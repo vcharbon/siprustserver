@@ -16,6 +16,10 @@ import type { Plan } from "./plan.js"
 import { formsTable, type FormsTable } from "./forms.js"
 
 export interface CaptureIndex {
+  /** The flows document the index was built of, by identity. */
+  readonly flows: Flows.FlowsDoc
+  /** The plan its forms table was read under, by identity. */
+  readonly plan: Plan
   readonly correlation: Correlation
   readonly forms: FormsTable
 }
@@ -25,4 +29,15 @@ export const captureIndex = (
   flows: Flows.FlowsDoc,
   derives: CallIdDerivation,
   plan: Plan
-): CaptureIndex => ({ correlation: correlate(flows, derives), forms: formsTable(flows, plan) })
+): CaptureIndex => ({ flows, plan, correlation: correlate(flows, derives), forms: formsTable(flows, plan) })
+
+/**
+ * `index`, where it was built of this very `flows` document under this very
+ * `plan` (identity, not content); a defect otherwise, since an index of
+ * another capture or plan yields wrong cases silently.
+ */
+export const indexOf = (index: CaptureIndex, flows: Flows.FlowsDoc, plan: Plan): CaptureIndex => {
+  if (index.flows !== flows) throw new Error("the capture index was built of another flows document")
+  if (index.plan !== plan) throw new Error("the capture index was built under another plan")
+  return index
+}

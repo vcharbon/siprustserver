@@ -413,13 +413,14 @@ describe("a misordered case is charged to the misordering alone", () => {
 
   const decide = (caller: ReadonlyArray<Flows.Msg>, quarantine = false) => {
     const flows = family(caller)
+    const read = plan()
     return decideCases({
       flows,
       capture: CAPTURE,
       specs: [SPEC],
       sut: sutSet(),
-      plan: plan(),
-      index: captureIndex(flows, derivesOnePrefix, plan()),
+      plan: read,
+      index: captureIndex(flows, derivesOnePrefix, read),
       policy: policyWith({ derives: derivesOnePrefix }),
       quarantine
     })

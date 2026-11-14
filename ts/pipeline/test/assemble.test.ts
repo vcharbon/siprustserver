@@ -24,13 +24,14 @@ const SPEC: CaseSpec = {
   cutLegs: [0, 1]
 }
 
-/** The CANCEL-race capture and its index under the one-prefix derivation, as a cut hands them on. */
+/** The CANCEL-race capture, its plan and its index of both under the one-prefix derivation, as a cut hands them on. */
 const raceCapture = () => {
   const flows = cancelRaceFlows()
-  return { flows, index: captureIndex(flows, derivesOnePrefix, plan()) }
+  const read = plan()
+  return { flows, plan: read, index: captureIndex(flows, derivesOnePrefix, read) }
 }
 
-const built =(policy = policyWith({ derives: derivesOnePrefix })) =>
+const built = (policy = policyWith({ derives: derivesOnePrefix })) =>
   assemble({
     flows: cancelRaceFlows(),
     capture: CAPTURE,
@@ -181,7 +182,6 @@ describe("deciding a whole capture", () => {
       capture: CAPTURE,
       specs: [SPEC],
       sut: sutSet(),
-      plan: plan(),
       policy: policyWith({ derives: derivesOnePrefix, refuse: rulesOf(refusals), declare }),
       quarantine
     })
@@ -306,7 +306,6 @@ describe("deciding a whole capture", () => {
       capture: CAPTURE,
       specs: [SPEC],
       sut: sutSet(),
-      plan: plan(),
       policy: policyWith({ derives: derivesOnePrefix, refuse: rulesOf([refusal]), refuseOnDocument: [unrunnable] }),
       quarantine: true
     })
@@ -425,7 +424,6 @@ describe("deciding a whole capture", () => {
       capture: CAPTURE,
       specs: [SPEC],
       sut: sutSet(),
-      plan: plan(),
       policy: policyWith({
         derives: derivesOnePrefix,
         refuse: rulesOf([deferral]),

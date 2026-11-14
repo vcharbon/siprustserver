@@ -42,7 +42,8 @@ const CALLER_TAG = `from-${CALLER_CALL_ID}`
 
 /** The cut's cases of a capture, decided under a policy that refuses nothing of its own. */
 const decide = (flows: Flows.FlowsDoc, capture = "capture.pcap") => {
-  const index = captureIndex(flows, derivesOnePrefix, plan())
+  const read = plan()
+  const index = captureIndex(flows, derivesOnePrefix, read)
   const cut = cutCalls(flows, sutSet(), capture, index.correlation, nameByCallIds)
   const specs: ReadonlyArray<CaseSpec> = cut.calls.map((c) => ({
     id: c.id,
@@ -56,7 +57,7 @@ const decide = (flows: Flows.FlowsDoc, capture = "capture.pcap") => {
     capture,
     specs,
     sut: sutSet(),
-    plan: plan(),
+    plan: read,
     index,
     policy: policyWith({ derives: derivesOnePrefix })
   })

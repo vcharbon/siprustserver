@@ -31,7 +31,11 @@ export interface CaptureInput {
   readonly specs: ReadonlyArray<CaseSpec>
   readonly sut: SutSet
   readonly plan: Plan
-  /** The index {@link Interface.index} built of `flows` under `plan`, the one the cut read. */
+  /**
+   * The index {@link Interface.index} built of this very `flows` under this
+   * very `plan`, the one the cut read; one of another document or plan is a
+   * defect of {@link Interface.cases}.
+   */
   readonly index: CaptureIndex
   readonly parts?: PartsIndex
   readonly allowed?: AllowedErrors.AllowedErrors
@@ -45,7 +49,7 @@ export interface CaptureInput {
 export interface Interface {
   /** The index of one capture under the bound policy's derivation: its one correlation and forms table. */
   readonly index: (flows: Flows.FlowsDoc, plan: Plan) => CaptureIndex
-  /** Every case this capture yields, generated or refused. */
+  /** Every case this capture yields, generated or refused; a defect where `input.index` is not of `input.flows` and `input.plan`. */
   readonly cases: (input: CaptureInput) => Effect.Effect<CaptureCases>
 }
 

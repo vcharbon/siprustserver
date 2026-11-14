@@ -39,7 +39,7 @@
  */
 import type { AllowedErrors, Flows } from "@sip/contracts"
 import { assemble, type Assembled } from "./assemble.js"
-import type { CaptureIndex } from "./capture-index.js"
+import { type CaptureIndex, indexOf } from "./capture-index.js"
 import type { CaseSpec } from "./case-spec.js"
 import { caseCallIds } from "./cut.js"
 import type { PartsIndex } from "./parts.js"
@@ -88,9 +88,10 @@ export interface CaseSetInput {
   readonly plan: Plan
   readonly policy: CasePolicy
   /**
-   * The capture's index, the one its cut read (`./capture-index.ts`): every
-   * case's calls and topology are read off it, and nothing here correlates
-   * the legs again.
+   * The capture's index, the one its cut read (`./capture-index.ts`), built of
+   * this `flows` under this `plan`: every case's calls and topology are read
+   * off it, nothing here correlates the legs again, and an index of another
+   * document or plan is a defect.
    */
   readonly index: CaptureIndex
   readonly parts?: PartsIndex
@@ -199,7 +200,13 @@ const onDocument = (
     return finding === undefined ? [] : [refusalOf(rule, site, finding)]
   })
 
+/**
+ * Every case of `input.specs`, generated or refused. A defect where
+ * `input.index` was built of another flows document or under another plan
+ * than the input's (`indexOf`).
+ */
 export const decideCases = (input: CaseSetInput): CaptureCases => {
+  indexOf(input.index, input.flows, input.plan)
   const outcomes: Array<CaseOutcome> = []
   for (const spec of input.specs) {
     const legs = spec.cutLegs ?? [spec.uac.leg, ...spec.uas.map((u) => u.leg)]
