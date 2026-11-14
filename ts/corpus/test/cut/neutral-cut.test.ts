@@ -59,13 +59,13 @@ describe("the neutral cut of a capture", () => {
   })
 
   it.each([
-    ["linked-call", LINK_RULE, 1],
-    ["linked-call", LINK_RULE, 3],
-    ["linked-call", LINK_RULE, 40],
-    ["parent-ref", REF_RULE, 1],
-    ["parent-ref", REF_RULE, 3],
-    ["parent-ref", REF_RULE, 40]
-  ] as const)("joins the legs the header-pair rule %s links in one correlation reading each leg once per side, over %i calls", async (_, rule, calls) => {
+    ["linked-call", 1, LINK_RULE],
+    ["linked-call", 3, LINK_RULE],
+    ["linked-call", 40, LINK_RULE],
+    ["parent-ref", 1, REF_RULE],
+    ["parent-ref", 3, REF_RULE],
+    ["parent-ref", 40, REF_RULE]
+  ] as const)("joins the legs the header-pair rule %s links in one correlation reading each leg once per side, over %i calls", async (_, calls, rule) => {
     const counted = countingRule(rule)
     const legs = 2 * calls
     const cut = await cutOf(`linked-${rule.name}-${calls}.pcap`, linkedCallsFlows(calls, rule), neverDerives, requiring(counted.rule))
