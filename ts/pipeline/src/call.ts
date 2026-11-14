@@ -1,6 +1,6 @@
 /**
  * The correlation engine's input unit: one flows-document call group, flattened
- * to the facts the five rule kinds anchor on.
+ * to the facts the six rule kinds anchor on.
  *
  * Built once per document; `./engine.ts` reads this and nothing else, so no rule
  * kind can reach back into the raw flows shape. Every SIP fact below is read
@@ -44,7 +44,7 @@ export interface InitialInvite {
   readonly fromUser?: string
   readonly toUser?: string
   readonly replaces?: DialogRef
-  /** Any projected header of the initial INVITE, for `header-key` rules. */
+  /** Any projected header of the initial INVITE, for `header-key` and `header-pair` rules. */
   readonly headers: (name: string) => Array<string>
   readonly msg: Flows.Msg
 }

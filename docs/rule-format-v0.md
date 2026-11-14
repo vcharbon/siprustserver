@@ -58,7 +58,7 @@ are an error. Regex is the only power feature: where a kind takes a regex, the
 regex must define a named group `key`; two calls join when their extracted keys
 are equal.
 
-## The five kinds
+## The six kinds
 
 ### 1. `call-id`
 Derived Call-ID relationship. Anchor: each call's Call-ID (any leg).
@@ -81,6 +81,23 @@ Shared token in a header of the initial INVITE. Anchor: first INVITE of each cal
 
 Join when both calls yield the same key. Optional `window_ms` between the two
 INVITEs (default: none).
+
+### 2b. `header-pair`
+A key one call carries in one header and another call in another header.
+Anchor: first INVITE of each call. `Call-ID` is a header like any other.
+
+```json
+{ "name": "asterisk-x-cid", "kind": "header-pair",
+  "left": { "header": "Call-ID", "pattern": "^(?<key>\\S+)$" },
+  "right": { "header": "X-CID", "pattern": "^(?<key>\\S+)$" } }
+```
+
+Join when a left call's `left` key equals a right call's `right` key: the
+right call was set up off the left one. Each side's `pattern` needs its `key`
+group. No window. A key several calls yield joins each pair, flagged as an
+ambiguity. Besides the engine, the case cut (`ts/pipeline` `cut.ts`) joins a
+capture's legs by this kind beside its Call-ID derivation; the base's case
+generator reads `ts/corpus/data/default.rules.json` unless told otherwise.
 
 ### 3. `retry`
 Reroute / failover chain. A CALL-LEVEL rule (ruled 2026-08-20): it

@@ -15,7 +15,7 @@ import {
   validateRuleFile
 } from "../src/rules.js"
 
-/** All five kinds, plus the `match`-less retry that is legal and means something else. */
+/** All six kinds, plus the `match`-less retry that is legal and means something else. */
 const FILE = {
   version: 0,
   rules: [
@@ -27,6 +27,12 @@ const FILE = {
       pattern: "icid-value=(?<key>[^;\\s]+)",
       window_ms: 20000
     },
+    {
+      name: "linked-leg",
+      kind: "header-pair",
+      left: { header: "Call-ID", pattern: "^(?<key>\\S+)$" },
+      right: { header: "X-Linked-Call", pattern: "^(?<key>\\S+)$" }
+    },
     { name: "reroute-busy", kind: "retry", match: ["to-user"], finals: ["486", "5xx"], window_ms: 15000 },
     { name: "reroute-reject", kind: "retry", finals: ["403"], window_ms: 15000 },
     { name: "attended-transfer", kind: "replaces" },
@@ -34,7 +40,7 @@ const FILE = {
   ]
 }
 
-describe("the five kinds", () => {
+describe("the six kinds", () => {
   const file = decodeRuleFileSync(FILE)
 
   it("all decode, and a match-less retry is legal", () => {
@@ -42,6 +48,7 @@ describe("the five kinds", () => {
     expect(file.rules.map((r) => r.kind)).toEqual([
       "call-id",
       "header-key",
+      "header-pair",
       "retry",
       "retry",
       "replaces",
@@ -60,7 +67,7 @@ describe("the five kinds", () => {
   })
 
   it("names every header a rule reads, so the emitter can be asked for it", () => {
-    expect(headersNamedBy(file.rules)).toEqual(["P-Charging-Vector"])
+    expect(headersNamedBy(file.rules)).toEqual(["P-Charging-Vector", "Call-ID", "X-Linked-Call"])
   })
 })
 
@@ -74,6 +81,15 @@ describe("strictness", () => {
   it("refuses an unknown kind and a cross-kind field alike", () => {
     expect(bad({ name: "r", kind: "icid" })).toThrow()
     expect(bad({ name: "r", kind: "refer", window_ms: 1, finals: [] })).toThrow()
+  })
+
+  it("refuses a header-pair side with a field of its own", () => {
+    expect(bad({
+      name: "r",
+      kind: "header-pair",
+      left: { header: "Call-ID", pattern: "^(?<key>.+)$", window_ms: 1 },
+      right: { header: "X-Linked-Call", pattern: "^(?<key>.+)$" }
+    })).toThrow()
   })
 
   it("refuses a match field outside the closed set", () => {
@@ -95,5 +111,18 @@ describe("the semantic checks a shape cannot state", () => {
     expect(found.some((v) => v.includes("duplicate rule name"))).toBe(true)
     expect(found.some((v) => v.includes("needs a (?<key>…) group"))).toBe(true)
     expect(() => validateRuleFile(file)).toThrow()
+  })
+
+  it("names the header-pair side whose regex has no key group", () => {
+    const file = decodeRuleFileSync({
+      version: 0,
+      rules: [{
+        name: "p",
+        kind: "header-pair",
+        left: { header: "Call-ID", pattern: "^(?<key>.+)$" },
+        right: { header: "X-Linked-Call", pattern: "^(.+)$" }
+      }]
+    })
+    expect(ruleFileViolations(file)).toEqual([`rule "p": "right.pattern" needs a (?<key>…) group`])
   })
 })

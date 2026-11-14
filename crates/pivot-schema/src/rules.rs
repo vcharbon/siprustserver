@@ -6,7 +6,7 @@
 //! after, over the neutral groups. A rule carries NO meaning: its name is an
 //! evidence label.
 //!
-//! Five kinds, each hard-coding its own anchor. The extension path is a SIXTH
+//! Six kinds, each hard-coding its own anchor. The extension path is one more
 //! kind with its own small matcher, never a more general existing one. There is
 //! no predicate AST, no boolean composition, no first-wins suppression:
 //! ambiguity is reported, never silently resolved.
@@ -79,6 +79,12 @@ pub enum Rule {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         window_ms: Option<u64>,
     },
+    /// A key one call's initial INVITE carries in one header and another
+    /// call's in another header. Anchor: each call's first INVITE. The left
+    /// call's `left` header and the right call's `right` header yield equal
+    /// keys: the right call was set up off the left one. `Call-ID` is a header
+    /// like any other.
+    HeaderPair { name: String, left: HeaderSide, right: HeaderSide },
     /// Reroute / failover chain, CALL-LEVEL: it reads whole-call facts — this
     /// call's terminal failure, that call's start — never individual messages.
     /// A final joins the NEXT candidate INVITE only, so a chain of N attempts
@@ -111,6 +117,7 @@ impl Rule {
         match self {
             Rule::CallId { name, .. }
             | Rule::HeaderKey { name, .. }
+            | Rule::HeaderPair { name, .. }
             | Rule::Retry { name, .. }
             | Rule::Replaces { name }
             | Rule::Refer { name, .. } => name,
@@ -124,9 +131,25 @@ impl Rule {
                 vec![("left", left.as_str()), ("right", right.as_str())]
             }
             Rule::HeaderKey { pattern, .. } => vec![("pattern", pattern.as_str())],
+            Rule::HeaderPair { left, right, .. } => {
+                vec![
+                    ("left.pattern", left.pattern.as_str()),
+                    ("right.pattern", right.pattern.as_str()),
+                ]
+            }
             _ => Vec::new(),
         }
     }
+}
+
+/// One side of a `header-pair` rule.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct HeaderSide {
+    /// A header of the call's initial INVITE.
+    pub header: String,
+    /// Regex over the header value, yielding the join key.
+    pub pattern: String,
 }
 
 /// A call-level identity set a `retry` rule may match on. Two calls match when
@@ -148,6 +171,9 @@ mod tests {
       "rules": [
         { "name": "derived-callid", "kind": "call-id", "left": "^(?<key>.+)$", "right": "^\\d+-(?<key>.+)$" },
         { "name": "icid", "kind": "header-key", "header": "P-Charging-Vector", "pattern": "icid-value=(?<key>[^;\\s]+)" },
+        { "name": "linked-leg", "kind": "header-pair",
+          "left": { "header": "Call-ID", "pattern": "^(?<key>\\S+)$" },
+          "right": { "header": "X-Linked-Call", "pattern": "^(?<key>\\S+)$" } },
         { "name": "reroute-busy", "kind": "retry", "match": ["to-user"], "finals": ["486", "5xx"], "window_ms": 15000 },
         { "name": "reroute-reject", "kind": "retry", "finals": ["403"], "window_ms": 15000 },
         { "name": "attended-transfer", "kind": "replaces" },
@@ -156,10 +182,10 @@ mod tests {
     }"#;
 
     #[test]
-    fn all_five_kinds_decode_and_a_match_less_retry_is_legal() {
+    fn all_six_kinds_decode_and_a_match_less_retry_is_legal() {
         let file = RuleFile::from_json(FILE).unwrap();
         assert_eq!(file.version, RULE_FILE_VERSION);
-        assert_eq!(file.rules.len(), 6);
+        assert_eq!(file.rules.len(), 7);
         assert!(file.violations().is_empty());
         let matchless = file.rules.iter().find(|r| r.name() == "reroute-reject").unwrap();
         assert!(matches!(matchless, Rule::Retry { match_on, .. } if match_on.is_empty()));
@@ -204,5 +230,25 @@ mod tests {
         assert_eq!(found.len(), 2, "{found:?}");
         assert!(found.iter().any(|v| v.contains("duplicate rule name")));
         assert!(found.iter().any(|v| v.contains("needs a (?<key>…) group")));
+    }
+
+    #[test]
+    fn a_header_pair_side_needs_its_key_group_and_refuses_an_unknown_field() {
+        let file = RuleFile::from_json(
+            r#"{"version":0,"rules":[{"name":"p","kind":"header-pair",
+                "left":{"header":"Call-ID","pattern":"^(?<key>.+)$"},
+                "right":{"header":"X-Linked-Call","pattern":"^(.+)$"}}]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            file.violations(),
+            vec![r#"rule "p": "right.pattern" needs a (?<key>…) group"#.to_string()]
+        );
+        assert!(RuleFile::from_json(
+            r#"{"version":0,"rules":[{"name":"p","kind":"header-pair",
+                "left":{"header":"Call-ID","pattern":"^(?<key>.+)$","window_ms":1},
+                "right":{"header":"X-Linked-Call","pattern":"^(?<key>.+)$"}}]}"#
+        )
+        .is_err());
     }
 }

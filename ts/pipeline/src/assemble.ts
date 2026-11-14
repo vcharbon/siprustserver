@@ -93,7 +93,7 @@ export interface AssembleInput {
   /**
    * The capture's once-built index, of this very `flows` under this very
    * `plan`: the case set passes the one it checked (`indexOf`). Absent, the
-   * index is built here under `policy.derives`, which only a test or a
+   * index is built here under `policy.derives` and `policy.legRules`, which only a test or a
    * one-case tool, assembling a single case of a capture, leaves to it.
    */
   readonly index?: CaptureIndex
@@ -101,7 +101,7 @@ export interface AssembleInput {
 
 export const assemble = (input: AssembleInput): Assembled => {
   const { capture, flows, plan, policy, spec, sut } = input
-  const index = input.index ?? captureIndex(flows, policy.derives, plan)
+  const index = input.index ?? captureIndex(flows, policy.derives, plan, policy.legRules)
   const vantages = [spec.uac, ...spec.uas]
   const layout = build(
     flows,

@@ -8,11 +8,11 @@
  *    received the call. A hop is a BOUNDARY of the cut when exactly one of its
  *    two sides is in that set; a hop between two other systems is never ours,
  *    and neither is one internal to the SUT.
- * 2. A call's legs are found by CALL-ID CORRELATION ALONE — the derivation
- *    chains an application server mints, as `./derivation.ts` states them — and
- *    every leg of the cut must touch the SUT. The flows document's own call
- *    groups are NOT read: a group is a correlation heuristic of the extractor's,
- *    and derivation is the one joiner.
+ * 2. A call's legs are found by the derivation chains an application server
+ *    mints, as `./derivation.ts` states them, and by the `header-pair` rules
+ *    the deployment states (`./header-pair-join.ts`) — and every leg of the cut
+ *    must touch the SUT. The flows document's own call groups are NOT read: a
+ *    group is a correlation heuristic of the extractor's.
  * 3. A call the SUT only ever sent outward, with no INVITE arriving at the SUT
  *    anywhere in its family, is a CAPTURE ARTIFACT — the upstream leg is
  *    missing — and the whole group is excluded loudly.
@@ -26,9 +26,10 @@
  * it continues, which is what keeps an in-dialog PRACK or BYE arriving from a
  * DIFFERENT peer address on the leg it belongs to instead of dropping it.
  */
-import { Flows } from "@sip/contracts"
+import { Flows, type Rules } from "@sip/contracts"
 import type { CaptureInput, CaptureRule } from "./capture-rules.js"
 import type { CallIdDerivation } from "./derivation.js"
+import { headerPairBases } from "./header-pair-join.js"
 import type { Refusal } from "./policy.js"
 import { checkRefusalRoster } from "./refusal-roster.js"
 import { refusalOf } from "./refusal-rule.js"
@@ -136,13 +137,18 @@ export interface Correlation {
   readonly families: ReadonlyArray<ReadonlyArray<number>>
   /** The family `leg` belongs to. */
   readonly familyOf: (leg: number) => ReadonlyArray<number>
-  /** Every leg whose Call-ID the derivation says `leg`'s was minted off. */
+  /**
+   * Every leg `leg` was set up off: the derivation says its Call-ID was minted
+   * off theirs, or a `header-pair` rule joins it to them as the right side.
+   */
   readonly basesOf: (leg: number) => ReadonlyArray<number>
 }
 
 /**
  * Correlation over every leg of the document: the transitive closure of the
- * derivation relation, and nothing else.
+ * derivation relation and of the joins its `header-pair` rules state
+ * (`./header-pair-join.ts`), and nothing else. With no rule it is the
+ * derivation's closure alone.
  *
  * The flows document's own `groups` are deliberately NOT read. A group is the
  * extractor's heuristic — time adjacency, a shared header parameter — and it
@@ -154,9 +160,16 @@ export interface Correlation {
  *
  * Linear in the legs: a derived Call-ID ENDS WITH its base (`./derivation.ts`),
  * so the bases a leg can have are its Call-ID's proper suffixes, looked up in an
- * index of every Call-ID, and the predicate is asked about those alone.
+ * index of every Call-ID, and the predicate is asked about those alone; a
+ * rule's joins are one index lookup per leg. Throws where `flows` does not
+ * project a header a rule names.
  */
-export const correlate = (flows: Flows.FlowsDoc, derives: CallIdDerivation): Correlation => {
+export const correlate = (
+  flows: Flows.FlowsDoc,
+  derives: CallIdDerivation,
+  rules: ReadonlyArray<Rules.HeaderPairRule> = []
+): Correlation => {
+  const bases: Array<Array<number>> = headerPairBases(flows, rules).map((legs) => [...legs])
   const byCallId = new Map<string, Array<number>>()
   let shortest = Number.MAX_SAFE_INTEGER
   flows.legs.forEach((leg, i) => {
@@ -176,7 +189,9 @@ export const correlate = (flows: Flows.FlowsDoc, derives: CallIdDerivation): Cor
     const rb = find(b)
     if (ra !== rb) parent[Math.max(ra, rb)] = Math.min(ra, rb)
   }
-  const bases: Array<Array<number>> = flows.legs.map(() => [])
+  bases.forEach((legs, i) => {
+    for (const base of legs) union(base, i)
+  })
   flows.legs.forEach((leg, i) => {
     const id = leg.call_id
     for (let cut = 1; id.length - cut >= shortest; cut++) {
@@ -207,8 +222,9 @@ export const correlate = (flows: Flows.FlowsDoc, derives: CallIdDerivation): Cor
 /** The families alone, for a reader that needs nothing else of the correlation. */
 export const callFamilies = (
   flows: Flows.FlowsDoc,
-  derives: CallIdDerivation
-): ReadonlyArray<ReadonlyArray<number>> => correlate(flows, derives).families
+  derives: CallIdDerivation,
+  rules: ReadonlyArray<Rules.HeaderPairRule> = []
+): ReadonlyArray<ReadonlyArray<number>> => correlate(flows, derives, rules).families
 
 interface Anchor {
   readonly leg: number

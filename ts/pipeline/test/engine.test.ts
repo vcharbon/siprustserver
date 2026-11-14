@@ -7,6 +7,7 @@ import { describe, expect, it } from "vitest"
 import { callsOf } from "../src/call.js"
 import { correlate } from "../src/engine.js"
 import { cancelRaceFlows, rerouteFlows } from "./fixtures.js"
+import { calleeLeg, callerLeg, LINK_RULE, linkedDoc } from "./linked-legs.js"
 
 const CALL_ID_RULE: Rules.Rule = {
   kind: "call-id",
@@ -71,6 +72,53 @@ describe("call-id joins", () => {
     const out = correlate(calls, [CALL_ID_RULE])
     expect(out.joins).toEqual([])
     expect(out.groups.map((g) => g.calls)).toEqual([["g0"], ["g1"]])
+  })
+})
+
+describe("header-pair joins", () => {
+  it("relates the call whose right header names the left header of another, the left call first", () => {
+    const flows = linkedDoc([callerLeg("caller-1@192.0.2.9", 0), calleeLeg("callee-1@192.0.2.1", 10, "caller-1@192.0.2.9")])
+    const out = correlate(callsOf(flows), [LINK_RULE])
+    expect(out.joins.map((j) => [j.rule, j.left, j.right, j.ambiguous, j.evidence])).toEqual([
+      [
+        "linked-call",
+        "g0",
+        "g1",
+        false,
+        {
+          key: "caller-1@192.0.2.9",
+          left_header: "Call-ID",
+          left_value: "caller-1@192.0.2.9",
+          right_header: "X-Linked-Call",
+          right_value: "caller-1@192.0.2.9"
+        }
+      ]
+    ])
+    expect(out.groups.map((g) => g.calls)).toEqual([["g0", "g1"]])
+  })
+
+  it("relates nothing on a key no call's left header carries", () => {
+    const flows = linkedDoc([callerLeg("caller-1@192.0.2.9", 0), calleeLeg("callee-1@192.0.2.1", 10, "uncaptured@192.0.2.9")])
+    const out = correlate(callsOf(flows), [LINK_RULE])
+    expect(out.joins).toEqual([])
+    expect(out.groups.map((g) => g.calls).sort()).toEqual([["g0"], ["g1"]])
+  })
+
+  it("keeps both joins of a key three calls carry and flags them, the engine picking neither", () => {
+    const flows = linkedDoc([
+      callerLeg("caller-1@192.0.2.9", 0),
+      calleeLeg("callee-1@192.0.2.1", 10, "caller-1@192.0.2.9"),
+      calleeLeg("callee-2@192.0.2.1", 2_000, "caller-1@192.0.2.9")
+    ])
+    const out = correlate(callsOf(flows), [LINK_RULE])
+    expect(out.joins.map((j) => [j.left, j.right, j.ambiguous])).toEqual([
+      ["g0", "g1", true],
+      ["g0", "g2", true]
+    ])
+    expect(out.ambiguities.map((a) => [a.rule, a.call, a.role, a.candidates.map((c) => c.other)])).toEqual([
+      ["linked-call", "g0", "left", ["g1", "g2"]]
+    ])
+    expect(out.groups.map((g) => g.calls)).toEqual([["g0", "g1", "g2"]])
   })
 })
 

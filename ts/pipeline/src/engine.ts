@@ -169,6 +169,38 @@ const MATCHERS: {
     }
   },
 
+  /**
+   * Anchor: the initial INVITE of each call, the left call's `left` header
+   * against the right call's `right` header. The left keys are indexed once and
+   * each right key is looked up, so a key on several calls joins each pair.
+   */
+  "header-pair": (rule, calls, emit) => {
+    const left = new RegExp(rule.left.pattern)
+    const right = new RegExp(rule.right.pattern)
+    const byKey = new Map<string, Array<{ call: Call; value: string }>>()
+    for (const a of calls) {
+      if (a.invite === undefined) continue
+      for (const { key, from } of keysOf(left, a.invite.headers(rule.left.header))) {
+        byKey.set(key, [...(byKey.get(key) ?? []), { call: a, value: from }])
+      }
+    }
+    for (const b of calls) {
+      if (b.invite === undefined) continue
+      for (const rb of keysOf(right, b.invite.headers(rule.right.header))) {
+        for (const la of byKey.get(rb.key) ?? []) {
+          if (la.call.id === b.id) continue
+          emit(la.call, b, b.invite.ts_ms - la.call.invite!.ts_ms, {
+            key: rb.key,
+            left_header: rule.left.header,
+            left_value: la.value,
+            right_header: rule.right.header,
+            right_value: rb.from
+          })
+        }
+      }
+    }
+  },
+
   /** Anchor: the right call's initial INVITE carrying a `Replaces` the left owns. */
   replaces: (_rule, calls, emit) => {
     for (const b of calls) {

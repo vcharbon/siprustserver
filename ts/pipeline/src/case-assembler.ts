@@ -7,7 +7,7 @@
  * cases of one capture under two different platforms' rules.
  *
  * The capture's index comes from here too, built under the bound policy's
- * Call-ID derivation: an entry asks for it once per capture and hands it to
+ * Call-ID derivation and leg rules: an entry asks for it once per capture and hands it to
  * the cut and to `cases`, so the capture's legs are correlated once and the
  * cut and its cases read the same correlation.
  */
@@ -47,7 +47,11 @@ export interface CaptureInput {
 }
 
 export interface Interface {
-  /** The index of one capture under the bound policy's derivation: its one correlation and forms table. */
+  /**
+   * The index of one capture under the bound policy's derivation and leg
+   * rules: its one correlation and forms table. Throws where `flows` does not
+   * project a header a leg rule names.
+   */
   readonly index: (flows: Flows.FlowsDoc, plan: Plan) => CaptureIndex
   /** Every case this capture yields, generated or refused; a defect where `input.index` is not of `input.flows` and `input.plan`. */
   readonly cases: (input: CaptureInput) => Effect.Effect<CaptureCases>
@@ -62,7 +66,8 @@ export const layer: Layer.Layer<Service, never, LogicExtractor.Service> = Layer.
   Effect.gen(function* () {
     const { policy } = yield* LogicExtractor.Service
 
-    const index = (flows: Flows.FlowsDoc, plan: Plan): CaptureIndex => captureIndex(flows, policy.derives, plan)
+    const index = (flows: Flows.FlowsDoc, plan: Plan): CaptureIndex =>
+      captureIndex(flows, policy.derives, plan, policy.legRules)
 
     const cases = Effect.fn("CaseAssembler.cases")(function* (input: CaptureInput) {
       return decideCases({ ...input, policy })

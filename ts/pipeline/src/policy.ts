@@ -18,7 +18,7 @@
  * Extension is Layer substitution and nothing else: a deployment builds one of
  * these and hands it to {@link CaseAssembler}.
  */
-import type { Call, Case, Flow, Flows, MustFail, Placement, Tokens } from "@sip/contracts"
+import type { Call, Case, Flow, Flows, MustFail, Placement, Rules, Tokens } from "@sip/contracts"
 import type { BackgroundMap } from "./background.js"
 import type * as Captured from "./captured.js"
 import { CAPTURE_RULES, type CaptureRule } from "./capture-rules.js"
@@ -207,6 +207,12 @@ export const withdrawnBy = (
 export interface CasePolicy {
   /** Whether one leg's Call-ID is the one this platform minted off another's. */
   readonly derives: CallIdDerivation
+  /**
+   * The `header-pair` correlation rules joining one leg to another beside
+   * {@link CasePolicy.derives}: the cut and the assembly both join a capture's
+   * legs by them. Neutral: none.
+   */
+  readonly legRules: ReadonlyArray<Rules.HeaderPairRule>
   /** Why each attempt of the chain handed over to the next. */
   readonly chain: (flows: Flows.FlowsDoc, layout: Layout) => ChainReading
   /** The provisional-handling profile the captured platform ran. */
@@ -303,6 +309,7 @@ export interface CasePolicy {
  */
 export const neutralPolicy: CasePolicy = {
   derives: neverDerives,
+  legRules: [],
   chain: () => ({ causes: [], flags: [] }),
   relay18x: () => undefined,
   relaysReinvite: () => false,
