@@ -1,12 +1,14 @@
 /**
  * A committed capture ingested and cut as the corpus does it: extracted by
  * `sipflow` with the identity extraction (`@sip/corpus` `ExtractionIdentity`)
- * into an artifacts directory, then cut by the base's case generator
- * (`@sip/corpus` `cut/base-generator.ts`) into an output directory.
+ * into an artifacts directory, projecting the headers the base's default leg
+ * rules read, then cut by the base's case generator (`@sip/corpus`
+ * `cut/base-generator.ts`) under those rules into an output directory.
  */
 import { NodeServices } from "@effect/platform-node"
 import { ExtractionIdentity, Tools } from "@sip/corpus"
 import { BASE } from "@sip/corpus/cut/generator"
+import * as LegRules from "@sip/corpus/cut/leg-rules"
 import * as Extract from "@sip/corpus/ingest/extract"
 import * as Record from "@sip/corpus/ingest/record"
 import * as Effect from "effect/Effect"
@@ -15,16 +17,24 @@ import { execFileSync } from "node:child_process"
 import * as fs from "node:fs"
 import * as path from "node:path"
 
-/** The extractor `sipflow` alone: the ingest reaches for no other tool. */
+/**
+ * The extractor `sipflow` alone, projecting the headers the base's default
+ * leg rules read: the ingest reaches for no other tool.
+ */
 const toolsOf = (sipflow: string) =>
-  Tools.layerWith({
-    ready: () => Effect.succeed(sipflow),
-    generator: Effect.succeed(BASE),
-    measure: Effect.die("the ingest measures nothing"),
-    compileMs: Effect.succeed(0),
-    decides: Effect.die("the ingest decides nothing"),
-    reading: []
-  })
+  Layer.effect(
+    Tools.Service,
+    Effect.map(LegRules.legRulesOf(LegRules.DEFAULT_RULES), (rules) =>
+      Tools.Service.of({
+        ready: () => Effect.succeed(sipflow),
+        generator: Effect.succeed(BASE),
+        measure: Effect.die("the ingest measures nothing"),
+        compileMs: Effect.succeed(0),
+        decides: Effect.die("the ingest decides nothing"),
+        reading: [],
+        emitHeaders: LegRules.headersOf(rules)
+      }))
+  )
 
 /** The capture file `file` ingested as `capture` into `artifacts` with the identity extraction by `sipflow`. */
 export const ingest = (sipflow: string, artifacts: string, capture: string, file: string) =>

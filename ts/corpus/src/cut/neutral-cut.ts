@@ -4,13 +4,14 @@
  * rule. The flows document is the one `*.flows.json` the capture's source
  * directory holds. The system under test is the address that took the
  * capture's earliest dialog-creating INVITE; its legs are joined into calls by
- * the Call-ID derivation (`derivation.ts`) of the policy the `CaseAssembler` is
- * bound to (the base generator binds the neutral policy with the derivation
- * its caller names), and each call at its boundary is cut and assembled under
- * that policy, which states nothing it did not observe; each call is named `<capture stem>-<n>` in cut order, so a
- * document cut again names its calls as before. Each case is
- * written as `cases/<id>/<id>.v3.json` with its `resources/`, and every
- * refusal as an `excluded.json` record beside them (`cut-contract.ts`).
+ * the Call-ID derivation (`derivation.ts`) and the leg rules of the policy the
+ * `CaseAssembler` is bound to (the base generator binds the neutral policy with
+ * the derivation and the rules its caller names), and each call at its boundary
+ * is cut and assembled under that policy, which states nothing it did not
+ * observe; each call is named `<capture stem>-<n>` in cut order, so a document
+ * cut again names its calls as before. Each case is written as
+ * `cases/<id>/<id>.v3.json` with its `resources/`, and every refusal as an
+ * `excluded.json` record beside them (`cut-contract.ts`).
  */
 import { type Pivot as PivotDoc, Flows, Pivot } from "@sip/contracts"
 import { CaseAssembler, Cut, FlowsFile, Parts, Plan, Profile, Sut } from "@sip/pipeline"
@@ -50,7 +51,7 @@ const writeCase = (caseDir: string, id: string, pivot: PivotDoc.PivotV3, resourc
     yield* linkDocument(caseDir, id)
   })
 
-/** The capture's flows document cannot be read; `reason` says why. */
+/** The capture's flows document cannot be read, or not under the bound leg rules; `reason` says why. */
 export class Unreadable extends Schema.TaggedError<Unreadable>()("NeutralCut.Unreadable", { reason: Schema.String }) {
   override get message(): string {
     return this.reason
@@ -78,14 +79,18 @@ const flowsOf = (work: CaptureWork) =>
 /**
  * The flows document of `work`, cut and written into its `outDir`, wiped first.
  * Its legs are correlated once, by the assembler's index, and the cut and the
- * case set both read that index.
+ * case set both read that index. A document that does not project a header a
+ * leg rule names is {@link Unreadable}.
  */
 export const cutCapture = Effect.fn("NeutralCut.cutCapture")(function*(work: CaptureWork) {
   const fs = yield* FileSystem.FileSystem
   const assembler = yield* CaseAssembler.Service
   const flows = yield* flowsOf(work)
   const decision = Sut.decideSut(flows, ANY_ADDRESS, work.capture)
-  const index = assembler.index(flows, NO_PLAN)
+  const index = yield* Effect.try({
+    try: () => assembler.index(flows, NO_PLAN),
+    catch: (error) => new Unreadable({ reason: `${work.capture}: ${error instanceof Error ? error.message : String(error)}` })
+  })
   let n = 0
   const cut = Cut.cutCalls(flows, decision.sut, work.capture, index.correlation, () => nameOf(work.capture, ++n))
   const decided = yield* assembler.cases({

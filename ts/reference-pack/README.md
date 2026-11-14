@@ -23,7 +23,7 @@ the image's `siprig-campaign run`).
 | `capture` | `collectors/capture/`, `parts/sip-capture.schema.json`, `targets/sip-capture/reference.toml` | a job collector, `on-failure`: `open` starts the job's capture, emptying the file the runner captures to (`B2BUA_CAPTURE`, the lane's `sip-capture` part) before the job's first batch stands it, so the file holds one job's capture at most; a box-wide lock keeps every other job's capture off it; `collect` runs only where a cell failed and attaches to each failed cell its calls' packets as a `file` attachment, a pcapng of its own, and a `table` of them, a row per packet |
 | the reference capture | `capture/forked-reliable.ts`, `capture/forked-reliable.pcapng` | a capture recorded through the upstream B2BUA and replayed: ingested with the identity extraction, cut by the base's case generator and replayed as a case source (see below) |
 | the recorded samples | `capture/answered-call.ts`, `capture/{basic,emergency,reinvite}-call.{ts,pcapng}` | three more captures recorded and replayed the same way: a basic answered call, an emergency call and a call held by a re-INVITE, between parties with display names and numbers (see below) |
-| the vendored captures | `capture/third-party/` | two captures another stack produced, ingested and cut but not replayed: a proxied blind transfer, cut into a case, and a B2BUA's calls the cut cannot join (see below) |
+| the vendored captures | `capture/third-party/` | two captures another stack produced, ingested and cut but not replayed: a proxied blind transfer, cut into a case, and a B2BUA's calls the default leg rules join, each cut into a case (see below) |
 | `calls-ended` | `collectors/calls-ended/` | a delayed cell collector: `delay_s` after each call it lists the runner's live calls (`GET /admin/calls` at the part's `admin`), while the lane runs its next cells (the lane not held), and answers the cell's `calls-ended` per call (`pass` where none of the cell's Call-IDs is listed, `fail` where one is, whatever the other cells' calls); it attaches what it read as `json` and where it read it as a `link` |
 
 ## Plug-in and attachment kinds
@@ -73,7 +73,8 @@ dialog ends with the INVITE's transaction (RFC 3261 §13.2.2.4).
 - **Replay** (`test/reference-replay.test.ts`, in the checks): the capture is ingested with the
   identity extraction (`@sip/corpus` `ExtractionIdentity`: the kept flows document is the raw
   one, under no seed), cut by the base's case generator (`@sip/corpus` `cut/base-generator.ts`,
-  the neutral policy, the runner's legs joined by its `counter-prefix` Call-ID derivation) into
+  the neutral policy, the runner's legs joined by its `counter-prefix` Call-ID derivation and
+  the default leg rules) into
   one case, and replayed by the base's campaign run on the simulated lane as its one cell, which
   passes. The callee is claimed by arrival order, since its R-URI names no number.
 
@@ -100,8 +101,9 @@ display names, on the callee side's From and To.
 `capture/third-party/` holds two captures copied unchanged from the sipnab repository, taken
 under the MIT License; `capture/third-party/PROVENANCE.md` states their source commit, paths and
 SHA-256, and the licence notice. `test/third-party-captures.test.ts` asserts the hashes, then
-ingests each and cuts it under no Call-ID derivation, as a capture of a stack the base knows
-nothing of is. Neither is replayed.
+ingests each, projecting the headers the base's default leg rules read (`Call-ID`, `X-CID`), and
+cuts it under no Call-ID derivation and those rules (`@sip/corpus` `data/default.rules.json`,
+read by `cut/leg-rules.ts`). Neither is replayed.
 
 - `refer-transfer.pcap`: two calls through a record-routing proxy, which keeps the Call-ID
   across its hop, each with a blind transfer (RFC 3515). The call whose transfer completes is
@@ -109,6 +111,8 @@ nothing of is. Neither is replayed.
   is refused (`source-truncated-at-edge`, `source-call-incomplete`).
 - `asterisk-22-xcid.pcap`: three calls through a B2BUA that gives the callee's leg a Call-ID of
   its own; a pre-dial handler in the source harness's dialplan names the caller's Call-ID in an
-  `X-CID` header on the callee's INVITE. The cut joins legs by Call-ID derivation
-  alone and reads no header, so it cuts no call: each callee leg is refused
-  `missing-upstream-leg`, each caller leg `source-dial-not-captured`.
+  `X-CID` header on the callee's INVITE. The default rule set's one rule, a `header-pair` rule
+  reading the callee leg's `X-CID` against the caller leg's `Call-ID`, joins the two legs, so
+  each call is cut into a case holding both. Under a rule file stating no rule
+  (`--correlation-rules`), no call is cut: each callee leg is refused `missing-upstream-leg`,
+  each caller leg `source-dial-not-captured`.

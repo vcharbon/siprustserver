@@ -265,15 +265,16 @@ const extractTimed = (
 const messageOf = (cause: unknown): string => (cause instanceof Error ? cause.message : String(cause))
 
 /**
- * The raw flows document of a capture, read under the deployment's reading,
- * into `raw`; why it could not be read, where it could not.
+ * The raw flows document of a capture, read under the deployment's reading
+ * and projecting the headers it names, into `raw`; why it could not be read,
+ * where it could not.
  */
 const readRaw = (tool: string, source: Source, raw: string) =>
   Effect.gen(function*() {
-    const reading = yield* Tools.reading
+    const args = yield* Tools.extractorArgs
     const ended = yield* IntoFile.exec(
       tool,
-      [...reading, ...source.pcaps, "--contiguous", String(SET_MAX_GAP_MS), "--json"],
+      [...args, ...source.pcaps, "--contiguous", String(SET_MAX_GAP_MS), "--json"],
       raw,
       { stderrHead: 600 }
     )

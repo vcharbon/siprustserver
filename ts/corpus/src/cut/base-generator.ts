@@ -3,11 +3,18 @@
  * generator where it states no cut rule of its own:
  *
  *   tsx src/cut/base-generator.ts --work-list <file> [--manifest <file>] [--census-report <file>]
- *     [--call-id-derivation none|counter-prefix]
+ *     [--call-id-derivation none|counter-prefix] [--correlation-rules <file>]
  *
  * `--call-id-derivation` names how the system under test derives the Call-ID
  * of a leg it dials, which joins its legs into one call: none (the default),
  * or the upstream B2BUA's `<n>-<base>`.
+ *
+ * `--correlation-rules` names the rule file whose `header-pair` rules join
+ * legs beside the derivation (`leg-rules.ts`): the base's default set
+ * (`data/default.rules.json`, Asterisk's `X-CID` against the caller leg's
+ * `Call-ID`) where none is named. Every flows document cut projects the
+ * headers its rules name, or its capture is not cut. A rule file that does not
+ * read is refused whole, exit 2 naming it.
  *
  * Each capture of the work list (`cut-contract.ts`) is cut by the neutral cut
  * (`neutral-cut.ts`) from the one flows document its source directory holds,
@@ -15,10 +22,11 @@
  * or not cut with the reason. The census report is accepted and not read: the
  * neutral policy declares nothing a census would decide.
  *
- * Exit 0 once every capture has its line; 2 where the work list does not read.
+ * Exit 0 once every capture has its line; 2 where the work list or the rule
+ * file does not read.
  */
 import { NodeRuntime, NodeServices } from "@effect/platform-node"
-import { Tokens } from "@sip/contracts"
+import { type Rules, Tokens } from "@sip/contracts"
 import { ANY_LANE } from "@sip/driver/lanes"
 import { CaseAssembler, LogicExtractor, Policy } from "@sip/pipeline"
 import { type CallIdDerivation, counterPrefixed, neverDerives } from "@sip/pipeline/derivation"
@@ -29,6 +37,7 @@ import * as Layer from "effect/Layer"
 import * as Option from "effect/Option"
 import { Command, Flag } from "effect/unstable/cli"
 import { type CaptureCut, decodeWorkList } from "./cut-contract.js"
+import { DEFAULT_RULES, legRulesOf } from "./leg-rules.js"
 import { cutCapture } from "./neutral-cut.js"
 
 const flags = {
@@ -41,6 +50,13 @@ const flags = {
   derivation: Flag.choice("call-id-derivation", ["none", "counter-prefix"]).pipe(
     Flag.withDescription("How the system under test derives a dialled leg's Call-ID: none, or `<n>-<base>` (the upstream B2BUA's)"),
     Flag.withDefault("none")
+  ),
+  rules: Flag.string("correlation-rules").pipe(
+    Flag.withDescription(
+      "A rule file whose header-pair rules join legs beside the derivation; the base's default set " +
+        "(Asterisk's X-CID against the caller leg's Call-ID) where none is named"
+    ),
+    Flag.withDefault(DEFAULT_RULES)
   )
 }
 
@@ -48,15 +64,16 @@ const flags = {
 const DERIVATIONS: Readonly<Record<"none" | "counter-prefix", CallIdDerivation>> = { none: neverDerives, "counter-prefix": counterPrefixed }
 
 /**
- * The neutral policy under `derives`, every case it assembles replayable on
- * every lane: the base states no lane a case cannot run on. The derivation is
- * the policy's, so the cut and the assembly of a capture join its legs alike.
+ * The neutral policy under `derives` and `legRules`, every case it assembles
+ * replayable on every lane: the base states no lane a case cannot run on. The
+ * joins are the policy's, so the cut and the assembly of a capture join its
+ * legs alike.
  */
-const assemblerUnder = (derives: CallIdDerivation) =>
+const assemblerUnder = (derives: CallIdDerivation, legRules: ReadonlyArray<Rules.HeaderPairRule>) =>
   CaseAssembler.layer.pipe(
     Layer.provide(
       LogicExtractor.layerWith(
-        Policy.policyWith({ derives, lanes: () => ({ [ANY_LANE]: Tokens.laneVerdictToken({ _tag: "ok" }) }) })
+        Policy.policyWith({ derives, legRules, lanes: () => ({ [ANY_LANE]: Tokens.laneVerdictToken({ _tag: "ok" }) }) })
       )
     )
   )
@@ -82,6 +99,12 @@ const command = Command.make("base-generator", flags, (input) =>
       process.exitCode = 2
       return
     }
+    const rules = yield* legRulesOf(input.rules).pipe(Effect.result)
+    if (rules._tag === "Failure") {
+      yield* Console.error(`base-generator: ${rules.failure.message}`)
+      process.exitCode = 2
+      return
+    }
     yield* Effect.gen(function*() {
       for (const work of read.success) {
         const done = yield* cutCapture(work).pipe(Effect.result)
@@ -93,7 +116,7 @@ const command = Command.make("base-generator", flags, (input) =>
         }
         yield* said(input.manifest, line)
       }
-    }).pipe(Effect.provide(assemblerUnder(DERIVATIONS[input.derivation])))
+    }).pipe(Effect.provide(assemblerUnder(DERIVATIONS[input.derivation], rules.success)))
   }))
 
 Command.run(command, { version: "0.0.0" }).pipe(

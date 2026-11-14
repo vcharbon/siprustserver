@@ -1,0 +1,11 @@
+{
+  "version": 0,
+  "rules": [
+    {
+      "name": "asterisk-x-cid",
+      "kind": "header-pair",
+      "left": { "header": "Call-ID", "pattern": "^(?<key>\\S+)$" },
+      "right": { "header": "X-CID", "pattern": "^(?<key>\\S+)$" }
+    }
+  ]
+}

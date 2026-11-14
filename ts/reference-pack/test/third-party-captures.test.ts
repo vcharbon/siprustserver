@@ -2,8 +2,8 @@
  * The vendored captures (`README.md`, "The vendored captures";
  * `capture/third-party/PROVENANCE.md`): each committed file still has the
  * SHA-256 its provenance states, and each is ingested with the identity
- * extraction and cut by the base's case generator under no Call-ID
- * derivation, as a capture of a stack the base knows nothing of is.
+ * extraction and cut by the base's case generator under no Call-ID derivation
+ * and the base's default leg rules.
  *
  * - `refer-transfer.pcap`, through a record-routing proxy that keeps the
  *   Call-ID across its hop: the call whose transfer completes is cut into a
@@ -11,10 +11,9 @@
  *   capture leaves open is refused as truncated and incomplete.
  * - `asterisk-22-xcid.pcap`, through a B2BUA giving the callee's leg a
  *   Call-ID of its own, the caller's named in an `X-CID` header a pre-dial
- *   handler of the source harness's dialplan adds: the cut joins legs by
- *   Call-ID derivation alone, so no call is cut. Each callee
- *   leg is refused as missing its upstream leg, each caller leg as a dial the
- *   capture does not hold.
+ *   handler of the source harness's dialplan adds: the default rule set's
+ *   `X-CID` rule joins the two legs, so each of the three calls is cut into a
+ *   case holding both.
  *
  * The extractor is `SIPFLOW_BIN`, else the release build of `sip-pcap`'s
  * `sipflow`.
@@ -74,7 +73,7 @@ const cutOf = async (capture: string) => {
   const refusals = fs.existsSync(excluded) ? JSON.parse(fs.readFileSync(excluded, "utf8")) as ReadonlyArray<Refusal> : []
   return {
     out,
-    cases: fs.readdirSync(path.join(out, "cases")),
+    cases: fs.readdirSync(path.join(out, "cases")).sort(),
     refused: refusals.map((refusal) => `${refusal.caseId} ${refusal.reason} ${refusal.callIds.join(",")}`).sort()
   }
 }
@@ -83,13 +82,39 @@ const cutOf = async (capture: string) => {
 interface Step {
   readonly leg: string
   readonly op: string
-  readonly msg: { readonly method?: string; readonly status?: number; readonly "cseq-method"?: string }
+  readonly msg: {
+    readonly method?: string
+    readonly status?: number
+    readonly "cseq-method"?: string
+    readonly headers?: ReadonlyArray<{ readonly name: string; readonly value: string }>
+  }
 }
+
+/** A cut document, as far as these checks read it. */
+interface Document {
+  readonly case: { readonly source: { readonly call_groups: ReadonlyArray<number> } }
+  readonly flow: ReadonlyArray<Step>
+}
+
+/** The document of the case `id` cut into `out`. */
+const documentOf = (out: string, id: string): Document =>
+  JSON.parse(fs.readFileSync(path.join(out, "cases", id, `${id}.v3.json`), "utf8")) as Document
 
 /** Each message step of the case `id` cut into `out`: its leg, its op and its method or status with its CSeq method. */
 const stepsOf = (out: string, id: string): ReadonlyArray<string> =>
-  (JSON.parse(fs.readFileSync(path.join(out, "cases", id, `${id}.v3.json`), "utf8")) as { readonly flow: ReadonlyArray<Step> }).flow
+  documentOf(out, id).flow
     .map((step) => `${step.leg} ${step.op} ${step.msg.method ?? `${step.msg.status} ${step.msg["cseq-method"]}`}`)
+
+/** The call groups the case `id` cut into `out` was cut of, and each `X-CID` its callee leg's INVITE carries. */
+const joinedOf = (out: string, id: string) => {
+  const document = documentOf(out, id)
+  return {
+    groups: document.case.source.call_groups,
+    xcid: document.flow
+      .filter((step) => step.leg === "B" && step.msg.method === "INVITE")
+      .flatMap((step) => (step.msg.headers ?? []).filter((h) => h.name === "X-CID").map((h) => h.value))
+  }
+}
 
 describe("the vendored captures", () => {
   it("are committed as their source repository records them, each hash stated on its file's row of the provenance", () => {
@@ -138,17 +163,32 @@ describe("the vendored captures", () => {
       ])
     })
 
-    it("cuts no call of the B2BUA whose legs only an X-CID header joins: each callee leg misses its upstream leg, each caller leg its dial", async () => {
-      const { cases, refused } = await cutOf("asterisk-22-xcid.pcap")
-      expect(cases).toEqual([])
-      expect(refused).toEqual([
-        "asterisk-22-xcid-1 source-dial-not-captured 1-xcid-call@example.com",
-        "asterisk-22-xcid-2 missing-upstream-leg 207e9af6-c60c-4f7f-99ae-328d569004c6",
-        "asterisk-22-xcid-3 source-dial-not-captured 2-xcid-call@example.com",
-        "asterisk-22-xcid-4 missing-upstream-leg 6fdf4f81-40b1-4c21-ad36-e76cadd78c2d",
-        "asterisk-22-xcid-5 source-dial-not-captured 3-xcid-call@example.com",
-        "asterisk-22-xcid-6 missing-upstream-leg 801ebb0b-2ce6-4fb9-8868-36fb5319d0ec"
+    it("cuts each call of the B2BUA whose legs an X-CID header joins into a case holding the caller's leg and the callee's", async () => {
+      const { out, cases, refused } = await cutOf("asterisk-22-xcid.pcap")
+      expect(cases).toEqual(["asterisk-22-xcid-1", "asterisk-22-xcid-2", "asterisk-22-xcid-3"])
+      expect(refused).toEqual([])
+      expect(cases.map((id) => joinedOf(out, id)), "each case the caller's call group and the callee's, its INVITE naming that caller").toEqual([
+        { groups: [0, 1], xcid: ["1-xcid-call@example.com"] },
+        { groups: [2, 3], xcid: ["2-xcid-call@example.com"] },
+        { groups: [4, 5], xcid: ["3-xcid-call@example.com"] }
       ])
+      for (const id of cases) {
+        expect(stepsOf(out, id), `${id}: the caller's leg A and the callee's leg B, the B2BUA ACKing the callee itself`).toEqual([
+          "A send INVITE",
+          "A expect 100 INVITE",
+          "B expect INVITE",
+          "B send 180 INVITE",
+          "A expect 180 INVITE",
+          "B send 200 INVITE",
+          "B expect ACK",
+          "A expect 200 INVITE",
+          "A send ACK",
+          "A send BYE",
+          "A expect 200 BYE",
+          "B expect BYE",
+          "B send 200 BYE"
+        ])
+      }
     })
   })
 })
