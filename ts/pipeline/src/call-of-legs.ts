@@ -142,41 +142,85 @@ const missing = (fact: Fact<unknown>): Fact<never> => (fact.state === "not-captu
  * - `none`: the system did not end the leg; its party did, a final did, or
  *   the capture does not show its ending.
  */
-export type Release =
-  | { readonly kind: "own"; readonly ending: Ending }
+export type ReleaseOf<N, E> =
+  | { readonly kind: "own"; readonly ending: N }
   | {
       readonly kind: "relayed"
-      readonly ending: Ending
+      readonly ending: N
       readonly cause: "caller-gave-up" | "caller-answered"
-      readonly because: Entry
+      readonly because: E
     }
   | { readonly kind: "none" }
+
+/** {@link ReleaseOf} as a capture shows it. */
+export type Release = ReleaseOf<Ending, Entry>
+
+/**
+ * Whether `a` stands no later than `b`, with `slackUs` of clock skew allowed:
+ * the order one side of the facts reads its messages in. A capture reads its
+ * stamps; a case document reads its own order (`./document-facts.ts`).
+ */
+export type NoLater<E> = (a: E, b: E, slackUs: number) => boolean
+
+/** What a release is judged on, on either side of the facts. */
+export interface Released<N, E> {
+  /** How the leg ended. */
+  readonly ending: N | undefined
+  /** The INVITE that dialled the leg. */
+  readonly dialled: E | undefined
+  /** The 2xx that answered the caller. */
+  readonly answered: E | undefined
+  /** Each give-up of the caller. */
+  readonly giveUps: ReadonlyArray<E>
+}
 
 /**
  * "The system released on its own", the one definition, over both endings of a
  * dialled leg: its CANCEL before the final, its BYE after the answer.
  *
- * A caller leg's give-up explains the release where it is stamped from
- * `skewUs` before the leg's INVITE to `skewUs` after the release: a capture
- * can stamp a relayed message before the message it relays, by its clock skew
- * between hops. An older give-up left a part of the call this leg was not
- * dialled for. The caller's answer explains a CANCEL only, where it is
- * stamped between the attempt's INVITE and that CANCEL.
+ * A give-up of the caller explains the release where it stands from `skewUs`
+ * before the leg's INVITE to `skewUs` after the release: a capture can stamp a
+ * relayed message before the message it relays, by its clock skew between
+ * hops. An older give-up left a part of the call this leg was not dialled
+ * for. The caller's answer explains a CANCEL only, where it stands between
+ * the attempt's INVITE and that CANCEL. The earliest give-up that explains
+ * the release is the one named.
  */
-export const release = (call: OfCall, leg: LegFacts, skewUs: number): Release => {
-  const ending = valueOf(leg.ending)
+export const releaseIn = <E extends { readonly bySystem: boolean }, N extends { readonly by: "BYE" | "CANCEL"; readonly entry: E }>(
+  of: Released<N, E>,
+  noLater: NoLater<E>,
+  skewUs: number
+): ReleaseOf<N, E> => {
+  const { answered, dialled, ending } = of
   if (ending === undefined || !ending.entry.bySystem) return { kind: "none" }
-  const at = ending.entry.at_us
-  const answered = valueOf(call.answered)
-  const dialled = leg.outcome?.request?.at_us
-  if (ending.by === "CANCEL" && answered !== undefined && dialled !== undefined && answered.at_us >= dialled && answered.at_us <= at) {
+  const released = ending.entry
+  if (
+    ending.by === "CANCEL" &&
+    answered !== undefined &&
+    dialled !== undefined &&
+    noLater(dialled, answered, 0) &&
+    noLater(answered, released, 0)
+  ) {
     return { kind: "relayed", ending, cause: "caller-answered", because: answered }
   }
-  const gaveUp = firstOf(
-    call.giveUps.filter(
-      (g) => (dialled === undefined || g.entry.at_us >= dialled - skewUs) && g.entry.at_us <= at + skewUs
-    )
-  )
-  if (gaveUp !== undefined) return { kind: "relayed", ending, cause: "caller-gave-up", because: gaveUp.entry }
+  const gaveUp = of.giveUps
+    .filter((g) => (dialled === undefined || noLater(dialled, g, skewUs)) && noLater(g, released, skewUs))
+    .reduce<E | undefined>((best, next) => (best === undefined || !noLater(best, next, 0) ? next : best), undefined)
+  if (gaveUp !== undefined) return { kind: "relayed", ending, cause: "caller-gave-up", because: gaveUp }
   return { kind: "own", ending }
 }
+
+const noLaterStamped: NoLater<Entry> = (a, b, slackUs) => a.at_us <= b.at_us + slackUs
+
+/** {@link releaseIn} of a capture's leg, every message placed by its stamp. */
+export const release = (call: OfCall, leg: LegFacts, skewUs: number): Release =>
+  releaseIn(
+    {
+      ending: valueOf(leg.ending),
+      dialled: leg.outcome?.request,
+      answered: valueOf(call.answered),
+      giveUps: call.giveUps.map((g) => g.entry)
+    },
+    noLaterStamped,
+    skewUs
+  )

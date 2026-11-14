@@ -103,3 +103,25 @@ export const arraySteps = <T>(work: () => T): { readonly result: T; readonly ste
     for (const [name, original] of kept) proto[name] = original
   }
 }
+
+/** A case document whose reads of its flow are counted. */
+export interface WatchedDocument<P extends { readonly flow: unknown }> {
+  /** The same document, answering through a counting proxy. */
+  readonly pivot: P
+  /** How many times the document's flow was read so far. */
+  readonly flowReads: () => number
+}
+
+/** `pivot` with every read of its `flow` counted: what flattening its steps costs each time. */
+export const watchedDocument = <P extends { readonly flow: unknown }>(pivot: P): WatchedDocument<P> => {
+  let reads = 0
+  return {
+    pivot: new Proxy(pivot, {
+      get: (target, key, receiver) => {
+        if (key === "flow") reads++
+        return Reflect.get(target, key, receiver)
+      }
+    }),
+    flowReads: () => reads
+  }
+}

@@ -11,12 +11,12 @@ import * as CallFacts from "../src/call-facts.js"
 import * as DocumentFacts from "../src/document-facts.js"
 import { policyWith } from "../src/policy.js"
 import { scenario, SDP, type Scenario, type ScenarioLeg } from "../src/scenario.js"
+import { watchedDocument } from "./counted-work.js"
 import { derivesOnePrefix, plan } from "./fixtures.js"
 
 const CALLER = "198.51.100.10:5060"
 const CALLEE = "203.0.113.20:5060"
 const CALLER_ID = "call@example.com"
-const DIALLED_ID = `1-${CALLER_ID}`
 
 interface Cut {
   readonly s: Scenario
@@ -27,8 +27,13 @@ interface Cut {
 const callerLeg = (s: Scenario): ScenarioLeg =>
   s.leg({ callId: CALLER_ID, party: CALLER, from: "sip:+15556000001@example.com", to: "sip:+15556000004@example.com" })
 
-const dialledLeg = (s: Scenario): ScenarioLeg =>
-  s.leg({ callId: DIALLED_ID, party: CALLEE, from: "sip:+15556000001@example.com", to: "sip:+15556000004@example.com" })
+const dialledLeg = (s: Scenario, n = 1): ScenarioLeg =>
+  s.leg({
+    callId: `${n}-${CALLER_ID}`,
+    party: n === 1 ? CALLEE : `203.0.113.${20 + n}:5060`,
+    from: "sip:+15556000001@example.com",
+    to: "sip:+15556000004@example.com"
+  })
 
 /** The document `assemble` builds of the case cut at the scenario's legs, with the capture it was built from. */
 const assembled = (cut: Cut) => {
@@ -159,6 +164,45 @@ describe("what a document states of an answered call", () => {
 
     expect(DocumentFacts.ofDocument(pivot)).toBe(facts)
   })
+
+  it("reads the document's flow once, whatever is asked of it after", () => {
+    const cut = answered()
+    const { flows, pivot } = assembled(cut)
+    const watched = watchedDocument(pivot)
+
+    const facts = DocumentFacts.ofDocument(watched.pivot)
+    const call = facts.callOf(pivot.calls[0]!)!
+    for (const leg of facts.legs.values()) DocumentFacts.release(call, leg, 500_000)
+    DocumentFacts.parity(flows, cut.s.sut, [cut.caller.vantage()], watched.pivot)
+    DocumentFacts.ofDocument(watched.pivot)
+
+    expect(watched.flowReads()).toBe(1)
+  })
+
+  it("names the capture leg each leg was cut from, its BYEs and the INVITE that decides it", () => {
+    const cut = answered()
+    const { facts } = assembled(cut)
+    const caller = documentLegOf(facts, cut.caller)
+    const dialled = documentLegOf(facts, cut.dialled[0]!)
+
+    expect([caller.observedLeg, dialled.observedLeg]).toEqual([cut.caller.index, cut.dialled[0]!.index])
+    expect(caller.byes.map((b) => [b.method, b.status, b.bySystem])).toEqual([["BYE", undefined, false]])
+    expect(dialled.byes.map((b) => [b.method, b.status, b.bySystem])).toEqual([["BYE", undefined, true]])
+    expect(CallFacts.valueOf(dialled.outcome)).toBe(CallFacts.valueOf(dialled.invite))
+    expect([caller.cancel.state, dialled.cancel.state]).toEqual(["absent", "absent"])
+  })
+
+  it("states the caller answered, with no failure final, and its BYE as its give-up", () => {
+    const cut = answered()
+    const { facts } = assembled(cut)
+    const call = facts.calls[0]!
+    const caller = documentLegOf(facts, cut.caller)
+
+    expect(CallFacts.valueOf(call.answered)).toBe(CallFacts.valueOf(caller.answer))
+    expect(call.failed.state).toBe("absent")
+    expect(CallFacts.valueOf(call.gaveUp)).toEqual({ by: "BYE", entry: caller.byes[0] })
+    expect(facts.callOf(call.call)).toBe(call)
+  })
 })
 
 describe("what a document states of a call that was not answered", () => {
@@ -191,6 +235,130 @@ describe("what a document states of a call that was not answered", () => {
 
     expect([call.abandoned?.method, call.abandoned?.bySystem, call.refused]).toEqual(["CANCEL", false, undefined])
     expect(CallFacts.valueOf(call.caller!.ending)?.entry).toBe(call.abandoned)
+  })
+
+  it("is each leg's CANCEL, the caller's 487 as its failure final and its CANCEL as its give-up", () => {
+    const cut = cancelled()
+    const { facts } = assembled(cut)
+    const call = facts.calls[0]!
+    const caller = documentLegOf(facts, cut.caller)
+    const dialled = documentLegOf(facts, cut.dialled[0]!)
+
+    expect([CallFacts.valueOf(caller.cancel)?.bySystem, CallFacts.valueOf(dialled.cancel)?.bySystem]).toEqual([false, true])
+    expect(call.answered.state).toBe("absent")
+    expect(statusOf(call.failed)).toBe(487)
+    expect(CallFacts.valueOf(call.gaveUp)).toEqual({ by: "CANCEL", entry: CallFacts.valueOf(caller.cancel) })
+  })
+
+  /** A caller challenged with a 407 sends its INVITE again (RFC 3261 §22.2): the second INVITE decides the leg. */
+  it("takes a leg's outcome INVITE as the one sent again after a challenge, and its first as the one that opens it", () => {
+    const s = scenario()
+    const caller = callerLeg(s)
+      .invite({ at: 0, by: "party", body: SDP })
+      .response(407, { at: 5 })
+      .ack({ at: 8, by: "party" })
+      .invite({ at: 50, by: "party", fresh: true, body: SDP })
+      .response(404, { at: 60 })
+      .ack({ at: 65, by: "party" })
+    const { facts } = assembled({ s, caller, dialled: [] })
+    const leg = documentLegOf(facts, caller)
+    const invites = leg.entries.filter((e) => e.method === "INVITE" && e.status === undefined)
+
+    expect(invites.length).toBe(2)
+    expect([CallFacts.valueOf(leg.invite), CallFacts.valueOf(leg.outcome)]).toEqual(invites)
+    expect(statusOf(facts.calls[0]!.failed)).toBe(404)
+  })
+})
+
+/** The release of each dialled leg, by kind, cause and the step that explains it. */
+const releasesOf = (cut: Cut, skewUs = 500_000) => {
+  const { facts } = assembled(cut)
+  const call = facts.calls[0]!
+  return cut.dialled.map((leg) => {
+    const released = DocumentFacts.release(call, documentLegOf(facts, leg), skewUs)
+    return released.kind === "none"
+      ? { kind: released.kind }
+      : {
+          kind: released.kind,
+          by: released.ending.by,
+          ...(released.kind === "relayed" ? { cause: released.cause, because: released.because.method, status: released.because.status } : {})
+        }
+  })
+}
+
+/** A hunt: the system gives the first callee up after 12 s of ringing; the second answers and hangs up. */
+const hunted = (): Cut => {
+  const s = scenario()
+  const caller = callerLeg(s).invite({ at: 0, by: "party", body: SDP }).response(100, { at: 2 })
+  const first = dialledLeg(s, 1).invite({ at: 10, by: "system", body: SDP }).response(180, { at: 200 })
+  caller.response(180, { at: 210 })
+  first.cancel({ at: 12_200, by: "system" }).response(200, { at: 12_205 }).response(487, { at: 12_210, to: "INVITE" }).ack({ at: 12_215, by: "system" })
+  const second = dialledLeg(s, 2).invite({ at: 12_300, by: "system", body: SDP }).response(200, { at: 13_000, body: SDP }).ack({ at: 13_020, by: "system" })
+  caller.response(200, { at: 13_010, body: SDP, to: "INVITE" }).ack({ at: 13_015, by: "party" })
+  second.bye({ at: 20_000, by: "party" }).response(200, { at: 20_005 })
+  caller.bye({ at: 20_010, by: "system" }).response(200, { at: 20_015 })
+  return { s, caller, dialled: [first, second] }
+}
+
+/** Two callees dialled at once: the first answers and the system cancels the second (RFC 3261 §16.7 step 10). */
+const forked = (): Cut => {
+  const s = scenario()
+  const caller = callerLeg(s).invite({ at: 0, by: "party", body: SDP }).response(100, { at: 2 })
+  const first = dialledLeg(s, 1).invite({ at: 10, by: "system", body: SDP }).response(180, { at: 200 })
+  const second = dialledLeg(s, 2).invite({ at: 12, by: "system", body: SDP }).response(180, { at: 220 })
+  caller.response(180, { at: 210 })
+  first.response(200, { at: 900, body: SDP, to: "INVITE" }).ack({ at: 920, by: "system" })
+  caller.response(200, { at: 910, body: SDP, to: "INVITE" }).ack({ at: 915, by: "party" })
+  second.cancel({ at: 930, by: "system" }).response(200, { at: 935 }).response(487, { at: 940, to: "INVITE" }).ack({ at: 945, by: "system" })
+  caller.bye({ at: 5_000, by: "party" }).response(200, { at: 5_005 })
+  first.bye({ at: 5_010, by: "system" }).response(200, { at: 5_015 })
+  return { s, caller, dialled: [first, second] }
+}
+
+/**
+ * The caller gives up while the callee rings, and the capture stamps the
+ * CANCEL the system relays `earlyMs` before the caller's own.
+ */
+const relayedEarly = (earlyMs: number): Cut => {
+  const s = scenario()
+  const caller = callerLeg(s).invite({ at: 0, by: "party", body: SDP }).response(100, { at: 2 })
+  const dialled = dialledLeg(s).invite({ at: 10, by: "system", body: SDP }).response(180, { at: 200 })
+  caller.response(180, { at: 210 })
+  dialled.cancel({ at: 3_000 - earlyMs, by: "system" }).response(200, { at: 3_005 - earlyMs })
+  caller.cancel({ at: 3_000, by: "party" }).response(200, { at: 3_002 })
+  dialled.response(487, { at: 3_020, to: "INVITE" }).ack({ at: 3_025, by: "system" })
+  caller.response(487, { at: 3_030, to: "INVITE" }).ack({ at: 3_035, by: "party" })
+  return { s, caller, dialled: [dialled] }
+}
+
+describe("whether the system releases a leg on its own, as a document states it", () => {
+  it("is its own where it cancels a ringing callee and the caller did nothing", () => {
+    expect(releasesOf(hunted())).toEqual([{ kind: "own", by: "CANCEL" }, { kind: "none" }])
+  })
+
+  it("is the caller's CANCEL relayed where the caller gave up first", () => {
+    expect(releasesOf(cancelled())).toEqual([{ kind: "relayed", by: "CANCEL", cause: "caller-gave-up", because: "CANCEL", status: undefined }])
+  })
+
+  it("is the caller's BYE relayed where the caller hangs up an answered call", () => {
+    expect(releasesOf(answered())).toEqual([{ kind: "relayed", by: "BYE", cause: "caller-gave-up", because: "BYE", status: undefined }])
+  })
+
+  it("is a fork loser's CANCEL where the caller was answered while the leg rang", () => {
+    expect(releasesOf(forked())).toEqual([
+      { kind: "relayed", by: "BYE", cause: "caller-gave-up", because: "BYE", status: undefined },
+      { kind: "relayed", by: "CANCEL", cause: "caller-answered", because: "INVITE", status: 200 }
+    ])
+  })
+
+  it("is the caller's CANCEL relayed where the capture stamps the relay before it, within the skew", () => {
+    expect(releasesOf(relayedEarly(10), 500_000)).toEqual([
+      { kind: "relayed", by: "CANCEL", cause: "caller-gave-up", because: "CANCEL", status: undefined }
+    ])
+  })
+
+  it("is its own where the caller's CANCEL follows it by more than the skew", () => {
+    expect(releasesOf(relayedEarly(10), 5_000)).toEqual([{ kind: "own", by: "CANCEL" }])
   })
 })
 

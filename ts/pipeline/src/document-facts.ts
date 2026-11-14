@@ -16,6 +16,7 @@
  * `expect` step is the system's.
  */
 import { type Call, Flow, type Flows, Pivot } from "@sip/contracts"
+import { type NoLater, releaseIn, type ReleaseOf } from "./call-of-legs.js"
 import type { CutVantage } from "./cut.js"
 import { atVantage, type Fact, type LegFacts, ofVantage, valueOf } from "./leg-facts.js"
 import type { SutSet } from "./sut.js"
@@ -58,18 +59,26 @@ export interface DocumentLeg {
   readonly leg: string
   /** The leg's message steps, in document order. */
   readonly entries: ReadonlyArray<StepEntry>
+  /** The capture leg the document's leg was cut from: the one its first observed step names. */
+  readonly observedLeg: number | undefined
   /** The INVITE that opens the leg: its first dialog-opening one. */
   readonly invite: Fact<StepEntry>
-  /** The first 180–189 answering the leg's last dialog-opening INVITE. */
+  /** The INVITE that decides the leg: its last dialog-opening one. */
+  readonly outcome: Fact<StepEntry>
+  /** The first 180–189 answering the outcome INVITE. */
   readonly ringing: Fact<StepEntry>
-  /** The final the leg holds for its last dialog-opening INVITE. */
+  /** The final the leg holds for the outcome INVITE. */
   readonly final: Fact<StepEntry>
   /** That final, where it is a 2xx. */
   readonly answer: Fact<StepEntry>
+  /** The CANCEL of the outcome INVITE, sent by the side that sent that INVITE (RFC 3261 §9.1). */
+  readonly cancel: Fact<StepEntry>
+  /** Every BYE request after the outcome INVITE, in document order. */
+  readonly byes: ReadonlyArray<StepEntry>
   /**
    * How the leg ends: an answered leg on its first BYE after the answer, an
-   * unanswered one on the CANCEL of its last dialog-opening INVITE, else on a
-   * BYE of its early dialog.
+   * unanswered one on the CANCEL of its outcome INVITE, else on a BYE of its
+   * early dialog.
    */
   readonly ending: Fact<DocumentEnding>
 }
@@ -86,6 +95,15 @@ export interface DocumentCall {
   readonly call: Call.Call
   readonly caller: DocumentLeg | undefined
   readonly attempts: ReadonlyArray<DocumentAttempt>
+  /** The caller was answered: the 2xx of the caller's leg. */
+  readonly answered: Fact<StepEntry>
+  /** The caller got a failure final: the final of its outcome INVITE, where it is 300 or above. */
+  readonly failed: Fact<StepEntry>
+  /**
+   * The caller gave up: the CANCEL of its outcome INVITE (RFC 3261 §9.1) or
+   * its first BYE after that INVITE (§15), the earlier in document order.
+   */
+  readonly gaveUp: Fact<DocumentEnding>
   /** The failure final the routing decision refused the caller with, where the call states one. */
   readonly refused: StepEntry | undefined
   /** The caller's CANCEL that abandoned the call before any dial, where the call states one. */
@@ -101,6 +119,8 @@ export interface DocumentFacts {
   readonly calls: ReadonlyArray<DocumentCall>
   /** The entry of the step `id` names. */
   readonly entryOf: (id: string) => StepEntry | undefined
+  /** What the document states of the call `call` is, among its `calls`. */
+  readonly callOf: (call: Call.Call) => DocumentCall | undefined
 }
 
 const entryOf = (step: Flow.Step, index: number): StepEntry => ({
@@ -117,15 +137,21 @@ const entryOf = (step: Flow.Step, index: number): StepEntry => ({
 const isRinging = (e: StepEntry): boolean =>
   e.method === "INVITE" && e.status !== undefined && e.status >= 180 && e.status < 190 && !e.inDialog
 
-const silentLeg = (leg: string): DocumentLeg => ({
+const silentLeg = (leg: string, entries: ReadonlyArray<StepEntry>): DocumentLeg => ({
   leg,
-  entries: [],
+  entries,
+  observedLeg: entries.find((e) => e.step.observed !== undefined)?.step.observed?.leg,
   invite: ABSENT,
+  outcome: ABSENT,
   ringing: ABSENT,
   final: ABSENT,
   answer: ABSENT,
+  cancel: ABSENT,
+  byes: entries.filter(isByeRequest),
   ending: ABSENT
 })
+
+const isByeRequest = (e: StepEntry): boolean => e.method === "BYE" && e.status === undefined
 
 const legOf = (
   leg: string,
@@ -136,13 +162,14 @@ const legOf = (
   const openings = transactions.filter((t) => t.invite !== undefined && Flow.opensDialog(t.invite))
   const outcome = openings[openings.length - 1]
   const first = openings[0]?.invite
-  if (outcome?.invite === undefined || first === undefined) return { ...silentLeg(leg), entries }
+  if (outcome?.invite === undefined || first === undefined) return silentLeg(leg, entries)
   const invite = byId.get(outcome.invite.id)!
   const final = outcome.final === undefined ? undefined : byId.get(outcome.final.step.id)
   const answered = final !== undefined && (final.status ?? 0) < 300
   const after = entries.filter((e) => e.index > invite.index)
   const ringing = after.find((e) => isRinging(e) && e.bySystem !== invite.bySystem && (final === undefined || e.index < final.index))
-  const bye = after.find((e) => e.method === "BYE" && e.status === undefined && (!answered || e.index > final.index))
+  const byes = after.filter(isByeRequest)
+  const bye = byes.find((e) => !answered || e.index > final.index)
   const cancel = after.find((e) => e.method === "CANCEL" && e.status === undefined && e.bySystem === invite.bySystem)
   const ending: DocumentEnding | undefined = answered
     ? bye && { by: "BYE", entry: bye }
@@ -150,13 +177,49 @@ const legOf = (
       ? { by: "CANCEL", entry: cancel }
       : bye && { by: "BYE", entry: bye }
   return {
-    leg,
-    entries,
+    ...silentLeg(leg, entries),
     invite: stated(byId.get(first.id)),
+    outcome: stated(invite),
     ringing: stated(ringing),
     final: stated(final),
     answer: stated(answered ? final : undefined),
+    cancel: stated(cancel),
+    byes,
     ending: stated(ending)
+  }
+}
+
+const failureOf = (leg: DocumentLeg | undefined): Fact<StepEntry> => {
+  const final = leg === undefined ? undefined : valueOf(leg.final)
+  return stated(final !== undefined && (final.status ?? 0) >= 300 ? final : undefined)
+}
+
+const giveUpOf = (leg: DocumentLeg | undefined): Fact<DocumentEnding> => {
+  if (leg === undefined) return ABSENT
+  const cancel = valueOf(leg.cancel)
+  const bye = leg.byes.find((b) => !b.bySystem)
+  const left: ReadonlyArray<DocumentEnding> = [
+    ...(cancel !== undefined && !cancel.bySystem ? [{ by: "CANCEL", entry: cancel } as const] : []),
+    ...(bye !== undefined ? [{ by: "BYE", entry: bye } as const] : [])
+  ]
+  return stated(left.reduce<DocumentEnding | undefined>((first, next) => (first === undefined || next.entry.index < first.entry.index ? next : first), undefined))
+}
+
+const callOf = (
+  call: Call.Call,
+  legs: ReadonlyMap<string, DocumentLeg>,
+  byId: ReadonlyMap<string, StepEntry>
+): DocumentCall => {
+  const caller = legs.get(call.caller_leg)
+  return {
+    call,
+    caller,
+    attempts: call.attempts.map((attempt) => ({ attempt, leg: legs.get(attempt.leg) })),
+    answered: caller === undefined ? ABSENT : caller.answer,
+    failed: failureOf(caller),
+    gaveUp: giveUpOf(caller),
+    refused: call.refused === undefined ? undefined : byId.get(call.refused.step),
+    abandoned: call.abandoned === undefined ? undefined : byId.get(call.abandoned.step)
   }
 }
 
@@ -181,21 +244,49 @@ export const ofDocument = (pivot: Pivot.PivotV3): DocumentFacts => {
   const transactions = inviteTransactions(steps).byLeg
   const legs = new Map<string, DocumentLeg>()
   for (const [leg, held] of byLeg) legs.set(leg, legOf(leg, held, byId, transactions.get(leg) ?? []))
+  const calls = pivot.calls.map((call) => callOf(call, legs, byId))
+  const byCall = new Map(calls.map((held) => [held.call, held]))
   const facts: DocumentFacts = {
     pivot,
     entries,
     legs,
-    calls: pivot.calls.map((call) => ({
-      call,
-      caller: legs.get(call.caller_leg),
-      attempts: call.attempts.map((attempt) => ({ attempt, leg: legs.get(attempt.leg) })),
-      refused: call.refused === undefined ? undefined : byId.get(call.refused.step),
-      abandoned: call.abandoned === undefined ? undefined : byId.get(call.abandoned.step)
-    })),
-    entryOf: (id) => byId.get(id)
+    calls,
+    entryOf: (id) => byId.get(id),
+    callOf: (call) => byCall.get(call)
   }
   documents.set(pivot, facts)
   return facts
+}
+
+/** {@link ReleaseOf} as a document states it. */
+export type DocumentRelease = ReleaseOf<DocumentEnding, StepEntry>
+
+/**
+ * A document's order: `a` is no later than `b` where it stands no later in the
+ * document, the order a replay runs; past that, where both steps were cut
+ * from a capture, where the capture stamped it within `slackUs` after `b`.
+ */
+const noLaterStated: NoLater<StepEntry> = (a, b, slackUs) =>
+  a.index <= b.index || (slackUs > 0 && a.at_us !== undefined && b.at_us !== undefined && a.at_us <= b.at_us + slackUs)
+
+/**
+ * Whether the system releases a leg of `call` on its own, as the document
+ * states it: the one definition (`releaseIn`, `./call-of-legs.ts`) read in the
+ * document's order. `skewUs` is the clock skew of the capture the document
+ * was cut from.
+ */
+export const release = (call: DocumentCall, leg: DocumentLeg, skewUs: number): DocumentRelease => {
+  const gaveUp = valueOf(call.gaveUp)
+  return releaseIn(
+    {
+      ending: valueOf(leg.ending),
+      dialled: valueOf(leg.outcome),
+      answered: valueOf(call.answered),
+      giveUps: gaveUp === undefined ? [] : [gaveUp.entry]
+    },
+    noLaterStated,
+    skewUs
+  )
 }
 
 /**
@@ -265,11 +356,26 @@ export interface Parity {
 }
 
 /**
+ * The vantage a document leg was cut at: the one, among those the case was cut
+ * at, that owns the captured message the leg's first observed step names.
+ * `undefined` for a leg no step of which was observed, or whose message no
+ * vantage owns.
+ */
+export const vantageOf = (
+  flows: Flows.FlowsDoc,
+  sut: SutSet,
+  vantages: ReadonlyArray<CutVantage>,
+  leg: DocumentLeg
+): CutVantage | undefined => {
+  const observed = leg.entries.find((e) => e.step.observed !== undefined)?.step.observed
+  if (observed === undefined) return undefined
+  return vantages.find((v) => v.leg === observed.leg && ofVantage(flows, sut, v).msgIdxs.includes(observed.msg))
+}
+
+/**
  * A case document held against the capture it was cut from. A document leg is
- * held against the vantage, among those the case was cut at, that owns the
- * captured message its first observed step names; a leg no step of which was
- * observed, or whose message no vantage owns, is held against nothing and is
- * not counted in `compared`.
+ * held against the vantage it was cut at ({@link vantageOf}); a leg cut at
+ * none is held against nothing and is not counted in `compared`.
  */
 export const parity = (
   flows: Flows.FlowsDoc,
@@ -279,9 +385,7 @@ export const parity = (
 ): Parity => {
   let compared = 0
   const disagreements = [...ofDocument(pivot).legs.values()].flatMap((leg): ReadonlyArray<Disagreement> => {
-    const observed = leg.entries.find((e) => e.step.observed !== undefined)?.step.observed
-    if (observed === undefined) return []
-    const vantage = vantages.find((v) => v.leg === observed.leg && ofVantage(flows, sut, v).msgIdxs.includes(observed.msg))
+    const vantage = vantageOf(flows, sut, vantages, leg)
     if (vantage === undefined) return []
     compared += 1
     const document = agreedOfDocument(leg)
