@@ -16,7 +16,8 @@
  * features (`case_features`, `Migrations`). `SchemaState` guards an entry point
  * against a migration its binding has pending; `AutoMigrate` applies them
  * unattended, backup first. `CampaignRuns` records a campaign run over its
- * lanes' runs, read back as the results model (`CampaignResults`).
+ * lanes' runs, read back as the results model (`CampaignResults`); `CampaignDiff`
+ * compares two of them.
  */
 export * as Aside from "./aside.js"
 export * as Attachments from "./attachments.js"
@@ -27,6 +28,7 @@ export * as Bundle from "./bundle.js"
 export * as CallHistory from "./call-history.js"
 export * as Calls from "./calls.js"
 export * as CallSummary from "./call-summary.js"
+export * as CampaignDiff from "./campaign-diff.js"
 export * as CampaignResults from "./campaign-results.js"
 export * as CampaignRuns from "./campaign-runs.js"
 export * as CellAnswers from "./cell-answers.js"
