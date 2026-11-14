@@ -516,3 +516,89 @@ describe("a position", () => {
     expect(CallFacts.valueOf(whole.ending)).toMatchObject({ by: "CANCEL", entry: { hop: 1, at_us: 4_002_000 } })
   })
 })
+
+describe("a position that owns every message of its leg", () => {
+  it("and the whole-leg position are one reading, whichever is asked first", () => {
+    const s = scenario()
+    const leg = answeredCall(s)
+    const other = s.leg({ callId: "second@example.com", party: CALLEE }).invite({ at: 0, by: "system" }).response(486, { at: 9 })
+    const flows = s.flows()
+    const atHop = CallFacts.atVantage(flows, s.sut, leg.vantage())
+    const paid = CallFacts.cost(flows)
+
+    expect(CallFacts.atLeg(flows, s.sut, leg.index)).toBe(atHop)
+    expect(CallFacts.cost(flows)).toEqual(paid)
+
+    const whole = CallFacts.atLeg(flows, s.sut, other.index)
+    const paidTwice = CallFacts.cost(flows)
+    expect(CallFacts.atVantage(flows, s.sut, other.vantage())).toBe(whole)
+    expect(CallFacts.cost(flows)).toEqual(paidTwice)
+  })
+
+  it("is not the whole-leg position where the leg has a hop it does not own", () => {
+    const s = scenario()
+    const leg = s
+      .leg({ callId: "relayed@example.com", party: PARTY, hops: [{ party: CALLEE, system: "192.0.2.10:5062" }] })
+      .invite({ at: 0, by: "party" })
+      .invite({ at: 2, by: "system", hop: 1, seq: 1, fresh: true })
+      .response(486, { at: 30, hop: 1 })
+      .response(486, { at: 32, by: "system" })
+    const flows = s.flows()
+
+    expect(CallFacts.atVantage(flows, s.sut, leg.vantage(0))).not.toBe(CallFacts.atLeg(flows, s.sut, leg.index))
+    expect(CallFacts.atLeg(flows, s.sut, leg.index).timeline.entries).toHaveLength(4)
+  })
+})
+
+describe("the tags the parties minted (RFC 3261 §8.2.6.2)", () => {
+  /**
+   * The system dials a far end that rejects with its own To-tag, and answers
+   * its caller with a To-tag of its own, or with the far end's where `relays`.
+   */
+  const rejected = (relays: boolean): { readonly s: Scenario; readonly caller: ScenarioLeg; readonly dialled: ScenarioLeg } => {
+    const s = scenario()
+    const caller = s.leg({ callId: "in@example.com", party: PARTY }).invite({ at: 0, by: "party" })
+    const dialled = s
+      .leg({ callId: "out@example.com", party: CALLEE })
+      .invite({ at: 5, by: "system" })
+      .response(486, { at: 40, tag: "far-end" })
+    caller.response(486, { at: 45, ...(relays ? { tag: "far-end" } : {}) })
+    return { s, caller, dialled }
+  }
+  const tagOf = (read: CallFacts.LegFacts): string =>
+    CallFacts.source(read.timeline, CallFacts.valueOf(read.final)!).summary.to.tag ?? ""
+
+  it("name the tag another leg's party put on its response", () => {
+    const { s, caller } = rejected(true)
+    const flows = s.flows()
+    const tag = tagOf(CallFacts.atVantage(flows, s.sut, caller.vantage()))
+
+    expect(tag).toBe("far-end")
+    expect(CallFacts.partyTags(flows, s.sut).onAnotherLeg(tag, caller.index)).toBe(true)
+  })
+
+  it("do not hold a tag the system minted itself", () => {
+    const { s, caller } = rejected(false)
+    const flows = s.flows()
+    const tag = tagOf(CallFacts.atVantage(flows, s.sut, caller.vantage()))
+
+    expect(tag).not.toBe("")
+    expect(CallFacts.partyTags(flows, s.sut).onAnotherLeg(tag, caller.index)).toBe(false)
+  })
+
+  it("do not name a leg's own party against that leg", () => {
+    const { s, dialled } = rejected(true)
+    const flows = s.flows()
+
+    expect(CallFacts.partyTags(flows, s.sut).onAnotherLeg("far-end", dialled.index)).toBe(false)
+  })
+
+  it("name a tag two legs' parties show against either leg", () => {
+    const s = scenario()
+    const one = s.leg({ callId: "one@example.com", party: CALLEE }).invite({ at: 0, by: "system" }).response(486, { at: 9, tag: "shared" })
+    const two = s.leg({ callId: "two@example.com", party: PARTY }).invite({ at: 1, by: "system" }).response(486, { at: 8, tag: "shared" })
+    const tags = CallFacts.partyTags(s.flows(), s.sut)
+
+    expect([tags.onAnotherLeg("shared", one.index), tags.onAnotherLeg("shared", two.index)]).toEqual([true, true])
+  })
+})

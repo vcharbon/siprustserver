@@ -81,3 +81,18 @@ describe("the cost of a position's facts", () => {
     expect(CallFacts.cost(flows).indexed).toBe(52)
   })
 })
+
+describe("the cost of the party tags", () => {
+  it("is one read of each message of the file, however many tags are asked for", () => {
+    const s = scenario()
+    decoys(s, 50)
+    const flows = s.flows()
+    const tags = CallFacts.partyTags(flows, s.sut)
+    const paid = CallFacts.cost(flows)
+
+    expect(paid).toEqual({ visits: 0, indexed: 150 })
+    for (let n = 0; n < 1000; n++) tags.onAnotherLeg(`tag-${n}`, n % 50)
+    expect(CallFacts.partyTags(flows, s.sut)).toBe(tags)
+    expect(CallFacts.cost(flows)).toEqual(paid)
+  })
+})

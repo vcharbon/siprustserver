@@ -162,7 +162,6 @@ export interface Timeline {
   /** The leg an entry's `msg` indexes. */
   readonly leg: Flows.Leg
   readonly legIndex: number
-  readonly hop: number
   readonly entries: ReadonlyArray<Entry>
   readonly transactions: ReadonlyArray<Transaction>
   /** When the position's last message was captured, retransmissions included. */
@@ -220,7 +219,7 @@ export interface LegFacts {
 export interface Cost {
   /** Messages and transactions read to compute positions. */
   readonly visits: number
-  /** Legs read once for the document's own indexes. */
+  /** What the document's own indexes read, once each: a leg for the capture's end, a message for the party tags. */
   readonly indexed: number
 }
 
@@ -229,6 +228,7 @@ interface FileFacts {
   indexed: number
   endUs: number | undefined
   readonly bySut: WeakMap<SutSet, Map<string, LegFacts>>
+  readonly tagsBySut: WeakMap<SutSet, PartyTags>
 }
 
 const files = new WeakMap<Flows.FlowsDoc, FileFacts>()
@@ -236,7 +236,7 @@ const files = new WeakMap<Flows.FlowsDoc, FileFacts>()
 const fileOf = (flows: Flows.FlowsDoc): FileFacts => {
   const known = files.get(flows)
   if (known !== undefined) return known
-  const file: FileFacts = { visits: 0, indexed: 0, endUs: undefined, bySut: new WeakMap() }
+  const file: FileFacts = { visits: 0, indexed: 0, endUs: undefined, bySut: new WeakMap(), tagsBySut: new WeakMap() }
   files.set(flows, file)
   return file
 }
@@ -273,10 +273,58 @@ const legOf = (flows: Flows.FlowsDoc, index: number): Flows.Leg => {
   return leg
 }
 
+/** The mark of a tag that several legs show. */
+const SEVERAL_LEGS = -1
+
+/**
+ * The dialog tags the parties of a capture minted: the To-tag of every
+ * response the system did not send (RFC 3261 §8.2.6.2), each with the leg that
+ * shows it. What a system relays of another leg's far end is told from what it
+ * minted itself by them.
+ */
+export interface PartyTags {
+  /** Whether a party put `tag` on a response of some leg other than `leg`. */
+  readonly onAnotherLeg: (tag: string, leg: number) => boolean
+}
+
+/**
+ * The party tags of a document, read in one pass over every leg it holds on
+ * the first request and kept for the document and SUT set: a second request
+ * reads nothing.
+ */
+export const partyTags = (flows: Flows.FlowsDoc, sut: SutSet): PartyTags => {
+  const file = fileOf(flows)
+  const known = file.tagsBySut.get(sut)
+  if (known !== undefined) return known
+  const isSystem = systemSide(sut)
+  const shownBy = new Map<string, number>()
+  ;(flows.legs as ReadonlyArray<Flows.Leg | undefined>).forEach((leg, index) => {
+    if (leg === undefined) return
+    for (const m of leg.msgs) {
+      file.indexed += 1
+      if (m.summary.kind !== "response" || isSystem(m.src)) continue
+      const tag = m.summary.to.tag
+      if (tag === null || tag.length === 0) continue
+      const shown = shownBy.get(tag)
+      if (shown === undefined) shownBy.set(tag, index)
+      else if (shown !== index) shownBy.set(tag, SEVERAL_LEGS)
+    }
+  })
+  const tags: PartyTags = {
+    onAnotherLeg: (tag, leg) => {
+      const shown = shownBy.get(tag)
+      return shown !== undefined && shown !== leg
+    }
+  }
+  file.tagsBySut.set(sut, tags)
+  return tags
+}
+
 /**
  * The facts of a position, computed on the first request and kept for the
  * document: a second request for the same document, SUT set, leg and hop reads
- * nothing.
+ * nothing. A position that owns every message of its leg and the whole-leg
+ * position read the same messages, so they share one computation.
  */
 export const legFacts = (p: Position): LegFacts => {
   const file = fileOf(p.flows)
@@ -288,11 +336,15 @@ export const legFacts = (p: Position): LegFacts => {
   const key = `${p.leg}:${p.hop}`
   const known = positions.get(key)
   if (known !== undefined) return known
-  const facts = factsOf(file, p.flows, timelineOf(file, p))
+  const msgIdxs = p.msgIdxs
+  const wholeKey = `${p.leg}:${WHOLE_LEG}`
+  const whole = msgIdxs.length === legOf(p.flows, p.leg).msgs.length
+  const facts =
+    (whole ? positions.get(wholeKey) : undefined) ?? factsOf(file, p.flows, timelineOf(file, p, msgIdxs))
   positions.set(key, facts)
+  if (whole) positions.set(wholeKey, facts)
   return facts
 }
-
 /** {@link legFacts} of an actor's position. */
 export const atActor = (flows: Flows.FlowsDoc, a: ActorObs): LegFacts => legFacts(ofActor(flows, a))
 
@@ -318,7 +370,7 @@ const systemSide = (sut: SutSet): ((sock: string) => boolean) => {
   }
 }
 
-const timelineOf = (file: FileFacts, p: Position): Timeline => {
+const timelineOf = (file: FileFacts, p: Position, msgIdxs: ReadonlyArray<number>): Timeline => {
   const leg = legOf(p.flows, p.leg)
   const isSystem = systemSide(p.sut)
   const entries: Array<Building<Entry>> = []
@@ -356,7 +408,7 @@ const timelineOf = (file: FileFacts, p: Position): Timeline => {
     return transaction
   }
 
-  for (const i of p.msgIdxs) {
+  for (const i of msgIdxs) {
     const m = leg.msgs[i]
     if (m === undefined) throw new Error(`position leg ${p.leg} hop ${p.hop} names no message ${i}`)
     file.visits += 1
@@ -419,7 +471,7 @@ const timelineOf = (file: FileFacts, p: Position): Timeline => {
       }
     }
   }
-  return { leg, legIndex: p.leg, hop: p.hop, entries, transactions, lastAt_us: lastAt }
+  return { leg, legIndex: p.leg, entries, transactions, lastAt_us: lastAt }
 }
 
 /** The entry a retransmission repeats: the one it names, else its transaction's same message. */

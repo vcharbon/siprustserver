@@ -82,6 +82,12 @@ export interface ResponseSpec extends Common {
   readonly seq?: number
   /** Who answers, where both sides have such a request pending. */
   readonly by?: Side
+  /**
+   * The To-tag the answerer mints where this response is the first to tag the
+   * dialog; the default is one of the leg's own. A system that relays another
+   * leg's answer whole carries that leg's.
+   */
+  readonly tag?: string
 }
 
 /** An SDP body of one audio stream, enough for a reader that asks whether a session is described. */
@@ -167,7 +173,7 @@ export class ScenarioLeg {
     if (answered === undefined) throw new Error(`leg ${this.spec.callId}: no request for the ${status} to answer`)
     let toTag = answered.toTag
     if (toTag === null && status > 100 && answered.method === "INVITE") {
-      this.answererTag ??= `answerer-${this.index}-${answered.seq}`
+      this.answererTag ??= o.tag ?? `answerer-${this.index}-${answered.seq}`
       toTag = this.answererTag
     }
     this.push(o, other(answered.by), { method: answered.method, seq: answered.seq, toTag, uri: answered.uri, status })

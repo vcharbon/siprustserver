@@ -79,8 +79,11 @@ messages.
 
 ## Consequences
 
-- `calls.ts` (`finalOf`, `abandonOf`, `refusalOf`), `call-completeness.ts` and
-  `capture-edge.ts` read the capture side; `Finals` and `Transactions` become its internals.
+- `calls.ts` (`finalOf`), `call-completeness.ts`, `capture-edge.ts` and the timestamp helpers of
+  `topology.ts` read the capture side. The first-INVITE reading of a leg (`finals.ts`) is
+  removed. `abandonOf` and `refusalOf` name a step of the case document, so they keep reading
+  its steps. `Transactions` pairs the steps of a document and stays exported for the readers
+  the document side does not serve yet.
 - A pack's per-rule walks over flows and steps move onto the module, one rule at a time, each
   move proved by re-cutting its captures and diffing the cases.
 - The situation reading is exported as `Situation` and `PivotReading`; a pack's header census
