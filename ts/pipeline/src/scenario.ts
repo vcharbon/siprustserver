@@ -201,7 +201,13 @@ export class ScenarioLeg {
     if (o.seq !== undefined && o.seq >= this.nextSeq[o.by]) this.nextSeq[o.by] = o.seq + 1
     const answererTag = repeated !== undefined ? repeated.answererTag : (o.fork ?? this.answererTag)
     const toTag =
-      repeated !== undefined ? repeated.toTag : name === "CANCEL" || opens ? null : this.remoteTagFor(o.by, answererTag)
+      repeated !== undefined
+        ? repeated.toTag
+        : name === "CANCEL"
+          ? (invite?.toTag ?? null)
+          : opens
+            ? null
+            : this.remoteTagFor(o.by, answererTag)
     const uri = o.uri ?? (o.by === (this.opener ?? o.by) ? this.to : this.from)
     const branch = repeated !== undefined ? repeated.branch : this.branchOf(name, invite)
     const sent: Sent = { method: name, seq, by: o.by, hop, toTag, answererTag, uri, branch, lastFinal: undefined }
