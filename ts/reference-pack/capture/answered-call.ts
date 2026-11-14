@@ -33,13 +33,19 @@ const CAPABILITIES: ReadonlyArray<Header> = [
   { name: "Supported", value: "" }
 ]
 
-/** How long the callee takes to ring and to answer, and how long the call is held before each request, in ms. */
+/** How long the callee takes to ring once the INVITE reaches it, in ms. */
 const RING_MS = 20
+
+/** How long the callee rings before it answers, in ms. */
 const ANSWER_MS = 40
+
+/** How long the confirmed call lasts before each of the caller's in-dialog requests, in ms. */
 const HOLD_MS = 100
 
-/** The resource paths of the caller's hold offer and the callee's answer to it. */
+/** The resource path of the caller's hold offer. */
 const HOLD_OFFER = "resources/hold-offer.sdp"
+
+/** The resource path of the callee's answer to the hold offer. */
 const HOLD_ANSWER = "resources/hold-answer.sdp"
 
 /**

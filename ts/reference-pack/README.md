@@ -108,6 +108,7 @@ nothing of is. Neither is replayed.
   cut into a case keeping the REFER, the 202 and both NOTIFYs; the call the capture leaves open
   is refused (`source-truncated-at-edge`, `source-call-incomplete`).
 - `asterisk-22-xcid.pcap`: three calls through a B2BUA that gives the callee's leg a Call-ID of
-  its own and names the caller's in an `X-CID` header. The cut joins legs by Call-ID derivation
+  its own; a pre-dial handler in the source harness's dialplan names the caller's Call-ID in an
+  `X-CID` header on the callee's INVITE. The cut joins legs by Call-ID derivation
   alone and reads no header, so it cuts no call: each callee leg is refused
   `missing-upstream-leg`, each caller leg `source-dial-not-captured`.

@@ -6,11 +6,13 @@
  * call. Each cell passes and its capture shows the call on both legs: the
  * forked call's two reliable provisionals each relayed on an early dialog of
  * its own, PRACKed on both legs, and answered once, from the fork that
- * answered; the basic call answered and ended by BYE; the emergency call's
- * `Resource-Priority` carried to the callee side; the re-INVITE's hold offer
- * and its answer on both legs. With `REFERENCE_CAPTURE_WRITE=1` each run's
- * capture replaces its committed one under `capture/` (`just
- * reference-capture`).
+ * answered; the basic call answered and ended by BYE, with no
+ * `Resource-Priority`; the emergency call's `Resource-Priority` carried to
+ * the callee side; the re-INVITE's hold offer and its answer on both legs.
+ * Each answered call shows the parties' display names and numbers on the
+ * caller's leg. With `REFERENCE_CAPTURE_WRITE=1` each run's capture replaces
+ * its committed one under `capture/` (`just reference-capture`). Each
+ * committed capture shows the same, with no database or binary at hand.
  *
  * A case source leading out of the pack is refused before the run's job
  * opens. The suite builds and drops its OWN database
@@ -186,6 +188,13 @@ const answered = (legs: ReadonlyArray<ReadonlyArray<Message>>): void => {
   ])
 }
 
+/** The basic call: answered, no message on either leg carrying a `Resource-Priority`. */
+const basic = (legs: ReadonlyArray<ReadonlyArray<Message>>): void => {
+  answered(legs)
+  expect(legs.flatMap((leg) => leg.flatMap((message) => headerOf(message, RESOURCE_PRIORITY.name) ?? [])), "no priority mark on either leg")
+    .toEqual([])
+}
+
 /** The emergency call: answered, its INVITE's `Resource-Priority` on both legs. */
 const emergency = (legs: ReadonlyArray<ReadonlyArray<Message>>): void => {
   answered(legs)
@@ -234,7 +243,7 @@ const RECORDINGS: ReadonlyArray<Recording> = [
     capture: "basic-call.pcapng",
     title: BASIC,
     shows: "a call answered and ended by the caller's BYE",
-    wire: answered
+    wire: basic
   },
   {
     source: "./capture/emergency-call.ts",
@@ -252,6 +261,21 @@ const RECORDINGS: ReadonlyArray<Recording> = [
   }
 ]
 
+/** Checks that `capture` holds the caller's leg and the callee side's, each showing what `recording` records. */
+const shows = (recording: Recording, capture: Uint8Array): void => {
+  const legs = legsOf(messagesIn(capture))
+  expect(legs, "the caller's leg and the callee side's").toHaveLength(2)
+  recording.wire(legs)
+}
+
+describe("the committed captures", () => {
+  for (const recording of RECORDINGS) {
+    it(`show in ${recording.capture} ${recording.shows}`, () => {
+      shows(recording, fs.readFileSync(path.join(PACK, "capture", recording.capture)))
+    })
+  }
+})
+
 describe.skipIf(!served || skipping)("the reference capture", () => {
   for (const recording of RECORDINGS) {
     it(`records through the runner ${recording.shows}`, async () => {
@@ -265,9 +289,7 @@ describe.skipIf(!served || skipping)("the reference capture", () => {
       expect(run!.lanes[0]!.results.map((result) => [CampaignResults.caseNameOf(result.caseId).ref, result.passed])).toEqual([
         [recording.title, true]
       ])
-      const legs = legsOf(messagesIn(fs.readFileSync(written.capture)))
-      expect(legs, "the caller's leg and the callee side's").toHaveLength(2)
-      recording.wire(legs)
+      shows(recording, fs.readFileSync(written.capture))
       if (process.env["REFERENCE_CAPTURE_WRITE"] === "1") fs.copyFileSync(written.capture, path.join(PACK, "capture", recording.capture))
     })
   }

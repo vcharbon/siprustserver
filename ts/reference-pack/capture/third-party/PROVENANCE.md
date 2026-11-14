@@ -20,8 +20,8 @@ script it tracks (`harness/asterisk-xcid/capture.sh`, `harness/refer/capture.sh`
 network using RFC 5737 addresses and `example.com` hosts:
 
 - `asterisk-22-xcid.pcap`: three calls placed by SIPp through Asterisk 22.11.0, a back-to-back
-  user agent that gives the callee's leg a Call-ID of its own and adds `X-CID`, carrying the
-  caller's Call-ID, to the callee's INVITE.
+  user agent that gives the callee's leg a Call-ID of its own. A pre-dial handler in the
+  harness's dialplan adds `X-CID`, carrying the caller's Call-ID, to the callee's INVITE.
 - `refer-transfer.pcap`: two calls placed by SIPp through an OpenSIPS 4.0.2 proxy that
   record-routes, each with a blind transfer (RFC 3515: REFER, 202, NOTIFY). The first transfer
   completes and the caller hangs up; the capture ends with the second transfer and its call

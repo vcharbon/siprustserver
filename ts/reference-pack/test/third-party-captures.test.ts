@@ -10,8 +10,9 @@
  *   case keeping its REFER, the 202 and both NOTIFYs (RFC 3515); the call the
  *   capture leaves open is refused as truncated and incomplete.
  * - `asterisk-22-xcid.pcap`, through a B2BUA giving the callee's leg a
- *   Call-ID of its own and naming the caller's in an `X-CID` header: the cut
- *   joins legs by Call-ID derivation alone, so no call is cut. Each callee
+ *   Call-ID of its own, the caller's named in an `X-CID` header a pre-dial
+ *   handler of the source harness's dialplan adds: the cut joins legs by
+ *   Call-ID derivation alone, so no call is cut. Each callee
  *   leg is refused as missing its upstream leg, each caller leg as a dial the
  *   capture does not hold.
  *
@@ -49,6 +50,13 @@ const HASHES: Readonly<Record<string, string>> = {
 
 const sha256Of = (file: string): string => crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex")
 
+/** Each row of the provenance's table: the file named in its first cell, the SHA-256 in its last. */
+const rowsOf = (provenance: string): ReadonlyArray<readonly [string, string]> =>
+  provenance.split("\n").flatMap((line) => {
+    const row = /^\|\s*`([^`]+)`\s*\|.*\|\s*`([0-9a-f]{64})`\s*\|\s*$/.exec(line)
+    return row === null ? [] : [[row[1]!, row[2]!] as const]
+  })
+
 /** One refusal of the cut's `excluded.json`, as far as these checks read it. */
 interface Refusal {
   readonly caseId: string
@@ -84,13 +92,13 @@ const stepsOf = (out: string, id: string): ReadonlyArray<string> =>
     .map((step) => `${step.leg} ${step.op} ${step.msg.method ?? `${step.msg.status} ${step.msg["cseq-method"]}`}`)
 
 describe("the vendored captures", () => {
-  it("are committed as their source repository records them, each hash stated in the provenance", () => {
+  it("are committed as their source repository records them, each hash stated on its file's row of the provenance", () => {
     const provenance = fs.readFileSync(path.join(VENDORED, "PROVENANCE.md"), "utf8")
     expect(fs.readdirSync(VENDORED).filter((file) => file.endsWith(".pcap")).sort()).toEqual(Object.keys(HASHES).sort())
     for (const [file, hash] of Object.entries(HASHES)) {
       expect(sha256Of(path.join(VENDORED, file)), file).toBe(hash)
-      expect(provenance, `${file}'s hash in the provenance`).toContain(hash)
     }
+    expect(Object.fromEntries(rowsOf(provenance)), "each file's row of the provenance, its hash").toEqual(HASHES)
   })
 
   describe.skipIf(skipping)("ingested and cut", () => {
