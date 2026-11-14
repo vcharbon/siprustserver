@@ -328,6 +328,14 @@ pub fn decompose(body: &[u8], boundary: &str) -> Vec<LocatedPart> {
     located(body, boundary, "text/plain")
 }
 
+/// The ranges of `body` that no delimiter line and no part [`decompose`]
+/// locates under `boundary` cover, in order: the preamble, what follows the
+/// close delimiter's `--` (the epilogue), and the whole body when the
+/// boundary frames none of it (RFC 2046 §5.1.1).
+pub fn outside_parts(body: &[u8], boundary: &str) -> Vec<std::ops::Range<usize>> {
+    framing::outside_parts(body, boundary)
+}
+
 /// The type of a part of `container` that states none (RFC 2045 §5.2, RFC
 /// 2046 §5.1.5).
 fn default_part_type(container: &MediaType) -> &'static str {
