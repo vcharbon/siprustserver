@@ -87,18 +87,18 @@ fn a_base64_run_glued_to_a_token_by_an_alphabet_character_is_read() {
 
 #[test]
 fn the_addresses_and_hosts_of_a_decoded_text_are_mapped_and_read_by_the_leak_check() {
-    let mapped = "cli=+15557778888;ip=85.12.34.10;peer=sip:fake-pbx.notreal-carrier.de";
+    let mapped = "cli=+15557778888;ip=8.8.8.10;peer=sip:fake-pbx.notreal-carrier.de";
     assert_as_in_clear("fakey", "X-Tok: {}", mapped, &STANDARD, true);
     let (decoded, ..) = in_clear_and_encoded("fakey", "X-Tok: {}", mapped, &STANDARD);
     assert!(
-        !decoded.contains("85.12.34.10") && !decoded.contains("notreal-carrier"),
+        !decoded.contains("8.8.8.10") && !decoded.contains("notreal-carrier"),
         "the address and the host are mapped: {decoded}"
     );
-    let named = "cli=+15557778888;ip=85.12.34.10;name=zorro.nobody";
+    let named = "cli=+15557778888;ip=8.8.8.10;name=zorro.nobody";
     let (decoded, clear, verdict, clear_verdict) =
         in_clear_and_encoded("fakey", "X-Tok: {}", named, &STANDARD);
     assert_eq!(decoded, clear);
-    assert!(!decoded.contains("85.12.34.10") && !decoded.contains("zorro.nobody"), "{decoded}");
+    assert!(!decoded.contains("8.8.8.10") && !decoded.contains("zorro.nobody"), "{decoded}");
     assert_eq!((verdict, clear_verdict), (0, 0), "nothing is left to count");
 }
 
@@ -114,11 +114,10 @@ fn the_leak_check_counts_in_a_decoded_text_what_it_counts_in_the_clear_text() {
             &crate::testflow::reading(),
         )
     };
-    let text = "cli=+15557778888;ip=85.12.34.10;name=zorro.nobody";
+    let text = "cli=+15557778888;ip=8.8.8.10;name=zorro.nobody";
     let clear = unexplained(&doc("fakey", &[format!("X-Tok: {text}")]));
     let encoded = unexplained(&doc("fakey", &[format!("X-Tok: {}", STANDARD.encode(text))]));
-    for token in [("digits", "15557778888"), ("address", "85.12.34.10"), ("domain", "zorro.nobody")]
-    {
+    for token in [("digits", "15557778888"), ("address", "8.8.8.10"), ("domain", "zorro.nobody")] {
         let token = (token.0, token.1.as_bytes().to_vec());
         assert!(clear.contains(&token), "{token:?} is counted in clear");
     }

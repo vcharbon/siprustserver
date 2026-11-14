@@ -35,12 +35,12 @@ fn extra(variant: char) -> Vec<String> {
     let b64num = base64::engine::general_purpose::STANDARD.encode("+2867778888");
     let lines: Vec<String> = match variant {
         'a' => vec![
-            "Contact: <sip:fakey.mcfakename@85.12.34.201;transport=udp>;+sip.instance=\"<urn:gsma:imei:35000099-176148-1>\";expires=600".into(),
+            "Contact: <sip:fakey.mcfakename@8.8.8.201;transport=udp>;+sip.instance=\"<urn:gsma:imei:35000099-176148-1>\";expires=600".into(),
             "P-Preferred-Identity: <sip:testo.placeholder@prefid-domain.de>".into(),
             "P-Access-Network-Info: 3GPP-E-UTRAN-FDD; utran-cell-id-3gpp=001019876ABCDE1F".into(),
             format!("Identity: {jws};info=<https://cert.fakecorp-certs.de/sti.pem>;alg=ES256;ppt=shaken"),
             "Geolocation: <cid:loc1@geo-cid-domain.de>, <https://lis.geo-lis-domain.de/loc/42>".into(),
-            "X-Note: \"reached 85.12.34.199 via jump\"".into(),
+            "X-Note: \"reached 8.8.8.199 via jump\"".into(),
             "P-Charging-Vector: icid-value=abcd1234ef;orig-ioi=Fakenetone;term-ioi=Fakenettwo".into(),
             "Subject: trunk".into(),
             "Organization: Notrealtel".into(),
@@ -61,8 +61,8 @@ fn extra(variant: char) -> Vec<String> {
         ],
         _ => vec![
             "Via: SIP/2.0/UDP sbc.porthost.zz:5070;branch=z9hG4bKcc1".into(),
-            "Via: SIP/2.0/UDP 85.12.34.50:5080;branch=z9hG4bKcc2".into(),
-            "Warning: 399 sbc.porthost.zz:5070 \"x\", 399 85.12.34.50:5080 \"y\"".into(),
+            "Via: SIP/2.0/UDP 8.8.8.50:5080;branch=z9hG4bKcc2".into(),
+            "Warning: 399 sbc.porthost.zz:5070 \"x\", 399 8.8.8.50:5080 \"y\"".into(),
             "Call-Info: <http://sbc.porthost.zz:5070/a>;purpose=info".into(),
         ],
     };
@@ -74,7 +74,7 @@ fn identities(variant: char) -> &'static [&'static str] {
     match variant {
         'a' => &[
             "fakey.mcfakename",
-            "85.12.34.201",
+            "8.8.8.201",
             "35000099-176148-1",
             "testo.placeholder",
             "prefid-domain",
@@ -84,7 +84,7 @@ fn identities(variant: char) -> &'static [&'static str] {
             "fakecorp-certs",
             "geo-cid-domain",
             "geo-lis-domain",
-            "85.12.34.199",
+            "8.8.8.199",
             "Fakenetone",
             "Fakenettwo",
             "Subject: trunk",
@@ -101,12 +101,12 @@ fn identities(variant: char) -> &'static [&'static str] {
             "KzI4Njc3Nzg4ODg=",
             "c2lnbmF0dXJl",
             "fmcfake",
-            "85.12.34.10",
+            "8.8.8.10",
             "Appel",
             "sdp-uri-domain",
             "sdp-email-domain",
             "11 22 33 4",
-            "85.12.34.11",
+            "8.8.8.11",
             "testo.dummy",
             "pidf-domain",
             "Fakeville",
@@ -123,16 +123,16 @@ fn identities(variant: char) -> &'static [&'static str] {
             "2864445555",
             "2862223333",
         ],
-        _ => &["porthost", "85.12.34.50"],
+        _ => &["porthost", "8.8.8.50"],
     }
 }
 
 /// An INVITE carrying `extra` and a multipart body of an SDP, a PIDF-LO and an
 /// ISUP part.
 fn probe(extra: &[String]) -> Flows {
-    let sdp = "v=0\r\no=fmcfake 1234 5678 IN IP4 85.12.34.10\r\ns=Appel Fakey McFakename\r\ni=Session of Fakey\r\n\
+    let sdp = "v=0\r\no=fmcfake 1234 5678 IN IP4 8.8.8.10\r\ns=Appel Fakey McFakename\r\ni=Session of Fakey\r\n\
                u=http://www.sdp-uri-domain.de/x\r\ne=f.mcfake@sdp-email-domain.zz\r\np=+28 6 11 22 33 4\r\n\
-               c=IN IP4 85.12.34.11\r\nt=0 0\r\nm=audio 4000 RTP/AVP 0\r\n";
+               c=IN IP4 8.8.8.11\r\nt=0 0\r\nm=audio 4000 RTP/AVP 0\r\n";
     let pidf = "<?xml version=\"1.0\"?><presence xmlns=\"urn:ietf:params:xml:ns:pidf\" entity=\"pres:testo.dummy@pidf-domain.de\">\
                 <tuple id=\"t1\"><status><geopriv><location-info><civicAddress><A3>Fakeville</A3><RD>Rue Fakey McFakename</RD>\
                 <HNO>12</HNO></civicAddress><gml:pos>12.3456 -1.2345</gml:pos></location-info></geopriv></status></tuple></presence>";
@@ -147,7 +147,7 @@ fn probe(extra: &[String]) -> Flows {
     );
     let raw = format!(
         "INVITE sip:+2868765432@as.alpha-carrier.zz SIP/2.0\r\n{}\r\n\
-         Via: SIP/2.0/UDP 85.12.34.3:5060;branch=z9hG4bK1\r\nMax-Forwards: 70\r\n\
+         Via: SIP/2.0/UDP 8.8.8.3:5060;branch=z9hG4bK1\r\nMax-Forwards: 70\r\n\
          From: <sip:+2862345678@alpha-carrier.zz>;tag=f1\r\nTo: <sip:+2868765432@alpha-carrier.zz>\r\n\
          Call-ID: probe1@alpha-carrier.zz\r\nCSeq: 1 INVITE\r\n\
          Content-Type: multipart/mixed;boundary=bnd42\r\nContent-Length: {}\r\n\r\n{body}",
@@ -159,9 +159,9 @@ fn probe(extra: &[String]) -> Flows {
         "decode_stats": { "records": 0, "non_ip": 0, "non_udp": 0, "snap_truncated": 0, "datagrams": 0,
                           "fragments": 0, "reassembled": 0, "frag_dropped": 0, "tail_truncated": 0 },
         "flow_stats": { "sip_messages": 1, "capture_dups": 0, "parse_failed": 0, "non_sip": 0 },
-        "legs": [{ "call_id": "probe1@alpha-carrier.zz", "hops": [{ "a": "85.12.34.3:5060", "b": "172.16.245.246:5060" }],
+        "legs": [{ "call_id": "probe1@alpha-carrier.zz", "hops": [{ "a": "8.8.8.3:5060", "b": "172.16.245.246:5060" }],
                    "invite": null, "final_status": null, "saw_180": false, "terminated_by": null, "tokens": [],
-                   "msgs": [{ "ts_us": 0, "src": "85.12.34.3:5060", "dst": "172.16.245.246:5060", "hop": 0,
+                   "msgs": [{ "ts_us": 0, "src": "8.8.8.3:5060", "dst": "172.16.245.246:5060", "hop": 0,
                               "retx": false, "raw": raw,
                               "summary": { "kind": "request", "method": "INVITE",
                                            "uri": "sip:+2868765432@as.alpha-carrier.zz",

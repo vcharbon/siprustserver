@@ -26,30 +26,30 @@ fn extra(variant: char) -> Vec<&'static str> {
     match variant {
         // A host behind an escaped `@` in a URI parameter of the Contact.
         'a' => vec![
-            "Contact: <sip:mx77;ab=1;user-id=ABCD%40ringo.telcoz-a.de@85.12.34.20:5060;transport=udp>",
+            "Contact: <sip:mx77;ab=1;user-id=ABCD%40ringo.telcoz-a.de@8.8.8.20:5060;transport=udp>",
         ],
         // A number and a host in an escaped URI of a Contact parameter.
         'b' => vec![
-            "Contact: <sip:4321@85.12.34.20:5060;xm=1;xfwd=%3Csip:5551234%40ims.telcoz-b.de%3Bgr%3Durn:uuid:0f6c2a1e-1b2c-4d5e-8f90-a1b2c3d4e5f6%3E>",
+            "Contact: <sip:4321@8.8.8.20:5060;xm=1;xfwd=%3Csip:5551234%40ims.telcoz-b.de%3Bgr%3Durn:uuid:0f6c2a1e-1b2c-4d5e-8f90-a1b2c3d4e5f6%3E>",
         ],
         // A host in a Via extension parameter.
         'c' => vec![
-            "Contact: <sip:4321@85.12.34.20:5060>",
-            "Via: SIP/2.0/UDP 85.12.34.21:5060;branch=z9hG4bKc9;xhop=edge7.trunkz-c.de;xfirst=true",
+            "Contact: <sip:4321@8.8.8.20:5060>",
+            "Via: SIP/2.0/UDP 8.8.8.21:5060;branch=z9hG4bKc9;xhop=edge7.trunkz-c.de;xfirst=true",
         ],
         // A vendor header whose name holds a dot.
-        'd' => vec!["Contact: <sip:4321@85.12.34.20:5060>", "P-Vendorx.Session-Info: corrID=ab1"],
+        'd' => vec!["Contact: <sip:4321@8.8.8.20:5060>", "P-Vendorx.Session-Info: corrID=ab1"],
         // A Reason whose protocol is a dotted token.
-        'e' => vec!["Contact: <sip:4321@85.12.34.20:5060>", "Reason: X.vnd;reasoncode=0x00001234"],
+        'e' => vec!["Contact: <sip:4321@8.8.8.20:5060>", "Reason: X.vnd;reasoncode=0x00001234"],
         // A digit run in the file name of an Identity `info` URL.
         'f' => vec![
-            "Contact: <sip:4321@85.12.34.20:5060>",
+            "Contact: <sip:4321@8.8.8.20:5060>",
             "Identity: eyJhbGciOiJFUzI1NiJ9.eyJvcmlnIjp7InRuIjoiMjg2MTExMzMzMyJ9fQ.c2ln;info=<https://cert.sti-f.de/certs/AB12/1234a5bc73519024.pem>;alg=ES256;ppt=shaken",
         ],
         // A number written as a display name and in an escaped URI of a Contact parameter.
         'i' => vec![
-            "P-Asserted-Identity: \"5551239\" <sip:4321@85.12.34.20>",
-            "Contact: <sip:4321@85.12.34.20:5060;xm=1;xfwd=%3Csip:5551239%40ims.telcoz-i.de%3Bgr%3D12345a678%3E>",
+            "P-Asserted-Identity: \"5551239\" <sip:4321@8.8.8.20>",
+            "Contact: <sip:4321@8.8.8.20:5060;xm=1;xfwd=%3Csip:5551239%40ims.telcoz-i.de%3Bgr%3D12345a678%3E>",
         ],
         // A number carrying a user parameter, written only there.
         'k' => vec![
@@ -58,7 +58,7 @@ fn extra(variant: char) -> Vec<&'static str> {
         // A short private number standing as a dotted group of a vendor parameter.
         'm' => vec![
             "P-Asserted-Identity: <sip:4321@caller-dom.de>",
-            "Contact: <sip:85.12.34.20:5060;yop=12.34.56789ABC.4321.0042>",
+            "Contact: <sip:8.8.8.20:5060;yop=12.34.56789ABC.4321.0042>",
         ],
         // A long digit run standing alone in a vendor header and as the tail
         // of a longer number elsewhere.
@@ -74,13 +74,13 @@ fn extra(variant: char) -> Vec<&'static str> {
         // A short private number written as, or at the end of, a display name,
         // and spelt by a group of an instance id.
         't' => vec![
-            "Remote-Party-ID: \"Fakey McFakename 52417\" <sip:52417@85.12.34.5>;party=calling;screen=yes;privacy=off",
-            "P-Asserted-Identity: \"52417\" <sip:52417@85.12.34.5:5060;user=phone>",
-            "Diversion: <sip:524190@85.12.34.5>;reason=unconditional",
-            "Contact: <sip:4321@85.12.34.20:5060>;+sip.instance=\"<urn:gsma:imei:35000099-524190-1>\"",
+            "Remote-Party-ID: \"Fakey McFakename 52417\" <sip:52417@8.8.8.5>;party=calling;screen=yes;privacy=off",
+            "P-Asserted-Identity: \"52417\" <sip:52417@8.8.8.5:5060;user=phone>",
+            "Diversion: <sip:524190@8.8.8.5>;reason=unconditional",
+            "Contact: <sip:4321@8.8.8.20:5060>;+sip.instance=\"<urn:gsma:imei:35000099-524190-1>\"",
         ],
         // A feature tag of the global tree written without its `+`.
-        'r' => vec!["Contact: <sip:4321@85.12.34.20:5060>;g.3gpp.zz-vndr-flag;expires=60"],
+        'r' => vec!["Contact: <sip:4321@8.8.8.20:5060>;g.3gpp.zz-vndr-flag;expires=60"],
         // Info Package names (RFC 6086) of the global tree.
         's' => vec!["Recv-Info: g.3gpp.zz-vndr-pkg, g.3gpp.yy-other-pkg"],
         // Numbers of zeros only, and a run of zeros in a vendor header.
@@ -96,7 +96,7 @@ fn extra(variant: char) -> Vec<&'static str> {
         ],
         // A dotted opaque key with a label longer than a DNS label, as a URI parameter.
         'h' => vec![
-            "Contact: <sip:85.12.34.20:5060;line=kq-zv7fwqe2plmn8rstuvw3xyzab4cdefg5hijkl6mnopq7rstuv8wxyzab9cdefghijklmnopqr.7quokka9lemur.zebra2;transport=udp>",
+            "Contact: <sip:8.8.8.20:5060;line=kq-zv7fwqe2plmn8rstuvw3xyzab4cdefg5hijkl6mnopq7rstuv8wxyzab9cdefghijklmnopqr.7quokka9lemur.zebra2;transport=udp>",
         ],
         _ => vec![],
     }
@@ -118,8 +118,8 @@ fn body(variant: char) -> &'static str {
     match variant {
         // An address as the RTCP canonical name of a source (RFC 5576 `cname`).
         'j' => {
-            "v=0\r\no=- 1 1 IN IP4 85.12.34.30\r\ns=-\r\nc=IN IP4 85.12.34.30\r\nt=0 0\r\n\
-                m=audio 4000 RTP/AVP 0\r\na=ssrc:4242 cname:85.12.34.77\r\n"
+            "v=0\r\no=- 1 1 IN IP4 8.8.8.30\r\ns=-\r\nc=IN IP4 8.8.8.30\r\nt=0 0\r\n\
+                m=audio 4000 RTP/AVP 0\r\na=ssrc:4242 cname:8.8.8.77\r\n"
         }
         _ => "",
     }
@@ -135,7 +135,7 @@ fn identities(variant: char) -> &'static [&'static str] {
         'g' => &["4455667788", "callerdom"],
         'h' => &["zv7fwqe2plmn8", "quokka", "lemur", "zebra2"],
         'i' => &["5551239", "telcoz-i"],
-        'j' => &["85.12.34.30", "85.12.34.77"],
+        'j' => &["8.8.8.30", "8.8.8.77"],
         'k' => &["65454545"],
         'l' => &["7654321", "34567"],
         'm' => &["4321"],
@@ -156,7 +156,7 @@ pub(super) fn document(extra: &[&str], call_id: &str, body: &str) -> Flows {
     let call_id_line = format!("Call-ID: {call_id}");
     let mut lines = vec![
         HEAD,
-        "Via: SIP/2.0/UDP 85.12.34.10:5060;branch=z9hG4bKp1",
+        "Via: SIP/2.0/UDP 8.8.8.10:5060;branch=z9hG4bKp1",
         "From: <sip:+2861113333@caller-dom.de>;tag=p2",
         "To: <sip:+2861112222@callee-dom.de>",
         &call_id_line,
@@ -165,7 +165,7 @@ pub(super) fn document(extra: &[&str], call_id: &str, body: &str) -> Flows {
     ];
     lines.extend(extra);
     if !lines.iter().any(|l| l.starts_with("Contact:")) {
-        lines.push("Contact: <sip:4321@85.12.34.20:5060>");
+        lines.push("Contact: <sip:4321@8.8.8.20:5060>");
     }
     let length = format!("Content-Length: {}", body.len());
     if !body.is_empty() {
@@ -178,9 +178,9 @@ pub(super) fn document(extra: &[&str], call_id: &str, body: &str) -> Flows {
         "decode_stats": { "records": 0, "non_ip": 0, "non_udp": 0, "snap_truncated": 0, "datagrams": 0,
                           "fragments": 0, "reassembled": 0, "frag_dropped": 0, "tail_truncated": 0 },
         "flow_stats": { "sip_messages": 1, "capture_dups": 0, "parse_failed": 0, "non_sip": 0 },
-        "legs": [{ "call_id": call_id, "hops": [{ "a": "85.12.34.10:5060", "b": "172.16.245.246:5060" }],
+        "legs": [{ "call_id": call_id, "hops": [{ "a": "8.8.8.10:5060", "b": "172.16.245.246:5060" }],
                    "invite": null, "final_status": null, "saw_180": false, "terminated_by": null, "tokens": [],
-                   "msgs": [{ "ts_us": 0, "src": "85.12.34.10:5060", "dst": "172.16.245.246:5060", "hop": 0,
+                   "msgs": [{ "ts_us": 0, "src": "8.8.8.10:5060", "dst": "172.16.245.246:5060", "hop": 0,
                               "retx": false, "raw": raw,
                               "summary": { "kind": "request", "method": "INVITE",
                                            "uri": "sip:+2861112222@callee-dom.de",
@@ -261,7 +261,7 @@ fn every_identity_of_every_refusal_probe_is_gone_and_verify_counts_nothing() {
 #[test]
 fn a_reason_text_spelling_the_status_line_leaves_both_as_written() {
     let raw = "SIP/2.0 487 Request Terminated\r\n\
-               Via: SIP/2.0/UDP 85.12.34.10:5060;branch=z9hG4bKp1\r\n\
+               Via: SIP/2.0/UDP 8.8.8.10:5060;branch=z9hG4bKp1\r\n\
                From: <sip:+2861113333@caller-dom.de>;tag=p2\r\n\
                To: <sip:+2861112222@callee-dom.de>;tag=p3\r\n\
                Call-ID: c1@cidhost.callerdom.zz\r\nCSeq: 2 INVITE\r\n\
@@ -272,9 +272,9 @@ fn a_reason_text_spelling_the_status_line_leaves_both_as_written() {
         "decode_stats": { "records": 0, "non_ip": 0, "non_udp": 0, "snap_truncated": 0, "datagrams": 0,
                           "fragments": 0, "reassembled": 0, "frag_dropped": 0, "tail_truncated": 0 },
         "flow_stats": { "sip_messages": 1, "capture_dups": 0, "parse_failed": 0, "non_sip": 0 },
-        "legs": [{ "call_id": "c1@cidhost.callerdom.zz", "hops": [{ "a": "85.12.34.10:5060", "b": "172.16.245.246:5060" }],
+        "legs": [{ "call_id": "c1@cidhost.callerdom.zz", "hops": [{ "a": "8.8.8.10:5060", "b": "172.16.245.246:5060" }],
                    "invite": null, "final_status": null, "saw_180": false, "terminated_by": null, "tokens": [],
-                   "msgs": [{ "ts_us": 0, "src": "172.16.245.246:5060", "dst": "85.12.34.10:5060", "hop": 0,
+                   "msgs": [{ "ts_us": 0, "src": "172.16.245.246:5060", "dst": "8.8.8.10:5060", "hop": 0,
                               "retx": false, "raw": raw,
                               "summary": { "kind": "response", "status": 487, "reason": "Request Terminated",
                                            "cseq": { "seq": 2, "method": "INVITE" },

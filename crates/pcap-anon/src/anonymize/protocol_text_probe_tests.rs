@@ -28,9 +28,9 @@ pub(super) fn response(raw: &str) -> Flows {
         "decode_stats": { "records": 0, "non_ip": 0, "non_udp": 0, "snap_truncated": 0, "datagrams": 0,
                           "fragments": 0, "reassembled": 0, "frag_dropped": 0, "tail_truncated": 0 },
         "flow_stats": { "sip_messages": 1, "capture_dups": 0, "parse_failed": 0, "non_sip": 0 },
-        "legs": [{ "call_id": "c1@cidhost.callerdom.zz", "hops": [{ "a": "85.12.34.10:5060", "b": "172.16.245.246:5060" }],
+        "legs": [{ "call_id": "c1@cidhost.callerdom.zz", "hops": [{ "a": "8.8.8.10:5060", "b": "172.16.245.246:5060" }],
                    "invite": null, "final_status": null, "saw_180": false, "terminated_by": null, "tokens": [],
-                   "msgs": [{ "ts_us": 0, "src": "172.16.245.246:5060", "dst": "85.12.34.10:5060", "hop": 0,
+                   "msgs": [{ "ts_us": 0, "src": "172.16.245.246:5060", "dst": "8.8.8.10:5060", "hop": 0,
                               "retx": false, "raw": raw,
                               "summary": { "kind": "response", "status": 487, "reason": "Request Fakey McFakename",
                                            "cseq": { "seq": 2, "method": "INVITE" },
@@ -51,8 +51,9 @@ fn typed(doc: Flows, media: &str) -> Flows {
 
 fn sites() -> Vec<Site> {
     let call = "c1@cidhost.callerdom.zz";
-    let status = "SIP/2.0 487 Request Fakey McFakename +2862345678 85.12.34.66 fake-sbc.notreal-carrier.de\r\n\
-                  Via: SIP/2.0/UDP 85.12.34.10:5060;branch=z9hG4bKp1\r\n\
+    let status =
+        "SIP/2.0 487 Request Fakey McFakename +2862345678 8.8.8.66 fake-sbc.notreal-carrier.de\r\n\
+                  Via: SIP/2.0/UDP 8.8.8.10:5060;branch=z9hG4bKp1\r\n\
                   From: <sip:+2861113333@caller-dom.de>;tag=p2\r\n\
                   To: <sip:+2861112222@callee-dom.de>;tag=p3\r\n\
                   Call-ID: c1@cidhost.callerdom.zz\r\nCSeq: 2 INVITE\r\nContent-Length: 0\r\n\r\n";
@@ -60,7 +61,7 @@ fn sites() -> Vec<Site> {
         Site {
             name: "status line reason phrase",
             doc: response(status),
-            kept: &["SIP/2.0 487 Request Fakey McFakename +2862345678 85.12.34.66 fake-sbc.notreal-carrier.de\r\n"],
+            kept: &["SIP/2.0 487 Request Fakey McFakename +2862345678 8.8.8.66 fake-sbc.notreal-carrier.de\r\n"],
             gone: &["61113333", "caller-dom"],
         },
         Site {
@@ -81,11 +82,11 @@ fn sites() -> Vec<Site> {
         Site {
             name: "SIP Reason text",
             doc: document(
-                &["Reason: SIP;cause=487;text=\"Fakey McFakename at fake-sbc.notreal-carrier.de, 85.12.34.66\""],
+                &["Reason: SIP;cause=487;text=\"Fakey McFakename at fake-sbc.notreal-carrier.de, 8.8.8.66\""],
                 call,
                 "",
             ),
-            kept: &["text=\"Fakey McFakename at fake-sbc.notreal-carrier.de, 85.12.34.66\"\r\n"],
+            kept: &["text=\"Fakey McFakename at fake-sbc.notreal-carrier.de, 8.8.8.66\"\r\n"],
             gone: &["61113333", "caller-dom"],
         },
         Site {
@@ -148,7 +149,7 @@ fn protocol_text_stays_byte_for_byte_and_verify_counts_nothing_in_it() {
 #[test]
 fn a_response_keeps_its_reason_phrase_in_the_model_too() {
     let mut out = response(
-        "SIP/2.0 487 Request Fakey McFakename\r\nVia: SIP/2.0/UDP 85.12.34.10:5060;branch=z9hG4bKp1\r\n\
+        "SIP/2.0 487 Request Fakey McFakename\r\nVia: SIP/2.0/UDP 8.8.8.10:5060;branch=z9hG4bKp1\r\n\
          From: <sip:+2861113333@caller-dom.de>;tag=p2\r\nTo: <sip:+2861112222@callee-dom.de>;tag=p3\r\n\
          Call-ID: c1@cidhost.callerdom.zz\r\nCSeq: 2 INVITE\r\nContent-Length: 0\r\n\r\n",
     );

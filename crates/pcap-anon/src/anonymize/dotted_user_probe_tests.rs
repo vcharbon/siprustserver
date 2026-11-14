@@ -125,7 +125,7 @@ fn a_dotted_user_part_that_is_no_quad_stays_a_number() {
 fn a_public_quad_user_part_is_faked_under_the_default_scope() {
     // Public-looking like the other probes' peers: the default scope maps
     // only public addresses.
-    let quad = "85.12.34.56";
+    let quad = "8.8.8.56";
     let out = anonymised(quad, quad, &Scope::default());
     let fake = fake_ipv4(&seed(), quad).expect("a dotted quad");
     assert_eq!(out.user, fake, "the user part is the address's fake, no number's");

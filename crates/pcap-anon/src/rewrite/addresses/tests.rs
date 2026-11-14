@@ -6,12 +6,12 @@ fn texts(input: &str) -> Vec<&str> {
 
 #[test]
 fn an_address_is_found_wherever_sip_and_sdp_write_one() {
-    let datagram = "Via: SIP/2.0/UDP 62.1.2.3:5060;received=62.1.2.4\r\n\
+    let datagram = "Via: SIP/2.0/UDP 1.1.1.3:5060;received=1.1.1.4\r\n\
                     Contact: <sip:+2861@[3fff:cb0::5]:5060>\r\n\r\n\
-                    o=- 1 1 IN IP4 62.1.2.3\r\nc=IN IP6 3fff:cb0::7\r\n";
-    assert_eq!(texts(datagram), ["62.1.2.3", "62.1.2.4", "3fff:cb0::5", "62.1.2.3", "3fff:cb0::7"]);
-    assert_eq!(texts("62.1.2.3:5060"), ["62.1.2.3"]);
-    assert_eq!(texts("Route: <sip:62.1.2.9:5060;lr>"), ["62.1.2.9"]);
+                    o=- 1 1 IN IP4 1.1.1.3\r\nc=IN IP6 3fff:cb0::7\r\n";
+    assert_eq!(texts(datagram), ["1.1.1.3", "1.1.1.4", "3fff:cb0::5", "1.1.1.3", "3fff:cb0::7"]);
+    assert_eq!(texts("1.1.1.3:5060"), ["1.1.1.3"]);
+    assert_eq!(texts("Route: <sip:1.1.1.9:5060;lr>"), ["1.1.1.9"]);
 }
 
 #[test]
@@ -23,14 +23,14 @@ fn an_unbracketed_or_mapped_ipv6_address_is_found_too() {
         ["3fff:e0a:1:2::8"]
     );
     assert_eq!(texts("X-Peer-V6: 3fff:e0a:1:2::7\r\n"), ["3fff:e0a:1:2::7"]);
-    assert_eq!(texts("X-Origin: [::ffff:85.12.34.202]"), ["::ffff:85.12.34.202"]);
+    assert_eq!(texts("X-Origin: [::ffff:8.8.8.202]"), ["::ffff:8.8.8.202"]);
 }
 
 #[test]
 fn a_version_a_date_a_time_or_a_word_is_no_address() {
     assert!(texts("Vendor/7.2.1 build 1.2.3.4.5").is_empty());
-    assert!(texts("v1.2.3.4").is_empty());
-    assert!(texts("1.2.3.4x").is_empty());
+    assert!(texts("v10.0.2.4").is_empty());
+    assert!(texts("10.0.2.4x").is_empty());
     assert!(texts("2026.10.12").is_empty());
     assert!(texts("[not:an:address]").is_empty());
     assert!(texts("Date: Sat, 13 Nov 2010 23:29:00 GMT").is_empty());
@@ -41,9 +41,8 @@ fn a_version_a_date_a_time_or_a_word_is_no_address() {
 
 #[test]
 fn the_mapping_decides_each_literal() {
-    let out = rewrite(b"a 62.1.2.3 b 10.0.0.1 c", &|t| {
-        (t == "62.1.2.3").then(|| "0.11.22.3".to_string())
-    });
+    let out =
+        rewrite(b"a 1.1.1.3 b 10.0.0.1 c", &|t| (t == "1.1.1.3").then(|| "0.11.22.3".to_string()));
     assert_eq!(out, b"a 0.11.22.3 b 10.0.0.1 c");
 }
 

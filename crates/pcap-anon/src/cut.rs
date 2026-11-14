@@ -97,12 +97,12 @@ mod tests {
 
     #[test]
     fn an_exact_address_and_a_cidr_block_match_their_sockets_and_nothing_else() {
-        let cut = Cut::from_json_str(r#"{"sut":["10.20.30.68","198.51.100.0/24"]}"#).unwrap();
+        let cut = Cut::from_json_str(r#"{"sut":["10.20.30.68","198.51.100.0/25"]}"#).unwrap();
         assert!(cut.matches("10.20.30.68:5060"));
         assert!(cut.matches("10.20.30.68"));
         assert!(!cut.matches("10.20.30.146:5071"));
         assert!(cut.matches("198.51.100.9:5060"));
-        assert!(!cut.matches("198.51.101.9:5060"));
+        assert!(!cut.matches("198.51.100.137:5060"));
     }
 
     #[test]

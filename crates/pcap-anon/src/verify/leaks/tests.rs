@@ -28,8 +28,7 @@ fn doc(extra: &str) -> Flows {
 
 #[test]
 fn every_identity_shaped_token_no_fake_explains_is_counted_by_class() {
-    let extra =
-        "X-Origin-Host: core.alpha-carrier.zz\r\nX-Peer: 85.12.34.200 and 3fff:e0a:1:2::7\r\n\
+    let extra = "X-Origin-Host: core.alpha-carrier.zz\r\nX-Peer: 8.8.8.200 and 3fff:e0a:1:2::7\r\n\
                  X-Note: Фейкова\r\nX-Corp: sbc2.fakecorp.internal\r\nSubject: trunk\r\n\
                  Organization: Notrealtel\r\n";
     let leaks =

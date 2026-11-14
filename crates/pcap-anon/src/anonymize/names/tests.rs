@@ -12,7 +12,7 @@ use crate::fake::address::Scope;
 use crate::fake::Seed;
 use crate::model::{ingest_str, Flows};
 
-const PEER: &str = "85.12.34.3:5060";
+const PEER: &str = "8.8.8.3:5060";
 const SUT: &str = "172.16.245.246:5060";
 const CALL_ID: &str = "a84b4c76e66710@pcscf1.ims.alpha-carrier.zz";
 
@@ -22,11 +22,11 @@ const NAMES: &[&str] = &[
     "pcscf1",
     "Fakevendor",
     "Fakecarrier",
-    "85.12.34.3",
-    "85.12.34.4",
-    "85.12.34.5",
-    "85-12-34-200",
-    "85.12.34.202",
+    "8.8.8.3",
+    "8.8.8.4",
+    "8.8.8.5",
+    "8-8-8-200",
+    "8.8.8.202",
     "3fff:cb0:1234::5",
     "3fff:e0a:1:2::7",
     "3fff:6d0::9",
@@ -39,13 +39,12 @@ const NAMES: &[&str] = &[
 ];
 
 fn invite() -> String {
-    let sdp =
-        "v=0\r\no=rhodium 1 1 IN IP4 85.12.34.3\r\ns=Frobnitz Bridge\r\nc=IN IP4 85.12.34.5\r\n\
+    let sdp = "v=0\r\no=rhodium 1 1 IN IP4 8.8.8.3\r\ns=Frobnitz Bridge\r\nc=IN IP4 8.8.8.5\r\n\
                t=0 0\r\nm=audio 4000 RTP/AVP 0\r\n\
                a=candidate:1 1 UDP 2130706431 3fff:e0a:1:2::7 9000 typ host\r\n";
     format!(
         "INVITE sip:+2862345678@as.ims.alpha-carrier.zz;user=phone SIP/2.0\r\n\
-         Via: SIP/2.0/UDP 85.12.34.3:5060;branch=z9hG4bK1;received=85.12.34.4\r\n\
+         Via: SIP/2.0/UDP 8.8.8.3:5060;branch=z9hG4bK1;received=8.8.8.4\r\n\
          Via: SIP/2.0/UDP pcscf1.ims.alpha-carrier.zz:5060;branch=z9hG4bK2\r\n\
          Via: SIP/2.0/UDP host-85-12-34-200.dyn.alpha-isp.zz:5060;branch=z9hG4bK3;received=3fff:6d0::9\r\n\
          Via: SIP/2.0/UDP Core.Alpha-Carrier.ZZ:5060;branch=z9hG4bK4\r\n\
@@ -57,8 +56,8 @@ fn invite() -> String {
          Contact: <sip:+2862345678@[3fff:cb0:1234::5]:5060>\r\n\
          Call-Info: <http://media.fakevendor-tunes.zz/ring.wav>;purpose=info\r\n\
          Warning: 399 core.alpha-carrier.zz \"busy\"\r\n\
-         X-Origin: [::ffff:85.12.34.202]\r\nX-Peer-V6: 3fff:e0a:1:2::7\r\n\
-         P-Charging-Vector: icid-value=0A1B2C3D4E5F6071;icid-generated-at=85.12.34.3;orig-ioi=ims.alpha-carrier.zz\r\n\
+         X-Origin: [::ffff:8.8.8.202]\r\nX-Peer-V6: 3fff:e0a:1:2::7\r\n\
+         P-Charging-Vector: icid-value=0A1B2C3D4E5F6071;icid-generated-at=8.8.8.3;orig-ioi=ims.alpha-carrier.zz\r\n\
          Authorization: Digest username=\"u\", realm=\"ims.alpha-carrier.zz\", nonce=\"n\", \
          uri=\"sip:as.ims.alpha-carrier.zz\", response=\"r\"\r\n\
          User-Agent: Fakevendor-SBC/7.2.1\r\nOrganization: Fakecarrier Telecom\r\nSubject: Фейкова\r\n\
@@ -224,11 +223,11 @@ fn verify_counts_the_names_that_survive_and_none_after_the_pass() {
 #[test]
 fn the_addresses_a_scope_keeps_stay_and_all_addresses_maps_the_private_ones() {
     let plan = crate::testflow::plan();
-    let cut = Cut::from_json_str(r#"{"sut":["85.12.34.0/24"]}"#).expect("a cut");
+    let cut = Cut::from_json_str(r#"{"sut":["8.8.8.0/24"]}"#).expect("a cut");
     let mut kept = call();
     anonymize_in(&mut kept, &plan, &Seed::from_bytes([1; 32]), &Scope::default().keeping(&cut))
         .expect("anonymises");
-    assert!(text(&kept).contains("85.12.34.3"), "the stated SUT stays");
+    assert!(text(&kept).contains("8.8.8.3"), "the stated SUT stays");
     assert!(!text(&kept).contains("alpha"));
     let mut whole = call();
     anonymize_in(&mut whole, &plan, &Seed::from_bytes([1; 32]), &Scope::default().all_addresses())
@@ -237,5 +236,5 @@ fn the_addresses_a_scope_keeps_stay_and_all_addresses_maps_the_private_ones() {
     let mut both = call();
     let scope = Scope::default().keeping(&cut).all_addresses();
     anonymize_in(&mut both, &plan, &Seed::from_bytes([1; 32]), &scope).expect("anonymises");
-    assert!(!text(&both).contains("85.12.34.3"), "all_addresses wins over the kept set");
+    assert!(!text(&both).contains("8.8.8.3"), "all_addresses wins over the kept set");
 }

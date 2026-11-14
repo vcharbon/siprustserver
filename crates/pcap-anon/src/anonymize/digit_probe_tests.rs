@@ -21,54 +21,54 @@ const HEAD: &str = "INVITE sip:+2861112222@callee-dom.de SIP/2.0";
 fn head(variant: char) -> Vec<&'static str> {
     match variant {
         'a' => vec![
-            "Via: SIP/2.0/UDP 85.12.34.10:5060;branch=z9hG4bK2861110003",
+            "Via: SIP/2.0/UDP 8.8.8.10:5060;branch=z9hG4bK2861110003",
             "From: \"Fakey McFakename\" <sip:+2861113333@caller-dom.de>;tag=2861110002",
             "To: <sip:+2861112222@callee-dom.de>",
             "Call-ID: 2861110001-77ab@cidhost.callerdom.zz",
             "CSeq: 2 INVITE",
             "Max-Forwards: 70",
-            "Contact: <sip:+2861113333@85.12.34.10:5060>;+sip.instance=\"<urn:gsma:imei:35000099-176148-1>\"",
+            "Contact: <sip:+2861113333@8.8.8.10:5060>;+sip.instance=\"<urn:gsma:imei:35000099-176148-1>\"",
             "P-Charging-Vector: icid-value=2861110004;orig-ioi=2861110005",
             "X-Called: 2861110006",
             "X-Caller-Name: \"Testo Placeholder\"",
             "Subject: 2861110007",
         ],
         'b' => vec![
-            "Via: SIP/2.0/UDP 85.12.34.10:5060;branch=z9hG4bK.85.12.34.71",
+            "Via: SIP/2.0/UDP 8.8.8.10:5060;branch=z9hG4bK.85.12.34.71",
             // A tag is a token, a Call-ID word admits `:` (RFC 3261 §25.1).
-            "From: <sip:+2861113333@caller-dom.de>;tag=85.12.34.73",
+            "From: <sip:+2861113333@caller-dom.de>;tag=8.8.8.73",
             "To: <sip:+2861112222@callee-dom.de>",
             "Call-ID: x-3fff:e0a:1:2::72-77ab@cidhost.callerdom.zz",
             "CSeq: 2 INVITE",
             "Max-Forwards: 70",
-            "Contact: <sip:+2861113333@85.12.34.10:5060>",
+            "Contact: <sip:+2861113333@8.8.8.10:5060>",
             "X-Hop: sip.hidden-xhop.de",
             "Record-Route: <sip:sip.rr-hidden.de;lr>",
             "X-Note: \"see http://sip.note-hidden.de/x\"",
         ],
         'c' => vec![
-            "Via: SIP/2.0/UDP 85.12.34.10:5060;branch=z9hG4bKc1",
+            "Via: SIP/2.0/UDP 8.8.8.10:5060;branch=z9hG4bKc1",
             "From: \"Fakey 061110020\" <sip:+2861113333@caller-dom.de>;tag=c2",
             "To: <sip:+2861112222@callee-dom.de>",
             "Call-ID: c3@cidhost.callerdom.zz",
             "CSeq: 2 INVITE",
             "Max-Forwards: 70",
-            "Contact: <sip:+2861113333@85.12.34.10:5060>",
+            "Contact: <sip:+2861113333@8.8.8.10:5060>",
             "Identity: eyJhbGciOiJFUzI1NiJ9.eyJvcmlnIjp7InRuIjoiMjg2MTExMzMzMyJ9fQ.c2lnbmF0dXJl;info=<https://cert.fakesti-c.de/sti.pem>;alg=ES256",
             "X-Who: Fäkey",
         ],
         'd' => vec![
-            "Via: SIP/2.0/UDP 85.12.34.10:5060;branch=z9hG4bK2861113333x",
+            "Via: SIP/2.0/UDP 8.8.8.10:5060;branch=z9hG4bK2861113333x",
             "From: <sip:+2861113333@caller-dom.de>;tag=9061113333",
             "To: <sip:+2861112222@callee-dom.de>",
             "Call-ID: 0611133337771@cidhost.callerdom.zz",
             "CSeq: 2 INVITE",
             "Max-Forwards: 70",
-            "Contact: <sip:+2861113333@85.12.34.10:5060>",
+            "Contact: <sip:+2861113333@8.8.8.10:5060>",
             "X-Orig: 002861112222",
         ],
         _ => vec![
-            "Via: SIP/2.0/UDP 85.12.34.10:5060;branch=z9hG4bKe1",
+            "Via: SIP/2.0/UDP 8.8.8.10:5060;branch=z9hG4bKe1",
             "From: <sip:+2861113333@caller-dom.de>;tag=e2",
             "To: <sip:+2861112222@callee-dom.de>",
             "Call-ID: e3@cidhost.callerdom.zz",
@@ -83,7 +83,7 @@ fn body(variant: char) -> (&'static str, &'static str) {
         'a' => (
             "multipart/mixed;boundary=b1",
             "--b1\r\nContent-Type: application/sdp\r\n\r\n\
-             v=0\r\no=- 1 1 IN IP4 85.12.34.10\r\ns=-\r\nc=IN IP4 85.12.34.10\r\nt=0 0\r\n\
+             v=0\r\no=- 1 1 IN IP4 8.8.8.10\r\ns=-\r\nc=IN IP4 8.8.8.10\r\nt=0 0\r\n\
              m=audio 4000 RTP/AVP 0\r\na=x-ref:http://media.sdp-hidden.de/a\r\n\
              a=x-host:sip.sdp-hidden2.de\r\na=x-num:2861110012\r\na=x-name:Dummy Notaperson\r\n\
              --b1\r\nContent-Type: message/sipfrag\r\n\r\n\
@@ -97,7 +97,7 @@ fn body(variant: char) -> (&'static str, &'static str) {
         'c' => (
             "multipart/mixed;boundary=b1",
             "--b1\r\nContent-Type: application/sdp\r\n\r\n\
-             v=0\r\no=- 1 1 IN IP4 85.12.34.10\r\ns=-\r\nc=IN IP4 85.12.34.10\r\nt=0 0\r\n\
+             v=0\r\no=- 1 1 IN IP4 8.8.8.10\r\ns=-\r\nc=IN IP4 8.8.8.10\r\nt=0 0\r\n\
              m=audio 4000 RTP/AVP 0\r\na=x-host:media.sdp-plain-c.de\r\n\
              --b1\r\nContent-Type: application/pidf+xml\r\n\r\n\
              <presence>\r\n<RD>Rue Fakestreet</RD>\r\n<HNO>12</HNO>\r\n</presence>\r\n\
@@ -105,8 +105,8 @@ fn body(variant: char) -> (&'static str, &'static str) {
              <mscivr><who>Fäkey</who><host name=\"media.ivrx-plain-c.zz\"/></mscivr>\r\n\
              --b1--\r\n",
         ),
-        'e' => ("application/sdp", concat!("v=0\r\no=- 1 1 IN IP4 85.12.34.10\r\ns=-\r\nc=IN IP4 85.12.34.10\r\nt=0 0\r\nm=audio 4000 RTP/AVP 0\r\n", "a=x-host:fcb.bc\r\n")),
-        'f' => ("application/sdp", concat!("v=0\r\no=- 1 1 IN IP4 85.12.34.10\r\ns=-\r\nc=IN IP4 85.12.34.10\r\nt=0 0\r\nm=audio 4000 RTP/AVP 0\r\n", "a=x-host:fcz.bc\r\n")),
+        'e' => ("application/sdp", concat!("v=0\r\no=- 1 1 IN IP4 8.8.8.10\r\ns=-\r\nc=IN IP4 8.8.8.10\r\nt=0 0\r\nm=audio 4000 RTP/AVP 0\r\n", "a=x-host:fcb.bc\r\n")),
+        'f' => ("application/sdp", concat!("v=0\r\no=- 1 1 IN IP4 8.8.8.10\r\ns=-\r\nc=IN IP4 8.8.8.10\r\nt=0 0\r\nm=audio 4000 RTP/AVP 0\r\n", "a=x-host:fcz.bc\r\n")),
         'g' => (
             "multipart/mixed;boundary=b1",
             "--b1\r\nContent-Type: application/pidf+xml\r\n\
@@ -148,14 +148,9 @@ fn identities(variant: char) -> &'static [&'static str] {
             "callerdom",
             "frag-dom",
         ],
-        'b' => &[
-            "85.12.34.71",
-            "3fff:e0a:1:2::72",
-            "85.12.34.73",
-            "hidden-xhop",
-            "rr-hidden",
-            "note-hidden",
-        ],
+        'b' => {
+            &["8.8.8.71", "3fff:e0a:1:2::72", "8.8.8.73", "hidden-xhop", "rr-hidden", "note-hidden"]
+        }
         'c' => {
             &["061110020", "fakesti-c", "Fäkey", "Rue Fakestreet", "sdp-plain-c", "ivrx-plain-c"]
         }
@@ -183,9 +178,9 @@ fn probe(variant: char) -> Flows {
         "decode_stats": { "records": 0, "non_ip": 0, "non_udp": 0, "snap_truncated": 0, "datagrams": 0,
                           "fragments": 0, "reassembled": 0, "frag_dropped": 0, "tail_truncated": 0 },
         "flow_stats": { "sip_messages": 1, "capture_dups": 0, "parse_failed": 0, "non_sip": 0 },
-        "legs": [{ "call_id": call_id, "hops": [{ "a": "85.12.34.10:5060", "b": "172.16.245.246:5060" }],
+        "legs": [{ "call_id": call_id, "hops": [{ "a": "8.8.8.10:5060", "b": "172.16.245.246:5060" }],
                    "invite": null, "final_status": null, "saw_180": false, "terminated_by": null, "tokens": [],
-                   "msgs": [{ "ts_us": 0, "src": "85.12.34.10:5060", "dst": "172.16.245.246:5060", "hop": 0,
+                   "msgs": [{ "ts_us": 0, "src": "8.8.8.10:5060", "dst": "172.16.245.246:5060", "hop": 0,
                               "retx": false, "raw": raw,
                               "summary": { "kind": "request", "method": "INVITE",
                                            "uri": "sip:+2861112222@callee-dom.de",

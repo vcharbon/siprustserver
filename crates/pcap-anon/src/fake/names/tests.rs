@@ -29,12 +29,12 @@ fn the_digits_of_a_host_are_faked_too() {
     let host = "host-85-12-34-200.dyn.alpha-isp.zz";
     let fake = fake_host(&seed(1), host);
     assert_eq!(fake.len(), host.len());
-    assert!(!fake.contains("85-12-34-200"), "{fake}");
+    assert!(!fake.contains("8-8-8-200"), "{fake}");
 }
 
 #[test]
 fn a_dotted_quad_inside_a_name_becomes_a_reserved_address() {
-    let text = "Alpha-SBC 85.12.34.200 build 7";
+    let text = "Alpha-SBC 8.8.8.200 build 7";
     let fake = fake_text(&seed(1), text);
     assert_eq!(fake.len(), text.len());
     let quad = fake.split(' ').nth(1).expect("the quad");

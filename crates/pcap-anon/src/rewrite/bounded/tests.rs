@@ -22,18 +22,18 @@ fn a_name_is_replaced_where_it_stands_alone_or_inside_a_dotted_name() {
 
 #[test]
 fn a_name_is_never_replaced_inside_a_longer_dotted_quad_the_address_pass_owns() {
-    let s = subs(&[("33", "86"), ("8.1.104.83", "0.46.35.37")]);
+    let s = subs(&[("10", "86"), ("192.0.2.83", "0.46.35.37")]);
     assert_eq!(
-        apply(&s, "Contact: <sip:203.0.113.33:5061>;x=33"),
-        "Contact: <sip:203.0.113.33:5061>;x=86"
+        apply(&s, "Contact: <sip:203.0.113.10:5061>;x=10"),
+        "Contact: <sip:203.0.113.10:5061>;x=86"
     );
-    assert_eq!(apply(&s, "33.1.2.3 1.2.3.33 a.33.b"), "33.1.2.3 1.2.3.33 a.86.b");
+    assert_eq!(apply(&s, "10.1.2.3 192.0.2.10 a.10.b"), "10.1.2.3 192.0.2.10 a.86.b");
     assert_eq!(
-        apply(&s, "Server: X 8.1.104.83 (y)"),
+        apply(&s, "Server: X 192.0.2.83 (y)"),
         "Server: X 0.46.35.37 (y)",
         "a quad that is the name itself"
     );
-    assert!(s.found(b"203.0.113.33").is_empty(), "the leak check reads it as the rewrite does");
+    assert!(s.found(b"203.0.113.10").is_empty(), "the leak check reads it as the rewrite does");
 }
 
 #[test]

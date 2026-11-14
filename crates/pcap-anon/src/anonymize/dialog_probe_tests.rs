@@ -23,9 +23,9 @@ fn doc(raws: &[String]) -> Flows {
         .iter()
         .map(|raw| {
             let call_id = raw.lines().find_map(|l| l.strip_prefix("Call-ID: ")).expect("a Call-ID");
-            json!({ "call_id": call_id, "hops": [{ "a": "85.12.34.10:5060", "b": "172.16.245.246:5060" }],
+            json!({ "call_id": call_id, "hops": [{ "a": "8.8.8.10:5060", "b": "172.16.245.246:5060" }],
                     "invite": null, "final_status": null, "saw_180": false, "terminated_by": null, "tokens": [],
-                    "msgs": [{ "ts_us": 0, "src": "85.12.34.10:5060", "dst": "172.16.245.246:5060", "hop": 0,
+                    "msgs": [{ "ts_us": 0, "src": "8.8.8.10:5060", "dst": "172.16.245.246:5060", "hop": 0,
                                "retx": false, "raw": raw,
                                "summary": { "kind": "request", "method": "INVITE",
                                             "uri": "sip:+2861112222@callee-dom.de",
@@ -59,10 +59,10 @@ fn invite(
     };
     format!(
         "INVITE sip:+2861112222@callee-dom.de SIP/2.0\r\n\
-         Via: SIP/2.0/UDP 85.12.34.10:5060;branch=z9hG4bK{branch}\r\n\
+         Via: SIP/2.0/UDP 8.8.8.10:5060;branch=z9hG4bK{branch}\r\n\
          From: <sip:+2861113333@caller-dom.de>;tag={ftag}\r\nTo: <sip:+2861112222@callee-dom.de>;tag={ttag}\r\n\
          Call-ID: {call_id}@cidhost.callerdom.zz\r\nCSeq: 2 INVITE\r\nMax-Forwards: 70\r\n\
-         Contact: <sip:+2861113333@85.12.34.10:5060>\r\n{extra}{typed}Content-Length: {}\r\n\r\n{content}",
+         Contact: <sip:+2861113333@8.8.8.10:5060>\r\n{extra}{typed}Content-Length: {}\r\n\r\n{content}",
         content.len()
     )
 }
@@ -159,7 +159,7 @@ fn a_label_and_its_digits_is_no_port_and_every_identity_beside_the_dialog_goes()
     let body = "<mscivr><caller ani=\"ani:061117777\"/></mscivr>";
     let raws = vec![
         invite("c1", "f1abcd", "t1abcd", "b1", extra, Some(("application/mediaservercontrol+xml", body))),
-        invite("c2", "f2abcd", "t2abcd", "b2", "", Some(("application/sdp", "v=0\r\no=- 1 1 IN IP4 85.12.34.10\r\ns=-\r\nt=0 0\r\nm=audio 4000 RTP/AVP 0\r\na=label:Fakey McFakename\r\n"))),
+        invite("c2", "f2abcd", "t2abcd", "b2", "", Some(("application/sdp", "v=0\r\no=- 1 1 IN IP4 8.8.8.10\r\ns=-\r\nt=0 0\r\nm=audio 4000 RTP/AVP 0\r\na=label:Fakey McFakename\r\n"))),
     ];
     let (raw, out, report) = anonymised(&raws);
     let text = wire(&out);
@@ -185,11 +185,11 @@ fn a_label_and_its_digits_is_no_port_and_every_identity_beside_the_dialog_goes()
 
 #[test]
 fn an_extension_map_and_a_feature_tag_tree_are_vocabulary() {
-    let sdp = "v=0\r\no=- 1 1 IN IP4 85.12.34.10\r\ns=-\r\nt=0 0\r\nm=audio 4000 RTP/AVP 0\r\n\
+    let sdp = "v=0\r\no=- 1 1 IN IP4 8.8.8.10\r\ns=-\r\nt=0 0\r\nm=audio 4000 RTP/AVP 0\r\n\
                a=extmap:1/sendonly http://ext.vendor-uri.zz/abs-send-time\r\n";
     let raw = invite("c1", "f1", "t1", "b1", "", Some(("application/sdp", sdp))).replace(
-        "Contact: <sip:+2861113333@85.12.34.10:5060>",
-        "Contact: <sip:+2861113333@85.12.34.10:5060>;+g.poc!vendor.example-tree.zz=\"x\"",
+        "Contact: <sip:+2861113333@8.8.8.10:5060>",
+        "Contact: <sip:+2861113333@8.8.8.10:5060>;+g.poc!vendor.example-tree.zz=\"x\"",
     );
     let untouched = crate::verify::leaks::leaks(
         &doc(std::slice::from_ref(&raw)),
@@ -276,7 +276,7 @@ fn a_product_name_a_branch_also_spells_goes_wherever_it_stands_in_any_case() {
     // The SDP origin's username names a product; a branch spells it too, and
     // a Reason's protocol slot writes it in another case.
     let sdp =
-        "v=0\r\no=Fakeswitch 1 1 IN IP4 85.12.34.10\r\ns=-\r\nt=0 0\r\nm=audio 4000 RTP/AVP 0\r\n";
+        "v=0\r\no=Fakeswitch 1 1 IN IP4 8.8.8.10\r\ns=-\r\nt=0 0\r\nm=audio 4000 RTP/AVP 0\r\n";
     let raw = invite(
         "c1",
         "f1",
@@ -295,8 +295,7 @@ fn a_product_name_a_branch_also_spells_goes_wherever_it_stands_in_any_case() {
 fn a_digit_only_name_never_reaches_an_sdp_origin_s_session_numbers() {
     // An inter-operator id of digits is a name; the SDP origin spells it as
     // its session id and version, protocol numbers that keep their step.
-    let sdp =
-        "v=0\r\no=- 4417 4417 IN IP4 85.12.34.10\r\ns=-\r\nt=0 0\r\nm=audio 4000 RTP/AVP 0\r\n";
+    let sdp = "v=0\r\no=- 4417 4417 IN IP4 8.8.8.10\r\ns=-\r\nt=0 0\r\nm=audio 4000 RTP/AVP 0\r\n";
     let extra = "P-Charging-Vector: icid-value=fake1234ab;orig-ioi=4417\r\n";
     let raw = invite("c1", "f1", "t1", "b1", extra, Some(("application/sdp", sdp)));
     let (raw, out, report) = anonymised(&[raw]);
@@ -315,7 +314,7 @@ fn an_sdp_origin_s_session_id_maps_a_phone_number_and_its_version_is_a_counter()
     let extra = "P-Asserted-Identity: <sip:4417@caller-dom.de>\r\nX-Called: 2862345678\r\n";
     let origin = |o: &str| {
         let sdp =
-            format!("v=0\r\n{o} IN IP4 85.12.34.10\r\ns=-\r\nt=0 0\r\nm=audio 4000 RTP/AVP 0\r\n");
+            format!("v=0\r\n{o} IN IP4 8.8.8.10\r\ns=-\r\nt=0 0\r\nm=audio 4000 RTP/AVP 0\r\n");
         invite("c1", "f1", "t1", "b1", extra, Some(("application/sdp", &sdp)))
     };
     let (raw, out, report) = anonymised(&[origin("o=4417 2862345678 5")]);

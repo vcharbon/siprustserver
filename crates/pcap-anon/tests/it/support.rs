@@ -91,7 +91,7 @@ pub fn extract(capture: &Path, into: &Path) -> PathBuf {
 
 /// The invented profile's SUT and the crafted document's public peer.
 pub const SUT: &str = "10.0.0.1:5060";
-pub const PUBLIC_PEER: &str = "85.12.34.10";
+pub const PUBLIC_PEER: &str = "8.8.8.10";
 
 /// The text the invented profile keeps as written.
 pub const KEPT_TEXT: &str = "Exampleswitch 4.2";

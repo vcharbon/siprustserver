@@ -72,12 +72,12 @@ mod tests {
     /// maps a public peer outside them.
     #[test]
     fn the_scope_keeps_the_sut_addresses_and_maps_a_public_peer() {
-        let profile = Profile::from_json_str(r#"{"sut":["85.12.34.0/24","91.80.70.10"]}"#)
+        let profile = Profile::from_json_str(r#"{"sut":["8.8.8.0/24","9.9.9.10"]}"#)
             .expect("the profile reads");
         let scope = profile.scope();
-        assert!(!scope.maps_v4("85.12.34.9".parse().unwrap()));
-        assert!(!scope.maps_v4("91.80.70.10".parse().unwrap()));
-        assert!(scope.maps_v4("91.80.70.11".parse().unwrap()));
+        assert!(!scope.maps_v4("8.8.8.9".parse().unwrap()));
+        assert!(!scope.maps_v4("9.9.9.10".parse().unwrap()));
+        assert!(scope.maps_v4("9.9.9.11".parse().unwrap()));
     }
 
     /// The body types a profile states reach its scope; a reading the

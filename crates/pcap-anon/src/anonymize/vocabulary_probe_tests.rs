@@ -59,7 +59,7 @@ const PROBES: &[Probe] = &[
     },
     Probe {
         lines: &[
-            "X-Dev: <sip:x@85.12.34.11>;+sip.instance=\"<urn:uuid:0f6c2a1e-1b2c-4d5e-8f90-a1b2c3d4e5f6>\"",
+            "X-Dev: <sip:x@8.8.8.11>;+sip.instance=\"<urn:uuid:0f6c2a1e-1b2c-4d5e-8f90-a1b2c3d4e5f6>\"",
             "Accept-Contact: *;+sip.instance=\"<urn:uuid:0f6c2a1e-1b2c-4d5e-8f90-a1b2c3d4e5f6>\";require",
         ],
         gone: &["0f6c2a1e-1b2c"],
@@ -128,9 +128,10 @@ fn every_identity_among_vocabulary_is_gone_and_the_vocabulary_stays() {
 fn a_letterless_device_id_is_faked_whole() {
     let imei = "35000099-524190-1";
     let raw = document(
-        &[&format!(
-            "Contact: <sip:4321@85.12.34.20:5060>;+sip.instance=\"<urn:gsma:imei:{imei}>\""
-        )[..]],
+        &[
+            &format!("Contact: <sip:4321@8.8.8.20:5060>;+sip.instance=\"<urn:gsma:imei:{imei}>\"")
+                [..],
+        ],
         "c1@cidhost.callerdom.zz",
         "",
     );
