@@ -135,6 +135,9 @@ To: <sip:+1555123@h>\r\n\
 Call-ID: enrich-1\r\n\
 CSeq: 1 INVITE\r\n\
 X-Api-Call: call-9\r\n\
+P-Asserted-Identity: <sip:+1555900@h>\r\n\
+Replaces: other-1;to-tag=a;from-tag=b\r\n\
+Refer-To: <sip:+1555124@h?Replaces=other-2%3Bto-tag%3Dc%3Bfrom-tag%3Dd>\r\n\
 Content-Type: application/sdp\r\n\
 Content-Length: 3\r\n\r\nv=0";
 
@@ -229,14 +232,20 @@ Content-Length: 0\r\n\r\n";
     fn a_stripped_document_carries_no_derivation_and_re_enriches_to_the_same() {
         let opts = EnrichOptions::with_headers(&["X-Api-Call"], ToolReading::plain_rfc());
         let whole = doc();
+        let invite = serde_json::to_value(&whole.legs[0].msgs[0]).unwrap();
+        for key in ["replaces", "refer_to"] {
+            assert!(invite.get(key).is_some(), "the INVITE derives {key}: {invite}");
+        }
+        assert!(invite["identities"].get("pai").is_some(), "{invite}");
         let mut stripped = whole.clone();
         strip(&mut stripped);
         let value = serde_json::to_value(&stripped).unwrap();
         for m in value["legs"][0]["msgs"].as_array().unwrap() {
-            for key in ["via", "headers", "body", "repeat_of", "rseq"] {
+            for key in ["via", "headers", "body", "repeat_of", "rseq", "replaces", "refer_to"] {
                 assert!(m.get(key).is_none(), "{key} is derived: {m}");
             }
             assert_eq!(m["identities"]["from"]["uri"], "", "{m}");
+            assert!(m["identities"].get("pai").is_none(), "{m}");
         }
         let group = &value["groups"][0];
         for key in ["initial_invite", "final_us", "final_status", "methods"] {
