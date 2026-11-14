@@ -28,13 +28,15 @@
  * a transaction it never receives.
  */
 import type { Flows, Placement } from "@sip/contracts"
+import type { Placed } from "./merged-timeline.js"
 import { typeKey } from "./msgspec.js"
+import type { ActorObs } from "./topology.js"
 
 /** Actor id -> the background policies that actor states. */
 export type BackgroundMap = ReadonlyMap<string, ReadonlyArray<Placement.BackgroundPolicy>>
 
 /** One observation, as synthesis walks them (time-sorted). */
-export interface BackgroundObs {
+interface BackgroundObs {
   readonly actorId: string
   readonly pivotLeg: string
   readonly emits: boolean
@@ -53,15 +55,26 @@ const requestMethod = (m: Flows.Msg): string | undefined =>
 
 /**
  * The `origLeg:msgIdx` coordinates background policies claim out of synthesis.
- * Empty when no actor states a policy — the zero-cost common case.
+ * `order` is the case's positions merged in capture order, `actors[p]` the
+ * actor observing position `p`. Empty when no actor states a policy — the
+ * zero-cost common case.
  */
 export const claimedByBackground = (
   flows: Flows.FlowsDoc,
-  obs: ReadonlyArray<BackgroundObs>,
+  order: ReadonlyArray<Placed>,
+  actors: ReadonlyArray<ActorObs>,
   background: BackgroundMap
 ): Set<string> => {
   const claimed = new Set<string>()
   if (background.size === 0) return claimed
+  const obs: ReadonlyArray<BackgroundObs> = order.map((p) => ({
+    actorId: actors[p.position]!.actorId,
+    pivotLeg: actors[p.position]!.pivotLeg,
+    emits: !p.entry.bySystem,
+    origLeg: p.leg,
+    msgIdx: p.msg,
+    ts_us: p.at_us
+  }))
   const msgOf = (o: BackgroundObs): Flows.Msg => flows.legs[o.origLeg]!.msgs[o.msgIdx]!
 
   for (const o of obs) {

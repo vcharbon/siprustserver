@@ -58,7 +58,8 @@ messages.
     pack derives, the RFC-correct reading wins, and the change lists each case it changed.
 12. **Linear, and proved by counting.** A test counts visits through the module's own
     interface: twice the messages cost at most 2.2 times the visits, decoy legs in the file
-    change nothing, and a second request for the same position costs nothing. The situation
+    change nothing, and a second request for the same position costs nothing. Merging several
+    positions' timelines into one capture order reads no message. The situation
     reading (`situation.ts`) places a call's emitted messages in one forward pass, linear in the
     call's messages with a factor logarithmic in the longest run of identical responses a relay
     reads. Its counting test, which also counts every message read, states a bound per shape:
@@ -91,3 +92,7 @@ messages.
   move proved by re-cutting its captures and diffing the cases.
 - The situation reading is exported as `Situation` and `PivotReading`; a pack's header census
   reads it from here.
+- The cut's flow synthesis reads its case's positions merged in capture order
+  (`merged-timeline.ts`) and builds no message list of its own. A timeline entry lists each
+  retransmission folded into it, and a retransmission whose original the position does not
+  hold is an entry of its own.

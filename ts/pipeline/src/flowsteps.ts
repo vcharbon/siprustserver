@@ -13,15 +13,18 @@
  * denied them. The one thing the marker withholds is a body the stack could not
  * place — see {@link bodyStorable}.
  *
- * WHICH step a repeat collapses onto is the flows document's `repeat_of`, not a
- * search of its own: the extractor states the earliest message each one repeats,
- * under a request criterion that ignores the Via branch, so a peer re-ACKing
- * each retransmitted final with a fresh branch collapses like any other ladder.
- * That relation is BOUNDED by the transaction envelope (64·T1 = 32 s), so bytes
- * matching an earlier message past it arrive here carrying no `repeat_of` and
- * become their own step — a re-emission, never a count (§6.9).
- * A document whose producer did not compute the field falls back to `retx` alone
- * and SAYS so — never silently.
+ * The messages are the case's positions read through call facts
+ * (`./call-facts.ts`, ADR-0061), merged in capture order: each timeline entry and
+ * each retransmission folded into it. WHICH step a repeat collapses onto is read,
+ * never searched for: a retransmission onto the entry its timeline folds it
+ * into, and an entry onto the earliest message its `repeat_of` names. The
+ * extractor states that relation under a request criterion that ignores the
+ * Via branch, so a peer re-ACKing each retransmitted final with a fresh branch
+ * collapses like any other ladder. It is BOUNDED by the transaction envelope
+ * (64·T1 = 32 s), so bytes matching an earlier message past it arrive here
+ * carrying no `repeat_of` and become their own step — a re-emission, never a
+ * count (§6.9). A document whose producer did not compute the field collapses
+ * the timeline's retransmissions alone and SAYS so — never silently.
  *
  * Assert-vs-record is decided HERE and stated in the document (§6.4): relayed
  * content is asserted, a SUT-MINTED message is recorded. Authorship, not delay
@@ -39,6 +42,7 @@
  */
 import { Flows, Tokens, type Case, type Check } from "@sip/contracts"
 import { claimedByBackground, type BackgroundMap } from "./background.js"
+import * as CallFacts from "./call-facts.js"
 import { offTransactionAcks } from "./stray-ack.js"
 import type { ResourceFile } from "./bodies.js"
 import { classify as classifyDelays, type DelayCausality, type StepTiming } from "./delay.js"
@@ -55,7 +59,7 @@ import { buildMsg, isAutomatic, typeKey } from "./msgspec.js"
 import type { PartsIndex } from "./parts.js"
 import { stampOverlaps } from "./race.js"
 import type { Plan } from "./plan.js"
-import { peerSide, type ActorObs, type Layout } from "./topology.js"
+import type { ActorObs, Layout } from "./topology.js"
 import { inviteTransactions, type InviteTransaction } from "./transactions.js"
 import { canonicalName, hasHeader } from "./wire.js"
 
@@ -150,40 +154,13 @@ export const synthesize = (
    */
   relaysReinvite = false
 ): FlowOut => {
-  interface Obs {
-    actor: ActorObs
-    origLeg: number
-    msgIdx: number
-    ts_us: number
-  }
-  const obs: Array<Obs> = []
-  for (const a of layout.actorsObs) {
-    for (const i of a.msgIdxs) {
-      obs.push({
-        actor: a,
-        origLeg: a.origLeg,
-        msgIdx: i,
-        ts_us: flows.legs[a.origLeg]!.msgs[i]!.ts_us
-      })
-    }
-  }
-  obs.sort((x, y) => x.ts_us - y.ts_us || x.origLeg - y.origLeg || x.msgIdx - y.msgIdx)
-  const t0 = obs.length > 0 ? obs[0]!.ts_us : 0
+  const positions = layout.actorsObs.map((a) => CallFacts.atActor(flows, a).timeline)
+  const order = CallFacts.merged(positions)
+  const t0 = order[0]?.at_us ?? 0
 
   // Exchanges a background policy claims (§5.1) collapse into the policy
   // instead of becoming steps — before ids, delays, and repeat collapse exist.
-  const claimed = claimedByBackground(
-    flows,
-    obs.map((o) => ({
-      actorId: o.actor.actorId,
-      pivotLeg: o.actor.pivotLeg,
-      emits: peerSide(o.actor, flows.legs[o.origLeg]!.msgs[o.msgIdx]!.src),
-      origLeg: o.origLeg,
-      msgIdx: o.msgIdx,
-      ts_us: o.ts_us
-    })),
-    background
-  )
+  const claimed = claimedByBackground(flows, order, layout.actorsObs, background)
 
   const steps: Array<StepDraft> = []
   const sources: Array<StepSource> = []
@@ -203,8 +180,7 @@ export const synthesize = (
   /** Step index -> capture time of the LAST copy on its ladder, for the gaps. */
   const rungAt = new Map<number, number>()
   const coord = (origLeg: number, msgIdx: number): string => `${origLeg}:${msgIdx}`
-  const collapseOnRepeatOf = carriesRepeatOf(flows)
-  if (!collapseOnRepeatOf) {
+  if (!carriesRepeatOf(flows)) {
     flags.push({
       kind: "retransmit-collapse-legacy",
       detail:
@@ -226,25 +202,23 @@ export const synthesize = (
     })
   }
 
-  for (const o of obs) {
-    if (claimed.has(coord(o.origLeg, o.msgIdx))) continue
-    const msg = flows.legs[o.origLeg]!.msgs[o.msgIdx]!
-    const emits = peerSide(o.actor, msg.src)
+  for (const o of order) {
+    const actor = layout.actorsObs[o.position]!
+    const timeline = positions[o.position]!
+    const at = coord(o.leg, o.msg)
+    if (claimed.has(at)) continue
+    const msg = CallFacts.source(timeline, o)
+    const emits = !o.entry.bySystem
     const auto = isAutomatic(msg)
     // Before any repeat collapse: a stray's own retransmission is no rung of
     // the ACK the final keeps.
-    if (strayAcks.has(coord(o.origLeg, o.msgIdx))) {
-      strays.push(`${o.actor.pivotLeg} leg${o.origLeg}/msg${o.msgIdx}`)
+    if (strayAcks.has(at)) {
+      strays.push(`${actor.pivotLeg} leg${o.leg}/msg${o.msg}`)
       continue
     }
 
-    const repeated = collapseOnRepeatOf
-      ? msg.repeat_of === undefined
-        ? -1
-        : stepOfMsg.get(coord(o.origLeg, msg.repeat_of)) ?? -1
-      : msg.retx
-        ? lastMatching(timings, o.actor.pivotLeg, emits, typeKey(msg), msg.summary.cseq.seq)
-        : -1
+    const repeats = repeatedMsg(o, msg)
+    const repeated = repeats === undefined ? -1 : (stepOfMsg.get(coord(o.leg, repeats)) ?? -1)
     if (repeated >= 0 && !unpaced(msg)) {
       // The count says how many rungs; the gap says when this one went out
       // (§6.9). Measured from the emission BEFORE it — the ladder's head on the
@@ -252,30 +226,30 @@ export const synthesize = (
       // not the RFC's is replayed as it ran, and the two 18x of a capture stay
       // on the side of the PRACK the capture put them.
       const head = steps[repeated]!
-      const previous = rungAt.get(repeated) ?? o.ts_us
+      const previous = rungAt.get(repeated) ?? o.at_us
       head.retransmits = (head.retransmits ?? 0) + 1
       head.retransmit_intervals_ms = [
         ...(head.retransmit_intervals_ms ?? []),
-        Math.max(0, Math.round((o.ts_us - previous) / 1000))
+        Math.max(0, Math.round((o.at_us - previous) / 1000))
       ]
-      rungAt.set(repeated, o.ts_us)
+      rungAt.set(repeated, o.at_us)
       continue
     }
-    if (repeated >= 0) expanded.push(`${o.actor.pivotLeg} leg${o.origLeg}/msg${o.msgIdx}`)
+    if (repeated >= 0) expanded.push(`${actor.pivotLeg} leg${o.leg}/msg${o.msg}`)
 
     const id = stepId(steps.length + 1)
     const spec: MsgSpecDraft = built(
       flows,
       layout,
       plan,
-      o.actor,
+      actor,
       msg,
       emits,
-      slug(o.actor, emits, ordinals),
+      slug(actor, emits, ordinals),
       resources,
       flags,
       parts,
-      !auto || bodyStorable(flows, o.origLeg, o.msgIdx, msg)
+      !auto || bodyStorable(timeline, o.entry, msg)
     )
     // The captured CSeq NUMBER, on a transaction-derived step only (§6.3): the
     // label of the transaction that obliged the message, which pairs it for
@@ -284,32 +258,32 @@ export const synthesize = (
     if (auto) spec.cseq = msg.summary.cseq.seq
 
     timings.push({
-      leg: o.actor.pivotLeg,
+      leg: actor.pivotLeg,
       emits,
-      ts_us: o.ts_us,
+      ts_us: o.at_us,
       typeKey: typeKey(msg),
       cseq: msg.summary.cseq.seq,
       timerLinked: isSessionRefresh(msg),
       image: relayImageOf(msg)
     })
-    stepOfMsg.set(coord(o.origLeg, o.msgIdx), steps.length)
-    rungAt.set(steps.length, o.ts_us)
+    stepOfMsg.set(at, steps.length)
+    rungAt.set(steps.length, o.at_us)
     sources.push({
       id,
-      pivotLeg: o.actor.pivotLeg,
-      origLeg: o.origLeg,
-      msgIdx: o.msgIdx,
+      pivotLeg: actor.pivotLeg,
+      origLeg: o.leg,
+      msgIdx: o.msg,
       emits,
       auto
     })
     steps.push({
       id,
-      leg: o.actor.pivotLeg,
+      leg: actor.pivotLeg,
       op: emits ? "send" : "expect",
       ...(auto ? { auto: true } : {}),
       msg: spec,
       delay: { ms: 0, from: TRIGGER, compressible: true, timer_linked: false },
-      observed: { leg: o.origLeg, msg: o.msgIdx, at_us: o.ts_us - t0 }
+      observed: { leg: o.leg, msg: o.msg, at_us: o.at_us - t0 }
     })
   }
 
@@ -635,12 +609,7 @@ const slug = (actor: ActorObs, emits: boolean, ordinals: Map<string, number>): s
  * the INVITE transaction (RFC 3261 §17.1.1.3) and reaches no TU that could read
  * one — so a payload stored there would be emitted by nobody.
  */
-const bodyStorable = (
-  flows: Flows.FlowsDoc,
-  origLeg: number,
-  msgIdx: number,
-  msg: Flows.Msg
-): boolean => {
+const bodyStorable = (timeline: CallFacts.Timeline, entry: CallFacts.Entry, msg: Flows.Msg): boolean => {
   if (msg.summary.kind === "response") {
     return msg.summary.status >= 200 &&
       msg.summary.status < 300 &&
@@ -648,31 +617,20 @@ const bodyStorable = (
   }
   const method = msg.summary.method.toUpperCase()
   if (method === "PRACK") return true
-  return method === "ACK" && ackedFinalIs2xx(flows, origLeg, msgIdx, msg.summary.cseq.seq)
+  return method === "ACK" && ackedFinalIs2xx(timeline, entry)
 }
 
 /**
- * Whether the final this ACK answers was a 2xx, read off the ACK's own captured
- * leg: the nearest earlier INVITE final sharing its CSeq number. A leg holding
- * no such final reads as non-2xx — a body the stack cannot place is worse than
- * a body the capture never had, and a capture missing its own final is a
- * capture defect.
+ * Whether the final this ACK answers was a 2xx: the final of the INVITE
+ * transaction its position's timeline matches the ACK to, on the INVITE's Via
+ * branch (RFC 3261 §17.1.1.3) or on the dialog (§13.2.2.4). An ACK matched to
+ * no final reads as non-2xx — a body the stack cannot place is worse than a
+ * body the capture never had, and a capture missing its own final is a capture
+ * defect.
  */
-const ackedFinalIs2xx = (
-  flows: Flows.FlowsDoc,
-  origLeg: number,
-  msgIdx: number,
-  cseq: number
-): boolean => {
-  const msgs = flows.legs[origLeg]!.msgs
-  for (let i = msgIdx - 1; i >= 0; i--) {
-    const m = msgs[i]!
-    if (m.summary.kind !== "response" || m.summary.status < 200) continue
-    if (m.summary.cseq.seq !== cseq) continue
-    if (m.summary.cseq.method.toUpperCase() !== "INVITE") continue
-    return m.summary.status < 300
-  }
-  return false
+const ackedFinalIs2xx = (timeline: CallFacts.Timeline, entry: CallFacts.Entry): boolean => {
+  const status = timeline.transactions[entry.transaction]?.final?.status
+  return status !== undefined && status < 300
 }
 
 const built = (
@@ -720,8 +678,8 @@ const unpaced = (msg: Flows.Msg): boolean =>
  *
  * The extractor decides `retx` and `repeat_of` together, so `retx` IMPLIES the
  * field by construction: a `retx` message carrying none is a document from a
- * producer that did not compute it. Absence is not "no repeats": it is a reason
- * to keep the retx+type+CSeq collapse and warn.
+ * producer that did not compute it. Absence is not "no repeats": only the
+ * retransmissions the timeline folds collapse, and the flow warns.
  */
 const carriesRepeatOf = (flows: Flows.FlowsDoc): boolean => {
   const known = repeatOfCarriage.get(flows)
@@ -737,22 +695,11 @@ const carriesRepeatOf = (flows: Flows.FlowsDoc): boolean => {
 const repeatOfCarriage = new WeakMap<Flows.FlowsDoc, boolean>()
 
 /**
- * The step a retransmission repeats: same leg, direction, message type AND
- * transaction. Type alone collapses a re-INVITE's retransmitted final onto the
- * initial INVITE's step, which is how a hold reads as longer than the call.
- *
- * The match for a document that carries no `repeat_of`.
+ * The index in its leg of the message a captured copy repeats: for a
+ * retransmission, the entry its position's timeline folds it into (the same
+ * transaction's same message, RFC 3261 §17); for an entry, the earliest message
+ * its `repeat_of` names, which is how a fresh-branch re-answer the timeline
+ * keeps as its own entry collapses too. `undefined` for a first emission.
  */
-const lastMatching = (
-  timings: ReadonlyArray<StepTiming>,
-  leg: string,
-  emits: boolean,
-  key: string,
-  cseq: number
-): number => {
-  for (let i = timings.length - 1; i >= 0; i--) {
-    const t = timings[i]!
-    if (t.leg === leg && t.emits === emits && t.typeKey === key && t.cseq === cseq) return i
-  }
-  return -1
-}
+const repeatedMsg = (o: CallFacts.Placed, msg: Flows.Msg): number | undefined =>
+  o.repeat === undefined ? msg.repeat_of : o.entry.msg

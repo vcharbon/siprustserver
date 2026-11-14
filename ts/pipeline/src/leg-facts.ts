@@ -113,7 +113,18 @@ export const ofLeg = (flows: Flows.FlowsDoc, sut: SutSet, leg: number): Position
  */
 export type DialogState = "opening" | "early" | "confirmed" | "outside"
 
-/** One message of a position, retransmissions folded into the message they repeat. */
+/** A retransmission folded into the entry it repeats: its source pointer and when it was captured. */
+export interface Repeat {
+  readonly msg: number
+  readonly at_us: number
+}
+
+/**
+ * One message of a position, retransmissions folded into the message they
+ * repeat. A retransmission whose original the position does not hold is the
+ * position's first copy of the message: an entry of its own. Every message of
+ * a position is so an entry or one of an entry's `repeats`.
+ */
 export interface Entry {
   /** The source pointer: the index of the message in its leg's `msgs`. */
   readonly msg: number
@@ -128,8 +139,10 @@ export interface Entry {
   /** The index of its transaction in the timeline's `transactions`. */
   readonly transaction: number
   readonly dialog: DialogState
-  /** How many retransmissions of it the position holds. */
+  /** How many retransmissions of it the position holds: the length of `repeats`. */
   readonly retransmissions: number
+  /** Each retransmission of it the position holds, in the position's order. */
+  readonly repeats: ReadonlyArray<Repeat>
 }
 
 /**
@@ -492,9 +505,9 @@ const timelineOf = (file: FileFacts, p: Position, msgIdxs: ReadonlyArray<number>
     const requestBySystem = request ? bySystem : toSystem
     const requester = requesterSide(m, bySystem, toSystem)
     const transaction = transactionOf(m, requester, method, requestBySystem)
-    if (m.retx) {
-      const repeated = repeatedBy(file, m, method, transaction, byMsg)
-      if (repeated !== undefined) repeated.retransmissions += 1
+    const repeated = m.retx ? repeatedBy(file, m, method, transaction, byMsg) : undefined
+    if (repeated !== undefined) {
+      fold(repeated, { msg: i, at_us: m.ts_us })
       continue
     }
     const inDialog: DialogState = confirmed ? "confirmed" : summary.to.tag !== null ? "early" : "outside"
@@ -521,7 +534,8 @@ const timelineOf = (file: FileFacts, p: Position, msgIdxs: ReadonlyArray<number>
       status: request ? undefined : summary.status,
       transaction: transaction.index,
       dialog,
-      retransmissions: 0
+      retransmissions: 0,
+      repeats: NO_REPEATS
     }
     entries.push(entry)
     byMsg.set(i, entry)
@@ -545,6 +559,16 @@ const timelineOf = (file: FileFacts, p: Position, msgIdxs: ReadonlyArray<number>
     }
   }
   return { leg, legIndex: p.leg, entries, transactions, lastAt_us: lastAt }
+}
+
+/** What an entry holds before a retransmission folds into it; shared, never written. */
+const NO_REPEATS: ReadonlyArray<Repeat> = Object.freeze([])
+
+/** Folds a retransmission into the entry it repeats; an entry's first one gives it a list of its own. */
+const fold = (entry: Building<Entry>, repeat: Repeat): void => {
+  entry.retransmissions += 1
+  if (entry.repeats === NO_REPEATS) entry.repeats = [repeat]
+  else (entry.repeats as Array<Repeat>).push(repeat)
 }
 
 /** The entry a retransmission repeats: the one it names, else its transaction's same message. */
@@ -634,8 +658,8 @@ const factsOf = (file: FileFacts, flows: Flows.FlowsDoc, timeline: Timeline): Le
   }
 }
 
-/** The message an entry points at. */
-export const source = (timeline: Timeline, entry: Entry): Flows.Msg => timeline.leg.msgs[entry.msg]!
+/** The message an entry, or anything else holding a source pointer of the timeline's leg, points at. */
+export const source = (timeline: Timeline, entry: Pick<Entry, "msg">): Flows.Msg => timeline.leg.msgs[entry.msg]!
 
 const mediaTypeOf = (contentType: string): string => (contentType.split(";")[0] ?? "").trim().toLowerCase()
 

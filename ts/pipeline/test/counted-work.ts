@@ -11,21 +11,30 @@ export interface Watched {
   readonly flows: Flows.FlowsDoc
   /** How many times a message was read by its index so far. */
   readonly reads: () => number
+  /** How many times each message of leg `leg` was read so far, by its index in the leg. */
+  readonly readsOf: (leg: number) => ReadonlyArray<number>
 }
 
 /** `flows` with every read of a message by its index counted, iteration included. */
 export const watched = (flows: Flows.FlowsDoc): Watched => {
   let reads = 0
-  const counting = <T extends object>(items: T): T =>
+  const perLeg = flows.legs.map((leg) => leg.msgs.map(() => 0))
+  const counting = <T extends object>(items: T, leg: number): T =>
     new Proxy(items, {
       get: (target, key, receiver) => {
-        if (typeof key === "string" && /^\d+$/.test(key)) reads++
+        if (typeof key === "string" && /^\d+$/.test(key)) {
+          reads++
+          const counts = perLeg[leg]!
+          const at = Number(key)
+          if (at < counts.length) counts[at] = counts[at]! + 1
+        }
         return Reflect.get(target, key, receiver)
       }
     })
   return {
-    flows: { ...flows, legs: flows.legs.map((leg) => ({ ...leg, msgs: counting(leg.msgs) })) },
-    reads: () => reads
+    flows: { ...flows, legs: flows.legs.map((leg, i) => ({ ...leg, msgs: counting(leg.msgs, i) })) },
+    reads: () => reads,
+    readsOf: (leg) => [...perLeg[leg]!]
   }
 }
 

@@ -141,6 +141,31 @@ describe("the cost of a call's facts over legs already read", () => {
   })
 })
 
+/** The work of merging a hunt's positions whose facts are already kept: message reads and array steps. */
+const mergeWorkFor = (attempts: number, exchanges: number): { readonly reads: number; readonly steps: number } => {
+  const s = scenario()
+  const { caller, chain } = hunt(s, attempts, exchanges)
+  const { flows, reads } = watched(s.flows())
+  const timelines = [caller, ...chain].map((leg) => CallFacts.atVantage(flows, s.sut, leg.vantage()).timeline)
+  const before = reads()
+  const { result, steps } = arraySteps(() => CallFacts.merged(timelines))
+  expect(result).toHaveLength(6 * attempts + 6 + 3 * exchanges)
+  return { reads: reads() - before, steps }
+}
+
+describe("the cost of merging positions already read", () => {
+  it("reads no message", () => {
+    expect(mergeWorkFor(50, 400).reads).toBe(0)
+  })
+
+  it("at most 2.2 times the steps for twice the messages", () => {
+    const once = mergeWorkFor(50, 400).steps
+
+    expect(once).toBeGreaterThan(400)
+    expect(mergeWorkFor(100, 800).steps).toBeLessThanOrEqual(2.2 * once)
+  })
+})
+
 describe("the cost of the party tags", () => {
   it("is one read of each message of the file, however many tags are asked for", () => {
     const s = scenario()

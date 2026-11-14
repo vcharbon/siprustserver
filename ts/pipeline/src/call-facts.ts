@@ -5,7 +5,9 @@
  * source pointer; it walks no flows document itself.
  *
  * Two levels: the facts of one leg at one position (`./leg-facts.ts`), and the
- * facts of a call over the legs its caller names (`./call-of-legs.ts`).
+ * facts of a call over the legs its caller names (`./call-of-legs.ts`). Several
+ * positions' messages in one capture order: `./merged-timeline.ts`.
  */
 export * from "./call-of-legs.js"
 export * from "./leg-facts.js"
+export * from "./merged-timeline.js"

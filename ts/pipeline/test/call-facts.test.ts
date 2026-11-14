@@ -372,6 +372,96 @@ describe("retransmissions", () => {
     ])
     expect(read.timeline.lastAt_us).toBe(1_610_000)
   })
+
+  it("each keep their own source pointer and capture time on the entry they fold into", () => {
+    const s = scenario()
+    const leg = s
+      .leg({ callId: "retransmitted@example.com", party: CALLEE })
+      .invite({ at: 0, by: "system" })
+      .invite({ at: 500, by: "system", retx: true })
+      .invite({ at: 1500, by: "system", retx: true })
+      .response(486, { at: 1600 })
+      .ack({ at: 1610, by: "system" })
+    const read = facts(s, leg)
+
+    expect(read.timeline.entries[0]!.repeats).toEqual([
+      { msg: 1, at_us: 500_000 },
+      { msg: 2, at_us: 1_500_000 }
+    ])
+    expect(read.timeline.entries[1]!.repeats).toEqual([])
+  })
+
+  it("make an entry of their own where the position never held the message they repeat", () => {
+    const s = scenario()
+    const leg = s
+      .leg({ callId: "first-copy-lost@example.com", party: CALLEE })
+      .invite({ at: 500, by: "system", retx: true })
+      .invite({ at: 1500, by: "system", retx: true })
+      .response(486, { at: 1600 })
+      .ack({ at: 1610, by: "system" })
+    const read = CallFacts.atLeg(s.flows(), s.sut, leg.index)
+
+    expect(read.timeline.entries.map((e) => [e.msg, e.method, e.status, e.retransmissions])).toEqual([
+      [0, "INVITE", undefined, 1],
+      [2, "INVITE", 486, 0],
+      [3, "ACK", undefined, 0]
+    ])
+    expect(seenAt(read.invite)).toBe(500_000)
+    expect(CallFacts.valueOf(read.final)?.status).toBe(486)
+  })
+})
+
+describe("the timelines of several positions merged", () => {
+  /** A caller's leg whose INVITE the system relays onto a callee's leg, answered there and relayed back. */
+  const relayed = (s: Scenario): { readonly caller: ScenarioLeg; readonly callee: ScenarioLeg } => ({
+    caller: s
+      .leg({ callId: "merged-in@example.com", party: PARTY })
+      .invite({ at: 0, by: "party" })
+      .invite({ at: 500, by: "party", retx: true })
+      .response(200, { at: 620 })
+      .ack({ at: 630, by: "party" }),
+    callee: s
+      .leg({ callId: "merged-out@example.com", party: CALLEE })
+      .invite({ at: 10, by: "system" })
+      .response(200, { at: 600 })
+      .response(200, { at: 610, retx: true })
+      .ack({ at: 615, by: "system" })
+  })
+
+  it("holds every message of every position once, each retransmission at its own capture time", () => {
+    const s = scenario()
+    const { caller, callee } = relayed(s)
+    const flows = s.flows()
+    const order = CallFacts.merged([facts(s, caller, flows).timeline, facts(s, callee, flows).timeline])
+
+    expect(order.map((p) => [p.position, p.leg, p.msg, p.at_us / 1000, p.repeat])).toEqual([
+      [0, 0, 0, 0, undefined],
+      [1, 1, 0, 10, undefined],
+      [0, 0, 1, 500, 0],
+      [1, 1, 1, 600, undefined],
+      [1, 1, 2, 610, 0],
+      [1, 1, 3, 615, undefined],
+      [0, 0, 2, 620, undefined],
+      [0, 0, 3, 630, undefined]
+    ])
+    expect(order[2]!.entry.msg).toBe(0)
+    expect(order[4]!.entry.msg).toBe(1)
+  })
+
+  it("orders messages captured at one instant by leg, then by index in the leg", () => {
+    const s = scenario()
+    const first = s.leg({ callId: "same-instant-a@example.com", party: PARTY }).invite({ at: 0, by: "party" }).response(486, { at: 5 })
+    const second = s.leg({ callId: "same-instant-b@example.com", party: CALLEE }).invite({ at: 0, by: "system" }).response(486, { at: 5 })
+    const flows = s.flows()
+    const order = CallFacts.merged([facts(s, second, flows).timeline, facts(s, first, flows).timeline])
+
+    expect(order.map((p) => [p.leg, p.msg])).toEqual([
+      [0, 0],
+      [1, 0],
+      [0, 1],
+      [1, 1]
+    ])
+  })
 })
 
 /** Each matching is stated twice: on Via branches, and on the dialog where the Via carries none. */

@@ -5,6 +5,7 @@
  */
 import { describe, expect, it } from "vitest"
 import { synthesize, type HeaderClassifier } from "../src/flowsteps.js"
+import { scenario, SDP } from "../src/scenario.js"
 import { build } from "../src/topology.js"
 import type { CallIdDerivation } from "../src/derivation.js"
 import type { Flows } from "@sip/contracts"
@@ -13,6 +14,7 @@ import {
   CALLEE_CALL_ID,
   CALLER_CALL_ID,
   delayedOfferFlows,
+  derivesNothing,
   derivesOnePrefix,
   doc,
   leg,
@@ -78,6 +80,27 @@ describe("every captured message is a step", () => {
     // reaches no TU that could read a body, so nothing stores one.
     expect(refused?.msg.body).toBeUndefined()
     expect(flow.flags.map((f) => f.kind)).toContain("automatic-body-dropped")
+  })
+
+  it("stores the delayed offer's answer on the ACK of its INVITE's 2xx, past a 491 to a far-end re-INVITE of the same CSeq number (RFC 3261 §12.2.1.1, §14.1)", () => {
+    const s = scenario()
+    const caller = s
+      .leg({ callId: "delayed-offer@example.com", party: "198.51.100.10:5060" })
+      .invite({ at: 0, by: "party" })
+      .response(200, { at: 100, body: SDP })
+      .invite({ at: 105, by: "system", body: SDP })
+      .response(491, { at: 110, by: "party" })
+      .ack({ at: 115, by: "system" })
+      .ack({ at: 120, by: "party", body: SDP })
+      .bye({ at: 2000, by: "party" })
+      .response(200, { at: 2010 })
+    const flows = s.flows()
+    const flow = synthesize(flows, build(flows, [caller.vantage()], s.sut, plan(), derivesNothing), plan())
+    const answering = flow.steps.find((step) => step.op === "send" && (step.msg.method ?? "").toUpperCase() === "ACK")
+
+    expect(answering?.observed?.msg).toBe(5)
+    expect(answering?.msg.body).toMatchObject({ ref: expect.stringContaining(".sdp") })
+    expect(flow.flags.map((f) => f.kind)).not.toContain("automatic-body-dropped")
   })
 
   it("keeps a step's observed coordinate pointing back at the message", () => {
