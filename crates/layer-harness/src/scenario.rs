@@ -1,5 +1,4 @@
-//! Scenario-level recording shapes (port of the SIP-agnostic half of
-//! `report-recorder/types.ts` + `framework/types.ts`).
+//! Scenario-level recording shapes, the SIP-agnostic half.
 //!
 //! The renderer-facing `RecordedScenario` here is intentionally **SIP-free**:
 //! it carries lanes + anomalies only. The SIP-specific projection
@@ -16,8 +15,8 @@ use crate::anomaly::RecordedAnomaly;
 pub type LaneKey = String;
 
 /// Stable string key for an address. `SocketAddr`'s `Display` already renders
-/// `ip:port` (and brackets IPv6), so this is just `addr.to_string()` — kept as
-/// a named function to mirror the source's `laneKey(ip, port)` call sites.
+/// `ip:port` (and brackets IPv6), so this is just `addr.to_string()`, named so
+/// every lane is keyed through one function.
 pub fn lane_key(addr: SocketAddr) -> LaneKey {
     addr.to_string()
 }

@@ -1,15 +1,13 @@
 # siprustserver
 
-Index of the vocabulary of the Rust port of [sipjsserver](./portsource/sipjsserver): one line per term, grouped by area. Grep a term here.
+Index of the vocabulary of this SIP B2BUA stack: one line per term, grouped by area. Grep a term here.
 Each line's full definition, with its _Avoid_ list, its examples and its relationships, is on the area page the section links.
-The SIP domain glossary (Worker, partition, replication channel, leg model, overload) lives in [portsource/sipjsserver/CONTEXT.md](./portsource/sipjsserver/CONTEXT.md).
 
 ## Language
 
 Full definitions: [docs/glossary/language.md](docs/glossary/language.md).
 
-- **Layer**: one row of MIGRATION_STATUS, a subsystem ported as a unit; one layer is one crate. Avoid: Effect Layer, module.
-- **Slice**: one dated increment of work advancing one or more layers; a layer may take several. Avoid: phase.
+- **Layer**: a cohesive subsystem (message, network, call model, rule engine, limiter); one layer is one crate. ADR-0002. Avoid: module.
 - **Layer interface** (a.k.a. **DI seam**): the Rust trait a layer exposes so consumers depend on it, not on an impl. Avoid: service.
 - **Parity oracle**: a second parser kept only for tests (`rvoip-sip-core`), diffed seed by seed against the production one.
 - **Compliance matrix**: the test running the production parser over the shared fixture corpus, asserting accept or reject. Avoid: parity test.
@@ -52,11 +50,20 @@ Full definitions: [docs/glossary/retransmission.md](docs/glossary/retransmission
 - **Metric catalogue**: a process's Prometheus families declared as data, one entry per family, checked by `metric-contract`.
 - **Dispatch class**: what an event is to its call's dispatch queue; its table row states room, caps, permit pool and owed answer.
 - **Owed answer**: what the router owes the sender of a request its call's queue discarded unrun, one per discard. Avoid: discard hook.
+- **Per-call FIFO**: one call's events run in arrival order and never overlap, on its own queue and worker task. ADR-0010.
+- **Per-call queue** (`dispatch::CallQueue`): one call's event queue, bounded by depth, overflow ceiling and lifetime cap.
+- **Overload signal** (`X-Overload`): the `elu`, `gc` and `adm` a worker puts on every OPTIONS 200. Avoid: CPU, load level.
+- **ELU band**: the proxy's hysteretic class of a worker's `elu`; `AboveCritical` leaves the non-emergency candidates.
+- **Per-worker cap**: one proxy's AIMD-tuned rate of non-emergency new-dialog INVITEs toward one worker. Avoid: throttle.
+- **Proxy self-gate**: the proxy's binary gate on external new-dialog non-emergency INVITEs: intake age and a CPS bucket.
 
 ## HA replication glossary
 
 Full definitions: [docs/glossary/ha-replication.md](docs/glossary/ha-replication.md).
 
+- **Worker**: one b2bua process behind the proxy, known by its ordinal; primary of its calls, backup of others'. Avoid: pod.
+- **Ordinal** (`topology::Ordinal`): a worker's stable name across restarts; one boot of it is a worker identity.
+- **Primary partition** / **Backup partition** (`Partition::{Pri, Bak}`): a replica of a call this node is primary of, or backs up.
 - **Element**: one replicated call replica, a `(partition, callRef)` entry in a backup's store. Avoid: shard, partition key.
 - **Unbacked call**: a call with no backup for its life, admitted over the backlog high-water mark or shed by its backup. ADR-0055.
 - **Backlog** (toward a backup): change-log entries above the position a backup reported; over high water, new calls run unbacked. ADR-0055.
@@ -120,6 +127,9 @@ Full definitions: [docs/glossary/outbound-backend.md](docs/glossary/outbound-bac
 
 Full definitions: [docs/glossary/call-state-machine-services.md](docs/glossary/call-state-machine-services.md).
 
+- **Callflow service**: a bundle of state-gated rules implementing one callflow, declared by `define_service!`. ADR-0016.
+- **Rule SDK** (`b2bua-sdk`): the public surface a callflow service is authored against; `b2bua` depends on it, never back.
+- **Integrator**: a party adding callflow services in its own crate against the Rule SDK, without forking. Avoid: tenant.
 - **Machine**: a named single-cursor per-call state selector guarding which rules are live; not a dispatcher. Avoid: phase machine, FSM.
 - **Global call machine**: the always-on `Active → Terminating → Terminated` machine; services drive it by lifecycle commands.
 - **Service machine**: the one machine a callflow service owns, its graph exactly the service's rules; legs are data, not machines.
@@ -141,6 +151,7 @@ Full definitions: [docs/glossary/call-state-machine-services.md](docs/glossary/c
 
 Full definitions: [docs/glossary/call-admission-set.md](docs/glossary/call-admission-set.md).
 
+- **Call limiter**: the cluster-shared HTTP process counting concurrent calls per limiter id by each call's leased set.
 - **Admission set**: the limiter entries (id and cap) a call holds under its key; every change replaces it whole. Avoid: reservation, permit.
 - **Held**: the set the limiter last stated it holds for the call, under that statement's change number.
 - **Target**: the set the call's latest admit asked for; the held set after a refused or superseded change.
@@ -155,6 +166,12 @@ Full definitions: [docs/glossary/call-model.md](docs/glossary/call-model.md).
 - **Attempt**: one routing answer that dials and the legs it dials, with a cause, a ring deadline and an outcome. ADR-0042. Avoid: try.
 - **Ring deadline** (`no_answer_ms`): how long a dialled leg may ring unanswered, run from its first 180–189. Avoid: no-answer timeout.
 - **Timer scope**: what a timer guards (call, attempt, leg, obligation, setup); leaving the scope retires its timers. ADR-0042, ADR-0055.
+- **Terminating timeout**: the 32 s backstop of a terminating call; its fire forces every unresolved leg terminal.
+- **A-leg** / **B-leg**: the leg facing the caller (answered as UAS) and a leg toward a called party (dialled as UAC).
+- **Leg kind** (`LegKind`): `a`, `destination`, `media` or `transfer-target`, defaulted from the leg id.
+- **Media leg**: a leg dialled toward a media server to broker SDP and control bodies; unadopted. Avoid: MRF leg.
+- **Adopted leg** / **Unadopted leg**: owned by the generic relay rules, or reached only by the service that made it.
+- **Active peer**: the one pair of legs the call bridges, or none; merge and split re-point it, never a set.
 
 ## Dialog model vocabulary
 

@@ -93,7 +93,7 @@ media relay — the MRF's SDP is brokered straight to A, so the `media` crate
 failover never touch it) but is reaped by ordinary `→ Terminated` cleanup like
 any leg, so an A-side hangup mid-announcement needs no special rule.
 
-The example brings the primitives the source has into the port: `send-request-to-leg`
+The example needs these primitives: `send-request-to-leg`
 (INFO), `send-provisional-to-leg`, a minimal MSCML build/parse, and the unadopted-leg relay
 gate on `Leg.adopted`.
 
@@ -101,15 +101,15 @@ gate on `Leg.adopted`.
 
 A service is given broad latitude to **create and initialise its own initial
 state and data**. Each service declares
-`init(descriptor, &Call) -> Option<ServiceSeed>`, run once at call setup (the
-source's `call-routed` re-entry point, after routing has built the `Call`).
+`init(descriptor, &Call) -> Option<ServiceSeed>`, run once at call setup
+(after routing has built the `Call`).
 Applicability is decided here — returning `None` keeps the service dormant and
 costs a vanilla call nothing. A returning service seeds, in one atomic batch
 folded through the normal executor/effects pipeline: its **initial cursor**
 (`sm_cursors[id] = S0`), its **data backing** (typed slice in-tree, or
 `ext[id]`), and an **initial action set** (e.g. the announcement service's
 `CreateLeg{kind:media}` toward the MRF — launched at setup, in parallel with the
-destination B-leg, exactly as the source's PRBT does). `define_service!` carries
+destination B-leg, as a ringback-tone service does). `define_service!` carries
 the `init` clause. Seeding rides the same audited `RuleAction`/effects path as
 every later transition — there is no privileged back-door that writes call state
 outside the executor.

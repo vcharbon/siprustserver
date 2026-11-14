@@ -1,4 +1,4 @@
-//! Long call with keepalive (port of `tests/scenarios/keepalive-happy.ts`).
+//! Long call with keepalive.
 //!
 //! After the call is established the B2BUA arms a keepalive timer. Each interval
 //! it sends an in-dialog OPTIONS to *both* legs; each 200 OK is absorbed (not

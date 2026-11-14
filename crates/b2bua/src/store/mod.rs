@@ -1,6 +1,5 @@
 //! `CallState` — the in-memory call map + per-call serialization, over the
-//! [`CallStore`] persistence/replication seam. Port of the load-bearing parts
-//! of `src/call/CallState.ts` (ADR-0010).
+//! [`CallStore`] persistence/replication seam (ADR-0010).
 //!
 //! Live calls are held *typed* in `calls`; the store path encodes via
 //! [`MsgpackCodec`] only for flush/replication. Routing uses the in-memory

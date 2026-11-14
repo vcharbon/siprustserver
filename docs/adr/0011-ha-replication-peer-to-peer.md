@@ -7,18 +7,18 @@ deferred to the primary), `(p,b)` reconciliation and the wire (five frames over 
 single-flow sockets). The sections below hold what ADR-0014 did not replace. X5 amended by
 ADR-0055 §6 (fencing by worker identity compared for equality).
 
-The source mapping, the rationale of each choice and the rejected alternatives are in the
+The rationale of each choice and the rejected alternatives are in the
 [appendix](appendix/0011-ha-replication-peer-to-peer.md).
 
 ## Context
 
-The source runs a pull-based replication log with watermarks over Redis. The Rust port drops
-Redis. The HA seam already exists (ADR-0010 X3): `CallStore` carries the role, primary and
-generation, `callRef = {primary}|{callId}|{fromTag}` encodes ownership, and the proxy emits
-the `w_pri`/`w_bak` HRW stickiness cookie (ADR-0009). This ADR records the engine's shape.
-The wire spec, reconnect FSM and slice plan are in
-[the migration plan](../plan/on-proper-migration-of-lazy-pancake.md), the exchange diagrams
-in [ha-replication.html](../ha-replication.html).
+Call-context high availability is a pull-based replication log with watermarks. A shared
+store between the workers (such as Redis) would only be its substrate: the mechanism is the
+log, the watermark and the pull. The HA seam is the store's (ADR-0010 X3): `CallStore`
+carries the role, primary and generation, `callRef = {primary}|{callId}|{fromTag}` encodes
+ownership, and the proxy emits the `w_pri`/`w_bak` HRW stickiness cookie (ADR-0009). This
+ADR records the engine's shape. The wire is ADR-0014's; the exchange diagrams are in
+[ha-replication.html](../ha-replication.html).
 [Detail](appendix/0011-ha-replication-peer-to-peer.md#context).
 
 ## Decision X1. Drop Redis; replication is direct peer-to-peer pull

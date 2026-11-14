@@ -7,6 +7,16 @@ A call's holds on the call limiter, keyed by the call
 side is `call::CallLimiterState`, written only through its operations; the
 worker side and the call-side recipes live in `b2bua::limiter`.
 
+**Call limiter** (`call-limiter`, `call-limiter-runner`):
+The concurrent-call limiter shared cluster-wide, a dedicated HTTP process with
+no persistence: per limiter id the live count of the calls holding it, per call its
+admission set, the change number of its last admit and a lease. An admit
+replaces a call's set whole, checked net of the set it already holds; a cap
+hit is a refusal, a normal outcome; a lapsed lease drops the set, so a crashed
+worker's calls stop counting. The worker's client and its fail-open policy live
+in `b2bua`.
+_Avoid_: "rate limiter" (it counts concurrent calls, not a rate).
+
 **Admission set**:
 The limiter entries (an id and the cap it is admitted under) a call holds
 under its limiter key. Every change replaces the whole set in one admit.

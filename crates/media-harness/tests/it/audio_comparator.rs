@@ -1,8 +1,6 @@
 //! The audio comparator. Clips self-classify, cross-separation holds,
 //! the silence/energy guard fires, G.711 transcoding survives classification,
 //! and a ringback→voice concatenation classifies as the ordered sequence.
-//!
-//! Port of `../sipjsserver/tests/media/audio-comparator.test.ts`.
 
 use media::codec::{g711_round_trip, G711Codec};
 use media_harness::audio::spectral::{clip_signature, cosine_distance, MfccOptions};

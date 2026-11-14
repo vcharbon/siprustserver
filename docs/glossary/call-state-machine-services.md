@@ -2,10 +2,35 @@
 
 Full definitions of the terms [CONTEXT.md](../../CONTEXT.md) indexes under "Call state-machine services (Rust shape)".
 
-The Rust formalisation of the source's **callflow service** + **phase machine**
-(both defined in [portsource/sipjsserver/CONTEXT.md](../../portsource/sipjsserver/CONTEXT.md),
-carried over unchanged) into explicit, doc-generated per-call state machines.
+A **callflow service** as an explicit, doc-generated per-call state machine.
 See [ADR-0016](../../docs/adr/0016-callflow-service-state-machines.md).
+
+**Callflow service** (shorthand **service**):
+A bundle of cooperating rules implementing one callflow (blind transfer, an
+announcement, early-media promotion, …), declared with `define_service!`
+(`b2bua_sdk::service`): its id (== its **machine** id), its state enum, an
+`init` hook run once at call setup that may seed the machine's cursor, install
+its data backing and fire a first action batch (`ServiceSeed`), and its
+state-gated rules (`sm_rule!`). Its rules sit at `SERVICE_LAYER`, above the core
+defaults, so an active service wins over a colliding core rule without naming
+it; within a layer the declared order decides. Everything it does rides the
+normal `RuleAction` pipeline.
+_Avoid_: "feature", "plugin".
+
+**Rule SDK** (`b2bua-sdk`):
+The public surface a callflow service is authored against: the
+`define_service!` / `sm_rule!` macros, the rule model (`Match`, `RuleAction`,
+`RuleDefinition`, `RuleContext`, the narrow `RuleCall` view), the service
+registry types and the inputs a rule reads. A lower crate: `b2bua` depends on
+it, never the reverse, so a service crate built on it alone (`announcement`)
+has no path to the engine's internals (ADR-0016 X6).
+
+**Integrator**:
+A party that adds call-handling behaviour without forking the B2BUA: it authors
+callflow services in its own crate against the **Rule SDK** and composes them
+into its own runner (`b2bua-runner-kit`). The B2BUA owns and replicates all
+per-call state, the integrator's service data included (`ext[id]`).
+_Avoid_: "tenant", "third party", "user" (the SIP caller).
 
 **Machine** (state machine):
 A named, single-cursor **per-call** state selector. A rule declares the machine
@@ -13,8 +38,7 @@ it belongs to, the states it is active in, and the transitions it may cause; the
 rule is a candidate for the engine only while its machine sits in one of those
 states. A machine selects *which rules are live*. It is a guard over the
 existing layer-ranked first-match engine, **not** a separate dispatcher.
-_Avoid_: "phase machine" in Rust code (the source's name for the same idea;
-keep it for prose / the TS source); "FSM" unqualified.
+_Avoid_: "phase machine"; "FSM" unqualified.
 
 **Global call machine**:
 The always-on machine present on every call (= the existing `CallModelState`

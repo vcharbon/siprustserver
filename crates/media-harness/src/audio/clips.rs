@@ -2,7 +2,7 @@
 //! alice / bob / charlie and a real-cadence ringback tone. Generated
 //! deterministically (no RNG, no clock) so tests are hermetic and reproducible.
 //!
-//! Port of `../sipjsserver/src/test-harness/media/audio/clips.ts`. The voices use
+//! The voices use
 //! source–filter synthesis (glottal impulse train → formant resonators) so each
 //! has a genuinely different spectral envelope — the thing MFCC classification
 //! keys on. Ringback is a pure 425 Hz EU tone, spectrally unmistakable against

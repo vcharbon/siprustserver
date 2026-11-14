@@ -45,7 +45,7 @@ async fn client_retransmits_on_timer_a_cadence() {
         .unwrap();
 
     // By 2 s the peer has seen the initial send + retransmits at 500 ms and
-    // 1500 ms (the source's doubling cadence) = 3 INVITEs.
+    // 1500 ms (Timer A doubling, RFC 3261 §17.1.1.2) = 3 INVITEs.
     elapse_ms(2_000).await;
     assert_eq!(count_requests(&stack.drain_peer(), "INVITE"), 3);
     // Each rung is counted under the ladder that paced it and the request it

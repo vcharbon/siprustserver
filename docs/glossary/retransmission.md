@@ -244,6 +244,37 @@ CANCEL of a refused INVITE draws a 200 from the proxy, that INVITE's UAS, and
 goes no further; a CANCEL is never remembered. Why it was refused stays in the
 reject counters and the call's trace.
 
+**Overload signal** (`X-Overload: v=1; elu=…; gc=…; adm=…`, `b2bua::overload`):
+The load payload a worker puts on every 200 to an out-of-dialog OPTIONS, a
+refusing worker's included: `elu`, the EWMA of its runtime's busy fraction
+(the **ELU**); `gc`, the EWMA of a pause fraction its sampler reads; `adm`, the
+monotonic count of non-emergency new-dialog INVITEs it admitted, which each
+front proxy diffs into the worker's total admitted rate with no coordination
+between proxies.
+_Avoid_: "CPU", "load level".
+
+**ELU band** (`sip_proxy::load_observer::EluBand`):
+The class a front proxy reads a worker's `elu` into on each payload, with
+hysteresis on every boundary: `BelowSoft` (its cap grows), `SoftToHard`
+(held), `HardToCritical` (cut), `AboveCritical` (pinned to its floor and
+filtered out of the non-emergency new-dialog candidates).
+
+**Per-worker cap** (`sip_proxy::load_observer::WorkerLoadObserver`):
+The AIMD-tuned rate one front proxy routes non-emergency new-dialog INVITEs to
+one worker at, kept by each proxy alone: additive increase in `BelowSoft` once
+the cooldown after a decrease has passed, multiplicative decrease in
+`HardToCritical`, the floor in `AboveCritical`, and one decrease on a payload
+gone stale. An empty bucket passes the INVITE to the next ranked worker; with
+no token at any, the proxy refuses it. In-dialog requests, emergency calls and
+responses never consume it.
+_Avoid_: "throttle", "shedding rate".
+
+**Proxy self-gate** (`sip_proxy::self_gate::ProxySelfGate`):
+The front proxy's own overload gate on external, new-dialog, non-emergency
+INVITEs: a smoothed intake age past its critical threshold, or an empty CPS
+bucket, refuses the INVITE. It is binary, with no AIMD: the proxy's load is its
+own. Worker-originated, in-dialog and emergency traffic bypasses it.
+
 **First worker view** (`sip_proxy::health::FirstView`):
 A starting front proxy's view of its workers is in once the worker registry
 holds its first listing and one OPTIONS round over it has completed, each
@@ -299,3 +330,15 @@ admitted afresh, or nothing. Exactly one per discard; the queue hands the
 event back with it and the router renders it.
 _Avoid_: "discard hook" (the answer is a value, not a callback); the
 **Dialog owed answer** is RFC 3264's, not this.
+
+**Per-call FIFO** (`b2bua::dispatch`, ADR-0010 X2):
+The invariant that one call's events run strictly in their arrival order and
+never overlap: each call has its own queue and one worker task draining it,
+and a global permit pool caps the handler bodies in flight, so a slow handler
+on one call stalls only that call.
+
+**Per-call queue** (`dispatch::CallQueue`):
+One call's queue of events, created on its first event and removed with the
+call: bounded by a depth with an overflow ceiling for past-bounds events and
+by a lifetime cap on the events it takes; a global cap bounds the number of
+live queues. An event refused at a bound is a discard with its **owed answer**.

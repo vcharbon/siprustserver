@@ -2,15 +2,12 @@
 
 **Status:** accepted (2026-05-30)
 
-The source ships two parser paths: a hand-written zero-regex TypeScript state
-machine (`customParser`) and a native path backed by the `rvoip-sip-core` Rust
-crate. We port the **custom parser whole** rather than adopting `rvoip-sip-core`
-as the production parser, because the ABNF fuzz suite and the strict
-wire-grammar gates (`SipParserLimits::wire_grammar`) are both built around the
-custom parser's per-header functions. Porting it whole keeps the entire test
-corpus a 1:1 functional port. `rvoip-sip-core` is retained as a **dev-only
-second parser** behind the `rvoip-oracle` feature: a differential test reads
-each message through both and compares what they read.
+The production parser is the hand-written, zero-regex **custom parser**
+(`CustomParser`), not `rvoip-sip-core`, because the ABNF fuzz suite and the
+strict wire-grammar gates (`SipParserLimits::wire_grammar`) are both built
+around the custom parser's per-header functions. `rvoip-sip-core` is retained
+as a **dev-only second parser** behind the `rvoip-oracle` feature: a
+differential test reads each message through both and compares what they read.
 
 Each gate's full rule with its RFC sections, the `maddr` rationale and the
 datagram band are in the
@@ -91,8 +88,6 @@ Detail: [appendix](appendix/0001-port-custom-parser-rvoip-as-parity-oracle.md#th
 
 ## Consequences
 
-- Each Rust parser module (scanner, start-line, headers, structured-headers,
-  extract-fields) is a direct port of a named source file.
 - The differential test must encode every place `CustomParser` and the rvoip
   oracle part, each with its RFC section: a custom rejection where rvoip
   accepts is only valid if it maps to a gate above or to grammar rvoip does

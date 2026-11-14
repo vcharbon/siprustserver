@@ -1,7 +1,6 @@
 //! Wire-text rendering + SIP label extraction shared by the renderers.
 //!
-//! Port of `wireText` / the message-description helpers in
-//! `svg-sequence-diagram.ts`. `wire_text` is a straight per-byte transform of
+//! `wire_text` is a straight per-byte transform of
 //! the captured packet — duplicate headers, casing, folding and exact
 //! whitespace all survive, because the report must show what crossed the wire,
 //! not a re-serialization. The label helpers parse `raw` (via `sip-message`)
@@ -109,8 +108,7 @@ pub fn facets(raw: &[u8]) -> Facets {
 }
 
 /// Format a virtual-clock offset (ms, relative to the first entry) as
-/// `T+SEC.mmms` — e.g. `T+0.015s`, `T+1m02.345s`. Port of
-/// `formatRelativeTimestamp`.
+/// `T+SEC.mmms` — e.g. `T+0.015s`, `T+1m02.345s`.
 pub fn format_relative(ms: i64) -> String {
     let ms = ms.max(0);
     let total_sec = ms / 1000;

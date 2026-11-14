@@ -1,13 +1,11 @@
 //! Media layer — RTP/RTCP framing, G.711 codecs, SDP offer/answer negotiation,
 //! and a paced media transport bound on [`sip_net::SignalingNetwork`].
 //!
-//! Rust port of `../sipjsserver/src/media/`. The engine is written once and is
-//! transport-agnostic: it runs unchanged over the simulated fabric (deterministic
-//! tests under a paused tokio clock) and over real UDP. The two
-//! [`RtpFraming`](rtp::RtpFraming) implementations — the hand-rolled RFC 3550
-//! [`HandRolled`](rtp::HandRolled) and the webrtc-rs [`WebRtcRs`](rtp::WebRtcRs)
-//! witness — cross-check each other's wire format, mirroring the TS
-//! `MediaEndpointTs` / `MediaEndpointRtpJs` pair.
+//! The engine is written once and is transport-agnostic: it runs unchanged over
+//! the simulated fabric (deterministic tests under a paused tokio clock) and over
+//! real UDP. The two [`RtpFraming`](rtp::RtpFraming) implementations — the
+//! hand-rolled RFC 3550 [`HandRolled`](rtp::HandRolled) and the webrtc-rs
+//! [`WebRtcRs`](rtp::WebRtcRs) witness — cross-check each other's wire format.
 
 pub mod codec;
 pub mod rtp;
@@ -46,7 +44,7 @@ pub enum StreamDirection {
     Outbound,
 }
 
-/// Per-stream stats snapshot. Mirrors the TS `MediaStreamStats`.
+/// Per-stream stats snapshot.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MediaStreamStats {
     pub direction: StreamDirection,
@@ -60,7 +58,7 @@ pub struct MediaStreamStats {
     pub remote: Option<NetAddr>,
 }
 
-/// A demuxed inbound source (per remote+SSRC). Mirrors the TS `SourceBucket`.
+/// A demuxed inbound source (per remote+SSRC).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceBucket {
     pub remote: NetAddr,
@@ -88,7 +86,7 @@ pub struct MediaNegotiationError {
     pub reason: String,
 }
 
-/// A network address (IP + UDP port) for media. Mirrors the TS `NetAddr`.
+/// A network address (IP + UDP port) for media.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct NetAddr {
     pub ip: String,
@@ -101,7 +99,7 @@ impl NetAddr {
     }
 }
 
-/// A negotiable codec description. Mirrors the TS `CodecDesc`.
+/// A negotiable codec description.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CodecDesc {
     pub name: G711Codec,
@@ -121,15 +119,13 @@ use std::sync::Arc;
 use sip_clock::Clock;
 use sip_net::SignalingNetwork;
 
-/// A [`MediaEndpoint`] using the hand-rolled RFC 3550 framing (the TS
-/// `MediaEndpointTs`). Uses a test clock anchored at 0 for deterministic RTCP
+/// A [`MediaEndpoint`] using the hand-rolled RFC 3550 framing. Uses a test clock anchored at 0 for deterministic RTCP
 /// timestamps under a paused runtime.
 pub fn ts_endpoint(net: Arc<dyn SignalingNetwork>) -> MediaEndpoint {
     MediaEndpoint::with_clock(net, Arc::new(rtp::HandRolled), Clock::test_at(0))
 }
 
-/// A [`MediaEndpoint`] using the webrtc-rs framing witness (the TS
-/// `MediaEndpointRtpJs`).
+/// A [`MediaEndpoint`] using the webrtc-rs framing witness.
 pub fn webrtc_endpoint(net: Arc<dyn SignalingNetwork>) -> MediaEndpoint {
     MediaEndpoint::with_clock(net, Arc::new(rtp::WebRtcRs), Clock::test_at(0))
 }

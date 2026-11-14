@@ -1,13 +1,13 @@
 # Frozen ABNF corpus
 
-Port of `portsource/sipjsserver/scripts/abnf-fuzz`. The conformance suite
-(`tests/it/conformance/`) holds the RFC grammars and generates from them; this
-corpus is the vendored generation, kept as a fixed input.
+The conformance suite (`tests/it/conformance/`) holds the RFC grammars and
+generates from them; this corpus is the vendored generation, kept as a fixed
+input.
 
-- **Grammars** (`grammars/*.abnf`) — vendored **verbatim** from the source
-  suite (themselves from RFC 3261 §25.1 + extension RFCs, via
+- **Grammars** (`grammars/*.abnf`) — vendored **verbatim** (RFC 3261 §25.1 +
+  extension RFCs, via
   [xsnpdngv/SIP-ABNF](https://github.com/xsnpdngv/SIP-ABNF)). Do not edit
-  except to re-sync with the source.
+  except to re-sync with that upstream.
 - **Corpus** (`corpus/<target>.txt`) — **frozen**, committed, generated once
   by `abnfgen`. The Rust test replays it deterministically — no external
   binary, no run-to-run nondeterminism in CI.

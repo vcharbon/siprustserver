@@ -5,8 +5,6 @@
 //! comparator's transcoding-robustness test. This is the canonical ITU-T G.711
 //! reference algorithm (the Sun/CCITT implementation): A-law works on the top 13
 //! bits, µ-law on the top 14, with the standard segment search.
-//!
-//! Port of `../sipjsserver/src/media/codec/g711.ts`.
 
 const SIGN_BIT: i32 = 0x80;
 const QUANT_MASK: i32 = 0x0f;

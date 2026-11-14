@@ -4,7 +4,7 @@ version = "0.1.0"
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
-description = "Media layer — RTP/RTCP framing, G.711 codecs, SDP offer/answer negotiation, and a paced media transport that binds on SignalingNetwork. Rust port of sipjsserver src/media/. Transport-agnostic over sip-net (simulated fabric in tests, real UDP in prod); ships a hand-rolled RFC 3550 framing plus a webrtc-rs witness that cross-checks it."
+description = "Media layer — RTP/RTCP framing, G.711 codecs, SDP offer/answer negotiation, and a paced media transport that binds on SignalingNetwork. Transport-agnostic over sip-net (simulated fabric in tests, real UDP in prod); ships a hand-rolled RFC 3550 framing plus a webrtc-rs witness that cross-checks it."
 
 [package.metadata.ha]
 side = "blind"
@@ -25,8 +25,8 @@ bytes = { workspace = true }
 webrtc-util = { workspace = true }
 
 [dev-dependencies]
-# `test-util` adds the paused-clock lever (tokio::time::pause/advance) — the
-# test analogue of Effect's TestClock, used by the play→record tests.
+# `test-util` adds the paused-clock lever (tokio::time::pause/advance), used by
+# the play→record tests.
 tokio = { workspace = true, features = ["test-util"] }
 sip-clock = { path = "../sip-clock", features = ["testkit"] }
 sip-net-testkit = { path = "../sip-net-testkit" }

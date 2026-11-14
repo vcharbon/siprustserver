@@ -1,8 +1,6 @@
 //! Play→record over the simulated fabric.
 //!
-//! Port of the play→record suite in
-//! `../sipjsserver/tests/media/rtp-media.test.ts`, for both framing flavors.
-//! Rather than depend on the spectral classifier (in `media-harness`),
+//! Runs for both framing flavors. Rather than depend on the spectral classifier (in `media-harness`),
 //! this asserts the transport/codec path directly: the PCM Bob records must
 //! equal the G.711 round-trip of the clip Alice played, and the packet/byte
 //! stats must be exact. RTCP SR/RR counts must flow on the configured interval.

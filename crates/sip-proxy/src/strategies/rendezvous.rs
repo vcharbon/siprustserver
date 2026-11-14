@@ -1,5 +1,4 @@
-//! Rendezvous (Highest-Random-Weight, HRW) hashing — port of
-//! `strategies/RendezvousHash.ts`.
+//! Rendezvous (Highest-Random-Weight, HRW) hashing.
 //!
 //! Pure function. Given a routing key (the SIP Call-ID) and a list of candidate
 //! workers, return the candidate maximising `weight * H(key + ":" + id)`. With
@@ -113,14 +112,14 @@ mod tests {
 
     #[test]
     fn distributes_across_workers_within_tolerance() {
-        // Port of load-balancer/distribution.test.ts: 1000 keys over 8 workers,
-        // each worker within ±25% of the 125 mean (94..=156).
+        // 1000 keys over 8 workers, each worker within ±25% of the 125 mean
+        // (94..=156).
         let workers: Vec<W> = (1..=8)
             .map(|i| W(Box::leak(format!("b2b-{i}").into_boxed_str()) as &'static str))
             .collect();
         let mut counts = std::collections::HashMap::new();
         for i in 0..1000usize {
-            // Deterministic LCG, mirroring the source's seeded PRNG, for stable Call-IDs.
+            // Deterministic multiplicative spread, for stable Call-IDs.
             let key = format!("call-{}-distribute@host", i.wrapping_mul(2_654_435_761usize));
             let w = rendezvous_select(&key, &workers).unwrap();
             *counts.entry(w.0).or_insert(0u32) += 1;

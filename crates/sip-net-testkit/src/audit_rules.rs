@@ -34,7 +34,7 @@ pub trait PeerAuditRule: Send + Sync {
 pub type PositionedFinding = (LaneKey, String, Option<usize>, Option<LaneKey>, Option<LaneKey>);
 
 /// A cross-message rule operates on the full event log at layer close. Each
-/// finding carries an originating `bind_key`. (Port of `CrossMessageAuditRule`.)
+/// finding carries an originating `bind_key`.
 pub trait CrossMessageAuditRule: Send + Sync {
     fn name(&self) -> &'static str;
     fn subject(&self) -> HashSet<UaRole> {

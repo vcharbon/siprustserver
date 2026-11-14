@@ -1,7 +1,7 @@
 //! RTP wire framing cross-check — independent witness.
 //!
-//! Each framing implementation must parse the other's bytes. Port of the
-//! `expectHeaderRoundTrip` matrix in `../sipjsserver/tests/media/rtp-media.test.ts`.
+//! Each framing implementation must parse the other's bytes, over a header
+//! round-trip matrix.
 
 use media::rtp::{HandRolled, RtpFraming, RtpHeader, WebRtcRs};
 

@@ -1,5 +1,4 @@
-//! [`WorkerRegistry`] — the B2BUA worker set the proxy load-balances across
-//! (port of `registry/WorkerRegistry.ts`).
+//! [`WorkerRegistry`] — the B2BUA worker set the proxy load-balances across.
 //!
 //! The routing hot path reads `snapshot`/`resolve`/`lookup_by_address`
 //! **synchronously and lock-free** (the worker set lives behind an
@@ -16,8 +15,8 @@ pub mod simulated;
 pub mod static_reg;
 pub mod tombstone;
 
-/// Worker identity (the source's branded `WorkerId`; a plain `String` here —
-/// the registry impls reject empty/malformed ids at build time).
+/// Worker identity: a plain `String` — the registry impls reject
+/// empty/malformed ids at build time.
 pub type WorkerId = String;
 
 /// Whether a worker serves its dialogs, as the proxy reads it (ADR-0050 §3).

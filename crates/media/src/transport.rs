@@ -1,7 +1,7 @@
 //! Media transport engine — one local RTP port over the shared
 //! [`SignalingNetwork`], paced on `tokio::time`.
 //!
-//! Port of `../sipjsserver/src/media/transport.ts`. Parameterized by an
+//! Parameterized by an
 //! [`RtpFraming`] so the hand-rolled and webrtc-rs
 //! implementations share this whole engine and differ only in the wire codec
 //! (each an independent witness of the other).
@@ -48,7 +48,7 @@ const DEFAULT_QUEUE_MAX: usize = 2048;
 /// Base of the endpoint's auto-allocated RTP port range (even ports, +2 step).
 const AUTO_PORT_BASE: u16 = 40000;
 
-/// FNV-1a over `ip:port` — the local SSRC. Matches the TS `deriveSsrc`.
+/// FNV-1a over `ip:port` — the local SSRC, stable for one address.
 fn derive_ssrc(ip: &str, port: u16) -> u32 {
     let mut h: u32 = 0x811c_9dc5;
     for b in format!("{ip}:{port}").bytes() {
@@ -131,7 +131,7 @@ fn merge_pcm(buckets: &[&InternalBucket]) -> PcmBuffer {
 
 /// A media endpoint factory bound to a [`SignalingNetwork`] and an
 /// [`RtpFraming`] wire codec. Each [`open`](MediaEndpoint::open) binds one RTP
-/// port. Mirrors the TS `mediaEndpointLayer`.
+/// port.
 #[derive(Clone)]
 pub struct MediaEndpoint {
     net: Arc<dyn SignalingNetwork>,
@@ -274,7 +274,7 @@ fn handle_packet(inner: &Mutex<Inner>, framing: &dyn RtpFraming, raw: &[u8], src
 }
 
 /// One bound RTP port. Cheap to clone — sessions and stats all share the same
-/// inner state. Mirrors the TS `MediaTransport`.
+/// inner state.
 #[derive(Clone)]
 pub struct MediaTransport {
     local_addr: NetAddr,
@@ -377,8 +377,7 @@ impl MediaTransport {
 
 impl Drop for MediaTransport {
     fn drop(&mut self) {
-        // Last owner closes shop: abort the background tasks (the scope-close
-        // analogue of the TS `forkIn`).
+        // Last owner closes shop: abort the background tasks.
         if Arc::strong_count(&self.tasks) == 1 {
             for t in self.tasks.iter() {
                 t.abort();
@@ -387,7 +386,7 @@ impl Drop for MediaTransport {
     }
 }
 
-/// A per-dialog media session. Mirrors the TS `MediaSession`.
+/// A per-dialog media session.
 #[derive(Clone)]
 pub struct MediaSession {
     dialog_id: String,
@@ -402,8 +401,8 @@ impl MediaSession {
     /// Set codec, remote addr and direction — from the negotiation engine's
     /// [`NegotiatedMedia`].
     pub fn configure(&self, remote: NegotiatedMedia) -> Result<(), MediaNegotiationError> {
-        // PCMA/PCMU are the only codecs we encode; the engine only ever yields
-        // those, but mirror the TS guard for defence in depth.
+        // PCMA/PCMU are the only codecs we encode, and the engine only ever
+        // yields those.
         let mut g = self.transport.inner.lock().unwrap();
         if let Some(st) = g.sessions.get_mut(&self.dialog_id) {
             st.negotiated = Some(remote);

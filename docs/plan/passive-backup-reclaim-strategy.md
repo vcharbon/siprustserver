@@ -92,15 +92,15 @@ and drop. Unavoidable without cross-node coordination; fails by cleanly dropping
 ## 3. "Take slack" — 120 s for kill + restart + re-hydrate + drain
 
 Today: keepalive 300 s, UAC `recv OPTIONS timeout` **350 s** → **50 s** slack
-([uac-long-options.xml:106](../../deploy/k8s/sipp/scenarios/uac-long-options.xml#L106)).
+(`uac-long-options.xml:106`).
 
 - **Change** the UAC `recv OPTIONS` timeout `350000 → 420000` (300 s + 120 s); update the
-  "50 s headroom" header note ([uac-long-options.xml:34-38](../../deploy/k8s/sipp/scenarios/uac-long-options.xml#L34)).
+  "50 s headroom" header note (`uac-long-options.xml:34-38`).
 - Audit `uac-hold.xml`, `uac-hold-failover.xml`, and any `pause`-based holds for the same
   constant.
 - B2BUA config: `keepalive_interval_sec=300` unchanged; `reboot_budget_sec=450` (backup
   replica TTL) ≥ 300 + 120, OK — consider 600 for margin
-  ([config.rs:83-84](../../crates/b2bua/src/config.rs#L83)).
+  (`config.rs:83-84`).
 
 This is the budget for reboot+rehydrate+smoothed drain before a quiescent call's UAC
 times out — the worst-positioned quiescent call survives iff
@@ -115,7 +115,7 @@ timers are past-due. Firing them all at once floods a freshly-rehydrated node. S
 backlog; **this is purely load management and never a correctness mechanism** (so it has
 no timing assumption to violate).
 
-### Algorithm (batch, in the `ReclaimAll` handler, [router.rs:128-131](../../crates/b2bua/src/router.rs#L128))
+### Algorithm (batch, in the `ReclaimAll` handler, `router.rs:128-131`)
 
 ```text
 SPEEDUP = 10                          // keepalive_catchup_speedup (config)
@@ -143,7 +143,7 @@ for call in calls:
   to the epoch/`Key` driver, no risk to the CLAUDE.md timer invariants.
 - **Config:** add `keepalive_catchup_speedup` (10) and optional `max_catchup_window_sec`
   to `B2buaConfig`. Remove any `keepalive_reclaim_settle_sec` idea — not used.
-- **`reclaim_into_live` ([router.rs:205-230](../../crates/b2bua/src/router.rs#L205)):** delete
+- **`reclaim_into_live` (`router.rs:205-230`):** delete
   the fresh-300 s deferral loop (lines 220-224); keepalive `fire_at` is set by the batch
   smoothing; non-keepalive timers keep absolute deadlines. Rewrite the doc comment.
 
@@ -224,7 +224,7 @@ Per-context, role-owned, monotonic, restored on bootstrap — all properties the
    `convergence_after_takeover_and_reboot_highest_gen`, [s8_tests.rs:429-470](../../crates/b2bua/src/repl/s8_tests.rs#L429)).
    The new model's self-release must keep using `drop_local` (live-only) — **it already
    does the right thing.**
-2. **Loop-freedom.** `flush` fires **only on local mutation** ([router.rs:698,712](../../crates/b2bua/src/router.rs#L698));
+2. **Loop-freedom.** `flush` fires **only on local mutation** (`router.rs:698,712`);
    the puller apply path is terminal — `put_call(..., PutOpts::default())` with `peer:
    None`, and the changelog only bumps when `peer` is `Some` ([puller.rs:722](../../crates/b2bua/src/repl/puller.rs#L722),
    [store.rs:272-275](../../crates/b2bua/src/repl/store.rs#L272)). Applying a remote update
@@ -239,8 +239,8 @@ Per-context, role-owned, monotonic, restored on bootstrap — all properties the
 
 | Symbol | File:line |
 |---|---|
-| `ReplCommand::TakeOverPeer` variant + `on_repl_command` arm | [router.rs:81,141-142](../../crates/b2bua/src/router.rs#L81) |
-| `take_over_peer()` (+ 34-line doc) | [router.rs:147-196](../../crates/b2bua/src/router.rs#L147) |
+| `ReplCommand::TakeOverPeer` variant + `on_repl_command` arm | `router.rs:81,141-142` |
+| `take_over_peer()` (+ 34-line doc) | `router.rs:147-196` |
 | supervisor eager-emission block (keep Park / Removed-then-Added) | [supervisor.rs:303-314](../../crates/b2bua/src/repl/supervisor.rs#L303) |
 | `reclaim_backup_scan()` (only caller was `take_over_peer`) | [store/mod.rs:377-398](../../crates/b2bua/src/store/mod.rs#L377) |
 | `bump_repl_eager_takeover` + help | [metrics.rs:142,243](../../crates/b2bua/src/metrics.rs#L142) |
@@ -252,9 +252,9 @@ Per-context, role-owned, monotonic, restored on bootstrap — all properties the
 | `Frame::Deactivate` wire variant + codec | [frame.rs](../../crates/repl-net/src/frame.rs), [codec.rs](../../crates/repl-net/src/codec.rs) |
 | `send_handback()` + serve-loop `Deactivate` watch arm | [server.rs:355-406](../../crates/b2bua/src/repl/server.rs#L355) |
 | puller `Frame::Deactivate` handler | [puller.rs:568-580](../../crates/b2bua/src/repl/puller.rs#L568) |
-| `ReplCommand::Deactivate` arm + `deactivate_takeovers()` | [router.rs:138-139,232-265](../../crates/b2bua/src/router.rs#L138) |
+| `ReplCommand::Deactivate` arm + `deactivate_takeovers()` | `router.rs:138-139,232-265` |
 | `deactivate_targets()` + its `position_of` use | [store/mod.rs:324-358](../../crates/b2bua/src/store/mod.rs#L324) |
-| go-active handback: `handback_tx/rx` watch, `with_handback`, `watermark_src`, 6-tick loop | [b2bua_core.rs:170-209,257-260](../../crates/b2bua/src/b2bua_core.rs#L170) |
+| go-active handback: `handback_tx/rx` watch, `with_handback`, `watermark_src`, 6-tick loop | `b2bua_core.rs:170-209,257-260` |
 | `bump_repl_handback` + help | [metrics.rs:141,242](../../crates/b2bua/src/metrics.rs#L141) |
 
 `position_of` ([changelog.rs:206-222](../../crates/b2bua/src/repl/changelog.rs#L206)) is
@@ -276,21 +276,21 @@ is `all_bootstrapped → ReclaimAll → all_current → ReclaimAll`.
 3. **Keepalive smoothing + de-deferral** in `ReclaimAll`/`reclaim_into_live` (§4).
 4. **LB transaction affinity** in the front proxy: do not re-target a call mid-transaction
    on switchback. (Verify current proxy routing — §11.)
-5. **Fix B — guard `generate_ack_for_2xx`** ([generators.rs:578](../../crates/sip-message/src/generators.rs#L578),
-   guard absent; mirror [generators.rs:489](../../crates/sip-message/src/generators.rs#L489)):
+5. **Fix B — guard `generate_ack_for_2xx`** (`generators.rs:578`,
+   guard absent; mirror `generators.rs:489`):
    ```rust
    let to_value = if dialog.remote_tag.is_empty() {
        wrap_uri(&dialog.remote_uri)
    } else { format!("{};tag={}", wrap_uri(&dialog.remote_uri), dialog.remote_tag) };
    ```
-   Reachable via reactive mid-confirm takeover → relayed-2xx ACK ([relay.rs:374](../../crates/b2bua/src/rules/relay.rs#L374)).
+   Reachable via reactive mid-confirm takeover → relayed-2xx ACK (`relay.rs:374`).
 6. **Fix D — retire `backup_held`**, use `meta_backup` (resident count) in dashboards/alerts
    ([store.rs:178-213](../../crates/b2bua/src/repl/store.rs#L178), [puller.rs:749](../../crates/b2bua/src/repl/puller.rs#L749)).
 7. **Commit the reap-driver** (working-tree `M`, [main.rs:~506](../../crates/b2bua-runner/src/main.rs#L506)).
 
 ### Explicitly KEEP
 
-`hydrate_from_replica` + reactive `mark_takeover`/`restore` ([router.rs:524-548](../../crates/b2bua/src/router.rs#L524));
+`hydrate_from_replica` + reactive `mark_takeover`/`restore` (`router.rs:524-548`);
 the reclaim path (`reclaim_scan`, `peek_reclaimable`, `materialize_if_absent`,
 `reclaim_into_live`, `bump_repl_reclaimed`); the reactive `ReclaimCall` emission
 ([puller.rs:674](../../crates/b2bua/src/repl/puller.rs#L674)); `drop_local` (now the
@@ -305,7 +305,7 @@ writing its takeover mutation into its own `bak:` replica.
 |---|---|
 | **A** stale-CSeq eager keepalive | **SUPERSEDED** — eager removed; smoothing + `(p,b)` reclaim. |
 | **B** `generate_ack_for_2xx` panic | **KEEP** (§8.5) — reactive mid-confirm. |
-| **C** dead-peer changelog bloat | **ELIMINATED** — the unbounded source was the *eager* reverse-flush of quiescent calls ([router.rs:192](../../crates/b2bua/src/router.rs#L192)); reactive reverse-flush is bounded/expected. |
+| **C** dead-peer changelog bloat | **ELIMINATED** — the unbounded source was the *eager* reverse-flush of quiescent calls (`router.rs:192`); reactive reverse-flush is bounded/expected. |
 | **D** `backup_held` gauge lies | **KEEP** (§8.6) — retire for `meta_backup`. |
 | reap-driver | **KEEP** (§8.7) — commit. |
 
@@ -355,7 +355,7 @@ writing its takeover mutation into its own `bak:` replica.
   references; keep reclaim + reactive ones.
 
 ### docs/plan
-- `failover-test-matrix-cells.md` / `on-proper-migration-of-lazy-pancake.md`: remove the
+- `failover-test-matrix-cells.md` and the replication wire spec: remove the
   eager-takeover cells and the `Deactivate` wire spec; document the `(p,b)` reconciliation
   and reactive self-release instead.
 

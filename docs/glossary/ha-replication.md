@@ -2,9 +2,30 @@
 
 Full definitions of the terms [CONTEXT.md](../../CONTEXT.md) indexes under "HA replication glossary".
 
-The peer-to-peer call-replication vocabulary (ADR-0011 / `docs/plan/
-on-proper-migration-of-lazy-pancake.md`). Each b2bua is *both* a replication
-server (serves its change stream) and a client (pulls from every peer).
+The peer-to-peer call-replication vocabulary (ADR-0011). Each b2bua is *both* a
+replication server (serves its change stream) and a client (pulls from every
+peer).
+
+**Worker**:
+One b2bua process behind the front proxy, known by its **ordinal**: the unit
+of fault containment. It is the primary of the calls the proxy places on it
+and the backup of calls other workers hold.
+_Avoid_: "pod", "instance", "node" where the role is meant; "worker" for the
+per-call dispatch task (that is the call's queue worker, `dispatch::worker`).
+
+**Ordinal** (`topology::Ordinal`, the proxy's `WorkerId`):
+The stable name a worker is known by across the cluster (a StatefulSet pod
+name in Kubernetes), the same across its restarts; one boot of it is a
+**worker identity**. Membership, the proxy's registry, the routing cookie and
+the call ref name a worker by it.
+
+**Primary partition** / **Backup partition** (`repl_net::Partition::{Pri, Bak}`):
+The two roles a node holds a call's replica in: `Pri`, a call this node is
+primary of, which the **Reclaim** flow carries back to it; `Bak`, a peer's
+call this node backs up, which the **Backup** flow carries. The changelog
+keeps one sub-log per peer and partition. Serving a call out of its backup
+partition never moves its primary.
+_Avoid_: "owner", "mirror", "shadow".
 
 **Element**:
 One replicated call replica, a `(partition, callRef)` entry in a backup's

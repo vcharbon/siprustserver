@@ -1,12 +1,11 @@
-//! In-dialog re-INVITE relay through the B2BUA (port of
-//! `tests/scenarios/reinvite.ts`). The B2BUA bridges two independent dialogs;
+//! In-dialog re-INVITE relay through the B2BUA. The B2BUA bridges two
+//! independent dialogs;
 //! a re-INVITE from either side is relayed transparently onto the peer dialog
 //! and its response correlated back via the pending-relay snapshot
 //! (`relay-reinvite-response`). When both peers re-INVITE at once, the loser is
 //! rejected 491 Request Pending (`reinvite-glare`, RFC 3261 §14.1).
 //!
-//! Each test first establishes the call (INVITE → 180 → 200 → ACK), mirroring
-//! the TS `callSetup` fragment the scenarios build on.
+//! Each test first establishes the call (INVITE → 180 → 200 → ACK).
 //!
 //! ```text
 //!   alice_reinvite          re-INVITE (no SDP) → 200(offer) → ACK(answer)

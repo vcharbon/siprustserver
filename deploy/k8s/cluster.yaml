@@ -1,8 +1,7 @@
-# kind cluster topology for the Rust SIP SUT — VENDORED COPY.
+# kind cluster topology for the Rust SIP SUT.
 #
-# Copied from sipjsserver/tests/k8s/cluster.yaml so the Rust runner depends on no
-# sibling checkout and the two topologies may diverge. Uses cluster name
-# `sip-e2e`: one cluster of that name runs on a host at a time, and
+# Uses cluster name `sip-e2e`: one cluster of that name runs on a host at a
+# time, and
 # `deploy/helm/kind-lab.sh up` refuses to replace an existing one.
 #
 # Tiers: edge = front proxy, app = b2bua workers (two app nodes so a primary and

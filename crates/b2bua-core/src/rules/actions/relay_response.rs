@@ -134,7 +134,7 @@ impl<'a> Relaying<'a> {
 
 impl ActionExecutor<'_> {
     /// Relay an inbound SIP response toward `target_leg` (normally the a-leg).
-    /// Two paths, mirroring the source:
+    /// Two paths:
     ///   - **pending-correlated** (any relayed in-dialog request: re-INVITE/
     ///     PRACK/OPTIONS/INFO/UPDATE/…): rebuild from the snapshot captured
     ///     when the request was relayed ([`Self::relay_pending_response`]).

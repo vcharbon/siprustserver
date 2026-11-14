@@ -1,6 +1,6 @@
 //! RFC 3264/3262/5009 offer-answer engine conformance.
 //!
-//! Port of `../sipjsserver/tests/media/sdp-negotiation.test.ts`. Positive paths
+//! Positive paths
 //! (codec selection, direction, hold, provisional reliability) and negative
 //! paths (each a typed `SdpRule` per RFC clause), plus the P-Early-Media gate.
 

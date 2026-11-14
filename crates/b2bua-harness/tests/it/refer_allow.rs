@@ -1,4 +1,4 @@
-//! REFER allow-path scenarios. Port of `tests/scenarios/refer-allow.ts`.
+//! REFER allow-path scenarios.
 //!
 //! Each scenario establishes an A↔B call and issues a REFER from B that the
 //! scripted `/call/refer` authorizes (`X-Api-Call` `refer-allow-c`). The B2BUA
@@ -297,7 +297,7 @@ async fn refer_allow_c_no_answer() {
 
     // Advance past the 5s no-answer timer → NOTIFY 408 terminated. The advance
     // crosses the deadline, so the 408 NOTIFY's 200 round-trip races the txn
-    // retransmit; tolerate the duplicate NOTIFYs (TS `bob.allowExtra("NOTIFY")`).
+    // retransmit; tolerate the duplicate NOTIFYs at bob.
     h.advance(Duration::from_secs(6)).await;
 
     let mut nterm = bob.receive("NOTIFY").await;

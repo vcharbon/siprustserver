@@ -1,7 +1,7 @@
 //! Self-contained HTML rendering of the unified timeline.
 //!
 //! Produces a single static document (no external assets) with a two-pane,
-//! viewport-filling layout that mirrors the proven sipjs report design:
+//! viewport-filling layout:
 //!   - a header (title / status / anomaly count),
 //!   - a **legend** naming the three planes,
 //!   - a `.main` flex row that fills the viewport:

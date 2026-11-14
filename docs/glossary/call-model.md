@@ -40,3 +40,44 @@ whose scope ended whatever the ledger holds, is stale and reaches no rule, so
 no rule re-checks for a stale ledger (ADR-0055 §10).
 _Avoid_: "timer id" (there is no string name); "cancel" for what a scope's
 end does (it **retires** the scope).
+
+**Terminating timeout** (`TimerType::TerminatingTimeout`, `TERMINATING_TIMEOUT_MS`):
+The call-scope backstop armed when the call enters `Terminating`, and again on
+each BYE it sends while terminating: 32 s, SIP Timer H/J, past which no
+legitimate BYE or 2xx retransmission lands. When it fires, every leg still
+unresolved is forced terminal, so the call reaches `Terminated` and is removed
+with its CDR and its replication delete.
+_Avoid_: "safety timer" alone (the call reaper's sweep is another net).
+
+**A-leg** / **B-leg**:
+The leg facing the caller (`LegKind::A`, leg id `a`), which this B2BUA answers
+as UAS, and a leg toward a called party (`LegKind::Destination`), which it
+dials as UAC.
+_Avoid_: "inbound leg" / "outbound leg" (they collide with transport
+direction).
+
+**Leg kind** (`call::LegKind`, read via `call::helpers::leg_kind`):
+The role of a leg: `a`, `destination`, `media` or `transfer-target` (the
+leg a REFER dials). A leg with no stated kind is `a` when its id is `a`, else
+`destination`.
+
+**Media leg** (`LegKind::Media`):
+A leg this B2BUA dials as UAC toward a media server (an MRF) to broker SDP and
+exchange control bodies, such as MSCML over INFO. It names no attempt and is
+**unadopted**, so the generic relay rules never reach it; it is reaped like
+any leg.
+_Avoid_: "MRF leg" for the role (MRF names the server).
+
+**Adopted leg** / **Unadopted leg** (`Leg.adopted`, `call::helpers::is_adopted`):
+Who drives a leg's in-dialog signalling. The generic relay, keepalive and
+failover rules own an adopted leg; only the service that created an unadopted
+leg reaches it, through explicit leg actions. A media leg and a transfer
+target not yet realigned are unadopted unless the flag says otherwise; every
+other leg is adopted. Adoption is not peering: a destination leg is adopted
+from its creation, before any merge.
+
+**Active peer** (`Call.active_peer`, `call::helpers::peering`):
+The one pair of legs the call bridges at an instant, or none. Merge and split
+re-point it across the call's legs; it is never a set, so two pairs are never
+bridged at once.
+_Avoid_: "peers" for the leg collection.

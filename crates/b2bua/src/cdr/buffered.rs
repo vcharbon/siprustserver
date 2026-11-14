@@ -1,8 +1,8 @@
-//! Buffered CDR writer — port of `BufferedCdrLayer`. `write` enqueues
+//! Buffered CDR writer. `write` enqueues
 //! non-blocking (drop-on-overload, counted; the call is copied only once the
 //! queue holds a slot for it); a drainer task performs the inner write.
-//! `queue_max == 0` is passthrough (the inner writer is called inline) — the
-//! fake-clock test mode the source uses.
+//! `queue_max == 0` is passthrough (the inner writer is called inline), the
+//! mode fake-clock tests use.
 //!
 //! `close` is the exit barrier: the drainer closes the queue (a later `write`
 //! is a counted drop), writes what is queued until the deadline, gives up and

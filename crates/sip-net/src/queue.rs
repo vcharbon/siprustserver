@@ -1,13 +1,11 @@
 //! `PacketQueue` — the bounded inbound queue shared by both the real and
 //! simulated endpoints.
 //!
-//! Rust analogue of the TS `Queue.bounded<UdpPacket>(queueMax)` with the
-//! `offerUnsafe` (non-blocking, tail-drop on full) / `take` / `poll` /
-//! `sizeUnsafe` surface. We hand-roll it rather than use `tokio::mpsc`
-//! because the audit decorator needs `depth()` (mpsc doesn't expose its len)
-//! and the simulated fabric needs an offer that reports "full" so the caller
-//! can bump the tail-drop counter — exactly the bounded-queue semantics the
-//! source relied on.
+//! A bounded queue of `queue_max` packets with an offer (non-blocking,
+//! tail-drop on full) / `take` / `poll` / `depth` surface. We hand-roll it
+//! rather than use `tokio::mpsc` because the audit decorator needs `depth()`
+//! (mpsc doesn't expose its len) and the simulated fabric needs an offer that
+//! reports "full" so the caller can bump the tail-drop counter.
 //!
 //! Backed by a `Mutex<VecDeque>` + a `Notify` for the async `take`. Counters
 //! live on the endpoint (see `Counters`), not here, so this type stays a pure
@@ -120,7 +118,7 @@ impl PacketQueue {
         }
     }
 
-    /// Non-blocking dequeue (the TS `poll` → `UdpPacket | null`).
+    /// Non-blocking dequeue: `None` when the queue is empty.
     pub fn poll(&self) -> Option<UdpPacket> {
         self.lock().buf.pop_front()
     }
@@ -130,7 +128,7 @@ impl PacketQueue {
         self.lock().buf.iter().cloned().collect()
     }
 
-    /// Current queued count (the TS `sizeUnsafe`). Drives the audit's
+    /// Current queued count. Drives the audit's
     /// queue-leak check and the pre-ingress depth argument.
     pub fn depth(&self) -> usize {
         self.lock().buf.len()

@@ -1,11 +1,9 @@
-//! **TEST-ONLY.** Contract decorators for `SignalingNetwork` — port of
-//! `SignalingNetwork.contracts.ts`. The worked example the `effect-layer-test`
-//! SKILL points at, reshaped from Effect `Layer` wrappers to **decorator
-//! structs that implement the same trait**.
+//! **TEST-ONLY.** Contract decorators for `SignalingNetwork`: **decorator
+//! structs that implement the same trait** (ADR-0004).
 //!
 //! Two decorators, composed in the canonical order
-//! `paranoidInputs(scopedAudit(impl))` (the source's `propertyTest` is skipped
-//! for `SignalingNetwork` — `bind_udp` opens a socket and `send_to` is
+//! `paranoidInputs(scopedAudit(impl))` (no property decorator for
+//! `SignalingNetwork` — `bind_udp` opens a socket and `send_to` is
 //! fire-and-forget UDP, so there is no natural input/output domain to assert a
 //! per-call property over):
 //!
@@ -15,21 +13,20 @@
 //!     anomaly ledger at the severity the active [`RunContext`] dictates.
 //!   - [`ParanoidSignalingNetwork`] — the `paranoidInputs` equivalent.
 //!     Caller-side precondition checks; a violation is a programmer error
-//!     (defect) raised by panic, the Rust analogue of the source's
-//!     `Effect.die`.
+//!     (defect) raised by panic.
 //!
 //! Production composes the bare `Real`/`Simulated` impl directly. These
 //! decorators require a `Recorder` + a `RunContext`, which production does not
 //! provide — never compose them into a production network tree.
 //!
-//! Scope-close semantics. The source ran rules in Effect scope finalizers
-//! (per-bind close, then layer close). Rust uses RAII for the per-bind close
+//! Scope-close semantics. Rules run at two closes: per-bind, then layer.
+//! RAII serves the per-bind close
 //! (an endpoint's [`Drop`] records its release, checks for a queue leak, and
 //! runs its peer rules) and an explicit [`RecordingSignalingNetwork::close`]
 //! for the layer close (drain transit, structural invariants, cross-message
 //! rules, and the deferred-fail → violation decision). **Drop your endpoints
 //! before calling `close()`** so their per-bind findings are on the ledger
-//! when `close()` reads it — the RAII analogue of LIFO scope finalizers.
+//! when `close()` reads it: the inner scope closes first.
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -61,7 +58,7 @@ pub const SIGNALING_TAG: &str = "sip-net/SignalingNetwork";
 
 /// One observation on the `SignalingNetwork` typed channel. Every variant
 /// carries the lane-identifying `bind_key` so per-peer rules can slice on a
-/// single peer. (Port of `SignalingNetworkEvent`.)
+/// single peer.
 ///
 /// `RecvItem` is the ARRIVAL fact, recorded at delivery into the endpoint's
 /// inbox (via the [`crate::types::RecvTap`] the decorator installs at bind);
@@ -180,7 +177,7 @@ fn is_audit_kind(kind: &str) -> bool {
 // ---------------------------------------------------------------------------
 
 /// Surfaced by [`RecordingSignalingNetwork::close`] when a non-advisory audit
-/// finding is on the ledger. (Port of `SignalingAuditViolation`.)
+/// finding is on the ledger.
 #[derive(Debug, Clone, thiserror::Error)]
 #[error("signaling audit [{check}]: {detail}")]
 pub struct SignalingAuditViolation {
@@ -194,12 +191,12 @@ pub use crate::audit_rules::{CrossMessageAuditRule, PeerAuditRule, PositionedFin
 use std::collections::HashSet;
 
 /// Predicate: should this bind be audited at all? Returning `false`
-/// short-circuits rule evaluation for the peer (events are still recorded).
-/// The source's `shouldAuditBind` escape valve.
+/// short-circuits rule evaluation for the peer (events are still recorded):
+/// the per-bind escape valve.
 pub type ShouldAuditBind = Arc<dyn Fn(&LaneKey) -> bool + Send + Sync>;
 
-/// Options for the recording/audit decorator. (Port of `ScopedAuditOptions`,
-/// without its per-test `exceptions` ledger.)
+/// Options for the recording/audit decorator. It carries no per-test
+/// `exceptions` ledger.
 #[derive(Default, Clone)]
 pub struct ScopedAuditOptions {
     /// Per-bind rules, evaluated at bind drop. The default RFC suite fills none
@@ -378,7 +375,7 @@ impl RecordingSignalingNetwork {
         bind_key: Option<LaneKey>,
     ) {
         // Layer-close structural findings are deferred-fail in a recorder test
-        // (advisory in real-run), matching the source's tier for these.
+        // (advisory in real-run).
         let severity = self.0.ctx.severity_for(SIGNALING_TAG, false);
         self.push_anomaly(kind, check, detail, severity, bind_key);
     }
@@ -585,7 +582,7 @@ impl UdpEndpoint for RecordedEndpoint {
 
 impl Drop for RecordedEndpoint {
     fn drop(&mut self) {
-        // Per-bind scope close (RAII analogue of the source's bind finalizer).
+        // Per-bind scope close.
         self.channel.record(SignalingNetworkEvent::BindRelease { bind_key: self.bind_key.clone() });
 
         // Queue-leak: capture depth BEFORE the inner endpoint drops and closes
@@ -651,7 +648,7 @@ use layer_harness::ParanoidViolation;
 use sip_net::max_udp_payload;
 
 /// Caller-side precondition checks. A violation is a programmer error and is
-/// raised by panic (the Rust analogue of `Effect.die`). Checks (all always-on,
+/// raised by panic. Checks (all always-on,
 /// µs-scale):
 ///
 ///   - `PA2_bindOpts_queueMax`  bind_udp queue_max ≥ 1

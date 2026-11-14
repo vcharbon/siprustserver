@@ -4,7 +4,7 @@ version = "0.1.0"
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
-description = "B2BUA core: per-call FIFO dispatch (SipRouter/PerCallDispatcher) + rule engine + in-memory call store (over a replication-aware CallStore seam) + decision-engine adapter + buffered CDR. Rust port of sipjsserver src/sip/{SipRouter,PerCallDispatcher}.ts, src/call/CallState.ts, src/b2bua/rules/, src/decision/."
+description = "The B2BUA's shell (ADR-0052): per-call FIFO dispatch + the call router + in-memory call store (over a replication-aware CallStore seam) + decision-engine adapter + buffered CDR, committing every effect a turn of the decision core (b2bua-core) returns."
 
 [package.metadata.purity]
 tier = "shell"

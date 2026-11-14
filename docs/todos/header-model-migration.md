@@ -951,7 +951,7 @@ pre-existing doc-indentation warnings.
   for what routing reads as a host and a port.** That is the same
   `size_of`-of-the-value-model debt M5 logged; a binding store keyed on
   `SocketAddr` would be smaller but would stop the store being verbatim, which
-  its sipjs parity contract states.
+  its contract states.
 - `RegisterProxy::on_response` reads the whole Via list to find the relay
   target and then pops the top entry through the draft, so the header is read
   twice — the `try_list` gap M5 and M6 both logged, seen from the response

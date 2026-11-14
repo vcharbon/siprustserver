@@ -4,7 +4,7 @@ version = "0.1.0"
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
-description = "SIP signaling network layer (UDP transport + SignalingNetwork) — Rust port of sipjsserver src/sip/{SignalingNetwork,UdpTransport} core: the seam and its real (tokio) implementation. The simulated fabric and the recording/audit decorators live in sip-net-testkit."
+description = "SIP signaling network layer (UDP transport + SignalingNetwork): the seam and its real (tokio) implementation. The simulated fabric and the recording/audit decorators live in sip-net-testkit."
 
 [package.metadata.purity]
 tier = "shell"

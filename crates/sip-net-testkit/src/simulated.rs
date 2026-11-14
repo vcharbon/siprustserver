@@ -1,5 +1,4 @@
-//! In-memory simulated `SignalingNetwork` (port of
-//! `SignalingNetwork.simulated.ts`).
+//! In-memory simulated `SignalingNetwork`.
 //!
 //! Routes datagrams by destination `SocketAddr` through an in-process table —
 //! no real sockets. Each `send_to` spawns a detached task that sleeps the
@@ -8,7 +7,7 @@
 //! the packet arrives later). This is the fake-transport fabric: a scenario
 //! runs in zero wall-time under a paused tokio clock.
 //!
-//! Per-fiber partition gating belongs with the cluster harness, not here.
+//! Per-node partition gating belongs with the cluster harness, not here.
 //! `send_fault` (per-pair send failure injection) lives here, as it's a
 //! pure-network fault primitive.
 //!
@@ -38,7 +37,7 @@ use crate::types::{
 };
 
 /// Optional per-pair send-failure injector: `(src, dst) -> Some(reason)` fails
-/// that send synchronously (the TS `sendFault`).
+/// that send synchronously.
 pub type SendFault = Arc<dyn Fn(SocketAddr, SocketAddr) -> Option<String> + Send + Sync>;
 
 /// The flow picker of a shared address: `src -> slot` names the member a

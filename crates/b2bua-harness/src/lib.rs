@@ -291,8 +291,7 @@ impl B2buaSutBuilder {
         self
     }
 
-    /// Config mutator hook (the faithful equivalent of a per-scenario
-    /// `configOverrides`). Runs LAST in [`start`](Self::start) — after the
+    /// Config mutator hook: a per-scenario config override. Runs LAST in [`start`](Self::start) — after the
     /// harness keepalive defaults — so a test may still override them.
     pub fn tune(mut self, tune: impl FnOnce(&mut B2buaConfig) + 'static) -> Self {
         self.tune = Box::new(tune);

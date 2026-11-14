@@ -10,11 +10,9 @@ detail: [appendix](appendix/0016-callflow-service-state-machines.md).
 
 The rule engine (ADR-0010 X5) is sound, but "which rules are live right now, and why" is
 implicit: scattered across slice presence, ad-hoc phase enums used as `Match` columns, the
-`DeactivateRule` action and the `active_rules` list. This ADR brings the source's
-*callflow service* + *phase machine* model (`portsource/sipjsserver/CONTEXT.md`) into the Rust
-port as explicit, doc-generated state machines. It adopts the source vocabulary unchanged
-(callflow service, phase machine, media leg, adopted/unadopted leg, Rule SDK, integrator). The
-Rust-port terms are in `CONTEXT.md`. Detail: [appendix, context](appendix/0016-callflow-service-state-machines.md#context).
+`DeactivateRule` action and the `active_rules` list. This ADR makes each *callflow service*
+an explicit, doc-generated per-call state machine. The vocabulary (callflow service, machine,
+media leg, adopted/unadopted leg, Rule SDK, integrator) is in `CONTEXT.md`. Detail: [appendix, context](appendix/0016-callflow-service-state-machines.md#context).
 
 ## Decision X1: State is a canonical rule selector, not a new dispatcher
 
@@ -116,7 +114,5 @@ The rest: [appendix, consequences](appendix/0016-callflow-service-state-machines
 - [ADR-0010](./0010-b2bua-dispatch-rules-rust-shape.md) (the rule engine this extends),
   [ADR-0008](./0008-call-context-data-model.md) (Call/Leg/Dialog model), ADR-0002 (opaque
   `ext`).
-- Source model: `portsource/sipjsserver/CONTEXT.md`; source ADRs
-  `0014-leg-kind-and-singleton-active-peer`, `0016-callflow-services-typed-ext`.
 - `crates/b2bua-core/src/rules/` (engine, actions, invariants), `crates/call/src/model/`
   (`LegKind`, `Leg.adopted`, `CallModelState`).

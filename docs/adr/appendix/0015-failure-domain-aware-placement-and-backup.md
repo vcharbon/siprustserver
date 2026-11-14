@@ -4,8 +4,8 @@ Decision part: [ADR-0015](../0015-failure-domain-aware-placement-and-backup.md).
 
 ## Context
 
-The source's two-worker deployment never scaled past a pair, so "primary and backup on
-distinct nodes" held by arithmetic, not by rule. With more B2BUA than worker nodes, naive
+A two-worker deployment never scales past a pair, so there "primary and backup on
+distinct nodes" holds by arithmetic, not by rule. With more B2BUA than worker nodes, naive
 anti-affinity ("no two on a node") is unsatisfiable, and the proxy's zone-blind `w_bak`
 selection can place a backup in the same failure domain as its primary, defeating
 failover.

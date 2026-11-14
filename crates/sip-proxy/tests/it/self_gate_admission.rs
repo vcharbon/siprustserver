@@ -221,7 +221,7 @@ async fn real_gate_cps_drain_yields_a_wire_503_cps() {
     let h = Harness::with_transit_delay("self-gate-real-cps", 1);
     let (_bob_ep, _bob_addr) = h.bind_sut("bob", BOB).await;
     let (strategy, registry) = forward_all_with_worker();
-    // Bucket size 1, rate 0 → the second external INVITE sheds with the TS 60 s
+    // Bucket size 1, rate 0 → the second external INVITE sheds with the 60 s
     // Retry-After fallback (rate 0 + empty bucket).
     let gate = Arc::new(EluCpsGate::new(
         Arc::new(simulated().0),
@@ -308,7 +308,7 @@ async fn real_gate_elu_over_critical_yields_a_wire_503_elu() {
     let _ = h.finish().await;
 }
 
-// ── Bypass arms: the three-way classification end-to-end (TS ProxyCore L852-855)
+// ── Bypass arms: the three-way classification end-to-end
 //
 // A force-reject gate would 503 anything the request path lets through. So if an
 // emergency / worker-outbound new-dialog INVITE reaches bob (no 503) AND the

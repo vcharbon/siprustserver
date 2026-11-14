@@ -10,7 +10,7 @@
 
 use crate::scenario::LaneKey;
 
-/// Three-tier severity (ADR-0013 D5).
+/// Three-tier severity (ADR-0004).
 ///
 ///   - [`Severity::Fatal`]        — the decorator fails the call *now*
 ///     (`unit-test-of-layer` hot path).

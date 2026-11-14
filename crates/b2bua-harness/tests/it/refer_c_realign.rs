@@ -1,5 +1,4 @@
-//! REFER c-realigning scenarios. Port of
-//! `tests/scenarios/refer-c-realign.ts`.
+//! REFER c-realigning scenarios.
 //!
 //! Builds on the C-leg lifecycle of `refer_allow.rs` by adding the B2BUA-originated
 //! re-INVITE to C carrying A's SDP (the c-realign re-INVITE). The charlie UA
@@ -30,7 +29,7 @@ const ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0
 const CHARLIE_FIRST_ANSWER: &str = "v=0\r\no=charlie 9 8 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/AVP 8\r\na=rtpmap:8 PCMA/8000\r\na=sendrecv\r\n";
 // C's active answer to the c-realign re-INVITE (sendrecv on C's real port). The
 // a-realign re-INVITE toward A must carry *this* body (not the initial held
-// answer) — the one-way-audio guard (slice5-refer-design.md §4).
+// answer) — the one-way-audio guard.
 const CHARLIE_ACTIVE_ANSWER: &str = "v=0\r\no=charlie 9 9 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 30000 RTP/AVP 8\r\na=rtpmap:8 PCMA/8000\r\na=sendrecv\r\n";
 
 // A's answer to the a-realign re-INVITE.
@@ -229,14 +228,12 @@ async fn refer_allow_c_realign_c_reject_488() {
 
 // ── 3. C does not answer the c-realign re-INVITE → 32s watchdog rollback ──
 //
-// skipFinalSweep (TS refer-c-realign.ts:298): the pending c-realign re-INVITE
-// Timer B (≈32s, the INVITE UAC transaction timeout) fires alongside the
-// rule-level `refer_reinvite_answer` watchdog (32s); under a paused clock the
-// single advance that crosses 32s trips both, and the three BYE 200 round-trips
-// race the re-INVITE/Timer-B retransmits. We drive the exact deadline and
-// tolerate the resulting INVITE/CANCEL/BYE retransmits (the harness equivalent
-// of the TS `allowExtra` + `.skipFinalSweep()`); the assertion that all three
-// legs are BYE'd is NOT relaxed.
+// The pending c-realign re-INVITE Timer B (≈32s, the INVITE UAC transaction
+// timeout) fires alongside the rule-level `refer_reinvite_answer` watchdog
+// (32s); under a paused clock the single advance that crosses 32s trips both,
+// and the three BYE 200 round-trips race the re-INVITE/Timer-B retransmits. We
+// drive the exact deadline and tolerate the resulting INVITE/CANCEL/BYE
+// retransmits; the assertion that all three legs are BYE'd is NOT relaxed.
 
 #[tokio::test(start_paused = true)]
 async fn refer_allow_c_realign_c_timeout() {

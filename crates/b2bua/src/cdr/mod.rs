@@ -1,4 +1,4 @@
-//! CDR (call detail record) writing — port of `CdrWriter.ts`. One record is
+//! CDR (call detail record) writing. One record is
 //! written per call at termination, carrying the accumulated `Call.cdr_events`.
 //! The in-memory writer ([`InMemoryCdrWriter`]) lets tests assert exactly one
 //! CDR per call; [`BufferedCdrWriter`] is the production drop-on-overload buffer.

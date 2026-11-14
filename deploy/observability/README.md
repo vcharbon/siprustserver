@@ -62,11 +62,11 @@ tagged with the time range kept.
 | `k8s-state` | Kubernetes — state & per-pod resources | kube-state-metrics + cAdvisor (SUT-independent) |
 | `kind-nodes` | Kind — Node infrastructure | node-exporter (SUT-independent) |
 
-The app dashboards are adapted from sipjsserver's but track the **Rust**
-exporters' metric names and label shapes — notably `sip_messages_total` carries
-a single `label` dimension holding `direction:result` (the Rust proxy does not
-split into separate `direction`/`result`/`method` labels), and `sip_worker_health`
-is a per-state count gauge (no `worker_id`). The Rust routing-duration histogram
+The app dashboards track the exporters' metric names and label shapes —
+notably `sip_messages_total` carries a single `label` dimension holding
+`direction:result` (the proxy does not split into separate
+`direction`/`result`/`method` labels), and `sip_worker_health` is a per-state
+count gauge (no `worker_id`). The routing-duration histogram
 emits only the `+Inf` bucket, so the latency panel shows the windowed average
 rather than quantiles.
 
@@ -88,8 +88,8 @@ whose sidecar serves metrics too names its port in `prometheus.io/sidecar-port`
 ## Notes / caveats
 
 - One stack per host. The host container names (`grafana`, `victoriametrics`, …)
-  and ports (3333/8428/9428/10428) are shared with sipjsserver's observability
-  stack — only one can run at a time. `install.sh --down` the other first.
+  and ports (3333/8428/9428/10428) are fixed, so a second observability stack
+  using them cannot run beside this one: `install.sh --down` the other first.
 - Use `127.0.0.1`, not `localhost`, when curling the host endpoints
   (`localhost` → IPv6 `::1` gets connection-reset against these containers).
 - Per-call traces (ADR-0026) are SAMPLED, so the VictoriaTraces datasource is

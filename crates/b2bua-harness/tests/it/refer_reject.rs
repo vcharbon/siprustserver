@@ -1,5 +1,4 @@
-//! REFER reject-path scenarios. Port of
-//! `tests/scenarios/refer-reject.ts`.
+//! REFER reject-path scenarios.
 //!
 //! Each scenario brings an A↔B call to confirmed state, then exercises one
 //! reject path of the TransferRules chain:

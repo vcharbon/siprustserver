@@ -1,6 +1,4 @@
-//! Unit tests locking the pure lens/accessor/timer helpers. No direct TS
-//! counterpart (the source exercised these via the deferred CallState tests);
-//! analogous to slice-1's message-layer smoke tests.
+//! Unit tests locking the pure lens/accessor/timer helpers.
 
 use crate::common;
 use call::helpers::*;

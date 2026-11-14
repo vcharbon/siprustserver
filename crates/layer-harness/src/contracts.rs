@@ -47,7 +47,7 @@ pub trait ParanoidCheck<I>: Send + Sync {
 /// A cross-call invariant evaluated over the recorded event log at scope
 /// close. Drives a `scopedAudit` decorator. Returns zero or more violation
 /// detail strings. `force_advisory` pins the rule to the advisory tier
-/// regardless of `RunContext` (the source's `severityOverride: "advisory"`).
+/// regardless of `RunContext`.
 pub trait AuditRule<E>: Send + Sync {
     fn name(&self) -> &'static str;
     fn force_advisory(&self) -> bool {
@@ -58,8 +58,7 @@ pub trait AuditRule<E>: Send + Sync {
 
 /// A failed CONTRACT property. For a service whose methods return `Result`, a
 /// decorator surfaces this in the error channel; for an infallible method it
-/// is a defect. Carries the property id for caller-side dispatch (mirrors the
-/// source's `_tag` field).
+/// is a defect. Carries the property id for caller-side dispatch.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PropertyViolation {
     pub property_id: &'static str,
@@ -75,7 +74,7 @@ impl fmt::Display for PropertyViolation {
 impl std::error::Error for PropertyViolation {}
 
 /// A violated caller-side precondition — a programmer error. Decorators raise
-/// it by panicking (the Rust analogue of the source's `Effect.die`); tests
+/// it by panicking; tests
 /// exercising the precondition surface catch it with `#[should_panic]` /
 /// `catch_unwind`.
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -1,14 +1,14 @@
 //! [`HmacKeyProvider`] — signs/verifies the routing cookie the proxy stamps on
-//! the Record-Route URI. Port of `security/HmacKeyProvider.ts` (the `static`
-//! impl only; the kubernetes-secret fs-watch variant is deferred — ADR-0009).
+//! the Record-Route URI. The `static` impl only; a kubernetes-secret fs-watch
+//! variant is deferred (ADR-0009).
 //!
 //! - `sign(input)` MACs `input` with the **current** key (HMAC-SHA256) and
 //!   returns `{ kid, mac }` (the full 32-byte digest; the LB truncates to 128
 //!   bits before base64url-encoding into the cookie).
 //! - `verify_truncated(input, kid, mac_prefix)` recomputes the digest under the
 //!   named key (current OR previous, for the rotation overlap window) and
-//!   compares the leading [`TRUNCATED_MAC_BYTES`] in constant time (`subtle`,
-//!   the `timingSafeEqual` analogue). `false` on unknown kid, on ANY prefix
+//!   compares the leading [`TRUNCATED_MAC_BYTES`] in constant time
+//!   (`subtle`). `false` on unknown kid, on ANY prefix
 //!   length other than the canonical truncation, or on mismatch — the provider
 //!   enforces the length so no caller can accidentally accept a 1-byte prefix
 //!   (a ≤256-guess forgery).
@@ -52,7 +52,7 @@ pub struct HmacSignResult {
     pub mac: [u8; 32],
 }
 
-/// The signing/verifying seam (port of `HmacKeyProviderApi`). A trait so the
+/// The signing/verifying seam. A trait so the
 /// LB depends on the seam and a k8s-secret impl can drop in later.
 pub trait HmacKeyProvider: Send + Sync {
     fn sign(&self, input: &[u8]) -> HmacSignResult;

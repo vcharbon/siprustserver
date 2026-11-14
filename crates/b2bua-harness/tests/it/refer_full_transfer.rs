@@ -1,5 +1,4 @@
-//! REFER full-transfer scenarios. Port of
-//! `tests/scenarios/refer-full-transfer.ts`.
+//! REFER full-transfer scenarios.
 //!
 //! Drive the complete A↔B↔C transfer through both re-INVITEs to completion
 //! (`merge(a, c)`) or to rollback on any failure in the a-realign phase. Slices
@@ -384,11 +383,9 @@ async fn refer_allow_full_a_glare_reinvite() {
 
 // ── 4. A BYEs while its a-realign re-INVITE is outstanding → teardown ────
 //
-// skipFinalSweep (TS refer-full-transfer.ts:361): the TS harness 24h end-of-
-// scenario sweep races A's outstanding a-realign re-INVITE retransmits. The
-// Rust harness has no such sweep — we drive the BYE explicitly between advances
-// and tolerate the CANCEL the B2BUA may emit for the in-flight re-INVITE; the
-// assertion that B+C are BYE'd is NOT relaxed. A BYE during a-realigning rides
+// We drive the BYE explicitly between advances and tolerate the CANCEL the
+// B2BUA may emit for the in-flight re-INVITE; the assertion that B+C are BYE'd
+// is NOT relaxed. A BYE during a-realigning rides
 // the CORE `relay-bye` path: 200 to A, then begin-termination BYEs B (orphan)
 // and C — no dedicated transfer rule is involved.
 
@@ -456,9 +453,7 @@ async fn refer_allow_full_a_bye_during_a_realign() {
 
 // ── 5. A never answers the a-realign re-INVITE → 32s watchdog rollback ───
 //
-// skipFinalSweep (TS refer-full-transfer.ts:442): the TS 24h sweep races A's
-// outstanding a-realign re-INVITE retransmits. The Rust harness has no sweep —
-// we drive the exact 32s `refer_reinvite_answer` deadline and tolerate the
+// We drive the exact 32s `refer_reinvite_answer` deadline and tolerate the
 // INVITE/CANCEL/BYE retransmits the crossed deadline emits (the watchdog rule
 // and the INVITE Timer B can both fire near 32s). The assertion that all three
 // legs are BYE'd is NOT relaxed.

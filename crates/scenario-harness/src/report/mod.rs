@@ -1,9 +1,9 @@
-//! Report renderers — port of the `*-report` / `svg-sequence-diagram` family
-//! in `src/test-harness/framework`. Every renderer consumes the **recording**:
+//! Report renderers — the text, HTML and sequence-diagram views of a run.
+//! Every renderer consumes the **recording**:
 //! the `RecordedSipEntry` trace projected by `sip_net_testkit::to_sip_entries` plus the
 //! `RecordedScenario` (lanes + anomalies) drained from the `layer-harness`
 //! `Recorder`. Nothing here reads interpreter state — the record is the source
-//! of truth, as the migration's recording-first design intends.
+//! of truth (the recording-first design of ADR-0006).
 
 pub mod html;
 pub mod http;

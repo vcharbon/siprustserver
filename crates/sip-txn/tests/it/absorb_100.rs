@@ -1,4 +1,4 @@
-//! Port of `tests/sip/transaction-layer-100-absorb.test.ts` — `100 Trying` is
+//! `100 Trying` is
 //! a hop-by-hop indicator that MUST NOT reach the app (RFC 3261 §8.1.3.4). It
 //! is absorbed after nudging the client txn's state; the next `180` (with a
 //! To-tag) is the first event the consumer sees. Pinned for INVITE / BYE /

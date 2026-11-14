@@ -1,6 +1,5 @@
-//! Codec round-trip + property suite — port of the codec properties of
-//! `tests/codec/round-trip-property.test.ts` (P1/P2/P3/P5/P6/P7/P8/P14).
-//! Cross-codec parity is out of scope; P10/P11/P13 are compile-time guarantees
+//! Codec round-trip + property suite (properties P1/P2/P3/P5/P6/P7/P8/P14).
+//! Cross-codec agreement is out of scope; P10/P11/P13 are compile-time guarantees
 //! (`encode(&Call)` cannot mutate, `decode` returns the typed `Call`). See
 //! ADR-0008.
 
@@ -462,25 +461,18 @@ fn policy_body_three_states_round_trip() {
     }
 }
 
-/// The `emergency` flag (`CallModel.ts` L628–635) is the data-layer prerequisite
-/// for the SipRouter `;emerg=1` / `;em=1` URI/Via marker stamping that lets the
-/// dispatcher byte-classifier route in-dialog packets into the emergency priority
-/// queue without parsing — so it MUST survive the failover/replication round-trip
-/// intact.
+/// The `emergency` flag is the data-layer prerequisite for the `;emerg=1` /
+/// `;em=1` URI/Via marker stamping that lets the dispatcher byte-classifier
+/// route in-dialog packets into the emergency priority queue without parsing —
+/// so it MUST survive the failover/replication round-trip intact.
 ///
-/// Wire position. The TS positional msgpack codec carries it at `FIELD_ORDER`
-/// **index 20** (`msgpack.ts` L37: `callRef`=0 … `emergency`=20);
-/// the protobuf codec encodes it whenever `!== undefined` (`protobuf.ts` L143),
-/// under id `optional bool emergency = 24` (`call.proto`). (The older bench
-/// definition in `tests/bench/call-codec/codec.ts` uses `id: 21`; the bench and
-/// the current proto diverge — cite the proto, not the bench.) Our codec here is
-/// `rmp-serde`'s positional/array encoding, so the field is carried by struct
-/// position, exactly like the TS msgpack codec.
+/// Wire position. The codec is `rmp-serde`'s positional/array encoding, so the
+/// field is carried by struct position.
 ///
 /// States. The three round-tripped here are `None`, `Some(false)`, `Some(true)`:
-/// - In production only `true` or absent are ever written: the producer is
-///   `SipRouter.ts` L1215 `emergency: isEmergency || undefined`, which coerces a
-///   computed `false` to `undefined`. `Some(false)` is therefore exercised here
+/// - In production only `true` or absent are ever written: the producer
+///   (`b2bua-core` `initial_invite`) writes `Some(true)` for an emergency
+///   INVITE and `None` otherwise. `Some(false)` is therefore exercised here
 ///   purely for codec robustness, not because the system emits it.
 /// - `None` serializes as an explicit nil in the field's position and decodes
 ///   back to `None`; a body is decoded only by the build that encoded it
@@ -555,7 +547,7 @@ fn reroute_plan_in_callback_context_survives_replication() {
 
 // ── Leg-kind / `adopted` round-trip (ADR-0014) ──────────────────────────────
 //
-// Port of `tests/codec/leg-kind-round-trip.test.ts`. `Leg.kind` and
+// `Leg.kind` and
 // `Leg.adopted` ride in the replicated call body and must survive
 // encode → decode: a media leg's `kind=Media` / `adopted=false` is what the
 // unadopted-leg gate keys on when another node restores the call, so losing it
@@ -565,7 +557,7 @@ fn reroute_plan_in_callback_context_survives_replication() {
 // `MsgpackCodec` (`rmp-serde`'s positional/array encoding). There is no
 // protobuf codec (ADR-0008).
 
-/// `it("a-leg kind/adopted survive encode→decode")` — the explicitly-tagged
+/// The a-leg's kind/adopted survive encode→decode: the explicitly-tagged
 /// a-leg carries `kind=A` / `adopted=true` through the positional msgpack codec.
 #[test]
 fn leg_kind_a_leg_kind_adopted_survive() {
@@ -573,7 +565,7 @@ fn leg_kind_a_leg_kind_adopted_survive() {
     let mut call = representative_call();
     call.a_leg.kind = Some(LegKind::A);
     call.a_leg.adopted = Some(true);
-    // An unadopted media leg rides in b_legs (mirrors the TS `mediaLeg`).
+    // An unadopted media leg rides in b_legs.
     let mut media = representative_call().a_leg;
     media.leg_id = "media-1".into();
     media.kind = Some(LegKind::Media);
@@ -586,7 +578,7 @@ fn leg_kind_a_leg_kind_adopted_survive() {
     assert_eq!(decoded, call, "full value preserved");
 }
 
-/// `it("media leg kind=media / adopted=false survive")` — the unadopted media
+/// A media leg's kind=media / adopted=false survive: the unadopted media
 /// leg's role/adopted bit round-trips intact (`false` is the gate-relevant
 /// value, distinct from absent).
 #[test]
@@ -611,7 +603,7 @@ fn leg_kind_media_leg_kind_adopted_survive() {
     assert_eq!(media.adopted, Some(false));
 }
 
-/// `it("a leg without kind/adopted decodes with both absent")`.
+/// A leg without kind/adopted decodes with both absent.
 ///
 /// The Rust `MsgpackCodec` is **positional**: a *value* of `None` for `kind` /
 /// `adopted` serializes as an explicit nil in its slot and round-trips to
@@ -632,7 +624,7 @@ fn leg_kind_absent_decodes_absent() {
 
 // ── Service-ext round-trip (ADR-0016) ───────────────────────────────────────
 //
-// Port of `tests/codec/service-ext-round-trip.test.ts`. Locks the load-bearing
+// Locks the load-bearing
 // invariant: `Call.ext[id]` / `Leg.ext[id]` carry the **Encoded** (JSON-safe)
 // form of a service slice, never a decoded value. A `promotedSdp` rides as its
 // **base64 string**, never as raw bytes.
@@ -645,17 +637,16 @@ fn leg_kind_absent_decodes_absent() {
 // positional msgpack codec AND re-decodes (base64 → bytes) to the original SDP
 // bytes.
 
-/// The PEM promote service's SDP — base64 is the at-rest form. Mirrors the TS
-/// `sdpBytes`.
+/// The PEM promote service's SDP — base64 is the at-rest form.
 const PEM_SDP: &[u8] =
     b"v=0\r\no=- 200 1 IN IP4 10.20.0.1\r\ns=-\r\nc=IN IP4 10.20.0.1\r\nt=0 0\r\nm=audio 40000 RTP/AVP 0\r\n";
-/// The transfer C-leg initial SDP — same Uint8Array/base64 trap as PEM's
-/// `promotedSdp`. Mirrors the TS `cInitialSdpBytes`.
+/// The transfer C-leg initial SDP — same bytes/base64 trap as PEM's
+/// `promotedSdp`.
 const TRANSFER_C_SDP: &[u8] =
     b"v=0\r\no=- 9001 1 IN IP4 10.30.0.7\r\ns=-\r\nc=IN IP4 10.30.0.7\r\nt=0 0\r\nm=audio 50000 RTP/AVP 8\r\n";
 
 /// The encoded `promote-pem` call-ext slice: `promotedSdp` as a base64 *string*
-/// (the at-rest form), the rest as plain JSON. Mirrors the TS `encodedSlice`.
+/// (the at-rest form), the rest as plain JSON.
 fn pem_call_ext_encoded() -> serde_json::Value {
     serde_json::json!({
         "promoted": true,
@@ -666,7 +657,6 @@ fn pem_call_ext_encoded() -> serde_json::Value {
 }
 
 /// The encoded `transfer` call-ext slice: `cInitialSdp` as a base64 *string*.
-/// Mirrors the TS `encodedTransferSlice`.
 fn transfer_call_ext_encoded() -> serde_json::Value {
     serde_json::json!({
         "phase": "c-realigning",
@@ -683,7 +673,7 @@ fn transfer_call_ext_encoded() -> serde_json::Value {
 }
 
 /// A `Call` carrying both service call-ext slices plus a typed leg-ext entry on
-/// the a-leg. Mirrors the TS `callWithExt`.
+/// the a-leg.
 fn call_with_ext() -> call::Call {
     let mut call = representative_call();
     let ext = call.ext.get_or_insert_with(Default::default);
@@ -698,8 +688,8 @@ fn call_with_ext() -> call::Call {
     call
 }
 
-/// `it("call-ext promotedSdp base64 survives encode→decode and re-decodes to
-/// the original bytes")`.
+/// The call-ext `promotedSdp` base64 survives encode→decode and re-decodes to
+/// the original bytes.
 #[test]
 fn service_ext_pem_promoted_sdp_base64_survives() {
     let codec = MsgpackCodec::new();
@@ -720,7 +710,7 @@ fn service_ext_pem_promoted_sdp_base64_survives() {
     assert_eq!(slice["resyncReinviteCSeq"], 42);
 }
 
-/// `it("leg-ext entry survives encode→decode")`.
+/// A leg-ext entry survives encode→decode.
 #[test]
 fn service_ext_leg_ext_entry_survives() {
     let codec = MsgpackCodec::new();
@@ -732,8 +722,8 @@ fn service_ext_leg_ext_entry_survives() {
     );
 }
 
-/// `it("transfer call-ext cInitialSdp base64 survives and re-decodes to
-/// bytes")`.
+/// The transfer call-ext `cInitialSdp` base64 survives and re-decodes to
+/// bytes.
 #[test]
 fn service_ext_transfer_c_initial_sdp_base64_survives() {
     let codec = MsgpackCodec::new();

@@ -1,5 +1,4 @@
-//! [`WorkerRegistryControl`] — the health-write seam (port of
-//! `health/WorkerRegistryControl.ts`). The HealthProbe writes worker health
+//! [`WorkerRegistryControl`] — the health-write seam. The HealthProbe writes worker health
 //! through this seam so it does not depend on a concrete registry's internals.
 //! The one impl is the adapter over the shared `WorkerSet` — every registry
 //! (static, composed, simulated) wraps a `WorkerSet`, so each hands out the

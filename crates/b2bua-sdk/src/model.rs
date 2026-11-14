@@ -1,6 +1,6 @@
-//! The rule-engine core types — port of `RuleDefinition.ts` (declarative
-//! `Match`, `RuleContext`, the `RuleAction` vocabulary) reduced to a concrete
-//! (non-type-narrowed) shape sufficient for the basic B2BUA. Service-layer
+//! The rule-engine core types (declarative `Match`, `RuleContext`, the
+//! `RuleAction` vocabulary) in a concrete (non-type-narrowed) shape sufficient
+//! for the basic B2BUA. Service-layer
 //! ext narrowing and rule composition are deferred with their consumers.
 
 use call::features::FeatureActivations;
@@ -472,7 +472,6 @@ pub enum RuleAction {
     /// Send a NOTIFY toward `leg_id`'s confirmed dialog carrying the REFER
     /// subscription state (`Event` + `Subscription-State` + sipfrag body). The
     /// B2BUA is the UAS of the referrer leg, so the NOTIFY rides that dialog.
-    /// Port of `executeSendNotify` (ActionExecutor.ts:2157).
     SendNotify {
         leg_id: String,
         event: String,

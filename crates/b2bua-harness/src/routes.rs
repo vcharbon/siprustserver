@@ -77,8 +77,8 @@ impl B2buaSut {
     /// Builder for a B2BUA that routes the call to `dest_port` (bob1) with the
     /// `relayFirst18xTo180` feature active under `strategy` and a `callback_context`
     /// set (the failover-capable marker), and fails over via `/call/failure` to
-    /// `failover_port` (bob2) with `failover_ruri` as the new Request-URI. Mirrors
-    /// the TS `on_failure: { action: "failover", destination, new_ruri }` instruction.
+    /// `failover_port` (bob2) with `failover_ruri` as the new Request-URI: an
+    /// `on_failure: { action: "failover", destination, new_ruri }` instruction.
     pub fn route_all_to_with_18x_failover(
         dest_host: &str,
         dest_port: u16,
@@ -96,8 +96,8 @@ impl B2buaSut {
                 .fallback(move |_req| {
                     let mut r = route_to_with_18x(&primary.0, primary.1, strategy);
                     r.callback_context = Some("failover-test".into());
-                    // The TS relies on the 30 s platform no-answer default the Rust
-                    // default route omits — set it so the no-answer failover fires.
+                    // The default route states no no-answer bound — set the 30 s
+                    // one so the no-answer failover fires.
                     r.no_answer_ms = Some(30_000);
                     NewCallResponse::Route(r)
                 })

@@ -1,5 +1,4 @@
-//! `RunContext` — the three-tier severity driver (ADR-0013 D5, port of
-//! `src/test-harness/framework/RunContext.ts`).
+//! `RunContext` — the three-tier severity driver (ADR-0004).
 //!
 //! Each contract decorator consults the active [`RunContext`] to decide how
 //! loudly a rule finding should surface:
@@ -17,10 +16,10 @@
 
 use crate::anomaly::Severity;
 
-/// The `tag` identity a [`RunContext::UnitTestOfLayer`] targets. In the source
-/// this is an Effect `ServiceMap.Key`; here a layer's stable channel key (the
-/// same `&'static str` passed to [`crate::Recorder::for_tag`]) is enough to
-/// decide "is this rule's layer the one under test".
+/// The `tag` identity a [`RunContext::UnitTestOfLayer`] targets: a layer's
+/// stable channel key (the same `&'static str` passed to
+/// [`crate::Recorder::for_tag`]), enough to decide "is this rule's layer the
+/// one under test".
 pub type LayerTag = &'static str;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -38,7 +37,7 @@ impl RunContext {
     /// Resolve the severity for a finding raised by the layer identified by
     /// `this_tag`, given an optional per-rule `advisory` override.
     ///
-    /// Mirrors the dispatch baked into `SignalingNetwork.contracts.ts`:
+    /// The dispatch:
     ///
     /// | context | severity |
     /// |---|---|
@@ -47,8 +46,8 @@ impl RunContext {
     /// | `UnitTestOfLayer{tag}` where `tag == this_tag` | `Fatal` |
     /// | `UnitTestOfLayer{tag}` where `tag != this_tag` | `Advisory` |
     ///
-    /// A rule that sets `force_advisory` (the `severityOverride: "advisory"`
-    /// of the source) collapses to `Advisory` in every non-fatal context.
+    /// A rule that sets `force_advisory` collapses to `Advisory` in every
+    /// non-fatal context.
     pub fn severity_for(self, this_tag: LayerTag, force_advisory: bool) -> Severity {
         match self {
             RunContext::RealRun => Severity::Advisory,

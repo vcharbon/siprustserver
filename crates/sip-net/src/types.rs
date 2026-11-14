@@ -1,10 +1,7 @@
-//! Public network-layer types — port of the type surface in
-//! `src/sip/SignalingNetwork.ts`, reshaped to Rust / tokio idioms.
-//!
-//! Reshaping notes (the "closer to Rust methods" adaptation):
-//!   - `RemoteInfo { address, port }` → [`std::net::SocketAddr`] everywhere.
-//!   - `bindUdp` ip/port pair → a single `addr: SocketAddr` on [`BindUdpOpts`].
-//!   - `Buffer` → `Bytes` (received) / `&[u8]` (borrowed on `send`).
+//! Public network-layer types, in Rust / tokio idioms:
+//!   - a peer is a [`std::net::SocketAddr`] everywhere.
+//!   - a bind names a single `addr: SocketAddr` on [`BindUdpOpts`].
+//!   - a datagram is `Bytes` (received) / `&[u8]` (borrowed on `send`).
 //!   - `PreIngressHook` is an `Arc<dyn Fn ...>` so it is cheap to clone into
 //!     the simulated fabric's routing table and into recorded summaries.
 
@@ -160,7 +157,7 @@ pub struct SocketBuffers {
     pub send: usize,
 }
 
-/// SIP role(s) a bind serves (port of `UaRole`). The audit framework's
+/// SIP role(s) a bind serves. The audit framework's
 /// per-rule dispatch intersects a rule's `subject` with a bind's declared
 /// roles; a `proxy`-only rule does not run against a pure-UA bind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -197,7 +194,7 @@ pub enum PreIngressAction {
 pub type PreIngressHook =
     Arc<dyn Fn(&mut Arrival, SocketAddr, usize) -> PreIngressAction + Send + Sync>;
 
-/// Options for `bind_udp` (port of `BindUdpOpts`).
+/// Options for `bind_udp`.
 #[derive(Clone)]
 pub struct BindUdpOpts {
     pub addr: SocketAddr,
@@ -350,7 +347,7 @@ pub enum BindErrorReason {
     HeldBack,
 }
 
-/// Failure binding a UDP endpoint (port of `BindError`).
+/// Failure binding a UDP endpoint.
 #[derive(Debug, Clone, thiserror::Error)]
 #[error("bind {addr} failed ({reason:?}): {message}")]
 pub struct BindError {
@@ -418,7 +415,7 @@ impl SendErrorKind {
     }
 }
 
-/// Failure sending a datagram (port of `SendError`).
+/// Failure sending a datagram.
 #[derive(Debug, Clone, thiserror::Error)]
 #[error("send failed: {message}")]
 pub struct SendError {

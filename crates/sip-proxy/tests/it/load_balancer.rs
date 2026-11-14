@@ -1,5 +1,4 @@
-//! Ports of the pure-logic `tests/sip-front-proxy/load-balancer/*` suite:
-//! cookie encode/decode round-trip, HMAC tampering, the liveness routing
+//! The load balancer's pure logic: cookie encode/decode round-trip, HMAC tampering, the liveness routing
 //! matrix and the acceptance of new calls (ADR-0050), unresolvable-id
 //! fallback, resharding stickiness, and initial-health gating. No proxy SUT —
 //! these exercise the `LoadBalancerStrategy` directly.
@@ -33,8 +32,8 @@ fn request(method: &str, call_id: &str, to_tag: Option<&str>) -> SipMessage {
 }
 
 /// As [`request`], optionally stamping a `Resource-Priority` header (the on-wire
-/// emergency signal `is_emergency_invite` detects, mirroring the TS
-/// `buildInvite(callId, true)` which adds `Resource-Priority: esnet.0`).
+/// emergency signal `is_emergency_invite` detects, `Resource-Priority:
+/// esnet.0`).
 fn request_with_rph(
     method: &str,
     call_id: &str,
@@ -104,8 +103,8 @@ async fn hmac_tampering_rejected() {
     let target = s.select_for_new_dialog(&invite, SelectOpts::default()).await.unwrap();
     let mut params = s.encode_stickiness(&target, &invite).unwrap();
 
-    // Pin the v3 cookie wire format the proxy stamped (mirrors the TS RR-shape
-    // assertions: v=3, e=0, w_pri/w_bak/kid/sig present).
+    // Pin the v3 cookie wire format the proxy stamped: v=3, e=0,
+    // w_pri/w_bak/kid/sig present.
     assert_eq!(params.get("v").unwrap(), "3");
     assert_eq!(params.get("e").unwrap(), "0", "non-emergency INVITE ⇒ e=0");
     assert!(!params.get("w_pri").unwrap().is_empty(), "w_pri present");
@@ -153,8 +152,8 @@ async fn cookie_round_trips_to_alive_primary() {
 #[tokio::test]
 async fn emergency_cookie_round_trips_e1_and_is_emergency() {
     // The v3 `e=1` emergency flag must survive an
-    // encode → decode round-trip. Mirrors the TS `e=1` contract (stickinessInput
-    // emergency arg; decodeStickiness isEmergencyDialog = emergencyFlag === '1').
+    // encode → decode round-trip: an emergency dialog encodes `e=1`, and a
+    // decoded `e=1` is an emergency dialog.
     let clock = Clock::test_at(0);
     let reg = two_worker_registry(clock.clone());
     let s = strategy(reg, clock);
@@ -380,7 +379,7 @@ async fn above_critical_band_filtered_for_non_emergency_only() {
     ));
     // Emergency bypasses the band filter — two independent paths, one assertion each:
     // (a) an on-wire `Resource-Priority: esnet.0` INVITE drives `is_emergency_invite`
-    //     on the select path directly (mirrors the TS `buildInvite(callId, true)`).
+    //     on the select path directly.
     let rph_invite = emergency_invite("call-ov-rph@h");
     assert_eq!(
         s.select_for_new_dialog(&rph_invite, SelectOpts::default()).await.unwrap(),
@@ -394,7 +393,7 @@ async fn above_critical_band_filtered_for_non_emergency_only() {
 
 #[tokio::test(start_paused = true)]
 async fn rate_cap_exhausted_when_winners_bucket_is_empty() {
-    // Wires the per-worker AIMD bucket into admission (TS LoadBalancer.ts:335-348):
+    // Wires the per-worker AIMD bucket into admission:
     // a non-emergency new dialog whose rendezvous winner has a drained bucket is
     // rejected with `RateCapExhausted`, and re-INVITE / emergency on the SAME
     // worker bypass the bucket and are still admitted.
@@ -402,8 +401,7 @@ async fn rate_cap_exhausted_when_winners_bucket_is_empty() {
     // `start_paused` freezes `tokio::time`, so every `clock.now_ms()` — the drain
     // loop's, AND the strategy's internal read inside `select_for_new_dialog` —
     // returns the SAME instant (anchor 0 + 0 elapsed). The bucket therefore refills
-    // by a provable zero between the drain and the assert, matching the TS unit
-    // test's pinned `nowMs=0`. Under a plain (unpaused) `#[tokio::test]` the real
+    // by a provable zero between the drain and the assert. Under a plain (unpaused) `#[tokio::test]` the real
     // monotonic clock ticks between the two and a token can trickle back under
     // extreme scheduling delay — a latent CI flake this removes.
     let clock = Clock::test_at(0);

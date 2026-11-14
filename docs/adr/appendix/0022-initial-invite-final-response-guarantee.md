@@ -11,8 +11,7 @@ Without X1 and X2, three independent gaps break the guarantee.
    router or the decision engine run. An initial-INVITE handler that `await`s
    `decision.new_call()` bare (`initial_invite.rs`) parks the per-call worker behind the
    caller's 100 for as long as a hung or slow call-control endpoint takes, including any
-   third-party `CallDecisionEngine` that forgot its own timeout. The TS
-   `HttpReferenceAdapter` bounds it with `callControlNewCallTimeoutMs = 5000`.
+   third-party `CallDecisionEngine` that forgot its own timeout.
 2. **Every backstop behind the seam is silent toward the caller.** A call reaches
    `→ terminated` with its a-leg INVITE unanswered on the reaper's `reaper-stale`,
    `reaper-fatal-error` and strike-2 discharge paths (`defaults.rs::reap_force_terminal`
@@ -20,17 +19,16 @@ Without X1 and X2, three independent gaps break the guarantee.
    the sip-txn safety sweep `delete_txn`s an unanswered server transaction at ~193 s
    (`layer.rs::sweep`). On each the caller hears 100 and then nothing.
 3. **Status-code drift.** Decision-error and overload rejects use `503`, and the requirement
-   was stated informally as "500". X3 settles on 503 Service Unavailable: both the Rust port
-   and the TS reference emit it, and it is the correct code for a transient server-side
+   was stated informally as "500". X3 settles on 503 Service Unavailable: the overload and
+   decision paths already emit it, and it is the correct code for a transient server-side
    inability to handle the call.
 
 ## Decision X1: a core-level decision deadline (`DeadlineDecisionEngine`)
 
 Each wrapped call rides `tokio::time::timeout`, deterministic under `start_paused`. On expiry
 it returns `CallDecisionError::Unavailable`, which every call site maps to a final response.
-The expired inner future is dropped, which cancels an HTTP adapter's in-flight request like
-the TS `Effect.timeoutOrElse`. The default of 5000 ms matches the TS `CALL_CONTROL_*_TIMEOUT_MS`. No consult runs unbounded
-while it holds its call's lock.
+The expired inner future is dropped, which cancels an HTTP adapter's in-flight request. The
+default is 5000 ms. No consult runs unbounded while it holds its call's lock.
 
 **Scope: `new_call` + `call_failure`, deliberately NOT `call_refer`.** These two
 
@@ -41,8 +39,7 @@ final*. `call_refer` is different in kind — the REFER already received its
 `202 Accepted`, so a hanging refer authorization strands no waiting INVITE; it is
 bounded instead by the dedicated `refer_subscription_expiry_sec` (60 s) and
 `refer_overall_safety_sec` (120 s) timers (`refer_reject.rs::refer_http_timeout`).
-This is a **documented divergence** from the TS `callControlReferTimeoutMs`: the
-Rust port bounds the REFER lifecycle with those subscription timers rather than a
+The REFER lifecycle is bounded by those subscription timers rather than a
 decision deadline, so `call_refer` passes straight through the wrapper.
 
 The setup budget bounds the whole setup on an initial INVITE's turn, not each round trip: a
@@ -85,8 +82,7 @@ convenience.
 
 503 rather than 500: a 4xx states a caller fault and a 500 a malformed request the server
 choked on, while 503 states a transient, retryable inability an upstream proxy or caller can
-fail over on, and matches the TS reference and the Rust
-overload and decision paths. The admission refusals are the overload and capacity gates, the
+fail over on, and matches the overload and decision paths. The admission refusals are the overload and capacity gates, the
 ingress brake and the deferred backlog. A `Reason` states the cause of a rejection someone
 decided (RFC 3326), and a caller rerouting on a 5xx reads it as one. So whichever path minted
 the 5xx (a spent budget, an unanswered consult, a refused route, the chain's depth, the X2
@@ -228,7 +224,7 @@ server transaction and answers it 503, so it holds the live transaction and answ
 
 ## Alternatives considered
 
-- **Timeout inside a ported HTTP adapter (TS-faithful).** Rejected as the *sole*
+- **Timeout inside the HTTP adapter.** Rejected as the *sole*
   mechanism: it does not bind third-party adapters and leaves the panic/reaper
   silence gaps open. The core deadline (X1) + central synthesis (X2) cover all
   engines and all internal-failure paths; a per-adapter timeout becomes an
@@ -240,4 +236,4 @@ server transaction and answers it 503, so it holds the live transaction and answ
 - **A Timer C in the LB proxy.** Rejected (X4): duplicates the endpoint's own
   transaction timer and re-introduces per-INVITE proxy state.
 - **500 instead of 503.** Rejected (X3): 503 is transient/retryable and matches
-  existing behaviour and the TS reference.
+  existing behaviour.

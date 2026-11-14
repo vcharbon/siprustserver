@@ -1,6 +1,5 @@
-//! LoadBalancer end-to-end through a real `ProxyCore` SUT — ports of
-//! `tests/sip-front-proxy/load-balancer/{callid-routing-guard, distribution}`
-//! at the wire level: a new-dialog INVITE is HRW-routed to a worker, the worker
+//! LoadBalancer end-to-end through a real `ProxyCore` SUT — Call-ID routing
+//! and distribution at the wire level: a new-dialog INVITE is HRW-routed to a worker, the worker
 //! sees a signed Record-Route, and the in-dialog BYE (carrying that cookie back)
 //! sticks to the same worker.
 

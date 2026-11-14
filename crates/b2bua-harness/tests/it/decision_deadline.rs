@@ -11,8 +11,7 @@
 //!  1. **Hang / slow HTTP adapter** (incl. any third-party `CallDecisionEngine`
 //!     that forgot its own timeout): the core-level [`DeadlineDecisionEngine`]
 //!     wrap converts the parked await into the ordinary decision-error 503 at
-//!     `call_control_timeout_ms` (default 5000 ms — the TS
-//!     `CALL_CONTROL_NEW_CALL_TIMEOUT_MS` parity).
+//!     `call_control_timeout_ms` (default 5000 ms).
 //!  2. **Internal error (panic) inside the INVITE body**: the dispatcher
 //!     isolates the panic, the reaper's strike-1 `fatal-error` verdict reaps
 //!     through the rules, and the `→ terminated` funnel's unanswered-a-leg

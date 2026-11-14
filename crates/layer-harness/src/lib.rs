@@ -1,21 +1,17 @@
 //! layer-harness — the test-only contract + recording foundation shared by
-//! every layer (port of sipjsserver's `src/test-harness/framework`).
+//! every layer (ADR-0004).
 //!
-//! This crate is the Rust home of the **effect-layer-test** pattern (see the
-//! `effect-layer-test` SKILL and ADR-0013 in the source). In the TypeScript
-//! source the four contract wrappers (`propertyTest` / `paranoidInputs` /
-//! `parity` / `scopedAudit`) are Effect `Layer`s that wrap an implementation
-//! `Layer` of the same `Tag`. The Effect→Rust construct map (see
-//! `docs/MIGRATION_STRATEGY.md`) renders that as **decorator structs that
-//! implement the same trait** — and they all need the same shared machinery:
+//! A layer's contracts (`paranoidInputs` / `scopedAudit` and their kin) are
+//! **decorator structs that implement the layer's own trait** around the real
+//! implementation, and they all stand on the same shared machinery:
 //!
-//! | Source piece | Here |
+//! | Piece | Here |
 //! |---|---|
-//! | `RunContext` (three-tier severity) | [`RunContext`], [`Severity`] |
-//! | `EventSequencer` | [`EventSequencer`] |
-//! | `Recorder` + typed `forTag` channels + projectors | [`Recorder`], [`Channel`] |
-//! | `recordingHelpers.ts` | [`recording`] |
-//! | `RecordedAnomaly` ledger | [`RecordedAnomaly`] |
+//! | three-tier severity | [`RunContext`], [`Severity`] |
+//! | per-scenario event order | [`EventSequencer`] |
+//! | typed recording channels + projectors | [`Recorder`], [`Channel`] |
+//! | recording helpers | [`recording`] |
+//! | anomaly ledger | [`RecordedAnomaly`] |
 //!
 //! **What lives here vs. in a layer crate.** This crate is SIP-agnostic: it
 //! knows nothing about `SipMessage`, sockets, or any specific service. The

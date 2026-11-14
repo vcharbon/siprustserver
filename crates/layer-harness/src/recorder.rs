@@ -1,5 +1,4 @@
-//! `Recorder` — single source of truth for what crossed the test fabric
-//! (port of `report-recorder/Recorder.ts`).
+//! `Recorder` — single source of truth for what crossed the test fabric.
 //!
 //! Two surfaces:
 //!
@@ -12,9 +11,8 @@
 //!     [`Recorder::register_projector`] for findings derived at snapshot from a
 //!     channel). [`Recorder::snapshot`] drains lanes + the merged anomalies.
 //!
-//! Recording is synchronous (the TS `record` was `Effect.sync` over an
-//! in-memory array), so none of this is `async` — a `Drop` finalizer can
-//! record cleanly.
+//! Recording is synchronous (an append to an in-memory buffer), so none of
+//! this is `async` — a `Drop` finalizer can record cleanly.
 
 use std::any::Any;
 use std::collections::{HashMap, HashSet};

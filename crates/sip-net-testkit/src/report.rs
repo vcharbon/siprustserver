@@ -71,8 +71,7 @@ impl RecvNote {
 }
 
 /// One message as it crossed (or tried to cross) the wire, reconstructed from a
-/// `SendCalled`/`RecvItem` pair on the recording channel. Port of the source's
-/// `NetworkTraceEntry` / report-recorder `RecordedSipEntry`.
+/// `SendCalled`/`RecvItem` pair on the recording channel.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecordedSipEntry {
     /// The sender's bound address (the `SendCalled` bind key).
@@ -102,8 +101,7 @@ pub struct RecordedSipEntry {
     /// The receiver's full lane key, when a receive half was matched.
     pub to_lane: Option<String>,
     /// Capture-order tiebreaker from the originating `SendCalled` — the
-    /// renderer sorts on `(sent_ms, seq)` exactly like the source's SVG/text
-    /// renderers sort on `(timestamp, seq)`.
+    /// renderers sort on `(sent_ms, seq)`.
     pub seq: u64,
 }
 

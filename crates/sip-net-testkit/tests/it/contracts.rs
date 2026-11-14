@@ -1,6 +1,5 @@
 //! Contract decorators — recording capture, paranoid preconditions, and the
-//! three-tier scoped audit. Port of the `SignalingNetwork.contracts.ts`
-//! behaviours exercised by the source harness.
+//! three-tier scoped audit.
 
 use std::sync::Arc;
 use std::time::Duration;

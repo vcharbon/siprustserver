@@ -1,6 +1,5 @@
 //! The worker-side `X-Overload` load signal the front proxy's
-//! ELU-band AIMD consumes (port of the X-Overload publish surface of
-//! `OverloadController.ts` / `LoadSampler.ts`).
+//! ELU-band AIMD consumes.
 //!
 //! Closes the producer→consumer loop: a *running* `B2buaCore` publishes
 //! `X-Overload: v=1; elu=…; gc=…; adm=…` and the front proxy's REAL parser
@@ -58,8 +57,8 @@ async fn running_worker_publishes_parseable_x_overload_after_sampling() {
     let _report = h.finish().await;
 }
 
-/// The faithful `start_paused` port of the TS `it.live` "LoadSampler injection
-/// drives eluEwma once the sampler fires": inject an `OverloadSignal` over the
+/// An injected load sampler drives the ELU EWMA once the sampler fires, on a
+/// paused clock: inject an `OverloadSignal` over the
 /// `simulated()` sampler, set a non-zero ELU through its control, advance several
 /// `SAMPLE_PERIOD`s, and prove the injected value flows THROUGH the running 100 ms
 /// sampler task into the published `X-Overload` header (`elu` rises above 0 and

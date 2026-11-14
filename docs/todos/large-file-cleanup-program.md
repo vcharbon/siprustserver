@@ -40,15 +40,11 @@ commit.
 
 - History: dates, "previously / used to / no longer / originally /
   replaces", commit hashes, ticket IDs. Git and ADRs own history.
-- TS/JS-port references ("mirrors the TS version", "like sipjsserver",
-  "ported from"). The Rust code has diverged; the comparison is dead weight.
-  33 such comments remain workspace-wide (rescan 2026-08-08), almost all in
-  the `media`/`media-harness` crates
-  (`grep -rniE 'typescript|sipjs|ported from' crates --include='*.rs'`).
-  If the comparison encodes a live invariant (e.g. "deliberately simpler
-  than the TS clock pump"), rewrite it as a present-tense contract with no
-  TS mention; the test-clock one is already documented in
-  docs/testing/test-clock.md — a doc pointer suffices.
+- Comparisons with another implementation ("mirrors the X version",
+  "ported from"): the comparison is dead weight. If it encodes a live
+  invariant, rewrite it as a present-tense contract with no comparison; the
+  test-clock one is already documented in docs/testing/test-clock.md — a doc
+  pointer suffices.
 - Narration ("now we parse the header", "call the helper"), restated
   signatures, and PR-reviewer talk ("this is safe because we just checked").
 
@@ -159,8 +155,7 @@ list stays one file by design, like the `define_service!` index.
   `supervisor.rs` (732), `store.rs` (535). ha-acceptance danger zone;
   comment scrub mandatory, splits only where a seam is obvious.
 - [ ] **16. `crates/callshapes/src/plan.rs`** — 954 L.
-- [ ] **17. `crates/media/` + `crates/media-harness/`** — the last
-  TS-port-comment stronghold (most of the 33 remaining hits); only
+- [ ] **17. `crates/media/` + `crates/media-harness/`** — only
   `transport.rs` (560) breaks 500 L, so this is chiefly a comment-scrub +
   lib.rs-TOC pass across both crates.
 - [ ] **18. Remainder 500–950 L** — `b2bua-runner-kit/src/lib.rs` (924),
@@ -200,8 +195,8 @@ comments and split only when navigation genuinely hurts.
   `crates/sip-txn/tests/it/fsm.rs` (818),
   `crates/call/tests/common/mod.rs` (765) + `codec_roundtrip.rs` (601),
   `crates/b2bua-harness/tests/refer_gating.rs` (624) +
-  `update_matrix.rs` (501) + `proxy_b2bua.rs` + `basic_call_media.rs`
-  (TS-port comments), `crates/sip-proxy/tests/it/health_probe_late_reply.rs`
+  `update_matrix.rs` (501) + `proxy_b2bua.rs` + `basic_call_media.rs`,
+  `crates/sip-proxy/tests/it/health_probe_late_reply.rs`
   (540) + `load_balancer.rs` (535), the rest of the >500 L test files.
 
 ## Open notes carried forward

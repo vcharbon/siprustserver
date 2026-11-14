@@ -1,9 +1,8 @@
-//! Parser tightening: response To-tag enforcement. Port of
-//! `tests/sip/parser-response-totag.test.ts`.
+//! Parser tightening: response To-tag enforcement.
 //!
 //! RFC 3261 §8.2.6.2 / §17.1.3: every response except 100 Trying MUST carry a
 //! To-tag. The parser rejects non-100 responses missing it; 100 Trying stays
-//! lenient. (The TS `jssip` oracle column is dropped — see ADR-0001.)
+//! lenient.
 
 use sip_message::{CustomParser, SipMessage, SipParser};
 

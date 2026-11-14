@@ -1,4 +1,4 @@
-//! Keepalive where one peer answers 481 (port of `tests/scenarios/keepalive-481.ts`).
+//! Keepalive where one peer answers 481.
 //!
 //! Long call; the keepalive timer fires and the B2BUA sends an in-dialog OPTIONS
 //! to *both* legs. Alice replies 200 OK; Bob replies 481 "Call/Transaction Does

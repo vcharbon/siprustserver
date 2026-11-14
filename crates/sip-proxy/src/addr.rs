@@ -1,7 +1,6 @@
 //! [`ProxyAddr`] — the proxy's `(host, port)` policy address.
 //!
-//! Port of the source `SocketAddr` value type (`RoutingStrategy.ts` — a
-//! `{ host: string; port: number }` pair, NOT `std::net::SocketAddr`). It is
+//! A `{ host, port }` pair, NOT `std::net::SocketAddr`. It is
 //! kept as a *string host + u16 port* on purpose: the stickiness cookie's
 //! `ForwardAll` form is literally `target=host:port`, and a worker registry
 //! entry is addressed by host string. The proxy resolves a `ProxyAddr` to a
@@ -24,7 +23,7 @@ impl ProxyAddr {
 
     /// Parse a `host:port` string (the cookie / registry wire form). Returns
     /// `None` on a missing/empty host or an unparseable port. IPv6 literals are
-    /// not split here (the source registry uses host names / IPv4); a bracketed
+    /// not split here (a registry names host names / IPv4); a bracketed
     /// `[::1]:5060` form is left for the registry parser if ever needed.
     pub fn parse(s: &str) -> Option<Self> {
         let (host, port) = s.rsplit_once(':')?;

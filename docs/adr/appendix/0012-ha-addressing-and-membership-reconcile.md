@@ -167,7 +167,7 @@ of failure. Worker HA is peer-to-peer replication (ADR-0011); this decision clos
 the last gap — the front proxy. It supersedes the earlier "proxy HA is out of
 scope for this thin runner" stance (a deliberate temporary choice).
 
-**Shape (ported from sipjsserver `deploy/helm/sip-front-proxy/`):** two
+**Shape:** two
 anti-affined proxy replicas on the two `tier=edge` nodes, fronted by a **keepalived
 VRRP virtual IP** (`172.20.255.250`, static in the kind `172.20.0.0/16` node
 subnet). Active/passive: the VRRP master owns the VIP and serves all traffic; the

@@ -1,7 +1,6 @@
-//! The typed side-effect vocabulary a handler returns — port of
-//! `SipRouter.ts` `HandlerEffects` / `HandlerResult`. The router's
-//! turn commit (`commit_turn`) runs the five categories in a fixed order with
-//! different safety wraps (see ADR-0003 in the source / ADR-0010 here).
+//! The typed side-effect vocabulary a handler returns ([`HandlerResult`]).
+//! The router's turn commit (`commit_turn`) runs the five categories in a
+//! fixed order with different safety wraps (ADR-0010).
 
 use call::TxnKind;
 use call::{Call, RetainedEmission, TimerEntry, TimerKey};

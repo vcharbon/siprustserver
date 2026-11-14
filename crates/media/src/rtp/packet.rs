@@ -1,7 +1,7 @@
 //! RTP packet framing (RFC 3550) — the [`RtpFraming`] seam plus the hand-rolled
 //! [`HandRolled`] implementation.
 //!
-//! Port of `../sipjsserver/src/media/rtp/packet.ts`. The seam lets the transport
+//! The seam lets the transport
 //! engine swap wire codecs so an independent implementation
 //! ([`WebRtcRs`](super::webrtc_framing::WebRtcRs)) can cross-check this one.
 //! The encoder always emits the 12-byte fixed header (CSRC count 0); the parser
@@ -10,7 +10,7 @@
 
 pub const RTP_HEADER_BYTES: usize = 12;
 
-/// The fixed RTP header fields we model. Mirrors the TS `RtpHeader`.
+/// The fixed RTP header fields we model.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RtpHeader {
     pub version: u8,
@@ -32,15 +32,14 @@ pub struct RtpFramed {
 
 /// The wire-codec seam. Two implementations cross-check each other.
 pub trait RtpFraming: Send + Sync {
-    /// `"ts"` for the hand-rolled codec, `"rtp.js"` for the webrtc-rs witness
-    /// (labels kept from the TS port for trace continuity).
+    /// The framing's stable trace label: `"ts"` for the hand-rolled codec,
+    /// `"rtp.js"` for the webrtc-rs witness.
     fn name(&self) -> &'static str;
     fn encode_rtp(&self, header: &RtpHeader, payload: &[u8]) -> Vec<u8>;
     fn parse_rtp(&self, bytes: &[u8]) -> Option<RtpFramed>;
 }
 
-/// Hand-rolled RFC 3550 framing — the primary under-test codec (the TS
-/// `tsFraming`).
+/// Hand-rolled RFC 3550 framing — the primary under-test codec.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct HandRolled;
 

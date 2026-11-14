@@ -1,5 +1,5 @@
-//! The unified event the router/handlers process — port of `SipRouter.ts`
-//! `CallEvent`. A single discriminated type so handlers narrow on one input.
+//! The unified event the router/handlers process. A single discriminated type
+//! so handlers narrow on one input.
 
 use std::net::SocketAddr;
 

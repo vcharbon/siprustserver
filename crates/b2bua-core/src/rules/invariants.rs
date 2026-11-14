@@ -1,4 +1,4 @@
-//! Framework guarantees — port of `InvariantEnforcer.ts` + the bye-disposition
+//! Framework guarantees — the invariant enforcer + the bye-disposition
 //! invariant. On the `→ terminated` transition the framework appends the
 //! cleanup a buggy rule might have forgotten: cancel-all-timers first, then
 //! every **obligation** the call still owes (the CDR, the limiter release —

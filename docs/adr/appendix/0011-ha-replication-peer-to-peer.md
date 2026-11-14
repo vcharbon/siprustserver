@@ -2,37 +2,24 @@
 
 Decision part: [ADR-0011](../0011-ha-replication-peer-to-peer.md).
 
-## Source
-
-sipjsserver @ `fffc4ac6`,
-`src/replication/{ReplLogServer,PullerFiber,ReplicationProtocol,ReplicationSupervisor,PeerScanBootstrap,ChannelStream,ChannelIndex,EpochCounter,genCounter,EchoApply,ReadinessController,PullerHttpTransport}.ts`,
-`src/cache/{PartitionedRelayStorage,PeerEnumerator,PeerCachePort,PeerCacheClient,StickinessCookie,WorkerReadiness,BufferedTerminateWriter}.ts`,
-`src/sip-front-proxy/health/{HealthProbe,WorkerRegistryControl}.ts`.
-
 ## Context
 
-Call-context high availability in the source is a **pull-based replication log
-with watermarks**, *mediated by Redis*: a primary dual-writes each call into
-Redis `pri:{owner}` / `bak:{owner}` partitions and appends to per-peer
-`propagate:{peer}` ZSETs (callRef-keyed, counter-scored — so re-writing a call
-*moves* its single entry: the set is already implicitly compacted); a backup
-long-polls `/replog` and applies anything newer than its `(gen, counter)`
-watermark; a rebooting primary re-hydrates via `/bootstrap`. Redis was only the
-*substrate* — the mechanism is the log + watermark + pull.
+Call-context high availability is a **pull-based replication log with
+watermarks**: each write of a call moves its single entry in a per-peer
+compacted log (callRef-keyed, counter-ordered); a backup pulls anything newer
+than its `(gen, counter)` watermark; a rebooting primary re-hydrates by a
+bootstrap scan. A shared store between the workers would only be the
+*substrate* — the mechanism is the log + watermark + pull — so there is none.
 
-The Rust port **drops Redis** (`docs/MIGRATION_STRATEGY.md`: "Redis sidecar
-dropped; in-memory buffer + tokio cleanup instead"). The HA seam is already
-carved (ADR-0010 X3): `CallStore` carries `role`/`primary`/`peer`/`direction`/
-`call_gen`/`ttl`, `callRef = {primary}|{callId}|{fromTag}` encodes ownership,
-the proxy emits the `w_pri`/`w_bak` HRW stickiness cookie (ADR-0009) and has a
-pre-wired `WorkerHealth::NotReady`. This ADR records the shape of the missing
-engine: the transport, the in-process change log (replacing the Redis ZSETs),
-the puller/supervisor, bootstrap, the k8s topology provider, and the readiness
-state machine. The decisions below were resolved in a design grilling and pin
-the choices a future reader would otherwise wonder about. The detailed wire
-spec, reconnect FSM, and slice plan live in
-[`docs/plan/on-proper-migration-of-lazy-pancake.md`](../../plan/on-proper-migration-of-lazy-pancake.md);
-the visual exchange diagrams in [`docs/ha-replication.html`](../../ha-replication.html).
+The HA seam is the store's (ADR-0010 X3): `CallStore` carries
+`role`/`primary`/`peer`/`direction`/`call_gen`/`ttl`,
+`callRef = {primary}|{callId}|{fromTag}` encodes ownership, and the proxy emits
+the `w_pri`/`w_bak` HRW stickiness cookie (ADR-0009) and reads a worker's
+`NotReady`. This ADR records the engine's shape: the transport, the in-process
+change log, the puller/supervisor, bootstrap, the k8s topology provider, and
+the readiness state machine. The decisions below pin the choices a future
+reader would otherwise wonder about. The wire is ADR-0014's; the visual
+exchange diagrams are in [`docs/ha-replication.html`](../../ha-replication.html).
 
 ## Decision X2. Transport is its own message-granular reliable seam
 
@@ -92,7 +79,7 @@ A `NotReady → Ready → Draining` state machine (`ReadinessController` /
 `WorkerHealth`. **Ready** when bootstrap re-hydration has completed for all
 *reachable* peers (best-effort, hard-timer bounded) **and** the forward pulls are
 "current", where the **`current` flag is set the instant the head `Noop`
-arrives** (per-peer, sticky across reconnects — the source's `everCaughtUp`).
+arrives** (per-peer, sticky across reconnects — `everCaughtUp`).
 Not "strictly converged" (the reverse tail never quiets under load → the signal
 would degenerate to the timer) and not "re-hydrated only" (the node would be a
 weak backup right after boot).
@@ -134,7 +121,7 @@ drain keeps its old one alive) — the same `ArcSwap` discipline the registry us
 
 ## Decision X9. Wire protocol: positional-msgpack frames
 
-**Two distinct generations** (a source-side terminology trap, `EpochCounter` vs
+**Two distinct generations** (a terminology trap, the incarnation counter vs
 the call body's `_topology.gen`): `gen` = incarnation (per worker-restart, high
 word of the watermark), `call_gen` = the call's primary counter `p` of the `(p,b)`
 version vector. A rebooted worker serves under a higher `gen`/counter-0, so
@@ -184,9 +171,7 @@ replication exchange renders as a sequence diagram beside the SIP exchange.
 
 ## References
 
-- [`docs/plan/on-proper-migration-of-lazy-pancake.md`](../../plan/on-proper-migration-of-lazy-pancake.md)
-  (full wire spec, reconnect FSM, slice plan), [`docs/ha-replication.html`](../../ha-replication.html)
-  (Mermaid exchange diagrams).
+- [`docs/ha-replication.html`](../../ha-replication.html) (Mermaid exchange diagrams).
 - ADR-0009 (proxy HRW + stickiness cookie + fresh-pod guard),
   ADR-0010 X3 (replication-aware `CallStore` seam — the deferral this fills),
   ADR-0008 (positional msgpack), ADR-0006 (recording-first harness),

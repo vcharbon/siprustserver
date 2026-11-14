@@ -1,4 +1,4 @@
-//! The persistence/replication seam — port of `PartitionedRelayStorage`. The
+//! The persistence/replication seam. The
 //! method signatures already carry every HA parameter (partition `role`/
 //! `primary`, propagate `peer`/`direction`, `call_gen`, index keys, `ttl`), so a
 //! replicating implementation drops in later with **no changes** to the call

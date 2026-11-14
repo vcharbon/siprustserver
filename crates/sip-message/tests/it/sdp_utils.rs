@@ -1,5 +1,4 @@
-//! Unit tests for SDP codec-profile extraction + held SDP construction. Port
-//! of `tests/sip/sdp-utils.test.ts`.
+//! Unit tests for SDP codec-profile extraction + held SDP construction.
 
 use sip_message::sdp::{
     build_held_sdp_from_profile, extract_codec_profile, BuildHeldSdpOptions, CodecProfile,

@@ -88,8 +88,8 @@ async fn setup(
         .into();
     let flooder = net.bind_udp(BindUdpOpts::new(flooder_addr(), 64)).await.expect("bind flooder");
 
-    // Live getters over the bound endpoint — the TS `get queueDepth()` /
-    // `get dropsTailDrop()`. A clone of the Arc'd endpoint is captured by each
+    // Live getters over the bound endpoint: the queue depth and the tail
+    // drops. A clone of the Arc'd endpoint is captured by each
     // closure so the shape reads the instantaneous value on every access.
     let ep_depth = b2bua.clone();
     let ep_counters = b2bua.clone();

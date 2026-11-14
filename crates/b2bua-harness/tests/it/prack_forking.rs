@@ -1,4 +1,4 @@
-//! PRACK forking with delayed offer (port of `tests/scenarios/prack-forking.ts`).
+//! PRACK forking with delayed offer.
 //!
 //! Bob (standing in for a forking proxy upstream of him) answers the offerless
 //! INVITE with **two** reliable 183s carrying distinct To-tags — two early

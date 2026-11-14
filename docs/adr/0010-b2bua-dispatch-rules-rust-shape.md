@@ -2,9 +2,6 @@
 
 **Status:** accepted.
 
-**Source:** sipjsserver `src/sip/{SipRouter,PerCallDispatcher}.ts`, `src/call/CallState.ts`,
-`src/b2bua/rules/`, `src/decision/`, `src/cdr/CdrWriter.ts`.
-
 ## Context
 
 The per-call FIFO dispatcher and router (ADR-0007 §X3), the in-memory call store
@@ -21,8 +18,8 @@ harness lives in a separate `crates/b2bua-harness` (X9).
 
 ## Decision X2. Per-call FIFO = per-call queues + worker tasks + a global semaphore
 
-A faithful port of source ADR-0004/0005, not the txn-layer actor (ADR-0007 X2).
-The dispatcher owns `callRef → queue`; each call has one worker task that runs
+Unlike the transaction layer's single actor (ADR-0007 X2), dispatch runs one
+worker per call, so a slow handler on one call never blocks another. The dispatcher owns `callRef → queue`; each call has one worker task that runs
 its handler bodies in strict FIFO order; a global `Semaphore` caps total
 in-flight handlers. Handler bodies run on spawned sub-tasks the worker awaits, so
 a panicking handler is isolated and the worker survives. cap-drop / queue-drop /
@@ -63,7 +60,7 @@ router never blocks on the store, whichever store is behind the seam.
 The `CallDecisionEngine` trait (`new_call` / `call_failure` / `call_refer`) is
 the seam the B2BUA calls to route a new INVITE. `b2bua-decision`
 holds the port, and a deployment supplies its HTTP adapter under the client policy of
-ADR-0043. In tests a `ScriptedDecisionEngine` emulates the jssip reference backend by
+ADR-0043. In tests a `ScriptedDecisionEngine` emulates a decision backend by
 inspecting the request JSON (R-URI / To / `X-*` headers / body) and returning a
 route/reject, so existing SIPp scenario scripts keep producing the same call
 flows. `apply_route` + `handle_initial_invite` translate the response into call
@@ -85,10 +82,10 @@ property; [ADR-0020](./0020-call-reaper-obligations-rule-view.md) adds the call
 reaper + obligation vocabulary that make it exactly-once across the panic / dropped
 -event / lost-timer / wedged-`Terminating` escape routes.)
 
-The basic-B2BUA default rule set is ported (relay / dialog / absorb / lifecycle /
-terminating / corner-case / failure / timer). The 18x-management strategies
+The basic-B2BUA default rule set covers relay / dialog / absorb / lifecycle /
+terminating / corner-case / failure / timer. The 18x-management strategies
 (`relayFirst18xTo180`, `promote18xPemTo200`, PEM/fake-prack) and REFER transfer
-(SERVICE_LAYER) are landed: `relayFirst18xTo180`, fake-prack included, and REFER transfer as
+sit at SERVICE_LAYER: `relayFirst18xTo180`, fake-prack included, and REFER transfer as
 service state machines (ADR-0016), `promote18xPemTo200` as rules over the call's own slice.
 
 ## Decision X6. B2BUA-local timer DelayQueue

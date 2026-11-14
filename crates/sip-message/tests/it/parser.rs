@@ -1,5 +1,4 @@
 //! RFC 4475 torture corpus — field-extraction + eager-leniency assertions.
-//! Port of `tests/sip/Parser.test.ts`.
 //!
 //! The accept/reject verdicts overlap `compliance_matrix.rs`; what this file
 //! adds is assertions on the *parsed field content* of the messages that

@@ -1,6 +1,6 @@
 //! End-to-end media over the shared simulated fabric.
 //!
-//! Port of `../sipjsserver/tests/media/media-e2e.test.ts`. A transparent relay →
+//! A transparent relay →
 //! both peers hear each other; an SDP-rewrite bug that corrupts the connection
 //! address → the victim hears silence/no-audio and has zero inbound sources,
 //! while the misdirected media physically lands at the wrong port (proving the

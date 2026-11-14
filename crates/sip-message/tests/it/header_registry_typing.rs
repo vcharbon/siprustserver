@@ -1,5 +1,4 @@
-//! Type-level guarantees of the header model. Port of
-//! `tests/sip/header-registry-typing.test.ts`.
+//! Type-level guarantees of the header model.
 //!
 //! The header model (ADR-0003) is concrete typed fields + refined views, so the
 //! guarantees are enforced by the type system directly: this file is a set of

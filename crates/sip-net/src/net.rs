@@ -1,12 +1,12 @@
 //! The `SignalingNetwork` + `UdpEndpoint` trait pair — the DI seam for the
-//! network layer (port of `SignalingNetworkApi` + `UdpEndpoint`).
+//! network layer.
 //!
 //! The trait is the seam consumers depend on; implementations (real,
 //! simulated) and decorators (recording, paranoid) all satisfy it. Methods
-//! are reshaped to tokio idioms: `bind_udp` returns a boxed `UdpEndpoint`
+//! follow tokio idioms: `bind_udp` returns a boxed `UdpEndpoint`
 //! trait object (so decorators can wrap it), `send_to` mirrors
-//! `UdpSocket::send_to`, and the `Stream` of the source is replaced by
-//! receiver-style `recv` / `try_recv`.
+//! `UdpSocket::send_to`, and inbound packets are read receiver-style with
+//! `recv` / `try_recv`.
 
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -31,7 +31,7 @@ pub trait UdpEndpoint: Send + Sync {
     /// simulated fabric's own bookkeeping, not for waiting on a socket.
     async fn send_to(&self, buf: &[u8], dst: SocketAddr) -> Result<(), SendError>;
 
-    /// Await the next inbound packet (the TS `take`). `None` once the
+    /// Await the next inbound packet. `None` once the
     /// endpoint's queue is closed and drained.
     async fn recv(&self) -> Option<UdpPacket>;
 
@@ -42,7 +42,7 @@ pub trait UdpEndpoint: Send + Sync {
         Vec::new()
     }
 
-    /// Non-blocking inbound poll (the TS `poll`).
+    /// Non-blocking inbound poll.
     fn try_recv(&self) -> Option<UdpPacket>;
 
     /// The bound local address.
@@ -98,9 +98,8 @@ pub trait UdpEndpoint: Send + Sync {
 /// boxed and moved into the consumer that drives the recv loop (e.g.
 /// `B2buaCore::spawn`, which takes `Box<dyn UdpEndpoint>`), while clones of the
 /// `Arc` feed read-only live getters elsewhere — notably the
-/// `UdpTransportMetrics` `queueDepth`/`dropsTailDrop` proxies, which (per the TS
-/// `UdpTransport` facade) close over the very endpoint the transport sends
-/// through. Every method delegates to the inner; sharing the recv side is safe
+/// `UdpTransportMetrics` `queueDepth`/`dropsTailDrop` proxies, which close over
+/// the very endpoint the transport sends through. Every method delegates to the inner; sharing the recv side is safe
 /// because the underlying endpoints take `&self` and serialise internally
 /// (the simulated `PacketQueue` and the real socket are both `Send + Sync`).
 #[async_trait]
@@ -140,7 +139,7 @@ impl UdpEndpoint for std::sync::Arc<dyn UdpEndpoint> {
     }
 }
 
-/// Abstraction over the SIP-signaling network (port of `SignalingNetworkApi`).
+/// Abstraction over the SIP-signaling network.
 #[async_trait]
 pub trait SignalingNetwork: Send + Sync {
     /// Bind a UDP endpoint. The returned endpoint lives until dropped.

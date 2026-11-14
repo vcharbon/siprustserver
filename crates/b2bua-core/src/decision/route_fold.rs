@@ -128,8 +128,7 @@ pub fn up_to_admit(
     // constructs that has no live pod). Without this the host would flow to the
     // send path and block on `getaddrinfo`/`EAI_AGAIN`; admission is the cheap
     // early filter — emit `503` and terminate BEFORE any b-leg state or limiter
-    // hold is allocated (port of `applyRoute.ts`'s admission block). `reject_call`
-    // is the Rust analogue of `buildAdmissionRejectResult` (503 + To-tag +
+    // hold is allocated. `reject_call` builds the refusal (503 + To-tag +
     // terminate effects + Reject CDR). Done before the limiter loop so a rejected
     // target never acquires a hold.
     if classify_admission(&route.destination.host, &config.worker_allowed_target_suffixes)

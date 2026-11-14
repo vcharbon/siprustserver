@@ -1,7 +1,6 @@
 target/
 **/target/
 .git/
-portsource/
 docs/
 *.diff
 .effect/

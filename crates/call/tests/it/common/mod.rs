@@ -1,6 +1,5 @@
-//! Shared test fixtures: a representative [`Call`] (port of
-//! `tests/bench/call-codec/fixture.ts`) and a proptest [`Strategy`] that
-//! generates varied call trees (the Rust analogue of the source fixture mixer).
+//! Shared test fixtures: a representative [`Call`] and a proptest
+//! [`Strategy`] that generates varied call trees.
 //!
 //! Each integration-test binary `mod common`s this file, so not every binary
 //! uses every helper — silence the cross-binary dead-code noise here.
@@ -27,7 +26,7 @@ use emission::arb_retained_emission;
 use leg::arb_leg;
 use provisional::arb_provisional;
 
-// ── Representative fixture (port of fixture.ts) ─────────────────────────────
+// ── Representative fixture ──────────────────────────────────────────────────
 
 const SDP_BODY: &[u8] = b"v=0\r\no=alice 53655765 2353687637 IN IP4 192.0.2.1\r\n\
 s=B2BUA call\r\nc=IN IP4 192.0.2.1\r\nt=0 0\r\n\
@@ -123,7 +122,7 @@ Content-Length: 0\r\n\r\n";
 pub const EMITTED_ACK: &[u8] = b"ACK sip:bob@192.0.2.20:5060 SIP/2.0\r\nMax-Forwards: 70\r\nVia: SIP/2.0/UDP 192.0.2.1:5060;branch=z9hG4bK-ack-1f45\r\n\
 CSeq: 8005 ACK\r\nContent-Length: 0\r\n\r\n";
 
-/// A realistic confirmed 2-leg call — mirrors `representativeCall` in fixture.ts.
+/// A realistic confirmed 2-leg call.
 pub fn representative_call() -> Call {
     let mut a_leg = Leg {
         leg_id: "a".into(),
@@ -600,7 +599,7 @@ fn arb_policy_headers() -> impl Strategy<Value = Option<BTreeMap<String, Option<
     ))
 }
 
-/// The Rust analogue of the fixture mixer: a richly-varied [`Call`] tree.
+/// The fixture mixer: a richly-varied [`Call`] tree.
 pub fn arb_call() -> impl Strategy<Value = Call> {
     let head = (
         "[a-z0-9|@.-]{1,32}",

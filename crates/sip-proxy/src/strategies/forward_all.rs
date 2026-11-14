@@ -1,4 +1,4 @@
-//! [`ForwardAllStrategy`] — port of `strategies/ForwardAll.ts`. Trivial dev/test
+//! [`ForwardAllStrategy`] — trivial dev/test
 //! strategy: every new dialog goes to one statically-configured backend.
 //! Stickiness is a plain `target=host:port` Record-Route param (no HMAC — this
 //! backs the transit-only suite). On an in-dialog request it parses that param

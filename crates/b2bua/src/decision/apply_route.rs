@@ -1,7 +1,6 @@
 //! `apply_route` — a "route" decision applied on the initial INVITE's turn:
 //! the route's folds up to its admit, the admit the turn waits on, and either
-//! the b-leg dialled or the limiter-reject failover (ADR-0052 §7). Port of
-//! `decision/apply/applyRoute.ts`.
+//! the b-leg dialled or the limiter-reject failover (ADR-0052 §7).
 
 use call::{AdmitOutcome, AdmitReport, Call};
 use sip_clock::Clock;

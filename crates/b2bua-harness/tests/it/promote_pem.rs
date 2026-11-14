@@ -1,5 +1,4 @@
-//! promote18xPemTo200 — `relayFirst18xTo180` strategy `promote-pem-to-200`. Port
-//! of `tests/scenarios/promote-pem-to-200.ts`.
+//! promote18xPemTo200 — `relayFirst18xTo180` strategy `promote-pem-to-200`.
 //!
 //! The B2BUA promotes Bob's first `183 + SDP + P-Early-Media` into a synthetic
 //! 200 OK toward Alice, opens a promotion window (Alice's in-dialog requests are

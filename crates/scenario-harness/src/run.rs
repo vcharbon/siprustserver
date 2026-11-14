@@ -1,8 +1,6 @@
-//! The driver — the thin "interpreter" (port of the load-bearing core of
-//! `interpreter.ts`, MIGRATION_PLAN_B2B §4(ii)'s `runDriveOnly` equivalent).
+//! The driver — the thin "interpreter" that drives a scenario (ADR-0006).
 //!
-//! Unlike the source interpreter, this driver maintains **no trace and no
-//! dialog state**. Its only job is to bind each agent on the
+//! This driver maintains **no trace and no dialog state**. Its only job is to bind each agent on the
 //! recording-wrapped simulated [`SignalingNetwork`](sip_net::SignalingNetwork)
 //! and replay the step list.
 //! Every `send_to` / `recv` flows through the recording decorator, so the

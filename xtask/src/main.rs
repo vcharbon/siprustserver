@@ -15,15 +15,14 @@
 //!                       Authored files reference them via `$schema`.
 //!
 //! The corpus is committed so CI is deterministic and needs no external
-//! binary at test time; this task is the opt-in refresh path. See
-//! docs/MIGRATION_STRATEGY.md § ABNF tests.
+//! binary at test time; this task is the opt-in refresh path.
 
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
-/// (corpus target file stem, abnfgen start symbol). Mirrors the source
-/// `scripts/abnf-fuzz/run-suite.sh` TARGETS table.
+/// (corpus target file stem, abnfgen start symbol): one row per frozen corpus
+/// file.
 const TARGETS: &[(&str, &str)] = &[
     ("sip-uri", "SIP-URI"),
     ("from", "from-spec"),

@@ -1,6 +1,5 @@
 //! [`HealthProbe`] — OPTIONS health probing toward the B2BUA workers, riding
-//! the `sip-txn` non-INVITE client transaction (port of `health/HealthProbe.ts`,
-//! re-based from a hand-rolled fan-out onto the transaction layer).
+//! the `sip-txn` non-INVITE client transaction.
 //!
 //! The first tick fires as soon as the registry holds its first listing, and
 //! its round latches the proxy's [`FirstView`] (ADR-0050 §11). Per tick (every

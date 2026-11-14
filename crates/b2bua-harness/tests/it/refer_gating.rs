@@ -1,6 +1,6 @@
-//! REFER gating scenarios. Port of `tests/scenarios/refer-gating.ts`.
+//! REFER gating scenarios.
 //!
-//! Verification slice for the two gating regimes (slice5-refer-design.md §5):
+//! Verification slice for the two gating regimes:
 //!
 //!   - Regime 1 — transparency (`refer-authorizing`, `c-ringing`): no transfer
 //!     rule gates in-dialog A↔B traffic, so an A re-INVITE / A INFO / B INFO
@@ -11,7 +11,7 @@
 //!     re-INVITE glares → 491 (`transfer-a-glare-reinvite`). A second REFER in
 //!     any active phase → 491 (`transfer-reject-second-refer`).
 //!
-//! Rows covered elsewhere and skipped here (per the TS header comment):
+//! Rows covered elsewhere and skipped here:
 //!   - A re-INVITE during a-realigning → 491   (refer_full_transfer.rs case 3)
 //!   - B non-BYE during c-realigning → 481     (refer_c_realign.rs case 5)
 //!   - Second REFER during refer-authorizing → 491 (refer-reject family)

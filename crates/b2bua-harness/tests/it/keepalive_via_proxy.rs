@@ -1,5 +1,4 @@
-//! Keepalive OPTIONS flowing through a record-routing front proxy (port of
-//! `tests/scenarios/keepalive-via-proxy.ts`, the `keepaliveViaProxy` case).
+//! Keepalive OPTIONS flowing through a record-routing front proxy.
 //!
 //! Guards against in-dialog keepalive OPTIONS bypassing the front proxy, which
 //! tears every long-hold call down at the probe's Timer F.
