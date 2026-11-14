@@ -358,7 +358,7 @@ export const vantageIsInbound = (
   sut: SutSet,
   v: CutVantage
 ): boolean => {
-  vantageLeg(flows, v)
+  assertVantageLeg(flows, v)
   return anchorsOf(flows, v.leg, sut).some((a) => a.hop === v.hop && a.inbound)
 }
 
@@ -372,7 +372,7 @@ export const vantageIsOutbound = (
   sut: SutSet,
   v: CutVantage
 ): boolean => {
-  vantageLeg(flows, v)
+  assertVantageLeg(flows, v)
   return anchorsOf(flows, v.leg, sut).some((a) => a.hop === v.hop && !a.inbound)
 }
 
@@ -387,6 +387,11 @@ export const vantageLeg = (flows: Flows.FlowsDoc, v: CutVantage): Flows.Leg => {
     throw new Error(`vantage leg ${v.leg} hop ${v.hop} names no leg of the flows document`)
   }
   return leg
+}
+
+/** Throws as {@link vantageLeg} does where `v` names no leg of the document, for a reader that takes nothing else of the leg. */
+export const assertVantageLeg = (flows: Flows.FlowsDoc, v: CutVantage): void => {
+  vantageLeg(flows, v)
 }
 
 /** Every message index of a leg that belongs to the vantage anchored at `hop`. */

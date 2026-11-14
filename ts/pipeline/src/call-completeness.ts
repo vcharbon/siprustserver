@@ -10,7 +10,7 @@
 import type { Flows } from "@sip/contracts"
 import * as CallFacts from "./call-facts.js"
 import type { CaseRule } from "./case-rules.js"
-import { type CutVantage, vantageIsInbound, vantageLeg } from "./cut.js"
+import { assertVantageLeg, type CutVantage, vantageIsInbound, vantageLeg } from "./cut.js"
 import type { RefusalEvidence } from "./policy.js"
 import { type Finding, findingOf } from "./refusal-rule.js"
 import type { SutSet } from "./sut.js"
@@ -38,7 +38,7 @@ const establishedDialog = (
   sut: SutSet,
   v: CutVantage
 ): { readonly answered: number; readonly closedBy: number | undefined } | undefined => {
-  vantageLeg(flows, v)
+  assertVantageLeg(flows, v)
   const facts = CallFacts.atVantage(flows, sut, v)
   const answer = CallFacts.valueOf(facts.answer)
   if (answer === undefined) return undefined
