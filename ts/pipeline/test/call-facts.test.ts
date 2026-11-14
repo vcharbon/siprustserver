@@ -329,6 +329,18 @@ describe("what the capture's edges leave out", () => {
     expect(read.openings).toHaveLength(0)
   })
 
+  it("reads a document loaded in part against the legs it holds", () => {
+    const s = scenario()
+    laterTraffic(s, 40_000)
+    const leg = unanswered(s)
+    const flows = s.flows()
+    const loaded: Array<(typeof flows.legs)[number]> = []
+    loaded[leg.index] = flows.legs[leg.index]!
+
+    expect(CallFacts.atVantage(flows, s.sut, leg.vantage()).final.state).toBe("absent")
+    expect(CallFacts.atVantage({ ...flows, legs: loaded }, s.sut, leg.vantage()).final.state).toBe("not-captured")
+  })
+
   it("shows no INVITE on a leg that never opens a dialog", () => {
     const s = scenario()
     const leg = s.leg({ callId: "ping@example.com", party: PARTY }).request("OPTIONS", { at: 0, by: "party" }).response(200, { at: 5 })

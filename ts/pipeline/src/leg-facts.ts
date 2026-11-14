@@ -250,7 +250,8 @@ export const cost = (flows: Flows.FlowsDoc): Cost => {
 const endOf = (file: FileFacts, flows: Flows.FlowsDoc): number => {
   if (file.endUs !== undefined) return file.endUs
   let end = 0
-  for (const leg of flows.legs) {
+  for (const leg of flows.legs as ReadonlyArray<Flows.Leg | undefined>) {
+    if (leg === undefined) continue
     file.indexed += 1
     const last = leg.msgs[leg.msgs.length - 1]
     if (last !== undefined && last.ts_us > end) end = last.ts_us
@@ -259,7 +260,11 @@ const endOf = (file: FileFacts, flows: Flows.FlowsDoc): number => {
   return end
 }
 
-/** When the capture's last SIP datagram was captured; read once per document. */
+/**
+ * When the capture's last SIP datagram was captured; read once per document.
+ * A document loaded in part, its `legs` holding only the legs of one call at
+ * their own indices, ends at the last datagram of the legs it holds.
+ */
 export const captureEndUs = (flows: Flows.FlowsDoc): number => endOf(fileOf(flows), flows)
 
 const legOf = (flows: Flows.FlowsDoc, index: number): Flows.Leg => {
