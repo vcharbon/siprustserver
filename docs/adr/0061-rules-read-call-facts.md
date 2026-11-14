@@ -84,8 +84,11 @@ messages.
 - `calls.ts` (`finalOf`), `call-completeness.ts`, `capture-edge.ts` and the timestamp helpers of
   `topology.ts` read the capture side. The first-INVITE reading of a leg (`finals.ts`) is
   removed. `abandonOf` and `refusalOf` name a step of the case document, so they keep reading
-  its steps. `Transactions` pairs the steps of a document and stays exported for the readers
-  the document side does not serve yet.
+  its steps. `Transactions` pairs the steps of a document inside the package; a rule asks the
+  document side whether an ACK discharged a final.
+- The document side reads a document's message steps before the document exists
+  (`DocumentFacts.ofSteps`, for the hooks an assembly calls on its flow) and the document shares
+  that reading: an assembled case's steps are read once, unless a hook rewrites them.
 - The capture side is exported as `CallFacts`, the document side as `DocumentFacts`, whose
   `parity` holds a case document against its capture on the agreed subset and says how many
   legs it compared.

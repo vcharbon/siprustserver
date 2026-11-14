@@ -81,6 +81,11 @@ export interface DocumentLeg {
    * early dialog.
    */
   readonly ending: Fact<DocumentEnding>
+  /**
+   * The party left the leg: its CANCEL of the outcome INVITE (RFC 3261 §9.1)
+   * or its first BYE after that INVITE (§15), the earlier in document order.
+   */
+  readonly left: Fact<DocumentEnding>
 }
 
 /** One attempt of a call's chain as its `calls` entry states it, with its leg. */
@@ -99,10 +104,7 @@ export interface DocumentCall {
   readonly answered: Fact<StepEntry>
   /** The caller got a failure final: the final of its outcome INVITE, where it is 300 or above. */
   readonly failed: Fact<StepEntry>
-  /**
-   * The caller gave up: the CANCEL of its outcome INVITE (RFC 3261 §9.1) or
-   * its first BYE after that INVITE (§15), the earlier in document order.
-   */
+  /** The caller gave up: the party left the caller's leg ({@link DocumentLeg.left}). */
   readonly gaveUp: Fact<DocumentEnding>
   /** The failure final the routing decision refused the caller with, where the call states one. */
   readonly refused: StepEntry | undefined
@@ -113,16 +115,29 @@ export interface DocumentCall {
 /** What the facts are read off: a document's flow and its `calls` block. */
 export type Stated = Pick<Pivot.PivotV3, "flow" | "calls">
 
-/** What a document states, over all its legs and calls. */
-export interface DocumentFacts<D extends Stated = Pivot.PivotV3> {
-  /** The document read. */
-  readonly pivot: D
+/**
+ * What a document's message steps state of their legs, read before or without
+ * its `calls` block: the reading a case's flow has as soon as it is assembled.
+ */
+export interface StepFacts {
   /** Every message step, in document order. */
   readonly entries: ReadonlyArray<StepEntry>
   readonly legs: ReadonlyMap<string, DocumentLeg>
-  readonly calls: ReadonlyArray<DocumentCall>
   /** The entry of the step `id` names. */
   readonly entryOf: (id: string) => StepEntry | undefined
+  /**
+   * Whether an ACK step discharges the INVITE transaction the final step `id`
+   * landed on while that transaction held it (RFC 3261 §13.2.2.4 and §17.1.1.3,
+   * paired by position as `./transactions.ts` pairs them).
+   */
+  readonly acked: (id: string) => boolean
+}
+
+/** What a document states, over all its legs and calls. */
+export interface DocumentFacts<D extends Stated = Pivot.PivotV3> extends StepFacts {
+  /** The document read. */
+  readonly pivot: D
+  readonly calls: ReadonlyArray<DocumentCall>
   /** What the document states of the call `call` is, among its `calls`. */
   readonly callOf: (call: Call.Call) => DocumentCall | undefined
 }
@@ -141,7 +156,9 @@ const entryOf = (step: Flow.Step, index: number): StepEntry => ({
 const isRinging = (e: StepEntry): boolean =>
   e.method === "INVITE" && e.status !== undefined && e.status >= 180 && e.status < 190 && !e.inDialog
 
-const silentLeg = (leg: string, entries: ReadonlyArray<StepEntry>): DocumentLeg => ({
+type Unleft = Omit<DocumentLeg, "left">
+
+const silentLeg = (leg: string, entries: ReadonlyArray<StepEntry>): Unleft => ({
   leg,
   entries,
   observedLeg: entries.find((e) => e.step.observed !== undefined)?.step.observed?.leg,
@@ -155,6 +172,18 @@ const silentLeg = (leg: string, entries: ReadonlyArray<StepEntry>): DocumentLeg 
   ending: ABSENT
 })
 
+const withLeft = (leg: Unleft): DocumentLeg => ({ ...leg, left: leftOf(leg) })
+
+const leftOf = (leg: Unleft): Fact<DocumentEnding> => {
+  const cancel = valueOf(leg.cancel)
+  const bye = leg.byes.find((b) => !b.bySystem)
+  const left: ReadonlyArray<DocumentEnding> = [
+    ...(cancel !== undefined && !cancel.bySystem ? [{ by: "CANCEL", entry: cancel } as const] : []),
+    ...(bye !== undefined ? [{ by: "BYE", entry: bye } as const] : [])
+  ]
+  return stated(left.reduce<DocumentEnding | undefined>((first, next) => (first === undefined || next.entry.index < first.entry.index ? next : first), undefined))
+}
+
 const isByeRequest = (e: StepEntry): boolean => e.method === "BYE" && e.status === undefined
 
 const legOf = (
@@ -162,7 +191,7 @@ const legOf = (
   entries: ReadonlyArray<StepEntry>,
   byId: ReadonlyMap<string, StepEntry>,
   transactions: ReadonlyArray<{ readonly invite?: Flow.Step; readonly final?: { readonly step: Flow.Step } }>
-): DocumentLeg => {
+): Unleft => {
   const openings = transactions.filter((t) => t.invite !== undefined && Flow.opensDialog(t.invite))
   const outcome = openings[openings.length - 1]
   const first = openings[0]?.invite
@@ -198,22 +227,7 @@ const failureOf = (leg: DocumentLeg | undefined): Fact<StepEntry> => {
   return stated(final !== undefined && (final.status ?? 0) >= 300 ? final : undefined)
 }
 
-const giveUpOf = (leg: DocumentLeg | undefined): Fact<DocumentEnding> => {
-  if (leg === undefined) return ABSENT
-  const cancel = valueOf(leg.cancel)
-  const bye = leg.byes.find((b) => !b.bySystem)
-  const left: ReadonlyArray<DocumentEnding> = [
-    ...(cancel !== undefined && !cancel.bySystem ? [{ by: "CANCEL", entry: cancel } as const] : []),
-    ...(bye !== undefined ? [{ by: "BYE", entry: bye } as const] : [])
-  ]
-  return stated(left.reduce<DocumentEnding | undefined>((first, next) => (first === undefined || next.entry.index < first.entry.index ? next : first), undefined))
-}
-
-const callOf = (
-  call: Call.Call,
-  legs: ReadonlyMap<string, DocumentLeg>,
-  byId: ReadonlyMap<string, StepEntry>
-): DocumentCall => {
+const callOf = (call: Call.Call, { entryOf, legs }: StepFacts): DocumentCall => {
   const caller = legs.get(call.caller_leg)
   return {
     call,
@@ -221,22 +235,21 @@ const callOf = (
     attempts: call.attempts.map((attempt) => ({ attempt, leg: legs.get(attempt.leg) })),
     answered: caller === undefined ? ABSENT : caller.answer,
     failed: failureOf(caller),
-    gaveUp: giveUpOf(caller),
-    refused: call.refused === undefined ? undefined : byId.get(call.refused.step),
-    abandoned: call.abandoned === undefined ? undefined : byId.get(call.abandoned.step)
+    gaveUp: caller === undefined ? ABSENT : caller.left,
+    refused: call.refused === undefined ? undefined : entryOf(call.refused.step),
+    abandoned: call.abandoned === undefined ? undefined : entryOf(call.abandoned.step)
   }
 }
 
-const documents = new WeakMap<Stated, DocumentFacts<Stated>>()
+const stepLists = new WeakMap<ReadonlyArray<Flow.Step>, StepFacts>()
 
 /**
- * The facts of a case document, computed on the first request in one pass over
- * its steps and kept for the document: a second request reads nothing.
+ * The facts of a document's message steps, computed on the first request in
+ * one pass over them and kept for that array: a second request reads nothing.
  */
-export const ofDocument = <D extends Stated>(pivot: D): DocumentFacts<D> => {
-  const known = documents.get(pivot)
-  if (known !== undefined) return known as DocumentFacts<D>
-  const steps = pivot.flow.flatMap(Flow.flowNodeSteps)
+export const ofSteps = (steps: ReadonlyArray<Flow.Step>): StepFacts => {
+  const known = stepLists.get(steps)
+  if (known !== undefined) return known
   const entries = steps.map(entryOf)
   const byId = new Map(entries.map((entry) => [entry.step.id, entry]))
   const byLeg = new Map<string, Array<StepEntry>>()
@@ -245,19 +258,36 @@ export const ofDocument = <D extends Stated>(pivot: D): DocumentFacts<D> => {
     if (held === undefined) byLeg.set(entry.step.leg, [entry])
     else held.push(entry)
   }
-  const transactions = inviteTransactions(steps).byLeg
+  const transactions = inviteTransactions(steps)
   const legs = new Map<string, DocumentLeg>()
-  for (const [leg, held] of byLeg) legs.set(leg, legOf(leg, held, byId, transactions.get(leg) ?? []))
-  const calls = pivot.calls.map((call) => callOf(call, legs, byId))
+  for (const [leg, held] of byLeg) legs.set(leg, withLeft(legOf(leg, held, byId, transactions.byLeg.get(leg) ?? [])))
+  const acked = new Set(
+    [...transactions.discharges.values()].flatMap((d) => (transactions.landings.get(d.final.id) === d.transaction ? [d.final.id] : []))
+  )
+  const facts: StepFacts = { entries, legs, entryOf: (id) => byId.get(id), acked: (id) => acked.has(id) }
+  stepLists.set(steps, facts)
+  return facts
+}
+
+/** A flow's message steps: the flow itself where it holds nothing else, so its reading is the one {@link ofSteps} keeps. */
+const stepsOfFlow = (flow: ReadonlyArray<Flow.FlowNode>): ReadonlyArray<Flow.Step> =>
+  flow.every(Flow.isStepNode) ? (flow as ReadonlyArray<Flow.Step>) : flow.flatMap(Flow.flowNodeSteps)
+
+const documents = new WeakMap<Stated, DocumentFacts<Stated>>()
+
+/**
+ * The facts of a case document, computed on the first request and kept for the
+ * document: a second request reads nothing. A document whose flow is its
+ * message steps shares their reading ({@link ofSteps}): the steps an assembly
+ * read before the document existed are not read again.
+ */
+export const ofDocument = <D extends Stated>(pivot: D): DocumentFacts<D> => {
+  const known = documents.get(pivot)
+  if (known !== undefined) return known as DocumentFacts<D>
+  const steps = ofSteps(stepsOfFlow(pivot.flow))
+  const calls = pivot.calls.map((call) => callOf(call, steps))
   const byCall = new Map(calls.map((held) => [held.call, held]))
-  const facts: DocumentFacts<D> = {
-    pivot,
-    entries,
-    legs,
-    calls,
-    entryOf: (id) => byId.get(id),
-    callOf: (call) => byCall.get(call)
-  }
+  const facts: DocumentFacts<D> = { ...steps, pivot, calls, callOf: (call) => byCall.get(call) }
   documents.set(pivot, facts)
   return facts
 }

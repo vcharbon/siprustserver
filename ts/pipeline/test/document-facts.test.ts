@@ -179,6 +179,47 @@ describe("what a document states of an answered call", () => {
     expect(watched.flowReads()).toBe(1)
   })
 
+  it("shares the reading of its steps, taken before the document existed", () => {
+    const { pivot } = assembled(answered())
+    const steps = [...pivot.flow] as ReadonlyArray<Flow.Step>
+
+    const read = DocumentFacts.ofSteps(steps)
+    const facts = DocumentFacts.ofDocument({ ...pivot, flow: steps })
+
+    expect(DocumentFacts.ofSteps(steps)).toBe(read)
+    expect(facts.entries).toBe(read.entries)
+    expect(facts.legs).toBe(read.legs)
+  })
+
+  it("states each final an ACK discharges, a 2xx's and a failure final's alike (RFC 3261 §13.2.2.4, §17.1.1.3)", () => {
+    const answeredFacts = assembled(answered()).facts
+    const cancelledFacts = assembled(cancelled()).facts
+    const finals = (facts: DocumentFacts.StepFacts) =>
+      [...facts.legs.values()].map((leg) => [CallFacts.valueOf(leg.final)?.status, facts.acked(CallFacts.valueOf(leg.final)!.step.id)])
+
+    expect(finals(answeredFacts)).toEqual([[200, true], [200, true]])
+    expect(finals(cancelledFacts)).toEqual([[487, true], [487, true]])
+  })
+
+  it("states no ACK for a final its party never acknowledged, nor for a provisional", () => {
+    const s = scenario()
+    const caller = callerLeg(s).invite({ at: 0, by: "party", body: SDP }).response(180, { at: 5 }).response(404, { at: 20 })
+    const { facts } = assembled({ s, caller, dialled: [] })
+    const leg = documentLegOf(facts, caller)
+
+    expect(facts.acked(CallFacts.valueOf(leg.final)!.step.id)).toBe(false)
+    expect(facts.acked(CallFacts.valueOf(leg.ringing)!.step.id)).toBe(false)
+  })
+
+  it("states that the caller left its leg by its BYE, and that no party left the leg the system hung up", () => {
+    const cut = answered()
+    const { facts } = assembled(cut)
+    const caller = documentLegOf(facts, cut.caller)
+
+    expect(CallFacts.valueOf(caller.left)).toEqual({ by: "BYE", entry: caller.byes[0] })
+    expect(documentLegOf(facts, cut.dialled[0]!).left.state).toBe("absent")
+  })
+
   it("names the capture leg each leg was cut from, its BYEs and the INVITE that decides it", () => {
     const cut = answered()
     const { facts } = assembled(cut)
@@ -359,6 +400,53 @@ describe("whether the system releases a leg on its own, as a document states it"
 
   it("is its own where the caller's CANCEL follows it by more than the skew", () => {
     expect(releasesOf(relayedEarly(10), 5_000)).toEqual([{ kind: "own", by: "CANCEL" }])
+  })
+
+  /**
+   * A CANCEL that crosses the callee's 2xx cancels nothing (RFC 3261 §9.1):
+   * the INVITE was answered, and the system ends the dialog it established
+   * with a BYE (§15). That BYE is how the leg ends, and the release.
+   */
+  it("is its own BYE where its CANCEL crossed the callee's 2xx", () => {
+    const s = scenario()
+    const caller = callerLeg(s).invite({ at: 0, by: "party", body: SDP }).response(100, { at: 2 })
+    const dialled = dialledLeg(s).invite({ at: 10, by: "system", body: SDP }).response(180, { at: 200 })
+    caller.response(180, { at: 210 })
+    dialled
+      .cancel({ at: 12_200, by: "system" })
+      .response(200, { at: 12_202, body: SDP, to: "INVITE" })
+      .response(200, { at: 12_204, to: "CANCEL" })
+      .ack({ at: 12_206, by: "system" })
+      .bye({ at: 12_210, by: "system" })
+      .response(200, { at: 12_215 })
+    caller.response(480, { at: 12_220, to: "INVITE" }).ack({ at: 12_225, by: "party" })
+    const cut = { s, caller, dialled: [dialled] }
+    const { facts } = assembled(cut)
+
+    expect(DocumentFacts.agreedOfDocument(documentLegOf(facts, dialled)).ending).toEqual({ by: "BYE", bySystem: true })
+    expect(releasesOf(cut)).toEqual([{ kind: "own", by: "BYE" }])
+  })
+
+  /**
+   * A caller that left before the system dialled a leg did not drive that
+   * leg's CANCEL: the system dialled it knowing the caller was gone, so
+   * cancelling it is its own decision. The skew allows a relay stamped early,
+   * never a give-up older than the leg itself.
+   */
+  it("is its own where the caller gave up longer than the skew before the leg was dialled", () => {
+    const s = scenario()
+    const caller = callerLeg(s).invite({ at: 0, by: "party", body: SDP }).response(100, { at: 2 })
+    const first = dialledLeg(s, 1).invite({ at: 10, by: "system", body: SDP }).response(180, { at: 200 })
+    caller.response(180, { at: 210 }).cancel({ at: 3_000, by: "party" }).response(200, { at: 3_002 })
+    first.cancel({ at: 3_010, by: "system" }).response(200, { at: 3_015 }).response(487, { at: 3_020, to: "INVITE" }).ack({ at: 3_025, by: "system" })
+    const second = dialledLeg(s, 2).invite({ at: 7_000, by: "system", body: SDP }).response(180, { at: 7_200 })
+    second.cancel({ at: 9_000, by: "system" }).response(200, { at: 9_005 }).response(487, { at: 9_010, to: "INVITE" }).ack({ at: 9_015, by: "system" })
+    caller.response(487, { at: 9_030, to: "INVITE" }).ack({ at: 9_035, by: "party" })
+
+    expect(releasesOf({ s, caller, dialled: [first, second] }, 500_000)).toEqual([
+      { kind: "relayed", by: "CANCEL", cause: "caller-gave-up", because: "CANCEL", status: undefined },
+      { kind: "own", by: "CANCEL" }
+    ])
   })
 })
 
