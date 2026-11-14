@@ -1,5 +1,4 @@
-//! The reusable vocabulary of the four-wrapper pattern (the
-//! `effect-layer-test` SKILL, ADR-0013).
+//! The reusable vocabulary of the four-wrapper pattern (ADR-0004).
 //!
 //! The wrappers themselves are per-service **decorator structs** (they live in
 //! each layer crate's `contracts` module, because the wrapped trait differs).
@@ -20,14 +19,14 @@ use std::fmt;
 
 use crate::recorder::Stamped;
 
-/// The fixed order the wrappers compose in (outermost → innermost), copied
-/// verbatim from `withCanonicalContracts`. A decorator stack must read
-/// `PropertyTest(ParanoidInputs(ScopedAudit(impl)))` so preconditions are
-/// checked before contract properties and recording sits closest to the impl.
-pub const COMPOSITION_ORDER: &str = "propertyTest(paranoidInputs(scopedAudit(impl)))";
+/// The fixed order the wrappers compose in (outermost → innermost). A
+/// decorator stack must read `property(paranoid_inputs(scoped_audit(impl)))`
+/// so preconditions are checked before contract properties and recording sits
+/// closest to the impl.
+pub const COMPOSITION_ORDER: &str = "property(paranoid_inputs(scoped_audit(impl)))";
 
 /// A CONTRACT property asserted on every call: given the call's `input` and
-/// `output`, return `Ok` or a failure reason. Drives a `propertyTest`
+/// `output`, return `Ok` or a failure reason. Drives a property
 /// decorator. (`O` is often `Result<_, _>` so a property can inspect failures.)
 pub trait PropertyRule<I, O>: Send + Sync {
     /// Stable id, e.g. `"P1_roundTrips"`.
@@ -36,7 +35,7 @@ pub trait PropertyRule<I, O>: Send + Sync {
 }
 
 /// A caller-side precondition on an input — what the caller must respect.
-/// Drives a `paranoidInputs` decorator. A failure is a *programmer error*
+/// Drives a paranoid-inputs decorator. A failure is a *programmer error*
 /// (defect), surfaced via [`ParanoidViolation`], not a recoverable `Err`.
 pub trait ParanoidCheck<I>: Send + Sync {
     /// Stable id, e.g. `"PA3_send_validDest"`.
@@ -45,7 +44,7 @@ pub trait ParanoidCheck<I>: Send + Sync {
 }
 
 /// A cross-call invariant evaluated over the recorded event log at scope
-/// close. Drives a `scopedAudit` decorator. Returns zero or more violation
+/// close. Drives a scoped-audit decorator. Returns zero or more violation
 /// detail strings. `force_advisory` pins the rule to the advisory tier
 /// regardless of `RunContext`.
 pub trait AuditRule<E>: Send + Sync {

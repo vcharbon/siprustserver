@@ -112,8 +112,8 @@ pub struct StaticHmacKeyProvider {
 }
 
 impl StaticHmacKeyProvider {
-    /// Validate and build. Mirrors `staticLayer`'s checks: non-empty kid, min
-    /// length, and a previous key whose id differs from current.
+    /// Validate and build. Checks a non-empty kid, a minimum key length, and a
+    /// previous key whose id differs from current.
     pub fn new(
         current: HmacKey,
         previous: Option<HmacKey>,

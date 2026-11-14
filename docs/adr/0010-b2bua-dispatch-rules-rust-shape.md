@@ -19,7 +19,8 @@ harness lives in a separate `crates/b2bua-harness` (X9).
 ## Decision X2. Per-call FIFO = per-call queues + worker tasks + a global semaphore
 
 Unlike the transaction layer's single actor (ADR-0007 X2), dispatch runs one
-worker per call, so a slow handler on one call never blocks another. The dispatcher owns `callRef → queue`; each call has one worker task that runs
+queue worker per call, so a slow handler on one call never blocks another. The
+dispatcher owns `callRef → queue`; each call has one queue worker that runs
 its handler bodies in strict FIFO order; a global `Semaphore` caps total
 in-flight handlers. Handler bodies run on spawned sub-tasks the worker awaits, so
 a panicking handler is isolated and the worker survives. cap-drop / queue-drop /

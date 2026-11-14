@@ -21,8 +21,9 @@ on scheduler bookkeeping and memory.
 timer, keyed by role and branch. One driver pops due timers. Memory is flat in
 the number of *pending* timers, not tasks, and there is a single wakeup path.
 
-This does **not** contradict the sip-clock ADR's "don't re-implement a worse
-timer wheel" caveat: `DelayQueue` *is* tokio's timer wheel (it rides
+This does **not** contradict the sip-clock crate's caveat that wrapping
+scheduling "would re-implement a worse tokio" (`crates/sip-clock/src/lib.rs`):
+`DelayQueue` *is* tokio's timer wheel (it rides
 `tokio::time`), not a hand-rolled one. `tokio::time::pause`/`advance` therefore
 drives it in tests exactly like every other behavioural timer.
 
@@ -112,9 +113,9 @@ to forge can spoof the source too.
 
 ## No property / parity tests
 
-The transaction layer has no property test and no parity check (those wrap
-`SignalingNetwork`, ADR-0005); the four behavioural suites are the whole test
-surface.
+The transaction layer has no property test and no parity check: no layer runs
+them, and ADR-0005 says why the network layer has neither. The four
+behavioural suites are the whole test surface.
 
 ## References
 

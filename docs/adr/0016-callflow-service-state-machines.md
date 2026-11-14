@@ -12,7 +12,8 @@ The rule engine (ADR-0010 X5) is sound, but "which rules are live right now, and
 implicit: scattered across slice presence, ad-hoc phase enums used as `Match` columns, the
 `DeactivateRule` action and the `active_rules` list. This ADR makes each *callflow service*
 an explicit, doc-generated per-call state machine. The vocabulary (callflow service, machine,
-media leg, adopted/unadopted leg, Rule SDK, integrator) is in `CONTEXT.md`. Detail: [appendix, context](appendix/0016-callflow-service-state-machines.md#context).
+media leg, adopted/unadopted leg, Rule SDK, integrator) is in `CONTEXT.md`. Detail:
+[appendix, context](appendix/0016-callflow-service-state-machines.md#context).
 
 ## Decision X1: State is a canonical rule selector, not a new dispatcher
 

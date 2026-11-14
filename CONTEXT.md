@@ -50,7 +50,7 @@ Full definitions: [docs/glossary/retransmission.md](docs/glossary/retransmission
 - **Metric catalogue**: a process's Prometheus families declared as data, one entry per family, checked by `metric-contract`.
 - **Dispatch class**: what an event is to its call's dispatch queue; its table row states room, caps, permit pool and owed answer.
 - **Owed answer**: what the router owes the sender of a request its call's queue discarded unrun, one per discard. Avoid: discard hook.
-- **Per-call FIFO**: one call's events run in arrival order and never overlap, on its own queue and worker task. ADR-0010.
+- **Per-call FIFO**: one call's events run in arrival order and never overlap, on its own queue and queue worker. ADR-0010.
 - **Per-call queue** (`dispatch::CallQueue`): one call's event queue, bounded by depth, overflow ceiling and lifetime cap.
 - **Overload signal** (`X-Overload`): the `elu`, `gc` and `adm` a worker puts on every OPTIONS 200. Avoid: CPU, load level.
 - **ELU band**: the proxy's hysteretic class of a worker's `elu`; `AboveCritical` leaves the non-emergency candidates.
@@ -102,7 +102,7 @@ Full definitions: [docs/glossary/ha-replication.md](docs/glossary/ha-replication
 - **Incarnation-gen** vs **callGen**: the per-boot epoch in the watermark vs a call's primary counter `p`; never conflate. ADR-0014.
 - **Watermark** `(gen, counter)`: a puller's changelog cursor, one per (peer, flow), never a call's version vector.
 - **Position frame**: the puller's "applied up to `at`" frame, read only by a draining worker's exit. ADR-0031. Avoid: Ack.
-- **Current flag** (`everCaughtUp`): set on a stream's first `Noop`, sticky, per flow; gates readiness. ADR-0014.
+- **Current flag** (`PullerStatus::current`): set on a stream's first `Noop`, sticky, per flow; gates readiness. ADR-0014.
 - **Readiness states** (`NotReady → Ready ⇄ Cordoned → Draining`): serving dialogs vs accepting calls; Release-all is an operator act. ADR-0050.
 
 ## HTTP call-decision adaptation
@@ -166,7 +166,7 @@ Full definitions: [docs/glossary/call-model.md](docs/glossary/call-model.md).
 - **Attempt**: one routing answer that dials and the legs it dials, with a cause, a ring deadline and an outcome. ADR-0042. Avoid: try.
 - **Ring deadline** (`no_answer_ms`): how long a dialled leg may ring unanswered, run from its first 180–189. Avoid: no-answer timeout.
 - **Timer scope**: what a timer guards (call, attempt, leg, obligation, setup); leaving the scope retires its timers. ADR-0042, ADR-0055.
-- **Terminating timeout**: the 32 s backstop of a terminating call; its fire forces every unresolved leg terminal.
+- **Terminating timeout**: the 32 s backstop of a terminating call, or later to outlast a held caller dialog; its fire forces every unresolved leg terminal.
 - **A-leg** / **B-leg**: the leg facing the caller (answered as UAS) and a leg toward a called party (dialled as UAC).
 - **Leg kind** (`LegKind`): `a`, `destination`, `media` or `transfer-target`, defaulted from the leg id.
 - **Media leg**: a leg dialled toward a media server to broker SDP and control bodies; unadopted. Avoid: MRF leg.

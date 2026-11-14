@@ -73,13 +73,13 @@ reclaiming primary.
 
 ## Decision X6. Readiness/OPTIONS gate: re-hydrated and backup-current
 
-A `NotReady → Ready → Draining` state machine (`ReadinessController` /
-`WorkerReadiness`) self-reports via OPTIONS — `200`=alive, `503 + not-ready`,
+A `NotReady → Ready → Draining` state machine (`b2bua::repl::Readiness`)
+self-reports via OPTIONS — `200`=alive, `503 + not-ready`,
 `503 + draining/Retry-After:0` — consumed by the proxy's existing
 `WorkerHealth`. **Ready** when bootstrap re-hydration has completed for all
 *reachable* peers (best-effort, hard-timer bounded) **and** the forward pulls are
 "current", where the **`current` flag is set the instant the head `Noop`
-arrives** (per-peer, sticky across reconnects — `everCaughtUp`).
+arrives** (per-peer, sticky across reconnects — `PullerStatus::current`).
 Not "strictly converged" (the reverse tail never quiets under load → the signal
 would degenerate to the timer) and not "re-hydrated only" (the node would be a
 weak backup right after boot).

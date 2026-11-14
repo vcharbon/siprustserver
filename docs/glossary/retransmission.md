@@ -333,7 +333,7 @@ _Avoid_: "discard hook" (the answer is a value, not a callback); the
 
 **Per-call FIFO** (`b2bua::dispatch`, ADR-0010 X2):
 The invariant that one call's events run strictly in their arrival order and
-never overlap: each call has its own queue and one worker task draining it,
+never overlap: each call has its own queue and one queue worker draining it,
 and a global permit pool caps the handler bodies in flight, so a slow handler
 on one call stalls only that call.
 

@@ -24,7 +24,7 @@ fn pcm(name: ClipName) -> PlayScript {
 #[tokio::test(start_paused = true)]
 async fn transparent_relay_both_hear_each_other() {
     let net: Arc<dyn sip_net::SignalingNetwork> = Arc::new(SimulatedSignalingNetwork::new(1));
-    let me = media::ts_endpoint(net);
+    let me = media::hand_rolled_endpoint(net);
     let alice = me.open("10.10.0.1", Some(40000), OpenOptions::default()).await.unwrap();
     let bob = me.open("10.20.0.1", Some(40002), OpenOptions::default()).await.unwrap();
 
@@ -43,7 +43,7 @@ async fn transparent_relay_both_hear_each_other() {
 #[tokio::test(start_paused = true)]
 async fn sdp_rewrite_bug_misdirects_media() {
     let net: Arc<dyn sip_net::SignalingNetwork> = Arc::new(SimulatedSignalingNetwork::new(1));
-    let me = media::ts_endpoint(net);
+    let me = media::hand_rolled_endpoint(net);
     let alice = me.open("10.10.0.1", Some(41000), OpenOptions::default()).await.unwrap();
     let bob = me.open("10.20.0.1", Some(41002), OpenOptions::default()).await.unwrap();
 

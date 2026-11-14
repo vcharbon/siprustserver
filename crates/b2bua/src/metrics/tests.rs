@@ -211,7 +211,7 @@ fn sm_cursor_census_renders_and_overwrites() {
 // UdpTransportMetrics shape
 // -----------------------------------------------------------------------
 
-/// A `UdpTransportMetrics` whose `queueDepth` / tail drops are backed by
+/// A `UdpTransportMetrics` whose queue depth / tail drops are backed by
 /// caller-held atomics (standing in for a live `UdpEndpoint`), with the real
 /// brake counters, without standing up a fabric — the fabric-proxy facet is
 /// covered end-to-end in `tests/it/udp_transport_metrics.rs`.

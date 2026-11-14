@@ -114,7 +114,7 @@ async fn a_shed_strands_no_per_call_lock() {
 /// An **emergency** INVITE (carrying an emergency Resource-Priority) bypasses the
 /// empty bucket: it is admitted, routed to bob, and the call establishes — even
 /// though a non-emergency INVITE against the same worker would be shed. Proves the
-/// emergency bypass (`isEmergency → always admit`) in the live path.
+/// emergency bypass (`is_emergency` → always admit) in the live path.
 #[tokio::test]
 async fn emergency_invite_bypasses_the_empty_bucket_and_establishes() {
     let h = Harness::with_transit_delay("b2bua-router-admission-emergency-bypass", 0)

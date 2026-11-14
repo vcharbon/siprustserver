@@ -34,7 +34,7 @@ async fn alice_and_bob_hear_each_other_through_b2bua() {
     // Media rides a separate simulated fabric (peer-to-peer; the B2BUA never
     // touches RTP). Both transports bind on the same media net so RTP routes.
     let media_net: Arc<dyn sip_net::SignalingNetwork> = Arc::new(SimulatedSignalingNetwork::new(1));
-    let me = media::ts_endpoint(media_net);
+    let me = media::hand_rolled_endpoint(media_net);
     let alice_rtp = me.open("127.0.0.1", Some(ALICE_RTP), OpenOptions::default()).await.unwrap();
     let bob_rtp = me.open("127.0.0.1", Some(BOB_RTP), OpenOptions::default()).await.unwrap();
 

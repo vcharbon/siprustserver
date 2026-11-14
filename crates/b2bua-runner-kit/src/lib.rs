@@ -196,7 +196,7 @@ impl RunnerEnv {
         let listen_sa = resolve(&self.listen)?;
         let metrics_sa = resolve(&self.metrics_addr)?;
 
-        // Ingress brake: the `preIngress` hook + its counters, installed
+        // Ingress brake: the `PreIngressHook` + its counters, installed
         // on the worker socket. Without it the brake (the cheapest stateless-503
         // shed, ahead of the router's rungs) is absent and a flooded ingress queue tail-drops
         // new INVITEs silently instead of returning a routable 503 + Retry-After.
@@ -227,7 +227,7 @@ impl RunnerEnv {
         // Real, non-recording transport: a plain tokio UDP socket. Bind into an
         // `Arc` so the endpoint can be SHARED: the core takes ownership of one
         // boxed clone (it drives the recv loop), while a second clone backs the
-        // `UdpTransportMetrics` live `queueDepth`/`dropsTailDrop` getters.
+        // `UdpTransportMetrics` live `queue_depth`/`drops_tail_drop` getters.
         let net = RealSignalingNetwork::new();
         let mut bind_opts =
             BindUdpOpts::new(listen_sa, self.queue_max).with_pre_ingress(brake_hook);
@@ -243,7 +243,7 @@ impl RunnerEnv {
         let local = endpoint.local_addr();
         log_socket_buffers(name, endpoint.as_ref(), self.udp_rcvbuf, self.udp_sndbuf);
 
-        // The `UdpTransport` facade's Prometheus-visible shape: the brake
+        // The UDP transport's Prometheus-visible shape: the brake
         // counters + live readings of the bound endpoint.
         let udp_metrics = {
             let live = |read: fn(&dyn UdpEndpoint) -> u64| -> LiveGauge {

@@ -8,9 +8,9 @@
 //! included. Bob, holding no dialog, answers that BYE 481 too; any final to our
 //! BYE resolves the leg (RFC 3261 §15.1.1, `resolve-bye-response`).
 //!
-//! Exercises `keepalive` + `absorb-options-200` + `handle-481`. The source backend
-//! used a 15-min interval; the Rust default keepalive interval is 30 s, so we
-//! advance in 30 s steps — the behaviour is identical.
+//! Exercises `keepalive` + `absorb-options-200` + `handle-481`. The harness
+//! baseline sets `B2buaConfig::keepalive_interval_sec` to 30 s, so we advance in
+//! 30 s steps.
 
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -21,7 +21,7 @@ use scenario_harness::RunReport;
 use sip_message::parser::custom::CustomParser;
 use sip_message::{SipMessage, SipParser};
 
-/// The Rust default keepalive interval (`KeepaliveActivation.interval_sec`).
+/// The harness baseline keepalive interval (`B2buaConfig::keepalive_interval_sec`).
 const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(30);
 
 /// Distinct BYE requests the B2BUA put on the wire toward `to` (retransmits

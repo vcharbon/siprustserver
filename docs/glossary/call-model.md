@@ -44,7 +44,8 @@ end does (it **retires** the scope).
 **Terminating timeout** (`TimerType::TerminatingTimeout`, `TERMINATING_TIMEOUT_MS`):
 The call-scope backstop armed when the call enters `Terminating`, and again on
 each BYE it sends while terminating: 32 s, SIP Timer H/J, past which no
-legitimate BYE or 2xx retransmission lands. When it fires, every leg still
+legitimate BYE or 2xx retransmission lands, or the end of a possibly confirmed
+caller dialog's hold when that is later. When it fires, every leg still
 unresolved is forced terminal, so the call reaches `Terminated` and is removed
 with its CDR and its replication delete.
 _Avoid_: "safety timer" alone (the call reaper's sweep is another net).

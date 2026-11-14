@@ -82,13 +82,13 @@ convenience.
 
 503 rather than 500: a 4xx states a caller fault and a 500 a malformed request the server
 choked on, while 503 states a transient, retryable inability an upstream proxy or caller can
-fail over on, and matches the overload and decision paths. The admission refusals are the overload and capacity gates, the
-ingress brake and the deferred backlog. A `Reason` states the cause of a rejection someone
-decided (RFC 3326), and a caller rerouting on a 5xx reads it as one. So whichever path minted
-the 5xx (a spent budget, an unanswered consult, a refused route, the chain's depth, the X2
-synthesis, a service's teardown), a stated `Reason` adds none. A decision's reject states its
-own `Reason` and keeps it over the route's. The route's other stated headers ride as ever,
-and a callee's relayed final takes them all.
+fail over on, and matches the overload and decision paths. The admission refusals are the
+overload and capacity gates, the ingress brake and the deferred backlog. A `Reason` states
+the cause of a rejection someone decided (RFC 3326), and a caller rerouting on a 5xx reads it
+as one. So whichever path minted the 5xx (a spent budget, an unanswered consult, a refused
+route, the chain's depth, the X2 synthesis, a service's teardown), a stated `Reason` adds
+none. A decision's reject states its own `Reason` and keeps it over the route's. The route's
+other stated headers ride as ever, and a callee's relayed final takes them all.
 
 This rule is the initial INVITE's alone: a re-INVITE or another request in a dialog is
 answered by its own rules. Every final the stack mints for an initial INVITE is one of:

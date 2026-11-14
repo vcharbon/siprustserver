@@ -32,8 +32,8 @@ pub struct RtpFramed {
 
 /// The wire-codec seam. Two implementations cross-check each other.
 pub trait RtpFraming: Send + Sync {
-    /// The framing's stable trace label: `"ts"` for the hand-rolled codec,
-    /// `"rtp.js"` for the webrtc-rs witness.
+    /// The framing's stable trace label: `"hand-rolled"` for the hand-rolled
+    /// codec, `"webrtc-rs"` for the webrtc-rs witness.
     fn name(&self) -> &'static str;
     fn encode_rtp(&self, header: &RtpHeader, payload: &[u8]) -> Vec<u8>;
     fn parse_rtp(&self, bytes: &[u8]) -> Option<RtpFramed>;
@@ -117,7 +117,7 @@ pub fn parse_rtp(bytes: &[u8]) -> Option<RtpFramed> {
 
 impl RtpFraming for HandRolled {
     fn name(&self) -> &'static str {
-        "ts"
+        "hand-rolled"
     }
     fn encode_rtp(&self, header: &RtpHeader, payload: &[u8]) -> Vec<u8> {
         encode_rtp(header, payload)

@@ -119,9 +119,9 @@ use std::sync::Arc;
 use sip_clock::Clock;
 use sip_net::SignalingNetwork;
 
-/// A [`MediaEndpoint`] using the hand-rolled RFC 3550 framing. Uses a test clock anchored at 0 for deterministic RTCP
-/// timestamps under a paused runtime.
-pub fn ts_endpoint(net: Arc<dyn SignalingNetwork>) -> MediaEndpoint {
+/// A [`MediaEndpoint`] using the hand-rolled RFC 3550 framing. Uses a test
+/// clock anchored at 0 for deterministic RTCP timestamps under a paused runtime.
+pub fn hand_rolled_endpoint(net: Arc<dyn SignalingNetwork>) -> MediaEndpoint {
     MediaEndpoint::with_clock(net, Arc::new(rtp::HandRolled), Clock::test_at(0))
 }
 

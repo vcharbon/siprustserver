@@ -40,9 +40,10 @@ call-context layers and to the SIP generators, not to a test interpreter.
   (`Recorder::with_clock`), so under a paused tokio runtime the report's
   relative-time labels advance with `tokio::time::advance` — deterministic,
   per [ADR-0004]'s note and `layer-harness/src/time.rs`. The harness anchors
-  `Clock::test_at(0)`. `seq` remains the ordering authority; the fabric's
-  `arrival_ms` and decorators' anomaly `at_ms` (neither rendered as a timeline)
-  keep the wall-clock `time::now_ms()`.
+  `Clock::test_at(0)`. `seq` remains the ordering authority; the decorators'
+  anomaly `at_ms` and the fabric's undeliverable-packet stamp (neither rendered
+  as a timeline) keep the wall-clock `time::now_ms()`. A packet's
+  `arrival_ms` rides the binding endpoint's `Clock`.
 
 ## The fluent dialog builder (added 2026-05-31)
 

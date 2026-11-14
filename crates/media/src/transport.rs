@@ -399,10 +399,9 @@ impl MediaSession {
     }
 
     /// Set codec, remote addr and direction — from the negotiation engine's
-    /// [`NegotiatedMedia`].
+    /// [`NegotiatedMedia`]. Never fails today: the engine only yields PCMA and
+    /// PCMU, the codecs this transport encodes, so no codec check is made here.
     pub fn configure(&self, remote: NegotiatedMedia) -> Result<(), MediaNegotiationError> {
-        // PCMA/PCMU are the only codecs we encode, and the engine only ever
-        // yields those.
         let mut g = self.transport.inner.lock().unwrap();
         if let Some(st) = g.sessions.get_mut(&self.dialog_id) {
             st.negotiated = Some(remote);

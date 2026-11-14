@@ -1,7 +1,7 @@
 //! `RecordedAnomaly` + `Severity` — the cross-layer finding ledger.
 //!
-//! A closed enum with one arm per layer (`signalingAudit`, `queueLeak`,
-//! `codecParity`, …) would force every layer to edit this crate to add an arm,
+//! A closed enum with one arm per finding kind (`signalingAudit`, `queueLeak`,
+//! …) would force every layer to edit this crate to add an arm,
 //! which defeats "shared foundation imported by most layers". So the shape is a
 //! **flat struct** with a `&'static str` `kind` discriminant the layer owns,
 //! plus the fields every finding shares (`check`, `detail`, `severity`,
@@ -34,7 +34,7 @@ impl Severity {
 
 /// One finding on the shared ledger. `kind` is the layer-owned discriminant
 /// (e.g. `"signalingAudit"`, `"queueLeak"`); `check` is the rule/invariant id
-/// (e.g. `"rfc.viaBranch"`, `"A1_inFlightImbalance"`); `detail` is the
+/// (e.g. `"rfc3261.cseqInDialogOrder"`, `"A1_inFlightImbalance"`); `detail` is the
 /// human-readable explanation. `bind_key` ties the finding to a peer lane when
 /// one applies.
 #[derive(Debug, Clone, PartialEq, Eq)]

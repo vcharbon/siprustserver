@@ -6,16 +6,15 @@
 //! paused clock to prove the call stays up and the timer re-arms, then tear it
 //! down.
 //!
-//! Exercises the `keepalive` + `absorb-options-200` default rules. The source
-//! backend configured a 15-min interval; the Rust default keepalive interval is
-//! 30 s (`FeatureActivations.platform.keepalive.interval_sec`), so we advance in
-//! 30 s steps — the behaviour (OPTIONS to both legs, absorb, re-arm) is identical.
+//! Exercises the `keepalive` + `absorb-options-200` default rules. The harness
+//! baseline sets `B2buaConfig::keepalive_interval_sec` to 30 s, so we advance in
+//! 30 s steps.
 
 use std::time::Duration;
 
 use b2bua_harness::B2buaScene;
 
-/// The Rust default keepalive interval (`KeepaliveActivation.interval_sec`).
+/// The harness baseline keepalive interval (`B2buaConfig::keepalive_interval_sec`).
 const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(30);
 
 #[tokio::test(start_paused = true)]

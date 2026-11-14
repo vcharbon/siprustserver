@@ -9,7 +9,7 @@
 //!
 //! The sim transport moves whole `Vec<u8>` frames and does **not**
 //! need this — length-prefixing is the real-transport-only concern, unit-tested
-//! here in isolation (ADR-0011 X2 / the migration plan).
+//! here in isolation (ADR-0011 X2).
 
 /// Hard cap on a single framed payload (64 MiB). A larger length prefix is
 /// rejected rather than trusted — it is almost certainly a desync or a hostile

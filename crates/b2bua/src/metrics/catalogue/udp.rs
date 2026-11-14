@@ -5,19 +5,19 @@ use metric_catalogue::{Family, Labels};
 pub const QUEUE_DEPTH: Family = Family::gauge(
     "b2bua_udp_queue_depth",
     Labels::None,
-    "Live inbound UDP queue depth (port of UdpTransportMetrics.queueDepth).",
+    "Datagrams waiting in the inbound UDP queue, read at scrape time.",
 );
 
 pub const QUEUE_MAX: Family = Family::gauge(
     "b2bua_udp_queue_max",
     Labels::None,
-    "Configured inbound UDP queue bound (udpQueueMax).",
+    "Configured inbound UDP queue bound, in datagrams.",
 );
 
 pub const TAIL_DROPPED: Family = Family::counter(
     "b2bua_udp_tail_dropped_total",
     Labels::None,
-    "Datagrams tail-dropped by the full inbound queue (port of UdpTransportMetrics.dropsTailDrop).",
+    "Datagrams tail-dropped by the full inbound queue.",
 );
 
 pub const SEND_WOULD_BLOCK: Family = Family::counter(

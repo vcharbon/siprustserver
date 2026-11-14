@@ -72,9 +72,10 @@ the **non-fatal** axis, not the **lazy** axis, and is satisfied by storing a
   `parse()` stays tolerant — a malformed one is captured as `Err`, the message
   still parses.
 - (Superseded by ADR-0053: the strict pass is folded into the parse and
-  removed.) `SipMessage::validate_strict()` re-validates Date/From/To/Contact grammar + every optional header and returns
-  the first violation. Security-sensitive callers (and the compliance matrix's
-  invalid corpus) opt into it; production stays tolerant. Note it intentionally
+  removed.) `SipMessage::validate_strict()` re-validates Date/From/To/Contact
+  grammar + every optional header and returns the first violation.
+  Security-sensitive callers (and the compliance matrix's invalid corpus) opt
+  into it; production stays tolerant. Note it intentionally
   over-rejects some RFC-valid torture display names, so it is
   applied to the invalid/canonical corpora, not the full valid torture set.
 - Extension headers stay on-demand via `TypedHeader` (the core can't eagerly

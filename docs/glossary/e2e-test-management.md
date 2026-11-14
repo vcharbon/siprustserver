@@ -19,7 +19,8 @@ exactly once, as a **Shape descriptor** in the unified open `ShapeRegistry`
 (`e2e-model`), and may carry a **load body** (see
 [Loadgen fusion vocabulary](loadgen-fusion.md)).
 _Avoid_: "scenario" (overloaded: the Rust `Scenario` struct, the JSON
-**Test case**, and loadgen's `--scenario` selector all collide; a registered shape is a **shape**); "framework".
+**Test case**, and loadgen's `--scenario` selector all collide; a registered shape
+is a **shape**); "framework".
 
 **Infra shape**:
 The label naming the topology and clock a run was under: **fake** (Alice/Bob*,

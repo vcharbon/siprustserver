@@ -1,6 +1,5 @@
-//! `UdpTransportMetrics` — the `UdpTransport` facade's Prometheus-visible
-//! shape: live getters over the bound endpoint and the ingress brake's
-//! counters.
+//! `UdpTransportMetrics` — the UDP transport's Prometheus-visible shape: live
+//! getters over the bound endpoint and the ingress brake's counters.
 
 use std::sync::Arc;
 
@@ -9,7 +8,7 @@ use sip_net::UdpEndpointCounters;
 use super::catalogue;
 use crate::ingress_brake::IngressBrakeCounters;
 
-/// A live-read source for an endpoint gauge (`queueDepth`). `Arc<dyn Fn>` so
+/// A live-read source for an endpoint gauge (`queue_depth`). `Arc<dyn Fn>` so
 /// the surface is decoupled from the concrete `UdpEndpoint` type (which is held
 /// as a `Box<dyn UdpEndpoint>` by the runner and is not `Clone`); the closure
 /// captures a clone of the shared counter/queue handle and reads it on demand.
@@ -20,12 +19,12 @@ pub type LiveGauge = Arc<dyn Fn() -> u64 + Send + Sync>;
 /// once per scrape.
 pub type LiveCounters = Arc<dyn Fn() -> UdpEndpointCounters + Send + Sync>;
 
-/// The `UdpTransport` facade's Prometheus-visible shape: a bag of **live
+/// The UDP transport's Prometheus-visible shape: a bag of **live
 /// getters**. Both the scrape endpoint and test reads want the *instantaneous*
 /// value, never a cached snapshot, so every facet reads through on each access:
 ///
 ///   - `queue_depth` → an injected [`LiveGauge`] backed by the underlying
-///     [`UdpEndpoint`](sip_net::UdpEndpoint) (`endpoint.queueDepth()`).
+///     [`UdpEndpoint`](sip_net::UdpEndpoint) (`endpoint.queue_depth()`).
 ///   - `queue_max` → the bind's configured bound (a constant, copied once).
 ///   - the endpoint's lifetime counters → an injected [`LiveCounters`] over
 ///     `endpoint.counters()`: tail drops, sends refused by a full send buffer,
@@ -33,7 +32,7 @@ pub type LiveCounters = Arc<dyn Fn() -> UdpEndpointCounters + Send + Sync>;
 ///     pre-ingress hook panicked (each accepted, each a defect), and failed
 ///     receives.
 ///   - `ingress_brake_emergency_bypassed` → the shared [`IngressBrakeCounters`] the
-///     `preIngress` hook mutates; its refusals are new-call counts
+///     ingress brake's `PreIngressHook` mutates; its refusals are new-call counts
 ///     ([`crate::new_calls`]).
 ///
 /// Clone-cheap (all fields are `Arc`/`Copy`): the runner keeps one to render
@@ -63,8 +62,8 @@ impl std::fmt::Debug for UdpTransportMetrics {
 impl UdpTransportMetrics {
     /// Build the shape from its live sources.
     ///
-    ///   - `queue_max`: the bind's configured queue bound (`config.udpQueueMax`).
-    ///   - `brake`: the [`IngressBrakeCounters`] the `preIngress` hook holds (so
+    ///   - `queue_max`: the bind's configured queue bound (`BindUdpOpts::queue_max`).
+    ///   - `brake`: the [`IngressBrakeCounters`] the `PreIngressHook` holds (so
     ///     `ingress_brake_emergency_bypassed` reads live).
     ///   - `queue_depth` / `counters`: live getters over the bound endpoint
     ///     (typically `move || endpoint.queue_depth()` and
@@ -78,11 +77,11 @@ impl UdpTransportMetrics {
         Self { queue_depth, queue_max, counters, brake }
     }
 
-    /// Live inbound-queue depth (`endpoint.queueDepth()`).
+    /// Live inbound-queue depth (`endpoint.queue_depth()`).
     pub fn queue_depth(&self) -> u64 {
         (self.queue_depth)()
     }
-    /// The configured inbound-queue bound (`config.udpQueueMax`).
+    /// The configured inbound-queue bound (`BindUdpOpts::queue_max`).
     pub fn queue_max(&self) -> usize {
         self.queue_max
     }
@@ -90,8 +89,8 @@ impl UdpTransportMetrics {
     pub fn counters(&self) -> UdpEndpointCounters {
         (self.counters)()
     }
-    /// Datagrams the full inbound queue tail-dropped (`dropsTailDrop`, live ←
-    /// `endpoint.counters.tailDropped`).
+    /// Datagrams the full inbound queue tail-dropped (live ←
+    /// `endpoint.counters().tail_dropped`).
     pub fn drops_tail_drop(&self) -> u64 {
         self.counters().tail_dropped
     }

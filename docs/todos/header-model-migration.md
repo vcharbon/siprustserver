@@ -950,8 +950,8 @@ pre-existing doc-indentation warnings.
 - **`Registrar` stores a `header::Uri` per binding, which is a 272-byte value
   for what routing reads as a host and a port.** That is the same
   `size_of`-of-the-value-model debt M5 logged; a binding store keyed on
-  `SocketAddr` would be smaller but would stop the store being verbatim, which
-  its contract states.
+  `SocketAddr` would be smaller but would break the binding store's contract
+  that it keeps each binding verbatim.
 - `RegisterProxy::on_response` reads the whole Via list to find the relay
   target and then pops the top entry through the draft, so the header is read
   twice — the `try_list` gap M5 and M6 both logged, seen from the response

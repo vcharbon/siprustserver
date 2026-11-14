@@ -98,8 +98,9 @@ pub trait UdpEndpoint: Send + Sync {
 /// boxed and moved into the consumer that drives the recv loop (e.g.
 /// `B2buaCore::spawn`, which takes `Box<dyn UdpEndpoint>`), while clones of the
 /// `Arc` feed read-only live getters elsewhere — notably the
-/// `UdpTransportMetrics` `queueDepth`/`dropsTailDrop` proxies, which close over
-/// the very endpoint the transport sends through. Every method delegates to the inner; sharing the recv side is safe
+/// `UdpTransportMetrics` `queue_depth`/`drops_tail_drop` proxies, which close
+/// over the very endpoint the transport sends through. Every method delegates
+/// to the inner; sharing the recv side is safe
 /// because the underlying endpoints take `&self` and serialise internally
 /// (the simulated `PacketQueue` and the real socket are both `Send + Sync`).
 #[async_trait]

@@ -1,7 +1,8 @@
-//! The load balancer's pure logic: cookie encode/decode round-trip, HMAC tampering, the liveness routing
-//! matrix and the acceptance of new calls (ADR-0050), unresolvable-id
-//! fallback, resharding stickiness, and initial-health gating. No proxy SUT —
-//! these exercise the `LoadBalancerStrategy` directly.
+//! The load balancer's pure logic: cookie encode/decode round-trip, HMAC
+//! tampering, the liveness routing matrix and the acceptance of new calls
+//! (ADR-0050), unresolvable-id fallback, resharding stickiness, and
+//! initial-health gating. No proxy SUT — these exercise the
+//! `LoadBalancerStrategy` directly.
 
 use std::sync::Arc;
 
@@ -401,9 +402,10 @@ async fn rate_cap_exhausted_when_winners_bucket_is_empty() {
     // `start_paused` freezes `tokio::time`, so every `clock.now_ms()` — the drain
     // loop's, AND the strategy's internal read inside `select_for_new_dialog` —
     // returns the SAME instant (anchor 0 + 0 elapsed). The bucket therefore refills
-    // by a provable zero between the drain and the assert. Under a plain (unpaused) `#[tokio::test]` the real
-    // monotonic clock ticks between the two and a token can trickle back under
-    // extreme scheduling delay — a latent CI flake this removes.
+    // by a provable zero between the drain and the assert. Under a plain
+    // (unpaused) `#[tokio::test]` the real monotonic clock ticks between the
+    // two and a token can trickle back under extreme scheduling delay — a
+    // latent CI flake this removes.
     let clock = Clock::test_at(0);
     let observer = Arc::new(WorkerLoadObserver::new(LoadObserverConfig::default()));
     // Single worker so the rendezvous winner is deterministic; seed a cool

@@ -23,8 +23,10 @@ seam. Its shape follows tokio idioms.
   impls' inbound side, because the audit needs `depth()` (which `tokio::mpsc`
   doesn't expose) and the fabric needs an `offer` that reports "full" to drive
   the tail-drop counter.
-- **`scopedAudit` ships as a recording decorator; `paranoidInputs` as a second
-  decorator.** Canonical order `paranoidInputs(scopedAudit(impl))`. Paranoid
+- **The scoped audit ships as a recording decorator
+  (`RecordingSignalingNetwork`); the paranoid-inputs check as a second
+  decorator (`ParanoidSignalingNetwork`).** Canonical order
+  `ParanoidSignalingNetwork(RecordingSignalingNetwork(impl))`. Paranoid
   violations are programmer errors → `panic!`, surfaced via
   `layer_harness::ParanoidViolation`.
 - **No property test and no parity check on this layer.** A property test:
@@ -38,7 +40,7 @@ seam. Its shape follows tokio idioms.
 
 ## Around the seam
 
-- The `UdpTransport` facade (ingress brake, Prometheus metrics shape) lives
+- The UDP transport's ingress brake and Prometheus metrics shape live
   in `b2bua::ingress_brake` / `b2bua::UdpTransportMetrics`, on this crate's
   `PreIngressHook`. There is no per-peer send drainer: a send takes a resolved
   `SocketAddr` and never blocks (ADR-0033), so there is nothing per peer to

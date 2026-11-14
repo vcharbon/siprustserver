@@ -7,8 +7,7 @@
 //!     either impl with the typed `layer-harness` `Recorder` channel and the
 //!     RFC audit over the recording ([`rfc_audit`], whose rule bodies live once
 //!     in `rfc-rules`), plus the caller-side precondition decorator
-//!     [`ParanoidSignalingNetwork`]. See the `effect-layer-test` SKILL for the
-//!     wrapper philosophy.
+//!     [`ParanoidSignalingNetwork`]. ADR-0004 states the wrapper pattern.
 //!   - [`report`] — the wire-trace projection of a recording; [`repeat`] — the
 //!     RFC 3261 §17.2 repeat classification; [`RandomLoss`] — the fabric's
 //!     random-loss model.

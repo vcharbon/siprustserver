@@ -126,7 +126,7 @@ fn cancelling_a_leg_retires_its_timers() {
             .critical
             .iter()
             .any(|e| matches!(e, CriticalStateEffect::CancelTimer { key } if *key == no_answer)),
-        "the live NoAnswer fiber is cancelled, got {:?}",
+        "the live NoAnswer timer is cancelled, got {:?}",
         result.effects.critical,
     );
 }
@@ -224,7 +224,7 @@ fn begin_termination_scrubs_per_leg_no_answer_entries() {
             .critical
             .iter()
             .any(|e| matches!(e, CriticalStateEffect::CancelTimer { key } if *key == no_answer)),
-        "the live NoAnswer fiber is cancelled, got {:?}",
+        "the live NoAnswer timer is cancelled, got {:?}",
         result.effects.critical,
     );
 }

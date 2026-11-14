@@ -1,8 +1,8 @@
 //! Wire-level trace projection — the SIP-specific half of the recording that
 //! `layer-harness::scenario` deliberately leaves out (see the note at the top
 //! of `layer-harness/src/scenario.rs`: "the SIP-specific projection
-//! (`RecordedSipEntry`, the `toSipWire` derivation) lives in `sip-net`, which
-//! reads its own typed channel snapshot directly").
+//! (`RecordedSipEntry`, the `to_sip_entries` derivation) lives in
+//! `sip-net-testkit`, which reads its own typed channel snapshot directly").
 //!
 //! The recording decorator ([`crate::contracts`]) captures every call as a
 //! [`SignalingNetworkEvent`]: a `SendCalled` at the sender and a `RecvItem` at

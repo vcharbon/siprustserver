@@ -2,16 +2,16 @@
 //! structs that implement the same trait** (ADR-0004).
 //!
 //! Two decorators, composed in the canonical order
-//! `paranoidInputs(scopedAudit(impl))` (no property decorator for
-//! `SignalingNetwork` — `bind_udp` opens a socket and `send_to` is
+//! `ParanoidSignalingNetwork(RecordingSignalingNetwork(impl))` (no property
+//! decorator for `SignalingNetwork` — `bind_udp` opens a socket and `send_to` is
 //! fire-and-forget UDP, so there is no natural input/output domain to assert a
 //! per-call property over):
 //!
-//!   - [`RecordingSignalingNetwork`] — the `scopedAudit` equivalent. Records
+//!   - [`RecordingSignalingNetwork`] — the scoped-audit decorator. Records
 //!     every method call onto the typed `layer-harness` channel and runs
 //!     per-bind + cross-message RFC rules, surfacing findings on the shared
 //!     anomaly ledger at the severity the active [`RunContext`] dictates.
-//!   - [`ParanoidSignalingNetwork`] — the `paranoidInputs` equivalent.
+//!   - [`ParanoidSignalingNetwork`] — the paranoid-inputs decorator.
 //!     Caller-side precondition checks; a violation is a programmer error
 //!     (defect) raised by panic.
 //!
@@ -211,7 +211,7 @@ fn subject_intersects(subject: &HashSet<UaRole>, roles: &HashSet<UaRole>) -> boo
 }
 
 // ---------------------------------------------------------------------------
-// RecordingSignalingNetwork (scopedAudit equivalent)
+// RecordingSignalingNetwork (the scoped-audit decorator)
 // ---------------------------------------------------------------------------
 
 struct RecordingInner {
@@ -286,7 +286,7 @@ impl RecordingSignalingNetwork {
                 self.push_layer_anomaly(
                     "inFlightImbalance",
                     "A1_inFlightImbalance",
-                    format!("{in_flight} transit fibers still in flight at layer close"),
+                    format!("{in_flight} transit tasks still in flight at layer close"),
                     None,
                 );
             }
@@ -641,7 +641,7 @@ impl Drop for RecordedEndpoint {
 }
 
 // ---------------------------------------------------------------------------
-// ParanoidSignalingNetwork (paranoidInputs equivalent)
+// ParanoidSignalingNetwork (the paranoid-inputs decorator)
 // ---------------------------------------------------------------------------
 
 use layer_harness::ParanoidViolation;
@@ -779,8 +779,9 @@ pub struct WrappedNetwork {
 }
 
 /// Compose the contract decorators in canonical order
-/// `paranoidInputs(scopedAudit(impl))`. Set `paranoid = false` to skip the
-/// precondition layer (perf benches, deliberate-violation tests).
+/// `ParanoidSignalingNetwork(RecordingSignalingNetwork(impl))`. Set
+/// `paranoid = false` to skip the precondition layer (perf benches,
+/// deliberate-violation tests).
 pub fn with_all_contracts(
     impl_: Arc<dyn SignalingNetwork>,
     recorder: Recorder,

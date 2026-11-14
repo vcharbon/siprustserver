@@ -367,7 +367,7 @@ Never an apply gate, a retention hint or a readiness input.
 _Avoid_: "Ack" (there is no retention frame); calling it a handshake (nothing
 waits for it).
 
-**Current flag** (`everCaughtUp`):
+**Current flag** (`PullerStatus::current`):
 Set the instant the **first `Noop`** arrives on a stream. The server emits it on
 the **catch-up edge** (backlog drained below one batch / to head), so it means "I
 have drained this flow's backlog." **Sticky** across reconnects; a transient TCP

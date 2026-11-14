@@ -428,7 +428,7 @@ fn the_retained_answered_2xx_round_trips_with_its_rung() {
     );
 }
 
-/// PA2 (source paranoid-decode precondition): empty input is a typed error.
+/// PA2 (the decode precondition): empty input is a typed error.
 #[test]
 fn decode_empty_is_error() {
     let codec = MsgpackCodec::new();
@@ -448,7 +448,7 @@ fn p7_binary_integrity_sizes() {
     }
 }
 
-/// The one preserved absent/null/value distinction (source `policyUpdateBody`).
+/// The one preserved absent/null/value distinction (`Call::policy_update_body`).
 #[test]
 fn policy_body_three_states_round_trip() {
     let codec = MsgpackCodec::new();

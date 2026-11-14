@@ -2,12 +2,13 @@
 
 **Status:** accepted (2026-05-31)
 
-Every layer's tests share one test-contract machinery: the contract wrappers
-(`propertyTest`, `paranoidInputs`, `scopedAudit`, and the parity check), the
-`Recorder`, `RunContext`, and the three-tier severity model. Every layer wraps
-its seam the same way, so the machinery lives in a dedicated
-`crates/layer-harness` crate rather than duplicated per layer or parked inside
-`sip-net`.
+The layers' tests share one test-contract machinery: the contract wrappers
+(the property, paranoid-inputs and scoped-audit decorators, and the parity
+check), the `Recorder`, `RunContext`, and the three-tier severity model. The
+network layer (`sip-net-testkit/src/contracts.rs`) is the one layer that wraps
+its seam in contract decorators; a layer that adds contracts builds on this
+crate. The machinery lives in a dedicated `crates/layer-harness` crate rather
+than duplicated per layer or parked inside `sip-net`.
 
 This does **not** contradict ADR-0002's "no premature shared types crate"
 stance. ADR-0002 defers a shared *production* foundation until a production
@@ -25,7 +26,7 @@ infrastructure, not a types crate.
 | typed recording channels + projectors | `Recorder` + `Channel<E>` (type-erased by tag key) |
 | recording helpers | `recording` module (`record_call`, `ReleaseGuard`) |
 | anomalies | flat `RecordedAnomaly` struct (`kind: &'static str`) |
-| the contract wrappers | **decorator structs** implementing the wrapped trait (live in each layer's `contracts` module, not here) |
+| the contract wrappers | **decorator structs** implementing the wrapped trait (live in the layer's `contracts` module, not here) |
 
 Two shapes are deliberate:
 
@@ -48,7 +49,8 @@ calls. Drop endpoints before `close()`.
 
 ## Consequences
 
-- Every layer's `contracts` module depends on `layer-harness`.
+- A layer's `contracts` module depends on `layer-harness`; the network
+  layer's (`sip-net-testkit`) is the one that exists.
 - The wrappers are test-only, and nothing in the compiler enforces it;
   reviewers reject any `with_all_contracts` / decorator import from a
   production binary.

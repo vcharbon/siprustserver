@@ -11,13 +11,13 @@ use webrtc_util::marshal::{Marshal, Unmarshal};
 
 use super::packet::{RtpFramed, RtpFraming, RtpHeader};
 
-/// webrtc-rs framing witness, traced as `"rtp.js"`.
+/// webrtc-rs framing witness, traced as `"webrtc-rs"`.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct WebRtcRs;
 
 impl RtpFraming for WebRtcRs {
     fn name(&self) -> &'static str {
-        "rtp.js"
+        "webrtc-rs"
     }
 
     fn encode_rtp(&self, header: &RtpHeader, payload: &[u8]) -> Vec<u8> {

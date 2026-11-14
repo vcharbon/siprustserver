@@ -1,5 +1,6 @@
-//! Request/response shapes for the call-decision adapter. `FeatureActivations` is reused from `call` (it is
-//! the canonical feature shape; the data model already carries it on `Call`).
+//! Request/response shapes for the call-decision adapter. `FeatureActivations`
+//! is reused from `call` (it is the canonical feature shape; the data model
+//! already carries it on `Call`).
 //!
 //! [`NewCallRequest`] round-trips serde — it is what the future HTTP adapter
 //! POSTs and what the scripted test adapter inspects. The response types are

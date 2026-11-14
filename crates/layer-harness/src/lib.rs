@@ -1,9 +1,10 @@
 //! layer-harness — the test-only contract + recording foundation shared by
 //! every layer (ADR-0004).
 //!
-//! A layer's contracts (`paranoidInputs` / `scopedAudit` and their kin) are
-//! **decorator structs that implement the layer's own trait** around the real
-//! implementation, and they all stand on the same shared machinery:
+//! A layer's contracts (the paranoid-inputs and scoped-audit decorators and
+//! their kin) are **decorator structs that implement the layer's own trait**
+//! around the real implementation, and they all stand on the same shared
+//! machinery:
 //!
 //! | Piece | Here |
 //! |---|---|

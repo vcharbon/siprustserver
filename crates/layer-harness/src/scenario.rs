@@ -2,9 +2,9 @@
 //!
 //! The renderer-facing `RecordedScenario` here is intentionally **SIP-free**:
 //! it carries lanes + anomalies only. The SIP-specific projection
-//! (`RecordedSipEntry`, the `toSipWire` derivation) lives in `sip-net`, which
-//! reads its own typed channel snapshot directly. Keeping SIP out of this
-//! crate is what lets the cache / limiter / rules layers reuse it.
+//! (`RecordedSipEntry`, the `to_sip_entries` derivation) lives in
+//! `sip-net-testkit`, which reads its own typed channel snapshot directly.
+//! Keeping SIP out of this crate is what lets other layers reuse it.
 
 use std::collections::BTreeMap;
 use std::net::SocketAddr;

@@ -41,7 +41,7 @@ const B2BUA: &str = "127.0.0.1:5090";
 async fn alice_calls_bob_through_proxy_and_b2bua() {
     let h = Harness::with_transit_delay("proxy-b2bua-basic", 0).describe(
         "alice → proxy → b2bua → proxy → bob: LB proxy fronts one B2BUA worker; \
-         the worker's b-leg traffic traverses the proxy via b2bOutboundProxy.",
+         the worker's b-leg traffic traverses the proxy, set as its outbound proxy.",
     );
     let alice = h.agent("alice", ALICE).await;
     let bob = h.agent("bob", BOB).await;

@@ -1,5 +1,6 @@
-//! Rule selection ([`pick_ranked`]) + execution. First handler returning `Some` wins; its actions run
-//! through the [`ActionExecutor`], then termination is finalized + invariants
+//! Rule selection ([`pick_ranked`]) + execution. First handler returning
+//! `Some` wins; its actions run through the [`ActionExecutor`], then
+//! termination is finalized + invariants
 //! enforced. The turn's lifecycle events reach the active services after
 //! the claim (`super::lifecycle_delivery`). No candidate → the default
 //! handler.

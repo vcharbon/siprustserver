@@ -1,7 +1,8 @@
 //! Play→record over the simulated fabric.
 //!
-//! Runs for both framing flavors. Rather than depend on the spectral classifier (in `media-harness`),
-//! this asserts the transport/codec path directly: the PCM Bob records must
+//! Runs for both framing flavors. Rather than depend on the spectral
+//! classifier (in `media-harness`), this asserts the transport/codec path
+//! directly: the PCM Bob records must
 //! equal the G.711 round-trip of the clip Alice played, and the packet/byte
 //! stats must be exact. RTCP SR/RR counts must flow on the configured interval.
 
@@ -76,7 +77,7 @@ async fn play_record(endpoint_of: fn(Arc<dyn sip_net::SignalingNetwork>) -> Medi
 
 #[tokio::test(start_paused = true)]
 async fn play_record_handrolled() {
-    play_record(media::ts_endpoint).await;
+    play_record(media::hand_rolled_endpoint).await;
 }
 
 #[tokio::test(start_paused = true)]
@@ -87,7 +88,7 @@ async fn play_record_webrtc_witness() {
 #[tokio::test(start_paused = true)]
 async fn rtcp_reports_flow_on_the_interval() {
     let net = Arc::new(SimulatedSignalingNetwork::new(1));
-    let me = media::ts_endpoint(net);
+    let me = media::hand_rolled_endpoint(net);
     let opts = OpenOptions { rtcp_interval_ms: Some(1000), ..Default::default() };
     let alice = me.open("10.10.0.1", Some(41000), opts.clone()).await.unwrap();
     let bob = me.open("10.20.0.1", Some(41002), opts).await.unwrap();
