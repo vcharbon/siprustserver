@@ -5,11 +5,17 @@
  * once, at composition, and every case a run assembles is assembled under the
  * same readings. A caller that could pass a policy per call could generate two
  * cases of one capture under two different platforms' rules.
+ *
+ * The capture's index comes from here too, built under the bound policy's
+ * Call-ID derivation: an entry asks for it once per capture and hands it to
+ * the cut and to `cases`, so the capture's legs are correlated once and the
+ * cut and its cases read the same correlation.
  */
 import type { AllowedErrors, Flows } from "@sip/contracts"
 import * as Context from "effect/Context"
 import * as Effect from "effect/Effect"
 import * as Layer from "effect/Layer"
+import { captureIndex, type CaptureIndex } from "./capture-index.js"
 import type { CaseSpec } from "./case-spec.js"
 import { decideCases, type CaptureCases } from "./caseset.js"
 import { LogicExtractor } from "./logic-extractor.js"
@@ -25,6 +31,8 @@ export interface CaptureInput {
   readonly specs: ReadonlyArray<CaseSpec>
   readonly sut: SutSet
   readonly plan: Plan
+  /** The index {@link Interface.index} built of `flows` under `plan`, the one the cut read. */
+  readonly index: CaptureIndex
   readonly parts?: PartsIndex
   readonly allowed?: AllowedErrors.AllowedErrors
   /**
@@ -35,6 +43,8 @@ export interface CaptureInput {
 }
 
 export interface Interface {
+  /** The index of one capture under the bound policy's derivation: its one correlation and forms table. */
+  readonly index: (flows: Flows.FlowsDoc, plan: Plan) => CaptureIndex
   /** Every case this capture yields, generated or refused. */
   readonly cases: (input: CaptureInput) => Effect.Effect<CaptureCases>
 }
@@ -48,11 +58,13 @@ export const layer: Layer.Layer<Service, never, LogicExtractor.Service> = Layer.
   Effect.gen(function* () {
     const { policy } = yield* LogicExtractor.Service
 
+    const index = (flows: Flows.FlowsDoc, plan: Plan): CaptureIndex => captureIndex(flows, policy.derives, plan)
+
     const cases = Effect.fn("CaseAssembler.cases")(function* (input: CaptureInput) {
       return decideCases({ ...input, policy })
     })
 
-    return Service.of({ cases })
+    return Service.of({ index, cases })
   })
 )
 

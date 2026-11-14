@@ -6,6 +6,7 @@
 import { Pivot, Tokens } from "@sip/contracts"
 import { describe, expect, it } from "vitest"
 import { assemble } from "../src/assemble.js"
+import { captureIndex } from "../src/capture-index.js"
 import type { CaseSpec } from "../src/case-spec.js"
 import { decideCases } from "../src/caseset.js"
 import type { CaseRule } from "../src/case-rules.js"
@@ -23,7 +24,13 @@ const SPEC: CaseSpec = {
   cutLegs: [0, 1]
 }
 
-const built = (policy = policyWith({ derives: derivesOnePrefix })) =>
+/** The CANCEL-race capture and its index under the one-prefix derivation, as a cut hands them on. */
+const raceCapture = () => {
+  const flows = cancelRaceFlows()
+  return { flows, index: captureIndex(flows, derivesOnePrefix, plan()) }
+}
+
+const built =(policy = policyWith({ derives: derivesOnePrefix })) =>
   assemble({
     flows: cancelRaceFlows(),
     capture: CAPTURE,
@@ -170,7 +177,7 @@ describe("deciding a whole capture", () => {
     quarantine = false
   ) =>
     decideCases({
-      flows: cancelRaceFlows(),
+      ...raceCapture(),
       capture: CAPTURE,
       specs: [SPEC],
       sut: sutSet(),
@@ -295,7 +302,7 @@ describe("deciding a whole capture", () => {
       refuses: (input) => ({ line: `${input.caseId}: no run of it can end` })
     }
     const out = decideCases({
-      flows: cancelRaceFlows(),
+      ...raceCapture(),
       capture: CAPTURE,
       specs: [SPEC],
       sut: sutSet(),
@@ -414,7 +421,7 @@ describe("deciding a whole capture", () => {
       refuses: (input) => ({ line: `${input.caseId}: part of an exchange` })
     }
     const out = decideCases({
-      flows: cancelRaceFlows(),
+      ...raceCapture(),
       capture: CAPTURE,
       specs: [SPEC],
       sut: sutSet(),

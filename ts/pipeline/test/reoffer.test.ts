@@ -5,6 +5,7 @@
  */
 import type { Flows } from "@sip/contracts"
 import { describe, expect, it } from "vitest"
+import { captureIndex } from "../src/capture-index.js"
 import type { CaseSpec } from "../src/case-spec.js"
 import { decideCases } from "../src/caseset.js"
 import { cutCalls } from "../src/cut.js"
@@ -41,7 +42,8 @@ const CALLER_TAG = `from-${CALLER_CALL_ID}`
 
 /** The cut's cases of a capture, decided under a policy that refuses nothing of its own. */
 const decide = (flows: Flows.FlowsDoc, capture = "capture.pcap") => {
-  const cut = cutCalls(flows, sutSet(), capture, derivesOnePrefix, nameByCallIds)
+  const index = captureIndex(flows, derivesOnePrefix, plan())
+  const cut = cutCalls(flows, sutSet(), capture, index.correlation, nameByCallIds)
   const specs: ReadonlyArray<CaseSpec> = cut.calls.map((c) => ({
     id: c.id,
     uac: c.uac,
@@ -55,6 +57,7 @@ const decide = (flows: Flows.FlowsDoc, capture = "capture.pcap") => {
     specs,
     sut: sutSet(),
     plan: plan(),
+    index,
     policy: policyWith({ derives: derivesOnePrefix })
   })
 }

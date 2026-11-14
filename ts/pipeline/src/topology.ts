@@ -153,6 +153,11 @@ export const relatedByDerivation = (a: number, b: number, correlation: Correlati
   return [...basesOfA].some((i) => i !== a && i !== b && basesOfB.has(i))
 }
 
+/**
+ * The layout of one case's vantages: its actors, endpoints, legs and topology,
+ * read off the capture's `index`. `assemble` always passes the index; `derives`
+ * builds it only where none is passed, which is a test laying out one case.
+ */
 export const build = (
   flows: Flows.FlowsDoc,
   vantages: ReadonlyArray<Vantage>,

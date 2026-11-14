@@ -5,10 +5,13 @@
  * once per case.
  */
 import type { Flows } from "@sip/contracts"
+import * as Effect from "effect/Effect"
+import * as Layer from "effect/Layer"
 import { describe, expect, it } from "vitest"
-import { decideCases } from "../src/caseset.js"
+import { CaseAssembler } from "../src/case-assembler.js"
 import { callFamilies, cutCalls } from "../src/cut.js"
 import type { CallIdDerivation } from "../src/derivation.js"
+import { LogicExtractor } from "../src/logic-extractor.js"
 import { policyWith } from "../src/policy.js"
 import { doc, leg, nameByCallIds, oneHop, plan, request, response, SOCKETS, sutSet } from "./fixtures.js"
 
@@ -158,33 +161,45 @@ describe("call families over thousands of legs", () => {
   })
 })
 
-describe("deciding every case of a capture", () => {
-  it("correlates the capture once, not once per case", () => {
-    const flows = manyCallsFlows(150)
+/**
+ * One cut of `flows` as an entry runs it, under a policy deriving by `derives`:
+ * the assembler's index of the capture, the cut off its correlation, and every
+ * case the cut proposes decided off the same index.
+ */
+const cutOnce = (flows: Flows.FlowsDoc, derives: CallIdDerivation) =>
+  Effect.gen(function*() {
+    const assembler = yield* CaseAssembler.Service
     const sut = sutSet()
-    const cut = cutCalls(flows, sut, "many.pcap", suffixDerives, nameByCallIds)
-    expect(cut.calls).toHaveLength(150)
-    const specs = cut.calls.map((c) => ({
-      id: c.id,
-      uac: c.uac,
-      uas: [...c.uas],
-      defects: [],
-      cutLegs: c.legs
-    }))
-
-    const counted = counting(suffixDerives)
-    const decided = decideCases({
+    const index = assembler.index(flows, plan())
+    const cut = cutCalls(flows, sut, "many.pcap", index.correlation, nameByCallIds)
+    const decided = yield* assembler.cases({
       flows,
       capture: "many.pcap",
-      specs,
+      specs: cut.calls.map((c) => ({ id: c.id, uac: c.uac, uas: [...c.uas], defects: [], cutLegs: c.legs })),
       sut,
       plan: plan(),
-      policy: policyWith({ derives: counted.derives })
+      index
     })
+    return { cut, decided }
+  }).pipe(
+    Effect.provide(CaseAssembler.layer.pipe(Layer.provide(LogicExtractor.layerWith(policyWith({ derives }))))),
+    Effect.runSync
+  )
+
+/**
+ * Each call of {@link manyCallsFlows} holds one derived leg, whose one suffix
+ * that is a Call-ID of the document is its base, and a base leg has no suffix
+ * as long as the shortest: one correlation asks the derivation once per call,
+ * and a second one anywhere in the cut asks every derived leg again.
+ */
+describe("one cut of a capture", () => {
+  it.each([1, 3, 150])("asks the derivation about each derived leg once, over %i cases", (calls) => {
+    const flows = manyCallsFlows(calls)
+    const counted = counting(suffixDerives)
+    const { cut, decided } = cutOnce(flows, counted.derives)
+    expect(cut.calls).toHaveLength(calls)
     expect(decided.outcomes.every((o) => o.built !== undefined && o.error === undefined)).toBe(true)
     expect(decided.refused).toEqual([])
-    // One probe per derived leg, its base being its only suffix that is a
-    // Call-ID of the document; a base leg has no suffix as long as the shortest.
-    expect(counted.count()).toBe(flows.legs.length / 2)
+    expect(counted.count()).toBe(calls)
   })
 })

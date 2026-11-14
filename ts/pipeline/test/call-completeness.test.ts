@@ -7,7 +7,7 @@
 import { describe, expect, it } from "vitest"
 import { CALL_COMPLETENESS_RULE, SOURCE_CALL_INCOMPLETE } from "../src/call-completeness.js"
 import { CASE_RULES } from "../src/case-rules.js"
-import { cutCalls, type CutVantage, vantageIsInbound } from "../src/cut.js"
+import { correlate, cutCalls, type CutVantage, vantageIsInbound } from "../src/cut.js"
 import { SutSet } from "../src/sut.js"
 import { BASE_CALL_ID, completenessFlows, SUT_IP } from "./cutfixtures.js"
 import { derivesOnePrefix, nameByCallIds } from "./fixtures.js"
@@ -19,7 +19,7 @@ type Flows = ReturnType<typeof completenessFlows>
 
 /** The cut's own vantages, so a test judges what the generator would judge. */
 const cutOf = (flows: Flows): ReadonlyArray<CutVantage> => {
-  const call = cutCalls(flows, sut, CAPTURE, derivesOnePrefix, nameByCallIds).calls[0]!
+  const call = cutCalls(flows, sut, CAPTURE, correlate(flows, derivesOnePrefix), nameByCallIds).calls[0]!
   return [call.uac, ...call.uas]
 }
 
@@ -90,7 +90,7 @@ describe("source-call completeness", () => {
 
   it("judges every caller-side ingress vantage, not only the cut's uac", () => {
     const flows = completenessFlows({ caller: "torn-down", derived: "left-open", derivedArrives: true })
-    const vantages = cutCalls(flows, sut, CAPTURE, derivesOnePrefix, nameByCallIds).calls.map((c) => c.uac)
+    const vantages = cutCalls(flows, sut, CAPTURE, correlate(flows, derivesOnePrefix), nameByCallIds).calls.map((c) => c.uac)
     expect(vantages.map((v) => vantageIsInbound(flows, sut, v))).toEqual([true, true])
     expect(gate(flows, vantages)!.legs).toEqual([1])
   })

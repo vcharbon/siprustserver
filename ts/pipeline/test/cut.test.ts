@@ -2,10 +2,12 @@
  * The cut: which captured legs are one call of the system under test, and which
  * hop of each leg a simulated peer binds at.
  */
+import type { Flows } from "@sip/contracts"
 import { describe, expect, it } from "vitest"
 import {
   boundaryHops,
   callFamilies,
+  type CaseNamer,
   caseCallIds,
   correlate,
   cutCalls,
@@ -33,6 +35,10 @@ import {
   sutSet,
   twoIngressOneLegFlows
 } from "./fixtures.js"
+
+/** The cut of `flows` at the fixture SUT, its legs correlated by the one-prefix derivation. */
+const cutOf = (flows: Flows.FlowsDoc, capture: string, name: CaseNamer) =>
+  cutCalls(flows, sutSet(), capture, correlate(flows, derivesOnePrefix), name)
 
 describe("boundary hops", () => {
   it("is a hop with exactly one side in the SUT set", () => {
@@ -70,7 +76,7 @@ describe("call families", () => {
 
 describe("cutting a capture", () => {
   it("anchors the caller vantage on the inbound dialog-creating INVITE", () => {
-    const cut = cutCalls(cancelRaceFlows(), sutSet(), "race.pcap", derivesOnePrefix, nameByCallIds)
+    const cut = cutOf(cancelRaceFlows(), "race.pcap", nameByCallIds)
     expect(cut.refused).toEqual([])
     expect(cut.calls).toHaveLength(1)
     const call = cut.calls[0]!
@@ -88,14 +94,14 @@ describe("cutting a capture", () => {
   })
 
   it("lets the caller name the case from the call's identity, so a regeneration keeps the id", () => {
-    const cut = cutCalls(cancelRaceFlows(), sutSet(), "race.pcap", derivesOnePrefix, (call) =>
+    const cut = cutOf(cancelRaceFlows(), "race.pcap", (call) =>
       call.callIds.includes(CALLER_CALL_ID) ? "known-case-id" : "unknown"
     )
     expect(cut.calls[0]!.id).toBe("known-case-id")
   })
 
   it("excludes a call the SUT only ever dialled, loudly", () => {
-    const cut = cutCalls(orphanBLegFlows(), sutSet(), "orphan.pcap", derivesOnePrefix, nameByCallIds)
+    const cut = cutOf(orphanBLegFlows(), "orphan.pcap", nameByCallIds)
     expect(cut.calls).toEqual([])
     expect(cut.refused).toHaveLength(1)
     const artifact = cut.refused[0]!
@@ -108,7 +114,7 @@ describe("cutting a capture", () => {
   })
 
   it("cuts one call per dialog that ARRIVED at the SUT, not one call with two attempts", () => {
-    const cut = cutCalls(twoIngressOneLegFlows(), sutSet(), "two.pcap", derivesOnePrefix, nameByCallIds)
+    const cut = cutOf(twoIngressOneLegFlows(), "two.pcap", nameByCallIds)
     expect(cut.refused).toEqual([])
     expect(cut.calls).toHaveLength(2)
     // Each call takes the outbound dialog the SUT opened after its own ingress.
@@ -125,7 +131,7 @@ describe("cutting a capture", () => {
   it("pairs an outbound dialog to the ingress at its own SUT socket, not to the nearest in time", () => {
     // The first call's b-leg is dialled at t=200, after the second call arrived
     // at t=100: on time alone it would land on the second ingress.
-    const cut = cutCalls(interleavedIngressFlows(), sutSet(), "interleaved.pcap", derivesOnePrefix, nameByCallIds)
+    const cut = cutOf(interleavedIngressFlows(), "interleaved.pcap", nameByCallIds)
     expect(cut.calls).toHaveLength(2)
     expect(cut.calls[0]!.uac).toEqual({ leg: 0, hop: 0 })
     expect(cut.calls[0]!.uas).toEqual([{ leg: 1, hop: 0 }])
@@ -139,14 +145,14 @@ describe("cutting a capture", () => {
     // which one it continues.
     const flows = secondIngressTailFlows()
     expect(hopOwners(flows, 0, sutSet()).get(2)).toBe(1)
-    const cut = cutCalls(flows, sutSet(), "tail.pcap", derivesOnePrefix, nameByCallIds)
+    const cut = cutOf(flows, "tail.pcap", nameByCallIds)
     expect(cut.calls).toHaveLength(2)
     expect(cut.calls[0]!.uac).toEqual({ leg: 0, hop: 0 })
     expect(cut.calls[1]!.uac).toEqual({ leg: 0, hop: 1 })
   })
 
   it("records a family that reaches the SUT and opens no dialog at it", () => {
-    const cut = cutCalls(midDialogOnlyFlows(), sutSet(), "middialog.pcap", derivesOnePrefix, nameByCallIds)
+    const cut = cutOf(midDialogOnlyFlows(), "middialog.pcap", nameByCallIds)
     expect(cut.calls).toEqual([])
     expect(cut.notCalls).toBe(0)
     expect(cut.refused).toHaveLength(1)
@@ -157,7 +163,7 @@ describe("cutting a capture", () => {
   })
 
   it("refuses a family the SUT hairpins, rather than reading its second transit as a fork", () => {
-    const cut = cutCalls(hairpinLoopbackFlows(), sutSet(), "hairpin.pcap", derivesOnePrefix, nameByCallIds)
+    const cut = cutOf(hairpinLoopbackFlows(), "hairpin.pcap", nameByCallIds)
     expect(cut.calls).toEqual([])
     expect(cut.refused).toHaveLength(1)
     const refusal = cut.refused[0]!
@@ -176,7 +182,7 @@ describe("cutting a capture", () => {
   })
 
   it("counts a keepalive family rather than recording one row per exchange", () => {
-    const cut = cutCalls(keepaliveOnlyFlows(), sutSet(), "keepalive.pcap", derivesOnePrefix, nameByCallIds)
+    const cut = cutOf(keepaliveOnlyFlows(), "keepalive.pcap", nameByCallIds)
     expect(cut.calls).toEqual([])
     expect(cut.refused).toEqual([])
     expect(cut.notCalls).toBe(1)
@@ -186,7 +192,7 @@ describe("cutting a capture", () => {
     const flows = hairpinBesideAPlainCallFlows()
     const reordered = { ...flows, legs: [...flows.legs.slice(2), ...flows.legs.slice(0, 2)] }
     const idsOf = (doc: typeof flows) => {
-      const cut = cutCalls(doc, sutSet(), "both.pcap", derivesOnePrefix, nameByCallIds)
+      const cut = cutOf(doc, "both.pcap", nameByCallIds)
       return {
         calls: cut.calls.map((c) => c.id),
         refused: cut.refused.map((r) => r.caseId)
@@ -199,14 +205,14 @@ describe("cutting a capture", () => {
   })
 
   it("names each ingress of a split family apart, by its ordinal", () => {
-    const cut = cutCalls(twoIngressOneLegFlows(), sutSet(), "two.pcap", derivesOnePrefix, nameByCallIds)
+    const cut = cutOf(twoIngressOneLegFlows(), "two.pcap", nameByCallIds)
     const family = `n:${CALLER_CALL_ID}+${CALLEE_CALL_ID}`
     expect(cut.calls.map((c) => c.id)).toEqual([`${family}#0`, `${family}#1`])
   })
 
   it("hands the namer each split call's own ingress — when and between which sockets it arrived — and the family's size", () => {
     const seen: Array<unknown> = []
-    cutCalls(twoIngressOneLegFlows(), sutSet(), "two.pcap", derivesOnePrefix, (call) => {
+    cutOf(twoIngressOneLegFlows(), "two.pcap", (call) => {
       seen.push({ ingress: call.ingress, ingresses: call.ingresses })
       return nameByCallIds(call)
     })
@@ -217,12 +223,12 @@ describe("cutting a capture", () => {
   })
 
   it("names a family that opens no dialog at the SUT through the namer as well, never off its legs", () => {
-    const cut = cutCalls(midDialogOnlyFlows(), sutSet(), "middialog.pcap", derivesOnePrefix, nameByCallIds)
+    const cut = cutOf(midDialogOnlyFlows(), "middialog.pcap", nameByCallIds)
     expect(cut.refused.map((r) => r.caseId)).toEqual([`n:${CALLER_CALL_ID}`])
   })
 
   it("cuts nothing at all from a call that never touches the SUT", () => {
-    const cut = cutCalls(foreignLegFlows(), sutSet(), "foreign.pcap", derivesOnePrefix, nameByCallIds)
+    const cut = cutOf(foreignLegFlows(), "foreign.pcap", nameByCallIds)
     expect(cut).toEqual({ calls: [], refused: [], notCalls: 0, notes: [] })
   })
 })

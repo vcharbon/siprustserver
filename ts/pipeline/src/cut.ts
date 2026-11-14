@@ -568,12 +568,16 @@ export type CaseNamer = (call: CallIdentity) => string
  * its own leg for each, and folding them into one case reads the second ingress
  * as a second ATTEMPT of the first — a failover the platform never made. A
  * family with one ingress, which is the common shape, cuts exactly as before.
+ *
+ * `correlation` is the capture's one correlation (`./capture-index.ts`): the
+ * cut reads its families and never correlates the legs itself, so the cut and
+ * the case set of one capture join its legs by the same reading.
  */
 export const cutCalls = (
   flows: Flows.FlowsDoc,
   sut: SutSet,
   capture: string,
-  derives: CallIdDerivation,
+  correlation: Correlation,
   name: CaseNamer
 ): CutResult => {
   const calls: Array<CutCall> = []
@@ -582,7 +586,7 @@ export const cutCalls = (
   let notCalls = 0
   if (sut.size === 0) return { calls, refused, notCalls, notes }
 
-  for (const family of correlate(flows, derives).families) {
+  for (const family of correlation.families) {
     const selected = family.filter((i) => boundaryHops(flows.legs[i]!, sut).length > 0)
     if (selected.length === 0) continue
     const anchors = selected.flatMap((i) => anchorsOf(flows, i, sut))

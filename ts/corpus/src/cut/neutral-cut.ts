@@ -4,17 +4,16 @@
  * rule. The flows document is the one `*.flows.json` the capture's source
  * directory holds. The system under test is the address that took the
  * capture's earliest dialog-creating INVITE; its legs are joined into calls by
- * the Call-ID derivation the caller names (none by default, `derivation.ts`),
- * and each call at its boundary is cut and assembled under
- * the `@sip/pipeline` neutral policy (`CaseAssembler`), which states nothing it
- * did not observe; each call is named `<capture stem>-<n>` in cut order, so a
+ * the Call-ID derivation (`derivation.ts`) of the policy the `CaseAssembler` is
+ * bound to (the base generator binds the neutral policy with the derivation
+ * its caller names), and each call at its boundary is cut and assembled under
+ * that policy, which states nothing it did not observe; each call is named `<capture stem>-<n>` in cut order, so a
  * document cut again names its calls as before. Each case is
  * written as `cases/<id>/<id>.v3.json` with its `resources/`, and every
  * refusal as an `excluded.json` record beside them (`cut-contract.ts`).
  */
 import { type Pivot as PivotDoc, Flows, Pivot } from "@sip/contracts"
 import { CaseAssembler, Cut, FlowsFile, Parts, Plan, Profile, Sut } from "@sip/pipeline"
-import { type CallIdDerivation, neverDerives } from "@sip/pipeline/derivation"
 import { type ExclusionRecord, exclusionRecordOf } from "@sip/pipeline/exclusion-record"
 import * as Effect from "effect/Effect"
 import * as FileSystem from "effect/FileSystem"
@@ -76,19 +75,22 @@ const flowsOf = (work: CaptureWork) =>
     return flows
   })
 
-/** The flows document of `work`, cut and written into its `outDir`, wiped first. */
-export const cutCapture = Effect.fn("NeutralCut.cutCapture")(function*(
-  work: CaptureWork,
-  derives: CallIdDerivation = neverDerives
-) {
+/**
+ * The flows document of `work`, cut and written into its `outDir`, wiped first.
+ * Its legs are correlated once, by the assembler's index, and the cut and the
+ * case set both read that index.
+ */
+export const cutCapture = Effect.fn("NeutralCut.cutCapture")(function*(work: CaptureWork) {
   const fs = yield* FileSystem.FileSystem
   const assembler = yield* CaseAssembler.Service
   const flows = yield* flowsOf(work)
   const decision = Sut.decideSut(flows, ANY_ADDRESS, work.capture)
+  const index = assembler.index(flows, NO_PLAN)
   let n = 0
-  const cut = Cut.cutCalls(flows, decision.sut, work.capture, derives, () => nameOf(work.capture, ++n))
+  const cut = Cut.cutCalls(flows, decision.sut, work.capture, index.correlation, () => nameOf(work.capture, ++n))
   const decided = yield* assembler.cases({
     flows,
+    index,
     capture: work.capture,
     specs: cut.calls.map((call) => ({
       id: call.id,

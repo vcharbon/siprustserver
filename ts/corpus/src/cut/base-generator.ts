@@ -44,14 +44,22 @@ const flags = {
   )
 }
 
-/**
- * The neutral policy, every case it assembles replayable on every lane: the
- * base states no lane a case cannot run on.
- */
-const POLICY = Policy.policyWith({ lanes: () => ({ [ANY_LANE]: Tokens.laneVerdictToken({ _tag: "ok" }) }) })
-
 /** The Call-ID derivations by the name `--call-id-derivation` gives them. */
-const DERIVATIONS: Readonly<Record<string, CallIdDerivation>> = { none: neverDerives, "counter-prefix": counterPrefixed }
+const DERIVATIONS: Readonly<Record<"none" | "counter-prefix", CallIdDerivation>> = { none: neverDerives, "counter-prefix": counterPrefixed }
+
+/**
+ * The neutral policy under `derives`, every case it assembles replayable on
+ * every lane: the base states no lane a case cannot run on. The derivation is
+ * the policy's, so the cut and the assembly of a capture join its legs alike.
+ */
+const assemblerUnder = (derives: CallIdDerivation) =>
+  CaseAssembler.layer.pipe(
+    Layer.provide(
+      LogicExtractor.layerWith(
+        Policy.policyWith({ derives, lanes: () => ({ [ANY_LANE]: Tokens.laneVerdictToken({ _tag: "ok" }) }) })
+      )
+    )
+  )
 
 /** One capture's line, appended to `manifest` where one is named. */
 const said = (manifest: Option.Option<string>, line: CaptureCut) =>
@@ -74,19 +82,21 @@ const command = Command.make("base-generator", flags, (input) =>
       process.exitCode = 2
       return
     }
-    for (const work of read.success) {
-      const done = yield* cutCapture(work, DERIVATIONS[input.derivation]).pipe(Effect.result)
-      const line: CaptureCut = done._tag === "Success"
-        ? { capture: work.capture, cut: true }
-        : { capture: work.capture, cut: false, error: done.failure.message }
-      if (done._tag === "Success") {
-        for (const record of done.success.refused) yield* Console.log(`[cut] ${record.caseId}: EXCLUDED ${record.reason}`)
+    yield* Effect.gen(function*() {
+      for (const work of read.success) {
+        const done = yield* cutCapture(work).pipe(Effect.result)
+        const line: CaptureCut = done._tag === "Success"
+          ? { capture: work.capture, cut: true }
+          : { capture: work.capture, cut: false, error: done.failure.message }
+        if (done._tag === "Success") {
+          for (const record of done.success.refused) yield* Console.log(`[cut] ${record.caseId}: EXCLUDED ${record.reason}`)
+        }
+        yield* said(input.manifest, line)
       }
-      yield* said(input.manifest, line)
-    }
+    }).pipe(Effect.provide(assemblerUnder(DERIVATIONS[input.derivation])))
   }))
 
 Command.run(command, { version: "0.0.0" }).pipe(
-  Effect.provide(Layer.mergeAll(NodeServices.layer, CaseAssembler.layer.pipe(Layer.provide(LogicExtractor.layerWith(POLICY))))),
+  Effect.provide(NodeServices.layer),
   NodeRuntime.runMain
 )

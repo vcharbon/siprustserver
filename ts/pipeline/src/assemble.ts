@@ -90,7 +90,11 @@ export interface AssembleInput {
   readonly policy: CasePolicy
   readonly parts?: PartsIndex
   readonly allowed?: AllowedErrors.AllowedErrors
-  /** The capture's once-built index; a caller assembling many cases passes one. */
+  /**
+   * The capture's once-built index. The case set always passes it; absent, the
+   * index is built here under `policy.derives`, which only a test or a
+   * one-case tool, assembling a single case of a capture, leaves to it.
+   */
   readonly index?: CaptureIndex
 }
 
