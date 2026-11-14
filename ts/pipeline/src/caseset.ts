@@ -47,6 +47,7 @@ import type { Plan } from "./plan.js"
 import { withdrawnBy, type CasePolicy, type Refusal } from "./policy.js"
 import { CAPTURE_RULES, type CaptureInput, type CaptureRule } from "./capture-rules.js"
 import { CASE_RULES, type CaseRule, type RefusalInput } from "./case-rules.js"
+import { ofDocument } from "./document-facts.js"
 import { DOCUMENT_RULES, type DocumentInput, type DocumentRule } from "./document-rules.js"
 import { refusalOf, type RefusalSite } from "./refusal-rule.js"
 import type { SutSet } from "./sut.js"
@@ -155,6 +156,7 @@ const documentInput = (input: CaseSetInput, spec: CaseSpec, built: Assembled): D
   caseId: spec.id,
   flow: built.pivot.flow,
   calls: built.pivot.calls,
+  document: ofDocument(built.pivot),
   declared: built.pivot.must_fail ?? []
 })
 

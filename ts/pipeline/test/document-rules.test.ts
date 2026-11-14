@@ -4,6 +4,7 @@
  */
 import { Tokens, type Call, type Flow, type MustFail } from "@sip/contracts"
 import { describe, expect, it } from "vitest"
+import { ofDocument } from "../src/document-facts.js"
 import { DOCUMENT_RULES, type DocumentInput } from "../src/document-rules.js"
 
 const DELAY: Flow.Delay = {
@@ -36,6 +37,7 @@ const input = (declared: ReadonlyArray<MustFail.MustFail>): DocumentInput => ({
   caseId: "capture_x.pcap.gz-auto",
   flow: unackedOnA,
   calls: [],
+  document: ofDocument({ flow: unackedOnA, calls: [] }),
   declared
 })
 

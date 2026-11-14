@@ -15,7 +15,7 @@
  * The scripted actor is the party: a `send` step is the party's message, an
  * `expect` step is the system's.
  */
-import { type Call, Flow, type Flows, Pivot } from "@sip/contracts"
+import { type Call, Flow, type Flows, type Pivot } from "@sip/contracts"
 import { type NoLater, releaseIn, type ReleaseOf } from "./call-of-legs.js"
 import type { CutVantage } from "./cut.js"
 import { atVantage, type Fact, type LegFacts, ofVantage, valueOf } from "./leg-facts.js"
@@ -110,9 +110,13 @@ export interface DocumentCall {
   readonly abandoned: StepEntry | undefined
 }
 
+/** What the facts are read off: a document's flow and its `calls` block. */
+export type Stated = Pick<Pivot.PivotV3, "flow" | "calls">
+
 /** What a document states, over all its legs and calls. */
-export interface DocumentFacts {
-  readonly pivot: Pivot.PivotV3
+export interface DocumentFacts<D extends Stated = Pivot.PivotV3> {
+  /** The document read. */
+  readonly pivot: D
   /** Every message step, in document order. */
   readonly entries: ReadonlyArray<StepEntry>
   readonly legs: ReadonlyMap<string, DocumentLeg>
@@ -223,16 +227,16 @@ const callOf = (
   }
 }
 
-const documents = new WeakMap<Pivot.PivotV3, DocumentFacts>()
+const documents = new WeakMap<Stated, DocumentFacts<Stated>>()
 
 /**
  * The facts of a case document, computed on the first request in one pass over
  * its steps and kept for the document: a second request reads nothing.
  */
-export const ofDocument = (pivot: Pivot.PivotV3): DocumentFacts => {
+export const ofDocument = <D extends Stated>(pivot: D): DocumentFacts<D> => {
   const known = documents.get(pivot)
-  if (known !== undefined) return known
-  const steps = Pivot.pivotSteps(pivot)
+  if (known !== undefined) return known as DocumentFacts<D>
+  const steps = pivot.flow.flatMap(Flow.flowNodeSteps)
   const entries = steps.map(entryOf)
   const byId = new Map(entries.map((entry) => [entry.step.id, entry]))
   const byLeg = new Map<string, Array<StepEntry>>()
@@ -246,7 +250,7 @@ export const ofDocument = (pivot: Pivot.PivotV3): DocumentFacts => {
   for (const [leg, held] of byLeg) legs.set(leg, legOf(leg, held, byId, transactions.get(leg) ?? []))
   const calls = pivot.calls.map((call) => callOf(call, legs, byId))
   const byCall = new Map(calls.map((held) => [held.call, held]))
-  const facts: DocumentFacts = {
+  const facts: DocumentFacts<D> = {
     pivot,
     entries,
     legs,
