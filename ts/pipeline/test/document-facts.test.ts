@@ -483,12 +483,12 @@ describe("whether the system releases a leg on its own, as a document states it"
   })
 
   /**
-   * A caller that left before the system dialled a leg did not drive that
-   * leg's CANCEL: the system dialled it knowing the caller was gone, so
-   * cancelling it is its own decision. The skew allows a relay stamped early,
-   * never a give-up older than the leg itself.
+   * The caller's CANCEL of its outcome INVITE explains every later CANCEL of
+   * the system, whatever the gap: the system dialled for a caller already
+   * gone. A capture, which names no caller leg a dialled leg serves, bounds a
+   * give-up by the leg's INVITE (`call-of-legs.test.ts`).
    */
-  it("is its own where the caller gave up longer than the skew before the leg was dialled", () => {
+  it("is the caller's CANCEL relayed where the caller gave up longer than the skew before the leg was dialled", () => {
     const s = scenario()
     const caller = callerLeg(s).invite({ at: 0, by: "party", body: SDP }).response(100, { at: 2 })
     const first = dialledLeg(s, 1).invite({ at: 10, by: "system", body: SDP }).response(180, { at: 200 })
@@ -500,7 +500,7 @@ describe("whether the system releases a leg on its own, as a document states it"
 
     expect(releasesOf({ s, caller, dialled: [first, second] }, 500_000)).toEqual([
       { kind: "relayed", by: "CANCEL", cause: "caller-gave-up", because: "CANCEL", status: undefined },
-      { kind: "own", by: "CANCEL" }
+      { kind: "relayed", by: "CANCEL", cause: "caller-gave-up", because: "CANCEL", status: undefined }
     ])
   })
 })

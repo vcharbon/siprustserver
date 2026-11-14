@@ -319,7 +319,8 @@ const noLaterStated: NoLater<StepEntry> = (a, b, slackUs) =>
  * Whether the system releases a leg of `call` on its own, as the document
  * states it: the one definition (`releaseIn`, `./call-of-legs.ts`) read in the
  * document's order. `skewUs` is the clock skew of the capture the document
- * was cut from.
+ * was cut from. A document holds one caller leg per call, and each leaving of
+ * it is one of its outcome transaction.
  */
 export const release = (call: DocumentCall, leg: DocumentLeg, skewUs: number): DocumentRelease =>
   releaseIn(
@@ -327,7 +328,8 @@ export const release = (call: DocumentCall, leg: DocumentLeg, skewUs: number): D
       ending: valueOf(leg.ending),
       dialled: valueOf(leg.outcome),
       answered: valueOf(call.answered),
-      giveUps: call.giveUps.map((g) => g.entry)
+      leftOutcome: call.giveUps.map((g) => g.entry),
+      leftElsewhere: []
     },
     noLaterStated,
     skewUs

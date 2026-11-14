@@ -287,6 +287,11 @@ describe("the system released a dialled leg on its own", () => {
     expect(releaseOf(s, a, b)).toMatchObject({ kind: "relayed", cause: "caller-gave-up", because: { at_us: 8_000_000 } })
   })
 
+  /**
+   * A capture names no caller leg the attempt serves, so a give-up older than
+   * the attempt's INVITE by more than the skew may have left another part of
+   * the call; a document, which does, reads it as relayed (`document-facts.test.ts`).
+   */
   it("where the caller's give-up is older than the attempt's INVITE by more than the skew", () => {
     const s = scenario()
     const a = caller(s).cancel({ at: 90, by: "party" }).response(200, { at: 95 })

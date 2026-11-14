@@ -181,21 +181,25 @@ export interface Released<N, E> {
   readonly dialled: E | undefined
   /** The 2xx that answered the caller. */
   readonly answered: E | undefined
-  /** Each give-up of the caller. */
-  readonly giveUps: ReadonlyArray<E>
+  /** Each leaving of the caller's outcome transaction, on the caller leg the leg was dialled for. */
+  readonly leftOutcome: ReadonlyArray<E>
+  /** Each other give-up of the caller: on another caller leg, or of an opening INVITE the caller sent again. */
+  readonly leftElsewhere: ReadonlyArray<E>
 }
 
 /**
  * "The system released on its own", the one definition, over both endings of a
  * dialled leg: its CANCEL before the final, its BYE after the answer.
  *
- * A give-up of the caller explains the release where it stands from `skewUs`
- * before the leg's INVITE to `skewUs` after the release: a capture can stamp a
- * relayed message before the message it relays, by its clock skew between
- * hops. An older give-up left a part of the call this leg was not dialled
- * for. The caller's answer explains a CANCEL only, where it stands between
- * the attempt's INVITE and that CANCEL. The earliest give-up that explains
- * the release is the one named.
+ * A give-up of the caller explains the release where it stands no later than
+ * `skewUs` after it: a capture can stamp a relayed message before the message
+ * it relays, by its clock skew between hops. A leaving of the caller's outcome
+ * transaction explains it whatever its age, the system having dialled for a
+ * caller already gone; any other give-up only from `skewUs` before the leg's
+ * INVITE, an older one having left a part of the call this leg was not
+ * dialled for. The caller's answer explains a CANCEL only, where it stands
+ * between the attempt's INVITE and that CANCEL. The earliest give-up that
+ * explains the release is the one named.
  */
 export const releaseIn = <E extends { readonly bySystem: boolean }, N extends { readonly by: "BYE" | "CANCEL"; readonly entry: E }>(
   of: Released<N, E>,
@@ -214,8 +218,9 @@ export const releaseIn = <E extends { readonly bySystem: boolean }, N extends { 
   ) {
     return { kind: "relayed", ending, cause: "caller-answered", because: answered }
   }
-  const gaveUp = of.giveUps
-    .filter((g) => (dialled === undefined || noLater(dialled, g, skewUs)) && noLater(g, released, skewUs))
+  const sinceDial = (g: E): boolean => dialled === undefined || noLater(dialled, g, skewUs)
+  const gaveUp = [...of.leftOutcome, ...of.leftElsewhere.filter(sinceDial)]
+    .filter((g) => noLater(g, released, skewUs))
     .reduce<E | undefined>((best, next) => (best === undefined || !noLater(best, next, 0) ? next : best), undefined)
   if (gaveUp !== undefined) return { kind: "relayed", ending, cause: "caller-gave-up", because: gaveUp }
   return { kind: "own", ending }
@@ -223,14 +228,19 @@ export const releaseIn = <E extends { readonly bySystem: boolean }, N extends { 
 
 const noLaterStamped: NoLater<Entry> = (a, b, slackUs) => a.at_us <= b.at_us + slackUs
 
-/** {@link releaseIn} of a capture's leg, every message placed by its stamp. */
+/**
+ * {@link releaseIn} of a capture's leg, every message placed by its stamp. The
+ * legs of a call name no caller leg a dialled leg serves, so each give-up a
+ * capture shows is offered as one on another caller leg.
+ */
 export const release = (call: OfCall, leg: LegFacts, skewUs: number): Release =>
   releaseIn(
     {
       ending: valueOf(leg.ending),
       dialled: leg.outcome?.request,
       answered: valueOf(call.answered),
-      giveUps: call.giveUps.map((g) => g.entry)
+      leftOutcome: [],
+      leftElsewhere: call.giveUps.map((g) => g.entry)
     },
     noLaterStamped,
     skewUs
