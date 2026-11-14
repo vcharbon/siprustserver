@@ -108,6 +108,15 @@ describe("an attempt's ring time", () => {
     expect(CallFacts.ringTime(legs[1]!).fromRinging_us.state).toBe("absent")
   })
 
+  it("ends at the CANCEL where a failure final was stamped ahead of it", () => {
+    const s = scenario()
+    const a = caller(s)
+    const b = attempt(s, 100).response(486, { at: 4_100 }).cancel({ at: 4_130, by: "system" })
+    const { legs } = callOf(s, a, b)
+
+    expect(CallFacts.valueOf(CallFacts.ringTime(legs[0]!).fromRinging_us)).toBe(4_000_000)
+  })
+
   it("ends at the answer where the attempt was answered", () => {
     const s = scenario()
     const a = caller(s)

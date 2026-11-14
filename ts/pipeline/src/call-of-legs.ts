@@ -83,7 +83,7 @@ export const ofCall = (legs: CallLegs): OfCall => ({
 
 /** How long one attempt rang, to the microsecond. */
 export interface RingTime {
-  /** What ended the ringing: the leg's CANCEL or its final, whichever came first. */
+  /** What ended the ringing: the CANCEL that gave the attempt up, else the final that settled it. */
   readonly end: Fact<Entry>
   /** From the attempt's INVITE to that end. */
   readonly fromInvite_us: Fact<number>
@@ -101,8 +101,7 @@ export const ringTime = (leg: LegFacts): RingTime => {
   if (outcome?.request === undefined) {
     return { end: leg.final, fromInvite_us: missing(leg.final), fromRinging_us: missing(leg.final) }
   }
-  const ends = [outcome.cancel, outcome.final].flatMap((e) => (e === undefined ? [] : [e]))
-  const end = ends.reduce<Entry | undefined>((a, b) => (a === undefined || b.at_us < a.at_us ? b : a), undefined)
+  const end = outcome.cancel ?? outcome.final
   if (end === undefined) {
     return { end: leg.final, fromInvite_us: missing(leg.final), fromRinging_us: missing(leg.final) }
   }
