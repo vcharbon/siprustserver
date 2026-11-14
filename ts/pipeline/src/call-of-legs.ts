@@ -36,10 +36,9 @@ export interface OfCall {
    */
   readonly gaveUp: Fact<GiveUp>
   /**
-   * Each caller leg's own give-up the capture shows: the CANCEL of its outcome
-   * INVITE (RFC 3261 §9.1), or its first BYE after that INVITE (§15), the
-   * earlier of the two. The CANCEL of an INVITE the caller then sent again
-   * left that INVITE, not the call.
+   * Every leaving of the caller the capture shows, leg by leg ({@link leavingsOf}).
+   * The CANCEL of an INVITE the caller then sent again left that INVITE, not
+   * the call.
    */
   readonly giveUps: ReadonlyArray<GiveUp>
 }
@@ -65,15 +64,24 @@ const failureOf = (leg: LegFacts): Fact<Entry> => {
   return (leg.final.value.status ?? 0) >= 300 ? leg.final : ABSENT
 }
 
-/** The party's own leaving of one leg; not captured where the leg's ending is. */
-const giveUpOf = (leg: LegFacts): Fact<GiveUp> => {
+/**
+ * Each leaving of one leg by its party, by stamp: its CANCEL of the outcome
+ * INVITE stamped before that INVITE's first final, since a CANCEL after it
+ * cancels nothing (RFC 3261 §9.1), and each of its BYEs after that INVITE (§15).
+ */
+const leavingsOf = (leg: LegFacts): ReadonlyArray<GiveUp> => {
   const cancel = leg.outcome?.cancel
-  const bye = leg.byes.find((b) => !b.bySystem)
-  const left: ReadonlyArray<GiveUp> = [
-    ...(cancel !== undefined && !cancel.bySystem ? [{ by: "CANCEL", entry: cancel, leg } as const] : []),
-    ...(bye !== undefined ? [{ by: "BYE", entry: bye, leg } as const] : [])
+  const final = leg.outcome?.firstFinal
+  const cancelled = cancel !== undefined && !cancel.bySystem && (final === undefined || cancel.at_us < final.at_us)
+  return [
+    ...(cancelled ? [{ by: "CANCEL", entry: cancel, leg } as const] : []),
+    ...leg.byes.filter((b) => !b.bySystem).map((entry) => ({ by: "BYE", entry, leg }) as const)
   ]
-  const first = firstOf(left)
+}
+
+/** The party's first leaving of one leg; not captured where the leg's ending is. */
+const giveUpOf = (leavings: ReadonlyArray<GiveUp>, leg: LegFacts): Fact<GiveUp> => {
+  const first = firstOf(leavings)
   if (first !== undefined) return { state: "seen", value: first }
   return leg.ending.state === "not-captured" ? NOT_CAPTURED : ABSENT
 }
@@ -86,13 +94,16 @@ const firstOf = (giveUps: ReadonlyArray<GiveUp>): GiveUp | undefined =>
 
 /** The facts of the call these legs form. */
 export const ofCall = (legs: CallLegs): OfCall => {
-  const gaveUp = legs.caller.map(giveUpOf)
+  const leavings = legs.caller.map(leavingsOf)
   return {
     legs,
     answered: earliest(legs.caller.map((leg) => leg.answer), (entry) => entry.at_us),
     failed: earliest(legs.caller.map(failureOf), (entry) => entry.at_us),
-    gaveUp: earliest(gaveUp, (giveUp) => giveUp.entry.at_us),
-    giveUps: gaveUp.flatMap((fact) => (fact.state === "seen" ? [fact.value] : []))
+    gaveUp: earliest(
+      legs.caller.map((leg, i) => giveUpOf(leavings[i]!, leg)),
+      (giveUp) => giveUp.entry.at_us
+    ),
+    giveUps: leavings.flat()
   }
 }
 

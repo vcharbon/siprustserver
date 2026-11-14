@@ -82,9 +82,13 @@ export interface DocumentLeg {
    */
   readonly ending: Fact<DocumentEnding>
   /**
-   * The party left the leg: its CANCEL of the outcome INVITE (RFC 3261 §9.1)
-   * or its first BYE after that INVITE (§15), the earlier in document order.
+   * Each leaving of the leg by its party, in document order: its CANCEL of the
+   * outcome INVITE where it stands before that INVITE's final, since a CANCEL
+   * after it cancels nothing (RFC 3261 §9.1), and each of its BYEs after that
+   * INVITE (§15).
    */
+  readonly leavings: ReadonlyArray<DocumentEnding>
+  /** The party left the leg: the first of its {@link leavings}. */
   readonly left: Fact<DocumentEnding>
 }
 
@@ -106,6 +110,8 @@ export interface DocumentCall {
   readonly failed: Fact<StepEntry>
   /** The caller gave up: the party left the caller's leg ({@link DocumentLeg.left}). */
   readonly gaveUp: Fact<DocumentEnding>
+  /** Every leaving of the caller's leg by its party ({@link DocumentLeg.leavings}). */
+  readonly giveUps: ReadonlyArray<DocumentEnding>
   /** The failure final the routing decision refused the caller with, where the call states one. */
   readonly refused: StepEntry | undefined
   /** The caller's CANCEL that abandoned the call before any dial, where the call states one. */
@@ -158,7 +164,7 @@ const entryOf = (step: Flow.Step, index: number): StepEntry => ({
 const isRinging = (e: StepEntry): boolean =>
   e.method === "INVITE" && e.status !== undefined && e.status >= 180 && e.status < 190 && !e.inDialog
 
-type Unleft = Omit<DocumentLeg, "left">
+type Unleft = Omit<DocumentLeg, "left" | "leavings">
 
 const silentLeg = (leg: string, entries: ReadonlyArray<StepEntry>): Unleft => ({
   leg,
@@ -174,16 +180,19 @@ const silentLeg = (leg: string, entries: ReadonlyArray<StepEntry>): Unleft => ({
   ending: ABSENT
 })
 
-const withLeft = (leg: Unleft): DocumentLeg => ({ ...leg, left: leftOf(leg) })
+const withLeft = (leg: Unleft): DocumentLeg => {
+  const leavings = leavingsOf(leg)
+  return { ...leg, leavings, left: stated(leavings[0]) }
+}
 
-const leftOf = (leg: Unleft): Fact<DocumentEnding> => {
+const leavingsOf = (leg: Unleft): ReadonlyArray<DocumentEnding> => {
   const cancel = valueOf(leg.cancel)
-  const bye = leg.byes.find((b) => !b.bySystem)
-  const left: ReadonlyArray<DocumentEnding> = [
-    ...(cancel !== undefined && !cancel.bySystem ? [{ by: "CANCEL", entry: cancel } as const] : []),
-    ...(bye !== undefined ? [{ by: "BYE", entry: bye } as const] : [])
-  ]
-  return stated(left.reduce<DocumentEnding | undefined>((first, next) => (first === undefined || next.entry.index < first.entry.index ? next : first), undefined))
+  const final = valueOf(leg.final)
+  const cancelled = cancel !== undefined && !cancel.bySystem && (final === undefined || cancel.index < final.index)
+  return [
+    ...(cancelled ? [{ by: "CANCEL", entry: cancel } as const] : []),
+    ...leg.byes.filter((b) => !b.bySystem).map((entry) => ({ by: "BYE", entry }) as const)
+  ].sort((a, b) => a.entry.index - b.entry.index)
 }
 
 const isByeRequest = (e: StepEntry): boolean => e.method === "BYE" && e.status === undefined
@@ -238,6 +247,7 @@ const callOf = (call: Call.Call, { entryOf, legs }: StepFacts): DocumentCall => 
     answered: caller === undefined ? ABSENT : caller.answer,
     failed: failureOf(caller),
     gaveUp: caller === undefined ? ABSENT : caller.left,
+    giveUps: caller === undefined ? [] : caller.leavings,
     refused: call.refused === undefined ? undefined : entryOf(call.refused.step),
     abandoned: call.abandoned === undefined ? undefined : entryOf(call.abandoned.step)
   }
@@ -311,19 +321,17 @@ const noLaterStated: NoLater<StepEntry> = (a, b, slackUs) =>
  * document's order. `skewUs` is the clock skew of the capture the document
  * was cut from.
  */
-export const release = (call: DocumentCall, leg: DocumentLeg, skewUs: number): DocumentRelease => {
-  const gaveUp = valueOf(call.gaveUp)
-  return releaseIn(
+export const release = (call: DocumentCall, leg: DocumentLeg, skewUs: number): DocumentRelease =>
+  releaseIn(
     {
       ending: valueOf(leg.ending),
       dialled: valueOf(leg.outcome),
       answered: valueOf(call.answered),
-      giveUps: gaveUp === undefined ? [] : [gaveUp.entry]
+      giveUps: call.giveUps.map((g) => g.entry)
     },
     noLaterStated,
     skewUs
   )
-}
 
 /**
  * Whether the system gave up the leg's outcome INVITE on its own: its CANCEL
