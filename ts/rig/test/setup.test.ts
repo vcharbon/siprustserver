@@ -282,19 +282,30 @@ describe("a job's setup", () => {
     expect(exit).toEqual(Exit.succeed({ value: undefined, labLeftChanged: true }))
     expect(traceOf(root).filter((line) => line === "heal never-recovers")).toHaveLength(2)
     expect(events.filter((event) => event.phase === "failed").map((event) => event.message?.split(",")[0])).toEqual([
-      "probe still answers not yet after 1 s",
-      "probe still answers not yet after 1 s"
+      "probe last answered not yet and its bound of 1 s ran out",
+      "probe last answered not yet and its bound of 1 s ran out"
     ])
   })
 
-  it("fails a heal attempt whose probe answered 75 and is cut short by its bound as one still answering 75", async () => {
+  it("fails a heal attempt whose first probe call outlasts its bound as a probe that timed out", async () => {
+    const { root, rig } = await samples()
+    const { events, sink } = collecting()
+    const exit = await exitOf(Setup.around(plan(rig, root, ["hanging-probe"]), sink, Effect.void))
+    expect(exit).toEqual(Exit.succeed({ value: undefined, labLeftChanged: true }))
+    expect(events.filter((event) => event.phase === "failed").map((event) => event.message?.split(",")[0])).toEqual([
+      "probe timed out after 500 ms",
+      "probe timed out after 500 ms"
+    ])
+  })
+
+  it("fails a heal attempt whose probe answered 75 and is cut short by its bound as one whose bound ran out", async () => {
     const { root, rig } = await samples()
     const { events, sink } = collecting()
     const exit = await exitOf(Setup.around(plan(rig, root, ["stalls-after-not-yet"]), sink, Effect.void))
     expect(exit).toEqual(Exit.succeed({ value: undefined, labLeftChanged: true }))
     expect(events.filter((event) => event.phase === "failed").map((event) => event.message?.split(",")[0])).toEqual([
-      "probe still answers not yet after 1 s",
-      "probe still answers not yet after 1 s"
+      "probe last answered not yet and its bound of 1 s ran out",
+      "probe last answered not yet and its bound of 1 s ran out"
     ])
   })
 })

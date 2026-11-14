@@ -51,6 +51,7 @@ export const SAMPLES: Readonly<Record<string, Entry>> = {
     probe: traced("probe late-recovery", `n=$(cat "$SIPRIG_STATE/probes" 2>/dev/null || echo 0)\necho $((n+1)) > "$SIPRIG_STATE/probes"\n[ "$n" -ge 2 ] && exit 0\nexit 75`)
   }, `[timeouts]\nprobe_s = 10\nprobe_interval_s = 0.05`),
   ...operation("never-recovers", { probe: traced("probe never-recovers", "exit 75") }, `[timeouts]\nprobe_s = 1\nprobe_interval_s = 0.2`),
+  ...operation("hanging-probe", { probe: traced("probe hanging-probe", "exec sleep 30") }, `[timeouts]\nprobe_s = 0.5`),
   ...operation("stalls-after-not-yet", {
     probe: traced("probe stalls-after-not-yet", `[ -e "$SIPRIG_STATE/asked" ] && rm "$SIPRIG_STATE/asked" && exec sleep 30\ntouch "$SIPRIG_STATE/asked"\nexit 75`)
   }, `[timeouts]\nprobe_s = 1\nprobe_interval_s = 0.05`),

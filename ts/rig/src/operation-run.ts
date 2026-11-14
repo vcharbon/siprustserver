@@ -181,14 +181,14 @@ export const inject = (
 
 /**
  * The probe of `instance` called until it answers other than "not yet" or its
- * bound runs out; why not recovered, or `undefined`. No call starts once the
- * bound has run out, and a call the bound cuts short after a "not yet" answer
- * is the bound running out, not a probe that timed out.
+ * bound runs out; why not recovered, or `undefined`. The bound running out
+ * after a "not yet" answer is said the same way whether it ran out between
+ * two calls or cut a call short; a first call that outlasts it timed out.
  */
 const probe = (instance: Instance, file: string, bounds: Operation.Bounds) =>
   Effect.gen(function*() {
     const deadline = (yield* Clock.currentTimeMillis) + bounds.probe_s * 1000
-    const stillNotYet = `probe still answers not yet after ${bounds.probe_s} s, its log ${path.join(instance.dir, "probe.log")}`
+    const stillNotYet = `probe last answered not yet and its bound of ${bounds.probe_s} s ran out, its log ${path.join(instance.dir, "probe.log")}`
     let left = bounds.probe_s * 1000
     for (let answeredNotYet = false;; answeredNotYet = true) {
       const { ended, said } = yield* step(instance, file, "probe", left)
