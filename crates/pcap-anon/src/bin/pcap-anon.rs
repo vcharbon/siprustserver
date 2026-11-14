@@ -1,5 +1,6 @@
 //! pcap-anon — CLI over the ingest library.
 //!
+//! ```text
 //!   pcap-anon auto <flows.json> <out-dir> --plan <cfg> --profile <cfg> --reading <file>
 //!                  --seed-file <path> [--fresh-seed] [--capture <name>] [--verify]
 //!   pcap-anon auto <flows.json> <out-dir> --plan <cfg> --profile <cfg> --reading <file>
@@ -18,6 +19,7 @@
 //!     → whether two runs over the raw document under one seed agree byte for
 //!       byte and the output leaks nothing, and where and in what shape every
 //!       token the leak check cannot explain sits.
+//! ```
 //!
 //! The seed is kept in the file `--seed-file` names (the `seeds` module) and
 //! never printed: a capture anonymised again under its kept seed is
