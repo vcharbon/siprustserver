@@ -123,19 +123,21 @@ const attemptOf = (
 /**
  * The final a leg's attempt drew. A leg relays its INVITE hop by hop under one
  * CSeq number (RFC 3261 §16.6), and a capture may hold the answer of one hop
- * and not of another: the attempt is every dialog-opening transaction that
- * carries the judged one's number, and its final is the first 2xx any of them
- * drew from `from` on (§16.7), else a final one of them drew from there.
+ * and not of another: the attempt is the judged transaction with every other
+ * dialog-opening one that carries its number. Its final is the first 2xx any
+ * of them drew (§16.7), else a final one of them drew; another transaction's
+ * final counts from `from` on only, so that an earlier attempt sent under the
+ * same number answers nothing of this one.
  */
 const attemptFinal = (
   facts: CallFacts.LegFacts,
   transaction: CallFacts.Transaction,
   from: number
 ): CallFacts.Entry | undefined => {
-  const relayed = transaction.opening ? facts.openings.filter((t) => t.seq === transaction.seq) : [transaction]
-  const finals = relayed
-    .flatMap((t) => t.responses)
-    .filter((r) => (r.status ?? 0) >= 200 && r.msg >= from)
+  if (!transaction.opening) return transaction.final
+  const finals = facts.openings
+    .filter((t) => t.seq === transaction.seq)
+    .flatMap((t) => t.responses.filter((r) => (r.status ?? 0) >= 200 && (t === transaction || r.msg >= from)))
     .sort((a, b) => a.msg - b.msg)
   return finals.find((r) => (r.status ?? 0) < 300) ?? finals[finals.length - 1]
 }

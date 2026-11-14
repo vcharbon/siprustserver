@@ -326,6 +326,14 @@ describe("the capture edge: a leg the file cut through", () => {
     expect(found[0]).toMatch(/took the 200 \(msg 2\) answering its INVITE \(msg 1\) and no BYE closed the dialog: dialog-left-open/)
   })
 
+  it("a dialog whose 2xx is captured ahead of the INVITE it answers, with no BYE, however long the silence", () => {
+    const msgs = [res(200, "INVITE", 1, 0), req("INVITE", 1, 3), req("ACK", 1, 5, "callee")]
+    const found = details(family(msgs, 5 + 10 * SILENCE_MS))
+
+    expect(found).toHaveLength(1)
+    expect(found[0]).toMatch(/took the 200 \(msg 0\) answering its INVITE \(msg 1\) and no BYE closed the dialog: dialog-left-open/)
+  })
+
   it("a non-INVITE leg whose last request drew no final, inside the give-up silence", () => {
     const options = [req("OPTIONS", 1, 0)]
     expect(details(family(options, SILENCE_MS - 1))[0]).toMatch(/its OPTIONS \(msg 0\) drew no final.*gave-up-at-edge/)
