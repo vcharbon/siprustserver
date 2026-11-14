@@ -1199,3 +1199,110 @@ export const repeatedNotFoundFlows = (): Flows.FlowsDoc =>
       request({ callId: CALLER_CALL_ID, seq: 1, method: "ACK", src: CALLER, dst: SUT, ts_ms: i * 100 + 25, toTag: `sut-${b}`, branch: `z9hG4bK-${b}` })
     ])
   )
+
+/** The shortest base a suffix match is evidence rather than coincidence. */
+const MIN_BASE = 8
+
+/** A prefix-minting convention: the derived Call-ID ENDS WITH a base of {@link MIN_BASE} or more. */
+export const suffixDerives: CallIdDerivation = (base, derived) =>
+  base.length >= MIN_BASE && derived.length > base.length && derived.endsWith(base)
+
+/** `inner`, counting how often it is asked. */
+export const counting = (inner: CallIdDerivation) => {
+  let n = 0
+  const derives: CallIdDerivation = (base, derived) => {
+    n += 1
+    return inner(base, derived)
+  }
+  return { derives, count: () => n }
+}
+
+/** A deterministic shuffle, so related legs are not adjacent in the document. */
+export const shuffled = <T>(items: ReadonlyArray<T>): Array<T> => {
+  const out = [...items]
+  let seed = 0x2545f491
+  for (let i = out.length - 1; i > 0; i--) {
+    seed = (Math.imul(seed, 1103515245) + 12345) >>> 0
+    const j = seed % (i + 1)
+    ;[out[i], out[j]] = [out[j]!, out[i]!]
+  }
+  return out
+}
+
+/**
+ * `n` answered calls through the SUT, each a caller leg and a callee leg whose
+ * Call-ID is `1-` and the caller's, shuffled: one derived leg per call, and no
+ * base leg holds a suffix as long as the shortest Call-ID.
+ */
+export const manyCallsFlows = (n: number): Flows.FlowsDoc => {
+  const legs: Array<Flows.Leg> = []
+  for (let i = 0; i < n; i++) {
+    const a = `caller-${i.toString(16).padStart(6, "0")}@10.0.0.9`
+    const b = `1-${a}`
+    const t = i * 20_000
+    legs.push(
+      leg(a, oneHop(CALLER, SUT), [
+        request({ callId: a, seq: 1, method: "INVITE", src: CALLER, dst: SUT, ts_ms: t }),
+        response({ callId: a, seq: 1, status: 100, reason: "Trying", cseqMethod: "INVITE", src: SUT, dst: CALLER, ts_ms: t + 5 }),
+        response({ callId: a, seq: 1, status: 180, reason: "Ringing", cseqMethod: "INVITE", src: SUT, dst: CALLER, ts_ms: t + 200, toTag: "sut-tag" }),
+        response({ callId: a, seq: 1, status: 200, reason: "OK", cseqMethod: "INVITE", src: SUT, dst: CALLER, ts_ms: t + 1_000, toTag: "sut-tag" }),
+        request({ callId: a, seq: 1, method: "ACK", src: CALLER, dst: SUT, ts_ms: t + 1_005, toTag: "sut-tag" }),
+        request({ callId: a, seq: 2, method: "BYE", src: CALLER, dst: SUT, ts_ms: t + 5_000, toTag: "sut-tag" }),
+        response({ callId: a, seq: 2, status: 200, reason: "OK", cseqMethod: "BYE", src: SUT, dst: CALLER, ts_ms: t + 5_005, toTag: "sut-tag" })
+      ]),
+      leg(b, oneHop(SUT, CALLEE), [
+        request({ callId: b, seq: 1, method: "INVITE", src: SUT, dst: CALLEE, ts_ms: t + 10 }),
+        response({ callId: b, seq: 1, status: 100, reason: "Trying", cseqMethod: "INVITE", src: CALLEE, dst: SUT, ts_ms: t + 15 }),
+        response({ callId: b, seq: 1, status: 180, reason: "Ringing", cseqMethod: "INVITE", src: CALLEE, dst: SUT, ts_ms: t + 190, toTag: "callee-tag" }),
+        response({ callId: b, seq: 1, status: 200, reason: "OK", cseqMethod: "INVITE", src: CALLEE, dst: SUT, ts_ms: t + 990, toTag: "callee-tag" }),
+        request({ callId: b, seq: 1, method: "ACK", src: SUT, dst: CALLEE, ts_ms: t + 1_010, toTag: "callee-tag" }),
+        request({ callId: b, seq: 2, method: "BYE", src: SUT, dst: CALLEE, ts_ms: t + 5_010, toTag: "callee-tag" }),
+        response({ callId: b, seq: 2, status: 200, reason: "OK", cseqMethod: "BYE", src: CALLEE, dst: SUT, ts_ms: t + 5_015, toTag: "callee-tag" })
+      ])
+    )
+  }
+  return doc(shuffled(legs), [])
+}
+
+/**
+ * A serial hunt by a B2BUA minting `<n>-<base>` Call-IDs: the caller's INVITE
+ * (leg 0, Call-ID `X`), a first attempt `1-X` to one callee answered 486
+ * (leg 1), then a second `2-X` to another callee after it, answered 200 and
+ * torn down with the caller's dialog (leg 2). Each leg is its own call group,
+ * as the extractor groups them when neither attempt loops back to the caller.
+ */
+export const serialHuntFlows = (): Flows.FlowsDoc => {
+  const first = `1-${CALLER_CALL_ID}`
+  const second = `2-${CALLER_CALL_ID}`
+  const firstCallee = "sip:+15556000004@10.0.0.2"
+  const secondCallee = "sip:+15556000005@10.0.0.3"
+  return doc(
+    [
+      leg(CALLER_CALL_ID, oneHop(CALLER, SUT), [
+        request({ callId: CALLER_CALL_ID, seq: 1, method: "INVITE", src: CALLER, dst: SUT, ts_ms: 0 }),
+        response({ callId: CALLER_CALL_ID, seq: 1, status: 100, reason: "Trying", cseqMethod: "INVITE", src: SUT, dst: CALLER, ts_ms: 5 }),
+        response({ callId: CALLER_CALL_ID, seq: 1, status: 200, reason: "OK", cseqMethod: "INVITE", src: SUT, dst: CALLER, ts_ms: 1_010, toTag: "sut-tag" }),
+        request({ callId: CALLER_CALL_ID, seq: 1, method: "ACK", src: CALLER, dst: SUT, ts_ms: 1_015, toTag: "sut-tag" }),
+        request({ callId: CALLER_CALL_ID, seq: 2, method: "BYE", src: CALLER, dst: SUT, ts_ms: 5_000, toTag: "sut-tag" }),
+        response({ callId: CALLER_CALL_ID, seq: 2, status: 200, reason: "OK", cseqMethod: "BYE", src: SUT, dst: CALLER, ts_ms: 5_005, toTag: "sut-tag" })
+      ]),
+      leg(first, oneHop(SUT, CALLEE), [
+        request({ callId: first, seq: 1, method: "INVITE", src: SUT, dst: CALLEE, ts_ms: 10, ruri: firstCallee }),
+        response({ callId: first, seq: 1, status: 486, reason: "Busy Here", cseqMethod: "INVITE", src: CALLEE, dst: SUT, ts_ms: 400, toTag: "first-tag", toUri: firstCallee }),
+        request({ callId: first, seq: 1, method: "ACK", src: SUT, dst: CALLEE, ts_ms: 405, toTag: "first-tag", ruri: firstCallee })
+      ]),
+      leg(second, oneHop(SUT, OTHER), [
+        request({ callId: second, seq: 1, method: "INVITE", src: SUT, dst: OTHER, ts_ms: 500, ruri: secondCallee }),
+        response({ callId: second, seq: 1, status: 200, reason: "OK", cseqMethod: "INVITE", src: OTHER, dst: SUT, ts_ms: 1_000, toTag: "second-tag", toUri: secondCallee }),
+        request({ callId: second, seq: 1, method: "ACK", src: SUT, dst: OTHER, ts_ms: 1_005, toTag: "second-tag", ruri: secondCallee }),
+        request({ callId: second, seq: 2, method: "BYE", src: SUT, dst: OTHER, ts_ms: 5_010, toTag: "second-tag", ruri: secondCallee }),
+        response({ callId: second, seq: 2, status: 200, reason: "OK", cseqMethod: "BYE", src: OTHER, dst: SUT, ts_ms: 5_015, toTag: "second-tag", toUri: secondCallee })
+      ])
+    ],
+    [
+      { legs: [0], initial_invite: { leg: 0, msg: 0 }, final_status: 200, final_us: 1_010_000 },
+      { legs: [1], t0_us: 10_000, initial_invite: { leg: 1, msg: 0 }, final_status: 486, final_us: 400_000 },
+      { legs: [2], t0_us: 500_000, initial_invite: { leg: 2, msg: 0 }, final_status: 200, final_us: 1_000_000 }
+    ]
+  )
+}
