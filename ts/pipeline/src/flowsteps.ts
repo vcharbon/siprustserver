@@ -617,20 +617,27 @@ const bodyStorable = (timeline: CallFacts.Timeline, entry: CallFacts.Entry, msg:
   }
   const method = msg.summary.method.toUpperCase()
   if (method === "PRACK") return true
-  return method === "ACK" && ackedFinalIs2xx(timeline, entry)
+  return method === "ACK" && ackedFinalIs2xx(timeline, msg, entry)
 }
 
 /**
- * Whether the final this ACK answers was a 2xx: the final of the INVITE
- * transaction its position's timeline matches the ACK to, on the INVITE's Via
- * branch (RFC 3261 §17.1.1.3) or on the dialog (§13.2.2.4). An ACK matched to
- * no final reads as non-2xx — a body the stack cannot place is worse than a
- * body the capture never had, and a capture missing its own final is a capture
- * defect.
+ * Whether the final this ACK answers was a 2xx: a 2xx among the finals of the
+ * INVITE transaction its position's timeline matches it to that carry the
+ * ACK's own To-tag. The ACK of a failure carries the failure's tag (RFC 3261
+ * §17.1.1.3), the ACK of a 2xx that 2xx's (§13.2.2.4), so one fork's failure
+ * ACK never reads as the ACK of another fork's 2xx. An ACK matched to no final
+ * reads as non-2xx: a body the stack cannot place is worse than a body the
+ * capture never had.
  */
-const ackedFinalIs2xx = (timeline: CallFacts.Timeline, entry: CallFacts.Entry): boolean => {
-  const status = timeline.transactions[entry.transaction]?.final?.status
-  return status !== undefined && status < 300
+const ackedFinalIs2xx = (timeline: CallFacts.Timeline, ack: Flows.Msg, entry: CallFacts.Entry): boolean => {
+  const tag = ack.summary.to.tag
+  return (timeline.transactions[entry.transaction]?.responses ?? []).some(
+    (r) =>
+      r.status !== undefined &&
+      r.status >= 200 &&
+      r.status < 300 &&
+      CallFacts.source(timeline, r).summary.to.tag === tag
+  )
 }
 
 const built = (
