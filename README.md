@@ -191,10 +191,14 @@ It reads UDP only, and it does not capture. See [docs/sipflow.md](docs/sipflow.m
 ### pcap-anon: a capture you can share
 
 `pcap-anon` rewrites the flows document that `sipflow --json` writes, so that a capture can leave
-the network it was taken on. Every number, name, host and address becomes a fake. A seed, drawn
-on the first run and kept in a file, gives each identity the same fake everywhere, and the same
-output byte for byte on the next run. With `--verify` it searches the output for what the raw document
-held, and writes nothing if it finds any. `sipflow --to-pcap` turns the result back into a capture.
+the network it was taken on. With `--all-addresses`, every number, name, host and address
+becomes a fake. Without that flag the private address ranges and the addresses your profile
+names as the system under test stay as they are: use that for a document that stays on your own
+tools. `--fresh-seed` draws a seed on the first run and keeps it in a file. The seed gives each
+identity the same fake everywhere, and a later run with the same seed file, without
+`--fresh-seed`, writes the same output byte for byte. With `--verify` it searches the output for
+what the raw document held, and writes nothing if it finds any. `sipflow --to-pcap` turns the
+result back into a capture.
 
 ```bash
 cargo build --release -p sip-pcap --bin sipflow
@@ -202,7 +206,7 @@ cargo build --release -p pcap-anon
 target/release/sipflow --json --reading my.reading capture.pcapng > capture.flows.json
 target/release/pcap-anon anonymize capture.flows.json capture.anon.flows.json \
   --plan my.plan.json --reading my.reading --profile my.profile.json \
-  --seed-file capture.seed --fresh-seed --verify
+  --all-addresses --seed-file capture.seed --fresh-seed --verify
 target/release/sipflow --to-pcap capture.anon.flows.json --out capture.anon.pcap
 ```
 
