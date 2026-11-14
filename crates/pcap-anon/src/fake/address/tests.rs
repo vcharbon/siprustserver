@@ -15,7 +15,7 @@ fn v4(text: &str) -> Ipv4Addr {
 fn a_public_address_maps_to_a_reserved_fake_of_its_own_width() {
     // Public-looking on purpose, of every width: the scope maps only public
     // addresses.
-    for text in ["5.6.7.8", "85.1.2.3", "85.229.233.177", "81.12.1.200", "193.12.22.1"] {
+    for text in ["5.6.7.8", "85.1.2.3", "85.12.34.177", "81.12.1.200", "85.12.35.1"] {
         let fake = fake_ipv4(&seed(1), text).expect("a dotted quad");
         assert_eq!(fake.len(), text.len(), "{text} -> {fake}");
         let addr = v4(&fake);
@@ -48,7 +48,7 @@ fn the_fakes_of_one_width_rarely_collide() {
 #[test]
 fn the_default_scope_maps_public_addresses_only() {
     let scope = Scope::default();
-    assert!(scope.maps_v4(v4("85.13.32.87")));
+    assert!(scope.maps_v4(v4("85.12.34.87")));
     assert!(scope.maps_v4(v4("5.6.7.9")));
     for kept in ["10.1.2.3", "172.16.245.246", "192.168.1.1", "127.0.0.1", "100.64.0.1"] {
         assert!(!scope.maps_v4(v4(kept)), "{kept}");
@@ -60,14 +60,14 @@ fn the_default_scope_maps_public_addresses_only() {
 
 #[test]
 fn a_kept_set_holds_by_default_and_all_addresses_wins_over_it() {
-    let cut = Cut::from_json_str(r#"{"sut":["85.13.32.0/24","10.9.9.9"]}"#).expect("a cut");
+    let cut = Cut::from_json_str(r#"{"sut":["85.12.34.0/24","10.9.9.9"]}"#).expect("a cut");
     let scope = Scope::default().keeping(&cut);
-    assert!(!scope.maps_v4(v4("85.13.32.87")), "the SUT a profile states stays");
-    assert!(scope.maps_v4(v4("85.13.33.1")));
+    assert!(!scope.maps_v4(v4("85.12.34.87")), "the SUT a profile states stays");
+    assert!(scope.maps_v4(v4("85.12.35.1")));
     let all = Scope::default().keeping(&cut).all_addresses();
     assert!(all.maps_v4(v4("10.1.2.3")), "a private address leaves with the document");
     assert!(
-        all.maps_v4(v4("85.13.32.87")),
+        all.maps_v4(v4("85.12.34.87")),
         "a document that leaves the network keeps no SUT address"
     );
     assert!(all.maps_v4(v4("10.9.9.9")));
@@ -78,7 +78,7 @@ fn a_kept_set_holds_by_default_and_all_addresses_wins_over_it() {
 #[test]
 fn keep_addresses_maps_no_address_public_v4_and_global_v6_included() {
     let keep = Scope::default().keep_addresses();
-    for kept in ["85.13.32.87", "5.6.7.9", "10.1.2.3", "172.16.245.246"] {
+    for kept in ["85.12.34.87", "5.6.7.9", "10.1.2.3", "172.16.245.246"] {
         assert!(!keep.maps_v4(v4(kept)), "{kept}");
     }
     assert!(!keep.maps_v6("3fff:cb0:1234::5".parse().expect("v6")));
