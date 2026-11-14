@@ -35,7 +35,8 @@ sipflow --to-pcap capture.anon.flows.json --out capture.anon.pcap
   the shape (`9` for a digit, `a`/`A` for a letter), never the value.
 - `auto` writes `<capture>.anon.flows.json`, `source.txt` and `auto.json`.
   `source.txt` is the callflow as text, for a reader who has no capture
-  viewer. Its first line is the format line `pcap2test source v1`.
+  viewer. Its first line is the format line `pcap2test source v1`, the
+  format's name, kept for compatibility.
   `auto.json` gives the counts of the run, or the error. It never contains
   the seed. With `--as-is`, `auto` takes the document as it is and
   anonymises nothing.

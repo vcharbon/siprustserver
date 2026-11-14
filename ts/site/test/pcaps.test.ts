@@ -16,7 +16,7 @@ const failedCut: Sources.Row = {
   ingestedAt: "2026-10-01T09:00:05.000Z",
   extractorHash: "old-extractor",
   ingest: "stale",
-  ingestFailed: "pcap2test auto failed: 1 names survive",
+  ingestFailed: "pcap-anon auto failed: 1 names survive",
   prepId: 8,
   cutAt: "2026-10-01T09:01:00.000Z",
   cut: "stale",
@@ -64,7 +64,7 @@ describe("a file of the pcaps page", () => {
     expect(listed.cases).toBe(0)
     expect(listed.ingest).toBe("stale")
     expect(listed.cut).toBe("stale")
-    expect(listed.problem).toBe("pcap2test auto failed: 1 names survive")
+    expect(listed.problem).toBe("pcap-anon auto failed: 1 names survive")
     expect(listed.standings).toHaveLength(1)
   })
 

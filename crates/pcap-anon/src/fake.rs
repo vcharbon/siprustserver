@@ -24,8 +24,9 @@ pub mod address;
 pub mod names;
 pub mod scope;
 
-/// The seed the crate's committed goldens and fixture expectations are
-/// anonymised under (a seed file holding it reproduces them).
+/// The seed the tests anonymise their invented documents under, so an
+/// expected output is reproducible (a seed file holding it reproduces it).
+/// It is public: no real capture is ever anonymised under it.
 pub const GOLDEN_SEED_HEX: &str =
     "0180018001800180018001800180018001800180018001800180018001800180";
 
