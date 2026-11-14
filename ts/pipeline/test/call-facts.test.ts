@@ -372,11 +372,79 @@ describe("retransmissions", () => {
   })
 })
 
-describe("a transaction (RFC 3261 §17.1.3, §17.2.3)", () => {
+/** Each matching is stated twice: on Via branches, and on the dialog where the Via carries none. */
+describe.each([
+  { matchedOn: "the Via branch", branches: true },
+  { matchedOn: "the dialog", branches: false }
+])("a transaction matched on $matchedOn (RFC 3261 §17.1.3, §17.2.3)", ({ branches }) => {
+  it("is one per fork where the system numbers a request alike in two early dialogs (§12.2.1.1)", () => {
+    const s = scenario()
+    const leg = s
+      .leg({ callId: "forked@example.com", party: CALLEE, branches })
+      .invite({ at: 0, by: "system" })
+      .response(183, { at: 20, tag: "fork-a" })
+      .response(183, { at: 25, tag: "fork-b" })
+      .request("INFO", { at: 40, by: "system", seq: 2, fork: "fork-a" })
+      .response(200, { at: 45 })
+      .request("INFO", { at: 50, by: "system", seq: 2, fork: "fork-b" })
+      .response(200, { at: 55 })
+      .response(200, { at: 900, to: "INVITE", tag: "fork-b" })
+      .ack({ at: 910, by: "system" })
+    const read = facts(s, leg)
+
+    expect(read.accepted.map((a) => [a.request.method, a.request.at_us, a.response.at_us])).toEqual([
+      ["INFO", 40_000, 45_000],
+      ["INFO", 50_000, 55_000]
+    ])
+    expect(read.openings).toHaveLength(1)
+    expect(read.outcome?.responses.map((r) => [r.status, CallFacts.source(read.timeline, r).summary.to.tag])).toEqual([
+      [183, "fork-a"],
+      [183, "fork-b"],
+      [200, "fork-b"]
+    ])
+    expect(CallFacts.source(read.timeline, read.outcome!.ack!).summary.to.tag).toBe("fork-b")
+  })
+
+  it("holds the ACK of a failure final and the ACK of a 2xx with the INVITE each acknowledges (§17.1.1.3, §13.2.2.4)", () => {
+    const s = scenario()
+    const leg = s
+      .leg({ callId: "acknowledged@example.com", party: CALLEE, branches })
+      .invite({ at: 0, by: "system" })
+      .response(503, { at: 100 })
+      .ack({ at: 105, by: "system" })
+      .invite({ at: 500, by: "system", fresh: true })
+      .response(200, { at: 900 })
+      .ack({ at: 910, by: "system" })
+    const read = facts(s, leg)
+
+    expect(read.timeline.transactions.map((t) => [t.method, t.seq, t.final?.status, t.ack?.at_us])).toEqual([
+      ["INVITE", 1, 503, 105_000],
+      ["INVITE", 2, 200, 910_000]
+    ])
+  })
+
+  it("points the INVITE at the CANCEL that names it, a transaction of its own (§9.1)", () => {
+    const s = scenario()
+    const leg = s
+      .leg({ callId: "cancelled@example.com", party: CALLEE, branches })
+      .invite({ at: 0, by: "system" })
+      .response(180, { at: 30 })
+      .cancel({ at: 4_000, by: "system" })
+      .response(200, { at: 4_005 })
+      .response(487, { at: 4_020, to: "INVITE" })
+      .ack({ at: 4_030, by: "system" })
+    const read = facts(s, leg)
+
+    expect(read.timeline.transactions.map((t) => [t.method, t.final?.status, t.cancel?.at_us])).toEqual([
+      ["INVITE", 487, 4_000_000],
+      ["CANCEL", 200, undefined]
+    ])
+  })
+
   it("of each early dialog keeps its own final where two dialogs of one leg number a request alike", () => {
     const s = scenario()
     const leg = s
-      .leg({ callId: "retried@example.com", party: CALLEE })
+      .leg({ callId: "retried@example.com", party: CALLEE, branches })
       .invite({ at: 0, by: "system" })
       .response(183, { at: 20 })
       .request("UPDATE", { at: 30, by: "party", seq: 1 })
@@ -392,6 +460,36 @@ describe("a transaction (RFC 3261 §17.1.3, §17.2.3)", () => {
 
     expect(updates.map((e) => read.timeline.transactions[e.transaction]!.final?.status)).toEqual([488, 200])
     expect(read.accepted.map((a) => [a.request.method, a.request.at_us])).toEqual([["UPDATE", 530_000]])
+  })
+})
+
+describe("a request that crosses the system twice on one Call-ID, read over its whole leg", () => {
+  /** The party's INVITE at one of its addresses, then the same INVITE at its second, as a spiral brings it back. */
+  const spiral = (s: Scenario, branches: boolean): ScenarioLeg =>
+    s
+      .leg({ callId: "spiral@example.com", party: PARTY, hops: [{ party: "198.51.100.11:5060", system: "192.0.2.10:5060" }], branches })
+      .invite({ at: 0, by: "party" })
+      .invite({ at: 4, by: "party", hop: 1, seq: 1, fresh: true })
+      .response(486, { at: 30, hop: 1 })
+      .response(486, { at: 32 })
+
+  it("is one transaction per crossing, each with the final sent back on its branch", () => {
+    const s = scenario()
+    const leg = spiral(s, true)
+    const read = CallFacts.atLeg(s.flows(), s.sut, leg.index)
+
+    expect(read.openings.map((t) => [t.request?.hop, t.final?.hop, t.final?.at_us])).toEqual([
+      [0, 0, 32_000],
+      [1, 1, 30_000]
+    ])
+  })
+
+  it("is one transaction where the Via carries no branch to tell the crossings apart", () => {
+    const s = scenario()
+    const leg = spiral(s, false)
+    const read = CallFacts.atLeg(s.flows(), s.sut, leg.index)
+
+    expect(read.openings.map((t) => [t.request?.hop, t.final?.at_us])).toEqual([[0, 30_000]])
   })
 })
 

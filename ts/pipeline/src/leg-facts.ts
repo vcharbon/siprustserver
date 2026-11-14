@@ -44,6 +44,9 @@ export const valueOf = <T>(fact: Fact<T>): T | undefined => (fact.state === "see
  */
 export const GIVE_UP_SILENCE_US = 32_000_000
 
+/** What opens the branch of an RFC 3261 element: one such branch names one transaction (§8.1.1.7). */
+const BRANCH_COOKIE = "z9hG4bK"
+
 /** The hop of a position that reads every hop of its leg. */
 export const WHOLE_LEG = -1
 
@@ -123,11 +126,17 @@ export interface Entry {
 }
 
 /**
- * One transaction of a position: a request and what answered it, matched on
- * the CSeq number, the CSeq method and the direction (RFC 3261 §17.1.3; the
- * two directions of a dialog number their CSeqs independently, §12.2.1.1). An
- * ACK belongs to the INVITE it acknowledges; a CANCEL is its own transaction
- * and the INVITE it cancels points at it.
+ * One transaction of a position: a request and what answered it, matched as
+ * RFC 3261 §17.1.3 and §17.2.3 say, on the top Via branch, the CSeq and the
+ * direction. A CANCEL and the ACK of a failure final carry their INVITE's
+ * branch (§9.1, §17.1.1.3): the ACK belongs to its INVITE, the CANCEL is its
+ * own transaction and the INVITE it cancels points at it.
+ *
+ * Where the branch cannot match, the dialog does: the CSeq, the direction and
+ * both tags, a response or an ACK finding the request that carried no To-tag.
+ * That reads the ACK of a 2xx, which carries a branch of its own (§13.2.2.4),
+ * and every message whose top Via has no `z9hG4bK` branch (§8.1.1.7). There a
+ * request that crosses the same side twice on one Call-ID is one transaction.
  *
  * The direction is the requester's side, system or party, at every boundary
  * hop together: a party that speaks from a second address stays one party. At
@@ -386,27 +395,53 @@ const timelineOf = (file: FileFacts, p: Position, msgIdxs: ReadonlyArray<number>
     const requester = m.summary.kind === "request" ? m.src : m.dst
     return `${m.hop}${requester === leg.hops[m.hop]?.a ? "a" : "b"}`
   }
-  const transactionOf = (requester: string, method: string, seq: number, bySystem: boolean): BuildingTransaction => {
-    const key = `${requester} ${method} ${seq}`
-    let transaction = byKey.get(key)
-    if (transaction === undefined) {
-      transaction = {
-        index: transactions.length,
-        method,
-        seq,
-        bySystem,
-        opening: false,
-        request: undefined,
-        responses: [],
-        final: undefined,
-        ack: undefined,
-        cancel: undefined
-      }
-      byKey.set(key, transaction)
-      transactions.push(transaction)
+  const viaKey = (requester: string, method: string, m: Flows.Msg): string | undefined => {
+    const branch = m.via?.[0]?.branch
+    if (branch === undefined || branch === null || !branch.startsWith(BRANCH_COOKIE)) return undefined
+    return `v ${requester} ${method} ${m.summary.cseq.seq} ${branch}`
+  }
+  const dialogKey = (requester: string, method: string, m: Flows.Msg, toTag: string | null): string =>
+    `d ${requester} ${method} ${m.summary.cseq.seq} ${m.summary.from.tag ?? ""} ${toTag ?? ""}`
+  const started = (method: string, seq: number, bySystem: boolean): BuildingTransaction => {
+    const transaction: BuildingTransaction = {
+      index: transactions.length,
+      method,
+      seq,
+      bySystem,
+      opening: false,
+      request: undefined,
+      responses: [],
+      final: undefined,
+      ack: undefined,
+      cancel: undefined
     }
+    transactions.push(transaction)
     return transaction
   }
+  const transactionOf = (m: Flows.Msg, requester: string, method: string, bySystem: boolean): BuildingTransaction => {
+    const ack = method === "ACK"
+    const matched = ack ? "INVITE" : method
+    const isRequest = m.summary.kind === "request" && !ack
+    const via = viaKey(requester, matched, m)
+    let transaction = via === undefined ? undefined : byKey.get(via)
+    if (transaction !== undefined) return transaction
+    const byDialog = via === undefined || matched === "INVITE"
+    const sameDialog = dialogKey(requester, matched, m, m.summary.to.tag)
+    const untagged = dialogKey(requester, matched, m, null)
+    if (via === undefined || ack) transaction = byKey.get(sameDialog) ?? (isRequest ? undefined : byKey.get(untagged))
+    if (transaction === undefined) {
+      transaction = started(matched, m.summary.cseq.seq, bySystem)
+      if (!isRequest && byDialog) {
+        if (!byKey.has(sameDialog)) byKey.set(sameDialog, transaction)
+        if (!byKey.has(untagged)) byKey.set(untagged, transaction)
+      }
+    }
+    if (via !== undefined && !ack) byKey.set(via, transaction)
+    if (isRequest && byDialog) byKey.set(sameDialog, transaction)
+    return transaction
+  }
+  const cancelledBy = (m: Flows.Msg, requester: string): BuildingTransaction | undefined =>
+    byKey.get(viaKey(requester, "INVITE", m) ?? dialogKey(requester, "INVITE", m, m.summary.to.tag))
 
   for (const i of msgIdxs) {
     const m = leg.msgs[i]
@@ -419,7 +454,7 @@ const timelineOf = (file: FileFacts, p: Position, msgIdxs: ReadonlyArray<number>
     const bySystem = isSystem(m.src)
     const requestBySystem = request ? bySystem : isSystem(m.dst)
     const requester = requesterOf(m, requestBySystem)
-    const transaction = transactionOf(requester, method === "ACK" ? "INVITE" : method, summary.cseq.seq, requestBySystem)
+    const transaction = transactionOf(m, requester, method, requestBySystem)
     if (m.retx) {
       const repeated = repeatedBy(file, m, method, transaction, byMsg)
       if (repeated !== undefined) repeated.retransmissions += 1
@@ -436,7 +471,7 @@ const timelineOf = (file: FileFacts, p: Position, msgIdxs: ReadonlyArray<number>
     } else if (method === "ACK") {
       dialog = transaction.request?.dialog ?? inDialog
     } else if (method === "CANCEL") {
-      dialog = byKey.get(`${requester} INVITE ${summary.cseq.seq}`)?.request?.dialog ?? inDialog
+      dialog = cancelledBy(m, requester)?.request?.dialog ?? inDialog
     } else {
       dialog = inDialog
     }
@@ -466,7 +501,7 @@ const timelineOf = (file: FileFacts, p: Position, msgIdxs: ReadonlyArray<number>
     } else {
       transaction.request ??= entry
       if (method === "CANCEL") {
-        const cancelled = byKey.get(`${requester} INVITE ${summary.cseq.seq}`)
+        const cancelled = cancelledBy(m, requester)
         if (cancelled !== undefined) cancelled.cancel ??= entry
       }
     }

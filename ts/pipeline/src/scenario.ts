@@ -4,9 +4,10 @@
  *
  * A scenario holds the system's addresses and its legs; a leg is a Call-ID
  * between one party socket and one system socket per hop. Each message names
- * who sent it and when; the builder numbers the CSeqs of each direction, tags
- * the dialog on the first response past `100` (RFC 3261 §12.1.1) and writes a
- * datagram whose headers and body say what the summary says. Messages stay in
+ * who sent it and when; the builder numbers the CSeqs of each direction, gives
+ * each request its Via branch (RFC 3261 §8.1.1.7), tags the dialog on the
+ * first response past `100` (§12.1.1) and writes a datagram whose headers and
+ * body say what the summary and the Via chain say. Messages stay in
  * the order they are added, which is the capture's order: a test of a
  * misordered capture adds them misordered.
  *
@@ -44,12 +45,27 @@ export interface LegSpec {
   /** The opener's and the answerer's URIs. */
   readonly from?: string
   readonly to?: string
+  /**
+   * Whether each request carries a Via branch of its own, a CANCEL and the ACK
+   * of a failure final their INVITE's (RFC 3261 §9.1, §17.1.1.3). `false`
+   * writes the Via of an RFC 2543 element, which has none. The default is `true`.
+   */
+  readonly branches?: boolean
+}
+
+/** One part of a multipart body, located in the body's text by byte offset. */
+export interface BodyPartSpec {
+  readonly type: string
+  readonly offset: number
+  readonly len: number
 }
 
 export interface Body {
   /** The Content-Type value, parameters included. */
   readonly type: string
   readonly text: string
+  /** The parts of a multipart body, as {@link multipart} locates them. */
+  readonly parts?: ReadonlyArray<BodyPartSpec>
 }
 
 interface Common {
@@ -72,6 +88,11 @@ export interface RequestSpec extends Common {
   readonly seq?: number
   /** Whether the request carries no To-tag though the dialog has one: a new opening. */
   readonly fresh?: boolean
+  /**
+   * The answerer's tag of the dialog the request is sent in, where the INVITE
+   * forked (RFC 3261 §12.1); the default is the leg's dialog tag.
+   */
+  readonly fork?: string
   readonly uri?: string
 }
 
@@ -83,9 +104,11 @@ export interface ResponseSpec extends Common {
   /** Who answers, where both sides have such a request pending. */
   readonly by?: Side
   /**
-   * The To-tag the answerer mints where this response is the first to tag the
-   * dialog; the default is one of the leg's own. A system that relays another
-   * leg's answer whole carries that leg's.
+   * The To-tag this response carries where its INVITE has none; the default
+   * is the leg's dialog tag, one of the leg's own minted by the first response
+   * past `100`. A response of another fork states its own (RFC 3261 §12.1),
+   * and the fork a 2xx comes from becomes the leg's dialog. A system that
+   * relays another leg's answer whole carries that leg's.
    */
   readonly tag?: string
 }
@@ -98,12 +121,34 @@ export const SDP: Body = {
   )
 }
 
+const BOUNDARY = "scenario-boundary"
+
+/** A `multipart/mixed` body holding `parts` in order (RFC 2046 §5.1). */
+export const multipart = (...parts: ReadonlyArray<Body>): Body => {
+  let text = ""
+  const located = parts.map((part): BodyPartSpec => {
+    text += `--${BOUNDARY}${CRLF}Content-Type: ${part.type}${CRLF}${CRLF}`
+    const offset = Buffer.byteLength(text)
+    text += `${part.text}${CRLF}`
+    return { type: part.type, offset, len: Buffer.byteLength(part.text) }
+  })
+  text += `--${BOUNDARY}--${CRLF}`
+  return { type: `multipart/mixed;boundary=${BOUNDARY}`, text, parts: located }
+}
+
 interface Sent {
   readonly method: string
   readonly seq: number
   readonly by: Side
+  readonly hop: number
   readonly toTag: string | null
+  /** The answerer's tag of the dialog the request is sent in; `null` before any. */
+  readonly answererTag: string | null
   readonly uri: string
+  /** The top Via branch the request and its responses carry; `null` on a leg without branches. */
+  readonly branch: string | null
+  /** The status of the last final response the request drew. */
+  lastFinal: number | undefined
 }
 
 const identityOf = (uri: string): Flows.Identity => {
@@ -125,6 +170,7 @@ export class ScenarioLeg {
   private readonly sent: Array<Sent> = []
   private opener: Side | undefined
   private answererTag: string | null = null
+  private branches = 0
 
   constructor(
     readonly index: number,
@@ -148,35 +194,43 @@ export class ScenarioLeg {
       this.opener ??= o.by
       this.answererTag = null
     }
-    const repeated = o.retx === true ? this.last(name, o.by) : undefined
-    const invite = name === "ACK" || name === "CANCEL" ? this.last("INVITE", o.by) : undefined
+    const hop = o.hop ?? 0
+    const repeated = o.retx === true ? this.last(name, o.by, hop) : undefined
+    const invite = name === "ACK" || name === "CANCEL" ? this.last("INVITE", o.by, hop) : undefined
     const seq = o.seq ?? repeated?.seq ?? invite?.seq ?? this.nextSeq[o.by]++
     if (o.seq !== undefined && o.seq >= this.nextSeq[o.by]) this.nextSeq[o.by] = o.seq + 1
-    const toTag = repeated !== undefined ? repeated.toTag : name === "CANCEL" || opens ? null : this.remoteTagFor(o.by)
+    const answererTag = repeated !== undefined ? repeated.answererTag : (o.fork ?? this.answererTag)
+    const toTag =
+      repeated !== undefined ? repeated.toTag : name === "CANCEL" || opens ? null : this.remoteTagFor(o.by, answererTag)
     const uri = o.uri ?? (o.by === (this.opener ?? o.by) ? this.to : this.from)
-    this.sent.push({ method: name, seq, by: o.by, toTag, uri })
-    this.push(o, o.by, { method: name, seq, toTag, uri, status: undefined })
+    const branch = repeated !== undefined ? repeated.branch : this.branchOf(name, invite)
+    const sent: Sent = { method: name, seq, by: o.by, hop, toTag, answererTag, uri, branch, lastFinal: undefined }
+    this.sent.push(sent)
+    this.push(o, o.by, sent, undefined, toTag)
     return this
   }
 
   /** A response to the leg's last request, or to the last one of method `to`. */
   response(status: number, o: ResponseSpec): this {
     const method = o.to?.toUpperCase()
-    const answered = [...this.sent]
+    const hop = o.hop ?? 0
+    const answerable = [...this.sent]
       .reverse()
-      .find(
+      .filter(
         (s) =>
           (method === undefined ? s.method !== "ACK" : s.method === method) &&
           (o.seq === undefined || s.seq === o.seq) &&
           (o.by === undefined || s.by !== o.by)
       )
+    const answered = answerable.find((s) => s.hop === hop) ?? answerable[0]
     if (answered === undefined) throw new Error(`leg ${this.spec.callId}: no request for the ${status} to answer`)
     let toTag = answered.toTag
     if (toTag === null && status > 100 && answered.method === "INVITE") {
-      this.answererTag ??= o.tag ?? `answerer-${this.index}-${answered.seq}`
-      toTag = this.answererTag
+      toTag = o.tag ?? this.answererTag ?? `answerer-${this.index}-${answered.seq}`
+      if (this.answererTag === null || (status >= 200 && status < 300)) this.answererTag = toTag
     }
-    this.push(o, other(answered.by), { method: answered.method, seq: answered.seq, toTag, uri: answered.uri, status })
+    if (status >= 200) answered.lastFinal = status
+    this.push(o, other(answered.by), answered, status, toTag)
     return this
   }
 
@@ -213,47 +267,51 @@ export class ScenarioLeg {
     }
   }
 
-  private last(method: string, by: Side): Sent | undefined {
-    return [...this.sent].reverse().find((s) => s.method === method && s.by === by)
+  /** The last request of `method` that `by` sent: the one on `hop` where there is one. */
+  private last(method: string, by: Side, hop: number): Sent | undefined {
+    const sent = [...this.sent].reverse().filter((s) => s.method === method && s.by === by)
+    return sent.find((s) => s.hop === hop) ?? sent[0]
   }
 
   /** The To-tag a request sent by `by` carries: the far side's dialog tag. */
-  private remoteTagFor(by: Side): string | null {
-    if (this.opener === undefined || by === this.opener) return this.answererTag
+  private remoteTagFor(by: Side, answererTag: string | null): string | null {
+    if (this.opener === undefined || by === this.opener) return answererTag
     return this.openerTag()
+  }
+
+  /**
+   * The Via branch of a new request: its INVITE's for a CANCEL and for the ACK
+   * of a failure final, else one no other request of the leg carries.
+   */
+  private branchOf(method: string, invite: Sent | undefined): string | null {
+    if (this.spec.branches === false) return null
+    const shared = method === "CANCEL" || (method === "ACK" && (invite?.lastFinal ?? 0) >= 300)
+    if (shared && invite !== undefined) return invite.branch
+    return `z9hG4bK-${this.index}-${this.branches++}`
   }
 
   private openerTag(): string {
     return `opener-${this.index}`
   }
 
-  private push(
-    o: Common,
-    by: Side,
-    line: {
-      readonly method: string
-      readonly seq: number
-      readonly toTag: string | null
-      readonly uri: string
-      readonly status: number | undefined
-    }
-  ): void {
+  /** Writes the request `line`, or the response `status` to it carrying `toTag`, as `by` sends it. */
+  private push(o: Common, by: Side, line: Sent, status: number | undefined, toTag: string | null): void {
     const hopIndex = o.hop ?? 0
     const hop = this.hops[hopIndex]
     if (hop === undefined) throw new Error(`leg ${this.spec.callId}: no hop ${hopIndex}`)
     const src = by === "party" ? hop.party : hop.system
     const dst = by === "party" ? hop.system : hop.party
-    const requester = line.status === undefined ? by : other(by)
+    const requester = line.by
     const fromOpener = this.opener === undefined || requester === this.opener
-    const from = { uri: fromOpener ? this.from : this.to, tag: fromOpener ? this.openerTag() : this.answererTag }
-    const to = { uri: fromOpener ? this.to : this.from, tag: line.toTag }
-    const via = requester === "party" ? hop.party : hop.system
+    const from = { uri: fromOpener ? this.from : this.to, tag: fromOpener ? this.openerTag() : line.answererTag }
+    const to = { uri: fromOpener ? this.to : this.from, tag: toTag }
+    const sentBy = requester === "party" ? hop.party : hop.system
     const tagged = (party: { readonly uri: string; readonly tag: string | null }): string =>
       `<${party.uri}>${party.tag === null ? "" : `;tag=${party.tag}`}`
     const body = o.body?.text ?? ""
     const raw = [
-      line.status === undefined ? `${line.method} ${line.uri} SIP/2.0` : `SIP/2.0 ${line.status} Scenario`,
-      `Via: SIP/2.0/UDP ${via};branch=z9hG4bK-${this.index}-${line.seq}-${line.method}`,
+      status === undefined ? `${line.method} ${line.uri} SIP/2.0` : `SIP/2.0 ${status} Scenario`,
+      `Via: SIP/2.0/UDP ${sentBy}${line.branch === null ? "" : `;branch=${line.branch}`}`,
       `From: ${tagged(from)}`,
       `To: ${tagged(to)}`,
       `Call-ID: ${this.spec.callId}`,
@@ -266,9 +324,10 @@ export class ScenarioLeg {
     ].join(CRLF)
     const cseq = { seq: line.seq, method: line.method }
     const summary: Flows.Summary =
-      line.status === undefined
+      status === undefined
         ? { kind: "request", method: line.method, uri: line.uri, cseq, from, to }
-        : { kind: "response", status: line.status, reason: "Scenario", cseq, from, to }
+        : { kind: "response", status, reason: "Scenario", cseq, from, to }
+    const parts = o.body?.parts?.map((part) => ({ content_type: part.type, offset: part.offset, len: part.len }))
     const repeated = o.retx === true ? this.msgs.findIndex((m) => sameMessage(m.summary, summary, m.src, src)) : -1
     this.msgs.push({
       ts_us: Math.round(o.at * 1000),
@@ -281,7 +340,10 @@ export class ScenarioLeg {
       raw,
       identities: { from: identityOf(from.uri), to: identityOf(to.uri), ruri: identityOf(line.uri) },
       summary,
-      ...(o.body === undefined ? {} : { body: { content_type: o.body.type, len: Buffer.byteLength(body) } })
+      via: [{ sent_by: sentBy, transport: "UDP", branch: line.branch }],
+      ...(o.body === undefined
+        ? {}
+        : { body: { content_type: o.body.type, len: Buffer.byteLength(body), ...(parts === undefined ? {} : { parts }) } })
     })
   }
 }
