@@ -112,6 +112,16 @@ describe("the diff of two campaign runs", () => {
     expect(CampaignDiff.render(diff).at(-1)).toBe("DIFF same (4 cell(s) on 1 lane(s) in both)")
   })
 
+  it("names a line a cell held twice and holds once", () => {
+    const twice = { ...BEFORE, run: run(7, [cell("hold", [...GREEN, pass("call", "interpreter")])]) }
+    const once = { ...BEFORE, run: run(8, [cell("hold", GREEN)]) }
+    expect(CampaignDiff.render(CampaignDiff.diffOf(twice, once)).slice(2, 5)).toEqual([
+      "lane simulated: 1 cell(s) in both, 1 differ",
+      "  moved  hold: pass, lines moved",
+      "      - call/interpreter=pass"
+    ])
+  })
+
   it("reads a lane only one run drove as cells on one side only", () => {
     const other = { ...AFTER.run.lanes[0]!, lane: "real", results: [cell("hold", GREEN)] }
     const diff = CampaignDiff.diffOf(BEFORE, { run: { ...BEFORE.run, id: 8, lanes: [...BEFORE.run.lanes, other] }, counts: BEFORE.counts })

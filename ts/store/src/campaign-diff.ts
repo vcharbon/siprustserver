@@ -226,7 +226,18 @@ const countLines = (pairs: ReadonlyArray<CountPair>): ReadonlyArray<string> => {
   ]
 }
 
-/** The lines of one moved cell: its statuses, then the lines only one side holds. */
+/** The lines of `lines` beyond those `others` holds, a line held twice counted twice. */
+const beyond = (lines: ReadonlyArray<string>, others: ReadonlyArray<string>): ReadonlyArray<string> => {
+  const left = [...others]
+  return lines.filter((line) => {
+    const at = left.indexOf(line)
+    if (at === -1) return true
+    left.splice(at, 1)
+    return false
+  })
+}
+
+/** The lines of one moved cell: its statuses, then the lines one side holds beyond the other's. */
 const cellLines = (moved: Moved, before: number, after: number): ReadonlyArray<string> => {
   if (moved.before === undefined) return [`  only in ${after}  ${moved.caseId}: ${moved.after?.status ?? "-"}`]
   if (moved.after === undefined) return [`  only in ${before}  ${moved.caseId}: ${moved.before.status}`]
@@ -237,8 +248,8 @@ const cellLines = (moved: Moved, before: number, after: number): ReadonlyArray<s
     : `${moved.before.status} → ${moved.after.status}`
   return [
     `  moved  ${moved.caseId}: ${status}`,
-    ...was.filter((line) => !is.includes(line)).map((line) => `      - ${line}`),
-    ...is.filter((line) => !was.includes(line)).map((line) => `      + ${line}`)
+    ...beyond(was, is).map((line) => `      - ${line}`),
+    ...beyond(is, was).map((line) => `      + ${line}`)
   ]
 }
 
