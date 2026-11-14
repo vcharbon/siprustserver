@@ -7,11 +7,13 @@
 //! enrichment is right by construction rather than by a second rewrite pass
 //! kept in step by hand. Nothing here reads state the document does not carry.
 
+use std::collections::BTreeMap;
+
 use sip_message::header::HeaderName;
 use sip_message::{SipParser, ToolReading};
 
 use crate::callfacts;
-use crate::doc::{FlowsDoc, EMIT_SCHEMA_VERSION};
+use crate::doc::{FlowsDoc, Identities, EMIT_SCHEMA_VERSION};
 use crate::msgfacts;
 
 /// What the enrichment needs beyond the document itself.
@@ -68,6 +70,32 @@ pub fn enrich(doc: &mut FlowsDoc, opts: &EnrichOptions) -> Result<(), String> {
     }
     doc.legs = legs;
     Ok(())
+}
+
+/// Drop every field [`enrich`] derives, leaving the document's core: a tool
+/// that rewrites message bytes strips the projections of the old bytes
+/// before anything reads the document, which then carries none until
+/// [`enrich`] derives them from the new bytes.
+pub fn strip(doc: &mut FlowsDoc) {
+    for leg in &mut doc.legs {
+        for msg in &mut leg.msgs {
+            msg.repeat_of = None;
+            msg.via = Vec::new();
+            msg.headers = Vec::new();
+            msg.identities = Identities::default();
+            msg.rseq = None;
+            msg.replaces = None;
+            msg.refer_to = None;
+            msg.body = None;
+        }
+    }
+    for group in &mut doc.groups {
+        group.t0_us = 0;
+        group.initial_invite = None;
+        group.final_us = None;
+        group.final_status = None;
+        group.methods = BTreeMap::new();
+    }
 }
 
 /// Re-enrich a serialized document — the entry point for a tool that rewrote
@@ -193,6 +221,30 @@ Content-Length: 0\r\n\r\n";
         assert_eq!(back.legs[0].msgs[0].identities.from.digits.as_deref(), Some("1555900"));
         assert!(matches!(back.legs[0].msgs[0].summary, Summary::Request { .. }));
         assert_eq!(back.groups[0].final_status, Some(200));
+    }
+
+    /// A stripped document carries no derived field — no projection of its
+    /// bytes is left to read — and enrichment puts back the very document.
+    #[test]
+    fn a_stripped_document_carries_no_derivation_and_re_enriches_to_the_same() {
+        let opts = EnrichOptions::with_headers(&["X-Api-Call"], ToolReading::plain_rfc());
+        let whole = doc();
+        let mut stripped = whole.clone();
+        strip(&mut stripped);
+        let value = serde_json::to_value(&stripped).unwrap();
+        for m in value["legs"][0]["msgs"].as_array().unwrap() {
+            for key in ["via", "headers", "body", "repeat_of", "rseq"] {
+                assert!(m.get(key).is_none(), "{key} is derived: {m}");
+            }
+            assert_eq!(m["identities"]["from"]["uri"], "", "{m}");
+        }
+        let group = &value["groups"][0];
+        for key in ["initial_invite", "final_us", "final_status", "methods"] {
+            assert!(group.get(key).is_none(), "{key} is derived: {group}");
+        }
+        assert_eq!(group["t0_us"], 0);
+        let again = enrich_str(&serde_json::to_string(&stripped).unwrap(), &opts).unwrap();
+        assert_eq!(again, serde_json::to_string_pretty(&whole).unwrap());
     }
 
     #[test]
