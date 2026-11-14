@@ -367,6 +367,8 @@ impl RecordingSignalingNetwork {
         Ok(())
     }
 
+    /// Records a layer-close structural finding: deferred-fail in a recorder
+    /// test, advisory in a real run.
     fn push_layer_anomaly(
         &self,
         kind: &'static str,
@@ -374,8 +376,6 @@ impl RecordingSignalingNetwork {
         detail: String,
         bind_key: Option<LaneKey>,
     ) {
-        // Layer-close structural findings are deferred-fail in a recorder test
-        // (advisory in real-run).
         let severity = self.0.ctx.severity_for(SIGNALING_TAG, false);
         self.push_anomaly(kind, check, detail, severity, bind_key);
     }
@@ -581,8 +581,8 @@ impl UdpEndpoint for RecordedEndpoint {
 }
 
 impl Drop for RecordedEndpoint {
+    /// The per-bind scope close.
     fn drop(&mut self) {
-        // Per-bind scope close.
         self.channel.record(SignalingNetworkEvent::BindRelease { bind_key: self.bind_key.clone() });
 
         // Queue-leak: capture depth BEFORE the inner endpoint drops and closes

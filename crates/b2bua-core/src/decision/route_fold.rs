@@ -56,6 +56,12 @@ pub struct AdmittingRoute {
 
 /// Apply `route` to `call` (which already carries the a-leg) up to its admit.
 /// `depth` counts the chained limiter-reject failovers behind it.
+///
+/// A destination host that is neither an IP literal nor allow-listed (a bogus
+/// host from call-control, a cluster name with no live pod) is refused with a
+/// `503`, To-tag, terminate effects and a Reject CDR before any b-leg state or
+/// limiter hold exists: the send path would otherwise block on name
+/// resolution, and a refused target never acquires a hold.
 pub fn up_to_admit(
     mut call: Call,
     mut route: RouteDecision,
@@ -123,14 +129,6 @@ pub fn up_to_admit(
     call = super::apply_reject::seed_service_ext(call, std::mem::take(&mut route.service_ext));
 
     // ── Destination allow-list: reject non-IP non-allow-listed destinations early ──
-    // Catches the case where call-control returns a bogus host (e.g. `kindlab`
-    // from a misconfigured fixture, or a `.svc.cluster.local` name the K8s runner
-    // constructs that has no live pod). Without this the host would flow to the
-    // send path and block on `getaddrinfo`/`EAI_AGAIN`; admission is the cheap
-    // early filter — emit `503` and terminate BEFORE any b-leg state or limiter
-    // hold is allocated. `reject_call` builds the refusal (503 + To-tag +
-    // terminate effects + Reject CDR). Done before the limiter loop so a rejected
-    // target never acquires a hold.
     if classify_admission(&route.destination.host, &config.worker_allowed_target_suffixes)
         == AdmissionVerdict::Reject
     {

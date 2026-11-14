@@ -376,8 +376,8 @@ impl MediaTransport {
 }
 
 impl Drop for MediaTransport {
+    /// The last owner aborts the background tasks.
     fn drop(&mut self) {
-        // Last owner closes shop: abort the background tasks.
         if Arc::strong_count(&self.tasks) == 1 {
             for t in self.tasks.iter() {
                 t.abort();

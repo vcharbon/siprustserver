@@ -79,6 +79,8 @@ impl B2buaSut {
     /// set (the failover-capable marker), and fails over via `/call/failure` to
     /// `failover_port` (bob2) with `failover_ruri` as the new Request-URI: an
     /// `on_failure: { action: "failover", destination, new_ruri }` instruction.
+    /// The first route states a 30 s no-answer bound, which the default route
+    /// leaves unset, so the no-answer failover fires.
     pub fn route_all_to_with_18x_failover(
         dest_host: &str,
         dest_port: u16,
@@ -96,8 +98,6 @@ impl B2buaSut {
                 .fallback(move |_req| {
                     let mut r = route_to_with_18x(&primary.0, primary.1, strategy);
                     r.callback_context = Some("failover-test".into());
-                    // The default route states no no-answer bound — set the 30 s
-                    // one so the no-answer failover fires.
                     r.no_answer_ms = Some(30_000);
                     NewCallResponse::Route(r)
                 })

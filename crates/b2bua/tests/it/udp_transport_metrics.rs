@@ -69,7 +69,9 @@ Max-Forwards: 70\r\n"
 /// Bind the B2BUA side (brake hook installed; counters folded into a live
 /// `UdpTransportMetrics` whose `queue_depth`/`drops_tail_drop` read THROUGH the
 /// bound endpoint) and a raw flooder on the same fabric. Returns the fabric, the
-/// (never-drained) B2BUA endpoint, the flooder, and the metrics shape.
+/// (never-drained) B2BUA endpoint, the flooder, and the metrics shape. Each
+/// live getter captures its own clone of the endpoint's `Arc`, so every read
+/// is the instantaneous value.
 async fn setup(
 ) -> (SimulatedSignalingNetwork, Arc<dyn UdpEndpoint>, Box<dyn UdpEndpoint>, UdpTransportMetrics) {
     let net = SimulatedSignalingNetwork::new(TRANSIT_MS);
@@ -88,9 +90,6 @@ async fn setup(
         .into();
     let flooder = net.bind_udp(BindUdpOpts::new(flooder_addr(), 64)).await.expect("bind flooder");
 
-    // Live getters over the bound endpoint: the queue depth and the tail
-    // drops. A clone of the Arc'd endpoint is captured by each
-    // closure so the shape reads the instantaneous value on every access.
     let ep_depth = b2bua.clone();
     let ep_counters = b2bua.clone();
     let metrics = UdpTransportMetrics::new(
@@ -137,7 +136,6 @@ async fn metrics_shape_reports_brake_drops_and_queue_depth() {
     let expected_rejects = (flood - 2) as u64;
     assert_eq!(metrics.brake().refused(Class::Normal), expected_rejects, "brake refusals");
     assert_eq!(metrics.brake().refused_copies(), 0, "no copy was sent");
-    // queue_depth is the live endpoint depth — the two below-threshold INVITEs.
     assert_eq!(metrics.queue_depth(), 2, "live queue depth");
     assert_eq!(metrics.queue_max(), QUEUE_MAX);
     // Below threshold + at capacity (5): the brake shed everything over the

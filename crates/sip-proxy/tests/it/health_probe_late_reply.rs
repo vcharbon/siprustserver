@@ -261,6 +261,10 @@ fn unknown_registry(worker_sock: std::net::SocketAddr) -> Arc<SimulatedWorkerReg
 // ───────────────────────────────────────────────────────────────────────────
 // 1. Late replies past the reap window keep the worker alive.
 // ───────────────────────────────────────────────────────────────────────────
+/// The worker answers every OPTIONS, each reply a handful of ticks after its
+/// tick. A per-cycle pending entry would already be reaped, the reply
+/// discarded and the miss counter walked to threshold; the branch still
+/// correlates, so the worker reaches, and stays, Alive.
 #[tokio::test(start_paused = true)]
 async fn late_replies_past_the_reap_window_keep_the_worker_alive() {
     let h = Harness::with_transit_delay("probe-late-reply", 5);
@@ -291,10 +295,6 @@ async fn late_replies_past_the_reap_window_keep_the_worker_alive() {
     )
     .await;
 
-    // The worker answers EVERY OPTIONS, but each reply lands a handful of ticks
-    // after its tick. A per-cycle pending entry would already be reaped, the
-    // reply discarded and the miss counter walked to threshold. The branch
-    // still correlates, so the worker reaches — and stays — Alive.
     wait_for_health(&registry, WorkerHealth::Alive).await;
     assert!(
         observer.band_for(WORKER_ID).is_some(),

@@ -245,6 +245,10 @@ async fn failover_reject() {
 /// B2BUA CANCELs bob1 and fails over via `/call/failure` to bob2 (new R-URI),
 /// which answers with the offer. Alice's 200 opens a second caller dialog (bob2
 /// rang behind the mask), and her ACK answers the offer inside it.
+///
+/// The clock advances just past the 30 s no-answer deadline, not a full second
+/// more, so bob2 answers the failover INVITE before its Timer A retransmit
+/// (~500 ms) and sees no extra INVITE.
 #[tokio::test(start_paused = true)]
 async fn failover_no_answer() {
     let h = Harness::with_transit_delay("suppress-18x-failover-no-answer", 0);
@@ -270,10 +274,6 @@ async fn failover_no_answer() {
     let p180 = call.expect(180).await;
     let first_to_tag = p180.to().tag().expect("180 has a To-tag").to_string();
 
-    // No-answer timeout (30 s) → CANCEL bob1 + failover to bob2. Advance just
-    // past the deadline (not a full second) so the failover INVITE to bob2 is
-    // answered before its Timer A retransmit (~500 ms) leaks under the paused
-    // clock, so bob2 sees no extra INVITE.
     h.advance(Duration::from_secs(30) + Duration::from_millis(100)).await;
 
     // Bob1 gets the CANCEL (tied to its still-open INVITE txn), 200s it, then

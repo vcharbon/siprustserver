@@ -216,13 +216,13 @@ async fn a_gate_hint_of_zero_goes_on_the_wire_as_one_second() {
 // EWMA crossing critical — so a Retry-After drift in either the gate or the
 // glue is caught together.
 
+/// Bucket size 1, rate 0: the second external INVITE sheds with the 60 s
+/// Retry-After fallback (rate 0 + empty bucket).
 #[tokio::test(start_paused = true)]
 async fn real_gate_cps_drain_yields_a_wire_503_cps() {
     let h = Harness::with_transit_delay("self-gate-real-cps", 1);
     let (_bob_ep, _bob_addr) = h.bind_sut("bob", BOB).await;
     let (strategy, registry) = forward_all_with_worker();
-    // Bucket size 1, rate 0 → the second external INVITE sheds with the 60 s
-    // Retry-After fallback (rate 0 + empty bucket).
     let gate = Arc::new(EluCpsGate::new(
         Arc::new(simulated().0),
         ProxySelfGateConfig {

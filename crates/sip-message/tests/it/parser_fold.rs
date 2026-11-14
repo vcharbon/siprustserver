@@ -53,10 +53,10 @@ fn nested_x_api_call_round_trips() {
     assert_eq!(vals[0], API_CALL_REROUTE);
 }
 
+/// A forwarded header list skips the structural headers and keeps the rest.
+/// The X-Api-Call value must survive whole.
 #[test]
 fn last_write_wins_extraction_keeps_payload_intact() {
-    // A forwarded header list skips the structural headers and keeps the
-    // rest. The X-Api-Call value must survive whole.
     let msg = CustomParser::new().parse(&build_invite(API_CALL_REROUTE)).expect("parse");
     let structural = [
         "from",

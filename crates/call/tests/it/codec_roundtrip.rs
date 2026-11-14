@@ -547,8 +547,7 @@ fn reroute_plan_in_callback_context_survives_replication() {
 
 // ── Leg-kind / `adopted` round-trip (ADR-0014) ──────────────────────────────
 //
-// `Leg.kind` and
-// `Leg.adopted` ride in the replicated call body and must survive
+// `Leg.kind` and `Leg.adopted` ride in the replicated call body and must survive
 // encode → decode: a media leg's `kind=Media` / `adopted=false` is what the
 // unadopted-leg gate keys on when another node restores the call, so losing it
 // across replication would mis-route the parked MRF leg on the backup.
@@ -558,14 +557,14 @@ fn reroute_plan_in_callback_context_survives_replication() {
 // protobuf codec (ADR-0008).
 
 /// The a-leg's kind/adopted survive encode→decode: the explicitly-tagged
-/// a-leg carries `kind=A` / `adopted=true` through the positional msgpack codec.
+/// a-leg carries `kind=A` / `adopted=true` through the positional msgpack codec,
+/// beside an unadopted media leg in `b_legs`.
 #[test]
 fn leg_kind_a_leg_kind_adopted_survive() {
     let codec = MsgpackCodec::new();
     let mut call = representative_call();
     call.a_leg.kind = Some(LegKind::A);
     call.a_leg.adopted = Some(true);
-    // An unadopted media leg rides in b_legs.
     let mut media = representative_call().a_leg;
     media.leg_id = "media-1".into();
     media.kind = Some(LegKind::Media);
@@ -624,8 +623,7 @@ fn leg_kind_absent_decodes_absent() {
 
 // ── Service-ext round-trip (ADR-0016) ───────────────────────────────────────
 //
-// Locks the load-bearing
-// invariant: `Call.ext[id]` / `Leg.ext[id]` carry the **Encoded** (JSON-safe)
+// Locks the load-bearing invariant: `Call.ext[id]` / `Leg.ext[id]` carry the **Encoded** (JSON-safe)
 // form of a service slice, never a decoded value. A `promotedSdp` rides as its
 // **base64 string**, never as raw bytes.
 //

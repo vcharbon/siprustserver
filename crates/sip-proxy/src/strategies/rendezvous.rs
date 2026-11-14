@@ -110,16 +110,16 @@ mod tests {
         }
     }
 
+    /// 1000 keys over 8 workers, each worker within ±25% of the 125 mean
+    /// (94..=156). The Call-IDs are a deterministic multiplicative spread, so
+    /// the counts are stable.
     #[test]
     fn distributes_across_workers_within_tolerance() {
-        // 1000 keys over 8 workers, each worker within ±25% of the 125 mean
-        // (94..=156).
         let workers: Vec<W> = (1..=8)
             .map(|i| W(Box::leak(format!("b2b-{i}").into_boxed_str()) as &'static str))
             .collect();
         let mut counts = std::collections::HashMap::new();
         for i in 0..1000usize {
-            // Deterministic multiplicative spread, for stable Call-IDs.
             let key = format!("call-{}-distribute@host", i.wrapping_mul(2_654_435_761usize));
             let w = rendezvous_select(&key, &workers).unwrap();
             *counts.entry(w.0).or_insert(0u32) += 1;

@@ -443,10 +443,10 @@ mod tests {
     }
 
     // --- StackIdentity public read-API ------------------------------------
-    // Pins the read-side seam consumers use to populate their own templating
-    // layer ($(ip.AS) / $(port.AS) substitution): the advertised host/port read
-    // back the configured `B2buaConfig.sip_local_{ip,port}`.
 
+    /// The read-side seam consumers populate their own templating layer from:
+    /// the advertised host and port read back the configured
+    /// `B2buaConfig.sip_local_{ip,port}`.
     #[test]
     fn advertised_host_port_match_the_configured_values() {
         let cfg = B2buaConfig {
@@ -459,9 +459,9 @@ mod tests {
         assert_eq!(identity.advertised_port(), 35060);
     }
 
+    /// A default-config identity yields a non-empty host and a port.
     #[test]
     fn default_config_is_reachable_end_to_end() {
-        // A default-config identity yields a non-empty host and a port.
         let identity = StackIdentity::from_config(&B2buaConfig::default());
         assert!(!identity.advertised_host().is_empty());
         assert!(identity.advertised_port() > 0);

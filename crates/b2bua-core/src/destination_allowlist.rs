@@ -111,8 +111,7 @@ mod tests {
 
     use super::*;
 
-    // Build the `Vec<String>` the Rust signature wants from string literals, so
-    // each case reads as a plain list of suffixes.
+    /// The `Vec<String>` the signature takes, from string literals.
     fn list(items: &[&str]) -> Vec<String> {
         items.iter().map(|s| s.to_string()).collect()
     }
