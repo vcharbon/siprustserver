@@ -60,11 +60,17 @@ const carriesSdp = (body: Flow.Step["msg"]["body"]): boolean => {
 }
 
 /** Every step's role, and every `expect` step's placement, of one pivot. */
-export const readSteps = (pivot: PivotView): StepReading => {
-  const steps = (pivot.flow ?? []).flatMap(Flow.flowNodeSteps)
-  const roles = legRoles(pivot.calls ?? [])
+export const readSteps = (pivot: PivotView): StepReading =>
+  readStepsOf((pivot.flow ?? []).flatMap(Flow.flowNodeSteps), pivot.calls ?? [])
+
+/**
+ * {@link readSteps} of a pivot's message steps, in document order, already in
+ * hand (`DocumentFacts.StepFacts.steps`), and its calls.
+ */
+export const readStepsOf = (steps: ReadonlyArray<Flow.Step>, calls: CallsView): StepReading => {
+  const roles = legRoles(calls)
   const callerOf = new Map<string, string>()
-  for (const call of pivot.calls ?? []) for (const a of call.attempts) callerOf.set(a.leg, call.caller_leg)
+  for (const call of calls) for (const a of call.attempts) callerOf.set(a.leg, call.caller_leg)
   const placements = place(steps.map(observationOf), (leg) => callerOf.get(leg))
   const placed = new Map<string, Placed>()
   const stepRoles = new Map<string, LegRole>()

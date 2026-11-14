@@ -2,8 +2,11 @@
  * A pivot's steps read as a captured call is read: each leg's role off the
  * document's calls, and each `expect` step's situation and pair.
  */
+import type { Flow } from "@sip/contracts"
 import { describe, expect, it } from "vitest"
-import { type PivotView, readSteps } from "../src/pivot-reading.js"
+import * as DocumentFacts from "../src/document-facts.js"
+import type { CallsView } from "../src/leg-role.js"
+import { type PivotView, readSteps, readStepsOf } from "../src/pivot-reading.js"
 
 const step = (id: string, leg: string, op: "send" | "expect", msg: Record<string, unknown>, inDialog = false) => ({
   id,
@@ -63,6 +66,14 @@ describe("pivot steps", () => {
     const { placed } = readSteps(twoCalls)
     expect(placed.get("s3")).toEqual({ situation: "INV", pair: 0 })
     expect(placed.get("s4")).toEqual({ situation: "INV", pair: 1 })
+  })
+
+  it("reads the steps of the document's own reading as it reads the pivot", () => {
+    const view = pivot as { readonly flow: ReadonlyArray<Flow.Step>; readonly calls: CallsView }
+    const steps = DocumentFacts.ofSteps(view.flow).steps
+
+    expect(steps).toBe(view.flow)
+    expect(readStepsOf(steps, view.calls)).toEqual(readSteps(pivot))
   })
 
   it("places expect steps only, and reads an unflagged PRACK as an early-dialog request", () => {

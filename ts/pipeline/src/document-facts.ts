@@ -120,6 +120,8 @@ export type Stated = Pick<Pivot.PivotV3, "flow" | "calls">
  * its `calls` block: the reading a case's flow has as soon as it is assembled.
  */
 export interface StepFacts {
+  /** The message steps read, in document order: an entry's `index` is its step's place here. */
+  readonly steps: ReadonlyArray<Flow.Step>
   /** Every message step, in document order. */
   readonly entries: ReadonlyArray<StepEntry>
   readonly legs: ReadonlyMap<string, DocumentLeg>
@@ -264,7 +266,7 @@ export const ofSteps = (steps: ReadonlyArray<Flow.Step>): StepFacts => {
   const acked = new Set(
     [...transactions.discharges.values()].flatMap((d) => (transactions.landings.get(d.final.id) === d.transaction ? [d.final.id] : []))
   )
-  const facts: StepFacts = { entries, legs, entryOf: (id) => byId.get(id), acked: (id) => acked.has(id) }
+  const facts: StepFacts = { steps, entries, legs, entryOf: (id) => byId.get(id), acked: (id) => acked.has(id) }
   stepLists.set(steps, facts)
   return facts
 }
