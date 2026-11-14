@@ -453,6 +453,36 @@ describe("whether the system releases a leg on its own, as a document states it"
   })
 
   /**
+   * The system answers the caller at once and the caller's CANCEL crosses that
+   * 200: it cancels nothing (RFC 3261 §9.1) and the caller stays. The system
+   * dials a callee at 5 s; the caller hangs up at 8 s, and the system CANCELs
+   * the callee it rings.
+   */
+  const crossedByCaller = (): Cut => {
+    const s = scenario()
+    const caller = callerLeg(s)
+      .invite({ at: 0, by: "party", body: SDP })
+      .response(100, { at: 2 })
+      .response(200, { at: 100, body: SDP, to: "INVITE" })
+      .cancel({ at: 102, by: "party" })
+      .response(200, { at: 104, to: "CANCEL" })
+      .ack({ at: 110, by: "party" })
+    const dialled = dialledLeg(s).invite({ at: 5_000, by: "system", body: SDP }).response(180, { at: 5_030 })
+    caller.bye({ at: 8_000, by: "party" }).response(200, { at: 8_005 })
+    dialled.cancel({ at: 8_010, by: "system" }).response(200, { at: 8_015 }).response(487, { at: 8_020, to: "INVITE" }).ack({ at: 8_025, by: "system" })
+    return { s, caller, dialled: [dialled] }
+  }
+
+  it("is the caller's BYE relayed where the caller's CANCEL crossed its 200 and the caller stayed", () => {
+    const cut = crossedByCaller()
+    const { facts } = assembled(cut)
+    const caller = documentLegOf(facts, cut.caller)
+
+    expect(CallFacts.valueOf(facts.calls[0]!.gaveUp)).toEqual({ by: "BYE", entry: caller.byes[0] })
+    expect(releasesOf(cut)).toEqual([{ kind: "relayed", by: "CANCEL", cause: "caller-gave-up", because: "BYE", status: undefined }])
+  })
+
+  /**
    * A caller that left before the system dialled a leg did not drive that
    * leg's CANCEL: the system dialled it knowing the caller was gone, so
    * cancelling it is its own decision. The skew allows a relay stamped early,

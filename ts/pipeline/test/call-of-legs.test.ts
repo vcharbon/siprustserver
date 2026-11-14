@@ -68,6 +68,21 @@ describe("the caller", () => {
     expect(CallFacts.valueOf(call.gaveUp)).toMatchObject({ by: "CANCEL", entry: { at_us: 4_000_000, bySystem: false } })
   })
 
+  it("stayed where its CANCEL came after the system's 200, which it cancels nothing of (RFC 3261 §9.1)", () => {
+    const s = scenario()
+    const a = caller(s)
+      .response(200, { at: 100, to: "INVITE" })
+      .cancel({ at: 102, by: "party" })
+      .response(200, { at: 104, to: "CANCEL" })
+      .ack({ at: 110, by: "party" })
+      .bye({ at: 8_000, by: "party" })
+      .response(200, { at: 8_005 })
+    const { call } = callOf(s, a)
+
+    expect(CallFacts.valueOf(call.gaveUp)).toMatchObject({ by: "BYE", entry: { at_us: 8_000_000, bySystem: false } })
+    expect(call.giveUps.map((g) => g.by)).toEqual(["BYE"])
+  })
+
   it("gave up at its BYE, also where the system's own BYE crossed it", () => {
     const s = scenario()
     const a = caller(s)
@@ -246,6 +261,30 @@ describe("the system released a dialled leg on its own", () => {
       cause: "caller-gave-up",
       because: { at_us: 79_990_000 }
     })
+  })
+
+  /**
+   * The caller's CANCEL crossed the system's 200 (RFC 3261 §9.1), so the caller
+   * ACKs the 200 and stays; it hangs up by a BYE at 8 s, and the system cancels
+   * the attempt it dialled at 5 s.
+   */
+  it("but relayed the caller's later BYE where its CANCEL, older than the attempt, crossed the system's 200", () => {
+    const s = scenario()
+    const a = caller(s)
+      .cancel({ at: 90, by: "party" })
+      .response(200, { at: 95, to: "INVITE" })
+      .response(200, { at: 97, to: "CANCEL" })
+      .ack({ at: 110, by: "party" })
+      .bye({ at: 8_000, by: "party" })
+      .response(200, { at: 8_005 })
+    const b = cancelled(attempt(s, 5_000), 8_010)
+    const { call } = callOf(s, a, b)
+
+    expect(call.giveUps.map((g) => [g.by, g.entry.at_us])).toEqual([
+      ["CANCEL", 90_000],
+      ["BYE", 8_000_000]
+    ])
+    expect(releaseOf(s, a, b)).toMatchObject({ kind: "relayed", cause: "caller-gave-up", because: { at_us: 8_000_000 } })
   })
 
   it("where the caller's give-up is older than the attempt's INVITE by more than the skew", () => {
