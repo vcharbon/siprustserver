@@ -17,7 +17,7 @@
 //! exemptions are the message's protocol counters, which are framing, not
 //! identity: the CSeq value (`keep`) — the digit run that is the sequence
 //! number written before its method (`CSeq: 41001 INVITE`, `RAck: 1 41001
-//! INVITE`) — and every counter named by its field ([`fields`]: a port, a
+//! INVITE`) — and every counter named by its field (`fields`: a port, a
 //! length, a timer, the media lines of a description, an SDP `o=`
 //! sess-version whatever key it spells, so the version keeps its +1 step,
 //! RFC 3264 §8, and a sess-id but where a phone-width key spells it: that is
@@ -188,7 +188,7 @@ impl DigitSubs {
 
     /// Rewrite every key occurrence in `input` to its fake, except inside a
     /// protocol counter: the CSeq value `keep` = `(seq, method)` states, a
-    /// counter by its field ([`fields::is_counter`]: a port, a length, an SDP
+    /// counter by its field (`fields::is_counter`: a port, a length, an SDP
     /// media line, an `o=` session number …). Each digit run is judged once:
     /// the verdict holds for every match starting before the run's end, since
     /// a key never spans a non-digit.

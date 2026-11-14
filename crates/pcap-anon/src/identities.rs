@@ -45,14 +45,14 @@ pub struct Harvested {
     /// from the escaped `?User-to-User=` header of any harvested URI.
     pub uuis: Vec<Uui>,
     /// Every digit run no harvest above reads as a number and no protocol
-    /// counter ([`digits`]): the number pass maps them too.
+    /// counter (`digits`): the number pass maps them too.
     pub digit_runs: Vec<String>,
     /// Number-bearing user-parts as written with visual separators
     /// (`+28-61-21-21-21`, RFC 3966 §5.1.1) or escapes (`%2B%328…`, RFC
     /// 3261 §19.1.2); `numbers` holds them plain.
     pub separated: Vec<String>,
     /// The names outside the numbers: every sip/sips URI host, and what
-    /// [`names::harvest`] reads.
+    /// `names::harvest` reads.
     pub names: names::Names,
 }
 
@@ -320,14 +320,14 @@ pub fn parses(raw: &[u8], reading: &Reading) -> bool {
 }
 
 /// Every body part of a datagram with its media type and byte span
-/// ([`bodies::parts_of`]), read leniently as [`harvest`] reads it; nothing for
+/// (`bodies::parts_of`), read leniently as [`harvest`] reads it; nothing for
 /// a datagram that does not read.
 pub fn body_parts(raw: &[u8]) -> Vec<bodies::BodyPart> {
     sip_message::read_stored(raw).map_or_else(|_| Vec::new(), |msg| bodies::parts_of(&msg, raw))
 }
 
 /// The byte ranges of a datagram's multipart body outside every part and
-/// every delimiter line ([`bodies::outside_parts_of`]), read as
+/// every delimiter line (`bodies::outside_parts_of`), read as
 /// [`body_parts`] reads; nothing for a datagram that does not read.
 pub fn outside_parts(raw: &[u8]) -> Vec<std::ops::Range<usize>> {
     sip_message::read_stored(raw)

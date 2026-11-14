@@ -65,7 +65,7 @@ pub fn is_control(media_type: &str, types: &BodyTypes) -> bool {
     reading(media_type, types) == Some(BodyReading::Control)
 }
 
-/// Whether the anonymiser understands a body part: a type of [`BUILT_IN`], a
+/// Whether the anonymiser understands a body part: a type of `BUILT_IN`, a
 /// control document that reads as an XML document
 /// ([`crate::xml::is_document`]), and a digit-run body written as text — a
 /// binary one is encoded data it does not read.

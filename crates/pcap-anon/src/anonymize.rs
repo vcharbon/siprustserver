@@ -55,7 +55,7 @@
 //! numbers elsewhere map, and the whole compact form is redacted by the
 //! [`names`] pass — a kept signature would confirm a guessed number. A body
 //! part of a media type the anonymiser does not understand is redacted
-//! whole ([`bodies`]). A hex User-to-User payload
+//! whole (`bodies`). A hex User-to-User payload
 //! ([`crate::uui`]) is handled the same way — its decoded digit runs are dial
 //! forms — an `ascii`/`text` one is its own bytes, whose runs are keys the
 //! pass rewrites in place, and a payload in any other encoding is counted

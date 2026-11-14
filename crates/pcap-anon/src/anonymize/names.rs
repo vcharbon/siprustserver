@@ -6,7 +6,7 @@
 //! identifier's host), and replaced by a same-length fake ([`crate::fake::names`],
 //! [`crate::fake::address`]), so a body keeps its Content-Length. A value
 //! redacted whole (a PASSporT) is replaced by its same-length redaction. The
-//! fakes the pass writes are reported ([`NamePass::fakes`]) for the leak
+//! fakes the pass writes are reported (`NamePass::fakes`) for the leak
 //! check to judge the output by.
 
 use std::cell::RefCell;

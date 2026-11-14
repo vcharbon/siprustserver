@@ -1,7 +1,7 @@
 //! The reserved fake digit space: a capture's [`Seed`] and the keyed fake
 //! of one number key. A fake is `fake_prefix` + the `9` marker +
 //! `decimal(HMAC-SHA256(seed, key)) mod 10^pad`, zero-padded so the fake has
-//! the KEY's width (past 36 digits the hash repeats in blocks, [`hash_digits`]) (`pad` = key width − prefix − marker); at a width too
+//! the KEY's width (past 36 digits the hash repeats in blocks, `hash_digits`) (`pad` = key width − prefix − marker); at a width too
 //! narrow for that it is the short form `0` + `9` + hash digits, and an
 //! unrecognised key keeps its leading digits in front of the reserved part
 //! ([`fake_keeping`]; the forms are the plan's, `plan.rs` module doc), and

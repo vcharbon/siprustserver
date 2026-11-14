@@ -74,7 +74,7 @@ impl Derivations {
         self.bases_of.get(derived).map_or(&[], Vec::as_slice)
     }
 
-    /// The legs an application server minted from `base` ([`loopback::derives`]).
+    /// The legs an application server minted from `base` (`loopback::derives`).
     pub fn derived_of<'a>(
         &'a self,
         flows: &'a Flows,
@@ -87,7 +87,7 @@ impl Derivations {
             .filter(move |&d| loopback::derives(base_cid, &flows.legs[d].call_id))
     }
 
-    /// The legs `derived` was minted from ([`loopback::derives`]).
+    /// The legs `derived` was minted from (`loopback::derives`).
     pub fn bases_of<'a>(
         &'a self,
         flows: &'a Flows,

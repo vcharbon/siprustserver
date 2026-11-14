@@ -1,8 +1,8 @@
 //! The leak check that does not trust the harvest: it reads the anonymised
 //! document alone and judges it by the fakes the run wrote
 //! ([`crate::anonymize::Fakes`]). Every domain-shaped token, every address
-//! the scope maps, every word of free text ([`words`]), every digit run that
-//! is no protocol counter ([`digits`]) and every non-ASCII run, head and body
+//! the scope maps, every word of free text (`words`), every digit run that
+//! is no protocol counter (`digits`) and every non-ASCII run, head and body
 //! alike, is identity-shaped; one that is neither a fake of the run, nor
 //! protocol vocabulary, nor a special-use name, nor an address the scope
 //! keeps names what the raw document named, and the distinct ones are counted

@@ -56,7 +56,7 @@ impl Datum {
     }
 
     /// Whether the datum is protocol text: the value of a control-protocol
-    /// attribute ([`PROTOCOL_ATTRIBUTES`]), in which only the hosts and
+    /// attribute (`PROTOCOL_ATTRIBUTES`), in which only the hosts and
     /// numbers are identities.
     pub fn is_protocol(&self) -> bool {
         self.attribute.as_deref().is_some_and(|a| PROTOCOL_ATTRIBUTES.contains(&a))

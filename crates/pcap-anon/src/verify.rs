@@ -39,7 +39,7 @@
 //! No check reads protocol text (a reason phrase, a Reason's or a Warning's
 //! text, a control-protocol attribute value): the rewrite never anonymises
 //! it, so every check blanks it by position first
-//! ([`without_protocol_text`]).
+//! (`without_protocol_text`).
 
 use std::collections::{HashMap, HashSet};
 
