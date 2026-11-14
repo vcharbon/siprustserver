@@ -24,7 +24,10 @@ export const SYSTEM_IP = "192.0.2.10"
 /** Who sends a message: the leg's party, or the system. */
 export type Side = "party" | "system"
 
-/** One hop of a leg: the party's socket and the system's. */
+/**
+ * One hop of a leg: the party's socket and the system's. On a hop between two
+ * parties, `system` names the end nearer the system.
+ */
 export interface HopSpec {
   readonly party: string
   readonly system: string

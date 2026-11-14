@@ -38,8 +38,10 @@
  * a per-call export is the call's own last message: a complete termination is
  * never charged for the file ending on it.
  */
-import { Flows } from "@sip/contracts"
+import type { Flows } from "@sip/contracts"
 import { closingBye } from "./call-completeness.js"
+import * as CallFacts from "./call-facts.js"
+import { captureEndUs, GIVE_UP_SILENCE_US } from "./call-facts.js"
 import { inversionsOf } from "./capture-order.js"
 import type { CaseRule, RefusalInput } from "./case-rules.js"
 import { type CutVantage, vantageIsInbound, vantageIsOutbound } from "./cut.js"
@@ -57,40 +59,9 @@ export const TRUNCATED_AT_EDGE = "source-truncated-at-edge"
  */
 export const RETRANSMISSION_TAIL_US = 4_000_000
 
-/**
- * 64·T1 (RFC 3261 §17.1.1.2 Timer B, §17.1.2.2 Timer F, §17.2.1 Timer H): the
- * longest any transaction waits for an answer before its own stack gives up. A
- * leg silent this long before the end of the capture is one the source gave up
- * on; one silent less than this may only be one the file cut short.
- */
-export const GIVE_UP_SILENCE_US = 32_000_000
+export { captureEndUs, GIVE_UP_SILENCE_US }
 
 const lastDatagramOf = (leg: Flows.Leg): Flows.Msg | undefined => leg.msgs[leg.msgs.length - 1]
-
-/**
- * The last SIP datagram of the whole capture, computed once per document: a
- * rule asked once per family that re-walked every leg each time would make the
- * cut quadratic in the number of calls.
- */
-const captureEnds = new WeakMap<Flows.FlowsDoc, number>()
-
-export const captureEndUs = (flows: Flows.FlowsDoc): number => {
-  const known = captureEnds.get(flows)
-  if (known !== undefined) return known
-  let end = 0
-  for (const leg of flows.legs) {
-    const last = lastDatagramOf(leg)
-    if (last !== undefined && last.ts_us > end) end = last.ts_us
-  }
-  captureEnds.set(flows, end)
-  return end
-}
-
-const isRequest = (m: Flows.Msg): boolean => m.summary.kind === "request"
-
-/** A final response to the transaction `method`, whatever the CSeq number. */
-const isFinalTo = (m: Flows.Msg, method: string): boolean =>
-  Flows.isResponseTo(m, method) && (Flows.statusOf(m) ?? 0) >= 200
 
 const secondsBeforeEnd = (m: Flows.Msg, endUs: number): string =>
   `${((endUs - m.ts_us) / 1_000_000).toFixed(3)} s before the capture ends`
@@ -127,16 +98,39 @@ const headTruncation = (leg: Flows.Leg, index: number): RefusalEvidence | undefi
   return undefined
 }
 
+/**
+ * The transaction a leg's termination is judged on: its outcome, or, on a leg
+ * that opens mid-dialog, the INVITE transaction its first answer names, with
+ * the index its reading starts at.
+ */
+const attemptOf = (
+  facts: CallFacts.LegFacts
+): { readonly transaction: CallFacts.Transaction; readonly from: number; readonly what: string } | undefined => {
+  const outcome = facts.outcome
+  if (outcome?.request !== undefined) {
+    return { transaction: outcome, from: outcome.request.msg + 1, what: `its INVITE (msg ${outcome.request.msg})` }
+  }
+  const answer = facts.timeline.entries.find((e) => e.method === "INVITE" && e.status !== undefined)
+  if (answer === undefined) return undefined
+  return {
+    transaction: facts.timeline.transactions[answer.transaction]!,
+    from: answer.msg,
+    what: "the INVITE before the capture"
+  }
+}
+
 /** What one leg needed and the capture did not hold; `undefined` where it is terminated. */
 const missingTermination = (
-  leg: Flows.Leg,
-  index: number,
-  endUs: number
+  flows: Flows.FlowsDoc,
+  sut: SutSet,
+  index: number
 ): RefusalEvidence | undefined => {
-  const msgs = leg.msgs
+  const facts = CallFacts.atLeg(flows, sut, index)
+  const { leg, entries, transactions } = facts.timeline
   const last = lastDatagramOf(leg)
   if (last === undefined) return undefined
-  const lastIdx = msgs.length - 1
+  const lastIdx = leg.msgs.length - 1
+  const endUs = captureEndUs(flows)
   const gaveUp = (what: string): RefusalEvidence | undefined =>
     endUs - last.ts_us >= GIVE_UP_SILENCE_US
       ? undefined
@@ -149,82 +143,53 @@ const missingTermination = (
           `${GIVE_UP_SILENCE_US / 1_000_000} s give-up silence`
       }
 
-  // The establishing attempt: the last fresh INVITE opening a dialog, or, on a
-  // leg that opens mid-dialog, the INVITE transaction its first answer names.
-  // What the attempt drew decides the leg; one retried after a failure is
-  // judged on the retry, and a dialog closed then re-opened on the one left
-  // standing. A re-INVITE's answer, on the same dialog, decides nothing.
-  let open = -1
-  msgs.forEach((m, i) => {
-    if (!m.retx && Flows.opensDialog(m)) open = i
-  })
-  const answer = open >= 0 ? -1 : msgs.findIndex((m) => Flows.isResponseTo(m, "INVITE"))
-  if (open < 0 && answer < 0) {
-    // No INVITE transaction here at all: the last fresh request is the
-    // transaction the leg ends on.
-    let req = -1
-    msgs.forEach((m, i) => {
-      if (!m.retx && isRequest(m) && !Flows.isMethod(m, "ACK")) req = i
-    })
-    if (req < 0) return undefined
-    const request = msgs[req]!
-    const method = request.summary.kind === "request" ? request.summary.method : ""
-    if (msgs.some((m, i) => i > req && isFinalTo(m, method))) return undefined
-    return gaveUp(`its ${method} (msg ${req}) drew no final`)
+  const attempt = attemptOf(facts)
+  if (attempt === undefined) {
+    const request = entries.findLast((e) => e.status === undefined && e.method !== "ACK")
+    if (request === undefined) return undefined
+    if (transactions[request.transaction]!.final !== undefined) return undefined
+    return gaveUp(`its ${methodOf(leg, request)} (msg ${request.msg}) drew no final`)
   }
-  const from = open >= 0 ? open + 1 : answer
-  const attempt = open >= 0 ? `its INVITE (msg ${open})` : "the INVITE before the capture"
-  const seq = msgs[open >= 0 ? open : answer]!.summary.cseq.seq
+  const { transaction, from, what } = attempt
 
-  const after = (test: (m: Flows.Msg) => boolean): number => {
-    for (let i = from; i < msgs.length; i++) if (test(msgs[i]!)) return i
-    return -1
-  }
-  // The BYE transaction the leg ends on: the last fresh BYE, so one retried
-  // after a challenge is judged on the retry and never on the challenge.
-  let bye = -1
-  for (let i = from; i < msgs.length; i++) {
-    if (!msgs[i]!.retx && Flows.isMethod(msgs[i]!, "BYE")) bye = i
-  }
-  if (bye >= 0) {
-    const byeSeq = msgs[bye]!.summary.cseq.seq
-    const ofBye = (m: Flows.Msg): boolean => m.summary.cseq.seq === byeSeq
-    if (msgs.some((m, i) => i > bye && ofBye(m) && isFinalTo(m, "BYE"))) return undefined
-    if (!msgs.some((m, i) => i > bye && ofBye(m) && m.retx && Flows.isMethod(m, "BYE"))) return undefined
+  const bye = transactions.findLast((t) => t.method === "BYE" && t.request !== undefined && t.request.msg >= from)
+  if (bye?.request !== undefined) {
+    if (bye.final !== undefined || bye.request.retransmissions === 0) return undefined
     if (endUs - last.ts_us >= RETRANSMISSION_TAIL_US) return undefined
     return {
       leg: index,
       callId: leg.call_id,
-      msg: bye,
-      detail: `its BYE (msg ${bye}) drew no final and was retransmitted, and the leg's last message ` +
+      msg: bye.request.msg,
+      detail: `its BYE (msg ${bye.request.msg}) drew no final and was retransmitted, and the leg's last message ` +
         `(msg ${lastIdx}) is ${secondsBeforeEnd(last, endUs)}: bye-unanswered-at-edge, inside the ` +
         `${RETRANSMISSION_TAIL_US / 1_000_000} s retransmission tail`
     }
   }
 
-  // A fresh 2xx to the attempt establishes the dialog whatever non-2xx another
-  // branch drew (RFC 3261 §16.7), so it wins over a later final.
-  const finals = msgs.flatMap((m, i) =>
-    i >= from && !m.retx && Flows.isFinalToInvite(m) && m.summary.cseq.seq === seq ? [i] : []
-  )
-  const final = finals.find((i) => (Flows.statusOf(msgs[i]!) ?? 0) < 300) ?? finals[finals.length - 1] ?? -1
-  if (final < 0) {
-    const cancel = after((m) => Flows.isMethod(m, "CANCEL"))
+  const final = transaction.final
+  if (final === undefined) {
+    const cancel = transaction.cancel ?? entries.find((e) => e.method === "CANCEL" && e.status === undefined && e.msg >= from)
     return gaveUp(
-      cancel >= 0
-        ? `${attempt} was cancelled (msg ${cancel}) and drew no final`
-        : `${attempt} drew no final`
+      cancel !== undefined
+        ? `${what} was cancelled (msg ${cancel.msg}) and drew no final`
+        : `${what} drew no final`
     )
   }
-  const status = Flows.statusOf(msgs[final]!) ?? 0
+  const status = final.status ?? 0
   if (status >= 300) return undefined
   return {
     leg: index,
     callId: leg.call_id,
-    msg: final,
-    detail: `took the ${status} (msg ${final}) answering ${attempt} and no BYE closed the ` +
+    msg: final.msg,
+    detail: `took the ${status} (msg ${final.msg}) answering ${what} and no BYE closed the ` +
       `dialog: dialog-left-open`
   }
+}
+
+/** The method of a request entry as the wire spells it. */
+const methodOf = (leg: Flows.Leg, entry: CallFacts.Entry): string => {
+  const summary = leg.msgs[entry.msg]!.summary
+  return summary.kind === "request" ? summary.method : entry.method
 }
 
 /**
@@ -262,12 +227,11 @@ export const edgeEvidence = (
   sut: SutSet,
   vantages: ReadonlyArray<CutVantage>
 ): ReadonlyArray<RefusalEvidence> => {
-  const endUs = captureEndUs(flows)
   const exempt = exemptTails(flows, sut, vantages)
   const legs = [...new Set(vantages.map((v) => v.leg))].sort((a, b) => a - b)
   return legs.flatMap((index) => {
     const leg = flows.legs[index]!
-    const tail = exempt.has(index) ? undefined : missingTermination(leg, index, endUs)
+    const tail = exempt.has(index) ? undefined : missingTermination(flows, sut, index)
     return [headTruncation(leg, index), tail].flatMap((e) => (e === undefined ? [] : [e]))
   })
 }

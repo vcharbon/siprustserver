@@ -130,6 +130,11 @@ export interface Entry {
  * two directions of a dialog number their CSeqs independently, §12.2.1.1). An
  * ACK belongs to the INVITE it acknowledges; a CANCEL is its own transaction
  * and the INVITE it cancels points at it.
+ *
+ * The direction is the requester's side, system or party, at every boundary
+ * hop together: a party that speaks from a second address stays one party. At
+ * a hop between two parties, which only a whole-leg position reads, it is the
+ * requester's end of that hop.
  */
 export interface Transaction {
   readonly index: number
@@ -315,8 +320,14 @@ const timelineOf = (file: FileFacts, p: Position): Timeline => {
   let confirmed = false
   let lastAt: number | undefined
 
-  const transactionOf = (method: string, seq: number, bySystem: boolean): BuildingTransaction => {
-    const key = `${bySystem ? "s" : "p"}${method} ${seq}`
+  const boundary = leg.hops.map((hop) => isSystem(hop.a) !== isSystem(hop.b))
+  const requesterOf = (m: Flows.Msg, bySystem: boolean): string => {
+    if (boundary[m.hop] === true) return bySystem ? "s" : "p"
+    const requester = m.summary.kind === "request" ? m.src : m.dst
+    return `${m.hop}${requester === leg.hops[m.hop]?.a ? "a" : "b"}`
+  }
+  const transactionOf = (requester: string, method: string, seq: number, bySystem: boolean): BuildingTransaction => {
+    const key = `${requester} ${method} ${seq}`
     let transaction = byKey.get(key)
     if (transaction === undefined) {
       transaction = {
@@ -346,11 +357,9 @@ const timelineOf = (file: FileFacts, p: Position): Timeline => {
     const request = summary.kind === "request"
     const method = (request ? summary.method : summary.cseq.method).toUpperCase()
     const bySystem = isSystem(m.src)
-    const transaction = transactionOf(
-      method === "ACK" ? "INVITE" : method,
-      summary.cseq.seq,
-      request ? bySystem : !bySystem
-    )
+    const requestBySystem = request ? bySystem : isSystem(m.dst)
+    const requester = requesterOf(m, requestBySystem)
+    const transaction = transactionOf(requester, method === "ACK" ? "INVITE" : method, summary.cseq.seq, requestBySystem)
     if (m.retx) {
       const repeated = repeatedBy(file, m, method, transaction, byMsg)
       if (repeated !== undefined) repeated.retransmissions += 1
@@ -367,7 +376,7 @@ const timelineOf = (file: FileFacts, p: Position): Timeline => {
     } else if (method === "ACK") {
       dialog = transaction.request?.dialog ?? inDialog
     } else if (method === "CANCEL") {
-      dialog = byKey.get(`${bySystem ? "s" : "p"}INVITE ${summary.cseq.seq}`)?.request?.dialog ?? inDialog
+      dialog = byKey.get(`${requester} INVITE ${summary.cseq.seq}`)?.request?.dialog ?? inDialog
     } else {
       dialog = inDialog
     }
@@ -397,7 +406,7 @@ const timelineOf = (file: FileFacts, p: Position): Timeline => {
     } else {
       transaction.request ??= entry
       if (method === "CANCEL") {
-        const cancelled = byKey.get(`${bySystem ? "s" : "p"}INVITE ${summary.cseq.seq}`)
+        const cancelled = byKey.get(`${requester} INVITE ${summary.cseq.seq}`)
         if (cancelled !== undefined) cancelled.cancel ??= entry
       }
     }

@@ -9,6 +9,7 @@
  * peer address that speaks on the same dialog.
  */
 import { Flows, type Call, type Case, type Placement, type Tokens } from "@sip/contracts"
+import * as CallFacts from "./call-facts.js"
 import { captureIndex, type CaptureIndex } from "./capture-index.js"
 import type { CallIdDerivation } from "./derivation.js"
 import { vantageMsgIdxs, type Correlation, type LegJoin } from "./cut.js"
@@ -370,11 +371,9 @@ const firstTs = (flows: Flows.FlowsDoc, a: ActorObs): number => {
   return i === undefined ? 0 : flows.legs[a.origLeg]!.msgs[i]!.ts_us
 }
 
-const firstInviteTs = (flows: Flows.FlowsDoc, a: ActorObs): number => {
-  const leg = flows.legs[a.origLeg]!
-  for (const i of a.msgIdxs) if (Flows.isInvite(leg.msgs[i]!)) return leg.msgs[i]!.ts_us
-  return Number.MAX_SAFE_INTEGER
-}
+/** When the leg was dialled: its first dialog-opening INVITE. A leg showing none sorts last. */
+const firstInviteTs = (flows: Flows.FlowsDoc, a: ActorObs): number =>
+  CallFacts.valueOf(CallFacts.atActor(flows, a).invite)?.at_us ?? Number.MAX_SAFE_INTEGER
 
 const legHasBody = (flows: Flows.FlowsDoc, a: ActorObs): boolean =>
   a.msgIdxs.some((i) => {
@@ -392,41 +391,13 @@ const callerAnsweredTs = (
   raw: ReadonlyArray<ActorObs>
 ): number | undefined => {
   const uac = raw.find((a) => a.kind === "uac")
-  if (!uac) return undefined
-  const leg = flows.legs[uac.origLeg]!
-  const answers = uac.msgIdxs
-    .map((i) => leg.msgs[i]!)
-    .filter(
-      (m) =>
-        m.summary.kind === "response" &&
-        m.summary.status >= 200 &&
-        m.summary.status < 300 &&
-        m.summary.cseq.method.toUpperCase() === "INVITE"
-    )
-    .map((m) => m.ts_us)
-  return answers.length > 0 ? Math.min(...answers) : undefined
+  return uac === undefined ? undefined : CallFacts.valueOf(CallFacts.atActor(flows, uac).answer)?.at_us
 }
 
 /** The attempt's terminal FAILURE final at its vantage, if it reached one. */
-export const failureFinalTs = (flows: Flows.FlowsDoc, a: ActorObs): number | undefined => {
-  const leg = flows.legs[a.origLeg]!
-  let answered: number | undefined
-  let failed: number | undefined
-  for (const i of a.msgIdxs) {
-    const m = leg.msgs[i]!
-    if (m.summary.kind !== "response") continue
-    const st = m.summary.status
-    if (st < 200 || m.summary.cseq.method.toUpperCase() !== "INVITE") continue
-    if (st < 300) {
-      answered = answered ?? m.ts_us
-    } else if (failed === undefined) {
-      failed = m.ts_us
-    }
-  }
-  // An attempt the callee ANSWERED is over; a later non-2xx describes the
-  // established dialog, not a target the platform hunted past.
-  if (answered !== undefined) return undefined
-  return failed
+const failureFinal = (flows: Flows.FlowsDoc, a: ActorObs): CallFacts.Entry | undefined => {
+  const final = CallFacts.valueOf(CallFacts.atActor(flows, a).final)
+  return final !== undefined && (final.status ?? 0) >= 300 ? final : undefined
 }
 
 /**
@@ -436,11 +407,10 @@ export const failureFinalTs = (flows: Flows.FlowsDoc, a: ActorObs): number | und
  * INVITE on the wire. Undefined where the attempt did not fail.
  */
 const gaveUpTs = (flows: Flows.FlowsDoc, a: ActorObs): number | undefined => {
-  const failed = failureFinalTs(flows, a)
+  const failed = failureFinal(flows, a)
   if (failed === undefined) return undefined
-  const leg = flows.legs[a.origLeg]!
-  const cancel = a.msgIdxs.map((i) => leg.msgs[i]!).find((m) => Flows.isMethod(m, "CANCEL"))
-  return cancel === undefined ? failed : Math.min(failed, cancel.ts_us)
+  const cancel = CallFacts.atActor(flows, a).outcome?.cancel
+  return cancel === undefined ? failed.at_us : Math.min(failed.at_us, cancel.at_us)
 }
 
 interface Branches {

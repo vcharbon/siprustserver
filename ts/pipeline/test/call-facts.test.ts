@@ -478,4 +478,29 @@ describe("a position", () => {
     expect(whole.openings.map((t) => t.bySystem)).toEqual([false, true])
     expect(CallFacts.atVantage(flows, s.sut, leg.vantage(0)).timeline.entries.length).toBeLessThan(4)
   })
+
+  it("of a whole leg matches a transaction at a hop between two parties by that hop's ends", () => {
+    const s = scenario()
+    const next = "203.0.113.20:5060"
+    const leg = s
+      .leg({ callId: "forwarded@example.com", party: next, hops: [{ party: "203.0.113.30:5060", system: "203.0.113.20:5062" }] })
+      .invite({ at: 0, by: "system" })
+      .invite({ at: 2, by: "system", hop: 1, seq: 1, fresh: true })
+      .response(180, { at: 30, hop: 1 })
+      .response(180, { at: 32 })
+      .cancel({ at: 4000, by: "system" })
+      .response(200, { at: 4001 })
+      .cancel({ at: 4002, by: "system", hop: 1 })
+      .response(487, { at: 4040, hop: 1, to: "INVITE" })
+      .ack({ at: 4041, by: "system", hop: 1 })
+      .response(487, { at: 4042, to: "INVITE" })
+      .ack({ at: 4043, by: "system" })
+    const whole = CallFacts.atLeg(s.flows(), s.sut, leg.index)
+
+    expect(whole.openings.map((t) => [t.request?.hop, t.bySystem, t.final?.status, t.final?.hop, t.cancel?.hop])).toEqual([
+      [0, true, 487, 0, 0],
+      [1, false, 487, 1, 1]
+    ])
+    expect(CallFacts.valueOf(whole.ending)).toMatchObject({ by: "CANCEL", entry: { hop: 1, at_us: 4_002_000 } })
+  })
 })
