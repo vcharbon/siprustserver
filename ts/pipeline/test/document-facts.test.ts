@@ -11,7 +11,7 @@ import * as CallFacts from "../src/call-facts.js"
 import * as DocumentFacts from "../src/document-facts.js"
 import { policyWith } from "../src/policy.js"
 import { scenario, SDP, type Scenario, type ScenarioLeg } from "../src/scenario.js"
-import { watchedDocument } from "./counted-work.js"
+import { watched, watchedDocument } from "./counted-work.js"
 import { derivesOnePrefix, plan } from "./fixtures.js"
 
 const CALLER = "198.51.100.10:5060"
@@ -580,6 +580,24 @@ describe("a document held against its capture", () => {
       disagreements: []
     })
     expect(facts.legs.size).toBe(vantagesOf(cut).length)
+  })
+
+  it("finds each leg's vantage, every vantage's messages read once for all the legs asked", () => {
+    const cut = hunted()
+    const { flows, facts } = assembled(cut)
+    const counted = watched(flows)
+    const legs = [...facts.legs.values()]
+    const vantageOf = DocumentFacts.vantagesOf(counted.flows, cut.s.sut, vantagesOf(cut))
+
+    const first = legs.map(vantageOf)
+    const reads = counted.reads()
+    const again = legs.map(vantageOf)
+
+    expect(first).toEqual(legs.map((leg) => DocumentFacts.vantageOf(flows, cut.s.sut, vantagesOf(cut), leg)))
+    expect(first.every((v) => v !== undefined)).toBe(true)
+    expect(again).toEqual(first)
+    expect(reads).toBeGreaterThan(0)
+    expect(counted.reads()).toBe(reads)
   })
 
   it("compares no leg whose captured message none of the vantages owns", () => {

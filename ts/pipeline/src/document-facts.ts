@@ -422,10 +422,31 @@ export const vantageOf = (
   sut: SutSet,
   vantages: ReadonlyArray<CutVantage>,
   leg: DocumentLeg
-): CutVantage | undefined => {
-  const observed = leg.entries.find((e) => e.step.observed !== undefined)?.step.observed
-  if (observed === undefined) return undefined
-  return vantages.find((v) => v.leg === observed.leg && ofVantage(flows, sut, v).msgIdxs.includes(observed.msg))
+): CutVantage | undefined => vantagesOf(flows, sut, vantages)(leg)
+
+/**
+ * {@link vantageOf} for every leg of one case: each vantage's messages are
+ * read once, on the first leg observed on its capture leg, for all the legs
+ * asked after.
+ */
+export const vantagesOf = (
+  flows: Flows.FlowsDoc,
+  sut: SutSet,
+  vantages: ReadonlyArray<CutVantage>
+): ((leg: DocumentLeg) => CutVantage | undefined) => {
+  const owned = new Map<CutVantage, ReadonlySet<number>>()
+  const ownedBy = (v: CutVantage): ReadonlySet<number> => {
+    const known = owned.get(v)
+    if (known !== undefined) return known
+    const msgs = new Set(ofVantage(flows, sut, v).msgIdxs)
+    owned.set(v, msgs)
+    return msgs
+  }
+  return (leg) => {
+    const observed = leg.entries.find((e) => e.step.observed !== undefined)?.step.observed
+    if (observed === undefined) return undefined
+    return vantages.find((v) => v.leg === observed.leg && ownedBy(v).has(observed.msg))
+  }
 }
 
 /**
@@ -440,8 +461,9 @@ export const parity = (
   pivot: Pivot.PivotV3
 ): Parity => {
   let compared = 0
+  const vantageOfLeg = vantagesOf(flows, sut, vantages)
   const disagreements = [...ofDocument(pivot).legs.values()].flatMap((leg): ReadonlyArray<Disagreement> => {
-    const vantage = vantageOf(flows, sut, vantages, leg)
+    const vantage = vantageOfLeg(leg)
     if (vantage === undefined) return []
     compared += 1
     const document = agreedOfDocument(leg)
