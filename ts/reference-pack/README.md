@@ -22,14 +22,17 @@ the image's `siprig-campaign run`).
 | `restart-worker` | `operations/restart-worker/`, `lanes/reference.toml` (`[operations]`) | an operation needing the `b2bua-runner` and `runner-pid` parts, so a lane naming neither part, or only one, cannot bind it: `inject` stops the runner the `runner-pid` part's file names (the base names there the runner it stands, while it runs) with the `signal` of its `[params]` and awaits its exit, its orchestrator, the base on this lane, standing the next one; it refuses to signal a process unless the runner answering `GET /admin/cordon` at the `b2bua-runner` part's `admin` states its readiness and that pid (a stale pid file may name another process); `heal` ends a stop an interrupted inject left, after the same check, `probe` answers once the stopped runner is gone and, as a case's step, once another runner answers at `admin`. It `stops` the system: its inject names the runner it stopped in `SIPRIG_OUT/stopped`, the one death the base claims as the step's. Named in a run's setup (`siprig-campaign run --setup restart-worker`), it stops a runner an earlier job left on the lane's addresses before the job's first batch stands its own; the lane binds it by name for a case to ask for |
 | `capture` | `collectors/capture/`, `parts/sip-capture.schema.json`, `targets/sip-capture/reference.toml` | a job collector, `on-failure`: `open` starts the job's capture, emptying the file the runner captures to (`B2BUA_CAPTURE`, the lane's `sip-capture` part) before the job's first batch stands it, so the file holds one job's capture at most; a box-wide lock keeps every other job's capture off it; `collect` runs only where a cell failed and attaches to each failed cell its calls' packets as a `file` attachment, a pcapng of its own, and a `table` of them, a row per packet |
 | the reference capture | `capture/forked-reliable.ts`, `capture/forked-reliable.pcapng` | a capture recorded through the upstream B2BUA and replayed: ingested with the identity extraction, cut by the base's case generator and replayed as a case source (see below) |
+| the recorded samples | `capture/answered-call.ts`, `capture/{basic,emergency,reinvite}-call.{ts,pcapng}` | three more captures recorded and replayed the same way: a basic answered call, an emergency call and a call held by a re-INVITE, between parties with display names and numbers (see below) |
+| the vendored captures | `capture/third-party/` | two captures another stack produced, ingested and cut but not replayed: a proxied blind transfer, cut into a case, and a B2BUA's calls the cut cannot join (see below) |
 | `calls-ended` | `collectors/calls-ended/` | a delayed cell collector: `delay_s` after each call it lists the runner's live calls (`GET /admin/calls` at the part's `admin`), while the lane runs its next cells (the lane not held), and answers the cell's `calls-ended` per call (`pass` where none of the cell's Call-IDs is listed, `fail` where one is, whatever the other cells' calls); it attaches what it read as `json` and where it read it as a `link` |
 
 ## Plug-in and attachment kinds
 
 | Kind | Sample |
 |---|---|
-| case source | `cases.ts`, `capture/forked-reliable.ts` (a flow no shape plays), a cut's output directory (`--sources`) |
-| capture ingest (identity extraction), cut (base generator), replay | `capture/forked-reliable.pcapng`, `test/reference-replay.test.ts` |
+| case source | `cases.ts`, `capture/forked-reliable.ts` and `capture/*-call.ts` (flows no shape plays), a cut's output directory (`--sources`) |
+| capture ingest (identity extraction), cut (base generator), replay | `capture/*.pcapng`, `test/reference-replay.test.ts` |
+| capture ingest and cut of another stack's capture, a refusal of the cut | `capture/third-party/*.pcap`, `test/third-party-captures.test.ts` |
 | claim | `cases.ts`, `call-records` |
 | lane file | `lanes/simulated.toml`, `lanes/reference.toml` |
 | part schema and part file | `parts/<kind>.schema.json` and `targets/<kind>/reference.toml` for each of `b2bua-runner`, `runner-log`, `runner-pid`, `sip-capture`, `cdr-file` |
@@ -64,11 +67,47 @@ dialog ends with the INVITE's transaction (RFC 3261 §13.2.2.4).
   the runner's own capture (the `sip-capture` part) is the recording. The parties sit on
   127.0.0.2 and the runner on 127.0.0.1, since no documentation address binds unprivileged and
   the cut tells the system from its parties by address. `just reference-capture` records it
-  again (`test/reference-capture.test.ts` with `REFERENCE_CAPTURE_WRITE=1`); without the variable
-  the same test runs in the checks and asserts the wire.
+  again with the recorded samples below (`test/reference-capture.test.ts` with
+  `REFERENCE_CAPTURE_WRITE=1`); without the variable the same test runs in the checks and asserts
+  the wire.
 - **Replay** (`test/reference-replay.test.ts`, in the checks): the capture is ingested with the
   identity extraction (`@sip/corpus` `ExtractionIdentity`: the kept flows document is the raw
   one, under no seed), cut by the base's case generator (`@sip/corpus` `cut/base-generator.ts`,
   the neutral policy, the runner's legs joined by its `counter-prefix` Call-ID derivation) into
   one case, and replayed by the base's campaign run on the simulated lane as its one cell, which
   passes. The callee is claimed by arrival order, since its R-URI names no number.
+
+## The recorded samples
+
+Three more captures are recorded and replayed as the reference capture is, each by its own case
+source, each written to its own file by the same test. The cases share one call
+(`capture/answered-call.ts`): Alice Example (`+15555550100`) calls Bob Example
+(`+15555550101`), Bob rings and answers, and Alice hangs up. Each party's display name and
+number ride its From, To and Contact on the caller's leg; the system writes the numbers, not the
+display names, on the callee side's From and To.
+
+| Capture | Case | What it shows |
+|---|---|---|
+| `basic-call.pcapng` | `basic-call.ts` | the answered call ended by BYE |
+| `emergency-call.pcapng` | `emergency-call.ts` | the same, its INVITE carrying `Resource-Priority: esnet.0` (RFC 4412), which the system carries to the callee side |
+| `reinvite-call.pcapng` | `reinvite-call.ts` | the same, held by the caller's re-INVITE before the BYE: a sendonly offer answered recvonly (RFC 3264 §8.4), CSeq 2 on both legs |
+
+`test/reference-capture.test.ts` asserts each capture's ladder on both legs, and
+`test/reference-replay.test.ts` cuts each into one case keeping what it shows and replays it.
+
+## The vendored captures
+
+`capture/third-party/` holds two captures copied unchanged from the sipnab repository, taken
+under the MIT License; `capture/third-party/PROVENANCE.md` states their source commit, paths and
+SHA-256, and the licence notice. `test/third-party-captures.test.ts` asserts the hashes, then
+ingests each and cuts it under no Call-ID derivation, as a capture of a stack the base knows
+nothing of is. Neither is replayed.
+
+- `refer-transfer.pcap`: two calls through a record-routing proxy, which keeps the Call-ID
+  across its hop, each with a blind transfer (RFC 3515). The call whose transfer completes is
+  cut into a case keeping the REFER, the 202 and both NOTIFYs; the call the capture leaves open
+  is refused (`source-truncated-at-edge`, `source-call-incomplete`).
+- `asterisk-22-xcid.pcap`: three calls through a B2BUA that gives the callee's leg a Call-ID of
+  its own and names the caller's in an `X-CID` header. The cut joins legs by Call-ID derivation
+  alone and reads no header, so it cuts no call: each callee leg is refused
+  `missing-upstream-leg`, each caller leg `source-dial-not-captured`.

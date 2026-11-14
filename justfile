@@ -240,19 +240,19 @@ hakit-check:
 
 # The reference pack's suite (ts/reference-pack, ADR-0060 item 17): its two
 # cases on its simulated lane and on its reference lane (the B2BUA runner on
-# loopback) through the base's campaign run, and the reference capture
-# ingested, cut and replayed; the plain replay binary, the B2BUA runner,
-# pivot-schema and the extractor sipflow built first, recorded in a scratch
-# database of the postgres STORE_TEST_URL names (`pnpm -r test` runs the same
-# suite with the binaries it finds).
+# loopback) through the base's campaign run, the recorded captures ingested,
+# cut and replayed, and the vendored ones ingested and cut; the plain replay
+# binary, the B2BUA runner, pivot-schema and the extractor sipflow built first,
+# recorded in a scratch database of the postgres STORE_TEST_URL names
+# (`pnpm -r test` runs the same suite with the binaries it finds).
 reference-campaign:
     cargo build -p pivot-replay -p pivot-schema -p b2bua-runner -p sip-pcap
     REPLAY_BIN={{ justfile_directory() }}/target/debug/pivot-replay B2BUA_RUNNER_BIN={{ justfile_directory() }}/target/debug/b2bua-runner PIVOT_SCHEMA_BIN={{ justfile_directory() }}/target/debug/pivot-schema SIPFLOW_BIN={{ justfile_directory() }}/target/debug/sipflow pnpm -C ts/reference-pack exec vitest run
 
-# The reference capture recorded again (ts/reference-pack/README.md, "The
-# reference capture"): the forked call with reliable provisionals played on the
-# reference lane, the B2BUA runner's capture of it replacing
-# ts/reference-pack/capture/forked-reliable.pcapng.
+# The recorded captures recorded again (ts/reference-pack/README.md, "The
+# reference capture" and "The recorded samples"): each recorded case played on
+# the reference lane, the B2BUA runner's capture of it replacing its own file
+# under ts/reference-pack/capture/.
 reference-capture:
     cargo build -p pivot-replay -p pivot-schema -p b2bua-runner
     REFERENCE_CAPTURE_WRITE=1 REPLAY_BIN={{ justfile_directory() }}/target/debug/pivot-replay B2BUA_RUNNER_BIN={{ justfile_directory() }}/target/debug/b2bua-runner PIVOT_SCHEMA_BIN={{ justfile_directory() }}/target/debug/pivot-schema pnpm -C ts/reference-pack exec vitest run reference-capture
