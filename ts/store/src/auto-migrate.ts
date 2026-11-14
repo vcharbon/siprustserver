@@ -5,7 +5,9 @@
  * a migration is pending and the database holds anything, a custom-format
  * `pg_dump` written to `<backups>/<UTC stamp>-before-<last pending>.dump`,
  * then the binding's migration. No migration runs without its backup: a dump
- * that fails stops the step, and only a finished dump carries the name.
+ * that fails stops the step, and only a finished dump carries the name. A
+ * store that skipped a migration (`schema-state.ts`) is refused before
+ * anything is dumped or applied.
  *
  * One step at a time per database: the pending read, the dump and the
  * migrations run under a session advisory lock, so a second step started
@@ -173,6 +175,9 @@ export const run = (
     const database = yield* databaseOf(url)
     const created = yield* ensureDatabase(url, database)
     return yield* exclusively(Effect.gen(function*() {
+      yield* SchemaState.refuseSkipped(binding).pipe(
+        Effect.catchTag("StoreSchema.SkippedMigrations", (skipped) => Effect.fail(new Refused({ reason: skipped.message })))
+      )
       const pending = yield* SchemaState.pendingOf(binding.sets)
       if (pending.length === 0) return { database, created, backup: undefined, applied: [] } satisfies Outcome
       const last = SchemaState.keyOf(pending[pending.length - 1]!)

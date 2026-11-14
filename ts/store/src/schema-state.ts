@@ -8,7 +8,10 @@
  *
  * A set's migration is pending when its id is past the newest id its table
  * records, which is the rule the migrator applies them by; a set whose table
- * does not exist has every migration pending.
+ * does not exist has every migration pending. A migration at or below that
+ * newest id which the table does not record under its id and name is SKIPPED:
+ * the migrator never applies it (two branches took one number, and the store
+ * ran the other's). The guard and the unattended step refuse such a store.
  */
 import * as StoreBinding from "./binding.js"
 import * as Effect from "effect/Effect"
@@ -38,6 +41,52 @@ const latestIn = (table: string): Effect.Effect<number, SqlError, SqlClient> =>
     return row?.latest ?? 0
   })
 
+/** The `<id>_<name>` keys `table` records; none where the table does not exist. */
+const recordedIn = (table: string): Effect.Effect<ReadonlySet<string>, SqlError, SqlClient> =>
+  Effect.gen(function*() {
+    const sql = yield* SqlClient
+    const [present] = yield* sql<{ readonly present: boolean }>`SELECT to_regclass(${table}::text) IS NOT NULL AS present`
+    if (present?.present !== true) return new Set<string>()
+    const rows = yield* sql<{ readonly key: string }>`SELECT migration_id || '_' || name AS key FROM ${sql(table)}`
+    return new Set(rows.map((row) => row.key))
+  })
+
+/** A set's migrations as its record keys them, oldest first; a key that is no `<id>_<name>` is left out. */
+const entriesOf = (set: StoreBinding.MigrationSet): ReadonlyArray<Pending> =>
+  Object.keys(set.record)
+    .flatMap((key) => {
+      const match = /^(\d+)_(.+)$/.exec(key)
+      return match === null ? [] : [{ table: set.table, id: Number(match[1]), name: match[2]! }]
+    })
+    .sort((a, b) => a.id - b.id)
+
+/** One migration a store skipped, and the newest id its table records. */
+export interface Skipped extends Pending {
+  readonly newest: number
+}
+
+/**
+ * The migrations of `sets` the store skipped: numbered at or below the newest
+ * id their table records, and not recorded there under their id and name.
+ */
+export const skippedOf = (
+  sets: ReadonlyArray<StoreBinding.MigrationSet>
+): Effect.Effect<ReadonlyArray<Skipped>, SqlError, SqlClient> =>
+  Effect.gen(function*() {
+    const skipped: Array<Skipped> = []
+    for (const set of sets) {
+      const newest = yield* latestIn(set.table)
+      if (newest === 0) continue
+      const recorded = yield* recordedIn(set.table)
+      skipped.push(
+        ...entriesOf(set)
+          .filter((entry) => entry.id <= newest && !recorded.has(keyOf(entry)))
+          .map((entry) => ({ ...entry, newest }))
+      )
+    }
+    return skipped
+  })
+
 /** The migrations of `sets` the store has not applied, in the order they would run. */
 export const pendingOf = (
   sets: ReadonlyArray<StoreBinding.MigrationSet>
@@ -46,14 +95,7 @@ export const pendingOf = (
     const pending: Array<Pending> = []
     for (const set of sets) {
       const latest = yield* latestIn(set.table)
-      const entries = Object.keys(set.record)
-        .flatMap((key) => {
-          const match = /^(\d+)_(.+)$/.exec(key)
-          return match === null ? [] : [{ table: set.table, id: Number(match[1]), name: match[2]! }]
-        })
-        .filter((entry) => entry.id > latest)
-        .sort((a, b) => a.id - b.id)
-      pending.push(...entries)
+      pending.push(...entriesOf(set).filter((entry) => entry.id > latest))
     }
     return pending
   })
@@ -82,10 +124,47 @@ export class PendingMigrations extends Schema.TaggedError<PendingMigrations>()("
   }
 }
 
-/** Fails with {@link PendingMigrations} where the store has a migration of its binding's sets to apply. */
-export const guard: Effect.Effect<void, PendingMigrations | SqlError, SqlClient | StoreBinding.Service> = Effect.gen(
+/** A store that skipped a migration: no migration run will ever apply it, so nothing starts on the store. */
+export class SkippedMigrations extends Schema.TaggedError<SkippedMigrations>()("StoreSchema.SkippedMigrations", {
+  store: Schema.String,
+  table: Schema.String,
+  skipped: Schema.String,
+  newest: Schema.Number
+}) {
+  override get message(): string {
+    return `${this.store} never applied ${this.skipped} and already holds migration ${this.newest} of ${this.table}: ` +
+      `number ${this.skipped} past ${this.newest} (a migration is numbered past every one its base branch holds)`
+  }
+}
+
+/** Fails with {@link SkippedMigrations}, naming the first, where the store skipped a migration of `binding`'s sets. */
+export const refuseSkipped = (
+  binding: Pick<StoreBinding.Interface, "name" | "sets">
+): Effect.Effect<void, SkippedMigrations | SqlError, SqlClient> =>
+  Effect.gen(function*() {
+    const [first] = yield* skippedOf(binding.sets)
+    if (first === undefined) return
+    return yield* new SkippedMigrations({
+      store: binding.name,
+      table: first.table,
+      skipped: keyOf(first),
+      newest: first.newest
+    })
+  })
+
+/**
+ * Fails with {@link SkippedMigrations} where the store skipped a migration of
+ * its binding's sets, else with {@link PendingMigrations} where it has one to
+ * apply.
+ */
+export const guard: Effect.Effect<
+  void,
+  PendingMigrations | SkippedMigrations | SqlError,
+  SqlClient | StoreBinding.Service
+> = Effect.gen(
   function*() {
     const binding = yield* StoreBinding.Service
+    yield* refuseSkipped(binding)
     const left = yield* pendingOf(binding.sets)
     if (left.length === 0) return
     return yield* new PendingMigrations({
@@ -100,5 +179,5 @@ export const guard: Effect.Effect<void, PendingMigrations | SqlError, SqlClient 
 /** `client` with the {@link guard} run once it connects: the layer fails on a store with a pending migration. */
 export const guarded = <ROut, E, RIn>(
   client: Layer.Layer<ROut | SqlClient, E, RIn>
-): Layer.Layer<ROut | SqlClient, E | PendingMigrations | SqlError, RIn | StoreBinding.Service> =>
+): Layer.Layer<ROut | SqlClient, E | PendingMigrations | SkippedMigrations | SqlError, RIn | StoreBinding.Service> =>
   Layer.effectDiscard(guard).pipe(Layer.provideMerge(client))
