@@ -23,6 +23,7 @@ import {
 import { CAPTURE_RULES } from "../src/capture-rules.js"
 import { CASE_RULES } from "../src/case-rules.js"
 import type { CutVantage } from "../src/cut.js"
+import { scenario } from "../src/scenario.js"
 import { SutSet } from "../src/sut.js"
 import {
   BASE_CALL_ID,
@@ -127,6 +128,30 @@ describe("the capture edge: a leg terminated inside the capture", () => {
 
   it("a non-2xx final with its ACK", () => {
     expect(details(family(callerMsgs("rejected"), 305))).toEqual([])
+  })
+
+  it("a non-2xx final sent from another port than its INVITE reached, past the system's own hop (RFC 3261 §18.2.2)", () => {
+    const next = "203.0.113.20:5060"
+    const nextForwardsFrom = "203.0.113.20:5062"
+    const s = scenario([SUT_IP])
+    const dialled = s
+      .leg({
+        callId: DERIVED_CALL_ID,
+        party: next,
+        system: SUT_EGRESS,
+        hops: [
+          { party: "203.0.113.30:5060", system: nextForwardsFrom },
+          { party: "203.0.113.30:49152", system: nextForwardsFrom }
+        ]
+      })
+      .invite({ at: 0, by: "system" })
+      .invite({ at: 2, by: "system", hop: 1, seq: 1, fresh: true })
+      .response(488, { at: 30, hop: 2 })
+      .ack({ at: 31, by: "system", hop: 1 })
+      .response(488, { at: 33 })
+      .ack({ at: 34, by: "system" })
+
+    expect(details(s.flows(), [dialled.vantage()])).toEqual([])
   })
 
   it("a CANCEL, its 487 and the ACK", () => {

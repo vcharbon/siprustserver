@@ -495,6 +495,58 @@ describe("a request that crosses the system twice on one Call-ID, read over its 
   })
 })
 
+/** A response goes back to the address its request came from, from whatever port its sender picks. */
+describe.each([
+  { matchedOn: "the Via branch", branches: true },
+  { matchedOn: "the dialog", branches: false }
+])("a final sent from another port than its INVITE reached, matched on $matchedOn (RFC 3261 §18.2.2)", ({ branches }) => {
+  const NEXT = "203.0.113.20:5060"
+  const NEXT_FORWARDS_FROM = "203.0.113.20:5062"
+  const FAR = "203.0.113.30:5060"
+  const FAR_ANSWERS_FROM = "203.0.113.30:49152"
+
+  it("answers the INVITE of a hop between two parties, read over the whole leg", () => {
+    const s = scenario()
+    const leg = s
+      .leg({
+        callId: "forwarded@example.com",
+        party: NEXT,
+        hops: [
+          { party: FAR, system: NEXT_FORWARDS_FROM },
+          { party: FAR_ANSWERS_FROM, system: NEXT_FORWARDS_FROM }
+        ],
+        branches
+      })
+      .invite({ at: 0, by: "system" })
+      .invite({ at: 2, by: "system", hop: 1, seq: 1, fresh: true })
+      .response(488, { at: 30, hop: 2 })
+      .ack({ at: 31, by: "system", hop: 1 })
+      .response(488, { at: 33 })
+      .ack({ at: 34, by: "system" })
+    const whole = CallFacts.atLeg(s.flows(), s.sut, leg.index)
+
+    expect(whole.openings.map((t) => [t.request?.hop, t.final?.status, t.final?.hop, t.ack?.hop])).toEqual([
+      [0, 488, 0, 0],
+      [1, 488, 2, 1]
+    ])
+    expect(CallFacts.valueOf(whole.final)).toMatchObject({ status: 488, at_us: 30_000, hop: 2, bySystem: false })
+    expect(whole.ending.state).toBe("absent")
+  })
+
+  it("answers the system's INVITE at the vantage of the hop it left on", () => {
+    const s = scenario()
+    const leg = s
+      .leg({ callId: "refused@example.com", party: FAR, hops: [{ party: FAR_ANSWERS_FROM, system: "192.0.2.10:5060" }], branches })
+      .invite({ at: 0, by: "system" })
+      .response(486, { at: 30, hop: 1 })
+      .ack({ at: 31, by: "system" })
+    const read = facts(s, leg)
+
+    expect(read.openings.map((t) => [t.request?.hop, t.final?.status, t.final?.hop, t.ack?.hop])).toEqual([[0, 486, 1, 0]])
+    expect(CallFacts.valueOf(read.final)).toMatchObject({ status: 486, at_us: 30_000, bySystem: false })
+  })
+})
+
 describe("in-dialog requests", () => {
   it("are listed with their method, body and acceptance time where a 2xx accepted them", () => {
     const s = scenario()
