@@ -18,7 +18,8 @@
  *   end of the capture;
  * - a non-2xx final ended the attempt, whatever its ACK (RFC 3261 §17.1.1.3:
  *   that ACK belongs to the final's transaction and ends nothing the final did
- *   not), unless a fresh 2xx answered the same attempt;
+ *   not), unless a fresh 2xx answered the same attempt. An attempt the leg
+ *   relays over several hops is answered where any of them answered it;
  * - the source GAVE UP — a CANCEL, or a request nothing ever answered — and
  *   {@link GIVE_UP_SILENCE_US} separates the leg's last message from the end of
  *   the capture, so the silence is the source's own and not the file's.
@@ -119,6 +120,26 @@ const attemptOf = (
   }
 }
 
+/**
+ * The final a leg's attempt drew. A leg relays its INVITE hop by hop under one
+ * CSeq number (RFC 3261 §16.6), and a capture may hold the answer of one hop
+ * and not of another: the attempt is every dialog-opening transaction that
+ * carries the judged one's number, and its final is the first 2xx any of them
+ * drew from `from` on (§16.7), else a final one of them drew from there.
+ */
+const attemptFinal = (
+  facts: CallFacts.LegFacts,
+  transaction: CallFacts.Transaction,
+  from: number
+): CallFacts.Entry | undefined => {
+  const relayed = transaction.opening ? facts.openings.filter((t) => t.seq === transaction.seq) : [transaction]
+  const finals = relayed
+    .flatMap((t) => t.responses)
+    .filter((r) => (r.status ?? 0) >= 200 && r.msg >= from)
+    .sort((a, b) => a.msg - b.msg)
+  return finals.find((r) => (r.status ?? 0) < 300) ?? finals[finals.length - 1]
+}
+
 /** What one leg needed and the capture did not hold; `undefined` where it is terminated. */
 const missingTermination = (
   flows: Flows.FlowsDoc,
@@ -166,7 +187,7 @@ const missingTermination = (
     }
   }
 
-  const final = transaction.final
+  const final = attemptFinal(facts, transaction, from)
   if (final === undefined) {
     const cancel = transaction.cancel ?? entries.find((e) => e.method === "CANCEL" && e.status === undefined && e.msg >= from)
     return gaveUp(
