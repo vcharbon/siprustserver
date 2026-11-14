@@ -103,6 +103,27 @@ describe("every captured message is a step", () => {
     expect(flow.flags.map((f) => f.kind)).not.toContain("automatic-body-dropped")
   })
 
+  it("reads the ACK of one fork's failure as a non-2xx's though another fork's 2xx answers the INVITE later (RFC 3261 §17.1.1.3, §13.2.2.4)", () => {
+    const s = scenario()
+    const caller = s
+      .leg({ callId: "forked@example.com", party: "198.51.100.10:5060" })
+      .invite({ at: 0, by: "party" })
+      .response(486, { at: 100, tag: "busy-fork" })
+      .ack({ at: 105, by: "party", fork: "busy-fork", body: SDP })
+      .response(200, { at: 300, to: "INVITE", tag: "answering-fork", body: SDP })
+      .ack({ at: 305, by: "party", fork: "answering-fork", body: SDP })
+      .bye({ at: 2000, by: "party" })
+      .response(200, { at: 2010 })
+    const flows = s.flows()
+    const flow = synthesize(flows, build(flows, [caller.vantage()], s.sut, plan(), derivesNothing), plan())
+    const acks = flow.steps.filter((step) => step.op === "send" && (step.msg.method ?? "").toUpperCase() === "ACK")
+
+    expect(acks.map((step) => step.observed?.msg)).toEqual([2, 4])
+    expect(acks[0]!.msg.body).toBeUndefined()
+    expect(acks[1]!.msg.body).toMatchObject({ ref: expect.stringContaining(".sdp") })
+    expect(flow.flags.map((f) => f.kind)).toContain("automatic-body-dropped")
+  })
+
   it("keeps a step's observed coordinate pointing back at the message", () => {
     const flow = flowOf(reInviteFlows(), CALLER_ONLY)
     expect(flow.steps[0]!.observed).toEqual({ leg: 0, msg: 0, at_us: 0 })
