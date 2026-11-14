@@ -31,11 +31,17 @@ export interface OfCall {
   /** The caller got a failure final: the earliest one that ended a caller leg. */
   readonly failed: Fact<Entry>
   /**
-   * The caller gave up: its earliest CANCEL of a dialog-opening INVITE (RFC
-   * 3261 §9.1) or BYE (§15), whichever leg shows it and whether or not the
-   * system's own BYE crossed it.
+   * The caller gave up: the earliest of {@link giveUps}, whichever leg shows
+   * it and whether or not the system's own BYE crossed it.
    */
   readonly gaveUp: Fact<GiveUp>
+  /**
+   * Each caller leg's own give-up the capture shows: the CANCEL of its outcome
+   * INVITE (RFC 3261 §9.1), or its first BYE after that INVITE (§15), the
+   * earlier of the two. The CANCEL of an INVITE the caller then sent again
+   * left that INVITE, not the call.
+   */
+  readonly giveUps: ReadonlyArray<GiveUp>
 }
 
 const ABSENT: Fact<never> = { state: "absent" }
@@ -61,25 +67,34 @@ const failureOf = (leg: LegFacts): Fact<Entry> => {
 
 /** The party's own leaving of one leg; not captured where the leg's ending is. */
 const giveUpOf = (leg: LegFacts): Fact<GiveUp> => {
-  const cancels = leg.openings.flatMap((t): ReadonlyArray<GiveUp> =>
-    t.cancel !== undefined && !t.cancel.bySystem ? [{ by: "CANCEL", entry: t.cancel, leg }] : []
-  )
-  const byes = leg.byes.flatMap((bye): ReadonlyArray<GiveUp> => (bye.bySystem ? [] : [{ by: "BYE", entry: bye, leg }]))
-  const first = [...cancels, ...byes].reduce<GiveUp | undefined>(
-    (best, next) => (best === undefined || next.entry.at_us < best.entry.at_us ? next : best),
-    undefined
-  )
+  const cancel = leg.outcome?.cancel
+  const bye = leg.byes.find((b) => !b.bySystem)
+  const left: ReadonlyArray<GiveUp> = [
+    ...(cancel !== undefined && !cancel.bySystem ? [{ by: "CANCEL", entry: cancel, leg } as const] : []),
+    ...(bye !== undefined ? [{ by: "BYE", entry: bye, leg } as const] : [])
+  ]
+  const first = firstOf(left)
   if (first !== undefined) return { state: "seen", value: first }
   return leg.ending.state === "not-captured" ? NOT_CAPTURED : ABSENT
 }
 
+const firstOf = (giveUps: ReadonlyArray<GiveUp>): GiveUp | undefined =>
+  giveUps.reduce<GiveUp | undefined>(
+    (best, next) => (best === undefined || next.entry.at_us < best.entry.at_us ? next : best),
+    undefined
+  )
+
 /** The facts of the call these legs form. */
-export const ofCall = (legs: CallLegs): OfCall => ({
-  legs,
-  answered: earliest(legs.caller.map((leg) => leg.answer), (entry) => entry.at_us),
-  failed: earliest(legs.caller.map(failureOf), (entry) => entry.at_us),
-  gaveUp: earliest(legs.caller.map(giveUpOf), (giveUp) => giveUp.entry.at_us)
-})
+export const ofCall = (legs: CallLegs): OfCall => {
+  const gaveUp = legs.caller.map(giveUpOf)
+  return {
+    legs,
+    answered: earliest(legs.caller.map((leg) => leg.answer), (entry) => entry.at_us),
+    failed: earliest(legs.caller.map(failureOf), (entry) => entry.at_us),
+    gaveUp: earliest(gaveUp, (giveUp) => giveUp.entry.at_us),
+    giveUps: gaveUp.flatMap((fact) => (fact.state === "seen" ? [fact.value] : []))
+  }
+}
 
 /** How long one attempt rang, to the microsecond. */
 export interface RingTime {
@@ -141,11 +156,12 @@ export type Release =
  * "The system released on its own", the one definition, over both endings of a
  * dialled leg: its CANCEL before the final, its BYE after the answer.
  *
- * The caller's give-up explains the release where it is stamped no later than
- * `skewUs` after it: a capture can stamp a relayed message before the message
- * it relays, by its clock skew between hops, and a caller that left earlier
- * left the whole call. The caller's answer explains a CANCEL only, where it
- * is stamped between the attempt's INVITE and that CANCEL.
+ * A caller leg's give-up explains the release where it is stamped from
+ * `skewUs` before the leg's INVITE to `skewUs` after the release: a capture
+ * can stamp a relayed message before the message it relays, by its clock skew
+ * between hops. An older give-up left a part of the call this leg was not
+ * dialled for. The caller's answer explains a CANCEL only, where it is
+ * stamped between the attempt's INVITE and that CANCEL.
  */
 export const release = (call: OfCall, leg: LegFacts, skewUs: number): Release => {
   const ending = valueOf(leg.ending)
@@ -156,9 +172,11 @@ export const release = (call: OfCall, leg: LegFacts, skewUs: number): Release =>
   if (ending.by === "CANCEL" && answered !== undefined && dialled !== undefined && answered.at_us >= dialled && answered.at_us <= at) {
     return { kind: "relayed", ending, cause: "caller-answered", because: answered }
   }
-  const gaveUp = valueOf(call.gaveUp)
-  if (gaveUp !== undefined && gaveUp.entry.at_us <= at + skewUs) {
-    return { kind: "relayed", ending, cause: "caller-gave-up", because: gaveUp.entry }
-  }
+  const gaveUp = firstOf(
+    call.giveUps.filter(
+      (g) => (dialled === undefined || g.entry.at_us >= dialled - skewUs) && g.entry.at_us <= at + skewUs
+    )
+  )
+  if (gaveUp !== undefined) return { kind: "relayed", ending, cause: "caller-gave-up", because: gaveUp.entry }
   return { kind: "own", ending }
 }
