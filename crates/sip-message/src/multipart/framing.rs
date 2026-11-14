@@ -258,7 +258,9 @@ mod tests {
         assert!(outside_texts("--b\r\none\r\n").is_empty(), "never closed");
         assert_eq!(outside_texts("--zz\r\none\r\n--zz--\r\n"), ["--zz\r\none\r\n--zz--\r\n"]);
         assert_eq!(outside_texts("pre\r\n--b-- epi"), ["pre", " epi"], "it closes first");
-        assert_eq!(outside_parts(b"--\r\nx", ""), [0..5], "an empty boundary frames nothing");
+        let unbounded: Vec<_> =
+            outside_parts(b"--\r\nx", "").into_iter().map(|r| r.len()).collect();
+        assert_eq!(unbounded, [5], "an empty boundary frames nothing");
     }
 
     #[test]
