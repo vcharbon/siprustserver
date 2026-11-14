@@ -303,6 +303,9 @@ importers:
       '@sip/corpus':
         specifier: workspace:*
         version: link:../corpus
+      '@sip/pipeline':
+        specifier: workspace:*
+        version: link:../pipeline
       '@sip/siprig':
         specifier: workspace:*
         version: link:../siprig

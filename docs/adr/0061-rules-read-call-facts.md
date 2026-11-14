@@ -85,7 +85,8 @@ messages.
   its steps. `Transactions` pairs the steps of a document and stays exported for the readers
   the document side does not serve yet.
 - The capture side is exported as `CallFacts`, the document side as `DocumentFacts`, whose
-  `disagreements` holds a case document against its capture on the agreed subset.
+  `parity` holds a case document against its capture on the agreed subset and says how many
+  legs it compared.
 - A pack's per-rule walks over flows and steps move onto the module, one rule at a time, each
   move proved by re-cutting its captures and diffing the cases.
 - The situation reading is exported as `Situation` and `PivotReading`; a pack's header census

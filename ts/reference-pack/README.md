@@ -33,6 +33,7 @@ the image's `siprig-campaign run`).
 | case source | `cases.ts`, `capture/forked-reliable.ts` and `capture/*-call.ts` (flows no shape plays), a cut's output directory (`--sources`) |
 | capture ingest (identity extraction), cut (base generator), replay | `capture/*.pcapng`, `test/reference-replay.test.ts` |
 | capture ingest and cut of another stack's capture, a refusal of the cut | `capture/third-party/*.pcap`, `test/third-party-captures.test.ts` |
+| a case document held against the capture it was cut from, on the subset both sides of call facts state | `capture/*.pcapng`, `capture/third-party/*.pcap`, `test/call-facts-parity.test.ts` |
 | claim | `cases.ts`, `call-records` |
 | lane file | `lanes/simulated.toml`, `lanes/reference.toml` |
 | part schema and part file | `parts/<kind>.schema.json` and `targets/<kind>/reference.toml` for each of `b2bua-runner`, `runner-log`, `runner-pid`, `sip-capture`, `cdr-file` |

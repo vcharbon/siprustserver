@@ -249,7 +249,7 @@ describe("the subset a document and its capture agree on", () => {
 })
 
 
-describe("the disagreements of a document with its capture", () => {
+describe("a document held against its capture", () => {
   const vantagesOf = (cut: Cut) => [cut.caller, ...cut.dialled].map((leg) => leg.vantage())
 
   it.each([
@@ -257,14 +257,25 @@ describe("the disagreements of a document with its capture", () => {
     ["a cancelled call", cancelled],
     ["a refused call", refused],
     ["an abandoned call", abandoned]
-  ])("are none on the document assembled from %s", (_, build) => {
+  ])("agrees with it on every leg of the document assembled from %s", (_, build) => {
     const cut = build()
-    const { flows, pivot } = assembled(cut)
+    const { flows, pivot, facts } = assembled(cut)
 
-    expect(DocumentFacts.disagreements(flows, cut.s.sut, vantagesOf(cut), pivot)).toEqual([])
+    expect(DocumentFacts.parity(flows, cut.s.sut, vantagesOf(cut), pivot)).toEqual({
+      compared: facts.legs.size,
+      disagreements: []
+    })
+    expect(facts.legs.size).toBe(vantagesOf(cut).length)
   })
 
-  it("name the leg whose 180 the document does not state, with both readings", () => {
+  it("compares no leg whose captured message none of the vantages owns", () => {
+    const cut = answered()
+    const { flows, pivot } = assembled(cut)
+
+    expect(DocumentFacts.parity(flows, cut.s.sut, [cut.caller.vantage()], pivot)).toEqual({ compared: 1, disagreements: [] })
+  })
+
+  it("names the leg whose 180 the document does not state, with both readings", () => {
     const cut = answered()
     const { flows, pivot, facts } = assembled(cut)
     const caller = documentLegOf(facts, cut.caller).leg
@@ -273,8 +284,9 @@ describe("the disagreements of a document with its capture", () => {
       flow: pivot.flow.filter((node) => !(Flow.isStepNode(node) && node.leg === caller && node.msg.status === 180))
     }
 
-    expect(DocumentFacts.disagreements(flows, cut.s.sut, vantagesOf(cut), silent)).toMatchObject([
-      { leg: caller, vantage: cut.caller.vantage(), document: { ringing: undefined }, capture: { ringing: 180 } }
-    ])
+    expect(DocumentFacts.parity(flows, cut.s.sut, vantagesOf(cut), silent)).toMatchObject({
+      compared: 2,
+      disagreements: [{ leg: caller, vantage: cut.caller.vantage(), document: { ringing: undefined }, capture: { ringing: 180 } }]
+    })
   })
 })

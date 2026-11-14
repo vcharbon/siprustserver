@@ -1,7 +1,7 @@
 /**
- * Call facts on real captures: every capture the reference pack commits
- * (`ts/reference-pack/capture/`, its vendored third-party ones included) is
- * extracted by `sipflow`, cut at the boundary of the system that took its
+ * Call facts on real captures: every capture the pack commits (`capture/`,
+ * its vendored third-party ones included) is extracted by `sipflow`
+ * (`./capture-cut.ts`), cut at the boundary of the system that took its
  * first INVITE, and each case's document, assembled by the real `assemble`,
  * is held against its capture on the subset the two sides of call facts agree
  * on (ADR-0061): who sent each leg's opening INVITE, its first 18x, its
@@ -20,11 +20,11 @@ import * as os from "node:os"
 import * as path from "node:path"
 import { fileURLToPath } from "node:url"
 import { afterAll, describe, expect, it } from "vitest"
-import { documentOf, ingest } from "../../../reference-pack/test/capture-cut.ts"
+import { documentOf, ingest } from "./capture-cut.ts"
 
-const TS = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..")
-const CAPTURES = path.join(TS, "reference-pack", "capture")
-const SIPFLOW = process.env["SIPFLOW_BIN"] ?? path.join(TS, "..", "target/release/sipflow")
+const PACK = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..")
+const CAPTURES = path.join(PACK, "capture")
+const SIPFLOW = process.env["SIPFLOW_BIN"] ?? path.join(PACK, "../..", "target/release/sipflow")
 const skipping = process.env["TOOLCHAIN_TEST_SKIP"] === "1"
 if (!skipping && !fs.existsSync(SIPFLOW)) {
   throw new Error(`no binary at ${SIPFLOW}: build it, name one with SIPFLOW_BIN, or skip the binary-bound suites with TOOLCHAIN_TEST_SKIP=1`)
@@ -36,7 +36,11 @@ afterAll(() => fs.rmSync(work, { recursive: true, force: true }))
 const NO_PLAN = new Plan.Plan({ default_cc: "", countries: [], max_composed_prefix: 0, fake_prefix: "" })
 const ANY_ADDRESS = new Profile.SutProfile(["0.0.0.0/0"])
 
-/** What the cut makes of one committed capture: its cases, each with the legs compared and those that disagree. */
+/**
+ * What the cut makes of one committed capture: its cases, each with its
+ * document's legs, its vantages, how many legs were held against the capture
+ * and those that disagree.
+ */
 const parityOf = async (file: string, derives: CallIdDerivation) => {
   const capture = path.basename(file)
   const [done] = await ingest(SIPFLOW, path.join(work, "artifacts"), capture, file)
@@ -63,7 +67,7 @@ const parityOf = async (file: string, derives: CallIdDerivation) => {
       {
         legs: DocumentFacts.ofDocument(outcome.built.pivot).legs.size,
         vantages: vantages.length,
-        disagreements: DocumentFacts.disagreements(flows, sut, vantages, outcome.built.pivot)
+        ...DocumentFacts.parity(flows, sut, vantages, outcome.built.pivot)
       }
     ]
   })
@@ -75,7 +79,9 @@ describe.skipIf(skipping)("a document and the capture it was cut from", () => {
     async (name) => {
       const cases = await parityOf(path.join(CAPTURES, name), counterPrefixed)
 
-      expect(cases.map((c) => [c.legs, c.vantages]), "one case, a document leg per vantage").toEqual([[2, 2]])
+      expect(cases.map((c) => [c.legs, c.vantages, c.compared]), "one case, each document leg held against its vantage").toEqual([
+        [2, 2, 2]
+      ])
       expect(cases.flatMap((c) => c.disagreements)).toEqual([])
     }
   )
@@ -83,7 +89,7 @@ describe.skipIf(skipping)("a document and the capture it was cut from", () => {
   it("agree on every leg of the vendored blind transfer, the one call the capture holds whole", async () => {
     const cases = await parityOf(path.join(CAPTURES, "third-party", "refer-transfer.pcap"), neverDerives)
 
-    expect(cases.map((c) => [c.legs, c.vantages])).toEqual([[2, 2]])
+    expect(cases.map((c) => [c.legs, c.vantages, c.compared])).toEqual([[2, 2, 2]])
     expect(cases.flatMap((c) => c.disagreements)).toEqual([])
   })
 

@@ -256,25 +256,37 @@ const sameSubset = (a: Agreed, b: Agreed): boolean =>
   a.ending?.by === b.ending?.by &&
   a.ending?.bySystem === b.ending?.bySystem
 
+/** A case document held against the capture it was cut from, on the agreed subset. */
+export interface Parity {
+  /** How many of the document's legs were held against a vantage. */
+  readonly compared: number
+  /** The legs, among those, that state the subset differently from the capture. */
+  readonly disagreements: ReadonlyArray<Disagreement>
+}
+
 /**
- * Every leg of a case document that states the agreed subset differently from
- * the capture it was cut from; empty where the two sides agree. A document leg
- * is held against the vantage, among those the case was cut at, that owns the
+ * A case document held against the capture it was cut from. A document leg is
+ * held against the vantage, among those the case was cut at, that owns the
  * captured message its first observed step names; a leg no step of which was
- * observed is held against nothing.
+ * observed, or whose message no vantage owns, is held against nothing and is
+ * not counted in `compared`.
  */
-export const disagreements = (
+export const parity = (
   flows: Flows.FlowsDoc,
   sut: SutSet,
   vantages: ReadonlyArray<CutVantage>,
   pivot: Pivot.PivotV3
-): ReadonlyArray<Disagreement> =>
-  [...ofDocument(pivot).legs.values()].flatMap((leg) => {
+): Parity => {
+  let compared = 0
+  const disagreements = [...ofDocument(pivot).legs.values()].flatMap((leg): ReadonlyArray<Disagreement> => {
     const observed = leg.entries.find((e) => e.step.observed !== undefined)?.step.observed
     if (observed === undefined) return []
     const vantage = vantages.find((v) => v.leg === observed.leg && ofVantage(flows, sut, v).msgIdxs.includes(observed.msg))
     if (vantage === undefined) return []
+    compared += 1
     const document = agreedOfDocument(leg)
     const capture = agreedOfCapture(atVantage(flows, sut, vantage))
     return sameSubset(document, capture) ? [] : [{ leg: leg.leg, vantage, document, capture }]
   })
+  return { compared, disagreements }
+}
