@@ -10,6 +10,7 @@ import { captureIndex } from "../src/capture-index.js"
 import type { CaseSpec } from "../src/case-spec.js"
 import { decideCases } from "../src/caseset.js"
 import type { CaseRule } from "../src/case-rules.js"
+import { ofDocument } from "../src/document-facts.js"
 import type { DocumentRule } from "../src/document-rules.js"
 import { neutralPolicy, policyWith, UNCLASSIFIED, type Refusal } from "../src/policy.js"
 import { abandonedFlows, cancelRaceFlows, derivesNothing, derivesOnePrefix, plan, refusedFlows, sutSet } from "./fixtures.js"
@@ -312,6 +313,33 @@ describe("deciding a whole capture", () => {
     expect(out.refused).toEqual([refusal])
     expect(out.outcomes[0]!.quarantined).toBeUndefined()
     expect(out.outcomes[0]!.quarantineError).toBe(`${SPEC.id}: no run of it can end`)
+  })
+
+  it("hands every document rule the one reading of the assembled document", () => {
+    const seen: Array<unknown> = []
+    const watching = (id: string): DocumentRule => ({
+      id,
+      subject: "scope",
+      disposition: "refuses",
+      why: "it refuses nothing, as the test states it",
+      refuses: (input) => {
+        seen.push(input.document)
+        return undefined
+      }
+    })
+    const out = decideCases({
+      ...raceCapture(),
+      capture: CAPTURE,
+      specs: [SPEC],
+      sut: sutSet(),
+      policy: policyWith({ derives: derivesOnePrefix, refuseOnDocument: [watching("scope-watches-once"), watching("scope-watches-twice")] }),
+      quarantine: true
+    })
+    const assembled = (out.outcomes[0]!.built ?? out.outcomes[0]!.quarantined)!
+
+    expect(seen.length).toBeGreaterThanOrEqual(2)
+    expect(new Set(seen).size).toBe(1)
+    expect(seen[0]).toBe(ofDocument(assembled.pivot))
   })
 
   it("quarantines no document an untrusted refusal stands on, and says why", () => {
