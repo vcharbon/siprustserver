@@ -199,6 +199,9 @@ These are documented and not handled:
 - The length of each line of a redacted part.
 - The path of a URL.
 - The free words of a vendor header value outside a quoted string.
+- In a header the tool does not know, a number written with separators
+  between its digit groups, or a private number shorter than six digits: it
+  is neither mapped nor reported, in clear or in base64.
 - The words of an identifier that are shorter than four characters.
 - A datagram that the parser refuses: only its addresses and digit runs are
   rewritten. The leak check still reads all of it.

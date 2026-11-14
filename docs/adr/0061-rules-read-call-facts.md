@@ -48,8 +48,9 @@ messages.
    Starting call facts: the caller was answered; the caller got a failure final; the caller's
    give-up, an event with its time; each attempt's ring time from its INVITE and from its first
    18x; "the system released on its own". That last one has one definition, aware of the
-   capture's clock skew, the skew passed in by the pack. The situation reading's pairing is to
-   take the same skew; it takes none yet.
+   capture's clock skew, the skew passed in by the pack. The situation reading's pairing takes
+   no skew: on a measured corpus a skew window changed 300 of 295,327 emissions, about 5 of
+   them repaired, so a window mispairs more than it repairs.
 9. **`CasePolicy` does not change.** A pack's rules call the module with the inputs each hook
    already receives.
 10. **No per-file work in a per-case path.** What a rule needs of the whole file (another

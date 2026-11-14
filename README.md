@@ -188,6 +188,28 @@ target/release/sipflow capture.pcap --json > calls.json       # the full model
 
 It reads UDP only, and it does not capture. See [docs/sipflow.md](docs/sipflow.md).
 
+### pcap-anon: a capture you can share
+
+`pcap-anon` rewrites the flows document that `sipflow --json` writes, so that a capture can leave
+the network it was taken on. Every number, name, host and address becomes a fake. A seed, drawn
+on the first run and kept in a file, gives each identity the same fake everywhere, and the same
+output byte for byte on the next run. With `--verify` it searches the output for what the raw document
+held, and writes nothing if it finds any. `sipflow --to-pcap` turns the result back into a capture.
+
+```bash
+cargo build --release -p sip-pcap --bin sipflow
+cargo build --release -p pcap-anon
+target/release/sipflow --json --reading my.reading capture.pcapng > capture.flows.json
+target/release/pcap-anon anonymize capture.flows.json capture.anon.flows.json \
+  --plan my.plan.json --reading my.reading --profile my.profile.json \
+  --seed-file capture.seed --fresh-seed --verify
+target/release/sipflow --to-pcap capture.anon.flows.json --out capture.anon.pcap
+```
+
+You write the numbering plan, the network profile and the reading for your network. A few
+identities stay readable, such as a name a peer typed into a reason phrase, and the crate README
+lists them. See [crates/pcap-anon/README.md](crates/pcap-anon/README.md).
+
 ### loadgen: a load generator
 
 `loadgen` sends SIP calls at a controlled rate and plays the caller and the callee. Use it where
