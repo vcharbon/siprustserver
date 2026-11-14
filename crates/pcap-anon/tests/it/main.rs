@@ -3,6 +3,7 @@
 
 mod anonymize;
 mod cli;
+mod identities;
 mod samples;
 mod sequence_references;
 mod support;

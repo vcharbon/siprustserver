@@ -78,7 +78,7 @@ sipflow --to-pcap capture.anon.flows.json --out capture.anon.pcap
 The protocol counters (CSeq, RSeq/RAck, Content-Length, Expires and the
 other counter fields, the SDP `o=` session id and version, ports), the
 protocol text (a reason phrase, a Reason or Warning text, media-server
-control values), the protocol vocabulary, the special-use host names
+control values), the protocol vocabulary, a one-character name, the special-use host names
 (`invalid`, `test`, `example`, `localhost`) and the documentation addresses.
 It also keeps the addresses and texts that the profile keeps (see below).
 The seed is never written in the output.
