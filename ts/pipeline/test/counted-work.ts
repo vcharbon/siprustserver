@@ -50,7 +50,9 @@ const DRIVING = [
   "map",
   "reduce",
   "reduceRight",
-  "some"
+  "some",
+  "sort",
+  "toSorted"
 ] as const
 
 type Callback = (...args: Array<unknown>) => unknown
@@ -59,7 +61,8 @@ type Driving = (this: unknown, callback: Callback, ...rest: Array<unknown>) => u
 /**
  * Runs `work` and counts the array elements it steps over: each step of an
  * array's iterator (`for…of`, a spread, a destructuring) and each call of a
- * callback an array method drives. `Array.prototype` is patched for the
+ * callback an array method drives, a sort's comparator included. A sort given
+ * no comparator is not counted. `Array.prototype` is patched for the
  * synchronous run of `work` only. A scan of an array the code under test built
  * for itself counts here like any other.
  */
@@ -71,6 +74,7 @@ export const arraySteps = <T>(work: () => T): { readonly result: T; readonly ste
     const original = proto[name] as Driving
     kept.set(name, original)
     proto[name] = function (this: unknown, callback: Callback, ...rest: Array<unknown>) {
+      if (typeof callback !== "function") return original.call(this, callback, ...rest)
       return original.call(
         this,
         (...args: Array<unknown>) => {

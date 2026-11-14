@@ -141,7 +141,10 @@ describe("the cost of a call's facts over legs already read", () => {
   })
 })
 
-/** The work of merging a hunt's positions whose facts are already kept: message reads and array steps. */
+/**
+ * The work of merging a hunt's positions whose facts are already kept: message
+ * reads, and array steps with the sort's comparator calls among them.
+ */
 const mergeWorkFor = (attempts: number, exchanges: number): { readonly reads: number; readonly steps: number } => {
   const s = scenario()
   const { caller, chain } = hunt(s, attempts, exchanges)
@@ -158,11 +161,11 @@ describe("the cost of merging positions already read", () => {
     expect(mergeWorkFor(50, 400).reads).toBe(0)
   })
 
-  it("at most 2.2 times the steps for twice the messages", () => {
+  it("at most 2.4 times the steps for twice the messages: one sort, n log n, whose doubling ratio at 1,500 messages is 2·log 3000 / log 1500 ≈ 2.19", () => {
     const once = mergeWorkFor(50, 400).steps
 
-    expect(once).toBeGreaterThan(400)
-    expect(mergeWorkFor(100, 800).steps).toBeLessThanOrEqual(2.2 * once)
+    expect(once).toBeGreaterThan(1_500)
+    expect(mergeWorkFor(100, 800).steps).toBeLessThanOrEqual(2.4 * once)
   })
 })
 
