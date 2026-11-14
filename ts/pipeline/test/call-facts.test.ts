@@ -3,10 +3,12 @@
  * scenarios are written with the scenario builder, so every fact is read off
  * datagrams and never off a leg's summary.
  */
+import type { Flows } from "@sip/contracts"
 import { describe, expect, it } from "vitest"
 import * as CallFacts from "../src/call-facts.js"
 import { multipart, scenario, SDP, type Scenario, type ScenarioLeg } from "../src/scenario.js"
-import type { ActorObs } from "../src/topology.js"
+import { type ActorObs, build } from "../src/topology.js"
+import { plan } from "./fixtures.js"
 
 const PARTY = "198.51.100.10:5060"
 const CALLEE = "203.0.113.20:5060"
@@ -578,26 +580,63 @@ describe("what the opening INVITE and its provisionals carry", () => {
 })
 
 describe("a position", () => {
-  it("is the same for an actor and for the cut vantage it was built from", () => {
-    const s = scenario()
-    const leg = answeredCall(s)
-    const flows = s.flows()
-    const actor: ActorObs = {
-      actorId: "uac1",
-      pivotLeg: "A",
-      kind: "uac",
-      origLeg: leg.index,
-      hop: 0,
-      peer: PARTY,
-      sut: "192.0.2.10:5060",
-      sutSet: s.sut,
-      endpointId: "ep0",
-      pos: "caller",
-      msgIdxs: flows.legs[0]!.msgs.map((_, i) => i)
-    }
+  /**
+   * A leg of three hops: the party's own, a second address the party sends
+   * its BYE from, and a hop the system forwards the call on, which the first
+   * vantage does not own. The INVITE is retransmitted once.
+   */
+  const threeHops = (s: Scenario): ScenarioLeg =>
+    s
+      .leg({
+        callId: "three-hops@example.com",
+        party: PARTY,
+        hops: [
+          { party: "198.51.100.11:5060", system: "192.0.2.10:5060" },
+          { party: CALLEE, system: "192.0.2.10:5062" }
+        ]
+      })
+      .invite({ at: 0, by: "party" })
+      .invite({ at: 500, by: "party", retx: true })
+      .invite({ at: 510, by: "system", hop: 2, seq: 1, fresh: true })
+      .response(200, { at: 600, hop: 2 })
+      .response(200, { at: 610, by: "system" })
+      .ack({ at: 620, by: "party" })
+      .ack({ at: 625, by: "system", hop: 2 })
+      .bye({ at: 900, by: "party", hop: 1 })
+      .response(200, { at: 910, hop: 1 })
 
-    expect(CallFacts.atActor(flows, actor)).toBe(CallFacts.atVantage(flows, s.sut, leg.vantage()))
+  const actorOf = (s: Scenario, flows: Flows.FlowsDoc, leg: ScenarioLeg): ActorObs =>
+    build(flows, [leg.vantage()], s.sut, plan(), () => false).actorsObs[0]!
+
+  it("of a layout's actor is its cut vantage's: the same messages, retransmissions and second address included", () => {
+    const s = scenario()
+    const leg = threeHops(s)
+    const flows = s.flows()
+    const actor = actorOf(s, flows, leg)
+
+    expect(CallFacts.ofActor(flows, actor).msgIdxs).toEqual([0, 1, 4, 5, 7, 8])
     expect(CallFacts.ofActor(flows, actor).msgIdxs).toEqual(CallFacts.ofVantage(flows, s.sut, leg.vantage()).msgIdxs)
+    expect(CallFacts.atVantage(flows, s.sut, leg.vantage())).toBe(CallFacts.atActor(flows, actor))
+    expect(CallFacts.atActor(flows, actor).timeline.entries.map((e) => [e.msg, e.retransmissions])).toEqual([
+      [0, 1],
+      [4, 0],
+      [5, 0],
+      [7, 0],
+      [8, 0]
+    ])
+  })
+
+  it("of an actor that brings other messages than the facts kept for its hop were read off is refused", () => {
+    const s = scenario()
+    const leg = threeHops(s)
+    const flows = s.flows()
+    const actor = actorOf(s, flows, leg)
+    CallFacts.atVantage(flows, s.sut, leg.vantage())
+    const withoutRetransmissions = { ...actor, msgIdxs: actor.msgIdxs.filter((i) => !flows.legs[leg.index]!.msgs[i]!.retx) }
+
+    expect(() => CallFacts.atActor(flows, withoutRetransmissions)).toThrow(
+      "position leg 0 hop 0 brings 5 messages where its kept facts were read off 6"
+    )
   })
 
   it("reads a party that speaks from a second address as the same party", () => {

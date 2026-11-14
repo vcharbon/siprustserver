@@ -62,16 +62,23 @@ export interface Position {
   /** The boundary hop that names the position, or {@link WHOLE_LEG}. */
   readonly hop: number
   readonly msgIdxs: ReadonlyArray<number>
+  /**
+   * How many indices `msgIdxs` holds, where the position's maker brings its
+   * own list: a request that finds kept facts throws where they were read off
+   * another count, since the list is then not the hop's own.
+   */
+  readonly held?: number
   /** The system's address set: what makes a message the system's or the party's. */
   readonly sut: SutSet
 }
 
-/** The position an actor of a layout observes its call at. */
+/** The position an actor of a layout observes its call at; the actor's own indices are checked by count. */
 export const ofActor = (flows: Flows.FlowsDoc, a: ActorObs): Position => ({
   flows,
   leg: a.origLeg,
   hop: a.hop,
   msgIdxs: a.msgIdxs,
+  held: a.msgIdxs.length,
   sut: a.sutSet
 })
 
@@ -232,11 +239,17 @@ export interface Cost {
   readonly indexed: number
 }
 
+/** The facts kept for a position, with how many messages they were read off. */
+interface Kept {
+  readonly facts: LegFacts
+  readonly msgs: number
+}
+
 interface FileFacts {
   visits: number
   indexed: number
   endUs: number | undefined
-  readonly bySut: WeakMap<SutSet, Map<string, LegFacts>>
+  readonly bySut: WeakMap<SutSet, Map<string, Kept>>
   readonly tagsBySut: WeakMap<SutSet, PartyTags>
 }
 
@@ -344,15 +357,24 @@ export const legFacts = (p: Position): LegFacts => {
   }
   const key = `${p.leg}:${p.hop}`
   const known = positions.get(key)
-  if (known !== undefined) return known
+  if (known !== undefined) {
+    if (p.held !== undefined && p.held !== known.msgs) {
+      throw new Error(
+        `position leg ${p.leg} hop ${p.hop} brings ${p.held} messages where its kept facts were read off ${known.msgs}`
+      )
+    }
+    return known.facts
+  }
   const msgIdxs = p.msgIdxs
   const wholeKey = `${p.leg}:${WHOLE_LEG}`
   const whole = msgIdxs.length === legOf(p.flows, p.leg).msgs.length
-  const facts =
-    (whole ? positions.get(wholeKey) : undefined) ?? factsOf(file, p.flows, timelineOf(file, p, msgIdxs))
-  positions.set(key, facts)
-  if (whole) positions.set(wholeKey, facts)
-  return facts
+  const kept: Kept = (whole ? positions.get(wholeKey) : undefined) ?? {
+    facts: factsOf(file, p.flows, timelineOf(file, p, msgIdxs)),
+    msgs: msgIdxs.length
+  }
+  positions.set(key, kept)
+  if (whole) positions.set(wholeKey, kept)
+  return kept.facts
 }
 /** {@link legFacts} of an actor's position. */
 export const atActor = (flows: Flows.FlowsDoc, a: ActorObs): LegFacts => legFacts(ofActor(flows, a))
