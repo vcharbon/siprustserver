@@ -83,8 +83,17 @@ pub enum Rule {
     /// call's in another header. Anchor: each call's first INVITE. The left
     /// call's `left` header and the right call's `right` header yield equal
     /// keys: the right call was set up off the left one. `Call-ID` is a header
-    /// like any other.
-    HeaderPair { name: String, left: HeaderSide, right: HeaderSide },
+    /// like any other, read off the call's own Call-ID.
+    HeaderPair {
+        name: String,
+        left: HeaderSide,
+        right: HeaderSide,
+        /// Maximum gap between the two INVITEs: a right call joins the left
+        /// call of its key whose INVITE is nearest in time within it. Absent
+        /// means no window: every left call of its key.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        window_ms: Option<u64>,
+    },
     /// Reroute / failover chain, CALL-LEVEL: it reads whole-call facts — this
     /// call's terminal failure, that call's start — never individual messages.
     /// A final joins the NEXT candidate INVITE only, so a chain of N attempts
@@ -173,7 +182,7 @@ mod tests {
         { "name": "icid", "kind": "header-key", "header": "P-Charging-Vector", "pattern": "icid-value=(?<key>[^;\\s]+)" },
         { "name": "linked-leg", "kind": "header-pair",
           "left": { "header": "Call-ID", "pattern": "^(?<key>\\S+)$" },
-          "right": { "header": "X-Linked-Call", "pattern": "^(?<key>\\S+)$" } },
+          "right": { "header": "X-Linked-Call", "pattern": "^(?<key>\\S+)$" }, "window_ms": 5000 },
         { "name": "reroute-busy", "kind": "retry", "match": ["to-user"], "finals": ["486", "5xx"], "window_ms": 15000 },
         { "name": "reroute-reject", "kind": "retry", "finals": ["403"], "window_ms": 15000 },
         { "name": "attended-transfer", "kind": "replaces" },
@@ -189,6 +198,8 @@ mod tests {
         assert!(file.violations().is_empty());
         let matchless = file.rules.iter().find(|r| r.name() == "reroute-reject").unwrap();
         assert!(matches!(matchless, Rule::Retry { match_on, .. } if match_on.is_empty()));
+        let pair = file.rules.iter().find(|r| r.name() == "linked-leg").unwrap();
+        assert!(matches!(pair, Rule::HeaderPair { window_ms: Some(5000), .. }));
     }
 
     #[test]

@@ -14,7 +14,7 @@
  * `excluded.json` record beside them (`cut-contract.ts`).
  */
 import { type Pivot as PivotDoc, Flows, Pivot } from "@sip/contracts"
-import { CaseAssembler, Cut, FlowsFile, Parts, Plan, Profile, Sut } from "@sip/pipeline"
+import { CaseAssembler, Cut, FlowsFile, HeaderPairJoin, Parts, Plan, Profile, Sut } from "@sip/pipeline"
 import { type ExclusionRecord, exclusionRecordOf } from "@sip/pipeline/exclusion-record"
 import * as Effect from "effect/Effect"
 import * as FileSystem from "effect/FileSystem"
@@ -36,6 +36,8 @@ export interface NeutralCut {
   readonly refused: ReadonlyArray<ExclusionRecord>
   /** The system under test the cut decided, and why. */
   readonly sut: string
+  /** The leg rules of a `skip` set the cut left out, the flows document projecting not their headers. */
+  readonly skipped: ReadonlyArray<HeaderPairJoin.SkippedRule>
 }
 
 /** The name of `capture`'s `n`th call: its file name's stem and the number. */
@@ -76,11 +78,21 @@ const flowsOf = (work: CaptureWork) =>
     return flows
   })
 
+/** Why the capture index of a flows document could not be built, with the remedy where a leg rule's header is not projected. */
+const indexFailure = (error: unknown): string =>
+  error instanceof HeaderPairJoin.UnprojectedHeaders
+    ? `${error.message}: name ${error.missing.join(", ")} in the deployment's Tools.emitHeaders`
+    : error instanceof Error
+    ? error.message
+    : String(error)
+
 /**
  * The flows document of `work`, cut and written into its `outDir`, wiped first.
  * Its legs are correlated once, by the assembler's index, and the cut and the
  * case set both read that index. A document that does not project a header a
- * leg rule names is {@link Unreadable}.
+ * leg rule of a `require` set reads is {@link Unreadable}, naming the
+ * deployment's `Tools.emitHeaders`; a rule of a `skip` set is left out of its
+ * joins and named in {@link NeutralCut.skipped}.
  */
 export const cutCapture = Effect.fn("NeutralCut.cutCapture")(function*(work: CaptureWork) {
   const fs = yield* FileSystem.FileSystem
@@ -89,7 +101,7 @@ export const cutCapture = Effect.fn("NeutralCut.cutCapture")(function*(work: Cap
   const decision = Sut.decideSut(flows, ANY_ADDRESS, work.capture)
   const index = yield* Effect.try({
     try: () => assembler.index(flows, NO_PLAN),
-    catch: (error) => new Unreadable({ reason: `${work.capture}: ${error instanceof Error ? error.message : String(error)}` })
+    catch: (error) => new Unreadable({ reason: `${work.capture}: ${indexFailure(error)}` })
   })
   let n = 0
   const cut = Cut.cutCalls(flows, decision.sut, work.capture, index.correlation, () => nameOf(work.capture, ++n))
@@ -132,5 +144,5 @@ export const cutCapture = Effect.fn("NeutralCut.cutCapture")(function*(work: Cap
   if (refused.length > 0) {
     yield* fs.writeFileString(path.join(work.outDir, EXCLUDED), `${JSON.stringify(refused, null, 2)}\n`)
   }
-  return { cases, refused, sut: decision.evidence } satisfies NeutralCut
+  return { cases, refused, sut: decision.evidence, skipped: index.correlation.skipped } satisfies NeutralCut
 })

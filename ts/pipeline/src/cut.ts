@@ -26,10 +26,10 @@
  * it continues, which is what keeps an in-dialog PRACK or BYE arriving from a
  * DIFFERENT peer address on the leg it belongs to instead of dropping it.
  */
-import { Flows, type Rules } from "@sip/contracts"
+import { Flows } from "@sip/contracts"
 import type { CaptureInput, CaptureRule } from "./capture-rules.js"
 import type { CallIdDerivation } from "./derivation.js"
-import { headerPairBases } from "./header-pair-join.js"
+import { headerPairJoins, type LegRules, NO_LEG_RULES, type SkippedRule } from "./header-pair-join.js"
 import type { Refusal } from "./policy.js"
 import { checkRefusalRoster } from "./refusal-roster.js"
 import { refusalOf } from "./refusal-rule.js"
@@ -127,26 +127,35 @@ export const boundaryHops = (leg: Flows.Leg, sut: SutSet): ReadonlyArray<number>
     .filter((i) => i >= 0)
 
 /**
- * The correlation of one capture: the families and the derivation edges they
- * are closed over. Built ONCE per capture and read by every consumer — a
- * capture of thousands of dialogs yields hundreds of cases, and correlating
- * per case is cases × legs².
+ * One join of the correlation: a leg was set up off the leg `base`, by the
+ * Call-ID derivation, or by the leg rule named `rule`.
+ */
+export type LegJoin =
+  | { readonly base: number; readonly by: "derivation" }
+  | { readonly base: number; readonly by: "rule"; readonly rule: string }
+
+/**
+ * The correlation of one capture: the families and the joins they are closed
+ * over, the derivation's and the leg rules'. Built ONCE per capture and read
+ * by every consumer — a capture of thousands of dialogs yields hundreds of
+ * cases, and correlating per case is cases × legs².
  */
 export interface Correlation {
   /** Every family, ascending by first leg, each ascending. */
   readonly families: ReadonlyArray<ReadonlyArray<number>>
   /** The family `leg` belongs to. */
   readonly familyOf: (leg: number) => ReadonlyArray<number>
-  /**
-   * Every leg `leg` was set up off: the derivation says its Call-ID was minted
-   * off theirs, or a `header-pair` rule joins it to them as the right side.
-   */
+  /** Every join making `leg` set up off another leg, each with what joined them. */
+  readonly joinsOf: (leg: number) => ReadonlyArray<LegJoin>
+  /** Every leg `leg` was set up off, each once: the bases of {@link Correlation.joinsOf}. */
   readonly basesOf: (leg: number) => ReadonlyArray<number>
+  /** The leg rules of a `skip` set the document left out, not projecting their headers. */
+  readonly skipped: ReadonlyArray<SkippedRule>
 }
 
 /**
  * Correlation over every leg of the document: the transitive closure of the
- * derivation relation and of the joins its `header-pair` rules state
+ * derivation relation and of the joins its leg rules state
  * (`./header-pair-join.ts`), and nothing else. With no rule it is the
  * derivation's closure alone.
  *
@@ -161,15 +170,18 @@ export interface Correlation {
  * Linear in the legs: a derived Call-ID ENDS WITH its base (`./derivation.ts`),
  * so the bases a leg can have are its Call-ID's proper suffixes, looked up in an
  * index of every Call-ID, and the predicate is asked about those alone; a
- * rule's joins are one index lookup per leg. Throws where `flows` does not
- * project a header a rule names.
+ * rule's joins are one index lookup per leg. Throws `UnprojectedHeaders` where
+ * `flows` does not project a header a rule of a `require` set reads.
  */
 export const correlate = (
   flows: Flows.FlowsDoc,
   derives: CallIdDerivation,
-  rules: ReadonlyArray<Rules.HeaderPairRule> = []
+  legRules: LegRules = NO_LEG_RULES
 ): Correlation => {
-  const bases: Array<Array<number>> = headerPairBases(flows, rules).map((legs) => [...legs])
+  const ruled = headerPairJoins(flows, legRules)
+  const joins: Array<Array<LegJoin>> = ruled.joins.map((legs) =>
+    legs.map(({ base, rule }) => ({ base, by: "rule", rule }))
+  )
   const byCallId = new Map<string, Array<number>>()
   let shortest = Number.MAX_SAFE_INTEGER
   flows.legs.forEach((leg, i) => {
@@ -189,8 +201,8 @@ export const correlate = (
     const rb = find(b)
     if (ra !== rb) parent[Math.max(ra, rb)] = Math.min(ra, rb)
   }
-  bases.forEach((legs, i) => {
-    for (const base of legs) union(base, i)
+  joins.forEach((legs, i) => {
+    for (const { base } of legs) union(base, i)
   })
   flows.legs.forEach((leg, i) => {
     const id = leg.call_id
@@ -198,11 +210,12 @@ export const correlate = (
       const candidates = byCallId.get(id.slice(cut))
       if (candidates === undefined || !derives(id.slice(cut), id)) continue
       for (const base of candidates) {
-        bases[i]!.push(base)
+        joins[i]!.push({ base, by: "derivation" })
         union(base, i)
       }
     }
   })
+  const bases = joins.map((legs) => [...new Set(legs.map(({ base }) => base))])
   const by = new Map<number, Array<number>>()
   const familyOf: Array<ReadonlyArray<number>> = []
   flows.legs.forEach((_, i) => {
@@ -215,7 +228,9 @@ export const correlate = (
   return {
     families: [...by.values()].sort((a, b) => a[0]! - b[0]!),
     familyOf: (leg) => familyOf[leg] ?? [],
-    basesOf: (leg) => bases[leg] ?? []
+    joinsOf: (leg) => joins[leg] ?? [],
+    basesOf: (leg) => bases[leg] ?? [],
+    skipped: ruled.skipped
   }
 }
 
@@ -223,8 +238,8 @@ export const correlate = (
 export const callFamilies = (
   flows: Flows.FlowsDoc,
   derives: CallIdDerivation,
-  rules: ReadonlyArray<Rules.HeaderPairRule> = []
-): ReadonlyArray<ReadonlyArray<number>> => correlate(flows, derives, rules).families
+  legRules: LegRules = NO_LEG_RULES
+): ReadonlyArray<ReadonlyArray<number>> => correlate(flows, derives, legRules).families
 
 interface Anchor {
   readonly leg: number

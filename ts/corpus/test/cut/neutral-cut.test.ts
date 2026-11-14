@@ -1,12 +1,14 @@
 /**
  * The neutral cut of one capture (`src/cut/neutral-cut.ts`), the base
  * generator's step, under an assembler whose Call-ID derivation counts how
- * often it is asked, or whose leg rule counts how often it is compiled: the
- * capture's legs are correlated once, whatever the number of calls it holds.
+ * often it is asked, or whose leg rule counts how often it is compiled and
+ * how often it reads a leg: the capture's legs are correlated once, whatever
+ * the number of calls it holds, and the rule reads each leg at most once per
+ * side.
  */
 import { NodeServices } from "@effect/platform-node"
-import type { Flows, Rules } from "@sip/contracts"
-import { CaseAssembler, LogicExtractor, Policy } from "@sip/pipeline"
+import type { Flows } from "@sip/contracts"
+import { CaseAssembler, type HeaderPairJoin, LogicExtractor, Policy } from "@sip/pipeline"
 import type { CallIdDerivation } from "@sip/pipeline/derivation"
 import { neverDerives } from "@sip/pipeline/derivation"
 import * as Effect from "effect/Effect"
@@ -16,18 +18,18 @@ import * as os from "node:os"
 import * as path from "node:path"
 import { afterAll, describe, expect, it } from "vitest"
 import { counting, manyCallsFlows, suffixDerives } from "../../../pipeline/test/fixtures.js"
-import { countingPatterns, LINK_RULE, linkedCallsFlows } from "../../../pipeline/test/linked-legs.js"
+import { countingRule, LINK_RULE, linkedCallsFlows, REF_RULE, requiring, skipping } from "../../../pipeline/test/linked-legs.js"
 import { cutCapture } from "../../src/cut/neutral-cut.js"
 
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), "neutral-cut-test-"))
 afterAll(() => fs.rmSync(dir, { recursive: true, force: true }))
 
 /** The assembler bound to a policy joining legs by `derives` and `legRules` and stating nothing else. */
-const assemblerJoining = (derives: CallIdDerivation, legRules: ReadonlyArray<Rules.HeaderPairRule>) =>
+const assemblerJoining = (derives: CallIdDerivation, legRules: HeaderPairJoin.LegRules) =>
   CaseAssembler.layer.pipe(Layer.provide(LogicExtractor.layerWith(Policy.policyWith({ derives, legRules }))))
 
 /** The neutral cut of the capture `capture` whose flows document is `flows`, its legs joined by `derives` and `legRules`. */
-const cutOf = (capture: string, flows: Flows.FlowsDoc, derives: CallIdDerivation, legRules: ReadonlyArray<Rules.HeaderPairRule> = []) => {
+const cutOf = (capture: string, flows: Flows.FlowsDoc, derives: CallIdDerivation, legRules: HeaderPairJoin.LegRules = requiring()) => {
   const srcDir = path.join(dir, capture, "src")
   fs.mkdirSync(srcDir, { recursive: true })
   fs.writeFileSync(path.join(srcDir, `${capture}.flows.json`), JSON.stringify(flows))
@@ -43,7 +45,9 @@ const cutOf = (capture: string, flows: Flows.FlowsDoc, derives: CallIdDerivation
  * document is its base: one correlation asks the derivation once per call,
  * and a second one anywhere in the cut asks every derived leg again. A leg
  * rule is compiled once per correlation, so a second one anywhere in the cut
- * reads its patterns again.
+ * reads its patterns again; it reads each side's header once per leg it
+ * indexes or looks up and once to check the projection, so a join that scans
+ * the legs per leg reads them legs² times.
  */
 describe("the neutral cut of a capture", () => {
   it.each([1, 3, 40])("asks the derivation about each derived leg once, over %i calls", async (calls) => {
@@ -54,16 +58,34 @@ describe("the neutral cut of a capture", () => {
     expect(counted.count()).toBe(calls)
   })
 
-  it.each([1, 3, 40])("joins the legs a header-pair rule links in one correlation, over %i calls", async (calls) => {
-    const counted = countingPatterns(LINK_RULE)
-    const cut = await cutOf(`linked-${calls}.pcap`, linkedCallsFlows(calls), neverDerives, [counted.rule])
+  it.each([
+    ["linked-call", LINK_RULE, 1],
+    ["linked-call", LINK_RULE, 3],
+    ["linked-call", LINK_RULE, 40],
+    ["parent-ref", REF_RULE, 1],
+    ["parent-ref", REF_RULE, 3],
+    ["parent-ref", REF_RULE, 40]
+  ] as const)("joins the legs the header-pair rule %s links in one correlation reading each leg once per side, over %i calls", async (_, rule, calls) => {
+    const counted = countingRule(rule)
+    const legs = 2 * calls
+    const cut = await cutOf(`linked-${rule.name}-${calls}.pcap`, linkedCallsFlows(calls, rule), neverDerives, requiring(counted.rule))
     expect(cut.cases).toHaveLength(calls)
     expect(cut.refused, "every callee leg joined to the caller leg it names").toEqual([])
-    expect(counted.count(), "each side's pattern read by one correlation").toBe(2)
+    expect(counted.patterns(), "each side's pattern read by one correlation").toBe(2)
+    expect(counted.headers(), "each side's header read once per leg and once for the projection").toBeLessThanOrEqual(2 * (legs + 1))
   })
 
-  it("does not cut a capture whose flows document does not project a header the leg rule reads", async () => {
-    const unprojected = { ...linkedCallsFlows(1), emit_headers: ["Call-ID"] }
-    await expect(cutOf("unprojected.pcap", unprojected, neverDerives, [LINK_RULE])).rejects.toThrow("--emit-headers Call-ID,X-Linked-Call")
+  it("does not cut a capture whose flows document does not project a header a required leg rule reads, naming Tools.emitHeaders", async () => {
+    const unprojected = { ...linkedCallsFlows(1), emit_headers: [] }
+    await expect(cutOf("unprojected.pcap", unprojected, neverDerives, requiring(LINK_RULE))).rejects.toThrow(
+      `the leg rule "linked-call" reads X-Linked-Call: name X-Linked-Call in the deployment's Tools.emitHeaders`
+    )
+  })
+
+  it("cuts a capture whose flows document does not project a header a skipped leg rule reads without it, naming it", async () => {
+    const unprojected = { ...linkedCallsFlows(1), emit_headers: [] }
+    const cut = await cutOf("skipped.pcap", unprojected, neverDerives, skipping(LINK_RULE))
+    expect(cut.skipped).toEqual([{ rule: "linked-call", missing: ["X-Linked-Call"] }])
+    expect(cut.cases, "the callee leg joined to no caller leg").toEqual([])
   })
 })

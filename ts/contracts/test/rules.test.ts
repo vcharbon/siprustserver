@@ -31,7 +31,8 @@ const FILE = {
       name: "linked-leg",
       kind: "header-pair",
       left: { header: "Call-ID", pattern: "^(?<key>\\S+)$" },
-      right: { header: "X-Linked-Call", pattern: "^(?<key>\\S+)$" }
+      right: { header: "X-Linked-Call", pattern: "^(?<key>\\S+)$" },
+      window_ms: 5000
     },
     { name: "reroute-busy", kind: "retry", match: ["to-user"], finals: ["486", "5xx"], window_ms: 15000 },
     { name: "reroute-reject", kind: "retry", finals: ["403"], window_ms: 15000 },
@@ -56,6 +57,7 @@ describe("the six kinds", () => {
     ])
     const matchless = file.rules.find((r) => r.name === "reroute-reject")
     expect(matchless?.kind === "retry" && matchless.match).toBeUndefined()
+    expect(file.rules.find((r) => r.name === "linked-leg")).toMatchObject({ window_ms: 5000 })
     expect(ruleFileViolations(file)).toEqual([])
     expect(() => validateRuleFile(file)).not.toThrow()
   })
@@ -66,8 +68,8 @@ describe("the six kinds", () => {
     expect(format(encodeRuleFile(decodeRuleFileSync(JSON.parse(once) as unknown)))).toBe(once)
   })
 
-  it("names every header a rule reads, so the emitter can be asked for it", () => {
-    expect(headersNamedBy(file.rules)).toEqual(["P-Charging-Vector", "Call-ID", "X-Linked-Call"])
+  it("names every header a rule reads, so the emitter can be asked for it, but Call-ID, read off the leg", () => {
+    expect(headersNamedBy(file.rules)).toEqual(["P-Charging-Vector", "X-Linked-Call"])
   })
 })
 

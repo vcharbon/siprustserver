@@ -94,10 +94,18 @@ Anchor: first INVITE of each call. `Call-ID` is a header like any other.
 
 Join when a left call's `left` key equals a right call's `right` key: the
 right call was set up off the left one. Each side's `pattern` needs its `key`
-group. No window. A key several calls yield joins each pair, flagged as an
-ambiguity. Besides the engine, the case cut (`ts/pipeline` `cut.ts`) joins a
-capture's legs by this kind beside its Call-ID derivation; the base's case
-generator reads `ts/corpus/data/default.rules.json` unless told otherwise.
+group. A side whose `header` is `Call-ID` reads the call's own Call-ID, so no
+projection is asked for it. Optional `window_ms` between the two INVITEs
+(default: none): with it, a right call joins the left call of its key whose
+INVITE is nearest its own within the window (the earlier on a tie), and none
+outside it; without it, every left call of its key.
+
+The engine flags a key that joins a call to several others as an ambiguity.
+The case cut (`ts/pipeline` `cut.ts`) also joins a capture's legs by this kind,
+beside its Call-ID derivation. It does not flag anything: a leg joins every
+left leg of its key (or the nearest within the window), and every leg it is
+joined to becomes part of the same call. The base's case generator reads
+`ts/corpus/data/default.rules.json` unless told otherwise.
 
 ### 3. `retry`
 Reroute / failover chain. A CALL-LEVEL rule (ruled 2026-08-20): it

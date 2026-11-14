@@ -44,7 +44,10 @@ export interface InitialInvite {
   readonly fromUser?: string
   readonly toUser?: string
   readonly replaces?: DialogRef
-  /** Any projected header of the initial INVITE, for `header-key` and `header-pair` rules. */
+  /**
+   * Any projected header of the initial INVITE, for `header-key` and
+   * `header-pair` rules; `Call-ID` is its leg's own.
+   */
   readonly headers: (name: string) => Array<string>
   readonly msg: Flows.Msg
 }
@@ -90,15 +93,16 @@ export const callsOf = (doc: Flows.FlowsDoc): Array<Call> => {
     // Which message is the CALL's initial INVITE is the extractor's verdict, not
     // a scan for the earliest INVITE repeated by every consumer.
     const at = group.initial_invite
-    const inviteMsg = at === undefined ? undefined : doc.legs[at.leg]?.msgs[at.msg]
-    const invite: InitialInvite | undefined = inviteMsg
+    const inviteLeg = at === undefined ? undefined : doc.legs[at.leg]
+    const inviteMsg = at === undefined ? undefined : inviteLeg?.msgs[at.msg]
+    const invite: InitialInvite | undefined = inviteLeg !== undefined && inviteMsg !== undefined
       ? {
           ts_ms: ms(inviteMsg.ts_us),
           ...user("ruriUser", Flows.userOf(inviteMsg.identities.ruri)),
           ...user("fromUser", Flows.userOf(inviteMsg.identities.from)),
           ...user("toUser", Flows.userOf(inviteMsg.identities.to)),
           ...(inviteMsg.replaces ? { replaces: dialogRef(inviteMsg.replaces) } : {}),
-          headers: (name: string) => Flows.headerValues(inviteMsg, name),
+          headers: (name: string) => Flows.ruleHeaderValues(inviteLeg.call_id, inviteMsg, name),
           msg: inviteMsg
         }
       : undefined

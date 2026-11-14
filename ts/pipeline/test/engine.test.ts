@@ -7,7 +7,16 @@ import { describe, expect, it } from "vitest"
 import { callsOf } from "../src/call.js"
 import { correlate } from "../src/engine.js"
 import { cancelRaceFlows, rerouteFlows } from "./fixtures.js"
-import { calleeLeg, callerLeg, LINK_RULE, linkedDoc } from "./linked-legs.js"
+import {
+  calleeLeg,
+  callerLeg,
+  dialledLeg,
+  LINK_RULE,
+  linkedDoc,
+  PARENT_REF_HEADER,
+  REF_HEADER,
+  REF_RULE
+} from "./linked-legs.js"
 
 const CALL_ID_RULE: Rules.Rule = {
   kind: "call-id",
@@ -119,6 +128,35 @@ describe("header-pair joins", () => {
       ["linked-call", "g0", "left", ["g1", "g2"]]
     ])
     expect(out.groups.map((g) => g.calls)).toEqual([["g0", "g1", "g2"]])
+  })
+
+  describe("two unrelated calls an hour apart whose short references are equal", () => {
+    const flows = linkedDoc([
+      callerLeg("caller-1@192.0.2.9", 0, [[REF_HEADER, "7"]]),
+      dialledLeg("callee-1@192.0.2.1", 10, [[PARENT_REF_HEADER, "7"]]),
+      callerLeg("caller-2@192.0.2.9", 3_600_000, [[REF_HEADER, "7"]]),
+      dialledLeg("callee-2@192.0.2.1", 3_600_010, [[PARENT_REF_HEADER, "7"]])
+    ])
+
+    it("are one group without a window, every join flagged", () => {
+      const out = correlate(callsOf(flows), [REF_RULE])
+      expect(out.joins.map((j) => [j.left, j.right, j.ambiguous])).toEqual([
+        ["g0", "g1", true],
+        ["g2", "g1", true],
+        ["g0", "g3", true],
+        ["g2", "g3", true]
+      ])
+      expect(out.groups.map((g) => g.calls)).toEqual([["g0", "g1", "g2", "g3"]])
+    })
+
+    it("are two groups under a window, each right call joining the nearest left call within it", () => {
+      const out = correlate(callsOf(flows), [{ ...REF_RULE, window_ms: 5_000 }])
+      expect(out.joins.map((j) => [j.left, j.right, j.ambiguous])).toEqual([
+        ["g0", "g1", false],
+        ["g2", "g3", false]
+      ])
+      expect(out.groups.map((g) => g.calls)).toEqual([["g0", "g1"], ["g2", "g3"]])
+    })
   })
 })
 

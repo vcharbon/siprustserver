@@ -49,8 +49,8 @@ export interface CaptureInput {
 export interface Interface {
   /**
    * The index of one capture under the bound policy's derivation and leg
-   * rules: its one correlation and forms table. Throws where `flows` does not
-   * project a header a leg rule names.
+   * rules: its one correlation and forms table. Throws `UnprojectedHeaders`
+   * where `flows` does not project a header a rule of a `require` set reads.
    */
   readonly index: (flows: Flows.FlowsDoc, plan: Plan) => CaptureIndex
   /** Every case this capture yields, generated or refused; a defect where `input.index` is not of `input.flows` and `input.plan`. */

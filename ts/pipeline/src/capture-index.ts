@@ -9,9 +9,10 @@
  * (`cutCalls`, its `correlation`) and to the case set (`decideCases`), so
  * both join the capture's legs by one reading.
  */
-import type { Flows, Rules } from "@sip/contracts"
+import type { Flows } from "@sip/contracts"
 import { correlate, type Correlation } from "./cut.js"
 import type { CallIdDerivation } from "./derivation.js"
+import { type LegRules, NO_LEG_RULES } from "./header-pair-join.js"
 import type { Plan } from "./plan.js"
 import { formsTable, type FormsTable } from "./forms.js"
 
@@ -25,16 +26,16 @@ export interface CaptureIndex {
 }
 
 /**
- * The index of `flows`, its legs correlated by `derives` and by the
- * `header-pair` `rules`, its numbers read under `plan`. Throws where `flows`
- * does not project a header a rule names.
+ * The index of `flows`, its legs correlated by `derives` and by `legRules`,
+ * its numbers read under `plan`. Throws `UnprojectedHeaders` where `flows`
+ * does not project a header a rule of a `require` set reads.
  */
 export const captureIndex = (
   flows: Flows.FlowsDoc,
   derives: CallIdDerivation,
   plan: Plan,
-  rules: ReadonlyArray<Rules.HeaderPairRule> = []
-): CaptureIndex => ({ flows, plan, correlation: correlate(flows, derives, rules), forms: formsTable(flows, plan) })
+  legRules: LegRules = NO_LEG_RULES
+): CaptureIndex => ({ flows, plan, correlation: correlate(flows, derives, legRules), forms: formsTable(flows, plan) })
 
 /**
  * `index`, where it was built of this very `flows` document under this very

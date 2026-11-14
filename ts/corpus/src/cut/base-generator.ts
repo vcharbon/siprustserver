@@ -10,11 +10,13 @@
  * or the upstream B2BUA's `<n>-<base>`.
  *
  * `--correlation-rules` names the rule file whose `header-pair` rules join
- * legs beside the derivation (`leg-rules.ts`): the base's default set
- * (`data/default.rules.json`, Asterisk's `X-CID` against the caller leg's
- * `Call-ID`) where none is named. Every flows document cut projects the
- * headers its rules name, or its capture is not cut. A rule file that does not
- * read is refused whole, exit 2 naming it.
+ * legs beside the derivation (`leg-rules.ts`); a flows document that does not
+ * project a header they read (`Tools.Interface.emitHeaders`) is not cut. Where
+ * none is named, the base's default set (`data/default.rules.json`, `X-CID`
+ * against the caller leg's Call-ID, as Asterisk dialplans set it) joins legs,
+ * and a document that does not project its headers is cut without it, the
+ * capture's `[cut]` line naming the rule skipped. A rule file that does not
+ * read, or whose patterns do not compile, is refused whole, exit 2 naming it.
  *
  * Each capture of the work list (`cut-contract.ts`) is cut by the neutral cut
  * (`neutral-cut.ts`) from the one flows document its source directory holds,
@@ -26,9 +28,9 @@
  * file does not read.
  */
 import { NodeRuntime, NodeServices } from "@effect/platform-node"
-import { type Rules, Tokens } from "@sip/contracts"
+import { Tokens } from "@sip/contracts"
 import { ANY_LANE } from "@sip/driver/lanes"
-import { CaseAssembler, LogicExtractor, Policy } from "@sip/pipeline"
+import { CaseAssembler, type HeaderPairJoin, LogicExtractor, Policy } from "@sip/pipeline"
 import { type CallIdDerivation, counterPrefixed, neverDerives } from "@sip/pipeline/derivation"
 import * as Console from "effect/Console"
 import * as Effect from "effect/Effect"
@@ -53,12 +55,23 @@ const flags = {
   ),
   rules: Flag.string("correlation-rules").pipe(
     Flag.withDescription(
-      "A rule file whose header-pair rules join legs beside the derivation; the base's default set " +
-        "(Asterisk's X-CID against the caller leg's Call-ID) where none is named"
+      "A rule file whose header-pair rules join legs beside the derivation, every header they read projected " +
+        "or the capture is not cut; where none is named, the base's default set (X-CID against the caller leg's " +
+        "Call-ID, as Asterisk dialplans set it), skipped on a capture not projecting X-CID"
     ),
-    Flag.withDefault(DEFAULT_RULES)
+    Flag.optional
   )
 }
+
+/**
+ * The leg rules `named` states, required of every document; the default set
+ * where none is named, skipped where a document does not project its headers.
+ */
+const legRulesNamed = (named: Option.Option<string>) =>
+  Option.match(named, {
+    onNone: () => Effect.map(legRulesOf(DEFAULT_RULES), (rules): HeaderPairJoin.LegRules => ({ rules, unprojected: "skip" })),
+    onSome: (file) => Effect.map(legRulesOf(file), (rules): HeaderPairJoin.LegRules => ({ rules, unprojected: "require" }))
+  })
 
 /** The Call-ID derivations by the name `--call-id-derivation` gives them. */
 const DERIVATIONS: Readonly<Record<"none" | "counter-prefix", CallIdDerivation>> = { none: neverDerives, "counter-prefix": counterPrefixed }
@@ -69,7 +82,7 @@ const DERIVATIONS: Readonly<Record<"none" | "counter-prefix", CallIdDerivation>>
  * joins are the policy's, so the cut and the assembly of a capture join its
  * legs alike.
  */
-const assemblerUnder = (derives: CallIdDerivation, legRules: ReadonlyArray<Rules.HeaderPairRule>) =>
+const assemblerUnder = (derives: CallIdDerivation, legRules: HeaderPairJoin.LegRules) =>
   CaseAssembler.layer.pipe(
     Layer.provide(
       LogicExtractor.layerWith(
@@ -77,6 +90,11 @@ const assemblerUnder = (derives: CallIdDerivation, legRules: ReadonlyArray<Rules
       )
     )
   )
+
+/** What a capture's line says of a default rule its flows document left out, and the two remedies. */
+const skippedLine = (skipped: HeaderPairJoin.SkippedRule): string =>
+  `the default leg rule "${skipped.rule}" is skipped: the flows document does not project ${skipped.missing.join(", ")}; ` +
+  "project it through the deployment's Tools.emitHeaders, or name a rule set with --correlation-rules"
 
 /** One capture's line, appended to `manifest` where one is named. */
 const said = (manifest: Option.Option<string>, line: CaptureCut) =>
@@ -99,7 +117,7 @@ const command = Command.make("base-generator", flags, (input) =>
       process.exitCode = 2
       return
     }
-    const rules = yield* legRulesOf(input.rules).pipe(Effect.result)
+    const rules = yield* legRulesNamed(input.rules).pipe(Effect.result)
     if (rules._tag === "Failure") {
       yield* Console.error(`base-generator: ${rules.failure.message}`)
       process.exitCode = 2
@@ -112,6 +130,7 @@ const command = Command.make("base-generator", flags, (input) =>
           ? { capture: work.capture, cut: true }
           : { capture: work.capture, cut: false, error: done.failure.message }
         if (done._tag === "Success") {
+          for (const skipped of done.success.skipped) yield* Console.log(`[cut] ${work.capture}: ${skippedLine(skipped)}`)
           for (const record of done.success.refused) yield* Console.log(`[cut] ${record.caseId}: EXCLUDED ${record.reason}`)
         }
         yield* said(input.manifest, line)

@@ -18,7 +18,7 @@
  * Extension is Layer substitution and nothing else: a deployment builds one of
  * these and hands it to {@link CaseAssembler}.
  */
-import type { Call, Case, Flow, Flows, MustFail, Placement, Rules, Tokens } from "@sip/contracts"
+import type { Call, Case, Flow, Flows, MustFail, Placement, Tokens } from "@sip/contracts"
 import type { BackgroundMap } from "./background.js"
 import type * as Captured from "./captured.js"
 import { CAPTURE_RULES, type CaptureRule } from "./capture-rules.js"
@@ -27,6 +27,7 @@ import { CUT_RULES } from "./cut.js"
 import { neverDerives, type CallIdDerivation } from "./derivation.js"
 import { DOCUMENT_RULES, type DocumentRule } from "./document-rules.js"
 import { NO_HEADER_CLASS, type FlowOut, type HeaderClassifier, type StepSource } from "./flowsteps.js"
+import { NO_LEG_RULES, type LegRules } from "./header-pair-join.js"
 import { checkRefusalRoster } from "./refusal-roster.js"
 import type { RuleIdentity } from "./refusal-rule.js"
 import type { ActorObs, JoinsReading, Layout, PartyIdentity } from "./topology.js"
@@ -209,10 +210,11 @@ export interface CasePolicy {
   readonly derives: CallIdDerivation
   /**
    * The `header-pair` correlation rules joining one leg to another beside
-   * {@link CasePolicy.derives}: the cut and the assembly both join a capture's
-   * legs by them. Neutral: none.
+   * {@link CasePolicy.derives}, and what a document not projecting their
+   * headers gets: the cut and the assembly both join a capture's legs by them.
+   * Neutral: none.
    */
-  readonly legRules: ReadonlyArray<Rules.HeaderPairRule>
+  readonly legRules: LegRules
   /** Why each attempt of the chain handed over to the next. */
   readonly chain: (flows: Flows.FlowsDoc, layout: Layout) => ChainReading
   /** The provisional-handling profile the captured platform ran. */
@@ -309,7 +311,7 @@ export interface CasePolicy {
  */
 export const neutralPolicy: CasePolicy = {
   derives: neverDerives,
-  legRules: [],
+  legRules: NO_LEG_RULES,
   chain: () => ({ causes: [], flags: [] }),
   relay18x: () => undefined,
   relaysReinvite: () => false,

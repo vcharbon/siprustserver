@@ -101,9 +101,9 @@ display names, on the callee side's From and To.
 `capture/third-party/` holds two captures copied unchanged from the sipnab repository, taken
 under the MIT License; `capture/third-party/PROVENANCE.md` states their source commit, paths and
 SHA-256, and the licence notice. `test/third-party-captures.test.ts` asserts the hashes, then
-ingests each, projecting the headers the base's default leg rules read (`Call-ID`, `X-CID`), and
-cuts it under no Call-ID derivation and those rules (`@sip/corpus` `data/default.rules.json`,
-read by `cut/leg-rules.ts`). Neither is replayed.
+ingests each, projecting the header the base's default leg rules read off a projection (`X-CID`;
+their `Call-ID` side is the leg's own), and cuts it under no Call-ID derivation and those rules
+(`@sip/corpus` `data/default.rules.json`, read by `cut/leg-rules.ts`). Neither is replayed.
 
 - `refer-transfer.pcap`: two calls through a record-routing proxy, which keeps the Call-ID
   across its hop, each with a blind transfer (RFC 3515). The call whose transfer completes is
@@ -115,4 +115,5 @@ read by `cut/leg-rules.ts`). Neither is replayed.
   reading the callee leg's `X-CID` against the caller leg's `Call-ID`, joins the two legs, so
   each call is cut into a case holding both. Under a rule file stating no rule
   (`--correlation-rules`), no call is cut: each callee leg is refused `missing-upstream-leg`,
-  each caller leg `source-dial-not-captured`.
+  each caller leg `source-dial-not-captured`. Stock Asterisk sets no `X-CID`; the rule is named
+  for the dialplans that set it.

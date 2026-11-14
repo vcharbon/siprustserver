@@ -11,7 +11,7 @@
 import { Flows, type Call, type Case, type Placement, type Tokens } from "@sip/contracts"
 import { captureIndex, type CaptureIndex } from "./capture-index.js"
 import type { CallIdDerivation } from "./derivation.js"
-import { vantageMsgIdxs, type Correlation } from "./cut.js"
+import { vantageMsgIdxs, type Correlation, type LegJoin } from "./cut.js"
 import type { FormsTable } from "./forms.js"
 import { canonical, classKey, type Plan } from "./plan.js"
 import type { SutSet } from "./sut.js"
@@ -142,15 +142,30 @@ export interface Layout {
 export const peerSide = (a: ActorObs, sock: string): boolean => !a.sutSet.has(sock)
 
 /**
- * Two calls one application server minted from a common base call: one derives
- * from the other, or a third leg's Call-ID derives both. Read off the
- * correlation's edges alone, so the index is the one seam to the derivation.
+ * The joins relating two legs set up off one call: those making one set up
+ * off the other, or else those making both set up off a third leg; none where
+ * neither holds. Read off the correlation's joins alone, the derivation's and
+ * the leg rules' alike, so the index is the one seam to either.
  */
-export const relatedByDerivation = (a: number, b: number, correlation: Correlation): boolean => {
-  const basesOfA = new Set(correlation.basesOf(a))
-  const basesOfB = new Set(correlation.basesOf(b))
-  if (basesOfA.has(b) || basesOfB.has(a)) return true
-  return [...basesOfA].some((i) => i !== a && i !== b && basesOfB.has(i))
+export const joinsRelating = (a: number, b: number, correlation: Correlation): ReadonlyArray<LegJoin> => {
+  const ofA = correlation.joinsOf(a)
+  const ofB = correlation.joinsOf(b)
+  const direct = [...ofA.filter((j) => j.base === b), ...ofB.filter((j) => j.base === a)]
+  if (direct.length > 0) return direct
+  const basesOfB = new Set(ofB.map((j) => j.base))
+  const common = new Set(ofA.filter((j) => j.base !== a && j.base !== b && basesOfB.has(j.base)).map((j) => j.base))
+  return [...ofA, ...ofB].filter((j) => common.has(j.base))
+}
+
+/**
+ * The evidence `joins` give two attempts of one chain: the derivation's
+ * wording where it alone relates them, else the leg rules that do, by name.
+ */
+const setUpOffOneCall = (joins: ReadonlyArray<LegJoin>): string => {
+  const rules = [...new Set(joins.flatMap((j) => (j.by === "rule" ? [`"${j.rule}"`] : [])))]
+  if (rules.length === 0) return "the attempts' Call-IDs are application-server derivations of one base call"
+  const derived = joins.some((j) => j.by === "derivation") ? "the Call-ID derivation and " : ""
+  return `the attempts were set up off one call, joined by ${derived}the leg rule${rules.length > 1 ? "s" : ""} ${rules.join(", ")}`
 }
 
 /**
@@ -490,9 +505,8 @@ const chainEvidence = (
   if (Flows.groupsForLegs(flows, [next.origLeg]).some((g) => prevGroups.has(g))) {
     return "both attempts sit in one upstream call group"
   }
-  if (relatedByDerivation(prev.origLeg, next.origLeg, correlation)) {
-    return "the attempts' Call-IDs are application-server derivations of one base call"
-  }
+  const joins = joinsRelating(prev.origLeg, next.origLeg, correlation)
+  if (joins.length > 0) return setUpOffOneCall(joins)
   const hinted = chainHints.some(
     ([x, y]) =>
       (x === prev.origLeg && y === next.origLeg) || (y === prev.origLeg && x === next.origLeg)

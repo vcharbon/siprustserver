@@ -172,7 +172,9 @@ const MATCHERS: {
   /**
    * Anchor: the initial INVITE of each call, the left call's `left` header
    * against the right call's `right` header. The left keys are indexed once and
-   * each right key is looked up, so a key on several calls joins each pair.
+   * each right key is looked up: without a window a key on several calls joins
+   * each pair; with `window_ms`, a right call joins the left call of its key
+   * whose INVITE is nearest its own within the window (the earlier on a tie).
    */
   "header-pair": (rule, calls, emit) => {
     const left = new RegExp(rule.left.pattern)
@@ -184,11 +186,27 @@ const MATCHERS: {
         byKey.set(key, [...(byKey.get(key) ?? []), { call: a, value: from }])
       }
     }
+    const gap = (la: { call: Call }, b: Call): number => Math.abs(b.invite!.ts_ms - la.call.invite!.ts_ms)
+    const candidates = (b: Call, key: string) => {
+      const others = (byKey.get(key) ?? []).filter((la) => la.call.id !== b.id)
+      if (rule.window_ms === undefined) return others
+      const near = others
+        .filter((la) => gap(la, b) <= rule.window_ms!)
+        .reduce<{ call: Call; value: string } | undefined>(
+          (best, la) =>
+            best === undefined ||
+            gap(la, b) < gap(best, b) ||
+            (gap(la, b) === gap(best, b) && la.call.invite!.ts_ms < best.call.invite!.ts_ms)
+              ? la
+              : best,
+          undefined
+        )
+      return near === undefined ? [] : [near]
+    }
     for (const b of calls) {
       if (b.invite === undefined) continue
       for (const rb of keysOf(right, b.invite.headers(rule.right.header))) {
-        for (const la of byKey.get(rb.key) ?? []) {
-          if (la.call.id === b.id) continue
+        for (const la of candidates(b, rb.key)) {
           emit(la.call, b, b.invite.ts_ms - la.call.invite!.ts_ms, {
             key: rb.key,
             left_header: rule.left.header,

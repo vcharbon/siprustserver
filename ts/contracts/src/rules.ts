@@ -16,6 +16,7 @@
  */
 import * as Effect from "effect/Effect"
 import * as Schema from "effect/Schema"
+import { isCallIdHeader } from "./flows.js"
 import { STRICT } from "./strict.js"
 
 /** The `version` this contract models. */
@@ -58,13 +59,17 @@ export interface HeaderSide extends Schema.Schema.Type<typeof HeaderSide> {}
  * A key one call's initial INVITE carries in one header and another call's in
  * another header. Anchor: each call's first INVITE. The left call's `left`
  * header and the right call's `right` header yield equal keys: the right call
- * was set up off the left one. `Call-ID` is a header like any other.
+ * was set up off the left one. `Call-ID` is a header like any other, read off
+ * the call's own Call-ID. With `window_ms`, a right call joins the left call of
+ * its key whose INVITE is nearest in time within the window, and none outside
+ * it; without, every left call of its key.
  */
 export const HeaderPairRule = Schema.Struct({
   kind: Schema.Literal("header-pair"),
   name: Schema.String,
   left: HeaderSide,
-  right: HeaderSide
+  right: HeaderSide,
+  window_ms: Schema.optionalKey(Schema.Int)
 })
 export interface HeaderPairRule extends Schema.Schema.Type<typeof HeaderPairRule> {}
 
@@ -165,19 +170,22 @@ export const validateRuleFile = (file: RuleFile): void => {
 /**
  * Every header a rule file names — the `--emit-headers` allow-list the flows
  * emitter is asked for, so a rule can never read a header the document does not
- * project.
+ * project. `Call-ID` is left out: a rule reads it off the leg
+ * (`Flows.ruleHeaderValues`), never off a projection.
  */
 export const headersNamedBy = (rules: ReadonlyArray<Rule>): Array<string> => [
   ...new Set(
-    rules.flatMap((rule) => {
-      switch (rule.kind) {
-        case "header-key":
-          return [rule.header]
-        case "header-pair":
-          return [rule.left.header, rule.right.header]
-        default:
-          return []
-      }
-    })
+    rules
+      .flatMap((rule) => {
+        switch (rule.kind) {
+          case "header-key":
+            return [rule.header]
+          case "header-pair":
+            return [rule.left.header, rule.right.header]
+          default:
+            return []
+        }
+      })
+      .filter((header) => !isCallIdHeader(header))
   )
 ]
