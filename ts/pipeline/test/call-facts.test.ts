@@ -372,6 +372,29 @@ describe("retransmissions", () => {
   })
 })
 
+describe("a transaction (RFC 3261 §17.1.3, §17.2.3)", () => {
+  it("of each early dialog keeps its own final where two dialogs of one leg number a request alike", () => {
+    const s = scenario()
+    const leg = s
+      .leg({ callId: "retried@example.com", party: CALLEE })
+      .invite({ at: 0, by: "system" })
+      .response(183, { at: 20 })
+      .request("UPDATE", { at: 30, by: "party", seq: 1 })
+      .response(488, { at: 35 })
+      .response(503, { at: 100, to: "INVITE" })
+      .ack({ at: 105, by: "system" })
+      .invite({ at: 500, by: "system", fresh: true })
+      .response(183, { at: 520 })
+      .request("UPDATE", { at: 530, by: "party", seq: 1 })
+      .response(200, { at: 535 })
+    const read = facts(s, leg)
+    const updates = read.timeline.entries.filter((e) => e.method === "UPDATE" && e.status === undefined)
+
+    expect(updates.map((e) => read.timeline.transactions[e.transaction]!.final?.status)).toEqual([488, 200])
+    expect(read.accepted.map((a) => [a.request.method, a.request.at_us])).toEqual([["UPDATE", 530_000]])
+  })
+})
+
 describe("in-dialog requests", () => {
   it("are listed with their method, body and acceptance time where a 2xx accepted them", () => {
     const s = scenario()
