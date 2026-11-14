@@ -4,17 +4,16 @@
 //!
 //! Its one goal is to **refuse new normal calls when the ingress queue is
 //! backed up**, before the datagram is queued and before any transaction or
-//! call state exists. It engages on any of three readings, taken as the
+//! call state exists. It engages on either of two readings, taken as the
 //! datagram arrives:
 //!
 //!   - the queue's depth is at or above `floor(queue_max * threshold_pct /
 //!     100)`: a flood;
-//!   - the queue's oldest datagram has waited the refusal wait
-//!     ([`IngressBrakeConfig::refuse_wait`]): a consumer too slow for the
-//!     load, a worker short of CPU, long before the depth says so;
 //!   - the event-queue gate refuses ([`Refusals::gate_refusing`], ADR-0050
-//!     §9): the worker sheds new calls, and sheds them here, ahead of the
-//!     queue the calls in progress wait in.
+//!     §9), which it does on the wait of this queue too: the worker sheds
+//!     new calls, and sheds them here, ahead of the queue the calls in
+//!     progress wait in. Such a refusal is the gate's, counted under its
+//!     reason ([`IngressBrakeCounters::gate_refused`]).
 //!
 //! While it is not engaged, and while the worker remembers no refused
 //! INVITE, it is a few compares, two atomic loads and a look at the
@@ -66,7 +65,6 @@
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
 
 use sip_message::received::{stamp_received, Received};
 use sip_message::{serialize, CustomParser, Method, SipMessage, SipRequest};
@@ -75,7 +73,7 @@ use sip_net::{Arrival, QueueLoad};
 use sip_txn::{InviteRefusals, Verdict as Memo};
 
 use crate::admission::{class_of, judge, Class, Refusals, Rung, Verdict};
-use crate::new_calls::StatelessCounts;
+use crate::new_calls::{Refusal, StatelessCounts};
 
 /// Tunables for the ingress brake. Cheap to copy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -87,30 +85,13 @@ pub struct IngressBrakeConfig {
     /// The brake engages once the live queue depth reaches
     /// `floor(queue_max * pct / 100)`.
     pub threshold_pct: u32,
-    /// The wait of the queue's oldest datagram at or past which the brake
-    /// engages: the age that trips the event-queue gate at a single reading
-    /// ([`EventQueueGateConfig::refuse_at_age`](crate::config::EventQueueGateConfig::refuse_at_age)),
-    /// below T1 and below a prober's reply window. [`Duration::MAX`] leaves
-    /// the depth and the gate's switch alone.
-    pub refuse_wait: Duration,
 }
 
 impl IngressBrakeConfig {
-    /// A brake over a queue bounded at `queue_max` that engages on the depth
-    /// (`threshold_pct`) and the gate's switch alone, never on the wait.
+    /// A brake over a queue bounded at `queue_max`, engaging at
+    /// `threshold_pct` of it.
     pub const fn by_depth(queue_max: usize, threshold_pct: u32) -> Self {
-        Self { queue_max, threshold_pct, refuse_wait: Duration::MAX }
-    }
-
-    /// The worker's brake: over a queue bounded at `queue_max`, engaging at
-    /// `threshold_pct` of it, and on the wait at the age that trips `gate` at
-    /// a single reading.
-    pub fn under_gate(
-        queue_max: usize,
-        threshold_pct: u32,
-        gate: &crate::config::EventQueueGateConfig,
-    ) -> Self {
-        Self { queue_max, threshold_pct, refuse_wait: gate.refuse_at_age() }
+        Self { queue_max, threshold_pct }
     }
 
     /// The absolute queue depth at/above which the brake engages:
@@ -139,8 +120,10 @@ pub struct IngressBrakeCounters {
     /// anyway — non-zero under flood means the brake is correctly letting
     /// emergency calls through while refusing the rest.
     emergency_bypassed: Arc<AtomicU64>,
-    /// INVITEs refused here first, by [`Class`].
+    /// INVITEs refused here first on the queue's depth, by [`Class`].
     refused: Arc<[AtomicU64; 3]>,
+    /// INVITEs refused here first for the event-queue gate, by [`Class`].
+    gate_refused: Arc<[AtomicU64; 3]>,
     /// Copies of a refused INVITE refused again here.
     copies: Arc<AtomicU64>,
 }
@@ -184,8 +167,22 @@ impl IngressBrakeCounters {
         }
     }
 
-    fn record_refused(&self, class: Class) {
-        if let Some(n) = self.refused.get(class.index()) {
+    /// INVITEs of `class` this brake refused first while the event-queue gate
+    /// refused and the queue was under its threshold: the gate's refusals,
+    /// made here ahead of the queue, counted under the gate's reason.
+    pub fn gate_refused(&self, class: Class) -> u64 {
+        self.gate_refused.get(class.index()).map_or(0, |n| n.load(Ordering::Relaxed))
+    }
+
+    /// The gate's refusals this brake made, by class
+    /// ([`gate_refused`](Self::gate_refused)).
+    pub fn gate_counts(&self) -> [u64; 3] {
+        Class::ALL.map(|c| self.gate_refused(c))
+    }
+
+    fn record_refused(&self, reason: Refusal, class: Class) {
+        let row = if reason == Refusal::EventQueue { &self.gate_refused } else { &self.refused };
+        if let Some(n) = row.get(class.index()) {
             n.fetch_add(1, Ordering::Relaxed);
         }
     }
@@ -209,12 +206,13 @@ pub fn build_ingress_brake_hook(
     refusals: Refusals,
     parser: CustomParser,
 ) -> PreIngressHook {
-    let (threshold, refuse_wait) = (config.threshold(), config.refuse_wait);
+    let threshold = config.threshold();
     let memo = refusals.memo().clone();
     let gate_refusing = refusals.gate_refusing().clone();
     Arc::new(move |arrival: &mut Arrival, src: SocketAddr, load: QueueLoad| {
         let gate_refusing = gate_refusing.load(Ordering::Relaxed);
-        let engaged = gate_refusing || load.depth >= threshold || load.wait >= refuse_wait;
+        let depth = load.depth;
+        let engaged = gate_refusing || depth >= threshold;
         let options = arrival.raw().starts_with(OPTIONS_LINE);
         if !engaged && !options && !memo.remembers() {
             return PreIngressAction::Accept;
@@ -238,13 +236,13 @@ pub fn build_ingress_brake_hook(
             counters.record_copy();
             return reply(&memo, req, src);
         }
-        let verdict = match judge(Rung::EventQueue { refusing: gate_refusing }, class) {
-            Verdict::Admit => judge(Rung::Brake { load, threshold, refuse_wait }, class),
+        let verdict = match judge(Rung::Brake { depth, threshold }, class) {
+            Verdict::Admit => judge(Rung::EventQueue { refusing: gate_refusing }, class),
             refuse @ Verdict::Refuse(_) => refuse,
         };
         match verdict {
             Verdict::Admit => {
-                if engaged && class == Class::Emergency {
+                if depth >= threshold && class == Class::Emergency {
                     counters.record_emergency_bypass();
                 }
                 PreIngressAction::Accept
@@ -252,13 +250,13 @@ pub fn build_ingress_brake_hook(
             // The reply is built before the refusal is remembered: a reply
             // that cannot be built leaves no memo entry the transaction
             // layer would rebuild that same answer from.
-            Verdict::Refuse(_) => {
+            Verdict::Refuse(refused) => {
                 let reply = reply(&memo, req, src);
                 match memo.refuse(req) {
                     Memo::Held => PreIngressAction::Accept,
                     Memo::Refused { first } => {
                         if first {
-                            counters.record_refused(class);
+                            counters.record_refused(refused.reason, class);
                         } else {
                             counters.record_copy();
                         }

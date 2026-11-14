@@ -84,9 +84,6 @@ Content-Length: 0\r\n\r\n"
     .into_bytes()
 }
 
-/// The refusal wait of the brake under test.
-const REFUSE_WAIT: Duration = Duration::from_millis(450);
-
 /// A brake hook judging a datagram's bytes as they arrive at a queue of the
 /// given depth, whose oldest datagram arrived just now.
 type OnBytes = Box<dyn Fn(&[u8], std::net::SocketAddr, usize) -> PreIngressAction>;
@@ -95,13 +92,10 @@ type OnBytes = Box<dyn Fn(&[u8], std::net::SocketAddr, usize) -> PreIngressActio
 /// the given load.
 type OnLoad = Box<dyn Fn(&[u8], std::net::SocketAddr, QueueLoad) -> PreIngressAction>;
 
-/// Brake hook under test: threshold 2, refusal wait [`REFUSE_WAIT`],
-/// refusing with `refusals`.
+/// Brake hook under test: threshold 2, refusing with `refusals`.
 fn brake_under_load(refusals: Refusals) -> (OnLoad, IngressBrakeCounters) {
     let counters = IngressBrakeCounters::new();
-    let cfg =
-        IngressBrakeConfig::under_gate(5, 40, &crate::config::EventQueueGateConfig::default());
-    assert_eq!(cfg.refuse_wait, REFUSE_WAIT, "the gate's age at a single reading");
+    let cfg = IngressBrakeConfig::by_depth(5, 40);
     let hook = build_ingress_brake_hook(cfg, counters.clone(), refusals, CustomParser::new());
     let on_load: OnLoad = Box::new(move |raw, src, load| {
         hook(&mut Arrival::new(sip_message::Bytes::copy_from_slice(raw)), src, load)
@@ -433,37 +427,20 @@ fn a_refused_copy_is_answered_where_and_as_the_transaction_layer_answers_it() {
 
 /// A shallow queue whose oldest datagram has waited `wait_ms`.
 fn waited(wait_ms: u64) -> QueueLoad {
-    QueueLoad { depth: 1, wait: Duration::from_millis(wait_ms) }
+    QueueLoad { depth: 1, wait: std::time::Duration::from_millis(wait_ms) }
 }
 
-/// Far below the depth threshold, a new normal INVITE is refused once the
-/// queue's oldest datagram has waited the refusal wait, and not before.
+/// The brake judges no wait by itself: under its depth threshold and with
+/// the gate accepting, a new INVITE behind a queue whose oldest datagram has
+/// waited long is queued. The gate reads that wait, across readings.
 #[test]
-fn a_queue_that_waited_the_refusal_wait_refuses_a_new_invite() {
-    let (hook, counters) = brake_under_load(refusals_with_jitter(0));
-    assert_eq!(hook(&new_invite(0), src(), waited(449)), PreIngressAction::Accept);
-    let PreIngressAction::Reply { datagram, .. } = hook(&new_invite(1), src(), waited(450)) else {
-        panic!("a new INVITE behind a queue that waited 450 ms is refused");
-    };
-    assert_eq!(status_line(&datagram), b"SIP/2.0 503 Service Unavailable");
-    assert!(find(&datagram, b"Retry-After: 5\r\n").is_some(), "the new-call refusal");
-    assert_eq!(counters.refused(Class::Normal), 1);
-}
-
-/// A queue that waited refuses new normal calls alone: an emergency INVITE,
-/// a re-INVITE and any other request are queued.
-#[test]
-fn a_queue_that_waited_admits_emergency_and_in_dialog_requests() {
+fn a_queue_that_waited_refuses_nothing_while_the_gate_accepts() {
     let (hook, counters) = brake_under_load(refusals_with_jitter(0));
     let late = waited(5_000);
-    assert_eq!(hook(&invite_buf(0, true, None), src(), late), PreIngressAction::Accept);
-    assert_eq!(
-        hook(&invite_buf(1, false, Some("bob-tag-1")), src(), late),
-        PreIngressAction::Accept
-    );
-    assert_eq!(hook(&response_buf(), src(), late), PreIngressAction::Accept);
+    assert_eq!(hook(&new_invite(0), src(), late), PreIngressAction::Accept);
+    assert_eq!(hook(&invite_buf(1, true, None), src(), late), PreIngressAction::Accept);
     assert_eq!(answered(&counters), 0);
-    assert_eq!(counters.emergency_bypassed(), 1);
+    assert_eq!(counters.emergency_bypassed(), 0);
 }
 
 /// An OPTIONS in a dialog: a call's keepalive, which waits its turn.
@@ -509,8 +486,14 @@ fn the_gate_refusing_refuses_a_new_invite_at_an_empty_queue() {
         hook(&invite_buf(3, false, Some("bob-tag-3")), src(), idle),
         PreIngressAction::Accept
     );
-    assert_eq!(counters.refused(Class::Normal), 1);
-    assert_eq!(counters.emergency_bypassed(), 1);
+    assert_eq!(counters.gate_refused(Class::Normal), 1, "the gate's refusal, counted as its own");
+    assert_eq!(counters.refused(Class::Normal), 0, "no refusal on the queue's depth");
+    assert_eq!(counters.emergency_bypassed(), 0, "the queue was never at its threshold");
+    assert!(matches!(
+        hook(&new_invite(5), src(), QueueLoad::at_depth(2)),
+        PreIngressAction::Reply { .. }
+    ));
+    assert_eq!(counters.refused(Class::Normal), 1, "at the threshold the refusal is the brake's");
 
     refusals.gate_refusing().store(false, Ordering::Relaxed);
     assert_eq!(hook(&new_invite(4), src(), idle), PreIngressAction::Accept);

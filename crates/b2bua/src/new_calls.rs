@@ -211,8 +211,10 @@ impl NewCallCounts {
             refused: Class::ALL.map(|class| txn.deferred_refused(class)),
             copies: txn.refused_copies(),
         };
+        let at_the_brake = brake.map(IngressBrakeCounters::gate_counts).unwrap_or_default();
         let brake = brake.map(IngressBrakeCounters::counts).unwrap_or_default();
         let mut counts = Self::compose(tally, backlog, brake);
+        counts.add(Refusal::EventQueue, at_the_brake);
         // The transaction layer's refusals on arrival while the event-queue
         // gate refuses; their copies are counted with the backlog's.
         counts.add(Refusal::EventQueue, Class::ALL.map(|class| txn.new_call_gate_refused(class)));

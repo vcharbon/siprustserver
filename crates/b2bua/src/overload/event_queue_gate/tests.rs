@@ -111,3 +111,34 @@ fn the_stored_form_round_trips() {
     stored.store(&state);
     assert_eq!(stored.load(), state);
 }
+
+/// The inbound queue's wait is never counted from before its first reading:
+/// one datagram left stale by a pause of the process, however old, trips
+/// nothing, and is forgotten once it is taken.
+#[test]
+fn one_stale_inbound_datagram_trips_nothing() {
+    let (mut s, t0) = (GateState::default(), Instant::now());
+    let none = Duration::ZERO;
+    assert_eq!(s.observe_both(&bounds(), 1, none, 5_000 * MS, t0), None, "the first reading");
+    assert_eq!(s.observe_both(&bounds(), 1, none, none, t0 + 10 * MS), None, "taken");
+    assert_eq!(s.observe_both(&bounds(), 1, none, 5_000 * MS, t0 + 200 * MS), None, "counted anew");
+    assert!(!s.refusing());
+}
+
+/// An inbound wait still past the refusal delay on readings a refusal
+/// interval apart refuses; the accept bounds then hold on that wait too.
+#[test]
+fn an_inbound_wait_that_persists_across_readings_refuses() {
+    let (mut s, t0) = (GateState::default(), Instant::now());
+    let none = Duration::ZERO;
+    assert_eq!(s.observe_both(&bounds(), 1, none, 300 * MS, t0), None);
+    assert_eq!(s.observe_both(&bounds(), 1, none, 400 * MS, t0 + 149 * MS), None, "149 ms on");
+    assert_eq!(
+        s.observe_both(&bounds(), 1, none, 450 * MS, t0 + 150 * MS),
+        Some(Transition::Refuse),
+        "past the delay through the interval"
+    );
+    assert_eq!(s.observe_both(&bounds(), 0, none, 51 * MS, t0 + 4_000 * MS), None, "wait above");
+    assert_eq!(s.observe_both(&bounds(), 0, none, none, t0 + 6_999 * MS), None, "hold restarted");
+    assert_eq!(s.observe_both(&bounds(), 0, none, none, t0 + 7_000 * MS), Some(Transition::Accept));
+}

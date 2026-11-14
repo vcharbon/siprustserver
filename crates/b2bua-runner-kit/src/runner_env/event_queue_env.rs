@@ -18,8 +18,9 @@
 //! The delay is the larger of the age of the oldest event waiting in the
 //! event queue and the wait of the oldest datagram in the inbound UDP queue,
 //! read when the gate reads: a router or a transaction layer that takes
-//! nothing still reads it grow. The refusal delay plus the interval is also
-//! the wait at which the ingress brake refuses a new INVITE as it arrives. Ordinary
+//! nothing still reads it grow. The inbound queue's wait counts from the first
+//! reading that finds it past the refusal delay, so the interval is the least
+//! time it persists across readings before new calls are refused. Ordinary
 //! operation holds the queue near empty, a handful of events; a backlog of
 //! hundreds already means the router lags its traffic, so the depth refuses
 //! at once. The refusal delay sits below SIP's T1 (500 ms), so the worker

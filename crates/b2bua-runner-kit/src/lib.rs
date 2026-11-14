@@ -206,11 +206,7 @@ impl RunnerEnv {
         let metrics_sa = resolve(&self.metrics_addr)?;
 
         let brake_counters = IngressBrakeCounters::new();
-        let brake_config = IngressBrakeConfig::under_gate(
-            self.queue_max,
-            self.udp_ingress_brake_pct,
-            &self.event_queue_gate,
-        );
+        let brake_config = IngressBrakeConfig::by_depth(self.queue_max, self.udp_ingress_brake_pct);
         // The worker's identifier generator, keyed from the OS RNG once: the
         // core's, and the To-tag secret of its refusals.
         let id_gen = Arc::new(entropy::keyed_id_gen()?);
@@ -267,7 +263,7 @@ impl RunnerEnv {
             threshold = brake_config.threshold(),
             queue_max = self.queue_max,
             ingress_brake_pct = self.udp_ingress_brake_pct,
-            "ingress brake armed: stateless-503 for new non-emergency INVITEs at ingress depth >= threshold, at the event-queue gate's age, or while that gate refuses"
+            "ingress brake armed: stateless-503 for new non-emergency INVITEs at ingress depth >= threshold, or while the event-queue gate refuses"
         );
 
         // The worker's own address on every Via; behind the proxy, every

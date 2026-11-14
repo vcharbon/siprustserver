@@ -4,10 +4,8 @@
 
 use std::cell::RefCell;
 use std::sync::Arc;
-use std::time::Duration;
 
 use sip_message::{CustomParser, SipMessage, SipParser, SipRequest};
-use sip_net::QueueLoad;
 
 use super::*;
 use crate::capacity::{simulated, CapacityGate, CapacityReading, Occupancy};
@@ -59,30 +57,14 @@ fn the_event_queue_row() {
     }
 }
 
-/// A brake rung at `depth` datagrams, the oldest waiting `wait_ms`, under a
-/// threshold of 10 and a refusal wait of 450 ms.
-fn brake(depth: usize, wait_ms: u64) -> Rung {
-    Rung::Brake {
-        load: QueueLoad { depth, wait: Duration::from_millis(wait_ms) },
-        threshold: 10,
-        refuse_wait: Duration::from_millis(450),
-    }
-}
-
-/// A brake rung that refuses: a queue at its threshold.
-fn brake_engaged() -> Rung {
-    brake(10, 0)
-}
-
-/// The brake refuses a normal INVITE at its threshold, or once the oldest
-/// queued datagram has waited the refusal wait, and nothing else.
+/// The brake refuses a normal INVITE at its threshold and nothing else.
 #[test]
 fn the_brake_row() {
-    assert_eq!(reason(brake(9, 449), Class::Normal), None);
-    assert_eq!(reason(brake(10, 0), Class::Normal), Some(Refusal::IngressBrake));
-    assert_eq!(reason(brake(1, 450), Class::Normal), Some(Refusal::IngressBrake));
+    let at = |depth| Rung::Brake { depth, threshold: 10 };
+    assert_eq!(reason(at(9), Class::Normal), None);
+    assert_eq!(reason(at(10), Class::Normal), Some(Refusal::IngressBrake));
     for class in [Class::Emergency, Class::InDialog] {
-        assert_eq!(reason(brake(usize::MAX, u64::MAX), class), None, "{class:?}");
+        assert_eq!(reason(at(usize::MAX), class), None, "{class:?}");
     }
 }
 
@@ -202,7 +184,7 @@ fn the_bucket_row() {
 #[test]
 fn only_the_bucket_raises_the_retry_after_base() {
     let refusing = [
-        brake_engaged(),
+        Rung::Brake { depth: 1, threshold: 0 },
         capacity(10, 0, None),
         Rung::Shed { at_threshold: true },
         Rung::PanicElu { elu: 1.0, threshold: 0.5 },
@@ -289,7 +271,7 @@ fn the_router_reads_its_rungs_up_to_the_first_refusal() {
 #[test]
 fn each_ladder_reason_names_one_rung() {
     let rungs = [
-        brake_engaged(),
+        Rung::Brake { depth: 1, threshold: 0 },
         capacity(10, 0, None),
         Rung::Shed { at_threshold: true },
         Rung::PanicElu { elu: 1.0, threshold: 0.5 },

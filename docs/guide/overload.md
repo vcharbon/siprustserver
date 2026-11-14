@@ -39,7 +39,7 @@ The first two run before the worker creates a transaction, so a refusal there is
 
 | # | Check | It measures | Limit (default) | Normal call | Emergency call |
 |---|---|---|---|---|---|
-| 1 | Input brake | Depth of the UDP input queue, and the wait of its oldest datagram | 70 % of 8 192 datagrams, or a wait of 450 ms, or while check 7 refuses | Refused | Passes |
+| 1 | Input brake | Depth of the UDP input queue | 70 % of 8 192 datagrams, or while check 7 refuses | Refused | Passes |
 | 2 | Backlog | Events that wait for the call logic | 4 096 events | Refused | Refused at 8 192 |
 | 3 | Capacity | Live calls, live transactions, process memory | Off until you set them | Refused at the normal ceiling | Refused at the emergency ceiling |
 | 4 | Call table | Live per-call queues | 1 000 000, less 5 % for normal calls | Refused at 95 % | Refused at 100 % |
@@ -88,10 +88,11 @@ retransmission.
 A worker can have less CPU than its load needs: its CPU limit is too low, or its host is busy.
 The work then waits in the UDP input queue, and the CPU reading of check 5 can stay low.
 
-Checks 1 and 7 measure how long the oldest datagram in that queue has waited. When the wait
-stays at 300 ms for 150 ms, the worker refuses each new normal call with 503 and `Retry-After`,
-before the call enters the queue. The worker also reports the refusal in its answer to the
-probe of the proxy. The proxy then sends new calls to the other workers. Emergency calls pass.
+Check 7 measures how long the oldest datagram in that queue has waited. When the wait stays at
+300 ms for 150 ms, the worker refuses each new normal call with 503 and `Retry-After`. Check 1
+then makes that refusal before the call enters the queue. One old datagram, found after a pause
+of the process, causes no refusal: the wait must stay for 150 ms. The worker also reports the
+refusal in its answer to the probe of the proxy. The proxy then sends new calls to the other workers. Emergency calls pass.
 The worker accepts new calls again when the waits of the two queues stayed at 50 ms or less, and
 the event queue at 64 events or less, for 3 s.
 

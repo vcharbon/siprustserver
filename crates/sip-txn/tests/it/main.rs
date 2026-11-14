@@ -32,7 +32,6 @@ mod late_cancel_hold;
 mod lifetime;
 mod long_ring_holds;
 mod new_call_gate;
-mod new_call_gate_inbound_wait;
 mod no_panic_lane;
 mod opened_at;
 mod orphan_bye;

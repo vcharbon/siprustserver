@@ -24,8 +24,9 @@ use tokio::time::Instant;
 
 use crate::types::{PreIngressAction, RecvDisposition, RecvTap, UdpPacket};
 
-/// An inbound queue read at one instant: how many datagrams wait in it, and
-/// how long the oldest of them has waited (zero when none waits).
+/// An inbound queue read at one instant: how many datagrams wait in it, the
+/// lane taken ahead left out, and how long the oldest of them has waited
+/// (zero when none waits).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct QueueLoad {
     pub depth: usize,
@@ -229,10 +230,11 @@ impl PacketQueue {
     }
 
     /// The queue's depth and wait at one instant: the pre-ingress hook's
-    /// argument.
+    /// argument. Both leave the lane out: a hook judges the queue against
+    /// the queue's own bound, which the lane does not count toward.
     pub fn load(&self) -> QueueLoad {
         let g = self.lock();
-        QueueLoad { depth: g.depth(), wait: g.wait() }
+        QueueLoad { depth: g.buf.len(), wait: g.wait() }
     }
 
     /// A guard that closes the queue when dropped: held by a pump, it closes
@@ -307,7 +309,8 @@ mod tests {
             assert!(queue.offer_ahead(tagged(100 + n)), "the lane has room beside a full queue");
         }
         assert!(!queue.offer_ahead(tagged(999)), "past the lane it is offered as any other");
-        assert_eq!(queue.load(), QueueLoad { depth: 2 + AHEAD_MAX, wait: 100 * MS });
+        assert_eq!(queue.load(), QueueLoad { depth: 2, wait: 100 * MS }, "the lane left out");
+        assert_eq!(queue.depth(), 2 + AHEAD_MAX, "every packet queued");
         let taken = |n: usize| -> Vec<u64> {
             (0..n).filter_map(|_| queue.poll()).map(|p| p.arrival_ms).collect()
         };

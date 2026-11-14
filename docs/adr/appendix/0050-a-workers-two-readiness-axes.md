@@ -229,12 +229,17 @@ unchanged.
   the queue it would wait in, from the gate's first refusing reading on,
   before any probe reads it; emergency INVITEs and in-dialog requests are
   never refused by it. Only the router reads the gate, so a router held in
-  one turn writes no refusal: the transaction layer reads the two queues'
-  ages itself as each new INVITE arrives, and refuses from that same 450 ms
-  (ADR-0037 item 11). The ingress brake reads the gate's state and the
-  inbound queue's wait as each datagram arrives, and refuses a new normal
-  INVITE there, ahead of the queue the calls in progress wait in: while
-  the gate refuses, that queue holds no new call. The bounds, their defaults
+  one turn writes no refusal: the transaction layer reads the event
+  queue's age itself as each new INVITE arrives, and refuses from that
+  same 450 ms (ADR-0037 item 11). The inbound queue's wait persists only
+  across readings of the gate: it counts from the first reading that finds
+  it past the refusal delay, never from before, so one datagram left
+  stale by a pause of the whole process trips nothing, and no stage
+  refuses on a single reading of that wait. The ingress brake reads the
+  gate's state as each datagram arrives, and makes the gate's refusal of a
+  new normal INVITE there, ahead of the queue the calls in progress wait
+  in, counted under the gate's reason: while the gate refuses, that queue
+  holds no new call. The bounds, their defaults
   and the boot checks between them are the runner's `B2BUA_EVENT_QUEUE_*`
   grammar. The proxy keeps a refusing worker `Alive` and every dialog it
   owns on it (§4), and places new calls elsewhere (§6): a worker whose
@@ -376,7 +381,10 @@ queued an OPTIONS waits as any other datagram, so a stream of them from
 elsewhere that keeps the lane full puts the prober's own behind the
 backlog; and the kernel's receive buffer ahead of the pump has no lane,
 so a pump that falls behind its arrivals delays or loses a probe there.
-In those two cases a worker that still turns is read `Dead`. The
+In those two cases a worker that still turns is read `Dead`. An OPTIONS
+that queued as any other can also be taken after a later one that found
+room on the lane, so two dead notices can apply out of their order of
+arrival: one more sweep of the same worker at worst. The
 lane is opt-in in the transaction layer (`keepalive_lane`), so its other
 users keep one queue. A slow but still turning worker stays `Alive`, and
 the delay of its in-dialog requests is not capped.

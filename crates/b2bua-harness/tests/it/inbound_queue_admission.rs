@@ -52,7 +52,7 @@ async fn paced_scene(name: &str, brake: bool) -> (B2buaScene, InboundPace, Agent
     let s = B2buaScene::with_b2bua(name, move |bob_port| {
         let sut = B2buaSut::route_all_to("127.0.0.1", bob_port).inbound_pace(inbound);
         if brake {
-            sut.ingress_brake(IngressBrakeConfig::under_gate(256, 100, &Default::default()))
+            sut.ingress_brake(IngressBrakeConfig::by_depth(256, 100))
         } else {
             sut
         }
@@ -187,10 +187,11 @@ async fn a_backlog_in_the_inbound_queue_trips_the_gate_and_the_brake_refuses_on_
     refused(&s).await;
     assert!(drained.elapsed() < ACCEPT_HOLD, "all of it inside the hold");
     let counts = s.b2bua.new_calls();
-    assert_eq!(counts.rejected(Refusal::IngressBrake, Class::Normal), 2, "each counted once");
-    assert_eq!(counts.rejected_sum(), 2, "at the brake alone");
+    assert_eq!(counts.rejected(Refusal::EventQueue, Class::Normal), 2, "each counted once");
+    assert_eq!(counts.rejected_sum(), 2, "under the gate's reason alone");
     let brake = s.b2bua.ingress_brake().expect("the brake is installed");
-    assert_eq!(brake.emergency_bypassed(), 1, "the emergency INVITE met the brake engaged");
+    assert_eq!(brake.gate_refused(Class::Normal), 2, "both made at the brake, on arrival");
+    assert_eq!(brake.emergency_bypassed(), 0, "the queue never reached its threshold");
 
     s.h.advance(ACCEPT_HOLD).await;
     assert_eq!(readiness(&s).await, Some(Readiness::accept()));
@@ -205,9 +206,9 @@ async fn a_backlog_in_the_inbound_queue_trips_the_gate_and_the_brake_refuses_on_
 
 /// With no brake on the bind, a new INVITE waits its turn in the inbound
 /// queue and the transaction layer refuses it when it takes it, under the
-/// event-queue reason: the queue's wait is past the gate's age.
+/// event-queue reason: the gate tripped on the queue's wait and refuses.
 #[tokio::test(start_paused = true)]
-async fn with_no_brake_the_transaction_layer_refuses_on_the_inbound_wait() {
+async fn with_no_brake_the_transaction_layer_refuses_while_the_gate_does() {
     let (s, pace, carol) = paced_scene("inbound-queue-admission-no-brake", false).await;
     let mut held = s.establish().await;
 

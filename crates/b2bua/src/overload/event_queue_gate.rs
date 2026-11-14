@@ -8,7 +8,10 @@
 //! refuses at the refusal depth at once, and on the delay once it has stayed
 //! at or past the refusal delay for the refusal interval (CoDel's
 //! persistence): a slow turn or a throttle gap shorter than the two together
-//! trips nothing, and one at least as long trips it on the next reading. It
+//! trips nothing, and one at least as long trips it on the next reading. The
+//! inbound queue's wait persists only across readings: it counts from the
+//! first reading that finds it past the delay, so a datagram left stale by a
+//! pause of the whole process trips nothing once it is taken. It
 //! accepts
 //! again only once depth and delay have both stayed at or below their accept
 //! bounds for the hold, so it does not flap at the probe's cadence.
@@ -54,6 +57,7 @@ impl GateState {
     /// oldest of which has waited `delay`, into the state. The oldest event
     /// alone has waited past the refusal delay since `now − (delay − bound)`,
     /// so a reading also tells how long the delay has stayed past it.
+    #[cfg(test)]
     pub(crate) fn observe(
         &mut self,
         bounds: &EventQueueGateConfig,
@@ -61,11 +65,34 @@ impl GateState {
         delay: Duration,
         now: Instant,
     ) -> Option<Transition> {
+        self.observe_both(bounds, depth, delay, Duration::ZERO, now)
+    }
+
+    /// [`observe`](Self::observe) with the inbound UDP queue's reading:
+    /// `inbound` is the wait of its oldest datagram. That wait counts as past
+    /// the refusal delay from the first reading that finds it there, never
+    /// from before: one stale datagram found after a pause of the process
+    /// trips nothing, and a wait still past the delay a refusal interval of
+    /// readings later does. The accept bounds hold on both waits.
+    pub(crate) fn observe_both(
+        &mut self,
+        bounds: &EventQueueGateConfig,
+        depth: usize,
+        delay: Duration,
+        inbound: Duration,
+        now: Instant,
+    ) -> Option<Transition> {
         let refuse_delay = Duration::from_millis(bounds.refuse_delay_ms);
-        self.delayed_since = (delay >= refuse_delay).then(|| {
-            let since = now.checked_sub(delay - refuse_delay).unwrap_or(now);
-            self.delayed_since.map_or(since, |earlier| earlier.min(since))
-        });
+        let event_since =
+            (delay >= refuse_delay).then(|| now.checked_sub(delay - refuse_delay).unwrap_or(now));
+        let inbound_since = (inbound >= refuse_delay).then_some(now);
+        let since = match (event_since, inbound_since) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
+        self.delayed_since =
+            since.map(|since| self.delayed_since.map_or(since, |earlier| earlier.min(since)));
+        let delay = delay.max(inbound);
         let persisted = self.delayed_since.is_some_and(|since| {
             now.saturating_duration_since(since) >= Duration::from_millis(bounds.refuse_interval_ms)
         });
@@ -181,9 +208,11 @@ impl EventQueueGate {
     pub(crate) fn read(&self) -> bool {
         let queue = &self.inner.queue;
         let depth = queue.event_queue_depth();
-        let delay = queue.event_queue_delay().max(queue.inbound_queue_delay());
+        let (delay, inbound) = (queue.event_queue_delay(), queue.inbound_queue_delay());
         let mut state = self.inner.state.load();
-        let transition = state.observe(&self.inner.bounds, depth, delay, Instant::now());
+        let transition =
+            state.observe_both(&self.inner.bounds, depth, delay, inbound, Instant::now());
+        let delay = delay.max(inbound);
         self.inner.state.store(&state);
         if let Some(transition) = transition {
             self.line(transition, depth, delay);
