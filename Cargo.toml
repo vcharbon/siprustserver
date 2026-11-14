@@ -63,6 +63,7 @@ members = [
     "crates/loadrun-render",
     "crates/rfc-rules",
     "crates/sip-pcap",
+    "crates/pcap-anon",
     "crates/pivot-schema",
     "crates/pivot-interpreter",
     "crates/pivot-replay",
@@ -158,6 +159,9 @@ subtle = "2"
 # archived capture corpora — routinely shipped gzipped — without a decompress
 # step on the side. Offline triage tooling only, never linked into a runner.
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+# `pcap-anon`'s one-pass multi-pattern rewrite: the major `regex` already
+# resolves, so the graph keeps one copy.
+aho-corasick = "1"
 arc-swap = "1"
 # `socket2` builds the proxy's SO_REUSEPORT recv shards (tokio's UdpSocket has
 # no reuse-port knob): N sockets on one port, kernel flow-hashing keeps a given

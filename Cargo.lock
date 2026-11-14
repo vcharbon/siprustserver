@@ -3239,6 +3239,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "pcap-anon"
+version = "0.1.0"
+dependencies = [
+ "aho-corasick",
+ "base64 0.23.1",
+ "clap",
+ "getrandom 0.4.3",
+ "hmac 0.13.0",
+ "schemars",
+ "serde",
+ "serde_json",
+ "sha2 0.11.1",
+ "sip-message",
+ "sip-pcap",
+]
+
+[[package]]
 name = "pem"
 version = "3.0.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
