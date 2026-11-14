@@ -4,7 +4,7 @@
  * dials B, and later legs are hunted, resources or transfers.
  */
 import { describe, expect, it } from "vitest"
-import { type Observation, place } from "../src/situation.js"
+import { type Observation, place, type Placed } from "../src/situation.js"
 
 const req = (leg: string, emitted: boolean, method: string, inDialog = true): Observation => ({
   leg,
@@ -239,5 +239,43 @@ describe("situation and pairing", () => {
     )
     expect(cancelled[3]).toEqual({ situation: "DS:2xx:CANCEL:local", pair: undefined })
     expect(cancelled[4]).toEqual({ situation: "DQ:CANCEL", pair: 2 })
+  })
+
+  /** A's CANCEL relayed to B, B's `status` to that CANCEL received, then the system's `status` to A's CANCEL. */
+  const answeredAfterTheFarEnd = (status: number): ReadonlyArray<Placed | undefined> =>
+    place(
+      [
+        req("A", false, "INVITE", false),
+        req("B", true, "INVITE", false),
+        req("A", false, "CANCEL", false),
+        req("B", true, "CANCEL", false),
+        res("B", false, status, "CANCEL"),
+        res("A", true, status, "CANCEL")
+      ],
+      () => "A"
+    )
+
+  it("answers a CANCEL hop by hop: its 200 never relays the far end's 200 to the system's CANCEL", () => {
+    const placed = answeredAfterTheFarEnd(200)
+    expect(placed[3]).toEqual({ situation: "DQ:CANCEL", pair: 2 })
+    expect(placed[5]).toEqual({ situation: "DS:2xx:CANCEL:local", pair: undefined })
+  })
+
+  it("answers a CANCEL hop by hop: its 481 never relays the far end's 481 to the system's CANCEL", () => {
+    expect(answeredAfterTheFarEnd(481)[5]).toEqual({ situation: "DS:4xx:CANCEL:local", pair: undefined })
+  })
+
+  it("pairs a 200 to BYE emitted after the far end's 200 to the relayed BYE", () => {
+    const relayed = place(
+      [
+        ...basicCall.slice(0, 10),
+        req("A", false, "BYE"),
+        req("B", true, "BYE"),
+        res("B", false, 200, "BYE"),
+        res("A", true, 200, "BYE")
+      ],
+      () => "A"
+    )
+    expect(relayed[13]).toEqual({ situation: "DS:2xx:BYE", pair: 12 })
   })
 })
