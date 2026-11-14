@@ -1,6 +1,6 @@
 # SIP Rust server
 
-The project is not in production: a design ignores upgrade compatibility.
+No compatibility between versions is promised: a design ignores upgrade compatibility.
 To show the user an html file or a URL: `xdg-open <path or URL>`.
 
 ## Coding rules
@@ -45,6 +45,8 @@ change does not call for Fable.
   [docs/testing/ha-acceptance.md](docs/testing/ha-acceptance.md).
 - A change to a reader: [docs/testing/fuzzing.md](docs/testing/fuzzing.md).
 - Any new `info!` or per-call trace emission: [docs/observability.md](docs/observability.md).
+- A change to a guarantee, a limit or a default a user reads: the matching page of
+  [docs/guide/](docs/guide/), written to ASD-STE100 (short active sentences, one term per thing).
 - Decisions: [docs/adr/](docs/adr/). An ADR over 8 KB keeps its decision in the numbered file
   and its scenarios, tables and evidence in `docs/adr/appendix/`. Most used:
   [ADR-0055](docs/adr/0055-services-are-ha-blind.md) (services are HA-blind),

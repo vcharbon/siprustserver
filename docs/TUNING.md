@@ -17,8 +17,9 @@ component's `extraEnv` escapes the render checks.
 
 `B2BUA_MAX_CALLS_EMERGENCY` is the live-call count past which every new call,
 emergency included, is refused; `B2BUA_MAX_CALLS`, below it, refuses only
-normal calls (ADR-0037 item 2). The pair is a protection: by default the
-emergency ceiling sits a small margin above the normal one, enough for the
+normal calls (ADR-0037 item 2). The pair is a protection, each ceiling off
+until set: the emergency ceiling sits above the normal one by the margin the
+deployment states (`sizing.emergencyPct` in the chart), enough for the
 emergency share of the load while normal calls are refused.
 
 - **Relations.** Emergency strictly above normal (worker start). Every peer's
@@ -87,8 +88,8 @@ components' memory resources. Every input is required.
 | `B2BUA_CAP_TIMERS`, `_REQUESTS`, `_DIALOGS`, `_HEADER_UPDATES`, `_EXT_BYTES` | 400, 400, 100, 1000, 122880 | what one call holds at once: timer keys (defect), requests in flight (peer), dialogs of one leg (peer), stated header lines (defect), one service's ext value as JSON bytes (defect) | never 0 (start) | as above; a defect cap's trip is an alert | a turn past it fails the call as above; set at twenty times the largest `b2bua_cap_peak` over valid traffic: memory a call holds (ADR-0057 §9) |
 | `B2BUA_CAP_ACTIONS_PER_TURN` | 100000 | the actions one turn returns, rule and lifecycle actions together (defect) | never 0; > `B2BUA_CAP_LEGS` + 2, the teardown of a call at its base leg cap (start) | as above, `b2bua_cap_peak{cap="actions-per-turn"}` | a turn past it fails the call as above; an action costs CPU and the turn's transient effects: hundreds of times the heaviest turn measured and more (ADR-0057 §9) |
 | `B2BUA_CAP_SERVICE_HTTP_TIMEOUT_MS` | 26000 | the longest a service's HTTP request runs; a longer timeout, the port's default included, is clamped | ≤ a held request's answer deadline (Timer F − T2) less the 2 s answer margin; never 0 (start) | service HTTP `no_answer` results | lower bounds how long one call waits on a service backend |
-| `B2BUA_REBOOT_BUDGET_SEC` | 600 | the replica TTL (not a reboot budget, see HA_GUARANTEES.md) | ≥ 60; ≥ keepalive + Timer F + 10 s; > the INVITE bound (start) | `b2bua_store_bodies` | raise keeps quiet calls' replicas longer, more memory after a long outage |
-| `B2BUA_CPS_BUCKET_RATE`, `_SIZE` | 500, 1000 | the per-worker new-call rate rung | rate > 0 when size > 0 (start) | `b2bua_new_calls_total{reason="bucket"}` | set to what a lone worker carries |
+| `B2BUA_REBOOT_BUDGET_SEC` | 600 | the replica TTL (not a reboot budget, see [guide/ha.md](guide/ha.md#what-ha-does-not-cover)) | ≥ 60; ≥ keepalive + Timer F + 10 s; > the INVITE bound (start) | `b2bua_store_bodies` | raise keeps quiet calls' replicas longer, more memory after a long outage |
+| `B2BUA_CPS_BUCKET_RATE`, `_SIZE` | 500, 1000 | the per-worker new-call rate rung | rate > 0 when size > 0 (start) | `b2bua_new_calls_total{reason="bucket_empty"}` | set to what a lone worker carries |
 | `B2BUA_QUEUE` | 8192 | inbound UDP queue, packets | ≥ 256 (start) | `b2bua_udp_queue_depth`, `b2bua_udp_tail_dropped_total` | raise absorbs bursts, longer queueing delay |
 | `B2BUA_UDP_INGRESS_BRAKE_PCT` | 70 | queue depth share at which new INVITEs are shed statelessly | 1..=100 (start) | `b2bua_udp_*` brake counters | lower sheds earlier |
 | `B2BUA_EVENT_QUEUE_*` | 512 / 64 / 300 / 150 / 50 / 3000 | the event-queue gate (ADR-0050 §9); the transaction layer also refuses on arrival once the queue's oldest event has waited the refusal delay plus the interval, 450 ms, while a router held in one turn writes nothing (ADR-0037 item 11) | accept bounds under refusal bounds, refusal depth ≤ the queue, interval < hold (start) | `b2bua_event_queue_refusing`, `_refusals_total`, `b2bua_new_calls_total{reason="event_queue"}` | see `runner_env::event_queue_env`; the sum bounds how many INVITEs hear a 100 behind a stopped router, rate × sum |
