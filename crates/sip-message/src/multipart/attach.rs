@@ -14,7 +14,8 @@ use crate::write_check::{Position, WriteRefusal};
 /// A message body built by [`attach`]: the bytes, the `Content-Type` that
 /// describes them (`None` for no body), the further entity headers the
 /// message itself states for them, `(name, value)` in emission order, and
-/// what of the parts was left out because it cannot be written whole.
+/// what of the parts was left out: a line that cannot be written whole, or a
+/// line of a lifted part's head that is no entity header.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Attached {
     pub content_type: Option<String>,

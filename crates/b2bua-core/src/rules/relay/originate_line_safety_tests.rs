@@ -1,6 +1,8 @@
-//! A line a decision states on the INVITE [`build_b_leg`] mints that the wire
-//! cannot carry whole (ADR-0053) — a header set, a charging host, a part line
-//! — is left out and handed back; the INVITE leaves without it.
+//! A line a decision states on the INVITE [`build_b_leg`] mints that cannot
+//! take its place there — a header set, a charging host or a part line the
+//! wire cannot carry whole (ADR-0053), a part line that is no entity header of
+//! a part lifted to be the body (RFC 2045 §9) — is left out and handed back;
+//! the INVITE leaves without it.
 
 use call::features::ChargingVectorFeature;
 use sip_ids::TurnIds;

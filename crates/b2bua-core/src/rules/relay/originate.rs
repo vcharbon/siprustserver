@@ -106,7 +106,9 @@ pub(super) fn override_descriptors(
 /// the INVITE states for it: the source's body, an override's bytes with the
 /// lines describing them ([`override_descriptors`]), or an override's session
 /// description beside its attached parts, headed by those lines. A part line
-/// the wire cannot carry whole is left out and pushed onto `skipped`.
+/// the wire cannot carry whole, or that is no entity header of a part lifted
+/// to be the body ([`sip_message::attach_parts`]), is left out and pushed onto
+/// `skipped`.
 fn minted_body(
     a_leg_invite: &SipRequest,
     body_override: Option<&Body>,
