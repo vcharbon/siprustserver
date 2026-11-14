@@ -4,7 +4,7 @@ use super::*;
 
 /// A fresh directory for one test's seed files.
 fn dir(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("pcap2test-seeds-{}-{name}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("pcap-anon-seeds-{}-{name}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("a temp dir");
     dir

@@ -1,9 +1,10 @@
-//! pcap2test — a SIP capture's anonymiser and ingest.
+//! pcap-anon — a SIP capture's anonymiser and ingest.
 //!
-//! Consumes the upstream `sipflow --json` flow model and writes what the
+//! Consumes the `sipflow --json` flow model (`sip-pcap`) and writes what a
 //! corpus keeps of a capture ([`auto`]): the anonymised flows document, the
 //! agent-readable callflow `source.txt` ([`text`], with the leg pairings
-//! [`propose`] offers), and a summary of the anonymisation.
+//! [`propose`] offers), and a summary of the anonymisation. The crate's
+//! README states the plan, profile and reading files and the seed.
 //!
 //! The anonymiser ([`anonymize`]) rewrites every number under a
 //! numbering-plan equivalence config ([`plan`]) and every other identity —
@@ -15,7 +16,7 @@
 //! plan, the profile and the reading the capture was extracted under
 //! ([`reading`]) are the caller's: nothing here holds a deployment's data.
 //!
-//! SIP parsing happens upstream (`sip-pcap` via `sip-message`); this crate
+//! SIP parsing happens in `sip-pcap` via `sip-message`; this crate
 //! reads a message's headers, its body parts and their framing, and the rows
 //! of a named header through `sip-message`. Two readings are its own, for
 //! want of an accessor there: the byte scan's positional classifiers

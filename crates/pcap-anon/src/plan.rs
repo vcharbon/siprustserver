@@ -5,7 +5,7 @@
 //! through one NSN mapping — and the total classification behind it
 //! ([`Plan::classify_any`]): a number-bearing user-part no form recognizes is
 //! [`NumberClass::Unrecognised`], never left in clear. One plan per source
-//! network, which the caller states (`pcap2test --plan`).
+//! network, which the caller states (`pcap-anon --plan`).
 //! Format (JSON, all digit strings literal):
 //!
 //! ```json

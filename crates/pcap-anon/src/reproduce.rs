@@ -1,4 +1,4 @@
-//! The anonymiser's quick check (`pcap2test anonymize --check-reproducible`):
+//! The anonymiser's quick check (`pcap-anon anonymize --check-reproducible`):
 //! the raw document is anonymised twice under one seed, and the two outputs
 //! must be byte-identical — a regeneration from the raw capture under its
 //! kept seed reproduces the anonymised one — and the leak check must count

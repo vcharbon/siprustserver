@@ -14,7 +14,7 @@ workspace = true
 
 [[bin]]
 name = "pcap-anon"
-path = "src/bin/pcap2test.rs"
+path = "src/bin/pcap-anon.rs"
 
 [dependencies]
 serde = { workspace = true }

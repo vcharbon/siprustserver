@@ -4,7 +4,7 @@
 //! keeps so the cut still finds the SUT, the texts the SUT itself writes,
 //! kept as written, and the body types the network adds, each with how its
 //! content is read ([`BodyTypes`]). The caller states it
-//! (`pcap2test --profile`). Format (JSON):
+//! (`pcap-anon --profile`). Format (JSON):
 //!
 //! ```json
 //! { "sut": ["192.0.2.0/24", "198.51.100.7"], "kept_texts": ["Exampleswitch"],

@@ -1,6 +1,6 @@
-//! The flows document this crate reads and writes: upstream's
-//! `sip_pcap::doc` (schema 5) under the crate's short names, read loudly and
-//! written back through upstream's enrichment.
+//! The flows document this crate reads and writes: `sip_pcap::doc`
+//! (schema 5) under the crate's short names, read loudly and written back
+//! through `sip-pcap`'s enrichment.
 //!
 //! Ingest is loud: an unknown `schema` value, a message carrying other than
 //! exactly one payload form, a payload that does not decode, or a structural
@@ -22,7 +22,7 @@ pub use sip_pcap::doc::{
 
 use crate::reading::Reading;
 
-/// The one upstream emit schema version this crate understands.
+/// The one `sip-pcap` emit schema version this crate understands.
 pub const SUPPORTED_SCHEMA: u64 = sip_pcap::doc::EMIT_SCHEMA_VERSION as u64;
 
 /// The payload keys of a message, one form per entry.
@@ -63,7 +63,7 @@ impl std::fmt::Display for IngestError {
             IngestError::Json(e) => write!(f, "flows input is not valid JSON: {e}"),
             IngestError::UnsupportedSchema { found: Some(s) } => write!(
                 f,
-                "unsupported flows schema {s} (this pcap2test build supports schema {SUPPORTED_SCHEMA} only; \
+                "unsupported flows schema {s} (this pcap-anon build supports schema {SUPPORTED_SCHEMA} only; \
                  regenerate with a matching sipflow --json)"
             ),
             IngestError::UnsupportedSchema { found: None } => write!(

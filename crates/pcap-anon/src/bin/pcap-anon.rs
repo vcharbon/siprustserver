@@ -1,20 +1,20 @@
-//! pcap2test — CLI over the ingest library.
+//! pcap-anon — CLI over the ingest library.
 //!
-//!   pcap2test auto <flows.json> <out-dir> --plan <cfg> --profile <cfg> --reading <file>
+//!   pcap-anon auto <flows.json> <out-dir> --plan <cfg> --profile <cfg> --reading <file>
 //!                  --seed-file <path> [--fresh-seed] [--capture <name>] [--verify]
-//!   pcap2test auto <flows.json> <out-dir> --plan <cfg> --profile <cfg> --reading <file>
+//!   pcap-anon auto <flows.json> <out-dir> --plan <cfg> --profile <cfg> --reading <file>
 //!                  --as-is [--capture <name>]
 //!     → <out-dir>/<capture>.anon.flows.json, source.txt, auto.json: one
 //!       capture's ingest (the `auto` module); `--as-is` takes the document
 //!       as it stands, anonymising nothing.
 //!
-//!   pcap2test anonymize <flows.json> <out.flows.json> --plan <cfg> --reading <file>
+//!   pcap-anon anonymize <flows.json> <out.flows.json> --plan <cfg> --reading <file>
 //!                       --seed-file <path> [--fresh-seed] [--profile <cfg>]
 //!                       [--all-addresses | --keep-addresses] [--verify]
 //!     → a flows document with every number, display name, host name,
 //!       charging id, product text and mapped address replaced.
 //!
-//!   pcap2test anonymize <flows.json> --check-reproducible [--sample N] [--seed-file <path>] …
+//!   pcap-anon anonymize <flows.json> --check-reproducible [--sample N] [--seed-file <path>] …
 //!     → whether two runs over the raw document under one seed agree byte for
 //!       byte and the output leaks nothing, and where and in what shape every
 //!       token the leak check cannot explain sits.
@@ -27,15 +27,15 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Args, Parser, Subcommand};
-use pcap2test::anonymize::names::NameCounts;
-use pcap2test::fake::address::Scope;
-use pcap2test::reading::Reading;
-use pcap2test::{anonymize, auto, model, plan, profile, reproduce, seeds, verify};
+use pcap_anon::anonymize::names::NameCounts;
+use pcap_anon::fake::address::Scope;
+use pcap_anon::reading::Reading;
+use pcap_anon::{anonymize, auto, model, plan, profile, reproduce, seeds, verify};
 
 #[derive(Parser)]
 #[command(
-    name = "pcap2test",
-    about = "capture ingest: anonymiser and callflow writer (see crate doc)"
+    name = "pcap-anon",
+    about = "SIP capture anonymiser and callflow writer (see the crate's README)"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -58,7 +58,7 @@ struct SeedArgs {
 }
 
 impl SeedArgs {
-    fn resolve(&self) -> Result<pcap2test::fake::Seed, String> {
+    fn resolve(&self) -> Result<pcap_anon::fake::Seed, String> {
         seeds::resolve(self.seed_file.as_deref(), self.fresh_seed)
     }
 }
@@ -157,7 +157,7 @@ fn main() -> ExitCode {
     match run() {
         Ok(code) => code,
         Err(err) => {
-            eprintln!("pcap2test: {err}");
+            eprintln!("pcap-anon: {err}");
             ExitCode::FAILURE
         }
     }
@@ -336,7 +336,7 @@ fn check_reproducible_cmd(
     }
     let seed = match &seed.seed_file {
         Some(_) => seed.resolve()?,
-        None => pcap2test::fake::Seed::random()?,
+        None => pcap_anon::fake::Seed::random()?,
     };
     let model = model::ingest_str(&read(&flows)?).map_err(|e| e.to_string())?;
     let report =
