@@ -17,14 +17,13 @@
  * (`./call-facts.ts`, ADR-0061), merged in capture order: each timeline entry and
  * each retransmission folded into it. WHICH step a repeat collapses onto is read,
  * never searched for: a retransmission onto the entry its timeline folds it
- * into, and an entry onto the earliest message its `repeat_of` names. The
- * extractor states that relation under a request criterion that ignores the
- * Via branch, so a peer re-ACKing each retransmitted final with a fresh branch
- * collapses like any other ladder. It is BOUNDED by the transaction envelope
- * (64·T1 = 32 s), so bytes matching an earlier message past it arrive here
- * carrying no `repeat_of` and become their own step — a re-emission, never a
- * count (§6.9). A document whose producer did not compute the field collapses
- * the timeline's retransmissions alone and SAYS so — never silently.
+ * into. The extractor states `repeat_of` only between byte-identical datagrams
+ * of one leg and direction, so a repeat carries its original's Via branch and
+ * is `retx` too. It is BOUNDED by the transaction envelope (64·T1 = 32 s), so
+ * bytes matching an earlier message past it arrive here carrying no
+ * `repeat_of` and become their own step — a re-emission, never a count (§6.9).
+ * A document whose producer did not compute the field collapses the
+ * timeline's retransmissions alone and SAYS so — never silently.
  *
  * Assert-vs-record is decided HERE and stated in the document (§6.4): relayed
  * content is asserted, a SUT-MINTED message is recorded. Authorship, not delay
@@ -157,10 +156,7 @@ export const synthesize = (
   const positions = layout.actorsObs.map((a) => CallFacts.atActor(flows, a).timeline)
   const order = CallFacts.merged(positions)
   const t0 = order[0]?.at_us ?? 0
-
-  // Exchanges a background policy claims (§5.1) collapse into the policy
-  // instead of becoming steps — before ids, delays, and repeat collapse exist.
-  const claimed = claimedByBackground(flows, order, layout.actorsObs, background)
+  const claimed =claimedByBackground(flows, order, layout.actorsObs, background)
 
   const steps: Array<StepDraft> = []
   const sources: Array<StepSource> = []
@@ -189,6 +185,11 @@ export const synthesize = (
     })
   }
 
+  /**
+   * ACKs to a non-2xx final that ride no transaction the stack composes. Read
+   * before any repeat collapse: a stray's own retransmission is no rung of the
+   * ACK the final keeps.
+   */
   const strayAcks = offTransactionAcks(flows)
   const strays: Array<string> = []
 
@@ -210,8 +211,6 @@ export const synthesize = (
     const msg = CallFacts.source(timeline, o)
     const emits = !o.entry.bySystem
     const auto = isAutomatic(msg)
-    // Before any repeat collapse: a stray's own retransmission is no rung of
-    // the ACK the final keeps.
     if (strayAcks.has(at)) {
       strays.push(`${actor.pivotLeg} leg${o.leg}/msg${o.msg}`)
       continue
@@ -220,18 +219,7 @@ export const synthesize = (
     const repeats = repeatedMsg(o, msg)
     const repeated = repeats === undefined ? -1 : (stepOfMsg.get(coord(o.leg, repeats)) ?? -1)
     if (repeated >= 0 && !unpaced(msg)) {
-      // The count says how many rungs; the gap says when this one went out
-      // (§6.9). Measured from the emission BEFORE it — the ladder's head on the
-      // first rung, the previous rung after that — so a peer whose ladder is
-      // not the RFC's is replayed as it ran, and the two 18x of a capture stay
-      // on the side of the PRACK the capture put them.
-      const head = steps[repeated]!
-      const previous = rungAt.get(repeated) ?? o.at_us
-      head.retransmits = (head.retransmits ?? 0) + 1
-      head.retransmit_intervals_ms = [
-        ...(head.retransmit_intervals_ms ?? []),
-        Math.max(0, Math.round((o.at_us - previous) / 1000))
-      ]
+      addRung(steps[repeated]!, rungAt.get(repeated) ?? o.at_us, o.at_us)
       rungAt.set(repeated, o.at_us)
       continue
     }
@@ -251,11 +239,7 @@ export const synthesize = (
       parts,
       !auto || bodyStorable(timeline, o.entry, msg)
     )
-    // The captured CSeq NUMBER, on a transaction-derived step only (§6.3): the
-    // label of the transaction that obliged the message, which pairs it for
-    // confrontation and scopes an auto ACK's DRAWN `retransmits`. Never
-    // replayed — the stack numbers its own.
-    if (auto) spec.cseq = msg.summary.cseq.seq
+    if (auto) labelTransaction(spec, msg)
 
     timings.push({
       leg: actor.pivotLeg,
@@ -482,6 +466,32 @@ export const synthesize = (
 const TRIGGER = Tokens.anchorToken({ _tag: "trigger" })
 
 /**
+ * Counts one more rung, captured at `at_us`, on the ladder `head` heads. The
+ * count says how many rungs; the gap says when this one went out (§6.9),
+ * measured from the emission BEFORE it (`previousAt_us`: the ladder's head on
+ * the first rung, the previous rung after that), so a peer whose ladder is not
+ * the RFC's is replayed as it ran, and the two 18x of a capture stay on the
+ * side of the PRACK the capture put them.
+ */
+const addRung = (head: StepDraft, previousAt_us: number, at_us: number): void => {
+  head.retransmits = (head.retransmits ?? 0) + 1
+  head.retransmit_intervals_ms = [
+    ...(head.retransmit_intervals_ms ?? []),
+    Math.max(0, Math.round((at_us - previousAt_us) / 1000))
+  ]
+}
+
+/**
+ * States the captured CSeq NUMBER on a transaction-derived step (§6.3): the
+ * label of the transaction that obliged the message, which pairs it for
+ * confrontation and scopes an auto ACK's DRAWN `retransmits`. Never replayed:
+ * the stack numbers its own.
+ */
+const labelTransaction = (spec: MsgSpecDraft, msg: Flows.Msg): void => {
+  spec.cseq = msg.summary.cseq.seq
+}
+
+/**
  * A session refresh (RFC 4028 §7.4, §10): a re-INVITE or UPDATE inside a
  * dialog stating `Session-Expires`. It is the one message the capture shows a
  * session timer sent, so its dwell is timer-linked. A response carrying the
@@ -705,8 +715,10 @@ const repeatOfCarriage = new WeakMap<Flows.FlowsDoc, boolean>()
  * The index in its leg of the message a captured copy repeats: for a
  * retransmission, the entry its position's timeline folds it into (the same
  * transaction's same message, RFC 3261 §17); for an entry, the earliest message
- * its `repeat_of` names, which is how a fresh-branch re-answer the timeline
- * keeps as its own entry collapses too. `undefined` for a first emission.
+ * its `repeat_of` names. An entry carries `repeat_of` only in a hand-built
+ * document stating the relation without `retx`, or where it is the position's
+ * first copy of a message held at another position of its leg. `undefined` for
+ * a first emission.
  */
 const repeatedMsg = (o: CallFacts.Placed, msg: Flows.Msg): number | undefined =>
   o.repeat === undefined ? msg.repeat_of : o.entry.msg

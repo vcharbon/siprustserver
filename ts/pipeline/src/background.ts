@@ -54,7 +54,9 @@ const requestMethod = (m: Flows.Msg): string | undefined =>
   m.summary.kind === "request" ? m.summary.method.toUpperCase() : undefined
 
 /**
- * The `origLeg:msgIdx` coordinates background policies claim out of synthesis.
+ * The `origLeg:msgIdx` coordinates background policies claim out of synthesis:
+ * a claimed exchange collapses into its policy (§5.1) and synthesis drops it
+ * before step ids, delays and repeat collapse exist.
  * `order` is the case's positions merged in capture order, `actors[p]` the
  * actor observing position `p`. Empty when no actor states a policy — the
  * zero-cost common case.

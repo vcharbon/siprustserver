@@ -519,10 +519,11 @@ export const delayedOfferFlows = (): Flows.FlowsDoc => {
 }
 
 /**
- * One retransmission ladder in its two spellings, which is what `repeat_of`
- * exists to unify: the platform repeats its 200 on ONE branch — `retx` sees that
- * — and the caller answers each copy with a fresh-branch ACK, which is a new
- * transaction every time and therefore never `retx`.
+ * One retransmission ladder in its two spellings, hand-built: the platform
+ * repeats its 200 on ONE branch, `retx` with `repeat_of`, and the caller answers
+ * each copy with a fresh-branch ACK the document states as a `repeat_of` that
+ * is not `retx`. The extractor never writes that second spelling (its repeats
+ * are byte-identical); the fixture holds the entry side of the collapse.
  */
 export const reAckedFinalFlows = (): Flows.FlowsDoc => {
   const ok = (ts_ms: number): Flows.Msg =>
