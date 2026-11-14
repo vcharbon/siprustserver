@@ -14,6 +14,7 @@ use sip_message::Bytes;
 
 use crate::arrival::Arrival;
 use crate::parse_guard::ParseOutcome;
+pub use crate::queue::QueueLoad;
 
 /// One received datagram handed up from an endpoint's inbound queue.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -188,11 +189,11 @@ pub enum PreIngressAction {
 
 /// Arrival-time filter installed at `bind_udp`. Receives the datagram (its
 /// bytes, and the parse it makes through [`Arrival::parse`], which the queued
-/// packet carries on), the source address, and the current queue depth.
-/// `Arc<dyn Fn>` so it clones into the simulated routing table and recorded
-/// summaries.
+/// packet carries on), the source address, and the inbound queue's load as
+/// the datagram arrives. `Arc<dyn Fn>` so it clones into the simulated
+/// routing table and recorded summaries.
 pub type PreIngressHook =
-    Arc<dyn Fn(&mut Arrival, SocketAddr, usize) -> PreIngressAction + Send + Sync>;
+    Arc<dyn Fn(&mut Arrival, SocketAddr, QueueLoad) -> PreIngressAction + Send + Sync>;
 
 /// Options for `bind_udp`.
 #[derive(Clone)]

@@ -209,6 +209,7 @@ impl RunnerEnv {
         let brake_config = IngressBrakeConfig {
             queue_max: self.queue_max,
             threshold_pct: self.udp_ingress_brake_pct,
+            refuse_wait: self.event_queue_gate.refuse_at_age(),
         };
         // The worker's identifier generator, keyed from the OS RNG once: the
         // core's, and the To-tag secret of its refusals.
@@ -257,13 +258,16 @@ impl RunnerEnv {
                     Arc::new(move || endpoint.counters())
                 },
             )
+            .with_queue_wait(live(|ep| {
+                u64::try_from(ep.queue_wait().as_millis()).unwrap_or(u64::MAX)
+            }))
         };
         tracing::info!(
             service = name,
             threshold = brake_config.threshold(),
             queue_max = self.queue_max,
             ingress_brake_pct = self.udp_ingress_brake_pct,
-            "ingress brake armed: stateless-503 for new non-emergency INVITEs at ingress depth >= threshold"
+            "ingress brake armed: stateless-503 for new non-emergency INVITEs at ingress depth >= threshold, at the event-queue gate's age, or while that gate refuses"
         );
 
         // The worker's own address on every Via; behind the proxy, every

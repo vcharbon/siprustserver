@@ -67,9 +67,9 @@ until the kernel kills it, dropping every call it serves.
 
     | rung | site | input | normal | emergency | in dialog | Retry-After base |
     |---|---|---|---|---|---|---|
-    | brake | arrival, before the datagram is queued | inbound queue depth | refused at the threshold | admitted | admitted | configured |
+    | brake | arrival, before the datagram is queued | inbound queue depth, the wait of its oldest datagram, and the state the event-queue gate last wrote | refused at the threshold, from the gate's delay plus its interval, or while the gate refuses | admitted | admitted | configured |
     | backlog | transaction layer, before any transaction | deferred events | refused at the normal ceiling | refused at the emergency ceiling | refused at the emergency ceiling | configured |
-    | event queue, on arrival | transaction layer, before any transaction | the state the event-queue gate (ADR-0050 §9) last wrote, and the age of the queue's oldest event | refused while it refuses, or from the gate's delay plus its interval | admitted | admitted | configured |
+    | event queue, on arrival | transaction layer, before any transaction | the state the event-queue gate (ADR-0050 §9) last wrote, and the age of the oldest event of the event queue and of the oldest datagram of the inbound queue | refused while it refuses, or from the gate's delay plus its interval | admitted | admitted | configured |
     | capacity | router ingress | live calls (admitted INVITEs included), transactions, sampled RSS | refused at a normal ceiling | refused at an emergency ceiling | n/a | configured |
     | shed | router ingress | live per-call queues | refused at the cap less the headroom | refused at the cap | n/a | configured |
     | panic-ELU | router ingress | the worker's EWMA-ELU | refused above the backstop | admitted | n/a | configured |

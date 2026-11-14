@@ -3,7 +3,7 @@
 
 use super::*;
 use sip_message::Bytes;
-use sip_net::Arrival;
+use sip_net::{Arrival, QueueLoad};
 use std::net::SocketAddr;
 
 use crate::observability::ProxyMetrics;
@@ -22,7 +22,7 @@ fn shed_hook() -> (PreIngressHook, Arc<ProxyMetrics>) {
 
 /// The hook's verdict on `raw` arriving at queue depth `depth`.
 fn judge(hook: &PreIngressHook, raw: &[u8], depth: usize) -> PreIngressAction {
-    hook(&mut Arrival::new(Bytes::copy_from_slice(raw)), src(), depth)
+    hook(&mut Arrival::new(Bytes::copy_from_slice(raw)), src(), QueueLoad::at_depth(depth))
 }
 
 /// A new INVITE whose To header line is `to`.
@@ -100,12 +100,13 @@ fn every_datagram_is_parsed_on_the_receive_path() {
     for depth in [0, WATERMARK] {
         for raw in [IN_DIALOG_INVITE, EMERGENCY_INVITE, BYE, OK_200] {
             let mut arrival = Arrival::new(Bytes::from_static(raw));
-            assert_eq!(hook(&mut arrival, src(), depth), PreIngressAction::Accept);
+            let load = QueueLoad::at_depth(depth);
+            assert_eq!(hook(&mut arrival, src(), load), PreIngressAction::Accept);
             assert!(matches!(arrival.parsed(), Some(Ok(Ok(_)))), "{depth}: {:?}", arrival.parsed());
         }
     }
     let mut garbage = Arrival::new(Bytes::from_static(GARBAGE));
-    assert_eq!(hook(&mut garbage, src(), 0), PreIngressAction::Accept);
+    assert_eq!(hook(&mut garbage, src(), QueueLoad::at_depth(0)), PreIngressAction::Accept);
     assert!(matches!(garbage.parsed(), Some(Ok(Err(_)))), "{:?}", garbage.parsed());
 }
 

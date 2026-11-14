@@ -256,9 +256,9 @@ fn deliver(shared: Arc<SimShared>, raw: Vec<u8>, src: SocketAddr, dst: SocketAdd
             }
         };
 
-        let depth = queue.depth();
+        let load = queue.load();
         let mut arrival = Arrival::new(Bytes::from(raw));
-        match crate::pre_ingress::judge(pre.as_ref(), &mut arrival, src, depth, &counters) {
+        match crate::pre_ingress::judge(pre.as_ref(), &mut arrival, src, load, &counters) {
             PreIngressAction::Drop => {
                 counters.pre_ingress_dropped.fetch_add(1, Ordering::Relaxed);
             }
@@ -342,6 +342,10 @@ impl UdpEndpoint for SimEndpoint {
 
     fn queue_depth(&self) -> usize {
         self.queue.depth()
+    }
+
+    fn queue_wait(&self) -> Duration {
+        self.queue.wait()
     }
 
     fn queue_max(&self) -> usize {

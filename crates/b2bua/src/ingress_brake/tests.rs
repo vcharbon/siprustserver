@@ -12,10 +12,11 @@ fn answered(counters: &IngressBrakeCounters) -> u64 {
 #[test]
 fn threshold_is_floor_of_queue_max_times_pct() {
     // The brake test's config: queue_max=5, pct=40 → floor(200/100)=2.
-    let cfg = IngressBrakeConfig { queue_max: 5, threshold_pct: 40 };
+    let cfg = IngressBrakeConfig { queue_max: 5, threshold_pct: 40, refuse_wait: REFUSE_WAIT };
     assert_eq!(cfg.threshold(), 2);
     // Production-ish: queue_max=8192, pct=70 → floor(573440/100)=5734.
-    let prod = IngressBrakeConfig { queue_max: 8192, threshold_pct: 70 };
+    let prod = IngressBrakeConfig { queue_max: 8192, ..cfg };
+    let prod = IngressBrakeConfig { threshold_pct: 70, ..prod };
     assert_eq!(prod.threshold(), 5734);
     // pct=0 would brake from the first INVITE — only ever set deliberately;
     // the floor is exact.
@@ -83,18 +84,33 @@ Content-Length: 0\r\n\r\n"
     .into_bytes()
 }
 
-/// A brake hook judging a datagram's bytes as they arrive.
+/// The refusal wait of the brake under test.
+const REFUSE_WAIT: Duration = Duration::from_millis(450);
+
+/// A brake hook judging a datagram's bytes as they arrive at a queue of the
+/// given depth, whose oldest datagram arrived just now.
 type OnBytes = Box<dyn Fn(&[u8], std::net::SocketAddr, usize) -> PreIngressAction>;
 
-/// Brake hook under test: threshold 2, refusing with `refusals`.
-fn brake_over(refusals: Refusals) -> (OnBytes, IngressBrakeCounters) {
+/// A brake hook judging a datagram's bytes as they arrive at a queue under
+/// the given load.
+type OnLoad = Box<dyn Fn(&[u8], std::net::SocketAddr, QueueLoad) -> PreIngressAction>;
+
+/// Brake hook under test: threshold 2, refusal wait [`REFUSE_WAIT`],
+/// refusing with `refusals`.
+fn brake_under_load(refusals: Refusals) -> (OnLoad, IngressBrakeCounters) {
     let counters = IngressBrakeCounters::new();
-    let cfg = IngressBrakeConfig { queue_max: 5, threshold_pct: 40 };
+    let cfg = IngressBrakeConfig { queue_max: 5, threshold_pct: 40, refuse_wait: REFUSE_WAIT };
     let hook = build_ingress_brake_hook(cfg, counters.clone(), refusals, CustomParser::new());
-    let on_bytes: OnBytes = Box::new(move |raw, src, depth| {
-        hook(&mut Arrival::new(sip_message::Bytes::copy_from_slice(raw)), src, depth)
+    let on_load: OnLoad = Box::new(move |raw, src, load| {
+        hook(&mut Arrival::new(sip_message::Bytes::copy_from_slice(raw)), src, load)
     });
-    (on_bytes, counters)
+    (on_load, counters)
+}
+
+/// [`brake_under_load`], read by depth alone.
+fn brake_over(refusals: Refusals) -> (OnBytes, IngressBrakeCounters) {
+    let (hook, counters) = brake_under_load(refusals);
+    (Box::new(move |raw, src, depth| hook(raw, src, QueueLoad::at_depth(depth))), counters)
 }
 
 /// The worker's refusals: `Retry-After` base 5, jitter `jitter_sec`.
@@ -410,4 +426,71 @@ fn a_refused_copy_is_answered_where_and_as_the_transaction_layer_answers_it() {
     let at = "192.0.2.2:5060".parse().unwrap();
     assert_eq!(stamped.destination, at);
     assert_eq!(reply, PreIngressAction::Reply { datagram: expected, to: at });
+}
+
+// ---- the wait of the queue's oldest datagram, and the gate's switch ----
+
+/// A shallow queue whose oldest datagram has waited `wait_ms`.
+fn waited(wait_ms: u64) -> QueueLoad {
+    QueueLoad { depth: 1, wait: Duration::from_millis(wait_ms) }
+}
+
+/// Far below the depth threshold, a new normal INVITE is refused once the
+/// queue's oldest datagram has waited the refusal wait, and not before.
+#[test]
+fn a_queue_that_waited_the_refusal_wait_refuses_a_new_invite() {
+    let (hook, counters) = brake_under_load(refusals_with_jitter(0));
+    assert_eq!(hook(&new_invite(0), src(), waited(449)), PreIngressAction::Accept);
+    let PreIngressAction::Reply { datagram, .. } = hook(&new_invite(1), src(), waited(450)) else {
+        panic!("a new INVITE behind a queue that waited 450 ms is refused");
+    };
+    assert_eq!(status_line(&datagram), b"SIP/2.0 503 Service Unavailable");
+    assert!(find(&datagram, b"Retry-After: 5\r\n").is_some(), "the new-call refusal");
+    assert_eq!(counters.refused(Class::Normal), 1);
+}
+
+/// A queue that waited refuses new normal calls alone: an emergency INVITE,
+/// a re-INVITE and any other request are queued.
+#[test]
+fn a_queue_that_waited_admits_emergency_and_in_dialog_requests() {
+    let (hook, counters) = brake_under_load(refusals_with_jitter(0));
+    let late = waited(5_000);
+    assert_eq!(hook(&invite_buf(0, true, None), src(), late), PreIngressAction::Accept);
+    assert_eq!(
+        hook(&invite_buf(1, false, Some("bob-tag-1")), src(), late),
+        PreIngressAction::Accept
+    );
+    assert_eq!(hook(&options_buf(2), src(), late), PreIngressAction::Accept);
+    assert_eq!(hook(&response_buf(), src(), late), PreIngressAction::Accept);
+    assert_eq!(answered(&counters), 0);
+    assert_eq!(counters.emergency_bypassed(), 1);
+}
+
+/// While the event-queue gate refuses, the brake refuses a new normal INVITE
+/// at an empty queue, admits an emergency one and a re-INVITE, and admits
+/// new calls again when the gate does.
+#[test]
+fn the_gate_refusing_refuses_a_new_invite_at_an_empty_queue() {
+    let refusals = refusals_with_jitter(0);
+    let (hook, counters) = brake_under_load(refusals.clone());
+    let idle = QueueLoad::default();
+    assert_eq!(hook(&new_invite(0), src(), idle), PreIngressAction::Accept);
+
+    refusals.gate_refusing().store(true, Ordering::Relaxed);
+    assert!(matches!(hook(&new_invite(1), src(), idle), PreIngressAction::Reply { .. }));
+    assert_eq!(hook(&invite_buf(2, true, None), src(), idle), PreIngressAction::Accept);
+    assert_eq!(
+        hook(&invite_buf(3, false, Some("bob-tag-3")), src(), idle),
+        PreIngressAction::Accept
+    );
+    assert_eq!(counters.refused(Class::Normal), 1);
+    assert_eq!(counters.emergency_bypassed(), 1);
+
+    refusals.gate_refusing().store(false, Ordering::Relaxed);
+    assert_eq!(hook(&new_invite(4), src(), idle), PreIngressAction::Accept);
+    assert!(
+        matches!(hook(&new_invite(1), src(), idle), PreIngressAction::Reply { .. }),
+        "the refused INVITE's copy still draws its refusal"
+    );
+    assert_eq!(counters.refused_copies(), 1);
 }

@@ -59,6 +59,13 @@ pub trait UdpEndpoint: Send + Sync {
     /// Current inbound-queue depth.
     fn queue_depth(&self) -> usize;
 
+    /// How long the oldest datagram of the inbound queue has waited, read
+    /// now; zero when none waits, and for an endpoint that stamps no arrival
+    /// (a test double).
+    fn queue_wait(&self) -> std::time::Duration {
+        std::time::Duration::ZERO
+    }
+
     /// The bind's configured `queue_max`.
     fn queue_max(&self) -> usize;
 
@@ -122,6 +129,9 @@ impl UdpEndpoint for std::sync::Arc<dyn UdpEndpoint> {
     }
     fn queue_depth(&self) -> usize {
         (**self).queue_depth()
+    }
+    fn queue_wait(&self) -> std::time::Duration {
+        (**self).queue_wait()
     }
     fn queue_max(&self) -> usize {
         (**self).queue_max()

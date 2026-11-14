@@ -73,7 +73,7 @@ async fn a_datagram_the_brake_parsed_is_not_parsed_again_by_the_transaction_laye
     let net = SimulatedSignalingNetwork::new(TRANSIT_MS);
     let counters = IngressBrakeCounters::new();
     let hook = build_ingress_brake_hook(
-        IngressBrakeConfig { queue_max: QUEUE_MAX, threshold_pct: 0 },
+        IngressBrakeConfig::by_depth(QUEUE_MAX, 0),
         counters.clone(),
         Refusals::new(5, 0, 64, &IdGen::seeded(11)),
         sip_message::CustomParser::new(),

@@ -199,6 +199,18 @@ tolerated (§3).
     catastrophic load: a loop, a flood. A product's budgets follow the same
     rule.
 
+    A worker without the CPU its load needs (`cpu_starve`) is not a spike: it
+    refuses new calls with a 503 and a `Retry-After` (ADR-0050 §9), and its
+    budgets allow that refusal and no other. What it may cost depends on the
+    depth. While the worker has the CPU its calls in progress need,
+    `cpu-overload` allows refused and slow setups for the outage plus about
+    10 s, and nothing in a dialog. Below that, `cpu-overload-severe` also
+    allows in-dialog requests to fail and calls to be cut, on the starved
+    worker's calls alone, each call ended at both parties, with no protocol
+    anomaly, no stranded call and no CDR mismatch, and traffic back within
+    60 s of the heal. A profile that starves a worker states which of the two
+    its `quota_us` makes.
+
 ## 3. The impact-budget contract
 
 A budget says what impact a window allows. It never says how an incident is

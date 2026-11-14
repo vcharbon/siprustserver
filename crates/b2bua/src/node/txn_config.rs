@@ -29,7 +29,8 @@ const KEEPALIVE_LANE: usize = 64;
 /// ([`crate::admission::deferred_bound`]) unless `ceilings` sets its own,
 /// no transaction for an out-of-dialog OPTIONS, which rides the keepalive
 /// lane, the worker's advertised SIP address, and the switch on new calls the
-/// event-queue gate sets (ADR-0037 item 11), returned with them.
+/// event-queue gate sets (ADR-0037 item 11), which is `refusals`' own
+/// ([`Refusals::gate_refusing`]), returned with them.
 pub(super) fn txn_config(
     config: &B2buaConfig,
     id_gen: &Arc<IdGen>,
@@ -38,7 +39,7 @@ pub(super) fn txn_config(
     write_path: &crate::repl::WritePath,
     probe: &crate::turn_probe::TurnProbes,
 ) -> (TransactionConfig, Arc<AtomicBool>) {
-    let switch = Arc::new(AtomicBool::new(false));
+    let switch = refusals.gate_refusing().clone();
     let mut txn_config = TransactionConfig {
         udp_queue_max: UDP_QUEUE_MAX,
         id_gen: id_gen.clone(),

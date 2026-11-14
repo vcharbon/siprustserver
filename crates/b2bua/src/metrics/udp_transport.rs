@@ -42,6 +42,7 @@ pub type LiveCounters = Arc<dyn Fn() -> UdpEndpointCounters + Send + Sync>;
 #[derive(Clone)]
 pub struct UdpTransportMetrics {
     queue_depth: LiveGauge,
+    queue_wait_ms: LiveGauge,
     queue_max: usize,
     counters: LiveCounters,
     brake: IngressBrakeCounters,
@@ -74,12 +75,24 @@ impl UdpTransportMetrics {
         queue_depth: LiveGauge,
         counters: LiveCounters,
     ) -> Self {
-        Self { queue_depth, queue_max, counters, brake }
+        Self { queue_depth, queue_wait_ms: Arc::new(|| 0), queue_max, counters, brake }
+    }
+
+    /// This shape reading the wait of the queue's oldest datagram, ms, from
+    /// `queue_wait_ms` (typically `move || endpoint.queue_wait()` in ms); a
+    /// shape built without it reads 0.
+    pub fn with_queue_wait(mut self, queue_wait_ms: LiveGauge) -> Self {
+        self.queue_wait_ms = queue_wait_ms;
+        self
     }
 
     /// Live inbound-queue depth (`endpoint.queue_depth()`).
     pub fn queue_depth(&self) -> u64 {
         (self.queue_depth)()
+    }
+    /// How long the inbound queue's oldest datagram has waited, ms, read now.
+    pub fn queue_wait_ms(&self) -> u64 {
+        (self.queue_wait_ms)()
     }
     /// The configured inbound-queue bound (`BindUdpOpts::queue_max`).
     pub fn queue_max(&self) -> usize {
@@ -110,7 +123,7 @@ impl UdpTransportMetrics {
     /// Counters (monotonic): `ingress_brake_emergency_bypassed`, `tail_dropped`,
     /// `send_would_block`, `kernel_rx_dropped`, `pre_ingress_panics`,
     /// `recv_errors`. Gauges
-    /// (instantaneous): `queue_depth`, `queue_max`. The brake's refusals are
+    /// (instantaneous): `queue_depth`, `queue_wait_ms`, `queue_max`. The brake's refusals are
     /// new-call counts (`b2bua_new_calls_total`), rendered with the other
     /// admission sources.
     pub fn prometheus_text(&self) -> String {
@@ -124,6 +137,7 @@ impl UdpTransportMetrics {
         //    tail-dropping queue otherwise shows 100% accepted, hiding a burst
         //    collapse. ──
         catalogue::udp::QUEUE_DEPTH.render_value(&mut s, self.queue_depth());
+        catalogue::udp::QUEUE_WAIT.render_value(&mut s, self.queue_wait_ms());
         catalogue::udp::QUEUE_MAX.render_value(&mut s, self.queue_max() as u64);
         let counters = self.counters();
         catalogue::udp::TAIL_DROPPED.render_value(&mut s, counters.tail_dropped);

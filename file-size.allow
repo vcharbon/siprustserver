@@ -15,7 +15,7 @@ crates/b2bua-core/src/rules/actions/respond.rs 579
 crates/b2bua-core/src/rules/defaults/core_rules.rs 1514
 crates/b2bua-core/src/rules/relay_first_18x.rs 524
 crates/b2bua-core/src/rules/relay/sdp_session_tests.rs 914
-crates/b2bua-harness/src/lib.rs 831
+crates/b2bua-harness/src/lib.rs 816
 crates/b2bua-harness/tests/it/call_keyed_holds.rs 1036
 crates/b2bua-harness/tests/it/fake_prack.rs 807
 crates/b2bua-harness/tests/it/message_ring.rs 831
@@ -82,7 +82,7 @@ crates/seq-report/src/html.rs 1002
 crates/sip-message/src/generators/relay.rs 504
 crates/sip-message/src/sniff.rs 563
 crates/sip-message/tests/it/generators.rs 1400
-crates/sip-net-testkit/src/contracts.rs 800
+crates/sip-net-testkit/src/contracts.rs 679
 crates/sip-pcap/src/bin/sipflow.rs 935
 crates/sip-pcap/src/flow.rs 707
 crates/sip-pcap/src/flow/tests.rs 1000

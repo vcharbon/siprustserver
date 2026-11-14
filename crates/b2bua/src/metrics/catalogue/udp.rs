@@ -8,6 +8,12 @@ pub const QUEUE_DEPTH: Family = Family::gauge(
     "Datagrams waiting in the inbound UDP queue, read at scrape time.",
 );
 
+pub const QUEUE_WAIT: Family = Family::gauge(
+    "b2bua_udp_queue_wait_ms",
+    Labels::None,
+    "How long the oldest datagram waiting in the inbound UDP queue has waited, ms, read at scrape time; 0 while the queue is empty. The event-queue gate and the ingress brake refuse new calls on it.",
+);
+
 pub const QUEUE_MAX: Family = Family::gauge(
     "b2bua_udp_queue_max",
     Labels::None,

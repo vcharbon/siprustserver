@@ -3,6 +3,10 @@
 //! for one [`Class`]. The router judges its rungs in that order
 //! ([`first_refusal`]).
 
+use std::time::Duration;
+
+use sip_net::QueueLoad;
+
 use crate::capacity::CapacityReading;
 use crate::new_calls::Refusal;
 
@@ -21,7 +25,7 @@ pub use sip_txn::class_of;
 /// [`DeferredBound`](sip_txn::DeferredBound) of
 /// [`deferred_bound`](super::deferred_bound); the other five at router
 /// ingress ([`first_refusal`]), the event queue also on arrival, where the
-/// transaction layer reads the gate's switch.
+/// brake and then the transaction layer read the gate's switch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Step {
     Brake,
@@ -47,8 +51,10 @@ pub const LADDER: [Step; 7] = [
 /// A rung [`judge`] decides, with the input it is judged on.
 #[derive(Debug, Clone, Copy)]
 pub enum Rung {
-    /// The inbound queue's live depth against the brake's threshold.
-    Brake { depth: usize, threshold: usize },
+    /// The inbound queue's live load against the brake's bounds: its depth
+    /// against the threshold, the wait of its oldest datagram against the
+    /// refusal wait.
+    Brake { load: QueueLoad, threshold: usize, refuse_wait: Duration },
     /// The live calls, transactions and sampled RSS against their ceilings.
     Capacity(CapacityReading),
     /// Whether the call has no queue and the live queues reach the threshold
@@ -94,9 +100,9 @@ pub enum Verdict {
 pub fn judge(rung: Rung, class: Class) -> Verdict {
     let refused = match (rung, class) {
         (_, Class::InDialog) => None,
-        (Rung::Brake { depth, threshold }, Class::Normal) => {
-            (depth >= threshold).then_some(Refused::now(Refusal::IngressBrake))
-        }
+        (Rung::Brake { load, threshold, refuse_wait }, Class::Normal) => (load.depth >= threshold
+            || load.wait >= refuse_wait)
+            .then_some(Refused::now(Refusal::IngressBrake)),
         (Rung::Capacity(reading), _) => reading.refusal(class).map(Refused::now),
         (Rung::Shed { at_threshold }, _) => at_threshold.then_some(Refused::now(Refusal::CapShed)),
         (Rung::PanicElu { elu, threshold }, Class::Normal) => {

@@ -87,6 +87,7 @@ mod held_request;
 mod in_dialog_identity;
 mod in_dialog_parse_refusal;
 mod in_dialog_request_uri_not_ours;
+mod inbound_queue_admission;
 mod info_body_relay;
 mod initial_admit_bound;
 mod initial_invite_finals;

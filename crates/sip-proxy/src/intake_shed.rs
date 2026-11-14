@@ -30,9 +30,9 @@ pub fn intake_shed_hook(
     metrics: Arc<ProxyMetrics>,
     parser: CustomParser,
 ) -> PreIngressHook {
-    Arc::new(move |arrival, _src, depth| {
+    Arc::new(move |arrival, _src, load| {
         let parsed = arrival.parse(&parser);
-        if depth < watermark {
+        if load.depth < watermark {
             return PreIngressAction::Accept;
         }
         match parsed {

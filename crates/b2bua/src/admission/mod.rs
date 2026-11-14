@@ -4,16 +4,17 @@
 //!
 //! | rung | site | input | normal | emergency | in dialog | Retry-After base |
 //! |---|---|---|---|---|---|---|
-//! | brake | arrival | inbound queue depth | at the threshold | admitted | admitted | configured |
+//! | brake | arrival | inbound queue depth, its oldest datagram's wait, the event-queue gate's state | at the threshold, at the gate's age, or while the gate refuses | admitted | admitted | configured |
 //! | backlog | transactions | deferred events | normal ceiling | emergency ceiling | emergency ceiling | configured |
-//! | event queue, on arrival | transactions | the event-queue gate's state (ADR-0050 §9) | while it refuses | admitted | admitted | configured |
+//! | event queue, on arrival | transactions | the event-queue gate's state (ADR-0050 §9), the age of both queues | while it refuses, or at the gate's age | admitted | admitted | configured |
 //! | capacity | router ingress | calls (admitted ones not born yet included), transactions, RSS | normal ceilings | emergency ceilings | admitted | configured |
 //! | shed | router ingress | live per-call queues | cap less headroom | cap | — | configured |
 //! | panic-ELU | router ingress | EWMA-ELU | above the backstop | admitted | — | configured |
 //! | bucket | router ingress | time to a CPS token | no token | admitted | — | time to a token, at least configured |
 //! | event queue, again | router ingress | the event-queue gate, read afresh | while it refuses | admitted | — | configured |
 //!
-//! Each rung keeps its site. The backlog is judged by the transaction
+//! Each rung keeps its site. The brake also refuses while the gate's switch
+//! is set, counted as its own. The backlog is judged by the transaction
 //! layer's bound ([`deferred_bound`]); the event queue by the transaction
 //! layer on arrival, right after the backlog, reading the gate's switch
 //! (`sip_txn::NewCallGate`), so an INVITE a router rung would also refuse is

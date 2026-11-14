@@ -26,7 +26,9 @@ use sip_net::UdpEndpoint;
 use sip_txn::IdGen;
 
 pub mod backlog;
+mod catalogued_counts;
 pub mod failure_view;
+mod inbound_pace;
 pub mod limiter;
 mod live;
 pub mod model_gate;
@@ -43,6 +45,7 @@ mod wire_reads;
 pub mod witness;
 
 pub use backlog::{drop_backlog_answers, send_backlog, BACKLOG_METHOD};
+pub use inbound_pace::{InboundPace, PacedInbound};
 pub use limiter::{LimiterCount, LimiterLeak, LimiterProbe, DEFAULT_LIMITER_ID};
 pub use proxy_core::{spawn_proxy_core, spawn_proxy_reading, ExternalProxyFace, ProxyCoreParts};
 pub use router_pace::{Pace, RouterPace};
@@ -211,6 +214,7 @@ pub struct B2buaSutBuilder {
     wire_faults: Option<WireFaults>,
     capacity: Option<b2bua::capacity::CapacityGate>,
     ingress_brake: Option<b2bua::ingress_brake::IngressBrakeConfig>,
+    inbound_pace: Option<InboundPace>,
     deferred_ceilings: Option<sip_txn::DeferredBound>,
     keep_terminated_calls: bool,
     cdr_tap: Option<Arc<dyn CdrWriter>>,
@@ -333,6 +337,14 @@ impl B2buaSutBuilder {
         self
     }
 
+    /// Space the SUT's takes from its inbound UDP queue by `pace`
+    /// ([`PacedInbound`]): what arrives meanwhile waits in that queue.
+    /// Default: free.
+    pub fn inbound_pace(mut self, pace: InboundPace) -> Self {
+        self.inbound_pace = Some(pace);
+        self
+    }
+
     /// Set the transaction layer's deferred-backlog ceilings
     /// ([`b2bua::admission::ceilings`]) to `normal` and `emergency` events: `0`
     /// refuses every new INVITE that reaches the layer, as a stalled router
@@ -407,6 +419,7 @@ impl B2buaSutBuilder {
             wire_faults,
             capacity,
             ingress_brake,
+            inbound_pace,
             deferred_ceilings,
             keep_terminated_calls,
             cdr_tap,
@@ -444,7 +457,8 @@ impl B2buaSutBuilder {
             let hook: sip_net::PreIngressHook = Arc::new(move |arrival, src, live| {
                 let Some(brake) = installed.get() else { return sip_net::PreIngressAction::Accept };
                 let forced = depth.load(Ordering::Relaxed);
-                brake(arrival, src, if forced == NO_FORCED_DEPTH { live } else { forced })
+                let depth = if forced == NO_FORCED_DEPTH { live.depth } else { forced };
+                brake(arrival, src, sip_net::QueueLoad { depth, ..live })
             });
             ((config, counters, forced, slot), hook)
         });
@@ -456,6 +470,10 @@ impl B2buaSutBuilder {
                 brake.as_ref().map(|(_, hook)| hook.clone()),
             )
             .await;
+        let endpoint: Box<dyn UdpEndpoint> = match inbound_pace {
+            Some(pace) => Box::new(PacedInbound::new(endpoint, pace)),
+            None => endpoint,
+        };
         let cdr = if keep_terminated_calls {
             TerminatedCallsWriter::new(TerminatedCalls::default())
         } else {
@@ -562,6 +580,7 @@ impl B2buaSut {
             wire_faults: None,
             capacity: None,
             ingress_brake: None,
+            inbound_pace: None,
             deferred_ceilings: None,
             keep_terminated_calls: false,
             cdr_tap: None,
@@ -620,40 +639,6 @@ impl B2buaSut {
             self._core.txn_metrics(),
             self.ingress_brake(),
         )
-    }
-
-    /// Every admission counter family
-    /// ([`b2bua::metrics::catalogue::ADMISSION`]) the worker renders, each
-    /// valued by the sum of its series.
-    pub fn catalogued_counts(&self) -> std::collections::BTreeMap<&'static str, f64> {
-        let udp = self.ingress_brake().map(|brake| {
-            let counters: b2bua::metrics::LiveCounters = Arc::new(Default::default);
-            b2bua::metrics::UdpTransportMetrics::new(0, brake.clone(), Arc::new(|| 0), counters)
-                .prometheus_text()
-        });
-        let text = [
-            self.metrics.prometheus_text(),
-            self.overload().prometheus_text(),
-            self.capacity().prometheus_text(),
-            self.new_calls().prometheus_text(),
-            udp.unwrap_or_default(),
-        ]
-        .concat();
-        b2bua::metrics::catalogue::ADMISSION
-            .iter()
-            .filter(|family| family.kind.as_str() == "counter")
-            .map(|family| {
-                let sum = text
-                    .lines()
-                    .filter(|line| {
-                        line.strip_prefix(family.name)
-                            .is_some_and(|rest| rest.starts_with('{') || rest.starts_with(' '))
-                    })
-                    .filter_map(|line| line.rsplit(' ').next()?.parse::<f64>().ok())
-                    .sum();
-                (family.name, sum)
-            })
-            .collect()
     }
 
     /// Drain the worker as its runner does on a planned exit

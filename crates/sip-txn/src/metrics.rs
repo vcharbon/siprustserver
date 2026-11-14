@@ -4,9 +4,10 @@
 //! the mutation — see `layer`).
 
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 use std::time::Duration;
 
+use sip_net::UdpEndpoint;
 use sip_retransmit::Class;
 use tokio::sync::mpsc;
 
@@ -205,6 +206,9 @@ pub struct TransactionMetrics {
     events_tx: mpsc::Sender<TransactionEvent>,
     /// The entry stamps of the events in that queue.
     ages: Arc<EventAges>,
+    /// The endpoint the owner reads, for its inbound queue's wait. Weak: the
+    /// owner alone keeps the endpoint, which closes with it.
+    inbound: Weak<dyn UdpEndpoint>,
 }
 
 impl TransactionMetrics {
@@ -212,8 +216,9 @@ impl TransactionMetrics {
         inner: Arc<MetricsInner>,
         events_tx: mpsc::Sender<TransactionEvent>,
         ages: Arc<EventAges>,
+        inbound: Weak<dyn UdpEndpoint>,
     ) -> Self {
-        Self { inner, events_tx, ages }
+        Self { inner, events_tx, ages, inbound }
     }
 
     /// Current number of active transactions (gauge).
@@ -246,6 +251,13 @@ impl TransactionMetrics {
     /// reads it grow.
     pub fn event_queue_delay(&self) -> Duration {
         self.ages.oldest()
+    }
+
+    /// How long the oldest datagram in the layer's inbound queue has waited
+    /// for the owner, read now; zero while that queue is empty, and once the
+    /// owner is gone. An owner that takes nothing still reads it grow.
+    pub fn inbound_queue_delay(&self) -> Duration {
+        self.inbound.upgrade().map_or(Duration::ZERO, |endpoint| endpoint.queue_wait())
     }
 
     /// Out-of-dialog OPTIONS the full keepalive lane dropped (counter).

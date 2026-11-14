@@ -45,7 +45,7 @@ fn flooder_addr() -> SocketAddr {
 /// Threshold 2. The refusals run at jitter 0, so the reject's `Retry-After`
 /// is exactly the base.
 fn brake_config() -> IngressBrakeConfig {
-    IngressBrakeConfig { queue_max: QUEUE_MAX, threshold_pct: BRAKE_PCT }
+    IngressBrakeConfig::by_depth(QUEUE_MAX, BRAKE_PCT)
 }
 
 /// An INVITE. `to_tag` makes it in-dialog (a re-INVITE); `emergency` adds the

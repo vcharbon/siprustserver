@@ -292,6 +292,7 @@ pub const TXN: &[Family] = &[
 pub const UDP: &[Family] = &[
     UDP_INGRESS_BRAKE_EMERGENCY_BYPASSED,
     udp::QUEUE_DEPTH,
+    udp::QUEUE_WAIT,
     udp::QUEUE_MAX,
     udp::TAIL_DROPPED,
     udp::SEND_WOULD_BLOCK,

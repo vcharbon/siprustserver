@@ -1,7 +1,10 @@
-//! [`EventQueueGate`]: whether a worker whose transaction event queue is
-//! backed up refuses new calls (ADR-0050 §9, `cause=overload`; ADR-0037
-//! item 11, the event-queue rung). It reads the queue's depth and its delay,
-//! the age of the oldest event waiting in it, at the instant it reads. It
+//! [`EventQueueGate`]: whether a worker whose inbound work is backed up
+//! refuses new calls (ADR-0050 §9, `cause=overload`; ADR-0037 item 11, the
+//! event-queue rung). It reads the transaction event queue's depth, and the
+//! delay of the two queues a request crosses to reach the router, at the
+//! instant it reads: the larger of the age of the oldest event waiting in the
+//! event queue and the wait of the oldest datagram in the inbound UDP queue,
+//! so the backlog trips it wherever it sits. It
 //! refuses at the refusal depth at once, and on the delay once it has stayed
 //! at or past the refusal delay for the refusal interval (CoDel's
 //! persistence): a slow turn or a throttle gap shorter than the two together
@@ -177,7 +180,8 @@ impl EventQueueGate {
     /// OPTIONS answer and the admission ladder.
     pub(crate) fn read(&self) -> bool {
         let queue = &self.inner.queue;
-        let (depth, delay) = (queue.event_queue_depth(), queue.event_queue_delay());
+        let depth = queue.event_queue_depth();
+        let delay = queue.event_queue_delay().max(queue.inbound_queue_delay());
         let mut state = self.inner.state.load();
         let transition = state.observe(&self.inner.bounds, depth, delay, Instant::now());
         self.inner.state.store(&state);
@@ -196,7 +200,7 @@ impl EventQueueGate {
                     node = %self.inner.node,
                     depth,
                     delay_ms,
-                    "event queue backed up: new calls refused"
+                    "inbound work backed up: new calls refused"
                 );
             }
             Transition::Accept => tracing::info!(
@@ -204,7 +208,7 @@ impl EventQueueGate {
                 depth,
                 delay_ms,
                 hold_ms = self.inner.bounds.accept_hold_ms,
-                "event queue drained through the hold: new calls accepted"
+                "inbound work drained through the hold: new calls accepted"
             ),
         }
     }

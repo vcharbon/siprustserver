@@ -204,10 +204,14 @@ unchanged.
 - **Ready**: accepting, unless a gating backend's breaker is open, which
   reports `new=refuse; cause=backend` and refuses new calls (ADR-0043 §10),
   or else the event-queue gate refuses, which reports `new=refuse;
-  cause=overload`. Never latched. The gate reads the transaction event
-  queue when it reads: its depth, and its delay, the age of the oldest
-  event waiting in it (an empty queue reads zero), so a router that takes
-  nothing still reads a growing delay. It refuses at the refusal depth
+  cause=overload`. Never latched. The gate reads, when it reads, the
+  transaction event queue's depth, and the delay of the two queues a
+  request crosses to reach the router: the larger of the age of the oldest
+  event waiting in the event queue and the wait of the oldest datagram in
+  the inbound UDP queue ahead of the transaction layer (an empty queue
+  reads zero), so a router or a transaction layer that takes nothing still
+  reads a growing delay, and the backlog trips the gate wherever it sits.
+  It refuses at the refusal depth
   (512) at once, and on the delay once it has stayed at or past the
   refusal delay (300 ms, below T1) for the refusal interval (150 ms,
   CoDel's persistence: a CPU-quota throttle gap, or a slow turn shorter
@@ -225,14 +229,27 @@ unchanged.
   the queue it would wait in, from the gate's first refusing reading on,
   before any probe reads it; emergency INVITEs and in-dialog requests are
   never refused by it. Only the router reads the gate, so a router held in
-  one turn writes no refusal: the transaction layer reads the queue's age
-  itself as each new INVITE arrives, and refuses from that same 450 ms
-  (ADR-0037 item 11). The bounds, their defaults
+  one turn writes no refusal: the transaction layer reads the two queues'
+  ages itself as each new INVITE arrives, and refuses from that same 450 ms
+  (ADR-0037 item 11). The ingress brake reads the gate's state and the
+  inbound queue's wait as each datagram arrives, and refuses a new normal
+  INVITE there, ahead of the queue the calls in progress wait in: while
+  the gate refuses, that queue holds no new call. The bounds, their defaults
   and the boot checks between them are the runner's `B2BUA_EVENT_QUEUE_*`
   grammar. The proxy keeps a refusing worker `Alive` and every dialog it
   owns on it (§4), and places new calls elsewhere (§6): a worker whose
   process is starved of CPU while its load signal reads low sheds new
   calls instead of being read dead and taken over.
+
+  The limit: shedding new calls frees the CPU they would cost, no more. A
+  worker with the CPU its calls in progress need serves them, late by the
+  gate's 450 ms at most, and answers its probes inside their window. A
+  worker with less CPU than its calls in progress need sheds every new
+  call and still falls behind: its inbound queue grows, requests inside
+  its dialogs time out, calls end, and once its probe answers pass the
+  proxy's window it is read `Dead` and its dialogs are routed to their
+  backups (§3, §4) while it still runs. That damage stays on its own
+  calls. ADR-0049 §2.11 states what each depth may cost.
 - **Cordoned**: `new=refuse; cause=cordoned`. New calls that reach it are
   refused (bare `503`, its call record written); every established dialog
   is served normally. Reversible, no timer of its own: the operator's next
@@ -346,7 +363,9 @@ verdicts apply in the order their OPTIONS arrived. A frozen or
 partitioned process, and a wedged router loop or transaction owner,
 still answer nothing and are still read `Dead` (§3). Residual: an OPTIONS
 still waits behind the datagrams ahead of it in the transport's receive
-queue and behind the transaction owner's own processing of them. The
+queue and behind the transaction owner's own processing of them; the
+gate holds that wait near its 450 ms while the worker has the CPU its
+calls in progress need, and nothing bounds it below that (§9). The
 lane is opt-in in the transaction layer (`keepalive_lane`), so its other
 users keep one queue. A slow but still turning worker stays `Alive`, and
 the delay of its in-dialog requests is not capped.

@@ -19,6 +19,7 @@ mod audit_rules;
 mod audit_view;
 pub mod contracts;
 pub mod loss;
+mod paranoid;
 pub mod repeat;
 pub mod report;
 pub mod rfc_audit;

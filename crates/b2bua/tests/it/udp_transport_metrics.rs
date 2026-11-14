@@ -43,7 +43,7 @@ fn flooder_addr() -> SocketAddr {
 }
 
 fn brake_config() -> IngressBrakeConfig {
-    IngressBrakeConfig { queue_max: QUEUE_MAX, threshold_pct: BRAKE_PCT }
+    IngressBrakeConfig::by_depth(QUEUE_MAX, BRAKE_PCT)
 }
 
 /// A new (To-tag-less) INVITE. With `emergency`, carries the

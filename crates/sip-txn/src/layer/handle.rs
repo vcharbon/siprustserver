@@ -191,6 +191,8 @@ impl TransactionLayer {
     /// keepalive lane, when configured (the consumer — the proxy/B2BUA router —
     /// drains them). The task lives until both the returned handle (all
     /// clones) and the events receiver are dropped, or the endpoint closes.
+    /// The owner task alone holds the endpoint; the metrics read its inbound
+    /// queue through a weak handle, so aborting the owner drops the endpoint.
     pub fn spawn(
         endpoint: Box<dyn UdpEndpoint>,
         parser: Arc<dyn SipParser + Send + Sync>,
@@ -209,8 +211,13 @@ impl TransactionLayer {
         let (forget_tx, forget_rx) = mpsc::unbounded_channel::<Forget>();
 
         let metrics_inner = Arc::new(MetricsInner::new());
-        let metrics =
-            TransactionMetrics::new(metrics_inner.clone(), events_tx.clone(), ages.clone());
+        let endpoint: Arc<dyn UdpEndpoint> = Arc::from(endpoint);
+        let metrics = TransactionMetrics::new(
+            metrics_inner.clone(),
+            events_tx.clone(),
+            ages.clone(),
+            Arc::downgrade(&endpoint),
+        );
         let events = TransactionEvents::new(events_rx, keepalive_rx, ages.clone());
 
         let owner = Owner::new(parser, (events_tx, ages), keepalive_tx, metrics_inner, config);

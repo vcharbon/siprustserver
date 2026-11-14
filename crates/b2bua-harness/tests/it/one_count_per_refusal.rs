@@ -127,7 +127,7 @@ async fn a_router_rung_refusal_moves_one_family_once() {
 async fn a_brake_refusal_moves_one_family_once() {
     let s = B2buaScene::with_b2bua("one-count-brake", |bob_port| {
         B2buaSut::route_all_to("127.0.0.1", bob_port)
-            .ingress_brake(IngressBrakeConfig { queue_max: 256, threshold_pct: 0 })
+            .ingress_brake(IngressBrakeConfig::by_depth(256, 0))
     })
     .await;
 

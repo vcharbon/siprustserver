@@ -9,8 +9,12 @@ protection, its limit, and what the caller sees.
 1. **New calls are refused before memory or CPU runs out.** Ceilings on live calls, on live
    transactions and on process memory bound what a worker admits (ADR-0037). You must set the
    ceilings: they are off by default.
-2. **Calls in progress continue.** A request inside a dialog passes the load checks. No limit
-   of any kind refuses the BYE, CANCEL or ACK that a worker sends, or their answers.
+2. **Calls in progress continue while the worker has the CPU to serve them.** A request inside
+   a dialog passes the load checks. No limit refuses the BYE, CANCEL or ACK that a worker
+   sends, or their answers. When the worker has less CPU than its calls in progress need, the
+   worker refuses all new calls, and calls in progress can fail: a re-INVITE can time out and a
+   call can end. The failures stay on the calls of that worker, and each call ends at both
+   parties. See [A worker with less CPU than its load needs](#a-worker-with-less-cpu-than-its-load-needs).
 3. **Emergency calls pass the load gates.** They stop only at their own, higher ceilings.
 4. **A caller that got 100 Trying gets a final response from a live worker.** The call is
    forwarded, or the caller gets 503 in 5 s, for each internal failure (ADR-0022).
@@ -35,13 +39,13 @@ The first two run before the worker creates a transaction, so a refusal there is
 
 | # | Check | It measures | Limit (default) | Normal call | Emergency call |
 |---|---|---|---|---|---|
-| 1 | Input brake | Depth of the UDP input queue | 70 % of 8 192 datagrams | Refused | Passes |
+| 1 | Input brake | Depth of the UDP input queue, and the wait of its oldest datagram | 70 % of 8 192 datagrams, or a wait of 450 ms, or while check 7 refuses | Refused | Passes |
 | 2 | Backlog | Events that wait for the call logic | 4 096 events | Refused | Refused at 8 192 |
 | 3 | Capacity | Live calls, live transactions, process memory | Off until you set them | Refused at the normal ceiling | Refused at the emergency ceiling |
 | 4 | Call table | Live per-call queues | 1 000 000, less 5 % for normal calls | Refused at 95 % | Refused at 100 % |
 | 5 | CPU | Smoothed use of the event loop | 0.75 | Refused | Passes |
 | 6 | Rate | A token bucket of new calls | 500 a second, burst 1 000 | Refused | Passes |
-| 7 | Event queue | Depth and age of the event queue | 512 events, or 300 ms for 150 ms | Refused | Passes |
+| 7 | Event queue | Depth and age of the event queue, and the wait of the oldest datagram in the UDP input queue | 512 events, or 300 ms for 150 ms | Refused | Passes |
 
 The proxy has two gates of its own before these. It refuses new calls when its own CPU use is
 above 0.8 or its rate bucket is empty. It also sends new calls away from a worker that reports a
@@ -78,6 +82,27 @@ Three refusals have no `Retry-After`, because an early retry does not help:
 When a request inside a dialog meets one of those two bounds, a re-INVITE gets 503 or 500 with
 `Retry-After` and the dialog stays. The worker drops any other request and serves its
 retransmission.
+
+## A worker with less CPU than its load needs
+
+A worker can have less CPU than its load needs: its CPU limit is too low, or its host is busy.
+The work then waits in the UDP input queue, and the CPU reading of check 5 can stay low.
+
+Checks 1 and 7 measure how long the oldest datagram in that queue has waited. When the wait
+stays at 300 ms for 150 ms, the worker refuses each new normal call with 503 and `Retry-After`,
+before the call enters the queue. The worker also reports the refusal in its answer to the
+probe of the proxy. The proxy then sends new calls to the other workers. Emergency calls pass.
+The worker accepts new calls again when the queue stayed empty for 3 s.
+
+The result depends on the CPU that the calls in progress need:
+
+| The worker has | Result |
+|---|---|
+| The CPU that its calls in progress need | Call setups are refused or slow. No request inside a dialog fails. The proxy does not read the worker as dead. |
+| Less CPU than its calls in progress need | The worker refuses all new normal calls. Calls in progress can fail: a re-INVITE can time out, and a call can end. When the answers to the probe arrive too late, the proxy reads the worker as dead and routes its calls to their backups. The failures stay on the calls of that worker, and each call ends at both parties. |
+
+The second row is a limit of the design. To stay in the first row, give each worker a CPU limit
+above the CPU that its calls in progress use at the nominal load. See [Sizing](#sizing).
 
 ## Emergency calls
 
@@ -214,6 +239,7 @@ its count falls. With a mean call duration `T`, `L` live calls and a ceiling `C`
 | `b2bua_overload_elu_ewma` | The CPU reading of check 5. |
 | `b2bua_udp_tail_dropped_total` | Datagrams lost at a full input queue. |
 | `b2bua_event_queue_refusing` | 1 while check 7 refuses. |
+| `b2bua_udp_queue_wait_ms` | The wait of the oldest datagram in the UDP input queue. |
 | `b2bua_cap_trips_total{cap}` | Calls ended for a bound. |
 | `b2bua_limiter_breaker_open`, `b2bua_limiter_uncounted_calls` | The limiter is unreachable, and how many calls run without a count. |
 | `b2bua_cdr_dropped_total` | CDRs lost at a full queue. |

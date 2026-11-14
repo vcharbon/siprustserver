@@ -13,11 +13,11 @@ pub const CORDONED: Family = Family::gauge(
 pub const EVENT_QUEUE_REFUSING: Family = Family::gauge(
     "b2bua_event_queue_refusing",
     Labels::None,
-    "1 while this worker refuses new calls because its transaction event queue is backed up, by depth or by the wait of its events (X-Readiness: new=refuse; cause=overload, ADR-0050 §9); it serves every dialog",
+    "1 while this worker refuses new calls because its inbound work is backed up: the depth of its transaction event queue, or the wait of that queue's oldest event or of the inbound UDP queue's oldest datagram (X-Readiness: new=refuse; cause=overload, ADR-0050 §9); it serves every dialog",
 );
 
 pub const EVENT_QUEUE_REFUSALS: Family = Family::counter(
     "b2bua_event_queue_refusals_total",
     Labels::None,
-    "times this worker turned to refusing new calls on a backed-up transaction event queue",
+    "times this worker turned to refusing new calls on backed-up inbound work (its transaction event queue or its inbound UDP queue)",
 );

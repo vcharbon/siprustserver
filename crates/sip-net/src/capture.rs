@@ -120,6 +120,9 @@ impl UdpEndpoint for CaptureEndpoint {
     fn queue_depth(&self) -> usize {
         self.inner.queue_depth()
     }
+    fn queue_wait(&self) -> std::time::Duration {
+        self.inner.queue_wait()
+    }
     fn queue_max(&self) -> usize {
         self.inner.queue_max()
     }

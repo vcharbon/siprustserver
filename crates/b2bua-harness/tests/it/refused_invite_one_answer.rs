@@ -23,7 +23,7 @@ const ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0
 /// INVITE would differ.
 fn braked(bob_port: u16, queue_max: usize, threshold_pct: u32) -> B2buaSutBuilder {
     B2buaSut::route_all_to("127.0.0.1", bob_port)
-        .ingress_brake(IngressBrakeConfig { queue_max, threshold_pct })
+        .ingress_brake(IngressBrakeConfig::by_depth(queue_max, threshold_pct))
         .tune(|c| {
             c.retry_after_base_sec = 5;
             c.retry_after_jitter_sec = 30;

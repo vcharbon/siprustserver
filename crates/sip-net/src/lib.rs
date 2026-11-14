@@ -48,6 +48,6 @@ pub use sip_message::datagram::{max_udp_payload, MAX_UDP6_PAYLOAD, MAX_UDP_PAYLO
 pub use sip_message::ip_literal::{ip_host, ip_socket_addr};
 pub use types::{
     all_ua_roles, BindError, BindErrorReason, BindSummary, BindUdpOpts, PreIngressAction,
-    PreIngressHook, ReEmitKind, RecvDisposition, RecvTap, SendError, SendErrorKind, SendTap,
-    SocketBuffers, UaRole, UdpEndpointCounters, UdpPacket, UndeliveredPacket,
+    PreIngressHook, QueueLoad, ReEmitKind, RecvDisposition, RecvTap, SendError, SendErrorKind,
+    SendTap, SocketBuffers, UaRole, UdpEndpointCounters, UdpPacket, UndeliveredPacket,
 };

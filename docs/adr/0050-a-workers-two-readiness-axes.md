@@ -53,7 +53,8 @@ Detail: [appendix, context](appendix/0050-a-workers-two-readiness-axes.md#contex
    changed `X-Incarnation` resets it to `Unknown`.
    [Detail](appendix/0050-a-workers-two-readiness-axes.md#8-no-fresh-pod-guard).
 9. **The worker's states.** NotReady (`503`); Ready (accepting, unless a gating backend's
-   breaker or the event-queue gate refuses); Cordoned (refuses new calls, serves the rest,
+   breaker or the event-queue gate, which reads the event queue and the inbound UDP queue,
+   refuses); Cordoned (refuses new calls, serves the rest,
    reversible); Draining (SIGTERM or withdrawal, terminal, ADR-0031 D2).
    [Detail](appendix/0050-a-workers-two-readiness-axes.md#9-the-workers-states).
 10. **Operator routes** on a loopback listener (`B2BUA_ADMIN`): `/admin/cordon` (POST, DELETE,
@@ -76,7 +77,8 @@ Detail: [appendix, context](appendix/0050-a-workers-two-readiness-axes.md#contex
   probe round answered.
 - A site leaves service by cordon, then SIGTERM or release-all.
 - An in-dialog request with no live worker gets no answer; the sender's timers end it.
-- A starved worker reads refusing, keeps its dialogs, and is never taken over for it.
+- A starved worker with the CPU its calls in progress need reads refusing, keeps its dialogs,
+  and is never taken over for it. With less CPU than that, its calls can fail (appendix §9).
 - Open: "none ready" is read literally, so a worker the slice reads ready but the probe reads
   `Dead`, beside a not-ready worker that answers, leaves no target for about 50 s.
 

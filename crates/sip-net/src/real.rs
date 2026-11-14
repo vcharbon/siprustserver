@@ -208,8 +208,8 @@ async fn recv_loop(
         };
         // `recv_from` reports at most the buffer's length.
         let mut arrival = Arrival::new(Bytes::copy_from_slice(buf.get(..n).unwrap_or(&buf)));
-        let depth = queue.depth();
-        match pre_ingress::judge(pre_ingress.as_ref(), &mut arrival, src, depth, &counters) {
+        let load = queue.load();
+        match pre_ingress::judge(pre_ingress.as_ref(), &mut arrival, src, load, &counters) {
             PreIngressAction::Drop => {
                 counters.pre_ingress_dropped.fetch_add(1, Ordering::Relaxed);
             }
@@ -287,6 +287,10 @@ impl UdpEndpoint for RealEndpoint {
 
     fn queue_depth(&self) -> usize {
         self.queue.depth()
+    }
+
+    fn queue_wait(&self) -> Duration {
+        self.queue.wait()
     }
 
     fn queue_max(&self) -> usize {
