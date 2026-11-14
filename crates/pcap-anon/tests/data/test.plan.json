@@ -1,0 +1,15 @@
+{
+  "default_cc": "28",
+  "countries": [
+    { "cc": "1", "nsn_len": 10 },
+    { "cc": "28", "nsn_len": 8, "national_prefix": "0", "short_len": 5 },
+    { "cc": "899", "nsn_len": 12 }
+  ],
+  "trunks": [
+    { "prefix": "15550", "len": 7 },
+    { "prefix": "15551234500", "len": 11 }
+  ],
+  "private_len": { "min": 4, "max": 7 },
+  "max_composed_prefix": 6,
+  "fake_prefix": "000"
+}

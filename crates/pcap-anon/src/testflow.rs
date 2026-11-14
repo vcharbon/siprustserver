@@ -18,22 +18,9 @@ pub(crate) const PEER: &str = "10.0.0.2:5060";
 /// (national prefix `0`, 8-digit NSN, 5-digit short codes) and the 12-digit
 /// country `899` are codes the ITU has not assigned (280–289 and 890–899 are
 /// spare), so no number of theirs is a subscriber's. Two trunk families of
-/// `1555` ids, private numbers of 4 to 7 digits.
-pub(crate) const PLAN: &str = r#"{
-  "default_cc": "28",
-  "countries": [
-    { "cc": "1", "nsn_len": 10 },
-    { "cc": "28", "nsn_len": 8, "national_prefix": "0", "short_len": 5 },
-    { "cc": "899", "nsn_len": 12 }
-  ],
-  "trunks": [
-    { "prefix": "15550", "len": 7 },
-    { "prefix": "15551234500", "len": 11 }
-  ],
-  "private_len": { "min": 4, "max": 7 },
-  "max_composed_prefix": 6,
-  "fake_prefix": "000"
-}"#;
+/// `1555` ids, private numbers of 4 to 7 digits. The integration tests read
+/// the same file.
+pub(crate) const PLAN: &str = include_str!("../tests/data/test.plan.json");
 
 /// [`PLAN`], loaded.
 pub(crate) fn plan() -> Plan {
@@ -41,14 +28,10 @@ pub(crate) fn plan() -> Plan {
 }
 
 /// The reading the unit tests run under: RFC 3261 as written, no exemption,
-/// and no bound below the datagram.
+/// and no bound below the datagram (`tests/data/test.reading`).
 pub(crate) fn reading() -> Reading {
-    Reading::stated(
-        "max-header-length = 65535\nmax-uri-length = 65535\nmax-header-lines = 1000\n\
-         max-datagram = 65535\n",
-        "the test reading",
-    )
-    .expect("the test reading reads")
+    Reading::stated(include_str!("../tests/data/test.reading"), "test.reading")
+        .expect("the test reading reads")
 }
 
 /// A request the peer sends to the SUT at `ms` (a caller's INVITE or CANCEL).

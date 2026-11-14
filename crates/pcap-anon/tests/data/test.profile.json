@@ -1,0 +1,6 @@
+{
+  "sut": ["10.0.0.1"],
+  "kept_texts": ["Exampleswitch 4.2"],
+  "bodies": [{ "media_type": "application/vnd.example.order", "read": "digit-runs",
+               "vocabulary": ["order"] }]
+}
