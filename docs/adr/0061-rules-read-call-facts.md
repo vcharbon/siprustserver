@@ -94,7 +94,9 @@ messages.
   legs it compared.
 - "The system released on its own" is one function, `releaseIn`, read in each side's order: a
   capture's stamps (`CallFacts.release`), a document's own order and, past it, the capture's
-  stamps within the skew (`DocumentFacts.release`).
+  stamps within the skew (`DocumentFacts.release`). The same function judges the system's CANCEL
+  of a leg's outcome INVITE whatever final crossed it (`DocumentFacts.cancelRelease`): a leg's
+  ending says how its dialog ended, the CANCEL says whether the system gave the INVITE up.
 - The document tier builds the reading of an assembled document and hands it to its rules
   (`DocumentInput.document`); whatever reads the document after the tier asks for the same
   reading and reads nothing.

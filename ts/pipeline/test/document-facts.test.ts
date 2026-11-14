@@ -402,12 +402,8 @@ describe("whether the system releases a leg on its own, as a document states it"
     expect(releasesOf(relayedEarly(10), 5_000)).toEqual([{ kind: "own", by: "CANCEL" }])
   })
 
-  /**
-   * A CANCEL that crosses the callee's 2xx cancels nothing (RFC 3261 §9.1):
-   * the INVITE was answered, and the system ends the dialog it established
-   * with a BYE (§15). That BYE is how the leg ends, and the release.
-   */
-  it("is its own BYE where its CANCEL crossed the callee's 2xx", () => {
+  /** The system CANCELs a ringing callee at 12.2 s, the callee's 2xx crosses it, and the system ACKs and BYEs it. */
+  const crossedCancel = (): Cut => {
     const s = scenario()
     const caller = callerLeg(s).invite({ at: 0, by: "party", body: SDP }).response(100, { at: 2 })
     const dialled = dialledLeg(s).invite({ at: 10, by: "system", body: SDP }).response(180, { at: 200 })
@@ -420,11 +416,40 @@ describe("whether the system releases a leg on its own, as a document states it"
       .bye({ at: 12_210, by: "system" })
       .response(200, { at: 12_215 })
     caller.response(480, { at: 12_220, to: "INVITE" }).ack({ at: 12_225, by: "party" })
-    const cut = { s, caller, dialled: [dialled] }
+    return { s, caller, dialled: [dialled] }
+  }
+
+  /**
+   * A CANCEL that crosses the callee's 2xx cancels nothing (RFC 3261 §9.1):
+   * the INVITE was answered, and the system ends the dialog it established
+   * with a BYE (§15). That BYE is how the leg ends, and the release.
+   */
+  it("is its own BYE where its CANCEL crossed the callee's 2xx", () => {
+    const cut = crossedCancel()
     const { facts } = assembled(cut)
 
-    expect(DocumentFacts.agreedOfDocument(documentLegOf(facts, dialled)).ending).toEqual({ by: "BYE", bySystem: true })
+    expect(DocumentFacts.agreedOfDocument(documentLegOf(facts, cut.dialled[0]!)).ending).toEqual({ by: "BYE", bySystem: true })
     expect(releasesOf(cut)).toEqual([{ kind: "own", by: "BYE" }])
+  })
+
+  it("gave the INVITE up on its own by that CANCEL, whatever final crossed it", () => {
+    const cut = crossedCancel()
+    const { facts } = assembled(cut)
+    const leg = documentLegOf(facts, cut.dialled[0]!)
+
+    expect(DocumentFacts.cancelRelease(facts.calls[0]!, leg, 500_000)).toEqual({
+      kind: "own",
+      ending: { by: "CANCEL", entry: CallFacts.valueOf(leg.cancel) }
+    })
+  })
+
+  it("gave nothing up by a CANCEL where the caller's CANCEL drove it, or where it sent none", () => {
+    const relayed = assembled(cancelled())
+    const hangUp = assembled(answered())
+    const leg = (facts: DocumentFacts.DocumentFacts) => [...facts.legs.values()].find((l) => CallFacts.valueOf(l.invite)?.bySystem === true)!
+
+    expect(DocumentFacts.cancelRelease(relayed.facts.calls[0]!, leg(relayed.facts), 500_000)).toMatchObject({ kind: "relayed", cause: "caller-gave-up" })
+    expect(DocumentFacts.cancelRelease(hangUp.facts.calls[0]!, leg(hangUp.facts), 500_000)).toEqual({ kind: "none" })
   })
 
   /**

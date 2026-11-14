@@ -326,6 +326,19 @@ export const release = (call: DocumentCall, leg: DocumentLeg, skewUs: number): D
 }
 
 /**
+ * Whether the system gave up the leg's outcome INVITE on its own: its CANCEL
+ * of that INVITE judged by the one definition, whatever final crossed it. A
+ * CANCEL the callee's 2xx crossed is still the system's give-up, while the
+ * leg's {@link DocumentLeg.ending} is the BYE that ended the dialog the 2xx
+ * established (RFC 3261 §9.1, §15).
+ */
+export const cancelRelease = (call: DocumentCall, leg: DocumentLeg, skewUs: number): DocumentRelease => {
+  const cancel = valueOf(leg.cancel)
+  if (cancel === undefined || !cancel.bySystem) return { kind: "none" }
+  return release(call, { ...leg, ending: { state: "seen", value: { by: "CANCEL", entry: cancel } } }, skewUs)
+}
+
+/**
  * What the capture side and the document side both state of a leg, and agree
  * on (ADR-0061): who sent the opening INVITE, the status of the first 18x, the
  * status of the outcome final, whether the leg was answered, how it ended and
