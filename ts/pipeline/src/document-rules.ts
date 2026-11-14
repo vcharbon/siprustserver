@@ -56,7 +56,7 @@ export interface DocumentInput {
   /**
    * What the assembled document states of its legs and calls
    * (`./document-facts.ts`): the one reading of the document, shared by every
-   * rule of the tier and by whatever reads the document after it.
+   * rule of the tier and freed with this input.
    */
   readonly document: DocumentFacts<Stated>
   /**

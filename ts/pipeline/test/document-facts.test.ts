@@ -159,36 +159,39 @@ describe("what a document states of an answered call", () => {
     expect([call.refused, call.abandoned]).toEqual([undefined, undefined])
   })
 
-  it("is computed once per document", () => {
-    const { pivot, facts } = assembled(answered())
+  it("is one reading per request, counted: the module keeps none", () => {
+    const { pivot } = assembled(answered())
+    const before = DocumentFacts.readingsBuilt()
 
-    expect(DocumentFacts.ofDocument(pivot)).toBe(facts)
+    const first = DocumentFacts.ofDocument(pivot)
+    const second = DocumentFacts.ofDocument(pivot)
+    DocumentFacts.ofSteps(pivot.flow as ReadonlyArray<Flow.Step>)
+
+    expect(second).not.toBe(first)
+    expect(second.legs.size).toBe(first.legs.size)
+    expect(DocumentFacts.readingsBuilt() - before).toBe(3)
   })
 
-  it("reads the document's flow once, whatever is asked of it after", () => {
-    const cut = answered()
-    const { flows, pivot } = assembled(cut)
+  it("reads the document's flow once, whatever is asked of the reading after", () => {
+    const { pivot } = assembled(answered())
     const watched = watchedDocument(pivot)
 
     const facts = DocumentFacts.ofDocument(watched.pivot)
     const call = facts.callOf(pivot.calls[0]!)!
-    for (const leg of facts.legs.values()) DocumentFacts.release(call, leg, 500_000)
-    DocumentFacts.parity(flows, cut.s.sut, [cut.caller.vantage()], watched.pivot)
-    DocumentFacts.ofDocument(watched.pivot)
+    for (const leg of facts.legs.values()) {
+      DocumentFacts.release(call, leg, 500_000)
+      DocumentFacts.cancelRelease(call, leg, 500_000)
+    }
 
     expect(watched.flowReads()).toBe(1)
   })
 
-  it("shares the reading of its steps, taken before the document existed", () => {
-    const { pivot } = assembled(answered())
-    const steps = [...pivot.flow] as ReadonlyArray<Flow.Step>
+  it("answers for a copy of a call as for the call it copies", () => {
+    const { pivot, facts } = assembled(answered())
+    const call = pivot.calls[0]!
 
-    const read = DocumentFacts.ofSteps(steps)
-    const facts = DocumentFacts.ofDocument({ ...pivot, flow: steps })
-
-    expect(DocumentFacts.ofSteps(steps)).toBe(read)
-    expect(facts.entries).toBe(read.entries)
-    expect(facts.legs).toBe(read.legs)
+    expect(facts.callOf({ ...call })).toBe(facts.callOf(call))
+    expect(facts.callOf(call)?.call).toBe(call)
   })
 
   it("states each final an ACK discharges, a 2xx's and a failure final's alike (RFC 3261 §13.2.2.4, §17.1.1.3)", () => {

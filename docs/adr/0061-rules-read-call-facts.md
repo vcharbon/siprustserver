@@ -87,8 +87,9 @@ messages.
   its steps. `Transactions` pairs the steps of a document inside the package; a rule asks the
   document side whether an ACK discharged a final.
 - The document side reads a document's message steps before the document exists
-  (`DocumentFacts.ofSteps`, for the hooks an assembly calls on its flow) and the document shares
-  that reading: an assembled case's steps are read once, unless a hook rewrites them.
+  (`DocumentFacts.ofSteps`, for the hooks an assembly calls on its flow). The module keeps no
+  reading: a reader builds one, hands it down and frees it, so a capture's cases, held until the
+  capture is written, hold none.
 - The capture side is exported as `CallFacts`, the document side as `DocumentFacts`, whose
   `parity` holds a case document against its capture on the agreed subset and says how many
   legs it compared.
@@ -98,8 +99,7 @@ messages.
   of a leg's outcome INVITE whatever final crossed it (`DocumentFacts.cancelRelease`): a leg's
   ending says how its dialog ended, the CANCEL says whether the system gave the INVITE up.
 - The document tier builds the reading of an assembled document and hands it to its rules
-  (`DocumentInput.document`); whatever reads the document after the tier asks for the same
-  reading and reads nothing.
+  (`DocumentInput.document`); a writer of the document after the tier builds its own.
 - A pack's per-rule walks over flows and steps move onto the module, one rule at a time, each
   move proved by re-cutting its captures and diffing the cases.
 - The situation reading is exported as `Situation` and `PivotReading`; a pack's header census

@@ -10,7 +10,7 @@ import { captureIndex } from "../src/capture-index.js"
 import type { CaseSpec } from "../src/case-spec.js"
 import { decideCases } from "../src/caseset.js"
 import type { CaseRule } from "../src/case-rules.js"
-import { ofDocument } from "../src/document-facts.js"
+import type { DocumentFacts } from "../src/document-facts.js"
 import type { DocumentRule } from "../src/document-rules.js"
 import { neutralPolicy, policyWith, UNCLASSIFIED, type Refusal } from "../src/policy.js"
 import { abandonedFlows, cancelRaceFlows, derivesNothing, derivesOnePrefix, plan, refusedFlows, sutSet } from "./fixtures.js"
@@ -339,7 +339,7 @@ describe("deciding a whole capture", () => {
 
     expect(seen.length).toBeGreaterThanOrEqual(2)
     expect(new Set(seen).size).toBe(1)
-    expect(seen[0]).toBe(ofDocument(assembled.pivot))
+    expect((seen[0] as DocumentFacts).pivot).toBe(assembled.pivot)
   })
 
   it("quarantines no document an untrusted refusal stands on, and says why", () => {

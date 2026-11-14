@@ -146,7 +146,7 @@ export interface DocumentFacts<D extends Stated = Pivot.PivotV3> extends StepFac
   /** The document read. */
   readonly pivot: D
   readonly calls: ReadonlyArray<DocumentCall>
-  /** What the document states of the call `call` is, among its `calls`. */
+  /** What the document states of the call `call` is, among its `calls`, by the call's id. */
   readonly callOf: (call: Call.Call) => DocumentCall | undefined
 }
 
@@ -253,15 +253,21 @@ const callOf = (call: Call.Call, { entryOf, legs }: StepFacts): DocumentCall => 
   }
 }
 
-const stepLists = new WeakMap<ReadonlyArray<Flow.Step>, StepFacts>()
+let built = 0
 
 /**
- * The facts of a document's message steps, computed on the first request in
- * one pass over them and kept for that array: a second request reads nothing.
+ * How many readings of message steps ({@link ofSteps}, {@link ofDocument})
+ * the module has computed so far: what a test counts a piece of work by.
+ */
+export const readingsBuilt = (): number => built
+
+/**
+ * The facts of a document's message steps, read in one pass over them. The
+ * module keeps no reading: each request reads the steps again, and a reading
+ * lives as long as the reader that holds it.
  */
 export const ofSteps = (steps: ReadonlyArray<Flow.Step>): StepFacts => {
-  const known = stepLists.get(steps)
-  if (known !== undefined) return known
+  built += 1
   const entries = steps.map(entryOf)
   const byId = new Map(entries.map((entry) => [entry.step.id, entry]))
   const byLeg = new Map<string, Array<StepEntry>>()
@@ -276,32 +282,23 @@ export const ofSteps = (steps: ReadonlyArray<Flow.Step>): StepFacts => {
   const acked = new Set(
     [...transactions.discharges.values()].flatMap((d) => (transactions.landings.get(d.final.id) === d.transaction ? [d.final.id] : []))
   )
-  const facts: StepFacts = { steps, entries, legs, entryOf: (id) => byId.get(id), acked: (id) => acked.has(id) }
-  stepLists.set(steps, facts)
-  return facts
+  return { steps, entries, legs, entryOf: (id) => byId.get(id), acked: (id) => acked.has(id) }
 }
 
-/** A flow's message steps: the flow itself where it holds nothing else, so its reading is the one {@link ofSteps} keeps. */
+/** A flow's message steps: the flow itself where it holds nothing else. */
 const stepsOfFlow = (flow: ReadonlyArray<Flow.FlowNode>): ReadonlyArray<Flow.Step> =>
   flow.every(Flow.isStepNode) ? (flow as ReadonlyArray<Flow.Step>) : flow.flatMap(Flow.flowNodeSteps)
 
-const documents = new WeakMap<Stated, DocumentFacts<Stated>>()
-
 /**
- * The facts of a case document, computed on the first request and kept for the
- * document: a second request reads nothing. A document whose flow is its
- * message steps shares their reading ({@link ofSteps}): the steps an assembly
- * read before the document existed are not read again.
+ * The facts of a case document, read off its flow once and its `calls` block.
+ * The module keeps no reading ({@link ofSteps}): whoever reads a document
+ * several times builds its reading once and hands it down.
  */
 export const ofDocument = <D extends Stated>(pivot: D): DocumentFacts<D> => {
-  const known = documents.get(pivot)
-  if (known !== undefined) return known as DocumentFacts<D>
   const steps = ofSteps(stepsOfFlow(pivot.flow))
   const calls = pivot.calls.map((call) => callOf(call, steps))
-  const byCall = new Map(calls.map((held) => [held.call, held]))
-  const facts: DocumentFacts<D> = { ...steps, pivot, calls, callOf: (call) => byCall.get(call) }
-  documents.set(pivot, facts)
-  return facts
+  const byCall = new Map(calls.map((held) => [held.call.id, held]))
+  return { ...steps, pivot, calls, callOf: (call) => byCall.get(call.id) }
 }
 
 /** {@link ReleaseOf} as a document states it. */
