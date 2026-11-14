@@ -462,6 +462,35 @@ describe("the timelines of several positions merged", () => {
       [1, 1]
     ])
   })
+
+  it("orders a retransmission captured at the instant of a later entry of its leg by index in the leg", () => {
+    const s = scenario()
+    const leg = s
+      .leg({ callId: "crossed-ack@example.com", party: PARTY })
+      .invite({ at: 0, by: "party" })
+      .response(100, { at: 1 })
+      .response(180, { at: 5 })
+      .response(200, { at: 10 })
+      .ack({ at: 20, by: "party" })
+      .response(200, { at: 20, to: "INVITE", retx: true })
+      .ack({ at: 30, by: "party", retx: true })
+      .bye({ at: 1000, by: "party" })
+      .response(200, { at: 1010 })
+    const order = CallFacts.merged([facts(s, leg).timeline])
+
+    expect(order.map((p) => [p.msg, p.at_us / 1000, p.repeat])).toEqual([
+      [0, 0, undefined],
+      [1, 1, undefined],
+      [2, 5, undefined],
+      [3, 10, undefined],
+      [4, 20, undefined],
+      [5, 20, 0],
+      [6, 30, 0],
+      [7, 1000, undefined],
+      [8, 1010, undefined]
+    ])
+    expect(order[5]!.entry.msg).toBe(3)
+  })
 })
 
 /** Each matching is stated twice: on Via branches, and on the dialog where the Via carries none. */
