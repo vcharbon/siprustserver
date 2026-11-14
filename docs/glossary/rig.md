@@ -5,7 +5,8 @@ Full definitions of the terms [CONTEXT.md](../../CONTEXT.md) indexes under "The 
 The language of siprig, the pluggable base of the capture replay, the campaign runner, their
 store and their site ([ADR-0060](../../docs/adr/0060-the-rig-is-a-pluggable-base.md), contracts
 in its [appendix](../../docs/adr/appendix/0060-the-rig-is-a-pluggable-base.md)): the three
-levels, the three scopes, the plug-ins found on the rig path, and how a cell is decided.
+levels, the three scopes, the plug-ins found on the rig path, how a cell is decided, and how a
+rule reads a call.
 
 ## Levels
 
@@ -161,3 +162,30 @@ _Avoid_: **Evidence** (ADR-0055's message proving a call's step).
 
 **Lab left changed**:
 The mark of a job where a `close` or a `heal` failed twice.
+
+## Reading a call
+
+How a cut, refusal or comparison rule reads a call
+([ADR-0061](../../docs/adr/0061-rules-read-call-facts.md)).
+
+**Call facts**:
+The `@sip/pipeline` module every rule reads a call through. Its capture side takes a position (a
+flows document, a leg, the hop's message indices, the system's address set); its document side
+takes a case document, whose facts mean what the replay will do. It states RFC readings only:
+who acted is the party or the system. It holds a timeline and a fixed set of leg facts and call
+facts derived from it. A fact is seen, absent or not captured. Call facts need the caller to
+name the call's legs and its chain; the module infers neither.
+_Avoid_: walking flows or steps in a rule.
+
+**Timeline**:
+Call facts' list of a call's messages, in order: each with its leg, direction, hop,
+transaction, dialog state, time, body media types, retransmission count, whether the system sent
+it, and a pointer to its source message or step. A rule reads a message's content through that
+pointer.
+
+**Leg** (rig):
+One attempt at one position of a capture or a document. It may hold several opening
+transactions (a retry after a 401 or 407 challenge); its outcome is the last one's final. Any
+method may open one; derived facts exist for INVITE-opened legs only.
+_Avoid_: the call model's leg (**Leg kind**, **Leg state**), one side of a call inside the
+B2BUA.

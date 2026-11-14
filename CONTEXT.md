@@ -299,3 +299,6 @@ Full definitions: [docs/glossary/rig.md](docs/glossary/rig.md).
 - **Case source**: a module that yields compiled cells.
 - **Reference pack**: the pack this repository ships to exercise every seam. It has no test value.
 - **Lab left changed**: the mark of a job where a `close` or a `heal` failed twice.
+- **Call facts**: the `@sip/pipeline` module a rule reads a call through, off a position in a capture or a case document. ADR-0061.
+- **Timeline**: call facts' list of a call's messages, each with its leg, hop, transaction and a pointer to its source message or step. ADR-0061.
+- **Leg** (rig): one attempt at one position of a capture or a document; its outcome is its last opening transaction's final. Not the call model's leg. ADR-0061.
