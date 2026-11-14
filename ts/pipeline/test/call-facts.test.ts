@@ -5,7 +5,7 @@
  */
 import { describe, expect, it } from "vitest"
 import * as CallFacts from "../src/call-facts.js"
-import { scenario, SDP, type Scenario, type ScenarioLeg } from "../src/scenario.js"
+import { multipart, scenario, SDP, type Scenario, type ScenarioLeg } from "../src/scenario.js"
 import type { ActorObs } from "../src/topology.js"
 
 const PARTY = "198.51.100.10:5060"
@@ -544,6 +544,24 @@ describe("what the opening INVITE and its provisionals carry", () => {
     expect(seenAt(CallFacts.reliableProvisional(read))).toBe(30_000)
     expect(seenAt(CallFacts.sessionProvisional(read))).toBe(30_000)
     expect(seenAt(read.ringing)).toBe(20_000)
+  })
+
+  it("reads a session description that is one part of a multipart body (RFC 2046 §5.1)", () => {
+    const s = scenario()
+    const mixed = multipart(SDP, { type: "application/isup;version=itu-t92+", text: "ISUP" })
+    const leg = s
+      .leg({ callId: "mixed@example.com", party: CALLEE })
+      .invite({ at: 0, by: "system", body: mixed })
+      .response(183, { at: 30, body: multipart({ type: "text/plain", text: "ringing" }) })
+      .response(183, { at: 40, body: mixed })
+    const read = facts(s, leg)
+    const invite = CallFacts.valueOf(read.invite)!
+
+    expect(CallFacts.mediaTypes(read.timeline, invite)).toEqual(["multipart/mixed", "application/sdp", "application/isup"])
+    expect(CallFacts.carriesSession(read.timeline, invite)).toBe(true)
+    expect(seenAt(CallFacts.sessionProvisional(read))).toBe(40_000)
+    const body = CallFacts.source(read.timeline, invite).body!
+    expect(Buffer.from(mixed.text).subarray(body.parts![0]!.offset, body.parts![0]!.offset + body.parts![0]!.len).toString()).toBe(SDP.text)
   })
 
   it("reads none of them on a bare INVITE answered by a plain 180", () => {
