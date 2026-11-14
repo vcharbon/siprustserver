@@ -282,8 +282,19 @@ describe("a job's setup", () => {
     expect(exit).toEqual(Exit.succeed({ value: undefined, labLeftChanged: true }))
     expect(traceOf(root).filter((line) => line === "heal never-recovers")).toHaveLength(2)
     expect(events.filter((event) => event.phase === "failed").map((event) => event.message?.split(",")[0])).toEqual([
-      "probe still answers not yet after 0.3 s",
-      "probe still answers not yet after 0.3 s"
+      "probe still answers not yet after 1 s",
+      "probe still answers not yet after 1 s"
+    ])
+  })
+
+  it("fails a heal attempt whose probe answered 75 and is cut short by its bound as one still answering 75", async () => {
+    const { root, rig } = await samples()
+    const { events, sink } = collecting()
+    const exit = await exitOf(Setup.around(plan(rig, root, ["stalls-after-not-yet"]), sink, Effect.void))
+    expect(exit).toEqual(Exit.succeed({ value: undefined, labLeftChanged: true }))
+    expect(events.filter((event) => event.phase === "failed").map((event) => event.message?.split(",")[0])).toEqual([
+      "probe still answers not yet after 1 s",
+      "probe still answers not yet after 1 s"
     ])
   })
 })

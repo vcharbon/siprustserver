@@ -179,19 +179,26 @@ export const inject = (
     yield* emit(sink, instance, "injected")
   })
 
-/** The probe of `instance` called until it answers other than "not yet" or its bound runs out; why not recovered, or `undefined`. */
+/**
+ * The probe of `instance` called until it answers other than "not yet" or its
+ * bound runs out; why not recovered, or `undefined`. No call starts once the
+ * bound has run out, and a call the bound cuts short after a "not yet" answer
+ * is the bound running out, not a probe that timed out.
+ */
 const probe = (instance: Instance, file: string, bounds: Operation.Bounds) =>
   Effect.gen(function*() {
     const deadline = (yield* Clock.currentTimeMillis) + bounds.probe_s * 1000
-    for (;;) {
-      const left = deadline - (yield* Clock.currentTimeMillis)
-      const { ended, said } = yield* step(instance, file, "probe", Math.max(1, left))
+    const stillNotYet = `probe still answers not yet after ${bounds.probe_s} s, its log ${path.join(instance.dir, "probe.log")}`
+    let left = bounds.probe_s * 1000
+    for (let answeredNotYet = false;; answeredNotYet = true) {
+      const { ended, said } = yield* step(instance, file, "probe", left)
       if (Executable.succeeded(ended)) return undefined
+      if (ended._tag === "TimedOut" && answeredNotYet) return stillNotYet
       if (!(ended._tag === "Exited" && ended.code === Operation.NOT_YET)) return `probe ${said}`
-      if ((yield* Clock.currentTimeMillis) + bounds.probe_interval_s * 1000 >= deadline) {
-        return `probe still answers not yet after ${bounds.probe_s} s, its log ${path.join(instance.dir, "probe.log")}`
-      }
+      if ((yield* Clock.currentTimeMillis) + bounds.probe_interval_s * 1000 >= deadline) return stillNotYet
       yield* Effect.sleep(bounds.probe_interval_s * 1000)
+      left = deadline - (yield* Clock.currentTimeMillis)
+      if (left <= 0) return stillNotYet
     }
   })
 
