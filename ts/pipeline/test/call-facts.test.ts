@@ -463,6 +463,33 @@ describe.each([
     expect(updates.map((e) => read.timeline.transactions[e.transaction]!.final?.status)).toEqual([488, 200])
     expect(read.accepted.map((a) => [a.request.method, a.request.at_us])).toEqual([["UPDATE", 530_000]])
   })
+
+  it("keeps the two directions of a hop between two ports of one address apart, read over the whole leg", () => {
+    const s = scenario()
+    const leg = s
+      .leg({
+        callId: "one-host@example.com",
+        party: "203.0.113.20:5060",
+        hops: [{ party: "203.0.113.20:5070", system: "203.0.113.20:5062" }],
+        branches
+      })
+      .invite({ at: 0, by: "system" })
+      .invite({ at: 2, by: "system", hop: 1, seq: 1, fresh: true })
+      .response(200, { at: 30, hop: 1 })
+      .response(200, { at: 32 })
+      .ack({ at: 40, by: "system" })
+      .ack({ at: 42, by: "system", hop: 1 })
+      .invite({ at: 2_000, by: "party", hop: 1, seq: 1 })
+      .response(488, { at: 2_010, hop: 1, to: "INVITE", by: "system" })
+      .ack({ at: 2_015, by: "party", hop: 1 })
+    const whole = CallFacts.atLeg(s.flows(), s.sut, leg.index)
+    const atSecondHop = whole.timeline.transactions.filter((t) => t.request?.hop === 1)
+
+    expect(atSecondHop.map((t) => [t.request?.at_us, t.opening, t.final?.status, t.ack?.at_us])).toEqual([
+      [2_000, true, 200, 42_000],
+      [2_000_000, false, 488, 2_015_000]
+    ])
+  })
 })
 
 describe("a request that crosses the system twice on one Call-ID, read over its whole leg", () => {
@@ -721,7 +748,7 @@ describe("a position", () => {
     expect(CallFacts.atVantage(flows, s.sut, leg.vantage(0)).timeline.entries.length).toBeLessThan(4)
   })
 
-  it("of a whole leg matches a transaction at a hop between two parties by that hop's ends", () => {
+  it("of a whole leg matches a transaction at a hop between two parties by the address its request came from", () => {
     const s = scenario()
     const next = "203.0.113.20:5060"
     const leg = s

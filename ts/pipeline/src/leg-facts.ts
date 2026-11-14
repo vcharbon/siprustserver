@@ -145,10 +145,9 @@ export interface Entry {
  * and every message whose top Via has no `z9hG4bK` branch (§8.1.1.7). There a
  * request that crosses the same side twice on one Call-ID is one transaction.
  *
- * The direction is the requester's side, system or party, at every boundary
- * hop together: a party that speaks from a second address stays one party. At
- * a hop between two parties, which only a whole-leg position reads, it is the
- * requester's end of that hop.
+ * The direction is the requester's side ({@link requesterSide}): it is read
+ * off the two addresses of the message, never off the hop the capture files
+ * the message under.
  */
 export interface Transaction {
   readonly index: number
@@ -406,6 +405,21 @@ const systemSide = (sut: SutSet): ((sock: string) => boolean) => {
   }
 }
 
+/**
+ * Who sent the request of a message's transaction, as the transaction's key
+ * holds it. Where the message crosses the system's boundary it is the system
+ * or the party, so a party that speaks from a second address stays one party.
+ * Between two parties, which only a whole-leg position reads, it is the
+ * requester's address without its port: a response goes back to the address
+ * its request came from, from whatever port its sender picks (RFC 3261
+ * §18.2.2), so no source port tells a response from its request.
+ */
+const requesterSide = (m: Flows.Msg, bySystem: boolean, toSystem: boolean): string => {
+  const request = m.summary.kind === "request"
+  if (bySystem !== toSystem) return (request ? bySystem : toSystem) ? "s" : "p"
+  return Flows.hostOf(request ? m.src : m.dst)
+}
+
 const timelineOf = (file: FileFacts, p: Position, msgIdxs: ReadonlyArray<number>): Timeline => {
   const leg = legOf(p.flows, p.leg)
   const isSystem = systemSide(p.sut)
@@ -416,12 +430,6 @@ const timelineOf = (file: FileFacts, p: Position, msgIdxs: ReadonlyArray<number>
   let confirmed = false
   let lastAt: number | undefined
 
-  const boundary = leg.hops.map((hop) => isSystem(hop.a) !== isSystem(hop.b))
-  const requesterOf = (m: Flows.Msg, bySystem: boolean): string => {
-    if (boundary[m.hop] === true) return bySystem ? "s" : "p"
-    const requester = m.summary.kind === "request" ? m.src : m.dst
-    return `${m.hop}${requester === leg.hops[m.hop]?.a ? "a" : "b"}`
-  }
   const viaKey = (requester: string, method: string, m: Flows.Msg): string | undefined => {
     const branch = m.via?.[0]?.branch
     if (branch === undefined || branch === null || !branch.startsWith(BRANCH_COOKIE)) return undefined
@@ -480,8 +488,9 @@ const timelineOf = (file: FileFacts, p: Position, msgIdxs: ReadonlyArray<number>
     const request = summary.kind === "request"
     const method = (request ? summary.method : summary.cseq.method).toUpperCase()
     const bySystem = isSystem(m.src)
-    const requestBySystem = request ? bySystem : isSystem(m.dst)
-    const requester = requesterOf(m, requestBySystem)
+    const toSystem = isSystem(m.dst)
+    const requestBySystem = request ? bySystem : toSystem
+    const requester = requesterSide(m, bySystem, toSystem)
     const transaction = transactionOf(m, requester, method, requestBySystem)
     if (m.retx) {
       const repeated = repeatedBy(file, m, method, transaction, byMsg)
