@@ -94,7 +94,7 @@ fn every_cc_and_a_short_code_classify() {
 fn unrecognised_numbers_keep_a_head_the_width_admits() {
     let p = crate::testflow::plan();
     let unrec = |d: &str| Some(NumberClass::Unrecognised { digits: d.into() });
-    for user in ["+8351234567890", "+28391256", "+0622370200009001", "123456789", "1234abc"] {
+    for user in ["+8351234567890", "+28391256", "+8352370200009001", "123456789", "1234abc"] {
         assert_eq!(p.classify(user), None, "{user}");
         let digits = user.trim_start_matches('+').trim_end_matches("abc");
         assert_eq!(p.classify_any(user), unrec(digits), "{user}");

@@ -58,7 +58,7 @@
 //!   leaves less than a standard fake behind them ([`Plan::kept_prefix`]).
 //!   One that embeds a recognised key is a composed form of it: the head is
 //!   kept up to that key and the remainder is the display-run form — the
-//!   embedded keys' fakes behind zeros (`+062291005 28 <NSN>` → `+062`
+//!   embedded keys' fakes behind zeros (`+835291005 28 <NSN>` → `+835`
 //!   `00000000` `00098273`).
 
 use serde::Deserialize;

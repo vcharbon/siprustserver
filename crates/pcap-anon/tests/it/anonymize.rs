@@ -230,7 +230,7 @@ fn no_raw_digit_string_survives_whatever_the_header_or_the_shape() {
         From: \"Desk\" <sip:+2839121@10.0.0.1>;tag=t1\r\n\
         To: <sip:+15552123456@example.net>\r\n\
         P-Asserted-Identity: <sip:+83571234567890@10.0.0.1>\r\n\
-        Diversion: <sip:+062237020000900123456@10.0.0.1>;reason=unknown\r\n\
+        Diversion: <sip:+835237020000900123456@10.0.0.1>;reason=unknown\r\n\
         Refer-To: <sip:+2829876543@10.0.0.9:5060?User-to-User=00ab>\r\n\
         Referred-By: <sip:+899123456789012@10.0.0.1>\r\n\
         P-Example-Hist: <sip:+2817654321@10.0.0.7>;exh=1\r\n\
@@ -249,7 +249,7 @@ fn no_raw_digit_string_survives_whatever_the_header_or_the_shape() {
         "5552123456",
         "39121",
         "83571234567890",
-        "062237020000900123456",
+        "835237020000900123456",
         "29876543",
         "123456789012",
         "17654321",
@@ -269,7 +269,7 @@ fn no_raw_digit_string_survives_whatever_the_header_or_the_shape() {
     }
     assert!(find(&once_bytes, b"<sip:+8350009"), "the unknown CC keeps three digits");
     let oddity = &report.entries[3].fake;
-    assert!(oddity.starts_with("0620009"), "the oddity keeps three digits: {oddity}");
+    assert!(oddity.starts_with("8350009"), "the oddity keeps three digits: {oddity}");
     assert!(find(&once_bytes, format!("<sip:+{oddity}@").as_bytes()), "{oddity}");
     assert!(find(&once_bytes, b"<sip:+280009"), "the short code is a 5-digit fake behind +28");
     assert!(find(&once_bytes, b"<tel:09"), "the 4-digit tel is a short fake");

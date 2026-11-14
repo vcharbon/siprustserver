@@ -42,12 +42,12 @@ fn digit_substitution_is_longest_first_and_non_cascading() {
         vec![(b"62345678".to_vec(), b"00091234".to_vec())],
         vec![
             (b"286234567".to_vec(), b"280009123".to_vec()),
-            (b"0622623456789".to_vec(), b"0620000912340".to_vec()),
+            (b"8352623456789".to_vec(), b"8350000912340".to_vec()),
         ],
     );
     assert_eq!(
-        subs.apply(b"+2862345678 +286234567 +0622623456789", None),
-        b"+2800091234 +280009123 +0620000912340".to_vec(),
+        subs.apply(b"+2862345678 +286234567 +8352623456789", None),
+        b"+2800091234 +280009123 +8350000912340".to_vec(),
         "a weak key yields to a strong one it partially overlaps (the truncated `+CC` form \
          beside the NSN it is a prefix of) and wins over one it contains (its composed form \
          carries that one)"
