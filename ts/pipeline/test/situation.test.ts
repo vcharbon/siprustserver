@@ -140,7 +140,11 @@ describe("situation and pairing", () => {
   })
 
   it("pairs a relayed response with the one whose body it carries when the system absorbed another", () => {
-    const sdp = (o: Observation, carries: boolean): Observation => ({ ...o, response: { ...o.response!, sdp: carries } })
+    const sdp = (o: Observation, carries: boolean): Observation => ({
+      leg: o.leg,
+      emitted: o.emitted,
+      response: { ...o.response!, sdp: carries }
+    })
     const absorbed = place(
       [
         req("A", false, "INVITE", false),
@@ -201,7 +205,9 @@ describe("situation and pairing", () => {
 
   it("matches a response to the request with its CSeq", () => {
     const cseq = (o: Observation, n: number): Observation =>
-      o.request !== undefined ? { ...o, request: { ...o.request, cseq: n } } : { ...o, response: { ...o.response!, cseq: n } }
+      o.request !== undefined
+        ? { leg: o.leg, emitted: o.emitted, request: { ...o.request, cseq: n } }
+        : { leg: o.leg, emitted: o.emitted, response: { ...o.response!, cseq: n } }
     const crossed = place(
       [
         cseq(req("A", false, "INVITE", false), 1),

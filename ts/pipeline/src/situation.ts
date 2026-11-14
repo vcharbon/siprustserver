@@ -34,32 +34,45 @@
  * - `T100` and `ACK-ERR` are hop by hop and never pair.
  *
  * One forward pass places every message, keeping the state each rule reads
- * (per leg, per method, per transaction, per run of identical responses): a
- * message costs constant work plus a search logarithmic in the length of the
- * run of identical responses it relays from.
+ * (per leg, per method, per transaction, per run of identical responses): the
+ * pass is linear in the call's messages, with a factor logarithmic in the
+ * longest run of identical responses on one leg that a relayed response reads
+ * (the run it relays from, or the relays of that run already emitted).
  */
 
-/** One message of a call as the reading needs it. */
-export interface Observation {
-  /** The leg the message travels on, as the caller names legs. */
+/** A request as the reading needs it. */
+export interface ObservedRequest {
+  readonly method: string
+  /** No To tag: the request opens a dialog or stands outside one. */
+  readonly dialogCreating: boolean
+  readonly cseq?: number | undefined
+}
+
+/** A response as the reading needs it. */
+export interface ObservedResponse {
+  readonly status: number
+  /** The CSeq method. */
+  readonly method: string
+  readonly cseq?: number | undefined
+  /** Whether it carries a session description; absent where the reading cannot tell. */
+  readonly sdp?: boolean | undefined
+}
+
+/** Where a message travels: the leg, as the caller names legs, and whether the system sent it. */
+interface Travel {
   readonly leg: string
   /** Whether the system sent it (else it received it). */
   readonly emitted: boolean
-  readonly request?: {
-    readonly method: string
-    /** No To tag: the request opens a dialog or stands outside one. */
-    readonly dialogCreating: boolean
-    readonly cseq?: number | undefined
-  } | undefined
-  readonly response?: {
-    readonly status: number
-    /** The CSeq method. */
-    readonly method: string
-    readonly cseq?: number | undefined
-    /** Whether it carries a session description; absent where the reading cannot tell. */
-    readonly sdp?: boolean | undefined
-  } | undefined
 }
+
+/**
+ * One message of a call as the reading needs it: a request, a response, or a
+ * message that is neither (placed `UNKNOWN`), never both.
+ */
+export type Observation =
+  | Travel & { readonly request: ObservedRequest; readonly response?: undefined }
+  | Travel & { readonly response: ObservedResponse; readonly request?: undefined }
+  | Travel & { readonly request?: undefined; readonly response?: undefined }
 
 /** An emitted message's situation and the index of the received message it relays. */
 export interface Placed {
@@ -74,9 +87,6 @@ export interface Placement {
   /** Observations read plus search probes: the work of the pass. */
   readonly visits: number
 }
-
-type Request = NonNullable<Observation["request"]>
-type Response = NonNullable<Observation["response"]>
 
 /**
  * Every message's placement, index for index: `undefined` for a received one.
@@ -128,8 +138,9 @@ class Recency {
 
 /** One leg's received history, as far as the rules read it. */
 interface LegState {
-  /** The leg's first message, either way, and whether it opens a dialog. */
+  /** The leg's first message, either way. */
   readonly first: number
+  /** Whether the leg's first message is a dialog-creating INVITE. */
   readonly firstOpens: boolean
   /** The first dialog-creating INVITE received on the leg. */
   openingInvite: number | undefined
@@ -231,7 +242,7 @@ class Pass {
     if (o.response.sdp !== true) emitted.withoutSdp.push(at)
   }
 
-  private recordReceivedRequest(state: LegState, leg: string, request: Request, at: number, opens: boolean): void {
+  private recordReceivedRequest(state: LegState, leg: string, request: ObservedRequest, at: number, opens: boolean): void {
     if (opens && state.openingInvite === undefined) state.openingInvite = at
     const byMethod = this.receivedRequests.get(request.method) ?? new Recency(2)
     this.receivedRequests.set(request.method, byMethod)
@@ -244,7 +255,7 @@ class Pass {
     else asked.byCseq.set(request.cseq, at)
   }
 
-  private recordReceivedResponse(state: LegState, response: Response, at: number): void {
+  private recordReceivedResponse(state: LegState, response: ObservedResponse, at: number): void {
     if (response.method === "INVITE" && response.status >= 200) state.inviteFinal = { at, status: response.status }
     const continues = state.run !== undefined && state.run.status === response.status &&
       state.run.method === response.method
@@ -257,7 +268,7 @@ class Pass {
     run.at.push(at)
   }
 
-  private placeRequest(leg: string, request: Request): Placed {
+  private placeRequest(leg: string, request: ObservedRequest): Placed {
     const method = request.method
     if (method === "INVITE" && request.dialogCreating) {
       const callerLeg = this.callerOf(leg)
@@ -282,7 +293,7 @@ class Pass {
     return relayed > ownPrevious && relayed > floor ? relayed : undefined
   }
 
-  private placeResponse(leg: string, response: Response): Placed {
+  private placeResponse(leg: string, response: ObservedResponse): Placed {
     const { status, method } = response
     if (status === 100) return { situation: "T100", pair: undefined }
     const asked = this.answeredRequest(leg, response)
@@ -300,7 +311,7 @@ class Pass {
    * The request a response answers: the latest one received on its leg with
    * its method and its CSeq number, a missing number matching any.
    */
-  private answeredRequest(leg: string, response: Response): number | undefined {
+  private answeredRequest(leg: string, response: ObservedResponse): number | undefined {
     const asked = this.asked.get(keyOf(leg, response.method))
     if (asked === undefined) return undefined
     const at = response.cseq === undefined
@@ -310,7 +321,7 @@ class Pass {
   }
 
   /** The response an emitted response relays, `after` the request it answers; see the module's pairing rules. */
-  private relayedResponse(leg: string, response: Response, after: number): number | undefined {
+  private relayedResponse(leg: string, response: ObservedResponse, after: number): number | undefined {
     const latest = this.received.latestOutside(leg)
     if (latest === undefined || latest.at <= after) return undefined
     const run = this.legOf(latest.leg)?.run

@@ -305,16 +305,34 @@ describe("the situation reading's forward pass", () => {
   })
 })
 
+/** A call's opening: A's INVITE received, relayed toward `leg`. */
+const opening = (leg: string): Array<Observation> => [
+  request("A", false, "INVITE", { dialogCreating: true }),
+  request(leg, true, "INVITE", { dialogCreating: true })
+]
+
+/** `leg`'s answer relayed to A, both acknowledged, then a BYE from A relayed to `leg`. */
+const answeredAndReleased = (leg: string): Array<Observation> => [
+  response(leg, false, 200, "INVITE", { sdp: true }),
+  response("A", true, 200, "INVITE", { sdp: true }),
+  request("A", false, "ACK"),
+  request(leg, true, "ACK"),
+  request("A", false, "BYE"),
+  response("A", true, 200, "BYE"),
+  request(leg, true, "BYE"),
+  response(leg, false, 200, "BYE")
+]
+
 /**
  * A call from A answered by B, then `rounds` exchanges in turn: the system's
- * keepalive toward A, A's keepalive answered locally, a re-INVITE from A and an
- * INFO from B relayed, and a BYE from B. Every BYE, keepalive answer and late
- * relay sits far from the messages a backward scan would reach first.
+ * keepalive toward A, A's keepalive answered locally, a re-INVITE from A whose
+ * three provisionals and answer B sends and the system relays, and an INFO from
+ * B relayed. Every run of identical responses is at most three long, whatever
+ * `rounds`.
  */
 const answeredCall = (rounds: number): Array<Observation> => {
   const messages: Array<Observation> = [
-    request("A", false, "INVITE", { dialogCreating: true }),
-    request("B", true, "INVITE", { dialogCreating: true }),
+    ...opening("B"),
     response("B", false, 180, "INVITE"),
     response("A", true, 180, "INVITE"),
     response("B", false, 200, "INVITE", { sdp: true }),
@@ -330,6 +348,12 @@ const answeredCall = (rounds: number): Array<Observation> => {
       response("A", true, 200, "OPTIONS"),
       request("A", false, "INVITE"),
       request("B", true, "INVITE"),
+      response("B", false, 183, "INVITE", { sdp: true }),
+      response("B", false, 183, "INVITE", { sdp: true }),
+      response("B", false, 183, "INVITE", { sdp: true }),
+      response("A", true, 183, "INVITE", { sdp: true }),
+      response("A", true, 183, "INVITE", { sdp: true }),
+      response("A", true, 183, "INVITE", { sdp: true }),
       response("B", false, 200, "INVITE", { sdp: true }),
       response("A", true, 200, "INVITE", { sdp: true }),
       request("A", false, "ACK"),
@@ -349,14 +373,84 @@ const answeredCall = (rounds: number): Array<Observation> => {
   return messages
 }
 
+/**
+ * A call from A forked in parallel to `legs` legs: every INVITE goes out, every
+ * leg rings and its 180 is relayed, the first leg answers and the system
+ * cancels the others, each CANCEL far from the INVITE it cancels.
+ */
+const forkedCall = (legs: number): Array<Observation> => {
+  const forks = Array.from({ length: legs }, (_, i) => `F${i}`)
+  const messages: Array<Observation> = [request("A", false, "INVITE", { dialogCreating: true })]
+  for (const leg of forks) messages.push(request(leg, true, "INVITE", { dialogCreating: true }))
+  for (const leg of forks) messages.push(response(leg, false, 180, "INVITE"), response("A", true, 180, "INVITE"))
+  const [answering, ...cancelled] = forks
+  for (const leg of cancelled) messages.push(request(leg, true, "CANCEL", { dialogCreating: true }))
+  for (const leg of cancelled) {
+    messages.push(response(leg, false, 200, "CANCEL"), response(leg, false, 487, "INVITE"), request(leg, true, "ACK"))
+  }
+  messages.push(...answeredAndReleased(answering!))
+  return messages
+}
+
+/** B sends `run` identical early-media provisionals, and only then does the system relay them, one for one. */
+const relayedLate = (run: number): Array<Observation> => [
+  ...opening("B"),
+  ...Array.from({ length: run }, () => response("B", false, 183, "INVITE", { sdp: true })),
+  ...Array.from({ length: run }, () => response("A", true, 183, "INVITE", { sdp: true })),
+  ...answeredAndReleased("B")
+]
+
+/** B sends one early-media provisional, which the system relays `relays` times. */
+const relayedOften = (relays: number): Array<Observation> => [
+  ...opening("B"),
+  response("B", false, 183, "INVITE", { sdp: true }),
+  ...Array.from({ length: relays }, () => response("A", true, 183, "INVITE", { sdp: true })),
+  ...answeredAndReleased("B")
+]
+
+/**
+ * The work of placing `messages`: the visits the pass reports, plus every read
+ * of a message, counted here, so a scan the pass leaves out of its visits still
+ * costs.
+ */
+const costOf = (messages: ReadonlyArray<Observation>): number => {
+  let reads = 0
+  const watched = new Proxy(messages, {
+    get: (target, key, receiver) => {
+      if (typeof key === "string" && /^\d+$/.test(key)) reads++
+      return Reflect.get(target, key, receiver)
+    }
+  })
+  return placeCounted(watched, () => "A").visits + reads
+}
+
+/** How many times the cost grows when the size doubles from `n`. */
+const growth = (shape: (n: number) => ReadonlyArray<Observation>, n: number): number =>
+  costOf(shape(2 * n)) / costOf(shape(n))
+
 describe("the situation reading's cost", () => {
-  it("places a long answered call as the literal rules do", () => {
-    const messages = answeredCall(50)
-    expect(place(messages, () => "A")).toEqual(placeReference(messages, () => "A"))
+  it("places every cost scenario as the literal rules do", () => {
+    for (const messages of [answeredCall(50), forkedCall(40), relayedLate(40), relayedOften(40)]) {
+      expect(place(messages, () => "A")).toEqual(placeReference(messages, () => "A"))
+    }
   })
 
-  it("visits twice the messages at most 2.2 times as often", () => {
-    const visitsOf = (rounds: number) => placeCounted(answeredCall(rounds), () => "A").visits
-    expect(visitsOf(8000)).toBeLessThanOrEqual(2.2 * visitsOf(4000))
+  it("costs at most 2.2 times as much for twice the exchanges, the runs of identical responses fixed", () => {
+    expect(growth(answeredCall, 4000)).toBeLessThanOrEqual(2.2)
+  })
+
+  it("costs at most 2.2 times as much for twice the forked legs, each cancelled far from its INVITE", () => {
+    expect(growth(forkedCall, 4000)).toBeLessThanOrEqual(2.2)
+  })
+
+  /** Twice a run of `n` costs at most 2.2 times, times the growth of log2 n: n log2 n with a tenth to spare. */
+  const runBound = (n: number): number => 2.2 * (Math.log2(2 * n) / Math.log2(n))
+
+  it("costs no more than n log n allows when the run relayed from doubles", () => {
+    expect(growth(relayedLate, 2000)).toBeLessThanOrEqual(runBound(2000))
+  })
+
+  it("costs no more than n log n allows when the relays of one response double", () => {
+    expect(growth(relayedOften, 2000)).toBeLessThanOrEqual(runBound(2000))
   })
 })

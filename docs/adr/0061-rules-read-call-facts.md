@@ -48,8 +48,8 @@ messages.
    Starting call facts: the caller was answered; the caller got a failure final; the caller's
    give-up, an event with its time; each attempt's ring time from its INVITE and from its first
    18x; "the system released on its own". That last one has one definition, aware of the
-   capture's clock skew, the skew passed in by the pack. The situation reading's pairing takes
-   the same skew.
+   capture's clock skew, the skew passed in by the pack. The situation reading's pairing is to
+   take the same skew; it takes none yet.
 9. **`CasePolicy` does not change.** A pack's rules call the module with the inputs each hook
    already receives.
 10. **No per-file work in a per-case path.** What a rule needs of the whole file (another
@@ -59,8 +59,12 @@ messages.
 12. **Linear, and proved by counting.** A test counts visits through the module's own
     interface: twice the messages cost at most 2.2 times the visits, decoy legs in the file
     change nothing, and a second request for the same position costs nothing. The situation
-    reading (`situation.ts`) places a call's emitted messages in one forward pass under the same
-    test, and a differential test holds it to the rules applied literally.
+    reading (`situation.ts`) places a call's emitted messages in one forward pass, linear in the
+    call's messages with a factor logarithmic in the longest run of identical responses a relay
+    reads. Its counting test, which also counts every message read, states a bound per shape:
+    at most 2.2 times the cost for twice the exchanges or the forked legs with the runs fixed,
+    and what n log n allows when a run doubles. A differential test holds it to the rules
+    applied literally.
 
 ## Considered and rejected
 
