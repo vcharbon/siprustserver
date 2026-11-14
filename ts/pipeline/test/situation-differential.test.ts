@@ -1,12 +1,28 @@
 /**
  * The situation reading's forward pass against the rules applied literally
  * (`./situation-reference.ts`): the same placement for every message of
- * thousands of generated calls, and a cost that doubles, no more, when the
- * call's messages double.
+ * thousands of generated calls, but for the one reading the reference predates,
+ * and a cost that doubles, no more, when the call's messages double.
  */
 import { describe, expect, it } from "vitest"
-import { type Observation, place, placeCounted } from "../src/situation.js"
+import { type Observation, place, placeCounted, type Placed } from "../src/situation.js"
 import { placeReference } from "./situation-reference.js"
+
+/**
+ * The reference's placements with its one difference from the forward pass:
+ * the reference pairs an emitted response to CANCEL like any response, where a
+ * response to CANCEL is hop by hop (RFC 3261 §9.2), `DS:<c>xx:CANCEL:local`
+ * and unpaired. A 100 stays `T100`.
+ */
+const expectedPlacement = (
+  messages: ReadonlyArray<Observation>,
+  callerOf: (leg: string) => string | undefined
+): ReadonlyArray<Placed | undefined> =>
+  placeReference(messages, callerOf).map((placed, at) => {
+    const response = messages[at]!.response
+    if (placed === undefined || response?.method !== "CANCEL" || response.status === 100) return placed
+    return { situation: `DS:${Math.floor(response.status / 100)}xx:CANCEL:local`, pair: undefined }
+  })
 
 /** A seeded generator of floats in [0, 1), so a failing seed replays. */
 const seeded = (seed: number) => {
@@ -147,13 +163,18 @@ const ringing = (script: CallScript, random: Random, leg: string): void => {
   }
 }
 
-/** The caller gives up: its CANCEL crosses into the attempt, which ends with a 487. */
+/**
+ * The caller gives up: its CANCEL, answered at once or only once the attempt
+ * answered the relayed one, crosses into the attempt, which ends with a 487.
+ */
 const cancelled = (script: CallScript, random: Random, leg: string): void => {
+  const answeredAtOnce = chance(random, 0.5)
   script.now(request("A", false, "CANCEL", { dialogCreating: true }))
-  script.now(response("A", true, 200, "CANCEL"))
+  if (answeredAtOnce) script.now(response("A", true, 200, "CANCEL"))
   script.later(request(leg, true, "CANCEL", { dialogCreating: true }))
   script.release()
   script.now(response(leg, false, 200, "CANCEL"))
+  if (!answeredAtOnce) script.now(response("A", true, 200, "CANCEL"))
   if (chance(random, 0.2)) script.now(response(leg, false, 200, "INVITE", { sdp: true }))
   else script.now(response(leg, false, 487, "INVITE"))
   script.now(request(leg, true, "ACK"))
@@ -268,7 +289,7 @@ const bothWays = (messages: ReadonlyArray<Observation>, random: Random) => {
     if (!callers.has(leg)) callers.set(leg, callerOf(leg))
     return callers.get(leg)
   }
-  return { forward: place(messages, stable), reference: placeReference(messages, stable) }
+  return { forward: place(messages, stable), reference: expectedPlacement(messages, stable) }
 }
 
 describe("the situation reading's forward pass", () => {
@@ -289,6 +310,21 @@ describe("the situation reading's forward pass", () => {
     }
   })
 
+  it("meets, in generated calls, responses to CANCEL the reference pairs and the forward pass does not", () => {
+    let hopByHop = 0
+    for (let seed = 1; seed <= 3000; seed++) {
+      const { messages } = call(seeded(seed), 0)
+      const forward = place(messages, () => "A")
+      placeReference(messages, () => "A").forEach((placed, at) => {
+        if (messages[at]!.response?.method === "CANCEL" && placed?.pair !== undefined) {
+          expect(forward[at]).toEqual({ situation: "DS:2xx:CANCEL:local", pair: undefined })
+          hopByHop++
+        }
+      })
+    }
+    expect(hopByHop).toBeGreaterThan(0)
+  })
+
   it("pairs a long run of identical provisionals, each relayed as it arrives, in arrival order", () => {
     const run = 300
     const messages: Array<Observation> = [
@@ -300,7 +336,7 @@ describe("the situation reading's forward pass", () => {
       messages.push(response("A", true, 183, "INVITE", { sdp: i % 3 !== 0 }))
     }
     const forward = place(messages, () => "A")
-    expect(forward).toEqual(placeReference(messages, () => "A"))
+    expect(forward).toEqual(expectedPlacement(messages, () => "A"))
     expect(forward[messages.length - 1]).toEqual({ situation: "P18", pair: messages.length - 2 })
   })
 })
@@ -431,7 +467,7 @@ const growth = (shape: (n: number) => ReadonlyArray<Observation>, n: number): nu
 describe("the situation reading's cost", () => {
   it("places every cost scenario as the literal rules do", () => {
     for (const messages of [answeredCall(50), forkedCall(40), relayedLate(40), relayedOften(40)]) {
-      expect(place(messages, () => "A")).toEqual(placeReference(messages, () => "A"))
+      expect(place(messages, () => "A")).toEqual(expectedPlacement(messages, () => "A"))
     }
   })
 

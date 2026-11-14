@@ -14,7 +14,8 @@
  * - `DS:<c>xx:<M>`: any other response; `OOD:<M>` / `OODS:<c>xx:<M>`: a
  *   request without To tag that opens no dialog, and a response to one;
  * - a response with no pair, which the system answered or minted itself,
- *   carries `:local` (`FIN:4xx:local`, `DS:2xx:BYE:local`);
+ *   carries `:local` (`FIN:4xx:local`, `DS:2xx:BYE:local`), a response to
+ *   CANCEL always (`DS:2xx:CANCEL:local`);
  * - `UNKNOWN`: an emitted message that is neither request nor response.
  *
  * Pairing:
@@ -31,7 +32,8 @@
  *   leg since the system's previous request of that method on this leg; when
  *   the leg opened with its dialog-creating INVITE, only after that INVITE. An
  *   ACK pairs only after the INVITE final it acknowledges arrived.
- * - `T100` and `ACK-ERR` are hop by hop and never pair.
+ * - `T100`, `ACK-ERR` and a response to CANCEL are hop by hop and never pair:
+ *   the element that receives a CANCEL answers it (RFC 3261 §9.2, §16.10).
  *
  * One forward pass places every message, keeping the state each rule reads
  * (per leg, per method, per transaction, per run of identical responses): the
@@ -296,6 +298,7 @@ class Pass {
   private placeResponse(leg: string, response: ObservedResponse): Placed {
     const { status, method } = response
     if (status === 100) return { situation: "T100", pair: undefined }
+    if (method === "CANCEL") return { situation: `DS:${statusClass(status)}:CANCEL:local`, pair: undefined }
     const asked = this.answeredRequest(leg, response)
     const pair = this.relayedResponse(leg, response, asked ?? -1)
     const opened = asked !== undefined && this.observations[asked]!.request!.dialogCreating
@@ -303,7 +306,7 @@ class Pass {
     if (opened && method === "INVITE") {
       return { situation: `${status < 200 ? "P18" : `FIN:${statusClass(status)}`}${local}`, pair }
     }
-    if (opened && method !== "CANCEL") return { situation: `OODS:${statusClass(status)}:${method}${local}`, pair }
+    if (opened) return { situation: `OODS:${statusClass(status)}:${method}${local}`, pair }
     return { situation: `DS:${statusClass(status)}:${method}${local}`, pair }
   }
 
