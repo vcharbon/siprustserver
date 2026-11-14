@@ -206,11 +206,11 @@ impl RunnerEnv {
         let metrics_sa = resolve(&self.metrics_addr)?;
 
         let brake_counters = IngressBrakeCounters::new();
-        let brake_config = IngressBrakeConfig {
-            queue_max: self.queue_max,
-            threshold_pct: self.udp_ingress_brake_pct,
-            refuse_wait: self.event_queue_gate.refuse_at_age(),
-        };
+        let brake_config = IngressBrakeConfig::under_gate(
+            self.queue_max,
+            self.udp_ingress_brake_pct,
+            &self.event_queue_gate,
+        );
         // The worker's identifier generator, keyed from the OS RNG once: the
         // core's, and the To-tag secret of its refusals.
         let id_gen = Arc::new(entropy::keyed_id_gen()?);

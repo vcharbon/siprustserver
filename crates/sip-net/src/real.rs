@@ -223,9 +223,9 @@ async fn recv_loop(
                     counters.pre_ingress_reply_failures.fetch_add(1, Ordering::Relaxed);
                 }
             }
-            PreIngressAction::Accept => {
+            action @ (PreIngressAction::Accept | PreIngressAction::AcceptAhead) => {
                 let arrival_ms = u64::try_from(clock.now_ms()).unwrap_or(0);
-                if queue.offer(arrival.into_packet(src, arrival_ms)) {
+                if queue.offer_as(&action, arrival.into_packet(src, arrival_ms)) {
                     counters.enqueued.fetch_add(1, Ordering::Relaxed);
                 } else {
                     counters.tail_dropped.fetch_add(1, Ordering::Relaxed);

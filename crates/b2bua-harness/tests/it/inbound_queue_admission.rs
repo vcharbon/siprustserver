@@ -52,11 +52,7 @@ async fn paced_scene(name: &str, brake: bool) -> (B2buaScene, InboundPace, Agent
     let s = B2buaScene::with_b2bua(name, move |bob_port| {
         let sut = B2buaSut::route_all_to("127.0.0.1", bob_port).inbound_pace(inbound);
         if brake {
-            sut.ingress_brake(IngressBrakeConfig {
-                queue_max: 256,
-                threshold_pct: 100,
-                refuse_wait: REFUSE_AT_WAIT,
-            })
+            sut.ingress_brake(IngressBrakeConfig::under_gate(256, 100, &Default::default()))
         } else {
             sut
         }
@@ -169,6 +165,18 @@ async fn a_backlog_in_the_inbound_queue_trips_the_gate_and_the_brake_refuses_on_
         taken(&s) - before
     );
     assert!(taken(&s) < BACKLOG as u64 / 2, "half the backlog still waits");
+
+    let before = taken(&s);
+    assert_eq!(
+        readiness(&s).await,
+        Some(Readiness::refuse("overload")),
+        "the probe's answer states the refusal"
+    );
+    assert!(
+        taken(&s) - before <= FLIGHT_TAKES + 2,
+        "the probe is answered ahead of the queued backlog: {} taken meanwhile",
+        taken(&s) - before
+    );
 
     reinvited(&s, &mut held).await;
     let drained = drained(&s).await;

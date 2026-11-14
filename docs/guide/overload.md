@@ -92,14 +92,24 @@ Checks 1 and 7 measure how long the oldest datagram in that queue has waited. Wh
 stays at 300 ms for 150 ms, the worker refuses each new normal call with 503 and `Retry-After`,
 before the call enters the queue. The worker also reports the refusal in its answer to the
 probe of the proxy. The proxy then sends new calls to the other workers. Emergency calls pass.
-The worker accepts new calls again when the queue stayed empty for 3 s.
+The worker accepts new calls again when the waits of the two queues stayed at 50 ms or less, and
+the event queue at 64 events or less, for 3 s.
+
+The worker takes the probe of the proxy before the datagrams that wait. The proxy thus gets its
+answer in time, and usually does not read a slow worker as dead. Two limits stay. The worker
+takes at most 64 probes before the other datagrams. A worker that cannot read its socket as fast
+as datagrams arrive answers the probe late.
+
+The 450 ms is the wait of the oldest datagram. A datagram that arrives at that moment waits
+longer: 450 ms multiplied by the ratio of the arrival rate to the rate at which the worker takes
+datagrams.
 
 The result depends on the CPU that the calls in progress need:
 
 | The worker has | Result |
 |---|---|
-| The CPU that its calls in progress need | Call setups are refused or slow. No request inside a dialog fails. The proxy does not read the worker as dead. |
-| Less CPU than its calls in progress need | The worker refuses all new normal calls. Calls in progress can fail: a re-INVITE can time out, and a call can end. When the answers to the probe arrive too late, the proxy reads the worker as dead and routes its calls to their backups. The failures stay on the calls of that worker, and each call ends at both parties. |
+| The CPU that its calls in progress need | Call setups are refused or slow. Requests inside a dialog are late and do not fail. The proxy does not read the worker as dead. |
+| Less CPU than its calls in progress need | The worker refuses all new normal calls. Calls in progress can fail: a re-INVITE can time out, and a call can end. When the worker also answers the probe late, the proxy reads it as dead and routes its calls to their backups. The failures stay on the calls of that worker, and each call ends at both parties. |
 
 The second row is a limit of the design. To stay in the first row, give each worker a CPU limit
 above the CPU that its calls in progress use at the nominal load. See [Sizing](#sizing).

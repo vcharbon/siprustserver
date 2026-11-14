@@ -241,15 +241,18 @@ unchanged.
   process is starved of CPU while its load signal reads low sheds new
   calls instead of being read dead and taken over.
 
-  The limit: shedding new calls frees the CPU they would cost, no more. A
-  worker with the CPU its calls in progress need serves them, late by the
-  gate's 450 ms at most, and answers its probes inside their window. A
-  worker with less CPU than its calls in progress need sheds every new
-  call and still falls behind: its inbound queue grows, requests inside
-  its dialogs time out, calls end, and once its probe answers pass the
-  proxy's window it is read `Dead` and its dialogs are routed to their
-  backups (§3, §4) while it still runs. That damage stays on its own
-  calls. ADR-0049 §2.11 states what each depth may cost.
+  The limit: shedding new calls frees the CPU they would cost, no more.
+  The 450 ms is the wait of the oldest datagram at the trip; what queued
+  behind it while arrivals outran the takes waits that long times the
+  ratio of the two rates, then less as the queue drains. A worker with the
+  CPU its calls in progress need serves them, late by that much at the
+  trip. A worker with less CPU than its calls in progress need sheds
+  every new call and still falls behind: its inbound queue grows to its
+  bound, requests inside its dialogs time out and calls end. In both cases
+  its probes are queued ahead of the backlog (§12), so while they reach
+  that lane it stays `Alive`, keeps its dialogs and is not taken over: the
+  damage of the second case then stays on its own calls. §12 lists where a
+  probe can still be late. ADR-0049 §2.11 states what each depth may cost.
 - **Cordoned**: `new=refuse; cause=cordoned`. New calls that reach it are
   refused (bare `503`, its call record written); every established dialog
   is served normally. Reversible, no timer of its own: the operator's next
@@ -361,11 +364,19 @@ events. The answer is built on the router loop as for any
 event, and the dead notice it carries (§3) is taken right after it, so
 verdicts apply in the order their OPTIONS arrived. A frozen or
 partitioned process, and a wedged router loop or transaction owner,
-still answer nothing and are still read `Dead` (§3). Residual: an OPTIONS
-still waits behind the datagrams ahead of it in the transport's receive
-queue and behind the transaction owner's own processing of them; the
-gate holds that wait near its 450 ms while the worker has the CPU its
-calls in progress need, and nothing bounds it below that (§9). The
+still answer nothing and are still read `Dead` (§3). The inbound UDP queue
+ahead of the transaction layer has the same lane: the ingress brake reads
+every arriving OPTIONS, whatever the queue holds, and queues an
+out-of-dialog one on a lane of 64 that the transaction layer takes ahead
+of what waits, in turn with the queue while both hold a datagram. A probe
+then waits for the transaction owner's turn in progress, one more, and
+the router's, whatever the backlog; a stream of OPTIONS takes every other
+turn at most and never stops the calls in progress. Residuals: past 64
+queued an OPTIONS waits as any other datagram, so a stream of them from
+elsewhere that keeps the lane full puts the prober's own behind the
+backlog; and the kernel's receive buffer ahead of the pump has no lane,
+so a pump that falls behind its arrivals delays or loses a probe there.
+In those two cases a worker that still turns is read `Dead`. The
 lane is opt-in in the transaction layer (`keepalive_lane`), so its other
 users keep one queue. A slow but still turning worker stays `Alive`, and
 the delay of its in-dialog requests is not capped.

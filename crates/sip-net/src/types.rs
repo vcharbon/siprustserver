@@ -179,6 +179,10 @@ pub fn all_ua_roles() -> HashSet<UaRole> {
 pub enum PreIngressAction {
     /// Enqueue normally.
     Accept,
+    /// Enqueue on the lane the consumer takes before every datagram that
+    /// waits ([`PacketQueue::offer_ahead`](crate::queue::PacketQueue::offer_ahead)):
+    /// a liveness probe, whose answer must not wait behind a backlog.
+    AcceptAhead,
     /// Silently drop (counted as `pre_ingress_dropped`).
     Drop,
     /// Don't enqueue; send `datagram` to `to` (counted as

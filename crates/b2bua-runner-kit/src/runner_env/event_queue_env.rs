@@ -1,5 +1,6 @@
 //! The event-queue gate's env grammar (ADR-0050 §9): when a worker whose
-//! transaction event queue is backed up refuses new calls, on its OPTIONS
+//! inbound work is backed up, in its transaction event queue or in the
+//! inbound UDP queue ahead of it, refuses new calls, on its OPTIONS
 //! answer (`new=refuse; cause=overload`) and at its admission ladder's
 //! event-queue rung (ADR-0037 item 11, a `503` to a new normal INVITE), and
 //! when it accepts them again. Both read the one gate: one state, one set of

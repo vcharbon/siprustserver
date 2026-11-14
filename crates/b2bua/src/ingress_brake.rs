@@ -16,9 +16,19 @@
 //!     §9): the worker sheds new calls, and sheds them here, ahead of the
 //!     queue the calls in progress wait in.
 //!
-//! While it is not engaged, and while the worker remembers no refused INVITE,
-//! it is two compares and two atomic loads, and the packet is accepted
+//! While it is not engaged, and while the worker remembers no refused
+//! INVITE, it is a few compares, two atomic loads and a look at the
+//! datagram's first bytes, and any datagram but an OPTIONS is accepted
 //! unparsed (the transaction layer parses it).
+//!
+//! Its second goal is to **keep a slow worker read alive**. An OPTIONS is
+//! always parsed, and a liveness probe, an OPTIONS outside any dialog, is
+//! queued on the lane taken ahead of what waits
+//! ([`PreIngressAction::AcceptAhead`]), whatever the queue reads: a prober
+//! hears its answer inside its window however long the backlog, and reads
+//! the worker's refusal of new calls from it (ADR-0050 §12). The lane holds
+//! 64 and shares its turns with the queue, so a stream of OPTIONS neither
+//! stops the calls in progress nor is stopped by them.
 //!
 //! While it is engaged the datagram is
 //! parsed, and the parse is queued with it: the transaction layer takes it
@@ -90,6 +100,17 @@ impl IngressBrakeConfig {
     /// (`threshold_pct`) and the gate's switch alone, never on the wait.
     pub const fn by_depth(queue_max: usize, threshold_pct: u32) -> Self {
         Self { queue_max, threshold_pct, refuse_wait: Duration::MAX }
+    }
+
+    /// The worker's brake: over a queue bounded at `queue_max`, engaging at
+    /// `threshold_pct` of it, and on the wait at the age that trips `gate` at
+    /// a single reading.
+    pub fn under_gate(
+        queue_max: usize,
+        threshold_pct: u32,
+        gate: &crate::config::EventQueueGateConfig,
+    ) -> Self {
+        Self { queue_max, threshold_pct, refuse_wait: gate.refuse_at_age() }
     }
 
     /// The absolute queue depth at/above which the brake engages:
@@ -194,7 +215,8 @@ pub fn build_ingress_brake_hook(
     Arc::new(move |arrival: &mut Arrival, src: SocketAddr, load: QueueLoad| {
         let gate_refusing = gate_refusing.load(Ordering::Relaxed);
         let engaged = gate_refusing || load.depth >= threshold || load.wait >= refuse_wait;
-        if !engaged && !memo.remembers() {
+        let options = arrival.raw().starts_with(OPTIONS_LINE);
+        if !engaged && !options && !memo.remembers() {
             return PreIngressAction::Accept;
         }
         // What the parser refuses is the pipeline's to answer, and responses
@@ -202,6 +224,9 @@ pub fn build_ingress_brake_hook(
         let Ok(Ok(SipMessage::Request(req))) = arrival.parse(&parser) else {
             return PreIngressAction::Accept;
         };
+        if is_probe(req) {
+            return PreIngressAction::AcceptAhead;
+        }
         if *req.method() != Method::Invite {
             return PreIngressAction::Accept;
         }
@@ -243,6 +268,17 @@ pub fn build_ingress_brake_hook(
             }
         }
     })
+}
+
+/// How a datagram that may be a liveness probe starts: the method of an
+/// OPTIONS request line. The one datagram the brake reads while not engaged.
+const OPTIONS_LINE: &[u8] = b"OPTIONS ";
+
+/// Whether `req` is a liveness probe: an OPTIONS outside any dialog (no
+/// `To`-tag), which the transaction layer passes up on the keepalive lane and
+/// the router answers ahead of its queued events (ADR-0050 §12).
+fn is_probe(req: &SipRequest) -> bool {
+    *req.method() == Method::Options && req.to().tag().is_none()
 }
 
 /// The worker's refusal of `req`, received from `src`, as the datagram the

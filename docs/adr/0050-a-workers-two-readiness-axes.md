@@ -65,8 +65,9 @@ Detail: [appendix, context](appendix/0050-a-workers-two-readiness-axes.md#contex
     present and not `terminating`. While none reads ready, it routes on the probe's answers.
     [Detail](appendix/0050-a-workers-two-readiness-axes.md#11-the-proxys-readiness).
 12. **The keepalive lane.** The transaction layer passes each out-of-dialog OPTIONS up on a
-    small bounded lane apart from the event queue, taken first by the router, so a probe never
-    waits behind the queued events.
+    small bounded lane apart from the event queue, taken first by the router, and the ingress
+    brake queues it on a lane of the inbound UDP queue taken ahead of what waits, so a probe
+    does not wait behind the queued events or datagrams while those lanes have room.
     [Detail](appendix/0050-a-workers-two-readiness-axes.md#12-the-keepalive-lane).
 
 ## Consequences
@@ -77,8 +78,9 @@ Detail: [appendix, context](appendix/0050-a-workers-two-readiness-axes.md#contex
   probe round answered.
 - A site leaves service by cordon, then SIGTERM or release-all.
 - An in-dialog request with no live worker gets no answer; the sender's timers end it.
-- A starved worker with the CPU its calls in progress need reads refusing, keeps its dialogs,
-  and is never taken over for it. With less CPU than that, its calls can fail (appendix §9).
+- A starved worker reads refusing and keeps its dialogs; it is taken over only where a probe
+  is still late (appendix §12). With less CPU than its calls in progress need, those calls
+  can fail (appendix §9).
 - Open: "none ready" is read literally, so a worker the slice reads ready but the probe reads
   `Dead`, beside a not-ready worker that answers, leaves no target for about 50 s.
 

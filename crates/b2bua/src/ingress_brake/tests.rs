@@ -12,7 +12,7 @@ fn answered(counters: &IngressBrakeCounters) -> u64 {
 #[test]
 fn threshold_is_floor_of_queue_max_times_pct() {
     // The brake test's config: queue_max=5, pct=40 → floor(200/100)=2.
-    let cfg = IngressBrakeConfig { queue_max: 5, threshold_pct: 40, refuse_wait: REFUSE_WAIT };
+    let cfg = IngressBrakeConfig::by_depth(5, 40);
     assert_eq!(cfg.threshold(), 2);
     // Production-ish: queue_max=8192, pct=70 → floor(573440/100)=5734.
     let prod = IngressBrakeConfig { queue_max: 8192, ..cfg };
@@ -99,7 +99,9 @@ type OnLoad = Box<dyn Fn(&[u8], std::net::SocketAddr, QueueLoad) -> PreIngressAc
 /// refusing with `refusals`.
 fn brake_under_load(refusals: Refusals) -> (OnLoad, IngressBrakeCounters) {
     let counters = IngressBrakeCounters::new();
-    let cfg = IngressBrakeConfig { queue_max: 5, threshold_pct: 40, refuse_wait: REFUSE_WAIT };
+    let cfg =
+        IngressBrakeConfig::under_gate(5, 40, &crate::config::EventQueueGateConfig::default());
+    assert_eq!(cfg.refuse_wait, REFUSE_WAIT, "the gate's age at a single reading");
     let hook = build_ingress_brake_hook(cfg, counters.clone(), refusals, CustomParser::new());
     let on_load: OnLoad = Box::new(move |raw, src, load| {
         hook(&mut Arrival::new(sip_message::Bytes::copy_from_slice(raw)), src, load)
@@ -179,6 +181,7 @@ fn new_non_emergency_invites_past_the_threshold_are_rejected() {
                 assert!(i < 2, "INVITE {i} below threshold must be accepted");
             }
             PreIngressAction::Drop => panic!("brake never silently drops"),
+            PreIngressAction::AcceptAhead => panic!("an INVITE is never queued ahead"),
         }
     }
     assert_eq!(rejects, flood - 2);
@@ -213,7 +216,7 @@ fn a_shed_invite_copy_below_the_threshold_is_shed_again() {
     };
     assert_eq!(first, again, "the same request draws the same 503 (RFC 3261 §8.2.7)");
     assert!(matches!(hook(&new_invite(8), src(), 0), PreIngressAction::Accept));
-    assert!(matches!(hook(&options_buf(8), src(), 0), PreIngressAction::Accept));
+    assert!(matches!(hook(&options_buf(8), src(), 0), PreIngressAction::AcceptAhead));
     assert_eq!(answered(&counters), 2);
     assert_eq!(counters.refused(Class::Normal), 1);
 }
@@ -298,7 +301,7 @@ fn non_invite_requests_are_not_rejected_by_the_brake() {
     assert_eq!(answered(&counters), 3);
     assert_eq!(
         hook(&options_buf(0), src(), 2),
-        PreIngressAction::Accept,
+        PreIngressAction::AcceptAhead,
         "non-INVITE must not be rejected"
     );
     assert_eq!(answered(&counters), 3);
@@ -428,8 +431,6 @@ fn a_refused_copy_is_answered_where_and_as_the_transaction_layer_answers_it() {
     assert_eq!(reply, PreIngressAction::Reply { datagram: expected, to: at });
 }
 
-// ---- the wait of the queue's oldest datagram, and the gate's switch ----
-
 /// A shallow queue whose oldest datagram has waited `wait_ms`.
 fn waited(wait_ms: u64) -> QueueLoad {
     QueueLoad { depth: 1, wait: Duration::from_millis(wait_ms) }
@@ -460,10 +461,35 @@ fn a_queue_that_waited_admits_emergency_and_in_dialog_requests() {
         hook(&invite_buf(1, false, Some("bob-tag-1")), src(), late),
         PreIngressAction::Accept
     );
-    assert_eq!(hook(&options_buf(2), src(), late), PreIngressAction::Accept);
     assert_eq!(hook(&response_buf(), src(), late), PreIngressAction::Accept);
     assert_eq!(answered(&counters), 0);
     assert_eq!(counters.emergency_bypassed(), 1);
+}
+
+/// An OPTIONS in a dialog: a call's keepalive, which waits its turn.
+fn in_dialog_options(i: u32) -> Vec<u8> {
+    let probe = String::from_utf8(options_buf(i)).expect("utf-8 fixture");
+    let (head, rest) = probe.split_once("\r\nTo: ").expect("a To line");
+    let (to, tail) = rest.split_once("\r\n").expect("the To line's end");
+    format!("{head}\r\nTo: {to};tag=bob-tag-{i}\r\n{tail}").into_bytes()
+}
+
+/// A liveness probe (an OPTIONS outside any dialog) is queued ahead of what
+/// waits whatever the queue reads, an idle one included; an OPTIONS inside a
+/// dialog waits its turn, whatever the queue reads.
+#[test]
+fn a_probe_is_always_queued_ahead_and_an_in_dialog_options_never() {
+    let refusals = refusals_with_jitter(0);
+    let (hook, counters) = brake_under_load(refusals.clone());
+    for load in [QueueLoad::default(), waited(49), waited(5_000), QueueLoad::at_depth(99)] {
+        assert_eq!(hook(&options_buf(0), src(), load), PreIngressAction::AcceptAhead, "{load:?}");
+        assert_eq!(hook(&in_dialog_options(1), src(), load), PreIngressAction::Accept, "{load:?}");
+    }
+    refusals.gate_refusing().store(true, Ordering::Relaxed);
+    let idle = QueueLoad::default();
+    assert_eq!(hook(&options_buf(2), src(), idle), PreIngressAction::AcceptAhead);
+    assert_eq!(hook(&in_dialog_options(3), src(), idle), PreIngressAction::Accept);
+    assert_eq!(answered(&counters), 0);
 }
 
 /// While the event-queue gate refuses, the brake refuses a new normal INVITE

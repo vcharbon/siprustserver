@@ -152,7 +152,8 @@ async fn metrics_shape_reports_brake_drops_and_queue_depth() {
 }
 
 /// The tail-drop count is a LIVE proxy of `endpoint.counters.tail_dropped`. The brake
-/// only sheds INVITEs; an OPTIONS flood past `queue_max` is accepted by the hook
+/// only sheds INVITEs; a flood of in-dialog OPTIONS (a probe, outside any
+/// dialog, would be queued ahead) past `queue_max` is accepted by the hook
 /// but TAIL-DROPPED by the full bounded queue once depth hits the cap — and the
 /// metrics shape surfaces that count (the blind spot a depth-only view misses).
 #[tokio::test(start_paused = true)]
@@ -167,7 +168,7 @@ async fn metrics_shape_reports_live_tail_drop() {
             "OPTIONS sip:bob@127.0.0.1:5060 SIP/2.0\r\n\
 Via: SIP/2.0/UDP 10.0.0.1:5555;branch=z9hG4bK-opts-{i}\r\n\
 From: <sip:alice@flooder.test>;tag=opt-{i}\r\n\
-To: <sip:bob@b2bua.test>\r\n\
+To: <sip:bob@b2bua.test>;tag=bob-{i}\r\n\
 Call-ID: opts-{i}@10.0.0.1\r\n\
 CSeq: 1 OPTIONS\r\n\
 Max-Forwards: 70\r\n\

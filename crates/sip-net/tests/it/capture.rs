@@ -245,3 +245,32 @@ async fn an_endpoint_bound_to_the_unspecified_address_is_refused() {
     assert!(refused.to_string().contains("0.0.0.0"), "{refused}");
     assert!(!file.exists());
 }
+
+/// The capture reads its endpoint's inbound queue as the endpoint does: a
+/// datagram left unread shows in the depth and in the wait through the
+/// capture, and through the shared handle the capture wraps.
+#[tokio::test]
+async fn the_capture_reads_its_endpoints_inbound_queue() {
+    let net = RealSignalingNetwork::new();
+    let file = scratch("queue");
+    let peer = bound(&net).await;
+    let inner = bound(&net).await;
+    let captured = CaptureEndpoint::open(inner.clone(), &file).unwrap();
+    assert_eq!((captured.queue_depth(), captured.queue_wait()), (0, Duration::ZERO));
+
+    peer.send_to(OK, inner.local_addr()).await.unwrap();
+    let unread = async {
+        while captured.queue_depth() == 0 {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    };
+    timeout(Duration::from_secs(2), unread).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    assert!(captured.queue_wait() >= Duration::from_millis(20), "{:?}", captured.queue_wait());
+    let through_the_capture = captured.queue_wait();
+    assert!(inner.queue_wait() >= through_the_capture, "the handle reads the same queue");
+
+    assert!(captured.try_recv().is_some());
+    assert_eq!(captured.queue_wait(), Duration::ZERO, "none waits");
+    let _ = std::fs::remove_file(&file);
+}

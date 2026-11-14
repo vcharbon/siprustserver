@@ -273,9 +273,9 @@ fn deliver(shared: Arc<SimShared>, raw: Vec<u8>, src: SocketAddr, dst: SocketAdd
                     shared2.in_flight.fetch_sub(1, Ordering::Relaxed);
                 });
             }
-            PreIngressAction::Accept => {
+            action @ (PreIngressAction::Accept | PreIngressAction::AcceptAhead) => {
                 let pkt = arrival.into_packet(src, clock.now_ms().max(0) as u64);
-                if queue.offer(pkt) {
+                if queue.offer_as(&action, pkt) {
                     counters.enqueued.fetch_add(1, Ordering::Relaxed);
                 } else {
                     counters.tail_dropped.fetch_add(1, Ordering::Relaxed);
