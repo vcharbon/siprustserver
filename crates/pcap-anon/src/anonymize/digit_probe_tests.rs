@@ -4,9 +4,9 @@
 //! entity headers; addresses inside ids; names under a `sip` first label;
 //! non-ASCII in a vendor header and in a control body. Each probe must leave
 //! none of them, keep every datagram's length and parse, and the leak checks
-//! must count nothing; untouched, they count something. Peer addresses are
-//! public-looking (85.12.34.x, a global IPv6) on purpose: the scope maps
-//! only public addresses.
+//! must count nothing; untouched, they count something. Peer addresses sit
+//! in a public resolver block (8.8.8.x) and in `3fff::/20`, which the scope
+//! maps as global, on purpose: the scope maps only public addresses.
 
 use serde_json::json;
 
@@ -34,7 +34,7 @@ fn head(variant: char) -> Vec<&'static str> {
             "Subject: 2861110007",
         ],
         'b' => vec![
-            "Via: SIP/2.0/UDP 8.8.8.10:5060;branch=z9hG4bK.85.12.34.71",
+            "Via: SIP/2.0/UDP 8.8.8.10:5060;branch=z9hG4bK.8.8.8.71",
             // A tag is a token, a Call-ID word admits `:` (RFC 3261 §25.1).
             "From: <sip:+2861113333@caller-dom.de>;tag=8.8.8.73",
             "To: <sip:+2861112222@callee-dom.de>",

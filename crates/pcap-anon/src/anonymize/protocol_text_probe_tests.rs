@@ -3,8 +3,8 @@
 //! control-protocol attribute's value stay byte for byte whatever they hold,
 //! because of where they sit, and verify reads none of them. The same name or
 //! number anywhere else is still mapped and counted. One probe per site,
-//! every value invented. The peer addresses are public-looking (85.12.34.x)
-//! on purpose: the scope maps only public addresses.
+//! every value invented. The peer addresses sit in a public resolver block
+//! (8.8.8.x) on purpose: the scope maps only public addresses.
 
 use super::refusal_probe_tests::{document, leaks, wire};
 use crate::anonymize::{anonymize_in, Fakes};

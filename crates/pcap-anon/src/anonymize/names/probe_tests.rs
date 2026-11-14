@@ -4,8 +4,8 @@
 //! SDP lines, multipart bodies, PASSporTs, base64 parameters, ports), and
 //! real values that a shape test would have taken for fakes. Each probe must
 //! leave none of them, keep every datagram's length and parse, and the
-//! leak checks must count nothing. Peer addresses are public-looking
-//! (85.12.34.x) on purpose: the scope maps only public addresses.
+//! leak checks must count nothing. Peer addresses sit in a public resolver
+//! block (8.8.8.x) on purpose: the scope maps only public addresses.
 
 use base64::Engine as _;
 use serde_json::json;

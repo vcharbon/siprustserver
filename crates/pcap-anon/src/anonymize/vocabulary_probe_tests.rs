@@ -6,8 +6,8 @@
 //! names of a dialog identifier header. Every value is invented. The
 //! identities go, the vocabulary keeps its spelling, the datagram keeps its
 //! length and parses, and the leak checks count nothing; untouched, they
-//! count the identities. Peer addresses are public-looking (85.12.34.x) on
-//! purpose: the scope maps only public addresses.
+//! count the identities. Peer addresses sit in a public resolver block
+//! (8.8.8.x) on purpose: the scope maps only public addresses.
 
 use super::refusal_probe_tests::{document, leaks, wire};
 use crate::anonymize::{anonymize_in, parse_ok_map, Fakes};

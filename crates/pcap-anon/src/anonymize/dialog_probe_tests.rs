@@ -3,8 +3,8 @@
 //! `label:digits` that is no port, an `Event` dialog package, a free-text SDP
 //! label, encoded payloads, vendor data. The anonymiser must keep every
 //! dialog apart, leave none of the identities, and verify must count nothing;
-//! untouched or merged, verify counts. The peer address is public-looking
-//! (85.12.34.x) on purpose: the scope maps only public addresses.
+//! untouched or merged, verify counts. The peer address sits in a public
+//! resolver block (8.8.8.x) on purpose: the scope maps only public addresses.
 
 use std::collections::HashSet;
 
