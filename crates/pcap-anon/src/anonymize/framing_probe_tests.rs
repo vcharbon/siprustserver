@@ -15,7 +15,7 @@ const NAMES: [&str; 2] = ["Zorblat Quintavius", "Wendeline Okonkwo-Prax"];
 /// A one-INVITE document whose body is `body` typed
 /// `multipart/mixed;boundary=b`.
 fn multipart(body: &str) -> Flows {
-    let mut doc = document(&[], "c1@cidhost.callerdom.de", body);
+    let mut doc = document(&[], "c1@cidhost.callerdom.zz", body);
     let text = wire(&doc).replacen("application/sdp", "multipart/mixed;boundary=b", 1);
     crate::model::set_wire(&mut doc.legs[0].msgs[0], text.as_bytes());
     doc

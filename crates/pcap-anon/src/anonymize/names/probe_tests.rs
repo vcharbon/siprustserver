@@ -44,26 +44,26 @@ fn extra(variant: char) -> Vec<String> {
             "P-Charging-Vector: icid-value=abcd1234ef;orig-ioi=Fakenetone;term-ioi=Fakenettwo".into(),
             "Subject: trunk".into(),
             "Organization: Notrealtel".into(),
-            "Warning: 399 warn-agent.warnhost.de \"Agent unreachable\"".into(),
+            "Warning: 399 warn-agent.warnhost.zz \"Agent unreachable\"".into(),
             "Refer-To: <sip:xfer@refer-domain.de?P-Asserted-Identity=%3Csip%3A%2B2865554444%40pct-domain.de%3E>".into(),
             format!("X-B64: <sip:b64@b64-domain.de;ident={b64num}>"),
             "Record-Route: <sip:notrealtel.fi;lr>".into(),
             "X-Corp-Host: sbc2.fakecorp-test.internal".into(),
         ],
         'b' => vec![
-            "Via: SIP/2.0/UDP edge.viahost.de:5060;branch=z9hG4bKbb1".into(),
-            "Refer-To: <sip:%2B2861112222@edge.viahost.de?Replaces=abc%40edge.viahost.de%3Bto-tag%3D1%3Bfrom-tag%3D2>".into(),
+            "Via: SIP/2.0/UDP edge.viahost.zz:5060;branch=z9hG4bKbb1".into(),
+            "Refer-To: <sip:%2B2861112222@edge.viahost.zz?Replaces=abc%40edge.viahost.zz%3Bto-tag%3D1%3Bfrom-tag%3D2>".into(),
             "Referred-By: <tel:+28-61-21-21-21>".into(),
-            "P-Preferred-Identity: <sip:002869990000@edge.viahost.de>".into(),
+            "P-Preferred-Identity: <sip:002869990000@edge.viahost.zz>".into(),
             "X-Note: \"peer 3fff:e0a:1:2::9 and [3fff:e0a:1:2::8]:5060\"".into(),
-            "Diversion: <sip:+2864445555@edge.viahost.de>;reason=unconditional".into(),
-            "History-Info: <sip:+2862223333@edge.viahost.de?Reason=SIP%3Bcause%3D302>;index=1".into(),
+            "Diversion: <sip:+2864445555@edge.viahost.zz>;reason=unconditional".into(),
+            "History-Info: <sip:+2862223333@edge.viahost.zz?Reason=SIP%3Bcause%3D302>;index=1".into(),
         ],
         _ => vec![
-            "Via: SIP/2.0/UDP sbc.porthost.de:5070;branch=z9hG4bKcc1".into(),
+            "Via: SIP/2.0/UDP sbc.porthost.zz:5070;branch=z9hG4bKcc1".into(),
             "Via: SIP/2.0/UDP 85.12.34.50:5080;branch=z9hG4bKcc2".into(),
-            "Warning: 399 sbc.porthost.de:5070 \"x\", 399 85.12.34.50:5080 \"y\"".into(),
-            "Call-Info: <http://sbc.porthost.de:5070/a>;purpose=info".into(),
+            "Warning: 399 sbc.porthost.zz:5070 \"x\", 399 85.12.34.50:5080 \"y\"".into(),
+            "Call-Info: <http://sbc.porthost.zz:5070/a>;purpose=info".into(),
         ],
     };
     lines
@@ -131,7 +131,7 @@ fn identities(variant: char) -> &'static [&'static str] {
 /// ISUP part.
 fn probe(extra: &[String]) -> Flows {
     let sdp = "v=0\r\no=fmcfake 1234 5678 IN IP4 85.12.34.10\r\ns=Appel Fakey McFakename\r\ni=Session of Fakey\r\n\
-               u=http://www.sdp-uri-domain.de/x\r\ne=f.mcfake@sdp-email-domain.fr\r\np=+28 6 11 22 33 4\r\n\
+               u=http://www.sdp-uri-domain.de/x\r\ne=f.mcfake@sdp-email-domain.zz\r\np=+28 6 11 22 33 4\r\n\
                c=IN IP4 85.12.34.11\r\nt=0 0\r\nm=audio 4000 RTP/AVP 0\r\n";
     let pidf = "<?xml version=\"1.0\"?><presence xmlns=\"urn:ietf:params:xml:ns:pidf\" entity=\"pres:testo.dummy@pidf-domain.de\">\
                 <tuple id=\"t1\"><status><geopriv><location-info><civicAddress><A3>Fakeville</A3><RD>Rue Fakey McFakename</RD>\

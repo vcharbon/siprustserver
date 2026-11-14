@@ -24,7 +24,7 @@ fn head(variant: char) -> Vec<&'static str> {
             "Via: SIP/2.0/UDP 85.12.34.10:5060;branch=z9hG4bK2861110003",
             "From: \"Fakey McFakename\" <sip:+2861113333@caller-dom.de>;tag=2861110002",
             "To: <sip:+2861112222@callee-dom.de>",
-            "Call-ID: 2861110001-77ab@cidhost.callerdom.de",
+            "Call-ID: 2861110001-77ab@cidhost.callerdom.zz",
             "CSeq: 2 INVITE",
             "Max-Forwards: 70",
             "Contact: <sip:+2861113333@85.12.34.10:5060>;+sip.instance=\"<urn:gsma:imei:35000099-176148-1>\"",
@@ -38,7 +38,7 @@ fn head(variant: char) -> Vec<&'static str> {
             // A tag is a token, a Call-ID word admits `:` (RFC 3261 §25.1).
             "From: <sip:+2861113333@caller-dom.de>;tag=85.12.34.73",
             "To: <sip:+2861112222@callee-dom.de>",
-            "Call-ID: x-3fff:e0a:1:2::72-77ab@cidhost.callerdom.de",
+            "Call-ID: x-3fff:e0a:1:2::72-77ab@cidhost.callerdom.zz",
             "CSeq: 2 INVITE",
             "Max-Forwards: 70",
             "Contact: <sip:+2861113333@85.12.34.10:5060>",
@@ -50,7 +50,7 @@ fn head(variant: char) -> Vec<&'static str> {
             "Via: SIP/2.0/UDP 85.12.34.10:5060;branch=z9hG4bKc1",
             "From: \"Fakey 061110020\" <sip:+2861113333@caller-dom.de>;tag=c2",
             "To: <sip:+2861112222@callee-dom.de>",
-            "Call-ID: c3@cidhost.callerdom.de",
+            "Call-ID: c3@cidhost.callerdom.zz",
             "CSeq: 2 INVITE",
             "Max-Forwards: 70",
             "Contact: <sip:+2861113333@85.12.34.10:5060>",
@@ -61,7 +61,7 @@ fn head(variant: char) -> Vec<&'static str> {
             "Via: SIP/2.0/UDP 85.12.34.10:5060;branch=z9hG4bK2861113333x",
             "From: <sip:+2861113333@caller-dom.de>;tag=9061113333",
             "To: <sip:+2861112222@callee-dom.de>",
-            "Call-ID: 0611133337771@cidhost.callerdom.de",
+            "Call-ID: 0611133337771@cidhost.callerdom.zz",
             "CSeq: 2 INVITE",
             "Max-Forwards: 70",
             "Contact: <sip:+2861113333@85.12.34.10:5060>",
@@ -71,7 +71,7 @@ fn head(variant: char) -> Vec<&'static str> {
             "Via: SIP/2.0/UDP 85.12.34.10:5060;branch=z9hG4bKe1",
             "From: <sip:+2861113333@caller-dom.de>;tag=e2",
             "To: <sip:+2861112222@callee-dom.de>",
-            "Call-ID: e3@cidhost.callerdom.de",
+            "Call-ID: e3@cidhost.callerdom.zz",
             "CSeq: 2 INVITE",
         ],
     }
@@ -90,8 +90,8 @@ fn body(variant: char) -> (&'static str, &'static str) {
              SIP/2.0 200 OK\r\nFrom: \"Fakey Fakerson\" <sip:+2861114444@frag-dom.de>;tag=2861110013\r\n\
              --b1\r\nContent-Type: application/mediaservercontrol+xml\r\n\r\n\
              <mscivr><dialogstart connectionid=\"2861110014~abc\"><dialog><prompt>\
-             <media loc=\"http://ann.mscp-dom.de/x.wav\"/></prompt><var name=\"caller\" value=\"2861110015\"/>\
-             <host name=\"sip.mscp-hidden.de\"/><who>Nobody Testname</who></dialog></dialogstart></mscivr>\r\n\
+             <media loc=\"http://ann.ivrx-dom.zz/x.wav\"/></prompt><var name=\"caller\" value=\"2861110015\"/>\
+             <host name=\"sip.ivrx-hidden.zz\"/><who>Nobody Testname</who></dialog></dialogstart></mscivr>\r\n\
              --b1--\r\n",
         ),
         'c' => (
@@ -102,7 +102,7 @@ fn body(variant: char) -> (&'static str, &'static str) {
              --b1\r\nContent-Type: application/pidf+xml\r\n\r\n\
              <presence>\r\n<RD>Rue Fakestreet</RD>\r\n<HNO>12</HNO>\r\n</presence>\r\n\
              --b1\r\nContent-Type: application/mediaservercontrol+xml\r\n\r\n\
-             <mscivr><who>Fäkey</who><host name=\"media.mscp-plain-c.de\"/></mscivr>\r\n\
+             <mscivr><who>Fäkey</who><host name=\"media.ivrx-plain-c.zz\"/></mscivr>\r\n\
              --b1--\r\n",
         ),
         'e' => ("application/sdp", concat!("v=0\r\no=- 1 1 IN IP4 85.12.34.10\r\ns=-\r\nc=IN IP4 85.12.34.10\r\nt=0 0\r\nm=audio 4000 RTP/AVP 0\r\n", "a=x-host:fcb.bc\r\n")),
@@ -139,8 +139,8 @@ fn identities(variant: char) -> &'static [&'static str] {
             "61110013",
             "61110014",
             "61110015",
-            "mscp-hidden",
-            "mscp-dom",
+            "ivrx-hidden",
+            "ivrx-dom",
             "Nobody",
             "Testname",
             "callee-dom",
@@ -157,7 +157,7 @@ fn identities(variant: char) -> &'static [&'static str] {
             "note-hidden",
         ],
         'c' => {
-            &["061110020", "fakesti-c", "Fäkey", "Rue Fakestreet", "sdp-plain-c", "mscp-plain-c"]
+            &["061110020", "fakesti-c", "Fäkey", "Rue Fakestreet", "sdp-plain-c", "ivrx-plain-c"]
         }
         'd' => &["61113333", "61112222", "7771"],
         'e' => &["fcb.bc"],

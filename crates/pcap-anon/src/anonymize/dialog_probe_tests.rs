@@ -61,7 +61,7 @@ fn invite(
         "INVITE sip:+2861112222@callee-dom.de SIP/2.0\r\n\
          Via: SIP/2.0/UDP 85.12.34.10:5060;branch=z9hG4bK{branch}\r\n\
          From: <sip:+2861113333@caller-dom.de>;tag={ftag}\r\nTo: <sip:+2861112222@callee-dom.de>;tag={ttag}\r\n\
-         Call-ID: {call_id}@cidhost.callerdom.de\r\nCSeq: 2 INVITE\r\nMax-Forwards: 70\r\n\
+         Call-ID: {call_id}@cidhost.callerdom.zz\r\nCSeq: 2 INVITE\r\nMax-Forwards: 70\r\n\
          Contact: <sip:+2861113333@85.12.34.10:5060>\r\n{extra}{typed}Content-Length: {}\r\n\r\n{content}",
         content.len()
     )
@@ -154,7 +154,7 @@ fn merged_dialogs_are_counted() {
 #[test]
 fn a_label_and_its_digits_is_no_port_and_every_identity_beside_the_dialog_goes() {
     let extra = "X-Caller: cli:061113339\r\nX-Sub: msisdn:2861119999\r\n\
-                 Event: dialog;call-id=c1@cidhost.callerdom.de;from-tag=f1abcd;to-tag=t1abcd\r\n\
+                 Event: dialog;call-id=c1@cidhost.callerdom.zz;from-tag=f1abcd;to-tag=t1abcd\r\n\
                  User-to-User: 00ff01fe02;encoding=hex\r\n";
     let body = "<mscivr><caller ani=\"ani:061117777\"/></mscivr>";
     let raws = vec![
@@ -236,11 +236,11 @@ fn a_derived_call_id_keeps_its_base_as_its_tail() {
     let copy = format!("X-Fake-Attach: \"{base}\"\r\n");
     let raws = vec![
         invite(base, "f1", "t1", "b1", &copy, None)
-            .replace(&format!("{base}@cidhost.callerdom.de"), base),
+            .replace(&format!("{base}@cidhost.callerdom.zz"), base),
         invite(&derived, "f2", "t2", "b2", "", None)
-            .replace(&format!("{derived}@cidhost.callerdom.de"), &derived),
+            .replace(&format!("{derived}@cidhost.callerdom.zz"), &derived),
         invite(&reoriginated, "f3", "t3", "b3", "", None)
-            .replace(&format!("{reoriginated}@cidhost.callerdom.de"), &reoriginated),
+            .replace(&format!("{reoriginated}@cidhost.callerdom.zz"), &reoriginated),
     ];
     let (raw, out, report) = anonymised(&raws);
     let (a, b, c) = (&out.legs[0].call_id, &out.legs[1].call_id, &out.legs[2].call_id);
@@ -260,9 +260,9 @@ fn a_host_spelling_a_call_id_word_never_maps_it_apart_from_its_derived_copy() {
     let via = "Via: SIP/2.0/UDP sbcfake01.notreal-carrier.de:5060;branch=z9hG4bKv1\r\n";
     let raws = vec![
         invite(base, "f1", "t1", "b1", via, None)
-            .replace(&format!("{base}@cidhost.callerdom.de"), base),
+            .replace(&format!("{base}@cidhost.callerdom.zz"), base),
         invite(&derived, "f2", "t2", "b2", "", None)
-            .replace(&format!("{derived}@cidhost.callerdom.de"), &derived),
+            .replace(&format!("{derived}@cidhost.callerdom.zz"), &derived),
     ];
     let (raw, out, report) = anonymised(&raws);
     let (a, b) = (&out.legs[0].call_id, &out.legs[1].call_id);
@@ -338,9 +338,9 @@ fn an_sdp_origin_s_session_id_maps_a_phone_number_and_its_version_is_a_counter()
 fn an_undotted_call_id_host_of_short_labels_is_faked_whole() {
     let raws = vec![
         invite("c1", "f1", "t1", "b1", "", None)
-            .replace("c1@cidhost.callerdom.de", "fakecid01@pbx"),
+            .replace("c1@cidhost.callerdom.zz", "fakecid01@pbx"),
         invite("c2", "f2", "t2", "b2", "", None)
-            .replace("c2@cidhost.callerdom.de", "fakecid02@gw1-7"),
+            .replace("c2@cidhost.callerdom.zz", "fakecid02@gw1-7"),
     ];
     let (raw, out, report) = anonymised(&raws);
     let ids: Vec<&str> = out.legs.iter().map(|l| l.call_id.as_str()).collect();
@@ -353,9 +353,9 @@ fn an_ipv6_literal_inside_a_call_id_maps_whole() {
     // Global unicast on purpose: the scope keeps the documentation range.
     let raws = vec![
         invite("c1", "f1", "t1", "b1", "", None)
-            .replace("c1@cidhost.callerdom.de", "fakecid03@[3fff:e0a:1:2::77]"),
+            .replace("c1@cidhost.callerdom.zz", "fakecid03@[3fff:e0a:1:2::77]"),
         invite("c2", "f2", "t2", "b2", "", None).replace(
-            "c2@cidhost.callerdom.de",
+            "c2@cidhost.callerdom.zz",
             "fakecid04-3fff:e0a:1:2::78@fake.notreal-carrier.de",
         ),
     ];

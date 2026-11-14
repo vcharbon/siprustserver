@@ -28,7 +28,7 @@ pub(super) fn response(raw: &str) -> Flows {
         "decode_stats": { "records": 0, "non_ip": 0, "non_udp": 0, "snap_truncated": 0, "datagrams": 0,
                           "fragments": 0, "reassembled": 0, "frag_dropped": 0, "tail_truncated": 0 },
         "flow_stats": { "sip_messages": 1, "capture_dups": 0, "parse_failed": 0, "non_sip": 0 },
-        "legs": [{ "call_id": "c1@cidhost.callerdom.de", "hops": [{ "a": "85.12.34.10:5060", "b": "172.16.245.246:5060" }],
+        "legs": [{ "call_id": "c1@cidhost.callerdom.zz", "hops": [{ "a": "85.12.34.10:5060", "b": "172.16.245.246:5060" }],
                    "invite": null, "final_status": null, "saw_180": false, "terminated_by": null, "tokens": [],
                    "msgs": [{ "ts_us": 0, "src": "172.16.245.246:5060", "dst": "85.12.34.10:5060", "hop": 0,
                               "retx": false, "raw": raw,
@@ -50,12 +50,12 @@ fn typed(doc: Flows, media: &str) -> Flows {
 }
 
 fn sites() -> Vec<Site> {
-    let call = "c1@cidhost.callerdom.de";
+    let call = "c1@cidhost.callerdom.zz";
     let status = "SIP/2.0 487 Request Fakey McFakename +2862345678 85.12.34.66 fake-sbc.notreal-carrier.de\r\n\
                   Via: SIP/2.0/UDP 85.12.34.10:5060;branch=z9hG4bKp1\r\n\
                   From: <sip:+2861113333@caller-dom.de>;tag=p2\r\n\
                   To: <sip:+2861112222@callee-dom.de>;tag=p3\r\n\
-                  Call-ID: c1@cidhost.callerdom.de\r\nCSeq: 2 INVITE\r\nContent-Length: 0\r\n\r\n";
+                  Call-ID: c1@cidhost.callerdom.zz\r\nCSeq: 2 INVITE\r\nContent-Length: 0\r\n\r\n";
     vec![
         Site {
             name: "status line reason phrase",
@@ -150,7 +150,7 @@ fn a_response_keeps_its_reason_phrase_in_the_model_too() {
     let mut out = response(
         "SIP/2.0 487 Request Fakey McFakename\r\nVia: SIP/2.0/UDP 85.12.34.10:5060;branch=z9hG4bKp1\r\n\
          From: <sip:+2861113333@caller-dom.de>;tag=p2\r\nTo: <sip:+2861112222@callee-dom.de>;tag=p3\r\n\
-         Call-ID: c1@cidhost.callerdom.de\r\nCSeq: 2 INVITE\r\nContent-Length: 0\r\n\r\n",
+         Call-ID: c1@cidhost.callerdom.zz\r\nCSeq: 2 INVITE\r\nContent-Length: 0\r\n\r\n",
     );
     anonymize_in(
         &mut out,
@@ -172,7 +172,7 @@ fn the_same_name_and_number_outside_protocol_text_are_mapped_and_counted() {
         "P-Asserted-Identity: <sip:+2862345678@fake-sbc.notreal-carrier.de>",
         "Subject: Fakey McFakename",
     ];
-    let doc = document(&headers, "c1@cidhost.callerdom.de", "");
+    let doc = document(&headers, "c1@cidhost.callerdom.zz", "");
     let mut out = doc.clone();
     let report = anonymize_in(
         &mut out,
@@ -189,10 +189,10 @@ fn the_same_name_and_number_outside_protocol_text_are_mapped_and_counted() {
     assert_eq!(leaks(&doc, &out, &report.fakes), 0, "{text}");
     // Left in place, the same identities count outside the text and not in it.
     let none = Fakes::default();
-    let inside_only = document(&headers[..1], "c1@cidhost.callerdom.de", "");
+    let inside_only = document(&headers[..1], "c1@cidhost.callerdom.zz", "");
     let bare = document(
         &["Reason: Q.850;cause=16;text=\"call to +abcdefghijk by aaaaa bbbbbbbbbb cleared\""],
-        "c1@cidhost.callerdom.de",
+        "c1@cidhost.callerdom.zz",
         "",
     );
     let floor = leaks(&bare, &bare, &none);

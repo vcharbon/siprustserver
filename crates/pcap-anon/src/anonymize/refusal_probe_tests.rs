@@ -30,12 +30,12 @@ fn extra(variant: char) -> Vec<&'static str> {
         ],
         // A number and a host in an escaped URI of a Contact parameter.
         'b' => vec![
-            "Contact: <sip:4321@85.12.34.20:5060;asm=1;epv=%3Csip:5551234%40ims.telcoz-b.de%3Bgr%3Durn:uuid:0f6c2a1e-1b2c-4d5e-8f90-a1b2c3d4e5f6%3E>",
+            "Contact: <sip:4321@85.12.34.20:5060;xm=1;xfwd=%3Csip:5551234%40ims.telcoz-b.de%3Bgr%3Durn:uuid:0f6c2a1e-1b2c-4d5e-8f90-a1b2c3d4e5f6%3E>",
         ],
         // A host in a Via extension parameter.
         'c' => vec![
             "Contact: <sip:4321@85.12.34.20:5060>",
-            "Via: SIP/2.0/UDP 85.12.34.21:5060;branch=z9hG4bKc9;pterm=edge7.trunkz-c.de;initialInvite=true",
+            "Via: SIP/2.0/UDP 85.12.34.21:5060;branch=z9hG4bKc9;xhop=edge7.trunkz-c.de;xfirst=true",
         ],
         // A vendor header whose name holds a dot.
         'd' => vec!["Contact: <sip:4321@85.12.34.20:5060>", "P-Vendorx.Session-Info: corrID=ab1"],
@@ -49,7 +49,7 @@ fn extra(variant: char) -> Vec<&'static str> {
         // A number written as a display name and in an escaped URI of a Contact parameter.
         'i' => vec![
             "P-Asserted-Identity: \"5551239\" <sip:4321@85.12.34.20>",
-            "Contact: <sip:4321@85.12.34.20:5060;asm=1;epv=%3Csip:5551239%40ims.telcoz-i.de%3Bgr%3D12345a678%3E>",
+            "Contact: <sip:4321@85.12.34.20:5060;xm=1;xfwd=%3Csip:5551239%40ims.telcoz-i.de%3Bgr%3D12345a678%3E>",
         ],
         // A number carrying a user parameter, written only there.
         'k' => vec![
@@ -106,10 +106,10 @@ fn extra(variant: char) -> Vec<&'static str> {
 fn call_id(variant: char) -> &'static str {
     match variant {
         // A Call-ID opening on an escape, a digit run right behind it.
-        'g' => "T%Ab4455667788QwErTyUi@cidhost.callerdom.de",
+        'g' => "T%Ab4455667788QwErTyUi@cidhost.callerdom.zz",
         // A Call-ID whose host part is an opaque token, digit runs inside.
         'l' => "ab12cd34567ef8g901h2345@1-ABc2de345-678f7654321gh890i1jkl2mno3456p7q-r890s123",
-        _ => "c1@cidhost.callerdom.de",
+        _ => "c1@cidhost.callerdom.zz",
     }
 }
 
@@ -264,7 +264,7 @@ fn a_reason_text_spelling_the_status_line_leaves_both_as_written() {
                Via: SIP/2.0/UDP 85.12.34.10:5060;branch=z9hG4bKp1\r\n\
                From: <sip:+2861113333@caller-dom.de>;tag=p2\r\n\
                To: <sip:+2861112222@callee-dom.de>;tag=p3\r\n\
-               Call-ID: c1@cidhost.callerdom.de\r\nCSeq: 2 INVITE\r\n\
+               Call-ID: c1@cidhost.callerdom.zz\r\nCSeq: 2 INVITE\r\n\
                Reason: SIP;cause=487;text=\"487 Request Terminated\"\r\n\
                Content-Length: 0\r\n\r\n";
     let doc = json!({
@@ -272,7 +272,7 @@ fn a_reason_text_spelling_the_status_line_leaves_both_as_written() {
         "decode_stats": { "records": 0, "non_ip": 0, "non_udp": 0, "snap_truncated": 0, "datagrams": 0,
                           "fragments": 0, "reassembled": 0, "frag_dropped": 0, "tail_truncated": 0 },
         "flow_stats": { "sip_messages": 1, "capture_dups": 0, "parse_failed": 0, "non_sip": 0 },
-        "legs": [{ "call_id": "c1@cidhost.callerdom.de", "hops": [{ "a": "85.12.34.10:5060", "b": "172.16.245.246:5060" }],
+        "legs": [{ "call_id": "c1@cidhost.callerdom.zz", "hops": [{ "a": "85.12.34.10:5060", "b": "172.16.245.246:5060" }],
                    "invite": null, "final_status": null, "saw_180": false, "terminated_by": null, "tokens": [],
                    "msgs": [{ "ts_us": 0, "src": "172.16.245.246:5060", "dst": "85.12.34.10:5060", "hop": 0,
                               "retx": false, "raw": raw,

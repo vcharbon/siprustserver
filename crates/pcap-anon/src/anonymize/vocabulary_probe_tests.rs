@@ -74,7 +74,7 @@ const PROBES: &[Probe] = &[
 
 /// A document whose last header line carries a media type parameter.
 fn with_media_type() -> crate::model::Flows {
-    let mut raw = document(&[], "c1@cidhost.callerdom.de", "v=0\r\n");
+    let mut raw = document(&[], "c1@cidhost.callerdom.zz", "v=0\r\n");
     let text = wire(&raw).replace(
         "Content-Type: application/sdp",
         "Content-Type: application/sdp;origin=media7.fakecorp-gw.de",
@@ -89,7 +89,7 @@ fn with_media_type() -> crate::model::Flows {
 fn every_identity_among_vocabulary_is_gone_and_the_vocabulary_stays() {
     let docs = PROBES
         .iter()
-        .map(|p| (document(p.lines, "c1@cidhost.callerdom.de", ""), p.gone, p.kept))
+        .map(|p| (document(p.lines, "c1@cidhost.callerdom.zz", ""), p.gone, p.kept))
         .chain([(with_media_type(), &["fakecorp-gw"][..], &["application/sdp;origin="][..])]);
     for (i, (raw, gone, kept)) in docs.enumerate() {
         let mut out = raw.clone();
@@ -131,7 +131,7 @@ fn a_letterless_device_id_is_faked_whole() {
         &[&format!(
             "Contact: <sip:4321@85.12.34.20:5060>;+sip.instance=\"<urn:gsma:imei:{imei}>\""
         )[..]],
-        "c1@cidhost.callerdom.de",
+        "c1@cidhost.callerdom.zz",
         "",
     );
     let mut out = raw.clone();
@@ -159,7 +159,7 @@ fn a_letterless_device_id_is_faked_whole() {
 /// reads a part by it.
 #[test]
 fn a_media_type_keeps_its_spelling() {
-    let mut raw = document(&[], "c1@cidhost.callerdom.de", "v=0\r\n");
+    let mut raw = document(&[], "c1@cidhost.callerdom.zz", "v=0\r\n");
     let text = wire(&raw)
         .replace("Content-Type: application/sdp", "Content-Type: application/vnd.vendorx.order");
     crate::model::set_wire(&mut raw.legs[0].msgs[0], text.as_bytes());
@@ -174,9 +174,9 @@ fn a_media_type_keeps_its_spelling() {
 fn verify_counts_an_identity_among_vocabulary_when_nothing_anonymises_it() {
     let docs = [&PROBES[0], &PROBES[1], &PROBES[3]]
         .into_iter()
-        .map(|p| document(p.lines, "c1@cidhost.callerdom.de", ""))
+        .map(|p| document(p.lines, "c1@cidhost.callerdom.zz", ""))
         .chain([with_media_type()]);
-    let base = document(&[], "c1@cidhost.callerdom.de", "v=0\r\n");
+    let base = document(&[], "c1@cidhost.callerdom.zz", "v=0\r\n");
     let reading = crate::testflow::reading();
     let floor =
         crate::verify::leaks::leaks(&base, &Scope::default(), &Fakes::default(), &reading).total();

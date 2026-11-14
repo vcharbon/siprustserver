@@ -225,7 +225,7 @@ fn the_leak_check_reads_a_base64_run_of_a_body_the_harvest_reads() {
 /// capture gives.
 #[test]
 fn a_text_short_of_sure_adds_no_key_and_takes_the_keys_of_the_capture() {
-    let text = "sip:zorro@pbx7.de";
+    let text = "sip:zorro@pbx7.zz";
     let encoded = STANDARD_NO_PAD.encode(text);
     let (alone, verdict) = anonymised(&doc("fakey", &[format!("X-Tok: {encoded}")]));
     assert_eq!(between(&wire(&alone), "X-Tok: ", &['\r']), encoded, "no key of its own");

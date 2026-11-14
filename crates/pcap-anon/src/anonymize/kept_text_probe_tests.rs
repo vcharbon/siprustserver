@@ -13,7 +13,7 @@ use crate::model::Flows;
 fn probe() -> Flows {
     document(
         &["Server: Fakeswitch", "User-Agent: Notreal Gateway"],
-        "c1@cidhost.callerdom.de",
+        "c1@cidhost.callerdom.zz",
         "v=0\r\no=- 1 1 IN IP4 85.12.34.30\r\ns= Fakeswitch\r\nc=IN IP4 85.12.34.30\r\nt=0 0\r\n\
          m=audio 4000 RTP/AVP 0\r\n",
     )
