@@ -167,6 +167,11 @@ export interface Transaction {
    * dialog whatever another branch drew, RFC 3261 §16.7), else the first final.
    */
   readonly final: Entry | undefined
+  /**
+   * The first final response in capture order: when the transaction stopped
+   * waiting. It is not `final` where a 2xx of another fork followed a failure.
+   */
+  readonly firstFinal: Entry | undefined
   /** The first ACK of an INVITE transaction. */
   readonly ack: Entry | undefined
   /** The first CANCEL of an INVITE transaction. */
@@ -434,6 +439,7 @@ const timelineOf = (file: FileFacts, p: Position, msgIdxs: ReadonlyArray<number>
       request: undefined,
       responses: [],
       final: undefined,
+      firstFinal: undefined,
       ack: undefined,
       cancel: undefined
     }
@@ -514,6 +520,7 @@ const timelineOf = (file: FileFacts, p: Position, msgIdxs: ReadonlyArray<number>
       transaction.responses.push(entry)
       const status = summary.status
       if (status >= 200) {
+        transaction.firstFinal ??= entry
         const first = transaction.final
         if (first === undefined || ((first.status ?? 0) >= 300 && status < 300)) transaction.final = entry
         if (transaction.opening && status < 300) confirmed = true

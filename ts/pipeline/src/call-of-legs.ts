@@ -98,7 +98,7 @@ export const ofCall = (legs: CallLegs): OfCall => {
 
 /** How long one attempt rang, to the microsecond. */
 export interface RingTime {
-  /** What ended the ringing: the CANCEL that gave the attempt up, else the final that settled it. */
+  /** What ended the ringing: the CANCEL that gave the attempt up, else the first final it drew. */
   readonly end: Fact<Entry>
   /** From the attempt's INVITE to that end. */
   readonly fromInvite_us: Fact<number>
@@ -109,14 +109,14 @@ export interface RingTime {
 /**
  * One attempt's ring time, measured on its outcome transaction: from its
  * INVITE and from its first 180–189, to the CANCEL that gave it up or the
- * final that settled it.
+ * first final it drew, whatever a fork answered after that.
  */
 export const ringTime = (leg: LegFacts): RingTime => {
   const outcome = leg.outcome
   if (outcome?.request === undefined) {
     return { end: leg.final, fromInvite_us: missing(leg.final), fromRinging_us: missing(leg.final) }
   }
-  const end = outcome.cancel ?? outcome.final
+  const end = outcome.cancel ?? outcome.firstFinal
   if (end === undefined) {
     return { end: leg.final, fromInvite_us: missing(leg.final), fromRinging_us: missing(leg.final) }
   }

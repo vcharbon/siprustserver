@@ -126,6 +126,22 @@ describe("an attempt's ring time", () => {
     expect(CallFacts.valueOf(CallFacts.ringTime(legs[0]!).fromRinging_us)).toBe(3_000_000)
   })
 
+  it("ends at the first final where another fork's 2xx followed a failure final (RFC 3261 §16.7)", () => {
+    const s = scenario()
+    const a = caller(s)
+    const b = attempt(s, 100)
+      .response(486, { at: 4_130, tag: "fork-a" })
+      .response(200, { at: 6_000, tag: "fork-b" })
+      .ack({ at: 6_010, by: "system" })
+    const { legs } = callOf(s, a, b)
+    const ring = CallFacts.ringTime(legs[0]!)
+
+    expect(CallFacts.valueOf(legs[0]!.answer)).toMatchObject({ status: 200, at_us: 6_000_000 })
+    expect(legs[0]!.outcome).toMatchObject({ final: { status: 200 }, firstFinal: { status: 486 } })
+    expect(CallFacts.valueOf(ring.end)).toMatchObject({ status: 486, at_us: 4_130_000 })
+    expect(CallFacts.valueOf(ring.fromRinging_us)).toBe(4_000_000)
+  })
+
   it("is not captured where the capture stops while the attempt rings", () => {
     const s = scenario()
     const a = caller(s)
