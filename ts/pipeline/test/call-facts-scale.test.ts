@@ -1,11 +1,14 @@
 /**
- * What call facts cost, counted in the module's own visits and never on a
- * clock: linear in a position's messages, blind to the legs a position does
- * not own, and free on a second request.
+ * What call facts cost, never on a clock: linear in a position's messages,
+ * blind to the legs a position does not own, and free on a second request.
+ * The work is counted at the source (`./counted-work.ts`): every read of a
+ * message of the document and every array element stepped over, added to the
+ * visits the module reports of itself.
  */
 import { describe, expect, it } from "vitest"
 import * as CallFacts from "../src/call-facts.js"
 import { scenario, type Scenario, type ScenarioLeg } from "../src/scenario.js"
+import { arraySteps, watched } from "./counted-work.js"
 
 const PARTY = "198.51.100.10:5060"
 
@@ -34,27 +37,28 @@ const decoys = (s: Scenario, count: number): void => {
   }
 }
 
-const visitsFor = (exchanges: number, decoyLegs = 0): number => {
+/** The work of reading the long call's facts at its vantage: message reads, array steps and reported visits. */
+const workFor = (exchanges: number, decoyLegs = 0): number => {
   const s = scenario()
   const leg = longCall(s, exchanges)
   decoys(s, decoyLegs)
-  const flows = s.flows()
-  const read = CallFacts.atVantage(flows, s.sut, leg.vantage())
-  expect(read.accepted).toHaveLength(exchanges + 1)
-  return CallFacts.cost(flows).visits
+  const { flows, reads } = watched(s.flows())
+  const { result, steps } = arraySteps(() => CallFacts.atVantage(flows, s.sut, leg.vantage()))
+  expect(result.accepted).toHaveLength(exchanges + 1)
+  return reads() + steps + CallFacts.cost(flows).visits
 }
 
 describe("the cost of a position's facts", () => {
-  it("at most 2.2 times the visits for twice the messages", () => {
-    const once = visitsFor(400)
-    const twice = visitsFor(800)
+  it("at most 2.2 times the work for twice the messages", () => {
+    const once = workFor(400)
+    const twice = workFor(800)
 
     expect(once).toBeGreaterThan(400)
     expect(twice).toBeLessThanOrEqual(2.2 * once)
   })
 
   it("is the same whatever other legs the file holds", () => {
-    expect(visitsFor(400, 300)).toBe(visitsFor(400))
+    expect(workFor(400, 300)).toBe(workFor(400))
   })
 
   it("is nothing on a second request for the same position", () => {
@@ -79,6 +83,61 @@ describe("the cost of a position's facts", () => {
     expect(CallFacts.atVantage(flows, s.sut, cut.vantage()).final.state).toBe("not-captured")
     expect(CallFacts.atVantage(flows, s.sut, other.vantage()).final.state).toBe("not-captured")
     expect(CallFacts.cost(flows).indexed).toBe(52)
+  })
+})
+
+/**
+ * A caller's leg holding `exchanges` accepted in-dialog requests, and
+ * `attempts` legs the system dials and cancels one after the other, the first
+ * a second after the caller's BYE.
+ */
+const hunt = (s: Scenario, attempts: number, exchanges: number): { readonly caller: ScenarioLeg; readonly chain: ReadonlyArray<ScenarioLeg> } => {
+  const caller = longCall(s, exchanges)
+  const first = 1_100 + exchanges * 10
+  const chain = Array.from({ length: attempts }, (_, n) => {
+    const at = first + 1_000 * n
+    return s
+      .leg({ callId: `attempt-${n}@example.com`, party: `203.0.113.${1 + (n % 200)}:5060` })
+      .invite({ at, by: "system" })
+      .response(180, { at: at + 30 })
+      .cancel({ at: at + 900, by: "system" })
+      .response(200, { at: at + 905 })
+      .response(487, { at: at + 910, to: "INVITE" })
+      .ack({ at: at + 915, by: "system" })
+  })
+  return { caller, chain }
+}
+
+/** The work of the call level over a hunt whose legs' facts are already kept: message reads and array steps. */
+const callWorkFor = (attempts: number, exchanges: number): { readonly reads: number; readonly steps: number } => {
+  const s = scenario()
+  const { caller, chain } = hunt(s, attempts, exchanges)
+  const { flows, reads } = watched(s.flows())
+  const at = (leg: ScenarioLeg) => CallFacts.atVantage(flows, s.sut, leg.vantage())
+  const legs = { caller: [at(caller)], chain: [chain.map(at)] }
+  const before = reads()
+  const { result, steps } = arraySteps(() => {
+    const call = CallFacts.ofCall(legs)
+    return legs.chain[0]!.map((leg) => [CallFacts.release(call, leg, 500_000).kind, CallFacts.ringTime(leg).end.state])
+  })
+  expect(result).toEqual(chain.map(() => ["own", "seen"]))
+  return { reads: reads() - before, steps }
+}
+
+describe("the cost of a call's facts over legs already read", () => {
+  it("reads no message", () => {
+    expect(callWorkFor(50, 400).reads).toBe(0)
+  })
+
+  it("at most 2.2 times the steps for twice the attempts", () => {
+    const once = callWorkFor(50, 10).steps
+
+    expect(once).toBeGreaterThan(50)
+    expect(callWorkFor(100, 10).steps).toBeLessThanOrEqual(2.2 * once)
+  })
+
+  it("does not grow with the messages of the caller's leg", () => {
+    expect(callWorkFor(50, 800).steps).toBe(callWorkFor(50, 10).steps)
   })
 })
 

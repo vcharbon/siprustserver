@@ -1,0 +1,92 @@
+/**
+ * Work counted at the source, never on a clock and never by what the code
+ * under test reports of itself: the reads of a flows document's messages, and
+ * the array elements stepped over while a piece of work runs.
+ */
+import type { Flows } from "@sip/contracts"
+
+/** A flows document whose message reads are counted. */
+export interface Watched {
+  /** The same legs, each `msgs` answering through a counting proxy. */
+  readonly flows: Flows.FlowsDoc
+  /** How many times a message was read by its index so far. */
+  readonly reads: () => number
+}
+
+/** `flows` with every read of a message by its index counted, iteration included. */
+export const watched = (flows: Flows.FlowsDoc): Watched => {
+  let reads = 0
+  const counting = <T extends object>(items: T): T =>
+    new Proxy(items, {
+      get: (target, key, receiver) => {
+        if (typeof key === "string" && /^\d+$/.test(key)) reads++
+        return Reflect.get(target, key, receiver)
+      }
+    })
+  return {
+    flows: { ...flows, legs: flows.legs.map((leg) => ({ ...leg, msgs: counting(leg.msgs) })) },
+    reads: () => reads
+  }
+}
+
+const DRIVING = [
+  "every",
+  "filter",
+  "find",
+  "findIndex",
+  "findLast",
+  "findLastIndex",
+  "flatMap",
+  "forEach",
+  "map",
+  "reduce",
+  "reduceRight",
+  "some"
+] as const
+
+type Callback = (...args: Array<unknown>) => unknown
+type Driving = (this: unknown, callback: Callback, ...rest: Array<unknown>) => unknown
+
+/**
+ * Runs `work` and counts the array elements it steps over: each step of an
+ * array's iterator (`for…of`, a spread, a destructuring) and each call of a
+ * callback an array method drives. `Array.prototype` is patched for the
+ * synchronous run of `work` only. A scan of an array the code under test built
+ * for itself counts here like any other.
+ */
+export const arraySteps = <T>(work: () => T): { readonly result: T; readonly steps: number } => {
+  let steps = 0
+  const proto = Array.prototype as unknown as Record<string | symbol, unknown>
+  const kept = new Map<string | symbol, unknown>()
+  for (const name of DRIVING) {
+    const original = proto[name] as Driving
+    kept.set(name, original)
+    proto[name] = function (this: unknown, callback: Callback, ...rest: Array<unknown>) {
+      return original.call(
+        this,
+        (...args: Array<unknown>) => {
+          steps++
+          return callback(...args)
+        },
+        ...rest
+      )
+    }
+  }
+  const iterate = proto[Symbol.iterator] as (this: unknown) => Iterator<unknown>
+  kept.set(Symbol.iterator, iterate)
+  proto[Symbol.iterator] = function (this: unknown) {
+    const iterator = iterate.call(this)
+    const next = iterator.next.bind(iterator)
+    iterator.next = () => {
+      steps++
+      return next()
+    }
+    return iterator
+  }
+  try {
+    const result = work()
+    return { result, steps }
+  } finally {
+    for (const [name, original] of kept) proto[name] = original
+  }
+}
