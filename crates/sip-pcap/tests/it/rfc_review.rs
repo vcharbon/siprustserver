@@ -62,7 +62,7 @@ fn the_review_of_the_selection_is_placed_on_the_stated_side() {
     assert!(stderr.contains("records=26 datagrams=26"), "{stderr}");
     assert!(stderr.contains("sip-messages=19 capture-dups=7 parse-failed=0"), "{stderr}");
     assert!(stderr.contains("legs=3 call-groups=1 matched=1"), "{stderr}");
-    assert!(stderr.contains("rules=wire sut=192.0.2.10 (stated)"), "{stderr}");
+    assert!(stderr.contains("1 selected group(s) sut=192.0.2.10 (stated)"), "{stderr}");
     assert!(stderr.contains("no-ack-to-dialog-creating-2xx: 2 hit(s)"), "{stderr}");
     assert!(stderr.contains("side peer: 1\n  side platform: 1"), "{stderr}");
 
@@ -174,21 +174,14 @@ fn without_a_sut_the_report_carries_no_side() {
     assert!(!text.contains("by_side"), "{text}");
 }
 
-/// The rule words: `all` widens past the census vocabulary and the summary
-/// then lists only the rules that had an occasion; an unknown token is a
-/// refusal, not an empty review.
+/// The review runs every rule, none named: the summary lists the rules that
+/// had an occasion, and leaves out a rule that had none.
 #[test]
-fn the_rule_set_is_named_and_an_unknown_rule_is_refused() {
-    let (_, stderr, ok) =
-        sipflow(&["--sut", "192.0.2.10", "--rfc", "--rfc-rules", "all", "--list"]);
+fn the_review_runs_every_rule_and_lists_those_with_an_occasion() {
+    let (_, stderr, ok) = sipflow(&["--sut", "192.0.2.10", "--rfc", "--list"]);
     assert!(ok, "{stderr}");
-    assert!(stderr.contains("rules=all"), "{stderr}");
     assert!(stderr.contains("no-ack-to-dialog-creating-2xx: 2 hit(s)"), "{stderr}");
     assert!(!stderr.contains("serial-register"), "a rule with no occasion is not listed\n{stderr}");
-
-    let (_, stderr, ok) = sipflow(&["--rfc", "--rfc-rules", "no-such-rule"]);
-    assert!(!ok);
-    assert!(stderr.contains("unknown rule \"no-such-rule\""), "{stderr}");
 }
 
 /// The fixture is what `--to-pcap` writes: decoding it, emitting the document

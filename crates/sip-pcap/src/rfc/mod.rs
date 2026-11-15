@@ -165,19 +165,13 @@ impl Scan {
 /// Every violation the document's own bytes prove, with its denominators —
 /// every rule of the [`RfcRule::WIRE`] vocabulary.
 pub fn scan(doc: &FlowsDoc) -> Scan {
-    scan_with(doc, &[])
+    scan_sut(doc, None)
 }
 
-/// [`scan`] with `candidates` named too. The census runs every rule already, so
-/// a candidate adds nothing; the parameter keeps the sweep's flag readable.
-pub fn scan_with(doc: &FlowsDoc, candidates: &[RfcRule]) -> Scan {
-    scan_sut(doc, candidates, None)
-}
-
-/// [`scan_with`], every hit also placed on a side by `sut` when one is
+/// [`scan`], every hit also placed on a side by `sut` when one is
 /// stated. The topology role is computed regardless: the two answer
 /// different questions and a reader compares them.
-pub fn scan_sut(doc: &FlowsDoc, candidates: &[RfcRule], sut: Option<&SutSet>) -> Scan {
+pub fn scan_sut(doc: &FlowsDoc, sut: Option<&SutSet>) -> Scan {
     let mut out = Scan::default();
     let span = Span::of(doc);
     for (gi, group) in doc.groups.iter().enumerate() {
@@ -186,7 +180,7 @@ pub fn scan_sut(doc: &FlowsDoc, candidates: &[RfcRule], sut: Option<&SutSet>) ->
         for &li in &group.legs {
             let Some(leg) = doc.legs.get(li) else { continue };
             let at = Site { leg, leg_index: li, group: gi, roles: &roles, span: &span, sut };
-            adapter::detect(&at, &mut out, candidates);
+            adapter::detect(&at, &mut out);
         }
         relay::link(doc, &mut out.hits[first..]);
     }

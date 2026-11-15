@@ -23,18 +23,29 @@ when one overlaps the one before it, starts more than the gap after it, or
 was given out of time order. Without it nothing is checked: a directory of
 unrelated captures is a valid corpus.
 
+| flag | meaning |
+|---|---|
+| `--reading <file>` | the reading every message is parsed under, wherever sipflow parses (extraction, `--enrich`, `--reparse`, `--rfc`): `key = value` lines naming `exemptions` and the `max-header-length`, `max-uri-length`, `max-header-lines`, `max-datagram` bounds (`sip_pcap::reading`). A line that does not read refuses the run. Without it: no exemption, the parser's default bounds |
+| `--json` | the whole flow model as the `sip_pcap::doc::FlowsDoc` document on stdout; selection and layout flags do not apply |
+| `--schema` | the JSON Schema of that document, then exit |
+| `--emit-headers <Name,…>` | headers projected onto every emitted message as `msgs[].headers` entries, matched by header identity (casing and RFC 3261 §7.3.3 compact forms collapse) |
+| `--enrich <flows.json>` | re-derive the enrichment of an emitted document from its message bytes and print it, so a rewritten (anonymized, filtered) document comes back in step |
+| `--parse-failed-pcap <path>` | also write every datagram ingest set aside (`parse-failed`, and a copy of each `header-failed` one), as captured, to this classic pcap |
+| `--list`, `--full`, `--limit <n>` | one line per call group; every message in full under its ladder line; the ladders printed (20) |
+
 ## Review mode: the RFC rules on the selected calls
 
-`--rfc` reviews the calls the selection chose in the same run. Every hit prints
-under its ladder (or as `rfc #n …` lines with `--list`); the per-rule summary
-goes to stderr.
+`--rfc` reviews the calls the selection chose in the same run, under every rule
+`rfc-rules` holds (`--list-rules` prints their tokens). Every hit prints under
+its ladder (or as `rfc #n …` lines with `--list`); the per-rule summary, the
+rules that had an occasion, goes to stderr.
 
 ```sh
 # the calls a peer dialed, reviewed, the platform stated
 $SF capture.pcap --ruri 33123456 --sut 10.0.0.9 --rfc
 
-# every rule, the SUT read off the capture, the outputs kept
-$SF capture.pcap --sut auto --rfc --rfc-rules all \
+# the SUT read off the capture, the outputs kept
+$SF capture.pcap --sut auto --rfc \
     --rfc-json review.json --rfc-doc review.flows.json > review.txt
 ```
 
@@ -43,7 +54,6 @@ $SF capture.pcap --sut auto --rfc --rfc-rules all \
 | `--rfc` | run the review on the selected call groups |
 | `--sut <ip,…>` | the system under test's addresses — exact IPs, port-insensitive, no CIDR. Selects the groups the SUT touched and stamps `side=platform\|peer` on every hit, beside the topology `role=` |
 | `--sut auto` | the addresses that re-originated a call under a derived Call-ID (`1-<base>`), as the correlation evidence names them; refused when no call carries that evidence |
-| `--rfc-rules wire\|all\|<tok,…>` | `wire` (default): the corpus-backed census vocabulary; `all`: every rule; tokens name rules. Beyond `wire` the report is triage input, not one the census consumers read |
 | `--rfc-json <path>` | the report — the census shape (`sip_pcap::rfc::Census`), one document |
 | `--rfc-doc <path>` | the reviewed selection as a flows document, what the report's `document` names |
 
@@ -52,9 +62,19 @@ leg=<Call-ID> @ <anchoring message> <evidence as flat JSON>`.
 
 Selection and correlation are the extractor's own flags and apply unchanged:
 `--call-id`, `--from`, `--to`, `--ruri`, `--method`, `--header`, `--final-status`,
-`--token`, or a `--query`; `--correlate <Header>`, `--correlate-param Header:param`
-(default `P-Charging-Vector:icid-value`), derived Call-ID and identity adjacency.
-The review runs over every selected group whatever `--limit` prints.
+`--token`, or a query (`--query <file>`, or `--query-json <json>` inline; a query's
+own `correlate` block replaces the pipeline below). The review runs over every
+selected group whatever `--limit` prints.
+
+Correlation ties B2BUA legs into calls by a pipeline of strategies, in order:
+
+| flag | strategy |
+|---|---|
+| `--correlate <Header>` | whole-value equality of a relayed header (default `X-Loadgen-Id`, `X-Api-Call`) |
+| `--correlate-param <Header:param>` | equality of one `;`-param, its siblings free to change (default `P-Charging-Vector:icid-value`); `--no-param-correlate` drops these |
+| derived Call-ID | the `1-<original>` loopback, its INVITE departing on a hop the base leg traversed; `--derived-call-id-any-hop` drops the hop condition, `--no-derived-call-id` the strategy |
+| identity adjacency | the last fallback; `--no-identity-adjacency` drops it |
+| `--pair-window-ms <ms>` | the largest first-activity distance the derived Call-ID and identity adjacency pair across (5000) |
 
 Capture-stack duplicates (same bytes within 200 ms) are collapsed at ingest and
 counted as `capture-dups`; a transaction's own retransmissions are marked and
@@ -106,8 +126,13 @@ stale index is replaced by one scan of the document, said on stderr.
 
 ## Corpus census
 
-`--rfc-census <flows.json…|dir…>` sweeps already-emitted documents under the
-`wire` vocabulary and prints the aggregate report; `--rfc-census-with <tok,…>`
-takes a candidate rule's baseline beside it. Reads no capture. A directory is
-walked for `*.flows.json` through symlinks, each document swept once (by its
-real path where the walk also reaches it through no link).
+`--rfc-census <flows.json…|dir…>` sweeps already-emitted documents under every
+rule and prints the aggregate report as JSON on stdout, its summary on stderr,
+on `--rfc-census-jobs` threads (4). Reads no capture and modifies no document. A
+directory is walked for `*.flows.json` through symlinks, each document swept
+once (by its real path where the walk also reaches it through no link).
+
+`--reparse <flows.json…|dir…>` walks the same way and re-parses every message
+under the reading: one JSON line per message the parser refuses and per failed
+non-fatal header of an accepted one, the totals on stderr, on `--reparse-jobs`
+threads (4).

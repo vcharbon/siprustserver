@@ -12,7 +12,7 @@ use crate::walk::{capture_of, expand_flows_documents};
 ///
 /// Every document is either scanned or recorded as a read failure: a census
 /// that dropped a document it could not parse would understate its own counts.
-pub(crate) fn run(inputs: &[PathBuf], jobs: usize, candidates: &[rfc_rules::RuleId]) {
+pub(crate) fn run(inputs: &[PathBuf], jobs: usize) {
     let files = expand_flows_documents(inputs);
     if files.is_empty() {
         eprintln!("no *.flows.json found under {inputs:?}");
@@ -28,7 +28,7 @@ pub(crate) fn run(inputs: &[PathBuf], jobs: usize, candidates: &[rfc_rules::Rule
             .map(|_| {
                 let (next, done, files) = (&next, &done, &files);
                 scope.spawn(move || {
-                    let mut local = Census::with_candidates(candidates);
+                    let mut local = Census::new();
                     while let Some(path) = files.get(next.fetch_add(1, Ordering::Relaxed)) {
                         let name = path.display().to_string();
                         let capture = capture_of(path);
@@ -47,7 +47,7 @@ pub(crate) fn run(inputs: &[PathBuf], jobs: usize, candidates: &[rfc_rules::Rule
                 })
             })
             .collect();
-        let mut merged = Census::with_candidates(candidates);
+        let mut merged = Census::new();
         for handle in handles {
             merged.merge(handle.join().expect("a census worker panicked"));
         }
