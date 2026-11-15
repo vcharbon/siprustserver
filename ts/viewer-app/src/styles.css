@@ -1847,7 +1847,8 @@ tr.rule-unrostered td {
 }
 
 /* The tick column: a row ticked is a cell of the next request. */
-.triage-listing .tick {
+.triage-listing .tick,
+.sources-listing .tick {
   width: 20px;
   text-align: center;
 }
