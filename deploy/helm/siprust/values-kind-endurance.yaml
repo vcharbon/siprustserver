@@ -1,0 +1,40 @@
+# The kind lab sized for the `endurance` hakit profile: 400 calls a second
+# steady, spikes to 600, one worker or one proxy alone able to carry the whole
+# load. Applied over values-kind.yaml:
+#   deploy/helm/kind-lab.sh deploy -f deploy/helm/siprust/values-kind-endurance.yaml
+#
+# The chart's capacity formula at that load: 480 calls a second with a quarter
+# of margin, calls of 50 s on average with a 2 s ring, 4.9 INVITEs per call
+# across the proxies. Per-call costs are the ones measured on the lab's worker;
+# the lab opens no routing connection, so 64 outbound connections stand for the
+# limiter's.
+inviteTxnTimeoutSec: 158
+proxy:
+  env:
+    LB_CAP_INITIAL_CPS: "480"
+    LB_CAP_CEILING_CPS: "600"
+    LB_AIMD_INCREASE_STEP_CPS: "60"
+worker:
+  env:
+    B2BUA_CPS_BUCKET_RATE: "750"
+    B2BUA_CPS_BUCKET_SIZE: "750"
+sizing:
+  enabled: true
+  profile: { cps: 480, holdSeconds: 50, ringSeconds: 2, invitesPerCall: 4.9 }
+  callMarginPct: 11
+  emergencyPct: 5
+  txnMarginPct: 15
+  gateMarginPct: 25
+  # Measured on this mix: 40 000 live transactions per worker at 200 calls a second.
+  txnSecondsPerCall: 200
+  memory:
+    baseBytes: 469762048
+    answeredCallBytes: 49300
+    ringingCallBytes: 63700
+    replicaBytes: 10555
+    txnBytes: 5600
+    outboundConnections: 64
+    connectionBytes: 40960
+    slackPct: 10
+    proxyBaseBytes: 67108864
+    memoEntryOverheadBytes: 141

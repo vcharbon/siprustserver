@@ -9,7 +9,7 @@ description: >-
   of CPU scarcity plus a spike, orphaned dialogs, a pod force-deleted while
   its process runs on, and an in-dialog request flood. Each window carries the
   budget of what its fault may cost.
-duration_s: 2960
+duration_s: 3500
 drain_s: 130
 settle_s: 15
 setup_slow_ms: 1000
@@ -57,29 +57,29 @@ streams:
 schedule:
   at:
     - { at_s: 30, incident: kill_worker, budget: worker-kill }
-    - { at_s: 110, incident: kill_worker_graceful, budget: worker-drain }
-    - { at_s: 220, incident: kill_worker_held, duration_s: 60, budget: worker-kill }
-    - { at_s: 360, incident: kill_proxy, budget: proxy-failover }
-    - { at_s: 440, incident: pod_kill, budget: dependency-fault }
-    - { at_s: 520, incident: pod_restart, budget: dependency-fault }
-    - { at_s: 630, incident: pod_freeze, duration_s: 15, budget: dependency-fault }
-    - { at_s: 725, incident: net_delay, duration_s: 30, budget: dependency-fault }
-    - { at_s: 835, incident: net_loss, duration_s: 30, budget: dependency-fault }
-    - { at_s: 945, incident: tcp_reset, duration_s: 30, budget: dependency-fault }
-    - at_s: 1055
+    - { at_s: 135, incident: kill_worker_graceful, budget: worker-drain }
+    - { at_s: 270, incident: kill_worker_held, duration_s: 60, budget: worker-kill }
+    - { at_s: 435, incident: kill_proxy, budget: proxy-failover }
+    - { at_s: 540, incident: pod_kill, budget: dependency-fault }
+    - { at_s: 645, incident: pod_restart, budget: dependency-fault }
+    - { at_s: 780, incident: pod_freeze, duration_s: 15, budget: dependency-fault }
+    - { at_s: 900, incident: net_delay, duration_s: 30, budget: dependency-fault }
+    - { at_s: 1035, incident: net_loss, duration_s: 30, budget: dependency-fault }
+    - { at_s: 1170, incident: tcp_reset, duration_s: 30, budget: dependency-fault }
+    - at_s: 1305
       incident: pod_freeze
       target: { selector: app=rabbitmq }
       duration_s: 30
       budget: dependency-fault
-    - { at_s: 1165, incident: cpu_starve, duration_s: 60, budget: cpu-overload }
-    - { at_s: 1305, incident: node_stop, duration_s: 60, expected_s: 240, budget: dependency-fault }
-    - { at_s: 1565, incident: partition, duration_s: 30, budget: dependency-fault }
-    - { at_s: 1675, incident: sip_loss, duration_s: 30, budget: lossy-plane }
-    - { at_s: 1785, incident: io_stall, duration_s: 30, budget: dependency-fault }
-    - { at_s: 1895, incident: clock_skew, duration_s: 30, budget: dependency-fault }
-    - { at_s: 2005, incident: cut_external_plane, duration_s: 30, budget: proxy-cut }
-    - { at_s: 2115, incident: spike, stream: burst, budget: spike }
-    - { at_s: 2315, incidents: [cpu_starve, spike], stream: burst, duration_s: 30, expected_s: 180, budget: cpu-overload }
-    - { at_s: 2515, incident: force_delete, budget: worker-kill }
-    - { at_s: 2600, incident: orphan, stream: orphaned, budget: dependency-fault }
-    - { at_s: 2720, incident: abuse, stream: flooding, budget: abuse }
+    - { at_s: 1440, incident: cpu_starve, duration_s: 60, budget: cpu-overload }
+    - { at_s: 1605, incident: node_stop, duration_s: 60, expected_s: 240, budget: dependency-fault }
+    - { at_s: 1890, incident: partition, duration_s: 30, budget: dependency-fault }
+    - { at_s: 2025, incident: sip_loss, duration_s: 30, budget: lossy-plane }
+    - { at_s: 2160, incident: io_stall, duration_s: 30, budget: dependency-fault }
+    - { at_s: 2295, incident: clock_skew, duration_s: 30, budget: dependency-fault }
+    - { at_s: 2430, incident: cut_external_plane, duration_s: 30, budget: proxy-cut }
+    - { at_s: 2565, incident: spike, stream: burst, budget: spike }
+    - { at_s: 2790, incidents: [cpu_starve, spike], stream: burst, duration_s: 30, expected_s: 180, budget: cpu-overload }
+    - { at_s: 3015, incident: force_delete, budget: worker-kill }
+    - { at_s: 3120, incident: orphan, stream: orphaned, budget: dependency-fault }
+    - { at_s: 3255, incident: abuse, stream: flooding, budget: abuse }

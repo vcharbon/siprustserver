@@ -85,12 +85,13 @@ def worst_call_s(stream: Stream, defaults: Mapping[str, str] | None = None) -> f
 
 @dataclass(frozen=True)
 class Counters:
-    """The last statistics row: calls created, calls in flight, and the rate
-    SIPp was set to when it wrote the row."""
+    """The last statistics row: calls created, calls in flight, the rate SIPp
+    was set to when it wrote the row, and the calls SIPp ended as failed."""
 
     calls_created: int | None
     current_calls: int | None
     target_rate: float | None = None
+    failed_calls: int | None = None
 
 
 def parse_stat_csv(text: str | None) -> Counters:
@@ -118,7 +119,7 @@ def parse_stat_csv(text: str | None) -> Counters:
         v = col(name)
         return None if v is None or not v.is_integer() else int(v)
 
-    return Counters(count("TotalCallCreated"), count("CurrentCall"), col("TargetRate"))
+    return Counters(count("TotalCallCreated"), count("CurrentCall"), col("TargetRate"), count("FailedCall(C)"))
 
 
 class SippStream:
@@ -313,8 +314,11 @@ class SippStream:
         return parse_stat_csv(self.executor.read_text(self.dir / "stat.csv"))
 
     def tally(self) -> Tally:
-        """SIPp places every call it creates and fails none on its own."""
-        return Tally(self.counters().calls_created)
+        """SIPp places every call it creates. Every path of the base UAC ends in
+        a record and a successful call, so a call SIPp counts failed (an abort,
+        a timeout with no branch) is one it ended without a record."""
+        c = self.counters()
+        return Tally(c.calls_created, generator_failures=c.failed_calls)
 
     def held_tally(self) -> Tally | None:
         """The last statistics row once its target rate reads 0: SIPp writes a

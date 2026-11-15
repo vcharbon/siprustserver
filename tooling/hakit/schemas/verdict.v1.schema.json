@@ -14,7 +14,7 @@
     "started_at_ms": { "type": "number" },
     "ended_at_ms": { "type": "number" },
     "status": {
-      "description": "`invalid` when an integrity finding exists (the run measured nothing trustworthy); else `fail` when any impact is a finding; else `pass`.",
+      "description": "`invalid` when an integrity finding that is not `tolerated` exists (the run measured nothing trustworthy); else `fail` when any impact is a finding; else `pass`.",
       "enum": ["pass", "fail", "invalid"]
     },
     "streams": {
@@ -262,6 +262,10 @@
           "stream": { "type": "string" },
           "at_ms": { "type": "number" },
           "detail": { "type": "string" },
+          "tolerated": {
+            "description": "True on a stream's `record_gap` or `generator_failure` when its calls without a record are known and at most the profile's `record_shortfall_pct` of its calls: reported, and the run stays valid.",
+            "type": "boolean"
+          },
           "call_ids": {
             "description": "The calls concerned, up to 50.",
             "type": "array",

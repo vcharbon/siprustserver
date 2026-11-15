@@ -341,7 +341,12 @@ made. A run profile joins the two.
    event's `expected_s` (default `duration_s` + 60) plus `settle_s`; with the
    defaults (`settle_s` 60) a kill every 3 minutes passes. A window of the
    verdict that opens while another is open is a `window_overlap` integrity
-   finding.
+   finding. A planned window also opens no earlier than the previous one's
+   planned close plus the longest life of a call of a `run` stream (its give-up
+   plus its hold), so a call meets one fault at most: a call whose replica a
+   first fault refused, then lost to a second fault, is a double failure no
+   budget states. A profile that tests that on purpose says why in
+   `schedule.calls_span_windows`.
 8. **CDR mismatch.** A profile with `cdr_join: true` joins the run's CDRs with
    its records, on a lab that offers the capability `cdr`. The base's CDR
    consumer (`cdr-consumer-runner`, with `CDR_OBSERVATION_URL` set) ships one
@@ -636,7 +641,13 @@ made. A run profile joins the two.
    offered-call counter (every slot of its rate, shed included) over the
    stream's life, read after the drain. A difference is a `record_gap` integrity
    finding: an exit that writes no record would otherwise hide exactly the
-   calls that went wrong.
+   calls that went wrong. SIPp's `FailedCall` counts the calls it ended with
+   no record. A stream whose calls without a record are known and at most the
+   profile's `record_shortfall_pct` (default 0.1 %) of its calls keeps its
+   findings marked `tolerated`, and the run stays valid. Those calls are charged
+   to no window; the integrity section states their count, so a reader weighs
+   them against the window allowances. A larger shortfall, an unread counter or
+   an incomplete record copy still makes the run `invalid`.
 6. **The classifier** is one module of the runner,
    `tooling/hakit/src/hakit/classify.py`: a pure function of a record and its
    catalog shape to impacts with instants. Neither generators nor dashboards

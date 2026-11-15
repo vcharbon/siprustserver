@@ -16,7 +16,7 @@ from .model import Incident
 from .one_at_a_time import one_at_a_time_errors
 from .recovery import MIN_SAMPLES
 from .profile import EventSpec, Profile, Stream
-from .schedule import overlaps, plan
+from .schedule import crowded, overlaps, plan
 from .scenario_lint import key_defaults, scenario_keys
 from .sipp_driver import DRIVER_KEYS, worst_call_s
 
@@ -89,6 +89,12 @@ def _teardown_s(s: Stream, content: Content | None = None) -> float:
         return max(bound, loadgen.worst_call_s(s))
     path = None if content is None else content.scenarios.get(s.scenario or "")
     return max(bound, worst_call_s(s, None if path is None else key_defaults(path)))
+
+
+def call_life_s(profile: Profile) -> float:
+    """The longest a call of a `run` stream lives when no fault touches it: its
+    setup bound, then its hold. A load incident's own calls belong to its window."""
+    return max((s.give_up_s + s.hold_s for s in profile.streams if s.start == "run"), default=0.0)
 
 
 def _tick_note(deadline: float) -> str:
@@ -188,6 +194,8 @@ def profile_errors(profile: Profile, content: Content) -> list[str]:
     if not errs:
         planned = plan(profile, content.incidents)
         errs.extend(f"{where}: {e}" for e in overlaps(planned))
+        if sched is not None and sched.calls_span_windows is None:
+            errs.extend(f"{where}: {e}" for e in crowded(planned, call_life_s(profile)))
         errs.extend(one_at_a_time_errors(where, profile, planned, content.incidents))
     return errs
 

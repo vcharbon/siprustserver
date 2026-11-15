@@ -30,7 +30,7 @@ from .model import Budget, Shape, parse_budget, parse_catalog
 from .profile import Profile, parse_profile
 from .recovery import Sample, StreamSamples
 from .report_metrics import kept as kept_report_metrics
-from .reconcile import integrity, reconcile
+from .reconcile import integrity, reconcile, tolerated
 from .schemas import SchemaSet
 from .generator_health import run_stalls
 from .host_stress import stress_findings, thresholds
@@ -272,7 +272,9 @@ def _compute(run_dir: Path, schemas: SchemaSet) -> Json:
         stall_rows[st.stream].append(
             {"at_ms": st.at_ms, "ms": round(st.ms, 3), "spoiled": len(stalled.get(st, [])), "source": st.source}
         )
-    streams_out, reconciled = reconcile(streams_doc, calls.per_stream, success, stall_rows)
+    streams_out, reconciled = reconcile(
+        streams_doc, calls.per_stream, success, stall_rows, profile.record_shortfall_pct
+    )
     host_t = thresholds(profile.preflight)
     found += reconciled + _stall_findings(stalled, stall_details(run_dir, host_t, list(stalled))) + _window_integrity(windows)
     spoiled = {st: len(ids) for st, ids in stalled.items()}
@@ -316,7 +318,7 @@ def _compute(run_dir: Path, schemas: SchemaSet) -> Json:
     by_cause = unanswered(
         ((r, run.shapes[jv.string(r, "shape")]) for r, _ in calls.valid), windows, budgets, profile, run.shapes
     )
-    status = "invalid" if found else ("fail" if findings else "pass")
+    status = "invalid" if any(not tolerated(f) for f in found) else ("fail" if findings else "pass")
     return {
         "schema": "verdict.v1",
         "run": jv.string(meta, "run"),

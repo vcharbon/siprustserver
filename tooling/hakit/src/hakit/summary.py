@@ -14,6 +14,7 @@ from datetime import UTC, datetime
 
 from . import jsonval as jv
 from .jsonval import Json
+from .reconcile import tolerated
 
 
 def _t(ms: float) -> str:
@@ -51,7 +52,7 @@ def _in_dialog_of(v: Json, event: str) -> dict[str, int]:
 def _why(v: Json) -> list[str]:
     status = jv.string(v, "status")
     if status == "invalid":
-        return [_integrity(i) for i in jv.objs(v, "integrity")]
+        return [_integrity(i) for i in jv.objs(v, "integrity") if not tolerated(i)]
     out: list[str] = []
     for w in jv.objs(v, "windows"):
         out += [f"- window {w['event']}: {_impact(r)[2:]}" for r in jv.objs(w, "impacts") if r.get("finding") is True]

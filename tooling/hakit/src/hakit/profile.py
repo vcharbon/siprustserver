@@ -79,6 +79,9 @@ class Schedule:
     interval_s: float | None
     cycle: list[EventSpec]
     at: list[EventSpec]
+    # Why a call of this schedule may live through two windows; None: each
+    # call meets one window at most (check.py refuses a tighter schedule).
+    calls_span_windows: str | None = None
 
 
 @dataclass(frozen=True)
@@ -182,6 +185,9 @@ class Profile:
     raw: Json = field(compare=False)
     cdr_required: list[CdrRequired] = field(default_factory=lambda: [])
     cdr_in_flight_s: float = 0.0
+    # The share of a stream's calls, in percent, that may end without a record
+    # and leave the run valid (reconcile.py).
+    record_shortfall_pct: float = 0.1
     limiters: list[LimiterSpec] = field(default_factory=lambda: [])
     one_at_a_time: list[OneAtATime] = field(default_factory=lambda: [])
     report_metrics: list[ReportMetric] = field(default_factory=lambda: [])
@@ -252,6 +258,7 @@ def parse_profile(d: Json) -> Profile:
             interval_s=jv.opt_number(sched_d, "interval_s"),
             cycle=[_event(e) for e in jv.objs(sched_d, "cycle")],
             at=[_event(e) for e in jv.objs(sched_d, "at")],
+            calls_span_windows=jv.opt_string(sched_d, "calls_span_windows"),
         )
     )
     pf = jv.obj(d, "preflight")
@@ -268,6 +275,7 @@ def parse_profile(d: Json) -> Profile:
             for m in jv.objs(d, "cdr_required")
         ],
         cdr_in_flight_s=jv.number(d, "cdr_in_flight_s", 0),
+        record_shortfall_pct=jv.number(d, "record_shortfall_pct", 0.1),
         limiters=[
             LimiterSpec(jv.string(e, "id"), int(jv.number(e, "cap")), jv.strings(e, "streams"), jv.number(e, "repair_s"))
             for e in jv.objs(d, "limiters")

@@ -58,6 +58,43 @@ def test_records_that_miss_the_counter_make_the_run_invalid(tmp_path: Path) -> N
     assert v["status"] == "invalid"
 
 
+def test_a_shortfall_within_the_profile_tolerance_is_reported_and_leaves_the_run_valid(tmp_path: Path) -> None:
+    recs = [record(f"c{i}", T0 + i * 10) for i in range(99)]
+    d = run_dir(tmp_path / "gap", recs, calls=100, events=[], profile={"record_shortfall_pct": 1})
+    v = compute(d, SCHEMAS)
+    assert SCHEMAS.errors("verdict.v1", v) == []
+    assert [(i["kind"], i["detail"], i.get("tolerated")) for i in jv.objs(v, "integrity")] == [
+        (
+            "record_gap",
+            "99 records + 0 not placed != 100 calls the generator counted "
+            "(tolerated: 1 of 100 calls without a record, within 1 %)",
+            True,
+        )
+    ]
+    assert v["status"] == "pass"
+
+    d = run_dir(tmp_path / "failed", recs, calls=100, events=[], profile={"record_shortfall_pct": 1}, stream={"generator_failures": 1})
+    v = compute(d, SCHEMAS)
+    assert [(i["kind"], i.get("tolerated")) for i in jv.objs(v, "integrity")] == [("generator_failure", True)]
+    assert v["status"] == "pass"
+
+
+def test_a_shortfall_above_the_tolerance_or_of_unknown_size_makes_the_run_invalid(tmp_path: Path) -> None:
+    recs = [record(f"c{i}", T0 + i * 10) for i in range(98)]
+    over = run_dir(tmp_path / "over", recs, calls=100, events=[], profile={"record_shortfall_pct": 1})
+    v = compute(over, SCHEMAS)
+    assert [i.get("tolerated") for i in jv.objs(v, "integrity")] == [None]
+    assert v["status"] == "invalid"
+
+    short = run_dir(tmp_path / "copy", recs, calls=99, events=[], profile={"record_shortfall_pct": 5}, stream={"records_complete": False})
+    v = compute(short, SCHEMAS)
+    assert [i.get("tolerated") for i in jv.objs(v, "integrity")] == [None, None]
+    assert v["status"] == "invalid"
+
+    extra = run_dir(tmp_path / "extra", recs, calls=97, events=[], profile={"record_shortfall_pct": 5})
+    assert compute(extra, SCHEMAS)["status"] == "invalid"
+
+
 def test_a_failed_incident_closes_its_window_at_its_maximum_and_invalidates_the_run(tmp_path: Path) -> None:
     d = run_dir(tmp_path, [record("a", T0)], calls=1, events=kill(1, T0 + 80_000, failed=True))
     v = compute(d, SCHEMAS)

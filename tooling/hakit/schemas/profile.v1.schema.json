@@ -96,6 +96,12 @@
       "minimum": 0,
       "default": 0
     },
+    "record_shortfall_pct": {
+      "description": "The share of a stream's calls, in percent, that its generator may count with no record (failed by the generator, dropped on the way to the disk, or simply missing) and leave the run valid. The verdict keeps such findings with `tolerated`. A shortfall above it, more records than calls, an unread call counter or an incomplete record copy still make the run `invalid`.",
+      "type": "number",
+      "minimum": 0,
+      "default": 0.1
+    },
     "cdr_required": {
       "description": "With `cdr_join`: the calls never answered that must still have a CDR, each a matcher on the record (its `ending`, and optionally its `final_code` and whether its final carried a Retry-After). An answered call always must; a call no matcher names may have none.",
       "type": "array",
@@ -188,6 +194,11 @@
       "properties": {
         "first_at_s": { "type": "number", "minimum": 0 },
         "interval_s": { "type": "number", "exclusiveMinimum": 0 },
+        "calls_span_windows": {
+          "description": "Why a call of this profile may live through two windows. Absent, `hakit validate` refuses a window that opens before the previous planned window's close plus the longest life of a call of a `run` stream (its `setup_deadline_s` or `final_wait_s`, plus its `hold_s`): each call then meets one fault at most, and each loss has the one fault that caused it.",
+          "type": "string",
+          "minLength": 1
+        },
         "cycle": {
           "type": "array",
           "minItems": 1,

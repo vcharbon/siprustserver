@@ -94,3 +94,19 @@ def overlaps(events: list[PlannedEvent]) -> list[str]:
                 f"({a.at_s:g}s + expected {a.expected_s:g}s + settle {a.settle_s:g}s = {a.window_end_s:g}s)"
             )
     return errs
+
+
+def crowded(events: list[PlannedEvent], call_life_s: float) -> list[str]:
+    """Pairs of planned windows closer than the longest call: a call alive when
+    the first closes may still be up when the second opens. Overlapping pairs
+    are `overlaps`' to report."""
+    errs: list[str] = []
+    for a, b in zip(events, events[1:]):
+        clear_s = a.window_end_s + call_life_s
+        if a.window_end_s <= b.at_s < clear_s:
+            errs.append(
+                f"event {b.event_id} at {b.at_s:g}s opens {b.at_s - a.window_end_s:g}s after {a.event_id}'s window "
+                f"closes at {a.window_end_s:g}s, under the longest call life {call_life_s:g}s: a call may meet both "
+                f"(first at {clear_s:g}s, or set schedule.calls_span_windows)"
+            )
+    return errs
