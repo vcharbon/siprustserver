@@ -989,6 +989,13 @@ describe("the document's own shape", () => {
     ])
   })
 
+  it("carries the deployment's own reading of the document as the context's pack, and nothing where it reads none", () => {
+    const pivot = doc([sendFinal("s5", "B", 500)])
+    const packOf = (read: Pivot.PivotV3) => ({ steps: read.flow.length })
+    expect(confront({ pivot, verdict: verdictWith([]), recordings: new Map(), packOf }).context.pack).toEqual({ steps: 1 })
+    expect(confront({ pivot, verdict: verdictWith([]), recordings: new Map() }).context.pack).toBeUndefined()
+  })
+
   it("names the final a leg ENDS on, with no ACK expect after it", () => {
     const finals = read([sendFinal("s5", "B", 500), expectAck("s6", "B"), sendFinal("s19", "D", 487)])
       .unackedFinals

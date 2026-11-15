@@ -383,7 +383,7 @@ const confrontCell = Effect.fn("Driver.confrontCell")(function* (
   const path = yield* Path.Path
   const classifier = yield* Classifier.Service
 
-  const confronted = Confront.confront(yield* confrontInputOf(cell, absolute, pivot, verdict))
+  const confronted = Confront.confront({ ...(yield* confrontInputOf(cell, absolute, pivot, verdict)), packOf: classifier.packOf })
 
   const meta = {
     lane: cell.lane,

@@ -4,7 +4,7 @@ import { Classifier } from "../src/classifier.js"
 import type { Probe } from "../src/probe.js"
 
 const context: Classifier.CaseContext = {
-  relay18x: [],
+  pack: undefined,
   run: { messages: 1, legs: 1, legsTornDownBySystem: 0, sentRSeqs: new Map(), openers: new Map(), receptions: new Map(), sent: new Map() },
   document: { unackedFinals: [], calls: 1, steps: [], attempts: [] }
 }
