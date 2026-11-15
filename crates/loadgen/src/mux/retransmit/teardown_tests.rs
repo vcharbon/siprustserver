@@ -2,8 +2,9 @@
 //! fabric: a CANCEL keeps retransmitting until its own final whatever its
 //! INVITE draws on the shared branch (RFC 3261 §9.1), a final to the INVITE
 //! ends its reliable provisionals (RFC 3262 §3), a retransmitted CANCEL or
-//! INVITE draws its own transaction's final again, and an ACKed INVITE final
-//! is not re-sent, the hop-ACK of a non-2xx touching no other transaction.
+//! INVITE draws its own transaction's final again, an ACKed INVITE final
+//! is not re-sent, the hop-ACK of a non-2xx touching no other transaction,
+//! and a PRACK ends the reliable provisional of its own early dialog only.
 
 use super::*;
 use sip_net::{BindUdpOpts, SignalingNetwork};
@@ -147,6 +148,61 @@ async fn an_invite_final_stops_its_reliable_provisional() {
     let sent = received(peer.as_ref(), TokioDuration::from_secs(5)).await;
     assert!(sent.iter().all(|l| !l.contains(" 183 ")), "no 183 after the final: {sent:?}");
     assert!(sent.iter().any(|l| l.contains(" 504 ")), "the 504 is retransmitted: {sent:?}");
+    txns.shutdown();
+}
+
+/// A reliable 183 on the early dialog of To-tag `to_tag`, RSeq 1.
+fn reliable_183(to_tag: &str) -> Vec<u8> {
+    let raw = response(183, "1 INVITE", "Require: 100rel\r\nRSeq: 1\r\n");
+    String::from_utf8(raw).unwrap().replace("tag=2", &format!("tag={to_tag}")).into_bytes()
+}
+
+/// The PRACK of RSeq 1 on the early dialog of To-tag `to_tag`, on `branch`.
+fn prack(to_tag: &str, branch: &str) -> Vec<u8> {
+    format!(
+        "PRACK sip:b@127.0.0.1:5060 SIP/2.0\r\nMax-Forwards: 70\r\nVia: SIP/2.0/UDP 127.0.0.1:5070;branch={branch}\r\n\
+         Call-ID: tc1@h\r\nFrom: <sip:a@h>;tag=1\r\nTo: <sip:b@h>;tag={to_tag}\r\nCSeq: 2 PRACK\r\n\
+         RAck: 1 1 INVITE\r\n\r\n"
+    )
+    .into_bytes()
+}
+
+/// The To-tag of every 183 `peer` receives within `window`.
+async fn retransmitted_183_tags(peer: &dyn UdpEndpoint, window: TokioDuration) -> Vec<String> {
+    let deadline = tokio::time::Instant::now() + window;
+    let mut tags = Vec::new();
+    while let Ok(Some(pkt)) = timeout(deadline - tokio::time::Instant::now(), peer.recv()).await {
+        if sip_message::sniff::first_line(&pkt.raw).contains(" 183 ") {
+            tags.push(sip_message::sniff::to_tag(&pkt.raw));
+        }
+    }
+    tags
+}
+
+/// A forking UAS sends a reliable provisional on each early dialog, each in
+/// its own RSeq space (RFC 3262 §3): two forks' 183s, both RSeq 1, are each
+/// retransmitted until the PRACK sent on their own early dialog.
+#[tokio::test(start_paused = true)]
+async fn each_forks_reliable_provisional_retransmits_until_its_own_prack() {
+    let (txns, peer, peer_addr) = sim_rig().await;
+    txns.on_outbound(&Datagram::sniff(&reliable_183("fa")), peer_addr);
+    txns.on_outbound(&Datagram::sniff(&reliable_183("fb")), peer_addr);
+    let both = retransmitted_183_tags(peer.as_ref(), TokioDuration::from_millis(1_200)).await;
+    assert!(
+        both.iter().any(|t| t == "fa") && both.iter().any(|t| t == "fb"),
+        "each fork's 183 is retransmitted: {both:?}"
+    );
+
+    assert!(txns.on_inbound(&Datagram::sniff(&prack("fb", "z9hG4bK-pb")), peer_addr));
+    let after_b = retransmitted_183_tags(peer.as_ref(), TokioDuration::from_secs(5)).await;
+    assert!(
+        !after_b.is_empty() && after_b.iter().all(|t| t == "fa"),
+        "the PRACK of fork fb stops fb's 183 only: {after_b:?}"
+    );
+
+    assert!(txns.on_inbound(&Datagram::sniff(&prack("fa", "z9hG4bK-pa")), peer_addr));
+    let after_a = retransmitted_183_tags(peer.as_ref(), TokioDuration::from_secs(40)).await;
+    assert!(after_a.is_empty(), "no 183 after both PRACKs: {after_a:?}");
     txns.shutdown();
 }
 

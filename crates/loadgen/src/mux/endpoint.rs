@@ -1,7 +1,7 @@
 //! The per-call face of the mux: [`MuxNetwork`] (a per-call
 //! [`SignalingNetwork`] over the shared core, built from a call's
-//! [`CallRouting`](super::CallRouting)) and [`MuxEndpoint`] (one leg's
-//! endpoint: inbox + shared send socket).
+//! [`CallRouting`](super::CallRouting)) and the [`MuxEndpoint`] of each leg
+//! it binds.
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -12,26 +12,23 @@ use std::time::Duration;
 use async_trait::async_trait;
 use scenario_harness::claim::ClaimRule;
 use scenario_harness::legpick::LegPicker;
-use sip_message::preparse::is_invite_request_buffer;
 use sip_net::queue::PacketQueue;
 use sip_net::{
-    BindError, BindErrorReason, BindUdpOpts, SendError, SendTap, SignalingNetwork, UdpEndpoint,
-    UdpEndpointCounters, UdpPacket, UndeliveredPacket,
+    BindError, BindErrorReason, BindUdpOpts, SignalingNetwork, UdpEndpoint, UndeliveredPacket,
 };
 use tokio::time::Instant;
 
-use super::datagram::Datagram;
 use super::late_answer::SentAnswers;
-use super::late_final::SentInvites;
-use super::loss::{DropDir, DropModel, TargetedDrop};
+use super::loss::{DropModel, TargetedDrop};
 use super::retransmit::CallTxns;
 use super::routing::BindDecl;
 use super::rtt::RttSink;
 use super::tally::CallTally;
 use super::taps::{Taps, WireTap};
-use super::{
-    CallGate, CallSlot, Delivery, Key, MuxCore, MuxSocket, ReceiverEntry, Role, RELEASE_HOLD,
-};
+use super::{CallGate, CallSlot, Key, MuxCore, ReceiverEntry, Role};
+use leg::MuxEndpoint;
+
+mod leg;
 
 /// Per-call `SignalingNetwork` over the shared [`MuxCore`].
 pub struct MuxNetwork {
@@ -315,186 +312,6 @@ impl SignalingNetwork for MuxNetwork {
     async fn await_in_flight(&self, _timeout: Duration) {}
 }
 
-/// One call leg's endpoint: an inbox fed by the shared dispatcher + the shared
-/// send socket. Deregisters on `Drop`.
-struct MuxEndpoint {
-    local: SocketAddr,
-    role: Role,
-    /// The From key a caller's initial INVITE must yield (from-user
-    /// correlation only): the call's key, registered by its callee legs.
-    caller_key: Option<String>,
-    mux: Arc<MuxSocket>,
-    queue: Arc<PacketQueue>,
-    keyset: Arc<Mutex<Vec<Key>>>,
-    /// The call's caller state; a caller opens it with its first INVITE.
-    gate: Arc<CallGate>,
-    /// This caller endpoint has sent its first INVITE.
-    invite_sent: AtomicBool,
-    queue_max: usize,
-    /// Simulated per-call packet loss (disabled by default), shared with this
-    /// call's [`CallTxns`] so retransmits are lossy too. Outbound loss is applied
-    /// here in `send_to`; inbound loss is applied in the demux route path (above
-    /// the retransmit engine, so a lost inbound datagram is truly gone and the
-    /// peer's retransmit re-delivers it fresh).
-    drop: Arc<DropModel>,
-    /// Per-call SIP retransmit engine (present only when `--auto-retransmit` is on
-    /// for this call). Records outbound requests/answers and drives their timers.
-    txns: Option<Arc<CallTxns>>,
-    /// This endpoint's taps (present iff the call has an [`RttSink`] or a
-    /// [`WireTap`]), shared with the inbound `route` path.
-    taps: Option<Arc<Taps>>,
-    /// A caller's INVITEs still open to a non-2xx final; handed to the
-    /// registry on `Drop` so a late final is still ACKed.
-    invites: Option<Arc<SentInvites>>,
-    /// The finals this endpoint's agent sent; handed to the registry on
-    /// `Drop` so a retransmitted request still draws its answer.
-    answers: Arc<SentAnswers>,
-}
-
-impl MuxEndpoint {
-    /// A caller registers the Call-ID of each dialog it opens, up to and
-    /// including its first INVITE, so responses and in-dialog requests demux
-    /// back to it. Under from-user correlation that first INVITE must carry
-    /// the call's key as its From user: a mismatch would return legs to
-    /// another call (or none), so it is refused and counted, never sent.
-    /// This is local bookkeeping, done even when the datagram is then
-    /// dropped on the wire (a UAC that loses its INVITE still owns the
-    /// dialog).
-    fn register_dialog(&self, d: &Datagram<'_>) -> Result<(), SendError> {
-        if self.role != Role::Caller || self.invite_sent.load(Ordering::Relaxed) {
-            return Ok(());
-        }
-        let invite = is_invite_request_buffer(d.raw());
-        if invite {
-            if let Some(key) = &self.caller_key {
-                let from = self.mux.correlation.token(d.raw());
-                if from.as_deref() != Some(key.as_str()) {
-                    self.mux.stats.caller_key_mismatch.fetch_add(1, Ordering::Relaxed);
-                    return Err(SendError::stated(format!(
-                        "caller INVITE From key {from:?} is not the call key {key:?}"
-                    )));
-                }
-            }
-        }
-        if let Some(cid) = d.id().call_id {
-            // Lock order: registry, then keyset (as the demux and `Drop`).
-            let mut g = self.mux.reg.lock().unwrap();
-            let mut keys = self.keyset.lock().unwrap();
-            if !keys.iter().any(|k| matches!(k, Key::CallId(c) if **c == *cid)) {
-                let cid: Arc<str> = cid.into();
-                g.by_call_id.insert(
-                    cid.clone(),
-                    Delivery {
-                        caller: true,
-                        queue: self.queue.clone(),
-                        drop: self.drop.clone(),
-                        txns: self.txns.clone(),
-                        taps: self.taps.clone(),
-                        invites: self.invites.clone(),
-                        answers: self.answers.clone(),
-                    },
-                );
-                keys.push(Key::CallId(cid));
-            }
-        }
-        if invite {
-            self.invite_sent.store(true, Ordering::Relaxed);
-            // Release: the Call-ID registered above is visible to the
-            // dispatcher that Acquire-loads the gate open.
-            self.gate.invite_sent.store(true, Ordering::Release);
-        }
-        Ok(())
-    }
-}
-
-#[async_trait]
-impl UdpEndpoint for MuxEndpoint {
-    async fn send_to(&self, buf: &[u8], dst: SocketAddr) -> Result<(), SendError> {
-        let dropped = {
-            let d = Datagram::sniff(buf);
-            self.register_dialog(&d)?;
-            // Record the outbound message in the retransmit engine BEFORE the
-            // loss check: a dropped request is exactly what the resender must
-            // recover, and the resender re-applies the same loss model on every
-            // retry.
-            if let Some(txns) = &self.txns {
-                txns.on_outbound(&d, dst);
-            }
-            if let Some(invites) = &self.invites {
-                invites.on_outbound(&d, dst);
-            }
-            self.answers.on_outbound(&d, self.taps.as_deref());
-            // A round trip runs from the first transmission attempt, lost or not.
-            if let Some(taps) = &self.taps {
-                taps.on_outbound(&d, Instant::now());
-            }
-            // Simulated loss: report success (the txn believes it sent) but never
-            // put the datagram on the wire — the SUT never sees it, so only
-            // auto-retransmit recovers the call. The targeted OUTBOUND drop fires
-            // here too (a deterministic single-shot the engine's Timer-E resend
-            // then heals).
-            self.drop.drops() || self.drop.targeted_hit(d.id(), DropDir::Outbound)
-        };
-        if dropped {
-            self.mux.stats.dropped_out.fetch_add(1, Ordering::Relaxed);
-            return Ok(());
-        }
-        self.mux.endpoint.as_ref().send_to(buf, dst).await
-    }
-
-    async fn recv(&self) -> Option<UdpPacket> {
-        self.queue.take().await
-    }
-    fn try_recv(&self) -> Option<UdpPacket> {
-        self.queue.poll()
-    }
-    fn local_addr(&self) -> SocketAddr {
-        self.local
-    }
-    fn queue_depth(&self) -> usize {
-        self.queue.depth()
-    }
-    fn queue_max(&self) -> usize {
-        self.queue_max
-    }
-    fn counters(&self) -> UdpEndpointCounters {
-        UdpEndpointCounters::default()
-    }
-
-    fn install_recv_tap(&self, tap: sip_net::RecvTap) -> bool {
-        self.queue.install_tap(tap);
-        true
-    }
-
-    fn install_send_tap(&self, tap: SendTap) -> bool {
-        // Re-emissions come from the per-call retransmit engine; with no engine
-        // (`--auto-retransmit` off) there is nothing to tap. The engine handle is
-        // shared with the inbound `route` path, so one install covers both the
-        // proactive (Timer A/E/G) and reactive (re-ACK / re-answer) resends.
-        match &self.txns {
-            Some(txns) => {
-                txns.set_sendtap(tap);
-                true
-            }
-            None => false,
-        }
-    }
-}
-
-impl Drop for MuxEndpoint {
-    fn drop(&mut self) {
-        // Lock order: registry, then keyset (as the demux, which promotes a
-        // leg's Call-ID into its keyset under the registry lock).
-        let mut g = self.mux.reg.lock().unwrap();
-        let keys: Vec<Key> = self.keyset.lock().unwrap().drain(..).collect();
-        let held = |c: &str| (self.invites.as_ref().and_then(|i| i.take(c)), self.answers.take(c));
-        g.release_keys(keys, held, Instant::now() + RELEASE_HOLD, &self.mux.stats);
-        drop(g);
-        self.queue.close();
-        // Stop this call's resender tasks now (call ended) rather than letting them
-        // run to their transaction timeout — bounded task lifetime under load.
-        if let Some(txns) = &self.txns {
-            txns.shutdown();
-        }
-    }
-}
+#[cfg(test)]
+#[path = "endpoint_tests.rs"]
+mod tests;
