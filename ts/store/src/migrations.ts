@@ -1053,6 +1053,23 @@ const dirtyRunsCurrent = Effect.suspend(() => viewsOf(CELL_COLUMNS))
 export const DIRTY_RUNS_CURRENT = "21_dirty_runs_current"
 
 /**
+ * Every foreign key's referencing columns lead an index: a parent's delete
+ * finds its children by index, where a cascade per parent row would scan the
+ * child table once per row.
+ */
+const foreignKeyIndexes = Effect.gen(function*() {
+  const sql = yield* SqlClient
+  yield* sql`CREATE INDEX cut_refusal_calls_refusal_idx ON cut_refusal_calls (prep_id, capture, case_id)`
+  yield* sql`CREATE INDEX capture_cuts_flows_idx ON capture_cuts (flows_hash)`
+  yield* sql`CREATE INDEX jobs_sweep_idx ON jobs (sweep_id)`
+  yield* sql`CREATE INDEX jobs_request_idx ON jobs (request_id)`
+  yield* sql`CREATE INDEX jobs_restart_of_idx ON jobs (restart_of)`
+})
+
+/** The key of the migration that indexes every foreign key's referencing columns. */
+export const FOREIGN_KEY_INDEXES = "22_foreign_key_indexes"
+
+/**
  * The migration record, static so `tsx` and a bundler both resolve it: the
  * filesystem loader would make the package's own layout a runtime dependency.
  */
@@ -1077,7 +1094,8 @@ export const record: Record<string, Effect.Effect<void, unknown, SqlClient>> = {
   [JOB_HOOKS_PATH_DROPPED]: jobHooksPathDropped,
   [CAMPAIGN_RUNS]: campaignRuns,
   [EVERY_BRANCH]: everyBranch,
-  [DIRTY_RUNS_CURRENT]: dirtyRunsCurrent
+  [DIRTY_RUNS_CURRENT]: dirtyRunsCurrent,
+  [FOREIGN_KEY_INDEXES]: foreignKeyIndexes
 }
 
 export const loader: Migrator.Loader = Migrator.fromRecord(record)
