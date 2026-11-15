@@ -17,7 +17,7 @@ use super::originate::{
 use super::pacing::Dwell;
 use super::runner::ActorState;
 use super::script::{consume_final_fact, drive_respond, expect_request, expect_response};
-use super::state::Observation;
+use super::state::{LegPhase, Observation};
 use crate::StepError;
 
 /// Drive one scripted goal step.
@@ -193,6 +193,12 @@ pub(super) async fn drive_goal(st: &mut ActorState<'_>, step: GoalStep) -> Resul
         }
         GoalStep::Bye => {
             let now = Instant::now();
+            // The peer's BYE ended the dialog first (RFC 3261 §15.1.2): no hang-up is left.
+            if st.dialogs.confirmed.is_some()
+                && st.obs.with_snapshot(|s| s.leg(st.role).phase() == LegPhase::Terminated)
+            {
+                return Ok(());
+            }
             // This leg is hanging up: any HELD ACK goes out first (§15 — the
             // renegotiation completes before the dialog ends), then discharge
             // any in-dialog ack it still awaits (a re-INVITE/realign it
