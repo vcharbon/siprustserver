@@ -235,6 +235,24 @@ fn an_ending_dialog_answers_in_its_own_dialog_and_judges_the_order_first() {
     assert_eq!(request_verdict(&call, "a", &caller_request(Method::Info, 4)), Verdict::OutOfOrder);
 }
 
+/// A PRACK on a retired dialog reaches its rule on the caller face, where a
+/// sibling fork's answer left her provisionals owed (RFC 3262 §3), and draws
+/// 481 on a dialled leg, whose losing forks share this stack's tag and were
+/// shown nothing.
+#[test]
+fn a_prack_on_a_retired_dialog_passes_on_the_caller_face_only() {
+    let mut call = call_with_caller_dialog(true);
+    call.a_leg.dialogs.by_tags_mut("ours", CALLER_TAG).expect("the dialog").state =
+        DialogState::Retired;
+    let mut leg = call::testkit::dialled_leg("b-1", "ours");
+    leg.dialogs.insert(dialog(DialogState::Retired));
+    call::helpers::add_originated_b_leg(&mut call, leg, 0);
+
+    let prack = caller_request(Method::Prack, 2);
+    assert!(matches!(request_verdict(&call, "a", &prack), Verdict::Pass(_)), "caller face");
+    assert_eq!(request_verdict(&call, "b-1", &prack), Verdict::NoDialog, "a losing callee fork");
+}
+
 /// A leg the record lacks — another owner dialled it — holds no dialog here:
 /// its BYE draws a 481 and its ACK is dropped (RFC 3261 §12.2.2).
 #[test]

@@ -82,6 +82,8 @@ mod resolve_tests;
 mod response_facts_tests;
 mod responses;
 mod restore_hygiene;
+#[cfg(test)]
+mod retired_prack_turn_tests;
 mod route_payload;
 mod stand_down;
 mod store_fault_gate;

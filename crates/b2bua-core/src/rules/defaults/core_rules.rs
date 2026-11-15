@@ -949,8 +949,8 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
         }),
         // A PRACK is relayed, answered 200 or refused 481 as what it names
         // decides (`call::helpers::prack_disposition`, RFC 3262 §3): this
-        // stack is the UAS of the face the provisional was shown on. One
-        // carrying no readable `RAck` is refused 400 (RFC 3261 §21.4.1).
+        // stack is the UAS of the face it was shown on, never relaying from a
+        // retired one. No readable `RAck`: 400 (RFC 3261 §21.4.1).
         rule("relay-prack", &[], Match::request().method("PRACK"), |ctx| {
             let respond = |status: u16, reason: &str| {
                 ok(vec![RuleAction::Respond {
@@ -965,10 +965,10 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
             };
             let tag = ctx.dialog().map_or("", |d| d.our_tag.as_str());
             match ctx.call.prack_disposition(tag, tokens, ctx.discharged) {
-                PrackDisposition::Relay => {
+                PrackDisposition::Relay if !ctx.dialog().is_some_and(|d| d.is_retired()) => {
                     ok(vec![RuleAction::RelayToPeer { transform: no_transform() }])
                 }
-                PrackDisposition::Answer200 => respond(200, "OK"),
+                PrackDisposition::Relay | PrackDisposition::Answer200 => respond(200, "OK"),
                 PrackDisposition::Refuse481 => respond(481, "Call/Transaction Does Not Exist"),
             }
         }),

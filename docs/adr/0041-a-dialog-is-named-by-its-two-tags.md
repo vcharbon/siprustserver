@@ -54,7 +54,7 @@ of). A positional read picks a wrong dialog as soon as a leg holds two.
    | `Ending` | BYE, PRACK pass; INFO, MESSAGE, NOTIFY, OPTIONS 200 here; others 487 (§21.4.25) |
    | `Ended(Rejected)` | PRACK passes (RFC 3262 §3); others 481 |
    | `Ended(PeerBye \| OurBye)` | 481, a BYE included (§15.1.2) |
-   | `Retired` | PRACK passes (RFC 3262 §3); others 481, or as `Ending` while its release BYE is in flight |
+   | `Retired` | PRACK passes on the caller face (RFC 3262 §3); others 481, or as `Ending` while its release BYE is in flight |
 
    A dialog exists until the BYE or CANCEL ending it completes (§15.1.2), so
    requests crossing it are answered in it: a 200 the gate sends goes no

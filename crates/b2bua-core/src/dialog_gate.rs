@@ -14,7 +14,7 @@
 //! | `Ending` (this side's BYE or CANCEL in flight) | see below |
 //! | `Ended(Rejected)` | PRACK passes (RFC 3262 §3); others 481 |
 //! | `Ended` by a BYE | 481, a BYE included (§15.1.2) |
-//! | `Retired` | PRACK passes (§3); others 481, or as `Ending` while its release BYE is in flight |
+//! | `Retired` | PRACK passes on the caller face (§3); others 481, or as `Ending` while its release BYE is in flight |
 //!
 //! A dialog this side is ending still exists until its BYE or its INVITE
 //! takes a final (§15.1.2): what it makes of a request is the method table's
@@ -131,6 +131,9 @@ pub fn request_verdict(call: &Call, leg_id: &str, req: &SipRequest) -> Verdict {
         .of_request(Some(to), req.from().tag())
         .filter(|d| dialled || d.shown || d.was_established());
     let taken: fn(Resolved) -> Verdict = match admission(dialog, method) {
+        Admission::Pass if dialled && names_losing_fork(dialog, method) => {
+            return Verdict::NoDialog
+        }
         Admission::Pass => Verdict::Pass,
         Admission::Absorb => Verdict::Absorbed,
         Admission::Terminate => Verdict::Terminated,
@@ -149,6 +152,13 @@ pub fn request_verdict(call: &Call, leg_id: &str, req: &SipRequest) -> Verdict {
         return Verdict::OutOfOrder;
     }
     taken(Resolved { dialog: Some(dialog.id()), record: None })
+}
+
+/// Whether `method` is a PRACK on a retired, unreleased dialog of a leg this
+/// stack dialled: a losing fork, shown no provisional of this stack's, whose
+/// tag it shares with its siblings, so the PRACK names nothing (481).
+fn names_losing_fork(dialog: Option<&Dialog>, method: &Method) -> bool {
+    *method == Method::Prack && dialog.is_some_and(|d| d.is_retired() && !d.release_in_flight())
 }
 
 /// Note the request the gate passed or answered in order on the dialog it

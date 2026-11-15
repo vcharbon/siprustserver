@@ -394,7 +394,8 @@ pub(super) fn open_early_a_dialog(call: &mut Call, tag: &str) {
 /// answer the caller was never sent — retires with the relays still open in
 /// it, so a
 /// request the caller sends on an early dialog the answer abandoned matches no
-/// live dialog and draws `481` (RFC 3261 §12.2.2), while the finals of those
+/// live dialog and draws `481` (RFC 3261 §12.2.2), a PRACK of a provisional
+/// shown there excepted (RFC 3262 §3), while the finals of those
 /// relays still reach her (§8.1.3.3). The answered dialog's session state
 /// becomes the leg's.
 pub(super) fn adopt_a_tag(call: &mut Call, tag: &str) {
