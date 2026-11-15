@@ -325,8 +325,7 @@ fn paired_sip_entries(
                 sent_ms: s.at_ms,
                 received_ms,
                 // Unmatched + recorded destination ⇒ genuinely lost on the fabric;
-                // unmatched + external destination ⇒ left the recording's horizon,
-                // unless the sender's loss model dropped it.
+                // unmatched + external destination ⇒ left the recording's horizon.
                 delivered: received_ms.is_some() || !(lost_on_send || recorded_binds.contains(to)),
                 recv_note,
                 reemit: None,

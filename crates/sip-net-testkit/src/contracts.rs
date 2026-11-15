@@ -43,101 +43,16 @@ use layer_harness::{
 
 use crate::net::{SignalingNetwork, UdpEndpoint};
 use crate::types::{
-    all_ua_roles, BindError, BindSummary, BindUdpOpts, RecvDisposition, SendError, SendNote,
-    UaRole, UdpEndpointCounters, UdpPacket, UndeliveredPacket,
+    all_ua_roles, BindError, BindUdpOpts, RecvDisposition, SendError, UaRole, UdpEndpointCounters,
+    UdpPacket, UndeliveredPacket,
 };
 
 /// The `layer-harness` channel key for this layer. The `RunContext` uses the
 /// same string to decide whether a `unit-test-of-layer` targets us.
 pub const SIGNALING_TAG: &str = "sip-net/SignalingNetwork";
 
-// ---------------------------------------------------------------------------
-// Typed event union
-// ---------------------------------------------------------------------------
-
-/// One observation on the `SignalingNetwork` typed channel. Every variant
-/// carries the lane-identifying `bind_key` so per-peer rules can slice on a
-/// single peer.
-///
-/// `RecvItem` is the ARRIVAL fact, recorded at delivery into the endpoint's
-/// inbox (via the [`crate::types::RecvTap`] the decorator installs at bind);
-/// `RecvConsumed` is the CONSUMPTION fact, recorded when the endpoint's
-/// `recv`/`try_recv` returns the packet. A `RecvItem` with no matching
-/// `RecvConsumed` is a message that really crossed the wire but the scenario
-/// body never read — still on the ladder, still seen by
-/// the RFC audit. On an impl with no tappable inbox the decorator falls back to
-/// recording both, adjacently, at recv time.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum SignalingNetworkEvent {
-    BindAcquire {
-        bind_key: LaneKey,
-        summary: BindSummary,
-    },
-    BindRelease {
-        bind_key: LaneKey,
-    },
-    SendCalled {
-        bind_key: LaneKey,
-        to: SocketAddr,
-        msg: Vec<u8>,
-    },
-    SendResult {
-        bind_key: LaneKey,
-        outcome: SendOutcome,
-    },
-    RecvItem {
-        bind_key: LaneKey,
-        packet: UdpPacket,
-        disposition: RecvDisposition,
-        wire: WireStamp,
-    },
-    RecvConsumed {
-        bind_key: LaneKey,
-        packet: UdpPacket,
-    },
-    /// An outbound datagram the endpoint's retransmit engine re-emitted below
-    /// the recording layer (loadgen `--auto-retransmit`). Projection-only — it
-    /// renders on the ladder as a tagged outbound frame but is invisible to the
-    /// RFC audit (a re-emit is a byte-identical retransmission the rules dedup).
-    ReEmit {
-        bind_key: LaneKey,
-        to: SocketAddr,
-        msg: Vec<u8>,
-        kind: crate::types::ReEmitKind,
-    },
-    /// The `SendCalled` of these bytes, from `bind_key` to `to`, that the
-    /// endpoint's loss model then dropped (loadgen `--drop-rate`): it never
-    /// reached its taker. Rules never judge it; the projection renders its
-    /// send lost and the cross pass reads it as loss evidence.
-    SendLost {
-        bind_key: LaneKey,
-        to: SocketAddr,
-        msg: Vec<u8>,
-    },
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SendOutcome {
-    Ok,
-    Err,
-}
-
+pub use crate::event::{SendOutcome, SignalingNetworkEvent};
 pub use crate::wire_stamp::WireStamp;
-
-impl SignalingNetworkEvent {
-    pub fn bind_key(&self) -> &LaneKey {
-        match self {
-            SignalingNetworkEvent::BindAcquire { bind_key, .. }
-            | SignalingNetworkEvent::BindRelease { bind_key }
-            | SignalingNetworkEvent::SendCalled { bind_key, .. }
-            | SignalingNetworkEvent::SendResult { bind_key, .. }
-            | SignalingNetworkEvent::RecvItem { bind_key, .. }
-            | SignalingNetworkEvent::RecvConsumed { bind_key, .. }
-            | SignalingNetworkEvent::ReEmit { bind_key, .. }
-            | SignalingNetworkEvent::SendLost { bind_key, .. } => bind_key,
-        }
-    }
-}
 
 pub use crate::audit_view::{audit_visible_event, cross_audit_event};
 
@@ -412,16 +327,16 @@ impl SignalingNetwork for RecordingSignalingNetwork {
         }));
         // Send-side twin (loadgen mux only): re-emitted recovery frames go on the
         // wire below this decorator, so tap them into the channel as `ReEmit`
-        // events — visible on the ladder, invisible to the audit; a send the
-        // loss model drops below it is tapped as `SendLost`.
+        // events — visible on the ladder, invisible to the audit.
         let sendtap_channel = self.0.channel.clone();
         let sendtap_key = bind_key.clone();
         endpoint.install_send_tap(Arc::new(move |raw: &[u8], to, note| {
-            let (bind_key, msg) = (sendtap_key.clone(), raw.to_vec());
-            sendtap_channel.record(match note {
-                SendNote::ReEmit(kind) => SignalingNetworkEvent::ReEmit { bind_key, to, msg, kind },
-                SendNote::LossModel => SignalingNetworkEvent::SendLost { bind_key, to, msg },
-            });
+            sendtap_channel.record(SignalingNetworkEvent::sent_below(
+                sendtap_key.clone(),
+                to,
+                raw.to_vec(),
+                note,
+            ));
         }));
         Ok(Box::new(RecordedEndpoint {
             inner: endpoint,

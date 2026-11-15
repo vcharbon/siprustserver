@@ -18,6 +18,7 @@
 mod audit_rules;
 mod audit_view;
 pub mod contracts;
+mod event;
 pub mod loss;
 mod paranoid;
 pub mod repeat;

@@ -9,6 +9,7 @@ use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
+use sip_message::sniff::Identity;
 use sip_net::{ReEmitKind, SendNote, SendTap, UdpEndpoint};
 
 use super::datagram::{key_of, Datagram};
@@ -118,6 +119,23 @@ struct TxnInner {
     seen_in: HashSet<u64>,
     /// Call ended: stop tracking and reject new resenders.
     closed: bool,
+}
+
+impl TxnInner {
+    /// Stop the resender of the reliable 1xx a PRACK acknowledges: the one of
+    /// the PRACK's early dialog whose RSeq and CSeq its RAck names (RFC 3262
+    /// §7.2). Idempotent, so a retransmitted PRACK runs it before it is
+    /// absorbed.
+    fn stop_acknowledged_provisional(&mut self, prack: &Identity<'_>) {
+        let (Some(cid), Some(rseq), Some(cseq)) = (prack.call_id, prack.rack_rseq, prack.rack_cseq)
+        else {
+            return;
+        };
+        let key = provisional_key(cid, prack.to_tag.unwrap_or_default(), cseq, rseq);
+        if let Some(ctl) = self.reliable_1xx.remove(&key) {
+            ctl.stop();
+        }
+    }
 }
 
 impl CallTxns {
@@ -344,15 +362,7 @@ impl CallTxns {
             return g.seen_in.insert(key_of((branch, "q", method))); // false: duplicate ACK
         }
         if method == "PRACK" {
-            // The PRACK acknowledges our reliable 1xx of its early dialog (RAck
-            // = its RSeq and CSeq, RFC 3262 §7.2) → stop that proactive
-            // resender. Idempotent, so it runs before the duplicate check below.
-            if let (Some(cid), Some(rseq), Some(cseq)) = (id.call_id, id.rack_rseq, id.rack_cseq) {
-                let key = provisional_key(cid, id.to_tag.unwrap_or_default(), cseq, rseq);
-                if let Some(ctl) = g.reliable_1xx.remove(&key) {
-                    ctl.stop();
-                }
-            }
+            g.stop_acknowledged_provisional(id);
         }
         if !g.seen_in.insert(key_of((branch, "q", method))) {
             // The peer retransmitted this request → our response was lost; re-send it.
