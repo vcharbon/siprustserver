@@ -137,7 +137,7 @@ const isAckExpect = (step: Flow.Step): boolean =>
  * final, so a re-INVITE's ACK can never stand in for the one the transaction
  * before it is owed.
  */
-const documentShape = (pivot: Pivot.PivotV3): CaseContext["document"] => {
+export const documentShape = (pivot: Pivot.PivotV3): CaseContext["document"] => {
   const steps = Pivot.pivotSteps(pivot)
   const unackedFinals: Array<UnackedFinal> = []
   for (const [i, step] of steps.entries()) {
