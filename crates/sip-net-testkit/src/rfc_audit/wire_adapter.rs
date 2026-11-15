@@ -104,8 +104,9 @@ enum Vantage {
     Emitter,
     /// As [`Emitter`](Self::Emitter), for a verdict that rests on a message
     /// the emitter never sent: the taker's audit view holds none the loss model
-    /// dropped, so an emitter that is no recorded bind is not judged at a taker
-    /// that recorded such a drop from it on the call.
+    /// dropped, and the emitter never took what the taker's loss model dropped
+    /// on send, so an emitter that is no recorded bind is not judged at a taker
+    /// that recorded such a drop, either way, between them on the call.
     EmitterUnlessLost,
     /// The emitter's own lane and no other: a verdict that orders what the
     /// emitter sent after what it took. A taker's lane times its own sends at
@@ -306,9 +307,9 @@ impl Live {
     /// The row's findings over `pass`, with the binds of `scoped_out` held as
     /// recorded parties: a consumer took their traffic out of the events, so
     /// what they sent is never judged at the lane that took it. The rules
-    /// judge the audit-visible events; the arrivals the loss model dropped
-    /// only tell [`Vantage::EmitterUnlessLost`] where a sender's traffic is
-    /// incomplete.
+    /// judge the audit-visible events; the datagrams the loss model dropped,
+    /// on arrival or on send, only tell [`Vantage::EmitterUnlessLost`] where a
+    /// lane's traffic with a party is incomplete.
     fn found(&self, pass: &AuditPass<'_>, scoped_out: &HashSet<LaneKey>) -> Vec<PositionedFinding> {
         let body = self.id.rule().body;
         let admits = self.admits;

@@ -115,12 +115,21 @@ impl ReEmitKind {
     }
 }
 
+/// What an endpoint did below the recording decorator with an outbound
+/// datagram — the send-side twin of [`RecvDisposition`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SendNote {
+    /// Put on the wire again by the endpoint's retransmit engine.
+    ReEmit(ReEmitKind),
+    /// Handed to `send_to` and discarded by the simulated packet-loss model
+    /// (loadgen `--drop-rate`): never on the wire.
+    LossModel,
+}
+
 /// Send-time tap installed on an endpoint by the recording decorator (sampled
-/// calls only). Invoked with the raw bytes, destination, and [`ReEmitKind`]
-/// each time the endpoint's retransmit engine puts a re-emitted datagram on the
-/// wire — the outbound twin of [`RecvTap`], so recovery traffic is visible on
-/// the ladder rather than silently hitting the socket below the recording.
-pub type SendTap = Arc<dyn Fn(&[u8], SocketAddr, ReEmitKind) + Send + Sync>;
+/// calls only), the outbound twin of [`RecvTap`]: told of each datagram the
+/// endpoint re-emits or its loss model drops, both below the recording.
+pub type SendTap = Arc<dyn Fn(&[u8], SocketAddr, SendNote) + Send + Sync>;
 
 /// Per-endpoint counters: the live atomics behind an endpoint, plus the
 /// kernel's own drop count for a real socket, read at snapshot time.

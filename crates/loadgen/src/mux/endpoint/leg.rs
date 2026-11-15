@@ -3,12 +3,12 @@
 
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use async_trait::async_trait;
 use sip_message::preparse::is_invite_request_buffer;
 use sip_net::queue::PacketQueue;
-use sip_net::{SendError, SendTap, UdpEndpoint, UdpEndpointCounters, UdpPacket};
+use sip_net::{SendError, SendNote, SendTap, UdpEndpoint, UdpEndpointCounters, UdpPacket};
 use tokio::time::Instant;
 
 use crate::mux::datagram::Datagram;
@@ -54,6 +54,9 @@ pub(super) struct MuxEndpoint {
     /// The finals this endpoint's agent sent; handed to the registry on
     /// `Drop` so a retransmitted request still draws its answer.
     pub(super) answers: Arc<SentAnswers>,
+    /// The recording's send tap (a recorded call only), told of each send
+    /// the loss model drops.
+    pub(super) sendtap: OnceLock<SendTap>,
 }
 
 impl MuxEndpoint {
@@ -142,6 +145,9 @@ impl UdpEndpoint for MuxEndpoint {
         };
         if dropped {
             self.mux.stats.dropped_out.fetch_add(1, Ordering::Relaxed);
+            if let Some(tap) = self.sendtap.get() {
+                tap(buf, dst, SendNote::LossModel);
+            }
             return Ok(());
         }
         self.mux.endpoint.as_ref().send_to(buf, dst).await
@@ -171,18 +177,16 @@ impl UdpEndpoint for MuxEndpoint {
         true
     }
 
+    /// The tap hears this endpoint's sends the loss model drops and, with
+    /// `--auto-retransmit`, the engine's re-emissions: proactive (Timer A/E/G)
+    /// and reactive (re-ACK / re-answer), the engine being shared with the
+    /// inbound `route` path. The first tap installed is kept.
     fn install_send_tap(&self, tap: SendTap) -> bool {
-        // Re-emissions come from the per-call retransmit engine; with no engine
-        // (`--auto-retransmit` off) there is nothing to tap. The engine handle is
-        // shared with the inbound `route` path, so one install covers both the
-        // proactive (Timer A/E/G) and reactive (re-ACK / re-answer) resends.
-        match &self.txns {
-            Some(txns) => {
-                txns.set_sendtap(tap);
-                true
-            }
-            None => false,
+        if let Some(txns) = &self.txns {
+            txns.set_sendtap(tap.clone());
         }
+        let _ = self.sendtap.set(tap);
+        true
     }
 }
 

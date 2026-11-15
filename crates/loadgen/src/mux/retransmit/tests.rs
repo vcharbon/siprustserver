@@ -209,8 +209,10 @@ async fn calltxns_sendtap_records_every_reemission() {
     let (txns, peer, peer_addr) = txn_rig().await;
     let seen = Arc::new(Mutex::new(Vec::<ReEmitKind>::new()));
     let sink = seen.clone();
-    txns.set_sendtap(Arc::new(move |_raw, _dst, kind| {
-        sink.lock().unwrap().push(kind);
+    txns.set_sendtap(Arc::new(move |_raw, _dst, note| {
+        if let SendNote::ReEmit(kind) = note {
+            sink.lock().unwrap().push(kind);
+        }
     }));
 
     // (1) Proactive Timer-E retransmit of an outbound UPDATE, then stop it.

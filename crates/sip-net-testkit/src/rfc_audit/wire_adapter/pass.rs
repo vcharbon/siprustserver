@@ -123,7 +123,8 @@ impl<'e> AuditPass<'e> {
         })
     }
 
-    /// The arrivals the loss model dropped, over every event.
+    /// The datagrams the loss model dropped, on arrival or on send, over
+    /// every event.
     pub(super) fn dropped(&self) -> &Dropped {
         self.dropped.get_or_init(|| {
             built("dropped");

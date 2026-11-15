@@ -49,5 +49,5 @@ pub use sip_message::ip_literal::{ip_host, ip_socket_addr};
 pub use types::{
     all_ua_roles, BindError, BindErrorReason, BindSummary, BindUdpOpts, PreIngressAction,
     PreIngressHook, QueueLoad, ReEmitKind, RecvDisposition, RecvTap, SendError, SendErrorKind,
-    SendTap, SocketBuffers, UaRole, UdpEndpointCounters, UdpPacket, UndeliveredPacket,
+    SendNote, SendTap, SocketBuffers, UaRole, UdpEndpointCounters, UdpPacket, UndeliveredPacket,
 };

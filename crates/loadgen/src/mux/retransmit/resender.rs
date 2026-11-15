@@ -5,7 +5,7 @@ use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 
-use sip_net::{ReEmitKind, SendTap, UdpEndpoint};
+use sip_net::{ReEmitKind, SendNote, SendTap, UdpEndpoint};
 
 use super::{T1, T2, TXN_TIMEOUT};
 use crate::mux::loss::DropModel;
@@ -109,7 +109,7 @@ pub(super) fn spawn_resender(
                 // Record the re-emission (a frame that reached the wire) on the
                 // ladder — a proactive Timer A/E/G retransmit of our own frame.
                 if let Some(tap) = sendtap.get() {
-                    tap(&bytes, dst, ReEmitKind::Retransmit);
+                    tap(&bytes, dst, SendNote::ReEmit(ReEmitKind::Retransmit));
                 }
             }
             interval = if invite {

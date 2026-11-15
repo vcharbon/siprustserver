@@ -24,6 +24,7 @@ pub mod repeat;
 pub mod report;
 pub mod rfc_audit;
 pub mod simulated;
+mod wire_stamp;
 
 // sip-net's modules, imported under the paths this crate's modules read them by.
 use sip_net::{net, pre_ingress, queue, types};

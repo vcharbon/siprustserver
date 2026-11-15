@@ -9,7 +9,7 @@ use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
-use sip_net::{ReEmitKind, SendTap, UdpEndpoint};
+use sip_net::{ReEmitKind, SendNote, SendTap, UdpEndpoint};
 
 use super::datagram::{key_of, Datagram};
 use super::loss::DropModel;
@@ -75,6 +75,13 @@ fn cid_key<N>(call_id: &str, n: N) -> (u64, N) {
     (key_of(call_id), n)
 }
 
+/// A reliable provisional's key: its Call-ID, hashed, and its early dialog's
+/// To-tag with the CSeq and RSeq a PRACK's RAck names, hashed. RSeq is
+/// numbered per early dialog (RFC 3262 §3), so each fork's starts afresh.
+fn provisional_key(call_id: &str, to_tag: &str, cseq: u32, rseq: u64) -> (u64, u64) {
+    (key_of(call_id), key_of((to_tag, cseq, rseq)))
+}
+
 /// A proactive INVITE-final resender, and the key of the final it resends in
 /// [`TxnInner::server`].
 type FinalResend = (Arc<ResendCtl>, u64);
@@ -95,8 +102,9 @@ struct TxnInner {
     /// NOT drained at `shutdown` — see the note there.
     invite_non2xx: HashMap<u64, Arc<ResendCtl>>,
     /// Our proactive RELIABLE-1xx resenders (RFC 3262 §3: retransmit until
-    /// PRACKed), keyed by (Call-ID, RSeq) so the inbound PRACK — whose RAck
-    /// response-num carries that RSeq but whose branch is its own — can stop them.
+    /// PRACKed), keyed by [`provisional_key`] so the inbound PRACK — sent on
+    /// that early dialog, its RAck naming that CSeq and RSeq, on a branch of
+    /// its own — stops the one it acknowledges.
     reliable_1xx: HashMap<(u64, u64), Arc<ResendCtl>>,
     /// The last response we sent per server txn ([`txn_key`]), for a reactive
     /// re-answer when the peer retransmits the request. An INVITE's final goes
@@ -139,8 +147,8 @@ impl CallTxns {
     /// re-answer) that run on the inbound (sync, lock-holding) path — re-applies
     /// the loss model. The actual transmission is a detached task (the fabric's
     /// `send_to` is async). `kind` classifies the re-emission for the ladder; a
-    /// frame that passed the loss model is reported to the send tap (a dropped
-    /// one is invisible, like a dropped first transmission).
+    /// frame that passed the loss model is reported to the send tap, a dropped
+    /// one is not.
     fn send(&self, sent: Sent, kind: ReEmitKind) {
         let Sent { bytes, dst, count } = sent;
         if let Some(count) = &count {
@@ -151,7 +159,7 @@ impl CallTxns {
             return;
         }
         if let Some(tap) = self.sendtap.get() {
-            tap(&bytes, dst, kind);
+            tap(&bytes, dst, SendNote::ReEmit(kind));
         }
         let endpoint = self.endpoint.clone();
         tokio::spawn(async move {
@@ -211,8 +219,9 @@ impl CallTxns {
             // anything. (A plain 18x stays best-effort by design.)
             if (101..200).contains(&status) && id.reliable {
                 if let Some(rseq) = id.rseq {
+                    let key = provisional_key(cid, id.to_tag.unwrap_or_default(), cseq, rseq);
                     g.reliable_1xx
-                        .entry(cid_key(cid, rseq))
+                        .entry(key)
                         .or_insert_with(|| self.spawn_response_resender(d, dst));
                 }
             }
@@ -335,11 +344,12 @@ impl CallTxns {
             return g.seen_in.insert(key_of((branch, "q", method))); // false: duplicate ACK
         }
         if method == "PRACK" {
-            // The PRACK acknowledges our reliable 1xx (RAck response-num = its
-            // RSeq, RFC 3262 §7.2) → stop that proactive resender. Idempotent, so
-            // it runs before the duplicate check below.
-            if let (Some(cid), Some(rseq)) = (id.call_id, id.rack_rseq) {
-                if let Some(ctl) = g.reliable_1xx.remove(&cid_key(cid, rseq)) {
+            // The PRACK acknowledges our reliable 1xx of its early dialog (RAck
+            // = its RSeq and CSeq, RFC 3262 §7.2) → stop that proactive
+            // resender. Idempotent, so it runs before the duplicate check below.
+            if let (Some(cid), Some(rseq), Some(cseq)) = (id.call_id, id.rack_rseq, id.rack_cseq) {
+                let key = provisional_key(cid, id.to_tag.unwrap_or_default(), cseq, rseq);
+                if let Some(ctl) = g.reliable_1xx.remove(&key) {
                     ctl.stop();
                 }
             }

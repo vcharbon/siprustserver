@@ -193,6 +193,46 @@ fn a_prack_the_loss_model_dropped_is_not_charged_to_its_unrecorded_sender() {
     assert_eq!((never[0].lane.as_str(), never[0].charged.as_deref()), (BOB, Some(ALICE)));
 }
 
+/// RFC 3262 §4 at the UAS lane, the UAC no recorded bind: a reliable 183 the
+/// UAS's loss model dropped on send never reached the UAC, so the PRACK the
+/// UAC never sent is not charged there; the same 183 delivered is owed it.
+#[test]
+fn a_provisional_dropped_on_send_owes_its_unrecorded_taker_no_prack() {
+    let call = |lost: bool| {
+        let invite = invite_3262("z9hG4bK-i", "Supported: 100rel\r\n", None, false);
+        let r183 = inv_resp_3262(183, "z9hG4bK-i", &reliable_rows(1), false);
+        let mut evs = vec![
+            arrival(BOB, invite, ALICE, 0, crate::types::RecvDisposition::Delivered, None),
+            sent(BOB, r183.clone(), ALICE, 1),
+        ];
+        if lost {
+            evs.push(Stamped {
+                event: SignalingNetworkEvent::SendLost {
+                    bind_key: BOB.to_string(),
+                    to: ALICE.parse().unwrap(),
+                    msg: r183,
+                },
+                seq: 2,
+                at_ms: 2,
+            });
+        }
+        evs.extend([
+            sent(BOB, inv_resp_3262(200, "z9hG4bK-i", "", false), ALICE, 3),
+            recv(BOB, req("ACK", "z9hG4bK-a", 1, Some("bt")), ALICE, 4),
+            recv(BOB, req("BYE", "z9hG4bK-b", 3, Some("bt")), ALICE, 5),
+            sent(BOB, resp(200, 3, "BYE", "bt", "z9hG4bK-b"), ALICE, 6),
+        ]);
+        evaluate_rfc_findings(&evs)
+            .into_iter()
+            .filter(|f| f.rule == RuleId::UnackedReliableProvisional.token())
+            .collect::<Vec<_>>()
+    };
+    assert!(call(true).is_empty(), "{:?}", call(true));
+    let delivered = call(false);
+    assert_eq!(delivered.len(), 1, "{delivered:?}");
+    assert_eq!((delivered[0].lane.as_str(), delivered[0].charged.as_deref()), (BOB, Some(ALICE)));
+}
+
 /// RFC 3262 §4 live: a reliable 180 the SUT takes after its own CANCEL,
 /// the 487 two seconds later, is owed its PRACK — the CANCEL ends nothing.
 #[test]
