@@ -165,17 +165,13 @@ pub struct ObligationLedger {
     /// Every obligation ever closed (grow-only). An obligation is satisfied iff
     /// its key is in BOTH `opened` and `closed`.
     closed: HashSet<ObligationKey>,
-    /// Per-dialog-end CSeq streams, keyed by `(Call-ID, observing-leg)`. A SIP
-    /// dialog has TWO independent CSeq spaces — each end maintains and increments
-    /// its own local sequence (RFC 3261 §12.2.1.1) — that share one Call-ID.
-    /// Keying by Call-ID alone would fold both ends' sequences into a single
-    /// stream; two interleaved monotone sequences are not one contiguous run, so
-    /// [`is_contiguous`](InDialogCseq::is_contiguous) would report a phantom gap
-    /// (or mask a real one). The `leg` here is the OBSERVING leg, so each stream
-    /// holds exactly the one remote space that observer sees — all of that
-    /// sender's methods (BYE + keepalive-OPTIONS + NOTIFY + …) still land in one
-    /// stream, preserving the §12.2.1.1 completeness detector.
-    dialogs: HashMap<(String, &'static str), InDialogCseq>,
+    /// One CSeq stream per remote CSeq space a leg observes ([`CseqStreamKey`]):
+    /// each dialog end, and each forked dialog on one Call-ID, numbers its
+    /// requests independently (RFC 3261 §12.2.1.1, §12.1.2), and two
+    /// interleaved sequences in one stream would report a phantom gap or mask
+    /// a real one. All of one sender's methods (BYE, OPTIONS, NOTIFY, …) land
+    /// in its one stream, the §12.2.1.1 completeness detector.
+    dialogs: HashMap<CseqStreamKey, InDialogCseq>,
 }
 
 impl ObligationLedger {
@@ -234,11 +230,7 @@ impl ObligationLedger {
     /// NOTIFY, OPTIONS, re-INVITE, …). Creates the stream if unseen;
     /// idempotent (the stream is a grow-only set).
     pub fn record_in_dialog(&mut self, key: CseqStreamKey, cseq: u32) {
-        let leg = key.leg;
-        self.dialogs
-            .entry((key.call_id, leg))
-            .or_insert_with(|| InDialogCseq::new(leg))
-            .record(cseq);
+        self.dialogs.entry(key).or_default().record(cseq);
     }
 
     /// The verdict predicate: every opened obligation is closed AND every dialog
@@ -264,9 +256,16 @@ impl ObligationLedger {
                 ));
             }
         }
-        for stream in self.dialogs.values() {
-            for hole in stream.holes() {
-                out.push(format!("{}:in-dialog cseq={hole} (gap — never observed)", stream.leg()));
+        for (key, stream) in &self.dialogs {
+            let holes = stream.holes();
+            for hole in holes.listed {
+                out.push(format!("{}:in-dialog cseq={hole} (gap — never observed)", key.leg));
+            }
+            if holes.unlisted > 0 {
+                out.push(format!(
+                    "{}:in-dialog {} more cseq gaps (never observed)",
+                    key.leg, holes.unlisted
+                ));
             }
         }
         out.sort();
@@ -301,6 +300,21 @@ mod tests {
         }
         assert!(led.is_closed(), "each fork's CSeq space is contiguous on its own");
         assert_eq!(led.describe_open().len(), 0, "no gap is reported across forks");
+    }
+
+    /// Forks numbering from 1 and from a 10-digit base (§8.1.1.5) on one
+    /// Call-ID settle in bounded time and memory, nothing to report.
+    #[test]
+    fn forks_with_a_ten_digit_cseq_base_settle() {
+        let mut led = ObligationLedger::default();
+        for cseq in [1, 2, 3] {
+            led.record_in_dialog(stream("call-fork", "alice", "fork-a"), cseq);
+        }
+        for cseq in [1_684_995_485, 1_684_995_486] {
+            led.record_in_dialog(stream("call-fork", "alice", "fork-b"), cseq);
+        }
+        assert!(led.is_closed());
+        assert_eq!(led.describe_open(), Vec::<String>::new());
     }
 
     /// A request lost on one fork is a hole in that fork's stream: a sibling
