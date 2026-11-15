@@ -12,8 +12,8 @@
  */
 import { plural } from "../plural.ts"
 import type { JSX, ReactNode } from "react"
-import { useState } from "react"
-import { api, type JobStarted, type LanesView, type RequestPreview, type RequestSelection, useAsync } from "../api.ts"
+import { useEffect, useState } from "react"
+import { api, type JobStarted, type LanesView, type RequestKnobs, type RequestPreview, type RequestSelection, useAsync } from "../api.ts"
 import { createLine, describeSelection, type KnobsInput, laneKnobs, laneNotes, NO_KNOBS, statedKnobs } from "../request-builder.ts"
 import { useCommands } from "../commands.ts"
 import { JobLinks } from "./JobLink.tsx"
@@ -29,6 +29,16 @@ type Outcome =
   | { readonly kind: "refused"; readonly detail: string }
 
 const said = (error: unknown): string => (error instanceof Error ? error.message : String(error))
+
+/** What an empty knob field shows: the one lane picked's defaults, else the generic ones (each lane's own are in the notes). */
+const placeholdersOf = (picked: readonly string[], view: LanesView | undefined, defaults: RequestKnobs): RequestKnobs => {
+  const only = picked.length === 1 ? view?.lanes.find((one) => one.lane === picked[0]) : undefined
+  return only === undefined ? defaults : laneKnobs(NO_KNOBS, only, defaults)
+}
+
+/** A preview or a refusal reads one selection: it goes when the selection changes. */
+const settledFor = (outcome: Outcome): Outcome =>
+  outcome.kind === "previewed" || outcome.kind === "refused" ? { kind: "idle" } : outcome
 
 export const ReplayLauncher = (
   { selection, lane, lanes: known, recut: initialRecut = "none", ticked, children }: {
@@ -57,9 +67,9 @@ export const ReplayLauncher = (
   const lanesView: LanesView | undefined = presets.state === "ok" ? presets.value : undefined
   const laneNames = lanesView === undefined ? known : lanesView.lanes.map((one) => one.lane)
   const defaults = lanesView?.knobs ?? { concurrency: 8, batchSize: 1000, memoryMax: "4G", startsPerSecond: 0, cleanup: true }
-  // Empty fields show the picked lane's defaults; with several lanes, the generic defaults (each lane's own are in the notes).
-  const only = picked.length === 1 ? lanesView?.lanes.find((one) => one.lane === picked[0]) : undefined
-  const placeholders = only === undefined ? defaults : laneKnobs(NO_KNOBS, only, defaults)
+  const placeholders = placeholdersOf(picked, lanesView, defaults)
+  const selectionKey = typeof selection === "string" ? selection : JSON.stringify(selection)
+  useEffect(() => setOutcome(settledFor), [selectionKey])
   const previewed = outcome.kind === "previewed" ? outcome.preview : undefined
 
   const body = () => (typeof selection === "string" ? undefined : { lanes: picked, selection })

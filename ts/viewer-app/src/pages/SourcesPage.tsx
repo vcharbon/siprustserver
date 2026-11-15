@@ -8,7 +8,8 @@
  * Three verbs live here: ADD BY PATH (§3 S1) — paths under the configured
  * roots, a set or one capture each, cut or not — which starts an ingest job;
  * REPLAY, the ticked captures whole (every row shown where none is ticked)
- * on the lanes picked, re-cut first where stale; and RETIRE (§3 S4), which
+ * on the lanes picked, re-cut first where stale, those with no cut of cases
+ * left out and named; and RETIRE (§3 S4), which
  * reads the capture's plan, confirms once on the counts, and starts a retire
  * job. Each links the jobs it started.
  */
@@ -184,8 +185,8 @@ const RetireButton = ({ capture, onStarted }: { readonly capture: string; readon
 const Table = ({ page, ticked, onTick, onTickAll, onStarted }: {
   readonly page: Page
   /** The captures ticked for a replay, by name. */
-  readonly ticked: ReadonlySet<string>
-  readonly onTick: (capture: string) => void
+  readonly ticked: ReadonlyMap<string, SourceRow>
+  readonly onTick: (row: SourceRow) => void
   readonly onTickAll: () => void
   readonly onStarted: () => void
 }): JSX.Element => (
@@ -217,7 +218,7 @@ const Table = ({ page, ticked, onTick, onTickAll, onStarted }: {
       {page.rows.map((row) => (
         <tr key={row.capture}>
           <td className="tick">
-            <input type="checkbox" checked={ticked.has(row.capture)} onChange={() => onTick(row.capture)} />
+            <input type="checkbox" checked={ticked.has(row.capture)} onChange={() => onTick(row)} />
           </td>
           <td className="mono break">
             <Link to={href.triageStudy(row.capture)}>{row.capture}</Link>
@@ -252,7 +253,7 @@ export const SourcesPage = (): JSX.Element => {
   const [limit, setLimit] = useState(() => initial.get("limit") ?? "")
   const [offset, setOffset] = useState(() => Number(initial.get("offset") ?? "0") || 0)
   const [refresh, setRefresh] = useState(0)
-  const [ticked, setTicked] = useState<ReadonlySet<string>>(new Set())
+  const [ticked, setTicked] = useState<ReadonlyMap<string, SourceRow>>(new Map())
   const settled = useSettled(needle, 250)
 
   // The filter IS the URL: this slice of the list is a link like any other view.
@@ -273,13 +274,13 @@ export const SourcesPage = (): JSX.Element => {
     return <p className="page muted">loading…</p>
   }
   const last = Math.min(value.total, value.offset + value.rows.length)
-  const shown = value.rows.map((row) => row.capture)
-  const onTick = (capture: string): void =>
+  const onTick = (row: SourceRow): void =>
     setTicked((held) => {
-      const next = new Set(held)
-      if (!next.delete(capture)) next.add(capture)
+      const next = new Map(held)
+      if (!next.delete(row.capture)) next.set(row.capture, row)
       return next
     })
+  const asked = sourcesSelection(ticked, value.rows)
 
   return (
     <div className="page sources-page">
@@ -340,7 +341,7 @@ export const SourcesPage = (): JSX.Element => {
 
       <div className="queue-tools">
         <ReplayLauncher
-          selection={sourcesSelection(ticked, shown)}
+          selection={asked.selection}
           lane=""
           lanes={[...new Set(value.rows.flatMap((row) => row.standings.map((one) => one.lane)))].sort()}
           recut="stale-only"
@@ -351,10 +352,15 @@ export const SourcesPage = (): JSX.Element => {
             {ticked.size > 0 && (
               <>
                 {" · "}
-                <button type="button" className="copy-ref" onClick={() => setTicked(new Set())}>untick all</button>
+                <button type="button" className="copy-ref" onClick={() => setTicked(new Map())}>untick all</button>
               </>
             )}
           </p>
+          {asked.left.length > 0 && (
+            <p className="muted" title="no cut, a broken cut, or a cut of no case: the add-by-path form cuts">
+              left out, no cut of cases: <span className="mono">{asked.left.join(", ")}</span>
+            </p>
+          )}
         </ReplayLauncher>
         <AddByPath roots={value.roots} />
       </div>
@@ -363,7 +369,7 @@ export const SourcesPage = (): JSX.Element => {
         page={value}
         ticked={ticked}
         onTick={onTick}
-        onTickAll={() => setTicked((held) => tickAllShown(held, shown))}
+        onTickAll={() => setTicked((held) => tickAllShown(held, value.rows))}
         onStarted={onStarted}
       />
     </div>
