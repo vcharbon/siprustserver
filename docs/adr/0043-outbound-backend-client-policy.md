@@ -6,8 +6,8 @@
 in-flight slots, retry rule and env grammar), `crates/http-net/src/resolved_target.rs` and
 `resolver.rs` (name lookup), `crates/http-net/src/settings.rs` and `transport/real_client.rs`
 (the `reqwest` client settings); `crates/b2bua-runner-kit/src/backend_url.rs` (a backend's
-URL in the env); the SIP side is `crates/b2bua-core/src/failure_unavailable.rs`,
-`decision/limiter_failover.rs`, `rules/refer_transfer/machine/authorizing.rs`,
+URL in the env); the SIP side is `crates/b2bua-core/src/failure_unavailable.rs` and
+`rules/refer_transfer/machine/authorizing.rs`, `crates/b2bua/src/decision/limiter_failover.rs`,
 `repl/backend_gate.rs` and `limiter/breaker.rs`;
 `crates/sip-proxy/src/strategies/load_balancer.rs` for the new-dialog fallback.
 

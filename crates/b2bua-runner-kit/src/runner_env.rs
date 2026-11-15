@@ -86,7 +86,9 @@ pub struct RunnerEnv {
     /// `B2BUA_CONCURRENCY` — handler concurrency ceiling (default 8192; a
     /// back-pressure SAFETY limit, not a rate governor).
     pub concurrency: usize,
-    /// `B2BUA_CALL_CAP` — max concurrent calls before drop (default 1_000_000).
+    /// `B2BUA_CALL_CAP` — live per-call queues; past it an event for a call
+    /// with no queue is refused, a new INVITE with a 503 (ADR-0022 X6;
+    /// default 1_000_000).
     pub call_cap: usize,
     /// `B2BUA_NEW_CALL_PERMIT_SHARE_PCT` — share of the handler concurrency
     /// normal initial-INVITE turns may hold, percent (default 50).
@@ -131,7 +133,7 @@ pub struct RunnerEnv {
     /// trip (default 5000; <= 0 is refused at startup — ADR-0022 X1).
     pub call_control_timeout_ms: i64,
     /// `B2BUA_ACK_TIMEOUT_SEC` — un-ACKed 2xx give-up deadline (RFC 3261
-    /// §13.3.1.4, 64·T1 = 32 s; <= 0 tears nothing down — the ladder itself
+    /// §13.3.1.4, 64·T1 = 32 s; <= 0 is refused at startup; the ladder
     /// always runs, ADR-0032 X5).
     pub ack_timeout_sec: i64,
     /// `B2BUA_CPS_BUCKET_SIZE` — CPS bucket rung capacity (default 1000).

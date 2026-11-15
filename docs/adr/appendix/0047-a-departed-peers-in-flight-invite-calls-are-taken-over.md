@@ -35,8 +35,8 @@ Decision part: [ADR-0047](../0047-a-departed-peers-in-flight-invite-calls-are-ta
 `repl/self_endpoint.rs` (leaving the slice), `router/departure.rs` (the sweep),
 `router/quiesced.rs` (the self-release turn), `router/undecided.rs` (the undecided
 call), `router/initial_turn.rs` (the creation write, the decision a node that left
-the slice does not apply), `rules/evidence.rs` and
-`rules/actions/evidence.rs` (the lost round, ADR-0055 §4's evidence rule), `sip-message`'s
+the slice does not apply), `crates/b2bua-core/src/rules/evidence.rs` and
+`crates/b2bua-core/src/rules/actions/evidence.rs` (the lost round, ADR-0055 §4's evidence rule), `sip-message`'s
 `generate_ack_for_non_2xx_in_dialog`, `router/reclaim/bulk.rs` (the reclaim write),
 `repl/puller/apply.rs` and `repl/router_sink.rs` (an applied primary write handed up),
 `router/stand_down.rs` (the stand-down), `store/takeover.rs` (the takeover marks),

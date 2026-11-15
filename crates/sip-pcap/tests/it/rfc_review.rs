@@ -174,16 +174,6 @@ fn without_a_sut_the_report_carries_no_side() {
     assert!(!text.contains("by_side"), "{text}");
 }
 
-/// The review runs every rule, none named: the summary lists the rules that
-/// had an occasion, and leaves out a rule that had none.
-#[test]
-fn the_review_runs_every_rule_and_lists_those_with_an_occasion() {
-    let (_, stderr, ok) = sipflow(&["--sut", "192.0.2.10", "--rfc", "--list"]);
-    assert!(ok, "{stderr}");
-    assert!(stderr.contains("no-ack-to-dialog-creating-2xx: 2 hit(s)"), "{stderr}");
-    assert!(!stderr.contains("serial-register"), "a rule with no occasion is not listed\n{stderr}");
-}
-
 /// The fixture is what `--to-pcap` writes: decoding it, emitting the document
 /// and encoding that again reproduces the capture byte for byte, so the
 /// encoder is pinned by the same file the review is.

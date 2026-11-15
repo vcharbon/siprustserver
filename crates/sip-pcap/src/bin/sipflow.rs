@@ -27,7 +27,7 @@
 //!   sipflow /tmp/sipcap --query update-rejected.json
 //!   sipflow corpus/ --query-json '{"select":{"evidence_kind":"derived_call_id"},
 //!                                  "project":{"mode":"summary","fields":["as_socket"]}}'
-//!   sipflow /tmp/sipcap --call-id 7f3a... --sut 10.0.0.9 --rfc --rfc-rules all
+//!   sipflow /tmp/sipcap --call-id 7f3a... --sut 10.0.0.9 --rfc
 //!   sipflow /tmp/sipcap --sut auto --rfc --rfc-json review.json --rfc-doc review.flows.json
 //!   sipflow --to-pcap capture.anon.flows.json --out capture.anon.pcap
 //!   sipflow --list-rules
@@ -96,7 +96,7 @@ struct Args {
     /// parses them (extraction, `--enrich`, `--reparse`, `--rfc`): a file of
     /// `key = value` lines naming `exemptions` and the `max-header-length`,
     /// `max-uri-length`, `max-header-lines` and `max-datagram` bounds
-    /// (`sip_pcap::reading`). A line that does not read refuses the run.
+    /// (`sip_message::ToolReading`). A line that does not read refuses the run.
     /// Without it, the RFC: no exemption, the parser's default bounds.
     #[arg(long, value_name = "FILE")]
     reading: Option<PathBuf>,

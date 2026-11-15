@@ -224,8 +224,9 @@ pub struct B2buaConfig {
     pub cps_bucket_rate: u32,
     /// **Panic-ELU rung threshold** (`0..1`).
     /// A *backstop* on the worker's OWN EWMA-smoothed Event-Loop Utilization:
-    /// above it, a non-emergency new INVITE that already passed the CPS bucket
-    /// is still 503'd locally, regardless of the LB's AIMD cap. The LB-side AIMD
+    /// above it, a non-emergency new INVITE is 503'd locally, regardless of
+    /// the LB's AIMD cap; the admission ladder judges this rung before the
+    /// CPS bucket. The LB-side AIMD
     /// (`sip_proxy::load_observer`) is the primary control loop; this catches the
     /// cases where the LB is absent, misconfigured, or itself overloaded. Kept
     /// high so it almost never fires in normal operation. Default **0.75**.

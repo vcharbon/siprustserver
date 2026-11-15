@@ -25,7 +25,7 @@ unrelated captures is a valid corpus.
 
 | flag | meaning |
 |---|---|
-| `--reading <file>` | the reading every message is parsed under, wherever sipflow parses (extraction, `--enrich`, `--reparse`, `--rfc`): `key = value` lines naming `exemptions` and the `max-header-length`, `max-uri-length`, `max-header-lines`, `max-datagram` bounds (`sip_pcap::reading`). A line that does not read refuses the run. Without it: no exemption, the parser's default bounds |
+| `--reading <file>` | the reading every message is parsed under, wherever sipflow parses (extraction, `--enrich`, `--reparse`, `--rfc`): `key = value` lines naming `exemptions` and the `max-header-length`, `max-uri-length`, `max-header-lines`, `max-datagram` bounds (`sip_message::ToolReading`). A line that does not read refuses the run. Without it: no exemption, the parser's default bounds |
 | `--json` | the whole flow model as the `sip_pcap::doc::FlowsDoc` document on stdout; selection and layout flags do not apply |
 | `--schema` | the JSON Schema of that document, then exit |
 | `--emit-headers <Name,…>` | headers projected onto every emitted message as `msgs[].headers` entries, matched by header identity (casing and RFC 3261 §7.3.3 compact forms collapse) |

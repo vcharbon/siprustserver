@@ -58,7 +58,7 @@
 //!   B2BUA_CDR_FILE  the file each call's record is appended to, a JSON line each
 //!                   (default none; refused beside B2BUA_CDR_RABBITMQ_URL)
 //!   B2BUA_CONCURRENCY handler concurrency ceiling       (default 8192; safety, not a rate cap)
-//!   B2BUA_CALL_CAP  max concurrent calls before drop    (default 1_000_000)
+//!   B2BUA_CALL_CAP  live per-call queues; past it a new INVITE gets a 503 (default 1_000_000)
 //!   B2BUA_NEW_CALL_PERMIT_SHARE_PCT share of B2BUA_CONCURRENCY normal initial-INVITE turns may hold (default 50; 1..=100; emergency INVITEs draw the whole pool)
 //!   B2BUA_NEW_CALL_QUEUE_HEADROOM_PCT share of B2BUA_CALL_CAP kept back from normal new INVITEs (default 5; 0..=99; emergency INVITEs and in-dialog requests reach the full cap)
 //!   B2BUA_KEEPALIVE_SEC in-dialog OPTIONS keepalive interval (default 300 = 5 min, min 120)
