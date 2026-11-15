@@ -8,11 +8,11 @@
 //! SIGTERM/drain — lives in `b2bua-runner-kit` (shared with downstream runner
 //! binaries per ADR-0016); this binary keeps only its OWN composition choices:
 //!   - route: `ScriptedDecisionEngine::route_all_to_with_limiter(DEST, stress)`
-//!            (this reference worker ships no call-control adapter; routing all
-//!            calls to a fixed UAS mirrors the k8s `worker -> sipp-uas` topology).
-//!            It attaches an always-on `B2BUA_STRESS_LIMITER` entry to every call
-//!            (full-chain stress) and honors an inbound `X-Api-Call` `call_limiter`
-//!            array so a dedicated stream can enforce a real cap.
+//!     (this reference worker ships no call-control adapter; routing all
+//!     calls to a fixed UAS mirrors the k8s `worker -> sipp-uas` topology).
+//!     It attaches an always-on `B2BUA_STRESS_LIMITER` entry to every call
+//!     (full-chain stress) and honors an inbound `X-Api-Call` `call_limiter`
+//!     array so a dedicated stream can enforce a real cap.
 //!   - CDR  : the JSON-lines file `B2BUA_CDR_FILE` names, else the RabbitMQ
 //!     sink when `B2BUA_CDR_RABBITMQ_URL` is set, else the kit's discarding
 //!     `NullCdrWriter` — any of them behind the bounded `BufferedCdrWriter`
