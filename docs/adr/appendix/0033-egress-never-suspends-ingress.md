@@ -93,10 +93,10 @@ it across its decision round trip (`B2BUA_CALL_CONTROL_TIMEOUT_MS`): a bulk
 reclaim defers a call whose lock a turn holds to that call's own queue
 (ADR-0010 X2). The stall threshold defaults to the larger of 10 s and that
 timeout plus 5 s, and boot refuses one not above it by 2 s. A bulk reclaim
-beats the router's pulse per call. Under the `cpu_starve` chaos the 0.3 CPU
+beats the router's pulse per call. Under the `cpu_starve` chaos the 0.5 CPU
 quota is shared by every runnable thread: with N runtime threads busy, a
-turn reads stalled only when its own work needs more than 3/N CPU-seconds,
-and exits the worker only when it needs more than 4.5/N (one SIP event,
+turn reads stalled only when its own work needs more than 5/N CPU-seconds,
+and exits the worker only when it needs more than 7.5/N (one SIP event,
 timer firing or sweep takes milliseconds); a process frozen past the
 threshold wakes on one reading of a turn it then finishes, which exits
 nothing. The pulse cannot see a loop that is waiting yet never scheduled
