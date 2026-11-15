@@ -19,14 +19,16 @@ PCT = {"record_shortfall_pct": 1}
 HEADER = "StartTime;LastResetTime;CurrentTime;CurrentCall;TotalCallCreated;SuccessfulCall(C);FailedCall(C)\n"
 
 
-def stat_rows(d: Path, rows: list[tuple[int, int]]) -> None:
-    """A SIPp stat file for `basic`: one row per (instant ms, cumulative failed calls)."""
+def stat_rows(d: Path, rows: list[tuple[int, int]], firing: str = "") -> None:
+    """A SIPp stat file for `basic` (of one firing when named): one row per
+    (instant ms, cumulative failed calls)."""
     lines = [HEADER]
     for at_ms, failed in rows:
         epoch = f"x\ty\t{at_ms / 1000:.6f}"
         lines.append(f"{epoch};{epoch};{epoch};0;100;{100 - failed};{failed}\n")
-    (d / "streams" / "basic").mkdir(parents=True, exist_ok=True)
-    (d / "streams" / "basic" / "stat.csv").write_text("".join(lines))
+    where = d / "streams" / "basic" / firing
+    where.mkdir(parents=True, exist_ok=True)
+    (where / "stat.csv").write_text("".join(lines))
 
 
 def integrity(v: Json) -> list[tuple[object, object, object]]:
@@ -64,16 +66,47 @@ def test_a_failure_inside_a_window_names_it_and_makes_the_run_invalid(tmp_path: 
     assert v["status"] == "invalid"
 
 
+def test_a_failure_within_a_call_life_of_a_window_belongs_to_it(tmp_path: Path) -> None:
+    """The window of a kill at 80 s closes at 125 s; a `basic` call lives up to
+    96 s. A call failing at 201 s may have started inside the window, so its
+    failure counts there; one failing at 301 s cannot have, and is calm traffic.
+    Spans straddling either edge of the window count inside it."""
+    cases = {
+        "after-close": ([(T0 + 200_000, 0), (T0 + 201_000, 1)], "invalid"),
+        "straddles-close": ([(T0 + 124_000, 0), (T0 + 126_000, 1)], "invalid"),
+        "straddles-open": ([(T0 + 79_000, 0), (T0 + 81_000, 1)], "invalid"),
+        "beyond-reach": ([(T0 + 300_000, 0), (T0 + 301_000, 1)], "pass"),
+    }
+    for name, (rows, status) in cases.items():
+        d = run_dir(tmp_path / name, RECS, calls=100, events=kill(1, T0 + 80_000), profile=PCT, stream={"generator_failures": 1})
+        stat_rows(d, rows)
+        assert compute(d, SCHEMAS)["status"] == status, name
+
+
 def test_a_failure_its_statistics_do_not_place_makes_the_run_invalid(tmp_path: Path) -> None:
-    d = run_dir(tmp_path, RECS, calls=100, events=[], profile=PCT, stream={"generator_failures": 1})
+    d = run_dir(tmp_path / "none", RECS, calls=100, events=[], profile=PCT, stream={"generator_failures": 1})
     v = compute(d, SCHEMAS)
     assert integrity(v) == [("generator_failure", "the generator failed 1 calls without a record; 1 not placed in time", None)]
     assert v["status"] == "invalid"
 
+    d = run_dir(tmp_path / "first", RECS, calls=100, events=[], profile=PCT, stream={"generator_failures": 1})
+    stat_rows(d, [(T0 + 300_000, 1), (T0 + 301_000, 1)])
+    assert compute(d, SCHEMAS)["status"] == "invalid"
+
+
+def test_a_firing_is_placed_from_its_own_statistics(tmp_path: Path) -> None:
+    d = run_dir(tmp_path, RECS, calls=100, events=kill(1, T0 + 80_000), profile=PCT, stream={"generator_failures": 1})
+    stat_rows(d, [(T0 + 90_000, 0), (T0 + 91_000, 1)], firing="001-kill_worker")
+    v = compute(d, SCHEMAS)
+    assert integrity(v) == [
+        ("generator_failure", "the generator failed 1 calls without a record; 1 in window 001-kill_worker", None)
+    ]
+
 
 def test_counters_that_disagree_are_never_tolerated(tmp_path: Path) -> None:
-    d = run_dir(tmp_path, RECS, calls=100, events=[], profile=PCT, stream={"generator_failures": 40})
-    stat_rows(d, [(T0 + 10_000, 0), (T0 + 11_000, 40)])
+    recs = RECS[:90]
+    d = run_dir(tmp_path, recs, calls=100, events=[], profile=PCT, stream={"generator_failures": 1})
+    stat_rows(d, [(T0 + 10_000, 0), (T0 + 11_000, 1)])
     v = compute(d, SCHEMAS)
     assert [(k, t) for k, _, t in integrity(v)] == [("generator_failure", None), ("record_gap", None)]
     assert v["status"] == "invalid"

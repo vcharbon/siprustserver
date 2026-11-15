@@ -57,14 +57,15 @@ class FailureSpan:
 
 
 def failure_spans(rows: list[StatRow]) -> list[FailureSpan]:
-    """Where the cumulative failed-call count grows, row to row; a count
-    already above 0 in the first row is placed at that row's instant."""
+    """Where the cumulative failed-call count grows, row to row. A count
+    already above 0 in the first readable row has no earlier row to bound it,
+    so it is left out: those calls stay not placed."""
     out: list[FailureSpan] = []
-    prev_at, prev_failed = None, 0
+    prev: StatRow | None = None
     for r in rows:
         if r.failed is None:
             continue
-        if r.failed > prev_failed:
-            out.append(FailureSpan(prev_at if prev_at is not None else r.at_ms, r.at_ms, r.failed - prev_failed))
-        prev_at, prev_failed = r.at_ms, r.failed
+        if prev is not None and prev.failed is not None and r.failed > prev.failed:
+            out.append(FailureSpan(prev.at_ms, r.at_ms, r.failed - prev.failed))
+        prev = r
     return out

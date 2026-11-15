@@ -48,8 +48,8 @@ failed call to the incident that caused it and compares the total with a budget.
 
 ## Verdict
 
-The runner computes `invalid`: 56 calls have no record, and their failures fall inside two
-windows (see [Integrity](#integrity)). The other findings are:
+The runner computes `invalid`: 56 calls have no record (a `record_gap`; see
+[Integrity](#integrity)). The other findings are:
 
 - In the four CPU starvation windows, 313 callers got a provisional and then no final. The
   `cpu-overload` budget allows none. 71 emergency callers and 33 spike callers are among
@@ -166,10 +166,12 @@ INVITE CSeq -- aborting call": the ACK it received for a callee re-INVITE did no
 CSeq of that re-INVITE. 27 aborts are in the first CPU starvation and spike window and 29 in
 the second. The calls had started 2 to 3 minutes before.
 
-The run is `invalid` because of these calls. The profile's `record_shortfall_pct` (0.1 %)
-tolerates only failures that fall outside every window. A failure inside a window can be a
-call that the fault broke, and the window's budget cannot judge a call with no record. Whether
-the system under test or the generator causes the mismatch is not yet known.
+The run is `invalid` because of these calls. This run reads them as a `record_gap`: its
+generator counters predate the count of SIPp's failed calls. A run of the current runner reads
+them as a `generator_failure` that names the two windows. The profile's `record_shortfall_pct`
+(0.1 %) tolerates only failures that no window can have touched. A failure inside a window can
+be a call that the fault broke, and the window's budget cannot judge a call with no record.
+Whether the system under test or the generator causes the mismatch is not yet known.
 
 ## How to run it again
 

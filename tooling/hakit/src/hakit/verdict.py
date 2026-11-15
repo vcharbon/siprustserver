@@ -30,7 +30,8 @@ from .model import Budget, Shape, parse_budget, parse_catalog
 from .profile import Profile, parse_profile
 from .recovery import Sample, StreamSamples
 from .report_metrics import kept as kept_report_metrics
-from .generator_stats import failure_spans, read_stat_csv
+from .generator_stats import FailureSpan, failure_spans, read_stat_csv
+from .sipp_driver import worst_call_s as sipp_worst_call_s
 from .reconcile import integrity, place, reconcile, tolerated
 from .schemas import SchemaSet
 from .generator_health import run_stalls
@@ -108,6 +109,25 @@ def _spoiled_cdr(imp: Impact, by_id: dict[str, Json], stalls: list[Stall]) -> St
         if st is not None:
             return st
     return None
+
+
+def _failure_spans(run_dir: Path, stream: str) -> list[FailureSpan]:
+    """The failed-call spans of every firing of `stream`, each from its own
+    statistics file: a load incident's firing restarts its counter."""
+    out: list[FailureSpan] = []
+    for path in sorted((run_dir / "streams" / stream).rglob("stat.csv")):
+        out += failure_spans(read_stat_csv(path))
+    return out
+
+
+def _worst_call_s(profile: Profile, stream: str) -> float:
+    """The longest a call of `stream` can take, by its generator's own bound;
+    the profile's longest for a stream it does not name."""
+    streams = [s for s in profile.streams if s.name == stream] or profile.streams
+    return max(
+        (sipp_worst_call_s(s) if s.driver == "sipp" else loadgen.worst_call_s(s) for s in streams),
+        default=0.0,
+    )
 
 
 def _samples(calls: _Calls, stalls: list[Stall], profile: Profile) -> dict[str, StreamSamples]:
@@ -275,7 +295,7 @@ def _compute(run_dir: Path, schemas: SchemaSet) -> Json:
         )
     spans = [(w.event, w.opened_at_ms, w.closed_at_ms) for w in windows]
     placed = {
-        name: place(failure_spans(read_stat_csv(run_dir / "streams" / name / "stat.csv")), spans)
+        name: place(_failure_spans(run_dir, name), spans, _worst_call_s(profile, name) * 1000)
         for name in (jv.string(s, "stream") for s in streams_doc)
     }
     streams_out, reconciled = reconcile(

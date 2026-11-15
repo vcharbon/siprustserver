@@ -263,7 +263,7 @@
           "at_ms": { "type": "number" },
           "detail": { "type": "string" },
           "tolerated": {
-            "description": "True on a stream's `generator_failure` when its counters agree, the generator's statistics place every failed call outside every window, and the failed calls are at most the profile's `record_shortfall_pct` of its calls: reported, and the run stays valid.",
+            "description": "True on a stream's `generator_failure` when its counters agree, the generator's statistics place every failed call so that no window meets it (from its stream's longest call before the failure, to the failure), and the failed calls are at most the profile's `record_shortfall_pct` of its calls: reported, and the run stays valid.",
             "type": "boolean"
           },
           "call_ids": {

@@ -7,10 +7,11 @@ that did not complete (`records_complete` false), reconciled stream or not. A
 count of calls the generator failed above 0 is `generator_failure`.
 
 A `generator_failure` is `tolerated`, and leaves the run valid, only when the
-counters agree, the generator's statistics place every failed call outside
-every window, and the failed calls are at most the profile's
-`record_shortfall_pct` of the stream's calls. A failure inside a window may be
-a call the system under test broke: it stays a finding naming the window.
+counters agree, the generator's statistics place every failed call where no
+window can have touched it, and the failed calls are at most the profile's
+`record_shortfall_pct` of the stream's calls. A failed call a window may have
+touched can be one the system under test broke: it stays a finding naming
+the window.
 """
 
 from __future__ import annotations
@@ -33,13 +34,14 @@ class Placed:
     windows: tuple[str, ...] = ()
 
 
-def place(spans: Sequence[FailureSpan], windows: Sequence[tuple[str, float, float]]) -> Placed:
-    """The failures of `spans` against the windows (event, opened, closed): a
-    span touching a window puts all its calls in that window."""
+def place(spans: Sequence[FailureSpan], windows: Sequence[tuple[str, float, float]], life_ms: float) -> Placed:
+    """The failures of `spans` against the windows (event, opened, closed). A
+    failed call started at most `life_ms` (its stream's longest call) before
+    SIPp counted it: a window that meets that reach holds all the span's calls."""
     outside = 0
     hit: list[str] = []
     for sp in spans:
-        inside = [e for e, opened, closed in windows if sp.from_ms <= closed and sp.to_ms >= opened]
+        inside = [e for e, opened, closed in windows if sp.from_ms - life_ms <= closed and sp.to_ms >= opened]
         if inside:
             hit += [e for e in inside if e not in hit]
         else:
@@ -83,7 +85,8 @@ def reconcile(
             found.append(integrity("record_gap", f"the generator's record copy did not complete: {why}", stream=name))
         if failed:
             where = (placed or {}).get(name, Placed(0))
-            found.append(_failure(name, failed, where, calls, shortfall_pct, reconciled and complete and not lost))
+            agree = calls is not None and n + not_placed + failed == calls
+            found.append(_failure(name, failed, where, calls, shortfall_pct, reconciled and complete and not lost and agree))
         if calls is None and reconciled:
             found.append(integrity("record_gap", f"the generator's call counter could not be read; {n} records", stream=name))
         elif calls is not None and reconciled and n + not_placed + (failed or 0) != calls:
@@ -111,7 +114,7 @@ def reconcile(
 def _failure(name: str, failed: int, where: Placed, calls: int | None, pct: float, sound: bool) -> Json:
     """The `generator_failure` of a stream, `tolerated` when its calls are all
     placed outside every window and within `pct` percent of `calls`. `sound`:
-    the stream is reconciled and its record copy whole."""
+    the stream is reconciled, its record copy whole and its counters agree."""
     detail = f"the generator failed {failed} calls without a record"
     if where.windows:
         detail += f"; {failed - where.outside} in window {', '.join(where.windows)}"
