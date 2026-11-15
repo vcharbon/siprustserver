@@ -6,9 +6,10 @@ failed call to the incident that caused it and compares the total with a budget.
 
 > **Read this first.** The schedule of this run put the windows closer together than the
 > longest call. A call can then meet two faults in a row. 521 calls were lost that way (see
-> [Double failures](#double-failures)). No budget states a double failure, so these losses are
-> an effect of the test design, not a defect of the system. The `endurance` profile now spaces
-> its windows by the longest call, and `hakit validate` refuses a profile that does not.
+> [Double failures](#double-failures)). Each fault alone stays within the behaviour that
+> [ha.md](ha.md) states; no budget states two faults on one call. These losses come from the
+> test design. The `endurance` profile now spaces its windows by the longest call, and
+> `hakit validate` refuses a profile that does not.
 
 ## The run
 
@@ -41,13 +42,14 @@ failed call to the incident that caused it and compares the total with a budget.
 | Calls placed | 2,934,895 |
 | Calls that ended as the scenario expects | 2,932,295 (99.91 %) |
 | Calls that failed | 2,144: 1,246 refused, 368 with no final, 530 cut. The 400 orphaned calls end by design without a record |
-| Calls with no record | 56 `callee_reinvite` calls that the generator failed (see [Integrity](#integrity)) |
+| Calls with no record | 56 `callee_reinvite` calls that the generator aborted inside two windows (see [Integrity](#integrity)) |
 | Highest count of calls in progress | 17,400 on the two workers; 12,800 on one worker while the other was down |
 | Setup time (INVITE to the first provisional): median, 95th percentile, 99th percentile | 5 ms, 6 ms, 154 ms. Outside the windows: 4 ms, 6 ms, 6 ms |
 
 ## Verdict
 
-The runner computes `fail`. These findings remain:
+The runner computes `invalid`: 56 calls have no record, and their failures fall inside two
+windows (see [Integrity](#integrity)). The other findings are:
 
 - In the four CPU starvation windows, 313 callers got a provisional and then no final. The
   `cpu-overload` budget allows none. 71 emergency callers and 33 spike callers are among
@@ -85,7 +87,7 @@ cut" and "Dialog requests failed" count the calls that the window may have chang
 | Clock shifted (`clock_skew`) | 2 | 37,262 | 0 | 0 | 0 | `dependency-fault` | 0 | 0 s |
 | External plane cut (`cut_external_plane`) | 2 | 37,219 | 0 | 0 | 0 | `proxy-cut` | 0 | 0 s |
 | Load spike (`spike`) | 7 | 199,108 | 0 | 0 | 0 | `spike` | 0 | 0 s |
-| CPU starvation and a spike (`cpu_starve+spike`) | 2 | 57,664 | 1,003 | 0 | 4 | `cpu-overload` | 10 | 0 s |
+| CPU starvation and a spike (`cpu_starve+spike`) | 2 | 57,664 | 1,001 | 0 | 4 | `cpu-overload` | 10 | 0 s |
 | Pod force-deleted (`force_delete`) | 2 | 14,180 | 3 | 527 | 521 | `worker-kill` | 2 | 2 s |
 | Orphaned dialogs (`orphan`) | 2 | 30,813 | 0 | 0 | 0 | `dependency-fault` | 0 | 0 s |
 | In-dialog flood (`abuse`) | 2 | 93,632 | 0 | 0 | 0 | `abuse` | 0 | 0 s |
@@ -158,11 +160,16 @@ came back.
 
 ## Integrity
 
-The generator failed 56 `callee_reinvite` calls and wrote no record for them. SIPp counts
-them as `FailedCall`. Each one started 2 to 3 minutes before a CPU starvation and spike
-window. In the call examined, the callee re-INVITE came after SIPp had ended the call. 56 calls are
-0.04 % of the stream, under the profile's `record_shortfall_pct` of 0.1 %. The verdict marks
-the finding `tolerated`, and the run stays valid.
+The generator aborted 56 `callee_reinvite` calls and wrote no record for them. SIPp counts
+them as `FailedCall`. For each one, SIPp logs "ACK CSeq value does NOT match value of related
+INVITE CSeq -- aborting call": the ACK it received for a callee re-INVITE did not carry the
+CSeq of that re-INVITE. 27 aborts are in the first CPU starvation and spike window and 29 in
+the second. The calls had started 2 to 3 minutes before.
+
+The run is `invalid` because of these calls. The profile's `record_shortfall_pct` (0.1 %)
+tolerates only failures that fall outside every window. A failure inside a window can be a
+call that the fault broke, and the window's budget cannot judge a call with no record. Whether
+the system under test or the generator causes the mismatch is not yet known.
 
 ## How to run it again
 

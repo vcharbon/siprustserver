@@ -97,7 +97,7 @@
       "default": 0
     },
     "record_shortfall_pct": {
-      "description": "The share of a stream's calls, in percent, that its generator may count with no record (failed by the generator, dropped on the way to the disk, or simply missing) and leave the run valid. The verdict keeps such findings with `tolerated`. A shortfall above it, more records than calls, an unread call counter or an incomplete record copy still make the run `invalid`.",
+      "description": "The share of a stream's calls, in percent, that its generator may fail with no record and leave the run valid, when its counters agree and its statistics place every failed call outside every window. The verdict keeps such a `generator_failure` with `tolerated`. A failure inside a window, one not placed in time, a record missing with no failure counted, a dropped record, an unread call counter or an incomplete record copy still make the run `invalid`.",
       "type": "number",
       "minimum": 0,
       "default": 0.1

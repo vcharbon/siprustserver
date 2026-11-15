@@ -69,7 +69,7 @@ def test_calls_the_generator_failed_reconcile_and_make_the_run_invalid(tmp_path:
     d = run_dir(tmp_path, [record("a", T0)], calls=3, events=[], stream={"generator_failures": 2})
     v = compute(d, SCHEMAS)
     assert [(i["kind"], i["detail"]) for i in jv.objs(v, "integrity")] == [
-        ("generator_failure", "the generator failed 2 calls without a record")
+        ("generator_failure", "the generator failed 2 calls without a record; 2 not placed in time")
     ]
     (s,) = jv.objs(v, "streams")
     assert s["generator_failures"] == 2

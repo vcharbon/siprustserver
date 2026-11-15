@@ -119,11 +119,10 @@ def test_a_window_closer_than_the_longest_call_is_refused_unless_the_profile_say
     """A call of `basic` lives up to 32 s of setup plus 20 s of hold: a window
     opening less than 52 s after the previous one closed can meet a call the
     previous one already met. A load incident's own stream does not count."""
-    at = [
-        {"at_s": 60, "incident": "freeze", "budget": "any", "params": {"mode": "m"}},
-        {"at_s": 211, "incident": "freeze", "budget": "any", "params": {"mode": "m"}},
-        {"at_s": 362, "incident": "freeze", "budget": "any", "params": {"mode": "m"}},
-    ]
+    def freezes(*times: int) -> list[Json]:
+        return [{"at_s": t, "incident": "freeze", "budget": "any", "params": {"mode": "m"}} for t in times]
+
+    at = freezes(60, 211, 362)
     long_burst = {**STREAM, "name": "burst", "start": "incident", "hold_s": 600}
     assert errors(entry(tmp_path / "a", drain_s=700, streams=[STREAM, long_burst], schedule={"at": at})) == [
         "profile 'p': event 002-freeze at 211s opens 51s after 001-freeze's window closes at 160s, under the "
@@ -131,8 +130,7 @@ def test_a_window_closer_than_the_longest_call_is_refused_unless_the_profile_say
         "profile 'p': event 003-freeze at 362s opens 51s after 002-freeze's window closes at 311s, under the "
         "longest call life 52s: a call may meet both (first at 363s, or set schedule.calls_span_windows)",
     ]
-    spaced = [{**e, "at_s": e["at_s"] + i} for i, e in enumerate(at)]
-    assert errors(entry(tmp_path / "b", schedule={"at": spaced})) == []
+    assert errors(entry(tmp_path / "b", schedule={"at": freezes(60, 212, 364)})) == []
     why = "each call meets two faults on purpose"
     assert errors(entry(tmp_path / "c", schedule={"at": at, "calls_span_windows": why})) == []
 

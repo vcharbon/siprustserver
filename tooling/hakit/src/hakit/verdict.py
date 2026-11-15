@@ -30,7 +30,8 @@ from .model import Budget, Shape, parse_budget, parse_catalog
 from .profile import Profile, parse_profile
 from .recovery import Sample, StreamSamples
 from .report_metrics import kept as kept_report_metrics
-from .reconcile import integrity, reconcile, tolerated
+from .generator_stats import failure_spans, read_stat_csv
+from .reconcile import integrity, place, reconcile, tolerated
 from .schemas import SchemaSet
 from .generator_health import run_stalls
 from .host_stress import stress_findings, thresholds
@@ -272,8 +273,13 @@ def _compute(run_dir: Path, schemas: SchemaSet) -> Json:
         stall_rows[st.stream].append(
             {"at_ms": st.at_ms, "ms": round(st.ms, 3), "spoiled": len(stalled.get(st, [])), "source": st.source}
         )
+    spans = [(w.event, w.opened_at_ms, w.closed_at_ms) for w in windows]
+    placed = {
+        name: place(failure_spans(read_stat_csv(run_dir / "streams" / name / "stat.csv")), spans)
+        for name in (jv.string(s, "stream") for s in streams_doc)
+    }
     streams_out, reconciled = reconcile(
-        streams_doc, calls.per_stream, success, stall_rows, profile.record_shortfall_pct
+        streams_doc, calls.per_stream, success, stall_rows, profile.record_shortfall_pct, placed
     )
     host_t = thresholds(profile.preflight)
     found += reconciled + _stall_findings(stalled, stall_details(run_dir, host_t, list(stalled))) + _window_integrity(windows)

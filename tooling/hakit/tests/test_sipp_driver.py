@@ -80,8 +80,8 @@ def test_a_real_trace_stat_row_reads_its_counters_and_shows_the_hold(tmp_path: P
 
 
 def test_the_calls_sipp_failed_are_the_generator_failures_of_its_tally(tmp_path: Path) -> None:
-    """A call SIPp counts failed ended with no record: the tally says so, and
-    the stream's records plus these failures reach its call counter."""
+    """A call SIPp counts failed ended with no record: the tally carries the
+    count as the generator's failures."""
     lines = TRACE_STAT.splitlines(keepends=True)
     header = lines[0].rstrip("\n").split(";")
     row = lines[-1].rstrip("\n").split(";")

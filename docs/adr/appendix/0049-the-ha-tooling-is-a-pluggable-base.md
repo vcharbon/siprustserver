@@ -642,12 +642,13 @@ made. A run profile joins the two.
    stream's life, read after the drain. A difference is a `record_gap` integrity
    finding: an exit that writes no record would otherwise hide exactly the
    calls that went wrong. SIPp's `FailedCall` counts the calls it ended with
-   no record. A stream whose calls without a record are known and at most the
-   profile's `record_shortfall_pct` (default 0.1 %) of its calls keeps its
-   findings marked `tolerated`, and the run stays valid. Those calls are charged
-   to no window; the integrity section states their count, so a reader weighs
-   them against the window allowances. A larger shortfall, an unread counter or
-   an incomplete record copy still makes the run `invalid`.
+   no record, and its statistics rows place them in time. A
+   `generator_failure` is `tolerated`, and the run stays valid, only when the
+   counters agree, every failed call falls outside every window, and the
+   failures are at most the profile's `record_shortfall_pct` (default 0.1 %)
+   of the stream's calls: a generator fault in calm traffic. A failure inside
+   a window may be a call the fault broke, so it stays a finding that names the
+   window, as does any gap the counters do not explain.
 6. **The classifier** is one module of the runner,
    `tooling/hakit/src/hakit/classify.py`: a pure function of a record and its
    catalog shape to impacts with instants. Neither generators nor dashboards
