@@ -9,9 +9,10 @@ use sip_message::SipRequest;
 use tokio::time::Instant;
 
 use super::answer::answer_initial_invite;
+use super::facts::in_dialog_arrival;
 use super::react::maybe_answer_held_invite;
 use super::runner::ActorState;
-use super::state::{LegPhase, Observation};
+use super::state::LegPhase;
 use crate::{ServerTxn, StepError};
 
 /// A PRACK for our reliable 183: 200 it, then — MUST-014 — answer 200 to the
@@ -23,12 +24,7 @@ pub(super) async fn react_prack(
     mut uas: ServerTxn,
 ) -> Result<(), StepError> {
     let now = Instant::now();
-    let arrived = Observation::InDialogRequest {
-        leg: st.role,
-        call_id: uas.request().call_id().to_string(),
-        cseq: uas.request().cseq().seq(),
-        method: uas.request().method().as_str().to_string(),
-    };
+    let arrived = in_dialog_arrival(st.role, uas.request());
     if names_nothing(st, uas.request()) {
         uas.respond(481, "Call/Transaction Does Not Exist").try_send().await?;
         st.obs.record(arrived, now);

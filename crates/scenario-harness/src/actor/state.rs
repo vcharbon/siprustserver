@@ -17,7 +17,7 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::Notify;
 use tokio::time::Instant;
 
-use super::ledger::{ObligationKey, ObligationLedger};
+use super::ledger::{CseqStreamKey, ObligationKey, ObligationLedger};
 
 pub use super::facts::{RequestFact, ResponseFact};
 pub use super::replay_record::{RecordedFinal, ReplayEntry};
@@ -339,22 +339,22 @@ pub enum Observation {
     /// arrive), so the settle barrier does not hold the verdict its 32 s ceiling
     /// for an impossible ack. See [`ObligationLedger::discharge_leg`].
     DialogTornDown { leg: &'static str },
-    /// We answered a received dialog-creating INVITE — seed the dialog's
-    /// received-CSeq baseline with the INVITE's CSeq (so the first in-dialog
-    /// request is not a phantom hole, §12.2.1.1).
-    SeedDialog { leg: &'static str, call_id: String, cseq: u32 },
+    /// We answered a received dialog-creating INVITE — seed its stream (sender
+    /// tag: the INVITE's From-tag) with the INVITE's CSeq, so the first
+    /// in-dialog request is not a phantom hole (§12.2.1.1).
+    SeedDialog { stream: CseqStreamKey, cseq: u32 },
     /// We sent an in-dialog request awaiting its final — opens a ledger
     /// obligation.
     RequestSent { key: ObligationKey, detail: String },
     /// A final response to one of our sent in-dialog requests — closes the
     /// obligation.
     ResponseObserved { key: ObligationKey },
-    /// An in-dialog request arrived on a dialog — folds into the CSeq gap
-    /// detector (any method) AND into the receiving leg's received-method set
-    /// (so an origination can gate on "leg X received an inbound `<method>`").
-    InDialogRequest { leg: &'static str, call_id: String, cseq: u32, method: String },
+    /// An in-dialog request arrived on `stream`'s dialog — folds into its CSeq
+    /// gap detector (any method) AND into the receiving leg's received-method
+    /// set (so an origination can gate on "leg X received an inbound `<method>`").
+    InDialogRequest { stream: CseqStreamKey, cseq: u32, method: String },
     /// An in-dialog request the dialog table refused still arrived: its CSeq is no hole.
-    RefusedInDialog { leg: &'static str, call_id: String, cseq: u32 },
+    RefusedInDialog { stream: CseqStreamKey, cseq: u32 },
     /// What an in-dialog request `leg` received said, once per `(call_id, cseq, method)`.
     LegRequest { leg: &'static str, call_id: String, cseq: u32, fact: RequestFact },
     /// `leg`'s establishing INVITE drew a non-2xx final (the reject path) —
@@ -428,18 +428,18 @@ impl StateInner {
             Observation::LegConfirmed { leg } => self.leg_mut(leg).advance(LegPhase::Confirmed),
             Observation::LegTerminated { leg } => self.leg_mut(leg).advance(LegPhase::Terminated),
             Observation::DialogTornDown { leg } => self.ledger.discharge_leg(leg),
-            Observation::SeedDialog { leg, call_id, cseq } => {
-                self.leg_mut(leg).advance(LegPhase::Early);
-                self.ledger.seed_dialog(call_id, leg, cseq);
+            Observation::SeedDialog { stream, cseq } => {
+                self.leg_mut(stream.leg).advance(LegPhase::Early);
+                self.ledger.record_in_dialog(stream, cseq);
             }
             Observation::RequestSent { key, detail } => self.ledger.open(key, now, detail),
             Observation::ResponseObserved { key } => self.ledger.close(key),
-            Observation::InDialogRequest { leg, call_id, cseq, method } => {
-                self.ledger.record_in_dialog(call_id, leg, cseq);
-                self.leg_mut(leg).record_method(method);
+            Observation::InDialogRequest { stream, cseq, method } => {
+                self.leg_mut(stream.leg).record_method(method);
+                self.ledger.record_in_dialog(stream, cseq);
             }
-            Observation::RefusedInDialog { leg, call_id, cseq } => {
-                self.ledger.record_in_dialog(call_id, leg, cseq)
+            Observation::RefusedInDialog { stream, cseq } => {
+                self.ledger.record_in_dialog(stream, cseq)
             }
             Observation::LegRequest { leg, call_id, cseq, fact } => {
                 self.leg_mut(leg)

@@ -3,6 +3,10 @@ use std::time::Duration;
 use crate::actor::*;
 use crate::{Harness, ANSWER_SDP, OFFER_SDP};
 
+fn stream(call_id: &str, leg: &'static str, sender_tag: &str) -> CseqStreamKey {
+    CseqStreamKey { call_id: call_id.into(), leg, sender_tag: sender_tag.into() }
+}
+
 /// The substrate exit gate: two actors (alice caller + bob `RingThenAnswer`) reach
 /// `torn_down` and settle OK under a paused clock — the reactor answers, the
 /// goal cursor originates + hangs up, the controller drives the barriers, and
@@ -151,8 +155,7 @@ async fn barrier_received_is_method_and_leg_scoped() {
     // A different method on the right leg does NOT satisfy it.
     obs.record(
         Observation::InDialogRequest {
-            leg: "bob",
-            call_id: "c1".to_string(),
+            stream: stream("c1", "bob", "a1"),
             cseq: 2,
             method: "OPTIONS".to_string(),
         },
@@ -163,8 +166,7 @@ async fn barrier_received_is_method_and_leg_scoped() {
     // The INFO on the RIGHT leg satisfies it...
     obs.record(
         Observation::InDialogRequest {
-            leg: "bob",
-            call_id: "c1".to_string(),
+            stream: stream("c1", "bob", "a1"),
             cseq: 3,
             method: "INFO".to_string(),
         },
@@ -222,7 +224,7 @@ async fn fold_order_is_deterministic() {
     let facts = || {
         vec![
             Observation::LegEarly { leg: "alice" },
-            Observation::SeedDialog { leg: "bob", call_id: "c1".to_string(), cseq: 1 },
+            Observation::SeedDialog { stream: stream("c1", "bob", "a1"), cseq: 1 },
             Observation::LegConfirmed { leg: "alice" },
             Observation::LegConfirmed { leg: "bob" },
             Observation::RequestSent {
@@ -230,8 +232,7 @@ async fn fold_order_is_deterministic() {
                 detail: "hangup".to_string(),
             },
             Observation::InDialogRequest {
-                leg: "bob",
-                call_id: "c1".to_string(),
+                stream: stream("c1", "bob", "a1"),
                 cseq: 2,
                 method: "BYE".to_string(),
             },
@@ -274,10 +275,9 @@ async fn fold_order_is_deterministic_when_open() {
     let facts = || {
         vec![
             // A NOTIFY gap: cseq 1 seeded, 3 seen, 2 dropped.
-            Observation::SeedDialog { leg: "bob", call_id: "c1".to_string(), cseq: 1 },
+            Observation::SeedDialog { stream: stream("c1", "bob", "a1"), cseq: 1 },
             Observation::InDialogRequest {
-                leg: "bob",
-                call_id: "c1".to_string(),
+                stream: stream("c1", "bob", "a1"),
                 cseq: 3,
                 method: "NOTIFY".to_string(),
             },

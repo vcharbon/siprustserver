@@ -11,6 +11,7 @@ use std::collections::HashSet;
 use tokio::time::Instant;
 
 use super::endpoint::{Disposition, ForkWinner};
+use super::facts::received_stream;
 use super::ledger::{ObligationKey, ObligationKind};
 use super::pacing::Dwell;
 use super::runner::{ActorState, ParkedRequest, PendingRejectAck, TimedAnswer};
@@ -145,7 +146,6 @@ pub(super) async fn answer_initial_invite(
 /// (§12.2.1.1), and open the answered-awaiting-ACK obligation. Shared by the
 /// policy answer and the scripted `Respond`/`RespondTemplate` finals.
 pub(super) fn note_uas_answered(st: &mut ActorState<'_>, uas: &ServerTxn) {
-    let call_id = uas.request().call_id().clone();
     let cseq = uas.request().cseq().seq();
     let now = Instant::now();
     let mut dialog = uas.dialog();
@@ -160,8 +160,10 @@ pub(super) fn note_uas_answered(st: &mut ActorState<'_>, uas: &ServerTxn) {
     // as a UAS whose 2xx is never ACKed must (§13.3.1.4).
     st.scope.set_confirmed(dialog.clone());
     st.dialogs.confirmed = Some(dialog);
-    st.obs
-        .record(Observation::SeedDialog { leg: st.role, call_id: call_id.to_string(), cseq }, now);
+    st.obs.record(
+        Observation::SeedDialog { stream: received_stream(st.role, uas.request()), cseq },
+        now,
+    );
     st.obs.record(
         Observation::RequestSent {
             key: ObligationKey::new(st.role, ObligationKind::ReInvite, cseq),
