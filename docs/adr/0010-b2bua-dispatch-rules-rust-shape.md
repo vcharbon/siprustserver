@@ -116,7 +116,7 @@ that depends on both `scenario-harness` and `b2bua`, binding a real `B2buaCore`
 on the simulated fabric via `Harness::bind_sut`. This keeps `scenario-harness`
 generic (no B2BUA knowledge) and avoids a dev-dependency cycle like `with_proxy`'s. The
 fluent UAC's `expect_response` absorbs an unsolicited `100 Trying`, as a real UAC does
-(`scenario-harness/src/agent.rs`).
+(`scenario-harness/src/agent/client_txn.rs`).
 
 ## References
 

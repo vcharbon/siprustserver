@@ -87,7 +87,7 @@ by the backup's takeover (ADR-0047). Detail: [appendix X4](appendix/0022-initial
 ## Decision X6: the per-call-cap shed: a new INVITE at capacity gets a 503, not a silent drop
 
 The per-call dispatcher refuses an event for a call with no queue once the live-queue map is
-at `per_call_queue_cap` (default 200 000), a normal new INVITE at the cap less the new-call
+at `per_call_queue_cap` (the SDK default 200 000; the runner's `B2BUA_CALL_CAP`, 1 000 000), a normal new INVITE at the cap less the new-call
 headroom (ADR-0037 item 10). No call exists there for X1 or X2 to reach. A refused new INVITE
 gets the X3 503 with a To-tag and a jittered `Retry-After`, through the server transaction
 that carried the 100, counted as a cap-shed new call. Detail: [appendix X6](appendix/0022-initial-invite-final-response-guarantee.md#decision-x6-the-per-call-cap-shed-a-new-invite-at-capacity-gets-a-503-not-a-silent-drop).
@@ -104,7 +104,7 @@ server transaction and answers it 503 (ADR-0047 D4). Detail: [appendix X5](appen
 
 ## Consequences
 
-- The guarantee is structural and pinned by `b2bua-harness/tests/decision_deadline.rs`.
+- The guarantee is structural and pinned by `b2bua-harness/tests/it/decision_deadline.rs`.
 - A call-control adapter needs no timeout of its own to be safe.
 
 ## Alternatives considered

@@ -348,7 +348,7 @@ Severity = operational risk if the behaviour is wrong.
 | REFER / blind transfer | ✅ Very strong | best-covered area |
 | Replaces / attended transfer | ⛔ Non-goal | parsed + **rejected 501**; deliberate, blind-only |
 | NOTIFY / subscription | 🟡 Moderate | REFER-implicit only; expires-match & post-terminal gaps |
-| **Session timers (4028)** | ⛔ Non-goal | unimplemented by decision; OPTIONS keepalive is liveness |
+| **Session timers (4028)** | 🟡 Transparent | negotiation and refreshes relayed end to end; a timer of our own is a non-goal; OPTIONS keepalive is liveness |
 | Keepalive / OPTIONS | ✅ Very strong | B2BUA in-dialog + proxy health probe |
 | BYE / teardown | ✅ Strong | gap: simultaneous double-BYE |
 | Dialog routing / in-dialog | ✅ Strong | RR-reversed route set well tested |
@@ -402,5 +402,5 @@ The items below were traced through the implementation.
 8. RTP anchoring corner cases if/when media is anchored (RTP-4/6/8)
 9. Reason on a transfer rollback BYE (REASON-2)
 
-> Replaces, auth and session timers are recorded under **Deliberate non-goals**
+> Replaces, auth and a session timer of our own are recorded under **Deliberate non-goals**
 > above, not as unimplemented gaps.

@@ -3,7 +3,7 @@
 The no-panic property lanes (ADR-0051 §8) mutate fixed seeds by the protocol's structure and
 never learn which inputs reach new code. Coverage-guided fuzzing does: libFuzzer keeps every
 input that reaches a new edge and mutates from it. It runs in its own workspace (`fuzz/`, a
-pinned nightly), as **discovery only**: it is never a gate, `just verify` never builds it,
+pinned nightly), as **discovery only**: it is never a gate, `just lint` and `just test` never build it,
 and a finding counts once it is a committed regression test in the owning crate.
 
 ## When to run it

@@ -124,8 +124,9 @@ a category (the compiler's exhaustiveness check forces each present and future
 action into one). The executor verifies the actually-emitted actions are a subset
 of the declared effects **by category** (`emitted ⊆ declared`); payloads are
 diagram labels only, so a handler targeting a dynamically-named leg still
-satisfies its declaration. Drift is a debug-build panic (a test failure), never a
-live-worker panic — identical to `check_declared_transition`.
+satisfies its declaration. Drift is a model defect, identical to
+`check_declared_transition`'s: logged, counted in `b2bua_model_defects_total` under
+`rule-declares-its-effects`, the turn going on; the harness's model gate fails the test.
 
 The taxonomy is cut by the **attribution principle** — *who authors the message*,
 not which bytes hit the wire — yielding exactly three **tracked side effects**:

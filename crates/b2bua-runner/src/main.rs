@@ -8,7 +8,7 @@
 //! SIGTERM/drain — lives in `b2bua-runner-kit` (shared with downstream runner
 //! binaries per ADR-0016); this binary keeps only its OWN composition choices:
 //!   - route: `ScriptedDecisionEngine::route_all_to_with_limiter(DEST, stress)`
-//!            (the HTTP call-control adapter is a deferred slice; routing all
+//!            (this reference worker ships no call-control adapter; routing all
 //!            calls to a fixed UAS mirrors the k8s `worker -> sipp-uas` topology).
 //!            It attaches an always-on `B2BUA_STRESS_LIMITER` entry to every call
 //!            (full-chain stress) and honors an inbound `X-Api-Call` `call_limiter`

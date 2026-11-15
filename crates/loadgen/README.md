@@ -39,8 +39,9 @@ cargo test -p loadgen --test it smoke::loadgen_mux_emergency_split_under_overloa
 cargo test -p loadgen --test it smoke::loadgen_post_call_cleanup_no_leak -- --nocapture
 ```
 
-These run in the **default test lane** (`just test`) — they are fast and require
-nothing external.
+They require nothing external. Most carry `#[ignore = "slow lane: loadgen"]`:
+`just test-slow 'package(=loadgen)'` runs them, and `-- --include-ignored` after a
+`cargo test` command above runs them with the others.
 
 ### 2. Host → real cluster — the `loadgen` binary
 
@@ -73,7 +74,7 @@ Prerequisites for the real cluster (one-time):
   (see *Correlation strategies* below).
 - `--bind-ip` = the external bridge's gateway:
   `docker network inspect sipext -f '{{(index .IPAM.Config 0).Gateway}}'` (e.g.
-  `192.168.60.1`). See the `cluster-nat-inventory` notes for the NAT details.
+  `192.168.60.1`).
 
 Key flags: `--cps`, `--duration`, `--max-in-flight`, `--target`, `--bind-ip`,
 `--base-port` (uac=base, uas=base+1, refer=base+2), `--shared-socket` (all
@@ -633,7 +634,7 @@ the shape ids the product registered and exits.
 1. Write the **load body** — a unit struct implementing `RealCallScenario`
    (`scenario_harness::realcall`; re-exported as
    `loadgen::scenarios::LoadScenario`). The shipped bodies live in
-   `crates/scenario-harness/src/realcall/scenarios/<name>.rs` so the SAME flow
+   `crates/callshapes/src/shapes.rs` so the SAME flow
    serves the load fleet and the in-process functional leak gate; a third-party
    crate implements the trait wherever it likes. Load attributes
    (charlie/bob2/emergency) are **not** on the trait — they live on the

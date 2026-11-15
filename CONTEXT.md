@@ -72,8 +72,8 @@ Full definitions: [docs/glossary/ha-replication.md](docs/glossary/ha-replication
 - **Rider**: what the router sends behind a call's latest write outside a turn's commit (the 100, a refusal); it reports no mark.
 - **Silent stream**: a replication stream silent for the 15 s idle bound; the puller re-pulls from its watermark. ADR-0045.
 - **Settled membership**: the membership view readiness reads, informer synced or the bootstrap hard timer passed. ADR-0045.
-- **Failure domain** (informally **zone**): the blast radius a primary and its backup are split across, one k8s topology key.
-- **Distinct-zone backup**: a call's backup sits in another failure domain, enforced only by the proxy's `w_bak` selection.
+- **Failure domain** (informally **zone**): the blast radius a primary and its backup would be split across, one k8s topology key. ADR-0015, not implemented.
+- **Distinct-zone backup**: a call's backup in another failure domain, chosen by the proxy's `w_bak` selection alone. ADR-0015, not implemented: today's `w_bak` ignores zones.
 - **Unwired node**: a b2bua with no replication store (`B2buaDeps.replication = None`), building no replication part.
 - **Reclaim stream** vs **Backup stream**: the two pull flows; N pulls its own partition back, or a partition it backs up. ADR-0014.
 - **Bootstrap phase**: the bulk store-scan prefix either stream runs on a cold connect, before the changelog tail.

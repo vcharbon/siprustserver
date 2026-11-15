@@ -14,8 +14,10 @@
 //!
 //! ## Scope
 //! - Included: the proxy data path ([`core`]), the load balancer (HRW + signed
-//!   cookie + routing matrix, [`strategies`]), the worker registry (static +
-//!   simulated), OPTIONS health probing toward the B2BUA, the metrics layer
+//!   cookie + routing matrix, [`strategies`]), the worker registry (static,
+//!   simulated, and the composed registry a discovery source feeds), OPTIONS
+//!   health probing toward the B2BUA, the per-worker band classification and
+//!   AIMD rate-cap token bucket ([`load_observer`]), the metrics layer
 //!   (counters + a Prometheus HTTP endpoint), and [`self_gate`] — the ELU/CPS
 //!   admission gate ([`self_gate::EluCpsGate`]: EWMA-smoothed intake pressure
 //!   (packet age at dequeue) + per-class CPS token bucket) shedding external new-dialog
@@ -23,9 +25,9 @@
 //!   [`self_gate::AlwaysAdmitGate`] as the no-protection default, and the
 //!   per-call trace tier ([`trace`], ADR-0026: independent sampling on the
 //!   initial INVITE, correlation by `Call-ID` only, nothing added to the wire).
-//! - Out of scope: the SIP registrar/REGISTER path, the per-worker AIMD
-//!   rate-cap token bucket (band classification only here), and the
-//!   kubernetes registry.
+//! - Out of scope: the SIP registrar/REGISTER path, and the kubernetes
+//!   EndpointSlice source (`topology::K8sMembership`, wired by
+//!   `sip-proxy-runner`).
 
 // The panic set at deny outside test code (ADR-0051 §3).
 #![cfg_attr(

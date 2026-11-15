@@ -1,5 +1,5 @@
 //! The call-decision adapter seam: the port, [`CallDecisionEngine`], and the
-//! decision DTOs are `b2bua-decision`'s, re-exported here. The production HTTP
+//! decision DTOs are `b2bua-decision`'s, re-exported here. A product's own
 //! adapter and the deterministic `ScriptedDecisionEngine` (feature `testkit`)
 //! both implement the port; the router reaches any of them through
 //! [`DeadlineDecisionEngine`]. The consults that await an engine live in

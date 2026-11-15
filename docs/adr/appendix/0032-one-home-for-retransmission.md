@@ -185,7 +185,7 @@ authored forms and `tightened_to`), the existing
 `b2bua-harness/tests/it/{unacked_2xx_retransmit_is_faithful,
 unacked_2xx_reap,unacked_reinvite_2xx_reap,prack_reliable_ladder}.rs`
 (`unacked_2xx_reap` includes the Timer L ceiling under a 60 s deadline),
-`b2bua-harness/tests/unacked_2xx_reap.rs` also holds the X5 floor: a
+`b2bua-harness/tests/it/unacked_2xx_reap.rs` also holds the X5 floor: a
 non-positive `ack_timeout_sec` still ends the session at Timer L, and a service
 rule that answers the give-up without terminating does not keep it up.
 `b2bua-core/tests/it/rules/` (answering the caller leaves a b-leg's pending re-INVITE

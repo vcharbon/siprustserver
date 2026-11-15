@@ -516,7 +516,7 @@ cell that pins the rule:
 
 | Rule | Ordinary path | Pinned by |
 | --- | --- | --- |
-| Own 2xx rung is quiet, does not count toward the cap | `b2bua-harness/tests/unacked_2xx_reap.rs`, `unacked_reinvite_2xx_reap.rs`, `failover-harness/tests/it/inflight_resend.rs` | `b2bua-harness/tests/it/retransmission_turn_and_message_cap.rs` (`a_2xx_ladder_rung_does_not_count_toward_the_message_cap`), `failover-harness/tests/it/retransmission_turn_is_quiet.rs` (`a_reclaim_after_one_rung_…`, `…three_rungs_…`) |
+| Own 2xx rung is quiet, does not count toward the cap | `b2bua-harness/tests/it/unacked_2xx_reap.rs`, `unacked_reinvite_2xx_reap.rs`, `failover-harness/tests/it/inflight_resend.rs` | `b2bua-harness/tests/it/retransmission_turn_and_message_cap.rs` (`a_2xx_ladder_rung_does_not_count_toward_the_message_cap`), `failover-harness/tests/it/retransmission_turn_is_quiet.rs` (`a_reclaim_after_one_rung_…`, `…three_rungs_…`) |
 | Own §3 rung is quiet, does not count toward the cap | `b2bua-harness/tests/it/prack_reliable_ladder.rs` | `retransmission_turn_and_message_cap.rs` (`a_reliable_provisional_rung_does_not_count_toward_the_message_cap`), `failover-harness/tests/it/prack_takeover.rs` |
 | Re-ACK is quiet, the repeated 2xx counts | `b2bua-harness/tests/it/reack_retransmitted_2xx.rs` | `retransmission_turn_is_quiet.rs` (`a_re_ack_of_a_repeated_2xx_replicates_nothing`), `retransmission_turn_and_message_cap.rs` (`a_repeated_inbound_2xx_counts_toward_the_message_cap`) |
 | The vector answers equality and strict-greater only | `failover-harness/tests/it/forward_flush_never_regresses_backup_progress.rs` (both `HealAt` cells), `answer_lost_with_primary_no_answer.rs`, `b2bua/src/repl/s12_tests.rs` | the same cells, unchanged |

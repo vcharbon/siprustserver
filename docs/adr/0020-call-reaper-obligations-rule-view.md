@@ -85,7 +85,7 @@ its release. Detail: [appendix X6](appendix/0020-call-reaper-obligations-rule-vi
 
 ## Decision X7: the obligation vocabulary: the Call is the ledger
 
-`crates/b2bua/src/obligations.rs` holds the release derivation `enforce` performs. An
+`crates/b2bua-core/src/obligations.rs` holds the release derivation `enforce` performs. An
 obligation is a per-call consequence discharged exactly once at release, derivable from the
 persisted `Call` snapshot alone (including `ext` slices), and idempotently dischargeable
 through the effect vocabulary. `ObligationSet::settle` is called by

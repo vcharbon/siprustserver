@@ -89,8 +89,9 @@ writes call state outside the executor. Detail:
 ## Decision X9: A rule declares its tracked side effects; the type system forces it
 
 `sm_rule!` requires an `effects` field, and a total `RuleAction::effect_kind` maps every action
-to a category. The executor checks `emitted ⊆ declared` by category. Drift is a debug-build
-panic, never a live-worker panic, like `check_declared_transition`. By the attribution
+to a category. The executor checks `emitted ⊆ declared` by category. Drift is a model defect,
+like `check_declared_transition`'s: logged, counted in `b2bua_model_defects_total`, and the
+turn goes on; the harness's model gate fails the test that meets it. By the attribution
 principle (who authors the message), the three tracked side effects are:
 
 - **leg message**: a SIP message the service rule authors toward a leg, with its `Method` and a

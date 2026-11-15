@@ -3,7 +3,8 @@
 **Status:** accepted. Its checks land crate by crate through the panic-sites
 ratchet; a crate is held to all of it once it is at `deny`.
 
-**Owner:** the tooling of `just verify` (tier, closure and ratchet checks), the root
+**Owner:** the tooling of `just lint` (its `purity` tier and closure checks, its
+`panic-sites` ratchet), the root
 `clippy.toml`, every crate linked by a production binary.
 
 The [appendix](appendix/0051-production-crates-never-panic-on-input.md) holds the context and the detail of §1 to §3, §5, §7 and §8.

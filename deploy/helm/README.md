@@ -23,8 +23,8 @@ node, the lab's runner env (socket buffers, keepalive, limiter, drain,
 heap profiling, the loadgen relay header, the stress limiter), replication on,
 traces exported with the trace header trusted, and `masq-exempt`.
 
-The SUT chart requires its network (`network.proxyVip`, `externalVip`, both
-interfaces and next hops, and `externalSubnet` for `masq-exempt`) and,
+The SUT chart requires its network (`network.proxyVip`, `externalVip`,
+`externalInterface`, `externalNextHops`, and `externalSubnet` for `masq-exempt`) and,
 with the workers' NetworkPolicy on, `worker.networkPolicy.proxyNodeCidrs`
 while the proxy is enabled; the collectors chart requires `hostStack.address` and
 `clusterName`. A top-level `enabled` in each chart serves a parent's

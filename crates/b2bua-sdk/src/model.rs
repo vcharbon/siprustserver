@@ -1,7 +1,8 @@
 //! The rule-engine core types (declarative `Match`, `RuleContext`, the
-//! `RuleAction` vocabulary) in a concrete (non-type-narrowed) shape sufficient
-//! for the basic B2BUA. Service-layer
-//! ext narrowing and rule composition are deferred with their consumers.
+//! `RuleAction` vocabulary) in one concrete shape, shared by the core rules and
+//! every service: `b2bua-core`'s `compose_rules` merges a service's rules with
+//! the core's, and a service's own state is the typed slice its `init`
+//! installs (ADR-0016 X8).
 
 use call::features::FeatureActivations;
 use call::{CdrEventType, ExtMap, LegKind, MachineId, StateLabel, TerminationCause, TimerKey};
@@ -137,9 +138,8 @@ pub struct MessageTransform {
     pub add_headers: Vec<Entry>,
 }
 
-/// The action vocabulary. The basic-B2BUA subset is exercised now; the trailing
-/// cluster (provisional/prack/notify/reinvite/sdp/policy/refer) is defined for
-/// the deferred 18x/transfer service rules and is unused until they land.
+/// The action vocabulary: every effect a rule, core or service, asks of the
+/// executor.
 #[derive(Debug, Clone)]
 pub enum RuleAction {
     RelayToPeer {

@@ -96,7 +96,7 @@ its turn took it.
     its record sends it again (decision 5); its subscription's expiry
     (`ReferSubscriptionExpiry`) ends the wait and tells the referrer the
     transfer failed (NOTIFY `terminated`, 500).
-- Tests: `b2bua/src/answer_deadline.rs` (arming, screening, the lost answers),
+- Tests: `b2bua-core/src/answer_deadline/tests.rs` (arming, screening, the lost answers),
   `b2bua/src/router/answer_deadline_tests.rs` (the router's turn: a late
   answer reaches no rule, a late admit report still states the held set),
   `b2bua-harness/tests/it/service_admission_set.rs`

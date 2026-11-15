@@ -4,7 +4,7 @@
 Amended (2026-10-23): §2, the business re-check moves into timer scopes (ADR-0055 §10).
 
 **Owner:** `crates/call/src/model/timer.rs`, `attempt.rs` and
-`helpers/attempt.rs`; the engine side is `crates/b2bua/src/router/timer_screen.rs`,
+`helpers/attempt.rs`; the engine side is `crates/b2bua-core/src/rule_chain/timer_screen.rs`,
 `rules/actions/retire.rs`, `attempts.rs` and `rules/lifecycle_delivery.rs`.
 
 ## Context

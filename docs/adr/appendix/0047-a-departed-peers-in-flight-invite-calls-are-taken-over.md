@@ -40,8 +40,9 @@ the slice does not apply), `rules/evidence.rs` and
 `generate_ack_for_non_2xx_in_dialog`, `router/reclaim/bulk.rs` (the reclaim write),
 `repl/puller/apply.rs` and `repl/router_sink.rs` (an applied primary write handed up),
 `router/stand_down.rs` (the stand-down), `store/takeover.rs` (the takeover marks),
-`store/adoption.rs` and `repl/store/admission.rs` (an adopted version's write),
-`router/reclaim.rs` (the reverse fold of a copy's ending), `call`'s
+`repl/store/admission.rs` (the write a version orders), `store/containment.rs` and
+`router/reclaim/meeting.rs` (two copies meeting, ADR-0055 §7), `router/reclaim/ending.rs`
+(the other owner's ending met here), `call`'s
 `helpers/lifecycle.rs` (the lifecycle order), `sip-txn`'s `layer/relinquish.rs`,
 `repl/departed.rs`, `router/commit.rs` and `router/departure.rs` (the discharge of a departed primary's call), `router/dropped_on_delete.rs` (the drop of a live copy on the backup's delete).
 

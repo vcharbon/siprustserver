@@ -26,7 +26,7 @@ loadgen stream may instead run as a pod (`placement: pod` in its profile).
 |---|---|---|
 | `sip-proxy-runner` | `crates/sip-proxy-runner` | Real UDP transport · `LoadBalancerStrategy` (HRW + HMAC-signed Record-Route stickiness) · EndpointSlice worker discovery (`ComposedWorkerRegistry`; a fixed `PROXY_WORKERS` list when set) · OPTIONS `HealthProbe` feeding the band observer · `EluCpsGate` self-gate · Prometheus `/metrics` |
 | `route-guard` | `crates/route-guard` | Beside each proxy, on the node's network with `NET_ADMIN` alone: reads the proxy's `/fitz` and keeps an nftables set that lets the node's BFD and BGP to its routers out while the proxy is fit (ADR-0056 §10) · Prometheus `/metrics` on `ROUTE_GUARD_METRICS` |
-| `b2bua-runner` | `crates/b2bua-runner` | Real UDP transport · system clock · `BufferedCdrWriter` over a discarding sink (no endurance leak) · `InMemoryCallStore` · `NoopLimiter` · `ScriptedDecisionEngine` routing all calls to the UAS · Prometheus `/metrics` |
+| `b2bua-runner` | `crates/b2bua-runner` | Real UDP transport · system clock · `BufferedCdrWriter` over the sink the env selects (a JSON-lines file, RabbitMQ, else a discarding one) · `InMemoryCallStore` · the limiter client `LIMITER_URL` names, else `NoopLimiter` · `ScriptedDecisionEngine` routing all calls to the UAS · Prometheus `/metrics` |
 
 Both are configured entirely by env vars (see the module docs at the top of each
 `main.rs`). HA call replication is opt-in via `B2BUA_REPL=1`: real TCP repl

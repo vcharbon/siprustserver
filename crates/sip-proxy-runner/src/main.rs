@@ -3,7 +3,8 @@
 //! Wires the `sip-proxy` library over the **real, non-recording** UDP transport
 //! (`sip_net::RealSignalingNetwork`) into the production data path:
 //!   - `LoadBalancerStrategy` — HRW worker selection + HMAC-signed Record-Route
-//!     stickiness cookie (rotation-overlap aware).
+//!     stickiness cookie, signed and checked under the one `PROXY_HMAC_KEY`
+//!     (no previous key: ADR-0046 §7).
 //!   - The worker pool ([`sip_proxy_runner::discovery`]): the EndpointSlices of
 //!     the worker Service (ADR-0012 D4), or a fixed `PROXY_WORKERS` list.
 //!   - `HealthProbe` — OPTIONS to workers from the pool's first listing on,
