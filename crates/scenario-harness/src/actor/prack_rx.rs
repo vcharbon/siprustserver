@@ -37,10 +37,11 @@ pub(super) async fn react_prack(
     }
     let prack_tag = uas.request().to().tag().map(str::to_owned);
     st.ctx.anchor(&st.agent, "prack", uas.request());
-    uas.respond(200, "OK").try_send().await?;
     if let Some(tag) = &prack_tag {
         st.unpracked.remove(tag);
+        st.trains.offered.remove(tag);
     }
+    super::prack_hold::answer(st, uas).await?;
     st.obs.record(arrived, now);
     // C5: this callee holds the INVITE for an early UPDATE — mark the 183
     // PRACKed and release the held 200 only once the UPDATE is also done

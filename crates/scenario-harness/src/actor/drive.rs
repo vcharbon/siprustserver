@@ -144,6 +144,8 @@ pub(super) async fn drive_goal(st: &mut ActorState<'_>, step: GoalStep) -> Resul
         GoalStep::Ring { forks, reliable } => ring(st, forks, reliable).await?,
         GoalStep::Answer { winner } => answer_held(st, winner).await?,
         GoalStep::Reject { status } => reject_held(st, status).await?,
+        GoalStep::Provisional(p) => super::provisional::send_provisional(st, p).await?,
+        GoalStep::Final(f) => super::provisional::send_final(st, f).await?,
         // One in-dialog OPTIONS keepalive ping; its 200 arrives through the
         // reactor, which stays free to answer whatever crosses it.
         GoalStep::Options => {

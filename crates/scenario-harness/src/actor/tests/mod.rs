@@ -1,5 +1,5 @@
 //! The actor substrate's pinned tests, grouped by concern: substrate/runner
-//! basics, forking (C1/E3), CANCEL×200 racing (C2/E5), renegotiation (C4/C5),
+//! basics, forking (C1/E3), provisional trains, CANCEL×200 racing (C2/E5), renegotiation (C4/C5),
 //! deferred auth (§22.2), the dialog table's refusals, the ACK-body offer/answer decision, the Scripted
 //! disposition (replay, CANCEL machinery, flow ordering), accepted deltas
 //! (ADR-0024 §6), the reception-observation hook, the reception goals' body
@@ -37,4 +37,5 @@ mod substrate;
 mod template_request;
 mod template_respond;
 mod testkit;
+mod trains;
 mod won_invite;

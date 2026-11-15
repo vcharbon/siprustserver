@@ -324,8 +324,9 @@ impl CallTxns {
             // genuine retransmission (or a B2BUA collapsing forks onto one a-leg
             // tag — on the wire it IS one, which makes byte-identical "ring again"
             // unobservable from a load body; see the shape-authoring caveat in
-            // `crate::scenarios`).
-            let key = key_of((branch, "r", method, status, id.to_tag.unwrap_or_default()));
+            // `crate::scenarios`). A reliable provisional's RSeq is part of it: a
+            // new RSeq is a new provisional (RFC 3262 §3), never a repeat.
+            let key = key_of((branch, "r", method, status, id.to_tag.unwrap_or_default(), id.rseq));
             if !g.seen_in.insert(key) {
                 // Duplicate response. A retransmitted INVITE 2xx means our ACK was
                 // lost → re-ACK it.

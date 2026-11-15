@@ -5,6 +5,7 @@
 use tokio::time::Instant;
 
 use super::answer::reject_initial;
+use super::endpoint::Disposition;
 use super::react::default_react;
 use super::runner::ActorState;
 use super::settle::T1;
@@ -56,5 +57,9 @@ async fn reject(st: &mut ActorState<'_>) -> Result<(), StepError> {
     }
     st.fork_answer = None;
     st.unpracked.clear();
+    // A held INVITE's goals act on the transaction the 504 just ended.
+    if matches!(st.disposition, Disposition::Held) {
+        st.goals.abandon();
+    }
     reject_initial(st, uas, 504).await
 }

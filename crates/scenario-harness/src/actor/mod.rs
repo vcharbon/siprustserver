@@ -62,7 +62,9 @@ mod lost_provisional;
 mod observe;
 mod originate;
 mod pacing;
+mod prack_hold;
 mod prack_rx;
+mod provisional;
 mod react;
 mod refused_dialog;
 mod replay_record;
@@ -101,7 +103,8 @@ pub use delta::{
 };
 pub use ending::{Branch, Ending, Expect};
 pub use goals::{
-    Barrier, BodyExpect, EarlyId, FinalAssert, Goal, GoalCursor, GoalStep, RequestKind,
+    Barrier, BodyExpect, EarlyId, FinalAssert, Goal, GoalCursor, GoalStep, HeldFinal, Provisional,
+    RequestKind,
 };
 pub use ledger::{CseqStreamKey, ObligationKey, ObligationKind, ObligationLedger};
 pub use lost_provisional::provisional_lost;

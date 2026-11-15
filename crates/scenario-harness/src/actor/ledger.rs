@@ -84,6 +84,9 @@ pub enum ObligationKind {
     RejectFinal,
     /// A CANCEL we sent, awaiting its final (RFC 3261 §9.1).
     Cancel,
+    /// A PRACK we took whose 200 we hold, until we send it; keyed by the
+    /// hold's ordinal, as forks' PRACKs may share a CSeq number.
+    HeldPrack200,
 }
 
 impl ObligationKind {
@@ -100,6 +103,7 @@ impl ObligationKind {
             ObligationKind::InDialog => "in-dialog",
             ObligationKind::RejectFinal => "reject-final",
             ObligationKind::Cancel => "CANCEL",
+            ObligationKind::HeldPrack200 => "held PRACK 200",
         }
     }
 
@@ -202,7 +206,8 @@ impl ObligationLedger {
     /// 200 can still arrive (and a lost fork BYE is Timer-E-recoverable), so
     /// settle must keep holding for it — and [`Cancel`](ObligationKind::Cancel):
     /// a CANCEL is hop-by-hop, answered by the server whatever becomes of the
-    /// dialog (§9.2). The CSeq gap
+    /// dialog (§9.2) — and [`HeldPrack200`](ObligationKind::HeldPrack200): our
+    /// own answer, owed whatever becomes of the dialog. The CSeq gap
     /// detector is deliberately untouched: a genuinely-lost fire-and-forget
     /// in-dialog request (a dropped NOTIFY the SUT never retransmits) is a REAL
     /// hole the terminal state does not fill.
@@ -210,7 +215,10 @@ impl ObligationLedger {
         let preserved = |k: &ObligationKind| {
             matches!(
                 k,
-                ObligationKind::RejectFinal | ObligationKind::ForkBye | ObligationKind::Cancel
+                ObligationKind::RejectFinal
+                    | ObligationKind::ForkBye
+                    | ObligationKind::Cancel
+                    | ObligationKind::HeldPrack200
             )
         };
         let stranded: Vec<ObligationKey> = self

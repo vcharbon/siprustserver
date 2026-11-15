@@ -279,3 +279,22 @@ async fn calltxns_counts_every_resend_on_the_tally() {
     assert!(resent("UPDATE") >= 1, "the proactive retransmit: {m:?}");
     assert_eq!(resent("ACK"), 1, "the reactive re-ACK: {m:?}");
 }
+
+/// A reliable provisional is told apart by its RSeq (RFC 3262 §3): after an
+/// unreliable 180 on an early dialog, a reliable 180 on the same dialog is a
+/// new provisional and reaches the body, and so does the next RSeq; a repeat
+/// of an RSeq is a retransmission and is absorbed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "slow lane: loadgen"]
+async fn calltxns_a_new_rseq_is_a_new_provisional() {
+    let (txns, _peer, peer_addr) = txn_rig().await;
+    let took = |extra: &str| {
+        txns.on_inbound(&Datagram::sniff(&resp(180, "z9hG4bK-i1", "1 INVITE", extra)), peer_addr)
+    };
+    let reliable = |rseq: u32| format!("Require: 100rel\r\nRSeq: {rseq}\r\n");
+    assert!(took(""), "the unreliable 180 is delivered");
+    assert!(took(&reliable(7)), "a reliable 180 on the same dialog is a new provisional");
+    assert!(!took(&reliable(7)), "its repeat is a retransmission");
+    assert!(took(&reliable(8)), "the next RSeq is a new provisional");
+    txns.shutdown();
+}

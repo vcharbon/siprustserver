@@ -18,6 +18,7 @@ pub use super::barrier::Barrier;
 use super::barrier::{await_paced, await_pred};
 use super::endpoint::ForkWinner;
 use super::pacing::{Dwell, Pacing};
+pub use super::provisional::{HeldFinal, Provisional};
 use super::state::ObservedState;
 use crate::realcall::InvitePlan;
 use crate::StepError;
@@ -139,6 +140,10 @@ pub enum GoalStep {
     /// empty. `reliable` makes each a `183` with `Require: 100rel`, an `RSeq`
     /// and the answer SDP (RFC 3262), else a plain `180`.
     Ring { forks: &'static [&'static str], reliable: bool },
+    /// One provisional on a held callee's early dialog ([`Provisional`]).
+    Provisional(Provisional),
+    /// A held callee's final, sent once RFC 3262 §3 allows ([`HeldFinal`]).
+    Final(HeldFinal),
     /// Answer a [`Disposition::Held`](super::Disposition::Held) callee's INVITE `200` + SDP under
     /// `winner` (`None`: the transaction's own tag). The goal waits until the
     /// answering early dialog's reliable provisional is PRACKed, and every
@@ -289,6 +294,8 @@ impl GoalStep {
             GoalStep::UpdateEarly => "update_early",
             GoalStep::EarlyRequest { .. } => "early_request",
             GoalStep::Ring { .. } => "ring",
+            GoalStep::Provisional(_) => "provisional",
+            GoalStep::Final(_) => "final",
             GoalStep::Answer { .. } => "answer",
             GoalStep::Reject { .. } => "reject",
             GoalStep::Options => "options",

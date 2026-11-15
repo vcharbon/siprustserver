@@ -282,9 +282,15 @@ impl SipRequest {
     /// in `Supported` (it MAY). `Err` when a line of either does not read:
     /// ingress refuses such a request, so an `Err` names one built past it.
     pub fn offers_100rel(&self) -> Result<bool, SipParseError> {
-        let required = self.list::<header::Require>()?.iter().any(|v| v.contains("100rel"));
         let supported = self.list::<header::Supported>()?.iter().any(|v| v.contains("100rel"));
-        Ok(required || supported)
+        Ok(self.requires_100rel()? || supported)
+    }
+
+    /// Whether this request requires reliable provisional responses (RFC 3262
+    /// §3): `100rel` listed in `Require`, so a UAS sends none unreliably. `Err`
+    /// when a `Require` line does not read.
+    pub fn requires_100rel(&self) -> Result<bool, SipParseError> {
+        Ok(self.list::<header::Require>()?.iter().any(|v| v.contains("100rel")))
     }
 }
 

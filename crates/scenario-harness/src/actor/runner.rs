@@ -138,23 +138,20 @@ pub struct ActorState<'c> {
     /// `(dialog tag, RSeq)` of the reliable provisionals PRACKed on this leg: a caller PRACKs each
     /// once per fork (C1/E3); a callee answers a second PRACK of one 481 (RFC 3262 §3).
     pub(super) pracked_rseqs: HashSet<(String, u32)>,
+    /// A held callee's `RSeq` per early dialog and its held PRACK answers.
+    pub(super) trains: super::provisional::Trains,
     /// A held forking-UAS answer plan (C1/E3): set alongside
     /// `pending_prack_answer` by a RELIABLE [`Disposition::ForkingRing`], so the
     /// PRACK arm answers the INVITE only on the WINNER fork's PRACK (a losing
     /// fork's PRACK is 200'd but does not release the 200-to-INVITE).
     pub(super) fork_answer: Option<ForkAnswer>,
-    /// CSeq numbers of in-dialog re-INVITEs THIS caller has ORIGINATED whose
-    /// `reneg` sub-flow has not yet been advanced (the `reinvite` body's
-    /// delayed-offer re-INVITE). A set keyed by CSeq — NOT a one-shot bool — so
-    /// the 2xx ACK is re-derivable and a lost datagram interleaving can never
-    /// strand it (mirrors the mux's `(Call-ID, CSeq)` re-ACK). Empty for every
-    /// non-`reinvite` leg.
+    /// CSeq numbers of the re-INVITEs this caller ORIGINATED whose `reneg`
+    /// sub-flow is not yet advanced: keyed by CSeq, so the 2xx ACK is
+    /// re-derivable and no lost datagram strands it. Empty on non-`reinvite` legs.
     pub(super) sent_reinvites: HashSet<u32>,
-    /// The client transaction handle of each outstanding originated re-INVITE,
-    /// keyed by CSeq — retained so a NON-2xx final (a `491 Request Pending`
-    /// glare reject, C4/S5) can be hop-ACKed (§17.1.1.3): `recv_any` surfaces
-    /// the 491 as a bare response without auto-ACKing it. Cleared in lockstep
-    /// with `sent_reinvites` on the 2xx OR the 491.
+    /// The client transaction of each outstanding originated re-INVITE, by
+    /// CSeq, so a non-2xx final (a 491 glare reject) is hop-ACKed (§17.1.1.3).
+    /// Cleared in lockstep with `sent_reinvites` on the 2xx or the 491.
     pub(super) sent_reinvite_txns: HashMap<u32, crate::InDialogTxn>,
     /// A pending §14.1 re-INVITE glare RETRY (C4/S5): set when our re-INVITE
     /// drew a 491, fires after the owner/non-owner dwell to re-originate it.
@@ -172,21 +169,17 @@ pub struct ActorState<'c> {
     /// 200 across the PRACK, answering it only after an early UPDATE is 200'd
     /// (RFC 3311 §5.1). `true` only for that disposition.
     pub(super) hold_for_early_update: bool,
-    /// C5 ordering: whether this early-UPDATE callee has PRACKed its reliable
-    /// 183 (RFC 3262 MUST-014 — the 2xx must not precede the PRACK) and whether
-    /// the early UPDATE has been 200'd. The held INVITE 200 is released only
-    /// once BOTH hold, so a UPDATE that races ahead of the PRACK does not answer
-    /// the INVITE early.
+    /// C5 ordering: whether this early-UPDATE callee's reliable 183 is PRACKed
+    /// (RFC 3262 §3) and its early UPDATE 200'd; the held INVITE 200 is
+    /// released only once BOTH hold, whichever arrives first.
     pub(super) early_pracked: bool,
     pub(super) early_updated: bool,
     /// Whether this caller has already stamped the first-OPTIONS-ping feed —
     /// so the looped `options_hold` pings stamp `keepalive_ack` exactly once.
     pub(super) saw_options_200: bool,
-    /// The provisional this caller's establishing INVITE awaits — `180` by
-    /// default, `183` once it has advertised `Supported: 100rel` (the reliable
-    /// flows). The `expected` field of the incidental `WrongStatus` a shed/reject
-    /// on the establishing INVITE surfaces (linear `establish`/`establish_100rel`
-    /// parity).
+    /// The provisional this caller's establishing INVITE awaits (`180`, `183`
+    /// once it advertised `Supported: 100rel`): the `expected` of the
+    /// incidental `WrongStatus` a shed or reject of that INVITE surfaces.
     pub(super) expected_provisional: u16,
     /// A sent non-2xx initial-INVITE final whose hop-ACK is outstanding — its
     /// own `select!` arm closes the `reject-final` obligation on fulfilment.
@@ -335,6 +328,7 @@ impl<'c> ActorState<'c> {
             unpracked: HashMap::new(),
             early_dialogs: HashMap::new(),
             pracked_rseqs: HashSet::new(),
+            trains: Default::default(),
             fork_answer: None,
             sent_reinvites: HashSet::new(),
             sent_reinvite_txns: HashMap::new(),
@@ -445,6 +439,7 @@ pub(super) async fn react_until_done(st: &mut ActorState<'_>) -> Result<(), Step
     loop {
         let give_up_at = give_up::due(st);
         let retransmit_at = st.retransmit_due(); // a request awaiting its answer, or a final its ACK
+        let prack_200_at = super::prack_hold::due(st);
         tokio::select! {
             inbound = inbox.recv_boxed() => {
                 match inbound {
@@ -523,6 +518,9 @@ pub(super) async fn react_until_done(st: &mut ActorState<'_>) -> Result<(), Step
             _ = super::client_retransmit::wait(retransmit_at), if retransmit_at.is_some() => {
                 super::client_retransmit::fire(st).await?;
             }
+            _ = give_up::sleep(prack_200_at), if prack_200_at.is_some() => {
+                Box::pin(super::prack_hold::fire(st)).await?;
+            }
         }
         // An open obligation or a re-INVITE of this leg still unanswered keeps
         // it REACTIVE through the settle window: the UA outlives the call, so a
@@ -530,7 +528,7 @@ pub(super) async fn react_until_done(st: &mut ActorState<'_>) -> Result<(), Step
         // §15, §17.1.1.3). Bounded: the controller's settle ceiling (64·T1)
         // wins the outer `select!` and drops still-parked actors either way.
         let settled = obs.all_terminated() && st.goals.is_exhausted() && obs.ledger_closed();
-        if settled && st.sent_reinvites.is_empty() {
+        if settled && st.sent_reinvites.is_empty() && st.trains.held_200s.is_empty() {
             return Ok(());
         }
     }

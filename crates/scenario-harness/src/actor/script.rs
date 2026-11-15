@@ -44,9 +44,6 @@ pub(super) fn goal_arm_enabled(st: &ActorState<'_>) -> bool {
             let pin = cseq_method.as_deref();
             st.obs.with_snapshot(|s| s.leg_response_ready(st.role, st.resp_seen, need_final, pin))
         }
-        Some(GoalStep::Ring { .. }) => super::held::ring_ready(st),
-        Some(GoalStep::Answer { winner }) => super::held::answer_ready(st, *winner),
-        Some(GoalStep::Reject { .. }) => super::held::reject_ready(st),
         Some(GoalStep::EarlyRequest { fork, .. }) if st.dialogs.pending_invite.is_none() => {
             super::held::early_request_ready(st, *fork)
         }
@@ -56,7 +53,8 @@ pub(super) fn goal_arm_enabled(st: &ActorState<'_>) -> bool {
             let pin = cseq_method.as_deref();
             st.obs.with_snapshot(|s| s.leg_response_ready(st.role, st.resp_seen, true, pin))
         }
-        _ => true,
+        Some(step) => super::held::held_step_ready(st, step),
+        None => true,
     }
 }
 

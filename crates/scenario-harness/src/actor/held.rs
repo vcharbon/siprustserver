@@ -11,7 +11,9 @@ use sip_message::generators::InDialogMethod;
 
 use super::answer::{answer_initial_invite, reject_initial, ForkAnswer};
 use super::endpoint::ForkWinner;
+use super::goals::GoalStep;
 use super::ledger::{ObligationKey, ObligationKind};
+use super::provisional::{final_ready, provisional_ready};
 use super::runner::ActorState;
 use super::state::Observation;
 use crate::{ServerTxn, StepError};
@@ -25,6 +27,7 @@ pub(super) async fn hold_initial(
     uas.respond(100, "Trying").try_send().await?;
     st.obs.record(Observation::LegEarly { leg: st.role }, Instant::now());
     st.unpracked.clear();
+    st.trains.reset();
     st.early_dialogs.clear();
     st.held = Some(Box::new(uas));
     Ok(())
@@ -32,7 +35,7 @@ pub(super) async fn hold_initial(
 
 /// The local tag a provisional under `fork` carries: the fork's tag, or the
 /// transaction's own (minted by its first provisional).
-fn early_tag(txn: &ServerTxn, fork: Option<&str>) -> String {
+pub(super) fn early_tag(txn: &ServerTxn, fork: Option<&str>) -> String {
     match fork {
         Some(tag) => tag.to_string(),
         None => txn.dialog().local_tag().to_string(),
@@ -65,6 +68,7 @@ pub(super) async fn ring(
         let tag = early_tag(txn, fork);
         st.early_provisionals.insert(fork.map(str::to_string).unwrap_or_default());
         if reliable {
+            st.trains.note_sent(&tag, 1, true);
             st.unpracked.entry(tag).or_insert_with(Instant::now);
         }
     }
@@ -77,15 +81,28 @@ pub(super) async fn ring(
     Ok(())
 }
 
+/// Whether a held-INVITE step may fire: each waits for what RFC 3262 §3 asks
+/// of it. Any other step is not gated here.
+pub(super) fn held_step_ready(st: &ActorState<'_>, step: &GoalStep) -> bool {
+    match step {
+        GoalStep::Ring { .. } => ring_ready(st),
+        GoalStep::Answer { winner } => answer_ready(st, *winner),
+        GoalStep::Reject { .. } => reject_ready(st),
+        GoalStep::Provisional(p) => provisional_ready(st, p),
+        GoalStep::Final(f) => final_ready(st, f),
+        _ => true,
+    }
+}
+
 /// Whether `GoalStep::Ring` may fire: the INVITE it rings has arrived.
-pub(super) fn ring_ready(st: &ActorState<'_>) -> bool {
+fn ring_ready(st: &ActorState<'_>) -> bool {
     st.held.is_some()
 }
 
 /// Whether `GoalStep::Answer { winner }` may fire: the INVITE is held and the
 /// answering early dialog's reliable provisional is PRACKed, every fork's for
 /// an unrung winner.
-pub(super) fn answer_ready(st: &ActorState<'_>, winner: Option<ForkWinner>) -> bool {
+fn answer_ready(st: &ActorState<'_>, winner: Option<ForkWinner>) -> bool {
     if st.held.is_none() {
         return false;
     }
@@ -113,7 +130,7 @@ pub(super) async fn answer_held(
 
 /// Whether `GoalStep::Reject` may fire: the INVITE is held and every reliable
 /// provisional it drew is PRACKed.
-pub(super) fn reject_ready(st: &ActorState<'_>) -> bool {
+fn reject_ready(st: &ActorState<'_>) -> bool {
     st.held.is_some() && st.unpracked.is_empty()
 }
 
