@@ -118,8 +118,8 @@ fn an_ended_or_retired_dialog_refuses_all_but_its_table_exceptions() {
     refused_but(dialog(DialogState::Ended(DialogEnd::PeerBye)), &[Method::Ack]);
     refused_but(by_our_bye(Some(200)), &[Method::Ack]);
     refused_but(by_our_bye(None), &[Method::Ack]);
-    refused_but(retired(None), &[]);
-    refused_but(retired(Some(true)), &[]);
+    refused_but(retired(None), &[Method::Prack]);
+    refused_but(retired(Some(true)), &[Method::Prack]);
     assert_eq!(admission(None, &Method::Bye), Admission::Refuse, "no dialog takes nothing");
 }
 

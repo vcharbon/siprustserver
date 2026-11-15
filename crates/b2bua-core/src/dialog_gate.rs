@@ -14,7 +14,7 @@
 //! | `Ending` (this side's BYE or CANCEL in flight) | see below |
 //! | `Ended(Rejected)` | PRACK passes (RFC 3262 §3); others 481 |
 //! | `Ended` by a BYE | 481, a BYE included (§15.1.2) |
-//! | `Retired` | 481; one whose release BYE is in flight reads as `Ending` |
+//! | `Retired` | PRACK passes (§3); others 481, or as `Ending` while its release BYE is in flight |
 //!
 //! A dialog this side is ending still exists until its BYE or its INVITE
 //! takes a final (§15.1.2): what it makes of a request is the method table's
@@ -192,7 +192,9 @@ pub fn admission(dialog: Option<&Dialog>, method: &Method) -> Admission {
     }
     let ending = match &d.state {
         DialogState::Early | DialogState::Confirmed => return Admission::Pass,
-        DialogState::Ended(DialogEnd::Rejected(_)) if *method == Method::Prack => {
+        DialogState::Ended(DialogEnd::Rejected(_)) | DialogState::Retired
+            if *method == Method::Prack =>
+        {
             return Admission::Pass
         }
         DialogState::Ending(_) => true,
