@@ -113,13 +113,20 @@ export const confront = (input: ConfrontInput): Confronted => {
     probes,
     compared: headers.compared,
     unreferenced: headers.unreferenced,
-    context: {
-      relay18x: input.pivot.calls.flatMap((call) => (call.relay18x ? [call.relay18x] : [])),
-      run: runShape(input.verdict, input.recordings),
-      document: documentShape(input.pivot)
-    }
+    context: caseContextOf(input.pivot, runShape(input.verdict, input.recordings))
   }
 }
+
+/**
+ * The case context a confrontation of `pivot` hands its classifier: the
+ * document's relayed 18x and its shape, read off the document alone, beside
+ * `run`, the shape of what the run recorded.
+ */
+export const caseContextOf = (pivot: Pivot.PivotV3, run: CaseContext["run"]): CaseContext => ({
+  relay18x: pivot.calls.flatMap((call) => (call.relay18x ? [call.relay18x] : [])),
+  run,
+  document: documentShape(pivot)
+})
 
 /** A `send` of a final response to an INVITE — the message that draws an ACK back. */
 const isInviteFinal = (step: Flow.Step): boolean =>
@@ -137,7 +144,7 @@ const isAckExpect = (step: Flow.Step): boolean =>
  * final, so a re-INVITE's ACK can never stand in for the one the transaction
  * before it is owed.
  */
-export const documentShape = (pivot: Pivot.PivotV3): CaseContext["document"] => {
+const documentShape = (pivot: Pivot.PivotV3): CaseContext["document"] => {
   const steps = Pivot.pivotSteps(pivot)
   const unackedFinals: Array<UnackedFinal> = []
   for (const [i, step] of steps.entries()) {
