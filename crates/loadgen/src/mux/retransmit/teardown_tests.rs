@@ -88,6 +88,40 @@ async fn a_cancel_retransmits_until_its_own_final_not_an_invite_provisional() {
     txns.shutdown();
 }
 
+/// The INVITE's 2xx crosses the CANCEL: the CANCEL's 200 shares the INVITE's
+/// branch, status and To-tag (RFC 3261 §9.2), and is still the first response
+/// of its own transaction, so it reaches the call and ends the CANCEL.
+#[tokio::test(start_paused = true)]
+async fn a_cancels_200_after_the_invites_200_reaches_the_call() {
+    let (txns, _peer, peer_addr) = sim_rig().await;
+    txns.on_outbound(&Datagram::sniff(&request("INVITE", "1 INVITE")), peer_addr);
+    txns.on_outbound(&Datagram::sniff(&request("CANCEL", "1 CANCEL")), peer_addr);
+    assert!(txns.on_inbound(&Datagram::sniff(&response(200, "1 INVITE", "")), peer_addr));
+    assert!(
+        txns.on_inbound(&Datagram::sniff(&response(200, "1 CANCEL", "")), peer_addr),
+        "the CANCEL's 200 is delivered, not absorbed as the INVITE 200's retransmission"
+    );
+    timeout(TokioDuration::from_millis(10), txns.clients_ended())
+        .await
+        .expect("the CANCEL's 200 ends its transaction");
+    txns.shutdown();
+}
+
+/// The mirror order: the CANCEL's 200 first, then the INVITE's 2xx, each the
+/// first response of its own transaction and each delivered.
+#[tokio::test(start_paused = true)]
+async fn an_invites_200_after_the_cancels_200_reaches_the_call() {
+    let (txns, _peer, peer_addr) = sim_rig().await;
+    txns.on_outbound(&Datagram::sniff(&request("INVITE", "1 INVITE")), peer_addr);
+    txns.on_outbound(&Datagram::sniff(&request("CANCEL", "1 CANCEL")), peer_addr);
+    assert!(txns.on_inbound(&Datagram::sniff(&response(200, "1 CANCEL", "")), peer_addr));
+    assert!(
+        txns.on_inbound(&Datagram::sniff(&response(200, "1 INVITE", "")), peer_addr),
+        "the INVITE's 200 is delivered, not absorbed as the CANCEL 200's retransmission"
+    );
+    txns.shutdown();
+}
+
 /// A client transaction no final answers ends at Timer F: the wait for it is
 /// bounded by 64·T1 after the request.
 #[tokio::test(start_paused = true)]
