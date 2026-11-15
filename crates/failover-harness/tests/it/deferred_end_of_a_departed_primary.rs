@@ -21,7 +21,7 @@
 use std::time::Duration;
 
 use failover_harness::{
-    assert_call_fully_over, assert_call_fully_released, cookie_field, total_cdrs_for,
+    assert_call_fully_over, assert_call_fully_released, cdrs_for, cookie_field, total_cdrs_for,
     FailoverHarness, ReplicatedB2buaSut, WorkerHealth,
 };
 
@@ -81,14 +81,18 @@ async fn an_end_deferred_to_a_primary_that_departs_is_discharged_by_the_sweep() 
 /// reconciled a deferred end — its CDR written, its delete sent — and left the
 /// set before the backup applied that delete. The departure parks the
 /// backup's flows, so the delete never lands, and the sweep discharges the
-/// ended Element again: two CDRs. The window runs from the copy's flush to the
-/// park; here the primary's writes to the backup are held throughout.
+/// ended Element again: two CDRs, which carry the call's one incarnation, the
+/// key a consumer dedupes them on (ADR-0055 §5). The window runs from the
+/// copy's flush to the park; here the primary's writes to the backup are held
+/// throughout.
 #[tokio::test(start_paused = true)]
 async fn an_end_reconciled_by_a_primary_that_departs_before_its_delete_lands_is_discharged_twice() {
     let Established { mut fh, alice, bob, proxy, w_b1, w_b2, pri_ord, call_ref, mut dialog } =
         establish("deferred-end-reconciled-then-departed").await;
     let bak_ord = if pri_ord == "b1" { "b2" } else { "b1" };
     let (primary, backup) = if pri_ord == "b1" { (&w_b1, &w_b2) } else { (&w_b2, &w_b1) };
+    let incarnation =
+        primary.live_call(&call_ref).expect("the primary serves the call").incarnation().to_owned();
     fh.stall(&pri_ord, bak_ord);
     // The proxy reads the running primary dead: the BYE reaches the backup.
     proxy.set_health(&pri_ord, WorkerHealth::Dead);
@@ -112,7 +116,11 @@ async fn an_end_reconciled_by_a_primary_that_departs_before_its_delete_lands_is_
         .await;
     fh.linger_peers(&[&alice, &bob], Duration::from_secs(3)).await;
     assert!(released, "nothing of the call is left");
-    assert_eq!(total_cdrs_for(&[primary, backup], &call_ref), 2, "the residual: two CDRs");
+    let cdrs = cdrs_for(&[primary, backup], &call_ref);
+    assert_eq!(cdrs.len(), 2, "the residual: two CDRs");
+    for cdr in &cdrs {
+        assert_eq!(cdr.incarnation, incarnation, "both CDRs name the call's one incarnation");
+    }
     drop(proxy);
 }
 

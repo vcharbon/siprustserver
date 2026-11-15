@@ -370,9 +370,10 @@ mod tests {
     }
 
     /// The native record of [`a_call`], created at 1000 and terminated at 2000,
-    /// as the RabbitMQ sink has always published it.
+    /// as the RabbitMQ sink publishes it.
     const GOLDEN: &str = concat!(
-        r#"{"call_ref":"w0|sink-probe@10.0.0.9|alicetag","created_at":1000,"terminated_at":2000,"#,
+        r#"{"call_ref":"w0|sink-probe@10.0.0.9|alicetag","#,
+        r#""incarnation":"w0|sink-probe@10.0.0.9|alicetag#94dmne6v","created_at":1000,"terminated_at":2000,"#,
         r#""a_leg":{"call_id":"sink-probe@10.0.0.9","from_tag":"alicetag","state":"trying"},"#,
         r#""b_legs":[],"events":[{"type":"invite_received","timestamp":1000,"leg_id":"a","#,
         r#""status_code":null,"reason":null,"decision_ordinal":0}],"decision_log":[],"#,
@@ -381,7 +382,8 @@ mod tests {
 
     /// The same call discharged at 500, before its creation: clamped and flagged.
     const GOLDEN_SKEWED: &str = concat!(
-        r#"{"call_ref":"w0|sink-probe@10.0.0.9|alicetag","created_at":1000,"terminated_at":1000,"#,
+        r#"{"call_ref":"w0|sink-probe@10.0.0.9|alicetag","#,
+        r#""incarnation":"w0|sink-probe@10.0.0.9|alicetag#94dmne6v","created_at":1000,"terminated_at":1000,"#,
         r#""clock_skew_clamped":true,"#,
         r#""a_leg":{"call_id":"sink-probe@10.0.0.9","from_tag":"alicetag","state":"trying"},"#,
         r#""b_legs":[],"events":[{"type":"invite_received","timestamp":1000,"leg_id":"a","#,

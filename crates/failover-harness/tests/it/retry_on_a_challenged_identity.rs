@@ -30,7 +30,7 @@ use std::time::Duration;
 
 use call::MsgpackCodec;
 use failover_harness::{
-    assert_call_fully_released, total_cdrs_for, worker_ordinals, FailoverHarness, PartitionRole,
+    assert_call_fully_released, cdrs_for, worker_ordinals, FailoverHarness, PartitionRole,
     ProxySut, ReplicatedB2buaSut, WorkerHealth,
 };
 use repl_net::frame::{Frame, Op};
@@ -238,10 +238,15 @@ async fn a_retry_on_a_challenged_identity(name: &str, retry: Retry) {
         })
         .await;
     fh.linger_peers(&[&alice, &bob], Duration::from_secs(3)).await;
+    let mut incarnations: Vec<String> =
+        cdrs_for(&[&w_b1, &w_b2], &call_ref).into_iter().map(|cdr| cdr.incarnation).collect();
+    incarnations.sort();
+    let mut expected =
+        vec![challenged.call.incarnation().to_owned(), served.incarnation().to_owned()];
+    expected.sort();
     assert_eq!(
-        total_cdrs_for(&[&w_b1, &w_b2], &call_ref),
-        2,
-        "one CDR for the challenged call and one for the retry"
+        incarnations, expected,
+        "one CDR for the challenged call and one for the retry, told apart by incarnation"
     );
     assert_call_fully_released(&[&w_b1, &w_b2], &call_ref).await;
     fh.assert_sip_rfc_clean(name);

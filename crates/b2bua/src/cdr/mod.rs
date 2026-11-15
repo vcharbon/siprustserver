@@ -41,6 +41,10 @@ pub struct CdrBLeg {
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct CdrRecord {
     pub call_ref: String,
+    /// The call's incarnation ([`Call::incarnation`]): the key a consumer
+    /// dedupes on. Two records of one call carry the same one; a retried
+    /// INVITE born on the same `call_ref` carries another (ADR-0055 §5).
+    pub incarnation: String,
     pub created_at: i64,
     pub terminated_at: i64,
     /// `true` when [`build_record`] had to clamp `terminated_at` up to
@@ -81,6 +85,7 @@ pub fn build_record(call: &Call, terminated_at: i64) -> CdrRecord {
     let terminated_at = terminated_at.max(call.created_at);
     CdrRecord {
         call_ref: call.call_ref.clone(),
+        incarnation: call.incarnation().to_owned(),
         created_at: call.created_at,
         terminated_at,
         clock_skew_clamped,

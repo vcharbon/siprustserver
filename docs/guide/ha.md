@@ -128,10 +128,9 @@ These are the CDRs that the workers write. A worker keeps a written CDR in memor
 publishes it, and a worker that dies loses the CDRs it did not publish. See
 [What HA does not cover](#what-ha-does-not-cover).
 
-Two CDRs of one call carry the same `call_ref` and the same `created_at`. Your billing chain
-must remove the duplicate with these two fields. Do not use `call_ref` alone: a caller that
-sends its INVITE again with the same Call-ID and From tag makes a new call with the same
-`call_ref`.
+Two CDRs of one call carry the same `incarnation`. Your billing chain must remove the duplicate
+with this field. Do not use `call_ref`: a caller that sends its INVITE again with the same
+Call-ID and From tag makes a new call with the same `call_ref` and another `incarnation`.
 
 ## Degraded operation
 
