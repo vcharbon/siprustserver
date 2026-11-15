@@ -41,9 +41,10 @@ pub struct CdrBLeg {
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct CdrRecord {
     pub call_ref: String,
-    /// The call's incarnation ([`Call::incarnation`]): the key a consumer
-    /// dedupes on. Two records of one call carry the same one; a retried
-    /// INVITE born on the same `call_ref` carries another (ADR-0055 §5).
+    /// The call's incarnation ([`Call::incarnation`]). The worker dedupes
+    /// nothing (ADR-0055 §5); a consumer dedupes on this field: two records
+    /// of one call carry the same one, a retried INVITE born on the same
+    /// `call_ref` carries another.
     pub incarnation: String,
     pub created_at: i64,
     pub terminated_at: i64,
