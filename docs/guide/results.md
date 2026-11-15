@@ -168,7 +168,9 @@ the second. The calls had started 2 to 3 minutes before.
 
 The run is `invalid` because of these calls. This run reads them as a `record_gap`: its
 generator counters predate the count of SIPp's failed calls. A run of the current runner reads
-them as a `generator_failure` that names the two windows. The profile's `record_shortfall_pct`
+them as a `generator_failure` that names each window a `callee_reinvite` call (up to 304 s)
+can have met before an abort: the two CPU starvation and spike windows, and the windows just
+before them. The profile's `record_shortfall_pct`
 (0.1 %) tolerates only failures that no window can have touched. A failure inside a window can
 be a call that the fault broke, and the window's budget cannot judge a call with no record.
 Whether the system under test or the generator causes the mismatch is not yet known.

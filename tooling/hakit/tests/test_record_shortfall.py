@@ -83,6 +83,28 @@ def test_a_failure_within_a_call_life_of_a_window_belongs_to_it(tmp_path: Path) 
         assert compute(d, SCHEMAS)["status"] == status, name
 
 
+def test_the_reach_of_a_failed_call_counts_its_scenario_defaults(tmp_path: Path) -> None:
+    """An OPTIONS flood with no count of its own takes the base UAC's declared
+    200 requests 200 ms apart: 40 s of flood instead of the 20 s hold, so a
+    call failing at 227 s may have started inside the window that closed at
+    125 s."""
+    flood = {
+        "name": "basic",
+        "driver": "sipp",
+        "shape": "basic",
+        "scenario": "uac-basic-hold.xml",
+        "cps": 20,
+        "setup_deadline_s": 32,
+        "ring_s": 5,
+        "hold_s": 20,
+        "params": {"abuse": "options_flood"},
+    }
+    profile = {**PCT, "streams": [flood]}
+    d = run_dir(tmp_path, RECS, calls=100, events=kill(1, T0 + 80_000), profile=profile, stream={"generator_failures": 1})
+    stat_rows(d, [(T0 + 226_000, 0), (T0 + 227_000, 1)])
+    assert compute(d, SCHEMAS)["status"] == "invalid"
+
+
 def test_a_failure_its_statistics_do_not_place_makes_the_run_invalid(tmp_path: Path) -> None:
     d = run_dir(tmp_path / "none", RECS, calls=100, events=[], profile=PCT, stream={"generator_failures": 1})
     v = compute(d, SCHEMAS)

@@ -27,10 +27,12 @@ from .judge import ALL_CALL_IDS, budget_of, judge
 from .limiters import judge_limiters
 from .jsonval import Json, as_obj
 from .model import Budget, Shape, parse_budget, parse_catalog
-from .profile import Profile, parse_profile
+from .profile import Profile, Stream, parse_profile
 from .recovery import Sample, StreamSamples
 from .report_metrics import kept as kept_report_metrics
 from .generator_stats import FailureSpan, failure_spans, read_stat_csv
+from .paths import BASE_CONTENT
+from .scenario_lint import key_defaults
 from .sipp_driver import worst_call_s as sipp_worst_call_s
 from .reconcile import integrity, place, reconcile, tolerated
 from .schemas import SchemaSet
@@ -120,14 +122,19 @@ def _failure_spans(run_dir: Path, stream: str) -> list[FailureSpan]:
     return out
 
 
-def _worst_call_s(profile: Profile, stream: str) -> float:
-    """The longest a call of `stream` can take, by its generator's own bound;
-    the profile's longest for a stream it does not name."""
+def _worst_call_s(profile: Profile, stream: str, search_path: list[Path]) -> float:
+    """The longest a call of `stream` can take, by its generator's own bound
+    under its scenario's declared keys (found on the run's search path); the
+    profile's longest for a stream it does not name."""
     streams = [s for s in profile.streams if s.name == stream] or profile.streams
-    return max(
-        (sipp_worst_call_s(s) if s.driver == "sipp" else loadgen.worst_call_s(s) for s in streams),
-        default=0.0,
-    )
+
+    def worst(s: Stream) -> float:
+        if s.driver != "sipp":
+            return loadgen.worst_call_s(s)
+        found = next((p for p in (e / "scenarios" / (s.scenario or "") for e in search_path) if p.is_file()), None)
+        return sipp_worst_call_s(s, None if found is None else key_defaults(found))
+
+    return max((worst(s) for s in streams), default=0.0)
 
 
 def _samples(calls: _Calls, stalls: list[Stall], profile: Profile) -> dict[str, StreamSamples]:
@@ -294,8 +301,9 @@ def _compute(run_dir: Path, schemas: SchemaSet) -> Json:
             {"at_ms": st.at_ms, "ms": round(st.ms, 3), "spoiled": len(stalled.get(st, [])), "source": st.source}
         )
     spans = [(w.event, w.opened_at_ms, w.closed_at_ms) for w in windows]
+    search_path = [*(Path(p) for p in jv.strings(meta, "search_path")), BASE_CONTENT]
     placed = {
-        name: place(_failure_spans(run_dir, name), spans, _worst_call_s(profile, name) * 1000)
+        name: place(_failure_spans(run_dir, name), spans, _worst_call_s(profile, name, search_path) * 1000)
         for name in (jv.string(s, "stream") for s in streams_doc)
     }
     streams_out, reconciled = reconcile(

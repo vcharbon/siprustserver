@@ -644,8 +644,10 @@ made. A run profile joins the two.
    calls that went wrong. SIPp's `FailedCall` counts the calls it ended with
    no record, and its statistics rows place them in time. A
    `generator_failure` is `tolerated`, and the run stays valid, only when the
-   counters agree, no window meets the reach of any failed call (from its
-   stream's longest call before the failure, to the failure), and the
+   counters agree, no window meets the reach of any failed call (from the
+   generator's worst-case call of its stream before the failure, to the
+   failure: give-up, hold and each 64*T1 wait, longer than the call life of
+   §3.7), and the
    failures are at most the profile's `record_shortfall_pct` (default 0.1 %)
    of the stream's calls: a generator fault in calm traffic. A failed call a
    window may have touched can be a call the fault broke, so it stays a
