@@ -65,6 +65,7 @@ fn the_review_of_the_selection_is_placed_on_the_stated_side() {
     assert!(stderr.contains("1 selected group(s) sut=192.0.2.10 (stated)"), "{stderr}");
     assert!(stderr.contains("no-ack-to-dialog-creating-2xx: 2 hit(s)"), "{stderr}");
     assert!(stderr.contains("side peer: 1\n  side platform: 1"), "{stderr}");
+    assert!(!stderr.contains("serial-register"), "a rule with no occasion is not listed\n{stderr}");
 
     golden("review.golden.txt", &stdout);
 

@@ -24,11 +24,11 @@ id/attributes in more than one place (the silent drift separate closed
 registries invite).
 
 **Load body**:
-The `Send + Sync` `RealCallScenario` a **Shape descriptor** may carry, minted by
+The `Send + Sync` `ActorScenario` a **Shape descriptor** may carry, minted by
 the descriptor's `LoadFactory` from per-run `ScenarioInputs` (fallible `try_*`
 surface; a deviation is a counted `StepError`).
 _Avoid_: "LoadScenario" as the trait name in new code (a re-export alias of
-`RealCallScenario`).
+`ActorScenario`).
 
 **Binding pool**:
 A **Test case**'s optional `bindings: { mode, entries }`, a **wrap-allowed**

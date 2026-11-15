@@ -631,48 +631,34 @@ the shape ids the product registered and exits.
 
 ### Add a load scenario (a body + a descriptor — no match arms anywhere)
 
-1. Write the **load body** — a unit struct implementing `RealCallScenario`
-   (`scenario_harness::realcall`; re-exported as
-   `loadgen::scenarios::LoadScenario`). The shipped bodies live in
-   `crates/callshapes/src/shapes.rs` so the SAME flow
-   serves the load fleet and the in-process functional leak gate; a third-party
-   crate implements the trait wherever it likes. Load attributes
-   (charlie/bob2/emergency) are **not** on the trait — they live on the
+1. Write the **load body**, an `ActorScenario` (`scenario_harness::actor`;
+   re-exported as `loadgen::scenarios::LoadScenario`): its `build(env)` declares
+   one call as per-endpoint actors (an `ActorCall`) the runner drives, the same
+   flow serving the load fleet and the in-process functional leak gate. The
+   usual body is a composed `ShapePlan` (`callshapes`), which implements the
+   trait: an establishment, pipeline stages on the current dialog, a teardown,
+   with routing stated through a `RouteBinder`. The shipped shapes are the
+   constructors of `crates/callshapes/src/shapes.rs`; the hand-written actor
+   bodies are in `crates/scenario-harness/src/actor/scenarios`. Load attributes
+   (charlie/bob2/emergency) are **not** on the body — they live on the
    descriptor (step 2):
 
    ```rust
-   pub struct MyFlow;
-
-   #[async_trait]
-   impl RealCallScenario for MyFlow {
-       fn id(&self) -> ScenarioId { "my_flow" }   // the body's intrinsic name; the
-                                                  // report/metrics id is the DESCRIPTOR's
-
-       async fn run(&self, env: &CallEnv<'_>, scope: &CallScope, ctx: &CallCtx)
-           -> Result<(), StepError>
-       {
-           // Reuse the shared building blocks where you can:
-           let mut dialog = establish(env, scope, ctx).await?;   // INVITE/180/200/ACK
-           // ... the interesting middle ...
-           hangup(env, scope, &mut dialog, ctx).await             // BYE/200
+   pub fn my_flow(binder: Arc<dyn RouteBinder>) -> ShapePlan {
+       ShapePlan {
+           id: "my_flow", // the body's name; the report id is the descriptor's
+           binder,
+           establish: Establishment::Transparent,
+           stages: vec![/* in-dialog scripts, transfers */],
+           teardown: Teardown::CallerBye {
+               after: DwellKnob::TalkTime,
+               feed: ByeFeed::CheckpointAndPhase,
+           },
+           ringing_gate: true,
+           stamp_connected: true,
        }
    }
    ```
-
-   - `env` gives you the bound agents (`env.alice` UAC, `env.bob` UAS, optional
-     `env.charlie`), `env.via` (the SUT ingress) and `env.outgoing_invite(&["bob"],
-     inv)` — the egress seam that realizes the logical INVITE on this run's wire
-     (correlation stamp + emergency marker + the run's `EgressPolicy` rewrite)
-     — plus `env.callee(role)`
-     to resolve any callee target and the REFER helpers (`env.refer_to()`,
-     `env.refer_authorization(refer_key)`). Per-run SUT auth data (the refer
-     scenarios' `refer_key`) is fed at CONSTRUCTION via `ScenarioInputs`, not the
-     env.
-   - **Register your dialog state in `scope`** as the call progresses
-     (`set_early` once the INVITE is out, `set_confirmed` once it answers,
-     `mark_terminated` once you tear it down) so a mid-flow failure is still
-     cleaned up by the driver — this is what keeps the SUT leak-free.
-   - `ctx.checkpoint("name")` records a latency checkpoint (shows in the report).
 
 2. Declare it ONCE in the unified, open shape registry
    (`e2e_model::registry::default_shapes`, or `ShapeRegistry::register` from a
@@ -680,7 +666,7 @@ the shape ids the product registered and exits.
    attributes (`.needs_charlie()` / `.needs_bob2()` / `.emergency()`), an
    optional `.default_weight(w)` for the default mix, the published
    `.anchors(…)` (so Test-case checks can bind), and the body factory —
-   `.load_shared(Arc::new(MyFlow))`, or `.load_with(|inputs| …)` when it needs
+   `.load_shared(Arc::new(my_flow(default_binder())))`, or `.load_actor_with(|inputs| …)` when it needs
    per-run SUT auth data (`ScenarioInputs`). That is the whole wiring: the
    driver resolves the descriptor from the registry (`MixEntry::by_id` /
    `--scenario my_flow=…`, `MixEntry::default_mix` / `abnormal_end_mix` for the
@@ -879,7 +865,7 @@ There is no REGISTER **load shape** yet, but the pieces are in place:
   send for free — a registrar almost always challenges, and the
   `ChallengeResponder` seam above is exactly the adapter it needs (`401` →
   credential → resend, once).
-- A `register-refresh` shape would be a `RealCallScenario` that REGISTERs
+- A `register-refresh` shape would be an `ActorScenario` that REGISTERs
   (binding its AOR), holds for the binding lifetime with periodic refreshes, then
   de-registers (Expires: 0) — declared once as a `ShapeDescriptor` like every
   other shape, with the AOR/credentials driven from the Test-case binding pool

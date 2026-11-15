@@ -137,8 +137,7 @@ pub fn originating_role(actors: &[ActorSpec]) -> &'static str {
         .unwrap_or("alice")
 }
 
-/// Drive one [`ActorScenario`] to its [`ScenarioVerdict`] — the actor
-/// analogue of one `RealCallScenario::run` invocation. Builds the call from the
+/// Drive one [`ActorScenario`] to its [`ScenarioVerdict`]: one call. Builds the call from the
 /// env (a build guard error is [`ScenarioVerdict::build_failure`]), runs the
 /// joined actors + controller (teardown scopes survive a panic — see
 /// [`run_call_with`](super::run_call_with)), and reads the verdict.

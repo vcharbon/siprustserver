@@ -86,9 +86,10 @@ pub struct RunnerEnv {
     /// `B2BUA_CONCURRENCY` — handler concurrency ceiling (default 8192; a
     /// back-pressure SAFETY limit, not a rate governor).
     pub concurrency: usize,
-    /// `B2BUA_CALL_CAP` — live per-call queues; past it an event for a call
-    /// with no queue is refused, a new INVITE with a 503 (ADR-0022 X6;
-    /// default 1_000_000).
+    /// `B2BUA_CALL_CAP` — live per-call queues; at it a request or response
+    /// for a call with no queue is refused, a normal new INVITE already at the
+    /// cap less the new-call headroom, with a 503 (ADR-0022 X6; default
+    /// 1_000_000).
     pub call_cap: usize,
     /// `B2BUA_NEW_CALL_PERMIT_SHARE_PCT` — share of the handler concurrency
     /// normal initial-INVITE turns may hold, percent (default 50).

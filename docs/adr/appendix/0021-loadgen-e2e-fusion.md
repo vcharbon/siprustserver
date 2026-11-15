@@ -34,7 +34,7 @@ a silent shadow). The descriptor is the shape's single declaration: published
 anchors, required input, optional authoring params schema, the load attributes
 the driver consults per call (`needs_charlie`/`needs_bob2`/`emergency`, default
 and failure mix weights), and an optional **load body** factory
-(`LoadFactory → Arc<dyn RealCallScenario>`, minted from per-run
+(`LoadFactory → Arc<dyn ActorScenario>`, minted from per-run
 `ScenarioInputs`). The **functional body** cannot live in the light crate (it
 drives an `InfraRuntime`), so `e2e-core` `attach()`es its `!Send` bodies **by
 id** onto the same descriptors. A shape may carry one body, the other, or
