@@ -3,7 +3,7 @@
  * directory it is handed, and its summary is the verdict a reader is told.
  */
 import { Campaign, CellHits, Confrontation, E2e } from "@sip/contracts"
-import { Reclassifier } from "@sip/pipeline"
+import { Classifier, Reclassifier } from "@sip/pipeline"
 import * as Effect from "effect/Effect"
 import * as fs from "node:fs"
 import * as path from "node:path"
@@ -463,5 +463,25 @@ describe("the post-run escape hatch", () => {
     })
     const written = fs.readFileSync(path.join(dir, cell.dir, RULE_HITS_FILE), "utf8")
     expect(CellHits.decodeHitsSync(JSON.parse(written) as unknown)).toEqual(hits)
+  })
+})
+
+describe("a deployment's own reading of the document", () => {
+  it("reaches its classifier in the confrontation's case context", async () => {
+    const callIds: Classifier.PackOf = (pivot) => ({ calls: pivot.calls.map((c) => c.id) })
+    const ruleOf = (pack: unknown): string =>
+      typeof pack === "object" && pack !== null && "calls" in pack ? `calls:${String(pack.calls)}` : ""
+    const classifier = Classifier.layerWith(
+      (_, context) => () => ({ class: "accepted", rule: ruleOf(context.pack), ticket: "" }),
+      callIds
+    )
+    const cases = runDir("cases")
+    dirs.push(cases)
+    const { dir, cell } = await one(replayCell({ case: caseExpectingBody(cases, "<request/>") }), { rig: { classifier } })
+    const records = Confrontation.parseConfrontationLines(
+      fs.readFileSync(path.join(dir, cell.dir, CONFRONTATION_FILE), "utf8")
+    )
+    expect(records.length).toBeGreaterThan(0)
+    expect(new Set(records.map((r) => r.rule))).toEqual(new Set(["calls:c1"]))
   })
 })
