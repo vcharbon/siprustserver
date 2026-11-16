@@ -67,6 +67,8 @@ pub struct LegFacts {
     /// The leg's own in-dialog requests awaiting a final, by CSeq number:
     /// their method and when they were first sent.
     pub(crate) pending: HashMap<u32, (String, i64)>,
+    /// The leg sent or received a BYE.
+    pub(crate) byed: bool,
 }
 
 impl LegFacts {
@@ -136,13 +138,30 @@ impl WireFacts {
     }
 }
 
+/// Whether the non-2xx final `code` to an in-dialog request fails it: a 481
+/// or 487 that reached a side after a BYE ended its dialog answers a request
+/// still in flight when the dialog ended (RFC 3261 §15.1.2, §12.2.2).
+fn fails(code: u16, byed: bool) -> bool {
+    code >= 300 && !(byed && matches!(code, 481 | 487))
+}
+
+/// Forget the 491 or 500 finals of `failures` to the `method` requests: the
+/// side re-sent the re-INVITE or UPDATE they refused (RFC 3261 §14.1), and
+/// the retry's own final judges it.
+fn retried(failures: &mut Vec<WireFailure>, method: &str) {
+    if matches!(method, "INVITE" | "UPDATE") {
+        failures.retain(|f| f.method != method || !matches!(f.code, Some(491 | 500)));
+    }
+}
+
 /// After the seal, the final `code` to the request `method` `cseq`: a
 /// request other than a BYE that `pending` still holds is settled, a non-2xx
-/// one a failure. A late 481 is that request's failure only: the call's
-/// ending stays as the seal left it, never `cut`.
+/// one a failure unless the side's dialog had ended (`byed`, [`fails`]). A
+/// late 481 is that request's failure only: the call's ending stays as the
+/// seal left it, never `cut`.
 fn settle_pending(
-    pending: &mut HashMap<u32, (String, i64)>,
-    failures: &mut Vec<WireFailure>,
+    (pending, failures): (&mut HashMap<u32, (String, i64)>, &mut Vec<WireFailure>),
+    byed: bool,
     method: &str,
     cseq: u32,
     code: u16,
@@ -153,7 +172,7 @@ fn settle_pending(
         return;
     }
     pending.remove(&cseq);
-    if code >= 300 {
+    if fails(code, byed) {
         failures.push(WireFailure { at_ms: now, method: method.to_string(), code: Some(code) });
     }
 }
@@ -236,7 +255,9 @@ impl WireFacts {
             let bye_ok = method == "BYE" && id.status.is_some_and(|c| (200..300).contains(&c));
             self.teardown_released |= bye_ok;
             if let (Dir::In, Some(code)) = (dir, id.status) {
-                settle_pending(&mut self.pending, &mut self.failures, method, cseq, code, now);
+                let byed = self.byed();
+                let side = (&mut self.pending, &mut self.failures);
+                settle_pending(side, byed, method, cseq, code, now);
             }
             return;
         }
@@ -285,6 +306,7 @@ impl WireFacts {
                 if method == "BYE" {
                     self.bye.get_or_insert(None);
                 }
+                retried(&mut self.failures, method);
                 self.pending.entry(cseq).or_insert_with(|| (method.to_string(), now));
             }
         }
@@ -331,13 +353,19 @@ impl WireFacts {
         }
     }
 
+    /// The caller sent or received a BYE.
+    fn byed(&self) -> bool {
+        self.bye.is_some() || self.bye_received.is_some()
+    }
+
     fn in_dialog_final(&mut self, cseq: u32, code: u16, now: i64) {
+        let byed = self.byed();
         let Some((method, _)) = self.pending.remove(&cseq) else { return };
         if method == "BYE" {
             self.bye = Some(Some(code));
         }
-        self.saw_481 |= code == 481;
-        if code >= 300 {
+        if fails(code, byed) {
+            self.saw_481 |= code == 481;
             self.failures.push(WireFailure { at_ms: now, method, code: Some(code) });
         }
     }
@@ -351,7 +379,15 @@ impl WireFacts {
                 (dir, id.status, opened, id.cseq_method, id.cseq)
             {
                 let leg = &mut self.legs[i];
-                settle_pending(&mut leg.pending, &mut leg.failures, method, cseq, code, now);
+                let byed = leg.byed;
+                settle_pending(
+                    (&mut leg.pending, &mut leg.failures),
+                    byed,
+                    method,
+                    cseq,
+                    code,
+                    now,
+                );
             }
             return;
         }
@@ -364,7 +400,10 @@ impl WireFacts {
             (Dir::In, None, Some(i)) if id.method == Some("CANCEL") => {
                 self.legs[i].cancelled = true;
             }
-            (Dir::In, None, Some(i)) => note_request(&mut self.legs[i].received, d, now),
+            (Dir::In, None, Some(i)) => {
+                self.legs[i].byed |= id.method == Some("BYE");
+                note_request(&mut self.legs[i].received, d, now)
+            }
             (Dir::Out, None, Some(i)) => self.legs[i].sent_request(id, now),
             (Dir::In, Some(code), Some(i)) => self.legs[i].own_final(id, code, now),
             (Dir::Out, Some(code), Some(i)) if id.cseq_method == Some("INVITE") => {
@@ -388,6 +427,8 @@ impl LegFacts {
     fn sent_request(&mut self, id: &Identity<'_>, now: i64) {
         let (Some(method), Some(cseq)) = (id.method, id.cseq) else { return };
         if method != "ACK" && method != "CANCEL" && !untagged(id) {
+            self.byed |= method == "BYE";
+            retried(&mut self.failures, method);
             self.pending.entry(cseq).or_insert_with(|| (method.to_string(), now));
         }
     }
@@ -399,7 +440,7 @@ impl LegFacts {
             return;
         }
         let Some((method, _)) = self.pending.remove(&cseq) else { return };
-        if code >= 300 {
+        if fails(code, self.byed) {
             self.failures.push(WireFailure { at_ms: now, method, code: Some(code) });
         }
     }
