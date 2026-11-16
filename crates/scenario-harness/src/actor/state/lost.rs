@@ -3,7 +3,7 @@
 //! the leg had observed when it was folded in: the drop came before every
 //! later response.
 
-use super::{LegObservation, StateInner};
+use super::{LegObservation, ResponseFact, StateInner};
 use crate::realcall::LostMessage;
 
 /// One datagram the loss model dropped, to or from a leg.
@@ -35,6 +35,19 @@ impl LegObservation {
             l.responses_before <= index
                 && l.message.inbound
                 && l.message.is_invite_response_in(200..300)
+        })
+    }
+
+    /// Whether the loss model dropped a provisional above 100 to this leg's
+    /// INVITE on its way to the leg before the leg received one: the early
+    /// dialog it opened may never be known to the leg. Once true, it stays.
+    pub fn ring_lost_unheard(&self) -> bool {
+        let ring = |f: &ResponseFact| (101..200).contains(&f.status) && f.cseq_method == "INVITE";
+        let first_ring = self.responses.iter().position(ring).unwrap_or(usize::MAX);
+        self.lost.iter().any(|l| {
+            l.responses_before <= first_ring
+                && l.message.inbound
+                && l.message.is_invite_response_in(101..200)
         })
     }
 

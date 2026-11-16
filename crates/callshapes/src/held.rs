@@ -66,8 +66,22 @@ fn heard_and(gate: Barrier) -> Barrier {
     Barrier::pred(gate.name(), move |s| gate.holds(s) && s.leg("alice").heard_provisional())
 }
 
+/// `gate`, once the caller also rang: her early request names the early
+/// dialog her ringing opened (RFC 3261 §12.1.2).
+fn rang_and(gate: Barrier) -> Barrier {
+    Barrier::pred(gate.name(), move |s| gate.holds(s) && s.leg_rang("alice"))
+}
+
+/// The caller's ringing was lost before she rang: she knows no early dialog
+/// to send an early request on.
+fn ring_unheard() -> Barrier {
+    Barrier::pred("ring_unheard", |s| s.leg("alice").ring_lost_unheard())
+}
+
 /// `count` early requests `by` sends one after another, each on the previous
-/// one's 2xx; the gate becomes "all answered".
+/// one's 2xx; the gate becomes "all answered". Under unreliable provisionals
+/// the caller's wait for her own ringing, and are skipped when it was lost
+/// before she rang ([`ring_unheard`]); the gate then holds too.
 pub(crate) fn compile_early(
     establish: Establishment,
     b: &mut Build,
@@ -87,15 +101,29 @@ pub(crate) fn compile_early(
     let sent = |g: &Goal| matches!(g.step, GoalStep::EarlyRequest { method: m, .. } if m == method);
     let base =
         u32::try_from(b.goals_mut(role).iter().filter(|g| sent(g)).count()).unwrap_or(u32::MAX);
+    let unheard =
+        by == Party::Caller && matches!(establish, Establishment::Held { reliable: false, .. });
     for i in 0..count {
         let guard =
             if i == 0 { b.gate.clone() } else { answered("early_exchanged", role, name, base + i) };
-        b.goals_mut(role).push(Goal::new(guard, GoalStep::EarlyRequest { method, fork }));
+        let step = GoalStep::EarlyRequest { method, fork };
+        let goal = if unheard {
+            Goal::new(rang_and(guard), step).unless(ring_unheard())
+        } else {
+            Goal::new(guard, step)
+        };
+        b.goals_mut(role).push(goal);
     }
     if method == InDialogMethod::Update {
         b.add_renegs(role, count);
     }
-    b.gate = answered("early_exchanged", role, name, base + count);
+    let exchanged = answered("early_exchanged", role, name, base + count);
+    b.gate = if unheard {
+        let skipped = ring_unheard();
+        Barrier::pred("early_exchanged", move |s| exchanged.holds(s) || skipped.holds(s))
+    } else {
+        exchanged
+    };
 }
 
 /// The held callee's answer, once the early stages completed and the ring
