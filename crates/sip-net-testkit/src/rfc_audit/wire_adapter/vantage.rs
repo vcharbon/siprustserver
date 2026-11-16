@@ -120,7 +120,6 @@ impl Live {
                 self.detail,
             ),
             Vantage::TakerElseEmitter => {
-                // The taker's lane must be in the view to report there.
                 let recorded = pass.recorded();
                 at_vantage(
                     pass,
