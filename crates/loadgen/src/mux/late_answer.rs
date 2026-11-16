@@ -8,7 +8,10 @@
 //!
 //! Held: every final to a non-INVITE request, and an INVITE's non-2xx final
 //! (whose ACK the hold then absorbs). An INVITE's 2xx is the dialog's own
-//! (§13.3.1.4) and is not held. For an in-dialog request that reached the
+//! (§13.3.1.4) and is not held: a marker without bytes, keyed by its CSeq,
+//! stands for it, and an ACK of that CSeq is absorbed (the 2xx's ACK is a
+//! transaction of its own, under a new branch: §13.2.2.4, §17.1.1.3). For an
+//! in-dialog request that reached the
 //! endpoint, delivered or dropped by the loss model on its way in, the 481 of
 //! a UA that no longer holds the dialog (§12.2.2) is held until the agent
 //! answers it: a retransmission arriving once the call released without
@@ -19,8 +22,8 @@
 //! Confirmed): its bytes go, and a retransmitted INVITE or ACK of that
 //! transaction is absorbed.
 //!
-//! Bounds: per dialog the last [`ANSWERS_HELD`] answers, each the response
-//! datagram as sent (the copy the endpoint's other stores share) with a
+//! Bounds: per dialog the last [`ANSWERS_HELD`] answers and markers, each
+//! answer the response datagram as sent (the copy the endpoint's other stores share) with a
 //! hashed transaction key and its request's ladder arrow; dropped with the
 //! endpoint, or for a released dialog when its hold
 //! ([`RELEASE_HOLD`](super::RELEASE_HOLD), 64·T1 = 32 s) expires. In
@@ -61,12 +64,18 @@ fn txn_key(cseq: u32, method: &str, branch: &str) -> u64 {
     key_of((cseq, method, branch))
 }
 
+/// The key of the marker an INVITE 2xx with CSeq number `cseq` leaves: its
+/// ACK carries that number under a branch of its own (RFC 3261 §13.2.2.4).
+fn answered_invite_key(cseq: u32) -> u64 {
+    key_of((cseq, "INVITE 2xx"))
+}
+
 /// What a request arriving on a released dialog draws from its held answers.
 pub(in crate::mux) enum LateReply {
     /// No held answer is this request's: it is a stray.
     NotHeld,
-    /// The ACK of a held INVITE non-2xx final, or a retransmission of an
-    /// INVITE whose final was ACKed: absorbed.
+    /// The ACK of a held INVITE non-2xx final or of an INVITE 2xx the agent
+    /// sent, or a retransmission of an INVITE whose final was ACKed: absorbed.
     Absorbed,
     /// A retransmission of an answered request: the same final again, and
     /// where that re-send is reported.
@@ -88,7 +97,8 @@ impl HeldAnswers {
             return LateReply::NotHeld;
         };
         if method == "ACK" {
-            let held = acked(&mut self.0, cseq, branch);
+            let held = acked(&mut self.0, cseq, branch)
+                || self.0.iter().any(|a| a.txn == answered_invite_key(cseq));
             return if held { LateReply::Absorbed } else { LateReply::NotHeld };
         }
         let txn = txn_key(cseq, method, branch);
@@ -136,7 +146,8 @@ pub(in crate::mux) struct SentAnswers(Mutex<Vec<Answer>>);
 impl SentAnswers {
     /// Hold `d` when it is a final this endpoint's agent sends that a
     /// retransmitted request may draw again; it replaces an earlier answer to
-    /// the same transaction. `taps` resolve the request's ladder arrow.
+    /// the same transaction. An INVITE 2xx leaves only its marker, once per
+    /// CSeq. `taps` resolve the request's ladder arrow.
     pub(in crate::mux) fn on_outbound(&self, d: &Datagram<'_>, taps: Option<&Taps>) {
         let id = d.id();
         let (Some(status), Some(cid), Some(cseq), Some(method), Some(branch)) =
@@ -144,15 +155,28 @@ impl SentAnswers {
         else {
             return;
         };
+        let dialog = key_of(cid);
         if method == "INVITE" && status < 300 {
+            self.mark_answered_invite(dialog, cseq);
             return;
         }
         let repair = taps.and_then(|t| t.late_repair(id));
-        let (dialog, txn) = (key_of(cid), txn_key(cseq, method, branch));
+        let txn = txn_key(cseq, method, branch);
         let mut held = self.0.lock().unwrap();
         held.retain(|a| a.dialog != dialog || a.txn != txn);
         let answer = Answer { dialog, txn, bytes: Some(d.shared()), unanswered: false, repair };
         hold(&mut held, answer);
+    }
+
+    /// Hold the marker of an INVITE 2xx with CSeq number `cseq` on `dialog`,
+    /// unless it is held already (a retransmitted 2xx).
+    fn mark_answered_invite(&self, dialog: u64, cseq: u32) {
+        let txn = answered_invite_key(cseq);
+        let mut held = self.0.lock().unwrap();
+        if !held.iter().any(|a| a.dialog == dialog && a.txn == txn) {
+            let marker = Answer { dialog, txn, bytes: None, unanswered: false, repair: None };
+            hold(&mut held, marker);
+        }
     }
 
     /// Note `d`, an in-dialog request that reached this endpoint (delivered,
