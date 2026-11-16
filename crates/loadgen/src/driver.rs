@@ -411,7 +411,8 @@ pub(crate) async fn run_one(
     };
     let accepted = outcome.is_checkable();
     let outcome = outcome.audited(|| {
-        let wo = binder.rfc_findings(&merged_waivers);
+        let lost = ctx.loss_notes().by_party(alice.name());
+        let wo = binder.rfc_findings_under_loss(&merged_waivers, &lost);
         // Fold this sampled call's per-waiver use into the CAMPAIGN tally
         // (never per call — a call exercises only its own branch).
         reporter.record_waiver_use(id, &merged_waivers, &wo.used);
@@ -490,7 +491,8 @@ pub(crate) async fn run_one(
     reporter.record(id, &outcome, &case, e2e, &checkpoints, evidence);
     // The ladder takes the call's messages once its traffic is over.
     let fold = record::ladder_fold(&reporter, id, &tally, &outcome);
-    let write = record::outcome_write(outcomes, wire, id, outcome, ended_at_ms);
+    let excused = binder.loss_excused(ctx.loss_notes(), alice.name().to_string());
+    let write = record::outcome_write(outcomes, wire, id, outcome, ended_at_ms, excused);
     tail.finish(fold, Box::new(write), awaits);
     rtts.finish();
     reporter.dec_inflight();

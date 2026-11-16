@@ -19,6 +19,11 @@ pub struct LostMessage {
     pub cseq_method: String,
     /// The datagram carried a session description.
     pub sdp: bool,
+    /// The Call-ID, From tag and CSeq number: what names a request in its
+    /// dialog.
+    pub call_id: String,
+    pub from_tag: String,
+    pub cseq: u32,
 }
 
 impl LostMessage {
@@ -54,6 +59,13 @@ impl LossNotes {
     /// Every datagram noted so far, in the order dropped.
     pub fn all(&self) -> Vec<LostMessage> {
         self.0.lock().unwrap().notes.clone()
+    }
+
+    /// Every datagram noted so far with the party it was to or from: its
+    /// callee leg, else `caller`.
+    pub fn by_party(&self, caller: &str) -> Vec<(String, LostMessage)> {
+        let party = |m: &LostMessage| m.leg.clone().unwrap_or_else(|| caller.to_string());
+        self.all().into_iter().map(|m| (party(&m), m)).collect()
     }
 
     /// Hand `sink` every datagram noted so far, then each one as it is

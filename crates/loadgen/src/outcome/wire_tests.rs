@@ -426,3 +426,30 @@ async fn a_491_the_side_retried_is_no_failure() {
         vec![WireFailure { at_ms: 0, method: "INVITE".into(), code: Some(488) }]
     );
 }
+
+/// A refusal a UA gave a request the loss model's drops explain, relayed to
+/// the other side, is excused there: the caller's OPTIONS 500 goes, her INFO
+/// 488 stays, and the dialog is no longer read as gone once its 481 went.
+#[tokio::test(start_paused = true)]
+#[ignore = "slow lane: loadgen"]
+async fn an_excused_refusal_is_no_failure() {
+    let wire = CallWire::new(Clock::test_at(0));
+    let f = feed(
+        &wire,
+        &[
+            (Side::Caller, Dir::Out, msg("INVITE sip:b@h SIP/2.0", "c12", "1 INVITE", "", "")),
+            (Side::Caller, Dir::In, msg("SIP/2.0 200 OK", "c12", "1 INVITE", "t1", "")),
+            (Side::Caller, Dir::Out, msg("OPTIONS sip:b@h SIP/2.0", "c12", "2 OPTIONS", "t1", "")),
+            (Side::Caller, Dir::In, msg("SIP/2.0 500 Out Of Order", "c12", "2 OPTIONS", "t1", "")),
+            (Side::Caller, Dir::Out, msg("INFO sip:b@h SIP/2.0", "c12", "3 INFO", "t1", "")),
+            (Side::Caller, Dir::In, msg("SIP/2.0 488 Not Here", "c12", "3 INFO", "t1", "")),
+            (Side::Caller, Dir::Out, msg("PRACK sip:b@h SIP/2.0", "c12", "4 PRACK", "t1", "")),
+            (Side::Caller, Dir::In, msg("SIP/2.0 481 No Dialog", "c12", "4 PRACK", "t1", "")),
+        ],
+    );
+    assert!(f.saw_481);
+    wire.excuse(&[("OPTIONS".to_string(), 500), ("PRACK".to_string(), 481)]);
+    let f = wire.facts();
+    assert_eq!(f.failures, vec![WireFailure { at_ms: 0, method: "INFO".into(), code: Some(488) }]);
+    assert!(!f.saw_481);
+}

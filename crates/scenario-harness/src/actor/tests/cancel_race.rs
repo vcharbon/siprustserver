@@ -331,6 +331,9 @@ fn lost_to_alice(obs: &ObservedState, status: u16, sdp: bool) {
         status: Some(status),
         cseq_method: "INVITE".to_string(),
         sdp,
+        call_id: "c".to_string(),
+        from_tag: "a".to_string(),
+        cseq: 1,
     };
     obs.record(Observation::Lost { leg: "alice", message }, tokio::time::Instant::now());
 }

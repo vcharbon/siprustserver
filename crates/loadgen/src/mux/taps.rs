@@ -13,7 +13,7 @@ use super::datagram::Datagram;
 use super::rtt::{RttSink, RttTracker};
 use super::tally::{CallTally, LateRepair};
 use scenario_harness::realcall::{LossNotes, LostMessage};
-use sip_message::sniff::{session_description, Identity};
+use sip_message::sniff::{from_tag, session_description, Identity};
 
 /// The endpoint of a call a datagram crossed: its caller, or the callee leg
 /// bound under this role.
@@ -55,6 +55,9 @@ pub fn notes_tap(notes: LossNotes) -> LossTap {
             status: id.status,
             cseq_method: id.cseq_method.unwrap_or_default().to_string(),
             sdp: session_description(d.raw()).is_some(),
+            call_id: id.call_id.unwrap_or_default().to_string(),
+            from_tag: from_tag(d.raw()),
+            cseq: id.cseq.unwrap_or_default(),
         });
     })
 }

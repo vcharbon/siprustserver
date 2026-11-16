@@ -227,6 +227,18 @@ impl CallWire {
         self.facts.lock().unwrap().awaits_finals()
     }
 
+    /// Forget the in-dialog failures `excused` names (request method and
+    /// final): a UA of the call refused a request the loss model's drops
+    /// explain, and the system under test relayed that refusal.
+    pub fn excuse(&self, excused: &[(String, u16)]) {
+        let mut f = self.facts.lock().unwrap();
+        let keep =
+            |w: &WireFailure| !excused.iter().any(|(m, c)| *m == w.method && w.code == Some(*c));
+        f.failures.retain(keep);
+        f.legs.iter_mut().for_each(|l| l.failures.retain(keep));
+        f.saw_481 = f.failures.iter().any(|w| w.code == Some(481));
+    }
+
     /// The facts seen so far.
     pub fn facts(&self) -> WireFacts {
         self.facts.lock().unwrap().clone()
