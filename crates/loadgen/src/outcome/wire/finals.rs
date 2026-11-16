@@ -227,3 +227,7 @@ pub(super) fn unanswered(pending: &HashMap<u32, (String, i64)>) -> Vec<WireFailu
     left.sort_by_key(|f| f.at_ms);
     left
 }
+
+#[cfg(test)]
+#[path = "finals_tests.rs"]
+mod tests;
