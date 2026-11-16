@@ -59,9 +59,8 @@ DRIVER_KEYS = ("run", "stream", "shape", "hold_ms", "setup_ms", "final_ms")
 # SIPp's default behaviours but the abort on an unexpected message and the abort
 # on an ACK whose CSeq is not the latest INVITE received: a message landing
 # while the call runs its unexpected-message handler is discarded and the call
-# goes on, acting on the peer's retransmission (ADR-0049 §4.2); an ACK repeated
-# for an earlier INVITE's 2xx (RFC 3261 §13.2.2.4) reaches the scenario, where
-# only the ACK echoing a 2xx's CSeq discharges that 2xx.
+# goes on, acting on the peer's retransmission; every ACK reaches the scenario,
+# which checks its CSeq itself (ADR-0049 §4.2).
 UAC_BEHAVIOURS = ("-default_behaviors", "all,-abortunexp,-cseq")
 
 

@@ -34,10 +34,11 @@
  after its 2xx is a protocol failure only, and so is any unexpected request
  once an ending is set (a far BYE in the CANCEL wait: still `timeout`). Each request has its own branch;
  every 2xx retransmission is ACKed again with its CSeq; a far re-INVITE is
- answered 200 (491 while the caller's own is pending, 481 after its BYE),
- discharged by the ACK with its CSeq only: an earlier INVITE's ACK repeated
- (RFC 3261 13.2.2.4) is absorbed, and ends SIPp's retransmission of that 200;
- a copy of the re-INVITE still draws it.
+ answered 200 (491 while the caller's own is pending, 481 after its BYE).
+ Only the ACK with the 200's CSeq discharges it; another ACK stops SIPp's
+ retransmission, so the 200 goes again. An ACK above the CSeq of the
+ latest far request given a final acknowledges nothing: a protocol failure,
+ the call goes on.
 -->
 <scenario name="hakit UAC call with call-outcome records">
 
@@ -91,8 +92,8 @@
    <multiply assign_to="t_start" value="1000"/>
    <divide assign_to="t_start_us" value="1000"/>
    <add assign_to="t_start" variable="t_start_us"/>
-   <assignstr assign_to="t_off_t" value="[clock_tick]"/>
-   <todouble assign_to="t_off" variable="t_off_t"/>
+   <assignstr assign_to="tk" value="[clock_tick]"/>
+   <todouble assign_to="t_off" variable="tk"/>
    <multiply assign_to="t_off" value="-1"/>
    <add assign_to="t_off" variable="t_start"/>
   </action>
@@ -129,8 +130,8 @@ a=rtpmap:0 PCMU/8000
  <label id="tick"/>
  <nop test="final_over" next="setup_timeout">
   <action>
-   <assignstr assign_to="el_s_t" value="[clock_tick]"/>
-   <todouble assign_to="el_s" variable="el_s_t"/>
+   <assignstr assign_to="tk" value="[clock_tick]"/>
+   <todouble assign_to="el_s" variable="tk"/>
    <add assign_to="el_s" variable="t_off"/>
    <subtract assign_to="el_s" variable="t_start"/>
    <test assign_to="setup_over" variable="el_s" compare="greater_than_equal" variable2="setup_ms"/>
@@ -143,8 +144,8 @@ a=rtpmap:0 PCMU/8000
  <recv response="100" optional="true" timeout="1000" ontimeout="tick" next="try_main"/>
  <recv response="^1[0-9][0-9]$" regexp_match="true" optional="true" next="tick">
   <action>
-   <assignstr assign_to="now_t" value="[clock_tick]"/>
-   <todouble assign_to="now_s" variable="now_t"/>
+   <assignstr assign_to="tk" value="[clock_tick]"/>
+   <todouble assign_to="now_s" variable="tk"/>
    <add assign_to="now_s" variable="t_off"/>
    <assign assign_to="fp_take" value="1"/>
    <subtract assign_to="fp_take" variable="fp_flag"/>
@@ -178,8 +179,8 @@ a=rtpmap:0 PCMU/8000
  <label id="try_main"/>
  <nop condexec="try_flag" condexec_inverse="true">
   <action>
-   <assignstr assign_to="now_t" value="[clock_tick]"/>
-   <todouble assign_to="try_ms" variable="now_t"/>
+   <assignstr assign_to="tk" value="[clock_tick]"/>
+   <todouble assign_to="try_ms" variable="tk"/>
    <add assign_to="try_ms" variable="t_off"/>
    <assign assign_to="try_flag" value="1"/>
    <test assign_to="fp_seen" variable="try_flag" compare="equal" value="1"/>
@@ -201,8 +202,8 @@ Max-Forwards: 70
 Content-Length: 0
   ]]>
   <action>
-   <assignstr assign_to="now_t" value="[clock_tick]"/>
-   <todouble assign_to="now_s" variable="now_t"/>
+   <assignstr assign_to="tk" value="[clock_tick]"/>
+   <todouble assign_to="now_s" variable="tk"/>
    <add assign_to="now_s" variable="t_off"/>
    <assignstr assign_to="r_se" value="[$now_s]"/>
    <assignstr assign_to="r_code" value="[$fin_code]"/>
@@ -240,8 +241,8 @@ Content-Length: 0
  <label id="setup_timeout"/>
  <nop test="fp_seen" next="cancel">
   <action>
-   <assignstr assign_to="now_t" value="[clock_tick]"/>
-   <todouble assign_to="now_s" variable="now_t"/>
+   <assignstr assign_to="tk" value="[clock_tick]"/>
+   <todouble assign_to="now_s" variable="tk"/>
    <add assign_to="now_s" variable="t_off"/>
    <assignstr assign_to="r_se" value="[$now_s]"/>
    <assignstr assign_to="r_reason" value="&quot;timeout&quot;"/>
@@ -254,8 +255,8 @@ Content-Length: 0
  <label id="late_tick"/>
  <nop test="late_over" next="write_record">
   <action>
-   <assignstr assign_to="el_s_t" value="[clock_tick]"/>
-   <todouble assign_to="el_s" variable="el_s_t"/>
+   <assignstr assign_to="tk" value="[clock_tick]"/>
+   <todouble assign_to="el_s" variable="tk"/>
    <add assign_to="el_s" variable="t_off"/>
    <subtract assign_to="el_s" variable="t_start"/>
    <test assign_to="late_over" variable="el_s" compare="greater_than_equal" value="32000"/>
@@ -265,8 +266,8 @@ Content-Length: 0
  <recv response="100" optional="true" timeout="1000" ontimeout="late_tick" next="try_late"/>
  <recv response="^1[0-9][0-9]$" regexp_match="true" optional="true" next="cancel">
   <action>
-   <assignstr assign_to="now_t" value="[clock_tick]"/>
-   <todouble assign_to="now_s" variable="now_t"/>
+   <assignstr assign_to="tk" value="[clock_tick]"/>
+   <todouble assign_to="now_s" variable="tk"/>
    <add assign_to="now_s" variable="t_off"/>
    <assign assign_to="fp_take" value="1"/>
    <subtract assign_to="fp_take" variable="fp_flag"/>
@@ -284,8 +285,8 @@ Content-Length: 0
  <label id="try_late"/>
  <nop next="cancel">
   <action>
-   <assignstr assign_to="now_t" value="[clock_tick]"/>
-   <todouble assign_to="try_ms" variable="now_t"/>
+   <assignstr assign_to="tk" value="[clock_tick]"/>
+   <todouble assign_to="try_ms" variable="tk"/>
    <add assign_to="try_ms" variable="t_off"/>
    <assign assign_to="try_flag" value="1"/>
   </action>
@@ -311,9 +312,8 @@ Content-Length: 0
   ]]>
   <action>
    <assign assign_to="cancelled" value="1"/>
-   <assignstr assign_to="cancel_t0_t" value="[clock_tick]"/>
-   <todouble assign_to="cancel_t0" variable="cancel_t0_t"/>
-   <add assign_to="cancel_t0" variable="t_off"/>
+   <assignstr assign_to="tk" value="[clock_tick]"/>
+   <todouble assign_to="cancel_t0" variable="tk"/>
   </action>
  </send>
  <label id="cancel_wait"/>
@@ -321,7 +321,7 @@ Content-Length: 0
  <recv response="^2[0-9][0-9]$" regexp_match="true" optional="true" rrs="true" next="cancel_2xx">
   <action>
    <ereg regexp="SIP/2\.0 ([0-9]+)" search_in="msg" assign_to="cw_all,cw_code"/>
-   <ereg regexp="^[[:blank:]]*([0-9]+)[[:blank:]]+([A-Z]+)" search_in="hdr" header="CSeq:" assign_to="cw_ca,cw_n,cw_m"/>
+   <ereg regexp="([0-9]+)[[:blank:]]+([A-Z]+)" search_in="hdr" header="CSeq:" assign_to="cw_ca,cw_n,cw_m"/>
    <strcmp assign_to="cw_mi" variable="cw_m" value="INVITE"/>
    <test assign_to="cw_inv" variable="cw_mi" compare="equal" value="0"/>
   </action>
@@ -329,7 +329,7 @@ Content-Length: 0
  <recv response="^[3-6][0-9][0-9]$" regexp_match="true" next="cancel_final">
   <action>
    <ereg regexp="SIP/2\.0 ([0-9]+)" search_in="msg" assign_to="cw_all,cw_code"/>
-   <ereg regexp="^[[:blank:]]*([0-9]+)[[:blank:]]+([A-Z]+)" search_in="hdr" header="CSeq:" assign_to="cw_ca,cw_n,cw_m"/>
+   <ereg regexp="([0-9]+)[[:blank:]]+([A-Z]+)" search_in="hdr" header="CSeq:" assign_to="cw_ca,cw_n,cw_m"/>
    <strcmp assign_to="cw_mi" variable="cw_m" value="INVITE"/>
    <test assign_to="cw_inv" variable="cw_mi" compare="equal" value="0"/>
   </action>
@@ -338,9 +338,8 @@ Content-Length: 0
  <label id="cancel_tick"/>
  <nop test="cancel_over" next="write_record">
   <action>
-   <assignstr assign_to="el_s_t" value="[clock_tick]"/>
-   <todouble assign_to="el_s" variable="el_s_t"/>
-   <add assign_to="el_s" variable="t_off"/>
+   <assignstr assign_to="tk" value="[clock_tick]"/>
+   <todouble assign_to="el_s" variable="tk"/>
    <subtract assign_to="el_s" variable="cancel_t0"/>
    <test assign_to="cancel_over" variable="el_s" compare="greater_than_equal" value="32000"/>
   </action>
@@ -381,7 +380,6 @@ From: <sip:caller@[local_ip]:[local_port]>;tag=[pid]-[call_number]-[run]
 To: <sip:[field0]@[remote_ip]:[remote_port]>[peer_tag_param]
 Call-ID: [call_id]
 CSeq: 1 ACK
-Contact: <sip:caller@[local_ip]:[local_port]>
 Max-Forwards: 70
 Content-Length: 0
   ]]>
@@ -389,16 +387,15 @@ Content-Length: 0
    <assignstr assign_to="d_url" value="[next_url]"/>
    <assignstr assign_to="d_routes" value="[routes]"/>
    <assignstr assign_to="d_tag" value="[peer_tag_param]"/>
-   <assignstr assign_to="now_t" value="[clock_tick]"/>
-   <todouble assign_to="now_s" variable="now_t"/>
+   <assignstr assign_to="tk" value="[clock_tick]"/>
+   <todouble assign_to="now_s" variable="tk"/>
    <add assign_to="now_s" variable="t_off"/>
    <assignstr assign_to="r_se" value="[$now_s]"/>
    <assignstr assign_to="r_ans" value="[$now_s]"/>
    <assignstr assign_to="r_code" value="[$fin_code]"/>
    <assign assign_to="answered" value="1"/>
-   <assignstr assign_to="call_t0_t" value="[clock_tick]"/>
-   <todouble assign_to="call_t0" variable="call_t0_t"/>
-   <add assign_to="call_t0" variable="t_off"/>
+   <assignstr assign_to="tk" value="[clock_tick]"/>
+   <todouble assign_to="call_t0" variable="tk"/>
   </action>
  </send>
  <nop test="is_ghost" next="ghost"/>
@@ -408,23 +405,21 @@ Content-Length: 0
  <label id="segment"/>
  <nop>
   <action>
-   <assignstr assign_to="hold_t0_t" value="[clock_tick]"/>
-   <todouble assign_to="hold_t0" variable="hold_t0_t"/>
-   <add assign_to="hold_t0" variable="t_off"/>
+   <assignstr assign_to="tk" value="[clock_tick]"/>
+   <todouble assign_to="hold_t0" variable="tk"/>
   </action>
  </nop>
  <label id="hold_left"/>
  <nop test="hold_over" next="segment_end">
   <action>
-   <assignstr assign_to="hl_s_t" value="[clock_tick]"/>
-   <todouble assign_to="hl_s" variable="hl_s_t"/>
-   <add assign_to="hl_s" variable="t_off"/>
+   <assignstr assign_to="tk" value="[clock_tick]"/>
+   <todouble assign_to="hl_s" variable="tk"/>
    <subtract assign_to="hl_s" variable="hold_t0"/>
    <test assign_to="hold_over" variable="hl_s" compare="greater_than_equal" variable2="seg_ms"/>
   </action>
  </nop>
- <recv request="OPTIONS" optional="true" crlf="true" timeout="1000" ontimeout="hold_left" next="hold_options"/>
- <recv request="INVITE" crlf="true" next="far_reinvite">
+ <recv request="OPTIONS" optional="true" timeout="1000" ontimeout="hold_left" next="hold_options"/>
+ <recv request="INVITE" next="far_reinvite">
   <action>
    <assign assign_to="fr_ret" value="0"/>
   </action>
@@ -493,15 +488,19 @@ a=rtpmap:0 PCMU/8000
  <recv response="^1[0-9][0-9]$" regexp_match="true" optional="true" timeout="32000" ontimeout="reinv_no_final" next="reinv_1xx">
   <action>
    <ereg regexp="SIP/2\.0 ([0-9]+)" search_in="msg" assign_to="rp_all,rp_code"/>
-   <ereg regexp="^[[:blank:]]*([0-9]+)[[:blank:]]+([A-Z]+)" search_in="hdr" header="CSeq:" assign_to="rp_ca,rp_n,rp_m"/>
+   <ereg regexp="([0-9]+)[[:blank:]]+([A-Z]+)" search_in="hdr" header="CSeq:" assign_to="rp_ca,rp_n,rp_m"/>
    <strcmp assign_to="rp_cc" variable="rp_n" variable2="cs_n"/>
    <test assign_to="rp_cur" variable="rp_cc" compare="equal" value="0"/>
   </action>
  </recv>
- <recv request="OPTIONS" optional="true" crlf="true" next="reinv_opt_cap"/>
- <recv request="INVITE" optional="true" crlf="true" next="reinv_gl_cap"/>
- <recv request="ACK" optional="true" crlf="true" next="reinv_wait"/>
- <recv request="[A-Z]" regexp_match="true" optional="true" crlf="true" next="reinv_ot_cap">
+ <recv request="OPTIONS" optional="true" next="reinv_opt_cap"/>
+ <recv request="INVITE" optional="true" next="reinv_gl_cap"/>
+ <recv request="ACK" optional="true" next="ack_in">
+  <action>
+   <ereg regexp="[0-9]+" search_in="hdr" header="CSeq:" assign_to="fa_n"/>
+  </action>
+ </recv>
+ <recv request="[A-Z]" regexp_match="true" optional="true" next="reinv_ot_cap">
   <action>
    <ereg regexp="^[A-Z]+" search_in="msg" assign_to="ux_req"/>
   </action>
@@ -509,7 +508,7 @@ a=rtpmap:0 PCMU/8000
  <recv response="^2[0-9][0-9]$" regexp_match="true" optional="true" next="reinv_2xx">
   <action>
    <ereg regexp="SIP/2\.0 ([0-9]+)" search_in="msg" assign_to="rc_all,rc_code"/>
-   <ereg regexp="^[[:blank:]]*([0-9]+)[[:blank:]]+([A-Z]+)" search_in="hdr" header="CSeq:" assign_to="rc_ca,rc_n,rc_m"/>
+   <ereg regexp="([0-9]+)[[:blank:]]+([A-Z]+)" search_in="hdr" header="CSeq:" assign_to="rc_ca,rc_n,rc_m"/>
    <strcmp assign_to="rc_mi" variable="rc_m" value="INVITE"/>
    <test assign_to="rc_inv" variable="rc_mi" compare="equal" value="0"/>
    <strcmp assign_to="rc_c1" variable="rc_n" value="1"/>
@@ -521,7 +520,7 @@ a=rtpmap:0 PCMU/8000
  <recv response="^[3-6][0-9][0-9]$" regexp_match="true" next="reinv_final">
   <action>
    <ereg regexp="SIP/2\.0 ([0-9]+)" search_in="msg" assign_to="rc_all,rc_code"/>
-   <ereg regexp="^[[:blank:]]*([0-9]+)[[:blank:]]+([A-Z]+)" search_in="hdr" header="CSeq:" assign_to="rc_ca,rc_n,rc_m"/>
+   <ereg regexp="([0-9]+)[[:blank:]]+([A-Z]+)" search_in="hdr" header="CSeq:" assign_to="rc_ca,rc_n,rc_m"/>
    <strcmp assign_to="rc_mi" variable="rc_m" value="INVITE"/>
    <test assign_to="rc_inv" variable="rc_mi" compare="equal" value="0"/>
    <strcmp assign_to="rc_c1" variable="rc_n" value="1"/>
@@ -637,8 +636,8 @@ Max-Forwards: 70
 Content-Length: 0
   ]]>
   <action>
-   <assignstr assign_to="now_t" value="[clock_tick]"/>
-   <todouble assign_to="now_s" variable="now_t"/>
+   <assignstr assign_to="tk" value="[clock_tick]"/>
+   <todouble assign_to="now_s" variable="tk"/>
    <add assign_to="now_s" variable="t_off"/>
    <assignstr assign_to="r_fail" value="[$r_fail][$r_sep]{&quot;at_ms&quot;:[$now_s],&quot;kind&quot;:&quot;dialog_request&quot;,&quot;method&quot;:&quot;INVITE&quot;,&quot;code&quot;:[$rc_code]}"/>
    <assignstr assign_to="r_sep" value=","/>
@@ -681,11 +680,12 @@ SIP/2.0 491 Request Pending
 [$gl_to]
 Call-ID: [call_id]
 [$gl_cseq]
-Contact: <sip:caller@[local_ip]:[local_port]>
 Content-Length: 0
   ]]>
   <action>
    <assign assign_to="gl_due" value="0"/>
+   <ereg regexp="[0-9]+" search_in="var" variable="gl_cseq" assign_to="gl_n"/>
+   <todouble assign_to="fa_hi" variable="gl_n"/>
   </action>
  </send>
  <send condexec="ot_due">
@@ -697,7 +697,6 @@ SIP/2.0 501 Not Implemented
 [$ot_to]
 Call-ID: [call_id]
 [$ot_cseq]
-Contact: <sip:caller@[local_ip]:[local_port]>
 Content-Length: 0
   ]]>
   <action>
@@ -705,6 +704,7 @@ Content-Length: 0
    <assign assign_to="ot_fail" value="1"/>
   </action>
  </send>
+ <nop test="fa_busy" next="far_tail"/>
  <nop test="reinv_pending" next="reinv_wait"/>
  <nop test="ot_fail" next="proto_fail"/>
  <nop test="rf_ok" next="segment"/>
@@ -734,8 +734,8 @@ Content-Length: 0
  <nop test="ri_failed" next="teardown"/>
  <nop next="teardown">
   <action>
-   <assignstr assign_to="now_t" value="[clock_tick]"/>
-   <todouble assign_to="now_s" variable="now_t"/>
+   <assignstr assign_to="tk" value="[clock_tick]"/>
+   <todouble assign_to="now_s" variable="tk"/>
    <add assign_to="now_s" variable="t_off"/>
    <assignstr assign_to="r_fail" value="[$r_fail][$r_sep]{&quot;at_ms&quot;:[$now_s],&quot;kind&quot;:&quot;dialog_request&quot;,&quot;method&quot;:&quot;INVITE&quot;,&quot;detail&quot;:&quot;no final&quot;}"/>
    <assignstr assign_to="r_sep" value=","/>
@@ -751,19 +751,26 @@ Content-Length: 0
  <label id="far_reinvite"/>
  <nop>
   <action>
-   <assignstr assign_to="fr_cseq" value="[last_CSeq:]"/>
-   <ereg regexp="[0-9]+" search_in="var" variable="fr_cseq" assign_to="fr_n"/>
+   <assignstr assign_to="fr_via" value="[last_Via:]"/>
+   <assignstr assign_to="fr_rr" value="[last_Record-Route:]"/>
+   <assignstr assign_to="fr_from" value="[last_From:]"/>
+   <assignstr assign_to="fr_to" value="[last_To:]"/>
+   <assignstr assign_to="fr_cs" value="[last_CSeq:]"/>
+   <assignstr assign_to="fr_n" value="[last_cseq_number]"/>
+   <todouble assign_to="fa_hi" variable="fr_n"/>
+   <assign assign_to="fa_busy" value="1"/>
   </action>
  </nop>
+ <label id="far_200"/>
  <send retrans="500" ontimeout="far_no_ack">
   <![CDATA[
 SIP/2.0 200 OK
-[last_Via:]
-[last_Record-Route:]
-[last_From:]
-[last_To:]
-[last_Call-ID:]
-[last_CSeq:]
+[$fr_via]
+[$fr_rr]
+[$fr_from]
+[$fr_to]
+Call-ID: [call_id]
+[$fr_cs]
 Contact: <sip:caller@[local_ip]:[local_port]>
 Content-Type: application/sdp
 Content-Length: [len]
@@ -778,16 +785,16 @@ a=rtpmap:0 PCMU/8000
   ]]>
  </send>
  <label id="far_ack_wait"/>
- <recv request="ACK" optional="true" crlf="true" timeout="32000" ontimeout="far_no_ack" next="far_acked">
+ <recv request="ACK" optional="true" timeout="32000" ontimeout="far_no_ack" next="ack_in">
   <action>
    <ereg regexp="[0-9]+" search_in="hdr" header="CSeq:" assign_to="fa_n"/>
    <strcmp assign_to="fa_x" variable="fa_n" variable2="fr_n"/>
   </action>
  </recv>
- <recv request="OPTIONS" optional="true" crlf="true" next="far_opt_cap"/>
- <recv request="BYE" optional="true" crlf="true" next="far_bye"/>
- <recv request="INVITE" optional="true" crlf="true" next="far_ack_wait"/>
- <recv request="[A-Z]" regexp_match="true" optional="true" crlf="true" next="far_ot_cap">
+ <recv request="OPTIONS" optional="true" next="far_opt_cap"/>
+ <recv request="BYE" optional="true" next="far_bye"/>
+ <recv request="INVITE" optional="true" next="far_ack_wait"/>
+ <recv request="[A-Z]" regexp_match="true" optional="true" next="far_ot_cap">
   <action>
    <ereg regexp="^[A-Z]+" search_in="msg" assign_to="ux_req"/>
   </action>
@@ -795,7 +802,7 @@ a=rtpmap:0 PCMU/8000
  <recv response="^[1-6][0-9][0-9]$" regexp_match="true" next="far_resp">
   <action>
    <ereg regexp="SIP/2\.0 ([0-9]+)" search_in="msg" assign_to="fx_all,fx_code"/>
-   <ereg regexp="^[[:blank:]]*([0-9]+)[[:blank:]]+([A-Z]+)" search_in="hdr" header="CSeq:" assign_to="fx_ca,fx_n,fx_m"/>
+   <ereg regexp="([0-9]+)[[:blank:]]+([A-Z]+)" search_in="hdr" header="CSeq:" assign_to="fx_ca,fx_n,fx_m"/>
    <strcmp assign_to="fx_mi" variable="fx_m" value="INVITE"/>
    <test assign_to="fx_inv" variable="fx_mi" compare="equal" value="0"/>
    <strcmp assign_to="fx_c1" variable="fx_n" value="1"/>
@@ -858,41 +865,15 @@ a=rtpmap:0 PCMU/8000
  </nop>
  <nop/>
  <label id="far_acked"/>
- <nop test="fa_x" next="far_ack_wait"/>
- <send condexec="opt_due">
-  <![CDATA[
-SIP/2.0 200 OK
-[$opt_via]
-[$opt_rr]
-[$opt_from]
-[$opt_to]
-Call-ID: [call_id]
-[$opt_cseq]
-Contact: <sip:caller@[local_ip]:[local_port]>
-Content-Length: 0
-  ]]>
+ <nop test="fa_x" next="far_200"/>
+ <nop next="reinv_answer"/>
+ <nop/>
+ <label id="far_tail"/>
+ <nop test="ot_fail" next="proto_fail">
   <action>
-   <assign assign_to="opt_due" value="0"/>
+   <assign assign_to="fa_busy" value="0"/>
   </action>
- </send>
- <send condexec="ot_due">
-  <![CDATA[
-SIP/2.0 501 Not Implemented
-[$ot_via]
-[$ot_rr]
-[$ot_from]
-[$ot_to]
-Call-ID: [call_id]
-[$ot_cseq]
-Contact: <sip:caller@[local_ip]:[local_port]>
-Content-Length: 0
-  ]]>
-  <action>
-   <assign assign_to="ot_due" value="0"/>
-   <assign assign_to="ot_fail" value="1"/>
-  </action>
- </send>
- <nop test="ot_fail" next="proto_fail"/>
+ </nop>
  <nop test="fr_ret" next="far_return"/>
  <nop next="hold_left"/>
  <nop/>
@@ -906,14 +887,15 @@ Content-Length: 0
  <label id="far_no_ack"/>
  <nop next="teardown">
   <action>
-   <assignstr assign_to="now_t" value="[clock_tick]"/>
-   <todouble assign_to="now_s" variable="now_t"/>
+   <assignstr assign_to="tk" value="[clock_tick]"/>
+   <todouble assign_to="now_s" variable="tk"/>
    <add assign_to="now_s" variable="t_off"/>
    <assignstr assign_to="r_fail" value="[$r_fail][$r_sep]{&quot;at_ms&quot;:[$now_s],&quot;kind&quot;:&quot;protocol&quot;,&quot;method&quot;:&quot;INVITE&quot;,&quot;detail&quot;:&quot;no ACK for the 2xx to a re-INVITE&quot;}"/>
    <assignstr assign_to="r_sep" value=","/>
    <assignstr assign_to="r_ending" value="cut"/>
    <assignstr assign_to="r_verdict" value="far_reinvite_no_ack"/>
    <assign assign_to="keep_ending" value="1"/>
+   <assign assign_to="fa_busy" value="0"/>
   </action>
  </nop>
  <nop/>
@@ -927,7 +909,6 @@ SIP/2.0 200 OK
 [last_To:]
 [last_Call-ID:]
 [last_CSeq:]
-Contact: <sip:caller@[local_ip]:[local_port]>
 Content-Length: 0
   ]]>
  </send>
@@ -955,15 +936,14 @@ Content-Length: 0
  <label id="ghost"/>
  <nop test="ghost_over" next="ghost_left">
   <action>
-   <assignstr assign_to="gh_s_t" value="[clock_tick]"/>
-   <todouble assign_to="gh_s" variable="gh_s_t"/>
-   <add assign_to="gh_s" variable="t_off"/>
+   <assignstr assign_to="tk" value="[clock_tick]"/>
+   <todouble assign_to="gh_s" variable="tk"/>
    <subtract assign_to="gh_s" variable="call_t0"/>
    <test assign_to="ghost_over" variable="gh_s" compare="greater_than_equal" variable2="hold_ms"/>
   </action>
  </nop>
- <recv request="BYE" optional="true" crlf="true" timeout="5000" ontimeout="ghost" next="ghost_bye"/>
- <recv request="[A-Z]" regexp_match="true" optional="true" crlf="true" next="ghost"/>
+ <recv request="BYE" optional="true" timeout="5000" ontimeout="ghost" next="ghost_bye"/>
+ <recv request="[A-Z]" regexp_match="true" optional="true" next="ghost"/>
  <recv response="^[1-6][0-9][0-9]$" regexp_match="true" next="ghost"/>
  <nop/>
  <label id="ghost_bye"/>
@@ -986,9 +966,8 @@ Content-Length: 0
  <label id="flood"/>
  <nop next="flood_wait">
   <action>
-   <assignstr assign_to="fl_t0_t" value="[clock_tick]"/>
-   <todouble assign_to="fl_t0" variable="fl_t0_t"/>
-   <add assign_to="fl_t0" variable="t_off"/>
+   <assignstr assign_to="tk" value="[clock_tick]"/>
+   <todouble assign_to="fl_t0" variable="tk"/>
   </action>
  </nop>
  <nop/>
@@ -1018,9 +997,8 @@ Max-Forwards: 70
 Content-Length: 0
   ]]>
   <action>
-   <assignstr assign_to="fl_t0_t" value="[clock_tick]"/>
-   <todouble assign_to="fl_t0" variable="fl_t0_t"/>
-   <add assign_to="fl_t0" variable="t_off"/>
+   <assignstr assign_to="tk" value="[clock_tick]"/>
+   <todouble assign_to="fl_t0" variable="tk"/>
   </action>
  </send>
  <nop/>
@@ -1048,9 +1026,8 @@ m=audio [media_port] RTP/AVP 0
 a=rtpmap:0 PCMU/8000
   ]]>
   <action>
-   <assignstr assign_to="fl_t0_t" value="[clock_tick]"/>
-   <todouble assign_to="fl_t0" variable="fl_t0_t"/>
-   <add assign_to="fl_t0" variable="t_off"/>
+   <assignstr assign_to="tk" value="[clock_tick]"/>
+   <todouble assign_to="fl_t0" variable="tk"/>
   </action>
  </send>
  <nop/>
@@ -1058,7 +1035,7 @@ a=rtpmap:0 PCMU/8000
  <recv response="^2[0-9][0-9]$" regexp_match="true" optional="true" timeout="100" ontimeout="flood_tick" next="flood_2xx">
   <action>
    <ereg regexp="SIP/2\.0 ([0-9]+)" search_in="msg" assign_to="fw_all,fw_code"/>
-   <ereg regexp="^[[:blank:]]*([0-9]+)[[:blank:]]+([A-Z]+)" search_in="hdr" header="CSeq:" assign_to="fw_ca,fw_n,fw_m"/>
+   <ereg regexp="([0-9]+)[[:blank:]]+([A-Z]+)" search_in="hdr" header="CSeq:" assign_to="fw_ca,fw_n,fw_m"/>
    <strcmp assign_to="fw_mi" variable="fw_m" value="INVITE"/>
    <test assign_to="fw_inv" variable="fw_mi" compare="equal" value="0"/>
    <strcmp assign_to="fw_c1" variable="fw_n" value="1"/>
@@ -1070,9 +1047,8 @@ a=rtpmap:0 PCMU/8000
  <label id="flood_tick"/>
  <nop test="flood_gap_over" next="flood_send">
   <action>
-   <assignstr assign_to="fe_s_t" value="[clock_tick]"/>
-   <todouble assign_to="fe_s" variable="fe_s_t"/>
-   <add assign_to="fe_s" variable="t_off"/>
+   <assignstr assign_to="tk" value="[clock_tick]"/>
+   <todouble assign_to="fe_s" variable="tk"/>
    <subtract assign_to="fe_s" variable="fl_t0"/>
    <test assign_to="flood_gap_over" variable="fe_s" compare="greater_than_equal" variable2="flood_gap"/>
   </action>
@@ -1139,7 +1115,7 @@ Content-Length: 0
  <recv response="^2[0-9][0-9]$" regexp_match="true" optional="true" timeout="32000" ontimeout="bye_no_final" next="bye_2xx">
   <action>
    <ereg regexp="SIP/2\.0 ([0-9]+)" search_in="msg" assign_to="bw_all,bw_code"/>
-   <ereg regexp="^[[:blank:]]*([0-9]+)[[:blank:]]+([A-Z]+)" search_in="hdr" header="CSeq:" assign_to="bw_ca,bw_n,bw_m"/>
+   <ereg regexp="([0-9]+)[[:blank:]]+([A-Z]+)" search_in="hdr" header="CSeq:" assign_to="bw_ca,bw_n,bw_m"/>
    <strcmp assign_to="bw_mi" variable="bw_m" value="INVITE"/>
    <test assign_to="bw_inv" variable="bw_mi" compare="equal" value="0"/>
    <strcmp assign_to="bw_mb" variable="bw_m" value="BYE"/>
@@ -1148,14 +1124,18 @@ Content-Length: 0
    <test assign_to="bw_one" variable="bw_c1" compare="equal" value="0"/>
   </action>
  </recv>
- <recv request="OPTIONS" optional="true" crlf="true" next="bye_opt_cap"/>
- <recv request="ACK" optional="true" crlf="true" next="bye_send"/>
- <recv request="BYE" optional="true" crlf="true" next="bye_crossed"/>
- <recv request="[A-Z]" regexp_match="true" optional="true" crlf="true" next="bye_bx_cap"/>
+ <recv request="OPTIONS" optional="true" next="bye_opt_cap"/>
+ <recv request="ACK" optional="true" next="ack_in">
+  <action>
+   <ereg regexp="[0-9]+" search_in="hdr" header="CSeq:" assign_to="fa_n"/>
+  </action>
+ </recv>
+ <recv request="BYE" optional="true" next="bye_crossed"/>
+ <recv request="[A-Z]" regexp_match="true" optional="true" next="bye_bx_cap"/>
  <recv response="^1[0-9][0-9]$" regexp_match="true" optional="true" next="bye_1xx">
   <action>
    <ereg regexp="SIP/2\.0 ([0-9]+)" search_in="msg" assign_to="bp_all,bp_code"/>
-   <ereg regexp="^[[:blank:]]*([0-9]+)[[:blank:]]+([A-Z]+)" search_in="hdr" header="CSeq:" assign_to="bp_ca,bp_n,bp_m"/>
+   <ereg regexp="([0-9]+)[[:blank:]]+([A-Z]+)" search_in="hdr" header="CSeq:" assign_to="bp_ca,bp_n,bp_m"/>
    <strcmp assign_to="bp_mi" variable="bp_m" value="INVITE"/>
    <test assign_to="bp_inv" variable="bp_mi" compare="equal" value="0"/>
   </action>
@@ -1163,15 +1143,15 @@ Content-Length: 0
  <recv response="^[3-6][0-9][0-9]$" regexp_match="true" next="bye_failed">
   <action>
    <ereg regexp="SIP/2\.0 ([0-9]+)" search_in="msg" assign_to="bw_all,bw_code"/>
-   <ereg regexp="^[[:blank:]]*([0-9]+)[[:blank:]]+([A-Z]+)" search_in="hdr" header="CSeq:" assign_to="bw_ca,bw_n,bw_m"/>
+   <ereg regexp="([0-9]+)[[:blank:]]+([A-Z]+)" search_in="hdr" header="CSeq:" assign_to="bw_ca,bw_n,bw_m"/>
    <strcmp assign_to="bw_mi" variable="bw_m" value="INVITE"/>
    <test assign_to="bw_inv" variable="bw_mi" compare="equal" value="0"/>
    <strcmp assign_to="bw_mb" variable="bw_m" value="BYE"/>
    <test assign_to="bw_bye" variable="bw_mb" compare="equal" value="0"/>
    <strcmp assign_to="bw_c1" variable="bw_n" value="1"/>
    <test assign_to="bw_one" variable="bw_c1" compare="equal" value="0"/>
-   <assignstr assign_to="now_t" value="[clock_tick]"/>
-   <todouble assign_to="now_s" variable="now_t"/>
+   <assignstr assign_to="tk" value="[clock_tick]"/>
+   <todouble assign_to="now_s" variable="tk"/>
    <add assign_to="now_s" variable="t_off"/>
    <assignstr assign_to="bye_code" value="[$bw_code]"/>
    <strcmp assign_to="bye_cmp" variable="bw_code" value="481"/>
@@ -1213,7 +1193,6 @@ SIP/2.0 200 OK
 [last_To:]
 [last_Call-ID:]
 [last_CSeq:]
-Contact: <sip:caller@[local_ip]:[local_port]>
 Content-Length: 0
   ]]>
   <action>
@@ -1299,8 +1278,8 @@ Content-Length: 0
  <label id="bye_no_final"/>
  <nop test="keep_ending" next="release_answers">
   <action>
-   <assignstr assign_to="now_t" value="[clock_tick]"/>
-   <todouble assign_to="now_s" variable="now_t"/>
+   <assignstr assign_to="tk" value="[clock_tick]"/>
+   <todouble assign_to="now_s" variable="tk"/>
    <add assign_to="now_s" variable="t_off"/>
    <assignstr assign_to="r_fail" value="[$r_fail][$r_sep]{&quot;at_ms&quot;:[$now_s],&quot;kind&quot;:&quot;dialog_request&quot;,&quot;method&quot;:&quot;BYE&quot;,&quot;detail&quot;:&quot;no final&quot;}"/>
    <assignstr assign_to="r_sep" value=","/>
@@ -1329,8 +1308,8 @@ Content-Length: 0
  </nop>
  <nop>
   <action>
-   <assignstr assign_to="now_t" value="[clock_tick]"/>
-   <todouble assign_to="now_s" variable="now_t"/>
+   <assignstr assign_to="tk" value="[clock_tick]"/>
+   <todouble assign_to="now_s" variable="tk"/>
    <add assign_to="now_s" variable="t_off"/>
    <assignstr assign_to="r_fail" value="[$r_fail][$r_sep]{&quot;at_ms&quot;:[$now_s],&quot;kind&quot;:&quot;protocol&quot;,&quot;method&quot;:&quot;INVITE&quot;,&quot;code&quot;:[$a2_code],&quot;detail&quot;:&quot;second final after 2xx&quot;}"/>
    <assignstr assign_to="r_sep" value=","/>
@@ -1353,7 +1332,6 @@ From: <sip:caller@[local_ip]:[local_port]>;tag=[pid]-[call_number]-[run]
 To: <sip:[field0]@[remote_ip]:[remote_port]>[$d_tag]
 Call-ID: [call_id]
 CSeq: [$rk_n] ACK
-Contact: <sip:caller@[local_ip]:[local_port]>
 Max-Forwards: 70
 Content-Length: 0
   ]]>
@@ -1373,11 +1351,44 @@ Content-Length: 0
  <nop next="flood_wait"/>
 
  <nop/>
+ <label id="ux_ack"/>
+ <nop test="ux_ok" next="unexp_resume">
+  <action>
+   <todouble assign_to="ux_d" variable="ux_n"/>
+   <test assign_to="ux_ok" variable="ux_d" compare="less_than_equal" variable2="fa_hi"/>
+  </action>
+ </nop>
+ <nop next="ack_bad"/>
+ <nop/>
+ <label id="ack_in"/>
+ <nop test="ak_ok" next="ack_out">
+  <action>
+   <todouble assign_to="ak_d" variable="fa_n"/>
+   <test assign_to="ak_ok" variable="ak_d" compare="less_than_equal" variable2="fa_hi"/>
+  </action>
+ </nop>
+ <label id="ack_bad"/>
+ <nop>
+  <action>
+   <assignstr assign_to="tk" value="[clock_tick]"/>
+   <todouble assign_to="now_s" variable="tk"/>
+   <add assign_to="now_s" variable="t_off"/>
+   <assignstr assign_to="r_fail" value="[$r_fail][$r_sep]{&quot;at_ms&quot;:[$now_s],&quot;kind&quot;:&quot;protocol&quot;,&quot;detail&quot;:&quot;ACK for no INVITE answered&quot;}"/>
+   <assignstr assign_to="r_sep" value=","/>
+  </action>
+ </nop>
+ <label id="ack_out"/>
+ <nop test="_unexp.retaddr" next="unexp_resume"/>
+ <nop test="fa_busy" next="far_acked"/>
+ <nop test="bye_sent" next="bye_send"/>
+ <nop next="reinv_wait"/>
+
+ <nop/>
  <label id="proto_fail"/>
  <nop>
   <action>
-   <assignstr assign_to="now_t" value="[clock_tick]"/>
-   <todouble assign_to="now_s" variable="now_t"/>
+   <assignstr assign_to="tk" value="[clock_tick]"/>
+   <todouble assign_to="now_s" variable="tk"/>
    <add assign_to="now_s" variable="t_off"/>
    <assignstr assign_to="r_fail" value="[$r_fail][$r_sep]{&quot;at_ms&quot;:[$now_s],&quot;kind&quot;:&quot;protocol&quot;,&quot;detail&quot;:&quot;unexpected [$ux_what]&quot;}"/>
    <assignstr assign_to="r_sep" value=","/>
@@ -1438,21 +1449,26 @@ SIP/2.0 481 Call/Transaction Does Not Exist
 [$bx_to]
 Call-ID: [call_id]
 [$bx_cseq]
-Contact: <sip:caller@[local_ip]:[local_port]>
 Content-Length: 0
   ]]>
   <action>
    <assign assign_to="bx_due" value="0"/>
+   <ereg regexp="[0-9]+" search_in="var" variable="bx_cseq" assign_to="gl_n"/>
+   <todouble assign_to="fa_hi" variable="gl_n"/>
   </action>
  </send>
  <nop next="write_record"/>
 
  <label id="_unexp.main"/>
- <recv request="OPTIONS" optional="true" crlf="true" next="unexp_options"/>
- <recv request="BYE" optional="true" crlf="true" next="unexp_bye"/>
- <recv request="ACK" optional="true" crlf="true" next="unexp_resume"/>
- <recv request="INVITE" optional="true" crlf="true" next="unexp_invite"/>
- <recv request="[A-Z]" regexp_match="true" optional="true" crlf="true" next="unexp_request">
+ <recv request="OPTIONS" optional="true" next="unexp_options"/>
+ <recv request="BYE" optional="true" next="unexp_bye"/>
+ <recv request="ACK" optional="true" next="ux_ack">
+  <action>
+   <ereg regexp="[0-9]+" search_in="hdr" header="CSeq:" assign_to="ux_n"/>
+  </action>
+ </recv>
+ <recv request="INVITE" optional="true" next="unexp_invite"/>
+ <recv request="[A-Z]" regexp_match="true" optional="true" next="unexp_request">
   <action>
    <ereg regexp="^[A-Z]+" search_in="msg" assign_to="ux_req"/>
   </action>
@@ -1461,7 +1477,7 @@ Content-Length: 0
  <recv response="^1[0-9][0-9]$" regexp_match="true" optional="true" counter="2" next="ux_1xx">
   <action>
    <ereg regexp="SIP/2\.0 ([0-9]+)" search_in="msg" assign_to="ux_all,ux_code"/>
-   <ereg regexp="^[[:blank:]]*([0-9]+)[[:blank:]]+([A-Z]+)" search_in="hdr" header="CSeq:" assign_to="ux_ca,ux_n,ux_m"/>
+   <ereg regexp="([0-9]+)[[:blank:]]+([A-Z]+)" search_in="hdr" header="CSeq:" assign_to="ux_ca,ux_n,ux_m"/>
    <strcmp assign_to="ux_c1" variable="ux_n" value="1"/>
    <test assign_to="ux_one" variable="ux_c1" compare="equal" value="0"/>
    <ereg regexp="m=" search_in="body" assign_to="em_m"/>
@@ -1472,7 +1488,7 @@ Content-Length: 0
  <recv response="^2[0-9][0-9]$" regexp_match="true" optional="true" counter="2" rrs="true" next="ux_2xx">
   <action>
    <ereg regexp="SIP/2\.0 ([0-9]+)" search_in="msg" assign_to="ux_all,ux_code"/>
-   <ereg regexp="^[[:blank:]]*([0-9]+)[[:blank:]]+([A-Z]+)" search_in="hdr" header="CSeq:" assign_to="ux_ca,ux_n,ux_m"/>
+   <ereg regexp="([0-9]+)[[:blank:]]+([A-Z]+)" search_in="hdr" header="CSeq:" assign_to="ux_ca,ux_n,ux_m"/>
    <strcmp assign_to="ux_mi" variable="ux_m" value="INVITE"/>
    <test assign_to="ux_inv" variable="ux_mi" compare="equal" value="0"/>
    <strcmp assign_to="ux_mb" variable="ux_m" value="BYE"/>
@@ -1486,7 +1502,7 @@ Content-Length: 0
  <recv response="^[3-6][0-9][0-9]$" regexp_match="true" counter="2" next="ux_final">
   <action>
    <ereg regexp="SIP/2\.0 ([0-9]+)" search_in="msg" assign_to="ux_all,ux_code"/>
-   <ereg regexp="^[[:blank:]]*([0-9]+)[[:blank:]]+([A-Z]+)" search_in="hdr" header="CSeq:" assign_to="ux_ca,ux_n,ux_m"/>
+   <ereg regexp="([0-9]+)[[:blank:]]+([A-Z]+)" search_in="hdr" header="CSeq:" assign_to="ux_ca,ux_n,ux_m"/>
    <strcmp assign_to="ux_mi" variable="ux_m" value="INVITE"/>
    <test assign_to="ux_inv" variable="ux_mi" compare="equal" value="0"/>
    <strcmp assign_to="ux_mb" variable="ux_m" value="BYE"/>
@@ -1507,8 +1523,8 @@ Content-Length: 0
  <nop test="answered" next="unexp_resume"/>
  <nop condexec="try_flag" condexec_inverse="true">
   <action>
-   <assignstr assign_to="now_t" value="[clock_tick]"/>
-   <todouble assign_to="try_ms" variable="now_t"/>
+   <assignstr assign_to="tk" value="[clock_tick]"/>
+   <todouble assign_to="try_ms" variable="tk"/>
    <add assign_to="try_ms" variable="t_off"/>
    <assign assign_to="try_flag" value="1"/>
    <test assign_to="fp_seen" variable="try_flag" compare="equal" value="1"/>
@@ -1526,8 +1542,8 @@ Content-Length: 0
  <nop next="unexp_resume">
   <action>
    <add assign_to="em_acc" variable="em_c"/>
-   <assignstr assign_to="now_t" value="[clock_tick]"/>
-   <todouble assign_to="now_s" variable="now_t"/>
+   <assignstr assign_to="tk" value="[clock_tick]"/>
+   <todouble assign_to="now_s" variable="tk"/>
    <add assign_to="now_s" variable="t_off"/>
    <assign assign_to="fp_take" value="1"/>
    <subtract assign_to="fp_take" variable="fp_flag"/>
@@ -1604,7 +1620,6 @@ From: <sip:caller@[local_ip]:[local_port]>;tag=[pid]-[call_number]-[run]
 To: <sip:[field0]@[remote_ip]:[remote_port]>[$d_tag]
 Call-ID: [call_id]
 CSeq: [$ux_n] ACK
-Contact: <sip:caller@[local_ip]:[local_port]>
 Max-Forwards: 70
 Content-Length: 0
   ]]>
@@ -1632,8 +1647,8 @@ Content-Length: 0
    <assignstr assign_to="bye_code" value="[$ux_code]"/>
    <strcmp assign_to="bye_cmp" variable="bye_code" value="481"/>
    <test assign_to="bye_481" variable="bye_cmp" compare="equal" value="0"/>
-   <assignstr assign_to="now_t" value="[clock_tick]"/>
-   <todouble assign_to="now_s" variable="now_t"/>
+   <assignstr assign_to="tk" value="[clock_tick]"/>
+   <todouble assign_to="now_s" variable="tk"/>
    <add assign_to="now_s" variable="t_off"/>
   </action>
  </nop>
@@ -1706,8 +1721,8 @@ Content-Length: 0
  <nop test="late_final_seen" next="unexp_resume"/>
  <nop next="unexp_resume">
   <action>
-   <assignstr assign_to="now_t" value="[clock_tick]"/>
-   <todouble assign_to="now_s" variable="now_t"/>
+   <assignstr assign_to="tk" value="[clock_tick]"/>
+   <todouble assign_to="now_s" variable="tk"/>
    <add assign_to="now_s" variable="t_off"/>
    <assignstr assign_to="r_fail" value="[$r_fail][$r_sep]{&quot;at_ms&quot;:[$now_s],&quot;kind&quot;:&quot;protocol&quot;,&quot;method&quot;:&quot;INVITE&quot;,&quot;code&quot;:[$ux_code],&quot;detail&quot;:&quot;second final after 2xx&quot;}"/>
    <assignstr assign_to="r_sep" value=","/>
@@ -1755,6 +1770,7 @@ Content-Length: 0
  <nop/>
  <label id="ux_invite_answered"/>
  <nop test="is_ghost" next="unexp_resume"/>
+ <nop test="fa_busy" next="unexp_resume"/>
  <nop test="reinv_pending" next="ux_491"/>
  <nop next="far_reinvite">
   <action>
@@ -1776,6 +1792,8 @@ SIP/2.0 491 Request Pending
 Content-Length: 0
   ]]>
   <action>
+   <assignstr assign_to="gl_n" value="[last_cseq_number]"/>
+   <todouble assign_to="fa_hi" variable="gl_n"/>
    <jump variable="_unexp.retaddr"/>
    <assign assign_to="_unexp.retaddr" value="0"/>
   </action>
@@ -1792,7 +1810,6 @@ SIP/2.0 200 OK
 [last_To:]
 [last_Call-ID:]
 [last_CSeq:]
-Contact: <sip:caller@[local_ip]:[local_port]>
 Content-Length: 0
   ]]>
   <action>
@@ -1866,8 +1883,8 @@ Content-Length: 0
  </nop>
  <nop>
   <action>
-   <assignstr assign_to="now_t" value="[clock_tick]"/>
-   <todouble assign_to="now_s" variable="now_t"/>
+   <assignstr assign_to="tk" value="[clock_tick]"/>
+   <todouble assign_to="now_s" variable="tk"/>
    <add assign_to="now_s" variable="t_off"/>
    <test assign_to="r_em" variable="em_acc" compare="greater_than" value="0"/>
    <log message="{&quot;schema&quot;:&quot;call-outcome.v1&quot;,&quot;run&quot;:&quot;[run]&quot;,&quot;source&quot;:&quot;sipp&quot;,&quot;stream&quot;:&quot;[stream]&quot;,&quot;shape&quot;:&quot;[shape]&quot;,&quot;call_id&quot;:&quot;[call_id]&quot;,&quot;started_at_ms&quot;:[$t_start],&quot;first_provisional_at_ms&quot;:[$r_fp],&quot;trying_at_ms&quot;:[$r_try],&quot;setup_ended_at_ms&quot;:[$r_se],&quot;answered_at_ms&quot;:[$r_ans],&quot;ended_at_ms&quot;:[$now_s],&quot;phase_reached&quot;:&quot;[$r_phase]&quot;,&quot;early_media&quot;:[$r_em],&quot;final_code&quot;:[$r_code],&quot;reason&quot;:[$r_reason],&quot;retry_after_s&quot;:[$r_ra],&quot;ending&quot;:&quot;[$r_ending]&quot;,&quot;failures&quot;:\x5B[$r_fail]\x5D,&quot;producer_verdict&quot;:&quot;[$r_verdict]&quot;}"/>
