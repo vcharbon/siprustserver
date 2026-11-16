@@ -6,6 +6,7 @@
   "description": "The delta rows an RFC alone justifies (ADR-0062): values the sending stack allocates on every B2BUA replay, each row citing its clause, for a deployment to place in its own match order.",
   "exports": {
     ".": "./src/index.ts",
+    "./test-fixtures": "./test/fixtures.ts",
     "./*": "./src/*.ts"
   },
   "types": "./src/index.ts",

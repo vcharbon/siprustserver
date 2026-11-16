@@ -1,6 +1,8 @@
 /**
  * The case facts the RFC rows read, and how each is read off a cell's document
- * and run. A deployment's own case facts extend {@link RfcFacts}.
+ * and run. A deployment's own case facts extend {@link RfcFacts} and take
+ * them whole from {@link rfcFactsOf}, so a fact a new row reads reaches it
+ * with no wiring of its own.
  */
 import { type DocumentReading, isRequestOf } from "@sip/delta-rules/document-reading"
 import type { Classifier } from "@sip/pipeline"
@@ -38,3 +40,8 @@ export const acknowledgedRSeqAtStep = (
   }
   return out
 }
+
+/** Every fact the RFC rows read, off a cell's document reading and its run: a deployment spreads it into its own case facts. */
+export const rfcFactsOf = (document: DocumentReading, run: Classifier.RunShape): RfcFacts => ({
+  acknowledgedRSeqAtStep: acknowledgedRSeqAtStep(document, run)
+})

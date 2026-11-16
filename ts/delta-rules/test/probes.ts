@@ -1,6 +1,6 @@
 /**
  * Probe builders the tests of the engine and of a package of rows share
- * (`@sip/delta-rules/probes`): a header probe with every field defaulted to
+ * (`@sip/delta-rules/test-probes`): a header probe with every field defaulted to
  * "nothing stated", and a shape probe.
  */
 import type { Probe } from "@sip/pipeline"

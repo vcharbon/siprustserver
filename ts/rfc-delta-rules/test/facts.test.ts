@@ -5,7 +5,7 @@
 import { documentReadingOf } from "@sip/delta-rules/document-reading"
 import type { Classifier } from "@sip/pipeline"
 import { describe, expect, it } from "vitest"
-import { acknowledgedRSeqAtStep } from "../src/facts.js"
+import { acknowledgedRSeqAtStep, rfcFactsOf } from "../src/facts.js"
 
 const step = (id: string, leg: string, op: "send" | "expect", over: Partial<Classifier.DocumentStep>): Classifier.DocumentStep =>
   ({ id, leg, op, auto: false, optional: false, inDialog: false, ...over })
@@ -45,6 +45,16 @@ describe("the RSeq a PRACK acknowledges (RFC 3262 §7.2)", () => {
     ]
     const read = acknowledgedRSeqAtStep(documentReadingOf(documentOf(steps)), runSending([["A", [7, 8]]]))
     expect([...read]).toEqual([["s3", 7]])
+  })
+
+  it("is the fact a deployment's case facts take whole from rfcFactsOf", () => {
+    const steps = [
+      step("s2", "A", "send", { status: 183, cseqMethod: "INVITE", reliable: true }),
+      step("s3", "A", "expect", { method: "PRACK", inDialog: true })
+    ]
+    const facts = rfcFactsOf(documentReadingOf(documentOf(steps)), runSending([["A", [7]]]))
+    expect(Object.keys(facts)).toEqual(["acknowledgedRSeqAtStep"])
+    expect([...facts.acknowledgedRSeqAtStep]).toEqual([["s3", 7]])
   })
 
   it("leaves out a PRACK whose provisional the run never sent", () => {
