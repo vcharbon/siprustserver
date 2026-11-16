@@ -13,7 +13,8 @@ use super::state::Observation;
 use crate::{ServerTxn, StepError};
 
 /// Answer the PRACK `uas` now, or hold its `200` for the delay its
-/// provisional asked for.
+/// provisional asked for. A held `200` is an obligation owed whatever
+/// becomes of the dialog: the call settles only once it is sent.
 pub(super) async fn answer(st: &mut ActorState<'_>, mut uas: ServerTxn) -> Result<(), StepError> {
     let tag = uas.request().to().tag().unwrap_or_default().to_string();
     let rseq = uas.request().header::<RAck>().and_then(Result::ok).map(|r| r.rseq());
@@ -21,7 +22,6 @@ pub(super) async fn answer(st: &mut ActorState<'_>, mut uas: ServerTxn) -> Resul
     let Some(after) = hold.filter(|d| !d.is_zero()) else {
         return uas.respond(200, "OK").try_send().await;
     };
-    // Owed whatever becomes of the dialog: the call settles only once it is sent.
     st.trains.holds_opened += 1;
     let key = ObligationKey::new(st.role, ObligationKind::HeldPrack200, st.trains.holds_opened);
     let now = Instant::now();

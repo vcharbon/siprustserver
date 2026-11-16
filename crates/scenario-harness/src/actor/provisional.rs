@@ -84,16 +84,19 @@ impl Trains {
     }
 }
 
+/// The RSeq values left above a dialog's first one.
+const RSEQ_HEADROOM: u64 = 65_536;
+
 /// The first `RSeq` of early dialog `tag` of the INVITE whose Call-ID is
-/// `call_id`: in 1..2^31 (RFC 3262 §3), spread by the dialog's identity.
+/// `call_id`: in 1..2^31 (RFC 3262 §3), spread by the dialog's identity, with
+/// [`RSEQ_HEADROOM`] left so every later RSeq of the dialog stays under 2^31.
 fn first_rseq(call_id: &str, tag: &str) -> u32 {
     let mut h = 0xcbf2_9ce4_8422_2325u64;
     for b in call_id.bytes().chain(tag.bytes()) {
         h ^= u64::from(b);
         h = h.wrapping_mul(0x0100_0000_01b3);
     }
-    // Headroom keeps every later RSeq of the dialog under 2^31.
-    1 + (h % ((1u64 << 31) - 1 - 65_536)) as u32
+    1 + (h % ((1u64 << 31) - 1 - RSEQ_HEADROOM)) as u32
 }
 
 /// Whether `txn`'s INVITE lets `p` go reliably, and requires it.
@@ -117,7 +120,9 @@ fn known_tag(st: &ActorState<'_>, txn: &ServerTxn, fork: Option<&str>) -> Option
     (fork.is_some() || !st.early_provisionals.is_empty()).then(|| early_tag(txn, fork))
 }
 
-/// `GoalStep::Provisional`: send `p` on its early dialog.
+/// `GoalStep::Provisional`: send `p` on its early dialog. The transaction's
+/// first provisional names the fork a later non-2xx final goes out on (RFC
+/// 3261 §16.7: a forked transaction's non-2xx final is one rung fork's).
 pub(super) async fn send_provisional(
     st: &mut ActorState<'_>,
     p: Provisional,
@@ -153,8 +158,6 @@ pub(super) async fn send_provisional(
     let tag = early_tag(txn, p.fork);
     if first_on_txn {
         if let Some(fork) = p.fork {
-            // A forked transaction's non-2xx final is one rung fork's (RFC
-            // 3261 §16.7): the first's.
             txn.adopt_to_tag(fork);
         }
     }
