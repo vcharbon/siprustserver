@@ -2,7 +2,8 @@
 <!DOCTYPE scenario SYSTEM "sipp.dtd">
 <!-- Answers, then sends two in-dialog re-INVITEs. On the second's 200 it
      sends an ACK with CSeq 3, for no INVITE it sent, then the second's own
-     ACK; it ACKs the 200 the caller sends again, then hangs up. -->
+     ACK back to back; it ACKs the 200 the caller may send again (the
+     order SIPp drains the two ACKs decides), then hangs up. -->
 <scenario name="peer-ack-above-reinvite">
   <recv request="INVITE" crlf="true" rrs="true">
     <action>
@@ -122,7 +123,7 @@
       Content-Length: 0
     ]]>
   </send>
-  <recv response="200" crlf="true" timeout="5000"/>
+  <recv response="200" crlf="true" timeout="1000" ontimeout="bye"/>
   <send>
     <![CDATA[
       ACK [next_url] SIP/2.0
@@ -136,6 +137,7 @@
       Content-Length: 0
     ]]>
   </send>
+  <label id="bye"/>
   <pause milliseconds="200"/>
   <send retrans="500">
     <![CDATA[

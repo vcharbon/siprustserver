@@ -311,6 +311,18 @@ def run_uas_pair(
     )
 
 
+def sent_responses(messages: str) -> list[tuple[str, str]]:
+    """(status code, CSeq) of every response a SIPp message log shows sent."""
+    out: list[tuple[str, str]] = []
+    for block in messages.split("UDP message sent")[1:]:
+        lines = [ln.strip() for ln in block.split("\n")[2:] if ln.strip()]
+        if not lines or not lines[0].startswith("SIP/2.0 "):
+            continue
+        cseq = next((ln for ln in lines if ln.lower().startswith("cseq:")), "")
+        out.append((lines[0].split(" ", 2)[1], cseq.split(":", 1)[1].strip() if cseq else ""))
+    return out
+
+
 def sent_requests(messages: str) -> list[tuple[str, str, str]]:
     """(method, CSeq, top Via branch) of every request a SIPp message log shows sent."""
     out: list[tuple[str, str, str]] = []

@@ -2,8 +2,9 @@
 
 Every pairing passes the keys that select a path (re-INVITEs, the far end's BYE
 as the planned end, a ghost or a flood) and checks the one schema-valid record
-the call left, that the UAC exited 0 and that the peer, which fails on any
-missing answer, ACK or BYE, exited 0. A pairing against the base UAS runs the
+the call left, that the UAC exited 0, that the peer, which fails on any
+missing answer, ACK or BYE, exited 0, and that the UAC sent no more 200s to
+an INVITE than the case allows (no 200/ACK loop). A pairing against the base UAS runs the
 two base scenarios together. Needs `sipp` on PATH.
 """
 
@@ -15,7 +16,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import pytest
-from sipp_pairing import SIPP, UAS, Pairing, exit_note, run_pair, sent_requests
+from sipp_pairing import SIPP, UAS, Pairing, exit_note, run_pair, sent_requests, sent_responses
 
 from hakit import jsonval as jv
 from hakit.schemas import SchemaSet
@@ -34,6 +35,9 @@ class Case:
     calls: int = 1
     rate: int = 10
     phase: str = "released"
+    max_200s: int = 6
+    """The most 200s to an INVITE the caller sends: one per far re-INVITE,
+    plus one per ACK that does not acknowledge it and per retransmission."""
 
 
 UAS_FAST = {"ring_ms": "200", "gap_ms": "300"}
@@ -59,12 +63,35 @@ CASES = [
     ),
     Case("far-reinvites-cut", UAS, "cut", "bye_from_far_end", {"hold_ms": "5000"}, UAS_FAST, ruri_user="reinvite"),
     Case("far-reinvite-unacked", "peer-reinvite-unacked.xml", "cut", "far_reinvite_no_ack", {"hold_ms": "15000"}, {}, ["protocol"]),
-    Case("far-reinvite-ack-repeat", "peer-reinvite-ack-repeat.xml", "answered", "far_end_release", FAR_RELEASE),
-    Case("far-reinvite-ack-repeat-true-lost", "peer-reinvite-ack-repeat-true-lost.xml", "answered", "far_end_release", FAR_RELEASE),
+    Case("far-reinvite-ack-repeat", "peer-reinvite-ack-repeat.xml", "answered", "far_end_release", FAR_RELEASE, max_200s=3),
+    Case("far-reinvite-ack-pair-then-hold", "peer-reinvite-ack-pair-then-hold.xml", "answered", "answered", {"hold_ms": "3000"}, max_200s=3),
+    Case(
+        "far-reinvite-ack-repeat-true-lost",
+        "peer-reinvite-ack-repeat-true-lost.xml",
+        "answered",
+        "far_end_release",
+        FAR_RELEASE,
+        max_200s=3,
+    ),
     Case("far-reinvite-ack-repeat-only", "peer-reinvite-ack-repeat-only.xml", "cut", "far_reinvite_no_ack", {"hold_ms": "15000"}, {}, ["protocol"]),
-    Case("far-reinvite-copy-after-ack-repeat", "peer-reinvite-copy-after-ack-repeat.xml", "answered", "far_end_release", FAR_RELEASE),
+    Case(
+        "far-reinvite-copy-after-ack-repeat",
+        "peer-reinvite-copy-after-ack-repeat.xml",
+        "answered",
+        "far_end_release",
+        FAR_RELEASE,
+        max_200s=4,
+    ),
+    Case(
+        "far-reinvite-relayed-copy-after-ack-repeat",
+        "peer-reinvite-relayed-copy-after-ack-repeat.xml",
+        "answered",
+        "far_end_release",
+        FAR_RELEASE,
+        max_200s=4,
+    ),
     Case("ack-before-its-reinvite", "peer-ack-before-reinvite.xml", "answered", "far_end_release", FAR_RELEASE, {}, ["protocol"]),
-    Case("ack-above-every-reinvite", "peer-ack-above-reinvite.xml", "answered", "far_end_release", FAR_RELEASE, {}, ["protocol"]),
+    Case("ack-above-every-reinvite", "peer-ack-above-reinvite.xml", "answered", "far_end_release", FAR_RELEASE, {}, ["protocol"], max_200s=3),
     Case("ack-in-reinvite-wait", "peer-ack-in-reinvite-wait.xml", "answered", "answered", {"reinvites": "1", "hold_ms": "2000"}, {}, ["protocol"]),
     Case("ack-in-bye-wait", "peer-ack-in-bye-wait.xml", "answered", "answered", {"hold_ms": "1000"}, {}, ["protocol"]),
     Case("ghost-released", "peer-ghost-bye.xml", "answered", "ghost_released", {"abuse": "ghost", "hold_ms": "15000"}),
@@ -113,7 +140,7 @@ def pairings() -> dict[str, Pairing]:
     with tempfile.TemporaryDirectory(prefix="hakit-call-") as tmp, ThreadPoolExecutor(len(cases)) as pool:
         work = Path(tmp)
         futures = {
-            c.id: pool.submit(run_pair, c.peer, work, c.calls, c.rate, keys=c.keys, peer_keys=c.peer_keys, ruri_user=c.ruri_user)
+            c.id: pool.submit(run_pair, c.peer, work, c.calls, c.rate, keys=c.keys, peer_keys=c.peer_keys, ruri_user=c.ruri_user, trace=c in CASES)
             for c in cases
         }
         return {k: f.result() for k, f in futures.items()}
@@ -129,6 +156,8 @@ def test_each_path_writes_its_record(case: Case, pairings: dict[str, Pairing]) -
     assert SchemaSet.load().errors("call-outcome.v1", r) == []
     assert (r["ending"], r["producer_verdict"], r["phase_reached"]) == (case.ending, case.verdict, case.phase)
     assert [f["kind"] for f in jv.objs(r, "failures")] == case.failures
+    sent_200s = sum(1 for code, cseq in sent_responses(p.messages) if code == "200" and cseq.endswith(" INVITE"))
+    assert sent_200s <= case.max_200s, f"{case.id}: the caller sent {sent_200s} 200s to an INVITE"
 
 
 def test_options_on_the_hold_deadline_never_cost_a_call(pairings: dict[str, Pairing]) -> None:
