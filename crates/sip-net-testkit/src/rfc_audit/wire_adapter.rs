@@ -30,6 +30,7 @@ use rfc_rules::rules::Obligation;
 use rfc_rules::{Decision, Observation, RuleId, WireView};
 
 use crate::contracts::{CrossMessageAuditRule, PositionedFinding, SignalingNetworkEvent};
+use crate::rfc_audit::dropped::Dropped;
 use crate::types::UaRole;
 
 mod ack;
@@ -106,8 +107,8 @@ enum Vantage {
     /// the emitter never sent: the taker's audit view holds none the loss model
     /// dropped, and the emitter never took what the taker's loss model dropped
     /// on send, so an emitter that is no recorded bind is not judged at a taker
-    /// that recorded such a drop, either way, between them on the call.
-    EmitterUnlessLost,
+    /// where the row's [`Explained`] reads a drop that explains the verdict.
+    EmitterUnlessLost(Explained),
     /// The emitter's own lane and no other: a verdict that orders what the
     /// emitter sent after what it took. A taker's lane times its own sends at
     /// sending and the emitter's at arrival, so it cannot order them: an
@@ -120,9 +121,8 @@ enum Vantage {
     Taker,
     /// As [`Taker`](Self::Taker), for a verdict a message the loss model
     /// dropped on its way to the taker may explain (a CSeq gap over it): not
-    /// reported at a taker that recorded such a drop from the emitter on the
-    /// call.
-    TakerUnlessLost,
+    /// reported where the row's [`Explained`] reads such a drop.
+    TakerUnlessLost(Explained),
     /// Both ends of the offending message: a two-party negotiation, where an
     /// offence whose sender is no recorded bind is still named on the lane that
     /// took it.
@@ -181,17 +181,32 @@ struct Live {
 
 type Detail = fn(&rfc_rules::Finding, &str) -> String;
 
+/// Whether the datagrams the loss model dropped explain a finding reported at
+/// the lane `lane` on the call `cid`: the message the verdict misses was
+/// sent.
+type Explained = fn(&Dropped, &LaneKey, &rfc_rules::Finding, &str) -> bool;
+
+/// Any datagram dropped between the lane and the finding's emitter on the
+/// call, either way.
+fn any_drop(dropped: &Dropped, lane: &LaneKey, f: &rfc_rules::Finding, cid: &str) -> bool {
+    dropped.holds(lane, &f.emitter, cid)
+}
+
 impl Live {
     const fn emitter(id: RuleId, detail: Detail) -> Live {
         Live::at(Vantage::Emitter, id, detail)
     }
 
     const fn emitter_unless_lost(id: RuleId, detail: Detail) -> Live {
-        Live::at(Vantage::EmitterUnlessLost, id, detail)
+        Live::emitter_unless(id, any_drop, detail)
     }
 
-    const fn taker_unless_lost(id: RuleId, detail: Detail) -> Live {
-        Live::at(Vantage::TakerUnlessLost, id, detail)
+    const fn emitter_unless(id: RuleId, explained: Explained, detail: Detail) -> Live {
+        Live::at(Vantage::EmitterUnlessLost(explained), id, detail)
+    }
+
+    const fn taker_unless(id: RuleId, explained: Explained, detail: Detail) -> Live {
+        Live::at(Vantage::TakerUnlessLost(explained), id, detail)
     }
 
     const fn emitter_only(id: RuleId, detail: Detail) -> Live {
@@ -317,7 +332,7 @@ impl Live {
     /// recorded parties: a consumer took their traffic out of the events, so
     /// what they sent is never judged at the lane that took it. The rules
     /// judge the audit-visible events; the datagrams the loss model dropped,
-    /// on arrival or on send, only tell [`Vantage::EmitterUnlessLost`] where a
+    /// on arrival or on send, only tell the `…UnlessLost` vantages where a
     /// lane's traffic with a party is incomplete.
     fn found(&self, pass: &AuditPass<'_>, scoped_out: &HashSet<LaneKey>) -> Vec<PositionedFinding> {
         let body = self.id.rule().body;
@@ -343,7 +358,7 @@ impl Live {
                     self.detail,
                 )
             }
-            Vantage::EmitterUnlessLost => {
+            Vantage::EmitterUnlessLost(explained) => {
                 let recorded = pass.recorded().scoped(scoped_out);
                 let dropped = pass.dropped();
                 at_vantage(
@@ -354,7 +369,7 @@ impl Live {
                         if recorded.holds(&f.emitter) {
                             return f.emitter == *b && admits(f);
                         }
-                        f.taker == *b && admits(f) && !dropped.holds(b, &f.emitter, cid)
+                        f.taker == *b && admits(f) && !explained(dropped, b, f, cid)
                     },
                     self.detail,
                 )
@@ -365,13 +380,13 @@ impl Live {
             Vantage::Taker => {
                 at_vantage(pass, &views, body, |f, b, _| f.taker == *b && admits(f), self.detail)
             }
-            Vantage::TakerUnlessLost => {
+            Vantage::TakerUnlessLost(explained) => {
                 let dropped = pass.dropped();
                 at_vantage(
                     pass,
                     &views,
                     body,
-                    |f, b, cid| f.taker == *b && admits(f) && !dropped.holds(b, &f.emitter, cid),
+                    |f, b, cid| f.taker == *b && admits(f) && !explained(dropped, b, f, cid),
                     self.detail,
                 )
             }

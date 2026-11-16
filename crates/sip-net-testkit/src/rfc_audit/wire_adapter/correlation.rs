@@ -14,7 +14,7 @@ pub(super) const LIVE: &[Live] = &[
         .advisory()
         .admits(tag_flip_2xx)
         .per_party(),
-    Live::emitter_unless_lost(RuleId::TagConsistency, tag_flip_detail)
+    Live::emitter_unless(RuleId::TagConsistency, final_tag_lost, tag_flip_detail)
         .admits(tag_flip_non_2xx)
         .per_party(),
     Live::emitter(RuleId::NoToTagOnInitialRequest, no_to_tag_on_initial_request).per_party(),
@@ -168,12 +168,20 @@ fn tag_flip_2xx(f: &rfc_rules::Finding) -> bool {
 }
 
 /// A flip on a non-2xx final: it establishes no dialog (§12.1.1), so the
-/// caller's early dialog is never terminated, and this arm gates. An
-/// unrecorded sender is not charged where the loss model dropped a datagram
-/// between it and the taker on the call: the dropped one may be the
-/// provisional that showed the final's tag.
+/// caller's early dialog is never terminated, and this arm gates.
 fn tag_flip_non_2xx(f: &rfc_rules::Finding) -> bool {
     tag_flip_status(f).is_some_and(|status| !(200..300).contains(&status))
+}
+
+/// A flip at the taker `lane` whose final carries the To tag of a
+/// provisional the loss model dropped on its way there from the emitter: the
+/// emitter showed that tag first (§17.2.1 holds).
+fn final_tag_lost(dropped: &Dropped, lane: &LaneKey, f: &rfc_rules::Finding, cid: &str) -> bool {
+    let Decision::Violated(rfc_rules::Evidence::UasTagFlipped { final_tag, .. }) = &f.decision
+    else {
+        return false;
+    };
+    dropped.provisional_to((lane, &f.emitter, cid), final_tag)
 }
 
 fn no_to_tag_on_initial_request(f: &rfc_rules::Finding, _cid: &str) -> String {
