@@ -35,8 +35,10 @@
  once an ending is set (a far BYE in the CANCEL wait: still `timeout`). Each request has its own branch;
  every 2xx retransmission is ACKed again with its CSeq; a far re-INVITE is
  answered 200 (491 while the caller's own is pending, 481 after its BYE).
- Only the ACK with the 200's CSeq discharges it; another ACK stops SIPp's
- retransmission, so the 200 goes again. An ACK above the CSeq of the
+ Only the ACK with the 200's CSeq discharges it, in its wait or in the
+ handler, and no 200 goes after it (SIPp would tie it to that ACK); any
+ other ACK there, and a response or a request but a BYE in its wait, send
+ the 200 again once its retransmission has stopped. An ACK above the CSeq of the
  latest far request given a final acknowledges nothing: a protocol failure,
  the call goes on.
 -->
@@ -145,13 +147,13 @@ a=rtpmap:0 PCMU/8000
  <recv response="^1[0-9][0-9]$" regexp_match="true" optional="true" next="tick">
   <action>
    <assignstr assign_to="tk" value="[clock_tick]"/>
-   <todouble assign_to="now_s" variable="tk"/>
-   <add assign_to="now_s" variable="t_off"/>
+   <todouble assign_to="ns" variable="tk"/>
+   <add assign_to="ns" variable="t_off"/>
    <assign assign_to="fp_take" value="1"/>
    <subtract assign_to="fp_take" variable="fp_flag"/>
    <multiply assign_to="fp_ms" variable="fp_flag"/>
-   <multiply assign_to="now_s" variable="fp_take"/>
-   <add assign_to="fp_ms" variable="now_s"/>
+   <multiply assign_to="ns" variable="fp_take"/>
+   <add assign_to="fp_ms" variable="ns"/>
    <assign assign_to="fp_flag" value="1"/>
    <test assign_to="fp_seen" variable="fp_flag" compare="equal" value="1"/>
    <ereg regexp="m=" search_in="body" assign_to="em_m"/>
@@ -203,9 +205,9 @@ Content-Length: 0
   ]]>
   <action>
    <assignstr assign_to="tk" value="[clock_tick]"/>
-   <todouble assign_to="now_s" variable="tk"/>
-   <add assign_to="now_s" variable="t_off"/>
-   <assignstr assign_to="r_se" value="[$now_s]"/>
+   <todouble assign_to="ns" variable="tk"/>
+   <add assign_to="ns" variable="t_off"/>
+   <assignstr assign_to="r_se" value="[$ns]"/>
    <assignstr assign_to="r_code" value="[$fin_code]"/>
    <assignstr assign_to="r_reason" value="&quot;[$fin_code]&quot;"/>
    <assignstr assign_to="r_ending" value="rejected"/>
@@ -237,18 +239,18 @@ Content-Length: 0
 
  <nop/>
  <label id="inv_timer_b"/>
- <nop test="keep_ending" next="write_record"/>
+ <nop test="keep" next="write_record"/>
  <label id="setup_timeout"/>
  <nop test="fp_seen" next="cancel">
   <action>
    <assignstr assign_to="tk" value="[clock_tick]"/>
-   <todouble assign_to="now_s" variable="tk"/>
-   <add assign_to="now_s" variable="t_off"/>
-   <assignstr assign_to="r_se" value="[$now_s]"/>
+   <todouble assign_to="ns" variable="tk"/>
+   <add assign_to="ns" variable="t_off"/>
+   <assignstr assign_to="r_se" value="[$ns]"/>
    <assignstr assign_to="r_reason" value="&quot;timeout&quot;"/>
    <assignstr assign_to="r_ending" value="timeout"/>
    <assignstr assign_to="r_verdict" value="setup_timeout"/>
-   <assign assign_to="keep_ending" value="1"/>
+   <assign assign_to="keep" value="1"/>
   </action>
  </nop>
 
@@ -267,13 +269,13 @@ Content-Length: 0
  <recv response="^1[0-9][0-9]$" regexp_match="true" optional="true" next="cancel">
   <action>
    <assignstr assign_to="tk" value="[clock_tick]"/>
-   <todouble assign_to="now_s" variable="tk"/>
-   <add assign_to="now_s" variable="t_off"/>
+   <todouble assign_to="ns" variable="tk"/>
+   <add assign_to="ns" variable="t_off"/>
    <assign assign_to="fp_take" value="1"/>
    <subtract assign_to="fp_take" variable="fp_flag"/>
    <multiply assign_to="fp_ms" variable="fp_flag"/>
-   <multiply assign_to="now_s" variable="fp_take"/>
-   <add assign_to="fp_ms" variable="now_s"/>
+   <multiply assign_to="ns" variable="fp_take"/>
+   <add assign_to="fp_ms" variable="ns"/>
    <assign assign_to="fp_flag" value="1"/>
    <test assign_to="fp_seen" variable="fp_flag" compare="equal" value="1"/>
   </action>
@@ -388,10 +390,10 @@ Content-Length: 0
    <assignstr assign_to="d_routes" value="[routes]"/>
    <assignstr assign_to="d_tag" value="[peer_tag_param]"/>
    <assignstr assign_to="tk" value="[clock_tick]"/>
-   <todouble assign_to="now_s" variable="tk"/>
-   <add assign_to="now_s" variable="t_off"/>
-   <assignstr assign_to="r_se" value="[$now_s]"/>
-   <assignstr assign_to="r_ans" value="[$now_s]"/>
+   <todouble assign_to="ns" variable="tk"/>
+   <add assign_to="ns" variable="t_off"/>
+   <assignstr assign_to="r_se" value="[$ns]"/>
+   <assignstr assign_to="r_ans" value="[$ns]"/>
    <assignstr assign_to="r_code" value="[$fin_code]"/>
    <assign assign_to="answered" value="1"/>
    <assignstr assign_to="tk" value="[clock_tick]"/>
@@ -637,9 +639,9 @@ Content-Length: 0
   ]]>
   <action>
    <assignstr assign_to="tk" value="[clock_tick]"/>
-   <todouble assign_to="now_s" variable="tk"/>
-   <add assign_to="now_s" variable="t_off"/>
-   <assignstr assign_to="r_fail" value="[$r_fail][$r_sep]{&quot;at_ms&quot;:[$now_s],&quot;kind&quot;:&quot;dialog_request&quot;,&quot;method&quot;:&quot;INVITE&quot;,&quot;code&quot;:[$rc_code]}"/>
+   <todouble assign_to="ns" variable="tk"/>
+   <add assign_to="ns" variable="t_off"/>
+   <assignstr assign_to="r_fail" value="[$r_fail][$r_sep]{&quot;at_ms&quot;:[$ns],&quot;kind&quot;:&quot;dialog_request&quot;,&quot;method&quot;:&quot;INVITE&quot;,&quot;code&quot;:[$rc_code]}"/>
    <assignstr assign_to="r_sep" value=","/>
    <strcmp assign_to="rf_c481" variable="rc_code" value="481"/>
    <test assign_to="rf_481" variable="rf_c481" compare="equal" value="0"/>
@@ -725,7 +727,7 @@ Content-Length: 0
   <action>
    <assignstr assign_to="r_ending" value="cut"/>
    <assignstr assign_to="r_verdict" value="reinvite_408"/>
-   <assign assign_to="keep_ending" value="1"/>
+   <assign assign_to="keep" value="1"/>
   </action>
  </nop>
 
@@ -735,13 +737,13 @@ Content-Length: 0
  <nop next="teardown">
   <action>
    <assignstr assign_to="tk" value="[clock_tick]"/>
-   <todouble assign_to="now_s" variable="tk"/>
-   <add assign_to="now_s" variable="t_off"/>
-   <assignstr assign_to="r_fail" value="[$r_fail][$r_sep]{&quot;at_ms&quot;:[$now_s],&quot;kind&quot;:&quot;dialog_request&quot;,&quot;method&quot;:&quot;INVITE&quot;,&quot;detail&quot;:&quot;no final&quot;}"/>
+   <todouble assign_to="ns" variable="tk"/>
+   <add assign_to="ns" variable="t_off"/>
+   <assignstr assign_to="r_fail" value="[$r_fail][$r_sep]{&quot;at_ms&quot;:[$ns],&quot;kind&quot;:&quot;dialog_request&quot;,&quot;method&quot;:&quot;INVITE&quot;,&quot;detail&quot;:&quot;no final&quot;}"/>
    <assignstr assign_to="r_sep" value=","/>
    <assignstr assign_to="r_ending" value="cut"/>
    <assignstr assign_to="r_verdict" value="reinvite_no_final"/>
-   <assign assign_to="keep_ending" value="1"/>
+   <assign assign_to="keep" value="1"/>
    <assign assign_to="reinv_pending" value="0"/>
    <assign assign_to="ri_failed" value="1"/>
   </action>
@@ -759,9 +761,13 @@ Content-Length: 0
    <assignstr assign_to="fr_n" value="[last_cseq_number]"/>
    <todouble assign_to="fa_hi" variable="fr_n"/>
    <assign assign_to="fa_busy" value="1"/>
+   <assign assign_to="ak_e" value="0"/>
+   <assign assign_to="ux_e" value="0"/>
   </action>
  </nop>
  <label id="far_200"/>
+ <nop test="ak_e" next="reinv_answer"/>
+ <nop test="ux_e" next="reinv_answer"/>
  <send retrans="500" ontimeout="far_no_ack">
   <![CDATA[
 SIP/2.0 200 OK
@@ -784,16 +790,14 @@ m=audio [media_port] RTP/AVP 0
 a=rtpmap:0 PCMU/8000
   ]]>
  </send>
- <label id="far_ack_wait"/>
  <recv request="ACK" optional="true" timeout="32000" ontimeout="far_no_ack" next="ack_in">
   <action>
    <ereg regexp="[0-9]+" search_in="hdr" header="CSeq:" assign_to="fa_n"/>
-   <strcmp assign_to="fa_x" variable="fa_n" variable2="fr_n"/>
   </action>
  </recv>
  <recv request="OPTIONS" optional="true" next="far_opt_cap"/>
  <recv request="BYE" optional="true" next="far_bye"/>
- <recv request="INVITE" optional="true" next="far_ack_wait"/>
+ <recv request="INVITE" optional="true" next="far_200"/>
  <recv request="[A-Z]" regexp_match="true" optional="true" next="far_ot_cap">
   <action>
    <ereg regexp="^[A-Z]+" search_in="msg" assign_to="ux_req"/>
@@ -812,7 +816,7 @@ a=rtpmap:0 PCMU/8000
  </recv>
  <nop/>
  <label id="far_opt_cap"/>
- <nop next="far_ack_wait">
+ <nop next="far_200">
   <action>
    <assignstr assign_to="opt_via" value="[last_Via:]"/>
    <assignstr assign_to="opt_rr" value="[last_Record-Route:]"/>
@@ -824,7 +828,7 @@ a=rtpmap:0 PCMU/8000
  </nop>
  <nop/>
  <label id="far_ot_cap"/>
- <nop next="far_ack_wait">
+ <nop next="far_200">
   <action>
    <assignstr assign_to="ot_via" value="[last_Via:]"/>
    <assignstr assign_to="ot_rr" value="[last_Record-Route:]"/>
@@ -838,11 +842,11 @@ a=rtpmap:0 PCMU/8000
  <nop/>
  <label id="far_resp"/>
  <nop test="fx_inv" next="far_resp_inv"/>
- <nop next="far_ack_wait"/>
+ <nop next="far_200"/>
  <nop/>
  <label id="far_resp_inv"/>
  <nop test="fx_one" next="far_resp_one"/>
- <nop next="far_ack_wait"/>
+ <nop next="far_200"/>
  <nop/>
  <label id="far_resp_one"/>
  <nop test="fx_2xx" next="far_reack"/>
@@ -864,10 +868,6 @@ a=rtpmap:0 PCMU/8000
   </action>
  </nop>
  <nop/>
- <label id="far_acked"/>
- <nop test="fa_x" next="far_200"/>
- <nop next="reinv_answer"/>
- <nop/>
  <label id="far_tail"/>
  <nop test="ot_fail" next="proto_fail">
   <action>
@@ -888,13 +888,13 @@ a=rtpmap:0 PCMU/8000
  <nop next="teardown">
   <action>
    <assignstr assign_to="tk" value="[clock_tick]"/>
-   <todouble assign_to="now_s" variable="tk"/>
-   <add assign_to="now_s" variable="t_off"/>
-   <assignstr assign_to="r_fail" value="[$r_fail][$r_sep]{&quot;at_ms&quot;:[$now_s],&quot;kind&quot;:&quot;protocol&quot;,&quot;method&quot;:&quot;INVITE&quot;,&quot;detail&quot;:&quot;no ACK for the 2xx to a re-INVITE&quot;}"/>
+   <todouble assign_to="ns" variable="tk"/>
+   <add assign_to="ns" variable="t_off"/>
+   <assignstr assign_to="r_fail" value="[$r_fail][$r_sep]{&quot;at_ms&quot;:[$ns],&quot;kind&quot;:&quot;protocol&quot;,&quot;method&quot;:&quot;INVITE&quot;,&quot;detail&quot;:&quot;no ACK for the 2xx to a re-INVITE&quot;}"/>
    <assignstr assign_to="r_sep" value=","/>
    <assignstr assign_to="r_ending" value="cut"/>
    <assignstr assign_to="r_verdict" value="far_reinvite_no_ack"/>
-   <assign assign_to="keep_ending" value="1"/>
+   <assign assign_to="keep" value="1"/>
    <assign assign_to="fa_busy" value="0"/>
   </action>
  </nop>
@@ -1103,7 +1103,6 @@ From: <sip:caller@[local_ip]:[local_port]>;tag=[pid]-[call_number]-[run]
 To: <sip:[field0]@[remote_ip]:[remote_port]>[$d_tag]
 Call-ID: [call_id]
 CSeq: [$bye_cs] BYE
-Contact: <sip:caller@[local_ip]:[local_port]>
 Max-Forwards: 70
 Content-Length: 0
   ]]>
@@ -1151,8 +1150,8 @@ Content-Length: 0
    <strcmp assign_to="bw_c1" variable="bw_n" value="1"/>
    <test assign_to="bw_one" variable="bw_c1" compare="equal" value="0"/>
    <assignstr assign_to="tk" value="[clock_tick]"/>
-   <todouble assign_to="now_s" variable="tk"/>
-   <add assign_to="now_s" variable="t_off"/>
+   <todouble assign_to="ns" variable="tk"/>
+   <add assign_to="ns" variable="t_off"/>
    <assignstr assign_to="bye_code" value="[$bw_code]"/>
    <strcmp assign_to="bye_cmp" variable="bw_code" value="481"/>
    <test assign_to="bye_481" variable="bye_cmp" compare="equal" value="0"/>
@@ -1222,7 +1221,7 @@ Content-Length: 0
  </nop>
  <nop/>
  <label id="bye_ok"/>
- <nop condexec="keep_ending" condexec_inverse="true" next="released">
+ <nop condexec="keep" condexec_inverse="true" next="released">
   <action>
    <assignstr assign_to="r_ending" value="answered"/>
    <assignstr assign_to="r_verdict" value="answered"/>
@@ -1249,9 +1248,9 @@ Content-Length: 0
  </nop>
  <nop/>
  <label id="bye_failed_bye"/>
- <nop test="keep_ending" next="released">
+ <nop test="keep" next="released">
   <action>
-   <assignstr assign_to="r_fail" value="[$r_fail][$r_sep]{&quot;at_ms&quot;:[$now_s],&quot;kind&quot;:&quot;dialog_request&quot;,&quot;method&quot;:&quot;BYE&quot;,&quot;code&quot;:[$bye_code]}"/>
+   <assignstr assign_to="r_fail" value="[$r_fail][$r_sep]{&quot;at_ms&quot;:[$ns],&quot;kind&quot;:&quot;dialog_request&quot;,&quot;method&quot;:&quot;BYE&quot;,&quot;code&quot;:[$bye_code]}"/>
    <assignstr assign_to="r_sep" value=","/>
   </action>
  </nop>
@@ -1276,12 +1275,12 @@ Content-Length: 0
 
  <nop/>
  <label id="bye_no_final"/>
- <nop test="keep_ending" next="release_answers">
+ <nop test="keep" next="release_answers">
   <action>
    <assignstr assign_to="tk" value="[clock_tick]"/>
-   <todouble assign_to="now_s" variable="tk"/>
-   <add assign_to="now_s" variable="t_off"/>
-   <assignstr assign_to="r_fail" value="[$r_fail][$r_sep]{&quot;at_ms&quot;:[$now_s],&quot;kind&quot;:&quot;dialog_request&quot;,&quot;method&quot;:&quot;BYE&quot;,&quot;detail&quot;:&quot;no final&quot;}"/>
+   <todouble assign_to="ns" variable="tk"/>
+   <add assign_to="ns" variable="t_off"/>
+   <assignstr assign_to="r_fail" value="[$r_fail][$r_sep]{&quot;at_ms&quot;:[$ns],&quot;kind&quot;:&quot;dialog_request&quot;,&quot;method&quot;:&quot;BYE&quot;,&quot;detail&quot;:&quot;no final&quot;}"/>
    <assignstr assign_to="r_sep" value=","/>
   </action>
  </nop>
@@ -1309,16 +1308,16 @@ Content-Length: 0
  <nop>
   <action>
    <assignstr assign_to="tk" value="[clock_tick]"/>
-   <todouble assign_to="now_s" variable="tk"/>
-   <add assign_to="now_s" variable="t_off"/>
-   <assignstr assign_to="r_fail" value="[$r_fail][$r_sep]{&quot;at_ms&quot;:[$now_s],&quot;kind&quot;:&quot;protocol&quot;,&quot;method&quot;:&quot;INVITE&quot;,&quot;code&quot;:[$a2_code],&quot;detail&quot;:&quot;second final after 2xx&quot;}"/>
+   <todouble assign_to="ns" variable="tk"/>
+   <add assign_to="ns" variable="t_off"/>
+   <assignstr assign_to="r_fail" value="[$r_fail][$r_sep]{&quot;at_ms&quot;:[$ns],&quot;kind&quot;:&quot;protocol&quot;,&quot;method&quot;:&quot;INVITE&quot;,&quot;code&quot;:[$a2_code],&quot;detail&quot;:&quot;second final after 2xx&quot;}"/>
    <assignstr assign_to="r_sep" value=","/>
    <assign assign_to="late_final_seen" value="1"/>
   </action>
  </nop>
  <label id="after_2xx_back"/>
  <nop test="a2_b1" next="reinv_wait"/>
- <nop test="a2_b2" next="far_ack_wait"/>
+ <nop test="a2_b2" next="far_200"/>
  <nop next="bye_send"/>
 
  <nop/>
@@ -1344,7 +1343,7 @@ Content-Length: 0
   </action>
  </send>
  <nop test="rk_b1" next="reinv_wait"/>
- <nop test="rk_b2" next="far_ack_wait"/>
+ <nop test="rk_b2" next="far_200"/>
  <nop test="rk_b3" next="bye_send"/>
  <nop test="rk_b5" next="reinv_done"/>
  <nop test="rk_b6" next="teardown"/>
@@ -1356,6 +1355,7 @@ Content-Length: 0
   <action>
    <todouble assign_to="ux_d" variable="ux_n"/>
    <test assign_to="ux_ok" variable="ux_d" compare="less_than_equal" variable2="fa_hi"/>
+   <test assign_to="ux_e" variable="ux_d" compare="equal" variable2="fa_hi"/>
   </action>
  </nop>
  <nop next="ack_bad"/>
@@ -1365,21 +1365,22 @@ Content-Length: 0
   <action>
    <todouble assign_to="ak_d" variable="fa_n"/>
    <test assign_to="ak_ok" variable="ak_d" compare="less_than_equal" variable2="fa_hi"/>
+   <test assign_to="ak_e" variable="ak_d" compare="equal" variable2="fa_hi"/>
   </action>
  </nop>
  <label id="ack_bad"/>
  <nop>
   <action>
    <assignstr assign_to="tk" value="[clock_tick]"/>
-   <todouble assign_to="now_s" variable="tk"/>
-   <add assign_to="now_s" variable="t_off"/>
-   <assignstr assign_to="r_fail" value="[$r_fail][$r_sep]{&quot;at_ms&quot;:[$now_s],&quot;kind&quot;:&quot;protocol&quot;,&quot;detail&quot;:&quot;ACK for no INVITE answered&quot;}"/>
+   <todouble assign_to="ns" variable="tk"/>
+   <add assign_to="ns" variable="t_off"/>
+   <assignstr assign_to="r_fail" value="[$r_fail][$r_sep]{&quot;at_ms&quot;:[$ns],&quot;kind&quot;:&quot;protocol&quot;,&quot;detail&quot;:&quot;ACK for no INVITE answered&quot;}"/>
    <assignstr assign_to="r_sep" value=","/>
   </action>
  </nop>
  <label id="ack_out"/>
  <nop test="_unexp.retaddr" next="unexp_resume"/>
- <nop test="fa_busy" next="far_acked"/>
+ <nop test="fa_busy" next="far_200"/>
  <nop test="bye_sent" next="bye_send"/>
  <nop next="reinv_wait"/>
 
@@ -1388,18 +1389,18 @@ Content-Length: 0
  <nop>
   <action>
    <assignstr assign_to="tk" value="[clock_tick]"/>
-   <todouble assign_to="now_s" variable="tk"/>
-   <add assign_to="now_s" variable="t_off"/>
-   <assignstr assign_to="r_fail" value="[$r_fail][$r_sep]{&quot;at_ms&quot;:[$now_s],&quot;kind&quot;:&quot;protocol&quot;,&quot;detail&quot;:&quot;unexpected [$ux_what]&quot;}"/>
+   <todouble assign_to="ns" variable="tk"/>
+   <add assign_to="ns" variable="t_off"/>
+   <assignstr assign_to="r_fail" value="[$r_fail][$r_sep]{&quot;at_ms&quot;:[$ns],&quot;kind&quot;:&quot;protocol&quot;,&quot;detail&quot;:&quot;unexpected [$ux_what]&quot;}"/>
    <assignstr assign_to="r_sep" value=","/>
   </action>
  </nop>
- <nop test="keep_ending" next="proto_kept"/>
+ <nop test="keep" next="proto_kept"/>
  <nop test="answered" next="teardown">
   <action>
    <assignstr assign_to="r_ending" value="failed"/>
    <assignstr assign_to="r_verdict" value="unexpected_request"/>
-   <assign assign_to="keep_ending" value="1"/>
+   <assign assign_to="keep" value="1"/>
   </action>
  </nop>
  <nop test="dialog" next="teardown"/>
@@ -1543,13 +1544,13 @@ Content-Length: 0
   <action>
    <add assign_to="em_acc" variable="em_c"/>
    <assignstr assign_to="tk" value="[clock_tick]"/>
-   <todouble assign_to="now_s" variable="tk"/>
-   <add assign_to="now_s" variable="t_off"/>
+   <todouble assign_to="ns" variable="tk"/>
+   <add assign_to="ns" variable="t_off"/>
    <assign assign_to="fp_take" value="1"/>
    <subtract assign_to="fp_take" variable="fp_flag"/>
    <multiply assign_to="fp_ms" variable="fp_flag"/>
-   <multiply assign_to="now_s" variable="fp_take"/>
-   <add assign_to="fp_ms" variable="now_s"/>
+   <multiply assign_to="ns" variable="fp_take"/>
+   <add assign_to="fp_ms" variable="ns"/>
    <assign assign_to="fp_flag" value="1"/>
    <test assign_to="fp_seen" variable="fp_flag" compare="equal" value="1"/>
   </action>
@@ -1594,7 +1595,7 @@ Content-Length: 0
  <nop test="writing" next="unexp_resume"/>
  <nop test="answered" next="ux_reack"/>
  <nop test="dialog" next="ux_reack"/>
- <nop test="keep_ending" next="ux_late_answer"/>
+ <nop test="keep" next="ux_late_answer"/>
  <nop next="got_answer">
   <action>
    <assign assign_to="_unexp.retaddr" value="0"/>
@@ -1648,8 +1649,8 @@ Content-Length: 0
    <strcmp assign_to="bye_cmp" variable="bye_code" value="481"/>
    <test assign_to="bye_481" variable="bye_cmp" compare="equal" value="0"/>
    <assignstr assign_to="tk" value="[clock_tick]"/>
-   <todouble assign_to="now_s" variable="tk"/>
-   <add assign_to="now_s" variable="t_off"/>
+   <todouble assign_to="ns" variable="tk"/>
+   <add assign_to="ns" variable="t_off"/>
   </action>
  </nop>
  <nop/>
@@ -1694,7 +1695,7 @@ Content-Length: 0
  <label id="ux_final_initial"/>
  <nop test="answered" next="ux_final_after_2xx"/>
  <nop test="dialog" next="ux_final_after_2xx"/>
- <nop test="keep_ending" next="ux_late_final"/>
+ <nop test="keep" next="ux_late_final"/>
  <nop condexec="ux_rsn_all">
   <action>
    <assign assign_to="rsn_all" value="1"/>
@@ -1722,9 +1723,9 @@ Content-Length: 0
  <nop next="unexp_resume">
   <action>
    <assignstr assign_to="tk" value="[clock_tick]"/>
-   <todouble assign_to="now_s" variable="tk"/>
-   <add assign_to="now_s" variable="t_off"/>
-   <assignstr assign_to="r_fail" value="[$r_fail][$r_sep]{&quot;at_ms&quot;:[$now_s],&quot;kind&quot;:&quot;protocol&quot;,&quot;method&quot;:&quot;INVITE&quot;,&quot;code&quot;:[$ux_code],&quot;detail&quot;:&quot;second final after 2xx&quot;}"/>
+   <todouble assign_to="ns" variable="tk"/>
+   <add assign_to="ns" variable="t_off"/>
+   <assignstr assign_to="r_fail" value="[$r_fail][$r_sep]{&quot;at_ms&quot;:[$ns],&quot;kind&quot;:&quot;protocol&quot;,&quot;method&quot;:&quot;INVITE&quot;,&quot;code&quot;:[$ux_code],&quot;detail&quot;:&quot;second final after 2xx&quot;}"/>
    <assignstr assign_to="r_sep" value=","/>
    <assign assign_to="late_final_seen" value="1"/>
   </action>
@@ -1884,10 +1885,10 @@ Content-Length: 0
  <nop>
   <action>
    <assignstr assign_to="tk" value="[clock_tick]"/>
-   <todouble assign_to="now_s" variable="tk"/>
-   <add assign_to="now_s" variable="t_off"/>
+   <todouble assign_to="ns" variable="tk"/>
+   <add assign_to="ns" variable="t_off"/>
    <test assign_to="r_em" variable="em_acc" compare="greater_than" value="0"/>
-   <log message="{&quot;schema&quot;:&quot;call-outcome.v1&quot;,&quot;run&quot;:&quot;[run]&quot;,&quot;source&quot;:&quot;sipp&quot;,&quot;stream&quot;:&quot;[stream]&quot;,&quot;shape&quot;:&quot;[shape]&quot;,&quot;call_id&quot;:&quot;[call_id]&quot;,&quot;started_at_ms&quot;:[$t_start],&quot;first_provisional_at_ms&quot;:[$r_fp],&quot;trying_at_ms&quot;:[$r_try],&quot;setup_ended_at_ms&quot;:[$r_se],&quot;answered_at_ms&quot;:[$r_ans],&quot;ended_at_ms&quot;:[$now_s],&quot;phase_reached&quot;:&quot;[$r_phase]&quot;,&quot;early_media&quot;:[$r_em],&quot;final_code&quot;:[$r_code],&quot;reason&quot;:[$r_reason],&quot;retry_after_s&quot;:[$r_ra],&quot;ending&quot;:&quot;[$r_ending]&quot;,&quot;failures&quot;:\x5B[$r_fail]\x5D,&quot;producer_verdict&quot;:&quot;[$r_verdict]&quot;}"/>
+   <log message="{&quot;schema&quot;:&quot;call-outcome.v1&quot;,&quot;run&quot;:&quot;[run]&quot;,&quot;source&quot;:&quot;sipp&quot;,&quot;stream&quot;:&quot;[stream]&quot;,&quot;shape&quot;:&quot;[shape]&quot;,&quot;call_id&quot;:&quot;[call_id]&quot;,&quot;started_at_ms&quot;:[$t_start],&quot;first_provisional_at_ms&quot;:[$r_fp],&quot;trying_at_ms&quot;:[$r_try],&quot;setup_ended_at_ms&quot;:[$r_se],&quot;answered_at_ms&quot;:[$r_ans],&quot;ended_at_ms&quot;:[$ns],&quot;phase_reached&quot;:&quot;[$r_phase]&quot;,&quot;early_media&quot;:[$r_em],&quot;final_code&quot;:[$r_code],&quot;reason&quot;:[$r_reason],&quot;retry_after_s&quot;:[$r_ra],&quot;ending&quot;:&quot;[$r_ending]&quot;,&quot;failures&quot;:\x5B[$r_fail]\x5D,&quot;producer_verdict&quot;:&quot;[$r_verdict]&quot;}"/>
   </action>
  </nop>
 

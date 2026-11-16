@@ -553,9 +553,11 @@ made. A run profile joins the two.
    stat) and the call acts on the peer's retransmission; a discarded
    provisional, never retransmitted, is lost. Every ACK reaches the scenario,
    which checks its CSeq: only the ACK with a 2xx's CSeq discharges that 2xx,
-   and any other sends the 2xx again; an ACK above the CSeq of the latest far
-   request the call gave a final acknowledges nothing the caller sent, a
-   `protocol` failure, and the call goes on. So every UAC
+   in its wait or in the handler, and any other sends the 2xx again. No 2xx
+   is sent after its own ACK: SIPp would answer each copy of that ACK with the
+   2xx, and the far end ACKs each 2xx copy again, a loop. An ACK above the
+   CSeq of the latest far request the call gave a final acknowledges nothing
+   the caller sent, a `protocol` failure, and the call goes on. So every UAC
    scenario follows these rules:
    - every wait (a group of `<recv>`s) is entered on a recv with its own
      `timeout` and `ontimeout`: a pending send never bounds it (below);
