@@ -520,3 +520,113 @@ async fn a_487_before_the_bye_that_ended_the_dialog_is_excused() {
     assert!(run(true).is_empty(), "{:?}", run(true));
     assert_eq!(run(false), vec![WireFailure { at_ms: 0, method: "INFO".into(), code: Some(487) }]);
 }
+
+/// A 481 to a side's own BYE, with no other BYE on its dialog, says the
+/// dialog was gone before the BYE: a failure, the caller's and a leg's.
+#[tokio::test(start_paused = true)]
+#[ignore = "slow lane: loadgen"]
+async fn a_481_to_the_side_s_own_bye_stays_a_failure() {
+    let wire = CallWire::new(Clock::test_at(0));
+    let f = feed(
+        &wire,
+        &[
+            (Side::Caller, Dir::Out, msg("INVITE sip:b@h SIP/2.0", "c15", "1 INVITE", "", "")),
+            (Side::Caller, Dir::In, msg("SIP/2.0 200 OK", "c15", "1 INVITE", "t1", "")),
+            (Side::Caller, Dir::Out, msg("ACK sip:b@h SIP/2.0", "c15", "1 ACK", "t1", "")),
+            (
+                Side::Leg("callee"),
+                Dir::In,
+                msg("INVITE sip:q@h SIP/2.0", "b15", "1 INVITE", "", ""),
+            ),
+            (Side::Leg("callee"), Dir::Out, msg("SIP/2.0 200 OK", "b15", "1 INVITE", "q1", "")),
+            (Side::Caller, Dir::Out, msg("BYE sip:b@h SIP/2.0", "c15", "2 BYE", "t1", "")),
+            (Side::Caller, Dir::In, msg("SIP/2.0 481 No Dialog", "c15", "2 BYE", "t1", "")),
+            (Side::Leg("callee"), Dir::Out, msg("BYE sip:a@h SIP/2.0", "b15", "5 BYE", "q1", "")),
+            (Side::Leg("callee"), Dir::In, msg("SIP/2.0 481 No Dialog", "b15", "5 BYE", "q1", "")),
+        ],
+    );
+    let failed = WireFailure { at_ms: 0, method: "BYE".into(), code: Some(481) };
+    assert_eq!(f.failures, vec![failed.clone()]);
+    assert!(f.saw_481);
+    assert_eq!(f.legs[0].failures, vec![failed]);
+}
+
+/// A 487 to an INFO, the BYE that ends the dialog coming 10 s later, answers
+/// no request pending as the dialog ended: it stays a failure. The same 487
+/// with the BYE in the same instant is excused.
+#[tokio::test(start_paused = true)]
+#[ignore = "slow lane: loadgen"]
+async fn a_487_far_from_any_bye_stays_a_failure() {
+    let wire = CallWire::new(Clock::test_at(0));
+    feed(
+        &wire,
+        &[
+            (Side::Caller, Dir::Out, msg("INVITE sip:b@h SIP/2.0", "c16", "1 INVITE", "", "")),
+            (Side::Caller, Dir::In, msg("SIP/2.0 200 OK", "c16", "1 INVITE", "t1", "")),
+            (Side::Caller, Dir::Out, msg("INFO sip:b@h SIP/2.0", "c16", "2 INFO", "t1", "")),
+            (Side::Caller, Dir::In, msg("SIP/2.0 487 Terminated", "c16", "2 INFO", "t1", "")),
+            (Side::Caller, Dir::Out, msg("INFO sip:b@h SIP/2.0", "c16", "3 INFO", "t1", "")),
+            (Side::Caller, Dir::In, msg("SIP/2.0 200 OK", "c16", "3 INFO", "t1", "")),
+        ],
+    );
+    tokio::time::advance(std::time::Duration::from_secs(10)).await;
+    feed(
+        &wire,
+        &[
+            (Side::Caller, Dir::Out, msg("BYE sip:b@h SIP/2.0", "c16", "4 BYE", "t1", "")),
+            (Side::Caller, Dir::In, msg("SIP/2.0 200 OK", "c16", "4 BYE", "t1", "")),
+        ],
+    );
+    wire.excuse(&[]);
+    assert_eq!(
+        wire.facts().failures,
+        vec![WireFailure { at_ms: 0, method: "INFO".into(), code: Some(487) }]
+    );
+}
+
+/// A 500 to a re-INVITE without a Retry-After asks for no retry (RFC 3261
+/// §14.1): the side's next re-INVITE leaves it a failure. One carrying a
+/// Retry-After, then retried, is no failure.
+#[tokio::test(start_paused = true)]
+#[ignore = "slow lane: loadgen"]
+async fn a_500_without_retry_after_stays_a_failure_when_retried() {
+    let run = |extra: &str| {
+        let reinvite = |cseq: &str| msg("INVITE sip:b@h SIP/2.0", "c17", cseq, "t1", "");
+        feed(
+            &CallWire::new(Clock::test_at(0)),
+            &[
+                (Side::Caller, Dir::Out, msg("INVITE sip:b@h SIP/2.0", "c17", "1 INVITE", "", "")),
+                (Side::Caller, Dir::In, msg("SIP/2.0 200 OK", "c17", "1 INVITE", "t1", "")),
+                (Side::Caller, Dir::Out, reinvite("2 INVITE")),
+                (Side::Caller, Dir::In, msg("SIP/2.0 500 Error", "c17", "2 INVITE", "t1", extra)),
+                (Side::Caller, Dir::Out, reinvite("3 INVITE")),
+                (Side::Caller, Dir::In, msg("SIP/2.0 200 OK", "c17", "3 INVITE", "t1", "")),
+            ],
+        )
+        .failures
+    };
+    assert_eq!(run(""), vec![WireFailure { at_ms: 0, method: "INVITE".into(), code: Some(500) }]);
+    assert_eq!(run("Retry-After: 2\r\n"), vec![]);
+}
+
+/// A 481 to an INFO the seal left pending is that request's failure only:
+/// the excuse never reads the dialog gone from it.
+#[tokio::test(start_paused = true)]
+#[ignore = "slow lane: loadgen"]
+async fn a_late_481_after_the_seal_never_reads_the_dialog_gone() {
+    let wire = CallWire::new(Clock::test_at(0));
+    feed(
+        &wire,
+        &[
+            (Side::Caller, Dir::Out, msg("INVITE sip:b@h SIP/2.0", "c18", "1 INVITE", "", "")),
+            (Side::Caller, Dir::In, msg("SIP/2.0 200 OK", "c18", "1 INVITE", "t1", "")),
+            (Side::Caller, Dir::Out, msg("INFO sip:b@h SIP/2.0", "c18", "2 INFO", "t1", "")),
+        ],
+    );
+    wire.seal();
+    feed(&wire, &[(Side::Caller, Dir::In, msg("SIP/2.0 481 No", "c18", "2 INFO", "t1", ""))]);
+    wire.excuse(&[]);
+    let f = wire.facts();
+    assert_eq!(f.failures, vec![WireFailure { at_ms: 0, method: "INFO".into(), code: Some(481) }]);
+    assert!(!f.saw_481, "the seal's ending stands, never cut");
+}
