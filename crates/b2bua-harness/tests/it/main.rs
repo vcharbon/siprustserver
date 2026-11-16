@@ -145,6 +145,7 @@ mod own_request_timeout_rule;
 mod own_timer_past_bounds;
 mod peer_cseq_across_confirmation;
 mod peer_dialog_ending;
+mod pending_relay_at_bye;
 mod per_call_caps;
 mod prack;
 mod prack_481_keeps_the_call;
