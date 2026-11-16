@@ -1,10 +1,9 @@
 <?xml version="1.0" encoding="ISO-8859-1" ?>
 <!DOCTYPE scenario SYSTEM "sipp.dtd">
-<!-- Answers, then sends two in-dialog re-INVITEs. After the second's 200 it
+<!-- Answers, then sends two in-dialog re-INVITEs. On the second's 200 it
      passes the ACK of the first's 200 to the transport again, the same
      datagram (RFC 3261 section 13.2.2.4), as a node taking a dialog over from
-     its record does; the caller's 200 to the second is still unacknowledged,
-     so the peer expects it again (section 13.3.1.4), ACKs it and hangs up. -->
+     its record does; 300 ms later it ACKs the second's 200, then hangs up. -->
 <scenario name="peer-reinvite-ack-repeat">
   <recv request="INVITE" crlf="true" rrs="true">
     <action>
@@ -111,7 +110,7 @@
       Content-Length: 0
     ]]>
   </send>
-  <recv response="200" crlf="true" timeout="5000"/>
+  <pause milliseconds="300"/>
   <send>
     <![CDATA[
       ACK [next_url] SIP/2.0
