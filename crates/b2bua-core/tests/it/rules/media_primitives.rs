@@ -9,6 +9,7 @@ use super::*;
 use b2bua_core::effects::OutboundBody;
 use b2bua_core::rules::MessageTransform;
 use sip_message::HeaderName;
+mod packaged_info;
 mod unbuilt_relay;
 
 /// A confirmed b-leg of the given role; its single dialog carries the callee

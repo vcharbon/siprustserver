@@ -266,6 +266,21 @@ Content-Length: 0\r\n\r\n";
         assert!(rendered.contains("\r\nRecv-Info:"), "{rendered}");
     }
 
+    /// A caller stating its own Recv-Info owns the 469's — no second line.
+    #[test]
+    fn a_caller_stated_recv_info_owns_the_469() {
+        let opts = GenerateResponseOpts {
+            extra_headers: vec![SipHeader {
+                name: SipStr::owned("Recv-Info"),
+                value: SipStr::owned("foo"),
+            }],
+            ..Default::default()
+        };
+        let resp = generate_response(&notify(), 469, "Bad Info Package", &opts).unwrap();
+        let recv_info: Vec<_> = resp.raw(HeaderName::from("Recv-Info")).collect();
+        assert_eq!(recv_info, ["foo"]);
+    }
+
     /// The Recv-Info stamp is the 469's alone.
     #[test]
     fn a_403_gains_no_recv_info() {
