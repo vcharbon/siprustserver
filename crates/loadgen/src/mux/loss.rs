@@ -41,6 +41,9 @@ pub struct TargetedDrop {
     /// Match the final responses (status 200 and above) whose CSeq method is
     /// `method`, not the requests.
     pub response: bool,
+    /// With `response`, match the provisionals above 100 instead of the
+    /// finals.
+    pub provisional: bool,
     /// Which distinct occurrence (1-based, by CSeq number, in arrival order).
     pub nth: u32,
     /// Drop every occurrence (incl. re-emissions) instead of just the first.
@@ -59,13 +62,19 @@ impl TargetedDrop {
     /// The first copy of the `nth` distinct `method` request on `dir`, on
     /// every endpoint of the call.
     pub const fn request(method: &'static str, nth: u32, dir: DropDir) -> Self {
-        Self { method, response: false, nth, permanent: false, dir, leg: None }
+        Self { method, response: false, provisional: false, nth, permanent: false, dir, leg: None }
     }
 
     /// The first copy of the final response to the `nth` distinct `method`
     /// request on `dir`, on every endpoint of the call.
     pub const fn final_response(method: &'static str, nth: u32, dir: DropDir) -> Self {
         Self { response: true, ..Self::request(method, nth, dir) }
+    }
+
+    /// The first provisional above 100 to the `nth` distinct `method` request
+    /// on `dir`, on every endpoint of the call.
+    pub const fn provisional(method: &'static str, nth: u32, dir: DropDir) -> Self {
+        Self { provisional: true, ..Self::final_response(method, nth, dir) }
     }
 
     /// Every copy, re-emissions included.
@@ -127,7 +136,8 @@ impl DropModel {
         if td.dir != dir || response != td.response || id.cseq_method != Some(td.method) {
             return false;
         }
-        if td.response && !id.status.is_some_and(|s| s >= 200) {
+        let wanted = if td.provisional { 101..200 } else { 200..u16::MAX };
+        if td.response && !id.status.is_some_and(|s| wanted.contains(&s)) {
             return false;
         }
         let Some(cseq) = id.cseq else { return false };

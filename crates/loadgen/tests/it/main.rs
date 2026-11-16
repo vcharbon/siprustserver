@@ -18,6 +18,7 @@ mod ladder_net;
 mod late_answer_net;
 mod late_final;
 mod live_report;
+mod lost_ring_net;
 mod mux_claims;
 mod mux_from_user;
 mod outcome_records;
