@@ -101,7 +101,8 @@ def test_a_window_with_in_dialog_candidates_says_so_in_why_and_in_its_section(tm
     v = compute(run_dir(tmp_path, [cut], calls=1, events=kill(1, T0 + 100_000)), SCHEMAS)
     text = render(v)
     why = text.split("## Why\n\n")[1].split("\n\n")[0]
-    assert "- window 001-kill_worker is a candidate of 2 in-dialog impacts: `call_cut` basic x1, `dialog_request_failed` basic x1 — FINDING" in why
+    assert "- window 001-kill_worker is a candidate of 2 in-dialog findings: `call_cut` basic x1, `dialog_request_failed` basic x1 — FINDING" in why
+    assert "- 2 in-dialog findings in all" in why
     (heading,) = [ln for ln in text.splitlines() if ln.startswith("### 001-kill_worker")]
     assert heading.endswith(", 0 findings against its allowances, candidate of 2 in-dialog findings")
     assert "- in-dialog `call_cut` basic: 1 (this window a candidate) — FINDING" in text

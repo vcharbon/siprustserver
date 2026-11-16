@@ -16,7 +16,7 @@ from hakit.profile import Profile, parse_profile
 from hakit.summary import priority_verdict, render
 from hakit.unanswered import Cause, Places, cause_of, is_priority, unanswered
 from hakit.verdict import compute
-from hakit.windows import Phase, Window
+from hakit.windows import Phase, Window, event_line, phase_line
 
 SHAPES = {s.shape: s for s in CONTENT.catalogs["x-api-call"].shapes}
 BASIC = SHAPES["basic"]
@@ -125,6 +125,72 @@ def test_a_cut_after_every_window_it_lived_through_is_placed_at_the_latest() -> 
     assert cause_of(stranded, BASIC, places) == Cause("cut", "stranded 200", "first")
     after = record("a", T0 + 52_000, "cut", ended=9_000, failures=bye_481(T0 + 60_000))
     assert cause_of(after, BASIC, places) == Cause("cut", "cut 200", "outside")
+
+
+def test_a_call_stranded_between_two_windows_sits_in_the_one_it_lived_through() -> None:
+    first = injected("001-first", "first", T0 + 10_000, T0 + 20_000)
+    second = injected("002-second", "second", T0 + 40_000, T0 + 50_000)
+    stranded = record("s", T0 + 5_000, "stranded", ended=25_000)
+    assert cause_of(stranded, BASIC, Places([second, first], {})) == Cause("cut", "stranded 200", "first")
+
+
+def outcome(v: Json) -> tuple[set[tuple[str, str, tuple[str, ...]]], set[tuple[str, tuple[str, ...]]], list[Json]]:
+    """The verdict's in-dialog entries, its unattributed classes and its one stream's unanswered causes."""
+    in_dialog = {(i["call_id"], i["class"], tuple(jv.strings(i, "candidate_windows"))) for i in jv.objs(v, "in_dialog")}
+    unattributed = {(u["class"], tuple(jv.strings(u, "call_ids"))) for u in jv.objs(v, "unattributed")}
+    (s,) = jv.objs(jv.obj(v, "unanswered"), "streams")
+    return in_dialog, unattributed, [{k: c[k] for k in ("cause", "detail", "where")} for c in jv.objs(s, "causes")]
+
+
+def test_both_tables_place_an_answered_call_that_failed_after_the_window_it_lived_through(tmp_path: Path) -> None:
+    close = T0 + 100_000 + 5_000 + 40_000
+    bare = record("bare", T0 + 90_000, "failed", ended=60_500)
+    v = compute(run_dir(tmp_path / "bare", [bare], calls=1, events=kill(1, T0 + 100_000)), SCHEMAS)
+    assert outcome(v) == (
+        {("bare", "unexpected_ending", ("001-kill_worker",))},
+        set(),
+        [{"cause": "cut", "detail": "failed 200", "where": {"kill_worker": 1}}],
+    )
+    bye = record("bye", T0 + 90_000, "failed", ended=60_500, failures=bye_481(close + 5_000))
+    v = compute(run_dir(tmp_path / "bye", [bye], calls=1, events=kill(1, T0 + 100_000)), SCHEMAS)
+    assert outcome(v) == (
+        {("bye", "unexpected_ending", ("001-kill_worker",)), ("bye", "dialog_request_failed", ("001-kill_worker",))},
+        set(),
+        [{"cause": "cut", "detail": "failed 200", "where": {"kill_worker": 1}}],
+    )
+
+
+STRANDED_ALLOWED: Json = {
+    "schema": "budget.v1",
+    "name": "stranded-allowed",
+    "description": "d",
+    "setup_failed": [],
+    "unexpected_ending": [],
+    "in_dialog": [{"stream": "*", "class": "call_stranded", "detail": "*", "max_calls": 10}],
+}
+
+
+def incident(seq: int, kind: str, at: int, budget: str) -> list[Json]:
+    """One event of incident `kind` injected at `at`, recovered 5 s later, settling 40 s."""
+    ev = f"{seq:03d}-{kind}"
+    return [
+        event_line(ev, "schedule", [kind], budget, 40, 220),
+        phase_line(ev, kind, "inject", at),
+        phase_line(ev, kind, "recovered", at + 5_000),
+    ]
+
+
+def test_both_tables_place_a_loss_in_overlapping_windows_where_the_judge_charges_it(tmp_path: Path) -> None:
+    events = [*incident(1, "outer", T0 + 100_000, "stranded-allowed"), *incident(2, "inner", T0 + 110_000, "worker-kill")]
+    no_final = {"at_ms": T0 + 140_000, "kind": "dialog_request", "method": "BYE", "detail": "no final"}
+    stranded = record("s", T0 + 90_000, "stranded", ended=50_000, failures=[no_final])
+    v = compute(run_dir(tmp_path, [stranded], calls=1, events=events, budgets=[STRANDED_ALLOWED]), SCHEMAS)
+    outer, inner = jv.objs(v, "windows")
+    assert [(r["class"], r["count"], r["finding"]) for r in jv.objs(outer, "impacts")] == [("call_stranded", 1, False)]
+    assert [r["class"] for r in jv.objs(inner, "impacts")] == []
+    in_dialog, unattributed, causes = outcome(v)
+    assert ("s", "call_stranded") not in {(c, cls) for c, cls, _ in in_dialog} and unattributed == set()
+    assert causes == [{"cause": "cut", "detail": "stranded 200", "where": {"outer": 1}}]
 
 
 def test_both_tables_place_a_cut_whose_bye_follows_the_window_the_call_lived_through(tmp_path: Path) -> None:
