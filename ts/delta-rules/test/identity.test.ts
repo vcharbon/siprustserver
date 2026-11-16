@@ -64,6 +64,14 @@ describe("URI equality (RFC 3261 §19.1.4)", () => {
     expect(urisEqual("<sip:alice@example.com?subject=a>", "<sip:alice@example.com?subject=b>")).toBe(false)
   })
 
+  it("compares `?headers` as a set: order and header-name case aside, each present in both", () => {
+    expect(urisEqual("<sip:alice@example.com?subject=a&priority=urgent>", "<sip:alice@example.com?priority=urgent&subject=a>"))
+      .toBe(true)
+    expect(urisEqual("<sip:alice@example.com?Subject=a>", "<sip:alice@example.com?subject=a>")).toBe(true)
+    expect(urisEqual("<sip:alice@example.com?subject=a&priority=urgent>", "<sip:alice@example.com?subject=a>")).toBe(false)
+    expect(urisEqual("<sip:alice@example.com>", "<sip:alice@example.com?subject=a>")).toBe(false)
+  })
+
   it("holds nothing equal to a value that is no address", () => {
     expect(urisEqual("not an address", "<sip:alice@example.com>")).toBe(false)
   })
@@ -155,6 +163,11 @@ describe("an identity apart from its number", () => {
     expect(identityButTheNumber(from("<sip:5550100@example.com>;x=1", "<sip:5550101@example.com>"), opts)).toBe(false)
   })
 
+  it("holds `?headers` in any order", () => {
+    const reordered = from("<sip:5550100@example.com?subject=a&priority=urgent>", "<sip:5550101@example.com?priority=urgent&subject=a>")
+    expect(identityButTheNumber(reordered, { hostMayMove: false })).toBe(true)
+  })
+
   it("lets the scheme, the host and `user=phone` change only where the form may change", () => {
     const swapped = from("<tel:+15555550100>", "<sip:+15555550101@example.com;user=phone>")
     expect(identityButTheNumber(swapped, { hostMayMove: false, formMayChange: true })).toBe(true)
@@ -179,6 +192,12 @@ describe("an address the replay states whole", () => {
   it("holds the URI, two users that spell a number counting as one", () => {
     expect(to("<sip:bob@example.com>", '"Bob" <sip:carol@example.com>')).toBe(false)
     expect(to("<sip:+15555550100@example.com>", '"Bob" <sip:+15555550100@example.org>')).toBe(false)
+  })
+
+  it("holds the URI's `?headers` in any order, each present in both", () => {
+    expect(to("<sip:bob@example.com?subject=a&priority=urgent>", '"Bob" <sip:bob@example.com?priority=urgent&subject=a>'))
+      .toBe(true)
+    expect(to("<sip:bob@example.com?subject=a>", '"Bob" <sip:bob@example.com>')).toBe(false)
   })
 })
 

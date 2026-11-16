@@ -52,6 +52,24 @@ const uriExtras = (text: string): { readonly userParams: string; readonly header
   return { userParams: semi < 0 ? "" : user.slice(semi + 1), headers: q < 0 ? "" : uri.slice(q + 1) }
 }
 
+/** A URI's `?headers` as sorted `hname=hvalue` items, the name lower-cased (§7.3.1), the value as written. */
+const headerItems = (headers: string): readonly string[] =>
+  headers === "" ? [] : headers.split("&").map((item) => {
+    const eq = item.indexOf("=")
+    return eq < 0 ? item.toLowerCase() : `${item.slice(0, eq).toLowerCase()}${item.slice(eq)}`
+  }).sort()
+
+/**
+ * Two URIs' `?headers` equal as RFC 3261 §19.1.4 compares them: in any order,
+ * each present in both. A value matches as written, never more leniently than
+ * the §20 rule of its header.
+ */
+const sameUriHeaders = (a: string, b: string): boolean => {
+  const x = headerItems(a)
+  const y = headerItems(b)
+  return x.length === y.length && x.every((item, i) => item === y[i])
+}
+
 /** An IP literal: an address of a topology, never a name a lane routes on. */
 const isIpLiteral = (host: string): boolean =>
   /^\[[0-9a-f:.]+\]$/i.test(host) || /^\d{1,3}(\.\d{1,3}){3}$/.test(host)
@@ -77,7 +95,7 @@ const userParamsForm = (userParams: string): string => userParams.replace(/(^|;)
  * Two single-valued identity headers equal in every part but the number: the
  * display name (or each display spelling its own number), the URI's
  * parameters, user parameters (`phonecontext` read as `phone-context`) and
- * `?headers`, and the header parameters but the tag. The host and port are held
+ * `?headers` (in any order), and the header parameters but the tag. The host and port are held
  * too, except that a capture host that is an IP literal may give way to the
  * lane's own (`hostMayMove`). The scheme is held unless `formMayChange`
  * (tel/sip), where the `user=phone` marker and the host belong to the form.
@@ -103,7 +121,7 @@ export const identityButTheNumber = (
     hostHeld &&
     sameParams(uriParams(a.uri), uriParams(b.uri)) &&
     userParamsForm(ea.userParams) === userParamsForm(eb.userParams) &&
-    ea.headers === eb.headers &&
+    sameUriHeaders(ea.headers, eb.headers) &&
     sameParams(paramsButTag(a.params), paramsButTag(b.params))
   )
 }
@@ -128,7 +146,8 @@ const sameUriParams = (a: ReadonlyMap<string, string>, b: ReadonlyMap<string, st
  * Two name-addrs whose URIs are equal in every part, user parameters and
  * `?headers` included; the scheme, host and URI parameters compared
  * case-insensitively, the userinfo as written, a parameter one URI alone carries
- * as {@link sameUriParams} reads it (RFC 3261 §19.1.4).
+ * as {@link sameUriParams} reads it, the headers as {@link sameUriHeaders} does
+ * (RFC 3261 §19.1.4).
  */
 export const urisEqual = (left: string, right: string): boolean => {
   const a = Fold.parseNameAddr(left)
@@ -138,7 +157,7 @@ export const urisEqual = (left: string, right: string): boolean => {
   const eb = uriExtras(right)
   return a.uri.scheme === b.uri.scheme && a.uri.user === b.uri.user && a.uri.host === b.uri.host &&
     a.uri.port === b.uri.port && sameUriParams(a.uri.params, b.uri.params) &&
-    ea.userParams === eb.userParams && ea.headers === eb.headers
+    ea.userParams === eb.userParams && sameUriHeaders(ea.headers, eb.headers)
 }
 
 /** Two name-addrs equal in every part but the dialog tag. */
@@ -155,14 +174,15 @@ const spellsANumber = (user: string | undefined): boolean => /^\+?[0-9]+$/.test(
 
 /**
  * Two name-addrs' URIs equal part for part as written (scheme, host, port, URI and
- * user parameters, `?headers`), two users that each spell a number counting as one.
+ * user parameters), `?headers` in any order, two users that each spell a number
+ * counting as one.
  */
 const sameUriAnyNumber = (left: string, right: string, a: Fold.NameAddr, b: Fold.NameAddr): boolean => {
   const ea = uriExtras(left)
   const eb = uriExtras(right)
   const sameUser = a.uri.user === b.uri.user || (spellsANumber(a.uri.user) && spellsANumber(b.uri.user))
   return a.uri.scheme === b.uri.scheme && a.uri.host === b.uri.host && a.uri.port === b.uri.port && sameUser &&
-    sameParams(a.uri.params, b.uri.params) && ea.userParams === eb.userParams && ea.headers === eb.headers
+    sameParams(a.uri.params, b.uri.params) && ea.userParams === eb.userParams && sameUriHeaders(ea.headers, eb.headers)
 }
 
 /**
