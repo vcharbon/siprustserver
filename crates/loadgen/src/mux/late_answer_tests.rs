@@ -93,13 +93,38 @@ fn an_invite_final_acked_during_the_call_is_not_answered_again() {
 
 #[test]
 #[ignore = "slow lane: loadgen"]
-fn an_invite_2xx_and_provisionals_are_not_held() {
+fn provisionals_and_requests_are_not_held() {
     let answers = SentAnswers::default();
     answers.on_outbound(&Datagram::sniff(&resp(100, "BYE", 2, "z9hG4bKb")), None);
     answers.on_outbound(&Datagram::sniff(&resp(180, "INVITE", 1, "z9hG4bKi")), None);
-    answers.on_outbound(&Datagram::sniff(&resp(200, "INVITE", 1, "z9hG4bKi")), None);
     answers.on_outbound(&Datagram::sniff(&req("BYE", 2, "z9hG4bKb")), None);
     assert!(answers.take("c1").is_none(), "nothing a retransmission may draw from the hold");
+}
+
+/// The ACK of a re-INVITE's 2xx the agent sent, arriving once the call
+/// released (its first 2xx lost, the 2xx retransmitted), is absorbed: it is
+/// a transaction of its own under a new branch (RFC 3261 §13.2.2.4). The 2xx
+/// itself is not held: a retransmitted INVITE draws nothing.
+#[test]
+#[ignore = "slow lane: loadgen"]
+fn the_late_ack_of_an_invite_2xx_is_absorbed() {
+    let answers = SentAnswers::default();
+    let ok = resp(200, "INVITE", 2, "z9hG4bKreinv");
+    answers.on_outbound(&Datagram::sniff(&ok), None);
+    answers.on_outbound(&Datagram::sniff(&ok), None);
+    answers.on_outbound(&Datagram::sniff(&resp(200, "BYE", 3, "z9hG4bKbye")), None);
+    let mut h = answers.take("c1").expect("the 2xx leaves its marker");
+    let ack = req("ACK", 2, "z9hG4bKack2");
+    assert!(matches!(on_request(&mut h, &ack), LateReply::Absorbed), "the 2xx's ACK");
+    assert!(matches!(on_request(&mut h, &ack), LateReply::Absorbed), "and its retransmission");
+    assert!(
+        matches!(on_request(&mut h, &req("ACK", 1, "z9hG4bKack1")), LateReply::NotHeld),
+        "no 2xx sent for CSeq 1"
+    );
+    assert!(
+        matches!(on_request(&mut h, &req("INVITE", 2, "z9hG4bKreinv")), LateReply::NotHeld),
+        "the 2xx is the dialog's own, not re-sent by the hold"
+    );
 }
 
 #[test]
