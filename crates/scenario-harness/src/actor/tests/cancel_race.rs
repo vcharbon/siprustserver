@@ -331,6 +331,8 @@ fn lost_to_alice(obs: &ObservedState, status: u16, sdp: bool) {
         status: Some(status),
         cseq_method: "INVITE".to_string(),
         sdp,
+        reliable: false,
+        to_tag: String::new(),
         call_id: "c".to_string(),
         from_tag: "a".to_string(),
         cseq: 1,

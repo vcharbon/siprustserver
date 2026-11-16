@@ -14,11 +14,23 @@ use super::endpoint::{Disposition, ForkWinner};
 use super::facts::received_stream;
 use super::ledger::{ObligationKey, ObligationKind};
 use super::pacing::Dwell;
-use super::runner::{ActorState, ParkedRequest, PendingRejectAck, TimedAnswer};
+use super::runner::{ActorState, ParkedRequest, PendingRejectAck};
 use super::script::scripted_wants_initial;
 use super::state::Observation;
 use crate::agent::top_via_branch;
 use crate::{ServerTxn, StepError};
+
+/// A ring/answer scheduled for `at` — held as its own interruptible arm so a CANCEL that lands
+/// before it fires answers `487` on the retained INVITE txn instead of racing an inline sleep.
+pub(super) struct TimedAnswer {
+    pub(super) at: Instant,
+    /// The pending UAS INVITE transaction — answered `200` when the timer fires
+    /// OR `487` if a CANCEL arrives first.
+    pub(super) uas: ServerTxn,
+    /// A forking callee's answer plan (`None` for the plain ring→answer): the
+    /// `200` goes out under the winning fork's tag (+ optional loser late 200).
+    pub(super) fork: Option<ForkAnswer>,
+}
 
 /// Open the `reject-final awaiting hop-ACK` ledger obligation for a non-2xx
 /// final just sent on `uas` (§17.2.1: a real UAS keeps its server txn — and

@@ -110,6 +110,8 @@ async fn each_drop_of_a_send_and_its_resend_is_noted_and_recorded() {
         status: None,
         cseq_method: "INVITE".to_string(),
         sdp: false,
+        reliable: false,
+        to_tag: String::new(),
         call_id: "loss-1@h".to_string(),
         from_tag: "a1".to_string(),
         cseq: 1,

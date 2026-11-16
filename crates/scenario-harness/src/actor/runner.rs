@@ -19,7 +19,7 @@ use tokio::time::Instant;
 
 use sip_message::{CseqDeviation, DelayedAutomatic};
 
-use super::answer::{fire_timed_answer, ForkAnswer};
+use super::answer::{fire_timed_answer, ForkAnswer, TimedAnswer};
 use super::delta::AcceptedDeltaPolicy;
 use super::dialog_table::DialogTable;
 use super::drive::drive_goal;
@@ -45,18 +45,6 @@ pub(super) struct ParkedRequest {
     pub(super) txn: ServerTxn,
     /// Whether this is the dialog-creating INVITE (no To-tag).
     pub(super) initial: bool,
-}
-
-/// A ring/answer scheduled for `at` — held as its own interruptible arm so a CANCEL that lands
-/// before it fires answers `487` on the retained INVITE txn instead of racing an inline sleep.
-pub(super) struct TimedAnswer {
-    pub(super) at: Instant,
-    /// The pending UAS INVITE transaction — answered `200` when the timer fires
-    /// OR `487` if a CANCEL arrives first.
-    pub(super) uas: ServerTxn,
-    /// A forking callee's answer plan (`None` for the plain ring→answer): the
-    /// `200` goes out under the winning fork's tag (+ optional loser late 200).
-    pub(super) fork: Option<ForkAnswer>,
 }
 
 /// One ACK-to-2xx a declared delayed automatic is holding: its own `select!`
@@ -129,6 +117,8 @@ pub struct ActorState<'c> {
     /// A [`Disposition::Held`] callee's initial INVITE server transaction,
     /// rung, used for early-dialog requests and answered by its goals.
     pub(super) held: Option<Box<ServerTxn>>,
+    /// The lost rings this callee sent again ([`super::re_ring`]).
+    pub(super) rerung: usize,
     /// The To-tags of reliable provisionals no PRACK has acknowledged yet,
     /// each with when it was first sent (RFC 3262 §3, [`super::give_up`]).
     pub(super) unpracked: HashMap<String, Instant>,
@@ -325,6 +315,7 @@ impl<'c> ActorState<'c> {
             pending_prack_answer: None,
             held_silent: None,
             held: None,
+            rerung: 0,
             unpracked: HashMap::new(),
             early_dialogs: HashMap::new(),
             pracked_rseqs: HashSet::new(),
@@ -520,6 +511,9 @@ pub(super) async fn react_until_done(st: &mut ActorState<'_>) -> Result<(), Step
             }
             _ = give_up::sleep(prack_200_at), if prack_200_at.is_some() => {
                 Box::pin(super::prack_hold::fire(st)).await?;
+            }
+            _ = super::re_ring::wait(&obs, role, st.rerung), if super::re_ring::armed(st) => {
+                Box::pin(super::re_ring::fire(st)).await?;
             }
         }
         // An open obligation or a re-INVITE of this leg still unanswered keeps

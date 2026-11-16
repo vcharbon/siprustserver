@@ -407,6 +407,8 @@ fn lost_request(method: &str, from_tag: &str, cseq: u32) -> crate::realcall::Los
         status: None,
         cseq_method: method.to_string(),
         sdp: false,
+        reliable: false,
+        to_tag: String::new(),
         call_id: "c1".to_string(),
         from_tag: from_tag.to_string(),
         cseq,

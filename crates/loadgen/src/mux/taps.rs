@@ -55,6 +55,8 @@ pub fn notes_tap(notes: LossNotes) -> LossTap {
             status: id.status,
             cseq_method: id.cseq_method.unwrap_or_default().to_string(),
             sdp: session_description(d.raw()).is_some(),
+            reliable: id.reliable,
+            to_tag: id.to_tag.unwrap_or_default().to_string(),
             call_id: id.call_id.unwrap_or_default().to_string(),
             from_tag: from_tag(d.raw()),
             cseq: id.cseq.unwrap_or_default(),

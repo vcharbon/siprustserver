@@ -19,6 +19,10 @@ pub struct LostMessage {
     pub cseq_method: String,
     /// The datagram carried a session description.
     pub sdp: bool,
+    /// A provisional sent reliably (RFC 3262): the retransmit engine re-sends it.
+    pub reliable: bool,
+    /// The To tag: the early dialog a provisional opened.
+    pub to_tag: String,
     /// The Call-ID, From tag and CSeq number: what names a request in its
     /// dialog.
     pub call_id: String,

@@ -22,6 +22,7 @@ use super::ledger::ObligationLedger;
 pub use super::facts::{RequestFact, ResponseFact};
 pub use super::observation::Observation;
 pub use super::replay_record::{RecordedFinal, ReplayEntry};
+use crate::realcall::LostMessage;
 
 /// One endpoint leg's observed dialog lifecycle. Ordered so `max` gives the
 /// monotone fold: a fact can advance the phase but never retreat.
@@ -90,7 +91,7 @@ pub struct LegObservation {
     responses: Vec<ResponseFact>,
     /// The datagrams to or from this leg the call's loss model dropped,
     /// folded in once the call ran ([`Observation::Lost`]).
-    lost: Vec<crate::realcall::LostMessage>,
+    lost: Vec<LostMessage>,
 }
 
 impl LegObservation {
@@ -166,6 +167,11 @@ impl LegObservation {
     /// Whether this leg has observed a response of the given status.
     pub fn saw_status(&self, status: u16) -> bool {
         self.responses.iter().any(|f| f.status == status)
+    }
+
+    /// The datagrams to or from this leg the call's loss model dropped.
+    pub fn lost(&self) -> &[LostMessage] {
+        &self.lost
     }
 
     /// Whether the loss model dropped a 2xx to this leg's INVITE on its way
