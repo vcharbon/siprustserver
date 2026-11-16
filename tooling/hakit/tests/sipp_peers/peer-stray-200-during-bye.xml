@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="ISO-8859-1" ?>
 <!DOCTYPE scenario SYSTEM "sipp.dtd">
-<!-- Answers; on the caller's BYE sends a 100, then a 200 for a request the caller never sent (CSeq 7 OPTIONS): expects no ACK for it, then answers the BYE. -->
+<!-- Answers; on the caller's BYE sends a 100, then a 200 for a request the caller never sent (CSeq 7 OPTIONS): expects no ACK for it, takes a copy of the BYE the caller may send meanwhile, then answers the BYE. -->
 <scenario name="peer-stray-200-during-bye">
   <recv request="INVITE" crlf="true" rrs="true">
     <action>
@@ -59,7 +59,9 @@
       Content-Length: 0
     ]]>
   </send>
-  <recv request="ACK" crlf="true" timeout="800" ontimeout="no_ack" next="acked"/>
+  <label id="ack_wait"/>
+  <recv request="ACK" optional="true" crlf="true" timeout="800" ontimeout="no_ack" next="acked"/>
+  <recv request="BYE" crlf="true" next="ack_wait"/>
   <label id="no_ack"/>
   <send next="done">
     <![CDATA[
