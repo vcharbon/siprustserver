@@ -34,13 +34,17 @@
  after its 2xx is a protocol failure only, and so is any unexpected request
  once an ending is set (a far BYE in the CANCEL wait: still `timeout`). Each request has its own branch;
  every 2xx retransmission is ACKed again with its CSeq; a far re-INVITE is
- answered 200 (491 while the caller's own is pending, 481 after its BYE).
- Only the ACK with the 200's CSeq discharges it, in its wait or in the
- handler, and no 200 goes after it (SIPp would tie it to that ACK); any
- other ACK there, and a response or a request but a BYE in its wait, send
- the 200 again once its retransmission has stopped. An ACK above the CSeq of the
+ answered 200 (491 while the caller's own is pending, 481 after its BYE),
+ sent once and never after an ACK (SIPp's engine answers a byte-identical
+ copy of the re-INVITE with it). Only the ACK with its CSeq discharges it,
+ in its wait or in the handler; a lower ACK is absorbed; a call ending with
+ it undischarged records a protocol failure. An ACK above the CSeq of the
  latest far request given a final acknowledges nothing: a protocol failure,
  the call goes on.
+
+ Departure (RFC 3261 section 13.3.1.4): SIPp stops the 200's retransmission
+ on any ACK, so after a lower ACK a lost true ACK with no copy of the
+ re-INVITE ends `far_reinvite_no_ack`.
 -->
 <scenario name="hakit UAC call with call-outcome records">
 
@@ -424,6 +428,7 @@ Content-Length: 0
  <recv request="INVITE" next="far_reinvite">
   <action>
    <assign assign_to="fr_ret" value="0"/>
+   <assign assign_to="fa_busy" value="1"/>
   </action>
  </recv>
  <nop/>
@@ -758,16 +763,8 @@ Content-Length: 0
    <assignstr assign_to="fr_from" value="[last_From:]"/>
    <assignstr assign_to="fr_to" value="[last_To:]"/>
    <assignstr assign_to="fr_cs" value="[last_CSeq:]"/>
-   <assignstr assign_to="fr_n" value="[last_cseq_number]"/>
-   <todouble assign_to="fa_hi" variable="fr_n"/>
-   <assign assign_to="fa_busy" value="1"/>
-   <assign assign_to="ak_e" value="0"/>
-   <assign assign_to="ux_e" value="0"/>
   </action>
  </nop>
- <label id="far_200"/>
- <nop test="ak_e" next="reinv_answer"/>
- <nop test="ux_e" next="reinv_answer"/>
  <send retrans="500" ontimeout="far_no_ack">
   <![CDATA[
 SIP/2.0 200 OK
@@ -789,7 +786,13 @@ t=0 0
 m=audio [media_port] RTP/AVP 0
 a=rtpmap:0 PCMU/8000
   ]]>
+  <action>
+   <ereg regexp="[0-9]+" search_in="var" variable="fr_cs" assign_to="gl_n"/>
+   <todouble assign_to="fa_hi" variable="gl_n"/>
+   <assign assign_to="fr_due" value="1"/>
+  </action>
  </send>
+ <label id="far_wait"/>
  <recv request="ACK" optional="true" timeout="32000" ontimeout="far_no_ack" next="ack_in">
   <action>
    <ereg regexp="[0-9]+" search_in="hdr" header="CSeq:" assign_to="fa_n"/>
@@ -797,26 +800,15 @@ a=rtpmap:0 PCMU/8000
  </recv>
  <recv request="OPTIONS" optional="true" next="far_opt_cap"/>
  <recv request="BYE" optional="true" next="far_bye"/>
- <recv request="INVITE" optional="true" next="far_200"/>
- <recv request="[A-Z]" regexp_match="true" optional="true" next="far_ot_cap">
+ <recv request="INVITE" optional="true" next="far_wait"/>
+ <recv request="[A-Z]" regexp_match="true" next="far_ot_cap">
   <action>
    <ereg regexp="^[A-Z]+" search_in="msg" assign_to="ux_req"/>
   </action>
  </recv>
- <recv response="^[1-6][0-9][0-9]$" regexp_match="true" next="far_resp">
-  <action>
-   <ereg regexp="SIP/2\.0 ([0-9]+)" search_in="msg" assign_to="fx_all,fx_code"/>
-   <ereg regexp="([0-9]+)[[:blank:]]+([A-Z]+)" search_in="hdr" header="CSeq:" assign_to="fx_ca,fx_n,fx_m"/>
-   <strcmp assign_to="fx_mi" variable="fx_m" value="INVITE"/>
-   <test assign_to="fx_inv" variable="fx_mi" compare="equal" value="0"/>
-   <strcmp assign_to="fx_c1" variable="fx_n" value="1"/>
-   <test assign_to="fx_one" variable="fx_c1" compare="equal" value="0"/>
-   <ereg regexp="^SIP/2\.0 2" search_in="msg" assign_to="fx_2xx"/>
-  </action>
- </recv>
  <nop/>
  <label id="far_opt_cap"/>
- <nop next="far_200">
+ <nop next="far_wait">
   <action>
    <assignstr assign_to="opt_via" value="[last_Via:]"/>
    <assignstr assign_to="opt_rr" value="[last_Record-Route:]"/>
@@ -828,7 +820,7 @@ a=rtpmap:0 PCMU/8000
  </nop>
  <nop/>
  <label id="far_ot_cap"/>
- <nop next="far_200">
+ <nop next="far_wait">
   <action>
    <assignstr assign_to="ot_via" value="[last_Via:]"/>
    <assignstr assign_to="ot_rr" value="[last_Record-Route:]"/>
@@ -837,34 +829,6 @@ a=rtpmap:0 PCMU/8000
    <assignstr assign_to="ot_cseq" value="[last_CSeq:]"/>
    <assign assign_to="ot_due" value="1"/>
    <assignstr assign_to="ux_what" value="[$ux_req]"/>
-  </action>
- </nop>
- <nop/>
- <label id="far_resp"/>
- <nop test="fx_inv" next="far_resp_inv"/>
- <nop next="far_200"/>
- <nop/>
- <label id="far_resp_inv"/>
- <nop test="fx_one" next="far_resp_one"/>
- <nop next="far_200"/>
- <nop/>
- <label id="far_resp_one"/>
- <nop test="fx_2xx" next="far_reack"/>
- <nop next="far_after_2xx"/>
- <nop/>
- <label id="far_reack"/>
- <nop next="reack">
-  <action>
-   <assignstr assign_to="rk_n" value="1"/>
-   <assign assign_to="rk_back" value="2"/>
-  </action>
- </nop>
- <nop/>
- <label id="far_after_2xx"/>
- <nop next="after_2xx">
-  <action>
-   <assignstr assign_to="a2_code" value="[$fx_code]"/>
-   <assign assign_to="a2_back" value="2"/>
   </action>
  </nop>
  <nop/>
@@ -885,19 +849,26 @@ a=rtpmap:0 PCMU/8000
  </nop>
  <nop/>
  <label id="far_no_ack"/>
- <nop next="teardown">
+ <nop>
   <action>
-   <assignstr assign_to="tk" value="[clock_tick]"/>
-   <todouble assign_to="ns" variable="tk"/>
-   <add assign_to="ns" variable="t_off"/>
-   <assignstr assign_to="r_fail" value="[$r_fail][$r_sep]{&quot;at_ms&quot;:[$ns],&quot;kind&quot;:&quot;protocol&quot;,&quot;method&quot;:&quot;INVITE&quot;,&quot;detail&quot;:&quot;no ACK for the 2xx to a re-INVITE&quot;}"/>
-   <assignstr assign_to="r_sep" value=","/>
    <assignstr assign_to="r_ending" value="cut"/>
    <assignstr assign_to="r_verdict" value="far_reinvite_no_ack"/>
    <assign assign_to="keep" value="1"/>
    <assign assign_to="fa_busy" value="0"/>
   </action>
  </nop>
+ <label id="far_unacked"/>
+ <nop test="writing" next="write_now">
+  <action>
+   <assignstr assign_to="tk" value="[clock_tick]"/>
+   <todouble assign_to="ns" variable="tk"/>
+   <add assign_to="ns" variable="t_off"/>
+   <assignstr assign_to="r_fail" value="[$r_fail][$r_sep]{&quot;at_ms&quot;:[$ns],&quot;kind&quot;:&quot;protocol&quot;,&quot;method&quot;:&quot;INVITE&quot;,&quot;detail&quot;:&quot;no ACK for the 2xx to a re-INVITE&quot;}"/>
+   <assignstr assign_to="r_sep" value=","/>
+   <assign assign_to="fr_due" value="0"/>
+  </action>
+ </nop>
+ <nop next="teardown"/>
  <nop/>
  <label id="far_bye"/>
  <send next="far_end_bye">
@@ -1302,7 +1273,6 @@ Content-Length: 0
  <nop test="late_final_seen" next="after_2xx_back">
   <action>
    <test assign_to="a2_b1" variable="a2_back" compare="equal" value="1"/>
-   <test assign_to="a2_b2" variable="a2_back" compare="equal" value="2"/>
   </action>
  </nop>
  <nop>
@@ -1317,7 +1287,6 @@ Content-Length: 0
  </nop>
  <label id="after_2xx_back"/>
  <nop test="a2_b1" next="reinv_wait"/>
- <nop test="a2_b2" next="far_200"/>
  <nop next="bye_send"/>
 
  <nop/>
@@ -1336,14 +1305,12 @@ Content-Length: 0
   ]]>
   <action>
    <test assign_to="rk_b1" variable="rk_back" compare="equal" value="1"/>
-   <test assign_to="rk_b2" variable="rk_back" compare="equal" value="2"/>
    <test assign_to="rk_b3" variable="rk_back" compare="equal" value="3"/>
    <test assign_to="rk_b5" variable="rk_back" compare="equal" value="5"/>
    <test assign_to="rk_b6" variable="rk_back" compare="equal" value="6"/>
   </action>
  </send>
  <nop test="rk_b1" next="reinv_wait"/>
- <nop test="rk_b2" next="far_200"/>
  <nop test="rk_b3" next="bye_send"/>
  <nop test="rk_b5" next="reinv_done"/>
  <nop test="rk_b6" next="teardown"/>
@@ -1351,23 +1318,28 @@ Content-Length: 0
 
  <nop/>
  <label id="ux_ack"/>
- <nop test="ux_ok" next="unexp_resume">
+ <nop condexec="ux_e">
   <action>
-   <todouble assign_to="ux_d" variable="ux_n"/>
-   <test assign_to="ux_ok" variable="ux_d" compare="less_than_equal" variable2="fa_hi"/>
-   <test assign_to="ux_e" variable="ux_d" compare="equal" variable2="fa_hi"/>
+   <assign assign_to="fr_due" value="0"/>
   </action>
  </nop>
+ <nop test="ux_ok" next="unexp_resume"/>
  <nop next="ack_bad"/>
  <nop/>
  <label id="ack_in"/>
- <nop test="ak_ok" next="ack_out">
+ <nop>
   <action>
    <todouble assign_to="ak_d" variable="fa_n"/>
    <test assign_to="ak_ok" variable="ak_d" compare="less_than_equal" variable2="fa_hi"/>
    <test assign_to="ak_e" variable="ak_d" compare="equal" variable2="fa_hi"/>
   </action>
  </nop>
+ <nop condexec="ak_e">
+  <action>
+   <assign assign_to="fr_due" value="0"/>
+  </action>
+ </nop>
+ <nop test="ak_ok" next="ack_out"/>
  <label id="ack_bad"/>
  <nop>
   <action>
@@ -1380,7 +1352,8 @@ Content-Length: 0
  </nop>
  <label id="ack_out"/>
  <nop test="_unexp.retaddr" next="unexp_resume"/>
- <nop test="fa_busy" next="far_200"/>
+ <nop test="fr_due" next="far_wait"/>
+ <nop test="fa_busy" next="reinv_answer"/>
  <nop test="bye_sent" next="bye_send"/>
  <nop next="reinv_wait"/>
 
@@ -1466,6 +1439,9 @@ Content-Length: 0
  <recv request="ACK" optional="true" next="ux_ack">
   <action>
    <ereg regexp="[0-9]+" search_in="hdr" header="CSeq:" assign_to="ux_n"/>
+   <todouble assign_to="ux_d" variable="ux_n"/>
+   <test assign_to="ux_ok" variable="ux_d" compare="less_than_equal" variable2="fa_hi"/>
+   <test assign_to="ux_e" variable="ux_d" compare="equal" variable2="fa_hi"/>
   </action>
  </recv>
  <recv request="INVITE" optional="true" next="unexp_invite"/>
@@ -1776,6 +1752,7 @@ Content-Length: 0
  <nop next="far_reinvite">
   <action>
    <assign assign_to="fr_ret" variable="_unexp.retaddr"/>
+   <assign assign_to="fa_busy" value="1"/>
    <assign assign_to="_unexp.retaddr" value="0"/>
   </action>
  </nop>
@@ -1861,6 +1838,8 @@ Content-Length: 0
    <assignstr assign_to="r_try" value="null"/>
   </action>
  </nop>
+ <nop test="fr_due" next="far_unacked"/>
+ <label id="write_now"/>
  <nop condexec="fp_flag">
   <action>
    <assignstr assign_to="r_phase" value="provisional"/>
@@ -1892,7 +1871,7 @@ Content-Length: 0
   </action>
  </nop>
 
- <Reference variables="bp_all,bp_ca,bp_code,bp_n,fw_all,fw_ca,fw_code,fx_all,fx_ca,lc_all,lc_pall,lc_pk,rb_all,rp_all,rp_ca,rp_code,rp_m,ux_br_all"/>
+ <Reference variables="bp_all,bp_ca,bp_code,bp_n,fw_all,fw_ca,fw_code,lc_all,lc_pall,lc_pk,rb_all,rp_all,rp_ca,rp_code,rp_m,ux_br_all"/>
  <ResponseTimeRepartition value="10, 20, 30, 40, 50, 100, 150, 200"/>
  <CallLengthRepartition value="100, 1000, 10000, 30000, 60000, 120000"/>
 </scenario>

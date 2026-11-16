@@ -553,11 +553,20 @@ made. A run profile joins the two.
    stat) and the call acts on the peer's retransmission; a discarded
    provisional, never retransmitted, is lost. Every ACK reaches the scenario,
    which checks its CSeq: only the ACK with a 2xx's CSeq discharges that 2xx,
-   in its wait or in the handler, and any other sends the 2xx again. No 2xx
-   is sent after its own ACK: SIPp would answer each copy of that ACK with the
-   2xx, and the far end ACKs each 2xx copy again, a loop. An ACK above the
-   CSeq of the latest far request the call gave a final acknowledges nothing
-   the caller sent, a `protocol` failure, and the call goes on. So every UAC
+   in its wait or in the handler, and a lower one is absorbed. The 2xx to a
+   far re-INVITE is sent once, never after an ACK: SIPp ties a send to the
+   message received just before it and answers each copy of that message
+   with it, so a 2xx sent after an ACK the far end repeats for each 2xx copy
+   loops. A call that ends with a 2xx undischarged records a `protocol`
+   failure. An ACK above the CSeq of the latest far request the call gave a
+   final acknowledges nothing the caller sent, a `protocol` failure, and the
+   call goes on.
+
+   This departs from RFC 3261 §13.3.1.4, where only the 2xx's own ACK stops
+   its retransmission: SIPp stops it on any ACK. After a lower ACK, a lost
+   true ACK is recovered only by a byte-identical copy of the re-INVITE,
+   which SIPp answers with the 2xx; without one the call ends
+   `far_reinvite_no_ack`, a double fault of the far end. So every UAC
    scenario follows these rules:
    - every wait (a group of `<recv>`s) is entered on a recv with its own
      `timeout` and `ontimeout`: a pending send never bounds it (below);
@@ -580,8 +589,8 @@ made. A run profile joins the two.
    Facts of SIPp's engine (3.7, `call.cpp`) shape these rules:
    - the retransmissions of a pending send stop when a recv placed after it
      takes any final, an INVITE provisional, or an ACK, CANCEL, BYE or PRACK,
-     another transaction's included: a scenario sends a message whose
-     retransmissions such a message stopped again (a BYE, a 2xx), and every
+     another transaction's included: a scenario sends a request whose
+     retransmissions such a message stopped again (a BYE), and every
      retransmitted send precedes `_unexp.main`;
    - SIPp sends nothing while a send of its own is retransmitting, so a
      request landing while the call's request is pending is captured by the
