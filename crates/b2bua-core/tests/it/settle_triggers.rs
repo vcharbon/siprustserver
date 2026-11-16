@@ -200,6 +200,20 @@ fn a_leg_a_rule_ends_is_settled() {
     assert!(finals_to(turn, "a").contains(&fin(487, "INFO")), "got {:?}", finals_to(turn, "a"));
 }
 
+/// alice hangs up while bob's NOTIFY relayed toward her awaits its final: its
+/// subscriber is gone, so it is answered 481, which ends that subscription
+/// alone (RFC 5057 §5.1), where any other method draws 487.
+#[test]
+fn a_notify_toward_a_leg_that_ended_is_answered_481() {
+    let driver = Driver::new();
+    let mut call = bridged(&driver);
+    let relayed = call.turned(Step::Sends("b-1", Method::Notify));
+    assert!(finals_to(relayed, "b-1").is_empty(), "the NOTIFY is relayed, not answered");
+
+    let turn = call.turned(Step::Sends("a", Method::Bye));
+    assert_eq!(finals_to(turn, "b-1"), [fin(481, "NOTIFY")]);
+}
+
 /// bob refuses a ringing call no failover follows (its route carries no
 /// callback context) while his INFO relayed toward alice awaits its final:
 /// the call is released at once, every leg settled, and his INFO is answered
