@@ -10,9 +10,12 @@ budget allows a 503 without Retry-After), `silent_after_provisional`,
 `setup_timeout` (no response heard by the give-up), `cut` (cut, stranded, or
 failed after its answer), `other` (any other ending or code, a bare 503 in a
 window that does not allow it among them). Its place is the incident kinds of
-the first window its setup overlaps (a cut: the window holding its last failure,
-else its end), or `outside`. Its detail is its ending and final code, with its
-early media when an expected ending of that code names one. A priority stream
+the first window its setup overlaps, or `outside`; a cut's is those of the
+latest-opened window the in-dialog attribution names a candidate of its last
+failure (else its end): one whose inject the call lived through, or the one
+holding that instant. A loss sits in the same window in both tables of a
+summary. Its detail is its ending and final code, with its early media when an
+expected ending of that code names one. A priority stream
 places calls whose shape's request carries `Resource-Priority` (RFC 4412); the
 groups hold `run` streams only.
 """
@@ -29,7 +32,7 @@ from .classify import SILENT_AFTER_PROVISIONAL, caller_expected, silent_after_pr
 from .jsonval import Json
 from .model import Budget, Shape
 from .profile import Profile
-from .windows import Window
+from .windows import Window, candidate_windows
 
 CAUSES = ("expected", "overload", "dependency_fault", SILENT_AFTER_PROVISIONAL, "setup_timeout", "cut", "other")
 OUTSIDE = "outside"
@@ -77,8 +80,15 @@ class Places:
         return found
 
     def where(self, from_ms: float, to_ms: float) -> str:
+        """The kind of the earliest-opened window that overlaps [from_ms, to_ms], or `outside`."""
         w = self.overlapping(from_ms, to_ms)
         return OUTSIDE if w is None else kind_of(w)
+
+    def cut_where(self, started_at_ms: float, cut_at_ms: float) -> str:
+        """The kind of the latest-opened window the in-dialog attribution names
+        a candidate of a loss at `cut_at_ms` (`candidate_windows`), or `outside`."""
+        found = candidate_windows(self.windows, started_at_ms, cut_at_ms)
+        return OUTSIDE if not found else kind_of(found[-1])
 
 
 @dataclass(frozen=True)
@@ -120,10 +130,10 @@ def cause_of(r: Json, shape: Shape, places: Places) -> Cause | None:
     if ending == "timeout":
         return Cause("setup_timeout", detail, setup_where)
     if ending == "stranded":
-        return Cause("cut", detail, places.where(ended, ended))
+        return Cause("cut", detail, places.cut_where(started, ended))
     if ending == "cut" or (ending == "failed" and jv.opt_number(r, "answered_at_ms") is not None):
         at = max((jv.number(f, "at_ms") for f in failures), default=ended)
-        return Cause("cut", detail, places.where(at, at))
+        return Cause("cut", detail, places.cut_where(started, at))
     return Cause("other", detail, setup_where)
 
 

@@ -14,9 +14,9 @@ from hakit.jsonval import Json
 from hakit.model import Budget, ExpectedEnding, Shape, parse_budget
 from hakit.profile import Profile, parse_profile
 from hakit.summary import priority_verdict, render
-from hakit.unanswered import Places, cause_of, is_priority, unanswered
+from hakit.unanswered import Cause, Places, cause_of, is_priority, unanswered
 from hakit.verdict import compute
-from hakit.windows import Window
+from hakit.windows import Phase, Window
 
 SHAPES = {s.shape: s for s in CONTENT.catalogs["x-api-call"].shapes}
 BASIC = SHAPES["basic"]
@@ -103,6 +103,48 @@ def test_a_cut_is_placed_at_its_cut_instant() -> None:
     assert cause(failed) == ("cut", "failed 200", "outside")
     early = record("e", T0 + 30_000, "failed", answered=None, code=None, ended=200)
     assert cause(early) == ("other", "failed", "outside")
+
+
+def bye_481(at: float) -> list[Json]:
+    return [{"at_ms": at, "kind": "dialog_request", "method": "BYE", "code": 481}]
+
+
+def injected(event: str, kind: str, opened: float, closed: float) -> Window:
+    return Window(event, "schedule", [kind], "", "ok", int(opened), int(closed), [Phase("inject", int(opened), kind)])
+
+
+def test_a_cut_after_every_window_it_lived_through_is_placed_at_the_latest() -> None:
+    first = injected("001-first", "first", T0 + 10_000, T0 + 20_000)
+    second = injected("002-second", "second", T0 + 40_000, T0 + 50_000)
+    places = Places([second, first], {})
+    both = record("b", T0, "cut", ended=61_000, failures=bye_481(T0 + 60_000))
+    assert cause_of(both, BASIC, places) == Cause("cut", "cut 200", "second")
+    late = record("l", T0 + 30_000, "cut", ended=31_000, failures=bye_481(T0 + 60_000))
+    assert cause_of(late, BASIC, places) == Cause("cut", "cut 200", "second")
+    stranded = record("s", T0 + 15_000, "stranded", ended=3_000)
+    assert cause_of(stranded, BASIC, places) == Cause("cut", "stranded 200", "first")
+    after = record("a", T0 + 52_000, "cut", ended=9_000, failures=bye_481(T0 + 60_000))
+    assert cause_of(after, BASIC, places) == Cause("cut", "cut 200", "outside")
+
+
+def test_both_tables_place_a_cut_whose_bye_follows_the_window_the_call_lived_through(tmp_path: Path) -> None:
+    close = T0 + 100_000 + 5_000 + 40_000
+    lived = record("lived", T0 + 90_000, "cut", ended=60_500, failures=bye_481(close + 5_000))
+    later = record("later", T0 + 120_000, "cut", ended=30_500, failures=bye_481(close + 5_000))
+    v = compute(run_dir(tmp_path, [lived, later], calls=2, events=kill(1, T0 + 100_000)), SCHEMAS)
+    assert {(i["call_id"], i["class"], tuple(jv.strings(i, "candidate_windows"))) for i in jv.objs(v, "in_dialog")} == {
+        ("lived", "call_cut", ("001-kill_worker",)),
+        ("lived", "dialog_request_failed", ("001-kill_worker",)),
+    }
+    assert {(u["class"], tuple(jv.strings(u, "call_ids"))) for u in jv.objs(v, "unattributed")} == {
+        ("call_cut", ("later",)),
+        ("dialog_request_failed", ("later",)),
+    }
+    (s,) = jv.objs(jv.obj(v, "unanswered"), "streams")
+    assert [(c["cause"], c["count"], c["where"]) for c in jv.objs(s, "causes")] == [
+        ("cut", 2, {"kill_worker": 1, "outside": 1})
+    ]
+    assert "- basic: cut / not released cut 200: 2 (kill_worker 1, outside 1)" in render(v)
 
 
 def test_a_final_its_shape_expects_with_other_early_media_says_so() -> None:

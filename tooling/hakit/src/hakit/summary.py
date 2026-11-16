@@ -185,11 +185,17 @@ def _priority(v: Json) -> list[str]:
     return out + ["", priority_verdict(prio)]
 
 
+def _findings(w: Json, dialog: dict[str, int]) -> str:
+    """The window's findings as its heading counts them: those against its
+    allowances, then the in-dialog findings that name it a candidate."""
+    against = f"{w['findings']} findings against its allowances"
+    return f"{against}, candidate of {sum(dialog.values())} in-dialog findings" if dialog else against
+
+
 def _window(w: Json, dialog: dict[str, int]) -> list[str]:
-    candidates = f", candidate of {sum(dialog.values())} in-dialog impacts" if dialog else ""
     out = [
         f"### {w['event']} ({w['source']}, {w['status']}, {_budget(w)}): "
-        f"{_t(jv.number(w, 'opened_at_ms'))} to {_t(jv.number(w, 'closed_at_ms'))}, {w['findings']} findings{candidates}",
+        f"{_t(jv.number(w, 'opened_at_ms'))} to {_t(jv.number(w, 'closed_at_ms'))}, {_findings(w, dialog)}",
         "",
     ]
     out += [f"- {_t(jv.number(p, 'at_ms'))} {p['step']} {p['phase']}" for p in jv.objs(w, "phases")]

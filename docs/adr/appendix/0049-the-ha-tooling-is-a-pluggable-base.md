@@ -444,12 +444,15 @@ made. A run profile joins the two.
     reads every call that did not end answered by cause (expected ending,
     503 with Retry-After, 503 without it whose setup overlaps a window
     whose budget allows one, setup timeout, cut, other) and by window
-    incident kind, per stream and for priority calls (`Resource-Priority`,
+    incident kind (a cut's: the latest-opened of its in-dialog candidate
+    windows, so both tables place a loss alike), per stream and for priority calls (`Resource-Priority`,
     RFC 4412) against the other `run` streams; it judges nothing and
     changes no status. A human
     `summary.md` is rendered from it: the status and why, the unanswered
     calls, then per window and per stream each class against its
-    allowance, and each window's in-dialog impacts it is a candidate of.
+    allowance, and each window's in-dialog impacts it is a candidate of; a
+    window's heading counts its findings against its allowances and the
+    in-dialog findings that name it a candidate.
 12. **Generator health.** A generator stall is a time the generator did not
     run: it placed no call and read no message. It has two signals. In the
     records: two consecutive calls of one firing of a stream started more than

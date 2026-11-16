@@ -29,7 +29,7 @@ from .classify import FINAL_LATE, SETUP_FAILED, SETUP_SLOW, SILENT_AFTER_PROVISI
 from .jsonval import Json
 from .model import NO_BUDGET, Allowance, Budget, InDialogAllowance
 from .stalls import Stall
-from .windows import Window
+from .windows import Window, candidate_windows
 
 MAX_CALL_IDS = 50
 ALL_CALL_IDS = "all_call_ids"
@@ -212,11 +212,7 @@ def judge(
         if holder is not None and _charged_in_dialog(holder, imp, budgets):
             dialog_in_window[holder.event].append(imp)
             continue
-        candidates = [
-            w.event
-            for w in windows
-            if ((inj := w.first("inject")) is not None and imp.started_at_ms <= inj <= imp.at_ms) or w.holds(imp.at_ms)
-        ]
+        candidates = [w.event for w in candidate_windows(windows, imp.started_at_ms, imp.at_ms)]
         if not candidates:
             outside[(imp.cls, imp.stream, imp.code or 0, imp.reason or "", False)].append(imp)
             continue

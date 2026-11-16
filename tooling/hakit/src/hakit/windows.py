@@ -59,6 +59,17 @@ class Window:
         self.closed_at_ms = max(self.closed_at_ms, min(limit_ms, int(latest) + self.settle_ms))
 
 
+def candidate_windows(windows: list[Window], started_at_ms: float, at_ms: float) -> list[Window]:
+    """The windows an in-dialog loss at `at_ms` of a call started at
+    `started_at_ms` may belong to, in the order given: each whose first inject
+    the call lived through before the loss, and each holding the loss's instant."""
+    return [
+        w
+        for w in windows
+        if ((inj := w.first("inject")) is not None and started_at_ms <= inj <= at_ms) or w.holds(at_ms)
+    ]
+
+
 def event_line(
     event: str, source: str, incidents: list[str], budget: str, settle_s: float, max_s: float
 ) -> Json:
