@@ -11,21 +11,20 @@
 //! (§13.3.1.4) and is not held: a marker without bytes, keyed by its CSeq,
 //! stands for it, and an ACK of that CSeq is absorbed (the 2xx's ACK is a
 //! transaction of its own, under a new branch: §13.2.2.4, §17.1.1.3). For an
-//! in-dialog request that reached the
-//! endpoint, delivered or dropped by the loss model on its way in, the 481 of
-//! a UA that no longer holds the dialog (§12.2.2) is held until the agent
-//! answers it: a retransmission arriving once the call released without
-//! answering it (the agent ended first, or never got a copy) draws the 481,
-//! not a stray. A request first arriving after the release stays a stray.
-//! Once the ACK of a held INVITE final arrives, before or after the call
-//! released, the final is owed no more (§17.2.1
-//! Confirmed): its bytes go, and a retransmitted INVITE or ACK of that
-//! transaction is absorbed.
+//! in-dialog request that reached the endpoint, delivered or dropped by the
+//! loss model on its way in, the 481 of a UA that no longer holds the dialog
+//! (§12.2.2) is held until the agent answers it: a retransmission arriving
+//! once the call released without answering it (the agent ended first, or
+//! never got a copy) draws the 481, not a stray. A request first arriving
+//! after the release stays a stray. Once the ACK of a held INVITE final
+//! arrives, before or after the call released, the final is owed no more
+//! (§17.2.1 Confirmed): its bytes go, and a retransmitted INVITE or ACK of
+//! that transaction is absorbed.
 //!
 //! Bounds: per dialog the last [`ANSWERS_HELD`] answers and markers, each
-//! answer the response datagram as sent (the copy the endpoint's other stores share) with a
-//! hashed transaction key and its request's ladder arrow; dropped with the
-//! endpoint, or for a released dialog when its hold
+//! answer the response datagram as sent (the copy the endpoint's other stores
+//! share) with a hashed transaction key and its request's ladder arrow;
+//! dropped with the endpoint, or for a released dialog when its hold
 //! ([`RELEASE_HOLD`](super::RELEASE_HOLD), 64·T1 = 32 s) expires. In
 //! aggregate the mux holds the calls released in the last 32 s (cps × 32), a
 //! call typically 1 to 3 answers (the BYE's 200; a CANCEL's 200 and the 487)
