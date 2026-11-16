@@ -334,3 +334,32 @@ fn a_prack_after_a_bye_on_its_dialog_may_draw_481() {
     ];
     assert!(decide(&Prack2xxOr481, &before)[0].violated());
 }
+
+/// `prack-2xx-or-481`: a PRACK reaching the UAS after a request of a higher
+/// CSeq on its dialog goes backwards there and owes the 500 of a request out
+/// of order (RFC 3261 §12.2.2); the same 500 in order still breaks the rule.
+#[test]
+fn a_prack_out_of_order_may_draw_500() {
+    let options = |at_us| {
+        let head = "OPTIONS sip:b@h SIP/2.0\r\nMax-Forwards: 70\r\nVia: SIP/2.0/UDP h;branch=z9hG4bK-opt\r\n\
+                    From: <sip:a@h>;tag=fa\r\nTo: <sip:b@h>;tag=tb\r\nCSeq: 3 OPTIONS\r\n\r\n";
+        let method = Kind::Request { method: "OPTIONS".to_string() };
+        let mut m = msg(at_us, UAC, UAS, method, 3, Some("tb"), head.to_string());
+        m.cseq_method = "OPTIONS".to_string();
+        m.via_branch = Some("z9hG4bK-opt".to_string());
+        m
+    };
+    let reordered = vec![
+        inv_resp(1_100_000, 180, &reliable_rows(1), false),
+        options(1_150_000),
+        prack_on(1_200_000, "1 1 INVITE", false),
+        prack_answer(1_250_000, 500),
+    ];
+    assert!(matches!(decide(&Prack2xxOr481, &reordered)[0].decision, Decision::Compliant));
+    let in_order = vec![
+        inv_resp(1_100_000, 180, &reliable_rows(1), false),
+        prack_on(1_200_000, "1 1 INVITE", false),
+        prack_answer(1_250_000, 500),
+    ];
+    assert!(decide(&Prack2xxOr481, &in_order)[0].violated());
+}
