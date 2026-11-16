@@ -90,7 +90,7 @@ pub use decision_log::{DecisionKind, DecisionMark};
 pub use dialog::{Dialog, DialogEnd, DialogId, DialogState, Direction, EndingBy, PeerDialog};
 pub use dialogs::Dialogs;
 pub use emission::{Repeat, Repeated, RetainedEmission};
-pub use invite_exchange::{InviteExchange, Unacked2xx};
+pub use invite_exchange::{InviteExchange, ReAckedCopy, Unacked2xx};
 pub use leg::{Leg, LegKind, RemoteInfo, Ring};
 pub use leg_space::LegSpace;
 pub use leg_state::{ByeDisposition, LegDisposition, LegState};

@@ -29,6 +29,17 @@ pub struct Unacked2xx {
     pub emission: RetainedEmission,
 }
 
+/// A copy of a taken 2xx owed its re-ACK (RFC 3261 §13.2.2.4): its number
+/// among the copies counted ([`InviteExchange::copies_received`]) and the
+/// instant it arrived.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReAckedCopy {
+    /// The copy's number, counting from 1.
+    pub copy: u32,
+    /// When the copy arrived, in ms on the turn clock.
+    pub at_ms: i64,
+}
+
 /// An INVITE's exchange beyond its final. A sent INVITE's 2xx is *taken* once
 /// its ACK is owed or has left; until then a final still settles the record.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -50,9 +61,13 @@ pub struct InviteExchange {
     pub ack_ahead: Option<RetainedEmission>,
     /// Sent: the copies of the 2xx the INVITE took received since
     /// (§13.3.1.4), each counted before the rules read it. A copy past the
-    /// re-sends a compliant answerer makes draws no re-ACK (ADR-0057 §10).
+    /// re-sends a compliant answerer makes draws a re-ACK only T1 after the
+    /// last one (ADR-0057 §10).
     #[serde(default)]
     pub copies_received: u32,
+    /// Sent: the last copy of that 2xx owed its re-ACK (§13.2.2.4).
+    #[serde(default)]
+    pub re_acked_copy: Option<ReAckedCopy>,
     /// Sent: the CSeq, in the acknowledging peer's own sequence, of the ACK
     /// the INVITE's 2xx awaits from that peer: armed when the 2xx is taken,
     /// discharged by the ACK leaving — the peer's relayed, or one this stack

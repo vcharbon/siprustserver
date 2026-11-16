@@ -90,10 +90,9 @@ pub(super) fn arb_pending_request() -> impl Strategy<Value = RequestRecord> {
         )
 }
 
-/// Any INVITE exchange: the ACK its 2xx drew or awaits, the copies of that
-/// 2xx counted, the ACK ahead of it,
-/// the non-2xx it answered, the 2xx it answered, the dialling facts or the
-/// final sent.
+/// Any INVITE exchange: the ACK its 2xx drew or awaits, the copies of that 2xx
+/// counted and the last re-ACKed, the ACK ahead of it, the non-2xx it
+/// answered, the 2xx it answered, the dialling facts or the final sent.
 fn arb_exchange() -> impl Strategy<Value = InviteExchange> {
     (
         (
@@ -112,18 +111,20 @@ fn arb_exchange() -> impl Strategy<Value = InviteExchange> {
             proptest::option::of(arb_retained_emission()),
             proptest::option::of(arb_retained_emission()),
             any::<u32>(),
+            proptest::option::of((any::<u32>(), any::<i64>())),
         ),
     )
         .prop_map(
             |(
                 (ack_branch, emitted_ack, awaited_ack_cseq, answered_2xx),
                 (dialled, final_sent, answer_preempted),
-                (ack_ahead, rejection, provisional, copies_received),
+                (ack_ahead, rejection, provisional, copies_received, re_acked),
             )| InviteExchange {
                 ack_branch,
                 emitted_ack,
                 ack_ahead,
                 copies_received,
+                re_acked_copy: re_acked.map(|(copy, at_ms)| ReAckedCopy { copy, at_ms }),
                 awaited_ack_cseq,
                 answered_2xx,
                 dialled: dialled.map(|(tag, sent_at, final_received)| OutboundInvite {

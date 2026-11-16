@@ -143,7 +143,8 @@ impl TurnNotes {
     }
 
     /// A copy of a taken 2xx arrived past the re-sends a compliant answerer
-    /// makes (RFC 3261 §13.3.1.4) and draws no re-ACK.
+    /// makes (RFC 3261 §13.3.1.4), within T1 of the last re-ACK, and draws no
+    /// re-ACK.
     pub fn copy_past_schedule(&mut self) {
         self.copies_past_schedule = self.copies_past_schedule.saturating_add(1);
     }

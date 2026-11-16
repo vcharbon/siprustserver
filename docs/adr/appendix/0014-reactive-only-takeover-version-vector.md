@@ -446,14 +446,15 @@ no axis moves, nothing flushes. The quiet list is closed
 2. a rung of this node's own reliable-provisional ladder (RFC 3262 §3),
 3. the re-ACK of a repeated inbound 2xx (RFC 3261 §13.2.2.4),
 4. an inbound ACK the rules absorb: it discharges nothing this node awaits
-   and no ACK is owed toward the peer for it (RFC 3261 §13.2.2.4).
+   and no ACK is owed toward the peer for it (RFC 3261 §13.2.2.4),
+5. an inbound copy of a taken 2xx owed no re-ACK (ADR-0057 §10).
 
 A rung is quiet only while the ladder goes on: a copy left and the next rung
 is armed, so the body differs from the last write by the rung index and the
 rung timer's due instant. The class is decided from the turn's effect set,
 not from the action that repeated: a quiet turn is one outbound repeat of the
 retained datagram on an `Active` call, and for a rung its own re-arm, and
-nothing else; an absorbed ACK is a turn with no effect at all that leaves the
+nothing else; an absorbed ACK or 2xx copy is a turn with no effect at all that leaves the
 body as the rules read it. The rung that ceases the ladder, a spent fire, a give-up, a
 keepalive OPTIONS turn, a request refused into the message ring, a re-ACK a
 rule emits beside a BYE or a CDR event, a re-ACK on a terminating call and
@@ -522,6 +523,7 @@ cell that pins the rule:
 | The vector answers equality and strict-greater only | `failover-harness/tests/it/forward_flush_never_regresses_backup_progress.rs` (both `HealAt` cells), `answer_lost_with_primary_no_answer.rs`, `b2bua/src/repl/s12_tests.rs` | the same cells, unchanged |
 | A restored ladder restarts from the last write, bounded by the deadline | — (a residual, not a rule) | `retransmission_turn_is_quiet.rs` (`a_reclaim_after_three_rungs_restarts_the_2xx_ladder_from_the_answer`) |
 | An absorbed ACK is quiet; the ACK that discharges is a write | `b2bua-harness/tests/it/duplicate_ack_absorbed.rs`, `reack_retransmitted_2xx.rs` | `duplicate_ack_absorbed.rs` (`a_duplicate_ack_on_a_fresh_branch_draws_no_second_b_leg_ack`, `a_duplicate_reinvite_ack_draws_no_third_b_leg_ack`) |
+| A 2xx copy owed no re-ACK is quiet, as are the re-ACKs before it | `b2bua-harness/tests/it/reack_bounded.rs` | `reack_bounded.rs` (`a_2xx_repeated_on_every_ack_draws_bounded_re_acks_on_the_b_leg`, `a_fork_stragglers_2xx_repeated_on_every_ack_draws_bounded_re_acks`) |
 | A fold is not an increment | `call_terminate_on_backup.rs` (`c11_reinvite_on_backup__primary_alive__no_terminal`), `reinvite_answer_failover.rs`, `forward_flush_never_regresses_backup_progress.rs`, `answer_lost_with_primary_no_answer.rs` | `b2bua/src/router/reclaim/tests.rs` (`a_reverse_fold_holds_the_backups_version_so_its_next_write_folds`, `a_forward_answer_folds_into_a_ringing_takeover_copy_without_ending_it`, `a_refused_flush_answering_the_round_the_live_copy_holds_open_folds`, `a_round_fold_keeps_what_the_live_copy_wrote_since_the_branch`) |
 
 `b2bua_repl_quiet_turns_total{kind}` counts the turns persisted this way, so

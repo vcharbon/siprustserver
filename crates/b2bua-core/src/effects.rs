@@ -245,11 +245,16 @@ pub enum QuietTurn {
     /// and no ACK is owed toward the peer for it (§13.2.2.4), so nothing
     /// leaves and the body records nothing but the in-dialog message count.
     AbsorbedAck,
+    /// A copy of a taken 2xx owed no re-ACK (ADR-0057 §10): nothing leaves
+    /// and the body records nothing but the in-dialog message count and the
+    /// 2xx's copy count.
+    AbsorbedCopy,
 }
 
 impl QuietTurn {
     /// Every kind, in declaration order.
-    pub const ALL: [QuietTurn; 3] = [QuietTurn::OwnRung, QuietTurn::ReAck, QuietTurn::AbsorbedAck];
+    pub const ALL: [QuietTurn; 4] =
+        [QuietTurn::OwnRung, QuietTurn::ReAck, QuietTurn::AbsorbedAck, QuietTurn::AbsorbedCopy];
 
     /// The `kind` label of `b2bua_repl_quiet_turns_total`.
     pub const fn kind(self) -> &'static str {
@@ -257,6 +262,7 @@ impl QuietTurn {
             QuietTurn::OwnRung => "own-rung",
             QuietTurn::ReAck => "re-ack",
             QuietTurn::AbsorbedAck => "absorbed-ack",
+            QuietTurn::AbsorbedCopy => "absorbed-2xx-copy",
         }
     }
 }

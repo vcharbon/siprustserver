@@ -236,7 +236,10 @@ fn chain_turn(
         exec.turn.notes.repeat_give_up(obligation.kind());
         exec.give_up(&mut call, &mut ladder_fx, obligation);
     }
-    if crate::rules::relay::count_copy(&mut call, source_leg_id, resolved.dialog.as_ref(), event) {
+    let named = resolved.dialog.as_ref();
+    let absorbed_copy =
+        crate::rules::relay::count_copy(&mut call, source_leg_id, named, event, now_ms);
+    if absorbed_copy {
         exec.turn.notes.copy_past_schedule();
     }
     // The record names the message before the rules read it, so what the
@@ -316,7 +319,7 @@ fn chain_turn(
         &mut exec.turn.ids,
         now_ms,
     );
-    quiet_turn::name_candidate(&mut result, &call, event, discharged.as_ref());
+    quiet_turn::name_candidate(&mut result, &call, event, (discharged.as_ref(), absorbed_copy));
     // The ladder's own effects (its cancels) precede the rule's.
     ladder_fx.extend(std::mem::take(&mut result.effects));
     result.effects = ladder_fx;

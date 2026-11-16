@@ -284,7 +284,7 @@ fn repeated(
                 })
         }
         SipMessage::Response(resp) => {
-            named.is_some_and(|d| crate::rules::relay::retransmitted_2xx(leg, d, resp))
+            named.is_some_and(|d| crate::rules::relay::copy_of_taken_2xx(leg, d, resp))
         }
     }
 }

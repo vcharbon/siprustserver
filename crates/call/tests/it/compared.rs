@@ -7,7 +7,7 @@ use crate::common;
 use call::helpers::{merge_exempt, same_state};
 use call::model::{
     Call, CdrEvent, CdrEventType, DialogState, DialogUsage, EndingBy, HostPort, MessageDirection,
-    MessageEntry, RequestRecord, SentRequest, TimerEntry, TimerKey, TimerType,
+    MessageEntry, ReAckedCopy, RequestRecord, SentRequest, TimerEntry, TimerKey, TimerType,
 };
 
 /// The representative call.
@@ -172,6 +172,34 @@ fn a_2xx_copy_count_is_exempt_and_merges_to_the_higher() {
         2,
         "another INVITE's count is not this one's"
     );
+}
+
+/// The last re-ACKed copy of a taken 2xx is exempt, and a merge keeps the
+/// later of the two copies' own: a copy that re-ACKed later keeps its instant.
+#[test]
+fn a_re_acked_copy_is_exempt_and_merges_to_the_later() {
+    let re_acked = |call: &mut Call, copy: u32, at_ms: i64| {
+        let d = call.b_legs[0].dialogs.confirmed_mut().expect("the confirmed dialog");
+        let x = call::helpers::sent_exchange_mut(d).expect("the INVITE's exchange");
+        x.re_acked_copy = Some(ReAckedCopy { copy, at_ms });
+    };
+    let read = |call: &Call| {
+        let d = call.b_legs[0].dialogs.confirmed().expect("the confirmed dialog");
+        call::helpers::sent_exchange(d).expect("the INVITE's exchange").re_acked_copy
+    };
+    let before = call();
+    let mut acked = before.clone();
+    re_acked(&mut acked, 3, 1_500);
+    assert!(same_state(&before, &acked), "the re-ACKed copy");
+
+    let mut container = call();
+    re_acked(&mut container, 11, 39_000);
+    let mut other = call();
+    re_acked(&mut other, 9, 31_000);
+    let later = Some(ReAckedCopy { copy: 11, at_ms: 39_000 });
+    assert_eq!(read(&merge_exempt(container.clone(), &other)), later, "the container's later");
+    assert_eq!(read(&merge_exempt(other.clone(), &container)), later, "the other's later");
+    assert_eq!(read(&merge_exempt(before.clone(), &other)), read(&other), "one copy's only");
 }
 
 /// The merge takes the container whole and the other copy's exempt fields:

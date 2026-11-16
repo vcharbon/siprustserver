@@ -49,7 +49,7 @@ const OBLIGATION_VALUES: [&str; 2] = label_values!(ObligationKind::ALL, Obligati
 /// A dialog-level ladder's obligation, indexed like [`ObligationKind::ALL`].
 pub const OBLIGATION: Dim = Dim::new("obligation", &OBLIGATION_VALUES);
 
-const QUIET_TURN_VALUES: [&str; 3] = label_values!(QuietTurn::ALL, QuietTurn::kind);
+const QUIET_TURN_VALUES: [&str; 4] = label_values!(QuietTurn::ALL, QuietTurn::kind);
 /// A quiet turn's kind, indexed like [`QuietTurn::ALL`].
 pub const QUIET_TURN: Dim = Dim::new("kind", &QUIET_TURN_VALUES);
 
@@ -75,7 +75,7 @@ const PEER_FAILURE_KIND_VALUES: [&str; 4] =
 pub const PEER_FAILURE_KIND: Dim = Dim::new("kind", &PEER_FAILURE_KIND_VALUES);
 
 assert_exposition_order!(ObligationKind: AckOf2xx, AwaitPrack);
-assert_exposition_order!(QuietTurn: OwnRung, ReAck, AbsorbedAck);
+assert_exposition_order!(QuietTurn: OwnRung, ReAck, AbsorbedAck, AbsorbedCopy);
 assert_exposition_order!(DrainExit: Quiescent, CaughtUp, Grace, GracePeersBehind);
 assert_exposition_order!(RemovalClass: Terminated, SelfRelease, StandDown, Orphan);
 assert_exposition_order!(PeerScope: Internal, External);
@@ -150,7 +150,7 @@ pub const MODEL_DEFECTS: Family = Family::counter(
 pub const REPL_QUIET_TURNS: Family = Family::counter(
     "b2bua_repl_quiet_turns_total",
     Labels::Product(&[QUIET_TURN]),
-    "dialog-level retransmission turns persisted with no version bump and no flush (own-rung: a rung of this node's own 2xx or reliable-provisional ladder; re-ack: the re-ACK of a repeated inbound 2xx); paired with b2bua_retransmits_total, N rungs against 0 flushes is the rule holding",
+    "dialog-level retransmission turns persisted with no version bump and no flush (own-rung: a rung of this node's own 2xx or reliable-provisional ladder; re-ack: the re-ACK of a repeated inbound 2xx; absorbed-ack: an inbound ACK owed nowhere; absorbed-2xx-copy: a repeated inbound 2xx owed no re-ACK); paired with b2bua_retransmits_total, N rungs against 0 flushes is the rule holding",
 );
 
 pub const REPL_APPLIED: Family = Family::counter(

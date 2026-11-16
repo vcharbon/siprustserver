@@ -13,18 +13,22 @@ use b2bua_sdk::event::CallEvent;
 /// Name the turn's quiet candidate once the rules ran over `read`, the body
 /// they read. A re-ACK whose rule also wrote into the body (a CDR event, a
 /// disposition) is no candidate. An ACK that discharged nothing here and left
-/// the body as the rules read it is an absorbed-ACK candidate.
+/// the body as the rules read it is an absorbed-ACK candidate; a 2xx copy the
+/// count absorbed (`absorbed_copy`) that left it so, an absorbed-copy one.
 pub(super) fn name_candidate(
     result: &mut HandlerResult,
     read: &Call,
     event: &CallEvent,
-    discharged: Option<&Obligation>,
+    (discharged, absorbed_copy): (Option<&Obligation>, bool),
 ) {
     if result.effects.quiet == Some(QuietTurn::ReAck) && result.call != *read {
         result.effects.quiet = None;
     }
     if received_ack(event) && discharged.is_none() && result.call == *read {
         result.effects.quiet = Some(QuietTurn::AbsorbedAck);
+    }
+    if absorbed_copy && result.call == *read {
+        result.effects.quiet = Some(QuietTurn::AbsorbedCopy);
     }
 }
 
@@ -33,7 +37,8 @@ pub(super) fn name_candidate(
 /// is exactly: an `Active` call, no soft, buffered or fire-and-forget effect,
 /// and for a repeat one outbound effect, it the retained datagram's repeat,
 /// with no critical effect but the rung's own re-arm for
-/// [`QuietTurn::OwnRung`]; a [`QuietTurn::AbsorbedAck`] has no effect at all.
+/// [`QuietTurn::OwnRung`]; a [`QuietTurn::AbsorbedAck`] or
+/// [`QuietTurn::AbsorbedCopy`] has no effect at all.
 /// A rule that reaches the re-ACK beside anything else — a BYE, a CDR event, a
 /// timer — is a write, as is a re-ACK on a terminating call, whose flush the
 /// teardown needs.
@@ -46,7 +51,7 @@ pub fn class(result: &HandlerResult) -> Option<QuietTurn> {
         (QuietTurn::OwnRung, [eff], [CriticalStateEffect::ScheduleTimer(entry)]) => {
             repeat(eff) && entry.key.timer_type == TimerType::Rung
         }
-        (QuietTurn::AbsorbedAck, [], []) => true,
+        (QuietTurn::AbsorbedAck | QuietTurn::AbsorbedCopy, [], []) => true,
         _ => false,
     };
     let quiet = result.call.state == CallModelState::Active

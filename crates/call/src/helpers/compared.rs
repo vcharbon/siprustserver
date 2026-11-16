@@ -8,8 +8,9 @@
 //!
 //! - the maximum of two copies stands: each dialog's local and remote CSeq
 //!   (RFC 3261 §12.2.1.1), the message and turn counters, the copies of a
-//!   taken 2xx an INVITE record counts, the timer generation, the limiter's
-//!   change counter (no change number either copy reserved is reused);
+//!   taken 2xx an INVITE record counts and the latest of them re-ACKed, the
+//!   timer generation, the limiter's change counter (no change number either
+//!   copy reserved is reused);
 //! - the union of two copies stands: the CDR events, each leg's message ring,
 //!   an item both hold counted once however its two clock frames read it;
 //! - the container's value stands: the keepalive request records, the
@@ -22,7 +23,7 @@ use std::collections::BTreeSet;
 
 use crate::model::{
     Call, CdrEvent, Dialog, InviteExchange, Ladder, Leg, MessageEntry, MessageRing, Provisional,
-    RequestRecord, Shown, TimerEntry, TimerType, Unacked2xx,
+    ReAckedCopy, RequestRecord, Shown, TimerEntry, TimerType, Unacked2xx,
 };
 
 use super::instants::REANCHOR_DEADBAND_MS;
@@ -263,6 +264,7 @@ fn same_exchange(a: &InviteExchange, b: &InviteExchange) -> bool {
         emitted_ack,
         ack_ahead,
         copies_received: _,
+        re_acked_copy: _,
         awaited_ack_cseq,
         answered_2xx,
         dialled,
@@ -338,7 +340,8 @@ pub fn merge_exempt(container: Call, other: &Call) -> Call {
 }
 
 /// `leg` with, on every dialog `other` holds too whose last sent INVITE is the
-/// same one there (its CSeq), the higher count of that INVITE's 2xx copies.
+/// same one there (its CSeq), the higher count of that INVITE's 2xx copies and
+/// the later of the copies the two re-ACKed.
 fn raise_copy_counts(leg: &mut Leg, other: &Call) {
     let Some(theirs) = super::leg::find_leg(other, &leg.leg_id) else { return };
     for d in leg.dialogs.iter_mut() {
@@ -352,8 +355,15 @@ fn raise_copy_counts(leg: &mut Leg, other: &Call) {
         }
         if let (Some(x), Some(y)) = (mine.invite.as_mut(), their_invite.invite.as_ref()) {
             x.copies_received = x.copies_received.max(y.copies_received);
+            x.re_acked_copy = later_re_acked(x.re_acked_copy, y.re_acked_copy);
         }
     }
+}
+
+/// The later of two re-ACKed copies of one 2xx: the later arrival, the higher
+/// copy number between two arrivals at one instant.
+fn later_re_acked(a: Option<ReAckedCopy>, b: Option<ReAckedCopy>) -> Option<ReAckedCopy> {
+    a.into_iter().chain(b).max_by_key(|c| (c.at_ms, c.copy))
 }
 
 /// `taken`, the other copy's body that the acting copy `own` plays on from,

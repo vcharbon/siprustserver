@@ -349,11 +349,11 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
         ),
         // RFC 3261 §13.2.2.4 — re-ACK a **retransmitted 2xx** whose first ACK was
         // lost. §13.2.2.4 gives one ACK per 2xx and re-passes THAT ACK to the
-        // transport for every copy, so the re-ACK MUST reuse the client
-        // transaction the ACK went out on (the retained `ack_branch` + the INVITE
-        // CSeq) — a fresh branch would mint a new transaction and never quiesce
-        // the answerer's INVITE server txn, leaking the confirmed call or timing
-        // it out late under packet loss. `ack_leg` re-passes the retained
+        // transport for each copy owed it (`re_ack_owed`, ADR-0057 §10), so the
+        // re-ACK MUST reuse the client transaction the ACK went out on (the
+        // retained `ack_branch` + the INVITE CSeq) — a fresh branch would mint a new
+        // transaction and never quiesce the answerer's INVITE server txn, leaking the
+        // confirmed call or timing it out late under packet loss. `ack_leg` re-passes the retained
         // datagram (`emitted_ack`) raw, so whatever body the acknowledging party
         // put on it rides every repeat. This is the b-leg / realign twin of the
         // a-leg `unacked-2xx-retransmit` (which retransmits the B2BUA's *own* 2xx
