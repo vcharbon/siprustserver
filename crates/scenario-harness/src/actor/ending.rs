@@ -23,6 +23,10 @@ pub enum Ending {
     Answered,
     /// The caller's establishing INVITE drew this non-2xx final.
     Refused(u16),
+    /// As [`Refused`](Self::Refused), the call ending on that final, and the
+    /// final state also shows the predicate: a refusal the call accepts only
+    /// in the circumstance it names.
+    RefusedWhen(u16, fn(&StateInner) -> bool),
     /// The caller received a provisional carrying SDP (early media), or the
     /// call's loss model dropped one on its way to her, then her establishing
     /// INVITE drew this non-2xx final.
@@ -96,6 +100,7 @@ impl Branch {
         match self.ending {
             Ending::Answered => leg.is_some_and(|l| l.first_final().is_none()),
             Ending::Refused(code) => leg.is_some_and(|l| l.saw_final(code)),
+            Ending::RefusedWhen(code, when) => leg.is_some_and(|l| l.saw_final(code)) && when(s),
             Ending::EarlyMediaRefused(code) => leg.is_some_and(|l| {
                 (l.saw_early_media() || l.lost_early_media()) && l.saw_final(code)
             }),
@@ -124,7 +129,10 @@ impl Branch {
     /// Whether this branch ends the call on the caller's establishing-INVITE
     /// final `code`.
     fn ends_on_final(&self, code: u16) -> bool {
-        matches!(self.ending, Ending::Refused(c) | Ending::EarlyMediaRefused(c) if c == code)
+        matches!(
+            self.ending,
+            Ending::Refused(c) | Ending::RefusedWhen(c, _) | Ending::EarlyMediaRefused(c) if c == code
+        )
     }
 }
 

@@ -85,6 +85,8 @@ pub struct LegObservation {
     reneg_cseqs: std::collections::BTreeSet<((String, String), u32)>,
     /// Whether this leg sent a CANCEL for its establishing INVITE.
     cancel_sent: bool,
+    /// Whether this leg's dialog was ever confirmed, whatever followed.
+    confirmed: bool,
     /// Every inbound response this leg's reactor observed, in arrival order — an
     /// append-only per-leg log with ONE writer (the leg's own reactor), so its
     /// order is deterministic; reception goals consume it through a per-actor
@@ -125,6 +127,12 @@ impl LegObservation {
     /// Whether this leg sent a CANCEL for its establishing INVITE.
     pub fn cancel_sent(&self) -> bool {
         self.cancel_sent
+    }
+
+    /// Whether this leg's dialog was ever confirmed ([`LegPhase::Confirmed`]),
+    /// a later teardown notwithstanding.
+    pub fn was_confirmed(&self) -> bool {
+        self.confirmed
     }
 
     /// Whether this leg received a provisional above 100 to an INVITE — the
@@ -337,7 +345,11 @@ impl StateInner {
     fn apply(&mut self, o: Observation, now: Instant) {
         match o {
             Observation::LegEarly { leg } => self.leg_mut(leg).advance(LegPhase::Early),
-            Observation::LegConfirmed { leg } => self.leg_mut(leg).advance(LegPhase::Confirmed),
+            Observation::LegConfirmed { leg } => {
+                let leg = self.leg_mut(leg);
+                leg.confirmed = true;
+                leg.advance(LegPhase::Confirmed);
+            }
             Observation::LegTerminated { leg } => self.leg_mut(leg).advance(LegPhase::Terminated),
             Observation::DialogTornDown { leg } => self.ledger.discharge_leg(leg),
             Observation::SeedDialog { stream, cseq } => {
