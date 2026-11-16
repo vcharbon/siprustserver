@@ -58,6 +58,10 @@ use timers::{T1, T2, TIMER_B, TIMER_F, TIMER_H};
 /// below, so the clamp is unobservable.
 const MAX_DOUBLINGS: u32 = 20;
 
+/// The most rungs an RFC class's ladder climbs: every wait is at least T1 and
+/// every class gives up by 64·T1.
+const MAX_RUNGS: u32 = 64;
+
 /// The retransmission class of a message: what an RFC obliges its emitter to
 /// re-send, and how often.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -147,6 +151,21 @@ impl Class {
             }
             Class::InviteServerFinal => timers::ms(TIMER_H),
         }
+    }
+
+    /// How many re-sends the schedule this class's RFC prescribes makes after
+    /// the original send before it gives up: the most copies of one message a
+    /// compliant emitter sends (a 2xx, RFC 3261 §13.3.1.4: 10).
+    pub fn resends(self) -> u32 {
+        let schedule = Schedule::rfc(self);
+        let mut resends = 0;
+        for rung in 1..=MAX_RUNGS {
+            if schedule.elapsed_at(rung) >= schedule.give_up_after() {
+                break;
+            }
+            resends = rung;
+        }
+        resends
     }
 
     /// The wait before rung `n` (counting from 1).

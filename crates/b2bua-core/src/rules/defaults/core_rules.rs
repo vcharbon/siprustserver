@@ -374,6 +374,7 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
         // A leg the BYE already Terminated still owes it (RFC 5407 §2 + App. D:
         // a Mortal UA keeps the invite usage for exactly this, and §13.2.2.4's
         // "every time a retransmission arrives" does not lapse with the dialog).
+        // A copy past a compliant answerer's re-sends draws none (ADR-0057 §10).
         rule(
             "re-ack-retransmitted-2xx",
             &[],
@@ -388,9 +389,7 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                     call::helpers::sent_exchange(d).is_some_and(|x| x.ack_branch.is_some())
                         && crate::rules::relay::retransmitted_2xx(leg, d, resp)
                 }),
-            |ctx| {
-                ok(vec![RuleAction::AckLeg { leg_id: ctx.source_leg_id.to_string(), body: None }])
-            },
+            |ctx| ok(crate::rules::relay::re_ack(ctx)),
         ),
         // RFC 3261 §13.2.2.4 — a fork STRAGGLER's 2xx: a 2xx to the INVITE a
         // b-leg sent, under a To-tag no live dialog of that leg carries, once another

@@ -239,7 +239,7 @@ pub enum QuietTurn {
     OwnRung,
     /// The re-ACK of a repeated inbound 2xx (RFC 3261 §13.2.2.4): the retained
     /// ACK's bytes leave again and the body records nothing but the in-dialog
-    /// message count.
+    /// message count and the 2xx's copy count.
     ReAck,
     /// An inbound ACK the rules absorb: it discharges nothing this node awaits
     /// and no ACK is owed toward the peer for it (§13.2.2.4), so nothing

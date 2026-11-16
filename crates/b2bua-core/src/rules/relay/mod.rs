@@ -77,7 +77,7 @@ pub(crate) use owed_answer::{
     ack_answer_on_leg, answer_never_comes, bare_ack_owed, invite_carried_offer,
     offer_deferred_to_ack, offer_owed_in_ack, offered_reliably, owe_answer_in_ack, owes_bare_ack,
 };
-pub(crate) use repeat::retransmitted_2xx;
+pub(crate) use repeat::{count_copy, re_ack, retransmitted_2xx};
 pub(crate) use session_timer::{settle_session_timer, TIMER};
 pub(crate) use stated_text::{set_lines, writable_lines, writable_status, Statements};
 pub(crate) use unbuilt::unbuilt;

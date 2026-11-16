@@ -7,9 +7,9 @@
 //! The exempt fields are what a write changes without changing the call:
 //!
 //! - the maximum of two copies stands: each dialog's local and remote CSeq
-//!   (RFC 3261 §12.2.1.1), the message and turn counters, the timer
-//!   generation, the limiter's change counter (no change number either copy
-//!   reserved is reused);
+//!   (RFC 3261 §12.2.1.1), the message and turn counters, the copies of a
+//!   taken 2xx an INVITE record counts, the timer generation, the limiter's
+//!   change counter (no change number either copy reserved is reused);
 //! - the union of two copies stands: the CDR events, each leg's message ring,
 //!   an item both hold counted once however its two clock frames read it;
 //! - the container's value stands: the keepalive request records, the
@@ -262,6 +262,7 @@ fn same_exchange(a: &InviteExchange, b: &InviteExchange) -> bool {
         ack_branch,
         emitted_ack,
         ack_ahead,
+        copies_received: _,
         awaited_ack_cseq,
         answered_2xx,
         dialled,
@@ -314,6 +315,10 @@ fn same_provisional(a: &Provisional, b: &Provisional) -> bool {
 /// field is the container's.
 pub fn merge_exempt(container: Call, other: &Call) -> Call {
     let mut merged = raise_sequences(container, other);
+    raise_copy_counts(&mut merged.a_leg, other);
+    for leg in merged.b_legs.iter_mut() {
+        raise_copy_counts(leg, other);
+    }
     merged.timer_generation = merged.timer_generation.max(other.timer_generation);
     merged.limiter.merge_change(&other.limiter);
     merged.message_seq = merged.message_seq.max(other.message_seq);
@@ -330,6 +335,25 @@ pub fn merge_exempt(container: Call, other: &Call) -> Call {
         leg.messages = union_ring(&leg.messages, theirs(&leg.leg_id));
     }
     merged
+}
+
+/// `leg` with, on every dialog `other` holds too whose last sent INVITE is the
+/// same one there (its CSeq), the higher count of that INVITE's 2xx copies.
+fn raise_copy_counts(leg: &mut Leg, other: &Call) {
+    let Some(theirs) = super::leg::find_leg(other, &leg.leg_id) else { return };
+    for d in leg.dialogs.iter_mut() {
+        let Some(t) = theirs.dialogs.by_tags(&d.our_tag, &d.peer_tag) else { continue };
+        let (Some(mine), Some(their_invite)) = (d.sent_invite.as_mut(), t.sent_invite.as_ref())
+        else {
+            continue;
+        };
+        if mine.outbound_cseq != their_invite.outbound_cseq {
+            continue;
+        }
+        if let (Some(x), Some(y)) = (mine.invite.as_mut(), their_invite.invite.as_ref()) {
+            x.copies_received = x.copies_received.max(y.copies_received);
+        }
+    }
 }
 
 /// `taken`, the other copy's body that the acting copy `own` plays on from,

@@ -67,6 +67,10 @@ plain_counters! {
         "b2bua_message_cap_terminated_total",
         "calls terminated for exceeding max_messages_per_call (cap-defense; a climbing rate names a runaway-traffic call class)",
     ) => message_cap_terminated, bump_message_cap_terminated, message_cap_terminated_total;
+    COPIES_PAST_SCHEDULE = (
+        "b2bua_2xx_copies_past_schedule_total",
+        "copies of an INVITE 2xx received past the 10 re-sends a compliant answerer makes within 64*T1 (RFC 3261 13.3.1.4), absorbed with no re-ACK; a climbing rate names a peer that answers each ACK with its 2xx again",
+    ) => copies_past_schedule, bump_2xx_copy_past_schedule, copies_past_schedule_total;
     DISPATCH_QUEUE_DROPS = (
         "b2bua_dispatch_queue_drops_total",
         "events dropped: per-call queue full (a non-INVITE request's transaction is forgotten so its retransmission is admitted again; an in-dialog INVITE is answered with a Retry-After); a new INVITE is counted on b2bua_new_calls_total instead",

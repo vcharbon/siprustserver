@@ -89,11 +89,18 @@ Each default is the largest value measured over the replay corpus and a soak, ti
 on what grows with age is a base plus a rate per granted hour.
 Detail: [appendix §9](appendix/0057-a-call-is-bounded-a-turn-is-bounded-by-construction.md#9-defaults-are-a-measured-maximum-times-a-factor-set-by-what-the-cap-costs).
 
+### 10. A peer's repeat draws a bounded answer
+
+A 2xx copy is re-ACKed only up to the re-sends a compliant answerer makes (RFC 3261 §13.3.1.4,
+`Class::Final2xx`: 10). A later copy is absorbed and counts on
+`b2bua_2xx_copies_past_schedule_total`. The count is on the INVITE's record, exempt from the
+comparison (ADR-0055 §7), and a takeover copy may count again from the last write.
+
 ## Consequences
 
 - A looping decision service or service defect costs a bounded number of legs, attempts and
   actions per call, and the call ends as a panicked one does.
-- No new replicated counter.
+- No cap adds a replicated counter; the re-ACK bound (§10) adds one exempt count.
 - A carrier that forks without bound, or a peer that floods relays, ends its own call and
   raises a counter, not an alert.
 - A stuck poll in a call body costs the node and leaves that one call's parties connected.

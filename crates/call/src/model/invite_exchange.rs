@@ -48,6 +48,11 @@ pub struct InviteExchange {
     /// unacknowledged (RFC 3261 §14.1, RFC 6026 §7.1), and a repeated ACK is
     /// absorbed (§13.2.2.4).
     pub ack_ahead: Option<RetainedEmission>,
+    /// Sent: the copies of the 2xx the INVITE took received since
+    /// (§13.3.1.4), each counted before the rules read it. A copy past the
+    /// re-sends a compliant answerer makes draws no re-ACK (ADR-0057 §10).
+    #[serde(default)]
+    pub copies_received: u32,
     /// Sent: the CSeq, in the acknowledging peer's own sequence, of the ACK
     /// the INVITE's 2xx awaits from that peer: armed when the 2xx is taken,
     /// discharged by the ACK leaving — the peer's relayed, or one this stack

@@ -49,8 +49,9 @@ struct PingPong {
 
 impl PingPong {
     /// The SUT re-ACKs the first copy, at most [`COMPLIANT_COPIES`] in all, and
-    /// sends nothing else.
-    fn assert_bounded(&self) {
+    /// sends nothing else; `past_schedule`, its count of copies absorbed past
+    /// the schedule, names each copy it did not re-ACK.
+    fn assert_bounded(&self, past_schedule: u64) {
         assert!(self.re_acks >= 1, "the SUT re-ACKs the first copy (RFC 3261 §13.2.2.4)");
         assert!(
             self.re_acks <= COMPLIANT_COPIES,
@@ -60,6 +61,9 @@ impl PingPong {
             self.copies,
         );
         assert!(self.others.is_empty(), "the SUT sends nothing but re-ACKs: {:?}", self.others);
+        let absorbed = u64::try_from(self.copies - self.re_acks).expect("a count");
+        assert!(absorbed >= 1, "the answerer's last copy is absorbed, so the ping-pong stops");
+        assert_eq!(past_schedule, absorbed, "each copy left un-ACKed is counted");
     }
 }
 
@@ -115,7 +119,9 @@ async fn a_2xx_repeated_on_every_ack_draws_bounded_re_acks_on_the_b_leg() {
     let mut dialog = call.ack().await;
     bob.receive("ACK").await;
 
-    ping_pong(&h, b2bua.addr, &bob, &mut uas, ANSWER).await.assert_bounded();
+    ping_pong(&h, b2bua.addr, &bob, &mut uas, ANSWER)
+        .await
+        .assert_bounded(b2bua.metrics().copies_past_schedule_total());
 
     let mut bye = dialog.bye().await;
     bob.receive("BYE").await.respond(200, "OK").await;
@@ -153,7 +159,9 @@ async fn a_reinvite_2xx_repeated_on_every_ack_draws_bounded_re_acks_toward_the_c
     dialog.ack_for(reinvite_cseq, None).await;
     bob.receive("ACK").await;
 
-    ping_pong(&h, b2bua.addr, &bob, &mut bob_reinvite, BOB_V2).await.assert_bounded();
+    ping_pong(&h, b2bua.addr, &bob, &mut bob_reinvite, BOB_V2)
+        .await
+        .assert_bounded(b2bua.metrics().copies_past_schedule_total());
 
     let mut bye = dialog.bye().await;
     bob.receive("BYE").await.respond(200, "OK").await;
@@ -192,7 +200,9 @@ async fn a_reinvite_2xx_repeated_on_every_ack_draws_bounded_re_acks_toward_the_c
     bob_dialog.ack_for(reinvite_cseq, None).await;
     alice.receive("ACK").await;
 
-    ping_pong(&h, b2bua.addr, &alice, &mut alice_reinvite, ALICE_V2).await.assert_bounded();
+    ping_pong(&h, b2bua.addr, &alice, &mut alice_reinvite, ALICE_V2)
+        .await
+        .assert_bounded(b2bua.metrics().copies_past_schedule_total());
 
     let mut bye = dialog.bye().await;
     bob.receive("BYE").await.respond(200, "OK").await;

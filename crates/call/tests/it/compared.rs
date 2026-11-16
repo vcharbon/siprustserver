@@ -140,6 +140,40 @@ fn a_ladder_rung_is_exempt_and_its_emission_compared() {
     assert!(!same_state(&before, &acked), "the 2xx discharged");
 }
 
+/// The copies of a taken 2xx counted on the INVITE's record are exempt, and a
+/// merge keeps the higher count of the INVITE both copies hold: a copy that
+/// counted more copies of the 2xx keeps its count.
+#[test]
+fn a_2xx_copy_count_is_exempt_and_merges_to_the_higher() {
+    let copies = |call: &mut Call, n: u32| {
+        let d = call.b_legs[0].dialogs.confirmed_mut().expect("the confirmed dialog");
+        call::helpers::sent_exchange_mut(d).expect("the INVITE's exchange").copies_received = n;
+    };
+    let read = |call: &Call| {
+        let d = call.b_legs[0].dialogs.confirmed().expect("the confirmed dialog");
+        call::helpers::sent_exchange(d).expect("the INVITE's exchange").copies_received
+    };
+    let before = call();
+    let mut counted = before.clone();
+    copies(&mut counted, 4);
+    assert!(same_state(&before, &counted), "the count");
+
+    let mut container = call();
+    copies(&mut container, 2);
+    let mut other = call();
+    copies(&mut other, 7);
+    assert_eq!(read(&merge_exempt(container.clone(), &other)), 7, "the other's higher count");
+    assert_eq!(read(&merge_exempt(other.clone(), &container)), 7, "the container's own");
+
+    let d = other.b_legs[0].dialogs.confirmed_mut().expect("the confirmed dialog");
+    d.sent_invite.as_mut().expect("the INVITE's record").outbound_cseq += 1;
+    assert_eq!(
+        read(&merge_exempt(container, &other)),
+        2,
+        "another INVITE's count is not this one's"
+    );
+}
+
 /// The merge takes the container whole and the other copy's exempt fields:
 /// the higher sequences, the union of the CDR events and of the rings.
 #[test]

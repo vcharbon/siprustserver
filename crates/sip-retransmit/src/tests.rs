@@ -128,6 +128,16 @@ fn a_ladder_stops_before_a_rung_that_would_land_at_or_past_the_give_up() {
     assert_eq!(walk(Schedule::rfc(Class::InviteServerFinal)), (10, m(31_500)));
 }
 
+/// A class's re-send count is the rung its ladder stops on: a 2xx is re-sent
+/// at 0.5, 1.5, 3.5, 7.5 s and then every T2 up to 31.5 s, ten copies.
+#[test]
+fn a_class_resends_as_many_copies_as_its_ladder_walks() {
+    for class in Class::ALL {
+        assert_eq!(class.resends(), walk(Schedule::rfc(class)).0, "{class:?}");
+    }
+    assert_eq!(Class::Final2xx.resends(), 10);
+}
+
 /// The bound is crossed by landing ON it, not only past it. Every RFC class
 /// steps either side of its own bound, so only a configured one pins the
 /// comparison — and `invite_initial_timeout_ms` is exactly such a bound.
