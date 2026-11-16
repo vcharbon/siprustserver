@@ -86,24 +86,24 @@ async fn a_seed_fixes_the_whole_perturbation() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn the_header_budget_bounds_every_invite_unless_lifted() {
+async fn the_header_budget_bounds_every_invite() {
     let (h, alice, bob) = agents("callfuzz-budget").await;
     let env = env(&alice, &bob, "t");
     let budget = 700;
-    let bytes = |oversize| {
+    let bytes = |header_budget| {
         (0..400)
             .map(|seed| {
                 let mut call = basic(&env);
-                let config = FuzzConfig { header_budget: budget, oversize, ..payloads_always() };
+                let config = FuzzConfig { header_budget, ..payloads_always() };
                 perturb(&mut Rng::new(seed), &mut call, &config, &mut Vec::new());
                 invite_headers(&call).iter().map(|(n, v)| n.len() + v.len() + 4).sum::<usize>()
             })
             .collect::<Vec<_>>()
     };
-    let bounded = bytes(false);
+    let bounded = bytes(budget);
     assert!(bounded.iter().all(|&b| b <= budget), "{bounded:?}");
     assert!(bounded.iter().any(|&b| b > budget / 2), "the budget is used: {bounded:?}");
-    assert!(bytes(true).iter().any(|&b| b > budget), "oversize lifts the budget");
+    assert!(bytes(usize::MAX).iter().any(|&b| b > budget), "the draws pass it unbounded");
     h.finish().await;
 }
 
@@ -186,7 +186,11 @@ fn wrap(config: FuzzConfig) -> FuzzWrap {
     FuzzWrap {
         id: "fz_basic_call",
         inner: Arc::new(basic_call(default_binder())),
-        policy: Policy { endings: Some(ENDINGS), callee_reliable: true, callee_roles: &["bob"] },
+        policy: Policy {
+            cancel_endings: Some(CANCEL_ENDINGS),
+            callee_reliable: true,
+            callee_roles: &["bob"],
+        },
         config,
     }
 }
@@ -209,7 +213,38 @@ async fn a_wrapped_call_is_stamped_with_its_seed_and_recorded() {
     assert_eq!(seed_of_call_id(&call_id), Some(seed));
     let drawn = drawn().lock().expect("registry").get("tok-1").cloned().expect("recorded");
     assert_eq!(drawn.seed, seed);
+    assert_eq!(drawn.call_id, call_id);
     assert!(drawn.desc.starts_with("Wrap | basic_call"), "{}", drawn.desc);
+    h.finish().await;
+}
+
+/// The names of the endings `call` accepts, in order.
+fn accepted(call: &ActorCall) -> Vec<&'static str> {
+    call.expect.branches().map(|b| b.name).collect()
+}
+
+/// A wrapped call that drew a CANCEL accepts the CANCEL races; one that drew
+/// none keeps the basic call's own ending, its held callee answering.
+#[tokio::test(start_paused = true)]
+async fn only_a_drawn_cancel_widens_the_accepted_endings() {
+    let (h, alice, bob) = agents("callfuzz-endings").await;
+    let own = accepted(&basic(&env(&alice, &bob, "t")));
+    let races: Vec<&str> = CANCEL_ENDINGS.iter().map(|b| b.name).collect();
+    let (mut cancelled, mut kept) = (0, 0);
+    for seed in 0..200u64 {
+        let token = format!("endings-{seed}");
+        let config = FuzzConfig { run_seed: seed, ..FuzzConfig::default() };
+        let call = wrap(config).build(&env(&alice, &bob, &token)).expect("built");
+        let desc = drawn().lock().expect("registry")[&token].desc.clone();
+        if desc.contains("cancel+") {
+            assert_eq!(accepted(&call), races, "{desc}");
+            cancelled += 1;
+        } else {
+            assert_eq!(accepted(&call), own, "{desc}");
+            kept += 1;
+        }
+    }
+    assert!(cancelled > 20 && kept > 100, "cancelled {cancelled}, kept {kept}");
     h.finish().await;
 }
 

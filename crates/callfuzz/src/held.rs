@@ -70,13 +70,14 @@ pub fn hold_callees(
 }
 
 /// With 25 % chance, the caller CANCELs within 3 s of its first provisional,
-/// unless the call is confirmed by then (RFC 3261 §9.1).
-pub fn inject_cancel(rng: &mut Rng, call: &mut ActorCall, notes: &mut Vec<String>) {
+/// unless the call is confirmed by then (RFC 3261 §9.1). Returns whether the
+/// CANCEL was drawn: the call's accepted endings are then the CANCEL races.
+pub fn inject_cancel(rng: &mut Rng, call: &mut ActorCall, notes: &mut Vec<String>) -> bool {
     if !rng.chance(25) {
-        return;
+        return false;
     }
     let caller = scenario_harness::actor::originating_role(&call.actors);
-    let Some(actor) = call.actors.iter_mut().find(|a| a.role == caller) else { return };
+    let Some(actor) = call.actors.iter_mut().find(|a| a.role == caller) else { return false };
     let at = Duration::from_millis(rng.below(3000));
     let provisional = move |s: &StateInner| s.leg(caller).saw_status(100) || s.leg_rang(caller);
     let confirmed = move |s: &StateInner| s.leg_at_least(caller, LegPhase::Confirmed);
@@ -88,6 +89,7 @@ pub fn inject_cancel(rng: &mut Rng, call: &mut ActorCall, notes: &mut Vec<String
     .unless(Barrier::pred("fz_confirmed", confirmed));
     actor.goals.insert(1.min(actor.goals.len()), cancel);
     notes.push(format!("cancel+{}ms", at.as_millis()));
+    true
 }
 
 /// Every INVITE of `call` offers `100rel` (RFC 3262 §3), so a reliable

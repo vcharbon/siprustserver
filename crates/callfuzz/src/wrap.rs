@@ -1,11 +1,12 @@
 //! Any [`ActorScenario`], fuzzed.
 //!
 //! The wrapped scenario builds its call as it always does; the fuzzer then,
-//! where the caller's [`Policy`] states the accepted endings, holds plain
-//! answering callees ([`crate::hold_callees`]) and may inject a caller CANCEL
-//! ([`crate::inject_cancel`]), and always applies the common perturbation
-//! ([`crate::perturb`]). A shape whose policy states no endings keeps its own
-//! and is only jittered and loaded with payloads.
+//! where the caller's [`Policy`] states the endings a CANCEL may reach, holds
+//! plain answering callees ([`crate::hold_callees`]) and may inject a caller
+//! CANCEL ([`crate::inject_cancel`]), and always applies the common
+//! perturbation ([`crate::perturb`]). A call that drew a CANCEL accepts the
+//! policy's endings; any other keeps the scenario's own, since a held callee
+//! still answers.
 
 use std::sync::Arc;
 
@@ -20,10 +21,10 @@ use crate::{FuzzConfig, Rng};
 /// What the fuzzer may change on one wrapped scenario.
 #[derive(Debug, Clone, Copy)]
 pub struct Policy {
-    /// The endings every legal mutation of the scenario may reach: callees
-    /// may be held and a CANCEL injected, the accepted endings replaced by
-    /// these. `None`: the call keeps its goals and endings.
-    pub endings: Option<&'static [Branch]>,
+    /// The endings the scenario may reach once its caller CANCELs: callees
+    /// may be held and a CANCEL injected, a call that drew one accepting
+    /// these instead of its own. `None`: the call keeps its goals and endings.
+    pub cancel_endings: Option<&'static [Branch]>,
     /// The scenario's callee legs are offered 100rel, so a held callee may
     /// ring reliably.
     pub callee_reliable: bool,
@@ -40,20 +41,22 @@ pub struct FuzzWrap {
 }
 
 impl FuzzWrap {
-    /// Hold callees, maybe inject a CANCEL, and state the policy's endings.
+    /// Hold callees and maybe inject a CANCEL; a call that drew one accepts
+    /// `cancel_endings`.
     fn mutate(
         &self,
         rng: &mut Rng,
         call: &mut ActorCall,
-        endings: &'static [Branch],
+        cancel_endings: &'static [Branch],
         notes: &mut Vec<String>,
     ) {
         let roles = self.policy.callee_roles;
         if hold_callees(rng, call, roles, self.policy.callee_reliable, notes) {
             offer_100rel(call);
         }
-        inject_cancel(rng, call, notes);
-        call.expect = Expect::of(endings);
+        if inject_cancel(rng, call, notes) {
+            call.expect = Expect::of(cancel_endings);
+        }
     }
 }
 
@@ -69,11 +72,11 @@ impl ActorScenario for FuzzWrap {
         let mut rng = Rng::new(seed);
         let mut call = self.inner.build(env)?;
         let mut notes = vec![self.inner.id().to_string()];
-        if let Some(endings) = self.policy.endings {
+        if let Some(endings) = self.policy.cancel_endings {
             self.mutate(&mut rng, &mut call, endings, &mut notes);
         }
         perturb(&mut rng, &mut call, &self.config, &mut notes);
-        if self.config.train && self.policy.endings.is_some() {
+        if self.config.train && self.policy.cancel_endings.is_some() {
             let max = self.config.train_max;
             draw_trains(seed, &mut call, max, self.policy.callee_reliable, &mut notes);
         }

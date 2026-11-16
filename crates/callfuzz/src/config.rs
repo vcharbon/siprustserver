@@ -14,8 +14,6 @@ pub struct FuzzConfig {
     /// Bytes the fuzzer may add to one INVITE's headers, so the message stays
     /// inside the receiver's size bound with room for what a proxy adds.
     pub header_budget: usize,
-    /// The header budget is lifted: a message may pass the size bound.
-    pub oversize: bool,
     /// Bodies an RFC refuses may be drawn (a multipart boundary outside
     /// RFC 2046 §5.1.1's `bcharsnospace`).
     pub illegal: bool,
@@ -37,7 +35,6 @@ impl Default for FuzzConfig {
             payload_pct: 50,
             jitter_pct: 70,
             header_budget: 6000,
-            oversize: false,
             illegal: false,
             train: false,
             train_max: 30,

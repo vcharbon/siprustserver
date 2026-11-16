@@ -15,10 +15,12 @@
 //! - [`FuzzWrap`]: all of the above over any [`ActorScenario`], under a
 //!   [`Policy`] the caller supplies per shape.
 //!
-//! The accepted endings are the legal ones, never a prediction: the verdict
-//! is the RFC audit, the reap and the records. [`seal`] stamps the seed into
-//! each call's Call-ID and records the draw; [`join()`] joins a run's
-//! `call-outcome.v1` records back to their draws.
+//! A call accepts the endings its draw allows: one that drew a caller CANCEL
+//! accepts the CANCEL races ([`CANCEL_ENDINGS`]), any other keeps the
+//! scenario's own. The verdict is that ending (the record's
+//! `producer_verdict`), the RFC audit, the reap and the records. [`seal`]
+//! stamps the seed into each call's Call-ID and records the draw; [`join()`]
+//! joins a run's `call-outcome.v1` records back to their draws.
 //!
 //! [`ActorCall`]: scenario_harness::actor::ActorCall
 //! [`ActorScenario`]: scenario_harness::actor::ActorScenario
@@ -40,18 +42,15 @@ pub use held::{hold_callees, inject_cancel, offer_100rel};
 pub use join::{join, Joined};
 pub use perturb::perturb;
 pub use rng::{call_seed, Rng};
-pub use stamp::{drawn, seal, seed_of_call_id, Drawn};
+pub use stamp::{drawn, seal, seed_of_call_id, take_drawn, Drawn};
 pub use train::draw_trains;
 pub use wrap::{wrapped_id, wrapped_shapes, FuzzWrap, Policy};
 
-/// Every ending a fuzzed call with a held callee may legally reach.
-pub const ENDINGS: &[Branch] = &[
-    Branch::ANSWERED,
-    Branch::ABANDONED,
-    Branch::ANSWERED_DESPITE_CANCEL,
-    Branch::ANSWERED_BEFORE_CANCEL,
-    Branch::rejected(487),
-];
+/// Every ending a call whose caller CANCELs its answering callee may legally
+/// reach (RFC 3261 §9): the 487, the 2xx crossing the CANCEL, or the 2xx
+/// before it left.
+pub const CANCEL_ENDINGS: &[Branch] =
+    &[Branch::ABANDONED, Branch::ANSWERED_DESPITE_CANCEL, Branch::ANSWERED_BEFORE_CANCEL];
 
 #[cfg(test)]
 mod tests;

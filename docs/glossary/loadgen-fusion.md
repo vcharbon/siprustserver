@@ -106,8 +106,8 @@ Any load body run under a fuzz policy (`fz_<id>`): its call built as usual,
 then held callees, an injected CANCEL, provisional trains and the RFC-legal
 perturbation drawn from the call's seed (`callfuzz::call_seed`: the run seed
 hashed with the call's token, or the one seed replayed, stamped into the
-Call-ID as `fz-<16 hex>-…` so a call-outcome record names its draw). Its
-accepted endings are every legal ending the policy states, never a
-prediction of the system under test.
-_Avoid_: mutant (a fuzzed call stays legal unless illegal bodies or oversize
-messages are asked for).
+Call-ID as `fz-<16 hex>-…` so a call-outcome record names its draw). A call
+that drew a CANCEL accepts the CANCEL races the policy states; any other
+keeps the load body's own endings.
+_Avoid_: mutant (a fuzzed call stays legal unless illegal bodies are asked
+for).

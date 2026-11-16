@@ -22,7 +22,7 @@ fn header_bytes(name: &str, value: &str) -> usize {
 /// `config.jitter_pct` percent, some goal delays grow by a drawn span; with
 /// `config.payload_pct` percent, every INVITE gains up to four hostile headers
 /// (one per name, compact forms counted as their long name, inside
-/// `config.header_budget` unless `config.oversize`) and up to two parties
+/// `config.header_budget`) and up to two parties
 /// send an INFO with an odd body once both they and the caller are confirmed,
 /// before their BYE. A call's draws are a function of `rng` alone.
 pub fn perturb(rng: &mut Rng, call: &mut ActorCall, config: &FuzzConfig, notes: &mut Vec<String>) {
@@ -74,7 +74,7 @@ fn hostile_headers(
             continue;
         }
         let used: usize = plan.headers.iter().map(|(h, v)| header_bytes(h, v)).sum();
-        if !config.oversize && used + header_bytes(&name, &value) > config.header_budget {
+        if used + header_bytes(&name, &value) > config.header_budget {
             continue;
         }
         plan.headers.push((name, value));

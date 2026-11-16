@@ -75,6 +75,16 @@ mod tests {
         assert_eq!(call_seed(7, Some(0xabc), "c1"), 0xabc);
     }
 
+    /// The stream and the call seed are fixed values: a change to either
+    /// algorithm breaks every recorded seed's replay.
+    #[test]
+    fn the_stream_and_the_call_seed_are_pinned() {
+        assert_eq!(Rng::new(0).next_u64(), 0xe220_a839_7b1d_cdaf);
+        assert_eq!(Rng::new(0x5EED).next_u64(), 0x09f1_fd9d_03f0_a9b4);
+        assert_eq!(call_seed(1, None, "c1"), 0x08a6_0307_b54d_7e7c);
+        assert_eq!(call_seed(0x5EED, None, "call-17"), 0x1b9b_ddd6_1930_5547);
+    }
+
     #[test]
     fn below_stays_in_range() {
         let mut rng = Rng::new(3);

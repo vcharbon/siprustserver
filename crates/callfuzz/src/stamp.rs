@@ -3,7 +3,7 @@
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Mutex, OnceLock, PoisonError};
 
 use scenario_harness::actor::{ActorCall, GoalStep};
 
@@ -11,6 +11,9 @@ use scenario_harness::actor::{ActorCall, GoalStep};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Drawn {
     pub seed: u64,
+    /// The Call-ID the call's INVITE carries: the stamp, or the one the
+    /// scenario stated.
+    pub call_id: String,
     /// The draw in one line: the shape's choices, then the perturbations.
     pub desc: String,
 }
@@ -36,6 +39,12 @@ static SEQ: AtomicU64 = AtomicU64::new(0);
 pub fn drawn() -> &'static Mutex<BTreeMap<String, Drawn>> {
     static D: OnceLock<Mutex<BTreeMap<String, Drawn>>> = OnceLock::new();
     D.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
+/// The registry's draws, by call token, leaving it empty: a run takes its own
+/// draws, none of an earlier run's.
+pub fn take_drawn() -> BTreeMap<String, Drawn> {
+    std::mem::take(&mut *drawn().lock().unwrap_or_else(PoisonError::into_inner))
 }
 
 /// The seed a stamped Call-ID names (`fz-<16 hex>-…`), wherever it sits in
@@ -69,9 +78,8 @@ pub fn seal(call: &mut ActorCall, seed: u64, token: &str, desc: String, log: boo
         let id = used.split('@').next().unwrap_or(&used);
         eprintln!("FUZZ-DRAW {id} seed={seed:#018x} {desc}");
     }
-    if let Ok(mut d) = drawn().lock() {
-        d.insert(token.to_string(), Drawn { seed, desc });
-    }
+    let draw = Drawn { seed, call_id: used, desc };
+    drawn().lock().unwrap_or_else(PoisonError::into_inner).insert(token.to_string(), draw);
 }
 
 #[cfg(test)]
