@@ -44,7 +44,10 @@ pub(super) async fn fire(st: &mut ActorState<'_>) -> Result<(), StepError> {
             .or(st.pending_answer.as_deref_mut().map(|ta| &mut ta.uas))
             .or(st.held.as_deref_mut());
         let Some(txn) = txn else { break };
-        let mut r = txn.respond(ring.status.unwrap_or(180), "Ringing").with_to_tag(&ring.to_tag);
+        let mut r = txn.respond(ring.status.unwrap_or(180), "Ringing");
+        if !ring.to_tag.is_empty() {
+            r = r.with_to_tag(&ring.to_tag);
+        }
         if ring.sdp {
             r = r.with_sdp(sdp);
         }
