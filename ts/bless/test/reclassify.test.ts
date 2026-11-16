@@ -238,15 +238,15 @@ describe("the reclassifier", () => {
         step: "s9",
         signature: "body:sdp:session:o=:request:ACK:in-dialog",
         class: "unlisted" as const,
-        rule: "sdp-origin-not-continued"
+        rule: "origin-not-continued"
       }
       const got = await reclassify(outcome({ dir: cellDir([bodyRow, named]), passed: true, verdict: ok }))
       expect(got.passed).toBe(false)
-      expect(got.reason).toContain("first sdp-origin-not-continued: body:sdp:session:o=:request:ACK:in-dialog")
+      expect(got.reason).toContain("first origin-not-continued: body:sdp:session:o=:request:ACK:in-dialog")
     })
 
     it("an accepted session-description row decides nothing", async () => {
-      const accepted = { ...bodyRow, signature: "body:sdp:session:o=:initial-invite", class: "accepted" as const, rule: "sdp-origin-stack-owned" }
+      const accepted = { ...bodyRow, signature: "body:sdp:session:o=:initial-invite", class: "accepted" as const, rule: "origin-restated" }
       const got = await reclassify(outcome({ dir: cellDir([accepted]), passed: true, verdict: ok }))
       expect(got.passed).toBe(true)
     })
@@ -461,12 +461,12 @@ describe("the reclassifier", () => {
       scope: "response:100:INVITE",
       captured: ["100"],
       replayed: ["487 after 2 ms"],
-      rule: "trying-omitted-before-final"
+      rule: "trying-not-sent"
     })
     const verdict = { case: "cap-case1", lane: "lab", status: "failed" as const, failures: [omitted, unmatched] }
     const got = await reclassify(outcome({ dir: cellDir([record({}), omission]), verdict }))
     expect(got.passed).toBe(true)
-    expect(got.reason).toContain("trying-omitted-before-final")
+    expect(got.reason).toContain("trying-not-sent")
 
     const elsewhere = await reclassify(outcome({ dir: cellDir([record({}), { ...omission, step: "s9" }]), verdict }))
     expect(elsewhere.passed, "an omission at another step answers nothing").toBe(false)
@@ -568,7 +568,7 @@ describe("the reclassifier", () => {
         signature: "shape:extra-message:ACK",
         scope: "",
         captured: ["extra-message:ACK"],
-        rule: "ack-completes-unscripted-final"
+        rule: "ack-of-unscripted-final"
       })
     ])
     const got = await reclassify(
@@ -578,7 +578,7 @@ describe("the reclassifier", () => {
       })
     )
     expect(got.passed).toBe(true)
-    expect(got.reason).toContain("ack-completes-unscripted-final")
+    expect(got.reason).toContain("ack-of-unscripted-final")
   })
 
   it("a stray past the flow that no record names leaves the failure standing", async () => {
@@ -687,7 +687,7 @@ describe("the bless audit on a passing cell", () => {
   })
 
   it("lets the held-final cadence through: it is derived from the recording, not a failure", async () => {
-    const got = await audited([record({ signature: "shape:retransmission:INVITE:2xx", rule: "held-final-retransmission-cadence" })])
+    const got = await audited([record({ signature: "shape:retransmission:INVITE:2xx", rule: "final-resend-count" })])
     expect(got.findings).toEqual([])
   })
 
