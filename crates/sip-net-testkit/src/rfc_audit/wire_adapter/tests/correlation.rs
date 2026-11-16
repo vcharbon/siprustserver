@@ -186,3 +186,22 @@ fn a_non_2xx_under_a_dropped_fork_tag_is_not_charged_to_its_unrecorded_sender() 
     assert_eq!(flipped.len(), 1, "{flipped:?}");
     assert_eq!((flipped[0].lane.as_str(), flipped[0].charged.as_deref()), (ALICE, Some(SUT)));
 }
+
+/// A dropped provisional excuses only the final carrying its tag: a 180
+/// under `bt2` lost on arrival, then a 487 under `bt9`, no provisional ever
+/// showed: still charged to its unrecorded sender.
+#[test]
+fn a_non_2xx_under_a_tag_no_dropped_provisional_carried_is_charged() {
+    use crate::types::RecvDisposition::{Delivered, LossModel};
+    let evs = vec![
+        arrival(ALICE, resp(180, 1, "INVITE", "bt", "z9hG4bK-i"), SUT, 0, Delivered, None),
+        arrival(ALICE, resp(180, 1, "INVITE", "bt2", "z9hG4bK-i"), SUT, 1, LossModel, None),
+        arrival(ALICE, resp(487, 1, "INVITE", "bt9", "z9hG4bK-i"), SUT, 2, Delivered, None),
+    ];
+    let flipped: Vec<_> = evaluate_rfc_findings(&evs)
+        .into_iter()
+        .filter(|f| f.rule == live_arm(RuleId::TagConsistency, false).name())
+        .collect();
+    assert_eq!(flipped.len(), 1, "{flipped:?}");
+    assert_eq!((flipped[0].lane.as_str(), flipped[0].charged.as_deref()), (ALICE, Some(SUT)));
+}
