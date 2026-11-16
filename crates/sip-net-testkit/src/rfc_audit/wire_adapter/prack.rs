@@ -21,7 +21,8 @@ pub(super) const LIVE: &[Live] = &[
         .roles(&[UaRole::Proxy])
         .advisory()
         .skip(Skip::RelayLanes),
-    Live::emitter(RuleId::Prack2xxOr481, prack_2xx_or_481).skip(Skip::RelayLanes),
+    Live::emitter_unless(RuleId::Prack2xxOr481, prack_held_behind_by_loss, prack_2xx_or_481)
+        .skip(Skip::RelayLanes),
     Live::emitter(
         RuleId::Delay2xxOnUnackedReliable1xxWithSdp,
         delay_2xx_on_unacked_reliable_1xx_with_sdp,
@@ -172,6 +173,40 @@ fn unmatched_prack_proxied(f: &rfc_rules::Finding, cid: &str) -> String {
          {known}) AND no outgoing PRACK observed (proxy must forward unmatched PRACKs, \
          not absorb) — RFC 3262 §3 / RFC3262-MUST-006",
     )
+}
+
+/// A 500 to a PRACK whose copy the loss model dropped on its way from the
+/// taker `lane` to the emitter, the lane having sent a request of a higher
+/// CSeq on its dialog before the 500 arrived (`msgs`, the lane's view): the
+/// emitter took a later copy behind that request and owed it the 500 of a
+/// request out of order (RFC 3261 §12.2.2).
+fn prack_held_behind_by_loss(
+    dropped: &Dropped,
+    lane: &LaneKey,
+    f: &rfc_rules::Finding,
+    cid: &str,
+    msgs: &[Msg],
+) -> bool {
+    let Decision::Violated(rfc_rules::Evidence::PrackAnsweredWrongly {
+        status: 500,
+        answered_prack_msg,
+        prack_answer_ts_us,
+        ..
+    }) = &f.decision
+    else {
+        return false;
+    };
+    let prack = &msgs[*answered_prack_msg];
+    let numbered = |m: &Msg| matches!(&m.kind, rfc_rules::Kind::Request { method } if method != "ACK" && method != "CANCEL");
+    let overtaken = msgs.iter().any(|m| {
+        numbered(m)
+            && (&m.src, &m.dst) == (&prack.src, &prack.dst)
+            && m.call_id == prack.call_id
+            && m.to_tag == prack.to_tag
+            && m.cseq > prack.cseq
+            && m.at_us < *prack_answer_ts_us
+    });
+    overtaken && dropped.request_from((lane, &f.emitter, cid), "PRACK", f.cseq)
 }
 
 fn prack_2xx_or_481(f: &rfc_rules::Finding, cid: &str) -> String {

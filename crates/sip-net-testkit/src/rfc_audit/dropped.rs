@@ -76,6 +76,23 @@ impl Dropped {
         })
     }
 
+    /// Whether the loss model dropped, on its way from `lane` to `party` on
+    /// the call `call_id`, a copy of the request `method` `cseq`: the party
+    /// took a later copy, if any.
+    pub(crate) fn request_from(
+        &self,
+        (lane, party, call_id): (&str, &str, &str),
+        method: &str,
+        cseq: u32,
+    ) -> bool {
+        self.0.iter().any(|l| {
+            !l.toward_lane
+                && l.between(lane, party, call_id)
+                && l.method.as_deref() == Some(method)
+                && l.cseq == cseq
+        })
+    }
+
     /// Whether the loss model dropped, on its way from `party` to `lane` on
     /// the call `call_id`, a provisional above 100 carrying the To tag
     /// `to_tag`.

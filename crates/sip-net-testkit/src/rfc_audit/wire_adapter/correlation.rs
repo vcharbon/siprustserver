@@ -176,7 +176,13 @@ fn tag_flip_non_2xx(f: &rfc_rules::Finding) -> bool {
 /// A flip at the taker `lane` whose final carries the To tag of a
 /// provisional the loss model dropped on its way there from the emitter: the
 /// emitter showed that tag first (§17.2.1 holds).
-fn final_tag_lost(dropped: &Dropped, lane: &LaneKey, f: &rfc_rules::Finding, cid: &str) -> bool {
+fn final_tag_lost(
+    dropped: &Dropped,
+    lane: &LaneKey,
+    f: &rfc_rules::Finding,
+    cid: &str,
+    _: &[Msg],
+) -> bool {
     let Decision::Violated(rfc_rules::Evidence::UasTagFlipped { final_tag, .. }) = &f.decision
     else {
         return false;

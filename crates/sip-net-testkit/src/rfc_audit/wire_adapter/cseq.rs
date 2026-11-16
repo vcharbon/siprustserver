@@ -16,6 +16,7 @@ fn gap_over_a_lost_request(
     lane: &LaneKey,
     f: &rfc_rules::Finding,
     cid: &str,
+    _: &[Msg],
 ) -> bool {
     let Decision::Violated(rfc_rules::Evidence::CseqNotContiguous { cseq, prior_cseq, .. }) =
         &f.decision
