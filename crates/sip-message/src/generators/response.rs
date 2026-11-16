@@ -188,8 +188,23 @@ pub fn generate_response(
         draft = draft.push_raw(HeaderName::Allow, SipStr::owned(super::B2BUA_ALLOW));
     }
 
+    if status == 469 {
+        draft = state_recv_info(draft, &opts.extra_headers);
+    }
+
     draft = emit::extra_headers(draft, &opts.extra_headers);
     emit::response(emit::framed(draft, opts.body.clone(), opts.content_type.clone()))
+}
+
+/// A 469 states the receiver's `Recv-Info` set (RFC 6086 §4.2.2, §7.1), and the
+/// stack receives no Info Package on its own behalf: an empty one. A caller
+/// stating its own Recv-Info in `extra_headers` owns it.
+fn state_recv_info(draft: ResponseDraft, extra_headers: &[SipHeader]) -> ResponseDraft {
+    let recv_info = HeaderName::from(crate::info_package::RECV_INFO);
+    if emit::carries(extra_headers, &recv_info) {
+        return draft;
+    }
+    draft.push_raw(recv_info, SipStr::EMPTY)
 }
 
 #[cfg(test)]
@@ -237,6 +252,25 @@ Content-Length: 0\r\n\r\n";
         let allow: Vec<_> = resp.raw_text(HeaderName::Allow).collect();
         assert_eq!(allow.len(), 1);
         assert_eq!(allow[0].as_str(), "INVITE, ACK, BYE");
+    }
+
+    /// RFC 6086 §4.2.2 — a minted 469 states the stack's Recv-Info set: one
+    /// line, empty, since the stack receives no Info Package on its own behalf.
+    #[test]
+    fn a_469_states_an_empty_recv_info() {
+        let resp =
+            generate_response(&notify(), 469, "Bad Info Package", &Default::default()).unwrap();
+        let recv_info: Vec<_> = resp.raw(HeaderName::from("Recv-Info")).collect();
+        assert_eq!(recv_info, [""]);
+        let rendered = String::from_utf8_lossy(resp.image()).to_string();
+        assert!(rendered.contains("\r\nRecv-Info:"), "{rendered}");
+    }
+
+    /// The Recv-Info stamp is the 469's alone.
+    #[test]
+    fn a_403_gains_no_recv_info() {
+        let resp = generate_response(&notify(), 403, "Forbidden", &Default::default()).unwrap();
+        assert_eq!(resp.raw(HeaderName::from("Recv-Info")).count(), 0);
     }
 
     /// The stamp is the 405's alone — other statuses state Allow only where
