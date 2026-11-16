@@ -1,0 +1,233 @@
+//! The fuzzer over the shipped basic call, alice calling bob directly: a seed
+//! fixes the whole draw, the header budget bounds every INVITE, only legal
+//! messages are drawn unless asked, and a fuzzed call runs to a legal ending
+//! the RFC audit finds nothing in.
+
+use std::sync::Arc;
+
+use callshapes::shapes::{basic_call, default_binder};
+use scenario_harness::actor::{
+    run_built_actor_call, ActorCall, ActorScenario, Disposition, GoalStep, ScenarioVerdict,
+};
+use scenario_harness::realcall::{CallCtx, CallEnv};
+use scenario_harness::{Agent, Harness};
+
+use crate::payload::ILLEGAL_BODY;
+use crate::*;
+
+fn env<'a>(alice: &'a Agent, bob: &'a Agent, token: &str) -> CallEnv<'a> {
+    CallEnv::for_functional(alice, bob, None, bob.addr(), "X-Test", token)
+}
+
+fn basic(env: &CallEnv<'_>) -> ActorCall {
+    basic_call(default_binder()).build(env).expect("the basic call builds")
+}
+
+fn payloads_always() -> FuzzConfig {
+    FuzzConfig { payload_pct: 100, jitter_pct: 100, ..FuzzConfig::default() }
+}
+
+/// The headers of the call's INVITE.
+fn invite_headers(call: &ActorCall) -> Vec<(String, String)> {
+    call.actors
+        .iter()
+        .flat_map(|a| a.goals.iter())
+        .find_map(|g| match &g.step {
+            GoalStep::Invite { plan: Some(plan), .. } => Some(plan.headers.clone()),
+            _ => None,
+        })
+        .expect("the call has an INVITE")
+}
+
+/// Every goal of the call, its delay and step, in order.
+fn goals(call: &ActorCall) -> Vec<String> {
+    call.actors
+        .iter()
+        .flat_map(|a| a.goals.iter().map(move |g| format!("{} {:?} {:?}", a.role, g.delay, g.step)))
+        .collect()
+}
+
+/// The content types of the INFOs the call sends.
+fn info_types(call: &ActorCall) -> Vec<String> {
+    call.actors
+        .iter()
+        .flat_map(|a| a.goals.iter())
+        .filter_map(|g| match &g.step {
+            GoalStep::InDialog { content_type, .. } => content_type.clone(),
+            _ => None,
+        })
+        .collect()
+}
+
+async fn agents(name: &str) -> (Harness, Agent, Agent) {
+    let h = Harness::new(name);
+    let alice = h.agent("alice", "127.0.0.1:5060").await;
+    let bob = h.agent("bob", "127.0.0.1:5070").await;
+    (h, alice, bob)
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_seed_fixes_the_whole_perturbation() {
+    let (h, alice, bob) = agents("callfuzz-determinism").await;
+    let env = env(&alice, &bob, "t");
+    let config = payloads_always();
+    let fuzzed = |seed| {
+        let mut call = basic(&env);
+        let mut notes = Vec::new();
+        perturb(&mut Rng::new(seed), &mut call, &config, &mut notes);
+        (notes, invite_headers(&call), goals(&call))
+    };
+    for seed in 0..64 {
+        assert_eq!(fuzzed(seed), fuzzed(seed), "seed {seed}");
+    }
+    let distinct: std::collections::BTreeSet<_> = (0..64).map(|s| fuzzed(s).0).collect();
+    assert!(distinct.len() > 32, "seeds draw different calls: {distinct:?}");
+    h.finish().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_header_budget_bounds_every_invite_unless_lifted() {
+    let (h, alice, bob) = agents("callfuzz-budget").await;
+    let env = env(&alice, &bob, "t");
+    let budget = 700;
+    let bytes = |oversize| {
+        (0..400)
+            .map(|seed| {
+                let mut call = basic(&env);
+                let config = FuzzConfig { header_budget: budget, oversize, ..payloads_always() };
+                perturb(&mut Rng::new(seed), &mut call, &config, &mut Vec::new());
+                invite_headers(&call).iter().map(|(n, v)| n.len() + v.len() + 4).sum::<usize>()
+            })
+            .collect::<Vec<_>>()
+    };
+    let bounded = bytes(false);
+    assert!(bounded.iter().all(|&b| b <= budget), "{bounded:?}");
+    assert!(bounded.iter().any(|&b| b > budget / 2), "the budget is used: {bounded:?}");
+    assert!(bytes(true).iter().any(|&b| b > budget), "oversize lifts the budget");
+    h.finish().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn only_legal_bodies_are_drawn_unless_asked() {
+    let (h, alice, bob) = agents("callfuzz-legal").await;
+    let env = env(&alice, &bob, "t");
+    let types = |illegal| {
+        (0..600)
+            .flat_map(|seed| {
+                let mut call = basic(&env);
+                let config = FuzzConfig { illegal, ..payloads_always() };
+                perturb(&mut Rng::new(seed), &mut call, &config, &mut Vec::new());
+                info_types(&call)
+            })
+            .collect::<Vec<_>>()
+    };
+    let illegal_boundary = |t: &String| t.contains("boundary=\"b😀\"");
+    let legal = types(false);
+    assert!(!legal.is_empty(), "INFOs are drawn");
+    assert!(!legal.iter().any(illegal_boundary), "{ILLEGAL_BODY} drawn unasked");
+    assert!(types(true).iter().any(illegal_boundary), "{ILLEGAL_BODY} drawn when asked");
+    h.finish().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_held_callee_rings_reliably_only_where_100rel_is_offered() {
+    let (h, alice, bob) = agents("callfuzz-held").await;
+    let env = env(&alice, &bob, "t");
+    let mut held = 0;
+    for (seed, reliable_ok) in (0..200).map(|s| (s, s % 2 == 0)) {
+        let mut call = basic(&env);
+        let mut rng = Rng::new(seed);
+        let reliable = hold_callees(&mut rng, &mut call, &["bob"], reliable_ok, &mut Vec::new());
+        let bob = call.actors.iter().find(|a| a.role == "bob").expect("bob");
+        if !matches!(bob.disposition, Disposition::Held) {
+            assert!(!reliable);
+            continue;
+        }
+        held += 1;
+        let steps: Vec<&GoalStep> = bob.goals.iter().map(|g| &g.step).collect();
+        let [GoalStep::Ring { reliable: rings_reliably, .. }, GoalStep::Answer { .. }] = steps[..]
+        else {
+            panic!("a held callee rings then answers: {steps:?}");
+        };
+        assert_eq!(*rings_reliably, reliable);
+        assert!(reliable_ok || !reliable, "seed {seed}: reliable without 100rel");
+    }
+    assert!(held > 60, "callees are held: {held}");
+    h.finish().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_train_replaces_the_ring_and_a_reliable_one_offers_100rel() {
+    let (h, alice, bob) = agents("callfuzz-train").await;
+    let env = env(&alice, &bob, "t");
+    let mut reliable_trains = 0;
+    for seed in 0..200 {
+        let mut call = basic(&env);
+        hold_callees(&mut Rng::new(seed), &mut call, &["bob"], false, &mut Vec::new());
+        if call.actors.iter().all(|a| !matches!(a.disposition, Disposition::Held)) {
+            continue;
+        }
+        draw_trains(seed, &mut call, 30, true, &mut Vec::new());
+        let bob = call.actors.iter().find(|a| a.role == "bob").expect("bob");
+        assert!(!bob.goals.iter().any(|g| matches!(g.step, GoalStep::Ring { .. })));
+        let reliable =
+            bob.goals.iter().any(|g| matches!(g.step, GoalStep::Provisional(p) if p.reliable));
+        let offered = invite_headers(&call)
+            .iter()
+            .any(|(n, v)| n.eq_ignore_ascii_case("Supported") && v.contains("100rel"));
+        assert_eq!(offered, reliable, "seed {seed}");
+        reliable_trains += usize::from(reliable);
+    }
+    assert!(reliable_trains > 0);
+    h.finish().await;
+}
+
+fn wrap(config: FuzzConfig) -> FuzzWrap {
+    FuzzWrap {
+        id: "fz_basic_call",
+        inner: Arc::new(basic_call(default_binder())),
+        policy: Policy { endings: Some(ENDINGS), callee_reliable: true, callee_roles: &["bob"] },
+        config,
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_wrapped_call_is_stamped_with_its_seed_and_recorded() {
+    let (h, alice, bob) = agents("callfuzz-stamp").await;
+    let config = FuzzConfig { run_seed: 77, ..FuzzConfig::default() };
+    let call = wrap(config).build(&env(&alice, &bob, "tok-1")).expect("built");
+    let call_id = call
+        .actors
+        .iter()
+        .flat_map(|a| a.goals.iter())
+        .find_map(|g| match &g.step {
+            GoalStep::Invite { plan: Some(plan), .. } => plan.call_id.clone(),
+            _ => None,
+        })
+        .expect("the INVITE states a Call-ID");
+    let seed = config.seed_of("tok-1");
+    assert_eq!(seed_of_call_id(&call_id), Some(seed));
+    let drawn = drawn().lock().expect("registry").get("tok-1").cloned().expect("recorded");
+    assert_eq!(drawn.seed, seed);
+    assert!(drawn.desc.starts_with("Wrap | basic_call"), "{}", drawn.desc);
+    h.finish().await;
+}
+
+/// Fuzzed basic calls, payloads and trains on, run alice to bob: each ends on
+/// an accepted ending and the RFC audit charges nothing.
+#[tokio::test(start_paused = true)]
+async fn fuzzed_calls_run_to_a_legal_ending() {
+    let config = FuzzConfig { train: true, ..payloads_always() };
+    for seed in 0..24u64 {
+        let name = format!("callfuzz-run-{seed}");
+        let (h, alice, bob) = agents(&name).await;
+        let env = env(&alice, &bob, &name);
+        let call =
+            wrap(FuzzConfig { run_seed: seed, ..config }).build(&env).expect("the call builds");
+        let verdict = run_built_actor_call(call, &env, &CallCtx::new()).await;
+        let (_report, findings) = h.finish_collecting().await;
+        assert!(matches!(verdict, ScenarioVerdict::Success { .. }), "seed {seed}: {verdict:?}");
+        let gating: Vec<_> = findings.iter().filter(|f| !f.advisory).collect();
+        assert!(gating.is_empty(), "seed {seed}: {gating:?}");
+    }
+}

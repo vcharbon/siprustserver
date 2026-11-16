@@ -57,6 +57,7 @@ members = [
     "crates/call-limiter-runner",
     "crates/cdr-consumer-runner",
     "crates/callshapes",
+    "crates/callfuzz",
     "crates/e2e-model",
     "crates/e2e-core",
     "crates/loadgen",

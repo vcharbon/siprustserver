@@ -100,3 +100,14 @@ this is a **per-sample oracle, not a per-call gate**, exactly like the RFC
 audit; raise coverage via `--sample-cap` / `--background-record-every 1`.
 _Avoid_: reading `check_fail` counts as full-population totals; using checks as
 a per-call SLA gate (population gating stays with result classes + metrics).
+
+**Fuzz wrapper** (`callfuzz::FuzzWrap`):
+Any load body run under a fuzz policy (`fz_<id>`): its call built as usual,
+then held callees, an injected CANCEL, provisional trains and the RFC-legal
+perturbation drawn from the call's seed (`callfuzz::call_seed`: the run seed
+hashed with the call's token, or the one seed replayed, stamped into the
+Call-ID as `fz-<16 hex>-…` so a call-outcome record names its draw). Its
+accepted endings are every legal ending the policy states, never a
+prediction of the system under test.
+_Avoid_: mutant (a fuzzed call stays legal unless illegal bodies or oversize
+messages are asked for).

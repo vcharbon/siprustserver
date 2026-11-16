@@ -222,6 +222,7 @@ Full definitions: [docs/glossary/loadgen-fusion.md](docs/glossary/loadgen-fusion
 - **Accepted ending**: one named way a scenario's call may end and still be a success; nothing else is accepted by default.
 - **Failed step**: where a call failed, keyed `<who>[:<kind>#<index>]@<barrier>` (`scenario_harness::actor::FailedAt`).
 - **check_fail** (result class): the class a sampled call takes when an attached check fails; a per-sample oracle, not a gate.
+- **Fuzz wrapper** (`callfuzz::FuzzWrap`): a load body fuzzed legally from each call's seed (`fz_<id>`).
 
 ## HA tooling vocabulary
 

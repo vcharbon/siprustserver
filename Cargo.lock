@@ -834,6 +834,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "callfuzz"
+version = "0.1.0"
+dependencies = [
+ "callshapes",
+ "e2e-model",
+ "scenario-harness",
+ "serde_json",
+ "sip-message",
+ "tokio",
+]
+
+[[package]]
 name = "callshapes"
 version = "0.1.0"
 dependencies = [
