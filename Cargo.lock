@@ -2693,6 +2693,7 @@ dependencies = [
  "async-trait",
  "b2bua-harness",
  "b2bua-sdk",
+ "callshapes",
  "clap",
  "e2e-model",
  "flamegraph-util",
