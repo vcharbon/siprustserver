@@ -11,6 +11,7 @@ mod advance_settles;
 mod alice_calls_bob;
 mod any_method_prack_update;
 mod callee_group;
+mod client_txn_match;
 mod deviations;
 mod dialog_table;
 mod early_dialogs;
