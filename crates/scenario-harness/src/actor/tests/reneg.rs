@@ -483,3 +483,70 @@ async fn a_barrier_reads_what_an_in_dialog_request_said() {
 
     h.finish().await;
 }
+
+/// A refused re-INVITE that is not retried finishes its renegotiation with
+/// the session unchanged (RFC 3261 §14.1): alice and bob glare into a 491
+/// both ways with the automatic retry off, and each one's renegotiation
+/// counts as done, so the BYE gated on both follows at once.
+#[tokio::test(start_paused = true)]
+async fn a_refused_reinvite_not_retried_finishes_its_renegotiation() {
+    let h = Harness::new("actor-reinvite-refused-not-retried").describe(
+        "alice+bob re-INVITE at once → 491 both ways, no retry → both \
+         renegotiations finished → BYE",
+    );
+    let alice = h.agent("alice", "127.0.0.1:5060").await;
+    let bob = h.agent("bob", "127.0.0.1:5070").await;
+
+    let both_confirmed = Barrier::AllConfirmed(&["alice", "bob"]);
+    let both_reneged = Barrier::pred("glare_resolved", |s| {
+        s.leg("alice").reneg_count() >= 1 && s.leg("bob").reneg_count() >= 1
+    });
+    let actor = |role, agent: &crate::Agent, disposition, media, goals, targets| ActorSpec {
+        role,
+        agent: agent.clone(),
+        disposition,
+        media,
+        goals,
+        invite_targets: targets,
+        via: None,
+        feed: CtxFeed::default(),
+        cseq: None,
+        delayed: vec![],
+        claim: None,
+    };
+    let call = CallPlan {
+        actors: vec![
+            actor(
+                "alice",
+                &alice,
+                Disposition::Caller,
+                MediaState::offer(OFFER_SDP),
+                vec![
+                    Goal::new(Barrier::None, GoalStep::Invite { callee: "bob", plan: None }),
+                    Goal::new(both_confirmed.clone(), GoalStep::Reinvite),
+                    Goal::new(both_reneged, GoalStep::Bye),
+                ],
+                vec![("bob", bob.clone())],
+            ),
+            actor(
+                "bob",
+                &bob,
+                Disposition::RingThenAnswer { ring: Duration::from_millis(100) },
+                MediaState::answer(ANSWER_SDP),
+                vec![Goal::new(both_confirmed, GoalStep::Reinvite)],
+                vec![],
+            ),
+        ],
+        plan: vec![],
+        settle: SettleBarrier::default_ceiling(),
+        automatics: Automatics { suppress_491_retry: true, ..Automatics::default() },
+        delta_policy: None,
+        reception_observer: None,
+    };
+
+    let started = tokio::time::Instant::now();
+    let verdict = run_call(call, Duration::from_secs(10)).await;
+    assert!(verdict.is_ok(), "both refused renegotiations finish, got {verdict:?}");
+    assert!(started.elapsed() < Duration::from_secs(2), "no wait for a reneg that never comes");
+    h.finish().await;
+}
