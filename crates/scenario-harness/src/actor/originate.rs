@@ -357,9 +357,10 @@ pub(super) async fn ping_options_once(st: &mut ActorState<'_>) -> Result<(), Ste
 /// s, a non-owner one in [0, 2] s, fixed in range so the paused-clock test is
 /// deterministic. A replay plan suppresses the retry: the script carries the
 /// captured one ([`Automatics::suppress_491_retry`](super::Automatics)).
-pub(super) fn schedule_reinvite_retry(st: &mut ActorState<'_>, resp: &SipResponse) {
+/// Returns whether a retry was scheduled.
+pub(super) fn schedule_reinvite_retry(st: &mut ActorState<'_>, resp: &SipResponse) -> bool {
     if st.automatics.suppress_491_retry {
-        return;
+        return false;
     }
     let asked_later = (resp.status() == 500)
         .then(|| retry_after_seconds(resp.raw(HeaderName::RetryAfter).map(SipStr::owned)))
@@ -368,7 +369,8 @@ pub(super) fn schedule_reinvite_retry(st: &mut ActorState<'_>, resp: &SipRespons
         (Some(secs), _) => Duration::from_secs(secs.into()),
         (None, 491) if st.originates => Duration::from_millis(2500),
         (None, 491) => Duration::from_millis(1000),
-        _ => return,
+        _ => return false,
     };
     st.reinvite_retry = Some(st.dwell(Dwell::Retry, delay));
+    true
 }

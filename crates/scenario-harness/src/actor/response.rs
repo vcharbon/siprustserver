@@ -14,6 +14,7 @@ use sip_message::SipResponse;
 
 use super::endpoint::{SUBFLOW_EARLY, SUBFLOW_REFER, SUBFLOW_RENEG};
 use super::ledger::{ObligationKey, ObligationKind};
+use super::reneg_done::{complete_originated_reinvite, refused_reneg};
 use super::runner::{ActorState, HeldAck};
 use super::state::{Observation, SubflowState};
 use super::{Dwell, GoalStep};
@@ -230,8 +231,10 @@ pub(super) async fn react_response(
                 },
                 now,
             );
-            if !super::refused_dialog::end_refused_dialog(st, &resp, now) {
-                super::originate::schedule_reinvite_retry(st, &resp);
+            let retried = !super::refused_dialog::end_refused_dialog(st, &resp, now)
+                && super::originate::schedule_reinvite_retry(st, &resp);
+            if !retried {
+                refused_reneg(st, &resp, now);
             }
             return Ok(());
         }
@@ -325,7 +328,9 @@ pub(super) async fn react_response(
             },
             now,
         );
-        if !st.automatics.suppress_491_retry {
+        if st.automatics.suppress_491_retry {
+            refused_reneg(st, &resp, now);
+        } else {
             let dwell = if st.originates {
                 Duration::from_millis(2500)
             } else {
@@ -357,6 +362,10 @@ pub(super) async fn react_response(
         st.obs.record(Observation::ResponseObserved { key }, now);
         if kind != ObligationKind::ForkBye {
             super::refused_dialog::end_refused_dialog(st, &resp, now);
+        }
+        if kind == ObligationKind::Update && resp.status() >= 300 {
+            st.sent_updates.remove(&resp.cseq().seq());
+            refused_reneg(st, &resp, now);
         }
         if (200..300).contains(&resp.status()) {
             match kind {
@@ -422,31 +431,6 @@ pub(super) async fn react_response(
         }
     }
     Ok(())
-}
-
-/// Close the bookkeeping of an originated re-INVITE once its 2xx is ACKed —
-/// the `ReInvite` obligation, the `reneg` sub-flow, the completed-cycle count
-/// (an N-cycle script's per-cycle barrier, C6) and the declared feed. ONCE per
-/// CSeq (the `sent_reinvites` guard), so a re-emitted 2xx cannot double-count.
-pub(super) fn complete_originated_reinvite(st: &mut ActorState<'_>, cseq: u32, now: Instant) {
-    if st.sent_reinvites.remove(&cseq) {
-        st.sent_reinvite_txns.remove(&cseq);
-        st.reinvite_ordinals.remove(&cseq);
-        let key = ObligationKey::new(st.role, ObligationKind::ReInvite, cseq);
-        st.obs.record(Observation::ResponseObserved { key }, now);
-        st.obs.record(
-            Observation::Subflow { leg: st.role, name: SUBFLOW_RENEG, to: SubflowState::Confirmed },
-            now,
-        );
-        let dialog = st
-            .dialogs
-            .confirmed
-            .as_ref()
-            .map(|d| (d.local_tag().to_string(), d.remote_tag().to_string()))
-            .unwrap_or_default();
-        st.obs.record(Observation::RenegCompleted { leg: st.role, dialog, cseq }, now);
-        st.feed.on_reinvite_ok.stamp(st.ctx);
-    }
 }
 
 /// The answer the ACK to an in-dialog INVITE 2xx owes (RFC 3261 §13.2.2.4):

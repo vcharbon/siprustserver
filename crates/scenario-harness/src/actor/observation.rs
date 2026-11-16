@@ -62,7 +62,7 @@ pub enum Observation {
     Subflow { leg: &'static str, name: &'static str, to: SubflowState },
     /// A renegotiation this leg ORIGINATED on `dialog` (its local and remote
     /// tags) completed — a re-INVITE's 2xx received and ACKed, an UPDATE's
-    /// 2xx received. Folds into the leg's grow-only completed-reneg set (keyed
+    /// 2xx received, or either refused with no retry to follow. Folds into the leg's grow-only completed-reneg set (keyed
     /// by dialog and CSeq, so a re-emitted 2xx cannot double-count), whose
     /// cardinality serializes an N-cycle re-INVITE script.
     RenegCompleted { leg: &'static str, dialog: (String, String), cseq: u32 },

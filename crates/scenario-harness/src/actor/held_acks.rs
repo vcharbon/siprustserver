@@ -4,7 +4,7 @@
 
 use tokio::time::Instant;
 
-use super::response::complete_originated_reinvite;
+use super::reneg_done::complete_originated_reinvite;
 use super::runner::{ActorState, HeldAck};
 use crate::agent::StepError;
 
