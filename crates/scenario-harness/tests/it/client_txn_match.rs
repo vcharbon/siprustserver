@@ -80,7 +80,7 @@ async fn a_fresh_response_of_another_transaction_waits_for_its_own_expect() {
 /// The INVITE's 200 and then its retransmission land while an OPTIONS awaits
 /// its final: the OPTIONS expect sets the 200 aside and drops the copy. A
 /// second OPTIONS expect sets the 200 aside again, and the INVITE's expect
-/// reads it.
+/// reads it. The callee's BYE is the next message the caller receives.
 #[tokio::test(start_paused = true)]
 async fn a_set_aside_2xx_outlives_its_retransmission() {
     let h = Harness::new("client-txn-match-set-aside-2xx");
@@ -102,10 +102,10 @@ async fn a_set_aside_2xx_outlives_its_retransmission() {
     again.expect(200).await;
     call.expect(200).await;
 
-    let mut dialog = call.ack().await;
+    let _alice_dialog = call.ack().await;
     bob.receive("ACK").await;
-    let mut bye = dialog.bye().await;
-    bob.receive("BYE").await.respond(200, "OK").send().await;
+    let mut bye = uas.dialog().bye().await;
+    alice.receive("BYE").await.respond(200, "OK").send().await;
     bye.expect(200).await;
     let _ = h.finish().await;
 }
@@ -148,6 +148,40 @@ async fn set_aside_responses_keep_their_arrival_order() {
         })
         .collect();
     assert_eq!(order, [format!("200 {first_seq}"), format!("403 {}", first_seq + 1)]);
+    alice.receive("BYE").await.respond(200, "OK").send().await;
+    bye.expect(200).await;
+    let _ = h.finish().await;
+}
+
+/// The load lane's wait for the INVITE's final sorts responses as every
+/// expect does: an OPTIONS 200 that lands first is set aside for the OPTIONS
+/// expect, and the INVITE's 200 it reads is a repeat to a later INFO expect
+/// when the callee retransmits it before the ACK.
+#[tokio::test(start_paused = true)]
+async fn the_final_wait_reads_only_the_invites_responses() {
+    let h = Harness::new("client-txn-match-final-wait");
+    let alice = h.agent("alice", "127.0.0.1:5060").await;
+    let bob = h.agent("bob", "127.0.0.1:5070").await;
+
+    let mut call = alice.invite(&bob).with_sdp(OFFER).send().await;
+    let mut uas = bob.receive("INVITE").await;
+    let mut ping = alice.request(OutOfDialogMethod::Options, &bob).send().await;
+    bob.receive("OPTIONS").await.respond(200, "OK").send().await;
+    uas.respond(200, "OK").with_sdp(ANSWER).send().await;
+    let (answer, _) = call.try_expect_final(200).await.expect("the INVITE's 200");
+    assert_eq!(answer.cseq().method(), "INVITE", "the final wait read the INVITE's 200");
+    ping.expect(200).await;
+
+    let mut info = call.send_request(InDialogMethod::Info).send().await;
+    let mut info_uas = bob.receive("INFO").await;
+    h.advance(T1).await;
+    uas.respond(200, "OK").with_sdp(ANSWER).send().await;
+    info_uas.respond(403, "Forbidden").send().await;
+    info.expect(403).await;
+
+    let _alice_dialog = call.ack().await;
+    bob.receive("ACK").await;
+    let mut bye = uas.dialog().bye().await;
     alice.receive("BYE").await.respond(200, "OK").send().await;
     bye.expect(200).await;
     let _ = h.finish().await;
