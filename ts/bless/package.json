@@ -1,0 +1,27 @@
+{
+  "name": "@sip/bless",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "The post-run bless (ADR-0062): a Reclassifier that re-reads a finished cell, restates a failure a named rule answers, reads an RFC charge back to the peer that authored it, gates the body rows, audits a passing cell against the rule, and counts the cell's rule hits.",
+  "exports": {
+    ".": "./src/index.ts",
+    "./*": "./src/*.ts"
+  },
+  "types": "./src/index.ts",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@sip/contracts": "workspace:*",
+    "@sip/pipeline": "workspace:*",
+    "effect": "4.0.0-rc.111"
+  },
+  "devDependencies": {
+    "@effect/platform-node": "4.0.0-rc.111",
+    "@types/node": "24.10.1",
+    "typescript": "5.9.3",
+    "vitest": "4.1.11"
+  }
+}
