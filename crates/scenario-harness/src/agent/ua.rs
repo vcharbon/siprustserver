@@ -18,7 +18,7 @@ use sip_message::header::{self, HeaderValue, NameAddr, Uri};
 use sip_message::{serialize, SipHeader, SipMessage, SipRequest, SipResponse, SipStr};
 use sip_net::{UdpEndpoint, UdpPacket};
 
-use super::client_txn::{expect_response, request_label};
+use super::client_txn::{expect_response, Awaited, TxnKey};
 use super::dialog::InDialogTxn;
 use super::ids::Ids;
 use super::out_of_dialog::OutOfDialogRequest;
@@ -668,14 +668,14 @@ impl Agent {
             ..Default::default()
         };
         let res = generate_in_dialog_request(InDialogMethod::Refer, &view, &opts).expect("a REFER");
-        let label = request_label(None, &res.request);
+        let txn = TxnKey::of(&res.request);
         self.send(&SipMessage::Request(res.request), dst).await;
         InDialogTxn::new(
             self.clone(),
+            txn,
             // A REFER's finals take no ACK.
             None,
             dst,
-            label,
         )
     }
 
@@ -713,8 +713,8 @@ impl Agent {
             }],
         };
         let req = generate_out_of_dialog_request(OutOfDialogMethod::Register, &opts).unwrap();
-        self.send(&SipMessage::Request(req), registrar).await;
-        let resp = expect_response(self, 200, None).await;
+        self.send(&SipMessage::Request(req.clone()), registrar).await;
+        let resp = expect_response(self, 200, &Awaited::Other(&TxnKey::of(&req))).await;
         // Echo back the Expires the registrar actually granted (RFC 3261 §10.3
         // step 8): the registrar may clamp our request; the UA refreshes on it.
         resp.header::<header::Expires>()

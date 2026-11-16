@@ -12,7 +12,7 @@ use sip_message::header::{self, CSeq, HeaderName, HeaderValue};
 use sip_message::sip_str::SipStr;
 use sip_message::{Automatic, DelayedAutomatic, SipMessage, SipRequest, SipResponse};
 
-use super::client_txn::{awaited_response, try_expect_response, try_send_cancel, AckCtx};
+use super::client_txn::{awaited_response, try_expect_response, try_send_cancel, AckCtx, Awaited};
 use super::dialog::{Dialog, InDialogRequest, InDialogTxn};
 use super::step::{unwrap_step, unwrap_step_at, StepError};
 use super::Agent;
@@ -129,7 +129,7 @@ impl ClientInvite {
     /// on it via [`expect`](ClientInvite::expect)). On success it learns the
     /// dialog state (remote tag / target / route set).
     pub async fn try_expect(&mut self, status: u16) -> Result<SipResponse, StepError> {
-        let resp = try_expect_response(&self.agent, status, Some(&self.ack_ctx()))
+        let resp = try_expect_response(&self.agent, status, &Awaited::Invite(self.ack_ctx()))
             .await
             .map_err(|e| e.awaiting(|| awaited_response(status, &self.original_invite)))?;
         self.learn_from_response(&resp);

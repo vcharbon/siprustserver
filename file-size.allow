@@ -74,7 +74,7 @@ crates/scenario-harness/src/actor/scenarios.rs 914
 crates/scenario-harness/src/actor/script.rs 530
 crates/scenario-harness/src/actor/state.rs 604
 crates/scenario-harness/src/agent/client_invite.rs 583
-crates/scenario-harness/src/agent/dialog.rs 715
+crates/scenario-harness/src/agent/dialog.rs 600
 crates/scenario-harness/src/agent/harness.rs 854
 crates/scenario-harness/src/agent/ua.rs 725
 crates/scenario-harness/tests/it/template_emission.rs 1012

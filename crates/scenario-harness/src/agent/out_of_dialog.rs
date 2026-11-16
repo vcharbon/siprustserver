@@ -13,7 +13,7 @@ use sip_template::{
     apply_name_forms, apply_remote_target_emits, emitted_wire, EmitOpts, MessageTemplate,
 };
 
-use super::client_txn::{recv_response_raw, request_label};
+use super::client_txn::{recv_response_raw, TxnKey};
 use super::dialog::InDialogTxn;
 use super::party::Party;
 use super::step::{unwrap_step, StepError};
@@ -191,14 +191,13 @@ impl<'a> OutOfDialogRequest<'a> {
             &self.remote_emits,
         );
         caller.try_send_emitted(&msg, &emitted_wire(&msg, &headers), wire_dst).await?;
-        let label = request_label(None, &req);
         Ok(InDialogTxn::new(
             caller.clone(),
+            TxnKey::of(&req),
             // An out-of-dialog INVITE's non-2xx final takes a txn-layer ACK
             // (§17.1.1.3) — retain the request so the txn can build it.
             matches!(self.method, OutOfDialogMethod::Invite).then_some(req),
             wire_dst,
-            label,
         ))
     }
 

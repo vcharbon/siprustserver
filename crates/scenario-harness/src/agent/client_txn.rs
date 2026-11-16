@@ -47,6 +47,60 @@ impl AckCtx<'_> {
     }
 }
 
+/// A client transaction as its responses name it (RFC 3261 §17.1.3), the
+/// top-Via branch and CSeq method of the request that opened it, and as a
+/// timed-out expect names it ([`request_label`]).
+#[derive(Debug, Clone)]
+pub(crate) struct TxnKey {
+    branch: String,
+    method: Method,
+    label: String,
+}
+
+impl TxnKey {
+    /// The transaction `request` opened.
+    pub(crate) fn of(request: &SipRequest) -> Self {
+        let label = request_label(None, request);
+        TxnKey { branch: branch_of(request), method: request.method().clone(), label }
+    }
+
+    /// The CANCEL transaction of `invite`: its branch, method CANCEL (§9.1).
+    pub(crate) fn cancel_of(invite: &SipRequest) -> Self {
+        let label = request_label(Some("CANCEL"), invite);
+        TxnKey { branch: branch_of(invite), method: Method::Cancel, label }
+    }
+
+    /// What an expect of `status` on this transaction waits for.
+    pub(super) fn awaited(&self, status: u16) -> String {
+        format!("a {status} to {}", self.label)
+    }
+}
+
+/// The client transaction an expect reads the responses of.
+pub(super) enum Awaited<'a> {
+    /// An INVITE's: its non-2xx finals are auto-ACKed (§17.1.1.3).
+    Invite(AckCtx<'a>),
+    /// Any other request's: its finals take no ACK.
+    Other(&'a TxnKey),
+}
+
+impl Awaited<'_> {
+    /// Whether `resp` answers this transaction: same top-Via branch and CSeq
+    /// method as its request (§17.1.3).
+    fn owns(&self, resp: &SipResponse) -> bool {
+        let (branch, method) = match self {
+            Awaited::Invite(ctx) => (branch_of(ctx.invite), &Method::Invite),
+            Awaited::Other(key) => (key.branch.clone(), &key.method),
+        };
+        resp.top_via().branch().unwrap_or_default() == branch && resp.cseq().method() == method
+    }
+}
+
+/// The top-Via branch `request` went out with.
+fn branch_of(request: &SipRequest) -> String {
+    request.top_via().branch().unwrap_or_default().to_string()
+}
+
 /// Build + send the CANCEL for a still-pending (re-)INVITE (RFC 3261 §9.1) —
 /// the ONE mechanism behind [`ClientInvite::cancel`](super::ClientInvite::cancel),
 /// [`ClientReinvite::cancel`](super::ClientReinvite::cancel) (which unwrap it)
@@ -107,9 +161,9 @@ pub(super) fn awaited_response(status: u16, request: &SipRequest) -> String {
 pub(super) async fn expect_response(
     agent: &Agent,
     status: u16,
-    ack: Option<&AckCtx<'_>>,
+    awaited: &Awaited<'_>,
 ) -> SipResponse {
-    unwrap_step(try_expect_response(agent, status, ack).await)
+    unwrap_step(try_expect_response(agent, status, awaited).await)
 }
 
 /// Receive the next response WITHOUT asserting its status (an unsolicited `100
@@ -136,39 +190,70 @@ pub(super) async fn recv_response_raw(agent: &Agent) -> Result<SipResponse, Step
 pub(super) async fn try_expect_response(
     agent: &Agent,
     status: u16,
-    ack: Option<&AckCtx<'_>>,
+    awaited: &Awaited<'_>,
 ) -> Result<SipResponse, StepError> {
-    try_expect_response_tolerating(agent, status, &[], ack).await
+    try_expect_response_tolerating(agent, status, &[], awaited).await
 }
 
 /// THE client-side expect core, behind every `expect`/`try_expect`
 /// (`_tolerating`) on [`ClientInvite`](super::ClientInvite) /
 /// [`ClientReinvite`](super::ClientReinvite) / [`InDialogTxn`](super::InDialogTxn):
-/// wait for the response with status `status`, absorbing an unsolicited `100
-/// Trying` (RFC 3261 §8.1.3.2 — a stateful upstream emits it before the first
-/// real provisional) and a provisional of another status byte-identical to one
-/// that arrived before it (§13.2.2.1), and 200-OKing any inbound request whose
-/// method is in `tolerate` (e.g. a keepalive OPTIONS racing the awaited
-/// response on the same socket). Any non-2xx final belonging to `ack`'s INVITE transaction is
-/// auto-ACKed on arrival (§17.1.1.3), matching or not. A wrong status /
+/// wait for the response of transaction `awaited` with status `status`,
+/// absorbing an unsolicited `100 Trying` (RFC 3261 §8.1.3.2 — a stateful
+/// upstream emits it before the first real provisional), a provisional of
+/// another status byte-identical to one that arrived before it (§13.2.2.1),
+/// and a response to another transaction that repeats one an expect already
+/// read, or one this expect set aside, such as an unACKed 2xx retransmission
+/// (§13.3.1.4, §17.1.3). Any other response to another transaction is set
+/// aside, in arrival order, for the next receive: that transaction's own
+/// expect. Each response read as its own transaction's is noted
+/// ([`Absorption::note_read`](crate::absorption::Absorption::note_read)). It 200-OKs any inbound request whose method is in
+/// `tolerate` (e.g. a keepalive OPTIONS racing the awaited response on the
+/// same socket). A non-2xx final of an awaited INVITE is auto-ACKed on arrival
+/// (§17.1.1.3), matching or not. A wrong status /
 /// genuinely unexpected request / timeout is a [`StepError`]; the panicking
 /// veneers unwrap it.
 pub(super) async fn try_expect_response_tolerating(
     agent: &Agent,
     status: u16,
     tolerate: &[&str],
-    ack: Option<&AckCtx<'_>>,
+    awaited: &Awaited<'_>,
+) -> Result<SipResponse, StepError> {
+    let mut aside = Vec::new();
+    let read = read_awaited(agent, status, tolerate, awaited, &mut aside).await;
+    let mut held = agent.holdback.lock().unwrap();
+    for msg in aside.into_iter().rev() {
+        held.push_front(Ok(SipMessage::Response(msg)));
+    }
+    read
+}
+
+/// The loop of [`try_expect_response_tolerating`], gathering into `aside` the
+/// fresh responses to other transactions it reads.
+async fn read_awaited(
+    agent: &Agent,
+    status: u16,
+    tolerate: &[&str],
+    awaited: &Awaited<'_>,
+    aside: &mut Vec<SipResponse>,
 ) -> Result<SipResponse, StepError> {
     loop {
         let next =
             agent.try_recv().await.map_err(|e| e.awaiting(|| format!("a {status} response")));
         match next? {
             SipMessage::Response(r) if r.status() == 100 && status != 100 => continue,
+            SipMessage::Response(r) if !awaited.owns(&r) => {
+                let set_aside = aside.iter().any(|a| a.image() == r.image());
+                if !set_aside && !agent.repeated_read_response(&r) {
+                    aside.push(r);
+                }
+            }
             SipMessage::Response(r) if r.status() != status && agent.repeated_provisional(&r) => {
                 continue
             }
             SipMessage::Response(r) => {
-                if let Some(ctx) = ack {
+                agent.txn.note_read(&r);
+                if let Awaited::Invite(ctx) = awaited {
                     ctx.ack_non_2xx(&r).await?;
                 }
                 agent.response_dialog_check(&r)?;

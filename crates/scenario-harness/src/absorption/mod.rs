@@ -37,6 +37,7 @@ mod abandoned;
 mod answered;
 mod hop_ack;
 mod invited;
+mod read_responses;
 mod received_acks;
 mod received_provisionals;
 mod rejected_acks;
@@ -154,6 +155,9 @@ pub struct Absorption {
     /// The provisionals this endpoint received: a byte-identical repeat tells
     /// the UAC core nothing new (§13.2.2.1).
     received_provisionals: received_provisionals::ReceivedProvisionals,
+    /// The responses an expect read as its transaction's: a copy another
+    /// transaction's expect reads is a repeat (§13.3.1.4).
+    read_responses: read_responses::ReadResponses,
     log: wire_log::WireLog,
 }
 
@@ -188,6 +192,7 @@ impl Absorption {
             rejected_acks: rejected_acks::RejectedAcks::default(),
             received_acks: received_acks::ReceivedAcks::default(),
             received_provisionals: Default::default(),
+            read_responses: Default::default(),
             log: wire_log::WireLog::default(),
         }
     }
@@ -211,6 +216,7 @@ impl Absorption {
             rejected_acks: rejected_acks::RejectedAcks::default(),
             received_acks: received_acks::ReceivedAcks::default(),
             received_provisionals: Default::default(),
+            read_responses: Default::default(),
             log: wire_log::WireLog::default(),
         }
     }
@@ -380,6 +386,17 @@ impl Absorption {
     /// already received: the UAC core learns nothing new from it (§13.2.2.1).
     pub fn repeats_a_provisional(&self, r: &SipResponse) -> bool {
         self.received_provisionals.repeats(r)
+    }
+
+    /// Note `r`, read by an expect as its own transaction's response.
+    pub(crate) fn note_read(&self, r: &SipResponse) {
+        self.read_responses.note(r);
+    }
+
+    /// Whether `r` is byte-identical to a response an expect read as its own
+    /// transaction's within 64·T1: a repeat to any other expect.
+    pub(crate) fn repeats_a_read_response(&self, r: &SipResponse) -> bool {
+        self.read_responses.holds(r)
     }
 
     pub(crate) fn hop_ack_is_fulfilled(&self, call_id: &str, branch: &str) -> bool {
