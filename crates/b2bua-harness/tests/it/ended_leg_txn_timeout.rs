@@ -6,7 +6,8 @@
 //! transaction times out (Timer F, RFC 3261 §17.1.2.2) on a leg whose
 //! disposition is already terminal: the leg keeps the disposition its BYE gave
 //! it and the rest of the call stays up. A request of the INVITE usage toward
-//! that leg is never relayed: this stack answers it 481 (RFC 3261 §12.2.2).
+//! that leg is never relayed: this stack answers it 500 with `Retry-After`
+//! (RFC 3261 §14.2), the sender's own dialog living on.
 
 use std::sync::Arc;
 use std::time::Duration;

@@ -130,7 +130,7 @@ fn the_termination_answers_what_is_held_and_the_pending_reinvite() {
 
 /// The caller CANCELs a ringing call while bob's INFO relayed toward her
 /// awaits its final: her INVITE carries the layer's 487, so the termination
-/// settles her leg and bob's INFO is answered the method table's 481.
+/// settles her leg and bob's INFO is answered the method table's 487.
 #[test]
 fn the_callers_leg_is_settled_once_her_invite_carries_its_final() {
     let driver = Driver::new();
@@ -139,13 +139,13 @@ fn the_callers_leg_is_settled_once_her_invite_carries_its_final() {
     assert!(relayed.is_some(), "bob's INFO is relayed to alice");
 
     let turn = call.turned(Step::AliceCancels);
-    assert_eq!(finals_to(turn, "b-1"), [fin(481, "INFO")]);
+    assert_eq!(finals_to(turn, "b-1"), [fin(487, "INFO")]);
     assert_eq!(owed_left(&call), 0);
 }
 
 /// A service ends a ringing call while alice's INFO relayed toward bob
 /// awaits its final: his leg is CANCELled and settled, so her INFO is
-/// answered 481; her own INVITE, unanswered, waits for the call's end.
+/// answered 487; her own INVITE, unanswered, waits for the call's end.
 #[test]
 fn a_ringing_leg_is_settled_as_its_cancel_leaves() {
     let driver = Driver::new().with_rule(ends_the_call());
@@ -153,13 +153,13 @@ fn a_ringing_leg_is_settled_as_its_cancel_leaves() {
     call.run([Step::Sends("a", Method::Info)]);
 
     let turn = call.turned(ends());
-    assert_eq!(finals_to(turn, "a"), [fin(481, "INFO")], "her INFO, not yet her INVITE");
+    assert_eq!(finals_to(turn, "a"), [fin(487, "INFO")], "her INFO, not yet her INVITE");
     assert_eq!(turn.methods_to("b-1").into_iter().map(|(m, _)| m).collect::<Vec<_>>(), ["CANCEL"]);
 }
 
 /// The caller's INVITE is still unanswered when the call ends: the ADR-0022
 /// 503 leaves as it terminates, and bob's INFO relayed toward her is
-/// answered 481 behind it.
+/// answered 487 behind it.
 #[test]
 fn the_callers_leg_is_settled_behind_the_unanswered_callers_503() {
     let driver = Driver::new().with_rule(ends_the_call());
@@ -168,16 +168,16 @@ fn the_callers_leg_is_settled_behind_the_unanswered_callers_503() {
 
     let turn = call.turned(Step::Answers("b-1", 487));
     assert_eq!(finals_to(turn, "a"), [fin(503, "INVITE")]);
-    assert_eq!(finals_to(turn, "b-1"), [fin(481, "INFO")]);
+    assert_eq!(finals_to(turn, "b-1"), [fin(487, "INFO")]);
     let labels: Vec<&str> = turn.result.effects.outbound.iter().map(|o| o.label.as_str()).collect();
     let at = |prefix: &str| labels.iter().position(|l| l.starts_with(prefix));
-    let (her_503, his_481) = (at("503 "), at("481 INFO"));
-    assert!(her_503.is_some() && her_503 < his_481, "her 503 leaves first: {labels:?}");
+    let (her_503, his_487) = (at("503 "), at("487 INFO"));
+    assert!(her_503.is_some() && her_503 < his_487, "her 503 leaves first: {labels:?}");
     assert_eq!(call.call().state, CallModelState::Terminated);
 }
 
 /// A service destroys bob's leg while alice's INFO relayed toward him
-/// awaits its final: it is answered 481 as his leg ends.
+/// awaits its final: it is answered 487 as his leg ends.
 #[test]
 fn a_destroyed_leg_is_settled() {
     let driver = Driver::new().with_rule(crate::services::reinvite_release());
@@ -185,11 +185,11 @@ fn a_destroyed_leg_is_settled() {
     call.run([Step::Sends("a", Method::Info)]);
 
     let turn = call.turned(crate::services::releases("b-1"));
-    assert_eq!(finals_to(turn, "a"), [fin(481, "INFO")]);
+    assert_eq!(finals_to(turn, "a"), [fin(487, "INFO")]);
 }
 
 /// bob hangs up while alice's INFO relayed toward him awaits its final: the
-/// rule ends his leg, which settles it, and her INFO is answered 481.
+/// rule ends his leg, which settles it, and her INFO is answered 487.
 #[test]
 fn a_leg_a_rule_ends_is_settled() {
     let driver = Driver::new();
@@ -197,13 +197,13 @@ fn a_leg_a_rule_ends_is_settled() {
     call.run([Step::Sends("a", Method::Info)]);
 
     let turn = call.turned(Step::Sends("b-1", Method::Bye));
-    assert!(finals_to(turn, "a").contains(&fin(481, "INFO")), "got {:?}", finals_to(turn, "a"));
+    assert!(finals_to(turn, "a").contains(&fin(487, "INFO")), "got {:?}", finals_to(turn, "a"));
 }
 
 /// bob refuses a ringing call no failover follows (its route carries no
 /// callback context) while his INFO relayed toward alice awaits its final:
 /// the call is released at once, every leg settled, and his INFO is answered
-/// 481.
+/// 487.
 #[test]
 fn a_call_released_at_once_settles_every_leg() {
     let driver = Driver::new().with_route(|r| r.callback_context = None);
@@ -211,7 +211,7 @@ fn a_call_released_at_once_settles_every_leg() {
     call.run([Step::Sends("b-1", Method::Info)]);
 
     let turn = call.turned(Step::Answers("b-1", 486));
-    assert_eq!(finals_to(turn, "b-1"), [fin(481, "INFO")]);
+    assert_eq!(finals_to(turn, "b-1"), [fin(487, "INFO")]);
     assert_eq!(call.call().state, CallModelState::Terminated);
     assert_eq!(owed_left(&call), 0);
 }

@@ -91,8 +91,8 @@ async fn a_silent_callee_does_not_hold_the_record_past_the_terminating_timeout()
 
 /// The callee's UPDATE on its other fork is relayed to the caller, who has
 /// not answered it when the early BYE ends the call. Her INVITE takes its
-/// final at once, which ends her leg: the callee's UPDATE draws its 481 then
-/// (RFC 3261 §8.2.6, ADR-0055 §2), not its own Timer F.
+/// final at once, which ends her leg: the callee's UPDATE draws its 487 then
+/// (RFC 3261 §15.1.2, ADR-0055 §2), not its own Timer F.
 #[tokio::test(start_paused = true)]
 async fn a_request_relayed_to_the_unanswered_caller_is_answered_with_her_final() {
     let h = Harness::with_transit_delay("early-fork-bye-relayed-update", 1);
@@ -123,7 +123,7 @@ async fn a_request_relayed_to_the_unanswered_caller_is_answered_with_her_final()
     fork1.send_request(InDialogMethod::Bye).send().await.expect(200).await;
     call.expect(503).await;
     let mut cancel = bob.receive("CANCEL").await;
-    update.expect(481).await;
+    update.expect(487).await;
     // Her early dialog ended with her INVITE's 503.
     at_alice.respond(481, "Call/Transaction Does Not Exist").await;
 
