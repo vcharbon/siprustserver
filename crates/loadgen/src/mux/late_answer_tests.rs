@@ -169,3 +169,30 @@ async fn a_late_reanswer_is_reported_on_the_arrow_of_its_request() {
     let want = ArrowKey { from: "SUT".into(), to: "bob".into(), label: "BYE".into(), nth: 1 };
     assert_eq!(*seen.lock().unwrap(), vec![want]);
 }
+
+/// A request the loss model dropped on its way in, never answered by the
+/// agent, draws the 481 of a UA without its dialog once the call released;
+/// one the agent answered from a later copy draws that answer, and an ACK
+/// the loss dropped draws nothing.
+#[test]
+#[ignore = "slow lane: loadgen"]
+fn a_request_lost_on_its_way_in_draws_481_unless_the_agent_answered_it() {
+    let answers = SentAnswers::default();
+    let bye = req("BYE", 3, "z9hG4bKbye");
+    answers.on_lost_request(&Datagram::sniff(&bye));
+    answers.on_lost_request(&Datagram::sniff(&req("ACK", 2, "z9hG4bKack")));
+    let info = req("INFO", 4, "z9hG4bKinfo");
+    answers.on_lost_request(&Datagram::sniff(&info));
+    let ok = resp(200, "INFO", 4, "z9hG4bKinfo");
+    answers.on_outbound(&Datagram::sniff(&ok), None);
+    answers.on_lost_request(&Datagram::sniff(&info));
+    let mut h = answers.take("c1").expect("the dialog holds answers");
+    let refused = reanswer(&mut h, &bye).expect("the lost BYE draws an answer");
+    let id = Datagram::sniff(&refused).id().clone();
+    assert_eq!(
+        (id.status, id.cseq, id.cseq_method, id.branch),
+        (Some(481), Some(3), Some("BYE"), Some("z9hG4bKbye"))
+    );
+    assert_eq!(reanswer(&mut h, &info), Some(ok), "the agent's own answer stands");
+    assert!(matches!(on_request(&mut h, &req("ACK", 2, "z9hG4bKack")), LateReply::NotHeld));
+}

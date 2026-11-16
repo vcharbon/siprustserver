@@ -232,6 +232,7 @@ fn handle_inbound(mux: &MuxSocket, d: &Delivery, dg: &Datagram<'_>, pkt: &UdpPac
         if let Some(taps) = &d.taps {
             taps.on_lost(Dir::In, dg);
         }
+        d.answers.on_lost_request(dg);
         return;
     }
     if let Some(taps) = &d.taps {

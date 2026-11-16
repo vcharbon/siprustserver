@@ -8,7 +8,10 @@
 //!
 //! Held: every final to a non-INVITE request, and an INVITE's non-2xx final
 //! (whose ACK the hold then absorbs). An INVITE's 2xx is the dialog's own
-//! (§13.3.1.4) and is not held. Once the ACK of a held INVITE final arrives,
+//! (§13.3.1.4) and is not held. For an in-dialog request the loss model
+//! dropped on its way in, the 481 of a UA that no longer holds the dialog
+//! (§12.2.2) is held until the agent answers a later copy itself: a
+//! retransmission arriving once the call released draws it, not a stray. Once the ACK of a held INVITE final arrives,
 //! before or after the call released, the final is owed no more (§17.2.1
 //! Confirmed): its bytes go, and a retransmitted INVITE or ACK of that
 //! transaction is absorbed.
@@ -25,7 +28,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use sip_message::sniff::Identity;
+use sip_message::sniff::{refusal, Identity};
 
 use super::datagram::{key_of, Datagram};
 use super::tally::LateRepair;
@@ -102,6 +105,19 @@ fn acked(held: &mut [Answer], cseq: u32, branch: &str) -> bool {
     }
 }
 
+/// Append `answer` to `held`, first dropping its dialog's oldest answer when
+/// the dialog already holds [`ANSWERS_HELD`].
+fn hold(held: &mut Vec<Answer>, answer: Answer) {
+    let dialog = answer.dialog;
+    if held.iter().filter(|a| a.dialog == dialog).count() == ANSWERS_HELD {
+        let oldest = held.iter().position(|a| a.dialog == dialog).expect("a held answer");
+        held.remove(oldest);
+    }
+    // An endpoint holds a handful of answers: room for one more at a time.
+    held.reserve_exact(1);
+    held.push(answer);
+}
+
 /// An endpoint's answers, every dialog's, in the order sent.
 #[derive(Default)]
 pub(in crate::mux) struct SentAnswers(Mutex<Vec<Answer>>);
@@ -124,13 +140,29 @@ impl SentAnswers {
         let (dialog, txn) = (key_of(cid), txn_key(cseq, method, branch));
         let mut held = self.0.lock().unwrap();
         held.retain(|a| a.dialog != dialog || a.txn != txn);
-        if held.iter().filter(|a| a.dialog == dialog).count() == ANSWERS_HELD {
-            let oldest = held.iter().position(|a| a.dialog == dialog).expect("a held answer");
-            held.remove(oldest);
+        hold(&mut held, Answer { dialog, txn, bytes: Some(d.shared()), repair });
+    }
+
+    /// Hold the 481 refusal of `d`, an in-dialog request the loss model
+    /// dropped on its way in that this endpoint's agent has not answered.
+    pub(in crate::mux) fn on_lost_request(&self, d: &Datagram<'_>) {
+        let id = d.id();
+        let (None, Some(cid), Some(cseq), Some(method), Some(branch)) =
+            (id.status, id.call_id, id.cseq, id.method, id.branch)
+        else {
+            return;
+        };
+        if method == "ACK" {
+            return;
         }
-        // An endpoint holds a handful of answers: room for one more at a time.
-        held.reserve_exact(1);
-        held.push(Answer { dialog, txn, bytes: Some(d.shared()), repair });
+        let Some(bytes) = refusal(d.raw(), 481, "Call/Transaction Does Not Exist") else {
+            return;
+        };
+        let (dialog, txn) = (key_of(cid), txn_key(cseq, method, branch));
+        let mut held = self.0.lock().unwrap();
+        if !held.iter().any(|a| a.dialog == dialog && a.txn == txn) {
+            hold(&mut held, Answer { dialog, txn, bytes: Some(bytes.into()), repair: None });
+        }
     }
 
     /// An ACK `id` delivered to this endpoint: the INVITE final it ACKs, if

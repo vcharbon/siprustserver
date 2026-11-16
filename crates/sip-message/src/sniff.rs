@@ -9,16 +9,20 @@
 mod description;
 mod except;
 mod identity;
+mod refusal;
 mod reliability;
+mod tags;
 mod uri_facts;
 mod via_hops;
 mod via_stamp;
 pub use description::session_description;
 pub use except::{equal_except, header_row_spans, line_at, Except};
 pub use identity::{identity, Identity};
+pub use refusal::refusal;
 pub use reliability::{rack_cseq, rack_rseq, require_has_100rel, rseq_of};
 use std::borrow::Cow;
 use std::ops::ControlFlow;
+pub use tags::{from_tag, to_tag};
 pub use uri_facts::UriFacts;
 pub use via_hops::{bottom_via, top_via, via_rport, OriginVia, ViaRport};
 pub use via_stamp::relay_stamp_spans;
@@ -68,34 +72,8 @@ pub fn call_id(raw: &[u8]) -> Option<String> {
     header_value(raw, "call-id").or_else(|| header_value(raw, "i"))
 }
 
-/// The `tag` parameter of the To header (full or compact `t` form), or the
-/// empty string when absent (e.g. a tagless 100 Trying).
-pub fn to_tag(raw: &[u8]) -> String {
-    header_value(raw, "to")
-        .or_else(|| header_value(raw, "t"))
-        .map_or_else(String::new, |v| tag_of(&v))
-}
-
-/// The `tag` parameter of the From header (full or compact `f` form), or the
-/// empty string when absent.
-pub fn from_tag(raw: &[u8]) -> String {
-    header_value(raw, "from")
-        .or_else(|| header_value(raw, "f"))
-        .map_or_else(String::new, |v| tag_of(&v))
-}
-
-/// The `tag` parameter of one From or To value, or the empty string.
-fn tag_of(value: &str) -> String {
-    let lower = value.to_ascii_lowercase();
-    // An ASCII fold keeps every byte offset, so `lower`'s offset is `value`'s.
-    let Some(rest) = lower.find("tag=").and_then(|pos| value.get(pos + "tag=".len()..)) else {
-        return String::new();
-    };
-    up_to_delimiter(rest, &[';', ',', ' ', '\t', '>']).trim().to_string()
-}
-
 /// `text` up to the first of `delims`, or all of it.
-fn up_to_delimiter<'a>(text: &'a str, delims: &[char]) -> &'a str {
+pub(crate) fn up_to_delimiter<'a>(text: &'a str, delims: &[char]) -> &'a str {
     text.split(delims).next().unwrap_or(text)
 }
 
