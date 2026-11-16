@@ -87,7 +87,7 @@ pub(super) enum Awaited<'a> {
 impl Awaited<'_> {
     /// Whether `resp` answers this transaction: same top-Via branch and CSeq
     /// method as its request (§17.1.3).
-    fn owns(&self, resp: &SipResponse) -> bool {
+    pub(super) fn owns(&self, resp: &SipResponse) -> bool {
         let (branch, method) = match self {
             Awaited::Invite(ctx) => (branch_of(ctx.invite), &Method::Invite),
             Awaited::Other(key) => (key.branch.clone(), &key.method),
@@ -198,21 +198,12 @@ pub(super) async fn try_expect_response(
 /// THE client-side expect core, behind every `expect`/`try_expect`
 /// (`_tolerating`) on [`ClientInvite`](super::ClientInvite) /
 /// [`ClientReinvite`](super::ClientReinvite) / [`InDialogTxn`](super::InDialogTxn):
-/// wait for the response of transaction `awaited` with status `status`,
-/// absorbing an unsolicited `100 Trying` (RFC 3261 §8.1.3.2 — a stateful
-/// upstream emits it before the first real provisional), a provisional of
-/// another status byte-identical to one that arrived before it (§13.2.2.1),
-/// and a response to another transaction that repeats one an expect already
-/// read, or one this expect set aside, such as an unACKed 2xx retransmission
-/// (§13.3.1.4, §17.1.3). Any other response to another transaction is set
-/// aside, in arrival order, for the next receive: that transaction's own
-/// expect. Each response read as its own transaction's is noted
-/// ([`Absorption::note_read`](crate::absorption::Absorption::note_read)). It 200-OKs any inbound request whose method is in
-/// `tolerate` (e.g. a keepalive OPTIONS racing the awaited response on the
-/// same socket). A non-2xx final of an awaited INVITE is auto-ACKed on arrival
-/// (§17.1.1.3), matching or not. A wrong status /
-/// genuinely unexpected request / timeout is a [`StepError`]; the panicking
-/// veneers unwrap it.
+/// wait for the response of transaction `awaited` with status `status`. It
+/// steps over a `100 Trying` (§8.1.3.2) and a repeated provisional of another
+/// status (§13.2.2.1), sorts responses to other transactions with
+/// [`step_over_or_set_aside`] (§17.1.3), and 200-OKs a request whose method is
+/// in `tolerate`. A non-2xx final it reads to an awaited INVITE is ACKed
+/// (§17.1.1.3), matching or not.
 pub(super) async fn try_expect_response_tolerating(
     agent: &Agent,
     status: u16,
@@ -221,11 +212,28 @@ pub(super) async fn try_expect_response_tolerating(
 ) -> Result<SipResponse, StepError> {
     let mut aside = Vec::new();
     let read = read_awaited(agent, status, tolerate, awaited, &mut aside).await;
+    put_back(agent, aside);
+    read
+}
+
+/// Sort `r`, a response to a transaction other than the one awaited: a copy
+/// of one an expect read as its own (a 2xx retransmission, §13.3.1.4) or of
+/// one already in `aside` is stepped over, any other joins `aside`.
+pub(super) fn step_over_or_set_aside(agent: &Agent, r: SipResponse, aside: &mut Vec<SipResponse>) {
+    let set_aside = aside.iter().any(|a| a.image() == r.image());
+    if !set_aside && !agent.repeated_read_response(&r) {
+        aside.push(r);
+    }
+}
+
+/// Put the responses an expect set aside back ahead of every message not yet
+/// read, in arrival order: the next receive, that transaction's own expect,
+/// reads them first.
+pub(super) fn put_back(agent: &Agent, aside: Vec<SipResponse>) {
     let mut held = agent.holdback.lock().unwrap();
     for msg in aside.into_iter().rev() {
         held.push_front(Ok(SipMessage::Response(msg)));
     }
-    read
 }
 
 /// The loop of [`try_expect_response_tolerating`], gathering into `aside` the
@@ -242,12 +250,7 @@ async fn read_awaited(
             agent.try_recv().await.map_err(|e| e.awaiting(|| format!("a {status} response")));
         match next? {
             SipMessage::Response(r) if r.status() == 100 && status != 100 => continue,
-            SipMessage::Response(r) if !awaited.owns(&r) => {
-                let set_aside = aside.iter().any(|a| a.image() == r.image());
-                if !set_aside && !agent.repeated_read_response(&r) {
-                    aside.push(r);
-                }
-            }
+            SipMessage::Response(r) if !awaited.owns(&r) => step_over_or_set_aside(agent, r, aside),
             SipMessage::Response(r) if r.status() != status && agent.repeated_provisional(&r) => {
                 continue
             }

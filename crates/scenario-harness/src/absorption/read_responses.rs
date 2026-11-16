@@ -6,13 +6,11 @@
 //! unread is never taken for a repeat of itself.
 
 use std::sync::Mutex;
-use std::time::Duration;
 
 use sip_message::SipResponse;
 use tokio::time::Instant;
 
-/// 64·T1: how long a UAS retransmits its 2xx (§13.3.1.4, Timer H's span).
-const RETRANSMIT_SPAN: Duration = Duration::from_secs(32);
+use super::unacked_finals::T1;
 
 /// The responses read, each as its bytes and when it is let go.
 #[derive(Default)]
@@ -26,7 +24,7 @@ impl ReadResponses {
         let now = Instant::now();
         let mut read = self.read.lock().unwrap();
         read.retain(|(_, until)| *until > now);
-        read.push((r.image().as_ref().into(), now + RETRANSMIT_SPAN));
+        read.push((r.image().as_ref().into(), now + 64 * T1));
     }
 
     /// Whether `r` is byte-identical to a response read within 64·T1.

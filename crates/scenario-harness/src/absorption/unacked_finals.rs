@@ -12,7 +12,7 @@ use sip_message::{SipRequest, SipResponse};
 use tokio::time::Instant;
 
 /// RFC 3261 T1.
-const T1: Duration = Duration::from_millis(500);
+pub(super) const T1: Duration = Duration::from_millis(500);
 /// RFC 3261 T2: the cap of the interval.
 const T2: Duration = Duration::from_secs(4);
 
