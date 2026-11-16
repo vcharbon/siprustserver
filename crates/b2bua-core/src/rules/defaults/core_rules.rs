@@ -374,7 +374,6 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
         // A leg the BYE already Terminated still owes it (RFC 5407 §2 + App. D:
         // a Mortal UA keeps the invite usage for exactly this, and §13.2.2.4's
         // "every time a retransmission arrives" does not lapse with the dialog).
-        // A copy past a compliant answerer's re-sends draws none (ADR-0057 §10).
         rule(
             "re-ack-retransmitted-2xx",
             &[],

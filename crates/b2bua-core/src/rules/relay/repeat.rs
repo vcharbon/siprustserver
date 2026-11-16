@@ -38,8 +38,9 @@ pub(crate) fn retransmitted_2xx(leg: &Leg, dialog: &Dialog, resp: &SipResponse) 
 
 /// Count `event`, received on `leg_id`'s dialog `named`, on that dialog's
 /// INVITE record when it is a copy of the 2xx the dialog took
-/// ([`retransmitted_2xx`]). Returns whether the copy is one past what a
-/// compliant answerer sends ([`re_ack_owed`] false).
+/// ([`retransmitted_2xx`]), before the rules read it: the re-ACK ([`re_ack`])
+/// reads the count. Returns whether the copy is one past what a compliant
+/// answerer sends ([`re_ack_owed`] false).
 pub(crate) fn count_copy(
     call: &mut Call,
     leg_id: &str,

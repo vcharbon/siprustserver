@@ -236,8 +236,6 @@ fn chain_turn(
         exec.turn.notes.repeat_give_up(obligation.kind());
         exec.give_up(&mut call, &mut ladder_fx, obligation);
     }
-    // A copy of a 2xx the dialog took is counted before the rules read it,
-    // so the re-ACK reads its count (RFC 3261 §13.3.1.4).
     if crate::rules::relay::count_copy(&mut call, source_leg_id, resolved.dialog.as_ref(), event) {
         exec.turn.notes.copy_past_schedule();
     }
