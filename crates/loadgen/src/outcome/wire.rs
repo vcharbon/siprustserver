@@ -14,18 +14,21 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use sip_clock::Clock;
-use sip_message::header::{cause_key, retry_after_seconds, HeaderValue, SubscriptionState};
+use sip_message::header::{cause_key, retry_after_seconds};
 use sip_message::sip_str::SipStr;
-use sip_message::sniff::{body, header_value, header_values, session_description, Identity};
+use sip_message::sniff::{header_values, session_description, Identity};
 
 use crate::mux::{Datagram, Dir, LossTap, Side, WireTap};
 
 mod excuse;
 mod finals;
+mod received;
 
 pub use excuse::Refusal;
 pub(crate) use finals::Finals;
 use finals::{settle_pending, unanswered, Request};
+use received::note_request;
+pub use received::{LegRequest, LEG_REQUESTS_MAX, LEG_REQUEST_BODY_MAX};
 
 /// One failed in-dialog request the caller sent: its non-2xx final, or no
 /// final at all (`code: None`).
@@ -35,26 +38,6 @@ pub struct WireFailure {
     pub method: String,
     pub code: Option<u16>,
 }
-
-/// One in-dialog request the caller or a callee leg received (ACK and CANCEL
-/// aside): what
-/// it said, for a reader that tells one outcome of an in-dialog exchange from
-/// another (a NOTIFY's subscription state and sipfrag, an INFO's payload).
-#[derive(Debug, Clone, PartialEq)]
-pub struct LegRequest {
-    pub at_ms: i64,
-    pub method: String,
-    pub(crate) cseq: u32,
-    /// The `Subscription-State` value's state token (RFC 6665 §8.2.3).
-    pub subscription_state: Option<String>,
-    /// The body's first [`LEG_REQUEST_BODY_MAX`] bytes.
-    pub body: Vec<u8>,
-}
-
-/// The bound on the requests the caller's or a leg's facts keep, and on each
-/// one's body.
-pub const LEG_REQUESTS_MAX: usize = 8;
-pub const LEG_REQUEST_BODY_MAX: usize = 64;
 
 /// What one callee leg did with the INVITE that opened it.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -191,12 +174,15 @@ impl CallWire {
     }
 
     /// The loss tap that tells the facts which of a side's requests the loss
-    /// model dropped on their way out.
+    /// model dropped: on their way out, or on their way to it (an in-dialog
+    /// request the side was still sent, a BYE whose copy it missed).
     pub fn loss_tap(&self) -> LossTap {
-        let facts = self.facts.clone();
+        let (clock, facts) = (self.clock.clone(), self.facts.clone());
         Arc::new(move |side, dir, d| {
             let id = d.id();
-            let (Dir::Out, None, Some(cseq)) = (dir, id.status, id.cseq) else { return };
+            let (None, Some(method), Some(cseq)) = (id.status, id.method, id.cseq) else {
+                return;
+            };
             let mut f = facts.lock().unwrap();
             let finals = match side {
                 Side::Caller => Some(&mut f.finals),
@@ -204,8 +190,17 @@ impl CallWire {
                     f.legs.iter_mut().find(|l| l.role == role).map(|l| &mut l.finals)
                 }
             };
-            if let Some(finals) = finals {
-                finals.sent.lost(cseq);
+            let Some(finals) = finals else { return };
+            match dir {
+                Dir::Out => finals.sent.lost(cseq),
+                Dir::In if in_dialog(method, id) => {
+                    let now = clock.now_ms();
+                    finals.took(method, cseq, now);
+                    if method == "BYE" {
+                        finals.bye_lost(cseq, now);
+                    }
+                }
+                Dir::In => {}
             }
         })
     }
@@ -245,6 +240,12 @@ fn untagged(id: &Identity<'_>) -> bool {
     id.to_tag.is_none_or(str::is_empty)
 }
 
+/// Whether the request `method` (`id`) is an in-dialog request that takes a
+/// final of its own: tagged, neither an ACK nor a CANCEL.
+fn in_dialog(method: &str, id: &Identity<'_>) -> bool {
+    !matches!(method, "ACK" | "CANCEL") && !untagged(id)
+}
+
 impl WireFacts {
     fn on_caller(&mut self, dir: Dir, d: &Datagram<'_>, now: i64) {
         let id = d.id();
@@ -275,11 +276,15 @@ impl WireFacts {
                 }
             }
             (Dir::In, None) => {
+                if in_dialog(method, id) {
+                    self.finals.took(method, cseq, now);
+                }
                 if id.method == Some("BYE") {
                     self.bye_received.get_or_insert(None);
                     if self.finals.bye(&mut self.failures, false, cseq, now) {
                         self.bye_elsewhere(None, now);
                     }
+                    self.saw_481 &= self.failures.iter().any(|f| f.code == Some(481));
                 }
                 note_request(&mut self.received, d, now);
             }
@@ -396,6 +401,11 @@ impl WireFacts {
             }
             (Dir::In, None, Some(i)) => {
                 let leg = &mut self.legs[i];
+                if let (Some(method), Some(cseq)) = (id.method, id.cseq) {
+                    if in_dialog(method, id) {
+                        leg.finals.took(method, cseq, now);
+                    }
+                }
                 let new_bye = match (id.method, id.cseq) {
                     (Some("BYE"), Some(cseq)) => {
                         leg.finals.bye(&mut leg.failures, false, cseq, now)
@@ -429,14 +439,19 @@ impl WireFacts {
     }
 
     /// A BYE first left or reached side `side` (`None`: the caller) at `now`:
-    /// every other side's finals learn it ([`Finals::other_bye`]).
+    /// every other side's finals learn it, with the requests that side was
+    /// sent ([`Finals::other_bye`]).
     fn bye_elsewhere(&mut self, side: Option<usize>, now: i64) {
+        let took = match side {
+            None => self.finals.requests_taken(),
+            Some(i) => self.legs[i].finals.requests_taken(),
+        };
         if side.is_some() {
-            self.finals.other_bye(&mut self.failures, now);
+            self.finals.other_bye(&mut self.failures, took.clone(), now);
         }
         for (i, leg) in self.legs.iter_mut().enumerate() {
             if side != Some(i) {
-                leg.finals.other_bye(&mut leg.failures, now);
+                leg.finals.other_bye(&mut leg.failures, took.clone(), now);
             }
         }
     }
@@ -466,30 +481,6 @@ impl LegFacts {
         let req = Request { method: &method, cseq, sent_at };
         self.finals.judge(&mut self.failures, &req, (code, raw), now);
     }
-}
-
-/// Note the in-dialog request `d` received at `now` in `received` (ACK and
-/// out-of-dialog requests aside, a retransmission once, the first
-/// [`LEG_REQUESTS_MAX`]).
-fn note_request(received: &mut Vec<LegRequest>, d: &Datagram<'_>, now: i64) {
-    let id = d.id();
-    let (Some(method), Some(cseq)) = (id.method, id.cseq) else { return };
-    let seen = received.iter().any(|r| r.cseq == cseq && r.method == method);
-    if method == "ACK" || untagged(id) || seen || received.len() >= LEG_REQUESTS_MAX {
-        return;
-    }
-    let raw = d.raw();
-    let subscription_state = header_value(raw, "Subscription-State")
-        .and_then(|v| SubscriptionState::parse(&SipStr::owned(&v)).ok())
-        .map(|s| s.token().to_ascii_lowercase());
-    let body = body(raw).unwrap_or_default();
-    received.push(LegRequest {
-        at_ms: now,
-        method: method.to_string(),
-        cseq,
-        subscription_state,
-        body: body[..body.len().min(LEG_REQUEST_BODY_MAX)].to_vec(),
-    });
 }
 
 #[cfg(test)]
