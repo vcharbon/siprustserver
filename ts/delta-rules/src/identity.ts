@@ -5,7 +5,7 @@
  */
 import { Fold } from "@sip/pipeline"
 import type { Probe } from "@sip/pipeline"
-import { is, singles } from "./header-items.js"
+import { canon, is, singles } from "./header-items.js"
 
 type HeaderProbe = Probe.HeaderProbe
 
@@ -52,11 +52,11 @@ const uriExtras = (text: string): { readonly userParams: string; readonly header
   return { userParams: semi < 0 ? "" : user.slice(semi + 1), headers: q < 0 ? "" : uri.slice(q + 1) }
 }
 
-/** A URI's `?headers` as sorted `hname=hvalue` items, the name lower-cased (§7.3.1), the value as written. */
+/** A URI's `?headers` as sorted `hname=hvalue` items, the name in canonical form (§7.3.1, §7.3.3), the value as written. */
 const headerItems = (headers: string): readonly string[] =>
   headers === "" ? [] : headers.split("&").map((item) => {
     const eq = item.indexOf("=")
-    return eq < 0 ? item.toLowerCase() : `${item.slice(0, eq).toLowerCase()}${item.slice(eq)}`
+    return eq < 0 ? canon(item) : `${canon(item.slice(0, eq))}${item.slice(eq)}`
   }).sort()
 
 /**

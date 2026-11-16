@@ -68,8 +68,15 @@ describe("URI equality (RFC 3261 §19.1.4)", () => {
     expect(urisEqual("<sip:alice@example.com?subject=a&priority=urgent>", "<sip:alice@example.com?priority=urgent&subject=a>"))
       .toBe(true)
     expect(urisEqual("<sip:alice@example.com?Subject=a>", "<sip:alice@example.com?subject=a>")).toBe(true)
+    expect(urisEqual("<sip:alice@example.com?s=a>", "<sip:alice@example.com?subject=a>")).toBe(true)
+    expect(urisEqual("<sip:alice@example.com?X-Flag>", "<sip:alice@example.com?x-flag>")).toBe(true)
     expect(urisEqual("<sip:alice@example.com?subject=a&priority=urgent>", "<sip:alice@example.com?subject=a>")).toBe(false)
     expect(urisEqual("<sip:alice@example.com>", "<sip:alice@example.com?subject=a>")).toBe(false)
+  })
+
+  it("matches a `?headers` value as written", () => {
+    expect(urisEqual("<sip:alice@example.com?subject=A>", "<sip:alice@example.com?subject=a>")).toBe(false)
+    expect(urisEqual("<sip:alice@example.com?Subject=A>", "<sip:alice@example.com?subject=a>")).toBe(false)
   })
 
   it("holds nothing equal to a value that is no address", () => {
