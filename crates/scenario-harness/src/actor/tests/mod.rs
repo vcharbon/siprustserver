@@ -24,6 +24,7 @@ mod long_call_ping;
 mod long_dwell;
 mod prack_refused;
 mod rang;
+mod re_ring;
 mod reception_observer;
 mod refused_requests;
 mod reinvite_ack_body;
