@@ -19,10 +19,10 @@ pub fn from_tag(raw: &[u8]) -> String {
         .map_or_else(String::new, |v| tag_of(&v))
 }
 
-/// The `tag` parameter of one From or To value, or the empty string.
+/// The `tag` parameter of one From or To value, or the empty string. The
+/// name is found in an ASCII-folded copy, whose byte offsets are the value's.
 fn tag_of(value: &str) -> String {
     let lower = value.to_ascii_lowercase();
-    // An ASCII fold keeps every byte offset, so `lower`'s offset is `value`'s.
     let Some(rest) = lower.find("tag=").and_then(|pos| value.get(pos + "tag=".len()..)) else {
         return String::new();
     };

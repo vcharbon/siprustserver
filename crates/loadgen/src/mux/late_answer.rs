@@ -116,14 +116,14 @@ fn acked(held: &mut [Answer], cseq: u32, branch: &str) -> bool {
 }
 
 /// Append `answer` to `held`, first dropping its dialog's oldest answer when
-/// the dialog already holds [`ANSWERS_HELD`].
+/// the dialog already holds [`ANSWERS_HELD`]. An endpoint holds a handful of
+/// answers: room is made for one more at a time.
 fn hold(held: &mut Vec<Answer>, answer: Answer) {
     let dialog = answer.dialog;
     if held.iter().filter(|a| a.dialog == dialog).count() == ANSWERS_HELD {
         let oldest = held.iter().position(|a| a.dialog == dialog).expect("a held answer");
         held.remove(oldest);
     }
-    // An endpoint holds a handful of answers: room for one more at a time.
     held.reserve_exact(1);
     held.push(answer);
 }

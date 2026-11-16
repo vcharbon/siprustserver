@@ -71,8 +71,7 @@ fn route(mux: &MuxSocket, pkt: &UdpPacket) -> Vec<(Arc<[u8]>, SocketAddr)> {
     }
     // 2. A retransmission of a request a released dialog's agent answered,
     //    re-answered to its source: the address the SUT sent from, as a UAS
-    //    answers to the request's received/rport (RFC 3261 §18.2.2); one of a
-    //    request that reached the agent unanswered, refused 481. The call's
+    //    answers to the request's received/rport (RFC 3261 §18.2.2). The call's
     //    loss model went with its endpoints: neither the request nor the
     //    re-answer is dropped.
     if let Some(cid) = cid.filter(|_| !dg.is_response()) {

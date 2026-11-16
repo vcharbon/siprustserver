@@ -23,7 +23,7 @@ pub enum Observation {
     /// its still-open in-dialog acknowledgement obligations (a pending re-INVITE
     /// ACK / PRACK-200 / … whose peer transaction dies with the call can never
     /// arrive), so the settle barrier does not hold the verdict its 32 s ceiling
-    /// for an impossible ack. See [`ObligationLedger::discharge_leg`].
+    /// for an impossible ack. See [`ObligationLedger::discharge_leg`](super::ledger::ObligationLedger::discharge_leg).
     DialogTornDown { leg: &'static str },
     /// We answered a received dialog-creating INVITE — seed its stream (sender
     /// tag: the INVITE's From-tag) with the INVITE's CSeq, so the first
@@ -86,15 +86,15 @@ pub enum Observation {
         rule: &'static str,
     },
     /// A shared endpoint's demux found no actor for an inbound (see
-    /// [`ReplayEntry::UnclaimedInbound`]).
+    /// [`ReplayEntry::UnclaimedInbound`](super::replay_record::ReplayEntry::UnclaimedInbound)).
     UnclaimedInbound { endpoint: String, detail: String },
     /// A final the peer retransmitted while `leg` held its ACK for it (see
-    /// [`ReplayEntry::HeldFinalRetransmitted`]).
+    /// [`ReplayEntry::HeldFinalRetransmitted`](super::replay_record::ReplayEntry::HeldFinalRetransmitted)).
     HeldFinalRetransmitted { leg: &'static str, status: u16, cseq_method: String, cseq: u32 },
     /// The call's loss model dropped a datagram to or from `leg`.
     Lost { leg: &'static str, message: LostMessage },
     /// A reception goal's body expectation missed (see
-    /// [`ReplayEntry::BodyExpectMiss`]) — appended to the replay record so the
+    /// [`ReplayEntry::BodyExpectMiss`](super::replay_record::ReplayEntry::BodyExpectMiss)) — appended to the replay record so the
     /// miss is never silent.
     BodyExpectMiss {
         leg: &'static str,

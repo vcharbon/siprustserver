@@ -300,7 +300,9 @@ impl CallTxns {
     /// Process an inbound datagram. Returns `true` to deliver it to the app,
     /// `false` to ABSORB it (a duplicate the strict agent must not see — any
     /// re-ACK / re-answer has already been sent here). A reliable provisional
-    /// with a new RSeq is a new provisional (RFC 3262 §3), never a repeat.
+    /// with a new RSeq is a new provisional (RFC 3262 §3), never a repeat. A
+    /// repeated INVITE final means our ACK was lost: it is sent again, the
+    /// 2xx's own or the hop ACK of a non-2xx (RFC 3261 §17.1.1.2).
     pub(super) fn on_inbound(&self, d: &Datagram<'_>, _src: SocketAddr) -> bool {
         let mut g = self.inner.lock().unwrap();
         if g.closed {
@@ -332,9 +334,6 @@ impl CallTxns {
             // `crate::scenarios`).
             let key = key_of((branch, "r", method, status, id.to_tag.unwrap_or_default(), id.rseq));
             if !g.seen_in.insert(key) {
-                // Duplicate response. A retransmitted INVITE final means our ACK
-                // was lost → re-ACK it: the 2xx's own ACK, or the hop ACK of a
-                // non-2xx (RFC 3261 §17.1.1.2).
                 if status >= 200 && is_invite {
                     if let (Some(cid), Some(cseq)) = (id.call_id, id.cseq) {
                         if let Some(ack) = g.acks.get(&cid_key(cid, cseq)).cloned() {

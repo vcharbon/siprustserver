@@ -17,7 +17,9 @@ pub fn refusal(raw: &[u8], status: u16, reason: &str) -> Option<Vec<u8>> {
         if spans.is_empty() {
             return None;
         }
-        spans.into_iter().for_each(|s| out.extend_from_slice(&raw[s]));
+        for span in spans {
+            out.extend_from_slice(raw.get(span)?);
+        }
     }
     out.extend_from_slice(b"Content-Length: 0\r\n\r\n");
     Some(out)

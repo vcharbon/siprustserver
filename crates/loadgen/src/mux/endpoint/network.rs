@@ -97,14 +97,7 @@ impl MuxCore {
         seed: u64,
         drop_nth: Option<TargetedDrop>,
     ) -> MuxNetwork {
-        // Per-addr bind-order dispense queue: each `bind_udp(addr)` takes the
-        // next declared entry for that addr (so several receivers — and, on a
-        // shared-vantage socket, the caller too — can share a socket; the
-        // driver binds the agents in declaration order).
-        let mut dispense: HashMap<SocketAddr, Vec<routing::BindDecl>> = HashMap::new();
-        for (addr, decl) in routing.binds {
-            dispense.entry(addr).or_default().push(decl);
-        }
+        let dispense = dispense(routing.binds);
         MuxNetwork {
             core: self.clone(),
             owner: self.call_seq.fetch_add(1, Ordering::Relaxed),
@@ -124,4 +117,18 @@ impl MuxCore {
             engines: Mutex::new(Vec::new()),
         }
     }
+}
+
+/// The per-addr bind-order dispense queue: each `bind_udp(addr)` takes the
+/// next declared entry for that addr, so several receivers (and, on a
+/// shared-vantage socket, the caller too) share a socket; the driver binds
+/// the agents in declaration order.
+fn dispense(
+    binds: Vec<(SocketAddr, routing::BindDecl)>,
+) -> HashMap<SocketAddr, Vec<routing::BindDecl>> {
+    let mut dispense: HashMap<SocketAddr, Vec<routing::BindDecl>> = HashMap::new();
+    for (addr, decl) in binds {
+        dispense.entry(addr).or_default().push(decl);
+    }
+    dispense
 }
