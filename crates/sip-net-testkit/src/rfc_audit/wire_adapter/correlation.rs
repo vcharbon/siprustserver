@@ -14,7 +14,9 @@ pub(super) const LIVE: &[Live] = &[
         .advisory()
         .admits(tag_flip_2xx)
         .per_party(),
-    Live::emitter(RuleId::TagConsistency, tag_flip_detail).admits(tag_flip_non_2xx).per_party(),
+    Live::emitter_unless_lost(RuleId::TagConsistency, tag_flip_detail)
+        .admits(tag_flip_non_2xx)
+        .per_party(),
     Live::emitter(RuleId::NoToTagOnInitialRequest, no_to_tag_on_initial_request).per_party(),
     // A declared proxy carries the originator's To through unchanged.
     Live::emitter(RuleId::InDialogToTag, in_dialog_to_tag)
@@ -166,7 +168,10 @@ fn tag_flip_2xx(f: &rfc_rules::Finding) -> bool {
 }
 
 /// A flip on a non-2xx final: it establishes no dialog (§12.1.1), so the
-/// caller's early dialog is never terminated, and this arm gates.
+/// caller's early dialog is never terminated, and this arm gates. An
+/// unrecorded sender is not charged where the loss model dropped a datagram
+/// between it and the taker on the call: the dropped one may be the
+/// provisional that showed the final's tag.
 fn tag_flip_non_2xx(f: &rfc_rules::Finding) -> bool {
     tag_flip_status(f).is_some_and(|status| !(200..300).contains(&status))
 }

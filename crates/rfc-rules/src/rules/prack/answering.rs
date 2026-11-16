@@ -87,7 +87,9 @@ impl Obligation for UnmatchedPrackProxied {
 /// transaction drew a 2xx for left the unacknowledged list as that PRACK
 /// arrived, whenever its 2xx left (§3), the right `RSeq`
 /// under another INVITE's CSeq names nothing, and a sibling fork's number
-/// names nothing here (§3, errata 4600). Charges the UAS. A PRACK the strict
+/// names nothing here (§3, errata 4600). A matched PRACK reaching the UAS
+/// after a BYE on its dialog left or reached it may also draw the 481 of a
+/// dialog it ended (RFC 3261 §12.2.2). Charges the UAS. A PRACK the strict
 /// reading refuses ([`crate::Msg::refused`]) owes its 400 instead and is no
 /// occasion.
 pub struct Prack2xxOr481;
@@ -131,7 +133,15 @@ impl Obligation for Prack2xxOr481 {
                     )
                     .contains(&(rack.rseq, rack.cseq))
                 && !acknowledged_before(&seen, key, prack);
-            let honoured = if matched { (200..300).contains(&a.status) } else { a.status == 481 };
+            let ended = seen
+                .bye_ended_at
+                .get(&(key.uas, key.call_id, prack.dialog))
+                .is_some_and(|at| *at <= prack.ts_us);
+            let honoured = match (matched, ended) {
+                (true, true) => (200..300).contains(&a.status) || a.status == 481,
+                (true, false) => (200..300).contains(&a.status),
+                (false, _) => a.status == 481,
+            };
             out.push(head(if honoured {
                 Decision::Compliant
             } else {

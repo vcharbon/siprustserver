@@ -296,3 +296,41 @@ fn a_prack_after_the_final_draws_what_its_match_decides() {
         "a late PRACK naming a provisional sent owes a 2xx: {f:?}"
     );
 }
+
+/// `prack-2xx-or-481`: a PRACK reaching the UAS after the UAC's BYE on its
+/// dialog reached it names a dialog the UAS ended, and draws its 481 (RFC
+/// 3261 §12.2.2); the same 481 with no BYE before the PRACK still breaks it.
+#[test]
+fn a_prack_after_a_bye_on_its_dialog_may_draw_481() {
+    let bye = |at_us| {
+        let head =
+            "BYE sip:b@h SIP/2.0\r\nMax-Forwards: 70\r\nVia: SIP/2.0/UDP h;branch=z9hG4bK-bye\r\n\
+                    From: <sip:a@h>;tag=fa\r\nTo: <sip:b@h>;tag=tb\r\nCSeq: 3 BYE\r\n\r\n";
+        let mut m = msg(
+            at_us,
+            UAC,
+            UAS,
+            Kind::Request { method: "BYE".to_string() },
+            3,
+            Some("tb"),
+            head.to_string(),
+        );
+        m.cseq_method = "BYE".to_string();
+        m.via_branch = Some("z9hG4bK-bye".to_string());
+        m
+    };
+    let after = vec![
+        inv_resp(1_100_000, 180, &reliable_rows(1), false),
+        bye(1_150_000),
+        prack_on(1_200_000, "1 1 INVITE", false),
+        prack_answer(1_250_000, 481),
+    ];
+    assert!(matches!(decide(&Prack2xxOr481, &after)[0].decision, Decision::Compliant));
+    let before = vec![
+        inv_resp(1_100_000, 180, &reliable_rows(1), false),
+        prack_on(1_200_000, "1 1 INVITE", false),
+        prack_answer(1_250_000, 481),
+        bye(1_300_000),
+    ];
+    assert!(decide(&Prack2xxOr481, &before)[0].violated());
+}

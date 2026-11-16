@@ -141,3 +141,48 @@ fn a_party_of_two_binds_is_judged_on_its_whole_stream() {
     assert_eq!(out[0].0, ALICE, "reported at the bind that took the 200");
     assert_eq!(out[0].3, Some(BOB.to_string()), "charged to its sender");
 }
+
+/// At the caller's lane, the SUT no recorded bind: a non-2xx under a fork's
+/// tag whose provisional the loss model dropped on arrival is not charged,
+/// the SUT having sent that fork's tag; with no drop on the call the same
+/// final is a flip.
+#[test]
+fn a_non_2xx_under_a_dropped_fork_tag_is_not_charged_to_its_unrecorded_sender() {
+    use crate::types::RecvDisposition::{Delivered, LossModel};
+    let call = |fork2: Option<crate::types::RecvDisposition>| {
+        let mut evs = vec![arrival(
+            ALICE,
+            resp(180, 1, "INVITE", "bt", "z9hG4bK-i"),
+            SUT,
+            0,
+            Delivered,
+            None,
+        )];
+        if let Some(disposition) = fork2 {
+            evs.push(arrival(
+                ALICE,
+                resp(180, 1, "INVITE", "bt2", "z9hG4bK-i"),
+                SUT,
+                1,
+                disposition,
+                None,
+            ));
+        }
+        evs.push(arrival(
+            ALICE,
+            resp(487, 1, "INVITE", "bt2", "z9hG4bK-i"),
+            SUT,
+            2,
+            Delivered,
+            None,
+        ));
+        evaluate_rfc_findings(&evs)
+            .into_iter()
+            .filter(|f| f.rule == live_arm(RuleId::TagConsistency, false).name())
+            .collect::<Vec<_>>()
+    };
+    assert!(call(Some(LossModel)).is_empty(), "{:?}", call(Some(LossModel)));
+    let flipped = call(None);
+    assert_eq!(flipped.len(), 1, "{flipped:?}");
+    assert_eq!((flipped[0].lane.as_str(), flipped[0].charged.as_deref()), (ALICE, Some(SUT)));
+}

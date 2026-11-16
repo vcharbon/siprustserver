@@ -69,6 +69,10 @@ pub(super) struct Reading<'a> {
     /// dialog first reached the UAC: before the INVITE's final, it ended the
     /// early dialog, and nothing rides it after (RFC 3261 §15.1.2).
     pub(super) byed_at: BTreeMap<(&'a str, &'a str, &'a str), u64>,
+    /// (user agent, Call-ID, that agent's own tag on the dialog) → when a BYE
+    /// on the dialog first left or reached that agent: a request it takes on
+    /// the dialog afterwards names a dialog it ended (RFC 3261 §12.2.2).
+    pub(super) bye_ended_at: BTreeMap<(&'a str, &'a str, &'a str), u64>,
     /// The last timestamp on this view's own stream: after it, an absence is
     /// the observation's rather than the wire's.
     pub(super) last_ts_us: u64,
@@ -172,6 +176,12 @@ impl<'a> Reading<'a> {
             let dialog = msg.from_tag.as_deref().unwrap_or_default();
             let at = self.byed_at.entry((taker, msg.call_id.as_str(), dialog)).or_insert(msg.at_us);
             *at = (*at).min(msg.at_us);
+            let to_tag = msg.to_tag.as_deref().unwrap_or_default();
+            for own in [(sender, dialog), (taker, to_tag)] {
+                let key = (own.0, msg.call_id.as_str(), own.1);
+                let at = self.bye_ended_at.entry(key).or_insert(msg.at_us);
+                *at = (*at).min(msg.at_us);
+            }
         } else if msg.is_request("PRACK") {
             let rack = head.and_then(rack_of);
             let dialog = msg.to_tag.as_deref().unwrap_or_default();
