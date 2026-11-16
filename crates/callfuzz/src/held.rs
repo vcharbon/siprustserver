@@ -79,7 +79,7 @@ pub fn inject_cancel(rng: &mut Rng, call: &mut ActorCall, notes: &mut Vec<String
     let caller = scenario_harness::actor::originating_role(&call.actors);
     let Some(actor) = call.actors.iter_mut().find(|a| a.role == caller) else { return false };
     let at = Duration::from_millis(rng.below(3000));
-    let provisional = move |s: &StateInner| s.leg(caller).saw_status(100) || s.leg_rang(caller);
+    let provisional = move |s: &StateInner| s.leg(caller).heard_provisional();
     let confirmed = move |s: &StateInner| s.leg_at_least(caller, LegPhase::Confirmed);
     let cancel = Goal::new(
         Barrier::pred("fz_provisional", provisional),

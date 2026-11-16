@@ -200,6 +200,7 @@ async fn run_built_actor_call_observed(
     let roles: Vec<&'static str> = actors.iter().map(|a| a.role).collect();
     let expect = expect.in_context(env);
     let obs = ObservedState::new();
+    watch_losses(ctx, &obs, caller, roles);
     // An explicit ceiling replaces the standard re-emission bound; the longer of
     // the plan's and the environment's holds.
     let step_timeout = ceiling.max(env.wait_ceiling).unwrap_or(STEP_TIMEOUT);
@@ -232,24 +233,30 @@ async fn run_built_actor_call_observed(
             ));
         }
     }
-    fold_losses(ctx, &obs, caller, &roles);
+    ctx.loss_notes().unwatch();
     (verdict(expect, run, &obs, caller), obs)
 }
 
-/// Fold the datagrams the call's loss model dropped into `obs`, each on the
-/// leg it was to or from: the callee leg of that role, else `caller`. A lost
-/// datagram of a leg no actor plays is not folded.
-fn fold_losses(ctx: &CallCtx, obs: &ObservedState, caller: &'static str, roles: &[&'static str]) {
-    let now = tokio::time::Instant::now();
-    for message in ctx.lost() {
+/// Fold each datagram the call's loss model drops into `obs` as it drops it,
+/// on the leg it was to or from: the callee leg of that role, else `caller`.
+/// A lost datagram of a leg no actor plays is not folded.
+fn watch_losses(
+    ctx: &CallCtx,
+    obs: &ObservedState,
+    caller: &'static str,
+    roles: Vec<&'static str>,
+) {
+    let obs = obs.clone();
+    ctx.loss_notes().watch(move |message| {
         let leg = match message.leg.as_deref() {
             None => Some(caller),
             Some(name) => roles.iter().copied().find(|r| *r == name),
         };
         if let Some(leg) = leg {
-            obs.record(Observation::Lost { leg, message }, now);
+            let message = message.clone();
+            obs.record(Observation::Lost { leg, message }, tokio::time::Instant::now());
         }
-    }
+    });
 }
 
 /// The per-barrier / per-goal-guard wait bound: `64·T1 = 32 s` — the protocol's

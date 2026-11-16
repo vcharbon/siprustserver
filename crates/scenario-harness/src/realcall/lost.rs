@@ -1,6 +1,6 @@
 //! The datagrams of one call a simulated loss model dropped, as the call's
-//! parties would have exchanged them: the evidence an ending reads when a
-//! message it expects never arrived ([`LossNotes`]).
+//! parties would have exchanged them: the evidence a goal or an ending reads
+//! when a message it waits for never arrives ([`LossNotes`]).
 
 use std::sync::{Arc, Mutex};
 
@@ -22,27 +22,50 @@ pub struct LostMessage {
 }
 
 impl LostMessage {
-    /// A response to an INVITE on its way to the party, its status in `range`.
+    /// A response to an INVITE, its status in `range`, in either direction.
     pub fn is_invite_response_in(&self, range: std::ops::Range<u16>) -> bool {
-        self.inbound
-            && self.cseq_method == "INVITE"
-            && self.status.is_some_and(|s| range.contains(&s))
+        self.cseq_method == "INVITE" && self.status.is_some_and(|s| range.contains(&s))
     }
+}
+
+type Sink = Box<dyn Fn(&LostMessage) + Send + Sync>;
+
+#[derive(Default)]
+struct Inner {
+    notes: Vec<LostMessage>,
+    sink: Option<Sink>,
 }
 
 /// The call's lost datagrams, noted by the loss model as it drops them; a
 /// clone notes into the same list.
-#[derive(Debug, Clone, Default)]
-pub struct LossNotes(Arc<Mutex<Vec<LostMessage>>>);
+#[derive(Clone, Default)]
+pub struct LossNotes(Arc<Mutex<Inner>>);
 
 impl LossNotes {
-    /// Note one dropped datagram.
+    /// Note one dropped datagram, handing it to the watching sink first.
     pub fn note(&self, lost: LostMessage) {
-        self.0.lock().unwrap().push(lost);
+        let mut g = self.0.lock().unwrap();
+        if let Some(sink) = &g.sink {
+            sink(&lost);
+        }
+        g.notes.push(lost);
     }
 
     /// Every datagram noted so far, in the order dropped.
     pub fn all(&self) -> Vec<LostMessage> {
-        self.0.lock().unwrap().clone()
+        self.0.lock().unwrap().notes.clone()
+    }
+
+    /// Hand `sink` every datagram noted so far, then each one as it is
+    /// noted; replaces an earlier sink. The sink must not note.
+    pub fn watch(&self, sink: impl Fn(&LostMessage) + Send + Sync + 'static) {
+        let mut g = self.0.lock().unwrap();
+        g.notes.iter().for_each(&sink);
+        g.sink = Some(Box::new(sink));
+    }
+
+    /// Stop handing notes to the sink.
+    pub fn unwatch(&self) {
+        self.0.lock().unwrap().sink = None;
     }
 }

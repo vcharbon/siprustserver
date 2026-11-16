@@ -132,6 +132,12 @@ impl LegObservation {
         self.responses.iter().any(|f| (101..200).contains(&f.status) && f.cseq_method == "INVITE")
     }
 
+    /// Whether this leg's INVITE drew a provisional, `100 Trying` included:
+    /// what RFC 3261 §9.1 asks of a caller before she CANCELs.
+    pub fn heard_provisional(&self) -> bool {
+        self.responses.iter().any(|f| (100..200).contains(&f.status) && f.cseq_method == "INVITE")
+    }
+
     /// Whether this leg received a provisional carrying SDP — early media
     /// (RFC 3261 §13.2.1, RFC 3262).
     pub fn saw_early_media(&self) -> bool {
@@ -165,14 +171,14 @@ impl LegObservation {
     /// Whether the loss model dropped a 2xx to this leg's INVITE on its way
     /// to the leg: the sender had answered before any later copy arrived.
     pub fn lost_answer(&self) -> bool {
-        self.lost.iter().any(|m| m.is_invite_response_in(200..300))
+        self.lost.iter().any(|m| m.inbound && m.is_invite_response_in(200..300))
     }
 
     /// Whether the loss model dropped a provisional with a session
     /// description to this leg's INVITE on its way to the leg: early media
     /// the leg was sent and never received.
     pub fn lost_early_media(&self) -> bool {
-        self.lost.iter().any(|m| m.is_invite_response_in(101..200) && m.sdp)
+        self.lost.iter().any(|m| m.inbound && m.is_invite_response_in(101..200) && m.sdp)
     }
 
     /// Record an observed inbound in-dialog method name (idempotent — a set, so
@@ -237,6 +243,14 @@ impl StateInner {
     /// ([`LegObservation::rang`]); borrows, so a barrier poll clones nothing.
     pub fn leg_rang(&self, role: &str) -> bool {
         self.legs.get(role).is_some_and(LegObservation::rang)
+    }
+
+    /// Whether `role` received a provisional above 100 to an INVITE, or the
+    /// call's loss model dropped one on any leg, so her ringing may never
+    /// come: the gate of a step timed from the caller's ringing.
+    pub fn rang_or_ring_lost(&self, role: &str) -> bool {
+        self.leg_rang(role)
+            || self.legs.values().flat_map(|l| &l.lost).any(|m| m.is_invite_response_in(101..200))
     }
 
     /// Whether the caller's establishing INVITE ended on a final the call

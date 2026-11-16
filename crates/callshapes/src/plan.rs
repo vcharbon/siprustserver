@@ -34,6 +34,7 @@ mod barriers;
 
 pub(crate) use barriers::{answered, established_pred};
 use barriers::{declined, finalled, merged, renegs_reached};
+use barriers::{ringing, ringing_cancel};
 
 /// How the call is established — the first pipeline stage, which mints the
 /// initial dialog (or a terminal outcome for the deliberately-failing shapes).
@@ -860,15 +861,12 @@ impl ShapePlan {
             }
             Establishment::AbandonAfterRinging => {
                 let plan = self.binder.invite_plan(env, RouteIntent::Direct { target: "bob" });
-                let ringing = |s: &StateInner| s.leg_rang("alice") || provisional_lost(s, "alice");
+                let ringing = |s: &StateInner| ringing(s) || provisional_lost(s, "alice");
                 b.caller_goals.push(Goal::new(
                     Barrier::None,
                     GoalStep::Invite { callee: "bob", plan: Some(plan) },
                 ));
-                b.caller_goals.push(Goal::new(
-                    Barrier::pred("ringing", ringing),
-                    GoalStep::Cancel { stated: Vec::new() },
-                ));
+                b.caller_goals.push(ringing_cancel(Duration::ZERO, true));
                 // A 200 that crossed the CANCEL confirmed the call: hang up
                 // (RFC 3261 §15). After a 487 the accepted final drops it.
                 b.caller_goals.push(Goal::new(
@@ -914,18 +912,11 @@ impl ShapePlan {
                     Branch::ABANDONED,
                 ];
                 let plan = self.binder.invite_plan(env, RouteIntent::Direct { target: "bob" });
-                let ringing = |s: &StateInner| s.leg_rang("alice");
                 b.caller_goals.push(Goal::new(
                     Barrier::None,
                     GoalStep::Invite { callee: "bob", plan: Some(plan) },
                 ));
-                b.caller_goals.push(
-                    Goal::new(
-                        Barrier::pred("ringing", ringing),
-                        GoalStep::Cancel { stated: Vec::new() },
-                    )
-                    .after(env.ring_delay),
-                );
+                b.caller_goals.push(ringing_cancel(env.ring_delay, false));
                 b.caller_feed.on_provisional = Feed::new(Some("time_to_180"), None);
                 b.callees.push(ActorSpec {
                     role: "bob",
