@@ -21,7 +21,11 @@
 # The workspace is `-w <dir>`, else SIPRIG_WORKSPACE, else the current
 # directory where it holds rig.toml. It is mounted at its own path, so every
 # path the tooling prints is a path of this machine. Everything runs as the
-# caller's uid/gid, on the host's network (`--network host`).
+# caller's uid/gid, on the host's network (`--network host`), or on the docker
+# network SIPRIG_NETWORK names: an internal one (`docker network create
+# --internal`) holds the container off every other machine, its site reached
+# at the container's address (rig.toml `[site] bind = "0.0.0.0"`); `--lab` and
+# `--compose` need the host's network and are refused on another.
 #
 #   --lab            gives the container the docker socket: a managed target runs its images
 #   --compose <dir>  mounts a compose lab checkout read-only and names it SIPRIG_COMPOSE: the workspace's
@@ -35,6 +39,7 @@ set -euo pipefail
 
 NAME=@WRAPPER@
 IMAGE="${SIPRIG_IMAGE:-@IMAGE@}"
+NETWORK="${SIPRIG_NETWORK:-host}"
 STOP_TIMEOUT=60
 UP_TIMEOUT=600
 SITE_NEVER_ANSWERED=3
@@ -77,7 +82,7 @@ need_running() { running || die "the workspace's container $(container) is not r
 
 # The flags of a one-off container over the workspace: the caller's uid/gid, the mount at its own path.
 oneoff() {
-  docker run --rm --user "$(id -u):$(id -g)" --network host \
+  docker run --rm --user "$(id -u):$(id -g)" --network "$NETWORK" \
     -v "$workspace:$workspace" -e "SIPRIG_WORKSPACE=$workspace" "$@"
 }
 
@@ -138,6 +143,9 @@ up() {
       *) die "up: unknown flag $1" ;;
     esac
   done
+  if [ "$NETWORK" != host ] && { [ "$lab" = 1 ] || [ -n "$compose" ]; }; then
+    die "up: --lab and --compose drive a lab on the host's network, and SIPRIG_NETWORK names $NETWORK: unset it"
+  fi
   need_image
   local name uid gid
   name="$(container)"; uid="$(id -u)"; gid="$(id -g)"
@@ -161,7 +169,7 @@ up() {
     extra+=(-v "$compose:$compose:ro" -e "SIPRIG_COMPOSE=$compose" --label "org.siprig.compose=$compose")
   fi
   docker run -d --name "$name" \
-    --user "$uid:$gid" --network host \
+    --user "$uid:$gid" --network "$NETWORK" \
     --tmpfs "/run:rw,exec,nosuid,size=64m,uid=$uid,gid=$gid,mode=0755" \
     --memory "$memory" --memory-swap "$memory" \
     --stop-timeout "$STOP_TIMEOUT" \

@@ -92,8 +92,12 @@ COPY --from=stamp . /opt/siprig/image/stamp/
 
 # Every process runs as the uid/gid the wrapper passes (`--user`), with /run a
 # tmpfs it owns. PGUSER names the store's superuser, the one initdb makes. No
-# systemd user session runs here: the container caps every child.
+# systemd user session runs here: the container caps every child. The image
+# runs offline: the installed node_modules trees are root's and record a
+# build-time store the image does not ship, so pnpm's install before `run` and
+# `exec` (verify-deps-before-run) is off; it would purge them and refetch.
 ENV SIPRIG_BIN_DIR=/opt/siprig/bin \
+    pnpm_config_verify_deps_before_run=false \
     SIPFLOW=/opt/siprig/bin/sipflow \
     PIVOT_SCHEMA_BIN=/opt/siprig/bin/pivot-schema \
     REPLAY_BIN=/opt/siprig/bin/replay \

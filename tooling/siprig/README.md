@@ -24,7 +24,10 @@ kit tar <dir> [--tag T] [--base IMAGE] [--out DIR]  the pack's image saved as DI
 | `/opt/siprig/image/stamp` | one `<component>.env` per checkout built in: `SHA`, `BRANCH`, `DIRTY`, `DIFF`, `DIR` |
 
 Node, postgres (its major in the label `org.siprig.pg-major`), s6-overlay and the docker
-CLI; no Python. The s6 services run a workspace mounted at its own path (`SIPRIG_WORKSPACE`):
+CLI; no Python. The image needs no network once built: the viewer app loads nothing from
+another origin, and pnpm's install before `run` and `exec` is off
+(`pnpm_config_verify_deps_before_run=false`), since the installed trees are root's and record
+a build-time store the image does not ship. The s6 services run a workspace mounted at its own path (`SIPRIG_WORKSPACE`):
 `workspace` checks its `rig.toml` (`check --config-only`), prepares it (`init`), checks the
 whole of it (`check`) and writes the store's environment to
 `/run/siprig/workspace.env`, `postgres` runs the workspace's own cluster in `pgdata/` on a
@@ -79,7 +82,9 @@ It then builds:
   `/opt/siprig/image/wrapper` in the image, and beside the tarball `kit tar` writes.
 
 The wrapper (`<wrapper> --help`) loads the image, makes a workspace (`init`), starts one
-container per workspace (`up`, as the caller's uid on the host's network; refused while any
+container per workspace (`up`, as the caller's uid on the host's network, or on the docker
+network `SIPRIG_NETWORK` names, such as an internal one that holds a run off every other
+machine; refused while any
 container labelled `org.siprig.workspace=<the workspace's real path>` runs; the container's
 name and label follow that real path, so a link to the workspace names the same one) and
 waits for the site,
