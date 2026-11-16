@@ -277,7 +277,9 @@ impl WireFacts {
             (Dir::In, None) => {
                 if id.method == Some("BYE") {
                     self.bye_received.get_or_insert(None);
-                    self.finals.bye(&mut self.failures, false, cseq, now);
+                    if self.finals.bye(&mut self.failures, false, cseq, now) {
+                        self.bye_elsewhere(None, now);
+                    }
                 }
                 note_request(&mut self.received, d, now);
             }
@@ -307,7 +309,9 @@ impl WireFacts {
             _ => {
                 if method == "BYE" {
                     self.bye.get_or_insert(None);
-                    self.finals.bye(&mut self.failures, true, cseq, now);
+                    if self.finals.bye(&mut self.failures, true, cseq, now) {
+                        self.bye_elsewhere(None, now);
+                    }
                 }
                 self.finals.sent(&mut self.failures, method, cseq);
                 self.pending.entry(cseq).or_insert_with(|| (method.to_string(), now));
@@ -392,12 +396,22 @@ impl WireFacts {
             }
             (Dir::In, None, Some(i)) => {
                 let leg = &mut self.legs[i];
-                if let (Some("BYE"), Some(cseq)) = (id.method, id.cseq) {
-                    leg.finals.bye(&mut leg.failures, false, cseq, now);
+                let new_bye = match (id.method, id.cseq) {
+                    (Some("BYE"), Some(cseq)) => {
+                        leg.finals.bye(&mut leg.failures, false, cseq, now)
+                    }
+                    _ => false,
+                };
+                note_request(&mut leg.received, d, now);
+                if new_bye {
+                    self.bye_elsewhere(Some(i), now);
                 }
-                note_request(&mut leg.received, d, now)
             }
-            (Dir::Out, None, Some(i)) => self.legs[i].sent_request(id, now),
+            (Dir::Out, None, Some(i)) => {
+                if self.legs[i].sent_request(id, now) {
+                    self.bye_elsewhere(Some(i), now);
+                }
+            }
             (Dir::In, Some(code), Some(i)) => self.legs[i].own_final(id, (code, d.raw()), now),
             (Dir::Out, Some(code), Some(i)) if id.cseq_method == Some("INVITE") => {
                 let leg = &mut self.legs[i];
@@ -413,19 +427,33 @@ impl WireFacts {
             _ => {}
         }
     }
+
+    /// A BYE first left or reached side `side` (`None`: the caller) at `now`:
+    /// every other side's finals learn it ([`Finals::other_bye`]).
+    fn bye_elsewhere(&mut self, side: Option<usize>, now: i64) {
+        if side.is_some() {
+            self.finals.other_bye(&mut self.failures, now);
+        }
+        for (i, leg) in self.legs.iter_mut().enumerate() {
+            if side != Some(i) {
+                leg.finals.other_bye(&mut leg.failures, now);
+            }
+        }
+    }
 }
 
 impl LegFacts {
-    /// An in-dialog request the leg sent (ACK and CANCEL aside), first sending.
-    fn sent_request(&mut self, id: &Identity<'_>, now: i64) {
-        let (Some(method), Some(cseq)) = (id.method, id.cseq) else { return };
-        if method != "ACK" && method != "CANCEL" && !untagged(id) {
-            if method == "BYE" {
-                self.finals.bye(&mut self.failures, true, cseq, now);
-            }
-            self.finals.sent(&mut self.failures, method, cseq);
-            self.pending.entry(cseq).or_insert_with(|| (method.to_string(), now));
+    /// An in-dialog request the leg sent (ACK and CANCEL aside), first
+    /// sending. Returns whether it is a BYE the leg had not sent before.
+    fn sent_request(&mut self, id: &Identity<'_>, now: i64) -> bool {
+        let (Some(method), Some(cseq)) = (id.method, id.cseq) else { return false };
+        if method == "ACK" || method == "CANCEL" || untagged(id) {
+            return false;
         }
+        let new_bye = method == "BYE" && self.finals.bye(&mut self.failures, true, cseq, now);
+        self.finals.sent(&mut self.failures, method, cseq);
+        self.pending.entry(cseq).or_insert_with(|| (method.to_string(), now));
+        new_bye
     }
 
     /// A final to one of the leg's own in-dialog requests.

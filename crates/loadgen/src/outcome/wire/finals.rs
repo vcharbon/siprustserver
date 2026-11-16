@@ -1,5 +1,6 @@
 //! Which finals fail a side's in-dialog requests: a non-2xx unless the
-//! request was in flight as a BYE ended its dialog, a retry the final asked
+//! request was in flight as a BYE ended its dialog (or, for a 487, the leg
+//! it was relayed toward), a retry the final asked
 //! for superseded it, or the loss model reordered it; and what is left
 //! unanswered.
 
@@ -64,12 +65,16 @@ impl Request<'_> {
 }
 
 /// What a side's in-dialog finals are judged against: the order of its
-/// requests, the BYEs that left or reached it, its refusals a retry may
-/// supersede, and its 487s a BYE arriving soon after may still excuse.
+/// requests, the BYEs that left or reached it or another side of the call,
+/// its refusals a retry may supersede, and its 487s a BYE arriving soon after
+/// may still excuse.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub(crate) struct Finals {
     pub(super) sent: SentOrder,
     byes: Vec<Bye>,
+    /// When a BYE first left or reached another side of the call, ending the
+    /// leg toward which the system under test relays the side's requests.
+    other_byes: Vec<i64>,
     /// A 491, or a 500 with a Retry-After, to a re-INVITE or UPDATE: the
     /// side's next request of that method retries it (RFC 3261 §14.1).
     retriable: Vec<WireFailure>,
@@ -80,11 +85,34 @@ pub(crate) struct Finals {
 impl Finals {
     /// A BYE left the side (`sent`) or reached it at `now`: the 487 failures
     /// of `failures` that arrived at most T2 before it answered requests
-    /// pending as it ended the dialog (RFC 3261 §15.1.2), and go.
-    pub(super) fn bye(&mut self, failures: &mut Vec<WireFailure>, sent: bool, cseq: u32, now: i64) {
-        if !self.byes.iter().any(|b| b.sent == sent && b.cseq == cseq) {
+    /// pending as it ended the dialog (RFC 3261 §15.1.2), and go. Returns
+    /// whether this BYE is new to the side (not a retransmission).
+    pub(super) fn bye(
+        &mut self,
+        failures: &mut Vec<WireFailure>,
+        sent: bool,
+        cseq: u32,
+        now: i64,
+    ) -> bool {
+        let new = !self.byes.iter().any(|b| b.sent == sent && b.cseq == cseq);
+        if new {
             self.byes.push(Bye { sent, cseq, at_ms: now });
         }
+        self.forget_terminated(failures, now);
+        new
+    }
+
+    /// A BYE first left or reached another side of the call at `now`: the
+    /// side's 487 failures that arrived at most T2 before it answered
+    /// requests relayed toward the leg it ended, and go.
+    pub(super) fn other_bye(&mut self, failures: &mut Vec<WireFailure>, now: i64) {
+        self.other_byes.push(now);
+        self.forget_terminated(failures, now);
+    }
+
+    /// Forget the 487 failures of `failures` a BYE at `now` excuses: sent
+    /// before it, arrived at most T2 before it.
+    fn forget_terminated(&mut self, failures: &mut Vec<WireFailure>, now: i64) {
         self.terminated.retain(|(failure, sent_at)| {
             let ended = now >= *sent_at && now - failure.at_ms <= T2_MS;
             if ended {
@@ -109,9 +137,10 @@ impl Finals {
 
     /// The final `code` (`raw`) to the side's request `req` arrived at `now`:
     /// a failure joins `failures` unless a BYE other than the request ended
-    /// its dialog first (a 481, RFC 3261 §12.2.2) or within T2 of it after
-    /// it was sent (a 487, §15.1.2), or the 500 refuses a CSeq the loss model
-    /// reordered. Returns whether it failed.
+    /// its dialog first (a 481, RFC 3261 §12.2.2), a BYE on its dialog or on
+    /// another side of the call came within T2 of it after it was sent (a
+    /// 487, §15.1.2), or the 500 refuses a CSeq the loss model reordered.
+    /// Returns whether it failed.
     pub(super) fn judge(
         &mut self,
         failures: &mut Vec<WireFailure>,
@@ -122,10 +151,11 @@ impl Finals {
         let fails = match code {
             ..300 => false,
             481 => !self.byes.iter().any(|b| req.other_than(b)),
-            487 => !self
-                .byes
-                .iter()
-                .any(|b| req.other_than(b) && b.at_ms >= req.sent_at && now - b.at_ms <= T2_MS),
+            487 => {
+                let ended_near = |at: i64| at >= req.sent_at && now - at <= T2_MS;
+                let own = self.byes.iter().any(|b| req.other_than(b) && ended_near(b.at_ms));
+                !own && !self.other_byes.iter().any(|at| ended_near(*at))
+            }
             _ => !self.sent.reordered(req.cseq, code),
         };
         if !fails {
