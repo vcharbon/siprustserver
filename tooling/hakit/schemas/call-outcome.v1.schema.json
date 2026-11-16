@@ -224,7 +224,7 @@
           "pattern": "^[a-z][a-z0-9_]*$"
         },
         "detail": {
-          "description": "A short bounded text: the RFC rule id, the step that failed, the message received.",
+          "description": "A short bounded text: the RFC rule id followed by its charged party, lane and finding, the step that failed, the message received.",
           "type": "string"
         }
       }
