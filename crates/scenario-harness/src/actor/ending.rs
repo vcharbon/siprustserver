@@ -113,7 +113,8 @@ impl Branch {
                     facts.iter().position(|f| f.status >= 200 && f.cseq_method == "CANCEL");
                 l.first_final().is_none()
                     && matches!((answered, cancel_final), (Some(a), Some(c))
-                        if (a < c || l.lost_answer_before(c)) && matches!(facts[c].status, 200 | 481))
+                        if (a < c || l.lost_answer_before_cancel_final())
+                            && matches!(facts[c].status, 200 | 481))
             }),
             Ending::AnsweredBeforeCancel => leg.is_some_and(|l| {
                 !l.cancel_sent()

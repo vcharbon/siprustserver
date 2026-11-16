@@ -28,12 +28,23 @@ pub struct LostMessage {
     pub call_id: String,
     pub from_tag: String,
     pub cseq: u32,
+    /// The responses the network had delivered to the party when the loss
+    /// model dropped this datagram, each distinct `(status, CSeq method)`
+    /// once, in arrival order: the network's own order, which the party's
+    /// reading of those responses may trail.
+    pub arrived_before: Vec<(u16, String)>,
 }
 
 impl LostMessage {
     /// A response to an INVITE, its status in `range`, in either direction.
     pub fn is_invite_response_in(&self, range: std::ops::Range<u16>) -> bool {
         self.cseq_method == "INVITE" && self.status.is_some_and(|s| range.contains(&s))
+    }
+
+    /// Whether a response to a `cseq_method` request, its status in `range`,
+    /// had reached the party before this datagram was dropped.
+    pub fn after_response_in(&self, cseq_method: &str, range: std::ops::Range<u16>) -> bool {
+        self.arrived_before.iter().any(|(s, m)| m == cseq_method && range.contains(s))
     }
 }
 

@@ -10,8 +10,8 @@ use crate::outcome::CallWire;
 pub(super) fn loss_tap(ctx: &CallCtx, wire: Option<&CallWire>) -> crate::mux::LossTap {
     let notes = crate::mux::notes_tap(ctx.loss_notes());
     let Some(wire) = wire.map(CallWire::loss_tap) else { return notes };
-    Arc::new(move |side, dir, d| {
-        notes(side, dir, d);
-        wire(side, dir, d);
+    Arc::new(move |side, dir, d, arrived_before| {
+        notes(side, dir, d, arrived_before);
+        wire(side, dir, d, arrived_before);
     })
 }

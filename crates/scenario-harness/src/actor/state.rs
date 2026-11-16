@@ -94,7 +94,7 @@ pub struct LegObservation {
     responses: Vec<ResponseFact>,
     /// The datagrams to or from this leg the call's loss model dropped, as
     /// they were folded in ([`Observation::Lost`]).
-    lost: Vec<lost::Lost>,
+    lost: Vec<crate::realcall::LostMessage>,
 }
 
 impl LegObservation {

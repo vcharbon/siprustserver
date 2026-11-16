@@ -47,6 +47,7 @@ async fn a_silent_callee_whose_ring_was_lost_rings_again() {
             cseq: 1,
             reliable: false,
             to_tag: String::new(),
+            arrived_before: vec![],
         });
     });
     let verdict = run_built_actor_call(call, &env, &ctx).await;

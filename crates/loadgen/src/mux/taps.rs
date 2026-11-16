@@ -5,7 +5,7 @@
 //! which sees each datagram with the side of the call it crossed. Each of
 //! them reads the datagram's one sniff ([`Datagram`]).
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use tokio::time::Instant;
 
@@ -36,14 +36,35 @@ pub enum Dir {
 pub type WireTap = Arc<dyn Fn(Side<'_>, Dir, &Datagram<'_>) + Send + Sync>;
 
 /// A call's loss tap: every datagram the call's loss model drops, first
-/// transmissions and the engine's re-sends alike, with the side of the call
-/// and its direction of travel (`Out`: it left the endpoint, `In`: it was on
-/// its way to it).
-pub type LossTap = Arc<dyn Fn(Side<'_>, Dir, &Datagram<'_>) + Send + Sync>;
+/// transmissions and the engine's re-sends alike, with the side of the call,
+/// its direction of travel (`Out`: it left the endpoint, `In`: it was on its
+/// way to it), and the responses the mux delivered to the endpoint before the
+/// drop, each distinct `(status, CSeq method)` once, in arrival order.
+pub type LossTap = Arc<dyn Fn(Side<'_>, Dir, &Datagram<'_>, &[(u16, String)]) + Send + Sync>;
+
+/// The responses the mux delivered to one endpoint, each distinct
+/// `(status, CSeq method)` once, in arrival order: the order the network
+/// delivered them in, which the endpoint's agent reads them after.
+#[derive(Default)]
+pub(in crate::mux) struct Arrived(Mutex<Vec<(u16, String)>>);
+
+impl Arrived {
+    fn on_inbound(&self, id: &Identity<'_>) {
+        let (Some(status), Some(method)) = (id.status, id.cseq_method) else { return };
+        let mut arrived = self.0.lock().unwrap();
+        if !arrived.iter().any(|(s, m)| *s == status && m == method) {
+            arrived.push((status, method.to_string()));
+        }
+    }
+
+    fn snapshot(&self) -> Vec<(u16, String)> {
+        self.0.lock().unwrap().clone()
+    }
+}
 
 /// A loss tap that notes each dropped datagram in `notes`.
 pub fn notes_tap(notes: LossNotes) -> LossTap {
-    Arc::new(move |side, dir, d| {
+    Arc::new(move |side, dir, d, arrived_before| {
         let id = d.id();
         notes.note(LostMessage {
             leg: match side {
@@ -60,6 +81,7 @@ pub fn notes_tap(notes: LossNotes) -> LossTap {
             call_id: id.call_id.unwrap_or_default().to_string(),
             from_tag: from_tag(d.raw()),
             cseq: id.cseq.unwrap_or_default(),
+            arrived_before: arrived_before.to_vec(),
         });
     })
 }
@@ -70,6 +92,8 @@ pub(in crate::mux) struct Taps {
     tally: Option<Arc<CallTally>>,
     wire: Option<WireTap>,
     loss: Option<LossTap>,
+    /// What the loss tap is told was delivered before each drop.
+    arrived: Arrived,
     /// The callee leg's role; `None` on the caller.
     leg: Option<String>,
 }
@@ -88,13 +112,14 @@ impl Taps {
             return None;
         }
         let rtt = rtt.map(RttTracker::new);
-        Some(Arc::new(Self { rtt, tally, wire, loss, leg: leg.map(str::to_string) }))
+        let leg = leg.map(str::to_string);
+        Some(Arc::new(Self { rtt, tally, wire, loss, arrived: Arrived::default(), leg }))
     }
 
     /// The loss model dropped `d` travelling `dir`.
     pub(in crate::mux) fn on_lost(&self, dir: Dir, d: &Datagram<'_>) {
         if let Some(loss) = &self.loss {
-            loss(self.side(), dir, d);
+            loss(self.side(), dir, d, &self.arrived.snapshot());
         }
     }
 
@@ -115,6 +140,9 @@ impl Taps {
     }
 
     pub(in crate::mux) fn on_inbound(&self, d: &Datagram<'_>, now: Instant) {
+        if self.loss.is_some() {
+            self.arrived.on_inbound(d.id());
+        }
         if let Some(rtt) = &self.rtt {
             rtt.on_inbound(d.id(), now);
         }

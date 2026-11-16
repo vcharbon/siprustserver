@@ -412,6 +412,7 @@ fn lost_request(method: &str, from_tag: &str, cseq: u32) -> crate::realcall::Los
         call_id: "c1".to_string(),
         from_tag: from_tag.to_string(),
         cseq,
+        arrived_before: vec![],
     }
 }
 

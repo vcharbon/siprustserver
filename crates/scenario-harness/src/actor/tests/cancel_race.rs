@@ -242,20 +242,29 @@ fn caller_saw(responses: &[(u16, &str)], final_status: Option<u16>) -> ObservedS
     caller_saw_losing(responses, final_status, None)
 }
 
-/// [`caller_saw`], the loss model dropping on its way to her, once she had
-/// observed `lost.0` responses, a response to her INVITE of status `lost.1`,
-/// with SDP when `lost.2`.
+/// One response to her INVITE the loss model dropped on its way to the
+/// caller: folded in once she had observed `folded_after` responses, the
+/// network having delivered her `arrived_before` first.
+#[derive(Clone, Copy)]
+struct LostToAlice {
+    folded_after: usize,
+    status: u16,
+    sdp: bool,
+    arrived_before: &'static [(u16, &'static str)],
+}
+
+/// [`caller_saw`], the loss model dropping `lost` on its way to her.
 fn caller_saw_losing(
     responses: &[(u16, &str)],
     final_status: Option<u16>,
-    lost: Option<(usize, u16, bool)>,
+    lost: Option<LostToAlice>,
 ) -> ObservedState {
     let obs = ObservedState::new();
     let now = tokio::time::Instant::now();
     obs.record(Observation::LegEarly { leg: "alice" }, now);
     let drop_after = |observed: usize| {
-        if let Some((_, status, sdp)) = lost.filter(|(at, _, _)| *at == observed) {
-            lost_to_alice(&obs, status, sdp);
+        if let Some(l) = lost.filter(|l| l.folded_after == observed) {
+            lost_to_alice(&obs, l.status, l.sdp, l.arrived_before);
         }
     };
     for (observed, &(status, method)) in responses.iter().enumerate() {
@@ -340,8 +349,9 @@ async fn a_server_ignoring_the_cancel_is_no_accepted_ending() {
 }
 
 /// What the loss model dropped on its way to the caller, as the load lane
-/// folds it in: a response to her INVITE of `status`, with SDP or not.
-fn lost_to_alice(obs: &ObservedState, status: u16, sdp: bool) {
+/// folds it in: a response to her INVITE of `status`, with SDP or not, the
+/// network having delivered her `arrived_before` first.
+fn lost_to_alice(obs: &ObservedState, status: u16, sdp: bool, arrived_before: &[(u16, &str)]) {
     let message = crate::realcall::LostMessage {
         leg: None,
         inbound: true,
@@ -354,9 +364,14 @@ fn lost_to_alice(obs: &ObservedState, status: u16, sdp: bool) {
         call_id: "c".to_string(),
         from_tag: "a".to_string(),
         cseq: 1,
+        arrived_before: arrived_before.iter().map(|(s, m)| (*s, m.to_string())).collect(),
     };
     obs.record(Observation::Lost { leg: "alice", message }, tokio::time::Instant::now());
 }
+
+/// What the caller saw of a CANCEL crossing a server's 2xx: her 180, her
+/// CANCEL's 200, then the 2xx.
+const CROSSING_LOG: [(u16, &str); 3] = [(180, "INVITE"), (200, "CANCEL"), (200, "INVITE")];
 
 /// A 2xx that reached the caller only after her CANCEL's 200, its earlier
 /// copy dropped on the way before that 200 arrived: the server had answered
@@ -365,24 +380,41 @@ fn lost_to_alice(obs: &ObservedState, status: u16, sdp: bool) {
 #[tokio::test]
 async fn a_2xx_whose_first_copy_was_lost_before_the_cancel_final_is_the_crossing() {
     let expect = Expect::of(&[Branch::ANSWERED_DESPITE_CANCEL, Branch::ABANDONED]);
-    let log = [(180, "INVITE"), (200, "CANCEL"), (200, "INVITE")];
-    let lost = caller_saw_losing(&log, None, Some((1, 200, false)));
+    let before = LostToAlice {
+        folded_after: 1,
+        status: 200,
+        sdp: false,
+        arrived_before: &[(180, "INVITE")],
+    };
+    let lost = caller_saw_losing(&CROSSING_LOG, None, Some(before));
     let v = verdict(expect, CallVerdict::Ok, &lost, "alice");
     assert_eq!(v.branch(), Some("answered_despite_cancel"), "got {v:?}");
-    let not_lost = caller_saw_losing(&log, None, Some((1, 183, true)));
+    let not_lost = LostToAlice { status: 183, sdp: true, ..before };
+    let not_lost = caller_saw_losing(&CROSSING_LOG, None, Some(not_lost));
     assert!(!verdict(expect, CallVerdict::Ok, &not_lost, "alice").is_success());
 }
 
 /// A server that ignored the CANCEL, its late 2xx's first copy dropped only
 /// after the CANCEL's 200 had reached her, answered after that 200: no
-/// crossing, no accepted ending.
+/// crossing, no accepted ending. The drop's place in the network's arrival
+/// order decides, not when it was folded in: a drop the network noted
+/// before she read the CANCEL's 200, that 200 having arrived first, is no
+/// crossing either.
 #[tokio::test]
 async fn a_2xx_first_lost_after_the_cancel_final_is_no_crossing() {
     let expect = Expect::of(&[Branch::ANSWERED_DESPITE_CANCEL, Branch::ABANDONED]);
-    let log = [(180, "INVITE"), (200, "CANCEL"), (200, "INVITE")];
-    let late = caller_saw_losing(&log, None, Some((2, 200, false)));
-    let v = verdict(expect, CallVerdict::Ok, &late, "alice");
-    assert!(!v.is_success(), "a 2xx answered after the CANCEL's 200, got {v:?}");
+    let after_cancel_final: &[(u16, &str)] = &[(180, "INVITE"), (200, "CANCEL")];
+    for folded_after in [2, 1] {
+        let lost = LostToAlice {
+            folded_after,
+            status: 200,
+            sdp: false,
+            arrived_before: after_cancel_final,
+        };
+        let late = caller_saw_losing(&CROSSING_LOG, None, Some(lost));
+        let v = verdict(expect, CallVerdict::Ok, &late, "alice");
+        assert!(!v.is_success(), "folded after {folded_after}: a late 2xx, got {v:?}");
+    }
 }
 
 /// A refusal after early media whose provisional with SDP the loss model
@@ -392,10 +424,10 @@ async fn a_2xx_first_lost_after_the_cancel_final_is_no_crossing() {
 async fn a_lost_early_media_provisional_still_makes_the_early_media_refusal() {
     let expect = Expect::one(Branch::early_media_rejected(603));
     let lost = caller_saw(&[(603, "INVITE")], Some(603));
-    lost_to_alice(&lost, 183, true);
+    lost_to_alice(&lost, 183, true, &[]);
     let v = verdict(expect, CallVerdict::Ok, &lost, "alice");
     assert_eq!(v.branch(), Some("early_media_rejected"), "got {v:?}");
     let no_sdp = caller_saw(&[(603, "INVITE")], Some(603));
-    lost_to_alice(&no_sdp, 180, false);
+    lost_to_alice(&no_sdp, 180, false, &[]);
     assert!(!verdict(expect, CallVerdict::Ok, &no_sdp, "alice").is_success());
 }

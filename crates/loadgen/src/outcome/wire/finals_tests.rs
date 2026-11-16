@@ -137,7 +137,7 @@ async fn a_500_to_a_request_the_loss_reordered_is_no_failure() {
             tap(Side::Caller, dir, &Datagram::sniff(&raw));
         }
         if lost {
-            loss(Side::Caller, Dir::Out, &Datagram::sniff(&update));
+            loss(Side::Caller, Dir::Out, &Datagram::sniff(&update), &[]);
         }
         for (dir, raw) in [
             (Dir::Out, msg("INFO sip:b@h SIP/2.0", "c13", "4 INFO", "t1", "")),
@@ -252,7 +252,7 @@ async fn a_487_far_from_any_bye_stays_a_failure() {
 fn relayed_info(wire: &CallWire, lost: Option<bool>) {
     let info = msg("INFO sip:q@h SIP/2.0", "b18", "3 INFO", "q1", "");
     match lost {
-        Some(true) => wire.loss_tap()(Side::Leg("callee"), Dir::In, &Datagram::sniff(&info)),
+        Some(true) => wire.loss_tap()(Side::Leg("callee"), Dir::In, &Datagram::sniff(&info), &[]),
         Some(false) => {
             feed(wire, &[(Side::Leg("callee"), Dir::In, info)]);
         }
@@ -374,7 +374,7 @@ async fn a_481_before_a_bye_whose_first_copy_was_lost_is_excused() {
             ],
         );
         if lost {
-            wire.loss_tap()(Side::Caller, Dir::In, &Datagram::sniff(&bye));
+            wire.loss_tap()(Side::Caller, Dir::In, &Datagram::sniff(&bye), &[]);
         }
         feed(
             &wire,

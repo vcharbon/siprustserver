@@ -178,7 +178,7 @@ impl CallWire {
     /// request the side was still sent, a BYE whose copy it missed).
     pub fn loss_tap(&self) -> LossTap {
         let (clock, facts) = (self.clock.clone(), self.facts.clone());
-        Arc::new(move |side, dir, d| {
+        Arc::new(move |side, dir, d, _| {
             let id = d.id();
             let (None, Some(method), Some(cseq)) = (id.status, id.method, id.cseq) else {
                 return;
