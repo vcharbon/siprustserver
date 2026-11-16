@@ -1,8 +1,9 @@
 //! **callfuzz**: a seeded call-flow fuzzer over the actor engine.
 //!
 //! Each call draws from its own seed ([`call_seed`]: the run's seed hashed
-//! with the call's token), so a run seed reproduces every call and one call's
-//! seed replays it alone. A drawn call is any compiled [`ActorCall`]; the
+//! with the call's token), so the calls of a run differ and one call's seed
+//! replays it alone; a run reproduces whole only where its tokens repeat. A
+//! drawn call is any compiled [`ActorCall`]; the
 //! fuzzer changes it in RFC-legal ways only, unless the caller opts in:
 //!
 //! - [`perturb`]: jittered goal dwells (new crossings), hostile but legal

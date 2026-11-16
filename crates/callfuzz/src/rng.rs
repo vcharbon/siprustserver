@@ -48,7 +48,7 @@ fn fnv(seed: u64, s: &str) -> u64 {
 
 /// The seed a call draws from: `replay` when one call is replayed, else the
 /// run's seed hashed with the call's token, so every call of a run differs and
-/// a run seed reproduces them all.
+/// the same run seed and token draw the same call.
 pub fn call_seed(run_seed: u64, replay: Option<u64>, token: &str) -> u64 {
     replay.unwrap_or_else(|| fnv(run_seed, token))
 }
