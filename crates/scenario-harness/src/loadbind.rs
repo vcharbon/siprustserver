@@ -366,13 +366,14 @@ impl AgentBinder {
     /// What, once the call's traffic is over, its UAs answered the requests
     /// the loss model's drops explain (`notes`, the caller's datagrams under
     /// `caller`, as [`rfc_findings`](Self::rfc_findings) reads them): each
-    /// refusal's request method and status, which the system under test may
-    /// relay to the other side of the call.
+    /// refusal's party (its callee leg, `None` for `caller`), request method
+    /// and status, which the system under test may relay to another side of
+    /// the call.
     pub fn loss_excused(
         &self,
         notes: crate::realcall::LossNotes,
         caller: String,
-    ) -> impl FnOnce() -> Vec<(String, u16)> + Send + 'static {
+    ) -> impl FnOnce() -> Vec<(Option<String>, String, u16)> + Send + 'static {
         use crate::agent::dialog_gate::GatedVerdict;
         let judges = self.judges.lock().unwrap().clone();
         move || {
@@ -385,7 +386,11 @@ impl AgentBinder {
             });
             gated
                 .filter(|g| g.explained_by_loss(&lost))
-                .filter_map(|g| g.verdict.kind.refusal().map(|(code, _)| (g.verdict.method, code)))
+                .filter_map(|g| {
+                    let (code, _) = g.verdict.kind.refusal()?;
+                    let leg = Some(g.party).filter(|party| *party != caller);
+                    Some((leg, g.verdict.method, code))
+                })
                 .collect()
         }
     }

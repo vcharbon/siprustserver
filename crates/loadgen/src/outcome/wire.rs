@@ -20,10 +20,12 @@ use sip_message::sniff::{body, header_value, header_values, session_description,
 
 use crate::mux::{Datagram, Dir, LossTap, Side, WireTap};
 
+mod excuse;
 mod finals;
 
-pub(crate) use finals::SentOrder;
-use finals::{fails, retried, settle_pending, unanswered};
+pub use excuse::Refusal;
+pub(crate) use finals::Finals;
+use finals::{settle_pending, unanswered, Request};
 
 /// One failed in-dialog request the caller sent: its non-2xx final, or no
 /// final at all (`code: None`).
@@ -72,9 +74,7 @@ pub struct LegFacts {
     /// The leg's own in-dialog requests awaiting a final, by CSeq number:
     /// their method and when they were first sent.
     pub(crate) pending: HashMap<u32, (String, i64)>,
-    /// The leg sent or received a BYE.
-    pub(crate) byed: bool,
-    pub(crate) sent: SentOrder,
+    pub(crate) finals: Finals,
 }
 
 impl LegFacts {
@@ -121,9 +121,12 @@ pub struct WireFacts {
     /// The caller's in-dialog requests awaiting a final, by CSeq number: their
     /// method and when they were first sent.
     pub(crate) pending: HashMap<u32, (String, i64)>,
-    pub(crate) sent: SentOrder,
+    pub(crate) finals: Finals,
     /// The verdict resolved: the facts no longer change.
     pub(crate) sealed: bool,
+    /// How many of the caller's failures the seal found: those after it are
+    /// the finals of requests it left pending.
+    pub(crate) failures_at_seal: usize,
     /// After the verdict, the generator's teardown BYE drew a 2xx.
     pub teardown_released: bool,
 }
@@ -174,7 +177,11 @@ impl CallWire {
 
     /// The call's verdict resolved: freeze the setup facts.
     pub fn seal(&self) {
-        self.facts.lock().unwrap().sealed = true;
+        let mut f = self.facts.lock().unwrap();
+        if !f.sealed {
+            f.sealed = true;
+            f.failures_at_seal = f.failures.len();
+        }
     }
 
     /// Whether an in-dialog request other than a BYE still awaits its final
@@ -191,34 +198,35 @@ impl CallWire {
             let id = d.id();
             let (Dir::Out, None, Some(cseq)) = (dir, id.status, id.cseq) else { return };
             let mut f = facts.lock().unwrap();
-            let sent = match side {
-                Side::Caller => Some(&mut f.sent),
-                Side::Leg(role) => f.legs.iter_mut().find(|l| l.role == role).map(|l| &mut l.sent),
+            let finals = match side {
+                Side::Caller => Some(&mut f.finals),
+                Side::Leg(role) => {
+                    f.legs.iter_mut().find(|l| l.role == role).map(|l| &mut l.finals)
+                }
             };
-            if let Some(sent) = sent {
-                sent.lost(cseq);
+            if let Some(finals) = finals {
+                finals.sent.lost(cseq);
             }
         })
     }
 
-    /// Forget the in-dialog failures `excused` names (request method and
-    /// final): a UA of the call refused a request the loss model's drops
-    /// explain, and the system under test relayed that refusal. Forget too a
-    /// 487 of a side whose dialog a BYE ended, before or after it arrived:
-    /// the answer to a request pending as its dialog ended (RFC 3261
-    /// §15.1.2).
-    pub fn excuse(&self, excused: &[(String, u16)]) {
+    /// Forget the in-dialog failures the `refusals` excuse ([`Refusal`]): a
+    /// UA of the call refused a request the loss model's drops explain, and
+    /// the system under test relayed that refusal to another side. The
+    /// dialog stays read as gone while a 481 failure from before the seal
+    /// stays.
+    pub fn excuse(&self, refusals: &[Refusal]) {
         let mut f = self.facts.lock().unwrap();
-        let keep =
-            |w: &WireFailure| !excused.iter().any(|(m, c)| *m == w.method && w.code == Some(*c));
-        let ended = |byed: bool| move |w: &WireFailure| !(byed && w.code == Some(487));
-        let byed = f.byed();
-        f.failures.retain(|w| keep(w) && ended(byed)(w));
+        let kept = excuse::kept(&f.failures, None, refusals);
+        let before_seal = if f.sealed { f.failures_at_seal } else { f.failures.len() };
+        let gone = f.failures.iter().zip(&kept).take(before_seal);
+        let dialog_gone = gone.into_iter().any(|(w, k)| *k && w.code == Some(481));
+        f.saw_481 &= dialog_gone;
+        excuse::retain(&mut f.failures, &kept);
         for leg in &mut f.legs {
-            let byed = leg.byed;
-            leg.failures.retain(|w| keep(w) && ended(byed)(w));
+            let kept = excuse::kept(&leg.failures, Some(&leg.role), refusals);
+            excuse::retain(&mut leg.failures, &kept);
         }
-        f.saw_481 = f.failures.iter().any(|w| w.code == Some(481));
     }
 
     /// The facts seen so far.
@@ -249,9 +257,8 @@ impl WireFacts {
             let bye_ok = method == "BYE" && id.status.is_some_and(|c| (200..300).contains(&c));
             self.teardown_released |= bye_ok;
             if let (Dir::In, Some(code)) = (dir, id.status) {
-                let byed = self.byed();
-                let side = (&mut self.pending, &mut self.failures);
-                settle_pending(side, byed, method, cseq, code, now);
+                let side = (&mut self.pending, &mut self.failures, &mut self.finals);
+                settle_pending(side, method, cseq, (code, d.raw()), now);
             }
             return;
         }
@@ -264,12 +271,13 @@ impl WireFacts {
                 if setup {
                     self.setup_response(code, d.raw(), now);
                 } else if code >= 200 {
-                    self.in_dialog_final(cseq, code, now);
+                    self.in_dialog_final(cseq, (code, d.raw()), now);
                 }
             }
             (Dir::In, None) => {
                 if id.method == Some("BYE") {
                     self.bye_received.get_or_insert(None);
+                    self.finals.bye(&mut self.failures, false, cseq, now);
                 }
                 note_request(&mut self.received, d, now);
             }
@@ -299,9 +307,9 @@ impl WireFacts {
             _ => {
                 if method == "BYE" {
                     self.bye.get_or_insert(None);
+                    self.finals.bye(&mut self.failures, true, cseq, now);
                 }
-                retried(&mut self.failures, method);
-                self.sent.sent(cseq);
+                self.finals.sent(&mut self.failures, method, cseq);
                 self.pending.entry(cseq).or_insert_with(|| (method.to_string(), now));
             }
         }
@@ -348,20 +356,14 @@ impl WireFacts {
         }
     }
 
-    /// The caller sent or received a BYE.
-    fn byed(&self) -> bool {
-        self.bye.is_some() || self.bye_received.is_some()
-    }
-
-    fn in_dialog_final(&mut self, cseq: u32, code: u16, now: i64) {
-        let byed = self.byed();
-        let Some((method, _)) = self.pending.remove(&cseq) else { return };
+    fn in_dialog_final(&mut self, cseq: u32, (code, raw): (u16, &[u8]), now: i64) {
+        let Some((method, sent_at)) = self.pending.remove(&cseq) else { return };
         if method == "BYE" {
             self.bye = Some(Some(code));
         }
-        if fails(code, byed) && !self.sent.reordered(cseq, code) {
+        let req = Request { method: &method, cseq, sent_at };
+        if self.finals.judge(&mut self.failures, &req, (code, raw), now) {
             self.saw_481 |= code == 481;
-            self.failures.push(WireFailure { at_ms: now, method, code: Some(code) });
         }
     }
 
@@ -374,15 +376,8 @@ impl WireFacts {
                 (dir, id.status, opened, id.cseq_method, id.cseq)
             {
                 let leg = &mut self.legs[i];
-                let byed = leg.byed;
-                settle_pending(
-                    (&mut leg.pending, &mut leg.failures),
-                    byed,
-                    method,
-                    cseq,
-                    code,
-                    now,
-                );
+                let side = (&mut leg.pending, &mut leg.failures, &mut leg.finals);
+                settle_pending(side, method, cseq, (code, d.raw()), now);
             }
             return;
         }
@@ -396,11 +391,14 @@ impl WireFacts {
                 self.legs[i].cancelled = true;
             }
             (Dir::In, None, Some(i)) => {
-                self.legs[i].byed |= id.method == Some("BYE");
-                note_request(&mut self.legs[i].received, d, now)
+                let leg = &mut self.legs[i];
+                if let (Some("BYE"), Some(cseq)) = (id.method, id.cseq) {
+                    leg.finals.bye(&mut leg.failures, false, cseq, now);
+                }
+                note_request(&mut leg.received, d, now)
             }
             (Dir::Out, None, Some(i)) => self.legs[i].sent_request(id, now),
-            (Dir::In, Some(code), Some(i)) => self.legs[i].own_final(id, code, now),
+            (Dir::In, Some(code), Some(i)) => self.legs[i].own_final(id, (code, d.raw()), now),
             (Dir::Out, Some(code), Some(i)) if id.cseq_method == Some("INVITE") => {
                 let leg = &mut self.legs[i];
                 if leg.final_code.is_some() {
@@ -422,23 +420,23 @@ impl LegFacts {
     fn sent_request(&mut self, id: &Identity<'_>, now: i64) {
         let (Some(method), Some(cseq)) = (id.method, id.cseq) else { return };
         if method != "ACK" && method != "CANCEL" && !untagged(id) {
-            self.byed |= method == "BYE";
-            retried(&mut self.failures, method);
-            self.sent.sent(cseq);
+            if method == "BYE" {
+                self.finals.bye(&mut self.failures, true, cseq, now);
+            }
+            self.finals.sent(&mut self.failures, method, cseq);
             self.pending.entry(cseq).or_insert_with(|| (method.to_string(), now));
         }
     }
 
     /// A final to one of the leg's own in-dialog requests.
-    fn own_final(&mut self, id: &Identity<'_>, code: u16, now: i64) {
+    fn own_final(&mut self, id: &Identity<'_>, (code, raw): (u16, &[u8]), now: i64) {
         let Some(cseq) = id.cseq else { return };
         if code < 200 {
             return;
         }
-        let Some((method, _)) = self.pending.remove(&cseq) else { return };
-        if fails(code, self.byed) && !self.sent.reordered(cseq, code) {
-            self.failures.push(WireFailure { at_ms: now, method, code: Some(code) });
-        }
+        let Some((method, sent_at)) = self.pending.remove(&cseq) else { return };
+        let req = Request { method: &method, cseq, sent_at };
+        self.finals.judge(&mut self.failures, &req, (code, raw), now);
     }
 }
 

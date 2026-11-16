@@ -52,7 +52,7 @@ pub(super) fn outcome_write(
     id: ScenarioId,
     outcome: CallOutcome,
     ended_at_ms: i64,
-    excused: impl FnOnce() -> Vec<(String, u16)> + Send,
+    excused: impl FnOnce() -> Vec<crate::outcome::wire::Refusal> + Send,
 ) -> impl FnOnce() + Send {
     move || {
         if let (Some(sink), Some(wire)) = (sink, wire) {

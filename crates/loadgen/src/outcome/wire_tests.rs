@@ -448,7 +448,11 @@ async fn an_excused_refusal_is_no_failure() {
         ],
     );
     assert!(f.saw_481);
-    wire.excuse(&[("OPTIONS".to_string(), 500), ("PRACK".to_string(), 481)]);
+    let callee = Some("callee".to_string());
+    wire.excuse(&[
+        (callee.clone(), "OPTIONS".to_string(), 500),
+        (callee, "PRACK".to_string(), 481),
+    ]);
     let f = wire.facts();
     assert_eq!(f.failures, vec![WireFailure { at_ms: 0, method: "INFO".into(), code: Some(488) }]);
     assert!(!f.saw_481);
@@ -629,4 +633,38 @@ async fn a_late_481_after_the_seal_never_reads_the_dialog_gone() {
     let f = wire.facts();
     assert_eq!(f.failures, vec![WireFailure { at_ms: 0, method: "INFO".into(), code: Some(481) }]);
     assert!(!f.saw_481, "the seal's ending stands, never cut");
+}
+
+/// One refusal a UA gave excuses one failure of its method and status on
+/// each other side, never one on its own side: the callee's OPTIONS 500
+/// excuses one of the caller's two, none of its own leg's; the caller's
+/// excuses the leg's.
+#[tokio::test(start_paused = true)]
+#[ignore = "slow lane: loadgen"]
+async fn a_refusal_excuses_one_failure_on_each_other_side() {
+    let options = |side, cid: &str, cseq: &str, tag: &str| {
+        [
+            (side, Dir::Out, msg("OPTIONS sip:b@h SIP/2.0", cid, cseq, tag, "")),
+            (side, Dir::In, msg("SIP/2.0 500 Out Of Order", cid, cseq, tag, "")),
+        ]
+    };
+    let callee = Side::Leg("callee");
+    let mut events = vec![
+        (Side::Caller, Dir::Out, msg("INVITE sip:b@h SIP/2.0", "c19", "1 INVITE", "", "")),
+        (Side::Caller, Dir::In, msg("SIP/2.0 200 OK", "c19", "1 INVITE", "t1", "")),
+        (callee, Dir::In, msg("INVITE sip:q@h SIP/2.0", "b19", "1 INVITE", "", "")),
+        (callee, Dir::Out, msg("SIP/2.0 200 OK", "b19", "1 INVITE", "q1", "")),
+    ];
+    events.extend(options(Side::Caller, "c19", "2 OPTIONS", "t1"));
+    events.extend(options(Side::Caller, "c19", "3 OPTIONS", "t1"));
+    events.extend(options(callee, "b19", "2 OPTIONS", "q1"));
+    let run = |by: Option<&str>| {
+        let wire = CallWire::new(Clock::test_at(0));
+        feed(&wire, &events);
+        wire.excuse(&[(by.map(str::to_string), "OPTIONS".to_string(), 500)]);
+        let f = wire.facts();
+        (f.failures.len(), f.legs[0].failures.len())
+    };
+    assert_eq!(run(Some("callee")), (1, 1));
+    assert_eq!(run(None), (2, 0));
 }
