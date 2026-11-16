@@ -320,3 +320,47 @@ async fn a_server_ignoring_the_cancel_is_no_accepted_ending() {
     let v = verdict(expect, CallVerdict::Ok, &ignored, "alice");
     assert!(!v.is_success(), "a 2xx after the CANCEL's 200, got {v:?}");
 }
+
+/// What the loss model dropped on its way to the caller, as the load lane
+/// folds it in: a response to her INVITE of `status`, with SDP or not.
+fn lost_to_alice(obs: &ObservedState, status: u16, sdp: bool) {
+    let message = crate::realcall::LostMessage {
+        leg: None,
+        inbound: true,
+        method: None,
+        status: Some(status),
+        cseq_method: "INVITE".to_string(),
+        sdp,
+    };
+    obs.record(Observation::Lost { leg: "alice", message }, tokio::time::Instant::now());
+}
+
+/// A 2xx that reached the caller only after her CANCEL's 200, its earlier
+/// copy dropped on the way: the server had answered before, so the call is
+/// the crossing; without the drop it stays a server ignoring the CANCEL.
+#[tokio::test]
+async fn a_2xx_whose_first_copy_was_lost_before_the_cancel_final_is_the_crossing() {
+    let expect = Expect::of(&[Branch::ANSWERED_DESPITE_CANCEL, Branch::ABANDONED]);
+    let lost = caller_saw(&[(180, "INVITE"), (200, "CANCEL"), (200, "INVITE")], None);
+    lost_to_alice(&lost, 200, false);
+    let v = verdict(expect, CallVerdict::Ok, &lost, "alice");
+    assert_eq!(v.branch(), Some("answered_despite_cancel"), "got {v:?}");
+    let not_lost = caller_saw(&[(180, "INVITE"), (200, "CANCEL"), (200, "INVITE")], None);
+    lost_to_alice(&not_lost, 183, true);
+    assert!(!verdict(expect, CallVerdict::Ok, &not_lost, "alice").is_success());
+}
+
+/// A refusal after early media whose provisional with SDP the loss model
+/// dropped on its way to the caller is the early-media refusal; one whose
+/// lost provisional carried no SDP is not.
+#[tokio::test]
+async fn a_lost_early_media_provisional_still_makes_the_early_media_refusal() {
+    let expect = Expect::one(Branch::early_media_rejected(603));
+    let lost = caller_saw(&[(603, "INVITE")], Some(603));
+    lost_to_alice(&lost, 183, true);
+    let v = verdict(expect, CallVerdict::Ok, &lost, "alice");
+    assert_eq!(v.branch(), Some("early_media_rejected"), "got {v:?}");
+    let no_sdp = caller_saw(&[(603, "INVITE")], Some(603));
+    lost_to_alice(&no_sdp, 180, false);
+    assert!(!verdict(expect, CallVerdict::Ok, &no_sdp, "alice").is_success());
+}

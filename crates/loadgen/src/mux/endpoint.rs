@@ -28,7 +28,7 @@ use super::retransmit::CallTxns;
 use super::routing::BindDecl;
 use super::rtt::RttSink;
 use super::tally::CallTally;
-use super::taps::{Taps, WireTap};
+use super::taps::{Dir, LossTap, Taps, WireTap};
 use super::{
     CallGate, CallSlot, Delivery, Key, MuxCore, MuxSocket, ReceiverEntry, Role, RELEASE_HOLD,
 };
@@ -63,56 +63,10 @@ pub struct MuxNetwork {
     pub(super) tally: Option<Arc<CallTally>>,
     /// The call's wire tap; `None` = not watched.
     pub(super) wire_tap: Option<WireTap>,
+    /// The call's loss tap; `None` = drops are only counted.
+    pub(super) loss_tap: Option<LossTap>,
     /// The retransmit engine of every endpoint bound on this network.
     pub(super) engines: Mutex<Vec<Arc<CallTxns>>>,
-}
-
-impl MuxNetwork {
-    /// Measure the SIP round trips of every endpoint bound on this network
-    /// into `sink`.
-    pub fn with_rtt_sink(mut self, sink: RttSink) -> Self {
-        self.rtt_sink = Some(sink);
-        self
-    }
-
-    /// Tally every datagram this network's endpoints send, re-send or have
-    /// delivered into `tally`.
-    pub fn with_tally(mut self, tally: Arc<CallTally>) -> Self {
-        self.tally = Some(tally);
-        self
-    }
-
-    /// Hand every datagram this network's endpoints send or receive to `tap`.
-    pub fn with_wire_tap(mut self, tap: WireTap) -> Self {
-        self.wire_tap = Some(tap);
-        self
-    }
-
-    /// Whether a client transaction is still open on this call's endpoints
-    /// (final not arrived, Timer B/F not expired). Never without the engine.
-    pub fn client_txn_open(&self) -> bool {
-        self.engines.lock().unwrap().iter().any(|txns| txns.client_open())
-    }
-
-    /// Park until every client transaction this call's endpoints have open
-    /// has ended (final received, or Timer B/F), retransmitting meanwhile:
-    /// what a failed call waits for before its endpoints drop, so its
-    /// teardown CANCEL or BYE survives a loss, and what a call whose in-dialog
-    /// request awaits its final waits for. Immediate without the engine.
-    pub async fn client_txns_ended(&self) {
-        let engines: Vec<Arc<CallTxns>> = self.engines.lock().unwrap().clone();
-        for txns in engines {
-            txns.clients_ended().await;
-        }
-    }
-
-    /// The next per-endpoint loss RNG seed (golden-ratio stride so alice/bob/
-    /// charlie of the same call get well-separated, non-zero seeds).
-    fn next_drop_seed(&self) -> u64 {
-        self.drop_seed
-            .fetch_add(0x9E37_79B9_7F4A_7C15, Ordering::Relaxed)
-            .wrapping_add(0x9E37_79B9_7F4A_7C15)
-    }
 }
 
 #[async_trait]
@@ -175,7 +129,13 @@ impl SignalingNetwork for MuxNetwork {
         });
         let drop = Arc::new(DropModel::new(self.drop_rate, self.next_drop_seed(), drop_nth));
         let leg = uas.as_ref().map(|(label, _)| label.as_str());
-        let taps = Taps::new(self.rtt_sink.clone(), self.tally.clone(), self.wire_tap.clone(), leg);
+        let taps = Taps::new(
+            self.rtt_sink.clone(),
+            self.tally.clone(),
+            self.wire_tap.clone(),
+            self.loss_tap.clone(),
+            leg,
+        );
         let txns = self.retransmit.then(|| {
             Arc::new(CallTxns::new(
                 mux.endpoint.clone(),
@@ -413,8 +373,8 @@ impl MuxEndpoint {
 #[async_trait]
 impl UdpEndpoint for MuxEndpoint {
     async fn send_to(&self, buf: &[u8], dst: SocketAddr) -> Result<(), SendError> {
+        let d = Datagram::sniff(buf);
         let dropped = {
-            let d = Datagram::sniff(buf);
             self.register_dialog(&d)?;
             // Record the outbound message in the retransmit engine BEFORE the
             // loss check: a dropped request is exactly what the resender must
@@ -441,6 +401,7 @@ impl UdpEndpoint for MuxEndpoint {
         if dropped {
             self.mux.stats.dropped_out.fetch_add(1, Ordering::Relaxed);
             self.sendtap.get().inspect(|tap| tap(buf, dst, SendNote::LossModel));
+            self.taps.iter().for_each(|t| t.on_lost(Dir::Out, &d));
             return Ok(());
         }
         self.mux.endpoint.as_ref().send_to(buf, dst).await
@@ -496,5 +457,6 @@ impl Drop for MuxEndpoint {
     }
 }
 
+mod network;
 #[cfg(test)]
 mod tests;

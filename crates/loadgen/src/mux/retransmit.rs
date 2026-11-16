@@ -10,13 +10,13 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use sip_message::sniff::Identity;
-use sip_net::{ReEmitKind, SendNote, SendTap, UdpEndpoint};
+use sip_net::{ReEmitKind, SendTap, UdpEndpoint};
 
 use super::datagram::{key_of, Datagram};
 use super::loss::DropModel;
 use super::stats::MuxStats;
 use super::taps::Taps;
-use resender::{spawn_resender, ResendCtl, Sent};
+use resender::{spawn_resender, Reports, ResendCtl, Sent};
 
 mod resender;
 
@@ -161,24 +161,28 @@ impl CallTxns {
         let _ = self.sendtap.set(tap);
     }
 
+    /// Where this engine reports its re-sends.
+    fn reports(&self) -> Reports {
+        Reports { sendtap: self.sendtap.clone(), taps: self.taps.clone() }
+    }
+
     /// Best-effort fire-and-forget send for the reactive resends (re-ACK /
     /// re-answer) that run on the inbound (sync, lock-holding) path — re-applies
     /// the loss model. The actual transmission is a detached task (the fabric's
     /// `send_to` is async). `kind` classifies the re-emission for the ladder; a
-    /// frame that passed the loss model is reported to the send tap, a dropped
-    /// one is not.
+    /// frame the loss model dropped is reported as lost.
     fn send(&self, sent: Sent, kind: ReEmitKind) {
         let Sent { bytes, dst, count } = sent;
         if let Some(count) = &count {
             count.record();
         }
+        let reports = self.reports();
         if self.drop.drops() {
             self.stats.dropped_out.fetch_add(1, Ordering::Relaxed);
+            reports.lost(&bytes, dst);
             return;
         }
-        if let Some(tap) = self.sendtap.get() {
-            tap(&bytes, dst, SendNote::ReEmit(kind));
-        }
+        reports.reemitted(&bytes, dst, kind);
         let endpoint = self.endpoint.clone();
         tokio::spawn(async move {
             let _ = endpoint.as_ref().send_to(&bytes, dst).await;
@@ -267,7 +271,7 @@ impl CallTxns {
             self.stats.clone(),
             self.sent(d, dst),
             invite,
-            self.sendtap.clone(),
+            self.reports(),
         );
     }
 
@@ -282,7 +286,7 @@ impl CallTxns {
             self.stats.clone(),
             self.sent(d, dst),
             false,
-            self.sendtap.clone(),
+            self.reports(),
         );
         ctl
     }

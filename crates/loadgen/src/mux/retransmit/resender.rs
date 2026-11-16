@@ -8,9 +8,37 @@ use std::sync::{Arc, OnceLock};
 use sip_net::{ReEmitKind, SendNote, SendTap, UdpEndpoint};
 
 use super::{T1, T2, TXN_TIMEOUT};
+use crate::mux::datagram::Datagram;
 use crate::mux::loss::DropModel;
 use crate::mux::stats::MuxStats;
-use crate::mux::taps::ResendCount;
+use crate::mux::taps::{Dir, ResendCount, Taps};
+
+/// Where the engine reports a re-send: the recording's send tap and the
+/// call's taps.
+#[derive(Clone)]
+pub(super) struct Reports {
+    pub(super) sendtap: Arc<OnceLock<SendTap>>,
+    pub(super) taps: Option<Arc<Taps>>,
+}
+
+impl Reports {
+    /// The loss model dropped the re-send `bytes` toward `dst`.
+    pub(super) fn lost(&self, bytes: &[u8], dst: SocketAddr) {
+        if let Some(tap) = self.sendtap.get() {
+            tap(bytes, dst, SendNote::LossModel);
+        }
+        if let Some(taps) = &self.taps {
+            taps.on_lost(Dir::Out, &Datagram::sniff(bytes));
+        }
+    }
+
+    /// The re-send `bytes` reached the wire toward `dst`.
+    pub(super) fn reemitted(&self, bytes: &[u8], dst: SocketAddr, kind: ReEmitKind) {
+        if let Some(tap) = self.sendtap.get() {
+            tap(bytes, dst, SendNote::ReEmit(kind));
+        }
+    }
+}
 
 /// A datagram we sent, as kept for a re-send: its shared copy, where it went,
 /// and where its re-sends are counted.
@@ -83,7 +111,7 @@ pub(super) fn spawn_resender(
     stats: Arc<MuxStats>,
     sent: Sent,
     invite: bool,
-    sendtap: Arc<OnceLock<SendTap>>,
+    reports: Reports,
 ) {
     tokio::spawn(async move {
         let Sent { bytes, dst, count } = sent;
@@ -104,13 +132,12 @@ pub(super) fn spawn_resender(
             }
             if drop.drops() {
                 stats.dropped_out.fetch_add(1, Ordering::Relaxed);
+                reports.lost(&bytes, dst);
             } else {
                 let _ = endpoint.as_ref().send_to(&bytes, dst).await;
                 // Record the re-emission (a frame that reached the wire) on the
                 // ladder — a proactive Timer A/E/G retransmit of our own frame.
-                if let Some(tap) = sendtap.get() {
-                    tap(&bytes, dst, SendNote::ReEmit(ReEmitKind::Retransmit));
-                }
+                reports.reemitted(&bytes, dst, ReEmitKind::Retransmit);
             }
             interval = if invite {
                 interval.saturating_mul(2)

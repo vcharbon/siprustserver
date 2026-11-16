@@ -254,6 +254,7 @@ pub(crate) async fn run_one(
     // number's contention never fails a call a free number could carry.
     let draws = if from_user && case.is_some() { KEY_DRAWS } else { 1 };
     let mut draw = 0;
+    let ctx = CallCtx::new();
     let rtts = CallRtts::new(reporter.clone(), id);
     let tally = Arc::new(CallTally::new(CALLER).with_late_sink(reporter.late_sink(id)));
     let (core, dwells, banner, resolved_input, token, net, binder, alice, callee_agents) = loop {
@@ -290,7 +291,8 @@ pub(crate) async fn run_one(
                 tuning.drop_nth,
             )
             .with_rtt_sink(rtts.sink())
-            .with_tally(tally.clone());
+            .with_tally(tally.clone())
+            .with_loss_tap(crate::mux::notes_tap(ctx.loss_notes()));
         let net = Arc::new(match &wire {
             Some(w) => mux_net.with_wire_tap(w.tap()),
             None => mux_net,
@@ -322,7 +324,6 @@ pub(crate) async fn run_one(
     // A SAMPLED call collects message anchors (ADR-0019) so the attached Test
     // case's checks can resolve `<agent>.<anchor>` over its recorded trace;
     // on the unsampled majority tagging stays a single atomic load.
-    let ctx = CallCtx::new();
     if record {
         ctx.enable_anchor_collection();
     }

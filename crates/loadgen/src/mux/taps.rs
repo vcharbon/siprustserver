@@ -12,7 +12,8 @@ use tokio::time::Instant;
 use super::datagram::Datagram;
 use super::rtt::{RttSink, RttTracker};
 use super::tally::{CallTally, LateRepair};
-use sip_message::sniff::Identity;
+use scenario_harness::realcall::{LossNotes, LostMessage};
+use sip_message::sniff::{session_description, Identity};
 
 /// The endpoint of a call a datagram crossed: its caller, or the callee leg
 /// bound under this role.
@@ -34,11 +35,36 @@ pub enum Dir {
 /// to them, duplicates included.
 pub type WireTap = Arc<dyn Fn(Side<'_>, Dir, &Datagram<'_>) + Send + Sync>;
 
+/// A call's loss tap: every datagram the call's loss model drops, first
+/// transmissions and the engine's re-sends alike, with the side of the call
+/// and its direction of travel (`Out`: it left the endpoint, `In`: it was on
+/// its way to it).
+pub type LossTap = Arc<dyn Fn(Side<'_>, Dir, &Datagram<'_>) + Send + Sync>;
+
+/// A loss tap that notes each dropped datagram in `notes`.
+pub fn notes_tap(notes: LossNotes) -> LossTap {
+    Arc::new(move |side, dir, d| {
+        let id = d.id();
+        notes.note(LostMessage {
+            leg: match side {
+                Side::Caller => None,
+                Side::Leg(role) => Some(role.to_string()),
+            },
+            inbound: dir == Dir::In,
+            method: id.method.map(str::to_string),
+            status: id.status,
+            cseq_method: id.cseq_method.unwrap_or_default().to_string(),
+            sdp: session_description(d.raw()).is_some(),
+        });
+    })
+}
+
 /// One endpoint's taps.
 pub(in crate::mux) struct Taps {
     rtt: Option<RttTracker>,
     tally: Option<Arc<CallTally>>,
     wire: Option<WireTap>,
+    loss: Option<LossTap>,
     /// The callee leg's role; `None` on the caller.
     leg: Option<String>,
 }
@@ -50,13 +76,21 @@ impl Taps {
         rtt: Option<RttSink>,
         tally: Option<Arc<CallTally>>,
         wire: Option<WireTap>,
+        loss: Option<LossTap>,
         leg: Option<&str>,
     ) -> Option<Arc<Self>> {
-        if rtt.is_none() && tally.is_none() && wire.is_none() {
+        if rtt.is_none() && tally.is_none() && wire.is_none() && loss.is_none() {
             return None;
         }
         let rtt = rtt.map(RttTracker::new);
-        Some(Arc::new(Self { rtt, tally, wire, leg: leg.map(str::to_string) }))
+        Some(Arc::new(Self { rtt, tally, wire, loss, leg: leg.map(str::to_string) }))
+    }
+
+    /// The loss model dropped `d` travelling `dir`.
+    pub(in crate::mux) fn on_lost(&self, dir: Dir, d: &Datagram<'_>) {
+        if let Some(loss) = &self.loss {
+            loss(self.side(), dir, d);
+        }
     }
 
     fn side(&self) -> Side<'_> {

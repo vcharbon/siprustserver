@@ -11,7 +11,7 @@ use super::ending::Expect;
 use super::endpoint::{Automatics, Disposition};
 use super::goals::GoalStep;
 use super::observe::ReceptionObserver;
-use super::state::{ObservedState, ReplayEntry};
+use super::state::{Observation, ObservedState, ReplayEntry};
 use super::verdict::{verdict, ScenarioVerdict};
 use super::{run_call_accepting, ActorSpec, BarrierPhase, CallPlan, CallVerdict, SettleBarrier};
 use crate::realcall::{CallCtx, CallEnv, ScenarioId};
@@ -197,6 +197,7 @@ async fn run_built_actor_call_observed(
     // The originating leg — the one the accepted endings are read on, keyed on
     // which actor's first goal originates the dialog.
     let caller = originating_role(&actors);
+    let roles: Vec<&'static str> = actors.iter().map(|a| a.role).collect();
     let expect = expect.in_context(env);
     let obs = ObservedState::new();
     // An explicit ceiling replaces the standard re-emission bound; the longer of
@@ -231,7 +232,24 @@ async fn run_built_actor_call_observed(
             ));
         }
     }
+    fold_losses(ctx, &obs, caller, &roles);
     (verdict(expect, run, &obs, caller), obs)
+}
+
+/// Fold the datagrams the call's loss model dropped into `obs`, each on the
+/// leg it was to or from: the callee leg of that role, else `caller`. A lost
+/// datagram of a leg no actor plays is not folded.
+fn fold_losses(ctx: &CallCtx, obs: &ObservedState, caller: &'static str, roles: &[&'static str]) {
+    let now = tokio::time::Instant::now();
+    for message in ctx.lost() {
+        let leg = match message.leg.as_deref() {
+            None => Some(caller),
+            Some(name) => roles.iter().copied().find(|r| *r == name),
+        };
+        if let Some(leg) = leg {
+            obs.record(Observation::Lost { leg, message }, now);
+        }
+    }
 }
 
 /// The per-barrier / per-goal-guard wait bound: `64·T1 = 32 s` — the protocol's

@@ -19,6 +19,7 @@ use super::datagram::Datagram;
 use super::late_answer::LateReply;
 use super::late_final::Reply;
 use super::stats::{MuxStats, OrphanReason};
+use super::taps::Dir;
 use super::{CallSlot, Delivery, Key, MuxSocket};
 
 /// One socket's dispatcher: parse the routing key, deliver or count-and-drop.
@@ -228,6 +229,9 @@ fn handle_inbound(mux: &MuxSocket, d: &Delivery, dg: &Datagram<'_>, pkt: &UdpPac
         // A recorded (sampled) call still shows the arrival on its ladder,
         // tagged as modeled loss — the RFC audit filters it out.
         tap_discard(mux, d, pkt, sip_net::RecvDisposition::LossModel);
+        if let Some(taps) = &d.taps {
+            taps.on_lost(Dir::In, dg);
+        }
         return;
     }
     if let Some(taps) = &d.taps {

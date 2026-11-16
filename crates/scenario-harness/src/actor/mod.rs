@@ -59,6 +59,7 @@ mod held;
 mod held_acks;
 mod ledger;
 mod lost_provisional;
+mod observation;
 mod observe;
 mod originate;
 mod pacing;

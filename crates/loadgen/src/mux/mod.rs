@@ -93,7 +93,7 @@ pub use scenario_harness::claim::ClaimRule;
 pub use stats::MuxStats;
 pub(crate) use stats::OrphanReason;
 pub use tally::{ArrowKey, ArrowStat, CallMessages, CallTally, LateSink, SUT_LANE};
-pub use taps::{Dir, Side, WireTap};
+pub use taps::{notes_tap, Dir, LossTap, Side, WireTap};
 
 use late_answer::SentAnswers;
 use late_final::SentInvites;
@@ -442,59 +442,5 @@ impl MuxCore {
                 g.by_call_id.len() + receivers
             })
             .sum()
-    }
-
-    /// Build a per-call [`SignalingNetwork`] view from a [`CallRouting`] (the
-    /// single call token + each callee leg's label + any same-socket picker).
-    /// No simulated packet loss and no auto-retransmit.
-    pub fn network(self: &Arc<Self>, routing: CallRouting) -> MuxNetwork {
-        self.network_tuned(routing, 0.0, false, 0, None)
-    }
-
-    /// [`network`](Self::network) with per-call robustness knobs:
-    /// - `drop_rate` (0 = off): each datagram this call's endpoints send/receive is
-    ///   independently dropped, so a scenario is exercised against a lossy fabric.
-    /// - `retransmit`: when set, the mux runs a per-call SIP transaction engine
-    ///   that retransmits lost signaling on real timers (Timer A/E for requests,
-    ///   Timer G 2xx-until-ACK for answers) and absorbs the resulting duplicates,
-    ///   so a rare drop is recovered instead of failing the call.
-    ///
-    /// `seed` seeds each endpoint's loss RNG (derive it from the per-call id seed
-    /// for reproducibility).
-    /// `drop_nth` optionally adds the DETERMINISTIC targeted drop
-    /// ([`TargetedDrop`]) on top of the probabilistic rate.
-    pub fn network_tuned(
-        self: &Arc<Self>,
-        routing: CallRouting,
-        drop_rate: f64,
-        retransmit: bool,
-        seed: u64,
-        drop_nth: Option<TargetedDrop>,
-    ) -> MuxNetwork {
-        // Per-addr bind-order dispense queue: each `bind_udp(addr)` takes the
-        // next declared entry for that addr (so several receivers — and, on a
-        // shared-vantage socket, the caller too — can share a socket; the
-        // driver binds the agents in declaration order).
-        let mut dispense: HashMap<SocketAddr, Vec<routing::BindDecl>> = HashMap::new();
-        for (addr, decl) in routing.binds {
-            dispense.entry(addr).or_default().push(decl);
-        }
-        MuxNetwork {
-            core: self.clone(),
-            owner: self.call_seq.fetch_add(1, Ordering::Relaxed),
-            token: routing.token,
-            dispense,
-            pickers: routing.pickers,
-            cursor: Mutex::new(HashMap::new()),
-            gate: Arc::new(CallGate::default()),
-            drop_rate,
-            retransmit,
-            drop_seed: AtomicU64::new(seed | 1),
-            drop_nth,
-            rtt_sink: None,
-            tally: None,
-            wire_tap: None,
-            engines: Mutex::new(Vec::new()),
-        }
     }
 }

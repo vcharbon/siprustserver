@@ -69,3 +69,54 @@ async fn a_send_the_loss_model_drops_is_recorded_lost() {
         );
     }
 }
+
+/// Every datagram the loss model drops reaches the call's loss tap and its
+/// recording, the retransmit engine's re-sends included: the INVITE dropped
+/// on its first send and again on its Timer A re-send is noted twice, each
+/// time leaving the caller.
+#[tokio::test(start_paused = true)]
+async fn each_drop_of_a_send_and_its_resend_is_noted_and_recorded() {
+    let (caller, peer): (SocketAddr, SocketAddr) = (CALLER.parse().unwrap(), PEER.parse().unwrap());
+    let sim = SimulatedSignalingNetwork::new(1);
+    let core = MuxCore::bind_on(
+        &sim,
+        vec![EndpointSpec { addr: caller, role: Role::Caller }],
+        Correlation::header("X-Loadgen-Id"),
+        64,
+        4,
+        Duration::from_secs(5),
+        Clock::test_at(0),
+    )
+    .await
+    .unwrap();
+    let notes = scenario_harness::realcall::LossNotes::default();
+    let lossy = core
+        .network_tuned(CallRouting::new("lgLOSS"), 1.0, true, 7, None)
+        .with_loss_tap(crate::mux::notes_tap(notes.clone()));
+    let recording = RecordingSignalingNetwork::new(
+        Arc::new(lossy),
+        Recorder::with_clock(TransportKind::Fake, Clock::test_at(0)),
+        RunContext::TestWithRecorder,
+        ScopedAuditOptions::default(),
+    );
+    let alice = recording.bind_udp(BindUdpOpts::new(caller, 64)).await.unwrap();
+    alice.send_to(&invite(), peer).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(600)).await;
+
+    let lost = scenario_harness::realcall::LostMessage {
+        leg: None,
+        inbound: false,
+        method: Some("INVITE".to_string()),
+        status: None,
+        cseq_method: "INVITE".to_string(),
+        sdp: false,
+    };
+    assert_eq!(notes.all(), vec![lost.clone(), lost], "the first send and the Timer A re-send");
+    let recorded = recording
+        .channel()
+        .snapshot()
+        .iter()
+        .filter(|s| matches!(s.event, sip_net_testkit::SignalingNetworkEvent::SendLost { .. }))
+        .count();
+    assert_eq!(recorded, 2, "both drops on the recording");
+}

@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
+use super::lost::{LossNotes, LostMessage};
 use crate::anchors::{AnchorKeys, AnchorTag};
 use crate::Agent;
 
@@ -47,6 +48,8 @@ pub struct CallCtx {
     /// Whether a provisional lost to a crash is accepted
     /// ([`accept_lost_provisionals`](Self::accept_lost_provisionals)).
     lost_provisionals: AtomicBool,
+    /// The datagrams of the call a simulated loss model dropped.
+    losses: LossNotes,
 }
 
 /// What a call runs at the instant its verdict resolves.
@@ -65,6 +68,7 @@ impl CallCtx {
             on_resolved: Mutex::new(None),
             clean_ends: AtomicBool::new(false),
             lost_provisionals: AtomicBool::new(false),
+            losses: LossNotes::default(),
         }
     }
 
@@ -96,6 +100,17 @@ impl CallCtx {
     /// was armed.
     pub fn lost_provisionals_accepted(&self) -> bool {
         self.lost_provisionals.load(Ordering::Relaxed)
+    }
+
+    /// Where the call's loss model notes each datagram it drops: the network
+    /// that simulates the loss holds a clone.
+    pub fn loss_notes(&self) -> LossNotes {
+        self.losses.clone()
+    }
+
+    /// The datagrams of the call the loss model dropped so far.
+    pub fn lost(&self) -> Vec<LostMessage> {
+        self.losses.all()
     }
 
     /// Run `hook` at the instant the call's verdict resolves: after its last
