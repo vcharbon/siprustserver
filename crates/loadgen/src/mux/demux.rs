@@ -11,6 +11,7 @@ use std::time::Duration;
 use scenario_harness::claim::{resolve_claim, ClaimRule};
 use scenario_harness::legpick::LegInfo;
 use sip_message::preparse::is_invite_request_buffer;
+use sip_message::sniff;
 use sip_net::queue::PacketQueue;
 use sip_net::{UdpEndpoint, UdpPacket};
 use tokio::time::Instant;
@@ -70,7 +71,8 @@ fn route(mux: &MuxSocket, pkt: &UdpPacket) -> Vec<(Arc<[u8]>, SocketAddr)> {
     }
     // 2. A retransmission of a request a released dialog's agent answered,
     //    re-answered to its source: the address the SUT sent from, as a UAS
-    //    answers to the request's received/rport (RFC 3261 §18.2.2). The call's
+    //    answers to the request's received/rport (RFC 3261 §18.2.2); one of a
+    //    request that reached the agent unanswered, refused 481. The call's
     //    loss model went with its endpoints: neither the request nor the
     //    re-answer is dropped.
     if let Some(cid) = cid.filter(|_| !dg.is_response()) {
@@ -82,6 +84,14 @@ fn route(mux: &MuxSocket, pkt: &UdpPacket) -> Vec<(Arc<[u8]>, SocketAddr)> {
                     repair.record();
                 }
                 return vec![(answer, src)];
+            }
+            LateReply::Refuse => {
+                let refused = sniff::refusal(raw, 481, "Call/Transaction Does Not Exist");
+                if let Some(refused) = refused {
+                    drop(g);
+                    mux.stats.late_answered.fetch_add(1, Ordering::Relaxed);
+                    return vec![(refused.into(), src)];
+                }
             }
             LateReply::Absorbed => return Vec::new(),
             LateReply::NotHeld => {}
@@ -232,7 +242,7 @@ fn handle_inbound(mux: &MuxSocket, d: &Delivery, dg: &Datagram<'_>, pkt: &UdpPac
         if let Some(taps) = &d.taps {
             taps.on_lost(Dir::In, dg);
         }
-        d.answers.on_lost_request(dg);
+        d.answers.on_request_in(dg);
         return;
     }
     if let Some(taps) = &d.taps {
@@ -240,6 +250,8 @@ fn handle_inbound(mux: &MuxSocket, d: &Delivery, dg: &Datagram<'_>, pkt: &UdpPac
     }
     if dg.id().method == Some("ACK") {
         d.answers.on_ack(dg.id());
+    } else {
+        d.answers.on_request_in(dg);
     }
     if let Some(invites) = &d.invites {
         invites.on_inbound(dg);

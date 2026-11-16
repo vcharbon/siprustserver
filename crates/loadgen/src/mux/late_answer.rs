@@ -8,10 +8,12 @@
 //!
 //! Held: every final to a non-INVITE request, and an INVITE's non-2xx final
 //! (whose ACK the hold then absorbs). An INVITE's 2xx is the dialog's own
-//! (§13.3.1.4) and is not held. For an in-dialog request the loss model
-//! dropped on its way in, the 481 of a UA that no longer holds the dialog
-//! (§12.2.2) is held until the agent answers a later copy itself: a
-//! retransmission arriving once the call released draws it, not a stray. Once the ACK of a held INVITE final arrives,
+//! (§13.3.1.4) and is not held. For an in-dialog request that reached the
+//! endpoint, delivered or dropped by the loss model on its way in, the 481 of
+//! a UA that no longer holds the dialog (§12.2.2) is held until the agent
+//! answers it: a retransmission arriving once the call released without
+//! answering it (the agent ended first, or never got a copy) draws the 481,
+//! not a stray. A request first arriving after the release stays a stray. Once the ACK of a held INVITE final arrives,
 //! before or after the call released, the final is owed no more (§17.2.1
 //! Confirmed): its bytes go, and a retransmitted INVITE or ACK of that
 //! transaction is absorbed.
@@ -28,7 +30,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use sip_message::sniff::{refusal, Identity};
+use sip_message::sniff::Identity;
 
 use super::datagram::{key_of, Datagram};
 use super::tally::LateRepair;
@@ -44,8 +46,11 @@ struct Answer {
     /// The transaction: the request's CSeq number, CSeq method and top Via
     /// branch (echoed on the response), hashed.
     txn: u64,
-    /// The final as sent; `None` once its ACK arrived (an INVITE's).
+    /// The final as sent; `None` once its ACK arrived (an INVITE's), or
+    /// while the agent has not answered (`unanswered`).
     bytes: Option<Arc<[u8]>>,
+    /// The request reached the endpoint and the agent has not answered it.
+    unanswered: bool,
     /// Where a late re-send of it is reported; `None`: not reported.
     repair: Option<LateRepair>,
 }
@@ -65,6 +70,10 @@ pub(in crate::mux) enum LateReply {
     /// A retransmission of an answered request: the same final again, and
     /// where that re-send is reported.
     Reanswer(Arc<[u8]>, Option<LateRepair>),
+    /// A retransmission of a request the agent never answered: the 481 of
+    /// a UA that no longer holds the dialog (RFC 3261 §12.2.2), built from
+    /// the retransmission itself.
+    Refuse,
 }
 
 /// The answers one released dialog holds.
@@ -86,6 +95,7 @@ impl HeldAnswers {
             Some(Answer { bytes: Some(bytes), repair, .. }) => {
                 LateReply::Reanswer(bytes.clone(), repair.clone())
             }
+            Some(Answer { unanswered: true, .. }) => LateReply::Refuse,
             Some(_) => LateReply::Absorbed,
             None => LateReply::NotHeld,
         }
@@ -140,28 +150,28 @@ impl SentAnswers {
         let (dialog, txn) = (key_of(cid), txn_key(cseq, method, branch));
         let mut held = self.0.lock().unwrap();
         held.retain(|a| a.dialog != dialog || a.txn != txn);
-        hold(&mut held, Answer { dialog, txn, bytes: Some(d.shared()), repair });
+        let answer = Answer { dialog, txn, bytes: Some(d.shared()), unanswered: false, repair };
+        hold(&mut held, answer);
     }
 
-    /// Hold the 481 refusal of `d`, an in-dialog request the loss model
-    /// dropped on its way in that this endpoint's agent has not answered.
-    pub(in crate::mux) fn on_lost_request(&self, d: &Datagram<'_>) {
+    /// Note `d`, an in-dialog request that reached this endpoint (delivered,
+    /// or dropped by the loss model on its way in), as unanswered until the
+    /// agent answers it.
+    pub(in crate::mux) fn on_request_in(&self, d: &Datagram<'_>) {
         let id = d.id();
-        let (None, Some(cid), Some(cseq), Some(method), Some(branch)) =
-            (id.status, id.call_id, id.cseq, id.method, id.branch)
+        let (None, Some(cid), Some(cseq), Some(method), Some(branch), Some(_)) =
+            (id.status, id.call_id, id.cseq, id.method, id.branch, id.to_tag)
         else {
             return;
         };
         if method == "ACK" {
             return;
         }
-        let Some(bytes) = refusal(d.raw(), 481, "Call/Transaction Does Not Exist") else {
-            return;
-        };
         let (dialog, txn) = (key_of(cid), txn_key(cseq, method, branch));
         let mut held = self.0.lock().unwrap();
         if !held.iter().any(|a| a.dialog == dialog && a.txn == txn) {
-            hold(&mut held, Answer { dialog, txn, bytes: Some(bytes.into()), repair: None });
+            let answer = Answer { dialog, txn, bytes: None, unanswered: true, repair: None };
+            hold(&mut held, answer);
         }
     }
 

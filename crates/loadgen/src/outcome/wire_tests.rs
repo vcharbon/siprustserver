@@ -453,3 +453,41 @@ async fn an_excused_refusal_is_no_failure() {
     assert_eq!(f.failures, vec![WireFailure { at_ms: 0, method: "INFO".into(), code: Some(488) }]);
     assert!(!f.saw_481);
 }
+
+/// A 500 to a request whose first copy the loss model dropped on its way
+/// out, refused once a higher CSeq of the side had reached the peer, is the
+/// peer's refusal of a CSeq going backwards (RFC 3261 §12.2.2): no failure.
+/// With no drop, the same 500 is one.
+#[tokio::test(start_paused = true)]
+#[ignore = "slow lane: loadgen"]
+async fn a_500_to_a_request_the_loss_reordered_is_no_failure() {
+    let run = |lost: bool| {
+        let wire = CallWire::new(Clock::test_at(0));
+        let update = msg("UPDATE sip:b@h SIP/2.0", "c13", "3 UPDATE", "t1", "");
+        let tap = wire.tap();
+        let loss = wire.loss_tap();
+        for (dir, raw) in [
+            (Dir::Out, msg("INVITE sip:b@h SIP/2.0", "c13", "1 INVITE", "", "")),
+            (Dir::In, msg("SIP/2.0 200 OK", "c13", "1 INVITE", "t1", "")),
+            (Dir::Out, update.clone()),
+        ] {
+            tap(Side::Caller, dir, &Datagram::sniff(&raw));
+        }
+        if lost {
+            loss(Side::Caller, Dir::Out, &Datagram::sniff(&update));
+        }
+        for (dir, raw) in [
+            (Dir::Out, msg("INFO sip:b@h SIP/2.0", "c13", "4 INFO", "t1", "")),
+            (Dir::In, msg("SIP/2.0 200 OK", "c13", "4 INFO", "t1", "")),
+            (Dir::In, msg("SIP/2.0 500 Out Of Order", "c13", "3 UPDATE", "t1", "")),
+        ] {
+            tap(Side::Caller, dir, &Datagram::sniff(&raw));
+        }
+        wire.facts().failures
+    };
+    assert!(run(true).is_empty(), "{:?}", run(true));
+    assert_eq!(
+        run(false),
+        vec![WireFailure { at_ms: 0, method: "UPDATE".into(), code: Some(500) }]
+    );
+}

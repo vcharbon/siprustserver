@@ -36,6 +36,7 @@ use scenario_harness::actor::ScenarioVerdict;
 
 mod binding;
 mod call_config;
+mod loss;
 mod record;
 mod seeds;
 pub(crate) use binding::CALLER;
@@ -292,7 +293,7 @@ pub(crate) async fn run_one(
             )
             .with_rtt_sink(rtts.sink())
             .with_tally(tally.clone())
-            .with_loss_tap(crate::mux::notes_tap(ctx.loss_notes()));
+            .with_loss_tap(loss::loss_tap(&ctx, wire.as_ref()));
         let net = Arc::new(match &wire {
             Some(w) => mux_net.with_wire_tap(w.tap()),
             None => mux_net,
