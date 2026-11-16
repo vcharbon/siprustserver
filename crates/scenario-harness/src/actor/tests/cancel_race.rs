@@ -239,10 +239,27 @@ async fn ring_then_silent_487s_on_cancel_and_settles() {
 /// The caller's leg after a crossing attempt, from its response log in
 /// arrival order (`(status, CSeq method)`) and its establishing final, if any.
 fn caller_saw(responses: &[(u16, &str)], final_status: Option<u16>) -> ObservedState {
+    caller_saw_losing(responses, final_status, None)
+}
+
+/// [`caller_saw`], the loss model dropping on its way to her, once she had
+/// observed `lost.0` responses, a response to her INVITE of status `lost.1`,
+/// with SDP when `lost.2`.
+fn caller_saw_losing(
+    responses: &[(u16, &str)],
+    final_status: Option<u16>,
+    lost: Option<(usize, u16, bool)>,
+) -> ObservedState {
     let obs = ObservedState::new();
     let now = tokio::time::Instant::now();
     obs.record(Observation::LegEarly { leg: "alice" }, now);
-    for &(status, method) in responses {
+    let drop_after = |observed: usize| {
+        if let Some((_, status, sdp)) = lost.filter(|(at, _, _)| *at == observed) {
+            lost_to_alice(&obs, status, sdp);
+        }
+    };
+    for (observed, &(status, method)) in responses.iter().enumerate() {
+        drop_after(observed);
         let fact = ResponseFact {
             status,
             reason: String::new(),
@@ -254,6 +271,7 @@ fn caller_saw(responses: &[(u16, &str)], final_status: Option<u16>) -> ObservedS
         };
         obs.record(Observation::LegResponse { leg: "alice", fact }, now);
     }
+    drop_after(responses.len());
     if let Some(status) = final_status {
         obs.record(Observation::LegFinal { leg: "alice", status, reason: String::new() }, now);
     }
@@ -341,18 +359,30 @@ fn lost_to_alice(obs: &ObservedState, status: u16, sdp: bool) {
 }
 
 /// A 2xx that reached the caller only after her CANCEL's 200, its earlier
-/// copy dropped on the way: the server had answered before, so the call is
-/// the crossing; without the drop it stays a server ignoring the CANCEL.
+/// copy dropped on the way before that 200 arrived: the server had answered
+/// before, so the call is the crossing. Without a lost 2xx it stays a server
+/// ignoring the CANCEL.
 #[tokio::test]
 async fn a_2xx_whose_first_copy_was_lost_before_the_cancel_final_is_the_crossing() {
     let expect = Expect::of(&[Branch::ANSWERED_DESPITE_CANCEL, Branch::ABANDONED]);
-    let lost = caller_saw(&[(180, "INVITE"), (200, "CANCEL"), (200, "INVITE")], None);
-    lost_to_alice(&lost, 200, false);
+    let log = [(180, "INVITE"), (200, "CANCEL"), (200, "INVITE")];
+    let lost = caller_saw_losing(&log, None, Some((1, 200, false)));
     let v = verdict(expect, CallVerdict::Ok, &lost, "alice");
     assert_eq!(v.branch(), Some("answered_despite_cancel"), "got {v:?}");
-    let not_lost = caller_saw(&[(180, "INVITE"), (200, "CANCEL"), (200, "INVITE")], None);
-    lost_to_alice(&not_lost, 183, true);
+    let not_lost = caller_saw_losing(&log, None, Some((1, 183, true)));
     assert!(!verdict(expect, CallVerdict::Ok, &not_lost, "alice").is_success());
+}
+
+/// A server that ignored the CANCEL, its late 2xx's first copy dropped only
+/// after the CANCEL's 200 had reached her, answered after that 200: no
+/// crossing, no accepted ending.
+#[tokio::test]
+async fn a_2xx_first_lost_after_the_cancel_final_is_no_crossing() {
+    let expect = Expect::of(&[Branch::ANSWERED_DESPITE_CANCEL, Branch::ABANDONED]);
+    let log = [(180, "INVITE"), (200, "CANCEL"), (200, "INVITE")];
+    let late = caller_saw_losing(&log, None, Some((2, 200, false)));
+    let v = verdict(expect, CallVerdict::Ok, &late, "alice");
+    assert!(!v.is_success(), "a 2xx answered after the CANCEL's 200, got {v:?}");
 }
 
 /// A refusal after early media whose provisional with SDP the loss model
