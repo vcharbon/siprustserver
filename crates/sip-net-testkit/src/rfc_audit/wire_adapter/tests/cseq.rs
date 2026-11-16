@@ -101,3 +101,35 @@ fn an_ack_on_an_unknown_cseq_is_reported_at_the_taker() {
     ];
     assert!(live(RuleId::AckCseqMatchesInvite).check_positioned(&matched).is_empty());
 }
+
+/// At the taker's lane, a CSeq gap over a request the loss model dropped on
+/// its way in is not reported: the sender sent it. The same gap on a call
+/// that dropped nothing is.
+#[test]
+fn a_cseq_gap_over_a_request_the_loss_model_dropped_is_not_reported() {
+    use crate::types::RecvDisposition::{Delivered, LossModel};
+    let call = |info: Option<crate::types::RecvDisposition>| {
+        let mut evs = vec![arrival(
+            SUT,
+            req("OPTIONS", "z9hG4bK-o", 1, Some("bt")),
+            ALICE,
+            0,
+            Delivered,
+            None,
+        )];
+        if let Some(disposition) = info {
+            evs.push(arrival(
+                SUT,
+                req("INFO", "z9hG4bK-i", 2, Some("bt")),
+                ALICE,
+                1,
+                disposition,
+                None,
+            ));
+        }
+        evs.push(arrival(SUT, req("BYE", "z9hG4bK-b", 3, Some("bt")), ALICE, 2, Delivered, None));
+        live(RuleId::CseqInDialogOrder).check(&evs)
+    };
+    assert!(call(Some(LossModel)).is_empty(), "{:?}", call(Some(LossModel)));
+    assert_eq!(call(None).len(), 1, "{:?}", call(None));
+}

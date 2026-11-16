@@ -3,7 +3,7 @@
 use super::*;
 
 pub(super) const LIVE: &[Live] = &[
-    Live::taker(RuleId::CseqInDialogOrder, cseq_in_dialog_order),
+    Live::taker_unless_lost(RuleId::CseqInDialogOrder, cseq_in_dialog_order),
     Live::taker(RuleId::ResponseCseqMatchesTransaction, response_cseq_matches_transaction),
     Live::taker(RuleId::AckCseqMatchesInvite, ack_cseq_matches_invite),
 ];

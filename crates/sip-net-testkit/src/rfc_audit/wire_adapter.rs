@@ -118,6 +118,11 @@ enum Vantage {
     /// the lane that took it, where a scoped waiver's party attribution still
     /// resolves to the true offender off the offending entry's sender.
     Taker,
+    /// As [`Taker`](Self::Taker), for a verdict a message the loss model
+    /// dropped on its way to the taker may explain (a CSeq gap over it): not
+    /// reported at a taker that recorded such a drop from the emitter on the
+    /// call.
+    TakerUnlessLost,
     /// Both ends of the offending message: a two-party negotiation, where an
     /// offence whose sender is no recorded bind is still named on the lane that
     /// took it.
@@ -183,6 +188,10 @@ impl Live {
 
     const fn emitter_unless_lost(id: RuleId, detail: Detail) -> Live {
         Live::at(Vantage::EmitterUnlessLost, id, detail)
+    }
+
+    const fn taker_unless_lost(id: RuleId, detail: Detail) -> Live {
+        Live::at(Vantage::TakerUnlessLost, id, detail)
     }
 
     const fn emitter_only(id: RuleId, detail: Detail) -> Live {
@@ -356,6 +365,16 @@ impl Live {
             Vantage::Taker => {
                 at_vantage(pass, &views, body, |f, b, _| f.taker == *b && admits(f), self.detail)
             }
+            Vantage::TakerUnlessLost => {
+                let dropped = pass.dropped();
+                at_vantage(
+                    pass,
+                    &views,
+                    body,
+                    |f, b, cid| f.taker == *b && admits(f) && !dropped.holds(b, &f.emitter, cid),
+                    self.detail,
+                )
+            }
             Vantage::EitherEnd => at_vantage(
                 pass,
                 &views,
@@ -385,25 +404,6 @@ impl Live {
             }
         }
     }
-}
-
-/// The detail line both `tag-consistency` arms report, off the flip evidence.
-fn tag_flip_detail(f: &rfc_rules::Finding, _cid: &str) -> String {
-    let Decision::Violated(rfc_rules::Evidence::UasTagFlipped {
-        status,
-        branch,
-        final_tag,
-        provisional_tags,
-        ..
-    }) = &f.decision
-    else {
-        return String::new();
-    };
-    format!(
-        "UAS To-tag mismatch on {status} (branch {branch}): prior provisional(s) established \
-         tag(s) [{seen}] but the final carries \"{final_tag}\" — RFC 3261 §17.2.1 / §12.1.1",
-        seen = provisional_tags.join(", "),
-    )
 }
 
 /// Every family's live rows.

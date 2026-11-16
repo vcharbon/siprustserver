@@ -218,3 +218,22 @@ fn in_dialog_from_tag(f: &rfc_rules::Finding, cid: &str) -> String {
         remotes = dialog_remote_tags.join(" | "),
     )
 }
+
+/// The detail line both `tag-consistency` arms report, off the flip evidence.
+fn tag_flip_detail(f: &rfc_rules::Finding, _cid: &str) -> String {
+    let Decision::Violated(rfc_rules::Evidence::UasTagFlipped {
+        status,
+        branch,
+        final_tag,
+        provisional_tags,
+        ..
+    }) = &f.decision
+    else {
+        return String::new();
+    };
+    format!(
+        "UAS To-tag mismatch on {status} (branch {branch}): prior provisional(s) established \
+         tag(s) [{seen}] but the final carries \"{final_tag}\" — RFC 3261 §17.2.1 / §12.1.1",
+        seen = provisional_tags.join(", "),
+    )
+}
