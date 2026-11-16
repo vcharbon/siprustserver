@@ -17,7 +17,7 @@
 //!
 //! The accepted endings are the legal ones, never a prediction: the verdict
 //! is the RFC audit, the reap and the records. [`seal`] stamps the seed into
-//! each call's Call-ID and records the draw; [`join`] joins a run's
+//! each call's Call-ID and records the draw; [`join()`] joins a run's
 //! `call-outcome.v1` records back to their draws.
 //!
 //! [`ActorCall`]: scenario_harness::actor::ActorCall

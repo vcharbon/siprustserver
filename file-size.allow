@@ -69,9 +69,9 @@ crates/rfc-rules/src/rules/cseq.rs 561
 crates/rfc-rules/src/rules/cseq/tests.rs 815
 crates/rfc-rules/src/rules/wellformed.rs 656
 crates/rfc-rules/src/verdict/evidence.rs 1659
-crates/scenario-harness/src/actor/runner.rs 555
+crates/scenario-harness/src/actor/runner.rs 553
 crates/scenario-harness/src/actor/scenarios.rs 914
-crates/scenario-harness/src/actor/script.rs 532
+crates/scenario-harness/src/actor/script.rs 530
 crates/scenario-harness/src/actor/state.rs 604
 crates/scenario-harness/src/agent/client_invite.rs 583
 crates/scenario-harness/src/agent/dialog.rs 715
