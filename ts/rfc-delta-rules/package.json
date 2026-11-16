@@ -1,0 +1,25 @@
+{
+  "name": "@sip/rfc-delta-rules",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "The delta rows an RFC alone justifies (ADR-0062): values the sending stack allocates on every B2BUA replay, each row citing its clause, for a deployment to place in its own match order.",
+  "exports": {
+    ".": "./src/index.ts",
+    "./*": "./src/*.ts"
+  },
+  "types": "./src/index.ts",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@sip/delta-rules": "workspace:*",
+    "@sip/pipeline": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "24.10.1",
+    "typescript": "5.9.3",
+    "vitest": "4.1.11"
+  }
+}

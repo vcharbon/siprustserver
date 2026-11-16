@@ -5,7 +5,6 @@
  * in the deployment's rules, so every id keeps its place in the match order.
  */
 import type { Probe } from "@sip/pipeline"
-import { itemsOf } from "./header-items.js"
 import { notGenerated, notRelayed } from "./provenance.js"
 import type { Predicate, RuleSpec, RuleText } from "./rule.js"
 import { onAnInvite, onKeepalive } from "./scope.js"
@@ -49,14 +48,6 @@ export const keepalive = <F>(rows: ReadonlyArray<KeepaliveRow<F>>): ReadonlyArra
     rfc: "RFC 3261 §11.2",
     on: family === undefined ? { kind: "header", scope: ["OPTIONS"] } : { kind: "header", family, scope: ["OPTIONS"] },
     header: (h) => onKeepalive(h.scope) && (also === undefined || also(h))
-  }))
-
-/** A header the replay stack allocates whole on every message it sends: one rule per header name. */
-export const stackAllocated = <F>(rows: Readonly<Record<string, RuleText<F>>>): ReadonlyArray<RuleSpec<F>> =>
-  Object.entries(rows).map(([name, text]) => ({
-    ...text,
-    on: { kind: "header", family: [name] },
-    header: (h) => itemsOf(h, "replayed").length > 0
   }))
 
 /** A request the stack sends or answers on its own, a stray the flow never scripted: one rule per method. */

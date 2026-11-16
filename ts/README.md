@@ -1,6 +1,6 @@
 # `ts/` — the TypeScript side of the replay toolchain
 
-A pnpm workspace. Twenty packages, four of them one layer each of the same stack:
+A pnpm workspace. Twenty-one packages, four of them one layer each of the same stack:
 
 | package | name | owns |
 | --- | --- | --- |
@@ -8,6 +8,7 @@ A pnpm workspace. Twenty packages, four of them one layer each of the same stack
 | `toolchain/` | `@sip/toolchain` | typed adapters over the Rust CLIs (`sipflow`, `pivot-schema`, `replay`) and the process primitives above them (a command into a file or a log, a detached command and its liveness, `git`, a node child's heap), where each Rust binary is (a prebuilt directory a variable names, else the checkout's release build) and whether an optional host tool is on `PATH` — the ONLY package that adapts a Rust CLI |
 | `pipeline/` | `@sip/pipeline` | flows ingest, the correlation rule engine, the cut, and case assembly |
 | `delta-rules/` | `@sip/delta-rules` | the engine a deployment writes its delta rules on (ADR-0062): the rule type and first-match order, the readings of a probe, the lane lists, the overlap graph that pins every winner, and the rules page |
+| `rfc-delta-rules/` | `@sip/rfc-delta-rules` | the delta rows an RFC alone justifies (ADR-0062 item 5): the values the sending stack allocates, each row citing its clause, with the case fact the RAck row reads, for a deployment to place in its own match order |
 | `bless/` | `@sip/bless` | the post-run bless a deployment composes as its `Reclassifier` (ADR-0062): a failure a named rule answers restated, an RFC charge read back to the peer that authored it, the body gate, the audit of a passing cell filed by rule, and the cell's rule counts |
 | `driver/` | `@sip/driver` | one cell of a campaign, either shape, into its caller's run dir; the `campaign.json` line it answers is the caller's to fold |
 | `store/` | `@sip/store` | the run store: the postgres record of cuts, runs and what each call said, the readers a queue and a comparison use, and the run selectors |
@@ -28,7 +29,7 @@ A pnpm workspace. Twenty packages, four of them one layer each of the same stack
 Dependencies point one way only. `contracts` depends on nothing, and every other
 package but the leaves `viewer-core` and `case-modules`, the deployment `siprig` and the pack `reference-pack` depends on it; beyond it, each
 package's own edges are: `pipeline`, `toolchain`, `store` and `rig` none,
-`delta-rules → pipeline`, `bless → pipeline`, `driver → {pipeline, toolchain}`, `basic-case → {driver, rig}` (its tests also
+`delta-rules → pipeline`, `rfc-delta-rules → {delta-rules, pipeline}`, `bless → pipeline`, `driver → {pipeline, toolchain}`, `basic-case → {driver, rig}` (its tests also
 `toolchain`), `corpus → {driver, pipeline, rig, store, toolchain, viewer-core}`,
 `cli → {corpus, store}`, `workspace → {cli, rig, store, toolchain}`,
 `lab-host → {cli, corpus, rig, store, toolchain, workspace}`,

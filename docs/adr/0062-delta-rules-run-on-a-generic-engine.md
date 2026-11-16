@@ -1,6 +1,6 @@
 # Delta rules run on a generic engine
 
-**Status:** accepted (2026-11-16) for the engine and the bless; proposed for the RFC rows.
+**Status:** accepted (2026-11-16).
 
 **Owner:** `ts/delta-rules/` (the rule type, the engine, the readings, the lane lists, the
 overlap graph, the rules page), `ts/rfc-delta-rules/` (the rows an RFC alone justifies),

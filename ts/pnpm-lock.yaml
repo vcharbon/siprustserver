@@ -372,6 +372,25 @@ importers:
         specifier: 4.1.11
         version: 4.1.11(@types/node@24.10.1)(vite@8.2.2(@types/node@24.10.1)(tsx@4.20.6))
 
+  rfc-delta-rules:
+    dependencies:
+      '@sip/delta-rules':
+        specifier: workspace:*
+        version: link:../delta-rules
+      '@sip/pipeline':
+        specifier: workspace:*
+        version: link:../pipeline
+    devDependencies:
+      '@types/node':
+        specifier: 24.10.1
+        version: 24.10.1
+      typescript:
+        specifier: 5.9.3
+        version: 5.9.3
+      vitest:
+        specifier: 4.1.11
+        version: 4.1.11(@types/node@24.10.1)(vite@8.2.2(@types/node@24.10.1)(tsx@4.20.6))
+
   rig:
     dependencies:
       '@effect/platform-node':

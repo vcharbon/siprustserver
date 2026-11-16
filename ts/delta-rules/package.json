@@ -6,6 +6,7 @@
   "description": "The delta-rule engine a deployment writes its replay rules on: the rule type and first-match order, the readings of a probe, the lane lists, the overlap graph and the rules table (ADR-0062).",
   "exports": {
     ".": "./src/index.ts",
+    "./probes": "./test/probes.ts",
     "./*": "./src/*.ts"
   },
   "types": "./src/index.ts",

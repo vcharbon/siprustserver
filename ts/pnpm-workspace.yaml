@@ -3,6 +3,7 @@ packages:
   - "toolchain"
   - "pipeline"
   - "delta-rules"
+  - "rfc-delta-rules"
   - "bless"
   - "driver"
   - "store"
