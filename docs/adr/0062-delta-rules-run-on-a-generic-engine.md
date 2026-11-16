@@ -46,8 +46,9 @@ ingress gate; a delta rule names a difference between a replay and its reference
    - its lane lists. An entry is a rule id with a class: `accepted`, or `known_bug` with the
      ticket it waits on. A list may extend another, the nearest list wins, and a list beside a
      lane's own files stands in for the shipped one of its name. The loader refuses a list that
-     names an unknown rule, a cycle, and an entry in both classes or with the wrong ticket
-     shape (`DeltaRules.LaneList*`);
+     names an unknown rule, an `extends` cycle, a rule in both classes of one file, a
+     `known_bug` entry with no ticket and an `accepted` one with a ticket
+     (`DeltaRules.LaneList*`);
    - any classification ahead of the rules, such as a header namespace it injects itself;
    - the intro, section titles and lane order the rules page prints, and any table of its own
      the page closes with;
@@ -90,8 +91,10 @@ ingress gate; a delta rule names a difference between a replay and its reference
   depend on it and on `@sip/contracts`; `@sip/rfc-delta-rules` depends on `@sip/delta-rules`.
 - A deployment binds the engine once to its facts and sections, and its own readings import the
   engine's.
-- A deployment's registry imports each RFC row by name and places it. One of the deployment's
-  tests holds that every RFC row is placed exactly once.
+- A deployment's registry imports each RFC row by name and places it, adding lane notes only.
+  One of the deployment's tests holds that every RFC row is placed exactly once and runs the
+  rows' fixtures (`@sip/rfc-delta-rules/test-fixtures`) through the placed rules. Its case
+  facts take the rows' facts whole from `rfcFactsOf`.
 - A deployment must place a new RFC row before it has any effect. Until then, that row's
   probes keep the rulings they had.
 - More rows move here when a second deployment consumes them.
