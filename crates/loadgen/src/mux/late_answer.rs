@@ -13,8 +13,9 @@
 //! a UA that no longer holds the dialog (§12.2.2) is held until the agent
 //! answers it: a retransmission arriving once the call released without
 //! answering it (the agent ended first, or never got a copy) draws the 481,
-//! not a stray. A request first arriving after the release stays a stray. Once the ACK of a held INVITE final arrives,
-//! before or after the call released, the final is owed no more (§17.2.1
+//! not a stray. A request first arriving after the release stays a stray.
+//! Once the ACK of a held INVITE final arrives, before or after the call
+//! released, the final is owed no more (§17.2.1
 //! Confirmed): its bytes go, and a retransmitted INVITE or ACK of that
 //! transaction is absorbed.
 //!

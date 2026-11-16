@@ -23,7 +23,9 @@ pub enum Observation {
     /// its still-open in-dialog acknowledgement obligations (a pending re-INVITE
     /// ACK / PRACK-200 / … whose peer transaction dies with the call can never
     /// arrive), so the settle barrier does not hold the verdict its 32 s ceiling
-    /// for an impossible ack. See [`ObligationLedger::discharge_leg`](super::ledger::ObligationLedger::discharge_leg).
+    /// for an impossible ack. See [`ObligationLedger::discharge_leg`].
+    ///
+    /// [`ObligationLedger::discharge_leg`]: super::ledger::ObligationLedger::discharge_leg
     DialogTornDown { leg: &'static str },
     /// We answered a received dialog-creating INVITE — seed its stream (sender
     /// tag: the INVITE's From-tag) with the INVITE's CSeq, so the first
@@ -62,9 +64,10 @@ pub enum Observation {
     Subflow { leg: &'static str, name: &'static str, to: SubflowState },
     /// A renegotiation this leg ORIGINATED on `dialog` (its local and remote
     /// tags) completed — a re-INVITE's 2xx received and ACKed, an UPDATE's
-    /// 2xx received, or either refused with no retry to follow. Folds into the leg's grow-only completed-reneg set (keyed
-    /// by dialog and CSeq, so a re-emitted 2xx cannot double-count), whose
-    /// cardinality serializes an N-cycle re-INVITE script.
+    /// 2xx received, or either refused with no retry to follow. Folds into
+    /// the leg's grow-only completed-reneg set (keyed by dialog and CSeq, so
+    /// a re-emitted 2xx cannot double-count), whose cardinality serializes an
+    /// N-cycle re-INVITE script.
     RenegCompleted { leg: &'static str, dialog: (String, String), cseq: u32 },
     /// An inbound response observed on `leg` — appended to the leg's ordered
     /// response log (one writer: the leg's own reactor), which reception goals
@@ -86,16 +89,22 @@ pub enum Observation {
         rule: &'static str,
     },
     /// A shared endpoint's demux found no actor for an inbound (see
-    /// [`ReplayEntry::UnclaimedInbound`](super::replay_record::ReplayEntry::UnclaimedInbound)).
+    /// [`ReplayEntry::UnclaimedInbound`]).
+    ///
+    /// [`ReplayEntry::UnclaimedInbound`]: super::replay_record::ReplayEntry::UnclaimedInbound
     UnclaimedInbound { endpoint: String, detail: String },
     /// A final the peer retransmitted while `leg` held its ACK for it (see
-    /// [`ReplayEntry::HeldFinalRetransmitted`](super::replay_record::ReplayEntry::HeldFinalRetransmitted)).
+    /// [`ReplayEntry::HeldFinalRetransmitted`]).
+    ///
+    /// [`ReplayEntry::HeldFinalRetransmitted`]: super::ReplayEntry::HeldFinalRetransmitted
     HeldFinalRetransmitted { leg: &'static str, status: u16, cseq_method: String, cseq: u32 },
     /// The call's loss model dropped a datagram to or from `leg`.
     Lost { leg: &'static str, message: LostMessage },
     /// A reception goal's body expectation missed (see
-    /// [`ReplayEntry::BodyExpectMiss`](super::replay_record::ReplayEntry::BodyExpectMiss)) — appended to the replay record so the
-    /// miss is never silent.
+    /// [`ReplayEntry::BodyExpectMiss`]) — appended to the replay record so
+    /// the miss is never silent.
+    ///
+    /// [`ReplayEntry::BodyExpectMiss`]: super::replay_record::ReplayEntry::BodyExpectMiss
     BodyExpectMiss {
         leg: &'static str,
         step: usize,
