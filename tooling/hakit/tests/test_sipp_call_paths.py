@@ -58,6 +58,7 @@ CASES = [
     ),
     Case("far-reinvites-cut", UAS, "cut", "bye_from_far_end", {"hold_ms": "5000"}, UAS_FAST, ruri_user="reinvite"),
     Case("far-reinvite-unacked", "peer-reinvite-unacked.xml", "cut", "far_reinvite_no_ack", {"hold_ms": "15000"}, {}, ["protocol"]),
+    Case("far-reinvite-ack-repeat", "peer-reinvite-ack-repeat.xml", "answered", "far_end_release", {"far_end_bye": "release", "hold_ms": "5000"}),
     Case("ghost-released", "peer-ghost-bye.xml", "answered", "ghost_released", {"abuse": "ghost", "hold_ms": "15000"}),
     Case("ghost-never-released", "peer-answer-quiet.xml", "stranded", "ghost_never_released", {"abuse": "ghost"}, phase="answered"),
     Case("options-flood", "peer-flood-target.xml", "answered", "answered", {"abuse": "options_flood", "flood_count": "5", "flood_gap_ms": "100"}),
