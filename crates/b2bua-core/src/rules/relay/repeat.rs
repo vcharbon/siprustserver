@@ -10,10 +10,8 @@ use b2bua_sdk::event::CallEvent;
 use b2bua_sdk::model::{RuleAction, RuleContext};
 use call::{Call, Dialog, DialogId, InviteExchange, Leg, ReAckedCopy};
 use sip_message::{Method, SipMessage, SipResponse};
+use sip_retransmit::timers::T1;
 use sip_retransmit::Class;
-
-/// This stack's T1 (RFC 3261 §17.1.1.1), in ms on the turn clock.
-const T1_MS: i64 = sip_retransmit::timers::T1 as i64;
 
 /// Whether `resp` is a copy of an INVITE 2xx `leg`'s `dialog` already took
 /// (RFC 3261 §13.3.1.4 — the answerer repeats it until ACKed): the dialog
@@ -114,5 +112,7 @@ pub(crate) fn re_ack_owed(x: &InviteExchange) -> bool {
 /// (§17.1.1.1). A peer answering each ACK with the 2xx again stops there.
 fn owes_re_ack(x: &InviteExchange, now_ms: i64) -> bool {
     x.copies_received <= Class::Final2xx.resends()
-        || x.re_acked_copy.is_none_or(|last| now_ms.saturating_sub(last.at_ms) >= T1_MS)
+        || x.re_acked_copy.is_none_or(|last| {
+            u64::try_from(now_ms.saturating_sub(last.at_ms)).is_ok_and(|since| since >= T1)
+        })
 }
