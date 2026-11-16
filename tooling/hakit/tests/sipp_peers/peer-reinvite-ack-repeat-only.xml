@@ -1,8 +1,9 @@
 <?xml version="1.0" encoding="ISO-8859-1" ?>
 <!DOCTYPE scenario SYSTEM "sipp.dtd">
 <!-- Answers, then sends two in-dialog re-INVITEs. On the second's 200 it
-     sends the ACK of the first's 200 again, and every ACK of the second's
-     200 is lost; answers the caller's BYE. -->
+     sends the ACK of the first's 200 again, and the second's own ACK is
+     lost; answers the caller's BYE. A 200 the caller sends after the ACKs
+     fails this peer. -->
 <scenario name="peer-reinvite-ack-repeat-only">
   <recv request="INVITE" crlf="true" rrs="true">
     <action>
@@ -122,8 +123,6 @@
       Content-Length: 0
     ]]>
   </send>
-  <label id="w"/>
-  <recv response="200" optional="true" crlf="true" next="w"/>
   <recv request="BYE" crlf="true" timeout="45000"/>
   <send>
     <![CDATA[
