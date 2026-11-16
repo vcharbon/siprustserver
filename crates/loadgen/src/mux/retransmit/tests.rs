@@ -298,3 +298,18 @@ async fn calltxns_a_new_rseq_is_a_new_provisional() {
     assert!(took(&reliable(8)), "the next RSeq is a new provisional");
     txns.shutdown();
 }
+
+/// A retransmitted non-2xx final to our re-INVITE means our hop ACK was lost:
+/// the engine sends that ACK again (RFC 3261 §17.1.1.2), as for a 2xx.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "slow lane: loadgen"]
+async fn calltxns_reacks_a_retransmitted_non_2xx_invite_final() {
+    let (txns, peer, peer_addr) = txn_rig().await;
+    let pending = resp(491, "z9hG4bK-r3", "3 INVITE", "");
+    assert!(txns.on_inbound(&Datagram::sniff(&pending), peer_addr), "first 491 delivered");
+    txns.on_outbound(&Datagram::sniff(&ack_req("z9hG4bK-r3", 3)), peer_addr);
+    assert!(!txns.on_inbound(&Datagram::sniff(&pending), peer_addr), "dup 491 absorbed");
+    let resent = recv_one(&peer, 500).await.expect("the hop ACK sent again");
+    assert!(resent.starts_with("ACK ") && resent.contains("CSeq: 3 ACK"), "{resent}");
+    txns.shutdown();
+}

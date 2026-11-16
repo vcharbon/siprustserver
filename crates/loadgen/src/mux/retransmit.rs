@@ -332,9 +332,10 @@ impl CallTxns {
             // `crate::scenarios`).
             let key = key_of((branch, "r", method, status, id.to_tag.unwrap_or_default(), id.rseq));
             if !g.seen_in.insert(key) {
-                // Duplicate response. A retransmitted INVITE 2xx means our ACK was
-                // lost → re-ACK it.
-                if (200..300).contains(&status) && is_invite {
+                // Duplicate response. A retransmitted INVITE final means our ACK
+                // was lost → re-ACK it: the 2xx's own ACK, or the hop ACK of a
+                // non-2xx (RFC 3261 §17.1.1.2).
+                if status >= 200 && is_invite {
                     if let (Some(cid), Some(cseq)) = (id.call_id, id.cseq) {
                         if let Some(ack) = g.acks.get(&cid_key(cid, cseq)).cloned() {
                             self.send(ack, ReEmitKind::ReAck);
