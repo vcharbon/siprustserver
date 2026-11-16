@@ -588,6 +588,49 @@ async fn a_487_far_from_any_bye_stays_a_failure() {
     );
 }
 
+/// A 487 to the caller's INFO answers a request relayed toward a callee leg
+/// a BYE ended (sent or received there) in the same instant: excused, while
+/// the caller's own dialog lives on. The same BYE 10 s later ended no leg the
+/// request was pending toward: the 487 stays a failure.
+#[tokio::test(start_paused = true)]
+#[ignore = "slow lane: loadgen"]
+async fn a_487_as_another_leg_ends_is_excused_only_within_t2() {
+    async fn run(leg_dir: Dir, later: bool) -> Vec<WireFailure> {
+        let wire = CallWire::new(Clock::test_at(0));
+        feed(
+            &wire,
+            &[
+                (Side::Caller, Dir::Out, msg("INVITE sip:b@h SIP/2.0", "c18", "1 INVITE", "", "")),
+                (
+                    Side::Leg("callee"),
+                    Dir::In,
+                    msg("INVITE sip:q@h SIP/2.0", "b18", "1 INVITE", "", ""),
+                ),
+                (Side::Leg("callee"), Dir::Out, msg("SIP/2.0 200 OK", "b18", "1 INVITE", "q1", "")),
+                (Side::Caller, Dir::In, msg("SIP/2.0 200 OK", "c18", "1 INVITE", "t1", "")),
+                (Side::Caller, Dir::Out, msg("ACK sip:b@h SIP/2.0", "c18", "1 ACK", "t1", "")),
+                (Side::Caller, Dir::Out, msg("INFO sip:b@h SIP/2.0", "c18", "2 INFO", "t1", "")),
+                (Side::Caller, Dir::In, msg("SIP/2.0 487 Terminated", "c18", "2 INFO", "t1", "")),
+            ],
+        );
+        if later {
+            tokio::time::advance(std::time::Duration::from_secs(10)).await;
+        }
+        let bye = msg("BYE sip:q@h SIP/2.0", "b18", "2 BYE", "q1", "");
+        feed(&wire, &[(Side::Leg("callee"), leg_dir, bye)]);
+        wire.excuse(&[]);
+        wire.facts().failures
+    }
+    for dir in [Dir::In, Dir::Out] {
+        assert!(run(dir, false).await.is_empty(), "{dir:?}: the leg's BYE in the same instant");
+        assert_eq!(
+            run(dir, true).await,
+            vec![WireFailure { at_ms: 0, method: "INFO".into(), code: Some(487) }],
+            "{dir:?}: the leg's BYE 10 s later"
+        );
+    }
+}
+
 /// A 500 to a re-INVITE without a Retry-After asks for no retry (RFC 3261
 /// §14.1): the side's next re-INVITE leaves it a failure. One carrying a
 /// Retry-After, then retried, is no failure.
