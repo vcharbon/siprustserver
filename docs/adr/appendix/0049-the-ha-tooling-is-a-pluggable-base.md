@@ -551,13 +551,19 @@ made. A run profile joins the two.
    received while the call is already in its unexpected-message handler is
    discarded (logging `Continuing call on unexpected message`, counted in no
    stat) and the call acts on the peer's retransmission; a discarded
-   provisional, never retransmitted, is lost. Every ACK reaches the scenario,
-   which checks its CSeq: only the ACK with a 2xx's CSeq discharges that 2xx,
-   in its wait or in the handler, and a lower one is absorbed. The 2xx to a
-   far re-INVITE is sent once, never after an ACK: SIPp ties a send to the
-   message received just before it and answers each copy of that message
-   with it, so a 2xx sent after an ACK the far end repeats for each 2xx copy
-   loops. A call that ends with a 2xx undischarged records a `protocol`
+   provisional, never retransmitted, is lost. Every other ACK reaches the
+   scenario, which checks its CSeq: only the ACK with a 2xx's CSeq discharges
+   that 2xx, in its wait or in the handler, and a lower one is absorbed. The
+   2xx to a far re-INVITE is sent once, never after an ACK: SIPp ties a send
+   to the message received just before it and answers each copy of that
+   message with it, so a 2xx sent after an ACK the far end repeats for each
+   2xx copy loops. SIPp runs one step of a call per scheduler pass and reads
+   the network between passes, so a message can land between the re-INVITE's
+   match and its 2xx whatever the steps; no recv can cover a `<send>` step (an
+   optional recv must be followed by a mandatory one, and a `global` recv
+   covers every later step), so the far re-INVITE is taken in the handler,
+   which the call leaves once the 2xx is sent: an ACK landing in between, the
+   far end's ACK sent ahead of the 2xx included, is discarded unchecked. A call that ends with a 2xx undischarged records a `protocol`
    failure. An ACK above the CSeq of the latest far request the call gave a
    final acknowledges nothing the caller sent, a `protocol` failure, and the
    call goes on.

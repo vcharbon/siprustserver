@@ -36,7 +36,9 @@
  every 2xx retransmission is ACKed again with its CSeq; a far re-INVITE is
  answered 200 (491 while the caller's own is pending, 481 after its BYE),
  sent once and never after an ACK (SIPp's engine answers a byte-identical
- copy of the re-INVITE with it). Only the ACK with its CSeq discharges it,
+ copy of the re-INVITE with it): the re-INVITE is taken in the handler,
+ which the call leaves once the 200 is sent, and SIPp discards what lands
+ meanwhile. Only the ACK with its CSeq discharges it,
  in its wait or in the handler; a lower ACK is absorbed; a call ending with
  it undischarged records a protocol failure. An ACK above the CSeq of the
  latest far request given a final acknowledges nothing: a protocol failure,
@@ -424,13 +426,7 @@ Content-Length: 0
    <test assign_to="hold_over" variable="hl_s" compare="greater_than_equal" variable2="seg_ms"/>
   </action>
  </nop>
- <recv request="OPTIONS" optional="true" timeout="1000" ontimeout="hold_left" next="hold_options"/>
- <recv request="INVITE" next="far_reinvite">
-  <action>
-   <assign assign_to="fr_ret" value="0"/>
-   <assign assign_to="fa_busy" value="1"/>
-  </action>
- </recv>
+ <recv request="OPTIONS" timeout="1000" ontimeout="hold_left" next="hold_options"/>
  <nop/>
  <label id="hold_options"/>
  <send next="hold_left">
@@ -790,6 +786,7 @@ a=rtpmap:0 PCMU/8000
    <ereg regexp="[0-9]+" search_in="var" variable="fr_cs" assign_to="gl_n"/>
    <todouble assign_to="fa_hi" variable="gl_n"/>
    <assign assign_to="fr_due" value="1"/>
+   <assign assign_to="_unexp.retaddr" value="0"/>
   </action>
  </send>
  <label id="far_wait"/>
@@ -914,6 +911,11 @@ Content-Length: 0
   </action>
  </nop>
  <recv request="BYE" optional="true" timeout="5000" ontimeout="ghost" next="ghost_bye"/>
+ <recv request="ACK" optional="true" next="ack_in">
+  <action>
+   <ereg regexp="[0-9]+" search_in="hdr" header="CSeq:" assign_to="fa_n"/>
+  </action>
+ </recv>
  <recv request="[A-Z]" regexp_match="true" optional="true" next="ghost"/>
  <recv response="^[1-6][0-9][0-9]$" regexp_match="true" next="ghost"/>
  <nop/>
@@ -1355,6 +1357,7 @@ Content-Length: 0
  <nop test="fr_due" next="far_wait"/>
  <nop test="fa_busy" next="reinv_answer"/>
  <nop test="bye_sent" next="bye_send"/>
+ <nop test="is_ghost" next="ghost"/>
  <nop next="reinv_wait"/>
 
  <nop/>
@@ -1753,7 +1756,6 @@ Content-Length: 0
   <action>
    <assign assign_to="fr_ret" variable="_unexp.retaddr"/>
    <assign assign_to="fa_busy" value="1"/>
-   <assign assign_to="_unexp.retaddr" value="0"/>
   </action>
  </nop>
  <nop/>
