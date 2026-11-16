@@ -491,3 +491,32 @@ async fn a_500_to_a_request_the_loss_reordered_is_no_failure() {
         vec![WireFailure { at_ms: 0, method: "UPDATE".into(), code: Some(500) }]
     );
 }
+
+/// A 487 to an INFO the caller sent, answered just before the BYE that ended
+/// her dialog reached her, answers a request pending as the dialog ended
+/// (RFC 3261 §15.1.2): excused once the call is over. With no BYE it stays.
+#[tokio::test(start_paused = true)]
+#[ignore = "slow lane: loadgen"]
+async fn a_487_before_the_bye_that_ended_the_dialog_is_excused() {
+    let run = |bye: bool| {
+        let wire = CallWire::new(Clock::test_at(0));
+        let mut events = vec![
+            (Side::Caller, Dir::Out, msg("INVITE sip:b@h SIP/2.0", "c14", "1 INVITE", "", "")),
+            (Side::Caller, Dir::In, msg("SIP/2.0 200 OK", "c14", "1 INVITE", "t1", "")),
+            (Side::Caller, Dir::Out, msg("INFO sip:b@h SIP/2.0", "c14", "2 INFO", "t1", "")),
+            (Side::Caller, Dir::In, msg("SIP/2.0 487 Terminated", "c14", "2 INFO", "t1", "")),
+        ];
+        if bye {
+            events.push((
+                Side::Caller,
+                Dir::In,
+                msg("BYE sip:a@h SIP/2.0", "c14", "9 BYE", "t1", ""),
+            ));
+        }
+        feed(&wire, &events);
+        wire.excuse(&[]);
+        wire.facts().failures
+    };
+    assert!(run(true).is_empty(), "{:?}", run(true));
+    assert_eq!(run(false), vec![WireFailure { at_ms: 0, method: "INFO".into(), code: Some(487) }]);
+}

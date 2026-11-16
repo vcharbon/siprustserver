@@ -203,13 +203,21 @@ impl CallWire {
 
     /// Forget the in-dialog failures `excused` names (request method and
     /// final): a UA of the call refused a request the loss model's drops
-    /// explain, and the system under test relayed that refusal.
+    /// explain, and the system under test relayed that refusal. Forget too a
+    /// 487 of a side whose dialog a BYE ended, before or after it arrived:
+    /// the answer to a request pending as its dialog ended (RFC 3261
+    /// §15.1.2).
     pub fn excuse(&self, excused: &[(String, u16)]) {
         let mut f = self.facts.lock().unwrap();
         let keep =
             |w: &WireFailure| !excused.iter().any(|(m, c)| *m == w.method && w.code == Some(*c));
-        f.failures.retain(keep);
-        f.legs.iter_mut().for_each(|l| l.failures.retain(keep));
+        let ended = |byed: bool| move |w: &WireFailure| !(byed && w.code == Some(487));
+        let byed = f.byed();
+        f.failures.retain(|w| keep(w) && ended(byed)(w));
+        for leg in &mut f.legs {
+            let byed = leg.byed;
+            leg.failures.retain(|w| keep(w) && ended(byed)(w));
+        }
         f.saw_481 = f.failures.iter().any(|w| w.code == Some(481));
     }
 
