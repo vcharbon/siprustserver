@@ -3,7 +3,8 @@
  * key, and a predicate over the probe kind the key names and the deployment's
  * case facts `F`. A built rule reads its predicate only on a probe its key
  * admits, so it matches no probe outside its key. The deployment names its
- * sections `S`; the engine reads them as an order and nothing else.
+ * sections `S` and lists its rules in match order; matching reads that list
+ * order alone, and {@link shapeIssues} holds the list to its sections.
  */
 import type { Probe } from "@sip/pipeline"
 import { keyTest, type RuleOn } from "./rule-on.js"
@@ -107,3 +108,42 @@ export const matchingRules = <F, S extends string>(
   probe: Probe.Probe,
   facts: F
 ): ReadonlyArray<DeltaRule<F, S>> => rules.filter((rule) => rule.matches(probe, facts))
+
+/** The sections of `rules` in list order, each named once per contiguous run. */
+const sectionRuns = <S extends string>(rules: ReadonlyArray<{ readonly section: S }>): ReadonlyArray<S> =>
+  rules.flatMap((rule, i) => (i > 0 && rules[i - 1]!.section === rule.section ? [] : [rule.section]))
+
+/** Each declared run of `runs` that follows a later-declared one. */
+const outOfOrder = <S extends string>(runs: ReadonlyArray<S>, sections: ReadonlyArray<S>): ReadonlyArray<string> => {
+  const declared = runs.filter((name) => sections.includes(name))
+  return declared.flatMap((name, i) =>
+    i > 0 && sections.indexOf(name) < sections.indexOf(declared[i - 1]!) ? [`section ${name} runs after ${declared[i - 1]}`] : []
+  )
+}
+
+/**
+ * What breaks the shape every deployment's rules hold, one line each; none for
+ * a sound list. Each section is declared, contiguous, and runs in the order
+ * `sections` states, so the rules page, which groups by section, prints the
+ * match order. Every id is minted once, every `why` fits {@link WHY_CAP} and
+ * every lane note {@link LANE_NOTE_CAP}. A deployment's test asserts it empty.
+ */
+export const shapeIssues = <F, S extends string>(
+  rules: ReadonlyArray<DeltaRule<F, S>>,
+  sections: ReadonlyArray<S>
+): ReadonlyArray<string> => {
+  const runs = sectionRuns(rules)
+  const ids = rules.map((rule) => rule.id)
+  return [
+    ...runs.filter((name) => !sections.includes(name)).map((name) => `section ${name} is not declared`),
+    ...runs.filter((name, i) => runs.indexOf(name) !== i).map((name) => `section ${name} is split`),
+    ...outOfOrder(runs, sections),
+    ...ids.filter((id, i) => ids.indexOf(id) !== i).map((id) => `id ${id} is minted twice`),
+    ...rules.filter((rule) => rule.why.length > WHY_CAP).map((rule) => `${rule.id}: why of ${rule.why.length} characters`),
+    ...rules.flatMap((rule) =>
+      Object.entries(rule.lanes ?? {})
+        .filter(([, note]) => note.length > LANE_NOTE_CAP)
+        .map(([lane, note]) => `${rule.id}: ${lane} note of ${note.length} characters`)
+    )
+  ]
+}

@@ -29,7 +29,8 @@ ingress gate; a delta rule names a difference between a replay and its reference
    (`families.ts`) whose rows name their ids.
 2. **Order is first match, by section, then by position.** The deployment states its sections,
    their order and the place of every rule; `matchRule` takes the first, `matchingRules` lists
-   every rule that names the probe. The overlap graph (`overlap.ts`) reads full match sets over
+   every rule that names the probe. `shapeIssues` refuses a section split or out of order, an id
+   minted twice and a `why` or lane note over its cap; a deployment's test asserts it empty. The overlap graph (`overlap.ts`) reads full match sets over
    the deployment's fixtures, their mutants and any archive it keeps, and lists each pair of
    rules seen naming one probe, with the pair's winner. The deployment checks that list in as a
    golden file and a test regenerates it: an edit that changes a winner fails, naming the pair.

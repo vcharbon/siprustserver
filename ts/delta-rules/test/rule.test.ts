@@ -4,7 +4,7 @@
  */
 import { describe, expect, it } from "vitest"
 import { substitution } from "../src/families.js"
-import { matchingRules, matchRule, section } from "../src/rule.js"
+import { LANE_NOTE_CAP, matchingRules, matchRule, section, shapeIssues, WHY_CAP } from "../src/rule.js"
 import { admits } from "../src/rule-on.js"
 import { headerProbe, shape } from "./probes.js"
 
@@ -77,6 +77,42 @@ describe("first match", () => {
 
   it("names no rule for a probe none matches", () => {
     expect(matchRule(rules, shape({ shape: "retransmission", cseqMethod: "INVITE", captured: 2, replayed: 1 }), NONE)).toBeUndefined()
+  })
+})
+
+describe("a rule list's shape", () => {
+  type S = "first" | "second" | "third"
+  const SECTIONS: ReadonlyArray<S> = ["first", "second", "third"]
+  const row = (id: string, over: { why?: string; lanes?: Record<string, string> } = {}) =>
+    ({ id, on: { kind: "header" as const }, why: over.why ?? "", ...(over.lanes ? { lanes: over.lanes } : {}), header: () => true })
+  const of = (name: S, ...ids: ReadonlyArray<string>) => section<Facts, S>(name, ids.map((id) => row(id)))
+
+  it("is sound where each section is contiguous, in declared order, and every id minted once", () => {
+    expect(shapeIssues([...of("first", "a", "b"), ...of("third", "c")], SECTIONS)).toEqual([])
+  })
+
+  it("refuses a section split by another, so the page grouped by section would misstate match order", () => {
+    expect(shapeIssues([...of("first", "a"), ...of("second", "b"), ...of("first", "c")], SECTIONS)).toEqual([
+      "section first is split",
+      "section first runs after second"
+    ])
+  })
+
+  it("refuses sections out of declared order, and a section not declared", () => {
+    expect(shapeIssues([...of("third", "a"), ...of("first", "b")], SECTIONS)).toEqual(["section first runs after third"])
+    expect(shapeIssues(section<Facts, string>("fourth", [row("a")]), SECTIONS)).toEqual(["section fourth is not declared"])
+  })
+
+  it("refuses an id minted twice, a why over the cap and a lane note over the cap", () => {
+    const rules = [
+      ...of("first", "a", "a"),
+      ...section<Facts, S>("second", [row("long", { why: "x".repeat(WHY_CAP + 1), lanes: { lab: "y".repeat(LANE_NOTE_CAP + 1) } })])
+    ]
+    expect(shapeIssues(rules, SECTIONS)).toEqual([
+      "id a is minted twice",
+      `long: why of ${WHY_CAP + 1} characters`,
+      `long: lab note of ${LANE_NOTE_CAP + 1} characters`
+    ])
   })
 })
 
