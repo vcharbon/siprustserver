@@ -23,11 +23,14 @@ pub struct FuzzConfig {
     pub train_max: usize,
     /// Each call's draw is written to stderr as one `FUZZ-DRAW` line.
     pub log_draws: bool,
+    /// The roles that send no odd INFO: a call that refuses a party's INFO.
+    pub quiet: &'static [&'static str],
 }
 
 impl Default for FuzzConfig {
     /// Run seed 1, payloads on half the calls, jitter on 70 %, a 6000-byte
-    /// header budget, legal messages only, no trains unless asked (30 at most).
+    /// header budget, legal messages only, no trains unless asked (30 at most),
+    /// every party free to send an odd INFO.
     fn default() -> Self {
         FuzzConfig {
             run_seed: 1,
@@ -39,6 +42,7 @@ impl Default for FuzzConfig {
             train: false,
             train_max: 30,
             log_draws: false,
+            quiet: &[],
         }
     }
 }

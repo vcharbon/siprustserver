@@ -83,11 +83,15 @@ fn hostile_headers(
 }
 
 /// One drawn party sends an INFO with an odd body on its confirmed dialog,
-/// ahead of its BYE; a party with no BYE goal sends none.
+/// ahead of its BYE; a party with no BYE goal, or one of `config.quiet`,
+/// sends none.
 fn odd_info(rng: &mut Rng, call: &mut ActorCall, config: &FuzzConfig, notes: &mut Vec<String>) {
     let idx = rng.below(call.actors.len() as u64) as usize;
     let caller = scenario_harness::actor::originating_role(&call.actors);
     let actor = &mut call.actors[idx];
+    if config.quiet.contains(&actor.role) {
+        return;
+    }
     let Some(pos) =
         actor.goals.iter().position(|g| matches!(g.step, GoalStep::Bye | GoalStep::ByeWith { .. }))
     else {

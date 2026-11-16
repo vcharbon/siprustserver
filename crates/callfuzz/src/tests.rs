@@ -129,6 +129,31 @@ async fn only_legal_bodies_are_drawn_unless_asked() {
     h.finish().await;
 }
 
+/// A quiet party sends no odd INFO: the basic call's caller, the one party
+/// with a BYE to send it ahead of, sends some unless quiet.
+#[tokio::test(start_paused = true)]
+async fn a_quiet_party_sends_no_odd_info() {
+    let (h, alice, bob) = agents("callfuzz-quiet").await;
+    let env = env(&alice, &bob, "t");
+    let senders = |quiet| {
+        let config = FuzzConfig { quiet, ..payloads_always() };
+        (0..200)
+            .flat_map(|seed| {
+                let mut call = basic(&env);
+                perturb(&mut Rng::new(seed), &mut call, &config, &mut Vec::new());
+                call.actors
+                    .iter()
+                    .filter(|a| a.goals.iter().any(|g| matches!(g.step, GoalStep::InDialog { .. })))
+                    .map(|a| a.role)
+                    .collect::<Vec<_>>()
+            })
+            .collect::<std::collections::BTreeSet<&str>>()
+    };
+    assert_eq!(senders(&[]).into_iter().collect::<Vec<_>>(), ["alice"]);
+    assert!(senders(&["alice"]).is_empty());
+    h.finish().await;
+}
+
 #[tokio::test(start_paused = true)]
 async fn a_held_callee_rings_reliably_only_where_100rel_is_offered() {
     let (h, alice, bob) = agents("callfuzz-held").await;
