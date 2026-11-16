@@ -70,7 +70,7 @@ impl MuxNetwork {
 }
 
 impl MuxCore {
-    /// Build a per-call [`SignalingNetwork`] view from a [`CallRouting`] (the
+    /// Build a per-call [`SignalingNetwork`](sip_net::SignalingNetwork) view from a [`CallRouting`] (the
     /// single call token + each callee leg's label + any same-socket picker).
     /// No simulated packet loss and no auto-retransmit.
     pub fn network(self: &Arc<Self>, routing: CallRouting) -> MuxNetwork {

@@ -35,6 +35,6 @@ fn an_earlier_invite_s_non_2xx_keeps_its_ack_across_a_later_answered_invite() {
     let Reply::AckNon2xx(ack, to) = held.on_final(&Datagram::sniff(&final_of(491, 3))) else {
         panic!("the retransmitted 491 draws its ACK");
     };
-    let id = Datagram::sniff(&ack).id().clone();
+    let id = *Datagram::sniff(&ack).id();
     assert_eq!((id.method, id.cseq, to), (Some("ACK"), Some(3), dst));
 }
