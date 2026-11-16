@@ -233,6 +233,71 @@ fn a_provisional_dropped_on_send_owes_its_unrecorded_taker_no_prack() {
     assert_eq!((delivered[0].lane.as_str(), delivered[0].charged.as_deref()), (BOB, Some(ALICE)));
 }
 
+/// The caller's lane, the SUT no recorded bind: her PRACK (CSeq 2) to a
+/// reliable 183, its copy lost on send when `lost`, her INFO (CSeq 3) sent
+/// before the PRACK's 500 arrives when `info_first`, else after it. The
+/// prack-2xx-or-481 findings.
+fn prack_500_at_the_caller(lost: bool, info_first: bool) -> Vec<RfcFinding> {
+    let prack = prack_3262("z9hG4bK-p", "1 1 INVITE", false);
+    let mut evs = vec![
+        sent(ALICE, invite_3262("z9hG4bK-i", "Supported: 100rel\r\n", None, false), SUT, 0),
+        recv(ALICE, inv_resp_3262(183, "z9hG4bK-i", &reliable_rows(1), false), SUT, 1),
+        sent(ALICE, prack.clone(), SUT, 2),
+    ];
+    if lost {
+        evs.push(Stamped {
+            event: SignalingNetworkEvent::SendLost {
+                bind_key: ALICE.to_string(),
+                to: SUT.parse().unwrap(),
+                msg: prack,
+            },
+            seq: 3,
+            at_ms: 3,
+        });
+    }
+    let info = [
+        sent(ALICE, req("INFO", "z9hG4bK-n", 3, Some("bt")), SUT, 4),
+        recv(ALICE, resp(200, 3, "INFO", "bt", "z9hG4bK-n"), SUT, 5),
+    ];
+    let refused = recv(ALICE, prack_resp_3262(500, "z9hG4bK-p"), SUT, 6);
+    if info_first {
+        evs.extend(info);
+        evs.push(refused);
+    } else {
+        evs.push(refused);
+        evs.extend(info);
+    }
+    evs.extend([
+        recv(ALICE, inv_resp_3262(200, "z9hG4bK-i", "", false), SUT, 7),
+        sent(ALICE, req("ACK", "z9hG4bK-a", 1, Some("bt")), SUT, 8),
+        sent(ALICE, req("BYE", "z9hG4bK-b", 4, Some("bt")), SUT, 9),
+        recv(ALICE, resp(200, 4, "BYE", "bt", "z9hG4bK-b"), SUT, 10),
+    ]);
+    evaluate_rfc_findings(&evs)
+        .into_iter()
+        .filter(|f| f.rule == RuleId::Prack2xxOr481.token())
+        .collect()
+}
+
+/// RFC 3261 §12.2.2 at the caller's lane, the SUT no recorded bind: her
+/// PRACK's copy lost on send, her INFO of a higher CSeq sent before the
+/// PRACK's 500 arrived, the SUT took a later copy after the INFO and owed it
+/// the 500 of a request out of order: not charged. The same 500 with no copy
+/// lost, or with the INFO sent only after it, is charged to the SUT.
+#[test]
+fn a_500_to_a_prack_the_loss_held_behind_a_higher_cseq_is_not_charged() {
+    assert!(
+        prack_500_at_the_caller(true, true).is_empty(),
+        "{:?}",
+        prack_500_at_the_caller(true, true)
+    );
+    for (lost, info_first) in [(false, true), (true, false)] {
+        let charged = prack_500_at_the_caller(lost, info_first);
+        assert_eq!(charged.len(), 1, "lost {lost}, INFO first {info_first}: {charged:?}");
+        assert_eq!((charged[0].lane.as_str(), charged[0].charged.as_deref()), (ALICE, Some(SUT)));
+    }
+}
+
 /// RFC 3262 §4 live: a reliable 180 the SUT takes after its own CANCEL,
 /// the 487 two seconds later, is owed its PRACK — the CANCEL ends nothing.
 #[test]
