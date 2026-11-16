@@ -40,7 +40,7 @@ async fn a_relay_the_primary_never_read_and_the_primarys_own_end_the_call() {
 
 /// The same, the callee holding the caller's INFO through the clean end. The
 /// copy keeps its relay through the end and answers it as its own teardown
-/// does once the callee's dialog ended under its BYE: `481` to the caller
+/// does once the callee's dialog ended under its BYE: `487` to the caller
 /// (RFC 3261 §15.1.2), whatever the callee then answers. The primary holds
 /// the caller's 200 to the callee's INFO for its stalled backup (ADR-0055
 /// §3): the clean end's BYE reaches the callee first.
@@ -59,7 +59,7 @@ async fn a_relay_the_copy_holds_through_the_end_draws_its_final() {
     est.alice.receive_tolerating("INFO", &["BYE"]).await.respond(200, "OK").await;
     est.bob.receive("BYE").await.respond(200, "OK").await;
     crossing.expect(200).await;
-    info.expect_tolerating(481, &["BYE"]).await;
+    info.expect_tolerating(487, &["BYE"]).await;
     info_at_bob.respond(487, "Request Terminated").await;
     est.fh.resume(&b_ord, &p_ord);
     answer_the_clean_end(&mut est).await;
