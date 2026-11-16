@@ -1,9 +1,8 @@
 <?xml version="1.0" encoding="ISO-8859-1" ?>
 <!DOCTYPE scenario SYSTEM "sipp.dtd">
 <!-- Answers, then sends two in-dialog re-INVITEs. On the second's 200 it
-     passes the ACK of the first's 200 to the transport again, the same
-     datagram (RFC 3261 section 13.2.2.4), and never ACKs the second's 200;
-     answers the caller's BYE. -->
+     sends the ACK of the first's 200 again, and every ACK of the second's
+     200 is lost; answers the caller's BYE. -->
 <scenario name="peer-reinvite-ack-repeat-only">
   <recv request="INVITE" crlf="true" rrs="true">
     <action>
@@ -110,6 +109,21 @@
       Content-Length: 0
     ]]>
   </send>
+  <send lost="100">
+    <![CDATA[
+      ACK [next_url] SIP/2.0
+      Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=z9hG4bK-[pid]-[call_number]-ack2
+      [routes]
+      From: [$to_raw];tag=[pid]P[call_number]
+      To: [$from_hdr]
+      Call-ID: [call_id]
+      CSeq: 2 ACK
+      Max-Forwards: 70
+      Content-Length: 0
+    ]]>
+  </send>
+  <label id="w"/>
+  <recv response="200" optional="true" crlf="true" next="w"/>
   <recv request="BYE" crlf="true" timeout="45000"/>
   <send>
     <![CDATA[
