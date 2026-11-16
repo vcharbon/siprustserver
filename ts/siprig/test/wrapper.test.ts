@@ -6,7 +6,8 @@
  * link names the workspace (container and label follow its real path), and reports a
  * container its site stopped by exiting before it ever answered with the
  * tail of the site's log and the log's path. Its containers join the host's
- * network, or the one SIPRIG_NETWORK names, on which a lab's `up` is refused. The kit's renderer
+ * network, or the one SIPRIG_NETWORK names, on which a lab's `up` is refused,
+ * and read the env file SIPRIG_ENV_FILE names. The kit's renderer
  * (`render-wrapper`) writes the very wrapper `kit pack` puts beside the image.
  */
 import { spawnSync } from "node:child_process"
@@ -37,8 +38,9 @@ const runWith = (docker: Docker, env: Readonly<Record<string, string>>, ...args:
     env: { ...process.env, ...env, PATH: `${docker.bin}:${process.env.PATH ?? ""}` }
   })
 
-/** `sample <args>` with `docker` first on PATH, SIPRIG_NETWORK unset. */
-const run = (docker: Docker, ...args: ReadonlyArray<string>) => runWith(docker, { SIPRIG_NETWORK: "" }, ...args)
+/** `sample <args>` with `docker` first on PATH, SIPRIG_NETWORK and SIPRIG_ENV_FILE unset. */
+const run = (docker: Docker, ...args: ReadonlyArray<string>) =>
+  runWith(docker, { SIPRIG_NETWORK: "", SIPRIG_ENV_FILE: "" }, ...args)
 
 /** The network each `docker run` the wrapper made names. */
 const networks = (docker: Docker): ReadonlyArray<string | undefined> =>
@@ -160,6 +162,14 @@ describe("the wrapper's network", () => {
     expect(networks(docker)).toEqual(["isolated-1", "isolated-1"])
   })
 
+  it("is named to each container as SIPRIG_NETWORK, the host's included", () => {
+    const docker = fakeDocker()
+    const workspace = tree({ "rig.toml": "" })
+    run(docker, "-w", workspace, "up")
+    runWith(docker, { SIPRIG_NETWORK: "isolated-1" }, "init", tree())
+    expect(runs(docker).map((call) => /-e SIPRIG_NETWORK=(\S+)/.exec(call)?.[1])).toEqual(["host", "isolated-1"])
+  })
+
   for (const flags of [["--lab"], ["--compose", "/srv/lab"]]) {
     it(`refuses \`up ${flags[0]}\` on a network other than the host's, naming it, and starts none`, () => {
       const docker = fakeDocker()
@@ -168,6 +178,31 @@ describe("the wrapper's network", () => {
         .toEqual({ status: 1, named: true, runs: 0 })
     })
   }
+})
+
+describe("the wrapper's env file", () => {
+  /** The file each `docker run` the wrapper made reads its variables from. */
+  const envFiles = (docker: Docker): ReadonlyArray<string | undefined> =>
+    runs(docker).map((call) => /--env-file (\S+)/.exec(call)?.[1])
+
+  it("is read by init and up where SIPRIG_ENV_FILE names one, and by none where it is unset", () => {
+    const docker = fakeDocker()
+    const file = path.join(tree({ "proxy.env": "HTTPS_PROXY=http://192.0.2.1:3128\n" }), "proxy.env")
+    const workspace = tree()
+    runWith(docker, { SIPRIG_ENV_FILE: file }, "init", workspace)
+    fs.writeFileSync(path.join(workspace, "rig.toml"), "")
+    runWith(docker, { SIPRIG_ENV_FILE: file }, "-w", workspace, "up")
+    run(docker, "init", tree())
+    expect(envFiles(docker)).toEqual([file, file, undefined])
+  })
+
+  it("refuses an up whose SIPRIG_ENV_FILE names no file, naming it, and starts none", () => {
+    const docker = fakeDocker()
+    const missing = path.join(tree(), "none.env")
+    const out = runWith(docker, { SIPRIG_ENV_FILE: missing }, "-w", tree({ "rig.toml": "" }), "up")
+    expect({ status: out.status, named: out.stderr.includes(`SIPRIG_ENV_FILE names no file: ${missing}`), runs: runs(docker).length })
+      .toEqual({ status: 1, named: true, runs: 0 })
+  })
 })
 
 describe("the kit's wrapper renderer", () => {

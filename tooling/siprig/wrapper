@@ -23,9 +23,12 @@
 # path the tooling prints is a path of this machine. Everything runs as the
 # caller's uid/gid, on the host's network (`--network host`), or on the docker
 # network SIPRIG_NETWORK names: an internal one (`docker network create
-# --internal`) holds the container off every other machine, its site reached
-# at the container's address (rig.toml `[site] bind = "0.0.0.0"`); `--lab` and
-# `--compose` need the host's network and are refused on another.
+# --internal`) holds the container off every other machine. There, a site
+# bound to every interface (rig.toml `[site] bind = "0.0.0.0"`) is named by
+# the container's address on that network unless `[site] public_url` states
+# its URL; `--lab` and `--compose` need the host's network and are refused on
+# another. SIPRIG_ENV_FILE names a docker env file (`--env-file`) whose
+# variables every container gets, such as a proxy's.
 #
 #   --lab            gives the container the docker socket: a managed target runs its images
 #   --compose <dir>  mounts a compose lab checkout read-only and names it SIPRIG_COMPOSE: the workspace's
@@ -40,6 +43,7 @@ set -euo pipefail
 NAME=@WRAPPER@
 IMAGE="${SIPRIG_IMAGE:-@IMAGE@}"
 NETWORK="${SIPRIG_NETWORK:-host}"
+ENV_FILE="${SIPRIG_ENV_FILE:-}"
 STOP_TIMEOUT=60
 UP_TIMEOUT=600
 SITE_NEVER_ANSWERED=3
@@ -80,10 +84,20 @@ running() { [ "$(docker inspect -f '{{.State.Running}}' "$(container)" 2>/dev/nu
 
 need_running() { running || die "the workspace's container $(container) is not running: \`$NAME up\`"; }
 
-# The flags of a one-off container over the workspace: the caller's uid/gid, the mount at its own path.
+# The flags every container over the workspace gets, in FLAGS: its network, named to it as
+# SIPRIG_NETWORK, the mount at its own path, and SIPRIG_ENV_FILE's variables where it names a
+# file; one naming no file is refused.
+container_flags() {
+  FLAGS=(--network "$NETWORK" -e "SIPRIG_NETWORK=$NETWORK" -v "$workspace:$workspace" -e "SIPRIG_WORKSPACE=$workspace")
+  [ -z "$ENV_FILE" ] && return 0
+  [ -f "$ENV_FILE" ] || die "SIPRIG_ENV_FILE names no file: $ENV_FILE"
+  FLAGS+=(--env-file "$ENV_FILE")
+}
+
+# A one-off container over the workspace, as the caller's uid/gid.
 oneoff() {
-  docker run --rm --user "$(id -u):$(id -g)" --network "$NETWORK" \
-    -v "$workspace:$workspace" -e "SIPRIG_WORKSPACE=$workspace" "$@"
+  container_flags
+  docker run --rm --user "$(id -u):$(id -g)" "${FLAGS[@]}" "$@"
 }
 
 # `docker exec` in the running container, in the caller's directory where the workspace holds it.
@@ -168,13 +182,14 @@ up() {
     [ -z "$holder" ] || die "up --compose: the lab $compose is already driven by ${holder%% *} (workspace ${holder#* }): one workspace per lab"
     extra+=(-v "$compose:$compose:ro" -e "SIPRIG_COMPOSE=$compose" --label "org.siprig.compose=$compose")
   fi
+  container_flags
   docker run -d --name "$name" \
-    --user "$uid:$gid" --network "$NETWORK" \
+    --user "$uid:$gid" "${FLAGS[@]}" \
     --tmpfs "/run:rw,exec,nosuid,size=64m,uid=$uid,gid=$gid,mode=0755" \
     --memory "$memory" --memory-swap "$memory" \
     --stop-timeout "$STOP_TIMEOUT" \
     --label "org.siprig.workspace=$workspace_real" \
-    -v "$workspace:$workspace" -e "SIPRIG_WORKSPACE=$workspace" -e SIPRIG_ENV=integration \
+    -e SIPRIG_ENV=integration \
     "${extra[@]}" "$IMAGE" >/dev/null
   echo "$NAME: started $name from $IMAGE"
   wait_for_site

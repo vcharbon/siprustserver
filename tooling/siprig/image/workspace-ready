@@ -15,6 +15,13 @@
 #   DATABASE_URL, PGHOST, PGPORT  the own store's socket URL (unset for another server,
 #                         whose URL rig.toml states)
 #   SITE_PORT, SITE_BIND  the site's port and bind address (default 5175, 127.0.0.1)
+#   SIPRIG_SITE_URL       on a docker network other than the host's (SIPRIG_NETWORK),
+#                         a site bound to every interface whose URL nothing states:
+#                         http://<the container's address>:<port>, which the host reaches
+#
+# On the host's network a wildcard bind is named by the machine's name, which
+# inside a container on another network is the container's id: no other
+# machine resolves it.
 #
 # `siprig-workspace` is the pack's where it ships one. Any failure stops the
 # container (S6_BEHAVIOUR_IF_STAGE2_FAILS=2). SIPRIG_RUN_DIR names another
@@ -32,6 +39,19 @@ echo "$checked"
 site_port="$(sed -n 's/^SIPRIG_SITE_PORT=//p' <<<"$checked")"
 site_port="${site_port:-5175}"
 site_bind="$(sed -n 's/^SIPRIG_SITE_BIND=//p' <<<"$checked")"
+site_url="${SIPRIG_SITE_URL:-$(sed -n 's/^SIPRIG_SITE_URL=//p' <<<"$checked")}"
+
+# The site's URL where the container's own address names it: printed as an env line, or nothing.
+address_url() {
+  local address
+  [ "${SIPRIG_NETWORK:-host}" != host ] && [ -z "$site_url" ] || return 0
+  case "$site_bind" in 0.0.0.0 | ::) ;; *) return 0 ;; esac
+  address="$(hostname -i 2>/dev/null | awk '{print $1}' || true)"
+  [ -n "$address" ] || { echo "siprig: the container has no address on the network $SIPRIG_NETWORK" >&2; exit 1; }
+  case "$address" in *:*) address="[$address]" ;; esac
+  printf "SIPRIG_SITE_URL='http://%s:%s'\n" "$address" "$site_port"
+}
+
 if [ -n "$(ss -Hltn "sport = :$site_port")" ]; then
   echo "siprig: port $site_port, the site's, is already listening on this host (another site or service):" \
     "state a free one as [site] port in $ws/rig.toml" >&2
@@ -59,4 +79,5 @@ esac
     *) printf "PG_OWN=0\nPG_HOST='%s'\nPG_PORT='%s'\n" "$host" "$port" ;;
   esac
   printf "SITE_PORT='%s'\nSITE_BIND='%s'\n" "$site_port" "${site_bind:-127.0.0.1}"
+  address_url
 } > "$run/workspace.env"

@@ -27,11 +27,14 @@ Node, postgres (its major in the label `org.siprig.pg-major`), s6-overlay and th
 CLI; no Python. The image needs no network once built: the viewer app loads nothing from
 another origin, and pnpm's install before `run` and `exec` is off
 (`pnpm_config_verify_deps_before_run=false`), since the installed trees are root's and record
-a build-time store the image does not ship. The s6 services run a workspace mounted at its own path (`SIPRIG_WORKSPACE`):
-`workspace` checks its `rig.toml` (`check --config-only`), prepares it (`init`), checks the
-whole of it (`check`) and writes the store's environment to
-`/run/siprig/workspace.env`, `postgres` runs the workspace's own cluster in `pgdata/` on a
-private socket, `migrate` brings the store to the image's schema, `site` serves.
+a build-time store the image does not ship. The s6 services run a workspace mounted at its
+own path (`SIPRIG_WORKSPACE`): `workspace` checks its `rig.toml` (`check --config-only`),
+prepares it (`init`), checks the whole of it (`check`) and writes the store's and the site's
+environment to `/run/siprig/workspace.env`, `postgres` runs the workspace's own cluster in
+`pgdata/` on a private socket, `migrate` brings the store to the image's schema, `site`
+serves. On a docker network other than the host's (`SIPRIG_NETWORK`), a site bound to every
+interface whose URL `rig.toml` does not state is named by the container's address there
+(`SIPRIG_SITE_URL`), which the host reaches; the machine's name would be the container's id.
 `s6-notifyoncheck` polls `image/site-check` each second until the site first answers,
 reporting nothing to s6, so the start never waits on the site. A site that exits before it
 ever answered stops the container with status 3 (`image/site-finish`), its line naming the
@@ -41,7 +44,7 @@ it. Each service runs a base command by name:
 | Command | Contract | The base's |
 |---|---|---|
 | `siprig-workspace init <dir>` | makes what the workspace lacks, keeps the rest | `@sip/workspace` over `rig.toml`'s generic sections |
-| `siprig-workspace check [--config-only] [<dir>]` | `<file>: valid`, then `KEY=value` lines: `SIPRIG_SITE_PORT`, `SIPRIG_SITE_BIND`, `DATABASE_URL` among them; exit 2 on a refused file, naming it, so the container stops at start; `--config-only` reads `rig.toml` alone (run before `init`) | `rig.toml`, and the rig path over the pack and the workspace |
+| `siprig-workspace check [--config-only] [<dir>]` | `<file>: valid`, then `KEY=value` lines: `SIPRIG_SITE_PORT`, `SIPRIG_SITE_BIND`, `DATABASE_URL` among them, `SIPRIG_SITE_URL` where `rig.toml` states it; exit 2 on a refused file, naming it, so the container stops at start; `--config-only` reads `rig.toml` alone (run before `init`) | `rig.toml`, and the rig path over the pack and the workspace |
 | `siprig-store migrate` | the store `DATABASE_URL` names (exported, else the workspace's `[database] url`) created and migrated, dumped into the workspace's `backups/` first | the store's own migrations |
 | `siprig-site` | the site, on the workspace's port and bind address | `@sip/site` over a site pack with no lane, campaign or rule |
 | `siprig-campaign run [--lanes] [--out] [--junit] [--job] [--collection]` | every cell the pack's case sources yield, on the workspace's lanes (else the pack's), recorded in the store as the campaign named after the pack; exit 0 all passed, 1 one failed, 2 an error; the wrapper's verb `campaign` | `@sip/campaign-runner` over the base's lane hosting: the simulated lane by the plain `replay` |
@@ -84,12 +87,13 @@ It then builds:
 The wrapper (`<wrapper> --help`) loads the image, makes a workspace (`init`), starts one
 container per workspace (`up`, as the caller's uid on the host's network, or on the docker
 network `SIPRIG_NETWORK` names, such as an internal one that holds a run off every other
-machine; refused while any
-container labelled `org.siprig.workspace=<the workspace's real path>` runs; the container's
-name and label follow that real path, so a link to the workspace names the same one) and
-waits for the site,
-printing the tail of `logs/site/current` where the site stopped the container, and stops,
-restarts, logs, `exec`s and upgrades the postgres major (`upgrade-pg`).
+machine, where `--lab` and `--compose` are refused; refused while any container labelled
+`org.siprig.workspace=<the workspace's real path>` runs; the container's name and label
+follow that real path, so a link to the workspace names the same one) and waits for the
+site, printing the tail of `logs/site/current` where the site stopped the container, and
+stops, restarts, logs, `exec`s and upgrades the postgres major (`upgrade-pg`). Every
+container it starts gets the variables of the docker env file `SIPRIG_ENV_FILE` names, such
+as a proxy's.
 
 ## Proof
 

@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # The commands the wrapper runs inside the container:
 #
-#   siprig-in site-url             the site's public URL once this container's site answers (exit 1 before)
+#   siprig-in site-url             the site's public URL once this container's site answers (exit 1 before),
+#                                  asked of the site itself, never through a proxy
 #   siprig-in busy                 the pack's commands running here, one line each (exit 1: none)
 #   siprig-in verb <verb> <args>…  the pack's command siprig-<verb> (`campaign`, `replay`, …), with the store's environment
 #   siprig-in exec <command>…      any command, with the store's environment
@@ -76,7 +77,7 @@ case "$verb" in
       *:*) at="[$SITE_BIND]" ;;
       *) at="$SITE_BIND" ;;
     esac
-    curl -sf -m 5 "http://$at:$SITE_PORT/api/config" | jq -er '.publicUrl'
+    curl -sf -m 5 --noproxy '*' "http://$at:$SITE_PORT/api/config" | jq -er '.publicUrl'
     ;;
   busy)
     found=1
@@ -116,5 +117,5 @@ case "$verb" in
     pg_ctl -D "$fresh" -w -m fast stop
     exit "$status"
     ;;
-  *) sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2 ;;
+  *) sed -n '2,/^set /p' "$0" | sed '$d' | sed 's/^# \{0,1\}//' >&2; exit 2 ;;
 esac
