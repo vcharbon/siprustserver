@@ -136,8 +136,11 @@ def test_a_call_stranded_between_two_windows_sits_in_the_one_it_lived_through() 
 
 def outcome(v: Json) -> tuple[set[tuple[str, str, tuple[str, ...]]], set[tuple[str, tuple[str, ...]]], list[Json]]:
     """The verdict's in-dialog entries, its unattributed classes and its one stream's unanswered causes."""
-    in_dialog = {(i["call_id"], i["class"], tuple(jv.strings(i, "candidate_windows"))) for i in jv.objs(v, "in_dialog")}
-    unattributed = {(u["class"], tuple(jv.strings(u, "call_ids"))) for u in jv.objs(v, "unattributed")}
+    in_dialog = {
+        (jv.string(i, "call_id"), jv.string(i, "class"), tuple(jv.strings(i, "candidate_windows")))
+        for i in jv.objs(v, "in_dialog")
+    }
+    unattributed = {(jv.string(u, "class"), tuple(jv.strings(u, "call_ids"))) for u in jv.objs(v, "unattributed")}
     (s,) = jv.objs(jv.obj(v, "unanswered"), "streams")
     return in_dialog, unattributed, [{k: c[k] for k in ("cause", "detail", "where")} for c in jv.objs(s, "causes")]
 

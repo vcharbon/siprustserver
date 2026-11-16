@@ -444,8 +444,9 @@ made. A run profile joins the two.
     reads every call that did not end answered by cause (expected ending,
     503 with Retry-After, 503 without it whose setup overlaps a window
     whose budget allows one, setup timeout, cut, other) and by window
-    incident kind (a cut's: the latest-opened of its in-dialog candidate
-    windows, so both tables place a loss alike), per stream and for priority calls (`Resource-Priority`,
+    incident kind (a cut's: the window its ending impact is charged to, else
+    the latest-opened of its in-dialog candidate windows, so both tables place
+    a loss alike), per stream and for priority calls (`Resource-Priority`,
     RFC 4412) against the other `run` streams; it judges nothing and
     changes no status. A human
     `summary.md` is rendered from it: the status and why, the unanswered

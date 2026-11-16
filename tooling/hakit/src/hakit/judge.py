@@ -99,6 +99,24 @@ def _charged_in_dialog(w: Window | None, imp: Impact, budgets: dict[str, Budget]
     return any(e.matches(imp.stream, imp.cls, imp.detail or "") for e in budget_of(w, budgets).in_dialog)
 
 
+def _charging(windows: list[Window], imp: Impact, budgets: dict[str, Budget]) -> Window | None:
+    """The window an in-dialog impact is charged to: the first holding its
+    instant, when that window's `in_dialog` allowances name it."""
+    holder = _holding(windows, imp.at_ms)
+    return holder if _charged_in_dialog(holder, imp, budgets) else None
+
+
+def in_dialog_window(windows: list[Window], imp: Impact, budgets: dict[str, Budget]) -> Window | None:
+    """The one window an in-dialog impact sits in, `windows` in opening order:
+    the one it is charged to, else the latest-opened of its candidate windows,
+    else None (it is unattributed)."""
+    charged = _charging(windows, imp, budgets)
+    if charged is not None:
+        return charged
+    found = candidate_windows(windows, imp.started_at_ms, imp.at_ms)
+    return found[-1] if found else None
+
+
 def _in_dialog_rows(impacts: list[Impact], entries: list[InDialogAllowance], cps: dict[str, float]) -> list[Json]:
     charged: dict[tuple[int, str], list[Impact]] = defaultdict(list)
     for imp in impacts:
@@ -208,8 +226,8 @@ def judge(
             else:
                 in_window[w.event].append(imp)
             continue
-        holder = _holding(windows, imp.at_ms)
-        if holder is not None and _charged_in_dialog(holder, imp, budgets):
+        holder = _charging(windows, imp, budgets)
+        if holder is not None:
             dialog_in_window[holder.event].append(imp)
             continue
         candidates = [w.event for w in candidate_windows(windows, imp.started_at_ms, imp.at_ms)]

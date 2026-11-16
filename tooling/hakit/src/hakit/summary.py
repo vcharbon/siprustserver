@@ -59,10 +59,10 @@ def _why(v: Json) -> list[str]:
         dialog = _in_dialog_of(v, str(w["event"]))
         if dialog:
             listed = ", ".join(f"{k} x{n}" for k, n in sorted(dialog.items()))
-            out.append(f"- window {w['event']} is a candidate of {sum(dialog.values())} in-dialog impacts: {listed} — FINDING")
+            out.append(f"- window {w['event']} is a candidate of {sum(dialog.values())} in-dialog findings: {listed} — FINDING")
     n_dialog = len(jv.objs(v, "in_dialog"))
     if n_dialog:
-        out.append(f"- {n_dialog} in-dialog impacts in all")
+        out.append(f"- {n_dialog} in-dialog findings in all")
     out += [f"- unattributed: {_impact(r)[2:]}" for r in jv.objs(v, "unattributed")]
     out += [f"- {_limiter(r)[2:]}" for r in jv.objs(v, "limiters")]
     return out or ["- every impact within its allowance, measurement intact"]

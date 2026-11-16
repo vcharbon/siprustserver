@@ -190,18 +190,56 @@ def _final_late(r: Json, base: Impact, wait_ms: float | None) -> Impact | None:
     return replace(base, cls=FINAL_LATE, at_ms=final, detail=f"{round(final - heard)} ms", answered=False)
 
 
+def _base(r: Json) -> Impact:
+    """An `unexpected_ending` of the call dated at its setup's end (its end without one)."""
+    setup_end = jv.opt_number(r, "setup_ended_at_ms")
+    return Impact(
+        UNEXPECTED_ENDING,
+        jv.string(r, "stream"),
+        jv.string(r, "call_id"),
+        setup_end if setup_end is not None else jv.number(r, "ended_at_ms"),
+        jv.number(r, "started_at_ms"),
+        answered=jv.opt_number(r, "answered_at_ms") is not None,
+        retry_after=jv.opt_int(r, "retry_after_s") is not None,
+    )
+
+
+def _loss_at(r: Json) -> float:
+    """The instant an answered call was lost: its last failure, else its end."""
+    return max((jv.number(f, "at_ms") for f in jv.objs(r, "failures")), default=jv.number(r, "ended_at_ms"))
+
+
+def _ending(r: Json, shape: Shape, base: Impact) -> Impact:
+    """The impact of a caller's ending its shape does not expect. A cut, and an
+    answered call that `failed`, is dated at its loss (`_loss_at`); a stranded
+    call at its end; any other ending at its setup's end."""
+    ending = jv.string(r, "ending")
+    code = jv.opt_int(r, "final_code")
+    reason = jv.opt_string(r, "reason")
+    if not base.answered and silent_after_provisional(r):
+        return replace(base, cls=SILENT_AFTER_PROVISIONAL, code=0, reason=reason or ending)
+    if ending in PRE_ANSWER_ENDINGS and not base.answered:
+        cls = SETUP_FAILED if shape.expects_answer or code is None else UNEXPECTED_ENDING
+        return replace(base, cls=cls, code=code or 0, reason=reason or ending)
+    if ending == "cut":
+        return replace(base, cls=CALL_CUT, at_ms=_loss_at(r), detail="cut")
+    if ending == "stranded":
+        return replace(base, cls=CALL_STRANDED, at_ms=jv.number(r, "ended_at_ms"), detail="teardown never completed")
+    at = _loss_at(r) if ending == "failed" else base.at_ms
+    return replace(base, at_ms=at, code=code or 0, reason=reason or ending, detail=f"ending {ending}")
+
+
+def ending_impact(r: Json, shape: Shape) -> Impact | None:
+    """The impact of the caller's ending as `classify` reads it; None when its shape expects it."""
+    return None if caller_expected(r, shape) else _ending(r, shape, _base(r))
+
+
 def classify(r: Json, shape: Shape, final_late_after_ms: float | None = None) -> Classified:
     """`final_late_after_ms` is the stream's setup deadline: past it a heard
     caller's final is `final_late`; None reads no such impact."""
     stream = jv.string(r, "stream")
     call_id = jv.string(r, "call_id")
     started = jv.number(r, "started_at_ms")
-    ended = jv.number(r, "ended_at_ms")
-    setup_end = jv.opt_number(r, "setup_ended_at_ms")
-    answered_at = jv.opt_number(r, "answered_at_ms")
-    ending = jv.string(r, "ending")
-    code = jv.opt_int(r, "final_code")
-    reason = jv.opt_string(r, "reason")
     failures = jv.objs(r, "failures")
 
     out = Classified(success=False)
@@ -212,26 +250,10 @@ def classify(r: Json, shape: Shape, final_late_after_ms: float | None = None) ->
 
     out.latency = setup_latency(r)
 
-    setup_instant = setup_end if setup_end is not None else ended
-    answered = answered_at is not None
-    retry_after = jv.opt_int(r, "retry_after_s") is not None
-    base = Impact(UNEXPECTED_ENDING, stream, call_id, setup_instant, started, answered=answered,
-                  retry_after=retry_after)
-
+    base = _base(r)
     caller_ok = caller_expected(r, shape)
     if not caller_ok:
-        if not answered and silent_after_provisional(r):
-            out.impacts.append(replace(base, cls=SILENT_AFTER_PROVISIONAL, code=0, reason=reason or ending))
-        elif ending in PRE_ANSWER_ENDINGS and not answered:
-            cls = SETUP_FAILED if shape.expects_answer or code is None else UNEXPECTED_ENDING
-            out.impacts.append(replace(base, cls=cls, code=code or 0, reason=reason or ending))
-        elif ending == "cut":
-            cut_at = max((jv.number(f, "at_ms") for f in failures), default=ended)
-            out.impacts.append(replace(base, cls=CALL_CUT, at_ms=cut_at, detail="cut"))
-        elif ending == "stranded":
-            out.impacts.append(replace(base, cls=CALL_STRANDED, at_ms=ended, detail="teardown never completed"))
-        else:
-            out.impacts.append(replace(base, code=code or 0, reason=reason or ending, detail=f"ending {ending}"))
+        out.impacts.append(_ending(r, shape, base))
     leg_impacts = _leg_impacts(r, shape, base) if caller_ok else []
     out.impacts.extend(leg_impacts)
     late = _final_late(r, base, final_late_after_ms)
