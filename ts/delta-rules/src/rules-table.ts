@@ -1,25 +1,17 @@
 /**
- * A deployment's rules table, rendered from its rules, its lane lists, its
- * overlap golden file and its refusal roster: the one Markdown page that
- * answers "what rules are there" without reading code. The deployment commits
- * the page and byte-checks it against this rendering, so it never drifts from
- * the rules it documents.
+ * A deployment's rules table, rendered from its rules, its lane lists and its
+ * overlap golden file: the one Markdown page that answers "what rules are
+ * there" without reading code. The deployment commits the page and
+ * byte-checks it against this rendering, so it never drifts from the rules it
+ * documents.
  *
- * Pure: the deployment hands in every input, its prose included.
+ * Pure: the deployment hands in every input, its prose and any table of its
+ * own the page closes with included.
  */
-import { Policy } from "@sip/pipeline"
 import type { LanePolicy } from "./lane-lists.js"
 import type { GoldenPair } from "./overlap.js"
 import type { DeltaRule } from "./rule.js"
 import { kindsOf } from "./rule-on.js"
-
-/** One refusal row of the roster, whatever its tier. */
-export interface RefusalRow {
-  readonly id: string
-  readonly subject: string
-  readonly disposition: string
-  readonly why: string
-}
 
 /** Everything one rendering reads. */
 export interface RulesTable<F, S extends string> {
@@ -35,10 +27,8 @@ export interface RulesTable<F, S extends string> {
   readonly overlap: ReadonlyArray<Pick<GoldenPair, "winner" | "shadowed">>
   /** The lines that open the page, ahead of the first section's table. */
   readonly intro: ReadonlyArray<string>
-  /** The paragraph that opens the refusal table. */
-  readonly refusalIntro: string
-  /** The refusal rows by tier, in the order a capture meets them. */
-  readonly refusals: ReadonlyArray<readonly [string, ReadonlyArray<RefusalRow>]>
+  /** The lines that close the page, after the last section's notes: the deployment's own tables, if any. */
+  readonly trailing: ReadonlyArray<string>
 }
 
 /** For each rule, the rules it wins over and the rules it loses to, each in match order. */
@@ -99,10 +89,7 @@ const ruleNotes = <F>(rule: DeltaRule<F>, standing: Standing | undefined): Reado
   return out
 }
 
-/** The refusal tokens the pipeline states on its own account, whatever the deployment. */
-const pipelineOwn: ReadonlySet<string> = new Set(Policy.refusalRoster(Policy.neutralPolicy).map((rule) => rule.id))
-
-/** The whole page: the intro, one table and its notes per section that holds a rule, then the refusal table. */
+/** The whole page: the intro, one table and its notes per section that holds a rule, then the trailing lines. */
 export const render = <F, S extends string>(table: RulesTable<F, S>): string => {
   const lines: Array<string> = [...table.intro]
   const byRule = standings(table.rules, table.overlap)
@@ -117,15 +104,6 @@ export const render = <F, S extends string>(table: RulesTable<F, S>): string => 
     for (const rule of rules) lines.push(...ruleNotes(rule, byRule.get(rule.id)))
     lines.push("")
   }
-  lines.push("## Refusal rules, in the order a capture meets them", "")
-  lines.push(table.refusalIntro, "")
-  lines.push("| tier | rule | home | subject | disposition | why |", "|---|---|---|---|---|---|")
-  for (const [tier, rules] of table.refusals) {
-    for (const rule of rules) {
-      const home = pipelineOwn.has(rule.id) ? "pipeline" : "deployment"
-      lines.push(`| ${tier} | \`${rule.id}\` | ${home} | ${rule.subject} | ${rule.disposition} | ${rule.why} |`)
-    }
-  }
-  lines.push("")
+  lines.push(...table.trailing)
   return lines.join("\n")
 }

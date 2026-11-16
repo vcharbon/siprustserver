@@ -49,7 +49,8 @@ ingress gate; a delta rule names a difference between a replay and its reference
      names an unknown rule, a cycle, and an entry in both classes or with the wrong ticket
      shape (`DeltaRules.LaneList*`);
    - any classification ahead of the rules, such as a header namespace it injects itself;
-   - the intro, section titles, lane order and refusal rows the rules page prints;
+   - the intro, section titles and lane order the rules page prints, and any table of its own
+     the page closes with;
    - the sink the bless audit files into (`@sip/bless/BlessAudit/Sink`).
 5. **The RFC rows.** A row belongs here when the difference it names arises on any B2BUA replay
    of any capture, because an RFC makes the value the sending stack's own: Via, Call-ID, the
