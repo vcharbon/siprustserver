@@ -2,8 +2,9 @@
 <!DOCTYPE scenario SYSTEM "sipp.dtd">
 <!-- Answers, then sends two in-dialog re-INVITEs. On the second's 200 it
      sends the ACK of the first's 200 again, then a copy of the second
-     re-INVITE (the same branch, RFC 3261 section 17.1.1.2); it ACKs the 200
-     it gets, then hangs up. -->
+     re-INVITE (the same branch, RFC 3261 section 17.1.1.2); it checks the
+     200 the copy draws is the second's (CSeq 2 INVITE, its branch), ACKs
+     it, then hangs up. -->
 <scenario name="peer-reinvite-copy-after-ack-repeat">
   <recv request="INVITE" crlf="true" rrs="true">
     <action>
@@ -133,7 +134,12 @@
       a=rtpmap:0 PCMU/8000
     ]]>
   </send>
-  <recv response="200" crlf="true" timeout="5000"/>
+  <recv response="200" crlf="true" timeout="5000">
+    <action>
+      <ereg regexp="^[[:blank:]]*2[[:blank:]]+INVITE" search_in="hdr" header="CSeq:" check_it="true" assign_to="re_cseq"/>
+      <ereg regexp="branch=z9hG4bK-[0-9]+-[0-9]+-inv2" search_in="hdr" header="Via:" check_it="true" assign_to="re_branch"/>
+    </action>
+  </recv>
   <send>
     <![CDATA[
       ACK [next_url] SIP/2.0
@@ -163,5 +169,5 @@
     ]]>
   </send>
   <recv response="200" crlf="true" timeout="5000"/>
-  <Reference variables="from_hdr,to_raw"/>
+  <Reference variables="from_hdr,to_raw,re_cseq,re_branch"/>
 </scenario>
