@@ -37,7 +37,8 @@ impl ClientInvite {
     }
 
     /// The loop of [`try_expect_final`](Self::try_expect_final), gathering
-    /// into `aside` the responses to other transactions it sets aside.
+    /// into `aside` the responses to other transactions it sets aside. A
+    /// non-2xx final to this INVITE is ACKed (§17.1.1.3), matching or not.
     async fn read_final(
         &mut self,
         status: u16,
@@ -62,8 +63,6 @@ impl ClientInvite {
                 }
                 SipMessage::Response(r) => {
                     self.agent.txn.note_read(&r);
-                    // §17.1.1.3 txn-layer auto-ACK — matching or not, a non-2xx
-                    // final to THIS INVITE completes its client transaction.
                     self.ack_ctx().ack_non_2xx(&r).await?;
                     if r.status() != status {
                         return Err(StepError::WrongStatus {

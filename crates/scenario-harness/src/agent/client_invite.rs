@@ -10,7 +10,7 @@ use std::net::SocketAddr;
 use sip_message::generators::{InDialogMethod, StackDialog};
 use sip_message::header::{self, CSeq, HeaderName, HeaderValue};
 use sip_message::sip_str::SipStr;
-use sip_message::{Automatic, DelayedAutomatic, SipMessage, SipRequest, SipResponse};
+use sip_message::{Automatic, DelayedAutomatic, SipRequest, SipResponse};
 
 use super::client_txn::{awaited_response, try_expect_response, try_send_cancel, AckCtx, Awaited};
 use super::dialog::{Dialog, InDialogRequest, InDialogTxn};
@@ -171,12 +171,12 @@ impl ClientInvite {
     pub(crate) async fn try_recv_response(&mut self) -> Result<SipResponse, StepError> {
         loop {
             match self.agent.try_recv().await? {
-                SipMessage::Response(r) if r.status() == 100 => continue,
-                SipMessage::Response(r) => {
+                sip_message::SipMessage::Response(r) if r.status() == 100 => continue,
+                sip_message::SipMessage::Response(r) => {
                     self.ack_ctx().ack_non_2xx(&r).await?;
                     return Ok(r);
                 }
-                SipMessage::Request(r) => {
+                sip_message::SipMessage::Request(r) => {
                     if self.agent.ack_obligation_claims(&r) {
                         continue; // txn-owned §17.1.1.3 hop ACK
                     }
