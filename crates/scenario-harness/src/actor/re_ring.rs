@@ -18,7 +18,7 @@ use crate::StepError;
 /// model dropped, in the order dropped.
 fn lost_rings(s: &StateInner, role: &str) -> Vec<LostMessage> {
     let ring = |m: &&LostMessage| !m.inbound && !m.reliable && m.is_invite_response_in(101..200);
-    s.leg_ref(role).map_or_else(Vec::new, |l| l.lost().iter().filter(ring).cloned().collect())
+    s.leg_ref(role).map_or_else(Vec::new, |l| l.lost().filter(ring).cloned().collect())
 }
 
 /// Whether the actor holds an INVITE it has not answered: one it may ring.

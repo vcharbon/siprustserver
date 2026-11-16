@@ -22,7 +22,8 @@ use super::ledger::ObligationLedger;
 pub use super::facts::{RequestFact, ResponseFact};
 pub use super::observation::Observation;
 pub use super::replay_record::{RecordedFinal, ReplayEntry};
-use crate::realcall::LostMessage;
+
+mod lost;
 
 /// One endpoint leg's observed dialog lifecycle. Ordered so `max` gives the
 /// monotone fold: a fact can advance the phase but never retreat.
@@ -89,9 +90,9 @@ pub struct LegObservation {
     /// order is deterministic; reception goals consume it through a per-actor
     /// cursor.
     responses: Vec<ResponseFact>,
-    /// The datagrams to or from this leg the call's loss model dropped,
-    /// folded in once the call ran ([`Observation::Lost`]).
-    lost: Vec<LostMessage>,
+    /// The datagrams to or from this leg the call's loss model dropped, as
+    /// they were folded in ([`Observation::Lost`]).
+    lost: Vec<lost::Lost>,
 }
 
 impl LegObservation {
@@ -169,24 +170,6 @@ impl LegObservation {
         self.responses.iter().any(|f| f.status == status)
     }
 
-    /// The datagrams to or from this leg the call's loss model dropped.
-    pub fn lost(&self) -> &[LostMessage] {
-        &self.lost
-    }
-
-    /// Whether the loss model dropped a 2xx to this leg's INVITE on its way
-    /// to the leg: the sender had answered before any later copy arrived.
-    pub fn lost_answer(&self) -> bool {
-        self.lost.iter().any(|m| m.inbound && m.is_invite_response_in(200..300))
-    }
-
-    /// Whether the loss model dropped a provisional with a session
-    /// description to this leg's INVITE on its way to the leg: early media
-    /// the leg was sent and never received.
-    pub fn lost_early_media(&self) -> bool {
-        self.lost.iter().any(|m| m.inbound && m.is_invite_response_in(101..200) && m.sdp)
-    }
-
     /// Record an observed inbound in-dialog method name (idempotent — a set, so
     /// the fold stays commutative).
     fn record_method(&mut self, method: String) {
@@ -249,14 +232,6 @@ impl StateInner {
     /// ([`LegObservation::rang`]); borrows, so a barrier poll clones nothing.
     pub fn leg_rang(&self, role: &str) -> bool {
         self.legs.get(role).is_some_and(LegObservation::rang)
-    }
-
-    /// Whether `role` received a provisional above 100 to an INVITE, or the
-    /// call's loss model dropped one on any leg, so her ringing may never
-    /// come: the gate of a step timed from the caller's ringing.
-    pub fn rang_or_ring_lost(&self, role: &str) -> bool {
-        self.leg_rang(role)
-            || self.legs.values().flat_map(|l| &l.lost).any(|m| m.is_invite_response_in(101..200))
     }
 
     /// Whether the caller's establishing INVITE ended on a final the call
@@ -398,7 +373,7 @@ impl StateInner {
             Observation::LegResponse { leg, fact } => {
                 self.leg_mut(leg).responses.push(fact);
             }
-            Observation::Lost { leg, message } => self.leg_mut(leg).lost.push(message),
+            Observation::Lost { leg, message } => self.leg_mut(leg).note_lost(message),
             Observation::ReplayFinal { key, expected, observed } => {
                 self.replay.push(ReplayEntry::Final(RecordedFinal { key, expected, observed }));
             }

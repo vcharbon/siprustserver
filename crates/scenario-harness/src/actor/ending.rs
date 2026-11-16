@@ -33,9 +33,9 @@ pub enum Ending {
     /// non-2xx final. A server that ignores the CANCEL — no final to it, or a
     /// 2xx after its 200 — shows neither order and is no crossing. That second
     /// reading holds when the SUT is the UAS; a stateful proxy may 200 the
-    /// CANCEL itself and still relay a 2xx (§16.10). A 2xx whose earlier copy
-    /// the call's loss model dropped on its way to her was sent before any
-    /// later copy arrived: it reads as the 2xx before the CANCEL's final.
+    /// CANCEL itself and still relay a 2xx (§16.10). A 2xx copy the call's
+    /// loss model dropped on its way to her before the CANCEL's final arrived
+    /// reads as the 2xx before that final.
     AnsweredAcrossCancel,
     /// The callee's 2xx reached the caller before her CANCEL left: she sent
     /// none, her INVITE drew a 2xx and no non-2xx final.
@@ -108,7 +108,7 @@ impl Branch {
                     facts.iter().position(|f| f.status >= 200 && f.cseq_method == "CANCEL");
                 l.first_final().is_none()
                     && matches!((answered, cancel_final), (Some(a), Some(c))
-                        if (a < c || l.lost_answer()) && matches!(facts[c].status, 200 | 481))
+                        if (a < c || l.lost_answer_before(c)) && matches!(facts[c].status, 200 | 481))
             }),
             Ending::AnsweredBeforeCancel => leg.is_some_and(|l| {
                 !l.cancel_sent()
