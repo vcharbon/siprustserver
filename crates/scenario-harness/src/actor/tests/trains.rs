@@ -211,3 +211,121 @@ async fn a_2xx_crosses_pracks_its_dialog_s_offer_does_not_await() {
     assert_eq!(reliable - answered, 2, "two PRACKs cross the 2xx: {seen:?}");
     h.finish().await;
 }
+
+/// What `bob` met of the PRACKs, by CSeq number: when each copy of the PRACK
+/// reached him, the RSeq it acknowledged, and when each of his 200s to it left.
+#[derive(Debug, Default)]
+struct PrackTimes {
+    rseq: Option<u32>,
+    arrived_ms: Vec<u64>,
+    answered_ms: Vec<u64>,
+}
+
+fn prack_times(h: &Harness, bob: &Agent) -> std::collections::BTreeMap<u32, PrackTimes> {
+    let mut by_cseq = std::collections::BTreeMap::<u32, PrackTimes>::new();
+    for e in h.wire_entries() {
+        match CustomParser::new().parse(&e.raw) {
+            Ok(SipMessage::Request(r)) if e.to == bob.addr() && r.method() == "PRACK" => {
+                let t = by_cseq.entry(r.cseq().seq()).or_default();
+                t.rseq =
+                    r.header::<sip_message::header::RAck>().and_then(Result::ok).map(|a| a.rseq());
+                t.arrived_ms.extend(e.received_ms);
+            }
+            Ok(SipMessage::Response(r))
+                if e.from == bob.addr() && r.status() == 200 && r.cseq().method() == "PRACK" =>
+            {
+                by_cseq.entry(r.cseq().seq()).or_default().answered_ms.push(e.sent_ms);
+            }
+            _ => {}
+        }
+    }
+    by_cseq
+}
+
+/// The RSeqs of bob's reliable provisionals, in the order he sent them.
+fn sent_rseqs(h: &Harness, bob: &Agent) -> Vec<u32> {
+    let mut v: Vec<u32> = h
+        .wire_entries()
+        .iter()
+        .filter(|e| e.from == bob.addr())
+        .filter_map(|e| match CustomParser::new().parse(&e.raw).ok()? {
+            SipMessage::Response(r) => {
+                r.header::<sip_message::header::RSeq>().and_then(Result::ok).map(|v| v.value())
+            }
+            SipMessage::Request(_) => None,
+        })
+        .collect();
+    v.dedup();
+    v
+}
+
+/// Each PRACK's 200 leaves its provisional's hold after the PRACK arrived,
+/// and once (RFC 3262 §3: the PRACK acknowledges on arrival, its 200 closes
+/// only its own transaction). The 700 ms hold outlasts T1, so the caller's
+/// Timer E sends the PRACK again (RFC 3261 §17.1.2.2): the held transaction
+/// absorbs the copy and still answers once.
+#[tokio::test(start_paused = true)]
+async fn a_held_prack_200_leaves_its_hold_after_the_prack_and_once() {
+    let h = Harness::new("actor-trains-prack-hold");
+    let alice = h.agent("alice", "127.0.0.1:5060").await;
+    let bob = h.agent("bob", "127.0.0.1:5070").await;
+    let holds = [700u64, 150];
+    let train = vec![
+        prov("f1", 183, true, true, holds[0]),
+        prov("f1", 180, false, true, holds[1]),
+        fin(200, Some(ForkWinner::Tag("f1"))),
+    ];
+    let call = plan(vec![caller(&alice, &bob, true), held(&bob, train)]);
+    let verdict = run_call(call, Duration::from_secs(5)).await;
+    assert!(verdict.is_ok(), "the held-PRACK call settles, got {verdict:?}");
+
+    let rseqs = sent_rseqs(&h, &bob);
+    assert_eq!(rseqs.len(), holds.len(), "two reliable provisionals: {rseqs:?}");
+    let times = prack_times(&h, &bob);
+    assert_eq!(times.len(), holds.len(), "one PRACK per reliable provisional: {times:?}");
+    for t in times.values() {
+        let at = rseqs.iter().position(|r| Some(*r) == t.rseq).expect("a PRACK names an RSeq");
+        let hold = holds[at];
+        let arrived = *t.arrived_ms.first().expect("the PRACK reached bob");
+        assert_eq!(t.answered_ms.len(), 1, "one 200 per PRACK: {t:?}");
+        let answered = t.answered_ms[0];
+        assert!(
+            (arrived + hold..arrived + hold + 5).contains(&answered),
+            "the 200 leaves {hold} ms after its PRACK: {t:?}"
+        );
+        if hold > 500 {
+            assert!(t.arrived_ms.len() >= 2, "a hold past T1 sees the PRACK again: {t:?}");
+        }
+    }
+    h.finish().await;
+}
+
+/// Bob answers, BYEs alice 300 ms later, and holds his PRACK's 200 for 2 s,
+/// which keeps the call open past alice's own hang-up goal 1 s after the
+/// answer. Bob's BYE already ended her dialog (RFC 3261 §15.1.2): her goal
+/// sends nothing, the wire carries his BYE alone, and the call settles.
+#[tokio::test(start_paused = true)]
+async fn a_bye_goal_the_peer_s_bye_met_sends_nothing() {
+    let h = Harness::new("actor-trains-peer-bye-first");
+    let alice = h.agent("alice", "127.0.0.1:5060").await;
+    let bob = h.agent("bob", "127.0.0.1:5070").await;
+    let both = Barrier::AllConfirmed(&["alice", "bob"]);
+    let mut alice_spec = caller(&alice, &bob, false);
+    alice_spec.goals.push(Goal::new(both.clone(), GoalStep::Bye).after(Duration::from_secs(1)));
+    let train = vec![
+        prov("f1", 183, true, true, 2000),
+        fin(200, Some(ForkWinner::Tag("f1"))),
+        Goal::new(both, GoalStep::Bye).after(Duration::from_millis(300)),
+    ];
+    let call = plan(vec![alice_spec, held(&bob, train)]);
+    let verdict = run_call(call, Duration::from_secs(5)).await;
+    assert!(verdict.is_ok(), "the call settles on bob's BYE, got {verdict:?}");
+    let byes: Vec<String> = h
+        .wire_entries()
+        .iter()
+        .filter(|e| e.raw.starts_with(b"BYE "))
+        .map(|e| format!("{} -> {}", e.from, e.to))
+        .collect();
+    assert_eq!(byes, vec![format!("{} -> {}", bob.addr(), alice.addr())], "bob's BYE alone");
+    h.finish().await;
+}
