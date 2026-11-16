@@ -34,7 +34,10 @@
  after its 2xx is a protocol failure only, and so is any unexpected request
  once an ending is set (a far BYE in the CANCEL wait: still `timeout`). Each request has its own branch;
  every 2xx retransmission is ACKed again with its CSeq; a far re-INVITE is
- answered 200 (491 while the caller's own is pending, 481 after its BYE).
+ answered 200 (491 while the caller's own is pending, 481 after its BYE),
+ discharged by the ACK with its CSeq only: an earlier INVITE's ACK repeated
+ (RFC 3261 13.2.2.4) is absorbed, and ends SIPp's retransmission of that 200;
+ a copy of the re-INVITE still draws it.
 -->
 <scenario name="hakit UAC call with call-outcome records">
 
@@ -746,6 +749,12 @@ Content-Length: 0
 
  <nop/>
  <label id="far_reinvite"/>
+ <nop>
+  <action>
+   <assignstr assign_to="fr_cseq" value="[last_CSeq:]"/>
+   <ereg regexp="[0-9]+" search_in="var" variable="fr_cseq" assign_to="fr_n"/>
+  </action>
+ </nop>
  <send retrans="500" ontimeout="far_no_ack">
   <![CDATA[
 SIP/2.0 200 OK
@@ -769,7 +778,12 @@ a=rtpmap:0 PCMU/8000
   ]]>
  </send>
  <label id="far_ack_wait"/>
- <recv request="ACK" optional="true" crlf="true" timeout="32000" ontimeout="far_no_ack" next="far_acked"/>
+ <recv request="ACK" optional="true" crlf="true" timeout="32000" ontimeout="far_no_ack" next="far_acked">
+  <action>
+   <ereg regexp="[0-9]+" search_in="hdr" header="CSeq:" assign_to="fa_n"/>
+   <strcmp assign_to="fa_x" variable="fa_n" variable2="fr_n"/>
+  </action>
+ </recv>
  <recv request="OPTIONS" optional="true" crlf="true" next="far_opt_cap"/>
  <recv request="BYE" optional="true" crlf="true" next="far_bye"/>
  <recv request="INVITE" optional="true" crlf="true" next="far_ack_wait"/>
@@ -844,6 +858,7 @@ a=rtpmap:0 PCMU/8000
  </nop>
  <nop/>
  <label id="far_acked"/>
+ <nop test="fa_x" next="far_ack_wait"/>
  <send condexec="opt_due">
   <![CDATA[
 SIP/2.0 200 OK

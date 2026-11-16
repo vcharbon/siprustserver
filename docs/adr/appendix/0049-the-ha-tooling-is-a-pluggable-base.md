@@ -546,12 +546,15 @@ made. A run profile joins the two.
    writes no record; it exposes counters only. SIPp ends a call without
    running any step of the scenario in two cases: the global
    `-recv_timeout` deletes the call, and an exhausted retransmission of a
-   `<send>` without `ontimeout` aborts it. A third, an unexpected message
-   received while the call is already in its unexpected-message handler, is
-   turned off: the UAC runs with `-default_behaviors all,-abortunexp`, so SIPp
-   discards that message (logging `Continuing call on unexpected message`,
-   counted in no stat) and the call acts on the peer's retransmission; a
-   discarded provisional, never retransmitted, is lost. So every UAC
+   `<send>` without `ontimeout` aborts it. Two more are turned off: the UAC
+   runs with `-default_behaviors all,-abortunexp,-cseq`. An unexpected message
+   received while the call is already in its unexpected-message handler is
+   discarded (logging `Continuing call on unexpected message`, counted in no
+   stat) and the call acts on the peer's retransmission; a discarded
+   provisional, never retransmitted, is lost. An ACK whose CSeq is not that of
+   the latest INVITE received, an earlier INVITE's ACK repeated (RFC 3261
+   §13.2.2.4), reaches the scenario, where only the ACK echoing a 2xx's CSeq
+   discharges that 2xx. So every UAC
    scenario follows these rules:
    - every wait (a group of `<recv>`s) is entered on a recv with its own
      `timeout` and `ontimeout`: a pending send never bounds it (below);
