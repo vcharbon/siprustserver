@@ -302,3 +302,4 @@ Full definitions: [docs/glossary/rig.md](docs/glossary/rig.md).
 - **Call facts**: the `@sip/pipeline` module a rule reads a call through, off a position in a capture or a case document. ADR-0061.
 - **Timeline**: call facts' list of a call's messages, each with its leg, hop, transaction and a pointer to its source message or step. ADR-0061.
 - **Leg** (rig): one attempt at one position of a capture or a document; its outcome is its last opening transaction's final. Not the call model's leg. ADR-0061.
+- **Delta rule**: a named difference between a replay and its reference capture, classed by a lane's lists after the run; not an Exemption, which accepts a non-RFC shape at the ingress gate. ADR-0062.

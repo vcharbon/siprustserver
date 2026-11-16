@@ -189,3 +189,16 @@ transactions (a retry after a 401 or 407 challenge); its outcome is the last one
 method may open one; derived facts exist for INVITE-opened legs only.
 _Avoid_: the call model's leg (**Leg kind**, **Leg state**), one side of a call inside the
 B2BUA.
+
+## Classifying a replay
+
+How a deployment names what differs between a replayed cell and its reference capture
+([ADR-0062](../../docs/adr/0062-delta-rules-run-on-a-generic-engine.md)).
+
+**Delta rule**:
+A named difference between a replay and its reference capture, and why it is not evidence about
+the system under test: an id, a match key, a predicate over one probe and the case's facts, a
+`why`. The first rule by section and position names a probe; the lane's lists class it. A delta
+rule classifies after the run and never changes what the stack accepts. An **Exemption**
+accepts a non-RFC shape at the ingress gate; it is not a delta rule.
+_Avoid_: "tolerance", "waiver".
