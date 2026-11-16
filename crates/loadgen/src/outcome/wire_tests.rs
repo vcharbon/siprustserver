@@ -369,3 +369,60 @@ async fn a_request_pending_at_the_seal_is_settled_by_its_later_final() {
     assert_eq!(f.legs[0].unanswered(), vec![]);
     assert_eq!(f.legs[0].failures, vec![]);
 }
+
+/// A 481 to an INFO the caller sent before the peer's BYE reached her answers
+/// a request in flight when the dialog ended (RFC 3261 §15.1.2): no failure,
+/// and the dialog is not read as gone. The same 481 with no BYE is one.
+#[tokio::test(start_paused = true)]
+#[ignore = "slow lane: loadgen"]
+async fn a_481_crossing_a_bye_is_no_failure() {
+    let setup = |cid: &str| {
+        vec![
+            (Side::Caller, Dir::Out, msg("INVITE sip:b@h SIP/2.0", cid, "1 INVITE", "", "")),
+            (Side::Caller, Dir::In, msg("SIP/2.0 200 OK", cid, "1 INVITE", "t1", "")),
+            (Side::Caller, Dir::Out, msg("ACK sip:b@h SIP/2.0", cid, "1 ACK", "t1", "")),
+            (Side::Caller, Dir::Out, msg("INFO sip:b@h SIP/2.0", cid, "2 INFO", "t1", "")),
+        ]
+    };
+    let mut crossed = setup("c9");
+    crossed.extend([
+        (Side::Caller, Dir::In, msg("BYE sip:a@h SIP/2.0", "c9", "7 BYE", "t1", "")),
+        (Side::Caller, Dir::In, msg("SIP/2.0 481 No Dialog", "c9", "2 INFO", "t1", "")),
+    ]);
+    let f = feed(&CallWire::new(Clock::test_at(0)), &crossed);
+    assert!(f.failures.is_empty(), "{:?}", f.failures);
+    assert!(!f.saw_481);
+    let mut alone = setup("c10");
+    alone.push((Side::Caller, Dir::In, msg("SIP/2.0 481 No Dialog", "c10", "2 INFO", "t1", "")));
+    let f = feed(&CallWire::new(Clock::test_at(0)), &alone);
+    assert_eq!(f.failures, vec![WireFailure { at_ms: 0, method: "INFO".into(), code: Some(481) }]);
+}
+
+/// A 491 to a re-INVITE the side then re-sent is no failure: the retry's own
+/// final judges it (RFC 3261 §14.1). A refusal never retried stays one.
+#[tokio::test(start_paused = true)]
+#[ignore = "slow lane: loadgen"]
+async fn a_491_the_side_retried_is_no_failure() {
+    let reinvite = |cseq: &str| msg("INVITE sip:b@h SIP/2.0", "c11", cseq, "t1", "");
+    let f = feed(
+        &CallWire::new(Clock::test_at(0)),
+        &[
+            (Side::Caller, Dir::Out, msg("INVITE sip:b@h SIP/2.0", "c11", "1 INVITE", "", "")),
+            (Side::Caller, Dir::In, msg("SIP/2.0 200 OK", "c11", "1 INVITE", "t1", "")),
+            (Side::Caller, Dir::Out, reinvite("2 INVITE")),
+            (
+                Side::Caller,
+                Dir::In,
+                msg("SIP/2.0 491 Request Pending", "c11", "2 INVITE", "t1", ""),
+            ),
+            (Side::Caller, Dir::Out, reinvite("3 INVITE")),
+            (Side::Caller, Dir::In, msg("SIP/2.0 200 OK", "c11", "3 INVITE", "t1", "")),
+            (Side::Caller, Dir::Out, reinvite("4 INVITE")),
+            (Side::Caller, Dir::In, msg("SIP/2.0 488 Not Here", "c11", "4 INVITE", "t1", "")),
+        ],
+    );
+    assert_eq!(
+        f.failures,
+        vec![WireFailure { at_ms: 0, method: "INVITE".into(), code: Some(488) }]
+    );
+}
