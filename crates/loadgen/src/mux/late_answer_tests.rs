@@ -146,6 +146,22 @@ fn a_dialog_holds_its_last_answers_one_per_transaction() {
     assert_eq!(reanswer(&mut h, &req("INFO", 10, "z9hG4bK10")), Some(again), "the latest answer");
 }
 
+/// A callee that sent fifteen reliable provisionals answered fifteen PRACKs,
+/// each its own transaction (RFC 3262 §3), then its INVITE's 2xx and the
+/// BYE's 200: its first PRACK's 200 is still held when the call releases,
+/// and a PRACK retransmitted until Timer F draws it, never a stray.
+#[test]
+#[ignore = "slow lane: loadgen"]
+fn the_pracks_of_a_long_reliable_train_stay_answerable() {
+    let mut sent: Vec<Vec<u8>> =
+        (2..=16).map(|cseq| resp(200, "PRACK", cseq, &format!("z9hG4bKp{cseq}"))).collect();
+    sent.push(resp(200, "INVITE", 1, "z9hG4bKinv"));
+    sent.push(resp(200, "BYE", 17, "z9hG4bKbye"));
+    let mut h = held(&sent);
+    let first = reanswer(&mut h, &req("PRACK", 2, "z9hG4bKp2"));
+    assert_eq!(first, Some(sent[0].clone()), "the first PRACK's 200");
+}
+
 #[tokio::test(start_paused = true)]
 #[ignore = "slow lane: loadgen"]
 async fn a_held_answer_expires_with_the_hold() {
