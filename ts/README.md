@@ -1,12 +1,13 @@
 # `ts/` — the TypeScript side of the replay toolchain
 
-A pnpm workspace. Eighteen packages, four of them one layer each of the same stack:
+A pnpm workspace. Nineteen packages, four of them one layer each of the same stack:
 
 | package | name | owns |
 | --- | --- | --- |
 | `contracts/` | `@sip/contracts` | Effect Schema mirrors of the Rust-owned wire formats, the canonical formatter, pure readings of those formats (call key, step order, a cell's main error), and the report formats the tooling publishes (`sip.compare/1`, `sip.run-report/1`, their JSON Schemas under `contracts/schemas/`) |
 | `toolchain/` | `@sip/toolchain` | typed adapters over the Rust CLIs (`sipflow`, `pivot-schema`, `replay`) and the process primitives above them (a command into a file or a log, a detached command and its liveness, `git`, a node child's heap), where each Rust binary is (a prebuilt directory a variable names, else the checkout's release build) and whether an optional host tool is on `PATH` — the ONLY package that adapts a Rust CLI |
 | `pipeline/` | `@sip/pipeline` | flows ingest, the correlation rule engine, the cut, and case assembly |
+| `delta-rules/` | `@sip/delta-rules` | the engine a deployment writes its delta rules on (ADR-0062): the rule type and first-match order, the readings of a probe, the lane lists, the overlap graph that pins every winner, and the rules page |
 | `driver/` | `@sip/driver` | one cell of a campaign, either shape, into its caller's run dir; the `campaign.json` line it answers is the caller's to fold |
 | `store/` | `@sip/store` | the run store: the postgres record of cuts, runs and what each call said, the readers a queue and a comparison use, and the run selectors |
 | `viewer-core/` | `@sip/viewer-core` | the callflow viewer's core: pivot types generated from the Rust schema, the pure ladder layouts, their SVG components, the run-bundle and capture-flows readers, and the text export |
@@ -26,7 +27,7 @@ A pnpm workspace. Eighteen packages, four of them one layer each of the same sta
 Dependencies point one way only. `contracts` depends on nothing, and every other
 package but the leaves `viewer-core` and `case-modules`, the deployment `siprig` and the pack `reference-pack` depends on it; beyond it, each
 package's own edges are: `pipeline`, `toolchain`, `store` and `rig` none,
-`driver → {pipeline, toolchain}`, `basic-case → {driver, rig}` (its tests also
+`delta-rules → pipeline`, `driver → {pipeline, toolchain}`, `basic-case → {driver, rig}` (its tests also
 `toolchain`), `corpus → {driver, pipeline, rig, store, toolchain, viewer-core}`,
 `cli → {corpus, store}`, `workspace → {cli, rig, store, toolchain}`,
 `lab-host → {cli, corpus, rig, store, toolchain, workspace}`,

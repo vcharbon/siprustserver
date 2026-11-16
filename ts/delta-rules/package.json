@@ -1,0 +1,27 @@
+{
+  "name": "@sip/delta-rules",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "The delta-rule engine a deployment writes its replay rules on: the rule type and first-match order, the readings of a probe, the lane lists, the overlap graph and the rules table (ADR-0062).",
+  "exports": {
+    ".": "./src/index.ts",
+    "./*": "./src/*.ts"
+  },
+  "types": "./src/index.ts",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@sip/contracts": "workspace:*",
+    "@sip/pipeline": "workspace:*",
+    "effect": "4.0.0-rc.111"
+  },
+  "devDependencies": {
+    "@effect/platform-node": "4.0.0-rc.111",
+    "@types/node": "24.10.1",
+    "typescript": "5.9.3",
+    "vitest": "4.1.11"
+  }
+}
