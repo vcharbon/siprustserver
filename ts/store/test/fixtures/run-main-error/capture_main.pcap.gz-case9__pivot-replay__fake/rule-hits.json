@@ -1,18 +1,18 @@
 [
   {
-    "family": "tolerance",
+    "family": "delta",
     "rule": "invite-final-class-preserved",
     "bucket": "accepted",
     "hits": 1
   },
   {
-    "family": "tolerance",
+    "family": "delta",
     "rule": "invite-final-class-preserved",
     "bucket": "shape",
     "hits": 1
   },
   {
-    "family": "tolerance",
+    "family": "delta",
     "rule": "(unnamed)",
     "bucket": "unknown",
     "hits": 2

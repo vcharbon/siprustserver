@@ -198,7 +198,8 @@ How a deployment names what differs between a replayed cell and its reference ca
 **Delta rule**:
 A named difference between a replay and its reference capture, and why it is not evidence about
 the system under test: an id, a match key, a predicate over one probe and the case's facts, a
-`why`. The first rule by section and position names a probe; the lane's lists class it. A delta
-rule classifies after the run and never changes what the stack accepts. An **Exemption**
+`why`. The first rule by section and position names a probe; the lane's lists class it, and a
+cell's rule hits count it under the family `delta`. A delta rule classifies after the run and
+never changes what the stack accepts. An **Exemption**
 accepts a non-RFC shape at the ingress gate; it is not a delta rule.
 _Avoid_: "tolerance", "waiver".

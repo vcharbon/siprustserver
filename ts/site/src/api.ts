@@ -518,7 +518,7 @@ const RuleOffTier = Schema.Struct({
 })
 
 export const RuleRow = Schema.Struct({
-  /** refusal | tolerance | bless | declaration. */
+  /** refusal | delta | bless | declaration. */
   family: Schema.String,
   id: Schema.String,
   /** pre-run | post-run — whether the rule speaks before a run or about one. */

@@ -64,7 +64,7 @@ export const SMOKE = { name: "smoke", title: "Smoke run", cases: ["*"], lanes: n
 
 /** The one rule of the pack's roster. */
 export const RULE: SitePack.RosterEntry = {
-  family: "tolerance",
+  family: "delta",
   id: "late-ack",
   stage: "post-run",
   tier: "run-cell",

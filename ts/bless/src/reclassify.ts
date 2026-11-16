@@ -3,8 +3,8 @@
  * structural error into a detailed accept, by RE-READING the finished cell —
  * never by influencing the run.
  *
- * The one refinement it makes: a run the interpreter failed only inside the
- * lane's stated tolerance — every refused datagram and every absence answered
+ * The one refinement it makes: a run the interpreter failed only within what
+ * the lane's lists accept — every refused datagram and every absence answered
  * by a named rule, and any `must_fail` declaration the run abandoned before
  * reaching (`./premise.ts` `blessing`) — is restated as passed, and the reason
  * names the rules. Anything else (an unclassified record, a failure the

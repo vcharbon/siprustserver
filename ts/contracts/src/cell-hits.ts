@@ -12,7 +12,7 @@ import { STRICT } from "./strict.js"
 
 /** One rule's count on one cell, under the one subdivision it was counted in. */
 export const Hit = Schema.Struct({
-  /** The rule family, an open token (`tolerance`, `bless`, ...). */
+  /** The rule family, an open token (`delta`, `bless`, ...). */
   family: Schema.String,
   rule: Schema.String,
   /** The count's subdivision, open per family. */

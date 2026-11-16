@@ -457,7 +457,7 @@ describe("the post-run escape hatch", () => {
   })
 
   it("writes the deployment's per-cell counts beside the cell, in its own tokens", async () => {
-    const hits: CellHits.Hits = [{ family: "tolerance", rule: "via-stack-owned", bucket: "accepted", hits: 2 }]
+    const hits: CellHits.Hits = [{ family: "delta", rule: "via-stack-owned", bucket: "accepted", hits: 2 }]
     const { dir, cell } = await one(replayCell(), {
       rig: { reclassifier: Reclassifier.layerWith((outcome) => Effect.succeed({ passed: outcome.passed, hits })) }
     })

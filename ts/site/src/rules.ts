@@ -10,7 +10,7 @@
  *
  * Three readings, from where each is DURABLE. Refusals come off the session
  * tree's `excluded.json`, which the cut writes and retention never touches, so
- * it is the standing cut entire. Tolerance and bless counts come off
+ * it is the standing cut entire. Delta and bless counts come off
  * `run_rule_hits`, because a bundle survives only while it is a (capture,
  * lane)'s latest or last-green one and a reading taken from disk answers for
  * the survivors alone. Declarations come off the standing cut's own documents.
@@ -33,7 +33,7 @@ export type Standing = "measured" | "declared-zero" | "unexercised" | "unrostere
 /** The cheap falsifier's report, as `<sessions>/_rules/off-tier.json` holds it. */
 const OFF_TIER_REPORT = "_rules/off-tier.json"
 
-/** How one lane's delta list classes a tolerance rule. */
+/** How one lane's delta list classes a delta rule. */
 export interface LaneClass {
   readonly lane: string
   readonly class: string
@@ -85,7 +85,7 @@ export interface Population {
   /** Captures whose `excluded.json` the refusal counts were read from. */
   readonly refusalCaptures: number
   readonly refusalRecords: number
-  /** Standing runs the tolerance and bless counts cover. */
+  /** Standing runs the delta and bless counts cover. */
   readonly standingRuns: number
   /** Those of them whose per-rule counts were recorded. */
   readonly measuredRuns: number
@@ -221,7 +221,7 @@ export const layer = Layer.effect(
 
     /** The bucket every family's headline count is read from. */
     const HEADLINE: Readonly<Record<string, ReadonlyArray<string>>> = {
-      tolerance: ["accepted", "known-bug", "unlisted", "unknown"],
+      delta: ["accepted", "known-bug", "unlisted", "unknown"],
       bless: ["fired"]
     }
 
@@ -345,7 +345,7 @@ export const layer = Layer.effect(
         if (rostered.has(key)) continue
         const [family = "", ...rest] = key.split(" ")
         const rule = rest.join(" ")
-        if (family !== "tolerance" && family !== "bless") continue
+        if (family !== "delta" && family !== "bless") continue
         rows.push({
           family,
           id: rule,

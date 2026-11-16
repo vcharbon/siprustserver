@@ -547,7 +547,7 @@ export interface CaptureIngestState {
   readonly detail: string
 }
 
-/** How one lane's delta list classes a tolerance rule. */
+/** How one lane's delta list classes a delta rule. */
 export interface RuleLaneClass {
   readonly lane: string
   /** accepted | known-bug | unlisted. */
@@ -576,7 +576,7 @@ export interface RuleOffTier {
  * cannot show is the rule that fires nowhere.
  */
 export interface RuleRow {
-  /** refusal | tolerance | bless | declaration. */
+  /** refusal | delta | bless | declaration. */
   readonly family: string
   readonly id: string
   /** pre-run | post-run. */

@@ -33,8 +33,8 @@ const FAMILIES = [
     what: "hits = must_fail entries · reach = case documents"
   },
   {
-    id: "tolerance",
-    title: "tolerance · after the run",
+    id: "delta",
+    title: "delta · after the run",
     what: "hits = confrontation records named · reach = cells"
   },
   {

@@ -59,7 +59,7 @@ export interface CampaignFacts extends Sides {
   readonly refusal: (env: NodeJS.ProcessEnv) => Effect.Effect<Runnable.Refusal<LaneView.View>, never, FileSystem>
 }
 
-/** One rule of the roster as it declares itself, nothing read off a corpus (`refusal`, `tolerance`, `bless`, `declaration`). */
+/** One rule of the roster as it declares itself, nothing read off a corpus (`refusal`, `delta`, `bless`, `declaration`). */
 export interface RosterEntry {
   readonly family: string
   readonly id: string
@@ -73,7 +73,7 @@ export interface RosterEntry {
   readonly inert?: string | undefined
   /** Why no replay can ever contradict it; absent where one can. */
   readonly unfalsifiable?: string | undefined
-  /** Which lane list holds it, in which class, waiting on which ticket. Tolerance rules only. */
+  /** Which lane list holds it, in which class, waiting on which ticket. Delta rules only. */
   readonly lanes: ReadonlyArray<{ readonly lane: string; readonly class: string; readonly ticket: string }>
 }
 

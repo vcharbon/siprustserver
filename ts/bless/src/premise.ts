@@ -10,8 +10,8 @@
  * refusal answered by a shape record at its own step, every absence by the
  * confrontation's own `missing-message` shape at that step and every omission
  * by its own `trying-omitted` shape there, all of them
- * `accepted` or `known-bug` under a named rule, is inside the lane's stated
- * tolerance. Coverage is a mapping, never a count, and every other record
+ * `accepted` or `known-bug` under a named rule, is within what the lane's lists
+ * accept. Coverage is a mapping, never a count, and every other record
  * must be `accepted` or `known-bug`.
  *
  * `auditFindings`: a passing cell read against the same premise; what it
@@ -52,8 +52,8 @@ const neverReached = (
 
 /**
  * The named rules covering every refused datagram and every absence, beside any
- * declaration the run never reached, or `undefined` where the run is not inside
- * the lane's stated tolerance.
+ * declaration the run never reached, or `undefined` where the run is not within
+ * what the lane's lists accept.
  *
  * An untestable declaration is forgiven BESIDE a divergence a rule names, never
  * on its own: a bless with nothing to name answers nothing. An absence is

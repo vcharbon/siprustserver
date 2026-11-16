@@ -176,11 +176,11 @@ describe("the reclassifier", () => {
     const got = await reclassify(outcome({ dir }))
     expect(got.passed).toBe(true)
     expect(got.hits).toEqual([
-      { family: "tolerance", rule: "final-class-kept", bucket: "accepted", hits: 1 },
-      { family: "tolerance", rule: "final-class-kept", bucket: "shape", hits: 1 },
-      { family: "tolerance", rule: "via-stack-owned", bucket: "accepted", hits: 1 },
+      { family: "delta", rule: "final-class-kept", bucket: "accepted", hits: 1 },
+      { family: "delta", rule: "final-class-kept", bucket: "shape", hits: 1 },
+      { family: "delta", rule: "via-stack-owned", bucket: "accepted", hits: 1 },
       { family: "bless", rule: "bless-premise", bucket: "fired", hits: 1 },
-      { family: "tolerance", rule: "final-class-kept", bucket: "blessed", hits: 1 }
+      { family: "delta", rule: "final-class-kept", bucket: "blessed", hits: 1 }
     ])
   })
 
@@ -190,7 +190,7 @@ describe("the reclassifier", () => {
       outcome({ dir, passed: true, verdict: { case: "cap-case1", lane: "lab", status: "ok" } })
     )
     expect(got.passed).toBe(true)
-    expect(got.hits).toContainEqual({ family: "tolerance", rule: "(unnamed)", bucket: "unknown", hits: 1 })
+    expect(got.hits).toContainEqual({ family: "delta", rule: "(unnamed)", bucket: "unknown", hits: 1 })
     expect(got.hits).toContainEqual({
       family: "bless",
       rule: "failure-shape-on-a-green-cell",
@@ -229,7 +229,7 @@ describe("the reclassifier", () => {
       expect(got.passed).toBe(false)
       expect(got.reason).toContain("bad-body")
       expect(got.reason).toContain("body:sdp:m0:a=rtpmap:response:200:INVITE")
-      expect(got.hits).toContainEqual({ family: "tolerance", rule: "(unnamed)", bucket: "unknown", hits: 1 })
+      expect(got.hits).toContainEqual({ family: "delta", rule: "(unnamed)", bucket: "unknown", hits: 1 })
     })
 
     it("names the row a rule names ahead of an unnamed one, the rule with it", async () => {

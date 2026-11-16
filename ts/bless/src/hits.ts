@@ -38,9 +38,9 @@ class CellTally {
  * Every post-run rule count one cell carries. `outcome.passed` is the gate the
  * reclassifier read, and decides whether the audit is put to the cell.
  *
- * - `tolerance <rule> <class>`: each record under its rule, and `shape` beside
+ * - `delta <rule> <class>`: each record under its delta rule, and `shape` beside
  *   it for a shape record, the only kind the bless premise reads.
- * - `bless bless-premise fired`, and `tolerance <rule> blessed` for each rule
+ * - `bless bless-premise fired`, and `delta <rule> blessed` for each rule
  *   the restated cell stood on.
  * - `bless <finding> fired`: each audit finding on a passing cell.
  * - `rfc <rule> relayed` and `rfc <rule> source-fault`: the findings the
@@ -54,13 +54,13 @@ export const cellHits = (
   const tally = new CellTally()
   for (const record of records) {
     const rule = record.rule === "" ? UNNAMED : record.rule
-    tally.add("tolerance", rule, record.class)
-    if (record.kind === "shape") tally.add("tolerance", rule, "shape")
+    tally.add("delta", rule, record.class)
+    if (record.kind === "shape") tally.add("delta", rule, "shape")
   }
   const blessed = blessing(outcome.verdict.failures ?? [], records, outcome.verdict.abandoned)
   if (blessed !== undefined) {
     tally.add("bless", BLESS_PREMISE, "fired")
-    for (const rule of blessed) tally.add("tolerance", rule, "blessed")
+    for (const rule of blessed) tally.add("delta", rule, "blessed")
   }
   if (outcome.passed) {
     for (const finding of auditFindings(outcome, records, rfc)) {
