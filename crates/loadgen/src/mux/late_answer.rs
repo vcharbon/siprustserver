@@ -29,7 +29,8 @@
 //! aggregate the mux holds the calls released in the last 32 s (cps × 32), a
 //! call typically 1 to 3 answers (the BYE's 200; a CANCEL's 200 and the 487)
 //! of about 0.5 KiB plus 0.1 KiB of key and arrow, so 1 to 2 KiB a call:
-//! about 13 MiB at 200 cps, 130 MiB at 2000 cps; at worst 8 × 64 KiB a dialog.
+//! about 13 MiB at 200 cps, 130 MiB at 2000 cps; at worst 32 × 64 KiB a
+//! dialog.
 
 use std::sync::{Arc, Mutex};
 
@@ -39,8 +40,11 @@ use super::datagram::{key_of, Datagram};
 use super::tally::LateRepair;
 use super::taps::Taps;
 
-/// The answers one dialog holds at most: the last ones it sent.
-pub(in crate::mux) const ANSWERS_HELD: usize = 8;
+/// The answers one dialog holds at most: the last ones it sent. Room for a
+/// long reliable-provisional train's PRACKs (RFC 3262 §3, each its own
+/// transaction a peer retransmits until Timer F) beside the dialog's other
+/// answers.
+pub(in crate::mux) const ANSWERS_HELD: usize = 32;
 
 /// One final our agent sent, keyed by the server transaction it ends.
 struct Answer {
