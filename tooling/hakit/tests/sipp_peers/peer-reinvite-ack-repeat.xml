@@ -2,10 +2,9 @@
 <!DOCTYPE scenario SYSTEM "sipp.dtd">
 <!-- Answers, then sends two in-dialog re-INVITEs. On the second's 200 it
      sends the ACK of the first's 200 again, as a node taking a dialog over
-     from its record does, then the second's own ACK back to back. Which
-     ACK the caller acts on first is the order SIPp drains them: it sends
-     the second's 200 again (checked: CSeq 2 INVITE, the second's branch),
-     which the peer ACKs, or nothing more; then the peer hangs up. -->
+     from its record does, then the second's own ACK back to back; then it
+     hangs up. Whichever ACK the caller acts on first (the order SIPp drains
+     them), it sends no 200 after them: one more fails this peer. -->
 <scenario name="peer-reinvite-ack-repeat">
   <recv request="INVITE" crlf="true" rrs="true">
     <action>
@@ -125,27 +124,7 @@
       Content-Length: 0
     ]]>
   </send>
-  <recv response="200" crlf="true" timeout="1000" ontimeout="bye">
-    <action>
-      <ereg regexp="^[[:blank:]]*2[[:blank:]]+INVITE" search_in="hdr" header="CSeq:" check_it="true" assign_to="re_cseq"/>
-      <ereg regexp="branch=z9hG4bK-[0-9]+-[0-9]+-inv2" search_in="hdr" header="Via:" check_it="true" assign_to="re_branch"/>
-    </action>
-  </recv>
-  <send>
-    <![CDATA[
-      ACK [next_url] SIP/2.0
-      Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=z9hG4bK-[pid]-[call_number]-ack2
-      [routes]
-      From: [$to_raw];tag=[pid]P[call_number]
-      To: [$from_hdr]
-      Call-ID: [call_id]
-      CSeq: 2 ACK
-      Max-Forwards: 70
-      Content-Length: 0
-    ]]>
-  </send>
-  <label id="bye"/>
-  <pause milliseconds="200"/>
+  <pause milliseconds="1000"/>
   <send retrans="500">
     <![CDATA[
       BYE [next_url] SIP/2.0
@@ -161,5 +140,5 @@
     ]]>
   </send>
   <recv response="200" crlf="true" timeout="5000"/>
-  <Reference variables="from_hdr,to_raw,re_cseq,re_branch"/>
+  <Reference variables="from_hdr,to_raw"/>
 </scenario>

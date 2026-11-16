@@ -37,7 +37,8 @@ class Case:
     phase: str = "released"
     max_200s: int = 6
     """The most 200s to an INVITE the caller sends: one per far re-INVITE,
-    plus one per ACK that does not acknowledge it and per retransmission."""
+    plus one per retransmission, its own or drawn by a byte-identical copy
+    of the re-INVITE; an ACK draws none."""
 
 
 UAS_FAST = {"ring_ms": "200", "gap_ms": "300"}
@@ -63,24 +64,36 @@ CASES = [
     ),
     Case("far-reinvites-cut", UAS, "cut", "bye_from_far_end", {"hold_ms": "5000"}, UAS_FAST, ruri_user="reinvite"),
     Case("far-reinvite-unacked", "peer-reinvite-unacked.xml", "cut", "far_reinvite_no_ack", {"hold_ms": "15000"}, {}, ["protocol"]),
-    Case("far-reinvite-ack-repeat", "peer-reinvite-ack-repeat.xml", "answered", "far_end_release", FAR_RELEASE, max_200s=3),
-    Case("far-reinvite-ack-pair-then-hold", "peer-reinvite-ack-pair-then-hold.xml", "answered", "answered", {"hold_ms": "3000"}, max_200s=3),
+    Case("far-reinvite-unacked-then-bye", "peer-reinvite-unacked-then-bye.xml", "cut", "bye_from_far_end", {"hold_ms": "5000"}, {}, ["protocol"], max_200s=2),
+    Case("far-reinvite-ack-repeat", "peer-reinvite-ack-repeat.xml", "answered", "far_end_release", FAR_RELEASE, max_200s=2),
+    Case("far-reinvite-ack-pair-then-hold", "peer-reinvite-ack-pair-then-hold.xml", "answered", "answered", {"hold_ms": "3000"}, max_200s=2),
     Case(
-        "far-reinvite-ack-repeat-true-lost",
-        "peer-reinvite-ack-repeat-true-lost.xml",
+        "far-reinvite-ack-repeat-then-bye",
+        "peer-reinvite-ack-repeat-then-bye.xml",
         "answered",
         "far_end_release",
         FAR_RELEASE,
-        max_200s=3,
+        {},
+        ["protocol"],
+        max_200s=2,
     ),
-    Case("far-reinvite-ack-repeat-only", "peer-reinvite-ack-repeat-only.xml", "cut", "far_reinvite_no_ack", {"hold_ms": "15000"}, {}, ["protocol"]),
+    Case(
+        "far-reinvite-ack-repeat-only",
+        "peer-reinvite-ack-repeat-only.xml",
+        "cut",
+        "far_reinvite_no_ack",
+        {"hold_ms": "15000"},
+        {},
+        ["protocol"],
+        max_200s=2,
+    ),
     Case(
         "far-reinvite-copy-after-ack-repeat",
         "peer-reinvite-copy-after-ack-repeat.xml",
         "answered",
         "far_end_release",
         FAR_RELEASE,
-        max_200s=4,
+        max_200s=3,
     ),
     Case(
         "far-reinvite-relayed-copy-after-ack-repeat",
@@ -88,10 +101,11 @@ CASES = [
         "answered",
         "far_end_release",
         FAR_RELEASE,
-        max_200s=4,
+        max_200s=2,
     ),
     Case("ack-before-its-reinvite", "peer-ack-before-reinvite.xml", "answered", "far_end_release", FAR_RELEASE, {}, ["protocol"]),
-    Case("ack-above-every-reinvite", "peer-ack-above-reinvite.xml", "answered", "far_end_release", FAR_RELEASE, {}, ["protocol"], max_200s=3),
+    Case("ack-above-every-reinvite", "peer-ack-above-reinvite.xml", "answered", "far_end_release", FAR_RELEASE, {}, ["protocol"], max_200s=2),
+    Case("ack-above-then-bye", "peer-ack-above-then-bye.xml", "answered", "far_end_release", FAR_RELEASE, {}, ["protocol", "protocol"], max_200s=2),
     Case("ack-in-reinvite-wait", "peer-ack-in-reinvite-wait.xml", "answered", "answered", {"reinvites": "1", "hold_ms": "2000"}, {}, ["protocol"]),
     Case("ack-in-bye-wait", "peer-ack-in-bye-wait.xml", "answered", "answered", {"hold_ms": "1000"}, {}, ["protocol"]),
     Case("ghost-released", "peer-ghost-bye.xml", "answered", "ghost_released", {"abuse": "ghost", "hold_ms": "15000"}),

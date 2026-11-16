@@ -6,8 +6,9 @@
      section 17.2.3, the same transaction), Max-Forwards 69, so it is no
      byte-identical retransmission SIPp answers by itself. The copy lands
      while the caller is still acting on the ACK (SIPp drains them in
-     order). It checks the 200 the caller sends again is the second's
-     (CSeq 2 INVITE, its branch), ACKs it, then hangs up. -->
+     order) and draws nothing (RFC 6026: its transaction is Accepted, the
+     copy goes to no TU). It then ACKs the second's 200 and hangs up; a 200 the
+     caller sends after the copy fails this peer. -->
 <scenario name="peer-reinvite-relayed-copy-after-ack-repeat">
   <recv request="INVITE" crlf="true" rrs="true">
     <action>
@@ -137,12 +138,7 @@
       a=rtpmap:0 PCMU/8000
     ]]>
   </send>
-  <recv response="200" crlf="true" timeout="5000">
-    <action>
-      <ereg regexp="^[[:blank:]]*2[[:blank:]]+INVITE" search_in="hdr" header="CSeq:" check_it="true" assign_to="re_cseq"/>
-      <ereg regexp="branch=z9hG4bK-[0-9]+-[0-9]+-inv2" search_in="hdr" header="Via:" check_it="true" assign_to="re_branch"/>
-    </action>
-  </recv>
+  <pause milliseconds="300"/>
   <send>
     <![CDATA[
       ACK [next_url] SIP/2.0
@@ -172,5 +168,5 @@
     ]]>
   </send>
   <recv response="200" crlf="true" timeout="5000"/>
-  <Reference variables="from_hdr,to_raw,re_cseq,re_branch"/>
+  <Reference variables="from_hdr,to_raw"/>
 </scenario>

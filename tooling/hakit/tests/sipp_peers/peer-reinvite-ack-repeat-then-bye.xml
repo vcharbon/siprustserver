@@ -1,10 +1,9 @@
 <?xml version="1.0" encoding="ISO-8859-1" ?>
 <!DOCTYPE scenario SYSTEM "sipp.dtd">
-<!-- Answers, then sends two in-dialog re-INVITEs. On the second's 200 it
-     sends the ACK of the first's 200 again, and the second's own ACK is
-     lost; it checks the 200 the caller sends again is the second's (CSeq
-     2 INVITE, the second's branch), ACKs it, then hangs up. -->
-<scenario name="peer-reinvite-ack-repeat-true-lost">
+<!-- Answers, then sends two in-dialog re-INVITEs. It answers the second's
+     200, and each copy of it, with the ACK of the first's 200 only, never
+     the second's own, then hangs up 500 ms later. -->
+<scenario name="peer-reinvite-ack-repeat-then-bye">
   <recv request="INVITE" crlf="true" rrs="true">
     <action>
       <ereg regexp=".*" search_in="hdr" header="From:" start_line="true" assign_to="from_hdr"/>
@@ -76,7 +75,7 @@
   <send retrans="500">
     <![CDATA[
       INVITE [next_url] SIP/2.0
-      Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=z9hG4bK-[pid]-[call_number]-inv2
+      Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch]
       [routes]
       From: [$to_raw];tag=[pid]P[call_number]
       To: [$from_hdr]
@@ -110,39 +109,7 @@
       Content-Length: 0
     ]]>
   </send>
-  <send lost="100">
-    <![CDATA[
-      ACK [next_url] SIP/2.0
-      Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=z9hG4bK-[pid]-[call_number]-ack2
-      [routes]
-      From: [$to_raw];tag=[pid]P[call_number]
-      To: [$from_hdr]
-      Call-ID: [call_id]
-      CSeq: 2 ACK
-      Max-Forwards: 70
-      Content-Length: 0
-    ]]>
-  </send>
-  <recv response="200" crlf="true" timeout="5000">
-    <action>
-      <ereg regexp="^[[:blank:]]*2[[:blank:]]+INVITE" search_in="hdr" header="CSeq:" check_it="true" assign_to="re_cseq"/>
-      <ereg regexp="branch=z9hG4bK-[0-9]+-[0-9]+-inv2" search_in="hdr" header="Via:" check_it="true" assign_to="re_branch"/>
-    </action>
-  </recv>
-  <send>
-    <![CDATA[
-      ACK [next_url] SIP/2.0
-      Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=z9hG4bK-[pid]-[call_number]-ack2
-      [routes]
-      From: [$to_raw];tag=[pid]P[call_number]
-      To: [$from_hdr]
-      Call-ID: [call_id]
-      CSeq: 2 ACK
-      Max-Forwards: 70
-      Content-Length: 0
-    ]]>
-  </send>
-  <pause milliseconds="200"/>
+  <pause milliseconds="500"/>
   <send retrans="500">
     <![CDATA[
       BYE [next_url] SIP/2.0
@@ -152,11 +119,10 @@
       To: [$from_hdr]
       Call-ID: [call_id]
       CSeq: 3 BYE
-      Contact: <sip:[local_ip]:[local_port];transport=[transport]>
       Max-Forwards: 70
       Content-Length: 0
     ]]>
   </send>
   <recv response="200" crlf="true" timeout="5000"/>
-  <Reference variables="from_hdr,to_raw,re_cseq,re_branch"/>
+  <Reference variables="from_hdr,to_raw"/>
 </scenario>
