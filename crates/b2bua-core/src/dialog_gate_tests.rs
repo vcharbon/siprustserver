@@ -253,6 +253,58 @@ fn a_prack_on_a_retired_dialog_passes_on_the_caller_face_only() {
     assert_eq!(request_verdict(&call, "b-1", &prack), Verdict::NoDialog, "a losing callee fork");
 }
 
+/// The request of `method` and CSeq `cseq` with no To-tag, on the caller's
+/// Call-ID.
+fn tagless_request(method: Method, cseq: u32) -> SipRequest {
+    let inv = invite("gate");
+    inv.thaw()
+        .with_method(method.clone())
+        .set(sip_message::header::CSeq::new(cseq, method))
+        .freeze()
+        .expect("a tagless request of the same call is complete")
+}
+
+/// A call whose caller-facing dialog `ours` is shown early and whose callee
+/// leg `b-1` rings on one early dialog.
+fn call_with_ringing_callee() -> Call {
+    let mut call = call_with_caller_dialog(true);
+    let mut leg = call::testkit::dialled_leg("b-1", "ours");
+    leg.dialogs.insert(dialog(DialogState::Early));
+    call::helpers::add_originated_b_leg(&mut call, leg, 0);
+    call
+}
+
+/// A non-INVITE request with no To-tag names no dialog (RFC 3261
+/// §12.2.1.1): on a live call it draws 481 (§12.2.2) on either leg.
+#[test]
+fn a_tagless_non_invite_request_on_a_live_call_names_no_dialog() {
+    let call = call_with_ringing_callee();
+    for leg in ["a", "b-1"] {
+        for method in [Method::Info, Method::Bye, Method::Update, Method::Prack, Method::Message] {
+            assert_eq!(
+                request_verdict(&call, leg, &tagless_request(method.clone(), 2)),
+                Verdict::NoDialog,
+                "{leg}: a tagless {method}"
+            );
+        }
+    }
+}
+
+/// A CANCEL is matched by its transaction (RFC 3261 §9.1), a tagless INVITE
+/// is the initial INVITE's or a merged or looped one, and a tagless ACK is
+/// the initial INVITE's: each passes with no dialog resolved.
+#[test]
+fn a_tagless_cancel_invite_or_ack_passes_unread() {
+    let call = call_with_ringing_callee();
+    for (method, cseq) in [(Method::Cancel, 1), (Method::Invite, 1), (Method::Ack, 1)] {
+        assert_eq!(
+            request_verdict(&call, "a", &tagless_request(method.clone(), cseq)),
+            Verdict::Pass(call::helpers::Resolved::default()),
+            "a tagless {method}"
+        );
+    }
+}
+
 /// A leg the record lacks — another owner dialled it — holds no dialog here:
 /// its BYE draws a 481 and its ACK is dropped (RFC 3261 §12.2.2).
 #[test]
