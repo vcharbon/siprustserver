@@ -7,14 +7,15 @@
 //! extra non-binding entry ([`DEFAULT_LIMITER_ID`]), so every routed call holds
 //! a limiter and must drain it. Whatever limiter the SUT runs, a
 //! `HoldLedger` counts, per call, the holds the SUT was granted, the holds
-//! it released (a replaced set counts as released) and the admits that failed
-//! open. The limiter a test drives itself is the
-//! [`WitnessRig`](crate::witness::WitnessRig); scripted limiters are in
-//! [`doubles`].
+//! it released (a replaced set counts as released, and so does a set granted
+//! after the call's release left) and the admits that failed open; a drain
+//! failure names each set left ([`UnreleasedSet`]). The limiter a test drives
+//! itself is the [`WitnessRig`](crate::witness::WitnessRig); scripted
+//! limiters are in [`doubles`].
 
 pub mod doubles;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -111,11 +112,19 @@ impl LimiterCount {
     /// `stored` exactly when a store is registered.
     #[track_caller]
     pub fn assert_matches(&self, leak: &LimiterLeak) {
+        self.assert_matches_naming(leak, &[]);
+    }
+
+    /// [`assert_matches`](Self::assert_matches), a failure on `unreleased`
+    /// naming each of `sets`.
+    #[track_caller]
+    fn assert_matches_naming(&self, leak: &LimiterLeak, sets: &[UnreleasedSet]) {
         let unreleased = self.unreleased();
+        let named: String = sets.iter().map(|set| format!("\n  {set}")).collect();
         assert_eq!(
             unreleased, leak.unreleased,
             "limiter leak: {unreleased} hold(s) granted and never released \
-             ({} admitted, {} released); declared {}",
+             ({} admitted, {} released); declared {}{named}",
             self.admitted, self.released, leak.unreleased
         );
         if let Some(stored) = self.stored {
@@ -124,6 +133,29 @@ impl LimiterCount {
                 "limiter leak: the store still counts {stored} hold(s); declared {}",
                 leak.stored
             );
+        }
+    }
+}
+
+/// One set the SUT was granted and has not released, as a drain failure
+/// names it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UnreleasedSet {
+    /// The call's limiter key: its incarnation, which carries its Call-ID.
+    pub key: String,
+    /// The holds of the set.
+    pub holds: i64,
+    /// The entries the registered store holds for the key (`None`: no store
+    /// is registered, or the store released the key).
+    pub stored: Option<usize>,
+}
+
+impl std::fmt::Display for UnreleasedSet {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: {} hold(s)", self.key, self.holds)?;
+        match self.stored {
+            Some(entries) => write!(f, ", the store holds {entries}"),
+            None => Ok(()),
         }
     }
 }
@@ -139,6 +171,10 @@ pub(crate) struct HoldLedger {
 struct Ledger {
     /// Limiter key -> holds of the set the SUT was granted and still holds.
     sets: HashMap<String, i64>,
+    /// The keys a release was sent for. The limiter fences a released key
+    /// against every later admit, so an admit of one answered `Admitted`
+    /// landed ahead of the release, which drops its set.
+    released_keys: HashSet<String>,
     admitted: i64,
     released: i64,
     failed_open: i64,
@@ -155,13 +191,32 @@ impl HoldLedger {
         }
     }
 
+    /// Every set granted and not released, by key, with what `store` holds
+    /// for its key.
+    fn unreleased(&self, store: Option<&CallStore>) -> Vec<UnreleasedSet> {
+        let ledger = self.inner.lock().unwrap();
+        let mut sets: Vec<UnreleasedSet> = ledger
+            .sets
+            .iter()
+            .map(|(key, holds)| UnreleasedSet {
+                key: key.clone(),
+                holds: *holds,
+                stored: store.and_then(|s| s.held_set(key)).map(|set| set.entries.len()),
+            })
+            .collect();
+        sets.sort_by(|a, b| a.key.cmp(&b.key));
+        sets
+    }
+
     fn on_admit(&self, key: &str, granted: i64, outcome: &AdmitOutcome, release_on_refusal: bool) {
         let mut ledger = self.inner.lock().unwrap();
         match outcome {
             AdmitOutcome::Admitted => {
                 ledger.released += ledger.sets.remove(key).unwrap_or(0);
                 ledger.admitted += granted;
-                if granted > 0 {
+                if ledger.released_keys.contains(key) {
+                    ledger.released += granted;
+                } else if granted > 0 {
                     ledger.sets.insert(key.to_string(), granted);
                 }
             }
@@ -178,6 +233,7 @@ impl HoldLedger {
     fn on_release(&self, key: &str) {
         let mut ledger = self.inner.lock().unwrap();
         ledger.released += ledger.sets.remove(key).unwrap_or(0);
+        ledger.released_keys.insert(key.to_string());
     }
 }
 
@@ -185,8 +241,10 @@ impl HoldLedger {
 /// answered admit: each hold granted (on [`AdmitOutcome::Admitted`]), each
 /// admit `inner` answered `Unavailable` or `NotSent` (failed open), and every
 /// hold released: at a release of the call, at the replacement of its set,
-/// and at a refusal that dropped it. An admit `inner` never answers, cut off
-/// by the worker's admit bound, records nothing. A refresh counts nothing.
+/// at a refusal that dropped it, and at once for a set granted after a
+/// release of the call left (the release drops it). An admit `inner` never
+/// answers, cut off by the worker's admit bound, records nothing. A refresh
+/// counts nothing.
 pub(crate) struct CountingLimiter {
     pub(crate) inner: Arc<dyn CallLimiter>,
     pub(crate) ledger: Arc<HoldLedger>,
@@ -244,6 +302,19 @@ impl LimiterProbe {
     /// [`B2buaSut::limiter_count`](crate::B2buaSut::limiter_count) reads.
     pub fn count(&self) -> LimiterCount {
         self.ledger.count(self.store.as_deref())
+    }
+
+    /// Every set granted and not released at this instant, by key.
+    pub fn unreleased(&self) -> Vec<UnreleasedSet> {
+        self.ledger.unreleased(self.store.as_deref())
+    }
+
+    /// Panics unless the count matches `leak`
+    /// ([`LimiterCount::assert_matches`]), a failure naming each set
+    /// granted and not released.
+    #[track_caller]
+    pub fn assert_matches(&self, leak: &LimiterLeak) {
+        self.count().assert_matches_naming(leak, &self.unreleased());
     }
 }
 
@@ -311,7 +382,7 @@ impl SutLimiter {
                 count.failed_open
             );
         }
-        count.assert_matches(leak);
+        count.assert_matches_naming(leak, &self.ledger.unreleased(self.store.as_deref()));
     }
 }
 
