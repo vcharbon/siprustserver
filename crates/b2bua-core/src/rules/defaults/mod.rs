@@ -10,6 +10,8 @@
 //!   registers in its place: one rule per `/call/failure` outcome.
 //! - `handle_481` — what a 481 ends: the dialog it answers in, when that
 //!   dialog still stands, and with it the call.
+//! - `non_invite_failure` — the failures to a PRACK or a NOTIFY that are not
+//!   relayed back: a relayed PRACK's answered 200, this stack's own absorbed.
 //! - `reaper_verdicts` — the bodies of the rules that handle the call
 //!   reaper's verdicts (ADR-0020).
 //! - `request_timeouts` — what a transaction timeout means before its INVITE
@@ -27,6 +29,7 @@ mod core_rules;
 mod failover_rules;
 mod handle_481;
 mod keepalive_failure;
+mod non_invite_failure;
 mod reaper_verdicts;
 mod request_timeouts;
 mod route_fold;

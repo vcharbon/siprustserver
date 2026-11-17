@@ -526,7 +526,7 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
         // the call as they were: report the failure to the requester, nothing
         // more. (BYE never takes this path — it is answered locally and
         // relayed by no record; the relay executor settles the record on this
-        // final. A relayed PRACK's failure is `answer-relayed-prack-failure`'s.)
+        // final.)
         rule(
             "relay-non-invite-failure",
             &["handle-481"],
@@ -538,18 +538,7 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                 }),
             |_ctx| ok(vec![RuleAction::RelayToPeer { transform: no_transform() }]),
         ),
-        // A PRACK is relayed only where it matches a reliable provisional this
-        // stack showed its sender unacknowledged, and such a PRACK MUST draw
-        // a 2xx (RFC 3262 §3): a non-2xx final to the relayed copy is
-        // answered 200 on the sender's leg, never relayed.
-        rule(
-            "answer-relayed-prack-failure",
-            &[],
-            Match::response().method("PRACK").filter(|ctx| {
-                ctx.response().is_some_and(|r| r.status() >= 300) && ctx.answers_relayed_request()
-            }),
-            |_ctx| ok(vec![RuleAction::AnswerRelayOriginator { status: 200, reason: "OK".into() }]),
-        ),
+        super::non_invite_failure::answer_relayed_prack_failure_rule(),
         // ── failure ─────────────────────────────────────────────────────────
         rule(
             "route-failure",
@@ -648,24 +637,7 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
     rules.extend([
         super::handle_481::handle_481_rule(),
         super::keepalive_failure::keepalive_dialog_terminated_rule(),
-        // A non-2xx final to a request THIS STACK originated — its own PRACK
-        // toward a responder whose provisional the originator was never shown
-        // reliably, or a REFER-progress NOTIFY — records as this stack's own,
-        // and denies one transaction or one subscription, never the
-        // dialog: a PRACK's 481 is RFC 3262 §3's ordinary answer once the
-        // responder no longer holds that provisional unacknowledged; a
-        // NOTIFY's that removes its subscription ended it before the rules
-        // (RFC 6665 §4.2.2). Nothing is owed and nothing moves. A RELAYED
-        // NOTIFY's failure is `relay-non-invite-failure`'s to relay, a relayed
-        // PRACK's `answer-relayed-prack-failure`'s.
-        rule(
-            "absorb-own-request-failure",
-            &[],
-            Match::response().methods(&["PRACK", "NOTIFY"]).filter(|ctx| {
-                ctx.response().is_some_and(|r| r.status() >= 300) && !ctx.answers_relayed_request()
-            }),
-            |_ctx| ok(vec![]),
-        ),
+        super::non_invite_failure::absorb_own_request_failure_rule(),
         // ── absorption ──────────────────────────────────────────────────────
         rule(
             "absorb-bye-200",
