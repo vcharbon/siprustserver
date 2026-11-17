@@ -5,9 +5,10 @@ it answers with actions. The call engine does the rest: SIP transactions, dialog
 retransmissions, replication. This page is the reference for a service author. Read
 [services.md](services.md) first for the overview and the worker binary.
 
-A service crate depends on two crates. `b2bua-sdk` gives the macros, the matcher, the actions
-and the context of a handler. `call` gives the types of the call model that a service names:
-`TimerKey`, `TimerType`, `Direction`, `LegState`, `LegKind`.
+A service crate depends on `b2bua-sdk` alone. `use b2bua_sdk::rules::*` gives the matcher, the
+actions, the context of a handler and the types of the call model that a service names, such as
+`TimerKey`, `TimerType`, `Direction`, `LegState` and `LegKind`. The macros are
+`b2bua_sdk::{define_service, sm_rule}`.
 
 ## One turn
 
@@ -127,7 +128,7 @@ the services in this repository are in [docs/sm/](../sm/).
 
 A service arms a timer for a delay. When the delay ends, the call gets a timer event.
 
-- **Key.** A timer has a key, `call::TimerKey`: a type and a scope. The type of a service timer
+- **Key.** A timer has a key, `TimerKey`: a type and a scope. The type of a service timer
   names the service and the timer. The scope is what the timer guards: the call, one attempt,
   or one leg. Two more scopes exist, and only the engine uses them.
 - **Arm.** `RuleAction::arm(key, TimerDelay::secs(10))`. A call holds one timer for each key.
@@ -143,7 +144,7 @@ A service arms a timer for a delay. When the delay ends, the call gets a timer e
 The type of the timer is a constant of the service:
 
 ```rust
-use call::{TimerKey, TimerType};
+use b2bua_sdk::rules::{TimerKey, TimerType};
 
 const WATCHDOG: TimerType = TimerType::service(MACHINE, "clip-watchdog");
 ```

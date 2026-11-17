@@ -7,8 +7,9 @@
 //! boundary check the `announcement` crate makes.
 
 use b2bua_sdk::rules::{
-    Effect, EffectKind, MachineId, Match, Method, RuleContext, RuleDefinition, RuleHandleResult,
-    StateLabel, SERVICE_LAYER,
+    Direction, Effect, EffectKind, LegState, MachineId, Match, Method, RuleAction, RuleContext,
+    RuleDefinition, RuleHandleResult, StateLabel, TimerKey, TimerScopeKind, TimerType,
+    SERVICE_LAYER,
 };
 use b2bua_sdk::{define_service, sm_rule};
 
@@ -38,6 +39,92 @@ mod stub {
             },
         ],
     }
+}
+
+/// A service that guards a leg with a timer of its own: armed on the callee's
+/// early answer, matched on its fire. Every name it uses comes from
+/// `b2bua_sdk::rules`.
+mod watchdog {
+    use b2bua_sdk::rules::{
+        Direction, Effect, LegState, Match, RuleAction, RuleCall, RuleContext, RuleHandleResult,
+        TimerDelay, TimerKey, TimerScopeKind, TimerType,
+    };
+    use b2bua_sdk::{define_service, sm_rule};
+
+    pub const WATCHDOG: TimerType = TimerType::service(WATCHDOG_MACHINE, "clip-watchdog");
+
+    /// The action that guards `leg_id` for 10 s.
+    pub fn arm(leg_id: &str) -> RuleAction {
+        RuleAction::arm(TimerKey::leg(WATCHDOG, leg_id), TimerDelay::secs(10))
+    }
+
+    fn on_early(ctx: &RuleContext) -> Option<RuleHandleResult> {
+        Some(RuleHandleResult::new(vec![arm(ctx.source_leg_id)]))
+    }
+
+    fn on_fire(_ctx: &RuleContext) -> Option<RuleHandleResult> {
+        None
+    }
+
+    define_service! {
+        id: "watchdog",
+        machine: WATCHDOG_MACHINE,
+        states: WatchdogState { Guarding },
+        init: |_call: &RuleCall| None,
+        rules: [
+            sm_rule! {
+                id: "watchdog-arm",
+                machine: WATCHDOG_MACHINE,
+                active: [ WatchdogState::Guarding ],
+                transitions: [],
+                effects: [
+                    Effect::GuardTimer { timer: WATCHDOG, scope: TimerScopeKind::Leg, label: "clip watchdog" },
+                ],
+                matcher: Match::response()
+                    .method("INVITE")
+                    .status_class(1)
+                    .direction(Direction::FromB)
+                    .leg_states(&[LegState::Early]),
+                handle: on_early,
+            },
+            sm_rule! {
+                id: "watchdog-fire",
+                machine: WATCHDOG_MACHINE,
+                active: [ WatchdogState::Guarding ],
+                transitions: [],
+                effects: [],
+                matcher: Match::timer().service_timers(WATCHDOG_MACHINE),
+                handle: on_fire,
+            },
+        ],
+    }
+}
+
+#[test]
+fn a_service_arms_a_leg_timer_of_its_own() {
+    let RuleAction::ScheduleTimer { key, delay } = watchdog::arm("b1") else {
+        panic!("RuleAction::arm builds a ScheduleTimer");
+    };
+    assert_eq!(
+        key,
+        TimerKey::leg(TimerType::service(MachineId::new("watchdog"), "clip-watchdog"), "b1")
+    );
+    assert_eq!(key.leg_id(), Some("b1"));
+    assert_eq!(delay.as_millis(), 10_000);
+}
+
+#[test]
+fn a_timer_rule_states_its_columns_and_declares_its_timer() {
+    let rules = watchdog::rules();
+    let arm = rules.iter().find(|r| r.id == "watchdog-arm").expect("the arm rule");
+    assert_eq!(arm.matcher.direction, Some(Direction::FromB));
+    assert_eq!(arm.matcher.leg_state, Some(vec![LegState::Early]));
+    assert!(matches!(
+        arm.effects,
+        [Effect::GuardTimer { timer, scope: TimerScopeKind::Leg, .. }] if *timer == watchdog::WATCHDOG
+    ));
+    let fire = rules.iter().find(|r| r.id == "watchdog-fire").expect("the fire rule");
+    assert_eq!(fire.matcher.timer_service, Some(MachineId::new("watchdog")));
 }
 
 #[test]

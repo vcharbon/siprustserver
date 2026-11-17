@@ -37,11 +37,11 @@
 //! (the one-hop service→global command, `BeginTermination`).
 
 use b2bua_sdk::rules::{
-    AttemptCause, AttemptOpening, Body, Effect, Match, Method, RouteAnswer, RuleAction, RuleCall,
-    RuleContext, RuleHandleResult, Terminal,
+    leg_kind, AttemptCause, AttemptOpening, Body, CdrEventType, Direction, Effect, LegEnd, LegKind,
+    LegState, Match, Method, RouteAnswer, RuleAction, RuleCall, RuleContext, RuleHandleResult,
+    Terminal, TerminationCause,
 };
 use b2bua_sdk::{define_service, sm_rule};
-use call::{CdrEventType, Direction, LegState, TerminationCause};
 use serde::Deserialize;
 
 pub mod mscml;
@@ -74,9 +74,7 @@ fn ann_data(call: &RuleCall) -> Option<AnnData> {
 fn media_leg_id(call: &RuleCall) -> Option<String> {
     call.b_legs()
         .iter()
-        .find(|l| {
-            call::helpers::leg_kind(l) == call::LegKind::Media && l.state() != LegState::Terminated
-        })
+        .find(|l| leg_kind(l) == LegKind::Media && l.state() != LegState::Terminated)
         .map(|l| l.leg_id.clone())
 }
 
@@ -230,10 +228,7 @@ fn on_media_failure(ctx: &RuleContext) -> Option<RuleHandleResult> {
         // response, so it reads `Terminated` — NOT still ringing, which
         // begin-termination would CANCEL, holding the call open for a 487 that
         // will never come.
-        RuleAction::TerminateLeg {
-            leg_id: media.clone(),
-            end: b2bua_sdk::model::LegEnd::InviteRejected,
-        },
+        RuleAction::TerminateLeg { leg_id: media.clone(), end: LegEnd::InviteRejected },
         // The caller's INVITE is still unanswered (early media only) — answer it
         // with the MRF's failure before tearing the call down (begin-termination
         // assumes the firing rule already replied to a Trying/Early a-leg).
@@ -273,7 +268,7 @@ define_service! {
                     body_override: None,
                     header_updates: vec![],
                     header_adds: vec![],
-                    kind: Some(call::LegKind::Media),
+                    kind: Some(LegKind::Media),
                     attempt: None,
                 },
             ]),

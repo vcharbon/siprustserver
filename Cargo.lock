@@ -170,7 +170,6 @@ name = "announcement"
 version = "0.1.0"
 dependencies = [
  "b2bua-sdk",
- "call",
  "serde",
  "serde_json",
  "sip-message",
