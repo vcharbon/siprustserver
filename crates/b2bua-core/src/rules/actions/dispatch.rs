@@ -140,6 +140,9 @@ impl ActionExecutor<'_> {
             RuleAction::RejectPendingReinvite { leg_id, outbound_cseq, status, reason } => {
                 self.reject_pending_reinvite(call, fx, leg_id, *outbound_cseq, *status, reason);
             }
+            RuleAction::AnswerRelayOriginator { status, reason } => {
+                self.answer_relay_originator(call, fx, ctx, *status, reason);
+            }
             RuleAction::TerminateCall { cause, by_leg } => {
                 settle(call, fx, Legs::Every, Cause::LegEnd, self.now_ms);
                 terminate_all(call, self.now_ms, *cause, by_leg.clone());

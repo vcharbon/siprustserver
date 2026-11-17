@@ -15,9 +15,10 @@
 //! A Confirmed leg BYEd at termination is not settled: its relays wait for
 //! their real finals. A discharge never settles (ADR-0022 X5): it sends
 //! nothing. A service's own answer to one named request (`AnswerHeld`,
-//! `RejectPendingReinvite`) and the platform's answer at a held request's
-//! deadline are not settlements: each answers that request through its own
-//! path.
+//! `RejectPendingReinvite`), a rule's local answer in place of a relay's
+//! final (`AnswerRelayOriginator`, through [`answer_relay`]) and the
+//! platform's answer at a held request's deadline are not settlements: each
+//! answers that request through its own path.
 
 use call::helpers::{find_leg, update_leg, RelayPeer};
 use call::{Call, CallModelState, Dialog, DialogId, RequestRecord};
@@ -139,15 +140,30 @@ fn answer_owed(call: &mut Call, fx: &mut HandlerEffects, leg_id: &str, owes: Owe
         }
     });
     for (dialog, record) in &settled {
-        let (status, reason, originator) = if record.is_held() {
-            (ENDED_HELD.0, ENDED_HELD.1, leg_id.to_string())
+        if record.is_held() {
+            let (status, reason) = ENDED_HELD;
+            answer_received(call, fx, leg_id, record, status, reason, Vec::new(), None);
         } else {
             let (status, reason) = row_of(&record.method).owed_at_leg_end;
-            (status, reason, relay_originator(call, leg_id, dialog))
-        };
-        answer_received(call, fx, &originator, record, status, reason, Vec::new(), None);
+            answer_relay(call, fx, leg_id, dialog, record, status, reason);
+        }
     }
     settled.iter().any(|(_, r)| r.is_held())
+}
+
+/// The final `status` this stack authors for the originator of `record`, a
+/// relay toward `leg_id`'s dialog `dialog`, in place of its target's answer.
+pub(super) fn answer_relay(
+    call: &Call,
+    fx: &mut HandlerEffects,
+    leg_id: &str,
+    dialog: &DialogId,
+    record: &RequestRecord,
+    status: u16,
+    reason: &str,
+) {
+    let originator = relay_originator(call, leg_id, dialog);
+    answer_received(call, fx, &originator, record, status, reason, Vec::new(), None);
 }
 
 /// The leg a relay toward `leg_id`'s dialog `dialog` came from: the one its

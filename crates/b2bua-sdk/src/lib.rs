@@ -66,6 +66,7 @@ mod request_record;
 pub mod rule_call;
 mod rule_context;
 mod rule_diagnostic;
+mod rule_handle_result;
 pub mod sdp_form;
 pub mod service;
 pub mod service_params;

@@ -526,26 +526,29 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
         // the call as they were: report the failure to the requester, nothing
         // more. (BYE never takes this path — it is answered locally and
         // relayed by no record; the relay executor settles the record on this
-        // final.)
+        // final. A relayed PRACK's failure is `answer-relayed-prack-failure`'s.)
         rule(
             "relay-non-invite-failure",
             &["handle-481"],
             Match::response()
-                .methods(&[
-                    "OPTIONS",
-                    "INFO",
-                    "PRACK",
-                    "UPDATE",
-                    "REFER",
-                    "MESSAGE",
-                    "SUBSCRIBE",
-                    "NOTIFY",
-                ])
+                .methods(&["OPTIONS", "INFO", "UPDATE", "REFER", "MESSAGE", "SUBSCRIBE", "NOTIFY"])
                 .filter(|ctx| {
                     ctx.response().is_some_and(|r| r.status() >= 300)
                         && ctx.answers_relayed_request()
                 }),
             |_ctx| ok(vec![RuleAction::RelayToPeer { transform: no_transform() }]),
+        ),
+        // A PRACK is relayed only where it matches a reliable provisional this
+        // stack showed its sender unacknowledged, and such a PRACK MUST draw
+        // a 2xx (RFC 3262 §3): a non-2xx final to the relayed copy is
+        // answered 200 on the sender's leg, never relayed.
+        rule(
+            "answer-relayed-prack-failure",
+            &[],
+            Match::response().method("PRACK").filter(|ctx| {
+                ctx.response().is_some_and(|r| r.status() >= 300) && ctx.answers_relayed_request()
+            }),
+            |_ctx| ok(vec![RuleAction::AnswerRelayOriginator { status: 200, reason: "OK".into() }]),
         ),
         // ── failure ─────────────────────────────────────────────────────────
         rule(
@@ -643,53 +646,7 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
     // ── failover resolution (/call/failure result) ──────────────────────────
     rules.extend(super::failover_rules::failover_rules());
     rules.extend([
-        // A 481 to a re-INVITE, UPDATE, INFO, MESSAGE, REFER or keepalive OPTIONS
-        // denies the dialog (RFC 3261 §12.2.1.2) and ends the call. It declines a
-        // PRACK's (RFC 3262 §3), CANCEL's (RFC 3261 §9.2), NOTIFY's (RFC 6665 §4.4.1)
-        // and BYE's (RFC 3261 §15.1.1: the dialog ends either way); a relayed one is
-        // `relay-non-invite-failure`'s and the rest `absorb-own-request-failure`'s.
-        //
-        // The 481 leg is BYEd like its peer: §12.2.1.2 ends an INVITE dialog
-        // by sending a BYE, whatever the peer answered. Its final to that BYE,
-        // a 481 as likely as a 200, resolves the leg (`resolve-bye-response`).
-        rule(
-            "handle-481",
-            &[],
-            Match::response().status_code(481).call_state(CallModelState::Active).filter(|ctx| {
-                ctx.response().is_some_and(|r| {
-                    !matches!(
-                        r.cseq().method(),
-                        Method::Prack | Method::Cancel | Method::Notify | Method::Bye
-                    )
-                })
-            }),
-            |ctx| {
-                let src = ctx.source_leg_id.to_string();
-                // A 481 to the liveness probe is the probe's failure — the
-                // peer holds no dialog to answer it in — and ends the call
-                // under the keepalive deadline; to anything else it is the
-                // peer's final denying the dialog.
-                let cause = if ctx.response().is_some_and(|r| r.cseq().method() == Method::Options)
-                {
-                    TerminationCause::Timeout(TimeoutKind::Keepalive)
-                } else {
-                    TerminationCause::RemoteFinal
-                };
-                ok(vec![
-                    RuleAction::AddCdrEvent {
-                        event_type: CdrEventType::Bye,
-                        leg_id: src.clone(),
-                        status_code: Some(481),
-                        reason: Some("Call/Transaction Does Not Exist".into()),
-                    },
-                    RuleAction::BeginTermination {
-                        reason: Some("481".into()),
-                        cause,
-                        by_leg: Some(src),
-                    },
-                ])
-            },
-        ),
+        super::handle_481::handle_481_rule(),
         super::keepalive_failure::keepalive_dialog_terminated_rule(),
         // A non-2xx final to a request THIS STACK originated — its own PRACK
         // toward a responder whose provisional the originator was never shown
@@ -699,7 +656,8 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
         // responder no longer holds that provisional unacknowledged; a
         // NOTIFY's that removes its subscription ended it before the rules
         // (RFC 6665 §4.2.2). Nothing is owed and nothing moves. A RELAYED
-        // request's failure is `relay-non-invite-failure`'s to relay.
+        // NOTIFY's failure is `relay-non-invite-failure`'s to relay, a relayed
+        // PRACK's `answer-relayed-prack-failure`'s.
         rule(
             "absorb-own-request-failure",
             &[],

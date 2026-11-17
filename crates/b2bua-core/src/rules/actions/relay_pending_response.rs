@@ -1,6 +1,7 @@
 //! Relaying a response that answers a request this stack relayed (§8.1.3.3):
 //! rebuilt from the snapshot taken as the request was relayed, so it echoes
-//! the originator's Via/From/To/CSeq.
+//! the originator's Via/From/To/CSeq; or answering its originator locally in
+//! place of that final.
 
 use call::helpers::{RecordHolder, Scope};
 use call::{Call, RSeq, RequestRecord};
@@ -209,6 +210,30 @@ impl ActionExecutor<'_> {
             self.arm_reliable_provisional_ladder(call, fx, &mut effect, &shown_tag, rseq);
         }
         fx.outbound.push(effect);
+    }
+
+    /// Answer the originator of the non-INVITE relay the current final closes
+    /// with this stack's own `status` in place of that final
+    /// ([`super::settle::answer_relay`]), and close the relay's record so no
+    /// later answer of its target is a second final (§17.2.1). Anything but a
+    /// final to a non-INVITE relay draws nothing.
+    pub(super) fn answer_relay_originator(
+        &mut self,
+        call: &mut Call,
+        fx: &mut HandlerEffects,
+        ctx: &b2bua_sdk::model::RuleContext,
+        status: u16,
+        reason: &str,
+    ) {
+        if !ctx.response().is_some_and(|r| r.status() >= 200) {
+            return;
+        }
+        let relayed =
+            ctx.resolved.record.as_deref().filter(|(_, r)| r.is_relay() && !r.is_invite());
+        let Some((holder, pending)) = relayed.cloned() else { return };
+        let leg_id = ctx.source_leg_id;
+        super::settle::answer_relay(call, fx, leg_id, holder.id(), &pending, status, reason);
+        call::helpers::close_record(call, leg_id, &holder, pending.outbound_cseq);
     }
 
     /// §8.1.3.3 / §14.1: the snapshot correlates EVERY response of the

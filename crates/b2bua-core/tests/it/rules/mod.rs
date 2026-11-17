@@ -41,6 +41,7 @@ mod create_leg_admission;
 mod decision_folds;
 mod declared_capabilities;
 mod default_sdp_create_leg;
+mod ended_dialog_481;
 mod enforce_equivalence;
 mod final_guard;
 mod fixtures;

@@ -132,6 +132,7 @@ impl RuleAction {
             | RuleAction::CancelLeg { .. }
             | RuleAction::CancelPendingReinvite { .. }
             | RuleAction::RejectPendingReinvite { .. }
+            | RuleAction::AnswerRelayOriginator { .. }
             | RuleAction::TerminateLeg { .. }
             | RuleAction::SendRequestToLeg { .. }
             | RuleAction::SendProvisionalToLeg { .. }

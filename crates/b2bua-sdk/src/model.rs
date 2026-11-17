@@ -19,6 +19,7 @@ use crate::relayed_final::RelayedFinal;
 pub use crate::rule_call::RuleCall;
 pub use crate::rule_context::RuleContext;
 pub use crate::rule_diagnostic::RuleDiagnostic;
+pub use crate::rule_handle_result::RuleHandleResult;
 pub use crate::timer_delay::TimerDelay;
 
 pub const CORE_LAYER: u8 = 0;
@@ -91,32 +92,6 @@ impl RuleDefinition {
     /// a spent ledger entry, or reap a wedged teardown.
     pub fn runs_while_terminating(mut self) -> Self {
         self.teardown = true;
-        self
-    }
-}
-
-/// What a rule emits when it handles an event.
-#[derive(Debug, Clone, Default)]
-pub struct RuleHandleResult {
-    pub actions: Vec<RuleAction>,
-    /// Inputs this rule refused to read. Carried alongside the actions rather
-    /// than in place of them: a rule reports the defect **and** emits the
-    /// refusal it owns. The engine logs and counts these; they emit no wire
-    /// traffic of their own, so a rule can never route on one.
-    pub diagnostics: Vec<RuleDiagnostic>,
-    /// The call's record does not rebuild the caller's INVITE the rule read.
-    pub unrecoverable: bool,
-}
-
-impl RuleHandleResult {
-    pub fn new(actions: Vec<RuleAction>) -> Self {
-        Self { actions, diagnostics: Vec::new(), unrecoverable: false }
-    }
-
-    /// The same actions, carrying `diagnostic` — what a rule returns when an
-    /// input did not read and the actions are its refusal.
-    pub fn with_diagnostic(mut self, diagnostic: RuleDiagnostic) -> Self {
-        self.diagnostics.push(diagnostic);
         self
     }
 }
@@ -288,6 +263,14 @@ pub enum RuleAction {
     RejectPendingReinvite {
         leg_id: String,
         outbound_cseq: i64,
+        status: u16,
+        reason: String,
+    },
+    /// Answer the originator of the non-INVITE relay the current final
+    /// closes with the locally authored `status` final in place of relaying
+    /// that final, as a leg's end answers a relay toward it; the relay's
+    /// record closes. Draws nothing on any other event.
+    AnswerRelayOriginator {
         status: u16,
         reason: String,
     },
