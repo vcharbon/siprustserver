@@ -92,10 +92,20 @@ async fn a_backend_past_the_cap_closes_the_connection_and_is_a_stall() {
     );
 }
 
+/// A loopback address every connection to is refused: the socket bound there
+/// never listens and holds the port while it lives, so no other listener can
+/// take it.
+fn refusing_addr() -> (tokio::net::TcpSocket, SocketAddr) {
+    let socket = tokio::net::TcpSocket::new_v4().unwrap();
+    socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+    let addr = socket.local_addr().unwrap();
+    (socket, addr)
+}
+
 #[tokio::test(start_paused = true)]
 async fn a_gone_backend_is_an_external_failure() {
     let side = RealSide::new(ClockMode::Paused, Duration::from_millis(500));
-    let gone = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap();
+    let (_held, gone) = refusing_addr();
     let (net, _h) = fabric(&side, gone).await;
     let err = net.request(SIM_ADDR.parse().unwrap(), HttpRequest::get("/0")).await.unwrap_err();
     assert_eq!(err.cause, FailureCause::Eof);
