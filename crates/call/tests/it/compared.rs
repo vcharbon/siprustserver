@@ -200,6 +200,14 @@ fn a_re_acked_copy_is_exempt_and_merges_to_the_later() {
     assert_eq!(read(&merge_exempt(container.clone(), &other)), later, "the container's later");
     assert_eq!(read(&merge_exempt(other.clone(), &container)), later, "the other's later");
     assert_eq!(read(&merge_exempt(before.clone(), &other)), read(&other), "one copy's only");
+
+    let mut late_low = call();
+    re_acked(&mut late_low, 3, 40_000);
+    let mut early_high = call();
+    re_acked(&mut early_high, 11, 39_000);
+    let latest = Some(ReAckedCopy { copy: 3, at_ms: 40_000 });
+    assert_eq!(read(&merge_exempt(late_low.clone(), &early_high)), latest, "the later arrival");
+    assert_eq!(read(&merge_exempt(early_high, &late_low)), latest, "over the higher copy");
 }
 
 /// The merge takes the container whole and the other copy's exempt fields:

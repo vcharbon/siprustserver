@@ -12,8 +12,9 @@
 //! on a re-INVITE's 2xx in each direction, and on a fork straggler's 2xx.
 //!
 //! The spaced answerers never see an ACK (each is lost): one re-sends on this
-//! stack's own schedule, one on the schedule of a larger T1 (§17.1.1.1) past
-//! the count, and every copy draws its re-ACK.
+//! stack's own schedule, then past the count just within and at T1 of the last
+//! re-ACK; one on the schedule of a larger T1 (§17.1.1.1) past the count. Every
+//! copy on a schedule draws its re-ACK, and past the count only one T1 apart.
 //!
 //! Each round sends one copy, then reads after a settled advance of a few
 //! transits: the verdict depends on no in-order draining of the paused runtime.
@@ -41,6 +42,10 @@ const TRANSIT_MS: u64 = 1;
 /// The settled advance after each copy: the copy's hop, the re-ACK's hop, and
 /// slack for the SUT's turn.
 const ROUND_MS: u64 = 5;
+/// This stack's T1 (RFC 3261 §17.1.1.1).
+const T1: Duration = Duration::from_millis(500);
+/// The step just short of a threshold.
+const ONE_MS: Duration = Duration::from_millis(1);
 /// The test's own bound on the ping-pong: a SUT that never stops re-ACKing
 /// ends the loop here, never the wall clock.
 const ROUNDS: usize = 1000;
@@ -149,6 +154,24 @@ async fn ping_pong(
     PingPong { copies, re_acks: acks.len(), others }
 }
 
+/// Plays an answerer that never sees an ACK: re-sends `uas`'s 2xx with
+/// `answer` at `due` and returns the ACKs the SUT at `b2bua` sent it for that
+/// copy.
+async fn copy_at(
+    h: &Harness,
+    b2bua: SocketAddr,
+    answerer: &Agent,
+    uas: &mut ServerTxn,
+    (answer, due): (&str, tokio::time::Instant),
+) -> usize {
+    h.advance(due.saturating_duration_since(tokio::time::Instant::now())).await;
+    let before = h.wire_entries().len();
+    send_copy(uas, answer, None).await;
+    h.advance(Duration::from_millis(ROUND_MS)).await;
+    answerer.drain().await;
+    acks_to(h, b2bua, answerer.addr(), before)
+}
+
 /// Plays a spaced answerer that never sees an ACK: re-sends `uas`'s 2xx with
 /// `answer` at each offset of `schedule_ms` after `sent` and asserts that each
 /// copy draws exactly one re-ACK from the SUT at `b2bua` and that the SUT
@@ -164,13 +187,8 @@ async fn spaced_copies(
     let start = h.wire_entries().len();
     for (n, offset) in schedule_ms.iter().enumerate() {
         let due = sent + Duration::from_millis(*offset);
-        h.advance(due.saturating_duration_since(tokio::time::Instant::now())).await;
-        let before = h.wire_entries().len();
-        send_copy(uas, answer, None).await;
-        h.advance(Duration::from_millis(ROUND_MS)).await;
-        answerer.drain().await;
         assert_eq!(
-            acks_to(h, b2bua, answerer.addr(), before),
+            copy_at(h, b2bua, answerer, uas, (answer, due)).await,
             1,
             "copy {} at {offset} ms draws its re-ACK (RFC 3261 §13.2.2.4)",
             n + 1,
@@ -317,7 +335,8 @@ async fn a_fork_stragglers_2xx_repeated_on_every_ack_draws_bounded_re_acks() {
 
 /// The callee re-sends its 200 on this stack's own schedule, every ACK lost:
 /// each of the ten copies draws its re-ACK; an eleventh, at ping-pong pace
-/// right after the tenth, draws none and is counted.
+/// right after the tenth, draws none and is counted; a twelfth T1 − 1 ms after
+/// the tenth draws none either, a thirteenth T1 after it draws one (§17.1.1.1).
 #[tokio::test(start_paused = true)]
 async fn a_2xx_resent_on_the_rfc_schedule_draws_a_re_ack_per_copy() {
     let h = Harness::with_transit_delay("b2bua-reack-own-schedule", TRANSIT_MS);
@@ -348,6 +367,14 @@ async fn a_2xx_resent_on_the_rfc_schedule_draws_a_re_ack_per_copy() {
     bob.drain().await;
     assert_eq!(acks_to(&h, b2bua.addr, bob.addr(), before), 0, "the eleventh copy is absorbed");
     assert_eq!(b2bua.metrics().copies_past_schedule_total(), 1, "the absorbed copy is counted");
+
+    let tenth = sent + Duration::from_millis(OWN_SCHEDULE_MS[COMPLIANT_COPIES - 1]);
+    let early = copy_at(&h, b2bua.addr, &bob, &mut uas, (ANSWER, tenth + T1 - ONE_MS)).await;
+    assert_eq!(early, 0, "a copy past the count within T1 of the last re-ACK is absorbed");
+    assert_eq!(b2bua.metrics().copies_past_schedule_total(), 2, "the early copy is counted");
+    let spaced = copy_at(&h, b2bua.addr, &bob, &mut uas, (ANSWER, tenth + T1)).await;
+    assert_eq!(spaced, 1, "a copy past the count T1 after the last re-ACK draws its re-ACK");
+    assert_eq!(b2bua.metrics().copies_past_schedule_total(), 2, "the re-ACKed copy is not counted");
 
     hang_up(h, &b2bua, &bob, &mut dialog).await;
 }

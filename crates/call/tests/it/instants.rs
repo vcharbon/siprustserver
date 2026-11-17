@@ -10,8 +10,9 @@ use serde_json::Value;
 use crate::common::representative_call;
 
 /// The representative call with every instant-bearing slice the fixture leaves
-/// empty filled in: a transfer, a termination, an own NOTIFY and a message
-/// ring entry on each leg.
+/// empty filled in: a transfer, a termination, an own NOTIFY, the last
+/// re-ACKed 2xx copy of the INVITE a dialog sent and a message ring entry on
+/// each leg.
 fn every_instant_present() -> Call {
     let mut call = representative_call();
     call.transfer = Some(TransferState {
@@ -39,6 +40,9 @@ fn every_instant_present() -> Call {
             notify: Some(NotifyInFlight { cseq: 9000, sent_at_ms: 1_779_440_065_000 }),
             ..Subscription::new("refer", None)
         }];
+        if let Some(x) = call::helpers::sent_exchange_mut(dialog) {
+            x.re_acked_copy = Some(ReAckedCopy { copy: 11, at_ms: 1_779_440_066_000 });
+        }
         leg.messages.entries.push(MessageEntry {
             seq: 1,
             at_ms: 1_779_440_042_005,
