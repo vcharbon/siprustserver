@@ -9,6 +9,7 @@ the cap tables and each section's long form are in the
 
 Amends ADR-0020 X6 (a trip is a strike; the reaper's verdict turns run with the collection caps
 off; strikes are pruned at the call's release) and ADR-0051 (two more site sets in the ratchet).
+Amended by ADR-0063 (§4: a mute; §10: every reactive re-send).
 
 ## Context
 
@@ -97,7 +98,6 @@ larger T1 spaces them (§17.1.1.1). Any other copy is absorbed, a quiet turn on 
 and counts on `b2bua_2xx_copies_past_schedule_total`. The count and the last re-ACK are on the
 INVITE's record, exempt from the comparison (ADR-0055 §7), and a re-anchor moves the last
 re-ACK's instant; a takeover copy may count again.
-Extended to every reactive re-send, with a per-Call-ID message budget behind it: ADR-0063.
 
 ## Consequences
 
