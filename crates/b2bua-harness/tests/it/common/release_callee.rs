@@ -9,8 +9,11 @@ use b2bua::{define_service, sm_rule};
 use call::{TimerKey, TimerType};
 use sip_message::Method;
 
-/// The release deadline, in seconds from the call's start.
-pub const AT_SEC: i64 = 10;
+/// The release deadline, in seconds from the call's start: past the 32 s a
+/// non-INVITE server transaction answered at the start holds its final
+/// (Timer J, RFC 3261 §17.2.2), so anything the release sends on it reaches
+/// the wire.
+pub const AT_SEC: i64 = 40;
 const DEADLINE: TimerType = TimerType::service(RELEASE, "deadline");
 
 define_service! {

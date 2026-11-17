@@ -81,8 +81,10 @@ async fn a_481_from_a_released_leg_leaves_the_caller_up() {
     let mut dialog = call.ack().await;
     bob.receive("ACK").await;
 
+    let half_way = Duration::from_secs(release::AT_SEC as u64 / 2);
+    h.advance(half_way).await;
     let mut info = dialog.send_request(InDialogMethod::Info).send().await;
-    h.advance(Duration::from_secs(release::AT_SEC as u64) + Duration::from_millis(300)).await;
+    h.advance(half_way + Duration::from_millis(300)).await;
     bob.receive("BYE").await.respond(200, "OK").await;
     info.expect(487).await;
 
