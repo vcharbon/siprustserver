@@ -376,13 +376,9 @@ async fn refer_allow_full_a_glare_reinvite() {
 }
 
 // ── 4. A BYEs while its a-realign re-INVITE is outstanding → teardown ────
-//
-// We drive the BYE explicitly between advances and tolerate the CANCEL the
-// B2BUA may emit for the in-flight re-INVITE; the assertion that B+C are BYE'd
-// is NOT relaxed. A BYE during a-realigning rides
-// the CORE `relay-bye` path: 200 to A, then begin-termination BYEs B and C —
-// no dedicated transfer rule is involved.
 
+/// A BYE during a-realigning rides the CORE `relay-bye` path: 200 to A, then
+/// begin-termination BYEs B and C; no dedicated transfer rule is involved.
 #[tokio::test]
 async fn refer_allow_full_a_bye_during_a_realign() {
     let h = Harness::with_transit_delay("refer-allow-full-a-bye-during-a-realign", 1);

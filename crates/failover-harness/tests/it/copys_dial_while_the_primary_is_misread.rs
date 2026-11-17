@@ -106,6 +106,14 @@ impl Misread {
         ports.extend(self.senders("BYE sip:charlie@"));
         ports
     }
+
+    /// The workers that released the referrer, each once.
+    fn referrer_releasers(&self) -> Vec<u16> {
+        let mut ports = self.senders("BYE sip:bob@");
+        ports.sort_unstable();
+        ports.dedup();
+        ports
+    }
 }
 
 async fn transfer_target_rings_during_the_misread(name: &str) -> Misread {
@@ -212,6 +220,11 @@ async fn a_dial_made_during_the_misread_is_answered_at_the_primary_after_the_fli
         "the primary ACKs the target's 2xx: {acks:?}"
     );
     assert!(m.call_enders().is_empty(), "no node ends the call on evidence");
+    assert_eq!(
+        m.referrer_releasers(),
+        vec![m.primary_port()],
+        "the primary, which completed the transfer, alone releases the referrer"
+    );
     hang_up_and_settle(m, name).await;
 }
 
@@ -233,5 +246,10 @@ async fn a_dial_answered_during_the_misread_leaves_no_invite_open_at_the_primary
         .collect();
     assert!(late.is_empty(), "no INVITE of the dial leaves the primary after its ACK: {late:?}");
     assert!(m.call_enders().is_empty(), "the call lives on past the INVITE's bound");
+    assert_eq!(
+        m.referrer_releasers(),
+        vec![m.copy_port()],
+        "the copy, which completed the transfer, alone releases the referrer"
+    );
     hang_up_and_settle(m, name).await;
 }

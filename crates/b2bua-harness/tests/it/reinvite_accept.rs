@@ -123,10 +123,10 @@ async fn transfer_stating(
     reinvite_supported.extend(supported(a_realign.request()));
     a_realign.respond(200, "OK").with_sdp(ALICE_REALIGN_ANSWER).await;
     alice.receive("ACK").await;
+    bob.receive("BYE").await.respond(200, "OK").await;
 
     let mut alice_bye = alice_dialog.bye().await;
     charlie.receive("BYE").await.respond(200, "OK").await;
-    bob.receive("BYE").await.respond(200, "OK").await;
     alice_bye.expect(200).await;
 
     settle_until(|| b2bua.is_reaped()).await;

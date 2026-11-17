@@ -135,10 +135,10 @@ pub(super) fn overall_timeout() -> RuleDefinition {
     }
 }
 
-/// transfer-referrer-bye — referrer B's BYE during realigning. B was told the
-/// transfer succeeded (NOTIFY sipfrag 200) and is no longer a party of the
-/// session (RFC 5589 §6.1): its BYE is answered 200 and ends B's leg alone;
-/// the transfer goes on to merge A↔C.
+/// transfer-referrer-bye — referrer B's BYE during realigning. C has answered
+/// and the success NOTIFY (sipfrag 200) is issued, so B is no longer a party
+/// of the session (RFC 5589 §6.1): its BYE is answered 200 and ends B's leg
+/// alone; the transfer goes on to merge A↔C.
 pub(super) fn referrer_bye_in_realign() -> RuleDefinition {
     sm_rule! {
         id: "transfer-referrer-bye",

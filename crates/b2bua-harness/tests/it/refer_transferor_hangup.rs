@@ -7,6 +7,7 @@
 //! crossing that release is answered 200 (RFC 3261 §15.1.2).
 
 use b2bua_harness::{settle_until, B2buaSut};
+use call::CdrEventType;
 
 use scenario_harness::{Agent, Dialog, Harness, ServerTxn};
 use sip_message::generators::InDialogMethod;
@@ -102,26 +103,63 @@ async fn bridge(t: &mut Transferred) {
     t.alice.receive("ACK").await;
 }
 
-/// C hangs up the transferred call: the BYE reaches A, the call ends.
-async fn charlie_hangs_up(mut t: Transferred) {
+/// C hangs up the transferred call: the BYE reaches A, the call ends. Returns
+/// the reaped stack, its CDR readable.
+async fn charlie_hangs_up(mut t: Transferred) -> B2buaSut {
     let mut charlie_bye = t.charlie_dialog.bye().await;
     t.alice.receive("BYE").await.respond(200, "OK").await;
     charlie_bye.expect(200).await;
     settle_until(|| t.b2bua.is_reaped()).await;
     t.b2bua.assert_fully_reaped();
-    let _ = t.alice_dialog;
     let _ = t.h.finish().await;
+    t.b2bua
+}
+
+/// The call's CDR events, as `(type, leg)` in the order written.
+fn cdr_events(b2bua: &B2buaSut) -> Vec<(CdrEventType, String)> {
+    b2bua
+        .cdr_records()
+        .iter()
+        .flat_map(|r| r.events.iter().map(|e| (e.event_type, e.leg_id.clone())))
+        .collect()
 }
 
 #[tokio::test]
 async fn the_transferor_hanging_up_on_the_success_notify_leaves_the_transferred_call_up() {
     let mut t = transfer_reported_to_bob("transferor-bye-on-success-notify", 4861, 4871).await;
+    let bob_leg = "b-1".to_string();
 
     let mut bob_bye = t.bob_dialog.bye().await;
     bob_bye.expect(200).await;
 
     bridge(&mut t).await;
-    charlie_hangs_up(t).await;
+    let b2bua = charlie_hangs_up(t).await;
+    let events = cdr_events(&b2bua);
+    let byes_of_bob: Vec<usize> =
+        (0..events.len()).filter(|&i| events[i] == (CdrEventType::Bye, bob_leg.clone())).collect();
+    let transfer_answered = events.iter().position(|e| *e == (CdrEventType::Answer, "a".into()));
+    assert_eq!(byes_of_bob.len(), 1, "B's own hangup is written once: {events:?}");
+    assert!(
+        transfer_answered.is_some_and(|at| byes_of_bob[0] < at),
+        "B's hangup is written before the transfer completes: {events:?}"
+    );
+}
+
+/// C hangs up while the stack re-INVITEs it onto A's session: the transfer
+/// target is gone, so the call ends and A and B are BYE'd.
+#[tokio::test]
+async fn the_transfer_targets_bye_while_realigned_ends_the_call() {
+    let mut t = transfer_reported_to_bob("transfer-target-bye-during-c-realign", 4865, 4875).await;
+
+    let mut charlie_bye = t.charlie_dialog.bye().await;
+    charlie_bye.expect(200).await;
+    t.alice.receive("BYE").await.respond(200, "OK").await;
+    t.bob.receive("BYE").await.respond(200, "OK").await;
+    let _ = &mut t.c_realign;
+
+    settle_until(|| t.b2bua.is_reaped()).await;
+    t.b2bua.assert_fully_reaped();
+    let _ = t.h.finish().await;
 }
 
 #[tokio::test]
