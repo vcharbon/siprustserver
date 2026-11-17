@@ -6,8 +6,9 @@
      retransmitted anyway, and this peer's SIPp absorbs those copies): any
      other response, a 200 answering the copy as a new INVITE above all, fails
      the call. Then it ACKs and ends the call. The 1 s wait ends midway
-     between the 200's retransmissions (T1 doubling: 0.5 s, 1.5 s), so none
-     crosses the ACK into the pause, where it would abort the call. -->
+     between the 200's retransmissions (T1 doubling: 0.5 s, 1.5 s); one that
+     still crosses the ACK is absorbed until 300 ms pass without a copy, then
+     the BYE goes. -->
 <scenario name="peer uac: an INVITE copy after the 200">
   <send retrans="500">
     <![CDATA[
@@ -82,7 +83,9 @@
       Content-Length: 0
     ]]>
   </send>
-  <pause milliseconds="300"/>
+  <label id="settle"/>
+  <recv response="200" timeout="300" ontimeout="bye" next="settle"/>
+  <label id="bye"/>
   <send retrans="500">
     <![CDATA[
       BYE [next_url] SIP/2.0
