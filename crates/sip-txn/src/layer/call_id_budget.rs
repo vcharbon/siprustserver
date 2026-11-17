@@ -1,9 +1,11 @@
 //! The message budget of each Call-ID (ADR-0063 §3, §4): how many datagrams
 //! the layer received and sent under it, the mute a Call-ID past its budget
-//! is under, and what its trip reports. The map is bounded; a muted entry is
-//! never evicted. Node-local: every ownership move counts from zero (§5).
+//! is under, and what its trip reports. The map is bounded: a Call-ID new to
+//! a full map takes the place of an idle entry, and an entry that is muted or
+//! counts a resident transaction is never evicted. Node-local: every
+//! ownership move counts from zero (§5).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::time::Duration;
 
 use tokio::time::Instant;
@@ -27,8 +29,10 @@ pub struct CallIdBudget {
     /// The datagrams one Call-ID may carry, received and sent together; the
     /// one past it trips the budget. At least 1.
     pub messages: u64,
-    /// The Call-IDs counted at once. A new Call-ID evicts an unmuted entry
-    /// when the map is full, and goes uncounted when every entry is muted.
+    /// The Call-IDs counted at once. A datagram of a Call-ID new to a full
+    /// map takes the place of the entry that went idle first (no resident
+    /// transaction, not muted), and goes uncounted when none is idle. A
+    /// Call-ID with a resident transaction is always counted, past the bound.
     pub entries: usize,
 }
 
@@ -66,6 +70,9 @@ struct Entry {
     /// The instant of the last message the mute dropped; `None` while the
     /// Call-ID is not muted.
     last_drop: Option<Instant>,
+    /// The ticket of the entry's place in [`IdleQueue`]: `Some` exactly while
+    /// no transaction of the Call-ID is resident and it is not muted.
+    queued: Option<u64>,
 }
 
 impl Entry {
@@ -77,6 +84,7 @@ impl Entry {
             caller_tags: Vec::new(),
             call_refs: Vec::new(),
             last_drop: None,
+            queued: None,
         }
     }
 
@@ -87,6 +95,11 @@ impl Entry {
         let last = self.last_drop.unwrap_or(self.last_message);
         self.txns == 0 && now.saturating_duration_since(last) >= WINDOW
     }
+
+    /// Whether the entry may give its place to another Call-ID.
+    fn idle(&self) -> bool {
+        self.txns == 0 && self.last_drop.is_none()
+    }
 }
 
 /// Record `item` in `list` unless it holds it already or is full.
@@ -96,24 +109,38 @@ fn note(list: &mut Vec<String>, item: &str) {
     }
 }
 
-/// The counts of the Call-IDs the layer carries.
-pub(super) struct Budgets {
-    budget: CallIdBudget,
-    entries: HashMap<String, Entry>,
-    muted: usize,
+/// The idle entries in the order they went idle, each named with the ticket
+/// its entry held then. An item whose entry is gone or holds another ticket
+/// is stale: skipped when popped, dropped by the sweep.
+#[derive(Default)]
+struct IdleQueue {
+    items: VecDeque<(String, u64)>,
+    next_ticket: u64,
 }
 
-impl Budgets {
-    pub(super) fn new(budget: CallIdBudget) -> Self {
-        Self { budget, entries: HashMap::new(), muted: 0 }
+impl IdleQueue {
+    /// Queue `entry` of `call_id` if it went idle and is not queued yet.
+    fn enqueue(&mut self, call_id: &str, entry: &mut Entry) {
+        if entry.idle() && entry.queued.is_none() {
+            entry.queued = Some(self.next_ticket);
+            self.items.push_back((call_id.to_string(), self.next_ticket));
+            self.next_ticket += 1;
+        }
     }
+}
 
-    /// Count one datagram under `call_id` at `now`. A muted Call-ID drops it
-    /// and its mute runs 64·T1 from it; the datagram past the budget mutes
-    /// its Call-ID and is dropped. A lapsed entry counts afresh.
-    pub(super) fn admit(&mut self, call_id: &str, now: Instant) -> Admission {
-        let budget = self.budget.messages;
-        let Some(entry) = self.entry(call_id, now) else { return Admission::Uncounted };
+/// What the map keeps beside its entries, borrowed apart from them.
+#[derive(Default)]
+struct Books {
+    muted: usize,
+    idle: IdleQueue,
+}
+
+impl Books {
+    /// Count one datagram on `entry` of `call_id` at `now` against
+    /// `budget`, a lapsed entry counting afresh.
+    fn count(&mut self, call_id: &str, entry: &mut Entry, budget: u64, now: Instant) -> Admission {
+        self.renew_lapsed(call_id, entry, now);
         if entry.last_drop.is_some() {
             entry.last_drop = Some(now);
             return Admission::Muted;
@@ -124,21 +151,64 @@ impl Budgets {
             return Admission::Counted;
         }
         entry.last_drop = Some(now);
-        let trip = CallIdBudgetTrip {
+        entry.queued = None;
+        self.muted += 1;
+        Admission::Tripped(CallIdBudgetTrip {
             call_id: call_id.to_string(),
             caller_tags: entry.caller_tags.clone(),
             call_refs: entry.call_refs.clone(),
-        };
-        self.muted += 1;
-        Admission::Tripped(trip)
+        })
+    }
+
+    /// Start `entry` of `call_id` afresh if it lapsed at `now`, lifting its
+    /// mute.
+    fn renew_lapsed(&mut self, call_id: &str, entry: &mut Entry, now: Instant) {
+        if !entry.lapsed(now) {
+            return;
+        }
+        if entry.last_drop.is_some() {
+            self.muted -= 1;
+        }
+        *entry = Entry { queued: entry.queued, ..Entry::new(now) };
+        self.idle.enqueue(call_id, entry);
+    }
+}
+
+/// The counts of the Call-IDs the layer carries.
+pub(super) struct Budgets {
+    budget: CallIdBudget,
+    entries: HashMap<String, Entry>,
+    books: Books,
+}
+
+impl Budgets {
+    pub(super) fn new(budget: CallIdBudget) -> Self {
+        Self { budget, entries: HashMap::new(), books: Books::default() }
+    }
+
+    /// Count one datagram under `call_id` at `now`. A muted Call-ID drops it
+    /// and its mute runs 64·T1 from it; the datagram past the budget mutes
+    /// its Call-ID and is dropped. A lapsed entry counts afresh.
+    pub(super) fn admit(&mut self, call_id: &str, now: Instant) -> Admission {
+        let budget = self.budget.messages;
+        if let Some(entry) = self.entries.get_mut(call_id) {
+            return self.books.count(call_id, entry, budget, now);
+        }
+        if !self.make_room() {
+            return Admission::Uncounted;
+        }
+        let mut entry = Entry::new(now);
+        self.books.idle.enqueue(call_id, &mut entry);
+        let admission = self.books.count(call_id, &mut entry, budget, now);
+        self.entries.insert(call_id.to_string(), entry);
+        admission
     }
 
     /// Whether `call_id` is muted at `now`, for a datagram outside the
     /// count: one it drops restarts the mute's 64·T1.
     pub(super) fn drops(&mut self, call_id: &str, now: Instant) -> bool {
-        self.forget_lapsed(call_id, now);
         match self.entries.get_mut(call_id) {
-            Some(entry) if entry.last_drop.is_some() => {
+            Some(entry) if entry.last_drop.is_some() && !entry.lapsed(now) => {
                 entry.last_drop = Some(now);
                 true
             }
@@ -146,31 +216,10 @@ impl Budgets {
         }
     }
 
-    /// `call_id`'s entry at `now`: a lapsed one replaced by a fresh one, one
-    /// made where there is room; `None` when every entry of the full map is
-    /// muted.
-    fn entry(&mut self, call_id: &str, now: Instant) -> Option<&mut Entry> {
-        self.forget_lapsed(call_id, now);
-        if !self.entries.contains_key(call_id) {
-            if !self.make_room() {
-                return None;
-            }
-            self.entries.insert(call_id.to_string(), Entry::new(now));
-        }
-        self.entries.get_mut(call_id)
-    }
-
-    /// Drop `call_id`'s entry if it lapsed at `now`, lifting its mute.
-    fn forget_lapsed(&mut self, call_id: &str, now: Instant) {
-        if self.entries.get(call_id).is_some_and(|e| e.lapsed(now)) {
-            self.remove(call_id);
-        }
-    }
-
     /// A transaction of `call_id` entered the layer at `now`: attributed to
     /// `call_ref`, and opened by a tagless INVITE from `caller_tag`, when
-    /// they are known. The entry lives while it does; with no room for an
-    /// entry, the Call-ID goes untracked.
+    /// they are known. The entry lives while it does, made past the bound
+    /// when the map is full.
     pub(super) fn opened(
         &mut self,
         call_id: &str,
@@ -178,24 +227,31 @@ impl Budgets {
         caller_tag: Option<&str>,
         now: Instant,
     ) {
-        let Some(entry) = self.entry(call_id, now) else { return };
-        entry.txns = entry.txns.saturating_add(1);
-        if let Some(call_ref) = call_ref {
-            note(&mut entry.call_refs, call_ref);
-        }
-        if let Some(tag) = caller_tag {
-            note(&mut entry.caller_tags, tag);
-        }
-    }
-
-    /// A transaction of `call_id` left the layer.
-    pub(super) fn closed(&mut self, call_id: &str) {
         if let Some(entry) = self.entries.get_mut(call_id) {
-            entry.txns = entry.txns.saturating_sub(1);
+            self.books.renew_lapsed(call_id, entry, now);
+            open(entry, call_ref, caller_tag);
+            return;
         }
+        let mut entry = Entry::new(now);
+        open(&mut entry, call_ref, caller_tag);
+        self.entries.insert(call_id.to_string(), entry);
     }
 
-    /// Drop every entry lapsed at `now`, lifting the mutes among them.
+    /// A transaction of `call_id`, [`opened`](Self::opened) before, left the
+    /// layer.
+    pub(super) fn closed(&mut self, call_id: &str) {
+        let entry = self.entries.get_mut(call_id);
+        debug_assert!(
+            entry.as_ref().is_some_and(|e| e.txns > 0),
+            "a transaction closed under a Call-ID counting none"
+        );
+        let Some(entry) = entry else { return };
+        entry.txns = entry.txns.saturating_sub(1);
+        self.books.idle.enqueue(call_id, entry);
+    }
+
+    /// Drop every entry lapsed at `now`, lifting the mutes among them, and
+    /// the stale items of the idle queue.
     pub(super) fn expire(&mut self, now: Instant) {
         let before = self.entries.len();
         let mut lifted = 0;
@@ -206,33 +262,49 @@ impl Budgets {
             }
             !lapsed
         });
-        self.muted -= lifted;
+        self.books.muted -= lifted;
         if self.entries.len() < before {
             super::shrink::shrink_idle(&mut self.entries);
         }
+        let entries = &self.entries;
+        let items = &mut self.books.idle.items;
+        items.retain(|(call_id, ticket)| holds_ticket(entries, call_id, *ticket));
+        super::shrink::shrink_idle_queue(items);
     }
 
-    fn remove(&mut self, call_id: &str) {
-        if let Some(entry) = self.entries.remove(call_id) {
-            if entry.last_drop.is_some() {
-                self.muted -= 1;
-            }
-        }
-    }
-
-    /// Room for one more entry: below the bound, or an unmuted entry
-    /// evicted. `false` when every entry is muted.
+    /// Room for one more entry: below the bound, or the entry that went
+    /// idle first evicted. `false` when no entry is idle; a lapsed mute
+    /// frees its place at the next [`expire`](Self::expire).
     fn make_room(&mut self) -> bool {
         if self.entries.len() < self.budget.entries {
             return true;
         }
-        if self.muted >= self.entries.len() {
-            return false;
+        while let Some((call_id, ticket)) = self.books.idle.items.pop_front() {
+            if holds_ticket(&self.entries, &call_id, ticket) {
+                self.entries.remove(&call_id);
+                return true;
+            }
         }
-        let evicted =
-            self.entries.iter().find(|(_, e)| e.last_drop.is_none()).map(|(k, _)| k.clone());
-        evicted.is_some_and(|call_id| self.entries.remove(&call_id).is_some())
+        false
     }
+}
+
+/// Count a transaction opened by a tagless INVITE from `caller_tag`, of
+/// `call_ref`, on `entry`.
+fn open(entry: &mut Entry, call_ref: Option<&str>, caller_tag: Option<&str>) {
+    entry.txns = entry.txns.saturating_add(1);
+    entry.queued = None;
+    if let Some(call_ref) = call_ref {
+        note(&mut entry.call_refs, call_ref);
+    }
+    if let Some(tag) = caller_tag {
+        note(&mut entry.caller_tags, tag);
+    }
+}
+
+/// Whether `call_id`'s entry still holds the idle queue's `ticket`.
+fn holds_ticket(entries: &HashMap<String, Entry>, call_id: &str, ticket: u64) -> bool {
+    entries.get(call_id).is_some_and(|e| e.queued == Some(ticket))
 }
 
 #[cfg(test)]

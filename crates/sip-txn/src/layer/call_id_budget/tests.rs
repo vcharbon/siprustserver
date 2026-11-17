@@ -147,3 +147,23 @@ fn a_full_map_evicts_the_count_that_went_idle_first() {
     assert_eq!(b.admit("recent", t0 + Duration::from_secs(2)), Admission::Counted);
     tripped(b.admit("recent", t0 + Duration::from_secs(2)));
 }
+
+#[test]
+fn a_count_back_to_idle_queues_behind_the_counts_idle_before_it() {
+    let t0 = Instant::now();
+    let mut b = budgets(2, 2);
+    b.admit("first", t0);
+    b.admit("second", t0);
+    b.opened("first", None, None, t0);
+    b.closed("first");
+    assert_eq!(b.admit("new", t0), Admission::Counted, "\"second\" gave its place");
+    assert_eq!(b.admit("first", t0), Admission::Counted);
+    tripped(b.admit("first", t0));
+}
+
+#[test]
+#[cfg(debug_assertions)]
+#[should_panic(expected = "a transaction closed under a Call-ID counting none")]
+fn closing_a_transaction_never_opened_is_a_defect() {
+    budgets(1, 16).closed("c1");
+}
