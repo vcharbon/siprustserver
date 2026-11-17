@@ -70,6 +70,16 @@ fn invite_2xx_on(dialog: &Dialog, resp: &SipResponse) -> bool {
         && resp.to().tag().unwrap_or_default() == dialog.peer_tag
 }
 
+/// A copy [`count_copy`] counted on its INVITE's record, whose retained ACK
+/// alone answers it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CountedCopy {
+    /// Owed its re-ACK.
+    Owed,
+    /// Past the answerer's ladder: absorbed, counted under the ladder's class.
+    Absorbed(Class),
+}
+
 /// Count `event`, received at `now_ms` on `leg_id`'s dialog `named`, on that
 /// dialog's INVITE record when it is a [`copy_of_taken_2xx`] or a
 /// [`copy_of_acked_failure`], before the rules read it, and mark it owed its
@@ -77,14 +87,14 @@ fn invite_2xx_on(dialog: &Dialog, resp: &SipResponse) -> bool {
 /// answerer sends counts toward its ladder (§13.3.1.4, §17.2.1), also one no
 /// rule re-ACKs: a copy arriving before this side's ACK left (no `ack_branch`
 /// yet), or one on a retired a-leg dialog (a fork release is a b-leg's).
-/// Returns the ladder's class when the copy is absorbed.
+/// `None` when `event` is no such copy.
 pub(crate) fn count_copy(
     call: &mut Call,
     leg_id: &str,
     named: Option<&DialogId>,
     event: &CallEvent,
     now_ms: i64,
-) -> Option<Class> {
+) -> Option<CountedCopy> {
     let CallEvent::Sip { message, .. } = event else { return None };
     let SipMessage::Response(resp) = message.as_ref() else { return None };
     let id = named?;
@@ -97,19 +107,20 @@ pub(crate) fn count_copy(
         return None;
     }
     let class = copy_schedule::class_of(resp.status());
-    let mut absorbed = None;
+    let mut counted = None;
     call::helpers::update_dialog(call, leg_id, id, |d| {
         if let Some(x) = call::helpers::sent_exchange_mut(d) {
             x.copies_received = x.copies_received.saturating_add(1);
             let since = x.re_acked_copy.map(|last| now_ms.saturating_sub(last.at_ms));
             if copy_schedule::owed(class, x.copies_received, since) {
                 x.re_acked_copy = Some(ReAckedCopy { copy: x.copies_received, at_ms: now_ms });
+                counted = Some(CountedCopy::Owed);
             } else {
-                absorbed = Some(class);
+                counted = Some(CountedCopy::Absorbed(class));
             }
         }
     });
-    absorbed
+    counted
 }
 
 /// What the copy of a final `ctx` carries asks of its leg: the retained ACK,
