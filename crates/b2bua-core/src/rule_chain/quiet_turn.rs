@@ -14,7 +14,9 @@ use b2bua_sdk::event::CallEvent;
 /// they read. A re-ACK whose rule also wrote into the body (a CDR event, a
 /// disposition) is no candidate. An ACK that discharged nothing here and left
 /// the body as the rules read it is an absorbed-ACK candidate; a final's copy
-/// the count absorbed (`absorbed_copy`) that left it so, an absorbed-copy one.
+/// the count absorbed (`absorbed_copy`) that left it so, an absorbed-copy one;
+/// and so is a turn naming no candidate whose rules left the body so and drew
+/// unheld answers, which the shell's book may absorb whole (ADR-0063 §2).
 pub(super) fn name_candidate(
     result: &mut HandlerResult,
     read: &Call,
@@ -30,12 +32,17 @@ pub(super) fn name_candidate(
     if absorbed_copy && result.call == *read {
         result.effects.quiet = Some(QuietTurn::AbsorbedCopy);
     }
+    let unheld_only = result.effects.quiet.is_none() && !result.effects.unheld.is_empty();
+    if unheld_only && result.call == *read {
+        result.effects.quiet = Some(QuietTurn::AbsorbedCopy);
+    }
 }
 
 /// The quiet class the turn is persisted under, or `None` for a write. An
-/// author's class is a candidate; the turn's effect set decides. A quiet turn
-/// is exactly: an `Active` call, no unheld answer and no soft, buffered or
-/// fire-and-forget effect,
+/// author's class is a candidate; the turn's effect set decides, once the
+/// shell's book took the unheld answers: one still pending makes a write. A
+/// quiet turn is exactly: an `Active` call, no unheld answer and no soft,
+/// buffered or fire-and-forget effect,
 /// and for a repeat one outbound effect, it the retained datagram's repeat,
 /// with no critical effect but the rung's own re-arm for
 /// [`QuietTurn::OwnRung`]; a [`QuietTurn::AbsorbedAck`] or

@@ -73,14 +73,15 @@ struct PingPong {
 }
 
 impl PingPong {
-    /// The node ACKs no more copies than a compliant answerer sends (the first
-    /// arrival and the [`COMPLIANT_COPIES`] after it), absorbs the copy that
-    /// ends the ping-pong, and BYEs the dialog once.
+    /// The node ACKs each copy a compliant answerer sends (the first arrival
+    /// and the [`COMPLIANT_COPIES`] after it), absorbs the copy that ends the
+    /// ping-pong, and BYEs the dialog once.
     fn assert_bounded(&self) {
-        assert!(
-            (1..=COMPLIANT_COPIES + 1).contains(&self.acks),
-            "the node ACKs at most the {} copies a compliant answerer sends (RFC 3261 \
-             §13.3.1.4), got {} ACKs over {} copies",
+        assert_eq!(
+            self.acks,
+            COMPLIANT_COPIES + 1,
+            "the node ACKs the {} copies a compliant answerer sends (RFC 3261 §13.3.1.4), \
+             each inside T1 of the last: got {} ACKs over {} copies",
             COMPLIANT_COPIES + 1,
             self.acks,
             self.copies,
@@ -115,7 +116,7 @@ fn reached(fh: &FailoverHarness, callee: SocketAddr, from: usize) -> (usize, usi
 
 /// Answers every BYE queued at `callee` with a 481 (its dialog is ended) and
 /// absorbs the rest.
-async fn refuse_byes(callee: &Agent) {
+pub(crate) async fn refuse_byes(callee: &Agent) {
     while let Some(inbound) = callee.take_queued_inbound().await {
         let Inbound::Request(mut txn) = inbound else { continue };
         if txn.request().method() == "BYE" {

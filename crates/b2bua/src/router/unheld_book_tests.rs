@@ -1,7 +1,9 @@
 //! The book of unheld answers (ADR-0063 §2): a final's first arrival draws its
 //! ACK and, for a 2xx, its BYE; a copy draws the ACK alone at any pace up to
 //! the ladder's re-sends, then one per T1 within 64·T1 of the first arrival;
-//! the rest is absorbed, and an entry outlives its last copy by 64·T1.
+//! the rest is absorbed, and an entry outlives its last copy by 64·T1. An
+//! admission dropped unsent is taken back; a full book forgets the finals
+//! idle longest.
 
 use b2bua_core::effects::{OutboundBody, OutboundSipEffect, OutboundTxnMode, Provenance};
 use b2bua_core::unheld_response::{UnheldAnswer, UnheldKey};
@@ -40,10 +42,18 @@ fn answer(tag: &str, cseq: u32, success: bool) -> UnheldAnswer {
     }
 }
 
-/// The labels of what one copy arriving at `now_ms` sends; empty when it is
-/// absorbed.
+/// The labels of what `sent`, one answer's admission, sends; empty when it
+/// is absorbed.
+fn labels(sent: Vec<Option<Vec<OutboundSipEffect>>>) -> Vec<String> {
+    sent.into_iter().flatten().flatten().map(|e| e.label).collect()
+}
+
+/// The labels of what one copy arriving at `now_ms` sends at once; empty
+/// when it is absorbed.
 fn copy_at(book: &UnheldBook, answer: UnheldAnswer, now_ms: i64) -> Vec<String> {
-    book.admit(answer, now_ms).unwrap_or_default().into_iter().map(|e| e.label).collect()
+    let (sent, admission) = book.admit_all(vec![answer], now_ms);
+    admission.sent();
+    labels(sent)
 }
 
 #[test]
@@ -109,4 +119,47 @@ fn each_final_has_its_own_entry() {
     assert_eq!(copy_at(&book, answer("t", 2, true), 0), ["ACK", "BYE"]);
     assert_eq!(copy_at(&book, answer("u", 2, true), 0), ["ACK", "BYE"], "another dialog");
     assert_eq!(copy_at(&book, answer("t", 3, true), 0), ["ACK", "BYE"], "another INVITE");
+}
+
+/// A turn dropped or fenced off before its answers reached the call's outbox
+/// sent nothing: the next copy draws the whole answer, its BYE included.
+#[test]
+fn an_admission_dropped_unsent_leaves_the_book_as_it_found_it() {
+    let book = UnheldBook::default();
+    let (sent, admission) = book.admit_all(vec![answer("t", 2, true)], 0);
+    assert_eq!(labels(sent), ["ACK", "BYE"], "the first arrival draws it all");
+    drop(admission);
+    assert_eq!(copy_at(&book, answer("t", 2, true), 1), ["ACK", "BYE"], "nothing left: again");
+    for copy in 1..=Class::Final2xx.resends() {
+        copy_at(&book, answer("t", 2, true), 1 + i64::from(copy));
+    }
+    let past = i64::from(Class::Final2xx.resends()) + 2;
+    let (sent, admission) = book.admit_all(vec![answer("t", 2, true)], past);
+    assert!(labels(sent).is_empty(), "past the ladder: absorbed");
+    drop(admission);
+    assert_eq!(
+        copy_at(&book, answer("t", 2, true), past),
+        Vec::<String>::new(),
+        "a copy taken back puts the final's entry back, not a first arrival",
+    );
+}
+
+/// Past its capacity the book forgets the finals idle longest: a copy of one
+/// of those draws its whole answer again, one copied lately its ACK alone.
+#[test]
+fn a_full_book_forgets_the_finals_idle_longest() {
+    let book = UnheldBook::with_capacity(4);
+    for (at, tag) in ["a", "b", "c", "d"].into_iter().enumerate() {
+        let at = i64::try_from(at).expect("a small index");
+        assert_eq!(copy_at(&book, answer(tag, 2, true), at), ["ACK", "BYE"]);
+    }
+    assert_eq!(copy_at(&book, answer("a", 2, true), 10), ["ACK"], "a, copied lately");
+    assert_eq!(copy_at(&book, answer("e", 2, true), 11), ["ACK", "BYE"], "a fifth: room made");
+    assert_eq!(copy_at(&book, answer("d", 2, true), 12), ["ACK"], "d, kept");
+    assert_eq!(copy_at(&book, answer("a", 2, true), 13), ["ACK"], "a, kept");
+    assert_eq!(
+        copy_at(&book, answer("b", 2, true), 14),
+        ["ACK", "BYE"],
+        "b, idle longest: forgotten"
+    );
 }

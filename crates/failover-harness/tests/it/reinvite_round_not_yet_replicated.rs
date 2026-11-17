@@ -29,6 +29,7 @@ use crate::inflight_resend::{
     bring_up, establish, reboot_and_reclaim, settle_to_one_cdr, split_mut, survivor_of,
     synchronized_call_ref, REANSWER, REOFFER, REPLICATE, T1,
 };
+use crate::unheld_2xx_copies_bounded::refuse_byes;
 
 /// RFC 3261 §17.1.2.2's T2: where the §13.3.1.4 2xx ladder stops doubling.
 const T2: Duration = Duration::from_secs(4);
@@ -154,6 +155,9 @@ impl LostRound {
     }
 }
 
+/// The time a copy's answers take to reach the callee, far inside T1.
+const SETTLE: Duration = Duration::from_millis(20);
+
 /// Then the callee's §13.3.1.4 ladder, as if the ACK were lost, reaches the
 /// ended call: each 2xx repeat no node holds draws an ACK, and the first also
 /// a BYE into the dialog the copy ended, closed by its 481, numbered from the
@@ -180,15 +184,26 @@ async fn a_round_answered_2xx_before_it_replicated_is_acknowledged_and_the_call_
     lost.ended_on_both_legs().await;
 
     lost.fh.strike(failover_harness::Incident::PrimaryKilled);
-    let mut gap = T1;
-    let mut elapsed = Duration::ZERO;
+    let since = lost.fh.sip_entries().len();
+    let start = tokio::time::Instant::now();
+    let (mut gap, mut elapsed, mut copies) = (T1, Duration::ZERO, 0);
     while elapsed + gap < 64 * T1 {
-        lost.fh.advance(gap).await;
         elapsed += gap;
+        let due = (start + elapsed).saturating_duration_since(tokio::time::Instant::now());
+        lost.fh.advance(due).await;
         lost.bob.try_send_datagram(&answer, toward).await.expect("the retransmitted 200 leaves");
+        copies += 1;
+        lost.fh.advance(SETTLE).await;
+        refuse_byes(&lost.bob).await;
         gap = (gap * 2).min(T2);
     }
     lost.fh.advance(Duration::from_millis(200)).await;
+    let to_bob: Vec<_> =
+        lost.fh.sip_entries().into_iter().skip(since).filter(|e| e.to == lost.bob.addr()).collect();
+    let acks = to_bob.iter().filter(|e| e.opens_with("ACK ")).count();
+    let byes = to_bob.iter().filter(|e| e.opens_with("BYE ")).count();
+    assert_eq!(acks, copies, "each copy on the ladder draws an ACK");
+    assert_eq!(byes, 1, "the first copy alone draws a BYE (ADR-0063 §2), answered at once");
     lost.taken_over_once("the callee's 200, its ladder and the answers to the BYEs");
     assert!(!lost.survivor().serves(&lost.call_ref), "the copy released itself");
     let _ = &lost.dialog;

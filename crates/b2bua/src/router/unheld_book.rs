@@ -12,12 +12,20 @@
 //! is absorbed and counted (`b2bua_copies_past_schedule_total{kind="unheld"}`).
 //! An entry lives until 64·T1 after its last copy, absorbed copies included.
 //! The book is node-local: a takeover node answers from its own.
+//!
+//! A turn's admission is taken back unless its answers reach the call's
+//! outbox ([`Admission`]): a turn dropped or fenced off before, its BYE
+//! never left, leaves the book as it found it.
+//!
+//! The book holds at most [`CAPACITY`] finals; past it, the half idle longest
+//! is forgotten, and a later copy of one of those draws its whole answer again
+//! (a second BYE into an ended dialog draws a 481, RFC 3261 §15.1.2).
 
 use std::collections::HashMap;
 use std::sync::Mutex;
 
 use b2bua_core::copy_schedule;
-use b2bua_core::effects::{HandlerEffects, OutboundSipEffect};
+use b2bua_core::effects::{HandlerResult, OutboundSipEffect};
 use b2bua_core::unheld_response::{UnheldAnswer, UnheldKey};
 use sip_retransmit::timers::T1;
 
@@ -29,10 +37,14 @@ use super::RouterCtx;
 #[expect(clippy::cast_possible_wrap, reason = "a const: 64·T1 fits an i64")]
 const WINDOW_MS: i64 = 64 * T1 as i64;
 
+/// The most finals the book holds.
+pub(crate) const CAPACITY: usize = 1 << 16;
+
 /// The `kind` label the book's absorbed copies count under.
 const KIND: &str = "unheld";
 
 /// One final's answers so far.
+#[derive(Clone, Copy)]
 struct Entry {
     first_ms: i64,
     /// The copies counted after the first arrival.
@@ -47,10 +59,13 @@ impl Entry {
     }
 }
 
-#[derive(Default)]
+/// What one admission changed: each key it touched, with its entry before.
+type Undo = Vec<(UnheldKey, Option<Entry>)>;
+
 struct Inner {
     entries: HashMap<UnheldKey, Entry>,
     pruned_ms: i64,
+    capacity: usize,
 }
 
 impl Inner {
@@ -62,25 +77,42 @@ impl Inner {
         self.pruned_ms = now_ms;
         self.entries.retain(|_, e| e.live(now_ms));
     }
-}
 
-/// The answers to unheld finals this node sent, by final.
-#[derive(Default)]
-pub(crate) struct UnheldBook {
-    inner: Mutex<Inner>,
-}
+    /// Make room for one more final: at capacity, keep at most the half
+    /// copied most recently, none copied at the instant of the latest one
+    /// forgotten.
+    fn make_room(&mut self) {
+        if self.entries.len() < self.capacity {
+            return;
+        }
+        let mut last: Vec<i64> = self.entries.values().map(|e| e.last_ms).collect();
+        let forgotten = self.entries.len() - self.capacity / 2;
+        let (_, &mut cutoff, _) = last.select_nth_unstable(forgotten - 1);
+        self.entries.retain(|_, e| e.last_ms > cutoff);
+        tracing::warn!(
+            capacity = self.capacity,
+            kept = self.entries.len(),
+            "the book of unheld answers is full: the finals idle longest are forgotten"
+        );
+    }
 
-impl UnheldBook {
     /// What `answer`, drawn by a copy of its final arriving at `now_ms`,
-    /// sends: everything on the final's first arrival, the ACK alone on a
-    /// copy owed one, `None` for a copy absorbed.
-    fn admit(&self, answer: UnheldAnswer, now_ms: i64) -> Option<Vec<OutboundSipEffect>> {
-        let mut inner = crate::poison::locked(&self.inner, crate::poison::UNHELD_ANSWERS);
-        inner.prune(now_ms);
-        let entry = inner.entries.get_mut(&answer.key).filter(|e| e.live(now_ms));
+    /// sends, its key's entry before noted in `undo`: everything on the
+    /// final's first arrival, the ACK alone on a copy owed one, `None` for a
+    /// copy absorbed.
+    fn admit(
+        &mut self,
+        answer: UnheldAnswer,
+        now_ms: i64,
+        undo: &mut Undo,
+    ) -> Option<Vec<OutboundSipEffect>> {
+        self.prune(now_ms);
+        undo.push((answer.key.clone(), self.entries.get(&answer.key).copied()));
+        let entry = self.entries.get_mut(&answer.key).filter(|e| e.live(now_ms));
         let Some(entry) = entry else {
+            self.make_room();
             let first = Entry { first_ms: now_ms, copies: 0, answered_ms: now_ms, last_ms: now_ms };
-            inner.entries.insert(answer.key.clone(), first);
+            self.entries.insert(answer.key.clone(), first);
             return Some(answer.into_effects());
         };
         entry.copies = entry.copies.saturating_add(1);
@@ -94,27 +126,117 @@ impl UnheldBook {
         entry.answered_ms = now_ms;
         Some(vec![answer.ack])
     }
+
+    /// Put back each entry `undo` noted, the latest change first.
+    fn undo(&mut self, undo: Undo) {
+        for (key, before) in undo.into_iter().rev() {
+            match before {
+                Some(entry) => self.entries.insert(key, entry),
+                None => self.entries.remove(&key),
+            };
+        }
+    }
 }
 
-/// What `answer`, drawn at `now_ms`, sends through the node's book; an
-/// absorbed copy sends nothing and is counted.
-pub(super) fn admitted(
-    ctx: &RouterCtx,
-    answer: UnheldAnswer,
-    now_ms: i64,
-) -> Vec<OutboundSipEffect> {
-    ctx.unheld_answers.admit(answer, now_ms).unwrap_or_else(|| {
+/// The answers to unheld finals this node sent, by final.
+pub(crate) struct UnheldBook {
+    inner: Mutex<Inner>,
+}
+
+impl Default for UnheldBook {
+    fn default() -> Self {
+        Self::with_capacity(CAPACITY)
+    }
+}
+
+impl UnheldBook {
+    /// A book holding at most `capacity` finals.
+    pub(crate) fn with_capacity(capacity: usize) -> Self {
+        let inner = Inner { entries: HashMap::new(), pruned_ms: 0, capacity: capacity.max(2) };
+        Self { inner: Mutex::new(inner) }
+    }
+
+    fn locked(&self) -> std::sync::MutexGuard<'_, Inner> {
+        crate::poison::locked(&self.inner, crate::poison::UNHELD_ANSWERS)
+    }
+
+    /// What `answers`, drawn at `now_ms`, send, and the admission that takes
+    /// the book's changes back unless [`Admission::sent`]; each entry is
+    /// `None` for a copy absorbed.
+    fn admit_all(
+        &self,
+        answers: Vec<UnheldAnswer>,
+        now_ms: i64,
+    ) -> (Vec<Option<Vec<OutboundSipEffect>>>, Admission<'_>) {
+        let mut undo = Undo::new();
+        if answers.is_empty() {
+            return (Vec::new(), Admission { book: self, undo });
+        }
+        let mut inner = self.locked();
+        let sent = answers.into_iter().map(|a| inner.admit(a, now_ms, &mut undo)).collect();
+        (sent, Admission { book: self, undo })
+    }
+}
+
+/// A turn's admission into the book: dropped before [`Admission::sent`], it
+/// puts back every entry it changed, as if the turn's answers never drew.
+#[must_use = "an admission dropped unsent takes its answers back"]
+pub(super) struct Admission<'a> {
+    book: &'a UnheldBook,
+    undo: Undo,
+}
+
+impl Admission<'_> {
+    /// The turn's answers reached the call's outbox: the book keeps them.
+    pub(super) fn sent(mut self) {
+        self.undo.clear();
+    }
+}
+
+impl Drop for Admission<'_> {
+    fn drop(&mut self) {
+        if self.undo.is_empty() {
+            return;
+        }
+        self.book.locked().undo(std::mem::take(&mut self.undo));
+    }
+}
+
+/// What `sent`, one answer's admission, sends; an absorbed copy sends nothing
+/// and is counted.
+fn counted(ctx: &RouterCtx, sent: Option<Vec<OutboundSipEffect>>) -> Vec<OutboundSipEffect> {
+    sent.unwrap_or_else(|| {
         ctx.metrics.record_copy_past_schedule(KIND);
         Vec::new()
     })
 }
 
-/// Move what the turn's unheld answers send, drawn at `now_ms`, onto its
-/// outbound effects, behind the turn's own.
-pub(super) fn admit_turn_answers(ctx: &RouterCtx, effects: &mut HandlerEffects, now_ms: i64) {
-    for answer in std::mem::take(&mut effects.unheld) {
-        effects.outbound.extend(admitted(ctx, answer, now_ms));
+/// What `answer`, drawn at `now_ms` and sent at once, sends through the
+/// node's book; an absorbed copy sends nothing and is counted.
+pub(super) fn admitted(
+    ctx: &RouterCtx,
+    answer: UnheldAnswer,
+    now_ms: i64,
+) -> Vec<OutboundSipEffect> {
+    let (sent, admission) = ctx.unheld_answers.admit_all(vec![answer], now_ms);
+    admission.sent();
+    sent.into_iter().flat_map(|s| counted(ctx, s)).collect()
+}
+
+/// `result` with what its unheld answers, drawn at `now_ms`, send moved onto
+/// its outbound effects behind the turn's own, and the admission the commit
+/// marks [`Admission::sent`] once the turn's entry is on the call's outbox.
+pub(super) fn admit_turn(
+    ctx: &RouterCtx,
+    mut result: HandlerResult,
+    now_ms: i64,
+) -> (HandlerResult, Admission<'_>) {
+    let answers = std::mem::take(&mut result.effects.unheld);
+    let (sent, admission) = ctx.unheld_answers.admit_all(answers, now_ms);
+    for s in sent {
+        result.effects.outbound.extend(counted(ctx, s));
     }
+    (result, admission)
 }
 
 #[cfg(test)]

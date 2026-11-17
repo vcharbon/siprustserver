@@ -250,9 +250,9 @@ fn a_bare_first_ack_retains_its_datagram_and_a_re_ack_repeats_it() {
     assert_eq!(re_sent.wire().0, sent.image(), "the re-ACK repeats the bare datagram");
 }
 
-// ADR-0057 §10 is the action's: a bodyless AckLeg on a dialog whose ACK left
-// sends nothing unless the copy its turn counted is owed a re-ACK, whichever
-// rule asks, and composes no fresh ACK in its place.
+/// ADR-0057 §10 is the action's: a bodyless AckLeg on a dialog whose ACK left
+/// sends nothing unless the copy its turn counted is owed a re-ACK, whichever
+/// rule asks, and composes no fresh ACK in its place.
 #[test]
 fn a_bodyless_ack_with_no_copy_owed_sends_nothing() {
     let mut call = test_call();

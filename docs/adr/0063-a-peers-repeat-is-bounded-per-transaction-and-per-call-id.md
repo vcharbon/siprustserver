@@ -65,7 +65,8 @@ and no leg the call holds: an unheld final, or an unknown leg's 2xx. Each one is
 through one book in the shell, keyed by Call-ID, To-tag and CSeq. The router consults it, and
 so does the commit that sends the core's unheld answers. Its ACK follows §1's rule, the 64·T1
 window included, and a 2xx's BYE leaves once. An entry lives until 64·T1 after its last copy,
-absorbed copies included.
+absorbed copies included. A turn's answers are booked once on the call's outbox. A full book
+(65 536 finals) forgets the half idle longest. A turn the book absorbed whole is quiet.
 
 ### 3. Every message counts against its Call-ID's budget
 

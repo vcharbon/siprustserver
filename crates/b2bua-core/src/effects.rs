@@ -246,9 +246,10 @@ pub enum QuietTurn {
     /// and no ACK is owed toward the peer for it (§13.2.2.4), so nothing
     /// leaves and the body records nothing but the in-dialog message count.
     AbsorbedAck,
-    /// A copy of such a final owed no re-ACK (ADR-0057 §10): nothing leaves
-    /// and the body records nothing but the in-dialog message count and the
-    /// final's copy count.
+    /// A copy of such a final owed no re-ACK (ADR-0057 §10), or of a final no
+    /// leg holds whose answer the shell's book absorbed (ADR-0063 §2): nothing
+    /// leaves and the body records nothing but the in-dialog message count and
+    /// the final's copy count.
     AbsorbedCopy,
 }
 

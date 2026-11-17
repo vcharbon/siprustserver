@@ -449,7 +449,8 @@ no axis moves, nothing flushes. The quiet list is closed
    held (§17.1.1.3),
 4. an inbound ACK the rules absorb: it discharges nothing this node awaits
    and no ACK is owed toward the peer for it (RFC 3261 §13.2.2.4),
-5. an inbound copy of such a final owed no re-ACK (ADR-0057 §10).
+5. an inbound copy of such a final owed no re-ACK (ADR-0057 §10), or of a
+   final no leg holds whose answer the shell's book absorbed (ADR-0063 §2).
 
 A rung is quiet only while the ladder goes on: a copy left and the next rung
 is armed, so the body differs from the last write by the rung index and the
