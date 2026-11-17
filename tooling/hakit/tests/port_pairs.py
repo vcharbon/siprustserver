@@ -53,7 +53,10 @@ def _hold(held: ExitStack, port: int) -> bool:
     """Takes the box-wide lock of `port` into `held` when no other reservation
     holds it and the port binds on loopback."""
     LOCK_DIR.mkdir(exist_ok=True)
-    lock: IO[str] = held.enter_context((LOCK_DIR / str(port)).open("a"))
+    try:
+        lock: IO[str] = held.enter_context((LOCK_DIR / str(port)).open("a"))
+    except PermissionError:
+        return False
     try:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:
