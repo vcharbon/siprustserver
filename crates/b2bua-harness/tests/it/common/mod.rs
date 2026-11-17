@@ -5,6 +5,7 @@
 
 #![allow(dead_code)]
 
+pub mod release_callee;
 pub mod sdp;
 pub mod spiral;
 pub mod stateful_proxy;

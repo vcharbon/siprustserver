@@ -19,52 +19,10 @@ use scenario_harness::{Harness, WaiverScope};
 use sip_message::generators::InDialogMethod;
 use sip_net::{Arrival, PreIngressAction};
 
+use crate::common::release_callee as release;
+
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 8\r\na=rtpmap:8 PCMA/8000\r\na=sendrecv\r\n";
 const ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/AVP 8\r\na=rtpmap:8 PCMA/8000\r\na=sendrecv\r\n";
-
-/// The release service: on a deadline it releases the callee leg, the
-/// caller's leg staying up.
-mod release {
-    use b2bua::rules::{
-        Effect, Match, RuleAction, RuleCall, RuleContext, RuleDefinition, RuleHandleResult,
-        ServiceSeed, TimerDelay,
-    };
-    use b2bua::{define_service, sm_rule};
-    use call::{TimerKey, TimerType};
-    use sip_message::Method;
-
-    pub const AT_SEC: i64 = 10;
-    const DEADLINE: TimerType = TimerType::service(RELEASE, "deadline");
-
-    define_service! {
-        id: "release-callee",
-        machine: RELEASE,
-        states: ReleaseState { Armed, Released },
-        init: |_call: &RuleCall| {
-            Some(ServiceSeed::new(ReleaseState::Armed.label()).with_actions(vec![
-                RuleAction::arm(TimerKey::call(DEADLINE), TimerDelay::secs(AT_SEC)),
-            ]))
-        },
-        rules: [ release_on_deadline() ],
-    }
-
-    fn release_on_deadline() -> RuleDefinition {
-        sm_rule! {
-            id: "release-callee-on-deadline",
-            machine: RELEASE,
-            active: [ ReleaseState::Armed ],
-            transitions: [ ReleaseState::Armed => ReleaseState::Released ],
-            effects: [ Effect::Originate { method: Method::Bye, label: "BYE → the callee" } ],
-            matcher: Match::timer().timer_type(DEADLINE),
-            handle: |_ctx: &RuleContext| {
-                Some(RuleHandleResult::new(vec![
-                    RuleAction::DestroyLeg { leg_id: "b-1".into(), headers: vec![] },
-                    RuleAction::SetState { machine: RELEASE, to: ReleaseState::Released.label() },
-                ]))
-            },
-        }
-    }
-}
 
 /// The caller's INFO is lost toward the callee until the release ended his
 /// dialog; he answers its next retransmission 481. No BYE reaches the caller,

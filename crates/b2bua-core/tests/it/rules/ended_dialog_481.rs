@@ -9,26 +9,39 @@ use call::{DialogEnd, DialogId};
 use super::fixtures::*;
 use super::*;
 
-/// An Active call whose callee leg `b-1` holds `dialogs`, each `(peer tag,
+/// A callee leg `leg_id` answered 2xx, holding `dialogs`, each `(peer tag,
 /// state)` under this stack's tag `svc`.
-fn call_with_callee_dialogs(dialogs: &[(&str, DialogState)]) -> call::Call {
-    let mut call = test_call();
-    confirm_a(&mut call);
+fn answered_leg(leg_id: &str, dialogs: &[(&str, DialogState)]) -> call::Leg {
     let mut leg = b_leg_pending();
+    leg.leg_id = leg_id.into();
     for (peer, state) in dialogs {
         leg.dialogs.insert(Dialog::new("svc", *peer, state.clone(), 1));
     }
     if let Some(invite) = leg.outbound_invite_mut() {
         invite.record_final(200);
     }
-    call::helpers::add_b_leg(&mut call, leg);
+    leg
+}
+
+/// An Active call whose callee leg `b-1` holds `dialogs`, each `(peer tag,
+/// state)` under this stack's tag `svc`.
+fn call_with_callee_dialogs(dialogs: &[(&str, DialogState)]) -> call::Call {
+    let mut call = test_call();
+    confirm_a(&mut call);
+    call::helpers::add_b_leg(&mut call, answered_leg("b-1", dialogs));
     assert_eq!(call.state, CallModelState::Active);
     call
 }
 
 /// The rules ranked for bob's 481 to an INFO in his dialog `peer_tag` of
-/// `call`, and whether any of them ends the session.
+/// `call`'s leg `b-1`, and whether any of them ends the session.
 fn info_481_in(call: &call::Call, peer_tag: &str) -> (Vec<&'static str>, bool) {
+    info_481_on(call, "b-1", peer_tag)
+}
+
+/// The rules ranked for a 481 to an INFO in the dialog `peer_tag` of `call`'s
+/// leg `leg_id`, and whether any of them ends the session.
+fn info_481_on(call: &call::Call, leg_id: &str, peer_tag: &str) -> (Vec<&'static str>, bool) {
     let raw = format!(
         "SIP/2.0 481 Call/Transaction Does Not Exist\r\n\
 Via: SIP/2.0/UDP 10.0.0.9:5060;branch=z9hG4bKinfo\r\n\
@@ -48,7 +61,7 @@ Content-Length: 0\r\n\r\n"
         dialog: Some(DialogId { our_tag: "svc".into(), peer_tag: peer_tag.into() }),
         record: None,
     };
-    let ctx = context(call, &event, "b-1", &config).resolving(&resolved);
+    let ctx = context(call, &event, leg_id, &config).resolving(&resolved);
     let rules = default_rules();
     let ranked = pick_ranked(&rules, call, &ctx);
     let ends = ranked.iter().filter_map(|r| (r.handle)(&ctx)).any(|outcome| {
@@ -89,6 +102,28 @@ fn a_481_in_an_ended_dialog_of_a_live_leg_tears_nothing_down() {
     ]);
     assert_eq!(call.b_legs[0].state(), LegState::Confirmed);
     let (ranked, ends) = info_481_in(&call, "oldtag");
+    assert!(!ranked.contains(&"handle-481"), "got {ranked:?}");
+    assert!(!ends, "no rule ends the session on {ranked:?}");
+}
+
+/// A 481 in a dialog still early on a leg already ended: the leg's 2xx came on
+/// one fork, whose dialog our BYE then ended, while the other fork's early
+/// dialog lingers (RFC 3261 §13.2.2.4). The leg is over, and the 481 there
+/// ends nothing while the call stays up on `b-1`.
+#[test]
+fn a_481_in_an_early_dialog_of_an_ended_leg_tears_nothing_down() {
+    let mut call = call_with_callee_dialogs(&[("bobtag", DialogState::Confirmed)]);
+    let ended = answered_leg(
+        "b-2",
+        &[
+            ("forkatag", DialogState::Ended(DialogEnd::OurBye { final_status: Some(200) })),
+            ("forkbtag", DialogState::Early),
+        ],
+    );
+    assert_eq!(ended.state(), LegState::Terminated);
+    call::helpers::add_b_leg(&mut call, ended);
+    assert_eq!(call.state, CallModelState::Active);
+    let (ranked, ends) = info_481_on(&call, "b-2", "forkbtag");
     assert!(!ranked.contains(&"handle-481"), "got {ranked:?}");
     assert!(!ends, "no rule ends the session on {ranked:?}");
 }
