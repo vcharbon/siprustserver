@@ -100,8 +100,6 @@ async fn no_notify_after_terminated() {
     assert_notify(&nterm, "terminated"); // ← the TERMINAL NOTIFY
     nterm.respond(200, "OK").await;
 
-    // c-realign + a-realign → merge(a, c). The merge clears the transfer slice
-    // and releases bob.
     let mut c_realign = charlie.receive("INVITE").await;
     c_realign.respond(200, "OK").with_sdp(CHARLIE_ACTIVE_ANSWER).await;
     charlie.receive("ACK").await;
@@ -144,7 +142,6 @@ async fn no_notify_after_terminated() {
         "no NOTIFY toward the referrer after the terminal NOTIFY + slice clear"
     );
 
-    // A hangs up the transferred call: its BYE reaches C.
     let mut alice_bye = alice_dialog.bye().await;
     charlie.receive("BYE").await.respond(200, "OK").await;
     alice_bye.expect(200).await;

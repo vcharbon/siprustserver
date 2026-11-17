@@ -8,8 +8,7 @@
 //!   1. FullHappy        — A 200 → ACK A, merge(a, c), BYE B; A's BYE reaches C.
 //!   2. FullARejectRealign — A 488 → rollback BYEs all three legs.
 //!   3. FullAGlareReinvite — A glares (re-INVITE) mid a-realigning → 491, resume.
-//!   4. FullABye         — A BYEs before answering → relay-bye begin-termination
-//!                          BYEs B + C.
+//!   4. FullABye         — A BYEs before answering → relay-bye BYEs B + C.
 //!   5. FullATimeout     — A never answers (32s watchdog) → rollback BYEs all 3.
 
 use std::time::Duration;
@@ -136,14 +135,10 @@ async fn refer_allow_full_happy() {
     // a-realign re-INVITE A carries C's active answer, Contact leg=a.
     let mut a_realign = alice.receive("INVITE").await;
     assert_reinvite(a_realign.request(), CHARLIE_ACTIVE_ANSWER, "a");
-    // A answers 200 → B2BUA ACKs A, merges a↔c (transfer complete) and
-    // releases the referrer B.
     a_realign.respond(200, "OK").with_sdp(ALICE_REALIGN_ANSWER).await;
     alice.receive("ACK").await;
     bob.receive("BYE").await.respond(200, "OK").await;
 
-    // A↔C now bridged. A BYE → relay-bye 200 + begin-termination BYEs the now
-    // peered C (proves the merge: A's hangup reaches C).
     let mut alice_bye = alice_dialog.bye().await;
     charlie.receive("BYE").await.respond(200, "OK").await;
     alice_bye.expect(200).await;
@@ -367,12 +362,10 @@ async fn refer_allow_full_a_glare_reinvite() {
         .await;
     a_glare.expect(491).await;
 
-    // A completes the original a-realign → ACK A, merge a↔c, BYE B.
     a_realign.respond(200, "OK").with_sdp(ALICE_REALIGN_ANSWER).await;
     alice.receive("ACK").await;
     bob.receive("BYE").await.respond(200, "OK").await;
 
-    // Teardown — A BYE → BYEs C (now peered).
     let mut alice_bye = alice_dialog.bye().await;
     charlie.receive("BYE").await.respond(200, "OK").await;
     alice_bye.expect(200).await;
@@ -442,7 +435,6 @@ async fn refer_allow_full_a_bye_during_a_realign() {
     let mut alice_bye = alice_dialog.bye().await;
     alice_bye.expect(200).await;
 
-    // B2BUA tears down bob and charlie.
     bob.receive("BYE").await.respond(200, "OK").await;
     charlie.receive("BYE").await.respond(200, "OK").await;
 

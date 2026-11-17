@@ -157,7 +157,6 @@ async fn refer_allow_c_realign_happy() {
     let mut a_realign = alice.receive("INVITE").await;
     assert_reinvite(a_realign.request(), CHARLIE_ACTIVE_ANSWER, "a");
 
-    // A answers: the transfer completes and releases B. A's BYE reaches C.
     a_realign.respond(200, "OK").with_sdp(ALICE_REALIGN_ANSWER).await;
     alice.receive("ACK").await;
     end_transferred_call(&mut alice_dialog, &bob, &charlie).await;
@@ -365,7 +364,6 @@ async fn refer_allow_c_realign_c_glare() {
     let mut a_realign = alice.receive("INVITE").await;
     assert_reinvite(a_realign.request(), CHARLIE_ACTIVE_ANSWER, "a");
 
-    // A answers: the transfer completes and releases B. A's BYE reaches C.
     a_realign.respond(200, "OK").with_sdp(ALICE_REALIGN_ANSWER).await;
     alice.receive("ACK").await;
     end_transferred_call(&mut alice_dialog, &bob, &charlie).await;
@@ -436,7 +434,6 @@ async fn refer_allow_c_realign_b_non_bye() {
     let mut a_realign = alice.receive("INVITE").await;
     assert_reinvite(a_realign.request(), CHARLIE_ACTIVE_ANSWER, "a");
 
-    // A answers: the transfer completes and releases B. A's BYE reaches C.
     a_realign.respond(200, "OK").with_sdp(ALICE_REALIGN_ANSWER).await;
     alice.receive("ACK").await;
     end_transferred_call(&mut alice_dialog, &bob, &charlie).await;
