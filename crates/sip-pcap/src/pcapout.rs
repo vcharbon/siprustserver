@@ -108,11 +108,13 @@ fn frame(src: SocketAddr, dst: SocketAddr, payload: &[u8]) -> Result<Vec<u8>, St
     let mut pseudo = Vec::with_capacity(40);
     match (src.ip(), dst.ip()) {
         (IpAddr::V4(s), IpAddr::V4(d)) => {
+            let total = u16::try_from(20 + udp_len).map_err(|_| {
+                format!("payload of {} bytes does not fit one IPv4 packet", payload.len())
+            })?;
             f.extend_from_slice(&0x0800u16.to_be_bytes());
-            let total = 20 + udp_len;
             let mut h = [0u8; 20];
             h[0] = 0x45;
-            h[2..4].copy_from_slice(&(total as u16).to_be_bytes());
+            h[2..4].copy_from_slice(&total.to_be_bytes());
             h[6] = 0x40; // DF
             h[8] = 64; // TTL
             h[9] = UDP;
@@ -162,7 +164,8 @@ const UDP: u8 = 17;
 
 /// The Internet checksum (RFC 1071) of `parts` read as one byte string: the
 /// ones' complement of the ones' complement sum of its big-endian 16-bit
-/// words, an odd last byte padded with a zero.
+/// words, an odd last byte padded with a zero. `sip-net`'s capture encoder
+/// keeps its own copy: neither crate depends on the other in production.
 fn internet_checksum(parts: &[&[u8]]) -> u16 {
     let mut sum: u64 = 0;
     for (i, &byte) in parts.iter().flat_map(|p| p.iter()).enumerate() {
@@ -241,37 +244,59 @@ mod tests {
         );
     }
 
-    /// Each record's UDP segment and the pseudo-header of its family, read
-    /// from the written capture's own frames.
-    fn udp_segments(pcap: &[u8]) -> Vec<(Vec<u8>, Vec<u8>)> {
+    /// The frames of a written capture, in record order.
+    fn frames(pcap: &[u8]) -> Vec<&[u8]> {
         let mut out = Vec::new();
         let mut at = 24;
         while at < pcap.len() {
             let len = u32::from_le_bytes(pcap[at + 8..at + 12].try_into().unwrap()) as usize;
-            let frame = &pcap[at + 16..at + 16 + len];
+            out.push(&pcap[at + 16..at + 16 + len]);
             at += 16 + len;
-            let (segment, pseudo) = match u16::from_be_bytes([frame[12], frame[13]]) {
-                0x0800 => {
-                    let segment = &frame[34..];
-                    let len = (segment.len() as u16).to_be_bytes();
-                    (segment, [&frame[26..34], &[0, 17], &len[..]].concat())
-                }
-                0x86dd => {
-                    let segment = &frame[54..];
-                    let len = (segment.len() as u32).to_be_bytes();
-                    (segment, [&frame[22..54], &len[..], &[0, 0, 0, 17]].concat())
-                }
-                other => panic!("ethertype {other:#06x}"),
-            };
-            out.push((pseudo, segment.to_vec()));
         }
         out
     }
 
-    /// The UDP checksum of each written datagram verifies the way a receiving
-    /// stack verifies it (RFC 768, RFC 8200 §8.1: the ones' complement sum of
-    /// pseudo-header and segment, checksum field included, is all ones), and
-    /// is never the zero IPv6 forbids; an odd payload length included.
+    /// The ones' complement sum of `parts` as one run of big-endian 16-bit
+    /// words, folded to 16 bits; every part but the last is of even length.
+    fn folded_sum(parts: &[&[u8]]) -> u32 {
+        let mut sum: u32 = 0;
+        for word in parts.iter().flat_map(|p| p.chunks(2)) {
+            sum += (u32::from(word[0]) << 8) | u32::from(*word.get(1).unwrap_or(&0));
+        }
+        while sum >> 16 != 0 {
+            sum = (sum & 0xffff) + (sum >> 16);
+        }
+        sum
+    }
+
+    /// A frame's UDP segment, the pseudo-header of its family (RFC 768,
+    /// RFC 8200 §8.1), and its IPv4 header when it is IPv4.
+    fn udp_of(frame: &[u8]) -> (&[u8], Vec<u8>, Option<&[u8]>) {
+        match u16::from_be_bytes([frame[12], frame[13]]) {
+            0x0800 => {
+                let segment = &frame[34..];
+                let len = (segment.len() as u16).to_be_bytes();
+                (segment, [&frame[26..34], &[0, 17], &len[..]].concat(), Some(&frame[14..34]))
+            }
+            0x86dd => {
+                let segment = &frame[54..];
+                let len = (segment.len() as u32).to_be_bytes();
+                (segment, [&frame[22..54], &len[..], &[0, 0, 0, 17]].concat(), None)
+            }
+            other => panic!("ethertype {other:#06x}"),
+        }
+    }
+
+    fn udp_checksum_field(frame: &[u8]) -> u16 {
+        let (segment, _, _) = udp_of(frame);
+        u16::from_be_bytes([segment[6], segment[7]])
+    }
+
+    /// Each written datagram verifies the way a receiving stack verifies it:
+    /// the UDP length field is the segment's, the UDP checksum sums with the
+    /// pseudo-header to all ones and is never the zero IPv6 forbids (RFC 768,
+    /// RFC 8200 §8.1), and an IPv4 header's own checksum and Total Length
+    /// hold (RFC 791); an odd payload length included.
     #[test]
     fn every_written_udp_checksum_verifies_and_ipv6_is_never_zero() {
         let mut odd = dg(1, "[2001:db8::1]:5060", "[2001:db8::2]:5070");
@@ -284,19 +309,61 @@ mod tests {
         let pcap = datagrams_to_pcap(&datagrams).expect("encodes");
         assert_eq!(read_back(&pcap).1.datagrams, 3, "the reader takes every record");
 
-        let segments = udp_segments(&pcap);
-        assert_eq!(segments.len(), 3);
-        for (i, (pseudo, segment)) in segments.iter().enumerate() {
-            let checksum = u16::from_be_bytes([segment[6], segment[7]]);
+        let frames = frames(&pcap);
+        assert_eq!(frames.len(), 3);
+        for (i, frame) in frames.iter().enumerate() {
+            let (segment, pseudo, ipv4) = udp_of(frame);
+            assert_eq!(usize::from(u16::from_be_bytes([segment[4], segment[5]])), segment.len());
+            let checksum = udp_checksum_field(frame);
             assert_ne!(checksum, 0, "record {i} carries no checksum");
-            let mut sum: u32 = 0;
-            for word in pseudo.chunks(2).chain(segment.chunks(2)) {
-                sum += (u32::from(word[0]) << 8) | u32::from(*word.get(1).unwrap_or(&0));
+            assert_eq!(
+                folded_sum(&[&pseudo, segment]),
+                0xffff,
+                "record {i}: checksum {checksum:#06x} does not verify"
+            );
+            if let Some(header) = ipv4 {
+                assert_eq!(folded_sum(&[header]), 0xffff, "record {i}: IPv4 header checksum");
+                assert_eq!(
+                    usize::from(u16::from_be_bytes([header[2], header[3]])),
+                    frame.len() - 14
+                );
             }
-            let folded = (sum & 0xffff) + (sum >> 16);
-            let folded = (folded & 0xffff) + (folded >> 16);
-            assert_eq!(folded, 0xffff, "record {i}: checksum {checksum:#06x} does not verify");
         }
+    }
+
+    /// A datagram whose checksum computes to zero is written with all ones,
+    /// its equivalent in ones' complement (RFC 768): over IPv6 a zero would
+    /// read as no checksum at all.
+    #[test]
+    fn a_checksum_computed_as_zero_is_written_as_all_ones() {
+        let mut d = dg(0, "[2001:db8::1]:5060", "[2001:db8::2]:5070");
+        if d.payload.len() % 2 == 1 {
+            d.payload.push(b' ');
+        }
+        d.payload.extend_from_slice(&[0, 0]);
+        let first = datagrams_to_pcap([&d]).expect("encodes");
+        let words_to_cancel = udp_checksum_field(frames(&first)[0]);
+        let end = d.payload.len();
+        d.payload[end - 2..].copy_from_slice(&words_to_cancel.to_be_bytes());
+
+        let pcap = datagrams_to_pcap([&d]).expect("encodes");
+        let frame = frames(&pcap)[0];
+        let (segment, pseudo, _) = udp_of(frame);
+        assert_eq!(udp_checksum_field(frame), 0xffff);
+        assert_eq!(folded_sum(&[&pseudo, segment]), 0xffff);
+    }
+
+    /// A payload too long for an IPv4 Total Length is refused, not written
+    /// with a wrapped length; over IPv6 the same payload fits.
+    #[test]
+    fn a_payload_past_the_ipv4_total_length_is_refused() {
+        let mut v4 = dg(0, "192.0.2.1:5060", "192.0.2.2:5060");
+        v4.payload = vec![b'x'; 65_510];
+        let err = datagrams_to_pcap([&v4]).expect_err("refused");
+        assert!(err.contains("65510"), "{err}");
+        let mut v6 = dg(0, "[2001:db8::1]:5060", "[2001:db8::2]:5070");
+        v6.payload = v4.payload.clone();
+        datagrams_to_pcap([&v6]).expect("fits one IPv6 UDP datagram");
     }
 
     /// The datagrams the parser rejected come back as they were captured.
