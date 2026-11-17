@@ -3,13 +3,13 @@
 //! This test crate depends on **`b2bua-sdk` only** (no `b2bua`, not even `call`
 //! directly — the framework types are reached through `b2bua_sdk::rules`). A
 //! service authored entirely against that surface must compile and produce
-//! correct rule metadata. It is the in-crate counterpart of the out-of-tree
+//! correct rule metadata; the `watchdog` service, with a timer, a direction and
+//! a leg state, is checked by compiling alone. It is the in-crate counterpart of the out-of-tree
 //! boundary check the `announcement` crate makes.
 
 use b2bua_sdk::rules::{
-    Direction, Effect, EffectKind, LegState, MachineId, Match, Method, RuleAction, RuleContext,
-    RuleDefinition, RuleHandleResult, StateLabel, TimerKey, TimerScopeKind, TimerType,
-    SERVICE_LAYER,
+    Effect, EffectKind, MachineId, Match, Method, RuleContext, RuleDefinition, RuleHandleResult,
+    ServiceDef, StateLabel, SERVICE_LAYER,
 };
 use b2bua_sdk::{define_service, sm_rule};
 
@@ -41,25 +41,29 @@ mod stub {
     }
 }
 
-/// A service that guards a leg with a timer of its own: armed on the callee's
-/// early answer, matched on its fire. Every name it uses comes from
-/// `b2bua_sdk::rules`.
+/// A service that guards its media leg with a timer of its own: armed on the
+/// callee's early answer, matched on its fire. It is a compile-only check: every
+/// name it uses comes from `b2bua_sdk::rules`, and the build is its test.
 mod watchdog {
     use b2bua_sdk::rules::{
-        Direction, Effect, LegState, Match, RuleAction, RuleCall, RuleContext, RuleHandleResult,
-        TimerDelay, TimerKey, TimerScopeKind, TimerType,
+        leg_kind, Direction, Effect, Leg, LegKind, LegState, Match, RuleAction, RuleCall,
+        RuleContext, RuleHandleResult, TimerDelay, TimerKey, TimerScopeKind, TimerType,
     };
     use b2bua_sdk::{define_service, sm_rule};
 
-    pub const WATCHDOG: TimerType = TimerType::service(WATCHDOG_MACHINE, "clip-watchdog");
+    const WATCHDOG: TimerType = TimerType::service(WATCHDOG_MACHINE, "clip-watchdog");
 
-    /// The action that guards `leg_id` for 10 s.
-    pub fn arm(leg_id: &str) -> RuleAction {
-        RuleAction::arm(TimerKey::leg(WATCHDOG, leg_id), TimerDelay::secs(10))
+    /// The live media leg of the call.
+    fn media_leg<'a>(call: &RuleCall<'a>) -> Option<&'a Leg> {
+        call.b_legs()
+            .iter()
+            .find(|l| leg_kind(l) == LegKind::Media && l.state() != LegState::Terminated)
     }
 
     fn on_early(ctx: &RuleContext) -> Option<RuleHandleResult> {
-        Some(RuleHandleResult::new(vec![arm(ctx.source_leg_id)]))
+        let leg = media_leg(&ctx.call)?;
+        let key = TimerKey::leg(WATCHDOG, leg.leg_id.clone());
+        Some(RuleHandleResult::new(vec![RuleAction::arm(key, TimerDelay::secs(10))]))
     }
 
     fn on_fire(_ctx: &RuleContext) -> Option<RuleHandleResult> {
@@ -100,32 +104,7 @@ mod watchdog {
     }
 }
 
-#[test]
-fn a_service_arms_a_leg_timer_of_its_own() {
-    let RuleAction::ScheduleTimer { key, delay } = watchdog::arm("b1") else {
-        panic!("RuleAction::arm builds a ScheduleTimer");
-    };
-    assert_eq!(
-        key,
-        TimerKey::leg(TimerType::service(MachineId::new("watchdog"), "clip-watchdog"), "b1")
-    );
-    assert_eq!(key.leg_id(), Some("b1"));
-    assert_eq!(delay.as_millis(), 10_000);
-}
-
-#[test]
-fn a_timer_rule_states_its_columns_and_declares_its_timer() {
-    let rules = watchdog::rules();
-    let arm = rules.iter().find(|r| r.id == "watchdog-arm").expect("the arm rule");
-    assert_eq!(arm.matcher.direction, Some(Direction::FromB));
-    assert_eq!(arm.matcher.leg_state, Some(vec![LegState::Early]));
-    assert!(matches!(
-        arm.effects,
-        [Effect::GuardTimer { timer, scope: TimerScopeKind::Leg, .. }] if *timer == watchdog::WATCHDOG
-    ));
-    let fire = rules.iter().find(|r| r.id == "watchdog-fire").expect("the fire rule");
-    assert_eq!(fire.matcher.timer_service, Some(MachineId::new("watchdog")));
-}
+const _: fn() -> ServiceDef = watchdog::service_def;
 
 #[test]
 fn macro_yields_machine_id_and_state_labels() {

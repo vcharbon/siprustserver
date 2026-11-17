@@ -36,7 +36,7 @@ flowchart TB
 | You write | Against | To do what |
 |---|---|---|
 | A decision engine | The `b2bua-decision` crate | Route, reject or redirect each new call, and decide the next step when a route fails. |
-| Services (optional) | The `b2bua-sdk` crate, with the model types of the `call` crate | Add steps to the call flow: play an announcement, change early media, control a transfer. |
+| Services (optional) | The `b2bua-sdk` crate alone (`b2bua_sdk::rules`) | Add steps to the call flow: play an announcement, change early media, control a transfer. |
 | A worker binary | The `b2bua-runner-kit` crate | Join your engine and services to the platform, in a few lines. |
 
 With no service, the call engine is a full B2BUA: it relays a call between two legs, with
@@ -181,7 +181,7 @@ One service is a sample.
 | `announcement` | Plays a clip from a media server as early media, then calls the real destination. It controls the media server with MSCML over INFO. |
 
 `announcement` shows how to write a service outside the engine. It is in its own crate, and it
-uses the SDK and the model types of the `call` crate only. Read
+depends on the SDK alone. Read
 `crates/announcement/src/lib.rs` as the model for a service of your own.
 
 It is a sample for two reasons. Its crate has no tier, so the purity check and the panic-site
