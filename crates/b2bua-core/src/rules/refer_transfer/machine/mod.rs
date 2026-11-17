@@ -52,6 +52,7 @@ define_service! {
         realign::a_realign_timeout(),
         guards::a_glare_reinvite(),
         guards::overall_timeout(),
+        guards::referrer_bye_in_realign(),
         guards::b_in_realign_reject(),
     ],
 }

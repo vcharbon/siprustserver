@@ -1,14 +1,14 @@
 //! Cross-phase guards + the overall-safety watchdog: a second REFER (491),
-//! glare re-INVITEs from C or A during realign (491), the referrer B's non-BYE
-//! in-dialog requests during realign (481), and the whole-transfer safety
-//! timeout (rollback).
+//! glare re-INVITEs from C or A during realign (491), the referrer B's
+//! in-dialog requests during realign (its BYE ends its leg alone, anything
+//! else 481), and the whole-transfer safety timeout (rollback).
 
 use b2bua_sdk::sm_rule;
 use call::{CdrEventType, Direction, TerminationCause, TimeoutKind};
 
 use super::{state, Phase, TRANSFER_MACHINE};
 use crate::rules::refer_transfer::ok;
-use b2bua_sdk::model::{Effect, Match, RuleAction, RuleDefinition};
+use b2bua_sdk::model::{Effect, LegEnd, Match, RuleAction, RuleDefinition};
 use call::TimerKey;
 
 /// transfer-reject-second-refer — a second REFER while active → 491.
@@ -135,9 +135,49 @@ pub(super) fn overall_timeout() -> RuleDefinition {
     }
 }
 
+/// transfer-referrer-bye — referrer B's BYE during realigning. B was told the
+/// transfer succeeded (NOTIFY sipfrag 200) and is no longer a party of the
+/// session (RFC 5589 §6.1): its BYE is answered 200 and ends B's leg alone;
+/// the transfer goes on to merge A↔C.
+pub(super) fn referrer_bye_in_realign() -> RuleDefinition {
+    sm_rule! {
+        id: "transfer-referrer-bye",
+        machine: TRANSFER_MACHINE,
+        active: [ Phase::CRealigning, Phase::ARealigning ],
+        transitions: [],
+        effects: [
+            Effect::Respond { status: 200, label: "200 → B (the referrer leaves; the transfer goes on)" },
+        ],
+        matcher: Match::request()
+            .method("BYE")
+            .direction(Direction::FromB)
+            .filter(|ctx| {
+                state(ctx).map(|s| s.referrer_leg_id.as_str()) == Some(ctx.source_leg_id)
+            }),
+        handle: |ctx| {
+            let referrer = ctx.source_leg_id.to_string();
+            ok(vec![
+                RuleAction::Respond {
+                    status: 200,
+                    reason: "OK".to_string(),
+                    body: vec![],
+                    content_type: None,
+                },
+                RuleAction::TerminateLeg { leg_id: referrer.clone(), end: LegEnd::PeerByeAnswered },
+                RuleAction::AddCdrEvent {
+                    event_type: CdrEventType::Bye,
+                    leg_id: referrer,
+                    status_code: None,
+                    reason: None,
+                },
+            ])
+        },
+    }
+}
+
 /// transfer-b-in-cre-are-reject — referrer B's non-BYE in-dialog request
 /// during realigning → 481 (B's signalling is "dead" until merge; its BYE
-/// is still allowed through `relay-bye`).
+/// is `transfer-referrer-bye`'s).
 pub(super) fn b_in_realign_reject() -> RuleDefinition {
     sm_rule! {
         id: "transfer-b-in-cre-are-reject",

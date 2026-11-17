@@ -165,9 +165,9 @@ pub(super) fn c_realign_timeout() -> RuleDefinition {
 /// transfer-a-realign-200 — A answers the a-realign re-INVITE (200) →
 /// merge(a, c). The transfer is complete: ACK A, cancel A's
 /// `refer_reinvite_answer` + the overall-safety timer, `merge(a, cLegId)`
-/// (A↔C now bridged), CDR answer "transfer-completed", and clear the slice.
-/// B is left an orphan confirmed leg — a subsequent A BYE → begin-termination
-/// BYEs both B and C.
+/// (A↔C now bridged), release the referrer B when it has not hung up (BYE;
+/// a BYE of B's crossing it is `resolve-cross-bye`'s), CDR answer
+/// "transfer-completed", and clear the slice.
 pub(super) fn a_realign_200() -> RuleDefinition {
     sm_rule! {
         id: "transfer-a-realign-200",
@@ -179,6 +179,7 @@ pub(super) fn a_realign_200() -> RuleDefinition {
             Effect::GuardTimer { timer: call::TimerType::ReferReinviteAnswer, scope: call::TimerScopeKind::Leg, label: "cancel A re-INVITE watchdog" },
             Effect::GuardTimer { timer: call::TimerType::ReferOverallSafety, scope: call::TimerScopeKind::Call, label: "cancel overall" },
             Effect::LifecycleCommand { label: "merge A↔C (transfer complete)" },
+            Effect::Originate { method: Method::Bye, label: "BYE → B (release the referrer)" },
         ],
         matcher: Match::response()
             .method("INVITE")
@@ -196,6 +197,7 @@ pub(super) fn a_realign_200() -> RuleDefinition {
                     leg_a: "a".to_string(),
                     leg_b: c_leg_id,
                 },
+                RuleAction::DestroyLeg { leg_id: st.referrer_leg_id.clone(), headers: vec![] },
                 RuleAction::AddCdrEvent {
                     event_type: CdrEventType::Answer,
                     leg_id: "a".to_string(),

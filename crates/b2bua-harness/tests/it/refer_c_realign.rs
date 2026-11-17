@@ -64,12 +64,12 @@ fn assert_notify(txn: &ServerTxn, state: &str, frag: &str) {
     assert!(body.contains(frag), "sipfrag body {body:?} should contain {frag:?}");
 }
 
-/// A hangs up the transferred call: its BYE reaches C, and B, the orphaned
-/// leg, is BYE'd too.
+/// The completed transfer releases B; A then hangs up the transferred call
+/// and her BYE reaches C.
 async fn end_transferred_call(alice_dialog: &mut Dialog, bob: &Agent, charlie: &Agent) {
+    bob.receive("BYE").await.respond(200, "OK").await;
     let mut alice_bye = alice_dialog.bye().await;
     charlie.receive("BYE").await.respond(200, "OK").await;
-    bob.receive("BYE").await.respond(200, "OK").await;
     alice_bye.expect(200).await;
 }
 
@@ -157,7 +157,7 @@ async fn refer_allow_c_realign_happy() {
     let mut a_realign = alice.receive("INVITE").await;
     assert_reinvite(a_realign.request(), CHARLIE_ACTIVE_ANSWER, "a");
 
-    // A answers: the transfer completes. A's BYE reaches C and the orphaned B.
+    // A answers: the transfer completes and releases B. A's BYE reaches C.
     a_realign.respond(200, "OK").with_sdp(ALICE_REALIGN_ANSWER).await;
     alice.receive("ACK").await;
     end_transferred_call(&mut alice_dialog, &bob, &charlie).await;
@@ -365,7 +365,7 @@ async fn refer_allow_c_realign_c_glare() {
     let mut a_realign = alice.receive("INVITE").await;
     assert_reinvite(a_realign.request(), CHARLIE_ACTIVE_ANSWER, "a");
 
-    // A answers: the transfer completes. A's BYE reaches C and the orphaned B.
+    // A answers: the transfer completes and releases B. A's BYE reaches C.
     a_realign.respond(200, "OK").with_sdp(ALICE_REALIGN_ANSWER).await;
     alice.receive("ACK").await;
     end_transferred_call(&mut alice_dialog, &bob, &charlie).await;
@@ -436,7 +436,7 @@ async fn refer_allow_c_realign_b_non_bye() {
     let mut a_realign = alice.receive("INVITE").await;
     assert_reinvite(a_realign.request(), CHARLIE_ACTIVE_ANSWER, "a");
 
-    // A answers: the transfer completes. A's BYE reaches C and the orphaned B.
+    // A answers: the transfer completes and releases B. A's BYE reaches C.
     a_realign.respond(200, "OK").with_sdp(ALICE_REALIGN_ANSWER).await;
     alice.receive("ACK").await;
     end_transferred_call(&mut alice_dialog, &bob, &charlie).await;
