@@ -30,6 +30,11 @@ const UPDATE_OFFER: &str = "v=0\r\no=alice 1 3 IN IP4 127.0.0.1\r\ns=-\r\nc=IN I
 /// Bob's answer to the UPDATE's offer.
 const UPDATE_ANSWER: &str = "v=0\r\no=bob 1 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20002 RTP/AVP 0\r\n";
 
+/// Bob's offer, in his reliable 183 to an INVITE that carried none.
+const EARLY_OFFER: &str = "v=0\r\no=bob 2 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20004 RTP/AVP 0\r\n";
+/// Alice's answer to [`EARLY_OFFER`], in her PRACK.
+const EARLY_ANSWER: &str = "v=0\r\no=alice 2 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10006 RTP/AVP 0\r\n";
+
 /// Bob's own `RSeq`.
 const BOB_RSEQ: u32 = 4711;
 
@@ -59,6 +64,19 @@ fn waive_overtaken_prack(h: &Harness) {
         WaiverScope::rule(
             DIALOG_CSEQ_BACKWARDS,
             "the PRACK's retransmission reaches bob after the UPDATE: its 500 is the stimulus",
+        )
+        .on_party("bob"),
+    );
+}
+
+/// Bob's waiver for denying 481 a PRACK whose reliable 183 he still holds
+/// unacknowledged: RFC 3262 §3 owes that PRACK a 2xx.
+fn waive_prack_denied_481(h: &Harness) {
+    h.waive(
+        WaiverScope::rule(
+            "prack-2xx-or-481",
+            "bob denies 481 a PRACK for the reliable 183 he still holds unacknowledged: \
+             the 481 is the stimulus",
         )
         .on_party("bob"),
     );
@@ -150,14 +168,7 @@ async fn a_relayed_prack_refused_by_the_callee_draws_the_caller_s_200() {
 #[tokio::test(start_paused = true)]
 async fn a_relayed_prack_denied_481_by_the_callee_draws_the_caller_s_200() {
     let h = Harness::with_transit_delay("relayed-prack-481", 1);
-    h.waive(
-        WaiverScope::rule(
-            "prack-2xx-or-481",
-            "bob answers the relayed PRACK 481 (RFC 3262 §3's answer for a provisional he no \
-             longer holds unacknowledged): the 481 is the stimulus",
-        )
-        .on_party("bob"),
-    );
+    waive_prack_denied_481(&h);
     let alice = h.agent_auto("alice").await;
     let bob = h.agent_auto("bob").await;
     let b2bua = B2buaSut::route_all_to(&bob.addr().ip().to_string(), bob.addr().port())
@@ -193,6 +204,63 @@ async fn a_relayed_prack_denied_481_by_the_callee_draws_the_caller_s_200() {
     bob.drain().await;
     b2bua.assert_fully_reaped();
     let _ = h.finish().await;
+}
+
+/// Alice's INVITE carries no offer, bob's reliable 183 carries his, and her
+/// PRACK carries her answer (RFC 3262 §5). Bob denies the relayed PRACK 481:
+/// alice's PRACK draws one final, a 200, since it offered nothing to refuse.
+/// Bob may not answer the INVITE 2xx with his offer's 183 unacknowledged
+/// (RFC 3262 §3): alice CANCELs.
+#[tokio::test(start_paused = true)]
+async fn a_relayed_prack_answering_the_callee_s_offer_denied_481_draws_the_caller_s_200() {
+    let h = Harness::with_transit_delay("relayed-prack-answer-481", 1);
+    waive_prack_denied_481(&h);
+    let alice = h.agent_auto("alice").await;
+    let alice_addr = alice.addr();
+    let bob = h.agent_auto("bob").await;
+    let b2bua = B2buaSut::route_all_to(&bob.addr().ip().to_string(), bob.addr().port())
+        .start(&h, "b2bua", &h.next_addr().to_string())
+        .await;
+
+    let mut call =
+        alice.invite(&bob).with_header("Supported", "100rel").through(b2bua.addr).send().await;
+    let mut uas = bob.receive("INVITE").await;
+    assert!(uas.request().sdp().is_none(), "alice's INVITE reaches bob without an offer");
+    uas.respond(183, "Session Progress").reliable(BOB_RSEQ).with_sdp(EARLY_OFFER).await;
+    let p183 = call.expect(183).await;
+    assert!(p183.sdp().is_some(), "bob's offer reaches alice in the reliable 183");
+    let rack = format!(
+        "{} {} INVITE",
+        p183.header::<sip_message::header::RSeq>().expect("RSeq").expect("RSeq").value(),
+        p183.cseq().seq()
+    );
+    let mut prack = call
+        .send_request(InDialogMethod::Prack)
+        .with_rack(&rack)
+        .with_sdp(EARLY_ANSWER)
+        .send()
+        .await;
+    bob.receive("PRACK").await.respond(481, "Call/Transaction Does Not Exist").await;
+    prack.expect(200).await;
+
+    let mut cxl = call.cancel().await;
+    cxl.expect(200).await;
+    bob.receive("CANCEL").await.respond(200, "OK").await;
+    uas.respond(487, "Request Terminated").await;
+    bob.receive("ACK").await;
+    call.expect(487).await;
+
+    settle_until(|| b2bua.is_reaped()).await;
+    alice.drain().await;
+    bob.drain().await;
+    b2bua.assert_fully_reaped();
+    let report = h.finish().await;
+    assert_eq!(
+        prack_finals(&report, alice_addr),
+        [200],
+        "a PRACK carrying the answer to the callee's offer draws the caller's 200, \
+         never the callee's refusal (RFC 3262 §3)",
+    );
 }
 
 /// Bob's reliable 183 answers alice's offer, and her PRACK carries a new one
