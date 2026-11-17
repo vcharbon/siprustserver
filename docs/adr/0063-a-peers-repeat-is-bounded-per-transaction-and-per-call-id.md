@@ -103,10 +103,9 @@ caller, BYE or CANCEL on its legs, and a CDR with the `MessageBudget` cause. The
 composes its full teardown, and the owner drops what goes to the muted Call-ID.
 
 The mute lasts until every call found is released, and in every case until 64·T1 after the
-last dropped message. The layer reads the first as its own state: the mute holds while a
-transaction of the Call-ID lives, and the teardown of each call found opens one there (its BYE,
-CANCEL or 503) that outlives the call's `TerminatingTimeout`. A trip after the calls' removal
-only mutes.
+last dropped message: the mute holds while a transaction of the Call-ID lives, and each call's
+teardown opens one there that outlives its `TerminatingTimeout`. A trip after the calls'
+removal only mutes.
 
 ### 5. The count is not replicated
 
@@ -117,15 +116,10 @@ in practice.
 
 ### 6. Detection
 
-- `b2bua_txn_message_budget_trips_total` counts trips, and the trip logs its Call-ID.
-- `b2bua_cap_trips_total{cap="messages_per_call_id", kind="peer"}` counts the calls ended. A
-  peer cap is a counter, not an alert (ADR-0057 §7).
-- `b2bua_txn_copies_past_schedule_total{kind}` counts what §1 absorbs.
-- `b2bua_copies_past_schedule_total{kind}` counts what §2 absorbs: a call's re-ACK of a 2xx or
-  a non-2xx, and the book's.
-- `b2bua_txn_muted_messages_total{direction}` counts what a mute drops.
-
-The transaction layer's families carry the `b2bua_txn_` prefix the worker serves them under.
+Trips count on `b2bua_txn_message_budget_trips_total`, and the calls ended on
+`b2bua_cap_trips_total{cap="messages_per_call_id", kind="peer"}`, a counter, not an alert
+(ADR-0057 §7). The families that count absorbed copies and muted messages are listed in the
+appendix.
 
 ## Consequences
 

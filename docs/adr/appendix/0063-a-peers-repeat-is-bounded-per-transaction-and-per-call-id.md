@@ -95,3 +95,15 @@ once received, which gives 88. A transaction that carries no counted event ends 
 unanswered keepalive). A budget of 100 × `max_messages_per_call_lifetime` is therefore out of
 reach of a call the lifetime cap has not yet ended. The default, 10 000 000, meets that
 relation at the lifetime cap's default of 100 000, which ADR-0057 §9 sizes.
+
+## Detection (§6)
+
+- `b2bua_txn_message_budget_trips_total` counts trips, and the trip logs its Call-ID.
+- `b2bua_cap_trips_total{cap="messages_per_call_id", kind="peer"}` counts the calls ended. A
+  peer cap is a counter, not an alert (ADR-0057 §7).
+- `b2bua_txn_copies_past_schedule_total{kind}` counts what §1 absorbs.
+- `b2bua_copies_past_schedule_total{kind}` counts what §2 absorbs: a call's re-ACK of a 2xx or
+  a non-2xx, and the book's.
+- `b2bua_txn_muted_messages_total{direction}` counts what a mute drops.
+
+The transaction layer's families carry the `b2bua_txn_` prefix the worker serves them under.
