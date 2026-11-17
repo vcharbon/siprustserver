@@ -80,18 +80,18 @@ with it, because after a takeover the copy is the first chance to send it.
 
 ## Sizing the budget (§3)
 
-A transaction carries four kinds of message: the request, a provisional, a final and the
-ACK. A compliant one puts each kind on one Call-ID at most 1 + R times, where R is the largest
-`Class::resends()` (10, the non-INVITE ladder capped at T2):
+The lifetime cap counts every request and every response the dispatcher is offered: each
+provisional, each final and each forked 2xx is one counted event. For each counted event, a
+compliant peer and the node put at most 1 + R of each of these kinds of message on its
+Call-ID, where R is the largest `Class::resends()` (10, the non-INVITE ladder capped at T2):
 
-- the request and its copies;
-- the provisional, replayed once per answered copy;
-- the final, with its Timer G re-sends or replays;
-- one hop ACK per final received.
+- the message and its copies;
+- the node's answers to those copies (a replayed provisional or final);
+- the node's own re-sends (Timer G);
+- the hop ACKs to a final.
 
 That is 44 messages. A call hairpinned through the node sees each message twice, once sent and
-once received, which gives 88. Every transaction that does not end its call carries at least
-one message the lifetime cap counts: the request, or the response to the node's own request.
-A budget of 100 × `max_messages_per_call_lifetime` is therefore out of reach of a call the
-lifetime cap has not yet ended. The default, 10 000 000, meets that relation at the lifetime
-cap's default of 100 000, which ADR-0057 §9 sizes.
+once received, which gives 88. A transaction that carries no counted event ends its call (an
+unanswered keepalive). A budget of 100 × `max_messages_per_call_lifetime` is therefore out of
+reach of a call the lifetime cap has not yet ended. The default, 10 000 000, meets that
+relation at the lifetime cap's default of 100 000, which ADR-0057 §9 sizes.
