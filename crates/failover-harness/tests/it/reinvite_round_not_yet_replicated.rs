@@ -42,21 +42,21 @@ const BOB: &str = "127.0.0.1:5070";
 
 /// An established call whose re-INVITE round reached the callee, its 100 heard
 /// by the caller, and whose node then died with the round in no replica.
-struct LostRound {
-    fh: FailoverHarness,
+pub(crate) struct LostRound {
+    pub(crate) fh: FailoverHarness,
     alice: Agent,
-    bob: Agent,
+    pub(crate) bob: Agent,
     proxy: ProxySut,
     w_b1: ReplicatedB2buaSut,
     w_b2: ReplicatedB2buaSut,
     dialog: Dialog,
-    at_bob: ServerTxn,
+    pub(crate) at_bob: ServerTxn,
     pri_ord: String,
-    call_ref: String,
+    pub(crate) call_ref: String,
     hydrated_before: u64,
 }
 
-async fn lose_a_round(name: &str) -> LostRound {
+pub(crate) async fn lose_a_round(name: &str) -> LostRound {
     lose_a_round_answered(name, false).await
 }
 
@@ -115,12 +115,12 @@ async fn lose_a_round_answered(name: &str, answered: bool) -> LostRound {
 }
 
 impl LostRound {
-    fn survivor(&self) -> &ReplicatedB2buaSut {
+    pub(crate) fn survivor(&self) -> &ReplicatedB2buaSut {
         survivor_of(&self.pri_ord, &self.w_b1, &self.w_b2)
     }
 
     /// The callee's final, `what`, took the call over, once.
-    fn taken_over_once(&self, what: &str) {
+    pub(crate) fn taken_over_once(&self, what: &str) {
         let hydrated = self.survivor().metrics().repl_takeover_hydrated_total();
         assert_eq!(hydrated, self.hydrated_before + 1, "{what} took the call over once");
     }
@@ -132,7 +132,7 @@ impl LostRound {
 
     /// The survivor ends the call: the callee's BYE, numbered past the lost
     /// round, and the caller's, both answered 200.
-    async fn ended_on_both_legs(&mut self) {
+    pub(crate) async fn ended_on_both_legs(&mut self) {
         let mut bye = self.bob.receive("BYE").await;
         assert!(
             bye.request().cseq().seq() > self.round_cseq(),
@@ -144,7 +144,7 @@ impl LostRound {
     }
 
     /// The node returns; the ended call has one CDR and is fully released.
-    async fn settle(mut self) {
+    pub(crate) async fn settle(mut self) {
         self.fh.advance(Duration::from_secs(60)).await;
         let (primary, survivor) = split_mut(&self.pri_ord, &mut self.w_b1, &mut self.w_b2);
         reboot_and_reclaim(&mut self.fh, primary, survivor, &self.pri_ord, &self.proxy).await;

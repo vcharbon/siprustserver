@@ -143,6 +143,7 @@ mod transparent_v1;
 mod turn_point_verbs;
 mod unbacked_turns_write_nothing;
 mod undecided_call_settled_on_departure;
+mod unheld_2xx_copies_bounded;
 mod unheld_response;
 mod verdict_meets_a_down_stream;
 mod via_lb_retarget_glare;

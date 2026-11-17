@@ -168,6 +168,7 @@ mod provisional_after_answer;
 mod proxy_b2bua;
 mod reack_bounded;
 mod reack_delayed_offer_after_caller_ack;
+mod reack_non_2xx_copy_bounded;
 mod reack_retransmitted_2xx;
 mod realcall_functional;
 mod reaped_limiter_check;
