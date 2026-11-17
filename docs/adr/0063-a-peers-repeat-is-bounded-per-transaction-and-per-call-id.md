@@ -87,7 +87,7 @@ their own bounds and do not count.
 - **Entry lifetime.** An entry lives while a transaction of its Call-ID lives, and for 64·T1
   after its last message. A transaction makes its entry past the bound; a muted entry or
   one with a live transaction is never evicted. A new Call-ID on a full bound replaces the
-  first entry gone idle, else goes uncounted (`b2bua_txn_message_budget_uncounted_total`).
+  idle entry least recently counted, else goes uncounted (`b2bua_txn_message_budget_uncounted_total`).
 
 ### 4. A trip mutes the Call-ID and ends its call
 
