@@ -390,10 +390,6 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                 }),
             |ctx| ok(crate::rules::relay::re_ack(ctx)),
         ),
-        // RFC 3261 §13.2.2.4 — a fork STRAGGLER's 2xx: a 2xx to the INVITE a
-        // b-leg sent, under a To-tag no live dialog of that leg carries, once another
-        // fork confirmed the leg. The UAC ACKs every 2xx and BYEs a dialog it
-        // does not want; the call keeps the winner. A repeat is re-ACKed alone.
         rule(
             "release-fork-straggler-2xx",
             &[],

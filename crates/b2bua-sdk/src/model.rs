@@ -202,8 +202,8 @@ pub enum RuleAction {
         leg_id: String,
     },
     /// Release the fork straggler whose 2xx the current event carries on a
-    /// b-leg another fork already confirmed (RFC 3261 §13.2.2.4): ACK that
-    /// 2xx, and BYE its dialog the first time it arrives.
+    /// b-leg another fork already confirmed (RFC 3261 §13.2.2.4): ACK it and
+    /// BYE its dialog once, re-ACK a copy alone while one is owed (ADR-0057 §10).
     ReleaseStraggler2xx {
         leg_id: String,
     },

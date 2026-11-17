@@ -29,8 +29,8 @@ pub fn reanchor_offset(skew_offset_ms: i64) -> i64 {
 /// Move every absolute instant `call` holds by `offset_ms` (the reading
 /// clock minus the writing clock): the timer ledger's deadlines, the creation
 /// time, each dialled INVITE's send time, each NOTIFY in flight's send time, each
-/// request record's deadline, each answered request's Timer J, each awaited
-/// REFER authorization's send time, the CDR
+/// request record's deadline, each re-ACKed 2xx copy's arrival, each answered
+/// request's Timer J, each awaited REFER authorization's send time, the CDR
 /// events, the message rings, the decision log, the termination record and the
 /// start of a transfer or reroute. Durations and counters are left as they
 /// are, and so is the opaque service `ext`. A zero offset changes nothing.
@@ -73,7 +73,8 @@ pub fn shift_instants(call: &mut Call, offset_ms: i64) {
 }
 
 /// The instants one leg holds: its INVITE's send time, its message ring, each
-/// dialog's NOTIFYs in flight and the deadline of each request record.
+/// dialog's NOTIFYs in flight, the last re-ACKed copy of the 2xx its last sent
+/// INVITE took and the deadline of each request record.
 fn shift_leg(leg: &mut Leg, offset_ms: i64) {
     if let Some(invite) = leg.outbound_invite_mut() {
         invite.sent_at_ms = invite.sent_at_ms.saturating_add(offset_ms);
@@ -87,6 +88,10 @@ fn shift_leg(leg: &mut Leg, offset_ms: i64) {
     for dialog in leg.dialogs.iter_mut() {
         for notify in dialog.subscriptions.iter_mut().filter_map(|s| s.notify.as_mut()) {
             notify.sent_at_ms = notify.sent_at_ms.saturating_add(offset_ms);
+        }
+        if let Some(copy) = super::sent_exchange_mut(dialog).and_then(|x| x.re_acked_copy.as_mut())
+        {
+            copy.at_ms = copy.at_ms.saturating_add(offset_ms);
         }
         for record in dialog.requests.iter_mut() {
             shift_deadline(record, offset_ms);

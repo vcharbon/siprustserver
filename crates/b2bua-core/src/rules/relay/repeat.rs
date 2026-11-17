@@ -23,7 +23,8 @@ use sip_retransmit::Class;
 /// last sent on it while no pending relay of that CSeq is open (a first-time
 /// re-INVITE final is claimed by the relay rules). A 2xx answering anything
 /// but an INVITE — the 200 to a CANCEL carries the INVITE's number — is never
-/// a copy of one, nor is a retired fork's: its release answers each copy.
+/// a copy of one, nor is a retired fork's: its release re-ACKs a copy while a
+/// re-ACK is owed ([`re_ack_owed`]).
 pub(crate) fn retransmitted_2xx(leg: &Leg, dialog: &Dialog, resp: &SipResponse) -> bool {
     let taken = call::helpers::invite_taken(dialog) && !dialog.is_retired();
     if !taken || !invite_2xx_on(dialog, resp) {
@@ -56,7 +57,10 @@ fn invite_2xx_on(dialog: &Dialog, resp: &SipResponse) -> bool {
 /// Count `event`, received at `now_ms` on `leg_id`'s dialog `named`, on that
 /// dialog's INVITE record when it is a [`copy_of_taken_2xx`], before the rules
 /// read it, and mark it owed its re-ACK or not: the re-ACK reads the mark
-/// ([`re_ack_owed`]). Returns whether the copy is absorbed.
+/// ([`re_ack_owed`]). Every copy the answerer sends counts toward its ladder
+/// (§13.3.1.4), also one no rule re-ACKs: a copy arriving before this side's
+/// ACK left (no `ack_branch` yet), or one on a retired a-leg dialog (a fork
+/// release is a b-leg's). Returns whether the copy is absorbed.
 pub(crate) fn count_copy(
     call: &mut Call,
     leg_id: &str,

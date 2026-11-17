@@ -20,8 +20,9 @@ use super::teardown::Relayed;
 use super::ActionExecutor;
 
 impl ActionExecutor<'_> {
-    /// ACK the straggler 2xx the current event carries on `leg_id`, and BYE its
-    /// dialog the first time it arrives.
+    /// ACK the straggler 2xx the current event carries on `leg_id` and BYE its
+    /// dialog the first time it arrives; re-ACK a later copy while one is owed
+    /// ([`re_ack_released`]).
     ///
     /// A delayed offer (§13.2.1: the leg's INVITE carried none) puts the offer
     /// in the 2xx, and the ACK MUST answer it (§13.2.2.4): the answer rejects
