@@ -104,9 +104,10 @@ $SF --to-pcap capture.anon.flows.json --out capture.anon.pcap
 ```
 
 Encodes an emitted (typically anonymized) flows document as a classic pcap
-(Ethernet / IPv4+IPv6 / UDP, the document's own sockets and timestamps), so it
-is a capture again for every reader. The review's own regression fixture,
-`crates/sip-pcap/tests/fixtures/rfc-review/`, is made that way.
+(Ethernet / IPv4+IPv6 / UDP with computed checksums, the document's own sockets
+and timestamps), so it is a capture again for every reader. The review's own
+regression fixture, `crates/sip-pcap/tests/fixtures/rfc-review/`, is made that
+way.
 
 ## One call of a document
 

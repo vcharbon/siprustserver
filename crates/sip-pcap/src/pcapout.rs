@@ -94,8 +94,9 @@ fn socket(text: &str) -> Option<SocketAddr> {
 }
 
 /// Ethernet II + IP + UDP around `payload`. The MAC addresses are
-/// placeholders — a capture consumer reads nothing from them — and the UDP
-/// checksum is left at zero, which IPv4 permits and every reader accepts.
+/// placeholders — a capture consumer reads nothing from them. The UDP
+/// checksum is computed over the pseudo-header of either family (RFC 768,
+/// RFC 8200 §8.1), so an IPv6 datagram is one a strict stack accepts.
 fn frame(src: SocketAddr, dst: SocketAddr, payload: &[u8]) -> Result<Vec<u8>, String> {
     let udp_len = 8 + payload.len();
     if udp_len > u16::MAX as usize {
@@ -104,6 +105,7 @@ fn frame(src: SocketAddr, dst: SocketAddr, payload: &[u8]) -> Result<Vec<u8>, St
     let mut f = Vec::with_capacity(14 + 40 + udp_len);
     f.extend_from_slice(&[0x02, 0, 0, 0, 0, 0x02]); // dst MAC
     f.extend_from_slice(&[0x02, 0, 0, 0, 0, 0x01]); // src MAC
+    let mut pseudo = Vec::with_capacity(40);
     match (src.ip(), dst.ip()) {
         (IpAddr::V4(s), IpAddr::V4(d)) => {
             f.extend_from_slice(&0x0800u16.to_be_bytes());
@@ -113,38 +115,58 @@ fn frame(src: SocketAddr, dst: SocketAddr, payload: &[u8]) -> Result<Vec<u8>, St
             h[2..4].copy_from_slice(&(total as u16).to_be_bytes());
             h[6] = 0x40; // DF
             h[8] = 64; // TTL
-            h[9] = 17; // UDP
+            h[9] = UDP;
             h[12..16].copy_from_slice(&s.octets());
             h[16..20].copy_from_slice(&d.octets());
-            let sum = ipv4_checksum(&h);
+            let sum = internet_checksum(&[&h]);
             h[10..12].copy_from_slice(&sum.to_be_bytes());
             f.extend_from_slice(&h);
+            pseudo.extend_from_slice(&s.octets());
+            pseudo.extend_from_slice(&d.octets());
+            pseudo.extend_from_slice(&[0, UDP]);
+            pseudo.extend_from_slice(&(udp_len as u16).to_be_bytes());
         }
         (IpAddr::V6(s), IpAddr::V6(d)) => {
             f.extend_from_slice(&0x86ddu16.to_be_bytes());
             let mut h = [0u8; 40];
             h[0] = 0x60;
             h[4..6].copy_from_slice(&(udp_len as u16).to_be_bytes());
-            h[6] = 17; // UDP
+            h[6] = UDP;
             h[7] = 64; // hop limit
             h[8..24].copy_from_slice(&s.octets());
             h[24..40].copy_from_slice(&d.octets());
             f.extend_from_slice(&h);
+            pseudo.extend_from_slice(&s.octets());
+            pseudo.extend_from_slice(&d.octets());
+            pseudo.extend_from_slice(&(udp_len as u32).to_be_bytes());
+            pseudo.extend_from_slice(&[0, 0, 0, UDP]);
         }
         _ => return Err(format!("mixed address families {src} → {dst}")),
     }
-    f.extend_from_slice(&src.port().to_be_bytes());
-    f.extend_from_slice(&dst.port().to_be_bytes());
-    f.extend_from_slice(&(udp_len as u16).to_be_bytes());
-    f.extend_from_slice(&0u16.to_be_bytes()); // checksum: none
+    let mut udp = [0u8; 8];
+    udp[0..2].copy_from_slice(&src.port().to_be_bytes());
+    udp[2..4].copy_from_slice(&dst.port().to_be_bytes());
+    udp[4..6].copy_from_slice(&(udp_len as u16).to_be_bytes());
+    let sum = match internet_checksum(&[&pseudo, &udp, payload]) {
+        0 => 0xffff,
+        sum => sum,
+    };
+    udp[6..8].copy_from_slice(&sum.to_be_bytes());
+    f.extend_from_slice(&udp);
     f.extend_from_slice(payload);
     Ok(f)
 }
 
-fn ipv4_checksum(header: &[u8; 20]) -> u16 {
-    let mut sum: u32 = 0;
-    for pair in header.chunks(2) {
-        sum += u32::from(u16::from_be_bytes([pair[0], pair[1]]));
+/// The IP protocol number of UDP.
+const UDP: u8 = 17;
+
+/// The Internet checksum (RFC 1071) of `parts` read as one byte string: the
+/// ones' complement of the ones' complement sum of its big-endian 16-bit
+/// words, an odd last byte padded with a zero.
+fn internet_checksum(parts: &[&[u8]]) -> u16 {
+    let mut sum: u64 = 0;
+    for (i, &byte) in parts.iter().flat_map(|p| p.iter()).enumerate() {
+        sum += if i % 2 == 0 { u64::from(byte) << 8 } else { u64::from(byte) };
     }
     while sum >> 16 != 0 {
         sum = (sum & 0xffff) + (sum >> 16);
@@ -217,6 +239,64 @@ mod tests {
                 .sip_messages,
             2
         );
+    }
+
+    /// Each record's UDP segment and the pseudo-header of its family, read
+    /// from the written capture's own frames.
+    fn udp_segments(pcap: &[u8]) -> Vec<(Vec<u8>, Vec<u8>)> {
+        let mut out = Vec::new();
+        let mut at = 24;
+        while at < pcap.len() {
+            let len = u32::from_le_bytes(pcap[at + 8..at + 12].try_into().unwrap()) as usize;
+            let frame = &pcap[at + 16..at + 16 + len];
+            at += 16 + len;
+            let (segment, pseudo) = match u16::from_be_bytes([frame[12], frame[13]]) {
+                0x0800 => {
+                    let segment = &frame[34..];
+                    let len = (segment.len() as u16).to_be_bytes();
+                    (segment, [&frame[26..34], &[0, 17], &len[..]].concat())
+                }
+                0x86dd => {
+                    let segment = &frame[54..];
+                    let len = (segment.len() as u32).to_be_bytes();
+                    (segment, [&frame[22..54], &len[..], &[0, 0, 0, 17]].concat())
+                }
+                other => panic!("ethertype {other:#06x}"),
+            };
+            out.push((pseudo, segment.to_vec()));
+        }
+        out
+    }
+
+    /// The UDP checksum of each written datagram verifies the way a receiving
+    /// stack verifies it (RFC 768, RFC 8200 §8.1: the ones' complement sum of
+    /// pseudo-header and segment, checksum field included, is all ones), and
+    /// is never the zero IPv6 forbids; an odd payload length included.
+    #[test]
+    fn every_written_udp_checksum_verifies_and_ipv6_is_never_zero() {
+        let mut odd = dg(1, "[2001:db8::1]:5060", "[2001:db8::2]:5070");
+        odd.payload.push(b'x');
+        let datagrams = [
+            dg(0, "[2001:db8::1]:5060", "[2001:db8::2]:5070"),
+            odd,
+            dg(2, "192.0.2.1:5060", "192.0.2.2:5060"),
+        ];
+        let pcap = datagrams_to_pcap(&datagrams).expect("encodes");
+        assert_eq!(read_back(&pcap).1.datagrams, 3, "the reader takes every record");
+
+        let segments = udp_segments(&pcap);
+        assert_eq!(segments.len(), 3);
+        for (i, (pseudo, segment)) in segments.iter().enumerate() {
+            let checksum = u16::from_be_bytes([segment[6], segment[7]]);
+            assert_ne!(checksum, 0, "record {i} carries no checksum");
+            let mut sum: u32 = 0;
+            for word in pseudo.chunks(2).chain(segment.chunks(2)) {
+                sum += (u32::from(word[0]) << 8) | u32::from(*word.get(1).unwrap_or(&0));
+            }
+            let folded = (sum & 0xffff) + (sum >> 16);
+            let folded = (folded & 0xffff) + (folded >> 16);
+            assert_eq!(folded, 0xffff, "record {i}: checksum {checksum:#06x} does not verify");
+        }
     }
 
     /// The datagrams the parser rejected come back as they were captured.
