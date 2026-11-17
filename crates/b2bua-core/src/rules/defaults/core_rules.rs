@@ -510,33 +510,7 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                 .status_class(2),
             |_ctx| ok(vec![RuleAction::RelayToPeer { transform: no_transform() }]),
         ),
-        // A relayed non-INVITE request's **non-2xx final** is relayed back to
-        // its requester — plain transaction-layer symmetry (RFC 3261 §8.1.3.3).
-        // The non-INVITE sibling of `relay-reinvite-response` (INVITE)
-        // alongside `relay-non-invite-200` (the 2xx half); a relayed PRACK's
-        // failure has its own rules. Matches ONLY when the response
-        // answers a relay record on the source dialog — i.e. a transaction WE
-        // relayed. A B2BUA-originated request (keepalive OPTIONS,
-        // relayFirst18x PRACK, REFER-progress NOTIFY) records as this stack's
-        // own, so its failures keep their own rules — in particular a
-        // keepalive-OPTIONS 481 still reaches `handle-481`'s teardown, which
-        // this rule outranks only for relayed transactions. Like a failed
-        // re-INVITE (§14.1), a failed relayed non-INVITE leaves the dialog and
-        // the call as they were: report the failure to the requester, nothing
-        // more. (BYE never takes this path — it is answered locally and
-        // relayed by no record; the relay executor settles the record on this
-        // final.)
-        rule(
-            "relay-non-invite-failure",
-            &["handle-481"],
-            Match::response()
-                .methods(&["OPTIONS", "INFO", "UPDATE", "REFER", "MESSAGE", "SUBSCRIBE", "NOTIFY"])
-                .filter(|ctx| {
-                    ctx.response().is_some_and(|r| r.status() >= 300)
-                        && ctx.answers_relayed_request()
-                }),
-            |_ctx| ok(vec![RuleAction::RelayToPeer { transform: no_transform() }]),
-        ),
+        super::non_invite_failure::relay_non_invite_failure_rule(),
         super::non_invite_failure::answer_relayed_prack_failure_rule(),
         super::non_invite_failure::relay_offered_prack_failure_rule(),
         // ── failure ─────────────────────────────────────────────────────────

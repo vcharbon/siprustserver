@@ -1,12 +1,33 @@
-//! The non-2xx finals to a PRACK or a NOTIFY: a relayed PRACK's, answered on
-//! its sender's leg by what the PRACK carried, and this stack's own PRACK's or
-//! NOTIFY's, which deny nothing beyond their transaction or subscription. A
-//! relayed NOTIFY's failure, like any other relayed non-INVITE request's, is
-//! `relay-non-invite-failure`'s to relay.
+//! The non-2xx finals to non-INVITE requests other than BYE: a relayed
+//! request's, relayed back to its requester; a relayed PRACK's, answered on
+//! its sender's leg by what the PRACK carried; and this stack's own PRACK's or
+//! NOTIFY's, which deny nothing beyond their transaction or subscription.
 
 use b2bua_sdk::model::{Match, RuleAction, RuleContext, RuleDefinition};
 
 use super::core_rules::{no_transform, ok, rule};
+
+/// `relay-non-invite-failure`: a relayed non-INVITE request's non-2xx final
+/// is relayed back to its requester (RFC 3261 §8.1.3.3), the sibling of
+/// `relay-reinvite-response` and `relay-non-invite-200`; a relayed PRACK's
+/// has the rules below. It matches only a final answering a relay record on
+/// the source dialog: this stack's own requests (keepalive OPTIONS, its own
+/// PRACK, a REFER-progress NOTIFY) keep their own rules, so a keepalive 481
+/// still reaches `handle-481`, which this rule outranks for relays alone. Like
+/// a failed re-INVITE (§14.1), the failure leaves the dialog and the call as
+/// they were. A BYE is answered locally and relayed by no record.
+pub(super) fn relay_non_invite_failure_rule() -> RuleDefinition {
+    rule(
+        "relay-non-invite-failure",
+        &["handle-481"],
+        Match::response()
+            .methods(&["OPTIONS", "INFO", "UPDATE", "REFER", "MESSAGE", "SUBSCRIBE", "NOTIFY"])
+            .filter(|ctx| {
+                ctx.response().is_some_and(|r| r.status() >= 300) && ctx.answers_relayed_request()
+            }),
+        |_ctx| ok(vec![RuleAction::RelayToPeer { transform: no_transform() }]),
+    )
+}
 
 /// Whether the current response is a failure final to a relayed PRACK that
 /// carried an offer (`Some(true)`), or one that carried an answer or no
