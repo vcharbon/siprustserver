@@ -8,7 +8,7 @@
 //! a limiter and must drain it. Whatever limiter the SUT runs, a
 //! `HoldLedger` counts, per call, the holds the SUT was granted, the holds
 //! it released (a replaced set counts as released, and so does a set granted
-//! after the call's release left) and the admits that failed open; a drain
+//! to an admit the call's release overtook) and the admits that failed open; a drain
 //! failure names each set left ([`UnreleasedSet`]). The limiter a test drives
 //! itself is the [`WitnessRig`](crate::witness::WitnessRig); scripted
 //! limiters are in [`doubles`].
@@ -145,17 +145,39 @@ pub struct UnreleasedSet {
     pub key: String,
     /// The holds of the set.
     pub holds: i64,
-    /// The entries the registered store holds for the key (`None`: no store
-    /// is registered, or the store released the key).
-    pub stored: Option<usize>,
+    /// What the registered store holds for the key.
+    pub stored: StoreView,
+}
+
+/// What the registered store holds for one key.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StoreView {
+    /// No store is registered.
+    NoStore,
+    /// The store released the key: it holds nothing and fences it.
+    Released,
+    /// The store holds a set of this many entries for the key (none for a
+    /// key it knows nothing of).
+    Holds(usize),
+}
+
+impl StoreView {
+    fn of(store: Option<&CallStore>, key: &str) -> Self {
+        match store.map(|s| s.held_set(key)) {
+            None => Self::NoStore,
+            Some(None) => Self::Released,
+            Some(Some(set)) => Self::Holds(set.entries.len()),
+        }
+    }
 }
 
 impl std::fmt::Display for UnreleasedSet {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}: {} hold(s)", self.key, self.holds)?;
         match self.stored {
-            Some(entries) => write!(f, ", the store holds {entries}"),
-            None => Ok(()),
+            StoreView::NoStore => Ok(()),
+            StoreView::Released => write!(f, ", the store released the key"),
+            StoreView::Holds(entries) => write!(f, ", the store holds {entries}"),
         }
     }
 }
@@ -172,8 +194,9 @@ struct Ledger {
     /// Limiter key -> holds of the set the SUT was granted and still holds.
     sets: HashMap<String, i64>,
     /// The keys a release was sent for. The limiter fences a released key
-    /// against every later admit, so an admit of one answered `Admitted`
-    /// landed ahead of the release, which drops its set.
+    /// against every later admit, so an admit sent before the key's release
+    /// left and answered `Admitted` after it landed ahead of the release,
+    /// which drops its set.
     released_keys: HashSet<String>,
     admitted: i64,
     released: i64,
@@ -201,20 +224,35 @@ impl HoldLedger {
             .map(|(key, holds)| UnreleasedSet {
                 key: key.clone(),
                 holds: *holds,
-                stored: store.and_then(|s| s.held_set(key)).map(|set| set.entries.len()),
+                stored: StoreView::of(store, key),
             })
             .collect();
         sets.sort_by(|a, b| a.key.cmp(&b.key));
         sets
     }
 
-    fn on_admit(&self, key: &str, granted: i64, outcome: &AdmitOutcome, release_on_refusal: bool) {
+    /// Whether a release of `key` was sent.
+    fn is_released(&self, key: &str) -> bool {
+        self.inner.lock().unwrap().released_keys.contains(key)
+    }
+
+    /// Record the answer to an admit of `key` asking for `granted` holds;
+    /// `released_at_send`: a release of `key` had left when the admit was
+    /// sent.
+    fn on_admit(
+        &self,
+        key: &str,
+        granted: i64,
+        outcome: &AdmitOutcome,
+        release_on_refusal: bool,
+        released_at_send: bool,
+    ) {
         let mut ledger = self.inner.lock().unwrap();
         match outcome {
             AdmitOutcome::Admitted => {
                 ledger.released += ledger.sets.remove(key).unwrap_or(0);
                 ledger.admitted += granted;
-                if ledger.released_keys.contains(key) {
+                if !released_at_send && ledger.released_keys.contains(key) {
                     ledger.released += granted;
                 } else if granted > 0 {
                     ledger.sets.insert(key.to_string(), granted);
@@ -241,10 +279,11 @@ impl HoldLedger {
 /// answered admit: each hold granted (on [`AdmitOutcome::Admitted`]), each
 /// admit `inner` answered `Unavailable` or `NotSent` (failed open), and every
 /// hold released: at a release of the call, at the replacement of its set,
-/// at a refusal that dropped it, and at once for a set granted after a
-/// release of the call left (the release drops it). An admit `inner` never
-/// answers, cut off by the worker's admit bound, records nothing. A refresh
-/// counts nothing.
+/// at a refusal that dropped it, and at once for a set granted to an admit a
+/// release of the call overtook in flight (the release drops it). That last
+/// rule holds for an `inner` that fences a released key, as the
+/// [`CallStore`] does. An admit `inner` never answers, cut off by the
+/// worker's admit bound, records nothing. A refresh counts nothing.
 pub(crate) struct CountingLimiter {
     pub(crate) inner: Arc<dyn CallLimiter>,
     pub(crate) ledger: Arc<HoldLedger>,
@@ -264,8 +303,10 @@ impl CallLimiter for CountingLimiter {
         entries: &[LimiterEntry],
         release_on_refusal: bool,
     ) -> AdmitOutcome {
+        let released_at_send = self.ledger.is_released(key);
         let outcome = self.inner.admit(key, change, held, entries, release_on_refusal).await;
-        self.ledger.on_admit(key, entries.len() as i64, &outcome, release_on_refusal);
+        let granted = entries.len() as i64;
+        self.ledger.on_admit(key, granted, &outcome, release_on_refusal, released_at_send);
         outcome
     }
 
