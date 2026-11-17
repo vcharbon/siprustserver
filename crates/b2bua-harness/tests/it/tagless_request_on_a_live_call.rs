@@ -9,6 +9,7 @@ use std::time::Duration;
 
 use b2bua_harness::{settle_until, B2buaSut};
 use scenario_harness::{Agent, ClientInvite, Harness, WaiverScope};
+use sip_message::generators::response::is_fallback_to_tag;
 use sip_message::generators::InDialogMethod;
 
 /// Why alice's INFO carries no To-tag: her non-compliance is the corner under
@@ -57,11 +58,13 @@ impl Scene {
     }
 
     /// alice sends an INFO with no To-tag on `call`: it draws a 481 under a
-    /// To-tag of its own (RFC 3261 §8.2.6.2), and bob receives nothing.
+    /// To-tag minted for it (RFC 3261 §8.2.6.2, §19.3), and bob receives
+    /// nothing.
     async fn tagless_info_is_refused(&self, call: &mut ClientInvite) {
         let mut info = call.send_request(InDialogMethod::Info).send().await;
         let refusal = info.expect(481).await;
-        assert!(refusal.to().tag().is_some(), "the 481 carries a To-tag: {refusal:?}");
+        let tag = refusal.to().tag().expect("the 481 carries a To-tag");
+        assert!(!is_fallback_to_tag(tag), "the 481's To-tag is minted, not the fallback: {tag}");
         self.h.advance(Duration::from_millis(100)).await;
         assert!(self.bob.try_receive_tolerating("INFO", &[]).await.is_none(), "nothing crossed");
     }
