@@ -21,6 +21,7 @@ mod cancel_ladder;
 mod cancel_off_branch;
 mod cancel_on_evict;
 mod cancel_retransmit;
+mod copy_schedule;
 mod first_provisional;
 mod fsm;
 mod handles;
