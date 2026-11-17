@@ -162,6 +162,19 @@ fn a_count_back_to_idle_queues_behind_the_counts_idle_before_it() {
 }
 
 #[test]
+fn a_full_map_evicts_the_count_whose_last_message_is_oldest() {
+    let t0 = Instant::now();
+    let mut b = budgets(3, 2);
+    b.admit("loop", t0);
+    b.admit("other", t0 + Duration::from_secs(1));
+    b.admit("loop", t0 + Duration::from_secs(2));
+    let later = t0 + Duration::from_secs(3);
+    assert_eq!(b.admit("new", later), Admission::Counted, "\"other\" gave its place");
+    assert_eq!(b.admit("loop", later), Admission::Counted, "its third message");
+    tripped(b.admit("loop", later));
+}
+
+#[test]
 #[cfg(debug_assertions)]
 #[should_panic(expected = "a transaction closed under a Call-ID counting none")]
 fn closing_a_transaction_never_opened_is_a_defect() {
