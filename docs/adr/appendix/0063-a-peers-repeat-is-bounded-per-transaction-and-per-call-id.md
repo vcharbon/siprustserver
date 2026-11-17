@@ -28,6 +28,7 @@ before ADR-0063. "Bound by" names the ADR-0063 section that bounds it.
 | ACK, plus a new BYE transaction for a 2xx, to a final for a call this node does not hold or has removed | `router/unheld.rs` → `b2bua-core` `unheld_response` | re-sends the final on every ACK | none; each copy opens a new BYE | §2 (the book), §3 |
 | Dialog-gate answers (481, 487, 500, 200) on an ending dialog | `router/dialog_gate.rs` | answers each with a new request | the lifetime cap's removal | §3 |
 | Answers after the lifetime cap (200 to BYE, 481) | `dispatch/queue.rs`, `router/owed.rs` | answers each with a new request | the queue's release | §3 |
+| 482 to a late copy of the caller's initial INVITE | `router/admit.rs` | re-sends the INVITE on every 482 | its transaction's Timer H, then judged again | §1 (the count outlives the transaction) |
 
 ## Call layer (`b2bua-core`)
 
@@ -48,6 +49,10 @@ before ADR-0063. "Bound by" names the ADR-0063 section that bounds it.
 | Refusal replayed for a copy (503, 513, 200 to the CANCEL) | `core/request/reply.rs` | re-sends on every refusal | 64·T1 memo | §1 |
 | Preflight rejects (483, 482, 420) | `core/request/route.rs` → `reply.rs` | re-sends the same request on every reject | none | §1 (the refusal memo) |
 
+A peer that answers each proxy refusal with a fresh request never reaches the B2BUA, so no
+budget sees it. It is a 1:1 flood, bounded by the proxy's self-gate and load shedding, and
+ADR-0063 accepts it.
+
 ## The RFC reading (§1)
 
 RFC 3261 asks for an answer to every copy in four places:
@@ -58,11 +63,16 @@ RFC 3261 asks for an answer to every copy in four places:
 - an INVITE client transaction in Completed re-sends its ACK on every final retransmission
   (§17.1.1.3, MUST).
 
-A retransmission is a copy sent on the T1→T2 schedule of §17.1.1.2 and §17.1.2.2: its first
-re-send comes T1 after the original, and the gaps never shrink. A copy past the class's
-re-sends that arrives less than T1 after the last answered one is not on that schedule. ADR-0063
-reads it as no retransmission, as ADR-0057 §10 reads §13.2.2.4 for a 2xx. Every copy on the
-schedule is answered, a lossy peer's included, and so is a peer whose T1 is larger.
+A retransmission is a copy sent on the T1→T2 schedule of §17.1.1.2 and §17.1.2.2. Its first
+re-send comes T1 after the original, the gaps never shrink, and the client stops at Timer B or
+F, 64·T1 after the original. ADR-0063 reads two kinds of copy as no retransmission, as ADR-0057
+§10 reads §13.2.2.4 for a 2xx:
+
+- a copy past the class's re-sends that arrives less than T1 after the last answered one;
+- a copy later than 64·T1 after the first.
+
+Every copy on the schedule is answered, a lossy peer's included. A peer with a larger T1 is
+answered until our 64·T1 window closes.
 
 RFC 6026 §7.1 has an Accepted INVITE server transaction absorb INVITE copies. Its 2xx is re-sent
 by the TU on its own schedule. A seeded transaction whose 2xx has not yet left answers the copy
@@ -70,11 +80,18 @@ with it, because after a takeover the copy is the first chance to send it.
 
 ## Sizing the budget (§3)
 
-A compliant transaction puts at most 2 × (1 + R) messages on one Call-ID, where R is the
-largest `Class::resends()` (10 for the non-INVITE ladder capped at T2): its request and up to R
-copies, and its response and up to R replays. A call hairpinned through the node sees each of
-those messages twice, once sent and once received, which gives 44. The lifetime cap counts at
-least one event for that transaction. A budget of 44 × `max_messages_per_call_lifetime` is
-therefore out of reach of a call the lifetime cap has not yet ended. The default, 5 000 000,
-sits above that relation at the lifetime cap's default of 100 000. The lifetime cap is itself
-sized by ADR-0057 §9.
+A transaction carries four kinds of message: the request, a provisional, a final and the
+ACK. A compliant one puts each kind on one Call-ID at most 1 + R times, where R is the largest
+`Class::resends()` (10, the non-INVITE ladder capped at T2):
+
+- the request and its copies;
+- the provisional, replayed once per answered copy;
+- the final, with its Timer G re-sends or replays;
+- one hop ACK per final received.
+
+That is 44 messages. A call hairpinned through the node sees each message twice, once sent and
+once received, which gives 88. Every transaction that does not end its call carries at least
+one message the lifetime cap counts: the request, or the response to the node's own request.
+A budget of 100 × `max_messages_per_call_lifetime` is therefore out of reach of a call the
+lifetime cap has not yet ended. The default, 10 000 000, meets that relation at the lifetime
+cap's default of 100 000, which ADR-0057 §9 sizes.

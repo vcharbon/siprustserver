@@ -33,10 +33,15 @@ layer sees, and they tear the call down without stopping the rules that answer c
 
 Each reactive re-send follows ADR-0057 §10's rule: copies up to the class's re-sends
 (`Class::resends()`) are answered at any pace, and a later copy only at least T1 after the last
-answered one. The copies in between are absorbed. The count is per answered trigger:
+answered one, and none later than 64·T1 after the trigger's first copy: a compliant client
+stops retransmitting by then. The copies in between are absorbed. The count is per answered
+trigger:
 
 - per method on a server transaction (the request copy, the CANCEL copy);
-- per dialog on a client transaction.
+- per dialog on a client transaction, with the dialogs past its dialog bound sharing one count.
+
+A trigger's count outlives its transaction in its Call-ID's entry (§3), so a copy that re-opens
+a transaction after its timer continues the count.
 
 The rule covers:
 
@@ -54,10 +59,11 @@ departures from RFC 3261 §17.1.1.3 and §17.2.2 are read in the appendix.
 
 ### 2. One book bounds every re-ACK the call layer sends
 
-The action that re-sends a retained ACK applies §10 itself. A final that matches no transaction
-and no leg the call holds (an unheld final, an unknown leg's 2xx) is answered through one router
-book. The book is keyed by Call-ID, To-tag and CSeq, and kept for 64·T1 after the entry's last
-copy. Its ACK follows §10, and a 2xx's BYE leaves once.
+The action that re-sends a retained ACK applies §10 itself. Some finals match no transaction
+and no leg the call holds: an unheld final, or an unknown leg's 2xx. Each one is answered
+through one book in the shell, keyed by Call-ID, To-tag and CSeq. The router consults it, and
+so does the commit that sends the core's unheld answers. Its ACK follows §1's rule, the 64·T1
+window included, and a 2xx's BYE leaves once.
 
 ### 3. Every message counts against its Call-ID's budget
 
@@ -72,8 +78,8 @@ their own bounds and do not count.
 
 - **Key.** A Call-ID outlives the call, so the stateless phase counts on the same entry. A
   dialled leg has its own Call-ID (ADR-0059), so a looping leg trips alone.
-- **Default.** `B2BUA_CAP_MESSAGES_PER_CALL_ID` is 5 000 000. Startup refuses a budget under 44
-  times `max_messages_per_call_lifetime`, so a compliant call reaches the lifetime cap first
+- **Default.** `B2BUA_CAP_MESSAGES_PER_CALL_ID` is 10 000 000. Startup refuses a budget under
+  100 times `max_messages_per_call_lifetime`, so a compliant call reaches the lifetime cap first
   (appendix).
 - **Entry lifetime.** An entry lives while a transaction of its Call-ID lives, and for 64·T1
   after its last message. A muted entry is never evicted. When the bound is full of mutes, a
@@ -82,19 +88,19 @@ their own bounds and do not count.
 ### 4. A trip mutes the Call-ID and ends its call
 
 Past the budget, the owner sends nothing for that Call-ID and drops whatever arrives for it
-before dispatch. Its transactions stay resident and their timers run: deleting them would let
-an INVITE copy be judged a new INVITE.
+before dispatch. Its transactions stay resident and their timers run, so each one reaches its
+terminal state. Deleting them would let an INVITE copy be judged a new INVITE.
 
-The owner reports the trip to the call holding the Call-ID. That call ends as the message
-cap's call does:
+The trip report carries the Call-ID with every From-tag and call reference seen on it. The
+router finds, through its SIP index (a-leg and b-leg keys), every call holding that Call-ID; a
+spiral finds two. Each call ends as the message cap's call does: a `503` to an unanswered
+caller, BYE or CANCEL on its legs, and a CDR with the `MessageBudget` cause. The call layer
+composes its full teardown, and the owner drops what goes to the muted Call-ID.
 
-- a `503` to an unanswered caller;
-- BYE or CANCEL on its other legs;
-- nothing on the muted leg;
-- its CDR, with the `MessageBudget` cause.
-
-The mute lasts until that call is released, and in every case until 64·T1 after the last
-dropped message. A trip after the call's removal only mutes.
+The mute lasts until every call found is released, and in every case until 64·T1 after the
+last dropped message. A trip after the calls' removal only mutes. A new dialog-creating INVITE
+on the Call-ID, received or sent, lifts the mute and starts the count again: a retry may reuse
+a Call-ID (ADR-0059).
 
 ### 5. The count is not replicated
 
@@ -113,7 +119,8 @@ in practice.
 
 ## Consequences
 
-- The per-path bounds (§1, §2) bring every loop in the inventory down to one answer per T1.
+- The per-path bounds (§1, §2) bring every loop in the inventory that repeats one message down
+  to one answer per T1, within 64·T1 of its first copy.
 - A loop with no per-path bound, or one added later, stops at the budget, after the call's
   removal included.
 - A party that knows a Call-ID can spend its budget with in-dialog requests, as it could end
