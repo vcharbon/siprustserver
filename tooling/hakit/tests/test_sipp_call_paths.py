@@ -171,7 +171,8 @@ CASES = [
         phase="provisional",
     ),
     Case("reinvite-crosses-bye", "peer-reinvite-crosses-bye.xml", "answered", "answered"),
-    Case("reinvite-crosses-bye-provisional", "peer-reinvite-crosses-bye-provisional.xml", "answered", "answered"),
+    Case("reinvite-crosses-bye-provisional", "peer-reinvite-crosses-bye-provisional.xml", "answered", "answered", calls=4),
+    Case("reinvite-after-bye-final", "peer-reinvite-after-bye-final.xml", "answered", "answered", calls=4),
     Case("setup-timeout-vs-uas", UAS, "timeout", "setup_timeout", {"setup_ms": "1000"}, {"ring_ms": "5000"}, phase="provisional"),
 ]
 RACE = Case("options-on-hold-deadline", "peer-uas-options-on-hold-deadline.xml", "answered", "answered", {"hold_ms": "2000"}, calls=300, rate=50)
