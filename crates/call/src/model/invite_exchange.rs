@@ -40,6 +40,31 @@ pub struct ReAckedCopy {
     pub at_ms: i64,
 }
 
+/// The ACK the 2xx to the INVITE a dialog sent before its last drew, as it
+/// left (§13.2.2.4), with the copies of that 2xx counted on that exchange
+/// (ADR-0057 §10): a copy arriving once the next INVITE left is answered by
+/// this ACK alone, under the same bound.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AckAhead {
+    /// The ACK, as the exact datagram that left.
+    pub ack: RetainedEmission,
+    /// The copies of the 2xx it acknowledges received since that 2xx
+    /// (§13.3.1.4), those counted before the next INVITE left included.
+    #[serde(default)]
+    pub copies_received: u32,
+    /// The last of those copies owed its re-ACK.
+    #[serde(default)]
+    pub re_acked_copy: Option<ReAckedCopy>,
+}
+
+impl AckAhead {
+    /// The ACK ahead of the INVITE following `x`, the exchange of the INVITE
+    /// before it: `ack`, that exchange's ACK, with its copies' count.
+    pub fn of(x: &InviteExchange, ack: RetainedEmission) -> Self {
+        AckAhead { ack, copies_received: x.copies_received, re_acked_copy: x.re_acked_copy }
+    }
+}
+
 /// An INVITE's exchange beyond its final. A sent INVITE's 2xx is *taken* once
 /// its ACK is owed or has left; until then a final still settles the record.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -57,8 +82,8 @@ pub struct InviteExchange {
     /// drew, as it left. A node re-sending this INVITE from the record sends
     /// that ACK first: the peer sees no new INVITE while the one before is
     /// unacknowledged (RFC 3261 §14.1, RFC 6026 §7.1), and a repeated ACK is
-    /// absorbed (§13.2.2.4).
-    pub ack_ahead: Option<RetainedEmission>,
+    /// absorbed (§13.2.2.4). A copy of that 2xx is re-ACKed with it.
+    pub ack_ahead: Option<AckAhead>,
     /// Sent: the copies of the 2xx the INVITE took received since
     /// (§13.3.1.4), each counted before the rules read it. A copy past the
     /// re-sends a compliant answerer makes draws a re-ACK only T1 after the

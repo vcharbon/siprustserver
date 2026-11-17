@@ -127,6 +127,7 @@ impl RuleAction {
             | RuleAction::AckLegAnswering { .. }
             | RuleAction::EndOnEvidence { .. }
             | RuleAction::ReleaseStraggler2xx { .. }
+            | RuleAction::ReAckAhead { .. }
             | RuleAction::CreateLeg { .. }
             | RuleAction::DestroyLeg { .. }
             | RuleAction::CancelLeg { .. }

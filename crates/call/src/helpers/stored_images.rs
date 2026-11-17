@@ -30,7 +30,7 @@ fn record_images<'a>(record: &'a RequestRecord, images: &mut Vec<&'a [u8]>) {
     let Some(x) = &record.invite else { return };
     let emissions: [Option<&RetainedEmission>; 5] = [
         x.emitted_ack.as_ref(),
-        x.ack_ahead.as_ref(),
+        x.ack_ahead.as_ref().map(|a| &a.ack),
         x.answered_2xx.as_ref().map(|u| &u.emission),
         x.rejection.as_ref(),
         x.provisional.as_ref(),

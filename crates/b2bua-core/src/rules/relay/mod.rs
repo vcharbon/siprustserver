@@ -78,8 +78,8 @@ pub(crate) use owed_answer::{
     offer_deferred_to_ack, offer_owed_in_ack, offered_reliably, owe_answer_in_ack, owes_bare_ack,
 };
 pub(crate) use repeat::{
-    copy_of_acked_failure, copy_of_taken_2xx, count_copy, re_ack, re_ack_owed, retransmitted_2xx,
-    CountedCopy,
+    copy_of_2xx_ahead, copy_of_acked_failure, copy_of_earlier_2xx, copy_of_taken_2xx, count_copy,
+    re_ack, re_ack_ahead_owed, re_ack_owed, retransmitted_2xx, CountedCopy,
 };
 pub(crate) use session_timer::{settle_session_timer, TIMER};
 pub(crate) use stated_text::{set_lines, writable_lines, writable_status, Statements};

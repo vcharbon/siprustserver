@@ -3,7 +3,8 @@
 //! retained for the 2xx's retransmissions, and the answer a delayed offer is
 //! owed in it (RFC 3264 §4). A retained ACK is sent again only for the copy
 //! of its final the count marked owed (ADR-0057 §10, [`re_ack_copy`]),
-//! whichever rule asks.
+//! whichever rule asks; the ACK carried ahead of a dialog's last INVITE, only
+//! for such a copy of the 2xx before it ([`re_ack_ahead`]).
 
 use call::{Call, InviteExchange, RetainedEmission};
 use sip_message::header::MediaType;
@@ -11,7 +12,7 @@ use sip_message::SipHeader;
 
 use crate::effects::{HandlerEffects, OutboundBody, Provenance, QuietTurn};
 use crate::rules::relay;
-use b2bua_sdk::model::Body;
+use b2bua_sdk::model::{Body, RuleContext};
 
 use super::ActionExecutor;
 
@@ -30,6 +31,26 @@ pub(super) fn re_ack_copy(
         return;
     };
     fx.outbound.push(super::ladder::repeat_of(retained, label, leg_id));
+    fx.quiet = Some(QuietTurn::ReAck);
+}
+
+/// The ACK `leg_id`'s dialog named by `ctx` carries ahead of its last INVITE
+/// ([`call::AckAhead`]), re-passed to the transport as it left, when `ctx`'s
+/// event is a copy of the 2xx that ACK acknowledges ([`relay::copy_of_2xx_ahead`])
+/// the count marked owed it ([`relay::re_ack_ahead_owed`]); nothing otherwise.
+pub(super) fn re_ack_ahead(call: &Call, fx: &mut HandlerEffects, ctx: &RuleContext, leg_id: &str) {
+    let (Some(resp), Some(id)) = (ctx.response(), ctx.resolved.dialog.as_ref()) else { return };
+    let x = call::helpers::find_leg(call, leg_id)
+        .and_then(|leg| leg.dialogs.by_tags(&id.our_tag, &id.peer_tag))
+        .filter(|d| relay::copy_of_earlier_2xx(d, resp))
+        .and_then(call::helpers::sent_exchange)
+        .filter(|x| relay::copy_of_2xx_ahead(x, resp));
+    let Some(ahead) = x.and_then(|x| x.ack_ahead.as_ref()).filter(|a| relay::re_ack_ahead_owed(a))
+    else {
+        return;
+    };
+    let label = format!("ACK (re-ACK, earlier INVITE's 2xx) → {leg_id}");
+    fx.outbound.push(super::ladder::repeat_of(&ahead.ack, label, leg_id));
     fx.quiet = Some(QuietTurn::ReAck);
 }
 

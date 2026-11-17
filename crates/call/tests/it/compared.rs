@@ -6,8 +6,9 @@
 use crate::common;
 use call::helpers::{merge_exempt, same_state};
 use call::model::{
-    Call, CdrEvent, CdrEventType, DialogState, DialogUsage, EndingBy, HostPort, MessageDirection,
-    MessageEntry, ReAckedCopy, RequestRecord, SentRequest, TimerEntry, TimerKey, TimerType,
+    AckAhead, Call, CdrEvent, CdrEventType, DialogState, DialogUsage, EndingBy, HostPort,
+    MessageDirection, MessageEntry, ReAckedCopy, Repeated, RequestRecord, RetainedEmission,
+    SentRequest, TimerEntry, TimerKey, TimerType,
 };
 
 /// The representative call.
@@ -208,6 +209,49 @@ fn a_re_acked_copy_is_exempt_and_merges_to_the_later() {
     let latest = Some(ReAckedCopy { copy: 3, at_ms: 40_000 });
     assert_eq!(read(&merge_exempt(late_low.clone(), &early_high)), latest, "the later arrival");
     assert_eq!(read(&merge_exempt(early_high, &late_low)), latest, "over the higher copy");
+}
+
+/// The copies of the 2xx before the INVITE a dialog last sent, counted on the
+/// ACK that INVITE carries ahead, are exempt as that INVITE's own are, and a
+/// merge keeps the higher count and the later re-ACKed copy; the ACK itself
+/// is compared.
+#[test]
+fn the_count_carried_ahead_is_exempt_and_merges_to_the_higher() {
+    let ahead = |call: &mut Call, copies: u32, at_ms: i64| {
+        let d = call.b_legs[0].dialogs.confirmed_mut().expect("the confirmed dialog");
+        let x = call::helpers::sent_exchange_mut(d).expect("the INVITE's exchange");
+        x.ack_ahead = Some(AckAhead {
+            ack: RetainedEmission::on_trigger(
+                b"ACK sip:bob@192.0.2.20 SIP/2.0\r\n\r\n".to_vec(),
+                ("192.0.2.20".into(), 5060),
+                Repeated::request("ACK"),
+            ),
+            copies_received: copies,
+            re_acked_copy: Some(ReAckedCopy { copy: copies, at_ms }),
+        });
+    };
+    let read = |call: &Call| {
+        let d = call.b_legs[0].dialogs.confirmed().expect("the confirmed dialog");
+        let x = call::helpers::sent_exchange(d).expect("the INVITE's exchange");
+        x.ack_ahead.as_ref().map(|a| (a.copies_received, a.re_acked_copy))
+    };
+    let mut before = call();
+    ahead(&mut before, 0, 0);
+    let mut counted = before.clone();
+    ahead(&mut counted, 4, 1_500);
+    assert!(same_state(&before, &counted), "the count carried ahead");
+    let mut dropped = before.clone();
+    let d = dropped.b_legs[0].dialogs.confirmed_mut().expect("the confirmed dialog");
+    call::helpers::sent_exchange_mut(d).expect("the INVITE's exchange").ack_ahead = None;
+    assert!(!same_state(&before, &dropped), "the ACK carried ahead");
+
+    let mut container = call();
+    ahead(&mut container, 2, 1_000);
+    let mut other = call();
+    ahead(&mut other, 7, 9_000);
+    let higher = Some((7, Some(ReAckedCopy { copy: 7, at_ms: 9_000 })));
+    assert_eq!(read(&merge_exempt(container.clone(), &other)), higher, "the other's higher");
+    assert_eq!(read(&merge_exempt(other, &container)), higher, "the container's own");
 }
 
 /// The merge takes the container whole and the other copy's exempt fields:

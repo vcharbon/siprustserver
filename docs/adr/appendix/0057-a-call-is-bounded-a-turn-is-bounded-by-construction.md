@@ -281,6 +281,20 @@ The measurement also states the memory one call holds with every cap reached at
 once; past what the sizing formula counts, admission (ADR-0037) refuses new
 calls before the node grows further.
 
+### 10. A peer's repeat draws a bounded answer
+
+The count and the last re-ACK are on the record of the INVITE whose final the
+copy repeats, exempt from the comparison (ADR-0055 §7): a meeting keeps the
+higher count and the later re-ACK, a re-anchor moves the last re-ACK's instant,
+and a takeover copy may count again.
+
+A dialog's next INVITE replaces its INVITE record. The ACK the previous
+INVITE's 2xx drew rides the new record as its ACK ahead, with that 2xx's count
+and last re-ACK. A copy of that 2xx arriving once the next INVITE left echoes
+the earlier CSeq (RFC 3261 §12.2.1.2) and answers nothing pending: it is
+re-ACKed with that ACK, on that count. A copy of a 2xx older still finds no ACK
+on the record and is absorbed, counted under `kind="2xx"`.
+
 ## Considered and deferred
 
 - **A pool for the core fold, a leaked thread at `SCHED_IDLE`.** The pure core

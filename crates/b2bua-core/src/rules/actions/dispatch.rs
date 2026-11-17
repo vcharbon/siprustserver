@@ -122,6 +122,9 @@ impl ActionExecutor<'_> {
             RuleAction::ReleaseStraggler2xx { leg_id } => {
                 self.release_straggler(call, fx, ctx, leg_id);
             }
+            RuleAction::ReAckAhead { leg_id } => {
+                super::ack_leg::re_ack_ahead(call, fx, ctx, leg_id)
+            }
             RuleAction::ConfirmDialog { leg_id } => {
                 self.confirm(call, fx, ctx, leg_id);
             }

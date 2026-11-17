@@ -10,8 +10,20 @@ use sip_message::Method;
 use super::{state, Phase, TRANSFER_MACHINE};
 use crate::rules::refer_transfer::ok;
 use crate::rules::Terminal;
-use b2bua_sdk::model::{Body, Effect, Match, RuleAction, RuleDefinition, TimerDelay};
+use b2bua_sdk::model::{Body, Effect, Match, RuleAction, RuleContext, RuleDefinition, TimerDelay};
 use call::TimerKey;
+
+/// Whether the current 2xx answers the realign re-INVITE: the INVITE last
+/// sent on the dialog it names, whose CSeq it echoes (RFC 3261 §12.2.1.2).
+/// A copy of an earlier INVITE's 2xx (§13.3.1.4) answers nothing pending; it
+/// is `re-ack-2xx-ahead`'s.
+fn answers_realign(ctx: &RuleContext) -> bool {
+    let (Some(resp), Some(leg), Some(dialog)) = (ctx.response(), ctx.source_leg(), ctx.dialog())
+    else {
+        return false;
+    };
+    crate::rules::relay::acked_invite_cseq(leg, dialog) == Some(resp.cseq().seq())
+}
 
 /// transfer-c-realign-200 — C answers the c-realign re-INVITE (200).
 /// Distinguished from `transfer-c-200-initial` by `legState: confirmed`
@@ -34,6 +46,7 @@ pub(super) fn c_realign_200() -> RuleDefinition {
             .leg_states(&[LegState::Confirmed])
             .filter(|ctx| {
                 state(ctx).and_then(|s| s.c_leg_id.as_deref()) == Some(ctx.source_leg_id)
+                    && answers_realign(ctx)
             }),
         handle: |ctx| {
             let st = state(ctx)?.clone();
@@ -185,7 +198,7 @@ pub(super) fn a_realign_200() -> RuleDefinition {
             .method("INVITE")
             .status_class(2)
             .direction(Direction::FromA)
-            .filter(|ctx| ctx.source_leg_id == "a"),
+            .filter(|ctx| ctx.source_leg_id == "a" && answers_realign(ctx)),
         handle: |ctx| {
             let st = state(ctx)?.clone();
             let c_leg_id = st.c_leg_id.clone()?;

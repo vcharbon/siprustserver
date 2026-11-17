@@ -95,9 +95,8 @@ Detail: [appendix §9](appendix/0057-a-call-is-bounded-a-turn-is-bounded-by-cons
 A copy of a taken 2xx, or of a non-2xx ACKed on this stack's account, is re-ACKed at any pace
 up to the re-sends a compliant answerer makes (RFC 3261 §13.3.1.4, §17.2.1); a later one only
 T1 or more after the last re-ACK (§17.1.1.1). Any other copy is absorbed, a quiet turn on an
-Active call, counted on `b2bua_copies_past_schedule_total{kind}`. The count and the last re-ACK
-are on the INVITE's record, exempt from the comparison (ADR-0055 §7); a re-anchor moves the
-last re-ACK's instant; a takeover copy may count again.
+Active call, counted on `b2bua_copies_past_schedule_total{kind}`. The count is exempt (ADR-0055 §7).
+Detail: [appendix §10](appendix/0057-a-call-is-bounded-a-turn-is-bounded-by-construction.md#10-a-peers-repeat-draws-a-bounded-answer).
 
 ## Consequences
 

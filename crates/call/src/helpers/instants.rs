@@ -74,7 +74,8 @@ pub fn shift_instants(call: &mut Call, offset_ms: i64) {
 
 /// The instants one leg holds: its INVITE's send time, its message ring, each
 /// dialog's NOTIFYs in flight, the last re-ACKed copy of the 2xx its last sent
-/// INVITE took and the deadline of each request record.
+/// INVITE took and of the one before it, and the deadline of each request
+/// record.
 fn shift_leg(leg: &mut Leg, offset_ms: i64) {
     if let Some(invite) = leg.outbound_invite_mut() {
         invite.sent_at_ms = invite.sent_at_ms.saturating_add(offset_ms);
@@ -89,9 +90,11 @@ fn shift_leg(leg: &mut Leg, offset_ms: i64) {
         for notify in dialog.subscriptions.iter_mut().filter_map(|s| s.notify.as_mut()) {
             notify.sent_at_ms = notify.sent_at_ms.saturating_add(offset_ms);
         }
-        if let Some(copy) = super::sent_exchange_mut(dialog).and_then(|x| x.re_acked_copy.as_mut())
-        {
-            copy.at_ms = copy.at_ms.saturating_add(offset_ms);
+        if let Some(x) = super::sent_exchange_mut(dialog) {
+            let ahead = x.ack_ahead.as_mut().and_then(|a| a.re_acked_copy.as_mut());
+            for copy in x.re_acked_copy.iter_mut().chain(ahead) {
+                copy.at_ms = copy.at_ms.saturating_add(offset_ms);
+            }
         }
         for record in dialog.requests.iter_mut() {
             shift_deadline(record, offset_ms);

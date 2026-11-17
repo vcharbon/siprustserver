@@ -107,7 +107,11 @@ fn arb_exchange() -> impl Strategy<Value = InviteExchange> {
             proptest::option::of(200u16..300),
         ),
         (
-            proptest::option::of(arb_retained_emission()),
+            proptest::option::of((
+                arb_retained_emission(),
+                any::<u32>(),
+                proptest::option::of((any::<u32>(), any::<i64>())),
+            )),
             proptest::option::of(arb_retained_emission()),
             proptest::option::of(arb_retained_emission()),
             any::<u32>(),
@@ -122,7 +126,11 @@ fn arb_exchange() -> impl Strategy<Value = InviteExchange> {
             )| InviteExchange {
                 ack_branch,
                 emitted_ack,
-                ack_ahead,
+                ack_ahead: ack_ahead.map(|(ack, copies_received, re_acked)| AckAhead {
+                    ack,
+                    copies_received,
+                    re_acked_copy: re_acked.map(|(copy, at_ms)| ReAckedCopy { copy, at_ms }),
+                }),
                 copies_received,
                 re_acked_copy: re_acked.map(|(copy, at_ms)| ReAckedCopy { copy, at_ms }),
                 awaited_ack_cseq,

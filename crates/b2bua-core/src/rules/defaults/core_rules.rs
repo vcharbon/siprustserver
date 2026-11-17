@@ -346,49 +346,8 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                 .filter(|ctx| ctx.relayed_pending().is_some_and(|p| !p.cancelled)),
             |_ctx| ok(vec![RuleAction::RelayToPeer { transform: no_transform() }]),
         ),
-        // RFC 3261 §13.2.2.4 — re-ACK a **retransmitted 2xx** whose first ACK was
-        // lost. §13.2.2.4 gives one ACK per 2xx and re-passes THAT ACK to the
-        // transport for every copy, so the re-ACK MUST reuse the client
-        // transaction the ACK went out on (the retained `ack_branch` + the INVITE
-        // CSeq) — a fresh branch would mint a new transaction and never quiesce
-        // the answerer's INVITE server txn, leaking the confirmed call or timing
-        // it out late under packet loss. `ack_leg` re-passes the retained
-        // datagram (`emitted_ack`) raw, so whatever body the acknowledging party
-        // put on it rides every repeat. This is the b-leg / realign twin of the
-        // a-leg `unacked-2xx-retransmit` (which retransmits the B2BUA's *own* 2xx
-        // to a silent caller).
-        //
-        // Fires ONLY on a genuine retransmit that nothing else claims: the source
-        // dialog holds an `ack_branch` — its ACK client transaction, minted by the
-        // ACK's emission and reset on every new INVITE txn — the response echoes
-        // that INVITE's CSeq, and no pending-relay snapshot is open (a first-time
-        // re-INVITE final is claimed by `relay-reinvite-response` / the
-        // realign-200 rules, whose `ack_branch` is still `None`). A 2xx whose ACK
-        // has not left yet draws nothing: no branch exists to re-send on, and the
-        // answerer's own ladder is the mechanism §13.3.1.4 provides while that
-        // ACK is on its way.
-        // Absorbs (AckLeg only — no relay to the peer, which already saw the first
-        // final).
-        //
-        // A leg the BYE already Terminated still owes it (RFC 5407 §2 + App. D:
-        // a Mortal UA keeps the invite usage for exactly this, and §13.2.2.4's
-        // "every time a retransmission arrives" does not lapse with the dialog).
-        rule(
-            "re-ack-retransmitted-2xx",
-            &[],
-            Match::response()
-                .method("INVITE")
-                .status_class(2)
-                .leg_states(&[LegState::Confirmed, LegState::Terminated])
-                .filter(|ctx| {
-                    let Some(d) = ctx.dialog() else { return false };
-                    let Some(leg) = ctx.source_leg() else { return false };
-                    let Some(resp) = ctx.response() else { return false };
-                    call::helpers::sent_exchange(d).is_some_and(|x| x.ack_branch.is_some())
-                        && crate::rules::relay::retransmitted_2xx(leg, d, resp)
-                }),
-            |ctx| ok(crate::rules::relay::re_ack(ctx)),
-        ),
+        super::re_ack::re_ack_retransmitted_2xx(),
+        super::re_ack::re_ack_2xx_ahead(),
         rule(
             "release-fork-straggler-2xx",
             &[],

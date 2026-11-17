@@ -2,8 +2,9 @@
 //! is repeated end-to-end until ACKed (RFC 3261 §13.3.1.4), so it reaches the
 //! rules more than once, and so does a non-2xx of a round the record never
 //! held, whose ACK this stack sent itself and no transaction re-sends
-//! (§17.1.1.3). [`copy_of_taken_2xx`] is the one reading of "already handled"
-//! the rules that re-ACK and the message ring share; a reliable provisional's
+//! (§17.1.1.3). [`copy_of_taken_2xx`] and [`copy_of_earlier_2xx`] (a 2xx to
+//! an INVITE the dialog sent another after) are the readings of "already
+//! handled" the rules that re-ACK and the message ring share; a reliable provisional's
 //! repeat is the engine's to drop before the rules. Each copy is counted on the
 //! INVITE's record, and only the copies a compliant answerer sends are owed a
 //! re-ACK (ADR-0057 §10): the action that re-sends the retained ACK reads the
@@ -11,7 +12,7 @@
 
 use b2bua_sdk::event::CallEvent;
 use b2bua_sdk::model::{RuleAction, RuleContext};
-use call::{Call, Dialog, DialogId, InviteExchange, Leg, ReAckedCopy};
+use call::{AckAhead, Call, Dialog, DialogId, InviteExchange, Leg, ReAckedCopy};
 use sip_message::{Method, SipMessage, SipResponse};
 use sip_retransmit::Class;
 
@@ -51,6 +52,26 @@ pub(crate) fn copy_of_taken_2xx(leg: &Leg, dialog: &Dialog, resp: &SipResponse) 
     released || retransmitted_2xx(leg, dialog, resp)
 }
 
+/// Whether `resp` is a copy of the 2xx to an INVITE `dialog` sent before its
+/// last (§13.3.1.4): a 2xx to an INVITE under the dialog's remote tag echoing
+/// a CSeq below that last INVITE's. Every INVITE before it was settled before
+/// it left (§14.1), so the copy answers nothing pending; only the one whose
+/// ACK the last INVITE carries ahead ([`copy_of_2xx_ahead`]) is re-ACKed.
+pub(crate) fn copy_of_earlier_2xx(dialog: &Dialog, resp: &SipResponse) -> bool {
+    let last = dialog.sent_invite.as_ref().map(|r| r.outbound_cseq);
+    invite_2xx_on(dialog, resp) && last.is_some_and(|last| i64::from(resp.cseq().seq()) < last)
+}
+
+/// Whether `resp`, a [`copy_of_earlier_2xx`] on the dialog whose last INVITE's
+/// exchange is `x`, is a copy of the 2xx whose ACK `x` carries ahead
+/// ([`InviteExchange::ack_ahead`]): it echoes that ACK's CSeq.
+pub(crate) fn copy_of_2xx_ahead(x: &InviteExchange, resp: &SipResponse) -> bool {
+    x.ack_ahead
+        .as_ref()
+        .and_then(|ahead| super::ack::parse_request(ahead.ack.wire().0))
+        .is_some_and(|ack| ack.cseq().seq() == resp.cseq().seq())
+}
+
 /// Whether `resp` is a copy of a non-2xx INVITE final `leg`'s `dialog` ACKed
 /// on this stack's own account (§17.1.1.3), in a round the record never held:
 /// the dialog's INVITE record holds no image of the INVITE and keeps the ACK
@@ -80,13 +101,25 @@ pub(crate) enum CountedCopy {
     Absorbed(Class),
 }
 
-/// Count `event`, received at `now_ms` on `leg_id`'s dialog `named`, on that
-/// dialog's INVITE record when it is a [`copy_of_taken_2xx`] or a
-/// [`copy_of_acked_failure`], before the rules read it, and mark it owed its
-/// re-ACK or not: the re-ACK reads the mark ([`re_ack_owed`]). Every copy the
+/// Which exchange's record a copy is counted on.
+#[derive(Clone, Copy)]
+enum CopyOf {
+    /// The dialog's last INVITE: a [`copy_of_taken_2xx`] or a
+    /// [`copy_of_acked_failure`].
+    Last,
+    /// The INVITE before it, whose ACK the last carries ahead.
+    Ahead,
+}
+
+/// Count `event`, received at `now_ms` on `leg_id`'s dialog `named`, before
+/// the rules read it, and mark it owed its re-ACK or not: the re-ACK reads the
+/// mark ([`re_ack_owed`], [`re_ack_ahead_owed`]). A [`copy_of_taken_2xx`] or a
+/// [`copy_of_acked_failure`] counts on the dialog's INVITE record, a
+/// [`copy_of_2xx_ahead`] on the ACK that record carries ahead. Every copy the
 /// answerer sends counts toward its ladder (§13.3.1.4, §17.2.1), also one no
 /// rule re-ACKs: a copy arriving before this side's ACK left (no `ack_branch`
-/// yet), or one on a retired a-leg dialog (a fork release is a b-leg's).
+/// yet), or one on a retired a-leg dialog (a fork release is a b-leg's). Any
+/// other [`copy_of_earlier_2xx`] is absorbed: the record holds no ACK of it.
 /// `None` when `event` is no such copy.
 pub(crate) fn count_copy(
     call: &mut Call,
@@ -98,29 +131,50 @@ pub(crate) fn count_copy(
     let CallEvent::Sip { message, .. } = event else { return None };
     let SipMessage::Response(resp) = message.as_ref() else { return None };
     let id = named?;
-    let copy = call::helpers::find_leg(call, leg_id).is_some_and(|leg| {
-        leg.dialogs
-            .by_tags(&id.our_tag, &id.peer_tag)
-            .is_some_and(|d| copy_of_taken_2xx(leg, d, resp) || copy_of_acked_failure(leg, d, resp))
-    });
-    if !copy {
-        return None;
-    }
+    let leg = call::helpers::find_leg(call, leg_id)?;
+    let d = leg.dialogs.by_tags(&id.our_tag, &id.peer_tag)?;
     let class = copy_schedule::class_of(resp.status());
+    let copy = if copy_of_taken_2xx(leg, d, resp) || copy_of_acked_failure(leg, d, resp) {
+        CopyOf::Last
+    } else if !copy_of_earlier_2xx(d, resp) {
+        return None;
+    } else if call::helpers::sent_exchange(d).is_some_and(|x| copy_of_2xx_ahead(x, resp)) {
+        CopyOf::Ahead
+    } else {
+        return Some(CountedCopy::Absorbed(class));
+    };
     let mut counted = None;
     call::helpers::update_dialog(call, leg_id, id, |d| {
-        if let Some(x) = call::helpers::sent_exchange_mut(d) {
-            x.copies_received = x.copies_received.saturating_add(1);
-            let since = x.re_acked_copy.map(|last| now_ms.saturating_sub(last.at_ms));
-            if copy_schedule::owed(class, x.copies_received, since) {
-                x.re_acked_copy = Some(ReAckedCopy { copy: x.copies_received, at_ms: now_ms });
-                counted = Some(CountedCopy::Owed);
-            } else {
-                counted = Some(CountedCopy::Absorbed(class));
-            }
-        }
+        let Some(x) = call::helpers::sent_exchange_mut(d) else { return };
+        let (received, re_acked) = match copy {
+            CopyOf::Last => (&mut x.copies_received, &mut x.re_acked_copy),
+            CopyOf::Ahead => match x.ack_ahead.as_mut() {
+                Some(ahead) => (&mut ahead.copies_received, &mut ahead.re_acked_copy),
+                None => return,
+            },
+        };
+        counted = Some(count_on(received, re_acked, class, now_ms));
     });
     counted
+}
+
+/// Count one more copy of a final of `class` on `received`, arrived at
+/// `now_ms`, marking it `re_acked` when owed its re-ACK
+/// ([`copy_schedule::owed`]).
+fn count_on(
+    received: &mut u32,
+    re_acked: &mut Option<ReAckedCopy>,
+    class: Class,
+    now_ms: i64,
+) -> CountedCopy {
+    *received = received.saturating_add(1);
+    let since = re_acked.map(|last| now_ms.saturating_sub(last.at_ms));
+    if copy_schedule::owed(class, *received, since) {
+        *re_acked = Some(ReAckedCopy { copy: *received, at_ms: now_ms });
+        CountedCopy::Owed
+    } else {
+        CountedCopy::Absorbed(class)
+    }
 }
 
 /// What the copy of a final `ctx` carries asks of its leg: the retained ACK,
@@ -134,4 +188,10 @@ pub(crate) fn re_ack(ctx: &RuleContext) -> Vec<RuleAction> {
 /// counted is owed nothing.
 pub(crate) fn re_ack_owed(x: &InviteExchange) -> bool {
     x.re_acked_copy.is_some_and(|last| last.copy == x.copies_received)
+}
+
+/// [`re_ack_owed`] for the ACK `ahead` the dialog's last INVITE carries ahead:
+/// the copy of its 2xx [`count_copy`] counted last is owed it.
+pub(crate) fn re_ack_ahead_owed(ahead: &AckAhead) -> bool {
+    ahead.re_acked_copy.is_some_and(|last| last.copy == ahead.copies_received)
 }

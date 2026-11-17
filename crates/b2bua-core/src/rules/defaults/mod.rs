@@ -30,6 +30,7 @@ mod failover_rules;
 mod handle_481;
 mod keepalive_failure;
 mod non_invite_failure;
+mod re_ack;
 mod reaper_verdicts;
 mod request_timeouts;
 mod route_fold;

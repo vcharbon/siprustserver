@@ -219,7 +219,8 @@ pub fn restate_retained(call: &mut Call, was: &[u8], now: &[u8]) {
                 unacked.emission.restate(was, now);
             }
             if let Some(sent) = dialog.sent_invite.as_mut().and_then(|r| r.invite.as_mut()) {
-                for ack in sent.emitted_ack.iter_mut().chain(sent.ack_ahead.iter_mut()) {
+                let ahead = sent.ack_ahead.iter_mut().map(|a| &mut a.ack);
+                for ack in sent.emitted_ack.iter_mut().chain(ahead) {
                     ack.restate(was, now);
                 }
             }

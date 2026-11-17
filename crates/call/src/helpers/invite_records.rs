@@ -4,7 +4,8 @@
 //! the image of a leg's dialling INVITE, which every dialog it created reads.
 
 use crate::model::{
-    Call, Dialog, DialogId, InviteExchange, Leg, RequestRecord, RetainedEmission, SentRequest,
+    AckAhead, Call, Dialog, DialogId, InviteExchange, Leg, RequestRecord, RetainedEmission,
+    SentRequest,
 };
 
 use super::lens::{update_dialog, update_leg};
@@ -59,11 +60,12 @@ pub fn relayed_invite_pending(d: &Dialog) -> bool {
 /// `record`, an INVITE this side sends on `leg_id`'s dialog `id`, becomes the
 /// dialog's last: the ACK the previous one's 2xx drew belongs to that
 /// transaction alone (§13.2.2.4), and `record` carries it as the ACK ahead of
-/// it ([`InviteExchange::ack_ahead`]) when it answered a 2xx.
+/// it ([`InviteExchange::ack_ahead`]), with the count of that 2xx's copies,
+/// when it answered a 2xx.
 pub fn open_sent_invite(call: &mut Call, leg_id: &str, id: &DialogId, mut record: RequestRecord) {
     update_dialog(call, leg_id, id, |d| {
-        let ahead = sent_exchange(d).filter(|x| x.ack_branch.is_some());
-        let ahead = ahead.and_then(|x| x.emitted_ack.clone());
+        let before = sent_exchange(d).filter(|x| x.ack_branch.is_some());
+        let ahead = before.and_then(|x| Some(AckAhead::of(x, x.emitted_ack.clone()?)));
         if let Some(ahead) = ahead {
             record.invite.get_or_insert_with(InviteExchange::default).ack_ahead = Some(ahead);
         }
