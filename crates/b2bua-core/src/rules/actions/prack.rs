@@ -296,10 +296,7 @@ fn deferred_offer(call: &Call, leg_id: &str) -> Option<(String, call::RSeq, Vec<
 /// answer to: a PRACK naming it carries that answer, never an offer of its
 /// own (RFC 3262 §5).
 pub(super) fn owes_prack_answer(call: &Call, id: &ProvisionalId) -> bool {
-    call::helpers::find_leg(call, &id.leg)
-        .and_then(|leg| call::helpers::dialog_with_peer(leg, &id.responder_tag))
-        .and_then(|d| d.owed_answer.as_ref())
-        .is_some_and(|o| o.prack_offer(id.rseq).is_some())
+    owed_offer(call, id).is_some()
 }
 
 /// The offer the provisional `id` carried is no longer owed by its dialog: a
