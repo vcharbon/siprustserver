@@ -166,6 +166,8 @@ CASES = [
     Case("info-after-bye-provisional", "peer-info-after-bye-provisional.xml", "answered", "answered", calls=4),
     Case("2xx-after-bye-provisional", "peer-2xx-after-bye-provisional.xml", "answered", "answered", calls=4),
     Case("ack-after-bye-provisional", "peer-ack-after-bye-provisional.xml", "answered", "answered", {}, {}, ["protocol"], calls=4),
+    Case("487-after-bye-provisional", "peer-487-after-bye-provisional.xml", "answered", "answered", {}, {}, ["protocol"], calls=4),
+    Case("2xx-after-bye-final", "peer-2xx-after-bye-final.xml", "answered", "answered", calls=4),
     Case(
         "request-before-answer",
         "peer-request-before-answer.xml",
