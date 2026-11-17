@@ -87,7 +87,7 @@ pub struct Defect {
 pub struct TurnNotes {
     trace: Vec<TraceFact>,
     repeat_give_ups: Vec<&'static str>,
-    copies_past_schedule: u32,
+    copies_past_schedule: Vec<&'static str>,
     message_caps: u32,
     caps_near: Vec<Cap>,
     cap_readings: CapReadings,
@@ -142,11 +142,11 @@ impl TurnNotes {
         self.repeat_give_ups.push(kind);
     }
 
-    /// A copy of a taken 2xx arrived past the re-sends a compliant answerer
-    /// makes (RFC 3261 §13.3.1.4), within T1 of the last re-ACK, and draws no
-    /// re-ACK.
-    pub fn copy_past_schedule(&mut self) {
-        self.copies_past_schedule = self.copies_past_schedule.saturating_add(1);
+    /// A copy of an INVITE final of `kind` ([`crate::copy_schedule::kind`])
+    /// arrived past the re-sends a compliant answerer makes (RFC 3261
+    /// §13.3.1.4, §17.2.1), within T1 of the last re-ACK, and draws no re-ACK.
+    pub fn copy_past_schedule(&mut self, kind: &'static str) {
+        self.copies_past_schedule.push(kind);
     }
 
     /// The message cap tore a runaway call down.
@@ -190,10 +190,10 @@ impl TurnNotes {
         &self.repeat_give_ups
     }
 
-    /// How many copies of a taken 2xx arrived past a compliant answerer's
-    /// re-sends.
-    pub fn copies_past_schedule(&self) -> u32 {
-        self.copies_past_schedule
+    /// The kind of each copy of an INVITE final that arrived past a compliant
+    /// answerer's re-sends, one per copy.
+    pub fn copies_past_schedule(&self) -> &[&'static str] {
+        &self.copies_past_schedule
     }
 
     /// How many runaway calls the message cap tore down.

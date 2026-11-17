@@ -136,6 +136,20 @@ fn ack_effect(result: &HandlerResult) -> &b2bua_core::effects::OutboundSipEffect
         .expect("AckLeg emits an ACK request")
 }
 
+/// `call` with a copy of `b-1`'s 2xx counted on its INVITE's record, owed its
+/// re-ACK (ADR-0057 §10): the mark the count leaves before the rules run.
+fn copy_owed(call: &call::Call) -> call::Call {
+    let mut call = call.clone();
+    call::helpers::update_leg(&mut call, "b-1", |leg| {
+        let exchange = leg.dialogs.confirmed_mut().and_then(call::helpers::sent_exchange_mut);
+        if let Some(x) = exchange {
+            x.copies_received += 1;
+            x.re_acked_copy = Some(call::ReAckedCopy { copy: x.copies_received, at_ms: 0 });
+        }
+    });
+    call
+}
+
 /// The one re-ACK in `result`: a retained datagram repeated as its bytes
 /// (RFC 3261 §13.2.2.4), never a composed request.
 fn re_ack_effect(result: &HandlerResult) -> &b2bua_core::effects::OutboundSipEffect {
@@ -193,7 +207,7 @@ fn a_bodyless_ack_re_passes_the_retained_datagram_byte_identical() {
     let OutboundBody::Request(sent) = &first_effect.body else { unreachable!() };
     let first_bytes = sent.image().to_vec();
 
-    let second = ack_exec(&first.call, Vec::new(), None);
+    let second = ack_exec(&copy_owed(&first.call), Vec::new(), None);
     let effect = re_ack_effect(&second);
     let OutboundBody::Datagram(re_sent) = &effect.body else { unreachable!() };
     assert_eq!(
@@ -231,7 +245,28 @@ fn a_bare_first_ack_retains_its_datagram_and_a_re_ack_repeats_it() {
     assert_eq!(retained.wire().0, sent.image());
     assert!(sent.body().is_empty(), "a minted ACK stays bare");
 
-    let second = ack_exec(&first.call, Vec::new(), None);
+    let second = ack_exec(&copy_owed(&first.call), Vec::new(), None);
     let OutboundBody::Datagram(re_sent) = &re_ack_effect(&second).body else { unreachable!() };
     assert_eq!(re_sent.wire().0, sent.image(), "the re-ACK repeats the bare datagram");
+}
+
+// ADR-0057 §10 is the action's: a bodyless AckLeg on a dialog whose ACK left
+// sends nothing unless the copy its turn counted is owed a re-ACK, whichever
+// rule asks, and composes no fresh ACK in its place.
+#[test]
+fn a_bodyless_ack_with_no_copy_owed_sends_nothing() {
+    let mut call = test_call();
+    call::helpers::add_b_leg(&mut call, b_leg_confirmed());
+    let first = ack_exec(&call, Vec::new(), None);
+    let uncounted = ack_exec(&first.call, Vec::new(), None);
+    assert!(uncounted.effects.outbound.is_empty(), "no copy counted: {:?}", uncounted.effects);
+    let mut absorbed = copy_owed(&first.call);
+    call::helpers::update_leg(&mut absorbed, "b-1", |leg| {
+        let exchange = leg.dialogs.confirmed_mut().and_then(call::helpers::sent_exchange_mut);
+        if let Some(x) = exchange {
+            x.copies_received += 1;
+        }
+    });
+    let past = ack_exec(&absorbed, Vec::new(), None);
+    assert!(past.effects.outbound.is_empty(), "the copy counted last absorbed: {:?}", past.effects);
 }

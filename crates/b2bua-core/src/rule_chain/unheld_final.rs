@@ -4,9 +4,10 @@
 //! INVITE whose responses reach this node as the call's primary (ADR-0055
 //! §8). When the rules sent no ACK for it, it is ACKed as a node that holds
 //! no client transaction of it answers it, from its verified via-extension
-//! (ADR-0055 §12, [`crate::unheld_response`]); one whose extension does not
-//! verify draws nothing, nor does one whose Via names this node: its own
-//! transaction absorbed that final and its repeats while it lived.
+//! (ADR-0055 §12, [`crate::unheld_response`]), as an unheld answer the
+//! shell's book bounds (ADR-0063 §2); one whose extension does not verify
+//! draws nothing, nor does one whose Via names this node: its own transaction
+//! absorbed that final and its repeats while it lived.
 
 use sip_ids::TurnIds;
 use sip_message::{Method, SipMessage, SipResponse};
@@ -15,8 +16,9 @@ use crate::config::B2buaConfig;
 use crate::effects::{HandlerEffects, OutboundBody};
 use b2bua_sdk::event::CallEvent;
 
-/// Push onto `effects` the ACK `event` draws: a non-2xx final to an INVITE,
-/// `matched_client_txn` false, that no ACK of the turn answers already.
+/// Push onto `effects`' unheld answers the ACK `event` draws: a non-2xx final
+/// to an INVITE, `matched_client_txn` false, that no ACK of the turn answers
+/// already.
 pub(super) fn ack_unheld_final(
     config: &B2buaConfig,
     event: &CallEvent,
@@ -33,12 +35,13 @@ pub(super) fn ack_unheld_final(
     if resp.top_via().host_port() == (config.sip_local_ip.as_str(), config.sip_local_port) {
         return;
     }
-    if effects.outbound.iter().any(|e| acks(&e.body, resp)) {
+    let unheld_acks = effects.unheld.iter().map(|a| &a.ack);
+    if effects.outbound.iter().chain(unheld_acks).any(|e| acks(&e.body, resp)) {
         return;
     }
     let from = (src.ip().to_string(), src.port());
     effects
-        .outbound
+        .unheld
         .extend(crate::unheld_response::answer_unheld_response(config, resp, from, ids, now_ms));
 }
 

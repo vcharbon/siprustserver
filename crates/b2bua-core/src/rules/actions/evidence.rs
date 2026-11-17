@@ -180,7 +180,8 @@ impl ActionExecutor<'_> {
     }
 
     /// A 2xx on a leg the record lacks, which its via-extension names: ACKed
-    /// and its dialog BYEd from its own headers (RFC 3261 §13.2.2.4, §15.1.1).
+    /// and its dialog BYEd from its own headers (RFC 3261 §13.2.2.4, §15.1.1),
+    /// as an unheld answer the shell's book bounds (ADR-0063 §2).
     fn release_unknown_leg_2xx(
         &mut self,
         fx: &mut HandlerEffects,
@@ -190,17 +191,14 @@ impl ActionExecutor<'_> {
     ) {
         let CallEvent::Sip { src, .. } = ctx.event else { return };
         let from = (src.ip().to_string(), src.port());
-        let answers = crate::unheld_response::answer_unheld_response(
+        let answer = crate::unheld_response::answer_unheld_response(
             self.config,
             resp,
             from,
             &mut self.turn.ids,
             self.now_ms,
         );
-        for mut answer in answers {
-            answer.leg_id = Some(leg_id.to_string());
-            fx.outbound.push(answer);
-        }
+        fx.unheld.extend(answer.map(|a| a.on_leg(leg_id)));
     }
 }
 

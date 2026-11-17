@@ -183,6 +183,8 @@ async fn a_vanished_calls_2xx_repeated_on_every_ack_draws_bounded_acks_and_one_b
     lost.settle().await;
 }
 
+/// The dial to the target never lands at the backup: the backup's replica is
+/// rewound to the call as it was before the REFER when the primary dies.
 #[tokio::test(start_paused = true)]
 async fn a_held_calls_unknown_leg_2xx_repeated_on_every_ack_draws_bounded_acks_and_one_bye() {
     let mut fh = FailoverHarness::new("unheld-2xx-copies-bounded-unknown-leg", &["b1", "b2"]);
@@ -220,8 +222,6 @@ async fn a_held_calls_unknown_leg_2xx_repeated_on_every_ack_draws_bounded_acks_a
     let mut at_charlie = charlie.receive("INVITE").await;
     at_charlie.respond(180, "Ringing").await;
     fh.advance(REPLICATE).await;
-    // The dial never landed at the backup: it holds the call as it was
-    // before the REFER when the primary dies.
     survivor_of(&pri_ord, &w_b1, &w_b2)
         .rewind_replica(PartitionRole::Backup, &pri_ord, &call_ref, established)
         .await;

@@ -11,11 +11,11 @@ use call::{Call, Direction, TerminationCause};
 use sip_ids::TurnIds;
 use sip_message::SipRequest;
 
-use super::{landing, Driver, Session};
+use super::landed::landed;
+use super::{Driver, Session};
 use crate::decision::route_fold::{self, Admitting};
 use crate::effects::HandlerResult;
 use crate::initial_invite::{build_initial_call, reject_call, setup_event};
-use crate::landing::land;
 use crate::owners::Owners;
 use crate::rule_fixture::executor;
 use crate::rules::invariants::{enforce, finalize, UnansweredCaller};
@@ -59,7 +59,7 @@ pub(super) fn fold(driver: &Driver, invite: &SipRequest) -> Option<HandlerResult
     let enforced = enforce(&driver.obligations, &born, finalized, 0, unanswered, &mut turn.notes);
     let mut exec = executor(config, &mut turn);
     let closed = close_turn(&driver.rules, &TurnStart::unborn(), enforced, &mut exec);
-    Some(land(closed, &landing(config), 0))
+    Some(landed(closed, config, 0))
 }
 
 /// `call` routed as `driver`'s route says, admitted unless the route is

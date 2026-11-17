@@ -101,6 +101,7 @@ mod turn_mark;
 pub(crate) mod txn_event;
 mod undecided;
 mod unheld;
+mod unheld_book;
 #[cfg(test)]
 mod unheld_final_tests;
 mod unrecoverable;
@@ -240,6 +241,8 @@ pub struct RouterCtx {
     pub unroutable_waves: crate::lifecycle::UnroutableWaves,
     /// The PRACKs released calls still answer 200 (RFC 3262 §3).
     pub(crate) late_pracks: late_prack::LatePrackBook,
+    /// The answers to finals no call here holds, by final (ADR-0063 §2).
+    pub(crate) unheld_answers: unheld_book::UnheldBook,
     /// The proxies' dead verdicts this node took (ADR-0050 §3).
     pub(crate) dead_verdicts: dead_verdict::VerdictBook,
     /// How those verdicts are read: their freshness window and hold.

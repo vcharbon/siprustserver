@@ -8,7 +8,7 @@
 use b2bua_core::config::B2buaConfig;
 use b2bua_core::effects::{OutboundBody, OutboundSipEffect};
 use b2bua_core::stack_identity::{build_call_via, RequestFacts, StackIdentityOpts};
-use b2bua_core::unheld_response::answer_unheld_response;
+use b2bua_core::unheld_response::{answer_unheld_response, UnheldAnswer};
 use sip_ids::{SigningKey, TurnIds};
 use sip_message::header::{HeaderValue, Rport};
 use sip_message::parser::custom::CustomParser;
@@ -67,7 +67,7 @@ Contact: <sip:bob@10.0.0.2:5070>\r\n\
 
 fn answer(resp: &SipResponse) -> Vec<OutboundSipEffect> {
     let src = ("10.0.0.5".to_string(), 5080);
-    answer_unheld_response(&config(), resp, src, &mut TurnIds::fixed(1), 0)
+    effects_of(&config(), resp, src, &mut TurnIds::fixed(1), 0)
 }
 
 fn requests(effects: &[OutboundSipEffect]) -> Vec<sip_message::SipRequest> {
@@ -96,7 +96,7 @@ fn a_2xx_without_a_verified_extension_draws_nothing() {
     let unkeyed = B2buaConfig::default();
     let resp = response(200, &our_via(true, true), "");
     let src = ("10.0.0.5".to_string(), 5080);
-    let sent = answer_unheld_response(&unkeyed, &resp, src, &mut TurnIds::fixed(1), 0);
+    let sent = effects_of(&unkeyed, &resp, src, &mut TurnIds::fixed(1), 0);
     assert!(sent.is_empty(), "a node without the cluster key trusts no extension");
 }
 
@@ -131,7 +131,7 @@ fn the_ack_and_the_bye_of_a_2xx_carry_this_nodes_via() {
     let config = B2buaConfig { sip_local_ip: "10.0.0.7".into(), sip_local_port: 5062, ..config() };
     let src = ("10.0.0.5".to_string(), 5080);
     let resp = response(200, &stamped, "");
-    let sent = requests(&answer_unheld_response(&config, &resp, src, &mut TurnIds::fixed(1), 0));
+    let sent = requests(&effects_of(&config, &resp, src, &mut TurnIds::fixed(1), 0));
     assert_eq!(sent.len(), 2, "the ACK and the BYE");
     let invite_hop = resp.top_via();
     for req in &sent {
@@ -174,7 +174,7 @@ fn refused(leg: &str, route: &str) -> SipResponse {
 /// The Route rows of the one ACK `resp` draws, and where it goes.
 fn acked(config: &B2buaConfig, resp: &SipResponse) -> (Vec<String>, (String, u16)) {
     let src = (PROXY.0.to_string(), PROXY.1);
-    let sent = answer_unheld_response(config, resp, src, &mut TurnIds::fixed(1), 0);
+    let sent = effects_of(config, resp, src, &mut TurnIds::fixed(1), 0);
     assert_eq!(sent.len(), 1, "{sent:?}");
     let [req] = requests(&sent).try_into().expect("one request");
     assert_eq!(req.method(), "ACK");
@@ -213,4 +213,18 @@ fn with_no_proxy_the_ack_goes_to_the_first_route_else_the_request_uri() {
     let (routes, dest) = acked(&config(), &refused("b-1", ""));
     assert!(routes.is_empty());
     assert_eq!(dest, ("10.0.0.2".to_string(), 5070));
+}
+
+/// Every message [`answer_unheld_response`] owes `resp`, before any book
+/// bounds it; none when it owes nothing.
+fn effects_of(
+    config: &B2buaConfig,
+    resp: &sip_message::SipResponse,
+    src: (String, u16),
+    ids: &mut TurnIds,
+    now_ms: i64,
+) -> Vec<OutboundSipEffect> {
+    answer_unheld_response(config, resp, src, ids, now_ms)
+        .map(UnheldAnswer::into_effects)
+        .unwrap_or_default()
 }

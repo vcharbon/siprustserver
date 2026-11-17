@@ -9,7 +9,7 @@
 use b2bua_core::config::B2buaConfig;
 use b2bua_core::effects::OutboundSipEffect;
 use b2bua_core::stack_identity::read_via_extension;
-use b2bua_core::unheld_response::answer_unheld_response;
+use b2bua_core::unheld_response::{answer_unheld_response, UnheldAnswer};
 use sip_ids::{SigningKey, TurnIds};
 use sip_message::header::Uri;
 use sip_message::parser::custom::CustomParser;
@@ -41,7 +41,7 @@ pub fn case(raw: &[u8]) -> Vec<OutboundSipEffect> {
         return Vec::new();
     }
     let src = ("10.0.0.5".to_string(), 5080);
-    let sent = answer_unheld_response(&config, &resp, src, &mut TurnIds::fixed(1), 0);
+    let sent = effects_of(&config, &resp, src, &mut TurnIds::fixed(1), 0);
     let owed = (resp.cseq().method() == Method::Invite && resp.status() >= 200)
         .then(|| read_via_extension(resp.top_via(), "INVITE", Some(&key())))
         .flatten();
@@ -54,4 +54,18 @@ pub fn case(raw: &[u8]) -> Vec<OutboundSipEffect> {
         }
     }
     sent
+}
+
+/// Every message [`answer_unheld_response`] owes `resp`, before any book
+/// bounds it; none when it owes nothing.
+fn effects_of(
+    config: &B2buaConfig,
+    resp: &sip_message::SipResponse,
+    src: (String, u16),
+    ids: &mut TurnIds,
+    now_ms: i64,
+) -> Vec<OutboundSipEffect> {
+    answer_unheld_response(config, resp, src, ids, now_ms)
+        .map(UnheldAnswer::into_effects)
+        .unwrap_or_default()
 }

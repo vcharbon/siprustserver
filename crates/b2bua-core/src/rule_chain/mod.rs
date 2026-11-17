@@ -237,11 +237,11 @@ fn chain_turn(
         exec.give_up(&mut call, &mut ladder_fx, obligation);
     }
     let named = resolved.dialog.as_ref();
-    let absorbed_copy =
-        crate::rules::relay::count_copy(&mut call, source_leg_id, named, event, now_ms);
-    if absorbed_copy {
-        exec.turn.notes.copy_past_schedule();
+    let absorbed = crate::rules::relay::count_copy(&mut call, source_leg_id, named, event, now_ms);
+    if let Some(class) = absorbed {
+        exec.turn.notes.copy_past_schedule(crate::copy_schedule::kind(class));
     }
+    let absorbed_copy = absorbed.is_some();
     // The record names the message before the rules read it, so what the
     // turn sends follows what it received.
     if let Some(ring) = crate::message_ring::Ring::of(fw.config) {

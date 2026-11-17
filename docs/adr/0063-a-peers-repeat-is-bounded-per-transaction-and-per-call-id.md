@@ -116,6 +116,8 @@ in practice.
 - `b2bua_cap_trips_total{cap="messages_per_call_id", kind="peer"}` counts the calls ended. A
   peer cap is a counter, not an alert (ADR-0057 §7).
 - `sip_txn_copies_past_schedule_total{kind}` counts what §1 absorbs.
+- `b2bua_copies_past_schedule_total{kind}` counts what §2 absorbs: a call's re-ACK of a 2xx or
+  a non-2xx, and the book's.
 - `sip_txn_muted_messages_total{direction}` counts what a mute drops.
 
 ## Consequences

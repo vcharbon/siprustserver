@@ -444,17 +444,19 @@ no axis moves, nothing flushes. The quiet list is closed
 
 1. a rung of this node's own un-ACKed 2xx ladder (RFC 3261 §13.3.1.4),
 2. a rung of this node's own reliable-provisional ladder (RFC 3262 §3),
-3. the re-ACK of a repeated inbound 2xx (RFC 3261 §13.2.2.4),
+3. the re-ACK of a repeated inbound INVITE final whose ACK the record retains:
+   a taken 2xx (RFC 3261 §13.2.2.4), or a non-2xx of a round the record never
+   held (§17.1.1.3),
 4. an inbound ACK the rules absorb: it discharges nothing this node awaits
    and no ACK is owed toward the peer for it (RFC 3261 §13.2.2.4),
-5. an inbound copy of a taken 2xx owed no re-ACK (ADR-0057 §10).
+5. an inbound copy of such a final owed no re-ACK (ADR-0057 §10).
 
 A rung is quiet only while the ladder goes on: a copy left and the next rung
 is armed, so the body differs from the last write by the rung index and the
 rung timer's due instant. The class is decided from the turn's effect set,
 not from the action that repeated: a quiet turn is one outbound repeat of the
 retained datagram on an `Active` call, and for a rung its own re-arm, and
-nothing else; an absorbed ACK or 2xx copy is a turn with no effect at all that leaves the
+nothing else; an absorbed ACK or final's copy is a turn with no effect at all that leaves the
 body as the rules read it. The rung that ceases the ladder, a spent fire, a give-up, a
 keepalive OPTIONS turn, a request refused into the message ring, a re-ACK a
 rule emits beside a BYE or a CDR event, a re-ACK on a terminating call and

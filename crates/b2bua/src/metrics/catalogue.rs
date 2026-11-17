@@ -158,6 +158,7 @@ const WORKER_REST: &[Family] = &[
     wire_drops::UNROUTABLE_INTERNAL,
     wire_drops::UNROUTABLE_INTERNAL_OVERFLOW,
     worker::REPEAT_GIVE_UPS,
+    worker::COPIES_PAST_SCHEDULE,
     worker::MODEL_DEFECTS,
     caps::CAP_TRIPS,
     caps::CAP_NEAR,

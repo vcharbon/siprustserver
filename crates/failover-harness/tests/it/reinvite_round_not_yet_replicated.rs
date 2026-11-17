@@ -12,10 +12,10 @@
 //! legs. The caller's pending re-INVITE cannot get a final: its transaction
 //! existed only on the dead node (§17.1.3); the BYE ends its dialog. Every
 //! retransmission of the callee's 2xx (§13.3.1.4) finds the call ended and
-//! takes nothing over again: one takeover per lost round. Each draws an ACK
-//! and a BYE, as a 2xx no node holds does (ADR-0055 §4), numbered from the 2xx
-//! alone; the callee answers the BYE into its ended dialog with a 481
-//! (ADR-0055 §11).
+//! takes nothing over again: one takeover per lost round. Each draws an ACK,
+//! as a 2xx no node holds does (ADR-0055 §4), and the first one a BYE numbered
+//! from the 2xx alone (ADR-0063 §2); the callee answers that BYE into its
+//! ended dialog with a 481 (ADR-0055 §11).
 //!
 //! Beyond the failover sweep: a re-INVITE round answered or refused before it replicated.
 
@@ -154,6 +154,10 @@ impl LostRound {
     }
 }
 
+/// Then the callee's §13.3.1.4 ladder, as if the ACK were lost, reaches the
+/// ended call: each 2xx repeat no node holds draws an ACK, and the first also
+/// a BYE into the dialog the copy ended, closed by its 481, numbered from the
+/// 2xx: the copy's BYE number re-used on that dialog.
 #[tokio::test(start_paused = true)]
 async fn a_round_answered_2xx_before_it_replicated_is_acknowledged_and_the_call_ended() {
     let mut lost = lose_a_round("reinvite-round-not-yet-replicated").await;
@@ -175,10 +179,6 @@ async fn a_round_answered_2xx_before_it_replicated_is_acknowledged_and_the_call_
     lost.taken_over_once("the callee's 200");
     lost.ended_on_both_legs().await;
 
-    // The callee's §13.3.1.4 ladder, as if the ACK were lost: the call is ended.
-    // A 2xx repeat no node holds draws a BYE into the dialog the copy ended,
-    // closed by its 481, numbered from the 2xx: the copy's BYE number re-used
-    // on that dialog.
     lost.fh.strike(failover_harness::Incident::PrimaryKilled);
     let mut gap = T1;
     let mut elapsed = Duration::ZERO;

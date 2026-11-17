@@ -18,6 +18,17 @@ impl B2buaMetrics {
         self.inner.rows.repeat_give_ups.get(&[obligation])
     }
 
+    /// Count one copy of an INVITE final absorbed past its ladder by the
+    /// answer of `kind`, for `b2bua_copies_past_schedule_total{kind}`.
+    pub fn record_copy_past_schedule(&self, kind: &str) {
+        self.inner.rows.copies_past_schedule.add(&[kind], 1);
+    }
+
+    /// The copies of one kind absorbed past their ladder.
+    pub fn copies_past_schedule_total(&self, kind: &str) -> u64 {
+        self.inner.rows.copies_past_schedule.get(&[kind])
+    }
+
     /// Count one model invariant broken or defect met, for
     /// `b2bua_model_defects_total{invariant}`.
     pub fn record_model_defect(&self, invariant: &str) {
@@ -76,6 +87,7 @@ impl B2buaMetrics {
     pub(super) fn render_turn_counts(&self, s: &mut String) {
         let rows = &self.inner.rows;
         rows.repeat_give_ups.render(s);
+        rows.copies_past_schedule.render(s);
         rows.model_defects.render(s);
         rows.cap_trips.render(s);
         rows.cap_near.render(s);

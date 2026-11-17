@@ -85,7 +85,8 @@ fn refused(call: &Call, sender: (&str, u16)) -> CallEvent {
 }
 
 /// The Request-URIs of the ACKs the turn on the callee's 487, sent from
-/// `sender`, sends, `matched_client_txn` as the layer read it.
+/// `sender`, sends or hands the book as unheld answers, `matched_client_txn`
+/// as the layer read it.
 fn acks_sent(sender: (&str, u16), matched_client_txn: bool) -> Vec<String> {
     let config = config();
     let rules = default_rules();
@@ -105,10 +106,12 @@ fn acks_sent(sender: (&str, u16), matched_client_txn: bool) -> Vec<String> {
         owners: Default::default(),
     };
     let result = rule_chain_turn(&fw, call, input, &mut turn(1)).expect("the turn crosses no cap");
+    let unheld = result.effects.unheld.iter().flat_map(|a| std::iter::once(&a.ack).chain(&a.bye));
     result
         .effects
         .outbound
         .iter()
+        .chain(unheld)
         .filter_map(|e| match &e.body {
             OutboundBody::Request(r) if r.method().as_str() == "ACK" => {
                 Some(r.request_uri().text().into_owned())

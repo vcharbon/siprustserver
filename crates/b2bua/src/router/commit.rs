@@ -1,4 +1,5 @@
-//! The turn commit (ADR-0055 §3): the one tail of a call's turn. It persists
+//! The turn commit (ADR-0055 §3): the one tail of a call's turn. It sends
+//! the turn's unheld answers through the node's book (ADR-0063 §2), persists
 //! the landed record, reports the turn `Logged`, takes in the turn what never
 //! leaves the node (timers, the CDR, metrics, re-entries), queues everything
 //! the turn sends on the call's outbox behind the write that records it, and
@@ -138,7 +139,7 @@ fn classify(landed: Landed, residency: impl FnOnce() -> Residency) -> CommitKind
 pub(super) async fn commit_turn(
     ctx: &Arc<RouterCtx>,
     call_ref: &str,
-    result: HandlerResult,
+    mut result: HandlerResult,
     now_ms: i64,
     turn: &(dyn std::fmt::Display + Sync),
     trigger: Option<&CallEvent>,
@@ -155,6 +156,7 @@ pub(super) async fn commit_turn(
         SipMessage::Response(_) => None,
     });
     let (ack, cancel) = trigger.map_or((None, None), held::of);
+    super::unheld_book::admit_turn_answers(ctx, &mut result.effects, now_ms);
     let result = crate::landing::land(result, &ctx.landing(), now_ms);
     let kind = TurnKind::of(&result, received);
     let awaited_before = ctx.state.resident(call_ref).is_some_and(|c| !c.awaited.is_empty());

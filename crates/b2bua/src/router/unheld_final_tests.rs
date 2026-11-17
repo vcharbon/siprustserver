@@ -192,3 +192,57 @@ async fn a_2xx_naming_the_held_dialog_keeps_its_own_path() {
     let byes = heard(callee.as_ref()).await.into_iter().filter(|r| r.method().as_str() == "BYE");
     assert_eq!(byes.count(), 0, "the held dialog is not BYEd");
 }
+
+/// The ACKs and the BYEs, each BYE once whatever its retransmissions, that
+/// `ep` receives within a second.
+async fn acks_and_byes(ep: &dyn UdpEndpoint) -> (usize, usize) {
+    let heard = heard(ep).await;
+    let acks = heard.iter().filter(|r| r.method().as_str() == "ACK").count();
+    let mut byes: Vec<&str> = heard
+        .iter()
+        .filter(|r| r.method().as_str() == "BYE")
+        .filter_map(|r| r.top_via().branch())
+        .collect();
+    byes.sort_unstable();
+    byes.dedup();
+    (acks, byes.len())
+}
+
+/// Sends `copies` copies of `resp` from `proxy` to the node, 1 ms apart: a
+/// peer re-sending its final far faster than its ladder.
+async fn burst(proxy: &dyn UdpEndpoint, resp: &SipMessage, copies: usize) {
+    let SipMessage::Response(resp) = resp else { unreachable!() };
+    for _ in 0..copies {
+        proxy.send_to(resp.image(), SocketAddr::from(NODE_SIP_ADDR)).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+}
+
+/// The copies of one final a compliant answerer sends after the first (RFC
+/// 3261 §13.3.1.4, §17.2.1; T1 = 500 ms, T2 = 4 s).
+const COMPLIANT_COPIES: usize = 10;
+
+/// A held call's final naming no leg or dialog it holds, re-sent at wire
+/// speed: the first arrival and the copies a compliant answerer sends draw an
+/// ACK each, the rest inside T1 nothing (ADR-0063 §2), counted as absorbed.
+#[tokio::test(start_paused = true)]
+async fn a_held_calls_unheld_final_repeated_at_wire_speed_draws_bounded_acks() {
+    let (node, proxy, callee, call_ref, mark) = holding_a_call().await;
+    burst(proxy.as_ref(), &final_to_the_dial(&call_ref, &mark, OTHER, 487, true), 15).await;
+    let (acks, byes) = acks_and_byes(callee.as_ref()).await;
+    assert_eq!((acks, byes), (COMPLIANT_COPIES + 1, 0), "a non-2xx: ACKs on its ladder, no BYE");
+    let metrics = &node.core.router_ctx().metrics;
+    assert_eq!(metrics.copies_past_schedule_total("unheld"), 4, "the copies past it are counted");
+}
+
+/// The same for a 2xx naming no dialog of the held leg: its dialog is BYEd
+/// once, on the first arrival.
+#[tokio::test(start_paused = true)]
+async fn a_held_calls_unheld_2xx_repeated_at_wire_speed_is_byed_once() {
+    let (node, proxy, callee, call_ref, mark) = holding_a_call().await;
+    burst(proxy.as_ref(), &final_on(&call_ref, &mark, "b-1", OTHER, 200, true), 15).await;
+    let (acks, byes) = acks_and_byes(callee.as_ref()).await;
+    assert_eq!((acks, byes), (COMPLIANT_COPIES + 1, 1), "a 2xx: ACKs on its ladder, one BYE");
+    let metrics = &node.core.router_ctx().metrics;
+    assert_eq!(metrics.copies_past_schedule_total("unheld"), 4, "the copies past it are counted");
+}

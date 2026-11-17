@@ -17,6 +17,8 @@
 //!   decision DTOs;
 //! - [`effects`] — the effect vocabulary a turn returns;
 //! - [`unheld_response`] — the answer to a response for a call no node holds;
+//! - [`copy_schedule`] — whether a peer's copy of an INVITE final is owed its
+//!   ACK again;
 //! - [`turn_scope`], [`turn_notes`], [`wire_fault_set`], [`owners`] — a turn's
 //!   inputs and what it reports;
 //! - [`caps`] — the per-call caps a turn is held to, and the trip that
@@ -45,6 +47,7 @@ pub mod attempts;
 pub use b2bua_sdk::caller_tags;
 pub mod caps;
 pub mod config;
+pub mod copy_schedule;
 pub mod decision;
 pub mod decision_log;
 pub mod destination_allowlist;

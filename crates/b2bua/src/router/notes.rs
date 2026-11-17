@@ -15,8 +15,8 @@ pub(super) fn drain(ctx: &RouterCtx, call_ref: &str, turn: &mut TurnScope) {
     for kind in notes.repeat_give_ups() {
         ctx.metrics.record_repeat_give_up(kind);
     }
-    for _ in 0..notes.copies_past_schedule() {
-        ctx.metrics.bump_2xx_copy_past_schedule();
+    for kind in notes.copies_past_schedule() {
+        ctx.metrics.record_copy_past_schedule(kind);
     }
     for _ in 0..notes.message_caps() {
         ctx.metrics.bump_message_cap_terminated();

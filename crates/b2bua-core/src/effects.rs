@@ -237,17 +237,18 @@ pub enum QuietTurn {
     /// rung index and the rung timer's next due instant; a rung that ceases
     /// the ladder or fires spent cancels a ledger entry and is a write.
     OwnRung,
-    /// The re-ACK of a repeated inbound 2xx (RFC 3261 §13.2.2.4): the retained
-    /// ACK's bytes leave again and the body records nothing but the in-dialog
-    /// message count and the 2xx's copy count.
+    /// The re-ACK of a repeated inbound INVITE final whose ACK the record
+    /// retains (RFC 3261 §13.2.2.4, §17.1.1.3): the retained ACK's bytes leave
+    /// again and the body records nothing but the in-dialog message count and
+    /// the final's copy count.
     ReAck,
     /// An inbound ACK the rules absorb: it discharges nothing this node awaits
     /// and no ACK is owed toward the peer for it (§13.2.2.4), so nothing
     /// leaves and the body records nothing but the in-dialog message count.
     AbsorbedAck,
-    /// A copy of a taken 2xx owed no re-ACK (ADR-0057 §10): nothing leaves
+    /// A copy of such a final owed no re-ACK (ADR-0057 §10): nothing leaves
     /// and the body records nothing but the in-dialog message count and the
-    /// 2xx's copy count.
+    /// final's copy count.
     AbsorbedCopy,
 }
 
@@ -262,7 +263,7 @@ impl QuietTurn {
             QuietTurn::OwnRung => "own-rung",
             QuietTurn::ReAck => "re-ack",
             QuietTurn::AbsorbedAck => "absorbed-ack",
-            QuietTurn::AbsorbedCopy => "absorbed-2xx-copy",
+            QuietTurn::AbsorbedCopy => "absorbed-copy",
         }
     }
 }
@@ -272,6 +273,10 @@ impl QuietTurn {
 pub struct HandlerEffects {
     pub critical: Vec<CriticalStateEffect>,
     pub outbound: Vec<OutboundSipEffect>,
+    /// The answers to finals no leg of the call holds (ADR-0063 §2): the
+    /// shell's book decides what each copy sends and appends it to
+    /// `outbound` before the turn lands.
+    pub unheld: Vec<crate::unheld_response::UnheldAnswer>,
     pub soft: Vec<SoftBoundedEffect>,
     pub buffered: Vec<BufferedObservabilityEffect>,
     pub fire_and_forget: Vec<FireAndForgetEffect>,
@@ -311,6 +316,7 @@ impl HandlerEffects {
         self.reasked |= other.reasked;
         self.critical.extend(other.critical);
         self.outbound.extend(other.outbound);
+        self.unheld.extend(other.unheld);
         self.soft.extend(other.soft);
         self.buffered.extend(other.buffered);
         self.fire_and_forget.extend(other.fire_and_forget);

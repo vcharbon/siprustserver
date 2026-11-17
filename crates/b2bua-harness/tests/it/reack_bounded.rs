@@ -87,14 +87,18 @@ impl PingPong {
         );
         assert_eq!(self.copies, COMPLIANT_COPIES + 1, "the first copy left un-ACKed ends it");
         assert!(self.others.is_empty(), "the SUT sends nothing but re-ACKs: {:?}", self.others);
-        assert_eq!(metrics.copies_past_schedule_total(), 1, "the copy left un-ACKed is counted");
+        assert_eq!(
+            metrics.copies_past_schedule_total("2xx"),
+            1,
+            "the copy left un-ACKed is counted"
+        );
         assert_eq!(
             metrics.repl_quiet_turns_total("re-ack"),
             u64::try_from(COMPLIANT_COPIES).expect("a count"),
             "each re-ACK is a quiet turn",
         );
         assert_eq!(
-            metrics.repl_quiet_turns_total("absorbed-2xx-copy"),
+            metrics.repl_quiet_turns_total("absorbed-copy"),
             1,
             "the absorbed copy is a quiet turn",
         );
@@ -359,22 +363,34 @@ async fn a_2xx_resent_on_the_rfc_schedule_draws_a_re_ack_per_copy() {
     bob.receive("ACK").await;
 
     spaced_copies(&h, b2bua.addr, &bob, &mut uas, (ANSWER, sent), &OWN_SCHEDULE_MS).await;
-    assert_eq!(b2bua.metrics().copies_past_schedule_total(), 0, "no copy is past the schedule");
+    assert_eq!(
+        b2bua.metrics().copies_past_schedule_total("2xx"),
+        0,
+        "no copy is past the schedule"
+    );
 
     let before = h.wire_entries().len();
     send_copy(&mut uas, ANSWER, None).await;
     h.advance(Duration::from_millis(ROUND_MS)).await;
     bob.drain().await;
     assert_eq!(acks_to(&h, b2bua.addr, bob.addr(), before), 0, "the eleventh copy is absorbed");
-    assert_eq!(b2bua.metrics().copies_past_schedule_total(), 1, "the absorbed copy is counted");
+    assert_eq!(
+        b2bua.metrics().copies_past_schedule_total("2xx"),
+        1,
+        "the absorbed copy is counted"
+    );
 
     let tenth = sent + Duration::from_millis(OWN_SCHEDULE_MS[COMPLIANT_COPIES - 1]);
     let early = copy_at(&h, b2bua.addr, &bob, &mut uas, (ANSWER, tenth + T1 - ONE_MS)).await;
     assert_eq!(early, 0, "a copy past the count within T1 of the last re-ACK is absorbed");
-    assert_eq!(b2bua.metrics().copies_past_schedule_total(), 2, "the early copy is counted");
+    assert_eq!(b2bua.metrics().copies_past_schedule_total("2xx"), 2, "the early copy is counted");
     let spaced = copy_at(&h, b2bua.addr, &bob, &mut uas, (ANSWER, tenth + T1)).await;
     assert_eq!(spaced, 1, "a copy past the count T1 after the last re-ACK draws its re-ACK");
-    assert_eq!(b2bua.metrics().copies_past_schedule_total(), 2, "the re-ACKed copy is not counted");
+    assert_eq!(
+        b2bua.metrics().copies_past_schedule_total("2xx"),
+        2,
+        "the re-ACKed copy is not counted"
+    );
 
     hang_up(h, &b2bua, &bob, &mut dialog).await;
 }
@@ -405,7 +421,7 @@ async fn a_larger_t1_answerers_copies_past_the_count_draw_their_re_acks() {
     bob.receive("ACK").await;
 
     spaced_copies(&h, b2bua.addr, &bob, &mut uas, (ANSWER, sent), &LARGER_T1_SCHEDULE_MS).await;
-    assert_eq!(b2bua.metrics().copies_past_schedule_total(), 0, "no copy is absorbed");
+    assert_eq!(b2bua.metrics().copies_past_schedule_total("2xx"), 0, "no copy is absorbed");
     assert_eq!(b2bua.active_calls(), 1, "the call is still up");
 
     hang_up(h, &b2bua, &bob, &mut dialog).await;

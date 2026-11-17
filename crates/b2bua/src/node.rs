@@ -380,6 +380,7 @@ impl B2buaCore {
             cap_trip_waves: crate::lifecycle::cap_trip_waves(),
             unroutable_waves: crate::lifecycle::UnroutableWaves::new(),
             late_pracks: Default::default(),
+            unheld_answers: Default::default(),
             dead_verdicts: Default::default(),
             verdict_bounds,
             outboxes: Arc::new(outboxes),
@@ -528,14 +529,6 @@ impl B2buaCore {
     /// runs.
     pub fn loops(&self) -> &crate::loops::WorkerLoops {
         &self.loops
-    }
-
-    pub fn metrics(&self) -> &B2buaMetrics {
-        &self.metrics
-    }
-
-    pub fn cdr(&self) -> &Arc<dyn CdrWriter> {
-        &self.cdr
     }
 }
 

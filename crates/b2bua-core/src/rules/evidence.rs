@@ -27,7 +27,9 @@
 //! unanswered when triggers 4 and 5 prove a callee answered is held possibly
 //! confirmed ([`super::actions::possibly_confirmed`]). `re-ack-evidence`
 //! sends the retained ACK again for a repeat of an evidence final's non-2xx,
-//! which no transaction here absorbs (§17.1.1.2).
+//! which no transaction here absorbs (§17.1.1.2), while the repeat is owed it
+//! (ADR-0057 §10). Trigger 5's ACK and BYE are an unheld answer, bounded by
+//! the shell's book (ADR-0063 §2).
 
 use call::{
     CallModelState, CdrEventType, Dialog, DialogState, Direction, Leg, LegState, TerminationCause,
@@ -103,10 +105,7 @@ pub fn evidence_rules(copy_served: bool) -> Vec<RuleDefinition> {
                 .method("INVITE")
                 .leg_states(&[LegState::Confirmed, LegState::Terminated])
                 .filter(repeated_evidence_failure),
-            |ctx| {
-                let leg_id = ctx.source_leg_id.to_string();
-                Some(RuleHandleResult::new(vec![RuleAction::AckLeg { leg_id, body: None }]))
-            },
+            |ctx| Some(RuleHandleResult::new(crate::rules::relay::re_ack(ctx))),
         ),
     ];
     rules.push(RuleDefinition::core(
@@ -216,19 +215,14 @@ fn names_unknown_leg(ctx: &RuleContext) -> bool {
     ext.leg != ctx.call.a_leg().leg_id && !ctx.call.b_legs().iter().any(|l| l.leg_id == ext.leg)
 }
 
-/// Whether the current response repeats the non-2xx of an evidence final: the
-/// dialog's INVITE record holds no image of the INVITE and the ACK it kept
-/// names this CSeq.
+/// Whether the current response repeats the non-2xx of an evidence final
+/// ([`crate::rules::relay::copy_of_acked_failure`]) and answers no relay.
 fn repeated_evidence_failure(ctx: &RuleContext) -> bool {
     let (Some(resp), Some(dialog), Some(leg)) = (ctx.response(), ctx.dialog(), ctx.source_leg())
     else {
         return false;
     };
-    resp.status() >= 300
-        && call::helpers::sent_invite_image(leg, dialog).is_none()
-        && call::helpers::sent_exchange(dialog).is_some_and(|x| x.emitted_ack.is_some())
-        && crate::rules::relay::acked_invite_cseq(leg, dialog) == Some(resp.cseq().seq())
-        && ctx.relayed_pending().is_none()
+    crate::rules::relay::copy_of_acked_failure(leg, dialog, resp) && ctx.relayed_pending().is_none()
 }
 
 fn end_on_evidence(ctx: &RuleContext) -> Option<RuleHandleResult> {

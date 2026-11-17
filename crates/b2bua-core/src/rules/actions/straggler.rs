@@ -10,7 +10,7 @@ use call::{Call, Dialog, DialogState, InviteExchange, RetainedEmission};
 use sip_message::generators::{self, GenerateAckFor2xxOpts};
 
 use crate::effects::{
-    HandlerEffects, OutboundBody, OutboundSipEffect, OutboundTxnMode, Provenance, QuietTurn,
+    HandlerEffects, OutboundBody, OutboundSipEffect, OutboundTxnMode, Provenance,
 };
 use crate::rules::relay;
 use b2bua_sdk::model::RuleContext;
@@ -145,14 +145,9 @@ impl ActionExecutor<'_> {
 
 /// The copy of the 2xx of the straggler `tag` already released on `leg_id`,
 /// whose INVITE's exchange is `released`: its ACK re-passed as it left
-/// (§13.2.2.4) while the copy is owed it ([`relay::re_ack_owed`]), nothing
-/// past it.
+/// (§13.2.2.4) while the copy is owed it, nothing past it
+/// ([`super::ack_leg::re_ack_copy`]).
 fn re_ack_released(fx: &mut HandlerEffects, released: &InviteExchange, tag: &str, leg_id: &str) {
-    let Some(first) = released.emitted_ack.as_ref() else { return };
-    if !relay::re_ack_owed(released) {
-        return;
-    }
     let label = format!("ACK (fork straggler {tag}, 2xx retransmit) → {leg_id}");
-    fx.outbound.push(super::ladder::repeat_of(first, label, leg_id));
-    fx.quiet = Some(QuietTurn::ReAck);
+    super::ack_leg::re_ack_copy(fx, released, label, leg_id);
 }

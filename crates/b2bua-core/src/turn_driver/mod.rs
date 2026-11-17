@@ -15,12 +15,11 @@
 //! ([`Session::lose`]).
 
 mod dial;
+mod landed;
 mod peers;
 mod steps;
 mod turn;
 mod txns;
-
-use std::time::Duration;
 
 use b2bua_sdk::event::CallEvent;
 use call::features::ReferFeature;
@@ -28,17 +27,16 @@ use call::{Call, CallModelState, Direction};
 use sip_ids::TurnIds;
 use sip_message::{SipMessage, SipRequest, SipResponse};
 
-use crate::answer_deadline::AnswerBudgets;
 use crate::config::B2buaConfig;
 use crate::decision::{default_platform_features, BodyUpdate, RouteDecision, SipDestination};
 use crate::dialog_gate::{note_in_order, verdict, Verdict};
 use crate::effects::{HandlerResult, OutboundBody};
-use crate::landing::{land, Landing};
 use crate::obligations::ObligationSet;
 use crate::owners::Owners;
 use crate::rule_chain::{rule_chain_turn, timer_screen, Framework, TurnInput};
 use crate::rules::{compose_rules, default_rules, RuleDefinition, ServiceDef};
 use crate::turn_scope::TurnScope;
+use landed::landed;
 
 pub use dial::Dialling;
 pub use peers::{callee_tag, Peer, ALICE, ALICE_TAG, BOB, CALL_ID, SDP};
@@ -406,7 +404,7 @@ impl<'d> Session<'d> {
             owners: self.owners.clone(),
         };
         let result = match rule_chain_turn(&fw, gated, input, &mut scope) {
-            Ok(result) => land(result, &landing(&driver.config), self.now),
+            Ok(result) => landed(result, &driver.config, self.now),
             Err(tripped) => return Outcome::Tripped(tripped),
         };
         let turn = Turn { result, rule: scope.handled_by, notes: scope.notes, resolved };
@@ -423,20 +421,6 @@ fn deadline(call: &Call, event: &CallEvent) -> i64 {
     let CallEvent::Timer { key, generation, .. } = event else { return i64::MIN };
     let entry = call.timers.iter().find(|t| t.key == *key && t.generation == *generation);
     entry.map_or(i64::MIN, |t| t.fire_at)
-}
-
-/// The landing pass every driven turn takes.
-pub(super) fn landing(config: &B2buaConfig) -> Landing<'_> {
-    Landing {
-        config,
-        budgets: AnswerBudgets {
-            http: Duration::from_secs(5),
-            admit: Duration::from_secs(1),
-            failure: Duration::from_secs(5),
-            release: Duration::from_secs(5),
-        },
-        refresh_period: Duration::from_secs(60),
-    }
 }
 
 /// alice's INVITE toward bob, with an offer when `offers`, carrying `lines`

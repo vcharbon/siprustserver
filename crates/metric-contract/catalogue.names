@@ -3,7 +3,6 @@ b2bua-runner b2bua_message_cap_lifetime_crossed_total counter fixed {}
 b2bua-runner b2bua_dispatch_capped_refusals_total counter fixed {}
 b2bua-runner b2bua_dispatch_capped_request_answered_total counter fixed {}
 b2bua-runner b2bua_message_cap_terminated_total counter fixed {}
-b2bua-runner b2bua_2xx_copies_past_schedule_total counter fixed {}
 b2bua-runner b2bua_dispatch_queue_drops_total counter fixed {}
 b2bua-runner b2bua_dispatch_cap_drops_total counter fixed {}
 b2bua-runner b2bua_dispatch_release_discards_total counter fixed {}
@@ -78,6 +77,7 @@ b2bua-runner b2bua_unroutable_refused_overflow_total counter fixed {}
 b2bua-runner b2bua_unroutable_internal_total counter capped:256 {event,method|event,method}
 b2bua-runner b2bua_unroutable_internal_overflow_total counter fixed {}
 b2bua-runner b2bua_repeat_give_ups_total counter fixed {obligation}
+b2bua-runner b2bua_copies_past_schedule_total counter fixed {kind}
 b2bua-runner b2bua_model_defects_total counter fixed {invariant}
 b2bua-runner b2bua_cap_trips_total counter fixed {cap,kind|cap,kind}
 b2bua-runner b2bua_cap_near_total counter fixed {cap}

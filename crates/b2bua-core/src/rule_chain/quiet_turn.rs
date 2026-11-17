@@ -13,8 +13,8 @@ use b2bua_sdk::event::CallEvent;
 /// Name the turn's quiet candidate once the rules ran over `read`, the body
 /// they read. A re-ACK whose rule also wrote into the body (a CDR event, a
 /// disposition) is no candidate. An ACK that discharged nothing here and left
-/// the body as the rules read it is an absorbed-ACK candidate; a 2xx copy the
-/// count absorbed (`absorbed_copy`) that left it so, an absorbed-copy one.
+/// the body as the rules read it is an absorbed-ACK candidate; a final's copy
+/// the count absorbed (`absorbed_copy`) that left it so, an absorbed-copy one.
 pub(super) fn name_candidate(
     result: &mut HandlerResult,
     read: &Call,
@@ -34,7 +34,8 @@ pub(super) fn name_candidate(
 
 /// The quiet class the turn is persisted under, or `None` for a write. An
 /// author's class is a candidate; the turn's effect set decides. A quiet turn
-/// is exactly: an `Active` call, no soft, buffered or fire-and-forget effect,
+/// is exactly: an `Active` call, no unheld answer and no soft, buffered or
+/// fire-and-forget effect,
 /// and for a repeat one outbound effect, it the retained datagram's repeat,
 /// with no critical effect but the rung's own re-arm for
 /// [`QuietTurn::OwnRung`]; a [`QuietTurn::AbsorbedAck`] or
@@ -56,6 +57,7 @@ pub fn class(result: &HandlerResult) -> Option<QuietTurn> {
     };
     let quiet = result.call.state == CallModelState::Active
         && own_effects
+        && fx.unheld.is_empty()
         && fx.soft.is_empty()
         && fx.buffered.is_empty()
         && fx.fire_and_forget.is_empty();

@@ -137,6 +137,16 @@ pub const REPEAT_GIVE_UPS: Family = Family::counter(
     "dialog-level ladders that ran to their give-up with the obligation still undischarged (ack-of-2xx: RFC 3261 §13.3.1.4; a reliable provisional's ladder arms none, its responder rejects); the rate a peer goes deaf at",
 );
 
+/// The answer a copy past its final's ladder was absorbed by: a call's 2xx
+/// re-ACK, a call's non-2xx re-ACK, or the book of unheld answers.
+pub const COPY_KIND: Dim = Dim::new("kind", &["2xx", "non-2xx", "unheld"]);
+
+pub const COPIES_PAST_SCHEDULE: Family = Family::counter(
+    "b2bua_copies_past_schedule_total",
+    Labels::Product(&[COPY_KIND]),
+    "copies of an INVITE final absorbed with no ACK (ADR-0057 §10, ADR-0063 §2): past the 10 re-sends a compliant answerer makes within 64*T1 (RFC 3261 13.3.1.4, 17.2.1) and within T1 of the last ACK, or, for an unheld final, past 64*T1 from its first arrival; by kind (2xx and non-2xx: a call's re-ACK of a final it took; unheld: the answer to a final no call here holds); a climbing rate names a peer that answers each ACK with its final again",
+);
+
 /// A model invariant a landing record broke, or a defect a turn reported
 /// (`model_invariants::NAMES`).
 pub const MODEL_INVARIANT: Dim = Dim::new("invariant", &crate::model_invariants::NAMES);
@@ -150,7 +160,7 @@ pub const MODEL_DEFECTS: Family = Family::counter(
 pub const REPL_QUIET_TURNS: Family = Family::counter(
     "b2bua_repl_quiet_turns_total",
     Labels::Product(&[QUIET_TURN]),
-    "dialog-level retransmission turns persisted with no version bump and no flush (own-rung: a rung of this node's own 2xx or reliable-provisional ladder; re-ack: the re-ACK of a repeated inbound 2xx; absorbed-ack: an inbound ACK owed nowhere; absorbed-2xx-copy: a repeated inbound 2xx owed no re-ACK); paired with b2bua_retransmits_total, N rungs against 0 flushes is the rule holding",
+    "dialog-level retransmission turns persisted with no version bump and no flush (own-rung: a rung of this node's own 2xx or reliable-provisional ladder; re-ack: the re-ACK of a repeated inbound INVITE final whose ACK the record retains; absorbed-ack: an inbound ACK owed nowhere; absorbed-copy: such a repeated final owed no re-ACK); paired with b2bua_retransmits_total, N rungs against 0 flushes is the rule holding",
 );
 
 pub const REPL_APPLIED: Family = Family::counter(

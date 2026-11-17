@@ -19,6 +19,9 @@ pub(super) struct Rows {
     // Dialog-level ladders that ran to their give-up, by the kind of
     // obligation left undischarged: the peer went deaf.
     pub(super) repeat_give_ups: FixedCounts,
+    /// Copies of an INVITE final absorbed past its ladder, by the answer that
+    /// absorbed them: a peer answering each ACK with its final again.
+    pub(super) copies_past_schedule: FixedCounts,
     // Model invariants broken and defects met, by name (ADR-0052 §8).
     pub(super) model_defects: FixedCounts,
     // Turns that crossed a per-call cap, by cap and kind; turns that grew a
@@ -70,6 +73,7 @@ impl Default for Rows {
             responses: OpenRows::new(&w::RESPONSES),
             retransmits: OpenRows::new(&w::RETRANSMITS),
             repeat_give_ups: FixedCounts::new(&w::REPEAT_GIVE_UPS),
+            copies_past_schedule: FixedCounts::new(&w::COPIES_PAST_SCHEDULE),
             model_defects: FixedCounts::new(&w::MODEL_DEFECTS),
             cap_trips: FixedCounts::new(&super::catalogue::caps::CAP_TRIPS),
             cap_near: FixedCounts::new(&super::catalogue::caps::CAP_NEAR),
