@@ -149,8 +149,8 @@ pub(crate) struct MetricsInner {
     pub send_errors: AtomicU64,
     /// Call-IDs that passed their message budget and were muted (counter).
     pub message_budget_trips: AtomicU64,
-    /// Datagrams of a new Call-ID the full map of mutes left uncounted
-    /// (counter).
+    /// Datagrams of a new Call-ID a full map with no idle Call-ID left
+    /// uncounted (counter).
     pub message_budget_uncounted: AtomicU64,
     /// Datagrams a mute dropped before dispatch (counter).
     pub muted_in: AtomicU64,

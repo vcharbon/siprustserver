@@ -125,24 +125,9 @@ fn force_terminal(
     Some(RuleHandleResult::new(actions))
 }
 
-/// The CORE_LAYER rules of the call reaper's verdicts (ADR-0020 X1/X6).
-///
-/// The reaper's verdicts arrive as ordinary InternalEvents and are
-/// handled by ordinary CORE rules — the single funnel. `stale` forces
-/// every unresolved leg terminal with no wire traffic (the call is
-/// provably dead: its stamp froze past the idle threshold) and runs
-/// while terminating: a wedged terminating call is exactly what it
-/// reaps. `overflow` tears the live legs down on the wire and leaves a
-/// terminating call to its teardown. `fatal-error` (a handler panicked,
-/// the legs are alive), `message-cap` (the work bound, in every
-/// state) and `message-budget` (a muted Call-ID, ADR-0063) do either,
-/// as the call's state asks: an Active call is torn down on the wire,
-/// a terminating one forced terminal. Each records
-/// the reason and begins termination; the
-/// invariant then promotes → Terminated and discharges the obligations
-/// (CDR + limiter) exactly once. The `discharge` outcome deliberately
-/// has NO rule (the router's bypass branch owns it — rules are the
-/// thing that failed by then).
+/// The CORE_LAYER rules of the call reaper's verdicts, one per outcome but
+/// `discharge`, which the router's bypass owns (ADR-0020 X1/X6). Each records
+/// its reason on the CDR and begins termination.
 pub(super) fn reaper_verdict_rules() -> [RuleDefinition; 5] {
     [
         rule(

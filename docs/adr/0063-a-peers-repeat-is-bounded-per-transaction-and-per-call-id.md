@@ -85,8 +85,10 @@ their own bounds and do not count.
   100 times `max_messages_per_call_lifetime`, so a compliant call reaches the lifetime cap first
   (appendix).
 - **Entry lifetime.** An entry lives while a transaction of its Call-ID lives, and for 64·T1
-  after its last message. A muted entry is never evicted. When the bound is full of mutes, a
-  new Call-ID goes uncounted, and `b2bua_txn_message_budget_uncounted_total` counts it.
+  after its last message. An entry that is muted or counts a live transaction is never
+  evicted, and a transaction always makes its entry, past the bound if need be. A new
+  Call-ID on a full bound takes the place of the entry that went idle first; with none idle
+  it goes uncounted, and `b2bua_txn_message_budget_uncounted_total` counts it.
 
 ### 4. A trip mutes the Call-ID and ends its call
 

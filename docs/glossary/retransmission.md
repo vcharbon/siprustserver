@@ -178,10 +178,11 @@ layer: every one it sends, and every one it receives that matches a
 transaction or draws an answer, across every call and every stateless answer
 under that Call-ID. Past it the Call-ID is **muted** (nothing sent under it,
 what arrives dropped before dispatch) and every call holding it ends with the
-`MessageBudget` cause. Node-local and never replicated: an ownership move
-counts from zero.
+`MessageBudget` cause. The count runs while a transaction of the Call-ID
+lives and for 64·T1 after its last message; past that the Call-ID counts from
+zero. Node-local and never replicated: an ownership move counts from zero.
 _Avoid_: "message cap" (the per-call caps the call layer counts); "rate limit"
-(it counts a Call-ID's whole life, not a rate).
+(it counts one window of activity, however long, with no refill).
 
 **Snooze** (`RuleAction::SnoozeTimer`):
 A timer fire that a rule puts off by one short step instead of acting on, so the

@@ -137,7 +137,7 @@ pub const MESSAGE_BUDGET_TRIPS: Family = Family::counter(
 pub const MESSAGE_BUDGET_UNCOUNTED: Family = Family::counter(
     "b2bua_txn_message_budget_uncounted_total",
     Labels::None,
-    "Datagrams of a new Call-ID left uncounted by the message budget because every Call-ID its bounded map holds is muted.",
+    "Datagrams of a new Call-ID left uncounted by the message budget because every Call-ID its full map holds is muted or has a live transaction.",
 );
 
 pub const MUTED_MESSAGES: Family = Family::counter(

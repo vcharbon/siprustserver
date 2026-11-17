@@ -10,8 +10,8 @@ impl TransactionMetrics {
         self.inner.message_budget_trips.load(Ordering::Relaxed)
     }
 
-    /// Datagrams of a new Call-ID left uncounted because every counted
-    /// Call-ID is muted (counter).
+    /// Datagrams of a new Call-ID left uncounted because the full map holds
+    /// no idle Call-ID, every one muted or with a live transaction (counter).
     pub fn message_budget_uncounted(&self) -> u64 {
         self.inner.message_budget_uncounted.load(Ordering::Relaxed)
     }
