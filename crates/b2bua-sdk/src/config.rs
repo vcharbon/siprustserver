@@ -79,6 +79,12 @@ pub struct B2buaConfig {
     /// reaches it after `lifetime / max_messages_per_call × keepalive
     /// interval`: 500 windows, about 41.7 h, at the defaults.
     pub max_messages_per_call_lifetime: u64,
+    /// The message budget of one Call-ID on this node (ADR-0063 §3,
+    /// `B2BUA_CAP_MESSAGES_PER_CALL_ID`): the datagrams the transaction layer
+    /// sends and the ones it receives that match a transaction or draw an
+    /// answer, under that Call-ID. Past it the Call-ID is muted and every call
+    /// holding it ends (§4).
+    pub max_messages_per_call_id: u64,
     /// REFER implicit-subscription expiry (RFC 3515), seconds. Armed at REFER
     /// intercept; fires while still `refer-authorizing` (HTTP hung). Default 60.
     pub refer_subscription_expiry_sec: i64,

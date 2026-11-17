@@ -11,6 +11,7 @@ use std::sync::Arc;
 
 use b2bua::admission::Class;
 use b2bua::cdr::CdrRecord;
+use b2bua::config::B2buaConfig;
 use b2bua::decision::test_adapter::route_to;
 use b2bua::decision::{CallDecisionEngine, NewCallResponse, ScriptedDecisionEngine};
 use b2bua_harness::{B2buaScene, B2buaSut, B2BUA_PORT};
@@ -92,8 +93,19 @@ fn spiral_decision(bob_port: u16) -> Arc<dyn CallDecisionEngine> {
 /// alice, bob and the B2BUA of a [`B2buaScene`], with the third-party proxy
 /// between call 1 and call 2.
 pub async fn spiral_scene(name: &str, record_route: RecordRoute) -> (B2buaScene, StatefulProxy) {
-    let s =
-        B2buaScene::with_b2bua(name, |bob_port| B2buaSut::builder(spiral_decision(bob_port))).await;
+    spiral_scene_with(name, record_route, |_| {}).await
+}
+
+/// [`spiral_scene`] with `tune` applied to the B2BUA's configuration.
+pub async fn spiral_scene_with(
+    name: &str,
+    record_route: RecordRoute,
+    tune: impl FnOnce(&mut B2buaConfig) + 'static,
+) -> (B2buaScene, StatefulProxy) {
+    let s = B2buaScene::with_b2bua(name, |bob_port| {
+        B2buaSut::builder(spiral_decision(bob_port)).tune(tune)
+    })
+    .await;
     let proxy =
         spawn_stateful_proxy_with(&s.h, "proxy", &format!("127.0.0.1:{PROXY_PORT}"), record_route)
             .await;

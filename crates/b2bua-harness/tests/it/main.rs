@@ -28,6 +28,7 @@ mod body_override_typing;
 mod bye_no_200_reap;
 mod bye_on_an_ended_early_dialog;
 mod bye_reinvite_2xx_ack_cross;
+mod call_id_message_budget;
 mod call_keyed_holds;
 mod call_shape_cells;
 mod caller_facing_early_dialogs;

@@ -54,6 +54,8 @@ pub enum TerminationCause {
     Admission,
     /// The per-call message cap.
     MessageCap,
+    /// The message budget of a Call-ID the call holds (ADR-0063 §4).
+    MessageBudget,
     /// The supervisor ended it: a reaper strike, a forced terminal.
     Supervisor,
     /// The worker released the call: an operator's release-all (ADR-0050
