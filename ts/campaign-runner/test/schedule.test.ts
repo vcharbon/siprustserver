@@ -1,4 +1,4 @@
-import { type Cell, CellCollectors, Collector, CollectorPlan, type Lanes, type RigPath } from "@sip/rig"
+import { type Cell, CellCollectors, Collector, CollectorPlan, type CollectorRun, type Lanes, type RigPath } from "@sip/rig"
 import * as Clock from "effect/Clock"
 import * as Effect from "effect/Effect"
 import * as Fiber from "effect/Fiber"
@@ -137,14 +137,37 @@ describe("the lock scheduler", () => {
       needs: []
     })
 
-    /** `effect` on the fake clock, moved a second at a time with a real pause between, so a collector's process ends before it moves on. */
-    const stepped = <A>(effect: Effect.Effect<A>) =>
+    /** The phases that start a collector's process, and those that say it ended. */
+    const STEP_STARTS: ReadonlySet<CollectorRun.Phase> = new Set(["open", "collect", "close"])
+    const STEP_ENDS: ReadonlySet<CollectorRun.Phase> = new Set(["opened", "collected", "closed", "failed"])
+
+    /** A sink counting the collector processes running, as their events say, and whether one is. */
+    const processes = () => {
+      let running = 0
+      const sink: CollectorRun.Sink = (event) =>
+        Effect.sync(() => {
+          if (STEP_STARTS.has(event.phase)) running++
+          else if (STEP_ENDS.has(event.phase)) running = Math.max(0, running - 1)
+        })
+      return { sink, busy: () => running > 0 }
+    }
+
+    /** A real pause, long enough for the fibers a clock move woke to reach their next wait or start their process. */
+    const settle = (ms: number) => Effect.promise(() => new Promise((resolve) => setTimeout(resolve, ms)))
+
+    /**
+     * `effect` on the fake clock, moved a second at a time; the clock stands
+     * still while `busy` says a collector's process runs, so a process the box
+     * slows costs real time, never test-clock time.
+     */
+    const stepped = <A>(effect: Effect.Effect<A>, busy: () => boolean) =>
       Effect.runPromise(
         Effect.gen(function*() {
           const fiber = yield* Effect.forkChild(effect)
           for (let second = 0; second < 120 && fiber.pollUnsafe() === undefined; second++) {
             yield* TestClock.adjust(1000)
-            yield* Effect.promise(() => new Promise((resolve) => setTimeout(resolve, 25)))
+            yield* settle(25)
+            while (busy()) yield* settle(10)
           }
           return yield* Fiber.join(fiber)
         }).pipe(Effect.provide(TestClock.layer()))
@@ -161,8 +184,9 @@ describe("the lock scheduler", () => {
       const plan = CollectorPlan.cellPlanOf(rig, REAL, path.join(root, "_cells"))
       const starts = new Map<string, number>()
       const trace = path.join(root, "trace")
+      const { sink, busy } = processes()
       await stepped(Effect.scoped(Effect.gen(function*() {
-        const cells = yield* CellCollectors.make(plan, { sink: () => Effect.void, locker: () => Effect.succeed(Effect.void) })
+        const cells = yield* CellCollectors.make(plan, { sink, locker: () => Effect.succeed(Effect.void) })
         const started = (job: Job) =>
           Effect.flatMap(Clock.currentTimeMillis, (now) =>
             Effect.sync(() => {
@@ -176,7 +200,7 @@ describe("the lock scheduler", () => {
           (ran) => ran.held
         )
         yield* cells.joined
-      })))
+      })), busy)
       const traced = fs.readFileSync(trace, "utf8").split("\n").filter((line) => line !== "")
       fs.rmSync(root, { recursive: true, force: true })
       return { starts, traced }
@@ -186,8 +210,7 @@ describe("the lock scheduler", () => {
       const { starts } = await heldRun([{ id: "a", locks: ["one"] }, { id: "b", locks: ["one"] }, { id: "c", locks: [] }], 3)
       expect(starts.get("a")).toBe(0)
       expect(starts.get("c")).toBe(0)
-      expect(starts.get("b")).toBeGreaterThanOrEqual(11_000)
-      expect(starts.get("b")).toBeLessThan(13_000)
+      expect(starts.get("b")).toBe(11_000)
     })
 
     it("keeps the lock until the collector closed: the second cell naming it starts after the first one's close", async () => {
@@ -199,8 +222,7 @@ describe("the lock scheduler", () => {
       const alone = (id: string): Job & Pick<Locked, "alone"> => ({ id, locks: [], alone: { name: id, healMs: 0 } })
       const { starts } = await heldRun([alone("x"), alone("y")], 1)
       expect(starts.get("x")).toBe(0)
-      expect(starts.get("y")).toBeGreaterThanOrEqual(11_000)
-      expect(starts.get("y")).toBeLessThan(13_000)
+      expect(starts.get("y")).toBe(11_000)
     })
   })
 
