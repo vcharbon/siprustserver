@@ -80,9 +80,15 @@ describe("the lock scheduler", () => {
   })
 
   describe("a cell whose collector holds its locks", () => {
+    /** How long each cell's call lasts on the test clock. */
+    const CALL_MS = 1000
+
+    /** How long after its cell's call the `holding` collector collects. */
+    const HOLDING_DELAY_S = 10
+
     /**
      * A rig path under a new directory defining the one cell-scope collector
-     * `holding`, delayed 10 s, holding its cell's locks, whose collect passes;
+     * `holding`, delayed {@link HOLDING_DELAY_S}, holding its cell's locks, whose collect passes;
      * its `close`, where `closes`, says `close` in the root's `trace`.
      */
     const holdingRig = (closes = false): { readonly root: string; readonly rig: RigPath.RigPath } => {
@@ -93,7 +99,7 @@ describe("the lock scheduler", () => {
       if (closes) fs.writeFileSync(path.join(dir, "close"), `#!/bin/sh\necho close >> "${path.join(root, "trace")}"\n`, { mode: 0o755 })
       const manifest = Result.getOrThrow(Collector.parse(
         "collector.toml",
-        `schema = "collector.v1"\nname = "holding"\nscope = "cell"\ndelay_s = 10\nholds_cell_locks = true\n[run]\ncollect = "./collect"\n` +
+        `schema = "collector.v1"\nname = "holding"\nscope = "cell"\ndelay_s = ${HOLDING_DELAY_S}\nholds_cell_locks = true\n[run]\ncollect = "./collect"\n` +
           (closes ? `close = "./close"\n` : "")
       ))
       return {
@@ -141,33 +147,61 @@ describe("the lock scheduler", () => {
     const STEP_STARTS: ReadonlySet<CollectorRun.Phase> = new Set(["open", "collect", "close"])
     const STEP_ENDS: ReadonlySet<CollectorRun.Phase> = new Set(["opened", "collected", "closed", "failed"])
 
-    /** A sink counting the collector processes running, as their events say, and whether one is. */
-    const processes = () => {
-      let running = 0
-      const sink: CollectorRun.Sink = (event) =>
-        Effect.sync(() => {
-          if (STEP_STARTS.has(event.phase)) running++
-          else if (STEP_ENDS.has(event.phase)) running = Math.max(0, running - 1)
-        })
-      return { sink, busy: () => running > 0 }
-    }
-
-    /** A real pause, long enough for the fibers a clock move woke to reach their next wait or start their process. */
-    const settle = (ms: number) => Effect.promise(() => new Promise((resolve) => setTimeout(resolve, ms)))
+    /** The phases that answer a collector's collect. */
+    const ANSWERS: ReadonlySet<CollectorRun.Phase> = new Set(["collected", "failed"])
 
     /**
-     * `effect` on the fake clock, moved a second at a time; the clock stands
-     * still while `busy` says a collector's process runs, so a process the box
-     * slows costs real time, never test-clock time.
+     * What a held-lock run of `jobs` cells reports, and whether at `now` on the
+     * test clock it still owes an event no clock move brings: a first start, a
+     * call's end once {@link CALL_MS} passed, a collector's answer once its
+     * delay passed, a collector process's end, or, after an answer while a cell
+     * waits, that cell's start. Each answer of these runs releases a waiting
+     * cell or comes beside one that does.
      */
-    const stepped = <A>(effect: Effect.Effect<A>, busy: () => boolean) =>
+    const owedOf = (jobs: number) => {
+      const running = new Set<string>()
+      const answered = new Set<string>()
+      const calls: Array<number> = []
+      const ends: Array<number> = []
+      let releasing = false
+      const sink: CollectorRun.Sink = (event) =>
+        Effect.sync(() => {
+          if (STEP_STARTS.has(event.phase)) running.add(event.collector)
+          if (STEP_ENDS.has(event.phase)) running.delete(event.collector)
+          if (ANSWERS.has(event.phase) && !answered.has(event.collector)) {
+            answered.add(event.collector)
+            releasing = calls.length < jobs
+          }
+        })
+      const passed = (from: ReadonlyArray<number>, ms: number, now: number) => from.filter((at) => at + ms <= now).length
+      return {
+        sink,
+        started: (now: number) => {
+          calls.push(now)
+          releasing = false
+        },
+        ended: (now: number) => void ends.push(now),
+        owes: (now: number) =>
+          calls.length === 0 || running.size > 0 || releasing || ends.length < passed(calls, CALL_MS, now) ||
+          answered.size < passed(ends, HOLDING_DELAY_S * 1000, now)
+      }
+    }
+
+    /** A real pause, for the run's fibers and processes to move. */
+    const pause = Effect.promise(() => new Promise((resolve) => setTimeout(resolve, 5)))
+
+    /**
+     * `effect` on the fake clock, moved a second at a time, and only once
+     * `owes` says the run owes no event at the current instant: a box that
+     * slows a process or a fiber costs real time, never test-clock time.
+     */
+    const stepped = <A>(effect: Effect.Effect<A>, owes: (now: number) => boolean) =>
       Effect.runPromise(
         Effect.gen(function*() {
           const fiber = yield* Effect.forkChild(effect)
           for (let second = 0; second < 120 && fiber.pollUnsafe() === undefined; second++) {
+            while (fiber.pollUnsafe() === undefined && owes(yield* Clock.currentTimeMillis)) yield* pause
             yield* TestClock.adjust(1000)
-            yield* settle(25)
-            while (busy()) yield* settle(10)
           }
           return yield* Fiber.join(fiber)
         }).pipe(Effect.provide(TestClock.layer()))
@@ -184,23 +218,26 @@ describe("the lock scheduler", () => {
       const plan = CollectorPlan.cellPlanOf(rig, REAL, path.join(root, "_cells"))
       const starts = new Map<string, number>()
       const trace = path.join(root, "trace")
-      const { sink, busy } = processes()
+      const owed = owedOf(jobs.length)
       await stepped(Effect.scoped(Effect.gen(function*() {
-        const cells = yield* CellCollectors.make(plan, { sink, locker: () => Effect.succeed(Effect.void) })
+        const cells = yield* CellCollectors.make(plan, { sink: owed.sink, locker: () => Effect.succeed(Effect.void) })
         const started = (job: Job) =>
           Effect.flatMap(Clock.currentTimeMillis, (now) =>
             Effect.sync(() => {
               starts.set(job.id, now)
+              owed.started(now)
               fs.appendFileSync(trace, `call ${job.id}\n`)
             }))
+        const ended = Effect.flatMap(Clock.currentTimeMillis, (now) => Effect.sync(() => owed.ended(now)))
+        const call = (job: Job) => Effect.andThen(started(job), Effect.andThen(Effect.sleep(CALL_MS), ended))
         yield* schedule(
           jobs,
           { concurrency },
-          (job) => cells.around(job.id, Effect.andThen(started(job), Effect.sleep(1000)), () => Effect.succeed({ cells: [cellOf(root, job.id)], unread: [], failed: [] })),
+          (job) => cells.around(job.id, call(job), () => Effect.succeed({ cells: [cellOf(root, job.id)], unread: [], failed: [] })),
           (ran) => ran.held
         )
         yield* cells.joined
-      })), busy)
+      })), owed.owes)
       const traced = fs.readFileSync(trace, "utf8").split("\n").filter((line) => line !== "")
       fs.rmSync(root, { recursive: true, force: true })
       return { starts, traced }
