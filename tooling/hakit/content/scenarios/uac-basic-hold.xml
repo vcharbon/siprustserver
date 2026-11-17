@@ -37,16 +37,19 @@
  answered 200 (491 while the caller's own is pending, 481 after its BYE),
  sent once and never after an ACK (SIPp's engine answers a byte-identical
  copy of the re-INVITE with it): the re-INVITE is taken in the handler,
- which the call leaves once the 200 is sent, and SIPp discards what lands
- meanwhile. Only the ACK with its CSeq discharges it,
- in its wait or in the handler; a lower ACK is absorbed; a call ending with
- it undischarged records a protocol failure. An ACK above the CSeq of the
- latest far request given a final acknowledges nothing: a protocol failure,
- the call goes on.
+ which the call leaves once the 200 is sent. Only the ACK with its CSeq
+ discharges it, in its wait or in the handler; a lower ACK is absorbed; a
+ call ending with it undischarged records a protocol failure. An ACK above
+ the CSeq of the latest far request given a final acknowledges nothing: a
+ protocol failure, the call goes on.
 
- Departure (RFC 3261 section 13.3.1.4): SIPp stops the 200's retransmission
- on any ACK, so after a lower ACK a lost true ACK with no copy of the
- re-INVITE ends `far_reinvite_no_ack`.
+ Limits: an ACK landing between the re-INVITE's match and the 200 send is
+ discarded unchecked by SIPp's engine; a lower ACK after the 200 and an ACK
+ ahead of its re-INVITE are still checked. SIPp stops the 200's
+ retransmission on any ACK, a departure from RFC 3261 section 13.3.1.4, so
+ after a lower ACK a lost true ACK with no copy of the re-INVITE ends
+ `far_reinvite_no_ack`. The hold is checked once a second; a far
+ re-INVITE taken meanwhile restarts that second.
 -->
 <scenario name="hakit UAC call with call-outcome records">
 
@@ -1144,7 +1147,7 @@ Content-Length: 0
  </nop>
  <nop/>
  <label id="bye_bx_cap"/>
- <nop next="bye_wait">
+ <nop>
   <action>
    <assignstr assign_to="bx_via" value="[last_Via:]"/>
    <assignstr assign_to="bx_rr" value="[last_Record-Route:]"/>
@@ -1154,6 +1157,8 @@ Content-Length: 0
    <assign assign_to="bx_due" value="1"/>
   </action>
  </nop>
+ <nop test="_unexp.retaddr" next="unexp_resume"/>
+ <nop next="bye_wait"/>
  <nop/>
  <label id="bye_crossed"/>
  <send next="bye_send">
@@ -1751,6 +1756,7 @@ Content-Length: 0
  <label id="ux_invite_answered"/>
  <nop test="is_ghost" next="unexp_resume"/>
  <nop test="fa_busy" next="unexp_resume"/>
+ <nop test="bye_sent" next="bye_bx_cap"/>
  <nop test="reinv_pending" next="ux_491"/>
  <nop next="far_reinvite">
   <action>

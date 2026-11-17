@@ -562,11 +562,13 @@ made. A run profile joins the two.
    match and its 2xx whatever the steps; no recv can cover a `<send>` step (an
    optional recv must be followed by a mandatory one, and a `global` recv
    covers every later step), so the far re-INVITE is taken in the handler,
-   which the call leaves once the 2xx is sent: an ACK landing in between, the
-   far end's ACK sent ahead of the 2xx included, is discarded unchecked. A call that ends with a 2xx undischarged records a `protocol`
-   failure. An ACK above the CSeq of the latest far request the call gave a
-   final acknowledges nothing the caller sent, a `protocol` failure, and the
-   call goes on.
+   which the call leaves once the 2xx is sent. A call that ends with a 2xx
+   undischarged records a `protocol` failure. An ACK above the CSeq of the
+   latest far request the call gave a final acknowledges nothing the caller
+   sent, a `protocol` failure, and the call goes on. A stated limit: an ACK
+   landing between the re-INVITE's match and the 2xx send, the far end's ACK
+   sent ahead of the 2xx included, is discarded unchecked by SIPp's engine; a
+   lower ACK after the 2xx and an ACK ahead of its re-INVITE are still checked.
 
    This departs from RFC 3261 §13.3.1.4, where only the 2xx's own ACK stops
    its retransmission: SIPp stops it on any ACK. After a lower ACK, a lost
@@ -600,7 +602,9 @@ made. A run profile joins the two.
      retransmitted send precedes `_unexp.main`;
    - SIPp sends nothing while a send of its own is retransmitting, so a
      request landing while the call's request is pending is captured by the
-     wait and answered once a provisional or the final is in;
+     wait and answered once a provisional or the final is in; a far
+     re-INVITE the handler takes while the caller's BYE is pending is
+     captured the same way;
    - on a byte-identical copy of the message last received, SIPp re-sends the
      first message it sent after that receive, and only that one;
    - a `<recv response>` without `response_txn` takes only the responses to
