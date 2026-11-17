@@ -1000,8 +1000,8 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
         rule("relay-notify", &[], Match::request().method("NOTIFY"), |_| {
             ok(vec![RuleAction::RelayToPeer { transform: no_transform() }])
         }),
-        // A request, tagged or not, of a method this stack models no relay for
-        // (a SUBSCRIBE, a PUBLISH, a REGISTER, an extension method) goes to the
+        // An in-dialog request of a method this stack models no relay for (a
+        // SUBSCRIBE, a PUBLISH, a REGISTER, an extension method) goes to the
         // relay too, which answers it locally (489 to a SUBSCRIBE, else 405):
         // no request is left to run out its sender's Timer F (RFC 3261 §8.2).
         rule(
