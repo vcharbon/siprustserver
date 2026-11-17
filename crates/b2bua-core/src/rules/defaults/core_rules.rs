@@ -23,7 +23,6 @@ use b2bua_sdk::provisional::{
     absorbed_provisional_actions, originator_final_sent, shown_to_no_one,
 };
 
-use super::reaper_verdicts::{reap_handler_panic, reap_message_cap, reap_overflow, reap_stale};
 use super::request_timeouts::{going_away_timeout, record_timeout_actions};
 use super::straggler::{fork_straggler, straggler_release, straggler_release_timeout};
 
@@ -1300,57 +1299,6 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                 ok(unacked_2xx_give_up_actions(&ctx.call, obligation))
             },
         ),
-        // ── call reaper verdicts (ADR-0020 X1/X6) ───────────────────────────
-        // The reaper's verdicts arrive as ordinary InternalEvents and are
-        // handled by ordinary CORE rules — the single funnel. `stale` forces
-        // every unresolved leg terminal with no wire traffic (the call is
-        // provably dead: its stamp froze past the idle threshold) and runs
-        // while terminating: a wedged terminating call is exactly what it
-        // reaps. `overflow` tears the live legs down on the wire and leaves a
-        // terminating call to its teardown. `fatal-error` (a handler panicked,
-        // the legs are alive) and `message-cap` (the work bound, in every
-        // state) do either, as the call's state asks: an Active call is torn
-        // down on the wire, a terminating one forced terminal. Each records
-        // the reason and begins termination; the
-        // invariant then promotes → Terminated and discharges the obligations
-        // (CDR + limiter) exactly once. The `discharge` outcome deliberately
-        // has NO rule (the router's bypass branch owns it — rules are the
-        // thing that failed by then).
-        rule(
-            "reaper-stale",
-            &[],
-            Match::internal_event()
-                .topic(crate::reaper_verdict::REAPER_TOPIC)
-                .outcome(crate::reaper_verdict::OUTCOME_STALE),
-            reap_stale,
-        )
-        .runs_while_terminating(),
-        rule(
-            "reaper-fatal-error",
-            &[],
-            Match::internal_event()
-                .topic(crate::reaper_verdict::REAPER_TOPIC)
-                .outcome(crate::reaper_verdict::OUTCOME_FATAL),
-            reap_handler_panic,
-        )
-        .runs_while_terminating(),
-        rule(
-            "reaper-overflow",
-            &[],
-            Match::internal_event()
-                .topic(crate::reaper_verdict::REAPER_TOPIC)
-                .outcome(crate::reaper_verdict::OUTCOME_OVERFLOW),
-            reap_overflow,
-        ),
-        rule(
-            "reaper-message-cap",
-            &[],
-            Match::internal_event()
-                .topic(crate::reaper_verdict::REAPER_TOPIC)
-                .outcome(crate::reaper_verdict::OUTCOME_MESSAGE_CAP),
-            reap_message_cap,
-        )
-        .runs_while_terminating(),
         rule(
             "terminating-safety-timeout",
             &[],
@@ -1386,6 +1334,7 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
         )
         .runs_while_terminating(),
     ]);
+    rules.extend(super::reaper_verdicts::reaper_verdict_rules());
     rules
 }
 

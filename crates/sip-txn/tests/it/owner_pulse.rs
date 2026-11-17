@@ -68,7 +68,7 @@ async fn an_idle_owner_is_never_stalled() {
 async fn an_owner_parked_on_one_turn_reads_stalled_past_the_threshold() {
     let (txn, _events) = layer(true).await;
     let sender = txn.clone();
-    tokio::spawn(async move { sender.send_raw(b"OPTIONS".to_vec(), addr(PEER)).await });
+    tokio::spawn(async move { sender.send_raw("parked", b"OPTIONS".to_vec(), addr(PEER)).await });
     tokio::time::sleep(THRESHOLD).await;
     assert!(txn.owner_pulse().busy_for().is_some(), "on its turn");
     assert!(!txn.owner_pulse().stalled(THRESHOLD), "not past the threshold yet");

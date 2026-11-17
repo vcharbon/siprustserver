@@ -49,11 +49,11 @@ impl Owner {
         let Some(t) = self.clients.get_mut(branch) else { return };
         let known = t.dialog(resp.to().tag()).map(|d| (d.ack.clone(), d.byed));
         if let Some((Some((ack, dest)), _)) = known {
-            return self.send_buffer(endpoint, &ack, dest).await;
+            return self.send_buffer(endpoint, resp.call_id().as_str(), &ack, dest).await;
         }
         let Some(invite) = self.accepted_invite(branch) else { return };
         let Some((ack, dest)) = self.orphan_ack(branch, &invite, resp) else { return };
-        self.send_buffer(endpoint, &ack, dest).await;
+        self.send_buffer(endpoint, resp.call_id().as_str(), &ack, dest).await;
         let Some((_, byed)) = known else { return };
         if let Some(dialog) = self.clients.get_mut(branch).and_then(|t| t.dialog(resp.to().tag())) {
             dialog.ack = Some((ack, dest));

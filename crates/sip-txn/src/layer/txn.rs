@@ -279,6 +279,16 @@ impl Transaction {
         self.id.as_ref().role()
     }
 
+    /// The From-tag of the caller whose tagless INVITE opened this server
+    /// transaction; `None` for any other transaction.
+    pub(super) fn caller_tag(&self) -> Option<&str> {
+        let request = self.original_request.as_deref()?;
+        let opens_a_dialog = self.role() == TxnRole::Server
+            && self.kind == TxnKind::Invite
+            && request.to().tag().is_none();
+        opens_a_dialog.then_some(self.from_tag.as_str())
+    }
+
     /// This INVITE's dialog under `to_tag`, recorded now when new; `None`
     /// for a new one past [`MAX_DIALOGS`].
     pub(super) fn dialog(&mut self, to_tag: Option<&str>) -> Option<&mut InviteDialog> {

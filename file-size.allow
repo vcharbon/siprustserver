@@ -12,7 +12,7 @@ ext .rs
 # `exclude <path glob>`.
 
 crates/b2bua-core/src/rules/actions/respond.rs 579
-crates/b2bua-core/src/rules/defaults/core_rules.rs 1412
+crates/b2bua-core/src/rules/defaults/core_rules.rs 1361
 crates/b2bua-core/src/rules/relay_first_18x.rs 524
 crates/b2bua-core/src/rules/relay/sdp_session_tests.rs 914
 crates/b2bua-harness/src/lib.rs 816
@@ -86,6 +86,5 @@ crates/sip-net-testkit/src/contracts.rs 569
 crates/sip-pcap/src/bin/sipflow.rs 890
 crates/sip-pcap/src/flow.rs 707
 crates/sip-pcap/src/flow/tests.rs 1000
-crates/sip-txn/src/layer/client.rs 568
 crates/sip-txn/tests/it/bounded_queue.rs 801
 crates/sip-txn/tests/it/fsm.rs 1415

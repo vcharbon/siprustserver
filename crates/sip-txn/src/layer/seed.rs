@@ -47,10 +47,11 @@ impl Owner {
         for seed in seeds {
             let went_in = match seed {
                 TxnSeed::ClientInvite { invite, dest, provisional, cancel, ack_ahead } => {
+                    let call_id = invite.call_id().as_str().to_string();
                     let went_in =
                         self.seed_client_invite(call_ref, invite, dest, provisional, cancel);
                     if let Some((ack, to)) = ack_ahead.filter(|_| went_in && !provisional) {
-                        self.send_buffer(endpoint, &ack, to).await;
+                        self.send_buffer(endpoint, &call_id, &ack, to).await;
                     }
                     went_in
                 }
@@ -141,7 +142,8 @@ impl Owner {
             txn.last_response_status = Some(provisional.status());
         }
         if let Some(dest) = destination {
-            self.send_buffer(endpoint, provisional.image(), dest).await;
+            self.send_buffer(endpoint, provisional.call_id().as_str(), provisional.image(), dest)
+                .await;
         }
         true
     }
@@ -170,7 +172,8 @@ impl Owner {
             let dest = occupant.destination.filter(|_| !occupant.seeded);
             self.accept(key.id(), &response);
             if let Some(dest) = dest {
-                self.send_buffer(endpoint, response.image(), dest).await;
+                self.send_buffer(endpoint, response.call_id().as_str(), response.image(), dest)
+                    .await;
             }
             return true;
         }
@@ -248,7 +251,7 @@ impl Owner {
             self.hold_for(TxnRef::Server(key.id()), Hold::TimerH, ms(left));
         }
         if let Some(source) = occupant {
-            self.send_buffer(endpoint, response.image(), source).await;
+            self.send_buffer(endpoint, response.call_id().as_str(), response.image(), source).await;
         }
         true
     }

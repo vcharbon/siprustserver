@@ -306,6 +306,7 @@ impl RunnerEnv {
             new_call_queue_headroom_percent: self.new_call_queue_headroom_percent,
             max_messages_per_call: self.max_messages_per_call,
             max_messages_per_call_lifetime: self.max_messages_per_call_lifetime,
+            max_messages_per_call_id: self.max_messages_per_call_id,
             keepalive_interval_sec: self.keepalive_sec,
             limiter_refresh_sec: self.limiter_refresh_sec,
             limiter_refresh_batch_ms: self.limiter_refresh_batch_ms,

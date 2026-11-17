@@ -70,7 +70,7 @@ impl Owner {
         // An INVITE whose lines no response can echo draws no 100.
         let Ok(trying) = generate_response(request, 100, "Trying", &opts) else { return false };
         let image = trying.image().clone();
-        self.send_buffer(endpoint, &image, dest).await;
+        self.send_buffer(endpoint, trying.call_id().as_str(), &image, dest).await;
         if let Some(txn) = self.server_mut(id) {
             txn.state = TxnState::Proceeding;
             txn.last_response = Some(image);

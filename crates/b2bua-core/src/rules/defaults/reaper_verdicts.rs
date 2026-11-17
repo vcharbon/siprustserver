@@ -1,12 +1,15 @@
-//! The bodies of the CORE_LAYER rules that handle the call reaper's verdicts
-//! (ADR-0020 X1): a call found dead is forced terminal with no wire message;
-//! a call whose legs are alive — condemned for its overflow or its message
-//! cap, or whose handler panicked — is torn down on the wire while Active.
+//! The CORE_LAYER rules that handle the call reaper's verdicts, and their
+//! bodies (ADR-0020 X1): a call found dead is forced terminal with no wire
+//! message; a call whose legs are alive — condemned for its overflow, its
+//! message cap or its Call-ID's message budget, or whose handler panicked —
+//! is torn down on the wire while Active.
 
 use b2bua_sdk::config::Cap;
 use b2bua_sdk::event::CallEvent;
-use b2bua_sdk::model::{LegEnd, RuleAction, RuleContext, RuleHandleResult};
+use b2bua_sdk::model::{LegEnd, Match, RuleAction, RuleContext, RuleDefinition, RuleHandleResult};
 use call::{CallModelState, CdrEventType, TerminationCause};
+
+use super::core_rules::rule;
 
 /// The `reaper-overflow` body. The call is condemned for flooding its
 /// dispatch overflow, not found dead: its legs are alive, so they are torn
@@ -24,6 +27,21 @@ pub(super) fn reap_message_cap(ctx: &RuleContext) -> Option<RuleHandleResult> {
     match ctx.call.state() {
         CallModelState::Active => teardown_on_the_wire(ctx, REASON, TerminationCause::MessageCap),
         _ => force_terminal(ctx, REASON, TerminationCause::MessageCap),
+    }
+}
+
+/// The `reaper-message-budget` body: a Call-ID the call holds passed its
+/// message budget and is muted (ADR-0063 §4). An Active call's live legs are
+/// torn down on the wire, the muted leg's messages dropped by the transaction
+/// layer; a terminating call is forced terminal now, its cause kept where one
+/// is named.
+pub(super) fn reap_message_budget(ctx: &RuleContext) -> Option<RuleHandleResult> {
+    const REASON: &str = "message-budget";
+    match ctx.call.state() {
+        CallModelState::Active => {
+            teardown_on_the_wire(ctx, REASON, TerminationCause::MessageBudget)
+        }
+        _ => force_terminal(ctx, REASON, TerminationCause::MessageBudget),
     }
 }
 
@@ -105,4 +123,71 @@ fn force_terminal(
     });
     actions.push(RuleAction::BeginTermination { reason: Some(reason.into()), cause, by_leg: None });
     Some(RuleHandleResult::new(actions))
+}
+
+/// The CORE_LAYER rules of the call reaper's verdicts (ADR-0020 X1/X6).
+///
+/// The reaper's verdicts arrive as ordinary InternalEvents and are
+/// handled by ordinary CORE rules — the single funnel. `stale` forces
+/// every unresolved leg terminal with no wire traffic (the call is
+/// provably dead: its stamp froze past the idle threshold) and runs
+/// while terminating: a wedged terminating call is exactly what it
+/// reaps. `overflow` tears the live legs down on the wire and leaves a
+/// terminating call to its teardown. `fatal-error` (a handler panicked,
+/// the legs are alive), `message-cap` (the work bound, in every
+/// state) and `message-budget` (a muted Call-ID, ADR-0063) do either,
+/// as the call's state asks: an Active call is torn down on the wire,
+/// a terminating one forced terminal. Each records
+/// the reason and begins termination; the
+/// invariant then promotes → Terminated and discharges the obligations
+/// (CDR + limiter) exactly once. The `discharge` outcome deliberately
+/// has NO rule (the router's bypass branch owns it — rules are the
+/// thing that failed by then).
+pub(super) fn reaper_verdict_rules() -> [RuleDefinition; 5] {
+    [
+        rule(
+            "reaper-stale",
+            &[],
+            Match::internal_event()
+                .topic(crate::reaper_verdict::REAPER_TOPIC)
+                .outcome(crate::reaper_verdict::OUTCOME_STALE),
+            reap_stale,
+        )
+        .runs_while_terminating(),
+        rule(
+            "reaper-fatal-error",
+            &[],
+            Match::internal_event()
+                .topic(crate::reaper_verdict::REAPER_TOPIC)
+                .outcome(crate::reaper_verdict::OUTCOME_FATAL),
+            reap_handler_panic,
+        )
+        .runs_while_terminating(),
+        rule(
+            "reaper-overflow",
+            &[],
+            Match::internal_event()
+                .topic(crate::reaper_verdict::REAPER_TOPIC)
+                .outcome(crate::reaper_verdict::OUTCOME_OVERFLOW),
+            reap_overflow,
+        ),
+        rule(
+            "reaper-message-cap",
+            &[],
+            Match::internal_event()
+                .topic(crate::reaper_verdict::REAPER_TOPIC)
+                .outcome(crate::reaper_verdict::OUTCOME_MESSAGE_CAP),
+            reap_message_cap,
+        )
+        .runs_while_terminating(),
+        rule(
+            "reaper-message-budget",
+            &[],
+            Match::internal_event()
+                .topic(crate::reaper_verdict::REAPER_TOPIC)
+                .outcome(crate::reaper_verdict::OUTCOME_MESSAGE_BUDGET),
+            reap_message_budget,
+        )
+        .runs_while_terminating(),
+    ]
 }

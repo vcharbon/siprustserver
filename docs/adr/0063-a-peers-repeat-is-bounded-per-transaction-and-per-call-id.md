@@ -86,7 +86,7 @@ their own bounds and do not count.
   (appendix).
 - **Entry lifetime.** An entry lives while a transaction of its Call-ID lives, and for 64·T1
   after its last message. A muted entry is never evicted. When the bound is full of mutes, a
-  new Call-ID goes uncounted, and `sip_txn_message_budget_uncounted_total` counts it.
+  new Call-ID goes uncounted, and `b2bua_txn_message_budget_uncounted_total` counts it.
 
 ### 4. A trip mutes the Call-ID and ends its call
 
@@ -102,7 +102,10 @@ caller, BYE or CANCEL on its legs, and a CDR with the `MessageBudget` cause. The
 composes its full teardown, and the owner drops what goes to the muted Call-ID.
 
 The mute lasts until every call found is released, and in every case until 64·T1 after the
-last dropped message. A trip after the calls' removal only mutes.
+last dropped message. The layer reads the first as its own state: the mute holds while a
+transaction of the Call-ID lives, and the teardown of each call found opens one there (its BYE,
+CANCEL or 503) that outlives the call's `TerminatingTimeout`. A trip after the calls' removal
+only mutes.
 
 ### 5. The count is not replicated
 
@@ -113,13 +116,15 @@ in practice.
 
 ### 6. Detection
 
-- `sip_txn_message_budget_trips_total` counts trips, and the trip logs its Call-ID.
+- `b2bua_txn_message_budget_trips_total` counts trips, and the trip logs its Call-ID.
 - `b2bua_cap_trips_total{cap="messages_per_call_id", kind="peer"}` counts the calls ended. A
   peer cap is a counter, not an alert (ADR-0057 §7).
-- `sip_txn_copies_past_schedule_total{kind}` counts what §1 absorbs.
+- `b2bua_txn_copies_past_schedule_total{kind}` counts what §1 absorbs.
 - `b2bua_copies_past_schedule_total{kind}` counts what §2 absorbs: a call's re-ACK of a 2xx or
   a non-2xx, and the book's.
-- `sip_txn_muted_messages_total{direction}` counts what a mute drops.
+- `b2bua_txn_muted_messages_total{direction}` counts what a mute drops.
+
+The transaction layer's families carry the `b2bua_txn_` prefix the worker serves them under.
 
 ## Consequences
 

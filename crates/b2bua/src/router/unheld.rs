@@ -49,7 +49,7 @@ pub(super) async fn answer(
                 let _ = ctx.txn.send_request(req.clone(), dest, kind).await;
             }
             _ => {
-                let _ = ctx.txn.send_raw(req.image().to_vec(), dest).await;
+                let _ = ctx.txn.send_raw(req.call_id().as_str(), req.image().to_vec(), dest).await;
             }
         }
     }

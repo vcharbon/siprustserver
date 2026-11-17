@@ -4,7 +4,9 @@ use std::sync::Arc;
 
 use std::sync::atomic::AtomicBool;
 
-use sip_txn::{BoundPassed, DeferredBound, IdGen, NewCallGate, OnBound, TransactionConfig};
+use sip_txn::{
+    BoundPassed, CallIdBudget, DeferredBound, IdGen, NewCallGate, OnBound, TransactionConfig,
+};
 
 use crate::admission::Refusals;
 use crate::config::B2buaConfig;
@@ -28,7 +30,9 @@ const KEEPALIVE_LANE: usize = 64;
 /// `refusals`, the ceilings on the deferred backlog
 /// ([`crate::admission::deferred_bound`]) unless `ceilings` sets its own,
 /// no transaction for an out-of-dialog OPTIONS, which rides the keepalive
-/// lane, the worker's advertised SIP address, and the switch on new calls the
+/// lane, the worker's advertised SIP address, every Call-ID's message
+/// budget (ADR-0063 §3, a trip ending the calls holding it), and the switch
+/// on new calls the
 /// event-queue gate sets (ADR-0037 item 11), which is `refusals`' own
 /// ([`Refusals::gate_refusing`]), returned with them.
 pub(super) fn txn_config(
@@ -88,6 +92,10 @@ pub(super) fn txn_config(
         // The worker's SIP identity names it in a Warning, never a wildcard
         // bind address.
         advertised: Some(hostport(&config.sip_local_ip, config.sip_local_port)),
+        call_id_budget: Some(CallIdBudget {
+            messages: config.max_messages_per_call_id,
+            entries: CallIdBudget::ENTRIES,
+        }),
     };
     debug_assert_eq!(txn_config.event_capacity(), EVENT_QUEUE_CAPACITY);
     txn_config.deferred_bound = Some(

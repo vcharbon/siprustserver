@@ -75,8 +75,9 @@ impl Owner {
     /// end of the turn.
     pub(super) fn owe_held_cancel(&mut self, held: UnsentCancel) {
         self.held_cancels.remove(&held.held_as);
-        self.owed_sends.extend(held.cancel_ok);
-        self.owed_sends.extend(held.terminated);
+        let (call_id, ..) = held.held_as;
+        let owed = held.cancel_ok.into_iter().chain(held.terminated);
+        self.owed_sends.extend(owed.map(|(buf, dest)| (call_id.clone(), buf, dest)));
     }
 
     /// The server transaction `key` names leaves for another node, which
@@ -90,8 +91,8 @@ impl Owner {
 
     /// Send what transactions that left the map this turn owed.
     pub(super) async fn flush_owed_sends(&mut self, endpoint: &dyn UdpEndpoint) {
-        for (buf, dest) in std::mem::take(&mut self.owed_sends) {
-            self.send_buffer(endpoint, &buf, dest).await;
+        for (call_id, buf, dest) in std::mem::take(&mut self.owed_sends) {
+            self.send_buffer(endpoint, &call_id, &buf, dest).await;
         }
     }
 
@@ -117,12 +118,12 @@ impl Owner {
             return false;
         };
         self.held_cancels.remove(&held.held_as);
-        let UnsentCancel { cancel_ok, terminated, .. } = *held;
+        let UnsentCancel { cancel_ok, terminated, held_as: (call_id, ..), .. } = *held;
         if let Some((buf, dest)) = cancel_ok {
-            self.send_buffer(endpoint, &buf, dest).await;
+            self.send_buffer(endpoint, &call_id, &buf, dest).await;
         }
         if let Some((buf, dest)) = terminated {
-            self.send_buffer(endpoint, &buf, dest).await;
+            self.send_buffer(endpoint, &call_id, &buf, dest).await;
             self.arm_final_hold(key.id(), TxnKind::Invite, 487);
         }
         true

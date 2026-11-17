@@ -103,6 +103,10 @@ pub struct RunnerEnv {
     /// `B2BUA_MAX_MESSAGES_PER_CALL_LIFETIME` — the per-call work bound over
     /// the call's life (default 100_000; 0 is refused).
     pub max_messages_per_call_lifetime: u64,
+    /// `B2BUA_CAP_MESSAGES_PER_CALL_ID` — the message budget of one Call-ID
+    /// on this node (ADR-0063 §3; default 10_000_000; 0 and less than 100
+    /// lifetime caps are refused).
+    pub max_messages_per_call_id: u64,
     /// `B2BUA_KEEPALIVE_SEC` — in-dialog OPTIONS keepalive interval (default
     /// 300 s; a shorter poke breaks long-hold endurance traffic).
     pub keepalive_sec: i64,
@@ -366,6 +370,7 @@ impl RunnerEnv {
             new_call_queue_headroom_percent: knob("B2BUA_NEW_CALL_QUEUE_HEADROOM_PCT", "5")?,
             max_messages_per_call: knob("B2BUA_MAX_MESSAGES_PER_CALL", "200")?,
             max_messages_per_call_lifetime: knob("B2BUA_MAX_MESSAGES_PER_CALL_LIFETIME", "100000")?,
+            max_messages_per_call_id: knob("B2BUA_CAP_MESSAGES_PER_CALL_ID", "10000000")?,
             keepalive_sec: knob("B2BUA_KEEPALIVE_SEC", "300")?,
             replica: b2bua::ReplicaConfig {
                 reboot_budget_sec: knob("B2BUA_REBOOT_BUDGET_SEC", "600")?,

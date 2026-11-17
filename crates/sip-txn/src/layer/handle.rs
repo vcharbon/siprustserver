@@ -42,6 +42,7 @@ pub(super) enum Command {
         reply: oneshot::Sender<Bytes>,
     },
     SendRaw {
+        call_id: String,
         buf: Vec<u8>,
         dest: SocketAddr,
         reply: oneshot::Sender<()>,
@@ -301,13 +302,18 @@ impl TransactionLayer {
         self.roundtrip(|reply| Command::SendResponse { msg: Box::new(msg), dest, reply }).await
     }
 
-    /// Send a raw buffer directly, bypassing transaction management.
+    /// Send a raw buffer directly, bypassing transaction management, counted
+    /// under `call_id`, the message's Call-ID, against its budget
+    /// ([`TransactionConfig::call_id_budget`]): nothing leaves under a muted
+    /// one.
     pub async fn send_raw(
         &self,
+        call_id: &str,
         buf: Vec<u8>,
         dest: SocketAddr,
     ) -> Result<(), TransactionLayerClosed> {
-        self.roundtrip(|reply| Command::SendRaw { buf, dest, reply }).await
+        let call_id = call_id.to_string();
+        self.roundtrip(|reply| Command::SendRaw { call_id, buf, dest, reply }).await
     }
 
     /// Rebuild the in-flight INVITE transactions a call materialised from a

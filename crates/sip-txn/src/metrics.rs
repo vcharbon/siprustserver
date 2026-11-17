@@ -17,6 +17,7 @@ use crate::invite_class::InviteClass;
 use crate::layer::EventAges;
 
 mod by_class;
+mod message_budget;
 mod retransmits;
 pub(crate) use by_class::ByClass;
 pub use retransmits::RetransmitRow;
@@ -146,6 +147,15 @@ pub(crate) struct MetricsInner {
     /// EPERM, an unreachable peer. Swallowed so a send error never aborts the
     /// owner.
     pub send_errors: AtomicU64,
+    /// Call-IDs that passed their message budget and were muted (counter).
+    pub message_budget_trips: AtomicU64,
+    /// Datagrams of a new Call-ID the full map of mutes left uncounted
+    /// (counter).
+    pub message_budget_uncounted: AtomicU64,
+    /// Datagrams a mute dropped before dispatch (counter).
+    pub muted_in: AtomicU64,
+    /// Datagrams a mute kept from the wire (counter).
+    pub muted_out: AtomicU64,
 }
 
 impl MetricsInner {
@@ -185,6 +195,10 @@ impl MetricsInner {
             released_unanswered_forgotten: AtomicU64::new(0),
             released_unanswered_invites_answered: AtomicU64::new(0),
             send_errors: AtomicU64::new(0),
+            message_budget_trips: AtomicU64::new(0),
+            message_budget_uncounted: AtomicU64::new(0),
+            muted_in: AtomicU64::new(0),
+            muted_out: AtomicU64::new(0),
         }
     }
 

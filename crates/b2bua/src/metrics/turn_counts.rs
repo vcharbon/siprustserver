@@ -4,7 +4,11 @@
 
 use b2bua_sdk::config::Cap;
 
+use super::catalogue::caps::{MESSAGE_BUDGET_CAP, PEER_KIND};
 use super::B2buaMetrics;
+
+/// The `b2bua_cap_trips_total` row of a call the message budget ended.
+const MESSAGE_BUDGET_ROW: [&str; 2] = [MESSAGE_BUDGET_CAP, PEER_KIND];
 
 impl B2buaMetrics {
     /// Count one dialog-level ladder that ran to its give-up, for
@@ -48,6 +52,17 @@ impl B2buaMetrics {
     /// The turns that crossed `cap`.
     pub fn cap_trips_of(&self, cap: Cap) -> u64 {
         self.inner.rows.cap_trips.get(&[cap.label(), cap.kind().label()])
+    }
+
+    /// Count one call ended by a Call-ID's message budget (ADR-0063 §6), for
+    /// `b2bua_cap_trips_total{cap="messages_per_call_id",kind="peer"}`.
+    pub fn record_message_budget_trip(&self) {
+        self.inner.rows.cap_trips.add(&MESSAGE_BUDGET_ROW, 1);
+    }
+
+    /// The calls ended by a Call-ID's message budget.
+    pub fn message_budget_trips(&self) -> u64 {
+        self.inner.rows.cap_trips.get(&MESSAGE_BUDGET_ROW)
     }
 
     /// Count one turn that grew the collection `cap` bounds across its half,

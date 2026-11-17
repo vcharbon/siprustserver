@@ -27,3 +27,9 @@ pub const OUTCOME_MESSAGE_CAP: &str = "message-cap";
 /// discharge branch forces the last persisted snapshot terminal and runs it
 /// through `finalize → enforce → commit_turn` directly.
 pub const OUTCOME_DISCHARGE: &str = "discharge";
+/// Message-budget verdict: a Call-ID the call holds passed its message budget
+/// in the transaction layer, which muted it (ADR-0063 §4). Handled by the
+/// CORE_LAYER `reaper-message-budget` rule as the message cap's verdict is:
+/// an Active call is torn down on the wire, a terminating one forced
+/// terminal.
+pub const OUTCOME_MESSAGE_BUDGET: &str = "message-budget";

@@ -78,7 +78,8 @@ impl Owner {
                 let to_tag = self.uas_to_tag_of(key.id());
                 let opts = GenerateResponseOpts { to_tag, ..Default::default() };
                 if let Ok(cancel_ok) = generate_response(&req, 200, "OK", &opts) {
-                    self.send_buffer(endpoint, cancel_ok.image(), cancel_dest).await;
+                    self.send_buffer(endpoint, call_id.as_str(), cancel_ok.image(), cancel_dest)
+                        .await;
                 }
                 return true;
             }
@@ -128,7 +129,7 @@ impl Owner {
         let cancel_ok = generate_response(&req, 200, "OK", &opts).ok();
         let cancel_ok = cancel_ok.map(|ok| (ok.image().clone(), cancel_dest));
         if let Some((buf, dest)) = cancel_ok.as_ref().filter(|_| !hold) {
-            self.send_buffer(endpoint, buf, *dest).await;
+            self.send_buffer(endpoint, call_id.as_str(), buf, *dest).await;
         }
 
         // 487 Request Terminated on the matched INVITE.
@@ -142,7 +143,7 @@ impl Owner {
             if hold {
                 held_487 = Some((terminated_buf.clone(), invite_dest));
             } else {
-                self.send_buffer(endpoint, &terminated_buf, invite_dest).await;
+                self.send_buffer(endpoint, call_id.as_str(), &terminated_buf, invite_dest).await;
             }
             self.record_uas_tag(id, &terminated);
             if let Some(txn) = self.server_mut(id) {

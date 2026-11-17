@@ -215,7 +215,9 @@ async fn emit(ctx: &RouterCtx, call_ref: &str, call: &Call, eff: &OutboundSipEff
                 repeated.method(),
                 repeated.code(),
             );
-            let _ = ctx.txn.send_raw(emission.wire().0.to_vec(), dest).await;
+            let (wire, _) = emission.wire();
+            let call_id = sip_message::sniff::call_id(wire).unwrap_or_default();
+            let _ = ctx.txn.send_raw(&call_id, wire.to_vec(), dest).await;
         }
         // A response goes through its server transaction, whatever the mode
         // says: `Raw` is for requests, and the only raw path for response
@@ -253,12 +255,12 @@ async fn emit(ctx: &RouterCtx, call_ref: &str, call: &Call, eff: &OutboundSipEff
             if matches!(*req.method(), Method::Ack | Method::Cancel) {
                 let _ = ctx.txn.send_request(req.clone(), dest, TxnKind::Invite).await;
             } else {
-                let _ = ctx.txn.send_raw(req.image().to_vec(), dest).await;
+                let _ = ctx.txn.send_raw(req.call_id().as_str(), req.image().to_vec(), dest).await;
             }
         }
         (OutboundBody::Request(req), OutboundTxnMode::ServerResponse) => {
             // A request tagged ServerResponse is a misuse; send raw as a fallback.
-            let _ = ctx.txn.send_raw(req.image().to_vec(), dest).await;
+            let _ = ctx.txn.send_raw(req.call_id().as_str(), req.image().to_vec(), dest).await;
         }
     }
 }

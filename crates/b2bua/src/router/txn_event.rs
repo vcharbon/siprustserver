@@ -1,9 +1,12 @@
-//! A transaction-layer event as the call sees it ([`call_event`]), and what the
-//! layer states beside it ([`Arrival`]).
+//! A transaction-layer event as the router takes it ([`work`]): a call
+//! event, with what the layer states beside it ([`Arrival`]), or a Call-ID's
+//! budget trip.
 
 use b2bua_sdk::event::{CallEvent, HOP_ALIVE_TOPIC};
 use sip_txn::TransactionEvent;
 use tokio::time::Instant;
+
+use super::Work;
 
 /// What the transaction layer states of an event, beside the event. An event
 /// the node raised itself states nothing.
@@ -16,18 +19,20 @@ pub(crate) struct Arrival {
     pub(crate) opened_at: Option<Instant>,
 }
 
-/// `event`, the transaction layer's, as a [`CallEvent`] and its [`Arrival`]: a
-/// timeout names the incarnation its Via marked, and the notice that a
+/// `event`, the transaction layer's, as the router's work: a Call-ID's budget
+/// trip as itself, every other event as a [`CallEvent`] and its [`Arrival`].
+/// A timeout names the incarnation its Via marked, and the notice that a
 /// watched call's last transaction cleared is the self-release notice
 /// ([`super::quiesced::notice`]); a hop reported alive is the
 /// [`HOP_ALIVE_TOPIC`] internal event of its call. A CANCEL the layer answered is stamped
 /// `now_ms`, the instant its event reached the run loop.
-pub(crate) fn call_event(event: TransactionEvent, now_ms: i64) -> (CallEvent, Arrival) {
+pub(super) fn work(event: TransactionEvent, now_ms: i64) -> Work {
     let event = match event {
         TransactionEvent::Message { message, src, matched_client_txn, datagram, opened_at } => {
             let arrival = Arrival { matched_client_txn, opened_at };
-            return (CallEvent::Sip { message, src, datagram }, arrival);
+            return Work::Event(CallEvent::Sip { message, src, datagram }, arrival);
         }
+        TransactionEvent::CallIdBudgetTripped(trip) => return Work::BudgetTripped(trip),
         TransactionEvent::Cancelled {
             call_id,
             from_tag,
@@ -83,7 +88,17 @@ pub(crate) fn call_event(event: TransactionEvent, now_ms: i64) -> (CallEvent, Ar
         }
         TransactionEvent::CallQuiesced { call_ref } => super::quiesced::notice(call_ref),
     };
-    (event, Arrival::default())
+    Work::Event(event, Arrival::default())
+}
+
+/// `event` as the [`CallEvent`] and [`Arrival`] [`work`] makes of it; `None`
+/// for a Call-ID's budget trip, which is no call's event.
+#[cfg(test)]
+pub(super) fn call_event(event: TransactionEvent, now_ms: i64) -> Option<(CallEvent, Arrival)> {
+    match work(event, now_ms) {
+        Work::Event(event, arrival) => Some((event, arrival)),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -105,7 +120,8 @@ mod tests {
                 kind: TxnTimeoutKind::Response,
             },
             0,
-        );
+        )
+        .expect("a call's event");
         event
     }
 
@@ -126,7 +142,8 @@ mod tests {
                 incarnation_mark: Some("k3".into()),
             },
             0,
-        );
+        )
+        .expect("a call's event");
         assert!(!arrival.matched_client_txn);
         let CallEvent::InternalEvent { call_ref, topic, payload, .. } = &event else {
             panic!("an internal event: {event:?}");

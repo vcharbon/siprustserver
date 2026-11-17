@@ -8,7 +8,7 @@ use sip_retransmit::Class;
 
 use crate::event::EventQueueClass;
 
-const EVENT_QUEUE_CLASS_VALUES: [&str; 6] =
+const EVENT_QUEUE_CLASS_VALUES: [&str; 7] =
     label_values!(EventQueueClass::ALL, EventQueueClass::label);
 /// The class of an event the inbound channel dropped or deferred, indexed
 /// like [`EventQueueClass::ALL`].
@@ -123,6 +123,27 @@ pub const KEEPALIVE_LANE_DROPS: Family = Family::counter(
     "b2bua_txn_keepalive_lane_drops_total",
     Labels::None,
     "Out-of-dialog OPTIONS the full keepalive lane dropped; the prober repeats.",
+);
+
+/// The way a datagram a mute dropped was going.
+pub const MUTED_DIRECTION: Dim = Dim::new("direction", &["in", "out"]);
+
+pub const MESSAGE_BUDGET_TRIPS: Family = Family::counter(
+    "b2bua_txn_message_budget_trips_total",
+    Labels::None,
+    "Call-IDs that passed their message budget (ADR-0063 §4, B2BUA_CAP_MESSAGES_PER_CALL_ID) and were muted: a peer looping with the node past every per-path bound. Each trip logs its Call-ID.",
+);
+
+pub const MESSAGE_BUDGET_UNCOUNTED: Family = Family::counter(
+    "b2bua_txn_message_budget_uncounted_total",
+    Labels::None,
+    "Datagrams of a new Call-ID left uncounted by the message budget because every Call-ID its bounded map holds is muted.",
+);
+
+pub const MUTED_MESSAGES: Family = Family::counter(
+    "b2bua_txn_muted_messages_total",
+    Labels::Product(&[MUTED_DIRECTION]),
+    "Datagrams a Call-ID's mute dropped (ADR-0063 §4), by direction: in, dropped before dispatch; out, never sent.",
 );
 
 pub const EVENT_QUEUE_DROPS: Family = Family::counter(

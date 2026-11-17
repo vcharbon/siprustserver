@@ -7,6 +7,7 @@ use crate::rng::IdGen;
 
 use super::backlog::DeferredBound;
 use super::bound_report::BoundPassed;
+use super::call_id_budget::CallIdBudget;
 use super::new_call_gate::NewCallGate;
 use super::refusals::InviteRefusals;
 
@@ -104,6 +105,14 @@ pub struct TransactionConfig {
     /// warn-agent of the 400 answering a refused request (RFC 3261 §20.43).
     /// `None` — the default — names it by the address the 400 leaves from.
     pub advertised: Option<String>,
+    /// The message budget of each Call-ID (ADR-0063 §3, [`CallIdBudget`]):
+    /// every datagram received that matches a transaction or draws an
+    /// answer, and every datagram sent, raw sends included, counts under its
+    /// Call-ID, the keepalive lane and the 400 refusing a parse aside; past
+    /// the budget the Call-ID is muted and
+    /// [`TransactionEvent::CallIdBudgetTripped`](crate::TransactionEvent)
+    /// told. `None` — the default — counts nothing.
+    pub call_id_budget: Option<CallIdBudget>,
 }
 
 /// The output event queue's floor and ceiling.
@@ -119,7 +128,7 @@ impl TransactionConfig {
     /// The defaults, identifiers drawn from `id_gen`: a 256-datagram receive
     /// queue, the RFC 3261 INVITE bounds and first-provisional bound, strict To-tag binding, no deferred
     /// bound, no shared refusals, no new-call gate, a transaction per OPTIONS, no keepalive
-    /// lane, no first hop, no advertised address.
+    /// lane, no first hop, no advertised address, no Call-ID budget.
     pub fn new(id_gen: Arc<IdGen>) -> Self {
         Self {
             udp_queue_max: 256,
@@ -138,6 +147,7 @@ impl TransactionConfig {
             keepalive_lane: None,
             first_hop: None,
             advertised: None,
+            call_id_budget: None,
         }
     }
 }

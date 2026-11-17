@@ -14,6 +14,7 @@ mod accepted_client;
 mod bounded_queue;
 mod branch_case;
 mod branch_collision;
+mod call_id_budget;
 mod cancel_after_final;
 mod cancel_hold;
 mod cancel_ladder;

@@ -54,37 +54,40 @@ impl Owner {
             },
             _ => None,
         };
+        let call_id = resp.call_id().as_str();
         if state == TxnState::Completed {
             if let Some((ack, dest)) = ack.filter(|_| !self.holds_ack(branch)) {
-                self.send_buffer(endpoint, &ack, dest).await;
+                self.send_buffer(endpoint, call_id, &ack, dest).await;
             }
             return;
         }
         if orphaned {
             if let Some((ack, dest)) = ack {
-                self.send_buffer(endpoint, &ack, dest).await;
+                self.send_buffer(endpoint, call_id, &ack, dest).await;
             }
             self.complete_non_2xx(branch);
             return;
         }
         if let Some(ack) = ack {
-            self.ack_first_non_2xx(endpoint, branch, ack).await;
+            self.ack_first_non_2xx(endpoint, branch, call_id, ack).await;
         }
         self.complete_non_2xx(branch);
         self.emit_critical(TransactionEvent::response(resp, src, true));
     }
 
-    /// Send `ack` toward `dest` now under a bound of zero, else hold it on the
-    /// client INVITE transaction at `branch` and arm its bound.
+    /// Send `ack`, of Call-ID `call_id`, toward `dest` now under a bound of
+    /// zero, else hold it on the client INVITE transaction at `branch` and
+    /// arm its bound.
     pub(super) async fn ack_first_non_2xx(
         &mut self,
         endpoint: &dyn UdpEndpoint,
         branch: &str,
+        call_id: &str,
         (ack, dest): (Bytes, SocketAddr),
     ) {
         let bound = self.ack_bound_ms;
         let Some(txn) = self.clients.get_mut(branch).filter(|_| bound > 0) else {
-            self.send_buffer(endpoint, &ack, dest).await;
+            self.send_buffer(endpoint, call_id, &ack, dest).await;
             return;
         };
         txn.unsent_ack = Some((ack, dest));
@@ -116,11 +119,14 @@ impl Owner {
 
     /// Send the ACK the transaction at `branch` holds; `true` when it left.
     pub(super) async fn send_held_ack(&mut self, endpoint: &dyn UdpEndpoint, branch: &str) -> bool {
-        let Some((ack, dest)) = self.clients.get_mut(branch).and_then(|t| t.unsent_ack.take())
+        let Some((ack, dest, call_id)) = self
+            .clients
+            .get_mut(branch)
+            .and_then(|t| t.unsent_ack.take().map(|(ack, dest)| (ack, dest, t.call_id.clone())))
         else {
             return false;
         };
-        self.send_buffer(endpoint, &ack, dest).await;
+        self.send_buffer(endpoint, &call_id, &ack, dest).await;
         true
     }
 }

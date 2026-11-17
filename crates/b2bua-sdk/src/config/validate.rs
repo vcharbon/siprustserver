@@ -85,6 +85,15 @@ impl B2buaConfig {
                     .to_string(),
             );
         }
+        let budget_floor = self.max_messages_per_call_lifetime.saturating_mul(100);
+        if self.max_messages_per_call_id == 0 || self.max_messages_per_call_id < budget_floor {
+            out.push(format!(
+                "B2BUA_CAP_MESSAGES_PER_CALL_ID={} < 100 x B2BUA_MAX_MESSAGES_PER_CALL_LIFETIME \
+                 ({budget_floor}): a compliant call must reach its lifetime cap before its \
+                 Call-ID's message budget (ADR-0063 §3), and the budget has no off",
+                self.max_messages_per_call_id
+            ));
+        }
         // The floor also keeps the interval above the probe's own Timer F
         // (32 s), so a probe's deadline passes before the next probe leaves.
         if self.keepalive_interval_sec < Self::MIN_KEEPALIVE_SEC {

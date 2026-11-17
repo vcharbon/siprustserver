@@ -58,18 +58,19 @@ mod stateless_tag;
 pub mod timers;
 
 // The layer actor: spawn, send API, per-call eviction, ADR-0014 self-release,
-// the deferred-backlog ceiling on new calls and the node's shared refusals.
+// the deferred-backlog ceiling on new calls and the node's shared refusals,
+// the per-Call-ID message budget.
 pub use layer::{
-    BoundPassed, DeferredBound, InviteRefusals, NewCallGate, NewCallRefusal, OnBound, ServerTxnKey,
-    TransactionConfig, TransactionEvents, TransactionLayer, TransactionLayerClosed, Verdict,
-    REFUSED_MEMO_MAX,
+    BoundPassed, CallIdBudget, DeferredBound, InviteRefusals, NewCallGate, NewCallRefusal, OnBound,
+    ServerTxnKey, TransactionConfig, TransactionEvents, TransactionLayer, TransactionLayerClosed,
+    Verdict, REFUSED_MEMO_MAX,
 };
 // The class a new INVITE is judged in, read off the parsed request.
 pub use invite_class::{class_of, InviteClass};
 // The seeds a materialised call hands the layer, and a re-offer's disposition.
 pub use seed::{Reoffer, TxnSeed};
 // Upward events + the client-transaction handles `send_request` returns.
-pub use event::{ClientTransactionHandle, EventQueueClass, TransactionEvent};
+pub use event::{CallIdBudgetTrip, ClientTransactionHandle, EventQueueClass, TransactionEvent};
 // Observability read handle (shared atomics, readable off the actor thread).
 pub use metrics::{RetransmitRow, TransactionMetrics};
 // Identifier generation seam (Via branch / To-tag), and the request-derived

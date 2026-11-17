@@ -21,6 +21,7 @@ use crate::metrics::MetricsInner;
 use crate::rng::IdGen;
 
 use super::backlog::DeferredBound;
+use super::call_id_budget::Budgets;
 use super::call_txns::CallTxns;
 use super::client_key::ClientMap;
 use super::event_age::EventAges;
@@ -117,8 +118,8 @@ pub(super) struct Owner {
     /// INVITE's Call-ID, From-tag and CSeq number (`layer::held_cancel`).
     pub(super) held_cancels: HashMap<(String, String, u32), ServerTxnKey>,
     /// Held answers to a CANCEL whose transaction left the map this turn,
-    /// sent at its end (`layer::held_cancel`).
-    pub(super) owed_sends: Vec<(Bytes, SocketAddr)>,
+    /// sent at its end (`layer::held_cancel`), each with its Call-ID.
+    pub(super) owed_sends: Vec<(String, Bytes, SocketAddr)>,
     /// The To-tag this node bound to a dialog it answered as UAS, by
     /// (Call-ID, From-tag), kept for Timer L past the transaction so a
     /// CANCEL or a stray answered after the transaction is gone still carries
@@ -131,6 +132,10 @@ pub(super) struct Owner {
     pub(super) stateless_options: bool,
     /// The cap and the To-tags of the 400s answering refused requests.
     pub(super) parse_refusals: ParseRefusals,
+    /// [`TransactionConfig::call_id_budget`](crate::TransactionConfig)'s
+    /// counts, kept in step with `clients` and `servers`: every `set_txn`
+    /// and `delete_txn` opens and closes a transaction of its Call-ID there.
+    pub(super) budgets: Option<Budgets>,
 }
 
 impl Owner {
@@ -183,6 +188,7 @@ impl Owner {
             recent_uas_tags: HashMap::new(),
             strict_to_tag: config.strict_to_tag,
             stateless_options: config.stateless_options,
+            budgets: config.call_id_budget.map(Budgets::new),
         }
     }
 
@@ -219,6 +225,10 @@ impl Owner {
     pub(super) fn set_txn(&mut self, txn: Transaction) {
         let new_call_ref = txn.call_ref.clone();
         let id = txn.id.clone();
+        if let Some(budgets) = self.budgets.as_mut() {
+            let now = tokio::time::Instant::now();
+            budgets.opened(&txn.call_id, txn.call_ref.as_deref(), txn.caller_tag(), now);
+        }
         // A re-insert of the same identity (a client send reusing a live
         // branch) must not double-count: drop the displaced txn's contribution
         // before adding the new one.
@@ -230,6 +240,9 @@ impl Owner {
             // A request matching a server transaction is absorbed by it, and a
             // seed skips an occupied identity: only a client is displaced.
             debug_assert!(old.role() == TxnRole::Client, "a server transaction was displaced");
+            if let Some(budgets) = self.budgets.as_mut() {
+                budgets.closed(&old.call_id);
+            }
             // The displaced txn's queue entries are keyed by the SAME identity
             // the replacement now owns; left in the wheel they would fire
             // against the new txn (spurious retransmit/timeout/cleanup) and their
@@ -322,6 +335,9 @@ impl Owner {
         };
         match removed {
             Some(mut t) => {
+                if let Some(budgets) = self.budgets.as_mut() {
+                    budgets.closed(&t.call_id);
+                }
                 if t.role() == TxnRole::Server {
                     if let Some(tag) = t.bound_to_tag() {
                         self.remember_uas_tag(&t.call_id, &t.from_tag, tag);
@@ -395,17 +411,6 @@ impl Owner {
         self.txn_index.get(call_ref).is_some_and(|t| t.on_books() > 0)
     }
 
-    // ── output ──────────────────────────────────────────────────────────────
-
-    pub(super) async fn send_buffer(
-        &self,
-        endpoint: &dyn UdpEndpoint,
-        buf: &[u8],
-        dest: SocketAddr,
-    ) {
-        self.metrics.count_send(endpoint.send_to(buf, dest).await);
-    }
-
     // ── timer firing ─────────────────────────────────────────────────────────
 
     pub(super) async fn fire_timer(&mut self, endpoint: &dyn UdpEndpoint, timer: Timer) {
@@ -459,10 +464,14 @@ impl Owner {
     }
 
     /// The periodic housekeeping pass: the lifetime safety net, the Timer L
-    /// memo purge, and the idle-table shrink and buffer census.
+    /// memo purge, the lapsed Call-ID counts, and the idle-table shrink and
+    /// buffer census.
     pub(super) fn sweep(&mut self) {
         self.reap_overdue();
         self.forget_expired_uas_tags();
+        if let Some(budgets) = self.budgets.as_mut() {
+            budgets.expire(tokio::time::Instant::now());
+        }
         self.clients.shrink_idle();
         shrink_idle(&mut self.servers);
         shrink_idle(&mut self.txn_index);

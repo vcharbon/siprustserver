@@ -97,7 +97,9 @@ impl Owner {
             },
         }
         match refusals.answer(req) {
-            Ok(refusal) => self.send_buffer(endpoint, refusal.image(), dest).await,
+            Ok(refusal) => {
+                self.send_buffer(endpoint, req.call_id().as_str(), refusal.image(), dest).await
+            }
             Err(e) => tracing::warn!(error = %e, "INVITE refusal not sent: its lines make none"),
         }
         NewInvite::Refused

@@ -79,7 +79,7 @@ b2bua-runner b2bua_unroutable_internal_overflow_total counter fixed {}
 b2bua-runner b2bua_repeat_give_ups_total counter fixed {obligation}
 b2bua-runner b2bua_copies_past_schedule_total counter fixed {kind}
 b2bua-runner b2bua_model_defects_total counter fixed {invariant}
-b2bua-runner b2bua_cap_trips_total counter fixed {cap,kind|cap,kind}
+b2bua-runner b2bua_cap_trips_total counter fixed {cap,kind|cap,kind|cap,kind}
 b2bua-runner b2bua_cap_near_total counter fixed {cap}
 b2bua-runner b2bua_cap_peak gauge fixed {cap}
 b2bua-runner b2bua_cap_peak_per_hour gauge fixed {cap}
@@ -173,6 +173,9 @@ b2bua-runner b2bua_txn_event_queue_depth gauge fixed {}
 b2bua-runner b2bua_txn_event_queue_capacity gauge fixed {}
 b2bua-runner b2bua_txn_event_queue_delay_ms gauge fixed {}
 b2bua-runner b2bua_txn_keepalive_lane_drops_total counter fixed {}
+b2bua-runner b2bua_txn_message_budget_trips_total counter fixed {}
+b2bua-runner b2bua_txn_message_budget_uncounted_total counter fixed {}
+b2bua-runner b2bua_txn_muted_messages_total counter fixed {direction}
 b2bua-runner b2bua_txn_event_queue_drops_total counter fixed {reason}
 b2bua-runner b2bua_txn_event_queue_deferred_total counter fixed {reason}
 b2bua-runner b2bua_txn_event_queue_deferred gauge fixed {}

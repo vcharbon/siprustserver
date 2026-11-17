@@ -2,8 +2,9 @@
 //! (auto-100, cached-response replay for duplicates, an out-of-dialog OPTIONS
 //! passed up with no transaction under `stateless_options`), ACK absorption and the
 //! Timer I Confirmed hold, the RFC 6026 Accepted hold after a 2xx, TU
-//! response sending (Timer H/J/L arming), and Timer G non-2xx final
-//! retransmission. A CANCEL of a server INVITE is `layer::server_cancel`'s;
+//! response sending (Timer H/J/L arming). Timer G non-2xx final
+//! retransmission is `layer::timer_g`'s, a CANCEL of a server INVITE
+//! `layer::server_cancel`'s;
 //! the client (UAC) side is `layer::client`'s; a server INVITE rebuilt from
 //! a record is `layer::seed`'s.
 
@@ -28,46 +29,6 @@ use super::owner::Owner;
 use super::txn::{NewTransaction, Timer, TxnId, TxnRef, TxnState};
 
 impl Owner {
-    /// RFC 3261 §17.2.1 Timer G: retransmit the cached non-2xx final of an INVITE
-    /// server txn still in `Completed` (not yet ACKed / Timer-H'd), then re-arm at
-    /// MIN(2×interval, T2). The auto-100 we already sent silenced the UAC's INVITE
-    /// retransmit, so the passive "replay the cached final on a request retransmit"
-    /// path never fires — without this a single dropped reject wedges the caller
-    /// for the full 32 s (Timer H). The ACK (`hold_for_timer_i`) cancels
-    /// `retransmit_key` and Timer H deletes the transaction, so this stops
-    /// exactly when RFC requires.
-    /// Non-INVITE (Timer J) and 2xx (TU-owned §13.3.1.4 retransmit) are excluded at
-    /// the arming site in `do_send_response`.
-    pub(super) async fn fire_server_retransmit(
-        &mut self,
-        endpoint: &dyn UdpEndpoint,
-        id: ServerTxnId<'_>,
-    ) {
-        let (buf, dest, status) = match self.server(id) {
-            Some(t) if t.kind == TxnKind::Invite && t.state == TxnState::Completed => {
-                match (&t.last_response, t.destination, t.last_response_status) {
-                    (Some(buf), Some(dest), Some(status)) => (buf.clone(), dest, status),
-                    _ => return, // no cached final / destination — nothing to resend
-                }
-            }
-            _ => return, // ACKed (Confirmed), Timer-H'd, or no longer a completed INVITE server txn
-        };
-
-        self.send_buffer(endpoint, &buf, dest).await;
-        self.metrics.retransmits.record_final(status);
-
-        let rearm = match self.server_mut(id).and_then(|t| t.ladder.as_mut()) {
-            Some(ladder) => ladder.advance(),
-            None => return,
-        };
-        if let Some(next_interval) = rearm {
-            let key = self.arm(Timer::ServerRetransmit(id.to_key()), next_interval);
-            if let Some(t) = self.server_mut(id) {
-                t.retransmit_key = Some(key);
-            }
-        }
-    }
-
     /// Send a TU response through its server transaction and return the
     /// datagram that left: the response's own image (ADR-0025, ADR-0032 X3),
     /// re-rendered only where `bind_to_tag` held it to the bound To-tag. The
@@ -113,13 +74,15 @@ impl Owner {
         // transaction for a CANCEL: it leaves raw, never through — or dropped
         // by — the INVITE transaction on that branch.
         if cseq_method == Method::Cancel {
-            self.send_buffer(endpoint, &buf, dest).await;
+            self.send_buffer(endpoint, msg.call_id().as_str(), &buf, dest).await;
             return buf;
         }
 
         let mut dest = dest;
+        let mut in_txn = false;
         if let Some(id) = ServerTxnId::of_response(&msg) {
             if let Some(held) = self.server(id).map(|t| t.destination) {
+                in_txn = true;
                 dest = held.unwrap_or(dest);
                 self.record_uas_tag(id, &msg);
                 if let Some(txn) = self.server_mut(id) {
@@ -154,7 +117,11 @@ impl Owner {
             }
         }
 
-        self.send_buffer(endpoint, &buf, dest).await;
+        if !in_txn && self.on_keepalive_lane(&cseq_method, true) {
+            self.send_uncounted(endpoint, &buf, dest).await;
+        } else {
+            self.send_buffer(endpoint, msg.call_id().as_str(), &buf, dest).await;
+        }
         buf
     }
 
@@ -278,7 +245,7 @@ impl Owner {
         // ── Out-of-dialog OPTIONS, stateless (RFC 3261 §8.2.7) ─────────────────
         // No transaction: every copy reaches the TU, on the keepalive lane when
         // the layer runs one, and its answer leaves raw.
-        if self.stateless_options && req.method() == Method::Options && req.to().tag().is_none() {
+        if self.on_keepalive_lane(req.method(), req.to().tag().is_none()) {
             let event = self.upward(req, src, datagram);
             self.emit_keepalive(event);
             return;
@@ -433,7 +400,7 @@ impl Owner {
         let dest = existing.destination.unwrap_or_else(|| stamped_destination(req.top_via(), src));
         match replay {
             Some((cached, status, method)) => {
-                self.send_buffer(endpoint, &cached, dest).await;
+                self.send_buffer(endpoint, req.call_id().as_str(), &cached, dest).await;
                 self.metrics.retransmits.record_trigger(&method, status);
             }
             None if owes_trying => {
@@ -445,7 +412,7 @@ impl Owner {
                     return true;
                 };
                 let trying_buf = trying.image().clone();
-                self.send_buffer(endpoint, &trying_buf, dest).await;
+                self.send_buffer(endpoint, req.call_id().as_str(), &trying_buf, dest).await;
                 if let Some(txn) = self.server_mut(id) {
                     txn.last_response = Some(trying_buf);
                     txn.last_response_status = Some(100);

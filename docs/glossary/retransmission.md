@@ -153,7 +153,8 @@ probe unanswered by its own Timer F or answered with a dialog-terminating
 final; transaction); the stack's own
 refusal (**admission**: a limiter, the destination
 allow-list, a spent hop budget, a malformed INVITE, an unreadable or unanswered
-decision); the per-call message cap; the **supervisor** (a reaper strike, a
+decision); the per-call message cap; the **message budget** of a Call-ID the
+call holds (ADR-0063 §4); the **supervisor** (a reaper strike, a
 forced terminal). The record names the leg whose message or timer caused it
 (**by leg**: the caller for its BYE or CANCEL, the callee for its BYE, final
 or unanswered probe; none for a decision, the stack or its supervisor), the
@@ -170,6 +171,17 @@ reached without one is counted (`termination_unrecorded`).
 _Avoid_: "reason" for the cause (the free-text `reason` is a label the rules
 pass, an RFC 3326 value at most; the cause is typed); "snapshot" for the cut
 (the ring is whole; the cut is a `seq`).
+
+**Message budget** (ADR-0063 §3, `sip_txn::CallIdBudget`):
+The datagrams one Call-ID may carry on a node, counted by the transaction
+layer: every one it sends, and every one it receives that matches a
+transaction or draws an answer, across every call and every stateless answer
+under that Call-ID. Past it the Call-ID is **muted** (nothing sent under it,
+what arrives dropped before dispatch) and every call holding it ends with the
+`MessageBudget` cause. Node-local and never replicated: an ownership move
+counts from zero.
+_Avoid_: "message cap" (the per-call caps the call layer counts); "rate limit"
+(it counts a Call-ID's whole life, not a rate).
 
 **Snooze** (`RuleAction::SnoozeTimer`):
 A timer fire that a rule puts off by one short step instead of acting on, so the

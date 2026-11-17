@@ -63,6 +63,7 @@ mod peer_metrics;
 #[cfg(test)]
 mod possibly_confirmed_tests;
 pub(crate) use peer_metrics::outbound_proxy_target;
+mod message_budget;
 #[cfg(test)]
 mod oversize_send_tests;
 mod process;
@@ -359,6 +360,9 @@ pub enum PrimaryWrite {
 /// states of it, or a replication command.
 enum Work {
     Event(CallEvent, txn_event::Arrival),
+    /// A Call-ID passed its message budget: the calls holding it end
+    /// (`message_budget`).
+    BudgetTripped(sip_txn::CallIdBudgetTrip),
     Repl(ReplCommand),
     /// What `readmission` held: the arming of parked calls, then the reclaim
     /// commands in arrival order.
@@ -386,10 +390,7 @@ pub async fn run(
     let mut inbox = inbox::Inbox::new(txn_rx, timer_rx, reentry_rx, repl_rx);
     loop {
         let work = match inbox.next(&ctx, &mut readmission).await {
-            inbox::Taken::Keepalive(ev) => {
-                let (ev, arrival) = txn_event::call_event(ev, ctx.clock.now_ms());
-                Work::Event(ev, arrival)
-            }
+            inbox::Taken::Keepalive(ev) => txn_event::work(ev, ctx.clock.now_ms()),
             inbox::Taken::Work(work) => work,
             inbox::Taken::Closed => break,
         };
@@ -409,6 +410,7 @@ pub async fn run(
                     ingress::on_event(&ctx, ev, arrival, Some(&parks)).await;
                 }
             }
+            Work::BudgetTripped(trip) => message_budget::end_calls_holding(&ctx, &trip),
             Work::Repl(cmd) => {
                 if let Some(cmd) = readmission.admit(cmd) {
                     on_repl_command(&ctx, cmd, &mut readmission, &mut parks).await

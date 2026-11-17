@@ -39,6 +39,7 @@ Full definitions: [docs/glossary/retransmission.md](docs/glossary/retransmission
 - **Message ring**: the capped, replicated per-leg history of the distinct SIP messages a leg received or sent. Avoid: history, log.
 - **Decision log**: every decision the decision layer returned and this stack applied, one mark each; the ordinal stamps messages.
 - **Termination record**: who ended the call and why (cause, by leg, cut), written once by the first termination. Avoid: reason.
+- **Message budget**: a Call-ID's datagram cap, then a mute. ADR-0063.
 - **Snooze**: a timer fire a rule puts off by one short step (`RuleAction::SnoozeTimer`), counted per key. Avoid: defer, hold.
 - **Admission ladder**: the ordered rungs that may refuse a new INVITE, ending at the CPS bucket; a refusal draws one 503. ADR-0037.
 - **Copy** (of a new INVITE): an initial INVITE matching a live call's Call-ID, From-tag and CSeq on another branch; answered 482.
