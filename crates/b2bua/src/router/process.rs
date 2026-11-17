@@ -192,7 +192,7 @@ pub(super) async fn process(
         }
         // The message is resolved to the dialog it names, or refused, before
         // any of the machinery below reads it (RFC 3261 §12.2.2, ADR-0041).
-        let resolved = match super::dialog_gate::admit(ctx, &call, event, &res) {
+        let resolved = match super::dialog_gate::admit(ctx, &call, event, &res, &mut turn.ids) {
             super::dialog_gate::Gate::Pass(resolved) => resolved,
             super::dialog_gate::Gate::Answered { answer, in_order } => {
                 let leg = res.source_leg_id.as_str();

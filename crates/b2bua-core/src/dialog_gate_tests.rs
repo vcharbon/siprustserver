@@ -280,7 +280,16 @@ fn call_with_ringing_callee() -> Call {
 fn a_tagless_non_invite_request_on_a_live_call_names_no_dialog() {
     let call = call_with_ringing_callee();
     for leg in ["a", "b-1"] {
-        for method in [Method::Info, Method::Bye, Method::Update, Method::Prack, Method::Message] {
+        for method in [
+            Method::Info,
+            Method::Bye,
+            Method::Update,
+            Method::Prack,
+            Method::Message,
+            Method::Notify,
+            Method::Refer,
+            Method::Options,
+        ] {
             assert_eq!(
                 request_verdict(&call, leg, &tagless_request(method.clone(), 2)),
                 Verdict::NoDialog,
@@ -302,6 +311,22 @@ fn a_tagless_cancel_invite_or_ack_passes_unread() {
             Verdict::Pass(call::helpers::Resolved::default()),
             "a tagless {method}"
         );
+    }
+}
+
+/// A method this stack relays in no dialog is answered by its method
+/// (RFC 3261 §8.2.1), tagged or not: a tagless one passes on either leg.
+#[test]
+fn a_tagless_request_of_a_method_relayed_in_no_dialog_passes_unread() {
+    let call = call_with_ringing_callee();
+    for leg in ["a", "b-1"] {
+        for method in [Method::Subscribe, Method::Publish, Method::Other("FOO".into())] {
+            assert_eq!(
+                request_verdict(&call, leg, &tagless_request(method.clone(), 2)),
+                Verdict::Pass(call::helpers::Resolved::default()),
+                "{leg}: a tagless {method}"
+            );
+        }
     }
 }
 

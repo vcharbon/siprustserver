@@ -8,13 +8,20 @@
 use std::time::Duration;
 
 use b2bua_harness::{settle_until, B2buaSut};
-use scenario_harness::{Agent, ClientInvite, Harness};
+use scenario_harness::{Agent, ClientInvite, Harness, WaiverScope};
 use sip_message::generators::InDialogMethod;
+
+/// Why alice's INFO carries no To-tag: her non-compliance is the corner under
+/// test, which the audit reads as an in-dialog request lacking the dialog's
+/// remote tag.
+const TAGLESS_INFO: &str = "alice's INFO before any early dialog reached her carries no To-tag \
+                            (RFC 3261 §12.2.1.1), the request under test";
 
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 8\r\na=rtpmap:8 PCMA/8000\r\na=sendrecv\r\n";
 const ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/AVP 8\r\na=rtpmap:8 PCMA/8000\r\na=sendrecv\r\n";
 
-/// The B2BUA routing every call to bob, and its two parties.
+/// The B2BUA routing every call to bob, and its two parties; the audit's
+/// reading of alice's tagless INFO, the request under test, is waived.
 struct Scene {
     h: Harness,
     alice: Agent,
@@ -27,6 +34,9 @@ impl Scene {
         let h = Harness::with_transit_delay(name, 1);
         let alice = h.agent_auto("alice").await;
         let bob = h.agent_auto("bob").await;
+        h.waive(
+            WaiverScope::rule("in-dialog-to-tag", TAGLESS_INFO).on_party("alice").on_method("INFO"),
+        );
         let b2bua = B2buaSut::route_all_to(&bob.addr().ip().to_string(), bob.addr().port())
             .start(&h, "b2bua", &h.next_addr().to_string())
             .await;
@@ -44,6 +54,16 @@ impl Scene {
             .through(self.b2bua.addr)
             .send()
             .await
+    }
+
+    /// alice sends an INFO with no To-tag on `call`: it draws a 481 under a
+    /// To-tag of its own (RFC 3261 §8.2.6.2), and bob receives nothing.
+    async fn tagless_info_is_refused(&self, call: &mut ClientInvite) {
+        let mut info = call.send_request(InDialogMethod::Info).send().await;
+        let refusal = info.expect(481).await;
+        assert!(refusal.to().tag().is_some(), "the 481 carries a To-tag: {refusal:?}");
+        self.h.advance(Duration::from_millis(100)).await;
+        assert!(self.bob.try_receive_tolerating("INFO", &[]).await.is_none(), "nothing crossed");
     }
 
     async fn finish(self) {
@@ -66,10 +86,7 @@ async fn a_tagless_info_while_one_early_dialog_rings_is_refused_481() {
     uas.respond(180, "Ringing").with_to_tag("bobfork1").await;
     s.h.advance(Duration::from_millis(10)).await;
 
-    let mut info = call.send_request(InDialogMethod::Info).send().await;
-    info.expect(481).await;
-    s.h.advance(Duration::from_millis(100)).await;
-    assert!(s.bob.try_receive_tolerating("INFO", &[]).await.is_none(), "nothing crossed");
+    s.tagless_info_is_refused(&mut call).await;
 
     call.expect(180).await;
     uas.respond(200, "OK").with_sdp(ANSWER).await;
@@ -94,10 +111,7 @@ async fn a_tagless_info_while_two_forks_ring_is_refused_481() {
     uas.respond(180, "Ringing").with_to_tag("bobfork2").await;
     s.h.advance(Duration::from_millis(10)).await;
 
-    let mut info = call.send_request(InDialogMethod::Info).send().await;
-    info.expect(481).await;
-    s.h.advance(Duration::from_millis(100)).await;
-    assert!(s.bob.try_receive_tolerating("INFO", &[]).await.is_none(), "nothing crossed");
+    s.tagless_info_is_refused(&mut call).await;
 
     call.expect(180).await;
     call.expect(180).await;

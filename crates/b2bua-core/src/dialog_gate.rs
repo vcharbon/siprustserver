@@ -5,11 +5,12 @@
 //! the dialog — and for a response, the relay it answers — resolved
 //! ([`call::helpers::Resolved`]). The shell sends what a refusal answers.
 //!
-//! A request with a To-tag, on any leg:
+//! A request, on any leg, CANCEL aside:
 //!
 //! | its dialog | the gate |
 //! |---|---|
-//! | none, or a caller-facing one the caller was never shown | 481 |
+//! | no To-tag: none (§12.2.1.1) | 481 to a method this stack carries only in a dialog; an INVITE, an ACK or a method it relays in no dialog passes (`tagless_verdict`) |
+//! | its To-tag names none, or a caller-facing one the caller was never shown | 481 |
 //! | `Early`, `Confirmed` | pass |
 //! | `Ending` (this side's BYE or CANCEL in flight) | see below |
 //! | `Ended(Rejected)` | PRACK passes (RFC 3262 §3); others 481 |
@@ -33,7 +34,7 @@
 //! ([`Verdict::UnexplainedAck`]): its final may be a stateless refusal of a
 //! re-INVITE that never reached the call, and a 2xx's ladder draws the ACK
 //! again (RFC 3261 §13.2.2.4). A CANCEL is matched by
-//! transaction (§9.1) and passes unread. A response whose From-tag is no tag
+//! transaction (§9.1) and passes unread, tagged or not. A response whose From-tag is no tag
 //! this stack put on the leg answers nothing of this stack's and is dropped,
 //! save a 2xx to an INVITE whose verified via-extension names a leg the record
 //! lacks (ADR-0055 §4, §12).
@@ -41,6 +42,7 @@
 use b2bua_sdk::event::CallEvent;
 use call::helpers::{response_origin, Resolved, ResponseFacts, ResponseOrigin};
 use call::{Call, Dialog, DialogEnd, DialogState};
+use sip_message::generators::InDialogMethod;
 use sip_message::{Method, SipMessage, SipRequest, SipResponse};
 
 use crate::config::B2buaConfig;
@@ -116,9 +118,10 @@ pub fn verdict(
 /// How the gate reads `req` arriving on `leg_id` of `call`, whoever served it.
 pub fn request_verdict(call: &Call, leg_id: &str, req: &SipRequest) -> Verdict {
     let method = req.method();
-    let (Some(to), false) = (req.to().tag(), *method == Method::Cancel) else {
+    if *method == Method::Cancel {
         return Verdict::Pass(Resolved::default());
-    };
+    }
+    let Some(to) = req.to().tag() else { return tagless_verdict(method) };
     // A leg the record lacks (another owner dialled it) holds no dialog here.
     let Some(leg) = call::helpers::find_leg(call, leg_id) else {
         return if *method == Method::Ack { Verdict::Drop } else { Verdict::NoDialog };
@@ -152,6 +155,19 @@ pub fn request_verdict(call: &Call, leg_id: &str, req: &SipRequest) -> Verdict {
         return Verdict::OutOfOrder;
     }
     taken(Resolved { dialog: Some(dialog.id()), record: None })
+}
+
+/// What the gate makes of a request with no To-tag, which names no dialog
+/// (RFC 3261 §12.2.1.1). A method this stack carries only within a dialog
+/// draws 481 (§12.2.2; an INFO rides only an invite dialog usage, RFC 6086
+/// §4.2.1). An INVITE (the initial one's retransmission, or a merged or looped
+/// copy), an ACK, and a method this stack relays in no dialog, which the rules
+/// answer by its method (§8.2.1), pass with no dialog resolved.
+fn tagless_verdict(method: &Method) -> Verdict {
+    match InDialogMethod::try_from(method) {
+        Ok(InDialogMethod::Invite) | Err(()) => Verdict::Pass(Resolved::default()),
+        Ok(_) => Verdict::NoDialog,
+    }
 }
 
 /// Whether `method` is a PRACK on a retired, unreleased dialog of a leg this

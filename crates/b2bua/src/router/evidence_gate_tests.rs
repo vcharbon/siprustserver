@@ -18,6 +18,12 @@ use crate::initial_invite::build_initial_call;
 use crate::stack_identity::{build_call_via, RequestFacts, StackIdentityOpts};
 use crate::store::CallTopology;
 
+/// What the gate makes of `event` on `call`, any tag it mints drawn from a
+/// fixed source.
+fn admitted(ctx: &RouterCtx, call: &Call, event: &CallEvent, res: &Resolution) -> Gate {
+    admit(ctx, call, event, res, &mut sip_ids::TurnIds::fixed(1))
+}
+
 fn key() -> sip_ids::SigningKey {
     sip_ids::SigningKey::new(&[7u8; 32]).expect("a 32-byte key")
 }
@@ -81,7 +87,7 @@ async fn an_ack_of_the_unanswered_caller_invite_is_evidence_once_a_copy_served_t
     let ack = event(SipMessage::Request(caller_ack("answered-elsewhere")));
 
     let unserved = unanswered_call(ctx, 0);
-    let gate = admit(ctx, &unserved, &ack, &resolution(&unserved, "a"));
+    let gate = admitted(ctx, &unserved, &ack, &resolution(&unserved, "a"));
     assert!(
         matches!(gate, Gate::Answered { answer: None, .. }),
         "no copy served the call: the copy that answered her is live and writing, {}",
@@ -90,7 +96,7 @@ async fn an_ack_of_the_unanswered_caller_invite_is_evidence_once_a_copy_served_t
     assert_eq!(ctx.metrics.unexplained_acks_total(), 1, "the ACK it ignored is counted");
 
     let served = unanswered_call(ctx, 1);
-    let gate = admit(ctx, &served, &ack, &resolution(&served, "a"));
+    let gate = admitted(ctx, &served, &ack, &resolution(&served, "a"));
     assert!(matches!(gate, Gate::Pass(_)), "a copy's write taken here: evidence, {}", kind(&gate));
     assert_eq!(ctx.metrics.unexplained_acks_total(), 1, "evidence is not counted as ignored");
 }
@@ -130,7 +136,7 @@ async fn a_2xx_on_a_leg_the_record_lacks_reaches_the_rules_under_a_verified_exte
     let call = unanswered_call(ctx, 0);
 
     let signed = event(answer_on(&call, "b-7", Some(&key())));
-    let gate = admit(ctx, &call, &signed, &resolution(&call, "b-7"));
+    let gate = admitted(ctx, &call, &signed, &resolution(&call, "b-7"));
     assert!(matches!(gate, Gate::Pass(_)), "trigger 5 reaches its rule, {}", kind(&gate));
 
     let other_key = sip_ids::SigningKey::new(&[8u8; 32]).expect("a key");
@@ -138,7 +144,7 @@ async fn a_2xx_on_a_leg_the_record_lacks_reaches_the_rules_under_a_verified_exte
         ("unsigned", answer_on(&call, "b-7", None)),
         ("signed under another key", answer_on(&call, "b-7", Some(&other_key))),
     ] {
-        let gate = admit(ctx, &call, &event(unverified), &resolution(&call, "b-7"));
+        let gate = admitted(ctx, &call, &event(unverified), &resolution(&call, "b-7"));
         assert!(matches!(gate, Gate::Dropped), "{what}: a stray, {}", kind(&gate));
     }
 }
@@ -156,11 +162,11 @@ async fn her_ack_reaches_the_turn_only_while_its_dialog_is_held_possibly_confirm
     *call.a_leg.invite_final_sent_mut() = Some(503);
     let ack = event(SipMessage::Request(caller_ack(tag)));
 
-    let gate = admit(ctx, &call, &ack, &resolution(&call, "a"));
+    let gate = admitted(ctx, &call, &ack, &resolution(&call, "a"));
     assert!(matches!(gate, Gate::Answered { answer: None, .. }), "not held: {}", kind(&gate));
 
     let key = call::TimerKey::call(call::TimerType::PossiblyConfirmed { tag: tag.into() });
     call::helpers::arm_timer(&mut call, key, 32_000);
-    let gate = admit(ctx, &call, &ack, &resolution(&call, "a"));
+    let gate = admitted(ctx, &call, &ack, &resolution(&call, "a"));
     assert!(matches!(gate, Gate::Pass(_)), "held: her ACK ends the hold, {}", kind(&gate));
 }

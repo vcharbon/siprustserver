@@ -7,6 +7,7 @@
 
 use call::helpers::Resolved;
 use call::Call;
+use sip_ids::TurnIds;
 use sip_message::{Method, SipMessage, SipResponse};
 
 use super::resolve::Resolution;
@@ -30,8 +31,15 @@ pub(super) enum Gate {
 }
 
 /// Resolve `event` on `call` (its source leg `res.source_leg_id`), answering a
-/// refused request.
-pub(super) fn admit(ctx: &RouterCtx, call: &Call, event: &CallEvent, res: &Resolution) -> Gate {
+/// refused request. A 481 to a request with no To-tag carries one drawn from
+/// the turn's `ids` (RFC 3261 §8.2.6.2).
+pub(super) fn admit(
+    ctx: &RouterCtx,
+    call: &Call,
+    event: &CallEvent,
+    res: &Resolution,
+    ids: &mut TurnIds,
+) -> Gate {
     let leg_id = res.source_leg_id.as_str();
     let served = || copy_served(ctx, call);
     let refused = match verdict(call, leg_id, event, &ctx.config, served) {
@@ -59,7 +67,10 @@ pub(super) fn admit(ctx: &RouterCtx, call: &Call, event: &CallEvent, res: &Resol
         | Verdict::Pass(_)
         | Verdict::Drop
         | Verdict::UnexplainedAck
-        | Verdict::Stray => build_481(req, None),
+        | Verdict::Stray => {
+            let minted = req.to().tag().is_none().then(|| ids.new_tag());
+            build_481(req, minted.as_deref())
+        }
     };
     // A request whose lines no response can echo is answered with none.
     let Ok(mut answer) = answer else { return Gate::Answered { answer: None, in_order } };
