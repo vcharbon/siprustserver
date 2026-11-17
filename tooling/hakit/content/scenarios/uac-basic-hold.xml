@@ -4,7 +4,7 @@
  UAC call: INVITE, final, ACK, a hold (split by the caller's re-INVITEs, or
  replaced by an abuse pattern), BYE. Every exit writes one call-outcome.v1
  record with `<log>`; the record states what the caller saw, never a verdict.
- The file is compact: SIPp 3.7 refuses a scenario over 64 KiB. The rules it
+ The file is compact: SIPp 3.7 refuses a scenario of 64 KiB. The rules it
  follows, and why, are ADR-0049 section 4.2.
 
  -inf: field0 the R-URI user, field1..4 one header line each (from the
@@ -41,14 +41,12 @@
  discharges it, in its wait or in the handler; a lower ACK is absorbed; a
  call ending with it undischarged records a protocol failure. An ACK above
  the CSeq of the latest far request given a final acknowledges nothing: a
- protocol failure, the call goes on.
+ protocol failure, the call goes on. A request landing while the BYE awaits
+ its final is answered after that final (OPTIONS 200, any other 481); a
+ message that stops the BYE's retransmission meanwhile sends the BYE again.
 
- Limits: an ACK landing between the re-INVITE's match and the 200 send is
- discarded unchecked by SIPp's engine; a lower ACK after the 200 and an ACK
- ahead of its re-INVITE are still checked. SIPp stops the 200's
- retransmission on any ACK, a departure from RFC 3261 section 13.3.1.4, so
- after a lower ACK a lost true ACK with no copy of the re-INVITE ends
- `far_reinvite_no_ack`. The hold is checked once a second; a far
+ Limits (an ACK SIPp's engine discards unchecked, a 200 retransmission any
+ ACK stops): ADR-0049 section 4.2. The hold is checked once a second; a far
  re-INVITE taken meanwhile restarts that second.
 -->
 <scenario name="hakit UAC call with call-outcome records">
@@ -1084,6 +1082,8 @@ Content-Length: 0
   ]]>
   <action>
    <assign assign_to="bye_sent" value="1"/>
+   <assign assign_to="bye_open" value="1"/>
+   <index assign_to="bye_ix"/>
   </action>
  </send>
  <label id="bye_wait"/>
@@ -1135,7 +1135,7 @@ Content-Length: 0
  </recv>
  <nop/>
  <label id="bye_opt_cap"/>
- <nop next="bye_wait">
+ <nop next="bye_cap_out">
   <action>
    <assignstr assign_to="opt_via" value="[last_Via:]"/>
    <assignstr assign_to="opt_rr" value="[last_Record-Route:]"/>
@@ -1157,6 +1157,7 @@ Content-Length: 0
    <assign assign_to="bx_due" value="1"/>
   </action>
  </nop>
+ <label id="bye_cap_out"/>
  <nop test="_unexp.retaddr" next="unexp_resume"/>
  <nop next="bye_wait"/>
  <nop/>
@@ -1199,6 +1200,11 @@ Content-Length: 0
  </nop>
  <nop/>
  <label id="bye_ok"/>
+ <nop>
+  <action>
+   <assign assign_to="bye_open" value="0"/>
+  </action>
+ </nop>
  <nop condexec="keep" condexec_inverse="true" next="released">
   <action>
    <assignstr assign_to="r_ending" value="answered"/>
@@ -1228,6 +1234,7 @@ Content-Length: 0
  <label id="bye_failed_bye"/>
  <nop test="keep" next="released">
   <action>
+   <assign assign_to="bye_open" value="0"/>
    <assignstr assign_to="r_fail" value="[$r_fail][$r_sep]{&quot;at_ms&quot;:[$ns],&quot;kind&quot;:&quot;dialog_request&quot;,&quot;method&quot;:&quot;BYE&quot;,&quot;code&quot;:[$bye_code]}"/>
    <assignstr assign_to="r_sep" value=","/>
   </action>
@@ -1255,6 +1262,7 @@ Content-Length: 0
  <label id="bye_no_final"/>
  <nop test="keep" next="release_answers">
   <action>
+   <assign assign_to="bye_open" value="0"/>
    <assignstr assign_to="tk" value="[clock_tick]"/>
    <todouble assign_to="ns" variable="tk"/>
    <add assign_to="ns" variable="t_off"/>
@@ -1330,7 +1338,11 @@ Content-Length: 0
    <assign assign_to="fr_due" value="0"/>
   </action>
  </nop>
- <nop test="ux_ok" next="unexp_resume"/>
+ <nop condexec="bye_open" test="ux_ok" next="unexp_resume">
+  <action>
+   <assign assign_to="_unexp.retaddr" variable="bye_ix"/>
+  </action>
+ </nop>
  <nop next="ack_bad"/>
  <nop/>
  <label id="ack_in"/>
@@ -1525,7 +1537,11 @@ Content-Length: 0
 
  <nop/>
  <label id="ux_2xx"/>
- <nop test="writing" next="unexp_resume"/>
+ <nop condexec="bye_open" test="writing" next="unexp_resume">
+  <action>
+   <assign assign_to="_unexp.retaddr" variable="bye_ix"/>
+  </action>
+ </nop>
  <nop test="ux_inv" next="ux_2xx_inv"/>
  <nop test="ux_bye" next="ux_2xx_bye"/>
  <nop next="unexp_resume"/>
@@ -1599,7 +1615,11 @@ Content-Length: 0
 
  <nop/>
  <label id="ux_final"/>
- <nop test="writing" next="unexp_resume"/>
+ <nop condexec="bye_open" test="writing" next="unexp_resume">
+  <action>
+   <assign assign_to="_unexp.retaddr" variable="bye_ix"/>
+  </action>
+ </nop>
  <nop test="ux_inv" next="ux_final_inv"/>
  <nop test="ux_bye" next="ux_final_bye"/>
  <nop next="unexp_resume"/>
@@ -1701,6 +1721,7 @@ Content-Length: 0
  <nop/>
  <label id="unexp_options"/>
  <nop test="is_ghost" next="unexp_resume"/>
+ <nop test="bye_open" next="bye_opt_cap"/>
  <send>
   <![CDATA[
 SIP/2.0 200 OK
@@ -1803,6 +1824,7 @@ Content-Length: 0
 
  <nop/>
  <label id="unexp_request"/>
+ <nop test="bye_open" next="bye_bx_cap"/>
  <send next="proto_fail">
   <![CDATA[
 SIP/2.0 501 Not Implemented

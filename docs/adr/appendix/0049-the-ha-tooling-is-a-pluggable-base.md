@@ -601,8 +601,9 @@ made. A run profile joins the two.
      retransmissions such a message stopped again (a BYE), and every
      retransmitted send precedes `_unexp.main`;
    - SIPp sends nothing while a send of its own is retransmitting, so a
-     request landing while the call's request is pending is captured by the
-     wait and answered once a provisional or the final is in; a far
+     request landing while the call's request is pending is captured, by the
+     wait or by the handler, and answered once a provisional or the final is
+     in (the BYE's final, for a request landing while the BYE is open); a far
      re-INVITE the handler takes once the caller's BYE is sent is
      captured the same way and answered 481 by the call's last step, after
      its record, so one landing at any step up to the call's end is answered;
@@ -619,7 +620,7 @@ made. A run profile joins the two.
      the discarded message, so a handler path answers and resumes in as few
      steps as it can (the resume is an action of its send); an `ontimeout`
      naming the end of the scenario counts the call failed; SIPp 3.7 loads no
-     scenario file over 64 KiB.
+     scenario file of 64 KiB or more.
 
    A static lint checks these rules on every scenario of the search path (the
    wait timers, the method lists, the handler's coverage, the resume guards,

@@ -203,5 +203,13 @@ def test_a_key_default_counts_only_in_the_header_comment(tmp_path: Path) -> None
 
 
 def test_a_scenario_over_what_sipp_loads_is_refused(tmp_path: Path) -> None:
-    padding = "<!--" + "x" * 70000 + "-->\n"
-    assert errors_of(tmp_path, GOOD.replace("<scenario", padding + "<scenario", 1))[0].endswith("over the 65536 SIPp 3.7 loads")
+    """SIPp 3.7 loads a 65535-byte scenario and refuses a 65536-byte one."""
+
+    def padded(size: int) -> str:
+        fill = "<!--" + "x" * (size - len(GOOD.encode()) - len("<!---->\n")) + "-->\n"
+        text = GOOD.replace("<scenario", fill + "<scenario", 1)
+        assert len(text.encode()) == size
+        return text
+
+    assert errors_of(tmp_path, padded(65535)) == []
+    assert errors_of(tmp_path, padded(65536)) == ["65536 bytes, over the 65535 SIPp 3.7 loads"]
