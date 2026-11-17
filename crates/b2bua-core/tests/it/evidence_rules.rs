@@ -148,3 +148,29 @@ fn a_repeat_of_an_evidence_non_2xx_another_node_dialled_is_re_acked_once() {
     assert_eq!(acks, 1, "one ACK per copy of the final (RFC 3261 §17.1.1.2)");
     assert_eq!(repeat.wire_to("b-1"), first[..1], "the record's own ACK");
 }
+
+/// On that node, a copy past the re-sends a compliant answerer makes (RFC
+/// 3261 §17.2.1), inside T1 of the last re-ACK, is absorbed by the record's
+/// count (ADR-0057 §10): no ACK is composed from the via-extension for it
+/// either.
+#[test]
+fn a_copy_past_the_ladder_of_an_evidence_non_2xx_another_node_dialled_draws_no_ack() {
+    let driver = Driver::new().with_config(|c| {
+        c.cluster_key = Some(sip_ids::SigningKey::new(&[7u8; 32]).expect("a key"));
+        c.sip_local_ip = "192.0.2.10".into();
+        c.sip_local_port = 5060;
+    });
+    let (mut call, _) = reinvite_lost(&driver);
+    call.step_edited(Step::AnswersSent("b-1", 488), &via_of_the_other_node);
+    let mut acks_per_copy = Vec::new();
+    for _ in 0..=sip_retransmit::Class::InviteServerFinal.resends() {
+        let repeat = Step::AnswersLast("b-1", Method::Invite, 488);
+        let Outcome::Turned(turn) = call.step_edited(repeat, &via_of_the_other_node) else {
+            panic!("the repeat takes no turn");
+        };
+        acks_per_copy.push(turn.methods_to("b-1").iter().filter(|(m, _)| m == "ACK").count());
+    }
+    let (past, ladder) = acks_per_copy.split_last().expect("copies");
+    assert!(ladder.iter().all(|&acks| acks == 1), "one ACK per copy on the ladder: {ladder:?}");
+    assert_eq!(*past, 0, "the copy past the ladder draws no ACK: {acks_per_copy:?}");
+}
