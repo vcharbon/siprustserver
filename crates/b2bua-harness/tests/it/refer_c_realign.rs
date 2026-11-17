@@ -526,7 +526,8 @@ async fn refer_allow_c_realign_carries_the_answer_whole() {
 /// flight) while the c-realign re-INVITE is pending. The copy answers the
 /// earlier CSeq, not the re-INVITE (RFC 3261 §12.2.1.2): the realign waits
 /// for C's own answer to the re-INVITE, and the a-realign re-INVITE toward A
-/// carries that active answer, never the held first one.
+/// carries that active answer, never the held first one. The copy draws its
+/// re-ACK (§13.2.2.4): the ACK of that first 2xx, the same datagram.
 #[tokio::test(start_paused = true)]
 async fn refer_allow_c_realign_ignores_a_copy_of_the_first_2xx() {
     let h = Harness::new("refer-allow-c-realign-first-2xx-copy");
@@ -561,6 +562,18 @@ async fn refer_allow_c_realign_ignores_a_copy_of_the_first_2xx() {
     let mut c_realign = charlie.receive("INVITE").await;
     assert_reinvite(c_realign.request(), OFFER, "b-2");
 
+    let acks_to_charlie = |from: usize| -> Vec<Vec<u8>> {
+        h.wire_entries()
+            .into_iter()
+            .skip(from)
+            .filter(|e| {
+                e.from == b2bua.addr && e.to == charlie.addr() && e.raw.starts_with(b"ACK ")
+            })
+            .map(|e| e.raw)
+            .collect()
+    };
+    let first_ack = acks_to_charlie(0);
+    let before_copy = h.wire_entries().len();
     charlie_uas.respond(200, "OK").with_sdp(CHARLIE_FIRST_ANSWER).await;
     let mut early_to_alice = 0;
     for _ in 0..5 {
@@ -572,6 +585,13 @@ async fn refer_allow_c_realign_ignores_a_copy_of_the_first_2xx() {
         "a copy of C's first 2xx answers no c-realign re-INVITE: nothing reaches A \
          before C answers it (got {early_to_alice} datagrams)"
     );
+    assert_eq!(first_ack.len(), 1, "C's first 2xx drew one ACK");
+    assert_eq!(
+        acks_to_charlie(before_copy),
+        first_ack,
+        "the copy of C's first 2xx is re-ACKed with the ACK that 2xx drew (RFC 3261 §13.2.2.4)"
+    );
+    charlie.drain().await;
 
     c_realign.respond(200, "OK").with_sdp(CHARLIE_ACTIVE_ANSWER).await;
     charlie.receive("ACK").await;

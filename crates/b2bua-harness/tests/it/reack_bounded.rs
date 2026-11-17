@@ -9,7 +9,9 @@
 //! the copies a compliant answerer can send and sends nothing else, the
 //! ping-pong stops, and the call still ends with a BYE, one CDR and is fully
 //! reaped. The cases drive the ping-pong on the initial INVITE's 2xx (b-leg),
-//! on a re-INVITE's 2xx in each direction, and on a fork straggler's 2xx.
+//! on a re-INVITE's 2xx in each direction, on a fork straggler's 2xx, and on
+//! the initial INVITE's 2xx while a re-INVITE is pending; a copy of a 2xx two
+//! INVITEs back finds no ACK to repeat and is absorbed.
 //!
 //! The spaced answerers never see an ACK (each is lost): one re-sends on this
 //! stack's own schedule, then past the count just within and at T1 of the last
@@ -30,6 +32,8 @@ const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 192.0.2.10\r\ns=-\r\nc=IN IP4 192
 const ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 192.0.2.20\r\ns=-\r\nc=IN IP4 192.0.2.20\r\nt=0 0\r\nm=audio 20000 RTP/AVP 0\r\n";
 const ALICE_V2: &str = "v=0\r\no=alice 1 2 IN IP4 192.0.2.10\r\ns=-\r\nc=IN IP4 192.0.2.10\r\nt=0 0\r\nm=audio 10002 RTP/AVP 0\r\n";
 const BOB_V2: &str = "v=0\r\no=bob 1 2 IN IP4 192.0.2.20\r\ns=-\r\nc=IN IP4 192.0.2.20\r\nt=0 0\r\nm=audio 20002 RTP/AVP 0\r\n";
+const ALICE_V3: &str = "v=0\r\no=alice 1 3 IN IP4 192.0.2.10\r\ns=-\r\nc=IN IP4 192.0.2.10\r\nt=0 0\r\nm=audio 10004 RTP/AVP 0\r\n";
+const BOB_V3: &str = "v=0\r\no=bob 1 3 IN IP4 192.0.2.20\r\ns=-\r\nc=IN IP4 192.0.2.20\r\nt=0 0\r\nm=audio 20006 RTP/AVP 0\r\n";
 const STRAGGLER_ANSWER: &str = "v=0\r\no=bob 2 1 IN IP4 192.0.2.21\r\ns=-\r\nc=IN IP4 192.0.2.21\r\nt=0 0\r\nm=audio 20004 RTP/AVP 0\r\n";
 
 /// The To-tag of the fork that wins the call.
@@ -302,6 +306,106 @@ async fn a_reinvite_2xx_repeated_on_every_ack_draws_bounded_re_acks_toward_the_c
     ping_pong(&h, b2bua.addr, &alice, &mut alice_reinvite, (ALICE_V2, None))
         .await
         .assert_bounded(b2bua.metrics());
+
+    hang_up(h, &b2bua, &bob, &mut dialog).await;
+}
+
+/// The callee re-sends the 200 to the initial INVITE once, then the caller
+/// re-INVITEs and, while the callee's answer is pending, the callee re-sends
+/// that first 200 on every ACK. Each copy answers the earlier INVITE (RFC 3261
+/// §12.2.1.2), not the pending one: it is re-ACKed with the ACK of that 200,
+/// on the count the copy before the re-INVITE started, and the re-INVITE then
+/// completes.
+#[tokio::test(start_paused = true)]
+async fn an_earlier_2xx_repeated_on_every_ack_while_a_reinvite_is_pending_draws_bounded_re_acks() {
+    let h = Harness::with_transit_delay("b2bua-reack-bounded-earlier-2xx", TRANSIT_MS);
+    let alice = h.agent_auto("alice").await;
+    let bob = h.agent_auto("bob").await;
+    let at = h.next_addr().to_string();
+    let b2bua =
+        B2buaSut::route_all_to("127.0.0.1", bob.addr().port()).start(&h, "b2bua", &at).await;
+
+    let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
+    let mut uas = bob.receive("INVITE").await;
+    uas.respond(180, "Ringing").await;
+    call.expect(180).await;
+    uas.respond(200, "OK").with_sdp(ANSWER).await;
+    call.expect(200).await;
+    let mut dialog = call.ack().await;
+    bob.receive("ACK").await;
+    let before = h.wire_entries().len();
+    send_copy(&mut uas, ANSWER, None).await;
+    h.advance(Duration::from_millis(ROUND_MS)).await;
+    bob.drain().await;
+    assert_eq!(acks_to(&h, b2bua.addr, bob.addr(), before), 1, "the first copy draws its re-ACK");
+
+    let mut reinvite = dialog.reinvite(Some(ALICE_V2)).await;
+    let reinvite_cseq = dialog.local_cseq();
+    let mut bob_reinvite = bob.receive("INVITE").await;
+
+    let pong = ping_pong(&h, b2bua.addr, &bob, &mut uas, (ANSWER, None)).await;
+    assert_eq!(
+        pong.re_acks,
+        COMPLIANT_COPIES - 1,
+        "the copies before and during the re-INVITE share one count (ADR-0057 §10)"
+    );
+    assert_eq!(pong.copies, COMPLIANT_COPIES, "the first copy left un-ACKed ends it");
+    assert!(pong.others.is_empty(), "the SUT sends nothing but re-ACKs: {:?}", pong.others);
+    assert_eq!(
+        b2bua.metrics().copies_past_schedule_total("2xx"),
+        1,
+        "the absorbed copy is counted"
+    );
+
+    bob_reinvite.respond(200, "OK").with_sdp(BOB_V2).await;
+    reinvite.expect(200).await;
+    dialog.ack_for(reinvite_cseq, None).await;
+    bob.receive("ACK").await;
+
+    hang_up(h, &b2bua, &bob, &mut dialog).await;
+}
+
+/// Two re-INVITEs after the initial INVITE, a copy of the 200 to that INVITE
+/// finds no ACK of it on the record: it answers nothing pending, draws nothing
+/// and is counted absorbed.
+#[tokio::test(start_paused = true)]
+async fn a_copy_of_a_2xx_two_invites_back_is_absorbed() {
+    let h = Harness::with_transit_delay("b2bua-reack-two-invites-back", TRANSIT_MS);
+    let alice = h.agent_auto("alice").await;
+    let bob = h.agent_auto("bob").await;
+    let at = h.next_addr().to_string();
+    let b2bua =
+        B2buaSut::route_all_to("127.0.0.1", bob.addr().port()).start(&h, "b2bua", &at).await;
+
+    let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
+    let mut uas = bob.receive("INVITE").await;
+    uas.respond(180, "Ringing").await;
+    call.expect(180).await;
+    uas.respond(200, "OK").with_sdp(ANSWER).await;
+    call.expect(200).await;
+    let mut dialog = call.ack().await;
+    bob.receive("ACK").await;
+    for (offer, answer) in [(ALICE_V2, BOB_V2), (ALICE_V3, BOB_V3)] {
+        let mut reinvite = dialog.reinvite(Some(offer)).await;
+        let reinvite_cseq = dialog.local_cseq();
+        bob.receive("INVITE").await.respond(200, "OK").with_sdp(answer).await;
+        reinvite.expect(200).await;
+        dialog.ack_for(reinvite_cseq, None).await;
+        bob.receive("ACK").await;
+    }
+
+    let before = h.wire_entries().len();
+    send_copy(&mut uas, ANSWER, None).await;
+    h.advance(Duration::from_millis(ROUND_MS)).await;
+    bob.drain().await;
+    let sent = h.wire_entries().into_iter().skip(before).filter(|e| e.from == b2bua.addr).count();
+    assert_eq!(sent, 0, "the copy answers nothing pending and draws nothing");
+    assert_eq!(
+        b2bua.metrics().copies_past_schedule_total("2xx"),
+        1,
+        "the absorbed copy is counted"
+    );
+    assert_eq!(b2bua.metrics().repl_quiet_turns_total("absorbed-copy"), 1, "a quiet turn");
 
     hang_up(h, &b2bua, &bob, &mut dialog).await;
 }
