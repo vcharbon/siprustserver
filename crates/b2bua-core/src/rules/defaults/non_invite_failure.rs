@@ -1,25 +1,47 @@
-//! The non-2xx finals to a PRACK or a NOTIFY that are not relayed back to a
-//! requester: a relayed PRACK's, which its sender is owed a 2xx for, and
-//! this stack's own PRACK's or NOTIFY's, which deny nothing beyond their
-//! transaction or subscription. A relayed NOTIFY's failure, like any other
-//! relayed non-INVITE request's, is `relay-non-invite-failure`'s to relay.
+//! The non-2xx finals to a PRACK or a NOTIFY: a relayed PRACK's, answered on
+//! its sender's leg by what the PRACK carried, and this stack's own PRACK's or
+//! NOTIFY's, which deny nothing beyond their transaction or subscription. A
+//! relayed NOTIFY's failure, like any other relayed non-INVITE request's, is
+//! `relay-non-invite-failure`'s to relay.
 
-use b2bua_sdk::model::{Match, RuleAction, RuleDefinition};
+use b2bua_sdk::model::{Match, RuleAction, RuleContext, RuleDefinition};
 
-use super::core_rules::{ok, rule};
+use super::core_rules::{no_transform, ok, rule};
+
+/// Whether the current response is a failure final to a relayed PRACK that
+/// carried an offer (`Some(true)`), or one that carried an answer or no
+/// description (`Some(false)`); `None` for anything else.
+fn relayed_prack_failure_offered(ctx: &RuleContext) -> Option<bool> {
+    ctx.response().filter(|r| r.status() >= 300)?;
+    ctx.answered_record().filter(|r| r.is_relay()).map(|r| r.offered)
+}
 
 /// `answer-relayed-prack-failure`: a PRACK is relayed only where it matches a
 /// reliable provisional this stack showed its sender unacknowledged, and such
 /// a PRACK MUST draw a 2xx (RFC 3262 §3): a non-2xx final to the relayed copy
-/// is answered 200 on the sender's leg, never relayed.
+/// of one carrying no offer is answered 200 on the sender's leg, never relayed.
 pub(super) fn answer_relayed_prack_failure_rule() -> RuleDefinition {
     rule(
         "answer-relayed-prack-failure",
         &[],
-        Match::response().method("PRACK").filter(|ctx| {
-            ctx.response().is_some_and(|r| r.status() >= 300) && ctx.answers_relayed_request()
-        }),
+        Match::response()
+            .method("PRACK")
+            .filter(|ctx| relayed_prack_failure_offered(ctx) == Some(false)),
         |_ctx| ok(vec![RuleAction::AnswerRelayOriginator { status: 200, reason: "OK".into() }]),
+    )
+}
+
+/// `relay-offered-prack-failure`: a non-2xx final to a relayed PRACK that
+/// carried an offer (RFC 3262 §5) is relayed to its sender: the offer is
+/// refused end to end, as a relayed UPDATE's is.
+pub(super) fn relay_offered_prack_failure_rule() -> RuleDefinition {
+    rule(
+        "relay-offered-prack-failure",
+        &[],
+        Match::response()
+            .method("PRACK")
+            .filter(|ctx| relayed_prack_failure_offered(ctx) == Some(true)),
+        |_ctx| ok(vec![RuleAction::RelayToPeer { transform: no_transform() }]),
     )
 }
 

@@ -41,7 +41,7 @@ pub(super) fn ok(actions: Vec<RuleAction>) -> Option<RuleHandleResult> {
     Some(RuleHandleResult::new(actions))
 }
 
-fn no_transform() -> MessageTransform {
+pub(super) fn no_transform() -> MessageTransform {
     MessageTransform::default()
 }
 
@@ -512,10 +512,9 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
         ),
         // A relayed non-INVITE request's **non-2xx final** is relayed back to
         // its requester — plain transaction-layer symmetry (RFC 3261 §8.1.3.3).
-        // The non-INVITE sibling of `relay-reinvite-response`
-        // (INVITE) alongside `relay-non-invite-200` (the 2xx half): without it
-        // the far end's 481/488/491… to a relayed UPDATE/INFO was silently
-        // dropped and the requester timed out. Matches ONLY when the response
+        // The non-INVITE sibling of `relay-reinvite-response` (INVITE)
+        // alongside `relay-non-invite-200` (the 2xx half); a relayed PRACK's
+        // failure has its own rules. Matches ONLY when the response
         // answers a relay record on the source dialog — i.e. a transaction WE
         // relayed. A B2BUA-originated request (keepalive OPTIONS,
         // relayFirst18x PRACK, REFER-progress NOTIFY) records as this stack's
@@ -539,6 +538,7 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
             |_ctx| ok(vec![RuleAction::RelayToPeer { transform: no_transform() }]),
         ),
         super::non_invite_failure::answer_relayed_prack_failure_rule(),
+        super::non_invite_failure::relay_offered_prack_failure_rule(),
         // ── failure ─────────────────────────────────────────────────────────
         rule(
             "route-failure",

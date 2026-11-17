@@ -3,8 +3,9 @@
 //! INFO, MESSAGE, REFER or keepalive OPTIONS denies the dialog and ends the
 //! call. A PRACK's (RFC 3262 §3), CANCEL's (§9.2), NOTIFY's (RFC 6665
 //! §4.4.1) and BYE's (§15.1.1: the dialog ends either way) deny nothing; a
-//! relayed one is `relay-non-invite-failure`'s or
-//! `answer-relayed-prack-failure`'s and the rest `absorb-own-request-failure`'s.
+//! relayed one is `relay-non-invite-failure`'s, `relay-offered-prack-failure`'s
+//! or `answer-relayed-prack-failure`'s and the rest
+//! `absorb-own-request-failure`'s.
 //! A 481 in a dialog already over, or from a leg already ended, denies
 //! nothing either ([`denies_a_live_dialog`]): no rule takes it.
 //!
