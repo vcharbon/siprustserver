@@ -43,6 +43,30 @@ const CALLEE: ([u8; 4], u16) = ([192, 0, 2, 3], 5070);
 /// itself, confirmed under its own tags, and without the leg `c-1`; the
 /// proxy's endpoint and the callee's.
 async fn holding_a_call() -> (Node, Box<dyn UdpEndpoint>, Box<dyn UdpEndpoint>, String, String) {
+    holding(|_| {}).await
+}
+
+/// The same, the record also holding the leg `c-1` `w1` dialled, ended by
+/// the CANCEL its INVITE drew: a final to that dial passes the gate to the
+/// call's turn.
+async fn holding_the_other_owners_dial(
+) -> (Node, Box<dyn UdpEndpoint>, Box<dyn UdpEndpoint>, String, String) {
+    holding(|call| {
+        let mut leg = call::testkit::dialled_leg("c-1", "w1-tag");
+        if let Some(record) = leg.invite.as_mut() {
+            record.relayed_by = call::RelayOwner::new("w1", "w1-boot-1");
+        }
+        call::testkit::stage_leg(&mut leg, call::LegState::Terminated);
+        call::helpers::add_b_leg(call, leg);
+    })
+    .await
+}
+
+/// A node holding the call [`holding_a_call`] states, `more` added to its
+/// record before the node takes it.
+async fn holding(
+    more: impl FnOnce(&mut call::Call),
+) -> (Node, Box<dyn UdpEndpoint>, Box<dyn UdpEndpoint>, String, String) {
     let net = SimulatedSignalingNetwork::new(1);
     let node = node_on(&net, "w0", |c| c.cluster_key = Some(key()), Vec::new()).await;
     let proxy = net.bind_udp(BindUdpOpts::new(SocketAddr::from(PROXY), 64)).await.unwrap();
@@ -57,6 +81,7 @@ async fn holding_a_call() -> (Node, Box<dyn UdpEndpoint>, Box<dyn UdpEndpoint>, 
     let mut own = call::testkit::dialled_leg("b-1", "w0-tag");
     own.dialogs.insert(call::Dialog::new("w0-tag", "carol-w0", call::DialogState::Confirmed, 1));
     call::helpers::add_b_leg(&mut call, own);
+    more(&mut call);
     let ctx = node.core.router_ctx();
     ctx.state.create(call.clone(), Some(CallTopology::new("w0", "w1", 3, 1)));
     let mark = call.incarnation_mark().to_string();
@@ -245,4 +270,19 @@ async fn a_held_calls_unheld_2xx_repeated_at_wire_speed_is_byed_once() {
     assert_eq!((acks, byes), (COMPLIANT_COPIES + 1, 1), "a 2xx: ACKs on its ladder, one BYE");
     let metrics = &node.core.router_ctx().metrics;
     assert_eq!(metrics.copies_past_schedule_total("unheld"), 4, "the copies past it are counted");
+}
+
+/// A non-2xx to the dial another owner sent on a leg the held call holds,
+/// re-sent at wire speed: each copy passes the gate to the call's turn, whose
+/// ACK the book bounds as the router's own (ADR-0063 §2); a turn whose ACK
+/// the book absorbed leaves the record as it read it and persists quietly.
+#[tokio::test(start_paused = true)]
+async fn a_held_calls_turn_on_a_final_repeated_at_wire_speed_draws_bounded_acks() {
+    let (node, proxy, callee, call_ref, mark) = holding_the_other_owners_dial().await;
+    burst(proxy.as_ref(), &final_to_the_dial(&call_ref, &mark, OTHER, 487, true), 15).await;
+    let (acks, byes) = acks_and_byes(callee.as_ref()).await;
+    assert_eq!((acks, byes), (COMPLIANT_COPIES + 1, 0), "a non-2xx: ACKs on its ladder, no BYE");
+    let metrics = &node.core.router_ctx().metrics;
+    assert_eq!(metrics.copies_past_schedule_total("unheld"), 4, "the copies past it are counted");
+    assert_eq!(metrics.repl_quiet_turns_total("absorbed-copy"), 4, "their turns are quiet");
 }
