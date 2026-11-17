@@ -162,6 +162,10 @@ CASES = [
     Case("2xx-retrans-in-flood", "peer-2xx-retrans-in-flood.xml", "answered", "answered", {"abuse": "options_flood", "flood_count": "1", "flood_gap_ms": "100"}),
     Case("stray-200-mid-hold", "peer-stray-200-mid-hold.xml", "answered", "answered"),
     Case("stray-200-during-bye", "peer-stray-200-during-bye.xml", "answered", "answered"),
+    Case("options-after-bye-provisional", "peer-options-after-bye-provisional.xml", "answered", "answered", calls=4),
+    Case("info-after-bye-provisional", "peer-info-after-bye-provisional.xml", "answered", "answered", calls=4),
+    Case("2xx-after-bye-provisional", "peer-2xx-after-bye-provisional.xml", "answered", "answered", calls=4),
+    Case("ack-after-bye-provisional", "peer-ack-after-bye-provisional.xml", "answered", "answered", {}, {}, ["protocol"], calls=4),
     Case(
         "request-before-answer",
         "peer-request-before-answer.xml",
