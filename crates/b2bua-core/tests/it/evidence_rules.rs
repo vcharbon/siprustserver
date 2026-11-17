@@ -117,15 +117,15 @@ const THIS_NODE: &str = "192.0.2.10:5060";
 const OTHER_NODE: &str = "192.0.2.11:5060";
 
 /// `raw` with its top Via naming [`OTHER_NODE`]: the response to a request
-/// another node of the cluster sent, as a takeover node receives it.
+/// another node sent.
 fn via_of_the_other_node(raw: &[u8]) -> Vec<u8> {
     String::from_utf8_lossy(raw).replacen(THIS_NODE, OTHER_NODE, 1).into_bytes()
 }
 
 /// The same repeat on a node whose transaction layer holds no transaction of
-/// the re-INVITE and whose address the Via does not name, as on a takeover:
-/// the record's ACK is sent again, and no second ACK is composed from the
-/// via-extension (ADR-0055 §12) for the one final.
+/// the re-INVITE and whose address the Via does not name: the record's ACK is
+/// sent again, and no second ACK is composed from the via-extension (ADR-0055
+/// §12) for the one final.
 #[test]
 fn a_repeat_of_an_evidence_non_2xx_another_node_dialled_is_re_acked_once() {
     let driver = Driver::new().with_config(|c| {
