@@ -162,7 +162,9 @@ pub fn request_verdict(call: &Call, leg_id: &str, req: &SipRequest) -> Verdict {
 /// draws 481 (§12.2.2; an INFO rides only an invite dialog usage, RFC 6086
 /// §4.2.1). An INVITE (the initial one's retransmission, or a merged or looped
 /// copy), an ACK, and a method this stack relays in no dialog, which the rules
-/// answer by its method (§8.2.1), pass with no dialog resolved.
+/// answer by its method (§8.2.1), pass with no dialog resolved. A tagless
+/// OPTIONS never reaches the gate: the router answers it as a keepalive
+/// before any call lookup.
 fn tagless_verdict(method: &Method) -> Verdict {
     match InDialogMethod::try_from(method) {
         Ok(InDialogMethod::Invite) | Err(()) => Verdict::Pass(Resolved::default()),

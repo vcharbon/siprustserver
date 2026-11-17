@@ -1000,10 +1000,6 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
         rule("relay-notify", &[], Match::request().method("NOTIFY"), |_| {
             ok(vec![RuleAction::RelayToPeer { transform: no_transform() }])
         }),
-        // An in-dialog request of a method this stack models no relay for (a
-        // SUBSCRIBE, a PUBLISH, a REGISTER, an extension method) goes to the
-        // relay too, which answers it locally (489 to a SUBSCRIBE, else 405):
-        // no request is left to run out its sender's Timer F (RFC 3261 §8.2).
         rule(
             "relay-unmodelled",
             &[],
@@ -1490,7 +1486,11 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
 }
 
 /// Whether `method` is one no relay rule models: neither a method the
-/// in-dialog relay builds nor an ACK or CANCEL, which have their own.
+/// in-dialog relay builds nor an ACK or CANCEL, which have their own. Such a
+/// request (a SUBSCRIBE, a PUBLISH, a REGISTER, an extension method), in a
+/// dialog or naming none, with a callee leg or not, `relay-unmodelled`
+/// answers locally (489 to a SUBSCRIBE, else 405): none runs out its sender's
+/// Timer F (RFC 3261 §8.2).
 fn unmodelled(method: &Method) -> bool {
     !matches!(method, Method::Ack | Method::Cancel)
         && sip_message::generators::InDialogMethod::try_from(method).is_err()

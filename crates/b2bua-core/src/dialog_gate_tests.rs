@@ -288,7 +288,6 @@ fn a_tagless_non_invite_request_on_a_live_call_names_no_dialog() {
             Method::Message,
             Method::Notify,
             Method::Refer,
-            Method::Options,
         ] {
             assert_eq!(
                 request_verdict(&call, leg, &tagless_request(method.clone(), 2)),
