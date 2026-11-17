@@ -13,6 +13,7 @@ use crate::seed::{Reoffer, TxnSeed};
 use crate::timers::ms;
 use call::{TxnKind, TxnTimeoutKind};
 
+use super::budget_gate::Direction;
 use super::key::{ServerTxnId, ServerTxnKey};
 use super::lifetime::Hold;
 use super::owner::Owner;
@@ -419,13 +420,17 @@ impl Owner {
     /// and re-emit with `matched_client_txn = true`; a request a server
     /// transaction matches (§17.2.3) is absorbed with nothing sent: the layer
     /// answered that datagram when it emitted it, and §17.2.1 replays a
-    /// response only to a retransmission received from the wire.
+    /// response only to a retransmission received from the wire. Under a
+    /// muted Call-ID it is dropped, counted once already on its arrival.
     pub(super) async fn do_reoffer(
         &mut self,
         endpoint: &dyn UdpEndpoint,
         message: SipMessage,
         src: SocketAddr,
     ) -> Reoffer {
+        if !self.not_muted(message.call_id().as_str(), Direction::In) {
+            return Reoffer::Muted;
+        }
         let matched = match message {
             SipMessage::Response(resp) => self.inbound_response(endpoint, resp, src, true).await,
             SipMessage::Request(req) if req.method() == Method::Cancel => {

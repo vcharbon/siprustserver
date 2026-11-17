@@ -338,7 +338,8 @@ impl TransactionLayer {
     /// absorbed with nothing sent, its arrival already answered (§17.2.1). All
     /// three are [`Reoffer::Matched`] (the consumer drops its copy: whatever
     /// that path emits arrives as a fresh event); anything else is
-    /// [`Reoffer::Unmatched`], sent nowhere and emitted nowhere.
+    /// [`Reoffer::Unmatched`], sent nowhere and emitted nowhere. Under a muted
+    /// Call-ID it is [`Reoffer::Muted`] and dropped (ADR-0063 §4).
     pub async fn reoffer(
         &self,
         message: SipMessage,

@@ -11,7 +11,9 @@ use crate::common;
 use common::*;
 use sip_message::parser::custom::CustomParser;
 use sip_message::{SipMessage, SipParser};
-use sip_txn::{CallIdBudget, CallIdBudgetTrip, IdGen, TransactionConfig, TransactionEvent};
+use sip_txn::{
+    CallIdBudget, CallIdBudgetTrip, IdGen, Reoffer, TransactionConfig, TransactionEvent,
+};
 
 const TRANSIT: u64 = 5;
 
@@ -141,7 +143,10 @@ async fn a_datagram_reoffered_under_a_muted_call_id_is_dropped() {
     let cancel = CustomParser::new()
         .parse(&inbound_request("CANCEL", branch, "muted", None))
         .expect("parse");
-    stack.txn.reoffer(cancel, addr(PEER)).await.expect("the layer runs");
+    assert_eq!(
+        stack.txn.reoffer(cancel, addr(PEER)).await.expect("the layer runs"),
+        Reoffer::Muted
+    );
     elapse_ms(TRANSIT + 1).await;
     assert!(stack.drain_events().is_empty(), "the INVITE is not cancelled");
     assert_eq!(stack.txn.metrics().muted_in(), muted_in + 1, "the mute dropped it");

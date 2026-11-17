@@ -115,7 +115,7 @@ impl Owner {
 
     /// Whether a datagram under `call_id` going `direction`, outside the
     /// count, passes: `false` under a mute, which it extends.
-    fn not_muted(&mut self, call_id: &str, direction: Direction) -> bool {
+    pub(super) fn not_muted(&mut self, call_id: &str, direction: Direction) -> bool {
         let Some(budgets) = self.budgets.as_mut() else { return true };
         if budgets.drops(call_id, Instant::now()) {
             self.count_muted(direction);

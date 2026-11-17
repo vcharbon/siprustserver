@@ -217,7 +217,7 @@ pub(super) async fn process(
         // after the datagram was emitted — may hold one now. Re-offered, a match
         // is the layer's to answer and re-emit; this turn ends.
         let call = match reoffer_trigger(ctx, call, event, matched_client_txn).await {
-            Offered::Matched => return false,
+            Offered::Absorbed => return false,
             Offered::Turn(call) => *call,
         };
         // A CANCEL reaches the router only when the transaction layer matched
