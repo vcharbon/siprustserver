@@ -2,9 +2,10 @@
 
 A port probed free is bound by SIPp only later, and pairings run in parallel in
 several test processes at once. A reservation therefore holds an exclusive
-`flock` on one file per port in a directory every process shares, for as long
-as the pairing runs, and draws its ports below the kernel's ephemeral range,
-which no `bind(0)` on the box is handed.
+`flock` on one file per port in a fixed directory, whatever a process's TMPDIR,
+for as long as the pairing runs, and draws its ports below the kernel's
+ephemeral range, which no `bind(0)` on the box is handed. The lock files stay:
+at most one per port of the range.
 """
 
 from __future__ import annotations
@@ -12,13 +13,12 @@ from __future__ import annotations
 import fcntl
 import random
 import socket
-import tempfile
 from collections.abc import Generator
 from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from typing import IO
 
-LOCK_DIR = Path(tempfile.gettempdir()) / "hakit-sipp-ports"
+LOCK_DIR = Path("/tmp/hakit-sipp-ports")
 LOWEST_PORT = 20000
 
 

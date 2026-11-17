@@ -4,7 +4,7 @@
  UAC call: INVITE, final, ACK, a hold (split by the caller's re-INVITEs, or
  replaced by an abuse pattern), BYE. Every exit writes one call-outcome.v1
  record with `<log>`; the record states what the caller saw, never a verdict.
- The file is compact: SIPp 3.7 refuses a scenario of 64 KiB. The rules it
+ The file is compact: SIPp 3.7 refuses a scenario of 64 KiB or more. The rules it
  follows, and why, are ADR-0049 section 4.2.
 
  -inf: field0 the R-URI user, field1..4 one header line each (from the
@@ -43,7 +43,7 @@
  the CSeq of the latest far request given a final acknowledges nothing: a
  protocol failure, the call goes on. A request landing while the BYE awaits
  its final is answered after that final (OPTIONS 200, any other 481); a
- message that stops the BYE's retransmission meanwhile sends the BYE again.
+ final or an ACK that stops the BYE's retransmission sends the BYE again.
 
  Limits (an ACK SIPp's engine discards unchecked, a 200 retransmission any
  ACK stops): ADR-0049 section 4.2. The hold is checked once a second; a far
@@ -1095,6 +1095,7 @@ Content-Length: 0
    <test assign_to="bw_inv" variable="bw_mi" compare="equal" value="0"/>
    <strcmp assign_to="bw_mb" variable="bw_m" value="BYE"/>
    <test assign_to="bw_bye" variable="bw_mb" compare="equal" value="0"/>
+   <test assign_to="bye_open" variable="bw_mb" compare="not_equal" value="0"/>
    <strcmp assign_to="bw_c1" variable="bw_n" value="1"/>
    <test assign_to="bw_one" variable="bw_c1" compare="equal" value="0"/>
   </action>
@@ -1123,6 +1124,7 @@ Content-Length: 0
    <test assign_to="bw_inv" variable="bw_mi" compare="equal" value="0"/>
    <strcmp assign_to="bw_mb" variable="bw_m" value="BYE"/>
    <test assign_to="bw_bye" variable="bw_mb" compare="equal" value="0"/>
+   <test assign_to="bye_open" variable="bw_mb" compare="not_equal" value="0"/>
    <strcmp assign_to="bw_c1" variable="bw_n" value="1"/>
    <test assign_to="bw_one" variable="bw_c1" compare="equal" value="0"/>
    <assignstr assign_to="tk" value="[clock_tick]"/>
@@ -1200,11 +1202,6 @@ Content-Length: 0
  </nop>
  <nop/>
  <label id="bye_ok"/>
- <nop>
-  <action>
-   <assign assign_to="bye_open" value="0"/>
-  </action>
- </nop>
  <nop condexec="keep" condexec_inverse="true" next="released">
   <action>
    <assignstr assign_to="r_ending" value="answered"/>
@@ -1234,7 +1231,6 @@ Content-Length: 0
  <label id="bye_failed_bye"/>
  <nop test="keep" next="released">
   <action>
-   <assign assign_to="bye_open" value="0"/>
    <assignstr assign_to="r_fail" value="[$r_fail][$r_sep]{&quot;at_ms&quot;:[$ns],&quot;kind&quot;:&quot;dialog_request&quot;,&quot;method&quot;:&quot;BYE&quot;,&quot;code&quot;:[$bye_code]}"/>
    <assignstr assign_to="r_sep" value=","/>
   </action>
@@ -1554,6 +1550,7 @@ Content-Length: 0
  <nop next="bye_ok">
   <action>
    <assign assign_to="_unexp.retaddr" value="0"/>
+   <assign assign_to="bye_open" value="0"/>
   </action>
  </nop>
  <nop/>
@@ -1632,6 +1629,7 @@ Content-Length: 0
  <nop next="bye_failed_bye">
   <action>
    <assign assign_to="_unexp.retaddr" value="0"/>
+   <assign assign_to="bye_open" value="0"/>
    <assignstr assign_to="bye_code" value="[$ux_code]"/>
    <strcmp assign_to="bye_cmp" variable="bye_code" value="481"/>
    <test assign_to="bye_481" variable="bye_cmp" compare="equal" value="0"/>
