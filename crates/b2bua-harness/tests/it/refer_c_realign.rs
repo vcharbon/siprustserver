@@ -519,3 +519,71 @@ async fn refer_allow_c_realign_carries_the_answer_whole() {
     b2bua.assert_fully_reaped();
     let _ = h.finish().await;
 }
+
+// ── 7. A copy of C's first 2xx does not answer the c-realign re-INVITE ──
+
+/// C re-sends the 2xx to the INVITE that dialled it (§13.3.1.4, its ACK in
+/// flight) while the c-realign re-INVITE is pending. The copy answers the
+/// earlier CSeq, not the re-INVITE (RFC 3261 §12.2.1.2): the realign waits
+/// for C's own answer to the re-INVITE, and the a-realign re-INVITE toward A
+/// carries that active answer, never the held first one.
+#[tokio::test(start_paused = true)]
+async fn refer_allow_c_realign_ignores_a_copy_of_the_first_2xx() {
+    let h = Harness::new("refer-allow-c-realign-first-2xx-copy");
+    let alice = h.agent("alice", "127.0.0.1:5938").await;
+    let bob = h.agent("bob", "127.0.0.1:5948").await;
+    let charlie = h.agent("charlie", &format!("127.0.0.1:{CHARLIE_PORT}")).await.transfer_target();
+    let b2bua = B2buaSut::route_all_with_refer("127.0.0.1", 5948)
+        .start(&h, "b2bua", "127.0.0.1:5958")
+        .await;
+
+    let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
+    let mut bob_uas = bob.receive("INVITE").await;
+    bob_uas.respond(200, "OK").with_sdp(ANSWER).await;
+    call.expect(200).await;
+    let mut alice_dialog = call.ack().await;
+    bob.receive("ACK").await;
+    let mut bob_dialog = bob_uas.dialog();
+
+    let mut refer = bob_dialog
+        .send_request(InDialogMethod::Refer)
+        .with_header("Refer-To", &refer_to_charlie())
+        .with_header("X-Api-Call", &x_api_allow_c(""))
+        .send()
+        .await;
+    refer.expect(202).await;
+    bob.receive("NOTIFY").await.respond(200, "OK").await;
+    let mut charlie_uas = charlie.receive("INVITE").await;
+    charlie_uas.respond(200, "OK").with_sdp(CHARLIE_FIRST_ANSWER).await;
+    charlie.receive("ACK").await;
+    bob.receive("NOTIFY").await.respond(200, "OK").await;
+
+    let mut c_realign = charlie.receive("INVITE").await;
+    assert_reinvite(c_realign.request(), OFFER, "b-2");
+
+    charlie_uas.respond(200, "OK").with_sdp(CHARLIE_FIRST_ANSWER).await;
+    let mut early_to_alice = 0;
+    for _ in 0..5 {
+        h.advance(Duration::from_millis(100)).await;
+        early_to_alice += alice.drain().await;
+    }
+    assert_eq!(
+        early_to_alice, 0,
+        "a copy of C's first 2xx answers no c-realign re-INVITE: nothing reaches A \
+         before C answers it (got {early_to_alice} datagrams)"
+    );
+
+    c_realign.respond(200, "OK").with_sdp(CHARLIE_ACTIVE_ANSWER).await;
+    charlie.receive("ACK").await;
+
+    let mut a_realign = alice.receive("INVITE").await;
+    assert_reinvite(a_realign.request(), CHARLIE_ACTIVE_ANSWER, "a");
+
+    a_realign.respond(200, "OK").with_sdp(ALICE_REALIGN_ANSWER).await;
+    alice.receive("ACK").await;
+    end_transferred_call(&mut alice_dialog, &bob, &charlie).await;
+
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
+    let _ = h.finish().await;
+}
