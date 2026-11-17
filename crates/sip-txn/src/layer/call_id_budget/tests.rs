@@ -105,3 +105,45 @@ fn a_full_map_evicts_an_unmuted_count_never_a_mute() {
     assert_eq!(b.admit("newer", t0), Admission::Uncounted, "a map of mutes counts no newcomer");
     assert_eq!(b.admit("newer", t0), Admission::Uncounted);
 }
+
+#[test]
+fn a_full_map_keeps_a_count_whose_transaction_lives() {
+    let t0 = Instant::now();
+    let mut b = budgets(2, 1);
+    b.opened("live", None, Some("alice"), t0);
+    assert_eq!(b.admit("stray", t0), Admission::Uncounted, "the live count is not evicted");
+    b.admit("live", t0);
+    b.admit("live", t0);
+    let trip = tripped(b.admit("live", t0));
+    assert_eq!(trip.caller_tags, ["alice"], "the live INVITE's caller is still named");
+    b.expire(t0 + WINDOW * 3);
+    assert_eq!(
+        b.admit("live", t0 + WINDOW * 3),
+        Admission::Muted,
+        "its transaction holds the mute"
+    );
+}
+
+#[test]
+fn a_transaction_opened_on_a_map_full_of_mutes_is_counted() {
+    let t0 = Instant::now();
+    let mut b = budgets(1, 1);
+    b.admit("muted", t0);
+    tripped(b.admit("muted", t0));
+    b.opened("call", None, Some("bob"), t0);
+    assert_eq!(b.admit("call", t0), Admission::Counted);
+    let trip = tripped(b.admit("call", t0));
+    assert_eq!(trip.caller_tags, ["bob"]);
+    assert_eq!(b.admit("muted", t0), Admission::Muted, "the mute stays");
+}
+
+#[test]
+fn a_full_map_evicts_the_count_that_went_idle_first() {
+    let t0 = Instant::now();
+    let mut b = budgets(2, 2);
+    b.admit("old", t0);
+    b.admit("recent", t0 + Duration::from_secs(1));
+    assert_eq!(b.admit("new", t0 + Duration::from_secs(2)), Admission::Counted);
+    assert_eq!(b.admit("recent", t0 + Duration::from_secs(2)), Admission::Counted);
+    tripped(b.admit("recent", t0 + Duration::from_secs(2)));
+}
