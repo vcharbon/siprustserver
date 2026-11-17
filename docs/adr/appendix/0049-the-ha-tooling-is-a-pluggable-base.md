@@ -603,8 +603,9 @@ made. A run profile joins the two.
    - SIPp sends nothing while a send of its own is retransmitting, so a
      request landing while the call's request is pending is captured by the
      wait and answered once a provisional or the final is in; a far
-     re-INVITE the handler takes while the caller's BYE is pending is
-     captured the same way;
+     re-INVITE the handler takes once the caller's BYE is sent is
+     captured the same way and answered 481 by the call's last step, after
+     its record, so one landing at any step up to the call's end is answered;
    - on a byte-identical copy of the message last received, SIPp re-sends the
      first message it sent after that receive, and only that one;
    - a `<recv response>` without `response_txn` takes only the responses to

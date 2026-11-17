@@ -1422,23 +1422,6 @@ Content-Length: 0
    <assign assign_to="opt_due" value="0"/>
   </action>
  </send>
- <send condexec="bx_due">
-  <![CDATA[
-SIP/2.0 481 Call/Transaction Does Not Exist
-[$bx_via]
-[$bx_rr]
-[$bx_from]
-[$bx_to]
-Call-ID: [call_id]
-[$bx_cseq]
-Content-Length: 0
-  ]]>
-  <action>
-   <assign assign_to="bx_due" value="0"/>
-   <ereg regexp="[0-9]+" search_in="var" variable="bx_cseq" assign_to="gl_n"/>
-   <todouble assign_to="fa_hi" variable="gl_n"/>
-  </action>
- </send>
  <nop next="write_record"/>
 
  <label id="_unexp.main"/>
@@ -1878,6 +1861,18 @@ Content-Length: 0
    <log message="{&quot;schema&quot;:&quot;call-outcome.v1&quot;,&quot;run&quot;:&quot;[run]&quot;,&quot;source&quot;:&quot;sipp&quot;,&quot;stream&quot;:&quot;[stream]&quot;,&quot;shape&quot;:&quot;[shape]&quot;,&quot;call_id&quot;:&quot;[call_id]&quot;,&quot;started_at_ms&quot;:[$t_start],&quot;first_provisional_at_ms&quot;:[$r_fp],&quot;trying_at_ms&quot;:[$r_try],&quot;setup_ended_at_ms&quot;:[$r_se],&quot;answered_at_ms&quot;:[$r_ans],&quot;ended_at_ms&quot;:[$ns],&quot;phase_reached&quot;:&quot;[$r_phase]&quot;,&quot;early_media&quot;:[$r_em],&quot;final_code&quot;:[$r_code],&quot;reason&quot;:[$r_reason],&quot;retry_after_s&quot;:[$r_ra],&quot;ending&quot;:&quot;[$r_ending]&quot;,&quot;failures&quot;:\x5B[$r_fail]\x5D,&quot;producer_verdict&quot;:&quot;[$r_verdict]&quot;}"/>
   </action>
  </nop>
+ <send condexec="bx_due">
+  <![CDATA[
+SIP/2.0 481 Call/Transaction Does Not Exist
+[$bx_via]
+[$bx_rr]
+[$bx_from]
+[$bx_to]
+Call-ID: [call_id]
+[$bx_cseq]
+Content-Length: 0
+  ]]>
+ </send>
 
  <Reference variables="bp_all,bp_ca,bp_code,bp_n,fw_all,fw_ca,fw_code,lc_all,lc_pall,lc_pk,rb_all,rp_all,rp_ca,rp_code,rp_m,ux_br_all"/>
  <ResponseTimeRepartition value="10, 20, 30, 40, 50, 100, 150, 200"/>
