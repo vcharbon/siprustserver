@@ -9,7 +9,8 @@ use std::sync::Arc;
 
 use crate::common;
 use common::*;
-use sip_message::SipMessage;
+use sip_message::parser::custom::CustomParser;
+use sip_message::{SipMessage, SipParser};
 use sip_txn::{CallIdBudget, CallIdBudgetTrip, IdGen, TransactionConfig, TransactionEvent};
 
 const TRANSIT: u64 = 5;
@@ -119,4 +120,29 @@ async fn out_of_dialog_options_on_the_keepalive_lane_spend_no_budget() {
     assert_eq!(count_responses(&stack.drain_peer(), 200), 3, "every probe is answered");
     assert!(trips(&stack.drain_events()).is_empty());
     assert_eq!(stack.txn.metrics().message_budget_trips(), 0);
+}
+
+/// A datagram re-offered under a muted Call-ID is dropped as one from the
+/// wire is: the transaction it matches does not take it and the consumer
+/// hears nothing of it.
+#[tokio::test(start_paused = true)]
+async fn a_datagram_reoffered_under_a_muted_call_id_is_dropped() {
+    let mut stack = stack(4).await;
+    let branch = "z9hG4bK-muted-invite";
+    stack.inject(&inbound_request("INVITE", branch, "muted", None)).await;
+    elapse_ms(TRANSIT + 1).await;
+    for _ in 0..4 {
+        stack.txn.send_raw("muted", b"raw".to_vec(), addr(PEER)).await.expect("the layer runs");
+    }
+    elapse_ms(TRANSIT + 1).await;
+    assert_eq!(trips(&stack.drain_events()).len(), 1);
+    let muted_in = stack.txn.metrics().muted_in();
+
+    let cancel = CustomParser::new()
+        .parse(&inbound_request("CANCEL", branch, "muted", None))
+        .expect("parse");
+    stack.txn.reoffer(cancel, addr(PEER)).await.expect("the layer runs");
+    elapse_ms(TRANSIT + 1).await;
+    assert!(stack.drain_events().is_empty(), "the INVITE is not cancelled");
+    assert_eq!(stack.txn.metrics().muted_in(), muted_in + 1, "the mute dropped it");
 }
