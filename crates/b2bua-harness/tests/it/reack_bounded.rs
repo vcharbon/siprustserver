@@ -410,6 +410,58 @@ async fn a_copy_of_a_2xx_two_invites_back_is_absorbed() {
     hang_up(h, &b2bua, &bob, &mut dialog).await;
 }
 
+/// The callee rejects the caller's re-INVITE (488) while its 200 to the
+/// initial INVITE is still repeating, that 200's ACK lost. The rejected
+/// INVITE settles nothing of the one before it: the next copy of that 200 is
+/// re-ACKed with the ACK it drew (RFC 3261 §13.2.2.4), so the callee's ladder
+/// stops and the call goes on.
+#[tokio::test(start_paused = true)]
+async fn a_2xx_repeated_after_a_rejected_reinvite_draws_its_re_ack() {
+    let h = Harness::with_transit_delay("b2bua-reack-after-rejected-reinvite", TRANSIT_MS);
+    let alice = h.agent_auto("alice").await;
+    let bob = h.agent_auto("bob").await;
+    let at = h.next_addr().to_string();
+    let b2bua =
+        B2buaSut::route_all_to("127.0.0.1", bob.addr().port()).start(&h, "b2bua", &at).await;
+    let acks = |from: usize| -> Vec<Vec<u8>> {
+        h.wire_entries()
+            .into_iter()
+            .skip(from)
+            .filter(|e| e.from == b2bua.addr && e.to == bob.addr() && e.raw.starts_with(b"ACK "))
+            .map(|e| e.raw)
+            .collect()
+    };
+
+    let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
+    let mut uas = bob.receive("INVITE").await;
+    uas.respond(180, "Ringing").await;
+    call.expect(180).await;
+    uas.respond(200, "OK").with_sdp(ANSWER).await;
+    call.expect(200).await;
+    let mut dialog = call.ack().await;
+    bob.receive("ACK").await;
+    let first_ack = acks(0);
+    assert_eq!(first_ack.len(), 1, "the 200 draws one ACK");
+
+    let mut reinvite = dialog.reinvite(Some(ALICE_V2)).await;
+    bob.receive("INVITE").await.respond(488, "Not Acceptable Here").await;
+    reinvite.expect(488).await;
+    h.advance(Duration::from_millis(ROUND_MS)).await;
+    bob.drain().await;
+
+    let before = h.wire_entries().len();
+    send_copy(&mut uas, ANSWER, None).await;
+    h.advance(Duration::from_millis(ROUND_MS)).await;
+    bob.drain().await;
+    assert_eq!(
+        acks(before),
+        first_ack,
+        "a copy of the 200 after the rejected re-INVITE draws the ACK that 200 drew"
+    );
+
+    hang_up(h, &b2bua, &bob, &mut dialog).await;
+}
+
 /// A fork answers and wins; a second fork's 2xx follows on the same INVITE,
 /// is ACKed and BYEd (RFC 3261 §13.2.2.4), then re-sent on every ACK.
 #[tokio::test(start_paused = true)]
