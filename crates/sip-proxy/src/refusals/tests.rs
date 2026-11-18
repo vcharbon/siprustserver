@@ -225,3 +225,38 @@ fn a_copy_past_64_t1_of_the_first_draws_nothing_and_keeps_the_refusal() {
     assert!(matches!(r.repeat(&invite("z9hG4bK-a"), SRC, later), Some(Repeat::Absorbed)));
     assert!(r.repeat(&invite("z9hG4bK-a"), SRC, later + TIMER_B).is_none(), "forgotten then");
 }
+
+/// One message of alice's dialog with bob, CSeq 2: `method` with the `extra`
+/// header lines, on `branch`.
+fn in_dialog_raw(method: &str, branch: &str, extra: &str) -> String {
+    format!(
+        "{method} sip:bob@127.0.0.1:5060 SIP/2.0\r\n\
+Via: SIP/2.0/UDP 10.0.0.1:5555;branch={branch}\r\n\
+Max-Forwards: 70\r\n\
+From: <sip:alice@caller.test>;tag=alice-tag\r\n\
+To: <sip:bob@uas.test>;tag=bob-tag\r\n\
+Call-ID: dialog@10.0.0.1\r\n\
+CSeq: 2 {method}\r\n\
+{extra}Content-Length: 0\r\n\r\n"
+    )
+}
+
+/// Each copy of an in-dialog INVITE the parser refused keeps its 400
+/// remembered 64·T1 longer, as every other refusal (ADR-0063 §1): an INVITE
+/// whose 400s were lost until its last copy, 31.5 s in, draws the ACK of that
+/// 400 at 33 s, and the memo still recognises it (RFC 3261 §17.1.1.3).
+#[test]
+fn each_copy_of_a_parse_refused_in_dialog_invite_keeps_its_400_remembered() {
+    let r = Refusals::new(&IdGen::seeded(1), 0);
+    let bad = in_dialog_raw("INVITE", "z9hG4bK-bad", "Expires: soon\r\n");
+    let error = CustomParser::new().parse(bad.as_bytes()).expect_err("Expires is refused");
+    let partial = error.partial().expect("a partial request");
+    r.remember_parse_refused(partial, 0);
+    r.remember_parse_refused(partial, 31_500);
+
+    let raw = in_dialog_raw("ACK", "z9hG4bK-bad", "");
+    let Ok(SipMessage::Request(ack)) = CustomParser::new().parse(raw.as_bytes()) else {
+        panic!("the ACK parses")
+    };
+    assert!(r.acknowledges_refusal(&ack, 33_000), "the ACK of the last copy's 400 is recognised");
+}

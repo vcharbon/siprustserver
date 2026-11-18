@@ -2,8 +2,9 @@
 //! the record took. The callee, broken on purpose, rejects the caller's first
 //! re-INVITE 488, takes the second with a 200, then sends a 200 to the first
 //! as well: that 200 repeats no 2xx the dialog took, so it is counted on no
-//! copy budget and the message ring does not mark it a repeat. The call then
-//! ends with the caller's BYE: one CDR, fully reaped.
+//! copy budget. The callee, never ACKed, re-sends it at T1 and 3·T1: each of
+//! those repeats the 200 the dialog read, and is counted absorbed. The call
+//! then ends with the caller's BYE: one CDR, fully reaped.
 
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -109,6 +110,17 @@ async fn a_2xx_to_an_earlier_reinvite_the_dialog_never_took_is_no_copy() {
         b2bua.metrics().copies_past_schedule_total("2xx"),
         0,
         "the late 200 copies no 2xx the dialog took: {to_bob:?}"
+    );
+    for wait_ms in [500, 1_000] {
+        h.advance(Duration::from_millis(wait_ms)).await;
+        bob.try_send_datagram(&late, b2bua.addr).await.expect("its copy leaves");
+    }
+    h.advance(Duration::from_millis(5)).await;
+    bob.drain().await;
+    assert_eq!(
+        b2bua.metrics().copies_past_schedule_total("2xx"),
+        2,
+        "each copy of the late 200 repeats the 200 the dialog read"
     );
 
     let mut bye = dialog.bye().await;

@@ -17,6 +17,8 @@ use std::time::Duration;
 use b2bua_harness::{settle_until, B2buaSut};
 use scenario_harness::Harness;
 
+use crate::common::unrun::one_permit_one_deep_with;
+
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 192.0.2.10\r\ns=-\r\nc=IN IP4 192.0.2.10\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
 const ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 192.0.2.20\r\ns=-\r\nc=IN IP4 192.0.2.20\r\nt=0 0\r\nm=audio 20000 RTP/AVP 0\r\n";
 
@@ -128,4 +130,36 @@ async fn one_copy_of_the_answered_invite_after_its_transaction_and_record_ended_
     assert_eq!(b2bua.cdr_records().len(), 1, "one CDR");
     assert!(answered.is_empty(), "the lone late copy draws no answer: {answered:?}");
     h.finish().await;
+}
+
+/// The lone late copy of the answered INVITE while another call's turn holds
+/// the only handler permit past the 100 Trying bound (RFC 3261 §17.2.1): the
+/// copy is absorbed as it arrives, before any turn of its own, so no 100
+/// leaves on the answered INVITE's branch. The other call, its decision never
+/// coming, is refused 503 once its setup budget runs out.
+#[tokio::test(start_paused = true)]
+async fn a_lone_late_copy_behind_a_held_permit_draws_no_trying() {
+    let s = one_permit_one_deep_with("b2bua-lone-late-copy-held-permit", |c| {
+        c.keepalive_interval_sec = 3_600;
+        c.call_control_timeout_ms = 10_000;
+    })
+    .await;
+    let carol = s.h.agent("carol", "127.0.0.1:5062").await;
+    let mut dialog = s.establish().await;
+    let invite = first_invite(&s.h, s.alice.addr(), s.b2bua.addr);
+    s.h.advance(Duration::from_millis(WINDOW_MS + 10_000)).await;
+
+    let mut parked = carol.invite(&s.bob).with_sdp(OFFER).through(s.b2bua.addr).send().await;
+    s.h.advance(Duration::from_millis(300)).await;
+    let before = s.h.wire_entries().len();
+    s.alice.try_send_datagram(&invite, s.b2bua.addr).await.expect("the copy leaves");
+    s.h.advance(Duration::from_millis(EVERY_MS)).await;
+    s.alice.drain().await;
+    let answered = invite_answers(&s.h, s.b2bua.addr, s.alice.addr(), before);
+
+    s.h.advance(Duration::from_secs(10)).await;
+    parked.expect(503).await;
+    s.hangup(&mut dialog).await;
+    assert!(answered.is_empty(), "the copy behind the held permit draws nothing: {answered:?}");
+    s.finish().await;
 }
