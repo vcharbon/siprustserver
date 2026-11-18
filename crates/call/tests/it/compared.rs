@@ -213,8 +213,8 @@ fn a_re_acked_copy_is_exempt_and_merges_to_the_later() {
 
 /// The ACK of the 2xx to the INVITE numbered `invite_cseq`, carried ahead with
 /// `copies` of that 2xx counted, the last re-ACKed at `at_ms`.
-fn ack_ahead(invite_cseq: i64, copies: u32, at_ms: i64) -> AckAhead {
-    AckAhead {
+fn ack_ahead(invite_cseq: i64, copies: u32, at_ms: i64) -> Box<AckAhead> {
+    Box::new(AckAhead {
         ack: RetainedEmission::on_trigger(
             b"ACK sip:bob@192.0.2.20 SIP/2.0\r\n\r\n".to_vec(),
             ("192.0.2.20".into(), 5060),
@@ -224,7 +224,7 @@ fn ack_ahead(invite_cseq: i64, copies: u32, at_ms: i64) -> AckAhead {
         ack_branch: "z9hG4bKack-ahead".into(),
         copies_received: copies,
         re_acked_copy: Some(ReAckedCopy { copy: copies, at_ms }),
-    }
+    })
 }
 
 /// The copies of the 2xx before the INVITE a dialog last sent, counted on the

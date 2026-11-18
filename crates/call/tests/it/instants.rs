@@ -42,7 +42,7 @@ fn every_instant_present() -> Call {
         }];
         if let Some(x) = call::helpers::sent_exchange_mut(dialog) {
             x.re_acked_copy = Some(ReAckedCopy { copy: 11, at_ms: 1_779_440_066_000 });
-            x.ack_ahead = Some(AckAhead {
+            x.ack_ahead = Some(Box::new(AckAhead {
                 ack: RetainedEmission::on_trigger(
                     b"ACK sip:bob@192.0.2.20 SIP/2.0\r\n\r\n".to_vec(),
                     ("192.0.2.20".into(), 5060),
@@ -52,7 +52,7 @@ fn every_instant_present() -> Call {
                 ack_branch: "z9hG4bKack-ahead".into(),
                 copies_received: 4,
                 re_acked_copy: Some(ReAckedCopy { copy: 4, at_ms: 1_779_440_064_000 }),
-            });
+            }));
         }
         leg.messages.entries.push(MessageEntry {
             seq: 1,

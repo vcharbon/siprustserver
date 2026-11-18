@@ -65,7 +65,8 @@ pub fn relayed_invite_pending(d: &Dialog) -> bool {
 pub fn open_sent_invite(call: &mut Call, leg_id: &str, id: &DialogId, mut record: RequestRecord) {
     update_dialog(call, leg_id, id, |d| {
         if let Some(ahead) = d.sent_invite.as_ref().and_then(AckAhead::of) {
-            record.invite.get_or_insert_with(InviteExchange::default).ack_ahead = Some(ahead);
+            record.invite.get_or_insert_with(InviteExchange::default).ack_ahead =
+                Some(Box::new(ahead));
         }
         d.sent_invite = Some(record);
     })
@@ -158,7 +159,7 @@ pub fn close_rejected_invite_round(call: &mut Call, leg_id: &str, branch: &str) 
 /// own count; nothing when it carried none.
 pub(super) fn close_untaken_invite(d: &mut Dialog) {
     let before = d.sent_invite.as_ref().and_then(|r| r.invite.as_ref()?.ack_ahead.as_ref());
-    d.sent_invite = before.map(AckAhead::restored);
+    d.sent_invite = before.map(|ahead| ahead.restored());
 }
 
 /// The 2xx `d` answered an INVITE with that awaits its ACK.

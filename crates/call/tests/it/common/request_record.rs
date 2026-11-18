@@ -127,12 +127,15 @@ fn arb_exchange() -> impl Strategy<Value = InviteExchange> {
                 ack_branch,
                 emitted_ack,
                 ack_ahead: ack_ahead.map(
-                    |((ack, invite_cseq, ack_branch), copies_received, re_acked)| AckAhead {
-                        ack,
-                        invite_cseq,
-                        ack_branch,
-                        copies_received,
-                        re_acked_copy: re_acked.map(|(copy, at_ms)| ReAckedCopy { copy, at_ms }),
+                    |((ack, invite_cseq, ack_branch), copies_received, re_acked)| {
+                        Box::new(AckAhead {
+                            ack,
+                            invite_cseq,
+                            ack_branch,
+                            copies_received,
+                            re_acked_copy: re_acked
+                                .map(|(copy, at_ms)| ReAckedCopy { copy, at_ms }),
+                        })
                     },
                 ),
                 copies_received,

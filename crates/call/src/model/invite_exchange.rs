@@ -114,8 +114,9 @@ pub struct InviteExchange {
     /// drew, as it left. A node re-sending this INVITE from the record sends
     /// that ACK first: the peer sees no new INVITE while the one before is
     /// unacknowledged (RFC 3261 §14.1, RFC 6026 §7.1), and a repeated ACK is
-    /// absorbed (§13.2.2.4). A copy of that 2xx is re-ACKed with it.
-    pub ack_ahead: Option<AckAhead>,
+    /// absorbed (§13.2.2.4). A copy of that 2xx is re-ACKed with it. Boxed:
+    /// every turn future holding a record carries its size.
+    pub ack_ahead: Option<Box<AckAhead>>,
     /// Sent: the copies of the 2xx the INVITE took received since
     /// (§13.3.1.4), each counted before the rules read it. A copy past the
     /// re-sends a compliant answerer makes draws a re-ACK only T1 after the

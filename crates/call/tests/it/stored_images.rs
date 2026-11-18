@@ -50,13 +50,13 @@ fn the_record_lists_every_image_it_holds() {
     let dialog = leg.dialogs.by_tags_mut(B_LOCAL_TAG, B_TAG).expect("its dialog");
     let exchange = InviteExchange {
         emitted_ack: Some(emission("sent-ack")),
-        ack_ahead: Some(AckAhead {
+        ack_ahead: Some(Box::new(AckAhead {
             ack: emission("sent-ack-ahead"),
             invite_cseq: 1,
             ack_branch: "z9hG4bKack-ahead".into(),
             copies_received: 0,
             re_acked_copy: None,
-        }),
+        })),
         ..InviteExchange::default()
     };
     dialog.sent_invite = Some(invite_record(2, "sent-invite", exchange));
