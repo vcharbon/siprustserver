@@ -77,7 +77,7 @@ until the kernel kills it, dropping every call it serves.
     | event queue, again | router ingress | the event-queue gate, read afresh | refused while it refuses | admitted | n/a | configured |
 
     A refusal at a router rung opens no per-call queue and spends no CPS token. A copy of a
-    live call's INVITE is answered 482.
+    live call's INVITE is answered 482, or absorbed when it retransmits that INVITE.
     [Detail](appendix/0037-admission-is-bounded-by-memory.md#11-the-admission-ladder).
 
 ## Consequences

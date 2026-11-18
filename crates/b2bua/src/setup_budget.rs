@@ -23,7 +23,8 @@ pub struct SetupBudget {
 
 impl SetupBudget {
     /// The budget of a turn that is no setup: nothing to bound, nothing to read.
-    /// No consult runs under it: a copy of an INVITE is answered 482 unasked.
+    /// No consult runs under it: a copy of an INVITE is answered 482 or
+    /// absorbed unasked.
     pub const NONE: Self = Self { received: None, due: None };
 
     /// The budget running from `received`, `length` long.

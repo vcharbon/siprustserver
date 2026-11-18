@@ -14,7 +14,8 @@
 //! ([`sip_txn::InviteRefusals`]) — is counted on
 //! `b2bua_new_call_refused_copies_total`, never as a new call, as is a copy
 //! of a call already here (live, or admitted and not born yet, on the same
-//! CSeq) the router answers 482 or discards unrun. A copy a live server
+//! CSeq) the router answers 482, absorbs as a retransmission of the live
+//! call's INVITE, or discards unrun. A copy a live server
 //! transaction holds is that transaction's to answer. An INVITE carrying a
 //! To-tag the backlog refuses is counted under class `in_dialog`.
 //!

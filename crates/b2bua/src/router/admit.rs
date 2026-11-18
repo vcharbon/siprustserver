@@ -133,11 +133,18 @@ pub(super) fn invite_here(ctx: &RouterCtx, call_ref: &str, cseq: u32) -> bool {
 }
 
 /// Whether an INVITE carrying CSeq `cseq` on `call`'s identity is a copy of
-/// `call`'s own: its INVITE carries the same CSeq. A copy is answered 482
-/// even once the original's transaction has ended, which §8.2.2.2 does not
-/// cover.
+/// `call`'s own: its INVITE carries the same CSeq.
 fn copies(call: &Call, cseq: u32) -> bool {
     call.a_leg_invite.cseq == cseq
+}
+
+/// Whether `req`, a copy of `call`'s own INVITE, is a retransmission of it:
+/// it names that INVITE's server transaction, top-Via branch and sent-by
+/// (RFC 3261 §17.2.3). Any other copy is a request merged with it on another
+/// branch (§8.2.2.2).
+pub(super) fn retransmits(call: &Call, req: &SipRequest) -> bool {
+    sip_txn::ServerTxnKey::of(req)
+        .is_some_and(|key| super::materialise::caller_invite_key(call) == Some(key))
 }
 
 /// Judge the new INVITE `req` of `call_ref` offered as `dispatch` on the
