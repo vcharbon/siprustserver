@@ -1,6 +1,8 @@
+use super::memo::STRIPES;
 use super::*;
 use sip_message::header::{HeaderValue, Rport};
 use sip_message::{serialize, CustomParser, SipMessage, SipParser};
+use sip_txn::timers::TIMER_B;
 
 /// Where every request of these tests comes from: its Via's own sent-by.
 const SRC: SocketAddr =

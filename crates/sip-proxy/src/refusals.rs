@@ -15,8 +15,9 @@
 //! is answered without another forward.
 //! A request a check before forwarding rejects (483, 482, 420, 400, 416, or
 //! a stickiness token it cannot decode) is remembered the same way in a memo
-//! of its own, its copies answered by that check again; such a reject
-//! answers no CANCEL here and claims no ACK: both are routed on.
+//! of its own, its copies answered by that check again; so is the 400 to an
+//! in-dialog INVITE the parser refused. Such a reject answers no CANCEL here,
+//! which is routed on; it claims the ACK of the INVITE it rejected.
 //! Every copy is answered on the RFC schedule (ADR-0063 §1): the copies up to
 //! the re-sends of its sender's ladder at any pace, a later one only T1 after
 //! the last answered one, none later than 64·T1 after the first; the others
@@ -27,33 +28,23 @@
 //! schedule, the proxy being the UAS of that INVITE (§9.2).
 
 use std::collections::hash_map::RandomState;
-use std::collections::{HashMap, VecDeque};
 use std::hash::BuildHasher;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Mutex, MutexGuard};
 
 use load_shed::retry_after;
 use sip_message::generators::{generate_response, GenerateError, GenerateResponseOpts};
-use sip_message::header::{HeaderValue, RetryAfter};
+use sip_message::header::{HeaderValue, RetryAfter, Via};
 use sip_message::types::SipHeader;
-use sip_message::{Method, SipRequest, SipResponse};
-use sip_retransmit::Class;
-use sip_txn::timers::TIMER_B;
+use sip_message::{Method, RequestPartial, SipRequest, SipResponse};
 use sip_txn::{IdGen, StatelessTagger};
-use std::time::Duration;
 
 use crate::cancel_lru::retransmit_key;
+use memo::{Copies, Refused, Striped};
 use sip_message::received::observed_source;
 
 /// The most refused requests a memo holds by default; past it the oldest is
 /// forgotten first. At 64·T1 it covers refusals up to 2 048 a second.
 pub const REFUSED_MEMO_MAX: usize = sip_txn::REFUSED_MEMO_MAX;
-
-/// The memo's independently locked stripes. A copy hashes to the stripe its
-/// original went to, so striping changes no answer; it bounds the requests
-/// that contend on one lock to those whose keys share a stripe.
-const STRIPES: usize = 16;
 
 /// The proxy's refusals: one To-tag secret and two striped memos, shared by
 /// every recv shard so a copy arriving on another socket draws the same
@@ -66,68 +57,6 @@ pub struct Refusals {
     hasher: RandomState,
     refused: Striped,
     preflight: Striped,
-}
-
-/// One memo, striped: each stripe's mutex guards that stripe's entries; a
-/// lookup takes one stripe's lock, and none while the memo holds nothing
-/// (read from a lock-free count).
-struct Striped {
-    stripes: [Mutex<Memo>; STRIPES],
-    remembered: AtomicUsize,
-}
-
-/// One refusal: the copies of its request, those of a CANCEL of it, the
-/// final it drew (`None` for a preflight reject, which its check composes
-/// again) and the To-tag it was answered with.
-struct Refused {
-    copies: Copies,
-    cancel: Option<Copies>,
-    answer: Option<Answer>,
-    to_tag: Box<str>,
-}
-
-/// The copies of one request the proxy answered itself (ADR-0063 §1): when
-/// it first arrived, how many copies followed, when the last one arrived and
-/// when the last answered one did, in ms.
-#[derive(Clone, Copy)]
-struct Copies {
-    class: Class,
-    first_ms: u64,
-    copies: u32,
-    last_ms: u64,
-    last_answered_ms: u64,
-}
-
-impl Copies {
-    /// The first arrival at `now_ms` of a request of `method`, which its
-    /// sender re-sends on Timer A (an INVITE) or Timer E.
-    fn first(method: &Method, now_ms: u64) -> Self {
-        let class = match method {
-            Method::Invite => Class::InviteClient,
-            Method::Cancel => Class::CancelClient,
-            _ => Class::NonInviteClient,
-        };
-        Self { class, first_ms: now_ms, copies: 0, last_ms: now_ms, last_answered_ms: now_ms }
-    }
-
-    /// Count a copy arriving at `now_ms`; whether it is answered: inside the
-    /// 64·T1 of the first arrival and owed on the sender's ladder.
-    fn copy(&mut self, now_ms: u64) -> bool {
-        self.copies = self.copies.saturating_add(1);
-        self.last_ms = now_ms;
-        let since_answered = Duration::from_millis(now_ms.saturating_sub(self.last_answered_ms));
-        let owed = now_ms.saturating_sub(self.first_ms) < TIMER_B
-            && self.class.owes_copy(self.copies, Some(since_answered));
-        if owed {
-            self.last_answered_ms = now_ms;
-        }
-        owed
-    }
-
-    /// Whether 64·T1 passed at `now_ms` since the last copy.
-    fn lapsed(&self, now_ms: u64) -> bool {
-        now_ms.saturating_sub(self.last_ms) >= TIMER_B
-    }
 }
 
 /// The final a remembered refusal draws.
@@ -163,46 +92,6 @@ pub enum Repeat {
     Answer(Box<SipResponse>),
     /// Nothing: the copy is past it.
     Absorbed,
-}
-
-/// One place in [`Memo::order`]: the ms it is due to be looked at, the key,
-/// and the first arrival of the refusal it was queued for.
-type Queued = (u64, u64, u64);
-
-/// One stripe's refused requests (keyed hashes of the received transaction,
-/// as the retransmission memo keys it), queued in the order they are due to
-/// be looked at for expiry.
-struct Memo {
-    refused: HashMap<u64, Refused>,
-    order: VecDeque<Queued>,
-    max: usize,
-}
-
-impl Memo {
-    /// Forget the refusals 64·T1 past their last copy and the oldest past
-    /// the stripe's capacity; the number forgotten. A queued refusal that
-    /// took a copy since is queued again at that copy; a place whose
-    /// refusal is gone or was made again is stale and dropped.
-    fn expire(&mut self, now_ms: u64) -> usize {
-        let before = self.refused.len();
-        while let Some(&(at_ms, key, first_ms)) = self.order.front() {
-            let over = self.order.len() > self.max;
-            if !over && now_ms.saturating_sub(at_ms) < TIMER_B {
-                break;
-            }
-            self.order.pop_front();
-            let Some(refused) = self.refused.get(&key) else { continue };
-            if refused.copies.first_ms != first_ms {
-                continue;
-            }
-            if over || refused.copies.lapsed(now_ms) {
-                self.refused.remove(&key);
-            } else {
-                self.order.push_back((refused.copies.last_ms, key, first_ms));
-            }
-        }
-        before - self.refused.len()
-    }
 }
 
 impl Refusals {
@@ -287,7 +176,8 @@ impl Refusals {
     ) -> Result<SipResponse, GenerateError> {
         if req.method() != Method::Cancel {
             let key = self.key(req, req.method().as_str());
-            let refused = Refused::first(req, now_ms, Some(answer), to_tag.as_str().into());
+            let refused =
+                Refused::first(req.method(), now_ms, Some(answer), to_tag.as_str().into());
             self.refused.note(key, refused, now_ms);
         }
         answer.to(req, src, to_tag)
@@ -303,10 +193,28 @@ impl Refusals {
         match self.preflight.with(key, now_ms, |rejected| rejected.copies.copy(now_ms)) {
             Some(owed) => owed,
             None => {
-                let rejected = Refused::first(req, now_ms, None, self.to_tag(req).into());
+                let rejected = Refused::first(req.method(), now_ms, None, self.to_tag(req).into());
                 self.preflight.note(key, rejected, now_ms);
                 true
             }
+        }
+    }
+
+    /// Remember, at `now_ms`, the 400 this hop answered the in-dialog INVITE
+    /// whose parse the parser refused with `partial`: the 400 echoes the
+    /// dialog's To-tag, so only the memo recognises its ACK
+    /// ([`acknowledges_refusal`](Self::acknowledges_refusal)). Any other
+    /// request is not remembered.
+    pub fn remember_parse_refused(&self, partial: &RequestPartial, now_ms: u64) {
+        let Some(dialog_tag) = partial.to().tag() else { return };
+        if *partial.method() != Method::Invite {
+            return;
+        }
+        let (via, call_id) = (partial.via().first(), partial.call_id().as_str());
+        let key = self.key_of(via, call_id, partial.from().tag(), "INVITE", partial.cseq().seq());
+        if self.preflight.with(key, now_ms, |_| ()).is_none() {
+            let rejected = Refused::first(&Method::Invite, now_ms, None, dialog_tag.into());
+            self.preflight.note(key, rejected, now_ms);
         }
     }
 
@@ -346,13 +254,17 @@ impl Refusals {
         Some(if owed { Repeat::Answer(Box::new(resp)) } else { Repeat::Absorbed })
     }
 
-    /// Whether `ack` acknowledges a 503 or 513 this memo holds for its
-    /// INVITE, refused within 64·T1 of its last copy at `now_ms`: the To-tag
-    /// a refusal of an in-dialog INVITE echoes is its dialog's, so only the
-    /// memo tells (§17.1.1.3).
+    /// Whether `ack` acknowledges a final this hop answered its INVITE with
+    /// itself, remembered within 64·T1 of the INVITE's last copy at `now_ms`:
+    /// a 503 or 513 refusal, or the reject of a check before forwarding
+    /// ([`preflight`](Self::preflight)). The To-tag a final to an in-dialog
+    /// INVITE echoes is its dialog's, so only the memo tells; the ACK carries
+    /// the INVITE's branch (§17.1.1.3).
     pub fn acknowledges_refusal(&self, ack: &SipRequest, now_ms: u64) -> bool {
-        self.with_refusal(ack, Method::Invite.as_str(), now_ms, |r| r.answer.is_some())
-            .unwrap_or(false)
+        let refused =
+            self.with_refusal(ack, Method::Invite.as_str(), now_ms, |r| r.answer.is_some());
+        let key = self.key(ack, Method::Invite.as_str());
+        refused.unwrap_or(false) || self.preflight.with(key, now_ms, |_| ()).is_some()
     }
 
     /// `read` of the remembered 503 or 513 refusal of `req`'s transaction as
@@ -372,77 +284,20 @@ impl Refusals {
     /// (§17.2.3), and a CANCEL every field of its INVITE but the method.
     fn key(&self, req: &SipRequest, method: &str) -> u64 {
         let from = req.from();
-        self.hasher.hash_one(retransmit_key(
-            req.top_via(),
-            req.call_id().as_str(),
-            from.tag(),
-            method,
-            req.cseq().seq(),
-        ))
-    }
-}
-
-impl Refused {
-    /// The first arrival at `now_ms` of `req`, answered `answer` under
-    /// `to_tag`.
-    fn first(req: &SipRequest, now_ms: u64, answer: Option<Answer>, to_tag: Box<str>) -> Self {
-        Self { copies: Copies::first(req.method(), now_ms), cancel: None, answer, to_tag }
-    }
-}
-
-impl Striped {
-    /// An empty memo of about `max` entries: each stripe holds
-    /// `max / STRIPES`, rounded up.
-    fn new(max: usize) -> Self {
-        let per_stripe = max.div_ceil(STRIPES).max(1);
-        Self {
-            stripes: std::array::from_fn(|_| {
-                Mutex::new(Memo {
-                    refused: HashMap::new(),
-                    order: VecDeque::new(),
-                    max: per_stripe,
-                })
-            }),
-            remembered: AtomicUsize::new(0),
-        }
+        self.key_of(req.top_via(), req.call_id().as_str(), from.tag(), method, req.cseq().seq())
     }
 
-    /// Remember `refused` under `key` at `now_ms`, its first arrival.
-    fn note(&self, key: u64, refused: Refused, now_ms: u64) {
-        let mut memo = self.lock(key);
-        let added = usize::from(memo.refused.insert(key, refused).is_none());
-        memo.order.push_back((now_ms, key, now_ms));
-        let forgotten = memo.expire(now_ms);
-        self.count(added, forgotten);
-    }
-
-    /// `read` of the entry under `key`, not lapsed at `now_ms`.
-    fn with<T>(&self, key: u64, now_ms: u64, read: impl FnOnce(&mut Refused) -> T) -> Option<T> {
-        if self.remembered.load(Ordering::Relaxed) == 0 {
-            return None;
-        }
-        let mut memo = self.lock(key);
-        let forgotten = memo.expire(now_ms);
-        self.count(0, forgotten);
-        memo.refused.get_mut(&key).filter(|r| !r.copies.lapsed(now_ms)).map(read)
-    }
-
-    fn lock(&self, key: u64) -> MutexGuard<'_, Memo> {
-        // STRIPES divides 256: the key's low byte picks the stripe its
-        // remainder by STRIPES names.
-        let slot = usize::from(key.to_le_bytes()[0]) % STRIPES;
-        #[expect(clippy::indexing_slicing, reason = "a remainder of STRIPES indexes the stripes")]
-        let stripe = &self.stripes[slot];
-        crate::poison::locked(stripe, crate::poison::REFUSALS_MEMO)
-    }
-
-    fn count(&self, added: usize, forgotten: usize) {
-        if added > 0 {
-            self.remembered.fetch_add(added, Ordering::Relaxed);
-        }
-        if forgotten > 0 {
-            self.remembered.fetch_sub(forgotten, Ordering::Relaxed);
-        }
+    /// The key of the transaction a `method` request with top Via `via`,
+    /// `call_id`, `from_tag` and CSeq number `cseq` opens ([`key`](Self::key)).
+    fn key_of(
+        &self,
+        via: &Via,
+        call_id: &str,
+        from_tag: Option<&str>,
+        method: &str,
+        cseq: u32,
+    ) -> u64 {
+        self.hasher.hash_one(retransmit_key(via, call_id, from_tag, method, cseq))
     }
 }
 
@@ -475,5 +330,6 @@ fn answer(
     generate_response(req, status, reason, &opts)
 }
 
+mod memo;
 #[cfg(test)]
 mod tests;
