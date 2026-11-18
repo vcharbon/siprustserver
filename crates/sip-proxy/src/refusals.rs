@@ -13,9 +13,10 @@
 //! A request whose forward the socket refused as past the largest UDP payload
 //! draws a 513 Message Too Large (§21.5.14), remembered the same way, so a copy
 //! is answered without another forward.
-//! A request a check before forwarding rejects (483, 482, 420, 400, 416) is
-//! remembered the same way, its copies answered by that check again; such a
-//! reject answers no CANCEL here and claims no ACK: both are routed on.
+//! A request a check before forwarding rejects (483, 482, 420, 400, 416, or
+//! a stickiness token it cannot decode) is remembered the same way in a memo
+//! of its own, its copies answered by that check again; such a reject
+//! answers no CANCEL here and claims no ACK: both are routed on.
 //! Every copy is answered on the RFC schedule (ADR-0063 §1): the copies up to
 //! the re-sends of its sender's ladder at any pace, a later one only T1 after
 //! the last answered one, none later than 64·T1 after the first; the others
@@ -54,17 +55,23 @@ pub const REFUSED_MEMO_MAX: usize = sip_txn::REFUSED_MEMO_MAX;
 /// that contend on one lock to those whose keys share a stripe.
 const STRIPES: usize = 16;
 
-/// The proxy's refusals: one To-tag secret and one striped memo of refused
-/// requests, shared by every recv shard so a copy arriving on another socket
-/// draws the same answer.
-///
-/// Concurrency: each stripe's mutex guards that stripe's refusals; a lookup
-/// takes one stripe's lock, and none while nothing is remembered anywhere
-/// (read from a lock-free count).
+/// The proxy's refusals: one To-tag secret and two striped memos, shared by
+/// every recv shard so a copy arriving on another socket draws the same
+/// answer: one of the requests refused 503 or 513, one of the preflight
+/// rejects. Each memo has its own capacity, so a flood of one kind never
+/// pushes the other out.
 pub struct Refusals {
     tagger: StatelessTagger,
     jitter_sec: u32,
     hasher: RandomState,
+    refused: Striped,
+    preflight: Striped,
+}
+
+/// One memo, striped: each stripe's mutex guards that stripe's entries; a
+/// lookup takes one stripe's lock, and none while the memo holds nothing
+/// (read from a lock-free count).
+struct Striped {
     stripes: [Mutex<Memo>; STRIPES],
     remembered: AtomicUsize,
 }
@@ -207,29 +214,23 @@ impl Refusals {
         Self::with_capacity(id_gen, jitter_sec, REFUSED_MEMO_MAX)
     }
 
-    /// [`new`](Self::new), remembering at most about `max` refused requests:
-    /// each stripe holds `max / STRIPES`, rounded up.
+    /// [`new`](Self::new), remembering at most about `max` refused requests
+    /// and as many preflight rejects: each stripe holds `max / STRIPES`,
+    /// rounded up.
     pub fn with_capacity(id_gen: &IdGen, jitter_sec: u32, max: usize) -> Self {
         Self::keyed(StatelessTagger::from_id_gen(id_gen), jitter_sec, max)
     }
 
     /// Refusals whose To-tags `tagger` derives (a deployment's shared key,
     /// `crate::security::own_final_tag`), remembering at most about `max`
-    /// refused requests.
+    /// refused requests and as many preflight rejects.
     pub fn keyed(tagger: StatelessTagger, jitter_sec: u32, max: usize) -> Self {
-        let per_stripe = max.div_ceil(STRIPES).max(1);
         Self {
             tagger,
             jitter_sec,
             hasher: RandomState::new(),
-            stripes: std::array::from_fn(|_| {
-                Mutex::new(Memo {
-                    refused: HashMap::new(),
-                    order: VecDeque::new(),
-                    max: per_stripe,
-                })
-            }),
-            remembered: AtomicUsize::new(0),
+            refused: Striped::new(max),
+            preflight: Striped::new(max),
         }
     }
 
@@ -285,35 +286,25 @@ impl Refusals {
         to_tag: String,
     ) -> Result<SipResponse, GenerateError> {
         if req.method() != Method::Cancel {
-            self.note(req, now_ms, Some(answer), to_tag.as_str().into());
+            let key = self.key(req, req.method().as_str());
+            let refused = Refused::first(req, now_ms, Some(answer), to_tag.as_str().into());
+            self.refused.note(key, refused, now_ms);
         }
         answer.to(req, src, to_tag)
     }
 
-    /// Remember `req`'s refusal at `now_ms` as its first arrival.
-    fn note(&self, req: &SipRequest, now_ms: u64, answer: Option<Answer>, to_tag: Box<str>) {
-        let key = self.key(req, req.method().as_str());
-        let copies = Copies::first(req.method(), now_ms);
-        let refused = Refused { copies, cancel: None, answer, to_tag };
-        let mut memo = self.lock(key);
-        let added = usize::from(memo.refused.insert(key, refused).is_none());
-        memo.order.push_back((now_ms, key, now_ms));
-        let forgotten = memo.expire(now_ms);
-        self.count(added, forgotten);
-    }
-
     /// Whether the reject a check this hop runs before forwarding composes
-    /// for `req` (483, 482, 420, 400, 416), received at `now_ms`, is owed: at
-    /// its first arrival, remembered then, and for a copy on its sender's
+    /// for `req` (483, 482, 420, 400, 416, or a stickiness token it cannot
+    /// decode), received at `now_ms`, is owed: at its first arrival,
+    /// remembered then in the preflight memo, and for a copy on its sender's
     /// schedule ([`Repeat`]).
     pub fn preflight(&self, req: &SipRequest, now_ms: u64) -> bool {
-        let first = self.with_refusal(req, req.method().as_str(), now_ms, |refused| {
-            refused.copies.copy(now_ms)
-        });
-        match first {
+        let key = self.key(req, req.method().as_str());
+        match self.preflight.with(key, now_ms, |rejected| rejected.copies.copy(now_ms)) {
             Some(owed) => owed,
             None => {
-                self.note(req, now_ms, None, self.to_tag(req).into());
+                let rejected = Refused::first(req, now_ms, None, self.to_tag(req).into());
+                self.preflight.note(key, rejected, now_ms);
                 true
             }
         }
@@ -364,8 +355,8 @@ impl Refusals {
             .unwrap_or(false)
     }
 
-    /// `read` of the remembered `method` refusal of `req`'s transaction, not
-    /// lapsed at `now_ms`.
+    /// `read` of the remembered 503 or 513 refusal of `req`'s transaction as
+    /// a `method` request, not lapsed at `now_ms`.
     fn with_refusal<T>(
         &self,
         req: &SipRequest,
@@ -373,14 +364,7 @@ impl Refusals {
         now_ms: u64,
         read: impl FnOnce(&mut Refused) -> T,
     ) -> Option<T> {
-        if self.remembered.load(Ordering::Relaxed) == 0 {
-            return None;
-        }
-        let key = self.key(req, method);
-        let mut memo = self.lock(key);
-        let forgotten = memo.expire(now_ms);
-        self.count(0, forgotten);
-        memo.refused.get_mut(&key).filter(|r| !r.copies.lapsed(now_ms)).map(read)
+        self.refused.with(self.key(req, method), now_ms, read)
     }
 
     /// The received transaction of `req` as a `method` request, keyed as the
@@ -395,6 +379,52 @@ impl Refusals {
             method,
             req.cseq().seq(),
         ))
+    }
+}
+
+impl Refused {
+    /// The first arrival at `now_ms` of `req`, answered `answer` under
+    /// `to_tag`.
+    fn first(req: &SipRequest, now_ms: u64, answer: Option<Answer>, to_tag: Box<str>) -> Self {
+        Self { copies: Copies::first(req.method(), now_ms), cancel: None, answer, to_tag }
+    }
+}
+
+impl Striped {
+    /// An empty memo of about `max` entries: each stripe holds
+    /// `max / STRIPES`, rounded up.
+    fn new(max: usize) -> Self {
+        let per_stripe = max.div_ceil(STRIPES).max(1);
+        Self {
+            stripes: std::array::from_fn(|_| {
+                Mutex::new(Memo {
+                    refused: HashMap::new(),
+                    order: VecDeque::new(),
+                    max: per_stripe,
+                })
+            }),
+            remembered: AtomicUsize::new(0),
+        }
+    }
+
+    /// Remember `refused` under `key` at `now_ms`, its first arrival.
+    fn note(&self, key: u64, refused: Refused, now_ms: u64) {
+        let mut memo = self.lock(key);
+        let added = usize::from(memo.refused.insert(key, refused).is_none());
+        memo.order.push_back((now_ms, key, now_ms));
+        let forgotten = memo.expire(now_ms);
+        self.count(added, forgotten);
+    }
+
+    /// `read` of the entry under `key`, not lapsed at `now_ms`.
+    fn with<T>(&self, key: u64, now_ms: u64, read: impl FnOnce(&mut Refused) -> T) -> Option<T> {
+        if self.remembered.load(Ordering::Relaxed) == 0 {
+            return None;
+        }
+        let mut memo = self.lock(key);
+        let forgotten = memo.expire(now_ms);
+        self.count(0, forgotten);
+        memo.refused.get_mut(&key).filter(|r| !r.copies.lapsed(now_ms)).map(read)
     }
 
     fn lock(&self, key: u64) -> MutexGuard<'_, Memo> {

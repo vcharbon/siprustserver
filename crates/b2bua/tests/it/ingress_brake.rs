@@ -285,10 +285,10 @@ const INVITE_RESENDS: usize = 6;
 
 /// A refused INVITE re-sent at wire speed (ADR-0063 §1): the refusal and the
 /// copies Timer A re-sends draw the brake's 503 from its memo, the rest
-/// nothing.
+/// nothing: the brake drops them, so none reaches the pipeline.
 #[tokio::test(start_paused = true)]
 async fn a_refused_invite_copied_at_wire_speed_draws_its_503_on_timer_as_schedule() {
-    let (net, _b2bua, flooder, counters) = setup().await;
+    let (net, b2bua, flooder, counters) = setup().await;
     for i in 0..2u32 {
         flooder.send_to(&new_invite(i), b2bua_addr()).await.unwrap();
     }
@@ -303,6 +303,7 @@ async fn a_refused_invite_copied_at_wire_speed_draws_its_503_on_timer_as_schedul
     assert_eq!(counters.refused(Class::Normal), 1, "one refusal");
     let replies = drain(flooder.as_ref());
     assert_eq!(replies.len(), 1 + INVITE_RESENDS, "the refusal and Timer A's re-sends");
+    assert_eq!(b2bua.queue_depth(), 2, "the two admitted INVITEs only: no copy is queued");
 }
 
 fn find(hay: &[u8], needle: &[u8]) -> Option<usize> {

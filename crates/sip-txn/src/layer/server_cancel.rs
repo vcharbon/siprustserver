@@ -35,7 +35,9 @@ impl Owner {
     /// ([`take_stray_cancel`](Self::take_stray_cancel), `false`); a re-offer
     /// (`datagram` `None`) still unmatched is handed nowhere. The 200 goes to
     /// the CANCEL's response target, the 487 to the INVITE transaction's
-    /// destination (§18.2.2).
+    /// destination (§18.2.2). A CANCEL with a transaction of its own is
+    /// answered through it: the 200 settles it, and once settled it answers
+    /// the CANCEL's copies on one count.
     pub(super) async fn handle_cancel(
         &mut self,
         endpoint: &dyn UdpEndpoint,
@@ -71,6 +73,10 @@ impl Owner {
             if self.cancelled_invite(cancel_via, |t| t.unsent_cancel.is_some()).is_some() {
                 return true;
             }
+            if self.cancel_answered_in_own_txn(&req) {
+                self.replay_cached(endpoint, &req, src).await;
+                return true;
+            }
             let is_answered_target = |t: &Transaction| {
                 t.kind == TxnKind::Invite
                     && t.call_id == call_id.as_str()
@@ -87,6 +93,7 @@ impl Owner {
                 let to_tag = self.uas_to_tag_of(key.id());
                 let opts = GenerateResponseOpts { to_tag, ..Default::default() };
                 if let Ok(cancel_ok) = generate_response(&req, 200, "OK", &opts) {
+                    self.settle_cancel_txn(&req, cancel_ok.image());
                     self.send_buffer(endpoint, call_id.as_str(), cancel_ok.image(), cancel_dest)
                         .await;
                 }
@@ -132,6 +139,9 @@ impl Owner {
         let hold = self.holds_cancel_answers();
         let cancel_ok = generate_response(&req, 200, "OK", &opts).ok();
         let cancel_ok = cancel_ok.map(|ok| (ok.image().clone(), cancel_dest));
+        if let Some((buf, _)) = cancel_ok.as_ref() {
+            self.settle_cancel_txn(&req, buf);
+        }
         if let Some((buf, dest)) = cancel_ok.as_ref().filter(|_| !hold) {
             self.send_buffer(endpoint, call_id.as_str(), buf, *dest).await;
         }
@@ -233,6 +243,28 @@ impl Owner {
         if !self.emit(event) {
             self.delete_txn(TxnRef::Server(key.id()));
         }
+    }
+
+    /// Whether the CANCEL `req`'s own server transaction (a stray CANCEL's,
+    /// [`take_stray_cancel`](Self::take_stray_cancel)) holds its final: that
+    /// transaction answers every copy of it.
+    fn cancel_answered_in_own_txn(&self, req: &SipRequest) -> bool {
+        ServerTxnId::of_request(req)
+            .and_then(|id| self.server(id))
+            .is_some_and(|t| !t.state.is_active())
+    }
+
+    /// The CANCEL `req`'s own server transaction, still unanswered, takes
+    /// `ok`, the 200 this layer answers the CANCEL with, as its final:
+    /// Completed under Timer J (RFC 3261 §17.2.2), so a later copy draws `ok`
+    /// from it and the TU's own answer to the CANCEL is dropped.
+    fn settle_cancel_txn(&mut self, req: &SipRequest, ok: &Bytes) {
+        let Some(id) = ServerTxnId::of_request(req) else { return };
+        let Some(txn) = self.server_mut(id).filter(|t| t.state.is_active()) else { return };
+        txn.state = TxnState::Completed;
+        txn.last_response = Some(ok.clone());
+        txn.last_response_status = Some(200);
+        self.arm_final_hold(id, TxnKind::NonInvite, 200);
     }
 
     /// The INVITE server transaction a CANCEL with top Via `via` names —

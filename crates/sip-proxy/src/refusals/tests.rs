@@ -104,6 +104,19 @@ fn a_refusal_is_forgotten_after_64_t1_or_past_capacity() {
     assert!(small.repeat(&invite("z9hG4bK-99"), SRC, 0).is_some());
 }
 
+/// Preflight rejects fill a memo of their own: a flood of them past every
+/// stripe's capacity forgets no 503.
+#[test]
+fn a_flood_of_preflight_rejects_keeps_every_refusal() {
+    let r = Refusals::with_capacity(&IdGen::seeded(1), 0, 1);
+    r.refuse(&invite("z9hG4bK-refused"), SRC, 1, 0).expect("a refusal");
+    for i in 0..256 {
+        let rejected = invite(&format!("z9hG4bK-hop-{i}"));
+        assert!(r.preflight(&rejected, 0), "the first arrival of each is answered");
+    }
+    assert!(answered(r.repeat(&invite("z9hG4bK-refused"), SRC, 1)).is_some(), "the 503 stays");
+}
+
 fn cancel(branch: &str) -> SipRequest {
     let raw = format!(
         "CANCEL sip:bob@127.0.0.1:5060 SIP/2.0\r\n\

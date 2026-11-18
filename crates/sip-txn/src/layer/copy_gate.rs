@@ -23,6 +23,7 @@ impl Owner {
     pub(super) fn request_copy_owed(&mut self, id: ServerTxnId<'_>) -> bool {
         let now = Instant::now();
         let Some(txn) = self.server_mut(id) else { return false };
+        let kind = copy_kind(&txn.method);
         let owed = match txn.copies.as_mut() {
             Some(copies) => copies.copy(now),
             None => {
@@ -30,7 +31,7 @@ impl Owner {
                 true
             }
         };
-        self.absorbed_unless(owed, CopyKind::Request)
+        self.absorbed_unless(owed, kind)
     }
 
     /// Count the copy of its request the server transaction `id` absorbs
@@ -93,11 +94,7 @@ impl Owner {
         let Some(id) = ServerTxnId::of_request(req) else { return Retired::Unknown };
         let retired = self.budgets.copy_retired(req.call_id().as_str(), id, Instant::now());
         if matches!(retired, Retired::Absorbed) {
-            let kind = match req.method() {
-                Method::Cancel => CopyKind::Cancel,
-                _ => CopyKind::Request,
-            };
-            self.metrics.copies_past_schedule.add(kind.index());
+            self.metrics.copies_past_schedule.add(copy_kind(req.method()).index());
         }
         retired
     }
@@ -126,6 +123,14 @@ impl Owner {
             self.metrics.copies_past_schedule.add(kind.index());
         }
         owed
+    }
+}
+
+/// What a copy of a request of `method` past its schedule is counted as.
+fn copy_kind(method: &Method) -> CopyKind {
+    match method {
+        Method::Cancel => CopyKind::Cancel,
+        _ => CopyKind::Request,
     }
 }
 

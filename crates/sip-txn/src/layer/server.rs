@@ -58,8 +58,7 @@ impl Owner {
         // re-sending it would put a second final with a different To-tag on
         // the wire, flip the ACK 2xx/non-2xx classifier
         // (last_response_status), and orphan a duplicate hold. The TU repeats
-        // its own 2xx raw (§13.3.1.4). A CANCEL's answer shares the branch and
-        // is not the INVITE's final.
+        // its own 2xx raw (§13.3.1.4).
         let held = ServerTxnId::of_response(&msg).and_then(|id| self.server(id));
         if let Some(txn) = held {
             if matches!(txn.state, TxnState::Completed | TxnState::Confirmed | TxnState::Accepted) {

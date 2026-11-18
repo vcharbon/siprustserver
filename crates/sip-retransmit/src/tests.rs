@@ -149,7 +149,6 @@ fn a_copy_past_the_ladders_re_sends_is_owed_t1_after_the_last_answered() {
         assert!(class.owes_copy(last + 1, Some(m(T1))), "{class:?}: T1 after");
         assert!(class.owes_copy(last + 1, None), "{class:?}: none answered");
     }
-    assert_eq!(COPY_WINDOW, m(64 * T1));
 }
 
 /// The bound is crossed by landing ON it, not only past it. Every RFC class

@@ -204,6 +204,36 @@ async fn a_non_invite_request_re_sent_past_64_t1_is_neither_answered_nor_handed_
     assert!(handed_up(&stack.drain_events(), "INFO").is_empty(), "no copy re-opens a transaction");
 }
 
+/// A non-INVITE request the TU forgot unanswered: the copy that re-opens its
+/// transaction continues the count the forgotten one left, so the copies after
+/// draw the TU's final only up to Timer E's re-sends, the re-opening copy
+/// among them.
+#[tokio::test(start_paused = true)]
+async fn a_copy_re_opening_a_forgotten_transaction_continues_its_count() {
+    let mut stack = Stack::build(TRANSIT, 64, 64).await;
+    let (branch, call_id) = ("z9hG4bK-info-reopen", "info-reopen");
+    let info = inbound_request("INFO", branch, call_id, Some("b2bua-tag"));
+    stack.inject(&info).await;
+    elapse_ms(20).await;
+    assert_eq!(handed_up(&stack.drain_events(), "INFO").len(), 1, "the INFO goes up");
+    stack.txn.forget_unanswered(&key_of(&info), call_id, "caller-tag");
+    elapse_ms(20).await;
+
+    stack.inject(&info).await;
+    elapse_ms(20).await;
+    let [request] = handed_up(&stack.drain_events(), "INFO").try_into().expect("re-opened");
+    let ok = generate_response(&request, 200, "OK", &GenerateResponseOpts::default()).unwrap();
+    stack.txn.send_response(ok, addr(PEER)).await.expect("the layer runs");
+    elapse_ms(20).await;
+    assert_eq!(answers(&stack.drain_peer(), 200, "INFO"), 1, "the TU's 200 leaves");
+
+    burst(&stack, &info, COPIES).await;
+    elapse_ms(20).await;
+    let replayed = answers(&stack.drain_peer(), 200, "INFO");
+    let resends = usize::try_from(Class::NonInviteClient.resends()).expect("fits");
+    assert_eq!(replayed, resends - 1, "Timer E's re-sends past the re-opening copy");
+}
+
 /// A CANCEL of an answered INVITE re-sent at wire speed: the first and the
 /// copies a CANCEL's Timer E re-sends draw a 200, the rest are absorbed.
 #[tokio::test(start_paused = true)]
