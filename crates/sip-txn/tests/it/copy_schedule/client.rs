@@ -11,12 +11,16 @@ use sip_message::generators::{generate_response, GenerateResponseOpts};
 use sip_message::{SipMessage, SipRequest, SipResponse};
 use sip_retransmit::timers::T1;
 use sip_retransmit::Class;
-use sip_txn::{IdGen, InviteRefusals, NewCallGate, TransactionConfig};
+use sip_txn::{CopyKind, IdGen, InviteRefusals, NewCallGate, TransactionConfig};
 
 use super::{answers, burst, copies_every, COPIES};
 use crate::common::{self, *};
 
 const TRANSIT: u64 = 5;
+
+/// The dialogs an INVITE client transaction remembers, one per fork (RFC
+/// 6026 §7.2): the forks past them share one count.
+const DIALOGS_REMEMBERED: usize = 16;
 
 /// The requests of `method` in a drained batch.
 fn requests(msgs: &[SipMessage], method: &str) -> usize {
@@ -44,6 +48,8 @@ async fn a_non_2xx_copied_at_wire_speed_draws_its_hop_ack_on_timer_gs_schedule()
     elapse_ms(20).await;
     let acks = requests(&stack.drain_peer(), "ACK");
     assert_eq!(acks, 1 + resends(Class::InviteServerFinal), "the final and Timer G's re-sends");
+    let absorbed = stack.txn.metrics().copies_past_schedule(CopyKind::Non2xx);
+    assert_eq!(absorbed, (1 + COPIES - acks) as u64, "each copy absorbed is counted");
 }
 
 /// The 2xx `tag` answers the INVITE on `branch` with, from the callee.
@@ -83,6 +89,40 @@ async fn an_orphans_2xx_copied_at_wire_speed_draws_its_ack_on_the_2xx_schedule()
     let out = stack.drain_peer();
     assert_eq!(requests(&out, "ACK"), 1 + resends(Class::Final2xx), "the 2xx and its re-sends");
     assert_eq!(requests(&out, "BYE"), 1, "one BYE");
+    let absorbed = stack.txn.metrics().copies_past_schedule(CopyKind::Final2xx);
+    assert_eq!(absorbed, (COPIES - resends(Class::Final2xx)) as u64, "each one absorbed counted");
+}
+
+/// The 2xx of one fork past the dialogs an orphan remembers.
+async fn fork_2xx(stack: &Stack, branch: &str, call_id: &str, fork: usize) {
+    stack.inject(&ok_tagged(branch, call_id, &format!("fork-{fork}"))).await;
+}
+
+/// The forks of an orphan past the dialogs it remembers share one count:
+/// two of them re-sending their 2xx interleaved at wire speed draw one first
+/// ACK and the 2xx ladder's re-sends between them, where two remembered forks
+/// draw that many each.
+#[tokio::test(start_paused = true)]
+async fn the_forks_past_an_orphans_dialog_bound_share_one_count() {
+    let stack = Stack::build(TRANSIT, 1024, 64).await;
+    let (branch, call_id) = ("z9hG4bK-orphan-many-forks", "orphan-many-forks");
+    orphaned(&stack, "self|orphan-many-forks", call_id, branch).await;
+    for fork in 0..DIALOGS_REMEMBERED {
+        fork_2xx(&stack, branch, call_id, fork).await;
+    }
+    elapse_ms(20).await;
+    let remembered = requests(&stack.drain_peer(), "ACK");
+    assert_eq!(remembered, DIALOGS_REMEMBERED, "each remembered fork's first 2xx is ACKed");
+
+    for _ in 0..=COPIES {
+        for fork in [DIALOGS_REMEMBERED, DIALOGS_REMEMBERED + 1] {
+            fork_2xx(&stack, branch, call_id, fork).await;
+        }
+        elapse_ms(1).await;
+    }
+    elapse_ms(20).await;
+    let past = requests(&stack.drain_peer(), "ACK");
+    assert_eq!(past, 1 + resends(Class::Final2xx), "one count for the forks past the bound");
 }
 
 /// Two forks' 2xx to one orphan, re-sent interleaved at wire speed: each
@@ -152,6 +192,8 @@ async fn a_refused_invite_copied_at_wire_speed_draws_its_refusal_on_timer_as_sch
     elapse_ms(20).await;
     let refused = answers(&stack.drain_peer(), 503, "INVITE");
     assert_eq!(refused, 1 + resends(Class::InviteClient), "the refusal and Timer A's re-sends");
+    let absorbed = stack.txn.metrics().copies_past_schedule(CopyKind::Refused);
+    assert_eq!(absorbed, (1 + COPIES - refused) as u64, "each copy absorbed is counted");
 }
 
 /// A refused INVITE re-sent every 2 s: each copy inside 64·T1 of the first is

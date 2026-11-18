@@ -7,6 +7,7 @@ use sip_message::method::Method;
 use sip_retransmit::Class;
 
 use crate::event::EventQueueClass;
+use crate::metrics::CopyKind;
 
 const EVENT_QUEUE_CLASS_VALUES: [&str; 7] =
     label_values!(EventQueueClass::ALL, EventQueueClass::label);
@@ -144,6 +145,16 @@ pub const MUTED_MESSAGES: Family = Family::counter(
     "b2bua_txn_muted_messages_total",
     Labels::Product(&[MUTED_DIRECTION]),
     "Datagrams a Call-ID's mute dropped (ADR-0063 §4), by direction: in, dropped before dispatch; out, never sent.",
+);
+
+const COPY_KIND_VALUES: [&str; 5] = label_values!(CopyKind::ALL, CopyKind::label);
+/// What an absorbed copy copied, indexed like [`CopyKind::ALL`].
+pub const COPY_KIND: Dim = Dim::new("kind", &COPY_KIND_VALUES);
+
+pub const COPIES_PAST_SCHEDULE: Family = Family::counter(
+    "b2bua_txn_copies_past_schedule_total",
+    Labels::Product(&[COPY_KIND]),
+    "A peer's copies the transaction layer absorbed past the RFC schedule (ADR-0063 §1): past the re-sends of the peer's ladder and inside T1 of the last answered copy, or later than 64·T1 after the first, by what they copied: request, cancel, non-2xx, 2xx (an orphan's), refused-invite.",
 );
 
 pub const EVENT_QUEUE_DROPS: Family = Family::counter(

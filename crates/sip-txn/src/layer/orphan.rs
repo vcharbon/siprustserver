@@ -1,6 +1,7 @@
 //! Orphaned client transactions (ADR-0034): a released call's transactions
 //! detached from it, and the obligations they then close on their own — the
-//! ACK of each 2xx, the BYE of a dialog nothing holds, the re-ACK of repeats.
+//! ACK of each 2xx, the BYE of a dialog nothing holds, the re-ACK of repeats
+//! on the RFC schedule, counted per dialog (ADR-0063 §1).
 
 use bytes::Bytes;
 use sip_message::generators::{

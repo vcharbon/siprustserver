@@ -22,6 +22,8 @@
 //! `call_txns` (a call's transactions, as the per-call index files them) ·
 //! `call_id_budget` (each Call-ID's message count and mute, ADR-0063) ·
 //! `budget_gate` (every datagram in and out held to its Call-ID's budget) ·
+//! `copies` (a peer's copies of a trigger answered on the RFC schedule,
+//! ADR-0063 §1) · `copy_gate` (where a copy's record is read and kept) ·
 //! `via_marks` (the call attribution a sent request's Via carries) ·
 //! `ingress` (an inbound datagram parsed, a parser panic contained to it) · `client` (RFC 3261 §17.1 UAC FSM) ·
 //! `client_cancel` (a client INVITE's CANCEL: held to the first provisional,
@@ -59,6 +61,8 @@ mod client_give_up;
 mod client_key;
 mod commands;
 mod config;
+mod copies;
+mod copy_gate;
 mod event_age;
 mod event_receiver;
 mod events;
@@ -93,4 +97,4 @@ pub(crate) use event_age::EventAges;
 pub use handle::{TransactionConfig, TransactionEvents, TransactionLayer, TransactionLayerClosed};
 pub use key::ServerTxnKey;
 pub use new_call_gate::NewCallGate;
-pub use refusals::{InviteRefusals, NewCallRefusal, Verdict, REFUSED_MEMO_MAX};
+pub use refusals::{InviteRefusals, NewCallRefusal, RefusedCopy, Verdict, REFUSED_MEMO_MAX};

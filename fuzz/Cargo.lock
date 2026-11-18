@@ -1252,6 +1252,7 @@ dependencies = [
  "sip-ids",
  "sip-message",
  "sip-net",
+ "sip-retransmit",
  "sip-txn",
  "subtle",
  "task-restart",

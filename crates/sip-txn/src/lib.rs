@@ -62,8 +62,8 @@ pub mod timers;
 // the per-Call-ID message budget.
 pub use layer::{
     BoundPassed, CallIdBudget, DeferredBound, InviteRefusals, NewCallGate, NewCallRefusal, OnBound,
-    ServerTxnKey, TransactionConfig, TransactionEvents, TransactionLayer, TransactionLayerClosed,
-    Verdict, REFUSED_MEMO_MAX,
+    RefusedCopy, ServerTxnKey, TransactionConfig, TransactionEvents, TransactionLayer,
+    TransactionLayerClosed, Verdict, REFUSED_MEMO_MAX,
 };
 // The class a new INVITE is judged in, read off the parsed request.
 pub use invite_class::{class_of, InviteClass};
@@ -72,7 +72,7 @@ pub use seed::{Reoffer, TxnSeed};
 // Upward events + the client-transaction handles `send_request` returns.
 pub use event::{CallIdBudgetTrip, ClientTransactionHandle, EventQueueClass, TransactionEvent};
 // Observability read handle (shared atomics, readable off the actor thread).
-pub use metrics::{RetransmitRow, TransactionMetrics};
+pub use metrics::{CopyKind, RetransmitRow, TransactionMetrics};
 // Identifier generation seam (Via branch / To-tag), and the request-derived
 // identity of a stateless answer.
 pub use rng::{EntropyUnavailable, IdGen};

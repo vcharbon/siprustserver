@@ -216,8 +216,8 @@ impl TransactionLayer {
         let metrics = TransactionMetrics::new(
             metrics_inner.clone(),
             events_tx.clone(),
-            ages.clone(),
-            Arc::downgrade(&endpoint),
+            (ages.clone(), Arc::downgrade(&endpoint)),
+            config.invite_refusals.clone(),
         );
         let events = TransactionEvents::new(events_rx, keepalive_rx, ages.clone());
 

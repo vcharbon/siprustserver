@@ -9,7 +9,7 @@ use sip_message::generators::{generate_response, GenerateResponseOpts};
 use sip_message::SipMessage;
 use sip_retransmit::timers::T1;
 use sip_retransmit::Class;
-use sip_txn::{TransactionEvent, TxnSeed};
+use sip_txn::{CopyKind, TransactionEvent, TxnSeed};
 
 use super::{answers, burst, copies_every, COPIES};
 use crate::common::*;
@@ -66,6 +66,8 @@ async fn a_ringing_invite_copied_at_wire_speed_draws_its_180_on_timer_as_schedul
     elapse_ms(20).await;
     let replayed = answers(&stack.drain_peer(), 180, "INVITE");
     assert_eq!(replayed, invite_resends(), "the copies Timer A re-sends, then none inside T1");
+    let absorbed = stack.txn.metrics().copies_past_schedule(CopyKind::Request);
+    assert_eq!(absorbed, (COPIES - replayed) as u64, "each copy absorbed is counted");
 
     elapse_ms(T1).await;
     stack.inject(&invite).await;
@@ -215,6 +217,8 @@ async fn a_cancel_of_an_answered_invite_copied_at_wire_speed_draws_200_on_timer_
     let answered = answers(&stack.drain_peer(), 200, "CANCEL");
     let resends = usize::try_from(Class::CancelClient.resends()).expect("fits");
     assert_eq!(answered, 1 + resends, "the CANCEL and its Timer E re-sends");
+    let absorbed = stack.txn.metrics().copies_past_schedule(CopyKind::Cancel);
+    assert_eq!(absorbed, (1 + COPIES - answered) as u64, "each copy absorbed is counted");
 }
 
 /// Plays the TU of a CANCEL matching no INVITE (RFC 3261 §9.2): each one

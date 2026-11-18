@@ -86,8 +86,7 @@ impl Owner {
     /// Count one datagram under `call_id` going `direction`; `false` when a
     /// mute drops it, the one that trips the budget included.
     fn within_budget(&mut self, call_id: &str, direction: Direction) -> bool {
-        let Some(budgets) = self.budgets.as_mut() else { return true };
-        match budgets.admit(call_id, Instant::now()) {
+        match self.budgets.admit(call_id, Instant::now()) {
             Admission::Counted => true,
             Admission::Uncounted => {
                 self.metrics.message_budget_uncounted.fetch_add(1, Relaxed);
@@ -116,8 +115,7 @@ impl Owner {
     /// Whether a datagram under `call_id` going `direction`, outside the
     /// count, passes: `false` under a mute, which it extends.
     pub(super) fn not_muted(&mut self, call_id: &str, direction: Direction) -> bool {
-        let Some(budgets) = self.budgets.as_mut() else { return true };
-        if budgets.drops(call_id, Instant::now()) {
+        if self.budgets.drops(call_id, Instant::now()) {
             self.count_muted(direction);
             return false;
         }

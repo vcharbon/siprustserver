@@ -155,6 +155,11 @@ pub fn txn_metrics_text(m: &sip_txn::TransactionMetrics) -> String {
         0 => m.muted_in(),
         _ => m.muted_out(),
     });
+    c::COPIES_PAST_SCHEDULE.render(&mut s, |series| {
+        sip_txn::CopyKind::ALL
+            .get(series.index(&c::COPY_KIND))
+            .map_or(0, |kind| m.copies_past_schedule(*kind))
+    });
     let class = |series: &metric_catalogue::Series<'_>| {
         EventQueueClass::ALL.get(series.index(&c::EVENT_QUEUE_CLASS)).copied()
     };

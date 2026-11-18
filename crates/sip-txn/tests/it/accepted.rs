@@ -60,7 +60,7 @@ async fn answer_200(stack: &mut Stack, invite: &[u8]) {
 
 /// An INVITE answered 2xx, then ACKed on its own branch: the ACK passes up and
 /// the transaction stays Accepted, so a delayed copy of the INVITE is absorbed
-/// with the 2xx and opens nothing; a repeated ACK passes up again; Timer L
+/// with nothing sent and opens nothing; a repeated ACK passes up again; Timer L
 /// purges the transaction.
 #[tokio::test(start_paused = true)]
 async fn an_answered_invite_absorbs_a_late_copy_until_timer_l() {
@@ -79,7 +79,7 @@ async fn an_answered_invite_absorbs_a_late_copy_until_timer_l() {
     elapse_ms(60).await;
     let out = stack.drain_peer();
     assert_eq!(count_responses(&out, 100), 0, "no 100 for a copy of an answered INVITE");
-    assert_eq!(count_responses(&out, 200), 1, "the copy draws the 2xx the TU sent");
+    assert_eq!(count_responses(&out, 200), 0, "the 2xx is the TU's to re-send (RFC 6026 §7.1)");
     assert_eq!(handed_up(&stack.drain_events(), "INVITE"), 0, "the copy is not handed up");
     assert_eq!(active(&stack), 1, "no transaction opens beside the Accepted one");
 

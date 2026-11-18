@@ -4667,6 +4667,7 @@ dependencies = [
  "sip-message",
  "sip-net",
  "sip-net-testkit",
+ "sip-retransmit",
  "sip-txn",
  "subtle",
  "task-restart",

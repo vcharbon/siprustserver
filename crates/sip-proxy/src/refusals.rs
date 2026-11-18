@@ -13,10 +13,17 @@
 //! A request whose forward the socket refused as past the largest UDP payload
 //! draws a 513 Message Too Large (§21.5.14), remembered the same way, so a copy
 //! is answered without another forward.
-//! A copy arriving after the window, or after the memo forgot it past its
-//! capacity, is judged afresh. A CANCEL is never remembered: the CANCEL of a
-//! remembered INVITE refusal is answered 200 here, the proxy being the UAS of
-//! that INVITE (§9.2).
+//! A request a check before forwarding rejects (483, 482, 420, 400, 416) is
+//! remembered the same way, its copies answered by that check again; such a
+//! reject answers no CANCEL here and claims no ACK: both are routed on.
+//! Every copy is answered on the RFC schedule (ADR-0063 §1): the copies up to
+//! the re-sends of its sender's ladder at any pace, a later one only T1 after
+//! the last answered one, none later than 64·T1 after the first; the others
+//! are absorbed, and each copy keeps the refusal 64·T1 longer.
+//! A copy arriving after the memo forgot it, 64·T1 after its last copy or
+//! past its capacity, is judged afresh. A CANCEL is never remembered: the
+//! CANCEL of a remembered INVITE refusal is answered 200 here, on its own
+//! schedule, the proxy being the UAS of that INVITE (§9.2).
 
 use std::collections::hash_map::RandomState;
 use std::collections::{HashMap, VecDeque};
@@ -30,8 +37,10 @@ use sip_message::generators::{generate_response, GenerateError, GenerateResponse
 use sip_message::header::{HeaderValue, RetryAfter};
 use sip_message::types::SipHeader;
 use sip_message::{Method, SipRequest, SipResponse};
+use sip_retransmit::Class;
 use sip_txn::timers::TIMER_B;
 use sip_txn::{IdGen, StatelessTagger};
+use std::time::Duration;
 
 use crate::cancel_lru::retransmit_key;
 use sip_message::received::observed_source;
@@ -60,12 +69,58 @@ pub struct Refusals {
     remembered: AtomicUsize,
 }
 
-/// One refusal: when it was made, the final it drew and the To-tag it was
-/// answered with.
+/// One refusal: the copies of its request, those of a CANCEL of it, the
+/// final it drew (`None` for a preflight reject, which its check composes
+/// again) and the To-tag it was answered with.
 struct Refused {
-    at_ms: u64,
-    answer: Answer,
+    copies: Copies,
+    cancel: Option<Copies>,
+    answer: Option<Answer>,
     to_tag: Box<str>,
+}
+
+/// The copies of one request the proxy answered itself (ADR-0063 §1): when
+/// it first arrived, how many copies followed, when the last one arrived and
+/// when the last answered one did, in ms.
+#[derive(Clone, Copy)]
+struct Copies {
+    class: Class,
+    first_ms: u64,
+    copies: u32,
+    last_ms: u64,
+    last_answered_ms: u64,
+}
+
+impl Copies {
+    /// The first arrival at `now_ms` of a request of `method`, which its
+    /// sender re-sends on Timer A (an INVITE) or Timer E.
+    fn first(method: &Method, now_ms: u64) -> Self {
+        let class = match method {
+            Method::Invite => Class::InviteClient,
+            Method::Cancel => Class::CancelClient,
+            _ => Class::NonInviteClient,
+        };
+        Self { class, first_ms: now_ms, copies: 0, last_ms: now_ms, last_answered_ms: now_ms }
+    }
+
+    /// Count a copy arriving at `now_ms`; whether it is answered: inside the
+    /// 64·T1 of the first arrival and owed on the sender's ladder.
+    fn copy(&mut self, now_ms: u64) -> bool {
+        self.copies = self.copies.saturating_add(1);
+        self.last_ms = now_ms;
+        let since_answered = Duration::from_millis(now_ms.saturating_sub(self.last_answered_ms));
+        let owed = now_ms.saturating_sub(self.first_ms) < TIMER_B
+            && self.class.owes_copy(self.copies, Some(since_answered));
+        if owed {
+            self.last_answered_ms = now_ms;
+        }
+        owed
+    }
+
+    /// Whether 64·T1 passed at `now_ms` since the last copy.
+    fn lapsed(&self, now_ms: u64) -> bool {
+        now_ms.saturating_sub(self.last_ms) >= TIMER_B
+    }
 }
 
 /// The final a remembered refusal draws.
@@ -94,26 +149,49 @@ impl Answer {
     }
 }
 
+/// What a copy of a request the proxy answered itself draws (ADR-0063 §1).
+#[derive(Debug)]
+pub enum Repeat {
+    /// The answer again: the copy is on its sender's schedule.
+    Answer(Box<SipResponse>),
+    /// Nothing: the copy is past it.
+    Absorbed,
+}
+
+/// One place in [`Memo::order`]: the ms it is due to be looked at, the key,
+/// and the first arrival of the refusal it was queued for.
+type Queued = (u64, u64, u64);
+
 /// One stripe's refused requests (keyed hashes of the received transaction,
-/// as the retransmission memo keys it), in refusal order for expiry.
+/// as the retransmission memo keys it), queued in the order they are due to
+/// be looked at for expiry.
 struct Memo {
     refused: HashMap<u64, Refused>,
-    order: VecDeque<(u64, u64)>,
+    order: VecDeque<Queued>,
     max: usize,
 }
 
 impl Memo {
-    /// Forget the refusals past 64·T1 and the oldest past the stripe's
-    /// capacity; the number forgotten.
+    /// Forget the refusals 64·T1 past their last copy and the oldest past
+    /// the stripe's capacity; the number forgotten. A queued refusal that
+    /// took a copy since is queued again at that copy; a place whose
+    /// refusal is gone or was made again is stale and dropped.
     fn expire(&mut self, now_ms: u64) -> usize {
         let before = self.refused.len();
-        while let Some(&(at_ms, key)) = self.order.front() {
-            if now_ms.saturating_sub(at_ms) < TIMER_B && self.order.len() <= self.max {
+        while let Some(&(at_ms, key, first_ms)) = self.order.front() {
+            let over = self.order.len() > self.max;
+            if !over && now_ms.saturating_sub(at_ms) < TIMER_B {
                 break;
             }
             self.order.pop_front();
-            if self.refused.get(&key).is_some_and(|r| r.at_ms == at_ms) {
+            let Some(refused) = self.refused.get(&key) else { continue };
+            if refused.copies.first_ms != first_ms {
+                continue;
+            }
+            if over || refused.copies.lapsed(now_ms) {
                 self.refused.remove(&key);
+            } else {
+                self.order.push_back((refused.copies.last_ms, key, first_ms));
             }
         }
         before - self.refused.len()
@@ -207,43 +285,94 @@ impl Refusals {
         to_tag: String,
     ) -> Result<SipResponse, GenerateError> {
         if req.method() != Method::Cancel {
-            let key = self.key(req, req.method().as_str());
-            let refused = Refused { at_ms: now_ms, answer, to_tag: to_tag.as_str().into() };
-            let mut memo = self.lock(key);
-            let added = usize::from(memo.refused.insert(key, refused).is_none());
-            memo.order.push_back((now_ms, key));
-            let forgotten = memo.expire(now_ms);
-            self.count(added, forgotten);
+            self.note(req, now_ms, Some(answer), to_tag.as_str().into());
         }
         answer.to(req, src, to_tag)
     }
 
-    /// The final an earlier copy of `req` drew, answering `req` received from
-    /// `src`, when `req` is a copy of a request refused within 64·T1 of
-    /// `now_ms` whose lines a response can echo.
-    pub fn repeat(&self, req: &SipRequest, src: SocketAddr, now_ms: u64) -> Option<SipResponse> {
-        let (to_tag, answer) = self.remembered(req, req.method().as_str(), now_ms)?;
-        answer.to(req, src, to_tag).ok()
+    /// Remember `req`'s refusal at `now_ms` as its first arrival.
+    fn note(&self, req: &SipRequest, now_ms: u64, answer: Option<Answer>, to_tag: Box<str>) {
+        let key = self.key(req, req.method().as_str());
+        let copies = Copies::first(req.method(), now_ms);
+        let refused = Refused { copies, cancel: None, answer, to_tag };
+        let mut memo = self.lock(key);
+        let added = usize::from(memo.refused.insert(key, refused).is_none());
+        memo.order.push_back((now_ms, key, now_ms));
+        let forgotten = memo.expire(now_ms);
+        self.count(added, forgotten);
     }
 
-    /// The 200 answering `cancel`, received from `src`, when it cancels an
-    /// INVITE refused within 64·T1 of `now_ms` (§9.2): the INVITE already has
-    /// its final, and the 200 carries that final's To-tag.
-    pub fn cancel(&self, cancel: &SipRequest, src: SocketAddr, now_ms: u64) -> Option<SipResponse> {
-        let (to_tag, _) = self.remembered(cancel, Method::Invite.as_str(), now_ms)?;
-        answer(cancel, src, 200, "OK", to_tag, None).ok()
+    /// Whether the reject a check this hop runs before forwarding composes
+    /// for `req` (483, 482, 420, 400, 416), received at `now_ms`, is owed: at
+    /// its first arrival, remembered then, and for a copy on its sender's
+    /// schedule ([`Repeat`]).
+    pub fn preflight(&self, req: &SipRequest, now_ms: u64) -> bool {
+        let first = self.with_refusal(req, req.method().as_str(), now_ms, |refused| {
+            refused.copies.copy(now_ms)
+        });
+        match first {
+            Some(owed) => owed,
+            None => {
+                self.note(req, now_ms, None, self.to_tag(req).into());
+                true
+            }
+        }
     }
 
-    /// Whether `ack` acknowledges a final this memo holds for its INVITE,
-    /// refused within 64·T1 of `now_ms`: the To-tag a refusal of an in-dialog
-    /// INVITE echoes is its dialog's, so only the memo tells (§17.1.1.3).
+    /// What `req`, received from `src`, draws when it is a copy of a request
+    /// refused 503 or 513 within 64·T1 of its last copy at `now_ms` whose
+    /// lines a response can echo: that final again on its sender's schedule.
+    pub fn repeat(&self, req: &SipRequest, src: SocketAddr, now_ms: u64) -> Option<Repeat> {
+        let (owed, to_tag, answer) = self
+            .with_refusal(req, req.method().as_str(), now_ms, |refused| {
+                let answer = refused.answer?;
+                Some((refused.copies.copy(now_ms), refused.to_tag.to_string(), answer))
+            })
+            .flatten()?;
+        let resp = answer.to(req, src, to_tag).ok()?;
+        Some(if owed { Repeat::Answer(Box::new(resp)) } else { Repeat::Absorbed })
+    }
+
+    /// What `cancel`, received from `src`, draws when it cancels an INVITE
+    /// refused 503 or 513 within 64·T1 of its last copy at `now_ms` (§9.2):
+    /// the INVITE already has its final, so a 200 under that final's To-tag,
+    /// on the CANCEL's own schedule.
+    pub fn cancel(&self, cancel: &SipRequest, src: SocketAddr, now_ms: u64) -> Option<Repeat> {
+        let (owed, to_tag) = self
+            .with_refusal(cancel, Method::Invite.as_str(), now_ms, |refused| {
+                refused.answer?;
+                let owed = match refused.cancel.as_mut() {
+                    Some(copies) => copies.copy(now_ms),
+                    None => {
+                        refused.cancel = Some(Copies::first(&Method::Cancel, now_ms));
+                        true
+                    }
+                };
+                Some((owed, refused.to_tag.to_string()))
+            })
+            .flatten()?;
+        let resp = answer(cancel, src, 200, "OK", to_tag, None).ok()?;
+        Some(if owed { Repeat::Answer(Box::new(resp)) } else { Repeat::Absorbed })
+    }
+
+    /// Whether `ack` acknowledges a 503 or 513 this memo holds for its
+    /// INVITE, refused within 64·T1 of its last copy at `now_ms`: the To-tag
+    /// a refusal of an in-dialog INVITE echoes is its dialog's, so only the
+    /// memo tells (§17.1.1.3).
     pub fn acknowledges_refusal(&self, ack: &SipRequest, now_ms: u64) -> bool {
-        self.remembered(ack, Method::Invite.as_str(), now_ms).is_some()
+        self.with_refusal(ack, Method::Invite.as_str(), now_ms, |r| r.answer.is_some())
+            .unwrap_or(false)
     }
 
-    /// The To-tag and answer of the remembered `method` refusal of `req`'s
-    /// transaction.
-    fn remembered(&self, req: &SipRequest, method: &str, now_ms: u64) -> Option<(String, Answer)> {
+    /// `read` of the remembered `method` refusal of `req`'s transaction, not
+    /// lapsed at `now_ms`.
+    fn with_refusal<T>(
+        &self,
+        req: &SipRequest,
+        method: &str,
+        now_ms: u64,
+        read: impl FnOnce(&mut Refused) -> T,
+    ) -> Option<T> {
         if self.remembered.load(Ordering::Relaxed) == 0 {
             return None;
         }
@@ -251,8 +380,7 @@ impl Refusals {
         let mut memo = self.lock(key);
         let forgotten = memo.expire(now_ms);
         self.count(0, forgotten);
-        let refused = memo.refused.get(&key)?;
-        Some((refused.to_tag.to_string(), refused.answer))
+        memo.refused.get_mut(&key).filter(|r| !r.copies.lapsed(now_ms)).map(read)
     }
 
     /// The received transaction of `req` as a `method` request, keyed as the

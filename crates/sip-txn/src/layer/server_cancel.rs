@@ -1,8 +1,8 @@
 //! A CANCEL received for an INVITE server transaction (RFC 3261 §9.2): the
 //! INVITE it names answered 487 and the CANCEL 200 while that INVITE is
 //! active, the CANCEL alone answered 200 once the INVITE took its final, and
-//! handed up when no INVITE here matches it. The rest of the server
-//! transaction lives in `layer::server`.
+//! handed up through a non-INVITE transaction of its own when no INVITE here
+//! matches it. The rest of the server transaction lives in `layer::server`.
 
 use std::net::SocketAddr;
 
@@ -10,26 +10,32 @@ use bytes::Bytes;
 use sip_message::generators::{generate_response, GenerateResponseOpts};
 use sip_message::header::Via;
 use sip_message::received::stamped_destination;
-use sip_message::{SipMessage, SipRequest};
+use sip_message::{Method, SipMessage, SipRequest};
 use sip_net::UdpEndpoint;
 
 use crate::event::TransactionEvent;
 use call::TxnKind;
 
+use super::call_id_budget::Retired;
+use super::copy_gate::opening_copies;
 use super::key::{ServerTxnId, ServerTxnKey};
 use super::owner::Owner;
-use super::txn::{Transaction, TxnState};
+use super::txn::{NewTransaction, Transaction, TxnId, TxnRef, TxnState};
 
 impl Owner {
     /// RFC 3261 §9.2 at this layer: a CANCEL matching an active INVITE server
     /// transaction is answered 200 and its INVITE 487, and `Cancelled` is
-    /// emitted; `true`. One matching nothing here is the TU's to answer — a
-    /// call it holds for a peer may hold the INVITE the CANCEL names, and only
-    /// the TU can rebuild that transaction and re-offer the CANCEL — so it is
-    /// handed up unanswered as a `Message` carrying `datagram` (`false`); a
-    /// re-offer (`datagram` `None`) still unmatched is handed nowhere. The 200
-    /// goes to the CANCEL's response target, the 487 to the INVITE
-    /// transaction's destination (§18.2.2).
+    /// emitted; `true`. Its copies, once the INVITE took its final, draw the
+    /// 200 again on the RFC schedule
+    /// ([`cancel_copy_owed`](Self::cancel_copy_owed)). One matching nothing
+    /// here is the TU's to answer — a call it holds for a peer may hold the
+    /// INVITE the CANCEL names, and only the TU can rebuild that transaction
+    /// and re-offer the CANCEL — so it is handed up unanswered as a `Message`
+    /// carrying `datagram`, through a transaction of its own
+    /// ([`take_stray_cancel`](Self::take_stray_cancel), `false`); a re-offer
+    /// (`datagram` `None`) still unmatched is handed nowhere. The 200 goes to
+    /// the CANCEL's response target, the 487 to the INVITE transaction's
+    /// destination (§18.2.2).
     pub(super) async fn handle_cancel(
         &mut self,
         endpoint: &dyn UdpEndpoint,
@@ -75,6 +81,9 @@ impl Owner {
                     )
             };
             if let Some(key) = self.cancelled_invite(cancel_via, is_answered_target) {
+                if !self.cancel_copy_owed(key.id()) {
+                    return true;
+                }
                 let to_tag = self.uas_to_tag_of(key.id());
                 let opts = GenerateResponseOpts { to_tag, ..Default::default() };
                 if let Ok(cancel_ok) = generate_response(&req, 200, "OK", &opts) {
@@ -92,13 +101,7 @@ impl Owner {
             Some(key) => key,
             None => {
                 if let Some(datagram) = datagram {
-                    self.emit(TransactionEvent::Message {
-                        message: Box::new(SipMessage::Request(req)),
-                        src,
-                        matched_client_txn: false,
-                        datagram,
-                        opened_at: None,
-                    });
+                    self.take_stray_cancel(endpoint, req, src, datagram).await;
                 }
                 return false;
             }
@@ -119,6 +122,7 @@ impl Owner {
         // Resolve (and lazily pin) the UAS To-tag on the matched INVITE: the
         // tag both answers carry, reported upstream with the event.
         let uas_to_tag = self.uas_to_tag_of(id);
+        self.note_first_cancel(id);
 
         // 200 OK to the CANCEL itself. This 200 and the 487 below are the
         // layer's own answers: they carry no header the TU states on its
@@ -179,6 +183,56 @@ impl Owner {
             to_tag: uas_to_tag,
         });
         true
+    }
+
+    /// A CANCEL received from `src` as `datagram` that names no INVITE here
+    /// is answered through a non-INVITE server transaction of its own (RFC
+    /// 3261 §9.2, ADR-0063 §1): handed up once, for the TU's 481 or its
+    /// re-offer, its copies answered from that transaction on the RFC
+    /// schedule. A copy whose transaction left meets the record it left: past
+    /// the schedule it is absorbed. A CANCEL the event queue drops leaves no
+    /// transaction behind.
+    async fn take_stray_cancel(
+        &mut self,
+        endpoint: &dyn UdpEndpoint,
+        req: SipRequest,
+        src: SocketAddr,
+        datagram: Bytes,
+    ) {
+        if self.replay_cached(endpoint, &req, src).await {
+            return;
+        }
+        let retired = self.retired_copy(&req);
+        if matches!(retired, Retired::Absorbed) {
+            return;
+        }
+        let Some(key) = ServerTxnKey::of(&req) else { return };
+        let head = NewTransaction {
+            id: TxnId::Server(key.clone()),
+            kind: TxnKind::NonInvite,
+            method: Method::Cancel,
+            cseq: req.cseq().seq(),
+            call_id: req.call_id().as_str().to_string(),
+            from_tag: req.from().tag().unwrap_or_default().to_string(),
+            original_request: None,
+            call_ref: None,
+            leg_id: None,
+            incarnation_mark: None,
+            state: TxnState::Trying,
+            destination: Some(stamped_destination(req.top_via(), src)),
+        };
+        let copies = opening_copies(&Method::Cancel, retired);
+        self.open_txn_with(head, |txn| txn.copies = Some(copies));
+        let event = TransactionEvent::Message {
+            message: Box::new(SipMessage::Request(req)),
+            src,
+            matched_client_txn: false,
+            datagram,
+            opened_at: None,
+        };
+        if !self.emit(event) {
+            self.delete_txn(TxnRef::Server(key.id()));
+        }
     }
 
     /// The INVITE server transaction a CANCEL with top Via `via` names —

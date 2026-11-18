@@ -53,6 +53,12 @@ impl ServerTxnKey {
         &self.branch
     }
 
+    /// The transaction on this key's branch and sent-by filed under
+    /// `method`: the CANCEL of the INVITE it names (§9.2).
+    pub(super) fn under(&self, method: &Method) -> Self {
+        Self::new(self.branch.clone(), self.sent_by.clone(), method)
+    }
+
     pub(super) fn id(&self) -> ServerTxnId<'_> {
         ServerTxnId {
             branch: &self.branch,

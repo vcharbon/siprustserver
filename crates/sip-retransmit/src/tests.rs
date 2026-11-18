@@ -138,6 +138,20 @@ fn a_class_resends_as_many_copies_as_its_ladder_walks() {
     assert_eq!(Class::Final2xx.resends(), 10);
 }
 
+/// A peer's copies up to the ladder's re-sends are owed at any pace; one past
+/// them only T1 after the last copy answered, or when none was.
+#[test]
+fn a_copy_past_the_ladders_re_sends_is_owed_t1_after_the_last_answered() {
+    for class in Class::ALL {
+        let last = class.resends();
+        assert!(class.owes_copy(last, Some(Duration::ZERO)), "{class:?}: its last re-send");
+        assert!(!class.owes_copy(last + 1, Some(m(T1 - 1))), "{class:?}: inside T1");
+        assert!(class.owes_copy(last + 1, Some(m(T1))), "{class:?}: T1 after");
+        assert!(class.owes_copy(last + 1, None), "{class:?}: none answered");
+    }
+    assert_eq!(COPY_WINDOW, m(64 * T1));
+}
+
 /// The bound is crossed by landing ON it, not only past it. Every RFC class
 /// steps either side of its own bound, so only a configured one pins the
 /// comparison — and `invite_initial_timeout_ms` is exactly such a bound.

@@ -23,6 +23,8 @@ use call::TxnKind;
 use sip_retransmit::{Class, Ladder, Schedule};
 
 use super::backlog::NewInvite;
+use super::call_id_budget::Retired;
+use super::copy_gate::opening_copies;
 use super::key::ServerTxnId;
 use super::lifetime::Hold;
 use super::owner::Owner;
@@ -35,7 +37,10 @@ impl Owner {
     /// transaction is the one its request matched (§17.2.3): the response
     /// echoes that request's top Via and CSeq method, and leaves to the
     /// destination the transaction holds (§18.2.2), whatever `dest` names.
-    /// `dest` addresses only a response no transaction here holds.
+    /// `dest` addresses only a response no transaction here holds. A CANCEL's
+    /// response goes through the CANCEL's own transaction (a stray CANCEL's,
+    /// `layer::server_cancel`); one no transaction holds leaves raw, never
+    /// through, nor dropped by, the INVITE transaction on its branch.
     pub(super) async fn do_send_response(
         &mut self,
         endpoint: &dyn UdpEndpoint,
@@ -55,25 +60,19 @@ impl Owner {
         // (last_response_status), and orphan a duplicate hold. The TU repeats
         // its own 2xx raw (§13.3.1.4). A CANCEL's answer shares the branch and
         // is not the INVITE's final.
-        if cseq_method != Method::Cancel {
-            if let Some(txn) = ServerTxnId::of_response(&msg).and_then(|id| self.server(id)) {
-                if matches!(
-                    txn.state,
-                    TxnState::Completed | TxnState::Confirmed | TxnState::Accepted
-                ) {
-                    return msg.image().clone();
-                }
+        let held = ServerTxnId::of_response(&msg).and_then(|id| self.server(id));
+        if let Some(txn) = held {
+            if matches!(txn.state, TxnState::Completed | TxnState::Confirmed | TxnState::Accepted) {
+                return msg.image().clone();
             }
         }
+        let cancel_unheld = cseq_method == Method::Cancel && held.is_none();
 
         let msg = self.bind_to_tag(msg);
         let outbound_to_tag = if status > 100 { msg.to().tag().map(str::to_string) } else { None };
         let buf: Bytes = msg.image().clone();
 
-        // A CANCEL response shares its INVITE's branch and this layer holds no
-        // transaction for a CANCEL: it leaves raw, never through — or dropped
-        // by — the INVITE transaction on that branch.
-        if cseq_method == Method::Cancel {
+        if cancel_unheld {
             self.send_buffer(endpoint, msg.call_id().as_str(), &buf, dest).await;
             return buf;
         }
@@ -179,7 +178,10 @@ impl Owner {
     /// refused INVITE — is first stamped with what the transport observed
     /// (RFC 3261 §18.2.1, RFC 3581 §4), once, so the TU, the transaction and
     /// every response composed from it read the stamped hop. The event still
-    /// carries the datagram as it arrived.
+    /// carries the datagram as it arrived. A copy whose transaction left
+    /// within 64·T1 of its last copy meets that transaction's record
+    /// (ADR-0063 §1): past the schedule it is absorbed, else the transaction
+    /// it re-opens carries the count on.
     pub(super) async fn handle_inbound_request(
         &mut self,
         endpoint: &dyn UdpEndpoint,
@@ -251,6 +253,11 @@ impl Owner {
             return;
         }
 
+        let retired = self.retired_copy(&req);
+        if matches!(retired, Retired::Absorbed) {
+            return;
+        }
+
         // New-call admission sits above this layer (ADR-0037). This layer
         // refuses, before any 100 Trying or transaction exists, a copy of an
         // INVITE the node already refused, an INVITE its deferred backlog has
@@ -264,6 +271,7 @@ impl Owner {
         // request's stamped response target (§18.2.2), fixed now.
         let Received { request: req, destination, .. } = self.stamp(req, src);
         let Some(id) = ServerTxnId::of_request(&req) else { return };
+        let copies = opening_copies(req.method(), retired);
         let held = if is_invite {
             match self.judge_new_invite(endpoint, &req, destination).await {
                 NewInvite::Refused => return,
@@ -300,7 +308,10 @@ impl Owner {
             state: TxnState::Trying,
             destination: Some(destination),
         };
-        self.open_txn_with(head, |txn| txn.held = held);
+        self.open_txn_with(head, |txn| {
+            txn.held = held;
+            txn.copies = Some(copies);
+        });
 
         // An INVITE's first provisional is its consumer's to release, or this
         // layer's at the §17.2.1 bound (`layer::trying`).
@@ -365,12 +376,14 @@ impl Owner {
     /// The retransmission path (RFC 3261 §17.2.1): a request a server
     /// transaction matches (§17.2.3) draws that transaction's cached
     /// response — a repeat no timer paced, counted as `trigger` under the
-    /// request's method and the response's status; an Accepted INVITE answers
-    /// a copy with its 2xx, this stack's choice where RFC 6026 §8.7 sends
-    /// nothing (a takeover seed never sent the 2xx the copy missed). A seed
-    /// `Proceeding` with no response yet (ADR-0014) owes a 100 Trying, composed
-    /// from `req`, sent and cached. A non-INVITE transaction still awaiting its
-    /// first response sends nothing: its request is the consumer's to answer.
+    /// request's method and the response's status — on the RFC schedule
+    /// (ADR-0063 §1, [`request_copy_owed`](Self::request_copy_owed)): a copy
+    /// past it is absorbed. An Accepted INVITE absorbs every copy (RFC 6026
+    /// §7.1) but the first an Accepted seed meets before its 2xx left this
+    /// node, which draws that 2xx. A seed `Proceeding` with no response yet
+    /// (ADR-0014) owes a 100 Trying, composed from `req`, sent and cached. A
+    /// non-INVITE transaction still awaiting its first response sends
+    /// nothing: its request is the consumer's to answer.
     /// A copy the event queue drops, or the consumer discards before handling
     /// it ([`TransactionLayer::forget_unanswered`](crate::TransactionLayer::forget_unanswered)),
     /// leaves no transaction behind. What it sends goes to the destination
@@ -390,6 +403,15 @@ impl Owner {
             return true;
         }
         let Some(existing) = self.server(id) else { return false };
+        if existing.state == TxnState::Accepted && !existing.unsent_2xx {
+            self.absorb_request_copy(id);
+            return true;
+        }
+        if !self.request_copy_owed(id) {
+            return true;
+        }
+        let Some(existing) = self.server_mut(id) else { return true };
+        existing.unsent_2xx = false;
         let replay = existing
             .last_response
             .clone()

@@ -1,11 +1,13 @@
 use std::time::Duration;
 
+use sip_message::SipParser;
+use sip_retransmit::Class;
 use tokio::time::Instant;
 
 use super::*;
 
 fn budgets(messages: u64, entries: usize) -> Budgets {
-    Budgets::new(CallIdBudget { messages, entries })
+    Budgets::new(Some(CallIdBudget { messages, entries }))
 }
 
 fn tripped(admission: Admission) -> CallIdBudgetTrip {
@@ -172,6 +174,58 @@ fn a_full_map_evicts_the_count_whose_last_message_is_oldest() {
     assert_eq!(b.admit("new", later), Admission::Counted, "\"other\" gave its place");
     assert_eq!(b.admit("loop", later), Admission::Counted, "its third message");
     tripped(b.admit("loop", later));
+}
+
+/// The server transaction key of an INVITE on `branch`.
+fn invite_key(branch: &str) -> ServerTxnKey {
+    let raw = format!(
+        "INVITE sip:bob@192.0.2.20 SIP/2.0\r\nVia: SIP/2.0/UDP 192.0.2.10:5060;branch={branch}\r\n\
+         From: <sip:alice@192.0.2.10>;tag=a\r\nTo: <sip:bob@192.0.2.20>\r\nCall-ID: c1\r\n\
+         CSeq: 1 INVITE\r\nMax-Forwards: 70\r\nContent-Length: 0\r\n\r\n"
+    );
+    match sip_message::CustomParser::new().parse(raw.as_bytes()) {
+        Ok(sip_message::SipMessage::Request(req)) => ServerTxnKey::of(&req).expect("a branch"),
+        other => panic!("an INVITE, not {other:?}"),
+    }
+}
+
+/// A retired transaction's record answers a copy with no transaction: past
+/// the schedule it is absorbed and kept 64·T1 longer; 64·T1 after its last
+/// copy it is gone and the entry with it.
+#[test]
+fn a_retired_record_meets_a_copy_until_64_t1_after_its_last_copy() {
+    let t0 = Instant::now();
+    let mut b = Budgets::new(None);
+    let key = invite_key("z9hG4bK-retired");
+    b.opened("c1", None, None, t0);
+    b.retire("c1", key.clone(), Copies::first(Class::InviteClient, t0), t0);
+    b.closed("c1");
+    let reopened = b.copy_retired("c1", key.id(), t0 + WINDOW - ms(1));
+    assert!(matches!(reopened, Retired::Reopens(_)), "a copy inside 64·T1 re-opens it");
+
+    let mut copied = Copies::first(Class::InviteClient, t0);
+    copied.copy(t0 + WINDOW / 2);
+    b.retire("c1", key.clone(), copied, t0 + WINDOW / 2);
+    let late = t0 + WINDOW;
+    assert!(matches!(b.copy_retired("c1", key.id(), late), Retired::Absorbed), "past 64·T1");
+    b.expire(late + WINDOW - ms(1));
+    let kept = b.copy_retired("c1", key.id(), late + WINDOW - ms(1));
+    assert!(matches!(kept, Retired::Absorbed), "kept 64·T1 after the absorbed copy");
+    b.expire(late + WINDOW * 2);
+    assert!(b.entries.is_empty(), "64·T1 after its last copy, the record and its entry are gone");
+}
+
+/// A full map never evicts an entry that keeps a copy record.
+#[test]
+fn a_full_map_keeps_an_entry_with_a_copy_record() {
+    let t0 = Instant::now();
+    let mut b = budgets(5, 1);
+    b.opened("kept", None, None, t0);
+    b.retire("kept", invite_key("z9hG4bK-kept"), Copies::first(Class::InviteClient, t0), t0);
+    b.closed("kept");
+    assert_eq!(b.admit("new", t0), Admission::Uncounted, "the record holds its place");
+    b.expire(t0 + WINDOW);
+    assert_eq!(b.admit("new", t0 + WINDOW), Admission::Counted, "freed with the record");
 }
 
 #[test]

@@ -6,7 +6,8 @@ use crate::self_gate::ShedReason;
 
 /// Every locally decided reject: the routing path's own, the load
 /// balancer's selection failures, the self gate's.
-const REJECT_REASONS: [&str; 20] = [
+const REJECT_REASONS: [&str; 21] = [
+    "copy_past_schedule",
     "drop_unforwardable",
     "no_target_dropped",
     "non_request",

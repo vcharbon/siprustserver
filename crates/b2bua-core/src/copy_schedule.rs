@@ -6,7 +6,8 @@
 //! them (§17.1.1.1). A peer answering each ACK with its final again stops
 //! there.
 
-use sip_retransmit::timers::T1;
+use std::time::Duration;
+
 use sip_retransmit::Class;
 
 /// The class whose ladder re-sends an INVITE final of `status`: a 2xx's
@@ -29,16 +30,18 @@ pub fn kind(class: Class) -> &'static str {
 }
 
 /// Whether `copy`, the copy's number among those after the final's first
-/// arrival (from 1), of a final re-sent on `class`'s ladder, is owed its ACK:
-/// within the ladder's re-sends, or `since_answered_ms` at least T1 after the
-/// last copy answered (`None`: none was).
+/// arrival (from 1), of a final re-sent on `class`'s ladder, is owed its ACK
+/// ([`Class::owes_copy`]): `since_answered_ms` since the last copy answered
+/// (`None`: none was), a negative span read as zero.
 pub fn owed(class: Class, copy: u32, since_answered_ms: Option<i64>) -> bool {
-    copy <= class.resends()
-        || since_answered_ms.is_none_or(|since| u64::try_from(since).is_ok_and(|s| s >= T1))
+    let since = since_answered_ms.map(|s| Duration::from_millis(u64::try_from(s).unwrap_or(0)));
+    class.owes_copy(copy, since)
 }
 
 #[cfg(test)]
 mod tests {
+    use sip_retransmit::timers::T1;
+
     use super::*;
 
     #[test]

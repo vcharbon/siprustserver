@@ -132,10 +132,13 @@ pub(super) struct Owner {
     pub(super) stateless_options: bool,
     /// The cap and the To-tags of the 400s answering refused requests.
     pub(super) parse_refusals: ParseRefusals,
-    /// [`TransactionConfig::call_id_budget`](crate::TransactionConfig)'s
-    /// counts, kept in step with `clients` and `servers`: every `set_txn`
-    /// and `delete_txn` opens and closes a transaction of its Call-ID there.
-    pub(super) budgets: Option<Budgets>,
+    /// The entry of each Call-ID: its count against
+    /// [`TransactionConfig::call_id_budget`](crate::TransactionConfig) when
+    /// one is set, and the copy records of its server transactions past
+    /// their life (ADR-0063 §1), kept in step with `clients` and `servers`:
+    /// every `set_txn` and `delete_txn` opens and closes a transaction of
+    /// its Call-ID there.
+    pub(super) budgets: Budgets,
 }
 
 impl Owner {
@@ -188,7 +191,7 @@ impl Owner {
             recent_uas_tags: HashMap::new(),
             strict_to_tag: config.strict_to_tag,
             stateless_options: config.stateless_options,
-            budgets: config.call_id_budget.map(Budgets::new),
+            budgets: Budgets::new(config.call_id_budget),
         }
     }
 
@@ -225,10 +228,8 @@ impl Owner {
     pub(super) fn set_txn(&mut self, txn: Transaction) {
         let new_call_ref = txn.call_ref.clone();
         let id = txn.id.clone();
-        if let Some(budgets) = self.budgets.as_mut() {
-            let now = tokio::time::Instant::now();
-            budgets.opened(&txn.call_id, txn.call_ref.as_deref(), txn.caller_tag(), now);
-        }
+        let now = tokio::time::Instant::now();
+        self.budgets.opened(&txn.call_id, txn.call_ref.as_deref(), txn.caller_tag(), now);
         // A re-insert of the same identity (a client send reusing a live
         // branch) must not double-count: drop the displaced txn's contribution
         // before adding the new one.
@@ -240,9 +241,7 @@ impl Owner {
             // A request matching a server transaction is absorbed by it, and a
             // seed skips an occupied identity: only a client is displaced.
             debug_assert!(old.role() == TxnRole::Client, "a server transaction was displaced");
-            if let Some(budgets) = self.budgets.as_mut() {
-                budgets.closed(&old.call_id);
-            }
+            self.budgets.closed(&old.call_id);
             // The displaced txn's queue entries are keyed by the SAME identity
             // the replacement now owns; left in the wheel they would fire
             // against the new txn (spurious retransmit/timeout/cleanup) and their
@@ -335,9 +334,8 @@ impl Owner {
         };
         match removed {
             Some(mut t) => {
-                if let Some(budgets) = self.budgets.as_mut() {
-                    budgets.closed(&t.call_id);
-                }
+                self.retire_copies(&mut t);
+                self.budgets.closed(&t.call_id);
                 if t.role() == TxnRole::Server {
                     if let Some(tag) = t.bound_to_tag() {
                         self.remember_uas_tag(&t.call_id, &t.from_tag, tag);
@@ -469,9 +467,7 @@ impl Owner {
     pub(super) fn sweep(&mut self) {
         self.reap_overdue();
         self.forget_expired_uas_tags();
-        if let Some(budgets) = self.budgets.as_mut() {
-            budgets.expire(tokio::time::Instant::now());
-        }
+        self.budgets.expire(tokio::time::Instant::now());
         self.clients.shrink_idle();
         shrink_idle(&mut self.servers);
         shrink_idle(&mut self.txn_index);

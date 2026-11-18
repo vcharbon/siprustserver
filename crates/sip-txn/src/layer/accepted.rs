@@ -11,6 +11,8 @@ use bytes::Bytes;
 use sip_message::header::RSeq;
 use sip_message::{SipMessage, SipRequest, SipResponse};
 use sip_net::parse_datagram;
+use sip_retransmit::Class;
+use tokio::time::Instant;
 
 use super::lifetime::Hold;
 use super::owner::Owner;
@@ -20,7 +22,8 @@ use super::via_marks::{extract_via_custom_params, ViaMarks};
 impl Owner {
     /// Move the client INVITE txn at `branch` to Accepted on its first 2xx:
     /// every timer it ran stops, a CANCEL still parked on it is moot (§9.2;
-    /// counted dropped only if it never left), the 2xx's dialog is recorded,
+    /// counted dropped only if it never left), the 2xx's dialog is recorded
+    /// with its first arrival (ADR-0063 §1),
     /// Timer M holds it from this 2xx, and it leaves its call's books
     /// ([`Owner::settle_accepted`]). The parsed INVITE, several times the size
     /// of its image, gives way to that image, all an Accepted txn reads of it
@@ -41,6 +44,7 @@ impl Owner {
                 txn.seed_resend = None;
                 txn.ladder = None;
                 let _ = txn.dialog(resp.to().tag());
+                txn.final_copies.arrival(resp.to().tag(), Class::Final2xx, Instant::now());
                 (
                     txn.retransmit_key.take(),
                     txn.timeout_key.take(),

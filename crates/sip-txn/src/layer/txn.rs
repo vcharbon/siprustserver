@@ -12,6 +12,7 @@ use tokio_util::time::delay_queue::Key;
 use call::{TxnKind, TxnTimeoutKind};
 use sip_retransmit::Ladder;
 
+use super::copies::{Copies, FinalCopies};
 use super::key::{ServerTxnId, ServerTxnKey};
 use super::lifetime::Lifetime;
 
@@ -38,8 +39,8 @@ pub(super) enum TxnState {
     Confirmed,
     /// RFC 6026 Accepted, after a 2xx; nothing retransmits or times out here.
     /// An INVITE server txn that sent a 2xx (§7.1, §8.7): held for Timer L,
-    /// passing every ACK up and handing no copy of its INVITE up; this stack
-    /// answers each copy with that 2xx where §8.7 sends nothing (`replay_cached`).
+    /// passing every ACK up and absorbing every copy of its INVITE, but the
+    /// first copy an Accepted seed meets before its 2xx left (`replay_cached`).
     /// An INVITE client txn that took a 2xx (§7.2): held for Timer M from
     /// that 2xx, absorbing every 1xx and non-2xx (§8.4). While its call holds
     /// it, every later 2xx reaches the TU, which owns each ACK (RFC 3261
@@ -264,6 +265,10 @@ impl Transaction {
             orphaned: false,
             held: false,
             seeded: false,
+            copies: None,
+            cancel_copies: None,
+            final_copies: FinalCopies::default(),
+            unsent_2xx: false,
         }
     }
 
@@ -446,4 +451,17 @@ pub(super) struct Transaction {
     /// A server INVITE transaction a seed rebuilt from a record, not one a
     /// request this layer received opened: it answers no copy of its own.
     pub(super) seeded: bool,
+    /// On a server transaction: the copies of its request (ADR-0063 §1),
+    /// from its first arrival. `None` on a seed until its first copy, which
+    /// is its first arrival here, and on a client transaction.
+    pub(super) copies: Option<Copies>,
+    /// On a server INVITE: the copies of a CANCEL of it, from that CANCEL's
+    /// first arrival.
+    pub(super) cancel_copies: Option<Copies>,
+    /// On a client INVITE: the copies of its finals, per To-tag.
+    pub(super) final_copies: FinalCopies,
+    /// On a server INVITE an Accepted seed rebuilt (ADR-0014): its 2xx has
+    /// not left this node, so the first copy of the INVITE draws it (RFC
+    /// 6026 §7.1 has an Accepted transaction absorb every other copy).
+    pub(super) unsent_2xx: bool,
 }

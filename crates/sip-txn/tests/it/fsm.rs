@@ -764,7 +764,7 @@ async fn unmatched_cancel_is_handed_up_unanswered() {
         "an unmatched CANCEL must not surface a Cancelled"
     );
     assert!(has_message_request(&events, "CANCEL"), "the CANCEL itself reaches the consumer");
-    assert_eq!(active(&stack), 0, "and builds no transaction");
+    assert_eq!(active(&stack), 1, "through a transaction of its own (ADR-0063 §1)");
 }
 
 /// A CANCEL arriving after the INVITE was answered (200 raced the CANCEL) finds

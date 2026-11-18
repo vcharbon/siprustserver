@@ -176,6 +176,7 @@ b2bua-runner b2bua_txn_keepalive_lane_drops_total counter fixed {}
 b2bua-runner b2bua_txn_message_budget_trips_total counter fixed {}
 b2bua-runner b2bua_txn_message_budget_uncounted_total counter fixed {}
 b2bua-runner b2bua_txn_muted_messages_total counter fixed {direction}
+b2bua-runner b2bua_txn_copies_past_schedule_total counter fixed {kind}
 b2bua-runner b2bua_txn_event_queue_drops_total counter fixed {reason}
 b2bua-runner b2bua_txn_event_queue_deferred_total counter fixed {reason}
 b2bua-runner b2bua_txn_event_queue_deferred gauge fixed {}

@@ -152,9 +152,10 @@ impl Owner {
     /// A server INVITE Accepted on `response` (RFC 6026 §7.1), keyed by its top
     /// Via. An occupant that has sent no final takes `response`; one a received
     /// copy of the INVITE opened sends it to the address that copy came from,
-    /// having answered it with a provisional only, and a seeded one sends
-    /// nothing: the 2xx's own retransmission ladder repeats it (RFC 3261
-    /// §13.3.1.4). `false` when the response names no branch or its identity
+    /// having answered it with a provisional only. A seeded occupant and a
+    /// fresh seed send nothing now: the 2xx's own retransmission ladder
+    /// repeats it (RFC 3261 §13.3.1.4), and the first copy of the INVITE
+    /// draws it. `false` when the response names no branch or its identity
     /// holds a transaction that has sent its final.
     async fn seed_accepted(
         &mut self,
@@ -172,9 +173,12 @@ impl Owner {
             }
             let dest = occupant.destination.filter(|_| !occupant.seeded);
             self.accept(key.id(), &response);
-            if let Some(dest) = dest {
-                self.send_buffer(endpoint, response.call_id().as_str(), response.image(), dest)
-                    .await;
+            match dest {
+                Some(dest) => {
+                    let call_id = response.call_id().as_str();
+                    self.send_buffer(endpoint, call_id, response.image(), dest).await;
+                }
+                None => self.owe_seeded_2xx(key.id()),
             }
             return true;
         }
@@ -194,7 +198,16 @@ impl Owner {
         });
         self.hold_seeded_identity(TxnRef::Server(key.id()));
         self.accept(key.id(), &response);
+        self.owe_seeded_2xx(key.id());
         true
+    }
+
+    /// The Accepted seed `id` names has not sent its 2xx from this node: the
+    /// first copy of its INVITE draws it (`replay_cached`).
+    fn owe_seeded_2xx(&mut self, id: ServerTxnId<'_>) {
+        if let Some(txn) = self.server_mut(id) {
+            txn.unsent_2xx = true;
+        }
     }
 
     /// A server INVITE Completed on the non-2xx `response` (RFC 3261 §17.2.1),

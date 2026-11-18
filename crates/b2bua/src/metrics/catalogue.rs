@@ -280,6 +280,7 @@ pub const TXN: &[Family] = &[
     txn::MESSAGE_BUDGET_TRIPS,
     txn::MESSAGE_BUDGET_UNCOUNTED,
     txn::MUTED_MESSAGES,
+    txn::COPIES_PAST_SCHEDULE,
     txn::EVENT_QUEUE_DROPS,
     txn::EVENT_QUEUE_DEFERRALS,
     txn::EVENT_QUEUE_DEFERRED,

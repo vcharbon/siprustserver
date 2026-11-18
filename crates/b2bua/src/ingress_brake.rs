@@ -36,9 +36,10 @@
 //!   - a datagram the parser refuses → accept (the transaction layer answers
 //!     or drops it);
 //!   - a response, any request but an INVITE → accept;
-//!   - a copy of an initial INVITE the worker refused in the last 64·T1 — at
-//!     this brake or at the transaction layer's deferred backlog, whatever
-//!     its class → that refusal again, counted as a copy;
+//!   - a copy of an initial INVITE the worker refused, within 64·T1 of its
+//!     last copy — at this brake or at the transaction layer's deferred
+//!     backlog, whatever its class → that refusal again, counted as a copy,
+//!     on the RFC schedule (ADR-0063 §1); a copy past it → drop;
 //!   - otherwise the ladder's brake rung judges it in its class
 //!     ([`class_of`]): an INVITE carrying a `To`-tag is admitted (the brake
 //!     never touches an existing call), an emergency one too, counted on
@@ -49,8 +50,9 @@
 //!
 //! While it is not engaged and the worker remembers a refused INVITE, the
 //! datagram is parsed the same way, and an initial INVITE the worker refused
-//! in the last 64·T1 — at this brake or at the transaction layer's deferred
-//! backlog — draws that refusal again, so a refused call is never admitted
+//! within 64·T1 of its last copy — at this brake or at the transaction
+//! layer's deferred backlog — draws that refusal again on the same schedule,
+//! or is dropped past it, so a refused call is never admitted
 //! behind its caller's back. Every other datagram is then accepted.
 //!
 //! The brake shares the worker's one refusal memo and answer with the
@@ -70,7 +72,7 @@ use sip_message::received::{stamp_received, Received};
 use sip_message::{serialize, CustomParser, Method, SipMessage, SipRequest};
 use sip_net::types::{PreIngressAction, PreIngressHook};
 use sip_net::{Arrival, QueueLoad};
-use sip_txn::{InviteRefusals, Verdict as Memo};
+use sip_txn::{InviteRefusals, RefusedCopy, Verdict as Memo};
 
 use crate::admission::{class_of, judge, Class, Refusals, Rung, Verdict};
 use crate::new_calls::{Refusal, StatelessCounts};
@@ -232,9 +234,15 @@ pub fn build_ingress_brake_hook(
         // A copy of an INVITE the worker refused draws that refusal again, on
         // either side of the threshold and whatever its class. A held identity
         // is never refused (see `InviteRefusals`), so a live call is spared.
-        if class != Class::InDialog && memo.remembers() && memo.refused(req) {
-            counters.record_copy();
-            return reply(&memo, req, src);
+        if class != Class::InDialog && memo.remembers() {
+            match memo.refused_copy(req) {
+                Some(RefusedCopy::Answered) => {
+                    counters.record_copy();
+                    return reply(&memo, req, src);
+                }
+                Some(RefusedCopy::Absorbed) => return PreIngressAction::Drop,
+                None => {}
+            }
         }
         let verdict = match judge(Rung::Brake { depth, threshold }, class) {
             Verdict::Admit => judge(Rung::EventQueue { refusing: gate_refusing }, class),

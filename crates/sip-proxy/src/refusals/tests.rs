@@ -28,6 +28,14 @@ fn wire(resp: SipResponse) -> String {
     String::from_utf8(serialize(&SipMessage::Response(resp))).expect("utf-8")
 }
 
+/// The answer a copy drew, `None` when it drew nothing.
+fn answered(repeat: Option<Repeat>) -> Option<SipResponse> {
+    match repeat? {
+        Repeat::Answer(resp) => Some(*resp),
+        Repeat::Absorbed => None,
+    }
+}
+
 /// The wire form of a refusal that must be built.
 fn refusal_wire(resp: Result<SipResponse, GenerateError>) -> String {
     wire(resp.expect("a refusal"))
@@ -53,7 +61,7 @@ fn every_copy_draws_the_same_refusal() {
     let r = Refusals::new(&IdGen::seeded(1), 30);
     assert!(r.repeat(&invite("z9hG4bK-a"), SRC, 0).is_none(), "nothing is remembered yet");
     let first = refusal_wire(r.refuse(&invite("z9hG4bK-a"), SRC, 5, 0));
-    let copy = r.repeat(&invite("z9hG4bK-a"), SRC, TIMER_B - 1).expect("a copy is remembered");
+    let copy = answered(r.repeat(&invite("z9hG4bK-a"), SRC, TIMER_B - 1)).expect("remembered");
     assert_eq!(first, wire(copy));
     assert!(r.repeat(&invite("z9hG4bK-b"), SRC, 0).is_none(), "another INVITE is no copy");
     let other = refusal_wire(r.refuse(&invite("z9hG4bK-b"), SRC, 5, 0));
@@ -119,7 +127,7 @@ Content-Length: 0\r\n\r\n"
 fn the_cancel_of_a_refused_invite_draws_200_with_its_final_s_tag() {
     let r = Refusals::new(&IdGen::seeded(1), 0);
     let refused = refusal_wire(r.refuse(&invite("z9hG4bK-a"), SRC, 1, 0));
-    let ok = wire(r.cancel(&cancel("z9hG4bK-a"), SRC, 0).expect("a refused INVITE"));
+    let ok = wire(answered(r.cancel(&cancel("z9hG4bK-a"), SRC, 0)).expect("a refused INVITE"));
     assert!(ok.starts_with("SIP/2.0 200 OK\r\n"), "{ok}");
     assert!(ok.contains("CSeq: 1 CANCEL\r\n"), "{ok}");
     assert!(!ok.contains("Retry-After"), "{ok}");
@@ -136,9 +144,9 @@ fn a_513_is_remembered_as_a_503_is() {
     let first = refusal_wire(r.refuse_too_large(&invite("z9hG4bK-a"), SRC, 0));
     assert!(first.starts_with("SIP/2.0 513 Message Too Large\r\n"), "{first}");
     assert!(!first.contains("Retry-After"), "{first}");
-    let copy = wire(r.repeat(&invite("z9hG4bK-a"), SRC, 10).expect("a remembered 513"));
+    let copy = wire(answered(r.repeat(&invite("z9hG4bK-a"), SRC, 10)).expect("a remembered 513"));
     assert_eq!(copy, first);
-    let ok = wire(r.cancel(&cancel("z9hG4bK-a"), SRC, 10).expect("a refused INVITE"));
+    let ok = wire(answered(r.cancel(&cancel("z9hG4bK-a"), SRC, 10)).expect("a refused INVITE"));
     let to = |w: &str| w.lines().find(|l| l.starts_with("To:")).map(str::to_owned);
     assert!(ok.starts_with("SIP/2.0 200 OK\r\n"), "{ok}");
     assert_eq!(to(&ok), to(&first));
@@ -180,9 +188,25 @@ fn a_repeated_503_and_a_cancels_200_are_stamped_with_their_source() {
     let r = Refusals::new(&IdGen::seeded(1), 0);
     let invite = || asking_rport(invite("z9hG4bK-a"));
     r.refuse(&invite(), SRC, 1, 0).expect("a refusal");
-    let copy = r.repeat(&invite(), MAPPED, 1).expect("a copy is remembered");
+    let copy = answered(r.repeat(&invite(), MAPPED, 1)).expect("a copy is remembered");
     assert_stamped(&copy);
-    let ok = r.cancel(&asking_rport(cancel("z9hG4bK-a")), MAPPED, 1).expect("a refused INVITE");
+    let ok = answered(r.cancel(&asking_rport(cancel("z9hG4bK-a")), MAPPED, 1));
+    let ok = ok.expect("a refused INVITE");
     assert_eq!(ok.status(), 200);
     assert_stamped(&ok);
+}
+
+/// A copy past 64·T1 of the refused request's first arrival draws nothing,
+/// and keeps the refusal 64·T1 longer: the next copy is absorbed too, not
+/// judged afresh.
+#[test]
+fn a_copy_past_64_t1_of_the_first_draws_nothing_and_keeps_the_refusal() {
+    let r = Refusals::new(&IdGen::seeded(1), 0);
+    r.refuse(&invite("z9hG4bK-a"), SRC, 1, 0).expect("a refusal");
+    assert!(answered(r.repeat(&invite("z9hG4bK-a"), SRC, TIMER_B - 1)).is_some(), "inside");
+    let late = TIMER_B * 2 - 2;
+    assert!(matches!(r.repeat(&invite("z9hG4bK-a"), SRC, late), Some(Repeat::Absorbed)));
+    let later = late + TIMER_B - 1;
+    assert!(matches!(r.repeat(&invite("z9hG4bK-a"), SRC, later), Some(Repeat::Absorbed)));
+    assert!(r.repeat(&invite("z9hG4bK-a"), SRC, later + TIMER_B).is_none(), "forgotten then");
 }

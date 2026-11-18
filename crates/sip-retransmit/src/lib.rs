@@ -62,6 +62,11 @@ const MAX_DOUBLINGS: u32 = 20;
 /// every class gives up by 64·T1.
 const MAX_RUNGS: u32 = 64;
 
+/// How long after a message's first arrival a peer's copy of it is still
+/// answered (ADR-0063 §1): 64·T1, past which a compliant emitter re-sends
+/// nothing (Timer B, F, H, L).
+pub const COPY_WINDOW: Duration = timers::ms(64 * T1);
+
 /// The retransmission class of a message: what an RFC obliges its emitter to
 /// re-send, and how often.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -166,6 +171,16 @@ impl Class {
             resends = rung;
         }
         resends
+    }
+
+    /// Whether a peer's copy of a message this class's ladder re-sends is
+    /// owed an answer (ADR-0063 §1): `copy` numbers it among the copies after
+    /// the message's first arrival (from 1), answered at any pace up to the
+    /// ladder's [`resends`](Self::resends), and past them only `since_answered`
+    /// at least T1 after the last copy answered (`None`: none was). The
+    /// [`COPY_WINDOW`] is the caller's to apply.
+    pub fn owes_copy(self, copy: u32, since_answered: Option<Duration>) -> bool {
+        copy <= self.resends() || since_answered.is_none_or(|since| since >= timers::ms(T1))
     }
 
     /// The wait before rung `n` (counting from 1).

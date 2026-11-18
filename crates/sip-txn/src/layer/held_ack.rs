@@ -4,7 +4,8 @@
 //! consumer releases it ([`TransactionLayer::release_ack`]) or until
 //! `ack_bound_ms` past the final, whichever comes first. A copy of the final
 //! that arrives meanwhile is absorbed with nothing sent: the held ACK answers
-//! it. Once the ACK left, each copy is ACKed again as it arrives.
+//! it. Once the ACK left, each copy is ACKed again as it arrives, on the RFC
+//! schedule (ADR-0063 §1).
 //!
 //! [`TransactionLayer::release_ack`]: crate::TransactionLayer::release_ack
 
@@ -29,9 +30,10 @@ pub(super) type Rejected = (TxnState, bool, Option<Box<SipRequest>>, Option<Sock
 impl Owner {
     /// The non-2xx final `resp` from `src` on the client INVITE transaction at
     /// `branch`, ACKed hop by hop (RFC 3261 §17.1.1.2). A copy of it on a
-    /// `Completed` transaction is re-ACKed unless the first ACK is still held,
-    /// which answers it, and goes nowhere; an orphan's ACK leaves at once,
-    /// with nobody to hand the final to; else the ACK is held or sent
+    /// `Completed` transaction is re-ACKed on the RFC schedule (ADR-0063 §1,
+    /// [`final_copy_owed`](Self::final_copy_owed)) unless the first ACK is
+    /// still held, which answers it, and goes nowhere; an orphan's ACK leaves
+    /// at once, with nobody to hand the final to; else the ACK is held or sent
     /// ([`ack_first_non_2xx`](Self::ack_first_non_2xx)), the transaction held
     /// Completed for Timer D so each copy is absorbed, not re-surfaced, and
     /// the final handed up once, critical: the ACK silences the UAS's resend,
@@ -55,8 +57,9 @@ impl Owner {
             _ => None,
         };
         let call_id = resp.call_id().as_str();
+        let owed = self.final_copy_owed(branch, resp.to().tag(), resp.status());
         if state == TxnState::Completed {
-            if let Some((ack, dest)) = ack.filter(|_| !self.holds_ack(branch)) {
+            if let Some((ack, dest)) = ack.filter(|_| owed && !self.holds_ack(branch)) {
                 self.send_buffer(endpoint, call_id, &ack, dest).await;
             }
             return;

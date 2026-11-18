@@ -414,7 +414,7 @@ impl Owner {
                     // RFC 6026 §7.2 + RFC 3261 §13.2.2.4: the orphan's 2xx
                     // draws its dialog's ACK from the layer; a 1xx or a non-2xx
                     // is absorbed until Timer M (§8.4: only 2xx go up).
-                    if is_2xx {
+                    if is_2xx && self.final_copy_owed(branch, resp.to().tag(), resp.status()) {
                         self.release_2xx(endpoint, branch, &resp).await;
                     }
                     return true;
