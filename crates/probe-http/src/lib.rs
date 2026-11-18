@@ -25,7 +25,9 @@
 //!   while they run, are served by an [`AdminServer`] on a loopback listener
 //!   of its own.
 //!
-//! [`parse_socket_addr`] is the address grammar of every listener's variable.
+//! [`parse_socket_addr`] is the address grammar of the proxy's and the route
+//! guard's HTTP listener variables and of `B2BUA_ADMIN`; the worker kit reads
+//! its other listeners with it before resolving a host name.
 //!
 //! ## Why one module
 //! The servers differ only in the `/metrics` body and the readiness predicate —

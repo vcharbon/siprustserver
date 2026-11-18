@@ -19,8 +19,8 @@ each runner's startup check.
 | `routeGuard.deadMs` + the BFD detection time ≤ `routeGuard.withdrawWithinMs` (route guard on) | a hung or dead proxy, whose guard stops refreshing, leaves it within the bound |
 | proxy `minReadySeconds` > `readinessProbe.periodSeconds` + `announce.metallb.connectTimeSeconds` + 2 s (route guard on) | the pod is Ready once its guard let the node out; its BGP sessions are back before the rollout stops the next proxy |
 | proxy PROXY_METRICS (`proxy.metrics.bind`) keeps port 9090, `proxy.routeGuard.metricsBind` `proxy.routeGuard.metricsPort`, worker B2BUA_METRICS (`worker.metrics.bind`) 9091 | the readiness and liveness probes, the scraper and the route guard read them there |
-| a proxy or route guard scrape bind's host is `$(HOST_IP)` or a dotted-quad IPv4 address outside 0.0.0.0/8 and 127.0.0.0/8 that is neither `network.proxyVip` nor `network.externalVip`; with `httpBinds.allowWildcard`, also `0.0.0.0` or `[::]` | the hostNetwork pod's wildcard binds every interface of its node, the external plane's included; the probes and the scraper reach the pod at the node's address, not at a VIP every proxy node holds on lo; an allowlist leaves no other spelling of these addresses through |
-| no worker scrape bind on loopback; no scrape bind naming a `$(VAR)` but its pod's address (`HOST_IP` for the proxy pod, `POD_IP` for a worker) | the kubelet's probes and the scraper reach the pod at its own address; an undeclared variable is left unexpanded and the runner cannot bind it |
+| a proxy or route guard scrape bind's host is `$(HOST_IP)`, with `httpBinds.allowWildcard` also `0.0.0.0` or `[::]`; a worker's is `$(POD_IP)`, `0.0.0.0` or `[::]` | every replica binds the one rendered value on its own node or in its own pod, where the probes and the scraper reach it, so no literal address serves them all; the hostNetwork pod's wildcard binds every interface of its node, the external plane's included; an allowlist leaves no other spelling of loopback, a VIP or a wildcard through |
+| no proxy or worker `extraEnv` entry names PROXY_METRICS, PROXY_DEBUG, ROUTE_GUARD_METRICS, ROUTE_GUARD_FITNESS, B2BUA_METRICS, B2BUA_ADMIN, HOST_IP or POD_IP; no proxy or worker `env` states HOST_IP or POD_IP | an entry after the chart's would replace a checked listener variable, or the address a bind names, unchecked |
 | proxy `announce.port` ≠ the metrics port 9090 and ≠ `network.sipPort` | the announce-only Services expose nothing kube-proxy would forward to a listener |
 | `proxy.nodeSelector` set | the workers' node affinity keeps them off every node it names: a node that runs or ran a proxy keeps the VIPs on lo (ADR-0056 §7) |
 | `network.externalNextHops` set | traffic from the external VIP leaves only through the table these next hops fill (ADR-0056 §11): with none, nothing reaches a caller |
@@ -37,8 +37,8 @@ each runner's startup check.
 | `proxy.hmac.existingSecret` set, or `proxy.hmac.drawInCluster` | a render without a cluster (helm template, GitOps) draws a new cookie key each time |
 | `sizing.enabled` ⇒ no component env or `proxy.selfGate` states a value sizing computes | one source for each capacity value: the computed ones keep the relations above by construction (templates/_sizing.tpl); the computed memory replaces the components' memory requests and limits |
 
-An `extraEnv` entry is outside these relations: a value set there is the
-operator's to keep consistent.
+An `extraEnv` entry is outside these relations, the listener variables'
+refusal aside: a value set there is the operator's to keep consistent.
 */ -}}
 {{- $margin := 2000 }}
 {{- $sizing := include "siprust.sizing" .Values | fromJson }}
@@ -210,12 +210,39 @@ grammar, the call limiter's lease. */ -}}
 {{- end }}
 {{- end }}
 {{- end }}
-{{- /* The scrape listeners: each bind keeps the port its readers use, is
-reached at the pod's address, and names no variable but its pod's address. On
-the hostNetwork proxy pod its host is one siprust.proxyPodHostRefusal takes; a
-worker's is any but loopback. Each entry: the name, the final bind, its port,
-why that port, the address variable its pod declares, whether it is
-hostNetwork. */ -}}
+{{- /* The listener variables: only the chart states them, so no extraEnv
+entry restates one after the chart's and no env replaces an address variable
+a bind names. */ -}}
+{{- $listenerVars := dict
+  "PROXY_METRICS" "proxy.metrics.bind"
+  "PROXY_DEBUG" "proxy.debug.bind"
+  "ROUTE_GUARD_METRICS" "proxy.routeGuard.metricsBind"
+  "ROUTE_GUARD_FITNESS" "proxy.metrics.bind, which it follows"
+  "B2BUA_METRICS" "worker.metrics.bind"
+  "B2BUA_ADMIN" "worker.admin.bind"
+  "HOST_IP" "nothing: the downward API's status.hostIP"
+  "POD_IP" "nothing: the downward API's status.podIP"
+}}
+{{- range $component := list "proxy" "worker" }}
+{{- $c := index $.Values $component }}
+{{- if $c.enabled }}
+{{- range $c.extraEnv | default list }}
+{{- $name := toString .name }}
+{{- with get $listenerVars $name }}
+{{- fail (printf "%s.extraEnv names %s, which the chart states and checks; an entry after the chart's replaces it unchecked: its value is %s" $component $name .) }}
+{{- end }}
+{{- end }}
+{{- range $name := list "HOST_IP" "POD_IP" }}
+{{- if hasKey ($c.env | default dict) $name }}
+{{- fail (printf "%s.env.%s names an address variable the chart takes from the downward API: a scrape bind names it, so no env replaces it" $component $name) }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- /* The scrape listeners: each bind keeps the port its readers use, and its
+host is one siprust.scrapeHostRefusal takes. Each entry: the name, the final
+bind, its port, why that port, the address variable its pod declares, whether
+it is hostNetwork. */ -}}
 {{- $scrape := list }}
 {{- if .Values.proxy.enabled }}
 {{- $named := ternary "proxy PROXY_METRICS" "proxy.metrics.bind" (hasKey $penv "PROXY_METRICS") }}
@@ -232,21 +259,11 @@ hostNetwork. */ -}}
 {{- end }}
 {{- range $scrape }}
 {{- $name := index . 0 }}{{- $bind := index . 1 }}{{- $port := index . 2 }}{{- $why := index . 3 }}
-{{- $addrVar := printf "$(%s)" (index . 4) }}{{- $hostNetwork := index . 5 }}
 {{- if not (hasSuffix (printf ":%d" $port) $bind) }}
 {{- fail (printf "%s=%s must keep port %d: %s" $name $bind $port $why) }}
 {{- end }}
-{{- range regexFindAll "\\$\\([^)]*\\)" $bind -1 }}
-{{- if ne . $addrVar }}
-{{- fail (printf "%s=%s names %s, which its pod does not declare before it: a scrape bind names %s only" $name $bind . $addrVar) }}
-{{- end }}
-{{- end }}
-{{- if $hostNetwork }}
-{{- with include "siprust.proxyPodHostRefusal" (list $ $bind $port) }}
+{{- with include "siprust.scrapeHostRefusal" (list $ $bind $port (index . 4) (index . 5)) }}
 {{- fail (printf "%s=%s %s" $name $bind .) }}
-{{- end }}
-{{- else if include "siprust.bindIsLoopback" $bind }}
-{{- fail (printf "%s=%s is a loopback address: the kubelet's probes and the scraper reach the pod at its own address" $name $bind) }}
 {{- end }}
 {{- end }}
 {{- if and .Values.worker.enabled .Values.callLimiter.enabled }}

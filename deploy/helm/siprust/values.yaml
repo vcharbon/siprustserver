@@ -35,17 +35,18 @@ imagePullSecrets: []
 
 # The runners' HTTP listeners. A scrape listener (proxy.metrics.bind,
 # proxy.routeGuard.metricsBind, worker.metrics.bind: /metrics and the probe
-# routes) is reached at its pod's address, never on loopback (refused at
-# render). The hostNetwork proxy pod's binds take the node's address by
-# default, `$(HOST_IP)`, either family; the only other host they take is a
-# dotted-quad IPv4 address of the node that is neither loopback nor a VIP
-# (refused at render otherwise). A worker's binds every address of its own
-# network namespace, which holds the pod IP and loopback only, behind the
-# workers' NetworkPolicy, and `kubectl port-forward` reaches it. The operator
-# and debug routes (worker.admin.bind, proxy.debug.bind) bind loopback only,
-# reached through `kubectl port-forward` (deploy/helm/README.md). Each bind is
-# `ip:port` and may name `$(HOST_IP)` (the proxy pod) or `$(POD_IP)` (a
-# worker), no other variable (refused at render).
+# routes) is reached at its pod's address. Every replica binds the one
+# rendered value, so its host is the pod's address variable or a wildcard,
+# never a literal address (refused at render). The hostNetwork proxy pod's
+# binds take the node's address, `$(HOST_IP)`, either family; with
+# httpBinds.allowWildcard, also 0.0.0.0 or [::]. A worker's binds every
+# address of its own network namespace by default, which holds the pod IP and
+# loopback only, behind the workers' NetworkPolicy, and `kubectl port-forward`
+# reaches it; it takes `$(POD_IP)`, 0.0.0.0 or [::]. The operator and debug
+# routes (worker.admin.bind, proxy.debug.bind) bind loopback only, reached
+# through `kubectl port-forward` (deploy/helm/README.md). The proxy's and the
+# worker's extraEnv never name a listener variable or HOST_IP / POD_IP
+# (refused at render).
 httpBinds:
   # On, a proxy or route guard scrape bind may also be the wildcard, 0.0.0.0
   # or [::] (no other spelling). The wildcard takes connections from the
@@ -172,9 +173,9 @@ worker:
     port: 9092
   # B2BUA_METRICS: /metrics, /ready, /healthz, on port 9091, where the
   # kubelet's probes, the Service and the scraper reach them (refused at render
-  # otherwise). Empty: every address of the pod, 0.0.0.0:9091 (the pod IP and
-  # loopback; `$(POD_IP):9091` binds the pod IP alone, out of kubectl
-  # port-forward's reach).
+  # otherwise). Empty: 0.0.0.0:9091, the pod's IPv4 addresses (its pod IP and
+  # loopback); [::]:9091 covers both families; `$(POD_IP):9091` binds the pod
+  # IP alone, out of kubectl port-forward's reach.
   metrics:
     bind: ""
   # B2BUA_ADMIN: the operator routes (/admin/*) and the debug routes
@@ -262,11 +263,11 @@ proxy:
   # kubelet's probes, the scraper and the route guard read them (refused at
   # render otherwise). Empty: the node's address (status.hostIP, the node's
   # InternalIP), $(HOST_IP):9090, the value to keep; with
-  # httpBinds.allowWildcard, 0.0.0.0:9090 or [::]:9090. A VIP is refused: the
-  # probes reach the pod at the node's address. One value serves every proxy
-  # pod, so where a node's InternalIP is not on the internal plane, set the
-  # kubelet's node IP (--node-ip) to the node's internal-plane address rather
-  # than an address here; the probes reach the pod at that address only.
+  # httpBinds.allowWildcard, 0.0.0.0:9090 or [::]:9090. A literal address is
+  # refused: one value serves every proxy pod, each on its own node. Where a
+  # node's InternalIP is not on the internal plane, set the kubelet's node IP
+  # (--node-ip) to the node's internal-plane address; the probes reach the pod
+  # at that address only.
   metrics:
     bind: ""
   # PROXY_DEBUG: /debug/flamegraph, on the node's loopback (hostNetwork), on a

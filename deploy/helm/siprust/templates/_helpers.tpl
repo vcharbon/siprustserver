@@ -295,57 +295,33 @@ env> <variable> <the chart's value> <the runner's default>).
 {{- $g.metricsBind | default (printf "$(HOST_IP):%d" (int $g.metricsPort)) }}
 {{- end }}
 
-{{/*
-The host of an `ip:port` bind, lower case: inside its brackets, else before
-its last colon, an IPv6 zone dropped.
-*/}}
-{{- define "siprust.bindHost" -}}
-{{- $host := ternary (regexReplaceAll "^\\[([^]]*)\\].*$" . "${1}") (regexReplaceAll ":[^:]*$" . "") (hasPrefix "[" .) }}
-{{- regexReplaceAll "%.*$" $host "" | lower }}
-{{- end }}
-
-{{/* The wildcard hosts a proxy pod scrape bind takes with httpBinds.allowWildcard. */}}
+{{/* The wildcard hosts a scrape bind takes: 0.0.0.0 and [::], no other spelling. */}}
 {{- define "siprust.wildcardHosts" -}}
 0.0.0.0 [::]
 {{- end }}
 
 {{/*
-Why the hostNetwork proxy pod refuses a scrape bind's host, empty when it
-takes it. The host is an allowlist: $(HOST_IP), or an IPv4 address in
-dotted-quad form that is neither 0.0.0.0/8, loopback nor a VIP the node holds
-on lo; with httpBinds.allowWildcard, also 0.0.0.0 or [::]. Takes (list <root>
-<bind> <port>), the bind already on its port.
+Why a scrape bind's host is refused, empty when it is taken. The host is an
+allowlist: the pod's address variable, $(HOST_IP) on the hostNetwork proxy
+pod and $(POD_IP) on a worker, or a wildcard host, on the proxy pod only with
+httpBinds.allowWildcard. Every replica renders the same bind, so no literal
+address serves them all. Takes (list <root> <bind> <port> <address variable>
+<hostNetwork>), the bind already on its port.
 */}}
-{{- define "siprust.proxyPodHostRefusal" -}}
-{{- $root := index . 0 }}{{- $bind := index . 1 }}
-{{- $host := trimSuffix (printf ":%d" (index . 2)) $bind }}
-{{- $octet := "(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])" }}
-{{- $vips := dict "network.proxyVip" (toString $root.Values.network.proxyVip) "network.externalVip" (toString $root.Values.network.externalVip) }}
-{{- if eq $host "$(HOST_IP)" }}
-{{- else if has $host (splitList " " (include "siprust.wildcardHosts" $root)) }}
-{{- if not $root.Values.httpBinds.allowWildcard }}
+{{- define "siprust.scrapeHostRefusal" -}}
+{{- $root := index . 0 }}{{- $addrVar := printf "$(%s)" (index . 3) }}{{- $hostNetwork := index . 4 }}
+{{- $host := trimSuffix (printf ":%d" (index . 2)) (index . 1) }}
+{{- $wildcard := has $host (splitList " " (include "siprust.wildcardHosts" $root)) }}
+{{- if eq $host $addrVar }}
+{{- else if and $wildcard (not $hostNetwork) }}
+{{- else if and $wildcard $root.Values.httpBinds.allowWildcard }}
+{{- else if $wildcard }}
 {{- printf "is a wildcard, which on the hostNetwork proxy pod binds every interface of the node, the external plane's included: bind $(HOST_IP), or set httpBinds.allowWildcard=true" }}
-{{- end }}
-{{- else if or (not (regexMatch (printf "^%s(\\.%s){3}$" $octet $octet) $host)) (hasPrefix "0." $host) }}
-{{- printf "is no address the hostNetwork proxy pod binds: a scrape bind there is $(HOST_IP), an IPv4 address of the node in dotted-quad form, or with httpBinds.allowWildcard=true 0.0.0.0 or [::]" }}
-{{- else if hasPrefix "127." $host }}
-{{- printf "is a loopback address: the kubelet's probes and the scraper reach the pod at its own address" }}
+{{- else if $hostNetwork }}
+{{- printf "is no host the hostNetwork proxy pod binds: each replica binds it on its own node, where the kubelet's probes and the scraper reach it, so its host is $(HOST_IP), or with httpBinds.allowWildcard=true 0.0.0.0 or [::]" }}
 {{- else }}
-{{- range $name, $vip := $vips }}
-{{- if eq $host $vip }}
-{{- printf "is %s, which every proxy node holds on lo: the kubelet's probes and the scraper reach the pod at the node's address" $name }}
+{{- printf "is no host a worker binds: each replica binds it in its own pod, where the kubelet's probes and the scraper reach it at the pod IP, so its host is $(POD_IP), 0.0.0.0 or [::]" }}
 {{- end }}
-{{- end }}
-{{- end }}
-{{- end }}
-
-{{/*
-Whether a bind's host is loopback: "true" or empty. 127.0.0.0/8, every
-spelling of ::1, and an IPv4-mapped 127.0.0.0/8 address.
-*/}}
-{{- define "siprust.bindIsLoopback" -}}
-{{- $host := include "siprust.bindHost" . }}
-{{- if or (regexMatch "^127\\." $host) (regexMatch "^[0:]*:0*1$" $host) (regexMatch "^[0:]*:ffff:127\\." $host) (eq $host "localhost") }}true{{ end }}
 {{- end }}
 
 {{/*

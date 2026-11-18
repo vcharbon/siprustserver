@@ -136,7 +136,7 @@ class GuardRelations(unittest.TestCase):
     def test_the_guard_reads_fitz_where_the_proxy_binds_it(self) -> None:
         def fitness(*args: str) -> str:
             return env(container(proxy(*args), "route-guard"))["ROUTE_GUARD_FITNESS"]
-        self.assertEqual(fitness("--set", "proxy.metrics.bind=10.0.0.5:9090"), "10.0.0.5:9090")
+        self.assertEqual(fitness(), "$(HOST_IP):9090")
         opened = ("--set", "httpBinds.allowWildcard=true")
         for wildcard in ("0.0.0.0:9090", "[::]:9090"):
             self.assertEqual(fitness(*opened, "--set-string", f"proxy.metrics.bind={wildcard}"),

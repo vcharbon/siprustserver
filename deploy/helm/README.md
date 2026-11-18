@@ -170,15 +170,16 @@ listener's bind is a value (`httpBinds` in `values.yaml`):
 - **Metrics** are read by the in-cluster Prometheus from the pod's address. A
   proxy or route guard scrape listener binds the node's InternalIP
   (`$(HOST_IP)`, `status.hostIP`); where that is not on the internal plane,
-  set the kubelet's `--node-ip` to the node's internal-plane address. The
-  render takes no other host there but a dotted-quad IPv4 address that is
-  neither loopback nor a VIP, and, with `httpBinds.allowWildcard=true`,
-  `0.0.0.0` or `[::]`: on the hostNetwork proxy pod a wildcard binds every
-  interface of the node, the external one included, and no NetworkPolicy
-  applies there. A worker is never
-  hostNetwork: its wildcard covers its pod IP and its loopback, and the
-  workers' NetworkPolicy holds port 9091. No scrape bind is loopback: the
-  kubelet's probes reach the pod at its address.
+  set the kubelet's `--node-ip` to the node's internal-plane address. Every
+  replica binds the one rendered value, so the render takes no literal
+  address: a proxy pod's scrape host is `$(HOST_IP)` or, with
+  `httpBinds.allowWildcard=true`, `0.0.0.0` or `[::]`. On the hostNetwork
+  proxy pod a wildcard binds every interface of the node, the external one
+  included, and no NetworkPolicy applies there. A worker is never
+  hostNetwork: its host is `$(POD_IP)`, `0.0.0.0` (its IPv4 pod IP and
+  loopback) or `[::]` (both families), and the workers' NetworkPolicy holds
+  port 9091. The proxy's and the worker's `extraEnv` name no listener
+  variable, nor `HOST_IP` or `POD_IP`.
 - **A proxy's metrics** are read at its node's address, from any host on the
   internal plane: `curl http://<node InternalIP>:9090/metrics` (on the kind
   lab, from the host, which holds the internal bridge's gateway). A worker's
