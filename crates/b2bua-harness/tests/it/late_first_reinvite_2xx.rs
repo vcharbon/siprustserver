@@ -66,7 +66,7 @@ async fn a_2xx_to_an_earlier_reinvite_the_dialog_never_took_is_no_copy() {
     let h = Harness::with_transit_delay("b2bua-late-first-reinvite-2xx", 1);
     h.waive(
         WaiverScope::rule(
-            "single-final-per-transaction",
+            "single-final-per-server-txn",
             "the callee deliberately answers 200 to a re-INVITE it rejected 488 — the \
              late first 2xx this test exists to read",
         )

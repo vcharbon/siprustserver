@@ -135,6 +135,11 @@ pub struct Dialog {
     /// (§13.2.2.4). The next INVITE this side sends on the dialog replaces it,
     /// and a non-2xx ending a re-INVITE closes it.
     pub sent_invite: Option<RequestRecord>,
+    /// The CSeq of the latest INVITE this side sent on the dialog whose round
+    /// ended with no 2xx taken: a 2xx to it arriving later is its first, never
+    /// a copy (§13.3.1.4).
+    #[serde(default)]
+    pub untaken_invite: Option<i64>,
     /// The INVITE this side received on the dialog and answered 2xx, while
     /// that 2xx awaits its ACK (§13.3.1.4): the call's answer on a
     /// caller-facing dialog, or a relayed re-INVITE's. The discharging ACK,
@@ -192,6 +197,7 @@ impl Dialog {
             shows_media: None,
             requests: Vec::new(),
             sent_invite: None,
+            untaken_invite: None,
             answered_invite: None,
             cached_sdp: None,
             sdp_session: None,

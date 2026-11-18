@@ -185,6 +185,7 @@ fn same_dialog(a: &Dialog, b: &Dialog) -> bool {
         shows_media,
         requests,
         sent_invite,
+        untaken_invite,
         answered_invite,
         cached_sdp,
         sdp_session,
@@ -208,6 +209,7 @@ fn same_dialog(a: &Dialog, b: &Dialog) -> bool {
             .zip(b.requests.iter().filter(compared))
             .all(|(x, y)| same_record(x, y))
         && same_option(sent_invite, &b.sent_invite, same_record)
+        && *untaken_invite == b.untaken_invite
         && same_option(answered_invite, &b.answered_invite, same_record)
         && *cached_sdp == b.cached_sdp
         && *sdp_session == b.sdp_session

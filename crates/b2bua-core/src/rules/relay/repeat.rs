@@ -54,12 +54,16 @@ pub(crate) fn copy_of_taken_2xx(leg: &Leg, dialog: &Dialog, resp: &SipResponse) 
 
 /// Whether `resp` is a copy of the 2xx to an INVITE `dialog` sent before its
 /// last (§13.3.1.4): a 2xx to an INVITE under the dialog's remote tag echoing
-/// a CSeq below that last INVITE's. Every INVITE before it was settled before
-/// it left (§14.1), so the copy answers nothing pending; only the one whose
-/// ACK the last INVITE carries ahead ([`copy_of_2xx_ahead`]) is re-ACKed.
+/// a CSeq below that last INVITE's, other than the latest INVITE whose round
+/// ended with no 2xx taken ([`Dialog::untaken_invite`]): that 2xx is its
+/// first. An earlier untaken INVITE is read as taken: the record keeps no
+/// history of it. Every INVITE before the last was settled before it left
+/// (§14.1), so the copy answers nothing pending; only the one whose ACK the
+/// last INVITE carries ahead ([`copy_of_2xx_ahead`]) is re-ACKed.
 pub(crate) fn copy_of_earlier_2xx(dialog: &Dialog, resp: &SipResponse) -> bool {
-    let last = dialog.sent_invite.as_ref().map(|r| r.outbound_cseq);
-    invite_2xx_on(dialog, resp) && last.is_some_and(|last| i64::from(resp.cseq().seq()) < last)
+    let Some(last) = dialog.sent_invite.as_ref() else { return false };
+    let cseq = i64::from(resp.cseq().seq());
+    invite_2xx_on(dialog, resp) && cseq < last.outbound_cseq && dialog.untaken_invite != Some(cseq)
 }
 
 /// Whether `resp`, a [`copy_of_earlier_2xx`] on the dialog whose last INVITE's

@@ -61,15 +61,26 @@ pub fn relayed_invite_pending(d: &Dialog) -> bool {
 /// dialog's last: the ACK the previous one's 2xx drew belongs to that
 /// transaction alone (§13.2.2.4), and `record` carries it as the ACK ahead of
 /// it ([`InviteExchange::ack_ahead`]), with the count of that 2xx's copies,
-/// when it answered a 2xx.
+/// when it answered a 2xx; when no 2xx to it was taken, the dialog notes it
+/// untaken ([`Dialog::untaken_invite`]).
 pub fn open_sent_invite(call: &mut Call, leg_id: &str, id: &DialogId, mut record: RequestRecord) {
     update_dialog(call, leg_id, id, |d| {
         if let Some(ahead) = d.sent_invite.as_ref().and_then(AckAhead::of) {
             record.invite.get_or_insert_with(InviteExchange::default).ack_ahead =
                 Some(Box::new(ahead));
         }
+        note_untaken(d);
         d.sent_invite = Some(record);
     })
+}
+
+/// Note `d`'s last INVITE untaken ([`Dialog::untaken_invite`]) when no 2xx
+/// to it was taken.
+fn note_untaken(d: &mut Dialog) {
+    let last = d.sent_invite.as_ref();
+    if let Some(r) = last.filter(|r| !r.invite.as_ref().is_some_and(InviteExchange::taken)) {
+        d.untaken_invite = Some(r.outbound_cseq);
+    }
 }
 
 /// Retain the Via branch of the ACK-for-2xx just sent on `leg_id`'s
@@ -154,11 +165,13 @@ pub fn close_rejected_invite_round(call: &mut Call, leg_id: &str, branch: &str) 
     })
 }
 
-/// Close `d`'s last INVITE, which no 2xx was taken for: the dialog holds
-/// again the INVITE before it, as the ACK the closed one carried ahead states
-/// it, so a copy of that INVITE's 2xx still draws its ACK (§13.2.2.4) on its
-/// own count; nothing when it carried none.
+/// Close `d`'s last INVITE, which no 2xx was taken for, noted untaken
+/// ([`Dialog::untaken_invite`]): the dialog holds again the INVITE before it,
+/// as the ACK the closed one carried ahead states it, so a copy of that
+/// INVITE's 2xx still draws its ACK (§13.2.2.4) on its own count; nothing
+/// when it carried none.
 pub fn close_untaken_invite(d: &mut Dialog) {
+    note_untaken(d);
     let before = d.sent_invite.as_ref().and_then(|r| r.invite.as_ref()?.ack_ahead.as_ref());
     d.sent_invite = before.map(|ahead| ahead.restored());
 }
