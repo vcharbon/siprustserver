@@ -56,8 +56,7 @@ impl Owner {
         // §9.1), the INVITE transaction's key (§9.2, §17.2.3): one lookup, and
         // a miss is no match. Call-ID and From-tag are confirmed on the hit.
         let cancel_via = req.top_via();
-        // A copy of a CANCEL whose answers are still held: they answer it.
-        if self.cancelled_invite(cancel_via, |t| t.unsent_cancel.is_some()).is_some() {
+        if self.cancel_answers_held(cancel_via) {
             return true;
         }
         if self.cancel_answered_in_own_txn(&req) {
@@ -245,6 +244,12 @@ impl Owner {
         if !self.emit(event) {
             self.delete_txn(TxnRef::Server(key.id()));
         }
+    }
+
+    /// Whether the answers to a CANCEL with top Via `via` (its 200 and its
+    /// INVITE's 487) are still held: they answer its copies when released.
+    fn cancel_answers_held(&self, via: &Via) -> bool {
+        self.cancelled_invite(via, |t| t.unsent_cancel.is_some()).is_some()
     }
 
     /// Whether the CANCEL `req`'s own server transaction (a stray CANCEL's,
