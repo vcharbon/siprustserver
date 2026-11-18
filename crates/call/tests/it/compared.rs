@@ -211,6 +211,22 @@ fn a_re_acked_copy_is_exempt_and_merges_to_the_later() {
     assert_eq!(read(&merge_exempt(early_high, &late_low)), latest, "over the higher copy");
 }
 
+/// The ACK of the 2xx to the INVITE numbered `invite_cseq`, carried ahead with
+/// `copies` of that 2xx counted, the last re-ACKed at `at_ms`.
+fn ack_ahead(invite_cseq: i64, copies: u32, at_ms: i64) -> AckAhead {
+    AckAhead {
+        ack: RetainedEmission::on_trigger(
+            b"ACK sip:bob@192.0.2.20 SIP/2.0\r\n\r\n".to_vec(),
+            ("192.0.2.20".into(), 5060),
+            Repeated::request("ACK"),
+        ),
+        invite_cseq,
+        ack_branch: "z9hG4bKack-ahead".into(),
+        copies_received: copies,
+        re_acked_copy: Some(ReAckedCopy { copy: copies, at_ms }),
+    }
+}
+
 /// The copies of the 2xx before the INVITE a dialog last sent, counted on the
 /// ACK that INVITE carries ahead, are exempt as that INVITE's own are, and a
 /// merge keeps the higher count and the later re-ACKed copy; the ACK itself
@@ -219,16 +235,10 @@ fn a_re_acked_copy_is_exempt_and_merges_to_the_later() {
 fn the_count_carried_ahead_is_exempt_and_merges_to_the_higher() {
     let ahead = |call: &mut Call, copies: u32, at_ms: i64| {
         let d = call.b_legs[0].dialogs.confirmed_mut().expect("the confirmed dialog");
-        let x = call::helpers::sent_exchange_mut(d).expect("the INVITE's exchange");
-        x.ack_ahead = Some(AckAhead {
-            ack: RetainedEmission::on_trigger(
-                b"ACK sip:bob@192.0.2.20 SIP/2.0\r\n\r\n".to_vec(),
-                ("192.0.2.20".into(), 5060),
-                Repeated::request("ACK"),
-            ),
-            copies_received: copies,
-            re_acked_copy: Some(ReAckedCopy { copy: copies, at_ms }),
-        });
+        let record = d.sent_invite.as_mut().expect("the INVITE's record");
+        let invite_cseq = record.outbound_cseq - 1;
+        let x = record.invite.as_mut().expect("the INVITE's exchange");
+        x.ack_ahead = Some(ack_ahead(invite_cseq, copies, at_ms));
     };
     let read = |call: &Call| {
         let d = call.b_legs[0].dialogs.confirmed().expect("the confirmed dialog");
@@ -271,19 +281,12 @@ fn the_count_carried_ahead_merges_with_the_count_on_the_invite_it_left() {
         let mut call = call();
         let d = call.b_legs[0].dialogs.confirmed_mut().expect("the confirmed dialog");
         let record = d.sent_invite.as_mut().expect("the INVITE's record");
+        let invite_cseq = record.outbound_cseq;
         record.outbound_cseq += 1;
         let x = record.invite.as_mut().expect("the INVITE's exchange");
         x.copies_received = 0;
         x.re_acked_copy = None;
-        x.ack_ahead = Some(AckAhead {
-            ack: RetainedEmission::on_trigger(
-                b"ACK sip:bob@192.0.2.20 SIP/2.0\r\n\r\n".to_vec(),
-                ("192.0.2.20".into(), 5060),
-                Repeated::request("ACK"),
-            ),
-            copies_received: copies,
-            re_acked_copy: Some(ReAckedCopy { copy: copies, at_ms }),
-        });
+        x.ack_ahead = Some(ack_ahead(invite_cseq, copies, at_ms));
         call
     };
     let ahead = |call: &Call| {

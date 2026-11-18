@@ -279,7 +279,9 @@ fn same_exchange(a: &InviteExchange, b: &InviteExchange) -> bool {
     };
     *ack_branch == b.ack_branch
         && *emitted_ack == b.emitted_ack
-        && same_option(ack_ahead, &b.ack_ahead, |x, y| x.ack == y.ack)
+        && same_option(ack_ahead, &b.ack_ahead, |x, y| {
+            x.ack == y.ack && x.invite_cseq == y.invite_cseq && x.ack_branch == y.ack_branch
+        })
         && *awaited_ack_cseq == b.awaited_ack_cseq
         && same_option(answered_2xx, &b.answered_2xx, same_2xx)
         && *dialled == b.dialled
@@ -339,10 +341,11 @@ pub fn merge_exempt(container: Call, other: &Call) -> Call {
     merged
 }
 
-/// `leg` with, on every dialog `other` holds too whose last sent INVITE is the
-/// same one there (its CSeq), the higher count of that INVITE's 2xx copies and
-/// the later of the copies the two re-ACKed; so too for the 2xx of the INVITE
-/// before it, whose ACK both carry ahead.
+/// `leg` with, for every 2xx a dialog `other` holds too counts the copies of
+/// — the one to its last sent INVITE, and the one before it whose ACK that
+/// INVITE carries ahead — the higher count of that 2xx's copies and the later
+/// of the copies the two re-ACKed, wherever each copy counts it: one copy may
+/// have sent the next INVITE while the other has not.
 fn raise_copy_counts(leg: &mut Leg, other: &Call) {
     let Some(theirs) = super::leg::find_leg(other, &leg.leg_id) else { return };
     for d in leg.dialogs.iter_mut() {
@@ -351,18 +354,39 @@ fn raise_copy_counts(leg: &mut Leg, other: &Call) {
         else {
             continue;
         };
-        if mine.outbound_cseq != their_invite.outbound_cseq {
-            continue;
+        let cseq = mine.outbound_cseq;
+        let Some(x) = mine.invite.as_mut() else { continue };
+        if let Some(counts) = copy_counts(their_invite, cseq) {
+            raise(&mut x.copies_received, &mut x.re_acked_copy, counts);
         }
-        if let (Some(x), Some(y)) = (mine.invite.as_mut(), their_invite.invite.as_ref()) {
-            x.copies_received = x.copies_received.max(y.copies_received);
-            x.re_acked_copy = later_re_acked(x.re_acked_copy, y.re_acked_copy);
-            if let (Some(a), Some(b)) = (x.ack_ahead.as_mut(), y.ack_ahead.as_ref()) {
-                a.copies_received = a.copies_received.max(b.copies_received);
-                a.re_acked_copy = later_re_acked(a.re_acked_copy, b.re_acked_copy);
+        if let Some(a) = x.ack_ahead.as_mut() {
+            if let Some(counts) = copy_counts(their_invite, a.invite_cseq) {
+                raise(&mut a.copies_received, &mut a.re_acked_copy, counts);
             }
         }
     }
+}
+
+/// The count of the copies of the 2xx to the INVITE numbered `cseq`, and the
+/// last of them re-ACKed, as `record`, a dialog's last sent INVITE, holds
+/// them: on its own exchange when it is that INVITE, on the ACK it carries
+/// ahead when that ACK acknowledges it.
+fn copy_counts(record: &RequestRecord, cseq: i64) -> Option<(u32, Option<ReAckedCopy>)> {
+    let x = record.invite.as_ref()?;
+    if record.outbound_cseq == cseq {
+        return Some((x.copies_received, x.re_acked_copy));
+    }
+    x.ack_ahead
+        .as_ref()
+        .filter(|a| a.invite_cseq == cseq)
+        .map(|a| (a.copies_received, a.re_acked_copy))
+}
+
+/// `copies` and `re_acked` raised to the higher count and the later re-ACKed
+/// copy of the two.
+fn raise(copies: &mut u32, re_acked: &mut Option<ReAckedCopy>, theirs: (u32, Option<ReAckedCopy>)) {
+    *copies = (*copies).max(theirs.0);
+    *re_acked = later_re_acked(*re_acked, theirs.1);
 }
 
 /// The later of two re-ACKed copies of one 2xx: the later arrival, the higher

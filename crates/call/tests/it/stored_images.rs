@@ -52,6 +52,8 @@ fn the_record_lists_every_image_it_holds() {
         emitted_ack: Some(emission("sent-ack")),
         ack_ahead: Some(AckAhead {
             ack: emission("sent-ack-ahead"),
+            invite_cseq: 1,
+            ack_branch: "z9hG4bKack-ahead".into(),
             copies_received: 0,
             re_acked_copy: None,
         }),

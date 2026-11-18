@@ -293,7 +293,11 @@ INVITE's 2xx drew rides the new record as its ACK ahead, with that 2xx's count
 and last re-ACK. A copy of that 2xx arriving once the next INVITE left echoes
 the earlier CSeq (RFC 3261 §12.2.1.2) and answers nothing pending: it is
 re-ACKed with that ACK, on that count. A copy of a 2xx older still finds no ACK
-on the record and is absorbed, counted under `kind="2xx"`.
+on the record and is absorbed, counted under `kind="2xx"`. A next INVITE closed
+with no 2xx taken (a rejection) gives the dialog back the record of the INVITE
+before it, rebuilt from that ACK with its count. A meeting of two copies keeps
+the higher count of one 2xx whether a copy holds it on that INVITE's record or
+ahead of the next.
 
 The re-ACK re-passes the retained ACK datagram raw (RFC 3261 §13.2.2.4: one
 ACK per 2xx): same Via branch, so the answerer's INVITE server transaction

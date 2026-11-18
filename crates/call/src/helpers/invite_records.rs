@@ -64,9 +64,7 @@ pub fn relayed_invite_pending(d: &Dialog) -> bool {
 /// when it answered a 2xx.
 pub fn open_sent_invite(call: &mut Call, leg_id: &str, id: &DialogId, mut record: RequestRecord) {
     update_dialog(call, leg_id, id, |d| {
-        let before = sent_exchange(d).filter(|x| x.ack_branch.is_some());
-        let ahead = before.and_then(|x| Some(AckAhead::of(x, x.emitted_ack.clone()?)));
-        if let Some(ahead) = ahead {
+        if let Some(ahead) = d.sent_invite.as_ref().and_then(AckAhead::of) {
             record.invite.get_or_insert_with(InviteExchange::default).ack_ahead = Some(ahead);
         }
         d.sent_invite = Some(record);
@@ -127,7 +125,7 @@ pub fn set_awaited_ack_cseq(call: &mut Call, leg_id: &str, cseq: Option<i64>) {
 /// Close the INVITE `leg_id`'s dialogs last sent on the client transaction
 /// `branch`, which a non-2xx final answered (RFC 3261 §17.1.1.3: the
 /// transaction ends with that final, hop-ACKed below the TU), so the record
-/// names nothing in flight for it. Only an INVITE no 2xx was taken for is
+/// names nothing in flight for it ([`close_untaken_invite`]). Only an INVITE no 2xx was taken for is
 /// closed: one taken stays for the ACK and its re-ACKs, whatever a later
 /// final on the same branch says; the dialling INVITE of a leg holding no
 /// confirmed dialog stays for the CANCEL.
@@ -148,10 +146,19 @@ pub fn close_rejected_invite_round(call: &mut Call, leg_id: &str, branch: &str) 
             let taken = record.invite.as_ref().is_some_and(InviteExchange::taken);
             // A branch compares ignoring case (RFC 3261 §7.3.1).
             if !taken && sent_branch.is_some_and(|b| b.eq_ignore_ascii_case(branch)) {
-                d.sent_invite = None;
+                close_untaken_invite(d);
             }
         }
     })
+}
+
+/// Close `d`'s last INVITE, which no 2xx was taken for: the dialog holds
+/// again the INVITE before it, as the ACK the closed one carried ahead states
+/// it, so a copy of that INVITE's 2xx still draws its ACK (§13.2.2.4) on its
+/// own count; nothing when it carried none.
+pub(super) fn close_untaken_invite(d: &mut Dialog) {
+    let before = d.sent_invite.as_ref().and_then(|r| r.invite.as_ref()?.ack_ahead.as_ref());
+    d.sent_invite = before.map(AckAhead::restored);
 }
 
 /// The 2xx `d` answered an INVITE with that awaits its ACK.

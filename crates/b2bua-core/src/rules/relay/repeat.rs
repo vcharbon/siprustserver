@@ -66,10 +66,7 @@ pub(crate) fn copy_of_earlier_2xx(dialog: &Dialog, resp: &SipResponse) -> bool {
 /// exchange is `x`, is a copy of the 2xx whose ACK `x` carries ahead
 /// ([`InviteExchange::ack_ahead`]): it echoes that ACK's CSeq.
 pub(crate) fn copy_of_2xx_ahead(x: &InviteExchange, resp: &SipResponse) -> bool {
-    x.ack_ahead
-        .as_ref()
-        .and_then(|ahead| super::ack::parse_request(ahead.ack.wire().0))
-        .is_some_and(|ack| ack.cseq().seq() == resp.cseq().seq())
+    x.ack_ahead.as_ref().is_some_and(|ahead| ahead.invite_cseq == i64::from(resp.cseq().seq()))
 }
 
 /// Whether `resp` is a copy of a non-2xx INVITE final `leg`'s `dialog` ACKed

@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use super::emission::RetainedEmission;
 use super::outbound_invite::OutboundInvite;
+use super::request_record::{RequestOrigin, RequestRecord};
 
 /// A 2xx to an INVITE this side received that still awaits the ACK for it
 /// (RFC 3261 §13.3.1.4): the retained emission its ladder repeats, with the
@@ -48,6 +49,11 @@ pub struct ReAckedCopy {
 pub struct AckAhead {
     /// The ACK, as the exact datagram that left.
     pub ack: RetainedEmission,
+    /// The CSeq of the INVITE whose 2xx the ACK acknowledges, which the ACK
+    /// echoes.
+    pub invite_cseq: i64,
+    /// The Via branch of the ACK's client transaction.
+    pub ack_branch: String,
     /// The copies of the 2xx it acknowledges received since that 2xx
     /// (§13.3.1.4), those counted before the next INVITE left included.
     #[serde(default)]
@@ -58,10 +64,36 @@ pub struct AckAhead {
 }
 
 impl AckAhead {
-    /// The ACK ahead of the INVITE following `x`, the exchange of the INVITE
-    /// before it: `ack`, that exchange's ACK, with its copies' count.
-    pub fn of(x: &InviteExchange, ack: RetainedEmission) -> Self {
-        AckAhead { ack, copies_received: x.copies_received, re_acked_copy: x.re_acked_copy }
+    /// The ACK ahead of the INVITE following `record`, the INVITE before it:
+    /// the ACK `record`'s 2xx drew, with its copies' count. `None` when this
+    /// stack sent no ACK for a 2xx to it.
+    pub fn of(record: &RequestRecord) -> Option<Self> {
+        let x = record.invite.as_ref()?;
+        Some(AckAhead {
+            ack: x.emitted_ack.clone()?,
+            invite_cseq: record.outbound_cseq,
+            ack_branch: x.ack_branch.clone()?,
+            copies_received: x.copies_received,
+            re_acked_copy: x.re_acked_copy,
+        })
+    }
+
+    /// The record of the INVITE this ACK acknowledges, as it stood once its
+    /// ACK left: its CSeq, the ACK and its client transaction, the copies'
+    /// count. A round the record holds no image of, as
+    /// [`crate::helpers::retain_emitted_ack`] opens one.
+    pub fn restored(&self) -> RequestRecord {
+        RequestRecord {
+            origin: RequestOrigin::Own,
+            invite: Some(InviteExchange {
+                ack_branch: Some(self.ack_branch.clone()),
+                emitted_ack: Some(self.ack.clone()),
+                copies_received: self.copies_received,
+                re_acked_copy: self.re_acked_copy,
+                ..InviteExchange::default()
+            }),
+            ..RequestRecord::relayed("INVITE", self.invite_cseq, 0)
+        }
     }
 }
 

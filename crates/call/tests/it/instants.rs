@@ -48,6 +48,8 @@ fn every_instant_present() -> Call {
                     ("192.0.2.20".into(), 5060),
                     Repeated::request("ACK"),
                 ),
+                invite_cseq: 1,
+                ack_branch: "z9hG4bKack-ahead".into(),
                 copies_received: 4,
                 re_acked_copy: Some(ReAckedCopy { copy: 4, at_ms: 1_779_440_064_000 }),
             });
