@@ -176,9 +176,9 @@ impl Striped {
         memo.refused.get_mut(&key).filter(|r| !r.copies.lapsed(now_ms)).map(read)
     }
 
+    /// The stripe of `key`, locked: STRIPES divides 256, so the key's low
+    /// byte picks the stripe its remainder by STRIPES names.
     fn lock(&self, key: u64) -> MutexGuard<'_, Memo> {
-        // STRIPES divides 256: the key's low byte picks the stripe its
-        // remainder by STRIPES names.
         let slot = usize::from(key.to_le_bytes()[0]) % STRIPES;
         #[expect(clippy::indexing_slicing, reason = "a remainder of STRIPES indexes the stripes")]
         let stripe = &self.stripes[slot];

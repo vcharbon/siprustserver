@@ -108,10 +108,6 @@ pub(super) async fn initial_invite_turn(
         return Turn::Consumed;
     }
 
-    // A copy creates no call, as no call is born past the admission ladder.
-    // A retransmission of the live call's answered INVITE whose transaction
-    // ended is absorbed; any other copy is a request merged with the INVITE
-    // it copies (RFC 3261 §8.2.2.2), answered 482.
     let resident = ctx.state.contains(call_ref);
     if copy {
         let live = ctx.state.resident(call_ref);
