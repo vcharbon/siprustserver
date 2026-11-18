@@ -8,7 +8,11 @@ use tokio::io::AsyncReadExt;
 use crate::accept::Incoming;
 
 fn routes(body: &'static str, ready: ReadyFn) -> ProbeRoutes {
-    ProbeRoutes { metrics: Arc::new(move || body.to_string()), ready, heap: None, fit: None }
+    ProbeRoutes { metrics: Arc::new(move || body.to_string()), ready, fit: None }
+}
+
+fn operator(admin: AdminFn) -> AdminRoutes {
+    AdminRoutes { operator: Some(admin), heap: None }
 }
 fn always(state: ProbeState) -> ReadyFn {
     Arc::new(move || state)
@@ -163,7 +167,7 @@ async fn admin_routes_receive_the_method_and_path_and_their_replies_are_framed()
         ("GET", "/admin/x") => Some(AdminReply::json(200, r#"{"y":1}"#.into())),
         _ => None,
     });
-    let server = AdminServer::start("127.0.0.1:0".parse().unwrap(), admin).await.unwrap();
+    let server = AdminServer::start("127.0.0.1:0".parse().unwrap(), operator(admin)).await.unwrap();
     let post = request(server.addr(), "POST", "/admin/x").await;
     assert_eq!(post, "HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n");
     let get = request(server.addr(), "GET", "/admin/x?y=1").await;
@@ -176,28 +180,85 @@ async fn admin_routes_receive_the_method_and_path_and_their_replies_are_framed()
     assert!(request(server.addr(), "GET", "/metrics").await.contains("404 Not Found"));
 }
 
-/// The operator server binds a loopback address only.
+/// The operator server binds a loopback address only, and serves a
+/// pre-bound listener only when it is bound to one.
 #[tokio::test]
 async fn the_admin_server_refuses_an_address_that_is_not_loopback() {
     let admin: AdminFn = Arc::new(|_: &str, _: &str| Some(AdminReply::no_content()));
     for addr in ["0.0.0.0:0", "[::]:0", "192.0.2.1:0"] {
-        let refused = AdminServer::start(addr.parse().unwrap(), admin.clone()).await;
+        let refused = AdminServer::start(addr.parse().unwrap(), operator(admin.clone())).await;
         assert!(
             matches!(&refused, Err(e) if e.kind() == std::io::ErrorKind::InvalidInput),
             "{addr}: {:?}",
             refused.map(|s| s.addr())
         );
     }
+    let wildcard = TcpListener::bind("0.0.0.0:0").await.unwrap();
+    let refused = AdminServer::serve_on(wildcard, AdminRoutes::default());
+    assert!(
+        matches!(&refused, Err(e) if e.kind() == std::io::ErrorKind::InvalidInput),
+        "{:?}",
+        refused.map(|s| s.addr())
+    );
 }
 
-/// The probe server answers no operator route.
+/// The probe server answers no operator route and no debug route.
 #[tokio::test]
-async fn admin_paths_are_404_on_the_probe_server() {
+async fn admin_and_debug_paths_are_404_on_the_probe_server() {
     let server =
         ProbeServer::start("127.0.0.1:0".parse().unwrap(), routes("", always(ProbeState::Ready)))
             .await
             .unwrap();
     assert!(request(server.addr(), "POST", "/admin/cordon").await.contains("404 Not Found"));
+    for path in ["/debug/flamegraph?seconds=1", "/debug/heap"] {
+        let r = get(server.addr(), path).await;
+        assert!(r.starts_with("HTTP/1.1 404 Not Found"), "{path}: {r}");
+    }
+}
+
+/// The heap route of the operator server answers the runner's dump, and
+/// `503` from a server given none; no other `/debug/` path is a route.
+#[tokio::test]
+async fn the_admin_server_serves_the_heap_route() {
+    let heap: HeapDumpFn = Arc::new(|| Ok(b"heap-profile".to_vec()));
+    let routes = AdminRoutes { operator: None, heap: Some(heap) };
+    let server = AdminServer::start("127.0.0.1:0".parse().unwrap(), routes).await.unwrap();
+    assert_eq!(
+        get(server.addr(), "/debug/heap").await,
+        "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: 12\r\n\
+         Connection: close\r\n\r\nheap-profile"
+    );
+    assert!(get(server.addr(), "/debug/nope").await.starts_with("HTTP/1.1 404"));
+    assert!(request(server.addr(), "POST", "/admin/cordon").await.starts_with("HTTP/1.1 404"));
+
+    let bare =
+        AdminServer::start("127.0.0.1:0".parse().unwrap(), AdminRoutes::default()).await.unwrap();
+    let r = get(bare.addr(), "/debug/heap").await;
+    assert!(r.starts_with("HTTP/1.1 503") && r.contains("heap profiling unavailable"), "{r}");
+}
+
+/// The flamegraph route of the operator server answers an SVG.
+#[tokio::test]
+#[ignore = "slow lane: real clock >= 1 s"]
+async fn the_admin_server_serves_the_flamegraph_route() {
+    let server =
+        AdminServer::start("127.0.0.1:0".parse().unwrap(), AdminRoutes::default()).await.unwrap();
+    let r = get(server.addr(), "/debug/flamegraph?seconds=1").await;
+    assert!(r.starts_with("HTTP/1.1 200 OK") && r.contains("image/svg+xml"), "{r}");
+}
+
+/// A listener variable reads an IP literal with its port, an IPv6 one with
+/// or without brackets, and nothing else.
+#[test]
+fn a_listener_address_reads_both_families_with_and_without_brackets() {
+    let read = |v: &str| parse_socket_addr(v);
+    assert_eq!(read("192.0.2.1:9090"), Some("192.0.2.1:9090".parse().unwrap()));
+    assert_eq!(read(" [2001:db8::1]:9090 "), Some("[2001:db8::1]:9090".parse().unwrap()));
+    assert_eq!(read("2001:db8::1:9090"), Some("[2001:db8::1]:9090".parse().unwrap()));
+    assert_eq!(read(":::9090"), Some("[::]:9090".parse().unwrap()));
+    for refused in ["localhost:9090", "192.0.2.1", "192.0.2.1:", "2001:db8::1", "[::1]", ""] {
+        assert_eq!(read(refused), None, "{refused:?}");
+    }
 }
 
 #[tokio::test]

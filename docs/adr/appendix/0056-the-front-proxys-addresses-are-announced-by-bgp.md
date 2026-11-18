@@ -151,7 +151,7 @@ A caller retransmits an INVITE at
 0.5, 1.5 and 3.5 s, so a node withdrawn within 3.4 s of a fault loses no setup a
 retransmission can still answer. Readiness cannot get there (§3), so a container beside the
 proxy, on the node's network with `NET_ADMIN` alone (the proxy keeps none), reads the proxy's
-`/fitz` over loopback every `ROUTE_GUARD_POLL_MS` (100 ms) and owns one nftables table. Its
+`/fitz` at the node's address (`ROUTE_GUARD_FITNESS`, where `PROXY_METRICS` binds) every `ROUTE_GUARD_POLL_MS` (100 ms) and owns one nftables table. Its
 output chain drops the node's BFD control (UDP 3784) and BGP (TCP 179, either end) toward the
 routers (`proxy.routeGuard.peers`, by default MetalLB's peers) unless the router is in a set
 whose entries time out `ROUTE_GUARD_DEAD_MS` (1 s) after each refresh. While the proxy reads

@@ -59,12 +59,7 @@ fn sources(
 /// A probe server over [`probes`] of `sources`.
 async fn serve(sources: ProbeSources) -> ProbeServer {
     let p = probes(sources);
-    let routes = ProbeRoutes {
-        metrics: Arc::new(String::new),
-        ready: p.ready,
-        heap: None,
-        fit: Some(p.fit),
-    };
+    let routes = ProbeRoutes { metrics: Arc::new(String::new), ready: p.ready, fit: Some(p.fit) };
     ProbeServer::start_live("127.0.0.1:0".parse().unwrap(), routes, p.live).await.unwrap()
 }
 

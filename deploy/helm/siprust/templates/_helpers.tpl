@@ -240,15 +240,88 @@ render.
 {{- $peers | uniq | join "," }}
 {{- end }}
 
+{{/*
+The node's address, HOST_IP, a scrape bind of the proxy pod names as
+$(HOST_IP); declared before every env entry that names it.
+*/}}
+{{- define "siprust.hostIpEnv" -}}
+- name: HOST_IP
+  valueFrom: { fieldRef: { fieldPath: status.hostIP } }
+{{- end }}
+
+{{/*
+The final value of a listener variable: the component env's when it states
+one (null: the runner's default), else the chart's. Takes (list <component
+env> <variable> <the chart's value> <the runner's default>).
+*/}}
+{{- define "siprust.statedBind" -}}
+{{- $env := index . 0 | default dict }}
+{{- if hasKey $env (index . 1) }}
+{{- $v := get $env (index . 1) }}
+{{- ternary (index . 3) (toString $v) (kindIs "invalid" $v) }}
+{{- else }}
+{{- index . 2 }}
+{{- end }}
+{{- end }}
+
+{{/* PROXY_METRICS as the chart derives it: proxy.metrics.bind, else the node's address. */}}
+{{- define "siprust.proxyMetricsBind" -}}
+{{- .Values.proxy.metrics.bind | default "$(HOST_IP):9090" }}
+{{- end }}
+
+{{/* PROXY_METRICS as the proxy reads it: its env over the derived value. */}}
+{{- define "siprust.proxyMetricsFinal" -}}
+{{- include "siprust.statedBind" (list .Values.proxy.env "PROXY_METRICS" (include "siprust.proxyMetricsBind" .) "0.0.0.0:9090") }}
+{{- end }}
+
+{{/* B2BUA_METRICS as the chart derives it: worker.metrics.bind, else the pod's address. */}}
+{{- define "siprust.workerMetricsBind" -}}
+{{- .Values.worker.metrics.bind | default "$(POD_IP):9091" }}
+{{- end }}
+
+{{/* ROUTE_GUARD_METRICS: proxy.routeGuard.metricsBind, else the node's address. */}}
+{{- define "siprust.guardMetricsBind" -}}
+{{- $g := .Values.proxy.routeGuard }}
+{{- $g.metricsBind | default (printf "$(HOST_IP):%d" (int $g.metricsPort)) }}
+{{- end }}
+
+{{/* The host of an `ip:port` bind: inside its brackets, else before its last colon. */}}
+{{- define "siprust.bindHost" -}}
+{{- if hasPrefix "[" . }}
+{{- regexReplaceAll "^\\[([^]]*)\\].*$" . "${1}" }}
+{{- else }}
+{{- regexReplaceAll ":[^:]*$" . "" }}
+{{- end }}
+{{- end }}
+
+{{/* Whether a bind's host is a wildcard: "true" or empty. */}}
+{{- define "siprust.bindIsWildcard" -}}
+{{- if has (include "siprust.bindHost" .) (list "0.0.0.0" "::") }}true{{ end }}
+{{- end }}
+
+{{/*
+The address the route guard reads /fitz at: the proxy's final PROXY_METRICS,
+the node's address in place of a wildcard host.
+*/}}
+{{- define "siprust.guardFitness" -}}
+{{- $bind := include "siprust.proxyMetricsFinal" . }}
+{{- if include "siprust.bindIsWildcard" $bind }}
+{{- printf "$(HOST_IP):%s" (regexReplaceAll "^.*:" $bind "") }}
+{{- else }}
+{{- $bind }}
+{{- end }}
+{{- end }}
+
 {{/* The route guard's env, for its container and its init step. */}}
 {{- define "siprust.routeGuardEnv" -}}
 {{- $g := .Values.proxy.routeGuard -}}
-- { name: ROUTE_GUARD_FITNESS, value: "127.0.0.1:9090" }
+{{ include "siprust.hostIpEnv" . }}
+- { name: ROUTE_GUARD_FITNESS, value: {{ include "siprust.guardFitness" . | quote }} }
 - { name: ROUTE_GUARD_PEERS, value: {{ include "siprust.routeGuardPeers" . | quote }} }
 - { name: ROUTE_GUARD_POLL_MS, value: {{ int $g.pollMs | toString | quote }} }
 - { name: ROUTE_GUARD_DEAD_MS, value: {{ int $g.deadMs | toString | quote }} }
 - { name: ROUTE_GUARD_HOLD_MS, value: {{ int $g.holdMs | toString | quote }} }
-- { name: ROUTE_GUARD_METRICS, value: {{ printf "0.0.0.0:%d" (int $g.metricsPort) | quote }} }
+- { name: ROUTE_GUARD_METRICS, value: {{ include "siprust.guardMetricsBind" . | quote }} }
 {{- end }}
 
 {{/* The route guard's privileges: NET_ADMIN on the node's network, nothing else. */}}

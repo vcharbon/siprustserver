@@ -1,7 +1,8 @@
 //! [`ProbeServer`] — the one hand-rolled HTTP probe/metrics server the runner
-//! binaries (the b2bua worker, the front proxy, the CDR consumer) expose on
-//! their observability port. A tiny tokio TCP handler (no HTTP framework dep) serving
-//! a fixed route set:
+//! binaries (the b2bua worker, the front proxy, the route guard, the CDR
+//! consumer) expose on their scrape port. A tiny tokio TCP handler (no HTTP
+//! framework dep) serving a fixed route set, each route cheap and
+//! non-blocking:
 //!
 //! - `GET /metrics` — Prometheus exposition, body supplied per-scrape by the
 //!   injected [`ProbeRoutes::metrics`] closure (each runner concatenates its own
@@ -19,21 +20,22 @@
 //!   [`ProbeRoutes::fit`] closure: whether the process could carry traffic,
 //!   its drain latch aside, read by a local guard that polls it far more
 //!   often than a kubelet probe; `404` for a server given none.
-//! - `GET /debug/flamegraph[?seconds=N]` — on-demand pprof CPU flamegraph SVG
-//!   (internal debug route, NOT the SIP datapath; blocks for the sample window
-//!   on a blocking thread).
-//! - everything else — `404`, the operator routes under `/admin/` included:
-//!   they are served by an [`AdminServer`] on a loopback listener of their own.
+//! - everything else — `404`. The operator routes under `/admin/` and the
+//!   debug routes under `/debug/` (`debug.rs`), which cost CPU or memory
+//!   while they run, are served by an [`AdminServer`] on a loopback listener
+//!   of its own.
+//!
+//! [`parse_socket_addr`] is the address grammar of every listener's variable.
 //!
 //! ## Why one module
 //! The servers differ only in the `/metrics` body and the readiness predicate —
 //! exactly the closures of [`ProbeRoutes`]. Everything else (the accept loop of
 //! `accept.rs`, the exact-path match, the response framing, the **fully-idle
-//! connection cut**, the flamegraph route) is shared transport, so the hardening
-//! applies to each by construction.
+//! connection cut**) is shared transport, so the hardening applies to each by
+//! construction.
 //!
 //! ## Fully-idle connection cut (auto resource exclusion, not DDoS)
-//! The observability port is internal to the cluster, so this is not DDoS
+//! The scrape port is internal to the cluster, so this is not DDoS
 //! defence — it is reclamation of file descriptors stranded by an *involuntary*
 //! bug: a client (a wedged scraper, a half-open probe, a port check) that
 //! connects and then never sends its request line would otherwise park a task +
@@ -42,7 +44,8 @@
 //! The window is deliberately long: a healthy probe/scrape sends its request
 //! immediately and never approaches it; only a genuinely stuck connection does.
 //! Once the request line has been read the timeout no longer applies, so a long
-//! flamegraph capture is unaffected.
+//! flamegraph capture on an [`AdminServer`], which reads its requests the same
+//! way, is unaffected.
 
 // The panic set at deny outside test code (ADR-0051 §3).
 #![cfg_attr(
@@ -70,13 +73,17 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::task::JoinHandle;
 
 mod accept;
+mod addr;
 mod admin;
 mod admin_server;
+mod debug;
 mod request;
 
 use accept::Incoming;
+pub use addr::parse_socket_addr;
 pub use admin::{AdminFn, AdminReply};
-pub use admin_server::AdminServer;
+pub use admin_server::{AdminRoutes, AdminServer};
+pub use debug::HeapDumpFn;
 
 /// The readiness a runner reports for `GET /readyz` (and the `/ready` alias).
 /// Three-valued so the HTTP probe can distinguish a node still coming up from
@@ -117,12 +124,6 @@ pub type ReadyFn = Arc<dyn Fn() -> ProbeState + Send + Sync>;
 /// `false` when the process runs but no longer serves.
 pub type LiveFn = Arc<dyn Fn() -> bool + Send + Sync>;
 
-/// On-demand heap-profile dump for `GET /debug/heap` (jemalloc `prof.dump` →
-/// jeprof/pprof bytes). Injected by the runner so the lib stays allocator-
-/// agnostic; `None` ⇒ the route reports profiling unavailable. May block on
-/// file I/O, so the server runs it on a blocking thread.
-pub type HeapDumpFn = Arc<dyn Fn() -> Result<Vec<u8>, String> + Send + Sync>;
-
 /// The things that vary between the worker's and the proxy's probe server.
 /// Everything else is shared transport in [`ProbeServer`].
 #[derive(Clone)]
@@ -131,8 +132,6 @@ pub struct ProbeRoutes {
     pub metrics: MetricsFn,
     /// `GET /readyz` / `GET /ready` state.
     pub ready: ReadyFn,
-    /// `GET /debug/heap` jemalloc heap dump; `None` ⇒ route 503s "unavailable".
-    pub heap: Option<HeapDumpFn>,
     /// `GET /fitz` fitness; `None` ⇒ `404`.
     pub fit: Option<FitFn>,
 }
@@ -246,80 +245,7 @@ pub(crate) async fn handle_conn(
     let Some(request) = request::read(&mut stream, idle_timeout).await? else {
         return Ok(()); // silent client — drop
     };
-    let path = request.path.as_str();
-
-    // On-demand CPU flamegraph (pprof SIGPROF sampling -> inferno SVG). Internal
-    // debug route on the observability port — NOT the SIP datapath. Blocks for
-    // the sample window on a blocking thread (the runner's async workers keep
-    // serving); the profiler is built only for the request. `?seconds=N`
-    // (default 20, max 120). Held past the idle window deliberately — the read
-    // already completed, so the cut no longer applies.
-    if path.split('?').next() == Some("/debug/flamegraph") {
-        let secs = flamegraph_util::parse_seconds(path, 20, 120);
-        let result = tokio::task::spawn_blocking(move || flamegraph_util::capture_svg(secs, 99))
-            .await
-            .unwrap_or_else(|e| Err(format!("join error: {e}")));
-        match result {
-            Ok(svg) => {
-                let header = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: image/svg+xml\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                    svg.len()
-                );
-                stream.write_all(header.as_bytes()).await?;
-                stream.write_all(&svg).await?;
-            }
-            Err(e) => {
-                let body = format!("flamegraph failed: {e}\n");
-                let header = format!(
-                    "HTTP/1.1 500 Internal Server Error\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                    body.len()
-                );
-                stream.write_all(header.as_bytes()).await?;
-                stream.write_all(body.as_bytes()).await?;
-            }
-        }
-        stream.flush().await?;
-        return Ok(());
-    }
-
-    // On-demand jemalloc heap profile (prof.dump -> jeprof/pprof bytes). Internal
-    // debug route, NOT the SIP datapath. Dumps the currently-LIVE sampled
-    // allocations by call stack, so one capture after the leak has grown names
-    // every leak source at once. Runs on a blocking thread (file I/O). `None`
-    // heap provider (proxy, or a non-profiling build) -> 503.
-    if path.split('?').next() == Some("/debug/heap") {
-        let result = match routes.heap.clone() {
-            Some(h) => tokio::task::spawn_blocking(move || h())
-                .await
-                .unwrap_or_else(|e| Err(format!("join error: {e}"))),
-            None => {
-                Err("heap profiling unavailable (non-jemalloc build or prof:false)".to_string())
-            }
-        };
-        match result {
-            Ok(bytes) => {
-                let header = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                    bytes.len()
-                );
-                stream.write_all(header.as_bytes()).await?;
-                stream.write_all(&bytes).await?;
-            }
-            Err(e) => {
-                let body = format!("heap dump failed: {e}\n");
-                let header = format!(
-                    "HTTP/1.1 503 Service Unavailable\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                    body.len()
-                );
-                stream.write_all(header.as_bytes()).await?;
-                stream.write_all(body.as_bytes()).await?;
-            }
-        }
-        stream.flush().await?;
-        return Ok(());
-    }
-
-    let (status, content_type, body) = match path {
+    let (status, content_type, body) = match request.path.as_str() {
         "/metrics" => ("200 OK", "text/plain; version=0.0.4", (routes.metrics)()),
         "/healthz" => match live.as_ref().is_none_or(|live| live()) {
             true => ("200 OK", "text/plain", "ok\n".to_string()),

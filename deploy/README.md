@@ -201,8 +201,9 @@ provides:
 - **Reading the route guard.** Its metrics are in
   [proxy-integration.md](../docs/guide/proxy-integration.md#what-to-monitor) and ADR-0056's
   appendix. On the node, `nft list table inet route_guard` shows the routers let out and the
-  drop counters, and `curl -s 127.0.0.1:9090/fitz` the proxy's own reading. A node that ran a
-  guard and runs no proxy keeps the table withdrawing until a proxy pod starts there or
+  drop counters, and `curl -s <the node's InternalIP>:9090/fitz` the proxy's own reading (its
+  scrape listener binds the node's address). A node that ran a guard and runs no proxy keeps
+  the table withdrawing until a proxy pod starts there or
   `nft delete table inet route_guard` removes it.
 
 ## HA acceptance

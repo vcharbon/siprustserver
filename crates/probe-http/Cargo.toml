@@ -4,7 +4,7 @@ version = "0.1.0"
 edition.workspace = true
 license.workspace = true
 publish = false
-description = "The single hand-rolled HTTP probe/metrics server the runner binaries expose on their observability port, and the loopback-only server of their operator routes. One deep module behind a ProbeRoutes seam: /metrics, /healthz, /readyz (+ /ready alias) driven by an injected 3-valued ProbeState, and the /debug/flamegraph CPU profile route. The hardening (exact-path match, fully-idle connection cut, connection backstop) lives here once."
+description = "The single hand-rolled HTTP probe/metrics server the runner binaries expose on their scrape port, and the loopback-only server of their operator and debug routes. One deep module behind a ProbeRoutes seam: /metrics, /healthz, /readyz (+ /ready alias) driven by an injected 3-valued ProbeState, /fitz; the /debug/flamegraph and /debug/heap profile routes on loopback only. The hardening (exact-path match, fully-idle connection cut, connection backstop) lives here once."
 
 [package.metadata.purity]
 tier = "shell"
@@ -19,6 +19,6 @@ workspace = true
 # Rides tokio::time directly so the idle-cut is paused-clock controllable.
 tokio = { workspace = true }
 tracing = { workspace = true }
-# The /debug/flamegraph route (pprof sampling -> inferno SVG). Both runners
+# The /debug/flamegraph route (pprof sampling -> inferno SVG). The runners
 # already depend on this directly, so it adds no new weight.
 flamegraph-util = { path = "../flamegraph-util" }

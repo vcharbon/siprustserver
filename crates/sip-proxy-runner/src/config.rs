@@ -8,7 +8,7 @@ mod preflight;
 mod process_env;
 mod reader;
 
-use std::net::SocketAddr;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::Duration;
 
 use sip_message::{CustomParser, Exemptions, SipParserLimits};
@@ -50,7 +50,12 @@ pub struct ProxyConfig {
     pub advertise: ProxyAddr,
     pub external: Option<ExternalFace>,
     pub workers: WorkerSource,
+    /// The probe server's address (`PROXY_METRICS`): `/metrics`, `/healthz`,
+    /// `/readyz`, `/fitz`.
     pub metrics: SocketAddr,
+    /// The debug server's loopback address (`PROXY_DEBUG`):
+    /// `/debug/flamegraph`.
+    pub debug: SocketAddr,
     pub queue_max: usize,
     /// What the process reads the wire under: the defaults, with the exemptions
     /// `SIP_EXEMPTIONS` states. [`parser`](Self::parser) is the one reader.
@@ -124,8 +129,9 @@ impl ProxyConfig {
         let listen = listen.unwrap_or(SocketAddr::from(([0, 0, 0, 0], 5060)));
         let workers = worker_source(&mut env, pod_namespace);
         let metrics = env
-            .bind_addr("PROXY_METRICS", SocketAddr::from(([0, 0, 0, 0], 9090)))
+            .http_addr("PROXY_METRICS", SocketAddr::from(([0, 0, 0, 0], 9090)))
             .unwrap_or(SocketAddr::from(([0, 0, 0, 0], 9090)));
+        let debug = debug_addr(&mut env);
         let queue_max = env.int_usize("PROXY_QUEUE", 8192, 1, u32::MAX);
         let parser_limits = parser_limits(&mut env);
         let udp_sndbuf = socket_buffer(&mut env, "PROXY_UDP_SNDBUF");
@@ -222,6 +228,7 @@ impl ProxyConfig {
             external,
             workers,
             metrics,
+            debug,
             queue_max,
             parser_limits,
             udp_sndbuf,
@@ -311,6 +318,23 @@ fn external_face(env: &mut EnvReader, listen: Option<SocketAddr>) -> Option<Exte
     }
     let listen = listen.unwrap_or(SocketAddr::from(([0, 0, 0, 0], 0)));
     Some(ExternalFace { listen, advertise })
+}
+
+/// `PROXY_DEBUG`'s default: loopback, on a port no other component of the
+/// chart takes on the node the proxy shares (hostNetwork).
+pub const DEFAULT_DEBUG: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 9096);
+
+/// `PROXY_DEBUG`: a loopback `ip:port`, [`DEFAULT_DEBUG`] when unset. The
+/// debug routes cost CPU while they run, so no other host reaches them.
+fn debug_addr(env: &mut EnvReader) -> SocketAddr {
+    let addr = env.http_addr("PROXY_DEBUG", DEFAULT_DEBUG).unwrap_or(DEFAULT_DEBUG);
+    if !addr.ip().is_loopback() {
+        env.refuse(format!(
+            "PROXY_DEBUG={addr} is not a loopback address: the debug routes are reached from \
+             inside the proxy's network namespace only"
+        ));
+    }
+    addr
 }
 
 /// `PROXY_WORKERS` when set, else EndpointSlice discovery in

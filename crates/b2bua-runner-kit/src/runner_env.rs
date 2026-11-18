@@ -43,9 +43,11 @@ pub struct RunnerEnv {
     /// worker's own `ip:port` and its deployment mode, read by
     /// [`addresses_from_lookup`], which refuses an inconsistent pair.
     pub addresses: WorkerAddresses,
-    /// `B2BUA_METRICS` — Prometheus HTTP listen addr (default `0.0.0.0:9091`).
+    /// `B2BUA_METRICS` — the probe server's listen addr: `/metrics`, `/ready`,
+    /// `/healthz` (default `0.0.0.0:9091`; an IPv6 address may go without
+    /// brackets, [`crate::resolve`]).
     pub metrics_addr: String,
-    /// `B2BUA_ADMIN` — the operator routes' listen addr, a loopback
+    /// `B2BUA_ADMIN` — the operator and debug routes' listen addr, a loopback
     /// `ip:port` only (default `127.0.0.1:9094`).
     pub admin_addr: SocketAddr,
     /// `B2BUA_QUEUE` — inbound UDP queue depth, packets (default 8192).
@@ -321,13 +323,13 @@ fn cluster_key(value: Option<String>) -> Result<Option<sip_ids::SigningKey>, Str
 /// names the variable for a value that is no address or not a loopback one.
 pub(crate) fn admin_addr(lookup: impl Fn(&str) -> Option<String>) -> Result<SocketAddr, String> {
     let raw = stated(lookup("B2BUA_ADMIN")).unwrap_or_else(|| "127.0.0.1:9094".into());
-    match raw.trim().parse::<SocketAddr>() {
-        Ok(addr) if addr.ip().is_loopback() => Ok(addr),
-        Ok(addr) => Err(format!(
-            "B2BUA_ADMIN={addr} is not a loopback address: the operator routes are reached \
-             from inside the worker's network namespace only"
+    match probe_http::parse_socket_addr(&raw) {
+        Some(addr) if addr.ip().is_loopback() => Ok(addr),
+        Some(addr) => Err(format!(
+            "B2BUA_ADMIN={addr} is not a loopback address: the operator and debug routes are \
+             reached from inside the worker's network namespace only"
         )),
-        Err(e) => Err(format!("B2BUA_ADMIN={raw:?} is not an ip:port: {e}")),
+        None => Err(format!("B2BUA_ADMIN={raw:?} is not an ip:port")),
     }
 }
 

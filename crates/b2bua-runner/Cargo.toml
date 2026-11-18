@@ -23,8 +23,9 @@ b2bua = { path = "../b2bua", features = ["testkit"] }
 # The shared env -> bind -> deps -> spawn -> drain runner plumbing (this binary
 # is its first consumer; downstream integrator runner binaries are the others).
 b2bua-runner-kit = { path = "../b2bua-runner-kit" }
-# The shared HTTP probe/metrics server: /metrics, /healthz, /ready, and the
-# /debug/flamegraph pprof route — one module shared with the front proxy.
+# The shared HTTP probe/metrics server (/metrics, /healthz, /ready) and the
+# loopback operator server of the /debug/flamegraph and /debug/heap routes —
+# one module shared with the front proxy.
 # (The kit spawns the server; this binary passes the jemalloc extras in.)
 probe-http = { path = "../probe-http" }
 # Out-of-tree callflow service (ADR-0016) — composed into the production

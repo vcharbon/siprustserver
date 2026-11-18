@@ -154,6 +154,37 @@ its key drawn on the first install and read back by every upgrade through
   listen on the worker's loopback (`B2BUA_ADMIN`, 127.0.0.1:9094), never on a
   Service, reached through `kubectl port-forward pod/<worker> 19094:9094`.
 
+## Reaching the HTTP listeners
+
+No private HTTP route is reachable from the external plane by default. Each
+listener's bind is a value (`httpBinds` in `values.yaml`):
+
+| listener | value, default | routes | reached by |
+|---|---|---|---|
+| proxy scrape (`PROXY_METRICS`) | `proxy.metrics.bind`, the node's address `$(HOST_IP):9090` | `/metrics` `/healthz` `/readyz` `/fitz` | the kubelet's probes, the in-cluster Prometheus (the pod's `prometheus.io/port`), the route guard |
+| route guard scrape (`ROUTE_GUARD_METRICS`) | `proxy.routeGuard.metricsBind`, `$(HOST_IP):<metricsPort>` | `/metrics` `/healthz` `/readyz` | the kubelet's probes, Prometheus (`prometheus.io/sidecar-port`) |
+| worker scrape (`B2BUA_METRICS`) | `worker.metrics.bind`, the pod's address `$(POD_IP):9091` | `/metrics` `/healthz` `/ready` | the kubelet's probes, Prometheus, the `b2bua-worker` Service |
+| worker operator and debug (`B2BUA_ADMIN`) | `worker.admin.bind`, `127.0.0.1:9094`, loopback only | `/admin/*`, `/debug/flamegraph`, `/debug/heap` | `kubectl port-forward` |
+| proxy debug (`PROXY_DEBUG`) | `proxy.debug.bind`, `127.0.0.1:9096`, loopback only | `/debug/flamegraph` | `kubectl port-forward` |
+
+- **Metrics** are read by the in-cluster Prometheus from the pod's address. A
+  scrape listener on a wildcard (`0.0.0.0`, `::`) or on `network.externalVip`
+  renders only with `httpBinds.allowExternal=true`: on the hostNetwork proxy
+  pod a wildcard binds every interface of the node, the external one included,
+  and no NetworkPolicy applies there. The proxy's default is the node's
+  InternalIP (`status.hostIP`); where that is not on the internal plane, set
+  the kubelet's `--node-ip` to the node's internal-plane address.
+- **Cordon, release and profiles** go through `kubectl port-forward`, which
+  connects inside the pod's network namespace, a hostNetwork pod's included:
+  `kubectl port-forward pod/<worker> 19094:9094` then
+  `curl -X POST localhost:19094/admin/cordon`, or
+  `curl -o cpu.svg 'localhost:19094/debug/flamegraph?seconds=20'`;
+  `kubectl port-forward pod/<proxy> 19096:9096` for the proxy's flamegraph.
+  `deploy/k8s/flamegraph.sh` wraps the capture. The route guard and the CDR
+  consumer serve no debug route.
+- **A runner outside Kubernetes** binds its debug listener on loopback too:
+  reach it through an SSH tunnel, `ssh -L 19094:127.0.0.1:9094 <host>`.
+
 ## Render-time relations
 
 `siprust/templates/checks.yaml` holds the relations that span a pod spec and a

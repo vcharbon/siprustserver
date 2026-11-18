@@ -331,7 +331,7 @@ NEIGHBOUR = Rule(r"docker exec e2 ip -j neigh show to 192\.168\.60\.1 dev eth1$"
 SILENCE = Rule(r"docker exec -i e2 nft -f -$")
 
 
-FITZ = r"docker exec e2 curl -s -m 1 127\.0\.0\.1:9090/fitz$"
+FITZ = r"docker exec e2 curl -s -m 1 172\.20\.0\.4:9090/fitz$"
 
 
 def test_next_hop_dead_silences_the_hop_below_ip_and_arp_and_waits_for_the_proxy_unfit(tmp_path: Path) -> None:

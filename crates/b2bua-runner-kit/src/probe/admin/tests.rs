@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use b2bua::release_all::ReleasedAll;
 use b2bua::repl::ReadinessSource;
-use probe_http::AdminServer;
+use probe_http::{AdminRoutes, AdminServer};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
@@ -42,6 +42,12 @@ async fn server_releasing(
         Arc::new(|| Some(Vec::new())),
         release_all,
     );
+    serve(routes).await
+}
+
+/// An operator server of `routes` on an ephemeral loopback port.
+async fn serve(routes: AdminFn) -> AdminServer {
+    let routes = AdminRoutes { operator: Some(routes), heap: None };
     AdminServer::start("127.0.0.1:0".parse().unwrap(), routes).await.unwrap()
 }
 
@@ -175,7 +181,7 @@ async fn the_live_calls_are_listed_with_their_legs_call_ids() {
         live,
         Arc::new(ReleasedAll::default),
     );
-    let s = AdminServer::start("127.0.0.1:0".parse().unwrap(), routes).await.unwrap();
+    let s = serve(routes).await;
     let get = request(s.addr(), "GET", "/admin/calls").await;
     assert!(get.starts_with("HTTP/1.1 200 OK"), "{get}");
     let listed: serde_json::Value = serde_json::from_str(body(&get)).unwrap();
@@ -197,7 +203,7 @@ async fn unreadable_calls_answer_503() {
         Arc::new(|| None),
         Arc::new(ReleasedAll::default),
     );
-    let s = AdminServer::start("127.0.0.1:0".parse().unwrap(), routes).await.unwrap();
+    let s = serve(routes).await;
     let get = request(s.addr(), "GET", "/admin/calls").await;
     assert!(get.starts_with("HTTP/1.1 503"), "{get}");
 }

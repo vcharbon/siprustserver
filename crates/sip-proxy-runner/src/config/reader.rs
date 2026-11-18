@@ -150,4 +150,18 @@ impl<'a> EnvReader<'a> {
             }
         }
     }
+
+    /// `key` as an HTTP listener's address, an IP literal with its port, an
+    /// IPv6 one with or without brackets ([`probe_http::parse_socket_addr`]);
+    /// `default` when unset, `None` when refused.
+    pub(super) fn http_addr(&mut self, key: &str, default: SocketAddr) -> Option<SocketAddr> {
+        let Some(value) = self.present(key) else {
+            return self.raw(key).is_none().then_some(default);
+        };
+        let addr = probe_http::parse_socket_addr(&value);
+        if addr.is_none() {
+            self.refuse(format!("{key} must be an IP literal with its port, got {value:?}"));
+        }
+        addr
+    }
 }

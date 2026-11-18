@@ -33,6 +33,20 @@ netToolsImage:
 
 imagePullSecrets: []
 
+# The runners' HTTP listeners. A scrape listener (proxy.metrics.bind,
+# proxy.routeGuard.metricsBind, worker.metrics.bind: /metrics and the probe
+# routes) binds one internal address by default: the node's for the
+# hostNetwork proxy pod, the pod's for a worker. The operator and debug routes
+# (worker.admin.bind, proxy.debug.bind) bind loopback only, reached through
+# `kubectl port-forward` (deploy/helm/README.md). Each bind is `ip:port`, an
+# IPv6 address with or without brackets, and may name `$(HOST_IP)` (the
+# proxy pod) or `$(POD_IP)` (a worker).
+httpBinds:
+  # A scrape bind on a wildcard (0.0.0.0, ::) or on network.externalVip takes
+  # connections from the external plane too, a hostNetwork pod's from every
+  # interface of its node: it renders only with this on (refused otherwise).
+  allowExternal: false
+
 # The two SIP planes. Every proxy node owns both VIPs on lo and announces them
 # while its proxy is Ready (ADR-0056); the proxy is the only component on both
 # planes, and workers reach the world through the internal VIP only. Required
@@ -150,6 +164,16 @@ worker:
   replication:
     enabled: false
     port: 9092
+  # B2BUA_METRICS: /metrics, /ready, /healthz, on port 9091, where the
+  # kubelet's probes, the Service and the scraper reach them (refused at render
+  # otherwise). Empty: the pod's address, $(POD_IP):9091.
+  metrics:
+    bind: ""
+  # B2BUA_ADMIN: the operator routes (/admin/*) and the debug routes
+  # (/debug/flamegraph, /debug/heap); the worker refuses an address that is not
+  # loopback.
+  admin:
+    bind: "127.0.0.1:9094"
   # The workers' ingress NetworkPolicy (templates/worker-network-policy.yaml):
   # SIP from the proxies, replication from the other workers, the probe port
   # from `monitoringNamespace` (the kubelet's probes come from the pod's own
@@ -226,6 +250,20 @@ proxy:
   # PROXY_RECV_SHARDS: SO_REUSEPORT recv sockets, one serial core task each.
   # Null keeps the runner default.
   recvShards: null
+  # PROXY_METRICS: /metrics, /healthz, /readyz, /fitz, on port 9090, where the
+  # kubelet's probes, the scraper and the route guard read them (refused at
+  # render otherwise). Empty: the node's address (status.hostIP, the node's
+  # InternalIP), $(HOST_IP):9090. One value serves every proxy pod, so where a
+  # node's InternalIP is not on the internal plane, set the kubelet's node IP
+  # (--node-ip) to the node's internal-plane address rather than an address
+  # here; the probes reach the pod at that address only.
+  metrics:
+    bind: ""
+  # PROXY_DEBUG: /debug/flamegraph, on the node's loopback (hostNetwork), on a
+  # port no other component of the chart takes; the proxy refuses an address
+  # that is not loopback.
+  debug:
+    bind: "127.0.0.1:9096"
   # The self-gate's CPS token bucket: refill per second and capacity. Null
   # keeps the runner default.
   selfGate:
@@ -340,8 +378,12 @@ proxy:
     # (ROUTE_GUARD_HOLD_MS). The guard container, and so the pod, is Ready
     # only while the node is let out.
     holdMs: 3000
-    # The guard's /metrics and /healthz (the pod's prometheus.io/sidecar-port).
+    # The guard's /metrics, /healthz and /readyz (the pod's
+    # prometheus.io/sidecar-port, its probes' port).
     metricsPort: 9095
+    # ROUTE_GUARD_METRICS, on metricsPort (refused at render otherwise).
+    # Empty: the node's address, $(HOST_IP):<metricsPort>, as proxy.metrics.bind.
+    metricsBind: ""
     # The bound, ms, from a fault to the routers' withdrawal that the render
     # checks every detection path against: its detection (HEALTH_ISOLATION_MS,
     # 2 × PROXY_EXT_FACE_CHECK_MS for a lost link, or deadMs for a hung or dead

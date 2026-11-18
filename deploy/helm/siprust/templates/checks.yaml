@@ -18,7 +18,8 @@ each runner's startup check.
 | 2 × `neighbour.retransTimeMs` ≤ proxy PROXY_EXT_FACE_CHECK_MS | when the first ARP retry after a carrier flap is answered, the flap's INCOMPLETE aftermath meets one reading only, which holds the face; a router answering later latches the face until the solicit is answered |
 | `routeGuard.deadMs` + the BFD detection time ≤ `routeGuard.withdrawWithinMs` (route guard on) | a hung or dead proxy, whose guard stops refreshing, leaves it within the bound |
 | proxy `minReadySeconds` > `readinessProbe.periodSeconds` + `announce.metallb.connectTimeSeconds` + 2 s (route guard on) | the pod is Ready once its guard let the node out; its BGP sessions are back before the rollout stops the next proxy |
-| proxy PROXY_METRICS keeps port 9090 | the readiness and liveness probes and the route guard read the proxy there |
+| proxy PROXY_METRICS (`proxy.metrics.bind`) keeps port 9090, `proxy.routeGuard.metricsBind` `proxy.routeGuard.metricsPort`, worker B2BUA_METRICS (`worker.metrics.bind`) 9091 | the readiness and liveness probes, the scraper and the route guard read them there |
+| no scrape bind on a wildcard or `network.externalVip`, unless `httpBinds.allowExternal` | the external plane would reach the listener: a hostNetwork pod's wildcard binds every interface of its node |
 | proxy `announce.port` ≠ the metrics port 9090 and ≠ `network.sipPort` | the announce-only Services expose nothing kube-proxy would forward to a listener |
 | `proxy.nodeSelector` set | the workers' node affinity keeps them off every node it names: a node that runs or ran a proxy keeps the VIPs on lo (ADR-0056 §7) |
 | `network.externalNextHops` set | traffic from the external VIP leaves only through the table these next hops fill (ADR-0056 §11): with none, nothing reaches a caller |
@@ -151,11 +152,6 @@ operator's to keep consistent.
 {{- fail (printf "proxy.minReadySeconds=%d s must exceed proxy.readinessProbe.periodSeconds=%d s + proxy.announce.metallb.connectTimeSeconds=%d s + %d ms: the pod is Ready once its route guard let the node out, and a rollout would stop the next proxy before the node's BGP sessions came back" (int64 $p.minReadySeconds) $period (int64 $p.announce.metallb.connectTimeSeconds) $margin) }}
 {{- end }}
 {{- end }}
-{{- with get $penv "PROXY_METRICS" }}
-{{- if not (hasSuffix ":9090" (toString .)) }}
-{{- fail (printf "proxy PROXY_METRICS=%s must keep port 9090: the probes and the route guard read /readyz, /healthz and /fitz there" (toString .)) }}
-{{- end }}
-{{- end }}
 {{- if not $p.nodeSelector }}
 {{- fail "proxy.nodeSelector is required: the workers' node affinity keeps them off every node it names, since a node that runs or ran a proxy keeps the VIPs on lo (ADR-0056)" }}
 {{- end }}
@@ -211,6 +207,33 @@ grammar, the call limiter's lease. */ -}}
 {{- if ge (int64 (toString $memo)) (include "siprust.bytes" (list "proxy.resources.limits.memory" $plimit) | int64) }}
 {{- fail (printf "proxy PROXY_BRANCH_MEMO_MAX_BYTES=%s must be below proxy.resources.limits.memory=%s: the memo would not fit the process" (toString $memo) (toString $plimit)) }}
 {{- end }}
+{{- end }}
+{{- end }}
+{{- /* The scrape listeners: each bind keeps the port its readers use and, unless
+httpBinds.allowExternal, stays off the external plane. */ -}}
+{{- $scrape := list }}
+{{- if .Values.proxy.enabled }}
+{{- $named := ternary "proxy PROXY_METRICS" "proxy.metrics.bind" (hasKey $penv "PROXY_METRICS") }}
+{{- $scrape = append $scrape (list $named (include "siprust.proxyMetricsFinal" .) 9090 "the probes, the scraper and the route guard read /readyz, /healthz, /metrics and /fitz there") }}
+{{- if .Values.proxy.routeGuard.enabled }}
+{{- $guardPort := int .Values.proxy.routeGuard.metricsPort }}
+{{- $scrape = append $scrape (list "proxy.routeGuard.metricsBind" (include "siprust.guardMetricsBind" .) $guardPort (printf "the guard's probes read it on proxy.routeGuard.metricsPort=%d" $guardPort)) }}
+{{- end }}
+{{- end }}
+{{- if .Values.worker.enabled }}
+{{- $named := ternary "worker B2BUA_METRICS" "worker.metrics.bind" (hasKey $wenv "B2BUA_METRICS") }}
+{{- $default := "0.0.0.0:9091" }}
+{{- $scrape = append $scrape (list $named (include "siprust.statedBind" (list $wenv "B2BUA_METRICS" (include "siprust.workerMetricsBind" .) $default)) 9091 "the probes, the Service, the NetworkPolicy and the scraper reach the worker there") }}
+{{- end }}
+{{- $extVip := toString .Values.network.externalVip }}
+{{- range $scrape }}
+{{- $name := index . 0 }}{{- $bind := index . 1 }}{{- $port := index . 2 }}{{- $why := index . 3 }}
+{{- if not (hasSuffix (printf ":%d" $port) $bind) }}
+{{- fail (printf "%s=%s must keep port %d: %s" $name $bind $port $why) }}
+{{- end }}
+{{- $host := include "siprust.bindHost" $bind }}
+{{- if and (not $.Values.httpBinds.allowExternal) (or (include "siprust.bindIsWildcard" $bind) (and $extVip (eq $host $extVip))) }}
+{{- fail (printf "%s=%s takes connections from the external plane (a wildcard binds every interface, a hostNetwork pod's every interface of its node; network.externalVip is the external plane's): bind an internal address, or set httpBinds.allowExternal=true" $name $bind) }}
 {{- end }}
 {{- end }}
 {{- if and .Values.worker.enabled .Values.callLimiter.enabled }}

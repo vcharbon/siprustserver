@@ -1,11 +1,14 @@
 #!/usr/bin/env bash
 # Capture an on-demand CPU flamegraph SVG from a running b2bua-worker (b2b) or
-# front-proxy (lb) pod via its metrics-port /debug/flamegraph route (pprof-rs,
-# in-process SIGPROF sampling -> inferno SVG). No perf/privileges/PMU needed.
+# front-proxy (lb) pod via the /debug/flamegraph route of its loopback
+# listener, through a port-forward (pprof-rs, in-process SIGPROF sampling ->
+# inferno SVG). No perf/privileges/PMU needed.
 #
-#   ./flamegraph.sh b2b   [seconds] [pod-index]   # b2bua-worker-<idx>:9091
-#   ./flamegraph.sh lb    [seconds] [pod-index]   # sip-front-proxy[<idx>]:9090
+#   ./flamegraph.sh b2b   [seconds] [pod-index]   # b2bua-worker-<idx>:9094 (worker.admin.bind)
+#   ./flamegraph.sh lb    [seconds] [pod-index]   # sip-front-proxy[<idx>]:9096 (proxy.debug.bind)
 #
+# A release that moves those listeners states their ports in
+# WORKER_DEBUG_PORT and PROXY_DEBUG_PORT.
 # Defaults: seconds=20, pod-index=0. Output: flamegraph-<tier>-<idx>-<ts>.svg
 # (override path with OUT=...). To profile across a chaos reboot, run with a
 # window (e.g. 60) just before triggering the kill so the sample spans it.
@@ -16,10 +19,10 @@ tier="${1:-b2b}"; secs="${2:-20}"; idx="${3:-0}"
 
 case "$tier" in
   b2b|worker|b2bua)
-    pod="b2bua-worker-$idx"; port=9091 ;;
+    pod="b2bua-worker-$idx"; port="${WORKER_DEBUG_PORT:-9094}" ;;
   lb|proxy)
     pod="$(kubectl -n "$NS" get pod -l app=sip-front-proxy -o jsonpath="{.items[$idx].metadata.name}")"
-    port=9090 ;;
+    port="${PROXY_DEBUG_PORT:-9096}" ;;
   *) echo "usage: $0 {b2b|lb} [seconds] [pod-index]" >&2; exit 1 ;;
 esac
 [ -n "$pod" ] || { echo "no pod found for tier=$tier idx=$idx" >&2; exit 1; }

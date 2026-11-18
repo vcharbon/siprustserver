@@ -19,7 +19,8 @@
 //!     self-overload (a stateless 503 + `Retry-After`, the same for every copy). A 100 ms
 //!     `tokio::time::interval` task drives its load sampler. `PROXY_SELF_GATE=0`
 //!     reverts to the always-admit gate.
-//!   - Prometheus `/metrics` + `/healthz` + `/readyz` + `/fitz` (`probe-http`).
+//!   - Prometheus `/metrics` + `/healthz` + `/readyz` + `/fitz` (`probe-http`),
+//!     and `/debug/flamegraph` on a loopback listener of its own.
 //!
 //! Config via env, read once before the first bind
 //! ([`sip_proxy_runner::config`]). Unset takes the default; a value set
@@ -42,8 +43,10 @@
 //!   PROXY_NAMESPACE  namespace of the worker Service (default POD_NAMESPACE,
 //!                    else the pod's own service-account namespace; required
 //!                    for discovery when none is known)
-//!   PROXY_METRICS    Prometheus HTTP listen ip:port, an IP literal
-//!                    (default 0.0.0.0:9090)
+//!   PROXY_METRICS    /metrics, /healthz, /readyz, /fitz listen ip:port, an IP
+//!                    literal, IPv6 with or without brackets (default 0.0.0.0:9090)
+//!   PROXY_DEBUG      /debug/flamegraph listen ip:port, loopback only
+//!                    (default 127.0.0.1:9096)
 //!   PROXY_QUEUE      inbound UDP queue depth, packets ≥ 1  (default 8192)
 //!   SIP_EXEMPTIONS   comma-separated shapes accepted against the RFC, read at
 //!                    ingress only (default none; a name no exemption has is
@@ -242,8 +245,13 @@ async fn run() -> Result<i32, String> {
     // readings of a SINGLE monotonic-anchored timeline.
     let clock = Clock::checked_system().map_err(|e| e.to_string())?;
     let metrics = Arc::new(ProxyMetrics::new());
-    let Sockets { metrics: metrics_listener, shards, probe: probe_ep, notice: notice_ep } =
-        bind_sockets(&cfg, &clock, &metrics).await?;
+    let Sockets {
+        metrics: metrics_listener,
+        debug: debug_listener,
+        shards,
+        probe: probe_ep,
+        notice: notice_ep,
+    } = bind_sockets(&cfg, &clock, &metrics).await?;
 
     let hmac = Arc::new(
         StaticHmacKeyProvider::new(
@@ -426,8 +434,6 @@ async fn run() -> Result<i32, String> {
             )
         }),
         ready: proxy_probes.ready,
-        // No heap profiling on the proxy (not the leak target): /debug/heap → 503.
-        heap: None,
         fit: Some(proxy_probes.fit),
     };
     // The listener was bound FIRST (metrics-first bind order above); this only
@@ -437,6 +443,10 @@ async fn run() -> Result<i32, String> {
         probe_http::ProbeServer::serve_on_live(metrics_listener, routes, proxy_probes.live)
             .map_err(|e| format!("metrics server on {metrics_sa} failed to start: {e}"))?;
     tracing::info!(addr = %_metrics_server.addr(), "metrics server listening (/metrics, readiness /readyz, liveness /healthz, fitness /fitz)");
+    let _debug_server =
+        probe_http::AdminServer::serve_on(debug_listener, probe_http::AdminRoutes::default())
+            .map_err(|e| format!("debug server on {} failed to start: {e}", cfg.debug))?;
+    tracing::info!(addr = %_debug_server.addr(), "debug server listening (/debug/flamegraph)");
 
     let probe_task = tokio::spawn(shared.health(probe, notice_ep, cfg.cluster_key.clone()));
     let mut core_tasks = tokio::task::JoinSet::new();

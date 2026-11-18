@@ -36,8 +36,9 @@
 //!                   IP-literal ip:port every Contact names.
 //!                   (the full consistency table: `b2bua_runner_kit::addresses_from_lookup`)
 //!   B2BUA_DEST      downstream UAS host:port          (default 127.0.0.1:5070)
-//!   B2BUA_METRICS   Prometheus HTTP listen addr       (default 0.0.0.0:9091)
-//!   B2BUA_ADMIN     operator routes' listen addr, loopback only (default 127.0.0.1:9094)
+//!   B2BUA_METRICS   /metrics, /ready, /healthz listen addr (default 0.0.0.0:9091)
+//!   B2BUA_ADMIN     operator and debug routes' listen addr, loopback only
+//!                   (default 127.0.0.1:9094)
 //!   B2BUA_QUEUE     inbound UDP queue depth (packets)  (default 8192)
 //!   B2BUA_CAPTURE   pcapng file each SIP datagram sent and received is appended to,
 //!                   a section per start (default none: no capture); refused with

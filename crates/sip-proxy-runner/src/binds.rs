@@ -21,6 +21,9 @@ pub struct Sockets {
     /// The metrics/probe HTTP listener, its address read; its accept loop
     /// starts later.
     pub metrics: tokio::net::TcpListener,
+    /// The loopback listener of the debug routes; its accept loop starts
+    /// later.
+    pub debug: tokio::net::TcpListener,
     /// The signalling endpoints of each recv shard.
     pub shards: Vec<ShardSockets>,
     /// The OPTIONS health probe's own source socket.
@@ -41,8 +44,9 @@ pub struct ShardSockets {
 /// Bind every socket `cfg` names, each signalling endpoint stamping arrivals
 /// on `clock`.
 ///
-/// BIND ORDER: metrics/probe HTTP listener FIRST, then the internal-face
-/// signaling sockets, then the external-face sockets LAST. The SIP stack is
+/// BIND ORDER: metrics/probe HTTP listener FIRST, then the debug listener,
+/// then the internal-face signaling sockets, then the external-face sockets
+/// LAST. The SIP stack is
 /// never exposed unless the process can already report health, and the
 /// metrics port — inherently exclusive TCP — is the node-singleton lock:
 /// holding it proves no other proxy instance is alive on the node in every
@@ -73,6 +77,12 @@ pub async fn bind_sockets(
     // The probe server reads the address when it starts: a listener that
     // cannot name it refuses the boot here, before any SIP socket is bound.
     metrics.local_addr().map_err(|e| format!("metrics listener on {metrics_sa}: {e}"))?;
+    let debug_sa = cfg.debug;
+    let debug =
+        bind_with_retry("debug", debug_sa, bind_interval, bind_deadline, is_tcp_in_use, || {
+            tokio::net::TcpListener::bind(debug_sa)
+        })
+        .await?;
 
     // Main signaling endpoint(s) — one per recv shard. With N > 1 every bind
     // (including the first) sets SO_REUSEPORT; the kernel flow-hashes on the
@@ -185,7 +195,7 @@ pub async fn bind_sockets(
     let mut external = external.into_iter();
     let shards =
         internal.into_iter().map(|internal| ShardSockets { internal, external: external.next() });
-    Ok(Sockets { metrics, shards: shards.collect(), probe, notice })
+    Ok(Sockets { metrics, debug, shards: shards.collect(), probe, notice })
 }
 
 /// Log the buffer sizes the kernel granted one face's signalling socket,

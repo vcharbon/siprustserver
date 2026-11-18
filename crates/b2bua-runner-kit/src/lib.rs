@@ -164,9 +164,12 @@ pub fn env_switch(key: &str, default: bool) -> Result<bool, String> {
     runner_env::switch(key, env::var(key).ok(), default)
 }
 
-/// Resolve a `host:port` string to a socket address; `Err` is the boot
-/// refusal of one that does not resolve.
+/// Resolve `host:port` to a socket address, an IPv6 literal with or without brackets
+/// ([`probe_http::parse_socket_addr`]); `Err` is the boot refusal of one that does not resolve.
 pub fn resolve(addr: &str) -> Result<SocketAddr, String> {
+    if let Some(literal) = probe_http::parse_socket_addr(addr) {
+        return Ok(literal);
+    }
     addr.to_socket_addrs()
         .map_err(|e| format!("cannot resolve {addr:?}: {e}"))?
         .next()

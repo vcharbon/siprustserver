@@ -3,7 +3,7 @@
 //! `/healthz` from its loops alone, `/metrics` from every metric source of the
 //! worker. The operator server (`B2BUA_ADMIN`, loopback only): the operator
 //! routes (`probe::admin`) from its readiness and its live calls, which it can
-//! release.
+//! release, and the debug routes `/debug/flamegraph` and `/debug/heap`.
 
 mod admin;
 
@@ -13,7 +13,7 @@ use std::time::Duration;
 use b2bua::loops::WorkerLoops;
 use b2bua::repl::ReadinessState;
 use b2bua::B2buaCore;
-use probe_http::{AdminFn, AdminServer, LiveFn, ProbeRoutes, ProbeServer, ProbeState, ReadyFn};
+use probe_http::{AdminRoutes, AdminServer, LiveFn, ProbeRoutes, ProbeServer, ProbeState, ReadyFn};
 
 use crate::{RunnerBase, WorkerMetrics};
 
@@ -28,8 +28,9 @@ impl RunnerBase {
     /// `extra_metrics` (e.g. allocator stats). `/ready` reads NotReady and
     /// `/healthz` 503 while a worker loop is stalled past `loop_stall`.
     /// The operator server on `B2BUA_ADMIN` serves `/admin/cordon`, the
-    /// operator's cordon, `/admin/release-all`, its release of every call, and
-    /// `/admin/calls`, the list of the live ones; the probe server answers
+    /// operator's cordon, `/admin/release-all`, its release of every call,
+    /// `/admin/calls`, the list of the live ones, `/debug/flamegraph` and
+    /// `/debug/heap` from `heap` (`503` for `None`); the probe server answers
     /// none of them. Hold the returned servers for the process lifetime: each
     /// accept loop aborts on drop.
     pub async fn spawn_probe_server(
@@ -55,17 +56,17 @@ impl RunnerBase {
         let routes = ProbeRoutes {
             metrics: Arc::new(move || worker.body(extra_metrics.as_ref())),
             ready: ready_fn(move || core_ready.readiness_state(), core.loops().clone(), stall),
-            heap,
             fit: None,
         };
         let live = live_fn(core.loops().clone(), stall);
         let serving = core.clone();
-        let admin = admin::admin_routes(
+        let operator = admin::admin_routes(
             core.readiness(),
             Arc::new(move || serving.active_calls()),
             live_calls(core),
             core.release_all_handle(),
         );
+        let admin = AdminRoutes { operator: Some(operator), heap };
         ProbeServers::start(
             &self.name,
             (self.metrics_sa, routes, live),
@@ -89,7 +90,7 @@ impl ProbeServers {
     pub(crate) async fn start(
         service: &str,
         probe: (std::net::SocketAddr, ProbeRoutes, LiveFn),
-        admin: (std::net::SocketAddr, AdminFn),
+        admin: (std::net::SocketAddr, AdminRoutes),
     ) -> Self {
         let (probe_at, routes, live) = probe;
         let probe = match ProbeServer::start_live(probe_at, routes, live).await {
@@ -112,7 +113,8 @@ impl ProbeServers {
                 tracing::info!(
                     service,
                     addr = %server.addr(),
-                    "operator server listening (/admin/cordon /admin/release-all /admin/calls)"
+                    "operator server listening (/admin/cordon /admin/release-all /admin/calls \
+                     /debug/flamegraph /debug/heap)"
                 );
                 Some(server)
             }
@@ -196,12 +198,8 @@ mod tests {
         let reads = state.clone();
         let ready = ready_fn(move || *reads.lock().unwrap(), loops.clone(), STALL);
         let live = live_fn(loops, STALL);
-        let routes = ProbeRoutes {
-            metrics: Arc::new(String::new),
-            ready: ready.clone(),
-            heap: None,
-            fit: None,
-        };
+        let routes =
+            ProbeRoutes { metrics: Arc::new(String::new), ready: ready.clone(), fit: None };
         let server =
             ProbeServer::start_live("127.0.0.1:0".parse().unwrap(), routes, live).await.unwrap();
         assert!(get(server.addr(), "/ready").await.contains("200 OK"));
@@ -234,10 +232,10 @@ mod tests {
         String::from_utf8_lossy(&resp).into_owned()
     }
 
-    /// The operator routes answer on the loopback operator server and on no
-    /// path of the probe server.
+    /// The operator routes and the heap route answer on the loopback operator
+    /// server and on no path of the probe server.
     #[tokio::test]
-    async fn the_operator_routes_answer_on_their_own_listener_only() {
+    async fn the_operator_and_debug_routes_answer_on_their_own_listener_only() {
         let parked = || tokio::spawn(std::future::pending::<()>()).abort_handle();
         let loops = WorkerLoops::new(
             (Arc::new(LoopPulse::new()), parked()),
@@ -247,22 +245,25 @@ mod tests {
         let routes = ProbeRoutes {
             metrics: Arc::new(String::new),
             ready: ready_fn(|| ReadinessState::Ready, loops.clone(), STALL),
-            heap: None,
             fit: None,
         };
-        let admin = admin::admin_routes(
+        let operator = admin::admin_routes(
             readiness.clone(),
             Arc::new(|| 0),
             Arc::new(|| Some(Vec::new())),
             Arc::new(b2bua::release_all::ReleasedAll::default),
         );
+        let heap: probe_http::HeapDumpFn = Arc::new(|| Ok(b"profile".to_vec()));
+        let admin = AdminRoutes { operator: Some(operator), heap: Some(heap) };
         let any = "127.0.0.1:0".parse().unwrap();
         let servers =
             ProbeServers::start("w", (any, routes, live_fn(loops, STALL)), (any, admin)).await;
         let probe = servers.probe.as_ref().unwrap().addr();
         let operator = servers.admin.as_ref().unwrap().addr();
 
-        for (method, path) in [("POST", "/admin/cordon"), ("POST", "/admin/release-all")] {
+        for (method, path) in
+            [("POST", "/admin/cordon"), ("POST", "/admin/release-all"), ("GET", "/debug/heap")]
+        {
             let r = request(probe, method, path).await;
             assert!(r.starts_with("HTTP/1.1 404"), "the probe server answered {path}: {r}");
         }
@@ -270,6 +271,8 @@ mod tests {
         let r = request(operator, "POST", "/admin/cordon").await;
         assert!(r.starts_with("HTTP/1.1 204"), "{r}");
         assert!(readiness.is_cordoned());
+        let r = request(operator, "GET", "/debug/heap").await;
+        assert!(r.starts_with("HTTP/1.1 200") && r.ends_with("\r\n\r\nprofile"), "{r}");
         assert!(request(operator, "GET", "/ready").await.starts_with("HTTP/1.1 404"));
     }
 

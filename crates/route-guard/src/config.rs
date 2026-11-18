@@ -1,6 +1,7 @@
 //! [`GuardConfig`] — every variable the guard reads at start, read once
 //! through a lookup. Unset takes the default; a value set empty, malformed or
-//! out of range refuses the start, naming every problem.
+//! out of range refuses the start, naming every problem. An `ip:port` takes
+//! an IPv6 address with or without brackets ([`probe_http::parse_socket_addr`]).
 //!
 //! | variable | default | role |
 //! |---|---|---|
@@ -39,7 +40,7 @@ impl GuardConfig {
         let mut errors = Vec::new();
         let mut addr = |key: &str, default: &str| {
             let raw = get(key).unwrap_or_else(|| default.to_string());
-            raw.trim().parse::<SocketAddr>().unwrap_or_else(|_| {
+            probe_http::parse_socket_addr(&raw).unwrap_or_else(|| {
                 errors.push(format!("{key} must be an ip:port, got {raw:?}"));
                 SocketAddr::from(([127, 0, 0, 1], 0))
             })
@@ -138,6 +139,20 @@ mod tests {
             Timing { dead: Duration::from_millis(1_000), hold: Duration::from_millis(3_000) }
         );
         assert_eq!(cfg.nft, "nft");
+    }
+
+    /// The node's IPv6 address, as the chart's `$(HOST_IP):port` expands it,
+    /// reads without brackets.
+    #[test]
+    fn the_addresses_read_an_ipv6_address_without_brackets() {
+        let cfg = read(&[
+            ("ROUTE_GUARD_PEERS", "192.0.2.1"),
+            ("ROUTE_GUARD_FITNESS", "2001:db8::7:9090"),
+            ("ROUTE_GUARD_METRICS", "2001:db8::7:9095"),
+        ])
+        .expect("valid");
+        assert_eq!(cfg.fitness, "[2001:db8::7]:9090".parse().unwrap());
+        assert_eq!(cfg.metrics, "[2001:db8::7]:9095".parse().unwrap());
     }
 
     #[test]

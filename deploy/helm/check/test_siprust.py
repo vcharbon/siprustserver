@@ -335,6 +335,65 @@ class WorkerNetworkPolicy(unittest.TestCase):
         self.assertNotIn(9094, [p["containerPort"] for p in c["ports"]])
 
 
+def env_order(c: Doc) -> list[str]:
+    return [e["name"] for e in c["env"]]
+
+
+class HttpBinds(unittest.TestCase):
+    """Every HTTP listener's bind is a value: the scrape listeners on the pod's
+    or the node's own address, the operator and debug listeners on loopback,
+    and an external-plane scrape bind only with the opt-in."""
+
+    def test_the_scrape_listeners_bind_the_pods_address_and_the_rest_loopback(self) -> None:
+        docs = render(SIPRUST, *KIND)
+        proxy = container(find(docs, "Deployment", "sip-front-proxy"), "sip-front-proxy")
+        self.assertEqual((env(proxy)["PROXY_METRICS"], env(proxy)["PROXY_DEBUG"]),
+                         ("$(HOST_IP):9090", "127.0.0.1:9096"))
+        self.assertIn({"name": "HOST_IP",
+                       "valueFrom": {"fieldRef": {"fieldPath": "status.hostIP"}}}, proxy["env"])
+        self.assertLess(env_order(proxy).index("HOST_IP"), env_order(proxy).index("PROXY_METRICS"))
+        self.assertNotIn(9096, [p["containerPort"] for p in proxy["ports"]])
+        worker = container(find(docs, "StatefulSet", "b2bua-worker"), "b2bua-worker")
+        self.assertEqual((env(worker)["B2BUA_METRICS"], env(worker)["B2BUA_ADMIN"]),
+                         ("$(POD_IP):9091", "127.0.0.1:9094"))
+        self.assertLess(env_order(worker).index("POD_IP"), env_order(worker).index("B2BUA_METRICS"))
+
+    def test_each_bind_is_a_value(self) -> None:
+        docs = render(SIPRUST, *KIND, "--set", "proxy.metrics.bind=10.0.0.5:9090",
+                      "--set", "proxy.debug.bind=127.0.0.1:19096",
+                      "--set", "proxy.routeGuard.metricsBind=10.0.0.5:9095",
+                      "--set", "worker.metrics.bind=$(POD_IP):9091",
+                      "--set", "worker.admin.bind=127.0.0.1:19094")
+        deployment = find(docs, "Deployment", "sip-front-proxy")
+        proxy = env(container(deployment, "sip-front-proxy"))
+        self.assertEqual((proxy["PROXY_METRICS"], proxy["PROXY_DEBUG"]),
+                         ("10.0.0.5:9090", "127.0.0.1:19096"))
+        self.assertEqual(env(container(deployment, "route-guard"))["ROUTE_GUARD_METRICS"],
+                         "10.0.0.5:9095")
+        worker = env(container(find(docs, "StatefulSet", "b2bua-worker"), "b2bua-worker"))
+        self.assertEqual(worker["B2BUA_ADMIN"], "127.0.0.1:19094")
+
+    def test_an_external_plane_scrape_bind_needs_the_opt_in(self) -> None:
+        vip = "192.168.60.250"
+        for value, named in (
+                ("proxy.metrics.bind=0.0.0.0:9090", "proxy.metrics.bind=0.0.0.0:9090"),
+                ("proxy.metrics.bind=[::]:9090", "proxy.metrics.bind=[::]:9090"),
+                (f"proxy.metrics.bind={vip}:9090", f"proxy.metrics.bind={vip}:9090"),
+                ("proxy.env.PROXY_METRICS=:::9090", "proxy PROXY_METRICS=:::9090"),
+                ("proxy.routeGuard.metricsBind=0.0.0.0:9095",
+                 "proxy.routeGuard.metricsBind=0.0.0.0:9095"),
+                ("worker.metrics.bind=0.0.0.0:9091", "worker.metrics.bind=0.0.0.0:9091"),
+                ("worker.env.B2BUA_METRICS=[::]:9091", "worker B2BUA_METRICS=[::]:9091")):
+            err = render_error(SIPRUST, *KIND, "--set-string", value)
+            self.assertIn(f"{named} takes connections from the external plane", err)
+            self.assertIn("httpBinds.allowExternal=true", err)
+            render(SIPRUST, *KIND, "--set-string", value, "--set", "httpBinds.allowExternal=true")
+
+    def test_the_worker_metrics_port_stays_where_the_probes_read_it(self) -> None:
+        err = render_error(SIPRUST, *KIND, "--set", "worker.metrics.bind=$(POD_IP):9191")
+        self.assertIn("worker.metrics.bind=$(POD_IP):9191 must keep port 9091", err)
+
+
 class Backends(unittest.TestCase):
     def test_producer_and_consumer_declare_the_same_queue(self) -> None:
         docs = render(SIPRUST, *KIND, "--set", "cdr.maxLength=5000", "--set", "cdr.queue=records")
@@ -420,7 +479,7 @@ class GenericDefaults(unittest.TestCase):
                          "B2BUA_CDR_RABBITMQ_MAX_LEN", "OTEL_EXPORTER_OTLP_ENDPOINT",
                          "SIP_TRACE_HEADER"},
         "sip-front-proxy": {"PROXY_LISTEN", "PROXY_ADVERTISE", "PROXY_LISTEN_EXT",
-                            "PROXY_ADVERTISE_EXT", "PROXY_METRICS",
+                            "PROXY_ADVERTISE_EXT", "PROXY_METRICS", "PROXY_DEBUG",
                             "PROXY_EXT_INTERFACE", "PROXY_EXT_NEXT_HOPS",
                             "PROXY_WORKER_SERVICE", "PROXY_WORKER_PORT",
                             "OTEL_EXPORTER_OTLP_ENDPOINT", "SIP_TRACE_HEADER"},

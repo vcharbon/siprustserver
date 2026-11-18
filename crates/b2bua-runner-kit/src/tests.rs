@@ -136,15 +136,25 @@ fn split_host_port_defaults_and_parses() {
     assert_eq!(split_host_port("bob:nope"), ("bob".to_string(), 5060));
 }
 
+/// The probe server's address takes the pod's IPv6 address as the chart's
+/// `$(POD_IP):9091` expands it, with no brackets.
+#[test]
+fn a_listen_address_reads_an_ipv6_address_without_brackets() {
+    assert_eq!(crate::resolve("fd00::5:9091").unwrap(), "[fd00::5]:9091".parse().unwrap());
+    assert_eq!(crate::resolve("10.0.0.5:9091").unwrap(), "10.0.0.5:9091".parse().unwrap());
+}
+
 #[test]
 fn the_admin_address_defaults_to_loopback_and_refuses_any_other() {
     assert_eq!(
         crate::runner_env::admin_addr(lookup(&[])).unwrap(),
         "127.0.0.1:9094".parse().unwrap()
     );
-    let stated = lookup(&[("B2BUA_ADMIN", "[::1]:19094")]);
-    assert_eq!(crate::runner_env::admin_addr(stated).unwrap(), "[::1]:19094".parse().unwrap());
-    for refused in ["0.0.0.0:9094", "10.0.0.5:9094", "localhost:9094"] {
+    for v6 in ["[::1]:19094", "::1:19094"] {
+        let stated = lookup(&[("B2BUA_ADMIN", v6)]);
+        assert_eq!(crate::runner_env::admin_addr(stated).unwrap(), "[::1]:19094".parse().unwrap());
+    }
+    for refused in ["0.0.0.0:9094", "10.0.0.5:9094", "fd00::5:9094", "localhost:9094"] {
         let e = crate::runner_env::admin_addr(lookup(&[("B2BUA_ADMIN", refused)])).unwrap_err();
         assert!(e.contains("B2BUA_ADMIN"), "{refused}: {e}");
     }

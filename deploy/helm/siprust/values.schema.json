@@ -151,6 +151,16 @@
           "$ref": "#/definitions/asn"
         }
       }
+    },
+    "listener": {
+      "description": "An HTTP listener's bind, ip:port; empty takes the chart's default.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "bind": {
+          "type": "string"
+        }
+      }
     }
   },
   "properties": {
@@ -168,6 +178,15 @@
     },
     "imagePullSecrets": {
       "$ref": "#/definitions/objects"
+    },
+    "httpBinds": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "allowExternal": {
+          "type": "boolean"
+        }
+      }
     },
     "network": {
       "type": "object",
@@ -255,6 +274,12 @@
               "$ref": "#/definitions/port"
             }
           }
+        },
+        "metrics": {
+          "$ref": "#/definitions/listener"
+        },
+        "admin": {
+          "$ref": "#/definitions/listener"
         },
         "networkPolicy": {
           "type": "object",
@@ -371,6 +396,12 @@
           ],
           "minimum": 1,
           "maximum": 1024
+        },
+        "metrics": {
+          "$ref": "#/definitions/listener"
+        },
+        "debug": {
+          "$ref": "#/definitions/listener"
         },
         "selfGate": {
           "type": "object",
@@ -616,6 +647,9 @@
             },
             "metricsPort": {
               "$ref": "#/definitions/port"
+            },
+            "metricsBind": {
+              "type": "string"
             },
             "withdrawWithinMs": {
               "type": "integer",

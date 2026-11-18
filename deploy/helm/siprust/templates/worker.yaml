@@ -7,9 +7,10 @@ construction. Readiness is /ready: 503 while re-hydrating or draining, so a
 NotReady worker leaves the EndpointSlice the proxy and its peers watch.
 Liveness is /healthz: 503 while a loop has been on one piece of work past
 B2BUA_LOOP_STALL_MS; a loop still on it past B2BUA_LOOP_EXIT_MS exits the
-process first, and the probe stays the backstop for a runtime wedged whole. The
-operator routes listen on loopback (B2BUA_ADMIN),
-reached through kubectl port-forward, never through a Service.
+process first, and the probe stays the backstop for a runtime wedged whole.
+The probe server binds the pod's address (B2BUA_METRICS); the operator and
+debug routes listen on loopback (B2BUA_ADMIN), reached through kubectl
+port-forward, never through a Service.
 */ -}}
 {{- if .Values.worker.enabled }}
 {{- $w := .Values.worker }}
@@ -17,8 +18,8 @@ reached through kubectl port-forward, never through a Service.
   "B2BUA_LISTEN" "0.0.0.0:5060"
   "B2BUA_ADVERTISE" "$(POD_IP):5060"
   "B2BUA_ORDINAL" "$(POD_NAME)"
-  "B2BUA_METRICS" "0.0.0.0:9091"
-  "B2BUA_ADMIN" "127.0.0.1:9094"
+  "B2BUA_METRICS" (include "siprust.workerMetricsBind" .)
+  "B2BUA_ADMIN" $w.admin.bind
   "B2BUA_REPL" (ternary "1" "0" $w.replication.enabled)
   "B2BUA_REPL_LISTEN" (printf "0.0.0.0:%d" (int $w.replication.port))
   "B2BUA_REPL_PORT" (toString (int $w.replication.port))
@@ -113,8 +114,8 @@ spec:
             # another one (ADR-0055 §6).
             - name: POD_UID
               valueFrom: { fieldRef: { fieldPath: metadata.uid } }
-            # The routable address peers reach the worker on; the bind address
-            # 0.0.0.0 is not routable.
+            # The routable address peers reach the worker on, and the one its
+            # probe server binds; the bind address 0.0.0.0 is not routable.
             - name: POD_IP
               valueFrom: { fieldRef: { fieldPath: status.podIP } }
             {{- with $clusterKeySecret }}

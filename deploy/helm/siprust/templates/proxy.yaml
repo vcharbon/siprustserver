@@ -21,7 +21,8 @@ discovered from the EndpointSlices of the headless b2bua-worker Service
   "PROXY_LISTEN_EXT" (printf "%s:%d" $extVip $port)
   "PROXY_ADVERTISE_EXT" (printf "%s:%d" $extVip $port)
   "PROXY_EXT_INTERFACE" (include "siprust.net" (dict "root" $ "key" "externalInterface"))
-  "PROXY_METRICS" "0.0.0.0:9090"
+  "PROXY_METRICS" (include "siprust.proxyMetricsBind" .)
+  "PROXY_DEBUG" $p.debug.bind
   "PROXY_WORKER_SERVICE" "b2bua-worker"
   "PROXY_WORKER_PORT" "5060"
   "OTEL_EXPORTER_OTLP_ENDPOINT" .Values.tracing.otlpEndpoint
@@ -156,6 +157,9 @@ spec:
           env:
             - name: POD_NAMESPACE
               valueFrom: { fieldRef: { fieldPath: metadata.namespace } }
+            # The node's address the scrape listener binds by default
+            # (httpBinds in values.yaml).
+            {{- include "siprust.hostIpEnv" . | nindent 12 }}
             - name: PROXY_HMAC_KID
               valueFrom: { secretKeyRef: { name: {{ $hmacSecret }}, key: kid } }
             - name: PROXY_HMAC_KEY
@@ -169,7 +173,9 @@ spec:
             {{- with $p.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
-          # containerPort is a label under hostNetwork: the bind is PROXY_LISTEN.
+          # containerPort is a label under hostNetwork: the binds are
+          # PROXY_LISTEN and PROXY_METRICS. PROXY_DEBUG's loopback listener
+          # is reached through kubectl port-forward and is no port here.
           ports:
             - { name: sip, containerPort: 5060, protocol: UDP }
             - { name: metrics, containerPort: 9090, protocol: TCP }
@@ -202,7 +208,8 @@ spec:
           {{- end }}
         {{- if $p.routeGuard.enabled }}
         {{- $g := $p.routeGuard }}
-        # The route guard (ADR-0056 §10): reads /fitz over loopback and drops
+        # The route guard (ADR-0056 §10): reads /fitz at the address the proxy's
+        # scrape listener binds, the node's by default, and drops
         # the node's BFD and BGP to the routers while the proxy is unfit, hung
         # or gone, so they withdraw the node within their BFD detection time.
         # The pod's only NET_ADMIN after its init container.

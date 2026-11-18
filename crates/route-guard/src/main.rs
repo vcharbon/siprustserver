@@ -99,7 +99,6 @@ async fn guard() -> Result<(), String> {
             let metrics = metrics.clone();
             Arc::new(move || readiness(&metrics))
         },
-        heap: None,
         fit: None,
     };
     let live = {

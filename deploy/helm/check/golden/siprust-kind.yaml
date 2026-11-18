@@ -460,6 +460,10 @@ spec:
           valueFrom:
             fieldRef:
               fieldPath: metadata.namespace
+        - name: HOST_IP
+          valueFrom:
+            fieldRef:
+              fieldPath: status.hostIP
         - name: PROXY_HMAC_KID
           valueFrom:
             secretKeyRef:
@@ -481,6 +485,8 @@ spec:
           value: 172.20.255.250:5060
         - name: PROXY_ADVERTISE_EXT
           value: 192.168.60.250:5060
+        - name: PROXY_DEBUG
+          value: 127.0.0.1:9096
         - name: PROXY_EXT_INTERFACE
           value: eth1
         - name: PROXY_EXT_NEXT_HOPS
@@ -490,7 +496,7 @@ spec:
         - name: PROXY_LISTEN_EXT
           value: 192.168.60.250:5060
         - name: PROXY_METRICS
-          value: 0.0.0.0:9090
+          value: $(HOST_IP):9090
         - name: PROXY_UDP_RCVBUF
           value: '4194304'
         - name: PROXY_UDP_SNDBUF
@@ -537,8 +543,12 @@ spec:
       - command:
         - /usr/local/bin/route-guard
         env:
+        - name: HOST_IP
+          valueFrom:
+            fieldRef:
+              fieldPath: status.hostIP
         - name: ROUTE_GUARD_FITNESS
-          value: 127.0.0.1:9090
+          value: $(HOST_IP):9090
         - name: ROUTE_GUARD_PEERS
           value: 172.20.0.1,192.168.60.1
         - name: ROUTE_GUARD_POLL_MS
@@ -548,7 +558,7 @@ spec:
         - name: ROUTE_GUARD_HOLD_MS
           value: '3000'
         - name: ROUTE_GUARD_METRICS
-          value: 0.0.0.0:9095
+          value: $(HOST_IP):9095
         image: siprustserver:dev
         imagePullPolicy: IfNotPresent
         livenessProbe:
@@ -661,8 +671,12 @@ spec:
         - /usr/local/bin/route-guard
         - --withdraw
         env:
+        - name: HOST_IP
+          valueFrom:
+            fieldRef:
+              fieldPath: status.hostIP
         - name: ROUTE_GUARD_FITNESS
-          value: 127.0.0.1:9090
+          value: $(HOST_IP):9090
         - name: ROUTE_GUARD_PEERS
           value: 172.20.0.1,192.168.60.1
         - name: ROUTE_GUARD_POLL_MS
@@ -672,7 +686,7 @@ spec:
         - name: ROUTE_GUARD_HOLD_MS
           value: '3000'
         - name: ROUTE_GUARD_METRICS
-          value: 0.0.0.0:9095
+          value: $(HOST_IP):9095
         image: siprustserver:dev
         imagePullPolicy: IfNotPresent
         name: route-guard-hold
@@ -1282,7 +1296,7 @@ spec:
         - name: B2BUA_LISTEN
           value: 0.0.0.0:5060
         - name: B2BUA_METRICS
-          value: 0.0.0.0:9091
+          value: $(POD_IP):9091
         - name: B2BUA_MODE
           value: proxied
         - name: B2BUA_ORDINAL
