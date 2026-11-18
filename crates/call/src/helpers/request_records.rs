@@ -148,7 +148,7 @@ pub fn cancel_relay(call: &mut Call, leg_id: &str, id: &DialogId, outbound_cseq:
 
 /// Close the relay `leg_id`'s dialog `id` holds with outbound CSeq
 /// `outbound_cseq`: a relayed INVITE no 2xx was taken for is closed, the
-/// INVITE before it held again ([`super::invite_records::close_untaken_invite`]);
+/// INVITE before it held again, from the ACK the closed one carried ahead;
 /// one taken stays for the ACK and its re-ACKs.
 pub fn remove_relay(call: &mut Call, leg_id: &str, id: &DialogId, outbound_cseq: i64) {
     update_dialog(call, leg_id, id, |d| {

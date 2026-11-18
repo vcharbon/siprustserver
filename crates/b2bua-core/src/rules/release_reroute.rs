@@ -338,8 +338,7 @@ pub fn release_reroute_rules() -> Vec<RuleDefinition> {
         // ── A answers the realign re-INVITE → bridge complete: ACK A,
         // merge(a, new), BYE the old b-leg, clear the slice. The call
         // continues A↔new under the route's re-armed cap; a later hangup
-        // rides the ordinary `relay-bye`. A copy of the 2xx to an earlier
-        // INVITE on A's dialog answers nothing pending: `re-ack-2xx-ahead`'s.
+        // rides the ordinary `relay-bye`.
         rule(
             "reroute-a-realign-200",
             &[],

@@ -126,7 +126,8 @@ pub fn set_awaited_ack_cseq(call: &mut Call, leg_id: &str, cseq: Option<i64>) {
 /// Close the INVITE `leg_id`'s dialogs last sent on the client transaction
 /// `branch`, which a non-2xx final answered (RFC 3261 §17.1.1.3: the
 /// transaction ends with that final, hop-ACKed below the TU), so the record
-/// names nothing in flight for it ([`close_untaken_invite`]). Only an INVITE no 2xx was taken for is
+/// names nothing in flight for it and holds again the INVITE before it, from
+/// the ACK the closed one carried ahead. Only an INVITE no 2xx was taken for is
 /// closed: one taken stays for the ACK and its re-ACKs, whatever a later
 /// final on the same branch says; the dialling INVITE of a leg holding no
 /// confirmed dialog stays for the CANCEL.
