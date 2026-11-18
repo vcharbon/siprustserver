@@ -36,8 +36,10 @@ impl Owner {
     /// (`datagram` `None`) still unmatched is handed nowhere. The 200 goes to
     /// the CANCEL's response target, the 487 to the INVITE transaction's
     /// destination (§18.2.2). A CANCEL with a transaction of its own is
-    /// answered through it: the 200 settles it, and once settled it answers
-    /// the CANCEL's copies on one count.
+    /// answered through it: the 200 settles it, and once it holds a final
+    /// (that 200 or the TU's 481) that final answers every copy on one count
+    /// (§17.2.2), before any INVITE is looked up, so a copy never cancels an
+    /// INVITE rebuilt on its branch after the CANCEL was answered.
     pub(super) async fn handle_cancel(
         &mut self,
         endpoint: &dyn UdpEndpoint,
@@ -54,6 +56,14 @@ impl Owner {
         // §9.1), the INVITE transaction's key (§9.2, §17.2.3): one lookup, and
         // a miss is no match. Call-ID and From-tag are confirmed on the hit.
         let cancel_via = req.top_via();
+        // A copy of a CANCEL whose answers are still held: they answer it.
+        if self.cancelled_invite(cancel_via, |t| t.unsent_cancel.is_some()).is_some() {
+            return true;
+        }
+        if self.cancel_answered_in_own_txn(&req) {
+            self.replay_cached(endpoint, &req, src).await;
+            return true;
+        }
         let is_cancel_target = |t: &Transaction| {
             t.kind == TxnKind::Invite
                 && t.call_id == call_id.as_str()
@@ -69,14 +79,6 @@ impl Owner {
         // final's To-tag (RFC 3261 §9.2): no 487, no `Cancelled`, and the
         // established call upstream is untouched.
         if matched.is_none() {
-            // A copy of a CANCEL whose answers are still held: they answer it.
-            if self.cancelled_invite(cancel_via, |t| t.unsent_cancel.is_some()).is_some() {
-                return true;
-            }
-            if self.cancel_answered_in_own_txn(&req) {
-                self.replay_cached(endpoint, &req, src).await;
-                return true;
-            }
             let is_answered_target = |t: &Transaction| {
                 t.kind == TxnKind::Invite
                     && t.call_id == call_id.as_str()
