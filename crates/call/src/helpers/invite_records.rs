@@ -158,7 +158,7 @@ pub fn close_rejected_invite_round(call: &mut Call, leg_id: &str, branch: &str) 
 /// again the INVITE before it, as the ACK the closed one carried ahead states
 /// it, so a copy of that INVITE's 2xx still draws its ACK (§13.2.2.4) on its
 /// own count; nothing when it carried none.
-pub(super) fn close_untaken_invite(d: &mut Dialog) {
+pub fn close_untaken_invite(d: &mut Dialog) {
     let before = d.sent_invite.as_ref().and_then(|r| r.invite.as_ref()?.ack_ahead.as_ref());
     d.sent_invite = before.map(|ahead| ahead.restored());
 }

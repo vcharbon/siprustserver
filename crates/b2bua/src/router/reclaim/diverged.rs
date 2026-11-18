@@ -169,7 +169,9 @@ fn union_of(base: Enveloped, other: &Call, live: &Call, by: &RelayOwner) -> Enve
 
 /// `call` with, on each dialog, the open request records of the same dialog
 /// of `live` the worker `by` made and no other: an INVITE relay another
-/// worker made is left to it.
+/// worker made is left to it, and the dialog holds again the INVITE before
+/// it, from the ACK that relay carried ahead, so a copy of that INVITE's 2xx
+/// still draws its ACK here (RFC 3261 §13.2.2.4).
 pub(super) fn own_records(mut call: Call, live: &Call, by: &RelayOwner) -> Call {
     let mine = |r: &RequestRecord| r.relayed_by == *by;
     let legs = std::iter::once(&mut call.a_leg).chain(call.b_legs.iter_mut());
@@ -185,7 +187,7 @@ pub(super) fn own_records(mut call: Call, live: &Call, by: &RelayOwner) -> Call 
             if let Some(relay) = relay {
                 d.sent_invite = Some(relay.clone());
             } else if call::helpers::invite_relay(d).is_some_and(|r| !mine(r)) {
-                d.sent_invite = None;
+                call::helpers::close_untaken_invite(d);
             }
         }
     }
