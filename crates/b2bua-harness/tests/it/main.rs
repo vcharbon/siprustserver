@@ -104,6 +104,7 @@ mod keepalive_reap_both_directions;
 mod keepalive_refused;
 mod keepalive_timeout;
 mod keepalive_via_proxy;
+mod late_first_reinvite_2xx;
 mod late_invite_copy_on_schedule;
 mod lifecycle_terminal_turn;
 mod lifetime_message_cap;
