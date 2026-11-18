@@ -9,29 +9,10 @@ use b2bua_sdk::model::{Match, RuleAction, RuleDefinition};
 
 use super::core_rules::{ok, rule};
 
-/// `re-ack-retransmitted-2xx` — re-ACK a **retransmitted 2xx** whose first ACK
-/// was lost. §13.2.2.4 gives one ACK per 2xx and re-passes THAT ACK to the
-/// transport for every copy, so the re-ACK reuses the client transaction the
-/// ACK went out on (the retained `ack_branch` + the INVITE CSeq): a fresh
-/// branch would mint a new transaction and never quiesce the answerer's INVITE
-/// server txn. `ack_leg` re-passes the retained datagram (`emitted_ack`) raw,
-/// so whatever body the acknowledging party put on it rides every repeat. This
-/// is the b-leg / realign twin of the a-leg `unacked-2xx-retransmit` (which
-/// retransmits the B2BUA's *own* 2xx to a silent caller).
-///
-/// Fires ONLY on a genuine retransmit that nothing else claims: the source
-/// dialog holds an `ack_branch` — its ACK client transaction, minted by the
-/// ACK's emission and reset on every new INVITE txn — the response echoes that
-/// INVITE's CSeq, and no pending-relay snapshot is open (a first-time
-/// re-INVITE final is claimed by `relay-reinvite-response` / the realign-200
-/// rules, whose `ack_branch` is still `None`). A 2xx whose ACK has not left yet
-/// draws nothing: the answerer's own ladder is the mechanism §13.3.1.4
-/// provides while that ACK is on its way. Absorbs (AckLeg only — no relay to
-/// the peer, which already saw the first final).
-///
-/// A leg the BYE already Terminated still owes it (RFC 5407 §2 + App. D: a
-/// Mortal UA keeps the invite usage for exactly this, and §13.2.2.4's "every
-/// time a retransmission arrives" does not lapse with the dialog).
+/// `re-ack-retransmitted-2xx` — a copy of the 2xx to the dialog's last INVITE,
+/// once its ACK left (the dialog holds its `ack_branch`), on a Confirmed or
+/// Terminated leg: the retained ACK datagram is re-passed raw, nothing is
+/// relayed. Rationale: ADR-0057 appendix §10.
 pub(super) fn re_ack_retransmitted_2xx() -> RuleDefinition {
     rule(
         "re-ack-retransmitted-2xx",

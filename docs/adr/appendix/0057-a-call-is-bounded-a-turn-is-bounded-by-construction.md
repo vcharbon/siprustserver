@@ -295,6 +295,16 @@ the earlier CSeq (RFC 3261 §12.2.1.2) and answers nothing pending: it is
 re-ACKed with that ACK, on that count. A copy of a 2xx older still finds no ACK
 on the record and is absorbed, counted under `kind="2xx"`.
 
+The re-ACK re-passes the retained ACK datagram raw (RFC 3261 §13.2.2.4: one
+ACK per 2xx): same Via branch, so the answerer's INVITE server transaction
+quiesces, where a fresh branch would mint a new transaction; same body, so a
+delayed offer's answer rides every repeat. It answers only a copy nothing else
+claims: a first final of a re-INVITE is its relay's or its machine's, and a
+copy arriving before this side's ACK left draws nothing, the answerer's own
+ladder covering the ACK in flight. A leg its BYE terminated still owes it
+(RFC 5407 §2 and App. D). It is the b-leg twin of the a-leg
+`unacked-2xx-retransmit`, which repeats this stack's own 2xx.
+
 ## Considered and deferred
 
 - **A pool for the core fold, a leaked thread at `SCHED_IDLE`.** The pure core
