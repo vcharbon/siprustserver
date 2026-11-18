@@ -4,7 +4,9 @@
 //! copies (RFC 6026 §7.1), and a copy after Timer L ended it opens no
 //! transaction and draws no 482 (RFC 3261 §8.2.2.2): the INVITE's count
 //! outlives its transaction, and no copy later than 64·T1 after the first is
-//! answered. The call then ends with the caller's BYE: one CDR, fully reaped.
+//! answered. A lone copy after the record lapsed opens a transaction and is
+//! absorbed as a retransmission (§17.2.3). The call then ends with the
+//! caller's BYE: one CDR, fully reaped.
 //!
 //! Each copy is read after a settled advance of a few transits: the verdict
 //! depends on no in-order draining of the paused runtime.
@@ -82,5 +84,48 @@ async fn the_callers_invite_re_sent_past_64_t1_after_its_2xx_draws_nothing() {
     b2bua.assert_fully_reaped();
     assert_eq!(b2bua.cdr_records().len(), 1, "one CDR");
     assert!(answered.is_empty(), "no copy of the answered INVITE draws an answer: {answered:?}");
+    h.finish().await;
+}
+
+/// One copy of the caller's answered INVITE, on its own branch, after Timer L
+/// ended its transaction and 64·T1 of silence lapsed its copy record: a
+/// retransmission of a request already answered (RFC 3261 §17.2.3), not a
+/// merged request (§8.2.2.2). It draws nothing, and the call stays up until
+/// the caller's BYE: one CDR, fully reaped.
+#[tokio::test(start_paused = true)]
+async fn one_copy_of_the_answered_invite_after_its_transaction_and_record_ended_draws_nothing() {
+    let h = Harness::with_transit_delay("b2bua-lone-late-invite-copy", 1);
+    let alice = h.agent_auto("alice").await;
+    let bob = h.agent_auto("bob").await;
+    let at = h.next_addr().to_string();
+    let b2bua = B2buaSut::route_all_to("127.0.0.1", bob.addr().port())
+        .tune(|c| c.keepalive_interval_sec = 3_600)
+        .start(&h, "b2bua", &at)
+        .await;
+
+    let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
+    let mut uas = bob.receive("INVITE").await;
+    uas.respond(180, "Ringing").await;
+    call.expect(180).await;
+    uas.respond(200, "OK").with_sdp(ANSWER).await;
+    call.expect(200).await;
+    let mut dialog = call.ack().await;
+    bob.receive("ACK").await;
+    let invite = first_invite(&h, alice.addr(), b2bua.addr);
+
+    h.advance(Duration::from_millis(WINDOW_MS + 10_000)).await;
+    let before = h.wire_entries().len();
+    alice.try_send_datagram(&invite, b2bua.addr).await.expect("the copy leaves");
+    h.advance(Duration::from_millis(EVERY_MS)).await;
+    alice.drain().await;
+    let answered = invite_answers(&h, b2bua.addr, alice.addr(), before);
+
+    let mut bye = dialog.bye().await;
+    bob.receive("BYE").await.respond(200, "OK").await;
+    bye.expect(200).await;
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
+    assert_eq!(b2bua.cdr_records().len(), 1, "one CDR");
+    assert!(answered.is_empty(), "the lone late copy draws no answer: {answered:?}");
     h.finish().await;
 }
