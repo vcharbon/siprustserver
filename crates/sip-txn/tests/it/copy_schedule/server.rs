@@ -255,3 +255,38 @@ async fn a_stray_cancel_copied_at_wire_speed_is_answered_through_its_own_transac
     assert_eq!(answered, 1 + resends, "its 481 and Timer E's re-sends");
     assert_eq!(handed, 1, "the TU answers the first CANCEL only");
 }
+
+/// A stray CANCEL the TU re-offers against the INVITE a seed rebuilt is
+/// answered 200 through its own transaction: a copy after Timer I ended the
+/// INVITE, its 200 lost, draws that 200 again from the CANCEL's transaction.
+#[tokio::test(start_paused = true)]
+async fn a_reoffered_cancel_copied_after_its_invite_left_draws_its_200() {
+    let mut stack = Stack::build(TRANSIT, 64, 64).await;
+    let (branch, call_id) = ("z9hG4bK-reoffered-cancel", "reoffered-cancel");
+    let raw = inbound_request("CANCEL", branch, call_id, None);
+    stack.inject(&raw).await;
+    elapse_ms(20).await;
+    assert_eq!(handed_up(&stack.drain_events(), "CANCEL").len(), 1, "the stray CANCEL goes up");
+    let seed = TxnSeed::ServerInvite {
+        request: request_of(&inbound_request("INVITE", branch, call_id, None)),
+        to_tag: Some("seed-to-tag".to_string()),
+        provisional: None,
+        leg_id: Some("a".to_string()),
+    };
+    assert_eq!(stack.txn.seed("w0|reoffered-cancel|atag", vec![seed]).await.unwrap(), 1);
+    let cancel = SipMessage::Request(request_of(&raw));
+    let _ = stack.txn.reoffer(cancel, addr(PEER)).await.expect("the layer runs");
+    elapse_ms(20).await;
+    let out = stack.drain_peer();
+    assert_eq!(answers(&out, 200, "CANCEL"), 1, "the re-offer draws the 200");
+    assert_eq!(answers(&out, 487, "INVITE"), 1, "and the 487");
+    stack.inject(&inbound_request("ACK", branch, call_id, Some("seed-to-tag"))).await;
+    elapse_ms(6_000).await;
+    let _ = stack.drain_peer();
+    let _ = stack.drain_events();
+
+    stack.inject(&raw).await;
+    elapse_ms(20).await;
+    assert_eq!(answers(&stack.drain_peer(), 200, "CANCEL"), 1, "the copy draws the 200 again");
+    assert!(handed_up(&stack.drain_events(), "CANCEL").is_empty(), "no copy goes up");
+}
