@@ -320,3 +320,39 @@ async fn a_reoffered_cancel_copied_after_its_invite_left_draws_its_200() {
     assert_eq!(answers(&stack.drain_peer(), 200, "CANCEL"), 1, "the copy draws the 200 again");
     assert!(handed_up(&stack.drain_events(), "CANCEL").is_empty(), "no copy goes up");
 }
+
+/// A stray CANCEL the TU answered 481 keeps that final (RFC 3261 §17.2.2):
+/// once a seed rebuilds the INVITE on its branch, its copies draw the 481
+/// again and cancel nothing — no 200, no 487, no `Cancelled`.
+#[tokio::test(start_paused = true)]
+async fn copies_of_a_cancel_answered_481_draw_its_481_once_a_seed_rebuilds_its_invite() {
+    let mut stack = Stack::build(TRANSIT, 64, 64).await;
+    let (branch, call_id) = ("z9hG4bK-answered-481", "answered-481");
+    let raw = inbound_request("CANCEL", branch, call_id, None);
+    stack.inject(&raw).await;
+    elapse_ms(20).await;
+    assert_eq!(answer_481(&mut stack).await, 1, "the stray CANCEL goes up");
+    elapse_ms(20).await;
+    assert_eq!(answers(&stack.drain_peer(), 481, "CANCEL"), 1, "the 481 leaves");
+    let seed = TxnSeed::ServerInvite {
+        request: request_of(&inbound_request("INVITE", branch, call_id, None)),
+        to_tag: Some("seed-to-tag".to_string()),
+        provisional: None,
+        leg_id: Some("a".to_string()),
+    };
+    assert_eq!(stack.txn.seed("w0|answered-481|atag", vec![seed]).await.unwrap(), 1);
+    for _ in 0..2 {
+        stack.inject(&raw).await;
+        elapse_ms(20).await;
+    }
+    let out = stack.drain_peer();
+    assert_eq!(answers(&out, 481, "CANCEL"), 2, "each copy draws the stored 481");
+    assert_eq!(answers(&out, 200, "CANCEL"), 0, "no copy draws a second final");
+    assert_eq!(answers(&out, 487, "INVITE"), 0, "the rebuilt INVITE is not cancelled");
+    let cancelled = stack
+        .drain_events()
+        .into_iter()
+        .filter(|e| matches!(e, TransactionEvent::Cancelled { .. }))
+        .count();
+    assert_eq!(cancelled, 0, "no copy reports a cancellation");
+}
