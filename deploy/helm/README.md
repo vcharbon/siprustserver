@@ -52,7 +52,8 @@ A product chart depends on `siprust` and sets, per component (`worker`,
 - `extraContainers`, `extraVolumes`, `extraVolumeMounts` (and
   `extraInitContainers` on the worker and the proxy): sidecars;
 - on the worker and the proxy, `extraPorts`, `podSecurityContext`, `sysctls`,
-  `priorityClassName`;
+  `priorityClassName`; on the worker and the call limiter, the container's
+  `securityContext`;
 - `resources`, `nodeSelector`, `tolerations`, `podAnnotations` (over the
   chart's `prometheus.io/*`, key by key), `podLabels` (never `app`); the worker
   also `affinity` and `topologySpreadConstraints`;

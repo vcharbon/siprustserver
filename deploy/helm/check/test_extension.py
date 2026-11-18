@@ -28,6 +28,16 @@ class PodSettings(unittest.TestCase):
             ports = container(w, app)["ports"]
             self.assertIn({"name": "rtp", "containerPort": 30000, "protocol": "UDP"}, ports, comp)
 
+    def test_the_worker_container_takes_a_security_context(self) -> None:
+        w = find(render(SIPRUST, *KIND,
+                        "--set", "worker.securityContext.readOnlyRootFilesystem=true",
+                        "--set", "worker.securityContext.allowPrivilegeEscalation=false"),
+                 "StatefulSet", "b2bua-worker")
+        self.assertEqual(container(w, "b2bua-worker")["securityContext"],
+                         {"readOnlyRootFilesystem": True, "allowPrivilegeEscalation": False})
+        plain = find(render(SIPRUST, *KIND), "StatefulSet", "b2bua-worker")
+        self.assertNotIn("securityContext", container(plain, "b2bua-worker"))
+
     def test_annotations_override_the_charts_without_a_duplicate_key(self) -> None:
         text_args = ["--set-string", "worker.podAnnotations.prometheus\\.io/port=9999",
                      "--set-string", "worker.podAnnotations.team=voice"]

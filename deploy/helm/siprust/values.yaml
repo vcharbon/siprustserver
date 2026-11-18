@@ -193,6 +193,9 @@ worker:
   podSecurityContext: {}
   # Namespaced sysctls of the pod (spec.securityContext.sysctls).
   sysctls: []
+  # The worker container's securityContext (readOnlyRootFilesystem,
+  # allowPrivilegeEscalation, capabilities); empty renders none.
+  securityContext: {}
   priorityClassName: ""
   # Above the drain's longest run, B2BUA_DRAIN_GRACE_MS + 2 ×
   # B2BUA_DRAIN_RELEASE_FLUSH_MS + B2BUA_DRAIN_CDR_FLUSH_MS + 2 s (refused at

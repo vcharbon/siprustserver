@@ -100,6 +100,10 @@ spec:
           {{- with $w.args }}
           args: {{ toJson . }}
           {{- end }}
+          {{- with $w.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           env:
             - name: POD_NAME
               valueFrom: { fieldRef: { fieldPath: metadata.name } }
