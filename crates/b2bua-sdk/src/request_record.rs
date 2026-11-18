@@ -1,6 +1,7 @@
 //! What a rule reads of the request record its event settled (ADR-0055 §2):
 //! the one a response answers, or a transaction timeout ends, as the engine
-//! resolved it before the rules.
+//! resolved it before the rules, and whether a response answers the INVITE
+//! record its dialog holds.
 
 use crate::event::CallEvent;
 use crate::model::RuleContext;
@@ -29,6 +30,16 @@ impl<'a> RuleContext<'a> {
     /// for any non-response event.
     pub fn answers_relayed_request(&self) -> bool {
         self.relayed_pending().is_some()
+    }
+
+    /// Whether the current response answers the INVITE this stack last sent on
+    /// the dialog it names ([`Self::dialog`]): it echoes that INVITE's CSeq
+    /// (RFC 3261 §12.2.1.2). A copy of the 2xx to an earlier INVITE on that
+    /// dialog (§13.3.1.4) answers nothing pending. `false` for any other event
+    /// and on a dialog holding no INVITE this stack sent.
+    pub fn answers_last_sent_invite(&self) -> bool {
+        let (Some(resp), Some(dialog)) = (self.response(), self.dialog()) else { return false };
+        dialog.sent_invite.as_ref().is_some_and(|r| r.outbound_cseq == i64::from(resp.cseq().seq()))
     }
 
     /// For a `Timeout` event: the request record the timeout settled, as it
