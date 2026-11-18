@@ -342,32 +342,32 @@ def env_order(c: Doc) -> list[str]:
 class HttpBinds(unittest.TestCase):
     """Every HTTP listener's bind is a value: the proxy pod's scrape listeners
     on the node's address, a worker's on every address of its pod, the
-    operator and debug listeners on loopback, and a proxy pod's
-    external-plane scrape bind only with the opt-in."""
+    operator and debug listeners on loopback, and a proxy pod's scrape host
+    from an allowlist, its wildcard only with the opt-in."""
 
     def test_the_scrape_listeners_bind_the_pods_address_and_the_rest_loopback(self) -> None:
         docs = render(SIPRUST, *KIND)
         proxy = container(find(docs, "Deployment", "sip-front-proxy"), "sip-front-proxy")
         self.assertEqual((env(proxy)["PROXY_METRICS"], env(proxy)["PROXY_DEBUG"]),
-                         ("$(HOST_IP):9090", "127.0.0.1:9096"))
+                         ("$(HOST_IP):9090", "127.0.0.1:9097"))
         self.assertIn({"name": "HOST_IP",
                        "valueFrom": {"fieldRef": {"fieldPath": "status.hostIP"}}}, proxy["env"])
         self.assertLess(env_order(proxy).index("HOST_IP"), env_order(proxy).index("PROXY_METRICS"))
-        self.assertNotIn(9096, [p["containerPort"] for p in proxy["ports"]])
+        self.assertNotIn(9097, [p["containerPort"] for p in proxy["ports"]])
         worker = container(find(docs, "StatefulSet", "b2bua-worker"), "b2bua-worker")
         self.assertEqual((env(worker)["B2BUA_METRICS"], env(worker)["B2BUA_ADMIN"]),
                          ("0.0.0.0:9091", "127.0.0.1:9094"))
 
     def test_each_bind_is_a_value(self) -> None:
         docs = render(SIPRUST, *KIND, "--set", "proxy.metrics.bind=10.0.0.5:9090",
-                      "--set", "proxy.debug.bind=127.0.0.1:19096",
+                      "--set", "proxy.debug.bind=127.0.0.1:19097",
                       "--set", "proxy.routeGuard.metricsBind=10.0.0.5:9095",
                       "--set", "worker.metrics.bind=$(POD_IP):9091",
                       "--set", "worker.admin.bind=127.0.0.1:19094")
         deployment = find(docs, "Deployment", "sip-front-proxy")
         proxy = env(container(deployment, "sip-front-proxy"))
         self.assertEqual((proxy["PROXY_METRICS"], proxy["PROXY_DEBUG"]),
-                         ("10.0.0.5:9090", "127.0.0.1:19096"))
+                         ("10.0.0.5:9090", "127.0.0.1:19097"))
         self.assertEqual(env(container(deployment, "route-guard"))["ROUTE_GUARD_METRICS"],
                          "10.0.0.5:9095")
         worker = container(find(docs, "StatefulSet", "b2bua-worker"), "b2bua-worker")
@@ -378,30 +378,63 @@ class HttpBinds(unittest.TestCase):
     def test_an_empty_loopback_bind_takes_the_charts_default(self) -> None:
         docs = render(SIPRUST, *KIND, "--set", "proxy.debug.bind=", "--set", "worker.admin.bind=")
         proxy = env(container(find(docs, "Deployment", "sip-front-proxy"), "sip-front-proxy"))
-        self.assertEqual(proxy["PROXY_DEBUG"], "127.0.0.1:9096")
+        self.assertEqual(proxy["PROXY_DEBUG"], "127.0.0.1:9097")
         worker = env(container(find(docs, "StatefulSet", "b2bua-worker"), "b2bua-worker"))
         self.assertEqual(worker["B2BUA_ADMIN"], "127.0.0.1:9094")
 
-    def test_an_external_plane_scrape_bind_needs_the_opt_in(self) -> None:
-        vip = "192.168.60.250"
+    def test_a_proxy_pod_wildcard_scrape_bind_needs_the_opt_in(self) -> None:
         for value, named in (
                 ("proxy.metrics.bind=0.0.0.0:9090", "proxy.metrics.bind=0.0.0.0:9090"),
                 ("proxy.metrics.bind=[::]:9090", "proxy.metrics.bind=[::]:9090"),
+                ("proxy.env.PROXY_METRICS=[::]:9090", "proxy PROXY_METRICS=[::]:9090"),
+                ("proxy.routeGuard.metricsBind=0.0.0.0:9095",
+                 "proxy.routeGuard.metricsBind=0.0.0.0:9095")):
+            err = render_error(SIPRUST, *KIND, "--set-string", value)
+            self.assertIn(f"{named} is a wildcard", err)
+            self.assertIn("httpBinds.allowWildcard=true", err)
+            render(SIPRUST, *KIND, "--set-string", value, "--set", "httpBinds.allowWildcard=true")
+
+    def test_a_proxy_pod_scrape_host_is_the_nodes_address_or_a_dotted_quad(self) -> None:
+        for value in ("proxy.metrics.bind=$(HOST_IP):9090", "proxy.metrics.bind=10.0.0.5:9090",
+                      "proxy.routeGuard.metricsBind=10.0.0.5:9095"):
+            render(SIPRUST, *KIND, "--set-string", value)
+        opened = ("--set", "httpBinds.allowWildcard=true")
+        for value, named, *more in (
                 ("proxy.metrics.bind=[::0]:9090", "proxy.metrics.bind=[::0]:9090"),
                 ("proxy.metrics.bind=0:0:0:0:0:0:0:0:9090",
                  "proxy.metrics.bind=0:0:0:0:0:0:0:0:9090"),
                 ("proxy.metrics.bind=[::FFFF:0.0.0.0]:9090",
                  "proxy.metrics.bind=[::FFFF:0.0.0.0]:9090"),
-                (f"proxy.metrics.bind={vip}:9090", f"proxy.metrics.bind={vip}:9090"),
+                ("proxy.metrics.bind=[::ffff:192.168.60.250]:9090",
+                 "proxy.metrics.bind=[::ffff:192.168.60.250]:9090"),
+                ("proxy.metrics.bind=[::ffff:7f00:1]:9090",
+                 "proxy.metrics.bind=[::ffff:7f00:1]:9090"),
+                ("proxy.metrics.bind=[2001:db8:0::10]:9090",
+                 "proxy.metrics.bind=[2001:db8:0::10]:9090",
+                 "--set", "network.externalVip=2001:db8::10"),
+                ("proxy.metrics.bind=010.0.0.5:9090", "proxy.metrics.bind=010.0.0.5:9090"),
+                ("proxy.metrics.bind=[10.0.0.5]:9090", "proxy.metrics.bind=[10.0.0.5]:9090"),
+                ("proxy.metrics.bind=localhost:9090", "proxy.metrics.bind=localhost:9090"),
                 ("proxy.env.PROXY_METRICS=:::9090", "proxy PROXY_METRICS=:::9090"),
-                ("proxy.routeGuard.metricsBind=0.0.0.0:9095",
-                 "proxy.routeGuard.metricsBind=0.0.0.0:9095"),
                 ("proxy.routeGuard.metricsBind=[0::0]:9095",
-                 "proxy.routeGuard.metricsBind=[0::0]:9095")):
-            err = render_error(SIPRUST, *KIND, "--set-string", value)
-            self.assertIn(f"{named} takes connections from the external plane", err)
-            self.assertIn("httpBinds.allowExternal=true", err)
-            render(SIPRUST, *KIND, "--set-string", value, "--set", "httpBinds.allowExternal=true")
+                 "proxy.routeGuard.metricsBind=[0::0]:9095"),
+                ("proxy.routeGuard.metricsBind=[::1]:9095",
+                 "proxy.routeGuard.metricsBind=[::1]:9095")):
+            err = render_error(SIPRUST, *KIND, *opened, *more, "--set-string", value)
+            self.assertIn(f"{named} is no address the hostNetwork proxy pod binds", err)
+
+    def test_a_proxy_pod_scrape_bind_on_a_vip_is_refused_whatever_the_opt_in(self) -> None:
+        for value, named, vip in (
+                ("proxy.metrics.bind=172.20.255.250:9090",
+                 "proxy.metrics.bind=172.20.255.250:9090", "network.proxyVip"),
+                ("proxy.metrics.bind=192.168.60.250:9090",
+                 "proxy.metrics.bind=192.168.60.250:9090", "network.externalVip"),
+                ("proxy.routeGuard.metricsBind=172.20.255.250:9095",
+                 "proxy.routeGuard.metricsBind=172.20.255.250:9095", "network.proxyVip")):
+            for opt_in in ("false", "true"):
+                err = render_error(SIPRUST, *KIND, "--set", f"httpBinds.allowWildcard={opt_in}",
+                                   "--set-string", value)
+                self.assertIn(f"{named} is {vip}, which every proxy node holds on lo", err)
 
     def test_a_workers_wildcard_scrape_bind_needs_no_opt_in(self) -> None:
         for value in ("worker.metrics.bind=0.0.0.0:9091", "worker.env.B2BUA_METRICS=[::]:9091"):
@@ -412,13 +445,13 @@ class HttpBinds(unittest.TestCase):
     def test_a_loopback_scrape_bind_is_refused(self) -> None:
         for value, named in (
                 ("proxy.metrics.bind=127.0.0.1:9090", "proxy.metrics.bind=127.0.0.1:9090"),
-                ("proxy.routeGuard.metricsBind=[::1]:9095",
-                 "proxy.routeGuard.metricsBind=[::1]:9095"),
+                ("proxy.routeGuard.metricsBind=127.0.0.2:9095",
+                 "proxy.routeGuard.metricsBind=127.0.0.2:9095"),
                 ("worker.metrics.bind=127.0.0.1:9091", "worker.metrics.bind=127.0.0.1:9091"),
                 ("worker.metrics.bind=0:0:0:0:0:0:0:1:9091",
                  "worker.metrics.bind=0:0:0:0:0:0:0:1:9091")):
             err = render_error(SIPRUST, *KIND, "--set-string", value,
-                               "--set", "httpBinds.allowExternal=true")
+                               "--set", "httpBinds.allowWildcard=true")
             self.assertIn(f"{named} is a loopback address", err)
 
     def test_a_scrape_bind_names_its_pods_address_variable_only(self) -> None:

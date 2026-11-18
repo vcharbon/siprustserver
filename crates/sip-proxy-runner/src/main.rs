@@ -46,7 +46,7 @@
 //!   PROXY_METRICS    /metrics, /healthz, /readyz, /fitz listen ip:port, an IP
 //!                    literal, IPv6 with or without brackets (default 0.0.0.0:9090)
 //!   PROXY_DEBUG      /debug/flamegraph listen ip:port, loopback only
-//!                    (default 127.0.0.1:9096)
+//!                    (default 127.0.0.1:9097)
 //!   PROXY_QUEUE      inbound UDP queue depth, packets ≥ 1  (default 8192)
 //!   SIP_EXEMPTIONS   comma-separated shapes accepted against the RFC, read at
 //!                    ingress only (default none; a name no exemption has is

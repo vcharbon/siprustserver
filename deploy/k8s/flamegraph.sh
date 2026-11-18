@@ -5,7 +5,7 @@
 # inferno SVG). No perf/privileges/PMU needed.
 #
 #   ./flamegraph.sh b2b   [seconds] [pod-index]   # b2bua-worker-<idx>:9094 (worker.admin.bind)
-#   ./flamegraph.sh lb    [seconds] [pod-index]   # sip-front-proxy[<idx>]:9096 (proxy.debug.bind)
+#   ./flamegraph.sh lb    [seconds] [pod-index]   # sip-front-proxy[<idx>]:9097 (proxy.debug.bind)
 #
 # A release that moves those listeners states their ports in
 # WORKER_DEBUG_PORT and PROXY_DEBUG_PORT.
@@ -22,7 +22,7 @@ case "$tier" in
     pod="b2bua-worker-$idx"; port="${WORKER_DEBUG_PORT:-9094}" ;;
   lb|proxy)
     pod="$(kubectl -n "$NS" get pod -l app=sip-front-proxy -o jsonpath="{.items[$idx].metadata.name}")"
-    port="${PROXY_DEBUG_PORT:-9096}" ;;
+    port="${PROXY_DEBUG_PORT:-9097}" ;;
   *) echo "usage: $0 {b2b|lb} [seconds] [pod-index]" >&2; exit 1 ;;
 esac
 [ -n "$pod" ] || { echo "no pod found for tier=$tier idx=$idx" >&2; exit 1; }

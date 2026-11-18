@@ -203,15 +203,15 @@ fn a_dual_face_wildcard_bind_refuses_the_boot() {
 /// address, naming the variable.
 #[test]
 fn the_debug_address_defaults_to_loopback_and_refuses_any_other() {
-    assert_eq!(boot(&[]).expect("valid").debug, "127.0.0.1:9096".parse().unwrap());
-    for v6 in ["[::1]:19096", "::1:19096"] {
+    assert_eq!(boot(&[]).expect("valid").debug, "127.0.0.1:9097".parse().unwrap());
+    for v6 in ["[::1]:19097", "::1:19097"] {
         let cfg = boot(&[("PROXY_DEBUG", v6)]).expect("loopback");
-        assert_eq!(cfg.debug, "[::1]:19096".parse().unwrap());
+        assert_eq!(cfg.debug, "[::1]:19097".parse().unwrap());
     }
-    for address in ["0.0.0.0:9096", "[::]:9096", "10.0.0.9:9096", "fd00::9:9096"] {
+    for address in ["0.0.0.0:9097", "[::]:9097", "10.0.0.9:9097", "fd00::9:9097"] {
         refused(&[("PROXY_DEBUG", address)], "PROXY_DEBUG");
     }
-    refused(&[("PROXY_DEBUG", "localhost:9096")], "PROXY_DEBUG");
+    refused(&[("PROXY_DEBUG", "localhost:9097")], "PROXY_DEBUG");
 }
 
 /// The probe server's address takes the node's IPv6 address as the chart's

@@ -274,9 +274,9 @@ env> <variable> <the chart's value> <the runner's default>).
 {{- include "siprust.statedBind" (list .Values.proxy.env "PROXY_METRICS" (include "siprust.proxyMetricsBind" .) "0.0.0.0:9090") }}
 {{- end }}
 
-{{/* PROXY_DEBUG: proxy.debug.bind, else loopback port 9096. */}}
+{{/* PROXY_DEBUG: proxy.debug.bind, else loopback port 9097. */}}
 {{- define "siprust.proxyDebugBind" -}}
-{{- .Values.proxy.debug.bind | default "127.0.0.1:9096" }}
+{{- .Values.proxy.debug.bind | default "127.0.0.1:9097" }}
 {{- end }}
 
 {{/* B2BUA_METRICS as the chart derives it: worker.metrics.bind, else every address of the pod. */}}
@@ -304,14 +304,39 @@ its last colon, an IPv6 zone dropped.
 {{- regexReplaceAll "%.*$" $host "" | lower }}
 {{- end }}
 
+{{/* The wildcard hosts a proxy pod scrape bind takes with httpBinds.allowWildcard. */}}
+{{- define "siprust.wildcardHosts" -}}
+0.0.0.0 [::]
+{{- end }}
+
 {{/*
-Whether a bind's host is unspecified, a wildcard: "true" or empty. Every
-spelling of 0.0.0.0 and :: (zero groups, an embedded 0.0.0.0) and the
-IPv4-mapped ::ffff:0.0.0.0, which binds every IPv4 address.
+Why the hostNetwork proxy pod refuses a scrape bind's host, empty when it
+takes it. The host is an allowlist: $(HOST_IP), or an IPv4 address in
+dotted-quad form that is neither 0.0.0.0/8, loopback nor a VIP the node holds
+on lo; with httpBinds.allowWildcard, also 0.0.0.0 or [::]. Takes (list <root>
+<bind> <port>), the bind already on its port.
 */}}
-{{- define "siprust.bindIsUnspecified" -}}
-{{- $host := include "siprust.bindHost" . }}
-{{- if or (regexMatch "^[0:.]*$" $host) (regexMatch "^[0:]*:ffff:[0:.]*$" $host) }}true{{ end }}
+{{- define "siprust.proxyPodHostRefusal" -}}
+{{- $root := index . 0 }}{{- $bind := index . 1 }}
+{{- $host := trimSuffix (printf ":%d" (index . 2)) $bind }}
+{{- $octet := "(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])" }}
+{{- $vips := dict "network.proxyVip" (toString $root.Values.network.proxyVip) "network.externalVip" (toString $root.Values.network.externalVip) }}
+{{- if eq $host "$(HOST_IP)" }}
+{{- else if has $host (splitList " " (include "siprust.wildcardHosts" $root)) }}
+{{- if not $root.Values.httpBinds.allowWildcard }}
+{{- printf "is a wildcard, which on the hostNetwork proxy pod binds every interface of the node, the external plane's included: bind $(HOST_IP), or set httpBinds.allowWildcard=true" }}
+{{- end }}
+{{- else if or (not (regexMatch (printf "^%s(\\.%s){3}$" $octet $octet) $host)) (hasPrefix "0." $host) }}
+{{- printf "is no address the hostNetwork proxy pod binds: a scrape bind there is $(HOST_IP), an IPv4 address of the node in dotted-quad form, or with httpBinds.allowWildcard=true 0.0.0.0 or [::]" }}
+{{- else if hasPrefix "127." $host }}
+{{- printf "is a loopback address: the kubelet's probes and the scraper reach the pod at its own address" }}
+{{- else }}
+{{- range $name, $vip := $vips }}
+{{- if eq $host $vip }}
+{{- printf "is %s, which every proxy node holds on lo: the kubelet's probes and the scraper reach the pod at the node's address" $name }}
+{{- end }}
+{{- end }}
+{{- end }}
 {{- end }}
 
 {{/*
@@ -325,11 +350,12 @@ spelling of ::1, and an IPv4-mapped 127.0.0.0/8 address.
 
 {{/*
 The address the route guard reads /fitz at: the proxy's final PROXY_METRICS,
-the node's address in place of a wildcard host.
+the node's address in place of a wildcard host (the render takes no other
+wildcard spelling).
 */}}
 {{- define "siprust.guardFitness" -}}
 {{- $bind := include "siprust.proxyMetricsFinal" . }}
-{{- if include "siprust.bindIsUnspecified" $bind }}
+{{- if has (regexReplaceAll ":[^:]*$" $bind "") (splitList " " (include "siprust.wildcardHosts" .)) }}
 {{- printf "$(HOST_IP):%s" (regexReplaceAll "^.*:" $bind "") }}
 {{- else }}
 {{- $bind }}

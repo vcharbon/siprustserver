@@ -36,21 +36,22 @@ imagePullSecrets: []
 # The runners' HTTP listeners. A scrape listener (proxy.metrics.bind,
 # proxy.routeGuard.metricsBind, worker.metrics.bind: /metrics and the probe
 # routes) is reached at its pod's address, never on loopback (refused at
-# render). The hostNetwork proxy pod's bind the node's address by default; a
-# worker's binds every address of its own network namespace, which holds the
-# pod IP and loopback only, behind the workers' NetworkPolicy, and `kubectl
-# port-forward` reaches it. The operator and debug routes (worker.admin.bind,
-# proxy.debug.bind) bind loopback only, reached through `kubectl port-forward`
-# (deploy/helm/README.md). Each bind is `ip:port`, an IPv6 address with or
-# without brackets, and may name `$(HOST_IP)` (the proxy pod) or `$(POD_IP)`
-# (a worker), no other variable (refused at render).
+# render). The hostNetwork proxy pod's binds take the node's address by
+# default, `$(HOST_IP)`, either family; the only other host they take is a
+# dotted-quad IPv4 address of the node that is neither loopback nor a VIP
+# (refused at render otherwise). A worker's binds every address of its own
+# network namespace, which holds the pod IP and loopback only, behind the
+# workers' NetworkPolicy, and `kubectl port-forward` reaches it. The operator
+# and debug routes (worker.admin.bind, proxy.debug.bind) bind loopback only,
+# reached through `kubectl port-forward` (deploy/helm/README.md). Each bind is
+# `ip:port` and may name `$(HOST_IP)` (the proxy pod) or `$(POD_IP)` (a
+# worker), no other variable (refused at render).
 httpBinds:
-  # A proxy or route guard scrape bind on a wildcard (0.0.0.0, ::, in any
-  # spelling) or on network.externalVip takes connections from the external
-  # plane: on the hostNetwork pod a wildcard binds every interface of the
-  # node, and no NetworkPolicy applies there. It renders only with this on
-  # (refused otherwise).
-  allowExternal: false
+  # On, a proxy or route guard scrape bind may also be the wildcard, 0.0.0.0
+  # or [::] (no other spelling). The wildcard takes connections from the
+  # external plane: on the hostNetwork pod it binds every interface of the
+  # node, and no NetworkPolicy applies there.
+  allowWildcard: false
 
 # The two SIP planes. Every proxy node owns both VIPs on lo and announces them
 # while its proxy is Ready (ADR-0056); the proxy is the only component on both
@@ -260,16 +261,18 @@ proxy:
   # PROXY_METRICS: /metrics, /healthz, /readyz, /fitz, on port 9090, where the
   # kubelet's probes, the scraper and the route guard read them (refused at
   # render otherwise). Empty: the node's address (status.hostIP, the node's
-  # InternalIP), $(HOST_IP):9090. One value serves every proxy pod, so where a
-  # node's InternalIP is not on the internal plane, set the kubelet's node IP
-  # (--node-ip) to the node's internal-plane address rather than an address
-  # here; the probes reach the pod at that address only.
+  # InternalIP), $(HOST_IP):9090, the value to keep; with
+  # httpBinds.allowWildcard, 0.0.0.0:9090 or [::]:9090. A VIP is refused: the
+  # probes reach the pod at the node's address. One value serves every proxy
+  # pod, so where a node's InternalIP is not on the internal plane, set the
+  # kubelet's node IP (--node-ip) to the node's internal-plane address rather
+  # than an address here; the probes reach the pod at that address only.
   metrics:
     bind: ""
   # PROXY_DEBUG: /debug/flamegraph, on the node's loopback (hostNetwork), on a
   # port no other component of the chart takes; the proxy refuses an address
   # that is not loopback, and serves without the route when the bind fails.
-  # Empty: 127.0.0.1:9096.
+  # Empty: 127.0.0.1:9097.
   debug:
     bind: ""
   # The self-gate's CPS token bucket: refill per second and capacity. Null
@@ -390,7 +393,8 @@ proxy:
     # prometheus.io/sidecar-port, its probes' port).
     metricsPort: 9095
     # ROUTE_GUARD_METRICS, on metricsPort (refused at render otherwise).
-    # Empty: the node's address, $(HOST_IP):<metricsPort>, as proxy.metrics.bind.
+    # Empty: the node's address, $(HOST_IP):<metricsPort>; it takes the hosts
+    # proxy.metrics.bind takes.
     metricsBind: ""
     # The bound, ms, from a fault to the routers' withdrawal that the render
     # checks every detection path against: its detection (HEALTH_ISOLATION_MS,

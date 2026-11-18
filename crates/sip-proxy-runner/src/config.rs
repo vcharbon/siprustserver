@@ -321,8 +321,9 @@ fn external_face(env: &mut EnvReader, listen: Option<SocketAddr>) -> Option<Exte
 }
 
 /// `PROXY_DEBUG`'s default: loopback, on a port no other component of the
-/// chart takes on the node the proxy shares (hostNetwork).
-pub const DEFAULT_DEBUG: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 9096);
+/// chart takes on the node the proxy shares (hostNetwork), nor a SIP capture
+/// agent's usual metrics port (9096).
+pub const DEFAULT_DEBUG: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 9097);
 
 /// `PROXY_DEBUG`: a loopback `ip:port`, [`DEFAULT_DEBUG`] when unset. The
 /// debug routes cost CPU while they run, so no other host reaches them.

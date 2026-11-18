@@ -147,23 +147,25 @@ a render without MetalLB's APIs fails naming them. Off, the operator keeps them.
 
 ## 10. A route guard withdraws an unfit node within 3.4 s
 
-A caller retransmits an INVITE at
-0.5, 1.5 and 3.5 s, so a node withdrawn within 3.4 s of a fault loses no setup a
-retransmission can still answer. Readiness cannot get there (§3), so a container beside the
-proxy, on the node's network with `NET_ADMIN` alone (the proxy keeps none), reads the proxy's
-`/fitz` at the node's address (`ROUTE_GUARD_FITNESS`, where `PROXY_METRICS` binds) every
-`ROUTE_GUARD_POLL_MS` (100 ms) and owns one nftables table. Its output chain drops the node's
-BFD control (UDP 3784) and BGP (TCP 179, either end) toward the routers
-(`proxy.routeGuard.peers`, by default MetalLB's peers) unless the router is in a set whose
-entries time out `ROUTE_GUARD_DEAD_MS` (1 s) after each refresh. While the proxy reads fit the
-guard refreshes the set every quarter of that bound; the second unfit answer since the last
-fit one empties it, so one reading of a passing blip does not; a proxy or a guard that stops
-refreshing (hung, crashed, killed with its pod) lets it run out in the kernel, with no write.
-An internal interface set down takes the node's address with it: the guard reads no answer
-and the set runs out as for a dead proxy, within the same bound. The routers miss the node's BFD for their detection
-time (3 × 300 ms) and withdraw every route through it, as for a dead node. BGP is dropped
-with BFD: without it the node's next connect retry re-establishes the session the BFD loss
-ended and announces the routes again while BFD stays down.
+A caller retransmits an INVITE at 0.5, 1.5 and 3.5 s, so a node withdrawn within 3.4 s of a
+fault loses no setup a retransmission can still answer. Readiness cannot get there (§3), so a
+container beside the proxy, on the node's network with `NET_ADMIN` alone (the proxy keeps
+none), reads the proxy's `/fitz` at the node's address (`ROUTE_GUARD_FITNESS`, where
+`PROXY_METRICS` binds) every `ROUTE_GUARD_POLL_MS` (100 ms) and owns one nftables table. Its
+output chain drops the node's BFD control (UDP 3784) and BGP (TCP 179, either end) toward the
+routers (`proxy.routeGuard.peers`, by default MetalLB's peers) unless the router is in a set
+whose entries time out `ROUTE_GUARD_DEAD_MS` (1 s) after each refresh. While the proxy reads
+fit the guard refreshes the set every quarter of that bound; the second unfit answer since the
+last fit one empties it, so one reading of a passing blip does not; a proxy or a guard that
+stops refreshing (hung, crashed, killed with its pod) lets it run out in the kernel, with no
+write. An internal interface set down keeps its address in the node's local table, so the
+guard still reads the proxy's own `/fitz`, and the proxy, cut off every worker, turns unfit
+within `HEALTH_ISOLATION_MS`; only an address removed from the node reads as no answer, and the
+set runs out as for a dead proxy. Either way the node leaves within the same bound. The
+routers miss the node's BFD for their detection time (3 × 300 ms) and withdraw every route
+through it, as for a dead node. BGP is dropped with BFD: without it the node's next connect
+retry re-establishes the session the BFD loss ended and announces the routes again while BFD
+stays down.
 - `/fitz` is fit when `/readyz` would be Ready, its drain latch aside, and some worker
   answered a health probe within `HEALTH_ISOLATION_MS` (2 s): the isolation verdict, the
   proxy's own reach, read before any per-worker dead verdict (2.6-3.6 s), which stays the

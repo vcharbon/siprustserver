@@ -183,7 +183,7 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "allowExternal": {
+        "allowWildcard": {
           "type": "boolean"
         }
       }

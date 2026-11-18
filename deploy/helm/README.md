@@ -165,16 +165,17 @@ listener's bind is a value (`httpBinds` in `values.yaml`):
 | route guard scrape (`ROUTE_GUARD_METRICS`) | `proxy.routeGuard.metricsBind`, `$(HOST_IP):<metricsPort>` | `/metrics` `/healthz` `/readyz` | the kubelet's probes, Prometheus (`prometheus.io/sidecar-port`) |
 | worker scrape (`B2BUA_METRICS`) | `worker.metrics.bind`, every address of the pod `0.0.0.0:9091` | `/metrics` `/healthz` `/ready` | the kubelet's probes, Prometheus, the `b2bua-worker` Service, `kubectl port-forward` |
 | worker operator and debug (`B2BUA_ADMIN`) | `worker.admin.bind`, `127.0.0.1:9094`, loopback only | `/admin/*`, `/debug/flamegraph`, `/debug/heap` | `kubectl port-forward` |
-| proxy debug (`PROXY_DEBUG`) | `proxy.debug.bind`, `127.0.0.1:9096`, loopback only | `/debug/flamegraph` | `kubectl port-forward` |
+| proxy debug (`PROXY_DEBUG`) | `proxy.debug.bind`, `127.0.0.1:9097`, loopback only | `/debug/flamegraph` | `kubectl port-forward` |
 
 - **Metrics** are read by the in-cluster Prometheus from the pod's address. A
-  proxy or route guard scrape listener on a wildcard (`0.0.0.0`, `::`, in any
-  spelling) or on `network.externalVip` renders only with
-  `httpBinds.allowExternal=true`: on the hostNetwork proxy pod a wildcard
-  binds every interface of the node, the external one included, and no
-  NetworkPolicy applies there. Their default is the node's InternalIP
-  (`status.hostIP`); where that is not on the internal plane, set the kubelet's
-  `--node-ip` to the node's internal-plane address. A worker is never
+  proxy or route guard scrape listener binds the node's InternalIP
+  (`$(HOST_IP)`, `status.hostIP`); where that is not on the internal plane,
+  set the kubelet's `--node-ip` to the node's internal-plane address. The
+  render takes no other host there but a dotted-quad IPv4 address that is
+  neither loopback nor a VIP, and, with `httpBinds.allowWildcard=true`,
+  `0.0.0.0` or `[::]`: on the hostNetwork proxy pod a wildcard binds every
+  interface of the node, the external one included, and no NetworkPolicy
+  applies there. A worker is never
   hostNetwork: its wildcard covers its pod IP and its loopback, and the
   workers' NetworkPolicy holds port 9091. No scrape bind is loopback: the
   kubelet's probes reach the pod at its address.
@@ -188,7 +189,7 @@ listener's bind is a value (`httpBinds` in `values.yaml`):
   `kubectl port-forward pod/<worker> 19094:9094` then
   `curl -X POST localhost:19094/admin/cordon`, or
   `curl -o cpu.svg 'localhost:19094/debug/flamegraph?seconds=20'`;
-  `kubectl port-forward pod/<proxy> 19096:9096` for the proxy's flamegraph.
+  `kubectl port-forward pod/<proxy> 19097:9097` for the proxy's flamegraph.
   `deploy/k8s/flamegraph.sh` wraps the capture. The route guard and the CDR
   consumer serve no debug route; a proxy whose debug port is taken serves
   without it and logs `debug server failed to bind`.

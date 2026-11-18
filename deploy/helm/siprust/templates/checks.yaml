@@ -19,8 +19,8 @@ each runner's startup check.
 | `routeGuard.deadMs` + the BFD detection time ≤ `routeGuard.withdrawWithinMs` (route guard on) | a hung or dead proxy, whose guard stops refreshing, leaves it within the bound |
 | proxy `minReadySeconds` > `readinessProbe.periodSeconds` + `announce.metallb.connectTimeSeconds` + 2 s (route guard on) | the pod is Ready once its guard let the node out; its BGP sessions are back before the rollout stops the next proxy |
 | proxy PROXY_METRICS (`proxy.metrics.bind`) keeps port 9090, `proxy.routeGuard.metricsBind` `proxy.routeGuard.metricsPort`, worker B2BUA_METRICS (`worker.metrics.bind`) 9091 | the readiness and liveness probes, the scraper and the route guard read them there |
-| no proxy or route guard scrape bind on a wildcard (any spelling of 0.0.0.0 or ::) or `network.externalVip`, unless `httpBinds.allowExternal` | the external plane would reach the listener: the hostNetwork pod's wildcard binds every interface of its node |
-| no scrape bind on loopback, nor naming a `$(VAR)` but its pod's address (`HOST_IP` for the proxy pod, `POD_IP` for a worker) | the kubelet's probes and the scraper reach the pod at its own address; an undeclared variable is left unexpanded and the runner cannot bind it |
+| a proxy or route guard scrape bind's host is `$(HOST_IP)` or a dotted-quad IPv4 address outside 0.0.0.0/8 and 127.0.0.0/8 that is neither `network.proxyVip` nor `network.externalVip`; with `httpBinds.allowWildcard`, also `0.0.0.0` or `[::]` | the hostNetwork pod's wildcard binds every interface of its node, the external plane's included; the probes and the scraper reach the pod at the node's address, not at a VIP every proxy node holds on lo; an allowlist leaves no other spelling of these addresses through |
+| no worker scrape bind on loopback; no scrape bind naming a `$(VAR)` but its pod's address (`HOST_IP` for the proxy pod, `POD_IP` for a worker) | the kubelet's probes and the scraper reach the pod at its own address; an undeclared variable is left unexpanded and the runner cannot bind it |
 | proxy `announce.port` ≠ the metrics port 9090 and ≠ `network.sipPort` | the announce-only Services expose nothing kube-proxy would forward to a listener |
 | `proxy.nodeSelector` set | the workers' node affinity keeps them off every node it names: a node that runs or ran a proxy keeps the VIPs on lo (ADR-0056 §7) |
 | `network.externalNextHops` set | traffic from the external VIP leaves only through the table these next hops fill (ADR-0056 §11): with none, nothing reaches a caller |
@@ -212,9 +212,10 @@ grammar, the call limiter's lease. */ -}}
 {{- end }}
 {{- /* The scrape listeners: each bind keeps the port its readers use, is
 reached at the pod's address, and names no variable but its pod's address. On
-the hostNetwork proxy pod it also stays off the external plane unless
-httpBinds.allowExternal. Each entry: the name, the final bind, its port, why
-that port, the address variable its pod declares, whether it is hostNetwork. */ -}}
+the hostNetwork proxy pod its host is one siprust.proxyPodHostRefusal takes; a
+worker's is any but loopback. Each entry: the name, the final bind, its port,
+why that port, the address variable its pod declares, whether it is
+hostNetwork. */ -}}
 {{- $scrape := list }}
 {{- if .Values.proxy.enabled }}
 {{- $named := ternary "proxy PROXY_METRICS" "proxy.metrics.bind" (hasKey $penv "PROXY_METRICS") }}
@@ -229,7 +230,6 @@ that port, the address variable its pod declares, whether it is hostNetwork. */ 
 {{- $default := "0.0.0.0:9091" }}
 {{- $scrape = append $scrape (list $named (include "siprust.statedBind" (list $wenv "B2BUA_METRICS" (include "siprust.workerMetricsBind" .) $default)) 9091 "the probes, the Service, the NetworkPolicy and the scraper reach the worker there" "POD_IP" false) }}
 {{- end }}
-{{- $extVip := toString .Values.network.externalVip | lower }}
 {{- range $scrape }}
 {{- $name := index . 0 }}{{- $bind := index . 1 }}{{- $port := index . 2 }}{{- $why := index . 3 }}
 {{- $addrVar := printf "$(%s)" (index . 4) }}{{- $hostNetwork := index . 5 }}
@@ -241,12 +241,12 @@ that port, the address variable its pod declares, whether it is hostNetwork. */ 
 {{- fail (printf "%s=%s names %s, which its pod does not declare before it: a scrape bind names %s only" $name $bind . $addrVar) }}
 {{- end }}
 {{- end }}
-{{- if include "siprust.bindIsLoopback" $bind }}
-{{- fail (printf "%s=%s is a loopback address: the kubelet's probes and the scraper reach the pod at its own address" $name $bind) }}
+{{- if $hostNetwork }}
+{{- with include "siprust.proxyPodHostRefusal" (list $ $bind $port) }}
+{{- fail (printf "%s=%s %s" $name $bind .) }}
 {{- end }}
-{{- $host := include "siprust.bindHost" $bind }}
-{{- if and $hostNetwork (not $.Values.httpBinds.allowExternal) (or (include "siprust.bindIsUnspecified" $bind) (and $extVip (eq $host $extVip))) }}
-{{- fail (printf "%s=%s takes connections from the external plane (on the hostNetwork proxy pod a wildcard binds every interface of the node; network.externalVip is the external plane's): bind an internal address, or set httpBinds.allowExternal=true" $name $bind) }}
+{{- else if include "siprust.bindIsLoopback" $bind }}
+{{- fail (printf "%s=%s is a loopback address: the kubelet's probes and the scraper reach the pod at its own address" $name $bind) }}
 {{- end }}
 {{- end }}
 {{- if and .Values.worker.enabled .Values.callLimiter.enabled }}
