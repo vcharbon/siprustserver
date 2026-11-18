@@ -1341,7 +1341,8 @@ async fn loadgen_actor_refer_reaps_every_call() {
 }
 
 /// Drive the actor refer mix over a 5 % lossy fabric with retransmit on, and
-/// assert the recovery; returns the count of failed calls.
+/// assert the recovery; returns the count of failed calls. The refer body
+/// never feeds the cross-call 18x gate: a pure-refer run counts no ringing.
 async fn actor_refer_under_loss(base: u16) -> (Harness, B2buaSut, Arc<MuxCore>, u64) {
     // recv = 12 s like the basic-call recovery test: compounded two-hop
     // retransmit ladders (0.5+1+2+4 s) need headroom under CI CPU contention.
@@ -1397,8 +1398,6 @@ async fn actor_refer_under_loss(base: u16) -> (Harness, B2buaSut, Arc<MuxCore>, 
         "an actor-refer call failed with a NON-timeout class under loss:\n{}",
         reporter.render_prometheus()
     );
-    // Contract-table §3 regression: the refer body must NOT feed the cross-call
-    // 18x gate (the linear body never did — a pure-refer run expects zero).
     let (_rung, expected) = reporter.ringing_totals();
     assert_eq!(expected, 0, "refer began feeding the 18x ringing gate — contract drift");
 
@@ -1611,7 +1610,7 @@ async fn loadgen_abandoned_reject_leg_recovery_lands_on_recording() {
 
 /// **The 2nd-NOTIFY ack gate, PERMANENT-LOSS side.** The same
 /// targeted drop, but EVERY arrival (re-emissions included) is discarded — an
-/// unrecoverable loss. The contract (table §2): the call's teardown still
+/// unrecoverable loss. The contract: the call's teardown still
 /// completes, the settle barrier's 32 s ceiling elapses with the CSeq gap open
 /// (the later BYE reveals the hole), and the verdict maps to the FIXED
 /// `Timeout { who: "settle" }` — class `timeout`, case `settle` (the failed

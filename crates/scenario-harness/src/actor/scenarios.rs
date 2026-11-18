@@ -59,7 +59,7 @@ fn guard(who: &'static str, detail: &'static str) -> StepError {
 ///
 /// Downstream contract: phases `referred` → `transferred` ONLY; checkpoints
 /// `time_to_200` / `time_to_202` / `time_to_charlie_200`; NO `mark_ringing`;
-/// guard errors under `who: "refer"`.
+/// guard errors under `who: "refer"`, a fixed string that keys a bounded sample.
 pub struct Refer {
     /// The `X-Api-Call.refer_key` the SUT's REFER backend authorizes — per-run
     /// SUT auth data fed in at construction (the CLI's `--refer-key`), NOT
@@ -89,7 +89,6 @@ impl ActorScenario for Refer {
     }
 
     fn build(&self, env: &CallEnv<'_>) -> Result<ActorCall, StepError> {
-        // The guards. Their `who` is a fixed string: it keys a bounded sample.
         if env.charlie.is_none() {
             return Err(StepError::UnexpectedKind {
                 who: "refer".to_string(),
@@ -211,7 +210,8 @@ impl ActorScenario for Refer {
 /// `transfer_declined` branch.
 ///
 /// Downstream contract: NO phases, NO anchors, checkpoint `time_to_200` only,
-/// NO `mark_ringing`; guard errors under `who: "refer_charlie_reject"`.
+/// NO `mark_ringing`; guard errors under `who: "refer_charlie_reject"`, a fixed
+/// string that keys a bounded sample.
 pub struct ReferCharlieReject {
     /// The `X-Api-Call.refer_key` the SUT's REFER backend authorizes.
     pub refer_key: String,
@@ -239,7 +239,6 @@ impl ActorScenario for ReferCharlieReject {
     }
 
     fn build(&self, env: &CallEnv<'_>) -> Result<ActorCall, StepError> {
-        // The guards. Their `who` is a fixed string: it keys a bounded sample.
         if env.charlie.is_none() {
             return Err(guard("refer_charlie_reject", "bound without a charlie leg"));
         }
@@ -267,7 +266,6 @@ impl ActorScenario for ReferCharlieReject {
                 invite_targets: vec![("bob", env.bob.clone())],
                 via: None,
                 feed: CtxFeed {
-                    // `time_to_200` on alice's answer; NO phase, NO ringing gate.
                     on_answer_rx: Feed::new(Some("time_to_200"), None),
                     ..CtxFeed::default()
                 },
@@ -352,8 +350,10 @@ impl ActorScenario for ReferCharlieReject {
 ///
 /// Downstream contract: phases `rerouted` → `pracked` → `connected` → `bye_200`; checkpoints
 /// `time_to_prack_200` / `time_to_200` / `time_to_bye_200`; `mark_ringing(true)`
-/// on bob2's reliable 183; anchors `PRACK_ANCHORS` (with `initialInvite` on BOTH
-/// bob's rejected and bob2's winning INVITE).
+/// on bob2's reliable 183, guaranteed-delivery, so it counts toward the cross-call
+/// 18x gate; anchors `PRACK_ANCHORS` (with `initialInvite` on BOTH bob's rejected
+/// and bob2's winning INVITE); guard errors under `who: "rerouting_prack"`, a
+/// fixed string that keys a bounded sample.
 pub struct ReroutingPrack;
 
 impl ActorScenario for ReroutingPrack {
@@ -362,7 +362,6 @@ impl ActorScenario for ReroutingPrack {
     }
 
     fn build(&self, env: &CallEnv<'_>) -> Result<ActorCall, StepError> {
-        // The guard. Its `who` is a fixed string: it keys a bounded sample.
         let bob2 = env.bob2.ok_or_else(|| guard("rerouting_prack", "bound without a bob2 leg"))?;
 
         let actors = vec![
@@ -391,8 +390,6 @@ impl ActorScenario for ReroutingPrack {
                 invite_targets: vec![("bob", env.bob.clone())],
                 via: None,
                 feed: CtxFeed {
-                    // bob2's reliable 183 is guaranteed-delivery, so it counts
-                    // toward the cross-call 18x gate.
                     ringing_gate: true,
                     on_answer_rx: Feed::new(Some("time_to_200"), None),
                     on_prack_ok: Feed::new(Some("time_to_prack_200"), Some("pracked")),
@@ -475,8 +472,8 @@ impl ActorScenario for ReroutingPrack {
 ///
 /// Downstream contract: phases `pracked` → `connected` → `updated` → `bye_200`; checkpoints
 /// `time_to_prack_200` / `time_to_200` / `time_to_update_200` / `time_to_bye_200`;
-/// `mark_ringing(true)` on the reliable 183; anchors `PRACK_ANCHORS` (UPDATE NOT
-/// anchored).
+/// `mark_ringing(true)` on the reliable 183, guaranteed-delivery, so it counts
+/// toward the cross-call 18x gate; anchors `PRACK_ANCHORS` (UPDATE NOT anchored).
 pub struct PrackUpdate;
 
 impl ActorScenario for PrackUpdate {
@@ -509,8 +506,6 @@ impl ActorScenario for PrackUpdate {
                 invite_targets: vec![("bob", env.bob.clone())],
                 via: None,
                 feed: CtxFeed {
-                    // bob's reliable 183 is guaranteed-delivery, so it counts
-                    // toward the cross-call 18x gate.
                     ringing_gate: true,
                     on_answer_rx: Feed::new(Some("time_to_200"), None),
                     on_prack_ok: Feed::new(Some("time_to_prack_200"), Some("pracked")),
@@ -681,7 +676,6 @@ impl ActorScenario for InviteReject {
                 )],
                 invite_targets: vec![("bob", env.bob.clone())],
                 via: None,
-                // NO phases / checkpoints / ringing gate.
                 feed: CtxFeed::default(),
 
                 cseq: None,
@@ -732,8 +726,8 @@ impl ActorScenario for InviteReject {
 /// under [`Branch::ANSWERED_DESPITE_CANCEL`]; when it reaches her before her
 /// CANCEL leaves, under [`Branch::ANSWERED_BEFORE_CANCEL`].
 ///
-/// Downstream contract: NO phases, NO anchors, checkpoint `time_to_180` only,
-/// NO `mark_ringing`.
+/// Downstream contract: NO phases, NO anchors, checkpoint `time_to_180` (on the
+/// first provisional) only, NO `mark_ringing`.
 pub struct AbandonRinging;
 
 /// The abandon's accepted endings: the CANCEL won (487), the 200 crossed it,
@@ -776,8 +770,6 @@ impl ActorScenario for AbandonRinging {
                 invite_targets: vec![("bob", env.bob.clone())],
                 via: None,
                 feed: CtxFeed {
-                    // `time_to_180` on the first provisional; NO phase, NO ringing
-                    // gate.
                     on_provisional: Feed::new(Some("time_to_180"), None),
                     ..CtxFeed::default()
                 },

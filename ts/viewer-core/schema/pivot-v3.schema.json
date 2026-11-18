@@ -221,7 +221,7 @@
               "type": "null"
             }
           ],
-          "description": "What ADDED this leg to the call: a transfer, or a media resource\ninserted into it. A joined leg is a parallel arrival, not a failure —\nthe first attempt answered and the call then dialed somebody else — so\nit is exclusive with the failure-only sequential `cause`."
+          "description": "What ADDED this leg to the call: a transfer, or a media resource\ninserted into it. A joined leg takes a branch of its own. Independent of\n`cause`: one says how the leg entered the call, the other why the\nplatform left it, so a joined leg that fails (a busy transfer target the\nplatform reroutes internally) states both."
         },
         "leg": {
           "description": "The leg id the flow uses for this attempt.",

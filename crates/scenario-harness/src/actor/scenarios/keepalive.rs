@@ -147,8 +147,6 @@ impl ActorScenario for LongCall {
                     ringing_gate: true,
                     on_answer_rx: Feed::new(Some("time_to_200"), None),
                     on_options_ok: Feed::new(Some("time_to_options_200"), Some("keepalive_ack")),
-                    // The BYE carries the `time_to_bye_200` checkpoint but NO phase
-                    // — `long_call`'s terminal phase stays `keepalive_ack`.
                     on_bye_ok: Feed::new(Some("time_to_bye_200"), None),
                     ..CtxFeed::default()
                 },

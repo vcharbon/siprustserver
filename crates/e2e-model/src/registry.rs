@@ -380,14 +380,10 @@ const PRACK_ANCHORS: &[Anchor] = &[
 fn default_shapes() -> Vec<ShapeDescriptor> {
     let mut shapes = vec![
         // ── Load: the happy-path real-call scenarios ─────────────────────────
-        // ACTOR-executed: same downstream contract
-        // (table §5.1).
         ShapeDescriptor::new("basic_call")
             .anchors(LOAD_CALL_ANCHORS)
             .default_weight(4.0)
             .load_actor_with(|_| Arc::new(cs::basic_call(cs::default_binder()))),
-        // ACTOR-executed: same downstream contract
-        // (table §5.2).
         ShapeDescriptor::new("reinvite")
             .anchors(LOAD_REINVITE_ANCHORS)
             .default_weight(2.0)
@@ -433,26 +429,18 @@ fn default_shapes() -> Vec<ShapeDescriptor> {
             .anchors(PRACK_ANCHORS)
             .default_weight(0.5)
             .load_actor_with(|_| Arc::new(cs::prack_update_early(cs::default_binder()))),
-        // ACTOR-executed: per-endpoint reactive actors + the ack-gated settle barrier;
-        // the downstream contract is `scenario_harness::actor::scenarios::Refer`'s.
         ShapeDescriptor::new("refer")
             .anchors(LOAD_REFER_ANCHORS)
             .default_weight(1.0)
             .needs_charlie()
             .load_actor_with(|inputs| Arc::new(cs::refer(cs::default_binder(), &inputs.refer_key))),
-        // ACTOR-executed: same downstream contract
-        // (table §5.4).
         ShapeDescriptor::new("options_hold")
             .anchors(LOAD_CALL_ANCHORS)
             .default_weight(1.0)
             .load_actor_with(|_| Arc::new(cs::options_hold(cs::default_binder()))),
-        // ACTOR-executed: the reactors answer SUT
-        // keepalives on both legs during the hold (table §5.5).
         ShapeDescriptor::new("long_call")
             .anchors(LOAD_ESTABLISH_ANCHORS)
             .load_actor_with(|_| Arc::new(cs::long_call(cs::default_binder()))),
-        // ACTOR-executed: per-endpoint reactors + the
-        // ack-gated settle barrier; same downstream contract (table §5.6).
         ShapeDescriptor::new("prack_update")
             .anchors(PRACK_ANCHORS)
             .load_actor_with(|_| Arc::new(cs::prack_update(cs::default_binder()))),
@@ -466,18 +454,12 @@ fn default_shapes() -> Vec<ShapeDescriptor> {
             .emergency()
             .load_actor_with(|_| Arc::new(cs::reinvite(cs::default_binder()))),
         // ── Load: the abnormal-end cleanup-coverage set ──────────────────────
-        // ACTOR-executed: same downstream contract
-        // (table §5.8).
         ShapeDescriptor::new("invite_reject")
             .abnormal_end_weight(1.0)
             .load_actor_with(|_| Arc::new(cs::invite_reject(cs::default_binder()))),
-        // ACTOR-executed: same downstream contract
-        // (table §5.9).
         ShapeDescriptor::new("abandon_ringing")
             .abnormal_end_weight(1.0)
             .load_actor_with(|_| Arc::new(cs::abandon_ringing(cs::default_binder()))),
-        // ACTOR-executed: per-endpoint reactors + the
-        // ack-gated settle barrier; same downstream contract (table §5.10).
         ShapeDescriptor::new("refer_charlie_reject")
             .abnormal_end_weight(1.0)
             .needs_charlie()

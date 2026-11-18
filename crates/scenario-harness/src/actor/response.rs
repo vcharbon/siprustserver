@@ -136,6 +136,10 @@ async fn absorb_establishing_failure(
     Ok(false)
 }
 
+/// Folds one inbound response into the caller's state. Under the ringing gate,
+/// an INVITE answered without ever ringing is a lost non-PRACK 18x: best-effort,
+/// counted into the cross-call gate (`mark_ringing(false)`), never a per-call
+/// failure.
 pub(super) async fn react_response(
     st: &mut ActorState<'_>,
     resp: SipResponse,
@@ -178,9 +182,6 @@ pub(super) async fn react_response(
                     super::lost_provisional::note_final(st, now);
                     st.ctx.anchor(&st.agent, "answer", &resp);
                     if st.feed.ringing_gate && !st.saw_provisional {
-                        // Answered without ever ringing: a lost non-PRACK 18x is
-                        // best-effort — counted into the cross-call gate, never a
-                        // per-call failure.
                         st.ctx.mark_ringing(false);
                     }
                     st.feed.on_answer_rx.stamp(st.ctx);
