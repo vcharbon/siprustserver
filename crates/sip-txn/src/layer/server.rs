@@ -41,6 +41,11 @@ impl Owner {
     /// response goes through the CANCEL's own transaction (a stray CANCEL's,
     /// `layer::server_cancel`); one no transaction holds leaves raw, never
     /// through, nor dropped by, the INVITE transaction on its branch.
+    /// A transaction that has sent its final (Completed, Confirmed, Accepted)
+    /// only retransmits the stored one (§17.2.1): any response the TU sends it
+    /// after is dropped — a 200 racing the layer's own 487, a duplicate
+    /// relayed final — so no second final leaves under another To-tag. The TU
+    /// repeats its own 2xx raw (§13.3.1.4).
     pub(super) async fn do_send_response(
         &mut self,
         endpoint: &dyn UdpEndpoint,
@@ -50,15 +55,6 @@ impl Owner {
         let status = msg.status();
         let cseq_method = msg.cseq().method().clone();
 
-        // RFC 3261 §17.2.1: a server txn that has sent its final (Completed,
-        // Confirmed once the ACK landed, Accepted after a 2xx) only
-        // retransmits the STORED response. DROP any further final from the TU
-        // here (a 200 racing handle_cancel's autonomous 487, a duplicate
-        // relayed final, a teardown timer answering a cancelled call) —
-        // re-sending it would put a second final with a different To-tag on
-        // the wire, flip the ACK 2xx/non-2xx classifier
-        // (last_response_status), and orphan a duplicate hold. The TU repeats
-        // its own 2xx raw (§13.3.1.4).
         let held = ServerTxnId::of_response(&msg).and_then(|id| self.server(id));
         if let Some(txn) = held {
             if matches!(txn.state, TxnState::Completed | TxnState::Confirmed | TxnState::Accepted) {
