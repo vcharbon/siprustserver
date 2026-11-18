@@ -49,8 +49,7 @@ pub(super) enum Turn {
 /// as an unavailable decision, its call born only to write its record. The
 /// probe's 500, the identity guard's 500, the cancelled setup, the cordon's or
 /// the budget's 503, or the accept counts the INVITE's outcome once
-/// ([`crate::new_calls`]); a copy is answered 482, or absorbed when it
-/// retransmits the live call's answered INVITE, and refused as a copy.
+/// ([`crate::new_calls`]); a copy is answered 482 and refused as a copy.
 /// `admitted` is the hold and the setup budget of a new call, `None` for a
 /// copy, whose budget only ends its wait for its permits: it asks nothing and
 /// answers at once. Every identifier the turn mints is drawn from `turn`; `datagram` is
@@ -108,18 +107,14 @@ pub(super) async fn initial_invite_turn(
         return Turn::Consumed;
     }
 
+    // A copy is a request merged with the INVITE it copies (RFC 3261
+    // §8.2.2.2): answered 482, it creates no call, as no call is born past
+    // the admission ladder.
     let resident = ctx.state.contains(call_ref);
     if copy {
-        let live = ctx.state.resident(call_ref);
-        match live.filter(|call| super::admit::retransmits_answered(call, req)) {
-            Some(_) => relinquish_retransmission(ctx, req).await,
-            None => {
-                let ids = &mut turn.ids;
-                let merged = build_merged_482(ids, req, &ctx.config.minted_final_advertisement);
-                if let Ok(merged) = merged {
-                    let _ = ctx.txn.send_response(merged, reply_to(req, src)).await;
-                }
-            }
+        let merged = build_merged_482(&mut turn.ids, req, &ctx.config.minted_final_advertisement);
+        if let Ok(merged) = merged {
+            let _ = ctx.txn.send_response(merged, reply_to(req, src)).await;
         }
         ctx.metrics.new_calls().refuse_copy();
         return if resident { Turn::Consumed } else { Turn::Shed };
@@ -302,16 +297,6 @@ pub(super) async fn initial_invite_turn(
     match crate::caps::hold(&ctx.config.caps, &Gauge::of(&call), Checked::All, turn, closed) {
         Ok(result) => Turn::Result(Box::new(result)),
         Err(tripped) => Turn::Tripped(tripped),
-    }
-}
-
-/// Absorb `req`, a retransmission of the live call's answered INVITE
-/// reaching the turn after that INVITE's server transaction ended
-/// (`super::admit::retransmits_answered`): the transaction the layer opened
-/// for it is relinquished with nothing sent.
-async fn relinquish_retransmission(ctx: &RouterCtx, req: &SipRequest) {
-    if let Some(key) = sip_txn::ServerTxnKey::of(req) {
-        let _ = ctx.txn.relinquish_server(key).await;
     }
 }
 

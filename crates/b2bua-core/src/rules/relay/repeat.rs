@@ -66,6 +66,28 @@ pub(crate) fn copy_of_earlier_2xx(dialog: &Dialog, resp: &SipResponse) -> bool {
     invite_2xx_on(dialog, resp) && cseq < last.outbound_cseq && dialog.untaken_invite != Some(cseq)
 }
 
+/// Read `event`, received on `leg_id`'s dialog `named`, once the turn has
+/// counted and recorded it: the first 2xx to the dialog's untaken INVITE
+/// ([`Dialog::untaken_invite`]) takes the mark, so each later copy of that
+/// 2xx reads as a copy ([`copy_of_earlier_2xx`]).
+pub(crate) fn read_untaken_2xx(
+    call: &mut Call,
+    leg_id: &str,
+    named: Option<&DialogId>,
+    event: &CallEvent,
+) {
+    let CallEvent::Sip { message, .. } = event else { return };
+    let SipMessage::Response(resp) = message.as_ref() else { return };
+    let Some(id) = named else { return };
+    let cseq = i64::from(resp.cseq().seq());
+    let first = |d: &Dialog| d.untaken_invite == Some(cseq) && invite_2xx_on(d, resp);
+    let leg = call::helpers::find_leg(call, leg_id);
+    if !leg.and_then(|l| l.dialogs.by_tags(&id.our_tag, &id.peer_tag)).is_some_and(first) {
+        return;
+    }
+    call::helpers::update_dialog(call, leg_id, id, |d| d.untaken_invite = None);
+}
+
 /// Whether `resp`, a [`copy_of_earlier_2xx`] on the dialog whose last INVITE's
 /// exchange is `x`, is a copy of the 2xx whose ACK `x` carries ahead
 /// ([`InviteExchange::ack_ahead`]): it echoes that ACK's CSeq.

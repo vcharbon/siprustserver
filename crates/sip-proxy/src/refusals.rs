@@ -203,8 +203,8 @@ impl Refusals {
     /// Remember, at `now_ms`, the 400 this hop answered the in-dialog INVITE
     /// whose parse the parser refused with `partial`: the 400 echoes the
     /// dialog's To-tag, so only the memo recognises its ACK
-    /// ([`acknowledges_refusal`](Self::acknowledges_refusal)). Any other
-    /// request is not remembered.
+    /// ([`acknowledges_refusal`](Self::acknowledges_refusal)). A copy keeps
+    /// it 64·T1 longer. Any other request is not remembered.
     pub fn remember_parse_refused(&self, partial: &RequestPartial, now_ms: u64) {
         let Some(dialog_tag) = partial.to().tag() else { return };
         if *partial.method() != Method::Invite {
@@ -212,7 +212,8 @@ impl Refusals {
         }
         let (via, call_id) = (partial.via().first(), partial.call_id().as_str());
         let key = self.key_of(via, call_id, partial.from().tag(), "INVITE", partial.cseq().seq());
-        if self.preflight.with(key, now_ms, |_| ()).is_none() {
+        let copy = self.preflight.with(key, now_ms, |rejected| rejected.copies.copy(now_ms));
+        if copy.is_none() {
             let rejected = Refused::first(&Method::Invite, now_ms, None, dialog_tag.into());
             self.preflight.note(key, rejected, now_ms);
         }

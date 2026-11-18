@@ -143,10 +143,32 @@ fn copies(call: &Call, cseq: u32) -> bool {
 /// and sent-by (RFC 3261 §17.2.3), and that transaction sent its final, so
 /// the copy is owed no other (§17.2.1). Any other copy is answered as a
 /// request merged with it (§8.2.2.2).
-pub(super) fn retransmits_answered(call: &Call, req: &SipRequest) -> bool {
+fn retransmits_answered(call: &Call, req: &SipRequest) -> bool {
     call.a_leg.invite_final_sent().is_some()
         && sip_txn::ServerTxnKey::of(req)
             .is_some_and(|key| super::materialise::caller_invite_key(call) == Some(key))
+}
+
+/// Whether the new INVITE `req` of `call_ref` retransmits the live call's
+/// answered INVITE after its transaction ended ([`retransmits_answered`]):
+/// then it is absorbed as it arrives, before any turn, so the 100 Trying
+/// bound of the transaction the layer opened for it never fires. That
+/// transaction is relinquished with nothing sent, and the copy is counted
+/// refused. A copy of a call answered after this read gets the turn's 482.
+pub(super) async fn absorbs_retransmission(
+    ctx: &RouterCtx,
+    call_ref: &str,
+    req: &SipRequest,
+) -> bool {
+    let live = ctx.state.resident(call_ref);
+    if !live.is_some_and(|call| retransmits_answered(&call, req)) {
+        return false;
+    }
+    if let Some(key) = sip_txn::ServerTxnKey::of(req) {
+        let _ = ctx.txn.relinquish_server(key).await;
+    }
+    ctx.metrics.new_calls().refuse_copy();
+    true
 }
 
 /// Judge the new INVITE `req` of `call_ref` offered as `dispatch` on the
