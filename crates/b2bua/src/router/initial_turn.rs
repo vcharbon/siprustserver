@@ -50,7 +50,7 @@ pub(super) enum Turn {
 /// probe's 500, the identity guard's 500, the cancelled setup, the cordon's or
 /// the budget's 503, or the accept counts the INVITE's outcome once
 /// ([`crate::new_calls`]); a copy is answered 482, or absorbed when it
-/// retransmits the live call's INVITE, and refused as a copy.
+/// retransmits the live call's answered INVITE, and refused as a copy.
 /// `admitted` is the hold and the setup budget of a new call, `None` for a
 /// copy, whose budget only ends its wait for its permits: it asks nothing and
 /// answers at once. Every identifier the turn mints is drawn from `turn`; `datagram` is
@@ -109,14 +109,14 @@ pub(super) async fn initial_invite_turn(
     }
 
     // A copy creates no call, as no call is born past the admission ladder.
-    // A retransmission of the live call's INVITE whose transaction ended is
-    // absorbed; any other copy is a request merged with the INVITE it copies
-    // (RFC 3261 §8.2.2.2), answered 482.
+    // A retransmission of the live call's answered INVITE whose transaction
+    // ended is absorbed; any other copy is a request merged with the INVITE
+    // it copies (RFC 3261 §8.2.2.2), answered 482.
     let resident = ctx.state.contains(call_ref);
     if copy {
         let live = ctx.state.resident(call_ref);
-        match live.filter(|call| super::admit::retransmits(call, req)) {
-            Some(call) => absorb_retransmission(ctx, &call, req).await,
+        match live.filter(|call| super::admit::retransmits_answered(call, req)) {
+            Some(_) => relinquish_retransmission(ctx, req).await,
             None => {
                 let ids = &mut turn.ids;
                 let merged = build_merged_482(ids, req, &ctx.config.minted_final_advertisement);
@@ -309,16 +309,11 @@ pub(super) async fn initial_invite_turn(
     }
 }
 
-/// Absorb `req`, a retransmission of `call`'s INVITE reaching the turn after
-/// that INVITE's server transaction ended (`super::admit::retransmits`):
-/// nothing answers it, as its transaction sent its final already (RFC 3261
-/// §17.2.1). The transaction the layer opened for it is relinquished with
-/// nothing sent once that final left; before it, that transaction is the
-/// INVITE's again and carries its final.
-async fn absorb_retransmission(ctx: &RouterCtx, call: &Call, req: &SipRequest) {
-    if call.a_leg.invite_final_sent().is_none() {
-        return;
-    }
+/// Absorb `req`, a retransmission of the live call's answered INVITE
+/// reaching the turn after that INVITE's server transaction ended
+/// (`super::admit::retransmits_answered`): the transaction the layer opened
+/// for it is relinquished with nothing sent.
+async fn relinquish_retransmission(ctx: &RouterCtx, req: &SipRequest) {
     if let Some(key) = sip_txn::ServerTxnKey::of(req) {
         let _ = ctx.txn.relinquish_server(key).await;
     }

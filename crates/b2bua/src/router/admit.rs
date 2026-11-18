@@ -138,13 +138,15 @@ fn copies(call: &Call, cseq: u32) -> bool {
     call.a_leg_invite.cseq == cseq
 }
 
-/// Whether `req`, a copy of `call`'s own INVITE, is a retransmission of it:
-/// it names that INVITE's server transaction, top-Via branch and sent-by
-/// (RFC 3261 §17.2.3). Any other copy is a request merged with it on another
-/// branch (§8.2.2.2).
-pub(super) fn retransmits(call: &Call, req: &SipRequest) -> bool {
-    sip_txn::ServerTxnKey::of(req)
-        .is_some_and(|key| super::materialise::caller_invite_key(call) == Some(key))
+/// Whether `req`, a copy of `call`'s own INVITE, retransmits that INVITE
+/// once answered: it names the INVITE's server transaction, top-Via branch
+/// and sent-by (RFC 3261 §17.2.3), and that transaction sent its final, so
+/// the copy is owed no other (§17.2.1). Any other copy is answered as a
+/// request merged with it (§8.2.2.2).
+pub(super) fn retransmits_answered(call: &Call, req: &SipRequest) -> bool {
+    call.a_leg.invite_final_sent().is_some()
+        && sip_txn::ServerTxnKey::of(req)
+            .is_some_and(|key| super::materialise::caller_invite_key(call) == Some(key))
 }
 
 /// Judge the new INVITE `req` of `call_ref` offered as `dispatch` on the

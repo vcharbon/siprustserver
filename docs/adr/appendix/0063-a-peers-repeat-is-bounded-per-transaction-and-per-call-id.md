@@ -28,7 +28,7 @@ before ADR-0063. "Bound by" names the ADR-0063 section that bounds it.
 | ACK, plus a new BYE transaction for a 2xx, to a final for a call this node does not hold or has removed | `router/unheld.rs` → `b2bua-core` `unheld_response` | re-sends the final on every ACK | none; each copy opens a new BYE | §2 (the book), §3 |
 | Dialog-gate answers (481, 487, 500, 200) on an ending dialog | `router/dialog_gate.rs` | answers each with a new request | the lifetime cap's removal | §3 |
 | Answers after the lifetime cap (200 to BYE, 481) | `dispatch/queue.rs`, `router/owed.rs` | answers each with a new request | the queue's release | §3 |
-| 482 to a late copy of the caller's initial INVITE on another branch (§8.2.2.2) | `router/admit.rs` | re-sends the INVITE on every 482 | its transaction's Timer H, then judged again | §1 (the count outlives the transaction); a retransmission on the INVITE's own transaction is absorbed |
+| 482 to a late copy of the caller's initial INVITE on another branch (§8.2.2.2) | `router/admit.rs` | re-sends the INVITE on every 482 | its transaction's Timer H, then judged again | §1 (the count outlives the transaction); a retransmission on the answered INVITE's own transaction is absorbed |
 
 ## Call layer (`b2bua-core`)
 

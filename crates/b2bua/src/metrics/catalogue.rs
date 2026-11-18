@@ -128,7 +128,7 @@ pub const NEW_CALLS: Family = Family::counter(
 pub const NEW_CALL_REFUSED_COPIES: Family = Family::counter(
     "b2bua_new_call_refused_copies_total",
     Labels::None,
-    "Copies answered with a refusal and never counted as a new call: a copy of a refused new INVITE answered that refusal again at the ingress brake or the transaction layer, or a copy of a call already here (live, or admitted and not born yet: same Call-ID, From-tag and CSeq) that the router answered 482, absorbed as a retransmission of the live call's INVITE, or discarded unrun.",
+    "Copies answered with a refusal and never counted as a new call: a copy of a refused new INVITE answered that refusal again at the ingress brake or the transaction layer, or a copy of a call already here (live, or admitted and not born yet: same Call-ID, From-tag and CSeq) that the router answered 482, absorbed as a retransmission of the live call's answered INVITE, or discarded unrun.",
 );
 
 /// The core counter set, as `B2buaMetrics::prometheus_text` writes it: the
