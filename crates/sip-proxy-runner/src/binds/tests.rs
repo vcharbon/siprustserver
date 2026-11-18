@@ -89,7 +89,6 @@ async fn the_intake_hook_reads_under_the_limit_the_configuration_states() {
     let lookup = |key: &str| match key {
         "PROXY_LISTEN" => Some("127.0.0.1:0".to_string()),
         "PROXY_METRICS" => Some("127.0.0.1:0".to_string()),
-        "PROXY_DEBUG" => Some("127.0.0.1:0".to_string()),
         "PROXY_WORKERS" => Some("w0@10.0.0.1:5060".to_string()),
         "PROXY_HMAC_KEY" => Some("0123456789abcdef0123456789abcdef".to_string()),
         _ => None,

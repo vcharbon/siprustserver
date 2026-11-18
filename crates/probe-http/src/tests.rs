@@ -180,8 +180,7 @@ async fn admin_routes_receive_the_method_and_path_and_their_replies_are_framed()
     assert!(request(server.addr(), "GET", "/metrics").await.contains("404 Not Found"));
 }
 
-/// The operator server binds a loopback address only, and serves a
-/// pre-bound listener only when it is bound to one.
+/// The operator server binds a loopback address only.
 #[tokio::test]
 async fn the_admin_server_refuses_an_address_that_is_not_loopback() {
     let admin: AdminFn = Arc::new(|_: &str, _: &str| Some(AdminReply::no_content()));
@@ -193,13 +192,6 @@ async fn the_admin_server_refuses_an_address_that_is_not_loopback() {
             refused.map(|s| s.addr())
         );
     }
-    let wildcard = TcpListener::bind("0.0.0.0:0").await.unwrap();
-    let refused = AdminServer::serve_on(wildcard, AdminRoutes::default());
-    assert!(
-        matches!(&refused, Err(e) if e.kind() == std::io::ErrorKind::InvalidInput),
-        "{:?}",
-        refused.map(|s| s.addr())
-    );
 }
 
 /// The probe server answers no operator route and no debug route.

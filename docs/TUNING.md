@@ -203,7 +203,7 @@ behaviour for another; a value missing where required, or malformed, refuses the
 | `B2BUA_MODE` | required | `proxied` (behind the front proxy) or `standalone`; each mode requires and refuses its own addresses below |
 | `B2BUA_ADVERTISE` | required | the worker's own `ip:port`, on every Via it sends; standalone, on every Contact too |
 | `B2BUA_OUTBOUND_PROXY`, `B2BUA_CONTACT_ADDRESS` | required proxied, refused standalone | the proxy's worker-facing `ip:port` every b-leg request goes through; the address the worker's Contacts state |
-| `B2BUA_LISTEN`, `B2BUA_METRICS` | `0.0.0.0:5060`, `0.0.0.0:9091` (the chart: `$(POD_IP):9091`) | the signalling socket; the probe routes and `/metrics` |
+| `B2BUA_LISTEN`, `B2BUA_METRICS` | `0.0.0.0:5060`, `0.0.0.0:9091` | the signalling socket; the probe routes and `/metrics` |
 | `B2BUA_ORDINAL`, `POD_UID` | `w0`, a per-boot token | the worker's ordinal and its boot identity (ADR-0055 §6); `POD_UID` is required when replication discovers its peers |
 | `B2BUA_CLUSTER_KEY` | none, required with `B2BUA_REPL` | the key every worker shares to sign and verify the via-extension of its own requests (ADR-0055 §12), 16 to 64 bytes; unset, a worker states and trusts none |
 | `PROXY_CLUSTER_KEY` | none | the workers' key, which the proxy signs its dead notices with (ADR-0050 §3); unset, the proxy sends no notice |
@@ -222,7 +222,7 @@ behaviour for another; a value missing where required, or malformed, refuses the
 | `B2BUA_DEST`, `B2BUA_STRESS_LIMITER_ID`, `B2BUA_STRESS_LIMITER_LIMIT` | `127.0.0.1:5070`, `global-stress`, 999999 | the reference worker's (`b2bua-runner`) one destination, and the limiter entry it attaches to every call; an empty id attaches none |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | none | the trace collector; unset, no trace leaves the process |
 | `PROXY_LISTEN`, `PROXY_LISTEN_EXT`, `PROXY_ADVERTISE`, `PROXY_ADVERTISE_EXT`, `PROXY_METRICS` | `0.0.0.0:5060`, none, the listen address, the external listen address, `0.0.0.0:9090` (the chart: `$(HOST_IP):9090`) | the proxy's two faces and its probe and metrics server; an advertise address is required where its listen IP is unspecified |
-| `PROXY_DEBUG` | `127.0.0.1:9096` | the proxy's `/debug/flamegraph` listener, a loopback `ip:port` only (refused at start otherwise), reached through `kubectl port-forward` |
+| `PROXY_DEBUG` | `127.0.0.1:9096` | the proxy's `/debug/flamegraph` listener, a loopback `ip:port` only (refused at start otherwise), reached through `kubectl port-forward`; a failed bind leaves the proxy without it (logged) |
 | `PROXY_WORKERS`, `PROXY_WORKER_SERVICE`, `PROXY_WORKER_PORT`, `PROXY_NAMESPACE` | none, `b2bua-worker`, 5060, `POD_NAMESPACE` | a fixed worker list, else the EndpointSlices of that Service in that namespace |
 | `PROXY_HMAC_KEY`, `PROXY_HMAC_KID` | required, `k0` | the stickiness cookie's signing key, 16 bytes at least, and its id (ADR-0046 §7) |
 | `PROXY_RESOLVER_PREWARM` | none | the `host:port` names looked up at start |

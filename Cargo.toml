@@ -218,9 +218,9 @@ lapin = { version = "4.12.3", default-features = false, features = ["tokio", "ru
 async-rs = { version = "0.8.13", default-features = false, features = ["tokio"] }
 
 # Keep line tables in release builds so on-demand pprof CPU flamegraphs (the
-# /debug/flamegraph route on the b2bua-worker + front-proxy metrics servers,
-# see crates/flamegraph-util) symbolize to function/file:line. This adds
-# debuginfo ONLY — opt-level/lto/codegen-units are untouched — so the captured
+# /debug/flamegraph route on the b2bua-worker + front-proxy loopback debug
+# listeners, see crates/flamegraph-util) symbolize to function/file:line. This
+# adds debuginfo ONLY — opt-level/lto/codegen-units are untouched — so the captured
 # profile still reflects the fully-optimized production binary. The Dockerfile
 # does not strip, so symbols reach the running container.
 [profile.release]

@@ -37,15 +37,8 @@ impl AdminServer {
     /// `Err` of kind `InvalidInput` when `addr` is not a loopback address.
     pub async fn start(addr: SocketAddr, routes: AdminRoutes) -> std::io::Result<Self> {
         loopback_only(addr)?;
-        Self::serve_on(TcpListener::bind(addr).await?, routes)
-    }
-
-    /// Serve `routes` on a pre-bound listener, whose bind policy is the
-    /// caller's. `Err` of kind `InvalidInput` when it is bound to an address
-    /// that is not loopback.
-    pub fn serve_on(listener: TcpListener, routes: AdminRoutes) -> std::io::Result<Self> {
+        let listener = TcpListener::bind(addr).await?;
         let local = listener.local_addr()?;
-        loopback_only(local)?;
         let task = tokio::spawn(accept::run(listener, move |stream| {
             let routes = routes.clone();
             async move {

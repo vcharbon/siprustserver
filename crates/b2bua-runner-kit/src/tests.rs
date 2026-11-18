@@ -136,8 +136,8 @@ fn split_host_port_defaults_and_parses() {
     assert_eq!(split_host_port("bob:nope"), ("bob".to_string(), 5060));
 }
 
-/// The probe server's address takes the pod's IPv6 address as the chart's
-/// `$(POD_IP):9091` expands it, with no brackets.
+/// The probe server's address takes the pod's IPv6 address as a
+/// `$(POD_IP):9091` value expands it, with no brackets.
 #[test]
 fn a_listen_address_reads_an_ipv6_address_without_brackets() {
     assert_eq!(crate::resolve("fd00::5:9091").unwrap(), "[fd00::5]:9091".parse().unwrap());

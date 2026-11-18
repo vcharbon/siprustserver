@@ -274,9 +274,19 @@ env> <variable> <the chart's value> <the runner's default>).
 {{- include "siprust.statedBind" (list .Values.proxy.env "PROXY_METRICS" (include "siprust.proxyMetricsBind" .) "0.0.0.0:9090") }}
 {{- end }}
 
-{{/* B2BUA_METRICS as the chart derives it: worker.metrics.bind, else the pod's address. */}}
+{{/* PROXY_DEBUG: proxy.debug.bind, else loopback port 9096. */}}
+{{- define "siprust.proxyDebugBind" -}}
+{{- .Values.proxy.debug.bind | default "127.0.0.1:9096" }}
+{{- end }}
+
+{{/* B2BUA_METRICS as the chart derives it: worker.metrics.bind, else every address of the pod. */}}
 {{- define "siprust.workerMetricsBind" -}}
-{{- .Values.worker.metrics.bind | default "$(POD_IP):9091" }}
+{{- .Values.worker.metrics.bind | default "0.0.0.0:9091" }}
+{{- end }}
+
+{{/* B2BUA_ADMIN: worker.admin.bind, else loopback port 9094. */}}
+{{- define "siprust.workerAdminBind" -}}
+{{- .Values.worker.admin.bind | default "127.0.0.1:9094" }}
 {{- end }}
 
 {{/* ROUTE_GUARD_METRICS: proxy.routeGuard.metricsBind, else the node's address. */}}
@@ -285,18 +295,32 @@ env> <variable> <the chart's value> <the runner's default>).
 {{- $g.metricsBind | default (printf "$(HOST_IP):%d" (int $g.metricsPort)) }}
 {{- end }}
 
-{{/* The host of an `ip:port` bind: inside its brackets, else before its last colon. */}}
+{{/*
+The host of an `ip:port` bind, lower case: inside its brackets, else before
+its last colon, an IPv6 zone dropped.
+*/}}
 {{- define "siprust.bindHost" -}}
-{{- if hasPrefix "[" . }}
-{{- regexReplaceAll "^\\[([^]]*)\\].*$" . "${1}" }}
-{{- else }}
-{{- regexReplaceAll ":[^:]*$" . "" }}
-{{- end }}
+{{- $host := ternary (regexReplaceAll "^\\[([^]]*)\\].*$" . "${1}") (regexReplaceAll ":[^:]*$" . "") (hasPrefix "[" .) }}
+{{- regexReplaceAll "%.*$" $host "" | lower }}
 {{- end }}
 
-{{/* Whether a bind's host is a wildcard: "true" or empty. */}}
-{{- define "siprust.bindIsWildcard" -}}
-{{- if has (include "siprust.bindHost" .) (list "0.0.0.0" "::") }}true{{ end }}
+{{/*
+Whether a bind's host is unspecified, a wildcard: "true" or empty. Every
+spelling of 0.0.0.0 and :: (zero groups, an embedded 0.0.0.0) and the
+IPv4-mapped ::ffff:0.0.0.0, which binds every IPv4 address.
+*/}}
+{{- define "siprust.bindIsUnspecified" -}}
+{{- $host := include "siprust.bindHost" . }}
+{{- if or (regexMatch "^[0:.]*$" $host) (regexMatch "^[0:]*:ffff:[0:.]*$" $host) }}true{{ end }}
+{{- end }}
+
+{{/*
+Whether a bind's host is loopback: "true" or empty. 127.0.0.0/8, every
+spelling of ::1, and an IPv4-mapped 127.0.0.0/8 address.
+*/}}
+{{- define "siprust.bindIsLoopback" -}}
+{{- $host := include "siprust.bindHost" . }}
+{{- if or (regexMatch "^127\\." $host) (regexMatch "^[0:]*:0*1$" $host) (regexMatch "^[0:]*:ffff:127\\." $host) (eq $host "localhost") }}true{{ end }}
 {{- end }}
 
 {{/*
@@ -305,7 +329,7 @@ the node's address in place of a wildcard host.
 */}}
 {{- define "siprust.guardFitness" -}}
 {{- $bind := include "siprust.proxyMetricsFinal" . }}
-{{- if include "siprust.bindIsWildcard" $bind }}
+{{- if include "siprust.bindIsUnspecified" $bind }}
 {{- printf "$(HOST_IP):%s" (regexReplaceAll "^.*:" $bind "") }}
 {{- else }}
 {{- $bind }}

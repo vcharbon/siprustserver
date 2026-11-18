@@ -1296,7 +1296,7 @@ spec:
         - name: B2BUA_LISTEN
           value: 0.0.0.0:5060
         - name: B2BUA_METRICS
-          value: $(POD_IP):9091
+          value: 0.0.0.0:9091
         - name: B2BUA_MODE
           value: proxied
         - name: B2BUA_ORDINAL

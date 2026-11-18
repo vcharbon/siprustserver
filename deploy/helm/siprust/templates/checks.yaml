@@ -19,7 +19,8 @@ each runner's startup check.
 | `routeGuard.deadMs` + the BFD detection time ≤ `routeGuard.withdrawWithinMs` (route guard on) | a hung or dead proxy, whose guard stops refreshing, leaves it within the bound |
 | proxy `minReadySeconds` > `readinessProbe.periodSeconds` + `announce.metallb.connectTimeSeconds` + 2 s (route guard on) | the pod is Ready once its guard let the node out; its BGP sessions are back before the rollout stops the next proxy |
 | proxy PROXY_METRICS (`proxy.metrics.bind`) keeps port 9090, `proxy.routeGuard.metricsBind` `proxy.routeGuard.metricsPort`, worker B2BUA_METRICS (`worker.metrics.bind`) 9091 | the readiness and liveness probes, the scraper and the route guard read them there |
-| no scrape bind on a wildcard or `network.externalVip`, unless `httpBinds.allowExternal` | the external plane would reach the listener: a hostNetwork pod's wildcard binds every interface of its node |
+| no proxy or route guard scrape bind on a wildcard (any spelling of 0.0.0.0 or ::) or `network.externalVip`, unless `httpBinds.allowExternal` | the external plane would reach the listener: the hostNetwork pod's wildcard binds every interface of its node |
+| no scrape bind on loopback, nor naming a `$(VAR)` but its pod's address (`HOST_IP` for the proxy pod, `POD_IP` for a worker) | the kubelet's probes and the scraper reach the pod at its own address; an undeclared variable is left unexpanded and the runner cannot bind it |
 | proxy `announce.port` ≠ the metrics port 9090 and ≠ `network.sipPort` | the announce-only Services expose nothing kube-proxy would forward to a listener |
 | `proxy.nodeSelector` set | the workers' node affinity keeps them off every node it names: a node that runs or ran a proxy keeps the VIPs on lo (ADR-0056 §7) |
 | `network.externalNextHops` set | traffic from the external VIP leaves only through the table these next hops fill (ADR-0056 §11): with none, nothing reaches a caller |
@@ -209,31 +210,43 @@ grammar, the call limiter's lease. */ -}}
 {{- end }}
 {{- end }}
 {{- end }}
-{{- /* The scrape listeners: each bind keeps the port its readers use and, unless
-httpBinds.allowExternal, stays off the external plane. */ -}}
+{{- /* The scrape listeners: each bind keeps the port its readers use, is
+reached at the pod's address, and names no variable but its pod's address. On
+the hostNetwork proxy pod it also stays off the external plane unless
+httpBinds.allowExternal. Each entry: the name, the final bind, its port, why
+that port, the address variable its pod declares, whether it is hostNetwork. */ -}}
 {{- $scrape := list }}
 {{- if .Values.proxy.enabled }}
 {{- $named := ternary "proxy PROXY_METRICS" "proxy.metrics.bind" (hasKey $penv "PROXY_METRICS") }}
-{{- $scrape = append $scrape (list $named (include "siprust.proxyMetricsFinal" .) 9090 "the probes, the scraper and the route guard read /readyz, /healthz, /metrics and /fitz there") }}
+{{- $scrape = append $scrape (list $named (include "siprust.proxyMetricsFinal" .) 9090 "the probes, the scraper and the route guard read /readyz, /healthz, /metrics and /fitz there" "HOST_IP" true) }}
 {{- if .Values.proxy.routeGuard.enabled }}
 {{- $guardPort := int .Values.proxy.routeGuard.metricsPort }}
-{{- $scrape = append $scrape (list "proxy.routeGuard.metricsBind" (include "siprust.guardMetricsBind" .) $guardPort (printf "the guard's probes read it on proxy.routeGuard.metricsPort=%d" $guardPort)) }}
+{{- $scrape = append $scrape (list "proxy.routeGuard.metricsBind" (include "siprust.guardMetricsBind" .) $guardPort (printf "the guard's probes read it on proxy.routeGuard.metricsPort=%d" $guardPort) "HOST_IP" true) }}
 {{- end }}
 {{- end }}
 {{- if .Values.worker.enabled }}
 {{- $named := ternary "worker B2BUA_METRICS" "worker.metrics.bind" (hasKey $wenv "B2BUA_METRICS") }}
 {{- $default := "0.0.0.0:9091" }}
-{{- $scrape = append $scrape (list $named (include "siprust.statedBind" (list $wenv "B2BUA_METRICS" (include "siprust.workerMetricsBind" .) $default)) 9091 "the probes, the Service, the NetworkPolicy and the scraper reach the worker there") }}
+{{- $scrape = append $scrape (list $named (include "siprust.statedBind" (list $wenv "B2BUA_METRICS" (include "siprust.workerMetricsBind" .) $default)) 9091 "the probes, the Service, the NetworkPolicy and the scraper reach the worker there" "POD_IP" false) }}
 {{- end }}
-{{- $extVip := toString .Values.network.externalVip }}
+{{- $extVip := toString .Values.network.externalVip | lower }}
 {{- range $scrape }}
 {{- $name := index . 0 }}{{- $bind := index . 1 }}{{- $port := index . 2 }}{{- $why := index . 3 }}
+{{- $addrVar := printf "$(%s)" (index . 4) }}{{- $hostNetwork := index . 5 }}
 {{- if not (hasSuffix (printf ":%d" $port) $bind) }}
 {{- fail (printf "%s=%s must keep port %d: %s" $name $bind $port $why) }}
 {{- end }}
+{{- range regexFindAll "\\$\\([^)]*\\)" $bind -1 }}
+{{- if ne . $addrVar }}
+{{- fail (printf "%s=%s names %s, which its pod does not declare before it: a scrape bind names %s only" $name $bind . $addrVar) }}
+{{- end }}
+{{- end }}
+{{- if include "siprust.bindIsLoopback" $bind }}
+{{- fail (printf "%s=%s is a loopback address: the kubelet's probes and the scraper reach the pod at its own address" $name $bind) }}
+{{- end }}
 {{- $host := include "siprust.bindHost" $bind }}
-{{- if and (not $.Values.httpBinds.allowExternal) (or (include "siprust.bindIsWildcard" $bind) (and $extVip (eq $host $extVip))) }}
-{{- fail (printf "%s=%s takes connections from the external plane (a wildcard binds every interface, a hostNetwork pod's every interface of its node; network.externalVip is the external plane's): bind an internal address, or set httpBinds.allowExternal=true" $name $bind) }}
+{{- if and $hostNetwork (not $.Values.httpBinds.allowExternal) (or (include "siprust.bindIsUnspecified" $bind) (and $extVip (eq $host $extVip))) }}
+{{- fail (printf "%s=%s takes connections from the external plane (on the hostNetwork proxy pod a wildcard binds every interface of the node; network.externalVip is the external plane's): bind an internal address, or set httpBinds.allowExternal=true" $name $bind) }}
 {{- end }}
 {{- end }}
 {{- if and .Values.worker.enabled .Values.callLimiter.enabled }}

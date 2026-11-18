@@ -245,13 +245,8 @@ async fn run() -> Result<i32, String> {
     // readings of a SINGLE monotonic-anchored timeline.
     let clock = Clock::checked_system().map_err(|e| e.to_string())?;
     let metrics = Arc::new(ProxyMetrics::new());
-    let Sockets {
-        metrics: metrics_listener,
-        debug: debug_listener,
-        shards,
-        probe: probe_ep,
-        notice: notice_ep,
-    } = bind_sockets(&cfg, &clock, &metrics).await?;
+    let Sockets { metrics: metrics_listener, shards, probe: probe_ep, notice: notice_ep } =
+        bind_sockets(&cfg, &clock, &metrics).await?;
 
     let hmac = Arc::new(
         StaticHmacKeyProvider::new(
@@ -443,10 +438,7 @@ async fn run() -> Result<i32, String> {
         probe_http::ProbeServer::serve_on_live(metrics_listener, routes, proxy_probes.live)
             .map_err(|e| format!("metrics server on {metrics_sa} failed to start: {e}"))?;
     tracing::info!(addr = %_metrics_server.addr(), "metrics server listening (/metrics, readiness /readyz, liveness /healthz, fitness /fitz)");
-    let _debug_server =
-        probe_http::AdminServer::serve_on(debug_listener, probe_http::AdminRoutes::default())
-            .map_err(|e| format!("debug server on {} failed to start: {e}", cfg.debug))?;
-    tracing::info!(addr = %_debug_server.addr(), "debug server listening (/debug/flamegraph)");
+    let _debug_server = sip_proxy_runner::debug_server::start(cfg.debug).await;
 
     let probe_task = tokio::spawn(shared.health(probe, notice_ep, cfg.cluster_key.clone()));
     let mut core_tasks = tokio::task::JoinSet::new();

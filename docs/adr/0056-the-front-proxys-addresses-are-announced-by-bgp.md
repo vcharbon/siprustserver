@@ -82,9 +82,9 @@ Detail: [appendix §9](appendix/0056-the-front-proxys-addresses-are-announced-by
 
 A caller retransmits an INVITE at 0.5, 1.5 and 3.5 s, so a node withdrawn within 3.4 s of a fault
 loses no setup a retransmission can still answer. A container beside the proxy, with `NET_ADMIN`
-alone, reads the proxy's `/fitz` at the node's address every 100 ms and owns one nftables table. The table drops the
-node's BFD and BGP toward the routers unless the router is in a set whose entries time out 1 s
-after each refresh. A fit proxy keeps the set refreshed. A second unfit answer empties it, and a
+alone, reads the proxy's `/fitz` at the node's address every 100 ms and owns one nftables table.
+The table drops the node's BFD and BGP toward the routers unless the router is in a set whose
+entries time out 1 s after each refresh. A fit proxy keeps the set refreshed. A second unfit answer empties it, and a
 hung proxy or a dead guard lets it run out in the kernel. The routers then withdraw the node as
 dead. A withdrawn node is let out after the proxy read fit for `ROUTE_GUARD_HOLD_MS` (3 s).
 Detail: [appendix §10](appendix/0056-the-front-proxys-addresses-are-announced-by-bgp.md#10-a-route-guard-withdraws-an-unfit-node-within-34-s).

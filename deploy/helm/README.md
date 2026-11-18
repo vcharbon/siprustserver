@@ -163,17 +163,26 @@ listener's bind is a value (`httpBinds` in `values.yaml`):
 |---|---|---|---|
 | proxy scrape (`PROXY_METRICS`) | `proxy.metrics.bind`, the node's address `$(HOST_IP):9090` | `/metrics` `/healthz` `/readyz` `/fitz` | the kubelet's probes, the in-cluster Prometheus (the pod's `prometheus.io/port`), the route guard |
 | route guard scrape (`ROUTE_GUARD_METRICS`) | `proxy.routeGuard.metricsBind`, `$(HOST_IP):<metricsPort>` | `/metrics` `/healthz` `/readyz` | the kubelet's probes, Prometheus (`prometheus.io/sidecar-port`) |
-| worker scrape (`B2BUA_METRICS`) | `worker.metrics.bind`, the pod's address `$(POD_IP):9091` | `/metrics` `/healthz` `/ready` | the kubelet's probes, Prometheus, the `b2bua-worker` Service |
+| worker scrape (`B2BUA_METRICS`) | `worker.metrics.bind`, every address of the pod `0.0.0.0:9091` | `/metrics` `/healthz` `/ready` | the kubelet's probes, Prometheus, the `b2bua-worker` Service, `kubectl port-forward` |
 | worker operator and debug (`B2BUA_ADMIN`) | `worker.admin.bind`, `127.0.0.1:9094`, loopback only | `/admin/*`, `/debug/flamegraph`, `/debug/heap` | `kubectl port-forward` |
 | proxy debug (`PROXY_DEBUG`) | `proxy.debug.bind`, `127.0.0.1:9096`, loopback only | `/debug/flamegraph` | `kubectl port-forward` |
 
 - **Metrics** are read by the in-cluster Prometheus from the pod's address. A
-  scrape listener on a wildcard (`0.0.0.0`, `::`) or on `network.externalVip`
-  renders only with `httpBinds.allowExternal=true`: on the hostNetwork proxy
-  pod a wildcard binds every interface of the node, the external one included,
-  and no NetworkPolicy applies there. The proxy's default is the node's
-  InternalIP (`status.hostIP`); where that is not on the internal plane, set
-  the kubelet's `--node-ip` to the node's internal-plane address.
+  proxy or route guard scrape listener on a wildcard (`0.0.0.0`, `::`, in any
+  spelling) or on `network.externalVip` renders only with
+  `httpBinds.allowExternal=true`: on the hostNetwork proxy pod a wildcard
+  binds every interface of the node, the external one included, and no
+  NetworkPolicy applies there. Their default is the node's InternalIP
+  (`status.hostIP`); where that is not on the internal plane, set the kubelet's
+  `--node-ip` to the node's internal-plane address. A worker is never
+  hostNetwork: its wildcard covers its pod IP and its loopback, and the
+  workers' NetworkPolicy holds port 9091. No scrape bind is loopback: the
+  kubelet's probes reach the pod at its address.
+- **A proxy's metrics** are read at its node's address, from any host on the
+  internal plane: `curl http://<node InternalIP>:9090/metrics` (on the kind
+  lab, from the host, which holds the internal bridge's gateway). A worker's
+  through a port-forward: `kubectl port-forward pod/<worker> 19091:9091` then
+  `curl localhost:19091/metrics`.
 - **Cordon, release and profiles** go through `kubectl port-forward`, which
   connects inside the pod's network namespace, a hostNetwork pod's included:
   `kubectl port-forward pod/<worker> 19094:9094` then
@@ -181,7 +190,8 @@ listener's bind is a value (`httpBinds` in `values.yaml`):
   `curl -o cpu.svg 'localhost:19094/debug/flamegraph?seconds=20'`;
   `kubectl port-forward pod/<proxy> 19096:9096` for the proxy's flamegraph.
   `deploy/k8s/flamegraph.sh` wraps the capture. The route guard and the CDR
-  consumer serve no debug route.
+  consumer serve no debug route; a proxy whose debug port is taken serves
+  without it and logs `debug server failed to bind`.
 - **A runner outside Kubernetes** binds its debug listener on loopback too:
   reach it through an SSH tunnel, `ssh -L 19094:127.0.0.1:9094 <host>`.
 

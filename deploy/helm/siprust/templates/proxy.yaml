@@ -22,7 +22,7 @@ discovered from the EndpointSlices of the headless b2bua-worker Service
   "PROXY_ADVERTISE_EXT" (printf "%s:%d" $extVip $port)
   "PROXY_EXT_INTERFACE" (include "siprust.net" (dict "root" $ "key" "externalInterface"))
   "PROXY_METRICS" (include "siprust.proxyMetricsBind" .)
-  "PROXY_DEBUG" $p.debug.bind
+  "PROXY_DEBUG" (include "siprust.proxyDebugBind" .)
   "PROXY_WORKER_SERVICE" "b2bua-worker"
   "PROXY_WORKER_PORT" "5060"
   "OTEL_EXPORTER_OTLP_ENDPOINT" .Values.tracing.otlpEndpoint

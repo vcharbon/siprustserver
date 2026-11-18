@@ -23,6 +23,7 @@
 
 pub mod binds;
 pub mod config;
+pub mod debug_server;
 pub mod discovery;
 pub mod external_face;
 pub mod health_sampler;
