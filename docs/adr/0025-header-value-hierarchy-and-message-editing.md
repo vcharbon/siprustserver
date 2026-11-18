@@ -107,7 +107,6 @@ Targets and measured figures: [appendix](appendix/0025-header-value-hierarchy-an
 
 ## Consequences / migration
 
-Breaking, migrated crate by crate beside the old API, legacy deleted last
-([docs/todos/header-model-migration.md](../todos/header-model-migration.md)). Refined views,
+Breaking, migrated crate by crate beside the old API, legacy deleted last. Refined views,
 `sniff`, `SipStr`/`SharedText`, the serializer's single-buffer core and the RFC-audit gate stay.
 Casualty list: [appendix](appendix/0025-header-value-hierarchy-and-message-editing.md#consequences--migration).

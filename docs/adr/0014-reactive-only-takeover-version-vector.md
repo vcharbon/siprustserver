@@ -2,8 +2,7 @@
 
 **Status:** accepted. Amends ADR-0011 X4, X9 and X11. ADR-0047 amends §1 and §2, ADR-0050
 amends §5, and ADR-0055 amends it (its §2–§4, §7, §9).
-Plan: [plan of record](../plan/passive-backup-reclaim-strategy.md),
-[task list](../plan/0014-rehydration-simplification-tasks.md). [Detail](appendix/0014-reactive-only-takeover-version-vector.md).
+[Detail](appendix/0014-reactive-only-takeover-version-vector.md).
 
 ## Context
 

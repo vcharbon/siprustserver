@@ -98,9 +98,10 @@ pub struct Attempt {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cause: Option<Cause>,
     /// What ADDED this leg to the call: a transfer, or a media resource
-    /// inserted into it. A joined leg is a parallel arrival, not a failure —
-    /// the first attempt answered and the call then dialed somebody else — so
-    /// it is exclusive with the failure-only sequential `cause`.
+    /// inserted into it. A joined leg takes a branch of its own. Independent of
+    /// `cause`: one says how the leg entered the call, the other why the
+    /// platform left it, so a joined leg that fails (a busy transfer target the
+    /// platform reroutes internally) states both.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub joined_by: Option<JoinedBy>,
     /// The captured signals that justify `cause`. Belongs to the attempt that

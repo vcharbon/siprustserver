@@ -1,4 +1,4 @@
-//! The correlation-rule file (`rule-format-v0.md`): how calls join into cases.
+//! The correlation-rule file: how calls join into cases.
 //!
 //! This file is the MIDDLE of three layers. In-dialog assembly (Call-ID + tags
 //! to dialog, dialogs to legs, B2BUA pairing) is deterministic SIP semantics

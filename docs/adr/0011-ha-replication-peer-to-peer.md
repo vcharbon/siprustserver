@@ -17,8 +17,7 @@ store between the workers (such as Redis) would only be its substrate: the mecha
 log, the watermark and the pull. The HA seam is the store's (ADR-0010 X3): `CallStore`
 carries the role, primary and generation, `callRef = {primary}|{callId}|{fromTag}` encodes
 ownership, and the proxy emits the `w_pri`/`w_bak` HRW stickiness cookie (ADR-0009). This
-ADR records the engine's shape. The wire is ADR-0014's; the exchange diagrams are in
-[ha-replication.html](../ha-replication.html).
+ADR records the engine's shape. The wire is ADR-0014's.
 [Detail](appendix/0011-ha-replication-peer-to-peer.md#context).
 
 ## Decision X1. Drop Redis; replication is direct peer-to-peer pull

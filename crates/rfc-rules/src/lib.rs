@@ -15,6 +15,8 @@
 //! visible on every report. Consumers choose their policy over `Undecidable`
 //! (the census under-reports; the live gate may still fail hard) — the rule
 //! itself only ever states what the wire proves.
+//!
+//! Adding or editing a rule: the crate's `README.md`.
 
 pub mod registry;
 pub mod rules;

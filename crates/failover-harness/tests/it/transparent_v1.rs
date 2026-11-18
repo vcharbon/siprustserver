@@ -1,4 +1,4 @@
-//! The transparent-failover matrix (ADR-0013, docs/plan/failover-test-matrix-cells.md).
+//! The transparent-failover matrix (ADR-0013).
 //! Each cell runs the same scenario clean (baseline) and with the failover
 //! injected at the safe-point, asserting (1) the external observation is
 //! identical and (2) the universal teardown sweep holds (no held context on

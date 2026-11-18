@@ -1,5 +1,5 @@
 //! The **pipeline algebra** — a [`ShapePlan`] is a chain of stages that
-//! compiles to one `ActorCall` (spec §5 of the callshapes program).
+//! compiles to one `ActorCall`.
 //!
 //! Compilation folds the chain left-to-right, threading the **gate**: the
 //! barrier that says "the current dialog is quiescent enough for the next
@@ -235,9 +235,9 @@ impl DwellKnob {
     }
 }
 
-/// What the caller's BYE feeds the per-call recorder (the contract table pins
-/// this per shape: most stamp checkpoint+phase, `long_call` checkpoint only,
-/// the refer family nothing).
+/// What the caller's BYE feeds the per-call recorder, a per-shape contract:
+/// most stamp checkpoint+phase, `long_call` checkpoint only, the refer family
+/// nothing.
 #[derive(Debug, Clone, Copy)]
 pub enum ByeFeed {
     CheckpointAndPhase,
@@ -307,8 +307,8 @@ pub struct ShapePlan {
     pub stages: Vec<Stage>,
     pub teardown: Teardown,
     /// Feed the cross-call 18x delivery gate from this caller's provisionals
-    /// (contract table §3: the shared-establishment shapes only — the
-    /// hand-rolled refer/abandon contracts must NOT).
+    /// (the shared-establishment shapes only — the hand-rolled refer/abandon
+    /// contracts must NOT).
     pub ringing_gate: bool,
     /// Stamp `connected` on the answering callee's ACK receipt (the shared
     /// establishment's phase; the refer family's contract has no `connected`).

@@ -1,5 +1,5 @@
 //! The **routing seam** — how an abstract "the SUT must route/behave like X"
-//! slot becomes concrete INVITE input (spec §3 of the callshapes program).
+//! slot becomes concrete INVITE input.
 //!
 //! A shape never spells wire syntax for routing: its stages declare a
 //! [`RouteIntent`] and the per-platform [`RouteBinder`] realizes it. Upstream

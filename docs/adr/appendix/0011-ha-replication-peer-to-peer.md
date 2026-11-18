@@ -18,8 +18,7 @@ the `w_pri`/`w_bak` HRW stickiness cookie (ADR-0009) and reads a worker's
 `NotReady`. This ADR records the engine's shape: the transport, the in-process
 change log, the puller/supervisor, bootstrap, the k8s topology provider, and
 the readiness state machine. The decisions below pin the choices a future
-reader would otherwise wonder about. The wire is ADR-0014's; the visual
-exchange diagrams are in [`docs/ha-replication.html`](../../ha-replication.html).
+reader would otherwise wonder about. The wire is ADR-0014's.
 
 ## Decision X2. Transport is its own message-granular reliable seam
 
@@ -171,7 +170,6 @@ replication exchange renders as a sequence diagram beside the SIP exchange.
 
 ## References
 
-- [`docs/ha-replication.html`](../../ha-replication.html) (Mermaid exchange diagrams).
 - ADR-0009 (proxy HRW + stickiness cookie + fresh-pod guard),
   ADR-0010 X3 (replication-aware `CallStore` seam — the deferral this fills),
   ADR-0008 (positional msgpack), ADR-0006 (recording-first harness),

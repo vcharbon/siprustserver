@@ -26,8 +26,7 @@ fn pinged(s: &StateInner) -> bool {
 /// alive with periodic in-dialog OPTIONS pings for `options_hold` (each 200 read
 /// inline), then BYE. The first ping stamps `keepalive_ack`.
 ///
-/// Downstream contract (`docs/todos/actor-harness-p1-contract-table.md` §5.4):
-/// phases `connected` → `keepalive_ack` (first ping only) → `bye_200`;
+/// Downstream contract: phases `connected` → `keepalive_ack` (first ping only) → `bye_200`;
 /// checkpoints `time_to_200` / `time_to_options_200` (first) / `time_to_bye_200`;
 /// `mark_ringing` on the 180; anchors `LOAD_CALL_ANCHORS` (OPTIONS NOT anchored).
 pub struct OptionsHold;
@@ -114,8 +113,7 @@ impl ActorScenario for OptionsHold {
 /// answer the SUT's own in-dialog keepalives on BOTH legs concurrently — then
 /// BYE tolerantly.
 ///
-/// Downstream contract (`docs/todos/actor-harness-p1-contract-table.md` §5.5):
-/// phases `connected` → `keepalive_ack` (terminal — **no `bye_200`**);
+/// Downstream contract: phases `connected` → `keepalive_ack` (terminal — **no `bye_200`**);
 /// checkpoints `time_to_200` / `time_to_options_200` / `time_to_bye_200`;
 /// `mark_ringing` on the 180; anchors `LOAD_ESTABLISH_ANCHORS` (no bye anchor).
 pub struct LongCall;
@@ -150,8 +148,7 @@ impl ActorScenario for LongCall {
                     on_answer_rx: Feed::new(Some("time_to_200"), None),
                     on_options_ok: Feed::new(Some("time_to_options_200"), Some("keepalive_ack")),
                     // The BYE carries the `time_to_bye_200` checkpoint but NO phase
-                    // — `long_call`'s terminal phase stays `keepalive_ack`
-                    // (contract table §5.5 / §8.5).
+                    // — `long_call`'s terminal phase stays `keepalive_ack`.
                     on_bye_ok: Feed::new(Some("time_to_bye_200"), None),
                     ..CtxFeed::default()
                 },

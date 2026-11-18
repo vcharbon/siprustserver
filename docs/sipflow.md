@@ -66,17 +66,12 @@ skipped by the rules.
 ## Probe clock alignment
 
 A merged capture whose probes' clocks disagree by more than the duplicate
-window is aligned first (`align.rs`). No window can do it: a clock offset lands
-anywhere in the T1 ladder's own range (0.5, 1, 2, 4, 8, 16 s), and a wider
-window swallows every smaller ladder gap with it. The probe id can, because a
-probe never writes one packet twice.
-
-The offset between two probes is measured on the datagrams both wrote, the
-k-th copy on one against the k-th on the other. A ladder both saw then yields
-the clock's offset, never the ladder's gap. An offset stands on three agreeing
-deltas at least, one of them an ACK or a response to a non-INVITE: that class
-has no retransmission timer, so its two copies are one packet and never a
-ladder whose first emission one probe saw and whose rung the other saw.
+window is aligned first. The offset between two probes is measured on the
+datagrams both wrote, the k-th copy on one against the k-th on the other, and
+stands on three agreeing deltas at least. A wider duplicate window is no
+substitute: a clock offset lands anywhere in the T1 ladder's range, and a window
+that wide merges real retransmissions too. The algorithm and why it holds are
+in `crates/sip-pcap/src/align.rs`.
 
 A clock that steps mid-capture is measured stretch by stretch. The later clock
 is rebased, its probe-only messages with it, and the copies collapse as

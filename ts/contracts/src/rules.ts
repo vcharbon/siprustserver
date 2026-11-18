@@ -1,5 +1,5 @@
 /**
- * The correlation-rule file (`rule-format-v0.md`), mirroring
+ * The correlation-rule file, mirroring
  * `pivot_schema::rules`: how calls join into cases.
  *
  * This file is the MIDDLE of three layers. In-dialog assembly (Call-ID + tags to

@@ -172,8 +172,9 @@ fn a_refer_to_composes_a_number_and_another_leg_s_dialog_identity() {
     );
 }
 
-/// §8.1 lists the leg fields, and the list is closed: a field it does not
-/// state is a malformed accessor at compile, never an empty substitution.
+/// `pivot_schema::accessor::LegField` lists the leg fields, and the list is
+/// closed: a field it does not state is a malformed accessor at compile, never
+/// an empty substitution.
 #[test]
 fn a_leg_field_the_spec_does_not_state_is_malformed_not_empty() {
     let state = state();

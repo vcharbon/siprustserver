@@ -116,4 +116,3 @@ The rest: [appendix, consequences](appendix/0020-call-reaper-obligations-rule-vi
   [ADR-0016](./0016-callflow-service-state-machines.md) (CORE_LAYER rules, SDK contract, `ext`
   slices).
 - `CONTEXT.md`, "Call reaper vocabulary".
-- Implementation plan: [docs/plan/call-reaper-obligations-rule-view.md](../plan/call-reaper-obligations-rule-view.md).

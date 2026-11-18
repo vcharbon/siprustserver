@@ -16,7 +16,7 @@
 //! A `num:` composition is the one accessor a
 //! capture DOES justify: it resolves statically through the identities and dial
 //! forms the document itself declares, which is what makes a captured number
-//! portable across lanes (§6.4).
+//! portable across lanes (§8.5).
 //!
 //! The gate runs the other way too: a captured document must carry what a
 //! capture DOES justify — its provenance, its coordinates, its span — so a

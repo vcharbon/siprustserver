@@ -180,7 +180,7 @@ pub(super) async fn react_response(
                     if st.feed.ringing_gate && !st.saw_provisional {
                         // Answered without ever ringing: a lost non-PRACK 18x is
                         // best-effort — counted into the cross-call gate, never a
-                        // per-call failure (contract table §3).
+                        // per-call failure.
                         st.ctx.mark_ringing(false);
                     }
                     st.feed.on_answer_rx.stamp(st.ctx);

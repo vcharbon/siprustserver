@@ -18,7 +18,11 @@
  * bounds: the far leg's record ends at its 2xx; the near-leg answer is a 2xx
  * (a refusal is left under `far-side-reinvite-not-derived`, a 491 the near
  * peer took is glare the replaying platform composes itself); the near-leg
- * half has no relay origin. §6.9 states the rationale of each.
+ * half has no relay origin. A far leg the vantage kept watching that shows no
+ * INVITE says the platform did NOT relay, which a replay must surface; a
+ * refusal the near peer sent owes the far leg an ACK no captured message gives
+ * a coordinate to, and a 491 is half of a crossing pair stated whole or not at
+ * all; a near-leg half with a relay origin is already a far-leg step.
  */
 import { Body, Tokens } from "@sip/contracts"
 import { relayOriginOf, type StepTiming } from "./delay.js"

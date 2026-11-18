@@ -376,9 +376,7 @@ incremental fill.
 
 Hard invariants the implementation must keep (enforced by refreshed alloc
 budgets + new benches). Each target carries the number M13 measured against it,
-so a met target and a missed one cannot read alike; the measurements and their
-diagnosis are in the M13 section of
-[docs/todos/header-model-migration.md](../../todos/header-model-migration.md).
+so a met target and a missed one cannot read alike.
 
 1. Parse: exactly one text copy (the image); body/raw slicing stays
    refcount-only. Target ≤ ~10 allocs/msg (from measured 20–21) via
@@ -412,8 +410,7 @@ diagnosis are in the M13 section of
 
 ## Consequences / migration
 
-Breaking, migrated crate-by-crate; mechanics, ordering, and the live tracker
-are in [docs/todos/header-model-migration.md](../../todos/header-model-migration.md)
+Breaking, migrated crate-by-crate
 (additive coexistence: new namespace lands beside the old API, consumers port
 one crate per commit, legacy is deleted last as the completion proof). Each
 step deletes its local surgery module as it lands. Casualty list on completion:

@@ -434,7 +434,7 @@ fn default_shapes() -> Vec<ShapeDescriptor> {
             .default_weight(0.5)
             .load_actor_with(|_| Arc::new(cs::prack_update_early(cs::default_binder()))),
         // ACTOR-executed: per-endpoint reactive actors + the ack-gated settle barrier;
-        // same downstream contract (`docs/todos/actor-harness-p1-contract-table.md` §5.3).
+        // the downstream contract is `scenario_harness::actor::scenarios::Refer`'s.
         ShapeDescriptor::new("refer")
             .anchors(LOAD_REFER_ANCHORS)
             .default_weight(1.0)

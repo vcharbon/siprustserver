@@ -13,7 +13,7 @@ here: a platform that does not route by `X-Api-Call` writes one `RouteBinder`.
 
 ---
 
-## 1. The pipeline algebra
+## The pipeline algebra
 
 Compose a shape by filling three slots (`callshapes::plan`):
 
@@ -63,7 +63,7 @@ generates the compatible cross-product into the registry with stable ids
 
 ---
 
-## 2. The routing seam (`RouteBinder`)
+## The routing seam (`RouteBinder`)
 
 A shape never spells wire routing syntax. A stage declares a `RouteIntent`
 (`Direct { target }`: one callee role; `FailoverOnReject { targets }`: try in
@@ -87,7 +87,7 @@ case JSON or `ScenarioInputs`.
 
 ---
 
-## 3. Registering shapes
+## Registering shapes
 
 The load application (`loadgen::app`) runs behind the `Product` seam: a product
 names its bin, adds its flags, and builds the `ShapeRegistry` its flags select.
@@ -98,7 +98,7 @@ registers its shapes as `ShapeDescriptor`s; the descriptor knobs are listed in
 
 ---
 
-## 4. Adding a new Establishment / Script / Transfer
+## Adding a new Establishment / Script / Transfer
 
 1. **Add the variant** to the enum in `callshapes::plan` (`Establishment`,
    `Script`, or `Transfer`).
@@ -117,7 +117,7 @@ registers its shapes as `ShapeDescriptor`s; the descriptor knobs are listed in
 
 ---
 
-## 5. The fake-net paused-clock tests
+## The fake-net paused-clock tests
 
 New shape coverage grows in `crates/loadgen/tests/it/fake_net.rs`: the real
 driver, mux and `DropModel` loss engine over one `SimulatedSignalingNetwork`
@@ -129,7 +129,7 @@ conservative.
 
 ---
 
-## 6. SUT-reachability: do NOT create dangling-fork load cells
+## SUT-reachability: do NOT create dangling-fork load cells
 
 Some behaviours are **peer-to-peer only** and cannot be a through-SUT load cell,
 because a dialog-terminating B2BUA absorbs the relevant message:

@@ -57,10 +57,9 @@ fn guard(who: &'static str, detail: &'static str) -> StepError {
 /// actually acknowledged — a dropped datagram must be RECOVERED by
 /// re-emission, never excused (endurance failure `cseq-in-dialog-order`).
 ///
-/// Downstream contract (`docs/todos/actor-harness-p1-contract-table.md` §5.3):
-/// phases `referred` → `transferred` ONLY; checkpoints `time_to_200` /
-/// `time_to_202` / `time_to_charlie_200`; NO `mark_ringing`; guard errors under
-/// `who: "refer"` byte-for-byte.
+/// Downstream contract: phases `referred` → `transferred` ONLY; checkpoints
+/// `time_to_200` / `time_to_202` / `time_to_charlie_200`; NO `mark_ringing`;
+/// guard errors under `who: "refer"`.
 pub struct Refer {
     /// The `X-Api-Call.refer_key` the SUT's REFER backend authorizes — per-run
     /// SUT auth data fed in at construction (the CLI's `--refer-key`), NOT
@@ -90,8 +89,7 @@ impl ActorScenario for Refer {
     }
 
     fn build(&self, env: &CallEnv<'_>) -> Result<ActorCall, StepError> {
-        // The linear body's guards, byte-for-byte (`refer.rs:39,80` — the `who`
-        // is a bounded sample-key, see the contract table §8.2).
+        // The guards. Their `who` is a fixed string: it keys a bounded sample.
         if env.charlie.is_none() {
             return Err(StepError::UnexpectedKind {
                 who: "refer".to_string(),
@@ -212,9 +210,8 @@ impl ActorScenario for Refer {
 /// observed — the call tears down, settles, and succeeds under its
 /// `transfer_declined` branch.
 ///
-/// Downstream contract (`docs/todos/actor-harness-p1-contract-table.md` §5.10):
-/// NO phases, NO anchors, checkpoint `time_to_200` only, NO `mark_ringing`;
-/// guard errors under `who: "refer_charlie_reject"`.
+/// Downstream contract: NO phases, NO anchors, checkpoint `time_to_200` only,
+/// NO `mark_ringing`; guard errors under `who: "refer_charlie_reject"`.
 pub struct ReferCharlieReject {
     /// The `X-Api-Call.refer_key` the SUT's REFER backend authorizes.
     pub refer_key: String,
@@ -242,8 +239,7 @@ impl ActorScenario for ReferCharlieReject {
     }
 
     fn build(&self, env: &CallEnv<'_>) -> Result<ActorCall, StepError> {
-        // The linear body's guards, byte-for-byte (`failures.rs:133,154` — the
-        // `who` is the fixed sample-key, contract table §5.10 / §8.1).
+        // The guards. Their `who` is a fixed string: it keys a bounded sample.
         if env.charlie.is_none() {
             return Err(guard("refer_charlie_reject", "bound without a charlie leg"));
         }
@@ -271,8 +267,7 @@ impl ActorScenario for ReferCharlieReject {
                 invite_targets: vec![("bob", env.bob.clone())],
                 via: None,
                 feed: CtxFeed {
-                    // `time_to_200` on alice's answer; NO phase, NO ringing gate
-                    // (contract table §5.10).
+                    // `time_to_200` on alice's answer; NO phase, NO ringing gate.
                     on_answer_rx: Feed::new(Some("time_to_200"), None),
                     ..CtxFeed::default()
                 },
@@ -355,8 +350,7 @@ impl ActorScenario for ReferCharlieReject {
 /// machine ([`Disposition::ReliableAnswer`]), alice PRACKs the reliable 183 in
 /// her reactor and BYEs once established.
 ///
-/// Downstream contract (`docs/todos/actor-harness-p1-contract-table.md` §5.7):
-/// phases `rerouted` → `pracked` → `connected` → `bye_200`; checkpoints
+/// Downstream contract: phases `rerouted` → `pracked` → `connected` → `bye_200`; checkpoints
 /// `time_to_prack_200` / `time_to_200` / `time_to_bye_200`; `mark_ringing(true)`
 /// on bob2's reliable 183; anchors `PRACK_ANCHORS` (with `initialInvite` on BOTH
 /// bob's rejected and bob2's winning INVITE).
@@ -368,8 +362,7 @@ impl ActorScenario for ReroutingPrack {
     }
 
     fn build(&self, env: &CallEnv<'_>) -> Result<ActorCall, StepError> {
-        // The linear body's guard, byte-for-byte (`rerouting_prack.rs:44` — the
-        // `who` is the fixed sample-key, contract table §5.7 / §8.3).
+        // The guard. Its `who` is a fixed string: it keys a bounded sample.
         let bob2 = env.bob2.ok_or_else(|| guard("rerouting_prack", "bound without a bob2 leg"))?;
 
         let actors = vec![
@@ -399,7 +392,7 @@ impl ActorScenario for ReroutingPrack {
                 via: None,
                 feed: CtxFeed {
                     // bob2's reliable 183 is guaranteed-delivery, so it counts
-                    // toward the cross-call 18x gate (contract table §5.7).
+                    // toward the cross-call 18x gate.
                     ringing_gate: true,
                     on_answer_rx: Feed::new(Some("time_to_200"), None),
                     on_prack_ok: Feed::new(Some("time_to_prack_200"), Some("pracked")),
@@ -480,8 +473,7 @@ impl ActorScenario for ReroutingPrack {
 /// UPDATE (offer) whose 200 completes the exchange (no ACK), then BYEs. The
 /// reactor reuses the 100rel machinery the rerouting-prack port built.
 ///
-/// Downstream contract (`docs/todos/actor-harness-p1-contract-table.md` §5.6):
-/// phases `pracked` → `connected` → `updated` → `bye_200`; checkpoints
+/// Downstream contract: phases `pracked` → `connected` → `updated` → `bye_200`; checkpoints
 /// `time_to_prack_200` / `time_to_200` / `time_to_update_200` / `time_to_bye_200`;
 /// `mark_ringing(true)` on the reliable 183; anchors `PRACK_ANCHORS` (UPDATE NOT
 /// anchored).
@@ -518,7 +510,7 @@ impl ActorScenario for PrackUpdate {
                 via: None,
                 feed: CtxFeed {
                     // bob's reliable 183 is guaranteed-delivery, so it counts
-                    // toward the cross-call 18x gate (contract table §5.6).
+                    // toward the cross-call 18x gate.
                     ringing_gate: true,
                     on_answer_rx: Feed::new(Some("time_to_200"), None),
                     on_prack_ok: Feed::new(Some("time_to_prack_200"), Some("pracked")),
@@ -578,8 +570,7 @@ impl ActorScenario for PrackUpdate {
 /// reactor, then BYEs. Emergency variant `reinvite_em` reuses this body (the
 /// marker rides the INVITE plan).
 ///
-/// Downstream contract (`docs/todos/actor-harness-p1-contract-table.md` §5.2):
-/// phases `connected` → `reinvited` → `bye_200`; checkpoints `time_to_200` /
+/// Downstream contract: phases `connected` → `reinvited` → `bye_200`; checkpoints `time_to_200` /
 /// `time_to_reinvite_200` / `time_to_bye_200`; `mark_ringing` on the 180;
 /// anchors `LOAD_REINVITE_ANCHORS` (adds `reInvite`←bob rx).
 pub struct Reinvite;
@@ -667,8 +658,7 @@ impl ActorScenario for Reinvite {
 /// call. Alice has ONLY the INVITE goal (her INVITE is rejected — no dialog, no
 /// BYE); the torn-down, settled call succeeds under its `rejected` branch.
 ///
-/// Downstream contract (`docs/todos/actor-harness-p1-contract-table.md` §5.8):
-/// NO phases, NO anchors, NO checkpoints, NO `mark_ringing`.
+/// Downstream contract: NO phases, NO anchors, NO checkpoints, NO `mark_ringing`.
 pub struct InviteReject;
 
 impl ActorScenario for InviteReject {
@@ -691,7 +681,7 @@ impl ActorScenario for InviteReject {
                 )],
                 invite_targets: vec![("bob", env.bob.clone())],
                 via: None,
-                // NO phases / checkpoints / ringing gate (contract table §5.8).
+                // NO phases / checkpoints / ringing gate.
                 feed: CtxFeed::default(),
 
                 cseq: None,
@@ -742,8 +732,8 @@ impl ActorScenario for InviteReject {
 /// under [`Branch::ANSWERED_DESPITE_CANCEL`]; when it reaches her before her
 /// CANCEL leaves, under [`Branch::ANSWERED_BEFORE_CANCEL`].
 ///
-/// Downstream contract (`docs/todos/actor-harness-p1-contract-table.md` §5.9):
-/// NO phases, NO anchors, checkpoint `time_to_180` only, NO `mark_ringing`.
+/// Downstream contract: NO phases, NO anchors, checkpoint `time_to_180` only,
+/// NO `mark_ringing`.
 pub struct AbandonRinging;
 
 /// The abandon's accepted endings: the CANCEL won (487), the 200 crossed it,
@@ -787,7 +777,7 @@ impl ActorScenario for AbandonRinging {
                 via: None,
                 feed: CtxFeed {
                     // `time_to_180` on the first provisional; NO phase, NO ringing
-                    // gate (contract table §5.9).
+                    // gate.
                     on_provisional: Feed::new(Some("time_to_180"), None),
                     ..CtxFeed::default()
                 },
@@ -838,9 +828,8 @@ impl ActorScenario for AbandonRinging {
 /// `talk_time` then BYEs. Emergency variant `basic_call_em` reuses this body
 /// (the marker rides the INVITE plan).
 ///
-/// Downstream contract (`docs/todos/actor-harness-p1-contract-table.md` §5.1):
-/// phases `connected` → `bye_200`; checkpoints `time_to_200` / `time_to_bye_200`;
-/// `mark_ringing` on the 180; anchors `LOAD_CALL_ANCHORS`.
+/// Downstream contract: phases `connected` → `bye_200`; checkpoints `time_to_200` /
+/// `time_to_bye_200`; `mark_ringing` on the 180; anchors `LOAD_CALL_ANCHORS`.
 pub struct BasicCall;
 
 impl ActorScenario for BasicCall {
