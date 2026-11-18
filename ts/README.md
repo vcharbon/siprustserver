@@ -26,40 +26,25 @@ A pnpm workspace. Twenty-one packages, four of them one layer each of the same s
 | `siprig/` | `@sip/siprig` | the base deployment the image kit ships (`tooling/siprig/`): its reading of a pack manifest before a build, and the workspace, store, site and campaign commands the base image runs for a pack that ships none of its own |
 | `reference-pack/` | `@sip/reference-pack` | the reference pack (ADR-0060 item 17): one sample per seam of the rig on the upstream B2BUA, its campaign run by `siprig`'s in this workspace's tests |
 
-Dependencies point one way only. `contracts` depends on nothing, and every other
-package but the leaves `viewer-core` and `case-modules`, `rfc-delta-rules` (which meets it only through `delta-rules`), the deployment `siprig` and the pack `reference-pack` depends on it; beyond it, each
-package's own edges are: `pipeline`, `toolchain`, `store` and `rig` none,
-`delta-rules → pipeline`, `rfc-delta-rules → {delta-rules, pipeline}`, `bless → pipeline`, `driver → {pipeline, toolchain}`, `basic-case → {driver, rig}` (its tests also
-`toolchain`), `corpus → {driver, pipeline, rig, store, toolchain, viewer-core}`,
-`cli → {corpus, store}`, `workspace → {cli, rig, store, toolchain}`,
-`lab-host → {cli, corpus, rig, store, toolchain, workspace}`,
-`campaign-runner → {corpus, rig, store, toolchain, workspace}`,
-`site → {campaign-runner, corpus, lab-host, pipeline, rig, store, viewer-core,
-workspace}`, `siprig → {campaign-runner, cli, corpus, lab-host, rig, site, store,
-workspace}`, `reference-pack → {basic-case, rig}` (its tests also `siprig`, `store`) and
-`viewer-app → viewer-core` (the app reads the report formats' types
-from `contracts`, nothing else).
-The viewer's server is `@sip/site`, a package of its own beside the app: the app
-never imports it and meets it over HTTP only, so the SPA's build carries no node
-side. A deployment runs the site under its own entry point, its pack provided
-once (`site-pack.ts`); `@sip/siprig` `site-main.ts` is the base's. A policy package never imports the
-store: what it reads of a run reaches it as contract vocabulary. Only
-`@sip/toolchain` runs a Rust CLI; `@sip/corpus` runs every child through it, and
-`@sip/lab-host` stands the host's own processes (a build, a lane's batch and SUT).
+Dependencies point one way only; each `package.json` states a package's edges.
+`contracts` depends on nothing. The rules the edges keep:
 
-The store's tests build and drop their own databases on a postgres server:
-`STORE_TEST_URL` names one (any database of it, `postgresql:///postgres?host=…`),
-exported or stated in the workspace's untracked `ts/.env.local` (an exported value
-wins), else the client's default socket. A suite whose server does not answer fails,
-naming the url; `STORE_TEST_SKIP=1` skips them instead. A
-deployment states its own configuration — database url, current population,
-selector spelling, capture names, document features — and nothing of it lives
-in the store.
+- The app never imports `@sip/site` and meets it over HTTP only, so the SPA's
+  build carries no node side. A deployment runs the site under its own entry
+  point, its pack provided once (`site-pack.ts`); `@sip/siprig` `site-main.ts`
+  is the base's.
+- A policy package never imports the store: what it reads of a run reaches it
+  as contract vocabulary.
+- Only `@sip/toolchain` runs a Rust CLI; `@sip/corpus` runs every child through
+  it, and `@sip/lab-host` stands the host's own processes.
+- A deployment states its own configuration (database url, selector spelling,
+  capture names); nothing of it lives in the store.
 
-The toolchain's suites held to the real `pivot-schema` run `PIVOT_SCHEMA_BIN`,
-else the release build (`cargo build --release -p pivot-schema`). Where neither
-is on disk they fail, naming the path and the build; `TOOLCHAIN_TEST_SKIP=1`
-skips them instead.
+The store's tests build and drop their own databases on the postgres server
+`STORE_TEST_URL` names (exported, or in the untracked `ts/.env.local`), else the
+client's default socket; `STORE_TEST_SKIP=1` skips them. The toolchain's suites
+held to the real `pivot-schema` run `PIVOT_SCHEMA_BIN`, else the release build;
+`TOOLCHAIN_TEST_SKIP=1` skips them.
 
 ## Nothing generic knows a deployment
 
@@ -176,10 +161,8 @@ once this workspace is installed. A schema, a tagged error or a check built on
 one side is then read by the other, which two copies of `effect` do not
 guarantee.
 
-The CLI is `effect/unstable/cli`, Effect v4's own home for what used to be
-`@effect/cli` — the same move that put the platform services and the process
-spawner into core. There is no 4.x `@effect/cli` to depend on; the published one
-still peers on `effect@^3` and `@effect/platform`.
+The CLI is `effect/unstable/cli`; `@effect/cli` peers on `effect@^3` and is not
+used.
 
 Binaries are found under `target/release` by default and overridden per binary
 by env var — `SIPFLOW`, `PIVOT_SCHEMA_BIN`. `replay` is built by the deployment

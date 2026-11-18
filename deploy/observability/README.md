@@ -55,12 +55,7 @@ without it: the `Incident window` annotation (regions from
 `sip_chaos_event`), the tag `hakit` and the link listing every dashboard so
 tagged with the time range kept.
 
-| UID | Title | Built from |
-|---|---|---|
-| `sip-front-proxy` | SIP front-proxy — Load balancer (Rust) | `sip_messages_total`, `sip_routing_decision_total`, `sip_routing_duration_seconds`, `sip_proxy_*`, `sip_worker_health` |
-| `b2bua-worker` | B2BUA — Worker (Rust) | `b2bua_active_calls`, `b2bua_call_*`, `b2bua_dispatch_*`, `b2bua_handler_timeouts_total`, `b2bua_cdr_*` |
-| `k8s-state` | Kubernetes — state & per-pod resources | kube-state-metrics + cAdvisor (SUT-independent) |
-| `kind-nodes` | Kind — Node infrastructure | node-exporter (SUT-independent) |
+Each JSON file of the base set is one dashboard; its panels name the series it reads.
 
 The app dashboards track the exporters' metric names and label shapes —
 notably `sip_messages_total` carries a single `label` dimension holding

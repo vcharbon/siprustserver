@@ -83,8 +83,9 @@ is the endurance twin). It cannot reproduce a host clock stepping mid-run.
 - **No time-based settle or handback.** Two copies of a call are reconciled by
   containment (ADR-0055 §7), never by a timer or a settle window. A takeover
   copy is shed when the transactions it serves clear (the transaction layer's
-  `CallQuiesced`, `router::quiesced`) or stands down on a write of its primary
-  that contains it (`router::stand_down`), never on a clock.
+  `CallQuiesced`, `router::quiesced::self_release_turn`) or stands down on a
+  write of its primary that contains it (`router::stand_down`), never on a
+  clock.
 - **Keepalive smoothing lives in the bulk reclaim**
   (`router::reclaim::bulk::arm_parked` passes `Smoothing` to
   `sanitize_restored_timers`), never in the timer driver (ADR-0014, "Keepalive

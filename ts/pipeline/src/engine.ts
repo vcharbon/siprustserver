@@ -8,6 +8,14 @@
  * its own matcher below and none of them is configurable beyond the fields its
  * schema declares.
  *
+ * Two phases. The join phase runs every rule but `retry` into pairwise joins,
+ * and union-find closes them into groups. The chain phase runs
+ * the `retry` rules: each qualifying terminal failure pairs with the next
+ * attempt, within a group and, for a rule with `match`, across groups, and
+ * those joins feed back into membership. The output is `calls`, `joins`,
+ * `groups`, `ambiguities` and `chains`; a chain lists its calls in attempt
+ * order and is the input to pivot `routing.attempts`.
+ *
  * The engine never PICKS. A call joining several candidates under the same rule
  * in the same role keeps every join and flags them all: which one is right is a
  * judgement, and a judgement made silently here would look exactly like

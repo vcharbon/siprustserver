@@ -94,15 +94,9 @@ Read [Call logic: how to extend it](docs/guide/services.md) and
 
 Read [Engineering rules of the critical code](docs/guide/engineering-rules.md).
 
-## High availability in brief
+## Before a deployment
 
-| If | Then, when one worker is lost |
-|---|---|
-| The backup confirmed each change of the call in 100 ms | The call continues. The parties see retransmissions. Three limits apply. A ringing tone sent without RFC 3262 can be lost. A lost answer comes on the retransmission of its request. A backend can get one request two times. |
-| The backup was slow, behind, or cut off | The call continues, or the platform ends it with a BYE on each side, or its dialogs are left to the timers of the endpoints. The call gets one or two CDRs. |
-| The call had no backup, or its two workers are lost together | The call is lost. The endpoints end it with their own timers. |
-
-Two pages are required reading before a deployment:
+Two pages are required reading:
 
 - [High availability: guarantees and constraints](docs/guide/ha.md) states each condition, how
   the platform degrades, what it does not cover and what your site must provide.
@@ -173,46 +167,24 @@ The repository has the tools we use to test the platform. They work on any SIP s
 
 ### sipflow: calls from a capture
 
-`sipflow` reads a pcap or pcapng file, plain or gzip. It parses each datagram with the parser of
-the platform and joins the legs of a B2BUA call into one call. It prints each call as a ladder.
-It can also review the calls against the 95 RFC rules of the test audit. For each finding, it
-states which side sent the message.
+`sipflow` reads a pcap or pcapng file, plain or gzip, joins the legs of a B2BUA call into one
+call and prints each call as a ladder. It can review the calls against the RFC rules of the test
+audit and say which side sent each faulty message. It reads UDP only, and it does not capture.
 
 ```bash
 cargo build --release -p sip-pcap --bin sipflow
 target/release/sipflow capture.pcap --list                    # one line for each call
-target/release/sipflow capture.pcap --call-id 7f3a --full     # the ladders, with the messages
 target/release/sipflow capture.pcap --sut 10.0.0.9 --rfc      # the RFC review
-target/release/sipflow capture.pcap --json > calls.json       # the full model
 ```
 
-It reads UDP only, and it does not capture. See [docs/sipflow.md](docs/sipflow.md).
+See [docs/sipflow.md](docs/sipflow.md).
 
 ### pcap-anon: a capture you can share
 
 `pcap-anon` rewrites the flows document that `sipflow --json` writes, so that a capture can leave
-the network it was taken on. With `--all-addresses`, every number, name, host and address
-becomes a fake. Without that flag the private address ranges and the addresses your profile
-names as the system under test stay as they are: use that for a document that stays on your own
-tools. `--fresh-seed` draws a seed on the first run and keeps it in a file. The seed gives each
-identity the same fake everywhere, and a later run with the same seed file, without
-`--fresh-seed`, writes the same output byte for byte. With `--verify` it searches the output for
-what the raw document held, and writes nothing if it finds any. `sipflow --to-pcap` turns the
-result back into a capture.
-
-```bash
-cargo build --release -p sip-pcap --bin sipflow
-cargo build --release -p pcap-anon
-target/release/sipflow --json --reading my.reading capture.pcapng > capture.flows.json
-target/release/pcap-anon anonymize capture.flows.json capture.anon.flows.json \
-  --plan my.plan.json --reading my.reading --profile my.profile.json \
-  --all-addresses --seed-file capture.seed --fresh-seed --verify
-target/release/sipflow --to-pcap capture.anon.flows.json --out capture.anon.pcap
-```
-
-You write the numbering plan, the network profile and the reading for your network. A few
-identities stay readable, such as a name a peer typed into a reason phrase, and the crate README
-lists them. See [crates/pcap-anon/README.md](crates/pcap-anon/README.md).
+the network it was taken on. A seed file gives each identity the same fake everywhere, and
+`--verify` writes nothing if the output still holds a raw identity. `sipflow --to-pcap` turns the
+result back into a capture. See [crates/pcap-anon/README.md](crates/pcap-anon/README.md).
 
 ### loadgen: a load generator
 
@@ -264,13 +236,6 @@ It needs the lab cluster of [deploy/README.md](deploy/README.md).
 - **Capture replay.** `ts/` holds a tool chain that turns captures into replayable test cases
   and compares runs on a web site. It needs a product pack to be useful. See
   [ts/README.md](ts/README.md).
-
-## Measured results
-
-An endurance run of 3 hours with incidents is in progress. Its numbers go in
-[docs/guide/results.md](docs/guide/results.md). That page gives the load and the impact of each
-incident against its budget. It also gives the share of replication round trips inside the sync
-cap, and the CPU and memory use.
 
 ## Documentation
 

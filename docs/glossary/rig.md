@@ -40,6 +40,19 @@ The pack, then the workspace, where manifests are found. Each entry holds `colle
 `judges/`, `operations/` and `parts/`. A name defined twice is refused, naming both files.
 _Avoid_: the HA tooling's **search path**, which is that runner's.
 
+**Workspace**:
+The one directory (`SIPRIG_WORKSPACE`) holding every root and the database the rig uses, by
+fixed subdirectory names, configured by its one `rig.toml` at its root
+(`ts/workspace/src/layout.ts`).
+
+**Prebuilt install**:
+An install that takes its Rust binaries from `SIPRIG_BIN_DIR` and never runs cargo, such as
+the base image.
+
+**Not available in this install**:
+What a feature says, naming the tool, where an optional host tool it execs is missing from
+`PATH`. It never fails on a spawn error.
+
 ## Scopes
 
 **Scope**:

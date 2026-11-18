@@ -285,7 +285,7 @@ relation and the effect of a higher or lower value.
   real cluster.
 - **Runs on a real cluster.** A runner injects incidents under load: worker kill, node stop,
   partition, packet loss, clock skew. It charges each failed call to the incident that
-  caused it and compares the total to a budget. [results.md](results.md) has the numbers.
+  caused it and compares the total to a budget.
 
 The sweep and its tiers are in
 [ADR-0055](../adr/0055-services-are-ha-blind.md) and

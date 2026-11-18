@@ -92,33 +92,16 @@ the timer a worker goes Ready with the view it has; peers join as it fills
 _Avoid_: "synced" for this bounded notion (synced is the informer's own flag).
 
 **Failure domain** (informally **zone**):
-The blast radius a **primary** and its **backup** must be split across so one
-failure cannot take both. Expressed by a single configurable k8s topology key:
-**`topology.kubernetes.io/zone`** by default (a rack, motivated by LAN/partition
-isolation, *not* power/cooling), overridable to **`kubernetes.io/hostname`** so
-the mechanism is exercisable on the kind endurance cluster (which has no zone
-label). Read off each **`EndpointSlice`** endpoint's native `zone` / `nodeName`
-field by the one `K8sMembership` informer (no extra RBAC, no node-get). Carried
-as `Peer.failure_domain` → `WorkerEntry`.
-_Avoid_: "zone" unqualified in code (overloaded with cloud AZ); "rack"/"node" as
-fixed terms (the key is configurable; the domain is whatever the key names).
+The blast radius a **primary** and its **backup** would be split across so one
+failure cannot take both, named by one configurable k8s topology key. A design
+of ADR-0015, not implemented: today a hard node anti-affinity of the workers is
+the only separation.
+_Avoid_: "zone" unqualified in code (overloaded with cloud AZ).
 
 **Distinct-zone backup**:
-The invariant that a call's **backup** sits in a different **failure domain**
-than its **primary**. Enforced in **one place only**, the proxy's `w_bak`
-selection (`encode_stickiness`), filtering HRW-2nd-best candidates to a foreign
-domain; the b2bua never recomputes it (it echoes `w_bak` onto `topology.bak`),
-so the stored **Element** lands in the chosen domain by construction. Frozen at
-INVITE for the call's life, **safe** because workers are zone-pinned (one
-StatefulSet per zone, hard `nodeAffinity`), so a rebooted primary always returns
-to its own domain and can never drift into its backup's. **Degraded fallback:**
-when no alive foreign-domain worker exists, fall back to a same-domain backup
-(survives the common pod crash/restart, not a domain partition) and emit a
-degraded-backup metric. With ≥3 zones this fallback only triggers if every other
-domain is dead. A periodic b2bua self-scan (own zone vs `topology.bak`'s zone)
-re-emits the metric as a safety net.
-_Avoid_: re-deriving the constraint in the b2bua or repl layer (single picker =
-the proxy).
+The planned invariant that a call's **backup** sits in another **failure
+domain** than its **primary**, chosen by the proxy's `w_bak` selection alone
+(ADR-0015). Not implemented: today's `w_bak` ignores zones.
 
 **Unwired node** (replication off):
 A b2bua with no replication store (`B2buaDeps.replication = None`, the runners'

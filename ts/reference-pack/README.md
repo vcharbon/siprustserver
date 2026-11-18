@@ -26,36 +26,8 @@ the image's `siprig-campaign run`).
 | the vendored captures | `capture/third-party/` | two captures another stack produced, ingested and cut but not replayed: a proxied blind transfer, cut into a case, and a B2BUA's calls the default leg rules join, each cut into a case (see below) |
 | `calls-ended` | `collectors/calls-ended/` | a delayed cell collector: `delay_s` after each call it lists the runner's live calls (`GET /admin/calls` at the part's `admin`), while the lane runs its next cells (the lane not held), and answers the cell's `calls-ended` per call (`pass` where none of the cell's Call-IDs is listed, `fail` where one is, whatever the other cells' calls); it attaches what it read as `json` and where it read it as a `link` |
 
-## Plug-in and attachment kinds
-
-| Kind | Sample |
-|---|---|
-| case source | `cases.ts`, `capture/forked-reliable.ts` and `capture/*-call.ts` (flows no shape plays), a cut's output directory (`--sources`) |
-| capture ingest (identity extraction), cut (base generator), replay | `capture/*.pcapng`, `test/reference-replay.test.ts` |
-| capture ingest and cut of another stack's capture, a refusal of the cut | `capture/third-party/*.pcap`, `test/third-party-captures.test.ts` |
-| a case document held against the capture it was cut from, on the subset both sides of call facts state | `capture/*.pcapng`, `capture/third-party/*.pcap`, `test/call-facts-parity.test.ts` |
-| claim | `cases.ts`, `call-records` |
-| lane file | `lanes/simulated.toml`, `lanes/reference.toml` |
-| part schema and part file | `parts/<kind>.schema.json` and `targets/<kind>/reference.toml` for each of `b2bua-runner`, `runner-log`, `runner-pid`, `sip-capture`, `cdr-file` |
-| judge (module), over a collector's records and over exports | `judges/call-records` |
-| collector (batch scope, a judge, `[join] key`, `[params]`, a lock) | `collectors/call-records` |
-| collector (job scope, `on-failure`, a lock) | `collectors/capture` |
-| collector (batch scope, bracket, state directory, a lock) | `collectors/sut-log` |
-| collector (cell scope, delayed, the lane not held) | `collectors/calls-ended` |
-| operation (`inject`, `heal`, `probe`, `[params]`, a part it needs), a run's setup, a lane's `[operations]` | `operations/restart-worker` |
-| export | the plain replay binary's `call-records` |
-| attachment `log` | `sut-log` |
-| attachment `file` | `capture` |
-| attachment `table` | `capture` |
-| attachment `json` | `calls-ended` |
-| attachment `link` | `calls-ended` |
-| attachment `records` | the `call-records` judge |
-| attachment `diff` | the `call-records` judge |
-
-Not shown, since each would add a process start to every hosted batch: a
-pre-check (a collector with `at = "before"`, ADR-0060 appendix §3), a collector's `close` step
-(§5; `sut-log` empties its log in `collect` instead) and an executable judge (`run`, §6; the
-`call-records` judge is a module).
+`test/call-facts-parity.test.ts` holds each case document against the capture it was cut from,
+on the call facts both sides state.
 
 ## The reference capture
 
@@ -99,22 +71,14 @@ display names, on the callee side's From and To.
 
 ## The vendored captures
 
-`capture/third-party/` holds two captures copied unchanged from the sipnab repository, taken
-under the MIT License; `capture/third-party/PROVENANCE.md` states their source commit, paths and
-SHA-256, and the licence notice. `test/third-party-captures.test.ts` asserts the hashes, then
-ingests each, projecting the header the base's default leg rules read off a projection (`X-CID`;
-their `Call-ID` side is the leg's own), and cuts it under no Call-ID derivation and those rules
-(`@sip/corpus` `data/default.rules.json`, read by `cut/leg-rules.ts`). Neither is replayed.
+`capture/third-party/` holds two captures copied unchanged from another MIT-licensed repository;
+`capture/third-party/PROVENANCE.md` states their source, SHA-256 and licence notice.
+`test/third-party-captures.test.ts` asserts the hashes, then ingests and cuts each under the
+base's default leg rules (`@sip/corpus` `data/default.rules.json`). Neither is replayed.
 
-- `refer-transfer.pcap`: two calls through a record-routing proxy, which keeps the Call-ID
-  across its hop, each with a blind transfer (RFC 3515). The call whose transfer completes is
-  cut into a case keeping the REFER, the 202 and both NOTIFYs; the call the capture leaves open
-  is refused (`source-truncated-at-edge`, `source-call-incomplete`).
+- `refer-transfer.pcap`: two calls through a record-routing proxy, each with a blind transfer
+  (RFC 3515). The completed one is cut into a case; the one the capture leaves open is refused.
 - `asterisk-22-xcid.pcap`: three calls through a B2BUA that gives the callee's leg a Call-ID of
-  its own; a pre-dial handler in the source harness's dialplan names the caller's Call-ID in an
-  `X-CID` header on the callee's INVITE. The default rule set's one rule, a `header-pair` rule
-  reading the callee leg's `X-CID` against the caller leg's `Call-ID`, joins the two legs, so
-  each call is cut into a case holding both. Under a rule file stating no rule
-  (`--correlation-rules`), no call is cut: each callee leg is refused `missing-upstream-leg`,
-  each caller leg `source-dial-not-captured`. Stock Asterisk sets no `X-CID`; the rule is named
-  for the dialplans that set it.
+  its own and names the caller's in an `X-CID` header. The default rule set's one `header-pair`
+  rule joins the two legs; under a rule file stating no rule (`--correlation-rules`), no call
+  is cut.

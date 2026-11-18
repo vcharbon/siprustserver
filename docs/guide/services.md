@@ -138,31 +138,8 @@ a failover run before a service.
 
 [service-model.md](service-model.md) is the reference for a service author. It covers the
 events, the state machine, the actions, and timers with their snooze. It also covers a request
-held for a later turn, a request to a backend, and the data of a service.
-
-**Events.** A rule sees:
-
-- SIP requests and responses;
-- timers and transaction timeouts;
-- a CANCEL of an INVITE that the worker received;
-- the answers to its own HTTP requests;
-- the start and the end of each routing attempt, and the end of each leg.
-
-**Actions.** A rule can:
-
-- relay a message, or answer it;
-- hold a request and answer it later;
-- create or end a leg;
-- send a request or a provisional response on a leg;
-- start or cancel a timer;
-- send an HTTP request;
-- write its own data and change its state;
-- end the call.
-
-**Declared effects.** The engine compares what a rule did with its `transitions` and `effects`.
-It records a difference as a defect of the service. The same declarations produce a state
-diagram for each service. A test fails if a committed diagram is out of date. The diagrams of
-the services in this repository are in [docs/sm/](../sm/).
+held for a later turn, a request to a backend, the data of a service, and the state diagrams
+that the declared effects produce.
 
 ### Services in the repository
 

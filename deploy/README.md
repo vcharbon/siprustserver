@@ -190,24 +190,19 @@ provides:
   - the routers run BFD on the proxy nodes' sessions with a detection time inside the guard's
     bound (multiplier × receive interval, 900 ms by default) and withdraw a node's routes when its
     BFD goes down;
-  - the routers update their forwarding tables within the bound's margin once BFD reads a session
-    down: every detection path is checked at render against `routeGuard.withdrawWithinMs` with
-    the BFD detection included but not the forwarding update, and the slowest path (a proxy cut
-    from every worker: isolation 2 s + two readings 0.2 s + BFD 0.9 s = 3.1 s at the defaults)
-    leaves 0.3 s under the 3.4 s bound and 0.4 s under the 3.5 s INVITE retransmission it
-    protects; the crash path (dead bound 1 s + BFD 0.9 s) leaves 1.5 s;
+  - the routers update their forwarding tables within the margin the render check leaves
+    (`routeGuard.withdrawWithinMs` counts the BFD detection, not the forwarding update; at the
+    defaults the slowest path leaves 0.3 s, see the failure timings of
+    [proxy-integration.md](../docs/guide/proxy-integration.md#failure-timings));
   - the proxy nodes peer with those routers for MetalLB alone: a CNI's BGP to the same routers,
     or routes the nodes learn over those sessions (the routes to the workers and the callers
     among them), would be cut with it;
   - nothing else on a proxy node uses an nftables table named `route_guard` in the `inet` family.
-- **Reading the route guard.** `route_guard_withdrawn` is 1 on a node held out of the routers'
-  ECMP, and the guard container is then not Ready, nor is the pod; `route_guard_withdrawals_total{cause}` counts each withdrawal (`unfit`: the proxy named
-  why, `expired`: no fit answer within `deadMs`, `start`) and `route_guard_restores_total` each
-  return. The guard logs `node withdrawn: BFD and BGP to the routers dropped` with the cause and
-  the proxy's reason, and `node let out: BFD and BGP to the routers pass again`. On the node,
-  `nft list table inet route_guard` shows the routers let out and the drop counters, and
-  `curl -s 127.0.0.1:9090/fitz` the proxy's own reading. A node that ran a guard and runs no
-  proxy keeps the table withdrawing until a proxy pod starts there or
+- **Reading the route guard.** Its metrics are in
+  [proxy-integration.md](../docs/guide/proxy-integration.md#what-to-monitor) and ADR-0056's
+  appendix. On the node, `nft list table inet route_guard` shows the routers let out and the
+  drop counters, and `curl -s 127.0.0.1:9090/fitz` the proxy's own reading. A node that ran a
+  guard and runs no proxy keeps the table withdrawing until a proxy pod starts there or
   `nft delete table inet route_guard` removes it.
 
 ## HA acceptance

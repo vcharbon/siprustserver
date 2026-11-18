@@ -32,13 +32,18 @@ own path (`SIPRIG_WORKSPACE`): `workspace` checks its `rig.toml` (`check --confi
 prepares it (`init`), checks the whole of it (`check`) and writes the store's and the site's
 environment to `/run/siprig/workspace.env`, `postgres` runs the workspace's own cluster in
 `pgdata/` on a private socket, `migrate` brings the store to the image's schema, `site`
-serves. On a docker network other than the host's (`SIPRIG_NETWORK`), a site bound to every
-interface whose URL `rig.toml` does not state is named by the container's address there
-(`SIPRIG_SITE_URL`), which the host reaches; the machine's name would be the container's id.
-`s6-notifyoncheck` polls `image/site-check` each second until the site first answers,
-reporting nothing to s6, so the start never waits on the site. A site that exits before it
-ever answered stops the container with status 3 (`image/site-finish`), its line naming the
-site's log, where s6 would otherwise restart it forever; once it has answered, s6 restarts
+serves.
+
+The site binds `SIPRIG_SITE_BIND` (default `127.0.0.1`). Every link the tooling prints is
+built under `SIPRIG_SITE_URL` where it is stated, else under the bound address and port; a
+wildcard bind (`0.0.0.0`, `::`) is named by the machine's `hostname -f`
+(`ts/workspace/src/public-url.ts`). On a docker network other than the host's
+(`SIPRIG_NETWORK`), a wildcard-bound site whose URL nothing states is named by the
+container's address there, which the host reaches; the machine's name would be the
+container's id.
+
+The start never waits on the site. A site that exits before it ever answered stops the
+container with status 3, its line naming the site's log; once it has answered, s6 restarts
 it. Each service runs a base command by name:
 
 | Command | Contract | The base's |
@@ -84,16 +89,11 @@ It then builds:
   `render-wrapper <wrapper> <image:tag>` (which a pack's own tests run too): at
   `/opt/siprig/image/wrapper` in the image, and beside the tarball `kit tar` writes.
 
-The wrapper (`<wrapper> --help`) loads the image, makes a workspace (`init`), starts one
-container per workspace (`up`, as the caller's uid on the host's network, or on the docker
-network `SIPRIG_NETWORK` names, such as an internal one that holds a run off every other
-machine, where `--lab` and `--compose` are refused; refused while any container labelled
-`org.siprig.workspace=<the workspace's real path>` runs; the container's name and label
-follow that real path, so a link to the workspace names the same one) and waits for the
-site, printing the tail of `logs/site/current` where the site stopped the container, and
-stops, restarts, logs, `exec`s and upgrades the postgres major (`upgrade-pg`). Every
-container it starts gets the variables of the docker env file `SIPRIG_ENV_FILE` names, such
-as a proxy's.
+The wrapper (`<wrapper> --help` lists its verbs) loads the image, makes a workspace
+(`init`), and starts one container per workspace (`up`), as the caller's uid, on the host's
+network or on the docker network `SIPRIG_NETWORK` names. An `--internal` network holds a
+run off every other machine; `--lab` and `--compose` are refused there. Every container it
+starts gets the variables of the docker env file `SIPRIG_ENV_FILE` names, such as a proxy's.
 
 ## Proof
 

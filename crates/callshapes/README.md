@@ -1,21 +1,15 @@
-# callshapes — composable, cross-platform call shapes
+# callshapes: composable call shapes
 
-A **call shape** is a SIP call flow *composed* from an algebra, not hand-written:
+A **call shape** is a SIP call flow composed from an algebra, not hand-written:
 
 ```
 ShapePlan = Establishment × Stage[] × Teardown          (routed through a RouteBinder)
 ```
 
-Each shape compiles to a `scenario_harness::actor::ActorCall` at build time and
-implements `ActorScenario`, so the same definition drives the loadgen fleet, the
-in-process fake-net tests, and the functional leak gate — unchanged.
-
-This crate is consumed **upstream** (siprustserver's loadgen + e2e model) and by
-**external platforms** that do not use siprustserver's `X-Api-Call` routing — a
-platform that routes by *dialed number* is the worked example throughout.
-Nothing platform-specific lives here: a downstream platform picks up the crate on
-its next submodule pin and writes one small adapter (a `RouteBinder`) plus a
-~30-LOC bin.
+Each shape compiles to a `scenario_harness::actor::ActorCall` and implements
+`ActorScenario`, so one definition drives the loadgen fleet, the in-process
+fake-net tests and the functional leak gate. Nothing platform-specific lives
+here: a platform that does not route by `X-Api-Call` writes one `RouteBinder`.
 
 ---
 
@@ -23,32 +17,31 @@ its next submodule pin and writes one small adapter (a `RouteBinder`) plus a
 
 Compose a shape by filling three slots (`callshapes::plan`):
 
-| Slot | Type | Values (as landed) |
+| Slot | Type | Values |
 |---|---|---|
-| **Establishment** | `Establishment` | `Transparent` · `Reliable` (100rel) · `RerouteOnReject{reject, winner_reliable}` (E4 — bob rejects with **no 18x**, SUT fails over to `bob2`) · `RerouteOnNoAnswer{no_answer_ms, winner_reliable}` (E6/047 — bob rings then **never answers**; the SUT's own no-answer timer CANCELs it (487) and fails over to `bob2`; same `FailoverOnReject` binder intent, so a downstream `RouteBinder` maps it unchanged — `no_answer_ms` is the client-armed SUT ring-timer knob a platform whose SUT owns its own timer ignores) · `Forked{tags, winner, reliable, loser_late_200}` (E3 true forking) · `RejectTerminal{code}` · `AbandonAfterRinging` · `CancelAnswerCrossing` (E5 branch race) |
-| **Stage[]** | `Vec<Stage>` | `Stage::Script(...)`: `Reinvite{n}` (S1, N serialized) · `UpdatePostConnect` (S2) · `UpdateEarly` (C5, early dialog) · `KeepaliveOnce` · `KeepaliveLoop`. `Stage::Transfer(...)`: `Blind{refer_key}` (T1 REFER) · `BlindDeclined{refer_key, code}` |
-| **Teardown** | `Teardown` | `CallerBye{after, feed}` · `CrossingBye{after}` (S3 both ends hang up at once) · `None` (terminals only) |
+| **Establishment** | `Establishment` | `Transparent` · `Reliable` (100rel) · `RerouteOnReject{reject, winner_reliable}` (bob rejects with no 18x, the SUT fails over to `bob2`) · `RerouteOnNoAnswer{no_answer_ms, winner_reliable}` (bob rings and never answers; the SUT's no-answer timer CANCELs it and fails over to `bob2`) · `Forked{tags, winner, reliable, loser_late_200}` · `RejectTerminal{code}` · `AbandonAfterRinging` · `CancelAnswerCrossing` |
+| **Stage[]** | `Vec<Stage>` | `Stage::Script(...)`: `Reinvite{n}` · `UpdatePostConnect` · `UpdateEarly` (early dialog) · `KeepaliveOnce` · `KeepaliveLoop`. `Stage::Transfer(...)`: `Blind{refer_key}` · `BlindDeclined{refer_key, code}` |
+| **Teardown** | `Teardown` | `CallerBye{after, feed}` · `CrossingBye{after}` (both ends hang up at once) · `None` (terminals only) |
 
-Each stage yields the *current dialog* the next stage runs on, so one `Reinvite`
-script runs identically on the initial dialog, the post-reroute dialog, or the
-post-REFER dialog — depending only on where it sits in the chain.
+Each stage yields the current dialog the next stage runs on, so one `Reinvite`
+script runs the same on the initial, the post-reroute or the post-REFER dialog.
 
 The shipped catalog (`callshapes::shapes`) is a set of constructors, each taking
-the platform binder:
+the binder:
 
 ```rust
 use callshapes::shapes;
 let binder = shapes::default_binder();          // Arc<dyn RouteBinder>
-let plan   = shapes::reinvite_n(binder, "reinvite10", 10);   // Reliable? no — Transparent + Reinvite{10}
+let plan   = shapes::reinvite_n(binder, "reinvite10", 10);
 ```
 
-To compose a **new** cell directly (the `ShapePlan` fields are public):
+A new cell is a `ShapePlan` literal (its fields are public):
 
 ```rust
 use callshapes::plan::{ByeFeed, DwellKnob, Establishment, Script, ShapePlan, Stage, Teardown};
 
 let plan = ShapePlan {
-    id: "reliable+reinvite",                    // ScenarioId = &'static str (report/metrics label)
+    id: "reliable+reinvite",                    // the report and metrics label
     binder: shapes::default_binder(),
     establish: Establishment::Reliable,
     stages: vec![Stage::Script(Script::Reinvite { n: 1 })],
@@ -56,35 +49,26 @@ let plan = ShapePlan {
     ringing_gate: true,
     stamp_connected: true,
 };
-plan.validate().unwrap();                        // structural check (env-independent)
+plan.validate().unwrap();
 ```
 
-`validate()` rejects miscomposed chains (a stage after a terminal establishment,
-a non-terminal with no teardown, `Reinvite{n: 0}`, `UpdateEarly` on a
-non-`Reliable` establishment, `Forked` with < 2 tags / a bad winner).
-
-### The declared compatibility matrix
+`validate()` rejects miscomposed chains: a stage after a terminal
+establishment, a non-terminal with no teardown, `Reinvite{n: 0}`, `UpdateEarly`
+on a non-`Reliable` establishment, `Forked` with fewer than 2 tags or a bad
+winner.
 
 `e2e_model::matrix` declares the establishment × script axes as data and
-generates the compatibility-gated cross-product into the registry with stable
-ids (`"<establishment>+<script>"`, e.g. `forked+reinvite`, `reroute+update`) —
-so the catalog is *generated*, not hand-listed. Add an axis point (an `Est` or
-`Scr`) or a `compatible()` rule there and every legal cell appears.
+generates the compatible cross-product into the registry with stable ids
+(`"<establishment>+<script>"`, e.g. `forked+reinvite`).
 
 ---
 
-## 2. The abstract routing seam (`RouteBinder`)
+## 2. The routing seam (`RouteBinder`)
 
-A shape never spells wire routing syntax. A stage declares a `RouteIntent`:
-
-```rust
-pub enum RouteIntent<'a> {
-    Direct { target: &'static str },              // deliver to one callee ROLE ("bob")
-    FailoverOnReject { targets: &'a [&'static str] }, // try in order, advance on a reject
-}
-```
-
-and a per-platform `RouteBinder` turns it into a concrete INVITE:
+A shape never spells wire routing syntax. A stage declares a `RouteIntent`
+(`Direct { target }`: one callee role; `FailoverOnReject { targets }`: try in
+order, advance on a reject), and a per-platform `RouteBinder` turns it into a
+concrete INVITE:
 
 ```rust
 pub trait RouteBinder: Send + Sync {
@@ -93,95 +77,24 @@ pub trait RouteBinder: Send + Sync {
 }
 ```
 
-Upstream ships `EgressBinder` (the historic `EgressPolicy` / `X-Api-Call` seam;
-`invite_plan` just delegates to `env.invite_plan(intent.targets())`).
-
-### Worked example — a dial-plan binder
-
-A platform that routes by *dialed number* (an R-URI user mapped from its own
-number plan), not `X-Api-Call`, implements the trait by building an
-`InvitePlan` with its own R-URI (the `InvitePlan` fields — `via`,
-`from`, `to`, `ruri`, `headers`, `rewrite` — are public):
-
-```rust
-struct DialPlanBinder { plan: NumberPlan }        // loaded from the platform's plan
-
-impl RouteBinder for DialPlanBinder {
-    fn invite_plan(&self, env: &CallEnv<'_>, intent: RouteIntent<'_>) -> InvitePlan {
-        // Map the intent's FIRST target role → the dialed number whose service
-        // logic realizes that behaviour (a plain number for Direct; a number
-        // whose downstream reroutes for FailoverOnReject).
-        let number = self.plan.number_for(intent.targets()[0]);
-        InvitePlan {
-            via: env.via,                          // still routes THROUGH the SUT ingress
-            ruri: Some(format!("sip:{number}@{}", env.via)),
-            from: None, to: None, headers: vec![],
-            rewrite: Default::default(),           // EgressRewrite::default() = no-op
-        }
-    }
-}
-```
-
-The same shapes now run on that platform with zero changes — only the binder differs.
-Per-run values (numbers, header names, `refer_key`) come from the case JSON /
-`ScenarioInputs`.
+The shipped `EgressBinder` delegates to `env.invite_plan(intent.targets())`
+(the `EgressPolicy` / `X-Api-Call` seam). A platform that routes by dialed
+number returns an `InvitePlan` (public fields: `via`, `from`, `to`, `ruri`,
+`headers`, `rewrite`) whose R-URI is the number its plan maps the intent's
+first target role to, still `via` the SUT ingress. The shapes then run there
+unchanged. Per-run values (numbers, header names, `refer_key`) come from the
+case JSON or `ScenarioInputs`.
 
 ---
 
-## 3. Registering shapes — the ~30-LOC downstream bin
+## 3. Registering shapes
 
 The load application (`loadgen::app`) runs behind the `Product` seam: a product
-names its bin, adds its own flags, sets the loadgen flag defaults it runs with,
-and builds the `ShapeRegistry` its flags select once the endpoint layout is
-resolved. A product's load bin is one line; the shipped bin
-(`crates/loadgen/src/bin/loadgen.rs`) is:
-
-```rust
-fn main() -> std::io::Result<()> {
-    loadgen::app::main(loadgen::app::Shipped)
-}
-```
-
-A product's registry starts from `ShapeRegistry::empty()` (or `with_defaults()`)
-and registers its composed shapes, one by one or as a `ShapeSource` (a compiled
-table, a generator, a directory of authored documents; a source building ids
-and legs from runtime data interns them with `e2e_model::intern` /
-`intern_legs`). `ShapeDescriptor` carries the load metadata:
-
-```rust
-use e2e_model::{ShapeRegistry, ShapeDescriptor};
-use std::sync::Arc;
-
-fn platform_registry() -> ShapeRegistry {
-    let binder = || Arc::new(DialPlanBinder::load("config/numbers.json")) as Arc<dyn RouteBinder>;
-    let mut reg = ShapeRegistry::empty();
-    reg.register(
-        ShapeDescriptor::new("platform_reroute+reinvite")
-            .needs_bob2()                                        // topology the driver must bind
-            .default_weight(1.0)                                 // share of the default mix
-            .load_shared(Arc::new(platform_reroute_reinvite(binder()))), // Arc<dyn ActorScenario>
-    );
-    // …register the rest…
-    reg
-}
-// struct Platform;
-// impl loadgen::app::Product for Platform {
-//     type Flags = loadgen::app::NoFlags;
-//     fn name(&self) -> &'static str { "platform-loadgen" }
-//     fn about(&self) -> &'static str { "platform load generator" }
-//     fn registry(&self, _: &NoFlags, _: &RunLayout<'_>) -> Result<ShapeRegistry, String> {
-//         Ok(platform_registry())
-//     }
-// }
-// fn main() -> std::io::Result<()> { loadgen::app::main(Platform) }
-```
-
-Descriptor knobs: `.anchors(&[Anchor])` (sampling), `.needs_charlie()` /
-`.needs_bob2()` (extra callee legs the driver binds), `.default_weight(f64)` /
-`.abnormal_end_weight(f64)` (mix membership), `.emergency()`, `.load_shared(body)` for
-a stateless body or `.load_actor_with(|inputs| …)` when the body needs
-`ScenarioInputs` (e.g. a `refer_key`). One id space — a duplicate id panics at
-registration.
+names its bin, adds its flags, and builds the `ShapeRegistry` its flags select.
+The shipped bin is `loadgen::app::main(loadgen::app::Shipped)`. A product's
+registry starts from `ShapeRegistry::empty()` or `with_defaults()` and
+registers its shapes as `ShapeDescriptor`s; the descriptor knobs are listed in
+[the loadgen README](../loadgen/README.md#how-to-add-a-scenario).
 
 ---
 
@@ -189,86 +102,57 @@ registration.
 
 1. **Add the variant** to the enum in `callshapes::plan` (`Establishment`,
    `Script`, or `Transfer`).
-2. **Compile it** — extend the matching arm in `ShapePlan::compile_establishment`
-   / `compile_script` / `compile_transfer`: push the caller goals + callee
-   `ActorSpec`(s), set the barrier `gate`, and (for terminals) the `Expect`.
-   Reactive answering is NOT scripted — the callee `Disposition` and the reactor
+2. **Compile it**: extend the matching arm in `ShapePlan::compile_establishment`
+   / `compile_script` / `compile_transfer`: push the caller goals and callee
+   `ActorSpec`s, set the barrier `gate`, and for terminals the `Expect`.
+   Reactive answering is not scripted: the callee `Disposition` and the reactor
    in `scenario_harness::actor` own it; add a `Disposition` variant there if the
-   callee needs new answer behaviour (as C1 `ForkingRing`, C5
-   `ReliableAnswerEarlyUpdate` did).
-3. **Validate it** — add any structural precondition to `ShapePlan::validate`
-   (e.g. `UpdateEarly` requires `Establishment::Reliable`).
-4. **Barrier/phase names are a fixed bounded vocabulary** (`established`,
-   `reinvited`, `updated`, `merged`, …) — they key `StepError::who` and the
+   callee needs a new answer behaviour.
+3. **Validate it**: add any structural precondition to `ShapePlan::validate`.
+4. **Barrier and phase names are a fixed vocabulary** (`established`,
+   `reinvited`, `updated`, `merged`, …): they key `StepError::who` and the
    downstream contract; never free-form.
 5. **Test it** SUT-less first (a `scenario_harness::actor` machinery test), then
    through the SUT on the fake net.
 
 ---
 
-## 5. The fake-net paused-clock test pattern
+## 5. The fake-net paused-clock tests
 
-New shape coverage grows in `crates/loadgen/tests/it/fake_net.rs`: the REAL driver +
-mux + `DropModel` loss engine run over one `SimulatedSignalingNetwork` shared with
-an in-process `B2buaCore`, under `#[tokio::test(start_paused = true)]`. Every
-timer (governor, recv, retransmit ladders, the SUT's 32 s reap) rides virtual
-time, so loss soaks that need 32 s+ of SIP traffic run deterministically (in the
-slow lane, like every `loadgen` test).
-
-```rust
-#[tokio::test(start_paused = true)]
-async fn my_shape() {
-    let (h, b2bua, core, transport) = setup_fake(7200).await;   // shared sim net + SUT
-    let reporter = Arc::new(Reporter::new(/* … */));
-    let driver = Driver::new(cfg(b2bua.addr, 20.0, 2, 8, seed), vec![mix("my_shape", 1.0)], reporter.clone(), transport);
-    driver.run().await;
-    assert_eq!(reporter.count("my_shape", &ResultClass::Ok), reporter.total_calls());
-    // Terminate + assert release (CLAUDE.md rule): drain, advance past the 32 s
-    // dead-call timer, then the strict oracle.
-    h.advance(Duration::from_secs(40)).await;
-    b2bua.assert_fully_reaped();
-}
-```
-
-Loss soaks use the `loss_soak()` helper (7 % drop + auto-retransmit → the
-graceful-degradation gates: recovery happens, `RfcAuditFail == 0`, every NOK is a
-bounded `Timeout`, fully reaped). Deterministic `TargetedDrop` tests drop the nth
-distinct **request** of a method (`permanent: false` proves recovery,
-`permanent: true` bounded give-up). **Gotcha:** an ×N shape carries ~N× the
-datagrams, so the governor's *delivered-call count* varies under concurrent
-scheduling — keep `total >= …` floors conservative and don't assert retransmit
-*dominance* (only `ok > 0`).
-
-Read `docs/testing/test-clock.md` before writing any timed test.
+New shape coverage grows in `crates/loadgen/tests/it/fake_net.rs`: the real
+driver, mux and `DropModel` loss engine over one `SimulatedSignalingNetwork`
+shared with an in-process `B2buaCore`, under `start_paused = true`
+(`setup_fake`, `loss_soak`). Read `docs/testing/test-clock.md` before writing
+a timed test. An ×N shape carries about N× the datagrams, so the delivered-call
+count varies under concurrent scheduling: keep `total >= …` floors
+conservative.
 
 ---
 
-## 6. SUT-reachability — do NOT create dangling-fork load cells
+## 6. SUT-reachability: do NOT create dangling-fork load cells
 
-Some behaviours are **peer-to-peer only** and CANNOT be a through-SUT load cell,
+Some behaviours are **peer-to-peer only** and cannot be a through-SUT load cell,
 because a dialog-terminating B2BUA absorbs the relevant message:
 
 | Behaviour | Why not through-SUT | Coverage |
 |---|---|---|
-| `forked_loser_late_200` | the SUT forwards only the FIRST b-leg 2xx and absorbs the loser's late 200 → the caller's ACK+BYE-the-loser path is unreachable | SUT-less machinery tests (C1a/C1b) |
-| re-INVITE glare (S5) | needs BOTH ends to re-INVITE at once; the SUT owns one leg | SUT-less machinery test (C4/S5) |
-| UPDATE-vs-re-INVITE collision (S6) | same | SUT-less machinery test (C4/S6) |
+| `forked_loser_late_200` | the SUT forwards only the first b-leg 2xx and absorbs the loser's late 200, so the caller's ACK and BYE of the loser are unreachable | SUT-less machinery tests |
+| re-INVITE glare | needs both ends to re-INVITE at once; the SUT owns one leg | SUT-less machinery test |
+| UPDATE-vs-re-INVITE collision | same | SUT-less machinery test |
 
-These have **no** `ShapeRegistry` load cell and no `TargetedDrop`. Everything else
-(reliable, forked, reroute, CANCEL×200 crossing, early UPDATE, crossing BYE, the
-generated cross-product) is dialog-terminating-B2BUA-reachable and IS a load cell.
-When you add a new behaviour, decide this first: if the SUT would swallow the
-distinguishing message, keep it SUT-less and do **not** register a load cell for
-it — a dangling fork/leg on the callee times the call out (a false NOK), not a
-real finding.
+These have **no** `ShapeRegistry` load cell and no `TargetedDrop`. Everything
+else (reliable, forked, reroute, CANCEL×200 crossing, early UPDATE, crossing
+BYE, the generated cross-product) is reachable through a dialog-terminating
+B2BUA and is a load cell. When you add a behaviour, decide this first: if the
+SUT would swallow the distinguishing message, keep it SUT-less. A dangling fork
+or leg on the callee times the call out, a false NOK.
 
 ---
 
 ## Pointers
 
-- Algebra + compile fold: `src/plan.rs` · catalog: `src/shapes.rs` · routing
+- Algebra and compile fold: `src/plan.rs` · catalog: `src/shapes.rs` · routing
   seam: `src/binder.rs`.
-- Matrix generation + catalog weights: `e2e_model::matrix`, `e2e_model::registry`.
-- Reactor / dispositions / barriers: `scenario_harness::actor`.
-- Program spec + phase findings: `docs/todos/callshapes-program.md`.
-- Load bin quick start + how it relates to the test suites: `crates/loadgen/README.md`.
+- Matrix generation and catalog weights: `e2e_model::matrix`, `e2e_model::registry`.
+- Reactor, dispositions, barriers: `scenario_harness::actor`.
+- The load binary and how it relates to the test suites: `crates/loadgen/README.md`.

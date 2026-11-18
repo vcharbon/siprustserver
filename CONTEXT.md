@@ -73,8 +73,8 @@ Full definitions: [docs/glossary/ha-replication.md](docs/glossary/ha-replication
 - **Rider**: what the router sends behind a call's latest write outside a turn's commit (the 100, a refusal); it reports no mark.
 - **Silent stream**: a replication stream silent for the 15 s idle bound; the puller re-pulls from its watermark. ADR-0045.
 - **Settled membership**: the membership view readiness reads, informer synced or the bootstrap hard timer passed. ADR-0045.
-- **Failure domain** (informally **zone**): the blast radius a primary and its backup would be split across, one k8s topology key. ADR-0015, not implemented.
-- **Distinct-zone backup**: a call's backup in another failure domain, chosen by the proxy's `w_bak` selection alone. ADR-0015, not implemented: today's `w_bak` ignores zones.
+- **Failure domain** (informally **zone**): the blast radius a primary and its backup would be split across. ADR-0015, not implemented.
+- **Distinct-zone backup**: a call's backup in another failure domain. ADR-0015, not implemented.
 - **Unwired node**: a b2bua with no replication store (`B2buaDeps.replication = None`), building no replication part.
 - **Reclaim stream** vs **Backup stream**: the two pull flows; N pulls its own partition back, or a partition it backs up. ADR-0014.
 - **Bootstrap phase**: the bulk store-scan prefix either stream runs on a cold connect, before the changelog tail.
@@ -272,6 +272,9 @@ Full definitions: [docs/glossary/rig.md](docs/glossary/rig.md).
 - **Test bed**: one workspace of the rig and the lab it drives. It builds nothing.
 - **Image kit**: `tooling/siprig/kit`, which builds the base image `siprig` and a pack's image from it and its `pack.toml`. Avoid: tools image.
 - **Rig path**: the pack then the workspace, where manifests are found. Not the HA tooling's search path.
+- **Workspace**: the directory (`SIPRIG_WORKSPACE`) of the rig's roots and `rig.toml`.
+- **Prebuilt install**: Rust binaries from `SIPRIG_BIN_DIR`, never cargo.
+- **Not available in this install**: a feature's words when its host tool is missing.
 - **Scope**: a job, a batch or a cell. Avoid: lane scope, run scope.
 - **Job**: one launched replay or campaign. Its scope is the widest.
 - **Batch**: the cells a lane runs between a stand and a drain; a `batches` row under its job, or its sweep where the replay is no job.
@@ -281,15 +284,15 @@ Full definitions: [docs/glossary/rig.md](docs/glossary/rig.md).
 - **Judge**: a plug-in that answers for the cells of a scope from their claims and their records.
 - **Operation**: a plug-in that changes the lab, with `inject`, `heal` and optionally `probe`. An incident of the HA tooling follows the same rules in another format.
 - **Setup**: the operations a named campaign injects after provisioning and heals in reverse when its job ends, however it ends.
-- **Job event**: one phase of an operation on a job (`inject`, `injected`, `heal`, `healed`, `recovered`, `failed`, `lab-left-changed`), on the runner's clock and the wall clock; a `job_events` row.
+- **Job event**: one phase of an operation on a job (`inject`, `heal`, `recovered`, …), on the runner's and the wall clock; a `job_events` row.
 - **Verification**: one named line of a cell, a batch or a job, with a source and an answer. Avoid: check (the RFC audit's), finding.
 - **Answer**: `pass`, `fail`, `not checkable` or `pending`.
 - **Not requested**: a verification the collection level or the lane did not ask for. It is no line.
 - **Final status**: what a cell's verifications come to: `pass`, `fail`, `fail, still verifying`, `ok so far`, `unverified`.
-- **Attachment**: a file attached to a job, a batch or a cell, with a kind, listed in its holder's `attachments.jsonl`; an `attachments` row. Avoid: evidence (ADR-0055's).
+- **Attachment**: a file attached to a job, a batch or a cell, with a kind, in its holder's `attachments.jsonl`; an `attachments` row. Avoid: evidence (ADR-0055's).
 - **Collection level**: a named set of collector defaults a job is launched with.
 - **Required collector**: one no collection level and no lane switches off.
-- **Pre-check**: a job- or batch-scope collector `at = "before"`; a `fail` it answers, or a `not checkable` of a `required` or asked-for one, refuses its scope before any call.
+- **Pre-check**: a job- or batch-scope collector `at = "before"`; its `fail` refuses its scope before any call.
 - **On-demand run**: a collector asked by the site or the CLI over named cells after their job ended; its attachments land, its lines never merge.
 - **Record**: one object a collector returned or a cell exported, joined to a cell by a key or assigned to it.
 - **Unclaimed record**, **ambiguous record**: one whose key matches no cell, or several.
@@ -297,7 +300,7 @@ Full definitions: [docs/glossary/rig.md](docs/glossary/rig.md).
 - **Key**: a named value a cell carries, that a record is joined on.
 - **Cell description**: `cell.v1`, what a collector or a judge reads of each cell.
 - **Part**: a named property of a lane beyond its SIP target, a file several lanes may name, with a schema a pack or a workspace declares.
-- **Registration seam**: what a product registers into the replay library: its backend double, its simulated system under test, its in-process verifications, its exports.
+- **Registration seam**: what a product registers into the replay library: its backend double, simulated SUT, in-process verifications and exports.
 - **Case source**: a module that yields compiled cells.
 - **Reference pack**: the pack this repository ships to exercise every seam. It has no test value.
 - **Lab left changed**: the mark of a job where a `close` or a `heal` failed twice.

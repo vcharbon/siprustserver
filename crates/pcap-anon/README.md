@@ -35,8 +35,7 @@ sipflow --to-pcap capture.anon.flows.json --out capture.anon.pcap
   the shape (`9` for a digit, `a`/`A` for a letter), never the value.
 - `auto` writes `<capture>.anon.flows.json`, `source.txt` and `auto.json`.
   `source.txt` is the callflow as text, for a reader who has no capture
-  viewer. Its first line is the format line `pcap2test source v1`, the
-  format's name, kept for compatibility.
+  viewer. Its first line is the format line `pcap2test source v1`.
   `auto.json` gives the counts of the run, or the error. It never contains
   the seed. With `--as-is`, `auto` takes the document as it is and
   anonymises nothing.
@@ -73,6 +72,20 @@ sipflow --to-pcap capture.anon.flows.json --out capture.anon.pcap
   relay and eCall control, plus the types that the profile states. It
   redacts any other part whole to `x` and keeps its framing and line
   lengths.
+- **Base64 text.** A base64 run (one alphabet, eight characters or more, a
+  letter in it, not hex digits alone) whose decoding is UTF-8 text with no
+  control character is that text standing in clear at the same place. Every
+  pass reads it decoded, and what a pass writes into it is re-encoded in the
+  run's alphabet and padding. Text of 20 bytes or more, or holding a phone
+  number's digits, adds keys of its own; shorter text only gets the keys the
+  rest of the capture gives. A text that is itself base64 is read one level
+  deep.
+- **User-to-User (RFC 7433).** An `encoding=hex` payload is decoded and its
+  ASCII digit runs are rewritten as dial forms, at the same width. An
+  `ascii`/`text` payload is its own bytes, and a `base64` one that decodes to
+  text is read as base64 text. Hex that decodes to no text is redacted to
+  zeros (`uui_redacted`). Any other encoding is left as found and counted
+  (`uui_skipped`).
 
 ## What it keeps
 
@@ -209,13 +222,3 @@ These are documented and not handled:
 Two different numbers can get the same fake, and a short fake can appear
 inside a long one. The run counts these cases and reports them. It does not
 fail on them.
-
-## Tests
-
-`cargo nextest run -p pcap-anon`. The unit tests and `tests/it` run on the
-invented plan, profile and reading in `tests/data/`. The tests in
-`tests/it/samples.rs` extract each capture of `ts/reference-pack/capture/`,
-anonymise it with `--verify`, anonymise it again under the kept seed and
-compare the two outputs byte for byte. Their profile
-(`tests/data/samples.profile.json`) states the B2BUA address of each capture
-as the SUT.
