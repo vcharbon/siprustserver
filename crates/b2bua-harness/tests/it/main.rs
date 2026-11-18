@@ -222,6 +222,7 @@ mod repeated_2xx_before_caller_ack;
 mod repeated_uri_parameter;
 mod required_100rel_withheld;
 mod reroute_limiter_holds;
+mod reroute_realign_copy;
 mod reroute_rejection_tag;
 mod response_contact_scope;
 mod response_destination;
