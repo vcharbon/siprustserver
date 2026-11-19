@@ -54,7 +54,7 @@ pub struct ProxyConfig {
     /// `/readyz`, `/fitz`.
     pub metrics: SocketAddr,
     /// The debug server's loopback address (`PROXY_DEBUG`):
-    /// `/debug/flamegraph`.
+    /// `/debug/flamegraph`, `501` without the `flamegraph` feature.
     pub debug: SocketAddr,
     pub queue_max: usize,
     /// What the process reads the wire under: the defaults, with the exemptions

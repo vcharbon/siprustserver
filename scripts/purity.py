@@ -31,7 +31,10 @@ Checks:
 
   closure    each binary's `cargo tree -p <binary> -e normal,features`, its
              resolution when built by a cargo command of its own: a test
-             feature fails, and so does a first-party crate without a tier
+             feature fails, and so does a first-party crate without a tier;
+             each crate's resolved feature set is read too, so a test feature
+             a `[features]` table forwards, which the tree prints no node for,
+             fails as well
   images     every `cargo build` of the listed Dockerfiles: a command that
              builds a binary with another package, the whole workspace or a
              feature flag fails, and so does a binary no command builds
@@ -187,6 +190,19 @@ def tree(root, *args):
     return rows
 
 
+def resolved_features(root, binary):
+    """`(crate, feature)` for every feature `binary`'s closure resolves on,
+    whatever turned it on."""
+    pairs = set()
+    for line in cargo(root, "tree", "-p", binary, "-e", "normal", "--prefix", "none",
+                      "-f", "{p}|{f}").splitlines():
+        package, sep, features = line.removesuffix(" (*)").partition("|")
+        if sep:
+            name = package.split(" ", 1)[0]
+            pairs.update((name, f) for f in features.split(",") if f)
+    return pairs
+
+
 def via(chain):
     """A tree path as its crate names and test features; another feature node
     is `None`."""
@@ -200,13 +216,14 @@ def closure(ws, config):
         if binary not in ws.local_names:
             bad.append(f"{config.path} names binary {binary}, which is no first-party crate")
             continue
-        chain = []
+        chain, reached = [], set()
         for depth, name, _, local, feature in tree(ws.root, "-p", binary, "-e",
                                                    "normal,features"):
             test = feature is not None and config.is_test_feature(name, feature)
             del chain[depth:]
             chain.append(name if feature is None else f"{name}/{feature}" if test else None)
             if test:
+                reached.add((name, feature))
                 bad.append(f"{binary} reaches {name} feature \"{feature}\" "
                            f"(via {via(chain[:-1])})")
             elif feature is None and local and ws.tiers.get(name) is None:
@@ -214,6 +231,10 @@ def closure(ws, config):
                 if name not in config.untiered:
                     bad.append(f"{binary} links {name}, which declares no tier "
                                f"(via {via(chain[:-1]) or binary})")
+        for name, feature in sorted(resolved_features(ws.root, binary) - reached):
+            if config.is_test_feature(name, feature):
+                bad.append(f"{binary} reaches {name} feature \"{feature}\" "
+                           "(forwarded by a [features] table)")
     for name in sorted(config.untiered - untiered):
         bad.append(f"{config.path} lists {name} as untiered, which no binary links or it "
                    "declares a tier: remove the entry")

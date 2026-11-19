@@ -50,6 +50,15 @@ class Closure(Case):
         self.assertEqual(rc, 1)
         self.assertIn('bin reaches clock feature "testkit" (via bin > core)', out)
 
+    def test_a_test_feature_the_binary_s_own_features_forward_fails(self):
+        ws = self.workspace(config(), [
+            ("clock", "shell", (), {"testkit": []}),
+            ("bin", "shell", ("clock",), {"default": ["clock/testkit"]})])
+        rc, out = ws.run(SCRIPT)
+        self.assertEqual(rc, 1)
+        self.assertIn('bin reaches clock feature "testkit" (forwarded by a [features] table)',
+                      out)
+
     def test_a_test_util_feature_fails_too(self):
         ws = self.workspace(config(), [
             ("clock", "shell", (), {"test-util": []}),

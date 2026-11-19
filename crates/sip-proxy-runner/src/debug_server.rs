@@ -1,5 +1,6 @@
 //! The proxy's debug server (`PROXY_DEBUG`): `/debug/flamegraph` on a
-//! loopback listener of its own. A profiling aid only: the proxy serves
+//! loopback listener of its own, a capture in a build with the `flamegraph`
+//! feature and `501` otherwise. A profiling aid only: the proxy serves
 //! without it when its bind fails.
 
 use std::net::SocketAddr;

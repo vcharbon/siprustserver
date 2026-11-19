@@ -42,6 +42,12 @@ for _ in $(seq 1 50); do
 done
 [ -n "$lp" ] || { echo "port-forward failed:" >&2; cat "$pflog" >&2; exit 1; }
 # curl timeout must exceed the sample window + render time.
-curl -fsS --max-time "$(( secs + 45 ))" "http://$lp/debug/flamegraph?seconds=$secs" -o "$out" \
-  || { echo "capture failed (a 501: the image is no --features flamegraph build)" >&2; exit 1; }
+code="$(curl -sS --max-time "$(( secs + 45 ))" -w '%{http_code}' \
+  "http://$lp/debug/flamegraph?seconds=$secs" -o "$out")" \
+  || { echo "capture failed: curl exit $?" >&2; exit 1; }
+case "$code" in
+  200) ;;
+  501) echo "capture refused: the image is no --features flamegraph build" >&2; exit 1 ;;
+  *) echo "capture failed: HTTP $code ($(head -c 200 "$out"))" >&2; exit 1 ;;
+esac
 echo ">> wrote $out ($(wc -c < "$out") bytes) — open in a browser"

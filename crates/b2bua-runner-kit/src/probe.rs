@@ -3,7 +3,8 @@
 //! `/healthz` from its loops alone, `/metrics` from every metric source of the
 //! worker. The operator server (`B2BUA_ADMIN`, loopback only): the operator
 //! routes (`probe::admin`) from its readiness and its live calls, which it can
-//! release, and the debug routes `/debug/flamegraph` and `/debug/heap`.
+//! release, and the debug routes `/debug/flamegraph` (`501` without
+//! probe-http's `flamegraph` feature) and `/debug/heap`.
 
 mod admin;
 
@@ -29,7 +30,8 @@ impl RunnerBase {
     /// `/healthz` 503 while a worker loop is stalled past `loop_stall`.
     /// The operator server on `B2BUA_ADMIN` serves `/admin/cordon`, the
     /// operator's cordon, `/admin/release-all`, its release of every call,
-    /// `/admin/calls`, the list of the live ones, `/debug/flamegraph` and
+    /// `/admin/calls`, the list of the live ones, `/debug/flamegraph` (`501`
+    /// without probe-http's `flamegraph` feature) and
     /// `/debug/heap` from `heap` (`503` for `None`); the probe server answers
     /// none of them. Hold the returned servers for the process lifetime: each
     /// accept loop aborts on drop.

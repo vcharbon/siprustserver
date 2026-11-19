@@ -20,7 +20,8 @@
 //!     `tokio::time::interval` task drives its load sampler. `PROXY_SELF_GATE=0`
 //!     reverts to the always-admit gate.
 //!   - Prometheus `/metrics` + `/healthz` + `/readyz` + `/fitz` (`probe-http`),
-//!     and `/debug/flamegraph` on a loopback listener of its own.
+//!     and `/debug/flamegraph` on a loopback listener of its own (`501`
+//!     without the `flamegraph` feature).
 //!
 //! Config via env, read once before the first bind
 //! ([`sip_proxy_runner::config`]). Unset takes the default; a value set
@@ -46,7 +47,8 @@
 //!   PROXY_METRICS    /metrics, /healthz, /readyz, /fitz listen ip:port, an IP
 //!                    literal, IPv6 with or without brackets (default 0.0.0.0:9090)
 //!   PROXY_DEBUG      /debug/flamegraph listen ip:port, loopback only
-//!                    (default 127.0.0.1:9097)
+//!                    (default 127.0.0.1:9097; `501` without the `flamegraph`
+//!                    feature)
 //!   PROXY_QUEUE      inbound UDP queue depth, packets ≥ 1  (default 8192)
 //!   SIP_EXEMPTIONS   comma-separated shapes accepted against the RFC, read at
 //!                    ingress only (default none; a name no exemption has is
