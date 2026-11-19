@@ -230,6 +230,7 @@ async fn the_admin_server_serves_the_heap_route() {
 }
 
 /// The flamegraph route of the operator server answers an SVG.
+#[cfg(feature = "flamegraph")]
 #[tokio::test]
 #[ignore = "slow lane: real clock >= 1 s"]
 async fn the_admin_server_serves_the_flamegraph_route() {
@@ -237,6 +238,20 @@ async fn the_admin_server_serves_the_flamegraph_route() {
         AdminServer::start("127.0.0.1:0".parse().unwrap(), AdminRoutes::default()).await.unwrap();
     let r = get(server.addr(), "/debug/flamegraph?seconds=1").await;
     assert!(r.starts_with("HTTP/1.1 200 OK") && r.contains("image/svg+xml"), "{r}");
+}
+
+/// A build without the `flamegraph` feature answers the route `501`, naming
+/// the feature, at once.
+#[cfg(not(feature = "flamegraph"))]
+#[tokio::test]
+async fn the_flamegraph_route_is_501_without_the_feature() {
+    let server =
+        AdminServer::start("127.0.0.1:0".parse().unwrap(), AdminRoutes::default()).await.unwrap();
+    let r = get(server.addr(), "/debug/flamegraph?seconds=1").await;
+    assert!(
+        r.starts_with("HTTP/1.1 501 Not Implemented") && r.contains("`flamegraph` feature"),
+        "{r}"
+    );
 }
 
 /// A listener variable reads an IP literal with its port, an IPv6 one with

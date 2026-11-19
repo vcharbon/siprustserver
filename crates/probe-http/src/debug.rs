@@ -2,7 +2,8 @@
 //!
 //! - `GET /debug/flamegraph[?seconds=N]`: an on-demand pprof CPU flamegraph
 //!   SVG, sampled at 99 Hz for `N` seconds (default 20, at most 120) on a
-//!   blocking thread, so the runner's async workers keep serving;
+//!   blocking thread, so the runner's async workers keep serving; `501` in a
+//!   build without the `flamegraph` feature;
 //! - `GET /debug/heap`: the runner's heap profile ([`HeapDumpFn`]), `503`
 //!   when the runner gives none.
 //!
@@ -29,16 +30,7 @@ pub(crate) async fn answer(
     heap: Option<&HeapDumpFn>,
 ) -> std::io::Result<bool> {
     let reply = match route {
-        "/debug/flamegraph" => {
-            let secs = flamegraph_util::parse_seconds(path, 20, 120);
-            let captured = blocking(move || flamegraph_util::capture_svg(secs, 99)).await;
-            match captured {
-                Ok(svg) => Reply::ok("image/svg+xml", svg),
-                Err(e) => {
-                    Reply::failed("500 Internal Server Error", format!("flamegraph failed: {e}"))
-                }
-            }
-        }
+        "/debug/flamegraph" => flamegraph(path).await,
         "/debug/heap" => {
             let dumped = match heap.cloned() {
                 Some(heap) => blocking(move || heap()).await,
@@ -63,6 +55,25 @@ pub(crate) async fn answer(
     stream.write_all(&reply.body).await?;
     stream.flush().await?;
     Ok(true)
+}
+
+/// The CPU flamegraph SVG of the window `path`'s `seconds` names.
+#[cfg(feature = "flamegraph")]
+async fn flamegraph(path: &str) -> Reply {
+    let secs = flamegraph_util::parse_seconds(path, 20, 120);
+    match blocking(move || flamegraph_util::capture_svg(secs, 99)).await {
+        Ok(svg) => Reply::ok("image/svg+xml", svg),
+        Err(e) => Reply::failed("500 Internal Server Error", format!("flamegraph failed: {e}")),
+    }
+}
+
+/// `501`: this build links no CPU profiler.
+#[cfg(not(feature = "flamegraph"))]
+async fn flamegraph(_path: &str) -> Reply {
+    Reply::failed(
+        "501 Not Implemented",
+        "flamegraph capture is not built in: build the runner with its `flamegraph` feature".into(),
+    )
 }
 
 /// One debug route's answer.

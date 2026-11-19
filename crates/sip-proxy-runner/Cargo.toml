@@ -33,8 +33,8 @@ metric-values = { path = "../metric-values" }
 # target-gated half below).
 jemalloc-stats = { path = "../jemalloc-stats" }
 # The shared HTTP probe/metrics server (/metrics, /healthz, /readyz, /fitz) and
-# the loopback server of the /debug/flamegraph pprof route — one module shared
-# with the b2bua worker.
+# the loopback server of the /debug/flamegraph pprof route (feature
+# `flamegraph`) — one module shared with the b2bua worker.
 probe-http = { path = "../probe-http" }
 sip-net = { path = "../sip-net" }
 sip-message = { path = "../sip-message" }
@@ -59,6 +59,10 @@ tokio = { workspace = true }
 # Process subscriber + lifecycle logging (ADR-0026).
 observe = { path = "../observe", features = ["otlp"] }
 tracing = { workspace = true }
+
+[features]
+# A profiling build: `/debug/flamegraph` on the `PROXY_DEBUG` listener.
+flamegraph = ["probe-http/flamegraph"]
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }

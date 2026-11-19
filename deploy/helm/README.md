@@ -191,7 +191,9 @@ listener's bind is a value (`httpBinds` in `values.yaml`):
   `curl -X POST localhost:19094/admin/cordon`, or
   `curl -o cpu.svg 'localhost:19094/debug/flamegraph?seconds=20'`;
   `kubectl port-forward pod/<proxy> 19097:9097` for the proxy's flamegraph.
-  `deploy/k8s/flamegraph.sh` wraps the capture. The route guard and the CDR
+  `deploy/k8s/flamegraph.sh` wraps the capture. A flamegraph needs a
+  profiling build (`cargo build --release -p <runner> --features flamegraph`);
+  a default build answers `501`. The route guard and the CDR
   consumer serve no debug route; a proxy whose debug port is taken serves
   without it and logs `debug server failed to bind`.
 - **A runner outside Kubernetes** binds its debug listener on loopback too:

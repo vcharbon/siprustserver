@@ -179,7 +179,8 @@ worker:
   metrics:
     bind: ""
   # B2BUA_ADMIN: the operator routes (/admin/*) and the debug routes
-  # (/debug/flamegraph, /debug/heap); the worker refuses an address that is not
+  # (/debug/heap; /debug/flamegraph in a `flamegraph` feature build, 501
+  # otherwise); the worker refuses an address that is not
   # loopback. Empty: 127.0.0.1:9094.
   admin:
     bind: ""
@@ -270,7 +271,8 @@ proxy:
   # at that address only.
   metrics:
     bind: ""
-  # PROXY_DEBUG: /debug/flamegraph, on the node's loopback (hostNetwork), on a
+  # PROXY_DEBUG: /debug/flamegraph (a `flamegraph` feature build; 501
+  # otherwise), on the node's loopback (hostNetwork), on a
   # port no other component of the chart takes; the proxy refuses an address
   # that is not loopback, and serves without the route when the bind fails.
   # Empty: 127.0.0.1:9097.

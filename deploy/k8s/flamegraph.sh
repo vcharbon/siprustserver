@@ -2,7 +2,8 @@
 # Capture an on-demand CPU flamegraph SVG from a running b2bua-worker (b2b) or
 # front-proxy (lb) pod via the /debug/flamegraph route of its loopback
 # listener, through a port-forward (pprof-rs, in-process SIGPROF sampling ->
-# inferno SVG). No perf/privileges/PMU needed.
+# inferno SVG). No perf/privileges/PMU needed. The pod runs a profiling build,
+# the runner built with its `flamegraph` feature; a default build answers 501.
 #
 #   ./flamegraph.sh b2b   [seconds] [pod-index]   # b2bua-worker-<idx>:9094 (worker.admin.bind)
 #   ./flamegraph.sh lb    [seconds] [pod-index]   # sip-front-proxy[<idx>]:9097 (proxy.debug.bind)
@@ -42,5 +43,5 @@ done
 [ -n "$lp" ] || { echo "port-forward failed:" >&2; cat "$pflog" >&2; exit 1; }
 # curl timeout must exceed the sample window + render time.
 curl -fsS --max-time "$(( secs + 45 ))" "http://$lp/debug/flamegraph?seconds=$secs" -o "$out" \
-  || { echo "capture failed (is the new image deployed?)" >&2; exit 1; }
+  || { echo "capture failed (a 501: the image is no --features flamegraph build)" >&2; exit 1; }
 echo ">> wrote $out ($(wc -c < "$out") bytes) — open in a browser"
