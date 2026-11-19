@@ -18,6 +18,8 @@ The configuration (`purity.toml` at the root of DIR's repository):
   test-features = ["testkit", "a-clock/sim"]
                                  features no binary may reach: a bare name
                                  is that feature of any crate
+  refused-crates = ["a-profiler"]
+                                 crates no binary may link
   pure-deps = ["serde", ...]     third-party crates a pure crate may reach
   dockerfiles = ["deploy/x/Dockerfile"]
                                  the images the binaries ship in, relative
@@ -34,7 +36,7 @@ Checks:
              feature fails, and so does a first-party crate without a tier;
              each crate's resolved feature set is read too, so a test feature
              a `[features]` table forwards, which the tree prints no node for,
-             fails as well
+             fails as well; a refused crate fails wherever it is linked
   images     every `cargo build` of the listed Dockerfiles: a command that
              builds a binary with another package, the whole workspace or a
              feature flag fails, and so does a binary no command builds
@@ -58,8 +60,8 @@ Checks:
              rustflags or sets CLIPPY_CONF_DIR
   base       against the base (REV, by default the merge-base of HEAD and
              `develop`, else HEAD): no known breach added, no binary, test
-             feature or Dockerfile removed; a known entry whose breach is
-             gone is stale
+             feature, refused crate or Dockerfile removed; a known entry
+             whose breach is gone is stale
 
   --staged   the staged configuration against the same base only (a
              pre-commit hook)
@@ -113,13 +115,15 @@ class Config:
             data = tomllib.loads(text)
         except tomllib.TOMLDecodeError as e:
             fail_setup(f"{path}: {e}")
-        unknown = set(data) - {"binaries", "dockerfiles", "test-features", "pure-deps", "known"}
+        unknown = set(data) - {"binaries", "dockerfiles", "test-features", "refused-crates",
+                               "pure-deps", "known"}
         if unknown:
             fail_setup(f"{path}: unknown key(s) {', '.join(sorted(unknown))}")
         self.path = path
         self.binaries = data.get("binaries", [])
         self.dockerfiles = data.get("dockerfiles", [])
         self.test_features = set(data.get("test-features", []))
+        self.refused_crates = set(data.get("refused-crates", []))
         self.pure_deps = set(data.get("pure-deps", []))
         known = data.get("known", {})
         if set(known) - {"untiered", "pure-reaches"}:
@@ -226,6 +230,9 @@ def closure(ws, config):
                 reached.add((name, feature))
                 bad.append(f"{binary} reaches {name} feature \"{feature}\" "
                            f"(via {via(chain[:-1])})")
+            elif feature is None and name in config.refused_crates:
+                bad.append(f"{binary} links refused crate {name} "
+                           f"(via {via(chain[:-1]) or binary})")
             elif feature is None and local and ws.tiers.get(name) is None:
                 untiered.add(name)
                 if name not in config.untiered:
@@ -398,6 +405,8 @@ def against_base(config, base):
             for b in base.binaries if b not in config.binaries]
     bad += [f"{config.path} drops test feature {f}, which {base.path} lists"
             for f in sorted(base.test_features - config.test_features)]
+    bad += [f"{config.path} drops refused crate {c}, which {base.path} lists"
+            for c in sorted(base.refused_crates - config.refused_crates)]
     bad += [f"{config.path} drops dockerfile {d}, which {base.path} lists"
             for d in base.dockerfiles if d not in config.dockerfiles]
     return bad

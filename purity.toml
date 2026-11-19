@@ -25,6 +25,10 @@ test-features = [
   "probe-http/flamegraph",
 ]
 
+# Crates no production binary may link, whatever pulls them in: the
+# in-process CPU profiler and its tree.
+refused-crates = ["flamegraph-util", "pprof", "inferno"]
+
 # Third-party crates a pure crate may reach through its normal dependencies
 # (proc-macro crates aside): no clock, randomness, filesystem, network,
 # environment, sleep or interior mutability of their own reaches the caller.

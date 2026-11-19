@@ -47,7 +47,8 @@ code="$(curl -sS --max-time "$(( secs + 45 ))" -w '%{http_code}' \
   || { echo "capture failed: curl exit $?" >&2; exit 1; }
 case "$code" in
   200) ;;
-  501) echo "capture refused: the image is no --features flamegraph build" >&2; exit 1 ;;
-  *) echo "capture failed: HTTP $code ($(head -c 200 "$out"))" >&2; exit 1 ;;
+  501) rm -f "$out"
+       echo "capture refused: the image is no --features flamegraph build" >&2; exit 1 ;;
+  *) echo "capture failed: HTTP $code ($(head -c 200 "$out"))" >&2; rm -f "$out"; exit 1 ;;
 esac
 echo ">> wrote $out ($(wc -c < "$out") bytes) — open in a browser"

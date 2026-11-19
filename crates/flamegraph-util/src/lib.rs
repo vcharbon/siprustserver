@@ -4,9 +4,9 @@
 //! of the current process for a fixed window and renders an inferno flamegraph
 //! SVG. No `perf`, no privileges, no kernel PMU — works in an unprivileged
 //! container on a kernel where `perf` is unavailable. Backs the
-//! `/debug/flamegraph` HTTP route on the b2bua-worker's and the front proxy's
-//! loopback listeners, so an endurance run can profile either tier live (e.g.
-//! around a chaos reboot) without rebuilding or redeploying.
+//! `/debug/flamegraph` HTTP route of probe-http's `flamegraph` feature, on the
+//! loopback listeners of a profiling build of the b2bua worker or the front
+//! proxy (e.g. around a chaos reboot), and the load driver's.
 //!
 //! When idle there is ZERO overhead: the SIGPROF handler exists only while a
 //! [`pprof::ProfilerGuard`] is alive (i.e. only during an active capture).

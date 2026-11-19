@@ -95,11 +95,12 @@ fuzz-cov target:
 parity-oracle:
     cargo nextest run -p sip-message --features rvoip-oracle --no-tests=fail -E 'test(/^rvoip_parity::/)'
 
-# The profiling build: probe-http's test targets under its `flamegraph`
-# feature, which no workspace build turns on, and the flamegraph route's test
-# run (1 s of real clock). A branch touching probe-http or flamegraph-util
-# passes it.
+# The profiling build: probe-http under its `flamegraph` feature, which no
+# workspace build turns on, linted with the panic set of ADR-0051 §3, and the
+# flamegraph route's test run, the one slow-lane test (1 s of real clock) any
+# environment runs. A branch touching probe-http or flamegraph-util passes it.
 flamegraph-build:
+    cargo clippy -p probe-http --features flamegraph -- -D warnings
     cargo nextest run -p probe-http --features flamegraph --run-ignored all --no-tests=fail -E 'test(/flamegraph/)'
 
 # The live ELU under a real one-core cgroup CPU quota (a transient systemd
