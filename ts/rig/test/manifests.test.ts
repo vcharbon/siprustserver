@@ -106,6 +106,16 @@ describe("collector.v1", () => {
     expect(refusalOf(Collector.parse("c/collector.toml", ofCell))).toBe("c/collector.toml: scope_only: a cell-scope collector's lines are its cell's")
   })
 
+  it("refuses a claimed collector of cell scope, or required", () => {
+    const claimed = COLLECTOR.replace("locks ", "claimed = true\nlocks ")
+    expect(refusalOf(Collector.parse("c/collector.toml", claimed))).toBe("accepted")
+    const ofCell = claimed.replace(`scope    = "batch"`, `scope    = "cell"`).replace(`locks    = ["records-chain"]\n`, "")
+    expect(refusalOf(Collector.parse("c/collector.toml", ofCell)))
+      .toBe("c/collector.toml: claimed: a cell-scope collector runs over its own cell, planned or not")
+    expect(refusalOf(Collector.parse("c/collector.toml", claimed.replace("required = false", "required = true"))))
+      .toBe("c/collector.toml: claimed: a required collector runs whatever its cells claim")
+  })
+
   it("refuses a pre-check whose default is on-failure", () => {
     const before = COLLECTOR.replace(`at       = "after"`, `at = "before"`)
       .replace(`open    = "./open"\n`, "")

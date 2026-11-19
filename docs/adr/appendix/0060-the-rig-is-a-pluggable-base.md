@@ -123,6 +123,7 @@ answers  = ["call-records"]    # the verifications it, or its judge, answers
 informative = false            # true: none of its lines decides (no judge then)
 scope_only = false             # true: it answers its scope's lines alone, never a cell's
 judge    = "call-records"      # optional
+claimed  = false               # true: runs only where a planned cell claims under its name
 locks    = ["records-chain"]   # box-wide, held from open to close; never at cell scope
 delay_s  = 10                  # cell scope: wall clock, after the cell ended
 holds_cell_locks = true        # cell scope: the cell's own locks are kept until it answered
@@ -201,6 +202,10 @@ Rules:
   whose lines decide is filled on a cell unless a deciding line, or a line of the promise's own
   source (the collector, or its judge), answered its name there. A collector named like a judge
   another collector names is refused at load: its lines would carry that judge's source.
+- A `claimed` collector of job or batch scope runs only where a planned cell of its scope
+  states a claim under its name. Where the planned cells are stated and none does, it is not
+  opened, collected or closed, and answers nothing. Where none are stated (a capture
+  replay), it runs. One of cell scope, or required, is refused at load.
 - Timeouts default to 30 s for `open` and `close`, 300 s for `collect`.
 - `after` orders collectors of one scope. A wider scope always runs after a narrower one ended
   and reads its keys and records without declaring it. An `after` naming a collector that is

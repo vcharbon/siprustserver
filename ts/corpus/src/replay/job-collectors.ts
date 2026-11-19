@@ -14,7 +14,7 @@
  * A cell the work ran twice (a repeated request's passes) is read once per
  * run, its later ids suffixed by the order it ran in.
  */
-import { CollectorRun, type Context, PreCheck } from "@sip/rig"
+import { CollectorPlan, CollectorRun, type Context, PreCheck } from "@sip/rig"
 import { Attachments, JobEvents } from "@sip/store"
 import * as Cause from "effect/Cause"
 import * as Effect from "effect/Effect"
@@ -71,7 +71,10 @@ export const around = <A, E, R>(request: Request<A>, work: Effect.Effect<A, E, R
   Effect.gen(function*() {
     const seam = yield* Collectors.Service
     const dir = yield* CollectorIo.jobHolderOf(request.job, request.dir)
-    const instances = (yield* seam.job(request.lanes, path.join(dir, "collectors"), dir)).filter((one) => !PreCheck.isPreCheck(one))
+    const instances = CollectorPlan.claimedOf(
+      (yield* seam.job(request.lanes, path.join(dir, "collectors"), dir)).filter((one) => !PreCheck.isPreCheck(one)),
+      request.planned
+    )
     if (instances.length === 0) return yield* work
     const events = yield* JobEvents.Service
     const options: CollectorRun.Options = {

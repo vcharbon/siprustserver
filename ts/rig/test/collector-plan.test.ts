@@ -44,6 +44,23 @@ const wiring = (lane: Lanes.Loaded, collectors: Record<string, unknown>): Lanes.
   lane: { ...lane.lane, collectors: collectors as never }
 })
 
+describe("a claimed collector", () => {
+  it("runs over a scope a planned cell of which claims under its name, or which states no planned cells; an unclaimed one runs over any", async () => {
+    const rig = await samples()
+    const plan = CollectorPlan.batchPlanOf(rig, laneOf("a", { [STORE]: "targets/x.toml" }), "/b/collectors", "/b")
+    const tidy = plan.find((instance) => instance.id === "tidy")!
+    const claimed = { ...tidy, collector: { ...tidy.collector, manifest: { ...tidy.collector.manifest, claimed: true } } }
+    const locked = plan.find((instance) => instance.id === "locked")!
+    const cell = (claims: Readonly<Record<string, unknown>>) => ({ id: "c1", case: "k", lane: "a", claims })
+    const kept = (planned: ReadonlyArray<ReturnType<typeof cell>> | undefined) =>
+      CollectorPlan.claimedOf([claimed, locked], planned).map((instance) => instance.id)
+    expect(kept([cell({}), cell({ locked: {} })])).toEqual(["locked"])
+    expect(kept([])).toEqual(["locked"])
+    expect(kept([cell({}), cell({ tidy: {} })])).toEqual(["tidy", "locked"])
+    expect(kept(undefined)).toEqual(["tidy", "locked"])
+  })
+})
+
 describe("the collectors a batch runs", () => {
   it("are those of batch scope wired on its lane, always (pre-checks among them) or on failure, by name", async () => {
     const rig = await samples()

@@ -55,6 +55,8 @@ export const Collector = Schema.Struct({
   scope_only: Schema.optionalKey(Schema.Boolean),
   /** The judge of the path that decides over its records. */
   judge: Schema.optionalKey(Name),
+  /** True: it runs over a scope whose planned cells, where stated, include one claiming under its name ({@link isClaimed}). */
+  claimed: Schema.optionalKey(Schema.Boolean),
   /** Box-wide locks held from `open` to `close`; none on a cell-scope collector. */
   locks: Schema.optionalKey(Schema.Array(Name)),
   /** Cell scope: wall-clock seconds after the cell ended before it runs. */
@@ -97,6 +99,13 @@ export const isInformative = (collector: Collector): boolean => collector.inform
 /** Whether `collector` answers its scope's own lines alone, never a cell's (`scope_only = true`). */
 export const isScopeOnly = (collector: Collector): boolean => collector.scope_only === true
 
+/**
+ * Whether `collector` runs only for a cell that claims under its name
+ * (`claimed = true`): a job or batch scope whose planned cells are stated and
+ * hold no such claim does not run it (`collector-plan.ts` `claimedOf`).
+ */
+export const isClaimed = (collector: Collector): boolean => collector.claimed === true
+
 /** The executables a collector names, by the step that runs each. */
 export const executablesOf = (collector: Collector): ReadonlyArray<readonly [string, string]> =>
   (["open", "collect", "close"] as const).flatMap((step) => {
@@ -134,6 +143,8 @@ const meaningOf = (collector: Collector): string | undefined => {
   if (collector.scope_only === true && collector.judge !== undefined) {
     return "judge: a scope-only collector answers no cell, and a judge answers its cells"
   }
+  if (collector.claimed === true && collector.scope === "cell") return "claimed: a cell-scope collector runs over its own cell, planned or not"
+  if (collector.claimed === true && collector.required === true) return "claimed: a required collector runs whatever its cells claim"
   return undefined
 }
 

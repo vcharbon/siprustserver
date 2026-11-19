@@ -29,9 +29,10 @@
 import * as Result from "effect/Result"
 import * as path from "node:path"
 import * as Collection from "./collection.js"
-import type * as Collector from "./collector.js"
+import * as Collector from "./collector.js"
 import * as CollectorOrder from "./collector-order.js"
 import type * as CollectorRun from "./collector-run.js"
+import type * as Context from "./context.js"
 import type * as Lanes from "./lanes.js"
 import type * as RigPath from "./rig-path.js"
 
@@ -118,6 +119,22 @@ const instanceOf = (
   judge: defined.manifest.judge === undefined ? undefined : rig.judges.get(defined.manifest.judge),
   ...(onFailure ? { onFailure } : {})
 })
+
+/**
+ * `instances` without each `claimed` one (`Collector.isClaimed`) whose
+ * scope's `planned` cells hold no claim under its collector's name: it is
+ * neither opened, collected nor closed, and answers nothing. Where the scope
+ * states no planned cells (`undefined`), every instance runs.
+ */
+export const claimedOf = (
+  instances: ReadonlyArray<CollectorRun.Instance>,
+  planned: ReadonlyArray<Context.Planned> | undefined
+): ReadonlyArray<CollectorRun.Instance> =>
+  planned === undefined
+    ? instances
+    : instances.filter((one) =>
+      !Collector.isClaimed(one.collector.manifest) || planned.some((cell) => cell.claims[one.collector.name] !== undefined)
+    )
 
 /** The instances a batch on `lane` runs under `settings`, each with its directory under `root`; `holder` is the batch's directory. */
 export const batchPlanOf = (

@@ -56,7 +56,8 @@ afterAll(async () => {
  * trace file; and, where `preCheck` is given, the job pre-check `lab-own`
  * whose collect runs it, required and needing the part `needs` where one is
  * named, the lane's clock `clock`, the lane excluding the collectors
- * `exclude`.
+ * `exclude`; `lab` runs only for a planned cell claiming under its name where
+ * `claimed`.
  */
 const labOf = async (steps: {
   readonly collect: string
@@ -67,6 +68,7 @@ const labOf = async (steps: {
   readonly needs?: string
   readonly clock?: "real" | "simulated"
   readonly exclude?: ReadonlyArray<string>
+  readonly claimed?: boolean
 }) => {
   const root = fs.mkdtempSync(path.join(TREE, "rig-"))
   const dir = path.join(root, "collectors", "lab")
@@ -88,6 +90,7 @@ const labOf = async (steps: {
     `schema = "collector.v1"\nname = "lab"\nscope = "job"\nanswers = ["lab-check"]\n` +
       (steps.locks === undefined ? "" : `locks = ${JSON.stringify(steps.locks)}\n`) +
       (steps.setting === undefined ? "" : `default = "${steps.setting}"\n`) +
+      (steps.claimed === true ? "claimed = true\n" : "") +
       `[run]\nopen = "./open"\ncollect = "./collect"\nclose = "./close"\n`
   )
   const script = (name: string, body: string) =>
@@ -191,6 +194,30 @@ const landedCell = Effect.gen(function*() {
     }]
   })
   return { id: "c1", caseId: "case-1", lane: LANE, dir, runId: opened.id }
+})
+
+describe.skipIf(!served)("a job's claimed collector", () => {
+  const planned = (claims: Readonly<Record<string, unknown>>) => [{ id: "c1", case: "case-1", lane: LANE, claims }]
+  const aroundOver = (lab: Awaited<ReturnType<typeof labOf>>, cells: ReturnType<typeof planned> | undefined) =>
+    withStore(lab.layer, Effect.gen(function*() {
+      const job = yield* jobOf
+      const dir = path.join(TREE, `job${job}`)
+      yield* JobCollectors.around({ job, dir, lanes: [LANE], cells: () => [], ...(cells === undefined ? {} : { planned: cells }) }, Effect.void)
+    }))
+
+  it("runs no step over planned cells none of which claims under its name", async () => {
+    const lab = await labOf({ collect: "exit 0", close: "exit 0", claimed: true })
+    await aroundOver(lab, planned({ other: {} }))
+    expect(lab.trace()).toEqual([])
+  })
+
+  it("runs every step where a planned cell claims under its name, or where no planned cells are stated", async () => {
+    const lab = await labOf({ collect: "exit 0", close: "exit 0", claimed: true })
+    await aroundOver(lab, planned({ lab: {} }))
+    expect(lab.trace()).toEqual(["open", "collect", "close"])
+    await aroundOver(lab, undefined)
+    expect(lab.trace()).toEqual(["open", "collect", "close", "open", "collect", "close"])
+  })
 })
 
 describe.skipIf(!served)("a job's pre-checks", () => {

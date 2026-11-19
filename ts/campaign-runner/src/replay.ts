@@ -38,7 +38,7 @@
  * Each attempt of the lane's cells (`run.ts`) is a batch of its own, under
  * its own directory, each cell's bundle its own (`attempts.ts`).
  */
-import type { CellCollectors, LaneCatalog, LaneView } from "@sip/rig"
+import { type CellCollectors, CollectorPlan, type LaneCatalog, type LaneView } from "@sip/rig"
 import { ReplayCli } from "@sip/toolchain"
 import { CollectedCells, CollectorIo, Collectors } from "@sip/corpus"
 import * as LaneBatch from "@sip/corpus/replay/lane-batch"
@@ -245,14 +245,15 @@ export const rigCollectorsOf = <A, C extends Cell>(
       Collectors.batchOf(seam, found.id, path.join(holder, "collectors"), holder))
     if (!Collectors.wiresAny(batch)) return {}
     const events = yield* JobEvents.Service
+    const planned = placed.map((p) => plannedOf(p.cell, found.id, pack.claimsOf(p.cell)))
     const collectors: LaneBatch.Collectors<A, FileSystem.FileSystem> = {
-      instances: batch.instances,
+      instances: CollectorPlan.claimedOf(batch.instances, planned),
       holder,
       options: {
         sink: CollectorIo.sinkOf(context.job === undefined ? undefined : { id: context.job, events }),
         locker: yield* CollectorIo.locker(),
         exportJudges: batch.exportJudges,
-        planned: placed.map((p) => plannedOf(p.cell, found.id, pack.claimsOf(p.cell)))
+        planned
       },
       cells: (value, end) =>
         Effect.flatMap(
