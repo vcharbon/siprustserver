@@ -24,7 +24,11 @@ export type LaneNotes = Readonly<Record<string, string>>
  * carry a class and a ticket and nothing else.
  */
 export interface DeltaRule<F, S extends string = string> {
-  /** The rule's name, never changed: lane lists, docs and stored verdicts read it. */
+  /**
+   * The rule's name: lane lists, docs and stored verdicts read it, so it never
+   * changes, save once for a row that moves to the generic rows under a name in
+   * one deployment's vocabulary (ADR-0062 item 7).
+   */
   readonly id: string
   /** The section the deployment placed the rule in: sections run in the deployment's order. */
   readonly section: S
@@ -32,7 +36,10 @@ export interface DeltaRule<F, S extends string = string> {
   readonly on: RuleOn
   /** The case-wide fact the rule keys on, where it keys on one. */
   readonly gate?: Extract<keyof F, string>
-  /** The clause the ruling rests on, where it rests on one. */
+  /**
+   * The clause the ruling rests on, where it rests on one; for the documented
+   * behaviour of this repository's B2BUA or replay rig, the ADR that states it.
+   */
   readonly rfc?: string
   /**
    * The ruling in one or two sentences, at most {@link WHY_CAP} characters:

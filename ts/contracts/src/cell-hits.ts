@@ -25,7 +25,6 @@ export interface Hit extends Schema.Schema.Type<typeof Hit> {}
 export const Hits = Schema.Array(Hit)
 export type Hits = typeof Hits.Type
 
-export const decodeHits = Schema.decodeUnknownEffect(Hits, STRICT)
 export const decodeHitsSync = Schema.decodeUnknownSync(Hits, STRICT)
 
 export const emitHits = (value: Hits): string => format(Schema.encodeUnknownSync(Hits, STRICT)(value))

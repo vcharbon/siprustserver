@@ -3,9 +3,9 @@
  *
  * The panel draws the `MockAnswers` the server read off the deployment's
  * record of the case and derives nothing of its own: the target the mock
- * answers for, what the capture observed, then one row per answer — its
- * label, the request it matches, the answer as a `JsonView` (folded past its
- * size). A list of more than `OPEN_ENTRIES` answers folds whole under its count.
+ * answers for, then one row per answer — its label, the request it matches,
+ * the answer as a `JsonView` (folded past its size). A list of more than
+ * `OPEN_ENTRIES` answers folds whole under its count.
  */
 import type { JSX } from "react"
 import type { MockAnswer, MockAnswers } from "../api.ts"
@@ -29,7 +29,6 @@ export const Profile = ({ ledger }: { ledger?: MockAnswers | null | undefined })
       <h3>mock answers</h3>
       <p className="profile-source">
         for <code>{ledger.target ?? "?"}</code>
-        {ledger.observed !== null && <> · captured <code>{ledger.observed}</code></>}
       </p>
       {answers.length === 0
         ? <p className="profile-source">no answer</p>

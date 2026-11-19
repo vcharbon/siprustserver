@@ -12,16 +12,19 @@
  * | `run-facts.ts`, `document-reading.ts` | what a gate reads off the run and the document |
  * | `lane-lists.ts` | the lane lists, their loader and the classification they decide |
  * | `overlap.ts` | the overlap graph and its golden form, which pin every winner |
+ * | `mutants.ts`, `canonical.ts` | the one-step mutants of a probe the graph also reads, and the canonical text they are keyed and digested by |
  * | `rules-table.ts` | the deployment's rules page |
  *
  * The deployment supplies its case facts, its sections and rows, its lane
  * lists, its fixtures and the prose its page prints.
  */
+export * as Canonical from "./canonical.js"
 export * as DocumentReading from "./document-reading.js"
 export * as Families from "./families.js"
 export * as HeaderItems from "./header-items.js"
 export * as Identity from "./identity.js"
 export * as LaneLists from "./lane-lists.js"
+export * as Mutants from "./mutants.js"
 export * as Overlap from "./overlap.js"
 export * as Provenance from "./provenance.js"
 export * as Rule from "./rule.js"

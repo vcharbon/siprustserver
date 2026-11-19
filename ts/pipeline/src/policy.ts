@@ -8,7 +8,8 @@
  * behaves — which Call-IDs it derives, why it moved to the next attempt, how it
  * handles provisionals, whether it ACKs locally, which lanes can replay the
  * result, which failure a run owes and which case is refused outright — arrives
- * here as a function.
+ * here: as data where data states it (the platform profile, the join and leg
+ * rules, the refusal rosters), as a function where a reading needs one.
  *
  * {@link neutralPolicy} is what an unconfigured pipeline runs: each default
  * STATES NOTHING rather than guessing. A guess is worse than silence, because a
@@ -19,7 +20,6 @@
  * these and hands it to {@link CaseAssembler}.
  */
 import type { Call, Case, Flow, Flows, MustFail, Placement, Tokens } from "@sip/contracts"
-import type { BackgroundMap } from "./background.js"
 import type * as Captured from "./captured.js"
 import { CAPTURE_RULES, type CaptureRule } from "./capture-rules.js"
 import { CASE_RULES, type CaseRule } from "./case-rules.js"
@@ -28,9 +28,11 @@ import { neverDerives, type CallIdDerivation } from "./derivation.js"
 import { DOCUMENT_RULES, type DocumentRule } from "./document-rules.js"
 import { NO_HEADER_CLASS, type FlowOut, type HeaderClassifier, type StepSource } from "./flowsteps.js"
 import { NO_LEG_RULES, type LegRules } from "./header-pair-join.js"
+import { NO_JOIN_RULES, type JoinRule } from "./join-rules.js"
+import { NEUTRAL_PLATFORM, type PlatformProfile } from "./platform.js"
 import { checkRefusalRoster } from "./refusal-roster.js"
 import type { RuleIdentity } from "./refusal-rule.js"
-import type { ActorObs, JoinsReading, Layout, PartyIdentity } from "./topology.js"
+import type { Layout, PartyIdentity } from "./topology.js"
 
 /** The family label a document carries when nothing classified it. */
 export const UNCLASSIFIED = "unclassified"
@@ -215,27 +217,20 @@ export interface CasePolicy {
    * Neutral: none.
    */
   readonly legRules: LegRules
-  /** Why each attempt of the chain handed over to the next. */
+  /**
+   * Why each attempt of the chain handed over to the next
+   * (`./chain-reading.ts` reads a sequential one).
+   */
   readonly chain: (flows: Flows.FlowsDoc, layout: Layout) => ChainReading
   /** The provisional-handling profile the captured platform ran. */
   readonly relay18x: (flows: Flows.FlowsDoc, layout: Layout) => Call.Relay18x | undefined
+  /** The REPLAYING platform's constant facts (`./platform.ts`). Neutral: states none. */
+  readonly platform: PlatformProfile
   /**
-   * Whether the REPLAYING platform relays an in-dialog INVITE end to end. Where
-   * it does, a leg the vantage lost past the 2xx its peer sent is owed the far
-   * side of every such exchange the other leg holds, and synthesis transcribes
-   * it there (`far-side-reinvite.ts`). Neutral: states nothing, so nothing is
-   * derived and the run shows what the platform does with the INVITE.
+   * How the platform JOINS a leg to the call rather than hunting it, read off
+   * the raw observations (`./join-rules.ts`). Neutral: none.
    */
-  readonly relaysReinvite: (flows: Flows.FlowsDoc, layout: Layout) => boolean
-  /**
-   * Which called legs are resources the platform JOINED to the call rather than
-   * destinations it hunted — read off the raw observations, since a media
-   * resource is told apart by what its dialog carries, not by its position.
-   */
-  readonly joins: (
-    flows: Flows.FlowsDoc,
-    actors: ReadonlyArray<ActorObs>
-  ) => JoinsReading
+  readonly joinRules: ReadonlyArray<JoinRule>
   /**
    * Any behavioural delta between the source platform and the replaying one,
    * applied to the synthesized flow. A pure rewrite: what it changes it flags,
@@ -291,14 +286,6 @@ export interface CasePolicy {
    * after the pipeline's own document rules, which every deployment gets.
    */
   readonly refuseOnDocument: ReadonlyArray<DocumentRule>
-  /**
-   * The background policies each actor states (§5.1), actor id → policies. A
-   * stated policy does double duty: the assembled actor carries it, and
-   * synthesis collapses the captured platform's own locally-minted exchanges
-   * of a policy-answered method into it instead of scripting them
-   * (`background.ts`). Neutral: no actor states any.
-   */
-  readonly background: (layout: Layout) => BackgroundMap
 }
 
 /**
@@ -314,8 +301,8 @@ export const neutralPolicy: CasePolicy = {
   legRules: NO_LEG_RULES,
   chain: () => ({ causes: [], flags: [] }),
   relay18x: () => undefined,
-  relaysReinvite: () => false,
-  joins: () => new Map(),
+  platform: NEUTRAL_PLATFORM,
+  joinRules: NO_JOIN_RULES,
   adaptFlow: (_flows, flow) => flow,
   headerClass: NO_HEADER_CLASS,
   familyOf: () => UNCLASSIFIED,
@@ -325,8 +312,7 @@ export const neutralPolicy: CasePolicy = {
   captured: () => ({ violations: [], flags: [] }),
   refuseAtCapture: [],
   refuse: [],
-  refuseOnDocument: [],
-  background: () => new Map()
+  refuseOnDocument: []
 }
 
 /**

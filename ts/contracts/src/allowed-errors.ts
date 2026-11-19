@@ -15,7 +15,6 @@
  * failure: ignoring either is how a typo turns a flagged capture back into a
  * clean one.
  */
-import * as Effect from "effect/Effect"
 import * as Schema from "effect/Schema"
 import { STRICT } from "./strict.js"
 import { RfcRule } from "./violation.js"
@@ -38,11 +37,6 @@ export const AllowedErrors = Schema.Struct({
 export interface AllowedErrors extends Schema.Schema.Type<typeof AllowedErrors> {}
 
 export const decodeAllowedErrors = Schema.decodeUnknownEffect(AllowedErrors, STRICT)
-export const decodeAllowedErrorsSync = Schema.decodeUnknownSync(AllowedErrors, STRICT)
-
-/** Parse a registry from its text. */
-export const parseAllowedErrors = (text: string) =>
-  Effect.suspend(() => decodeAllowedErrors(JSON.parse(text) as unknown))
 
 /** The entries the registry holds for one capture. Absent reads as none. */
 export const violationsOf = (

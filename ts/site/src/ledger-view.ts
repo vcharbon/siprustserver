@@ -1,11 +1,10 @@
 /**
  * A case's ledger row — what the backend mock answers for the case, as the
- * cut wrote it (`ledger/<number>.json`: the number dialled, the number the
- * capture showed, one entry per answer family with the request it matches) —
- * read into the viewer's generic `MockAnswers`: the target, what the capture
- * observed, and one row per answer with its label, its match keys on one line
- * and the answer verbatim. Nothing is derived: a half no entry carries is a
- * half the mock does not send.
+ * cut wrote it (`ledger/<number>.json`: the number dialled, one entry per
+ * answer family with the request it matches) — read into the viewer's generic
+ * `MockAnswers`: the target and one row per answer with its label, its match
+ * keys on one line and the answer verbatim. Nothing is derived: a half no
+ * entry carries is a half the mock does not send.
  */
 
 /** One answer the mock serves: its family, the request it matches, the answer verbatim. */
@@ -18,7 +17,6 @@ export interface MockAnswer {
 /** What the lane's mock answers for one case; the shape the app's panel draws. */
 export interface MockAnswers {
   readonly target: string | null
-  readonly observed: string | null
   readonly answers: ReadonlyArray<MockAnswer>
 }
 
@@ -42,7 +40,6 @@ export const mockAnswersOf = (row: unknown): MockAnswers | null => {
   const entries = Array.isArray(read["entries"]) ? read["entries"] : []
   return {
     target: text(read["dialled"]) ?? text(read["number"]),
-    observed: text(read["observed_dialled"]),
     answers: entries.map((entry) => {
       const one = asRecord(entry) ?? {}
       return { label: text(one["family"]) ?? "?", match: matchLine(one["match"]), answer: one["answer"] ?? null }

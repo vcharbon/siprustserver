@@ -10,7 +10,7 @@ Full definitions: [docs/glossary/language.md](docs/glossary/language.md).
 - **Layer**: a cohesive subsystem (message, network, call model, rule engine, limiter); one layer is one crate. ADR-0002. Avoid: module.
 - **Layer interface** (a.k.a. **DI seam**): the Rust trait a layer exposes so consumers depend on it, not on an impl. Avoid: service.
 - **Parity oracle**: a second parser kept only for tests (`rvoip-sip-core`), diffed seed by seed against the production one.
-- **Compliance matrix**: the test running the production parser over the shared fixture corpus, asserting accept or reject. Avoid: parity test.
+- **Compliance matrix**: the test running the production parser over the shared fixtures, asserting accept or reject. Avoid: parity test.
 - **Frozen corpus**: grammar-valid inputs generated once by `abnfgen`, replayed by the ABNF fuzz test. Avoid: fuzz corpus.
 - **Callflow choreography** (`scenario_harness::callflow`): the inline helper a test calls to run INVITE/180/200/ACK; not a Callflow shape.
 - **Refined view**: a borrowed newtype over a request or response encoding a guarantee proven once at a boundary. Avoid: subtype, cast.
@@ -113,6 +113,7 @@ Full definitions: [docs/glossary/http-call-decision.md](docs/glossary/http-call-
 - **Call treatment**: the one outcome the decision layer returns at any hop: route, redirect, reject or relay. Avoid: terminate.
 - **Header ownership**: which party authors each header: the decision layer (From/To URIs, 302 Contact, added headers) or the core.
 - **Reroute plan**: the ordered failover destinations and on-exhausted treatment, carried in the opaque callback context. ADR-0008.
+- **Sequential attempt reading**: why each attempt of a captured sequential chain handed over to the next; no unstated cause is minted.
 
 ## Outbound backend vocabulary
 
@@ -167,7 +168,7 @@ Full definitions: [docs/glossary/call-model.md](docs/glossary/call-model.md).
 - **Attempt**: one routing answer that dials and the legs it dials, with a cause, a ring deadline and an outcome. ADR-0042. Avoid: try.
 - **Ring deadline** (`no_answer_ms`): how long a dialled leg may ring unanswered, run from its first 180–189. Avoid: no-answer timeout.
 - **Timer scope**: what a timer guards (call, attempt, leg, obligation, setup); leaving the scope retires its timers. ADR-0042, ADR-0055.
-- **Terminating timeout**: the 32 s backstop of a terminating call, or later to outlast a held caller dialog; its fire forces every unresolved leg terminal.
+- **Terminating timeout**: a terminating call's 32 s backstop, later to outlast a held caller dialog; its fire makes every unresolved leg terminal.
 - **A-leg** / **B-leg**: the leg facing the caller (answered as UAS) and a leg toward a called party (dialled as UAC).
 - **Leg kind** (`LegKind`): `a`, `destination`, `media` or `transfer-target`, defaulted from the leg id.
 - **Media leg**: a leg dialled toward a media server to broker SDP and control bodies; unadopted. Avoid: MRF leg.
@@ -192,7 +193,7 @@ Full definitions: [docs/glossary/dialog-model.md](docs/glossary/dialog-model.md)
 Full definitions: [docs/glossary/call-reaper.md](docs/glossary/call-reaper.md).
 
 - **Call reaper**: the module releasing every admitted call exactly once, with one CDR, through panic handling and a liveness sweep.
-- **Release obligation**: a consequence of admitting a call, discharged once at release from the `Call` alone: the owed CDR, one limiter release.
+- **Release obligation**: a consequence of admitting a call, discharged once at release from the `Call` alone: the owed CDR, a limiter release.
 - **Release queue**: the worker's unreplicated queue of limiter releases, sent batched and given up after one lease. ADR-0040.
 - **Last-touched stamp**: the node-local per-call activity timestamp, the reaper's only liveness input.
 - **Acting-backup terminal contract**: an acting backup ends a call only when serving an explicit BYE or CANCEL.
@@ -206,7 +207,7 @@ Full definitions: [docs/glossary/e2e-test-management.md](docs/glossary/e2e-test-
 - **Test Agent**: a scenario-driven UA the framework controls (Alice, Bob1, Bob2). Avoid: client, UA, endpoint.
 - **SUT** (system under test): the LB and b2bua the Test Agents exercise; the LB is the sole boundary in both directions.
 - **Test case** (a.k.a. **test data**): a committed JSON of input data, checks and compatible shapes; it also feeds the load fleet. ADR-0021.
-- **Endpoint config**: a JSON binding logical roles to addresses, recv-timeout and egress policy, labelled with its Infra shape; loadgen reads it.
+- **Endpoint config**: a JSON binding logical roles to addresses, recv-timeout and egress policy, labelled by Infra shape; loadgen reads it.
 - **Check**: a declared assertion over the recorded trace, run post-call by the RFC audit engine, keyed by a message anchor.
 - **Message anchor**: a project-wide message name (`initialInvite`, `answer`, `bye`, …) a shape publishes and checks bind to.
 - **Check set**: a committed reusable JSON bundle of checks keyed by message anchor, referenced by name.
@@ -266,7 +267,7 @@ Full definitions: [docs/glossary/failover-sweep.md](docs/glossary/failover-sweep
 
 Full definitions: [docs/glossary/rig.md](docs/glossary/rig.md).
 
-- **Rig** (siprig): the capture replay, the campaign runner, their store and their site, as one tool. ADR-0060. Avoid: testkit, flow viewer, tools.
+- **Rig** (siprig): the capture replay, the campaign runner, their store and site, as one tool. ADR-0060. Avoid: testkit, flow viewer, tools.
 - **Base**: what this repository holds of the rig. ADR-0060.
 - **Pack**: one product's content for the rig, shipped in its image.
 - **Test bed**: one workspace of the rig and the lab it drives. It builds nothing.
@@ -282,29 +283,29 @@ Full definitions: [docs/glossary/rig.md](docs/glossary/rig.md).
 - **Export**: records a cell's or a batch's own process leaves under a collector's name.
 - **Collector**: a plug-in that reads the lab around a scope: records, verifications, attachments, keys. Avoid: gatherer, hook, probe.
 - **Judge**: a plug-in that answers for the cells of a scope from their claims and their records.
-- **Operation**: a plug-in that changes the lab, with `inject`, `heal` and optionally `probe`. An incident of the HA tooling follows the same rules in another format.
+- **Operation**: a plug-in that changes the lab: `inject`, `heal`, optionally `probe`. An HA tooling incident follows the same rules in another format.
 - **Setup**: the operations a named campaign injects after provisioning and heals in reverse when its job ends, however it ends.
-- **Job event**: one phase of an operation on a job (`inject`, `heal`, `recovered`, …), on the runner's and the wall clock; a `job_events` row.
+- **Job event**: one phase of an operation on a job (`inject`, `heal`, `recovered`, …), on the runner's and wall clock; a `job_events` row.
 - **Verification**: one named line of a cell, a batch or a job, with a source and an answer. Avoid: check (the RFC audit's), finding.
 - **Answer**: `pass`, `fail`, `not checkable` or `pending`.
 - **Not requested**: a verification the collection level or the lane did not ask for. It is no line.
 - **Final status**: what a cell's verifications come to: `pass`, `fail`, `fail, still verifying`, `ok so far`, `unverified`.
-- **Attachment**: a file attached to a job, a batch or a cell, with a kind, in its holder's `attachments.jsonl`; an `attachments` row. Avoid: evidence (ADR-0055's).
+- **Attachment**: a kinded file on a job, a batch or a cell, in its holder's `attachments.jsonl`; an `attachments` row. Avoid: evidence (ADR-0055's).
 - **Collection level**: a named set of collector defaults a job is launched with.
 - **Required collector**: one no collection level and no lane switches off.
 - **Pre-check**: a job- or batch-scope collector `at = "before"`; its `fail` refuses its scope before any call.
-- **On-demand run**: a collector asked by the site or the CLI over named cells after their job ended; its attachments land, its lines never merge.
+- **On-demand run**: a collector the site or CLI asks over named cells after their job ended; its attachments land, its lines never merge.
 - **Record**: one object a collector returned or a cell exported, joined to a cell by a key or assigned to it.
 - **Unclaimed record**, **ambiguous record**: one whose key matches no cell, or several.
 - **Join**: the base matching a name's records to a scope's cells on one key, in one pass over the records. Avoid: correlation.
 - **Key**: a named value a cell carries, that a record is joined on.
 - **Cell description**: `cell.v1`, what a collector or a judge reads of each cell.
 - **Part**: a named property of a lane beyond its SIP target, a file several lanes may name, with a schema a pack or a workspace declares.
-- **Registration seam**: what a product registers into the replay library: its backend double, simulated SUT, in-process verifications and exports.
+- **Registration seam**: what a product registers into the replay library: backend double, simulated SUT, in-process verifications, exports.
 - **Case source**: a module that yields compiled cells.
 - **Reference pack**: the pack this repository ships to exercise every seam. It has no test value.
 - **Lab left changed**: the mark of a job where a `close` or a `heal` failed twice.
 - **Call facts**: the `@sip/pipeline` module a rule reads a call through, off a position in a capture or a case document. ADR-0061.
-- **Timeline**: call facts' list of a call's messages, each with its leg, hop, transaction and a pointer to its source message or step. ADR-0061.
-- **Leg** (rig): one attempt at one position of a capture or a document; its outcome is its last opening transaction's final. Not the call model's leg. ADR-0061.
-- **Delta rule**: a named difference between a replay and its reference capture, classed by a lane's lists after the run; not an Exemption, which accepts a non-RFC shape at the ingress gate. ADR-0062.
+- **Timeline**: call facts' list of a call's messages, each with its leg, hop, transaction and source message or step. ADR-0061.
+- **Leg** (rig): one attempt at one position of a capture or document; its outcome is its last opening transaction's final. Not the call model's leg. ADR-0061.
+- **Delta rule**: a named replay-vs-capture difference, classed after the run by lane lists; not an Exemption (a non-RFC shape the ingress gate accepts). ADR-0062.

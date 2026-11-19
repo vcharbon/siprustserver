@@ -16,7 +16,6 @@
  * it nowhere. What that costs is the reader's to weigh — see
  * {@link measuredRules} — because only the reader knows which rules it acts on.
  */
-import * as Effect from "effect/Effect"
 import * as Schema from "effect/Schema"
 import { STRICT } from "./strict.js"
 import { RFC_RULES, type RfcRule } from "./violation.js"
@@ -270,7 +269,3 @@ export const measuredRules = (report: CensusReport): ReadonlySet<RfcRule> =>
 
 export const decodeCensusReport = Schema.decodeUnknownEffect(CensusReport, STRICT)
 export const decodeCensusReportSync = Schema.decodeUnknownSync(CensusReport, STRICT)
-
-/** Parse a census report from its text. */
-export const parseCensusReport = (text: string) =>
-  Effect.suspend(() => decodeCensusReport(JSON.parse(text) as unknown))

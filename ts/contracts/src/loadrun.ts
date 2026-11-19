@@ -286,7 +286,6 @@ export const LoadRunIndex = Schema.Struct({
 })
 export interface LoadRunIndex extends Schema.Schema.Type<typeof LoadRunIndex> {}
 
-export const decodeLoadRunIndex = Schema.decodeUnknownEffect(LoadRunIndex, STRICT)
 export const decodeLoadRunIndexSync = Schema.decodeUnknownSync(LoadRunIndex, STRICT)
 
 /** Total completed calls across every bucket. */

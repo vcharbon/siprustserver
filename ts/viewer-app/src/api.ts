@@ -47,10 +47,9 @@ export interface MockAnswer {
   readonly answer: unknown
 }
 
-/** What a lane's HTTP mock answers for one case: the target it answers for, what the capture observed, the answers. */
+/** What a lane's HTTP mock answers for one case: the target it answers for, the answers. */
 export interface MockAnswers {
   readonly target: string | null
-  readonly observed: string | null
   readonly answers: ReadonlyArray<MockAnswer>
 }
 

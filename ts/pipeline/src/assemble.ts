@@ -25,7 +25,9 @@ import { buildCalls, CALLER_IDENTITY } from "./calls.js"
 import { captureIndex, type CaptureIndex } from "./capture-index.js"
 import { caseCallIds } from "./cut.js"
 import { synthesize, type StepSource } from "./flowsteps.js"
+import { joinsOf } from "./join-rules.js"
 import type { PartsIndex } from "./parts.js"
+import { backgroundOf } from "./platform.js"
 import type { Plan } from "./plan.js"
 import type { CasePolicy, HitCoverage } from "./policy.js"
 import type { SutSet } from "./sut.js"
@@ -81,7 +83,7 @@ const NO_CDR_ORACLE = "capture-carries-no-cdr"
  */
 const CAPTURED_LANE = "captured-platform"
 
-export interface AssembleInput {
+interface AssembleInput {
   readonly flows: Flows.FlowsDoc
   readonly capture: string
   readonly spec: CaseSpec
@@ -110,7 +112,7 @@ export const assemble = (input: AssembleInput): Assembled => {
     plan,
     policy.derives,
     spec.chainHints,
-    policy.joins,
+    joinsOf(policy.joinRules),
     index
   )
   const flags: Array<Case.Flag> = [...layout.flags]
@@ -120,7 +122,7 @@ export const assemble = (input: AssembleInput): Assembled => {
   // between the source platform and this one, flagging what it changed. The
   // policy's background readings reach both sides of §5.1: synthesis collapses
   // the claimed exchanges, the actors below carry the policies.
-  const background = policy.background(layout)
+  const background = backgroundOf(policy.platform, layout)
   const flow = policy.adaptFlow(
     flows,
     synthesize(
@@ -131,7 +133,7 @@ export const assemble = (input: AssembleInput): Assembled => {
       input.parts ?? new Map(),
       background,
       policy.relay18x(flows, layout) === undefined,
-      policy.relaysReinvite(flows, layout)
+      policy.platform.relaysReinvite
     ),
     layout
   )

@@ -4,7 +4,7 @@
  *
  * A policy an actor states does double duty. The assembled actor carries it, so
  * the replay answers the replaying SUT's own traffic of that method; and the
- * captured platform's own locally-minted exchanges of that method collapse into
+ * captured side's own locally-minted exchanges of that method collapse into
  * it instead of becoming steps — the cadence is a system parameter of the
  * platform that ran it, never call behaviour, so scripting it would gate the
  * flow on another deployment's liveness timer.
@@ -13,7 +13,7 @@
  * method that arrives at the actor WITHOUT a cross-leg origin (no captured
  * cross-leg emit of the same type within the relay proximity window, and an
  * emit origins only the FIRST same-type arrival that follows it) was minted
- * by the captured platform; the claim takes that request, the answers the actor
+ * by the captured side; the claim takes that request, the answers the actor
  * returned on the same CSeq, and every retransmission of either. A relayed
  * (end-to-end) request keeps its steps, and so does an out-of-dialog probe or a
  * request the ACTOR emits toward the platform: those are call behaviour whose

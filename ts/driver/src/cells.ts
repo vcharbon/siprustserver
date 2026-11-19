@@ -86,12 +86,6 @@ export interface TestInvocation {
   readonly unavailable?: string
 }
 
-/** `cargo test -p <crate> -- --exact <name> --nocapture`, the standard form. */
-export const cargoTest: TestInvocation = {
-  command: "cargo",
-  args: (cell) => ["test", "-p", cell.crate, "--", "--exact", cell.name, "--nocapture"]
-}
-
 /** Everything one cell needs that the campaign decided once. */
 export interface CellContext {
   /** Absolute path of the campaign's run directory. */

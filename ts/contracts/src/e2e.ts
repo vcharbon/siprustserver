@@ -143,9 +143,7 @@ export interface CampaignIndex extends Schema.Schema.Type<typeof CampaignIndex> 
 
 export const decodeRunResult = Schema.decodeUnknownEffect(RunResult, STRICT)
 export const decodeRunResultSync = Schema.decodeUnknownSync(RunResult, STRICT)
-export const decodeCampaignIndex = Schema.decodeUnknownEffect(CampaignIndex, STRICT)
 export const decodeCampaignIndexSync = Schema.decodeUnknownSync(CampaignIndex, STRICT)
-export const decodeCellSkip = Schema.decodeUnknownEffect(CellSkip, STRICT)
 export const decodeCellSkipSync = Schema.decodeUnknownSync(CellSkip, STRICT)
 
 // --- Declaration-order emission ----------------------------------------------

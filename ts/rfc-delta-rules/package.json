@@ -3,7 +3,7 @@
   "private": true,
   "version": "0.0.0",
   "type": "module",
-  "description": "The delta rows an RFC alone justifies (ADR-0062): values the sending stack allocates on every B2BUA replay, each row citing its clause, for a deployment to place in its own match order.",
+  "description": "The generic delta rows (ADR-0062): values the sending stack allocates, a captured side's break of a named clause, and the documented behaviour of this repository's B2BUA and replay rig, each citing its clause or ADR, in sections and an order a deployment keeps when it places them.",
   "exports": {
     ".": "./src/index.ts",
     "./test-fixtures": "./test/fixtures.ts",

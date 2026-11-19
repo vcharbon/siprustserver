@@ -31,3 +31,13 @@ export const neverDerives: CallIdDerivation = () => false
  */
 export const counterPrefixed: CallIdDerivation = (base, derived) =>
   derived.endsWith(base) && /^\d+-$/.test(derived.slice(0, derived.length - base.length))
+
+/**
+ * A server that mints a leg's Call-ID by prepending anything to the
+ * originator's: every longer Call-ID ending with a base of at least `minBase`
+ * characters, the floor under which two calls merely end alike.
+ */
+export const suffixed =
+  (minBase: number): CallIdDerivation =>
+  (base, derived) =>
+    base.length >= minBase && derived.length > base.length && derived.endsWith(base)

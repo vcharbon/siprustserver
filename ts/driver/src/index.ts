@@ -30,7 +30,7 @@
  * ).pipe(Layer.provide(NodeServices.layer))
  * ```
  */
-export { cargoTest, INTERRUPTED, runCell, type CellContext, type CellRun, type TestInvocation } from "./cells.js"
+export { INTERRUPTED, runCell, type CellContext, type CellRun, type TestInvocation } from "./cells.js"
 export { confrontInputOf } from "./confront-input.js"
 export { LanePresets, LaneUnknown } from "./lanes.js"
 export { settled } from "./pending.js"

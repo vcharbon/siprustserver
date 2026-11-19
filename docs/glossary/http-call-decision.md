@@ -48,3 +48,11 @@ positional-codec change, ADR-0008), so it survives failover by construction.
 _Avoid_: a structured top-level "routes" field on the call (would be a new
 replicated field); parsing the callback context anywhere but the decision layer
 (the platform keeps it opaque).
+
+**Sequential attempt reading** (a reroute plan, as a capture shows it):
+Why each attempt of a captured sequential chain handed over to the next: the
+callee's final (busy, redirect, an external status), or the platform's own
+give-up by CANCEL, the **no-answer** timer on an attempt that rang (its dwell
+from the first 180–189) and the **no-provisional** timer on one that did not
+(from its INVITE). A cause the vantage does not state is refused, never
+minted (`ts/pipeline/src/chain-reading.ts`).
