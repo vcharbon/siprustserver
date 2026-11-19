@@ -106,7 +106,7 @@ describe("collector.v1", () => {
     expect(refusalOf(Collector.parse("c/collector.toml", ofCell))).toBe("c/collector.toml: scope_only: a cell-scope collector's lines are its cell's")
   })
 
-  it("refuses a claimed collector of cell scope, or required", () => {
+  it("refuses a claimed collector of cell scope, required, or a pre-check", () => {
     const claimed = COLLECTOR.replace("locks ", "claimed = true\nlocks ")
     expect(refusalOf(Collector.parse("c/collector.toml", claimed))).toBe("accepted")
     const ofCell = claimed.replace(`scope    = "batch"`, `scope    = "cell"`).replace(`locks    = ["records-chain"]\n`, "")
@@ -114,6 +114,13 @@ describe("collector.v1", () => {
       .toBe("c/collector.toml: claimed: a cell-scope collector runs over its own cell, planned or not")
     expect(refusalOf(Collector.parse("c/collector.toml", claimed.replace("required = false", "required = true"))))
       .toBe("c/collector.toml: claimed: a required collector runs whatever its cells claim")
+    const before = claimed.replace(`at       = "after"`, `at = "before"`)
+      .replace(`open    = "./open"\n`, "")
+      .replace(`judge    = "call-records"\n`, "")
+      .replace(`[join]\nkey = "call_id"\n`, "")
+    expect(refusalOf(Collector.parse("c/collector.toml", before)))
+      .toBe("c/collector.toml: claimed: a pre-check judges the lab, whatever its cells claim")
+    expect(refusalOf(Collector.parse("c/collector.toml", before.replace("claimed = true\n", "")))).toBe("accepted")
   })
 
   it("refuses a pre-check whose default is on-failure", () => {

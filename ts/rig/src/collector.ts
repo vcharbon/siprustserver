@@ -55,7 +55,7 @@ export const Collector = Schema.Struct({
   scope_only: Schema.optionalKey(Schema.Boolean),
   /** The judge of the path that decides over its records. */
   judge: Schema.optionalKey(Name),
-  /** True: it runs over a scope whose planned cells, where stated, include one claiming under its name ({@link isClaimed}). */
+  /** True: it runs over a scope whose planned cells, where stated, include one claiming under its name ({@link isClaimed}); never a pre-check's. */
   claimed: Schema.optionalKey(Schema.Boolean),
   /** Box-wide locks held from `open` to `close`; none on a cell-scope collector. */
   locks: Schema.optionalKey(Schema.Array(Name)),
@@ -145,6 +145,7 @@ const meaningOf = (collector: Collector): string | undefined => {
   }
   if (collector.claimed === true && collector.scope === "cell") return "claimed: a cell-scope collector runs over its own cell, planned or not"
   if (collector.claimed === true && collector.required === true) return "claimed: a required collector runs whatever its cells claim"
+  if (collector.claimed === true && collector.at === "before") return "claimed: a pre-check judges the lab, whatever its cells claim"
   return undefined
 }
 

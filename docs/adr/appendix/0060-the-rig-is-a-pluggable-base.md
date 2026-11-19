@@ -205,7 +205,7 @@ Rules:
 - A `claimed` collector of job or batch scope runs only where a planned cell of its scope
   states a claim under its name. Where the planned cells are stated and none does, it is not
   opened, collected or closed, and answers nothing. Where none are stated (a capture
-  replay), it runs. One of cell scope, or required, is refused at load.
+  replay), it runs. One of cell scope, required, or a pre-check is refused at load.
 - Timeouts default to 30 s for `open` and `close`, 300 s for `collect`.
 - `after` orders collectors of one scope. A wider scope always runs after a narrower one ended
   and reads its keys and records without declaring it. An `after` naming a collector that is
