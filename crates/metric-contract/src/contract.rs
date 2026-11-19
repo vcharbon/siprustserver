@@ -21,10 +21,10 @@ pub struct FamilyRecord {
 pub struct Contract {
     /// The families, by name.
     pub families: BTreeMap<String, FamilyRecord>,
-    /// The name prefixes the families own, longest first: per first name
-    /// segment, the longest prefix every family of that segment shares, cut
-    /// at a `_`; a lone family's first two segments; and every prefix a
-    /// product catalogue declares.
+    /// The name prefixes the families own, longest first: every prefix a
+    /// product catalogue declares; and, over the families no declared prefix
+    /// covers, per first name segment the longest prefix every family of that
+    /// segment shares, cut at a `_`, and a lone family's first two segments.
     pub namespaces: Vec<String>,
     /// The prefixes product catalogues declared ([`Contract::extend_json`]).
     declared: BTreeSet<String>,
@@ -61,7 +61,11 @@ impl Contract {
             self.families.insert(name, record);
         }
         self.declared.extend(declared);
-        let mut all = namespaces(self.families.keys().map(String::as_str));
+        let undeclared = self
+            .families
+            .keys()
+            .filter(|name| !self.declared.iter().any(|ns| name.starts_with(ns.as_str())));
+        let mut all = namespaces(undeclared.map(String::as_str));
         for ns in &self.declared {
             if !all.contains(ns) {
                 all.push(ns.clone());
@@ -183,5 +187,31 @@ mod tests {
             .into_iter(),
         );
         assert_eq!(ns, ["http_request_failures_", "log_lines_", "b2bua_", "trace_"]);
+    }
+
+    /// A product declaring two prefixes under one first segment owns those two,
+    /// never their common stem, so its readers' other names under that stem
+    /// stay unchecked.
+    #[test]
+    fn a_declared_prefix_derives_no_wider_namespace() {
+        let family = |name: &str| {
+            format!(
+                r#"{{"name": "{name}", "kind": "counter", "labels": [[]], "semi_open": false}}"#
+            )
+        };
+        let json = format!(
+            r#"{{"namespaces": ["prod_alpha_", "prod_beta_"], "catalogues": [{{"binary": "prod",
+                "families": [{}, {}]}}]}}"#,
+            family("prod_alpha_total"),
+            family("prod_beta_total")
+        );
+        let mut contract = Contract::from_json(
+            r#"{"catalogues": [{"binary": "core", "families": [
+                {"name": "core_a_total", "kind": "counter", "labels": [[]], "semi_open": false},
+                {"name": "core_b_total", "kind": "counter", "labels": [[]], "semi_open": false}]}]}"#,
+        )
+        .unwrap();
+        contract.extend_json(&json, "prod.json").unwrap();
+        assert_eq!(contract.namespaces, ["prod_alpha_", "prod_beta_", "core_"]);
     }
 }
