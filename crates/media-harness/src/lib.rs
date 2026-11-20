@@ -4,8 +4,7 @@
 //! `sip_clock::testkit::advance_settled`, which runs a paced sender at each of
 //! its ptime deadlines.
 //!
-//! Port of the TS media test support (`src/test-harness/media/` + the
-//! `tests/media` helpers). Carries no production code (ADR-0004).
+//! Carries no production code (ADR-0004).
 
 pub mod audio;
 pub mod negotiate;

@@ -23,3 +23,21 @@ export type CallIdDerivation = (base: string, derived: string) => boolean
 
 /** The neutral default: no Call-ID derives from another until a deployment says how. */
 export const neverDerives: CallIdDerivation = () => false
+
+/**
+ * The upstream B2BUA's own convention: a leg it dials is called
+ * `<n>-<originator's Call-ID>`, `n` a decimal counter (`b2bua-core`
+ * `rules/relay/call_id.rs`).
+ */
+export const counterPrefixed: CallIdDerivation = (base, derived) =>
+  derived.endsWith(base) && /^\d+-$/.test(derived.slice(0, derived.length - base.length))
+
+/**
+ * A server that mints a leg's Call-ID by prepending anything to the
+ * originator's: every longer Call-ID ending with a base of at least `minBase`
+ * characters, the floor under which two calls merely end alike.
+ */
+export const suffixed =
+  (minBase: number): CallIdDerivation =>
+  (base, derived) =>
+    base.length >= minBase && derived.length > base.length && derived.endsWith(base)

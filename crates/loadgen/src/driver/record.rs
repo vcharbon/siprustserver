@@ -44,16 +44,19 @@ pub(super) fn record_unrun(
 }
 
 /// What writes the call's outcome record into `sink` from `wire`'s facts as
-/// they stand when it runs, the call ended at `ended_at_ms`.
+/// they stand when it runs, the call ended at `ended_at_ms`, less the
+/// refusals `excused` names then ([`CallWire::excuse`]).
 pub(super) fn outcome_write(
     sink: Option<Arc<OutcomeSink>>,
     wire: Option<CallWire>,
     id: ScenarioId,
     outcome: CallOutcome,
     ended_at_ms: i64,
+    excused: impl FnOnce() -> Vec<crate::outcome::wire::Refusal> + Send,
 ) -> impl FnOnce() + Send {
     move || {
         if let (Some(sink), Some(wire)) = (sink, wire) {
+            wire.excuse(&excused());
             crate::outcome::write_call(&sink, id, &wire.facts(), &outcome, ended_at_ms);
         }
     }

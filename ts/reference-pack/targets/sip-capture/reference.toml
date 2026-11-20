@@ -1,0 +1,3 @@
+# The reference lane's packet capture: the file its B2BUA runner appends each
+# SIP datagram to, which the `capture` collector cuts per failed cell.
+file = "/tmp/siprig-reference/b2bua-runner.pcapng"

@@ -4,7 +4,8 @@
  * The bundle is self-describing: `campaign.json` names the cells and whether
  * each passed, and every cell carries the `pivot.json` it actually ran, its
  * `verdict.json`, its `classification.json` and its `rfc.json` — a cell that
- * wrote no `pivot.json` records the document its run-spec asked for. So the same reader serves the
+ * wrote no `pivot.json` records the document its run-spec asked for — and
+ * lists the files it holds as attachments (`attachments.jsonl`, `attachments.ts`). So the same reader serves the
  * live recorder, the seed and the rebuild — the DB never learns
  * anything the bundle did not already prove.
  *
@@ -27,6 +28,8 @@ import { Bundle, Confrontation as Records, MainError, StepOrder } from "@sip/con
 import * as Effect from "effect/Effect"
 import * as FileSystem from "effect/FileSystem"
 import * as path from "node:path"
+import * as Attachments from "./attachments.js"
+import { answeredOf, linesOf, VERIFICATIONS_FILE } from "./cell-lines.js"
 import type { CaseResult, RunStatus } from "./model.js"
 
 const { BAD_BODY, failingBody, mainErrorOf, sourceFaultOf } = MainError
@@ -67,6 +70,8 @@ interface Rollup {
     readonly dir?: string
     readonly skipped?: string
     readonly error?: string
+    readonly restated?: string
+    readonly restatedLines?: ReadonlyArray<unknown>
   }>
 }
 
@@ -177,6 +182,13 @@ const findingsOf = (stored: Record<string, unknown> | null): ReadonlyArray<Bundl
   }
 }
 
+/** Whether `rfc.json` states an audit of the cell. */
+const auditedOf = (rfc: Record<string, unknown> | null): boolean => rfc?.["status"] === "audited"
+
+/** Why `rfc.json` states the cell not audited; null where it audited it or is absent. */
+const unauditedOf = (rfc: Record<string, unknown> | null): string | null =>
+  rfc?.["status"] === "not-audited" ? String(rfc["reason"] ?? "no reason stated") : null
+
 /** The confrontation counts `classification.json` states; none where the cell wrote no counts. */
 const confrontationOf = (classification: Record<string, unknown> | null): Confrontation | undefined => {
   const unknown = classification?.["unknown"]
@@ -260,6 +272,15 @@ export const read = Effect.fn("Bundle.read")(function*(runDir: string, options?:
     const body = failingBody(records)
     const source = findings.filter((finding) => finding.source_fault === true)
     const sourceFault = sourceFaultOf(source)
+    const decoded = verdictOf(verdict)
+    const error = typeof cell.error === "string" ? cell.error : undefined
+    const ran = dir !== undefined && skipped === null && error === undefined
+    const restated = typeof cell.restated === "string"
+      ? {
+        reason: cell.restated,
+        lines: (cell.restatedLines ?? []).filter((name): name is string => typeof name === "string")
+      }
+      : null
     cases.push({
       caseId,
       passed,
@@ -271,8 +292,8 @@ export const read = Effect.fn("Bundle.read")(function*(runDir: string, options?:
       mainError: mainErrorOf({
         passed,
         skipped,
-        ...(typeof cell.error === "string" ? { error: cell.error } : {}),
-        verdict: verdictOf(verdict),
+        ...(error === undefined ? {} : { error }),
+        verdict: decoded,
         charged,
         source,
         confrontation: confrontationOf(classification),
@@ -282,7 +303,21 @@ export const read = Effect.fn("Bundle.read")(function*(runDir: string, options?:
       }),
       ...(sourceFault === undefined ? {} : { sourceFault }),
       classification,
-      document
+      document,
+      ...(dir === undefined ? {} : { attachments: yield* Attachments.listed(dir) }),
+      ...(ran
+        ? {
+          verifications: linesOf({
+            passed,
+            verdict: decoded,
+            audit: auditedOf(rfc) ? findings : null,
+            unaudited: unauditedOf(rfc),
+            charged: restated === null ? charged : findings.filter((finding) => finding.gating),
+            answered: answeredOf(yield* readJson(path.join(dir, VERIFICATIONS_FILE))),
+            restated
+          })
+        }
+        : {})
     })
   }
   return {

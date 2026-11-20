@@ -595,9 +595,10 @@ export interface Attempt {
   join_evidence?: string | null
   /**
    * What ADDED this leg to the call: a transfer, or a media resource
-   * inserted into it. A joined leg is a parallel arrival, not a failure —
-   * the first attempt answered and the call then dialed somebody else — so
-   * it is exclusive with the failure-only sequential `cause`.
+   * inserted into it. A joined leg takes a branch of its own. Independent of
+   * `cause`: one says how the leg entered the call, the other why the
+   * platform left it, so a joined leg that fails (a busy transfer target the
+   * platform reroutes internally) states both.
    */
   joined_by?: JoinedBy | null
   /**
@@ -1762,15 +1763,16 @@ export interface MustFail {
   step: string
 }
 /**
- * Assertions evaluated once, after settle.
+ * Assertions evaluated once, after settle, and claims answered after the call.
  *
  * This interface was referenced by `PivotV3`'s JSON-Schema
  * via the `definition` "Postconditions".
  */
 export interface Postconditions {
   /**
-   * The call-detail-record expectation. Required (lint), because a call test
-   * that never looks at what was billed is half a test.
+   * The call-record expectation, read as the [`CALL_RECORDS`] claim.
+   * Required (lint), here or as that claim, because a call test that never
+   * looks at what was billed is half a test.
    */
   cdr?: CdrExpectation | null
   /**
@@ -1778,6 +1780,13 @@ export interface Postconditions {
    * settle and never mid-flow. Open field vocabulary.
    */
   checks?: Check[]
+  /**
+   * What the case expects of each collector, by collector name, opaque to
+   * the runner. A [`CALL_RECORDS`] claim has the shape of [`CdrCheck`].
+   */
+  claims?: {
+    [k: string]: unknown
+  }
 }
 /**
  * The records the run must have written.

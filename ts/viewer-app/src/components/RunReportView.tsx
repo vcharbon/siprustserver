@@ -6,11 +6,10 @@
  * what stands is what the citation kept.
  */
 import type { CompareReport, RunReport } from "@sip/contracts"
+import { commitLabel } from "@sip/contracts/commit-label"
 import type { JSX } from "react"
 import { errorOf, localPath, outcomeOf, repeatsOf, toneOf } from "./CompareReportView.tsx"
 import { Link } from "./Link.tsx"
-
-const short = (sha: string | null): string => (sha === null ? "unknown" : sha.slice(0, 10))
 
 /** Failed first, then skipped, then passed; within each, the document's order. */
 const rank = (cell: CompareReport.Cell): number => (cell.skipped !== null ? 1 : cell.passed ? 2 : 0)
@@ -41,7 +40,7 @@ const Runs = ({ doc }: { doc: RunReport.RunReport }): JSX.Element => (
           <td>{run.lane}</td>
           <td>{run.setKind} · {run.status}</td>
           <td>{run.env ?? "unknown"}@{run.branch ?? "unknown"}</td>
-          <td>{run.code.length === 0 ? "unknown" : run.code.map((one) => `${one.name} ${short(one.sha)}`).join(", ")}</td>
+          <td>{run.code.length === 0 ? "unknown" : run.code.map((one) => `${one.name} ${commitLabel(one)}`).join(", ")}</td>
           <td>{run.startedAt}</td>
           <td>{run.cases} · {run.failed}</td>
           <td>{run.sweepId ?? "—"} · {run.jobId ?? "—"}</td>

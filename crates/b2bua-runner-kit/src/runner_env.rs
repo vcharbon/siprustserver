@@ -5,9 +5,11 @@
 use std::env;
 use std::fmt::Display;
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::str::FromStr;
 use std::time::Duration;
 
+use b2bua::cdr::BufferedCdrWriter;
 use b2bua::config::{B2buaConfig, CapacityConfig, CdrConfig};
 use sip_message::{Exemptions, SipParserLimits};
 
@@ -41,13 +43,20 @@ pub struct RunnerEnv {
     /// worker's own `ip:port` and its deployment mode, read by
     /// [`addresses_from_lookup`], which refuses an inconsistent pair.
     pub addresses: WorkerAddresses,
-    /// `B2BUA_METRICS` — Prometheus HTTP listen addr (default `0.0.0.0:9091`).
+    /// `B2BUA_METRICS` — the probe server's listen addr: `/metrics`, `/ready`,
+    /// `/healthz` (default `0.0.0.0:9091`; an IPv6 address may go without
+    /// brackets, [`crate::resolve`]).
     pub metrics_addr: String,
-    /// `B2BUA_ADMIN` — the operator routes' listen addr, a loopback
+    /// `B2BUA_ADMIN` — the operator and debug routes' listen addr, a loopback
     /// `ip:port` only (default `127.0.0.1:9094`).
     pub admin_addr: SocketAddr,
     /// `B2BUA_QUEUE` — inbound UDP queue depth, packets (default 8192).
     pub queue_max: usize,
+    /// `B2BUA_CAPTURE` — the pcapng file the worker appends each SIP datagram
+    /// it sends and receives to, one section per start
+    /// ([`sip_net::CaptureEndpoint`]); unset or blank, nothing is captured.
+    /// It refuses the boot where `listen` is the unspecified address.
+    pub capture: Option<PathBuf>,
     /// What the process reads the wire under: the default limits and the
     /// exemptions `SIP_EXEMPTIONS` states (comma-separated, default none; a blank
     /// value or a name no exemption has refuses the boot, as on the proxy).
@@ -62,7 +71,9 @@ pub struct RunnerEnv {
     /// `rmem_max`). What overflows it is dropped by the kernel and exported as
     /// `b2bua_udp_kernel_rx_dropped_total`.
     pub udp_rcvbuf: Option<usize>,
-    /// `B2BUA_CDR_QUEUE` — buffered-CDR submit queue depth (default 1024).
+    /// `B2BUA_CDR_QUEUE` — buffered-CDR submit queue depth (default 1024, at
+    /// most [`BufferedCdrWriter::MAX_QUEUE`]; `0` unbuffered: the sink is
+    /// called inline on the call path).
     pub cdr_queue: usize,
     /// `B2BUA_ORDINAL` — worker ordinal stamped in callRef (default `w0`).
     pub ordinal: String,
@@ -77,7 +88,10 @@ pub struct RunnerEnv {
     /// `B2BUA_CONCURRENCY` — handler concurrency ceiling (default 8192; a
     /// back-pressure SAFETY limit, not a rate governor).
     pub concurrency: usize,
-    /// `B2BUA_CALL_CAP` — max concurrent calls before drop (default 1_000_000).
+    /// `B2BUA_CALL_CAP` — live per-call queues; at it a request or response
+    /// for a call with no queue is refused, a normal new INVITE already at the
+    /// cap less the new-call headroom, with a 503 (ADR-0022 X6; default
+    /// 1_000_000).
     pub call_cap: usize,
     /// `B2BUA_NEW_CALL_PERMIT_SHARE_PCT` — share of the handler concurrency
     /// normal initial-INVITE turns may hold, percent (default 50).
@@ -91,6 +105,10 @@ pub struct RunnerEnv {
     /// `B2BUA_MAX_MESSAGES_PER_CALL_LIFETIME` — the per-call work bound over
     /// the call's life (default 100_000; 0 is refused).
     pub max_messages_per_call_lifetime: u64,
+    /// `B2BUA_CAP_MESSAGES_PER_CALL_ID` — the message budget of one Call-ID
+    /// on this node (ADR-0063 §3; default 10_000_000; 0 and less than 100
+    /// lifetime caps are refused).
+    pub max_messages_per_call_id: u64,
     /// `B2BUA_KEEPALIVE_SEC` — in-dialog OPTIONS keepalive interval (default
     /// 300 s; a shorter poke breaks long-hold endurance traffic).
     pub keepalive_sec: i64,
@@ -122,7 +140,7 @@ pub struct RunnerEnv {
     /// trip (default 5000; <= 0 is refused at startup — ADR-0022 X1).
     pub call_control_timeout_ms: i64,
     /// `B2BUA_ACK_TIMEOUT_SEC` — un-ACKed 2xx give-up deadline (RFC 3261
-    /// §13.3.1.4, 64·T1 = 32 s; <= 0 tears nothing down — the ladder itself
+    /// §13.3.1.4, 64·T1 = 32 s; <= 0 is refused at startup; the ladder
     /// always runs, ADR-0032 X5).
     pub ack_timeout_sec: i64,
     /// `B2BUA_CPS_BUCKET_SIZE` — CPS bucket rung capacity (default 1000).
@@ -239,6 +257,24 @@ fn socket_buffer_knob(key: &str) -> Result<Option<usize>, String> {
         .transpose()
 }
 
+/// `B2BUA_CDR_QUEUE`: the CDR buffer's depth in records, 1024 when unset, `0`
+/// unbuffered. `Err` names the variable for a value that is no integer or is
+/// above [`BufferedCdrWriter::MAX_QUEUE`].
+pub(crate) fn cdr_queue_from_lookup(
+    lookup: impl Fn(&str) -> Option<String>,
+) -> Result<usize, String> {
+    let Some(raw) = lookup("B2BUA_CDR_QUEUE") else { return Ok(1_024) };
+    let max = BufferedCdrWriter::MAX_QUEUE;
+    match raw.parse::<usize>() {
+        Ok(depth) if depth <= max => Ok(depth),
+        Ok(depth) => Err(format!(
+            "B2BUA_CDR_QUEUE={depth} is above {max}: each slot of the CDR buffer holds one \
+             whole call; state a depth of at most {max}"
+        )),
+        Err(e) => Err(format!("B2BUA_CDR_QUEUE={raw:?}: {e}")),
+    }
+}
+
 /// `B2BUA_CDR_MESSAGE_RING` (default `0`, off), `B2BUA_CDR_CAPTURED_HEADERS`
 /// (comma-separated, default none) and `B2BUA_CDR_FINAL_RESPONSE_HEADERS`
 /// (comma-separated, default the captured ones) as `lookup` states them; a
@@ -287,13 +323,13 @@ fn cluster_key(value: Option<String>) -> Result<Option<sip_ids::SigningKey>, Str
 /// names the variable for a value that is no address or not a loopback one.
 pub(crate) fn admin_addr(lookup: impl Fn(&str) -> Option<String>) -> Result<SocketAddr, String> {
     let raw = stated(lookup("B2BUA_ADMIN")).unwrap_or_else(|| "127.0.0.1:9094".into());
-    match raw.trim().parse::<SocketAddr>() {
-        Ok(addr) if addr.ip().is_loopback() => Ok(addr),
-        Ok(addr) => Err(format!(
-            "B2BUA_ADMIN={addr} is not a loopback address: the operator routes are reached \
-             from inside the worker's network namespace only"
+    match probe_http::parse_socket_addr(&raw) {
+        Some(addr) if addr.ip().is_loopback() => Ok(addr),
+        Some(addr) => Err(format!(
+            "B2BUA_ADMIN={addr} is not a loopback address: the operator and debug routes are \
+             reached from inside the worker's network namespace only"
         )),
-        Err(e) => Err(format!("B2BUA_ADMIN={raw:?} is not an ip:port: {e}")),
+        None => Err(format!("B2BUA_ADMIN={raw:?} is not an ip:port")),
     }
 }
 
@@ -319,10 +355,11 @@ impl RunnerEnv {
             metrics_addr: env_or("B2BUA_METRICS", "0.0.0.0:9091"),
             admin_addr: admin_addr(lookup)?,
             queue_max: knob("B2BUA_QUEUE", "8192")?,
+            capture: stated(lookup("B2BUA_CAPTURE")).map(PathBuf::from),
             parser_limits: parser_limits(lookup)?,
             udp_sndbuf: socket_buffer_knob("B2BUA_UDP_SNDBUF")?,
             udp_rcvbuf: socket_buffer_knob("B2BUA_UDP_RCVBUF")?,
-            cdr_queue: knob("B2BUA_CDR_QUEUE", "1024")?,
+            cdr_queue: cdr_queue_from_lookup(lookup)?,
             ordinal: env_or("B2BUA_ORDINAL", "w0"),
             identity: stated(env::var("POD_UID").ok()),
             cluster_key: cluster_key(stated(env::var("B2BUA_CLUSTER_KEY").ok()))?,
@@ -335,6 +372,7 @@ impl RunnerEnv {
             new_call_queue_headroom_percent: knob("B2BUA_NEW_CALL_QUEUE_HEADROOM_PCT", "5")?,
             max_messages_per_call: knob("B2BUA_MAX_MESSAGES_PER_CALL", "200")?,
             max_messages_per_call_lifetime: knob("B2BUA_MAX_MESSAGES_PER_CALL_LIFETIME", "100000")?,
+            max_messages_per_call_id: knob("B2BUA_CAP_MESSAGES_PER_CALL_ID", "10000000")?,
             keepalive_sec: knob("B2BUA_KEEPALIVE_SEC", "300")?,
             replica: b2bua::ReplicaConfig {
                 reboot_budget_sec: knob("B2BUA_REBOOT_BUDGET_SEC", "600")?,

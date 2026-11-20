@@ -137,8 +137,9 @@ fn only_here_to_end(live: &Call, ending: &Call, by: &RelayOwner) -> bool {
 /// dialled; a leg's own tag where `base` holds none; the caller answered, under
 /// `other`'s own tag, when `other` answered her; and every early dialog of a
 /// leg whose INVITE took a final ended by it. A leg id names one leg in both
-/// copies: two copies acting at once mint from distinct leg-id spaces
-/// (`call::LegSpace`). The request records of the union are those of `live`
+/// copies acting at once, which mint from distinct leg-id spaces
+/// (`call::LegSpace`); a leg id minted twice across a lost write
+/// (`call::helpers::same_leg` false) keeps `base`'s leg only. The request records of the union are those of `live`
 /// the worker `by` made: this node's teardown answers its own transactions,
 /// the other node's teardown its own.
 fn union_of(base: Enveloped, other: &Call, live: &Call, by: &RelayOwner) -> Enveloped {
@@ -168,7 +169,9 @@ fn union_of(base: Enveloped, other: &Call, live: &Call, by: &RelayOwner) -> Enve
 
 /// `call` with, on each dialog, the open request records of the same dialog
 /// of `live` the worker `by` made and no other: an INVITE relay another
-/// worker made is left to it.
+/// worker made is left to it, and the dialog holds again the INVITE before
+/// it, from the ACK that relay carried ahead, so a copy of that INVITE's 2xx
+/// still draws its ACK here (RFC 3261 §13.2.2.4).
 pub(super) fn own_records(mut call: Call, live: &Call, by: &RelayOwner) -> Call {
     let mine = |r: &RequestRecord| r.relayed_by == *by;
     let legs = std::iter::once(&mut call.a_leg).chain(call.b_legs.iter_mut());
@@ -184,7 +187,7 @@ pub(super) fn own_records(mut call: Call, live: &Call, by: &RelayOwner) -> Call 
             if let Some(relay) = relay {
                 d.sent_invite = Some(relay.clone());
             } else if call::helpers::invite_relay(d).is_some_and(|r| !mine(r)) {
-                d.sent_invite = None;
+                call::helpers::close_untaken_invite(d);
             }
         }
     }
@@ -192,7 +195,7 @@ pub(super) fn own_records(mut call: Call, live: &Call, by: &RelayOwner) -> Call 
 }
 
 fn union_leg(ours: &mut Leg, theirs: &Leg) {
-    if ours.call_id != theirs.call_id {
+    if !call::helpers::same_leg(ours, theirs) {
         return;
     }
     if ours.own_tag.is_none() {

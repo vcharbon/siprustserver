@@ -5,6 +5,7 @@
  */
 import { describe, expect, it } from "vitest"
 import { synthesize, type HeaderClassifier } from "../src/flowsteps.js"
+import { scenario, SDP } from "../src/scenario.js"
 import { build } from "../src/topology.js"
 import type { CallIdDerivation } from "../src/derivation.js"
 import type { Flows } from "@sip/contracts"
@@ -13,6 +14,7 @@ import {
   CALLEE_CALL_ID,
   CALLER_CALL_ID,
   delayedOfferFlows,
+  derivesNothing,
   derivesOnePrefix,
   doc,
   leg,
@@ -77,6 +79,48 @@ describe("every captured message is a step", () => {
     // The ACK to the 488 belongs to the INVITE transaction (§17.1.1.3) and
     // reaches no TU that could read a body, so nothing stores one.
     expect(refused?.msg.body).toBeUndefined()
+    expect(flow.flags.map((f) => f.kind)).toContain("automatic-body-dropped")
+  })
+
+  it("stores the delayed offer's answer on the ACK of its INVITE's 2xx, past a 491 to a far-end re-INVITE of the same CSeq number (RFC 3261 §12.2.1.1, §14.1)", () => {
+    const s = scenario()
+    const caller = s
+      .leg({ callId: "delayed-offer@example.com", party: "198.51.100.10:5060" })
+      .invite({ at: 0, by: "party" })
+      .response(200, { at: 100, body: SDP })
+      .invite({ at: 105, by: "system", body: SDP })
+      .response(491, { at: 110, by: "party" })
+      .ack({ at: 115, by: "system" })
+      .ack({ at: 120, by: "party", body: SDP })
+      .bye({ at: 2000, by: "party" })
+      .response(200, { at: 2010 })
+    const flows = s.flows()
+    const flow = synthesize(flows, build(flows, [caller.vantage()], s.sut, plan(), derivesNothing), plan())
+    const answering = flow.steps.find((step) => step.op === "send" && (step.msg.method ?? "").toUpperCase() === "ACK")
+
+    expect(answering?.observed?.msg).toBe(5)
+    expect(answering?.msg.body).toMatchObject({ ref: expect.stringContaining(".sdp") })
+    expect(flow.flags.map((f) => f.kind)).not.toContain("automatic-body-dropped")
+  })
+
+  it("reads the ACK of one fork's failure as a non-2xx's though another fork's 2xx answers the INVITE later (RFC 3261 §17.1.1.3, §13.2.2.4)", () => {
+    const s = scenario()
+    const caller = s
+      .leg({ callId: "forked@example.com", party: "198.51.100.10:5060" })
+      .invite({ at: 0, by: "party" })
+      .response(486, { at: 100, tag: "busy-fork" })
+      .ack({ at: 105, by: "party", fork: "busy-fork", body: SDP })
+      .response(200, { at: 300, to: "INVITE", tag: "answering-fork", body: SDP })
+      .ack({ at: 305, by: "party", fork: "answering-fork", body: SDP })
+      .bye({ at: 2000, by: "party" })
+      .response(200, { at: 2010 })
+    const flows = s.flows()
+    const flow = synthesize(flows, build(flows, [caller.vantage()], s.sut, plan(), derivesNothing), plan())
+    const acks = flow.steps.filter((step) => step.op === "send" && (step.msg.method ?? "").toUpperCase() === "ACK")
+
+    expect(acks.map((step) => step.observed?.msg)).toEqual([2, 4])
+    expect(acks[0]!.msg.body).toBeUndefined()
+    expect(acks[1]!.msg.body).toMatchObject({ ref: expect.stringContaining(".sdp") })
     expect(flow.flags.map((f) => f.kind)).toContain("automatic-body-dropped")
   })
 

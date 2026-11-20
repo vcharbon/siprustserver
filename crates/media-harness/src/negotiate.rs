@@ -2,7 +2,7 @@
 //! production O/A engine, with a pluggable "B2BUA rewrite" applied to the offer
 //! and answer as they cross the middle.
 //!
-//! Port of `../sipjsserver/tests/media/support-negotiate.ts`. The identity
+//! The identity
 //! rewrite models a transparent (signaling-only) B2BUA; a corrupting rewrite
 //! models an SDP-rewrite bug that misdirects media — which a recorded-clip
 //! verdict must then catch.

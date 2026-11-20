@@ -31,6 +31,7 @@ async fn the_metrics_socket_serves_the_live_report() {
         advisory: false,
         offending: None,
         charged: None,
+        counterpart: None,
     }]);
     let sample = loadgen::report::RenderedSample {
         html: Some(Arc::from("<html><body>the recorded flow</body></html>")),

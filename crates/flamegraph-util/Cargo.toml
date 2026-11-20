@@ -4,7 +4,7 @@ version = "0.1.0"
 edition.workspace = true
 license.workspace = true
 publish = false
-description = "On-demand pprof-rs CPU flamegraph capture for the runner binaries (no perf, no privileges, no kernel PMU). Backs the /debug/flamegraph route on the b2bua-worker + front-proxy metrics servers so an endurance run can profile either tier live."
+description = "On-demand pprof-rs CPU flamegraph capture for the runner binaries (no perf, no privileges, no kernel PMU). Backs the /debug/flamegraph route of probe-http's `flamegraph` feature, on the loopback listeners of a profiling build of the b2bua worker or the front proxy, and the load driver's."
 
 [package.metadata.purity]
 tier = "shell"

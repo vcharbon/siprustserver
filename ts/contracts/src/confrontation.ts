@@ -87,9 +87,7 @@ export const ClassificationSummary = Schema.Struct({
 })
 export interface ClassificationSummary extends Schema.Schema.Type<typeof ClassificationSummary> {}
 
-export const decodeConfrontationRecord = Schema.decodeUnknownEffect(ConfrontationRecord, STRICT)
 export const decodeConfrontationRecordSync = Schema.decodeUnknownSync(ConfrontationRecord, STRICT)
-export const decodeClassificationSummary = Schema.decodeUnknownEffect(ClassificationSummary, STRICT)
 export const decodeClassificationSummarySync = Schema.decodeUnknownSync(ClassificationSummary, STRICT)
 
 /** One NDJSON line, sorted keys, no trailing newline — the caller owns `\n`. */

@@ -1,11 +1,9 @@
-//! X-Api-Call JSON integrity through the parser. Port of
-//! `tests/sip/parser-x-api-call-fold.test.ts`.
+//! X-Api-Call JSON integrity through the parser.
 //!
 //! Regression: an extension header whose value contains commas (a JSON
 //! payload) must NOT be split on those commas — only structured list headers
 //! fold. The B2BUA's k8s reroute payload nests an `on_failure` object; it must
-//! round-trip byte-identical so `InitialInviteHandler` can `JSON.parse` it.
-//! (The TS `jssip`/`native` oracle columns are dropped — see ADR-0001.)
+//! round-trip byte-identical so the B2BUA can read it as JSON.
 
 use sip_message::header::HeaderName;
 use sip_message::{CustomParser, SipMessage, SipParser};
@@ -55,10 +53,10 @@ fn nested_x_api_call_round_trips() {
     assert_eq!(vals[0], API_CALL_REROUTE);
 }
 
+/// A forwarded header list skips the structural headers and keeps the rest.
+/// The X-Api-Call value must survive whole.
 #[test]
 fn last_write_wins_extraction_keeps_payload_intact() {
-    // Replicates InitialInviteHandler's extractSipHeaders: skip structural
-    // headers, keep the rest. The X-Api-Call value must survive whole.
     let msg = CustomParser::new().parse(&build_invite(API_CALL_REROUTE)).expect("parse");
     let structural = [
         "from",

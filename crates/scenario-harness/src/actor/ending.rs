@@ -23,8 +23,13 @@ pub enum Ending {
     Answered,
     /// The caller's establishing INVITE drew this non-2xx final.
     Refused(u16),
-    /// The caller received a provisional carrying SDP (early media), then its
-    /// establishing INVITE drew this non-2xx final.
+    /// As [`Refused`](Self::Refused), the call ending on that final, and the
+    /// final state also shows the predicate: a refusal the call accepts only
+    /// in the circumstance it names.
+    RefusedWhen(u16, fn(&StateInner) -> bool),
+    /// The caller received a provisional carrying SDP (early media), or the
+    /// call's loss model dropped one on its way to her, then her establishing
+    /// INVITE drew this non-2xx final.
     EarlyMediaRefused(u16),
     /// The callee's 2xx crossed the caller's CANCEL (RFC 3261 §9.2): her
     /// INVITE drew a 2xx before her CANCEL drew its final — a 200, or a 481 when
@@ -32,7 +37,9 @@ pub enum Ending {
     /// non-2xx final. A server that ignores the CANCEL — no final to it, or a
     /// 2xx after its 200 — shows neither order and is no crossing. That second
     /// reading holds when the SUT is the UAS; a stateful proxy may 200 the
-    /// CANCEL itself and still relay a 2xx (§16.10).
+    /// CANCEL itself and still relay a 2xx (§16.10). A 2xx copy the call's
+    /// loss model dropped on its way to her before the CANCEL's final arrived
+    /// reads as the 2xx before that final.
     AnsweredAcrossCancel,
     /// The callee's 2xx reached the caller before her CANCEL left: she sent
     /// none, her INVITE drew a 2xx and no non-2xx final.
@@ -93,9 +100,10 @@ impl Branch {
         match self.ending {
             Ending::Answered => leg.is_some_and(|l| l.first_final().is_none()),
             Ending::Refused(code) => leg.is_some_and(|l| l.saw_final(code)),
-            Ending::EarlyMediaRefused(code) => {
-                leg.is_some_and(|l| l.saw_early_media() && l.saw_final(code))
-            }
+            Ending::RefusedWhen(code, when) => leg.is_some_and(|l| l.saw_final(code)) && when(s),
+            Ending::EarlyMediaRefused(code) => leg.is_some_and(|l| {
+                (l.saw_early_media() || l.lost_early_media()) && l.saw_final(code)
+            }),
             Ending::AnsweredAcrossCancel => leg.is_some_and(|l| {
                 let facts = l.responses();
                 let answered = facts
@@ -105,7 +113,8 @@ impl Branch {
                     facts.iter().position(|f| f.status >= 200 && f.cseq_method == "CANCEL");
                 l.first_final().is_none()
                     && matches!((answered, cancel_final), (Some(a), Some(c))
-                        if a < c && matches!(facts[c].status, 200 | 481))
+                        if (a < c || l.lost_answer_before_cancel_final())
+                            && matches!(facts[c].status, 200 | 481))
             }),
             Ending::AnsweredBeforeCancel => leg.is_some_and(|l| {
                 !l.cancel_sent()
@@ -121,7 +130,10 @@ impl Branch {
     /// Whether this branch ends the call on the caller's establishing-INVITE
     /// final `code`.
     fn ends_on_final(&self, code: u16) -> bool {
-        matches!(self.ending, Ending::Refused(c) | Ending::EarlyMediaRefused(c) if c == code)
+        matches!(
+            self.ending,
+            Ending::Refused(c) | Ending::RefusedWhen(c, _) | Ending::EarlyMediaRefused(c) if c == code
+        )
     }
 }
 

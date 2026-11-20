@@ -12,7 +12,7 @@ import { STRICT } from "./strict.js"
 
 /** One rule's count on one cell, under the one subdivision it was counted in. */
 export const Hit = Schema.Struct({
-  /** The rule family, an open token (`tolerance`, `bless`, ...). */
+  /** The rule family, an open token (`delta`, `bless`, ...). */
   family: Schema.String,
   rule: Schema.String,
   /** The count's subdivision, open per family. */
@@ -25,7 +25,6 @@ export interface Hit extends Schema.Schema.Type<typeof Hit> {}
 export const Hits = Schema.Array(Hit)
 export type Hits = typeof Hits.Type
 
-export const decodeHits = Schema.decodeUnknownEffect(Hits, STRICT)
 export const decodeHitsSync = Schema.decodeUnknownSync(Hits, STRICT)
 
 export const emitHits = (value: Hits): string => format(Schema.encodeUnknownSync(Hits, STRICT)(value))

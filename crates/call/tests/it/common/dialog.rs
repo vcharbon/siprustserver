@@ -38,7 +38,7 @@ pub(super) fn arb_dialog() -> BoxedStrategy<Dialog> {
             proptest::collection::vec(arb_subscription(), 0..2),
             proptest::collection::vec(arb_queued(), 0..3),
         ),
-        (any::<bool>(), proptest::option::of(arb_tag())),
+        (any::<bool>(), proptest::option::of(arb_tag()), proptest::option::of(any::<i64>())),
     );
     (sip, ext)
         .prop_map(
@@ -51,7 +51,7 @@ pub(super) fn arb_dialog() -> BoxedStrategy<Dialog> {
                     answered_invite,
                     cached_sdp,
                     (sdp_session, owed_answer, subscriptions, queued),
-                    (shown, shows_media),
+                    (shown, shows_media, untaken_invite),
                 ),
             )| Dialog {
                 our_tag,
@@ -66,6 +66,7 @@ pub(super) fn arb_dialog() -> BoxedStrategy<Dialog> {
                 shows_media,
                 requests,
                 sent_invite,
+                untaken_invite,
                 answered_invite,
                 cached_sdp,
                 sdp_session,

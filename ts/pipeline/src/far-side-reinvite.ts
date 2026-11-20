@@ -2,8 +2,8 @@
  * The far side of an in-dialog INVITE exchange the capture holds on ONE leg
  * only, because the vantage lost the other leg past the 2xx it sent (§6.9).
  *
- * Where the policy states the platform relays an in-dialog INVITE end to end
- * (`CasePolicy.relaysReinvite`), every exchange the near leg carries and the
+ * Where the platform profile states the platform relays an in-dialog INVITE end
+ * to end (`PlatformProfile.relaysReinvite`), every exchange the near leg carries and the
  * far leg's record cannot hold is transcribed onto the far leg from the near
  * leg's half, in the direction it ran:
  *
@@ -18,7 +18,11 @@
  * bounds: the far leg's record ends at its 2xx; the near-leg answer is a 2xx
  * (a refusal is left under `far-side-reinvite-not-derived`, a 491 the near
  * peer took is glare the replaying platform composes itself); the near-leg
- * half has no relay origin. §6.9 states the rationale of each.
+ * half has no relay origin. A far leg the vantage kept watching that shows no
+ * INVITE says the platform did NOT relay, which a replay must surface; a
+ * refusal the near peer sent owes the far leg an ACK no captured message gives
+ * a coordinate to, and a 491 is half of a crossing pair stated whole or not at
+ * all; a near-leg half with a relay origin is already a far-leg step.
  */
 import { Body, Tokens } from "@sip/contracts"
 import { relayOriginOf, type StepTiming } from "./delay.js"
@@ -26,10 +30,10 @@ import type { MsgSpecDraft, StepDraft } from "./draft.js"
 import { stepId, type StepSource } from "./flowsteps.js"
 
 /** Who sent the re-INVITE: the near leg's peer, or the far party through the platform. */
-export type ReinviteOrigin = "near-peer" | "far-party"
+type ReinviteOrigin = "near-peer" | "far-party"
 
 /** One exchange transcribed onto the far leg, as step OBJECTS until ids settle. */
-export interface FarSide {
+interface FarSide {
   readonly farLeg: string
   readonly origin: ReinviteOrigin
   /** The far leg's last captured step: the 2xx its record ends at. */
@@ -45,20 +49,20 @@ export interface FarSide {
 }
 
 /** One exchange the pass declined, and the reason it states. */
-export interface FarSideLeft {
+interface FarSideLeft {
   readonly farLeg: string
   readonly nearInvite: StepDraft
   readonly detail: string
 }
 
 /** The build-up arrays this pass splices into, all parallel to `steps`. */
-export interface FarSideInput {
+interface FarSideInput {
   readonly steps: Array<StepDraft>
   readonly timings: Array<StepTiming>
   readonly sources: Array<StepSource>
 }
 
-export interface FarSideOut {
+interface FarSideOut {
   readonly derived: ReadonlyArray<FarSide>
   readonly left: ReadonlyArray<FarSideLeft>
 }

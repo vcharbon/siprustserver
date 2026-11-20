@@ -1,5 +1,5 @@
-//! The scenario DSL — scenarios as **data** (port of the *useful* half of
-//! `src/test-harness/framework/dsl.ts`, MIGRATION_PLAN_B2B §4(ii) decision B).
+//! The scenario DSL — scenarios as **data**, a slim DSL over the recording
+//! (ADR-0006).
 //!
 //! It holds no dialog state of its own (CSeq, route sets, tags, offer/answer
 //! belong to the transaction and call-context layers), only:
@@ -83,8 +83,7 @@ impl Scenario {
         Self { name: name.into(), description: None, agents: Vec::new(), steps: Vec::new() }
     }
 
-    /// Human-readable commentary, surfaced in the report header (port of
-    /// `.describe(...)`).
+    /// Human-readable commentary, surfaced in the report header.
     pub fn describe(mut self, description: impl Into<String>) -> Self {
         self.description = Some(description.into());
         self

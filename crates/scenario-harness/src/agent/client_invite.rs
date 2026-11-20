@@ -10,15 +10,16 @@ use std::net::SocketAddr;
 use sip_message::generators::{InDialogMethod, StackDialog};
 use sip_message::header::{self, CSeq, HeaderName, HeaderValue};
 use sip_message::sip_str::SipStr;
-use sip_message::{Automatic, DelayedAutomatic, SipMessage, SipRequest, SipResponse};
+use sip_message::{Automatic, DelayedAutomatic, SipRequest, SipResponse};
 
-use super::client_txn::{awaited_response, try_expect_response, try_send_cancel, AckCtx};
+use super::client_txn::{awaited_response, try_expect_response, try_send_cancel, AckCtx, Awaited};
 use super::dialog::{Dialog, InDialogRequest, InDialogTxn};
 use super::step::{unwrap_step, unwrap_step_at, StepError};
 use super::Agent;
 use crate::realcall::auth::{parse_challenge, ChallengeResponder};
 
 mod fallible;
+mod final_wait;
 mod won;
 
 pub(crate) use won::WonInvite;
@@ -129,7 +130,7 @@ impl ClientInvite {
     /// on it via [`expect`](ClientInvite::expect)). On success it learns the
     /// dialog state (remote tag / target / route set).
     pub async fn try_expect(&mut self, status: u16) -> Result<SipResponse, StepError> {
-        let resp = try_expect_response(&self.agent, status, Some(&self.ack_ctx()))
+        let resp = try_expect_response(&self.agent, status, &Awaited::Invite(self.ack_ctx()))
             .await
             .map_err(|e| e.awaiting(|| awaited_response(status, &self.original_invite)))?;
         self.learn_from_response(&resp);
@@ -152,68 +153,6 @@ impl ClientInvite {
         self.ack_ctx().ack_non_2xx(resp).await
     }
 
-    /// SIPp-`optional` semantics for the load lane: wait for the FINAL
-    /// response `status`, absorbing — and collecting — any interleaved
-    /// provisional (1xx), instead of erroring on it the way
-    /// [`try_expect`](Self::try_expect) does. A multi-leg shape legitimately
-    /// sees a relay-timing-dependent number of provisionals (the reroute
-    /// caller gets one or two 180s depending on when the alternate leg rings),
-    /// so a body says `try_expect_final(200)` and asserts the collected 1xx
-    /// list only where the count IS deterministic. Every absorbed provisional
-    /// still feeds the dialog bookkeeping (early To-tag, Contact, route set),
-    /// exactly as a sequence of `try_expect(18x)` calls would; the final
-    /// overrides per §13.2.2.4. A non-matching FINAL is still a
-    /// [`StepError::WrongStatus`].
-    ///
-    /// NOTE: under `--auto-retransmit` the mux absorbs a REPEATED
-    /// byte-identical provisional as a retransmission before any body sees it
-    /// — see the retransmit-engine notes in `loadgen::mux` (`CallTxns`); a
-    /// "ring again" assertion belongs to the functional/e2e surface, not here.
-    pub async fn try_expect_final(
-        &mut self,
-        status: u16,
-    ) -> Result<(SipResponse, Vec<SipResponse>), StepError> {
-        let mut provisionals = Vec::new();
-        loop {
-            let next = self
-                .agent
-                .try_recv()
-                .await
-                .map_err(|e| e.awaiting(|| awaited_response(status, &self.original_invite)));
-            match next? {
-                SipMessage::Response(r) if r.status() == 100 => continue,
-                SipMessage::Response(r) if r.status() < 200 => {
-                    self.learn_from_response(&r);
-                    provisionals.push(r);
-                }
-                SipMessage::Response(r) => {
-                    // §17.1.1.3 txn-layer auto-ACK — matching or not, a non-2xx
-                    // final to THIS INVITE completes its client transaction.
-                    self.ack_ctx().ack_non_2xx(&r).await?;
-                    if r.status() != status {
-                        return Err(StepError::WrongStatus {
-                            who: self.agent.name.clone(),
-                            expected: status,
-                            got: r.status(),
-                            reason: r.reason().to_string(),
-                        });
-                    }
-                    self.learn_from_response(&r);
-                    return Ok((r, provisionals));
-                }
-                SipMessage::Request(r) => {
-                    if self.agent.ack_obligation_claims(&r) {
-                        continue; // txn-owned §17.1.1.3 hop ACK
-                    }
-                    return Err(StepError::UnexpectedKind {
-                        who: self.agent.name.clone(),
-                        detail: format!("got a {} request, expected a {status} final", r.method()),
-                    });
-                }
-            }
-        }
-    }
-
     /// Receive the next response to this INVITE **without asserting its status**
     /// (an unsolicited `100 Trying` is still absorbed). Unlike
     /// [`try_expect`](Self::try_expect) this surfaces a `401`/`407` challenge as an
@@ -232,12 +171,12 @@ impl ClientInvite {
     pub(crate) async fn try_recv_response(&mut self) -> Result<SipResponse, StepError> {
         loop {
             match self.agent.try_recv().await? {
-                SipMessage::Response(r) if r.status() == 100 => continue,
-                SipMessage::Response(r) => {
+                sip_message::SipMessage::Response(r) if r.status() == 100 => continue,
+                sip_message::SipMessage::Response(r) => {
                     self.ack_ctx().ack_non_2xx(&r).await?;
                     return Ok(r);
                 }
-                SipMessage::Request(r) => {
+                sip_message::SipMessage::Request(r) => {
                     if self.agent.ack_obligation_claims(&r) {
                         continue; // txn-owned §17.1.1.3 hop ACK
                     }
@@ -263,6 +202,7 @@ impl ClientInvite {
         &mut self,
         resp: &SipResponse,
     ) -> Result<InviteResponseFate, StepError> {
+        self.agent.txn.note_read(resp);
         if resp.status() < 200 {
             self.learn_from_response(resp);
             return Ok(InviteResponseFate::Provisional { status: resp.status() });

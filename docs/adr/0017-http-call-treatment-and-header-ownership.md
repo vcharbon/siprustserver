@@ -1,46 +1,34 @@
-# 0017 — HTTP call-treatment model, header ownership, and the reroute plan
+# HTTP call-treatment model, header ownership, and the reroute plan
 
-**Status:** accepted (2026-06-07)
+**Status:** accepted
+
+The [appendix](appendix/0017-http-call-treatment-and-header-ownership.md) holds why the
+generator's header ownership shapes the vocabulary, the long form of each rejected alternative,
+and where the treatment is wired.
 
 ## Context
 
-The B2BUA decides *how to treat a call* through an external decision layer (a
-future HTTP adapter; today the in-process `ScriptedDecisionEngine`). This is the
-substrate for **advanced numbering-plan services**: an inbound INVITE is
-described to the layer (R-URI, From/To, all non-structural `X-*` headers, body),
-and the layer answers with an instruction the B2BUA executes.
+The B2BUA decides how to treat a call through an external decision layer behind
+`CallDecisionEngine` (an HTTP adapter, or the in-process `ScriptedDecisionEngine` in tests). This
+is the substrate for numbering-plan services: an inbound INVITE is described to the layer
+(R-URI, From/To, all non-structural `X-*` headers, body), and the layer answers with an
+instruction the B2BUA executes. One instruction vocabulary carries how to treat the call:
 
-We want a single, expressive instruction vocabulary so "all the info of how to
-treat the call" travels as one decision, covering:
+1. **Route + rewrite.** Bridge the call, update identity fields (From number, To number, R-URI)
+   and add arbitrary headers (PAI, PANI, any `X-*`).
+2. **Route and reroute.** An ordered list of destinations. On a b-leg failure the next is tried,
+   and when the list is exhausted the caller is rejected transparently, the way the plan dictates.
+3. **Direct rejection / redirect.** Author a final failure (with a `Reason` header, RFC 3326) or
+   emit a 302 carrying a Contact list to redirect the caller.
 
-1. **Route + rewrite** — bridge the call and update identity fields (From number,
-   To number, R-URI) and add arbitrary headers (PAI, PANI, any `X-*`).
-2. **Route and reroute** — an *ordered list* of destinations; on a b-leg failure
-   the next is tried, and when the list is exhausted the caller is rejected
-   *transparently*, the way the plan dictates.
-3. **Direct rejection / redirect** — author a final failure (with a `Reason`
-   header, RFC 3326) or emit a **302** carrying a **Contact list** to redirect
-   the caller.
-
-The pre-existing shapes (`schemas.rs`) covered only part of this and, crucially,
-several declared fields were **unwired**: `RouteDecision.update_headers` was
-never applied in `apply_route`, and `reject_call` took only `(code, reason)` —
-ignoring `RejectDecision.update_headers`. Failover was a single fixed path
-(`CallFailureResponse::{Failover, Terminate}`, `Terminate` → hardcoded 486).
-
-A second-order constraint surfaced during design: the b-leg INVITE generator
-*owns* the structural headers (From/To/Via/CSeq/Call-ID/Contact/Max-Forwards)
-from typed opts; the flat header-update map only **appends** non-structural
-headers. So "rewrite the From/To number" is not expressible as a map entry — a
-flat `update_headers["From"]` appends a *second* From header rather than
-rewriting it.
+The b-leg generator owns the structural headers, so a From or To rewrite cannot ride the flat
+header map ([appendix](appendix/0017-http-call-treatment-and-header-ownership.md#the-b-leg-generator-owns-the-structural-headers)).
 
 ## Decision
 
-### X1 — One unified `CallTreatment` returned at every hop
+### X1. One unified `CallTreatment` returned at every hop
 
-Both `new_call` and `call_failure` return the **same** closed set, replacing the
-old per-callback enums (and the fixed `Terminate`):
+Both `new_call` and `call_failure` return the same closed set:
 
 ```
 enum CallTreatment {
@@ -51,15 +39,14 @@ enum CallTreatment {
 }
 ```
 
-`new_call` may return `Route | Redirect | Reject` (no prior leg, so `Relay` is
-not meaningful). `call_failure` may return any of the four. This makes the
-numbering plan able to do *anything at any hop*: try the next destination,
-redirect, author a rejection, or relay the real downstream failure.
+`new_call` may return `Route | Redirect | Reject` (with no prior leg, `Relay` has no meaning).
+`call_failure` may return any of the four, so the numbering plan can try the next destination,
+redirect, author a rejection, or relay the real downstream failure at any hop.
 
-### X2 — Header ownership matrix
+### X2. Header ownership matrix
 
-For each header on a B2BUA-authored message, exactly one party is its author —
-the **decision layer** or the **core engine**. For a normal service:
+For each header on a B2BUA-authored message, exactly one party is its author, the decision layer
+or the core engine. For a normal service:
 
 | Header | Owner | Notes |
 |---|---|---|
@@ -70,103 +57,79 @@ the **decision layer** or the **core engine**. For a normal service:
 | Via, CSeq, Call-ID, branch, Max-Forwards | core engine | always |
 | PAI, PANI, any `X-*` | decision layer (additive) | flat `update_headers` |
 
-Structural rewrites (From/To URI) go through **typed identity fields**
-(`new_from`, `new_to`), never the flat map; the map only appends non-structural
-headers and removes non-structural headers. Tags are never HTTP-settable.
+Structural rewrites (From/To URI) go through typed identity fields (`new_from`, `new_to`), never
+the flat map. The map only appends and removes non-structural headers. Tags are never
+HTTP-settable.
 
-A non-structural header **neither party states** has a third source, at the
-bottom of the precedence ladder: a final that **answers a `/call/failure`
-consult** also carries that consult's failing b-leg final relayable headers
-(`generators::relayable_headers`, response scope — credentials, per-leg
-negotiation and a privacy-concealed identity stay withheld). Per name:
-explicit `update_headers` (set or removal) > decision-typed fields > relayed
-from the failing peer's final > core-authored structural. The decision layer
-therefore never needs to echo the `sip_headers` it was shown on
-`/call/failure` — silence means the peer's statement travels.
+A non-structural header neither party states has a third source, at the bottom of the precedence
+ladder. A final that answers a `/call/failure` consult also carries that consult's failing b-leg
+final's relayable headers (`generators::relayable_headers`, response scope: credentials, per-leg
+negotiation and a privacy-concealed identity stay withheld). Per name: explicit `update_headers`
+(set or removal) > decision-typed fields > relayed from the failing peer's final > core-authored
+structural. The decision layer never needs to echo the `sip_headers` it was shown on
+`/call/failure`, since silence lets the peer's statement travel.
 
-The image is **scoped to the consult in flight**, and that scope is the
-invariant: every consult restates it (empty when the failure drew no peer final
-— a ring deadline or a transaction timeout), and a final that answers something
-else — a setup deadline, a capacity refusal, a media-service failure, a refused
-redirect — carries none of it. Otherwise a superseded attempt's `Warning` and
-`Retry-After` would diagnose a peer that was never contacted.
+The image is scoped to the consult in flight, and that scope is the invariant. Every consult
+restates it, empty when the failure drew no peer final (a ring deadline, a transaction timeout).
+A final that answers something else (a setup deadline, a capacity refusal, a media-service
+failure, a refused redirect) carries none of it, so a superseded attempt's `Warning` and
+`Retry-After` never diagnose a peer that was not contacted.
 
-Product identity travels with the rest: no allow-list filters the image, so a
-decision-authored final restates the failing peer's `Server` and its `Allow`
-even though the a-face responder is this stack, which states no `Server` of its
-own. Transparency about who refused is the reading taken here; withholding the
-responder-describing headers is the alternative, and would be a change to every
-failure final this stack mints.
+No allow-list filters the image, so a decision-authored final restates the failing peer's
+`Server` and its `Allow`, though the a-face responder is this stack, which states no `Server` of
+its own. This reads transparency about who refused as the rule. Withholding the
+responder-describing headers would change every failure final this stack mints.
 
-### X3 — The reroute plan rides the opaque callback context (callback-per-failure)
+### X3. The reroute plan rides the opaque callback context (callback-per-failure)
 
-Failover stays **callback-per-failure** — the architecture a real HTTP backend
-needs. The platform treats `callback_context` as an opaque token it round-trips
-untouched. The decision layer stashes the **reroute plan** there — the ordered
-remainder of destinations plus the `on_exhausted` treatment. On a b-leg failure,
-`call_failure` pops the head → returns a `Route` to it, and re-stashes the tail
-(`apply_route` already persists the returned route's `callback_context` back onto
-the call). On an empty list, it returns the plan's `on_exhausted` treatment
-(`Reject` / `Relay` / `Redirect`) — the per-call "reject transparently" choice.
+Failover is callback-per-failure, the architecture a real HTTP backend needs. The platform
+round-trips `callback_context` as an opaque token. The decision layer stashes the reroute plan
+there: the ordered remainder of destinations plus the `on_exhausted` treatment. On a b-leg
+failure `call_failure` pops the head, returns a `Route` to it and re-stashes the tail
+(`apply_route` persists the returned route's `callback_context` onto the call). On an empty list
+it returns the plan's `on_exhausted` treatment (`Reject` / `Relay` / `Redirect`).
 
-In tests, Alice injects the entire plan via the `X-Api-Call` header; the scripted
-adapter is stateless and simply walks the plan it reads back out of the context.
+In tests, Alice injects the entire plan through the `X-Api-Call` header, and the stateless
+scripted adapter walks the plan it reads back out of the context.
 
-### X4 — HA: zero new replicated fields
+### X4. HA: zero new replicated fields
 
-Because the plan rides the **existing** `Call.callback_context: Option<String>`
-(line 468 of `call/src/model.rs`, a plain serialized field) and `Call.ext`, it is
-msgpack-encoded and replicated with the call **for free**. No new field is added
-to `Call`, so there is **no positional-codec change** (ADR-0008) and no HA
-migration. The plan, and thus the in-flight numbering-plan state, survives
-failover **by construction** — both reactive takeover and reclaim deserialize the
-full body including the context.
+The plan rides `Call.callback_context: Option<String>` (`crates/call/src/model/record.rs`) and
+`Call.ext`, which are serialized and replicated with the call. No field is added to `Call`, so
+there is no positional-codec change (ADR-0008). The plan, and with it the in-flight
+numbering-plan state, survives failover by construction: reactive takeover and reclaim both
+deserialize the full body, context included.
 
-### X5 — Edge-case defaults (overridable)
+### X5. Edge-case defaults (overridable)
 
-- **`Relay` with no captured downstream failure** (e.g. relay requested before
-  any b-leg produced a final response): fall back to a synthesized `480
-  Temporarily Unavailable`. Relay is only verbatim when a real failure exists.
-- **Multiple `Reason` headers** (RFC 3326 allows SIP + Q.850 rows): the flat
-  `update_headers` map (`BTreeMap<String, Option<String>>`) carries **one** value
-  per name, so only a single `Reason` is expressible today. The response
-  generator's `extra_headers: Vec` already permits duplicates, so a future typed
-  `reason: Vec<...>` field can lift this without a wire change. Single `Reason`
-  suffices for the current scope.
-- **302 Contact ordering**: `contacts` is an ordered `Vec<{uri, q}>`; rendered in
-  list order with `;q=` params, no platform reordering (the q-value is advisory
-  for the caller).
-- **Redirect mid-reroute**: allowed — a `call_failure` hop may return `Redirect`,
-  abandoning the hunt and 302-ing the caller.
+- **`Relay` with no captured downstream failure** (relay requested before any b-leg produced a
+  final): a synthesized `480 Temporarily Unavailable`. Relay is verbatim only when a real failure
+  exists.
+- **Multiple `Reason` headers** (RFC 3326 allows SIP + Q.850 rows): the flat `update_headers` map
+  (`BTreeMap<String, Option<String>>`) carries one value per name, so a single `Reason` is
+  expressible. The response generator's `extra_headers: Vec` permits duplicates, so a typed
+  `reason: Vec<...>` field can lift this without a wire change.
+- **302 Contact ordering**: `contacts` is an ordered `Vec<{uri, q}>`, rendered in list order with
+  `;q=` params, with no platform reordering (the q-value is advisory for the caller).
+- **Redirect mid-reroute**: a `call_failure` hop may return `Redirect`, abandoning the hunt.
 
 ## Considered alternatives
 
-- **Embed the route list as a structured top-level field on the decision and
-  walk it locally in the b2bua** (no per-failure callback). Rejected: it would be
-  a *new replicated field* on `Call` (codec change), and it diverges from the
-  real-world HTTP model where the backend holds plan state and receives an opaque
-  token. The callback-per-failure model keeps the platform agnostic and the wire
-  format frozen. (The opaque-token form gives the same "one big JSON" ergonomics
-  in tests, since the token *is* the plan there.)
-- **Magic `From`/`To` keys in the flat header map** routed into generator opts.
-  Rejected: relies on special-cased keys, collides with the "removals never apply
-  to structural headers" rule, and hides identity rewrites inside a map meant for
+- A route list walked locally in the b2bua. It adds a replicated field and diverges from the HTTP
+  model.
+- Magic `From`/`To` keys in the flat header map. They hide identity rewrites in a map meant for
   additive headers.
-- **Decision owns the full header set.** Rejected: breaks the Via/CSeq/Call-ID/
-  branch/tag invariants the generator guarantees — unacceptable blast radius.
-- **Keep separate new-call vs failover enums.** Rejected in favor of one
-  `CallTreatment` — less duplication, and the plan's `on_exhausted` is literally a
-  treatment, so the sets are identical anyway.
+- The decision owns the full header set. It breaks the generator's Via/CSeq/Call-ID/branch/tag
+  invariants.
+- Separate new-call and failover enums. The plan's `on_exhausted` is a treatment, so the sets are
+  identical.
+
+Detail: [appendix, Considered alternatives](appendix/0017-http-call-treatment-and-header-ownership.md#considered-alternatives).
 
 ## Consequences
 
-- The decision-engine trait contract changes (unified return type) — a one-time
-  churn across the scripted adapter, `apply_route`, and `initial_invite`.
-- `apply_route` must thread `route.update_headers` into `build_b_leg`'s existing
-  `header_updates` slot, and `new_from`/`new_to` into the generator opts.
-- `reject_call` must thread `update_headers` into the existing `extra_headers`
-  slot and gain a Contact-list path for 302 (`response_to_a_leg` already has both
-  `contact` and `extra_headers` parameters).
-- No HA/codec migration (X4). Failover transparency (ADR-0014) is preserved: the
-  plan is already-replicated state, not a runtime dependency on the decision
-  service being reachable during takeover/reclaim.
+- No HA or codec migration (X4). Failover transparency (ADR-0014) holds: the plan is replicated
+  state, not a runtime dependency on the decision service being reachable during takeover or
+  reclaim.
+- `apply_route` and `reject_call` carry the decision's headers and identity fields into the
+  generators ([appendix](appendix/0017-http-call-treatment-and-header-ownership.md#where-the-treatment-is-wired)).

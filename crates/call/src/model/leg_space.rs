@@ -24,4 +24,22 @@ impl LegSpace {
             LegSpace::Other => "c",
         }
     }
+
+    /// The space whose ids start with `prefix`, if any.
+    pub fn of_prefix(prefix: &str) -> Option<Self> {
+        match prefix {
+            "b" => Some(LegSpace::Creator),
+            "c" => Some(LegSpace::Other),
+            _ => None,
+        }
+    }
+
+    /// What the space adds to a leg's ordinal to number its Call-ID: the two
+    /// spaces number apart so long as a call holds fewer than 10^9 legs.
+    pub fn call_id_base(self) -> u64 {
+        match self {
+            LegSpace::Creator => 0,
+            LegSpace::Other => 1_000_000_000,
+        }
+    }
 }

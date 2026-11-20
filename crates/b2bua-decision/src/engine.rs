@@ -17,7 +17,7 @@ pub trait CallDecisionEngine: Send + Sync {
         &self,
         req: CallFailureRequest,
     ) -> Result<CallFailureResponse, CallDecisionError>;
-    /// Authorize/deny a REFER transfer (dormant until the transfer slice).
+    /// Authorize/deny a REFER transfer: the transfer service's consult.
     async fn call_refer(
         &self,
         req: CallReferRequest,

@@ -100,10 +100,16 @@ pub fn assert_single_owner(nodes: &[&ReplicatedB2buaSut], call_ref: &str) {
 /// *anywhere* in the cluster; a kill of the primary or a split may leave a second
 /// (ADR-0055 §5), and `0` is a lost CDR.
 pub fn total_cdrs_for(nodes: &[&ReplicatedB2buaSut], call_ref: &str) -> usize {
+    cdrs_for(nodes, call_ref).len()
+}
+
+/// The CDRs whose `call_ref` matches across **every** node's CDR sink, node by
+/// node in the order given, each node's in writing order.
+pub fn cdrs_for(nodes: &[&ReplicatedB2buaSut], call_ref: &str) -> Vec<b2bua::cdr::CdrRecord> {
     nodes
         .iter()
-        .map(|n| n.cdr_records().into_iter().filter(|r| r.call_ref == call_ref).count())
-        .sum()
+        .flat_map(|n| n.cdr_records().into_iter().filter(|r| r.call_ref == call_ref))
+        .collect()
 }
 
 /// A limiter lease outliving the replica TTL (`reboot_budget_sec`, 600 s): a

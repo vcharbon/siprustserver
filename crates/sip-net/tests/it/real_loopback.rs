@@ -1,5 +1,5 @@
-//! Real impl over loopback UDP — the behaviours TestClock can't model (real
-//! sockets), the source's `it.live` tier. Each test binds ephemeral
+//! Real impl over loopback UDP — the behaviours a paused clock can't model
+//! (real sockets). Each test binds ephemeral
 //! `127.0.0.1:0` sockets and talks between them.
 
 use std::sync::Arc;

@@ -35,7 +35,6 @@ const study: TriageStudy = {
     caseRuns: []
   },
   cut: { prepId: 1, cutAt: "2026-09-15T00:00:00.000Z", broke: null, cases: 2 },
-  auto: null,
   exclusions: {
     path: "/nowhere/excluded.json",
     document: [{ caseId: "capture_demo-cut3", reason: "source-truncated-at-edge", callIds: ["c3"] }]

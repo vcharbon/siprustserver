@@ -1,21 +1,15 @@
 //! The **unified, OPEN shape registry** — ONE vocabulary of Callflow shapes,
-//! each declared exactly once as a [`ShapeDescriptor`], shared by BOTH run
-//! surfaces:
+//! each declared exactly once as a [`ShapeDescriptor`]:
 //!
 //!   - the **load** surface (`crates/loadgen`) consumes the descriptor's
 //!     load-side attributes (the named callee [`LegSpec`]s — or their
 //!     `needs_charlie` / `needs_bob2` sugar — plus `emergency` / mix weights)
 //!     and its optional [`ActorScenario`] body factory;
-//!   - the **functional** surface (`crates/e2e-core`) ATTACHES its `!Send`
-//!     `CallflowShape` bodies to the same descriptors **by id** (the body
-//!     drives an `InfraRuntime`, which cannot live in this dependency-light
-//!     crate), and validates authored Test cases against the descriptor's
-//!     [`ShapeSpec`] metadata (anchors / required input).
+//!   - authored Test cases validate against the descriptor's [`ShapeSpec`]
+//!     metadata (anchors / required input).
 //!
-//! A shape may carry one body, the other, or **both** (a *dual-body* shape —
-//! `rerouting_prack` is the first): the descriptor is the single declaration of
-//! its id, anchor vocabulary and load attributes, so the two surfaces can never
-//! drift apart on what a shape *is*.
+//! The descriptor is the single declaration of a shape's id, anchor vocabulary
+//! and load attributes.
 //!
 //! The registry is a plain **builder**: [`ShapeRegistry::with_defaults`] loads
 //! every shipped shape in one call; a third-party crate starts from that (or
@@ -109,29 +103,22 @@ impl LegSpec {
 }
 
 /// The ONE declaration of a Callflow shape (see the module docs): its stable
-/// **id** (the Test-case/campaign selector, the load report/metrics label and
-/// the functional-body attachment key — one id space), its load-time metadata
-/// ([`ShapeSpec`]: published anchors + required input), its optional authoring
-/// **params schema** (typed `input.extras`), the **load-side attributes** the
-/// driver consults per call, and the optional **load body** factory. The
-/// functional body is attached by `e2e-core` (it cannot live here).
+/// **id** (the Test-case selector and the load report/metrics label — one id
+/// space), its load-time metadata
+/// ([`ShapeSpec`]: published anchors + required input), the **load-side
+/// attributes** the driver consults per call, and the optional **load body**
+/// factory.
 #[derive(Clone)]
 pub struct ShapeDescriptor {
-    /// Stable shape id — one id space across both run surfaces.
+    /// Stable shape id — one id space.
     pub id: &'static str,
     /// The canonical anchors this shape publishes (per-agent at runtime).
-    /// BOTH bodies publish: a functional body tags via `InfraRuntime::anchor`
-    /// (agents `alice`/`bob1`/`bob2`); a load body via `CallCtx::anchor` in the
-    /// shared choreography (agents `alice`/`bob`/`bob2`/`charlie`, tagged only
-    /// on a sampled call).
+    /// A load body tags them via `CallCtx::anchor` in the shared choreography
+    /// (agents `alice`/`bob`/`bob2`/`charlie`, tagged only on a sampled call).
     pub anchors: &'static [Anchor],
     /// Input core/extra field names this shape *requires* (beyond the always-
     /// optional core overrides).
     pub required_input: &'static [&'static str],
-    /// JSON schema for the shape's typed authoring parameters (spliced over the
-    /// Test case's open `extras` map by the editor projection). `None` = no
-    /// declared params.
-    pub params_schema: Option<serde_json::Value>,
     /// Load: this shape's **named callee legs** ([`LegSpec`]: agent role +
     /// R-URI user-part prefixes) on the shared UAS socket, in the load-bearing
     /// bind order. Empty (the default) = derive from the
@@ -185,7 +172,6 @@ impl ShapeDescriptor {
             id,
             anchors: &[],
             required_input: &[],
-            params_schema: None,
             legs: &[],
             needs_charlie: false,
             needs_bob2: false,
@@ -203,11 +189,6 @@ impl ShapeDescriptor {
 
     pub fn required_input(mut self, fields: &'static [&'static str]) -> Self {
         self.required_input = fields;
-        self
-    }
-
-    pub fn params_schema(mut self, schema: serde_json::Value) -> Self {
-        self.params_schema = Some(schema);
         self
     }
 
@@ -353,28 +334,6 @@ impl ShapeRegistry {
 // Shipped shape declarations — THE one place each shape's vocabulary lives.
 // ---------------------------------------------------------------------------
 
-/// Authoring parameters for the `rerouting` shape — the typed `input.extras`
-/// the editor suggests. All optional (defaults reproduce the canonical 486
-/// flow). Declared here —
-/// next to the shape's descriptor — and consumed by the functional body in
-/// `e2e-core` via `Input::params`.
-#[derive(Debug, Clone, serde::Deserialize, schemars::JsonSchema)]
-#[serde(rename_all = "camelCase", deny_unknown_fields, default)]
-pub struct ReroutingParams {
-    /// SIP status bob1 rejects the first b-leg with, triggering the SUT's
-    /// failover to bob2. Any 4xx–6xx the decision engine treats as a reroute
-    /// trigger (default `486` Busy Here; e.g. `503` Service Unavailable).
-    pub reject_status: u16,
-    /// Reason phrase paired with `rejectStatus` (default `"Busy Here"`).
-    pub reject_reason: String,
-}
-
-impl Default for ReroutingParams {
-    fn default() -> Self {
-        ReroutingParams { reject_status: 486, reject_reason: "Busy Here".to_string() }
-    }
-}
-
 /// The anchor set of a plain full-call shape.
 const CALL_ANCHORS: &[Anchor] = &[Anchor::InitialInvite, Anchor::Answer, Anchor::Ack, Anchor::Bye];
 /// The anchor set the standard LOAD establishment + teardown publishes (the
@@ -410,34 +369,21 @@ const PRACK_ANCHORS: &[Anchor] = &[
     Anchor::Ack,
     Anchor::Bye,
 ];
-/// The `transfer-refer-media` anchor set.
-const TRANSFER_ANCHORS: &[Anchor] = &[
-    Anchor::InitialInvite,
-    Anchor::Answer,
-    Anchor::Ack,
-    Anchor::Refer,
-    Anchor::ReInvite,
-    Anchor::Bye,
-];
 
 /// Every shipped shape, declared once. Grouped by surface:
 ///
 ///  - **load-only** — the fallible real-call scenarios (`basic_call`,
 ///    `reinvite`, …);
-///  - **functional-only** — the anchored e2e shapes (`basic-call`, `rerouting`,
-///    …), whose `!Send` bodies `e2e-core` attaches by id;
-///  - **dual-body** — `rerouting_prack`: ONE descriptor, both bodies.
+///  - **anchors-only** — `basic-call`, the declaration a Test case validates
+///    against, with no load body;
+///  - **anchored load** — `rerouting_prack`: anchors and a load body.
 fn default_shapes() -> Vec<ShapeDescriptor> {
     let mut shapes = vec![
         // ── Load: the happy-path real-call scenarios ─────────────────────────
-        // ACTOR-executed: same downstream contract
-        // (table §5.1).
         ShapeDescriptor::new("basic_call")
             .anchors(LOAD_CALL_ANCHORS)
             .default_weight(4.0)
             .load_actor_with(|_| Arc::new(cs::basic_call(cs::default_binder()))),
-        // ACTOR-executed: same downstream contract
-        // (table §5.2).
         ShapeDescriptor::new("reinvite")
             .anchors(LOAD_REINVITE_ANCHORS)
             .default_weight(2.0)
@@ -483,26 +429,18 @@ fn default_shapes() -> Vec<ShapeDescriptor> {
             .anchors(PRACK_ANCHORS)
             .default_weight(0.5)
             .load_actor_with(|_| Arc::new(cs::prack_update_early(cs::default_binder()))),
-        // ACTOR-executed: per-endpoint reactive actors + the ack-gated settle barrier;
-        // same downstream contract (`docs/todos/actor-harness-p1-contract-table.md` §5.3).
         ShapeDescriptor::new("refer")
             .anchors(LOAD_REFER_ANCHORS)
             .default_weight(1.0)
             .needs_charlie()
             .load_actor_with(|inputs| Arc::new(cs::refer(cs::default_binder(), &inputs.refer_key))),
-        // ACTOR-executed: same downstream contract
-        // (table §5.4).
         ShapeDescriptor::new("options_hold")
             .anchors(LOAD_CALL_ANCHORS)
             .default_weight(1.0)
             .load_actor_with(|_| Arc::new(cs::options_hold(cs::default_binder()))),
-        // ACTOR-executed: the reactors answer SUT
-        // keepalives on both legs during the hold (table §5.5).
         ShapeDescriptor::new("long_call")
             .anchors(LOAD_ESTABLISH_ANCHORS)
             .load_actor_with(|_| Arc::new(cs::long_call(cs::default_binder()))),
-        // ACTOR-executed: per-endpoint reactors + the
-        // ack-gated settle barrier; same downstream contract (table §5.6).
         ShapeDescriptor::new("prack_update")
             .anchors(PRACK_ANCHORS)
             .load_actor_with(|_| Arc::new(cs::prack_update(cs::default_binder()))),
@@ -516,40 +454,19 @@ fn default_shapes() -> Vec<ShapeDescriptor> {
             .emergency()
             .load_actor_with(|_| Arc::new(cs::reinvite(cs::default_binder()))),
         // ── Load: the abnormal-end cleanup-coverage set ──────────────────────
-        // ACTOR-executed: same downstream contract
-        // (table §5.8).
         ShapeDescriptor::new("invite_reject")
             .abnormal_end_weight(1.0)
             .load_actor_with(|_| Arc::new(cs::invite_reject(cs::default_binder()))),
-        // ACTOR-executed: same downstream contract
-        // (table §5.9).
         ShapeDescriptor::new("abandon_ringing")
             .abnormal_end_weight(1.0)
             .load_actor_with(|_| Arc::new(cs::abandon_ringing(cs::default_binder()))),
-        // ACTOR-executed: per-endpoint reactors + the
-        // ack-gated settle barrier; same downstream contract (table §5.10).
         ShapeDescriptor::new("refer_charlie_reject")
             .abnormal_end_weight(1.0)
             .needs_charlie()
             .load_actor_with(|inputs| {
                 Arc::new(cs::refer_charlie_reject(cs::default_binder(), &inputs.refer_key))
             }),
-        // ── Functional: the anchored e2e shapes ──────────────────────────────
         ShapeDescriptor::new("basic-call").anchors(CALL_ANCHORS),
-        ShapeDescriptor::new("basic-call-media").anchors(CALL_ANCHORS),
-        ShapeDescriptor::new("rerouting").anchors(CALL_ANCHORS).params_schema(
-            serde_json::to_value(schemars::schema_for!(ReroutingParams))
-                .expect("ReroutingParams schema"),
-        ),
-        ShapeDescriptor::new("transfer-refer-media").anchors(TRANSFER_ANCHORS),
-        // ── DUAL-BODY: rerouting + reliable provisional on the winning leg ───
-        // One descriptor, one id: `e2e-core` attaches the functional (anchored,
-        // panic-on-deviation) body; the load body below drives the same flow
-        // fallibly through the egress candidate list ([bob, bob2] → the
-        // `X-Api-Call` routes failover plan on a pinned layout).
-        // The load body is ACTOR-executed (establishes the
-        // reactive 100rel/PRACK machinery); the functional body stays in
-        // `e2e-core`. Same downstream contract (table §5.7).
         ShapeDescriptor::new("rerouting_prack")
             .anchors(PRACK_ANCHORS)
             .needs_bob2()

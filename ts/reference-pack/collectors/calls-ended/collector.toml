@@ -1,0 +1,20 @@
+# The B2BUA runner's live calls read after each call (ADR-0060 appendix
+# §17): a delayed cell collector, `collect` run `delay_s` after the cell's
+# call ended while the lane runs its next cells (it holds no cell lock),
+# answering the cell's `calls-ended` off `GET /admin/calls` at the operator
+# address of the lane's `b2bua-runner` part (`main.ts`): it fails the cell
+# whose own call the runner still serves. A lane may override `delay_s` under
+# `[collectors.calls-ended]`. No cell collector runs on a simulated lane.
+schema = "collector.v1"
+name = "calls-ended"
+scope = "cell"
+needs = ["b2bua-runner"]
+answers = ["calls-ended"]
+delay_s = 1
+holds_cell_locks = false
+
+[timeouts]
+collect_s = 10
+
+[run]
+collect = "./run"

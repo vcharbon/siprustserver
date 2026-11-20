@@ -80,21 +80,21 @@ pub use dialog::{
 };
 pub use instants::shift_instants;
 pub use invite_records::{
-    answered_2xx, answered_2xx_mut, close_rejected_invite_round, hold_answered_2xx, invite_image,
-    invite_relay, invite_taken, invite_untaken, open_sent_invite, relayed_invite_pending,
-    retain_ack_branch, retain_emitted_ack, sent_exchange, sent_exchange_mut, sent_invite_image,
-    set_awaited_ack_cseq,
+    answered_2xx, answered_2xx_mut, close_rejected_invite_round, close_untaken_invite,
+    hold_answered_2xx, invite_image, invite_relay, invite_taken, invite_untaken, open_sent_invite,
+    relayed_invite_pending, retain_ack_branch, retain_emitted_ack, sent_exchange,
+    sent_exchange_mut, sent_invite_image, set_awaited_ack_cseq,
 };
 pub use leg::{
     add_b_leg, callee_dialog, callee_dialog_mut, caller_answered, caller_dialog, caller_dialog_mut,
     carrying_dialog, dialog_with_peer, dialog_with_peer_mut, find_b_leg, find_b_leg_by_call_id,
-    find_leg, is_adopted, is_fully_resolved, leg_is_going_away, leg_is_resolved, leg_kind,
-    leg_own_tag, mark_rang, next_b_leg_id, own_dialog,
+    find_leg, is_adopted, is_fully_resolved, leg_call_id_number, leg_is_going_away,
+    leg_is_resolved, leg_kind, leg_own_tag, mark_rang, next_b_leg_id, own_dialog, same_leg,
 };
 pub use leg_end::{
     abandon_leg, cancel_early_dialogs, record_cancel_sent, record_cancelled_invite,
-    record_dialled_invite_final, record_dialling_invite_rejected, record_invite_final,
-    reject_early_dialogs, retire_early_dialogs,
+    record_dead_hop, record_dialled_invite_final, record_dialling_invite_rejected,
+    record_hop_answered, record_invite_final, reject_early_dialogs, retire_early_dialogs,
 };
 pub use lens::{update_dialog, update_leg};
 pub use lifecycle::{lifecycle_behind, lifecycle_position};

@@ -11,6 +11,7 @@
  * lead to each call's evidence.
  */
 import { CompareReport, RunReport } from "@sip/contracts"
+import { commitLabel } from "@sip/contracts/commit-label"
 import { Compare, type Model, type RunSets, type RunSummaries } from "@sip/store"
 import * as Report from "./compare-report.js"
 
@@ -29,7 +30,7 @@ const headlineOf = (counts: RunReport.Counts): string =>
   `${counts.skipped} skipped`
 
 const codeOf = (code: Model.Provenance): ReadonlyArray<CompareReport.CellComponent> =>
-  code.map((component) => ({ name: component.name, sha: component.sha }))
+  code.map((component) => ({ name: component.name, sha: component.sha, ...(component.dirty === true ? { dirty: true } : {}) }))
 
 const callsOf = (viewer: string, cells: ReadonlyArray<Compare.Cell>): ReadonlyArray<RunReport.Call> =>
   cells.map((cell) => ({
@@ -143,12 +144,10 @@ export const fromSummary = (
   }
 }
 
-const short = (sha: string | null): string => (sha === null ? "unknown" : sha.slice(0, 10))
-
 const runLine = (run: RunReport.Run): string =>
   `  run${run.id} ${run.capture} on ${run.lane}: ${run.setKind}, ${run.status}; ` +
   `env ${run.env ?? "unknown"}@${run.branch ?? "unknown"}; ` +
-  (run.code.length === 0 ? "code unknown" : run.code.map((one) => `${one.name} ${short(one.sha)}`).join(", ")) +
+  (run.code.length === 0 ? "code unknown" : run.code.map((one) => `${one.name} ${commitLabel(one)}`).join(", ")) +
   `; started ${run.startedAt}${run.finishedAt === null ? "" : `, finished ${run.finishedAt}`}` +
   `; ${run.cases} case(s), ${run.failed} failed` +
   (run.sweepId === null ? "" : `; sweep ${run.sweepId}`) +

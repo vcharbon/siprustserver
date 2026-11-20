@@ -17,16 +17,15 @@ __pycache__/
 *_stat.csv
 sipp-*.csv
 
-# Vendored reference source snapshot (not part of the build)
-/portsource
 .worktrees/
 
 # E2E test-management generated run artifacts (committed inputs live in e2e/{cases,checksets,infra,campaigns,schemas})
 /e2e/runs/
 _TODOS.md
-portsource/
 .vscode/
 
 # TypeScript workspace (`ts/`) — installed dependencies and build output; sources are committed
 **/node_modules/
+# The host's env file the DB-bound test suites read (ts/store/test/server-url.ts)
+ts/.env.local
 ts/viewer-app/dist/

@@ -281,6 +281,29 @@ pub enum Summary {
     Response { status: u16, reason: String, cseq: CSeqJson, from: Party, to: Party },
 }
 
+impl Summary {
+    /// The CSeq, whichever kind of message carries it.
+    pub fn cseq(&self) -> &CSeqJson {
+        match self {
+            Summary::Request { cseq, .. } | Summary::Response { cseq, .. } => cseq,
+        }
+    }
+
+    /// The From party, whichever kind of message carries it.
+    pub fn from(&self) -> &Party {
+        match self {
+            Summary::Request { from, .. } | Summary::Response { from, .. } => from,
+        }
+    }
+
+    /// The To party, whichever kind of message carries it.
+    pub fn to(&self) -> &Party {
+        match self {
+            Summary::Request { to, .. } | Summary::Response { to, .. } => to,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct CSeqJson {
     pub seq: u32,
@@ -447,3 +470,6 @@ pub enum Evidence {
         dt_us: u64,
     },
 }
+
+#[cfg(test)]
+mod tests;

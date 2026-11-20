@@ -8,7 +8,7 @@
  *                     branch, every tree clean
  *   @env:X            runs made from environment X
  *   @run:N  N  runN   one run by id
- *   @sha:X            a clean tree on a commit of any component starting with X
+ *   @sha:X            runs on a commit of any component starting with X, dirty trees included
  *                     (7 hex digits at least, one commit only: `RunSets.refusal`)
  *   @lane:L           runs on lane L
  *   @sweep:N  sweepN  the runs of one sweep

@@ -1,0 +1,254 @@
+{
+  "actors": [
+    {
+      "endpoint": "caller",
+      "id": "caller",
+      "identity": "caller",
+      "kind": "uac"
+    },
+    {
+      "claim": {
+        "by": "arrival-order"
+      },
+      "endpoint": "callee",
+      "id": "callee",
+      "kind": "uas"
+    }
+  ],
+  "calls": [
+    {
+      "attempts": [
+        {
+          "branch": 0,
+          "callee": {
+            "identity": "callee"
+          },
+          "leg": "B",
+          "position": 0
+        }
+      ],
+      "caller_leg": "A",
+      "id": "c1"
+    }
+  ],
+  "case": {
+    "annotations": {
+      "notes": [
+        "basic case of shape invite_reject"
+      ]
+    },
+    "family": "transparent",
+    "id": "bob-is-busy",
+    "lanes": {
+      "*": "ok"
+    },
+    "origin": "authored",
+    "title": "bob is busy",
+    "variant": "target"
+  },
+  "endpoints": [
+    {
+      "binding": "dedicated",
+      "id": "caller",
+      "observed": "192.0.2.10:5060",
+      "side": "peer"
+    },
+    {
+      "binding": "dedicated",
+      "id": "callee",
+      "observed": "192.0.2.20:5060",
+      "side": "peer"
+    }
+  ],
+  "flow": [
+    {
+      "delay": {
+        "compressible": true,
+        "from": "trigger",
+        "ms": 0,
+        "timer_linked": false
+      },
+      "id": "s1",
+      "leg": "A",
+      "msg": {
+        "body": {
+          "ref": "resources/offer.sdp",
+          "rewrite": [
+            "c=addr",
+            "m=port"
+          ]
+        },
+        "from": {
+          "frozen": "sip:alice@atlanta.example.com"
+        },
+        "headers": [
+          {
+            "name": "Allow",
+            "value": "INVITE, ACK, CANCEL, BYE, OPTIONS"
+          },
+          {
+            "name": "Supported",
+            "value": ""
+          }
+        ],
+        "method": "INVITE",
+        "ruri": {
+          "frozen": "sip:bob@biloxi.example.com"
+        },
+        "to": {
+          "frozen": "sip:bob@biloxi.example.com"
+        }
+      },
+      "op": "send"
+    },
+    {
+      "auto": true,
+      "check": "record",
+      "delay": {
+        "compressible": true,
+        "from": "step:s1",
+        "ms": 0,
+        "timer_linked": false
+      },
+      "id": "s2",
+      "leg": "A",
+      "msg": {
+        "cseq": 1,
+        "cseq-method": "INVITE",
+        "reason": "Trying",
+        "status": 100
+      },
+      "op": "expect"
+    },
+    {
+      "check": "assert",
+      "delay": {
+        "compressible": true,
+        "from": "step:s1",
+        "ms": 0,
+        "timer_linked": false
+      },
+      "id": "s3",
+      "leg": "B",
+      "msg": {
+        "body": {
+          "mode": "sdp-present"
+        },
+        "method": "INVITE"
+      },
+      "op": "expect"
+    },
+    {
+      "delay": {
+        "compressible": true,
+        "from": "step:s3",
+        "ms": 20,
+        "timer_linked": false
+      },
+      "id": "s4",
+      "leg": "B",
+      "msg": {
+        "cseq-method": "INVITE",
+        "reason": "Busy Here",
+        "status": 486
+      },
+      "op": "send"
+    },
+    {
+      "auto": true,
+      "check": "record",
+      "delay": {
+        "compressible": true,
+        "from": "step:s4",
+        "ms": 0,
+        "timer_linked": false
+      },
+      "id": "s5",
+      "leg": "B",
+      "msg": {
+        "cseq": 1,
+        "method": "ACK"
+      },
+      "op": "expect"
+    },
+    {
+      "check": "assert",
+      "checks": [
+        {
+          "field": "status",
+          "op": "eq",
+          "value": "486"
+        }
+      ],
+      "delay": {
+        "compressible": true,
+        "from": "step:s4",
+        "ms": 0,
+        "timer_linked": false
+      },
+      "id": "s6",
+      "leg": "A",
+      "msg": {
+        "cseq-method": "INVITE",
+        "reason": "Busy Here",
+        "status": 486
+      },
+      "op": "expect"
+    },
+    {
+      "auto": true,
+      "delay": {
+        "compressible": true,
+        "from": "step:s6",
+        "ms": 0,
+        "timer_linked": false
+      },
+      "id": "s7",
+      "leg": "A",
+      "msg": {
+        "cseq": 1,
+        "method": "ACK"
+      },
+      "op": "send"
+    }
+  ],
+  "identities": [
+    {
+      "kind": "address",
+      "name": "caller",
+      "observed": "sip:alice@atlanta.example.com"
+    },
+    {
+      "kind": "address",
+      "name": "callee",
+      "observed": "sip:bob@biloxi.example.com"
+    }
+  ],
+  "legs": [
+    {
+      "actor": "caller",
+      "dir": "out",
+      "id": "A"
+    },
+    {
+      "actor": "callee",
+      "dir": "in",
+      "id": "B"
+    }
+  ],
+  "pivot_version": 3,
+  "postconditions": {
+    "cdr": {
+      "absent": "claims"
+    },
+    "claims": {
+      "call-records": {
+        "count": 1
+      }
+    }
+  },
+  "timing": {
+    "expect_budget_ms": 37000,
+    "settle_budget_ms": 37000
+  }
+}

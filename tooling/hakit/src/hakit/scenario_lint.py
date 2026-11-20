@@ -283,8 +283,9 @@ def _record_errors(sc: Scenario) -> list[str]:
     return sorted(errors)
 
 
-# SIPp 3.7 refuses a scenario file longer than this (xp_parser.c XP_MAX_FILE_LEN).
-MAX_FILE_BYTES = 65536
+# The longest scenario file SIPp 3.7 loads: xp_parser.c refuses one that
+# reaches XP_MAX_FILE_LEN (65536) bytes.
+MAX_FILE_BYTES = 65535
 
 
 def lint(path: Path) -> list[str]:

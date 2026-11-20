@@ -102,7 +102,7 @@ pub struct Call {
     pub a_leg_invite: ALegInviteSnapshot,
     /// The call's admission state on the call limiter, under its own key.
     pub limiter: CallLimiterState,
-    /// Serializable timer intents (not runtime fibers): at most one entry per
+    /// Serializable timer intents (not runtime tasks): at most one entry per
     /// key.
     pub timers: Vec<TimerEntry>,
     /// The last generation a timer was armed under: each arming takes the

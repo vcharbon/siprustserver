@@ -1,4 +1,4 @@
-//! Text report writer — port of `text-report.ts`.
+//! Text report writer.
 //!
 //! The **global** view (`<name>.global.txt`) is now produced by the SHARED
 //! [`seq_report`] renderer over a single-plane [`seq_report::SeqDoc`] (the

@@ -63,7 +63,7 @@ def test_the_smoke_profile_fires_its_kills_on_schedule_with_their_series(tmp_pat
     assert [p[1] for p in got[:5]] == ["inject", "injected", "heal", "healed", "recovered"]
     starts = [at for _ev, ph, at in got if ph == "inject"]
     load_start = starts[0] - 60_000
-    assert [s - load_start for s in starts] == [60_000, 210_000, 360_000, 510_000]
+    assert [s - load_start for s in starts] == [60_000, 215_000, 370_000, 525_000]
     lines = vm_lines(fake)
     for _ev, ph, at in got:
         assert f'sip_chaos_event{{incident="kill_worker",phase="{ph}",source="schedule",run="{run}"}} 1 {at}' in lines

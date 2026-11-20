@@ -168,6 +168,18 @@
       "node": "i1"
     },
     {
+      "action": "kill-b2bua",
+      "failure": "inject-refused",
+      "node": "i1",
+      "reason": "the operation exited 1"
+    },
+    {
+      "action": "kill-b2bua",
+      "failure": "inject-timed-out",
+      "node": "i1",
+      "within_ms": 60000
+    },
+    {
       "event": "decision-request-in-flight",
       "failure": "lane-event-unsupported",
       "step": "s3"

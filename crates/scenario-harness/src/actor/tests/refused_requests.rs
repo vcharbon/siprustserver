@@ -94,3 +94,31 @@ async fn a_request_refused_481_ends_the_dialog() {
     bob_task.await.expect("bob's side completes");
     h.finish().await;
 }
+
+#[tokio::test(start_paused = true)]
+async fn an_update_refused_with_no_retry_finishes_its_renegotiation() {
+    let h = Harness::new("actor-update-488").describe(
+        "bob refuses alice's UPDATE 488, which asks no retry: her renegotiation finishes with \
+         the session unchanged (RFC 3261 §14.1), and her BYE gated on it follows at once",
+    );
+    let alice = h.agent("alice", "127.0.0.1:5060").await;
+    let bob = h.agent("bob", "127.0.0.1:5070").await;
+    let bob_task = {
+        let bob = bob.clone();
+        tokio::spawn(async move {
+            let mut invite = bob.receive("INVITE").await;
+            invite.respond(200, "OK").with_sdp(ANSWER_SDP).await;
+            bob.receive("ACK").await;
+            bob.receive("UPDATE").await.respond(488, "Not Acceptable Here").await;
+            bob.receive("BYE").await.respond(200, "OK").await;
+        })
+    };
+    let renegotiated = |s: &StateInner| s.leg("alice").reneg_count() >= 1;
+    let started = tokio::time::Instant::now();
+    let verdict =
+        run_call(plan(&alice, &bob, GoalStep::Update, renegotiated), Duration::from_secs(10)).await;
+    assert!(verdict.is_ok(), "the call completes, got {verdict:?}");
+    assert!(started.elapsed() < Duration::from_secs(2), "no wait for a reneg that never comes");
+    bob_task.await.expect("bob's side completes");
+    h.finish().await;
+}

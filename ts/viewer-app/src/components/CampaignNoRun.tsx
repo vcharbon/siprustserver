@@ -25,6 +25,7 @@ export const CampaignNoRun = ({ view }: { readonly view: Campaign }): JSX.Elemen
             stated={view.launch.defaultLanes}
             tags={view.launch.tags}
             cases={view.cases}
+            collection={view.launch.collection}
             open
           />
         )}

@@ -14,8 +14,8 @@
 //! single bulk `advance` fires the sleeps but does NOT run the freshly-spawned
 //! delivery task bodies — the woken task needs a scheduler turn — so we
 //! `advance` one hop then `yield_now` until the fabric is fully quiescent
-//! (`in_flight == 0`). This is the CLAUDE.md "drive the protocol between
-//! advances" discipline applied to the spawn-per-datagram fabric. No real
+//! (`in_flight == 0`). This is the test-clock guide's "advance between protocol
+//! steps" rule applied to the spawn-per-datagram fabric. No real
 //! wall-clock cost — default lane.
 
 use std::net::SocketAddr;
@@ -45,7 +45,7 @@ fn flooder_addr() -> SocketAddr {
 /// Threshold 2. The refusals run at jitter 0, so the reject's `Retry-After`
 /// is exactly the base.
 fn brake_config() -> IngressBrakeConfig {
-    IngressBrakeConfig { queue_max: QUEUE_MAX, threshold_pct: BRAKE_PCT }
+    IngressBrakeConfig::by_depth(QUEUE_MAX, BRAKE_PCT)
 }
 
 /// An INVITE. `to_tag` makes it in-dialog (a re-INVITE); `emergency` adds the
@@ -276,6 +276,34 @@ async fn non_invite_requests_are_not_rejected_by_the_brake() {
     for raw in &replies {
         assert_eq!(status_line(raw), b"SIP/2.0 503 Service Unavailable");
     }
+}
+
+/// The copies of an INVITE a compliant client re-sends on Timer A (RFC 3261
+/// §17.1.1.2, T1 = 500 ms) before Timer B = 64·T1: at 0.5, 1.5, 3.5, 7.5,
+/// 15.5 and 31.5 s.
+const INVITE_RESENDS: usize = 6;
+
+/// A refused INVITE re-sent at wire speed (ADR-0063 §1): the refusal and the
+/// copies Timer A re-sends draw the brake's 503 from its memo, the rest
+/// nothing: the brake drops them, so none reaches the pipeline.
+#[tokio::test(start_paused = true)]
+async fn a_refused_invite_copied_at_wire_speed_draws_its_503_on_timer_as_schedule() {
+    let (net, b2bua, flooder, counters) = setup().await;
+    for i in 0..2u32 {
+        flooder.send_to(&new_invite(i), b2bua_addr()).await.unwrap();
+    }
+    settle(&net).await;
+
+    let copies = 15;
+    for _ in 0..=copies {
+        flooder.send_to(&new_invite(7), b2bua_addr()).await.unwrap();
+    }
+    settle(&net).await;
+
+    assert_eq!(counters.refused(Class::Normal), 1, "one refusal");
+    let replies = drain(flooder.as_ref());
+    assert_eq!(replies.len(), 1 + INVITE_RESENDS, "the refusal and Timer A's re-sends");
+    assert_eq!(b2bua.queue_depth(), 2, "the two admitted INVITEs only: no copy is queued");
 }
 
 fn find(hay: &[u8], needle: &[u8]) -> Option<usize> {

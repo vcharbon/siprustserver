@@ -262,8 +262,9 @@ impl Ring {
 /// Whether the layer handed the TU a message it already handled: an ACK that
 /// discharges no 2xx awaiting it while the ring already holds the peer's ACK
 /// of that same (tag, CSeq) — a late first ACK after the ladder gave up is
-/// still the first — or a copy of an INVITE 2xx the dialog already took
-/// (RFC 3261 §13.3.1.4) — the readings the executor absorbs and re-ACKs by.
+/// still the first — or a copy of an INVITE 2xx the dialog already took, its
+/// last INVITE's or an earlier one's (RFC 3261 §13.3.1.4) — the readings the
+/// executor absorbs and re-ACKs by.
 fn repeated(
     call: &Call,
     leg_id: &str,
@@ -283,9 +284,10 @@ fn repeated(
                         && e.to_tag.as_deref() == req.to().tag()
                 })
         }
-        SipMessage::Response(resp) => {
-            named.is_some_and(|d| crate::rules::relay::retransmitted_2xx(leg, d, resp))
-        }
+        SipMessage::Response(resp) => named.is_some_and(|d| {
+            crate::rules::relay::copy_of_taken_2xx(leg, d, resp)
+                || crate::rules::relay::copy_of_earlier_2xx(d, resp)
+        }),
     }
 }
 

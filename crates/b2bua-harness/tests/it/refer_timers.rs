@@ -1,5 +1,4 @@
-//! REFER safety-timer scenario. Port of
-//! `tests/scenarios/refer-timers.ts`.
+//! REFER safety-timer scenario.
 //!
 //! Exercises the `refer_overall_safety` watchdog (the cross-phase end-to-end
 //! safety net). The per-scenario config pushes `refer_reinvite_answer` out to
@@ -8,9 +7,8 @@
 //! reinvite-answer timer) trips first → `transfer-overall-timeout` →
 //! begin-termination BYEs all three confirmed legs (A, B, C).
 //!
-//! skipFinalSweep (TS refer-timers.ts:118): the TS 24h end-of-scenario sweep
-//! races the pending c-realign re-INVITE's Timer B against the three BYE 200s.
-//! The Rust harness has no such sweep — we drive the exact 10s overall-safety
+//! The pending c-realign re-INVITE's Timer B races the three BYE 200s: we
+//! drive the exact 10s overall-safety
 //! deadline and tolerate the INVITE/CANCEL/BYE retransmits the crossed deadline
 //! emits (the stuck c-realign re-INVITE is still retransmitting toward C when
 //! begin-termination fires, and may emit a CANCEL during teardown). The

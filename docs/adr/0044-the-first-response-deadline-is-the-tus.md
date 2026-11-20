@@ -43,7 +43,7 @@ silence".
    never answered does; `"transaction"` (it answered, then drew no final)
    keeps `408`.
 4. **The abandoned INVITE stays a transaction.** The TU's CANCEL on it is held
-   (ADR-0043 X1); a late provisional sends it, a late final is ACKed, and no
+   (ADR-0058 X1); a late provisional sends it, a late final is ACKed, and no
    later timeout of the transaction is reported. A provisional after the
    report leaves Timer B armed: the long INVITE bound is not swapped in.
 5. **Only the initial INVITE reads it.** An in-dialog INVITE and every

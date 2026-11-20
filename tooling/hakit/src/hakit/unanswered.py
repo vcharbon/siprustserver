@@ -10,9 +10,11 @@ budget allows a 503 without Retry-After), `silent_after_provisional`,
 `setup_timeout` (no response heard by the give-up), `cut` (cut, stranded, or
 failed after its answer), `other` (any other ending or code, a bare 503 in a
 window that does not allow it among them). Its place is the incident kinds of
-the first window its setup overlaps (a cut: the window holding its last failure,
-else its end), or `outside`. Its detail is its ending and final code, with its
-early media when an expected ending of that code names one. A priority stream
+the first window its setup overlaps, or `outside`; a cut's is those of the
+window the judge places its ending impact in (`judge.in_dialog_window`): the
+one charging it, else the latest-opened of its candidate windows. A loss sits
+in the same window in both tables of a summary. Its detail is its ending and final code, with its early media when an
+expected ending of that code names one. A priority stream
 places calls whose shape's request carries `Resource-Priority` (RFC 4412); the
 groups hold `run` streams only.
 """
@@ -25,7 +27,8 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 
 from . import jsonval as jv
-from .classify import SILENT_AFTER_PROVISIONAL, caller_expected, silent_after_provisional
+from .classify import SILENT_AFTER_PROVISIONAL, caller_expected, ending_impact, silent_after_provisional
+from .judge import in_dialog_window
 from .jsonval import Json
 from .model import Budget, Shape
 from .profile import Profile
@@ -59,6 +62,7 @@ class Places:
     that window's budget allows a 503 without Retry-After."""
 
     def __init__(self, windows: list[Window], budgets: dict[str, Budget]) -> None:
+        self.budgets = budgets
         self.bare_503 = {name for name, b in budgets.items() if allows_bare_503(b)}
         self.windows = sorted(windows, key=lambda w: w.opened_at_ms)
         self.opens = [w.opened_at_ms for w in self.windows]
@@ -77,7 +81,15 @@ class Places:
         return found
 
     def where(self, from_ms: float, to_ms: float) -> str:
+        """The kind of the earliest-opened window that overlaps [from_ms, to_ms], or `outside`."""
         w = self.overlapping(from_ms, to_ms)
+        return OUTSIDE if w is None else kind_of(w)
+
+    def cut_where(self, r: Json, shape: Shape) -> str:
+        """The kind of the window the judge places the call's ending impact in
+        (`in_dialog_window`), or `outside`."""
+        loss = ending_impact(r, shape)
+        w = None if loss is None else in_dialog_window(self.windows, loss, self.budgets)
         return OUTSIDE if w is None else kind_of(w)
 
 
@@ -119,11 +131,8 @@ def cause_of(r: Json, shape: Shape, places: Places) -> Cause | None:
         return Cause(SILENT_AFTER_PROVISIONAL, detail, setup_where)
     if ending == "timeout":
         return Cause("setup_timeout", detail, setup_where)
-    if ending == "stranded":
-        return Cause("cut", detail, places.where(ended, ended))
-    if ending == "cut" or (ending == "failed" and jv.opt_number(r, "answered_at_ms") is not None):
-        at = max((jv.number(f, "at_ms") for f in failures), default=ended)
-        return Cause("cut", detail, places.where(at, at))
+    if ending in ("cut", "stranded") or (ending == "failed" and jv.opt_number(r, "answered_at_ms") is not None):
+        return Cause("cut", detail, places.cut_where(r, shape))
     return Cause("other", detail, setup_where)
 
 

@@ -2,8 +2,7 @@
 //! Play→record over real UDP + real wall-clock.
 //!
 //! The wire proof that the framing/codec/transport path works on real sockets,
-//! not just the simulated fabric. Port of
-//! `../sipjsserver/tests/media/rtp-media-live.test.ts`. Localhost UDP can drop a
+//! not just the simulated fabric. Localhost UDP can drop a
 //! packet, so the frame count is asserted with a small tolerance (unlike the
 //! exact count over the simulated fabric).
 

@@ -347,6 +347,7 @@ pub fn release_reroute_rules() -> Vec<RuleDefinition> {
                     ctx.source_leg_id == "a"
                         && ctx.call.reroute_state().map(|r| r.phase)
                             == Some(ReroutePhase::ARealigning)
+                        && ctx.answers_last_sent_invite()
                 },
             ),
             |ctx| {

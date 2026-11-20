@@ -9,9 +9,10 @@ use sip_message::SipRequest;
 use tokio::time::Instant;
 
 use super::answer::answer_initial_invite;
+use super::facts::in_dialog_arrival;
 use super::react::maybe_answer_held_invite;
 use super::runner::ActorState;
-use super::state::{LegPhase, Observation};
+use super::state::LegPhase;
 use crate::{ServerTxn, StepError};
 
 /// A PRACK for our reliable 183: 200 it, then — MUST-014 — answer 200 to the
@@ -23,12 +24,7 @@ pub(super) async fn react_prack(
     mut uas: ServerTxn,
 ) -> Result<(), StepError> {
     let now = Instant::now();
-    let arrived = Observation::InDialogRequest {
-        leg: st.role,
-        call_id: uas.request().call_id().to_string(),
-        cseq: uas.request().cseq().seq(),
-        method: uas.request().method().as_str().to_string(),
-    };
+    let arrived = in_dialog_arrival(st.role, uas.request());
     if names_nothing(st, uas.request()) {
         uas.respond(481, "Call/Transaction Does Not Exist").try_send().await?;
         st.obs.record(arrived, now);
@@ -41,10 +37,11 @@ pub(super) async fn react_prack(
     }
     let prack_tag = uas.request().to().tag().map(str::to_owned);
     st.ctx.anchor(&st.agent, "prack", uas.request());
-    uas.respond(200, "OK").try_send().await?;
     if let Some(tag) = &prack_tag {
         st.unpracked.remove(tag);
+        st.trains.offered.remove(tag);
     }
+    super::prack_hold::answer(st, uas).await?;
     st.obs.record(arrived, now);
     // C5: this callee holds the INVITE for an early UPDATE — mark the 183
     // PRACKed and release the held 200 only once the UPDATE is also done

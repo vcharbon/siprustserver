@@ -2,7 +2,7 @@
 //! of WebRTC setLocalDescription / setRemoteDescription, and an *independent*
 //! conformance witness of whatever SDP the B2BUA relays or synthesizes.
 //!
-//! Port of `../sipjsserver/src/media/sdp/negotiator.ts`. Strict refusals (typed
+//! Strict refusals (typed
 //! [`SdpNegotiationError`], each a named RFC MUST) catch a B2BUA that mangles the
 //! relayed c=/m=, intersects codecs wrong, or drops an m-line: the receiving
 //! engine rejects or mis-points, so a media `hears(...)` assertion fails loudly.
@@ -14,7 +14,7 @@ use super::{
     build_sdp, media_connection_addr, MediaDirection, Sdp, SdpMedia, SdpOrigin, SdpRtpMap,
 };
 
-/// The negotiation state machine. Mirrors the TS `NegotiationState`.
+/// The negotiation state machine.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NegotiationState {
     Idle,
@@ -24,7 +24,7 @@ pub enum NegotiationState {
     Held,
 }
 
-/// The committed outcome of negotiation. Mirrors the TS `NegotiatedMedia`.
+/// The committed outcome of negotiation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NegotiatedMedia {
     pub remote: NetAddr,
@@ -86,7 +86,7 @@ fn is_reachable(addr: &str, port: u16) -> bool {
     port != 0 && addr != "0.0.0.0" && addr != "::"
 }
 
-/// FNV-1a over `ip:port`, matching the TS `deriveSessionId`.
+/// FNV-1a over `ip:port`: a session id stable for one address.
 fn derive_session_id(addr: &NetAddr) -> u32 {
     let mut h: u32 = 0x811c_9dc5;
     let s = format!("{}:{}", addr.ip, addr.port);
@@ -97,7 +97,7 @@ fn derive_session_id(addr: &NetAddr) -> u32 {
     h
 }
 
-/// The per-dialog offer/answer engine. Mirrors the TS `OfferAnswerEngine`.
+/// The per-dialog offer/answer engine.
 pub struct OfferAnswerEngine {
     local_addr: NetAddr,
     codecs: Vec<CodecDesc>,

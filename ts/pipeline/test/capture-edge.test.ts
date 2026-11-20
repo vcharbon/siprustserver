@@ -23,6 +23,7 @@ import {
 import { CAPTURE_RULES } from "../src/capture-rules.js"
 import { CASE_RULES } from "../src/case-rules.js"
 import type { CutVantage } from "../src/cut.js"
+import { scenario, type ScenarioLeg } from "../src/scenario.js"
 import { SutSet } from "../src/sut.js"
 import {
   BASE_CALL_ID,
@@ -116,6 +117,34 @@ const details = (
   cutLegs?: ReadonlyArray<number>
 ): ReadonlyArray<string> => edge(flows, vantages, cutLegs)?.evidence?.map((e) => e.detail) ?? []
 
+const NEXT = "203.0.113.20:5060"
+const NEXT_RELAYS_FROM = "203.0.113.20:5062"
+const PAST = "203.0.113.30:5060"
+const PAST_ANSWERS_FROM = "203.0.113.30:49152"
+
+/**
+ * A leg the system dials (hop 0, msg 0) and its next hop relays under the same
+ * CSeq number (hop 1, msg 1); hop 2 is hop 1 as the party past it answers from
+ * another port. The leg ends the capture: nothing follows its last message.
+ */
+const relayedLeg = (): ScenarioLeg =>
+  scenario([SUT_IP])
+    .leg({
+      callId: DERIVED_CALL_ID,
+      party: NEXT,
+      system: SUT_EGRESS,
+      hops: [
+        { party: PAST, system: NEXT_RELAYS_FROM },
+        { party: PAST_ANSWERS_FROM, system: NEXT_RELAYS_FROM }
+      ]
+    })
+    .invite({ at: 0, by: "system" })
+    .invite({ at: 2, by: "system", hop: 1, seq: 1, fresh: true })
+
+/** What the rule finds of a leg that is the whole capture, scripted at its hop 0. */
+const detailsAlone = (leg: ScenarioLeg): ReadonlyArray<string> =>
+  details(doc([leg.build()], [{ legs: [0] }]), [leg.vantage()])
+
 describe("the capture edge: a leg terminated inside the capture", () => {
   it("a BYE that drew its final, whatever the distance to the end", () => {
     // The end of the capture is the 200 to the BYE itself, as a per-call export ends.
@@ -127,6 +156,26 @@ describe("the capture edge: a leg terminated inside the capture", () => {
 
   it("a non-2xx final with its ACK", () => {
     expect(details(family(callerMsgs("rejected"), 305))).toEqual([])
+  })
+
+  it("a non-2xx final sent from another port than its INVITE reached, past the system's own hop (RFC 3261 §18.2.2)", () => {
+    const leg = relayedLeg()
+      .response(488, { at: 30, hop: 2 })
+      .ack({ at: 31, by: "system", hop: 1 })
+      .response(488, { at: 33 })
+      .ack({ at: 34, by: "system" })
+
+    expect(detailsAlone(leg)).toEqual([])
+  })
+
+  it("a CANCEL and its 487 at the system's hop, where the capture holds no answer of the hop the INVITE was relayed on", () => {
+    const leg = relayedLeg()
+      .response(180, { at: 90 })
+      .cancel({ at: 4_000, by: "system" })
+      .response(487, { at: 4_040, to: "INVITE" })
+      .ack({ at: 4_041, by: "system" })
+
+    expect(detailsAlone(leg)).toEqual([])
   })
 
   it("a CANCEL, its 487 and the ACK", () => {
@@ -247,6 +296,42 @@ describe("the capture edge: a leg the file cut through", () => {
     const found = details(family(msgs, 1_000))
     expect(found).toHaveLength(1)
     expect(found[0]).toMatch(/its INVITE \(msg 2\) drew no final.*gave-up-at-edge/)
+  })
+
+  it("an INVITE sent again under its CSeq number after a non-2xx (msg 3) and never answered, inside the give-up silence", () => {
+    const leg = scenario([SUT_IP])
+      .leg({ callId: BASE_CALL_ID, party: UPSTREAM, system: SUT_INGRESS })
+      .invite({ at: 0, by: "party" })
+      .response(486, { at: 300 })
+      .ack({ at: 305, by: "party" })
+      .invite({ at: 400, by: "party", seq: 1, fresh: true })
+    const found = detailsAlone(leg)
+
+    expect(found).toHaveLength(1)
+    expect(found[0]).toMatch(/its INVITE \(msg 3\) drew no final.*gave-up-at-edge/)
+  })
+
+  it("an INVITE relayed past the system's hop (msg 1) that no hop answered, inside the give-up silence", () => {
+    const found = detailsAlone(relayedLeg().response(100, { at: 5, hop: 0 }))
+
+    expect(found).toHaveLength(1)
+    expect(found[0]).toMatch(/its INVITE \(msg 1\) drew no final.*gave-up-at-edge/)
+  })
+
+  it("a 2xx at the system's hop with no BYE, where the capture holds no answer of the hop the INVITE was relayed on", () => {
+    const leg = relayedLeg().response(200, { at: 900 }).ack({ at: 910, by: "system" })
+    const found = detailsAlone(leg)
+
+    expect(found).toHaveLength(1)
+    expect(found[0]).toMatch(/took the 200 \(msg 2\) answering its INVITE \(msg 1\) and no BYE closed the dialog: dialog-left-open/)
+  })
+
+  it("a dialog whose 2xx is captured ahead of the INVITE it answers, with no BYE, however long the silence", () => {
+    const msgs = [res(200, "INVITE", 1, 0), req("INVITE", 1, 3), req("ACK", 1, 5, "callee")]
+    const found = details(family(msgs, 5 + 10 * SILENCE_MS))
+
+    expect(found).toHaveLength(1)
+    expect(found[0]).toMatch(/took the 200 \(msg 0\) answering its INVITE \(msg 1\) and no BYE closed the dialog: dialog-left-open/)
   })
 
   it("a non-INVITE leg whose last request drew no final, inside the give-up silence", () => {

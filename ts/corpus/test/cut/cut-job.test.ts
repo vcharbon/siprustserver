@@ -150,7 +150,7 @@ describe("CutJob.run", () => {
       kind: "cut",
       args: { captures, mode: "stale-only", concurrency: 2, memoryMax: "3G" }
     })
-    expect(on.started).toEqual([[JOB, { pid: process.pid, hooksPath: "/w/sessions/_jobs/42/hooks" }]])
+    expect(on.started).toEqual([[JOB, { pid: process.pid }]])
     expect(on.planned).toEqual([[JOB, 2]])
     expect(on.openedUnder).toEqual([JOB])
     expect(asked).toEqual([[captures, PREP, JOB]])

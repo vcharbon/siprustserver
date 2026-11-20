@@ -15,8 +15,12 @@
  * the same line, so a reader never has to guess whether a cell failed or never
  * ran. A cell that ran its interpreter and did not pass keeps what the
  * interpreter wrote on stderr in `stderr.txt`, whatever the verdict says. A
- * cell whose document declares its lane BLOCKED is not red either: it leaves
- * a `skipped.json` and never reaches the interpreter.
+ * pivot-replay cell whose lane still waits on one of its verification lines
+ * (`pending` in `verifications.json`) lands not passed, naming them: a line
+ * stays pending until its batch's end answers it, and the cell is read again
+ * then (`pending.ts` `settled`). A cell whose document declares its lane
+ * BLOCKED is not red either: it leaves a `skipped.json` and never reaches the
+ * interpreter.
  *
  * A cell is INTERRUPTIBLE: an interruption reaches the interpreter's process
  * (SIGTERM, then SIGKILL after the toolchain's grace), and the cell leaves
@@ -24,8 +28,8 @@
  * answers nothing — its fiber is interrupted — so the caller counts it from
  * what it admitted and what landed.
  */
-import { Body, Bundle, Campaign, CellHits, Confrontation, E2e, Flows, Pivot, Tokens } from "@sip/contracts"
-import { Classifier, Confront, FlowsFile, Reclassifier } from "@sip/pipeline"
+import { Bundle, Campaign, CellHits, Confrontation, E2e, Pivot, Tokens, Verification } from "@sip/contracts"
+import { Classifier, Confront, Reclassifier } from "@sip/pipeline"
 import { ReplayCli, runner as toolchainRunner } from "@sip/toolchain"
 import * as Cause from "effect/Cause"
 import * as Effect from "effect/Effect"
@@ -33,7 +37,8 @@ import * as FileSystem from "effect/FileSystem"
 import * as Path from "effect/Path"
 import type * as ChildProcessSpawner from "effect/unstable/process/ChildProcessSpawner"
 import { LanePresets } from "./lanes.js"
-import { readRecordings } from "./recordings.js"
+import { confrontInputOf, documentPath } from "./confront-input.js"
+import { landedIn } from "./pending.js"
 import {
   cellDir,
   cellIdOf,
@@ -44,7 +49,6 @@ import {
   STDERR_FILE,
   RFC_FILE,
   RULE_HITS_FILE,
-  RUN_CONFIG_FILE,
   runSpecFile,
   SKIP_FILE,
   SPECS_DIR,
@@ -80,12 +84,6 @@ export interface TestInvocation {
    * every crate-test cell is an error carrying it and nothing is spawned.
    */
   readonly unavailable?: string
-}
-
-/** `cargo test -p <crate> -- --exact <name> --nocapture`, the standard form. */
-export const cargoTest: TestInvocation = {
-  command: "cargo",
-  args: (cell) => ["test", "-p", cell.crate, "--", "--exact", cell.name, "--nocapture"]
 }
 
 /** Everything one cell needs that the campaign decided once. */
@@ -158,7 +156,10 @@ export const runCell = Effect.fn("Driver.runCell")(function* (
       dir,
       ...(outcome.crashed ? { error: firstLine(outcome.detail) } : {}),
       ...(outcome.skipped === undefined ? {} : { skipped: outcome.skipped }),
-      ...(outcome.sourceFault === undefined ? {} : { sourceFault: outcome.sourceFault })
+      ...(outcome.sourceFault === undefined ? {} : { sourceFault: outcome.sourceFault }),
+      ...(outcome.restated === undefined ? {} : { restated: outcome.restated }),
+      ...(outcome.restatedLines === undefined ? {} : { restatedLines: outcome.restatedLines }),
+      ...(outcome.pending === undefined ? {} : { pending: outcome.pending })
     },
     detail: outcome.detail
   } satisfies CellRun
@@ -190,6 +191,12 @@ interface CellOutcome {
   readonly skipped?: Tokens.LaneVerdict
   /** The cell's RFC audit holds a source fault: information beside `passed`, which it never decides. */
   readonly sourceFault?: true
+  /** The reclassifier restated the failed run as passed: its reason. */
+  readonly restated?: string
+  /** Beside `restated`: the lane's lines failing the cell as it landed, the ones restated. */
+  readonly restatedLines?: ReadonlyArray<string>
+  /** The lines the lane still waits on, where only they keep the cell from passing. */
+  readonly pending?: ReadonlyArray<string>
 }
 
 /**
@@ -213,7 +220,10 @@ const guarded = <R>(
 /**
  * One document on one lane. The cell directory IS the interpreter's `out_dir`,
  * so the run-spec is written under `specs/` and nothing else is put there before
- * the run.
+ * the run. A cell that only lines its lane still waits on keep from passing
+ * lands not passed, naming them (`pending.ts`). A cell the reclassifier
+ * restates as passed names the lane's lines failing it as it lands: those,
+ * and no line failing later, are what it restated.
  */
 const runPivotReplay = Effect.fn("Driver.runPivotReplay")(function* (
   cell: Campaign.PivotReplayCell,
@@ -282,6 +292,8 @@ const runPivotReplay = Effect.fn("Driver.runPivotReplay")(function* (
   // whatever verdict it left was written before the unwind, so it cannot
   // answer for what came after.
   const panicked = report.outcome._tag === "panicked"
+  const landed = yield* landedIn(absolute)
+  const pending = landed.pending
   const structural = !panicked && Bundle.verdictPassed(verdict) && rfcGating.length === 0
 
   const caseId = Campaign.cellCaseId(cell)
@@ -301,10 +313,14 @@ const runPivotReplay = Effect.fn("Driver.runPivotReplay")(function* (
     yield* fs.writeFileString(path.join(absolute, RULE_HITS_FILE), CellHits.emitHits(final.hits))
   }
   const sutPassed = !panicked && final.passed
+  const awaiting = sutPassed && pending.length > 0
+  const restated = sutPassed && !gated ? final.reason ?? "no reason stated" : undefined
   const sourceSaid = `(see ${RFC_FILE}):\n` +
     source.map((f) => `  ${f.rule} [${f.lane}] by ${f.actor ?? "a scripted party"}: ${f.detail}`).join("\n")
   const sutSaid = panicked
     ? `replay exited ${report.exitCode} (panicked):\n${report.stderr}`
+    : awaiting
+    ? `still verifying: ${pending.join(", ")} pending (see ${Verification.FILE})`
     : final.passed === gated
       ? gated === structural
         ? rfcGating.length > 0
@@ -316,7 +332,7 @@ const runPivotReplay = Effect.fn("Driver.runPivotReplay")(function* (
       : `${verdict.status} restated as ${final.passed ? "passed" : "failed"}: ` +
         `${final.reason ?? "no reason stated"}`
   return {
-    passed: sutPassed,
+    passed: sutPassed && !awaiting,
     detail: source.length === 0
       ? sutSaid
       : sutPassed
@@ -325,7 +341,9 @@ const runPivotReplay = Effect.fn("Driver.runPivotReplay")(function* (
       : `${sutSaid}\nbeside it, a source fault ${sourceSaid}`,
     crashed: false,
     stderr: report.stderr,
-    ...(source.length > 0 ? { sourceFault: true as const } : {})
+    ...(source.length > 0 ? { sourceFault: true as const } : {}),
+    ...(restated === undefined ? {} : { restated, restatedLines: landed.failing }),
+    ...(awaiting ? { pending } : {})
   } satisfies CellOutcome
 })
 
@@ -359,27 +377,7 @@ const confrontCell = Effect.fn("Driver.confrontCell")(function* (
   const path = yield* Path.Path
   const classifier = yield* Classifier.Service
 
-  const recordings = yield* readRecordings(absolute)
-  // The legs this case cites, never the capture: a document of thousands of
-  // calls is read once for its leg index, then a few legs per cell (`FlowsFile`).
-  const captured = cell.flows === undefined
-    ? undefined
-    : yield* FlowsFile.readFlowsLegsDecoded(cell.flows, observedLegs(pivot))
-  if (captured !== undefined) yield* Flows.requireSchemaVersion(captured.envelope)
-  const resources = yield* readStatedBodies(path.dirname(yield* documentPath(cell.case)), pivot)
-  // The run configuration states what the media plane did to the session
-  // descriptions the run sent, which decides what an expected SDP is held to.
-  const config = yield* Bundle.decodeRunConfig(
-    JSON.parse(yield* fs.readFileString(path.join(absolute, RUN_CONFIG_FILE))) as unknown
-  )
-  const confronted = Confront.confront({
-    pivot,
-    verdict,
-    recordings,
-    resources,
-    media: Bundle.mediaModeOf(config),
-    ...(captured === undefined ? {} : { captured: captured.legs })
-  })
+  const confronted = Confront.confront({ ...(yield* confrontInputOf(cell, absolute, pivot, verdict)), packOf: classifier.packOf })
 
   const meta = {
     lane: cell.lane,
@@ -414,54 +412,6 @@ const confrontCell = Effect.fn("Driver.confrontCell")(function* (
     Confrontation.emitClassificationSummary(summary)
   )
   return summary
-})
-
-/** The flows legs the document's `expect` steps cite through their `observed` coordinate. */
-const observedLegs = (pivot: Pivot.PivotV3): ReadonlySet<number> =>
-  new Set(
-    Pivot.pivotSteps(pivot).flatMap((step) =>
-      step.op === "expect" && step.observed !== undefined ? [step.observed.leg] : []
-    )
-  )
-
-/**
- * Every resource a `send` or `expect` step's body or part references, read
- * from the case directory as bytes and keyed by its ref: what the
- * confrontation holds the received bodies against (an expected one must
- * exist), and what the capture drove into the system (a sent one the
- * directory lacks is left out).
- */
-const readStatedBodies = Effect.fn("Driver.readStatedBodies")(function* (
-  caseDir: string,
-  pivot: Pivot.PivotV3
-) {
-  const fs = yield* FileSystem.FileSystem
-  const path = yield* Path.Path
-  const out = new Map<string, Uint8Array>()
-  for (const step of Pivot.pivotSteps(pivot)) {
-    const body = step.msg.body
-    if ((step.op !== "expect" && step.op !== "send") || body === undefined) continue
-    const refs = Body.isResourceBody(body)
-      ? [body.ref]
-      : Body.isMultipartBody(body)
-        ? body.multipart.parts.map((part) => part.ref)
-        : []
-    for (const ref of refs) {
-      if (out.has(ref)) continue
-      const file = path.join(caseDir, ref)
-      if (step.op === "send" && !(yield* fs.exists(file))) continue
-      out.set(ref, yield* fs.readFile(file))
-    }
-  }
-  return out
-})
-
-/** The v3 document a cell names: a file, or `scenario.json` inside a case directory. */
-const documentPath = Effect.fn("Driver.documentPath")(function* (target: string) {
-  const fs = yield* FileSystem.FileSystem
-  const path = yield* Path.Path
-  const info = yield* fs.stat(target)
-  return info.type === "Directory" ? path.join(target, "scenario.json") : target
 })
 
 /**

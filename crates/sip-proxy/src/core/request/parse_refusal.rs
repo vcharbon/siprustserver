@@ -1,7 +1,8 @@
 //! The stateless path's answer to a datagram the parser refused (RFC 3261
 //! §16.3): the 400 [`crate::parse_refusals::ParseRefusals`] builds, sent as the
-//! proxy's own final, whose ACK is recognised by its To-tag and absorbed
-//! (`route`); or nothing. Each outcome is counted.
+//! proxy's own final, whose ACK is recognised and absorbed (`route`): by its
+//! To-tag, or for an in-dialog INVITE, whose 400 echoes the dialog's To-tag, by
+//! the refusal memo; or nothing. Each outcome is counted.
 
 use std::net::SocketAddr;
 
@@ -28,6 +29,7 @@ impl ProxyCore {
         match (refusal, error.partial()) {
             (ParseRefusal::Answer(response), Some(partial)) => {
                 let arrival = Arrival { src, face };
+                self.refusals.remember_parse_refused(partial, self.now_ms());
                 self.send_own_final_to(partial.call_id().as_str(), arrival, &response).await;
                 self.metrics.record_parse_refusal_answered();
             }

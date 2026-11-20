@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# The store's server log: logs/postgres/current in the workspace, timestamped,
+# rotated at 2 MB with 10 archives kept.
+set -euo pipefail
+mkdir -p "$SIPRIG_WORKSPACE/logs/postgres"
+exec s6-log -b -- n10 s2000000 T "$SIPRIG_WORKSPACE/logs/postgres"

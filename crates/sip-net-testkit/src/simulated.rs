@@ -1,5 +1,4 @@
-//! In-memory simulated `SignalingNetwork` (port of
-//! `SignalingNetwork.simulated.ts`).
+//! In-memory simulated `SignalingNetwork`.
 //!
 //! Routes datagrams by destination `SocketAddr` through an in-process table —
 //! no real sockets. Each `send_to` spawns a detached task that sleeps the
@@ -8,7 +7,7 @@
 //! the packet arrives later). This is the fake-transport fabric: a scenario
 //! runs in zero wall-time under a paused tokio clock.
 //!
-//! Per-fiber partition gating belongs with the cluster harness, not here.
+//! Per-node partition gating belongs with the cluster harness, not here.
 //! `send_fault` (per-pair send failure injection) lives here, as it's a
 //! pure-network fault primitive.
 //!
@@ -38,7 +37,7 @@ use crate::types::{
 };
 
 /// Optional per-pair send-failure injector: `(src, dst) -> Some(reason)` fails
-/// that send synchronously (the TS `sendFault`).
+/// that send synchronously.
 pub type SendFault = Arc<dyn Fn(SocketAddr, SocketAddr) -> Option<String> + Send + Sync>;
 
 /// The flow picker of a shared address: `src -> slot` names the member a
@@ -257,9 +256,9 @@ fn deliver(shared: Arc<SimShared>, raw: Vec<u8>, src: SocketAddr, dst: SocketAdd
             }
         };
 
-        let depth = queue.depth();
+        let load = queue.load();
         let mut arrival = Arrival::new(Bytes::from(raw));
-        match crate::pre_ingress::judge(pre.as_ref(), &mut arrival, src, depth, &counters) {
+        match crate::pre_ingress::judge(pre.as_ref(), &mut arrival, src, load, &counters) {
             PreIngressAction::Drop => {
                 counters.pre_ingress_dropped.fetch_add(1, Ordering::Relaxed);
             }
@@ -274,9 +273,9 @@ fn deliver(shared: Arc<SimShared>, raw: Vec<u8>, src: SocketAddr, dst: SocketAdd
                     shared2.in_flight.fetch_sub(1, Ordering::Relaxed);
                 });
             }
-            PreIngressAction::Accept => {
+            action @ (PreIngressAction::Accept | PreIngressAction::AcceptAhead) => {
                 let pkt = arrival.into_packet(src, clock.now_ms().max(0) as u64);
-                if queue.offer(pkt) {
+                if queue.offer_as(&action, pkt) {
                     counters.enqueued.fetch_add(1, Ordering::Relaxed);
                 } else {
                     counters.tail_dropped.fetch_add(1, Ordering::Relaxed);
@@ -343,6 +342,10 @@ impl UdpEndpoint for SimEndpoint {
 
     fn queue_depth(&self) -> usize {
         self.queue.depth()
+    }
+
+    fn queue_wait(&self) -> Duration {
+        self.queue.wait()
     }
 
     fn queue_max(&self) -> usize {

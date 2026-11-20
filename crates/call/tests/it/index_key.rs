@@ -77,7 +77,7 @@ fn a_matched_key_names_the_leg_that_owns_it() {
     assert_eq!(stranger.owning_leg(KeyKind::BDialog, &call), None, "no dialog with that tag");
 }
 
-/// Parity property the source relies on: a well-shaped value yields the same
+/// The two key readers agree: a well-shaped value yields the same
 /// keys through the schema-tolerant walk as through the typed extractor.
 #[test]
 fn from_unknown_matches_typed_extractor() {

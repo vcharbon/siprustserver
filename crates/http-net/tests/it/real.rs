@@ -140,9 +140,23 @@ impl HttpService for LengthService {
     }
 }
 
-/// A raw HTTP/1.1 peer: reads one request head off each connection and
-/// writes `head` then `chunks` copies of `chunk`, the connection left open.
-async fn raw_peer(head: &'static str, chunk: Vec<u8>, chunks: usize) -> std::net::SocketAddr {
+/// What a [`raw_peer`] does with a connection once its bytes are written.
+#[derive(Clone, Copy)]
+enum Then {
+    /// Leaves it open and writes nothing more.
+    Stall,
+    /// Closes it.
+    Close,
+}
+
+/// A raw HTTP/1.1 peer: reads one request head off each connection, writes
+/// `head` then `chunks` copies of `chunk`, and ends as `then` states.
+async fn raw_peer(
+    head: &'static str,
+    chunk: Vec<u8>,
+    chunks: usize,
+    then: Then,
+) -> std::net::SocketAddr {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -166,7 +180,10 @@ async fn raw_peer(head: &'static str, chunk: Vec<u8>, chunks: usize) -> std::net
                         return;
                     }
                 }
-                std::future::pending::<()>().await;
+                match then {
+                    Then::Stall => std::future::pending::<()>().await,
+                    Then::Close => {}
+                }
             });
         }
     });
@@ -214,8 +231,8 @@ async fn a_response_body_past_the_cap_fails_as_body_too_large() {
 /// sent, so a client that waited for it would run to its ceiling.
 #[tokio::test]
 async fn a_declared_length_past_the_cap_fails_before_the_body() {
-    let dst =
-        raw_peer("HTTP/1.1 200 OK\r\nContent-Length: 1073741824\r\n\r\n", Vec::new(), 0).await;
+    let head = "HTTP/1.1 200 OK\r\nContent-Length: 1073741824\r\n\r\n";
+    let dst = raw_peer(head, Vec::new(), 0, Then::Stall).await;
     let net = RealHttpNetwork::new();
 
     let err = tokio::time::timeout(
@@ -234,9 +251,8 @@ async fn a_declared_length_past_the_cap_fails_before_the_body() {
 async fn a_chunked_body_past_the_cap_fails_as_it_streams() {
     const CHUNK: usize = 1024 * 1024;
     let chunks = http_net::MAX_BODY_BYTES / CHUNK + 1;
-    let dst =
-        raw_peer("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n", chunked(CHUNK), chunks)
-            .await;
+    let head = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n";
+    let dst = raw_peer(head, chunked(CHUNK), chunks, Then::Stall).await;
     let net = RealHttpNetwork::new();
 
     let err = tokio::time::timeout(
@@ -248,6 +264,32 @@ async fn a_chunked_body_past_the_cap_fails_as_it_streams() {
     .expect_err("past the cap");
 
     assert_eq!(err.cause, FailureCause::BodyTooLarge, "{err:?}");
+}
+
+/// A response is a whole one: a body the peer closes before its declared end,
+/// a length not reached or a chunked body with no last chunk, fails as `Eof`
+/// at the close, not at the client's ceiling.
+#[tokio::test]
+async fn a_body_cut_before_its_declared_end_fails_as_eof() {
+    let cut = [
+        ("HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\n", b"xxxx".to_vec()),
+        ("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n", chunked(4)),
+    ];
+    for (head, sent) in cut {
+        let dst = raw_peer(head, sent, 1, Then::Close).await;
+        let net = RealHttpNetwork::new();
+
+        let err = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            net.request(dst, HttpRequest::get("/")),
+        )
+        .await
+        .expect("failed at the close, not at the ceiling")
+        .expect_err(head);
+
+        assert_eq!(err.cause, FailureCause::Eof, "{head}: {err:?}");
+        assert_eq!(failures::get(&dst.to_string(), FailureCause::Eof), 1, "{head}");
+    }
 }
 
 #[tokio::test]

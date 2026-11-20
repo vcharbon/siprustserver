@@ -14,6 +14,7 @@ from datetime import UTC, datetime
 
 from . import jsonval as jv
 from .jsonval import Json
+from .reconcile import tolerated
 
 
 def _t(ms: float) -> str:
@@ -51,17 +52,17 @@ def _in_dialog_of(v: Json, event: str) -> dict[str, int]:
 def _why(v: Json) -> list[str]:
     status = jv.string(v, "status")
     if status == "invalid":
-        return [_integrity(i) for i in jv.objs(v, "integrity")]
+        return [_integrity(i) for i in jv.objs(v, "integrity") if not tolerated(i)]
     out: list[str] = []
     for w in jv.objs(v, "windows"):
         out += [f"- window {w['event']}: {_impact(r)[2:]}" for r in jv.objs(w, "impacts") if r.get("finding") is True]
         dialog = _in_dialog_of(v, str(w["event"]))
         if dialog:
             listed = ", ".join(f"{k} x{n}" for k, n in sorted(dialog.items()))
-            out.append(f"- window {w['event']} is a candidate of {sum(dialog.values())} in-dialog impacts: {listed} — FINDING")
+            out.append(f"- window {w['event']} is a candidate of {sum(dialog.values())} in-dialog findings: {listed} — FINDING")
     n_dialog = len(jv.objs(v, "in_dialog"))
     if n_dialog:
-        out.append(f"- {n_dialog} in-dialog impacts in all")
+        out.append(f"- {n_dialog} in-dialog findings in all")
     out += [f"- unattributed: {_impact(r)[2:]}" for r in jv.objs(v, "unattributed")]
     out += [f"- {_limiter(r)[2:]}" for r in jv.objs(v, "limiters")]
     return out or ["- every impact within its allowance, measurement intact"]
@@ -184,11 +185,17 @@ def _priority(v: Json) -> list[str]:
     return out + ["", priority_verdict(prio)]
 
 
+def _findings(w: Json, dialog: dict[str, int]) -> str:
+    """The window's findings as its heading counts them: those against its
+    allowances, then the in-dialog findings that name it a candidate."""
+    against = f"{w['findings']} findings against its allowances"
+    return f"{against}, candidate of {sum(dialog.values())} in-dialog findings" if dialog else against
+
+
 def _window(w: Json, dialog: dict[str, int]) -> list[str]:
-    candidates = f", candidate of {sum(dialog.values())} in-dialog impacts" if dialog else ""
     out = [
         f"### {w['event']} ({w['source']}, {w['status']}, {_budget(w)}): "
-        f"{_t(jv.number(w, 'opened_at_ms'))} to {_t(jv.number(w, 'closed_at_ms'))}, {w['findings']} findings{candidates}",
+        f"{_t(jv.number(w, 'opened_at_ms'))} to {_t(jv.number(w, 'closed_at_ms'))}, {_findings(w, dialog)}",
         "",
     ]
     out += [f"- {_t(jv.number(p, 'at_ms'))} {p['step']} {p['phase']}" for p in jv.objs(w, "phases")]

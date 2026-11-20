@@ -43,7 +43,7 @@ fn flooder_addr() -> SocketAddr {
 }
 
 fn brake_config() -> IngressBrakeConfig {
-    IngressBrakeConfig { queue_max: QUEUE_MAX, threshold_pct: BRAKE_PCT }
+    IngressBrakeConfig::by_depth(QUEUE_MAX, BRAKE_PCT)
 }
 
 /// A new (To-tag-less) INVITE. With `emergency`, carries the
@@ -67,9 +67,11 @@ Max-Forwards: 70\r\n"
 }
 
 /// Bind the B2BUA side (brake hook installed; counters folded into a live
-/// `UdpTransportMetrics` whose `queueDepth`/`dropsTailDrop` read THROUGH the
+/// `UdpTransportMetrics` whose `queue_depth`/`drops_tail_drop` read THROUGH the
 /// bound endpoint) and a raw flooder on the same fabric. Returns the fabric, the
-/// (never-drained) B2BUA endpoint, the flooder, and the metrics shape.
+/// (never-drained) B2BUA endpoint, the flooder, and the metrics shape. Each
+/// live getter captures its own clone of the endpoint's `Arc`, so every read
+/// is the instantaneous value.
 async fn setup(
 ) -> (SimulatedSignalingNetwork, Arc<dyn UdpEndpoint>, Box<dyn UdpEndpoint>, UdpTransportMetrics) {
     let net = SimulatedSignalingNetwork::new(TRANSIT_MS);
@@ -88,9 +90,6 @@ async fn setup(
         .into();
     let flooder = net.bind_udp(BindUdpOpts::new(flooder_addr(), 64)).await.expect("bind flooder");
 
-    // Live getters over the bound endpoint — the TS `get queueDepth()` /
-    // `get dropsTailDrop()`. A clone of the Arc'd endpoint is captured by each
-    // closure so the shape reads the instantaneous value on every access.
     let ep_depth = b2bua.clone();
     let ep_counters = b2bua.clone();
     let metrics = UdpTransportMetrics::new(
@@ -137,7 +136,6 @@ async fn metrics_shape_reports_brake_drops_and_queue_depth() {
     let expected_rejects = (flood - 2) as u64;
     assert_eq!(metrics.brake().refused(Class::Normal), expected_rejects, "brake refusals");
     assert_eq!(metrics.brake().refused_copies(), 0, "no copy was sent");
-    // queueDepth is the live endpoint depth — the two below-threshold INVITEs.
     assert_eq!(metrics.queue_depth(), 2, "live queue depth");
     assert_eq!(metrics.queue_max(), QUEUE_MAX);
     // Below threshold + at capacity (5): the brake shed everything over the
@@ -154,7 +152,8 @@ async fn metrics_shape_reports_brake_drops_and_queue_depth() {
 }
 
 /// The tail-drop count is a LIVE proxy of `endpoint.counters.tail_dropped`. The brake
-/// only sheds INVITEs; an OPTIONS flood past `queue_max` is accepted by the hook
+/// only sheds INVITEs; a flood of in-dialog OPTIONS (a probe, outside any
+/// dialog, would be queued ahead) past `queue_max` is accepted by the hook
 /// but TAIL-DROPPED by the full bounded queue once depth hits the cap — and the
 /// metrics shape surfaces that count (the blind spot a depth-only view misses).
 #[tokio::test(start_paused = true)]
@@ -169,7 +168,7 @@ async fn metrics_shape_reports_live_tail_drop() {
             "OPTIONS sip:bob@127.0.0.1:5060 SIP/2.0\r\n\
 Via: SIP/2.0/UDP 10.0.0.1:5555;branch=z9hG4bK-opts-{i}\r\n\
 From: <sip:alice@flooder.test>;tag=opt-{i}\r\n\
-To: <sip:bob@b2bua.test>\r\n\
+To: <sip:bob@b2bua.test>;tag=bob-{i}\r\n\
 Call-ID: opts-{i}@10.0.0.1\r\n\
 CSeq: 1 OPTIONS\r\n\
 Max-Forwards: 70\r\n\

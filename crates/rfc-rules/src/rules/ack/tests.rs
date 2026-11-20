@@ -176,6 +176,86 @@ fn another_calls_unacked_2xx_does_not_excuse_a_b2buas_missing_ack() {
     assert!(b2bua.violated(), "x was ACKed, so y's missing ACK is the B2BUA's: {f:?}");
 }
 
+/// `m` on `branch`, its top Via naming `sent_by`: the address its sender
+/// listens at for the answers.
+fn via(mut m: Msg, branch: &str, sent_by: &str) -> Msg {
+    m.via_branch = Some(branch.to_string());
+    m.head = Some(format!("Via: SIP/2.0/UDP {sent_by};branch={branch}\r\n\r\n").into_bytes());
+    m
+}
+
+/// A UAC that sends its INVITE from another socket than its sent-by opened
+/// the dialog its 2xx confirms: the missing ACK is its own.
+#[test]
+fn a_two_socket_uac_owes_the_ack_of_its_own_invite() {
+    const UAC_SENDS: &str = "10.0.0.1:40000";
+    let msgs = vec![
+        via(req(1_000_000, UAC_SENDS, UAS, "INVITE", 1, None), "z9hG4bK-i", UAC),
+        via(ok200(1_200_000, 1), "z9hG4bK-i", UAC),
+    ];
+    let closed = obs(&msgs, true);
+    let f = NoAckToDialogCreating2xx.eval(&WireView { msgs: &msgs, obs: &closed });
+    assert_eq!(f.len(), 1, "{f:?}");
+    assert!(f[0].violated(), "{:?}", f[0].decision);
+    assert_eq!(f[0].emitter, UAC_SENDS, "the socket that opened the INVITE is charged");
+}
+
+/// A B2BUA dialling from another socket than the one it took its caller's
+/// INVITE at still holds its ACK behind that caller's.
+#[test]
+fn a_two_socket_b2buas_ack_held_behind_its_unacking_caller_is_undecided() {
+    const B2BUA: &str = "10.0.0.5:5060";
+    const B2BUA_SENDS: &str = "10.0.0.5:40000";
+    let on = |mut m: Msg, call: &str| {
+        m.call_id = call.to_string();
+        m
+    };
+    let msgs = vec![
+        on(via(req(1_000_000, UAC, B2BUA, "INVITE", 1, None), "z9hG4bK-a", UAC), "a"),
+        on(via(req(1_010_000, B2BUA_SENDS, UAS, "INVITE", 1, None), "z9hG4bK-b", B2BUA), "b"),
+        on(
+            via(
+                msg(
+                    1_200_000,
+                    UAS,
+                    B2BUA,
+                    Kind::Response { status: 200 },
+                    1,
+                    Some("fa"),
+                    Some("tb"),
+                ),
+                "z9hG4bK-b",
+                B2BUA,
+            ),
+            "b",
+        ),
+        on(
+            via(
+                msg(
+                    1_210_000,
+                    B2BUA,
+                    UAC,
+                    Kind::Response { status: 200 },
+                    1,
+                    Some("fa"),
+                    Some("ta"),
+                ),
+                "z9hG4bK-a",
+                UAC,
+            ),
+            "a",
+        ),
+    ];
+    let closed = obs(&msgs, true);
+    let f = NoAckToDialogCreating2xx.eval(&WireView { msgs: &msgs, obs: &closed });
+    let of = |who: &str| f.iter().find(|f| f.emitter == who).expect("an occasion");
+    assert!(of(UAC).violated(), "the caller withheld its ACK: {f:?}");
+    assert!(
+        matches!(of(B2BUA_SENDS).decision, Decision::Undecidable(_)),
+        "the B2BUA's ACK waits on the caller's: {f:?}"
+    );
+}
+
 /// One trace — a dialog-creating 2xx that is BYE'd but never ACKed — and
 /// the pair states BOTH obligations: the UAC
 /// broke §13.2.2.4 (a BYE is corroboration, never a discharge), and the
@@ -506,6 +586,90 @@ fn a_reject_that_is_never_acked_is_violated() {
     assert_eq!((*status, branch.as_str(), *invite_msg), (486, "z9hG4bK-i", 0));
 }
 
+/// A UAS that rejects from another socket than the one it took the INVITE
+/// at is owed the ACK at the socket the INVITE reached.
+#[test]
+fn a_reject_from_a_second_uas_socket_is_owed_its_ack() {
+    const UAS_SENDS: &str = "10.0.0.2:41000";
+    let from_second =
+        |at_us| on(at_us, UAS_SENDS, UAC, Kind::Response { status: 486 }, 1, "z9hG4bK-i");
+    let acked = unacked(&[
+        took(1_000, "INVITE", "z9hG4bK-i"),
+        from_second(2_000),
+        took(3_000, "ACK", "z9hG4bK-i"),
+    ]);
+    assert_eq!(acked.len(), 1, "{acked:?}");
+    assert!(matches!(acked[0].decision, Decision::Compliant), "{:?}", acked[0].decision);
+    assert_eq!(acked[0].taker, UAS, "the ACK is owed at the socket the INVITE reached");
+
+    let never = unacked(&[took(1_000, "INVITE", "z9hG4bK-i"), from_second(2_000)]);
+    assert_eq!(never.len(), 1, "{never:?}");
+    assert!(never[0].violated(), "{:?}", never[0].decision);
+}
+
+/// §17.1.1.3 sends the ACK to the INVITE's own destination: an ACK to the
+/// socket the reject came from discharges nothing, and the evidence names
+/// where it went.
+#[test]
+fn an_ack_to_the_reject_s_sender_instead_of_the_invite_s_destination_is_violated() {
+    const UAS_SENDS: &str = "10.0.0.2:41000";
+    let mut stray =
+        on(3_000, UAC, UAS_SENDS, Kind::Request { method: "ACK".to_string() }, 1, "z9hG4bK-i");
+    stray.cseq_method = "ACK".to_string();
+    let f = unacked(&[
+        took(1_000, "INVITE", "z9hG4bK-i"),
+        on(2_000, UAS_SENDS, UAC, Kind::Response { status: 486 }, 1, "z9hG4bK-i"),
+        stray,
+    ]);
+    assert_eq!(f.len(), 1, "{f:?}");
+    let Decision::Violated(Evidence::UnackedReject { ack_sent_to, .. }) = &f[0].decision else {
+        panic!("{:?}", f[0].decision)
+    };
+    assert_eq!(ack_sent_to.as_deref(), Some(UAS_SENDS));
+    assert_eq!((f[0].emitter.as_str(), f[0].taker.as_str()), (UAC, UAS));
+}
+
+/// The server matches the ACK by branch, not by source (§17.2.3): an ACK
+/// from another socket of the UAC that reaches the INVITE's destination
+/// discharges the reject.
+#[test]
+fn an_ack_from_another_uac_socket_at_the_invite_s_destination_discharges_it() {
+    let mut ack = on(
+        3_000,
+        "10.0.0.1:40001",
+        UAS,
+        Kind::Request { method: "ACK".to_string() },
+        1,
+        "z9hG4bK-i",
+    );
+    ack.cseq_method = "ACK".to_string();
+    let f = unacked(&[took(1_000, "INVITE", "z9hG4bK-i"), reject(2_000, 486, "z9hG4bK-i"), ack]);
+    assert_eq!(f.len(), 1, "{f:?}");
+    assert!(matches!(f[0].decision, Decision::Compliant), "{:?}", f[0].decision);
+}
+
+/// Only the UAC that owes the ACK names where it went: an ACK on the branch
+/// another endpoint sent elsewhere is no stray of this reject's.
+#[test]
+fn an_ack_another_endpoint_sent_elsewhere_names_no_stray() {
+    let mut foreign = on(
+        3_000,
+        "10.0.0.9:5060",
+        "10.0.0.8:5060",
+        Kind::Request { method: "ACK".to_string() },
+        1,
+        "z9hG4bK-i",
+    );
+    foreign.cseq_method = "ACK".to_string();
+    let f =
+        unacked(&[took(1_000, "INVITE", "z9hG4bK-i"), reject(2_000, 486, "z9hG4bK-i"), foreign]);
+    assert_eq!(f.len(), 1, "{f:?}");
+    let Decision::Violated(Evidence::UnackedReject { ack_sent_to, .. }) = &f[0].decision else {
+        panic!("{:?}", f[0].decision)
+    };
+    assert_eq!(*ack_sent_to, None);
+}
+
 /// The offence is the ACK that never came, so [`Finding::emitter`] is the
 /// party that OWED it: the UAC whose INVITE client transaction took the
 /// reject (§17.1.1.3). The UAS that sent the reject and waited is the one
@@ -557,3 +721,5 @@ fn a_closed_observation_collapses_the_reject_window() {
     assert!(!open[0].decided(), "{:?}", open[0].decision);
     assert!(unacked(&msgs)[0].violated());
 }
+
+mod agent;

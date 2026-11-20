@@ -7,8 +7,9 @@ use sip_message::method::Method;
 use sip_retransmit::Class;
 
 use crate::event::EventQueueClass;
+use crate::metrics::CopyKind;
 
-const EVENT_QUEUE_CLASS_VALUES: [&str; 6] =
+const EVENT_QUEUE_CLASS_VALUES: [&str; 7] =
     label_values!(EventQueueClass::ALL, EventQueueClass::label);
 /// The class of an event the inbound channel dropped or deferred, indexed
 /// like [`EventQueueClass::ALL`].
@@ -123,6 +124,37 @@ pub const KEEPALIVE_LANE_DROPS: Family = Family::counter(
     "b2bua_txn_keepalive_lane_drops_total",
     Labels::None,
     "Out-of-dialog OPTIONS the full keepalive lane dropped; the prober repeats.",
+);
+
+/// The way a datagram a mute dropped was going.
+pub const MUTED_DIRECTION: Dim = Dim::new("direction", &["in", "out"]);
+
+pub const MESSAGE_BUDGET_TRIPS: Family = Family::counter(
+    "b2bua_txn_message_budget_trips_total",
+    Labels::None,
+    "Call-IDs that passed their message budget (ADR-0063 §4, B2BUA_CAP_MESSAGES_PER_CALL_ID) and were muted: a peer looping with the node past every per-path bound. Each trip logs its Call-ID.",
+);
+
+pub const MESSAGE_BUDGET_UNCOUNTED: Family = Family::counter(
+    "b2bua_txn_message_budget_uncounted_total",
+    Labels::None,
+    "Datagrams of a new Call-ID left uncounted by the message budget because every Call-ID its full map holds is muted or has a live transaction.",
+);
+
+pub const MUTED_MESSAGES: Family = Family::counter(
+    "b2bua_txn_muted_messages_total",
+    Labels::Product(&[MUTED_DIRECTION]),
+    "Datagrams a Call-ID's mute dropped (ADR-0063 §4), by direction: in, dropped before dispatch; out, never sent.",
+);
+
+const COPY_KIND_VALUES: [&str; 5] = label_values!(CopyKind::ALL, CopyKind::label);
+/// What an absorbed copy copied, indexed like [`CopyKind::ALL`].
+pub const COPY_KIND: Dim = Dim::new("kind", &COPY_KIND_VALUES);
+
+pub const COPIES_PAST_SCHEDULE: Family = Family::counter(
+    "b2bua_txn_copies_past_schedule_total",
+    Labels::Product(&[COPY_KIND]),
+    "A peer's copies the transaction layer absorbed past the RFC schedule (ADR-0063 §1): past the re-sends of the peer's ladder and inside T1 of the last answered copy, or later than 64·T1 after the first, by what they copied: request, cancel, non-2xx, 2xx (an orphan's), refused-invite.",
 );
 
 pub const EVENT_QUEUE_DROPS: Family = Family::counter(

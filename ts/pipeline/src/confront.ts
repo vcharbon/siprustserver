@@ -38,7 +38,7 @@ import { bodiesEqual } from "./bodyfold.js"
 import { layoutFault, locate, type LayoutFault } from "./parts.js"
 import { diffSdp, maskOf } from "./sdpfold.js"
 import { answering, collecting, type Driven, identitiesIn, type Ledger, readings, type Reception, type Sighting } from "./sdporigin.js"
-import type { CaseContext, Classification, DocumentStep, UnackedFinal } from "./classifier.js"
+import { type CaseContext, type Classification, type DocumentStep, NO_PACK, type PackOf, type UnackedFinal } from "./classifier.js"
 import { items, valuesEqual } from "./fold.js"
 import { legPlaces } from "./leg-role.js"
 import { receptionsOf, sentOf } from "./receptions.js"
@@ -77,6 +77,8 @@ export interface ConfrontInput {
   readonly resources?: ReadonlyMap<string, Uint8Array>
   /** What the run's media plane did to its session descriptions; absent reads as `rebooked`. */
   readonly media?: Bundle.MediaMode
+  /** The deployment's own reading of the document, carried as the context's `pack`; absent reads nothing. */
+  readonly packOf?: PackOf
 }
 
 /** One probe, at the flow step it was observed at (empty when unattributed). */
@@ -113,13 +115,20 @@ export const confront = (input: ConfrontInput): Confronted => {
     probes,
     compared: headers.compared,
     unreferenced: headers.unreferenced,
-    context: {
-      relay18x: input.pivot.calls.flatMap((call) => (call.relay18x ? [call.relay18x] : [])),
-      run: runShape(input.verdict, input.recordings),
-      document: documentShape(input.pivot)
-    }
+    context: caseContextOf(input.pivot, runShape(input.verdict, input.recordings), input.packOf)
   }
 }
+
+/**
+ * The case context a confrontation of `pivot` hands its classifier: the
+ * document's shape and the deployment's own reading of it (`packOf`), both off
+ * the document alone, beside `run`, the shape of what the run recorded.
+ */
+export const caseContextOf = (pivot: Pivot.PivotV3, run: CaseContext["run"], packOf: PackOf = NO_PACK): CaseContext => ({
+  pack: packOf(pivot),
+  run,
+  document: documentShape(pivot)
+})
 
 /** A `send` of a final response to an INVITE — the message that draws an ACK back. */
 const isInviteFinal = (step: Flow.Step): boolean =>

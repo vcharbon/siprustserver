@@ -199,6 +199,29 @@ fn a_dual_face_wildcard_bind_refuses_the_boot() {
     refused(&external, "PROXY_LISTEN_EXT 0.0.0.0:5060");
 }
 
+/// The debug routes listen on loopback: by default, and refused on any other
+/// address, naming the variable.
+#[test]
+fn the_debug_address_defaults_to_loopback_and_refuses_any_other() {
+    assert_eq!(boot(&[]).expect("valid").debug, "127.0.0.1:9097".parse().unwrap());
+    for v6 in ["[::1]:19097", "::1:19097"] {
+        let cfg = boot(&[("PROXY_DEBUG", v6)]).expect("loopback");
+        assert_eq!(cfg.debug, "[::1]:19097".parse().unwrap());
+    }
+    for address in ["0.0.0.0:9097", "[::]:9097", "10.0.0.9:9097", "fd00::9:9097"] {
+        refused(&[("PROXY_DEBUG", address)], "PROXY_DEBUG");
+    }
+    refused(&[("PROXY_DEBUG", "localhost:9097")], "PROXY_DEBUG");
+}
+
+/// The probe server's address takes the node's IPv6 address as the chart's
+/// `$(HOST_IP):9090` expands it, with no brackets.
+#[test]
+fn the_metrics_address_reads_an_ipv6_address_without_brackets() {
+    let cfg = boot(&[("PROXY_METRICS", "2001:db8::9:9090")]).expect("valid");
+    assert_eq!(cfg.metrics, "[2001:db8::9]:9090".parse().unwrap());
+}
+
 #[test]
 fn a_cluster_key_out_of_its_bounds_refuses_the_boot() {
     refused(&[("PROXY_CLUSTER_KEY", "short")], "PROXY_CLUSTER_KEY");

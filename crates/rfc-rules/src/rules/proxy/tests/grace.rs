@@ -39,6 +39,18 @@ fn a_trying_on_the_transaction_is_compliant() {
     assert!(matches!(f[0].decision, Decision::Compliant), "{:?}", f[0].decision);
 }
 
+/// A hop that answers from another socket than the one it took the INVITE at
+/// said it was trying on that INVITE's transaction.
+#[test]
+fn a_trying_from_a_second_socket_of_the_hop_is_compliant() {
+    let mut second = trying(2_000, 1);
+    second.src = "127.0.0.1:41000".to_string();
+    let f = grace(&[invite(1_000, 1), second]);
+    assert_eq!(f.len(), 1, "{f:?}");
+    assert_eq!(f[0].emitter, BOB, "the socket that took the INVITE is charged");
+    assert!(matches!(f[0].decision, Decision::Compliant), "{:?}", f[0].decision);
+}
+
 /// §16.7 wants the 100 only where the answer is slow: a hop that rejected
 /// inside the grace owes nobody a Trying.
 #[test]

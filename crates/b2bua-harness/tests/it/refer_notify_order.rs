@@ -98,10 +98,10 @@ async fn transfer_completes_and_alice_hangs_up(
     let mut a_realign = alice.receive("INVITE").await;
     a_realign.respond(200, "OK").with_sdp(ALICE_REALIGN_ANSWER).await;
     alice.receive("ACK").await;
+    bob.receive("BYE").await.respond(200, "OK").await;
 
     let mut alice_bye = alice_dialog.bye().await;
     charlie.receive("BYE").await.respond(200, "OK").await;
-    bob.receive("BYE").await.respond(200, "OK").await;
     alice_bye.expect(200).await;
 }
 

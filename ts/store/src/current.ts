@@ -4,9 +4,11 @@
  * (`current_runs`, `current_cells`) and the selectors (`@current`) read the
  * same answer.
  *
- * A run is current when it was made from that env on that branch, no component
- * of its code was dirty, and it finished: a run still in flight, or one of any
- * other environment, never moves what a call stands at. A store with no
+ * A run is current when it was made from that env on that branch (on any
+ * branch, where the setting names none) and it finished, whether its code
+ * was built from a dirty tree or not: a run still in flight, or one of any
+ * other environment, never moves what a call stands at. A run keeps the
+ * branch and the dirty flags it recorded, whatever the setting. A store with no
  * setting has no current run at all, and asking it for its setting fails
  * ({@link NoCurrentPopulation}) rather than answer with an empty population.
  */
@@ -17,10 +19,10 @@ import * as Schema from "effect/Schema"
 import { SqlClient } from "effect/unstable/sql/SqlClient"
 import type { SqlError } from "effect/unstable/sql/SqlError"
 
-/** The env and branch whose clean, finished runs are current. */
+/** The env and branch whose finished runs are current; `branch` null is every branch of `env`. */
 export interface Population {
   readonly env: string
-  readonly branch: string
+  readonly branch: string | null
 }
 
 /** The store states no current population. */

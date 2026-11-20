@@ -212,6 +212,9 @@ pub(super) async fn on_event(
     if class.is_new_call() {
         if let CallEvent::Sip { message, src, .. } = &event {
             if let SipMessage::Request(req) = message.as_ref() {
+                if !res.deferred_copy && admit::absorbs_retransmission(ctx, &call_ref, req).await {
+                    return;
+                }
                 if !res.deferred_copy && !admit::is_copy(ctx, &call_ref, req) {
                     match admit::admit(ctx, &call_ref, req, *src, class).await {
                         Some(hold) => unborn = Some(hold),

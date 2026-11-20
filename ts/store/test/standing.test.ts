@@ -156,8 +156,9 @@ describe.skipIf(!served)("only @current runs are current", () => {
       expect(standing?.caseRuns.map((entry) => entry.runId)).toEqual([current.id])
     })))
 
-  it("never moves on a current-population run made on a dirty tree", () =>
+  it("moves on a current-population run made on a dirty tree like any other, the run keeping its dirty flag", () =>
     withRuns(Effect.gen(function*() {
+      const sql = yield* SqlClient
       const runs = yield* Runs.Service
       const capture = "identity_dirty.pcap.gz"
       const one = `${capture}-case1`
@@ -176,8 +177,14 @@ describe.skipIf(!served)("only @current runs are current", () => {
       yield* runs.finish({ id: dirty.id, status: "done", cases: [passed(one)] })
 
       const standing = yield* standingOf(capture)
-      expect(standing?.runId).toBe(clean.id)
-      expect(standing?.failed).toBe(1)
+      expect(standing?.runId).toBe(dirty.id)
+      expect(standing?.failed).toBe(0)
+      expect(clean.id).toBeLessThan(dirty.id)
+      const recorded = yield* sql<{ name: string; dirty: boolean }>`
+        SELECT c->>'name' AS name, (c->>'dirty')::boolean AS dirty
+        FROM runs r, jsonb_array_elements(r.components) c WHERE r.id = ${dirty.id} ORDER BY name
+      `
+      expect(recorded).toEqual([{ name: "app", dirty: true }, { name: "core", dirty: false }])
     })))
 
   it("reads a run of no recorded env as unknown, never as @current", () =>
@@ -200,6 +207,30 @@ describe.skipIf(!served)("only @current runs are current", () => {
       yield* sql`DELETE FROM current_population`
       expect((yield* Effect.flip(current.get))._tag).toBe("Current.NoCurrentPopulation")
       expect(yield* standingOf(capture)).toBeNull()
+      yield* current.set(CURRENT_POPULATION)
+    })))
+
+  it("reads as current every branch of the env a setting names with no branch, each run keeping its own", () =>
+    withRuns(Effect.gen(function*() {
+      const sql = yield* SqlClient
+      const current = yield* Effect.provide(Current.Service, Current.layer)
+      const capture = "identity_every_branch.pcap.gz"
+      const one = `${capture}-case1`
+      const env = "box-2"
+      const earlier = yield* ran(capture, [failed(one)], "full", LANE, { ...CURRENT, env, branch: "feat/1-earlier" })
+      yield* current.set({ env, branch: null })
+      expect(yield* current.get).toEqual({ env, branch: null })
+      expect((yield* standingOf(capture))?.runId).toBe(earlier.id)
+
+      const later = yield* ran(capture, [passed(one)], "full", LANE, { ...CURRENT, env, branch: "fix/2-later" })
+      yield* ran(capture, [failed(one)], "full", LANE, TASK_ENV)
+      const standing = yield* standingOf(capture)
+      expect(standing?.runId).toBe(later.id)
+      expect(standing?.failed).toBe(0)
+      const branches = yield* sql<{ id: number; branch: string }>`
+        SELECT id::int AS id, branch FROM runs WHERE capture = ${capture} AND env = ${env} ORDER BY id
+      `
+      expect(branches).toEqual([{ id: earlier.id, branch: "feat/1-earlier" }, { id: later.id, branch: "fix/2-later" }])
       yield* current.set(CURRENT_POPULATION)
     })))
 

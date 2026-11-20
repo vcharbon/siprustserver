@@ -1,0 +1,23 @@
+{
+  "claim_numbers": {
+    "c2-called-0-0": [
+      "idle5090"
+    ],
+    "called-0-0": [
+      "+1999999bob5070",
+      "bob5070",
+      "bob5070"
+    ]
+  },
+  "clock": "virtual",
+  "identities": {
+    "called-0-0": {
+      "e164": "bob5070"
+    },
+    "caller": {
+      "private": "0009001"
+    }
+  },
+  "lane": "upstream-demo",
+  "route_target": "127.0.0.1:5080"
+}

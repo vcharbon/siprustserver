@@ -27,9 +27,10 @@ use std::collections::HashSet;
 use layer_harness::{LaneKey, Stamped};
 
 use rfc_rules::rules::Obligation;
-use rfc_rules::{Decision, RuleId, WireView};
+use rfc_rules::{Decision, Msg, Observation, RuleId, WireView};
 
-use crate::contracts::{CrossMessageAuditRule, SignalingNetworkEvent};
+use crate::contracts::{CrossMessageAuditRule, PositionedFinding, SignalingNetworkEvent};
+use crate::rfc_audit::dropped::Dropped;
 use crate::types::UaRole;
 
 mod ack;
@@ -40,6 +41,7 @@ mod cseq;
 mod dialog;
 mod final_response;
 mod offer_answer;
+mod party_view;
 mod pass;
 mod prack;
 mod proxy;
@@ -47,47 +49,12 @@ mod register;
 mod reinvite;
 mod retransmit;
 mod scoped;
+mod vantage;
 mod via;
 mod view;
 mod wellformed;
 
 pub use pass::AuditPass;
-
-/// Run `rule` over every bind view of the pass and keep the violated,
-/// non-relayed findings the `vantage` predicate accepts for the bind the view
-/// belongs to. Every non-relayed occasion at that vantage, violated or not, is
-/// noted for the run's rule population.
-fn at_vantage(
-    pass: &AuditPass<'_>,
-    rule: &dyn Obligation,
-    vantage: impl Fn(&rfc_rules::Finding, &LaneKey, &str) -> bool,
-    detail: impl Fn(&rfc_rules::Finding, &str) -> String,
-) -> Vec<(LaneKey, String, Option<usize>, Option<LaneKey>)> {
-    let positions = pass.positions();
-    let mut out = Vec::new();
-    for (view, obs) in pass.views() {
-        for f in rule.eval(&WireView { msgs: &view.msgs, obs }) {
-            let (seq, cid) = &view.meta[f.anchor];
-            if f.relayed || !vantage(&f, &view.bind, cid) {
-                continue;
-            }
-            crate::rfc_audit::occasions::note(&view.bind, &f);
-            if !f.violated() {
-                continue;
-            }
-            // The charged party is the rule's own `emitter` — the bind that
-            // emitted the offending message or owed the missing one — whatever
-            // vantage this finding is reported at.
-            out.push((
-                view.bind.clone(),
-                format!("{}: {}", f.emitter, detail(&f, cid)),
-                positions.get(seq).copied(),
-                Some(f.emitter.clone()),
-            ));
-        }
-    }
-    out
-}
 
 /// Where the live audit reports a rule's finding. The charged party is always
 /// the finding's `emitter`; the vantage is the lane that REPORTS it. Subject
@@ -103,9 +70,10 @@ enum Vantage {
     Emitter,
     /// As [`Emitter`](Self::Emitter), for a verdict that rests on a message
     /// the emitter never sent: the taker's audit view holds none the loss model
-    /// dropped, so an emitter that is no recorded bind is not judged at a taker
-    /// that recorded such a drop from it on the call.
-    EmitterUnlessLost,
+    /// dropped, and the emitter never took what the taker's loss model dropped
+    /// on send, so an emitter that is no recorded bind is not judged at a taker
+    /// where the row's [`Explained`] reads a drop that explains the verdict.
+    EmitterUnlessLost(Explained),
     /// The emitter's own lane and no other: a verdict that orders what the
     /// emitter sent after what it took. A taker's lane times its own sends at
     /// sending and the emitter's at arrival, so it cannot order them: an
@@ -116,6 +84,10 @@ enum Vantage {
     /// the lane that took it, where a scoped waiver's party attribution still
     /// resolves to the true offender off the offending entry's sender.
     Taker,
+    /// As [`Taker`](Self::Taker), for a verdict a message the loss model
+    /// dropped on its way to the taker may explain (a CSeq gap over it): not
+    /// reported where the row's [`Explained`] reads such a drop.
+    TakerUnlessLost(Explained),
     /// Both ends of the offending message: a two-party negotiation, where an
     /// offence whose sender is no recorded bind is still named on the lane that
     /// took it.
@@ -160,13 +132,36 @@ struct Live {
     skip: Skip,
     subject: &'static [UaRole],
     advisory: bool,
+    /// Judged on each bind's party view ([`AuditPass::party_views`]) rather
+    /// than its own.
+    per_party: bool,
     /// An advisory row that gates a finding charged to a system under test.
     gates_sut: bool,
+    /// A gating row whose finding is informative when both ends of its hop
+    /// are under test.
+    informative_inside_sut: bool,
     admits: fn(&rfc_rules::Finding) -> bool,
     detail: Detail,
 }
 
 type Detail = fn(&rfc_rules::Finding, &str) -> String;
+
+/// Whether the datagrams the loss model dropped explain a finding reported at
+/// the lane `lane` on the call `cid`, over that lane's view `msgs`: the
+/// message the verdict misses was sent, or reached its taker late.
+type Explained = fn(&Dropped, &LaneKey, &rfc_rules::Finding, &str, &[Msg]) -> bool;
+
+/// Any datagram dropped between the lane and the finding's emitter on the
+/// call, either way.
+fn any_drop(
+    dropped: &Dropped,
+    lane: &LaneKey,
+    f: &rfc_rules::Finding,
+    cid: &str,
+    _: &[Msg],
+) -> bool {
+    dropped.holds(lane, &f.emitter, cid)
+}
 
 impl Live {
     const fn emitter(id: RuleId, detail: Detail) -> Live {
@@ -174,7 +169,15 @@ impl Live {
     }
 
     const fn emitter_unless_lost(id: RuleId, detail: Detail) -> Live {
-        Live::at(Vantage::EmitterUnlessLost, id, detail)
+        Live::emitter_unless(id, any_drop, detail)
+    }
+
+    const fn emitter_unless(id: RuleId, explained: Explained, detail: Detail) -> Live {
+        Live::at(Vantage::EmitterUnlessLost(explained), id, detail)
+    }
+
+    const fn taker_unless(id: RuleId, explained: Explained, detail: Detail) -> Live {
+        Live::at(Vantage::TakerUnlessLost(explained), id, detail)
     }
 
     const fn emitter_only(id: RuleId, detail: Detail) -> Live {
@@ -200,7 +203,9 @@ impl Live {
             skip: Skip::None,
             subject: &[],
             advisory: false,
+            per_party: false,
             gates_sut: false,
+            informative_inside_sut: false,
             admits: |_| true,
             detail,
         }
@@ -209,6 +214,12 @@ impl Live {
     /// Applies to binds declaring one of `roles` (every role by default).
     const fn roles(mut self, roles: &'static [UaRole]) -> Live {
         self.subject = roles;
+        self
+    }
+
+    /// Judged on each bind's party view: a rule keyed by user agent, not socket.
+    const fn per_party(mut self) -> Live {
+        self.per_party = true;
         self
     }
 
@@ -223,6 +234,16 @@ impl Live {
     /// run on a finding charged to one ([`rfc_rule_gates_sut`]).
     const fn gating_the_sut(mut self) -> Live {
         self.gates_sut = true;
+        self
+    }
+
+    /// Gating on a border hop, informative on a hop inside the system under
+    /// test: a harness that knows which recorded parties are under test
+    /// reports, and never fails the run on, a finding whose charged party and
+    /// hop's other end are both under test
+    /// ([`rfc_rule_informative_inside_sut`]).
+    const fn informative_inside_sut(mut self) -> Live {
+        self.informative_inside_sut = true;
         self
     }
 
@@ -262,120 +283,19 @@ impl CrossMessageAuditRule for Live {
     }
 
     fn check(&self, events: &[Stamped<SignalingNetworkEvent>]) -> Vec<(LaneKey, String)> {
-        self.check_positioned(events).into_iter().map(|(b, d, _, _)| (b, d)).collect()
+        self.check_positioned(events).into_iter().map(|(b, d, ..)| (b, d)).collect()
     }
 
     fn check_positioned(
         &self,
         events: &[Stamped<SignalingNetworkEvent>],
-    ) -> Vec<(LaneKey, String, Option<usize>, Option<LaneKey>)> {
+    ) -> Vec<PositionedFinding> {
         self.check_pass(&AuditPass::new(events))
     }
 
-    fn check_pass(
-        &self,
-        pass: &AuditPass<'_>,
-    ) -> Vec<(LaneKey, String, Option<usize>, Option<LaneKey>)> {
+    fn check_pass(&self, pass: &AuditPass<'_>) -> Vec<PositionedFinding> {
         self.found(pass, &HashSet::new())
     }
-}
-
-impl Live {
-    /// The row's findings over `pass`, with the binds of `scoped_out` held as
-    /// recorded parties: a consumer took their traffic out of the events, so
-    /// what they sent is never judged at the lane that took it. The rules
-    /// judge the audit-visible events; the arrivals the loss model dropped
-    /// only tell [`Vantage::EmitterUnlessLost`] where a sender's traffic is
-    /// incomplete.
-    fn found(
-        &self,
-        pass: &AuditPass<'_>,
-        scoped_out: &HashSet<LaneKey>,
-    ) -> Vec<(LaneKey, String, Option<usize>, Option<LaneKey>)> {
-        let body = self.id.rule().body;
-        let admits = self.admits;
-        let found = match self.vantage {
-            Vantage::Emitter => {
-                let recorded = pass.recorded().scoped(scoped_out);
-                let falls_back = !self.proxy_only();
-                at_vantage(
-                    pass,
-                    body,
-                    |f, b, _| {
-                        let own = !falls_back || recorded.holds(&f.emitter);
-                        let at = if own { &f.emitter } else { &f.taker };
-                        at == b && admits(f)
-                    },
-                    self.detail,
-                )
-            }
-            Vantage::EmitterUnlessLost => {
-                let recorded = pass.recorded().scoped(scoped_out);
-                let dropped = pass.dropped();
-                at_vantage(
-                    pass,
-                    body,
-                    |f, b, cid| {
-                        if recorded.holds(&f.emitter) {
-                            return f.emitter == *b && admits(f);
-                        }
-                        f.taker == *b && admits(f) && !dropped.holds(b, &f.emitter, cid)
-                    },
-                    self.detail,
-                )
-            }
-            Vantage::EmitterOnly => {
-                at_vantage(pass, body, |f, b, _| f.emitter == *b && admits(f), self.detail)
-            }
-            Vantage::Taker => {
-                at_vantage(pass, body, |f, b, _| f.taker == *b && admits(f), self.detail)
-            }
-            Vantage::EitherEnd => at_vantage(
-                pass,
-                body,
-                |f, b, _| (f.emitter == *b || f.taker == *b) && admits(f),
-                self.detail,
-            ),
-            Vantage::TakerElseEmitter => {
-                // The taker's lane must be in the view to report there.
-                let recorded = pass.recorded();
-                at_vantage(
-                    pass,
-                    body,
-                    |f, b, _| {
-                        let at = if recorded.holds(&f.taker) { &f.taker } else { &f.emitter };
-                        at == b && admits(f)
-                    },
-                    self.detail,
-                )
-            }
-        };
-        match self.skip.lanes(pass) {
-            None => found,
-            Some(skipped) => {
-                found.into_iter().filter(|(lane, _, _, _)| !skipped.contains(lane)).collect()
-            }
-        }
-    }
-}
-
-/// The detail line both `tag-consistency` arms report, off the flip evidence.
-fn tag_flip_detail(f: &rfc_rules::Finding, _cid: &str) -> String {
-    let Decision::Violated(rfc_rules::Evidence::UasTagFlipped {
-        status,
-        branch,
-        final_tag,
-        provisional_tags,
-        ..
-    }) = &f.decision
-    else {
-        return String::new();
-    };
-    format!(
-        "UAS To-tag mismatch on {status} (branch {branch}): prior provisional(s) established \
-         tag(s) [{seen}] but the final carries \"{final_tag}\" — RFC 3261 §17.2.1 / §12.1.1",
-        seen = provisional_tags.join(", "),
-    )
 }
 
 /// Every family's live rows.
@@ -410,6 +330,33 @@ pub fn rfc_rule_gates_sut(token: &str) -> bool {
         .filter(|id| id.token() == token)
         .flat_map(|&id| rows_of(id))
         .any(|live| live.gates_sut)
+}
+
+/// Whether the rule `token` is informative on a hop inside the system under
+/// test: one stack's parties may hand each other what the RFC asks of a
+/// border, where it still gates.
+pub fn rfc_rule_informative_inside_sut(token: &str) -> bool {
+    RuleId::ALL
+        .iter()
+        .filter(|id| id.token() == token)
+        .flat_map(|&id| rows_of(id))
+        .any(|live| live.informative_inside_sut)
+}
+
+/// Whether a finding of rule `token`, charged to `charged` with `counterpart`
+/// at the other end of its hop, is informative: the rule is
+/// ([`rfc_rule_informative_inside_sut`]) and `is_sut` holds both ends. A
+/// finding missing either end, or a consumer that knows no party under test,
+/// keeps it gating.
+pub fn rfc_finding_inside_sut(
+    token: &str,
+    charged: Option<&str>,
+    counterpart: Option<&str>,
+    is_sut: impl Fn(&str) -> bool,
+) -> bool {
+    rfc_rule_informative_inside_sut(token)
+        && charged.is_some_and(&is_sut)
+        && counterpart.is_some_and(&is_sut)
 }
 
 /// The merged-rule cross checks this adapter contributes to the default suite:

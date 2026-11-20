@@ -1,0 +1,121 @@
+#!/usr/bin/env bash
+# The commands the wrapper runs inside the container:
+#
+#   siprig-in site-url             the site's public URL once this container's site answers (exit 1 before),
+#                                  asked of the site itself, never through a proxy
+#   siprig-in busy                 the pack's commands running here, one line each (exit 1: none)
+#   siprig-in verb <verb> <args>…  the pack's command siprig-<verb> (`campaign`, `replay`, …), with the store's environment
+#   siprig-in exec <command>…      any command, with the store's environment
+#   siprig-in pg-dump <file>       pgdata/ started on a private socket and dumped whole (`pg_dumpall`) into <file>
+#   siprig-in pg-restore <file>    <file> restored into a fresh pgdata.new/; pgdata/ is never touched
+#
+# Every verb but the pg ones runs in the running container with the store's
+# environment its first step wrote (/run/siprig/workspace.env). A pack verb's
+# process is marked busy (/run/siprig/busy/<pid>) while it lives; `busy` also
+# lists what the pack's own `siprig-busy` prints, where it ships one. The
+# base's commands (`siprig-in`, `-site`, `-store`, `-workspace`, `-busy`) are
+# no verb. The pg verbs run in a one-off container of a stopped workspace.
+set -euo pipefail
+verb="${1:-}"; shift || true
+
+# The store's and the site's environment, as the container's first step wrote it.
+server() {
+  set -a
+  # shellcheck disable=SC1091
+  . /run/siprig/workspace.env
+  set +a
+}
+
+PGDATA_DIR="${SIPRIG_WORKSPACE:-/nonexistent}/pgdata"
+SOCKET_ONLY="-c listen_addresses= -c unix_socket_directories=/tmp/siprig-pg"
+BUSY=/run/siprig/busy
+
+# A one-off container's postgres user: the uid served by nss_wrapper, a private socket directory.
+offline_user() {
+  printf 'siprig:x:%s:%s:siprig:%s:/bin/bash\n' "$(id -u)" "$(id -g)" "$HOME" > /tmp/siprig-passwd
+  printf 'siprig:x:%s:\n' "$(id -g)" > /tmp/siprig-group
+  export LD_PRELOAD=libnss_wrapper.so NSS_WRAPPER_PASSWD=/tmp/siprig-passwd NSS_WRAPPER_GROUP=/tmp/siprig-group
+  mkdir -p /tmp/siprig-pg "$SIPRIG_WORKSPACE/logs"
+}
+
+# Whether a process of this container listens on SITE_PORT: ss names the users of the
+# sockets it can see, and this container sees only its own, so another site of the host
+# on that port is no answer.
+own_listener() {
+  ss -Hltnp "sport = :$SITE_PORT" | grep -q 'users:'
+}
+
+# The base's own commands, which run the container and are no verb of its pack.
+BASE_COMMANDS=" in site store workspace busy "
+
+# The verb <name> refused, exit 2, where it is no pack command's name: not lower-case
+# letters, digits and dashes, or one of BASE_COMMANDS.
+need_verb() {
+  local name=$1
+  case "$name" in
+    *[!a-z0-9-]* | "") echo "siprig-in: $name is no verb (lower-case letters, digits and dashes)" >&2; exit 2 ;;
+  esac
+  case "$BASE_COMMANDS" in
+    *" $name "*) echo "siprig-in: $name is a command of the image (siprig-$name), no verb of its pack" >&2; exit 2 ;;
+  esac
+}
+
+# <file>, a dump of a cluster whose superuser is siprig, restored into the running cluster
+# on the private socket; the dump's `CREATE ROLE siprig;` is left out, since initdb made that
+# role, and any other error stops the restore (its status returned).
+restore_dump() {
+  local file=$1
+  grep -v -x 'CREATE ROLE siprig;' "$file" | psql -h /tmp/siprig-pg -U siprig -d postgres -q -o /dev/null -v ON_ERROR_STOP=1
+}
+
+case "$verb" in
+  site-url)
+    server
+    own_listener || exit 1
+    case "$SITE_BIND" in
+      0.0.0.0 | ::) at="127.0.0.1" ;;
+      *:*) at="[$SITE_BIND]" ;;
+      *) at="$SITE_BIND" ;;
+    esac
+    curl -sf -m 5 --noproxy '*' "http://$at:$SITE_PORT/api/config" | jq -er '.publicUrl'
+    ;;
+  busy)
+    found=1
+    for mark in "$BUSY"/*; do
+      [ -e "$mark" ] || continue
+      if kill -0 "${mark##*/}" 2>/dev/null; then cat "$mark"; found=0; else rm -f "$mark"; fi
+    done
+    if command -v siprig-busy >/dev/null && siprig-busy; then found=0; fi
+    exit "$found"
+    ;;
+  verb)
+    name="${1:?verb <verb> <args>…}"; shift
+    need_verb "$name"
+    command -v "siprig-$name" >/dev/null || { echo "siprig-in: this image has no command siprig-$name: \`$name\` is no verb of its pack" >&2; exit 2; }
+    server
+    mkdir -p "$BUSY"
+    echo "$$ $name $*" > "$BUSY/$$"
+    exec "siprig-$name" "$@"
+    ;;
+  exec) server; exec "$@" ;;
+  pg-dump)
+    file="${1:?pg-dump <file>}"
+    offline_user
+    pg_ctl -D "$PGDATA_DIR" -w -l "$SIPRIG_WORKSPACE/logs/upgrade-pg.log" -o "$SOCKET_ONLY" start
+    pg_dumpall -h /tmp/siprig-pg -U siprig -f "$file"
+    pg_ctl -D "$PGDATA_DIR" -w -m fast stop
+    ;;
+  pg-restore)
+    file="${1:?pg-restore <file>}"
+    fresh="$PGDATA_DIR.new"
+    offline_user
+    [ ! -e "$fresh" ] || { echo "siprig-in: $fresh exists (an earlier restore?): remove it first" >&2; exit 1; }
+    initdb -D "$fresh" --username=siprig --auth-local=trust --auth-host=reject --encoding=UTF8 --locale=C.UTF-8
+    pg_ctl -D "$fresh" -w -l "$SIPRIG_WORKSPACE/logs/upgrade-pg.log" -o "$SOCKET_ONLY" start
+    status=0
+    restore_dump "$file" || status=$?
+    pg_ctl -D "$fresh" -w -m fast stop
+    exit "$status"
+    ;;
+  *) sed -n '2,/^set /p' "$0" | sed '$d' | sed 's/^# \{0,1\}//' >&2; exit 2 ;;
+esac

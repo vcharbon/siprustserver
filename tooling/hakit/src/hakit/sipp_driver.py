@@ -56,10 +56,12 @@ RECV_BACKSTOP_MARGIN_S = 60
 CONTROL_PORT = 8888
 # The `-key`s every stream passes; a scenario's other keys come from the stream's params.
 DRIVER_KEYS = ("run", "stream", "shape", "hold_ms", "setup_ms", "final_ms")
-# SIPp's default behaviours but the abort on an unexpected message: a message
-# landing while the call runs its unexpected-message handler is discarded and
-# the call goes on, acting on the peer's retransmission (ADR-0049 §4.2).
-UAC_BEHAVIOURS = ("-default_behaviors", "all,-abortunexp")
+# SIPp's default behaviours but the abort on an unexpected message and the abort
+# on an ACK whose CSeq is not the latest INVITE received: a message landing
+# while the call runs its unexpected-message handler is discarded and the call
+# goes on, acting on the peer's retransmission; every ACK reaches the scenario,
+# which checks its CSeq itself (ADR-0049 §4.2).
+UAC_BEHAVIOURS = ("-default_behaviors", "all,-abortunexp,-cseq")
 
 
 def _key_number(stream: Stream, defaults: Mapping[str, str], key: str) -> float:
@@ -85,12 +87,13 @@ def worst_call_s(stream: Stream, defaults: Mapping[str, str] | None = None) -> f
 
 @dataclass(frozen=True)
 class Counters:
-    """The last statistics row: calls created, calls in flight, and the rate
-    SIPp was set to when it wrote the row."""
+    """The last statistics row: calls created, calls in flight, the rate SIPp
+    was set to when it wrote the row, and the calls SIPp ended as failed."""
 
     calls_created: int | None
     current_calls: int | None
     target_rate: float | None = None
+    failed_calls: int | None = None
 
 
 def parse_stat_csv(text: str | None) -> Counters:
@@ -118,7 +121,7 @@ def parse_stat_csv(text: str | None) -> Counters:
         v = col(name)
         return None if v is None or not v.is_integer() else int(v)
 
-    return Counters(count("TotalCallCreated"), count("CurrentCall"), col("TargetRate"))
+    return Counters(count("TotalCallCreated"), count("CurrentCall"), col("TargetRate"), count("FailedCall(C)"))
 
 
 class SippStream:
@@ -313,8 +316,11 @@ class SippStream:
         return parse_stat_csv(self.executor.read_text(self.dir / "stat.csv"))
 
     def tally(self) -> Tally:
-        """SIPp places every call it creates and fails none on its own."""
-        return Tally(self.counters().calls_created)
+        """SIPp places every call it creates. Every path of the base UAC ends in
+        a record and a successful call, so a call SIPp counts failed (an abort,
+        a timeout with no branch) is one it ended without a record."""
+        c = self.counters()
+        return Tally(c.calls_created, generator_failures=c.failed_calls)
 
     def held_tally(self) -> Tally | None:
         """The last statistics row once its target rate reads 0: SIPp writes a

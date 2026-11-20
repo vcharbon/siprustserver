@@ -1,8 +1,8 @@
 //! Wire-level trace projection — the SIP-specific half of the recording that
 //! `layer-harness::scenario` deliberately leaves out (see the note at the top
 //! of `layer-harness/src/scenario.rs`: "the SIP-specific projection
-//! (`RecordedSipEntry`, the `toSipWire` derivation) lives in `sip-net`, which
-//! reads its own typed channel snapshot directly").
+//! (`RecordedSipEntry`, the `to_sip_entries` derivation) lives in
+//! `sip-net-testkit`, which reads its own typed channel snapshot directly").
 //!
 //! The recording decorator ([`crate::contracts`]) captures every call as a
 //! [`SignalingNetworkEvent`]: a `SendCalled` at the sender and a `RecvItem` at
@@ -47,7 +47,8 @@ pub enum RecvNote {
     InboxOverflow,
     /// Arrived after the endpoint closed its inbox.
     InboxClosed,
-    /// Discarded by the simulated packet-loss model (loadgen `--drop-rate`).
+    /// Discarded by the simulated packet-loss model (loadgen `--drop-rate`),
+    /// on arrival or on send.
     LossModel,
     /// Correlated to the call but no live logical endpoint accepted it —
     /// rendered on the `ip:port#noendpoint` sub-lane.
@@ -71,8 +72,7 @@ impl RecvNote {
 }
 
 /// One message as it crossed (or tried to cross) the wire, reconstructed from a
-/// `SendCalled`/`RecvItem` pair on the recording channel. Port of the source's
-/// `NetworkTraceEntry` / report-recorder `RecordedSipEntry`.
+/// `SendCalled`/`RecvItem` pair on the recording channel.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecordedSipEntry {
     /// The sender's bound address (the `SendCalled` bind key).
@@ -102,8 +102,7 @@ pub struct RecordedSipEntry {
     /// The receiver's full lane key, when a receive half was matched.
     pub to_lane: Option<String>,
     /// Capture-order tiebreaker from the originating `SendCalled` — the
-    /// renderer sorts on `(sent_ms, seq)` exactly like the source's SVG/text
-    /// renderers sort on `(timestamp, seq)`.
+    /// renderers sort on `(sent_ms, seq)`.
     pub seq: u64,
 }
 
@@ -153,8 +152,33 @@ impl RecvHalf<'_> {
     }
 }
 
+/// A `SendLost` on the channel, not yet claimed by its `SendCalled`.
+struct LostSend<'a> {
+    seq: u64,
+    bind_key: &'a str,
+    to: SocketAddr,
+    msg: &'a [u8],
+}
+
+/// Claim the earliest `SendLost` recorded after the `SendCalled` stamped
+/// `seq` of `msg` from `bind_key` to `to`: whether the sender's loss model
+/// dropped that send.
+fn claim_lost_send(
+    lost: &mut Vec<LostSend<'_>>,
+    seq: u64,
+    bind_key: &str,
+    to: SocketAddr,
+    msg: &[u8],
+) -> bool {
+    let at = lost
+        .iter()
+        .position(|l| l.seq > seq && l.bind_key == bind_key && l.to == to && l.msg == msg);
+    at.map(|i| lost.remove(i)).is_some()
+}
+
 /// Pair every `SendCalled` on the channel with its delivering `RecvItem` and
-/// return one [`RecordedSipEntry`] per send, in capture order.
+/// return one [`RecordedSipEntry`] per send, in capture order. A send whose
+/// `SendLost` follows it is undelivered, noted [`RecvNote::LossModel`].
 ///
 /// A `RecvItem` matches a `SendCalled` when the receiver's bind key is the
 /// send's destination, the packet's source is the sender, and the bytes are
@@ -253,6 +277,16 @@ fn paired_sip_entries(
         }
     }
 
+    let mut lost: Vec<LostSend<'_>> = events
+        .iter()
+        .filter_map(|s| match &s.event {
+            SignalingNetworkEvent::SendLost { bind_key, to, msg } => {
+                Some(LostSend { seq: s.seq, bind_key, to: *to, msg })
+            }
+            _ => None,
+        })
+        .collect();
+
     let mut out = Vec::new();
     for s in events {
         let SignalingNetworkEvent::SendCalled { bind_key, to, msg } = &s.event else {
@@ -272,12 +306,15 @@ fn paired_sip_entries(
                 && r.seq >= s.seq
         });
 
-        let (received_ms, recv_note, to_lane, recv_seq) = match matched {
+        let (received_ms, recv_note, to_lane, recv_seq, lost_on_send) = match matched {
             Some(r) => {
                 r.paired = true;
-                (Some(r.at_ms), r.note(), Some(r.bind_key.to_string()), Some(r.seq))
+                (Some(r.at_ms), r.note(), Some(r.bind_key.to_string()), Some(r.seq), false)
             }
-            None => (None, None, None, None),
+            None if claim_lost_send(&mut lost, s.seq, bind_key, *to, msg) => {
+                (None, Some(RecvNote::LossModel), None, None, true)
+            }
+            None => (None, None, None, None, false),
         };
 
         out.push((
@@ -289,7 +326,7 @@ fn paired_sip_entries(
                 received_ms,
                 // Unmatched + recorded destination ⇒ genuinely lost on the fabric;
                 // unmatched + external destination ⇒ left the recording's horizon.
-                delivered: received_ms.is_some() || !recorded_binds.contains(to),
+                delivered: received_ms.is_some() || !(lost_on_send || recorded_binds.contains(to)),
                 recv_note,
                 reemit: None,
                 from_lane: Some(bind_key.clone()),

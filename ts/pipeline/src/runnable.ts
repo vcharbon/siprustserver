@@ -448,13 +448,6 @@ export const unackedLine = (
  */
 export const ACTOR_ACK_NOT_CAPTURED = "source-actor-ack-not-captured"
 
-/**
- * What proves the actor's missing ACK crossed the wire: a later in-dialog
- * request on the leg (`continuation`), or a 2xx whose ladder stopped short of
- * its schedule while the far leg expects its ACK relayed (`relayed-ack`).
- */
-export type LostAckGroundKind = "continuation" | "relayed-ack"
-
 /** Where a 2xx's declared ladder stopped, in ms from the 2xx. */
 export interface LadderEnd {
   /** How many rungs the document declares. */

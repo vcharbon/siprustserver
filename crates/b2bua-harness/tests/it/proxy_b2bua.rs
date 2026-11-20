@@ -1,9 +1,8 @@
 //! End-to-end: `alice → proxy → b2bua → proxy → bob`, with a single real
 //! load-balancing `ProxyCore` in front of one real `B2buaCore` worker, both
-//! bound as SUTs on the scenario-harness simulated network. Port of the
-//! sipjsserver `basic-call` scenario run on the `proxy+b2b` SUT
-//! (`tests/support/proxyB2bFakeStack.ts`, single-worker form): the B2BUA is
-//! deployed behind the front proxy (`b2bOutboundProxy`), so the b-leg
+//! bound as SUTs on the scenario-harness simulated network: a basic call on the
+//! proxy-plus-B2BUA SUT in its single-worker form. The B2BUA is
+//! deployed behind the front proxy (its outbound proxy), so the b-leg
 //! (worker→bob) traffic *also* traverses the proxy — symmetric with the
 //! a-leg's cookie-decoded path.
 //!
@@ -42,7 +41,7 @@ const B2BUA: &str = "127.0.0.1:5090";
 async fn alice_calls_bob_through_proxy_and_b2bua() {
     let h = Harness::with_transit_delay("proxy-b2bua-basic", 0).describe(
         "alice → proxy → b2bua → proxy → bob: LB proxy fronts one B2BUA worker; \
-         the worker's b-leg traffic traverses the proxy via b2bOutboundProxy.",
+         the worker's b-leg traffic traverses the proxy, set as its outbound proxy.",
     );
     let alice = h.agent("alice", ALICE).await;
     let bob = h.agent("bob", BOB).await;

@@ -158,6 +158,18 @@ export const InjectorMissing = failure("injector-missing", {
   node: Schema.String,
   action: Schema.String
 })
+/** The lane's injector refused or failed an `inject`, in its own words. */
+export const InjectRefused = failure("inject-refused", {
+  node: Schema.String,
+  action: Schema.String,
+  reason: Schema.String
+})
+/** The lane's injector did not answer an `inject` within its bound. */
+export const InjectTimedOut = failure("inject-timed-out", {
+  node: Schema.String,
+  action: Schema.String,
+  within_ms: Schema.Int
+})
 /** A send awaits a lane event the lane does not report (§6.7g): refused before the dial. */
 export const LaneEventUnsupported = failure("lane-event-unsupported", {
   step: Schema.String,
@@ -268,6 +280,8 @@ export const Failure = Schema.Union([
   FlowIncomplete,
   DeviationUnimplemented,
   InjectorMissing,
+  InjectRefused,
+  InjectTimedOut,
   LaneEventUnsupported,
   LaneEventMissing,
   IdentityUnbound,

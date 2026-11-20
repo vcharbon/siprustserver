@@ -16,8 +16,8 @@ For *which harness* to use, see [harness-layers.md](harness-layers.md).
   value to a `tokio::time::Instant` once. `Clock::test_at(0)` reads the *same*
   tokio timeline, so **one `advance` moves behaviour timers and report
   timestamps together**.
-- There is **no separate fake-clock counter** to keep in sync. This is
-  deliberately simpler than the TS `TestClock` pump — keep it that way.
+- There is **no separate fake-clock counter** to keep in sync, and no clock
+  pump driving one — keep it that way.
 
 ## The primitives
 

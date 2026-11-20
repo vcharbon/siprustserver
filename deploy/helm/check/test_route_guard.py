@@ -19,13 +19,15 @@ class GuardContainer(unittest.TestCase):
         self.assertEqual(guard["command"], ["/usr/local/bin/route-guard"])
         self.assertEqual(guard["image"], container(deployment, "sip-front-proxy")["image"])
         self.assertEqual(env(guard), {
-            "ROUTE_GUARD_FITNESS": "127.0.0.1:9090",
+            "ROUTE_GUARD_FITNESS": "$(HOST_IP):9090",
             "ROUTE_GUARD_PEERS": "172.20.0.1,192.168.60.1",
             "ROUTE_GUARD_POLL_MS": "100",
             "ROUTE_GUARD_DEAD_MS": "1000",
             "ROUTE_GUARD_HOLD_MS": "3000",
-            "ROUTE_GUARD_METRICS": "0.0.0.0:9095",
+            "ROUTE_GUARD_METRICS": "$(HOST_IP):9095",
         })
+        self.assertEqual(guard["env"][0], {
+            "name": "HOST_IP", "valueFrom": {"fieldRef": {"fieldPath": "status.hostIP"}}})
         self.assertEqual(guard["securityContext"]["capabilities"],
                          {"drop": ["ALL"], "add": ["NET_ADMIN"]})
         self.assertIs(guard["securityContext"]["allowPrivilegeEscalation"], False)
@@ -128,6 +130,17 @@ class GuardRelations(unittest.TestCase):
     def test_the_proxy_metrics_port_stays_where_the_guard_reads_it(self) -> None:
         err = render_error(SIPRUST, *KIND, "--set-string", "proxy.env.PROXY_METRICS=0.0.0.0:9191")
         self.assertIn("PROXY_METRICS=0.0.0.0:9191 must keep port 9090", err)
+        err = render_error(SIPRUST, *KIND, "--set", "proxy.routeGuard.metricsBind=10.0.0.5:9195")
+        self.assertIn("proxy.routeGuard.metricsBind=10.0.0.5:9195 must keep port 9095", err)
+
+    def test_the_guard_reads_fitz_where_the_proxy_binds_it(self) -> None:
+        def fitness(*args: str) -> str:
+            return env(container(proxy(*args), "route-guard"))["ROUTE_GUARD_FITNESS"]
+        self.assertEqual(fitness(), "$(HOST_IP):9090")
+        opened = ("--set", "httpBinds.allowWildcard=true")
+        for wildcard in ("0.0.0.0:9090", "[::]:9090"):
+            self.assertEqual(fitness(*opened, "--set-string", f"proxy.metrics.bind={wildcard}"),
+                             "$(HOST_IP):9090")
 
 if __name__ == "__main__":
     unittest.main()

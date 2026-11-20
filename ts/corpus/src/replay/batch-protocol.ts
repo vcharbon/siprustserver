@@ -24,6 +24,9 @@ export type HeldContext = Batch.HeldContext
 /** What the batch's gate read of the SUT's call contexts. */
 export type ContextsReport = Batch.ContextsReport
 
+/** One check the batch's end read, answered apart. */
+export type Gate = Batch.Gate
+
 /** What a batch process is stood with. */
 export interface BatchRequest {
   /** Where the batch's scratch goes. */
@@ -34,27 +37,59 @@ export interface BatchRequest {
   readonly memoryMax: string
   /** How many cells the batch runs at once. */
   readonly cells: number
+  /**
+   * The deployment's block for cells routed through its provisioned routing
+   * rather than routing the cells script; absent for scripted cells.
+   */
+  readonly provisioned?: unknown
 }
+
+/** An inject one cell's run asks of the harness: its node, its action, the target the node states. */
+export type InjectAsk = Batch.InjectLine
+
+/**
+ * What performs the injects one cell's run asks: it succeeds once the inject
+ * did its work, and fails with the words of its refusal. It never outlasts the
+ * batch process's bound on an answer (90 s).
+ */
+export type Injector = (ask: InjectAsk) => Effect.Effect<void, string>
 
 /** A batch process, as the batch holds it. */
 export interface BatchHost {
-  /** Runs one cell's run-spec in the process. */
-  readonly run: (specPath: string) => Effect.Effect<ReplayCli.RunReport>
+  /** Runs one cell's run-spec in the process, the injects it asks performed by `injector`, refused where none is given. */
+  readonly run: (specPath: string, injector?: Injector) => Effect.Effect<ReplayCli.RunReport>
   /** How the process died, if it has; `undefined` while it lives. */
   readonly died: () => string | undefined
   /** Closes the process's input once every cell ended, and resolves on what the SUT still held (`undefined` clean). */
   readonly end: Effect.Effect<string | undefined>
   /** What the gate read of the SUT's call contexts once `end` resolved; `undefined` before, and where the lane reads none. */
   readonly contexts: () => ContextsReport | undefined
+  /** Each gate the end read, apart, once `end` resolved; none before, and where the process states none apart. */
+  readonly gates?: () => ReadonlyArray<Gate>
   /** Ends the process now, its cells in flight with it, and resolves once it exited; a process already gone is left. */
   readonly kill: Effect.Effect<void>
+  /**
+   * Whether `end` ran the gate to its end line, so every cell's end checks
+   * are final; read once `end` resolved. Absent where resolving says so.
+   */
+  readonly judged?: () => boolean
+}
+
+/** What a {@link SutHandle.restand} stood the SUT again after: how its process ended, and whether the step claimed that death. */
+export interface Restood {
+  readonly exit: string
+  readonly claimed: boolean
 }
 
 /** The lane's SUT, as the batch holds it. */
 export interface SutHandle {
   /** Where it publishes Prometheus text, where it publishes any. */
   readonly metrics: string | undefined
-  /** How a managed SUT died, if it has; `undefined` while it is alive. */
+  /**
+   * How a managed SUT died, where it has: each death a {@link restand} stood it
+   * again after and no step claimed, and the death of the one now stood;
+   * `undefined` while none.
+   */
   readonly died: () => string | undefined
   /**
    * Stops a managed SUT and resolves once its process exited, so the next
@@ -62,4 +97,12 @@ export interface SutHandle {
    * found.
    */
   readonly stop: Effect.Effect<void>
+  /**
+   * Stands a managed SUT whose process died again, as its orchestrator would,
+   * and leaves a running one as it is (`undefined`). The death is the step's
+   * only where `claim` is the dead process's pid, the one a step's inject
+   * named stopped; any other stays in `died`. Fails with why it could not
+   * stand it. Absent where the harness stands no process.
+   */
+  readonly restand?: (claim?: number) => Effect.Effect<Restood | undefined, string>
 }

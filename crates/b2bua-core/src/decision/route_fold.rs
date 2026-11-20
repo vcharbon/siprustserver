@@ -56,6 +56,12 @@ pub struct AdmittingRoute {
 
 /// Apply `route` to `call` (which already carries the a-leg) up to its admit.
 /// `depth` counts the chained limiter-reject failovers behind it.
+///
+/// A destination host that is neither an IP literal nor allow-listed (a bogus
+/// host from call-control, a cluster name with no live pod) is refused with a
+/// `503`, To-tag, terminate effects and a Reject CDR before any b-leg state or
+/// limiter hold exists: the send path would otherwise block on name
+/// resolution, and a refused target never acquires a hold.
 pub fn up_to_admit(
     mut call: Call,
     mut route: RouteDecision,
@@ -123,15 +129,6 @@ pub fn up_to_admit(
     call = super::apply_reject::seed_service_ext(call, std::mem::take(&mut route.service_ext));
 
     // ── Destination allow-list: reject non-IP non-allow-listed destinations early ──
-    // Catches the case where call-control returns a bogus host (e.g. `kindlab`
-    // from a misconfigured fixture, or a `.svc.cluster.local` name the K8s runner
-    // constructs that has no live pod). Without this the host would flow to the
-    // send path and block on `getaddrinfo`/`EAI_AGAIN`; admission is the cheap
-    // early filter — emit `503` and terminate BEFORE any b-leg state or limiter
-    // hold is allocated (port of `applyRoute.ts`'s admission block). `reject_call`
-    // is the Rust analogue of `buildAdmissionRejectResult` (503 + To-tag +
-    // terminate effects + Reject CDR). Done before the limiter loop so a rejected
-    // target never acquires a hold.
     if classify_admission(&route.destination.host, &config.worker_allowed_target_suffixes)
         == AdmissionVerdict::Reject
     {
@@ -183,10 +180,11 @@ pub fn refused(route: AdmittingRoute) -> (Call, HandlerEffects) {
 }
 
 /// Dial the admitted route's b-leg under the attempt it opens, its INVITE
-/// leaving at `sent_ms` (`OutboundInvite::sent_at_ms`), after the admission
-/// the turn waited on; a route whose dial a service defers opens none here.
-/// `now_ms` is the turn's timestamp: every CDR entry and timer deadline below
-/// reads it; `owners` are the call's, as the shell states them.
+/// leaving at `sent_ms`, after the admission the turn waited on: the INVITE's
+/// `Timestamp` and `OutboundInvite::sent_at_ms` read it. A route whose dial a
+/// service defers opens none here. `now_ms` is the turn's timestamp: every CDR
+/// entry and the setup deadline and duration cap read it; `owners` are the
+/// call's, as the shell states them.
 #[allow(clippy::too_many_arguments)]
 pub fn admitted(
     route: AdmittingRoute,
@@ -307,7 +305,7 @@ pub fn admitted(
         &capabilities::offered_option_tags(&call, None),
         None,
         call.a_leg.invite_final_sent().is_none(),
-        now_ms,
+        sent_ms,
         &mut skipped,
     ) {
         Ok(built) => built,
@@ -352,9 +350,6 @@ pub fn admitted(
             BodyUpdate::Drop | BodyUpdate::Replace(_) => relay::Author::Stack,
         },
     );
-    if let Some(invite) = leg.outbound_invite_mut() {
-        invite.sent_at_ms = sent_ms;
-    }
     add_originated_b_leg(&mut call, leg, now_ms);
     fx.outbound.push(effect);
     // The leg rings for the attempt's deadline from its first 18x

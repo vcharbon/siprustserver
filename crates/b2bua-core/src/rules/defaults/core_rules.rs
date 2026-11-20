@@ -23,7 +23,6 @@ use b2bua_sdk::provisional::{
     absorbed_provisional_actions, originator_final_sent, shown_to_no_one,
 };
 
-use super::reaper_verdicts::{reap_handler_panic, reap_message_cap, reap_overflow, reap_stale};
 use super::request_timeouts::{going_away_timeout, record_timeout_actions};
 use super::straggler::{fork_straggler, straggler_release, straggler_release_timeout};
 
@@ -41,7 +40,7 @@ pub(super) fn ok(actions: Vec<RuleAction>) -> Option<RuleHandleResult> {
     Some(RuleHandleResult::new(actions))
 }
 
-fn no_transform() -> MessageTransform {
+pub(super) fn no_transform() -> MessageTransform {
     MessageTransform::default()
 }
 
@@ -347,55 +346,8 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                 .filter(|ctx| ctx.relayed_pending().is_some_and(|p| !p.cancelled)),
             |_ctx| ok(vec![RuleAction::RelayToPeer { transform: no_transform() }]),
         ),
-        // RFC 3261 §13.2.2.4 — re-ACK a **retransmitted 2xx** whose first ACK was
-        // lost. §13.2.2.4 gives one ACK per 2xx and re-passes THAT ACK to the
-        // transport for every copy, so the re-ACK MUST reuse the client
-        // transaction the ACK went out on (the retained `ack_branch` + the INVITE
-        // CSeq) — a fresh branch would mint a new transaction and never quiesce
-        // the answerer's INVITE server txn, leaking the confirmed call or timing
-        // it out late under packet loss. `ack_leg` re-passes the retained
-        // datagram (`emitted_ack`) raw, so whatever body the acknowledging party
-        // put on it rides every repeat. This is the b-leg / realign twin of the
-        // a-leg `unacked-2xx-retransmit` (which retransmits the B2BUA's *own* 2xx
-        // to a silent caller).
-        //
-        // Fires ONLY on a genuine retransmit that nothing else claims: the source
-        // dialog holds an `ack_branch` — its ACK client transaction, minted by the
-        // ACK's emission and reset on every new INVITE txn — the response echoes
-        // that INVITE's CSeq, and no pending-relay snapshot is open (a first-time
-        // re-INVITE final is claimed by `relay-reinvite-response` / the
-        // realign-200 rules, whose `ack_branch` is still `None`). A 2xx whose ACK
-        // has not left yet draws nothing: no branch exists to re-send on, and the
-        // answerer's own ladder is the mechanism §13.3.1.4 provides while that
-        // ACK is on its way.
-        // Absorbs (AckLeg only — no relay to the peer, which already saw the first
-        // final).
-        //
-        // A leg the BYE already Terminated still owes it (RFC 5407 §2 + App. D:
-        // a Mortal UA keeps the invite usage for exactly this, and §13.2.2.4's
-        // "every time a retransmission arrives" does not lapse with the dialog).
-        rule(
-            "re-ack-retransmitted-2xx",
-            &[],
-            Match::response()
-                .method("INVITE")
-                .status_class(2)
-                .leg_states(&[LegState::Confirmed, LegState::Terminated])
-                .filter(|ctx| {
-                    let Some(d) = ctx.dialog() else { return false };
-                    let Some(leg) = ctx.source_leg() else { return false };
-                    let Some(resp) = ctx.response() else { return false };
-                    call::helpers::sent_exchange(d).is_some_and(|x| x.ack_branch.is_some())
-                        && crate::rules::relay::retransmitted_2xx(leg, d, resp)
-                }),
-            |ctx| {
-                ok(vec![RuleAction::AckLeg { leg_id: ctx.source_leg_id.to_string(), body: None }])
-            },
-        ),
-        // RFC 3261 §13.2.2.4 — a fork STRAGGLER's 2xx: a 2xx to the INVITE a
-        // b-leg sent, under a To-tag no live dialog of that leg carries, once another
-        // fork confirmed the leg. The UAC ACKs every 2xx and BYEs a dialog it
-        // does not want; the call keeps the winner. A repeat is re-ACKed alone.
+        super::re_ack::re_ack_retransmitted_2xx(),
+        super::re_ack::re_ack_2xx_ahead(),
         rule(
             "release-fork-straggler-2xx",
             &[],
@@ -516,43 +468,9 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                 .status_class(2),
             |_ctx| ok(vec![RuleAction::RelayToPeer { transform: no_transform() }]),
         ),
-        // A relayed non-INVITE request's **non-2xx final** is relayed back to
-        // its requester — plain transaction-layer symmetry (RFC 3261 §8.1.3.3).
-        // The non-INVITE sibling of `relay-reinvite-response`
-        // (INVITE) alongside `relay-non-invite-200` (the 2xx half): without it
-        // the far end's 481/488/491… to a relayed UPDATE/INFO was silently
-        // dropped and the requester timed out. Matches ONLY when the response
-        // answers a relay record on the source dialog — i.e. a transaction WE
-        // relayed. A B2BUA-originated request (keepalive OPTIONS,
-        // relayFirst18x PRACK, REFER-progress NOTIFY) records as this stack's
-        // own, so its failures keep their own rules — in particular a
-        // keepalive-OPTIONS 481 still reaches `handle-481`'s teardown, which
-        // this rule outranks only for relayed transactions. Like a failed
-        // re-INVITE (§14.1), a failed relayed non-INVITE leaves the dialog and
-        // the call as they were: report the failure to the requester, nothing
-        // more. (BYE never takes this path — it is answered locally and
-        // relayed by no record; the relay executor settles the record on this
-        // final.)
-        rule(
-            "relay-non-invite-failure",
-            &["handle-481"],
-            Match::response()
-                .methods(&[
-                    "OPTIONS",
-                    "INFO",
-                    "PRACK",
-                    "UPDATE",
-                    "REFER",
-                    "MESSAGE",
-                    "SUBSCRIBE",
-                    "NOTIFY",
-                ])
-                .filter(|ctx| {
-                    ctx.response().is_some_and(|r| r.status() >= 300)
-                        && ctx.answers_relayed_request()
-                }),
-            |_ctx| ok(vec![RuleAction::RelayToPeer { transform: no_transform() }]),
-        ),
+        super::non_invite_failure::relay_non_invite_failure_rule(),
+        super::non_invite_failure::answer_relayed_prack_failure_rule(),
+        super::non_invite_failure::relay_offered_prack_failure_rule(),
         // ── failure ─────────────────────────────────────────────────────────
         rule(
             "route-failure",
@@ -649,71 +567,9 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
     // ── failover resolution (/call/failure result) ──────────────────────────
     rules.extend(super::failover_rules::failover_rules());
     rules.extend([
-        // A 481 to a re-INVITE, UPDATE, INFO, MESSAGE, REFER or keepalive OPTIONS
-        // denies the dialog (RFC 3261 §12.2.1.2) and ends the call. It declines a
-        // PRACK's (RFC 3262 §3), CANCEL's (RFC 3261 §9.2), NOTIFY's (RFC 6665 §4.4.1)
-        // and BYE's (RFC 3261 §15.1.1: the dialog ends either way); a relayed one is
-        // `relay-non-invite-failure`'s and the rest `absorb-own-request-failure`'s.
-        //
-        // The 481 leg is BYEd like its peer: §12.2.1.2 ends an INVITE dialog
-        // by sending a BYE, whatever the peer answered. Its final to that BYE,
-        // a 481 as likely as a 200, resolves the leg (`resolve-bye-response`).
-        rule(
-            "handle-481",
-            &[],
-            Match::response().status_code(481).call_state(CallModelState::Active).filter(|ctx| {
-                ctx.response().is_some_and(|r| {
-                    !matches!(
-                        r.cseq().method(),
-                        Method::Prack | Method::Cancel | Method::Notify | Method::Bye
-                    )
-                })
-            }),
-            |ctx| {
-                let src = ctx.source_leg_id.to_string();
-                // A 481 to the liveness probe is the probe's failure — the
-                // peer holds no dialog to answer it in — and ends the call
-                // under the keepalive deadline; to anything else it is the
-                // peer's final denying the dialog.
-                let cause = if ctx.response().is_some_and(|r| r.cseq().method() == Method::Options)
-                {
-                    TerminationCause::Timeout(TimeoutKind::Keepalive)
-                } else {
-                    TerminationCause::RemoteFinal
-                };
-                ok(vec![
-                    RuleAction::AddCdrEvent {
-                        event_type: CdrEventType::Bye,
-                        leg_id: src.clone(),
-                        status_code: Some(481),
-                        reason: Some("Call/Transaction Does Not Exist".into()),
-                    },
-                    RuleAction::BeginTermination {
-                        reason: Some("481".into()),
-                        cause,
-                        by_leg: Some(src),
-                    },
-                ])
-            },
-        ),
+        super::handle_481::handle_481_rule(),
         super::keepalive_failure::keepalive_dialog_terminated_rule(),
-        // A non-2xx final to a request THIS STACK originated — its own PRACK
-        // toward a responder whose provisional the originator was never shown
-        // reliably, or a REFER-progress NOTIFY — records as this stack's own,
-        // and denies one transaction or one subscription, never the
-        // dialog: a PRACK's 481 is RFC 3262 §3's ordinary answer once the
-        // responder no longer holds that provisional unacknowledged; a
-        // NOTIFY's that removes its subscription ended it before the rules
-        // (RFC 6665 §4.2.2). Nothing is owed and nothing moves. A RELAYED
-        // request's failure is `relay-non-invite-failure`'s to relay.
-        rule(
-            "absorb-own-request-failure",
-            &[],
-            Match::response().methods(&["PRACK", "NOTIFY"]).filter(|ctx| {
-                ctx.response().is_some_and(|r| r.status() >= 300) && !ctx.answers_relayed_request()
-            }),
-            |_ctx| ok(vec![]),
-        ),
+        super::non_invite_failure::absorb_own_request_failure_rule(),
         // ── absorption ──────────────────────────────────────────────────────
         rule(
             "absorb-bye-200",
@@ -965,10 +821,10 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
             };
             let tag = ctx.dialog().map_or("", |d| d.our_tag.as_str());
             match ctx.call.prack_disposition(tag, tokens, ctx.discharged) {
-                PrackDisposition::Relay => {
+                PrackDisposition::Relay if !ctx.dialog().is_some_and(|d| d.is_retired()) => {
                     ok(vec![RuleAction::RelayToPeer { transform: no_transform() }])
                 }
-                PrackDisposition::Answer200 => respond(200, "OK"),
+                PrackDisposition::Relay | PrackDisposition::Answer200 => respond(200, "OK"),
                 PrackDisposition::Refuse481 => respond(481, "Call/Transaction Does Not Exist"),
             }
         }),
@@ -1006,10 +862,6 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
         rule("relay-notify", &[], Match::request().method("NOTIFY"), |_| {
             ok(vec![RuleAction::RelayToPeer { transform: no_transform() }])
         }),
-        // An in-dialog request of a method this stack models no relay for (a
-        // SUBSCRIBE, a PUBLISH, a REGISTER, an extension method) goes to the
-        // relay too, which answers it locally (489 to a SUBSCRIBE, else 405):
-        // no request is left to run out its sender's Timer F (RFC 3261 §8.2).
         rule(
             "relay-unmodelled",
             &[],
@@ -1406,57 +1258,6 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                 ok(unacked_2xx_give_up_actions(&ctx.call, obligation))
             },
         ),
-        // ── call reaper verdicts (ADR-0020 X1/X6) ───────────────────────────
-        // The reaper's verdicts arrive as ordinary InternalEvents and are
-        // handled by ordinary CORE rules — the single funnel. `stale` forces
-        // every unresolved leg terminal with no wire traffic (the call is
-        // provably dead: its stamp froze past the idle threshold) and runs
-        // while terminating: a wedged terminating call is exactly what it
-        // reaps. `overflow` tears the live legs down on the wire and leaves a
-        // terminating call to its teardown. `fatal-error` (a handler panicked,
-        // the legs are alive) and `message-cap` (the work bound, in every
-        // state) do either, as the call's state asks: an Active call is torn
-        // down on the wire, a terminating one forced terminal. Each records
-        // the reason and begins termination; the
-        // invariant then promotes → Terminated and discharges the obligations
-        // (CDR + limiter) exactly once. The `discharge` outcome deliberately
-        // has NO rule (the router's bypass branch owns it — rules are the
-        // thing that failed by then).
-        rule(
-            "reaper-stale",
-            &[],
-            Match::internal_event()
-                .topic(crate::reaper_verdict::REAPER_TOPIC)
-                .outcome(crate::reaper_verdict::OUTCOME_STALE),
-            reap_stale,
-        )
-        .runs_while_terminating(),
-        rule(
-            "reaper-fatal-error",
-            &[],
-            Match::internal_event()
-                .topic(crate::reaper_verdict::REAPER_TOPIC)
-                .outcome(crate::reaper_verdict::OUTCOME_FATAL),
-            reap_handler_panic,
-        )
-        .runs_while_terminating(),
-        rule(
-            "reaper-overflow",
-            &[],
-            Match::internal_event()
-                .topic(crate::reaper_verdict::REAPER_TOPIC)
-                .outcome(crate::reaper_verdict::OUTCOME_OVERFLOW),
-            reap_overflow,
-        ),
-        rule(
-            "reaper-message-cap",
-            &[],
-            Match::internal_event()
-                .topic(crate::reaper_verdict::REAPER_TOPIC)
-                .outcome(crate::reaper_verdict::OUTCOME_MESSAGE_CAP),
-            reap_message_cap,
-        )
-        .runs_while_terminating(),
         rule(
             "terminating-safety-timeout",
             &[],
@@ -1492,11 +1293,16 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
         )
         .runs_while_terminating(),
     ]);
+    rules.extend(super::reaper_verdicts::reaper_verdict_rules());
     rules
 }
 
 /// Whether `method` is one no relay rule models: neither a method the
-/// in-dialog relay builds nor an ACK or CANCEL, which have their own.
+/// in-dialog relay builds nor an ACK or CANCEL, which have their own. Such a
+/// request (a SUBSCRIBE, a PUBLISH, a REGISTER, an extension method), in a
+/// dialog or naming none, with a callee leg or not, `relay-unmodelled`
+/// answers locally (489 to a SUBSCRIBE, else 405): none runs out its sender's
+/// Timer F (RFC 3261 §8.2).
 fn unmodelled(method: &Method) -> bool {
     !matches!(method, Method::Ack | Method::Cancel)
         && sip_message::generators::InDialogMethod::try_from(method).is_err()

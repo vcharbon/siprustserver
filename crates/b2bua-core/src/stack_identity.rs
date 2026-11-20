@@ -1,4 +1,4 @@
-//! Leg "stack identity" — port of `src/b2bua/stack-identity.ts`. Stamps the
+//! Leg "stack identity". Stamps the
 //! B2BUA's own Via + Contact onto outbound messages, carrying the `callRef`
 //! (`cr`), the leg id (`lg`) and the call incarnation's mark (`ci`) in opaque
 //! params so any inbound response/request self-routes back to the owning call
@@ -210,8 +210,7 @@ pub fn build_call_contact(facts: &ContactFacts) -> Uri {
 
 // ---------------------------------------------------------------------------
 // Public read-side seam — consumer-facing API for the addresses the B2BUA
-// stamps on outbound Contact / Via (port of `StackIdentity` /
-// `StackIdentityApi`).
+// stamps on outbound Contact / Via.
 // ---------------------------------------------------------------------------
 
 /// Read-only view of the addresses this B2BUA advertises to its peers.
@@ -236,8 +235,7 @@ pub struct StackIdentity {
 }
 
 impl StackIdentity {
-    /// Derive the advertised identity from a worker's [`B2buaConfig`] — the
-    /// analogue of `StackIdentity.Default` wired over `AppConfig`.
+    /// Derive the advertised identity from a worker's [`B2buaConfig`].
     pub fn from_config(config: &B2buaConfig) -> Self {
         Self {
             advertised_host: config.sip_local_ip.clone(),
@@ -445,13 +443,10 @@ mod tests {
     }
 
     // --- StackIdentity public read-API ------------------------------------
-    // Port of `tests/b2bua/stack-identity-public-api.test.ts`
-    // (describe "StackIdentity public read-API"). Pins the read-side seam
-    // consumers use to populate their own templating layer ($(ip.AS) /
-    // $(port.AS) substitution): the advertised host/port read back the
-    // configured `B2buaConfig.sip_local_{ip,port}` (the source's
-    // `AppConfig.sipLocalIp` / `sipLocalPort`).
 
+    /// The read-side seam consumers populate their own templating layer from:
+    /// the advertised host and port read back the configured
+    /// `B2buaConfig.sip_local_{ip,port}`.
     #[test]
     fn advertised_host_port_match_the_configured_values() {
         let cfg = B2buaConfig {
@@ -464,10 +459,9 @@ mod tests {
         assert_eq!(identity.advertised_port(), 35060);
     }
 
+    /// A default-config identity yields a non-empty host and a port.
     #[test]
     fn default_config_is_reachable_end_to_end() {
-        // The TS analogue of "default (testAppConfigDefaults) is reachable":
-        // a default-config identity yields a non-empty host and a port.
         let identity = StackIdentity::from_config(&B2buaConfig::default());
         assert!(!identity.advertised_host().is_empty());
         assert!(identity.advertised_port() > 0);

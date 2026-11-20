@@ -60,7 +60,7 @@ impl Owner {
             ParseRefusal::Answer(response) => {
                 // §18.2.2: the stamped top Via's response target.
                 let dest = response_destination(response.top_via()).unwrap_or(src);
-                self.send_buffer(endpoint, response.image(), dest).await;
+                self.send_uncounted(endpoint, response.image(), dest).await;
                 self.metrics.parse_refusals_answered.fetch_add(1, Relaxed);
             }
             ParseRefusal::Capped => {

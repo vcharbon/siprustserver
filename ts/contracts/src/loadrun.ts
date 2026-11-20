@@ -1,8 +1,7 @@
 /**
  * The machine-readable **load run index** (`load-result.json`), mirroring
  * `e2e_model::loadrun`: one loadgen run's result as a single authored-shape
- * document, so the e2e website renders a load run beside a functional campaign
- * run without re-deriving anything.
+ * document, so a reader renders a load run without re-deriving anything.
  *
  * Every path in it is RELATIVE to the run directory, so a run dir is
  * self-contained and portable. camelCase on the wire, declaration-order bytes —
@@ -287,7 +286,6 @@ export const LoadRunIndex = Schema.Struct({
 })
 export interface LoadRunIndex extends Schema.Schema.Type<typeof LoadRunIndex> {}
 
-export const decodeLoadRunIndex = Schema.decodeUnknownEffect(LoadRunIndex, STRICT)
 export const decodeLoadRunIndexSync = Schema.decodeUnknownSync(LoadRunIndex, STRICT)
 
 /** Total completed calls across every bucket. */

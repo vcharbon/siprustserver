@@ -14,7 +14,6 @@ import { Flows } from "@sip/contracts"
 
 /** A profile document as a deployment writes it. */
 export interface ProfileDoc {
-  readonly mode: string
   readonly sut: ReadonlyArray<string>
 }
 

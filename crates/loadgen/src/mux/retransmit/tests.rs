@@ -1,5 +1,5 @@
 use super::*;
-use sip_net::{BindUdpOpts, RealSignalingNetwork, SignalingNetwork};
+use sip_net::{BindUdpOpts, RealSignalingNetwork, SendNote, SignalingNetwork};
 use std::net::SocketAddr;
 use tokio::net::UdpSocket as TokioUdp;
 use tokio::time::{timeout, Duration as TokioDuration};
@@ -209,8 +209,10 @@ async fn calltxns_sendtap_records_every_reemission() {
     let (txns, peer, peer_addr) = txn_rig().await;
     let seen = Arc::new(Mutex::new(Vec::<ReEmitKind>::new()));
     let sink = seen.clone();
-    txns.set_sendtap(Arc::new(move |_raw, _dst, kind| {
-        sink.lock().unwrap().push(kind);
+    txns.set_sendtap(Arc::new(move |_raw, _dst, note| {
+        if let SendNote::ReEmit(kind) = note {
+            sink.lock().unwrap().push(kind);
+        }
     }));
 
     // (1) Proactive Timer-E retransmit of an outbound UPDATE, then stop it.
@@ -253,7 +255,7 @@ async fn calltxns_counts_every_resend_on_the_tally() {
     use sip_message::sniff::identity;
 
     let tally = Arc::new(CallTally::new("alice"));
-    let taps = Taps::new(None, Some(tally.clone()), None, None);
+    let taps = Taps::new(None, Some(tally.clone()), None, None, None);
     let (txns, peer, peer_addr) = txn_rig_with(taps).await;
     let (update, ack) = (update_req("z9hG4bK-u1"), ack_req("z9hG4bK-a9", 1));
     let now = tokio::time::Instant::now();
@@ -276,4 +278,38 @@ async fn calltxns_counts_every_resend_on_the_tally() {
     let resent = |label: &str| m.arrows.iter().find(|(k, _)| *k.label == *label).unwrap().1.resent;
     assert!(resent("UPDATE") >= 1, "the proactive retransmit: {m:?}");
     assert_eq!(resent("ACK"), 1, "the reactive re-ACK: {m:?}");
+}
+
+/// A reliable provisional is told apart by its RSeq (RFC 3262 §3): after an
+/// unreliable 180 on an early dialog, a reliable 180 on the same dialog is a
+/// new provisional and reaches the body, and so does the next RSeq; a repeat
+/// of an RSeq is a retransmission and is absorbed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "slow lane: loadgen"]
+async fn calltxns_a_new_rseq_is_a_new_provisional() {
+    let (txns, _peer, peer_addr) = txn_rig().await;
+    let took = |extra: &str| {
+        txns.on_inbound(&Datagram::sniff(&resp(180, "z9hG4bK-i1", "1 INVITE", extra)), peer_addr)
+    };
+    let reliable = |rseq: u32| format!("Require: 100rel\r\nRSeq: {rseq}\r\n");
+    assert!(took(""), "the unreliable 180 is delivered");
+    assert!(took(&reliable(7)), "a reliable 180 on the same dialog is a new provisional");
+    assert!(!took(&reliable(7)), "its repeat is a retransmission");
+    assert!(took(&reliable(8)), "the next RSeq is a new provisional");
+    txns.shutdown();
+}
+
+/// A retransmitted non-2xx final to our re-INVITE means our hop ACK was lost:
+/// the engine sends that ACK again (RFC 3261 §17.1.1.2), as for a 2xx.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "slow lane: loadgen"]
+async fn calltxns_reacks_a_retransmitted_non_2xx_invite_final() {
+    let (txns, peer, peer_addr) = txn_rig().await;
+    let pending = resp(491, "z9hG4bK-r3", "3 INVITE", "");
+    assert!(txns.on_inbound(&Datagram::sniff(&pending), peer_addr), "first 491 delivered");
+    txns.on_outbound(&Datagram::sniff(&ack_req("z9hG4bK-r3", 3)), peer_addr);
+    assert!(!txns.on_inbound(&Datagram::sniff(&pending), peer_addr), "dup 491 absorbed");
+    let resent = recv_one(&peer, 500).await.expect("the hop ACK sent again");
+    assert!(resent.starts_with("ACK ") && resent.contains("CSeq: 3 ACK"), "{resent}");
+    txns.shutdown();
 }

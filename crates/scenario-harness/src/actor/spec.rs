@@ -11,7 +11,7 @@ use super::ending::Expect;
 use super::endpoint::{Automatics, Disposition};
 use super::goals::GoalStep;
 use super::observe::ReceptionObserver;
-use super::state::{ObservedState, ReplayEntry};
+use super::state::{Observation, ObservedState, ReplayEntry};
 use super::verdict::{verdict, ScenarioVerdict};
 use super::{run_call_accepting, ActorSpec, BarrierPhase, CallPlan, CallVerdict, SettleBarrier};
 use crate::realcall::{CallCtx, CallEnv, ScenarioId};
@@ -137,8 +137,7 @@ pub fn originating_role(actors: &[ActorSpec]) -> &'static str {
         .unwrap_or("alice")
 }
 
-/// Drive one [`ActorScenario`] to its [`ScenarioVerdict`] — the actor
-/// analogue of one `RealCallScenario::run` invocation. Builds the call from the
+/// Drive one [`ActorScenario`] to its [`ScenarioVerdict`]: one call. Builds the call from the
 /// env (a build guard error is [`ScenarioVerdict::build_failure`]), runs the
 /// joined actors + controller (teardown scopes survive a panic — see
 /// [`run_call_with`](super::run_call_with)), and reads the verdict.
@@ -198,8 +197,10 @@ async fn run_built_actor_call_observed(
     // The originating leg — the one the accepted endings are read on, keyed on
     // which actor's first goal originates the dialog.
     let caller = originating_role(&actors);
+    let roles: Vec<&'static str> = actors.iter().map(|a| a.role).collect();
     let expect = expect.in_context(env);
     let obs = ObservedState::new();
+    watch_losses(ctx, &obs, caller, roles);
     // An explicit ceiling replaces the standard re-emission bound; the longer of
     // the plan's and the environment's holds.
     let step_timeout = ceiling.max(env.wait_ceiling).unwrap_or(STEP_TIMEOUT);
@@ -232,7 +233,30 @@ async fn run_built_actor_call_observed(
             ));
         }
     }
+    ctx.loss_notes().unwatch();
     (verdict(expect, run, &obs, caller), obs)
+}
+
+/// Fold each datagram the call's loss model drops into `obs` as it drops it,
+/// on the leg it was to or from: the callee leg of that role, else `caller`.
+/// A lost datagram of a leg no actor plays is not folded.
+fn watch_losses(
+    ctx: &CallCtx,
+    obs: &ObservedState,
+    caller: &'static str,
+    roles: Vec<&'static str>,
+) {
+    let obs = obs.clone();
+    ctx.loss_notes().watch(move |message| {
+        let leg = match message.leg.as_deref() {
+            None => Some(caller),
+            Some(name) => roles.iter().copied().find(|r| *r == name),
+        };
+        if let Some(leg) = leg {
+            let message = message.clone();
+            obs.record(Observation::Lost { leg, message }, tokio::time::Instant::now());
+        }
+    });
 }
 
 /// The per-barrier / per-goal-guard wait bound: `64·T1 = 32 s` — the protocol's

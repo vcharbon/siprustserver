@@ -11,16 +11,22 @@
  * context, returning the per-probe function, so a deployment reads its
  * case-wide facts ONCE per cell and implementations cross the workspace
  * boundary as plain data. `classify` is the one-probe convenience over it.
+ * `packOf` is what the deployment reads of a document beyond the generic
+ * context; a confrontation carries it, opaque, as `CaseContext.pack`.
  */
-import type { Call, Confrontation } from "@sip/contracts"
+import type { Confrontation, Pivot } from "@sip/contracts"
 import * as Context from "effect/Context"
 import * as Layer from "effect/Layer"
 import type { Probe } from "./probe.js"
 
 /** Case-wide facts a rule may gate on, read once off the pivot. */
 export interface CaseContext {
-  /** The provisional-handling declarations of the document's calls. */
-  readonly relay18x: ReadonlyArray<Call.Relay18x>
+  /**
+   * What the deployment reads off the document for its own rules
+   * ({@link Interface.packOf}), carried untouched: opaque here, and `undefined`
+   * where the deployment reads nothing.
+   */
+  readonly pack: unknown
   /** How the run itself went, for a difference only that reading explains. */
   readonly run: RunShape
   /** What the document itself states, for a difference only that reading explains. */
@@ -212,26 +218,35 @@ export type ProbeClassifier = (probe: Probe) => Classification
 /** How a deployment states its classifier: the case-wide read, once per cell. */
 export type ClassifierFor = (lane: string, context: CaseContext) => ProbeClassifier
 
+/** What a deployment reads off a document for its own rules: {@link CaseContext.pack}. */
+export type PackOf = (pivot: Pivot.PivotV3) => unknown
+
+/** The deployment that reads nothing of its own off a document. */
+export const NO_PACK: PackOf = () => undefined
+
 export interface Interface {
   /** The classifier for ONE cell; a caller with many probes obtains it once. */
   readonly classifierFor: ClassifierFor
   /** One probe through {@link classifierFor}; every probe of a cell agrees with it. */
   readonly classify: (lane: string, probe: Probe, context: CaseContext) => Classification
+  /** The deployment's own reading of a cell's document, which a confrontation carries in its context. */
+  readonly packOf: PackOf
 }
 
 export class Service extends Context.Service<Service, Interface>()("@sip/pipeline/Classifier") {}
 
-/** The full interface from the per-cell read alone. */
-export const make = (classifierFor: ClassifierFor): Interface =>
+/** The full interface from the per-cell read and the deployment's document reading. */
+export const make = (classifierFor: ClassifierFor, packOf: PackOf = NO_PACK): Interface =>
   Service.of({
     classifierFor,
-    classify: (lane, probe, context) => classifierFor(lane, context)(probe)
+    classify: (lane, probe, context) => classifierFor(lane, context)(probe),
+    packOf
   })
 
 /** The neutral classifier: no rules stated, every difference `unknown`. */
 export const layer: Layer.Layer<Service> = Layer.succeed(Service, make(() => () => UNKNOWN))
 
-export const layerWith = (classifierFor: ClassifierFor): Layer.Layer<Service> =>
-  Layer.succeed(Service, make(classifierFor))
+export const layerWith = (classifierFor: ClassifierFor, packOf: PackOf = NO_PACK): Layer.Layer<Service> =>
+  Layer.succeed(Service, make(classifierFor, packOf))
 
 export * as Classifier from "./classifier.js"

@@ -11,18 +11,18 @@ pub(super) fn check(index: &Index<'_>, report: &mut Report) {
     if index.pivot.case.origin_lane.is_some() {
         return;
     }
+    let records = index
+        .pivot
+        .postconditions
+        .as_ref()
+        .and_then(|p| p.call_records().ok().flatten())
+        .map(|records| records.checks)
+        .unwrap_or_default();
     let classified_checks = index
         .all_steps()
         .flat_map(|(_, step)| step.checks.iter())
         .chain(index.pivot.postconditions.iter().flat_map(|p| p.checks.iter()))
-        .chain(
-            index
-                .pivot
-                .postconditions
-                .iter()
-                .filter_map(|p| p.cdr.as_ref())
-                .flat_map(|cdr| cdr.checks()),
-        )
+        .chain(&records)
         .any(|check| check.class.is_some());
     let classified_headers = index
         .all_steps()

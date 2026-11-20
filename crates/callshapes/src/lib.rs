@@ -1,5 +1,5 @@
 //! **callshapes** — the composable, cross-platform call-shape catalog
-//! (callshapes program, `docs/todos/callshapes-program.md`).
+//! (`crates/callshapes/README.md`).
 //!
 //! A call shape is COMPOSED, not hand-written: a [`ShapePlan`] chains an
 //! [`Establishment`] stage, any number of pipeline [`Stage`]s (in-dialog
@@ -17,11 +17,9 @@
 //! an external platform (e.g. a dialed-number plan) implements its
 //! own binder without touching any shape.
 //!
-//! The shipped catalog ([`shapes`]) regenerates the historic hand-written
-//! scenarios through this algebra — same ids, same downstream contract
-//! (`docs/todos/actor-harness-p1-contract-table.md`), byte-for-byte on the
-//! wire — proving the algebra before new establishment/script capabilities
-//! land on it (program phases C/D).
+//! The shipped catalog ([`shapes`]) builds the hand-written scenarios of
+//! `scenario_harness::actor::scenarios` through this algebra: same ids, same
+//! downstream contract (stated on each scenario type), the same wire.
 //!
 //! The [`generator`] composes shapes instead of listing them: it crosses the
 //! dimensions of a call (who sends the in-dialog requests, the early

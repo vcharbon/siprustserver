@@ -2,10 +2,17 @@ schema: budget.v1
 name: cpu-overload
 description: >-
   A worker (or every worker) without the CPU its load needs, alone or with a
-  spike. Starvation is no loop and no flood, so no refusal is allowed
-  (ADR-0049 §2.11 keeps an overload 503 for those): every call still sets
-  up. Setups may be slow for the window's outage (inject to recovered) plus
-  about 10 s of offered rate while the starved worker catches up.
+  spike, while it still has the CPU its calls in progress need: the small
+  overload of ADR-0049 §2.11. The starved worker refuses new normal calls
+  with 503 and a Retry-After once its inbound work has waited 450 ms
+  (ADR-0050 §9), and the proxies place new calls on the other workers from
+  their next probe. Setups may be refused that way, and may be slow, for the
+  window's outage (inject to recovered) plus about 10 s of offered rate while
+  the starved worker catches up. Nothing in a dialog fails: no allowance for
+  an in-dialog impact, a cut call or an unexpected ending. A refusal without
+  a Retry-After, and any other failed setup, is a finding.
+setup_failed:
+  - { stream: "*", code: 503, reason: "*", retry_after: true, max_seconds: 10, over_outage: true }
 setup_slow:
   over_outage: true
   max_seconds: 10

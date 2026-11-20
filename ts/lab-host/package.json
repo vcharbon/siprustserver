@@ -1,0 +1,32 @@
+{
+  "name": "@sip/lab-host",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "The host a tooling's lab runs on: its user session and the boxes its children run in, its binaries built under one box-wide lock, its roots and env files, its inbox, its run bundles, the checks a lane owes before it is driven, and the batch and worker processes a hosted lane stands.",
+  "exports": {
+    ".": "./src/index.ts",
+    "./*": "./src/*.ts"
+  },
+  "types": "./src/index.ts",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@sip/cli": "workspace:*",
+    "@sip/contracts": "workspace:*",
+    "@sip/corpus": "workspace:*",
+    "@sip/rig": "workspace:*",
+    "@sip/store": "workspace:*",
+    "@sip/toolchain": "workspace:*",
+    "@sip/workspace": "workspace:*",
+    "effect": "4.0.0-rc.111"
+  },
+  "devDependencies": {
+    "@effect/platform-node": "4.0.0-rc.111",
+    "@types/node": "24.10.1",
+    "typescript": "5.9.3",
+    "vitest": "4.1.11"
+  }
+}

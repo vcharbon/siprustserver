@@ -5,6 +5,8 @@
 
 use std::fmt;
 
+use crate::realcall::LostMessage;
+
 /// What is wrong with a received in-dialog request (RFC 3261 §12.2.2).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VerdictKind {
@@ -99,6 +101,27 @@ impl DialogVerdict {
     /// The rule name a `WaiverScope` opts out of.
     pub fn rule(&self) -> &'static str {
         self.kind.rule()
+    }
+
+    /// Whether the loss model's drops of requests on their way to the UA,
+    /// `lost`, explain this verdict: a skip over a CSeq a dropped request of
+    /// the dialog carried; a CSeq going backwards, or a request on a dialog a
+    /// BYE ended, that is the retransmission of a dropped copy (RFC 3261
+    /// §17.1.2: it was sent before the later request or the BYE arrived).
+    pub fn explained_by(&self, lost: &[&LostMessage]) -> bool {
+        let of_dialog =
+            |m: &&&LostMessage| m.call_id == self.call_id && m.from_tag == self.from_tag;
+        let same =
+            |m: &LostMessage| m.cseq == self.cseq && m.method.as_deref() == Some(&self.method);
+        match self.kind {
+            VerdictKind::CseqSkip { cseq, last } => {
+                lost.iter().filter(of_dialog).any(|m| (last + 1..cseq).contains(&m.cseq))
+            }
+            VerdictKind::CseqBackwards { .. } | VerdictKind::Ended { by: None } => {
+                lost.iter().filter(of_dialog).any(|m| same(m))
+            }
+            _ => false,
+        }
     }
 }
 

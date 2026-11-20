@@ -1,0 +1,5 @@
+#!/bin/sh
+# The sut-log collector's one executable for every step: its module, which
+# node runs with its types stripped.
+set -eu
+exec node "$(dirname "$0")/main.ts"

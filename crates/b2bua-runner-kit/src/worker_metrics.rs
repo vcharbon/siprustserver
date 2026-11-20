@@ -1,6 +1,7 @@
 //! The worker's `/metrics` body: every metric source of a worker, rendered
 //! in one fixed order.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use b2bua::capacity::CapacityGate;
@@ -9,6 +10,7 @@ use b2bua::metrics::{catalogue, B2buaMetrics, UdpTransportMetrics};
 use b2bua::new_calls::NewCallCounts;
 use b2bua::overload::OverloadSignal;
 use b2bua::repl::Readiness;
+use b2bua::B2buaCore;
 use metric_catalogue::Catalogue;
 
 /// The metric sources of one worker. Clone-cheap: every field shares its
@@ -32,6 +34,23 @@ pub struct WorkerMetrics {
     pub loop_stall: Duration,
     /// The worker's readiness: its operator cordon.
     pub readiness: Readiness,
+    /// Publishes the call store's and the replication store's map sizes into
+    /// their gauges (`b2bua_store_*`, `b2bua_repl_*`); run first at each
+    /// render, so they read the maps as they are at the scrape.
+    pub sample_maps: MapSampler,
+}
+
+/// Publishes a worker's store map sizes into their gauges.
+pub type MapSampler = Arc<dyn Fn() + Send + Sync>;
+
+/// Publishes `core`'s call store and replication store map sizes into their
+/// gauges (`b2bua_store_*`, `b2bua_repl_*`).
+pub(crate) fn sample_maps(core: &B2buaCore) {
+    core.sample_gauges();
+    if let Some(repl) = core.repl_store() {
+        let (bodies, idx, _meta, tomb) = repl.map_lens();
+        core.metrics().set_store_map_sizes(bodies as u64, idx as u64, tomb as u64);
+    }
 }
 
 /// The b2bua worker's `/metrics` catalogue: every family of
@@ -87,8 +106,9 @@ impl WorkerMetrics {
     /// The worker's families as Prometheus text: core registry, txn
     /// backpressure, UDP transport, overload signal, capacity gate, the loops'
     /// stall gauge, the cordon gauge, then every new call's admission outcome,
-    /// every rung composed.
+    /// every rung composed. The store map gauges are sampled first.
     pub fn prometheus_text(&self) -> String {
+        (self.sample_maps)();
         let mut text = self.core.prometheus_text();
         text.push_str(&txn_metrics_text(&self.txn));
         text.push_str(&self.udp.prometheus_text());
@@ -129,6 +149,17 @@ pub fn txn_metrics_text(m: &sip_txn::TransactionMetrics) -> String {
     c::EVENT_QUEUE_CAPACITY.render_value(&mut s, m.event_queue_capacity());
     c::EVENT_QUEUE_DELAY.render_value(&mut s, m.event_queue_delay().as_millis());
     c::KEEPALIVE_LANE_DROPS.render_value(&mut s, m.keepalive_lane_drops());
+    c::MESSAGE_BUDGET_TRIPS.render_value(&mut s, m.message_budget_trips());
+    c::MESSAGE_BUDGET_UNCOUNTED.render_value(&mut s, m.message_budget_uncounted());
+    c::MUTED_MESSAGES.render(&mut s, |series| match series.index(&c::MUTED_DIRECTION) {
+        0 => m.muted_in(),
+        _ => m.muted_out(),
+    });
+    c::COPIES_PAST_SCHEDULE.render(&mut s, |series| {
+        sip_txn::CopyKind::ALL
+            .get(series.index(&c::COPY_KIND))
+            .map_or(0, |kind| m.copies_past_schedule(*kind))
+    });
     let class = |series: &metric_catalogue::Series<'_>| {
         EventQueueClass::ALL.get(series.index(&c::EVENT_QUEUE_CLASS)).copied()
     };
@@ -198,6 +229,7 @@ mod tests {
             loops: WorkerLoops::new((pulse(), parked()), (pulse(), parked())),
             loop_stall: Duration::from_secs(5),
             readiness: Readiness::always_ready(),
+            sample_maps: Arc::new(|| ()),
         }
     }
 

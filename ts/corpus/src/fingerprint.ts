@@ -57,10 +57,21 @@ const filesUnder = (
   })
 
 /**
+ * A file found under the listed path `listed`, named by the path's place in
+ * its list and the file's path below it: never by where the path sits, so a
+ * tree moved whole whose list follows it keeps its name.
+ */
+const listedAs = (at: number, listed: string, input: Input): Input => ({
+  name: `${at}:${path.relative(listed, input.name)}`,
+  file: input.file
+})
+
+/**
  * The contents of `paths` under `root`, and of `extra`, as one sha-256. Names
  * ride with the bytes and the list is sorted, so the hash is a function of the
  * files and never of the order the filesystem listed them in — two hosts
- * holding the same inputs agree.
+ * holding the same inputs agree. A file under a path is named by that path's
+ * place in `paths` and the file's path below it ({@link listedAs}).
  */
 export const contentHash = Effect.fn("Fingerprint.contentHash")(function*(
   root: string,
@@ -69,7 +80,9 @@ export const contentHash = Effect.fn("Fingerprint.contentHash")(function*(
 ) {
   const fs = yield* FileSystem.FileSystem
   const found: Array<Input> = []
-  for (const one of paths) found.push(...(yield* filesUnder(fs, root, one)))
+  for (const [at, one] of paths.entries()) {
+    for (const input of yield* filesUnder(fs, root, one)) found.push(listedAs(at, one, input))
+  }
   // Code-unit order, as `Array.prototype.sort` orders names: the same on every host.
   const inputs = [...found, ...extra].sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
   const hash = crypto.createHash("sha256")

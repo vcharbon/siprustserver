@@ -684,3 +684,30 @@ fn an_unreliable_provisional_needs_no_rseq() {
     );
     assert_eq!(refusals(&flow), []);
 }
+
+/// The call-records claim is stated once and as a `{ count, checks }`: a
+/// document stating it both as `cdr.count` and in `claims`, or in another
+/// shape, is refused by name, never run with the claim dropped.
+#[test]
+fn a_call_records_claim_stated_twice_or_in_another_shape_is_refused() {
+    let flow =
+        format!(r#"[{{"id":"s1","leg":"A","op":"send","msg":{{"method":"INVITE"}},"delay":{D}}}]"#);
+    let claimed = |postconditions: &str| refusals_with(&flow, postconditions, "");
+    let twice = claimed(
+        r#""postconditions": { "cdr": { "count": 1 },
+                               "claims": { "call-records": { "count": 1 } } },"#,
+    );
+    assert!(
+        matches!(&twice[..], [PlanError::RecordsClaim { detail }] if detail.contains("stated twice")),
+        "{twice:?}"
+    );
+    let other = claimed(r#""postconditions": { "claims": { "call-records": { "lines": 1 } } },"#);
+    assert!(
+        matches!(&other[..], [PlanError::RecordsClaim { detail }] if detail.contains("no { count, checks }")),
+        "{other:?}"
+    );
+    assert_eq!(
+        claimed(r#""postconditions": { "claims": { "call-records": { "count": 1 } } },"#),
+        []
+    );
+}

@@ -27,13 +27,20 @@ const AGED_CAPS: [&str; 3] = ["legs", "attempts", "cdr-events"];
 const COUNTED_CAPS: [&str; 7] =
     ["legs", "attempts", "timers", "requests", "cdr-events", "dialogs", "header-updates"];
 
+/// The `cap` of a call a Call-ID's message budget ended (ADR-0063 §6): a
+/// node-wide bound, not one of the per-call caps.
+pub const MESSAGE_BUDGET_CAP: &str = "messages_per_call_id";
+/// The `kind` of a cap a peer's traffic can reach.
+pub const PEER_KIND: &str = "peer";
+
 pub const CAP_TRIPS: Family = Family::counter(
     "b2bua_cap_trips_total",
     Labels::Union(&[
-        &[Dim::new("cap", &PEER_CAPS), Dim::new("kind", &["peer"])],
+        &[Dim::new("cap", &PEER_CAPS), Dim::new("kind", &[PEER_KIND])],
         &[Dim::new("cap", &DEFECT_CAPS), Dim::new("kind", &["defect"])],
+        &[Dim::new("cap", &[MESSAGE_BUDGET_CAP]), Dim::new("kind", &[PEER_KIND])],
     ]),
-    "turns that crossed a per-call cap (ADR-0057), by cap and kind: the turn is discarded and its call ends from the record it had before the event, torn down on the wire. One increment is one tripped turn, not one call: a call may trip again before its teardown runs. A defect cap is reached only by a defect in a service, the decision service or the B2BUA, and alerts; a peer cap is reachable by a peer's traffic",
+    "turns that crossed a per-call cap (ADR-0057), by cap and kind: the turn is discarded and its call ends from the record it had before the event, torn down on the wire. One increment is one tripped turn, not one call: a call may trip again before its teardown runs. A defect cap is reached only by a defect in a service, the decision service or the B2BUA, and alerts; a peer cap is reachable by a peer's traffic. The cap messages_per_call_id counts instead each call a Call-ID's message budget ended (ADR-0063): the Call-ID's datagrams passed B2BUA_CAP_MESSAGES_PER_CALL_ID, the transaction layer muted it, and every call holding it ends",
 );
 
 pub const CAP_NEAR: Family = Family::counter(

@@ -84,3 +84,36 @@ describe("Fingerprint.extractor", () => {
     expect(after).toBe(await under(roots[0]!, Fingerprint.contentHash(roots[0]!, ["extract.rs"])))
   })
 })
+
+/** A tree under a fresh root holding `dir/out.sha256` and `dir/src/{lib.rs,flow/ingest.rs}`. */
+const treeAt = (dir: string): string => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "corpus-fingerprint-moved-"))
+  const files: Record<string, string> = {
+    "out.sha256": "0123\n",
+    "src/lib.rs": "pub mod flow;\n",
+    "src/flow/ingest.rs": "pub fn ingest() {}\n"
+  }
+  for (const [rel, text] of Object.entries(files)) {
+    fs.mkdirSync(path.dirname(path.join(root, dir, rel)), { recursive: true })
+    fs.writeFileSync(path.join(root, dir, rel), text)
+  }
+  return root
+}
+
+const hashOf = (root: string, paths: ReadonlyArray<string>) =>
+  Effect.runPromise(Fingerprint.contentHash(root, paths).pipe(Effect.provide(NodeServices.layer)))
+
+describe("Fingerprint.contentHash", () => {
+  it("is the same for a tree moved whole whose listed paths follow it, and moves with a file renamed below one", async () => {
+    const before = treeAt("kit")
+    const after = treeAt("rig/pack")
+    try {
+      const first = await hashOf(before, ["kit/out.sha256", "kit/src"])
+      expect(await hashOf(after, ["rig/pack/out.sha256", "rig/pack/src"])).toBe(first)
+      fs.renameSync(path.join(after, "rig/pack/src/lib.rs"), path.join(after, "rig/pack/src/main.rs"))
+      expect(await hashOf(after, ["rig/pack/out.sha256", "rig/pack/src"])).not.toBe(first)
+    } finally {
+      for (const root of [before, after]) fs.rmSync(root, { recursive: true, force: true })
+    }
+  })
+})

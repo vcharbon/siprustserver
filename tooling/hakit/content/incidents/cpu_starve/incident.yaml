@@ -11,7 +11,7 @@ target:
 params:
   quota_us:
     type: integer
-    default: 30000
+    default: 50000
     description: The CPU time the container may use per period, in microseconds.
   period_us:
     type: integer

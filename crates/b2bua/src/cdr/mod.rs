@@ -1,15 +1,18 @@
-//! CDR (call detail record) writing — port of `CdrWriter.ts`. One record is
+//! CDR (call detail record) writing. One record is
 //! written per call at termination, carrying the accumulated `Call.cdr_events`.
 //! The in-memory writer ([`InMemoryCdrWriter`]) lets tests assert exactly one
 //! CDR per call; [`BufferedCdrWriter`] is the production drop-on-overload buffer.
 //! A transport sink publishes the bytes of a [`CdrEncoder`], by default
-//! [`JsonRecordEncoder`] (the [`CdrRecord`] as JSON).
+//! [`JsonRecordEncoder`] (the [`CdrRecord`] as JSON), and tells a
+//! [`CdrDeliveryObserver`] how and when each record ended.
 
 mod buffered;
+mod delivery;
 mod encoder;
 mod memory;
 
 pub use buffered::BufferedCdrWriter;
+pub use delivery::{CdrDelivery, CdrDeliveryObserver};
 pub use encoder::{CdrEncodeError, CdrEncoder, JsonRecordEncoder};
 pub use memory::InMemoryCdrWriter;
 
@@ -38,6 +41,11 @@ pub struct CdrBLeg {
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct CdrRecord {
     pub call_ref: String,
+    /// The call's incarnation ([`Call::incarnation`]). The worker dedupes
+    /// nothing (ADR-0055 §5); a consumer dedupes on this field: two records
+    /// of one call carry the same one, a retried INVITE born on the same
+    /// `call_ref` carries another.
+    pub incarnation: String,
     pub created_at: i64,
     pub terminated_at: i64,
     /// `true` when [`build_record`] had to clamp `terminated_at` up to
@@ -78,6 +86,7 @@ pub fn build_record(call: &Call, terminated_at: i64) -> CdrRecord {
     let terminated_at = terminated_at.max(call.created_at);
     CdrRecord {
         call_ref: call.call_ref.clone(),
+        incarnation: call.incarnation().to_owned(),
         created_at: call.created_at,
         terminated_at,
         clock_skew_clamped,

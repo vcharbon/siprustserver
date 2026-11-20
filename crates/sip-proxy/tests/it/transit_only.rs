@@ -1,4 +1,4 @@
-//! Transit-only suite — port of `tests/sip-front-proxy/transit-only/*`. Drives a
+//! Transit-only suite. Drives a
 //! **real** `ProxyCore` (ForwardAll) as a SUT on the harness fabric: the proxy
 //! auto-forwards as datagrams arrive. Covers the happy INVITE/200/ACK/BYE call
 //! (Via push/pop, Record-Route insertion, Route stripping), Max-Forwards → 483,

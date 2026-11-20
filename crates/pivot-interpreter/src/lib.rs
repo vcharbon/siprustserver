@@ -49,6 +49,7 @@
 //!   `optional` release, `unordered` completion.
 //! - `early` — the early dialogs a forking callee answers under (§6.1).
 //! - `events` — the lane events a `send` waits on (§6.7g).
+//! - `injector` — the lane's injector an `inject` node is handed to (§6.6).
 //! - `deviation` — the reproduced non-compliance an emission must carry.
 //! - `preserve` — holding a preserved emission to the block the document
 //!   stores (`verbatim-emission`, `raw-order`).
@@ -60,6 +61,8 @@
 //! - `progress` — whether a recorded failure leaves the run able to go on.
 //! - `close` — what a scripted leg owes when its script ends before its call.
 //! - `settle` — the settle contract and the postcondition evaluation.
+//! - `records` — the call-records claim: stated by the run, answered by the
+//!   records written for its calls, never waited for.
 //! - `recording` — MAKING the verbatim per-leg recording.
 //! - `retransmit` — the `retransmits` count: the ladder a `send` emits and
 //!   the repeats an `expect` counts (§6.9).
@@ -68,6 +71,7 @@
 //! - `mscml` — the MSCML request id a replayed response echoes (RFC 5022).
 //! - `stack` — the per-leg UA: tier-1 regeneration and the automatics.
 //! - `exec` — the run loop that drives a plan over the scenario harness.
+//! - `wall` — the wall clock a bundle's timing states beside the run's own.
 //!
 //! The §17.2 receive view is NOT one of them: it lives once for the whole tree
 //! in `scenario_harness::absorption`, and the interpreter drives it in `exec`
@@ -85,6 +89,7 @@ pub(crate) mod early;
 pub(crate) mod events;
 pub(crate) mod exec;
 pub(crate) mod gate;
+pub(crate) mod injector;
 pub(crate) mod instance;
 pub(crate) mod media;
 pub(crate) mod mscml;
@@ -94,6 +99,7 @@ pub(crate) mod preserve;
 pub(crate) mod program;
 pub(crate) mod progress;
 pub(crate) mod recording;
+pub mod records;
 pub(crate) mod render;
 mod replay;
 pub(crate) mod resolve;
@@ -103,9 +109,11 @@ pub(crate) mod scripted_final;
 pub(crate) mod settle;
 pub(crate) mod stack;
 pub(crate) mod state;
+pub(crate) mod wall;
 
 pub use events::{LaneEventSender, LaneEvents};
 pub use exec::{Lane, Outcome};
+pub use injector::{InjectRequest, Injection, Injector};
 pub use instance::mint_nonce;
 pub use media::{Booking, MediaMode};
 pub use plan::{Plan, PlanError};

@@ -203,7 +203,7 @@ async fn every_new_invite_is_counted_once_by_its_outcome() {
 async fn the_ingress_brake_counts_a_shed_invite_once() {
     let s = B2buaScene::with_b2bua("b2bua-new-call-brake", |bob_port| {
         B2buaSut::route_all_to("127.0.0.1", bob_port)
-            .ingress_brake(IngressBrakeConfig { queue_max: 256, threshold_pct: 0 })
+            .ingress_brake(IngressBrakeConfig::by_depth(256, 0))
     })
     .await;
 
@@ -235,7 +235,7 @@ async fn the_ingress_brake_counts_a_shed_invite_once() {
 async fn a_shed_invite_copy_below_the_brake_threshold_is_shed_again() {
     let s = B2buaScene::with_b2bua("b2bua-new-call-brake-threshold", |bob_port| {
         B2buaSut::route_all_to("127.0.0.1", bob_port)
-            .ingress_brake(IngressBrakeConfig { queue_max: 256, threshold_pct: 50 })
+            .ingress_brake(IngressBrakeConfig::by_depth(256, 50))
     })
     .await;
     let brake = s.b2bua.ingress_brake().expect("the brake is installed").clone();

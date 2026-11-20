@@ -1,0 +1,4 @@
+max-header-length = 65535
+max-uri-length = 65535
+max-header-lines = 1000
+max-datagram = 65535

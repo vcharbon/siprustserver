@@ -159,6 +159,7 @@ impl ActionExecutor<'_> {
         // `relay-prack` relays only a PRACK naming a provisional this stack
         // showed (`call::helpers::prack_disposition`); the responder's PRACK
         // is then the relayed one, and the offer it answers no longer owed.
+        let mut prack_answers = false;
         let rack = if method == InDialogMethod::Prack {
             // The number the PRACKing party names is unique to the dialog it
             // was shown in, so the translation is keyed there — and the PRACK
@@ -175,6 +176,7 @@ impl ActionExecutor<'_> {
                             &id,
                             call::ResponderAck::RelayedPrack,
                         );
+                        prack_answers = super::prack::owes_prack_answer(call, &id);
                         super::prack::clear_owed_offer(call, &id);
                         id.rseq.0
                     }
@@ -283,7 +285,7 @@ impl ActionExecutor<'_> {
                 source_from: req.raw(HeaderName::From).next().unwrap_or_default().to_string(),
                 source_to: req.raw(HeaderName::To).next().unwrap_or_default().to_string(),
                 offered_100rel: relay::offers_100rel(req),
-                offered: relay::carries_sdp(req),
+                offered: relay::carries_sdp(req) && !prack_answers,
                 source_timestamp: req.raw(HeaderName::Timestamp).next().map(str::to_string),
                 relayed_by: self.owners.this.clone(),
                 ..RequestRecord::relayed(req.method().as_str(), outbound_cseq, inbound_cseq)

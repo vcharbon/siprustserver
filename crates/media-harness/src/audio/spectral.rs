@@ -1,8 +1,7 @@
 //! Spectral feature extraction for audio classification: framed MFCCs reduced
 //! to a single clip-level signature, plus cosine distance between signatures.
 //!
-//! Port of `../sipjsserver/src/test-harness/media/audio/spectral.ts`. The
-//! pipeline is the textbook one — pre-emphasis → Hamming-windowed frames → power
+//! The pipeline is the textbook one — pre-emphasis → Hamming-windowed frames → power
 //! spectrum (FFT via `rustfft`) → mel filterbank → log → DCT-II → keep the low
 //! cepstral coefficients. The clip signature is the per-frame MFCC mean over
 //! voiced frames (dropping c0 so the match is gain-invariant), which makes the

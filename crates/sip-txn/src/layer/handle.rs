@@ -42,6 +42,7 @@ pub(super) enum Command {
         reply: oneshot::Sender<Bytes>,
     },
     SendRaw {
+        call_id: String,
         buf: Vec<u8>,
         dest: SocketAddr,
         reply: oneshot::Sender<()>,
@@ -191,6 +192,8 @@ impl TransactionLayer {
     /// keepalive lane, when configured (the consumer — the proxy/B2BUA router —
     /// drains them). The task lives until both the returned handle (all
     /// clones) and the events receiver are dropped, or the endpoint closes.
+    /// The owner task alone holds the endpoint; the metrics read its inbound
+    /// queue through a weak handle, so aborting the owner drops the endpoint.
     pub fn spawn(
         endpoint: Box<dyn UdpEndpoint>,
         parser: Arc<dyn SipParser + Send + Sync>,
@@ -209,8 +212,13 @@ impl TransactionLayer {
         let (forget_tx, forget_rx) = mpsc::unbounded_channel::<Forget>();
 
         let metrics_inner = Arc::new(MetricsInner::new());
-        let metrics =
-            TransactionMetrics::new(metrics_inner.clone(), events_tx.clone(), ages.clone());
+        let endpoint: Arc<dyn UdpEndpoint> = Arc::from(endpoint);
+        let metrics = TransactionMetrics::new(
+            metrics_inner.clone(),
+            events_tx.clone(),
+            (ages.clone(), Arc::downgrade(&endpoint)),
+            config.invite_refusals.clone(),
+        );
         let events = TransactionEvents::new(events_rx, keepalive_rx, ages.clone());
 
         let owner = Owner::new(parser, (events_tx, ages), keepalive_tx, metrics_inner, config);
@@ -294,13 +302,18 @@ impl TransactionLayer {
         self.roundtrip(|reply| Command::SendResponse { msg: Box::new(msg), dest, reply }).await
     }
 
-    /// Send a raw buffer directly, bypassing transaction management.
+    /// Send a raw buffer directly, bypassing transaction management, counted
+    /// under `call_id`, the message's Call-ID, against its budget
+    /// ([`TransactionConfig::call_id_budget`]): nothing leaves under a muted
+    /// one.
     pub async fn send_raw(
         &self,
+        call_id: &str,
         buf: Vec<u8>,
         dest: SocketAddr,
     ) -> Result<(), TransactionLayerClosed> {
-        self.roundtrip(|reply| Command::SendRaw { buf, dest, reply }).await
+        let call_id = call_id.to_string();
+        self.roundtrip(|reply| Command::SendRaw { call_id, buf, dest, reply }).await
     }
 
     /// Rebuild the in-flight INVITE transactions a call materialised from a
@@ -325,7 +338,8 @@ impl TransactionLayer {
     /// absorbed with nothing sent, its arrival already answered (§17.2.1). All
     /// three are [`Reoffer::Matched`] (the consumer drops its copy: whatever
     /// that path emits arrives as a fresh event); anything else is
-    /// [`Reoffer::Unmatched`], sent nowhere and emitted nowhere.
+    /// [`Reoffer::Unmatched`], sent nowhere and emitted nowhere. Under a muted
+    /// Call-ID it is [`Reoffer::Muted`] and dropped (ADR-0063 §4).
     pub async fn reoffer(
         &self,
         message: SipMessage,

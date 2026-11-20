@@ -118,7 +118,6 @@ mod tests {
         let routes = ProbeRoutes {
             metrics: Arc::new(String::new),
             ready: Arc::new(|| ProbeState::Ready),
-            heap: None,
             fit: Some(Arc::new(move || match reads.load(Ordering::SeqCst) {
                 true => Fitness::Fit,
                 false => Fitness::Unfit("no-worker-alive"),

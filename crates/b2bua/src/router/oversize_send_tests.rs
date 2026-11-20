@@ -244,7 +244,7 @@ async fn a_b_leg_that_cannot_leave_draws_the_callers_final() {
     second.send_to(bye_ok.as_bytes(), node).await.unwrap();
     let answered = next_starting(caller.as_ref(), "SIP/2.0 200", wait).await;
     assert!(answered.expect("her BYE is answered").contains("CSeq: 2 BYE"));
-    tokio::time::sleep(Duration::from_secs(33)).await;
+    tokio::time::sleep(wait).await;
     assert_eq!(n.core.router_ctx().state.active_count(), 0, "the call is released");
     assert_eq!(n.cdr.snapshot().len(), 1, "with its CDR");
 }

@@ -1,0 +1,33 @@
+{
+  "name": "@sip/site",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "The rig's site: an Effect v4 HttpApi over case directories, run bundles, the result store, campaign runs and the job console, over what a pack states of its deployment (site-pack.ts). A module is imported by its file name, no extension (`@sip/site/config`).",
+  "exports": {
+    "./*": "./src/*.ts"
+  },
+  "scripts": {
+    "typecheck": "tsgo --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@sip/campaign-runner": "workspace:*",
+    "@sip/contracts": "workspace:*",
+    "@sip/corpus": "workspace:*",
+    "@sip/lab-host": "workspace:*",
+    "@sip/pipeline": "workspace:*",
+    "@sip/rig": "workspace:*",
+    "@sip/store": "workspace:*",
+    "@sip/viewer-core": "workspace:*",
+    "@sip/workspace": "workspace:*",
+    "effect": "4.0.0-rc.111"
+  },
+  "devDependencies": {
+    "@effect/platform-node": "4.0.0-rc.111",
+    "@types/node": "24.10.1",
+    "@typescript/native-preview": "7.0.0-dev.20260707.2",
+    "typescript": "5.9.3",
+    "vitest": "4.1.11"
+  }
+}

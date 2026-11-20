@@ -1,0 +1,11 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "The call records of a B2BUA runner a hosted lane of the base stands: the file the runner appends each call's record to as the call ends, a JSON line each.",
+  "x-siprig": {},
+  "type": "object",
+  "properties": {
+    "file": { "type": "string", "minLength": 1 }
+  },
+  "required": ["file"],
+  "additionalProperties": false
+}

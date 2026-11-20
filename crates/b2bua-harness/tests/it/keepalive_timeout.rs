@@ -1,5 +1,4 @@
-//! Auto-cutoff when one party stops answering keepalives (port of
-//! `tests/scenarios/options-keepalive-timeout.ts`).
+//! Auto-cutoff when one party stops answering keepalives.
 //!
 //! The call is up. The B2BUA fires its keepalive and sends an in-dialog OPTIONS
 //! to both legs. Bob answers 200; **alice does not**. When the probe's own

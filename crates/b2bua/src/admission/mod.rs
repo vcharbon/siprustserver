@@ -13,7 +13,9 @@
 //! | bucket | router ingress | time to a CPS token | no token | admitted | — | time to a token, at least configured |
 //! | event queue, again | router ingress | the event-queue gate, read afresh | while it refuses | admitted | — | configured |
 //!
-//! Each rung keeps its site. The backlog is judged by the transaction
+//! Each rung keeps its site. While the event-queue gate refuses, the brake
+//! makes the gate's refusal as the INVITE arrives, ahead of the inbound
+//! queue, counted under the event-queue reason. The backlog is judged by the transaction
 //! layer's bound ([`deferred_bound`]); the event queue by the transaction
 //! layer on arrival, right after the backlog, reading the gate's switch
 //! (`sip_txn::NewCallGate`), so an INVITE a router rung would also refuse is

@@ -3,12 +3,12 @@
 //! worker's CANCEL of it waits for one (RFC 3261 §9.1). The CANCEL is in the
 //! replicated record; when the serving node dies before the callee answers,
 //! the survivor rebuilds the INVITE transaction with that CANCEL held on it.
-//! It re-sends the INVITE once, the CANCEL waiting on it (ADR-0043), and the
+//! It re-sends the INVITE once, the CANCEL waiting on it (ADR-0058), and the
 //! callee's transaction takes it as a retransmission.
 //! The callee's 100 carries no Record-Route (§8.2.6.1), but the proxy's Via
 //! on the INVITE carries the cookie naming the dead node and its backup, so
 //! the front proxy fails the 100 over to the survivor, whose transaction takes
-//! it as the provisional §9.1 waits for and releases the CANCEL (ADR-0043 X1).
+//! it as the provisional §9.1 waits for and releases the CANCEL (ADR-0058 X1).
 //!
 //! Beyond the failover sweep: a CANCEL held for a silent callee, sent by the survivor on the
 //! callee's 100.

@@ -85,7 +85,7 @@ pub struct Harness {
     /// under a paused (simulated) clock — a parked `recv` auto-advances virtual
     /// time, so the bound only catches a genuinely stuck flow. A *real*-clock
     /// infra shape (an external SUT over real sockets) must widen it, since the
-    /// wait is then real wall-clock latency. Sourced from the Endpoint config.
+    /// wait is then real wall-clock latency.
     recv_timeout: Duration,
     /// `(agent, anchor)` message labels a scenario attached via
     /// [`tag_anchor`](Harness::tag_anchor), surfaced on the [`RunReport`] for
@@ -149,14 +149,13 @@ impl Harness {
         Self::with_simulated_network(scenario_name, net)
     }
 
-    /// Start a session over a **caller-supplied** network + clock — the seam an
-    /// E2E *Infra shape* uses to run the **same** scenario over either a
-    /// `SimulatedSignalingNetwork` under a paused clock (fake) or a
-    /// `RealSignalingNetwork` under a wall clock (real, external SUT). The only
-    /// per-shape differences are transport + clock + the `recv_timeout`; the
-    /// scenario body is identical (ADR-0018). `transport_kind` tags the recording
-    /// (`Fake` / `Live` / `Hybrid`); `recv_timeout` comes from the Endpoint config
-    /// (small for sim, wide for a real socket).
+    /// Start a session over a **caller-supplied** network + clock — the seam
+    /// that runs the **same** scenario over either a `SimulatedSignalingNetwork`
+    /// under a paused clock (fake) or a `RealSignalingNetwork` under a wall
+    /// clock (real, external SUT). Only transport, clock and `recv_timeout`
+    /// differ; the scenario body is identical (ADR-0018). `transport_kind` tags
+    /// the recording (`Fake` / `Live` / `Hybrid`); `recv_timeout` is small for
+    /// sim, wide for a real socket.
     pub fn with_network_and_clock(
         scenario_name: impl Into<String>,
         network: Arc<dyn SignalingNetwork>,

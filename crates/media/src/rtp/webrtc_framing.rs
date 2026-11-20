@@ -2,8 +2,7 @@
 //!
 //! Wraps the `rtp` crate's [`Packet`] /
 //! [`Header`] so it can cross-check the hand-rolled
-//! [`HandRolled`](super::packet::HandRolled) codec on the wire. Direct analog of
-//! the TS `rtpJsFraming` (which wraps Versatica's `rtp.js`).
+//! [`HandRolled`](super::packet::HandRolled) codec on the wire.
 
 use bytes::Bytes;
 use rtp::header::Header;
@@ -12,13 +11,13 @@ use webrtc_util::marshal::{Marshal, Unmarshal};
 
 use super::packet::{RtpFramed, RtpFraming, RtpHeader};
 
-/// webrtc-rs framing witness (the rtp.js role).
+/// webrtc-rs framing witness, traced as `"webrtc-rs"`.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct WebRtcRs;
 
 impl RtpFraming for WebRtcRs {
     fn name(&self) -> &'static str {
-        "rtp.js"
+        "webrtc-rs"
     }
 
     fn encode_rtp(&self, header: &RtpHeader, payload: &[u8]) -> Vec<u8> {

@@ -71,7 +71,8 @@ decomposed per size class:
    arena mutex, for the bin mutexes, and per global mutex, so a gap between
    `active` and `allocated`, or a cost of fewer arenas, is attributed, not
    guessed.
-6. **Profiling stays on at jemalloc's interval.** `/debug/heap` remains usable
+6. **Profiling stays on at jemalloc's interval.** `/debug/heap`, on the
+   worker's loopback operator listener (`B2BUA_ADMIN`), remains usable
    with `prof:true,prof_active:true,lg_prof_sample:19`: a 300 MB leak of 3 KiB
    objects yields about 600 samples.
 

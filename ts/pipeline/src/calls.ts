@@ -16,7 +16,7 @@
  * to say (`./policy.ts`).
  */
 import type { Call, Case, Flow, Flows, Identity } from "@sip/contracts"
-import { openingInvite, openingResponse } from "./finals.js"
+import * as CallFacts from "./call-facts.js"
 import { parseCalledPos } from "./msgspec.js"
 import type { CasePolicy } from "./policy.js"
 import type { ActorObs, Layout, PartyIdentity } from "./topology.js"
@@ -241,26 +241,17 @@ const withoutJoin = (
 ): Array<string> => evidence.filter((e) => e !== next?.chainEvidence)
 
 /**
- * The attempt's own terminal final: the one that answered the INVITE which
- * CREATED this leg's dialog. An in-dialog final answers a renegotiation and
- * never closes a leg (`PCAP2TEST_PIVOT_V3.md` §4.1), so it is not this attempt's
- * outcome.
+ * The attempt's own terminal final: the leg's outcome, the final of its last
+ * dialog-opening INVITE. An in-dialog final answers a renegotiation and never
+ * closes a leg (`PCAP2TEST_PIVOT_V3.md` §4.1), and the failure a retried INVITE
+ * drew first is not what the attempt ended on.
  */
 const finalOf = (
   flows: Flows.FlowsDoc,
   a: ActorObs,
   t0_us: number
 ): Call.Final | undefined => {
-  const opening = openingInvite(flows, a)
-  if (!opening) return undefined
-  const leg = flows.legs[a.origLeg]!
-  for (const i of a.msgIdxs) {
-    const m = leg.msgs[i]!
-    if (m.retx) continue
-    const st = openingResponse(a, opening, m)
-    if (st !== undefined && st >= 200) {
-      return { status: st, at_ms: Math.floor((m.ts_us - t0_us) / 1000) }
-    }
-  }
-  return undefined
+  const final = CallFacts.valueOf(CallFacts.atActor(flows, a).final)
+  if (final?.status === undefined) return undefined
+  return { status: final.status, at_ms: Math.floor((final.at_us - t0_us) / 1000) }
 }

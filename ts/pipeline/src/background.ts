@@ -4,7 +4,7 @@
  *
  * A policy an actor states does double duty. The assembled actor carries it, so
  * the replay answers the replaying SUT's own traffic of that method; and the
- * captured platform's own locally-minted exchanges of that method collapse into
+ * captured side's own locally-minted exchanges of that method collapse into
  * it instead of becoming steps — the cadence is a system parameter of the
  * platform that ran it, never call behaviour, so scripting it would gate the
  * flow on another deployment's liveness timer.
@@ -13,7 +13,7 @@
  * method that arrives at the actor WITHOUT a cross-leg origin (no captured
  * cross-leg emit of the same type within the relay proximity window, and an
  * emit origins only the FIRST same-type arrival that follows it) was minted
- * by the captured platform; the claim takes that request, the answers the actor
+ * by the captured side; the claim takes that request, the answers the actor
  * returned on the same CSeq, and every retransmission of either. A relayed
  * (end-to-end) request keeps its steps, and so does an out-of-dialog probe or a
  * request the ACTOR emits toward the platform: those are call behaviour whose
@@ -28,13 +28,15 @@
  * a transaction it never receives.
  */
 import type { Flows, Placement } from "@sip/contracts"
+import type { Placed } from "./merged-timeline.js"
 import { typeKey } from "./msgspec.js"
+import type { ActorObs } from "./topology.js"
 
 /** Actor id -> the background policies that actor states. */
 export type BackgroundMap = ReadonlyMap<string, ReadonlyArray<Placement.BackgroundPolicy>>
 
 /** One observation, as synthesis walks them (time-sorted). */
-export interface BackgroundObs {
+interface BackgroundObs {
   readonly actorId: string
   readonly pivotLeg: string
   readonly emits: boolean
@@ -52,16 +54,29 @@ const requestMethod = (m: Flows.Msg): string | undefined =>
   m.summary.kind === "request" ? m.summary.method.toUpperCase() : undefined
 
 /**
- * The `origLeg:msgIdx` coordinates background policies claim out of synthesis.
- * Empty when no actor states a policy — the zero-cost common case.
+ * The `origLeg:msgIdx` coordinates background policies claim out of synthesis:
+ * a claimed exchange collapses into its policy (§5.1) and synthesis drops it
+ * before step ids, delays and repeat collapse exist.
+ * `order` is the case's positions merged in capture order, `actors[p]` the
+ * actor observing position `p`. Empty when no actor states a policy — the
+ * zero-cost common case.
  */
 export const claimedByBackground = (
   flows: Flows.FlowsDoc,
-  obs: ReadonlyArray<BackgroundObs>,
+  order: ReadonlyArray<Placed>,
+  actors: ReadonlyArray<ActorObs>,
   background: BackgroundMap
 ): Set<string> => {
   const claimed = new Set<string>()
   if (background.size === 0) return claimed
+  const obs: ReadonlyArray<BackgroundObs> = order.map((p) => ({
+    actorId: actors[p.position]!.actorId,
+    pivotLeg: actors[p.position]!.pivotLeg,
+    emits: !p.entry.bySystem,
+    origLeg: p.leg,
+    msgIdx: p.msg,
+    ts_us: p.at_us
+  }))
   const msgOf = (o: BackgroundObs): Flows.Msg => flows.legs[o.origLeg]!.msgs[o.msgIdx]!
 
   for (const o of obs) {

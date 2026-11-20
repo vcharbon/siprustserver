@@ -5,6 +5,7 @@
 use call::Call;
 use sip_message::datagram::max_udp_payload;
 use sip_message::header::HeaderName;
+use sip_message::info_package::names_info_package;
 use sip_message::ip_literal::ip_socket_addr;
 use sip_message::{Method, SipHeader, SipRequest, SipStr};
 
@@ -30,7 +31,8 @@ pub(super) enum Unrelayed {
     /// lines.
     Unbuildable,
     /// The request comes from a leg its service owns (ADR-0014), and no rule
-    /// of that service took it: 403 (§21.4.4).
+    /// of that service took it: 403 (§21.4.4); an `INFO` naming a package,
+    /// which that dialog never accepted, 469 (RFC 6086 §4.2.2).
     ServiceOwned,
     /// Its copy toward the peer is past the largest UDP payload, though the
     /// request fit: 513 (§21.5.14). A refused re-INVITE leaves the session
@@ -74,6 +76,9 @@ impl ActionExecutor<'_> {
             }
             Unrelayed::Unbuildable => {
                 self.respond(call, fx, ctx, 500, "Server Internal Error", &[], None, vec![]);
+            }
+            Unrelayed::ServiceOwned if *req.method() == Method::Info && names_info_package(req) => {
+                self.respond(call, fx, ctx, 469, "Bad Info Package", &[], None, vec![]);
             }
             Unrelayed::ServiceOwned => {
                 self.respond(call, fx, ctx, 403, "Forbidden", &[], None, vec![]);

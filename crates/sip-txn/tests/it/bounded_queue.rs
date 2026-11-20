@@ -1,9 +1,7 @@
-//! Port of `tests/sip/transaction-layer-bounded-queue.test.ts` — the inbound→
-//! app event queue is bounded; producers never block; excess is dropped-newest
-//! and counted by reason; draining recovers normal accept.
+//! The inbound→app event queue is bounded; producers never block; excess is
+//! dropped-newest and counted by reason; draining recovers normal accept.
 //!
-//! Adaptation: the source pumps incrementally so its tiny UDP recv queue
-//! (`udpQueueMax`) never fills. Here the b2bua endpoint is bound with a
+//! The b2bua endpoint is bound with a
 //! generous recv queue so the network layer never tail-drops, isolating the
 //! event-queue bound under test. (The UDP-queue tail-drop is sip-net's own
 //! concern, covered by its `simulated` tests.)

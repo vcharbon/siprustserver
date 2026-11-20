@@ -7,14 +7,18 @@
  */
 import type { Overrides } from "@sip/corpus/paths"
 import {
+  Attachments,
+  Batches,
   Calls,
   CaseDocuments,
   CaseIds,
   CaseMaps,
+  CellAnswers,
   Citations,
   Cuts,
   Delta,
   Forget,
+  JobEvents,
   Jobs,
   Measure,
   OpenPreps,
@@ -22,6 +26,7 @@ import {
   Refusals,
   Removal,
   Requests,
+  ResultReset,
   RuleHits,
   Runs,
   RunSets,
@@ -29,6 +34,7 @@ import {
   Sources,
   StoreBinding,
   Sweeps,
+  Verifications,
   Wipe
 } from "@sip/store"
 import * as Effect from "effect/Effect"
@@ -39,12 +45,16 @@ import { pathsOf } from "./options.js"
 export const services = Layer.provideMerge(
   Requests.layer,
   Layer.mergeAll(
+    Attachments.layer,
+    Batches.layer,
     Calls.layer,
     CaseIds.layer,
     CaseMaps.layer,
+    CellAnswers.layer,
     Citations.layer,
     Cuts.layer,
     Forget.layer,
+    JobEvents.layer,
     Jobs.layer,
     OpenPreps.layer,
     Pins.layer,
@@ -52,6 +62,7 @@ export const services = Layer.provideMerge(
     Measure.layer,
     Refusals.layer,
     Removal.layer,
+    ResultReset.layer,
     StoreBinding.resolver,
     Runs.layer,
     RunSets.layer,
@@ -59,6 +70,7 @@ export const services = Layer.provideMerge(
     RuleHits.layer,
     Sources.layer,
     Sweeps.layer,
+    Verifications.layer,
     Delta.layer
   )
 )

@@ -1,8 +1,9 @@
 /**
  * The STORE BINDING: what a deployment states about its store beyond the
  * client — how it spells the current selector term, which inputs name one of
- * its captures and which suffixes end its case ids, and the migration that
- * brings its schema up to date.
+ * its captures and which suffixes end its case ids, and its schema: the
+ * migration sets it is built from, the migration that applies them, and what
+ * a reader refused over a pending one is told.
  *
  * A reader that parses a selector or reads a case id takes them from here, so
  * one composition states them once for every command and page. The default is
@@ -19,17 +20,33 @@ import * as Migrator from "./migrator.js"
 import * as Resolver from "./resolver.js"
 import * as Selector from "./selector.js"
 
+/**
+ * One migration set: the table it records its applied ids in, and its
+ * migrations keyed `<id>_<name>`. A migration is applied when its id is past
+ * the newest its table records, and pending until then.
+ */
+export interface MigrationSet {
+  readonly table: string
+  readonly record: Readonly<Record<string, unknown>>
+}
+
 export interface Interface {
   /** How the current term is written. */
   readonly spelling: Selector.Spelling
   /** Which inputs name a capture, and which suffixes end a case id. */
   readonly grammar: Resolver.Grammar
-  /** Brings the schema up to date; answers every migration it applied. */
+  /** What a refusal over the schema calls the store: `the run store`. */
+  readonly name: string
+  /** Every set {@link Interface.migrate} applies, in its order: what a schema guard reads as pending. */
+  readonly sets: ReadonlyArray<MigrationSet>
+  /** Brings the schema up to date, applying {@link Interface.sets}; answers every migration it applied. */
   readonly migrate: Effect.Effect<
     ReadonlyArray<readonly [id: number, name: string]>,
     SqlMigrator.MigrationError | SqlError,
     SqlClient
   >
+  /** What a reader refused over a pending migration is told to do. */
+  readonly remedy: string
 }
 
 export class Service extends Context.Service<Service, Interface>()("@sip/store/StoreBinding") {}
@@ -38,11 +55,17 @@ export class Service extends Context.Service<Service, Interface>()("@sip/store/S
 export const layerWith = (binding: Interface): Layer.Layer<Service> => Layer.succeed(Service, Service.of(binding))
 
 /** The store's own binding: `@current`, `.pcap` captures, the store's migrations. */
-export const layer = layerWith({
+export const STORE: Interface = {
   spelling: Selector.DEFAULT_SPELLING,
   grammar: Resolver.DEFAULT_GRAMMAR,
-  migrate: Migrator.run
-})
+  name: "the run store",
+  sets: Migrator.SETS,
+  migrate: Migrator.run,
+  remedy: "apply its migrations first (the store's `migrate` verb)"
+}
+
+/** {@link STORE} as a layer. */
+export const layer = layerWith(STORE)
 
 /** The case-id resolver reading the binding's grammar: the one place a reader's capture names come from. */
 export const resolver: Layer.Layer<Resolver.Service, never, Service | SqlClient> = Layer.unwrap(

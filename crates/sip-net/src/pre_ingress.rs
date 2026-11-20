@@ -11,20 +11,20 @@ use std::sync::atomic::Ordering;
 
 use crate::arrival::Arrival;
 use crate::net::Counters;
-use crate::types::{PreIngressAction, PreIngressHook};
+use crate::types::{PreIngressAction, PreIngressHook, QueueLoad};
 
-/// The verdict of `hook` on `arrival` from `src` at queue depth `depth`:
-/// [`PreIngressAction::Accept`] with no hook, or when the hook panics (counted
-/// in `pre_ingress_panics`).
+/// The verdict of `hook` on `arrival` from `src` while the inbound queue
+/// reads `load`: [`PreIngressAction::Accept`] with no hook, or when the hook
+/// panics (counted in `pre_ingress_panics`).
 pub fn judge(
     hook: Option<&PreIngressHook>,
     arrival: &mut Arrival,
     src: SocketAddr,
-    depth: usize,
+    load: QueueLoad,
     counters: &Counters,
 ) -> PreIngressAction {
     let Some(hook) = hook else { return PreIngressAction::Accept };
-    catch_unwind(AssertUnwindSafe(|| hook(arrival, src, depth))).unwrap_or_else(|_payload| {
+    catch_unwind(AssertUnwindSafe(|| hook(arrival, src, load))).unwrap_or_else(|_payload| {
         counters.pre_ingress_panics.fetch_add(1, Ordering::Relaxed);
         PreIngressAction::Accept
     })
@@ -48,7 +48,7 @@ mod tests {
     fn a_hook_that_panics_accepts_the_datagram_and_is_counted() {
         let counters = Counters::default();
         let hook: PreIngressHook = Arc::new(|_, _, _| panic!("probe: hook panic"));
-        let action = judge(Some(&hook), &mut arrival(), src(), 0, &counters);
+        let action = judge(Some(&hook), &mut arrival(), src(), QueueLoad::default(), &counters);
         assert_eq!(action, PreIngressAction::Accept);
         assert_eq!(counters.snapshot().pre_ingress_panics, 1);
     }
@@ -57,7 +57,7 @@ mod tests {
     fn a_hook_verdict_is_returned_as_given() {
         let counters = Counters::default();
         let hook: PreIngressHook = Arc::new(|_, _, _| PreIngressAction::Drop);
-        let action = judge(Some(&hook), &mut arrival(), src(), 0, &counters);
+        let action = judge(Some(&hook), &mut arrival(), src(), QueueLoad::default(), &counters);
         assert_eq!(action, PreIngressAction::Drop);
         assert_eq!(counters.snapshot().pre_ingress_panics, 0);
     }

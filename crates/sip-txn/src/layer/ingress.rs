@@ -1,7 +1,8 @@
 //! The owner's inbound packet dispatch: a datagram's parse — the one its
 //! receive path made, else one made here with a parser panic contained to it
 //! ([`sip_net::parse_guard`]) — a refused one answered or dropped
-//! (`parse_refusal`), and the message handed to the server or the client side.
+//! (`parse_refusal`), a message under a muted Call-ID dropped (`budget_gate`),
+//! and the message handed to the server or the client side.
 
 use std::sync::atomic::Ordering::Relaxed;
 
@@ -30,6 +31,9 @@ impl Owner {
                 return;
             }
         };
+        if !self.admits_inbound(&parsed) {
+            return;
+        }
 
         match parsed {
             SipMessage::Request(req) => self.handle_inbound_request(endpoint, req, src).await,

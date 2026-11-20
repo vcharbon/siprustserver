@@ -31,7 +31,9 @@
  * What the cut refused lands in `<stem>/<capture>/excluded.json` under the
  * session tree, and each replay in a `run<id>` holding its cells, their
  * run-specs and its own index; the id comes from the store, so no two replays
- * collide on a run directory.
+ * collide on a run directory. The lane's job pre-checks run once the lane is
+ * taken, before the cut (`@sip/corpus` `pre-checks.ts`): a refusal of theirs
+ * exits 2 with its message.
  */
 import { afterSweep } from "@sip/corpus/housekeeping/cleanup"
 import { errorsFail } from "@sip/corpus/options"
@@ -116,6 +118,7 @@ const main = Effect.fn("Evidence.main")(function*(facts: CliFacts, input: Input)
     return yield* replay({ captures: plans, options, prepId: prep.prep })
   })).pipe(
     Effect.catchTag("Session.Held", (held) => Effect.succeed(held.held)),
+    Effect.catchTag("PreChecks.Refused", (refused) => Effect.succeed(refused.reason)),
     Effect.catchTag("ReplayDb.UnknownCases", (unknown) => Effect.succeed(unknown.message))
   )
   if (typeof replayed === "string") {

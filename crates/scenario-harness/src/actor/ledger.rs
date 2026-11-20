@@ -33,9 +33,12 @@
 //! CSeq streams are grow-only `BTreeSet`s for the same reason (set insertion
 //! commutes). Fold-order determinism then holds by construction.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 
 use tokio::time::Instant;
+
+pub use super::cseq_stream::CseqStreamKey;
+use super::cseq_stream::InDialogCseq;
 
 /// What class of in-dialog acknowledgement an obligation waits on — bounded so
 /// the describe/settle strings stay low-cardinality.
@@ -81,6 +84,9 @@ pub enum ObligationKind {
     RejectFinal,
     /// A CANCEL we sent, awaiting its final (RFC 3261 §9.1).
     Cancel,
+    /// A PRACK we took whose 200 we hold, until we send it; keyed by the
+    /// hold's ordinal, as forks' PRACKs may share a CSeq number.
+    HeldPrack200,
 }
 
 impl ObligationKind {
@@ -97,6 +103,7 @@ impl ObligationKind {
             ObligationKind::InDialog => "in-dialog",
             ObligationKind::RejectFinal => "reject-final",
             ObligationKind::Cancel => "CANCEL",
+            ObligationKind::HeldPrack200 => "held PRACK 200",
         }
     }
 
@@ -152,47 +159,6 @@ struct Obligation {
     detail: String,
 }
 
-/// Per-dialog received-CSeq completeness — the NOTIFY-gap detector, generalized
-/// to **every** in-dialog method on the dialog (§12.2.1.1). `seen` is a
-/// grow-only set of the CSeq numbers of in-dialog requests observed on this
-/// dialog (seeded with the dialog-creating INVITE's CSeq so the baseline is not
-/// a phantom hole). Contiguous iff `seen` covers `[min..=max]` with no gap.
-#[derive(Debug, Clone)]
-pub struct InDialogCseq {
-    /// The leg this dialog belongs to — for the `describe_open` diagnostic.
-    leg: &'static str,
-    seen: BTreeSet<u32>,
-}
-
-impl InDialogCseq {
-    fn new(leg: &'static str) -> Self {
-        Self { leg, seen: BTreeSet::new() }
-    }
-
-    fn record(&mut self, cseq: u32) {
-        self.seen.insert(cseq);
-    }
-
-    /// No gap between the lowest and highest CSeq observed (an empty stream is
-    /// vacuously contiguous). A hole means a request the peer sent was never
-    /// observed here — a dropped datagram the SUT's retransmit has not (yet)
-    /// re-emitted.
-    pub fn is_contiguous(&self) -> bool {
-        match (self.seen.iter().next(), self.seen.iter().next_back()) {
-            (Some(&lo), Some(&hi)) => (hi - lo + 1) as usize == self.seen.len(),
-            _ => true,
-        }
-    }
-
-    /// The missing CSeq numbers in `[min..=max]` (empty when contiguous).
-    fn holes(&self) -> Vec<u32> {
-        match (self.seen.iter().next(), self.seen.iter().next_back()) {
-            (Some(&lo), Some(&hi)) => (lo..=hi).filter(|c| !self.seen.contains(c)).collect(),
-            _ => Vec::new(),
-        }
-    }
-}
-
 /// The acknowledgement ledger — grow-only, so the fold is order-independent
 /// (see the module doc). Every in-dialog acknowledgement the settle barrier
 /// waits on lives here.
@@ -203,17 +169,13 @@ pub struct ObligationLedger {
     /// Every obligation ever closed (grow-only). An obligation is satisfied iff
     /// its key is in BOTH `opened` and `closed`.
     closed: HashSet<ObligationKey>,
-    /// Per-dialog-end CSeq streams, keyed by `(Call-ID, observing-leg)`. A SIP
-    /// dialog has TWO independent CSeq spaces — each end maintains and increments
-    /// its own local sequence (RFC 3261 §12.2.1.1) — that share one Call-ID.
-    /// Keying by Call-ID alone would fold both ends' sequences into a single
-    /// stream; two interleaved monotone sequences are not one contiguous run, so
-    /// [`is_contiguous`](InDialogCseq::is_contiguous) would report a phantom gap
-    /// (or mask a real one). The `leg` here is the OBSERVING leg, so each stream
-    /// holds exactly the one remote space that observer sees — all of that
-    /// sender's methods (BYE + keepalive-OPTIONS + NOTIFY + …) still land in one
-    /// stream, preserving the §12.2.1.1 completeness detector.
-    dialogs: HashMap<(String, &'static str), InDialogCseq>,
+    /// One CSeq stream per remote CSeq space a leg observes ([`CseqStreamKey`]):
+    /// each dialog end, and each forked dialog on one Call-ID, numbers its
+    /// requests independently (RFC 3261 §12.2.1.1, §12.1.2), and two
+    /// interleaved sequences in one stream would report a phantom gap or mask
+    /// a real one. All of one sender's methods (BYE, OPTIONS, NOTIFY, …) land
+    /// in its one stream, the §12.2.1.1 completeness detector.
+    dialogs: HashMap<CseqStreamKey, InDialogCseq>,
 }
 
 impl ObligationLedger {
@@ -244,7 +206,8 @@ impl ObligationLedger {
     /// 200 can still arrive (and a lost fork BYE is Timer-E-recoverable), so
     /// settle must keep holding for it — and [`Cancel`](ObligationKind::Cancel):
     /// a CANCEL is hop-by-hop, answered by the server whatever becomes of the
-    /// dialog (§9.2). The CSeq gap
+    /// dialog (§9.2) — and [`HeldPrack200`](ObligationKind::HeldPrack200): our
+    /// own answer, owed whatever becomes of the dialog. The CSeq gap
     /// detector is deliberately untouched: a genuinely-lost fire-and-forget
     /// in-dialog request (a dropped NOTIFY the SUT never retransmits) is a REAL
     /// hole the terminal state does not fill.
@@ -252,7 +215,10 @@ impl ObligationLedger {
         let preserved = |k: &ObligationKind| {
             matches!(
                 k,
-                ObligationKind::RejectFinal | ObligationKind::ForkBye | ObligationKind::Cancel
+                ObligationKind::RejectFinal
+                    | ObligationKind::ForkBye
+                    | ObligationKind::Cancel
+                    | ObligationKind::HeldPrack200
             )
         };
         let stranded: Vec<ObligationKey> = self
@@ -266,23 +232,13 @@ impl ObligationLedger {
         }
     }
 
-    /// Seed a dialog's CSeq baseline with its dialog-creating request's CSeq, so
-    /// the first in-dialog request is not mistaken for a hole above an empty
-    /// stream. Idempotent (the stream is a grow-only set).
-    pub fn seed_dialog(&mut self, call_id: impl Into<String>, leg: &'static str, cseq: u32) {
-        self.dialogs
-            .entry((call_id.into(), leg))
-            .or_insert_with(|| InDialogCseq::new(leg))
-            .record(cseq);
-    }
-
-    /// Record an in-dialog request's CSeq on its dialog (any method — BYE,
-    /// NOTIFY, OPTIONS, re-INVITE, …). Creates the stream if unseen.
-    pub fn record_in_dialog(&mut self, call_id: impl Into<String>, leg: &'static str, cseq: u32) {
-        self.dialogs
-            .entry((call_id.into(), leg))
-            .or_insert_with(|| InDialogCseq::new(leg))
-            .record(cseq);
+    /// Record a received request's CSeq on the stream `key` names: the
+    /// dialog-creating INVITE's (the baseline, so the first in-dialog request
+    /// is not a hole above an empty stream) or any in-dialog method's (BYE,
+    /// NOTIFY, OPTIONS, re-INVITE, …). Creates the stream if unseen;
+    /// idempotent (the stream is a grow-only set).
+    pub fn record_in_dialog(&mut self, key: CseqStreamKey, cseq: u32) {
+        self.dialogs.entry(key).or_default().record(cseq);
     }
 
     /// The verdict predicate: every opened obligation is closed AND every dialog
@@ -308,9 +264,16 @@ impl ObligationLedger {
                 ));
             }
         }
-        for stream in self.dialogs.values() {
-            for hole in stream.holes() {
-                out.push(format!("{}:in-dialog cseq={hole} (gap — never observed)", stream.leg));
+        for (key, stream) in &self.dialogs {
+            let holes = stream.holes();
+            for hole in holes.listed {
+                out.push(format!("{}:in-dialog cseq={hole} (gap — never observed)", key.leg));
+            }
+            if holes.unlisted > 0 {
+                out.push(format!(
+                    "{}:in-dialog {} more cseq gaps (never observed)",
+                    key.leg, holes.unlisted
+                ));
             }
         }
         out.sort();
@@ -324,6 +287,71 @@ mod tests {
 
     fn t0() -> Instant {
         Instant::now()
+    }
+
+    fn stream(call_id: &str, leg: &'static str, sender_tag: &str) -> CseqStreamKey {
+        CseqStreamKey { call_id: call_id.into(), leg, sender_tag: sender_tag.into() }
+    }
+
+    /// Two forked early dialogs on one Call-ID, seen by the same leg, each
+    /// number their requests in their own CSeq space (RFC 3261 §12.1.2,
+    /// §8.1.1.5): one starting at 1, the other at a large base. Each stream
+    /// is contiguous on its own, so the ledger settles with nothing to report.
+    #[test]
+    fn forked_dialogs_on_one_call_id_keep_independent_cseq_spaces() {
+        let mut led = ObligationLedger::default();
+        for cseq in [1, 2, 3] {
+            led.record_in_dialog(stream("call-fork", "alice", "fork-a"), cseq);
+        }
+        for cseq in [1_000_000, 1_000_001] {
+            led.record_in_dialog(stream("call-fork", "alice", "fork-b"), cseq);
+        }
+        assert!(led.is_closed(), "each fork's CSeq space is contiguous on its own");
+        assert_eq!(led.describe_open().len(), 0, "no gap is reported across forks");
+    }
+
+    /// Forks numbering from 1 and from a 10-digit base (§8.1.1.5) on one
+    /// Call-ID settle in bounded time and memory, nothing to report.
+    #[test]
+    fn forks_with_a_ten_digit_cseq_base_settle() {
+        let mut led = ObligationLedger::default();
+        for cseq in [1, 2, 3] {
+            led.record_in_dialog(stream("call-fork", "alice", "fork-a"), cseq);
+        }
+        for cseq in [1_684_995_485, 1_684_995_486] {
+            led.record_in_dialog(stream("call-fork", "alice", "fork-b"), cseq);
+        }
+        assert!(led.is_closed());
+        assert_eq!(led.describe_open(), Vec::<String>::new());
+    }
+
+    /// A request lost on one fork is a hole in that fork's stream: a sibling
+    /// fork's request with the missing number does not fill it.
+    #[test]
+    fn a_gap_on_one_fork_is_not_filled_by_its_sibling() {
+        let mut led = ObligationLedger::default();
+        for cseq in [1, 3] {
+            led.record_in_dialog(stream("call-fork", "alice", "fork-a"), cseq);
+        }
+        for cseq in [1, 2] {
+            led.record_in_dialog(stream("call-fork", "alice", "fork-b"), cseq);
+        }
+        assert!(!led.is_closed(), "fork-a's cseq 2 was never observed");
+        assert_eq!(led.describe_open(), vec!["alice:in-dialog cseq=2 (gap — never observed)"]);
+    }
+
+    /// A wide gap in one stream is described in a bounded number of lines:
+    /// the first missing numbers, then one line counting the rest.
+    #[test]
+    fn a_wide_gap_is_described_in_bounded_lines() {
+        let mut led = ObligationLedger::default();
+        led.record_in_dialog(stream("call-wide", "bob", "t"), 2);
+        led.record_in_dialog(stream("call-wide", "bob", "t"), 1_000_002);
+        assert!(!led.is_closed());
+        let open = led.describe_open();
+        assert_eq!(open.len(), 17, "{:?}", &open[..open.len().min(20)]);
+        assert!(open.iter().any(|s| s == "bob:in-dialog cseq=3 (gap — never observed)"));
+        assert!(open.iter().any(|s| s.contains("999983 more")), "{open:?}");
     }
 
     #[test]
@@ -364,8 +392,8 @@ mod tests {
     fn real_gap_keeps_ledger_open() {
         // A dropped NOTIFY: cseq 1 and 3 seen, 2 never was.
         let mut led = ObligationLedger::default();
-        led.seed_dialog("call-abc", "bob", 1);
-        led.record_in_dialog("call-abc", "bob", 3);
+        led.record_in_dialog(stream("call-abc", "bob", "t"), 1);
+        led.record_in_dialog(stream("call-abc", "bob", "t"), 3);
         assert!(!led.is_closed(), "a hole at cseq 2 leaves the ledger open");
         let open = led.describe_open();
         assert_eq!(open.len(), 1);
@@ -378,10 +406,10 @@ mod tests {
         // The §12.2.1.1 fix: a BYE sharing the dialog CSeq space closes a hole a
         // NOTIFY-only detector would report forever.
         let mut led = ObligationLedger::default();
-        led.seed_dialog("call-abc", "bob", 1);
-        led.record_in_dialog("call-abc", "bob", 3); // hole at 2
+        led.record_in_dialog(stream("call-abc", "bob", "t"), 1);
+        led.record_in_dialog(stream("call-abc", "bob", "t"), 3); // hole at 2
         assert!(!led.is_closed());
-        led.record_in_dialog("call-abc", "bob", 2); // e.g. a BYE / OPTIONS
+        led.record_in_dialog(stream("call-abc", "bob", "t"), 2); // e.g. a BYE / OPTIONS
         assert!(led.is_closed(), "any in-dialog method filling cseq 2 closes the gap");
     }
 
@@ -397,9 +425,9 @@ mod tests {
         // and a PHANTOM gap at 3..19. Keyed by (Call-ID, observing-leg) each
         // end's stream is contiguous on its own, so the ledger settles.
         let mut led = ObligationLedger::default();
-        led.seed_dialog("call-shared", "alice", 1);
-        led.record_in_dialog("call-shared", "alice", 2);
-        led.record_in_dialog("call-shared", "bob", 20);
+        led.record_in_dialog(stream("call-shared", "alice", "t"), 1);
+        led.record_in_dialog(stream("call-shared", "alice", "t"), 2);
+        led.record_in_dialog(stream("call-shared", "bob", "t"), 20);
         assert!(
             led.is_closed(),
             "each end's CSeq space is contiguous independently — no phantom gap: {:?}",
@@ -412,8 +440,8 @@ mod tests {
         // Seeding with the INVITE cseq (1) then a BYE at cseq 2 must be
         // contiguous — the toy-call shape (no NOTIFYs).
         let mut led = ObligationLedger::default();
-        led.seed_dialog("call-xyz", "bob", 1);
-        led.record_in_dialog("call-xyz", "bob", 2);
+        led.record_in_dialog(stream("call-xyz", "bob", "t"), 1);
+        led.record_in_dialog(stream("call-xyz", "bob", "t"), 2);
         assert!(led.is_closed(), "1 then 2 is contiguous — no phantom hole at the baseline");
     }
 
@@ -444,8 +472,8 @@ mod tests {
     fn describe_open_lists_both_obligations_and_gaps() {
         let mut led = ObligationLedger::default();
         led.open(ObligationKey::new("alice", ObligationKind::Bye, 2), t0(), "hangup");
-        led.seed_dialog("call-1", "bob", 1);
-        led.record_in_dialog("call-1", "bob", 4); // holes 2,3
+        led.record_in_dialog(stream("call-1", "bob", "t"), 1);
+        led.record_in_dialog(stream("call-1", "bob", "t"), 4); // holes 2,3
         let open = led.describe_open();
         assert!(open.iter().any(|s| s.contains("alice:BYE cseq=2")), "{open:?}");
         assert!(open.iter().any(|s| s.contains("bob:in-dialog cseq=2")), "{open:?}");

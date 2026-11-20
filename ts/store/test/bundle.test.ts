@@ -7,6 +7,7 @@ import * as path from "node:path"
 import { describe, expect, it } from "vitest"
 import { NodeServices } from "@effect/platform-node"
 import * as Effect from "effect/Effect"
+import { Verification } from "@sip/contracts"
 import * as Bundle from "../src/bundle.js"
 
 const readOf = (dir: string, options?: Bundle.Options): Promise<Bundle.BundleReading> =>
@@ -207,5 +208,129 @@ describe("Bundle.read", () => {
     expect(asked).toEqual([
       [`${CAPTURE}-case2__pivot-replay__fake`, ["rport-echo", "cseq-in-dialog-order"]]
     ])
+  })
+
+  it("states each ran cell's lines, failing it where the rollup does, and none for a cell that did not run", async () => {
+    const cells = byCase(await readOf(RUN))
+    expect(cells.get("case1")!.verifications?.[0]).toMatchObject({
+      name: "call",
+      source: "interpreter",
+      answer: "fail",
+      detail: { step: "s14" }
+    })
+    expect(cells.get("case2")!.verifications?.find((line) => line.name === "rfc-audit")).toMatchObject({
+      answer: "fail",
+      message: expect.stringContaining("rport-echo")
+    })
+    expect(cells.get("case3")!.verifications).toEqual([
+      { name: "call", source: "interpreter", answer: "pass" },
+      { name: "rfc-audit", source: "rfc audit", answer: "pass" }
+    ])
+    expect(cells.get("case5")!.verifications).toBeUndefined()
+    for (const [name, cell] of cells) {
+      if (cell.verifications === undefined) continue
+      expect([name, Verification.finalStatusOf(cell.verifications) === "pass"]).toEqual([name, cell.passed])
+    }
+  })
+
+  it("states the lines a cell's lane answered, and a known bug as a waived line that fails nothing", async () => {
+    const reading = await readOf(path.join(import.meta.dirname, "fixtures", "run-lines"))
+    const cells = new Map(reading.cases.map((entry) => [entry.caseId.split("-").at(-1), entry]))
+    const answered = cells.get("answered")!.verifications!
+    expect(answered.map((line) => `${line.name} ${line.answer}`)).toEqual([
+      "call pass",
+      "cleanup pass",
+      "call-records fail",
+      "rfc-audit pass"
+    ])
+    expect(Verification.finalStatusOf(answered)).toBe("fail")
+    const waived = cells.get("waived")!.verifications!
+    expect(waived).toContainEqual(expect.objectContaining({
+      name: "call",
+      answer: "fail",
+      waived: true,
+      message: expect.stringContaining("known bug provisional-rewrite-not-applied")
+    }))
+    expect(Verification.finalStatusOf(waived)).toBe("pass")
+  })
+
+  it("states an audit that did not run as a not-checkable rfc-audit line, never a pass", async () => {
+    const reading = await readOf(path.join(import.meta.dirname, "fixtures", "run-lines"))
+    const unaudited = reading.cases.find((entry) => entry.caseId.endsWith("-unaudited"))!
+    expect(unaudited.verifications).toEqual([
+      { name: "call", source: "interpreter", answer: "pass" },
+      {
+        name: "rfc-audit",
+        source: "rfc audit",
+        answer: "not-checkable",
+        message: "not audited: the lane's binder recorded no wire"
+      }
+    ])
+    expect(Verification.finalStatusOf(unaudited.verifications!)).toBe("unverified")
+  })
+
+  it("leaves a cell whose lane line is still pending ok so far, the rollup not passing it", async () => {
+    const reading = await readOf(path.join(import.meta.dirname, "fixtures", "run-lines"))
+    const pending = reading.cases.find((entry) => entry.caseId.endsWith("-pending"))!
+    expect(pending.passed).toBe(false)
+    expect(pending.verifications!.map((line) => `${line.name} ${line.answer}`)).toEqual(["call pass", "cleanup pending"])
+    expect(Verification.finalStatusOf(pending.verifications!)).toBe("ok so far")
+  })
+
+  it("states a failure the reclassifier restated as passed as a waived line it answers, naming its rules, and passes its own line", async () => {
+    const reading = await readOf(path.join(import.meta.dirname, "fixtures", "run-lines"))
+    const restated = reading.cases.find((entry) => entry.caseId.endsWith("-restated"))!
+    expect(restated.passed).toBe(true)
+    const lines = restated.verifications!
+    expect(lines).toContainEqual({
+      name: "call",
+      source: "reclassifier",
+      answer: "fail",
+      message: "restated as passed (allow-trimmed — ok with accepted delta): check-failed: site=B1 180, field=header.Allow, " +
+        "op=eq, expected=INVITE, ACK, observed=INVITE",
+      detail: { step: "s7" },
+      waived: true
+    })
+    expect(lines.filter((line) => line.answer === "fail" && Verification.decides(line))).toEqual([])
+    expect(lines.at(-1)).toEqual({
+      name: "reclassifier",
+      source: "reclassifier",
+      answer: "pass",
+      message: "allow-trimmed — ok with accepted delta"
+    })
+    expect(Verification.finalStatusOf(lines)).toBe("pass")
+  })
+
+  it("states an RFC charge the reclassifier restated as passed as a waived audit line it answers", async () => {
+    const reading = await readOf(path.join(import.meta.dirname, "fixtures", "run-lines"))
+    const restated = reading.cases.find((entry) => entry.caseId.endsWith("-restated-audit"))!
+    const lines = restated.verifications!
+    expect(lines.map((line) => `${line.name} ${line.source} ${line.answer}${line.waived === true ? " waived" : ""}`)).toEqual([
+      "call interpreter pass",
+      "rfc-audit reclassifier fail waived",
+      "reclassifier reclassifier pass"
+    ])
+    expect(lines[1]!.message).toContain("restated as passed (1 RFC charge(s) are a peer's own")
+    expect(lines[1]!.message).toContain("sdp-origin-continuity")
+    expect(Verification.finalStatusOf(lines)).toBe("pass")
+  })
+
+  it("leaves failing a lane line its batch's end failed after the reclassifier restated the cell as it landed", async () => {
+    const reading = await readOf(path.join(import.meta.dirname, "fixtures", "run-lines"))
+    const late = reading.cases.find((entry) => entry.caseId.endsWith("-restated-late"))!
+    const lines = late.verifications!
+    expect(lines.map((line) => `${line.name} ${line.source} ${line.answer}${line.waived === true ? " waived" : ""}`)).toEqual([
+      "call reclassifier fail waived",
+      "cleanup lane gate fail",
+      "reclassifier reclassifier pass"
+    ])
+    expect(lines[1]).toEqual({
+      name: "cleanup",
+      source: "lane gate",
+      answer: "fail",
+      message: "a call left",
+      detail: { seen: "a call left", side: "sut" }
+    })
+    expect(Verification.finalStatusOf(lines)).toBe("fail")
   })
 })

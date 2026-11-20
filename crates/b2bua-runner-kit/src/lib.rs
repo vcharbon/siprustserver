@@ -16,9 +16,12 @@
 //! - [`RunnerBase::deps`] — production-shaped defaults for every dependency
 //!   (store / buffered CDR / limiter-from-env / metrics / clock / id-gen),
 //!   each overridable field-by-field on the returned [`B2buaDeps`];
-//! - [`RunnerBase::rabbitmq_cdr_sink_from_env`] — the RabbitMQ CDR sink the
-//!   `B2BUA_CDR_RABBITMQ_*` grammar selects, passed to [`RunnerBase::deps`]
-//!   (`_with_encoder` publishes a runner-chosen [`CdrEncoder`] format);
+//! - [`RunnerBase::cdr_sink_from_env`] — the CDR sink the env selects, passed
+//!   to [`RunnerBase::deps`]: the JSON-lines file `B2BUA_CDR_FILE` names
+//!   ([`FileCdrWriter`]), else the RabbitMQ sink the `B2BUA_CDR_RABBITMQ_*`
+//!   grammar selects ([`RunnerBase::rabbitmq_cdr_sink_from_env`];
+//!   `_with_encoder` publishes a runner-chosen [`CdrEncoder`](b2bua::cdr::CdrEncoder)
+//!   format, [`RunnerBase::wired_cdr_sink`] takes a writer the runner built);
 //! - [`RunnerBase::replication_setup_from_env`] — the peer-to-peer
 //!   replication the `B2BUA_REPL*` grammar selects ([`ReplicationSettings`]:
 //!   static or EndpointSlice membership, per-attempt peer addressing), assigned
@@ -59,9 +62,10 @@
 //! those are the runner's own, injected through the seams above. Replication is
 //! the runner's choice to take: a runner may assign any other `ReplicationSetup`
 //! to `deps.replication`. The CDR sink is the runner's choice too: the kit ships
-//! the RabbitMQ sink ([`RabbitMqCdrSettings`] holds its env grammar) and the
-//! discarding default; a runner may give the RabbitMQ sink its own
-//! [`CdrEncoder`] or pass any other [`CdrWriter`] to [`RunnerBase::deps`].
+//! the RabbitMQ sink ([`RabbitMqCdrSettings`] holds its env grammar), the
+//! file sink and the discarding default; a runner may give the RabbitMQ sink
+//! its own [`CdrEncoder`](b2bua::cdr::CdrEncoder) or pass any other
+//! [`CdrWriter`] to [`RunnerBase::deps`].
 
 // The panic set at deny outside test code (ADR-0051 §3).
 #![cfg_attr(
@@ -87,7 +91,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use b2bua::admission::Refusals;
-use b2bua::cdr::{BufferedCdrWriter, CdrEncoder, CdrWriter};
+use b2bua::cdr::{BufferedCdrWriter, CdrWriter};
 use b2bua::config::{B2buaConfig, Front};
 use b2bua::decision::CallDecisionEngine;
 use b2bua::ingress_brake::{build_ingress_brake_hook, IngressBrakeConfig, IngressBrakeCounters};
@@ -104,7 +108,10 @@ use sip_net::{RealSignalingNetwork, SignalingNetwork, UdpEndpoint};
 pub mod backend_url;
 mod base;
 mod capacity_env;
+mod capture_env;
+mod cdr_file;
 mod cdr_rabbitmq;
+mod cdr_sink;
 mod check;
 mod drain_env;
 mod entropy;
@@ -125,6 +132,7 @@ mod spawn;
 mod validate;
 mod worker_metrics;
 pub use base::RunnerBase;
+pub use cdr_file::{file_cdr_writer_from_lookup, FileCdrWriter, CDR_FILE_VARIABLE};
 pub use cdr_rabbitmq::{
     rabbitmq_cdr_writer_from_lookup, rabbitmq_cdr_writer_from_lookup_with_encoder,
     CdrDeliveryBounds, CdrQueueDeclare, RabbitMqCdrSettings, RabbitMqCdrWriter,
@@ -138,7 +146,7 @@ pub use replication::{replication_setup_from_lookup, ReplicationSettings};
 pub use runner_env::{switch, RunnerEnv};
 use socket_buffers::log_socket_buffers;
 pub use validate::{validate_default_dest, validate_ingress_brake_pct};
-pub use worker_metrics::{txn_metrics_text, WorkerMetrics, CATALOGUE};
+pub use worker_metrics::{txn_metrics_text, MapSampler, WorkerMetrics, CATALOGUE};
 
 /// How often the gauge sampler publishes.
 const GAUGE_PERIOD: Duration = Duration::from_secs(5);
@@ -156,9 +164,12 @@ pub fn env_switch(key: &str, default: bool) -> Result<bool, String> {
     runner_env::switch(key, env::var(key).ok(), default)
 }
 
-/// Resolve a `host:port` string to a socket address; `Err` is the boot
-/// refusal of one that does not resolve.
+/// Resolve `host:port` to a socket address, an IPv6 literal with or without brackets
+/// ([`probe_http::parse_socket_addr`]); `Err` is the boot refusal of one that does not resolve.
 pub fn resolve(addr: &str) -> Result<SocketAddr, String> {
+    if let Some(literal) = probe_http::parse_socket_addr(addr) {
+        return Ok(literal);
+    }
     addr.to_socket_addrs()
         .map_err(|e| format!("cannot resolve {addr:?}: {e}"))?
         .next()
@@ -176,6 +187,15 @@ impl RunnerEnv {
     ///
     /// The runner installs the process subscriber (ADR-0026,
     /// [`observe::init_production`]) before it, so the refusal is logged.
+    ///
+    /// The ingress brake, a pre-ingress hook on the worker socket, is the
+    /// cheapest stateless-503 shed, ahead of the router's rungs: without it a
+    /// flooded ingress queue tail-drops new INVITEs silently instead of
+    /// answering a routable 503 + Retry-After. The socket is a plain,
+    /// non-recording tokio UDP endpoint shared through an `Arc`: the core
+    /// drives the receive loop on one clone, and [`UdpTransportMetrics`] reads
+    /// the brake counters and the live queue depth and tail drops of another
+    /// for the `/metrics` scrape.
     pub async fn bind(self, name: &str) -> Result<RunnerBase, String> {
         // The per-call trace gate, configured once from the environment before
         // any call arrives (ADR-0026): with no OTLP endpoint it is inert and no
@@ -188,16 +208,8 @@ impl RunnerEnv {
         let listen_sa = resolve(&self.listen)?;
         let metrics_sa = resolve(&self.metrics_addr)?;
 
-        // Ingress brake: the `preIngress` hook + its counters, installed
-        // on the worker socket. Without it the brake (the cheapest stateless-503
-        // shed, ahead of the router's rungs) is absent and a flooded ingress queue tail-drops
-        // new INVITEs silently instead of returning a routable 503 + Retry-After.
-        // The counters are retained for the `/metrics` scrape.
         let brake_counters = IngressBrakeCounters::new();
-        let brake_config = IngressBrakeConfig {
-            queue_max: self.queue_max,
-            threshold_pct: self.udp_ingress_brake_pct,
-        };
+        let brake_config = IngressBrakeConfig::by_depth(self.queue_max, self.udp_ingress_brake_pct);
         // The worker's identifier generator, keyed from the OS RNG once: the
         // core's, and the To-tag secret of its refusals.
         let id_gen = Arc::new(entropy::keyed_id_gen()?);
@@ -216,10 +228,6 @@ impl RunnerEnv {
             self.addresses.front.parser(&self.parser_limits),
         );
 
-        // Real, non-recording transport: a plain tokio UDP socket. Bind into an
-        // `Arc` so the endpoint can be SHARED: the core takes ownership of one
-        // boxed clone (it drives the recv loop), while a second clone backs the
-        // `UdpTransportMetrics` live `queueDepth`/`dropsTailDrop` getters.
         let net = RealSignalingNetwork::new();
         let mut bind_opts =
             BindUdpOpts::new(listen_sa, self.queue_max).with_pre_ingress(brake_hook);
@@ -229,16 +237,12 @@ impl RunnerEnv {
         if let Some(bytes) = self.udp_rcvbuf {
             bind_opts = bind_opts.with_recv_buffer(bytes);
         }
-        let endpoint: Arc<dyn UdpEndpoint> = net
-            .bind_udp(bind_opts)
-            .await
-            .map_err(|e| format!("bind {listen_sa} failed: {e:?}"))?
-            .into();
+        let bound = net.bind_udp(bind_opts).await;
+        let bound = bound.map_err(|e| format!("bind {listen_sa} failed: {e:?}"))?;
+        let endpoint = capture_env::captured(bound.into(), self.capture.as_deref(), name)?;
         let local = endpoint.local_addr();
         log_socket_buffers(name, endpoint.as_ref(), self.udp_rcvbuf, self.udp_sndbuf);
 
-        // The `UdpTransport` facade's Prometheus-visible shape: the brake
-        // counters + live readings of the bound endpoint.
         let udp_metrics = {
             let live = |read: fn(&dyn UdpEndpoint) -> u64| -> LiveGauge {
                 let endpoint = endpoint.clone();
@@ -253,13 +257,16 @@ impl RunnerEnv {
                     Arc::new(move || endpoint.counters())
                 },
             )
+            .with_queue_wait(live(|ep| {
+                u64::try_from(ep.queue_wait().as_millis()).unwrap_or(u64::MAX)
+            }))
         };
         tracing::info!(
             service = name,
             threshold = brake_config.threshold(),
             queue_max = self.queue_max,
             ingress_brake_pct = self.udp_ingress_brake_pct,
-            "ingress brake armed: stateless-503 for new non-emergency INVITEs at ingress depth >= threshold"
+            "ingress brake armed: stateless-503 for new non-emergency INVITEs at ingress depth >= threshold, or while the event-queue gate refuses"
         );
 
         // The worker's own address on every Via; behind the proxy, every
@@ -296,13 +303,13 @@ impl RunnerEnv {
             sip_local_ip: advertise_ip,
             sip_local_port: advertise_port,
             front: self.addresses.front.clone(),
-            cdr_buffer_queue_max: self.cdr_queue,
             event_dispatch_concurrency: self.concurrency,
             per_call_queue_cap: self.call_cap,
             new_call_permit_share_percent: self.new_call_permit_share_percent,
             new_call_queue_headroom_percent: self.new_call_queue_headroom_percent,
             max_messages_per_call: self.max_messages_per_call,
             max_messages_per_call_lifetime: self.max_messages_per_call_lifetime,
+            max_messages_per_call_id: self.max_messages_per_call_id,
             keepalive_interval_sec: self.keepalive_sec,
             limiter_refresh_sec: self.limiter_refresh_sec,
             limiter_refresh_batch_ms: self.limiter_refresh_batch_ms,
@@ -393,42 +400,6 @@ impl RunnerBase {
         .await
     }
 
-    /// The RabbitMQ CDR sink the env selects ([`RabbitMqCdrSettings`]),
-    /// publishing the default [`JsonRecordEncoder`](b2bua::cdr::JsonRecordEncoder)
-    /// record and recording into [`Self::metrics`]; `None` when the URL is
-    /// unset. `Err` is the boot refusal of a malformed `B2BUA_CDR_RABBITMQ_*`
-    /// value.
-    pub fn rabbitmq_cdr_sink_from_env(&self) -> Result<Option<Arc<dyn CdrWriter>>, String> {
-        let writer = rabbitmq_cdr_writer_from_lookup(|k| env::var(k).ok(), &self.metrics)
-            .map_err(|e| format!("invalid B2BUA config: {e}"))?;
-        Ok(writer.map(|w| self.wired_cdr_sink(w)))
-    }
-
-    /// [`Self::rabbitmq_cdr_sink_from_env`] publishing the bytes `encoder`
-    /// produces: the runner chooses the record format, the kit owns delivery.
-    pub fn rabbitmq_cdr_sink_from_env_with_encoder(
-        &self,
-        encoder: Arc<dyn CdrEncoder>,
-    ) -> Result<Option<Arc<dyn CdrWriter>>, String> {
-        let lookup = |k: &str| env::var(k).ok();
-        let writer = rabbitmq_cdr_writer_from_lookup_with_encoder(lookup, encoder, &self.metrics)
-            .map_err(|e| format!("invalid B2BUA config: {e}"))?;
-        Ok(writer.map(|w| self.wired_cdr_sink(w)))
-    }
-
-    fn wired_cdr_sink(&self, writer: RabbitMqCdrWriter) -> Arc<dyn CdrWriter> {
-        let settings = writer.settings();
-        tracing::info!(
-            service = %self.name,
-            sink = "rabbitmq",
-            queue = %settings.queue,
-            declare = ?settings.declare,
-            buffer = self.env.cdr_queue,
-            "CDR sink wired"
-        );
-        Arc::new(writer)
-    }
-
     /// The peer-to-peer replication the env selected ([`RunnerEnv::replication`]),
     /// its store on [`Self::clock`]; `None` when replication is off. `Err` is
     /// the boot refusal of a replication listener that cannot be bound.
@@ -485,8 +456,10 @@ impl RunnerBase {
 
     /// Memory-attribution sampler: push the store + replication map sizes into
     /// their gauges every 5 s so an RSS climb can be pinned to a specific map
-    /// even when `active_calls` is flat. 5 s is well inside the scrape cadence;
-    /// the sample is a couple of brief locks, off the call path. It evicts
+    /// even when `active_calls` is flat; the `/metrics` scrape samples them
+    /// again ([`WorkerMetrics::sample_maps`]), so a scrape never reads a
+    /// sample older than itself. The sample is a couple of brief locks and
+    /// one pass over the call map, off the call path. It evicts
     /// nothing: the core's paced replica reap is the one eviction site, since an
     /// expired deferred terminal owes its limiter release on the way out. Each
     /// sample also logs a worker loop stalling past `loop_stall`, and turning
@@ -503,11 +476,7 @@ impl RunnerBase {
                 let mut stalled_before = Vec::new();
                 loop {
                     tick.tick().await;
-                    core.sample_gauges();
-                    if let Some(repl) = core.repl_store() {
-                        let (bodies, idx, _meta, tomb) = repl.map_lens();
-                        core.metrics().set_store_map_sizes(bodies as u64, idx as u64, tomb as u64);
-                    }
+                    worker_metrics::sample_maps(&core);
                     let stalled = core.loops().stalled(stall);
                     if stalled != stalled_before {
                         if stalled.is_empty() {

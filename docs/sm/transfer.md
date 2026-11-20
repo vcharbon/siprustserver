@@ -9,6 +9,7 @@ stateDiagram-v2
     CRealigning
     CRinging
     ReferAuthorizing
+    ARealigning --> ARealigning : BYE (B) [guard] ⇒ 200 → B (the referrer leaves, the transfer goes on)
     ARealigning --> ARealigning : INVITE (A) [guard] ⇒ cancel A re-INVITE watchdog · cancel overall · terminate (a-realign rollback — BYE A/B/C)
     ARealigning --> ARealigning : INVITE (A) ⇒ 491 → A (glare during realign)
     ARealigning --> ARealigning : INVITE (B) [guard] ⇒ 491 → C (glare during realign)
@@ -16,8 +17,9 @@ stateDiagram-v2
     ARealigning --> ARealigning : request (B) [guard] ⇒ 481 → B (referrer signalling dead until merge)
     ARealigning --> ARealigning : timer ReferOverallSafety ⇒ cancel subscription-expiry · cancel both re-INVITE watchdogs · terminate (overall-safety watchdog rollback)
     ARealigning --> ARealigning : timer ReferReinviteAnswer [guard] ⇒ cancel overall-safety · terminate (a-realign timeout rollback)
-    ARealigning --> [*] : INVITE 2xx (A) [guard] ⇒ ACK → A (a-realign answered) · cancel A re-INVITE watchdog · cancel overall · merge A↔C (transfer complete)
+    ARealigning --> [*] : INVITE 2xx (A) [guard] ⇒ ACK → A (a-realign answered) · cancel A re-INVITE watchdog · cancel overall · merge A↔C (transfer complete) · BYE → B (release the referrer)
     CRealigning --> ARealigning : INVITE 2xx (B) [leg Confirmed] [guard] ⇒ ACK → C (c-realign answered) · re-INVITE → A (a-realign, C's active SDP) · cancel C / arm A re-INVITE watchdog
+    CRealigning --> CRealigning : BYE (B) [guard] ⇒ 200 → B (the referrer leaves, the transfer goes on)
     CRealigning --> CRealigning : INVITE (A) ⇒ 491 → A (glare during realign)
     CRealigning --> CRealigning : INVITE (B) [guard] ⇒ 491 → C (glare during realign)
     CRealigning --> CRealigning : INVITE (B) [leg Confirmed] [guard] ⇒ cancel the re-INVITE watchdog · cancel overall · terminate (c-realign rollback — BYE A/B/C)

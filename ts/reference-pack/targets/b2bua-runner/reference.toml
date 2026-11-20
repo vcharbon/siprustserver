@@ -1,0 +1,4 @@
+# The reference lane's B2BUA runner: its metrics and operator routes on
+# loopback.
+metrics = "127.0.0.1:9161"
+admin = "127.0.0.1:9162"

@@ -1522,49 +1522,7 @@ impl FailoverHarness {
             &self.views.views(),
         );
         self.callouts.draw(&mut doc);
-        // RFC 3261 status MUST be reflected in the report: a trace that violates a
-        // gating rule can NEVER show PASS. Fold the findings into the doc anomalies
-        // and force passed=false so the rendered report.html / global.txt show FAIL
-        // and list the violation(s). A window-ACCEPTED deviation is listed too, as
-        // advisory: classified, not masked, and it does not fail the run; so is
-        // each rule waived for the whole run, with its justification.
-        let (gating, accepted) = self.partition_rfc_findings();
-        if !gating.is_empty() {
-            doc.passed = false;
-        }
-        for (rule, lane, detail) in gating {
-            doc.anomalies.push(seq_report::Anomaly {
-                check: rule,
-                detail,
-                lane: Some(lane),
-                endpoint: None,
-                advisory: Some(false),
-                row_seqs: Vec::new(),
-                rule_sourced: true,
-            });
-        }
-        for ((rule, lane, detail), row) in accepted {
-            doc.anomalies.push(seq_report::Anomaly {
-                check: rule,
-                detail: format!("ACCEPTED by {row}: {detail}"),
-                lane: Some(lane),
-                endpoint: None,
-                advisory: Some(true),
-                row_seqs: Vec::new(),
-                rule_sourced: true,
-            });
-        }
-        for (rule, why) in self.rfc_acceptance.lifetime_waivers() {
-            doc.anomalies.push(seq_report::Anomaly {
-                check: rule.clone(),
-                detail: format!("WAIVED for the run: {why}"),
-                lane: None,
-                endpoint: None,
-                advisory: Some(true),
-                row_seqs: Vec::new(),
-                rule_sourced: true,
-            });
-        }
+        self.fold_rfc_findings(&mut doc);
         doc
     }
 

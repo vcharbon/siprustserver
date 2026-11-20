@@ -16,7 +16,6 @@ const session = (name: string, cells: ReadonlyArray<TriageStudyCell>, aside?: st
   dir: `/w/cap/${name}`,
   campaign: null,
   cells,
-  hooks: [],
   ...(aside === undefined ? {} : { aside })
 })
 

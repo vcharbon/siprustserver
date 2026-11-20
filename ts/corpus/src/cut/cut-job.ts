@@ -55,7 +55,7 @@ export const run = Effect.fn("CutJob.run")(function*(
     concurrency: options.concurrency,
     memoryMax: options.memoryMax
   }
-  const job = yield* JobStart.runningAs(undefined, "cut", { ...args }, options.paths.sessions).pipe(
+  const job = yield* JobStart.runningAs(undefined, "cut", { ...args }).pipe(
     Effect.catchIf(JobStart.isNoSuchJob, (refused) => Effect.die(refused))
   )
   yield* jobs.planned(job, captures.length)

@@ -17,6 +17,7 @@
     "@sip/contracts": "workspace:*",
     "@sip/driver": "workspace:*",
     "@sip/pipeline": "workspace:*",
+    "@sip/rig": "workspace:*",
     "@sip/store": "workspace:*",
     "@sip/toolchain": "workspace:*",
     "@sip/viewer-core": "workspace:*",

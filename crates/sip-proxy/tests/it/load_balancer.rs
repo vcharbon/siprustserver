@@ -1,8 +1,8 @@
-//! Ports of the pure-logic `tests/sip-front-proxy/load-balancer/*` suite:
-//! cookie encode/decode round-trip, HMAC tampering, the liveness routing
-//! matrix and the acceptance of new calls (ADR-0050), unresolvable-id
-//! fallback, resharding stickiness, and initial-health gating. No proxy SUT —
-//! these exercise the `LoadBalancerStrategy` directly.
+//! The load balancer's pure logic: cookie encode/decode round-trip, HMAC
+//! tampering, the liveness routing matrix and the acceptance of new calls
+//! (ADR-0050), unresolvable-id fallback, resharding stickiness, and
+//! initial-health gating. No proxy SUT — these exercise the
+//! `LoadBalancerStrategy` directly.
 
 use std::sync::Arc;
 
@@ -33,8 +33,8 @@ fn request(method: &str, call_id: &str, to_tag: Option<&str>) -> SipMessage {
 }
 
 /// As [`request`], optionally stamping a `Resource-Priority` header (the on-wire
-/// emergency signal `is_emergency_invite` detects, mirroring the TS
-/// `buildInvite(callId, true)` which adds `Resource-Priority: esnet.0`).
+/// emergency signal `is_emergency_invite` detects, `Resource-Priority:
+/// esnet.0`).
 fn request_with_rph(
     method: &str,
     call_id: &str,
@@ -96,6 +96,8 @@ fn two_worker_registry(clock: Clock) -> SimulatedWorkerRegistry {
     )
 }
 
+/// The proxy stamps the v3 cookie wire format (v=3, e=0, w_pri/w_bak/kid/sig
+/// present), and a cookie whose signature is altered is refused with a 403.
 #[tokio::test]
 async fn hmac_tampering_rejected() {
     let reg = two_worker_registry(Clock::test_at(0));
@@ -104,8 +106,6 @@ async fn hmac_tampering_rejected() {
     let target = s.select_for_new_dialog(&invite, SelectOpts::default()).await.unwrap();
     let mut params = s.encode_stickiness(&target, &invite).unwrap();
 
-    // Pin the v3 cookie wire format the proxy stamped (mirrors the TS RR-shape
-    // assertions: v=3, e=0, w_pri/w_bak/kid/sig present).
     assert_eq!(params.get("v").unwrap(), "3");
     assert_eq!(params.get("e").unwrap(), "0", "non-emergency INVITE ⇒ e=0");
     assert!(!params.get("w_pri").unwrap().is_empty(), "w_pri present");
@@ -150,11 +150,10 @@ async fn cookie_round_trips_to_alive_primary() {
     }
 }
 
+/// The v3 `e=1` emergency flag survives an encode → decode round-trip: an
+/// emergency dialog encodes `e=1`, and a decoded `e=1` is an emergency dialog.
 #[tokio::test]
 async fn emergency_cookie_round_trips_e1_and_is_emergency() {
-    // The v3 `e=1` emergency flag must survive an
-    // encode → decode round-trip. Mirrors the TS `e=1` contract (stickinessInput
-    // emergency arg; decodeStickiness isEmergencyDialog = emergencyFlag === '1').
     let clock = Clock::test_at(0);
     let reg = two_worker_registry(clock.clone());
     let s = strategy(reg, clock);
@@ -362,6 +361,12 @@ async fn a_new_dialog_skips_a_refusing_worker_while_one_accepts() {
     }
 }
 
+/// Above the critical band a non-emergency new dialog finds no target.
+/// Emergency bypasses the band filter on two independent paths, one assertion
+/// each: an on-wire `Resource-Priority: esnet.0` INVITE drives
+/// `is_emergency_invite` on the select path directly, and the explicit
+/// `emergency_override` opts shortcut (used by the dispatcher-marked in-dialog
+/// path) bypasses the filter on a non-RPH INVITE.
 #[tokio::test]
 async fn above_critical_band_filtered_for_non_emergency_only() {
     let clock = Clock::test_at(0);
@@ -378,34 +383,26 @@ async fn above_critical_band_filtered_for_non_emergency_only() {
         s.select_for_new_dialog(&invite, SelectOpts::default()).await,
         Err(SelectError::NoTarget { .. })
     ));
-    // Emergency bypasses the band filter — two independent paths, one assertion each:
-    // (a) an on-wire `Resource-Priority: esnet.0` INVITE drives `is_emergency_invite`
-    //     on the select path directly (mirrors the TS `buildInvite(callId, true)`).
     let rph_invite = emergency_invite("call-ov-rph@h");
     assert_eq!(
         s.select_for_new_dialog(&rph_invite, SelectOpts::default()).await.unwrap(),
         addr(A1)
     );
-    // (b) the explicit `emergency_override` opts shortcut (used by the dispatcher-marked
-    //     in-dialog path) bypasses the filter on a non-RPH INVITE.
     let emergency = SelectOpts { emergency_override: true, ..SelectOpts::default() };
     assert_eq!(s.select_for_new_dialog(&invite, emergency).await.unwrap(), addr(A1));
 }
 
+/// The per-worker AIMD bucket gates admission: a non-emergency new dialog
+/// whose rendezvous winner has a drained bucket is rejected with
+/// `RateCapExhausted`, and re-INVITE / emergency on the SAME worker bypass the
+/// bucket and are still admitted.
+///
+/// `start_paused` freezes `tokio::time`, so every `clock.now_ms()` (the drain
+/// loop's and the strategy's own read inside `select_for_new_dialog`) returns
+/// the same instant, and the bucket refills by a provable zero between the
+/// drain and the assert.
 #[tokio::test(start_paused = true)]
 async fn rate_cap_exhausted_when_winners_bucket_is_empty() {
-    // Wires the per-worker AIMD bucket into admission (TS LoadBalancer.ts:335-348):
-    // a non-emergency new dialog whose rendezvous winner has a drained bucket is
-    // rejected with `RateCapExhausted`, and re-INVITE / emergency on the SAME
-    // worker bypass the bucket and are still admitted.
-    //
-    // `start_paused` freezes `tokio::time`, so every `clock.now_ms()` — the drain
-    // loop's, AND the strategy's internal read inside `select_for_new_dialog` —
-    // returns the SAME instant (anchor 0 + 0 elapsed). The bucket therefore refills
-    // by a provable zero between the drain and the assert, matching the TS unit
-    // test's pinned `nowMs=0`. Under a plain (unpaused) `#[tokio::test]` the real
-    // monotonic clock ticks between the two and a token can trickle back under
-    // extreme scheduling delay — a latent CI flake this removes.
     let clock = Clock::test_at(0);
     let observer = Arc::new(WorkerLoadObserver::new(LoadObserverConfig::default()));
     // Single worker so the rendezvous winner is deterministic; seed a cool

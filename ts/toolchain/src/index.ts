@@ -20,6 +20,8 @@
  * ```
  */
 export * as Binaries from "./binaries.js"
+export * as BinaryRule from "./binary-rule.js"
+export * as HostTools from "./host-tools.js"
 export { PivotSchemaCli } from "./pivot-schema-cli.js"
 export { PivotSchemaSchedules } from "./pivot-schema-schedules.js"
 export { ReplayCli } from "./replay-cli.js"

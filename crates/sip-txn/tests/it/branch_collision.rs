@@ -151,7 +151,8 @@ async fn a_colliding_invite_answered_486_repeats_it_on_timer_g() {
 }
 
 /// A CANCEL on A's branch from another sent-by names no INVITE here: it is
-/// handed up for the TU to answer (§9.2), and A's INVITE is not cancelled.
+/// handed up for the TU to answer (§9.2), through a transaction of its own,
+/// and A's INVITE is not cancelled.
 #[tokio::test(start_paused = true)]
 async fn a_cancel_from_another_sent_by_does_not_cancel_the_invite() {
     let mut stack = Stack::build(TRANSIT, 64, 64).await;
@@ -163,8 +164,10 @@ async fn a_cancel_from_another_sent_by_does_not_cancel_the_invite() {
     elapse_ms(20).await;
     let events = stack.drain_events();
     assert!(cancelled(&events).is_empty(), "no Cancelled: {events:?}");
-    assert_eq!(requests(&events, "CANCEL").len(), 1, "the CANCEL is the TU's to answer");
+    let [(cancel, cancel_src)] =
+        requests(&events, "CANCEL").try_into().expect("the TU's to answer");
     assert_eq!(on_wire(&stack.drain_peer(), 487, "a@u"), 0, "A's INVITE rings on");
+    answer(&stack, &cancel, cancel_src, 481).await;
 
     answer(&stack, &a_req, a_src, 486).await;
     stack.inject(&request("ACK", "a@u", Some(TAG), "10.0.0.1:5555")).await;

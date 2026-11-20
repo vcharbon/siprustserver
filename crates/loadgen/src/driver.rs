@@ -36,6 +36,7 @@ use scenario_harness::actor::ScenarioVerdict;
 
 mod binding;
 mod call_config;
+mod loss;
 mod record;
 mod seeds;
 pub(crate) use binding::CALLER;
@@ -254,6 +255,7 @@ pub(crate) async fn run_one(
     // number's contention never fails a call a free number could carry.
     let draws = if from_user && case.is_some() { KEY_DRAWS } else { 1 };
     let mut draw = 0;
+    let ctx = CallCtx::new();
     let rtts = CallRtts::new(reporter.clone(), id);
     let tally = Arc::new(CallTally::new(CALLER).with_late_sink(reporter.late_sink(id)));
     let (core, dwells, banner, resolved_input, token, net, binder, alice, callee_agents) = loop {
@@ -290,7 +292,8 @@ pub(crate) async fn run_one(
                 tuning.drop_nth,
             )
             .with_rtt_sink(rtts.sink())
-            .with_tally(tally.clone());
+            .with_tally(tally.clone())
+            .with_loss_tap(loss::loss_tap(&ctx, wire.as_ref()));
         let net = Arc::new(match &wire {
             Some(w) => mux_net.with_wire_tap(w.tap()),
             None => mux_net,
@@ -322,7 +325,6 @@ pub(crate) async fn run_one(
     // A SAMPLED call collects message anchors (ADR-0019) so the attached Test
     // case's checks can resolve `<agent>.<anchor>` over its recorded trace;
     // on the unsampled majority tagging stays a single atomic load.
-    let ctx = CallCtx::new();
     if record {
         ctx.enable_anchor_collection();
     }
@@ -410,7 +412,8 @@ pub(crate) async fn run_one(
     };
     let accepted = outcome.is_checkable();
     let outcome = outcome.audited(|| {
-        let wo = binder.rfc_findings(&merged_waivers);
+        let lost = ctx.loss_notes().by_party(alice.name());
+        let wo = binder.rfc_findings_under_loss(&merged_waivers, &lost);
         // Fold this sampled call's per-waiver use into the CAMPAIGN tally
         // (never per call — a call exercises only its own branch).
         reporter.record_waiver_use(id, &merged_waivers, &wo.used);
@@ -489,7 +492,8 @@ pub(crate) async fn run_one(
     reporter.record(id, &outcome, &case, e2e, &checkpoints, evidence);
     // The ladder takes the call's messages once its traffic is over.
     let fold = record::ladder_fold(&reporter, id, &tally, &outcome);
-    let write = record::outcome_write(outcomes, wire, id, outcome, ended_at_ms);
+    let excused = binder.loss_excused(ctx.loss_notes(), alice.name().to_string());
+    let write = record::outcome_write(outcomes, wire, id, outcome, ended_at_ms, excused);
     tail.finish(fold, Box::new(write), awaits);
     rtts.finish();
     reporter.dec_inflight();

@@ -62,6 +62,28 @@ async fn branches_are_tried_in_order_and_the_run_s_overload_refusal_last() {
     h.finish().await;
 }
 
+/// A refusal under a predicate ends the call on its final like any refusal,
+/// and holds only when the final state shows the predicate: here, a callee
+/// whose dialog never confirmed, which a confirmed-then-ended one is not.
+#[tokio::test]
+async fn a_refusal_under_a_predicate_holds_only_with_it() {
+    fn callee_never_answered(s: &StateInner) -> bool {
+        !s.leg("bob").was_confirmed()
+    }
+    const UNANSWERED: Branch =
+        Branch::new("unanswered", Ending::RefusedWhen(480, callee_never_answered));
+    let expect = Expect::one(UNANSWERED).without_overload_refusal();
+    assert!(expect.accepts_final(480) && !expect.accepts_final(486));
+    let rang = caller_refused(480, false);
+    rang.record(Observation::LegEarly { leg: "bob" }, tokio::time::Instant::now());
+    rang.record(Observation::LegTerminated { leg: "bob" }, tokio::time::Instant::now());
+    assert_eq!(branch(expect, &rang), Some("unanswered"));
+    let answered = caller_refused(480, false);
+    answered.record(Observation::LegTerminated { leg: "bob" }, tokio::time::Instant::now());
+    answered.record(Observation::LegConfirmed { leg: "bob" }, tokio::time::Instant::now());
+    assert_eq!(branch(expect, &answered), None, "the callee had answered");
+}
+
 #[tokio::test]
 #[should_panic(expected = "one run-time branch")]
 async fn a_second_run_time_branch_is_a_scenario_bug() {

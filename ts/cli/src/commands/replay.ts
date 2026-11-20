@@ -35,10 +35,12 @@
  *
  * A request's replay is a JOB: `--job <id>` names the row `job start` made and
  * launched this process for; without it the process makes its own row,
- * `running` under its own pid, so a foreground replay is in the queue too. The
- * hooks bracket it, each run keeps their logs over its own cells' window
- * (`@sip/corpus` `hook-keep.ts`), its lock waits show on the row, and the row
- * closes with the exit code on the way out.
+ * `running` under its own pid, so a foreground replay is in the queue too. Its
+ * pre-checks run once the lane is held, before any call (`@sip/corpus`
+ * `pre-checks.ts`), a work list's too: a refusal of theirs exits 2 with its
+ * message, the job's row closed with it. The job-scope collectors the deployment wires on the lane bracket its passes
+ * once the lane is held (`@sip/corpus` `job-collectors.ts`), its lock waits
+ * show on the row, and the row closes with the exit code on the way out.
  *
  * A job STOPS on SIGTERM (`job stop`): the phase admits no new cell, waits the
  * grace the stop wrote on the row (else `DEFAULT_GRACE`) for the cells in
@@ -63,8 +65,6 @@
  * is `no-cases`. Silence is never an outcome.
  */
 import { afterSweep } from "@sip/corpus/housekeeping/cleanup"
-import * as HookKeep from "@sip/corpus/jobs/hook-keep"
-import * as Hooks from "@sip/corpus/jobs/hooks"
 import * as Job from "@sip/corpus/jobs/job"
 import { DEFAULT_GRACE } from "@sip/corpus/jobs/job"
 import { errorsFail, type Options } from "@sip/corpus/options"
@@ -77,8 +77,8 @@ import * as ReplaySummary from "@sip/corpus/report/replay-summary"
 import { passes as passesOf } from "@sip/corpus/requests/compare-request"
 import { resolutionLines, unranOnly } from "@sip/corpus/requests/request"
 import * as Session from "@sip/corpus/session"
+import * as JobCollectors from "@sip/corpus/replay/job-collectors"
 import { label, type Work, workList } from "@sip/corpus/universe"
-import { Launcher } from "@sip/corpus"
 import { Jobs, Requests } from "@sip/store"
 import * as Cause from "effect/Cause"
 import * as Console from "effect/Console"
@@ -89,7 +89,7 @@ import * as Fiber from "effect/Fiber"
 import * as Option from "effect/Option"
 import { Command, Flag } from "effect/unstable/cli"
 import type { CliFacts } from "../facts.js"
-import { triageFlags } from "../flags.js"
+import { collectionFlag, triageFlags, withCollection } from "../flags.js"
 import * as IdFlags from "../id-flags.js"
 import { replayOptionsOf, requestOptionsOf, USAGE_TAIL } from "../options.js"
 import * as Refusals from "../refusals.js"
@@ -98,7 +98,7 @@ import * as CaseSelection from "./case-selection.js"
 import { createdBy } from "./compare.js"
 
 const usage = (facts: CliFacts): string =>
-  `usage: ${facts.invocation("replay")} --request <id> | --from-census <file> --rule R | ${USAGE_TAIL}`
+  `usage: ${facts.invocation("replay")} --request <id> | --from-census <file> --rule R | ${USAGE_TAIL} [--collection LEVEL]`
 
 export const flags = (facts: CliFacts) => ({
   ...triageFlags(facts),
@@ -133,7 +133,8 @@ export const flags = (facts: CliFacts) => ({
   force: Flag.boolean("force").pipe(
     Flag.withDescription("Drive a lane lacking a capability a capture replay needs; its results are forced ones"),
     Flag.withDefault(false)
-  )
+  ),
+  collection: collectionFlag
 })
 
 type Input = Command.Command.Config.Infer<ReturnType<typeof flags>>
@@ -165,7 +166,7 @@ const jobOf = Effect.fn("Replay.job")(function*(input: Input, row: Requests.Row,
     args: { batch: options.batchSize, concurrency: options.concurrency, memoryMax: options.memoryMax },
     createdBy: yield* createdBy
   })
-  yield* jobs.started(id, { pid: process.pid, hooksPath: Job.hooksPath(options.paths.sessions, id) })
+  yield* jobs.started(id, { pid: process.pid })
   return id
 })
 
@@ -203,6 +204,21 @@ const closing = (code: number): Jobs.CloseRequest =>
     ? { status: "interrupted", exit: code }
     : { status: code === 0 ? "done" : "failed", exit: code }
 
+/** The least exit code of a job whose collector's `close` left the lab changed, as a dirty batch's. */
+const LAB_LEFT_CHANGED_EXIT = 1
+
+/**
+ * Where a stop that came in before any pass ran found the job: waiting for
+ * the lane, for a lock a job collector names (and who holds it), or in its
+ * collectors' `open`.
+ */
+const stoppedWhere = (opening: { readonly laneTaken: boolean; readonly lockHeldBy: string | undefined }): string =>
+  !opening.laneTaken
+    ? "before the lane was taken and its pre-checks passed"
+    : opening.lockHeldBy !== undefined
+    ? `while its collectors waited for a lock held by ${opening.lockHeldBy}`
+    : "while its collectors opened"
+
 /** The grace a stop wrote on the row, else the default: read when the stop lands, never before. */
 const graceOf = Effect.fn("Replay.grace")(function*(jobId: number) {
   const jobs = yield* Jobs.Service
@@ -211,17 +227,19 @@ const graceOf = Effect.fn("Replay.grace")(function*(jobId: number) {
 })
 
 /**
- * A request replayed as a job: resolved against the pin, bracketed by the
- * hooks, the phase under the lane's locks with the row saying whom it waits
- * for, the row closed on the way out — with the exit code, or `failed` when
- * the process failed before it had one.
+ * A request replayed as a job: resolved against the pin, the phase under the
+ * lane's locks with the row saying whom it waits for and the job's collectors
+ * around its passes, the row closed on the way out — with the exit code, or
+ * `failed` when the process failed before it had one.
  *
  * The whole of it runs MASKED: a SIGTERM (the runtime interrupts the main
- * fiber) lands in one of two places — the wait for the lane, which simply
- * ends, or the wait on the phase, which asks it to stop and waits for its
- * answer — and the closing, the hooks and the row are written whatever came
- * in. The fiber ends interrupted once the mask is left, so the process exits
- * `INTERRUPTED_EXIT` as the row says.
+ * fiber) lands in one of three places — the wait for the lane or the job
+ * collectors' opening (a lock wait, an `open`), which simply end, or the wait
+ * on the phase, which asks it to stop and waits for its answer — and the
+ * collectors' close and the row are written whatever came in. The fiber ends
+ * interrupted once the mask is left, so the process exits `INTERRUPTED_EXIT`
+ * as the row says. A job collector whose `close` left the lab changed raises
+ * the code to at least {@link LAB_LEFT_CHANGED_EXIT}.
  */
 const requestMain = Effect.fn("Replay.request")(function*(facts: CliFacts, input: Input, id: number) {
   return yield* Effect.uninterruptibleMask((restore) => requestMasked(facts, input, id, restore))
@@ -281,17 +299,6 @@ const requestMasked = Effect.fn("Replay.requestMasked")(function*(
   }
   // The row states its cells before the lane is waited for: `job_cells` are written under the lane.
   yield* jobs.planned(jobId, cellsOf(resolution))
-  const launcher = yield* Launcher.Service
-  const hooks = yield* launcher.hooks
-  const hooksDir = Job.hooksPath(options.paths.sessions, jobId)
-  const env: Hooks.HookEnv = {
-    job: jobId,
-    jobDir: Job.jobDir(options.paths.sessions, jobId),
-    captures: resolution.captures.map((capture) => capture.capture),
-    lane: options.lane,
-    startedAt: new Date().toISOString()
-  }
-  yield* Hooks.run(hooks, "before", env, hooksDir, launcher.hooksCwd)
   const watch = (holder: string | undefined) => jobs.waiting(jobId, holder ?? null).pipe(Effect.ignore)
   const stop: Stop = yield* Deferred.make<number>()
   const passes = passesOf(shown.request.knobs)
@@ -312,22 +319,47 @@ const requestMasked = Effect.fn("Replay.requestMasked")(function*(
       yield* Deferred.succeed(stop, grace)
       return yield* Fiber.join(work)
     })
+  const opening = { laneTaken: false, lockHeldBy: undefined as string | undefined }
+  const collectorWatch = (holder: string | undefined) =>
+    Effect.andThen(Effect.sync(() => void (opening.lockHeldBy = holder)), watch(holder))
+  let leftChanged: ReadonlyArray<string> = []
   const ran = yield* Effect.exit(
     Effect.scoped(Effect.gen(function*() {
-      yield* restore(ReplayBuild.session(options, `job ${jobId}: replaying request ${id} on ${options.lane}`, watch))
-      const done: Array<Replay> = []
-      for (let at = 0; at < passes; at++) {
-        const one = yield* pass(at)
-        done.push(one)
-        if (one.interrupted) break
-      }
-      return done as ReadonlyArray<Replay>
-    })).pipe(Effect.catchTag("Session.Held", (held) => Effect.succeed(held)))
+      yield* restore(ReplayBuild.session(options, `job ${jobId}: replaying request ${id} on ${options.lane}`, {
+        watch,
+        job: { id: jobId, dir: Job.jobDir(options.paths.sessions, jobId) }
+      }))
+      opening.laneTaken = true
+      const passed = Effect.gen(function*() {
+        const done: Array<Replay> = []
+        for (let at = 0; at < passes; at++) {
+          const one = yield* pass(at)
+          done.push(one)
+          if (one.interrupted) break
+        }
+        return done as ReadonlyArray<Replay>
+      })
+      return yield* JobCollectors.around({
+        job: jobId,
+        dir: Job.jobDir(options.paths.sessions, jobId),
+        lanes: [options.lane],
+        cells: (done) => done.flatMap((one) => one.ran),
+        restore,
+        watch: collectorWatch,
+        leftChanged: (labels) =>
+          Effect.andThen(
+            Effect.sync(() => void (leftChanged = labels)),
+            Console.error(`[replay] job ${jobId}: the collector(s) ${labels.join(", ")} left the lab changed`)
+          )
+      }, passed)
+    })).pipe(
+      Effect.catchTag("Session.Held", (held) => Effect.succeed(held.held)),
+      Effect.catchTag("PreChecks.Refused", (refused) => Effect.succeed(refused.reason))
+    )
   )
   if (Exit.isFailure(ran)) {
-    // A stop that came in while the lane was waited for: nothing ran, the row says so.
     if (Cause.hasInterruptsOnly(ran.cause)) {
-      yield* Console.error(`[replay] job ${jobId}: stopped before the lane was taken`)
+      yield* Console.error(`[replay] job ${jobId}: stopped ${stoppedWhere(opening)}`)
       yield* jobs.close(jobId, closing(INTERRUPTED_EXIT))
       return INTERRUPTED_EXIT
     }
@@ -335,22 +367,11 @@ const requestMasked = Effect.fn("Replay.requestMasked")(function*(
     return yield* Effect.failCause(ran.cause)
   }
   const replays = ran.value
-  const code = replays instanceof Session.Held ? 2 : yield* closingCode(replays)
-  if (replays instanceof Session.Held) yield* Console.error(`[replay] refused: ${replays.held}`)
-  const finishedAt = new Date().toISOString()
-  const bundles = replays instanceof Session.Held ? [] : replays.flatMap((one) => one.bundles)
-  yield* Hooks.run(
-    hooks,
-    "after",
-    { ...env, finishedAt, ...(bundles.length === 1 ? { runDir: bundles[0] } : {}) },
-    hooksDir,
-    launcher.hooksCwd
-  )
-  // Each real-lane run keeps the hook logs over its own cells' window.
-  const kept = yield* HookKeep.keep(hooksDir, bundles)
-  if (kept > 0) yield* Console.log(`[replay] job ${jobId}: ${kept} hook log(s) kept with the runs they cover`)
+  const passesCode = typeof replays === "string" ? 2 : yield* closingCode(replays)
+  const code = leftChanged.length === 0 ? passesCode : Math.max(passesCode, LAB_LEFT_CHANGED_EXIT)
+  if (typeof replays === "string") yield* Console.error(`[replay] refused: ${replays}`)
   yield* jobs.close(jobId, closing(code))
-  if (replays instanceof Session.Held) return code
+  if (typeof replays === "string") return code
   if (input.summary) for (const line of yield* ReplaySummary.read(`@job:${jobId}`, options.lane)) yield* Console.log(line)
   // After the lane is given back, never under it: a sweep must not be what the
   // next one queues behind while it tidies.
@@ -446,6 +467,7 @@ const workMain = Effect.fn("Replay.work")(function*(facts: CliFacts, input: Inpu
     return yield* phase({ captures: plans, options, prepId: prep })
   })).pipe(
     Effect.catchTag("Session.Held", (held) => Effect.succeed(held.held)),
+    Effect.catchTag("PreChecks.Refused", (refused) => Effect.succeed(refused.reason)),
     Effect.catchTag("ReplayDb.UnknownCases", (unknown) => Effect.succeed(unknown.message))
   )
   if (typeof replay === "string") {
@@ -466,7 +488,7 @@ const main = Effect.fn("Replay.main")(function*(facts: CliFacts, input: Input) {
 })
 
 export const command = (facts: CliFacts) =>
-  Command.make("replay", flags(facts), (input) => main(facts, input).pipe(Effect.flatMap(exit))).pipe(
+  Command.make("replay", flags(facts), (input) => withCollection(input.collection, main(facts, input)).pipe(Effect.flatMap(exit))).pipe(
     Command.withDescription(
       `The replay alone: a standing cut or a request driven against one lane\n\n${facts.frontDoors}`
     )

@@ -33,9 +33,10 @@ pub(crate) const SUPERVISOR_PEERS: &str = "supervisor_peers";
 pub(crate) const SUPERVISOR_WIRING: &str = "supervisor_wiring";
 pub(crate) const TRACE_PROCESS: &str = "trace_process";
 pub(crate) const TRACE_SPANS: &str = "trace_spans";
+pub(crate) const UNHELD_ANSWERS: &str = "unheld_answers";
 
 /// Every lock name, in counter order: the `lock` label's values.
-pub const LOCKS: [&str; 25] = [
+pub const LOCKS: [&str; 26] = [
     ADMIT_BY_CALL,
     BACKEND_GATE,
     CAPACITY_LIMITS,
@@ -61,6 +62,7 @@ pub const LOCKS: [&str; 25] = [
     SUPERVISOR_WIRING,
     TRACE_PROCESS,
     TRACE_SPANS,
+    UNHELD_ANSWERS,
 ];
 
 /// The recoveries of the worker's locks in this process.

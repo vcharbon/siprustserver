@@ -4,20 +4,25 @@
 //! the mutation — see `layer`).
 
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 use std::time::Duration;
 
+use sip_net::UdpEndpoint;
 use sip_retransmit::Class;
 use tokio::sync::mpsc;
 
 use crate::event::EventQueueClass;
 use crate::event::TransactionEvent;
 use crate::invite_class::InviteClass;
-use crate::layer::EventAges;
+use crate::layer::{EventAges, InviteRefusals};
 
 mod by_class;
+mod copies;
+mod message_budget;
+mod parse;
 mod retransmits;
 pub(crate) use by_class::ByClass;
+pub use copies::CopyKind;
 pub use retransmits::RetransmitRow;
 pub(crate) use retransmits::{method_slot, RetransmitFamily};
 
@@ -145,6 +150,19 @@ pub(crate) struct MetricsInner {
     /// EPERM, an unreachable peer. Swallowed so a send error never aborts the
     /// owner.
     pub send_errors: AtomicU64,
+    /// Call-IDs that passed their message budget and were muted (counter).
+    pub message_budget_trips: AtomicU64,
+    /// Datagrams of a new Call-ID a full map with no idle Call-ID left
+    /// uncounted (counter).
+    pub message_budget_uncounted: AtomicU64,
+    /// Datagrams a mute dropped before dispatch (counter).
+    pub muted_in: AtomicU64,
+    /// Datagrams a mute kept from the wire (counter).
+    pub muted_out: AtomicU64,
+    /// A peer's copies absorbed past the RFC schedule (ADR-0063 §1), by
+    /// [`CopyKind::index`] (counter); the refused INVITEs' are the shared
+    /// refusals' to count.
+    pub copies_past_schedule: ByClass<{ CopyKind::ALL.len() }>,
 }
 
 impl MetricsInner {
@@ -184,6 +202,11 @@ impl MetricsInner {
             released_unanswered_forgotten: AtomicU64::new(0),
             released_unanswered_invites_answered: AtomicU64::new(0),
             send_errors: AtomicU64::new(0),
+            message_budget_trips: AtomicU64::new(0),
+            message_budget_uncounted: AtomicU64::new(0),
+            muted_in: AtomicU64::new(0),
+            muted_out: AtomicU64::new(0),
+            copies_past_schedule: ByClass::new(),
         }
     }
 
@@ -205,15 +228,22 @@ pub struct TransactionMetrics {
     events_tx: mpsc::Sender<TransactionEvent>,
     /// The entry stamps of the events in that queue.
     ages: Arc<EventAges>,
+    /// The endpoint the owner reads, for its inbound queue's wait. Weak: the
+    /// owner alone keeps the endpoint, which closes with it.
+    inbound: Weak<dyn UdpEndpoint>,
+    /// The node's shared refusals the layer answers from, which count the
+    /// copies of refused INVITEs they absorb.
+    refusals: Option<InviteRefusals>,
 }
 
 impl TransactionMetrics {
     pub(crate) fn new(
         inner: Arc<MetricsInner>,
         events_tx: mpsc::Sender<TransactionEvent>,
-        ages: Arc<EventAges>,
+        (ages, inbound): (Arc<EventAges>, Weak<dyn UdpEndpoint>),
+        refusals: Option<InviteRefusals>,
     ) -> Self {
-        Self { inner, events_tx, ages }
+        Self { inner, events_tx, ages, inbound, refusals }
     }
 
     /// Current number of active transactions (gauge).
@@ -246,6 +276,13 @@ impl TransactionMetrics {
     /// reads it grow.
     pub fn event_queue_delay(&self) -> Duration {
         self.ages.oldest()
+    }
+
+    /// How long the oldest datagram in the layer's inbound queue has waited
+    /// for the owner, read now; zero while that queue is empty, and once the
+    /// owner is gone. An owner that takes nothing still reads it grow.
+    pub fn inbound_queue_delay(&self) -> Duration {
+        self.inbound.upgrade().map_or(Duration::ZERO, |endpoint| endpoint.queue_wait())
     }
 
     /// Out-of-dialog OPTIONS the full keepalive lane dropped (counter).
@@ -423,27 +460,6 @@ impl TransactionMetrics {
     /// Responses that left under the generator's fallback To-tag (counter).
     pub fn fallback_to_tag_used(&self) -> u64 {
         self.inner.fallback_to_tag_used.load(Ordering::Relaxed)
-    }
-
-    /// Inbound packets the parser refused and the layer dropped unanswered
-    /// (counter).
-    pub fn parse_errors(&self) -> u64 {
-        self.inner.parse_errors.load(Ordering::Relaxed)
-    }
-
-    /// Refused requests answered with a stateless 400 (counter).
-    pub fn parse_refusals_answered(&self) -> u64 {
-        self.inner.parse_refusals_answered.load(Ordering::Relaxed)
-    }
-
-    /// Answerable refused requests dropped by the cap on 400s (counter).
-    pub fn parse_refusals_capped(&self) -> u64 {
-        self.inner.parse_refusals_capped.load(Ordering::Relaxed)
-    }
-
-    /// Inbound packets the parser panicked on and dropped (counter).
-    pub fn parse_panics(&self) -> u64 {
-        self.inner.parse_panics.load(Ordering::Relaxed)
     }
 
     /// Non-INVITE server transactions forgotten unanswered for the consumer

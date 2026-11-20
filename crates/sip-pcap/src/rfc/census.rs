@@ -106,27 +106,14 @@ pub struct Census {
     /// stated.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sut: Option<SutSet>,
-    /// Rules a sweep named beside the vocabulary (see
-    /// [`scan_with`](super::scan_with)) — every rule runs regardless. Sweep
-    /// configuration, not a result: it is not reported.
-    #[serde(skip)]
-    pub candidates: Vec<RfcRule>,
 }
 
 impl Census {
     /// A census with every known rule present at zero — a rule with no hits is
     /// a reported result, not a missing key.
     pub fn new() -> Self {
-        Census::with_candidates(&[])
-    }
-
-    /// A census naming `candidates` beside the vocabulary; every rule is
-    /// present at zero whichever are named.
-    pub fn with_candidates(candidates: &[RfcRule]) -> Self {
-        let mut census = Census { candidates: candidates.to_vec(), ..Census::default() };
-        for rule in
-            RfcRule::WIRE.iter().chain(candidates.iter().filter(|c| !RfcRule::WIRE.contains(c)))
-        {
+        let mut census = Census::default();
+        for rule in RfcRule::WIRE {
             census.rules.insert(rule.token().to_string(), RuleTally::default());
         }
         census
@@ -163,7 +150,7 @@ impl Census {
         let stats = &doc.flow_stats;
         add_set_aside(&mut self.parse_failed_by_reason, &stats.parse_failed_by_reason, capture);
         add_set_aside(&mut self.header_failed_by_reason, &stats.header_failed_by_reason, capture);
-        let scan = scan_sut(doc, &self.candidates, sut);
+        let scan = scan_sut(doc, sut);
         // Each detector brings its own denominators; the census only adds them
         // up under the token the detector counted them against.
         for (token, population) in scan.population {

@@ -47,7 +47,8 @@ sip-net = { path = "../sip-net" }
 sip-net-testkit = { path = "../sip-net-testkit" }
 # `GET /debug/flamegraph` on the metrics socket — the load driver runs the shared
 # sip-message parse path at a saturated core, so it is the high-signal vantage
-# for parse/alloc CPU (the runner tiers serve the same route via probe-http).
+# for parse/alloc CPU (a `flamegraph` feature build of a runner tier serves
+# the same route via probe-http).
 flamegraph-util = { path = "../flamegraph-util" }
 # One process-wide monotonic-anchored Clock (created once at startup) stamps every
 # call recording and packet arrival — so loadgen never reads raw
@@ -72,6 +73,8 @@ alloc-counter = { path = "../alloc-counter" }
 b2bua-harness = { path = "../b2bua-harness" }
 # `B2buaConfig` field tunes (exhaust the CPS bucket) for the overload-shed test.
 b2bua-sdk = { path = "../b2bua-sdk" }
+# The generated call shapes, driven under a targeted drop.
+callshapes = { path = "../callshapes" }
 scenario-harness = { path = "../scenario-harness" }
 sip-clock = { path = "../sip-clock", features = ["testkit"] }
 # `TransportKind::Fake` for `Harness::with_network_and_clock` (shared-net SUT).

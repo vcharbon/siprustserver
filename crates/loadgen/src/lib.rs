@@ -85,8 +85,8 @@ pub use mux::{
 };
 pub use rate::{Governor, RateHandle};
 pub use report::{CallEvidence, Reporter, ReporterCfg, SERIES_TICK};
-// The machine-readable run index (`load-result.json`) the reporter writes — the
-// axis data model shared with the e2e website. Re-exported so the CLI/tests use
+// The machine-readable run index (`load-result.json`) the reporter writes, from
+// the e2e axis data model. Re-exported so the CLI/tests use
 // one path (`loadgen::LoadRunIndex`) without a direct e2e-model dependency.
 pub use e2e_model::{
     Canaries, CheckSummaryRow, CheckpointRow, CountRow, LatencyRow, LoadRunIndex, LoadRunMeta,

@@ -1,5 +1,6 @@
 //! The event-queue gate's env grammar (ADR-0050 §9): when a worker whose
-//! transaction event queue is backed up refuses new calls, on its OPTIONS
+//! inbound work is backed up, in its transaction event queue or in the
+//! inbound UDP queue ahead of it, refuses new calls, on its OPTIONS
 //! answer (`new=refuse; cause=overload`) and at its admission ladder's
 //! event-queue rung (ADR-0037 item 11, a `503` to a new normal INVITE), and
 //! when it accepts them again. Both read the one gate: one state, one set of
@@ -14,8 +15,12 @@
 //! | `B2BUA_EVENT_QUEUE_ACCEPT_DELAY_MS` | the queue's delay, ms, at or below which they may be accepted again | 50 |
 //! | `B2BUA_EVENT_QUEUE_ACCEPT_HOLD_MS` | how long both accept bounds hold before new calls are accepted again | 3000 |
 //!
-//! The delay is the age of the oldest event waiting in the queue, read when
-//! the gate reads: a router that takes nothing still reads it grow. Ordinary
+//! The delay is the larger of the age of the oldest event waiting in the
+//! event queue and the wait of the oldest datagram in the inbound UDP queue,
+//! read when the gate reads: a router or a transaction layer that takes
+//! nothing still reads it grow. The inbound queue's wait counts from the first
+//! reading that finds it past the refusal delay, so the interval is the least
+//! time it persists across readings before new calls are refused. Ordinary
 //! operation holds the queue near empty, a handful of events; a backlog of
 //! hundreds already means the router lags its traffic, so the depth refuses
 //! at once. The refusal delay sits below SIP's T1 (500 ms), so the worker

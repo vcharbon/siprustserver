@@ -1,0 +1,26 @@
+[package]
+name = "callfuzz"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "A seeded call-flow fuzzer over the actor engine: per-call seeds, the perturbation of any compiled ActorCall (jittered dwells, legal hostile headers and bodies under a size budget), held callees with forks, 100rel and injected CANCELs, RFC 3262 provisional trains, the wrapper that fuzzes any ActorScenario, and the join of call-outcome records to what each call was drawn as."
+
+[package.metadata.ha]
+side = "aware"
+
+[lints]
+workspace = true
+
+[dependencies]
+scenario-harness = { path = "../scenario-harness" }
+sip-message = { path = "../sip-message" }
+# `TRANSIT`, the one-hop dwell the jitter spans are counted in.
+callshapes = { path = "../callshapes" }
+# The shape registry a catalog is wrapped from.
+e2e-model = { path = "../e2e-model" }
+# The call-outcome records the join reads.
+serde_json = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }

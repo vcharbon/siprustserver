@@ -1,5 +1,4 @@
 //! Unit tests for the generators — correct-by-default message construction.
-//! Port of `tests/sip/generators.test.ts`.
 
 use crate::generated::*;
 use sip_message::draft::Entry;

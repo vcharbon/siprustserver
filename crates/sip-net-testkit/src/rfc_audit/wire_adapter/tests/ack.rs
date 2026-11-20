@@ -122,6 +122,55 @@ fn an_unacked_reject_gates_at_the_uas_lane() {
     assert_eq!((out[0].0.as_str(), out[0].3.as_deref()), (BOB, Some(ALICE)));
 }
 
+/// An ACK of a non-2xx final sent to another socket than the INVITE's
+/// (RFC 3261 §17.1.1.3) is charged to the UAC that owed it, with the INVITE's
+/// destination at the other end of its hop; its rule, and no other, is
+/// informative on a hop inside the system under test.
+#[test]
+fn an_ack_at_another_socket_names_both_ends_of_its_hop() {
+    const ELSEWHERE: &str = "127.0.0.1:5072";
+    let evs = vec![
+        sent(ALICE, req("INVITE", "z9hG4bK-w", 1, None), BOB, 0),
+        recv(ALICE, resp(486, 1, "INVITE", "bt", "z9hG4bK-w"), BOB, 1),
+        sent(ALICE, req("ACK", "z9hG4bK-w", 1, Some("bt")), ELSEWHERE, 2),
+    ];
+    let out = live(RuleId::UnackedInviteNon2xxFinal).check_positioned(&evs);
+    assert_eq!(out.len(), 1, "{out:?}");
+    assert_eq!((out[0].3.as_deref(), out[0].4.as_deref()), (Some(ALICE), Some(BOB)));
+    assert!(out[0].1.contains(&format!("ACKed it at {ELSEWHERE}")), "{}", out[0].1);
+
+    let informative: Vec<&str> = RuleId::ALL
+        .iter()
+        .map(|id| id.token())
+        .filter(|token| crate::rfc_rule_informative_inside_sut(token))
+        .collect();
+    assert_eq!(informative, ["unacked-invite-non-2xx-final"]);
+}
+
+/// A finding is informative only when its rule is and the consumer holds both
+/// ends of its hop under test; a border hop, a missing end, or a consumer that
+/// knows no party under test keeps it gating.
+#[test]
+fn a_finding_is_informative_only_with_both_ends_under_test() {
+    let finding = |rule: &str, charged: Option<&str>, counterpart: Option<&str>| RfcFinding {
+        rule: rule.to_string(),
+        lane: SUT.to_string(),
+        detail: String::new(),
+        advisory: false,
+        offending: Some(1),
+        charged: charged.map(str::to_string),
+        counterpart: counterpart.map(str::to_string),
+    };
+    let unacked = "unacked-invite-non-2xx-final";
+    let sut = |party: &str| party == SUT || party == BOB;
+    assert!(finding(unacked, Some(SUT), Some(BOB)).inside_sut(sut));
+    assert!(!finding(unacked, Some(ALICE), Some(SUT)).inside_sut(sut), "a border hop");
+    assert!(!finding(unacked, Some(SUT), Some(ALICE)).inside_sut(sut), "a border hop");
+    assert!(!finding(unacked, Some(SUT), None).inside_sut(sut), "one end unnamed");
+    assert!(!finding(unacked, Some(SUT), Some(BOB)).inside_sut(|_| false), "no party under test");
+    assert!(!finding("cseq-in-dialog-order", Some(SUT), Some(BOB)).inside_sut(sut));
+}
+
 /// What the loss model dropped is out of the audit view, so a taker's lane
 /// does not show every ACK its peer sent: a caller that is no recorded bind is
 /// not charged at the callee's lane for an ACK it sent and the network lost

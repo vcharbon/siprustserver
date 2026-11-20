@@ -1,6 +1,5 @@
-//! End-to-end test of the scenario harness — a full one-call dialog
-//! (CLAUDE.md migration ritual: "one basic real test that just tests the
-//! harness", here grown to a complete INVITE transaction + in-dialog BYE).
+//! End-to-end test of the scenario harness — a full one-call dialog: a
+//! complete INVITE transaction + in-dialog BYE.
 //!
 //! Flow (alice = UAC @ 5060, bob = UAS @ 5070), all over the recording-wrapped
 //! simulated `SignalingNetwork`:

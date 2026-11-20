@@ -5,19 +5,22 @@
 //! and this layer's deferred-backlog ceiling — so every copy of one INVITE
 //! draws the same bytes wherever it is judged (RFC 3261 §8.2.7), and a copy
 //! of an INVITE a live server transaction holds is left to that transaction
-//! (§17.2.1).
+//! (§17.2.1). A copy of a refused INVITE draws its refusal on the RFC
+//! schedule (ADR-0063 §1), and the memo keeps the refusal until 64·T1 after
+//! its last copy.
 
 use std::collections::hash_map::RandomState;
 use std::collections::{HashMap, VecDeque};
 use std::hash::BuildHasher;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use sip_message::generators::GenerateError;
 use sip_message::{SipRequest, SipResponse};
+use sip_retransmit::{Class, COPY_WINDOW};
 use tokio::time::Instant;
 
-use crate::timers::{ms, TIMER_B};
+use super::copies::Copies;
 
 /// Builds the response that refuses a new INVITE. It answers one request
 /// identically each time: every later copy of that INVITE is sent the same
@@ -42,10 +45,20 @@ pub enum Verdict {
     Refused { first: bool },
 }
 
+/// What a copy of a refused INVITE draws (ADR-0063 §1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RefusedCopy {
+    /// The refusal again: the copy is on Timer A's schedule.
+    Answered,
+    /// Nothing: the copy is past the schedule.
+    Absorbed,
+}
+
 /// What the transaction layer decides for an INVITE no transaction matches.
 pub(super) enum Admission {
-    /// A copy of a refused INVITE: it draws that refusal again.
-    Repeat,
+    /// A copy of a refused INVITE: it draws that refusal again, or nothing
+    /// past the schedule.
+    Repeat(RefusedCopy),
     /// Refused now, at the caller's ceiling.
     Refuse,
     /// Admitted; `held` when its identity is now held for a transaction.
@@ -69,44 +82,72 @@ struct Shared {
     hasher: RandomState,
     memo: Mutex<Memo>,
     remembering: AtomicBool,
+    /// Copies of refused INVITEs absorbed past the schedule, by every stage.
+    absorbed: AtomicU64,
 }
 
+/// One place in [`Memo::order`]: the instant it is due to be looked at, the
+/// identity, and the first arrival of the refusal it was queued for.
+type Queued = (Instant, u64, Instant);
+
 /// The identities (top-`Via` branch, Call-ID, From-tag) as keyed hashes:
-/// those refused in the last 64·T1 (Timer B, the longest a UAC retransmits an
-/// INVITE) with their refusal instant, in refusal order, and those a live
-/// server transaction holds, with the count of transactions holding each.
+/// those refused, each with the copies of its INVITE, until 64·T1 after its
+/// last copy (Timer B, the longest a UAC retransmits an INVITE), queued in
+/// the order they are due to be looked at; and those a live server
+/// transaction holds, with the count of transactions holding each.
 struct Memo {
-    refused: HashMap<u64, Instant>,
-    order: VecDeque<(Instant, u64)>,
+    refused: HashMap<u64, Copies>,
+    order: VecDeque<Queued>,
     held: HashMap<u64, u32>,
     max: usize,
 }
 
 impl Memo {
+    /// Forget the refusals lapsed at `now`, and the oldest past the
+    /// capacity. A queued refusal that took a copy since is queued again at
+    /// that copy; a place whose refusal is gone or was refused again is
+    /// stale and dropped.
     fn expire(&mut self, now: Instant) {
-        while let Some(&(at, key)) = self.order.front() {
-            if now.duration_since(at) < ms(TIMER_B) && self.order.len() <= self.max {
+        while let Some(&(at, key, first)) = self.order.front() {
+            let over = self.order.len() > self.max;
+            if !over && now.saturating_duration_since(at) < COPY_WINDOW {
                 break;
             }
             self.order.pop_front();
-            // A key cleared by a hold and refused again has a later entry.
-            if self.refused.get(&key) == Some(&at) {
+            let Some(copies) = self.refused.get(&key).filter(|c| c.first_arrival() == first) else {
+                continue;
+            };
+            if over || copies.lapsed(now) {
                 self.refused.remove(&key);
+            } else {
+                self.order.push_back((copies.last_copy(), key, first));
             }
         }
     }
 
+    /// The live refusal of `key` at `now`.
+    fn refusal(&mut self, key: u64, now: Instant) -> Option<&mut Copies> {
+        self.expire(now);
+        self.refused.get_mut(&key).filter(|c| !c.lapsed(now))
+    }
+
     fn holds_refusal(&mut self, key: u64) -> bool {
-        self.expire(Instant::now());
-        self.refused.contains_key(&key)
+        self.refusal(key, Instant::now()).is_some()
+    }
+
+    /// The copy of the refused INVITE `key` arriving now, if it is one.
+    fn copy(&mut self, key: u64) -> Option<RefusedCopy> {
+        let now = Instant::now();
+        let copies = self.refusal(key, now)?;
+        Some(if copies.copy(now) { RefusedCopy::Answered } else { RefusedCopy::Absorbed })
     }
 
     fn remember(&mut self, key: u64) -> bool {
         let now = Instant::now();
-        let first = !self.refused.contains_key(&key);
+        let first = self.refusal(key, now).is_none();
         if first {
-            self.refused.insert(key, now);
-            self.order.push_back((now, key));
+            self.refused.insert(key, Copies::first(Class::InviteClient, now));
+            self.order.push_back((now, key, now));
         }
         self.expire(now);
         first
@@ -138,8 +179,35 @@ impl InviteRefusals {
                     max,
                 }),
                 remembering: AtomicBool::new(false),
+                absorbed: AtomicU64::new(0),
             }),
         }
+    }
+
+    /// Copies of refused INVITEs absorbed past the RFC schedule (ADR-0063
+    /// §1), by this layer or a stage ahead of it (counter).
+    pub fn copies_absorbed(&self) -> u64 {
+        self.shared.absorbed.load(Ordering::Relaxed)
+    }
+
+    /// Whether `req` is a copy of an INVITE refused in the last 64·T1 after
+    /// its last copy, counted, and what it draws (ADR-0063 §1): the refusal
+    /// on Timer A's schedule, nothing past it. `None` for no refused INVITE.
+    pub fn refused_copy(&self, req: &SipRequest) -> Option<RefusedCopy> {
+        let key = self.key(req);
+        let mut memo = self.lock();
+        let copy = memo.copy(key);
+        self.mirror(&memo);
+        drop(memo);
+        self.count(copy)
+    }
+
+    /// `copy`, counted when it is absorbed.
+    fn count(&self, copy: Option<RefusedCopy>) -> Option<RefusedCopy> {
+        if copy == Some(RefusedCopy::Absorbed) {
+            self.shared.absorbed.fetch_add(1, Ordering::Relaxed);
+        }
+        copy
     }
 
     /// The response refusing `req`: the same for every copy of it.
@@ -176,14 +244,16 @@ impl InviteRefusals {
     }
 
     /// The transaction layer's judgement of the INVITE `req`, which no
-    /// transaction matches: a copy of a refused INVITE is refused again;
-    /// otherwise it is refused when `refuse`, else admitted, and an initial
-    /// one (no To-tag) is held until [`release`](Self::release).
+    /// transaction matches: a copy of a refused INVITE is refused again on
+    /// the RFC schedule, absorbed past it and counted; otherwise it is
+    /// refused when `refuse`, else admitted, and an initial one (no To-tag)
+    /// is held until [`release`](Self::release).
     pub(super) fn admit(&self, req: &SipRequest, refuse: bool) -> Admission {
         let key = self.key(req);
         let mut memo = self.lock();
-        let admission = if memo.holds_refusal(key) {
-            Admission::Repeat
+        let admission = if let Some(copy) = memo.copy(key) {
+            self.count(Some(copy));
+            Admission::Repeat(copy)
         } else if refuse {
             memo.remember(key);
             Admission::Refuse
@@ -255,8 +325,10 @@ impl InviteRefusals {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::timers::{T1, TIMER_B};
     use sip_message::generators::{generate_response, GenerateResponseOpts};
     use sip_message::{CustomParser, SipMessage, SipParser};
+    use std::time::Duration;
 
     fn invite(branch: &str, to_tag: Option<&str>) -> SipRequest {
         let to = to_tag.map(|t| format!(";tag={t}")).unwrap_or_default();
@@ -314,9 +386,43 @@ Content-Length: 0\r\n\r\n"
         let r = refusals();
         let req = invite("z9hG4bK-a", None);
         r.refuse(&req);
-        assert!(matches!(r.admit(&req, false), Admission::Repeat));
+        assert!(matches!(r.admit(&req, false), Admission::Repeat(RefusedCopy::Answered)));
         assert!(matches!(r.admit(&invite("z9hG4bK-b", None), true), Admission::Refuse));
         assert_eq!(r.refuse(&invite("z9hG4bK-b", None)), Verdict::Refused { first: false });
+    }
+
+    /// The copies of a refused INVITE draw its refusal for Timer A's
+    /// re-sends at once, then one per T1, each stage counting on one record;
+    /// the absorbed ones are counted.
+    #[tokio::test(start_paused = true)]
+    async fn a_refused_invites_copies_draw_it_on_timer_as_schedule() {
+        let r = refusals();
+        let req = invite("z9hG4bK-a", None);
+        r.refuse(&req);
+        let drawn: Vec<_> = (0..8).map(|_| r.refused_copy(&req)).collect();
+        let answered = drawn.iter().filter(|c| **c == Some(RefusedCopy::Answered)).count();
+        assert_eq!(answered, 6, "Timer A's re-sends: {drawn:?}");
+        assert!(matches!(r.admit(&req, false), Admission::Repeat(RefusedCopy::Absorbed)));
+        assert_eq!(r.copies_absorbed(), 3);
+        tokio::time::advance(Duration::from_millis(T1)).await;
+        assert_eq!(r.refused_copy(&req), Some(RefusedCopy::Answered), "T1 after");
+    }
+
+    /// A refusal copied past 64·T1 of its first arrival draws nothing and is
+    /// kept 64·T1 after that copy; its ACK still ends there.
+    #[tokio::test(start_paused = true)]
+    async fn a_refusal_copied_past_64_t1_is_kept_and_answers_nothing() {
+        let r = refusals();
+        let req = invite("z9hG4bK-a", None);
+        r.refuse(&req);
+        tokio::time::advance(Duration::from_millis(TIMER_B - 1)).await;
+        assert_eq!(r.refused_copy(&req), Some(RefusedCopy::Answered), "inside 64·T1");
+        tokio::time::advance(Duration::from_millis(TIMER_B - 1)).await;
+        assert_eq!(r.refused_copy(&req), Some(RefusedCopy::Absorbed), "past it");
+        tokio::time::advance(Duration::from_millis(TIMER_B - 1)).await;
+        assert!(r.refused(&req), "64·T1 after its last copy, less 1 ms");
+        tokio::time::advance(Duration::from_millis(1)).await;
+        assert_eq!(r.refused_copy(&req), None, "forgotten 64·T1 after its last copy");
     }
 
     /// An INVITE carrying a To-tag is never held: no stage ahead judges one.

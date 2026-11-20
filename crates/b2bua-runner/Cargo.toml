@@ -23,8 +23,9 @@ b2bua = { path = "../b2bua", features = ["testkit"] }
 # The shared env -> bind -> deps -> spawn -> drain runner plumbing (this binary
 # is its first consumer; downstream integrator runner binaries are the others).
 b2bua-runner-kit = { path = "../b2bua-runner-kit" }
-# The shared HTTP probe/metrics server: /metrics, /healthz, /ready, and the
-# /debug/flamegraph pprof route — one module shared with the front proxy.
+# The shared HTTP probe/metrics server (/metrics, /healthz, /ready) and the
+# loopback operator server of the /debug/heap and (feature `flamegraph`)
+# /debug/flamegraph routes — one module shared with the front proxy.
 # (The kit spawns the server; this binary passes the jemalloc extras in.)
 probe-http = { path = "../probe-http" }
 # Out-of-tree callflow service (ADR-0016) — composed into the production
@@ -36,6 +37,18 @@ tokio = { workspace = true }
 # first, so a refused boot is logged.
 observe = { path = "../observe" }
 tracing = { workspace = true }
+
+[features]
+# A profiling build: `/debug/flamegraph` on the `B2BUA_ADMIN` listener.
+flamegraph = ["probe-http/flamegraph"]
+
+[dev-dependencies]
+# The store-gauge test drives the binary over real loopback UDP with the
+# harness's RFC-checked UAs.
+scenario-harness = { path = "../scenario-harness" }
+layer-harness = { path = "../layer-harness" }
+sip-clock = { path = "../sip-clock" }
+sip-net = { path = "../sip-net" }
 
 # jemalloc global allocator (see the #[global_allocator] note in src/main.rs):
 # glibc malloc ratchets RSS under sustained SIP churn (arena retention) and never

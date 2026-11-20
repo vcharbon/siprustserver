@@ -1,0 +1,14 @@
+# The reference pack (ADR-0060 item 17, appendix §17): one sample per seam of
+# the rig, on the upstream B2BUA, with no provisioning and no test value of
+# its own. Every path below is relative to this directory.
+schema    = "pack.v1"
+name      = "reference"
+title     = "siprig reference"
+wrapper   = "rigref"
+component = "reference"
+
+[cases]
+sources = ["./cases.ts"]
+
+[modules]
+lanes = "./lanes"

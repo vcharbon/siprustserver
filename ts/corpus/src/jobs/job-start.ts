@@ -43,9 +43,11 @@ export interface ReplayKnobs {
   readonly after: number | null
   /** Drive the lane even where it lacks a capability a capture replay needs; the runs are recorded forced. */
   readonly force: boolean
+  /** The collection level the replay takes (`--collection`); `null`, the level its entry point provides, else the workspace's default. */
+  readonly collection: string | null
 }
 
-/** The knobs a row's `args` keeps; a knob it does not carry reads back unstated, and a restart keeps a force. */
+/** The knobs a row's `args` keeps; a knob it does not carry reads back unstated, and a restart keeps a force and a level. */
 export const replayKnobsOf = (args: Readonly<Record<string, unknown>>): ReplayKnobs => ({
   prep: typeof args["prep"] === "number" ? args["prep"] : null,
   batch: typeof args["batch"] === "number" ? args["batch"] : null,
@@ -56,7 +58,8 @@ export const replayKnobsOf = (args: Readonly<Record<string, unknown>>): ReplayKn
   wait: typeof args["wait"] === "number" ? args["wait"] : null,
   unran: false,
   after: null,
-  force: args["force"] === true
+  force: args["force"] === true,
+  collection: typeof args["collection"] === "string" ? args["collection"] : null
 })
 
 /** Who starts a job or a request: the deployment's environment name, else the shell's user. */
@@ -135,7 +138,8 @@ export const replayArgs = (jobId: number, requestId: number, knobs: ReplayKnobs)
   ...(knobs.startsPerSecond === null ? [] : ["--starts-per-second", String(knobs.startsPerSecond)]),
   knobs.cleanup ? "--cleanup" : "--no-cleanup",
   ...(knobs.wait === null ? [] : ["--wait", String(knobs.wait)]),
-  ...(knobs.force ? ["--force"] : [])
+  ...(knobs.force ? ["--force"] : []),
+  ...(knobs.collection === null ? [] : ["--collection", knobs.collection])
 ]
 
 /** The arguments an ingest job runs its entry point with: the inputs as named, a list file by its path. */
@@ -202,8 +206,9 @@ const deleteArgs = (id: number, request: DeleteRequest): ReadonlyArray<string> =
 /**
  * What a campaign job is asked: the campaign, its lanes, one case (by its
  * test id) and one of its sub-cases or every case, whether the system's data
- * is rebuilt from scratch before the run, and the case tags it takes on the
- * lanes that exclude them.
+ * is rebuilt from scratch before the run, the case tags it takes on the
+ * lanes that exclude them, and its collection level (`null`, the level its
+ * entry point provides, else the workspace's default).
  */
 export interface CampaignRequest {
   readonly capture: string
@@ -212,6 +217,7 @@ export interface CampaignRequest {
   readonly subcase: string | null
   readonly rebuild: boolean
   readonly allow: ReadonlyArray<string>
+  readonly collection: string | null
 }
 
 /** One inbox file as an inbox take found it: what tells a later copy over it from the one taken. */
@@ -227,6 +233,8 @@ export interface InboxRequest {
   readonly files: ReadonlyArray<InboxFile>
   /** The name the capture takes in the pcap root, recorded so the row says what came in. */
   readonly capture: string
+  /** The capture's sidecar as the take found it (`size:mtimeMs`), null where it had none: a later sidecar retries a refused take. */
+  readonly sidecar: string | null
 }
 
 /** The entry point's arguments of an inbox job: the row, then the files. */
@@ -247,7 +255,8 @@ export const campaignArgs = (id: number, request: CampaignRequest): ReadonlyArra
   ...(request.case === null ? [] : ["--case", request.case]),
   ...(request.subcase === null ? [] : ["--subcase", request.subcase]),
   ...(request.rebuild ? ["--recreate"] : []),
-  ...(request.allow.length === 0 ? [] : ["--allow", request.allow.join(",")])
+  ...(request.allow.length === 0 ? [] : ["--allow", request.allow.join(",")]),
+  ...(request.collection === null ? [] : ["--collection", request.collection])
 ]
 
 /** The row, then the process; a launch that made no process closes the row `failed`. */
@@ -330,8 +339,7 @@ export const isNoSuchJob = (error: unknown): error is NoSuchJob => error instanc
 export const runningAs = Effect.fn("JobStart.runningAs")(function*(
   named: number | undefined,
   kind: Jobs.Kind,
-  args: Readonly<Record<string, unknown>>,
-  sessions: string
+  args: Readonly<Record<string, unknown>>
 ) {
   const jobs = yield* Jobs.Service
   if (named !== undefined) {
@@ -339,7 +347,7 @@ export const runningAs = Effect.fn("JobStart.runningAs")(function*(
     return named
   }
   const id = yield* jobs.create({ kind, args, createdBy: yield* createdBy })
-  yield* jobs.started(id, { pid: process.pid, hooksPath: Job.hooksPath(sessions, id) })
+  yield* jobs.started(id, { pid: process.pid })
   return id
 })
 

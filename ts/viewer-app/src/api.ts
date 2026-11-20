@@ -1,5 +1,5 @@
 /** The server client. One fetch helper, one hook, no state library. */
-import type { CompareReport, RunReport } from "@sip/contracts"
+import type { Attachment, CompareReport, RunReport, Verification } from "@sip/contracts"
 import type { HttpExchanges } from "@sip/viewer-core/http"
 import { useEffect, useState } from "react"
 
@@ -47,10 +47,9 @@ export interface MockAnswer {
   readonly answer: unknown
 }
 
-/** What a lane's HTTP mock answers for one case: the target it answers for, what the capture observed, the answers. */
+/** What a lane's HTTP mock answers for one case: the target it answers for, the answers. */
 export interface MockAnswers {
   readonly target: string | null
-  readonly observed: string | null
   readonly answers: ReadonlyArray<MockAnswer>
 }
 
@@ -393,10 +392,12 @@ export interface TriageStudyCellDetail {
   readonly confrontationProblem?: string
   /** The Call-IDs this cell minted and the wall-clock window it drove the SUT in; null where it states none. */
   readonly join?: TriageCellJoin | null
-  /** The run's hook logs cut to this cell's window; [] where it states none. */
-  readonly windows?: readonly TriageStudyHook[]
+  /** The cell's SUT logs over its window, attached by the rig's `sut-log` collector; [] where it has none. */
+  readonly sutLogs?: readonly TriageSutLog[]
   /** The call contexts the SUT still held after a batch whose call this cell placed. */
   readonly held?: readonly unknown[]
+  /** The cell's verification lines as the store holds them, and the status they give it; null or absent where it holds none. */
+  readonly verifications?: { readonly status: CellStatus; readonly lines: readonly VerificationLine[] } | null
 }
 
 /** What joins a cell to the SUT's own records. */
@@ -421,20 +422,15 @@ export interface TriageStudySession {
   readonly writtenAt?: string
   readonly campaign: unknown
   readonly cells: readonly TriageStudyCell[]
-  /** What the configured hooks recorded around this run; [] where none did. */
-  readonly hooks: readonly TriageStudyHook[]
   /** What each batch's cleanup gate read of the SUT's call state around the run; [] where none did. */
   readonly held?: readonly unknown[]
 }
 
-/** One hook log kept beside a run: `hooks/<name>.log`, its two ends where it is long. */
-export interface TriageStudyHook {
-  readonly name: string
+/** One SUT log of a cell, over its window: its title, its two ends where it is long, the whole log's size. */
+export interface TriageSutLog {
+  readonly title: string
   readonly text: string
-  /** The whole log's size, where the server states it. */
-  readonly bytes?: number
-  /** Where the whole log is read, where the server serves it. */
-  readonly href?: string
+  readonly bytes: number
 }
 
 export interface TriageStudyCase {
@@ -513,7 +509,8 @@ export interface TriageStudy {
   readonly corpusDir?: string
   /** Where the flows document is and how many legs it holds; its legs come per window. */
   readonly flows?: FlowsPlace
-  readonly auto: unknown
+  /** The line the capture's failed extraction left; absent where none. */
+  readonly extractionFailure?: string
   /** The generator's refusal to cut, where it wrote one: a `no-cases` capture's evidence. */
   readonly exclusions?: { readonly path: string; readonly document: unknown }
   readonly cases: readonly TriageStudyCase[]
@@ -549,7 +546,7 @@ export interface CaptureIngestState {
   readonly detail: string
 }
 
-/** How one lane's delta list classes a tolerance rule. */
+/** How one lane's delta list classes a delta rule. */
 export interface RuleLaneClass {
   readonly lane: string
   /** accepted | known-bug | unlisted. */
@@ -578,7 +575,7 @@ export interface RuleOffTier {
  * cannot show is the rule that fires nowhere.
  */
 export interface RuleRow {
-  /** refusal | tolerance | bless | declaration. */
+  /** refusal | delta | bless | declaration. */
   readonly family: string
   readonly id: string
   /** pre-run | post-run. */
@@ -747,6 +744,8 @@ export type JobStartBody =
       readonly startsPerSecond?: number
       readonly cleanup?: boolean
       readonly wait?: number
+      /** The collection level the replay takes; absent, the workspace's default. */
+      readonly collection?: string
     }
     readonly recutFirst?: "stale-only" | "force"
   }
@@ -762,6 +761,8 @@ export type JobStartBody =
     readonly rebuild?: boolean
     /** Case tags the run takes on the lanes that exclude them. */
     readonly allow?: readonly string[]
+    /** The collection level the run takes; absent, the workspace's default. */
+    readonly collection?: string
   }
   | { readonly kind: "ingest"; readonly paths: readonly string[]; readonly set?: boolean; readonly cut?: boolean }
   /** A file of the pcap root on a lane: an ingest with its cut, then a replay after it. */
@@ -843,7 +844,6 @@ export interface JobDetail {
   readonly finishedAt: string | null
   readonly exit: number | null
   readonly logPath: string | null
-  readonly hooksPath: string | null
   readonly waitingOn: string | null
   readonly sweepId: number | null
   readonly batchAt: number | null
@@ -864,6 +864,22 @@ export interface JobDetail {
     readonly selection: string
   } | null
   readonly lineage: { readonly ancestors: readonly JobKin[]; readonly descendants: readonly JobKin[] }
+  /** The job's own verification lines; absent where the server states none. */
+  readonly lines?: readonly VerificationLine[]
+  /** The job's batches in the order they started, each with the lines its end gates answered; absent where the server states none. */
+  readonly batchList?: readonly JobBatch[]
+}
+
+/** One batch of a job: its lane, attempt, cells, when it ran, what its end said, its lines. */
+export interface JobBatch {
+  readonly id: number
+  readonly lane: string
+  readonly attempt: number
+  readonly cells: number
+  readonly startedAt: string
+  readonly finishedAt: string | null
+  readonly detail: string | null
+  readonly lines: readonly VerificationLine[]
 }
 
 /** A byte range of the job's log: the next poll starts at `to`; `done` once the job ended and the end was reached. */
@@ -889,6 +905,8 @@ export interface JobRedCell {
   readonly error: TriageMainError | null
   /** The body rows no rule accepts, whatever `error` names. */
   readonly bodyFailing: number
+  /** The campaign run the cell belongs to (its page's run and environment); null for a capture replay's. */
+  readonly campaign: { readonly run: number; readonly env: string | null } | null
 }
 
 export type JobCells =
@@ -901,11 +919,6 @@ export interface JobDeletePlan {
   readonly rows: { readonly runs: number; readonly caseResults: number; readonly runRuleHits: number }
   readonly bundles: number
   readonly held: readonly { readonly id: number; readonly why: string }[]
-}
-
-export interface JobHook {
-  readonly name: string
-  readonly text: string
 }
 
 export interface SourceStanding {
@@ -954,6 +967,7 @@ export interface PcapFile {
   readonly modifiedAt: string
   /** The capture the population holds it as, or the name its ingest will give it. */
   readonly capture: string
+  /** `new` where never ingested, or written since its last ingest: the fields after it then say nothing. */
   readonly state: "new" | "ingested" | "cut"
   /** The standing cut's cases; null unless cut. */
   readonly cases: number | null
@@ -963,10 +977,18 @@ export interface PcapFile {
   readonly standings: readonly SourceStanding[]
 }
 
+/** The levels a capture dropped into a workspace's inbox is taken at (`@sip/workspace` `AnonymiseLevel`). */
+export const ANONYMISE_LEVELS = ["keep-all-ips", "keep-sut", "shareable", "none"] as const
+export type AnonymiseLevel = (typeof ANONYMISE_LEVELS)[number]
+
 /** One capture of the inbox and where it stands. */
 export interface InboxEntry {
-  /** The file its shareable copy takes in the pcap root. */
+  /** The file it lands as in the pcap root: its anonymised copy, or itself at level `none`. */
   readonly copy: string
+  /** The anonymisation level it is taken at; null where the level stated does not read. */
+  readonly level: AnonymiseLevel | null
+  /** Why the level stated for it (its sidecar, the workspace's `[anonymise] level`) does not read, or null. */
+  readonly unreadable: string | null
   readonly files: readonly { readonly name: string; readonly size: number; readonly modifiedAt: string }[]
   readonly state: "settling" | "waiting" | "taking" | "refused"
   readonly jobId: number | null
@@ -978,6 +1000,8 @@ export interface PcapLane {
   readonly fit: "fits" | "forced" | "none"
   readonly lacks: readonly string[]
   readonly line: string | null
+  /** Why the deployment does not drive the lane now (its lab guard), or null. */
+  readonly refused: string | null
 }
 
 /** The pcaps page: the pcap root's files, the inbox, the lanes; the roots null where the server has none. */
@@ -1003,6 +1027,8 @@ export interface RetirePlan {
 }
 
 export interface ServerConfig {
+  /** The site's name, which the top bar and the browser tab show; absent where the server states none. */
+  readonly name?: string
   readonly configPath: string
   readonly caseRoots: readonly { readonly id: string; readonly label: string; readonly path: string }[]
   readonly runRoots: readonly { readonly id: string; readonly label: string; readonly path: string }[]
@@ -1047,6 +1073,41 @@ export interface CampaignCheck {
   readonly step?: string | null
 }
 
+/** What a verification line answered. */
+export type VerificationAnswer = "pass" | "fail" | "not-checkable" | "pending"
+
+/**
+ * One verification line of a cell, a batch or a job: a named question, who
+ * answered it and how; its detail's `step`, `expected`, `seen` and `side`
+ * where stated. A `waived` failure is a known bug of the lane; an
+ * `informative` line never decides the cell.
+ */
+export interface VerificationLine {
+  readonly name: string
+  readonly source: string
+  readonly answer: VerificationAnswer
+  readonly message: string | null
+  readonly detail: Readonly<Record<string, unknown>> | null
+  readonly informative: boolean
+  readonly waived: boolean
+}
+
+/**
+ * A cell's status: the final status its lines give a cell that ran (`pass`,
+ * `fail`, `fail, still verifying`, `ok so far`, `unverified`), or why it did
+ * not run (`excluded`, `not runnable`, `not ported`, `error`).
+ */
+export type CellStatus =
+  | "pass"
+  | "fail"
+  | "fail, still verifying"
+  | "ok so far"
+  | "unverified"
+  | "error"
+  | "excluded"
+  | "not runnable"
+  | "not ported"
+
 /** One replay of a cell replayed more than once on its lane: its bundle directory, outcome, failed checks, whether it is the result. */
 export interface CampaignAttempt {
   readonly cell: string | null
@@ -1062,6 +1123,12 @@ export interface CampaignResult {
   readonly cell: string | null
   readonly log: { readonly records?: number; readonly missing?: string } | null
   readonly detail: string | null
+  /** Its status; absent where the server states none. */
+  readonly status?: CellStatus
+  /** Its verification lines in their order; absent where the server states none. */
+  readonly lines?: readonly VerificationLine[]
+  /** What its lane could not check though the cell ran (a claim not requested, a source not checkable); absent where it checked everything. */
+  readonly unchecked?: string
   readonly checks: readonly CampaignCheck[]
   /** Every attempt, in order, of a cell replayed more than once on its lane; absent for one attempt. */
   readonly attempts?: readonly CampaignAttempt[]
@@ -1078,6 +1145,8 @@ export interface CampaignLane {
   readonly skipped: number
   /** The cases a tag left out on the lane, each with why. */
   readonly excluded: readonly { readonly caseId: string; readonly reason: string }[]
+  /** Per status of a cell that did not run, how many; absent where the server states none. */
+  readonly notRun?: Readonly<Record<string, number>>
   readonly results: readonly CampaignResult[]
 }
 
@@ -1096,70 +1165,53 @@ export interface CampaignRun {
   readonly selection: { readonly allow: readonly string[]; readonly lanes: Readonly<Record<string, readonly string[]>> } | null
   /** Every check each case the run compiled makes, by case id. */
   readonly checked: Readonly<Record<string, readonly CampaignChecked[]>>
-  /** The raw CDR lines each call of each case the run compiled declares, by case id; absent where the deployment states none. */
-  readonly rawCdr?: Readonly<Record<string, readonly CampaignDeclaredLines[]>>
 }
 
-/** One call's declared raw CDR lines: its id in the case, the caller leg its Call-ID is minted for, how many. */
-export interface CampaignDeclaredLines {
-  readonly call: string
-  readonly leg: string
-  readonly lines: number
-}
+/** What renders an attachment's file (`@sip/contracts` `Attachment.Kind`). */
+export type AttachmentKind = Attachment.Kind
 
-/** One CDR of a cell as the call details draw it: a title, its fields, its tables, the whole as JSON where it is one. */
-export interface CdrBlock {
+/** One attachment a holder lists: its id, its name, its kind, what heads it, who attached it. */
+export interface AttachmentListed {
+  readonly id: number
+  readonly name: string
+  readonly kind: AttachmentKind
   readonly title: string
-  readonly fields: ReadonlyArray<{ readonly name: string; readonly value: string }>
-  readonly tables: readonly CdrTable[]
-  readonly json: unknown
+  readonly source: string
 }
 
-/** A titled table of text cells: its column headings, its rows. */
-export interface CdrTable {
-  readonly title: string
-  readonly columns: readonly string[]
-  readonly rows: ReadonlyArray<readonly string[]>
+/** A holder of attachments: a cell by its run and case, a batch, a job. */
+export type AttachmentHolder =
+  | { readonly run: number; readonly case: string }
+  | { readonly batch: number }
+  | { readonly job: number }
+
+/** An on-demand collector to run on one cell: the cell as the study lists it, and the case result it lands under. */
+export interface CollectAsked {
+  readonly collector: string
+  readonly capture: string
+  readonly session: string
+  readonly cell: string
+  readonly runId: number
+  readonly caseId: string
+  readonly lane: string
 }
 
-/** A campaign cell's CDRs: each file its bundle holds as blocks or one table, its raw CDR lines per call, the counts its verdict states. */
-export interface CellCdr {
-  readonly files: ReadonlyArray<{
-    readonly name: string
-    readonly label: string
-    readonly blocks: readonly CdrBlock[]
-    /** The whole file as one table, a column per line where it is lines; null where it reads as blocks. */
-    readonly table: CdrTable | null
-    /** Why a held file reads as neither blocks nor a table; null where it reads. */
-    readonly note: string | null
-  }>
-  /** The raw CDR lines of each call, by the caller leg its Call-ID is minted for; null where the cell holds none. */
-  readonly lines: ReadonlyArray<{ readonly leg: string; readonly callId: string; readonly lines: number }> | null
-  readonly facts: ReadonlyArray<{ readonly name: string; readonly value: string }>
+/** What an on-demand run answered of the cell: its lines (never merged into the cell's), how many attachments it landed, who left the lab changed. */
+export interface CollectAnswered {
+  readonly verifications: readonly Verification.Verification[]
+  readonly attached: number
+  readonly leftChanged: readonly string[]
 }
 
-/**
- * How a differing CDR field is read: `timing` and `identity` are expected to
- * differ, `expected` differs and is accepted, `content` is not.
- */
-export type CdrDeltaKind = "timing" | "identity" | "expected" | "content"
-
-/** The raw CDR lines of several cells, the fields that tell them apart. */
-export interface CdrDelta {
-  /** Each cell compared and its raw CDR lines; null where its bundle holds none. */
-  readonly columns: ReadonlyArray<{ readonly session: string; readonly cell: string; readonly lines: number | null }>
-  readonly rows: ReadonlyArray<{
-    readonly leg: string
-    readonly line: number
-    /** The last line the row stands for: `line` but for a run of missing lines. */
-    readonly last: number
-    readonly field: string
-    readonly kind: CdrDeltaKind
-    readonly values: ReadonlyArray<string | null>
-  }>
-  /** The fields compared that read the same in every cell holding their line. */
-  readonly same: number
-}
+/** One attachment read for its kind's component. */
+export type AttachmentView =
+  | { readonly kind: "log"; readonly text: string; readonly bytes: number }
+  | { readonly kind: "records"; readonly records: ReadonlyArray<Readonly<Record<string, string>>> }
+  | { readonly kind: "diff"; readonly diff: Attachment.Diff }
+  | ({ readonly kind: "table" } & Attachment.Table)
+  | { readonly kind: "json"; readonly value: unknown }
+  | { readonly kind: "file"; readonly bytes: number }
+  | { readonly kind: "link"; readonly url: string }
 
 /** One thing a campaign case uses, under the role it plays, with the page it is read on where there is one. */
 export interface CampaignLink {
@@ -1215,6 +1267,8 @@ export interface Campaign {
   readonly envs: readonly string[]
   /** The label of a check's `said`. */
   readonly saidLabel: string
+  /** The name of the cell attachment a check's `said` was read from. */
+  readonly saidLog: string
   /** The side vocabulary, in the order the pages list it. */
   readonly sides: readonly string[]
   readonly lanes: readonly string[]
@@ -1229,6 +1283,8 @@ export interface Campaign {
     readonly lanes: readonly LaunchLane[]
     readonly tags: readonly LaunchTag[]
     readonly defaultLanes: readonly string[] | null
+    /** The collection levels a start may name; absent where the server states none. */
+    readonly collection?: LaunchCollection
   } | null
   /** The environment the server starts this campaign's runs in; null where it starts none. */
   readonly own: string | null
@@ -1242,6 +1298,12 @@ export interface LaunchTag {
   readonly warning: string | null
   readonly excludedOn: readonly string[]
   readonly allowed: boolean
+}
+
+/** The collection levels a start may name (ADR-0060 appendix §10), and the one a start naming none takes. */
+export interface LaunchCollection {
+  readonly default: string
+  readonly levels: readonly string[]
 }
 
 /** One lane a page start may name: the lanes of one group run together, a refused one does not run here. */
@@ -1413,10 +1475,11 @@ export const api = {
       }`
     ),
   /** One capture: one file, or the consecutive files of one tap together. */
-  captureIngest: (files: ReadonlyArray<File>, lane?: string) => {
+  captureIngest: (files: ReadonlyArray<File>, lane?: string, level?: AnonymiseLevel) => {
     const form = new FormData()
     for (const file of files) form.append("file", file, file.name)
     if (lane !== undefined && lane !== "") form.append("lane", lane)
+    if (level !== undefined) form.append("level", level)
     return upload<CaptureIngestStart>("/api/captures", form)
   },
   captureIngestState: (capture: string) =>
@@ -1437,7 +1500,6 @@ export const api = {
   jobRestart: (id: number, mode: "resume" | "again") => post<JobStarted>(`/api/jobs/${id}/restart`, { mode }),
   jobDeletePlan: (id: number) => request<JobDeletePlan>(`/api/jobs/${id}/delete-plan`),
   jobDelete: (id: number) => post<JobStarted>(`/api/jobs/${id}/delete`, {}),
-  jobHooks: (id: number) => request<readonly JobHook[]>(`/api/jobs/${id}/hooks`),
   sources: (query: { stale?: boolean; q?: string; limit?: number; offset?: number }) =>
     request<SourcesPage>(
       `/api/sources${search({ stale: query.stale === true ? "1" : undefined, q: query.q, limit: query.limit, offset: query.offset })}`
@@ -1448,19 +1510,18 @@ export const api = {
   /** One environment's latest runs of a campaign (the server's choice where none is named), `run` among them. */
   campaign: (capture: string, query: { readonly env?: string | undefined; readonly run?: number | undefined } = {}) =>
     request<Campaign>(`/api/campaign/${encodeURIComponent(capture)}${search({ env: query.env, run: query.run })}`),
-  /** A campaign cell's CDRs, decoded. */
-  campaignCdr: (capture: string, session: string, cell: string) =>
-    request<CellCdr>(`${campaignCellPath(capture, session, cell)}/cdr`),
-  /** The raw CDR lines of `cells` compared, in their order. */
-  campaignCdrDelta: (capture: string, cells: ReadonlyArray<{ readonly session: string; readonly cell: string }>) =>
-    request<CdrDelta>(
-      `/api/campaign/${encodeURIComponent(capture)}/cdr-delta${search({ cells: cells.map((c) => `${c.session}/${c.cell}`).join(",") })}`
-    )
+  /** What `holder` holds attached, in its order. */
+  attachments: (holder: AttachmentHolder) => request<readonly AttachmentListed[]>(`/api/attachments${search(holder)}`),
+  /** The attachment `id` read for its kind. */
+  attachment: (id: number) => request<AttachmentView>(`/api/attachments/${id}`),
+  /** The on-demand collectors a cell of `lane` may run, by name. */
+  collectOffered: (lane: string) => request<readonly string[]>(`/api/collect${search({ lane })}`),
+  /** Runs an on-demand collector on one cell; its attachments land on the cell. */
+  collect: (asked: CollectAsked) => post<CollectAnswered>("/api/collect", asked)
 }
 
-/** The path of one campaign cell under the API. */
-export const campaignCellPath = (capture: string, session: string, cell: string): string =>
-  `/api/campaign/${encodeURIComponent(capture)}/runs/${encodeURIComponent(session)}/cells/${encodeURIComponent(cell)}`
+/** Where the attachment `id`'s file is read whole. */
+export const attachmentFileHref = (id: number): string => `/api/attachments/${id}/file`
 
 export type Async<A> =
   | { readonly state: "loading" }

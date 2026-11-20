@@ -575,6 +575,11 @@ export const TriagePage = (): JSX.Element => {
 
       <div className="queue-bar">
         <Counts value={value} />
+        {value.matched === 0 && value.scope !== "all" && (
+          <button type="button" className="copy-ref" title="the queue opens on failed calls" onClick={() => setScope("all")}>
+            none {SCOPES.find(([one]) => one === value.scope)?.[1] ?? value.scope}: show every call
+          </button>
+        )}
         {/* Built from the page's own state: a held answer may be of the slice before the last pick. */}
         <Link
           to={deltasOf({ lane: lane === "" ? value.lane ?? "" : lane, scope, q: settled, filter })}

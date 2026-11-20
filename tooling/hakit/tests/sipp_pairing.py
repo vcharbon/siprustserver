@@ -16,12 +16,12 @@ import signal
 import socket
 import subprocess
 import tempfile
-import threading
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
 from burst_peer import BurstPeer
+from port_pairs import reserved_port_pair
 
 from hakit.jsonval import Json, as_obj
 from hakit.paths import BASE_CONTENT, REPO_ROOT
@@ -97,35 +97,6 @@ class Pairing:
         return exit_note(self.peer_rc, self.peer_pid)
 
 
-_TAKEN: set[int] = set()
-_TAKEN_LOCK = threading.Lock()
-
-
-def _free_port_pair() -> int:
-    """A pair of adjacent free UDP ports no other pairing of this process got:
-    the pairings run in parallel, and a port probed free is bound by SIPp
-    only later."""
-    with _TAKEN_LOCK:
-        port = _probe_pair()
-        _TAKEN.update((port, port + 1))
-        return port
-
-
-def _probe_pair() -> int:
-    for _ in range(200):
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as a, socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as b:
-            a.bind(("127.0.0.1", 0))
-            port = a.getsockname()[1]
-            if port in _TAKEN or port + 1 in _TAKEN:
-                continue
-            try:
-                b.bind(("127.0.0.1", port + 1))
-            except OSError:
-                continue
-            return port
-    raise RuntimeError("no free UDP port pair")
-
-
 def _last_stats(path: Path) -> dict[str, str]:
     if not path.is_file():
         return {}
@@ -172,19 +143,19 @@ def run_pair(
     d = Path(tempfile.mkdtemp(prefix=f"{scenario.stem}-{peer_path.stem}-{calls}-", dir=work))
     sipp = _sipp_argv(image, d, peer_path.parent, scenario.parent)
     (d / "inject.csv").write_text(f"SEQUENTIAL\n{ruri_user};X-Test: loopback;;;\n")
-    caller = _free_port_pair()
-    callee = caller + 1
     common = ["-i", "127.0.0.1", "-m", str(calls), "-nostdin", "-max_invite_retrans", "3", "-max_non_invite_retrans", "3"]
-    proc = subprocess.Popen(
-        [*sipp, "-sf", str(peer_path), "-p", str(callee), *common, *key_args(peer_path, peer_keys or {})]
-        + ["-recv_timeout", "15000"],
-        cwd=d,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
-    uac = _start_uac(sipp, d, scenario, caller, callee, common, rate, keys, trace)
-    uac_rc = _wait(uac, 180)
-    peer_rc = _wait(proc, 30)
+    with reserved_port_pair() as caller:
+        callee = caller + 1
+        proc = subprocess.Popen(
+            [*sipp, "-sf", str(peer_path), "-p", str(callee), *common, *key_args(peer_path, peer_keys or {})]
+            + ["-recv_timeout", "15000"],
+            cwd=d,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        uac = _start_uac(sipp, d, scenario, caller, callee, common, rate, keys, trace)
+        uac_rc = _wait(uac, 180)
+        peer_rc = _wait(proc, 30)
     return _pairing(d, uac, uac_rc, peer_rc, proc.pid)
 
 
@@ -196,9 +167,8 @@ def run_burst_pair(work: Path, calls: int = 1, rate: int = 10) -> Pairing:
     assert SIPP is not None, "sipp is not on PATH"
     d = Path(tempfile.mkdtemp(prefix=f"{UAC.stem}-burst-{calls}-", dir=work))
     (d / "inject.csv").write_text("SEQUENTIAL\nservice;X-Test: loopback;;;\n")
-    caller = _free_port_pair()
-    callee = caller + 1
-    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+    with reserved_port_pair() as caller, socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+        callee = caller + 1
         sock.bind(("127.0.0.1", callee))
         common = ["-i", "127.0.0.1", "-m", str(calls), "-nostdin", "-max_invite_retrans", "3", "-max_non_invite_retrans", "3"]
         uac = _start_uac([SIPP], d, UAC, caller, callee, common, rate, None, False)
@@ -281,26 +251,26 @@ def run_uas_pair(
     scenario; `trace` keeps the UAS's message log."""
     assert SIPP is not None, "sipp is not on PATH"
     d = Path(tempfile.mkdtemp(prefix=f"{scenario.stem}-{peer.removesuffix('.xml')}-{service}-{calls}-", dir=work))
-    caller = _free_port_pair()
-    callee = caller + 1
     common = ["-i", "127.0.0.1", "-m", str(calls), "-nostdin", "-max_invite_retrans", "3", "-max_non_invite_retrans", "3"]
     traces = ["-trace_msg", "-message_file", "messages.log"] if trace else []
-    proc = subprocess.Popen(
-        [SIPP, "-sf", str(scenario), "-p", str(callee), *common, *key_args(scenario, keys or {}), "-recv_timeout", "60000"]
-        + ["-trace_err", "-trace_stat", "-stf", "stat.csv", "-fd", "1", *traces],
-        cwd=d,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
-    peer_proc = subprocess.Popen(
-        [SIPP, f"127.0.0.1:{callee}", "-sf", str(PEERS / peer), "-p", str(caller), "-s", service, *common, "-r", str(rate)]
-        + ["-recv_timeout", "30000", "-trace_err"],
-        cwd=d,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
-    peer_rc = _wait(peer_proc, 180)
-    sut_rc = _wait(proc, 60)
+    with reserved_port_pair() as caller:
+        callee = caller + 1
+        proc = subprocess.Popen(
+            [SIPP, "-sf", str(scenario), "-p", str(callee), *common, *key_args(scenario, keys or {}), "-recv_timeout", "60000"]
+            + ["-trace_err", "-trace_stat", "-stf", "stat.csv", "-fd", "1", *traces],
+            cwd=d,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        peer_proc = subprocess.Popen(
+            [SIPP, f"127.0.0.1:{callee}", "-sf", str(PEERS / peer), "-p", str(caller), "-s", service, *common, "-r", str(rate)]
+            + ["-recv_timeout", "30000", "-trace_err"],
+            cwd=d,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        peer_rc = _wait(peer_proc, 180)
+        sut_rc = _wait(proc, 60)
     return UasRun(
         sut_rc,
         peer_rc if peer_rc is not None else -9,
@@ -309,6 +279,18 @@ def run_uas_pair(
         peer_proc.pid,
         _read(d / "messages.log"),
     )
+
+
+def sent_responses(messages: str) -> list[tuple[str, str]]:
+    """(status code, CSeq) of every response a SIPp message log shows sent."""
+    out: list[tuple[str, str]] = []
+    for block in messages.split("UDP message sent")[1:]:
+        lines = [ln.strip() for ln in block.split("\n")[2:] if ln.strip()]
+        if not lines or not lines[0].startswith("SIP/2.0 "):
+            continue
+        cseq = next((ln for ln in lines if ln.lower().startswith("cseq:")), "")
+        out.append((lines[0].split(" ", 2)[1], cseq.split(":", 1)[1].strip() if cseq else ""))
+    return out
 
 
 def sent_requests(messages: str) -> list[tuple[str, str, str]]:

@@ -1,39 +1,50 @@
 # `ts/` — the TypeScript side of the replay toolchain
 
-A pnpm workspace. Nine packages, four of them one layer each of the same stack:
+A pnpm workspace. Twenty-one packages, four of them one layer each of the same stack:
 
 | package | name | owns |
 | --- | --- | --- |
 | `contracts/` | `@sip/contracts` | Effect Schema mirrors of the Rust-owned wire formats, the canonical formatter, pure readings of those formats (call key, step order, a cell's main error), and the report formats the tooling publishes (`sip.compare/1`, `sip.run-report/1`, their JSON Schemas under `contracts/schemas/`) |
-| `toolchain/` | `@sip/toolchain` | typed adapters over the Rust CLIs (`sipflow`, `pivot-schema`, `replay`) and the process primitives above them (a command into a file or a log, a detached command and its liveness, `git`, a node child's heap) — the ONLY package that knows subprocesses exist |
-| `pipeline/` | `@sip/pipeline` | flows ingest, the correlation rule engine, the cut, and case assembly |
-| `driver/` | `@sip/driver` | the campaign orchestrator: cells in, one `campaign.json` out, exit code is the verdict |
+| `toolchain/` | `@sip/toolchain` | typed adapters over the Rust CLIs (`sipflow`, `pivot-schema`, `replay`) and the process primitives above them (a command into a file or a log, a detached command and its liveness, `git`, a node child's heap), where each Rust binary is (a prebuilt directory a variable names, else the checkout's release build) and whether an optional host tool is on `PATH` — the ONLY package that adapts a Rust CLI |
+| `pipeline/` | `@sip/pipeline` | flows ingest, the correlation rule engine, the cut, the join rules a `CasePolicy` states as data, and case assembly; a deployment's join tests read its scenario actors (`./test-scenario-actors`) |
+| `delta-rules/` | `@sip/delta-rules` | the engine a deployment writes its delta rules on (ADR-0062): the rule type, first-match order and the shape a rule list holds, the readings of a probe, the lane lists, the overlap graph that pins every winner with the one-step mutants and canonical text it is keyed by, and the rules page; a deployment's rule fixtures read its probes (`./test-probes`) |
+| `rfc-delta-rules/` | `@sip/rfc-delta-rules` | the generic delta rows (ADR-0062 item 5), each citing its clause or ADR, in ordered sections, with the case facts they read, for a deployment to place among its own rows in upstream's order (item 6) and check against the rows' fixtures (`./test-fixtures`) |
+| `bless/` | `@sip/bless` | the post-run bless a deployment composes as its `Reclassifier` (ADR-0062): a failure a named rule answers restated, an RFC charge read back to the peer that authored it, the body gate, the audit of a passing cell filed by rule, and the cell's rule counts |
+| `driver/` | `@sip/driver` | one cell of a campaign, either shape, into its caller's run dir; the `campaign.json` line it answers is the caller's to fold |
 | `store/` | `@sip/store` | the run store: the postgres record of cuts, runs and what each call said, the readers a queue and a comparison use, and the run selectors |
 | `viewer-core/` | `@sip/viewer-core` | the callflow viewer's core: pivot types generated from the Rust schema, the pure ladder layouts, their SVG components, the run-bundle and capture-flows readers, and the text export |
 | `viewer-app/` | `@sip/viewer-app` | the viewer's Vite + React SPA over a deployment's server: cases, runs, the triage queue and study, and the compare and run report pages over the report formats |
 | `corpus/` | `@sip/corpus` | the orchestration of a capture corpus over a deployment's seams (`deployment/`): extraction, cut and replay on a lane, jobs and requests, and the compare and run reports a command prints and a viewer serves |
 | `cli/` | `@sip/cli` | the command lines over `@sip/corpus`: flag sets and command builders taking a deployment's facts |
+| `rig/` | `@sip/rig` | the rig's plug-in contract (ADR-0060): the pack, collector, judge and operation manifests, the rig path that finds them, the collection levels and lane wiring checked before a job opens, and the `cell.v1` description built from a cell's bundle |
+| `basic-case/` | `@sip/basic-case` | the minimal case form: two parties as plain SIP addresses, the basic call and the rejected INVITE on a pivot step builder, compiled to the cells a case source yields |
+| `case-modules/` | `@sip/case-modules` | a workspace's TypeScript case files as modules of a tooling's SDK: imported at their on-disk version with the SDK's specifier resolved to the tooling's own entry, typechecked against the SDK's declaration text alone, and that text generated from the tooling's sources — on the TypeScript compiler and node's module hooks, no other package of this workspace |
+| `workspace/` | `@sip/workspace` | one directory holding a tooling's roots, its store and its one configuration file: its layout and the environment it states, the campaigns and tags it defines, the site's public URL, and the workspace as a run's provenance |
+| `lab-host/` | `@sip/lab-host` | the host a lab runs on: its user session and the boxes its children run in, its binaries built under one box-wide lock, its roots and env files, its inbox, its run bundles, the checks a lane owes before it is driven, and the batch and SUT processes a hosted lane stands |
+| `campaign-runner/` | `@sip/campaign-runner` | a campaign run over a pack's cases: its cells compiled and replayed on each lane under their locks and the lane's pacing, retried, judged into verification lines, recorded in the store's campaign record, and reported (JUnit included) |
+| `site/` | `@sip/site` | the viewer's server: an Effect v4 HttpApi over case directories, run bundles, the store, campaign runs and the job console, serving the app's build and the documents it draws, over what a deployment's pack states of itself (`site-pack.ts`) |
+| `siprig/` | `@sip/siprig` | the base deployment the image kit ships (`tooling/siprig/`): its reading of a pack manifest before a build, and the workspace, store, site and campaign commands the base image runs for a pack that ships none of its own |
+| `reference-pack/` | `@sip/reference-pack` | the reference pack (ADR-0060 item 17): one sample per seam of the rig on the upstream B2BUA, its campaign run by `siprig`'s in this workspace's tests |
 
-Dependencies point one way only: `driver → pipeline → toolchain → contracts`,
-`store → contracts`, `viewer-app → viewer-core` (the app reads the report
-formats' types from `contracts`, nothing else), and `cli → corpus → {driver,
-store, viewer-core}`. The viewer's server is the deployment's: it serves the
-app's build and the documents the app draws. A policy package never imports the
-store: what it reads of a run reaches it as contract vocabulary. Only
-`@sip/toolchain` spawns a process; `@sip/corpus` runs every child through it.
+Dependencies point one way only; each `package.json` states a package's edges.
+`contracts` depends on nothing. The rules the edges keep:
 
-The store's tests build and drop their own databases on a postgres server:
-`STORE_TEST_URL` names one (any database of it, `postgresql:///postgres?host=…`),
-else the client's default socket. A suite whose server does not answer fails,
-naming the url; `STORE_TEST_SKIP=1` skips them instead. A
-deployment states its own configuration — database url, current population,
-selector spelling, capture names, document features — and nothing of it lives
-in the store.
+- The app never imports `@sip/site` and meets it over HTTP only, so the SPA's
+  build carries no node side. A deployment runs the site under its own entry
+  point, its pack provided once (`site-pack.ts`); `@sip/siprig` `site-main.ts`
+  is the base's.
+- A policy package never imports the store: what it reads of a run reaches it
+  as contract vocabulary.
+- Only `@sip/toolchain` runs a Rust CLI; `@sip/corpus` runs every child through
+  it, and `@sip/lab-host` stands the host's own processes.
+- A deployment states its own configuration (database url, selector spelling,
+  capture names); nothing of it lives in the store.
 
-The toolchain's suites held to the real `pivot-schema` run `PIVOT_SCHEMA_BIN`,
-else the release build (`cargo build --release -p pivot-schema`). Where neither
-is on disk they fail, naming the path and the build; `TOOLCHAIN_TEST_SKIP=1`
-skips them instead.
+The store's tests build and drop their own databases on the postgres server
+`STORE_TEST_URL` names (exported, or in the untracked `ts/.env.local`), else the
+client's default socket; `STORE_TEST_SKIP=1` skips them. The toolchain's suites
+held to the real `pivot-schema` run `PIVOT_SCHEMA_BIN`, else the release build;
+`TOOLCHAIN_TEST_SKIP=1` skips them.
 
 ## Nothing generic knows a deployment
 
@@ -59,7 +70,7 @@ const composed = Layer.mergeAll(
 `LanePresets` has no usable default on purpose: a guessed lane block would run a
 case against whatever process happened to be listening. `RoutingCompiler`'s
 default is the cell's own `overlay`, which is the escape hatch a pilot needs and
-is visible in the campaign document rather than buried in a layer.
+is visible in the cell rather than buried in a layer.
 
 The orchestration above the driver reads the same way. What only a deployment
 can state is a `@sip/corpus` seam, substituted with `layerWith`:
@@ -97,29 +108,22 @@ The case-id grammar has one source, the binding: the resolver
 
 ```text
 <run-dir>/
-  campaign.json                 the aggregate index (`e2e_core::CampaignIndex`)
+  campaign.json                 the aggregate index (`E2e.CampaignIndex`)
   specs/<cell>.run-spec.json    what the driver asked the interpreter for
   <cell>/                       IS the interpreter out_dir — it WIPES this
   <cell>/error.txt              a cell that never produced a result
 ```
 
 A cell is `{case, shape, infra}` where `shape` is `pivot-replay` or `rust-test`
-and `infra` is the lane or the crate. Cells run one at a time unless a campaign
-says otherwise: a replay cell binds real sockets and a crate cell compiles, and a
-flaky matrix is worse than a slow one.
-
-```sh
-pnpm --filter @sip/driver exec tsx src/main.ts run campaign.json --run-dir runs/1
-```
-
-The neutral entry point runs rust-test cells and refuses every pivot-replay cell
-— it composes no lane presets. A deployment ships its own entry point with its
-layers merged in.
+and `infra` is the lane or the crate. `@sip/driver` runs one cell
+(`runCell`); the replay of `@sip/corpus` (`replay/replay.ts`) runs a cut's
+cells under its ceilings and pace and writes `campaign.json`.
 
 ## Rust is the source of truth
 
-Every schema in `@sip/contracts` mirrors a serde struct in this repository, and
-each module's doc comment names the Rust file it mirrors. **A contract question
+Every schema in `@sip/contracts` that a Rust crate writes mirrors a serde struct
+in this repository, and each module's doc comment names the Rust file it
+mirrors. **A contract question
 is answered by that file, never by the mirror.** When the two disagree, the Rust
 side is right and the mirror is a bug.
 
@@ -150,10 +154,15 @@ Effect v4 is pinned exactly (`4.0.0-rc.111`, and the same for
 `@effect/platform-node`). There is no build step: every package exports its
 TypeScript source, and consumers run through `tsx` or `vitest`.
 
-The CLI is `effect/unstable/cli`, Effect v4's own home for what used to be
-`@effect/cli` — the same move that put the platform services and the process
-spawner into core. There is no 4.x `@effect/cli` to depend on; the published one
-still peers on `effect@^3` and `@effect/platform`.
+The workspace root installs `effect` at `ts/node_modules/effect`. A workspace
+that links these packages (`link:`) takes that copy for its own `effect`
+(`overrides: effect: link:<path to ts>/node_modules/effect`); the link resolves
+once this workspace is installed. A schema, a tagged error or a check built on
+one side is then read by the other, which two copies of `effect` do not
+guarantee.
+
+The CLI is `effect/unstable/cli`; `@effect/cli` peers on `effect@^3` and is not
+used.
 
 Binaries are found under `target/release` by default and overridden per binary
 by env var — `SIPFLOW`, `PIVOT_SCHEMA_BIN`. `replay` is built by the deployment

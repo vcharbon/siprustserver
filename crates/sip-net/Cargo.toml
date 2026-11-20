@@ -4,7 +4,7 @@ version = "0.1.0"
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
-description = "SIP signaling network layer (UDP transport + SignalingNetwork) — Rust port of sipjsserver src/sip/{SignalingNetwork,UdpTransport} core: the seam and its real (tokio) implementation. The simulated fabric and the recording/audit decorators live in sip-net-testkit."
+description = "SIP signaling network layer (UDP transport + SignalingNetwork): the seam and its real (tokio) implementation. The simulated fabric and the recording/audit decorators live in sip-net-testkit."
 
 [package.metadata.purity]
 tier = "shell"
@@ -45,3 +45,9 @@ metric-catalogue = { path = "../metric-catalogue" }
 # The IP-literal readers the socket addresses are built with (re-exported);
 # the loopback tests parse what they received.
 sip-message = { path = "../sip-message" }
+# A packet capture whose file refused a write says so once.
+tracing = { workspace = true }
+
+[dev-dependencies]
+# The capture tests read what the endpoint wrote with the capture decoder.
+sip-pcap = { path = "../sip-pcap" }

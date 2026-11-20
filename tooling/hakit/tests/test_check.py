@@ -98,7 +98,7 @@ def test_a_recovery_span_must_hold_enough_calls_of_each_stream(tmp_path: Path) -
 
 def test_overlapping_windows_are_refused(tmp_path: Path) -> None:
     cycle = [{"incident": "freeze", "budget": "any", "params": {"mode": "m"}}]
-    c = entry(tmp_path, schedule={"first_at_s": 60, "interval_s": 120, "cycle": cycle})
+    c = entry(tmp_path, schedule={"first_at_s": 60, "interval_s": 160, "cycle": cycle})
     assert errors(c) == []
     c = entry(tmp_path, schedule={"first_at_s": 60, "interval_s": 90, "cycle": cycle})
     assert errors(c) == [
@@ -113,6 +113,26 @@ def test_overlapping_windows_are_refused(tmp_path: Path) -> None:
         "profile 'p': event 006-freeze at 510s opens before 005-freeze's window closes "
         "(420s + expected 60s + settle 40s = 520s)",
     ]
+
+
+def test_a_window_closer_than_the_longest_call_is_refused_unless_the_profile_says_why(tmp_path: Path) -> None:
+    """A call of `basic` lives up to 32 s of setup plus 20 s of hold: a window
+    opening less than 52 s after the previous one closed can meet a call the
+    previous one already met. A load incident's own stream does not count."""
+    def freezes(*times: int) -> list[Json]:
+        return [{"at_s": t, "incident": "freeze", "budget": "any", "params": {"mode": "m"}} for t in times]
+
+    at = freezes(60, 211, 362)
+    long_burst = {**STREAM, "name": "burst", "start": "incident", "hold_s": 600}
+    assert errors(entry(tmp_path / "a", drain_s=700, streams=[STREAM, long_burst], schedule={"at": at})) == [
+        "profile 'p': event 002-freeze at 211s opens 51s after 001-freeze's window closes at 160s, under the "
+        "longest call life 52s: a call may meet both (first at 212s, or set schedule.calls_span_windows)",
+        "profile 'p': event 003-freeze at 362s opens 51s after 002-freeze's window closes at 311s, under the "
+        "longest call life 52s: a call may meet both (first at 363s, or set schedule.calls_span_windows)",
+    ]
+    assert errors(entry(tmp_path / "b", schedule={"at": freezes(60, 212, 364)})) == []
+    why = "each call meets two faults on purpose"
+    assert errors(entry(tmp_path / "c", schedule={"at": at, "calls_span_windows": why})) == []
 
 
 def test_a_key_the_scenario_reads_and_no_param_sets_is_refused(tmp_path: Path) -> None:

@@ -7,8 +7,7 @@
 //!     either impl with the typed `layer-harness` `Recorder` channel and the
 //!     RFC audit over the recording ([`rfc_audit`], whose rule bodies live once
 //!     in `rfc-rules`), plus the caller-side precondition decorator
-//!     [`ParanoidSignalingNetwork`]. See the `effect-layer-test` SKILL for the
-//!     wrapper philosophy.
+//!     [`ParanoidSignalingNetwork`]. ADR-0004 states the wrapper pattern.
 //!   - [`report`] — the wire-trace projection of a recording; [`repeat`] — the
 //!     RFC 3261 §17.2 repeat classification; [`RandomLoss`] — the fabric's
 //!     random-loss model.
@@ -19,25 +18,30 @@
 mod audit_rules;
 mod audit_view;
 pub mod contracts;
+mod event;
 pub mod loss;
+mod paranoid;
 pub mod repeat;
 pub mod report;
 pub mod rfc_audit;
 pub mod simulated;
+mod wire_stamp;
 
 // sip-net's modules, imported under the paths this crate's modules read them by.
 use sip_net::{net, pre_ingress, queue, types};
 
 pub use contracts::{
     audit_visible_event, cross_audit_event, with_all_contracts, CrossMessageAuditRule,
-    ParanoidSignalingNetwork, PeerAuditRule, RecordingSignalingNetwork, ScopedAuditOptions,
-    SendOutcome, SignalingAuditViolation, SignalingNetworkEvent, WireStamp, WrappedNetwork,
-    SIGNALING_TAG,
+    ParanoidSignalingNetwork, PeerAuditRule, PositionedFinding, RecordingSignalingNetwork,
+    ScopedAuditOptions, SendOutcome, SignalingAuditViolation, SignalingNetworkEvent, WireStamp,
+    WrappedNetwork, SIGNALING_TAG,
 };
 pub use loss::RandomLoss;
 pub use report::{to_sip_entries, wire_positions_by_stamp, RecordedSipEntry, RecvNote};
 pub use rfc_audit::capture_index::{CaptureIndex, Captured, DialogKey, Kind, Transaction, TxnKey};
-pub use rfc_audit::wire_adapter::rfc_rule_gates_sut;
+pub use rfc_audit::wire_adapter::{
+    rfc_finding_inside_sut, rfc_rule_gates_sut, rfc_rule_informative_inside_sut,
+};
 pub use rfc_audit::{
     audit_wire_entries, bind_roles_of, evaluate_rfc_audit, evaluate_rfc_findings,
     rfc_cross_message_rules, rfc_cross_message_rules_scoped, AuditPass, CrossMessageRules,

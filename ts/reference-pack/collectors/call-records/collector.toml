@@ -1,0 +1,31 @@
+# The B2BUA runner's call records over its batch (ADR-0060 appendix §17):
+# `open` empties the file the lane's `cdr-file` part names, which the runner
+# appends a JSON line to as each call ends; `collect` reads the batch's
+# records off it, each keyed by its a-leg's Call-ID, which the base joins to
+# the cell whose `call_id` key holds it (`main.ts`). The `call-records` judge
+# answers each cell's claim over the records joined to it. The lock keeps
+# every other batch's collector off the file between its `open` and its
+# `close`. A lane naming no record file does not wire it: there the judge
+# answers over the exports of the plain replay binary.
+schema = "collector.v1"
+name = "call-records"
+scope = "batch"
+needs = ["cdr-file"]
+judge = "call-records"
+locks = ["reference-cdr-file"]
+
+# How long `collect` waits for a record of each cell's call, the runner
+# writing it just after the call ended.
+[params]
+settle_s = 2
+
+[join]
+key = "call_id"
+
+[timeouts]
+open_s = 30
+collect_s = 60
+
+[run]
+open = "./run"
+collect = "./run"

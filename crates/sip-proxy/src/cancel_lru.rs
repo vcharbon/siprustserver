@@ -1,5 +1,5 @@
 //! [`CancelBranchLru`] — proxy-local `INVITE transaction → {target, branches,
-//! cookie}` cache with per-entry TTL (port of `CancelBranchLru.ts`).
+//! cookie}` cache with per-entry TTL.
 //!
 //! RFC 3261 §16.10 / §17.2.3: a stateless proxy forwards a CANCEL to the same
 //! downstream the matching INVITE went to. The outbound branch the downstream

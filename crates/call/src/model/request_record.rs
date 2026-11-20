@@ -119,8 +119,9 @@ pub struct RequestRecord {
     /// itself.
     pub offered_100rel: bool,
     /// The originator's request carried a description (RFC 3264): an offer,
-    /// on an INVITE or an UPDATE. An offerless INVITE has its offer made by
-    /// the answerer.
+    /// on an INVITE or an UPDATE, or on a PRACK whose provisional carried no
+    /// offer of its own (RFC 3262 §5). An offerless INVITE has its offer made
+    /// by the answerer; a PRACK answering its provisional's offer is `false`.
     pub offered: bool,
     /// The originator's request's `Timestamp` value, which the response
     /// relayed back to it echoes (RFC 3261 §8.2.6.1); `None` where it stated

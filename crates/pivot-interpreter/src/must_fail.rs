@@ -175,6 +175,8 @@ fn class(failure: &Failure) -> Class {
         Failure::PlanRefused { .. }
         | Failure::AccessorUnresolved { .. }
         | Failure::InjectorMissing { .. }
+        | Failure::InjectRefused { .. }
+        | Failure::InjectTimedOut { .. }
         | Failure::LaneEventUnsupported { .. }
         | Failure::LaneEventMissing { .. }
         | Failure::IdentityUnbound { .. }

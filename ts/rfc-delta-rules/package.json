@@ -1,0 +1,26 @@
+{
+  "name": "@sip/rfc-delta-rules",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "The generic delta rows (ADR-0062): values the sending stack allocates, a captured side's break of a named clause, and the documented behaviour of this repository's B2BUA and replay rig, each citing its clause or ADR, in sections and an order a deployment keeps when it places them.",
+  "exports": {
+    ".": "./src/index.ts",
+    "./test-fixtures": "./test/fixtures.ts",
+    "./*": "./src/*.ts"
+  },
+  "types": "./src/index.ts",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@sip/delta-rules": "workspace:*",
+    "@sip/pipeline": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "24.10.1",
+    "typescript": "5.9.3",
+    "vitest": "4.1.11"
+  }
+}

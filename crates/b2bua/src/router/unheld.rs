@@ -7,7 +7,8 @@
 //! call absorbed the final and its repeats while they lived (§17.1.1.2). An
 //! INVITE final no client transaction here matched, on a call this node
 //! holds, that names no leg or dialog this node holds, is answered the same
-//! way.
+//! way. Every copy of one final is answered through the node's book
+//! ([`super::unheld_book`], ADR-0063 §2).
 
 use std::net::SocketAddr;
 
@@ -32,9 +33,12 @@ pub(super) async fn answer(
     }
     let from = (src.ip().to_string(), src.port());
     let now_ms = ctx.clock.now_ms();
-    let answers =
-        b2bua_core::unheld_response::answer_unheld_response(&ctx.config, resp, from, ids, now_ms);
-    for eff in answers {
+    let Some(answer) =
+        b2bua_core::unheld_response::answer_unheld_response(&ctx.config, resp, from, ids, now_ms)
+    else {
+        return;
+    };
+    for eff in super::unheld_book::admitted(ctx, answer, now_ms) {
         let Some(dest) = sip_net::ip_socket_addr(&eff.destination.0, eff.destination.1) else {
             continue;
         };
@@ -45,7 +49,7 @@ pub(super) async fn answer(
                 let _ = ctx.txn.send_request(req.clone(), dest, kind).await;
             }
             _ => {
-                let _ = ctx.txn.send_raw(req.image().to_vec(), dest).await;
+                let _ = ctx.txn.send_raw(req.call_id().as_str(), req.image().to_vec(), dest).await;
             }
         }
     }

@@ -15,7 +15,7 @@
 loadgen-smoke = { max-threads = 4 }
 
 # The default lane (`just test`): fake-clock tests and real-clock tests under
-# 1 s (CLAUDE.md "Test-runtime policy"). A test still running at 30 s is
+# 1 s (docs/testing/lanes-and-build.md). A test still running at 30 s is
 # reported slow and killed at 2 min: nothing in this lane comes near that.
 [profile.default]
 test-threads = 16

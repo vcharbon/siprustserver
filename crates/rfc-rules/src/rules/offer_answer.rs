@@ -3,9 +3,11 @@
 //! reading of the wire they share.
 //!
 //! **The reading is a per-AGENT state machine, and every message feeds two of
-//! them.** A description is one endpoint's emission and the other's arrival, so
-//! the walk absorbs each message twice — once as `src`, once as `dst` — and
-//! each agent keeps its own rounds. A round opens when a request carries a
+//! them.** A description is one agent's emission and the other's arrival, so
+//! the walk absorbs each message twice — once for its sender, once for its
+//! taker — and each agent keeps its own rounds. An agent is every socket its
+//! transactions tie on the call ([`correlation::Parties`](super::correlation::Parties));
+//! a finding still names the sockets of the message judged. A round opens when a request carries a
 //! description and closes when the first non-failure response to that
 //! transaction carries one; a request WITHOUT a description whose 2xx carries
 //! one is the delayed-offer form (§13.2.1), where the 2xx is the offer and the

@@ -1,6 +1,6 @@
 //! Simulated in-memory fabric — routing, faults, bounded-queue tail-drop,
-//! pre-ingress, undeliverable, quiescence. The fake-transport behaviours the
-//! source's `SignalingNetwork.simulated.ts` provided to the test harness.
+//! pre-ingress, undeliverable, quiescence: the fake-transport behaviours the
+//! test harness stands on.
 
 use std::sync::Arc;
 use std::time::Duration;

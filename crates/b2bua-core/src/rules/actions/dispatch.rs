@@ -122,6 +122,9 @@ impl ActionExecutor<'_> {
             RuleAction::ReleaseStraggler2xx { leg_id } => {
                 self.release_straggler(call, fx, ctx, leg_id);
             }
+            RuleAction::ReAckAhead { leg_id } => {
+                super::ack_leg::re_ack_ahead(call, fx, ctx, leg_id)
+            }
             RuleAction::ConfirmDialog { leg_id } => {
                 self.confirm(call, fx, ctx, leg_id);
             }
@@ -139,6 +142,9 @@ impl ActionExecutor<'_> {
             }
             RuleAction::RejectPendingReinvite { leg_id, outbound_cseq, status, reason } => {
                 self.reject_pending_reinvite(call, fx, leg_id, *outbound_cseq, *status, reason);
+            }
+            RuleAction::AnswerRelayOriginator { status, reason } => {
+                self.answer_relay_originator(call, fx, ctx, *status, reason);
             }
             RuleAction::TerminateCall { cause, by_leg } => {
                 settle(call, fx, Legs::Every, Cause::LegEnd, self.now_ms);

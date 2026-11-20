@@ -133,11 +133,42 @@ pub(super) fn invite_here(ctx: &RouterCtx, call_ref: &str, cseq: u32) -> bool {
 }
 
 /// Whether an INVITE carrying CSeq `cseq` on `call`'s identity is a copy of
-/// `call`'s own: its INVITE carries the same CSeq. A copy is answered 482
-/// even once the original's transaction has ended, which §8.2.2.2 does not
-/// cover.
+/// `call`'s own: its INVITE carries the same CSeq.
 fn copies(call: &Call, cseq: u32) -> bool {
     call.a_leg_invite.cseq == cseq
+}
+
+/// Whether `req`, a copy of `call`'s own INVITE, retransmits that INVITE
+/// once answered: it names the INVITE's server transaction, top-Via branch
+/// and sent-by (RFC 3261 §17.2.3), and that transaction sent its final, so
+/// the copy is owed no other (§17.2.1). Any other copy is answered as a
+/// request merged with it (§8.2.2.2).
+fn retransmits_answered(call: &Call, req: &SipRequest) -> bool {
+    call.a_leg.invite_final_sent().is_some()
+        && sip_txn::ServerTxnKey::of(req)
+            .is_some_and(|key| super::materialise::caller_invite_key(call) == Some(key))
+}
+
+/// Whether the new INVITE `req` of `call_ref` retransmits the live call's
+/// answered INVITE after its transaction ended ([`retransmits_answered`]):
+/// then it is absorbed as it arrives, before any turn, so the 100 Trying
+/// bound of the transaction the layer opened for it never fires. That
+/// transaction is relinquished with nothing sent, and the copy is counted
+/// refused. A copy of a call answered after this read gets the turn's 482.
+pub(super) async fn absorbs_retransmission(
+    ctx: &RouterCtx,
+    call_ref: &str,
+    req: &SipRequest,
+) -> bool {
+    let live = ctx.state.resident(call_ref);
+    if !live.is_some_and(|call| retransmits_answered(&call, req)) {
+        return false;
+    }
+    if let Some(key) = sip_txn::ServerTxnKey::of(req) {
+        let _ = ctx.txn.relinquish_server(key).await;
+    }
+    ctx.metrics.new_calls().refuse_copy();
+    true
 }
 
 /// Judge the new INVITE `req` of `call_ref` offered as `dispatch` on the

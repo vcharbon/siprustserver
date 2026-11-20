@@ -12,7 +12,7 @@ import * as Effect from "effect/Effect"
 import * as fs from "node:fs"
 import * as path from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
-import { runCampaign } from "../src/campaign.js"
+import { runCell } from "../src/cells.js"
 import { CONFRONTATION_FILE, ERROR_FILE } from "../src/layout.js"
 import { pivotDocument, rig, runDir, stubTests } from "./harness.js"
 
@@ -89,12 +89,9 @@ const confront = async (legs: Array<unknown>) => {
     flows
   }
   const run = await Effect.runPromise(
-    runCampaign(
-      { campaign: "stub", cells: [cell] },
-      { runDir: dir, ts: "2026-08-25T00:00:00Z", tests: stubTests(0, true) }
-    ).pipe(Effect.provide(rig({ reads })))
+    runCell(cell, { runDir: dir, tests: stubTests(0, true), mode: "record" }).pipe(Effect.provide(rig({ reads })))
   )
-  const cellDir = path.join(dir, run.index.cells[0]!.dir)
+  const cellDir = path.join(dir, run.summary.dir)
   return { run, flows, reads, cellDir }
 }
 
@@ -104,7 +101,7 @@ const LEGS = Array.from({ length: 7 }, (_, index) => legOf(index))
 describe("a replay cell's flows document", () => {
   it("is confronted against without ever being read as one string", async () => {
     const { cellDir, flows, reads, run } = await confront(LEGS)
-    expect(run.index.cells[0]!.passed).toBe(true)
+    expect(run.summary.passed).toBe(true)
     expect(fs.existsSync(path.join(cellDir, CONFRONTATION_FILE))).toBe(true)
     // The pivot document beside it IS read whole, which is what says the watch
     // is wired at all: the flows document is the one file that must not be.
@@ -115,7 +112,7 @@ describe("a replay cell's flows document", () => {
   it("fails the cell on a cited leg the contract refuses, naming that leg", async () => {
     const legs = LEGS.map((leg, index) => (index === 5 ? { ...leg, final_status: "200" } : leg))
     const { cellDir, run } = await confront(legs)
-    expect(run.index.cells[0]!.passed).toBe(false)
+    expect(run.summary.passed).toBe(false)
     const error = fs.readFileSync(path.join(cellDir, ERROR_FILE), "utf8")
     expect(error).toContain("FlowsLegRefused")
     expect(error).toContain("legs[5]")
@@ -124,13 +121,13 @@ describe("a replay cell's flows document", () => {
   it("never decodes a leg the case does not cite", async () => {
     const legs = LEGS.map((leg, index) => (index === 1 ? { ...leg, final_status: "200" } : leg))
     const { cellDir, run } = await confront(legs)
-    expect(run.index.cells[0]!.passed).toBe(true)
+    expect(run.summary.passed).toBe(true)
     expect(fs.existsSync(path.join(cellDir, CONFRONTATION_FILE))).toBe(true)
   })
 
   it("compares nothing for a coordinate past the document, and still runs the cell", async () => {
     const { cellDir, run } = await confront([legOf(0), legOf(1), legOf(2)])
-    expect(run.index.cells[0]!.passed).toBe(true)
+    expect(run.summary.passed).toBe(true)
     expect(fs.existsSync(path.join(cellDir, CONFRONTATION_FILE))).toBe(true)
   })
 })

@@ -1,5 +1,5 @@
 /**
- * The correlation-rule file (`rule-format-v0.md`), mirroring
+ * The correlation-rule file, mirroring
  * `pivot_schema::rules`: how calls join into cases.
  *
  * This file is the MIDDLE of three layers. In-dialog assembly (Call-ID + tags to
@@ -8,12 +8,15 @@
  * over the neutral groups. A rule carries NO meaning: its name is an evidence
  * label.
  *
- * Five kinds, each hard-coding its own anchor, internally tagged on `kind` in
- * kebab-case. The extension path is a SIXTH kind with its own small matcher,
- * never a more general existing one.
+ * Six kinds, each hard-coding its own anchor, internally tagged on `kind` in
+ * kebab-case: `call-id`, `header-key` (one header, the same on both calls),
+ * `header-pair` (a header of one call against another header of the other),
+ * `retry`, `replaces`, `refer`. The extension path is one more kind with its
+ * own small matcher, never a more general existing one.
  */
 import * as Effect from "effect/Effect"
 import * as Schema from "effect/Schema"
+import { isCallIdHeader } from "./flows.js"
 import { STRICT } from "./strict.js"
 
 /** The `version` this contract models. */
@@ -44,6 +47,31 @@ export const HeaderKeyRule = Schema.Struct({
   window_ms: Schema.optionalKey(Schema.Int)
 })
 export interface HeaderKeyRule extends Schema.Schema.Type<typeof HeaderKeyRule> {}
+
+/** One side of a `header-pair` rule: a header of a call's initial INVITE and the regex yielding its key. */
+export const HeaderSide = Schema.Struct({
+  header: Schema.String,
+  pattern: Schema.String
+})
+export interface HeaderSide extends Schema.Schema.Type<typeof HeaderSide> {}
+
+/**
+ * A key one call's initial INVITE carries in one header and another call's in
+ * another header. Anchor: each call's first INVITE. The left call's `left`
+ * header and the right call's `right` header yield equal keys: the right call
+ * was set up off the left one. `Call-ID` is a header like any other, read off
+ * the call's own Call-ID. With `window_ms`, a right call joins the left call of
+ * its key whose INVITE is nearest in time within the window, and none outside
+ * it; without, every left call of its key.
+ */
+export const HeaderPairRule = Schema.Struct({
+  kind: Schema.Literal("header-pair"),
+  name: Schema.String,
+  left: HeaderSide,
+  right: HeaderSide,
+  window_ms: Schema.optionalKey(Schema.Int)
+})
+export interface HeaderPairRule extends Schema.Schema.Type<typeof HeaderPairRule> {}
 
 /**
  * Reroute / failover chain, CALL-LEVEL: whole-call facts only. A final joins the
@@ -76,7 +104,7 @@ export const ReferRule = Schema.Struct({
 export interface ReferRule extends Schema.Schema.Type<typeof ReferRule> {}
 
 /** One rule. `name` is unique and shows up in the evidence a join carries. */
-export const Rule = Schema.Union([CallIdRule, HeaderKeyRule, RetryRule, ReplacesRule, ReferRule])
+export const Rule = Schema.Union([CallIdRule, HeaderKeyRule, HeaderPairRule, RetryRule, ReplacesRule, ReferRule])
 export type Rule = typeof Rule.Type
 
 /** A correlation rule file. The rules are tried in file order. */
@@ -103,6 +131,11 @@ export const ruleKeyRegexes = (rule: Rule): Array<[string, string]> => {
       ]
     case "header-key":
       return [["pattern", rule.pattern]]
+    case "header-pair":
+      return [
+        ["left.pattern", rule.left.pattern],
+        ["right.pattern", rule.right.pattern]
+      ]
     default:
       return []
   }
@@ -137,8 +170,22 @@ export const validateRuleFile = (file: RuleFile): void => {
 /**
  * Every header a rule file names — the `--emit-headers` allow-list the flows
  * emitter is asked for, so a rule can never read a header the document does not
- * project.
+ * project. `Call-ID` is left out: a rule reads it off the leg
+ * (`Flows.ruleHeaderValues`), never off a projection.
  */
 export const headersNamedBy = (rules: ReadonlyArray<Rule>): Array<string> => [
-  ...new Set(rules.flatMap((rule) => (rule.kind === "header-key" ? [rule.header] : [])))
+  ...new Set(
+    rules
+      .flatMap((rule) => {
+        switch (rule.kind) {
+          case "header-key":
+            return [rule.header]
+          case "header-pair":
+            return [rule.left.header, rule.right.header]
+          default:
+            return []
+        }
+      })
+      .filter((header) => !isCallIdHeader(header))
+  )
 ]

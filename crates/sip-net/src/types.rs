@@ -1,10 +1,7 @@
-//! Public network-layer types — port of the type surface in
-//! `src/sip/SignalingNetwork.ts`, reshaped to Rust / tokio idioms.
-//!
-//! Reshaping notes (the "closer to Rust methods" adaptation):
-//!   - `RemoteInfo { address, port }` → [`std::net::SocketAddr`] everywhere.
-//!   - `bindUdp` ip/port pair → a single `addr: SocketAddr` on [`BindUdpOpts`].
-//!   - `Buffer` → `Bytes` (received) / `&[u8]` (borrowed on `send`).
+//! Public network-layer types, in Rust / tokio idioms:
+//!   - a peer is a [`std::net::SocketAddr`] everywhere.
+//!   - a bind names a single `addr: SocketAddr` on [`BindUdpOpts`].
+//!   - a datagram is `Bytes` (received) / `&[u8]` (borrowed on `send`).
 //!   - `PreIngressHook` is an `Arc<dyn Fn ...>` so it is cheap to clone into
 //!     the simulated fabric's routing table and into recorded summaries.
 
@@ -17,6 +14,7 @@ use sip_message::Bytes;
 
 use crate::arrival::Arrival;
 use crate::parse_guard::ParseOutcome;
+pub use crate::queue::QueueLoad;
 
 /// One received datagram handed up from an endpoint's inbound queue.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -117,12 +115,21 @@ impl ReEmitKind {
     }
 }
 
+/// What an endpoint did below the recording decorator with an outbound
+/// datagram — the send-side twin of [`RecvDisposition`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SendNote {
+    /// Put on the wire again by the endpoint's retransmit engine.
+    ReEmit(ReEmitKind),
+    /// Handed to `send_to` and discarded by the simulated packet-loss model
+    /// (loadgen `--drop-rate`): never on the wire.
+    LossModel,
+}
+
 /// Send-time tap installed on an endpoint by the recording decorator (sampled
-/// calls only). Invoked with the raw bytes, destination, and [`ReEmitKind`]
-/// each time the endpoint's retransmit engine puts a re-emitted datagram on the
-/// wire — the outbound twin of [`RecvTap`], so recovery traffic is visible on
-/// the ladder rather than silently hitting the socket below the recording.
-pub type SendTap = Arc<dyn Fn(&[u8], SocketAddr, ReEmitKind) + Send + Sync>;
+/// calls only), the outbound twin of [`RecvTap`]: told of each datagram the
+/// endpoint re-emits or its loss model drops, both below the recording.
+pub type SendTap = Arc<dyn Fn(&[u8], SocketAddr, SendNote) + Send + Sync>;
 
 /// Per-endpoint counters: the live atomics behind an endpoint, plus the
 /// kernel's own drop count for a real socket, read at snapshot time.
@@ -160,7 +167,7 @@ pub struct SocketBuffers {
     pub send: usize,
 }
 
-/// SIP role(s) a bind serves (port of `UaRole`). The audit framework's
+/// SIP role(s) a bind serves. The audit framework's
 /// per-rule dispatch intersects a rule's `subject` with a bind's declared
 /// roles; a `proxy`-only rule does not run against a pure-UA bind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -181,6 +188,10 @@ pub fn all_ua_roles() -> HashSet<UaRole> {
 pub enum PreIngressAction {
     /// Enqueue normally.
     Accept,
+    /// Enqueue on the lane the consumer takes before every datagram that
+    /// waits ([`PacketQueue::offer_ahead`](crate::queue::PacketQueue::offer_ahead)):
+    /// a liveness probe, whose answer must not wait behind a backlog.
+    AcceptAhead,
     /// Silently drop (counted as `pre_ingress_dropped`).
     Drop,
     /// Don't enqueue; send `datagram` to `to` (counted as
@@ -191,13 +202,13 @@ pub enum PreIngressAction {
 
 /// Arrival-time filter installed at `bind_udp`. Receives the datagram (its
 /// bytes, and the parse it makes through [`Arrival::parse`], which the queued
-/// packet carries on), the source address, and the current queue depth.
-/// `Arc<dyn Fn>` so it clones into the simulated routing table and recorded
-/// summaries.
+/// packet carries on), the source address, and the inbound queue's load as
+/// the datagram arrives. `Arc<dyn Fn>` so it clones into the simulated
+/// routing table and recorded summaries.
 pub type PreIngressHook =
-    Arc<dyn Fn(&mut Arrival, SocketAddr, usize) -> PreIngressAction + Send + Sync>;
+    Arc<dyn Fn(&mut Arrival, SocketAddr, QueueLoad) -> PreIngressAction + Send + Sync>;
 
-/// Options for `bind_udp` (port of `BindUdpOpts`).
+/// Options for `bind_udp`.
 #[derive(Clone)]
 pub struct BindUdpOpts {
     pub addr: SocketAddr,
@@ -350,7 +361,7 @@ pub enum BindErrorReason {
     HeldBack,
 }
 
-/// Failure binding a UDP endpoint (port of `BindError`).
+/// Failure binding a UDP endpoint.
 #[derive(Debug, Clone, thiserror::Error)]
 #[error("bind {addr} failed ({reason:?}): {message}")]
 pub struct BindError {
@@ -418,7 +429,7 @@ impl SendErrorKind {
     }
 }
 
-/// Failure sending a datagram (port of `SendError`).
+/// Failure sending a datagram.
 #[derive(Debug, Clone, thiserror::Error)]
 #[error("send failed: {message}")]
 pub struct SendError {

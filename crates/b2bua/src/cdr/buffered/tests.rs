@@ -111,6 +111,35 @@ async fn a_write_after_the_close_is_counted_dropped() {
     assert_eq!(metrics.cdr_dropped_total(), 1);
 }
 
+/// With the drainer held in its first write and two records queued, the
+/// queue is full: each further record is one counted drop, and the three
+/// taken are written.
+#[tokio::test(start_paused = true)]
+async fn a_record_that_finds_the_queue_full_is_counted_dropped() {
+    let (sink, metrics) = (SlowSink::new(Duration::from_secs(1)), B2buaMetrics::new());
+    let buf = BufferedCdrWriter::spawn(sink.clone(), 2, metrics.clone());
+    buf.write(&a_call(), 2_000).await;
+    tokio::time::sleep(Duration::from_millis(1)).await;
+    for _ in 0..4 {
+        buf.write(&a_call(), 2_000).await;
+    }
+    assert_eq!((buf.dropped_total(), metrics.cdr_dropped_total()), (2, 2));
+    buf.close(Instant::now() + Duration::from_secs(10)).await;
+    assert_eq!(sink.written(), 3);
+    assert_eq!((buf.dropped_total(), metrics.cdr_dropped_total()), (2, 2));
+}
+
+/// A depth past the channel's permit ceiling is held to `MAX_QUEUE`: the
+/// buffer starts and delivers.
+#[tokio::test(start_paused = true)]
+async fn a_depth_above_the_ceiling_still_buffers() {
+    let (sink, metrics) = (SlowSink::new(Duration::ZERO), B2buaMetrics::new());
+    let buf = BufferedCdrWriter::spawn(sink.clone(), usize::MAX, metrics.clone());
+    buf.write(&a_call(), 2_000).await;
+    buf.close(Instant::now() + Duration::from_secs(1)).await;
+    assert_eq!((sink.written(), metrics.cdr_dropped_total()), (1, 0));
+}
+
 #[tokio::test(start_paused = true)]
 async fn a_second_close_waits_for_the_first() {
     let (sink, metrics) = (SlowSink::new(Duration::from_millis(100)), B2buaMetrics::new());

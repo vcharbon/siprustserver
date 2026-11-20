@@ -406,6 +406,17 @@ export const userOf = (identity: Identity | undefined): string | undefined =>
 export const headerValues = (msg: Msg, name: string): Array<string> =>
   (msg.headers ?? []).filter((h) => h.name.toLowerCase() === name.toLowerCase()).map((h) => h.value)
 
+/** Whether `name` is the `Call-ID` header, in any case. */
+export const isCallIdHeader = (name: string): boolean => name.toLowerCase() === "call-id"
+
+/**
+ * The values of header `name` on `msg`, a message of the leg on `callId`, as a
+ * correlation rule reads them: `Call-ID` is the leg's own, never a projection;
+ * any other header is its projected instances ({@link headerValues}).
+ */
+export const ruleHeaderValues = (callId: string, msg: Msg, name: string): Array<string> =>
+  isCallIdHeader(name) ? [callId] : headerValues(msg, name)
+
 /**
  * Refuse a document that does not project a header a rule names. Without this
  * the rule silently matches nothing — a quiet mismatch, one level up.

@@ -1,5 +1,5 @@
 //! The **declared compatibility matrix** that GENERATES the establishment ×
-//! script cross-product of load shapes (callshapes program §7 / phase D1).
+//! script cross-product of load shapes.
 //!
 //! Rather than hand-listing every `Establishment`+`Script` combination, the
 //! axes are declared as data (`ESTS`, `SCRS`) and a compatibility predicate

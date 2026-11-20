@@ -87,7 +87,7 @@ describe("countBundle", () => {
   it("folds each cell's counts into rows: written counts as written, the rest off the sheet", async () => {
     const runDir = path.join(ROOT, "run1")
     cell(runDir, "a-written", {
-      hits: CellHits.emitHits([{ family: "tolerance", rule: "t1", bucket: "header", hits: 2 }]),
+      hits: CellHits.emitHits([{ family: "delta", rule: "t1", bucket: "header", hits: 2 }]),
       rules: ["ignored"]
     })
     cell(runDir, "b-sheet", { verdict: "ok", rules: ["r1", "r1"] })
@@ -112,7 +112,7 @@ describe("countBundle", () => {
     expect(asked.get("c-sheet")).toBe(false)
     const rows = [...counted.hits].sort((a, b) => `${a.rule}${a.bucket}`.localeCompare(`${b.rule}${b.bucket}`))
     expect(rows.find((row) => row.rule === "t1")).toEqual({
-      family: "tolerance",
+      family: "delta",
       rule: "t1",
       bucket: "header",
       hits: 2,

@@ -11,9 +11,15 @@
 //! | BYE | ends the dialog | passes | — |
 //! | PRACK | the session | passes | 200 (RFC 3262 §3) |
 //! | NOTIFY | carries a subscription's state; never on a subscription that is terminated (RFC 6665 §4.2.2) | 200 | 481 |
-//! | REFER | opens an implicit subscription (RFC 3515 §2.4.4) | 487 | 481 |
-//! | INFO, MESSAGE, OPTIONS | the session | 200 | 481 |
-//! | UPDATE, SUBSCRIBE, any other | the session | 487 (§21.4.25) | 481 |
+//! | REFER | opens an implicit subscription (RFC 3515 §2.4.4) | 487 | 487 |
+//! | INFO, MESSAGE, OPTIONS | the session | 200 | 487 |
+//! | UPDATE, SUBSCRIBE, any other | the session | 487 (§21.4.25) | 487 |
+//!
+//! A relay toward a leg that ended is terminated with it while its
+//! originator's dialog lives on or is being ended by this stack: 487 (RFC 3261
+//! §15.1.2) ends that transaction alone (RFC 5057 §5.1), where 481 would end
+//! the originator's dialog (§12.2.1.2). A NOTIFY's 481 ends only its
+//! subscription, whose subscriber is gone.
 //!
 //! What the timeout of this stack's own request ends is the rules' to decide
 //! (`defaults::request_timeouts`). Glare and offer/answer are facts of the
@@ -46,17 +52,21 @@ pub struct MethodRow {
     pub owed_at_leg_end: (u16, &'static str),
 }
 
+const TERMINATED: (u16, &str) = (487, "Request Terminated");
 const DOES_NOT_EXIST: (u16, &str) = (481, "Call/Transaction Does Not Exist");
 
 /// The row of `method`.
 pub fn row(method: &Method) -> MethodRow {
-    let ordinary = MethodRow { on_ending: OnEnding::Terminate, owed_at_leg_end: DOES_NOT_EXIST };
+    let ordinary = MethodRow { on_ending: OnEnding::Terminate, owed_at_leg_end: TERMINATED };
     match method {
         Method::Bye => MethodRow { on_ending: OnEnding::Pass, ..ordinary },
         Method::Prack => {
             MethodRow { on_ending: OnEnding::Pass, owed_at_leg_end: (200, "OK"), ..ordinary }
         }
-        Method::Notify | Method::Info | Method::Message | Method::Options => {
+        Method::Notify => {
+            MethodRow { on_ending: OnEnding::Absorb, owed_at_leg_end: DOES_NOT_EXIST }
+        }
+        Method::Info | Method::Message | Method::Options => {
             MethodRow { on_ending: OnEnding::Absorb, ..ordinary }
         }
         _ => ordinary,

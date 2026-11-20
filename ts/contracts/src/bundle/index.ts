@@ -8,7 +8,7 @@
  *   run-config.json         `RunConfig` — the lane's compiled configuration
  *   recording/<leg>.jsonl   one `RecordedMessage` per line, in wire order
  *   verdict.json            `RunVerdict` — what the run decided, and why
- *   timing.json             `RunTiming` — when it started and when it settled
+ *   timing.json             `RunTiming` — when it started and settled, on its clock and the wall clock
  *   rfc.json                `RunRfcAudit` — the post-run RFC audit, or that none ran
  * ```
  *
@@ -28,18 +28,13 @@ import { RunVerdict } from "./verdict.js"
 
 export * from "./bindings.js"
 export * from "./overlay.js"
+export * from "./recorded-head.js"
 export * from "./recording.js"
 export * from "./rfc.js"
 export * from "./runconfig.js"
 export * from "./timing.js"
 export * from "./verdict.js"
 
-/**
- * The overlay decodes like every other record here, and it needs to: a driver
- * reads a hand-written one out of a campaign document or a pilot run-spec, and
- * nobody outside this package may build a decoder for a schema this package owns.
- */
-export const decodeRunOverlay = Schema.decodeUnknownEffect(RunOverlay, STRICT)
 export const decodeRunConfig = Schema.decodeUnknownEffect(RunConfig, STRICT)
 export const decodeRunVerdict = Schema.decodeUnknownEffect(RunVerdict, STRICT)
 export const decodeRunTiming = Schema.decodeUnknownEffect(RunTiming, STRICT)
@@ -53,7 +48,6 @@ export const decodeRunTimingSync = Schema.decodeUnknownSync(RunTiming, STRICT)
 export const decodeRecordedMessageSync = Schema.decodeUnknownSync(RecordedMessage, STRICT)
 export const decodeRunRfcAuditSync = Schema.decodeUnknownSync(RunRfcAudit, STRICT)
 
-export const emitRunOverlay = (value: RunOverlay): string => format(Schema.encodeUnknownSync(RunOverlay, STRICT)(value))
 export const emitRunConfig = (value: RunConfig): string => format(Schema.encodeUnknownSync(RunConfig, STRICT)(value))
 export const emitRunVerdict = (value: RunVerdict): string => format(Schema.encodeUnknownSync(RunVerdict, STRICT)(value))
 export const emitRunTiming = (value: RunTiming): string => format(Schema.encodeUnknownSync(RunTiming, STRICT)(value))

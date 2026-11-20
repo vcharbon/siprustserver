@@ -3,12 +3,13 @@
 //! This test crate depends on **`b2bua-sdk` only** (no `b2bua`, not even `call`
 //! directly — the framework types are reached through `b2bua_sdk::rules`). A
 //! service authored entirely against that surface must compile and produce
-//! correct rule metadata. It is the in-crate counterpart of the out-of-tree
+//! correct rule metadata; the `watchdog` service, with a timer, a direction and
+//! a leg state, is checked by compiling alone. It is the in-crate counterpart of the out-of-tree
 //! boundary check the `announcement` crate makes.
 
 use b2bua_sdk::rules::{
     Effect, EffectKind, MachineId, Match, Method, RuleContext, RuleDefinition, RuleHandleResult,
-    StateLabel, SERVICE_LAYER,
+    ServiceDef, StateLabel, SERVICE_LAYER,
 };
 use b2bua_sdk::{define_service, sm_rule};
 
@@ -39,6 +40,71 @@ mod stub {
         ],
     }
 }
+
+/// A service that guards its media leg with a timer of its own: armed on the
+/// callee's early answer, matched on its fire. It is a compile-only check: every
+/// name it uses comes from `b2bua_sdk::rules`, and the build is its test.
+mod watchdog {
+    use b2bua_sdk::rules::{
+        leg_kind, Direction, Effect, Leg, LegKind, LegState, Match, RuleAction, RuleCall,
+        RuleContext, RuleHandleResult, TimerDelay, TimerKey, TimerScopeKind, TimerType,
+    };
+    use b2bua_sdk::{define_service, sm_rule};
+
+    const WATCHDOG: TimerType = TimerType::service(WATCHDOG_MACHINE, "clip-watchdog");
+
+    /// The live media leg of the call.
+    fn media_leg<'a>(call: &RuleCall<'a>) -> Option<&'a Leg> {
+        call.b_legs()
+            .iter()
+            .find(|l| leg_kind(l) == LegKind::Media && l.state() != LegState::Terminated)
+    }
+
+    fn on_early(ctx: &RuleContext) -> Option<RuleHandleResult> {
+        let leg = media_leg(&ctx.call)?;
+        let key = TimerKey::leg(WATCHDOG, leg.leg_id.clone());
+        Some(RuleHandleResult::new(vec![RuleAction::arm(key, TimerDelay::secs(10))]))
+    }
+
+    fn on_fire(_ctx: &RuleContext) -> Option<RuleHandleResult> {
+        None
+    }
+
+    define_service! {
+        id: "watchdog",
+        machine: WATCHDOG_MACHINE,
+        states: WatchdogState { Guarding },
+        init: |_call: &RuleCall| None,
+        rules: [
+            sm_rule! {
+                id: "watchdog-arm",
+                machine: WATCHDOG_MACHINE,
+                active: [ WatchdogState::Guarding ],
+                transitions: [],
+                effects: [
+                    Effect::GuardTimer { timer: WATCHDOG, scope: TimerScopeKind::Leg, label: "clip watchdog" },
+                ],
+                matcher: Match::response()
+                    .method("INVITE")
+                    .status_class(1)
+                    .direction(Direction::FromB)
+                    .leg_states(&[LegState::Early]),
+                handle: on_early,
+            },
+            sm_rule! {
+                id: "watchdog-fire",
+                machine: WATCHDOG_MACHINE,
+                active: [ WatchdogState::Guarding ],
+                transitions: [],
+                effects: [],
+                matcher: Match::timer().service_timers(WATCHDOG_MACHINE),
+                handle: on_fire,
+            },
+        ],
+    }
+}
+
+const _: fn() -> ServiceDef = watchdog::service_def;
 
 #[test]
 fn macro_yields_machine_id_and_state_labels() {

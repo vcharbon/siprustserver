@@ -1,9 +1,8 @@
-//! The shipped catalog, REGENERATED through the pipeline algebra — same ids,
-//! same downstream contract (`docs/todos/actor-harness-p1-contract-table.md`),
-//! byte-for-byte on the wire as the historic hand-written bodies in
-//! `scenario_harness::actor::scenarios`. This is the phase-B equivalence
-//! proof: the whole existing test surface (loadgen smoke + fake-net, actor
-//! tests, e2e) runs these compositions via the shape registry.
+//! The shipped catalog, built through the pipeline algebra: same ids, same
+//! downstream contract (stated on each scenario type), the same wire as the
+//! hand-written bodies in `scenario_harness::actor::scenarios`. The loadgen
+//! smoke and fake-net tests, the actor tests and e2e run these compositions
+//! via the shape registry.
 //!
 //! Every constructor takes the platform [`RouteBinder`]; upstream callers pass
 //! [`EgressBinder`] (see [`default_binder`]).

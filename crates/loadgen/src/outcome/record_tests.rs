@@ -149,7 +149,8 @@ fn after_answer_the_dialog_facts_name_the_ending() {
 }
 
 /// An RFC audit vote on a call the callee released is a protocol anomaly of an
-/// answered call, never a cut.
+/// answered call, never a cut; its detail leads with the rule id, then names
+/// the charged party (`?` when none), the lane and the finding.
 #[test]
 #[ignore = "slow lane: loadgen"]
 fn an_audit_vote_on_a_released_call_is_no_cut() {
@@ -160,13 +161,17 @@ fn an_audit_vote_on_a_released_call_is_no_cut() {
         advisory: false,
         offending: None,
         charged: None,
+        counterpart: None,
     };
     let r = record(
         &WireFacts { bye_received: Some(Some(200)), ..answered() },
         &CallOutcome::RfcAuditFail(vec![finding]),
     );
     assert_eq!(r["ending"], "answered");
-    assert_eq!(r["failures"][0]["detail"], "mid-dialog-route");
+    assert_eq!(
+        r["failures"][0]["detail"],
+        "mid-dialog-route charged=? lane=10.0.0.1:5060 :: in-dialog BYE omits Route header"
+    );
 }
 
 /// A step of an answered call that waited in vain is a failure, even when the

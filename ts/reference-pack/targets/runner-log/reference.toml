@@ -1,0 +1,3 @@
+# The reference lane's runner log: the file its B2BUA runner's output is
+# appended to, which the `sut-log` collector cuts per batch.
+file = "/tmp/siprig-reference/b2bua-runner.log"

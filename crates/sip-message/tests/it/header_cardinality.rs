@@ -1,5 +1,4 @@
-//! Header-cardinality enforcement (RFC 3261 §8.1.1 / §8.1.1.8 / §12.1.1). Port
-//! of `tests/sip/header-cardinality.test.ts`.
+//! Header-cardinality enforcement (RFC 3261 §8.1.1 / §8.1.1.8 / §12.1.1).
 //!
 //! From / To / Call-ID / CSeq appear exactly once; a duplicate is rejected.
 //! Contact may repeat only where a list is legal (3xx redirects, REGISTER);

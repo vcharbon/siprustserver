@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use super::emission::RetainedEmission;
 use super::outbound_invite::OutboundInvite;
+use super::request_record::{RequestOrigin, RequestRecord};
 
 /// A 2xx to an INVITE this side received that still awaits the ACK for it
 /// (RFC 3261 §13.3.1.4): the retained emission its ladder repeats, with the
@@ -29,6 +30,73 @@ pub struct Unacked2xx {
     pub emission: RetainedEmission,
 }
 
+/// A copy of a taken 2xx owed its re-ACK (RFC 3261 §13.2.2.4): its number
+/// among the copies counted ([`InviteExchange::copies_received`]) and the
+/// instant it arrived.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReAckedCopy {
+    /// The copy's number, counting from 1.
+    pub copy: u32,
+    /// When the copy arrived, in ms on the turn clock.
+    pub at_ms: i64,
+}
+
+/// The ACK the 2xx to the INVITE a dialog sent before its last drew, as it
+/// left (§13.2.2.4), with the copies of that 2xx counted on that exchange
+/// (ADR-0057 §10): a copy arriving once the next INVITE left is answered by
+/// this ACK alone, under the same bound.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AckAhead {
+    /// The ACK, as the exact datagram that left.
+    pub ack: RetainedEmission,
+    /// The CSeq of the INVITE whose 2xx the ACK acknowledges, which the ACK
+    /// echoes.
+    pub invite_cseq: i64,
+    /// The Via branch of the ACK's client transaction.
+    pub ack_branch: String,
+    /// The copies of the 2xx it acknowledges received since that 2xx
+    /// (§13.3.1.4), those counted before the next INVITE left included.
+    #[serde(default)]
+    pub copies_received: u32,
+    /// The last of those copies owed its re-ACK.
+    #[serde(default)]
+    pub re_acked_copy: Option<ReAckedCopy>,
+}
+
+impl AckAhead {
+    /// The ACK ahead of the INVITE following `record`, the INVITE before it:
+    /// the ACK `record`'s 2xx drew, with its copies' count. `None` when this
+    /// stack sent no ACK for a 2xx to it.
+    pub fn of(record: &RequestRecord) -> Option<Self> {
+        let x = record.invite.as_ref()?;
+        Some(AckAhead {
+            ack: x.emitted_ack.clone()?,
+            invite_cseq: record.outbound_cseq,
+            ack_branch: x.ack_branch.clone()?,
+            copies_received: x.copies_received,
+            re_acked_copy: x.re_acked_copy,
+        })
+    }
+
+    /// The record of the INVITE this ACK acknowledges, as it stood once its
+    /// ACK left: its CSeq, the ACK and its client transaction, the copies'
+    /// count. A round the record holds no image of, as
+    /// [`crate::helpers::retain_emitted_ack`] opens one.
+    pub fn restored(&self) -> RequestRecord {
+        RequestRecord {
+            origin: RequestOrigin::Own,
+            invite: Some(InviteExchange {
+                ack_branch: Some(self.ack_branch.clone()),
+                emitted_ack: Some(self.ack.clone()),
+                copies_received: self.copies_received,
+                re_acked_copy: self.re_acked_copy,
+                ..InviteExchange::default()
+            }),
+            ..RequestRecord::relayed("INVITE", self.invite_cseq, 0)
+        }
+    }
+}
+
 /// An INVITE's exchange beyond its final. A sent INVITE's 2xx is *taken* once
 /// its ACK is owed or has left; until then a final still settles the record.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -46,8 +114,18 @@ pub struct InviteExchange {
     /// drew, as it left. A node re-sending this INVITE from the record sends
     /// that ACK first: the peer sees no new INVITE while the one before is
     /// unacknowledged (RFC 3261 §14.1, RFC 6026 §7.1), and a repeated ACK is
-    /// absorbed (§13.2.2.4).
-    pub ack_ahead: Option<RetainedEmission>,
+    /// absorbed (§13.2.2.4). A copy of that 2xx is re-ACKed with it. Boxed:
+    /// every turn future holding a record carries its size.
+    pub ack_ahead: Option<Box<AckAhead>>,
+    /// Sent: the copies of the 2xx the INVITE took received since
+    /// (§13.3.1.4), each counted before the rules read it. A copy past the
+    /// re-sends a compliant answerer makes draws a re-ACK only T1 after the
+    /// last one (ADR-0057 §10).
+    #[serde(default)]
+    pub copies_received: u32,
+    /// Sent: the last copy of that 2xx owed its re-ACK (§13.2.2.4).
+    #[serde(default)]
+    pub re_acked_copy: Option<ReAckedCopy>,
     /// Sent: the CSeq, in the acknowledging peer's own sequence, of the ACK
     /// the INVITE's 2xx awaits from that peer: armed when the 2xx is taken,
     /// discharged by the ACK leaving — the peer's relayed, or one this stack

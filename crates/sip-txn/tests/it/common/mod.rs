@@ -1,7 +1,6 @@
 //! Shared scaffolding for the transaction-layer tests: a simulated-fabric
 //! stack (b2bua endpoint under test + a peer endpoint to inject from) and a
-//! couple of raw-message builders. Mirrors the source tests' `fakeStack` /
-//! simulated `SignalingNetwork` wiring.
+//! couple of raw-message builders, wired on the simulated `SignalingNetwork`.
 //!
 //! ## Time idiom — one and only one
 //!

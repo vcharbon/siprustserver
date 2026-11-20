@@ -18,7 +18,7 @@ fn every_class_paces_and_bounds_as_its_rfc_states() {
         (Class::NonInviteClient, [500, 1000, 2000, 4000], 4000, 32_000),
         // §17.1.2.2 in Proceeding: flat T2 from the first fire after it.
         (Class::NonInviteProceeding, [4000, 4000, 4000, 4000], 4000, 32_000),
-        // ADR-0043 X4: a non-INVITE's pacing, its own 64·T1 ceiling.
+        // ADR-0058 X4: a non-INVITE's pacing, its own 64·T1 ceiling.
         (Class::CancelClient, [500, 1000, 2000, 4000], 4000, 32_000),
         // §17.2.1 Timer G: doubling, T2 ceiling, until the ACK or Timer H.
         (Class::InviteServerFinal, [500, 1000, 2000, 4000], 4000, 32_000),
@@ -126,6 +126,29 @@ fn a_ladder_stops_before_a_rung_that_would_land_at_or_past_the_give_up() {
     // 500 + 1000 + 2000 + 4000, then T2 forever: rung 10 lands at 31 500 ms and
     // rung 11 would land at 35 500, past Timer H.
     assert_eq!(walk(Schedule::rfc(Class::InviteServerFinal)), (10, m(31_500)));
+}
+
+/// A class's re-send count is the rung its ladder stops on: a 2xx is re-sent
+/// at 0.5, 1.5, 3.5, 7.5 s and then every T2 up to 31.5 s, ten copies.
+#[test]
+fn a_class_resends_as_many_copies_as_its_ladder_walks() {
+    for class in Class::ALL {
+        assert_eq!(class.resends(), walk(Schedule::rfc(class)).0, "{class:?}");
+    }
+    assert_eq!(Class::Final2xx.resends(), 10);
+}
+
+/// A peer's copies up to the ladder's re-sends are owed at any pace; one past
+/// them only T1 after the last copy answered, or when none was.
+#[test]
+fn a_copy_past_the_ladders_re_sends_is_owed_t1_after_the_last_answered() {
+    for class in Class::ALL {
+        let last = class.resends();
+        assert!(class.owes_copy(last, Some(Duration::ZERO)), "{class:?}: its last re-send");
+        assert!(!class.owes_copy(last + 1, Some(m(T1 - 1))), "{class:?}: inside T1");
+        assert!(class.owes_copy(last + 1, Some(m(T1))), "{class:?}: T1 after");
+        assert!(class.owes_copy(last + 1, None), "{class:?}: none answered");
+    }
 }
 
 /// The bound is crossed by landing ON it, not only past it. Every RFC class

@@ -48,7 +48,7 @@ export interface CliFacts {
   readonly environmentRefusal: (what: string) => string | null
   /** How an operator runs `command` (`replay`, `job`…) here, as a hint line spells it. */
   readonly invocation: (command: string) => string
-  /** The flow viewer a report's links point at, read when the report is made. */
+  /** The site a report's links point at, read when the report is made. */
   readonly viewer: () => string
   /** The run-selector forms as the deployment spells them (`@sip/store` `Selector.formsOf`), for help texts. */
   readonly selectorForms: string
@@ -60,4 +60,10 @@ export interface CliFacts {
   readonly defaultPcaps: () => ReadonlyArray<string>
   /** Where to watch a campaign on `lane`: the lines it prints before and after it. */
   readonly where: (lane: string) => ReadonlyArray<string>
+  /**
+   * Why a job naming the collection level `level` may not open, as the job's
+   * own entry point would refuse it; `null` where it may. A detached start
+   * asks it before it makes the job's row; absent, only the job itself checks.
+   */
+  readonly levelRefusal?: (level: string) => Effect.Effect<string | null, never, FileSystem.FileSystem>
 }

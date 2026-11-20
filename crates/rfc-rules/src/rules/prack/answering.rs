@@ -41,11 +41,13 @@ impl Obligation for UnmatchedPrackProxied {
             };
             let known: Vec<u64> = seen
                 .rseqs_taken
-                .get(&(p.dst, p.call_id))
+                .get(&(p.dst_agent, p.call_id))
                 .map(|s| s.iter().copied().collect())
                 .unwrap_or_default();
             let forwarded = seen.pracks.iter().any(|q| {
-                q.src == p.dst && q.call_id == p.call_id && q.rack_triple.as_ref() == Some(triple)
+                q.src_agent == p.dst_agent
+                    && q.call_id == p.call_id
+                    && q.rack_triple.as_ref() == Some(triple)
             });
             let (rseq, cseq, method) = triple;
             out.push(head(if known.contains(rseq) || forwarded {
@@ -85,7 +87,11 @@ impl Obligation for UnmatchedPrackProxied {
 /// transaction drew a 2xx for left the unacknowledged list as that PRACK
 /// arrived, whenever its 2xx left (§3), the right `RSeq`
 /// under another INVITE's CSeq names nothing, and a sibling fork's number
-/// names nothing here (§3, errata 4600). Charges the UAS. A PRACK the strict
+/// names nothing here (§3, errata 4600). A matched PRACK reaching the UAS
+/// after a BYE on its dialog left or reached it may also draw the 481 of a
+/// dialog it ended (RFC 3261 §12.2.2), and one whose CSeq went backwards
+/// there (a later request of the dialog arrived first) the 500 of a request
+/// out of order (§12.2.2). Charges the UAS. A PRACK the strict
 /// reading refuses ([`crate::Msg::refused`]) owes its 400 instead and is no
 /// occasion.
 pub struct Prack2xxOr481;
@@ -129,7 +135,15 @@ impl Obligation for Prack2xxOr481 {
                     )
                     .contains(&(rack.rseq, rack.cseq))
                 && !acknowledged_before(&seen, key, prack);
-            let honoured = if matched { (200..300).contains(&a.status) } else { a.status == 481 };
+            let ended = seen
+                .bye_ended_at
+                .get(&(key.uas, key.call_id, prack.dialog))
+                .is_some_and(|at| *at <= prack.ts_us);
+            let honoured = match (matched, ended) {
+                (true, true) => (200..300).contains(&a.status) || a.status == 481,
+                (true, false) => (200..300).contains(&a.status),
+                (false, _) => a.status == 481,
+            } || (a.status == 500 && out_of_order(&seen, wire, key, prack));
             out.push(head(if honoured {
                 Decision::Compliant
             } else {
@@ -150,13 +164,33 @@ impl Obligation for Prack2xxOr481 {
     }
 }
 
+/// Whether the UAS of `key` had taken a request of a higher CSeq on `prack`'s
+/// dialog before `prack` arrived: the PRACK's CSeq goes backwards there, and
+/// the dialog owes it the 500 of a request out of order (RFC 3261 §12.2.2)
+/// before any PRACK processing.
+fn out_of_order(
+    seen: &Reading<'_>,
+    wire: &WireView<'_>,
+    key: &TxnKey<'_>,
+    prack: &Served<'_>,
+) -> bool {
+    let cseq = wire.msgs[prack.msg].cseq;
+    seen.served.iter().any(|(other, s)| {
+        other.uas == key.uas
+            && other.call_id == key.call_id
+            && s.dialog == prack.dialog
+            && s.ts_us < prack.ts_us
+            && wire.msgs[s.msg].cseq > cseq
+    })
+}
+
 /// Whether a PRACK of another transaction naming the same `RAck` in the same
-/// dialog reached the UAS of `key` before `prack` did and drew its 2xx, at
-/// any time: the provisional left the unacknowledged list as that PRACK
-/// arrived (RFC 3262 §3).
+/// dialog reached the UAS of `key`, at any of its sockets, before `prack` did
+/// and drew its 2xx, at any time: the provisional left the unacknowledged list
+/// as that PRACK arrived (RFC 3262 §3).
 fn acknowledged_before(seen: &Reading<'_>, key: &TxnKey<'_>, prack: &Served<'_>) -> bool {
     seen.served.iter().any(|(other, earlier)| {
-        other.uas == key.uas
+        seen.parties.same(key.call_id, other.uas, key.uas)
             && other.call_id == key.call_id
             && other.branch != key.branch
             && earlier.method.eq_ignore_ascii_case("PRACK")

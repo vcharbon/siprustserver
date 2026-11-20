@@ -7,11 +7,26 @@ use std::sync::Arc;
 
 use super::waiver::WaiverState;
 use crate::dialogs::{covers_at, DialogJudge, DialogVerdict};
+use crate::realcall::LostMessage;
 
 /// One verdict that survived the waivers, with the UA that recorded it.
 pub(crate) struct GatedVerdict {
     pub party: String,
     pub verdict: DialogVerdict,
+}
+
+impl GatedVerdict {
+    /// Whether the requests the loss model dropped on their way to the UA
+    /// explain the verdict ([`DialogVerdict::explained_by`]); `lost` holds
+    /// each dropped datagram with the party it was to or from.
+    pub(crate) fn explained_by_loss(&self, lost: &[(String, LostMessage)]) -> bool {
+        let to_party: Vec<&LostMessage> = lost
+            .iter()
+            .filter(|(party, m)| *party == self.party && m.inbound && m.method.is_some())
+            .map(|(_, m)| m)
+            .collect();
+        self.verdict.explained_by(&to_party)
+    }
 }
 
 /// The verdicts of `judges` no waiver covers, marking each covering waiver
@@ -105,6 +120,7 @@ pub(crate) fn as_findings(verdicts: Vec<GatedVerdict>) -> Vec<sip_net_testkit::R
             advisory: false,
             offending: None,
             charged: None,
+            counterpart: None,
         })
         .collect()
 }

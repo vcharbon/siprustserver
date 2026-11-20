@@ -105,6 +105,26 @@ pub enum TransactionEvent {
     /// B2BUA's acting-backup self-release (ADR-0014) keys on it to shed its live
     /// takeover copy without polling.
     CallQuiesced { call_ref: String },
+    /// A Call-ID passed its message budget (ADR-0063 §4,
+    /// [`TransactionConfig::call_id_budget`](crate::TransactionConfig)): the
+    /// layer sends nothing under it and drops what arrives under it, until
+    /// no transaction of it lives and 64·T1 passed since the last message
+    /// it dropped. Told once per trip; the consumer ends every call holding
+    /// the Call-ID.
+    CallIdBudgetTripped(CallIdBudgetTrip),
+}
+
+/// What a Call-ID's trip names of the calls holding it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CallIdBudgetTrip {
+    /// The Call-ID muted.
+    pub call_id: String,
+    /// The From-tags of the tagless INVITEs that opened a server transaction
+    /// under it: each names an incoming leg by Call-ID and From-tag. At most
+    /// a few.
+    pub caller_tags: Vec<String>,
+    /// The call references of its transactions. At most a few.
+    pub call_refs: Vec<String>,
 }
 
 impl TransactionEvent {
@@ -136,6 +156,7 @@ pub enum EventQueueClass {
     Cancelled,
     Timeout,
     CallQuiesced,
+    CallIdBudgetTripped,
 }
 
 impl EventQueueClass {
@@ -144,6 +165,7 @@ impl EventQueueClass {
             TransactionEvent::Cancelled { .. } => Self::Cancelled,
             TransactionEvent::Timeout { .. } | TransactionEvent::HopAlive { .. } => Self::Timeout,
             TransactionEvent::CallQuiesced { .. } => Self::CallQuiesced,
+            TransactionEvent::CallIdBudgetTripped(_) => Self::CallIdBudgetTripped,
             TransactionEvent::Message { message, .. } => match message.as_ref() {
                 SipMessage::Response(_) => Self::Response,
                 SipMessage::Request(r) if r.method() == Method::Invite => Self::RequestInvite,
@@ -152,13 +174,14 @@ impl EventQueueClass {
         }
     }
 
-    pub const ALL: [EventQueueClass; 6] = [
+    pub const ALL: [EventQueueClass; 7] = [
         Self::RequestInvite,
         Self::RequestOther,
         Self::Response,
         Self::Cancelled,
         Self::Timeout,
         Self::CallQuiesced,
+        Self::CallIdBudgetTripped,
     ];
 
     /// Stable metric-label for this reason (`reason="..."`).
@@ -170,6 +193,7 @@ impl EventQueueClass {
             Self::Cancelled => "cancelled",
             Self::Timeout => "timeout",
             Self::CallQuiesced => "call_quiesced",
+            Self::CallIdBudgetTripped => "call_id_budget_tripped",
         }
     }
 
@@ -181,6 +205,7 @@ impl EventQueueClass {
             Self::Cancelled => 3,
             Self::Timeout => 4,
             Self::CallQuiesced => 5,
+            Self::CallIdBudgetTripped => 6,
         }
     }
 }

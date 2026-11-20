@@ -1,11 +1,10 @@
 //! Real RTP media through the real B2BUA.
 //!
-//! Port of `../sipjsserver/tests/media/basic-call-media.test.ts`. Alice and Bob
-//! run real [`MediaTransport`]s; the SDP offer/answer is built by the production
-//! offer/answer engine, carried over SIP through the **real** B2BUA, and applied
-//! from whatever actually arrived. Because the Rust B2BUA is signalling-only (no
-//! RTP relay), media flows peer-to-peer to the addresses the relayed SDP
-//! advertises — so this exercises the same end-to-end path as the TS slice and
+//! Alice and Bob run real [`MediaTransport`]s; the SDP offer/answer is built by
+//! the production offer/answer engine, carried over SIP through the **real**
+//! B2BUA, and applied from whatever actually arrived. Because the B2BUA is
+//! signalling-only (no RTP relay), media flows peer-to-peer to the addresses the
+//! relayed SDP advertises — so this exercises the end-to-end media path and
 //! would catch a B2BUA that mangled the relayed c=/m=.
 //!
 //! Media rides its own simulated fabric, paced by tokio timers on the paused
@@ -35,7 +34,7 @@ async fn alice_and_bob_hear_each_other_through_b2bua() {
     // Media rides a separate simulated fabric (peer-to-peer; the B2BUA never
     // touches RTP). Both transports bind on the same media net so RTP routes.
     let media_net: Arc<dyn sip_net::SignalingNetwork> = Arc::new(SimulatedSignalingNetwork::new(1));
-    let me = media::ts_endpoint(media_net);
+    let me = media::hand_rolled_endpoint(media_net);
     let alice_rtp = me.open("127.0.0.1", Some(ALICE_RTP), OpenOptions::default()).await.unwrap();
     let bob_rtp = me.open("127.0.0.1", Some(BOB_RTP), OpenOptions::default()).await.unwrap();
 

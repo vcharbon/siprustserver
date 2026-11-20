@@ -28,6 +28,9 @@ pub struct Identity<'a> {
     /// The RAck response-num of a PRACK: the RSeq it acknowledges (RFC 3262
     /// §7.2).
     pub rack_rseq: Option<u64>,
+    /// The RAck CSeq-num of a PRACK: the CSeq of the request whose
+    /// provisional it acknowledges (RFC 3262 §7.2).
+    pub rack_cseq: Option<u32>,
     /// The To `tag` parameter.
     pub to_tag: Option<&'a str>,
     /// The `branch` parameter of the top Via (RFC 3261 §17 transaction key),
@@ -78,7 +81,9 @@ pub fn identity(raw: &[u8]) -> Identity<'_> {
                 value.split(|&b| b == b',').any(|t| trim(t).eq_ignore_ascii_case(b"100rel"));
         } else if prack && !rack && is(&[b"rack"]) {
             rack = true;
-            id.rack_rseq = words(value).next().and_then(number);
+            let mut words = words(value);
+            id.rack_rseq = words.next().and_then(number);
+            id.rack_cseq = words.next().and_then(number);
         } else if !to && is(&[b"to", b"t"]) {
             to = true;
             id.to_tag = tag(value);
@@ -154,6 +159,7 @@ mod tests {
                 rseq: Some(3),
                 reliable: false,
                 rack_rseq: None,
+                rack_cseq: None,
                 to_tag: Some("b1"),
                 branch: Some("z9hG4bK1"),
             }
@@ -170,9 +176,9 @@ mod tests {
     }
 
     #[test]
-    fn a_prack_has_the_rseq_it_acknowledges() {
+    fn a_prack_has_the_rseq_and_cseq_it_acknowledges() {
         let raw = b"PRACK sip:b@h SIP/2.0\r\nCSeq: 2 PRACK\r\nRAck: 4 1 INVITE\r\n\r\n";
-        assert_eq!(identity(raw).rack_rseq, Some(4));
+        assert_eq!((identity(raw).rack_rseq, identity(raw).rack_cseq), (Some(4), Some(1)));
         let bye = b"BYE sip:b@h SIP/2.0\r\nRAck: 4 1 INVITE\r\n\r\n";
         assert_eq!(identity(bye).rack_rseq, None, "only a PRACK acknowledges");
     }

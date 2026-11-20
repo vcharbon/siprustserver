@@ -2,8 +2,11 @@
 //! connection level (refused, unreachable, connect timeout, reset, EOF,
 //! broken pipe) or timed out is sent once more, on the same client, when the
 //! total budget leaves room for a whole attempt after the first was due to
-//! end; the second gets that attempt's budget, at most the time left. Never after an HTTP response of any status,
-//! never while the breaker is open, never for a request that was not sent.
+//! end; the second gets that attempt's budget, at most the time left. Never
+//! after an HTTP response of any status, never while the breaker is open,
+//! never for a request that was not sent. A response is a whole one: a body
+//! that stalls or is cut before its end is a timeout or a connection-level
+//! failure, so the backend may serve a retried request twice.
 //! The pool hands out the most recently returned idle connection first, so a
 //! retry lands on a connection that has just proven itself.
 

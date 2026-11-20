@@ -35,7 +35,12 @@ export class ToolUnavailable extends Schema.TaggedError<ToolUnavailable>()("Corp
 /** Who hears whose build a caller waits for: a job writes it on its row. */
 export type Watch = (holder: string | undefined) => Effect.Effect<void>
 
-/** The source paths, relative to `root`, whose content decides a phase's output. */
+/**
+ * The source paths, relative to `root`, whose content decides a phase's
+ * output. A path's place in its list names its files in the fingerprint, so
+ * moving a path in the tree and in its list keeps the fingerprint; reordering
+ * a list moves it.
+ */
 export interface Decides {
   readonly root: string
   readonly extraction: ReadonlyArray<string>
@@ -69,6 +74,13 @@ export interface Interface {
    * bounds.
    */
   readonly reading: ReadonlyArray<string>
+  /**
+   * The headers every message of a flows document the extractor writes
+   * projects (`sipflow --emit-headers`), passed to each extraction and
+   * enrichment: those the cut's leg rules read (`cut/leg-rules.ts`). Absent
+   * or empty, none is projected.
+   */
+  readonly emitHeaders?: ReadonlyArray<string>
 }
 
 export class Service extends Context.Service<Service, Interface>()("@sip/corpus/Tools") {}
@@ -99,6 +111,20 @@ export const layer = Layer.succeed(
 export const reading: Effect.Effect<ReadonlyArray<string>, never, Service> = Effect.map(
   Service,
   (tools) => tools.reading
+)
+
+/**
+ * The arguments every extraction and enrichment passes the extractor before
+ * its own: the deployment's reading, then the headers it projects.
+ */
+export const extractorArgs: Effect.Effect<ReadonlyArray<string>, never, Service> = Effect.map(
+  Service,
+  (tools) => [
+    ...tools.reading,
+    ...(tools.emitHeaders === undefined || tools.emitHeaders.length === 0
+      ? []
+      : ["--emit-headers", tools.emitHeaders.join(",")])
+  ]
 )
 
 /** A deployment's own tools. */

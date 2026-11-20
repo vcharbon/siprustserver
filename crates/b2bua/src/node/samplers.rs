@@ -36,7 +36,7 @@ pub(super) fn spawn_overload_sampler(
             #[expect(clippy::disallowed_methods, reason = "SAMPLE_PERIOD is not zero")]
             let mut tick = tokio::time::interval(OverloadSignal::SAMPLE_PERIOD);
             tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-            tick.tick().await; // skip the immediate first tick (TS first fire is +100 ms)
+            tick.tick().await; // skip the immediate tick: the first sample lands one period in
             loop {
                 tick.tick().await;
                 overload.sample();

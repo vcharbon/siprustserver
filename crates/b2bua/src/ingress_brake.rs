@@ -3,21 +3,43 @@
 //! ([`crate::admission`]).
 //!
 //! Its one goal is to **refuse new normal calls when the ingress queue is
-//! saturated**, before the datagram is queued and before any transaction or
-//! call state exists. Below the threshold, and while the worker remembers no
-//! refused INVITE, it is an integer compare and an atomic load, and the packet
-//! is accepted unparsed (the transaction layer parses it).
+//! backed up**, before the datagram is queued and before any transaction or
+//! call state exists. It engages on either of two readings, taken as the
+//! datagram arrives:
 //!
-//! At or above `floor(queue_max * threshold_pct / 100)` the datagram is
+//!   - the queue's depth is at or above `floor(queue_max * threshold_pct /
+//!     100)`: a flood;
+//!   - the event-queue gate refuses ([`Refusals::gate_refusing`], ADR-0050
+//!     §9), which it does on the wait of this queue too: the worker sheds
+//!     new calls, and sheds them here, ahead of the queue the calls in
+//!     progress wait in. Such a refusal is the gate's, counted under its
+//!     reason ([`IngressBrakeCounters::gate_refused`]).
+//!
+//! While it is not engaged, and while the worker remembers no refused
+//! INVITE, it is a few compares, two atomic loads and a look at the
+//! datagram's first bytes, and any datagram but an OPTIONS is accepted
+//! unparsed (the transaction layer parses it).
+//!
+//! Its second goal is to **keep a slow worker read alive**. An OPTIONS is
+//! always parsed, and a liveness probe, an OPTIONS outside any dialog, is
+//! queued on the lane taken ahead of what waits
+//! ([`PreIngressAction::AcceptAhead`]), whatever the queue reads: a prober
+//! hears its answer inside its window however long the backlog, and reads
+//! the worker's refusal of new calls from it (ADR-0050 §12). The lane holds
+//! 64 and shares its turns with the queue, so a stream of OPTIONS neither
+//! stops the calls in progress nor is stopped by them.
+//!
+//! While it is engaged the datagram is
 //! parsed, and the parse is queued with it: the transaction layer takes it
 //! and does not parse the datagram again ([`sip_net::Arrival`]). Then:
 //!
 //!   - a datagram the parser refuses → accept (the transaction layer answers
 //!     or drops it);
 //!   - a response, any request but an INVITE → accept;
-//!   - a copy of an initial INVITE the worker refused in the last 64·T1 — at
-//!     this brake or at the transaction layer's deferred backlog, whatever
-//!     its class → that refusal again, counted as a copy;
+//!   - a copy of an initial INVITE the worker refused, within 64·T1 of its
+//!     last copy — at this brake or at the transaction layer's deferred
+//!     backlog, whatever its class → that refusal again, counted as a copy,
+//!     on the RFC schedule (ADR-0063 §1); a copy past it → drop;
 //!   - otherwise the ladder's brake rung judges it in its class
 //!     ([`class_of`]): an INVITE carrying a `To`-tag is admitted (the brake
 //!     never touches an existing call), an emergency one too, counted on
@@ -26,12 +48,12 @@
 //!     transaction holds a copy of it (that transaction answers it), its
 //!     first refusal counted as a new call refused in its class.
 //!
-//! Below the threshold, while the worker remembers a refused INVITE, the
+//! While it is not engaged and the worker remembers a refused INVITE, the
 //! datagram is parsed the same way, and an initial INVITE the worker refused
-//! in the last 64·T1 — at this brake or at the transaction layer's deferred
-//! backlog — draws that refusal again, so a refused call is never admitted
-//! behind its caller's back. Every other datagram below the threshold is
-//! accepted.
+//! within 64·T1 of its last copy — at this brake or at the transaction
+//! layer's deferred backlog — draws that refusal again on the same schedule,
+//! or is dropped past it, so a refused call is never admitted
+//! behind its caller's back. Every other datagram is then accepted.
 //!
 //! The brake shares the worker's one refusal memo and answer with the
 //! transaction layer: every copy of one INVITE draws the same bytes, the
@@ -39,8 +61,8 @@
 //!
 //! Counters are `Arc<AtomicU64>` because a [`PreIngressHook`] is an immutable
 //! `Fn` shared across the recv task(s); the read side stays lock-free for the
-//! `/metrics` scrape. The memo's lock is taken only on an INVITE above the
-//! threshold or, while a refusal is remembered, on an INVITE below it.
+//! `/metrics` scrape. The memo's lock is taken only on an INVITE that meets
+//! the brake engaged or, while a refusal is remembered, on any INVITE.
 
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -49,11 +71,11 @@ use std::sync::Arc;
 use sip_message::received::{stamp_received, Received};
 use sip_message::{serialize, CustomParser, Method, SipMessage, SipRequest};
 use sip_net::types::{PreIngressAction, PreIngressHook};
-use sip_net::Arrival;
-use sip_txn::{InviteRefusals, Verdict as Memo};
+use sip_net::{Arrival, QueueLoad};
+use sip_txn::{InviteRefusals, RefusedCopy, Verdict as Memo};
 
 use crate::admission::{class_of, judge, Class, Refusals, Rung, Verdict};
-use crate::new_calls::StatelessCounts;
+use crate::new_calls::{Refusal, StatelessCounts};
 
 /// Tunables for the ingress brake. Cheap to copy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -68,6 +90,12 @@ pub struct IngressBrakeConfig {
 }
 
 impl IngressBrakeConfig {
+    /// A brake over a queue bounded at `queue_max`, engaging at
+    /// `threshold_pct` of it.
+    pub const fn by_depth(queue_max: usize, threshold_pct: u32) -> Self {
+        Self { queue_max, threshold_pct }
+    }
+
     /// The absolute queue depth at/above which the brake engages:
     /// `floor(queue_max * threshold_pct / 100)`. `u64` widens the product
     /// before the floor-divide so no realistic queue bound can overflow.
@@ -94,8 +122,10 @@ pub struct IngressBrakeCounters {
     /// anyway — non-zero under flood means the brake is correctly letting
     /// emergency calls through while refusing the rest.
     emergency_bypassed: Arc<AtomicU64>,
-    /// INVITEs refused here first, by [`Class`].
+    /// INVITEs refused here first on the queue's depth, by [`Class`].
     refused: Arc<[AtomicU64; 3]>,
+    /// INVITEs refused here first for the event-queue gate, by [`Class`].
+    gate_refused: Arc<[AtomicU64; 3]>,
     /// Copies of a refused INVITE refused again here.
     copies: Arc<AtomicU64>,
 }
@@ -139,8 +169,22 @@ impl IngressBrakeCounters {
         }
     }
 
-    fn record_refused(&self, class: Class) {
-        if let Some(n) = self.refused.get(class.index()) {
+    /// INVITEs of `class` this brake refused first while the event-queue gate
+    /// refused and the queue was under its threshold: the gate's refusals,
+    /// made here ahead of the queue, counted under the gate's reason.
+    pub fn gate_refused(&self, class: Class) -> u64 {
+        self.gate_refused.get(class.index()).map_or(0, |n| n.load(Ordering::Relaxed))
+    }
+
+    /// The gate's refusals this brake made, by class
+    /// ([`gate_refused`](Self::gate_refused)).
+    pub fn gate_counts(&self) -> [u64; 3] {
+        Class::ALL.map(|c| self.gate_refused(c))
+    }
+
+    fn record_refused(&self, reason: Refusal, class: Class) {
+        let row = if reason == Refusal::EventQueue { &self.gate_refused } else { &self.refused };
+        if let Some(n) = row.get(class.index()) {
             n.fetch_add(1, Ordering::Relaxed);
         }
     }
@@ -153,7 +197,7 @@ impl IngressBrakeCounters {
 /// Build the ingress brake [`PreIngressHook`] for the worker's UDP bind.
 ///
 /// The returned closure runs at arrival time for every datagram, with the live
-/// inbound-queue `depth`, and applies the classification in the module doc.
+/// inbound-queue load, and applies the classification in the module doc.
 /// `refusals` is the worker's one instance, whose memo the transaction layer
 /// holds too ([`sip_txn::TransactionConfig::invite_refusals`]); `parser` is the
 /// process's one parser, so a datagram reads the same whether this hook or the
@@ -166,9 +210,13 @@ pub fn build_ingress_brake_hook(
 ) -> PreIngressHook {
     let threshold = config.threshold();
     let memo = refusals.memo().clone();
-    Arc::new(move |arrival: &mut Arrival, src: SocketAddr, depth: usize| {
-        let above = depth >= threshold;
-        if !above && !memo.remembers() {
+    let gate_refusing = refusals.gate_refusing().clone();
+    Arc::new(move |arrival: &mut Arrival, src: SocketAddr, load: QueueLoad| {
+        let gate_refusing = gate_refusing.load(Ordering::Relaxed);
+        let depth = load.depth;
+        let engaged = gate_refusing || depth >= threshold;
+        let options = arrival.raw().starts_with(OPTIONS_LINE);
+        if !engaged && !options && !memo.remembers() {
             return PreIngressAction::Accept;
         }
         // What the parser refuses is the pipeline's to answer, and responses
@@ -176,6 +224,9 @@ pub fn build_ingress_brake_hook(
         let Ok(Ok(SipMessage::Request(req))) = arrival.parse(&parser) else {
             return PreIngressAction::Accept;
         };
+        if is_probe(req) {
+            return PreIngressAction::AcceptAhead;
+        }
         if *req.method() != Method::Invite {
             return PreIngressAction::Accept;
         }
@@ -183,13 +234,23 @@ pub fn build_ingress_brake_hook(
         // A copy of an INVITE the worker refused draws that refusal again, on
         // either side of the threshold and whatever its class. A held identity
         // is never refused (see `InviteRefusals`), so a live call is spared.
-        if class != Class::InDialog && memo.remembers() && memo.refused(req) {
-            counters.record_copy();
-            return reply(&memo, req, src);
+        if class != Class::InDialog && memo.remembers() {
+            match memo.refused_copy(req) {
+                Some(RefusedCopy::Answered) => {
+                    counters.record_copy();
+                    return reply(&memo, req, src);
+                }
+                Some(RefusedCopy::Absorbed) => return PreIngressAction::Drop,
+                None => {}
+            }
         }
-        match judge(Rung::Brake { depth, threshold }, class) {
+        let verdict = match judge(Rung::Brake { depth, threshold }, class) {
+            Verdict::Admit => judge(Rung::EventQueue { refusing: gate_refusing }, class),
+            refuse @ Verdict::Refuse(_) => refuse,
+        };
+        match verdict {
             Verdict::Admit => {
-                if above && class == Class::Emergency {
+                if depth >= threshold && class == Class::Emergency {
                     counters.record_emergency_bypass();
                 }
                 PreIngressAction::Accept
@@ -197,13 +258,13 @@ pub fn build_ingress_brake_hook(
             // The reply is built before the refusal is remembered: a reply
             // that cannot be built leaves no memo entry the transaction
             // layer would rebuild that same answer from.
-            Verdict::Refuse(_) => {
+            Verdict::Refuse(refused) => {
                 let reply = reply(&memo, req, src);
                 match memo.refuse(req) {
                     Memo::Held => PreIngressAction::Accept,
                     Memo::Refused { first } => {
                         if first {
-                            counters.record_refused(class);
+                            counters.record_refused(refused.reason, class);
                         } else {
                             counters.record_copy();
                         }
@@ -213,6 +274,17 @@ pub fn build_ingress_brake_hook(
             }
         }
     })
+}
+
+/// How a datagram that may be a liveness probe starts: the method of an
+/// OPTIONS request line. The one datagram the brake reads while not engaged.
+const OPTIONS_LINE: &[u8] = b"OPTIONS ";
+
+/// Whether `req` is a liveness probe: an OPTIONS outside any dialog (no
+/// `To`-tag), which the transaction layer passes up on the keepalive lane and
+/// the router answers ahead of its queued events (ADR-0050 §12).
+fn is_probe(req: &SipRequest) -> bool {
+    *req.method() == Method::Options && req.to().tag().is_none()
 }
 
 /// The worker's refusal of `req`, received from `src`, as the datagram the

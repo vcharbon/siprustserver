@@ -1,11 +1,13 @@
-//! The bounds of the event-queue gate: when a worker whose transaction event
-//! queue is backed up refuses new calls, on its OPTIONS answer and at its
-//! admission ladder, and when it accepts them again (ADR-0050 §9).
+//! The bounds of the event-queue gate: when a worker whose inbound work is
+//! backed up, in its transaction event queue or in the inbound UDP queue
+//! ahead of it, refuses new calls, on its OPTIONS answer and at its admission
+//! ladder, and when it accepts them again (ADR-0050 §9).
 
-/// Refuse at the refusal depth at once, or once the queue's delay (the age of
-/// its oldest waiting event) has stayed at or past the refusal delay for the
-/// refusal interval; accept again once depth and delay have both stayed at or
-/// below their accept bounds for `accept_hold_ms`.
+/// Refuse at the event queue's refusal depth at once, or once the delay (the
+/// larger of the age of the event queue's oldest waiting event and the wait
+/// of the inbound UDP queue's oldest datagram) has stayed at or past the
+/// refusal delay for the refusal interval; accept again once depth and delay
+/// have both stayed at or below their accept bounds for `accept_hold_ms`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct EventQueueGateConfig {
     /// Queued events at which the worker refuses new calls.

@@ -27,7 +27,7 @@
 //!   sipflow /tmp/sipcap --query update-rejected.json
 //!   sipflow corpus/ --query-json '{"select":{"evidence_kind":"derived_call_id"},
 //!                                  "project":{"mode":"summary","fields":["as_socket"]}}'
-//!   sipflow /tmp/sipcap --call-id 7f3a... --sut 10.0.0.9 --rfc --rfc-rules all
+//!   sipflow /tmp/sipcap --call-id 7f3a... --sut 10.0.0.9 --rfc
 //!   sipflow /tmp/sipcap --sut auto --rfc --rfc-json review.json --rfc-doc review.flows.json
 //!   sipflow --to-pcap capture.anon.flows.json --out capture.anon.pcap
 //!   sipflow --list-rules
@@ -96,7 +96,7 @@ struct Args {
     /// parses them (extraction, `--enrich`, `--reparse`, `--rfc`): a file of
     /// `key = value` lines naming `exemptions` and the `max-header-length`,
     /// `max-uri-length`, `max-header-lines` and `max-datagram` bounds
-    /// (`sip_pcap::reading`). A line that does not read refuses the run.
+    /// (`sip_message::ToolReading`). A line that does not read refuses the run.
     /// Without it, the RFC: no exemption, the parser's default bounds.
     #[arg(long, value_name = "FILE")]
     reading: Option<PathBuf>,
@@ -281,25 +281,12 @@ struct Args {
     #[arg(long, default_value_t = 4)]
     reparse_jobs: usize,
 
-    /// Rule tokens (`rfc_rules::RuleId`) named beside the census vocabulary.
-    /// The census runs every rule with a body already, so naming one changes
-    /// nothing the report carries.
-    #[arg(long = "rfc-census-with", value_delimiter = ',', requires = "rfc_census")]
-    rfc_census_with: Vec<rfc_rules::RuleId>,
-
-    /// Review the SELECTED call groups against the RFC rules (`sip_pcap::rfc`)
+    /// Review the SELECTED call groups against every RFC rule (`sip_pcap::rfc`)
     /// in the same run: the hits under each ladder (or list line), the census
     /// summary on stderr. Whole-capture `--json` is the one mode it does not
     /// combine with — `--rfc-doc` writes the reviewed document instead.
     #[arg(long, default_value_t = false, conflicts_with_all = ["json", "enrich", "rfc_census"])]
     rfc: bool,
-
-    /// Which rules `--rfc` runs: `wire` (the corpus-backed census vocabulary),
-    /// `all` (every rule `rfc-rules` holds), or rule tokens, comma-separated.
-    /// Rules beyond `wire` are triage input: a report carrying them is not
-    /// one the census consumers read.
-    #[arg(long = "rfc-rules", value_delimiter = ',', default_values_t = ["wire".to_string()], requires = "rfc")]
-    rfc_rules: Vec<String>,
 
     /// Write the `--rfc` report — the census shape, one document — here.
     #[arg(long = "rfc-json", requires = "rfc")]
@@ -393,16 +380,9 @@ fn main() {
         return;
     }
     if !args.rfc_census.is_empty() {
-        census::run(&args.rfc_census, args.rfc_census_jobs, &args.rfc_census_with);
+        census::run(&args.rfc_census, args.rfc_census_jobs);
         return;
     }
-    let rfc_rules = args.rfc.then(|| match rule_set(&args.rfc_rules) {
-        Ok(rules) => rules,
-        Err(e) => {
-            eprintln!("{e}");
-            std::process::exit(2);
-        }
-    });
     if args.inputs.is_empty() {
         eprintln!(
             "no capture given (see --help; --schema, --enrich, --reparse and --rfc-census read no capture)"
@@ -464,8 +444,8 @@ fn main() {
         let flows = build_flows(&datagrams, &cfg);
         let sut = sut_of(&args, &flows);
         let hits = run_query(&flows, &stats, &query, &opts, sut.as_ref());
-        if let Some(rules) = &rfc_rules {
-            let review = review(&flows, &stats, &hits, &opts, rules, sut.as_ref(), &capture, &args);
+        if args.rfc {
+            let review = review(&flows, &stats, &hits, &opts, sut.as_ref(), &capture, &args);
             print_review(&review, &flows, &hits, &args, true);
         }
         return;
@@ -519,9 +499,8 @@ fn main() {
 
     // The review is over EVERY selected group, whatever `--limit` prints: the
     // limit bounds the reader's screen, not the question.
-    let review = rfc_rules.as_ref().map(|rules| {
-        review(&flows, &stats, &selected, &opts, rules, sut.as_ref(), &capture, &args)
-    });
+    let review =
+        args.rfc.then(|| review(&flows, &stats, &selected, &opts, sut.as_ref(), &capture, &args));
 
     if args.list {
         for (n, &g) in selected.iter().enumerate() {
@@ -586,28 +565,6 @@ fn sut_of(args: &Args, flows: &sip_pcap::flow::Flows) -> Option<SutSet> {
     }
 }
 
-/// The `--rfc-rules` words as candidate rule ids: `wire` is the census
-/// vocabulary and needs no candidates; `all` names every rule beyond it; a
-/// token names one.
-fn rule_set(words: &[String]) -> Result<Vec<rfc_rules::RuleId>, String> {
-    let mut out = Vec::new();
-    for word in words {
-        match word.as_str() {
-            "wire" => {}
-            "all" => out.extend(rfc_rules::RuleId::ALL),
-            token => {
-                let id = token
-                    .parse::<rfc_rules::RuleId>()
-                    .map_err(|_| format!("--rfc-rules: unknown rule {token:?}"))?;
-                out.push(id);
-            }
-        }
-    }
-    out.sort();
-    out.dedup();
-    Ok(out)
-}
-
 /// One selection's review: the emitted document scanned into a one-document
 /// census, its hits keyed by the position each group has in `selected` — the
 /// same `#n` the ladders print.
@@ -621,7 +578,6 @@ fn review(
     decode: &sip_pcap::DecodeStats,
     selected: &[usize],
     opts: &EnrichOptions,
-    candidates: &[rfc_rules::RuleId],
     sut: Option<&SutSet>,
     capture: &str,
     args: &Args,
@@ -638,7 +594,7 @@ fn review(
         .as_ref()
         .map(|p| p.display().to_string())
         .unwrap_or_else(|| format!("{capture}#selected"));
-    let mut census = Census::with_candidates(candidates);
+    let mut census = Census::new();
     census.absorb_with_sut(&document, capture, &doc, sut);
     census.sort();
     Review { census, doc }
@@ -732,9 +688,8 @@ fn print_review(
         .map(|s| format!(" sut={} ({})", s.addresses.join(","), s.decided_by))
         .unwrap_or_default();
     eprint!(
-        "# rfc review: {} selected group(s), rules={}{sut}\n{}",
+        "# rfc review: {} selected group(s){sut}\n{}",
         selected.len(),
-        args.rfc_rules.join(","),
         review.census.summary_measured()
     );
     if let Some(path) = &args.rfc_json {

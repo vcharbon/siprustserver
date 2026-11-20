@@ -99,11 +99,15 @@ export interface Interface {
     request: BatchRequest
   ) => Effect.Effect<BatchHost | undefined, LaneUnready | LaneUnstated>
   /**
-   * Stands the lane's SUT for a batch, logging under `under`; `undefined` where
-   * the cell builds its own. A managed SUT's own tool is current by then
-   * (`Tools.ready("sut")`).
+   * Stands the lane's SUT for a batch, logging under `under`, a managed one
+   * given `variables` beside its own; `undefined` where the cell builds its
+   * own. A managed SUT's own tool is current by then (`Tools.ready("sut")`).
    */
-  readonly standSut: (lane: string, under: string) => Effect.Effect<SutHandle | undefined, LaneUnready | LaneUnstated>
+  readonly standSut: (
+    lane: string,
+    under: string,
+    variables?: Readonly<Record<string, string>>
+  ) => Effect.Effect<SutHandle | undefined, LaneUnready | LaneUnstated>
   /** Why the lane cannot be driven on this box now, naming what fixes it; `null` where it can. */
   readonly preflight: (lane: string) => Effect.Effect<string | null, LaneUnstated>
 }

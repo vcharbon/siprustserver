@@ -8,9 +8,8 @@ use std::path::PathBuf;
 use e2e_model::model::{load_test_case, validate_case, ModelError, TestCase};
 use e2e_model::shape::{Anchor, ShapeSpec};
 
-/// A minimal load-time stand-in for the compiled `basic-call` shape (the full
-/// registry lives in `e2e-core`; the model crate only needs the `ShapeSpec`
-/// metadata slice).
+/// A minimal load-time stand-in for the `basic-call` shape (the model crate
+/// only needs the `ShapeSpec` metadata slice).
 struct StubShape {
     required: &'static [&'static str],
 }

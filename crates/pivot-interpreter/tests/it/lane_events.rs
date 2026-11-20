@@ -50,10 +50,6 @@ impl Sut for ScriptedSystem {
         usize::from(!self.done.load(Ordering::SeqCst))
     }
 
-    fn cdr_records(&self) -> Vec<BTreeMap<String, String>> {
-        Vec::new()
-    }
-
     fn observe(&self, name: &str) -> Result<Option<String>, String> {
         Err(format!("{name:?} is not an observable this lane publishes"))
     }
@@ -132,6 +128,7 @@ async fn run(
         base_dir,
         composer: &Composer,
         events,
+        injector: None,
         reader: std::sync::Arc::new(sip_message::CustomParser::built()),
     };
     let dir = std::env::temp_dir().join("pivot-runs").join(case);

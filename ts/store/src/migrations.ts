@@ -11,8 +11,10 @@
  * cut invocation), `capture_cuts`, `cut_cases` and `cut_refusals` (what that
  * cut made of one capture), over the content-addressed stores a case rebuilds
  * from — `case_assets`, `ledger_rows`, `flows_documents` and `flows_legs`.
- * Around them: the replay `population`, replay `requests` and the `jobs` that
- * ran them, and the {@link Current} population setting.
+ * Around them: the replay `population`, replay `requests`, the `jobs` that
+ * ran them, the `batches` those drove, the `job_events` their runners
+ * wrote, the `verifications` lines of a cell, a batch or a job, the campaign
+ * runs ({@link CAMPAIGN_RUNS}) and the {@link Current} population setting.
  *
  * `case_documents` (the v3 case JSON) is shared by both, content-hash deduped
  * so a corpus question is a query and a re-cut or re-run that changed nothing
@@ -29,7 +31,8 @@
  * deployment replaces the function and re-adds the generated column.
  *
  * The views, for SQL questions the commands do not class:
- * - `current_runs`: the clean, finished runs of the current population.
+ * - `current_runs`: the clean, finished runs of the current population, of
+ *   every branch of its env where it names none.
  * - `current_cells`: one row per (capture, lane, case) — the call's CURRENT
  *   result, its latest `current_runs` row holding the case, no older than the
  *   capture's latest full `current_runs` reading on the lane (whose case set is
@@ -125,9 +128,8 @@ const viewsOf = (cellColumns: ReadonlyArray<string>): Effect.Effect<void, SqlErr
     CREATE VIEW current_runs AS
     SELECT ${listed("r", RUN_COLUMNS)}
     FROM runs r
-    JOIN current_population p ON p.env = r.env AND p.branch = r.branch
+    JOIN current_population p ON p.env = r.env AND (p.branch IS NULL OR p.branch = r.branch)
     WHERE r.finished_at IS NOT NULL
-      AND NOT EXISTS (SELECT 1 FROM jsonb_array_elements(r.components) c WHERE c->>'dirty' = 'true')
   `)
   yield* sql.unsafe(`
     CREATE VIEW current_cells AS
@@ -775,6 +777,299 @@ const inboxJobs = Effect.gen(function*() {
 export const INBOX_JOBS = "12_inbox_jobs"
 
 /**
+ * `batches`: one row per batch a job (or a sweep that is no job) drove on a
+ * lane: its attempt, its cells by name, and its window, closed once what the
+ * lane stood for it (its SUT, its batch process) is given back. A retry is a
+ * batch of its own, its attempt above 1.
+ */
+const batches = Effect.gen(function*() {
+  const sql = yield* SqlClient
+  yield* sql`
+    CREATE TABLE batches (
+      id           bigserial PRIMARY KEY,
+      job_id       bigint REFERENCES jobs (id) ON DELETE CASCADE,
+      sweep_id     bigint REFERENCES sweeps (id) ON DELETE CASCADE,
+      lane         text NOT NULL,
+      attempt      integer NOT NULL DEFAULT 1 CHECK (attempt >= 1),
+      cells        text[] NOT NULL,
+      started_at   timestamptz NOT NULL DEFAULT now(),
+      finished_at  timestamptz,
+      detail       text,
+      CHECK (job_id IS NOT NULL OR sweep_id IS NOT NULL)
+    )
+  `
+  yield* sql`CREATE INDEX batches_job_idx ON batches (job_id)`
+  yield* sql`CREATE INDEX batches_sweep_idx ON batches (sweep_id)`
+})
+
+/** The key of the migration that records each batch. */
+export const BATCHES = "13_batches"
+
+/**
+ * `job_events`: what a job's runner did to the lab, one row per phase of one
+ * subject (an operation's inject, heal, probe), on the runner's clock
+ * (`clock_ms`) and the wall clock (`at`), in the order written.
+ */
+const jobEvents = Effect.gen(function*() {
+  const sql = yield* SqlClient
+  yield* sql`
+    CREATE TABLE job_events (
+      id        bigserial PRIMARY KEY,
+      job_id    bigint NOT NULL REFERENCES jobs (id) ON DELETE CASCADE,
+      subject   text NOT NULL,
+      phase     text NOT NULL,
+      clock_ms  double precision NOT NULL,
+      at        timestamptz NOT NULL,
+      message   text
+    )
+  `
+  yield* sql`CREATE INDEX job_events_job_idx ON job_events (job_id, id)`
+})
+
+/** The key of the migration that records a job's events. */
+export const JOB_EVENTS = "14_job_events"
+
+/**
+ * `verifications`: the verification lines (`@sip/contracts` `Verification`)
+ * of a cell (a `case_results` row), a batch or a job, in the order they were
+ * written; `cell_statuses`: the final status of every cell holding a line,
+ * read off its lines (`Verification.finalStatusOf`), never stored.
+ */
+const verifications = Effect.gen(function*() {
+  const sql = yield* SqlClient
+  yield* sql`
+    CREATE TABLE verifications (
+      id          bigserial PRIMARY KEY,
+      scope       text NOT NULL CHECK (scope IN ('cell', 'batch', 'job')),
+      run_id      bigint,
+      case_id     text,
+      batch_id    bigint REFERENCES batches (id) ON DELETE CASCADE,
+      job_id      bigint REFERENCES jobs (id) ON DELETE CASCADE,
+      ordinal     integer NOT NULL,
+      name        text NOT NULL,
+      source      text NOT NULL,
+      answer      text NOT NULL CHECK (answer IN ('pass', 'fail', 'not-checkable', 'pending')),
+      message     text,
+      detail      jsonb,
+      informative boolean NOT NULL DEFAULT false,
+      waived      boolean NOT NULL DEFAULT false,
+      FOREIGN KEY (run_id, case_id) REFERENCES case_results (run_id, case_id) ON DELETE CASCADE,
+      CHECK ((scope = 'cell') = (run_id IS NOT NULL AND case_id IS NOT NULL)),
+      CHECK ((scope = 'batch') = (batch_id IS NOT NULL)),
+      CHECK ((scope = 'job') = (job_id IS NOT NULL)),
+      CHECK (NOT waived OR answer = 'fail')
+    )
+  `
+  yield* sql`CREATE INDEX verifications_cell_idx ON verifications (run_id, case_id, ordinal) WHERE scope = 'cell'`
+  yield* sql`CREATE INDEX verifications_batch_idx ON verifications (batch_id, ordinal) WHERE scope = 'batch'`
+  yield* sql`CREATE INDEX verifications_job_idx ON verifications (job_id, ordinal) WHERE scope = 'job'`
+  yield* sql`CREATE INDEX verifications_name_idx ON verifications (name, answer)`
+  yield* sql`
+    CREATE VIEW cell_statuses AS
+    SELECT run_id, case_id,
+           CASE
+             WHEN bool_or(answer = 'fail') FILTER (WHERE deciding) THEN
+               CASE WHEN bool_or(answer = 'pending') FILTER (WHERE deciding) THEN 'fail, still verifying' ELSE 'fail' END
+             WHEN bool_or(answer = 'pending') FILTER (WHERE deciding) THEN 'ok so far'
+             WHEN bool_or(answer = 'not-checkable') FILTER (WHERE deciding) THEN 'unverified'
+             WHEN bool_and(NOT deciding) THEN 'unverified'
+             ELSE 'pass'
+           END AS status
+    FROM (SELECT run_id, case_id, answer, NOT informative AND NOT waived AS deciding
+          FROM verifications WHERE scope = 'cell') lines
+    GROUP BY run_id, case_id
+  `
+})
+
+/** The key of the migration that holds the verification lines of a cell, a batch and a job. */
+export const VERIFICATIONS = "15_verifications"
+
+/**
+ * `attachments`: the typed files (`@sip/contracts` `Attachment`) of a cell (a
+ * `case_results` row), a batch or a job, one per name per holder, in the
+ * order they were listed: `dir` the holder's directory as `runs.bundle_path`
+ * stores a bundle, `file` relative to it (a `link`'s URL, its `dir` empty).
+ */
+const attachments = Effect.gen(function*() {
+  const sql = yield* SqlClient
+  yield* sql`
+    CREATE TABLE attachments (
+      id        bigserial PRIMARY KEY,
+      scope     text NOT NULL CHECK (scope IN ('cell', 'batch', 'job')),
+      run_id    bigint,
+      case_id   text,
+      batch_id  bigint REFERENCES batches (id) ON DELETE CASCADE,
+      job_id    bigint REFERENCES jobs (id) ON DELETE CASCADE,
+      ordinal   integer NOT NULL,
+      name      text NOT NULL,
+      kind      text NOT NULL CHECK (kind IN ('log', 'records', 'diff', 'table', 'json', 'file', 'link')),
+      title     text,
+      dir       text NOT NULL,
+      file      text NOT NULL,
+      source    text NOT NULL,
+      FOREIGN KEY (run_id, case_id) REFERENCES case_results (run_id, case_id) ON DELETE CASCADE,
+      CHECK ((scope = 'cell') = (run_id IS NOT NULL AND case_id IS NOT NULL)),
+      CHECK ((scope = 'batch') = (batch_id IS NOT NULL)),
+      CHECK ((scope = 'job') = (job_id IS NOT NULL))
+    )
+  `
+  yield* sql`CREATE UNIQUE INDEX attachments_cell_idx ON attachments (run_id, case_id, name) WHERE scope = 'cell'`
+  yield* sql`CREATE UNIQUE INDEX attachments_batch_idx ON attachments (batch_id, name) WHERE scope = 'batch'`
+  yield* sql`CREATE UNIQUE INDEX attachments_job_idx ON attachments (job_id, name) WHERE scope = 'job'`
+})
+
+/** The key of the migration that holds the attachments of a cell, a batch and a job. */
+export const ATTACHMENTS = "16_attachments"
+
+/**
+ * A job's attachments moved to `job_attachments`, which references `jobs`
+ * alone: a `TRUNCATE … CASCADE` of the results (`result-reset.ts`) empties
+ * `attachments` whole and never reaches a job's. Both tables draw their ids
+ * from one sequence; `attachment_rows` reads them as one.
+ */
+const jobAttachments = Effect.gen(function*() {
+  const sql = yield* SqlClient
+  yield* sql`
+    CREATE TABLE job_attachments (
+      id        bigint PRIMARY KEY DEFAULT nextval('attachments_id_seq'),
+      job_id    bigint NOT NULL REFERENCES jobs (id) ON DELETE CASCADE,
+      ordinal   integer NOT NULL,
+      name      text NOT NULL,
+      kind      text NOT NULL CHECK (kind IN ('log', 'records', 'diff', 'table', 'json', 'file', 'link')),
+      title     text,
+      dir       text NOT NULL,
+      file      text NOT NULL,
+      source    text NOT NULL
+    )
+  `
+  yield* sql`CREATE UNIQUE INDEX job_attachments_idx ON job_attachments (job_id, name)`
+  yield* sql`
+    INSERT INTO job_attachments (id, job_id, ordinal, name, kind, title, dir, file, source)
+    SELECT id, job_id, ordinal, name, kind, title, dir, file, source FROM attachments WHERE scope = 'job'
+  `
+  yield* sql`DELETE FROM attachments WHERE scope = 'job'`
+  yield* sql`ALTER TABLE attachments DROP COLUMN job_id`
+  yield* sql`ALTER TABLE attachments DROP CONSTRAINT attachments_scope_check`
+  yield* sql`ALTER TABLE attachments ADD CONSTRAINT attachments_scope_check CHECK (scope IN ('cell', 'batch'))`
+  yield* sql`
+    CREATE VIEW attachment_rows AS
+    SELECT id, scope, run_id, case_id, batch_id, NULL::bigint AS job_id, ordinal, name, kind, title, dir, file, source
+    FROM attachments
+    UNION ALL
+    SELECT id, 'job', NULL, NULL, NULL, job_id, ordinal, name, kind, title, dir, file, source
+    FROM job_attachments
+  `
+})
+
+/** The key of the migration that keeps a job's attachments apart from the results. */
+export const JOB_ATTACHMENTS = "17_job_attachments"
+
+/** A job keeps no directory of shell-hook logs: what its collectors attach is in `job_attachments`. */
+const jobHooksPathDropped = Effect.flatMap(SqlClient, (sql) => sql`ALTER TABLE jobs DROP COLUMN hooks_path`)
+
+/** The key of the migration that drops a job's hook directory. */
+export const JOB_HOOKS_PATH_DROPPED = "18_job_hooks_path_dropped"
+
+/**
+ * The CAMPAIGN record (`campaign-runs.ts`): `campaign_runs`, one campaign run
+ * with what its pack states of the target it drove (`target`); the store
+ * `runs` row of each lane it drove (`campaign_run_lanes`); each case result's
+ * cell, its backend's log and its attempts (`campaign_cells`); and what each
+ * case it compiled says of itself (`campaign_case_about`).
+ */
+const campaignRuns = Effect.gen(function*() {
+  const sql = yield* SqlClient
+  yield* sql`
+    CREATE TABLE campaign_runs (
+      id          bigserial PRIMARY KEY,
+      capture     text NOT NULL,
+      env         text,
+      branch      text,
+      seed        text,
+      dir         text NOT NULL,
+      scope       text,
+      selection   jsonb,
+      target      jsonb NOT NULL DEFAULT '{}'::jsonb,
+      started_at  timestamptz NOT NULL DEFAULT now(),
+      finished_at timestamptz
+    )
+  `
+  yield* sql`CREATE INDEX campaign_runs_capture_id_idx ON campaign_runs (capture, id DESC)`
+  yield* sql`
+    CREATE TABLE campaign_run_lanes (
+      campaign_run_id bigint NOT NULL REFERENCES campaign_runs (id) ON DELETE CASCADE,
+      run_id          bigint NOT NULL REFERENCES runs (id) ON DELETE CASCADE,
+      PRIMARY KEY (campaign_run_id, run_id)
+    )
+  `
+  yield* sql`CREATE INDEX campaign_run_lanes_run_idx ON campaign_run_lanes (run_id)`
+  yield* sql`
+    CREATE TABLE campaign_cells (
+      run_id      bigint NOT NULL,
+      case_id     text NOT NULL,
+      cell        text NOT NULL,
+      log_records integer,
+      log_missing text,
+      attempts    jsonb,
+      PRIMARY KEY (run_id, case_id),
+      FOREIGN KEY (run_id, case_id) REFERENCES case_results (run_id, case_id) ON DELETE CASCADE
+    )
+  `
+  yield* sql`
+    CREATE TABLE campaign_case_about (
+      campaign_run_id bigint NOT NULL REFERENCES campaign_runs (id) ON DELETE CASCADE,
+      ref             text NOT NULL,
+      about           jsonb NOT NULL,
+      PRIMARY KEY (campaign_run_id, ref)
+    )
+  `
+})
+
+/** The key of the migration that creates the campaign record. */
+export const CAMPAIGN_RUNS = "19_campaign_runs"
+
+/**
+ * A current population may name an env with no branch: every branch of that
+ * env is current (`current.ts`), each run keeping the branch it recorded. The
+ * views are restated over the setting's nullable branch.
+ */
+const everyBranch = Effect.gen(function*() {
+  const sql = yield* SqlClient
+  yield* sql`ALTER TABLE current_population ALTER COLUMN branch DROP NOT NULL`
+  yield* viewsOf(CELL_COLUMNS)
+})
+
+/** The key of the migration that lets the current population name every branch of its env. */
+export const EVERY_BRANCH = "20_every_branch"
+
+/**
+ * A run built from a dirty tree is current like any other (`current.ts`),
+ * its dirty flags kept as provenance: the views are restated without
+ * excluding it.
+ */
+const dirtyRunsCurrent = Effect.suspend(() => viewsOf(CELL_COLUMNS))
+
+/** The key of the migration that makes a run built from a dirty tree current like any other. */
+export const DIRTY_RUNS_CURRENT = "21_dirty_runs_current"
+
+/**
+ * Every foreign key's referencing columns lead an index: a parent's delete
+ * finds its children by index, where a cascade per parent row would scan the
+ * child table once per row.
+ */
+const foreignKeyIndexes = Effect.gen(function*() {
+  const sql = yield* SqlClient
+  yield* sql`CREATE INDEX cut_refusal_calls_refusal_idx ON cut_refusal_calls (prep_id, capture, case_id)`
+  yield* sql`CREATE INDEX capture_cuts_flows_idx ON capture_cuts (flows_hash)`
+  yield* sql`CREATE INDEX jobs_sweep_idx ON jobs (sweep_id)`
+  yield* sql`CREATE INDEX jobs_request_idx ON jobs (request_id)`
+  yield* sql`CREATE INDEX jobs_restart_of_idx ON jobs (restart_of)`
+})
+
+/** The key of the migration that indexes every foreign key's referencing columns. */
+export const FOREIGN_KEY_INDEXES = "22_foreign_key_indexes"
+
+/**
  * The migration record, static so `tsx` and a bundler both resolve it: the
  * filesystem loader would make the package's own layout a runtime dependency.
  */
@@ -790,7 +1085,17 @@ export const record: Record<string, Effect.Effect<void, unknown, SqlClient>> = {
   [CUT_CASE_HASHES]: cutCaseHashes,
   [CAMPAIGN_JOBS]: campaignJobs,
   [FORCED_RUNS]: forcedRuns,
-  [INBOX_JOBS]: inboxJobs
+  [INBOX_JOBS]: inboxJobs,
+  [BATCHES]: batches,
+  [JOB_EVENTS]: jobEvents,
+  [VERIFICATIONS]: verifications,
+  [ATTACHMENTS]: attachments,
+  [JOB_ATTACHMENTS]: jobAttachments,
+  [JOB_HOOKS_PATH_DROPPED]: jobHooksPathDropped,
+  [CAMPAIGN_RUNS]: campaignRuns,
+  [EVERY_BRANCH]: everyBranch,
+  [DIRTY_RUNS_CURRENT]: dirtyRunsCurrent,
+  [FOREIGN_KEY_INDEXES]: foreignKeyIndexes
 }
 
 export const loader: Migrator.Loader = Migrator.fromRecord(record)

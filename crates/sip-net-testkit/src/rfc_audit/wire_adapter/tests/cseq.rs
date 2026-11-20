@@ -101,3 +101,84 @@ fn an_ack_on_an_unknown_cseq_is_reported_at_the_taker() {
     ];
     assert!(live(RuleId::AckCseqMatchesInvite).check_positioned(&matched).is_empty());
 }
+
+/// At the taker's lane, a CSeq gap over a request the loss model dropped on
+/// its way in is not reported: the sender sent it. The same gap on a call
+/// that dropped nothing is.
+#[test]
+fn a_cseq_gap_over_a_request_the_loss_model_dropped_is_not_reported() {
+    use crate::types::RecvDisposition::{Delivered, LossModel};
+    let call = |info: Option<crate::types::RecvDisposition>| {
+        let mut evs = vec![arrival(
+            SUT,
+            req("OPTIONS", "z9hG4bK-o", 1, Some("bt")),
+            ALICE,
+            0,
+            Delivered,
+            None,
+        )];
+        if let Some(disposition) = info {
+            evs.push(arrival(
+                SUT,
+                req("INFO", "z9hG4bK-i", 2, Some("bt")),
+                ALICE,
+                1,
+                disposition,
+                None,
+            ));
+        }
+        evs.push(arrival(SUT, req("BYE", "z9hG4bK-b", 3, Some("bt")), ALICE, 2, Delivered, None));
+        live(RuleId::CseqInDialogOrder).check(&evs)
+    };
+    assert!(call(Some(LossModel)).is_empty(), "{:?}", call(Some(LossModel)));
+    assert_eq!(call(None).len(), 1, "{:?}", call(None));
+}
+
+/// The CSeq gap between the emitter's OPTIONS 1 and BYE 3 at the taker's
+/// lane, `lost` dropped between them: the rule's reports.
+fn gap_over(lost: Stamped<SignalingNetworkEvent>) -> Vec<(LaneKey, String)> {
+    use crate::types::RecvDisposition::Delivered;
+    let evs = vec![
+        arrival(SUT, req("OPTIONS", "z9hG4bK-o", 1, Some("bt")), ALICE, 0, Delivered, None),
+        lost,
+        arrival(SUT, req("BYE", "z9hG4bK-b", 3, Some("bt")), ALICE, 2, Delivered, None),
+    ];
+    live(RuleId::CseqInDialogOrder).check(&evs)
+}
+
+/// A drop that carried no request inside the gap explains none: the
+/// emitter's request of a CSeq past the gap lost on arrival leaves the skip
+/// reported.
+#[test]
+fn a_cseq_gap_no_dropped_request_fills_is_reported() {
+    use crate::types::RecvDisposition::LossModel;
+    let past = arrival(SUT, req("INFO", "z9hG4bK-i", 4, Some("bt")), ALICE, 1, LossModel, None);
+    assert_eq!(gap_over(past).len(), 1);
+}
+
+/// A request the taker itself sent, numbered inside the emitter's gap and
+/// lost on send, travelled away from the taker: it explains no request the
+/// emitter sent, and the skip stays reported.
+#[test]
+fn the_taker_s_own_request_lost_on_send_fills_no_gap() {
+    let own_info = Stamped {
+        event: SignalingNetworkEvent::SendLost {
+            bind_key: SUT.to_string(),
+            to: ALICE.parse().unwrap(),
+            msg: req("INFO", "z9hG4bK-s", 2, Some("bt")),
+        },
+        seq: 1,
+        at_ms: 1,
+    };
+    assert_eq!(gap_over(own_info).len(), 1);
+}
+
+/// An ACK reuses its INVITE's CSeq number (RFC 3261 §17.1.1.3): one the
+/// emitter sent numbered inside the gap and lost on arrival fills no number
+/// of the dialog's sequence, and the skip stays reported.
+#[test]
+fn a_lost_ack_numbered_inside_the_gap_fills_none() {
+    use crate::types::RecvDisposition::LossModel;
+    let ack = arrival(SUT, req("ACK", "z9hG4bK-a", 2, Some("bt")), ALICE, 1, LossModel, None);
+    assert_eq!(gap_over(ack).len(), 1);
+}

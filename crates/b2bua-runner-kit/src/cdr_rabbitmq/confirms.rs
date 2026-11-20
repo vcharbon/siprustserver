@@ -1,21 +1,23 @@
 //! The confirm tracker of one session: it turns each publish's confirm into
-//! exactly one `cdr_written_total` or `cdr_dropped_total`, by the writer's
-//! close deadline at the latest.
+//! exactly one written or dropped record of the writer's [`Tally`], by the
+//! writer's close deadline at the latest.
 
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 
-use b2bua::metrics::B2buaMetrics;
 use lapin::{Confirmation, PublisherConfirm};
 use tokio::sync::{mpsc, watch, OwnedSemaphorePermit};
 use tokio::time::{timeout, timeout_at, Instant};
 
 use super::session::Health;
+use super::tally::Tally;
 
 /// A publish awaiting its confirm, holding one window slot until resolved.
 pub(super) struct Pending {
     pub(super) confirm: PublisherConfirm,
+    /// When the writer was handed the record.
+    pub(super) handed_at: Instant,
     pub(super) deadline: Instant,
     pub(super) _slot: OwnedSemaphorePermit,
 }
@@ -39,15 +41,16 @@ enum Outcome {
 /// Resolves every tracked publish, in publish order, to exactly one written
 /// or dropped record. A publish still unconfirmed when the session ends, or
 /// at the writer's close deadline (`close_by`), is dropped without waiting;
-/// one already confirmed keeps its confirm. Exits once the session's
-/// publishes stopped and every tracked publish is resolved.
+/// one already confirmed keeps its confirm. A record's end is counted when
+/// the tracker reaches it, so no earlier than the publishes before it. Exits
+/// once the session's publishes stopped and every tracked publish is resolved.
 pub(super) async fn track_confirms(
     mut rx: mpsc::UnboundedReceiver<Pending>,
     health: Arc<Health>,
     mut close_by: watch::Receiver<Option<Instant>>,
-    metrics: B2buaMetrics,
+    tally: Tally,
 ) {
-    while let Some(Pending { confirm, deadline, _slot }) = rx.recv().await {
+    while let Some(Pending { confirm, handed_at, deadline, _slot }) = rx.recv().await {
         let outcome = if health.ended() {
             // Only a confirm already received counts; nothing is awaited.
             match timeout(Duration::ZERO, confirm).await {
@@ -60,27 +63,27 @@ pub(super) async fn track_confirms(
         match outcome {
             Outcome::Acked => {
                 health.delivered.store(true, Ordering::SeqCst);
-                metrics.bump_cdr_written();
+                tally.written(handed_at);
             }
             Outcome::Nacked => {
-                metrics.bump_cdr_dropped();
+                tally.dropped(handed_at);
                 if !health.nack_logged.swap(true, Ordering::SeqCst) {
                     tracing::warn!("CDR publish nacked by the broker; nacked records are dropped");
                 }
             }
             Outcome::Returned => {
-                metrics.bump_cdr_dropped();
+                tally.dropped(handed_at);
                 health.end("publish returned unroutable: the queue is gone");
             }
             Outcome::Lost(e) => {
-                metrics.bump_cdr_dropped();
+                tally.dropped(handed_at);
                 health.end(&format!("confirm lost: {e}"));
             }
             Outcome::TimedOut => {
-                metrics.bump_cdr_dropped();
+                tally.dropped(handed_at);
                 health.end("no confirm within the confirm bound");
             }
-            Outcome::Closed | Outcome::SessionEnded => metrics.bump_cdr_dropped(),
+            Outcome::Closed | Outcome::SessionEnded => tally.dropped(handed_at),
         }
     }
 }

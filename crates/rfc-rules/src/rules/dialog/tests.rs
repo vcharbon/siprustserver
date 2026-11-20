@@ -502,6 +502,47 @@ fn record_route_on_a_response_to_an_in_dialog_request_is_violated() {
     assert_eq!(request_method.as_str(), "INVITE");
 }
 
+/// A UAC that sends its re-INVITE from another socket than its sent-by still
+/// opened the transaction its response answers.
+#[test]
+fn record_route_answering_a_two_socket_uac_s_in_dialog_request_is_violated() {
+    let msgs = [
+        invite(1_000, "z9hG4bK-i", ""),
+        rsp(2_000, 200, 1, "INVITE", "z9hG4bK-i", ""),
+        req(
+            3_000,
+            "127.0.0.1:40000",
+            BOB,
+            "INVITE",
+            B_URI,
+            "z9hG4bK-r",
+            2,
+            A_URI,
+            B_URI,
+            Some("bt"),
+            "",
+        ),
+        rsp(4_000, 200, 2, "INVITE", "z9hG4bK-r", "Record-Route: <sip:p1@127.0.0.1;lr>\r\n"),
+    ];
+    let f = hits(&RecordRoutePlacement, &msgs);
+    assert_eq!(f.len(), 1, "{:?}", eval(&RecordRoutePlacement, &msgs));
+}
+
+/// A UAC that sends from another socket than its sent-by learned the route
+/// set from the 2xx its sent-by took: its in-dialog request owes that set.
+#[test]
+fn a_two_socket_uac_owes_the_route_set_its_sent_by_learned() {
+    const ALICE_SENDS: &str = "127.0.0.1:60000";
+    let msgs = [
+        req(1_000, ALICE_SENDS, BOB, "INVITE", B_URI, "z9hG4bK-i", 1, A_URI, B_URI, None, ""),
+        rsp(2_000, 200, 1, "INVITE", "z9hG4bK-i", "Record-Route: <sip:p1@127.0.0.1:5090;lr>\r\n"),
+        req(3_000, ALICE_SENDS, BOB, "BYE", B_URI, "z9hG4bK-b", 2, A_URI, B_URI, Some("bt"), ""),
+    ];
+    let f = hits(&MidDialogRoute, &msgs);
+    assert_eq!(f.len(), 1, "{:?}", eval(&MidDialogRoute, &msgs));
+    assert_eq!(f[0].emitter, ALICE_SENDS, "the socket that sent the BYE is charged");
+}
+
 /// §17.1.1.3: the ACK for a non-2xx final reuses the INVITE's branch and
 /// carries the final's To tag. A §17.2.1 retransmit landing after it must
 /// still read as answering the INVITE — an ACK elicits no response, so it is

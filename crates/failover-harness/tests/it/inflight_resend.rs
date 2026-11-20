@@ -55,8 +55,7 @@ use std::time::Duration;
 use crate::answer_lost::kill_serving_node_answer_lost;
 use crate::relay_resumed_at_the_takeover::callee_repeats_its_final;
 use failover_harness::{
-    assert_call_fully_released, total_cdrs_for, worker_ordinals, FailoverHarness, ProxySut,
-    ReplicatedB2buaSut, WorkerHealth,
+    worker_ordinals, FailoverHarness, ProxySut, ReplicatedB2buaSut, WorkerHealth,
 };
 use scenario_harness::agent::{Agent, Dialog};
 use sip_message::generators::InDialogMethod;
@@ -337,22 +336,7 @@ pub(crate) async fn settle_to_one_cdr(
     nodes: &[&ReplicatedB2buaSut; 2],
     call_ref: &str,
 ) {
-    let drained = fh
-        .settle_terminal(async || {
-            nodes[0].memory_clean()
-                && nodes[1].memory_clean()
-                && !nodes[0].holds_any_trace(call_ref).await
-                && !nodes[1].holds_any_trace(call_ref).await
-        })
-        .await;
-    assert!(drained, "the cluster drains the failed-over call within the settle budget");
-    fh.linger_peers(peers, Duration::from_secs(3)).await;
-    assert_eq!(
-        total_cdrs_for(&nodes[..], call_ref),
-        1,
-        "exactly one CDR for the failed-over call across the cluster",
-    );
-    assert_call_fully_released(&nodes[..], call_ref).await;
+    crate::cdr_settle::settle_to_cdrs(fh, peers, nodes, call_ref, 1..=1).await;
 }
 
 /// An in-dialog **UPDATE** (RFC 3311) relayed to the callee and still unanswered

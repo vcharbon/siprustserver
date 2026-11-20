@@ -18,11 +18,14 @@ const UNWITNESSED: &[&str] = &[
     "W-stall-cancel-reason",
 ];
 
-/// The backticked `W-…` ids of ADR-0055 §11.
+/// The backticked `W-…` ids of ADR-0055 §11, read from its appendix, which holds the window table.
 fn adr_ids() -> BTreeSet<String> {
-    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs/adr/0055-services-are-ha-blind.md");
-    let adr = std::fs::read_to_string(path).expect("ADR-0055 reads");
-    let start = adr.find("### 11. The proof").expect("ADR-0055 has §11");
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../docs/adr/appendix/0055-services-are-ha-blind.md"
+    );
+    let adr = std::fs::read_to_string(path).expect("the ADR-0055 appendix reads");
+    let start = adr.find("### 11. The proof").expect("the ADR-0055 appendix has §11");
     let end = adr[start..].find("\n### 12.").map_or(adr.len(), |e| start + e);
     adr[start..end]
         .split('`')

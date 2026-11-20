@@ -12,6 +12,7 @@ use super::*;
 mod cancel_target;
 mod dialog_id;
 mod from_tag;
+mod parties;
 mod to_tag;
 mod transaction;
 

@@ -1,0 +1,5 @@
+{
+  "clock": "virtual",
+  "lane": "rfc-demo",
+  "route_target": "192.0.2.2:5060"
+}

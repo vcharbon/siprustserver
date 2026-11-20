@@ -5,8 +5,18 @@
 use std::sync::Arc;
 
 use super::B2buaCore;
+use crate::cdr::CdrWriter;
+use crate::metrics::B2buaMetrics;
 
 impl B2buaCore {
+    pub fn metrics(&self) -> &B2buaMetrics {
+        &self.metrics
+    }
+
+    pub fn cdr(&self) -> &Arc<dyn CdrWriter> {
+        &self.cdr
+    }
+
     /// The process's one parser: what a hook on this worker's bind reads with.
     pub fn parser(&self) -> sip_message::CustomParser {
         self.ctx.config.parser()

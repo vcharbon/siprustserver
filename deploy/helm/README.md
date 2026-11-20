@@ -23,8 +23,8 @@ node, the lab's runner env (socket buffers, keepalive, limiter, drain,
 heap profiling, the loadgen relay header, the stress limiter), replication on,
 traces exported with the trace header trusted, and `masq-exempt`.
 
-The SUT chart requires its network (`network.proxyVip`, `externalVip`, both
-interfaces and next hops, and `externalSubnet` for `masq-exempt`) and,
+The SUT chart requires its network (`network.proxyVip`, `externalVip`,
+`externalInterface`, `externalNextHops`, and `externalSubnet` for `masq-exempt`) and,
 with the workers' NetworkPolicy on, `worker.networkPolicy.proxyNodeCidrs`
 while the proxy is enabled; the collectors chart requires `hostStack.address` and
 `clusterName`. A top-level `enabled` in each chart serves a parent's
@@ -52,7 +52,8 @@ A product chart depends on `siprust` and sets, per component (`worker`,
 - `extraContainers`, `extraVolumes`, `extraVolumeMounts` (and
   `extraInitContainers` on the worker and the proxy): sidecars;
 - on the worker and the proxy, `extraPorts`, `podSecurityContext`, `sysctls`,
-  `priorityClassName`;
+  `priorityClassName`; on the worker and the call limiter, the container's
+  `securityContext`;
 - `resources`, `nodeSelector`, `tolerations`, `podAnnotations` (over the
   chart's `prometheus.io/*`, key by key), `podLabels` (never `app`); the worker
   also `affinity` and `topologySpreadConstraints`;
@@ -152,6 +153,51 @@ its key drawn on the first install and read back by every upgrade through
 - **The operator routes** (cordon, release-all, the live calls; ADR-0050 §10)
   listen on the worker's loopback (`B2BUA_ADMIN`, 127.0.0.1:9094), never on a
   Service, reached through `kubectl port-forward pod/<worker> 19094:9094`.
+
+## Reaching the HTTP listeners
+
+No private HTTP route is reachable from the external plane by default. Each
+listener's bind is a value (`httpBinds` in `values.yaml`):
+
+| listener | value, default | routes | reached by |
+|---|---|---|---|
+| proxy scrape (`PROXY_METRICS`) | `proxy.metrics.bind`, the node's address `$(HOST_IP):9090` | `/metrics` `/healthz` `/readyz` `/fitz` | the kubelet's probes, the in-cluster Prometheus (the pod's `prometheus.io/port`), the route guard |
+| route guard scrape (`ROUTE_GUARD_METRICS`) | `proxy.routeGuard.metricsBind`, `$(HOST_IP):<metricsPort>` | `/metrics` `/healthz` `/readyz` | the kubelet's probes, Prometheus (`prometheus.io/sidecar-port`) |
+| worker scrape (`B2BUA_METRICS`) | `worker.metrics.bind`, every address of the pod `0.0.0.0:9091` | `/metrics` `/healthz` `/ready` | the kubelet's probes, Prometheus, the `b2bua-worker` Service, `kubectl port-forward` |
+| worker operator and debug (`B2BUA_ADMIN`) | `worker.admin.bind`, `127.0.0.1:9094`, loopback only | `/admin/*`, `/debug/flamegraph`, `/debug/heap` | `kubectl port-forward` |
+| proxy debug (`PROXY_DEBUG`) | `proxy.debug.bind`, `127.0.0.1:9097`, loopback only | `/debug/flamegraph` | `kubectl port-forward` |
+
+- **Metrics** are read by the in-cluster Prometheus from the pod's address. A
+  proxy or route guard scrape listener binds the node's InternalIP
+  (`$(HOST_IP)`, `status.hostIP`); where that is not on the internal plane,
+  set the kubelet's `--node-ip` to the node's internal-plane address. Every
+  replica binds the one rendered value, so the render takes no literal
+  address: a proxy pod's scrape host is `$(HOST_IP)` or, with
+  `httpBinds.allowWildcard=true`, `0.0.0.0` or `[::]`. On the hostNetwork
+  proxy pod a wildcard binds every interface of the node, the external one
+  included, and no NetworkPolicy applies there. A worker is never
+  hostNetwork: its host is `$(POD_IP)`, `0.0.0.0` (its IPv4 pod IP and
+  loopback) or `[::]` (both families), and the workers' NetworkPolicy holds
+  port 9091. The proxy's and the worker's `extraEnv` name no listener
+  variable, nor `HOST_IP` or `POD_IP`.
+- **A proxy's metrics** are read at its node's address, from any host on the
+  internal plane: `curl http://<node InternalIP>:9090/metrics` (on the kind
+  lab, from the host, which holds the internal bridge's gateway). A worker's
+  through a port-forward: `kubectl port-forward pod/<worker> 19091:9091` then
+  `curl localhost:19091/metrics`.
+- **Cordon, release and profiles** go through `kubectl port-forward`, which
+  connects inside the pod's network namespace, a hostNetwork pod's included:
+  `kubectl port-forward pod/<worker> 19094:9094` then
+  `curl -X POST localhost:19094/admin/cordon`, or
+  `curl -o cpu.svg 'localhost:19094/debug/flamegraph?seconds=20'`;
+  `kubectl port-forward pod/<proxy> 19097:9097` for the proxy's flamegraph.
+  `deploy/k8s/flamegraph.sh` wraps the capture. A flamegraph needs a
+  profiling build (`cargo build --release -p <runner> --features flamegraph`);
+  a default build answers `501`. The route guard and the CDR
+  consumer serve no debug route; a proxy whose debug port is taken serves
+  without it and logs `debug server failed to bind`.
+- **A runner outside Kubernetes** binds its debug listener on loopback too:
+  reach it through an SSH tunnel, `ssh -L 19094:127.0.0.1:9094 <host>`.
 
 ## Render-time relations
 

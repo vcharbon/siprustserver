@@ -402,15 +402,16 @@ pub(super) async fn reoffer_trigger(
         return Offered::Turn(Box::new(call));
     }
     match ctx.txn.reoffer((**message).clone(), *src).await.unwrap_or(Reoffer::Unmatched) {
-        Reoffer::Matched => Offered::Matched,
+        Reoffer::Matched | Reoffer::Muted => Offered::Absorbed,
         Reoffer::Unmatched => Offered::Turn(Box::new(call)),
     }
 }
 
 /// What [`reoffer_trigger`] made of a turn's datagram.
 pub(super) enum Offered {
-    /// A transaction here took it: the turn ends.
-    Matched,
+    /// A transaction here took it, or its Call-ID's mute dropped it
+    /// (ADR-0063 §4): the turn ends.
+    Absorbed,
     /// The turn runs on the call, a relay the datagram supersedes dropped.
     Turn(Box<Call>),
 }

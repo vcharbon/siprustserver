@@ -302,7 +302,8 @@ export const load = (
 /**
  * A box-wide singleton, by name: a build, or a lane whose SUT is one per
  * host. Named under the lock root, so two checkouts queue for the same ports
- * rather than fight over them.
+ * rather than fight over them. Each attempt is uninterruptible, so a take
+ * interrupted while it waits holds nothing: a lock it got is given back.
  */
 export const exclusive = (
   name: string,
@@ -316,14 +317,14 @@ export const exclusive = (
     const now = stamp()
     let taken: Taken | undefined
     const blocked = yield* waitFor(
-      Effect.map(claim(file, what, now), (claimed) => {
+      Effect.uninterruptible(Effect.map(claim(file, what, now), (claimed) => {
         if ("held" in claimed) return claimed.held
         taken = claimed
         return undefined
-      }),
+      })),
       patience,
       watch
-    )
+    ).pipe(Effect.onInterrupt(() => taken?.release ?? Effect.void))
     if (blocked !== undefined || taken === undefined) {
       return { held: blocked ?? `${file} could not be locked` } as Taken | Held
     }

@@ -34,6 +34,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::plan::{CompiledStep, Plan};
 use crate::program::ItemKind;
 
+mod injects;
 mod transaction;
 
 /// Where one step stands; every status but `Pending` is settled.
@@ -75,7 +76,7 @@ pub struct Cursor<'p> {
     items: Vec<ItemStatus>,
     /// `alt` item index → the branch index that committed.
     committed: BTreeMap<usize, usize>,
-    /// `inject` item index → whether the lane's injector has been called.
+    /// `inject` item indices the lane's injector has performed.
     injected: BTreeSet<usize>,
     /// Completion order, for the verdict.
     completed: Vec<String>,
@@ -364,21 +365,6 @@ impl<'p> Cursor<'p> {
                 }
             },
         }
-    }
-
-    /// The `inject` nodes whose ordering is satisfied and which have not been
-    /// handed to the lane's injector yet, as `(node id, action)` — the data the
-    /// caller acts on, so the item index never leaves this file.
-    pub fn open_injects(&self) -> Vec<(&'p str, &'p str)> {
-        self.plan
-            .program()
-            .items
-            .iter()
-            .filter(|item| self.items[item.index] == ItemStatus::Pending)
-            .filter(|item| !self.injected.contains(&item.index))
-            .filter(|item| self.item_open(item.index))
-            .filter_map(|item| item.action.as_deref().map(|action| (item.id.as_str(), action)))
-            .collect()
     }
 
     /// Commit an `alt` to the branch a step belongs to. Every step of every

@@ -29,10 +29,6 @@ impl Sut for Idle {
         0
     }
 
-    fn cdr_records(&self) -> Vec<BTreeMap<String, String>> {
-        Vec::new()
-    }
-
     fn observe(&self, name: &str) -> Result<Option<String>, String> {
         Err(format!("{name:?} is not an observable this lane publishes"))
     }
@@ -77,6 +73,7 @@ async fn a_leg_s_local_hostport_is_its_endpoint_s_bound_address() {
         base_dir: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures"),
         composer: &Composer,
         events: None,
+        injector: None,
         reader: std::sync::Arc::new(sip_message::CustomParser::built()),
     };
     let dir = std::env::temp_dir().join("pivot-runs").join("bound-address");

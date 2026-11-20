@@ -333,9 +333,9 @@ fn default_tuning(args: &Args) -> CallTuning {
     CallTuning { drop_rate, retransmit: args.auto_retransmit, drop_nth: None }
 }
 
-/// The `infraShape` id the flag-synthesized [`EndpointConfig`] carries. A loaded
-/// `--endpoint-config` may use any id (loadgen is not a compiled e2e Infra
-/// shape) — only the alice/bob/charlie/lb role set is required.
+/// The `infraShape` label the flag-synthesized [`EndpointConfig`] carries. A
+/// loaded `--endpoint-config` may carry any label; only the alice/bob/charlie/lb
+/// role set is required.
 const LOADGEN_SHAPE: &str = "loadgen-mux";
 
 /// Resolve the run's [`EndpointConfig`] — the ONE environment-axis document:
@@ -372,7 +372,6 @@ pub(super) fn endpoint_config(args: &Args, recv_timeout_ms: u64) -> EndpointConf
         infra_shape: LOADGEN_SHAPE.to_string(),
         roles,
         recv_timeout_ms,
-        transit_delay_ms: 0,
         egress: args.route_pin_to_uas.then_some(e2e_model::EgressPolicySpec::ApiCallPin),
     }
 }

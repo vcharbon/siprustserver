@@ -62,7 +62,7 @@ impl Owner {
             destination: Some(dest),
         });
         self.start_client_retransmit(&branch, buf.clone(), dest, max_ms, timeout_kind);
-        self.send_buffer(endpoint, &buf, dest).await;
+        self.send_buffer(endpoint, request.call_id().as_str(), &buf, dest).await;
         true
     }
 
@@ -153,7 +153,7 @@ impl Owner {
             txn.original_request = None;
         }
         self.hold_for(TxnRef::Server(key.id()), Hold::TimerJ, ms(bound_ms));
-        self.send_buffer(endpoint, response.image(), to).await;
+        self.send_buffer(endpoint, response.call_id().as_str(), response.image(), to).await;
         true
     }
 }

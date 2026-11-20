@@ -13,6 +13,10 @@ use super::{CancelAfter1xx, CancelRouteEchoesInvite, No200AfterCancel, NoCancelA
 
 const UAC: &str = "10.0.0.1:5060";
 const UAS: &str = "10.0.0.2:5060";
+/// The ephemeral socket a two-socket UAC sends from; it listens at [`UAC`].
+const UAC_SENDS: &str = "10.0.0.1:40000";
+/// The socket a two-socket UAS answers from; it listens at [`UAS`].
+const UAS_SENDS: &str = "10.0.0.2:41000";
 /// The transaction every `req` / `rsp` rides unless a test re-homes it.
 const B1: &str = "z9hG4bK-1";
 const B2: &str = "z9hG4bK-2";
@@ -82,6 +86,26 @@ fn a_2xx_after_the_cancel_is_violated_under_a_closed_observation() {
         panic!("cancel evidence: {:?}", f[0].decision)
     };
     assert_eq!((*gap_us, *status), (2_000, 200));
+}
+
+/// A UAS answering from another socket than the one it took the INVITE and
+/// its CANCEL at answered the cancelled transaction.
+#[test]
+fn a_2xx_after_the_cancel_from_a_second_uas_socket_is_violated() {
+    let from_second = |at_us, status| {
+        let mut m = rsp(at_us, status);
+        m.src = UAS_SENDS.to_string();
+        m
+    };
+    let msgs = vec![
+        req(1_000, "INVITE"),
+        from_second(3_000, 180),
+        req(4_000, "CANCEL"),
+        from_second(6_000, 200),
+    ];
+    let f = No200AfterCancel.eval(&WireView { msgs: &msgs, obs: &obs(&msgs) });
+    assert_eq!(f.len(), 1, "one occasion, the cancelled transaction: {f:?}");
+    assert!(f[0].violated(), "{:?}", f[0].decision);
 }
 
 /// The crossing race stays COMPLIANT live: the 200 was already on the wire
@@ -539,6 +563,46 @@ fn a_cancel_after_a_taken_provisional_is_compliant() {
     ]);
     assert_eq!(f.len(), 1, "one occasion, the CANCEL: {f:?}");
     assert!(matches!(f[0].decision, Decision::Compliant), "{:?}", f[0].decision);
+}
+
+/// A UAC that sends from another socket than its sent-by took the provisional
+/// its CANCEL waited for at that sent-by.
+#[test]
+fn a_two_socket_uac_s_cancel_after_its_provisional_is_compliant() {
+    let from_second = |at_us, method| {
+        let mut m = sent(at_us, method, "z9hG4bK-1", "");
+        m.src = UAC_SENDS.to_string();
+        m
+    };
+    let f = waited(&[
+        from_second(1_000, "INVITE"),
+        took(3_000, 180, "z9hG4bK-1"),
+        from_second(4_000, "CANCEL"),
+    ]);
+    assert_eq!(f.len(), 1, "one occasion, the CANCEL: {f:?}");
+    assert!(matches!(f[0].decision, Decision::Compliant), "{:?}", f[0].decision);
+}
+
+/// A two-socket UAC that took its final at its sent-by and CANCELs after it
+/// completed its own transaction.
+#[test]
+fn a_two_socket_uac_s_cancel_after_its_final_is_violated() {
+    let from_second = |at_us, method| {
+        let mut m = sent(at_us, method, "z9hG4bK-1", "");
+        m.src = UAC_SENDS.to_string();
+        m
+    };
+    let msgs = vec![
+        from_second(1_000, "INVITE"),
+        took(3_000, 180, "z9hG4bK-1"),
+        took(4_000, 480, "z9hG4bK-1"),
+        from_second(4_500, "ACK"),
+        from_second(5_000, "CANCEL"),
+    ];
+    let f = NoCancelAfterFinal.eval(&WireView { msgs: &msgs, obs: &obs(&msgs) });
+    assert_eq!(f.len(), 1, "one occasion, the CANCEL: {f:?}");
+    assert!(f[0].violated(), "{:?}", f[0].decision);
+    assert_eq!(f[0].emitter, UAC_SENDS, "the socket that cancelled is charged");
 }
 
 /// The eager CANCEL: nothing had answered the INVITE, so the UAS may not have

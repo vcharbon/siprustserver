@@ -90,6 +90,56 @@ async fn a_granted_set_never_released_is_a_leak() {
     ledger.count(None).assert_matches(&LimiterLeak::NONE);
 }
 
+#[tokio::test(start_paused = true)]
+#[should_panic(expected = "1 hold(s) granted and never released (2 admitted, 1 released); \
+                           declared 0\n  c2: 1 hold(s), the store holds 1")]
+async fn a_leak_names_each_set_left_and_what_the_store_holds_for_it() {
+    let (client, sut) = SutLimiter::serve_default().await;
+    let limiter = CountingLimiter { inner: client, ledger: sut.ledger() };
+    limiter.admit("c1", 1, &LimiterHeld::default(), &[entry("x")], false).await;
+    limiter.admit("c2", 1, &LimiterHeld::default(), &[entry("y")], false).await;
+    limiter.release(&["c1".to_string()]).await;
+    sut.probe().assert_matches(&LimiterLeak::NONE);
+}
+
+/// The release of one call excuses no other call's set.
+#[tokio::test]
+async fn a_release_of_one_call_leaves_another_call_s_set_counted() {
+    let (client, sut) = (admit_all(), SutLimiter::own(None));
+    let limiter = CountingLimiter { inner: client, ledger: sut.ledger() };
+    limiter.admit("c1", 1, &LimiterHeld::default(), &[entry("x")], false).await;
+    limiter.release(&["c1".to_string()]).await;
+    limiter.admit("c2", 1, &LimiterHeld::default(), &[entry("y")], false).await;
+    assert_eq!(sut.count().unreleased(), 1);
+    let left: Vec<String> = sut.probe().unreleased().into_iter().map(|set| set.key).collect();
+    assert_eq!(left, ["c2"]);
+}
+
+/// An admit sent after its call's release left is no admit the release
+/// overtook: a limiter that grants it holds a set nothing releases.
+#[tokio::test]
+#[should_panic(expected = "c1: 1 hold(s)")]
+async fn a_set_granted_to_an_admit_sent_after_the_release_is_a_leak() {
+    let sut = SutLimiter::own(None);
+    let limiter = CountingLimiter { inner: admit_all(), ledger: sut.ledger() };
+    limiter.admit("c1", 1, &LimiterHeld::default(), &[entry("x")], false).await;
+    limiter.release(&["c1".to_string()]).await;
+    limiter.admit("c1", 2, &LimiterHeld::default(), &[entry("x")], false).await;
+    sut.probe().assert_matches(&LimiterLeak::NONE);
+}
+
+/// A set the count keeps for a key the store released: the gate's
+/// accounting, not the SUT, is what the failure points at.
+#[tokio::test(start_paused = true)]
+#[should_panic(expected = "c1: 1 hold(s), the store released the key")]
+async fn a_leak_the_store_released_says_so() {
+    let (client, sut) = SutLimiter::serve_default().await;
+    let limiter = CountingLimiter { inner: client, ledger: sut.ledger() };
+    limiter.admit("c1", 1, &LimiterHeld::default(), &[entry("x")], false).await;
+    sut.store().unwrap().release(&["c1"]);
+    sut.probe().assert_matches(&LimiterLeak::NONE);
+}
+
 #[tokio::test]
 async fn a_second_release_of_one_call_counts_nothing() {
     let (limiter, ledger) = counting(admit_all());
@@ -99,6 +149,40 @@ async fn a_second_release_of_one_call_counts_nothing() {
     limiter.release(&["never-admitted".to_string()]).await;
     assert_eq!(ledger.count(None).released, 1);
     ledger.count(None).assert_matches(&LimiterLeak::NONE);
+}
+
+/// An admit the store applies before a release of its call that leaves while
+/// the admit's answer is still in transit: the store fences the key once the
+/// release lands, so the admit could only be granted ahead of it, and the
+/// release in flight drops the set. Nothing is left, on the store or the count.
+#[tokio::test(start_paused = true)]
+async fn a_set_granted_ahead_of_a_release_in_flight_is_released_by_it() {
+    let (client, sut) = SutLimiter::serve_default().await;
+    let limiter = Arc::new(CountingLimiter { inner: client, ledger: sut.ledger() });
+    let admit = {
+        let limiter = limiter.clone();
+        tokio::spawn(async move {
+            limiter.admit("c1", 1, &LimiterHeld::default(), &[entry("x")], false).await
+        })
+    };
+    let store = sut.store().unwrap().clone();
+    let applied = || store.held_set("c1").is_some_and(|set| !set.entries.is_empty());
+    tokio::time::sleep(Duration::from_millis(1)).await;
+    for _ in 0..8 {
+        if applied() {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert!(applied(), "the store applied the admit");
+    assert!(!admit.is_finished(), "the admit's answer is still in transit");
+    let release = {
+        let limiter = limiter.clone();
+        tokio::spawn(async move { limiter.release(&["c1".to_string()]).await })
+    };
+    assert_eq!(admit.await.unwrap(), AdmitOutcome::Admitted);
+    assert_eq!(release.await.unwrap(), ReleaseAnswer::Released);
+    sut.assert_drained(&LimiterLeak::NONE);
 }
 
 #[tokio::test]

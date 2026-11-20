@@ -109,248 +109,7 @@ fn hits(rule: &dyn Obligation, msgs: &[Msg]) -> Vec<Finding> {
     eval(rule, msgs).into_iter().filter(Finding::violated).collect()
 }
 
-// ---- concurrent-re-invite-500-or-491 ---------------------------------
-
-/// The sender re-INVITEs while its own earlier INVITE has no final: §14.2's
-/// first clause owes 500 with `Retry-After`, so a 491 is the violation.
-#[test]
-fn a_same_sender_race_answered_491_is_violated() {
-    let f = hits(
-        &ConcurrentReInvite500Or491,
-        &[
-            req(1_000, ALICE, BOB, "INVITE", "z9hG4bK-1", 2, "at", "bt"),
-            req(2_000, ALICE, BOB, "INVITE", "z9hG4bK-2", 3, "at", "bt"),
-            rsp(3_000, BOB, ALICE, 491, "z9hG4bK-2", 3, "at", "bt", ""),
-            rsp(4_000, BOB, ALICE, 200, "z9hG4bK-1", 2, "at", "bt", ""),
-        ],
-    );
-    assert_eq!(f.len(), 1, "one occasion, the racing re-INVITE: {f:?}");
-    assert_eq!(f[0].rule, RuleId::ConcurrentReInvite500Or491);
-    assert_eq!(f[0].emitter, BOB, "the UAS that owed the 500 is charged");
-    assert_eq!(f[0].taker, ALICE);
-    let Decision::Violated(Evidence::ConcurrentReInvite { answered_status, .. }) = &f[0].decision
-    else {
-        panic!("{:?}", f[0].decision)
-    };
-    assert_eq!(*answered_status, 491);
-}
-
-/// A re-INVITE the strict reading refuses is neither an occasion nor in
-/// progress: its 400 is owed, and a later re-INVITE races nothing.
-#[test]
-fn a_refused_reinvite_opens_no_race() {
-    let mut refused = req(1_000, ALICE, BOB, "INVITE", "z9hG4bK-1", 2, "at", "bt");
-    refused.refused = true;
-    let mut racing = req(2_000, ALICE, BOB, "INVITE", "z9hG4bK-2", 3, "at", "bt");
-    racing.refused = true;
-    let msgs = [
-        refused,
-        racing,
-        req(3_000, ALICE, BOB, "INVITE", "z9hG4bK-3", 4, "at", "bt"),
-        rsp(4_000, BOB, ALICE, 200, "z9hG4bK-3", 4, "at", "bt", ""),
-    ];
-    assert!(eval(&ConcurrentReInvite500Or491, &msgs).is_empty());
-}
-
-/// A re-INVITE crossing one of the other party's at a hop that carries
-/// both directions is §14.2's second clause: 491 meets it.
-#[test]
-fn a_crossing_race_answered_491_is_compliant() {
-    let f = eval(
-        &ConcurrentReInvite500Or491,
-        &[
-            req(1_000, ALICE, BOB, "INVITE", "z9hG4bK-a", 2, "at", "bt"),
-            req(2_000, ALICE, BOB, "INVITE", "z9hG4bK-b", 2, "bt", "at"),
-            rsp(3_000, BOB, ALICE, 491, "z9hG4bK-b", 2, "bt", "at", ""),
-            rsp(4_000, BOB, ALICE, 200, "z9hG4bK-a", 2, "at", "bt", ""),
-        ],
-    );
-    assert_eq!(f.len(), 1, "{f:?}");
-    assert!(matches!(f[0].decision, Decision::Compliant), "{:?}", f[0].decision);
-}
-
-/// At a hop carrying both directions, a re-INVITE that finds its sender's
-/// own INVITE AND a crossing one in flight is judged against its sender's:
-/// 500 with Retry-After is owed and a 491 is the violation, whichever
-/// pending branch sorts first.
-#[test]
-fn a_race_over_both_a_same_sender_and_a_crossing_invite_owes_the_500() {
-    let msgs = |status: u16, head: &str| {
-        vec![
-            req(1_000, ALICE, BOB, "INVITE", "z9hG4bK-1", 2, "at", "bt"),
-            req(2_000, ALICE, BOB, "INVITE", "z9hG4bK-0", 2, "bt", "at"),
-            rsp(3_000, BOB, ALICE, 491, "z9hG4bK-0", 2, "bt", "at", ""),
-            req(2_500, ALICE, BOB, "INVITE", "z9hG4bK-2", 3, "at", "bt"),
-            rsp(4_000, BOB, ALICE, status, "z9hG4bK-2", 3, "at", "bt", head),
-            rsp(5_000, BOB, ALICE, 200, "z9hG4bK-1", 2, "at", "bt", ""),
-        ]
-    };
-    let on_the_newcomer =
-        |f: Vec<Finding>| -> Vec<Finding> { f.into_iter().filter(|f| f.cseq == 3).collect() };
-    let compliant =
-        on_the_newcomer(eval(&ConcurrentReInvite500Or491, &msgs(500, "Retry-After: 3\r\n")));
-    assert_eq!(compliant.len(), 1, "{compliant:?}");
-    assert!(matches!(compliant[0].decision, Decision::Compliant), "{:?}", compliant[0].decision);
-    let refused_491 = on_the_newcomer(hits(&ConcurrentReInvite500Or491, &msgs(491, "")));
-    assert_eq!(refused_491.len(), 1, "{refused_491:?}");
-}
-
-/// The crossing owes 491, not the 500 of a same-sender race.
-#[test]
-fn a_crossing_race_answered_500_is_violated() {
-    let f = hits(
-        &ConcurrentReInvite500Or491,
-        &[
-            req(1_000, ALICE, BOB, "INVITE", "z9hG4bK-a", 2, "at", "bt"),
-            req(2_000, ALICE, BOB, "INVITE", "z9hG4bK-b", 2, "bt", "at"),
-            rsp(3_000, BOB, ALICE, 500, "z9hG4bK-b", 2, "bt", "at", "Retry-After: 3\r\n"),
-        ],
-    );
-    assert_eq!(f.len(), 1, "{f:?}");
-}
-
-/// Answering the race 200 serves two offers at once — the violation, with
-/// both transactions named.
-#[test]
-fn a_racing_re_invite_answered_200_is_violated() {
-    let f = hits(
-        &ConcurrentReInvite500Or491,
-        &[
-            req(1_000, ALICE, BOB, "INVITE", "z9hG4bK-1", 2, "at", "bt"),
-            req(2_000, ALICE, BOB, "INVITE", "z9hG4bK-2", 3, "at", "bt"),
-            rsp(3_000, BOB, ALICE, 200, "z9hG4bK-2", 3, "at", "bt", ""),
-        ],
-    );
-    assert_eq!(f.len(), 1, "{f:?}");
-    let Decision::Violated(Evidence::ConcurrentReInvite {
-        branch,
-        pending_invite_branch,
-        pending_invite_msg,
-        answered_status,
-        retry_after,
-        ..
-    }) = &f[0].decision
-    else {
-        panic!("{:?}", f[0].decision)
-    };
-    assert_eq!(branch.as_str(), "z9hG4bK-2");
-    assert_eq!(pending_invite_branch.as_str(), "z9hG4bK-1");
-    assert_eq!(*pending_invite_msg, 0, "the INVITE it collided with");
-    assert_eq!((*answered_status, *retry_after), (200, false));
-    assert_eq!(f[0].anchor, 1, "the occasion rests on the racing re-INVITE");
-}
-
-/// §14.2's other legal answer: 500 CARRYING `Retry-After`. A bare 500 is
-/// not it.
-#[test]
-fn a_500_discharges_only_with_retry_after() {
-    let race = |head: &str| {
-        vec![
-            req(1_000, ALICE, BOB, "INVITE", "z9hG4bK-1", 2, "at", "bt"),
-            req(2_000, ALICE, BOB, "INVITE", "z9hG4bK-2", 3, "at", "bt"),
-            rsp(3_000, BOB, ALICE, 500, "z9hG4bK-2", 3, "at", "bt", head),
-        ]
-    };
-    assert!(hits(&ConcurrentReInvite500Or491, &race("Retry-After: 5\r\n")).is_empty());
-    assert_eq!(hits(&ConcurrentReInvite500Or491, &race("")).len(), 1);
-}
-
-/// The 100 Trying precedes a compliant 500 — only the transaction's FINAL
-/// answers §14.2, so the provisional must not stand in for it.
-#[test]
-fn a_100_trying_does_not_stand_in_for_the_final() {
-    assert!(hits(
-        &ConcurrentReInvite500Or491,
-        &[
-            req(1_000, ALICE, BOB, "INVITE", "z9hG4bK-1", 2, "at", "bt"),
-            req(2_000, ALICE, BOB, "INVITE", "z9hG4bK-2", 3, "at", "bt"),
-            rsp(3_000, BOB, ALICE, 100, "z9hG4bK-2", 3, "at", "bt", ""),
-            rsp(4_000, BOB, ALICE, 500, "z9hG4bK-2", 3, "at", "bt", "Retry-After: 3\r\n"),
-            rsp(5_000, BOB, ALICE, 200, "z9hG4bK-1", 2, "at", "bt", ""),
-        ],
-    )
-    .is_empty());
-}
-
-/// §17.2.1: a Timer-A retransmission of an ALREADY-ANSWERED re-INVITE
-/// crosses its own 491 on the wire. It draws the recorded final again — it
-/// is not a new transaction and must not re-enter the in-progress window,
-/// or the next genuine re-INVITE's compliant 200 reads as a race.
-#[test]
-fn a_post_final_retransmit_does_not_re_enter_the_window() {
-    let f = hits(
-        &ConcurrentReInvite500Or491,
-        &[
-            req(1_000, ALICE, BOB, "INVITE", "z9hG4bK-1", 2, "at", "bt"),
-            rsp(2_000, BOB, ALICE, 491, "z9hG4bK-1", 2, "at", "bt", ""),
-            req(3_000, ALICE, BOB, "INVITE", "z9hG4bK-1", 2, "at", "bt"),
-            req(4_000, ALICE, BOB, "INVITE", "z9hG4bK-2", 3, "at", "bt"),
-            rsp(5_000, BOB, ALICE, 200, "z9hG4bK-2", 3, "at", "bt", ""),
-        ],
-    );
-    assert!(f.is_empty(), "{f:?}");
-}
-
-/// A retransmission of an INVITE still in flight is the same act again,
-/// never a second transaction to serialise against.
-#[test]
-fn an_in_flight_retransmit_is_no_race() {
-    assert!(eval(
-        &ConcurrentReInvite500Or491,
-        &[
-            req(1_000, ALICE, BOB, "INVITE", "z9hG4bK-1", 2, "at", "bt"),
-            req(2_000, ALICE, BOB, "INVITE", "z9hG4bK-1", 2, "at", "bt"),
-        ],
-    )
-    .is_empty());
-}
-
-/// The race is read on the UNORDERED dialog: a callee-initiated re-INVITE
-/// crossing the caller's is exactly the §14.2 collision, tags reversed and
-/// all.
-#[test]
-fn crossing_re_invites_collide_at_the_uas_whichever_way_they_point() {
-    let f = hits(
-        &ConcurrentReInvite500Or491,
-        &[
-            req(1_000, ALICE, BOB, "INVITE", "z9hG4bK-a", 2, "at", "bt"),
-            // BOB is the taker of the first and the SENDER of the reversed
-            // one; only what it TOOK is judged here.
-            req(2_000, ALICE, BOB, "INVITE", "z9hG4bK-b", 2, "bt", "at"),
-            rsp(3_000, BOB, ALICE, 200, "z9hG4bK-b", 2, "bt", "at", ""),
-        ],
-    );
-    assert_eq!(f.len(), 1, "the reversed re-INVITE races the first: {f:?}");
-}
-
-/// An INVITE with only one tag creates a dialog rather than riding one:
-/// §14.2 has nothing to serialise it against.
-#[test]
-fn an_initial_invite_is_no_race() {
-    assert!(eval(
-        &ConcurrentReInvite500Or491,
-        &[
-            req(1_000, ALICE, BOB, "INVITE", "z9hG4bK-1", 1, "at", ""),
-            req(2_000, ALICE, BOB, "INVITE", "z9hG4bK-2", 2, "at", ""),
-        ],
-    )
-    .is_empty());
-}
-
-/// A race the observation stopped on top of settles nothing: silence
-/// inside the window is truncation, not a missing answer.
-#[test]
-fn an_unanswered_race_inside_the_window_is_undecidable() {
-    let msgs = [
-        req(1_000, ALICE, BOB, "INVITE", "z9hG4bK-1", 2, "at", "bt"),
-        req(2_000, ALICE, BOB, "INVITE", "z9hG4bK-2", 3, "at", "bt"),
-    ];
-    let open = eval_open(&ConcurrentReInvite500Or491, &msgs);
-    assert_eq!(open.len(), 1, "{open:?}");
-    assert!(!open[0].decided(), "{:?}", open[0].decision);
-    // Closed, the window collapses and the absence decides.
-    assert_eq!(hits(&ConcurrentReInvite500Or491, &msgs).len(), 1);
-}
+mod concurrent;
 
 // ---- no-re-invite-while-invite-in-progress ---------------------------
 
@@ -370,6 +129,86 @@ fn a_re_invite_after_the_ack_is_compliant() {
     assert_eq!(f.len(), 1, "one occasion, the re-INVITE: {f:?}");
     assert!(matches!(f[0].decision, Decision::Compliant), "{:?}", f[0].decision);
     assert_eq!(f[0].emitter, ALICE, "the UAC that sent it is charged");
+}
+
+/// A UAC that sends from another socket than its sent-by took the 491 that
+/// ended its re-INVITE at that sent-by: the next re-INVITE overlaps nothing.
+#[test]
+fn a_two_socket_uac_s_re_invite_after_a_491_is_compliant() {
+    let from_second = |at_us, branch: &str, cseq| {
+        let mut m = req(at_us, ALICE_SENDS, BOB, "INVITE", branch, cseq, "at", "bt");
+        m.head = Some(format!("Via: SIP/2.0/UDP {ALICE};branch={branch}\r\n\r\n").into_bytes());
+        m
+    };
+    let f = eval(
+        &NoReInviteWhileInviteInProgress,
+        &[
+            from_second(1_000, "z9hG4bK-1", 2),
+            rsp(2_000, BOB, ALICE, 491, "z9hG4bK-1", 2, "at", "bt", ""),
+            from_second(3_000, "z9hG4bK-2", 3),
+        ],
+    );
+    assert_eq!(f.len(), 2, "two occasions, the two re-INVITEs: {f:?}");
+    assert!(f.iter().all(|f| matches!(f.decision, Decision::Compliant)), "{f:?}");
+}
+
+/// alice's sending socket; her agent is named by `ALICE`, which sorts first.
+const ALICE_SENDS: &str = "10.0.0.1:60000";
+
+/// A request alice sends from her sending socket, its top Via naming `ALICE`.
+fn from_sending(at_us: u64, method: &str, branch: &str, cseq: u32, to_tag: &str) -> Msg {
+    let mut m = req(at_us, ALICE_SENDS, BOB, method, branch, cseq, "at", to_tag);
+    m.head = Some(format!("Via: SIP/2.0/UDP {ALICE};branch={branch}\r\n\r\n").into_bytes());
+    m
+}
+
+/// §14.1: a re-INVITE alice sends from her sent-by while the one she sent
+/// from her other socket drew only a provisional overlaps it.
+#[test]
+fn a_two_socket_uac_s_re_invite_over_its_other_socket_s_is_violated() {
+    let f = hits(
+        &NoReInviteWhileInviteInProgress,
+        &[
+            from_sending(1_000, "INVITE", "z9hG4bK-1", 2, "bt"),
+            rsp(1_500, BOB, ALICE, 180, "z9hG4bK-1", 2, "at", "bt", ""),
+            req(2_000, ALICE, BOB, "INVITE", "z9hG4bK-2", 3, "at", "bt"),
+        ],
+    );
+    assert_eq!(f.len(), 1, "{f:?}");
+    assert_eq!(f[0].emitter, ALICE, "the socket that sent the overlapping re-INVITE");
+}
+
+/// §14.1 rule 2: the ACK alice sends from her sending socket confirms the
+/// re-INVITE whose 2xx her sent-by took, so the next one overlaps nothing.
+#[test]
+fn a_two_socket_uac_s_ack_confirms_the_re_invite_its_sent_by_took() {
+    let f = eval(
+        &NoReInviteWhileInviteInProgress,
+        &[
+            from_sending(1_000, "INVITE", "z9hG4bK-1", 2, "bt"),
+            rsp(2_000, BOB, ALICE, 200, "z9hG4bK-1", 2, "at", "bt", ""),
+            from_sending(3_000, "ACK", "z9hG4bK-k1", 2, "bt"),
+            from_sending(4_000, "INVITE", "z9hG4bK-2", 3, "bt"),
+        ],
+    );
+    assert_eq!(f.len(), 2, "two occasions, the two re-INVITEs: {f:?}");
+    assert!(f.iter().all(|f| matches!(f.decision, Decision::Compliant)), "{f:?}");
+}
+
+/// The dialog-creating INVITE alice sent from her other socket is
+/// outstanding on the early dialog the 180 her sent-by took names: an INVITE
+/// on that early dialog overlaps it.
+#[test]
+fn an_invite_on_an_early_dialog_a_two_socket_uac_s_sent_by_took_is_violated() {
+    let f = hits(
+        &NoReInviteWhileInviteInProgress,
+        &[
+            from_sending(1_000, "INVITE", "z9hG4bK-1", 1, ""),
+            rsp(1_500, BOB, ALICE, 180, "z9hG4bK-1", 1, "at", "bt", ""),
+            from_sending(2_000, "INVITE", "z9hG4bK-2", 2, "bt"),
+        ],
+    );
+    assert_eq!(f.len(), 1, "{f:?}");
 }
 
 /// RFC 6026's *Accepted* interval: the 2xx has landed but the ACK has not
@@ -747,4 +586,23 @@ fn silence_inside_the_final_window_is_undecidable() {
     ));
     let decided = eval_open(&FailedReinviteTearsDownDialog, &long);
     assert!(decided.iter().any(Finding::violated), "{decided:?}");
+}
+
+/// A BYE alice sends from her sent-by is the other cause that abandons the
+/// re-INVITE she sent from her other socket.
+#[test]
+fn a_two_socket_uac_s_bye_discharges_its_abandoned_re_invite() {
+    let f = eval(
+        &FailedReinviteTearsDownDialog,
+        &[
+            from_sending(1_000, "INVITE", "z9hG4bK-i", 1, ""),
+            rsp(2_000, BOB, ALICE, 200, "z9hG4bK-i", 1, "at", "bt", ""),
+            from_sending(3_000, "ACK", "z9hG4bK-k", 1, "bt"),
+            from_sending(4_000, "INVITE", "z9hG4bK-r", 2, "bt"),
+            rsp(5_000, BOB, ALICE, 180, "z9hG4bK-r", 2, "at", "bt", ""),
+            req(6_000, ALICE, BOB, "BYE", "z9hG4bK-b", 3, "at", "bt"),
+        ],
+    );
+    assert_eq!(f.len(), 1, "{f:?}");
+    assert!(matches!(f[0].decision, Decision::Compliant), "{:?}", f[0].decision);
 }

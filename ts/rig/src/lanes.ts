@@ -1,0 +1,230 @@
+/**
+ * The lanes of one root (ADR-0060 appendix §11): every `lanes/<id>.toml` of
+ * it, each with the parts it names read from `targets/<kind>/<name>.toml` of
+ * the same root and validated against the rig path's `parts/<kind>.schema.json`,
+ * the operations it binds resolved on the path, and its capabilities.
+ *
+ * Loading refuses, naming the file: a lane file that does not hold
+ * (`lane.ts`), an id that is not a name, a part kind the path has no schema
+ * for, a part file that is not there, a part file its schema refuses (the
+ * dotted field named), and a binding to an operation the path does not define,
+ * whose parts the lane lacks, or with a parameter its manifest does not
+ * declare or of another type. {@link sharedOf} refuses a job whose lanes
+ * name different files of a kind its schema declares shared.
+ */
+import * as Effect from "effect/Effect"
+import * as FileSystem from "effect/FileSystem"
+import * as Result from "effect/Result"
+import * as Schema from "effect/Schema"
+import * as path from "node:path"
+import * as Capability from "./capability.js"
+import * as Collection from "./collection.js"
+import * as Lane from "./lane.js"
+import { Name, type ParamValue, type Refusal, refuse } from "./manifest-file.js"
+import type * as Operation from "./operation.js"
+import * as Part from "./part.js"
+import * as RigPath from "./rig-path.js"
+
+/** A lane as loaded. */
+export interface Loaded {
+  readonly id: string
+  readonly file: string
+  readonly lane: Lane.LaneFile
+  /** Per kind, the part the lane names. */
+  readonly parts: ReadonlyMap<string, Part.Part>
+  /** Per name a case asks for, the operation bound to it. */
+  readonly operations: ReadonlyMap<string, RigPath.Defined<Operation.Operation>>
+  /** Per bound name stating some, the parameters the lane runs its operation with over the manifest's, as a case's step. */
+  readonly operationParams?: ReadonlyMap<string, Readonly<Record<string, ParamValue>>>
+  readonly capabilities: ReadonlySet<string>
+}
+
+/**
+ * The capabilities of a lane: those of its clock and backend mode
+ * (`Capability.BASE`), those its parts' schemas give (`part.ts`), and
+ * `operation:<name>` for each name bound in `[operations]`.
+ */
+export const capabilitiesOf = (
+  lane: Lane.LaneFile,
+  parts: ReadonlyArray<readonly [Part.Kind, Part.Part]>,
+  bound: ReadonlyArray<string>
+): ReadonlySet<string> => {
+  const derived = new Set<string>()
+  const mode = lane.backend?.mode
+  if (lane.clock === "simulated") {
+    derived.add(Capability.BASE.scriptedRouting).add(Capability.BASE.routingVisible).add(Capability.BASE.pausedClock)
+  } else {
+    derived.add(Capability.BASE.realClock)
+    if (mode === "served") derived.add(Capability.BASE.scriptedRouting)
+    if (mode === "served" || mode === "proxied") derived.add(Capability.BASE.routingVisible)
+  }
+  for (const [kind, part] of parts) for (const capability of Part.capabilitiesOf(kind, part.value)) derived.add(capability)
+  for (const name of bound) derived.add(`${Capability.OPERATION_PREFIX}${name}`)
+  return derived
+}
+
+/**
+ * The operation names among `asked` that `lane` binds none of, sorted: a cell
+ * asking for one is not runnable on the lane, since nothing there would run
+ * its step.
+ */
+export const unboundOf = (lane: Loaded, asked: ReadonlyArray<string>): ReadonlyArray<string> =>
+  [...new Set(asked.filter((name) => !lane.operations.has(name)))].sort()
+
+/** A lane's `[collectors]`, as the job's wiring check reads it (`Collection.check`). */
+export const wiringOf = (lane: Loaded): Collection.LaneWiring => ({ file: lane.file, collectors: lane.lane.collectors })
+
+const readText = (file: string) =>
+  Effect.flatMap(FileSystem.FileSystem, (fs) => fs.readFileString(file)).pipe(
+    Effect.mapError((error) => refuse([file], `unreadable: ${error.message}`))
+  )
+
+/** The lane ids under `dir`, sorted; none where the directory is absent. */
+const idsOf = (dir: string) =>
+  Effect.gen(function*() {
+    const fs = yield* FileSystem.FileSystem
+    if (!(yield* fs.exists(dir).pipe(Effect.orElseSucceed(() => false)))) return []
+    const names = yield* fs.readDirectory(dir).pipe(Effect.mapError((error) => refuse([dir], `unreadable: ${error.message}`)))
+    return names.filter((name) => name.endsWith(".toml")).map((name) => name.slice(0, -".toml".length)).sort()
+  })
+
+/** The types of the elements of the array parameter `value`. */
+const elementKindsOf = (value: ReadonlyArray<string | number | boolean>): ReadonlySet<string> =>
+  new Set(value.map((element) => typeof element))
+
+/** A parameter value's type as a refusal names it: `a string`, `an array of number`, `an empty array`. */
+const typeNameOf = (value: ParamValue): string => {
+  if (!Array.isArray(value)) return `a ${typeof value}`
+  const kinds = [...elementKindsOf(value)].sort()
+  return kinds.length === 0 ? "an empty array" : `an array of ${kinds.join(" and ")}`
+}
+
+/**
+ * Whether the bound value `bound` is of the type of the manifest's `stated`:
+ * the same scalar type, or an array each of whose elements is of a type the
+ * stated array's elements are; an empty stated array admits any element.
+ */
+const holdsAs = (stated: ParamValue, bound: ParamValue): boolean => {
+  if (!Array.isArray(stated) || !Array.isArray(bound)) {
+    return Array.isArray(stated) === Array.isArray(bound) && typeof stated === typeof bound
+  }
+  const kinds = elementKindsOf(stated)
+  return kinds.size === 0 || bound.every((element) => kinds.has(typeof element))
+}
+
+/**
+ * Why the parameters `bound` a lane binds an operation with do not hold
+ * against its manifest's `offered` (`<key>: …`): a key the manifest's
+ * `[params]` does not declare as its own, or a value of another type than its
+ * default, an array's elements included; `undefined` where they hold.
+ */
+const paramRefusalOf = (
+  offered: Readonly<Record<string, ParamValue>>,
+  bound: Readonly<Record<string, ParamValue>>
+): string | undefined => {
+  for (const [key, value] of Object.entries(bound)) {
+    if (!Object.hasOwn(offered, key)) return `${key}: the operation's [params] declares no ${key}`
+    const stated = offered[key]!
+    if (!holdsAs(stated, value)) return `${key}: ${typeNameOf(value)}, where the operation's [params] states ${typeNameOf(stated)}`
+  }
+  return undefined
+}
+
+/** The bindings of `lane` resolved on `rig`, or why one does not hold. */
+const operationsOf = (rig: RigPath.RigPath, file: string, lane: Lane.LaneFile, parts: ReadonlyMap<string, Part.Part>) => {
+  const bound = new Map<string, RigPath.Defined<Operation.Operation>>()
+  const params = new Map<string, Readonly<Record<string, ParamValue>>>()
+  for (const [name, stated] of Object.entries(lane.operations ?? {})) {
+    const binding = Lane.bindingOf(stated)
+    const operation = binding.operation
+    if (binding.params !== undefined) params.set(name, binding.params)
+    const defined = rig.operations.get(operation)
+    if (defined === undefined) return Result.fail(refuse([file], `operations.${name}: names ${operation}, which no operation of the path defines`))
+    const lacks = (defined.manifest.needs ?? []).filter((kind) => !parts.has(kind))
+    if (lacks.length > 0) {
+      return Result.fail(refuse([file, defined.file], `operations.${name}: ${operation} needs the part ${lacks.join(", ")}, which the lane names none of`))
+    }
+    const unoffered = paramRefusalOf(defined.manifest.params ?? {}, binding.params ?? {})
+    if (unoffered !== undefined) return Result.fail(refuse([file, defined.file], `operations.${name}.params.${unoffered}`))
+    bound.set(name, defined)
+  }
+  return Result.succeed({ bound, params })
+}
+
+/** Every lane of `root`, by `order`, then id; the first file at fault refuses them all. */
+export const load = (rig: RigPath.RigPath, root: string): Effect.Effect<ReadonlyArray<Loaded>, Refusal, FileSystem.FileSystem> =>
+  Effect.gen(function*() {
+    const fs = yield* FileSystem.FileSystem
+    const dir = path.join(root, Lane.LANES_DIR)
+    const read = new Map<string, Part.Part>()
+    const partOf = (lane: string, kind: string, name: string) =>
+      Effect.gen(function*() {
+        const schema = rig.parts.get(kind)
+        if (schema === undefined) return yield* Effect.fail(refuse([lane], `parts.${kind}: no part schema ${kind}${RigPath.PART_SUFFIX} on the path`))
+        const file = Part.fileOf(root, kind, name)
+        const known = read.get(file)
+        if (known !== undefined) return [schema.reads, known] as const
+        if (!(yield* fs.exists(file).pipe(Effect.orElseSucceed(() => false)))) {
+          return yield* Effect.fail(refuse([lane], `parts.${kind}: no part file ${file}`))
+        }
+        const value = Part.parse(schema.reads, file, yield* readText(file))
+        if (Result.isFailure(value)) return yield* Effect.fail(value.failure)
+        const part: Part.Part = { kind, name, file, value: value.success }
+        read.set(file, part)
+        return [schema.reads, part] as const
+      })
+    const loaded: Array<Loaded> = []
+    for (const id of yield* idsOf(dir)) {
+      const file = path.join(dir, `${id}.toml`)
+      if (!Schema.is(Name)(id)) return yield* Effect.fail(refuse([file], "a lane id is lower-case letters, digits and dashes"))
+      const lane = Lane.parse(file, yield* readText(file))
+      if (Result.isFailure(lane)) return yield* Effect.fail(lane.failure)
+      const named = yield* Effect.forEach(Object.entries(lane.success.parts ?? {}), ([kind, name]) => partOf(file, kind, name))
+      const parts = new Map(named.map(([, part]) => [part.kind, part] as const))
+      const operations = operationsOf(rig, file, lane.success, parts)
+      if (Result.isFailure(operations)) return yield* Effect.fail(operations.failure)
+      loaded.push({
+        id,
+        file,
+        lane: lane.success,
+        parts,
+        operations: operations.success.bound,
+        operationParams: operations.success.params,
+        capabilities: capabilitiesOf(lane.success, named, [...operations.success.bound.keys()])
+      })
+    }
+    const orderOf = (lane: Loaded) => lane.lane.order ?? Number.MAX_SAFE_INTEGER
+    return loaded.sort((a, b) => orderOf(a) - orderOf(b) || a.id.localeCompare(b.id))
+  })
+
+/** The part kinds the schemas of `rig` declare shared (`part.ts`), sorted. */
+export const sharedKinds = (rig: RigPath.RigPath): ReadonlyArray<string> =>
+  [...rig.parts].filter(([, schema]) => schema.reads.shared).map(([kind]) => kind).sort()
+
+/**
+ * Per shared kind of `rig`, the name of the part `lane` names, `undefined`
+ * where it names none: lanes alike in every one may run as one job.
+ */
+export const sharedNamesOf = (rig: RigPath.RigPath, lane: Loaded): ReadonlyArray<readonly [string, string | undefined]> =>
+  sharedKinds(rig).map((kind) => [kind, lane.parts.get(kind)?.name] as const)
+
+/**
+ * The parts of the shared kinds the lanes of one job name: one file per kind
+ * declared `shared` (`part.ts`), or none on every lane. Refuses, naming the
+ * lane files, where two lanes differ.
+ */
+export const sharedOf = (
+  rig: RigPath.RigPath,
+  lanes: ReadonlyArray<Loaded>
+): Result.Result<ReadonlyMap<string, Part.Part | undefined>, Refusal> => {
+  const shared = new Map<string, Part.Part | undefined>()
+  for (const kind of sharedKinds(rig)) {
+    const named = (lane: Loaded) => lane.parts.get(kind)?.name
+    if (new Set(lanes.map(named)).size > 1) {
+      const said = (lane: Loaded) => `${lane.id} names ${named(lane) ?? `no ${kind} part`}`
+      return Result.fail(refuse(lanes.map((lane) => lane.file), `the lanes of one job name one ${kind} part: ${lanes.map(said).join(", ")}`))
+    }
+    shared.set(kind, lanes[0]?.parts.get(kind))
+  }
+  return Result.succeed(shared)
+}

@@ -1,7 +1,8 @@
-//! The rule-engine core types — port of `RuleDefinition.ts` (declarative
-//! `Match`, `RuleContext`, the `RuleAction` vocabulary) reduced to a concrete
-//! (non-type-narrowed) shape sufficient for the basic B2BUA. Service-layer
-//! ext narrowing and rule composition are deferred with their consumers.
+//! The rule-engine core types (declarative `Match`, `RuleContext`, the
+//! `RuleAction` vocabulary) in one concrete shape, shared by the core rules and
+//! every service: `b2bua-core`'s `compose_rules` merges a service's rules with
+//! the core's, and a service's own state is the typed slice its `init`
+//! installs (ADR-0016 X8).
 
 use call::features::FeatureActivations;
 use call::{CdrEventType, ExtMap, LegKind, MachineId, StateLabel, TerminationCause, TimerKey};
@@ -17,108 +18,14 @@ pub use crate::matcher::{Match, MatchKind, StatusMatch};
 use crate::relayed_final::RelayedFinal;
 pub use crate::rule_call::RuleCall;
 pub use crate::rule_context::RuleContext;
+pub use crate::rule_definition::RuleDefinition;
 pub use crate::rule_diagnostic::RuleDiagnostic;
+pub use crate::rule_handle_result::RuleHandleResult;
 pub use crate::timer_delay::TimerDelay;
 
 pub const CORE_LAYER: u8 = 0;
 #[allow(dead_code)]
 pub const SERVICE_LAYER: u8 = 1;
-
-/// A rule: a named, layer-ranked event handler that returns actions or declines.
-///
-/// A rule may belong to a per-call **machine** (ADR-0016 X1): it is then a
-/// selection candidate only when that machine's cursor is in [`Self::active_states`]
-/// (see `executor::pick_ranked`). Machine-less ("core") rules — built via
-/// [`Self::core`] — leave `machine`/`active_states`/`transitions` unset and are
-/// always candidates. The `transitions` it declares are the `(from, to)` edges
-/// its handle may cause via `SetState` (checked + diagram-generated in later
-/// slices).
-#[derive(Clone)]
-pub struct RuleDefinition {
-    pub id: &'static str,
-    pub layer: u8,
-    pub overrides: &'static [&'static str],
-    pub matcher: Match,
-    pub handle: fn(&RuleContext) -> Option<RuleHandleResult>,
-    /// Owner machine, or `None` for a machine-less core rule.
-    pub machine: Option<MachineId>,
-    /// States (within `machine`) in which this rule is a candidate.
-    pub active_states: &'static [StateLabel],
-    /// Declared `(from, to)` transition edges this rule's handle may cause.
-    pub transitions: &'static [(StateLabel, StateLabel)],
-    /// The **tracked side effects** this rule's handle may emit (ADR-0016 X9).
-    /// Required for a machine-bound (`sm_rule!`) rule; empty for a core rule. The
-    /// executor verifies the handler's emitted actions are a subset of these *by
-    /// [`EffectKind`]* (cursor moves + bookkeeping are auto-allowed).
-    pub effects: &'static [Effect],
-    /// A teardown rule stays a selection candidate on a `Terminating` /
-    /// `Terminated` call for an asynchronous trigger — a timer fire, a
-    /// transaction timeout, an internal-event fold
-    /// ([`CallEvent::is_asynchronous_trigger`](crate::event::CallEvent::is_asynchronous_trigger)). Every other rule is absorbed
-    /// there: a call already going away makes no forward progress on its own
-    /// clock. A peer's message and a CANCEL keep their per-rule filters.
-    pub teardown: bool,
-}
-
-impl RuleDefinition {
-    /// A machine-less ("core") rule: always a selection candidate, regardless of
-    /// any machine cursor. Every core rule is built through this; only
-    /// `sm_rule!`-generated service rules populate the machine fields directly.
-    pub fn core(
-        id: &'static str,
-        layer: u8,
-        overrides: &'static [&'static str],
-        matcher: Match,
-        handle: fn(&RuleContext) -> Option<RuleHandleResult>,
-    ) -> Self {
-        Self {
-            id,
-            layer,
-            overrides,
-            matcher,
-            handle,
-            machine: None,
-            active_states: &[],
-            transitions: &[],
-            effects: &[],
-            teardown: false,
-        }
-    }
-
-    /// Mark this a teardown rule ([`Self::teardown`]): it still runs on a
-    /// going-away call for an asynchronous trigger — to resolve a leg, scrub
-    /// a spent ledger entry, or reap a wedged teardown.
-    pub fn runs_while_terminating(mut self) -> Self {
-        self.teardown = true;
-        self
-    }
-}
-
-/// What a rule emits when it handles an event.
-#[derive(Debug, Clone, Default)]
-pub struct RuleHandleResult {
-    pub actions: Vec<RuleAction>,
-    /// Inputs this rule refused to read. Carried alongside the actions rather
-    /// than in place of them: a rule reports the defect **and** emits the
-    /// refusal it owns. The engine logs and counts these; they emit no wire
-    /// traffic of their own, so a rule can never route on one.
-    pub diagnostics: Vec<RuleDiagnostic>,
-    /// The call's record does not rebuild the caller's INVITE the rule read.
-    pub unrecoverable: bool,
-}
-
-impl RuleHandleResult {
-    pub fn new(actions: Vec<RuleAction>) -> Self {
-        Self { actions, diagnostics: Vec::new(), unrecoverable: false }
-    }
-
-    /// The same actions, carrying `diagnostic` — what a rule returns when an
-    /// input did not read and the actions are its refusal.
-    pub fn with_diagnostic(mut self, diagnostic: RuleDiagnostic) -> Self {
-        self.diagnostics.push(diagnostic);
-        self
-    }
-}
 
 /// Transform applied to a relayed message.
 #[derive(Debug, Clone, Default)]
@@ -137,9 +44,8 @@ pub struct MessageTransform {
     pub add_headers: Vec<Entry>,
 }
 
-/// The action vocabulary. The basic-B2BUA subset is exercised now; the trailing
-/// cluster (provisional/prack/notify/reinvite/sdp/policy/refer) is defined for
-/// the deferred 18x/transfer service rules and is unused until they land.
+/// The action vocabulary: every effect a rule, core or service, asks of the
+/// executor.
 #[derive(Debug, Clone)]
 pub enum RuleAction {
     RelayToPeer {
@@ -202,9 +108,16 @@ pub enum RuleAction {
         leg_id: String,
     },
     /// Release the fork straggler whose 2xx the current event carries on a
-    /// b-leg another fork already confirmed (RFC 3261 §13.2.2.4): ACK that
-    /// 2xx, and BYE its dialog the first time it arrives.
+    /// b-leg another fork already confirmed (RFC 3261 §13.2.2.4): ACK it and
+    /// BYE its dialog once, re-ACK a copy alone while one is owed (ADR-0057 §10).
     ReleaseStraggler2xx {
+        leg_id: String,
+    },
+    /// Re-send toward `leg_id` the ACK the 2xx to the INVITE before its
+    /// dialog's last drew (RFC 3261 §13.2.2.4), carried ahead on the last
+    /// one's record, when the current event is a copy of that 2xx the count
+    /// marked owed its re-ACK (ADR-0057 §10); nothing otherwise.
+    ReAckAhead {
         leg_id: String,
     },
     ConfirmDialog {
@@ -288,6 +201,14 @@ pub enum RuleAction {
     RejectPendingReinvite {
         leg_id: String,
         outbound_cseq: i64,
+        status: u16,
+        reason: String,
+    },
+    /// Answer the originator of the non-INVITE relay the current final
+    /// closes with the locally authored `status` final in place of relaying
+    /// that final, as a leg's end answers a relay toward it; the relay's
+    /// record closes. Draws nothing on any other event.
+    AnswerRelayOriginator {
         status: u16,
         reason: String,
     },
@@ -472,7 +393,6 @@ pub enum RuleAction {
     /// Send a NOTIFY toward `leg_id`'s confirmed dialog carrying the REFER
     /// subscription state (`Event` + `Subscription-State` + sipfrag body). The
     /// B2BUA is the UAS of the referrer leg, so the NOTIFY rides that dialog.
-    /// Port of `executeSendNotify` (ActionExecutor.ts:2157).
     SendNotify {
         leg_id: String,
         event: String,

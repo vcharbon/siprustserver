@@ -17,7 +17,9 @@ use super::{
 };
 
 mod acknowledgement;
+mod agent;
 mod answering;
+mod calls;
 mod negotiation;
 mod offer;
 mod sequence;
@@ -243,6 +245,18 @@ fn fork_prack(at_us: u64, rack: &str, to_tag: &str, branch: &str) -> Msg {
     let mut m =
         msg(at_us, UAC, UAS, Kind::Request { method: "PRACK".to_string() }, 2, Some(to_tag), head);
     m.cseq_method = "PRACK".to_string();
+    m.via_branch = Some(branch.to_string());
+    m
+}
+
+/// `m` on transaction `branch`, its top Via naming `sent_by`: the socket its
+/// sender listens at for the answers (RFC 3261 §18.2.2).
+fn via(mut m: Msg, branch: &str, sent_by: &str) -> Msg {
+    let head = String::from_utf8(m.head.take().unwrap_or_default()).unwrap_or_default();
+    let (start, rest) = head.split_once("\r\n").unwrap_or((head.as_str(), ""));
+    m.head = Some(
+        format!("{start}\r\nVia: SIP/2.0/UDP {sent_by};branch={branch}\r\n{rest}").into_bytes(),
+    );
     m.via_branch = Some(branch.to_string());
     m
 }

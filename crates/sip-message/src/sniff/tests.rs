@@ -531,3 +531,26 @@ fn identity_reads_a_status_line_whatever_the_version_case() {
     assert_eq!((id.status, id.method), (Some(180), None));
     assert_eq!(id.call_id, Some("c1"));
 }
+
+/// A refusal of an in-dialog request copies its Via rows, From, To, Call-ID
+/// and CSeq, so it is that request's response; a request whose To names no
+/// dialog draws none.
+#[test]
+fn a_refusal_answers_its_in_dialog_request() {
+    let bye = b"BYE sip:a@h SIP/2.0\r\nVia: SIP/2.0/UDP s;branch=z9hG4bK-b\r\nv: SIP/2.0/UDP p;branch=z9hG4bK-p\r\n\
+Max-Forwards: 70\r\nFrom: <sip:b@h>;tag=fb\r\nTo: <sip:a@h>;tag=ta\r\nCall-ID: c1\r\nCSeq: 7 BYE\r\n\
+Content-Length: 0\r\n\r\n";
+    let r = refusal(bye, 481, "Call/Transaction Does Not Exist").expect("a refusal");
+    let (req, resp) = (identity(bye), identity(&r));
+    assert_eq!(resp.status, Some(481));
+    assert_eq!(
+        (resp.call_id, resp.cseq, resp.cseq_method, resp.branch, resp.to_tag),
+        (req.call_id, req.cseq, req.cseq_method, req.branch, req.to_tag)
+    );
+    assert_eq!(header_values(&r, "Via").len(), 2, "every Via, in order");
+    assert_eq!(from_tag(&r), "fb");
+    assert!(header_value(&r, "Max-Forwards").is_none());
+    let initial = b"INVITE sip:a@h SIP/2.0\r\nVia: SIP/2.0/UDP s;branch=z9hG4bK-i\r\n\
+From: <sip:b@h>;tag=fb\r\nTo: <sip:a@h>\r\nCall-ID: c1\r\nCSeq: 1 INVITE\r\n\r\n";
+    assert!(refusal(initial, 481, "x").is_none());
+}

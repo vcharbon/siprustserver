@@ -26,7 +26,7 @@ loadgen stream may instead run as a pod (`placement: pod` in its profile).
 |---|---|---|
 | `sip-proxy-runner` | `crates/sip-proxy-runner` | Real UDP transport · `LoadBalancerStrategy` (HRW + HMAC-signed Record-Route stickiness) · EndpointSlice worker discovery (`ComposedWorkerRegistry`; a fixed `PROXY_WORKERS` list when set) · OPTIONS `HealthProbe` feeding the band observer · `EluCpsGate` self-gate · Prometheus `/metrics` |
 | `route-guard` | `crates/route-guard` | Beside each proxy, on the node's network with `NET_ADMIN` alone: reads the proxy's `/fitz` and keeps an nftables set that lets the node's BFD and BGP to its routers out while the proxy is fit (ADR-0056 §10) · Prometheus `/metrics` on `ROUTE_GUARD_METRICS` |
-| `b2bua-runner` | `crates/b2bua-runner` | Real UDP transport · system clock · `BufferedCdrWriter` over a discarding sink (no endurance leak) · `InMemoryCallStore` · `NoopLimiter` · `ScriptedDecisionEngine` routing all calls to the UAS · Prometheus `/metrics` |
+| `b2bua-runner` | `crates/b2bua-runner` | Real UDP transport · system clock · `BufferedCdrWriter` over the sink the env selects (a JSON-lines file, RabbitMQ, else a discarding one) · `InMemoryCallStore` · the limiter client `LIMITER_URL` names, else `NoopLimiter` · `ScriptedDecisionEngine` routing all calls to the UAS · Prometheus `/metrics` |
 
 Both are configured entirely by env vars (see the module docs at the top of each
 `main.rs`). HA call replication is opt-in via `B2BUA_REPL=1`: real TCP repl
@@ -190,24 +190,20 @@ provides:
   - the routers run BFD on the proxy nodes' sessions with a detection time inside the guard's
     bound (multiplier × receive interval, 900 ms by default) and withdraw a node's routes when its
     BFD goes down;
-  - the routers update their forwarding tables within the bound's margin once BFD reads a session
-    down: every detection path is checked at render against `routeGuard.withdrawWithinMs` with
-    the BFD detection included but not the forwarding update, and the slowest path (a proxy cut
-    from every worker: isolation 2 s + two readings 0.2 s + BFD 0.9 s = 3.1 s at the defaults)
-    leaves 0.3 s under the 3.4 s bound and 0.4 s under the 3.5 s INVITE retransmission it
-    protects; the crash path (dead bound 1 s + BFD 0.9 s) leaves 1.5 s;
+  - the routers update their forwarding tables within the margin the render check leaves
+    (`routeGuard.withdrawWithinMs` counts the BFD detection, not the forwarding update; at the
+    defaults the slowest path leaves 0.3 s, see the failure timings of
+    [proxy-integration.md](../docs/guide/proxy-integration.md#failure-timings));
   - the proxy nodes peer with those routers for MetalLB alone: a CNI's BGP to the same routers,
     or routes the nodes learn over those sessions (the routes to the workers and the callers
     among them), would be cut with it;
   - nothing else on a proxy node uses an nftables table named `route_guard` in the `inet` family.
-- **Reading the route guard.** `route_guard_withdrawn` is 1 on a node held out of the routers'
-  ECMP, and the guard container is then not Ready, nor is the pod; `route_guard_withdrawals_total{cause}` counts each withdrawal (`unfit`: the proxy named
-  why, `expired`: no fit answer within `deadMs`, `start`) and `route_guard_restores_total` each
-  return. The guard logs `node withdrawn: BFD and BGP to the routers dropped` with the cause and
-  the proxy's reason, and `node let out: BFD and BGP to the routers pass again`. On the node,
-  `nft list table inet route_guard` shows the routers let out and the drop counters, and
-  `curl -s 127.0.0.1:9090/fitz` the proxy's own reading. A node that ran a guard and runs no
-  proxy keeps the table withdrawing until a proxy pod starts there or
+- **Reading the route guard.** Its metrics are in
+  [proxy-integration.md](../docs/guide/proxy-integration.md#what-to-monitor) and ADR-0056's
+  appendix. On the node, `nft list table inet route_guard` shows the routers let out and the
+  drop counters, and `curl -s <the node's InternalIP>:9090/fitz` the proxy's own reading (its
+  scrape listener binds the node's address). A node that ran a guard and runs no proxy keeps
+  the table withdrawing until a proxy pod starts there or
   `nft delete table inet route_guard` removes it.
 
 ## HA acceptance

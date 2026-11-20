@@ -113,8 +113,8 @@ fn every_rule_in_one_document_is_tallied_separately() {
     assert_eq!(ack["bye_by"], B);
 }
 
-/// Every rule runs: a census names no candidates and still tallies a rule
-/// beyond the first ones the vocabulary held, under its own token and
+/// Every rule runs: a census tallies a rule beyond the first ones the
+/// vocabulary held, under its own token and
 /// bucketed by its own measure, with the hit anchored on its message.
 #[test]
 fn every_rule_is_tallied_without_being_named() {

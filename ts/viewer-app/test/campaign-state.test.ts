@@ -14,7 +14,13 @@ describe("the summary page's place", () => {
       run: 7,
       vs: 5,
       filters: { lanes: ["lane-x"], failing: true, oneLane: false, fresh: true, text: "pai" },
-      selection: { checks: ["B1 INVITE pai.uri", "rfc rule"], groups: ["group-a", "group b"], families: ["fam-a"] },
+      selection: {
+        checks: ["B1 INVITE pai.uri", "rfc rule"],
+        groups: ["group-a", "group b"],
+        families: ["fam-a"],
+        statuses: ["fail", "fail, still verifying"],
+        lines: ["cdr fail", "call fail waived"]
+      },
       caseId: "fam-a/one [s]",
       delta: { run: 5, lane: "lane-x" }
     }
@@ -55,6 +61,7 @@ describe("the summary page's place", () => {
       launch: null,
       own: null,
       saidLabel: "s",
+      saidLog: "l",
       sides: [],
       lanes: ["l"],
       cases: [],
@@ -71,8 +78,8 @@ describe("the summary page's place", () => {
     const view: Campaign = {
       capture: "c",
       title: null,
-      env: null, envs: [], launch: null, own: null, saidLabel: "s", sides: [], lanes: [], cases: [],
-      runs: [run(3, "Routing/x [a]"), run(2, null), run(1, null)]
+      env: null, envs: [], launch: null, own: null, saidLabel: "s", saidLog: "l", sides: [], lanes: [], cases: [],
+      runs: [run(3, "cases/x [a]"), run(2, null), run(1, null)]
     }
     expect(summaryOf(view, undefined).runs.map((r) => r.id)).toEqual([2, 1])
     expect(summaryOf(view, 3).runs.map((r) => r.id)).toEqual([3, 2, 1])

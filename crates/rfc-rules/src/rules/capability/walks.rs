@@ -8,7 +8,8 @@ use sip_message::sniff;
 use crate::verdict::{Decision, Evidence, Finding, RuleId};
 use crate::wire::{Kind, Msg, WireView};
 
-use super::{sent_key, taken_key, Answer, TxnKey, ANSWER_WINDOW_US};
+use super::super::sides::Sides;
+use super::{uas_key, Answer, TxnKey, ANSWER_WINDOW_US};
 
 /// One request an endpoint took that owes a specific rejection.
 pub(super) struct Rejectable<'a> {
@@ -39,6 +40,7 @@ pub(super) fn rejections<'a>(
     owed_header: &str,
     judge: impl Fn(&Rejectable<'a>, Option<Answer>) -> (bool, Evidence),
 ) -> Vec<Finding> {
+    let sides = Sides::of(wire.msgs);
     let mut occasions: Vec<Rejectable<'a>> = Vec::new();
     let mut opened: BTreeMap<TxnKey<'a>, usize> = BTreeMap::new();
     let mut answers: BTreeMap<TxnKey<'a>, Answer> = BTreeMap::new();
@@ -50,7 +52,7 @@ pub(super) fn rejections<'a>(
                 if msg.refused || !owes(msg) {
                     continue;
                 }
-                let Some(key) = taken_key(msg) else { continue };
+                let Some(key) = uas_key(&sides, msg) else { continue };
                 if let Entry::Vacant(e) = opened.entry(key) {
                     e.insert(occasions.len());
                     occasions.push(Rejectable {
@@ -67,7 +69,7 @@ pub(super) fn rejections<'a>(
                 }
             }
             Kind::Response { status } if *status >= 200 => {
-                let Some(key) = sent_key(msg) else { continue };
+                let Some(key) = uas_key(&sides, msg) else { continue };
                 if !opened.contains_key(&key) {
                     continue;
                 }
@@ -117,7 +119,8 @@ pub(super) fn rejections<'a>(
 
 /// The single-response walk: every response an endpoint SENT whose status
 /// `owes` selects must carry at least one of `owed`. A retransmission of that
-/// same status on the same transaction is the same answer, not a new occasion.
+/// same status from the same socket on the same transaction is the same
+/// answer, not a new occasion; a branchless response is keyed by its call.
 pub(super) fn sent_response_owes(
     wire: &WireView<'_>,
     rule: RuleId,
@@ -131,9 +134,8 @@ pub(super) fn sent_response_owes(
         if !owes(*status) {
             continue;
         }
-        // A branchless response names no transaction; its own status still
-        // keys the repeat collapse at this endpoint's call.
-        let key = sent_key(msg).unwrap_or((msg.src.as_str(), msg.call_id.as_str(), ""));
+        let branch = msg.via_branch.as_deref().unwrap_or_default();
+        let key = (msg.src.as_str(), msg.call_id.as_str(), branch);
         if judged.insert((key, *status), ()).is_some() {
             continue;
         }

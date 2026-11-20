@@ -49,18 +49,39 @@ pub(crate) fn held_callee(
 }
 
 /// The gate the first early request, else the answer, waits on: the caller
-/// has every reliable provisional's PRACK answered, else she rang.
+/// has every reliable provisional's PRACK answered, else she rang or the
+/// loss model dropped a provisional of the call.
 pub(crate) fn early_gate(forks: Forks, reliable: bool) -> Barrier {
     if reliable {
         let forks = u32::try_from(forks.count()).unwrap_or(u32::MAX);
         answered("early", "alice", "PRACK", forks)
     } else {
-        Barrier::pred("ringing", |s| s.leg_rang("alice"))
+        Barrier::pred("ringing", |s| s.rang_or_ring_lost("alice"))
     }
 }
 
+/// `gate`, once the caller also heard a provisional: RFC 3261 §9.1 holds her
+/// CANCEL until one arrived.
+fn heard_and(gate: Barrier) -> Barrier {
+    Barrier::pred(gate.name(), move |s| gate.holds(s) && s.leg("alice").heard_provisional())
+}
+
+/// `gate`, once the caller also rang: her early request names the early
+/// dialog her ringing opened (RFC 3261 §12.1.2).
+fn rang_and(gate: Barrier) -> Barrier {
+    Barrier::pred(gate.name(), move |s| gate.holds(s) && s.leg_rang("alice"))
+}
+
+/// The caller's ringing was lost before she rang: she knows no early dialog
+/// to send an early request on.
+fn ring_unheard() -> Barrier {
+    Barrier::pred("ring_unheard", |s| s.leg("alice").ring_lost_unheard())
+}
+
 /// `count` early requests `by` sends one after another, each on the previous
-/// one's 2xx; the gate becomes "all answered".
+/// one's 2xx; the gate becomes "all answered". Under unreliable provisionals
+/// the caller's wait for her own ringing, and are skipped when it was lost
+/// before she rang ([`ring_unheard`]); the gate then holds too.
 pub(crate) fn compile_early(
     establish: Establishment,
     b: &mut Build,
@@ -80,15 +101,29 @@ pub(crate) fn compile_early(
     let sent = |g: &Goal| matches!(g.step, GoalStep::EarlyRequest { method: m, .. } if m == method);
     let base =
         u32::try_from(b.goals_mut(role).iter().filter(|g| sent(g)).count()).unwrap_or(u32::MAX);
+    let unheard =
+        by == Party::Caller && matches!(establish, Establishment::Held { reliable: false, .. });
     for i in 0..count {
         let guard =
             if i == 0 { b.gate.clone() } else { answered("early_exchanged", role, name, base + i) };
-        b.goals_mut(role).push(Goal::new(guard, GoalStep::EarlyRequest { method, fork }));
+        let step = GoalStep::EarlyRequest { method, fork };
+        let goal = if unheard {
+            Goal::new(rang_and(guard), step).unless(ring_unheard())
+        } else {
+            Goal::new(guard, step)
+        };
+        b.goals_mut(role).push(goal);
     }
     if method == InDialogMethod::Update {
         b.add_renegs(role, count);
     }
-    b.gate = answered("early_exchanged", role, name, base + count);
+    let exchanged = answered("early_exchanged", role, name, base + count);
+    b.gate = if unheard {
+        let skipped = ring_unheard();
+        Barrier::pred("early_exchanged", move |s| exchanged.holds(s) || skipped.holds(s))
+    } else {
+        exchanged
+    };
 }
 
 /// The held callee's answer, once the early stages completed and the ring
@@ -119,24 +154,26 @@ pub(crate) fn ring_after(at: CancelAt) -> Duration {
 ///
 /// From the gate G, the callee's 2xx leaves at G + ring and the SUT relays it
 /// at G + ring + T (T: [`TRANSIT`]); a CANCEL leaving the caller at G + d
-/// reaches the SUT at G + d + T and the callee at G + d + 2T.
+/// reaches the SUT at G + d + T and the callee at G + d + 2T. Every CANCEL
+/// also waits for a provisional at the caller (§9.1).
 pub(crate) fn compile_cancel(env: &CallEnv<'_>, b: &mut Build, at: CancelAt) {
     let ring = env.ring_delay;
-    let trying = Barrier::pred("trying", |s| s.leg("alice").saw_status(100));
+    let trying = Barrier::pred("trying", |s| s.leg("alice").heard_provisional());
+    let gate = heard_and(b.gate.clone());
     // The SUT's 100 Trying reaches the caller at 2T, the callee's relayed
     // provisional (rung at 2T) at 4T.
     let (guard, dwell, expect) = match at {
         CancelAt::BeforeProvisional => (trying, TRANSIT, Expect::one(Branch::ABANDONED)),
         CancelAt::CrossingProvisional => (trying, TRANSIT * 3 / 2, Expect::one(Branch::ABANDONED)),
         CancelAt::AfterProvisional | CancelAt::AfterProvisionalThenEarlyBye => {
-            (b.gate.clone(), TRANSIT * 3, Expect::one(Branch::ABANDONED))
+            (gate, TRANSIT * 3, Expect::one(Branch::ABANDONED))
         }
         CancelAt::CrossingFinal => {
             const ENDINGS: &[Branch] = &[Branch::ABANDONED, Branch::ANSWERED_DESPITE_CANCEL];
-            (b.gate.clone(), ring - TRANSIT * 3 / 2, Expect::of(ENDINGS))
+            (gate, ring - TRANSIT * 3 / 2, Expect::of(ENDINGS))
         }
         CancelAt::AfterFinal => {
-            (b.gate.clone(), ring + TRANSIT / 2, Expect::one(Branch::ANSWERED_DESPITE_CANCEL))
+            (gate, ring + TRANSIT / 2, Expect::one(Branch::ANSWERED_DESPITE_CANCEL))
         }
     };
     b.caller_goals.push(Goal::new(guard, GoalStep::Cancel { stated: Vec::new() }).after(dwell));

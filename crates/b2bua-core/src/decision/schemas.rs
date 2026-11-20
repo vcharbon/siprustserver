@@ -1,6 +1,6 @@
-//! Request/response shapes for the call-decision adapter — port of
-//! `src/decision/schemas/*`. `FeatureActivations` is reused from `call` (it is
-//! the canonical feature shape; the data model already carries it on `Call`).
+//! Request/response shapes for the call-decision adapter. `FeatureActivations`
+//! is reused from `call` (it is the canonical feature shape; the data model
+//! already carries it on `Call`).
 //!
 //! [`NewCallRequest`] round-trips serde — it is what the future HTTP adapter
 //! POSTs and what the scripted test adapter inspects. The response types are
@@ -114,7 +114,7 @@ pub fn read_stated_port(stated: Option<&serde_json::Value>) -> Option<u16> {
 }
 
 /// Body directive on a route: leave the inbound body, drop it, substitute a
-/// new one (the source's `update_body` absent/null/value), or send the inbound
+/// new one (`update_body` absent/null/value), or send the inbound
 /// session description beside the stated parts, which replace every other part
 /// the inbound body frames (RFC 5621 §3).
 #[derive(Debug, Clone, Default, Serialize)]
@@ -398,8 +398,8 @@ pub enum CallReleaseResponse {
     Route(RouteDecision),
 }
 
-/// The REFER authorization request POSTed to `/call/refer` (port of TS
-/// `CallReferRequest`, requests.ts:57-64). Built by `transfer-intercept-refer`.
+/// The REFER authorization request POSTed to `/call/refer`. Built by
+/// `transfer-intercept-refer`.
 #[derive(Debug, Clone, Default)]
 pub struct CallReferRequest {
     /// A-leg Call-ID.
@@ -447,8 +447,8 @@ pub enum CallReferResponse {
     },
 }
 
-/// Mandatory platform features every successful route must carry (the source
-/// 500s if `features` is absent). A sane default for the scripted adapter.
+/// Mandatory platform features every successful route must carry. A sane
+/// default for the scripted adapter.
 pub fn default_platform_features() -> FeatureActivations {
     use call::features::{KeepaliveActivation, PlatformActivations};
     FeatureActivations {

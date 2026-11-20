@@ -6,3 +6,4 @@
 //! `cargo nextest run --workspace -E 'package(=b2bua-runner) & binary(it)' <module>::`.
 
 mod state_machine_docs;
+mod store_gauges_at_scrape;

@@ -113,7 +113,6 @@ export const SeqDoc = Schema.Struct({
 })
 export interface SeqDoc extends Schema.Schema.Type<typeof SeqDoc> {}
 
-export const decodeSeqDoc = Schema.decodeUnknownEffect(SeqDoc, STRICT)
 export const decodeSeqDocSync = Schema.decodeUnknownSync(SeqDoc, STRICT)
 
 // --- Declaration-order emission ----------------------------------------------

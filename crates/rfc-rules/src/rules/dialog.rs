@@ -1,6 +1,6 @@
 //! RFC 3261 §12 — what establishing a dialog FIXES, what every later message on
 //! it must reproduce, and (§15) what may end it. SIX obligations, each read
-//! against one endpoint's own view of one dialog:
+//! against one user agent's own view of one dialog:
 //!
 //!   - [`MidDialogUri`] (§12.2.1.1) charges the UAC: an in-dialog request
 //!     repeats the peer URIs the dialog was created with.
@@ -18,16 +18,20 @@
 //!     names a dialog that exists, and the callee of one it has not accepted
 //!     rejects or CANCELs rather than BYE-ing.
 //!
-//! **A dialog is `(endpoint, Call-ID, PEER tag)`.** The peer's tag is the half
-//! of the §12 dialog id this endpoint does not mint, and it is direction-
-//! independent: a request the endpoint SENT names its peer in To, a request it
+//! **A dialog is `(user agent, Call-ID, PEER tag)`.** The user agent is the set
+//! of sockets its transactions tie on the Call-ID
+//! ([`Parties`](super::correlation::Parties)), so a party that sends from one
+//! socket and listens on another holds one dialog; a finding still names the
+//! socket of the message judged. The peer's tag is the half
+//! of the §12 dialog id this agent does not mint, and it is direction-
+//! independent: a request the agent SENT names its peer in To, a request it
 //! TOOK names its peer in From, and the two orientations of one dialog collapse
 //! onto one key. That is what keeps a callee-initiated re-INVITE or BYE — whose
 //! From/To are reversed relative to the establishing INVITE — on the dialog it
 //! actually rides.
 //!
 //! **Before the peer has a tag there is one PENDING state per
-//! `(endpoint, Call-ID)`**, and every tag that later appears is seeded from it.
+//! `(user agent, Call-ID)`**, and every tag that later appears is seeded from it.
 //! The UAC learns its peer's tag only from the first tagged response, so the
 //! establishing INVITE — which fixes the dialog URIs and the initial-INVITE
 //! branch — is recorded there and copied into each dialog that materialises.
@@ -39,7 +43,7 @@
 //! **Only the dialog-ESTABLISHING INVITE (no To tag) seeds role and URIs.** A
 //! UAS-initiated re-INVITE carries both tags in the reverse orientation and
 //! shares the dialog with the establishing INVITE; taking it for the initial one
-//! would flip the endpoint's role and corrupt the route set it learned.
+//! would flip the agent's role and corrupt the route set it learned.
 //!
 //! **Facts beyond the wire model come from `Msg::head` via `sip_message::sniff`
 //! — never parsed here.** A message the vantage carried no header block for
@@ -47,12 +51,10 @@
 //! clean. So is a Route row no reader accepts — the routing rules judge the
 //! path a peer EXPRESSED, and an unreadable row is the grammar rules' finding.
 
-use std::collections::BTreeMap;
-
 use sip_message::sniff;
 
 use crate::verdict::{Decision, Evidence, Finding, RuleId};
-use crate::wire::{Kind, WireView};
+use crate::wire::WireView;
 
 use super::Obligation;
 use message_facts::request_uri_target;
@@ -60,8 +62,10 @@ use reading::Reading;
 
 mod message_facts;
 mod reading;
+mod record_route;
 mod unknown_dialog;
 
+pub use record_route::RecordRoutePlacement;
 pub use unknown_dialog::{UnknownDialog481, UNKNOWN_DIALOG_WINDOW_US};
 
 crate::registry::rules! {
@@ -316,100 +320,6 @@ impl Obligation for MidDialogWireDestination {
 pub(super) fn wire_addr(endpoint: &str) -> Option<(String, u16)> {
     let addr: std::net::SocketAddr = endpoint.split('#').next()?.parse().ok()?;
     Some((addr.ip().to_string(), addr.port()))
-}
-
-/// **§12.1.1 / §12.2.2 — Record-Route rides dialog-CREATING responses only.** A
-/// 100 Trying creates no dialog, so a Record-Route on it is vestigial; and once
-/// a dialog exists its route set is fixed, so a response to an IN-DIALOG request
-/// cannot carry one either — there is no longer a set for it to join.
-///
-/// The occasion is ONE response the endpoint TOOK. Charges the endpoint that
-/// sent it. A response whose request this vantage never carried settles nothing
-/// (`Undecidable`): whether the transaction was in-dialog is exactly what
-/// decides it.
-///
-/// **An ACK is never a correlation target.** It elicits no response, and a
-/// non-2xx ACK reuses its INVITE's branch (§17.1.1.3) while carrying the final's
-/// To tag — recording it would let a §17.2.1-retransmitted final that crosses
-/// the ACK be misread as answering an "in-dialog ACK".
-///
-/// This is the teeth for a B2BUA or proxy that leaks Record-Route onto these
-/// responses; the test UA ignores it, a strict UAC's route-set bookkeeping does
-/// not.
-pub struct RecordRoutePlacement;
-
-impl Obligation for RecordRoutePlacement {
-    fn eval(&self, wire: &WireView<'_>) -> Vec<Finding> {
-        // Requests each endpoint SENT, by transaction, with whether they were
-        // in-dialog when they went out — built as the walk goes, so a response
-        // is only ever measured against a request that preceded it.
-        let mut sent: BTreeMap<(&str, &str, &str), (&str, bool)> = BTreeMap::new();
-        let mut out = Vec::new();
-        for (mi, msg) in wire.msgs.iter().enumerate() {
-            let branch = msg.via_branch.as_deref().filter(|b| !b.is_empty());
-            match &msg.kind {
-                Kind::Request { method } => {
-                    if !method.eq_ignore_ascii_case("ACK") {
-                        if let Some(branch) = branch {
-                            sent.insert(
-                                (msg.src.as_str(), msg.call_id.as_str(), branch),
-                                (
-                                    method.as_str(),
-                                    msg.to_tag.as_deref().is_some_and(|t| !t.is_empty()),
-                                ),
-                            );
-                        }
-                    }
-                }
-                Kind::Response { status } => {
-                    let finding = |decision| Finding {
-                        rule: RuleId::RecordRoutePlacement,
-                        emitter: msg.src.to_string(),
-                        taker: msg.dst.to_string(),
-                        cseq: msg.cseq,
-                        relayed: false,
-                        anchor: mi,
-                        decision,
-                    };
-                    let Some(head) = msg.head.as_deref() else {
-                        out.push(finding(Decision::Undecidable("no header block at this vantage")));
-                        continue;
-                    };
-                    let rows = sniff::header_values(head, "Record-Route");
-                    let Some(row) = rows.into_iter().next() else {
-                        out.push(finding(Decision::Compliant));
-                        continue;
-                    };
-                    let misplaced = |request_method: &str| {
-                        Decision::Violated(Evidence::RecordRouteMisplaced {
-                            record_route_msg: mi,
-                            record_route_hop: msg.hop,
-                            record_route_ts_us: msg.at_us,
-                            status: *status,
-                            record_route: row.clone(),
-                            request_method: request_method.to_string(),
-                        })
-                    };
-                    if *status == 100 {
-                        out.push(finding(misplaced("")));
-                        continue;
-                    }
-                    // The transaction this response answers is one the TAKER
-                    // opened: it sent the request, and the response came back.
-                    let opened =
-                        branch.and_then(|b| sent.get(&(msg.dst.as_str(), msg.call_id.as_str(), b)));
-                    match opened {
-                        None => out.push(finding(Decision::Undecidable(
-                            "no request on this transaction at this vantage",
-                        ))),
-                        Some((method, true)) => out.push(finding(misplaced(method))),
-                        Some(_) => out.push(finding(Decision::Compliant)),
-                    }
-                }
-            }
-        }
-        out
-    }
 }
 
 /// How long after a non-2xx final this vantage saw the caller take her BYE

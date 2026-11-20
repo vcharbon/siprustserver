@@ -4,7 +4,7 @@
 //!
 //! Observation policy lives here, not in the rules: the capture is an OPEN
 //! observation (`closed: false` — the recording span, not the harness, bounds
-//! the evidence), and every rule of the [`RfcRule::WIRE`] contract — all of
+//! the evidence), and every rule of the [`RfcRule::WIRE`](super::RfcRule::WIRE) contract — all of
 //! them — is run. On a leg whose opening request extraction set aside
 //! (`opening_request_set_aside`) only the rules that judge one message alone
 //! run: the others would judge a dialog or transaction without its request.
@@ -13,9 +13,9 @@ use rfc_rules::{Decision, Kind, Msg, Observation, WireView};
 
 use crate::doc::{MsgJson, Payload, Summary};
 
-use super::{RfcRule, Scan, Site};
+use super::{Scan, Site};
 
-pub(super) fn detect(at: &Site<'_>, out: &mut Scan, candidates: &[RfcRule]) {
+pub(super) fn detect(at: &Site<'_>, out: &mut Scan) {
     let msgs: Vec<Msg> = at.leg.msgs.iter().map(|m| msg_of(m, &at.leg.call_id)).collect();
     let obs = Observation {
         last_us: at.span.last_us,
@@ -23,7 +23,6 @@ pub(super) fn detect(at: &Site<'_>, out: &mut Scan, candidates: &[RfcRule]) {
         closed: false,
     };
     let view = WireView { msgs: &msgs, obs: &obs };
-    let _ = candidates;
     let partial = at.leg.opening_request_set_aside;
     for rule in rfc_rules::all_rules().filter(|rule| !partial || rule.one_message) {
         for f in rule.body.eval(&view) {

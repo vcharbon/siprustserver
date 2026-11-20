@@ -39,7 +39,9 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use layer_harness::NetworkTag;
-use sip_net::{BindUdpOpts, SendError, UaRole, UdpEndpoint, UdpEndpointCounters, UdpPacket};
+use sip_net::{
+    BindUdpOpts, PreIngressHook, SendError, UaRole, UdpEndpoint, UdpEndpointCounters, UdpPacket,
+};
 
 use crate::agent::{decide_rr_fold, Agent, Harness};
 use crate::legpick::{labelled_prefix_leg_picker, LegInfo};
@@ -258,6 +260,8 @@ pub struct CalleeGroupBuilder<'h> {
     queue_max: usize,
     /// `(agent name, R-URI user-part prefix)` in declaration order.
     members: Vec<(String, String)>,
+    /// The shared socket's pre-ingress hook. See [`with_pre_ingress`](Self::with_pre_ingress).
+    pre_ingress: Option<PreIngressHook>,
 }
 
 impl<'h> CalleeGroupBuilder<'h> {
@@ -270,6 +274,7 @@ impl<'h> CalleeGroupBuilder<'h> {
             roles: HashSet::from([UaRole::Uac, UaRole::Uas]),
             queue_max: 64,
             members: Vec::new(),
+            pre_ingress: None,
         }
     }
 
@@ -278,6 +283,16 @@ impl<'h> CalleeGroupBuilder<'h> {
     /// prefixes that are prefixes of each other (`bob` vs `bob2`) are fine.
     pub fn callee(mut self, name: impl Into<String>, ruri_prefix: impl Into<String>) -> Self {
         self.members.push((name.into(), ruri_prefix.into()));
+        self
+    }
+
+    /// Judge every datagram reaching the shared socket with `hook` before any
+    /// member sees it: a dropped one is lost on the wire for every member
+    /// (the deterministic loss a test states, [`PreIngressAction::Drop`]).
+    ///
+    /// [`PreIngressAction::Drop`]: sip_net::PreIngressAction::Drop
+    pub fn with_pre_ingress(mut self, hook: PreIngressHook) -> Self {
+        self.pre_ingress = Some(hook);
         self
     }
 
@@ -300,6 +315,7 @@ impl<'h> CalleeGroupBuilder<'h> {
 
         let arrivals = sip_clock::Clock::system();
         let opts = BindUdpOpts::new(self.addr, self.queue_max).with_roles(self.roles);
+        let opts = BindUdpOpts { pre_ingress: self.pre_ingress, ..opts };
         let ep = self
             .harness
             .network()

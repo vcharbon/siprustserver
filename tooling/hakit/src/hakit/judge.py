@@ -29,7 +29,7 @@ from .classify import FINAL_LATE, SETUP_FAILED, SETUP_SLOW, SILENT_AFTER_PROVISI
 from .jsonval import Json
 from .model import NO_BUDGET, Allowance, Budget, InDialogAllowance
 from .stalls import Stall
-from .windows import Window
+from .windows import Window, candidate_windows
 
 MAX_CALL_IDS = 50
 ALL_CALL_IDS = "all_call_ids"
@@ -97,6 +97,24 @@ def _charged_in_dialog(w: Window | None, imp: Impact, budgets: dict[str, Budget]
     if w is None:
         return False
     return any(e.matches(imp.stream, imp.cls, imp.detail or "") for e in budget_of(w, budgets).in_dialog)
+
+
+def _charging(windows: list[Window], imp: Impact, budgets: dict[str, Budget]) -> Window | None:
+    """The window an in-dialog impact is charged to: the first holding its
+    instant, when that window's `in_dialog` allowances name it."""
+    holder = _holding(windows, imp.at_ms)
+    return holder if _charged_in_dialog(holder, imp, budgets) else None
+
+
+def in_dialog_window(windows: list[Window], imp: Impact, budgets: dict[str, Budget]) -> Window | None:
+    """The one window an in-dialog impact sits in, `windows` in opening order:
+    the one it is charged to, else the latest-opened of its candidate windows,
+    else None (it is unattributed)."""
+    charged = _charging(windows, imp, budgets)
+    if charged is not None:
+        return charged
+    found = candidate_windows(windows, imp.started_at_ms, imp.at_ms)
+    return found[-1] if found else None
 
 
 def _in_dialog_rows(impacts: list[Impact], entries: list[InDialogAllowance], cps: dict[str, float]) -> list[Json]:
@@ -208,15 +226,11 @@ def judge(
             else:
                 in_window[w.event].append(imp)
             continue
-        holder = _holding(windows, imp.at_ms)
-        if holder is not None and _charged_in_dialog(holder, imp, budgets):
+        holder = _charging(windows, imp, budgets)
+        if holder is not None:
             dialog_in_window[holder.event].append(imp)
             continue
-        candidates = [
-            w.event
-            for w in windows
-            if ((inj := w.first("inject")) is not None and imp.started_at_ms <= inj <= imp.at_ms) or w.holds(imp.at_ms)
-        ]
+        candidates = [w.event for w in candidate_windows(windows, imp.started_at_ms, imp.at_ms)]
         if not candidates:
             outside[(imp.cls, imp.stream, imp.code or 0, imp.reason or "", False)].append(imp)
             continue

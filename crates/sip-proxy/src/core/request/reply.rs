@@ -12,12 +12,17 @@ use sip_message::types::SipHeader;
 use sip_message::{Method, SipRequest, SipResponse};
 
 use crate::observability::metrics::{Direction, MessageResult, NoTargetDrop, RoutingDecisionKind};
+use crate::refusals::Repeat;
 use crate::strategy::SelectError;
 use crate::trace::emit;
 use sip_message::received::{observed_source, response_destination};
 
 use super::super::ProxyCore;
 use super::{Arrival, RouteOutcome};
+
+/// The reject reason of a copy of a request this hop answered itself,
+/// absorbed past its sender's schedule (ADR-0063 §1).
+const COPY_PAST_SCHEDULE: &str = "copy_past_schedule";
 
 /// A typed value on the response generator's extra-header seam, which still
 /// takes wire lines.
@@ -27,7 +32,9 @@ pub(super) fn extra_header(value: impl HeaderValue) -> SipHeader {
 }
 
 impl ProxyCore {
-    /// Reject `req` locally: answer it with `status`, counted under `metric`.
+    /// Reject `req` locally: answer it with `status`, counted under `metric`,
+    /// remembered so its copies draw it on their sender's schedule and are
+    /// absorbed past it (ADR-0063 §1), counted `copy_past_schedule`.
     /// An ACK is never answered — nothing awaits a response to it — so a
     /// rejected ACK is dropped, counted `ack_not_answered`; an ACK no worker
     /// takes is a request dropped for want of a target (`no_target_dropped`).
@@ -42,9 +49,11 @@ impl ProxyCore {
     ) -> RouteOutcome {
         if req.method() == Method::Ack {
             self.metrics.record_reject("ack_not_answered");
-        } else {
+        } else if self.refusals.preflight(req, self.now_ms()) {
             self.reply(req, arrival, status, reason, extra).await;
             self.metrics.record_reject(metric);
+        } else {
+            self.metrics.record_reject(COPY_PAST_SCHEDULE);
         }
         RouteOutcome { decision: RoutingDecisionKind::Reject, target: None }
     }
@@ -112,30 +121,39 @@ impl ProxyCore {
         RouteOutcome { decision: RoutingDecisionKind::Reject, target: None }
     }
 
-    /// Answer a copy of a request refused within 64·T1 with that refusal's
-    /// bytes, judged and counted no further. `None` when `req` is no such copy.
+    /// Answer a copy of a refused request with that refusal's bytes on its
+    /// sender's schedule, absorb it past that schedule (ADR-0063 §1), judged
+    /// and counted no further. `None` when `req` is no such copy.
     pub(super) async fn repeat_refusal(
         &self,
         req: &SipRequest,
         arrival: Arrival,
     ) -> Option<RouteOutcome> {
-        let resp = self.refusals.repeat(req, arrival.src, self.now_ms())?;
-        self.send_own_final(req, arrival, &resp).await;
+        let repeat = self.refusals.repeat(req, arrival.src, self.now_ms())?;
+        self.answer_copy(req, arrival, repeat).await;
         Some(RouteOutcome { decision: RoutingDecisionKind::Reject, target: None })
     }
 
-    /// Answer 200 to a CANCEL of an INVITE this hop refused within 64·T1: the
-    /// proxy is that INVITE's UAS and its final is already sent (RFC 3261
-    /// §9.2), so the CANCEL goes no further. `None` when `req` cancels no such
-    /// INVITE.
+    /// Answer 200 to a CANCEL of an INVITE this hop refused: the proxy is
+    /// that INVITE's UAS and its final is already sent (RFC 3261 §9.2), so
+    /// the CANCEL goes no further, its copies answered on its own schedule.
+    /// `None` when `req` cancels no such INVITE.
     pub(super) async fn cancel_refused(
         &self,
         req: &SipRequest,
         arrival: Arrival,
     ) -> Option<RouteOutcome> {
-        let resp = self.refusals.cancel(req, arrival.src, self.now_ms())?;
-        self.send_own_final(req, arrival, &resp).await;
+        let repeat = self.refusals.cancel(req, arrival.src, self.now_ms())?;
+        self.answer_copy(req, arrival, repeat).await;
         Some(RouteOutcome { decision: RoutingDecisionKind::Cancel, target: None })
+    }
+
+    /// Send what `repeat` owes `req`, or count it absorbed.
+    async fn answer_copy(&self, req: &SipRequest, arrival: Arrival, repeat: Repeat) {
+        match repeat {
+            Repeat::Answer(resp) => self.send_own_final(req, arrival, &resp).await,
+            Repeat::Absorbed => self.metrics.record_reject(COPY_PAST_SCHEDULE),
+        }
     }
 
     /// Synthesize a UAS response, the source recorded on its topmost Via (RFC

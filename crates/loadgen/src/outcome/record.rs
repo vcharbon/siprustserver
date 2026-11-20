@@ -76,7 +76,12 @@ fn result_failures(outcome: &CallOutcome, at_ms: i64, stop: Stop) -> Vec<Value> 
         CallOutcome::RfcAuditFail(findings) => findings
             .iter()
             .take(8)
-            .map(|f| failure(at_ms, "protocol", Some(f.rule.clone())))
+            .map(|f| {
+                let charged = f.charged.as_deref().unwrap_or("?");
+                let detail =
+                    format!("{} charged={charged} lane={} :: {}", f.rule, f.lane, f.detail);
+                failure(at_ms, "protocol", Some(detail))
+            })
             .collect(),
         CallOutcome::CheckFail(failed) => failed
             .iter()

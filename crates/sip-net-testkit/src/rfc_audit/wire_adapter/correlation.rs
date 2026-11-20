@@ -3,19 +3,26 @@
 use super::*;
 
 pub(super) const LIVE: &[Live] = &[
-    Live::taker(RuleId::ResponseEchoesRequestVia, response_echoes_request_via),
-    Live::taker(RuleId::ResponseCorrelation, response_correlation),
-    Live::taker(RuleId::MidDialogTags, mid_dialog_tags),
-    Live::taker(RuleId::PeerUriStable, peer_uri_stable),
+    Live::taker(RuleId::ResponseEchoesRequestVia, response_echoes_request_via).per_party(),
+    Live::taker(RuleId::ResponseCorrelation, response_correlation).per_party(),
+    Live::taker(RuleId::MidDialogTags, mid_dialog_tags).per_party(),
+    Live::taker(RuleId::PeerUriStable, peer_uri_stable).per_party(),
     Live::taker(RuleId::DialogCallIdStable, dialog_call_id_stable),
-    Live::taker(RuleId::CancelRequestUri, cancel_request_uri),
-    Live::taker(RuleId::CancelViaBranch, cancel_via_branch),
-    Live::emitter(RuleId::TagConsistency, tag_flip_detail).advisory().admits(tag_flip_2xx),
-    Live::emitter(RuleId::TagConsistency, tag_flip_detail).admits(tag_flip_non_2xx),
-    Live::emitter(RuleId::NoToTagOnInitialRequest, no_to_tag_on_initial_request),
+    Live::taker(RuleId::CancelRequestUri, cancel_request_uri).per_party(),
+    Live::taker(RuleId::CancelViaBranch, cancel_via_branch).per_party(),
+    Live::emitter(RuleId::TagConsistency, tag_flip_detail)
+        .advisory()
+        .admits(tag_flip_2xx)
+        .per_party(),
+    Live::emitter_unless(RuleId::TagConsistency, final_tag_lost, tag_flip_detail)
+        .admits(tag_flip_non_2xx)
+        .per_party(),
+    Live::emitter(RuleId::NoToTagOnInitialRequest, no_to_tag_on_initial_request).per_party(),
     // A declared proxy carries the originator's To through unchanged.
-    Live::emitter(RuleId::InDialogToTag, in_dialog_to_tag).roles(&[UaRole::Uac, UaRole::Uas]),
-    Live::taker_else_emitter(RuleId::InDialogFromTag, in_dialog_from_tag),
+    Live::emitter(RuleId::InDialogToTag, in_dialog_to_tag)
+        .roles(&[UaRole::Uac, UaRole::Uas])
+        .per_party(),
+    Live::taker_else_emitter(RuleId::InDialogFromTag, in_dialog_from_tag).per_party(),
 ];
 
 fn response_echoes_request_via(f: &rfc_rules::Finding, _cid: &str) -> String {
@@ -166,6 +173,23 @@ fn tag_flip_non_2xx(f: &rfc_rules::Finding) -> bool {
     tag_flip_status(f).is_some_and(|status| !(200..300).contains(&status))
 }
 
+/// A flip at the taker `lane` whose final carries the To tag of a
+/// provisional the loss model dropped on its way there from the emitter: the
+/// emitter showed that tag first (§17.2.1 holds).
+fn final_tag_lost(
+    dropped: &Dropped,
+    lane: &LaneKey,
+    f: &rfc_rules::Finding,
+    cid: &str,
+    _: &[Msg],
+) -> bool {
+    let Decision::Violated(rfc_rules::Evidence::UasTagFlipped { final_tag, .. }) = &f.decision
+    else {
+        return false;
+    };
+    dropped.provisional_to((lane, &f.emitter, cid), final_tag)
+}
+
 fn no_to_tag_on_initial_request(f: &rfc_rules::Finding, _cid: &str) -> String {
     let Decision::Violated(rfc_rules::Evidence::ForbiddenHeaderPresent { on, value, .. }) =
         &f.decision
@@ -206,5 +230,24 @@ fn in_dialog_from_tag(f: &rfc_rules::Finding, cid: &str) -> String {
          dialog its taker holds)",
         cseq = f.cseq,
         remotes = dialog_remote_tags.join(" | "),
+    )
+}
+
+/// The detail line both `tag-consistency` arms report, off the flip evidence.
+fn tag_flip_detail(f: &rfc_rules::Finding, _cid: &str) -> String {
+    let Decision::Violated(rfc_rules::Evidence::UasTagFlipped {
+        status,
+        branch,
+        final_tag,
+        provisional_tags,
+        ..
+    }) = &f.decision
+    else {
+        return String::new();
+    };
+    format!(
+        "UAS To-tag mismatch on {status} (branch {branch}): prior provisional(s) established \
+         tag(s) [{seen}] but the final carries \"{final_tag}\" — RFC 3261 §17.2.1 / §12.1.1",
+        seen = provisional_tags.join(", "),
     )
 }

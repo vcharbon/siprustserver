@@ -11,6 +11,7 @@ use std::time::Duration;
 use scenario_harness::claim::{resolve_claim, ClaimRule};
 use scenario_harness::legpick::LegInfo;
 use sip_message::preparse::is_invite_request_buffer;
+use sip_message::sniff;
 use sip_net::queue::PacketQueue;
 use sip_net::{UdpEndpoint, UdpPacket};
 use tokio::time::Instant;
@@ -19,6 +20,7 @@ use super::datagram::Datagram;
 use super::late_answer::LateReply;
 use super::late_final::Reply;
 use super::stats::{MuxStats, OrphanReason};
+use super::taps::Dir;
 use super::{CallSlot, Delivery, Key, MuxSocket};
 
 /// One socket's dispatcher: parse the routing key, deliver or count-and-drop.
@@ -81,6 +83,14 @@ fn route(mux: &MuxSocket, pkt: &UdpPacket) -> Vec<(Arc<[u8]>, SocketAddr)> {
                     repair.record();
                 }
                 return vec![(answer, src)];
+            }
+            LateReply::Refuse => {
+                let refused = sniff::refusal(raw, 481, "Call/Transaction Does Not Exist");
+                if let Some(refused) = refused {
+                    drop(g);
+                    mux.stats.late_answered.fetch_add(1, Ordering::Relaxed);
+                    return vec![(refused.into(), src)];
+                }
             }
             LateReply::Absorbed => return Vec::new(),
             LateReply::NotHeld => {}
@@ -228,6 +238,10 @@ fn handle_inbound(mux: &MuxSocket, d: &Delivery, dg: &Datagram<'_>, pkt: &UdpPac
         // A recorded (sampled) call still shows the arrival on its ladder,
         // tagged as modeled loss — the RFC audit filters it out.
         tap_discard(mux, d, pkt, sip_net::RecvDisposition::LossModel);
+        if let Some(taps) = &d.taps {
+            taps.on_lost(Dir::In, dg);
+        }
+        d.answers.on_request_in(dg);
         return;
     }
     if let Some(taps) = &d.taps {
@@ -235,6 +249,8 @@ fn handle_inbound(mux: &MuxSocket, d: &Delivery, dg: &Datagram<'_>, pkt: &UdpPac
     }
     if dg.id().method == Some("ACK") {
         d.answers.on_ack(dg.id());
+    } else {
+        d.answers.on_request_in(dg);
     }
     if let Some(invites) = &d.invites {
         invites.on_inbound(dg);

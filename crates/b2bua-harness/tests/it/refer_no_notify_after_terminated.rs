@@ -100,13 +100,13 @@ async fn no_notify_after_terminated() {
     assert_notify(&nterm, "terminated"); // ← the TERMINAL NOTIFY
     nterm.respond(200, "OK").await;
 
-    // c-realign + a-realign → merge(a, c). The merge clears the transfer slice.
     let mut c_realign = charlie.receive("INVITE").await;
     c_realign.respond(200, "OK").with_sdp(CHARLIE_ACTIVE_ANSWER).await;
     charlie.receive("ACK").await;
     let mut a_realign = alice.receive("INVITE").await;
     a_realign.respond(200, "OK").with_sdp(ALICE_REALIGN_ANSWER).await;
     alice.receive("ACK").await;
+    bob.receive("BYE").await.respond(200, "OK").await;
 
     // Drain anything still queued at bob from the (legitimate) transfer phase so
     // the post-terminal assertion only sees LATE traffic.
@@ -142,10 +142,8 @@ async fn no_notify_after_terminated() {
         "no NOTIFY toward the referrer after the terminal NOTIFY + slice clear"
     );
 
-    // A hangs up the transferred call: its BYE reaches C and the orphaned B.
     let mut alice_bye = alice_dialog.bye().await;
     charlie.receive("BYE").await.respond(200, "OK").await;
-    bob.receive("BYE").await.respond(200, "OK").await;
     alice_bye.expect(200).await;
 
     settle_until(|| b2bua.is_reaped()).await;

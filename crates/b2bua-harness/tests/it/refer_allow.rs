@@ -1,4 +1,4 @@
-//! REFER allow-path scenarios. Port of `tests/scenarios/refer-allow.ts`.
+//! REFER allow-path scenarios.
 //!
 //! Each scenario establishes an A↔B call and issues a REFER from B that the
 //! scripted `/call/refer` authorizes (`X-Api-Call` `refer-allow-c`). The B2BUA
@@ -258,6 +258,10 @@ async fn refer_allow_c_multiple_18x() {
 
 // ── 4. C no-answer → NOTIFY 408 terminated after the no-answer timer ──────
 
+/// Charlie rings and never answers: past the 5 s no-answer timer bob gets
+/// NOTIFY 408 terminated. The advance crosses the deadline, so the 408
+/// NOTIFY's 200 round-trip races the transaction's retransmit, and bob
+/// tolerates the duplicate NOTIFYs.
 #[tokio::test(start_paused = true)]
 async fn refer_allow_c_no_answer() {
     let h = Harness::new("refer-allow-c-no-answer");
@@ -295,9 +299,6 @@ async fn refer_allow_c_no_answer() {
     let mut charlie_uas = charlie.receive("INVITE").await;
     charlie_uas.respond(180, "Ringing").await;
 
-    // Advance past the 5s no-answer timer → NOTIFY 408 terminated. The advance
-    // crosses the deadline, so the 408 NOTIFY's 200 round-trip races the txn
-    // retransmit; tolerate the duplicate NOTIFYs (TS `bob.allowExtra("NOTIFY")`).
     h.advance(Duration::from_secs(6)).await;
 
     let mut nterm = bob.receive("NOTIFY").await;

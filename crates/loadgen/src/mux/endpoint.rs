@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -15,8 +15,8 @@ use scenario_harness::legpick::LegPicker;
 use sip_message::preparse::is_invite_request_buffer;
 use sip_net::queue::PacketQueue;
 use sip_net::{
-    BindError, BindErrorReason, BindUdpOpts, SendError, SendTap, SignalingNetwork, UdpEndpoint,
-    UdpEndpointCounters, UdpPacket, UndeliveredPacket,
+    BindError, BindErrorReason, BindUdpOpts, SendError, SendNote, SendTap, SignalingNetwork,
+    UdpEndpoint, UdpEndpointCounters, UdpPacket, UndeliveredPacket,
 };
 use tokio::time::Instant;
 
@@ -28,7 +28,7 @@ use super::retransmit::CallTxns;
 use super::routing::BindDecl;
 use super::rtt::RttSink;
 use super::tally::CallTally;
-use super::taps::{Taps, WireTap};
+use super::taps::{Dir, LossTap, Taps, WireTap};
 use super::{
     CallGate, CallSlot, Delivery, Key, MuxCore, MuxSocket, ReceiverEntry, Role, RELEASE_HOLD,
 };
@@ -63,56 +63,10 @@ pub struct MuxNetwork {
     pub(super) tally: Option<Arc<CallTally>>,
     /// The call's wire tap; `None` = not watched.
     pub(super) wire_tap: Option<WireTap>,
+    /// The call's loss tap; `None` = drops are only counted.
+    pub(super) loss_tap: Option<LossTap>,
     /// The retransmit engine of every endpoint bound on this network.
     pub(super) engines: Mutex<Vec<Arc<CallTxns>>>,
-}
-
-impl MuxNetwork {
-    /// Measure the SIP round trips of every endpoint bound on this network
-    /// into `sink`.
-    pub fn with_rtt_sink(mut self, sink: RttSink) -> Self {
-        self.rtt_sink = Some(sink);
-        self
-    }
-
-    /// Tally every datagram this network's endpoints send, re-send or have
-    /// delivered into `tally`.
-    pub fn with_tally(mut self, tally: Arc<CallTally>) -> Self {
-        self.tally = Some(tally);
-        self
-    }
-
-    /// Hand every datagram this network's endpoints send or receive to `tap`.
-    pub fn with_wire_tap(mut self, tap: WireTap) -> Self {
-        self.wire_tap = Some(tap);
-        self
-    }
-
-    /// Whether a client transaction is still open on this call's endpoints
-    /// (final not arrived, Timer B/F not expired). Never without the engine.
-    pub fn client_txn_open(&self) -> bool {
-        self.engines.lock().unwrap().iter().any(|txns| txns.client_open())
-    }
-
-    /// Park until every client transaction this call's endpoints have open
-    /// has ended (final received, or Timer B/F), retransmitting meanwhile:
-    /// what a failed call waits for before its endpoints drop, so its
-    /// teardown CANCEL or BYE survives a loss, and what a call whose in-dialog
-    /// request awaits its final waits for. Immediate without the engine.
-    pub async fn client_txns_ended(&self) {
-        let engines: Vec<Arc<CallTxns>> = self.engines.lock().unwrap().clone();
-        for txns in engines {
-            txns.clients_ended().await;
-        }
-    }
-
-    /// The next per-endpoint loss RNG seed (golden-ratio stride so alice/bob/
-    /// charlie of the same call get well-separated, non-zero seeds).
-    fn next_drop_seed(&self) -> u64 {
-        self.drop_seed
-            .fetch_add(0x9E37_79B9_7F4A_7C15, Ordering::Relaxed)
-            .wrapping_add(0x9E37_79B9_7F4A_7C15)
-    }
 }
 
 #[async_trait]
@@ -175,7 +129,13 @@ impl SignalingNetwork for MuxNetwork {
         });
         let drop = Arc::new(DropModel::new(self.drop_rate, self.next_drop_seed(), drop_nth));
         let leg = uas.as_ref().map(|(label, _)| label.as_str());
-        let taps = Taps::new(self.rtt_sink.clone(), self.tally.clone(), self.wire_tap.clone(), leg);
+        let taps = Taps::new(
+            self.rtt_sink.clone(),
+            self.tally.clone(),
+            self.wire_tap.clone(),
+            self.loss_tap.clone(),
+            leg,
+        );
         let txns = self.retransmit.then(|| {
             Arc::new(CallTxns::new(
                 mux.endpoint.clone(),
@@ -296,6 +256,7 @@ impl SignalingNetwork for MuxNetwork {
             taps,
             invites: (role == Role::Caller).then(Default::default),
             answers,
+            sendtap: OnceLock::new(),
         }))
     }
 
@@ -349,6 +310,8 @@ struct MuxEndpoint {
     /// The finals this endpoint's agent sent; handed to the registry on
     /// `Drop` so a retransmitted request still draws its answer.
     answers: Arc<SentAnswers>,
+    /// The recording's send tap, told of each send the loss model drops.
+    sendtap: OnceLock<SendTap>,
 }
 
 impl MuxEndpoint {
@@ -410,8 +373,8 @@ impl MuxEndpoint {
 #[async_trait]
 impl UdpEndpoint for MuxEndpoint {
     async fn send_to(&self, buf: &[u8], dst: SocketAddr) -> Result<(), SendError> {
+        let d = Datagram::sniff(buf);
         let dropped = {
-            let d = Datagram::sniff(buf);
             self.register_dialog(&d)?;
             // Record the outbound message in the retransmit engine BEFORE the
             // loss check: a dropped request is exactly what the resender must
@@ -437,6 +400,8 @@ impl UdpEndpoint for MuxEndpoint {
         };
         if dropped {
             self.mux.stats.dropped_out.fetch_add(1, Ordering::Relaxed);
+            self.sendtap.get().inspect(|tap| tap(buf, dst, SendNote::LossModel));
+            self.taps.iter().for_each(|t| t.on_lost(Dir::Out, &d));
             return Ok(());
         }
         self.mux.endpoint.as_ref().send_to(buf, dst).await
@@ -466,18 +431,11 @@ impl UdpEndpoint for MuxEndpoint {
         true
     }
 
+    /// The tap hears the loss model's dropped sends and the engine's re-sends; the first is kept.
     fn install_send_tap(&self, tap: SendTap) -> bool {
-        // Re-emissions come from the per-call retransmit engine; with no engine
-        // (`--auto-retransmit` off) there is nothing to tap. The engine handle is
-        // shared with the inbound `route` path, so one install covers both the
-        // proactive (Timer A/E/G) and reactive (re-ACK / re-answer) resends.
-        match &self.txns {
-            Some(txns) => {
-                txns.set_sendtap(tap);
-                true
-            }
-            None => false,
-        }
+        self.txns.iter().for_each(|txns| txns.set_sendtap(tap.clone()));
+        let _ = self.sendtap.set(tap);
+        true
     }
 }
 
@@ -498,3 +456,7 @@ impl Drop for MuxEndpoint {
         }
     }
 }
+
+mod network;
+#[cfg(test)]
+mod tests;

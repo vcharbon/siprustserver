@@ -1,5 +1,4 @@
-//! Keepalive OPTIONS flowing through a record-routing front proxy (port of
-//! `tests/scenarios/keepalive-via-proxy.ts`, the `keepaliveViaProxy` case).
+//! Keepalive OPTIONS flowing through a record-routing front proxy.
 //!
 //! Guards against in-dialog keepalive OPTIONS bypassing the front proxy, which
 //! tears every long-hold call down at the probe's Timer F.
@@ -8,15 +7,17 @@
 //!
 //!   alice :5061 ──▶ proxy :5081 ──▶ b2bua :5091 ──▶ proxy :5081 ──▶ bob :5071
 //!
-//! With `b2bOutboundProxy` set (the `proxy+b2b` deployment), the b-leg INVITE
+//! With the outbound proxy set (`config.front.outbound_proxy()`, the
+//! `proxy+b2b` deployment), the b-leg INVITE
 //! traverses the proxy, the proxy Record-Routes, the b-leg route set is
 //! populated, and subsequent in-dialog OPTIONS flow back through the proxy. Each
 //! keepalive OPTIONS therefore arrives carrying ≥2 Via headers (proxy + worker)
 //! on *both* legs. We drive two cycles to prove the timer re-arms after a
 //! successful round-trip, then tear the call down (the BYE also goes via proxy).
 //!
-//! Exercises `keepalive` + `absorb-options-200` over the proxy fabric. The source
-//! used a 15-min interval; the Rust default is 30 s, so we advance in 30 s steps.
+//! Exercises `keepalive` + `absorb-options-200` over the proxy fabric. The
+//! harness baseline sets `B2buaConfig::keepalive_interval_sec` to 30 s, so we
+//! advance in 30 s steps.
 
 use crate::common;
 
@@ -33,7 +34,7 @@ const BOB: &str = "127.0.0.1:5071";
 const PROXY: &str = "127.0.0.1:5081";
 const B2BUA: &str = "127.0.0.1:5091";
 
-/// The Rust default keepalive interval (`KeepaliveActivation.interval_sec`).
+/// The harness baseline keepalive interval (`B2buaConfig::keepalive_interval_sec`).
 const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(30);
 
 #[tokio::test(start_paused = true)]

@@ -8,7 +8,7 @@ use sip_message::generators::{
 use sip_message::SipMessage;
 
 use super::super::addressing::next_hop;
-use super::super::client_txn::{request_label, stated_lines, try_send_cancel};
+use super::super::client_txn::{stated_lines, try_send_cancel, TxnKey};
 use super::super::dialog::{Dialog, InDialogTxn};
 use super::super::step::StepError;
 use super::ClientInvite;
@@ -69,11 +69,11 @@ impl ClientInvite {
         try_send_cancel(&self.agent, &self.original_invite, self.wire_dst, stated).await?;
         Ok(InDialogTxn::new(
             self.agent.clone(),
+            TxnKey::cancel_of(&self.original_invite),
             // A CANCEL transaction's finals take no ACK; the INVITE's 487 is
             // read — and auto-ACKed — via [`ClientInvite::expect`].
             None,
             self.wire_dst,
-            request_label(Some("CANCEL"), &self.original_invite),
         ))
     }
 }

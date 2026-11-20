@@ -221,7 +221,7 @@
               "type": "null"
             }
           ],
-          "description": "What ADDED this leg to the call: a transfer, or a media resource\ninserted into it. A joined leg is a parallel arrival, not a failure —\nthe first attempt answered and the call then dialed somebody else — so\nit is exclusive with the failure-only sequential `cause`."
+          "description": "What ADDED this leg to the call: a transfer, or a media resource\ninserted into it. A joined leg takes a branch of its own. Independent of\n`cause`: one says how the leg entered the call, the other why the\nplatform left it, so a joined leg that fails (a busy transfer target the\nplatform reroutes internally) states both."
         },
         "leg": {
           "description": "The leg id the flow uses for this attempt.",
@@ -1746,7 +1746,7 @@
     },
     "Postconditions": {
       "additionalProperties": false,
-      "description": "Assertions evaluated once, after settle.",
+      "description": "Assertions evaluated once, after settle, and claims answered after the call.",
       "properties": {
         "cdr": {
           "anyOf": [
@@ -1757,7 +1757,7 @@
               "type": "null"
             }
           ],
-          "description": "The call-detail-record expectation. Required (lint), because a call test\nthat never looks at what was billed is half a test."
+          "description": "The call-record expectation, read as the [`CALL_RECORDS`] claim.\nRequired (lint), here or as that claim, because a call test that never\nlooks at what was billed is half a test."
         },
         "checks": {
           "description": "Deployment observables — metric names, store contents — checked at\nsettle and never mid-flow. Open field vocabulary.",
@@ -1765,6 +1765,11 @@
             "$ref": "#/$defs/Check"
           },
           "type": "array"
+        },
+        "claims": {
+          "additionalProperties": true,
+          "description": "What the case expects of each collector, by collector name, opaque to\nthe runner. A [`CALL_RECORDS`] claim has the shape of [`CdrCheck`].",
+          "type": "object"
         }
       },
       "type": "object"

@@ -25,6 +25,7 @@
  * undeclared}).
  */
 import type { Call, Flow, MustFail } from "@sip/contracts"
+import type { DocumentFacts, Stated } from "./document-facts.js"
 import { checkRefusalRoster } from "./refusal-roster.js"
 import { PRACK_UNANSWERABLE_RULE } from "./unanswered-prack.js"
 import { DIAL_NOT_CAPTURED_RULE } from "./undialled.js"
@@ -52,6 +53,12 @@ export interface DocumentInput {
   readonly flow: ReadonlyArray<Flow.FlowNode>
   /** The pivot's calls, each with the attempts, refusal or abandon it states. */
   readonly calls: ReadonlyArray<Call.Call>
+  /**
+   * What the assembled document states of its legs and calls
+   * (`./document-facts.ts`): the one reading of the document, shared by every
+   * rule of the tier and freed with this input.
+   */
+  readonly document: DocumentFacts<Stated>
   /**
    * The divergences the document already OWES (`must_fail`), each at the step
    * that predicts it. Empty on a positive case.

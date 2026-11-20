@@ -102,14 +102,7 @@ async fn notify_481_ends_the_subscription() {
     charlie_uas.respond(200, "OK").with_sdp(CHARLIE_FIRST_ANSWER).await;
     charlie.receive("ACK").await;
 
-    // c-realign, then a-realign → merge(a, c). Reaching them proves the B2BUA
-    // fully processed C's 200 — the batch that emits the terminal NOTIFY today.
     let mut c_realign = charlie.receive("INVITE").await;
-    c_realign.respond(200, "OK").with_sdp(CHARLIE_ACTIVE_ANSWER).await;
-    charlie.receive("ACK").await;
-    let mut a_realign = alice.receive("INVITE").await;
-    a_realign.respond(200, "OK").with_sdp(ALICE_REALIGN_ANSWER).await;
-    alice.receive("ACK").await;
 
     // Any NOTIFY emitted alongside the realign has landed at 1 ms transit.
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -136,10 +129,15 @@ async fn notify_481_ends_the_subscription() {
         "the referrer's dialog stands too — nothing in the 481 denied it",
     );
 
-    // ── teardown: A hangs up; the merge sends BYE to C and the orphan B ──────
+    c_realign.respond(200, "OK").with_sdp(CHARLIE_ACTIVE_ANSWER).await;
+    charlie.receive("ACK").await;
+    let mut a_realign = alice.receive("INVITE").await;
+    a_realign.respond(200, "OK").with_sdp(ALICE_REALIGN_ANSWER).await;
+    alice.receive("ACK").await;
+    bob.receive("BYE").await.respond(200, "OK").await;
+
     let mut alice_bye = alice_dialog.bye().await;
     charlie.receive("BYE").await.respond(200, "OK").await;
-    bob.receive("BYE").await.respond(200, "OK").await;
     alice_bye.expect(200).await;
 
     let _report = h.finish().await;

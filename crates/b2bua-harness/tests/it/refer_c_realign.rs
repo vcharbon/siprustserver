@@ -1,5 +1,4 @@
-//! REFER c-realigning scenarios. Port of
-//! `tests/scenarios/refer-c-realign.ts`.
+//! REFER c-realigning scenarios.
 //!
 //! Builds on the C-leg lifecycle of `refer_allow.rs` by adding the B2BUA-originated
 //! re-INVITE to C carrying A's SDP (the c-realign re-INVITE). The charlie UA
@@ -30,7 +29,7 @@ const ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0
 const CHARLIE_FIRST_ANSWER: &str = "v=0\r\no=charlie 9 8 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/AVP 8\r\na=rtpmap:8 PCMA/8000\r\na=sendrecv\r\n";
 // C's active answer to the c-realign re-INVITE (sendrecv on C's real port). The
 // a-realign re-INVITE toward A must carry *this* body (not the initial held
-// answer) — the one-way-audio guard (slice5-refer-design.md §4).
+// answer) — the one-way-audio guard.
 const CHARLIE_ACTIVE_ANSWER: &str = "v=0\r\no=charlie 9 9 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 30000 RTP/AVP 8\r\na=rtpmap:8 PCMA/8000\r\na=sendrecv\r\n";
 
 // A's answer to the a-realign re-INVITE.
@@ -65,12 +64,12 @@ fn assert_notify(txn: &ServerTxn, state: &str, frag: &str) {
     assert!(body.contains(frag), "sipfrag body {body:?} should contain {frag:?}");
 }
 
-/// A hangs up the transferred call: its BYE reaches C, and B, the orphaned
-/// leg, is BYE'd too.
+/// The completed transfer releases B; A then hangs up the transferred call
+/// and her BYE reaches C.
 async fn end_transferred_call(alice_dialog: &mut Dialog, bob: &Agent, charlie: &Agent) {
+    bob.receive("BYE").await.respond(200, "OK").await;
     let mut alice_bye = alice_dialog.bye().await;
     charlie.receive("BYE").await.respond(200, "OK").await;
-    bob.receive("BYE").await.respond(200, "OK").await;
     alice_bye.expect(200).await;
 }
 
@@ -158,7 +157,6 @@ async fn refer_allow_c_realign_happy() {
     let mut a_realign = alice.receive("INVITE").await;
     assert_reinvite(a_realign.request(), CHARLIE_ACTIVE_ANSWER, "a");
 
-    // A answers: the transfer completes. A's BYE reaches C and the orphaned B.
     a_realign.respond(200, "OK").with_sdp(ALICE_REALIGN_ANSWER).await;
     alice.receive("ACK").await;
     end_transferred_call(&mut alice_dialog, &bob, &charlie).await;
@@ -229,14 +227,12 @@ async fn refer_allow_c_realign_c_reject_488() {
 
 // ── 3. C does not answer the c-realign re-INVITE → 32s watchdog rollback ──
 //
-// skipFinalSweep (TS refer-c-realign.ts:298): the pending c-realign re-INVITE
-// Timer B (≈32s, the INVITE UAC transaction timeout) fires alongside the
-// rule-level `refer_reinvite_answer` watchdog (32s); under a paused clock the
-// single advance that crosses 32s trips both, and the three BYE 200 round-trips
-// race the re-INVITE/Timer-B retransmits. We drive the exact deadline and
-// tolerate the resulting INVITE/CANCEL/BYE retransmits (the harness equivalent
-// of the TS `allowExtra` + `.skipFinalSweep()`); the assertion that all three
-// legs are BYE'd is NOT relaxed.
+// The pending c-realign re-INVITE Timer B (≈32s, the INVITE UAC transaction
+// timeout) fires alongside the rule-level `refer_reinvite_answer` watchdog
+// (32s); under a paused clock the single advance that crosses 32s trips both,
+// and the three BYE 200 round-trips race the re-INVITE/Timer-B retransmits. We
+// drive the exact deadline and tolerate the resulting INVITE/CANCEL/BYE
+// retransmits; the assertion that all three legs are BYE'd is NOT relaxed.
 
 #[tokio::test(start_paused = true)]
 async fn refer_allow_c_realign_c_timeout() {
@@ -368,7 +364,6 @@ async fn refer_allow_c_realign_c_glare() {
     let mut a_realign = alice.receive("INVITE").await;
     assert_reinvite(a_realign.request(), CHARLIE_ACTIVE_ANSWER, "a");
 
-    // A answers: the transfer completes. A's BYE reaches C and the orphaned B.
     a_realign.respond(200, "OK").with_sdp(ALICE_REALIGN_ANSWER).await;
     alice.receive("ACK").await;
     end_transferred_call(&mut alice_dialog, &bob, &charlie).await;
@@ -439,7 +434,6 @@ async fn refer_allow_c_realign_b_non_bye() {
     let mut a_realign = alice.receive("INVITE").await;
     assert_reinvite(a_realign.request(), CHARLIE_ACTIVE_ANSWER, "a");
 
-    // A answers: the transfer completes. A's BYE reaches C and the orphaned B.
     a_realign.respond(200, "OK").with_sdp(ALICE_REALIGN_ANSWER).await;
     alice.receive("ACK").await;
     end_transferred_call(&mut alice_dialog, &bob, &charlie).await;
@@ -518,6 +512,191 @@ async fn refer_allow_c_realign_carries_the_answer_whole() {
     assert!(body.contains("application/vnd.example.data"), "the body whole: {body}");
 
     a_realign.respond(200, "OK").with_sdp(ALICE_REALIGN_ANSWER).await;
+    alice.receive("ACK").await;
+    end_transferred_call(&mut alice_dialog, &bob, &charlie).await;
+
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
+    let _ = h.finish().await;
+}
+
+// ── 7. A copy of C's first 2xx does not answer the c-realign re-INVITE ──
+
+/// C re-sends the 2xx to the INVITE that dialled it (§13.3.1.4, its ACK in
+/// flight) while the c-realign re-INVITE is pending. The copy answers the
+/// earlier CSeq, not the re-INVITE (RFC 3261 §12.2.1.2): the realign waits
+/// for C's own answer to the re-INVITE, and the a-realign re-INVITE toward A
+/// carries that active answer, never the held first one. The copy draws its
+/// re-ACK (§13.2.2.4): the ACK of that first 2xx, the same datagram.
+#[tokio::test(start_paused = true)]
+async fn refer_allow_c_realign_ignores_a_copy_of_the_first_2xx() {
+    let h = Harness::new("refer-allow-c-realign-first-2xx-copy");
+    let alice = h.agent("alice", "127.0.0.1:5938").await;
+    let bob = h.agent("bob", "127.0.0.1:5948").await;
+    let charlie = h.agent("charlie", &format!("127.0.0.1:{CHARLIE_PORT}")).await.transfer_target();
+    let b2bua = B2buaSut::route_all_with_refer("127.0.0.1", 5948)
+        .start(&h, "b2bua", "127.0.0.1:5958")
+        .await;
+
+    let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
+    let mut bob_uas = bob.receive("INVITE").await;
+    bob_uas.respond(200, "OK").with_sdp(ANSWER).await;
+    call.expect(200).await;
+    let mut alice_dialog = call.ack().await;
+    bob.receive("ACK").await;
+    let mut bob_dialog = bob_uas.dialog();
+
+    let mut refer = bob_dialog
+        .send_request(InDialogMethod::Refer)
+        .with_header("Refer-To", &refer_to_charlie())
+        .with_header("X-Api-Call", &x_api_allow_c(""))
+        .send()
+        .await;
+    refer.expect(202).await;
+    bob.receive("NOTIFY").await.respond(200, "OK").await;
+    let mut charlie_uas = charlie.receive("INVITE").await;
+    charlie_uas.respond(200, "OK").with_sdp(CHARLIE_FIRST_ANSWER).await;
+    charlie.receive("ACK").await;
+    bob.receive("NOTIFY").await.respond(200, "OK").await;
+
+    let mut c_realign = charlie.receive("INVITE").await;
+    assert_reinvite(c_realign.request(), OFFER, "b-2");
+
+    let acks_to_charlie = |from: usize| -> Vec<Vec<u8>> {
+        h.wire_entries()
+            .into_iter()
+            .skip(from)
+            .filter(|e| {
+                e.from == b2bua.addr && e.to == charlie.addr() && e.raw.starts_with(b"ACK ")
+            })
+            .map(|e| e.raw)
+            .collect()
+    };
+    let first_ack = acks_to_charlie(0);
+    let before_copy = h.wire_entries().len();
+    charlie_uas.respond(200, "OK").with_sdp(CHARLIE_FIRST_ANSWER).await;
+    let mut early_to_alice = 0;
+    for _ in 0..5 {
+        h.advance(Duration::from_millis(100)).await;
+        early_to_alice += alice.drain().await;
+    }
+    assert_eq!(
+        early_to_alice, 0,
+        "a copy of C's first 2xx answers no c-realign re-INVITE: nothing reaches A \
+         before C answers it (got {early_to_alice} datagrams)"
+    );
+    assert_eq!(first_ack.len(), 1, "C's first 2xx drew one ACK");
+    assert_eq!(
+        acks_to_charlie(before_copy),
+        first_ack,
+        "the copy of C's first 2xx is re-ACKed with the ACK that 2xx drew (RFC 3261 §13.2.2.4)"
+    );
+    charlie.drain().await;
+
+    c_realign.respond(200, "OK").with_sdp(CHARLIE_ACTIVE_ANSWER).await;
+    charlie.receive("ACK").await;
+
+    let mut a_realign = alice.receive("INVITE").await;
+    assert_reinvite(a_realign.request(), CHARLIE_ACTIVE_ANSWER, "a");
+
+    a_realign.respond(200, "OK").with_sdp(ALICE_REALIGN_ANSWER).await;
+    alice.receive("ACK").await;
+    end_transferred_call(&mut alice_dialog, &bob, &charlie).await;
+
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
+    let _ = h.finish().await;
+}
+
+// ── 8. A copy of A's earlier 2xx does not answer the a-realign re-INVITE ──
+
+/// B's re-offer, relayed to A before the transfer: B's session one version up.
+const BOB_REOFFER: &str = "v=0\r\no=bob 1 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20002 RTP/AVP 8\r\na=rtpmap:8 PCMA/8000\r\na=sendrecv\r\n";
+/// A's answer to B's relayed re-offer: her session one version up.
+const ALICE_REANSWER: &str = "v=0\r\no=alice 1 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10002 RTP/AVP 8\r\na=rtpmap:8 PCMA/8000\r\na=sendrecv\r\n";
+/// A's answer to the a-realign re-INVITE, continuing her session after
+/// [`ALICE_REANSWER`].
+const ALICE_LATER_REALIGN_ANSWER: &str = "v=0\r\no=alice 1 3 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 8\r\na=rtpmap:8 PCMA/8000\r\na=sendrecv\r\n";
+
+/// A re-sends the 2xx to an earlier INVITE on her dialog (B's re-INVITE the
+/// B2BUA relayed to her, §13.3.1.4, its ACK in flight) while the a-realign
+/// re-INVITE is pending. The copy answers that earlier CSeq, not the
+/// a-realign (RFC 3261 §12.2.1.2): nothing reaches B or C, the copy draws the
+/// ACK its 2xx drew (§13.2.2.4), and the transfer completes on A's own answer
+/// to the a-realign.
+#[tokio::test(start_paused = true)]
+async fn refer_allow_a_realign_ignores_a_copy_of_an_earlier_2xx() {
+    let h = Harness::new("refer-allow-a-realign-earlier-2xx-copy");
+    let alice = h.agent("alice", "127.0.0.1:5939").await;
+    let bob = h.agent("bob", "127.0.0.1:5949").await;
+    let charlie = h.agent("charlie", &format!("127.0.0.1:{CHARLIE_PORT}")).await.transfer_target();
+    let b2bua = B2buaSut::route_all_with_refer("127.0.0.1", 5949)
+        .start(&h, "b2bua", "127.0.0.1:5959")
+        .await;
+
+    let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
+    let mut bob_uas = bob.receive("INVITE").await;
+    bob_uas.respond(200, "OK").with_sdp(ANSWER).await;
+    call.expect(200).await;
+    let mut alice_dialog = call.ack().await;
+    bob.receive("ACK").await;
+    let mut bob_dialog = bob_uas.dialog();
+
+    let mut bob_reinvite = bob_dialog.request(InDialogMethod::Invite, Some(BOB_REOFFER)).await;
+    let mut alice_earlier = alice.receive("INVITE").await;
+    alice_earlier.respond(200, "OK").with_sdp(ALICE_REANSWER).await;
+    bob_reinvite.expect(200).await;
+    bob_dialog.ack(None).await;
+    alice.receive("ACK").await;
+
+    let mut refer = bob_dialog
+        .send_request(InDialogMethod::Refer)
+        .with_header("Refer-To", &refer_to_charlie())
+        .with_header("X-Api-Call", &x_api_allow_c(""))
+        .send()
+        .await;
+    refer.expect(202).await;
+    bob.receive("NOTIFY").await.respond(200, "OK").await;
+    let mut charlie_uas = charlie.receive("INVITE").await;
+    charlie_uas.respond(200, "OK").with_sdp(CHARLIE_FIRST_ANSWER).await;
+    charlie.receive("ACK").await;
+    bob.receive("NOTIFY").await.respond(200, "OK").await;
+    let mut c_realign = charlie.receive("INVITE").await;
+    c_realign.respond(200, "OK").with_sdp(CHARLIE_ACTIVE_ANSWER).await;
+    charlie.receive("ACK").await;
+    let mut a_realign = alice.receive("INVITE").await;
+    assert_reinvite(a_realign.request(), CHARLIE_ACTIVE_ANSWER, "a");
+
+    let acks_to_alice = |from: usize| -> Vec<Vec<u8>> {
+        h.wire_entries()
+            .into_iter()
+            .skip(from)
+            .filter(|e| e.from == b2bua.addr && e.to == alice.addr() && e.raw.starts_with(b"ACK "))
+            .map(|e| e.raw)
+            .collect()
+    };
+    let earlier_ack = acks_to_alice(0);
+    let before_copy = h.wire_entries().len();
+    alice_earlier.respond(200, "OK").with_sdp(ALICE_REANSWER).await;
+    let mut heard = 0;
+    for _ in 0..5 {
+        h.advance(Duration::from_millis(100)).await;
+        heard += bob.drain().await + charlie.drain().await;
+    }
+    assert_eq!(
+        heard, 0,
+        "a copy of A's earlier 2xx answers no a-realign re-INVITE: nothing reaches B or C \
+         before A answers it (got {heard} datagrams)"
+    );
+    assert_eq!(earlier_ack.len(), 1, "A's 2xx to the relayed re-INVITE drew one ACK");
+    assert_eq!(
+        acks_to_alice(before_copy),
+        earlier_ack,
+        "the copy of A's earlier 2xx is re-ACKed with the ACK that 2xx drew (RFC 3261 §13.2.2.4)"
+    );
+    alice.drain().await;
+
+    a_realign.respond(200, "OK").with_sdp(ALICE_LATER_REALIGN_ANSWER).await;
     alice.receive("ACK").await;
     end_transferred_call(&mut alice_dialog, &bob, &charlie).await;
 

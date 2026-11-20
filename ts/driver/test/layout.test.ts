@@ -54,13 +54,13 @@ describe("the run-spec", () => {
     const text = emitRunSpec({
       case: REPLAY.case,
       out_dir: "/runs/1/cell",
-      lane: { kind: "fake", egress_endpoint: "e1", no_answer_ms: 12_000 },
+      lane: { kind: "simulated", egress_endpoint: "e1", no_answer_ms: 12_000 },
       run: { ...Bundle.emptyOverlay, injected_headers: { "X-Thing": "1" } }
     })
     expect(JSON.parse(text)).toEqual({
       case: REPLAY.case,
       out_dir: "/runs/1/cell",
-      lane: { kind: "fake", egress_endpoint: "e1", no_answer_ms: 12_000 },
+      lane: { kind: "simulated", egress_endpoint: "e1", no_answer_ms: 12_000 },
       run: { timing_tolerance_ms: 0, injected_headers: { "X-Thing": "1" } }
     })
   })
@@ -69,7 +69,7 @@ describe("the run-spec", () => {
     const spec = {
       case: "c.json",
       out_dir: "/runs/1/cell",
-      lane: { kind: "fake" },
+      lane: { kind: "simulated" },
       run: Bundle.emptyOverlay
     }
     const text = emitRunSpec(spec)

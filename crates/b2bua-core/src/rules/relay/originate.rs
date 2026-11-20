@@ -1,8 +1,8 @@
 //! [`build_b_leg`] — the single mint point for every leg the B2BUA originates:
 //! the callee b-leg, and the REFER transfer leg (fed the caller's rehydrated
-//! INVITE via [`super::rebuild_a_leg_invite`]). The originated leg's dialog identity
-//! (Call-ID, tags, CSeq space, Contact) is minted fresh — nothing
-//! dialog-identifying is copied from the a-leg.
+//! INVITE via [`super::rebuild_a_leg_invite`]). The originated leg's tags, CSeq
+//! space and Contact are minted fresh; its Call-ID derives from the
+//! originator's ([`super::call_id`]).
 
 use call::{Leg, RemoteInfo, TxnKind};
 use sip_ids::TurnIds;
@@ -106,7 +106,9 @@ pub(super) fn override_descriptors(
 /// the INVITE states for it: the source's body, an override's bytes with the
 /// lines describing them ([`override_descriptors`]), or an override's session
 /// description beside its attached parts, headed by those lines. A part line
-/// the wire cannot carry whole is left out and pushed onto `skipped`.
+/// the wire cannot carry whole, or that is no entity header of a part lifted
+/// to be the body ([`sip_message::attach_parts`]), is left out and pushed onto
+/// `skipped`.
 fn minted_body(
     a_leg_invite: &SipRequest,
     body_override: Option<&Body>,
@@ -259,7 +261,9 @@ pub fn build_b_leg(
     .stamped(Some(&stamp));
     let branch = ids.new_branch();
     let from_tag = ids.new_tag();
-    let b_call_id = format!("{}-{}@{}", leg_id, ids.new_tag(), config.sip_local_ip);
+    let b_call_id =
+        super::call_id::dialled_call_id(leg_id, a_leg_invite.call_id().as_str(), first_ingress)
+            .unwrap_or_else(|| format!("{}-{}@{}", leg_id, ids.new_tag(), config.sip_local_ip));
     let contact = allocate_leg_contact(config, marks.into(), leg_id);
     // Each rewrite is read here or the leg is not built. `None` keeps the
     // relayed a-leg value, which the parser already accepted.

@@ -26,8 +26,7 @@ impl Obligation for NoOverlappingReliableProvisionals {
     fn eval(&self, wire: &WireView<'_>) -> Vec<Finding> {
         let seen = Reading::of(wire.msgs);
         let mut out = Vec::new();
-        for ((uas, dialog), list) in &seen.emitted {
-            let (uas, dialog) = (*uas, *dialog);
+        for (&(uas, call, dialog), list) in &seen.emitted {
             let mut sent: Vec<&Reliable<'_>> = Vec::new();
             for r in list {
                 if sent.iter().any(|q| q.rseq == r.rseq) {
@@ -38,10 +37,10 @@ impl Obligation for NoOverlappingReliableProvisionals {
                 if !sent.is_empty() {
                     out.push(Finding {
                         rule: RuleId::NoOverlappingReliableProvisionals,
-                        emitter: uas.to_string(),
+                        emitter: r.own.to_string(),
                         taker: r.peer.to_string(),
                         cseq: r.cseq,
-                        relayed: seen.relayed_provisional(uas, dialog, r),
+                        relayed: seen.relayed_provisional((uas, call, dialog), r),
                         anchor: r.msg,
                         decision: match outstanding {
                             Some(prior) => Decision::Violated(Evidence::Overlapping {
@@ -79,8 +78,7 @@ impl Obligation for NonContiguousRseq {
     fn eval(&self, wire: &WireView<'_>) -> Vec<Finding> {
         let seen = Reading::of(wire.msgs);
         let mut out = Vec::new();
-        for ((uas, dialog), list) in &seen.emitted {
-            let (uas, dialog) = (*uas, *dialog);
+        for (&(uas, call, dialog), list) in &seen.emitted {
             let mut prior: Option<u64> = None;
             for r in list {
                 let Some(previous) = prior else {
@@ -93,10 +91,10 @@ impl Obligation for NonContiguousRseq {
                 prior = Some(r.rseq);
                 out.push(Finding {
                     rule: RuleId::NonContiguousRseq,
-                    emitter: uas.to_string(),
+                    emitter: r.own.to_string(),
                     taker: r.peer.to_string(),
                     cseq: r.cseq,
-                    relayed: seen.relayed_provisional(uas, dialog, r),
+                    relayed: seen.relayed_provisional((uas, call, dialog), r),
                     anchor: r.msg,
                     decision: if r.rseq == previous + 1 {
                         Decision::Compliant

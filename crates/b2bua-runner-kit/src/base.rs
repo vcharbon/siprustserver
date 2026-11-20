@@ -29,7 +29,7 @@ pub struct RunnerBase {
     /// This worker's identity, one boot of its ordinal (ADR-0055 §6);
     /// [`deps`](Self::deps) hands it to the core.
     pub identity: String,
-    /// The `UdpTransport` metrics facade over [`Self::endpoint`].
+    /// The UDP transport metrics over [`Self::endpoint`].
     pub udp_metrics: UdpTransportMetrics,
     /// The worker's identifier generator, keyed from the OS RNG at bind;
     /// [`deps`](Self::deps) hands it to the core.

@@ -113,11 +113,35 @@ fn an_unparsable_ring_cap_is_a_boot_refusal_naming_it() {
     assert!(refused.contains("B2BUA_CDR_MESSAGE_RING"), "{refused}");
 }
 
+/// The CDR buffer's depth reads up to its ceiling; one above it, or past
+/// what the platform counts, is a boot refusal naming the variable.
+#[test]
+fn a_cdr_queue_depth_above_the_ceiling_is_a_boot_refusal_naming_it() {
+    use crate::runner_env::cdr_queue_from_lookup;
+    let max = b2bua::cdr::BufferedCdrWriter::MAX_QUEUE;
+    let depth = |v: &str| cdr_queue_from_lookup(lookup(&[("B2BUA_CDR_QUEUE", v)]));
+    assert_eq!(cdr_queue_from_lookup(lookup(&[])), Ok(1_024));
+    assert_eq!(depth("0"), Ok(0));
+    assert_eq!(depth(&max.to_string()), Ok(max));
+    for refused in [(max + 1).to_string(), usize::MAX.to_string(), format!("{}0", usize::MAX)] {
+        let e = depth(&refused).expect_err("a depth above the ceiling refuses the boot");
+        assert!(e.contains("B2BUA_CDR_QUEUE"), "{refused}: {e}");
+    }
+}
+
 #[test]
 fn split_host_port_defaults_and_parses() {
     assert_eq!(split_host_port("bob:5071"), ("bob".to_string(), 5071));
     assert_eq!(split_host_port("bob"), ("bob".to_string(), 5060));
     assert_eq!(split_host_port("bob:nope"), ("bob".to_string(), 5060));
+}
+
+/// The probe server's address takes the pod's IPv6 address as a
+/// `$(POD_IP):9091` value expands it, with no brackets.
+#[test]
+fn a_listen_address_reads_an_ipv6_address_without_brackets() {
+    assert_eq!(crate::resolve("fd00::5:9091").unwrap(), "[fd00::5]:9091".parse().unwrap());
+    assert_eq!(crate::resolve("10.0.0.5:9091").unwrap(), "10.0.0.5:9091".parse().unwrap());
 }
 
 #[test]
@@ -126,9 +150,11 @@ fn the_admin_address_defaults_to_loopback_and_refuses_any_other() {
         crate::runner_env::admin_addr(lookup(&[])).unwrap(),
         "127.0.0.1:9094".parse().unwrap()
     );
-    let stated = lookup(&[("B2BUA_ADMIN", "[::1]:19094")]);
-    assert_eq!(crate::runner_env::admin_addr(stated).unwrap(), "[::1]:19094".parse().unwrap());
-    for refused in ["0.0.0.0:9094", "10.0.0.5:9094", "localhost:9094"] {
+    for v6 in ["[::1]:19094", "::1:19094"] {
+        let stated = lookup(&[("B2BUA_ADMIN", v6)]);
+        assert_eq!(crate::runner_env::admin_addr(stated).unwrap(), "[::1]:19094".parse().unwrap());
+    }
+    for refused in ["0.0.0.0:9094", "10.0.0.5:9094", "fd00::5:9094", "localhost:9094"] {
         let e = crate::runner_env::admin_addr(lookup(&[("B2BUA_ADMIN", refused)])).unwrap_err();
         assert!(e.contains("B2BUA_ADMIN"), "{refused}: {e}");
     }

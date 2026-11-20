@@ -33,6 +33,7 @@ mod deliver;
 mod dispatch;
 mod emit;
 mod flow;
+mod injects;
 mod ladders;
 mod legs;
 mod omission;
@@ -58,10 +59,13 @@ use crate::gate::Inbound;
 use crate::instance::Instance;
 use crate::plan::Plan;
 use crate::recording::Recording;
+use crate::records::{self, RecordsClaim};
 use crate::render::UriComposer;
+use crate::resolve::Resolver;
 use crate::retransmit::{DrawnAcks, Repeats};
 use crate::settle::Sut;
 use crate::stack::LegStack;
+use crate::wall;
 
 /// What the lane supplies: a bound agent per actor, where a request goes, and
 /// how a tier-2 position becomes a URI.
@@ -81,6 +85,9 @@ pub struct Lane<'a> {
     /// The events the lane observes off the wire, for a send that awaits one
     /// (§6.7g); `None` on a lane that reports none.
     pub events: Option<crate::events::LaneEvents>,
+    /// What performs an `inject` node's action (§6.6); `None` on a lane that
+    /// performs none, where an `inject` fails the run as `injector-missing`.
+    pub injector: Option<std::sync::Arc<dyn crate::injector::Injector>>,
     /// How the run reads what its parties exchanged, off its recording: the
     /// lane's reading of the wire. `CustomParser::built()` reads the RFC; a
     /// lane replaying captured traffic states its tool reading.
@@ -96,6 +103,10 @@ pub struct Outcome {
     /// view it belongs to — the WIRE view of the wire/TU pair. The recording is
     /// this same stream rendered per leg.
     pub wire_view: Vec<WireEntry>,
+    /// The document's call-records claim as the run states it, for whoever
+    /// holds the records to answer ([`crate::records::judge`]); `None` where
+    /// the document claims none or the run never drove.
+    pub call_records: Option<RecordsClaim>,
 }
 
 impl Outcome {
@@ -119,10 +130,12 @@ pub async fn run_recording_into(
     recording: Recording,
 ) -> Outcome {
     let mut instance = Instance::with_recording(plan, config, recording.clone());
+    let mut call_records = None;
     let (timing, wire_view) = if instance.verdict().passed() {
         let mut runner = Runner::new(&mut instance, lane);
         let timing = runner.drive(sut).await;
         let wire_view = runner.absorption.wire_view();
+        call_records = state_call_records(&instance);
         (timing, wire_view)
     } else {
         // The lane's configuration is already refused (an unbound identity):
@@ -132,12 +145,24 @@ pub async fn run_recording_into(
                 started_at_ms: 0,
                 settled_at_ms: None,
                 settle_budget_ms: plan.document().timing.settle_budget_ms,
+                wall_started_at_ms: Some(wall::now_ms()),
+                wall_ended_at_ms: Some(wall::now_ms()),
             },
             Vec::new(),
         )
     };
     instance.seal_verdict();
-    Outcome { verdict: instance.verdict().clone(), recording, timing, wire_view }
+    Outcome { verdict: instance.verdict().clone(), recording, timing, wire_view, call_records }
+}
+
+/// The document's call-records claim as `instance`'s run states it, a check
+/// whose value does not resolve carried failing in it. A claim the plan could
+/// not read never reaches a run: compiling it refused the document.
+fn state_call_records(instance: &Instance<'_>) -> Option<RecordsClaim> {
+    let post = instance.plan().document().postconditions.as_ref()?;
+    let expected = post.call_records().ok()??;
+    let resolver = Resolver::new(instance.state(), &instance.config().identities);
+    Some(records::state(&expected, &resolver, &instance.scope()))
 }
 
 /// The run loop's own state, kept beside the instance it drives.
@@ -193,7 +218,11 @@ struct Runner<'a, 'p> {
     /// one at a time: the hold arbitrates a single instant, and a second hold
     /// would be a queue.
     held: Option<Held>,
+    /// The injects the lane's injector is performing (§6.6).
+    injections: injects::Injections,
     started: Instant,
+    /// The wall clock's reading when [`Self::started`] was taken.
+    wall_started_ms: u64,
 }
 
 /// A datagram an armed expect is holding out on, recorded already, undelivered.
@@ -227,6 +256,7 @@ struct PendingRepeat {
 impl<'a, 'p> Runner<'a, 'p> {
     fn new(instance: &'a mut Instance<'p>, lane: Lane<'a>) -> Self {
         let started = Instant::now();
+        let wall_started_ms = wall::now_ms();
         // The interpreter owns §17.2 (see [`Absorption`]): the agents must not
         // absorb beneath it, or the retransmissions never reach the recording.
         // It owns the dialog verdicts too: each UA's table judges what it
@@ -285,7 +315,9 @@ impl<'a, 'p> Runner<'a, 'p> {
             timer_b_reported: std::collections::BTreeSet::new(),
             pending_repeats: Vec::new(),
             held: None,
+            injections: injects::Injections::default(),
             started,
+            wall_started_ms,
         }
     }
 
@@ -335,7 +367,13 @@ impl<'a, 'p> Runner<'a, 'p> {
         // still arriving.
         self.reconcile_retransmits();
         self.state_abandonment();
-        RunTiming { started_at_ms: 0, settled_at_ms: settled_at, settle_budget_ms: settle_budget }
+        RunTiming {
+            started_at_ms: 0,
+            settled_at_ms: settled_at,
+            settle_budget_ms: settle_budget,
+            wall_started_at_ms: Some(self.wall_started_ms),
+            wall_ended_at_ms: Some(wall::now_ms()),
+        }
     }
 
     /// Record one ARRIVING datagram, with the §17.2 seam deciding whether it is

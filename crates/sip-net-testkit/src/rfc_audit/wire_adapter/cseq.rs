@@ -3,10 +3,29 @@
 use super::*;
 
 pub(super) const LIVE: &[Live] = &[
-    Live::taker(RuleId::CseqInDialogOrder, cseq_in_dialog_order),
+    Live::taker_unless(RuleId::CseqInDialogOrder, gap_over_a_lost_request, cseq_in_dialog_order),
     Live::taker(RuleId::ResponseCseqMatchesTransaction, response_cseq_matches_transaction),
     Live::taker(RuleId::AckCseqMatchesInvite, ack_cseq_matches_invite),
 ];
+
+/// A CSeq skip at the taker `lane` over a request the loss model dropped on
+/// its way there from the emitter, its number inside the gap: the emitter
+/// sent it (RFC 3261 §12.2.1.1 holds).
+fn gap_over_a_lost_request(
+    dropped: &Dropped,
+    lane: &LaneKey,
+    f: &rfc_rules::Finding,
+    cid: &str,
+    _: &[Msg],
+) -> bool {
+    let Decision::Violated(rfc_rules::Evidence::CseqNotContiguous { cseq, prior_cseq, .. }) =
+        &f.decision
+    else {
+        return false;
+    };
+    let gap = |c: u32| *prior_cseq < c && c < *cseq;
+    dropped.request_to((lane, &f.emitter, cid), gap)
+}
 
 /// The `Call-ID=… from-tag=… to-tag=…` descriptor the CSeq findings name the
 /// dialog by.

@@ -1,5 +1,4 @@
-//! fake-prack — `relayFirst18xTo180` strategy `fake-prack`. Port of
-//! `tests/scenarios/fake-prack.ts`.
+//! fake-prack — `relayFirst18xTo180` strategy `fake-prack`.
 //!
 //! The B2BUA puts bob on reliable provisional (Supported:100rel offered on its
 //! own behalf, whatever alice advertised — it acknowledges bob's reliable 1xx
@@ -264,8 +263,7 @@ async fn update_codec_mismatch() {
 
 /// No policy → full end-to-end reliable provisional: bob's 183(100rel) is
 /// relayed verbatim (Require:100rel intact), alice PRACKs end-to-end. Regression
-/// guard that the SERVICE_LAYER path stays off the default flow. (TS
-/// `fakePrackNoPolicyControl`.)
+/// guard that the SERVICE_LAYER path stays off the default flow.
 #[tokio::test]
 async fn no_policy_control() {
     let h = Harness::with_transit_delay("fake-prack-no-policy-control", 0);
@@ -318,8 +316,7 @@ async fn no_policy_control() {
 
 /// Alice's INVITE has no SDP (delayed offer) → the outbound INVITE strips
 /// `Supported:100rel` and the policy self-disables (plain relay; bob uses
-/// unreliable provisional, offer in his 200, answer in alice's ACK). (TS
-/// `fakePrackDelayedOfferFallback`.)
+/// unreliable provisional, offer in his 200, answer in alice's ACK).
 #[tokio::test]
 async fn delayed_offer_fallback() {
     let h = Harness::with_transit_delay("fake-prack-delayed-offer-fallback", 0);
@@ -362,7 +359,7 @@ async fn delayed_offer_fallback() {
 
 /// Bob's early-dialog UPDATE(offer) is answered locally by the B2BUA out of
 /// alice's INVITE offer, and alice's 200 carries her offer answered from bob's
-/// (`fake_prack_answer` pins the bytes). (TS `fakePrackUpdateHappy`.)
+/// (`fake_prack_answer` pins the bytes).
 #[tokio::test]
 async fn update_happy() {
     let h = Harness::with_transit_delay("fake-prack-update-happy", 0);
@@ -525,7 +522,7 @@ async fn a_callee_answer_framed_in_a_multipart_provisional_is_staged_as_sdp() {
     let _ = h.finish().await;
 }
 
-/// Shared body for the two failover-on-503 cases (TS `forking` / `failover`):
+/// Shared body for the two failover-on-503 cases (`forking` / `failover`):
 /// bob1 goes reliable (183/100rel → bare 180 + B2BUA PRACK + cached SDP) then
 /// 503s; the B2BUA fails over to bob2 (unreliable). bob1's cache dies with its
 /// leg, so alice's 200 carries bob2's own SDP.

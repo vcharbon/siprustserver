@@ -55,18 +55,13 @@ without it: the `Incident window` annotation (regions from
 `sip_chaos_event`), the tag `hakit` and the link listing every dashboard so
 tagged with the time range kept.
 
-| UID | Title | Built from |
-|---|---|---|
-| `sip-front-proxy` | SIP front-proxy — Load balancer (Rust) | `sip_messages_total`, `sip_routing_decision_total`, `sip_routing_duration_seconds`, `sip_proxy_*`, `sip_worker_health` |
-| `b2bua-worker` | B2BUA — Worker (Rust) | `b2bua_active_calls`, `b2bua_call_*`, `b2bua_dispatch_*`, `b2bua_handler_timeouts_total`, `b2bua_cdr_*` |
-| `k8s-state` | Kubernetes — state & per-pod resources | kube-state-metrics + cAdvisor (SUT-independent) |
-| `kind-nodes` | Kind — Node infrastructure | node-exporter (SUT-independent) |
+Each JSON file of the base set is one dashboard; its panels name the series it reads.
 
-The app dashboards are adapted from sipjsserver's but track the **Rust**
-exporters' metric names and label shapes — notably `sip_messages_total` carries
-a single `label` dimension holding `direction:result` (the Rust proxy does not
-split into separate `direction`/`result`/`method` labels), and `sip_worker_health`
-is a per-state count gauge (no `worker_id`). The Rust routing-duration histogram
+The app dashboards track the exporters' metric names and label shapes —
+notably `sip_messages_total` carries a single `label` dimension holding
+`direction:result` (the proxy does not split into separate
+`direction`/`result`/`method` labels), and `sip_worker_health` is a per-state
+count gauge (no `worker_id`). The routing-duration histogram
 emits only the `+Inf` bucket, so the latency panel shows the windowed average
 rather than quantiles.
 
@@ -88,8 +83,8 @@ whose sidecar serves metrics too names its port in `prometheus.io/sidecar-port`
 ## Notes / caveats
 
 - One stack per host. The host container names (`grafana`, `victoriametrics`, …)
-  and ports (3333/8428/9428/10428) are shared with sipjsserver's observability
-  stack — only one can run at a time. `install.sh --down` the other first.
+  and ports (3333/8428/9428/10428) are fixed, so a second observability stack
+  using them cannot run beside this one: `install.sh --down` the other first.
 - Use `127.0.0.1`, not `localhost`, when curling the host endpoints
   (`localhost` → IPv6 `::1` gets connection-reset against these containers).
 - Per-call traces (ADR-0026) are SAMPLED, so the VictoriaTraces datasource is

@@ -12,6 +12,7 @@ use tokio_util::time::delay_queue::Key;
 use call::{TxnKind, TxnTimeoutKind};
 use sip_retransmit::Ladder;
 
+use super::copies::{Copies, FinalCopies};
 use super::key::{ServerTxnId, ServerTxnKey};
 use super::lifetime::Lifetime;
 
@@ -38,8 +39,8 @@ pub(super) enum TxnState {
     Confirmed,
     /// RFC 6026 Accepted, after a 2xx; nothing retransmits or times out here.
     /// An INVITE server txn that sent a 2xx (§7.1, §8.7): held for Timer L,
-    /// passing every ACK up and handing no copy of its INVITE up; this stack
-    /// answers each copy with that 2xx where §8.7 sends nothing (`replay_cached`).
+    /// passing every ACK up and absorbing every copy of its INVITE, but the
+    /// first copy an Accepted seed meets before its 2xx left (`replay_cached`).
     /// An INVITE client txn that took a 2xx (§7.2): held for Timer M from
     /// that 2xx, absorbing every 1xx and non-2xx (§8.4). While its call holds
     /// it, every later 2xx reaches the TU, which owns each ACK (RFC 3261
@@ -264,6 +265,10 @@ impl Transaction {
             orphaned: false,
             held: false,
             seeded: false,
+            copies: None,
+            cancel_copies: None,
+            final_copies: FinalCopies::default(),
+            unsent_2xx: false,
         }
     }
 
@@ -277,6 +282,16 @@ impl Transaction {
 
     pub(super) fn role(&self) -> TxnRole {
         self.id.as_ref().role()
+    }
+
+    /// The From-tag of the caller whose tagless INVITE opened this server
+    /// transaction; `None` for any other transaction.
+    pub(super) fn caller_tag(&self) -> Option<&str> {
+        let request = self.original_request.as_deref()?;
+        let opens_a_dialog = self.role() == TxnRole::Server
+            && self.kind == TxnKind::Invite
+            && request.to().tag().is_none();
+        opens_a_dialog.then_some(self.from_tag.as_str())
     }
 
     /// This INVITE's dialog under `to_tag`, recorded now when new; `None`
@@ -379,7 +394,7 @@ pub(super) struct Transaction {
     /// txn, the INVITE's image, which stands in for `original_request`.
     pub(super) retransmit_buf: Option<Bytes>,
     /// On a client INVITE seeded `Trying` (ADR-0014): its INVITE, re-sent once
-    /// when a CANCEL is first held on it (ADR-0043), taken at that send.
+    /// at the seed (ADR-0058 X1), taken at that send.
     pub(super) seed_resend: Option<Bytes>,
     /// On a client INVITE that took a non-2xx final: its ACK and where it
     /// goes, held until the consumer releases it or its bound passes
@@ -436,4 +451,17 @@ pub(super) struct Transaction {
     /// A server INVITE transaction a seed rebuilt from a record, not one a
     /// request this layer received opened: it answers no copy of its own.
     pub(super) seeded: bool,
+    /// On a server transaction: the copies of its request (ADR-0063 §1),
+    /// from its first arrival. `None` on a seed until its first copy, which
+    /// is its first arrival here, and on a client transaction.
+    pub(super) copies: Option<Copies>,
+    /// On a server INVITE: the copies of a CANCEL of it, from that CANCEL's
+    /// first arrival.
+    pub(super) cancel_copies: Option<Copies>,
+    /// On a client INVITE: the copies of its finals, per To-tag.
+    pub(super) final_copies: FinalCopies,
+    /// On a server INVITE an Accepted seed rebuilt (ADR-0014): its 2xx has
+    /// not left this node, so the first copy of the INVITE draws it (RFC
+    /// 6026 §7.1 has an Accepted transaction absorb every other copy).
+    pub(super) unsent_2xx: bool,
 }

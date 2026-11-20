@@ -4,8 +4,9 @@
  * population, cut — and links it here. A replay is a request to create once
  * the job is done: the lane picked is said back, nothing is replayed by the
  * drop itself (§3 S3). A server with an inbox takes the drop there instead,
- * and the item links the pcaps page its anonymised copy (public peers faked,
- * SUT and private addresses kept: for this network's tooling) is listed on.
+ * and the item links the pcaps page what landed is listed on. Where the page
+ * offers it (`anonymise`), the drop states its anonymisation level; else, or
+ * on "workspace default", the workspace's `[anonymise] level` holds.
  *
  * Several files dropped together are ONE capture by default — the consecutive
  * files of one tap, a call starting in one and ending in the next — and the
@@ -16,8 +17,9 @@
  */
 import type { JSX } from "react"
 import { useEffect, useRef, useState } from "react"
-import { api, type CaptureIngestStart } from "../api.ts"
+import { ANONYMISE_LEVELS, type AnonymiseLevel, api, type CaptureIngestStart } from "../api.ts"
 import { href } from "../router.ts"
+import { drop, type Picked, type Queued } from "./drop-queue.ts"
 import { Link } from "./Link.tsx"
 
 /** One dropped capture, from the queue to its job. */
@@ -53,19 +55,30 @@ const WORD: Readonly<Record<Item["status"], string>> = {
   error: "error"
 }
 
+/** What each level does to a dropped capture, as the level picker says it. */
+const LEVEL_WORDS: Readonly<Record<AnonymiseLevel, string>> = {
+  "keep-all-ips": "anonymise, keep every IP",
+  "keep-sut": "anonymise, keep SUT and private IPs",
+  shareable: "shareable: fake every IP (no case: the SUT is faked)",
+  none: "none: a lab capture, as dropped"
+}
+
 export const DropCaptures = (
-  { lane, lanes, laneless, onFresh }: {
+  { lane, lanes, laneless, anonymise, onFresh }: {
     /** The lane the page reports on: what a drop replays on unless changed. */
     readonly lane?: string | undefined
     /** The lanes offered beside "add only"; empty = add only is the only choice. */
     readonly lanes: readonly string[]
     /** No lane choice: a page whose drop only brings the capture in. */
     readonly laneless?: boolean
+    /** The drop goes to a workspace's inbox: offer its anonymisation level. */
+    readonly anonymise?: boolean
     /** Called once per capture that lands, so the page behind can reload. */
     readonly onFresh?: () => void
   }
 ): JSX.Element => {
   const [choice, setChoice] = useState(lane ?? "")
+  const [level, setLevel] = useState<Picked>("")
   const [asSet, setAsSet] = useState(true)
   const [items, setItems] = useState<readonly Item[]>([])
   const [over, setOver] = useState(false)
@@ -81,7 +94,7 @@ export const DropCaptures = (
     }
   }, [])
 
-  const pending = useRef<{ readonly id: number; readonly files: readonly File[] }[]>([])
+  const pending = useRef<Queued<File>[]>([])
   const draining = useRef(false)
   const counter = useRef(0)
   // The lane in force when a file is POSTED, not when it was dropped: a lane
@@ -92,11 +105,11 @@ export const DropCaptures = (
   const patch = (id: number, fields: Partial<Item>): void =>
     setItems((all) => all.map((item) => (item.id === id ? { ...item, ...fields } : item)))
 
-  const runOne = async (id: number, files: readonly File[]): Promise<void> => {
+  const runOne = async ({ id, files, level: at }: Queued<File>): Promise<void> => {
     const on = laneNow.current
     patch(id, { status: "uploading", lane: on })
     try {
-      const started: CaptureIngestStart = await api.captureIngest(files, on)
+      const started: CaptureIngestStart = await api.captureIngest(files, on, at === "" ? undefined : at)
       if (!live.current) return
       patch(id, { capture: started.capture, detail: started.detail, inbox: started.inbox === true })
       if (!started.started) {
@@ -117,7 +130,7 @@ export const DropCaptures = (
       for (;;) {
         const head = pending.current.shift()
         if (head === undefined) return
-        await runOne(head.id, head.files)
+        await runOne(head)
       }
     } finally {
       draining.current = false
@@ -127,8 +140,9 @@ export const DropCaptures = (
   const take = (dropped: FileList | null): void => {
     if (dropped === null || dropped.length === 0) return
     const files = ringOrder(Array.from(dropped))
-    const captures = asSet ? [files] : files.map((file) => [file])
-    const taken = captures.map((group) => ({ id: counter.current++, files: group }))
+    const { queued: taken, picking } = drop({ level, next: counter.current }, files, asSet)
+    counter.current = picking.next
+    setLevel(picking.level)
     setItems((all) => [
       ...all,
       ...taken.map(({ files, id }) => ({
@@ -180,6 +194,15 @@ export const DropCaptures = (
             <select value={choice} onChange={(event) => setChoice(event.target.value)}>
               <option value="">add only (ingest + cut)</option>
               {lanes.map((one) => <option key={one} value={one}>replay on {one}</option>)}
+            </select>
+          </label>
+        )}
+        {anonymise === true && (
+          <label>
+            anonymisation{" "}
+            <select value={level} onChange={(event) => setLevel(event.target.value as Picked)}>
+              <option value="">workspace default (rig.toml)</option>
+              {ANONYMISE_LEVELS.map((one) => <option key={one} value={one}>{LEVEL_WORDS[one]}</option>)}
             </select>
           </label>
         )}

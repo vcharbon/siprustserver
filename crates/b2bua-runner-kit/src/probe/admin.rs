@@ -4,8 +4,10 @@
 //! - `POST /admin/cordon` cordons the worker, `DELETE /admin/cordon` lifts the
 //!   cordon: `204`, idempotent; `409` with the state the worker is in when no
 //!   cordon applies to it (NotReady, Draining).
-//! - `GET /admin/cordon`: `200` with `{"state", "cordoned", "calls"}`, the
-//!   readiness state, whether a cordon is set, and the live call count.
+//! - `GET /admin/cordon`: `200` with `{"state", "cordoned", "calls", "pid"}`,
+//!   the readiness state, whether a cordon is set, the live call count, and
+//!   the pid of the worker's process (an operator holding a pid tells by it
+//!   whether the worker answering is that process).
 //! - `GET /admin/calls`: `200` with `{"calls": [{"call_ref", "call_ids"}]}`,
 //!   every live call by its ref and the Call-IDs of its legs, a-leg first;
 //!   `503` when the worker's calls cannot be read.
@@ -60,6 +62,7 @@ fn cordon(readiness: &Readiness, calls: &CallCount, method: &str) -> AdminReply 
                 "state": readiness.state().label(),
                 "cordoned": readiness.is_cordoned(),
                 "calls": calls(),
+                "pid": std::process::id(),
             })
             .to_string(),
         ),

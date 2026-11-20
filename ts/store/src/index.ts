@@ -13,14 +13,25 @@
  * url (`Client`), the env and branch whose runs are current (`Current`), the
  * spelling of its current selector, the capture names its resolver recognises
  * and the migration it runs (`StoreBinding`), and its reading of a document's
- * features (`case_features`, `Migrations`).
+ * features (`case_features`, `Migrations`). `SchemaState` guards an entry point
+ * against a migration its binding has pending; `AutoMigrate` applies them
+ * unattended, backup first. `CampaignRuns` records a campaign run over its
+ * lanes' runs, read back as the results model (`CampaignResults`); `CampaignDiff`
+ * compares two of them.
  */
 export * as Aside from "./aside.js"
+export * as Attachments from "./attachments.js"
+export * as AutoMigrate from "./auto-migrate.js"
+export * as Batches from "./batches.js"
 export * as StoreBinding from "./binding.js"
 export * as Bundle from "./bundle.js"
 export * as CallHistory from "./call-history.js"
 export * as Calls from "./calls.js"
 export * as CallSummary from "./call-summary.js"
+export * as CampaignDiff from "./campaign-diff.js"
+export * as CampaignResults from "./campaign-results.js"
+export * as CampaignRuns from "./campaign-runs.js"
+export * as CellAnswers from "./cell-answers.js"
 export * as CaseDocuments from "./case-documents.js"
 export * as CaseIds from "./case-ids.js"
 export * as CaseMaps from "./case-maps.js"
@@ -33,6 +44,7 @@ export * as Declared from "./declared.js"
 export * as Delta from "./delta.js"
 export * as Facets from "./facets.js"
 export * as Forget from "./forget.js"
+export * as JobEvents from "./job-events.js"
 export * as Jobs from "./jobs.js"
 export * as Measure from "./measure.js"
 export * as Migrations from "./migrations.js"
@@ -47,13 +59,16 @@ export * as Registry from "./registry.js"
 export * as Removal from "./removal.js"
 export * as Requests from "./requests.js"
 export * as Resolver from "./resolver.js"
+export * as ResultReset from "./result-reset.js"
 export * as RuleHits from "./rulehits.js"
 export * as RunIdentity from "./run-identity.js"
 export * as RunSets from "./run-sets.js"
 export * as RunSummaries from "./run-summaries.js"
 export * as Runs from "./runs.js"
+export * as SchemaState from "./schema-state.js"
 export * as Selector from "./selector.js"
 export * as Sessions from "./sessions.js"
 export * as Sources from "./sources.js"
 export * as Sweeps from "./sweeps.js"
+export * as Verifications from "./verifications.js"
 export * as Wipe from "./wipe.js"

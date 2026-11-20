@@ -9,8 +9,8 @@
  *
  * A roster of these is read in ON-DISK order, not in match order: refusals are
  * ALL-THAT-APPLY, and every rule that fires is recorded. Nothing here is
- * first-match-wins — that is the tolerance family's contract
- * (the downstream tolerance registry) and copying it here would silently
+ * first-match-wins — that is the delta rules' contract (`@sip/delta-rules`,
+ * ADR-0062) and copying it here would silently
  * delete the second reason a case was refused.
  */
 import type { Flows } from "@sip/contracts"

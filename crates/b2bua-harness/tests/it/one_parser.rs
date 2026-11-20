@@ -55,7 +55,7 @@ async fn reads_the_same(name: &str, limits: SipParserLimits, past: Option<u16>) 
     let alice = h.agent("alice", "127.0.0.1:5060").await;
     let bob = h.agent("bob", BOB).await;
     let sut = B2buaSut::route_all_to("127.0.0.1", 5070)
-        .ingress_brake(IngressBrakeConfig { queue_max: QUEUE_MAX, threshold_pct: 50 })
+        .ingress_brake(IngressBrakeConfig::by_depth(QUEUE_MAX, 50))
         .tune(move |config| config.parser_limits = limits)
         .start(&h, "b2bua", "127.0.0.1:5080")
         .await;

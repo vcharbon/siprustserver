@@ -201,6 +201,20 @@ const CASES: &[Case] = &[
     case("answer_from_own", "SDP KiB, sections", ops::sdp_answer_sections_kib, KIB, LINEAR_KIB),
     case("answer_from_own", "SDP KiB, attributes", ops::sdp_answer_attributes_kib, KIB, LINEAR_KIB),
     case("multipart decompose", "body KiB", ops::multipart_decompose_kib, KIB, LINEAR_KIB),
+    case(
+        "multipart attach",
+        "part head KiB, derived boundary and dashes",
+        ops::attach_planted_head_kib,
+        KIB,
+        LINEAR_KIB,
+    ),
+    case(
+        "multipart attach",
+        "part head KiB, spelled boundaries",
+        ops::attach_spelled_boundaries_head_kib,
+        KIB,
+        LINEAR_KIB,
+    ),
 ];
 
 /// Growth beyond the axis ratio a linear case may show, and the growth a

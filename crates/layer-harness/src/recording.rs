@@ -1,4 +1,4 @@
-//! Recording helpers (port of `recordingHelpers.ts`, ADR-0013 D4).
+//! Recording helpers (ADR-0004).
 //!
 //! Boilerplate-elimination for the call shapes a wrappable layer surface
 //! actually has. The network surface has two (receiver-style `recv` is
@@ -7,23 +7,21 @@
 //!
 //!   - [`record_call`]     — an `async` method returning `Result`: record a
 //!     `before` event on entry, an `after` event on exit (built from the
-//!     outcome). The analogue of `recordEffectCall`.
+//!     outcome).
 //!   - [`ReleaseGuard`]    — records an `acquire` event now and a `release`
-//!     event on `Drop`. The analogue of `recordScopedAcquire`, using RAII
-//!     where the source used an Effect scope finalizer.
+//!     event on `Drop` (RAII).
 //!
-//! A layer also free to record directly via [`crate::Channel::record`] when a
-//! helper doesn't fit (higher-order methods, hubs) — exactly as the source's
-//! "explicit-wrap, no helper" convention prescribes.
+//! A layer is also free to record directly via [`crate::Channel::record`] when
+//! a helper doesn't fit (higher-order methods, hubs): an explicit wrap with no
+//! helper.
 
 use std::future::Future;
 
 use crate::recorder::Channel;
 
-/// Outcome handed to a `record_call` after-builder, mirroring
-/// `RecordEffectOutcome`. `Interrupt` has no direct Rust analogue for a plain
-/// `Future` (cancellation drops the future without resuming), so only `Ok` /
-/// `Err` are surfaced; a cancelled call simply never records its after-event.
+/// Outcome handed to a `record_call` after-builder. A cancelled `Future` is
+/// dropped without resuming, so only `Ok` / `Err` are surfaced; a cancelled
+/// call simply never records its after-event.
 pub enum CallOutcome<'a, T, E> {
     Ok(&'a T),
     Err(&'a E),

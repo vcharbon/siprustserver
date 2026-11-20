@@ -6,6 +6,7 @@
  */
 import { Tokens, type Flow } from "@sip/contracts"
 import { describe, expect, it } from "vitest"
+import { ofDocument } from "../src/document-facts.js"
 import { DOCUMENT_RULES } from "../src/document-rules.js"
 import { PRACK_UNANSWERABLE, unansweredPracks } from "../src/unanswered-prack.js"
 
@@ -49,7 +50,14 @@ const unanswerable: ReadonlyArray<Flow.FlowNode> = [
 
 const refusedBy = (flow: ReadonlyArray<Flow.FlowNode>) =>
   DOCUMENT_RULES.flatMap((rule) => {
-    const finding = rule.refuses({ capture: "c.pcap", caseId: "c.pcap-case1", flow, calls: [], declared: [] })
+    const finding = rule.refuses({
+      capture: "c.pcap",
+      caseId: "c.pcap-case1",
+      flow,
+      calls: [],
+      document: ofDocument({ flow, calls: [] }),
+      declared: []
+    })
     return finding === undefined ? [] : [{ id: rule.id, line: finding.line }]
   })
 

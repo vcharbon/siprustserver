@@ -30,6 +30,8 @@ lock-poison = { path = "../lock-poison" }
 task-restart = { path = "../task-restart" }
 sip-clock = { path = "../sip-clock" }
 sip-txn = { path = "../sip-txn" } # IdGen (To-tags), timer constants, and the health prober's client transactions
+# The ladder a sender re-sends a refused request on, which its copies are answered by (ADR-0063 §1).
+sip-retransmit = { path = "../sip-retransmit" }
 # The token bucket, EWMA, load-sampler seam and Retry-After policy the self-gate
 # and the per-worker caps shed with, shared with the worker.
 load-shed = { path = "../load-shed" }

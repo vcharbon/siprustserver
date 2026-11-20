@@ -69,7 +69,7 @@ def test_calls_the_generator_failed_reconcile_and_make_the_run_invalid(tmp_path:
     d = run_dir(tmp_path, [record("a", T0)], calls=3, events=[], stream={"generator_failures": 2})
     v = compute(d, SCHEMAS)
     assert [(i["kind"], i["detail"]) for i in jv.objs(v, "integrity")] == [
-        ("generator_failure", "the generator failed 2 calls without a record")
+        ("generator_failure", "the generator failed 2 calls without a record; 2 not placed in time")
     ]
     (s,) = jv.objs(v, "streams")
     assert s["generator_failures"] == 2
@@ -101,9 +101,17 @@ def test_a_window_with_in_dialog_candidates_says_so_in_why_and_in_its_section(tm
     v = compute(run_dir(tmp_path, [cut], calls=1, events=kill(1, T0 + 100_000)), SCHEMAS)
     text = render(v)
     why = text.split("## Why\n\n")[1].split("\n\n")[0]
-    assert "- window 001-kill_worker is a candidate of 2 in-dialog impacts: `call_cut` basic x1, `dialog_request_failed` basic x1 — FINDING" in why
-    assert "0 findings, candidate of 2 in-dialog impacts" in text
+    assert "- window 001-kill_worker is a candidate of 2 in-dialog findings: `call_cut` basic x1, `dialog_request_failed` basic x1 — FINDING" in why
+    assert "- 2 in-dialog findings in all" in why
+    (heading,) = [ln for ln in text.splitlines() if ln.startswith("### 001-kill_worker")]
+    assert heading.endswith(", 0 findings against its allowances, candidate of 2 in-dialog findings")
     assert "- in-dialog `call_cut` basic: 1 (this window a candidate) — FINDING" in text
+
+
+def test_a_window_no_loss_names_counts_only_its_allowances(tmp_path: Path) -> None:
+    v = compute(run_dir(tmp_path, [record("ok", T0)], calls=1, events=kill(1, T0 + 100_000)), SCHEMAS)
+    (heading,) = [ln for ln in render(v).splitlines() if ln.startswith("### 001-kill_worker")]
+    assert heading.endswith(", 0 findings against its allowances")
 
 
 def test_the_verdict_keeps_50_call_ids_a_row_and_the_full_list_apart(tmp_path: Path) -> None:

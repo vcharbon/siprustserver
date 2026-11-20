@@ -1,7 +1,6 @@
-//! The typed side-effect vocabulary a handler returns — port of
-//! `SipRouter.ts` `HandlerEffects` / `HandlerResult`. The router's
-//! turn commit (`commit_turn`) runs the five categories in a fixed order with
-//! different safety wraps (see ADR-0003 in the source / ADR-0010 here).
+//! The typed side-effect vocabulary a handler returns ([`HandlerResult`]).
+//! The router's turn commit (`commit_turn`) runs the five categories in a
+//! fixed order with different safety wraps (ADR-0010).
 
 use call::TxnKind;
 use call::{Call, RetainedEmission, TimerEntry, TimerKey};
@@ -238,19 +237,26 @@ pub enum QuietTurn {
     /// rung index and the rung timer's next due instant; a rung that ceases
     /// the ladder or fires spent cancels a ledger entry and is a write.
     OwnRung,
-    /// The re-ACK of a repeated inbound 2xx (RFC 3261 §13.2.2.4): the retained
-    /// ACK's bytes leave again and the body records nothing but the in-dialog
-    /// message count.
+    /// The re-ACK of a repeated inbound INVITE final whose ACK the record
+    /// retains (RFC 3261 §13.2.2.4, §17.1.1.3): the retained ACK's bytes leave
+    /// again and the body records nothing but the in-dialog message count and
+    /// the final's copy count.
     ReAck,
     /// An inbound ACK the rules absorb: it discharges nothing this node awaits
     /// and no ACK is owed toward the peer for it (§13.2.2.4), so nothing
     /// leaves and the body records nothing but the in-dialog message count.
     AbsorbedAck,
+    /// A copy of such a final owed no re-ACK (ADR-0057 §10), or of a final no
+    /// leg holds whose answer the shell's book absorbed (ADR-0063 §2): nothing
+    /// leaves and the body records nothing but the in-dialog message count and
+    /// the final's copy count.
+    AbsorbedCopy,
 }
 
 impl QuietTurn {
     /// Every kind, in declaration order.
-    pub const ALL: [QuietTurn; 3] = [QuietTurn::OwnRung, QuietTurn::ReAck, QuietTurn::AbsorbedAck];
+    pub const ALL: [QuietTurn; 4] =
+        [QuietTurn::OwnRung, QuietTurn::ReAck, QuietTurn::AbsorbedAck, QuietTurn::AbsorbedCopy];
 
     /// The `kind` label of `b2bua_repl_quiet_turns_total`.
     pub const fn kind(self) -> &'static str {
@@ -258,6 +264,7 @@ impl QuietTurn {
             QuietTurn::OwnRung => "own-rung",
             QuietTurn::ReAck => "re-ack",
             QuietTurn::AbsorbedAck => "absorbed-ack",
+            QuietTurn::AbsorbedCopy => "absorbed-copy",
         }
     }
 }
@@ -267,6 +274,10 @@ impl QuietTurn {
 pub struct HandlerEffects {
     pub critical: Vec<CriticalStateEffect>,
     pub outbound: Vec<OutboundSipEffect>,
+    /// The answers to finals no leg of the call holds (ADR-0063 §2): the
+    /// shell's book decides what each copy sends and appends it to
+    /// `outbound` before the turn lands.
+    pub unheld: Vec<crate::unheld_response::UnheldAnswer>,
     pub soft: Vec<SoftBoundedEffect>,
     pub buffered: Vec<BufferedObservabilityEffect>,
     pub fire_and_forget: Vec<FireAndForgetEffect>,
@@ -306,6 +317,7 @@ impl HandlerEffects {
         self.reasked |= other.reasked;
         self.critical.extend(other.critical);
         self.outbound.extend(other.outbound);
+        self.unheld.extend(other.unheld);
         self.soft.extend(other.soft);
         self.buffered.extend(other.buffered);
         self.fire_and_forget.extend(other.fire_and_forget);

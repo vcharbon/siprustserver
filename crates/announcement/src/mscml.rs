@@ -1,10 +1,9 @@
 //! Minimal MSCML (Media Server Control Markup Language, RFC 5022 family) for
 //! the announcement service: build a `<play>` request, and tell a `<response>`
-//! the media server sends by the code [`sip_message::mscml`] reads off it. The
+//! the media server sends by the code [`mscml`] reads off it. The
 //! body is opaque to the B2BUA and rides `SendRequestToLeg`.
 
-use sip_message::header::HeaderName;
-use sip_message::{mscml, SipRequest};
+use b2bua_sdk::rules::{mscml, HeaderName, SipRequest};
 
 /// The MSCML content type carried on the INFO control channel.
 pub const CONTENT_TYPE: &str = mscml::CONTENT_TYPE;

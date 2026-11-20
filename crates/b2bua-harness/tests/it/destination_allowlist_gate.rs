@@ -1,6 +1,6 @@
 //! Wiring/regression test for the b-leg **destination allow-list** gate
-//! (`b2bua::destination_allowlist`, port of `TargetAdmission.ts` + the `applyRoute.ts`
-//! admission block). The pure classifier is unit-tested in
+//! (`b2bua::destination_allowlist` + the `apply_route` admission block). The pure
+//! classifier is unit-tested in
 //! `b2bua::destination_allowlist::tests`; this pins the *wiring* end-to-end: a route to
 //! a host that is neither an IP literal nor in the worker's allow-list must be
 //! answered with a `503` and torn down *before* any b-leg INVITE is sent — so a
@@ -14,12 +14,11 @@
 //! event is written. Pure paused-clock; `h.finish()` runs the RFC post-call audit
 //! over the relayed `503`.
 //!
-//! The second test pins the load-bearing property of the gate (the one the TS
-//! `apply-route-admission-reject.test.ts` proves with `Effect.die` stubs): the
+//! The second test pins the load-bearing property of the gate: the
 //! admission reject lands BEFORE the limiter is touched. The route carries a
 //! `call_limiter` entry, yet admission must short-circuit so the limiter's
 //! `admit()` is never invoked — no hold is allocated for a doomed target. A
-//! recording spy limiter (the Rust analogue of the TS die-on-call stub) records
+//! recording spy limiter records
 //! whether `admit` ran and the test asserts it did not.
 
 use std::sync::Arc;

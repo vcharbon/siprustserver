@@ -14,8 +14,8 @@
 //! There is **no second teardown vocabulary**: every reaper verdict is a
 //! synthetic `CallEvent::InternalEvent { topic: "reaper" }` down the existing
 //! re-entry channel, through the per-call FIFO and per-call lock, handled by
-//! four CORE_LAYER rules (`reaper-stale`, `reaper-fatal-error`,
-//! `reaper-overflow`, `reaper-message-cap`). Only the
+//! five CORE_LAYER rules (`reaper-stale`, `reaper-fatal-error`,
+//! `reaper-overflow`, `reaper-message-cap`, `reaper-message-budget`). Only the
 //! strike-2 **discharge** bypasses the *rules* stage (rules are the thing that
 //! failed); it still runs `finalize → enforce → commit_turn` — the
 //! [`ObligationSet`](crate::obligations::ObligationSet) derivation, the CDR,
@@ -63,8 +63,8 @@ fn prune<V: Default>(m: &Mutex<Ledger<V>>, judged: Vec<(String, Stamp)>) {
 }
 
 pub use crate::reaper_verdict::{
-    OUTCOME_DISCHARGE, OUTCOME_FATAL, OUTCOME_MESSAGE_CAP, OUTCOME_OVERFLOW, OUTCOME_STALE,
-    REAPER_TOPIC,
+    OUTCOME_DISCHARGE, OUTCOME_FATAL, OUTCOME_MESSAGE_BUDGET, OUTCOME_MESSAGE_CAP,
+    OUTCOME_OVERFLOW, OUTCOME_STALE, REAPER_TOPIC,
 };
 
 /// Sweep pacing: at most this many verdicts per tick, so a mass-wedge (or a
@@ -206,6 +206,14 @@ impl Reaper {
         if ledger(&self.capped).write(call_ref).1 {
             self.send_verdict(call_ref, OUTCOME_MESSAGE_CAP, serde_json::json!({}));
         }
+    }
+
+    /// Hears a call holding a Call-ID the transaction layer muted past its
+    /// message budget (ADR-0063 §4): one `message-budget` verdict, with the
+    /// sweep on or off. Every later message of the muted leg is dropped, so
+    /// nothing re-trips it while the mute lasts.
+    pub fn on_message_budget(&self, call_ref: &str) {
+        self.send_verdict(call_ref, OUTCOME_MESSAGE_BUDGET, serde_json::json!({}));
     }
 
     /// One paced sweep pass, gated on `enabled` (a no-op for a disabled reaper).

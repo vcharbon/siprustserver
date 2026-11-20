@@ -3,7 +3,8 @@
 //! Wires the `sip-proxy` library over the **real, non-recording** UDP transport
 //! (`sip_net::RealSignalingNetwork`) into the production data path:
 //!   - `LoadBalancerStrategy` — HRW worker selection + HMAC-signed Record-Route
-//!     stickiness cookie (rotation-overlap aware).
+//!     stickiness cookie, signed and checked under the one `PROXY_HMAC_KEY`
+//!     (no previous key: ADR-0046 §7).
 //!   - The worker pool ([`sip_proxy_runner::discovery`]): the EndpointSlices of
 //!     the worker Service (ADR-0012 D4), or a fixed `PROXY_WORKERS` list.
 //!   - `HealthProbe` — OPTIONS to workers from the pool's first listing on,
@@ -18,7 +19,9 @@
 //!     self-overload (a stateless 503 + `Retry-After`, the same for every copy). A 100 ms
 //!     `tokio::time::interval` task drives its load sampler. `PROXY_SELF_GATE=0`
 //!     reverts to the always-admit gate.
-//!   - Prometheus `/metrics` + `/healthz` + `/readyz` + `/fitz` (`probe-http`).
+//!   - Prometheus `/metrics` + `/healthz` + `/readyz` + `/fitz` (`probe-http`),
+//!     and `/debug/flamegraph` on a loopback listener of its own (`501`
+//!     without the `flamegraph` feature).
 //!
 //! Config via env, read once before the first bind
 //! ([`sip_proxy_runner::config`]). Unset takes the default; a value set
@@ -41,8 +44,11 @@
 //!   PROXY_NAMESPACE  namespace of the worker Service (default POD_NAMESPACE,
 //!                    else the pod's own service-account namespace; required
 //!                    for discovery when none is known)
-//!   PROXY_METRICS    Prometheus HTTP listen ip:port, an IP literal
-//!                    (default 0.0.0.0:9090)
+//!   PROXY_METRICS    /metrics, /healthz, /readyz, /fitz listen ip:port, an IP
+//!                    literal, IPv6 with or without brackets (default 0.0.0.0:9090)
+//!   PROXY_DEBUG      /debug/flamegraph listen ip:port, loopback only
+//!                    (default 127.0.0.1:9097; `501` without the `flamegraph`
+//!                    feature)
 //!   PROXY_QUEUE      inbound UDP queue depth, packets ≥ 1  (default 8192)
 //!   SIP_EXEMPTIONS   comma-separated shapes accepted against the RFC, read at
 //!                    ingress only (default none; a name no exemption has is
@@ -425,8 +431,6 @@ async fn run() -> Result<i32, String> {
             )
         }),
         ready: proxy_probes.ready,
-        // No heap profiling on the proxy (not the leak target): /debug/heap → 503.
-        heap: None,
         fit: Some(proxy_probes.fit),
     };
     // The listener was bound FIRST (metrics-first bind order above); this only
@@ -436,6 +440,7 @@ async fn run() -> Result<i32, String> {
         probe_http::ProbeServer::serve_on_live(metrics_listener, routes, proxy_probes.live)
             .map_err(|e| format!("metrics server on {metrics_sa} failed to start: {e}"))?;
     tracing::info!(addr = %_metrics_server.addr(), "metrics server listening (/metrics, readiness /readyz, liveness /healthz, fitness /fitz)");
+    let _debug_server = sip_proxy_runner::debug_server::start(cfg.debug).await;
 
     let probe_task = tokio::spawn(shared.health(probe, notice_ep, cfg.cluster_key.clone()));
     let mut core_tasks = tokio::task::JoinSet::new();

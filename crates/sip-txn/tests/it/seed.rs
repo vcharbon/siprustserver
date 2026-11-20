@@ -294,12 +294,13 @@ async fn a_seeded_reinvite_is_answered_at_its_calls_release() {
 
 // ── The Accepted seed ───────────────────────────────────────────────────────
 
-/// A 2xx seeded Accepted (RFC 6026 §7.1) answers each copy of its INVITE with
-/// that 2xx — no 100, nothing handed up, nothing opened beside it — counts for
-/// its call until an ACK on its branch, which passes up, and leaves at Timer L
-/// measured from the seed.
+/// A 2xx seeded Accepted (RFC 6026 §7.1) answers the first copy of its INVITE
+/// with that 2xx, which never left this node, and absorbs the next — no 100,
+/// nothing handed up, nothing opened beside it — counts for its call until an
+/// ACK on its branch, which passes up, and leaves at Timer L measured from the
+/// seed.
 #[tokio::test(start_paused = true)]
-async fn an_accepted_seed_answers_copies_of_its_invite_with_its_2xx() {
+async fn an_accepted_seed_answers_the_first_copy_of_its_invite_with_its_2xx() {
     let mut stack = Stack::build(TRANSIT, 64, 64).await;
     let (branch, call_id) = ("z9hG4bK-seed-accepted", "seed-accepted");
     let seeded = stack.txn.seed(CALL_REF, vec![accepted_seed(branch, call_id)]).await.unwrap();
@@ -316,6 +317,9 @@ async fn an_accepted_seed_answers_copies_of_its_invite_with_its_2xx() {
     assert_eq!(count_responses(&out, 100), 0, "and no 100");
     assert!(stack.drain_events().is_empty(), "the copy is not handed up");
     assert_eq!(active(&stack), 1, "nothing opens beside the seed");
+    stack.inject(&copy).await;
+    elapse_ms(60).await;
+    assert!(stack.drain_peer().is_empty(), "the 2xx left: the next copy is absorbed");
 
     stack.inject(&inbound_request("ACK", branch, call_id, Some("peer-tag"))).await;
     elapse_ms(60).await;

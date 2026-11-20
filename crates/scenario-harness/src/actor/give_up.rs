@@ -5,6 +5,7 @@
 use tokio::time::Instant;
 
 use super::answer::reject_initial;
+use super::endpoint::Disposition;
 use super::react::default_react;
 use super::runner::ActorState;
 use super::settle::T1;
@@ -45,7 +46,9 @@ pub(super) async fn fire(st: &mut ActorState<'_>, inbox: &mut Inbox) -> Result<(
 }
 
 /// Reject the held initial INVITE `504` under the To-tag of its oldest
-/// unacknowledged reliable provisional (on a forked INVITE, that fork's).
+/// unacknowledged reliable provisional (on a forked INVITE, that fork's). A
+/// held callee's goals, which act on the transaction the 504 ends, are
+/// abandoned.
 async fn reject(st: &mut ActorState<'_>) -> Result<(), StepError> {
     let Some(mut uas) = st.pending_prack_answer.take().or_else(|| st.held.take()).map(|t| *t)
     else {
@@ -56,5 +59,8 @@ async fn reject(st: &mut ActorState<'_>) -> Result<(), StepError> {
     }
     st.fork_answer = None;
     st.unpracked.clear();
+    if matches!(st.disposition, Disposition::Held) {
+        st.goals.abandon();
+    }
     reject_initial(st, uas, 504).await
 }

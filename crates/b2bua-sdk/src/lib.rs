@@ -65,7 +65,9 @@ pub mod release_reason;
 mod request_record;
 pub mod rule_call;
 mod rule_context;
+mod rule_definition;
 mod rule_diagnostic;
+mod rule_handle_result;
 pub mod sdp_form;
 pub mod service;
 pub mod service_params;
@@ -91,14 +93,15 @@ pub mod rules {
     pub use crate::service::{ServiceDef, ServiceSeed, Terminal};
     pub use sip_message::draft::Entry;
     pub use sip_message::header::HeaderName;
-    pub use sip_message::Method;
+    pub use sip_message::{mscml, Method, SipRequest};
     // NOTE: `Call` is deliberately NOT re-exported here (ADR-0020 X8) — rules
     // read through the [`RuleCall`](crate::model::RuleCall) view. The full
     // struct stays nameable only as `b2bua_sdk::service::Call`, for the
     // `ServiceSeed::data_write` installer.
+    pub use call::helpers::leg_kind;
     pub use call::{
-        AttemptCause, AttemptId, AttemptOutcome, MachineId, StateLabel, TerminationCause,
-        TimeoutKind, TimerScopeKind,
+        AttemptCause, AttemptId, AttemptOutcome, CdrEventType, Direction, Leg, LegKind, LegState,
+        MachineId, StateLabel, TerminationCause, TimeoutKind, TimerKey, TimerScopeKind, TimerType,
     };
 }
 

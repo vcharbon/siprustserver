@@ -86,7 +86,7 @@ both halves. `B2buaSpawnParams` carries both as defaulted `Option`s;
 
 - Dialog-store outage tests become mechanical: Scene + armed
   `StoreFaults` + assert the defined outcome
-  (`b2bua-harness/tests/store_fault.rs` pins all three semantics).
+  (`b2bua-harness/tests/it/store_fault.rs` pins all three semantics).
 - Two new counters: `b2bua_store_fault_rejected_total` (fail-closed 500s) and
   `b2bua_store_fault_audit_skipped_total` (fail-open skipped cycles); both 0
   unless a fault is armed.

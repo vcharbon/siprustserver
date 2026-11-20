@@ -39,7 +39,7 @@
  */
 import type { AllowedErrors, Flows } from "@sip/contracts"
 import { assemble, type Assembled } from "./assemble.js"
-import { captureIndex, type CaptureIndex } from "./capture-index.js"
+import { type CaptureIndex, indexOf } from "./capture-index.js"
 import type { CaseSpec } from "./case-spec.js"
 import { caseCallIds } from "./cut.js"
 import type { PartsIndex } from "./parts.js"
@@ -47,6 +47,7 @@ import type { Plan } from "./plan.js"
 import { withdrawnBy, type CasePolicy, type Refusal } from "./policy.js"
 import { CAPTURE_RULES, type CaptureInput, type CaptureRule } from "./capture-rules.js"
 import { CASE_RULES, type CaseRule, type RefusalInput } from "./case-rules.js"
+import { ofDocument } from "./document-facts.js"
 import { DOCUMENT_RULES, type DocumentInput, type DocumentRule } from "./document-rules.js"
 import { refusalOf, type RefusalSite } from "./refusal-rule.js"
 import type { SutSet } from "./sut.js"
@@ -87,6 +88,13 @@ export interface CaseSetInput {
   readonly sut: SutSet
   readonly plan: Plan
   readonly policy: CasePolicy
+  /**
+   * The capture's index, the one its cut read (`./capture-index.ts`), built of
+   * this `flows` under this `plan`: every case's calls and topology are read
+   * off it, nothing here correlates the legs again, and an index of another
+   * document or plan is a defect.
+   */
+  readonly index: CaptureIndex
   readonly parts?: PartsIndex
   readonly allowed?: AllowedErrors.AllowedErrors
   /** Assemble refused cases too, and carry their documents. Never changes a verdict. */
@@ -96,7 +104,6 @@ export interface CaseSetInput {
 /** One spec assembled, or the reason it threw. Never both, never neither. */
 const build = (
   input: CaseSetInput,
-  index: CaptureIndex,
   spec: CaseSpec
 ): { readonly built: Assembled } | { readonly error: string } => {
   try {
@@ -108,7 +115,7 @@ const build = (
         sut: input.sut,
         plan: input.plan,
         policy: input.policy,
-        index,
+        index: input.index,
         ...(input.parts === undefined ? {} : { parts: input.parts }),
         ...(input.allowed === undefined ? {} : { allowed: input.allowed })
       })
@@ -128,7 +135,6 @@ const build = (
  */
 const quarantineOf = (
   input: CaseSetInput,
-  index: CaptureIndex,
   spec: CaseSpec,
   refused: ReadonlyArray<Refusal>,
   already?: Assembled
@@ -136,7 +142,7 @@ const quarantineOf = (
   if (input.quarantine !== true) return {}
   const untrusted = refused.find((r) => r.disposition === "untrusted")
   if (untrusted !== undefined) return { quarantineError: untrusted.line }
-  const attempt = already === undefined ? build(input, index, spec) : { built: already }
+  const attempt = already === undefined ? build(input, spec) : { built: already }
   if (!("built" in attempt)) return { quarantineError: attempt.error }
   const unrunnable = [...DOCUMENT_RULES, ...input.policy.refuseOnDocument]
     .filter((rule) => rule.disposition === "unrunnable")
@@ -150,6 +156,7 @@ const documentInput = (input: CaseSetInput, spec: CaseSpec, built: Assembled): D
   caseId: spec.id,
   flow: built.pivot.flow,
   calls: built.pivot.calls,
+  document: ofDocument(built.pivot),
   declared: built.pivot.must_fail ?? []
 })
 
@@ -195,14 +202,17 @@ const onDocument = (
     return finding === undefined ? [] : [refusalOf(rule, site, finding)]
   })
 
+/**
+ * Every case of `input.specs`, generated or refused. A defect where
+ * `input.index` was built of another flows document or under another plan
+ * than the input's (`indexOf`).
+ */
 export const decideCases = (input: CaseSetInput): CaptureCases => {
+  indexOf(input.index, input.flows, input.plan)
   const outcomes: Array<CaseOutcome> = []
-  // Once per capture, whatever the number of cases: the correlation and the
-  // forms table are each a pass over the whole document.
-  const index = captureIndex(input.flows, input.policy.derives, input.plan)
   for (const spec of input.specs) {
     const legs = spec.cutLegs ?? [spec.uac.leg, ...spec.uas.map((u) => u.leg)]
-    const callIds = caseCallIds(input.flows, input.sut, legs, index.correlation)
+    const callIds = caseCallIds(input.flows, input.sut, legs, input.index.correlation)
     // The capture tier first, because it needs strictly less: a rule that
     // decides on the family alone never sees the vantages the cut produced.
     const captured = {
@@ -223,10 +233,10 @@ export const decideCases = (input: CaseSetInput): CaptureCases => {
     // so its deferrals, claims about a document, are not recorded.
     if (refusals.some((r) => r.disposition !== "defers")) {
       const refused = refusals.filter((r) => r.disposition !== "defers")
-      outcomes.push({ spec, legs, callIds, refused, ...quarantineOf(input, index, spec, refused) })
+      outcomes.push({ spec, legs, callIds, refused, ...quarantineOf(input, spec, refused) })
       continue
     }
-    const attempt = build(input, index, spec)
+    const attempt = build(input, spec)
     if ("error" in attempt) {
       // A case only deferrals refuse, with no document: nothing is declared,
       // so every deferral stands.
@@ -249,7 +259,7 @@ export const decideCases = (input: CaseSetInput): CaptureCases => {
     ]
     outcomes.push(
       standing.length > 0
-        ? { spec, legs, callIds, refused: standing, ...quarantineOf(input, index, spec, standing, built) }
+        ? { spec, legs, callIds, refused: standing, ...quarantineOf(input, spec, standing, built) }
         : { spec, legs, callIds, built, refused: [] }
     )
   }

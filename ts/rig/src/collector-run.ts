@@ -1,0 +1,745 @@
+/**
+ * The run of a scope's collectors (ADR-0060 appendix §3, §5): each opened
+ * before its scope, collected over the scope's cells once it ended, and
+ * closed after it, whatever ended it: a failure, an interruption, a signal
+ * to the runner. A scope's named box-wide locks, the union of its
+ * instances', are taken once before its first `open` and given back after
+ * its last `close`; where they are refused, an instance naming one runs none
+ * of its steps. An `on-failure` instance opens and closes as any other, and
+ * collects after the others, where its `after` lets it, over the scope's
+ * failed cells alone (those the caller states failed or errored, or with a
+ * failing line by then), not at all where none failed.
+ *
+ * A failed or timed-out `open` or `collect` answers `not checkable`, with
+ * what failed, for every verification its manifest names
+ * (`Collector.answeredBy`) on every cell of its scope and on the scope
+ * itself, and its judge does not judge those cells. A `close` that fails is
+ * run once more; a second failure is the event `lab-left-changed`, the job's
+ * mark. The scope's collect, its records joined and judged, is
+ * `scope-judging.ts`'s.
+ */
+import { Attachment, Verification } from "@sip/contracts"
+import * as Cause from "effect/Cause"
+import * as Clock from "effect/Clock"
+import * as Duration from "effect/Duration"
+import * as Effect from "effect/Effect"
+import * as Exit from "effect/Exit"
+import * as Result from "effect/Result"
+import type * as Scope from "effect/Scope"
+import * as fs from "node:fs"
+import * as path from "node:path"
+import type * as Cell from "./cell.js"
+import * as Collector from "./collector.js"
+import * as Attached from "./attached.js"
+import * as Lines from "./collector-lines.js"
+import * as Context from "./context.js"
+import * as Executable from "./executable.js"
+import type * as Judge from "./judge.js"
+import type * as Lanes from "./lanes.js"
+import type * as RigPath from "./rig-path.js"
+import * as ScopeJudging from "./scope-judging.js"
+
+/**
+ * What an event says of a step; `refused` is a pre-check's `fail`, which
+ * refuses its scope (`pre-check.ts`); `not-run`, a collector wired where it
+ * does not run, a cell-scope one on a simulated lane (`cell-collectors.ts`).
+ */
+export const PHASES = ["open", "opened", "collect", "collected", "close", "closed", "failed", "lab-left-changed", "refused", "not-run"] as const
+export type Phase = (typeof PHASES)[number]
+
+/** The phase of the event that marks a job whose lab a collector's `close` left changed. */
+export const LAB_LEFT_CHANGED: Phase = "lab-left-changed"
+
+/** How many times `close` runs before the lab is said left changed. */
+export const CLOSE_ATTEMPTS = 2
+
+/** The directory under a holder's where an instance's attached files go, one directory per instance. */
+export const COLLECTED_DIR = Attached.COLLECTED_DIR
+
+/** One phase of one collector instance, at its instant on the runner's clock and on the wall clock. */
+export interface Event {
+  /** The instance's label. */
+  readonly collector: string
+  readonly phase: Phase
+  /** Milliseconds on the runner's clock. */
+  readonly clock_ms: number
+  /** Unix milliseconds. */
+  readonly wall_ms: number
+  /** What failed, and the log that says more; absent on a positive answer. */
+  readonly message?: string
+}
+
+/** Where the events of a run go: a job's record, a log. It never fails the run. */
+export type Sink = (event: Event) => Effect.Effect<void>
+
+/**
+ * Takes the box-wide locks `names` for `holder`, all or none: the effect that
+ * gives them back, or who holds one of them. Interrupted while it waits, it
+ * holds none.
+ */
+export type Locker = (names: ReadonlyArray<string>, holder: string) => Effect.Effect<Effect.Effect<void>, string>
+
+/** One collector as it runs for one scope. */
+export interface Instance {
+  readonly collector: RigPath.Defined<Collector.Collector>
+  /** File-safe and unique among its scope's instances: its directory's name, and its attachments' default name. */
+  readonly id: string
+  /** What its events name it by. */
+  readonly label: string
+  /** A cell scope has one cell: a line of its `collect` naming no cell is that cell's. */
+  readonly scope: "job" | "batch" | "cell"
+  /** The lane its context states, whose parts it reads; none for a job-scope collector that needs no part. */
+  readonly lane: Lanes.Loaded | undefined
+  /** The lanes whose cells it collects; every cell of its scope where absent. */
+  readonly lanes: ReadonlyArray<string> | undefined
+  /** Its manifest's parameters after the lane's overrides. */
+  readonly params: Readonly<Record<string, unknown>>
+  /** Its own directory: `state/` and `out/`, its context file, a log per step. */
+  readonly dir: string
+  /** The scope's own directory, which holds the attachments that name no cell. */
+  readonly holder: string
+  /** The judge its manifest names, as the path defines it; none judges its records where absent. */
+  readonly judge?: RigPath.Defined<Judge.Judge> | undefined
+  /** A collector its scope asked for by name, whatever the level sets it; a pre-check so asked never fails open (`pre-check.ts`). */
+  readonly asked?: true
+  /**
+   * Set `on-failure`: its `collect` runs after every other instance's of its
+   * scope, reads only the cells failed by then ({@link failedOf}), and does
+   * not run where none failed.
+   */
+  readonly onFailure?: boolean
+}
+
+/** What one holder was answered: its verification lines, the last per name, and its attachments, already listed in its directory. */
+export interface Answers {
+  readonly verifications: ReadonlyArray<Verification.Verification>
+  readonly attachments: ReadonlyArray<Attachment.Attachment>
+}
+
+/** What one instance's `collect` came to, or one judge's run, or a name's exports judged alone (`scope-judging.ts`). */
+export interface Collected {
+  /** The instance's label; `judge <judge> of <name>` for a judge's run; `exports <name>` for exports judged alone. */
+  readonly label: string
+  /** The scope's own answers. */
+  readonly scope: Answers
+  /** Per cell of the instance's scope, its answers, empty where it got none. */
+  readonly cells: ReadonlyMap<string, Answers>
+  /** The records to join by the manifest's key. */
+  readonly keyed: ReadonlyArray<Lines.KeyedRecord>
+  /** The records the collector assigned to a cell itself. */
+  readonly assigned: ReadonlyArray<Lines.AssignedRecord>
+  /** The keys it added to cells. */
+  readonly keys: ReadonlyArray<Lines.KeyLine>
+}
+
+/** A cell of the scope the base could not describe as `cell.v1`: no collector reads it. */
+export interface Unread {
+  readonly id: string
+  readonly lane: string
+  /** Why it has no description. */
+  readonly why: string
+}
+
+/**
+ * A scope's cells as its collectors read them: those described, those the
+ * base could not describe, and the ids of those whose own outcome, as the
+ * caller knows it when it hands them over, is a failure or an error.
+ */
+export interface Over {
+  readonly cells: ReadonlyArray<Cell.Cell>
+  readonly unread: ReadonlyArray<Unread>
+  readonly failed: ReadonlyArray<string>
+}
+
+/** A scope's opened collectors. */
+export interface Opened {
+  /**
+   * Collects over `over`, the scope's cells, each instance over those of its
+   * lanes as the earlier ones left them, in their {@link collectOrderOf}
+   * order: the `on-failure` ones over the cells failed by then
+   * ({@link failedOf}). Then joins and judges their records
+   * (`scope-judging.ts`): what each instance, in the order they collected,
+   * then each judge, answered. Called once, when the scope ended. Each cell of
+   * `over.unread` on an instance's lanes is answered `not checkable` by it (by
+   * an `on-failure` one where `over.failed` names it), and by each judge of
+   * exports alone, saying why the cell was not described.
+   */
+  readonly collect: (over: Over) => Effect.Effect<ReadonlyArray<Collected>>
+  /** The labels of the instances whose `close` left the lab changed so far, in order. */
+  readonly leftChanged: () => ReadonlyArray<string>
+}
+
+/** An instance as its scope runs it: when it opened, and what kept it from opening. */
+interface Opening {
+  readonly instance: Instance
+  start: Context.Context["window"]["start"]
+  /** Where its collect's window ends; undefined, the instant it collects. */
+  readonly end: Cell.Instant | undefined
+  /** The cells its scope is to run, stated in each of its contexts; none where the runner states none. */
+  readonly planned: ReadonlyArray<Context.Planned> | undefined
+  /** Set once it went past its scope's locks; its `close` runs then. */
+  closes: boolean
+  /** Why it did not open; its `collect` does not run and its verifications are not checkable. */
+  failure: string | undefined
+}
+
+/** The locks `instance`'s manifest names. */
+const locksOf = (instance: Instance): ReadonlyArray<string> => instance.collector.manifest.locks ?? []
+
+/** The locks of a scope of `instances`: the union of theirs, sorted, and the labels of those naming one as their holder. */
+const scopeLocksOf =(instances: ReadonlyArray<Instance>) => ({
+  names: [...new Set(instances.flatMap(locksOf))].sort(),
+  holder: instances.filter((instance) => locksOf(instance).length > 0).map((instance) => instance.label).join(", ")
+})
+
+const layoutOf = (instance: Instance) => ({
+  state: path.join(instance.dir, "state"),
+  out: path.join(instance.dir, "out"),
+  context: path.join(instance.dir, "context.json")
+})
+
+const now = Effect.map(Clock.currentTimeMillis, (clock_ms) => ({ clock_ms, wall_ms: Date.now() }))
+
+const emit = (sink: Sink, instance: Instance, phase: Phase, message?: string) =>
+  Effect.flatMap(now, (at) => sink({ collector: instance.label, phase, ...at, ...(message === undefined ? {} : { message }) }))
+
+const errorText = (cause: unknown): string => (cause instanceof Error ? cause.message : String(cause))
+
+/** `context` written as `instance`'s context file. */
+const writeContext = (instance: Instance, context: Omit<Context.Context, "schema" | "scope" | "lane" | "params">) => {
+  const written: Context.Context = {
+    schema: Context.SCHEMA,
+    scope: instance.scope,
+    ...context,
+    ...(instance.lane === undefined ? {} : { lane: Context.laneOf(instance.lane) }),
+    params: { ...instance.params }
+  }
+  fs.writeFileSync(layoutOf(instance).context, `${JSON.stringify(written, null, 2)}\n`)
+}
+
+/** `opening`'s cells planned, as its contexts state them; nothing where there are none. */
+const plannedOf = (opening: Opening): Pick<Context.Context, "planned"> =>
+  opening.planned === undefined ? {} : { planned: opening.planned }
+
+/** `opening`'s directory emptied and laid out, its context written with no cell, its planned ones, and its window opening at its start. */
+const layOut = (opening: Opening) =>
+  Effect.try({
+    try: () => {
+      const { instance } = opening
+      const layout = layoutOf(instance)
+      fs.rmSync(instance.dir, { recursive: true, force: true })
+      fs.mkdirSync(layout.state, { recursive: true })
+      fs.mkdirSync(layout.out, { recursive: true })
+      writeContext(instance, { window: { start: opening.start }, cells: [], ...plannedOf(opening) })
+    },
+    catch: (cause) => `its directory ${opening.instance.dir} not laid out: ${errorText(cause)}`
+  })
+
+/** The last line of `file` that says something, at most 300 characters of it; `undefined` where none does. */
+const lastLineOf = (file: string): string | undefined => {
+  try {
+    const size = fs.statSync(file).size
+    const fd = fs.openSync(file, "r")
+    const buffer = Buffer.alloc(Math.min(size, 4096))
+    fs.readSync(fd, buffer, 0, buffer.length, size - buffer.length)
+    fs.closeSync(fd)
+    const last = buffer.toString("utf8").split("\n").map((line) => line.trim()).filter((line) => line !== "").at(-1)
+    return last === undefined ? undefined : last.slice(0, 300)
+  } catch {
+    return undefined
+  }
+}
+
+/** Runs `step`'s executable `file` of `instance` within `timeoutMs`; how it ended and what that says, its log's last line included. */
+const runStep = (instance: Instance, file: string, step: "open" | "collect" | "close", timeoutMs: number, stdout?: string) => {
+  const log = path.join(instance.dir, `${step}.log`)
+  return Effect.map(
+    Executable.run({
+      dir: instance.collector.dir,
+      file,
+      ...layoutOf(instance),
+      step,
+      timeoutMs,
+      log,
+      ...(stdout === undefined ? {} : { stdout })
+    }),
+    (ended) => {
+      const last = Executable.succeeded(ended) ? undefined : lastLineOf(log)
+      return { ended, said: `${step} ${Executable.describe(ended)}${last === undefined ? "" : `: ${last}`}, its log ${log}` }
+    }
+  )
+}
+
+/**
+ * Runs `opening`'s `open`, `opening.closes` set once it went past its
+ * scope's locks: `refused`, why they were not taken, where they were not
+ * and it names one.
+ */
+const openOne = (
+  opening: Opening,
+  refused: string | undefined,
+  options: Options,
+  restore: <A, E, R>(effect: Effect.Effect<A, E, R>) => Effect.Effect<A, E, R>
+) =>
+  Effect.gen(function*() {
+    const { instance } = opening
+    const manifest = instance.collector.manifest
+    if (refused !== undefined && locksOf(instance).length > 0) {
+      opening.failure = `its locks not taken: ${refused}`
+      yield* emit(options.sink, instance, "failed", opening.failure)
+      return
+    }
+    opening.closes = true
+    const laid = yield* Effect.result(layOut(opening))
+    if (Result.isFailure(laid)) {
+      opening.failure = laid.failure
+      yield* emit(options.sink, instance, "failed", `open not run: ${laid.failure}`)
+      return
+    }
+    const file = manifest.run.open
+    if (file === undefined) return
+    yield* emit(options.sink, instance, "open")
+    const ran = yield* restore(runStep(instance, file, "open", Collector.boundsOf(manifest).open_s * 1000)).pipe(
+      Effect.onInterrupt(() => emit(options.sink, instance, "failed", "open interrupted, its process group killed"))
+    )
+    if (!Executable.succeeded(ran.ended)) {
+      opening.failure = ran.said
+      yield* emit(options.sink, instance, "failed", ran.said)
+      return
+    }
+    yield* emit(options.sink, instance, "opened")
+  })
+
+/** The cells of `cells` that `instance` collects. */
+const cellsOf = (instance: Instance, cells: ReadonlyArray<Cell.Cell>): ReadonlyArray<Cell.Cell> =>
+  instance.lanes === undefined ? cells : cells.filter((cell) => instance.lanes!.includes(cell.lane))
+
+const NO_ANSWERS: Answers = { verifications: [], attachments: [] }
+
+/** The flag every line of `instance` carries: informative where its manifest says its lines never decide; nothing otherwise. */
+const informativeOf = (instance: Instance): { readonly informative?: true } =>
+  Collector.isInformative(instance.collector.manifest) ? { informative: true } : {}
+
+/** `not checkable`, saying `message`, for each verification `instance` names; informative where its lines never decide. */
+const notCheckableLines = (instance: Instance, message: string): Answers => ({
+  verifications: Collector.answeredBy(instance.collector.manifest).map((name) => ({
+    name,
+    source: ScopeJudging.sourceOf(instance),
+    answer: "not-checkable" as const,
+    message,
+    ...informativeOf(instance)
+  })),
+  attachments: []
+})
+
+/**
+ * What `instance` answers where it could not collect over `cells`: `not
+ * checkable`, saying `message`, for each verification it names, on its scope
+ * and, unless it is scope-only, on each of `cells`.
+ */
+export const notCheckable = (instance: Instance, cells: ReadonlyArray<Cell.Cell>, message: string): Collected => {
+  const lines = notCheckableLines(instance, message)
+  const answered = Collector.isScopeOnly(instance.collector.manifest) ? [] : cells
+  return { label: instance.label, scope: lines, cells: new Map(answered.map((cell) => [cell.id, lines])), keyed: [], assigned: [], keys: [] }
+}
+
+/** `collected` with each cell of `unread` on `instance`'s lanes answered `not checkable`, saying why it was not described; none where it is scope-only. */
+const withUnread = (instance: Instance, collected: Collected, unread: ReadonlyArray<Unread>): Collected => {
+  const mine = instance.lanes === undefined ? unread : unread.filter((cell) => instance.lanes!.includes(cell.lane))
+  if (mine.length === 0 || Collector.isScopeOnly(instance.collector.manifest)) return collected
+  const cells = new Map(collected.cells)
+  for (const cell of mine) cells.set(cell.id, notCheckableLines(instance, `the cell ${cell.id} was not described: ${cell.why}`))
+  return { ...collected, cells }
+}
+
+/** Why `line` is no answer of `instance` over the cells `ids`, or `undefined`. */
+const faultOf = (instance: Instance, ids: ReadonlySet<string>, line: Lines.Line): string | undefined => {
+  const cell = "cell" in line.line ? line.line.cell : undefined
+  if (cell !== undefined && !ids.has(cell)) return `names the cell ${cell}, which is not one of its scope`
+  const manifest = instance.collector.manifest
+  switch (line._tag) {
+    case "Verification":
+      if (cell !== undefined && Collector.isScopeOnly(manifest)) return `answers the cell ${cell}, where its manifest answers its scope alone`
+      return Collector.answeredBy(manifest).includes(line.line.verification)
+        ? undefined
+        : `answers ${line.line.verification}, which its manifest does not name`
+    case "KeyedRecord":
+      return manifest.join === undefined ? "a record by key, where its manifest states no [join] key" : undefined
+    case "Attachment":
+      return Attached.faultOf(writerOf(instance), line.line)
+    default:
+      return undefined
+  }
+}
+
+/** The lines `instance`'s collect answered: its stdout's, then its {@link Lines.OUT_FILE}'s; or the first that is none. */
+const linesOf = (instance: Instance, stdout: string, ids: ReadonlySet<string>): Result.Result<ReadonlyArray<Lines.Line>, string> => {
+  const outFile = path.join(layoutOf(instance).out, Lines.OUT_FILE)
+  const read: Array<Lines.Line> = []
+  for (const [file, origin] of [[stdout, "its stdout"], [outFile, `SIPRIG_OUT/${Lines.OUT_FILE}`]] as const) {
+    if (!fs.existsSync(file)) continue
+    const parsed = Lines.parse(fs.readFileSync(file, "utf8"), origin)
+    if (Result.isFailure(parsed)) return Result.fail(parsed.failure)
+    for (const { at, line } of parsed.success) {
+      const fault = faultOf(instance, ids, line)
+      if (fault !== undefined) return Result.fail(`${at}: ${fault}`)
+      read.push(line)
+    }
+  }
+  return Result.succeed(read)
+}
+
+/** `instance` as the writer of its attachment lines. */
+const writerOf = (instance: Instance): Attached.Writer => ({ id: instance.id, source: instance.collector.name, out: layoutOf(instance).out })
+
+/** One holder's answers as they accrue: its lines by name, the last kept, and its attachments. */
+const accrued = () => ({ verifications: new Map<string, Verification.Verification>(), attachments: [] as Array<Attachment.Attachment> })
+
+/** `lines`, read over `cells`, applied: each attachment's file copied and listed in its holder's directory. */
+const applied = (instance: Instance, cells: ReadonlyArray<Cell.Cell>, lines: ReadonlyArray<Lines.Line>) =>
+  Effect.try({
+    try: (): Collected => {
+      const dirs = new Map(cells.map((cell) => [cell.id, cell.dir]))
+      const scope = accrued()
+      const byCell = new Map(cells.map((cell) => [cell.id, accrued()]))
+      const keyed: Array<Lines.KeyedRecord> = []
+      const assigned: Array<Lines.AssignedRecord> = []
+      const keys: Array<Lines.KeyLine> = []
+      const sole = instance.scope === "cell" ? cells[0]?.id : undefined
+      for (const line of lines) {
+        switch (line._tag) {
+          case "Verification": {
+            const { verification, cell: named, ...rest } = line.line
+            const cell = named ?? sole
+            const holder = cell === undefined ? scope : byCell.get(cell)!
+            holder.verifications.set(verification, { name: verification, source: ScopeJudging.sourceOf(instance), ...rest, ...informativeOf(instance) })
+            break
+          }
+          case "Attachment": {
+            const cell = line.line.cell ?? sole
+            const holder = cell === undefined ? scope : byCell.get(cell)!
+            holder.attachments.push(Attached.attach(writerOf(instance), cell === undefined ? instance.holder : dirs.get(cell)!, line.line))
+            break
+          }
+          case "KeyedRecord":
+            keyed.push(line.line)
+            break
+          case "AssignedRecord":
+            assigned.push(line.line)
+            break
+          case "Key":
+            keys.push(line.line)
+            break
+        }
+      }
+      const answersOf = (holder: ReturnType<typeof accrued>): Answers => ({
+        verifications: [...holder.verifications.values()],
+        attachments: holder.attachments
+      })
+      return {
+        label: instance.label,
+        scope: answersOf(scope),
+        cells: new Map([...byCell].map(([id, holder]) => [id, answersOf(holder)])),
+        keyed,
+        assigned,
+        keys
+      }
+    },
+    catch: (cause) => `its answers not applied: ${errorText(cause)}`
+  })
+
+/**
+ * `instance`'s `out/` removed once its answers were applied: every file it
+ * attached is copied into its holder, so none is kept twice. A failed collect
+ * keeps its `out/` to read what it left.
+ */
+const dropOut = (instance: Instance) => Effect.ignore(Effect.try(() => fs.rmSync(layoutOf(instance).out, { recursive: true, force: true })))
+
+/** What one collect came to: its answers, and why it collected nothing where its open or its collect failed. */
+interface Outcome {
+  readonly collected: Collected
+  readonly failed?: string | undefined
+}
+
+/** `instance`'s outcome where it could not collect over `cells`: {@link notCheckable}, `message` the why. */
+const notCollected = (instance: Instance, cells: ReadonlyArray<Cell.Cell>, message: string): Outcome => ({
+  collected: notCheckable(instance, cells, message),
+  failed: message
+})
+
+/** `opening`'s collect over `scopeCells`: its answers, or `not checkable` where it did not open or its collect failed. */
+const collectOne = (opening: Opening, sink: Sink, scopeCells: ReadonlyArray<Cell.Cell>): Effect.Effect<Outcome> =>
+  Effect.gen(function*() {
+    const { instance } = opening
+    const cells = cellsOf(instance, scopeCells)
+    if (opening.failure !== undefined) return notCollected(instance, cells, opening.failure)
+    const manifest = instance.collector.manifest
+    const failed = (message: string) => Effect.as(emit(sink, instance, "failed", message), notCollected(instance, cells, message))
+    yield* emit(sink, instance, "collect")
+    const at = yield* now
+    const end = opening.end ?? { lane_ms: at.clock_ms, wall_ms: at.wall_ms }
+    const stdout = path.join(instance.dir, "collect.out.jsonl")
+    const withinMs = Collector.boundsOf(manifest).collect_s * 1000
+    const laid = yield* Effect.result(Effect.try({
+      try: () => {
+        fs.rmSync(path.join(layoutOf(instance).out, Lines.OUT_FILE), { force: true })
+        const deadline = { wall_ms: Date.now() + withinMs }
+        writeContext(instance, { window: { start: opening.start, end }, cells, ...plannedOf(opening), deadline })
+      },
+      catch: (cause) => `collect not run: its context not written: ${errorText(cause)}`
+    }))
+    if (Result.isFailure(laid)) return yield* failed(laid.failure)
+    const ran = yield* runStep(instance, manifest.run.collect, "collect", withinMs, stdout)
+    if (!Executable.succeeded(ran.ended)) return yield* failed(ran.said)
+    const read = linesOf(instance, stdout, new Set(cells.map((cell) => cell.id)))
+    if (Result.isFailure(read)) return yield* failed(`collect: ${read.failure}`)
+    const done = yield* Effect.result(applied(instance, cells, read.success))
+    if (Result.isFailure(done)) return yield* failed(`collect ${done.failure}`)
+    yield* dropOut(instance)
+    yield* emit(sink, instance, "collected")
+    const outcome: Outcome = { collected: done.success }
+    return outcome
+  })
+
+/** {@link collectOne}, a defect of the base's own reading (a file going between its check and its read) answered `not checkable` saying it died. */
+const collectGuarded = (opening: Opening, sink: Sink, scopeCells: ReadonlyArray<Cell.Cell>): Effect.Effect<Outcome> =>
+  Effect.catchDefect(collectOne(opening, sink, scopeCells), (defect) => {
+    const message = `collect died: ${errorText(defect)}`
+    return Effect.as(emit(sink, opening.instance, "failed", message), notCollected(opening.instance, cellsOf(opening.instance, scopeCells), message))
+  })
+
+/**
+ * {@link collectGuarded}, where `options.due` is given awaited first, then
+ * bounded by the instance's `collect_s` from the instant it ended: past it the
+ * collect is interrupted and its cells answered `not checkable`, saying so: it collected nothing.
+ */
+const collectDue = (opening: Opening, options: Options, cells: ReadonlyArray<Cell.Cell>): Effect.Effect<Outcome> => {
+  const guarded = collectGuarded(opening, options.sink, cells)
+  if (options.due === undefined) return guarded
+  const { instance } = opening
+  const withinMs = Collector.boundsOf(instance.collector.manifest).collect_s * 1000
+  const late = `not answered within its collect_s of ${withinMs / 1000} s once due`
+  return Effect.andThen(
+    options.due(instance),
+    Effect.timeoutOrElse(guarded, {
+      duration: Duration.millis(withinMs),
+      orElse: () => Effect.as(emit(options.sink, instance, "failed", late), notCollected(instance, cellsOf(instance, cells), late))
+    })
+  )
+}
+
+/**
+ * The cells of `cells` failed by then: those `failed` names, whose own
+ * outcome is a failure or an error, and those with a failed line, one of
+ * their own (`cell.v1` `verifications`) or one an earlier instance of the
+ * scope answered of them in `earlier`; an informative or waived failure fails
+ * none.
+ */
+export const failedOf = (
+  cells: ReadonlyArray<Cell.Cell>,
+  failed: ReadonlySet<string>,
+  earlier: ReadonlyArray<Collected>
+): ReadonlyArray<Cell.Cell> =>
+  cells.filter((cell) =>
+    failed.has(cell.id) ||
+    Verification.failing([...cell.verifications, ...earlier.flatMap((one) => one.cells.get(cell.id)?.verifications ?? [])]).length > 0
+  )
+
+/** What an `on-failure` instance answers where no cell of its scope failed: nothing. */
+const unasked = (instance: Instance): Collected => ({
+  label: instance.label,
+  scope: NO_ANSWERS,
+  cells: new Map(),
+  keyed: [],
+  assigned: [],
+  keys: []
+})
+
+/**
+ * `opening`'s answers over `cells`, the scope's as the earlier instances left
+ * them, after `earlier`, the answers of the instances collected before it,
+ * and the cells it read: an `on-failure` one collects over the failed cells
+ * alone (`over.failed` among them) and answers nothing where none failed,
+ * each of `over.unread` stated failed answered `not checkable`; any other
+ * collects over every cell of its lanes, each of `over.unread` answered
+ * `not checkable`.
+ */
+const answersOf = (
+  opening: Opening,
+  options: Options,
+  cells: ReadonlyArray<Cell.Cell>,
+  over: Over,
+  earlier: ReadonlyArray<Collected>
+): Effect.Effect<ScopeJudging.Stepped> => {
+  const { instance } = opening
+  if (instance.onFailure !== true) {
+    return Effect.map(collectDue(opening, options, cells), (one) => ({ collected: withUnread(instance, one.collected, over.unread), failed: one.failed }))
+  }
+  const stated = new Set(over.failed)
+  const failed = failedOf(cellsOf(instance, cells), stated, earlier)
+  const unreadFailed = over.unread.filter((cell) => stated.has(cell.id))
+  const read = failed.map((cell) => cell.id)
+  const outcome = failed.length === 0 ? Effect.succeed<Outcome>({ collected: unasked(instance) }) : collectDue(opening, options, failed)
+  return Effect.map(outcome, (one) => ({ collected: withUnread(instance, one.collected, unreadFailed), read, failed: one.failed }))
+}
+
+/**
+ * `openings` in the order they collect: the first in their order whose
+ * `after` (`collector-order.ts`) left none of the others' instances to
+ * collect, one that is not `on-failure` before any `on-failure` one; where
+ * none is free (a cycle the path refuses), the first left.
+ */
+const collectOrderOf = (openings: ReadonlyArray<Opening>): ReadonlyArray<Opening> => {
+  const left = [...openings]
+  const out: Array<Opening> = []
+  const free = (opening: Opening) =>
+    (opening.instance.collector.manifest.after ?? []).every((name) => !left.some((other) => other.instance.collector.name === name))
+  while (left.length > 0) {
+    const first = left.findIndex((opening) => free(opening) && opening.instance.onFailure !== true)
+    const at = first >= 0 ? first : Math.max(0, left.findIndex(free))
+    out.push(...left.splice(at, 1))
+  }
+  return out
+}
+
+/** One `close` of `instance`; why it failed, or `undefined`. */
+const closeAttempt = (instance: Instance, file: string, sink: Sink) =>
+  Effect.gen(function*() {
+    yield* emit(sink, instance, "close")
+    const laid = yield* Effect.result(Effect.try({
+      try: () => {
+        const layout = layoutOf(instance)
+        fs.mkdirSync(layout.state, { recursive: true })
+        fs.mkdirSync(layout.out, { recursive: true })
+      },
+      catch: (cause) => `close not run: its directory ${instance.dir}: ${errorText(cause)}`
+    }))
+    if (Result.isFailure(laid)) {
+      yield* emit(sink, instance, "failed", laid.failure)
+      return laid.failure
+    }
+    const ran = yield* runStep(instance, file, "close", Collector.boundsOf(instance.collector.manifest).close_s * 1000)
+    if (!Executable.succeeded(ran.ended)) {
+      yield* emit(sink, instance, "failed", ran.said)
+      return ran.said
+    }
+    yield* emit(sink, instance, "closed")
+    return undefined
+  })
+
+/** Why an attempt that ended `ended` failed, or `undefined`; one that died failed with its defect. */
+const whyOf = (ended: Exit.Exit<string | undefined>): string | undefined =>
+  Exit.isSuccess(ended) ? ended.value : `close attempt died: ${Cause.pretty(ended.cause).split("\n")[0]}`
+
+/**
+ * Closes `instance`, uninterruptibly: up to {@link CLOSE_ATTEMPTS} runs of its
+ * `close`, the last failed one followed by `lab-left-changed`. Whether it
+ * closed; one with no `close` has nothing to undo.
+ */
+export const close = (instance: Instance, sink: Sink): Effect.Effect<boolean> =>
+  Effect.uninterruptible(Effect.gen(function*() {
+    const file = instance.collector.manifest.run.close
+    if (file === undefined) return true
+    let why: string | undefined
+    for (let tried = 1; tried <= CLOSE_ATTEMPTS; tried++) {
+      why = whyOf(yield* Effect.exit(closeAttempt(instance, file, sink)))
+      if (why === undefined) return true
+    }
+    yield* emit(sink, instance, LAB_LEFT_CHANGED, `${CLOSE_ATTEMPTS} close attempts failed, the last: ${why}`)
+    return false
+  }))
+
+/** What a scope's collectors run with. */
+export interface Options {
+  readonly sink: Sink
+  readonly locker: Locker
+  /** The judges of the scope's exports alone (`scope-judging.ts`); none where absent. */
+  readonly exportJudges?: ScopeJudging.ExportJudges | undefined
+  /**
+   * The window every instance's context states, and every judge's of the
+   * scope (`scope-judging.ts`), for a scope that reads calls
+   * which ended before it opened (an on-demand run); absent, an instance's
+   * window opens as it opens and ends as it collects.
+   */
+  readonly window?: { readonly start: Cell.Instant; readonly end: Cell.Instant } | undefined
+  /**
+   * Awaited before each instance's `collect`, in their collect order: a
+   * delayed cell-scope collector's wait (`cell-collectors.ts`). Where given,
+   * each collect is bounded by its `collect_s` from the instant its wait ended,
+   * the one before it having answered by then: past it, it answers `not
+   * checkable` and the next one collects. None where absent.
+   */
+  readonly due?: ((instance: Instance) => Effect.Effect<void>) | undefined
+  /** The cells the scope is to run, which every step's context states (`planned`); none stated where absent. */
+  readonly planned?: ReadonlyArray<Context.Planned> | undefined
+}
+
+/**
+ * Opens `instances` in order for the scope at hand, once the scope's locks
+ * are taken: each its directory laid out empty and its context written, then
+ * its `open` run within its bound. The scope's finalizer closes, in reverse
+ * order and uninterruptibly, every instance that went past the locks, then
+ * gives the locks back: after the scope collected, failed or was
+ * interrupted, an instance whose `open` failed or was interrupted included.
+ * An interruption interrupts the lock wait or the `open` under way, never a
+ * `close`.
+ */
+export const opened = (instances: ReadonlyArray<Instance>, options: Options): Effect.Effect<Opened, never, Scope.Scope> =>
+  Effect.uninterruptibleMask((restore) =>
+    Effect.gen(function*() {
+      const openings: Array<Opening> = []
+      const left: Array<string> = []
+      let release: Effect.Effect<void> = Effect.void
+      yield* Effect.addFinalizer(() =>
+        Effect.andThen(
+          Effect.forEach([...openings].reverse(), (opening) =>
+            opening.closes ? Effect.gen(function*() {
+              const closed = yield* Effect.exit(close(opening.instance, options.sink))
+              if (!(Exit.isSuccess(closed) && closed.value)) left.push(opening.instance.label)
+            }) : Effect.void, { discard: true }),
+          release
+        )
+      )
+      const locks = scopeLocksOf(instances)
+      const taken = locks.names.length === 0
+        ? Result.succeed(Effect.void)
+        : yield* restore(Effect.result(options.locker(locks.names, locks.holder)))
+      if (Result.isSuccess(taken)) release = taken.success
+      const refused = Result.isFailure(taken) ? taken.failure : undefined
+      for (const instance of instances) {
+        const at = yield* now
+        const opening: Opening = {
+          instance,
+          start: options.window?.start ?? { lane_ms: at.clock_ms, wall_ms: at.wall_ms },
+          end: options.window?.end,
+          planned: options.planned,
+          closes: false,
+          failure: undefined
+        }
+        openings.push(opening)
+        yield* openOne(opening, refused, options, restore)
+      }
+      let collected = false
+      const start = openings[0]?.start ?? (yield* Effect.map(now, (at) => ({ lane_ms: at.clock_ms, wall_ms: at.wall_ms })))
+      return {
+        collect: (over) =>
+          Effect.suspend(() => {
+            if (collected) return Effect.die(new Error("a scope's collectors collect once"))
+            collected = true
+            return ScopeJudging.collect({
+              steps: collectOrderOf(openings).map((opening) => ({
+                instance: opening.instance,
+                collect: (current, earlier) => answersOf(opening, options, current, over, earlier)
+              })),
+              cells: over.cells,
+              undescribed: over.unread,
+              exportJudges: options.exportJudges,
+              start,
+              end: options.window?.end,
+              say: (message) => Effect.flatMap(now, (at) => options.sink({ collector: "scope", phase: "failed", ...at, message }))
+            })
+          }),
+        leftChanged: () => [...left]
+      } satisfies Opened
+    })
+  )

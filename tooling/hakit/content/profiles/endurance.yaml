@@ -1,0 +1,82 @@
+schema: profile.v1
+name: endurance
+description: >-
+  400 calls a second for 2 h 20 min against two workers and two proxies: 180
+  basic, 180 with three caller re-INVITEs, 20 emergency, and 20 long calls whose
+  callee sends two re-INVITEs and hangs up at 180 s. Every base incident of the
+  incident tour fires once, with spikes of 200 calls a second from their own
+  stream. Each window opens at least 250 s, the longest call, after the previous
+  one closes, so a call meets one fault at most. The lab runs with
+  deploy/helm/siprust/values-kind-endurance.yaml.
+duration_s: 8400
+drain_s: 330
+settle_s: 15
+setup_slow_ms: 1000
+catalogs: [x-api-call]
+capture: { file_mb: 100, files: 20 }
+preflight:
+  min_free_memory_gib: 4
+  max_swap_used_gib: 20
+  min_free_disk_gib: 40
+streams:
+  - { name: basic, driver: sipp, shape: basic, scenario: uac-basic-hold.xml, cps: 180, setup_deadline_s: 10, ring_s: 2, hold_s: 20 }
+  - name: reinvite
+    driver: sipp
+    shape: basic
+    scenario: uac-basic-hold.xml
+    cps: 180
+    setup_deadline_s: 10
+    ring_s: 2
+    hold_s: 20
+    params: { reinvites: 3 }
+  - { name: emergency, driver: sipp, shape: basic_em, scenario: uac-basic-hold.xml, cps: 20, setup_deadline_s: 10, ring_s: 2, hold_s: 20 }
+  - name: callee_reinvite
+    driver: sipp
+    shape: callee_reinvite
+    scenario: uac-basic-hold.xml
+    cps: 20
+    setup_deadline_s: 10
+    ring_s: 2
+    hold_s: 240
+    params: { far_end_bye: release }
+  - { name: burst, driver: sipp, start: incident, shape: basic, scenario: uac-basic-hold.xml, cps: 200, setup_deadline_s: 10, ring_s: 2, hold_s: 2 }
+  - { name: orphaned, driver: sipp, start: incident, shape: basic, scenario: uac-basic-hold.xml, cps: 10, setup_deadline_s: 10, ring_s: 5, hold_s: 60 }
+  - name: flooding
+    driver: sipp
+    start: incident
+    shape: basic
+    scenario: uac-basic-hold.xml
+    cps: 5
+    setup_deadline_s: 10
+    ring_s: 5
+    hold_s: 1
+    params: { abuse: options_flood, flood_count: 30, flood_gap_ms: 1000 }
+schedule:
+  at:
+    - { at_s: 90, incident: kill_worker, budget: worker-kill }
+    - { at_s: 415, incident: kill_worker_graceful, budget: worker-drain }
+    - { at_s: 770, incident: kill_worker_held, duration_s: 60, budget: worker-kill }
+    - { at_s: 1155, incident: kill_proxy, budget: proxy-failover }
+    - { at_s: 1480, incident: pod_kill, budget: dependency-fault }
+    - { at_s: 1805, incident: pod_restart, budget: dependency-fault }
+    - { at_s: 2160, incident: pod_freeze, duration_s: 15, budget: dependency-fault }
+    - { at_s: 2500, incident: net_delay, duration_s: 30, budget: dependency-fault }
+    - { at_s: 2855, incident: net_loss, duration_s: 30, budget: dependency-fault }
+    - { at_s: 3210, incident: tcp_reset, duration_s: 30, budget: dependency-fault }
+    - at_s: 3565
+      incident: pod_freeze
+      target: { selector: app=rabbitmq }
+      duration_s: 30
+      budget: dependency-fault
+    - { at_s: 3920, incident: cpu_starve, duration_s: 60, budget: cpu-overload }
+    - { at_s: 4305, incident: node_stop, duration_s: 60, expected_s: 240, budget: dependency-fault }
+    - { at_s: 4810, incident: partition, duration_s: 30, budget: dependency-fault }
+    - { at_s: 5165, incident: sip_loss, duration_s: 30, budget: lossy-plane }
+    - { at_s: 5520, incident: io_stall, duration_s: 30, budget: dependency-fault }
+    - { at_s: 5875, incident: clock_skew, duration_s: 30, budget: dependency-fault }
+    - { at_s: 6230, incident: cut_external_plane, duration_s: 30, budget: proxy-cut }
+    - { at_s: 6585, incident: spike, stream: burst, budget: spike }
+    - { at_s: 7030, incidents: [cpu_starve, spike], stream: burst, duration_s: 30, expected_s: 180, budget: cpu-overload }
+    - { at_s: 7475, incident: force_delete, budget: worker-kill }
+    - { at_s: 7800, incident: orphan, stream: orphaned, budget: dependency-fault }
+    - { at_s: 8155, incident: abuse, stream: flooding, budget: abuse }

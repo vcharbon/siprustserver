@@ -1,0 +1,7 @@
+{
+  "settle_budget_ms": 10000,
+  "settled_at_ms": 1020,
+  "started_at_ms": 0,
+  "wall_ended_at_ms": 1700000001100,
+  "wall_started_at_ms": 1700000000000
+}

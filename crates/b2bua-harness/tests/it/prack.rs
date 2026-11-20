@@ -1,5 +1,5 @@
-//! End-to-end PRACK relay (port of `tests/scenarios/prack.ts`, the default
-//! end-to-end path — *not* the deferred `fake-prack` 18x-management strategy).
+//! End-to-end PRACK relay (the default end-to-end path — *not* the
+//! `fake-prack` 18x-management strategy).
 //!
 //! Reliable provisional handling (RFC 3262) with no 18x-management policy
 //! declared: the B2BUA is FULLY transparent on reliability. `Supported: 100rel`

@@ -1,4 +1,4 @@
-//! [`RoutingStrategy`] — the routing-policy seam (port of `RoutingStrategy.ts`).
+//! [`RoutingStrategy`] — the routing-policy seam.
 //!
 //! The proxy *core* owns every SIP mechanic (classify, top-Route strip, Via
 //! push/pop, the CANCEL/ACK LRU, forwarding). The strategy never touches message
@@ -41,7 +41,7 @@ pub struct StatedOwners {
 }
 
 /// Outcome of [`RoutingStrategy::decode_stickiness`]. Tagged so the core can
-/// dispatch without casts (port of the `DecodeResult` ADT).
+/// dispatch without casts.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DecodeResult {
     /// Forward straight to that address.
@@ -105,8 +105,8 @@ pub enum RankPlacement {
     Unranked,
 }
 
-/// The routing-policy seam. `async` for symmetry with the registry the LB calls
-/// (the source returns `Effect`s); `ForwardAll` is effectively synchronous.
+/// The routing-policy seam. `async` for symmetry with the registry the LB
+/// calls; `ForwardAll` is effectively synchronous.
 #[async_trait]
 pub trait RoutingStrategy: Send + Sync {
     /// Human-readable name for logs/metrics (e.g. "ForwardAll", "LoadBalancer").

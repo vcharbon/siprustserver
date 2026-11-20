@@ -154,7 +154,8 @@ const sameBytes = (fs: FileSystem.FileSystem, a: string, b: string) =>
  * the next generation when they do not; one the store holds without a kept
  * seed under the next generation, with a fresh seed. A new generation never
  * touches the old name's rows, artifacts or runs; its seed is kept under its
- * own name (the kept seed carried where only the bytes changed). A
+ * own name (the kept seed carried where only the bytes changed). An
+ * anonymiser drawing on no seed stands as one under a kept seed. A
  * re-extraction under a kept seed that fails leaves the artifacts it would
  * have replaced as they were.
  */
@@ -173,8 +174,9 @@ const extractTimed = (
     const first = source.first ?? source.capture
     const at = yield* Generation.current(artifacts, first)
     const record = yield* Record.read(artifacts, source.capture)
-    const kept = record?.seedFile !== undefined &&
-      (yield* extraction.keptSeed(artifacts, source.capture)) !== undefined
+    const unseeded = extraction.seeded === false
+    const kept = unseeded || (record?.seedFile !== undefined &&
+      (yield* extraction.keptSeed(artifacts, source.capture)) !== undefined)
     const scratch = yield* scratchFor(fs, artifacts)
     const raw = path.join(scratch, rawFlowsName(source.capture))
     const landing = (generation: Generation.Generation): Source =>
@@ -211,7 +213,8 @@ const extractTimed = (
       const read = yield* readRaw(tool, source, raw)
       if (read !== undefined) return { capture: source.capture, source, landed: keptLine, broke: read }
       watch.lap("sipflow")
-      const anonymised = yield* extraction.anonymise({ raw, dir: staged, artifacts, capture: source.capture }).pipe(
+      const request = { raw, dir: staged, artifacts, capture: source.capture, pcaps: source.pcaps }
+      const anonymised = yield* extraction.anonymise(request).pipe(
         Effect.as(undefined),
         Effect.catchTag("Corpus.AnonymiseFailed", (failed) => Effect.succeed(failed.line))
       )
@@ -228,7 +231,7 @@ const extractTimed = (
         return yield* into(source, why, undefined, { _tag: "staged", dir: staged })
       }
       const next = landing(yield* Generation.after(artifacts, first, at.generation))
-      yield* extraction.carrySeed(artifacts, source.capture, next.capture)
+      if (!unseeded) yield* extraction.carrySeed(artifacts, source.capture, next.capture)
       return yield* into(next, `the anonymised bytes of ${source.capture} changed under its kept seed`, source.capture, {
         _tag: "read"
       })
@@ -262,15 +265,16 @@ const extractTimed = (
 const messageOf = (cause: unknown): string => (cause instanceof Error ? cause.message : String(cause))
 
 /**
- * The raw flows document of a capture, read under the deployment's reading,
- * into `raw`; why it could not be read, where it could not.
+ * The raw flows document of a capture, read under the deployment's reading
+ * and projecting the headers it names, into `raw`; why it could not be read,
+ * where it could not.
  */
 const readRaw = (tool: string, source: Source, raw: string) =>
   Effect.gen(function*() {
-    const reading = yield* Tools.reading
+    const args = yield* Tools.extractorArgs
     const ended = yield* IntoFile.exec(
       tool,
-      [...reading, ...source.pcaps, "--contiguous", String(SET_MAX_GAP_MS), "--json"],
+      [...args, ...source.pcaps, "--contiguous", String(SET_MAX_GAP_MS), "--json"],
       raw,
       { stderrHead: 600 }
     )
@@ -330,7 +334,7 @@ const landInto = (
         yield* fs.rename(path.join(done.dir, file), path.join(dir, file))
       }
     } else {
-      const anonymised = yield* extraction.anonymise({ raw, dir, artifacts, capture: source.capture }).pipe(
+      const anonymised = yield* extraction.anonymise({ raw, dir, artifacts, capture: source.capture, pcaps: source.pcaps }).pipe(
         Effect.as(undefined),
         Effect.catchTag("Corpus.AnonymiseFailed", (failed) => Effect.succeed(failed.line))
       )

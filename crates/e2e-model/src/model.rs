@@ -1,7 +1,7 @@
-//! The authored JSON surface (ADR-0018): Test cases, Check sets and
-//! Campaigns as `serde` + `schemars::JsonSchema` documents, plus the loader and
-//! the **load-time compatibility validation** (ADR-0019): a Test case is
-//! compatible with a Callflow shape iff (i) its input satisfies the shape's
+//! The authored JSON surface (ADR-0018): Test cases and Check sets as `serde`
+//! and `schemars::JsonSchema` documents, plus the loader and the **load-time
+//! compatibility validation** (ADR-0019): a Test case is compatible with a
+//! Callflow shape iff (i) its input satisfies the shape's
 //! `required_input`, and (ii) every `<agent>.<anchor>` its checks (inline or via
 //! referenced Check sets) bind to names an anchor the shape publishes. An
 //! incompatible case fails loudly at load, never silently at run.
@@ -48,19 +48,6 @@ impl Input {
             "ruri" => self.core.ruri.is_some(),
             other => self.extras.contains_key(other),
         }
-    }
-
-    /// Deserialize the open `extras` map into a shape's typed parameters `T`
-    /// (paired with its `JsonSchema` via the shape's `params_schema` in
-    /// `e2e-core`, so the schema the author saw IS the type `run` reads —
-    /// `CallflowShape::params_schema`). `T` should carry
-    /// `#[serde(default)]` so an absent/partial `extras` yields its defaults; a
-    /// *malformed* one panics loudly (the harness philosophy — never a silent
-    /// fallback to defaults that masks a typo).
-    pub fn params<T: DeserializeOwned>(&self) -> T {
-        let obj = serde_json::Value::Object(self.extras.clone().into_iter().collect());
-        serde_json::from_value(obj)
-            .unwrap_or_else(|e| panic!("invalid shape params in `extras`: {e}"))
     }
 }
 
@@ -117,7 +104,7 @@ impl CheckBlock {
     }
 }
 
-/// A committed, shareable bundle of check blocks (e.g. `invite-identity`),
+/// A committed, shareable bundle of check blocks (e.g. `loadgen-invite-identity`),
 /// reusable by every Test case whose shapes publish the referenced anchors.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -165,47 +152,6 @@ pub struct TestCase {
     pub allow_violations: Vec<String>,
 }
 
-/// Per-infra-kind run-executor concurrency caps (`InfraKind` in `e2e-core`):
-/// fake cells fan out wide; real cells share one external cluster.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct Concurrency {
-    #[serde(default = "default_fake_concurrency")]
-    pub fake: usize,
-    #[serde(default = "default_real_concurrency")]
-    pub real: usize,
-}
-
-fn default_fake_concurrency() -> usize {
-    8
-}
-fn default_real_concurrency() -> usize {
-    1
-}
-
-impl Default for Concurrency {
-    fn default() -> Self {
-        Concurrency { fake: default_fake_concurrency(), real: default_real_concurrency() }
-    }
-}
-
-/// A campaign: the {case × compatible shape × infra} matrix to expand and run.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct Campaign {
-    #[serde(rename = "$schema", default, skip_serializing_if = "Option::is_none")]
-    pub schema: Option<String>,
-    pub id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
-    /// Test-case ids.
-    pub cases: Vec<String>,
-    /// Infra-shape ids to run each compatible cell over.
-    pub infra_shapes: Vec<String>,
-    #[serde(default)]
-    pub concurrency: Concurrency,
-}
-
 /// Every authored doc type, as `(file stem, JSON schema)` — the source of
 /// truth `xtask e2e-schema` writes to `e2e/schemas/<stem>.schema.json`.
 pub fn schemas() -> Vec<(&'static str, Schema)> {
@@ -213,7 +159,6 @@ pub fn schemas() -> Vec<(&'static str, Schema)> {
         ("endpoint-config", schema_for!(EndpointConfig)),
         ("test-case", schema_for!(TestCase)),
         ("check-set", schema_for!(CheckSet)),
-        ("campaign", schema_for!(Campaign)),
         ("load-profile", schema_for!(LoadProfile)),
         ("load-run-index", schema_for!(LoadRunIndex)),
     ]
@@ -269,10 +214,6 @@ pub fn load_check_set(path: &Path) -> Result<CheckSet, ModelError> {
     load_json(path)
 }
 
-pub fn load_campaign(path: &Path) -> Result<Campaign, ModelError> {
-    load_json(path)
-}
-
 pub fn load_endpoint_config(path: &Path) -> Result<EndpointConfig, ModelError> {
     load_json(path)
 }
@@ -318,8 +259,7 @@ pub fn load_check_sets(dir: &Path) -> Result<BTreeMap<String, CheckSet>, ModelEr
 ///
 /// Generic over [`ShapeCatalog`] — the by-id lookup of a shape's load-time
 /// metadata ([`crate::shape::ShapeSpec`]) — so the unified descriptor registry
-/// (`ShapeRegistry`), e2e-core's descriptor+functional-body map, and any test
-/// fixture map validate through the one implementation.
+/// (`ShapeRegistry`) and any test fixture map validate through the one implementation.
 pub fn validate_case<C: ShapeCatalog + ?Sized>(
     case: &TestCase,
     shapes: &C,

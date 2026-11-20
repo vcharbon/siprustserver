@@ -135,4 +135,7 @@ pub enum Reoffer {
     Matched,
     /// No transaction took it; nothing was sent and nothing was emitted.
     Unmatched,
+    /// Its Call-ID is muted (ADR-0063 §4): dropped as one from the wire is,
+    /// nothing sent and nothing emitted. The consumer drops its copy.
+    Muted,
 }

@@ -329,10 +329,23 @@ impl AgentBinder {
     /// findings whether or not the call recorded, each under its rule and its
     /// UA's name, waived by a `dialog-…` scope on that UA.
     pub fn rfc_findings(&self, waivers: &[crate::WaiverScope]) -> WaiverOutcome {
+        self.rfc_findings_under_loss(waivers, &[])
+    }
+
+    /// [`rfc_findings`](Self::rfc_findings), less the dialog verdicts the
+    /// call's loss model explains (`lost`, each dropped datagram with the
+    /// party it was to or from).
+    pub fn rfc_findings_under_loss(
+        &self,
+        waivers: &[crate::WaiverScope],
+        lost: &[(String, crate::realcall::LostMessage)],
+    ) -> WaiverOutcome {
         use crate::agent::dialog_gate::{as_findings, surviving_verdicts};
         use crate::agent::waiver::{apply_waivers_findings, Attribution, WaiverState};
         let states: Vec<WaiverState> = waivers.iter().cloned().map(WaiverState::new).collect();
-        let mut findings = as_findings(surviving_verdicts(&self.judges.lock().unwrap(), &states).0);
+        let (verdicts, _) = surviving_verdicts(&self.judges.lock().unwrap(), &states);
+        let unexplained = verdicts.into_iter().filter(|g| !g.explained_by_loss(lost)).collect();
+        let mut findings = as_findings(unexplained);
         if let Some(rec) = &self.recording {
             let events = rec.channel().snapshot();
             findings.extend(apply_waivers_findings(&events, &states, &Attribution::SubLane));
@@ -348,6 +361,38 @@ impl AgentBinder {
     pub fn normalized_seq_doc(&self, title: &str, passed: bool) -> Option<seq_report::SeqDoc> {
         let doc = self.seq_doc(title, passed, None, None, &[])?;
         Some(crate::report::project::normalize_doc(&doc))
+    }
+
+    /// What, once the call's traffic is over, its UAs answered the requests
+    /// the loss model's drops explain (`notes`, the caller's datagrams under
+    /// `caller`, as [`rfc_findings`](Self::rfc_findings) reads them): each
+    /// refusal's party (its callee leg, `None` for `caller`), request method
+    /// and status, which the system under test may relay to another side of
+    /// the call.
+    pub fn loss_excused(
+        &self,
+        notes: crate::realcall::LossNotes,
+        caller: String,
+    ) -> impl FnOnce() -> Vec<(Option<String>, String, u16)> + Send + 'static {
+        use crate::agent::dialog_gate::GatedVerdict;
+        let judges = self.judges.lock().unwrap().clone();
+        move || {
+            let lost = notes.by_party(&caller);
+            let gated = judges.iter().flat_map(|j| {
+                let party = j.party().to_string();
+                j.gated()
+                    .into_iter()
+                    .map(move |(verdict, _)| GatedVerdict { party: party.clone(), verdict })
+            });
+            gated
+                .filter(|g| g.explained_by_loss(&lost))
+                .filter_map(|g| {
+                    let (code, _) = g.verdict.kind.refusal()?;
+                    let leg = Some(g.party).filter(|party| *party != caller);
+                    Some((leg, g.verdict.method, code))
+                })
+                .collect()
+        }
     }
 
     /// The wire trace of this call's recording, projected exactly like

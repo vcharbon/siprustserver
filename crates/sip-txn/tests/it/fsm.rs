@@ -35,6 +35,8 @@ fn has_message_request(events: &[TransactionEvent], method: &str) -> bool {
 
 // ── Client retransmission (Timer A) ─────────────────────────────────────────
 
+/// By 2 s the peer has seen the initial send + retransmits at 500 ms and
+/// 1500 ms (Timer A doubling, RFC 3261 §17.1.1.2) = 3 INVITEs.
 #[tokio::test(start_paused = true)]
 async fn client_retransmits_on_timer_a_cadence() {
     let stack = Stack::build(TRANSIT, 64, 64).await;
@@ -44,8 +46,6 @@ async fn client_retransmits_on_timer_a_cadence() {
         .await
         .unwrap();
 
-    // By 2 s the peer has seen the initial send + retransmits at 500 ms and
-    // 1500 ms (the source's doubling cadence) = 3 INVITEs.
     elapse_ms(2_000).await;
     assert_eq!(count_requests(&stack.drain_peer(), "INVITE"), 3);
     // Each rung is counted under the ladder that paced it and the request it
@@ -764,7 +764,7 @@ async fn unmatched_cancel_is_handed_up_unanswered() {
         "an unmatched CANCEL must not surface a Cancelled"
     );
     assert!(has_message_request(&events, "CANCEL"), "the CANCEL itself reaches the consumer");
-    assert_eq!(active(&stack), 0, "and builds no transaction");
+    assert_eq!(active(&stack), 1, "through a transaction of its own (ADR-0063 §1)");
 }
 
 /// A CANCEL arriving after the INVITE was answered (200 raced the CANCEL) finds

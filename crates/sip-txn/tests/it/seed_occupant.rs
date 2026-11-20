@@ -40,9 +40,9 @@ fn accepted_seed(branch: &str, call_id: &str) -> TxnSeed {
 
 /// The INVITE copy that triggered the materialisation opened a transaction
 /// with no final on the Accepted seed's identity: it takes the seed's 2xx and
-/// sends it once to the copy's source, and the re-offer of that copy is then
-/// absorbed with nothing more sent. An occupant that has sent its final keeps
-/// it, and the seed is skipped.
+/// sends it once to the copy's source, and the re-offer of that copy and a
+/// later copy are then absorbed with nothing more sent. An occupant that has
+/// sent its final keeps it, and the seed is skipped.
 #[tokio::test(start_paused = true)]
 async fn an_occupant_with_no_final_takes_the_accepted_seeds_2xx() {
     let mut stack = Stack::build(TRANSIT, 64, 64).await;
@@ -63,7 +63,8 @@ async fn an_occupant_with_no_final_takes_the_accepted_seeds_2xx() {
     assert!(stack.drain_peer().is_empty(), "the re-offered copy draws nothing more");
     stack.inject(&raw).await;
     elapse_ms(60).await;
-    assert_eq!(count_responses(&stack.drain_peer(), 200), 1, "a copy from the wire draws it");
+    let out = stack.drain_peer();
+    assert_eq!(count_responses(&out, 200), 0, "the 2xx left: a copy is absorbed (RFC 6026 §7.1)");
     assert_eq!(active(&stack), 1);
 
     // An occupant answered on its own keeps its final.

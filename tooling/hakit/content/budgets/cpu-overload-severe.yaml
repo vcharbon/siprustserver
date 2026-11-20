@@ -1,0 +1,29 @@
+schema: budget.v1
+name: cpu-overload-severe
+description: >-
+  A worker with less CPU than its calls in progress need: the large overload
+  of ADR-0049 §2.11, a stated limit of the design. The starved worker refuses
+  every new normal call, as in `cpu-overload`, and its calls in progress can
+  fail: a request inside a dialog can time out, or draw a 503 or 500 with a
+  Retry-After, and the call can end. The bounds:
+  - the damage stays on the calls of the starved worker, about its share of
+    each stream (one worker of two here: half), and inside the window;
+  - a failed call ends at both parties, with its outcome record and its CDR:
+    no stranded call, no unexpected ending, no CDR mismatch takes an
+    allowance;
+  - the system under test breaks no RFC rule: no protocol anomaly takes an
+    allowance;
+  - the in-dialog failures stay under the starved worker's in-dialog request
+    rate over the outage: 30 s of each stream's offered rate for a failed
+    request, and as much for a cut call (a 60 s outage, half the calls);
+  - traffic is back within 60 s of the heal.
+setup_failed:
+  - { stream: "*", code: 503, reason: "*", retry_after: true, max_seconds: 10, over_outage: true }
+setup_slow:
+  over_outage: true
+  max_seconds: 10
+in_dialog:
+  - { stream: "*", class: dialog_request_failed, detail: "*", max_seconds: 30 }
+  - { stream: "*", class: call_cut, detail: "*", max_seconds: 30 }
+recovery:
+  max_s: 60

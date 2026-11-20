@@ -14,5 +14,5 @@
     "exactOptionalPropertyTypes": false,
     "resolveJsonModule": true
   },
-  "include": ["src", "test", "vite.config.ts", "vitest.config.ts"]
+  "include": ["src", "test", "build-commit.ts", "vite.config.ts", "vitest.config.ts"]
 }

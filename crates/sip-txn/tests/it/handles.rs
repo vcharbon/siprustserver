@@ -1,4 +1,4 @@
-//! Port of `tests/sip/transaction-layer-handles.test.ts` — `send_request`
+//! `send_request`
 //! returns a typed handle carrying the Via branch, original request, and
 //! destination (consumed by later CANCEL / ACK-for-2xx call sites).
 

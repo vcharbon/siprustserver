@@ -24,7 +24,8 @@ pub(super) fn straggler_release(resolved: &call::helpers::Resolved) -> bool {
 /// the INVITE's final (a fork a service tracked late), on a leg a 2xx
 /// established, answering an INVITE no later than the one the established
 /// dialog's ACK acknowledges (every fork of one INVITE answers on its CSeq,
-/// RFC 3261 §12.1.2).
+/// RFC 3261 §12.1.2). The UAC ACKs every 2xx and BYEs a dialog it does not
+/// want (§13.2.2.4): the call keeps the winner.
 pub(super) fn fork_straggler(ctx: &RuleContext) -> bool {
     let Some(resp) = ctx.response() else { return false };
     if resp.to().tag().is_none_or(str::is_empty) {

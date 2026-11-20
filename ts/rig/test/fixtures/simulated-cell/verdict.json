@@ -1,0 +1,33 @@
+{
+  "case": "linear-attempt",
+  "completed_steps": [
+    "s1",
+    "s2",
+    "s3",
+    "s4",
+    "s5",
+    "s6",
+    "s7",
+    "s8",
+    "s9",
+    "s10",
+    "s13",
+    "s11",
+    "s12"
+  ],
+  "informative": [
+    {
+      "class": "origin-platform-header",
+      "finding": {
+        "expected": "",
+        "failure": "check-failed",
+        "field": "header(P-Charging-Vector)",
+        "observed": "absent",
+        "op": "exists",
+        "site": "step \"s7\""
+      }
+    }
+  ],
+  "lane": "upstream-demo",
+  "status": "ok"
+}

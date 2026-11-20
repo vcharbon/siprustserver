@@ -1,6 +1,5 @@
-//! Transparency: HealthProbe late-reply recovery + uncorrelated-reply rejection
-//! — port of `tests/sip-front-proxy/transparency/health-probe-late-reply.test.ts`,
-//! retargeted to the Rust correlation model.
+//! Transparency: HealthProbe late-reply recovery + uncorrelated-reply rejection,
+//! on the transaction-branch correlation model.
 //!
 //! Under sustained UDP traffic a probe whose only re-marking path matches a
 //! per-cycle entry its reap has *already cleared* by the time the (valid)
@@ -262,6 +261,10 @@ fn unknown_registry(worker_sock: std::net::SocketAddr) -> Arc<SimulatedWorkerReg
 // ───────────────────────────────────────────────────────────────────────────
 // 1. Late replies past the reap window keep the worker alive.
 // ───────────────────────────────────────────────────────────────────────────
+/// The worker answers every OPTIONS, each reply a handful of ticks after its
+/// tick. A per-cycle pending entry would already be reaped, the reply
+/// discarded and the miss counter walked to threshold; the branch still
+/// correlates, so the worker reaches, and stays, Alive.
 #[tokio::test(start_paused = true)]
 async fn late_replies_past_the_reap_window_keep_the_worker_alive() {
     let h = Harness::with_transit_delay("probe-late-reply", 5);
@@ -292,11 +295,6 @@ async fn late_replies_past_the_reap_window_keep_the_worker_alive() {
     )
     .await;
 
-    // The worker answers EVERY OPTIONS, but each reply lands a handful of ticks
-    // after its tick. In the TS bug the per-cycle pending entry was already
-    // reaped so the reply was discarded and the miss counter walked to
-    // threshold. Here the branch still correlates, so the worker reaches — and
-    // stays — Alive.
     wait_for_health(&registry, WorkerHealth::Alive).await;
     assert!(
         observer.band_for(WORKER_ID).is_some(),
@@ -319,7 +317,6 @@ async fn late_replies_past_the_reap_window_keep_the_worker_alive() {
 
 // ───────────────────────────────────────────────────────────────────────────
 // 2. Stable alive across sustained late replies.
-//    (TS: "stable alive across 10 cycles of sustained late replies")
 // ───────────────────────────────────────────────────────────────────────────
 #[tokio::test(start_paused = true)]
 async fn stable_alive_across_sustained_late_replies() {
@@ -372,9 +369,8 @@ async fn stable_alive_across_sustained_late_replies() {
 
 // ───────────────────────────────────────────────────────────────────────────
 // 3. An uncorrelated reply cannot revive a dead worker; a correlated one does.
-//    Rust analogue of the TS "spoofed Call-ID cannot revive a dead worker;
-//    properly-prefixed packet does" — correlation is the transaction Via branch
-//    here (not a Call-ID prefix), so the spoof is a forged branch.
+//    Correlation is the transaction Via branch (not a Call-ID prefix), so the
+//    spoof is a forged branch.
 // ───────────────────────────────────────────────────────────────────────────
 #[tokio::test(start_paused = true)]
 async fn uncorrelated_reply_cannot_revive_dead_worker_correlated_one_does() {
@@ -450,10 +446,9 @@ async fn uncorrelated_reply_cannot_revive_dead_worker_correlated_one_does() {
 // ───────────────────────────────────────────────────────────────────────────
 // 4. A branch-correlated reply from a worker whose address moved cannot revive
 //    it — the stale-origin guard (probe.rs `handle_reply`, the "dead-pod
-//    resurrection race"). This is the Rust analogue of the TS spoof test's
-//    case (b): a packet that DOES correlate (here: by Via branch; in TS: by a
-//    correctly-prefixed Call-ID) but whose worker no longer resolves to the
-//    probed origin must NOT move health. Case (a) [uncorrelated → drop] and
+//    resurrection race"), case (b): a packet that DOES correlate (by Via
+//    branch) but whose worker no longer resolves to the probed origin must NOT
+//    move health. Case (a) [uncorrelated → drop] and
 //    case (c) [correlated + current → revive] are test 3 above; this closes (b).
 // ───────────────────────────────────────────────────────────────────────────
 #[tokio::test(start_paused = true)]
@@ -525,8 +520,7 @@ async fn branch_correlated_reply_from_moved_worker_cannot_revive() {
     let _ = h.finish().await;
 }
 
-/// Build a synthetic 200 OK carrying the given (forged) Via branch — the Rust
-/// analogue of the TS `synthetic200(callId)`. Mirrors the probe's own OPTIONS
+/// Build a synthetic 200 OK carrying the given (forged) Via branch. Mirrors the probe's own OPTIONS
 /// shape so the response is well-formed, but the branch is one the probe never
 /// issued, so it correlates to nothing.
 fn synthetic_200(

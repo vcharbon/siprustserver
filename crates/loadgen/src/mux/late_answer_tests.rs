@@ -93,13 +93,38 @@ fn an_invite_final_acked_during_the_call_is_not_answered_again() {
 
 #[test]
 #[ignore = "slow lane: loadgen"]
-fn an_invite_2xx_and_provisionals_are_not_held() {
+fn provisionals_and_requests_are_not_held() {
     let answers = SentAnswers::default();
     answers.on_outbound(&Datagram::sniff(&resp(100, "BYE", 2, "z9hG4bKb")), None);
     answers.on_outbound(&Datagram::sniff(&resp(180, "INVITE", 1, "z9hG4bKi")), None);
-    answers.on_outbound(&Datagram::sniff(&resp(200, "INVITE", 1, "z9hG4bKi")), None);
     answers.on_outbound(&Datagram::sniff(&req("BYE", 2, "z9hG4bKb")), None);
     assert!(answers.take("c1").is_none(), "nothing a retransmission may draw from the hold");
+}
+
+/// The ACK of a re-INVITE's 2xx the agent sent, arriving once the call
+/// released (its first 2xx lost, the 2xx retransmitted), is absorbed: it is
+/// a transaction of its own under a new branch (RFC 3261 §13.2.2.4). The 2xx
+/// itself is not held: a retransmitted INVITE draws nothing.
+#[test]
+#[ignore = "slow lane: loadgen"]
+fn the_late_ack_of_an_invite_2xx_is_absorbed() {
+    let answers = SentAnswers::default();
+    let ok = resp(200, "INVITE", 2, "z9hG4bKreinv");
+    answers.on_outbound(&Datagram::sniff(&ok), None);
+    answers.on_outbound(&Datagram::sniff(&ok), None);
+    answers.on_outbound(&Datagram::sniff(&resp(200, "BYE", 3, "z9hG4bKbye")), None);
+    let mut h = answers.take("c1").expect("the 2xx leaves its marker");
+    let ack = req("ACK", 2, "z9hG4bKack2");
+    assert!(matches!(on_request(&mut h, &ack), LateReply::Absorbed), "the 2xx's ACK");
+    assert!(matches!(on_request(&mut h, &ack), LateReply::Absorbed), "and its retransmission");
+    assert!(
+        matches!(on_request(&mut h, &req("ACK", 1, "z9hG4bKack1")), LateReply::NotHeld),
+        "no 2xx sent for CSeq 1"
+    );
+    assert!(
+        matches!(on_request(&mut h, &req("INVITE", 2, "z9hG4bKreinv")), LateReply::NotHeld),
+        "the 2xx is the dialog's own, not re-sent by the hold"
+    );
 }
 
 #[test]
@@ -119,6 +144,22 @@ fn a_dialog_holds_its_last_answers_one_per_transaction() {
     assert!(reanswer(&mut h, &req("INFO", 2, "z9hG4bK2")).is_none(), "the oldest went");
     assert!(reanswer(&mut h, &req("INFO", 3, "z9hG4bK3")).is_some());
     assert_eq!(reanswer(&mut h, &req("INFO", 10, "z9hG4bK10")), Some(again), "the latest answer");
+}
+
+/// A callee that sent fifteen reliable provisionals answered fifteen PRACKs,
+/// each its own transaction (RFC 3262 §3), then its INVITE's 2xx and the
+/// BYE's 200: its first PRACK's 200 is still held when the call releases,
+/// and a PRACK retransmitted until Timer F draws it, never a stray.
+#[test]
+#[ignore = "slow lane: loadgen"]
+fn the_pracks_of_a_long_reliable_train_stay_answerable() {
+    let mut sent: Vec<Vec<u8>> =
+        (2..=16).map(|cseq| resp(200, "PRACK", cseq, &format!("z9hG4bKp{cseq}"))).collect();
+    sent.push(resp(200, "INVITE", 1, "z9hG4bKinv"));
+    sent.push(resp(200, "BYE", 17, "z9hG4bKbye"));
+    let mut h = held(&sent);
+    let first = reanswer(&mut h, &req("PRACK", 2, "z9hG4bKp2"));
+    assert_eq!(first, Some(sent[0].clone()), "the first PRACK's 200");
 }
 
 #[tokio::test(start_paused = true)]
@@ -156,7 +197,7 @@ async fn a_late_reanswer_is_reported_on_the_arrow_of_its_request() {
     let sink = seen.clone();
     let tally = CallTally::new("alice")
         .with_late_sink(Arc::new(move |arrow: &ArrowKey| sink.lock().unwrap().push(arrow.clone())));
-    let taps = Taps::new(None, Some(Arc::new(tally)), None, Some("bob")).unwrap();
+    let taps = Taps::new(None, Some(Arc::new(tally)), None, None, Some("bob")).unwrap();
     let (bye, ok) = (req("BYE", 3, "z9hG4bKbye"), resp(200, "BYE", 3, "z9hG4bKbye"));
     taps.on_inbound(&Datagram::sniff(&bye), Instant::now());
     let answers = SentAnswers::default();
@@ -168,4 +209,25 @@ async fn a_late_reanswer_is_reported_on_the_arrow_of_its_request() {
     repair.record();
     let want = ArrowKey { from: "SUT".into(), to: "bob".into(), label: "BYE".into(), nth: 1 };
     assert_eq!(*seen.lock().unwrap(), vec![want]);
+}
+
+/// A request that reached the endpoint, delivered or lost on its way in,
+/// and that the agent never answered, is refused once the call released;
+/// one the agent answered draws that answer, and an ACK draws nothing.
+#[test]
+#[ignore = "slow lane: loadgen"]
+fn a_request_in_unanswered_is_refused_unless_the_agent_answered_it() {
+    let answers = SentAnswers::default();
+    let bye = req("BYE", 3, "z9hG4bKbye");
+    answers.on_request_in(&Datagram::sniff(&bye));
+    answers.on_request_in(&Datagram::sniff(&req("ACK", 2, "z9hG4bKack")));
+    let info = req("INFO", 4, "z9hG4bKinfo");
+    answers.on_request_in(&Datagram::sniff(&info));
+    let ok = resp(200, "INFO", 4, "z9hG4bKinfo");
+    answers.on_outbound(&Datagram::sniff(&ok), None);
+    answers.on_request_in(&Datagram::sniff(&info));
+    let mut h = answers.take("c1").expect("the dialog holds answers");
+    assert!(matches!(on_request(&mut h, &bye), LateReply::Refuse), "the unanswered BYE");
+    assert_eq!(reanswer(&mut h, &info), Some(ok), "the agent's own answer stands");
+    assert!(matches!(on_request(&mut h, &req("ACK", 2, "z9hG4bKack")), LateReply::NotHeld));
 }

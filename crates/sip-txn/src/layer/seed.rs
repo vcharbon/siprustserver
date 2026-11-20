@@ -13,6 +13,7 @@ use crate::seed::{Reoffer, TxnSeed};
 use crate::timers::ms;
 use call::{TxnKind, TxnTimeoutKind};
 
+use super::budget_gate::Direction;
 use super::key::{ServerTxnId, ServerTxnKey};
 use super::lifetime::Hold;
 use super::owner::Owner;
@@ -47,10 +48,11 @@ impl Owner {
         for seed in seeds {
             let went_in = match seed {
                 TxnSeed::ClientInvite { invite, dest, provisional, cancel, ack_ahead } => {
+                    let call_id = invite.call_id().as_str().to_string();
                     let went_in =
                         self.seed_client_invite(call_ref, invite, dest, provisional, cancel);
                     if let Some((ack, to)) = ack_ahead.filter(|_| went_in && !provisional) {
-                        self.send_buffer(endpoint, &ack, to).await;
+                        self.send_buffer(endpoint, &call_id, &ack, to).await;
                     }
                     went_in
                 }
@@ -141,7 +143,8 @@ impl Owner {
             txn.last_response_status = Some(provisional.status());
         }
         if let Some(dest) = destination {
-            self.send_buffer(endpoint, provisional.image(), dest).await;
+            self.send_buffer(endpoint, provisional.call_id().as_str(), provisional.image(), dest)
+                .await;
         }
         true
     }
@@ -149,9 +152,10 @@ impl Owner {
     /// A server INVITE Accepted on `response` (RFC 6026 §7.1), keyed by its top
     /// Via. An occupant that has sent no final takes `response`; one a received
     /// copy of the INVITE opened sends it to the address that copy came from,
-    /// having answered it with a provisional only, and a seeded one sends
-    /// nothing: the 2xx's own retransmission ladder repeats it (RFC 3261
-    /// §13.3.1.4). `false` when the response names no branch or its identity
+    /// having answered it with a provisional only. A seeded occupant and a
+    /// fresh seed send nothing now: the 2xx's own retransmission ladder
+    /// repeats it (RFC 3261 §13.3.1.4), and the first copy of the INVITE
+    /// draws it. `false` when the response names no branch or its identity
     /// holds a transaction that has sent its final.
     async fn seed_accepted(
         &mut self,
@@ -169,8 +173,12 @@ impl Owner {
             }
             let dest = occupant.destination.filter(|_| !occupant.seeded);
             self.accept(key.id(), &response);
-            if let Some(dest) = dest {
-                self.send_buffer(endpoint, response.image(), dest).await;
+            match dest {
+                Some(dest) => {
+                    let call_id = response.call_id().as_str();
+                    self.send_buffer(endpoint, call_id, response.image(), dest).await;
+                }
+                None => self.owe_seeded_2xx(key.id()),
             }
             return true;
         }
@@ -190,7 +198,16 @@ impl Owner {
         });
         self.hold_seeded_identity(TxnRef::Server(key.id()));
         self.accept(key.id(), &response);
+        self.owe_seeded_2xx(key.id());
         true
+    }
+
+    /// The Accepted seed `id` names has not sent its 2xx from this node: the
+    /// first copy of its INVITE draws it (`replay_cached`).
+    fn owe_seeded_2xx(&mut self, id: ServerTxnId<'_>) {
+        if let Some(txn) = self.server_mut(id) {
+            txn.unsent_2xx = true;
+        }
     }
 
     /// A server INVITE Completed on the non-2xx `response` (RFC 3261 §17.2.1),
@@ -248,7 +265,7 @@ impl Owner {
             self.hold_for(TxnRef::Server(key.id()), Hold::TimerH, ms(left));
         }
         if let Some(source) = occupant {
-            self.send_buffer(endpoint, response.image(), source).await;
+            self.send_buffer(endpoint, response.call_id().as_str(), response.image(), source).await;
         }
         true
     }
@@ -416,13 +433,17 @@ impl Owner {
     /// and re-emit with `matched_client_txn = true`; a request a server
     /// transaction matches (§17.2.3) is absorbed with nothing sent: the layer
     /// answered that datagram when it emitted it, and §17.2.1 replays a
-    /// response only to a retransmission received from the wire.
+    /// response only to a retransmission received from the wire. Under a
+    /// muted Call-ID it is dropped, counted once already on its arrival.
     pub(super) async fn do_reoffer(
         &mut self,
         endpoint: &dyn UdpEndpoint,
         message: SipMessage,
         src: SocketAddr,
     ) -> Reoffer {
+        if !self.not_muted(message.call_id().as_str(), Direction::In) {
+            return Reoffer::Muted;
+        }
         let matched = match message {
             SipMessage::Response(resp) => self.inbound_response(endpoint, resp, src, true).await,
             SipMessage::Request(req) if req.method() == Method::Cancel => {

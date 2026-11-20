@@ -9,7 +9,6 @@ use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use amqp_connect::{connect_stream, open_over, Connected};
-use b2bua::metrics::B2buaMetrics;
 use lapin::{
     options::{BasicPublishOptions, ConfirmSelectOptions},
     uri::AMQPUri,
@@ -24,6 +23,7 @@ use super::declaration::declaration;
 use super::resolver::BrokerResolver;
 use super::settings::RabbitMqCdrSettings;
 use super::socket_kill::{KillOnDrop, SocketKill};
+use super::tally::Tally;
 
 /// The confirm window's permits: `window`, at most the settings' ceiling
 /// (far below the semaphore's).
@@ -117,7 +117,7 @@ pub(super) struct Session {
 impl Session {
     /// Resolves the broker through `resolver`, connects, opens a channel,
     /// selects publisher confirms and declares the queue, then spawns the
-    /// confirm tracker recording into `metrics`, bounded by the writer's close
+    /// confirm tracker counting into `tally`, bounded by the writer's close
     /// deadline `close_by`. Resolution, the TCP connect and the TLS handshake
     /// run on this task and stop at `deadline`; the caller bounds the rest by
     /// it, and dropping this future (or a failure half-way) shuts down
@@ -128,7 +128,7 @@ impl Session {
         settings: &RabbitMqCdrSettings,
         resolver: &mut BrokerResolver,
         deadline: Instant,
-        metrics: &B2buaMetrics,
+        tally: &Tally,
         close_by: watch::Receiver<Option<Instant>>,
     ) -> Result<Self, OpenError> {
         let uri: AMQPUri = settings.url.parse().map_err(OpenError::Uri)?;
@@ -158,7 +158,7 @@ impl Session {
             socket,
         });
         let (pending, rx) = mpsc::unbounded_channel();
-        let tracker = tokio::spawn(track_confirms(rx, health.clone(), close_by, metrics.clone()));
+        let tracker = tokio::spawn(track_confirms(rx, health.clone(), close_by, tally.clone()));
         Ok(Self {
             channel,
             _connection: connection,
@@ -196,14 +196,16 @@ impl Session {
         self.health.delivered.load(Ordering::SeqCst)
     }
 
-    /// Publishes `payload` to `queue` (default exchange, `mandatory`,
-    /// persistent), taking a window slot and handing the publish to the
-    /// connection before `deadline`. `Ok` hands the record to the confirm
-    /// tracker, which counts it; `Err` means the caller counts it dropped.
+    /// Publishes `payload`, the record the writer was handed at `handed_at`,
+    /// to `queue` (default exchange, `mandatory`, persistent), taking a
+    /// window slot and handing the publish to the connection before
+    /// `deadline`. `Ok` hands the record to the confirm tracker, which counts
+    /// it; `Err` means the caller counts it dropped.
     pub(super) async fn publish(
         &self,
         queue: &str,
         payload: &[u8],
+        handed_at: Instant,
         deadline: Instant,
     ) -> Result<(), PublishRefused> {
         if self.health.ended() {
@@ -236,8 +238,12 @@ impl Session {
                 return Err(PublishRefused::Ended);
             }
         };
-        let pending =
-            Pending { confirm, deadline: Instant::now() + self.confirm_timeout, _slot: slot };
+        let pending = Pending {
+            confirm,
+            handed_at,
+            deadline: Instant::now() + self.confirm_timeout,
+            _slot: slot,
+        };
         let Some(tracker) = &self.pending else {
             return Err(PublishRefused::Ended);
         };

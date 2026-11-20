@@ -1,10 +1,8 @@
 //! Parser extraction — raw bytes → parse → structured data, exercised through
-//! the downstream header helpers and the eager typed fields. Port of the
-//! custom-parser sections of `tests/sip/parser-extraction.test.ts`.
+//! the downstream header helpers and the eager typed fields.
 //!
-//! The cross-parser "custom vs JsSIP" equivalence block is NOT ported — there
-//! is no JsSIP in the Rust stack (ADR-0001); the `rvoip` parity oracle takes
-//! that role in the compliance matrix.
+//! Cross-parser equivalence is not here: the `rvoip` parity oracle (ADR-0001)
+//! holds it in the compliance matrix.
 
 use sip_message::header::{Contact, HeaderName, HeaderValue, Params, To, Uri, Via};
 use sip_message::{ContactSet, CustomParser, SipMessage, SipParser, SipRequest, SipStr};

@@ -215,7 +215,8 @@ async fn emit(ctx: &RouterCtx, call_ref: &str, call: &Call, eff: &OutboundSipEff
                 repeated.method(),
                 repeated.code(),
             );
-            let _ = ctx.txn.send_raw(emission.wire().0.to_vec(), dest).await;
+            let (wire, _) = emission.wire();
+            let _ = ctx.txn.send_raw(repeat_call_id(call, eff), wire.to_vec(), dest).await;
         }
         // A response goes through its server transaction, whatever the mode
         // says: `Raw` is for requests, and the only raw path for response
@@ -253,12 +254,21 @@ async fn emit(ctx: &RouterCtx, call_ref: &str, call: &Call, eff: &OutboundSipEff
             if matches!(*req.method(), Method::Ack | Method::Cancel) {
                 let _ = ctx.txn.send_request(req.clone(), dest, TxnKind::Invite).await;
             } else {
-                let _ = ctx.txn.send_raw(req.image().to_vec(), dest).await;
+                let _ = ctx.txn.send_raw(req.call_id().as_str(), req.image().to_vec(), dest).await;
             }
         }
         (OutboundBody::Request(req), OutboundTxnMode::ServerResponse) => {
             // A request tagged ServerResponse is a misuse; send raw as a fallback.
-            let _ = ctx.txn.send_raw(req.image().to_vec(), dest).await;
+            let _ = ctx.txn.send_raw(req.call_id().as_str(), req.image().to_vec(), dest).await;
         }
     }
+}
+
+/// The Call-ID the repeat `eff` of a retained emission counts under: its
+/// leg's, which every message of the leg's dialogs carries (RFC 3261 §12).
+/// Every repeat names its leg.
+fn repeat_call_id<'a>(call: &'a Call, eff: &OutboundSipEffect) -> &'a str {
+    let leg = eff.leg_id.as_deref().and_then(|leg_id| call::helpers::find_leg(call, leg_id));
+    debug_assert!(leg.is_some(), "a repeat names no leg of its call: {:?}", eff.leg_id);
+    leg.map_or("", |leg| leg.call_id.as_str())
 }

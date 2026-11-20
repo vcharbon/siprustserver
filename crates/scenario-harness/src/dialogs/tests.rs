@@ -396,3 +396,54 @@ fn a_prack_names_the_reliable_provisional_the_ua_sent() {
     assert!(!t.names(&prack("8 1 INVITE", "B1")));
     assert!(!t.names(&prack("7 1 INVITE", "B9")));
 }
+
+/// A request of the dialog `from_tag` the loss model dropped on its way to
+/// the UA.
+fn lost_request(method: &str, from_tag: &str, cseq: u32) -> crate::realcall::LostMessage {
+    crate::realcall::LostMessage {
+        leg: None,
+        inbound: true,
+        method: Some(method.to_string()),
+        status: None,
+        cseq_method: method.to_string(),
+        sdp: false,
+        reliable: false,
+        to_tag: String::new(),
+        call_id: "c1".to_string(),
+        from_tag: from_tag.to_string(),
+        cseq,
+        arrived_before: vec![],
+    }
+}
+
+fn verdict_of(method: &str, cseq: u32, kind: VerdictKind) -> DialogVerdict {
+    DialogVerdict {
+        method: method.to_string(),
+        call_id: "c1".to_string(),
+        from_tag: "a".to_string(),
+        to_tag: "b".to_string(),
+        cseq,
+        terminating: false,
+        kind,
+    }
+}
+
+/// A verdict the loss model's drops explain: a skip over the CSeq a dropped
+/// request of the dialog carried; a backwards CSeq, or a request on a dialog
+/// a BYE ended, that retransmits a dropped copy. A drop on another dialog,
+/// or of another request, explains nothing.
+#[test]
+fn a_verdict_is_explained_only_by_a_drop_of_its_own_request() {
+    let skip = verdict_of("BYE", 4, VerdictKind::CseqSkip { cseq: 4, last: 2 });
+    let prack3 = lost_request("PRACK", "a", 3);
+    assert!(skip.explained_by(&[&prack3]));
+    assert!(!skip.explained_by(&[&lost_request("PRACK", "z", 3)]), "another dialog");
+    assert!(!skip.explained_by(&[&lost_request("PRACK", "a", 4)]), "not in the gap");
+    let ended = verdict_of("PRACK", 3, VerdictKind::Ended { by: None });
+    assert!(ended.explained_by(&[&prack3]));
+    assert!(!ended.explained_by(&[&lost_request("INFO", "a", 3)]), "another request");
+    let backwards = verdict_of("OPTIONS", 4, VerdictKind::CseqBackwards { cseq: 4, last: 5 });
+    assert!(backwards.explained_by(&[&lost_request("OPTIONS", "a", 4)]));
+    let by_final = verdict_of("PRACK", 3, VerdictKind::Ended { by: Some(487) });
+    assert!(!by_final.explained_by(&[&prack3]), "a final's end is not the loss's");
+}

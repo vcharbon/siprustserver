@@ -6,5 +6,6 @@
 //! `cargo nextest run --workspace -E 'package(=e2e-model) & binary(it)' <module>::`.
 
 mod case_checks_model;
+mod case_validation;
 mod load_profile;
 mod pooled_case;

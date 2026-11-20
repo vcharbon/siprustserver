@@ -24,8 +24,10 @@ pub fn audit_visible_event(event: &SignalingNetworkEvent) -> bool {
 }
 
 /// Whether the cross-message pass is handed this event: an
-/// [`audit_visible_event`], or an arrival the loss model dropped, which a rule
-/// never judges and which says only that its sender sent it.
+/// [`audit_visible_event`] (a `SendLost` among them, which no rule judges
+/// and which says only that its taker never got it), or an arrival the loss
+/// model dropped, which a rule never judges and which says only that its
+/// sender sent it.
 pub fn cross_audit_event(event: &SignalingNetworkEvent) -> bool {
     audit_visible_event(event)
         || matches!(

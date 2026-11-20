@@ -54,7 +54,7 @@ of). A positional read picks a wrong dialog as soon as a leg holds two.
    | `Ending` | BYE, PRACK pass; INFO, MESSAGE, NOTIFY, OPTIONS 200 here; others 487 (§21.4.25) |
    | `Ended(Rejected)` | PRACK passes (RFC 3262 §3); others 481 |
    | `Ended(PeerBye \| OurBye)` | 481, a BYE included (§15.1.2) |
-   | `Retired` | 481; one whose release BYE is in flight reads as `Ending` |
+   | `Retired` | PRACK passes on the caller face (RFC 3262 §3); others 481, or as `Ending` while its release BYE is in flight |
 
    A dialog exists until the BYE or CANCEL ending it completes (§15.1.2), so
    requests crossing it are answered in it: a 200 the gate sends goes no
@@ -64,7 +64,9 @@ of). A positional read picks a wrong dialog as soon as a leg holds two.
    established, ended since or not (RFC 5407 §2), and is otherwise dropped
    unanswered (§17.1.1.3), as is one of an INVITE the record holds no final
    sent for on a call no other owner served (ADR-0055 §4); a CANCEL is matched
-   by transaction (§9.1). A
+   by transaction (§9.1). A request with no To-tag names no dialog: one of a
+   method carried only in a dialog draws 481 under a minted tag (§8.2.6.2);
+   an INVITE, an ACK or a method relayed in no dialog passes. A
    response resolves to the relay it answers (by dialog, method and CSeq),
    to its dialog, or to the request this stack sent; one whose From-tag is
    no tag of this stack's on the leg answers nothing and is dropped.
@@ -85,7 +87,7 @@ of). A positional read picks a wrong dialog as soon as a leg holds two.
    face. Our sequence on a caller-facing dialog starts at 1, as on a dialled
    leg (§8.1.1.5 allows any start below 2³¹).
 8. **The model states its invariants at the end of every turn**
-   (`crates/b2bua/src/rules/model_invariants.rs`, on in debug builds and every
+   (`crates/b2bua/src/model_invariants.rs`, on in debug builds and every
    harness): each dialog of a leg is named by exactly one pair of tags; a leg
    holds at most one confirmed or ending dialog (§12.1); every `fronts` entry and the
    leg's own tag name a dialog the call holds; a dialog stays until the call

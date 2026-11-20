@@ -165,6 +165,9 @@ pub enum IndexLookup<'a> {
     /// An in-dialog request (its From-tag) or a response (its To-tag): the tag
     /// the remote peer of the dialog owns, on either side of the B2BUA.
     Peer { call_id: &'a str, tag: &'a str },
+    /// An outgoing leg by its Call-ID alone: a Call-ID's message-budget trip
+    /// (ADR-0063 §4) names no dialog of it.
+    Leg { call_id: &'a str },
 }
 
 /// A call an index lookup found, and the namespace of the key that matched:
@@ -186,6 +189,7 @@ pub enum Probe {
 
 const CANCEL_PROBES: [Probe; 2] = [Probe::Resolve(KeyKind::ALeg), Probe::Resolve(KeyKind::BDialog)];
 const INVITE_PROBES: [Probe; 1] = [Probe::Resolve(KeyKind::ALeg)];
+const LEG_PROBES: [Probe; 1] = [Probe::Resolve(KeyKind::BLeg)];
 const PEER_PROBES: [Probe; 4] = [
     Probe::Resolve(KeyKind::ALeg),
     Probe::Resolve(KeyKind::BDialog),
@@ -196,7 +200,8 @@ const PEER_PROBES: [Probe; 4] = [
 impl IndexLookup<'_> {
     /// The probes that resolve this lookup, in order. A CANCEL never resolves
     /// by an outgoing leg's Call-ID alone or by its own tag; an INVITE with no
-    /// To-tag resolves by an incoming leg alone. A peer tag that
+    /// To-tag resolves by an incoming leg alone, a leg lookup by an outgoing
+    /// leg's Call-ID alone. A peer tag that
     /// is an outgoing leg's own tag stops before the Call-ID-only key: the
     /// message belongs to the incoming leg with that identity, and no such
     /// leg is indexed.
@@ -205,6 +210,7 @@ impl IndexLookup<'_> {
             IndexLookup::Cancel { .. } => &CANCEL_PROBES,
             IndexLookup::Invite { .. } => &INVITE_PROBES,
             IndexLookup::Peer { .. } => &PEER_PROBES,
+            IndexLookup::Leg { .. } => &LEG_PROBES,
         }
     }
 
@@ -247,6 +253,7 @@ impl IndexLookup<'_> {
             IndexLookup::Cancel { call_id, from_tag }
             | IndexLookup::Invite { call_id, from_tag } => (call_id, from_tag),
             IndexLookup::Peer { call_id, tag } => (call_id, tag),
+            IndexLookup::Leg { call_id } => (call_id, ""),
         }
     }
 }

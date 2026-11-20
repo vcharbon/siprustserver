@@ -1,35 +1,32 @@
-//! **TEST-ONLY.** Contract decorators for `SignalingNetwork` — port of
-//! `SignalingNetwork.contracts.ts`. The worked example the `effect-layer-test`
-//! SKILL points at, reshaped from Effect `Layer` wrappers to **decorator
-//! structs that implement the same trait**.
+//! **TEST-ONLY.** Contract decorators for `SignalingNetwork`: **decorator
+//! structs that implement the same trait** (ADR-0004).
 //!
 //! Two decorators, composed in the canonical order
-//! `paranoidInputs(scopedAudit(impl))` (the source's `propertyTest` is skipped
-//! for `SignalingNetwork` — `bind_udp` opens a socket and `send_to` is
+//! `ParanoidSignalingNetwork(RecordingSignalingNetwork(impl))` (no property
+//! decorator for `SignalingNetwork` — `bind_udp` opens a socket and `send_to` is
 //! fire-and-forget UDP, so there is no natural input/output domain to assert a
 //! per-call property over):
 //!
-//!   - [`RecordingSignalingNetwork`] — the `scopedAudit` equivalent. Records
+//!   - [`RecordingSignalingNetwork`] — the scoped-audit decorator. Records
 //!     every method call onto the typed `layer-harness` channel and runs
 //!     per-bind + cross-message RFC rules, surfacing findings on the shared
 //!     anomaly ledger at the severity the active [`RunContext`] dictates.
-//!   - [`ParanoidSignalingNetwork`] — the `paranoidInputs` equivalent.
+//!   - [`ParanoidSignalingNetwork`] — the paranoid-inputs decorator.
 //!     Caller-side precondition checks; a violation is a programmer error
-//!     (defect) raised by panic, the Rust analogue of the source's
-//!     `Effect.die`.
+//!     (defect) raised by panic.
 //!
 //! Production composes the bare `Real`/`Simulated` impl directly. These
 //! decorators require a `Recorder` + a `RunContext`, which production does not
 //! provide — never compose them into a production network tree.
 //!
-//! Scope-close semantics. The source ran rules in Effect scope finalizers
-//! (per-bind close, then layer close). Rust uses RAII for the per-bind close
+//! Scope-close semantics. Rules run at two closes: per-bind, then layer.
+//! RAII serves the per-bind close
 //! (an endpoint's [`Drop`] records its release, checks for a queue leak, and
 //! runs its peer rules) and an explicit [`RecordingSignalingNetwork::close`]
 //! for the layer close (drain transit, structural invariants, cross-message
 //! rules, and the deferred-fail → violation decision). **Drop your endpoints
 //! before calling `close()`** so their per-bind findings are on the ledger
-//! when `close()` reads it — the RAII analogue of LIFO scope finalizers.
+//! when `close()` reads it: the inner scope closes first.
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -43,129 +40,19 @@ use layer_harness::time::now_ms;
 use layer_harness::{
     lane_key, Channel, LaneKey, RecordedAnomaly, Recorder, RunContext, Severity, Stamped,
 };
-use sip_message::SipParser;
 
 use crate::net::{SignalingNetwork, UdpEndpoint};
 use crate::types::{
-    all_ua_roles, BindError, BindSummary, BindUdpOpts, RecvDisposition, SendError, UaRole,
-    UdpEndpointCounters, UdpPacket, UndeliveredPacket,
+    all_ua_roles, BindError, BindUdpOpts, RecvDisposition, SendError, UaRole, UdpEndpointCounters,
+    UdpPacket, UndeliveredPacket,
 };
 
 /// The `layer-harness` channel key for this layer. The `RunContext` uses the
 /// same string to decide whether a `unit-test-of-layer` targets us.
 pub const SIGNALING_TAG: &str = "sip-net/SignalingNetwork";
 
-// ---------------------------------------------------------------------------
-// Typed event union
-// ---------------------------------------------------------------------------
-
-/// One observation on the `SignalingNetwork` typed channel. Every variant
-/// carries the lane-identifying `bind_key` so per-peer rules can slice on a
-/// single peer. (Port of `SignalingNetworkEvent`.)
-///
-/// `RecvItem` is the ARRIVAL fact, recorded at delivery into the endpoint's
-/// inbox (via the [`crate::types::RecvTap`] the decorator installs at bind);
-/// `RecvConsumed` is the CONSUMPTION fact, recorded when the endpoint's
-/// `recv`/`try_recv` returns the packet. A `RecvItem` with no matching
-/// `RecvConsumed` is a message that really crossed the wire but the scenario
-/// body never read — still on the ladder, still seen by
-/// the RFC audit. On an impl with no tappable inbox the decorator falls back to
-/// recording both, adjacently, at recv time.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum SignalingNetworkEvent {
-    BindAcquire {
-        bind_key: LaneKey,
-        summary: BindSummary,
-    },
-    BindRelease {
-        bind_key: LaneKey,
-    },
-    SendCalled {
-        bind_key: LaneKey,
-        to: SocketAddr,
-        msg: Vec<u8>,
-    },
-    SendResult {
-        bind_key: LaneKey,
-        outcome: SendOutcome,
-    },
-    RecvItem {
-        bind_key: LaneKey,
-        packet: UdpPacket,
-        disposition: RecvDisposition,
-        wire: WireStamp,
-    },
-    RecvConsumed {
-        bind_key: LaneKey,
-        packet: UdpPacket,
-    },
-    /// An outbound datagram the endpoint's retransmit engine re-emitted below
-    /// the recording layer (loadgen `--auto-retransmit`). Projection-only — it
-    /// renders on the ladder as a tagged outbound frame but is invisible to the
-    /// RFC audit (a re-emit is a byte-identical retransmission the rules dedup).
-    ReEmit {
-        bind_key: LaneKey,
-        to: SocketAddr,
-        msg: Vec<u8>,
-        kind: crate::types::ReEmitKind,
-    },
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SendOutcome {
-    Ok,
-    Err,
-}
-
-/// The wire facts of one arrival, computed ONCE at event production: the
-/// lenient parse every downstream reader shares, and the §17.2 wire-view
-/// repeat mark from [`crate::repeat`] — the same classification the harness
-/// absorption seam runs, so the recorded stream and the TU's surfacing can
-/// never disagree on what a repeat is. Stamped for EVERY arrival, audit-visible
-/// or not: a repeat of a modeled-loss delivery is still a repeat on the wire.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct WireStamp {
-    /// The datagram parsed leniently (the wire is allowed to be malformed —
-    /// flagging that is a rule's job, not the parser's); `None` when the bytes
-    /// do not parse at all.
-    pub parsed: Option<Arc<sip_message::SipMessage>>,
-    /// The `seq` of the `RecvItem` this datagram byte-identically repeats
-    /// under its §17.2 transaction key, on the same bind.
-    pub repeat_of: Option<u64>,
-}
-
-impl WireStamp {
-    /// Parse `raw` and classify it against `tables` as the arrival stamped
-    /// with `seq` — the production path, one call per recorded arrival.
-    fn classify(tables: &crate::repeat::RepeatTables, raw: &[u8], seq: u64) -> Self {
-        let parsed = crate::rfc_audit::lenient_parser().parse(raw).ok().map(Arc::new);
-        let repeat_of = parsed.as_ref().and_then(|m| tables.note(raw, m, seq));
-        WireStamp { parsed, repeat_of }
-    }
-
-    /// A stamp for a hand-built arrival outside a recording bind (test
-    /// fixtures): the lenient parse, and never a repeat.
-    pub fn of_bytes(raw: &[u8]) -> Self {
-        WireStamp {
-            parsed: crate::rfc_audit::lenient_parser().parse(raw).ok().map(Arc::new),
-            repeat_of: None,
-        }
-    }
-}
-
-impl SignalingNetworkEvent {
-    pub fn bind_key(&self) -> &LaneKey {
-        match self {
-            SignalingNetworkEvent::BindAcquire { bind_key, .. }
-            | SignalingNetworkEvent::BindRelease { bind_key }
-            | SignalingNetworkEvent::SendCalled { bind_key, .. }
-            | SignalingNetworkEvent::SendResult { bind_key, .. }
-            | SignalingNetworkEvent::RecvItem { bind_key, .. }
-            | SignalingNetworkEvent::RecvConsumed { bind_key, .. }
-            | SignalingNetworkEvent::ReEmit { bind_key, .. } => bind_key,
-        }
-    }
-}
+pub use crate::event::{SendOutcome, SignalingNetworkEvent};
+pub use crate::wire_stamp::WireStamp;
 
 pub use crate::audit_view::{audit_visible_event, cross_audit_event};
 
@@ -180,7 +67,7 @@ fn is_audit_kind(kind: &str) -> bool {
 // ---------------------------------------------------------------------------
 
 /// Surfaced by [`RecordingSignalingNetwork::close`] when a non-advisory audit
-/// finding is on the ledger. (Port of `SignalingAuditViolation`.)
+/// finding is on the ledger.
 #[derive(Debug, Clone, thiserror::Error)]
 #[error("signaling audit [{check}]: {detail}")]
 pub struct SignalingAuditViolation {
@@ -189,17 +76,17 @@ pub struct SignalingAuditViolation {
     pub bind_key: Option<LaneKey>,
 }
 
-pub use crate::audit_rules::{CrossMessageAuditRule, PeerAuditRule};
+pub use crate::audit_rules::{CrossMessageAuditRule, PeerAuditRule, PositionedFinding};
 
 use std::collections::HashSet;
 
 /// Predicate: should this bind be audited at all? Returning `false`
-/// short-circuits rule evaluation for the peer (events are still recorded).
-/// The source's `shouldAuditBind` escape valve.
+/// short-circuits rule evaluation for the peer (events are still recorded):
+/// the per-bind escape valve.
 pub type ShouldAuditBind = Arc<dyn Fn(&LaneKey) -> bool + Send + Sync>;
 
-/// Options for the recording/audit decorator. (Port of `ScopedAuditOptions`,
-/// without its per-test `exceptions` ledger.)
+/// Options for the recording/audit decorator. It carries no per-test
+/// `exceptions` ledger.
 #[derive(Default, Clone)]
 pub struct ScopedAuditOptions {
     /// Per-bind rules, evaluated at bind drop. The default RFC suite fills none
@@ -214,7 +101,7 @@ fn subject_intersects(subject: &HashSet<UaRole>, roles: &HashSet<UaRole>) -> boo
 }
 
 // ---------------------------------------------------------------------------
-// RecordingSignalingNetwork (scopedAudit equivalent)
+// RecordingSignalingNetwork (the scoped-audit decorator)
 // ---------------------------------------------------------------------------
 
 struct RecordingInner {
@@ -289,7 +176,7 @@ impl RecordingSignalingNetwork {
                 self.push_layer_anomaly(
                     "inFlightImbalance",
                     "A1_inFlightImbalance",
-                    format!("{in_flight} transit fibers still in flight at layer close"),
+                    format!("{in_flight} transit tasks still in flight at layer close"),
                     None,
                 );
             }
@@ -329,7 +216,7 @@ impl RecordingSignalingNetwork {
             let bind_roles = self.0.bind_roles.lock().unwrap().clone();
             let pass = crate::AuditPass::new(&snapshot);
             for rule in self.0.cross_rules.iter() {
-                for (bind_key, detail, _, _) in rule.check_pass(&pass) {
+                for (bind_key, detail, ..) in rule.check_pass(&pass) {
                     if !(self.0.should_audit)(&bind_key) {
                         continue;
                     }
@@ -370,6 +257,8 @@ impl RecordingSignalingNetwork {
         Ok(())
     }
 
+    /// Records a layer-close structural finding: deferred-fail in a recorder
+    /// test, advisory in a real run.
     fn push_layer_anomaly(
         &self,
         kind: &'static str,
@@ -377,8 +266,6 @@ impl RecordingSignalingNetwork {
         detail: String,
         bind_key: Option<LaneKey>,
     ) {
-        // Layer-close structural findings are deferred-fail in a recorder test
-        // (advisory in real-run), matching the source's tier for these.
         let severity = self.0.ctx.severity_for(SIGNALING_TAG, false);
         self.push_anomaly(kind, check, detail, severity, bind_key);
     }
@@ -443,13 +330,13 @@ impl SignalingNetwork for RecordingSignalingNetwork {
         // events — visible on the ladder, invisible to the audit.
         let sendtap_channel = self.0.channel.clone();
         let sendtap_key = bind_key.clone();
-        endpoint.install_send_tap(Arc::new(move |raw: &[u8], to, kind| {
-            sendtap_channel.record(SignalingNetworkEvent::ReEmit {
-                bind_key: sendtap_key.clone(),
+        endpoint.install_send_tap(Arc::new(move |raw: &[u8], to, note| {
+            sendtap_channel.record(SignalingNetworkEvent::sent_below(
+                sendtap_key.clone(),
                 to,
-                msg: raw.to_vec(),
-                kind,
-            });
+                raw.to_vec(),
+                note,
+            ));
         }));
         Ok(Box::new(RecordedEndpoint {
             inner: endpoint,
@@ -572,6 +459,9 @@ impl UdpEndpoint for RecordedEndpoint {
     fn queue_depth(&self) -> usize {
         self.inner.queue_depth()
     }
+    fn queue_wait(&self) -> std::time::Duration {
+        self.inner.queue_wait()
+    }
     fn queue_max(&self) -> usize {
         self.inner.queue_max()
     }
@@ -584,8 +474,8 @@ impl UdpEndpoint for RecordedEndpoint {
 }
 
 impl Drop for RecordedEndpoint {
+    /// The per-bind scope close.
     fn drop(&mut self) {
-        // Per-bind scope close (RAII analogue of the source's bind finalizer).
         self.channel.record(SignalingNetworkEvent::BindRelease { bind_key: self.bind_key.clone() });
 
         // Queue-leak: capture depth BEFORE the inner endpoint drops and closes
@@ -643,131 +533,7 @@ impl Drop for RecordedEndpoint {
     }
 }
 
-// ---------------------------------------------------------------------------
-// ParanoidSignalingNetwork (paranoidInputs equivalent)
-// ---------------------------------------------------------------------------
-
-use layer_harness::ParanoidViolation;
-use sip_net::max_udp_payload;
-
-/// Caller-side precondition checks. A violation is a programmer error and is
-/// raised by panic (the Rust analogue of `Effect.die`). Checks (all always-on,
-/// µs-scale):
-///
-///   - `PA2_bindOpts_queueMax`  bind_udp queue_max ≥ 1
-///   - `PA3_send_validDest`     send dst port ≠ 0
-///   - `PA4_send_msgBuffer`     send buf non-empty
-///   - `PA5_send_msgSizeBound`  send buf.len() ≤ the largest UDP payload of dst's family
-///
-/// (PA1 — a valid bind address — is enforced by the `SocketAddr` type itself:
-/// an ip and a u16 port always exist, and port 0 = ephemeral is allowed.)
-#[derive(Clone)]
-pub struct ParanoidSignalingNetwork {
-    inner: Arc<dyn SignalingNetwork>,
-}
-
-impl ParanoidSignalingNetwork {
-    pub fn new(inner: Arc<dyn SignalingNetwork>) -> Self {
-        Self { inner }
-    }
-}
-
-#[async_trait]
-impl SignalingNetwork for ParanoidSignalingNetwork {
-    async fn bind_udp(&self, opts: BindUdpOpts) -> Result<Box<dyn UdpEndpoint>, BindError> {
-        if opts.queue_max == 0 {
-            panic!(
-                "{}",
-                ParanoidViolation::new(
-                    "PA2_bindOpts_queueMax",
-                    "bind_udp queue_max must be a positive integer (got 0)",
-                )
-            );
-        }
-        let endpoint = self.inner.bind_udp(opts).await?;
-        Ok(Box::new(ParanoidEndpoint { inner: endpoint }))
-    }
-
-    async fn drain_undeliverable(&self) -> Vec<UndeliveredPacket> {
-        self.inner.drain_undeliverable().await
-    }
-    fn transit_delay_ms(&self) -> Option<u64> {
-        self.inner.transit_delay_ms()
-    }
-    fn in_flight(&self) -> i64 {
-        self.inner.in_flight()
-    }
-    fn bump_in_flight(&self, delta: i64) {
-        self.inner.bump_in_flight(delta)
-    }
-    fn queue_depths(&self) -> Vec<(SocketAddr, usize)> {
-        self.inner.queue_depths()
-    }
-    async fn await_in_flight(&self, timeout: Duration) {
-        self.inner.await_in_flight(timeout).await
-    }
-}
-
-struct ParanoidEndpoint {
-    inner: Box<dyn UdpEndpoint>,
-}
-
-#[async_trait]
-impl UdpEndpoint for ParanoidEndpoint {
-    async fn send_to(&self, buf: &[u8], dst: SocketAddr) -> Result<(), SendError> {
-        if dst.port() == 0 {
-            panic!(
-                "{}",
-                ParanoidViolation::new(
-                    "PA3_send_validDest",
-                    format!("send dst port must be in 1..=65535 (got {})", dst.port()),
-                )
-            );
-        }
-        if buf.is_empty() {
-            panic!(
-                "{}",
-                ParanoidViolation::new("PA4_send_msgBuffer", "send buf must be non-empty")
-            );
-        }
-        let max = max_udp_payload(dst);
-        if buf.len() > max {
-            panic!(
-                "{}",
-                ParanoidViolation::new(
-                    "PA5_send_msgSizeBound",
-                    format!("send buf.len()={} exceeds the largest UDP payload {max}", buf.len()),
-                )
-            );
-        }
-        self.inner.send_to(buf, dst).await
-    }
-
-    async fn recv(&self) -> Option<UdpPacket> {
-        self.inner.recv().await
-    }
-    fn try_recv(&self) -> Option<UdpPacket> {
-        self.inner.try_recv()
-    }
-    fn peek_queued(&self) -> Vec<UdpPacket> {
-        self.inner.peek_queued()
-    }
-    fn local_addr(&self) -> SocketAddr {
-        self.inner.local_addr()
-    }
-    fn queue_depth(&self) -> usize {
-        self.inner.queue_depth()
-    }
-    fn queue_max(&self) -> usize {
-        self.inner.queue_max()
-    }
-    fn counters(&self) -> UdpEndpointCounters {
-        self.inner.counters()
-    }
-    fn socket_buffers(&self) -> Option<crate::types::SocketBuffers> {
-        self.inner.socket_buffers()
-    }
-}
+pub use crate::paranoid::ParanoidSignalingNetwork;
 
 // ---------------------------------------------------------------------------
 // Canonical composition forwarder
@@ -782,8 +548,9 @@ pub struct WrappedNetwork {
 }
 
 /// Compose the contract decorators in canonical order
-/// `paranoidInputs(scopedAudit(impl))`. Set `paranoid = false` to skip the
-/// precondition layer (perf benches, deliberate-violation tests).
+/// `ParanoidSignalingNetwork(RecordingSignalingNetwork(impl))`. Set
+/// `paranoid = false` to skip the precondition layer (perf benches,
+/// deliberate-violation tests).
 pub fn with_all_contracts(
     impl_: Arc<dyn SignalingNetwork>,
     recorder: Recorder,

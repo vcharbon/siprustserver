@@ -1,4 +1,4 @@
-//! Unit tests for sipfrag helpers. Port of `tests/sip/sipfrag-utils.test.ts`.
+//! Unit tests for sipfrag helpers.
 
 use sip_message::sipfrag::sipfrag_from_status;
 

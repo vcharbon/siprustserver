@@ -7,7 +7,8 @@ use super::stream::SessionStreams;
 /// One agent's offer/answer state on one call.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(super) struct AgentKey<'a> {
-    /// The endpoint whose state this is.
+    /// The user agent whose state this is ([`Parties`](crate::rules::correlation::Parties)):
+    /// a party sending from one socket and listening on another is one agent.
     pub(super) agent: &'a str,
     pub(super) call_id: &'a str,
 }

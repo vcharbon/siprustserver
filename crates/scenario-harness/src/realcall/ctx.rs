@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
+use super::lost::{LossNotes, LostMessage};
 use crate::anchors::{AnchorKeys, AnchorTag};
 use crate::Agent;
 
@@ -47,6 +48,8 @@ pub struct CallCtx {
     /// Whether a provisional lost to a crash is accepted
     /// ([`accept_lost_provisionals`](Self::accept_lost_provisionals)).
     lost_provisionals: AtomicBool,
+    /// The datagrams of the call a simulated loss model dropped.
+    losses: LossNotes,
 }
 
 /// What a call runs at the instant its verdict resolves.
@@ -65,6 +68,7 @@ impl CallCtx {
             on_resolved: Mutex::new(None),
             clean_ends: AtomicBool::new(false),
             lost_provisionals: AtomicBool::new(false),
+            losses: LossNotes::default(),
         }
     }
 
@@ -98,6 +102,17 @@ impl CallCtx {
         self.lost_provisionals.load(Ordering::Relaxed)
     }
 
+    /// Where the call's loss model notes each datagram it drops: the network
+    /// that simulates the loss holds a clone.
+    pub fn loss_notes(&self) -> LossNotes {
+        self.losses.clone()
+    }
+
+    /// The datagrams of the call the loss model dropped so far.
+    pub fn lost(&self) -> Vec<LostMessage> {
+        self.losses.all()
+    }
+
     /// Run `hook` at the instant the call's verdict resolves: after its last
     /// scripted step and before the runner's teardown (the best-effort CANCEL
     /// or BYE of a failed call). Replaces an earlier hook.
@@ -122,9 +137,9 @@ impl CallCtx {
     }
 
     /// Label a message `agent` just RECEIVED with a canonical anchor name
-    /// (ADR-0019) — the load-surface analogue of `Harness::tag_anchor` /
-    /// e2e-core's `InfraRuntime::anchor`. A no-op (one relaxed atomic load,
-    /// `keys` never converted) unless anchor collection was enabled. `name` is
+    /// (ADR-0019) — the load-surface analogue of `Harness::tag_anchor`. A no-op
+    /// (one relaxed atomic load, `keys` never converted) unless anchor
+    /// collection was enabled. `name` is
     /// `'static` to keep the vocabulary fixed, like phases/checkpoints.
     pub fn anchor(&self, agent: &Agent, name: &'static str, keys: impl Into<AnchorKeys>) {
         self.push_anchor(agent, name, keys, false);

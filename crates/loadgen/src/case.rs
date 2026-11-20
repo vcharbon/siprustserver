@@ -5,8 +5,7 @@
 //! driver resolves ONE binding — pool walk per mode, tokens expanded — and:
 //!
 //! - the resolved **core** From/To/R-URI rides the egress `outgoing_invite`
-//!   path ([`scenario_harness::realcall::CallEnv::outgoing_invite`], the same
-//!   fold-in as e2e-core's `InfraRuntime::outgoing_invite`);
+//!   path ([`scenario_harness::realcall::CallEnv::outgoing_invite`]);
 //! - the **recognized extras** become per-call dwells overriding the global
 //!   CLI defaults (`ring_delay_ms`, `talk_time_ms`, `reinvite_gap_ms`,
 //!   `long_hold_secs`, `options_cadence_ms`) — killing the "dwells are global"

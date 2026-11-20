@@ -8,14 +8,15 @@
 //! SIGTERM/drain — lives in `b2bua-runner-kit` (shared with downstream runner
 //! binaries per ADR-0016); this binary keeps only its OWN composition choices:
 //!   - route: `ScriptedDecisionEngine::route_all_to_with_limiter(DEST, stress)`
-//!            (the HTTP call-control adapter is a deferred slice; routing all
-//!            calls to a fixed UAS mirrors the k8s `worker -> sipp-uas` topology).
-//!            It attaches an always-on `B2BUA_STRESS_LIMITER` entry to every call
-//!            (full-chain stress) and honors an inbound `X-Api-Call` `call_limiter`
-//!            array so a dedicated stream can enforce a real cap.
-//!   - CDR  : RabbitMQ sink when `B2BUA_CDR_RABBITMQ_URL` is set, else the
-//!            kit's discarding `NullCdrWriter` — either way behind the bounded
-//!            `BufferedCdrWriter` (drop-on-overload).
+//!     (this reference worker ships no call-control adapter; routing all
+//!     calls to a fixed UAS mirrors the k8s `worker -> sipp-uas` topology).
+//!     It attaches an always-on `B2BUA_STRESS_LIMITER` entry to every call
+//!     (full-chain stress) and honors an inbound `X-Api-Call` `call_limiter`
+//!     array so a dedicated stream can enforce a real cap.
+//!   - CDR  : the JSON-lines file `B2BUA_CDR_FILE` names, else the RabbitMQ
+//!     sink when `B2BUA_CDR_RABBITMQ_URL` is set, else the kit's discarding
+//!     `NullCdrWriter` — any of them behind the bounded `BufferedCdrWriter`
+//!     (drop-on-overload).
 //!   - HA   : opt-in peer-to-peer replication with static or kube
 //!            EndpointSlice membership.
 //!   - alloc: jemalloc (+ heap-profiling `/debug/heap` route, jemalloc stats
@@ -35,9 +36,13 @@
 //!                   IP-literal ip:port every Contact names.
 //!                   (the full consistency table: `b2bua_runner_kit::addresses_from_lookup`)
 //!   B2BUA_DEST      downstream UAS host:port          (default 127.0.0.1:5070)
-//!   B2BUA_METRICS   Prometheus HTTP listen addr       (default 0.0.0.0:9091)
-//!   B2BUA_ADMIN     operator routes' listen addr, loopback only (default 127.0.0.1:9094)
+//!   B2BUA_METRICS   /metrics, /ready, /healthz listen addr (default 0.0.0.0:9091)
+//!   B2BUA_ADMIN     operator and debug routes' listen addr, loopback only
+//!                   (default 127.0.0.1:9094)
 //!   B2BUA_QUEUE     inbound UDP queue depth (packets)  (default 8192)
+//!   B2BUA_CAPTURE   pcapng file each SIP datagram sent and received is appended to,
+//!                   a section per start (default none: no capture); refused with
+//!                   an unspecified B2BUA_LISTEN, whose address no datagram states
 //!   B2BUA_UDP_SNDBUF SO_SNDBUF on the signalling socket, bytes (default 4 MiB;
 //!                   empty = kernel wmem_default; clamped at wmem_max) — ADR-0033
 //!   B2BUA_UDP_RCVBUF SO_RCVBUF on the signalling socket, bytes (default 4 MiB;
@@ -48,11 +53,13 @@
 //!   B2BUA_CLUSTER_KEY the key the cluster's workers share to sign the via-extension
 //!                   (16..64 bytes; required with B2BUA_REPL on; unset: none
 //!                   stated, none trusted) — ADR-0055 §12
-//!   B2BUA_CDR_QUEUE buffered-CDR submit queue depth    (default 1024; 0 = unbuffered, refused beside a RabbitMQ URL)
+//!   B2BUA_CDR_QUEUE buffered-CDR submit queue depth    (default 1024, at most 1048576; 0 = unbuffered, refused beside a RabbitMQ URL or a CDR file)
 //!   B2BUA_CDR_RABBITMQ_URL / _QUEUE / _DECLARE / _MAX_LEN / _WINDOW / _*_TIMEOUT_MS / _BACKOFF*_MS
 //!                   the RabbitMQ CDR sink (see `b2bua_runner_kit::RabbitMqCdrSettings`)
+//!   B2BUA_CDR_FILE  the file each call's record is appended to, a JSON line each
+//!                   (default none; refused beside B2BUA_CDR_RABBITMQ_URL)
 //!   B2BUA_CONCURRENCY handler concurrency ceiling       (default 8192; safety, not a rate cap)
-//!   B2BUA_CALL_CAP  max concurrent calls before drop    (default 1_000_000)
+//!   B2BUA_CALL_CAP  live per-call queues; a new INVITE at the cap less the headroom gets a 503 (default 1_000_000)
 //!   B2BUA_NEW_CALL_PERMIT_SHARE_PCT share of B2BUA_CONCURRENCY normal initial-INVITE turns may hold (default 50; 1..=100; emergency INVITEs draw the whole pool)
 //!   B2BUA_NEW_CALL_QUEUE_HEADROOM_PCT share of B2BUA_CALL_CAP kept back from normal new INVITEs (default 5; 0..=99; emergency INVITEs and in-dialog requests reach the full cap)
 //!   B2BUA_KEEPALIVE_SEC in-dialog OPTIONS keepalive interval (default 300 = 5 min, min 120)
@@ -203,9 +210,7 @@ async fn run() -> Result<std::process::ExitCode, String> {
     // brake installed) → the worker's addresses → validated config + metrics/clock.
     let base = RunnerEnv::from_env()?.bind("b2bua-runner").await?;
 
-    // CDR sink: RabbitMQ when `B2BUA_CDR_RABBITMQ_URL` is set, else the kit's
-    // discarding default, either way behind the kit's bounded buffer.
-    let cdr_sink = base.rabbitmq_cdr_sink_from_env()?;
+    let cdr_sink = base.cdr_sink_from_env()?;
 
     let mut deps = base
         .deps(
@@ -239,7 +244,7 @@ async fn run() -> Result<std::process::ExitCode, String> {
         ordinal = %base.env.ordinal,
         queue = base.env.queue_max,
         cdr_queue = base.env.cdr_queue,
-        "listening; all calls route to the default callee (resolved per-call)"
+        "listening UDP; all calls route to the default callee (resolved per-call)"
     );
 
     // jemalloc footprint/purge/decay-config counters appended to `/metrics`,

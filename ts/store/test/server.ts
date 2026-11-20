@@ -1,6 +1,7 @@
 /**
- * The postgres server the DB-bound suites build their own databases on:
- * `STORE_TEST_URL` (any database of it), else the client's default.
+ * The postgres server the DB-bound suites build their own databases on: the
+ * one the run states (`server-url.ts`: `STORE_TEST_URL` exported, else in the
+ * workspace's `.env.local`; any database of it), else the client's default.
  *
  * A DB-bound suite whose server does not answer FAILS: importing this module
  * throws, naming the url it tried. `STORE_TEST_SKIP=1` is the one way to skip
@@ -9,13 +10,18 @@
  */
 import { NodeServices } from "@effect/platform-node"
 import * as Effect from "effect/Effect"
+import * as Option from "effect/Option"
 import { SqlClient } from "effect/unstable/sql/SqlClient"
 import * as Client from "../src/client.js"
 import * as Current from "../src/current.js"
 import * as Migrator from "../src/migrator.js"
 import { CURRENT_POPULATION } from "./identity.js"
+import * as ServerUrl from "./server-url.js"
 
-const SERVER = process.env["STORE_TEST_URL"] ?? Client.DEFAULT_URL
+const SERVER = Option.getOrElse(
+  await Effect.runPromise(ServerUrl.stated(process.env).pipe(Effect.provide(NodeServices.layer))),
+  () => Client.DEFAULT_URL
+)
 
 /** The url of `database` on the test server. */
 export const urlFor = (database: string): string => Client.atDatabase(SERVER, database)
@@ -36,8 +42,8 @@ export const served: boolean = await Effect.runPromise(
 
 if (!served && !skipping) {
   throw new Error(
-    `no postgres answers at ${urlFor("postgres")}: name one with STORE_TEST_URL, or skip the DB-bound ` +
-      "suites with STORE_TEST_SKIP=1"
+    `no postgres answers at ${urlFor("postgres")}: name one with STORE_TEST_URL (exported, or in ` +
+      `${ServerUrl.ENV_FILE}), or skip the DB-bound suites with STORE_TEST_SKIP=1`
   )
 }
 

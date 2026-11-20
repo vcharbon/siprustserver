@@ -6,6 +6,7 @@
 //! ([`InviteRefusals`]); a rung behind the INVITE server transaction sends it
 //! through that transaction, which absorbs retransmissions and the ACK.
 
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 use load_shed::retry_after;
@@ -20,11 +21,13 @@ use std::sync::OnceLock;
 use super::ladder::Refused;
 
 /// The worker's refusals of new INVITEs: the renderer every rung answers
-/// with, and the memo the stateless rungs share. Clone shares both.
+/// with, the memo the stateless rungs share, and the switch the event-queue
+/// gate sets while it refuses, which those rungs read. Clone shares all three.
 #[derive(Clone)]
 pub struct Refusals {
     render: Arc<Render>,
     memo: InviteRefusals,
+    gate_refusing: Arc<AtomicBool>,
 }
 
 struct Render {
@@ -82,7 +85,14 @@ impl Refusals {
             Arc::new(move |req: &SipRequest| stateless.answer(req, 0)),
             memo_capacity,
         );
-        Self { render, memo }
+        Self { render, memo, gate_refusing: Arc::new(AtomicBool::new(false)) }
+    }
+
+    /// The switch on new calls: set by the event-queue gate, its one writer,
+    /// while it refuses (ADR-0050 §9), and read by the arrival brake and the
+    /// transaction layer as each new INVITE arrives.
+    pub fn gate_refusing(&self) -> &Arc<AtomicBool> {
+        &self.gate_refusing
     }
 
     /// The memo and stateless answer the arrival brake and the transaction

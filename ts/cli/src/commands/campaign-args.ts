@@ -10,14 +10,14 @@ import * as Effect from "effect/Effect"
 import * as Option from "effect/Option"
 import { type Command, Flag } from "effect/unstable/cli"
 import type { CliFacts } from "../facts.js"
-import { patienceOf, triageFlags } from "../flags.js"
+import { collectionFlag, patienceOf, triageFlags } from "../flags.js"
 import { cutAndReplayDefaults, pathsOf, statedKnobs } from "../options.js"
 
 export const usage = (facts: CliFacts): string =>
   `usage: ${facts.invocation("campaign")} --pcaps P [--pcaps P …] [--set F [--set F …]] [--lane L] ` +
   "[--add-only | --add-and-replay] [--max-span SECONDS] [--sample N] [--limit N] " +
   "[--concurrency N] [--batch N] [--memory-max SIZE] [--prep N] [--no-cleanup] [--force-recut] [--strict-census] " +
-  "[--dry-run] [--repo DIR] [--wait SECONDS]"
+  "[--dry-run] [--repo DIR] [--wait SECONDS] [--collection LEVEL]"
 
 export const flags = (facts: CliFacts) => {
   const triage = triageFlags(facts)
@@ -69,7 +69,8 @@ export const flags = (facts: CliFacts) => {
       Flag.withDescription("Print what each phase would do and write nothing"),
       Flag.withDefault(false)
     ),
-    wait: triage.wait
+    wait: triage.wait,
+    collection: collectionFlag
   }
 }
 

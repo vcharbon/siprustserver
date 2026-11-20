@@ -4,6 +4,7 @@
 //! values it is handed ([`Framework`]) and the event as the shell resolved it
 //! ([`TurnInput`]), and nothing else (ADR-0052 §2).
 
+mod dead_hop;
 pub mod message_cap;
 pub mod quiet_turn;
 pub mod response_facts;
@@ -22,6 +23,7 @@ use crate::obligations::ObligationSet;
 use crate::owners::Owners;
 use crate::rules::actions::{possibly_confirmed, Owed, Settle};
 use crate::rules::lifecycle_delivery::{close_turn, TurnStart};
+use crate::rules::relay::CountedCopy;
 use crate::rules::{execute_turn, ActionExecutor, RuleCall, RuleContext, RuleDefinition};
 use crate::turn_notes::TurnNotes;
 use crate::turn_scope::TurnScope;
@@ -230,10 +232,17 @@ fn chain_turn(
             caller.then(|| crate::rules::relay::cancelled_final(&call, to_tag.clone(), notes));
         call::helpers::record_cancelled_invite(&mut call, source_leg_id, sent.flatten());
     }
+    dead_hop::record(&mut call, source_leg_id, event);
     if let Some(obligation) = fired_obligation(event, &TimerType::RepeatGiveUp) {
         exec.turn.notes.repeat_give_up(obligation.kind());
         exec.give_up(&mut call, &mut ladder_fx, obligation);
     }
+    let named = resolved.dialog.as_ref();
+    let counted = crate::rules::relay::count_copy(&mut call, source_leg_id, named, event, now_ms);
+    if let Some(CountedCopy::Absorbed(class)) = counted {
+        exec.turn.notes.copy_past_schedule(crate::copy_schedule::kind(class));
+    }
+    let absorbed_copy = matches!(counted, Some(CountedCopy::Absorbed(_)));
     // The record names the message before the rules read it, so what the
     // turn sends follows what it received.
     if let Some(ring) = crate::message_ring::Ring::of(fw.config) {
@@ -248,6 +257,7 @@ fn chain_turn(
         };
         call = ring.received(call, source_leg_id, received, now_ms);
     }
+    crate::rules::relay::read_untaken_2xx(&mut call, source_leg_id, named, event);
     // An INVITE (offerless included) or an UPDATE offer the leg's peer sends
     // opens an exchange on that leg, counted once as it is received, before
     // the rules read it.
@@ -306,12 +316,12 @@ fn chain_turn(
     unheld_final::ack_unheld_final(
         fw.config,
         event,
-        matched_client_txn,
+        matched_client_txn || counted.is_some(),
         &mut result.effects,
         &mut exec.turn.ids,
         now_ms,
     );
-    quiet_turn::name_candidate(&mut result, &call, event, discharged.as_ref());
+    quiet_turn::name_candidate(&mut result, &call, event, (discharged.as_ref(), absorbed_copy));
     // The ladder's own effects (its cancels) precede the rule's.
     ladder_fx.extend(std::mem::take(&mut result.effects));
     result.effects = ladder_fx;

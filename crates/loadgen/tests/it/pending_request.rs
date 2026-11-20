@@ -24,7 +24,7 @@ use scenario_harness::{StepError, ANSWER_SDP, OFFER_SDP};
 use serde_json::Value;
 use sip_message::generators::InDialogMethod;
 use sip_message::parser::custom::CustomParser;
-use sip_message::{Method, SipMessage, SipParser};
+use sip_message::{Method, SipMessage, SipParser, SipRequest};
 
 use crate::fake_rig::{cfg, setup_fake};
 
@@ -94,17 +94,27 @@ impl ActorScenario for InfoByeCrossing {
     }
 }
 
-/// The instants (ms) the B2BUA received the caller's INFO, each copy.
-fn caller_infos(h: &scenario_harness::Harness) -> Vec<u64> {
-    h.wire_entries()
+/// The instants (ms) the B2BUA received the caller's INFO, each copy: an INFO
+/// on the Call-ID of the first INVITE the B2BUA received.
+fn caller_infos(h: &scenario_harness::Harness, b2bua: std::net::SocketAddr) -> Vec<u64> {
+    let requests: Vec<(u64, SipRequest)> = h
+        .wire_entries()
         .iter()
-        .filter(|e| match CustomParser::new().parse(&e.raw) {
-            Ok(SipMessage::Request(r)) => {
-                r.method() == Method::Info && r.call_id().to_string().contains(".run-1@")
-            }
-            _ => false,
+        .filter(|e| e.to == b2bua)
+        .filter_map(|e| match CustomParser::new().parse(&e.raw) {
+            Ok(SipMessage::Request(r)) => Some((e.sent_ms, r)),
+            _ => None,
         })
-        .map(|e| e.sent_ms)
+        .collect();
+    let caller = requests
+        .iter()
+        .find(|(_, r)| r.method() == Method::Invite)
+        .map(|(_, r)| r.call_id().to_string())
+        .expect("the caller's INVITE reached the B2BUA");
+    requests
+        .iter()
+        .filter(|(_, r)| r.method() == Method::Info && r.call_id().as_str() == caller)
+        .map(|(at, _)| *at)
         .collect()
 }
 
@@ -143,7 +153,7 @@ async fn an_info_whose_final_is_lost_as_a_bye_crosses_it_is_answered_by_its_retr
     let received: Vec<&str> =
         r["received"].as_array().unwrap().iter().filter_map(|q| q["method"].as_str()).collect();
     assert_eq!(received, ["BYE"], "the callee's BYE ended the call: {r}");
-    let infos = caller_infos(&h);
+    let infos = caller_infos(&h, b2bua.addr);
     assert_eq!(infos.len(), 2, "the INFO was retransmitted once: {infos:?}");
     let ended = r["ended_at_ms"].as_u64().unwrap();
     assert!(ended < infos[1], "the call ended before the retransmission: {ended} {infos:?}");

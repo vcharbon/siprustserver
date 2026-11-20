@@ -15,7 +15,7 @@ use sip_net::UdpEndpoint;
 use crate::invite_class::InviteClass;
 
 use super::owner::Owner;
-use super::refusals::Admission;
+use super::refusals::{Admission, RefusedCopy};
 
 /// Ceilings on the deferred backlog (the critical events a full output queue
 /// holds for later), in events, and the classifier a new INVITE is judged
@@ -63,7 +63,8 @@ pub(super) enum NewInvite {
 
 impl Owner {
     /// Judge the INVITE `req`, which no transaction holds, against the node's
-    /// refusals: a copy of a refused INVITE draws that refusal again, whatever
+    /// refusals: a copy of a refused INVITE draws that refusal again on the
+    /// RFC schedule (ADR-0063 §1), and nothing past it, whatever
     /// the backlog holds now — the caller has its final, or will have it from
     /// this copy, and a call admitted behind it would ring for no one; past its
     /// class's ceiling, or while the consumer's new-call gate refuses its class
@@ -87,7 +88,8 @@ impl Owner {
         };
         match refusals.admit(req, backlog.is_some() || gate.is_some()) {
             Admission::Admit { held } => return NewInvite::Admitted { held },
-            Admission::Repeat => {
+            Admission::Repeat(RefusedCopy::Absorbed) => return NewInvite::Refused,
+            Admission::Repeat(RefusedCopy::Answered) => {
                 self.metrics.refused_copies.fetch_add(1, Relaxed);
             }
             Admission::Refuse => match (backlog, gate) {
@@ -97,7 +99,9 @@ impl Owner {
             },
         }
         match refusals.answer(req) {
-            Ok(refusal) => self.send_buffer(endpoint, refusal.image(), dest).await,
+            Ok(refusal) => {
+                self.send_buffer(endpoint, req.call_id().as_str(), refusal.image(), dest).await
+            }
             Err(e) => tracing::warn!(error = %e, "INVITE refusal not sent: its lines make none"),
         }
         NewInvite::Refused

@@ -53,6 +53,12 @@ const blank = (value: string): string | undefined => (value === "" ? undefined :
 const some = (values: ReadonlyArray<string>): ReadonlyArray<string> | undefined =>
   values.length === 0 ? undefined : values
 
+/** The captures named, each whole, once and in order; or why there is none. */
+export const wholeCaptures = (captures: ReadonlyArray<string>): RequestSelection | string => {
+  const named = [...new Set(captures)].sort()
+  return named.length === 0 ? "no capture on screen" : { kind: "captures", captures: named }
+}
+
 /**
  * The selection the page means, or why there is none: the filter as it
  * stands on the page's lane (whatever lanes the request targets, §5 R1, R2),
@@ -97,10 +103,8 @@ export const selectionOf = (
             : { capture: row.capture, caseId: row.caseId }
         )
       }
-    case "captures": {
-      const captures = [...new Set((ticked.length === 0 ? shown : ticked).map((row) => row.capture))].sort()
-      return captures.length === 0 ? "no capture on screen" : { kind: "captures", captures }
-    }
+    case "captures":
+      return wholeCaptures((ticked.length === 0 ? shown : ticked).map((row) => row.capture))
     case "population":
       return {
         kind: "universe",

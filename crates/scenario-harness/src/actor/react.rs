@@ -13,7 +13,7 @@ use super::answer::{
 };
 use super::clean_end::Ending;
 use super::endpoint::{Disposition, SUBFLOW_REALIGN};
-use super::facts::record_request;
+use super::facts::{in_dialog_arrival, record_request, refused_arrival};
 use super::ledger::{ObligationKey, ObligationKind};
 use super::response::react_response;
 use super::runner::{ActorState, ParkedRequest};
@@ -125,11 +125,7 @@ async fn react_request(st: &mut ActorState<'_>, uas: ServerTxn) -> Result<(), St
         {
             let mut uas = uas;
             uas.respond(code, reason).try_send().await?;
-            let (call_id, cseq) = (uas.request().call_id().to_string(), uas.request().cseq().seq());
-            st.obs.record(
-                Observation::RefusedInDialog { leg: st.role, call_id, cseq },
-                Instant::now(),
-            );
+            st.obs.record(refused_arrival(st.role, uas.request()), Instant::now());
             st.obs.record(
                 Observation::ServicedStray {
                     leg: st.role,
@@ -177,15 +173,7 @@ async fn react_request(st: &mut ActorState<'_>, uas: ServerTxn) -> Result<(), St
     if matches!(st.disposition, Disposition::Scripted) && method != "ACK" {
         let now = Instant::now();
         if method != "CANCEL" && scripted_wants_in_dialog(st, &method) {
-            st.obs.record(
-                Observation::InDialogRequest {
-                    leg: st.role,
-                    call_id: uas.request().call_id().to_string(),
-                    cseq: uas.request().cseq().seq(),
-                    method,
-                },
-                now,
-            );
+            st.obs.record(in_dialog_arrival(st.role, uas.request()), now);
             st.parked.push(ParkedRequest { txn: uas, initial: false });
             return Ok(());
         }
@@ -233,7 +221,6 @@ pub(super) async fn react_in_dialog_request(
     mut uas: ServerTxn,
 ) -> Result<(), StepError> {
     let method = uas.request().method().as_str().to_string();
-    let call_id = uas.request().call_id().clone();
     let cseq = uas.request().cseq().seq();
     let now = Instant::now();
 
@@ -307,15 +294,7 @@ pub(super) async fn react_in_dialog_request(
                 .is_some_and(|d| uas.request().to().tag().is_some_and(|t| t != d.local_tag()));
             st.ctx.anchor(&st.agent, "bye", uas.request());
             uas.respond(200, "OK").try_send().await?;
-            st.obs.record(
-                Observation::InDialogRequest {
-                    leg: st.role,
-                    call_id: call_id.to_string(),
-                    cseq,
-                    method: method.clone(),
-                },
-                now,
-            );
+            st.obs.record(in_dialog_arrival(st.role, uas.request()), now);
             if is_fork_teardown {
                 return Ok(());
             }
@@ -344,15 +323,7 @@ pub(super) async fn react_in_dialog_request(
         // A NOTIFY ending her own subscription is a clean end too.
         "NOTIFY" | "OPTIONS" | "INFO" | "MESSAGE" => {
             uas.respond(200, "OK").try_send().await?;
-            st.obs.record(
-                Observation::InDialogRequest {
-                    leg: st.role,
-                    call_id: call_id.to_string(),
-                    cseq,
-                    method: method.clone(),
-                },
-                now,
-            );
+            st.obs.record(in_dialog_arrival(st.role, uas.request()), now);
             if method == "NOTIFY" && super::clean_end::ends_own_subscription(st, uas.request()) {
                 super::clean_end::end_cleanly(st, Ending::Notify, now);
             }
@@ -375,28 +346,12 @@ pub(super) async fn react_in_dialog_request(
             if !st.sent_reinvites.is_empty() || !st.sent_updates.is_empty() {
                 uas.respond(491, "Request Pending").try_send().await?;
                 arm_reject_final(st, &uas, 491);
-                st.obs.record(
-                    Observation::InDialogRequest {
-                        leg: st.role,
-                        call_id: call_id.to_string(),
-                        cseq,
-                        method: method.clone(),
-                    },
-                    now,
-                );
+                st.obs.record(in_dialog_arrival(st.role, uas.request()), now);
                 return Ok(());
             }
             respond_200_sdp(&mut uas, st.answer_body()).await?;
             st.answered_reinvites.insert(cseq);
-            st.obs.record(
-                Observation::InDialogRequest {
-                    leg: st.role,
-                    call_id: call_id.to_string(),
-                    cseq,
-                    method: method.clone(),
-                },
-                now,
-            );
+            st.obs.record(in_dialog_arrival(st.role, uas.request()), now);
             st.obs.record(
                 Observation::RequestSent {
                     key: ObligationKey::new(st.role, ObligationKind::ReInvite, cseq),
@@ -423,27 +378,11 @@ pub(super) async fn react_in_dialog_request(
         "UPDATE" => {
             if !st.sent_reinvites.is_empty() || !st.sent_updates.is_empty() {
                 uas.respond(491, "Request Pending").try_send().await?;
-                st.obs.record(
-                    Observation::InDialogRequest {
-                        leg: st.role,
-                        call_id: call_id.to_string(),
-                        cseq,
-                        method: method.clone(),
-                    },
-                    now,
-                );
+                st.obs.record(in_dialog_arrival(st.role, uas.request()), now);
                 return Ok(());
             }
             respond_200_sdp(&mut uas, st.answer_body()).await?;
-            st.obs.record(
-                Observation::InDialogRequest {
-                    leg: st.role,
-                    call_id: call_id.to_string(),
-                    cseq,
-                    method: method.clone(),
-                },
-                now,
-            );
+            st.obs.record(in_dialog_arrival(st.role, uas.request()), now);
             // C5 (RFC 3311 §5.1): the EARLY UPDATE's offer/answer completed —
             // release the held INVITE 200, but only once the reliable 183 was
             // also PRACKed (MUST-014); if the UPDATE raced ahead of the PRACK

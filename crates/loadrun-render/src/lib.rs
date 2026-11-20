@@ -1,7 +1,6 @@
 //! The one HTML rendering of a load run. Everything it shows comes from a
-//! [`LoadRunIndex`], so the page a load generator serves live, the
-//! `index.html` it writes at the end of its run and the page a website embeds
-//! show the same figures.
+//! [`LoadRunIndex`], so the page a load generator serves live and the
+//! `index.html` it writes at the end of its run show the same figures.
 //!
 //! The page, in order: the command line and target, the headline figures
 //! (with the rate and drain controls on a live page), the time series, the

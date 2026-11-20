@@ -1,0 +1,14 @@
+{
+  "status": "audited",
+  "findings": [
+    {
+      "rule": "sdp-origin-continuity",
+      "lane": "127.0.0.1:5080",
+      "detail": "the answer's o= version did not advance over a changed session",
+      "advisory": false,
+      "gating": true,
+      "offending": 4,
+      "charged": "127.0.0.1:5080"
+    }
+  ]
+}

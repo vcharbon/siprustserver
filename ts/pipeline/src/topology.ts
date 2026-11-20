@@ -9,9 +9,10 @@
  * peer address that speaks on the same dialog.
  */
 import { Flows, type Call, type Case, type Placement, type Tokens } from "@sip/contracts"
+import * as CallFacts from "./call-facts.js"
 import { captureIndex, type CaptureIndex } from "./capture-index.js"
 import type { CallIdDerivation } from "./derivation.js"
-import { vantageMsgIdxs, type Correlation } from "./cut.js"
+import { vantageMsgIdxs, type Correlation, type LegJoin } from "./cut.js"
 import type { FormsTable } from "./forms.js"
 import { canonical, classKey, type Plan } from "./plan.js"
 import type { SutSet } from "./sut.js"
@@ -142,17 +143,37 @@ export interface Layout {
 export const peerSide = (a: ActorObs, sock: string): boolean => !a.sutSet.has(sock)
 
 /**
- * Two calls one application server minted from a common base call: one derives
- * from the other, or a third leg's Call-ID derives both. Read off the
- * correlation's edges alone, so the index is the one seam to the derivation.
+ * The joins relating two legs set up off one call: those making one set up
+ * off the other, or else those making both set up off a third leg; none where
+ * neither holds. Read off the correlation's joins alone, the derivation's and
+ * the leg rules' alike, so the index is the one seam to either.
  */
-export const relatedByDerivation = (a: number, b: number, correlation: Correlation): boolean => {
-  const basesOfA = new Set(correlation.basesOf(a))
-  const basesOfB = new Set(correlation.basesOf(b))
-  if (basesOfA.has(b) || basesOfB.has(a)) return true
-  return [...basesOfA].some((i) => i !== a && i !== b && basesOfB.has(i))
+export const joinsRelating = (a: number, b: number, correlation: Correlation): ReadonlyArray<LegJoin> => {
+  const ofA = correlation.joinsOf(a)
+  const ofB = correlation.joinsOf(b)
+  const direct = [...ofA.filter((j) => j.base === b), ...ofB.filter((j) => j.base === a)]
+  if (direct.length > 0) return direct
+  const basesOfB = new Set(ofB.map((j) => j.base))
+  const common = new Set(ofA.filter((j) => j.base !== a && j.base !== b && basesOfB.has(j.base)).map((j) => j.base))
+  return [...ofA, ...ofB].filter((j) => common.has(j.base))
 }
 
+/**
+ * The evidence `joins` give two attempts of one chain: the derivation's
+ * wording where it alone relates them, else the leg rules that do, by name.
+ */
+const setUpOffOneCall = (joins: ReadonlyArray<LegJoin>): string => {
+  const rules = [...new Set(joins.flatMap((j) => (j.by === "rule" ? [`"${j.rule}"`] : [])))]
+  if (rules.length === 0) return "the attempts' Call-IDs are application-server derivations of one base call"
+  const derived = joins.some((j) => j.by === "derivation") ? "the Call-ID derivation and " : ""
+  return `the attempts were set up off one call, joined by ${derived}the leg rule${rules.length > 1 ? "s" : ""} ${rules.join(", ")}`
+}
+
+/**
+ * The layout of one case's vantages: its actors, endpoints, legs and topology,
+ * read off the capture's `index`. `assemble` always passes the index; `derives`
+ * builds it only where none is passed, which is a test laying out one case.
+ */
 export const build = (
   flows: Flows.FlowsDoc,
   vantages: ReadonlyArray<Vantage>,
@@ -276,9 +297,15 @@ export const build = (
     })
   })
 
+  const caller = callerIdentity(flows, plan, index.forms, raw)
+  const called = ordered.map((br) =>
+    br.map((i) => calledIdentity(flows, plan, index.forms, raw[i]!))
+  )
+  const calledOf = new Map(ordered.flatMap((br, b) => br.map((i, s) => [i, called[b]![s]!] as const)))
+
   const actors: Array<LayoutActor> = []
   const legs: Array<Placement.Leg> = []
-  for (const a of raw) {
+  for (const [i, a] of raw.entries()) {
     if (a.kind === "uac") {
       actors.push({ id: a.actorId, type: "uac", endpoint: a.endpointId })
     } else if (a.joinedBy) {
@@ -293,7 +320,7 @@ export const build = (
         id: a.actorId,
         type: "uas",
         endpoint: a.endpointId,
-        claim: { by: "ruri-pos", pos: a.pos }
+        claim: calleeClaim(a, calledOf.get(i))
       })
     }
     const media = legHasBody(flows, a) ? { rtp: "book" } : undefined
@@ -304,11 +331,6 @@ export const build = (
       ...(media ? { media } : {})
     })
   }
-
-  const caller = callerIdentity(flows, plan, index.forms, raw)
-  const called = ordered.map((br) =>
-    br.map((i) => calledIdentity(flows, plan, index.forms, raw[i]!))
-  )
 
   const posByKey = new Map<string, string>()
   const uac = raw.find((a) => a.kind === "uac")
@@ -349,11 +371,9 @@ const firstTs = (flows: Flows.FlowsDoc, a: ActorObs): number => {
   return i === undefined ? 0 : flows.legs[a.origLeg]!.msgs[i]!.ts_us
 }
 
-const firstInviteTs = (flows: Flows.FlowsDoc, a: ActorObs): number => {
-  const leg = flows.legs[a.origLeg]!
-  for (const i of a.msgIdxs) if (Flows.isInvite(leg.msgs[i]!)) return leg.msgs[i]!.ts_us
-  return Number.MAX_SAFE_INTEGER
-}
+/** When the leg was dialled: its first dialog-opening INVITE. A leg showing none sorts last. */
+const firstInviteTs = (flows: Flows.FlowsDoc, a: ActorObs): number =>
+  CallFacts.valueOf(CallFacts.atActor(flows, a).invite)?.at_us ?? Number.MAX_SAFE_INTEGER
 
 const legHasBody = (flows: Flows.FlowsDoc, a: ActorObs): boolean =>
   a.msgIdxs.some((i) => {
@@ -371,41 +391,13 @@ const callerAnsweredTs = (
   raw: ReadonlyArray<ActorObs>
 ): number | undefined => {
   const uac = raw.find((a) => a.kind === "uac")
-  if (!uac) return undefined
-  const leg = flows.legs[uac.origLeg]!
-  const answers = uac.msgIdxs
-    .map((i) => leg.msgs[i]!)
-    .filter(
-      (m) =>
-        m.summary.kind === "response" &&
-        m.summary.status >= 200 &&
-        m.summary.status < 300 &&
-        m.summary.cseq.method.toUpperCase() === "INVITE"
-    )
-    .map((m) => m.ts_us)
-  return answers.length > 0 ? Math.min(...answers) : undefined
+  return uac === undefined ? undefined : CallFacts.valueOf(CallFacts.atActor(flows, uac).answer)?.at_us
 }
 
 /** The attempt's terminal FAILURE final at its vantage, if it reached one. */
-export const failureFinalTs = (flows: Flows.FlowsDoc, a: ActorObs): number | undefined => {
-  const leg = flows.legs[a.origLeg]!
-  let answered: number | undefined
-  let failed: number | undefined
-  for (const i of a.msgIdxs) {
-    const m = leg.msgs[i]!
-    if (m.summary.kind !== "response") continue
-    const st = m.summary.status
-    if (st < 200 || m.summary.cseq.method.toUpperCase() !== "INVITE") continue
-    if (st < 300) {
-      answered = answered ?? m.ts_us
-    } else if (failed === undefined) {
-      failed = m.ts_us
-    }
-  }
-  // An attempt the callee ANSWERED is over; a later non-2xx describes the
-  // established dialog, not a target the platform hunted past.
-  if (answered !== undefined) return undefined
-  return failed
+const failureFinal = (flows: Flows.FlowsDoc, a: ActorObs): CallFacts.Entry | undefined => {
+  const final = CallFacts.valueOf(CallFacts.atActor(flows, a).final)
+  return final !== undefined && (final.status ?? 0) >= 300 ? final : undefined
 }
 
 /**
@@ -415,11 +407,10 @@ export const failureFinalTs = (flows: Flows.FlowsDoc, a: ActorObs): number | und
  * INVITE on the wire. Undefined where the attempt did not fail.
  */
 const gaveUpTs = (flows: Flows.FlowsDoc, a: ActorObs): number | undefined => {
-  const failed = failureFinalTs(flows, a)
+  const failed = failureFinal(flows, a)
   if (failed === undefined) return undefined
-  const leg = flows.legs[a.origLeg]!
-  const cancel = a.msgIdxs.map((i) => leg.msgs[i]!).find((m) => Flows.isMethod(m, "CANCEL"))
-  return cancel === undefined ? failed : Math.min(failed, cancel.ts_us)
+  const cancel = CallFacts.atActor(flows, a).outcome?.cancel
+  return cancel === undefined ? failed.at_us : Math.min(failed.at_us, cancel.at_us)
 }
 
 interface Branches {
@@ -484,9 +475,8 @@ const chainEvidence = (
   if (Flows.groupsForLegs(flows, [next.origLeg]).some((g) => prevGroups.has(g))) {
     return "both attempts sit in one upstream call group"
   }
-  if (relatedByDerivation(prev.origLeg, next.origLeg, correlation)) {
-    return "the attempts' Call-IDs are application-server derivations of one base call"
-  }
+  const joins = joinsRelating(prev.origLeg, next.origLeg, correlation)
+  if (joins.length > 0) return setUpOffOneCall(joins)
   const hinted = chainHints.some(
     ([x, y]) =>
       (x === prev.origLeg && y === next.origLeg) || (y === prev.origLeg && x === next.origLeg)
@@ -518,6 +508,23 @@ const callerIdentity = (
     ...(forms.length > 0 ? { forms } : {})
   }
 }
+
+/** A URI user-part written as a number: digits, after an optional `+`. */
+const NUMBER_USER = /^\+?[0-9]/
+
+/**
+ * How a hunted callee is claimed: by R-URI position where its INVITE names a
+ * number (one the plan classifies, or digits a lane's routing binds); by
+ * arrival order where the plan classifies none and its R-URI user is no number
+ * (a name, or no user part), since a `ruri-pos` claim matches a number.
+ * Its limit: two such callees on one endpoint dialled at once are told apart
+ * only by which INVITE arrives first, so a replay whose system sends them in
+ * the other order binds each to the other's actor.
+ */
+const calleeClaim = (a: ActorObs, identity: PartyIdentity | undefined): LayoutActor["claim"] =>
+  identity?.kind === "unknown" && !NUMBER_USER.test(identity.observed)
+    ? { by: "arrival-order" }
+    : { by: "ruri-pos", pos: a.pos }
 
 const calledIdentity = (
   flows: Flows.FlowsDoc,

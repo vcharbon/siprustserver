@@ -5,15 +5,31 @@
  * once per case.
  */
 import type { Flows } from "@sip/contracts"
+import * as Cause from "effect/Cause"
+import * as Effect from "effect/Effect"
+import * as Exit from "effect/Exit"
+import * as Layer from "effect/Layer"
 import { describe, expect, it } from "vitest"
-import { decideCases } from "../src/caseset.js"
-import { callFamilies, cutCalls } from "../src/cut.js"
+import { captureIndex, type CaptureIndex } from "../src/capture-index.js"
+import { CaseAssembler } from "../src/case-assembler.js"
+import { callFamilies, cutCalls, type CutResult } from "../src/cut.js"
 import type { CallIdDerivation } from "../src/derivation.js"
+import { LogicExtractor } from "../src/logic-extractor.js"
+import type { Plan } from "../src/plan.js"
 import { policyWith } from "../src/policy.js"
-import { doc, leg, nameByCallIds, oneHop, plan, request, response, SOCKETS, sutSet } from "./fixtures.js"
-
-/** The shortest base a suffix match is evidence rather than coincidence. */
-const MIN_BASE = 8
+import {
+  counting,
+  doc,
+  leg,
+  manyCallsFlows,
+  nameByCallIds,
+  oneHop,
+  plan,
+  shuffled,
+  SOCKETS,
+  suffixDerives,
+  sutSet
+} from "./fixtures.js"
 
 /** The decoys of {@link manyLegsFlows}: a suffix of every Call-ID, each under the base minimum. */
 const DECOYS = ["example", "xample", "e"] as const
@@ -27,32 +43,6 @@ const MAX_DEPTH = 2
  * about it.
  */
 const CANDIDATES_PER_LEG = DECOYS.length + MAX_DEPTH
-
-/** A prefix-minting convention: the derived Call-ID ENDS WITH its base. */
-const suffixDerives: CallIdDerivation = (base, derived) =>
-  base.length >= MIN_BASE && derived.length > base.length && derived.endsWith(base)
-
-/** The same predicate, counting how often the cut asks it. */
-const counting = (inner: CallIdDerivation) => {
-  let n = 0
-  const derives: CallIdDerivation = (base, derived) => {
-    n += 1
-    return inner(base, derived)
-  }
-  return { derives, count: () => n }
-}
-
-/** A deterministic shuffle, so related legs are not adjacent in the document. */
-const shuffled = <T>(items: ReadonlyArray<T>): Array<T> => {
-  const out = [...items]
-  let seed = 0x2545f491
-  for (let i = out.length - 1; i > 0; i--) {
-    seed = (Math.imul(seed, 1103515245) + 12345) >>> 0
-    const j = seed % (i + 1)
-    ;[out[i], out[j]] = [out[j]!, out[i]!]
-  }
-  return out
-}
 
 /**
  * Thousands of legs, message-free: base Call-IDs, `1-` and `2-1-` derivations
@@ -109,38 +99,6 @@ const pairwiseFamilies = (
   return [...by.values()].sort((a, b) => a[0]! - b[0]!)
 }
 
-/** `n` answered calls through the SUT, each a caller leg and a derived callee leg. */
-const manyCallsFlows = (n: number): Flows.FlowsDoc => {
-  const legs: Array<Flows.Leg> = []
-  for (let i = 0; i < n; i++) {
-    const a = `caller-${i.toString(16).padStart(6, "0")}@10.0.0.9`
-    const b = `1-${a}`
-    const t = i * 20_000
-    const { callee, caller, sut } = SOCKETS
-    legs.push(
-      leg(a, oneHop(caller, sut), [
-        request({ callId: a, seq: 1, method: "INVITE", src: caller, dst: sut, ts_ms: t }),
-        response({ callId: a, seq: 1, status: 100, reason: "Trying", cseqMethod: "INVITE", src: sut, dst: caller, ts_ms: t + 5 }),
-        response({ callId: a, seq: 1, status: 180, reason: "Ringing", cseqMethod: "INVITE", src: sut, dst: caller, ts_ms: t + 200, toTag: "sut-tag" }),
-        response({ callId: a, seq: 1, status: 200, reason: "OK", cseqMethod: "INVITE", src: sut, dst: caller, ts_ms: t + 1_000, toTag: "sut-tag" }),
-        request({ callId: a, seq: 1, method: "ACK", src: caller, dst: sut, ts_ms: t + 1_005, toTag: "sut-tag" }),
-        request({ callId: a, seq: 2, method: "BYE", src: caller, dst: sut, ts_ms: t + 5_000, toTag: "sut-tag" }),
-        response({ callId: a, seq: 2, status: 200, reason: "OK", cseqMethod: "BYE", src: sut, dst: caller, ts_ms: t + 5_005, toTag: "sut-tag" })
-      ]),
-      leg(b, oneHop(sut, callee), [
-        request({ callId: b, seq: 1, method: "INVITE", src: sut, dst: callee, ts_ms: t + 10 }),
-        response({ callId: b, seq: 1, status: 100, reason: "Trying", cseqMethod: "INVITE", src: callee, dst: sut, ts_ms: t + 15 }),
-        response({ callId: b, seq: 1, status: 180, reason: "Ringing", cseqMethod: "INVITE", src: callee, dst: sut, ts_ms: t + 190, toTag: "callee-tag" }),
-        response({ callId: b, seq: 1, status: 200, reason: "OK", cseqMethod: "INVITE", src: callee, dst: sut, ts_ms: t + 990, toTag: "callee-tag" }),
-        request({ callId: b, seq: 1, method: "ACK", src: sut, dst: callee, ts_ms: t + 1_010, toTag: "callee-tag" }),
-        request({ callId: b, seq: 2, method: "BYE", src: sut, dst: callee, ts_ms: t + 5_010, toTag: "callee-tag" }),
-        response({ callId: b, seq: 2, status: 200, reason: "OK", cseqMethod: "BYE", src: callee, dst: sut, ts_ms: t + 5_015, toTag: "callee-tag" })
-      ])
-    )
-  }
-  return doc(shuffled(legs), [])
-}
-
 describe("call families over thousands of legs", () => {
   const flows = manyLegsFlows(1_500)
 
@@ -158,33 +116,89 @@ describe("call families over thousands of legs", () => {
   })
 })
 
-describe("deciding every case of a capture", () => {
-  it("correlates the capture once, not once per case", () => {
-    const flows = manyCallsFlows(150)
+/**
+ * One cut of `flows` as an entry runs it, under a policy deriving by `derives`:
+ * the assembler's index of the capture, the cut off its correlation, and every
+ * case the cut proposes decided off the same index.
+ */
+const cutOnce = (flows: Flows.FlowsDoc, derives: CallIdDerivation) =>
+  Effect.gen(function*() {
+    const assembler = yield* CaseAssembler.Service
     const sut = sutSet()
-    const cut = cutCalls(flows, sut, "many.pcap", suffixDerives, nameByCallIds)
-    expect(cut.calls).toHaveLength(150)
-    const specs = cut.calls.map((c) => ({
-      id: c.id,
-      uac: c.uac,
-      uas: [...c.uas],
-      defects: [],
-      cutLegs: c.legs
-    }))
-
-    const counted = counting(suffixDerives)
-    const decided = decideCases({
+    const read = plan()
+    const index = assembler.index(flows, read)
+    const cut = cutCalls(flows, sut, "many.pcap", index.correlation, nameByCallIds)
+    const decided = yield* assembler.cases({
       flows,
       capture: "many.pcap",
-      specs,
+      specs: specsOf(cut),
       sut,
-      plan: plan(),
-      policy: policyWith({ derives: counted.derives })
+      plan: read,
+      index
     })
+    return { cut, decided }
+  }).pipe(Effect.provide(assemblerDeriving(derives)), Effect.runSync)
+
+/** The assembler bound to a policy deriving by `derives` and stating nothing else. */
+const assemblerDeriving = (derives: CallIdDerivation) =>
+  CaseAssembler.layer.pipe(Layer.provide(LogicExtractor.layerWith(policyWith({ derives }))))
+
+/** The case spec of each call the cut proposes. */
+const specsOf = (cut: CutResult) =>
+  cut.calls.map((c) => ({ id: c.id, uac: c.uac, uas: [...c.uas], defects: [], cutLegs: c.legs }))
+
+/**
+ * Each call of {@link manyCallsFlows} holds one derived leg, whose one suffix
+ * that is a Call-ID of the document is its base, and a base leg has no suffix
+ * as long as the shortest: one correlation asks the derivation once per call,
+ * and a second one anywhere in the cut asks every derived leg again.
+ */
+describe("one cut of a capture", () => {
+  it.each([1, 3, 150])("asks the derivation about each derived leg once, over %i cases", (calls) => {
+    const flows = manyCallsFlows(calls)
+    const counted = counting(suffixDerives)
+    const { cut, decided } = cutOnce(flows, counted.derives)
+    expect(cut.calls).toHaveLength(calls)
     expect(decided.outcomes.every((o) => o.built !== undefined && o.error === undefined)).toBe(true)
     expect(decided.refused).toEqual([])
-    // One probe per derived leg, its base being its only suffix that is a
-    // Call-ID of the document; a base leg has no suffix as long as the shortest.
-    expect(counted.count()).toBe(flows.legs.length / 2)
+    expect(counted.count()).toBe(calls)
+  })
+})
+
+/**
+ * The case set reads its cases off the index it is handed, so an index of
+ * another capture, or read under another plan, would decide wrong cases
+ * without a word: the assembler refuses it as a defect.
+ */
+describe("an index handed to the case set", () => {
+  const casesWith = (index: (flows: Flows.FlowsDoc, read: Plan) => CaptureIndex, read: Plan) =>
+    Effect.gen(function*() {
+      const assembler = yield* CaseAssembler.Service
+      const flows = manyCallsFlows(2)
+      const sut = sutSet()
+      const cut = cutCalls(flows, sut, "two.pcap", assembler.index(flows, read).correlation, nameByCallIds)
+      return yield* assembler.cases({ flows, capture: "two.pcap", specs: specsOf(cut), sut, plan: read, index: index(flows, read) })
+    }).pipe(Effect.provide(assemblerDeriving(suffixDerives)), Effect.runSyncExit)
+
+  /** The message of the defect `exit` ended on; undefined where it succeeded. */
+  const defectOf = (exit: Exit.Exit<unknown>): string | undefined => {
+    if (Exit.isSuccess(exit)) return undefined
+    const squashed = Cause.squash(exit.cause)
+    return squashed instanceof Error ? squashed.message : String(squashed)
+  }
+
+  it("is refused where it was built of another flows document", () => {
+    const exit = casesWith((_, read) => captureIndex(manyCallsFlows(2), suffixDerives, read), plan())
+    expect(defectOf(exit)).toBe("the capture index was built of another flows document")
+  })
+
+  it("is refused where it was built under another plan", () => {
+    const exit = casesWith((flows) => captureIndex(flows, suffixDerives, plan()), plan())
+    expect(defectOf(exit)).toBe("the capture index was built under another plan")
+  })
+
+  it("is read where it is the capture's own", () => {
+    const exit = casesWith((flows, read) => captureIndex(flows, suffixDerives, read), plan())
+    expect(Exit.isSuccess(exit) && exit.value.outcomes.every((o) => o.built !== undefined)).toBe(true)
   })
 })

@@ -110,3 +110,126 @@ fn a_final_under_a_shown_tag_charges_neither_arm() {
         .into_iter()
         .all(|f| f.rule != live_arm(RuleId::TagConsistency, true).name()));
 }
+
+/// The socket the caller sends from; its Via sent-by, where it listens, is `ALICE`.
+const ALICE_SEND: &str = "127.0.0.1:40000";
+
+/// A call the caller places from `ALICE_SEND`, every answer reaching `ALICE`
+/// (RFC 3261 §18.2.2), the 200 under the From-tag `from_tag`.
+fn placed_from_two_sockets(from_tag: &str) -> Vec<Stamped<SignalingNetworkEvent>> {
+    let ok = String::from_utf8(resp(200, 1, "INVITE", "bt", "z9hG4bK-i1"))
+        .expect("text")
+        .replacen(";tag=at\r\n", &format!(";tag={from_tag}\r\n"), 1)
+        .into_bytes();
+    vec![
+        sent(ALICE_SEND, req("INVITE", "z9hG4bK-i1", 1, None), BOB, 0),
+        recv(BOB, req("INVITE", "z9hG4bK-i1", 1, None), ALICE_SEND, 1),
+        sent(BOB, ok.clone(), ALICE, 2),
+        recv(ALICE, ok, BOB, 3),
+        sent(ALICE_SEND, req("ACK", "z9hG4bK-a1", 1, Some("bt")), BOB, 4),
+        recv(BOB, req("ACK", "z9hG4bK-a1", 1, Some("bt")), ALICE_SEND, 5),
+    ]
+}
+
+/// The caller's two binds are one party: the 200 at `ALICE` names the tag
+/// `ALICE_SEND` minted, and a foreign one is reported once, at `ALICE`.
+#[test]
+fn a_party_of_two_binds_is_judged_on_its_whole_stream() {
+    assert!(live(RuleId::MidDialogTags).check(&placed_from_two_sockets("at")).is_empty());
+    let out = live(RuleId::MidDialogTags).check_positioned(&placed_from_two_sockets("nope"));
+    assert_eq!(out.len(), 1, "{out:?}");
+    assert_eq!(out[0].0, ALICE, "reported at the bind that took the 200");
+    assert_eq!(out[0].3, Some(BOB.to_string()), "charged to its sender");
+}
+
+/// At the caller's lane, the SUT no recorded bind: a non-2xx under a fork's
+/// tag whose provisional the loss model dropped on arrival is not charged,
+/// the SUT having sent that fork's tag; with no drop on the call the same
+/// final is a flip.
+#[test]
+fn a_non_2xx_under_a_dropped_fork_tag_is_not_charged_to_its_unrecorded_sender() {
+    use crate::types::RecvDisposition::{Delivered, LossModel};
+    let call = |fork2: Option<crate::types::RecvDisposition>| {
+        let mut evs = vec![arrival(
+            ALICE,
+            resp(180, 1, "INVITE", "bt", "z9hG4bK-i"),
+            SUT,
+            0,
+            Delivered,
+            None,
+        )];
+        if let Some(disposition) = fork2 {
+            evs.push(arrival(
+                ALICE,
+                resp(180, 1, "INVITE", "bt2", "z9hG4bK-i"),
+                SUT,
+                1,
+                disposition,
+                None,
+            ));
+        }
+        evs.push(arrival(
+            ALICE,
+            resp(487, 1, "INVITE", "bt2", "z9hG4bK-i"),
+            SUT,
+            2,
+            Delivered,
+            None,
+        ));
+        evaluate_rfc_findings(&evs)
+            .into_iter()
+            .filter(|f| f.rule == live_arm(RuleId::TagConsistency, false).name())
+            .collect::<Vec<_>>()
+    };
+    assert!(call(Some(LossModel)).is_empty(), "{:?}", call(Some(LossModel)));
+    let flipped = call(None);
+    assert_eq!(flipped.len(), 1, "{flipped:?}");
+    assert_eq!((flipped[0].lane.as_str(), flipped[0].charged.as_deref()), (ALICE, Some(SUT)));
+}
+
+/// A provisional under `bt2` the caller's lane itself sent, lost on send,
+/// is no evidence of the tags its peer sent: a 487 under `bt2` that no
+/// provisional from the peer showed stays charged to its unrecorded sender.
+#[test]
+fn a_provisional_the_lane_lost_on_send_excuses_no_peer_tag() {
+    use crate::types::RecvDisposition::Delivered;
+    let own = Stamped {
+        event: SignalingNetworkEvent::SendLost {
+            bind_key: ALICE.to_string(),
+            to: SUT.parse().unwrap(),
+            msg: resp(180, 1, "INVITE", "bt2", "z9hG4bK-i"),
+        },
+        seq: 1,
+        at_ms: 1,
+    };
+    let evs = vec![
+        arrival(ALICE, resp(180, 1, "INVITE", "bt", "z9hG4bK-i"), SUT, 0, Delivered, None),
+        own,
+        arrival(ALICE, resp(487, 1, "INVITE", "bt2", "z9hG4bK-i"), SUT, 2, Delivered, None),
+    ];
+    let flipped: Vec<_> = evaluate_rfc_findings(&evs)
+        .into_iter()
+        .filter(|f| f.rule == live_arm(RuleId::TagConsistency, false).name())
+        .collect();
+    assert_eq!(flipped.len(), 1, "{flipped:?}");
+    assert_eq!((flipped[0].lane.as_str(), flipped[0].charged.as_deref()), (ALICE, Some(SUT)));
+}
+
+/// A dropped provisional excuses only the final carrying its tag: a 180
+/// under `bt2` lost on arrival, then a 487 under `bt9`, no provisional ever
+/// showed: still charged to its unrecorded sender.
+#[test]
+fn a_non_2xx_under_a_tag_no_dropped_provisional_carried_is_charged() {
+    use crate::types::RecvDisposition::{Delivered, LossModel};
+    let evs = vec![
+        arrival(ALICE, resp(180, 1, "INVITE", "bt", "z9hG4bK-i"), SUT, 0, Delivered, None),
+        arrival(ALICE, resp(180, 1, "INVITE", "bt2", "z9hG4bK-i"), SUT, 1, LossModel, None),
+        arrival(ALICE, resp(487, 1, "INVITE", "bt9", "z9hG4bK-i"), SUT, 2, Delivered, None),
+    ];
+    let flipped: Vec<_> = evaluate_rfc_findings(&evs)
+        .into_iter()
+        .filter(|f| f.rule == live_arm(RuleId::TagConsistency, false).name())
+        .collect();
+    assert_eq!(flipped.len(), 1, "{flipped:?}");
+    assert_eq!((flipped[0].lane.as_str(), flipped[0].charged.as_deref()), (ALICE, Some(SUT)));
+}

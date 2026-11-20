@@ -18,9 +18,8 @@ impl Owner {
                 let sent = self.do_send_response(endpoint, *msg, dest).await;
                 let _ = reply.send(sent);
             }
-            Command::SendRaw { buf, dest, reply } => {
-                // Bypasses transaction management; still counts a send failure.
-                self.metrics.count_send(endpoint.send_to(&buf, dest).await);
+            Command::SendRaw { call_id, buf, dest, reply } => {
+                self.send_buffer(endpoint, &call_id, &buf, dest).await;
                 let _ = reply.send(());
             }
             Command::Seed { call_ref, seeds, reply } => {

@@ -47,7 +47,7 @@ def content(tmp_path: Path, schedule: list[Json], **profile: object) -> Content:
         "setup_slow_ms": 1000,
         "catalogs": ["x-api-call"],
         "streams": [STREAM],
-        "schedule": {"at": schedule},
+        "schedule": {"at": schedule, "calls_span_windows": "the events test the one-at-a-time gap alone"},
         **profile,
     }
     write_yaml(tmp_path / "profiles" / "p.yaml", doc)

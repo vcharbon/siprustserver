@@ -27,10 +27,14 @@ from .judge import ALL_CALL_IDS, budget_of, judge
 from .limiters import judge_limiters
 from .jsonval import Json, as_obj
 from .model import Budget, Shape, parse_budget, parse_catalog
-from .profile import Profile, parse_profile
+from .profile import Profile, Stream, parse_profile
 from .recovery import Sample, StreamSamples
 from .report_metrics import kept as kept_report_metrics
-from .reconcile import integrity, reconcile
+from .generator_stats import FailureSpan, failure_spans, read_stat_csv
+from .paths import BASE_CONTENT
+from .scenario_lint import key_defaults
+from .sipp_driver import worst_call_s as sipp_worst_call_s
+from .reconcile import integrity, place, reconcile, tolerated
 from .schemas import SchemaSet
 from .generator_health import run_stalls
 from .host_stress import stress_findings, thresholds
@@ -107,6 +111,30 @@ def _spoiled_cdr(imp: Impact, by_id: dict[str, Json], stalls: list[Stall]) -> St
         if st is not None:
             return st
     return None
+
+
+def _failure_spans(run_dir: Path, stream: str) -> list[FailureSpan]:
+    """The failed-call spans of every firing of `stream`, each from its own
+    statistics file: a load incident's firing restarts its counter."""
+    out: list[FailureSpan] = []
+    for path in sorted((run_dir / "streams" / stream).rglob("stat.csv")):
+        out += failure_spans(read_stat_csv(path))
+    return out
+
+
+def _worst_call_s(profile: Profile, stream: str, search_path: list[Path]) -> float:
+    """The longest a call of `stream` can take, by its generator's own bound
+    under its scenario's declared keys (found on the run's search path); the
+    profile's longest for a stream it does not name."""
+    streams = [s for s in profile.streams if s.name == stream] or profile.streams
+
+    def worst(s: Stream) -> float:
+        if s.driver != "sipp":
+            return loadgen.worst_call_s(s)
+        found = next((p for p in (e / "scenarios" / (s.scenario or "") for e in search_path) if p.is_file()), None)
+        return sipp_worst_call_s(s, None if found is None else key_defaults(found))
+
+    return max((worst(s) for s in streams), default=0.0)
 
 
 def _samples(calls: _Calls, stalls: list[Stall], profile: Profile) -> dict[str, StreamSamples]:
@@ -272,7 +300,15 @@ def _compute(run_dir: Path, schemas: SchemaSet) -> Json:
         stall_rows[st.stream].append(
             {"at_ms": st.at_ms, "ms": round(st.ms, 3), "spoiled": len(stalled.get(st, [])), "source": st.source}
         )
-    streams_out, reconciled = reconcile(streams_doc, calls.per_stream, success, stall_rows)
+    spans = [(w.event, w.opened_at_ms, w.closed_at_ms) for w in windows]
+    search_path = [*(Path(p) for p in jv.strings(meta, "search_path")), BASE_CONTENT]
+    placed = {
+        name: place(_failure_spans(run_dir, name), spans, _worst_call_s(profile, name, search_path) * 1000)
+        for name in (jv.string(s, "stream") for s in streams_doc)
+    }
+    streams_out, reconciled = reconcile(
+        streams_doc, calls.per_stream, success, stall_rows, profile.record_shortfall_pct, placed
+    )
     host_t = thresholds(profile.preflight)
     found += reconciled + _stall_findings(stalled, stall_details(run_dir, host_t, list(stalled))) + _window_integrity(windows)
     spoiled = {st: len(ids) for st, ids in stalled.items()}
@@ -316,7 +352,7 @@ def _compute(run_dir: Path, schemas: SchemaSet) -> Json:
     by_cause = unanswered(
         ((r, run.shapes[jv.string(r, "shape")]) for r, _ in calls.valid), windows, budgets, profile, run.shapes
     )
-    status = "invalid" if found else ("fail" if findings else "pass")
+    status = "invalid" if any(not tolerated(f) for f in found) else ("fail" if findings else "pass")
     return {
         "schema": "verdict.v1",
         "run": jv.string(meta, "run"),

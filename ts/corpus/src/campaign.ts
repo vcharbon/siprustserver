@@ -193,7 +193,11 @@ const cutPhase = Effect.fn("Campaign.cut")(function*(request: Request, plan: Pla
   return done.prep
 })
 
-/** The lane driven over the pinned cut, under whatever locks the lane takes. */
+/**
+ * The lane driven over the pinned cut, under whatever locks the lane takes,
+ * once its preflight passed and, under the lane, its job pre-checks
+ * (`ReplayBuild.session`); a refusal of either is the lane's not being ready.
+ */
 const replayPhase = Effect.fn("Campaign.replay")(function*(
   request: Request,
   lane: string,
@@ -212,6 +216,7 @@ const replayPhase = Effect.fn("Campaign.replay")(function*(
     return yield* replay({ captures: plans, options, prepId: prep })
   })).pipe(
     Effect.catchTag("Session.Held", (held) => Effect.succeed(held.held)),
+    Effect.catchTag("PreChecks.Refused", (refused) => Effect.succeed(`${lane} is not ready — ${refused.reason}`)),
     Effect.catchTag("ReplayDb.UnknownCases", (unknown) => Effect.succeed(unknown.message))
   )
   if (typeof replayed === "string") {

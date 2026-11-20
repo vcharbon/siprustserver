@@ -1,41 +1,7 @@
-//! E2E test-management run-core (ADR-0018).
-//!
-//! Holds the compiled **Callflow shapes** and **Infra shapes** and the seam that
-//! runs the *same* scenario over a fake (simulated, paused-clock, in-process
-//! LB+b2bua SUT) or a real (external kind cluster) Infra shape. Fronted later by
-//! the web site and the CI CLI.
+//! The **cell result record** (ADR-0018): the `result.json` a crate's in-test
+//! reporter writes for one cell of a campaign, which the campaign runner reads
+//! back and `ts/contracts/src/e2e.ts` mirrors.
 
-pub mod checks;
-pub mod differential;
-pub mod egress;
-pub mod infra;
-pub mod media;
-pub mod model;
-pub mod registrar;
 pub mod result;
-pub mod run;
-pub mod schema_gen;
-pub mod selector;
-pub mod shape;
-pub mod shapes;
 
-pub use checks::{Bindings, CheckVerdict};
-pub use egress::{
-    ApiCall, ApiCallDestination, ApiCallRoute, CalleeTarget, EgressPolicy, EgressRewrite,
-};
-pub use infra::{
-    EndpointConfig, FakeLsbcB2bua, FakeRegisterProxy, InfraKind, InfraRuntime, InfraShape,
-    RealLoopbackDirect,
-};
-pub use model::{Campaign, Check, CheckBlock, CheckOp, CheckSet, ModelError, TestCase};
-pub use result::{CampaignIndex, CellId, CellSummary, MediaRef, RunResult};
-pub use run::{
-    load_spec, run_blocking, spawn_job, CampaignResult, CampaignSpec, JobHandle, JobStatus,
-};
-pub use shape::{Anchor, CallflowShape, Input, MediaMode};
-pub use shapes::{
-    BasicCall, BasicCallMedia, Rerouting, ReroutingPrack, ShapeEntry, TransferReferMedia,
-};
-// The unified, OPEN shape registry (ONE declaration per shape, shared with the
-// load surface) this crate's functional bodies attach to.
-pub use e2e_model::{ScenarioInputs, ShapeDescriptor, ShapeRegistry};
+pub use result::{CellId, RunResult, Timings};

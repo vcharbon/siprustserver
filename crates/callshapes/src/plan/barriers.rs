@@ -1,7 +1,11 @@
 //! The barriers a compiled plan gates its goals and phases on: facts the
 //! actors observed, each named for the bounded `StepError::who` label.
 
-use scenario_harness::actor::{Barrier, LegPhase, StateInner, SubflowState, SUBFLOW_REALIGN};
+use std::time::Duration;
+
+use scenario_harness::actor::{
+    provisional_lost, Barrier, Goal, GoalStep, LegPhase, StateInner, SubflowState, SUBFLOW_REALIGN,
+};
 
 /// The renegotiation count of `role` reached `n` — the `reinvited` /
 /// `updated` gate.
@@ -61,4 +65,26 @@ pub(super) fn merged(s: &StateInner) -> bool {
 /// The transfer target declined (its leg terminated without confirming).
 pub(super) fn declined(s: &StateInner) -> bool {
     s.leg_at_least("charlie", LegPhase::Terminated)
+}
+
+/// The caller rang, or the loss model dropped a provisional of the call.
+pub(super) fn ringing(s: &StateInner) -> bool {
+    s.rang_or_ring_lost("alice")
+}
+
+/// [`ringing`], and she heard a provisional, so RFC 3261 §9.1 lets her
+/// CANCEL.
+fn may_cancel(s: &StateInner) -> bool {
+    ringing(s) && s.leg("alice").heard_provisional()
+}
+
+/// The caller's CANCEL once she may send it ([`may_cancel`]; with `crash`,
+/// also once her provisional was lost to a crash), `after` its dwell; dropped
+/// once she is answered, as a CANCEL would come after her 2xx.
+pub(super) fn ringing_cancel(after: Duration, crash: bool) -> Goal {
+    let guard = move |s: &StateInner| may_cancel(s) || (crash && provisional_lost(s, "alice"));
+    let answered = |s: &StateInner| s.leg_at_least("alice", LegPhase::Confirmed);
+    Goal::new(Barrier::pred("ringing", guard), GoalStep::Cancel { stated: Vec::new() })
+        .after(after)
+        .unless(Barrier::pred("answered", answered))
 }

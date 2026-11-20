@@ -14,7 +14,8 @@
 //! ([`sip_txn::InviteRefusals`]) — is counted on
 //! `b2bua_new_call_refused_copies_total`, never as a new call, as is a copy
 //! of a call already here (live, or admitted and not born yet, on the same
-//! CSeq) the router answers 482 or discards unrun. A copy a live server
+//! CSeq) the router answers 482, absorbs as a retransmission of the live
+//! call's answered INVITE, or discards unrun. A copy a live server
 //! transaction holds is that transaction's to answer. An INVITE carrying a
 //! To-tag the backlog refuses is counted under class `in_dialog`.
 //!
@@ -211,8 +212,10 @@ impl NewCallCounts {
             refused: Class::ALL.map(|class| txn.deferred_refused(class)),
             copies: txn.refused_copies(),
         };
+        let at_the_brake = brake.map(IngressBrakeCounters::gate_counts).unwrap_or_default();
         let brake = brake.map(IngressBrakeCounters::counts).unwrap_or_default();
         let mut counts = Self::compose(tally, backlog, brake);
+        counts.add(Refusal::EventQueue, at_the_brake);
         // The transaction layer's refusals on arrival while the event-queue
         // gate refuses; their copies are counted with the backlog's.
         counts.add(Refusal::EventQueue, Class::ALL.map(|class| txn.new_call_gate_refused(class)));

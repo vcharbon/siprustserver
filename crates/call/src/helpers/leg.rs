@@ -50,6 +50,22 @@ pub fn callee_dialog_mut<'a>(leg: &'a mut Leg, peer_tag: &str) -> Option<&'a mut
     leg.dialogs.by_tags_mut(&ours, peer_tag)
 }
 
+/// Whether `a` and `b` record one leg: one leg id and one Call-ID and, on a
+/// leg this stack dialled, one From-tag. A Call-ID derives from the leg id
+/// ([`leg_call_id_number`]), so a leg id minted twice names two legs only
+/// by the From-tag each INVITE drew.
+pub fn same_leg(a: &Leg, b: &Leg) -> bool {
+    fn dialled_tag(leg: &Leg) -> Option<&str> {
+        leg.outbound_invite().map(|i| i.our_tag.as_str())
+    }
+    a.leg_id == b.leg_id
+        && a.call_id == b.call_id
+        && match (dialled_tag(a), dialled_tag(b)) {
+            (Some(x), Some(y)) => x == y,
+            _ => true,
+        }
+}
+
 /// This stack's tag on `leg` for a message no dialog names (RFC 3261
 /// §8.2.6.2): the From-tag of the INVITE it sent the leg, else the tag of the
 /// dialog it answers the leg's INVITE under ([`Leg::own_tag`]).
@@ -85,7 +101,8 @@ pub fn caller_dialog_mut<'a>(call: &'a mut Call, our_tag: &str) -> Option<&'a mu
 /// Whether the call waits on nothing more from `leg` before its record is
 /// released ([`Leg::is_resolved`]). A leg whose CANCEL is in flight is not:
 /// the callee owes a `487`, or a `200` may still cross the CANCEL (RFC 3261
-/// §9.1), and finalization must not strand a ringing callee.
+/// §9.1), and finalization must not strand a ringing callee. A CANCEL held
+/// for a dead hop is not in flight.
 pub fn leg_is_resolved(leg: &Leg) -> bool {
     leg.is_resolved()
 }
@@ -97,10 +114,10 @@ pub fn leg_is_resolved(leg: &Leg) -> bool {
 /// call's lifecycle has entered `Terminating`/`Terminated`, or when the leg
 /// itself reads `Terminated` (its CANCEL or BYE sent, its INVITE ended).
 ///
-/// Distinct from [`leg_is_resolved`]: a `Cancelling` leg is *unresolved*
-/// (its callee still owes a 487 or a crossing 200, so finalization waits) yet
-/// already going away — resolution and progress-eligibility are different
-/// questions.
+/// Distinct from [`leg_is_resolved`]: a `Cancelling` leg whose CANCEL left is
+/// *unresolved* (its callee still owes a 487 or a crossing 200, so
+/// finalization waits) yet already going away — resolution and
+/// progress-eligibility are different questions.
 pub fn leg_is_going_away(call_state: CallModelState, leg: &Leg) -> bool {
     matches!(call_state, CallModelState::Terminating | CallModelState::Terminated)
         || leg.state() == LegState::Terminated
@@ -124,6 +141,17 @@ pub fn add_b_leg(call: &mut Call, leg: Leg) {
 /// dialled so far.
 pub fn next_b_leg_id(call: &Call) -> String {
     format!("{}-{}", call.leg_space.prefix(), call.b_legs.len() + 1)
+}
+
+/// The number a dialled leg's Call-ID starts with: the ordinal of `leg_id`
+/// (`{prefix}-{n}`, [`next_b_leg_id`]) plus its space's
+/// [`call_id_base`](crate::LegSpace::call_id_base). Two ids [`next_b_leg_id`]
+/// mints on one copy of a call number distinctly; `None` for an id no leg
+/// space minted.
+pub fn leg_call_id_number(leg_id: &str) -> Option<u64> {
+    let (prefix, n) = leg_id.split_once('-')?;
+    let space = crate::LegSpace::of_prefix(prefix)?;
+    space.call_id_base().checked_add(n.parse::<u64>().ok()?)
 }
 
 /// Record that `leg_id` rang: its INVITE received a 180–189 provisional.

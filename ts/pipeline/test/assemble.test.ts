@@ -6,9 +6,11 @@
 import { Pivot, Tokens } from "@sip/contracts"
 import { describe, expect, it } from "vitest"
 import { assemble } from "../src/assemble.js"
+import { captureIndex } from "../src/capture-index.js"
 import type { CaseSpec } from "../src/case-spec.js"
 import { decideCases } from "../src/caseset.js"
 import type { CaseRule } from "../src/case-rules.js"
+import type { DocumentFacts } from "../src/document-facts.js"
 import type { DocumentRule } from "../src/document-rules.js"
 import { neutralPolicy, policyWith, UNCLASSIFIED, type Refusal } from "../src/policy.js"
 import { abandonedFlows, cancelRaceFlows, derivesNothing, derivesOnePrefix, plan, refusedFlows, sutSet } from "./fixtures.js"
@@ -21,6 +23,13 @@ const SPEC: CaseSpec = {
   uas: [{ leg: 1, hop: 0 }],
   defects: [],
   cutLegs: [0, 1]
+}
+
+/** The CANCEL-race capture, its plan and its index of both under the one-prefix derivation, as a cut hands them on. */
+const raceCapture = () => {
+  const flows = cancelRaceFlows()
+  const read = plan()
+  return { flows, plan: read, index: captureIndex(flows, derivesOnePrefix, read) }
 }
 
 const built = (policy = policyWith({ derives: derivesOnePrefix })) =>
@@ -170,11 +179,10 @@ describe("deciding a whole capture", () => {
     quarantine = false
   ) =>
     decideCases({
-      flows: cancelRaceFlows(),
+      ...raceCapture(),
       capture: CAPTURE,
       specs: [SPEC],
       sut: sutSet(),
-      plan: plan(),
       policy: policyWith({ derives: derivesOnePrefix, refuse: rulesOf(refusals), declare }),
       quarantine
     })
@@ -295,17 +303,43 @@ describe("deciding a whole capture", () => {
       refuses: (input) => ({ line: `${input.caseId}: no run of it can end` })
     }
     const out = decideCases({
-      flows: cancelRaceFlows(),
+      ...raceCapture(),
       capture: CAPTURE,
       specs: [SPEC],
       sut: sutSet(),
-      plan: plan(),
       policy: policyWith({ derives: derivesOnePrefix, refuse: rulesOf([refusal]), refuseOnDocument: [unrunnable] }),
       quarantine: true
     })
     expect(out.refused).toEqual([refusal])
     expect(out.outcomes[0]!.quarantined).toBeUndefined()
     expect(out.outcomes[0]!.quarantineError).toBe(`${SPEC.id}: no run of it can end`)
+  })
+
+  it("hands every document rule the one reading of the assembled document", () => {
+    const seen: Array<unknown> = []
+    const watching = (id: string): DocumentRule => ({
+      id,
+      subject: "scope",
+      disposition: "refuses",
+      why: "it refuses nothing, as the test states it",
+      refuses: (input) => {
+        seen.push(input.document)
+        return undefined
+      }
+    })
+    const out = decideCases({
+      ...raceCapture(),
+      capture: CAPTURE,
+      specs: [SPEC],
+      sut: sutSet(),
+      policy: policyWith({ derives: derivesOnePrefix, refuseOnDocument: [watching("scope-watches-once"), watching("scope-watches-twice")] }),
+      quarantine: true
+    })
+    const assembled = (out.outcomes[0]!.built ?? out.outcomes[0]!.quarantined)!
+
+    expect(seen.length).toBeGreaterThanOrEqual(2)
+    expect(new Set(seen).size).toBe(1)
+    expect((seen[0] as DocumentFacts).pivot).toBe(assembled.pivot)
   })
 
   it("quarantines no document an untrusted refusal stands on, and says why", () => {
@@ -414,11 +448,10 @@ describe("deciding a whole capture", () => {
       refuses: (input) => ({ line: `${input.caseId}: part of an exchange` })
     }
     const out = decideCases({
-      flows: cancelRaceFlows(),
+      ...raceCapture(),
       capture: CAPTURE,
       specs: [SPEC],
       sut: sutSet(),
-      plan: plan(),
       policy: policyWith({
         derives: derivesOnePrefix,
         refuse: rulesOf([deferral]),

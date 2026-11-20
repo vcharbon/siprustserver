@@ -101,7 +101,7 @@ impl FailoverHarness {
     /// The RFC findings and dialog verdicts a row accepted this run, in the
     /// order they were found.
     pub fn fired_rows(&self) -> Vec<Fired> {
-        let (_, accepted) = self.partition_rfc_findings();
+        let accepted = self.partition_rfc_findings().accepted;
         let rfc = accepted.into_iter().filter_map(|((rule, lane, detail), id)| {
             Some(Fired { row: windows::row(id)?, what: format!("[{lane}] {rule}: {detail}") })
         });

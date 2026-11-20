@@ -14,12 +14,15 @@ use serde::{Deserialize, Serialize};
 
 use crate::header_update::SipHeaderUpdates;
 
-/// Platform-mandatory keepalive activation.
+/// Platform-mandatory keepalive activation, as the decision states it. The call
+/// carries it and the runtime acts on neither field: the worker's
+/// `B2buaConfig::keepalive_interval_sec` paces the in-dialog OPTIONS, and one
+/// probe unanswered by its Timer F ends the call.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct KeepaliveActivation {
-    /// Seconds between OPTIONS pokes (or whatever keepalive mechanism is used).
+    /// The keepalive interval the decision asks for, in seconds.
     pub interval_sec: i64,
-    /// Tear down the leg after this many unanswered keepalives.
+    /// The unanswered keepalives the decision would tolerate.
     pub max_missed: i64,
 }
 

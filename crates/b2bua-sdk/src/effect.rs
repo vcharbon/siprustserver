@@ -127,11 +127,13 @@ impl RuleAction {
             | RuleAction::AckLegAnswering { .. }
             | RuleAction::EndOnEvidence { .. }
             | RuleAction::ReleaseStraggler2xx { .. }
+            | RuleAction::ReAckAhead { .. }
             | RuleAction::CreateLeg { .. }
             | RuleAction::DestroyLeg { .. }
             | RuleAction::CancelLeg { .. }
             | RuleAction::CancelPendingReinvite { .. }
             | RuleAction::RejectPendingReinvite { .. }
+            | RuleAction::AnswerRelayOriginator { .. }
             | RuleAction::TerminateLeg { .. }
             | RuleAction::SendRequestToLeg { .. }
             | RuleAction::SendProvisionalToLeg { .. }

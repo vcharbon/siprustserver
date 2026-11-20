@@ -12,12 +12,12 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@sip/contracts": "workspace:*",
     "@sip/viewer-core": "workspace:*",
     "react": "19.2.8",
     "react-dom": "19.2.8"
   },
   "devDependencies": {
-    "@sip/contracts": "workspace:*",
     "@types/node": "24.10.1",
     "@types/react": "19.2.18",
     "@types/react-dom": "19.2.4",

@@ -12,8 +12,13 @@
 //! run that states no clock is folded into the stretch before it — the offset
 //! in force stays, its own copies stay wire events — and dropped when nothing
 //! precedes it. Probes hang under the earliest clock of their connected
-//! component. Why a window cannot do this, why rank pairing needs the
-//! no-timer class and why a clock steps is `docs/sipflow.md`'s.
+//! component.
+//!
+//! No dedup window can stand in for this: a clock offset lands anywhere in the
+//! T1 ladder's own range (0.5 to 16 s), and a window that wide swallows every
+//! smaller ladder gap. Rank pairing can, because a probe never writes one
+//! packet twice; the no-timer anchor keeps a ladder whose first emission one
+//! probe saw and whose rung the other saw from reading as a clock offset.
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 

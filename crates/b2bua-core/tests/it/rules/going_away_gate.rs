@@ -226,7 +226,7 @@ fn begin_termination_disarms_service_watchdogs_and_deactivates_machines() {
                 e,
                 CriticalStateEffect::CancelTimer { key: cancelled } if cancelled == key
             )),
-            "the live fiber {key:?} is cancelled, got {:?}",
+            "the live timer {key:?} is cancelled, got {:?}",
             result.effects.critical,
         );
     }

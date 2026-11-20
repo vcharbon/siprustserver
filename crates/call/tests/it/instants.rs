@@ -10,8 +10,9 @@ use serde_json::Value;
 use crate::common::representative_call;
 
 /// The representative call with every instant-bearing slice the fixture leaves
-/// empty filled in: a transfer, a termination, an own NOTIFY and a message
-/// ring entry on each leg.
+/// empty filled in: a transfer, a termination, an own NOTIFY, the last
+/// re-ACKed 2xx copy of the INVITE a dialog sent and of the one before it, and
+/// a message ring entry on each leg.
 fn every_instant_present() -> Call {
     let mut call = representative_call();
     call.transfer = Some(TransferState {
@@ -39,6 +40,20 @@ fn every_instant_present() -> Call {
             notify: Some(NotifyInFlight { cseq: 9000, sent_at_ms: 1_779_440_065_000 }),
             ..Subscription::new("refer", None)
         }];
+        if let Some(x) = call::helpers::sent_exchange_mut(dialog) {
+            x.re_acked_copy = Some(ReAckedCopy { copy: 11, at_ms: 1_779_440_066_000 });
+            x.ack_ahead = Some(Box::new(AckAhead {
+                ack: RetainedEmission::on_trigger(
+                    b"ACK sip:bob@192.0.2.20 SIP/2.0\r\n\r\n".to_vec(),
+                    ("192.0.2.20".into(), 5060),
+                    Repeated::request("ACK"),
+                ),
+                invite_cseq: 1,
+                ack_branch: "z9hG4bKack-ahead".into(),
+                copies_received: 4,
+                re_acked_copy: Some(ReAckedCopy { copy: 4, at_ms: 1_779_440_064_000 }),
+            }));
+        }
         leg.messages.entries.push(MessageEntry {
             seq: 1,
             at_ms: 1_779_440_042_005,
@@ -117,6 +132,7 @@ fn every_instant_moves_by_the_offset_and_nothing_else_moves() {
         "sent_at_ms",
         "subscriptions",
         "messages",
+        "ack_ahead",
     ] {
         assert!(
             instants.iter().any(|p| p.contains(kind)),

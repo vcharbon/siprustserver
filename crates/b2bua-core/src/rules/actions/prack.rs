@@ -292,6 +292,13 @@ fn deferred_offer(call: &Call, leg_id: &str) -> Option<(String, call::RSeq, Vec<
     }
 }
 
+/// Whether the provisional `id` carried an offer its dialog still owes the
+/// answer to: a PRACK naming it carries that answer, never an offer of its
+/// own (RFC 3262 §5).
+pub(super) fn owes_prack_answer(call: &Call, id: &ProvisionalId) -> bool {
+    owed_offer(call, id).is_some()
+}
+
 /// The offer the provisional `id` carried is no longer owed by its dialog: a
 /// PRACK naming it has left, or its dialog is gone.
 pub(super) fn clear_owed_offer(call: &mut Call, id: &ProvisionalId) {

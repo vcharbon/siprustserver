@@ -73,14 +73,27 @@ def reading(tmp_path: Path, text: str) -> SippStream:
 
 def test_a_real_trace_stat_row_reads_its_counters_and_shows_the_hold(tmp_path: Path) -> None:
     held = TRACE_STAT.splitlines(keepends=True)
-    assert parse_stat_csv(TRACE_STAT) == Counters(100, 100, 0.0)
-    assert parse_stat_csv("".join(held[:2])) == Counters(95, 95, 5.0)
+    assert parse_stat_csv(TRACE_STAT) == Counters(100, 100, 0.0, 0)
+    assert parse_stat_csv("".join(held[:2])) == Counters(95, 95, 5.0, 0)
     assert reading(tmp_path, TRACE_STAT).held_tally() == Tally(100)
     assert reading(tmp_path, "".join(held[:2])).held_tally() is None
+
+
+def test_the_calls_sipp_failed_are_the_generator_failures_of_its_tally(tmp_path: Path) -> None:
+    """A call SIPp counts failed ended with no record: the tally carries the
+    count as the generator's failures."""
+    lines = TRACE_STAT.splitlines(keepends=True)
+    header = lines[0].rstrip("\n").split(";")
+    row = lines[-1].rstrip("\n").split(";")
+    row[header.index("SuccessfulCall(C)")] = "97"
+    row[header.index("FailedCall(C)")] = "3"
+    text = "".join(lines[:-1]) + ";".join(row) + "\n"
+    assert reading(tmp_path, text).tally() == Tally(100, generator_failures=3)
+    assert reading(tmp_path, TRACE_STAT).tally() == Tally(100, generator_failures=0)
 
 
 def test_a_row_sipp_is_still_writing_is_left_out(tmp_path: Path) -> None:
     held = TRACE_STAT.splitlines(keepends=True)
     partial = "".join(held[:2]) + held[2][:120]
-    assert parse_stat_csv(partial) == Counters(95, 95, 5.0)
+    assert parse_stat_csv(partial) == Counters(95, 95, 5.0, 0)
     assert reading(tmp_path, partial).held_tally() is None

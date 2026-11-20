@@ -11,9 +11,8 @@
 //! This free function serves the wall-clock stamps that are **not**
 //! rendered as a timeline and are ordering-only: the decorators' anomaly
 //! `at_ms` and the simulated fabric's undeliverable-packet stamp (whose
-//! ordering authority is `seq`). None is on a logic path, so it does not
-//! violate the "all logic-path time through tokio" rule of
-//! `docs/MIGRATION_STRATEGY.md`. `UdpPacket::arrival_ms` is NOT one of them —
+//! ordering authority is `seq`). None is on a logic path, so it keeps the
+//! "all logic-path time through tokio" rule. `UdpPacket::arrival_ms` is NOT one of them —
 //! it is a behavioural input and rides the binding endpoint's
 //! `sip_clock::Clock`.
 

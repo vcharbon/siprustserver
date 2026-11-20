@@ -1,0 +1,3 @@
+# The reference lane's runner pid: the file naming its B2BUA runner's pid
+# while it runs, which the `restart-worker` operation reads.
+file = "/tmp/siprig-reference/b2bua-runner.pid"

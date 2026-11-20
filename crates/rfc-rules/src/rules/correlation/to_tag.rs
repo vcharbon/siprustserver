@@ -9,6 +9,8 @@ use crate::wire::{Kind, Msg, WireView};
 use crate::rules::charge::charge;
 use crate::rules::Obligation;
 
+use super::parties::Parties;
+
 /// Methods that can legitimately OPEN a transaction outside a dialog. Every
 /// other verb (BYE, ACK, UPDATE, INFO, PRACK, CANCEL) is intrinsically
 /// in-dialog, where a To-tag is what the request owes rather than what it may
@@ -34,16 +36,15 @@ pub struct NoToTagOnInitialRequest;
 
 impl Obligation for NoToTagOnInitialRequest {
     fn eval(&self, wire: &WireView<'_>) -> Vec<Finding> {
-        // The (endpoint, Call-ID) pairs the view has already carried traffic for.
+        let parties = Parties::of(wire.msgs);
         let mut carried: HashMap<(String, String), ()> = HashMap::new();
         let mut out = Vec::new();
         for (mi, msg) in wire.msgs.iter().enumerate() {
             if msg.call_id.is_empty() {
                 continue;
             }
-            let first_for_sender =
-                carried.insert((msg.src.clone(), msg.call_id.clone()), ()).is_none();
-            carried.insert((msg.dst.clone(), msg.call_id.clone()), ());
+            let first_for_sender = carried.insert(parties.sender(msg), ()).is_none();
+            carried.insert(parties.taker(msg), ());
             if msg.repeat || !first_for_sender {
                 continue;
             }
@@ -231,20 +232,21 @@ pub struct InDialogToTag;
 
 impl Obligation for InDialogToTag {
     fn eval(&self, wire: &WireView<'_>) -> Vec<Finding> {
+        let parties = Parties::of(wire.msgs);
         let mut by: HashMap<(String, String), DialogWitness> = HashMap::new();
         let mut out = Vec::new();
         for (mi, msg) in wire.msgs.iter().enumerate() {
             if msg.call_id.is_empty() {
                 continue;
             }
-            let sender = (msg.src.clone(), msg.call_id.clone());
+            let sender = parties.sender(msg);
             if !msg.repeat {
                 if let Some(d) = by.get(&sender).and_then(|w| w.decision(msg, mi)) {
                     out.push(charge(RuleId::InDialogToTag, msg, mi, d));
                 }
             }
             by.entry(sender).or_default().observe(msg, true);
-            by.entry((msg.dst.clone(), msg.call_id.clone())).or_default().observe(msg, false);
+            by.entry(parties.taker(msg)).or_default().observe(msg, false);
         }
         out
     }

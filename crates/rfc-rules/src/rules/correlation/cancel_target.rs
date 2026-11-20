@@ -23,7 +23,7 @@ pub struct CancelRequestUri;
 
 impl Obligation for CancelRequestUri {
     fn eval(&self, wire: &WireView<'_>) -> Vec<Finding> {
-        let mut st = PeerDialogs::default();
+        let mut st = PeerDialogs::new(wire);
         let mut out = Vec::new();
         for (mi, msg) in wire.msgs.iter().enumerate() {
             if !msg.repeat && msg.is_request("CANCEL") {
@@ -81,7 +81,7 @@ pub struct CancelViaBranch;
 
 impl Obligation for CancelViaBranch {
     fn eval(&self, wire: &WireView<'_>) -> Vec<Finding> {
-        let mut st = PeerDialogs::default();
+        let mut st = PeerDialogs::new(wire);
         let mut out = Vec::new();
         for (mi, msg) in wire.msgs.iter().enumerate() {
             if !msg.repeat && msg.is_request("CANCEL") {

@@ -1,5 +1,4 @@
-//! `EventSequencer` — monotonic per-scenario counter (port of
-//! `src/test-harness/framework/EventSequencer.ts`).
+//! `EventSequencer` — monotonic per-scenario counter.
 //!
 //! A deterministic tiebreaker when two recorded events share the same `at_ms`
 //! timestamp. Every recording channel allocates its `seq` from one shared

@@ -1,7 +1,9 @@
 //! RFC 3261 §14 — an INVITE transaction INSIDE a confirmed dialog: how many may
 //! be in flight, what answers one that races another, and how one that fails
-//! must leave the dialog. THREE obligations, each read off one endpoint's own
-//! view:
+//! must leave the dialog. THREE obligations, each read off one user agent's
+//! own view — every socket its transactions tie on the call
+//! ([`Parties`]); a finding still names the
+//! socket of the message judged:
 //!
 //!   - [`NoReInviteWhileInviteInProgress`] (§14.1) charges the UAC: it holds
 //!     one INVITE outstanding per dialog DIRECTION and waits for Confirmed.
@@ -45,13 +47,14 @@
 use crate::rules::branch::BranchName;
 use std::collections::{BTreeMap, BTreeSet};
 
-use sip_message::header::SentBy;
 use sip_message::sniff;
 
 use crate::verdict::{Decision, Evidence, Finding, RuleId};
 use crate::wire::{Kind, Msg, WireView};
 
 use super::branch::BranchReading;
+use super::correlation::Parties;
+use super::sides::Sides;
 use super::Obligation;
 
 crate::registry::rules! {
@@ -107,6 +110,11 @@ pub const REINVITE_FINAL_WINDOW_US: u64 = 180_000_000;
 /// **A re-INVITE the strict reading refuses ([`Msg::refused`]) is neither an
 /// occasion nor in progress**: the UAS answers it 400 or drops it, and no
 /// session change rides it.
+///
+/// **In progress is per user agent** ([`Parties`]): a re-INVITE taken at one
+/// socket of the UAS races an INVITE pending at another. A final is filed under
+/// the agent of the socket its INVITE reached, whichever socket of the UAS sent
+/// it (`Sides`); the finding names the socket the racing re-INVITE reached.
 pub struct ConcurrentReInvite500Or491;
 
 impl Obligation for ConcurrentReInvite500Or491 {
@@ -114,6 +122,8 @@ impl Obligation for ConcurrentReInvite500Or491 {
         // Per endpoint's view of a dialog: the branches of the INVITE
         // transactions still in progress at it. Built as the walk goes, so a
         // re-INVITE is judged against what was in flight BEFORE it.
+        let sides = Sides::of(wire.msgs);
+        let parties = Parties::of(wire.msgs);
         let mut in_progress: BTreeMap<PairKey<'_>, BTreeSet<&str>> = BTreeMap::new();
         let mut dialog_of: BTreeMap<TxnKey<'_>, PairKey<'_>> = BTreeMap::new();
         // Each INVITE transaction's From tag: who sent it on the dialog.
@@ -132,7 +142,7 @@ impl Obligation for ConcurrentReInvite500Or491 {
                 Kind::Request { method }
                     if method.eq_ignore_ascii_case("INVITE") && !msg.refused =>
                 {
-                    let taker = msg.dst.as_str();
+                    let taker = parties.took(msg);
                     let (Some(from_tag), Some(to_tag)) = tags(msg) else { continue };
                     let txn = TxnKey {
                         endpoint: taker,
@@ -168,6 +178,7 @@ impl Obligation for ConcurrentReInvite500Or491 {
                                 ts_us: msg.at_us,
                                 cseq: msg.cseq,
                                 sender: msg.src.as_str(),
+                                taken_at: msg.dst.as_str(),
                                 branch,
                                 pending_branch: pending,
                                 same_sender,
@@ -180,7 +191,7 @@ impl Obligation for ConcurrentReInvite500Or491 {
                 }
                 Kind::Response { status } if msg.cseq_method.eq_ignore_ascii_case("INVITE") => {
                     let txn = TxnKey {
-                        endpoint: msg.src.as_str(),
+                        endpoint: parties.agent(&msg.call_id, sides.uas(msg)),
                         call_id: msg.call_id.as_str(),
                         branch: BranchName(branch),
                     };
@@ -211,14 +222,14 @@ impl Obligation for ConcurrentReInvite500Or491 {
         for race in raced {
             let finding = |decision| Finding {
                 rule: RuleId::ConcurrentReInvite500Or491,
-                emitter: race.txn.endpoint.to_string(),
+                emitter: race.taken_at.to_string(),
                 taker: race.sender.to_string(),
                 cseq: race.cseq,
                 relayed: false,
                 anchor: race.msg,
                 decision,
             };
-            let pending_msg = raced_pending_msg(wire.msgs, &race);
+            let pending_msg = raced_pending_msg(wire.msgs, &parties, &race);
             let Some(answer) = answered.get(&race.txn) else {
                 // No final at all: an absence, decidable only once the
                 // observation demonstrably outlived the window.
@@ -276,7 +287,9 @@ impl Obligation for ConcurrentReInvite500Or491 {
 }
 
 mod in_progress;
+mod origins;
 pub use in_progress::NoReInviteWhileInviteInProgress;
+use origins::Origins;
 
 /// **RFC 3261 §14.1 — a failed re-INVITE leaves the dialog in its prior
 /// state.** A non-2xx final to an in-dialog INVITE does not end the call: the
@@ -307,13 +320,14 @@ pub struct FailedReinviteTearsDownDialog;
 impl Obligation for FailedReinviteTearsDownDialog {
     fn eval(&self, wire: &WireView<'_>) -> Vec<Finding> {
         let seen = BranchReading::of(wire.msgs);
+        let parties = Parties::of(wire.msgs);
         // The calls each endpoint saw a BYE on, in either direction — the
         // "another cause" escape.
         let mut byed: BTreeSet<(&str, &str)> = BTreeSet::new();
         for msg in wire.msgs {
             if msg.is_request("BYE") {
-                byed.insert((msg.src.as_str(), msg.call_id.as_str()));
-                byed.insert((msg.dst.as_str(), msg.call_id.as_str()));
+                byed.insert((parties.sent_by(msg), msg.call_id.as_str()));
+                byed.insert((parties.took(msg), msg.call_id.as_str()));
             }
         }
 
@@ -337,7 +351,8 @@ impl Obligation for FailedReinviteTearsDownDialog {
                     anchor: invite.msg,
                     decision,
                 };
-                if branch.first_final.is_some() || byed.contains(&(key.emitter, key.call_id)) {
+                let agent = parties.agent(key.call_id, key.emitter);
+                if branch.first_final.is_some() || byed.contains(&(agent, key.call_id)) {
                     out.push(finding(Decision::Compliant));
                     continue;
                 }
@@ -365,19 +380,21 @@ impl Obligation for FailedReinviteTearsDownDialog {
     }
 }
 
-/// One INVITE transaction as ONE endpoint drove it. Spelled out as a struct so
-/// the three parts can never swap places.
+/// One INVITE transaction as ONE user agent drove it. Spelled out as a struct
+/// so the three parts can never swap places.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 struct TxnKey<'a> {
+    /// The user agent ([`Parties::agent`]).
     endpoint: &'a str,
     call_id: &'a str,
     branch: BranchName<'a>,
 }
 
-/// One endpoint's view of a dialog, tags UNORDERED: §14.2 judges a UAS against
-/// every INVITE riding the dialog, whichever party sent it.
+/// One user agent's view of a dialog, tags UNORDERED: §14.2 judges a UAS
+/// against every INVITE riding the dialog, whichever party sent it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 struct PairKey<'a> {
+    /// The user agent ([`Parties::agent`]).
     endpoint: &'a str,
     call_id: &'a str,
     /// The dialog's two tags, sorted, so both orientations map to one key.
@@ -392,11 +409,12 @@ impl<'a> PairKey<'a> {
     }
 }
 
-/// One endpoint's view of a dialog DIRECTION, tags ORDERED: §14.1 forbids a UAC
-/// from overlapping its OWN requests, and the reversed orientation is its
+/// One user agent's view of a dialog DIRECTION, tags ORDERED: §14.1 forbids a
+/// UAC from overlapping its OWN requests, and the reversed orientation is its
 /// peer's.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 struct OrderedKey<'a> {
+    /// The user agent ([`Parties::agent`]).
     endpoint: &'a str,
     call_id: &'a str,
     from_tag: &'a str,
@@ -413,6 +431,8 @@ struct Race<'a> {
     cseq: u32,
     /// The party that sent it — the other side of the §14.2 obligation.
     sender: &'a str,
+    /// The socket it reached: the one charged.
+    taken_at: &'a str,
     branch: &'a str,
     pending_branch: &'a str,
     /// The pending INVITE came from the same sender: §14.2's 500 case, not
@@ -429,40 +449,6 @@ struct Answer {
     retry_after: Option<bool>,
 }
 
-/// The bottom Via (sent-by and branch) and CSeq of each INVITE transaction an
-/// endpoint drove, where the vantage carried them: what every forwarder keeps
-/// (§16.6), so the INVITE by another path (§16.3) is told by them.
-#[derive(Default)]
-struct Origins<'a> {
-    of: BTreeMap<TxnKey<'a>, (SentBy, String, u32)>,
-}
-
-impl<'a> Origins<'a> {
-    fn record(&mut self, msg: &Msg, txn: TxnKey<'a>) {
-        if let Some(origin) = origin(msg) {
-            self.of.entry(txn).or_insert(origin);
-        }
-    }
-
-    /// Whether `msg` is, by its bottom Via and CSeq, one of the INVITEs
-    /// `endpoint` has `in_flight` on its dialog under another top-Via branch.
-    fn copies_one_of(&self, msg: &Msg, endpoint: &str, in_flight: &BTreeSet<&str>) -> bool {
-        let Some(origin) = origin(msg) else { return false };
-        in_flight.iter().any(|branch| {
-            let txn =
-                TxnKey { endpoint, call_id: msg.call_id.as_str(), branch: BranchName(branch) };
-            self.of.get(&txn) == Some(&origin)
-        })
-    }
-}
-
-/// `msg`'s bottom Via sent-by and branch, and its CSeq number, or `None` where
-/// the vantage carried no header block or the bottom Via names no branch.
-fn origin(msg: &Msg) -> Option<(SentBy, String, u32)> {
-    let bottom = msg.head.as_deref().and_then(sniff::bottom_via)?;
-    Some((bottom.sent_by, bottom.branch?, msg.cseq))
-}
-
 /// A message's dialog tags, both present, or `None` where either is missing —
 /// an INVITE without both names no dialog to serialise on.
 fn tags(msg: &Msg) -> (Option<&str>, Option<&str>) {
@@ -472,19 +458,21 @@ fn tags(msg: &Msg) -> (Option<&str>, Option<&str>) {
     )
 }
 
-/// View index of the INVITE `endpoint` sent on `branch`, or the branch's own
-/// occasion index where this vantage carried no such send.
-fn branch_msg(msgs: &[Msg], endpoint: &str, branch: &str) -> usize {
+/// View index of the INVITE the user agent `agent` sent on `branch`, or the
+/// branch's own occasion index where this vantage carried no such send.
+fn branch_msg<'m>(msgs: &'m [Msg], parties: &Parties<'m>, agent: &str, branch: &str) -> usize {
     msgs.iter()
-        .position(|m| m.src == endpoint && m.is_request("INVITE") && names(m, branch))
+        .position(|m| parties.sent_by(m) == agent && m.is_request("INVITE") && names(m, branch))
         .unwrap_or(0)
 }
 
 /// View index of the INVITE the racing one collided with, as its TAKER saw it.
-fn raced_pending_msg(msgs: &[Msg], race: &Race<'_>) -> usize {
+fn raced_pending_msg<'m>(msgs: &'m [Msg], parties: &Parties<'m>, race: &Race<'_>) -> usize {
     msgs.iter()
         .position(|m| {
-            m.dst == race.txn.endpoint && m.is_request("INVITE") && names(m, race.pending_branch)
+            parties.took(m) == race.txn.endpoint
+                && m.is_request("INVITE")
+                && names(m, race.pending_branch)
         })
         .unwrap_or(race.msg)
 }

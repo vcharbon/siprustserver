@@ -1,17 +1,58 @@
 //! ACK origination toward a leg (RFC 3261 §13.2.2.4): the ACK of a 2xx this
 //! stack's INVITE drew, relayed from the peer or composed on its own account,
 //! retained for the 2xx's retransmissions, and the answer a delayed offer is
-//! owed in it (RFC 3264 §4).
+//! owed in it (RFC 3264 §4). A retained ACK is sent again only for the copy
+//! of its final the count marked owed (ADR-0057 §10, [`re_ack_copy`]),
+//! whichever rule asks; the ACK carried ahead of a dialog's last INVITE, only
+//! for such a copy of the 2xx before it ([`re_ack_ahead`]).
 
-use call::{Call, RetainedEmission};
+use call::{Call, InviteExchange, RetainedEmission};
 use sip_message::header::MediaType;
 use sip_message::SipHeader;
 
 use crate::effects::{HandlerEffects, OutboundBody, Provenance, QuietTurn};
 use crate::rules::relay;
-use b2bua_sdk::model::Body;
+use b2bua_sdk::model::{Body, RuleContext};
 
 use super::ActionExecutor;
+
+/// The ACK `x`, an INVITE's exchange, retains, re-passed to the transport as it
+/// left (§13.2.2.4: answer included on a delayed offer) under `label`, toward
+/// `leg_id`, when the copy of its final the turn counted is owed it
+/// ([`relay::re_ack_owed`]); nothing otherwise: a copy past the answerer's
+/// ladder, or no copy at all.
+pub(super) fn re_ack_copy(
+    fx: &mut HandlerEffects,
+    x: &InviteExchange,
+    label: String,
+    leg_id: &str,
+) {
+    let Some(retained) = x.emitted_ack.as_ref().filter(|_| relay::re_ack_owed(x)) else {
+        return;
+    };
+    fx.outbound.push(super::ladder::repeat_of(retained, label, leg_id));
+    fx.quiet = Some(QuietTurn::ReAck);
+}
+
+/// The ACK `leg_id`'s dialog named by `ctx` carries ahead of its last INVITE
+/// ([`call::AckAhead`]), re-passed to the transport as it left, when `ctx`'s
+/// event is a copy of the 2xx that ACK acknowledges ([`relay::copy_of_2xx_ahead`])
+/// the count marked owed it ([`relay::re_ack_ahead_owed`]); nothing otherwise.
+pub(super) fn re_ack_ahead(call: &Call, fx: &mut HandlerEffects, ctx: &RuleContext, leg_id: &str) {
+    let (Some(resp), Some(id)) = (ctx.response(), ctx.resolved.dialog.as_ref()) else { return };
+    let x = call::helpers::find_leg(call, leg_id)
+        .and_then(|leg| leg.dialogs.by_tags(&id.our_tag, &id.peer_tag))
+        .filter(|d| relay::copy_of_earlier_2xx(d, resp))
+        .and_then(call::helpers::sent_exchange)
+        .filter(|x| relay::copy_of_2xx_ahead(x, resp));
+    let Some(ahead) = x.and_then(|x| x.ack_ahead.as_ref()).filter(|a| relay::re_ack_ahead_owed(a))
+    else {
+        return;
+    };
+    let label = format!("ACK (re-ACK, earlier INVITE's 2xx) → {leg_id}");
+    fx.outbound.push(super::ladder::repeat_of(&ahead.ack, label, leg_id));
+    fx.quiet = Some(QuietTurn::ReAck);
+}
 
 impl ActionExecutor<'_> {
     /// ACK `leg_id`'s confirmed dialog, carrying `body`/`content_type` through
@@ -50,9 +91,18 @@ impl ActionExecutor<'_> {
         author: relay::Author<'_>,
     ) {
         // The ACK rides the leg's dialog: the one a 2xx established.
-        let dialog = call::helpers::find_leg(call, leg_id)
-            .and_then(|l| l.dialogs.established())
-            .map(call::Dialog::id);
+        let established =
+            call::helpers::find_leg(call, leg_id).and_then(|l| l.dialogs.established());
+        if body.is_empty() {
+            let retained = established
+                .and_then(call::helpers::sent_exchange)
+                .filter(|x| x.emitted_ack.is_some());
+            if let Some(x) = retained {
+                let label = format!("ACK (re-ACK, final retransmit) → {leg_id}");
+                return re_ack_copy(fx, x, label, leg_id);
+            }
+        }
+        let dialog = established.map(call::Dialog::id);
         let description = relay::description_in(&body, content_type.as_ref(), &extra_headers);
         let body = relay::continue_on_leg(
             call,
@@ -69,27 +119,6 @@ impl ActionExecutor<'_> {
         } else {
             call.b_legs.iter().find(|l| l.leg_id == leg_id)
         };
-        // §13.2.2.4 hands THE ACK — the one the 2xx triggered — back to the
-        // transport on every retransmitted copy: when this dialog's current
-        // INVITE transaction already emitted its ACK, a bodyless ack re-sends
-        // those bytes as they are (answer included on a delayed offer) instead
-        // of composing a fresh, answerless datagram. A body-bearing call is a
-        // first emission and composes below.
-        if body.is_empty() {
-            if let Some(retained) = leg
-                .and_then(|l| l.dialogs.established())
-                .and_then(call::helpers::sent_exchange)
-                .and_then(|x| x.emitted_ack.as_ref())
-            {
-                fx.outbound.push(super::ladder::repeat_of(
-                    retained,
-                    format!("ACK (re-ACK, 2xx retransmit) → {leg_id}"),
-                    leg_id,
-                ));
-                fx.quiet = Some(QuietTurn::ReAck);
-                return;
-            }
-        }
         let ack = leg.and_then(|leg| {
             relay::ack_b_leg(
                 self.marks(call),

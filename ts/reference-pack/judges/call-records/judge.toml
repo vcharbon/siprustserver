@@ -1,0 +1,8 @@
+# The judge of the `call-records` claim: each cell's claimed count against the
+# records joined to it, on every cell of the batch it is called for.
+schema = "judge.v1"
+name   = "call-records"
+module = "./judge.ts"
+
+[timeouts]
+judge_s = 30

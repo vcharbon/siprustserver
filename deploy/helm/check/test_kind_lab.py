@@ -25,6 +25,12 @@ class Lint(unittest.TestCase):
             out = helm("lint", "--strict", str(chart), "-f", str(chart / "values-kind.yaml"), *args)
             self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
 
+    def test_the_endurance_sizing_lints_over_the_kind_values(self) -> None:
+        out = helm("lint", "--strict", str(SIPRUST), "-f", str(SIPRUST / "values-kind.yaml"),
+                   "-f", str(SIPRUST / "values-kind-endurance.yaml"),
+                   "--set", "proxy.announce.metallb.enabled=false")
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+
     def test_the_sut_chart_lints_without_a_proxy(self) -> None:
         out = helm("lint", "--strict", str(SIPRUST), "--set", "proxy.enabled=false")
         self.assertEqual(out.returncode, 0, out.stdout + out.stderr)

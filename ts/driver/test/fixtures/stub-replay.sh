@@ -74,6 +74,13 @@ JSON
   "status": "failed"
 }
 JSON
+    # A failing case whose lane still waits on one of its lines leaves its
+    # call failed beside the pending one.
+    case "$case_path" in
+      *pending-line*)
+        printf '[{"name": "call", "source": "interpreter", "answer": "fail"}, {"name": "cleanup", "source": "lane gate", "answer": "pending"}]\n' > "$out_dir/verifications.json"
+        ;;
+    esac
     printf 'the run failed\n' >&2
     exit 1
     ;;
@@ -125,6 +132,13 @@ JSON
     ;;
   *rfc-sut-charged*)
     printf '{"status": "audited", "findings": [{"advisory": false, "charged": "127.0.0.1:5080", "detail": "CSeq reused", "gating": true, "lane": "127.0.0.1:5080", "offending": 9, "rule": "cseq-in-dialog-order"}]}\n' > "$out_dir/rfc.json"
+    ;;
+esac
+
+# A case whose lane still waits on one of its lines leaves it pending.
+case "$case_path" in
+  *pending-line*)
+    printf '[{"name": "call", "source": "interpreter", "answer": "pass"}, {"name": "cleanup", "source": "lane gate", "answer": "pending"}]\n' > "$out_dir/verifications.json"
     ;;
 esac
 

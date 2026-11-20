@@ -1,5 +1,4 @@
-//! Contact-set extraction — the eager, validate-all Contact model. Port of
-//! `tests/sip/contact-set.test.ts`.
+//! Contact-set extraction — the eager, validate-all Contact model.
 //!
 //! `contacts()` returns every contact (folded across repeated header lines and
 //! comma-separated values, RFC 3261 §7.3.1) or the `*` wildcard (§10.2.2).

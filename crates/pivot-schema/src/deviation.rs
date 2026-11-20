@@ -8,7 +8,7 @@
 //! corpus, and a document naming a kind a given interpreter does not implement
 //! must still parse so lint can say so.
 //!
-//! A held automatic is NOT a deviation: §6.1 states the hold as the auto step's
+//! A held automatic is NOT a deviation: §6.3 states the hold as the auto step's
 //! `delay` and the repeat count as `retransmits` on the final that was repeated.
 
 use schemars::JsonSchema;

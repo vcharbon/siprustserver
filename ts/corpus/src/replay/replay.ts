@@ -22,13 +22,18 @@
  * lets the post-run reclassifier re-read the finished cell where it stands.
  *
  * Per batch: its cells are materialised and ONE side-row directory holds the
- * rows of every case in flight. On a lane with a batch process every cell runs
+ * rows of every case in flight, and the batch runs through the one batch
+ * driver (`lane-batch.ts`), its row filed under the sweep and the job where
+ * the replay is one. On a lane with a batch process every cell runs
  * inside it (`LaneHosting.standBatch`): it takes the post-run cleanup check at
  * the batch's scope, because a gauge counting every cell in flight cannot
  * answer for one call. The lane's SUT is the batch's too — stood up where the
  * deployment manages it, attached to where it stands (`LaneHosting.standSut`).
  * Elsewhere each cell is its own interpreter process. Either runs inside the
- * deployment's box (`Boxing`), per cell or per batch.
+ * deployment's box (`Boxing`), per cell or per batch. The collectors the
+ * deployment wires on the lane (`Collectors`) bracket each batch and read the
+ * cells it ran to a bundle; what they answered of a cell is merged into it
+ * once its row closed (`collected-cells.ts`).
  *
  * The phase writes nothing anybody else reads: the bundles are store-named and
  * the cases content-named, so any number of replays run at once over one cut.
@@ -43,11 +48,13 @@
  * `interrupted` over the cells that landed. A cell that never landed stays
  * `planned` on the job, which is what a resume replays.
  */
-import { E2e } from "@sip/contracts"
-import { runCell } from "@sip/driver"
+import { E2e, type Verification } from "@sip/contracts"
+import { CellCollectors, type CollectorRun } from "@sip/rig"
+import { runCell, settled } from "@sip/driver"
 import { perSecond, unpaced } from "@sip/driver/pace"
-import { Bundle, Jobs, Requests, RuleHits, Runs, Sweeps } from "@sip/store"
+import { Batches, Bundle, JobEvents, Jobs, Requests, RuleHits, Runs, Sweeps } from "@sip/store"
 import { ReplayCli } from "@sip/toolchain"
+import * as Clock from "effect/Clock"
 import * as Console from "effect/Console"
 import * as Deferred from "effect/Deferred"
 import * as Duration from "effect/Duration"
@@ -59,8 +66,12 @@ import * as Option from "effect/Option"
 import * as Semaphore from "effect/Semaphore"
 import * as path from "node:path"
 import * as Content from "../content/content.js"
-import { Boxing, CaseLayout, CellHost, LaneHosting, Tools } from "../deployment/index.js"
-import type { BatchHost, SutHandle } from "./batch-protocol.js"
+import { Boxing, CaseLayout, CellHost, Collectors, LaneHosting, Tools } from "../deployment/index.js"
+import type { BatchHost } from "./batch-protocol.js"
+import * as CollectedCells from "./collected-cells.js"
+import * as CollectorIo from "./collector-io.js"
+import * as LaneBatch from "./lane-batch.js"
+import type { StandBatch, StandSut } from "./lane-batch.js"
 import type { Options } from "../options.js"
 import { stemOf } from "../paths.js"
 import * as Provenance from "../provenance.js"
@@ -126,6 +137,8 @@ export interface Replay {
   readonly dirty: ReadonlyArray<string>
   /** How each batch's process died, for every batch whose process did. */
   readonly deadHosts: ReadonlyArray<string>
+  /** Every cell the phase ran to a bundle, as a job's collectors read them. */
+  readonly ran: ReadonlyArray<CollectedCells.LandedCell>
 }
 
 /**
@@ -145,6 +158,8 @@ export interface Batch {
   readonly driven: ReadonlyArray<CellRef>
   /** How many cells the stop interrupted mid-run: admitted, never landed. */
   readonly interrupted: number
+  /** The cells the batch ran to a bundle, in the order they landed. */
+  readonly ran: ReadonlyArray<CollectedCells.LandedCell>
 }
 
 /** Where a batch process keeps its scratch, and a managed SUT its log. */
@@ -169,17 +184,7 @@ export const ceilings = Effect.fn("Replay.ceilings")(function*(options: Options)
   return { cells, starts }
 })
 
-/** Who stands the batch process of a lane; `undefined` where its cells run on their own. */
-export type StandBatch = (
-  lane: string,
-  request: { readonly under: string; readonly rowsDir?: string; readonly memoryMax: string; readonly cells: number }
-) => Effect.Effect<BatchHost | undefined, LaneHosting.LaneUnready | LaneHosting.LaneUnstated>
-
-/** Who stands the SUT of a lane; `undefined` where the cell builds its own. */
-export type StandSut = (
-  lane: string,
-  under: string
-) => Effect.Effect<SutHandle | undefined, LaneHosting.LaneUnready | LaneHosting.LaneUnstated>
+export type { StandBatch, StandSut }
 
 /** Who runs a cell and stands the batch process and the SUT: named so a test drives the loop without an interpreter. */
 export interface Seams {
@@ -211,6 +216,8 @@ export interface Tally {
   /** Why the row closes `error` rather than on its bundle, once a batch of it broke. */
   broke: string | undefined
   outcome: Outcome | undefined
+  /** What the rig's collectors answered of its landed cells, merged once the row closed. */
+  readonly answered: Array<CollectedCells.Pending>
 }
 
 /** What one batch is asked to do. */
@@ -220,10 +227,45 @@ export interface BatchRequest extends Seams {
   /** Every open run row, by capture; a batch closes the rows its cells complete. */
   readonly tallies: ReadonlyMap<string, Tally>
   readonly options: Options
+  /** Whose batch it is: the sweep, and the job where the replay is one. */
+  readonly owner: Batches.Owner
   /** The stop the batch honours, where its caller can be stopped. */
   readonly stop?: Stop
   /** What each cell that landed is told to, the moment it lands: a job marks it ran. */
   readonly ran?: (cell: CellRef) => Effect.Effect<void, unknown>
+  /** The batch's number in its sweep, from 1: its collectors' directory. */
+  readonly number: number
+}
+
+/** The answers of `tally`'s landed cells merged, once its row closed. */
+const mergeAnswered = (tally: Tally) =>
+  tally.outcome === undefined ? Effect.void : CollectedCells.merge(tally.answered.splice(0))
+
+/**
+ * Every landed cell of `tallies` read again once its batch's end and its
+ * collectors have answered the lines it waited on (`settled`, over the lines
+ * `answered` gives for its directory): it passes where they all came back
+ * answered and none failed, and stays not passed while one is still pending.
+ */
+const settleLanded = Effect.fn("Replay.settleLanded")(function*(
+  tallies: ReadonlyArray<Tally>,
+  answered: (cellDir: string) => ReadonlyArray<Verification.Verification>
+) {
+  for (const tally of new Set(tallies)) {
+    for (const [at, summary] of tally.summaries.entries()) {
+      const dir = path.join(tally.run.bundlePath, summary.dir)
+      tally.summaries[at] = yield* settled(summary, dir, answered(dir))
+    }
+  }
+})
+
+/** The lines `collected` answered of each cell of `ran`, by the cell's directory: none for a directory it does not name. */
+const answeredByDir = (
+  ran: ReadonlyArray<CollectedCells.LandedCell>,
+  collected: ReadonlyArray<CollectorRun.Collected>
+): (cellDir: string) => ReadonlyArray<Verification.Verification> => {
+  const byDir = new Map(ran.map((cell) => [cell.dir, collected.flatMap((one) => one.cells.get(cell.id)?.verifications ?? [])]))
+  return (cellDir) => byDir.get(cellDir) ?? []
 }
 
 /**
@@ -269,6 +311,7 @@ const close = Effect.fn("Replay.close")(function*(tally: Tally, options: Options
   const line = interrupted ? `${capture}  ${run.name}: INTERRUPTED ${stopped}` : summarise(capture, run.name, bundle)
   yield* Console.log(line)
   tally.outcome = { capture, status: interrupted ? "interrupted" : bundle.status, detail: line }
+  yield* mergeAnswered(tally)
 })
 
 /** A cell landed under its capture's row; the row closes on its last one. */
@@ -277,6 +320,17 @@ const landed = (tally: Tally, options: Options, count = 1) =>
     tally.landed += count
     return tally.landed >= tally.planned ? close(tally, options) : Effect.void
   })
+
+/**
+ * Each row of `tallies` still open whose every cell landed, closed: the rows
+ * the batch's end closes, a batch process's once its gate has read and a
+ * batch's with collectors once they answered.
+ */
+const closeLanded = Effect.fn("Replay.closeLanded")(function*(tallies: Iterable<Tally>, options: Options) {
+  for (const tally of new Set(tallies)) {
+    if (tally.outcome === undefined && tally.landed >= tally.planned) yield* close(tally, options)
+  }
+})
 
 /** The variables every interpreter of a batch runs under: its box, and the batch's side rows. */
 const interpreterEnv = (memoryMax: string, rowsDir: string | undefined) =>
@@ -295,26 +349,24 @@ const interpreterEnv = (memoryMax: string, rowsDir: string | undefined) =>
  * One batch: its cells materialised, then every cell run under one side-row
  * directory, one batch process (where the lane has one) and one SUT, each
  * capture's row closed as its own last cell lands — or, under a batch
- * process, once the batch's gate has read and charged its cells.
+ * process, once the batch's gate has read and charged its cells, and with
+ * collectors, once they answered.
  * A capture a batch cannot materialise breaks: its cells here and in every
  * batch after it are landed unrun, and its row closes `error`. A stop asked
  * for mid-batch admits no further cell, waits the stop's grace for the cells
  * in flight, then interrupts them; the batch's end runs as on any other.
+ * A batch that fails still closes, where no batch process ran it, each row of
+ * its collectors whose every cell landed, its cells settled on what its
+ * cell-scope collectors answered, and merges those answers into the landed
+ * cells whose rows closed, `not checkable` where it cut them short, so no such
+ * cell passes unanswered.
+ * The batch's row names the cells it drives, the materialised ones; a
+ * batch with none files no row.
  */
 export const batch = Effect.fn("Replay.batch")(function*(request: BatchRequest) {
   const { options, stop, tallies } = request
-  const hosting = yield* LaneHosting.Service
   const cellHost = yield* CellHost.Service
   const drive = request.drive ?? runCell
-  const standHost: StandBatch = request.host ??
-    ((lane, ask) =>
-      hosting.standBatch(lane, {
-        under: ask.under,
-        ...(ask.rowsDir === undefined ? {} : { rowsDir: ask.rowsDir }),
-        memoryMax: ask.memoryMax,
-        cells: ask.cells
-      }))
-  const standSut: StandSut = request.sut ?? ((lane, under) => hosting.standSut(lane, under))
   const tests = yield* cellHost.tests
   const tallyOf = (capture: string): Tally => tallies.get(capture)!
 
@@ -343,107 +395,157 @@ export const batch = Effect.fn("Replay.batch")(function*(request: BatchRequest) 
     : yield* Content.materialiseLedger(options.paths.sessions, [...new Set(cells.map((entry) => entry.caseHash))])
   const env = yield* interpreterEnv(options.memoryMax, merged)
   const limits = yield* ceilings(options)
-  // The lane's batch process, for as long as the batch: it serves what the
-  // SUT asks of its peers, so it stands first. Killed with the batch's scope
-  // whichever way it ends; ended by hand on the way that ends well.
-  const host: BatchHost | undefined = merged === undefined
-    ? undefined
-    : yield* Effect.acquireRelease(
-      standHost(options.lane, { under: runtime, rowsDir: merged, memoryMax: options.memoryMax, cells: limits.cells }),
-      (held) => held?.kill ?? Effect.void
-    )
-
-  // The lane's SUT, for as long as the batch: started here where the
-  // deployment manages it, attached to where it already stands — after the
-  // batch process. Given back whichever way the batch ends.
-  const sut = yield* Effect.acquireRelease(
-    cells.length === 0 ? Effect.succeed(undefined) : standSut(options.lane, runtime),
-    (held) => held?.stop ?? Effect.void
-  )
-
-  const gate = yield* Semaphore.make(limits.cells)
-  const pace = limits.starts > 0 ? yield* perSecond(limits.starts) : unpaced
   const stopping = stop === undefined ? Effect.succeed(false) : Deferred.isDone(stop)
 
   /** The cells handed to the driver, and the ones that came back with a result. */
   const admitted = new Set<PlannedCell>()
   const driven: Array<CellRef> = []
+  /** The cells that ran to a bundle, as the rig's collectors read them. */
+  const ranCells: Array<CollectedCells.LandedCell> = []
+  const collectors = cells.length === 0 ? undefined : yield* collectorsOf(request, () => ranCells)
 
   /**
-   * One cell, run and landed under its row — which closes here on its last,
-   * or once the batch's gate has read where a batch process runs the cells.
-   * Not admitted once a stop is in: it stays planned. The landing is
-   * uninterruptible, so a cell whose result is in hand is never half-recorded.
+   * Every cell in flight at once, bounded by the permit gate, on what the lane
+   * stood: a batch process's cells run in it (the interpreter seam's `run` is
+   * the process's, everything else about a cell is `runCell`'s as ever). The
+   * cells run on a fiber of their own, so a stop can wait for them and then
+   * cut them short.
    */
-  const one = (planned: PlannedCell) => {
-    const tally = tallyOf(planned.capture)
-    return gate.withPermits(1)(Effect.gen(function*() {
-      yield* pace.admit
-      if (yield* stopping) return
-      admitted.add(planned)
-      const finished = yield* drive(planned.cell, { runDir: tally.run.bundlePath, tests, mode: "record" })
-      yield* trimTerminated(path.join(tally.run.bundlePath, finished.summary.dir), finished.summary.passed)
-      yield* Effect.uninterruptible(Effect.suspend(() => {
-        tally.summaries.push(finished.summary)
-        const { cell: _cell, ...ref } = planned
-        driven.push(ref)
-        // Marked as it lands, not at the batch's end: a real-clock batch is a
-        // quarter of an hour, and the job's progress reads these marks.
-        return Effect.andThen(
-          request.ran === undefined ? Effect.void : Effect.ignore(request.ran(ref)),
-          host === undefined ? landed(tally, options) : Effect.sync(() => void (tally.landed += 1))
-        )
-      }))
-    }))
-  }
+  const driveAll = (host: BatchHost | undefined, cellCollectors: CellCollectors.CellCollectors) =>
+    Effect.gen(function*() {
+      const gate = yield* Semaphore.make(limits.cells)
+      const pace = limits.starts > 0 ? yield* perSecond(limits.starts) : unpaced
 
-  // Every cell in flight at once, bounded by the permit gate — on a fiber of
-  // its own, so a stop can wait for it and then cut it short. A batch
-  // process's cells run in it: the interpreter seam's `run` is the process's,
-  // everything else about a cell is `runCell`'s as ever.
-  const inHost = <A, E, R>(self: Effect.Effect<A, E, R>) =>
-    host === undefined ? self : Effect.updateService(self, ReplayCli.Service, (cli) => ({ ...cli, run: host.run }))
-  const running = yield* Effect.forkChild(
-    Effect.forEach(cells, one, { concurrency: "unbounded", discard: true }).pipe(
-      Effect.provideService(ReplayCli.Environment, env),
-      inHost
-    )
-  )
-  const stopped = stop === undefined
-    ? false
-    : yield* Effect.raceFirst(Effect.as(Fiber.await(running), false), Effect.as(Deferred.await(stop), true))
-  if (stopped) {
-    const grace = yield* Deferred.await(stop!)
-    const inFlight = () => admitted.size - driven.length
-    yield* Console.log(
-      `[replay] stop requested: admitting no new cell; ${inFlight()} cell(s) in flight, waiting up to ${grace} s`
-    )
-    const finished = yield* Fiber.await(running).pipe(Effect.timeoutOption(Duration.seconds(grace)))
-    if (Option.isNone(finished)) {
-      yield* Console.log(`[replay] grace over: interrupting ${inFlight()} cell(s)`)
-      yield* Fiber.interrupt(running)
+      /**
+       * One cell's call, landed under its row — which closes here on its last,
+       * or once the batch's gate has read where a batch process runs the cells,
+       * or once its collectors answered where the batch runs any.
+       * The landing is uninterruptible, so a cell whose result is in hand is
+       * never half-recorded. The cell as the rig's collectors read it, where
+       * it ran to a bundle.
+       */
+      const call = (planned: PlannedCell) =>
+        Effect.gen(function*() {
+          const tally = tallyOf(planned.capture)
+          const finished = yield* drive(planned.cell, { runDir: tally.run.bundlePath, tests, mode: "record" })
+          yield* trimTerminated(path.join(tally.run.bundlePath, finished.summary.dir), finished.summary.passed)
+          return yield* Effect.uninterruptible(Effect.suspend(() => {
+            tally.summaries.push(finished.summary)
+            const { cell: _cell, ...ref } = planned
+            driven.push(ref)
+            const ran: CollectedCells.LandedCell | undefined = finished.summary.skipped !== undefined ? undefined : {
+              id: cellName(ref),
+              caseId: finished.summary.cell.case,
+              lane: options.lane,
+              dir: path.join(tally.run.bundlePath, finished.summary.dir),
+              runId: tally.run.id,
+              failed: failedOwn(finished.summary)
+            }
+            if (ran !== undefined) ranCells.push(ran)
+            // Marked as it lands, not at the batch's end: a real-clock batch is a
+            // quarter of an hour, and the job's progress reads these marks.
+            return Effect.as(
+              Effect.andThen(
+                request.ran === undefined ? Effect.void : Effect.ignore(request.ran(ref)),
+                host === undefined && collectors === undefined
+                  ? landed(tally, options)
+                  : Effect.sync(() => void (tally.landed += 1))
+              ),
+              ran
+            )
+          }))
+        })
+
+      /** One cell, its call bracketed by its cell-scope collectors. Not admitted once a stop is in: it stays planned. */
+      const one = (planned: PlannedCell) =>
+        gate.withPermits(1)(Effect.gen(function*() {
+          yield* pace.admit
+          if (yield* stopping) return
+          admitted.add(planned)
+          yield* cellCollectors.around(
+            cellName(planned),
+            call(planned),
+            (ran) => (ran === undefined ? Effect.succeed(undefined) : CollectedCells.describe([ran], batchNameOf(request)))
+          )
+        }))
+
+      const inHost = <A, E, R>(self: Effect.Effect<A, E, R>) =>
+        host === undefined ? self : Effect.updateService(self, ReplayCli.Service, (cli) => ({ ...cli, run: host.run }))
+      const running = yield* Effect.forkChild(
+        Effect.forEach(cells, one, { concurrency: "unbounded", discard: true }).pipe(
+          Effect.provideService(ReplayCli.Environment, env),
+          inHost
+        )
+      )
+      const stopped = stop === undefined
+        ? false
+        : yield* Effect.raceFirst(Effect.as(Fiber.await(running), false), Effect.as(Deferred.await(stop), true))
+      let graceEnd: number | undefined
+      if (stopped) {
+        const grace = yield* Deferred.await(stop!)
+        graceEnd = (yield* Clock.currentTimeMillis) + grace * 1000
+        const inFlight = () => admitted.size - driven.length
+        yield* Console.log(
+          `[replay] stop requested: admitting no new cell; ${inFlight()} cell(s) in flight, waiting up to ${grace} s`
+        )
+        const finished = yield* Fiber.await(running).pipe(Effect.timeoutOption(Duration.seconds(grace)))
+        if (Option.isNone(finished)) {
+          yield* Console.log(`[replay] grace over: interrupting ${inFlight()} cell(s)`)
+          yield* Fiber.interrupt(running)
+        }
+      }
+      const ran = yield* Fiber.await(running)
+      if (!stopped && Exit.isFailure(ran)) return yield* Effect.failCause(ran.cause)
+      const interrupted = admitted.size - driven.length
+      if (interrupted > 0) yield* Console.log(`[replay] ${interrupted} cell(s) interrupted, ${driven.length} landed`)
+      return { value: undefined, interrupted, ...(graceEnd === undefined ? {} : { graceEnd }) } satisfies LaneBatch.Driven<void>
+    })
+
+  const answeredOf = (collected: ReadonlyArray<CollectorRun.Collected>) => {
+    for (const pending of CollectedCells.pendingOf(collected, ranCells)) {
+      [...tallies.values()].find((tally) => tally.run.id === pending.runId)!.answered.push(pending)
     }
   }
-  const ran = yield* Fiber.await(running)
-  if (!stopped && Exit.isFailure(ran)) return yield* Effect.failCause(ran.cause)
-  const interrupted = admitted.size - driven.length
-  if (interrupted > 0) yield* Console.log(`[replay] ${interrupted} cell(s) interrupted, ${driven.length} landed`)
-  // Whether the process died is read BEFORE it is ended: one that died
-  // mid-batch is a cause, one that ended here is not.
-  const deadHost = host?.died()
+  let ofCells = CellCollectors.NONE
+  let hosted = false
+  const touched = () => driven.map((ref) => tallyOf(ref.capture))
+  const ended = yield* LaneBatch.run({
+    lane: options.lane,
+    ...(cells.length === 0 ? {} : { row: { ...request.owner, lane: options.lane, cells: cells.map(cellName) } }),
+    stand: merged === undefined
+      ? undefined
+      : { under: runtime, rowsDir: merged, memoryMax: options.memoryMax, cells: limits.cells },
+    ...(request.host === undefined ? {} : { host: request.host }),
+    ...(request.sut === undefined ? {} : { sut: request.sut }),
+    ...(collectors === undefined ? {} : { collectors }),
+    drive: ({ host, cells: cellCollectors }) => {
+      ofCells = cellCollectors
+      hosted = host !== undefined
+      return driveAll(host, cellCollectors)
+    }
+  }).pipe(
+    Effect.tapCause(() =>
+      Effect.suspend(() => {
+        const settled = ofCells.settled()
+        answeredOf(settled)
+        const closing = hosted || collectors === undefined ? Effect.void : Effect.andThen(
+          settleLanded(touched(), answeredByDir(ranCells, settled)),
+          closeLanded(touched(), options)
+        )
+        return Effect.andThen(closing, Effect.forEach(new Set(touched()), mergeAnswered, { discard: true }))
+      })
+    )
+  )
+  answeredOf(ended.collected)
+  const { deadHost, contexts, interrupted } = ended
+  const dirty = [ended.dirty, LaneBatch.leftChangedOf(ended)].filter((said) => said !== undefined).join("; ") || undefined
   if (deadHost !== undefined) yield* Console.error(`[replay] ${deadHost}`)
-  // The batch's own gate, in the process once every cell ended. A batch whose
-  // stop interrupted cells has its process killed with them in flight, and
-  // takes no gate. A managed SUT that DIED is reported as itself, never as a
-  // leak.
-  const reapedBy = host === undefined || interrupted > 0 ? Effect.succeed(undefined) : host.end
-  const hostDirty = deadHost === undefined ? yield* reapedBy : undefined
-  const dirty = sut?.died() ?? hostDirty
   if (dirty !== undefined) yield* Console.error(`[replay] ${dirty}`)
+  const closesHere = ended.hosted || collectors !== undefined
+  if (closesHere) yield* settleLanded(touched(), answeredByDir(ranCells, ended.collected))
   // What the gate read of a standing SUT's call contexts, on every run the
   // batch's cells ran under; a context one cell's call left is that cell's
   // run's cleanup finding, never the batch's.
-  const contexts = host?.contexts()
   if (contexts !== undefined) {
     const runs = yield* Runs.Service
     const runOf = new Map(driven.map((ref) => [tallyOf(ref.capture).run.bundlePath, tallyOf(ref.capture).run.id]))
@@ -457,16 +559,81 @@ export const batch = Effect.fn("Replay.batch")(function*(request: BatchRequest) 
       if (at >= 0) tally.summaries[at] = { ...tally.summaries[at]!, passed: false }
     }
   }
-  // A batch process's rows close once its gate has read, each on its last cell.
-  if (host !== undefined) {
-    for (const tally of new Set(driven.map((ref) => tallyOf(ref.capture)))) {
-      if (tally.outcome === undefined && tally.landed >= tally.planned) yield* close(tally, options)
-    }
-  }
-  return { dirty, deadHost, driven, interrupted } satisfies Batch
-  // Scoped: the batch process is released with the batch, whichever way it
-  // ends, so nothing is left holding the lane's addresses.
-}, Effect.scoped)
+  if (closesHere) yield* closeLanded(driven.map((ref) => tallyOf(ref.capture)), options)
+  for (const tally of new Set(driven.map((ref) => tallyOf(ref.capture)))) yield* mergeAnswered(tally)
+  return { dirty, deadHost, driven, interrupted, ran: ranAsEnded(ranCells, ended, tallies) } satisfies Batch
+})
+
+/** Whether `summary`'s cell failed or errored as it stands: not passed, not skipped, and no line of it still pending. */
+const failedOwn = (summary: E2e.CellSummary): boolean =>
+  !summary.passed && summary.skipped === undefined && summary.pending === undefined
+
+/**
+ * `ran`, a batch's landed cells, each marked failed as its batch ended
+ * (`ended`): every one where its end did not judge them (`LaneBatch.failedAtEnd`),
+ * else its summary read again once the batch's end settled and charged it,
+ * or a failing line the batch's collectors answered of it.
+ */
+const ranAsEnded = (
+  ran: ReadonlyArray<CollectedCells.LandedCell>,
+  ended: Pick<LaneBatch.Ended<unknown>, "judged" | "collected">,
+  tallies: ReadonlyMap<string, Tally>
+): ReadonlyArray<CollectedCells.LandedCell> => {
+  if (!ended.judged) return ran.map((cell) => ({ ...cell, failed: true }))
+  const summaries = new Map(
+    [...tallies.values()].flatMap((tally) => tally.summaries.map((summary) => [path.join(tally.run.bundlePath, summary.dir), summary] as const))
+  )
+  return CollectedCells.failedBy(ran, ended.collected).map((cell) => {
+    const summary = summaries.get(cell.dir)
+    return cell.failed !== true && summary !== undefined && failedOwn(summary) ? { ...cell, failed: true } : cell
+  })
+}
+
+/**
+ * The rig's collectors of `request`'s batch (`@sip/corpus` `Collectors`), their
+ * directories under the sweep's batch's own, their events the job's where the
+ * replay is one, over the cells `ran` names once driven, with the judges of
+ * the batch's exports alone and its cell-scope collectors, each cell's over
+ * that cell once its call landed; none where the deployment wires nothing on
+ * the lane.
+ */
+const collectorsOf = Effect.fn("Replay.collectorsOf")(function*(
+  request: BatchRequest,
+  ran: () => ReadonlyArray<CollectedCells.LandedCell>
+) {
+  const { options, owner } = request
+  const holder = holderOf(request)
+  const batch = yield* Effect.flatMap(Collectors.Service, (seam) =>
+    Collectors.batchOf(seam, options.lane, path.join(holder, "collectors"), holder))
+  if (!Collectors.wiresAny(batch)) return undefined
+  const events = yield* JobEvents.Service
+  return {
+    instances: batch.instances,
+    holder,
+    options: {
+      sink: CollectorIo.sinkOf(owner.jobId === undefined ? undefined : { id: owner.jobId, events }),
+      locker: yield* CollectorIo.locker(),
+      exportJudges: batch.exportJudges
+    },
+    cells: () => CollectedCells.describe(ran(), batchNameOf(request)),
+    cell: batch.cell
+  } satisfies LaneBatch.Collectors<void, FileSystem.FileSystem>
+})
+
+/** The directory of `request`'s batch under the session tree: what its collectors attach to it, theirs under it. */
+const holderOf = (request: BatchRequest): string =>
+  path.join(
+    request.options.paths.sessions,
+    CollectedCells.COLLECTORS_DIR,
+    request.owner.sweepId === undefined ? `job${request.owner.jobId}` : `sweep${request.owner.sweepId}`,
+    batchNameOf(request)
+  )
+
+/** The batch's name as its cells' descriptions state it. */
+const batchNameOf = (request: BatchRequest): string => `batch${request.number}`
+
+/** A cell as its batch's row names it: its capture and its call. */
+const cellName = (ref: CellRef): string => `${ref.capture}#${ref.callKey}`
 
 /** What the phase is asked to replay. */
 export interface PhaseRequest extends Seams {
@@ -643,7 +810,8 @@ export const phase = Effect.fn("Replay.phase")(function*(request: PhaseRequest) 
       landed: 0,
       summaries: [],
       broke: undefined,
-      outcome: undefined
+      outcome: undefined,
+      answered: []
     })
   }
 
@@ -651,13 +819,16 @@ export const phase = Effect.fn("Replay.phase")(function*(request: PhaseRequest) 
   const swept = yield* Effect.gen(function*() {
     const dirty: Array<string> = []
     const deadHosts: Array<string> = []
+    const ran: Array<CollectedCells.LandedCell> = []
     for (let at = 0; at < cells.length; at += options.batchSize) {
       // A stop in before a batch starts: no batch starts.
       if (yield* stopping) break
       if (job !== undefined) yield* jobs.batch(job.id, Math.floor(at / options.batchSize) + 1, batches)
       const done = yield* batch({
         cells: cells.slice(at, at + options.batchSize),
+        number: Math.floor(at / options.batchSize) + 1,
         tallies,
+        owner: job === undefined ? { sweepId: sweep } : { sweepId: sweep, jobId: job.id },
         options,
         ...(stop === undefined ? {} : { stop }),
         ...(job === undefined ? {} : { ran: (cell: CellRef) => requests.ran(job.id, [cell]) }),
@@ -672,8 +843,9 @@ export const phase = Effect.fn("Replay.phase")(function*(request: PhaseRequest) 
         yield* runs.dirty(touched, done.dirty)
       }
       if (done.deadHost !== undefined) deadHosts.push(done.deadHost)
+      ran.push(...done.ran)
     }
-    return { dirty, deadHosts }
+    return { dirty, deadHosts, ran }
   }).pipe(Effect.provide(cellHost.services({ interpreter, audit })))
   // Stopped: every row still open closes on what landed under it.
   const interrupted = yield* stopping
@@ -696,7 +868,8 @@ export const phase = Effect.fn("Replay.phase")(function*(request: PhaseRequest) 
     bundles: [...opened.values()].map((run) => run.bundlePath),
     outcomes: captures.map((plan) => settled.get(plan.capture) ?? tallies.get(plan.capture)!.outcome!),
     dirty: swept.dirty,
-    deadHosts: swept.deadHosts
+    deadHosts: swept.deadHosts,
+    ran: swept.ran
   } satisfies Replay
 })
 
@@ -724,7 +897,7 @@ export const report = (replay: Replay, options: { readonly errorsFail?: boolean 
         (replay.dirty.length === 0 ? "" : ` dirty-batches=${replay.dirty.length}`) +
         (replay.deadHosts.length === 0 ? "" : ` dead-batch-processes=${replay.deadHosts.length}`)
     )
-    yield* Console.log("[replay] study any of them at /triage/<capture> in the flow viewer")
+    yield* Console.log("[replay] study any of them at /triage/<capture> on the site")
     if (replay.interrupted) return INTERRUPTED_EXIT
     const errors = (options.errorsFail ?? true) && by("error") > 0
     return errors || replay.dirty.length > 0 || replay.deadHosts.length > 0 ? 1 : 0

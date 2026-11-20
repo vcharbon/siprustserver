@@ -11,6 +11,7 @@
 import type { Flows } from "@sip/contracts"
 import { describe, expect, it } from "vitest"
 import { CASE_RULES, type CaseRule, type RefusalInput } from "../src/case-rules.js"
+import { captureIndex } from "../src/capture-index.js"
 import { decideCases } from "../src/caseset.js"
 import type { CaseSpec } from "../src/case-spec.js"
 import { TRUNCATED_AT_EDGE } from "../src/capture-edge.js"
@@ -410,16 +411,20 @@ describe("a misordered case is charged to the misordering alone", () => {
       }]
     )
 
-  const decide = (caller: ReadonlyArray<Flows.Msg>, quarantine = false) =>
-    decideCases({
-      flows: family(caller),
+  const decide = (caller: ReadonlyArray<Flows.Msg>, quarantine = false) => {
+    const flows = family(caller)
+    const read = plan()
+    return decideCases({
+      flows,
       capture: CAPTURE,
       specs: [SPEC],
       sut: sutSet(),
-      plan: plan(),
+      plan: read,
+      index: captureIndex(flows, derivesOnePrefix, read),
       policy: policyWith({ derives: derivesOnePrefix }),
       quarantine
     })
+  }
 
   /** The caller's re-INVITE, its ACK stamped before the 200 it acknowledges. */
   const lateAnswer = (): ReadonlyArray<Flows.Msg> => [

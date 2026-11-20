@@ -21,6 +21,7 @@
 //! document's expect and settle budgets. Different facts, so different names.
 
 pub mod bindings;
+pub mod identities;
 pub mod locate;
 pub mod recording;
 pub mod rfc;
@@ -29,6 +30,7 @@ pub mod timing;
 pub mod verdict;
 
 pub use bindings::{BindingError, IdentityBindings};
+pub use identities::{Identities, Identity};
 pub use locate::locate;
 pub use recording::{Dir, RecordedMessage};
 pub use rfc::{MessageRef, RfcFinding, RunRfcAudit};

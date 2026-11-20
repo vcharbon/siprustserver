@@ -12,10 +12,10 @@ use sip_message::parser::custom::CustomParser;
 use sip_message::SipParser;
 
 use crate::config::B2buaConfig;
-use crate::effects::OutboundBody;
+use crate::effects::{HandlerResult, OutboundBody, QuietTurn};
 use crate::initial_invite::build_initial_call;
 use crate::obligations::ObligationSet;
-use crate::rule_chain::{rule_chain_turn, Framework, TurnInput};
+use crate::rule_chain::{quiet_turn, rule_chain_turn, Framework, TurnInput};
 use crate::rules::default_rules;
 use crate::stack_identity::{build_call_via, RequestFacts, StackIdentityOpts};
 use crate::test_call::{invite, src, turn};
@@ -84,14 +84,13 @@ fn refused(call: &Call, sender: (&str, u16)) -> CallEvent {
     CallEvent::sip(CustomParser::new().parse(raw.as_bytes()).expect("a response"), src())
 }
 
-/// The Request-URIs of the ACKs the turn on the callee's 487, sent from
-/// `sender`, sends, `matched_client_txn` as the layer read it.
-fn acks_sent(sender: (&str, u16), matched_client_txn: bool) -> Vec<String> {
+/// The turn `call` takes on the callee's 487, sent from `sender`,
+/// `matched_client_txn` as the layer read it.
+fn turn_on_the_487(call: Call, sender: (&str, u16), matched_client_txn: bool) -> HandlerResult {
     let config = config();
     let rules = default_rules();
     let obligations = ObligationSet::core();
     let fw = Framework { config: &config, rules: &rules, obligations: &obligations };
-    let call = call_with_an_ended_dial();
     let event = refused(&call, sender);
     let call_ref = call.call_ref.clone();
     let input = TurnInput {
@@ -104,11 +103,20 @@ fn acks_sent(sender: (&str, u16), matched_client_txn: bool) -> Vec<String> {
         now_ms: 1_000,
         owners: Default::default(),
     };
-    let result = rule_chain_turn(&fw, call, input, &mut turn(1)).expect("the turn crosses no cap");
+    rule_chain_turn(&fw, call, input, &mut turn(1)).expect("the turn crosses no cap")
+}
+
+/// The Request-URIs of the ACKs the turn on the callee's 487, sent from
+/// `sender`, sends or hands the book as unheld answers, `matched_client_txn`
+/// as the layer read it.
+fn acks_sent(sender: (&str, u16), matched_client_txn: bool) -> Vec<String> {
+    let result = turn_on_the_487(call_with_an_ended_dial(), sender, matched_client_txn);
+    let unheld = result.effects.unheld.iter().flat_map(|a| std::iter::once(&a.ack).chain(&a.bye));
     result
         .effects
         .outbound
         .iter()
+        .chain(unheld)
         .filter_map(|e| match &e.body {
             OutboundBody::Request(r) if r.method().as_str() == "ACK" => {
                 Some(r.request_uri().text().into_owned())
@@ -134,4 +142,20 @@ fn a_non_2xx_the_layer_matched_draws_no_second_ack() {
 #[test]
 fn a_non_2xx_whose_via_names_this_node_draws_no_ack() {
     assert_eq!(acks_sent(("127.0.0.1", 5091), false), Vec::<String>::new());
+}
+
+/// A copy of the 487 on the call that took its first arrival leaves the body
+/// as it read it: the turn persists quietly when the shell's book absorbed
+/// its answer whole (ADR-0063 §2), and is a write while the answer is pending
+/// or once the book sent its ACK.
+#[test]
+fn a_copy_whose_unheld_answer_the_book_absorbed_persists_quietly() {
+    let first = turn_on_the_487(call_with_an_ended_dial(), OTHER, false);
+    let mut copy = turn_on_the_487(first.call, OTHER, false);
+    assert_eq!(copy.effects.unheld.len(), 1, "the copy draws its unheld answer");
+    assert_eq!(quiet_turn::class(&copy), None, "its answer pending: a write");
+    let answer = copy.effects.unheld.pop().expect("the answer");
+    assert_eq!(quiet_turn::class(&copy), Some(QuietTurn::AbsorbedCopy), "absorbed: quiet");
+    copy.effects.outbound.push(answer.ack);
+    assert_eq!(quiet_turn::class(&copy), None, "its ACK sent: a write");
 }

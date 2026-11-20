@@ -1,5 +1,4 @@
-//! suppress-18x — `relayFirst18xTo180` strategy `drop-sdp` (wire `true`). Port of
-//! `tests/scenarios/suppress-18x.ts`.
+//! suppress-18x — `relayFirst18xTo180` strategy `drop-sdp` (wire `true`).
 //!
 //! The B2BUA rewrites the first 18x from any b-leg into a bare 180 (no SDP / no
 //! 100rel) and suppresses later 18x. A reliable 1xx is PRACKed by the B2BUA
@@ -183,7 +182,6 @@ async fn a_fork_the_caller_never_saw_answers_under_its_own_dialog() {
 /// `/call/failure` to bob2 (new R-URI), which answers. Alice never sees the 503;
 /// her 200 OK opens a second caller dialog (bob2 rang behind the mask) and the
 /// dialog it confirms carries her ACK and BYE.
-/// (TS `suppress18xFailoverReject`.)
 #[tokio::test]
 async fn failover_reject() {
     let h = Harness::with_transit_delay("suppress-18x-failover-reject", 0);
@@ -247,7 +245,10 @@ async fn failover_reject() {
 /// B2BUA CANCELs bob1 and fails over via `/call/failure` to bob2 (new R-URI),
 /// which answers with the offer. Alice's 200 opens a second caller dialog (bob2
 /// rang behind the mask), and her ACK answers the offer inside it.
-/// (TS `suppress18xFailoverNoAnswer`.)
+///
+/// The clock advances just past the 30 s no-answer deadline, not a full second
+/// more, so bob2 answers the failover INVITE before its Timer A retransmit
+/// (~500 ms) and sees no extra INVITE.
 #[tokio::test(start_paused = true)]
 async fn failover_no_answer() {
     let h = Harness::with_transit_delay("suppress-18x-failover-no-answer", 0);
@@ -273,10 +274,6 @@ async fn failover_no_answer() {
     let p180 = call.expect(180).await;
     let first_to_tag = p180.to().tag().expect("180 has a To-tag").to_string();
 
-    // No-answer timeout (30 s) → CANCEL bob1 + failover to bob2. Advance just
-    // past the deadline (not a full second) so the failover INVITE to bob2 is
-    // answered before its Timer A retransmit (~500 ms) leaks under the paused
-    // clock — the deterministic equivalent of the TS `bob2.allowExtra("INVITE")`.
     h.advance(Duration::from_secs(30) + Duration::from_millis(100)).await;
 
     // Bob1 gets the CANCEL (tied to its still-open INVITE txn), 200s it, then
@@ -475,7 +472,6 @@ async fn messages_one_per_value_dedupes_on_upstream_status() {
 
 /// No policy → normal behaviour: every 180 is relayed verbatim (no suppression,
 /// no bare-180 downgrade): the policy stays off the default path.
-/// (TS `suppress18xDisabled`.)
 #[tokio::test]
 async fn disabled() {
     let h = Harness::with_transit_delay("suppress-18x-disabled", 0);

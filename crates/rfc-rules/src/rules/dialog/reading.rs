@@ -1,40 +1,42 @@
-//! The dialog walk the §12 rules share: per endpoint, the requests it sent,
+//! The dialog walk the §12 rules share: per user agent, the requests it sent,
 //! each paired with the dialog state that held when it went.
 
 use std::collections::BTreeMap;
 
 use sip_message::sniff::UriFacts;
 
+use crate::rules::correlation::Parties;
 use crate::verdict::{Decision, Finding, RuleId};
 use crate::wire::{Kind, Msg};
 
 use super::message_facts::{record_route_set, remote_tag_of, set_if_empty};
 
-/// One endpoint's view of ONE dialog. Spelled out as a struct so the three
+/// One user agent's view of ONE dialog. Spelled out as a struct so the three
 /// parts can never swap places.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 struct DialogKey<'a> {
-    /// The endpoint whose dialog this is.
-    endpoint: &'a str,
+    /// The user agent whose dialog this is ([`Parties`]): a party sending from
+    /// one socket and listening on another holds one dialog, not two.
+    agent: &'a str,
     call_id: &'a str,
     /// The PEER's dialog tag, `""` before the peer has minted one.
     remote_tag: &'a str,
 }
 
-/// What the establishing exchange fixed for one dialog, as one endpoint saw it.
+/// What the establishing exchange fixed for one dialog, as one agent saw it.
 #[derive(Debug, Default, Clone)]
 pub(super) struct Dialog {
-    /// The URI this endpoint answers on, and the URI its peer does — §12.2.1.1
+    /// The URI this agent answers on, and the URI its peer does — §12.2.1.1
     /// has every in-dialog request repeat the pair.
     pub(super) local_uri: String,
     pub(super) remote_uri: String,
     /// The route set in the order in-dialog requests must reproduce it.
     pub(super) route_set: Vec<UriFacts>,
-    /// The endpoint sent the establishing INVITE, so its route set is the
+    /// The agent sent the establishing INVITE, so its route set is the
     /// dialog-creating RESPONSE's Record-Route stack, without the rows it
     /// forwarded, reversed (§12.1.2).
     pub(super) is_uac: bool,
-    /// Record-Route rows the endpoint itself forwarded on the establishing
+    /// Record-Route rows the agent itself forwarded on the establishing
     /// INVITE: a record-routing proxy's own hop and those upstream of it, the
     /// bottom of the response's stack and no part of its route set.
     pub(super) forwarded_record_routes: usize,
@@ -42,25 +44,25 @@ pub(super) struct Dialog {
     /// INVITE on the sent branch is that INVITE, not a re-INVITE.
     pub(super) initial_invite_sent_branch: String,
     pub(super) initial_invite_received_branch: String,
-    /// The endpoint ANSWERED the establishing INVITE with a tagged response, so
+    /// The agent ANSWERED the establishing INVITE with a tagged response, so
     /// it is this dialog's UAS — the party §15 forbids a BYE to before it has
     /// accepted.
     pub(super) answered_establishing_invite: bool,
     /// One of those answers was a 2xx: the dialog it is the UAS of is
     /// confirmed, not early.
     pub(super) accepted_establishing_invite: bool,
-    /// The endpoint, as UAC, took a 2xx on the establishing INVITE's branch:
+    /// The agent, as UAC, took a 2xx on the establishing INVITE's branch:
     /// the dialog is confirmed, and a non-2xx after it on that branch is a
     /// stray that ends nothing (§13.2.2.4, §17.1.1.2).
     pub(super) took_establishing_2xx: bool,
-    /// When the endpoint, as UAC, took a non-2xx final on the establishing
+    /// When the agent, as UAC, took a non-2xx final on the establishing
     /// INVITE's branch before any 2xx on it (§12.3 ends the early dialog);
     /// cleared by any INVITE 2xx it takes and by a provisional on a later
     /// INVITE (a challenge retried).
     pub(super) rejected_at_us: Option<u64>,
 }
 
-/// One request an endpoint SENT, with the dialog state that held when it went.
+/// One request an agent SENT, with the dialog state that held when it went.
 #[derive(Debug)]
 pub(super) struct Sent<'a> {
     pub(super) msg: usize,
@@ -73,12 +75,12 @@ pub(super) struct Sent<'a> {
     pub(super) taker: &'a str,
     pub(super) dialog: Dialog,
     /// This IS the dialog-creating INVITE: the first establishing INVITE this
-    /// endpoint's view of the dialog carried, in either direction.
+    /// agent's view of the dialog carried, in either direction.
     pub(super) initial_invite: bool,
     /// §12.2.1.1's in-dialog test: both tags present, and — for an INVITE — not
     /// the establishing INVITE by branch.
     pub(super) in_dialog: bool,
-    /// The peer's tag is known, so the dialog is confirmed at this endpoint.
+    /// The peer's tag is known, so the dialog is confirmed at this agent.
     pub(super) confirmed: bool,
 }
 
@@ -103,7 +105,7 @@ impl<'a> Sent<'a> {
 }
 
 /// What one view's messages say about the dialogs on it: every request each
-/// endpoint sent, paired with the dialog state that held when it did.
+/// agent sent, paired with the dialog state that held when it did.
 #[derive(Debug, Default)]
 pub(super) struct Reading<'a> {
     pub(super) requests: Vec<Sent<'a>>,
@@ -113,6 +115,7 @@ pub(super) struct Reading<'a> {
 
 impl<'a> Reading<'a> {
     pub(super) fn of(msgs: &'a [Msg]) -> Self {
+        let parties = Parties::of(msgs);
         let mut seen = Reading::default();
         for (mi, msg) in msgs.iter().enumerate() {
             // A message with no call or no From tag names no dialog: it can key
@@ -120,23 +123,22 @@ impl<'a> Reading<'a> {
             if msg.call_id.is_empty() || msg.from_tag.as_deref().is_none_or(str::is_empty) {
                 continue;
             }
-            for endpoint in [msg.src.as_str(), msg.dst.as_str()] {
-                seen.absorb(mi, msg, endpoint, endpoint == msg.src.as_str());
-                if msg.src == msg.dst {
-                    break; // one endpoint talking to itself is one view
-                }
+            let (sender, taker) = (parties.sent_by(msg), parties.took(msg));
+            seen.absorb(mi, msg, sender, true);
+            if taker != sender {
+                seen.absorb(mi, msg, taker, false);
             }
         }
         seen
     }
 
-    /// Absorb one message into `endpoint`'s view of the dialog it rides:
-    /// record the occasion it opens (a request the endpoint sent), then let it
-    /// advance the dialog state — the order the check demands, since a request
-    /// is judged against what the dialog was BEFORE it.
-    fn absorb(&mut self, mi: usize, msg: &'a Msg, endpoint: &'a str, sent: bool) {
+    /// Absorb one message into `agent`'s view of the dialog it rides: record
+    /// the occasion it opens (a request the agent sent), then let it advance
+    /// the dialog state — the order the check demands, since a request is
+    /// judged against what the dialog was BEFORE it.
+    fn absorb(&mut self, mi: usize, msg: &'a Msg, agent: &'a str, sent: bool) {
         let remote_tag = remote_tag_of(msg, sent);
-        let key = DialogKey { endpoint, call_id: msg.call_id.as_str(), remote_tag };
+        let key = DialogKey { agent, call_id: msg.call_id.as_str(), remote_tag };
         // A tag first seen now inherits what the pending state fixed: the
         // establishing INVITE the UAC sent before its peer had a tag.
         if !remote_tag.is_empty() && !self.dialogs.contains_key(&key) {

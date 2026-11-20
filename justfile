@@ -10,7 +10,7 @@
 # per test, 16 at once across every binary. nextest skips doc tests, so
 # `just test` runs them with `cargo test --doc`.
 #
-# Test lanes follow CLAUDE.md "Test-runtime policy": the default lane is every
+# Test lanes follow docs/testing/lanes-and-build.md: the default lane is every
 # test on the fake clock (paused tokio), whatever its length, and every
 # real-clock test under 1 s; real-clock tests of 1 s or more and every loadgen
 # test are `#[ignore]`d into the slow lane. One crate's tests: `cargo nextest
@@ -94,6 +94,14 @@ fuzz-cov target:
 # differential tests run. A branch touching sip-message passes it.
 parity-oracle:
     cargo nextest run -p sip-message --features rvoip-oracle --no-tests=fail -E 'test(/^rvoip_parity::/)'
+
+# The profiling build: probe-http under its `flamegraph` feature, which no
+# workspace build turns on, linted with the panic set of ADR-0051 §3, and the
+# flamegraph route's test run, the one slow-lane test (1 s of real clock) any
+# environment runs. A branch touching probe-http or flamegraph-util passes it.
+flamegraph-build:
+    cargo clippy -p probe-http --features flamegraph -- -D warnings
+    cargo nextest run -p probe-http --features flamegraph --run-ignored all --no-tests=fail -E 'test(/flamegraph/)'
 
 # The live ELU under a real one-core cgroup CPU quota (a transient systemd
 # user scope): the one `overload::quota_tests` case no other lane can run,
@@ -237,6 +245,25 @@ sipp-exporter-check:
 # record checks, which fail without it).
 hakit-check:
     cd tooling/hakit && uv run --locked pyright && uv run --locked pytest
+
+# The reference pack's suite (ts/reference-pack, ADR-0060 item 17): its two
+# cases on its simulated lane and on its reference lane (the B2BUA runner on
+# loopback) through the base's campaign run, the recorded captures ingested,
+# cut and replayed, and the vendored ones ingested and cut; the plain replay
+# binary, the B2BUA runner, pivot-schema and the extractor sipflow built first,
+# recorded in a scratch database of the postgres STORE_TEST_URL names
+# (`pnpm -r test` runs the same suite with the binaries it finds).
+reference-campaign:
+    cargo build -p pivot-replay -p pivot-schema -p b2bua-runner -p sip-pcap
+    REPLAY_BIN={{ justfile_directory() }}/target/debug/pivot-replay B2BUA_RUNNER_BIN={{ justfile_directory() }}/target/debug/b2bua-runner PIVOT_SCHEMA_BIN={{ justfile_directory() }}/target/debug/pivot-schema SIPFLOW_BIN={{ justfile_directory() }}/target/debug/sipflow pnpm -C ts/reference-pack exec vitest run
+
+# The recorded captures recorded again (ts/reference-pack/README.md, "The
+# reference capture" and "The recorded samples"): each recorded case played on
+# the reference lane, the B2BUA runner's capture of it replacing its own file
+# under ts/reference-pack/capture/.
+reference-capture:
+    cargo build -p pivot-replay -p pivot-schema -p b2bua-runner
+    REFERENCE_CAPTURE_WRITE=1 REPLAY_BIN={{ justfile_directory() }}/target/debug/pivot-replay B2BUA_RUNNER_BIN={{ justfile_directory() }}/target/debug/b2bua-runner PIVOT_SCHEMA_BIN={{ justfile_directory() }}/target/debug/pivot-schema pnpm -C ts/reference-pack exec vitest run reference-capture
 
 # ── environment ────────────────────────────────────────────────────────
 

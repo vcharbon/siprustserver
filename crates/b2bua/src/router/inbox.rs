@@ -170,8 +170,7 @@ async fn next_other(
                 if let Some(gate) = ctx.readiness.queue_gate() {
                     gate.read();
                 }
-                let (ev, arrival) = txn_event::call_event(ev, ctx.clock.now_ms());
-                Next::Work(Work::Event(ev, arrival))
+                Next::Work(txn_event::work(ev, ctx.clock.now_ms()))
             }
             None => Next::TxnClosed,
         },

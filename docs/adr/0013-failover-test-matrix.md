@@ -1,127 +1,39 @@
-# 0013 — Failover test matrix: safe-point CallScenario DSL, transparent-failover oracle, generated cell tests
+# Failover test matrix: safe-point CallScenario DSL, transparent-failover oracle, generated cell tests
 
-**Status:** accepted (2026-06-04); **built** — `crates/failover-harness`,
-transparent cells + oracle teeth tests green (including the
-production-cadence keepalive cell; see §Keepalive cell at production cadence).
+**Status:** accepted (2026-06-04), built in `crates/failover-harness`.
+
+The source, the axes in full, the keepalive cell at production cadence and the
+complete-kill and CSeq-audit rules are in the
+[appendix](appendix/0013-failover-test-matrix.md), under the same section
+numbers.
 
 **Takeover model (ADR-0014, reactive-only).** A failed-over dialog is taken over
-**reactively** — only when the proxy reroutes its in-dialog traffic to a survivor;
+**reactively**, only when the proxy reroutes its in-dialog traffic to a survivor;
 a quiescent dialog is recovered by the rebooting primary's (smoothed) reclaim.
-There is no eager/membership-driven takeover and no `Deactivate` handback. The
+There is no eager or membership-driven takeover and no `Deactivate` handback. The
 acting-backup **self-releases** its takeover copy on transaction completion,
 deferring any terminal discharge to the primary. The harness asserts in cluster
 vocabulary (`serves` / `is_synchronized_backup` / `memory_clean` /
 `assert_single_owner` / `assert_call_fully_released`), not HA internals.
 
-**Scope — `Early`/`CANCEL` are v2-disruptive, not transparent.** `Early` state /
-`CANCEL` are excluded from the transparent matrix and classified **v2-disruptive**. By the same
-quiescence rule that excludes re-negotiating/terminating-in-flight, an early
-dialog has a *pending INVITE transaction* — and transactions are not replicated,
-only confirmed call context is — so killing the primary mid-early-INVITE is not
-transparent. The transparent state axis is therefore `ConfirmedPreAck` (200 sent
-+ replicated, ACK pending → ACK routes to the backup) and `Established`.
-
-### Keepalive cell at production cadence
-
-The `established__keepalive__kill__reboot_no_traffic` cell runs in the matrix at
-production cadence. Two things make it representative *and* fix the cadence:
-
-1. **Production timers, globally.** The harness no longer shortcuts the keepalive
-   to 30 s — every worker runs the real `keepalive_interval_sec: 300`
-   (`harness.rs`). A long quiescent call is flushed (and its backup `Element` TTL
-   refreshed) *only* by its in-dialog OPTIONS, so dead-peer/limiter-refresh/
-   backup-TTL cadence is only representative at 300 s. Under `start_paused` the
-   advance is free. `reboot_budget_sec` (default 450 s) ≥ 300 s keeps the backup
-   alive across one keepalive gap (`config.rs::validate`). This is exactly the
-   long-call-on-reboot loss the endurance run flagged ([[repl-takeover-longcall-loss]],
-   [[repl-reboot-reclaim-bootstrap-truncation]]): a rebooted primary reclaims a
-   quiescent dialog and must re-arm its keepalive so the next AS OPTIONS keeps it
-   alive — the cell now asserts that transparently against the clean baseline.
-2. **A fine-grained pump replaces fixed advances.** The deadline is one interval
-   out from whenever the keepalive was last (re-)armed — *establish* in the
-   baseline, *reclaim* in the variant (`reclaim_into_live` re-arms fresh). It is
-   not computable in advance, so a fixed `advance(300s)` overshoots the variant's
-   deadline **and** its 5 s dead-peer reap, tearing the call down (the CLAUDE.md
-   keepalive hazard). New primitive `FailoverHarness::pump_until(step, max, ready)`
-   advances in sub-reap (2 s) steps and stops the instant an async probe is
-   satisfied; `Agent::try_receive_tolerating` is the non-blocking drain it polls
-   with. The runner answers both legs inside their 5 s window regardless of the
-   interleaving timers (the reclaimed-primary keepalive re-arm and the dead-peer
-   reap). Teeth verified: deliberately dropping the reclaim keepalive re-arm fails
-   the cell.
-
-The happy-path foundation is `failover.rs::successful_long_call_with_b2bua_generated_options`
-(no fault: a long call kept alive across two B2BUA-generated OPTIONS cycles at 300 s,
-then a clean BYE). Core rearm-on-takeover stays covered by
-`failover.rs::hydrated_takeover_copy_self_releases_without_leaking`.
-
-### Complete k8s kill + default RFC CSeq audit
-
-Two representativeness upgrades targeting the endurance `unexpected_msg` long-call
-loss:
-
-1. **The kill is the COMPLETE k8s death signal.** A `Kill`/`Drain` cell does not
-   only mark the worker dead at the proxy — `inject_failover` also drives the dead
-   pod's endpoint OUT of the survivor's membership (`simulate_peer_removed`), which
-   keeps the survivor's membership view honest (it does **not** drive an eager
-   takeover — that mechanism was removed in ADR-0014); the reboot re-adds it
-   (`simulate_peer_added`, a StatefulSet restart = Removed-then-Added). Takeover
-   itself stays reactive: the survivor takes a dialog over only when the proxy
-   reroutes its in-dialog traffic to it.
-
-2. **A default RFC 3261 audit over the recorded SIP layer, every cell.** New
-   `cseq-in-dialog-order` (a `CrossMessageAuditRule` installed in the
-   `scenario-harness` default `ScopedAuditOptions`) replays every received request
-   from the recording and flags an in-dialog CSeq regression per
-   `(receiving endpoint, Call-ID, From-tag)` — RFC §12.2.2 out-of-order, which a
-   real UA rejects (`unexpected_msg`) but the test UAs answer blindly.
-   `run_cell` calls `FailoverHarness::assert_sip_rfc_clean` for baseline + variant
-   — the SIP-plane analogue of the universal teardown sweep, on ALL endpoints.
-   Rule teeth: `sip-net::rfc_audit::tests`. A representative end-to-end guard with
-   in-dialog CSeq churn through the full kill→failover→reboot→reclaim cycle
-   is `failover.rs::cseq_stays_in_order_across_failover_and_reclaim`.
-
-   **Framework finding (open).** The genuine production *race* — the last in-dialog
-   flush dying with the primary so the survivor probes from a stale CSeq snapshot —
-   is **not yet reproducible** here: under the simulated repl fabric the backup
-   replica stays current (a `partition()` does NOT sever an established
-   forward-replication stream — only a crash closes streams, and the primary must
-   be alive to create the lag; observed the backup gen advancing 4→8 across a
-   partition). So the audit is in place and proven to have teeth, but the stale-CSeq
-   lag itself needs a new seam to inject deterministically (e.g. a store-level "hold
-   the replica back" hook, or a fault that cuts forward replication on a live
-   primary). The underlying b2bua behaviour is settled (ADR-0014 reactive-only,
-   superseding X11; ADR-0020 Model-Y terminal handling); the only open item is this
-   deterministic injection seam.
-
-**Source:** this codebase. The HA re-hydration / backup / switchback paths
-accumulated a string of bugs that were each long to detect, reproduce, and debug
-because they only surfaced under the **live endurance + chaos** suite (see
-`MEMORY.md`: timer-tombstone CPU drift, repl reclaim/reboot bootstrap
-truncation, orphan-reject dispatch leak, takeover long-call loss, limiter netcut
-OOM). All of them are, in principle, expressible under the existing fake-clock /
-simulated-network harness (`FailoverHarness`, ADR-0011 X10 tier-2). This ADR
-records how we turn that one-off harness into a *matrix framework* so the whole
-class is covered in CI rather than discovered in endurance.
+**Scope: `Early`/`CANCEL` are v2-disruptive, not transparent.** An early dialog
+has a pending INVITE transaction, and transactions are not replicated, only
+confirmed call context is. So killing the primary mid-early-INVITE is not
+transparent, by the same quiescence rule that excludes
+re-negotiating/terminating-in-flight. The transparent state axis is
+`ConfirmedPreAck` (200 sent + replicated, ACK pending, so the ACK routes to the
+backup) and `Established`.
 
 ## Context
 
-`crates/b2bua-harness/src/failover.rs` already composes, under one paused clock:
-the SIP plane (`scenario-harness`), a real load-balancing `ProxyCore` over a
-`SimulatedWorkerRegistry`, and two replicating `B2buaCore` workers over a
-recording `SimulatedReplicationNetwork`. It exposes `crash()`, `reboot()`,
-`partition()/heal()`, `set_health()`, `is_ready()`, and call introspection
-(`active_calls`, `lock_count`, `call_gen`, `scan_backed_up`, `scan_primary`,
-`get`). Several hand-written tests use it (`canonical_failover`,
-`hydrated_takeover_copy_self_releases_without_leaking`,
-`reboot_reclaim_exactly_one_owner_after_self_release`,
-`acting_backup_terminate_leaves_no_expired_context_for_reclaim`, four
-`matrix_*` fault cases).
-
-Two problems: (1) each test repeats ~50 lines of identical setup + cookie
-discovery + the `(b1, b2)` borrow-swap dance; (2) coverage is a handful of points
-in a large space (dialog state × in-dialog event × failure mode × recovery
-sequence), so the gaps are invisible — nothing forces us to confront every cell.
+`FailoverHarness` composes the SIP plane, a load-balancing `ProxyCore` and two
+replicating `B2buaCore` workers under one paused clock, with crash, reboot,
+partition and introspection. HA re-hydration, backup and switchback bugs
+surfaced only under live endurance and chaos runs, though each fits this
+harness. Hand-written tests repeat their setup and cover a handful of points
+in a large space, so the gaps are invisible.
+Detail: [appendix, source](appendix/0013-failover-test-matrix.md#source) and
+[context](appendix/0013-failover-test-matrix.md#context-long-form).
 
 ## Decision
 
@@ -129,114 +41,55 @@ A two-layer framework on top of the existing `FailoverHarness` (not a rewrite).
 
 ### 0. Crate layout — a dedicated `failover-harness` crate
 
-All multi-node HA-failover test infrastructure moves into a new dedicated crate
-(`crates/failover-harness/`):
-
-- **Moved in** from `b2bua-harness`: `FailoverHarness`, `ReplicatedB2buaSut`,
-  `ProxySut` (today `b2bua-harness/src/failover.rs`) and the 8 existing failover
-  tests (`b2bua-harness/tests/failover.rs`).
-- **New** here: the `CallScenario` / safe-point DSL, the transparency oracle, and
-  the `macro_rules!` matrix (§1–§4 below). `src/lib.rs` = DSL + macro; `tests/` =
-  the generated cells.
-- **Normal deps**: `b2bua`, `sip-proxy`, `repl-net`, `topology`, `ha-harness`,
-  `scenario-harness`, **plus `call-limiter` + `http-net`** (promoted from
-  dev-deps so the DSL can wire the genuine limiter stack — `HttpCallLimiter` +
-  `LimiterServer` + `CallStore` over the **simulated** HTTP fabric
-  (`SimulatedHttpNetwork`) on the fake clock, *not* a `NoopLimiter`/mock — in
-  library code; the reason a dedicated crate is warranted rather than extending
-  `b2bua-harness`).
-
-Consequently **`b2bua-harness` slims back** to single-SUT b2bua testing
-(`B2buaSut`) and **sheds** `sip-proxy` / `repl-net` / `topology` / `ha-harness`
-from its normal deps (they existed only for the failover module). Rejected:
-extending `b2bua-harness` in place — it would bloat that crate's compile/test
-target and mix HA cells with the unrelated refer/prack/media suites; and a crate
-that left `FailoverHarness` behind in `b2bua-harness` — splitting one concern
-across two crates.
+`crates/failover-harness/` holds all multi-node HA-failover test
+infrastructure: `FailoverHarness`, the SUTs, the DSL, the oracle and the
+matrix. Its normal deps include `call-limiter` and `http-net`, so the DSL
+wires the genuine limiter stack over the simulated HTTP fabric.
+`b2bua-harness` stays single-SUT.
+Detail: [appendix §0](appendix/0013-failover-test-matrix.md#0-crate-layout--a-dedicated-failover-harness-crate).
 
 ### 1. `CallScenario` — a callflow as a step list with **safe-points**
 
-A callflow is expressed declaratively as an ordered list of steps (the SIP
-actions + expected reactions for a clean run). Between steps the author marks
-**safe-points**: boundaries where the call's replicated state is *quiescent* (the
-last authoritative mutation has settled to the backup), so a failover injected
-there is **expected to be transparent**. New callflows (REFER, forking, complex
-callflow services) declare their steps + safe-points and inherit failover
-coverage with no bespoke failover test. *This is the extensibility hook the
-author asked for: "flag expected safe points for crash/recovery relative to the
-call scenario."*
+A callflow is an ordered list of steps. The author marks safe-points, where
+the call's replicated state is quiescent, so a failover injected there is
+expected to be transparent. A new callflow declares its steps and safe-points
+and inherits failover coverage.
+Detail: [appendix §1](appendix/0013-failover-test-matrix.md#1-callscenario--a-callflow-as-a-step-list-with-safe-points).
 
 ### 2. Failover-matrix driver — generated cell tests
 
-A `macro_rules!` matrix expands `(scenario × safe-point × failure-mode ×
-recovery-permutation)`, after a legality filter, into **one individually-named
-`#[tokio::test]` per legal cell** (e.g.
-`transparent__established__bye_alice__kill__reboot_after_takeover`). No new
-dependency; each cell is isolated, parallel, and individually runnable. (Rejected:
-a single looping test — one failure masks the rest, no per-cell CI name; an
-`rstest`/`test-case` dependency the workspace otherwise avoids.)
+A `macro_rules!` matrix expands (scenario × safe-point × failure mode ×
+recovery permutation), after a legality filter, into one named
+`#[tokio::test]` per legal cell.
+Detail: [appendix §2](appendix/0013-failover-test-matrix.md#2-failover-matrix-driver--generated-cell-tests).
 
 ### 3. The oracle = differential baseline **+** strict structural invariants
 
-Each cell runs the scenario twice — **clean** (baseline) and with the failover
-**injected at the safe-point** — and asserts the externally observable behavior
-matches: the ordered sequence of methods/status each UA observes, plus the final
-CDR disposition. The check is **strict**: every message's From/To tags and CSeq
-must stay correct/consistent. Transparency *requires* the takeover to preserve
-the **b-leg's** From/To tag and CSeq (replicated dialog state, not re-minted), so
-a takeover that re-mints them fails the differential — that is the bug-catching
-teeth. Layered on top: a few always-on external invariants (never a 481/5xx the
-baseline didn't have; exactly one CDR with the right disposition).
+Each cell runs clean and with the failover injected, and asserts the same
+ordered methods and statuses at each UA and the same final CDR disposition.
+From/To tags and CSeq must match, so a takeover that re-mints the b-leg's
+fails. Always-on invariants add no 481 or 5xx the baseline lacked and exactly
+one CDR.
+Detail: [appendix §3](appendix/0013-failover-test-matrix.md#3-the-oracle--differential-baseline--strict-structural-invariants).
 
 ### 4. Scope: **transparent failover first**
 
-v1 covers only cells whose expected behavior is *zero visible external impact* —
-the kill is injected at a safe-point, after replication has settled, so one
-uniform oracle applies to every cell and the dimensions multiply cheaply.
-Everything routes through the simulated LB (`ProxySut`), never direct-to-worker.
+v1 covers only cells with zero visible external impact, all routed through
+`ProxySut`. A repl partition during failover and a kill before replication
+get bespoke expectations in a separate v2.
+Detail: [appendix §4](appendix/0013-failover-test-matrix.md#4-scope-transparent-failover-first).
 
-**Deferred to a separate, smaller v2 (bespoke per-case expectations, NOT the
-transparency oracle):** repl **partition** during failover, and
-**immediate-kill-before-replication** (a message killed before it propagated).
-These are *expected* to be externally impactful (`MEMORY.md`: partition/netcut
-cases), so they get distinct expectations rather than being forced through the
-transparency oracle.
-
-## Axes (legal cross-product, transparent v1)
-
-- **A. Dialog state at the safe-point:** early · confirmed-pre-ACK · established ·
-  re-negotiating · terminating-in-flight.
-- **B. In-dialog event the backup processes**, as behavioral *categories*:
-  - *Terminating* — `BYE` (confirmed/established → 200) or `CANCEL` (early → 487);
-    same invariant family (release the takeover copy + lock, **retain** the `bak:`
-    Element as a short-TTL deferred terminal reverse-flushed to the primary — the
-    backup propagates **no** delete and discharges nothing; the reclaiming primary
-    is the sole discharge authority; no resurrection on reboot via the delete
-    tombstone — ADR-0014 / ADR-0020 X3).
-  - *Generic in-dialog* — re-INVITE / UPDATE / INFO / in-dialog OPTIONS ping;
-    behaviorally interchangeable, so the driver picks `{method × direction}` by
-    **seeded random** rather than permuting (keeps the matrix from exploding).
-  - *B2BUA-generated keepalive OPTIONS* — its own category: refreshes both dead-peer
-    detection **and** the call-limiter keepalive hold on the owner.
-  - *Nothing* — no event routed to the backup; pure re-hydration on reboot.
-- **D. Recovery permutation:** kill-and-stay-dead (rest of call served on backup) ·
-  kill-then-reboot-with-no-traffic-while-dead (clean reclaim) ·
-  kill-then-reboot-after-backup-served-part (takeover → reclaim → self-release).
-- **Failure mode:** abrupt kill · graceful drain (both must be transparent at a
-  safe-point).
-- **Direction (C)** and the concrete generic method are folded into the seeded
-  selection, not a full axis.
-
-The **whole matrix runs with the genuine limiter logic** — the b2bua's
-`HttpCallLimiter` client talking to a real `LimiterServer` + `CallStore`, but
-over the **simulated** HTTP transport (`SimulatedHttpNetwork`) and the same fake
-`Clock::test_at(0)`, shared across crashes/reboots. "Genuine" means *not* a
-`NoopLimiter`/mock — there is no real socket and no wall-clock; the HTTP
-round-trips and the window/TTL expiry ride the one paused `tokio::time` that
-`FailoverHarness::advance` drives, exactly like the SIP and replication sims. So
-the limiter-hold-migrates/refreshes-on-takeover and released-on-teardown
-invariant is asserted, deterministically, in every cell — not just the keepalive
-category.
+The axes are dialog state, in-dialog event category (terminating, generic
+in-dialog by seeded random choice, B2BUA keepalive OPTIONS, nothing),
+recovery permutation and failure mode (abrupt kill, graceful drain). Every
+cell runs the genuine limiter logic on the fake clock. A kill drives the dead
+pod out of the survivor's membership, and every cell runs the default RFC 3261
+`cseq-in-dialog-order` audit. The keepalive cell runs at the production
+300 s interval. The stale-CSeq race of a last flush dying with the primary
+has no deterministic injection seam.
+Detail: [axes](appendix/0013-failover-test-matrix.md#axes-legal-cross-product-transparent-v1),
+[keepalive cell](appendix/0013-failover-test-matrix.md#keepalive-cell-at-production-cadence),
+[complete kill and CSeq audit](appendix/0013-failover-test-matrix.md#complete-k8s-kill--default-rfc-cseq-audit).
 
 ## Consequences
 
@@ -245,7 +98,14 @@ category.
 - A generated-cell failure is named for its exact `(state, event, fault,
   recovery)` coordinates, so an endurance-class bug reproduces as a single
   `cargo test <name>` instead of an hours-long chaos run.
-- The transparency oracle is strict on From/To/CSeq; legitimate future changes to
-  b-leg identifier handling will trip it and must be reviewed deliberately.
-- Disruptive (partition / pre-replication-kill) coverage is explicitly *not* in
-  the transparent matrix; it is a known, named follow-up, not an accidental gap.
+- The transparency oracle is strict on From/To/CSeq; a change to b-leg
+  identifier handling trips it and is reviewed deliberately.
+- Disruptive (partition / pre-replication-kill) coverage is not in the
+  transparent matrix; it is a named follow-up.
+
+## Considered and rejected
+
+- Extending `b2bua-harness` in place: bloats its build and mixes HA cells with unrelated suites.
+- Leaving `FailoverHarness` in `b2bua-harness`: splits one concern across two crates.
+- One looping test: one failure masks the rest, no per-cell name.
+- An `rstest` or `test-case` dependency: the workspace avoids it.

@@ -8,6 +8,7 @@ use sip_message::{SipRequest, SipResponse};
 use tokio::time::Instant;
 
 use super::goals::GoalStep;
+use super::ledger::CseqStreamKey;
 use super::runner::ActorState;
 use super::state::Observation;
 
@@ -45,6 +46,33 @@ pub struct ResponseFact {
     /// Boxed: retained only for a pending matcher or an installed reception
     /// observer, and kept off the `Observation` fold's common-variant size.
     pub typed: Option<Box<sip_message::SipResponse>>,
+}
+
+/// The arrival of `req` on `leg`: folds its CSeq into the stream of the dialog
+/// it rides (keyed by its From-tag) and its method into the leg's received set.
+pub(super) fn in_dialog_arrival(leg: &'static str, req: &SipRequest) -> Observation {
+    Observation::InDialogRequest {
+        stream: received_stream(leg, req),
+        cseq: req.cseq().seq(),
+        method: req.method().as_str().to_string(),
+    }
+}
+
+/// The arrival of `req` on `leg`, refused by the dialog table: its CSeq still
+/// fills the stream of the dialog it names.
+pub(super) fn refused_arrival(leg: &'static str, req: &SipRequest) -> Observation {
+    Observation::RefusedInDialog { stream: received_stream(leg, req), cseq: req.cseq().seq() }
+}
+
+/// The CSeq stream a request `leg` received belongs to: its Call-ID and its
+/// From-tag, the tag its sender holds on the dialog (empty for a tagless RFC
+/// 2543 peer).
+pub(super) fn received_stream(leg: &'static str, req: &SipRequest) -> CseqStreamKey {
+    CseqStreamKey {
+        call_id: req.call_id().to_string(),
+        leg,
+        sender_tag: req.from().tag().unwrap_or_default().to_string(),
+    }
 }
 
 /// Folds what an in-dialog request said into its leg's observed requests.

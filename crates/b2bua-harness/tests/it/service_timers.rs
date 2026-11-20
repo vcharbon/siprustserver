@@ -216,7 +216,9 @@ mod dualkeys {
 
 /// Fire path: bob never sends a provisional → the service's own timer fires at
 /// its deadline, the exact-key rule catches it, the caller gets the 480 and the
-/// silent b-leg is reaped — a service watchdog with zero core involvement.
+/// silent b-leg is reaped — a service watchdog with zero core involvement. The
+/// INVITE's first-response deadline (ADR-0044), which runs from the INVITE as
+/// the watchdog does, is moved past it.
 #[tokio::test(start_paused = true)]
 async fn service_timer_fires_and_owning_rule_reaps_the_silent_call() {
     let h = Harness::new("service-timer-fires");
@@ -225,7 +227,10 @@ async fn service_timer_fires_and_owning_rule_reaps_the_silent_call() {
     let decision = Arc::new(ScriptedDecisionEngine::route_all_to("127.0.0.1", 5070));
     let b2bua = B2buaSut::builder(decision)
         .services(vec![ringwatch::service_def()])
-        .tune(|c| c.keepalive_interval_sec = 3_600)
+        .tune(|c| {
+            c.keepalive_interval_sec = 3_600;
+            c.invite_first_response_timeout_sec = 10;
+        })
         .start(&h, "b2bua", "127.0.0.1:5080")
         .await;
 

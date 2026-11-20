@@ -12,9 +12,9 @@ SCRIPT = "purity.py"
 
 
 def config(binaries=("bin",), untiered=(), reaches=None, tests=("testkit", "test-util"),
-           pure_deps=(), dockerfiles=("Dockerfile",)):
+           pure_deps=(), dockerfiles=("Dockerfile",), refused=()):
     text = (f"binaries = {list(binaries)!r}\ndockerfiles = {list(dockerfiles)!r}\n"
-            f"test-features = {list(tests)!r}\n"
+            f"test-features = {list(tests)!r}\nrefused-crates = {list(refused)!r}\n"
             f"pure-deps = {list(pure_deps)!r}\n[known]\nuntiered = {list(untiered)!r}\n")
     text += "[known.pure-reaches]\n" + "".join(
         f"{c} = {ds!r}\n" for c, ds in (reaches or {}).items())
@@ -49,6 +49,26 @@ class Closure(Case):
         rc, out = ws.run(SCRIPT)
         self.assertEqual(rc, 1)
         self.assertIn('bin reaches clock feature "testkit" (via bin > core)', out)
+
+    def test_a_test_feature_the_binary_s_own_features_forward_fails(self):
+        ws = self.workspace(config(), [
+            ("clock", "shell", (), {"testkit": []}),
+            ("bin", "shell", ("clock",), {"default": ["clock/testkit"]})])
+        rc, out = ws.run(SCRIPT)
+        self.assertEqual(rc, 1)
+        self.assertIn('bin reaches clock feature "testkit" (forwarded by a [features] table)',
+                      out)
+
+    def test_a_refused_crate_fails_wherever_the_binary_links_it(self):
+        ws = self.workspace(config(refused=("profiler",)), [
+            ("profiler", "shell", (), None),
+            ("core", "shell", (), None),
+            ("bin", "shell", ("core",), None)])
+        self.assertEqual(ws.run(SCRIPT)[0], 0)
+        ws.crate("core", "shell", deps=("profiler",))
+        rc, out = ws.run(SCRIPT)
+        self.assertEqual(rc, 1)
+        self.assertIn("bin links refused crate profiler (via bin > core)", out)
 
     def test_a_test_util_feature_fails_too(self):
         ws = self.workspace(config(), [
@@ -270,6 +290,13 @@ class Base(Case):
         self.assertEqual(rc, 1)
         self.assertIn("purity.toml drops binary tool, which", out)
         self.assertIn("purity.toml drops test feature test-util, which", out)
+
+    def test_a_dropped_refused_crate_fails(self):
+        ws = self.workspace(config(refused=("profiler",)), [("bin", "shell", (), None)])
+        ws.write("purity.toml", config())
+        rc, out = ws.run(SCRIPT)
+        self.assertEqual(rc, 1)
+        self.assertIn("purity.toml drops refused crate profiler, which", out)
 
     def test_an_unused_pure_dep_is_stale(self):
         ws = self.workspace(config(pure_deps=("serde",)), [

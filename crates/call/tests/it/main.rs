@@ -16,6 +16,7 @@ mod decode_bounds;
 mod index_key;
 mod instants;
 mod invite_glare;
+mod leg_ids;
 mod lifecycle;
 mod model_helpers;
 mod request_records;

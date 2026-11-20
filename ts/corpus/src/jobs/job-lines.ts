@@ -79,7 +79,6 @@ export const showLines = (detail: Jobs.Detail): ReadonlyArray<string> => {
   if (job.waitingOn !== null) lines.push(`  waiting on: ${job.waitingOn}`)
   if (job.sweepId !== null) lines.push(`  sweep: ${job.sweepId}`)
   if (job.logPath !== null) lines.push(`  log: ${job.logPath}`)
-  if (job.hooksPath !== null) lines.push(`  hooks: ${job.hooksPath}`)
   return lines
 }
 

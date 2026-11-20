@@ -126,3 +126,37 @@ async fn a_timed_out_first_attempt_is_retried_at_the_default_ratio() {
     let outcome = client.send_with_retry(HttpRequest::get("/"), budgets).await;
     assert_eq!(outcome.map(|r| r.status), Ok(200), "connections: {}", conns.load(Ordering::SeqCst));
 }
+
+/// A first answer the peer closes before the end of its body is no response:
+/// the request is sent once more, and the caller gets the whole answer.
+#[tokio::test]
+async fn an_answer_cut_before_its_end_is_retried() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let conns = Arc::new(AtomicUsize::new(0));
+    let counted = conns.clone();
+    tokio::spawn(async move {
+        while let Ok((mut s, _)) = listener.accept().await {
+            let n = counted.fetch_add(1, Ordering::SeqCst);
+            tokio::spawn(async move {
+                if read_head(&mut s).await.is_none() {
+                    return;
+                }
+                let answer: &[u8] = if n == 0 {
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\ncut"
+                } else {
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nwhole"
+                };
+                let _ = s.write_all(answer).await;
+            });
+        }
+    });
+    let target = Arc::new(ResolvedTarget::addr(addr));
+    let client =
+        BackendClient::new(real(), target, ClientSettings::default(), BreakerConfig::probing("/"));
+    let budgets =
+        Budgets { attempt: Duration::from_millis(150), total: Duration::from_millis(300) };
+    let outcome = client.send_with_retry(HttpRequest::get("/"), budgets).await;
+    assert_eq!(outcome.map(|r| r.body), Ok(b"whole".to_vec()));
+    assert_eq!(conns.load(Ordering::SeqCst), 2, "the cut answer was served too");
+}

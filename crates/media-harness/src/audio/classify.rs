@@ -1,7 +1,6 @@
 //! Audio verdict: classify recorded PCM against the reference clips by
 //! nearest-signature with a margin, guarded by an energy floor.
 //!
-//! Port of `../sipjsserver/src/test-harness/media/audio/classify.ts`.
 //! "Nearest with a margin" (relative match), not an absolute distance
 //! threshold, survives a transcoding leg's DSP — the matched clip just has to be
 //! clearly closer than every other reference. The silence/energy guard fails

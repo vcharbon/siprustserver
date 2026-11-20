@@ -51,6 +51,7 @@ pub mod deviation;
 pub mod emergency;
 pub mod generators;
 pub mod hops;
+pub mod info_package;
 pub mod ip_literal;
 pub mod mscml;
 pub mod multipart;

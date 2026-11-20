@@ -68,6 +68,21 @@ fn a_481_answers_the_unknown_dialog() {
     assert!(hits(&UnknownDialog481, &msgs).is_empty(), "{:?}", eval(&UnknownDialog481, &msgs));
 }
 
+/// A 481 the taker sends from another socket than the one the request
+/// reached answers that request's transaction.
+#[test]
+fn a_481_from_a_second_socket_of_the_taker_answers_the_unknown_dialog() {
+    let mut second = rsp(4_000, 481, 2, "BYE", "z9hG4bK-b", "");
+    second.src = "127.0.0.1:41000".to_string();
+    let msgs = [
+        invite(1_000, "z9hG4bK-i", ""),
+        rsp(2_000, 200, 1, "INVITE", "z9hG4bK-i", ""),
+        in_dialog(3_000, "BYE", "z9hG4bK-b", 2, "zz", "bt"),
+        second,
+    ];
+    assert!(hits(&UnknownDialog481, &msgs).is_empty(), "{:?}", eval(&UnknownDialog481, &msgs));
+}
+
 /// Without a dialog-creating response on the call, nothing at this vantage
 /// says which dialogs the taker has — an orphan request is no occasion.
 #[test]
@@ -268,4 +283,25 @@ fn a_rejected_reinvite_keeps_the_confirmed_dialog() {
         rsp(6_000, 200, 3, "BYE", "z9hG4bK-b", ""),
     ];
     assert!(hits(&UnknownDialog481, &msgs).is_empty(), "{:?}", eval(&UnknownDialog481, &msgs));
+}
+
+/// A UAS that answers from another socket than the one it takes requests at
+/// knows the dialogs its answers created at both: a request it takes at the
+/// first naming an unknown peer tag owes the 481 there.
+#[test]
+fn a_two_socket_uas_owes_the_481_where_it_takes_the_request() {
+    const BOB_SENDS: &str = "127.0.0.1:5069";
+    let from_second = |mut m: Msg| {
+        m.src = BOB_SENDS.to_string();
+        m
+    };
+    let msgs = [
+        invite(1_000, "z9hG4bK-i", ""),
+        from_second(rsp(2_000, 200, 1, "INVITE", "z9hG4bK-i", "")),
+        in_dialog(3_000, "BYE", "z9hG4bK-b", 2, "zz", "bt"),
+        from_second(rsp(4_000, 200, 2, "BYE", "z9hG4bK-b", "")),
+    ];
+    let f = hits(&UnknownDialog481, &msgs);
+    assert_eq!(f.len(), 1, "{:?}", eval(&UnknownDialog481, &msgs));
+    assert_eq!(f[0].emitter, BOB, "the socket that took the request is charged");
 }

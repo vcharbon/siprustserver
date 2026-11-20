@@ -1,0 +1,11 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "The packet capture of a B2BUA runner a hosted lane of the base stands: the pcapng file the runner appends each SIP datagram it sends and receives to, a section per start.",
+  "x-siprig": {},
+  "type": "object",
+  "properties": {
+    "file": { "type": "string", "minLength": 1 }
+  },
+  "required": ["file"],
+  "additionalProperties": false
+}

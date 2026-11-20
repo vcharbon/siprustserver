@@ -75,6 +75,9 @@ streams:
     hold_s: 600
     params: { abuse: ghost }
 schedule:
+  calls_span_windows: >-
+    The long, callee re-INVITE and ghost families outlive a crash interval on
+    purpose: each of their calls meets several worker crashes in a row.
   first_at_s: 120
   interval_s: 150
   cycle:

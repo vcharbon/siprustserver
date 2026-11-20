@@ -252,8 +252,8 @@ fn sent_invite_seed(
     if let TxnSeed::ClientInvite { ack_ahead, .. } = &mut seed {
         *ack_ahead = call::helpers::sent_exchange(dialog)
             .and_then(|x| x.ack_ahead.as_ref())
-            .and_then(|ack| {
-                let (bytes, (host, port)) = ack.wire();
+            .and_then(|ahead| {
+                let (bytes, (host, port)) = ahead.ack.wire();
                 Some((bytes.to_vec(), sip_net::ip_socket_addr(host, port)?))
             });
     }

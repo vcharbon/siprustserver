@@ -1,6 +1,6 @@
 //! Multiple early dialogs (forking) with **PRACK mixed with UPDATE**, then the
 //! call is answered on the *second* fork and confirmed in-dialog traffic is
-//! exercised end-to-end (port idea: `prack-forking.ts` ⊕ RFC 3311 UPDATE).
+//! exercised end-to-end (`prack_forking` ⊕ RFC 3311 UPDATE).
 //!
 //! Bob (standing in for a forking proxy upstream of him) answers Alice's INVITE
 //! — which carries the offer — with **two** reliable 183s on distinct callee

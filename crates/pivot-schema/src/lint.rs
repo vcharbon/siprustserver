@@ -21,6 +21,7 @@ mod deviation_rules;
 mod event_rules;
 mod flow_rules;
 mod must_fail_rules;
+mod postcondition_rules;
 mod references;
 mod routing_rules;
 mod scoping_rules;
@@ -140,6 +141,7 @@ pub fn lint(pivot: &PivotV3) -> Report {
     references::check(&index, &mut report);
     routing_rules::check(&index, &mut report);
     flow_rules::check(&index, &mut report);
+    postcondition_rules::check(&index, &mut report);
     body_rules::check(&index, &mut report);
     deviation_rules::check(&index, &mut report);
     event_rules::check(&index, &mut report);

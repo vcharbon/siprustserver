@@ -1,6 +1,8 @@
+use super::memo::STRIPES;
 use super::*;
 use sip_message::header::{HeaderValue, Rport};
 use sip_message::{serialize, CustomParser, SipMessage, SipParser};
+use sip_txn::timers::TIMER_B;
 
 /// Where every request of these tests comes from: its Via's own sent-by.
 const SRC: SocketAddr =
@@ -28,6 +30,14 @@ fn wire(resp: SipResponse) -> String {
     String::from_utf8(serialize(&SipMessage::Response(resp))).expect("utf-8")
 }
 
+/// The answer a copy drew, `None` when it drew nothing.
+fn answered(repeat: Option<Repeat>) -> Option<SipResponse> {
+    match repeat? {
+        Repeat::Answer(resp) => Some(*resp),
+        Repeat::Absorbed => None,
+    }
+}
+
 /// The wire form of a refusal that must be built.
 fn refusal_wire(resp: Result<SipResponse, GenerateError>) -> String {
     wire(resp.expect("a refusal"))
@@ -53,7 +63,7 @@ fn every_copy_draws_the_same_refusal() {
     let r = Refusals::new(&IdGen::seeded(1), 30);
     assert!(r.repeat(&invite("z9hG4bK-a"), SRC, 0).is_none(), "nothing is remembered yet");
     let first = refusal_wire(r.refuse(&invite("z9hG4bK-a"), SRC, 5, 0));
-    let copy = r.repeat(&invite("z9hG4bK-a"), SRC, TIMER_B - 1).expect("a copy is remembered");
+    let copy = answered(r.repeat(&invite("z9hG4bK-a"), SRC, TIMER_B - 1)).expect("remembered");
     assert_eq!(first, wire(copy));
     assert!(r.repeat(&invite("z9hG4bK-b"), SRC, 0).is_none(), "another INVITE is no copy");
     let other = refusal_wire(r.refuse(&invite("z9hG4bK-b"), SRC, 5, 0));
@@ -96,6 +106,19 @@ fn a_refusal_is_forgotten_after_64_t1_or_past_capacity() {
     assert!(small.repeat(&invite("z9hG4bK-99"), SRC, 0).is_some());
 }
 
+/// Preflight rejects fill a memo of their own: a flood of them past every
+/// stripe's capacity forgets no 503.
+#[test]
+fn a_flood_of_preflight_rejects_keeps_every_refusal() {
+    let r = Refusals::with_capacity(&IdGen::seeded(1), 0, 1);
+    r.refuse(&invite("z9hG4bK-refused"), SRC, 1, 0).expect("a refusal");
+    for i in 0..256 {
+        let rejected = invite(&format!("z9hG4bK-hop-{i}"));
+        assert!(r.preflight(&rejected, 0), "the first arrival of each is answered");
+    }
+    assert!(answered(r.repeat(&invite("z9hG4bK-refused"), SRC, 1)).is_some(), "the 503 stays");
+}
+
 fn cancel(branch: &str) -> SipRequest {
     let raw = format!(
         "CANCEL sip:bob@127.0.0.1:5060 SIP/2.0\r\n\
@@ -119,7 +142,7 @@ Content-Length: 0\r\n\r\n"
 fn the_cancel_of_a_refused_invite_draws_200_with_its_final_s_tag() {
     let r = Refusals::new(&IdGen::seeded(1), 0);
     let refused = refusal_wire(r.refuse(&invite("z9hG4bK-a"), SRC, 1, 0));
-    let ok = wire(r.cancel(&cancel("z9hG4bK-a"), SRC, 0).expect("a refused INVITE"));
+    let ok = wire(answered(r.cancel(&cancel("z9hG4bK-a"), SRC, 0)).expect("a refused INVITE"));
     assert!(ok.starts_with("SIP/2.0 200 OK\r\n"), "{ok}");
     assert!(ok.contains("CSeq: 1 CANCEL\r\n"), "{ok}");
     assert!(!ok.contains("Retry-After"), "{ok}");
@@ -136,9 +159,9 @@ fn a_513_is_remembered_as_a_503_is() {
     let first = refusal_wire(r.refuse_too_large(&invite("z9hG4bK-a"), SRC, 0));
     assert!(first.starts_with("SIP/2.0 513 Message Too Large\r\n"), "{first}");
     assert!(!first.contains("Retry-After"), "{first}");
-    let copy = wire(r.repeat(&invite("z9hG4bK-a"), SRC, 10).expect("a remembered 513"));
+    let copy = wire(answered(r.repeat(&invite("z9hG4bK-a"), SRC, 10)).expect("a remembered 513"));
     assert_eq!(copy, first);
-    let ok = wire(r.cancel(&cancel("z9hG4bK-a"), SRC, 10).expect("a refused INVITE"));
+    let ok = wire(answered(r.cancel(&cancel("z9hG4bK-a"), SRC, 10)).expect("a refused INVITE"));
     let to = |w: &str| w.lines().find(|l| l.starts_with("To:")).map(str::to_owned);
     assert!(ok.starts_with("SIP/2.0 200 OK\r\n"), "{ok}");
     assert_eq!(to(&ok), to(&first));
@@ -180,9 +203,60 @@ fn a_repeated_503_and_a_cancels_200_are_stamped_with_their_source() {
     let r = Refusals::new(&IdGen::seeded(1), 0);
     let invite = || asking_rport(invite("z9hG4bK-a"));
     r.refuse(&invite(), SRC, 1, 0).expect("a refusal");
-    let copy = r.repeat(&invite(), MAPPED, 1).expect("a copy is remembered");
+    let copy = answered(r.repeat(&invite(), MAPPED, 1)).expect("a copy is remembered");
     assert_stamped(&copy);
-    let ok = r.cancel(&asking_rport(cancel("z9hG4bK-a")), MAPPED, 1).expect("a refused INVITE");
+    let ok = answered(r.cancel(&asking_rport(cancel("z9hG4bK-a")), MAPPED, 1));
+    let ok = ok.expect("a refused INVITE");
     assert_eq!(ok.status(), 200);
     assert_stamped(&ok);
+}
+
+/// A copy past 64·T1 of the refused request's first arrival draws nothing,
+/// and keeps the refusal 64·T1 longer: the next copy is absorbed too, not
+/// judged afresh.
+#[test]
+fn a_copy_past_64_t1_of_the_first_draws_nothing_and_keeps_the_refusal() {
+    let r = Refusals::new(&IdGen::seeded(1), 0);
+    r.refuse(&invite("z9hG4bK-a"), SRC, 1, 0).expect("a refusal");
+    assert!(answered(r.repeat(&invite("z9hG4bK-a"), SRC, TIMER_B - 1)).is_some(), "inside");
+    let late = TIMER_B * 2 - 2;
+    assert!(matches!(r.repeat(&invite("z9hG4bK-a"), SRC, late), Some(Repeat::Absorbed)));
+    let later = late + TIMER_B - 1;
+    assert!(matches!(r.repeat(&invite("z9hG4bK-a"), SRC, later), Some(Repeat::Absorbed)));
+    assert!(r.repeat(&invite("z9hG4bK-a"), SRC, later + TIMER_B).is_none(), "forgotten then");
+}
+
+/// One message of alice's dialog with bob, CSeq 2: `method` with the `extra`
+/// header lines, on `branch`.
+fn in_dialog_raw(method: &str, branch: &str, extra: &str) -> String {
+    format!(
+        "{method} sip:bob@127.0.0.1:5060 SIP/2.0\r\n\
+Via: SIP/2.0/UDP 10.0.0.1:5555;branch={branch}\r\n\
+Max-Forwards: 70\r\n\
+From: <sip:alice@caller.test>;tag=alice-tag\r\n\
+To: <sip:bob@uas.test>;tag=bob-tag\r\n\
+Call-ID: dialog@10.0.0.1\r\n\
+CSeq: 2 {method}\r\n\
+{extra}Content-Length: 0\r\n\r\n"
+    )
+}
+
+/// Each copy of an in-dialog INVITE the parser refused keeps its 400
+/// remembered 64·T1 longer, as every other refusal (ADR-0063 §1): an INVITE
+/// whose 400s were lost until its last copy, 31.5 s in, draws the ACK of that
+/// 400 at 33 s, and the memo still recognises it (RFC 3261 §17.1.1.3).
+#[test]
+fn each_copy_of_a_parse_refused_in_dialog_invite_keeps_its_400_remembered() {
+    let r = Refusals::new(&IdGen::seeded(1), 0);
+    let bad = in_dialog_raw("INVITE", "z9hG4bK-bad", "Expires: soon\r\n");
+    let error = CustomParser::new().parse(bad.as_bytes()).expect_err("Expires is refused");
+    let partial = error.partial().expect("a partial request");
+    r.remember_parse_refused(partial, 0);
+    r.remember_parse_refused(partial, 31_500);
+
+    let raw = in_dialog_raw("ACK", "z9hG4bK-bad", "");
+    let Ok(SipMessage::Request(ack)) = CustomParser::new().parse(raw.as_bytes()) else {
+        panic!("the ACK parses")
+    };
+    assert!(r.acknowledges_refusal(&ack, 33_000), "the ACK of the last copy's 400 is recognised");
 }

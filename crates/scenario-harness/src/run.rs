@@ -1,10 +1,8 @@
-//! The driver — the thin "interpreter" (port of the load-bearing core of
-//! `interpreter.ts`, MIGRATION_PLAN_B2B §4(ii)'s `runDriveOnly` equivalent).
+//! The driver — the thin "interpreter" that drives a scenario (ADR-0006).
 //!
-//! Unlike the source interpreter, this driver maintains **no trace and no
-//! dialog state**. Its only job is to bind each agent on the
-//! recording-wrapped simulated [`SignalingNetwork`](sip_net::SignalingNetwork)
-//! and replay the step list.
+//! This driver maintains **no trace and no dialog state**. Its only job is to
+//! bind each agent on the recording-wrapped simulated
+//! [`SignalingNetwork`](sip_net::SignalingNetwork) and replay the step list.
 //! Every `send_to` / `recv` flows through the recording decorator, so the
 //! `layer-harness` `Recorder` *is* the trace — the reports are projected from
 //! its channel snapshot afterwards (`sip_net_testkit::to_sip_entries`), exactly the
@@ -181,7 +179,8 @@ fn summarize(msg: &SipMessage) -> String {
 
 /// Run a scenario end to end and return its [`RunReport`].
 ///
-/// Binds each agent on `paranoidInputs(scopedAudit(SimulatedSignalingNetwork))`
+/// Binds each agent on
+/// `ParanoidSignalingNetwork(RecordingSignalingNetwork(SimulatedSignalingNetwork))`
 /// (the canonical contract stack), registers a lane per agent so the reports
 /// carry names, replays the steps, then closes the recording layer.
 pub async fn run(scenario: &Scenario) -> RunReport {

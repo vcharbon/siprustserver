@@ -1,5 +1,4 @@
-//! Optional structured headers — the eager, non-fatal accessor model. Port of
-//! `tests/sip/lazy-headers.test.ts`.
+//! Optional structured headers — the eager, non-fatal accessor model.
 //!
 //! ADR-0003 makes them **eager + non-fatal** fields on `OptionalHeaders` (parsed
 //! once at parse time, a malformed value captured as `Err` rather than rejecting
@@ -97,10 +96,10 @@ fn pai_list_is_reserved_at_its_line_count() {
     assert_eq!((list.len(), list.capacity()), (2, 2));
 }
 
+/// In the eager model the parsed value is stored on the message, so two
+/// accesses yield the same reference.
 #[test]
 fn pai_field_is_stored_once_eagerly() {
-    // The TS "memoization" test: in the eager model the parsed value is stored
-    // on the message, so two accesses yield the same reference.
     let msg = invite("P-Asserted-Identity: <sip:fluffy@cisco.com>\r\n");
     let a = &msg.optional().p_asserted_identity;
     let b = &msg.optional().p_asserted_identity;

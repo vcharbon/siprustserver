@@ -1,18 +1,12 @@
 /**
  * `Launcher` — how a job runs detached in this deployment: the command line of
- * the entry point each job kind runs, the directory it runs in, and the shell
- * lines run before and after every job.
+ * the entry point each job kind runs, and the directory it runs in.
  *
  * A job's row records the command line it was launched with, so a restart
  * launches the same entry point: the deployment keeps each one at a stable
- * path. The hooks are read when a job asks for them, so an edit to where the
- * deployment states them is live for the next job.
+ * path.
  *
- * A hook never fails its job: the job is the work, the hook only the record
- * around it.
- *
- * The default knows no entry point and refuses every launch by name; it runs
- * no hook.
+ * The default knows no entry point and refuses every launch by name.
  */
 import * as Context from "effect/Context"
 import * as Effect from "effect/Effect"
@@ -21,13 +15,6 @@ import * as Schema from "effect/Schema"
 
 /** The kinds of job a launch starts. */
 export type JobKind = "replay" | "ingest" | "cut" | "retire" | "delete" | "campaign" | "inbox"
-
-/** One named shell line and the side of the job it runs on. */
-export interface Hook {
-  readonly name: string
-  readonly when: "before" | "after"
-  readonly command: string
-}
 
 /** The deployment states no entry point for `kind`. */
 export class LaunchUnstated extends Schema.TaggedError<LaunchUnstated>()("Corpus.LaunchUnstated", {
@@ -43,23 +30,17 @@ export interface Interface {
   readonly entry: (kind: JobKind) => Effect.Effect<ReadonlyArray<string>, LaunchUnstated>
   /** The directory a launched job runs in. */
   readonly cwd: string
-  /** The directory the hooks run in. */
-  readonly hooksCwd: string
-  /** The hooks around every job, in the order they run. */
-  readonly hooks: Effect.Effect<ReadonlyArray<Hook>>
   /** The command an operator runs to freeze a capture's earlier case ids, as a refusal names it. */
   readonly seedIds: string
 }
 
 export class Service extends Context.Service<Service, Interface>()("@sip/corpus/Launcher") {}
 
-/** The default: no entry point, no hook. */
+/** The default: no entry point. */
 export const layer = Layer.sync(Service, () =>
   Service.of({
     entry: (kind) => Effect.fail(new LaunchUnstated({ kind })),
     cwd: process.cwd(),
-    hooksCwd: process.cwd(),
-    hooks: Effect.succeed([]),
     seedIds: "the deployment's case-id seed"
   }))
 

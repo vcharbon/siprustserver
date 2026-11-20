@@ -1,17 +1,14 @@
-//! sip-clock — the clock seam (re-expression of the source's Effect `Clock` /
-//! `TestClock`).
+//! sip-clock — the clock seam.
 //!
 //! # Why this exists (and why it is *narrow*)
 //!
-//! Effect's `Clock`/`TestClock` did two jobs through one runtime-injected seam:
-//! it answered "what time is it?" (the `nowMs` value flowing into deadline math)
-//! **and** "wake me later" (scheduling). In Rust those split:
+//! A clock answers two questions: "what time is it?" (a timestamp) and "wake
+//! me later" (scheduling). Here those split:
 //!
 //! - **Behaviour — timers, deadlines, idle-sweeps, windows — runs on monotonic
 //!   time via `tokio::time` directly** (`sleep`, `sleep_until`, `interval`,
 //!   `timeout`, `Instant`). `tokio::time::pause`/`advance` is the universal test
-//!   lever for all of it, ambient within the runtime exactly as Effect's
-//!   `TestClock` was ambient within the Effect runtime. There is **no trait
+//!   lever for all of it, ambient within the runtime. There is **no trait
 //!   wrapping** of scheduling — wrapping it would re-implement a worse tokio.
 //! - **Wall-clock `now_ms()` is for timestamps only** — log lines, call records.
 //!   It is *not* a behavioural input (no deadline is computed from it). It is the
@@ -32,7 +29,7 @@
 //! - In tests the elapsed rides the **same** monotonic clock `tokio::time`
 //!   controls, so a single `tokio::time::advance(d)` moves the behavioural timers
 //!   **and** `now_ms()` together, consistently. No separately-settable
-//!   `TestClock` counter is needed — pause/advance is the one lever.
+//!   test-clock counter is needed — pause/advance is the one lever.
 //!
 //! # HA note — failover timer reconstruction
 //!
@@ -54,7 +51,7 @@
 //! nodes' **wall clocks agree** (keep them NTP-disciplined), plus each node's
 //! monotonic drift from true wall over its uptime. Skew shifts the rearmed
 //! deadline earlier/later by the disagreement; a past-due `fire_at` clamps to a
-//! zero delay and fires immediately. See docs/MIGRATION_PLAN_B2B.md §2.
+//! zero delay and fires immediately.
 //!
 //! ## Skew re-anchoring at the replication boundary
 //!

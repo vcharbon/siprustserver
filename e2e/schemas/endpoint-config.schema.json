@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "EndpointConfig",
-  "description": "The JSON **Endpoint config** (ADR-0018): binds one Infra shape's logical\nroles (alice, bob1, lb, b2bua) to concrete addresses, plus the agent recv\nbound. Addresses are infra-specific, so a config names the Infra shape it\nis for — `build` rejects a mismatch.",
+  "description": "The JSON **Endpoint config** (ADR-0018): binds logical roles (alice, bob,\ncharlie, lb) to concrete addresses, plus the agent recv bound and the\negress policy, labelled with the Infra shape it addresses.",
   "type": "object",
   "properties": {
     "$schema": {
@@ -11,7 +11,7 @@
       ]
     },
     "egress": {
-      "description": "Optional authored **egress policy** — how a run realizes a logical INVITE\non this topology's wire (`\"transparent\"` | `\"api-call-pin\"` |\n`{\"registrar-aor\":{\"domain\":…}}`). The e2e framework's compiled Infra\nshapes keep declaring their own policy and OVERRIDE this field; the load\ngenerator standalone (`loadgen --endpoint-config`) reads it (absent =\ntransparent). See [`EndpointConfig::egress_policy`].",
+      "description": "Optional authored **egress policy** — how a run realizes a logical INVITE\non this topology's wire (`\"transparent\"` | `\"api-call-pin\"` |\n`{\"registrar-aor\":{\"domain\":…}}`); absent = transparent. The load\ngenerator (`loadgen --endpoint-config`) reads it. See\n[`EndpointConfig::egress_policy`].",
       "anyOf": [
         {
           "$ref": "#/$defs/EgressPolicySpec"
@@ -22,7 +22,7 @@
       ]
     },
     "infraShape": {
-      "description": "The Infra shape these addresses bind (e.g. `fake-lsbc-b2bua`).",
+      "description": "The Infra shape label of the topology these addresses reach (e.g.\n`loadgen-mux`).",
       "type": "string"
     },
     "recvTimeoutMs": {
@@ -36,13 +36,6 @@
       "additionalProperties": {
         "type": "string"
       }
-    },
-    "transitDelayMs": {
-      "description": "One-hop simulated transit delay (fake only; coerced to ≥1ms).",
-      "type": "integer",
-      "format": "uint64",
-      "default": 0,
-      "minimum": 0
     }
   },
   "additionalProperties": false,

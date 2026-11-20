@@ -1214,6 +1214,7 @@ dependencies = [
  "socket2",
  "thiserror",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -1251,6 +1252,7 @@ dependencies = [
  "sip-ids",
  "sip-message",
  "sip-net",
+ "sip-retransmit",
  "sip-txn",
  "subtle",
  "task-restart",

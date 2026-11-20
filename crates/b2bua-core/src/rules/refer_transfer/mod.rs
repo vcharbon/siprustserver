@@ -1,7 +1,7 @@
 //! `referTransfer` — the REFER-driven blind-transfer service. A bridged B leg
 //! REFERs; `/call/refer` authorizes; the B2BUA dials the transfer target C on
 //! held SDP, realigns C to A's SDP, realigns A to C's answer, then merges A↔C
-//! (B is left orphaned; its BYE rides the CORE relay path).
+//! and releases B. Once told of C's answer (sipfrag 200), B's BYE ends B alone.
 //!
 //! - `seed` — the CORE_LAYER rules that run BEFORE the transfer slice exists
 //!   (intercept the first REFER, reject Replaces / a-leg REFER).

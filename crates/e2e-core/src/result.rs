@@ -1,18 +1,13 @@
-//! The **result model + persistence** (ADR-0018): one serde
-//! `RunResult` per cell — verdict, check verdicts, surfaced report findings,
-//! the neutral [`SeqDoc`] diagram, timings — written as
-//! `e2e/runs/<campaign>/<ts>/<case>__<shape>__<infra>/result.json`, with a
-//! `campaign.json` aggregate index per run. JSON-first: the web layer renders
-//! these files; heavy artifacts (`.wav`) are sibling files, never inlined.
-
-use std::io;
-use std::path::{Path, PathBuf};
+//! The **cell result record** (ADR-0018): one serde `RunResult` per cell —
+//! verdict, check verdicts, the RFC findings, the neutral [`SeqDoc`] diagram,
+//! timings — written as `<cell dir>/result.json` in camelCase, the byte form
+//! `ts/contracts/src/e2e.ts` decodes.
 
 use scenario_harness::RunReport;
 use seq_report::{Anomaly, SeqDoc};
 use serde::{Deserialize, Serialize};
 
-use crate::checks::{self, CheckVerdict};
+use e2e_model::checks::{self, CheckVerdict};
 
 /// One cell of the campaign matrix: {Test case × Callflow shape × Infra shape}.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -21,13 +16,6 @@ pub struct CellId {
     pub case: String,
     pub shape: String,
     pub infra: String,
-}
-
-impl CellId {
-    /// The cell's directory name under the run dir.
-    pub fn dir_name(&self) -> String {
-        format!("{}__{}__{}", self.case, self.shape, self.infra)
-    }
 }
 
 /// Recorded-activity span — virtual ms under a paused clock, wall ms under a
@@ -39,21 +27,6 @@ pub struct Timings {
     pub first_ms: u64,
     pub last_ms: u64,
     pub messages: usize,
-}
-
-/// One media artifact a cell produced: what `agent` RECEIVED, as a sibling
-/// `.wav` next to `result.json` (never inlined), plus the spectral classifier
-/// verdict over the recorded PCM.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MediaRef {
-    pub agent: String,
-    /// The sibling file name (e.g. `alice.received.wav`), relative to the cell dir.
-    pub wav: String,
-    /// The classifier's label for the received audio (e.g. `tone:200hz`).
-    pub classify: String,
-    /// RMS level of the recorded PCM (silence ≈ 0).
-    pub rms: f64,
 }
 
 /// Everything one cell run produced.
@@ -73,9 +46,6 @@ pub struct RunResult {
     /// advisory/gating severity. Structural recorder findings and harness
     /// verdicts (an HTTP service's, a failed expect) stay in `seq_doc` only.
     pub rfc: Vec<Anomaly>,
-    /// Media artifacts (media-exchanging shapes only; empty otherwise).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub media: Vec<MediaRef>,
     /// The neutral sequence diagram — render with `seq_report::render_svg`.
     pub seq_doc: SeqDoc,
     pub timings: Timings,
@@ -105,83 +75,8 @@ impl RunResult {
             passed,
             checks: check_verdicts,
             rfc: seq_doc.anomalies.iter().filter(|a| a.rule_sourced).cloned().collect(),
-            media: Vec::new(),
             seq_doc,
             timings,
         }
     }
-
-    /// Attach media artifact refs (the executor writes the `.wav`s; the
-    /// matching "hears" verdicts are already folded into `checks`).
-    pub fn with_media(mut self, media: Vec<MediaRef>) -> Self {
-        self.media = media;
-        self
-    }
-}
-
-/// Per-cell line of the `campaign.json` aggregate.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CellSummary {
-    pub cell: CellId,
-    pub passed: bool,
-    /// The cell directory (relative to the run dir) holding `result.json`.
-    pub dir: String,
-    /// Set when the cell CRASHED (a harness assertion / the RFC hard gate
-    /// panicked) — there is then no `result.json`, only `error.txt`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
-}
-
-/// The aggregate index of one campaign run.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CampaignIndex {
-    pub campaign: String,
-    /// Run timestamp label (the `<ts>` path segment) — supplied by the caller
-    /// so the core stays clock-free.
-    pub ts: String,
-    pub cells: Vec<CellSummary>,
-}
-
-impl CampaignIndex {
-    pub fn passed(&self) -> bool {
-        self.cells.iter().all(|c| c.passed)
-    }
-}
-
-/// `<runs_root>/<campaign>/<ts>` — the directory of one campaign run.
-pub fn run_dir(runs_root: &Path, campaign: &str, ts: &str) -> PathBuf {
-    runs_root.join(campaign).join(ts)
-}
-
-/// Persist one cell result as `<run_dir>/<cell>/result.json`. Creates the dir.
-pub fn write_result(run_dir: &Path, result: &RunResult) -> io::Result<PathBuf> {
-    let dir = run_dir.join(result.cell.dir_name());
-    std::fs::create_dir_all(&dir)?;
-    let path = dir.join("result.json");
-    let json = serde_json::to_string_pretty(result).map_err(io::Error::other)?;
-    std::fs::write(&path, json + "\n")?;
-    Ok(path)
-}
-
-/// Read a cell result back from its directory.
-pub fn read_result(cell_dir: &Path) -> io::Result<RunResult> {
-    let text = std::fs::read_to_string(cell_dir.join("result.json"))?;
-    serde_json::from_str(&text).map_err(io::Error::other)
-}
-
-/// Persist the aggregate as `<run_dir>/campaign.json`.
-pub fn write_campaign_index(run_dir: &Path, index: &CampaignIndex) -> io::Result<PathBuf> {
-    std::fs::create_dir_all(run_dir)?;
-    let path = run_dir.join("campaign.json");
-    let json = serde_json::to_string_pretty(index).map_err(io::Error::other)?;
-    std::fs::write(&path, json + "\n")?;
-    Ok(path)
-}
-
-/// Read the aggregate back.
-pub fn read_campaign_index(run_dir: &Path) -> io::Result<CampaignIndex> {
-    let text = std::fs::read_to_string(run_dir.join("campaign.json"))?;
-    serde_json::from_str(&text).map_err(io::Error::other)
 }

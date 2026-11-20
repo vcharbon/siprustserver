@@ -35,7 +35,7 @@ enum Work {
 /// Run the owner until every handle drops or the endpoint closes.
 pub(super) async fn run(
     mut owner: Owner,
-    endpoint: Box<dyn UdpEndpoint>,
+    endpoint: Arc<dyn UdpEndpoint>,
     mut cmd_rx: mpsc::Receiver<Command>,
     mut forget_rx: mpsc::UnboundedReceiver<Forget>,
     pulse: Arc<LoopPulse>,

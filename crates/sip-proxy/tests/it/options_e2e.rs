@@ -1,11 +1,9 @@
-//! OPTIONS end-to-end — port of
-//! `tests/sip-front-proxy/integration/options-end-to-end.test.ts`, retargeted to
-//! a **simulated B2BUA responder**. A real [`HealthProbe`] fans OPTIONS at a
-//! worker; the responder answers as a worker does in each of its states
-//! (ADR-0050 §2) or stays silent; the probe drives the worker's health and
-//! acceptance through the control seam (§3): a `200` → `Alive` with the
-//! acceptance its `X-Readiness` states, a `503` → refusing, health as it was,
-//! repeated silence → `Dead`, a new `X-Incarnation` → `Unknown` first.
+//! OPTIONS end-to-end against a **simulated B2BUA responder**. A real
+//! [`HealthProbe`] fans OPTIONS at a worker; the responder answers as a worker
+//! does in each of its states (ADR-0050 §2) or stays silent; the probe drives
+//! the worker's health and acceptance through the control seam (§3): a `200`
+//! → `Alive` with the acceptance its `X-Readiness` states, a `503` →
+//! refusing, health as it was, repeated silence → `Dead`, a new `X-Incarnation` → `Unknown` first.
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;

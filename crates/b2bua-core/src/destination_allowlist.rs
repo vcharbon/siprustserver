@@ -1,5 +1,4 @@
-//! Destination allow-list — pre-flight check on b-leg destinations. Port of
-//! `src/b2bua/TargetAdmission.ts`.
+//! Destination allow-list — pre-flight check on b-leg destinations.
 //!
 //! The b2bua worker accepts call-control's `route.destination.host` verbatim and
 //! resolves no name: an IP literal is sent as is, and a name reaches the wire only
@@ -21,8 +20,7 @@
 //!     but NOT a look-alike sibling label like `evil-svc.cluster.local`. Empty
 //!     entries never match (a blank list element does not silently allow all).
 
-/// The verdict for a destination host against the suffix allow-list. Port of the
-/// TS string union `"ip-literal" | "allow-listed" | "reject"`.
+/// The verdict for a destination host against the suffix allow-list.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AdmissionVerdict {
     /// Short-circuit accept — the host is an IP literal, so no DNS is required at
@@ -48,9 +46,8 @@ fn is_ip_literal(host: &str) -> bool {
 }
 
 /// Returns true if any suffix in `suffixes` matches `host` (case-insensitive) at a
-/// label boundary, or if the list contains the wildcard `"*"`. Port of TS
-/// `isAllowedSuffix`, hardened so a misconfigured dotless suffix cannot admit a
-/// look-alike sibling label.
+/// label boundary, or if the list contains the wildcard `"*"`. A misconfigured
+/// dotless suffix cannot admit a look-alike sibling label.
 ///
 /// The wildcard `"*"` matches every host (incl. the empty host). An empty list —
 /// and any blank `""` entry within a list — rejects (never matches), so a stray
@@ -85,8 +82,7 @@ fn is_allowed_suffix(host: &str, suffixes: &[String]) -> bool {
     false
 }
 
-/// Classify a destination host against the suffix allow-list. Port of TS
-/// `classifyAdmission`.
+/// Classify a destination host against the suffix allow-list.
 ///
 ///   - [`AdmissionVerdict::IpLiteral`]  — short-circuit accept; no DNS will be
 ///     required at send time.
@@ -105,20 +101,17 @@ pub fn classify_admission(host: &str, suffixes: &[String]) -> AdmissionVerdict {
 
 #[cfg(test)]
 mod tests {
-    //! Port of `tests/b2bua/TargetAdmission.test.ts` — the pure-helper suite.
-    //! The two admission WIRING sites have their own ports of the source's
-    //! dedicated wiring tests: the `apply_route` decision-boundary gate by
-    //! `b2bua-harness/tests/destination_allowlist_gate.rs` (port of
-    //! `apply-route-admission-reject.test.ts`, incl. the never-touch-the-limiter
-    //! property), and the rule-path `ActionExecutor::CreateLeg` branch by
-    //! `b2bua-core/tests/it/rules.rs::create_leg_admission` (port of
-    //! `action-executor-create-leg-admission.test.ts`: reject + IP-literal &
+    //! The pure-helper suite. The two admission WIRING sites have their own
+    //! wiring tests: the `apply_route` decision-boundary gate in
+    //! `b2bua-harness/tests/it/destination_allowlist_gate.rs` (incl. the
+    //! never-touch-the-limiter property), and the rule-path
+    //! `ActionExecutor::CreateLeg` branch in
+    //! `b2bua-core/tests/it/rules/create_leg_admission.rs` (reject + IP-literal &
     //! wildcard admit). No clock, no timers — pure functions.
 
     use super::*;
 
-    // Build the `Vec<String>` the Rust signature wants from string literals, so
-    // each case reads like its TS array-literal counterpart.
+    /// The `Vec<String>` the signature takes, from string literals.
     fn list(items: &[&str]) -> Vec<String> {
         items.iter().map(|s| s.to_string()).collect()
     }

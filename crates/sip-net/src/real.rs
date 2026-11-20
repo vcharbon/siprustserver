@@ -1,15 +1,13 @@
-//! Real `dgram`-backed `SignalingNetwork` (port of `SignalingNetwork.real.ts`),
-//! over `tokio::net::UdpSocket`.
+//! Real `SignalingNetwork`, over `tokio::net::UdpSocket`.
 //!
 //! Each `bind_udp` opens a real UDP socket and spawns a receive task that
 //! pumps `recv_from` into the endpoint's bounded [`PacketQueue`], applying the
-//! pre-ingress hook at arrival time exactly as the source's `socket.on(
-//! "message")` handler did. Every send is one non-blocking `sendto`: a full
+//! pre-ingress hook at arrival time. Every send is one non-blocking `sendto`: a full
 //! send buffer drops the datagram and counts it, it never suspends the caller
 //! (ADR-0033 — the kernel can hold a socket's send buffer for seconds on an
-//! unresolved next hop, and the caller is an ingress loop). Trace recording is NOT here — in this port the
+//! unresolved next hop, and the caller is an ingress loop). Trace recording is NOT here — the
 //! typed `Recorder` channel (the recording decorator in `contracts.rs`) is the
-//! single recording path, replacing the source's `realTracing` boolean split.
+//! single recording path.
 
 use std::net::SocketAddr;
 use std::sync::atomic::Ordering;
@@ -177,8 +175,8 @@ fn recv_pause(error: &std::io::Error) -> Option<Duration> {
     }
 }
 
-/// The receive pump. Mirrors the source's `socket.on("message", ...)` handler:
-/// depth-aware pre-ingress dispatch, tail-drop on a full queue. An accepted
+/// The receive pump: depth-aware pre-ingress dispatch, tail-drop on a full
+/// queue. An accepted
 /// datagram is queued with the parse its hook made, if any. A receive
 /// error never ends it: each is counted ([`UdpEndpointCounters::recv_errors`])
 /// and the pump reads on, after [`recv_pause`].
@@ -210,8 +208,8 @@ async fn recv_loop(
         };
         // `recv_from` reports at most the buffer's length.
         let mut arrival = Arrival::new(Bytes::copy_from_slice(buf.get(..n).unwrap_or(&buf)));
-        let depth = queue.depth();
-        match pre_ingress::judge(pre_ingress.as_ref(), &mut arrival, src, depth, &counters) {
+        let load = queue.load();
+        match pre_ingress::judge(pre_ingress.as_ref(), &mut arrival, src, load, &counters) {
             PreIngressAction::Drop => {
                 counters.pre_ingress_dropped.fetch_add(1, Ordering::Relaxed);
             }
@@ -225,9 +223,9 @@ async fn recv_loop(
                     counters.pre_ingress_reply_failures.fetch_add(1, Ordering::Relaxed);
                 }
             }
-            PreIngressAction::Accept => {
+            action @ (PreIngressAction::Accept | PreIngressAction::AcceptAhead) => {
                 let arrival_ms = u64::try_from(clock.now_ms()).unwrap_or(0);
-                if queue.offer(arrival.into_packet(src, arrival_ms)) {
+                if queue.offer_as(&action, arrival.into_packet(src, arrival_ms)) {
                     counters.enqueued.fetch_add(1, Ordering::Relaxed);
                 } else {
                     counters.tail_dropped.fetch_add(1, Ordering::Relaxed);
@@ -289,6 +287,10 @@ impl UdpEndpoint for RealEndpoint {
 
     fn queue_depth(&self) -> usize {
         self.queue.depth()
+    }
+
+    fn queue_wait(&self) -> Duration {
+        self.queue.wait()
     }
 
     fn queue_max(&self) -> usize {

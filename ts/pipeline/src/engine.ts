@@ -8,6 +8,14 @@
  * its own matcher below and none of them is configurable beyond the fields its
  * schema declares.
  *
+ * Two phases. The join phase runs every rule but `retry` into pairwise joins,
+ * and union-find closes them into groups. The chain phase runs
+ * the `retry` rules: each qualifying terminal failure pairs with the next
+ * attempt, within a group and, for a rule with `match`, across groups, and
+ * those joins feed back into membership. The output is `calls`, `joins`,
+ * `groups`, `ambiguities` and `chains`; a chain lists its calls in attempt
+ * order and is the input to pivot `routing.attempts`.
+ *
  * The engine never PICKS. A call joining several candidates under the same rule
  * in the same role keeps every join and flags them all: which one is right is a
  * judgement, and a judgement made silently here would look exactly like
@@ -165,6 +173,56 @@ const MATCHERS: {
         const dt = Math.abs(b.call.invite!.ts_ms - a.call.invite!.ts_ms)
         if (rule.window_ms !== undefined && dt > rule.window_ms) continue
         emit(a.call, b.call, dt, { header: rule.header, key: a.key, value: a.value })
+      }
+    }
+  },
+
+  /**
+   * Anchor: the initial INVITE of each call, the left call's `left` header
+   * against the right call's `right` header. The left keys are indexed once and
+   * each right key is looked up: without a window a key on several calls joins
+   * each pair; with `window_ms`, a right call joins the left call of its key
+   * whose INVITE is nearest its own within the window (the earlier on a tie).
+   */
+  "header-pair": (rule, calls, emit) => {
+    const left = new RegExp(rule.left.pattern)
+    const right = new RegExp(rule.right.pattern)
+    const byKey = new Map<string, Array<{ call: Call; value: string }>>()
+    for (const a of calls) {
+      if (a.invite === undefined) continue
+      for (const { key, from } of keysOf(left, a.invite.headers(rule.left.header))) {
+        byKey.set(key, [...(byKey.get(key) ?? []), { call: a, value: from }])
+      }
+    }
+    const gap = (la: { call: Call }, b: Call): number => Math.abs(b.invite!.ts_ms - la.call.invite!.ts_ms)
+    const candidates = (b: Call, key: string) => {
+      const others = (byKey.get(key) ?? []).filter((la) => la.call.id !== b.id)
+      if (rule.window_ms === undefined) return others
+      const near = others
+        .filter((la) => gap(la, b) <= rule.window_ms!)
+        .reduce<{ call: Call; value: string } | undefined>(
+          (best, la) =>
+            best === undefined ||
+            gap(la, b) < gap(best, b) ||
+            (gap(la, b) === gap(best, b) && la.call.invite!.ts_ms < best.call.invite!.ts_ms)
+              ? la
+              : best,
+          undefined
+        )
+      return near === undefined ? [] : [near]
+    }
+    for (const b of calls) {
+      if (b.invite === undefined) continue
+      for (const rb of keysOf(right, b.invite.headers(rule.right.header))) {
+        for (const la of candidates(b, rb.key)) {
+          emit(la.call, b, b.invite.ts_ms - la.call.invite!.ts_ms, {
+            key: rb.key,
+            left_header: rule.left.header,
+            left_value: la.value,
+            right_header: rule.right.header,
+            right_value: rb.from
+          })
+        }
       }
     }
   },

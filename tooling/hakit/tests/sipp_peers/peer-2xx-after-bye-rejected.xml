@@ -1,0 +1,74 @@
+<?xml version="1.0" encoding="ISO-8859-1" ?>
+<!DOCTYPE scenario SYSTEM "sipp.dtd">
+<!-- Answers; rejects the caller's BYE with a 500 and at once sends its 200 to
+     the INVITE again (it lands in SIPp's unexpected-message handler while the
+     caller steps past the BYE's final). It takes the 2xx's ACK and fails on a
+     copy of the BYE, which already has its final. -->
+<scenario name="peer-2xx-after-bye-rejected">
+  <recv request="INVITE" crlf="true" rrs="true">
+    <action>
+      <ereg regexp=".*" search_in="hdr" header="Via:" start_line="true" assign_to="i_via"/>
+      <ereg regexp=".*" search_in="hdr" header="From:" start_line="true" assign_to="from_hdr"/>
+      <ereg regexp=".*" search_in="hdr" header="To:" start_line="true" assign_to="to_raw"/>
+    </action>
+  </recv>
+  <send retrans="500">
+    <![CDATA[
+      SIP/2.0 200 OK
+      [last_Via:]
+      [last_Record-Route:]
+      [last_From:]
+      [last_To:];tag=[pid]P[call_number]
+      [last_Call-ID:]
+      [last_CSeq:]
+      Contact: <sip:[local_ip]:[local_port];transport=[transport]>
+      Content-Type: application/sdp
+      Content-Length: [len]
+
+      v=0
+      o=callee 1 1 IN IP[local_ip_type] [local_ip]
+      s=-
+      c=IN IP[media_ip_type] [media_ip]
+      t=0 0
+      m=audio [media_port] RTP/AVP 0
+      a=rtpmap:0 PCMU/8000
+    ]]>
+  </send>
+  <recv request="ACK" crlf="true"/>
+  <recv request="BYE" crlf="true" timeout="10000"/>
+  <send>
+    <![CDATA[
+      SIP/2.0 500 Server Internal Error
+      [last_Via:]
+      [last_Record-Route:]
+      [last_From:]
+      [last_To:]
+      [last_Call-ID:]
+      [last_CSeq:]
+      Content-Length: 0
+    ]]>
+  </send>
+  <send>
+    <![CDATA[
+      SIP/2.0 200 OK
+      Via:[$i_via]
+      From: [$from_hdr]
+      To: [$to_raw];tag=[pid]P[call_number]
+      Call-ID: [call_id]
+      CSeq: 1 INVITE
+      Contact: <sip:[local_ip]:[local_port];transport=[transport]>
+      Content-Type: application/sdp
+      Content-Length: [len]
+
+      v=0
+      o=callee 1 1 IN IP[local_ip_type] [local_ip]
+      s=-
+      c=IN IP[media_ip_type] [media_ip]
+      t=0 0
+      m=audio [media_port] RTP/AVP 0
+      a=rtpmap:0 PCMU/8000
+    ]]>
+  </send>
+  <recv request="ACK" crlf="true" timeout="5000"/>
+  <pause milliseconds="300"/>
+</scenario>

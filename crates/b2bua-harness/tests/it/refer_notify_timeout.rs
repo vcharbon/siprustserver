@@ -154,6 +154,7 @@ async fn unanswered_notify_ends_the_subscription() {
     let mut a_realign = alice.receive("INVITE").await;
     a_realign.respond(200, "OK").with_sdp(ALICE_REALIGN_ANSWER).await;
     alice.receive("ACK").await;
+    bob.receive("BYE").await.respond(200, "OK").await;
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     assert!(
@@ -163,7 +164,6 @@ async fn unanswered_notify_ends_the_subscription() {
 
     let mut alice_bye = alice_dialog.bye().await;
     charlie.receive("BYE").await.respond(200, "OK").await;
-    bob.receive("BYE").await.respond(200, "OK").await;
     alice_bye.expect(200).await;
 
     let _ = h.finish().await;

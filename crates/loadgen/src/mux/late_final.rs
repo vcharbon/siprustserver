@@ -10,7 +10,10 @@
 //!   no call holds ([`Held::Answered`]): a retransmitted 2xx draws the ACK
 //!   again, the BYE's own final is absorbed.
 //!
-//! A 2xx to a live call's INVITE ends the hold: its ACK is the dialog's.
+//! A later INVITE of the dialog keeps the ACK an earlier one's non-2xx final
+//! drew ([`Held::earlier`]), still owed to that final's retransmissions; a
+//! 2xx to a live call's INVITE ends the hold of that INVITE (its ACK is the
+//! dialog's) and leaves the earlier ACK held.
 
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
@@ -30,6 +33,8 @@ pub(in crate::mux) struct Held {
     cseq: u32,
     dst: SocketAddr,
     state: HeldState,
+    /// An earlier INVITE of the dialog and the ACK its non-2xx final drew.
+    earlier: Option<(u32, Arc<[u8]>)>,
 }
 
 #[derive(Clone)]
@@ -88,6 +93,11 @@ impl Held {
             return Reply::NotHeld;
         };
         let (dst, held_cseq) = (self.dst, self.cseq);
+        if let Some((_, ack)) = self.earlier.as_ref().filter(|(c, _)| *c == cseq) {
+            if method == "INVITE" && status >= 300 {
+                return Reply::AckNon2xx(ack.clone(), dst);
+            }
+        }
         match (&self.state, method) {
             (HeldState::Answered { bye_cseq, .. }, "BYE") if *bye_cseq == cseq => Reply::Absorbed,
             _ if method != "INVITE" || cseq != held_cseq => Reply::NotHeld,
@@ -139,10 +149,17 @@ impl SentInvites {
             return;
         }
         let (Some(cid), Some(cseq)) = (id.call_id, id.cseq) else { return };
-        let (dialog, held) = (key_of(cid), Held { cseq, dst, state: HeldState::Open(d.shared()) });
+        let dialog = key_of(cid);
+        let held = Held { cseq, dst, state: HeldState::Open(d.shared()), earlier: None };
         let mut holds = self.0.lock().unwrap();
         match holds.iter_mut().find(|(k, _)| *k == dialog) {
-            Some((_, h)) => *h = held,
+            Some((_, h)) => {
+                let earlier = match &h.state {
+                    HeldState::Completed(ack) if h.cseq != cseq => Some((h.cseq, ack.clone())),
+                    _ => h.earlier.take(),
+                };
+                *h = Held { earlier, ..held };
+            }
             None => {
                 // A caller endpoint holds a handful of dialogs: room for one more.
                 holds.reserve_exact(1);
@@ -166,7 +183,15 @@ impl SentInvites {
             return;
         };
         if status < 300 {
-            holds.swap_remove(i);
+            match holds[i].1.earlier.take() {
+                Some((cseq, ack)) => {
+                    let h = &mut holds[i].1;
+                    (h.cseq, h.state) = (cseq, HeldState::Completed(ack));
+                }
+                None => {
+                    holds.swap_remove(i);
+                }
+            }
         } else if matches!(holds[i].1.state, HeldState::Open(_)) {
             let _ = holds[i].1.on_final(d);
         }
@@ -180,3 +205,7 @@ impl SentInvites {
         Some(holds.swap_remove(i).1)
     }
 }
+
+#[cfg(test)]
+#[path = "late_final_tests.rs"]
+mod tests;

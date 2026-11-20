@@ -23,7 +23,8 @@ pub(super) fn early_media(cid: &str) -> Vec<u8> {
     .into_bytes()
 }
 
-fn feed(wire: &CallWire, events: &[(Side<'_>, Dir, Vec<u8>)]) -> WireFacts {
+/// Hand `events` to the wire's tap in order; the facts after the last.
+pub(super) fn feed(wire: &CallWire, events: &[(Side<'_>, Dir, Vec<u8>)]) -> WireFacts {
     let tap = wire.tap();
     for (side, dir, raw) in events {
         tap(*side, *dir, &Datagram::sniff(raw));

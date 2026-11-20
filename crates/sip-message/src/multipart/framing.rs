@@ -118,6 +118,34 @@ fn blocks(body: &[u8], boundary: &[u8]) -> Vec<std::ops::Range<usize>> {
     starts.zip(ends).map(|(start, end)| start..end).collect()
 }
 
+/// The ranges of `body` outside every delimiter line and every block under
+/// `boundary` ([`blocks`]): the preamble, what follows the close delimiter's
+/// `--`, and the whole body when it holds no delimiter.
+pub(super) fn outside_parts(body: &[u8], boundary: &str) -> Vec<std::ops::Range<usize>> {
+    let dash_boundary = [b"--".as_slice(), boundary.as_bytes()].concat();
+    let found = if boundary.is_empty() {
+        Vec::new()
+    } else {
+        delimiters(body, &dash_boundary).unwrap_or_default()
+    };
+    let mut covered = 0;
+    let mut out = Vec::new();
+    for (i, (at, delimiter)) in found.iter().enumerate() {
+        let line = at.saturating_sub(2);
+        if line > covered {
+            out.push(covered..line);
+        }
+        covered = match delimiter {
+            Delimiter::Open { .. } => found.get(i + 1).map_or(body.len(), |(next, _)| next - 2),
+            Delimiter::Close => at + dash_boundary.len() + 2,
+        };
+    }
+    if covered < body.len() {
+        out.push(covered..body.len());
+    }
+    out
+}
+
 /// Whether `body` frames cleanly under `boundary`: its first delimiter opens a
 /// part, and every line up to the close delimiter that starts with
 /// `--boundary` is a delimiter. RFC 2046 §5.1.1 recognises a delimiter by the
@@ -216,6 +244,23 @@ mod tests {
         let (one, two) = (steps(most), steps(2 * most));
         assert!(one <= 3 * most + 1, "{one} steps for {most} lines");
         assert!(two <= 2 * one + 1, "{two} steps for twice {one}");
+    }
+
+    fn outside_texts(body: &str) -> Vec<&str> {
+        outside_parts(body.as_bytes(), "b").into_iter().map(|r| &body[r]).collect()
+    }
+
+    #[test]
+    fn outside_the_parts_lie_the_preamble_the_epilogue_and_an_unframed_body() {
+        let body = "pre\r\n--b\r\none\r\n--b\r\ntwo\r\n--b--\r\nepi\r\n";
+        assert_eq!(outside_texts(body), ["pre", "\r\nepi\r\n"]);
+        assert!(outside_texts("--b\r\none\r\n--b--").is_empty(), "framed whole");
+        assert!(outside_texts("--b\r\none\r\n").is_empty(), "never closed");
+        assert_eq!(outside_texts("--zz\r\none\r\n--zz--\r\n"), ["--zz\r\none\r\n--zz--\r\n"]);
+        assert_eq!(outside_texts("pre\r\n--b-- epi"), ["pre", " epi"], "it closes first");
+        let unbounded: Vec<_> =
+            outside_parts(b"--\r\nx", "").into_iter().map(|r| r.len()).collect();
+        assert_eq!(unbounded, [5], "an empty boundary frames nothing");
     }
 
     #[test]

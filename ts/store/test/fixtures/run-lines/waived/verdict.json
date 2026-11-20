@@ -1,0 +1,11 @@
+{
+  "case": "capture_lines.pcap.gz-waived",
+  "lane": "fake",
+  "status": "ok",
+  "waived": [
+    {
+      "bug": "provisional-rewrite-not-applied",
+      "finding": { "failure": "check-failed", "site": "B1 180", "field": "body", "op": "absent", "expected": "no body", "observed": "application/sdp" }
+    }
+  ]
+}

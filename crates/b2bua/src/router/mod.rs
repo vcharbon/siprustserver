@@ -63,6 +63,7 @@ mod peer_metrics;
 #[cfg(test)]
 mod possibly_confirmed_tests;
 pub(crate) use peer_metrics::outbound_proxy_target;
+mod message_budget;
 #[cfg(test)]
 mod oversize_send_tests;
 mod process;
@@ -82,6 +83,8 @@ mod resolve_tests;
 mod response_facts_tests;
 mod responses;
 mod restore_hygiene;
+#[cfg(test)]
+mod retired_prack_turn_tests;
 mod route_payload;
 mod stand_down;
 mod store_fault_gate;
@@ -99,6 +102,7 @@ mod turn_mark;
 pub(crate) mod txn_event;
 mod undecided;
 mod unheld;
+mod unheld_book;
 #[cfg(test)]
 mod unheld_final_tests;
 mod unrecoverable;
@@ -238,6 +242,8 @@ pub struct RouterCtx {
     pub unroutable_waves: crate::lifecycle::UnroutableWaves,
     /// The PRACKs released calls still answer 200 (RFC 3262 §3).
     pub(crate) late_pracks: late_prack::LatePrackBook,
+    /// The answers to finals no call here holds, by final (ADR-0063 §2).
+    pub(crate) unheld_answers: unheld_book::UnheldBook,
     /// The proxies' dead verdicts this node took (ADR-0050 §3).
     pub(crate) dead_verdicts: dead_verdict::VerdictBook,
     /// How those verdicts are read: their freshness window and hold.
@@ -354,6 +360,9 @@ pub enum PrimaryWrite {
 /// states of it, or a replication command.
 enum Work {
     Event(CallEvent, txn_event::Arrival),
+    /// A Call-ID passed its message budget: the calls holding it end
+    /// (`message_budget`).
+    BudgetTripped(sip_txn::CallIdBudgetTrip),
     Repl(ReplCommand),
     /// What `readmission` held: the arming of parked calls, then the reclaim
     /// commands in arrival order.
@@ -381,10 +390,7 @@ pub async fn run(
     let mut inbox = inbox::Inbox::new(txn_rx, timer_rx, reentry_rx, repl_rx);
     loop {
         let work = match inbox.next(&ctx, &mut readmission).await {
-            inbox::Taken::Keepalive(ev) => {
-                let (ev, arrival) = txn_event::call_event(ev, ctx.clock.now_ms());
-                Work::Event(ev, arrival)
-            }
+            inbox::Taken::Keepalive(ev) => txn_event::work(ev, ctx.clock.now_ms()),
             inbox::Taken::Work(work) => work,
             inbox::Taken::Closed => break,
         };
@@ -404,6 +410,7 @@ pub async fn run(
                     ingress::on_event(&ctx, ev, arrival, Some(&parks)).await;
                 }
             }
+            Work::BudgetTripped(trip) => message_budget::end_calls_holding(&ctx, &trip),
             Work::Repl(cmd) => {
                 if let Some(cmd) = readmission.admit(cmd) {
                     on_repl_command(&ctx, cmd, &mut readmission, &mut parks).await

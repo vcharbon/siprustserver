@@ -98,6 +98,22 @@ impl Misread {
         ports.dedup();
         ports
     }
+
+    /// The workers that sent a BYE toward a party of the transferred call,
+    /// the caller or the transfer target.
+    fn call_enders(&self) -> Vec<u16> {
+        let mut ports = self.senders("BYE sip:alice@");
+        ports.extend(self.senders("BYE sip:charlie@"));
+        ports
+    }
+
+    /// The workers that released the referrer, each once.
+    fn referrer_releasers(&self) -> Vec<u16> {
+        let mut ports = self.senders("BYE sip:bob@");
+        ports.sort_unstable();
+        ports.dedup();
+        ports
+    }
 }
 
 async fn transfer_target_rings_during_the_misread(name: &str) -> Misread {
@@ -155,7 +171,8 @@ async fn transfer_target_rings_during_the_misread(name: &str) -> Misread {
     m
 }
 
-/// The target's 2xx taken, the parties are realigned and the callee told.
+/// The target's 2xx taken, the parties are realigned, the callee told and
+/// released.
 async fn realigned(m: &Misread) {
     m.charlie.receive("ACK").await;
     let mut c_realign = m.charlie.receive("INVITE").await;
@@ -165,6 +182,7 @@ async fn realigned(m: &Misread) {
     a_realign.respond(200, "OK").with_sdp(OFFER).await;
     m.alice.receive("ACK").await;
     m.bob.receive("NOTIFY").await.respond(200, "OK").await;
+    m.bob.receive_tolerating("BYE", &["NOTIFY"]).await.respond(200, "OK").await;
 }
 
 /// The caller hangs up; the cluster settles to the call's one CDR.
@@ -173,7 +191,6 @@ async fn hang_up_and_settle(mut m: Misread, name: &str) {
     // A node that takes the call over sends again what its record says
     // left (RFC 3261 §17.1.2.2, §17.2.2): the parties absorb those copies.
     m.charlie.receive_tolerating("BYE", &["ACK", "INVITE"]).await.respond(200, "OK").await;
-    m.bob.receive_tolerating("BYE", &["NOTIFY"]).await.respond(200, "OK").await;
     bye.expect(200).await;
     m.fh.advance(Duration::from_secs(40)).await;
     let peers = [&m.alice, &m.bob, &m.charlie];
@@ -202,7 +219,12 @@ async fn a_dial_made_during_the_misread_is_answered_at_the_primary_after_the_fli
         !acks.is_empty() && acks.iter().all(|p| *p == m.primary_port()),
         "the primary ACKs the target's 2xx: {acks:?}"
     );
-    assert!(m.senders("BYE").is_empty(), "no node ends the call on evidence");
+    assert!(m.call_enders().is_empty(), "no node ends the call on evidence");
+    assert_eq!(
+        m.referrer_releasers(),
+        vec![m.primary_port()],
+        "the primary, which completed the transfer, alone releases the referrer"
+    );
     hang_up_and_settle(m, name).await;
 }
 
@@ -223,6 +245,11 @@ async fn a_dial_answered_during_the_misread_leaves_no_invite_open_at_the_primary
         .map(|(_, at)| at)
         .collect();
     assert!(late.is_empty(), "no INVITE of the dial leaves the primary after its ACK: {late:?}");
-    assert!(m.senders("BYE").is_empty(), "the call lives on past the INVITE's bound");
+    assert!(m.call_enders().is_empty(), "the call lives on past the INVITE's bound");
+    assert_eq!(
+        m.referrer_releasers(),
+        vec![m.copy_port()],
+        "the copy, which completed the transfer, alone releases the referrer"
+    );
     hang_up_and_settle(m, name).await;
 }

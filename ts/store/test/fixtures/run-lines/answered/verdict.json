@@ -1,0 +1,8 @@
+{
+  "case": "capture_lines.pcap.gz-answered",
+  "lane": "fake",
+  "status": "failed",
+  "failures": [
+    { "failure": "check-failed", "site": "call records", "field": "count", "op": "eq", "expected": "1", "observed": "2" }
+  ]
+}

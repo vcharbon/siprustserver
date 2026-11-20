@@ -5,10 +5,13 @@
  * stale filter and the name search in the URL so a slice is a link. A
  * capture whose ingest failed is a row with its failure.
  *
- * Two verbs live here: ADD BY PATH (§3 S1) — paths under the configured
- * roots, a set or one capture each, cut or not — which starts an ingest job,
- * and RETIRE (§3 S4), which reads the capture's plan, confirms once on the
- * counts, and starts a retire job. Both link the job they started.
+ * Three verbs live here: ADD BY PATH (§3 S1) — paths under the configured
+ * roots, a set or one capture each, cut or not — which starts an ingest job;
+ * REPLAY, the ticked captures whole (every row shown where none is ticked)
+ * on the lanes picked, re-cut first where stale, those with no cut of cases
+ * left out and named; and RETIRE (§3 S4), which
+ * reads the capture's plan, confirms once on the counts, and starts a retire
+ * job. Each links the jobs it started.
  */
 import { plural } from "../plural.ts"
 import type { JSX } from "react"
@@ -17,8 +20,10 @@ import { api, type JobStarted, type RetirePlan, type SourceRow, type SourcesPage
 import { Age } from "../components/Age.tsx"
 import { JobLinks } from "../components/JobLink.tsx"
 import { Link } from "../components/Link.tsx"
+import { ReplayLauncher } from "../components/ReplayLauncher.tsx"
 import { useHeld } from "../held.ts"
 import { href, setQuery, useQuery } from "../router.ts"
+import { sourcesSelection, tickAllShown } from "../sources-selection.ts"
 
 const DEFAULT_LIMIT = 100
 
@@ -177,10 +182,25 @@ const RetireButton = ({ capture, onStarted }: { readonly capture: string; readon
   )
 }
 
-const Table = ({ page, onStarted }: { readonly page: Page; readonly onStarted: () => void }): JSX.Element => (
+const Table = ({ page, ticked, onTick, onTickAll, onStarted }: {
+  readonly page: Page
+  /** The captures ticked for a replay, by name. */
+  readonly ticked: ReadonlyMap<string, SourceRow>
+  readonly onTick: (row: SourceRow) => void
+  readonly onTickAll: () => void
+  readonly onStarted: () => void
+}): JSX.Element => (
   <table className="listing sources-listing">
     <thead>
       <tr>
+        <th className="tick">
+          <input
+            type="checkbox"
+            title="tick every capture shown"
+            checked={page.rows.length > 0 && page.rows.every((row) => ticked.has(row.capture))}
+            onChange={onTickAll}
+          />
+        </th>
         <th>capture</th>
         <th>ingested</th>
         <th>ingest</th>
@@ -197,6 +217,9 @@ const Table = ({ page, onStarted }: { readonly page: Page; readonly onStarted: (
     <tbody>
       {page.rows.map((row) => (
         <tr key={row.capture}>
+          <td className="tick">
+            <input type="checkbox" checked={ticked.has(row.capture)} onChange={() => onTick(row)} />
+          </td>
           <td className="mono break">
             <Link to={href.triageStudy(row.capture)}>{row.capture}</Link>
             {row.sourcePath !== null && <div className="muted path">{row.sourcePath}</div>}
@@ -230,6 +253,7 @@ export const SourcesPage = (): JSX.Element => {
   const [limit, setLimit] = useState(() => initial.get("limit") ?? "")
   const [offset, setOffset] = useState(() => Number(initial.get("offset") ?? "0") || 0)
   const [refresh, setRefresh] = useState(0)
+  const [ticked, setTicked] = useState<ReadonlyMap<string, SourceRow>>(new Map())
   const settled = useSettled(needle, 250)
 
   // The filter IS the URL: this slice of the list is a link like any other view.
@@ -250,6 +274,13 @@ export const SourcesPage = (): JSX.Element => {
     return <p className="page muted">loading…</p>
   }
   const last = Math.min(value.total, value.offset + value.rows.length)
+  const onTick = (row: SourceRow): void =>
+    setTicked((held) => {
+      const next = new Map(held)
+      if (!next.delete(row.capture)) next.set(row.capture, row)
+      return next
+    })
+  const asked = sourcesSelection(ticked, value.rows)
 
   return (
     <div className="page sources-page">
@@ -308,9 +339,39 @@ export const SourcesPage = (): JSX.Element => {
         </button>
       </p>
 
-      <AddByPath roots={value.roots} />
+      <div className="queue-tools">
+        <ReplayLauncher
+          selection={asked.selection}
+          lane=""
+          lanes={[...new Set(value.rows.flatMap((row) => row.standings.map((one) => one.lane)))].sort()}
+          recut="stale-only"
+          ticked={ticked.size}
+        >
+          <p className="muted">
+            {ticked.size === 0 ? "every capture shown, whole" : `${plural(ticked.size, "ticked capture")}, whole`}
+            {ticked.size > 0 && (
+              <>
+                {" · "}
+                <button type="button" className="copy-ref" onClick={() => setTicked(new Map())}>untick all</button>
+              </>
+            )}
+          </p>
+          {asked.left.length > 0 && (
+            <p className="muted" title="no cut, a broken cut, or a cut of no case: the add-by-path form cuts">
+              left out, no cut of cases: <span className="mono">{asked.left.join(", ")}</span>
+            </p>
+          )}
+        </ReplayLauncher>
+        <AddByPath roots={value.roots} />
+      </div>
 
-      <Table page={value} onStarted={onStarted} />
+      <Table
+        page={value}
+        ticked={ticked}
+        onTick={onTick}
+        onTickAll={() => setTicked((held) => tickAllShown(held, value.rows))}
+        onStarted={onStarted}
+      />
     </div>
   )
 }

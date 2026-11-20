@@ -1,5 +1,6 @@
 //! The **run's clock**, as `timing.json` in the run bundle: when the run
-//! started, when it settled, and the ceiling it had.
+//! started, when it settled, and the ceiling it had, on the run's own clock,
+//! and the wall-clock instants it began and returned at.
 //!
 //! Named apart from [`crate::document::Timing`], which is the DOCUMENT's expect
 //! and settle budgets: one states what a run is allowed, the other what one run
@@ -20,6 +21,14 @@ pub struct RunTiming {
     pub settled_at_ms: Option<u64>,
     /// The settle budget the document declared for this run.
     pub settle_budget_ms: u64,
+    /// Unix milliseconds on the wall clock when the run's clock read zero. On a
+    /// virtual clock the two clocks part after it: only the run's own instants
+    /// say how far a run got.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wall_started_at_ms: Option<u64>,
+    /// Unix milliseconds on the wall clock when the run returned, settled or not.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wall_ended_at_ms: Option<u64>,
 }
 
 #[cfg(test)]
@@ -28,8 +37,13 @@ mod tests {
 
     #[test]
     fn a_run_that_never_settled_does_not_carry_the_field_at_all() {
-        let unsettled =
-            RunTiming { started_at_ms: 0, settled_at_ms: None, settle_budget_ms: 32_000 };
+        let unsettled = RunTiming {
+            started_at_ms: 0,
+            settled_at_ms: None,
+            settle_budget_ms: 32_000,
+            wall_started_at_ms: None,
+            wall_ended_at_ms: None,
+        };
         let text = serde_json::to_string(&unsettled).unwrap();
         assert!(!text.contains("settled_at_ms"), "{text}");
         assert_eq!(serde_json::from_str::<RunTiming>(&text).unwrap(), unsettled);

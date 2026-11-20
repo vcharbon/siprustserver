@@ -1,11 +1,12 @@
 //! The release of a fork straggler's 2xx (RFC 3261 §13.2.2.4): a 2xx under a
 //! To-tag no live dialog of an already confirmed b-leg carries is ACKed and
-//! its dialog BYEd, once per straggler; a repeat is re-ACKed with the same ACK.
+//! its dialog BYEd, once per straggler; a repeat is re-ACKed with the same ACK
+//! while it is owed one (ADR-0057 §10).
 //! The straggler is a retired dialog of the leg ([`call::DialogState::Retired`]): its
 //! INVITE record keeps the ACK's branch and bytes, and the BYE, continuing its own
 //! sequence, is a request record of its own until it settles (ADR-0055 §2).
 
-use call::{Call, Dialog, DialogState, RetainedEmission};
+use call::{Call, Dialog, DialogState, InviteExchange, RetainedEmission};
 use sip_message::generators::{self, GenerateAckFor2xxOpts};
 
 use crate::effects::{
@@ -19,8 +20,9 @@ use super::teardown::Relayed;
 use super::ActionExecutor;
 
 impl ActionExecutor<'_> {
-    /// ACK the straggler 2xx the current event carries on `leg_id`, and BYE its
-    /// dialog the first time it arrives.
+    /// ACK the straggler 2xx the current event carries on `leg_id` and BYE its
+    /// dialog the first time it arrives; re-ACK a later copy while one is owed
+    /// ([`re_ack_released`]).
     ///
     /// A delayed offer (§13.2.1: the leg's INVITE carried none) puts the offer
     /// in the 2xx, and the ACK MUST answer it (§13.2.2.4): the answer rejects
@@ -64,13 +66,10 @@ impl ActionExecutor<'_> {
             straggler.remote_target = target;
         }
         straggler.route_set = self.dialog_route_set(uac_route_set(resp), &call.call_ref, leg_id);
-        // Released already: its ACK left, re-passed as it left (§13.2.2.4).
-        if let Some(first) =
-            call::helpers::sent_exchange(&straggler).and_then(|x| x.emitted_ack.as_ref())
+        if let Some(released) =
+            call::helpers::sent_exchange(&straggler).filter(|x| x.emitted_ack.is_some())
         {
-            let label = format!("ACK (fork straggler {tag}, 2xx retransmit) → {leg_id}");
-            fx.outbound.push(super::ladder::repeat_of(first, label, leg_id));
-            return;
+            return re_ack_released(fx, released, &tag, leg_id);
         }
         let released = call::helpers::sent_exchange(&straggler).and_then(|x| x.ack_branch.clone());
         let offered_reliably = relay::offered_reliably(call, leg_id, &tag, i64::from(invite_cseq));
@@ -142,4 +141,13 @@ impl ActionExecutor<'_> {
         self.record_own_effect(call, leg_id, &id, &bye);
         fx.outbound.push(bye);
     }
+}
+
+/// The copy of the 2xx of the straggler `tag` already released on `leg_id`,
+/// whose INVITE's exchange is `released`: its ACK re-passed as it left
+/// (§13.2.2.4) while the copy is owed it, nothing past it
+/// ([`super::ack_leg::re_ack_copy`]).
+fn re_ack_released(fx: &mut HandlerEffects, released: &InviteExchange, tag: &str, leg_id: &str) {
+    let label = format!("ACK (fork straggler {tag}, 2xx retransmit) → {leg_id}");
+    super::ack_leg::re_ack_copy(fx, released, label, leg_id);
 }

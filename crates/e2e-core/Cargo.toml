@@ -4,7 +4,7 @@ version = "0.1.0"
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
-description = "E2E test-management run-core (ADR-0018): the registry of compiled Callflow shapes + Infra shapes, and the seam that runs the SAME scenario over a fake (simulated, paused-clock, in-process LB+b2bua SUT) or a real (external kind cluster) Infra shape. Fronted later by the web site and the CI CLI."
+description = "The e2e cell result record (ADR-0018): the result.json a crate's in-test reporter writes for one campaign cell, folded from a scenario-harness RunReport."
 
 [package.metadata.ha]
 side = "aware"
@@ -13,34 +13,12 @@ side = "aware"
 workspace = true
 
 [dependencies]
-# The axis DATA MODEL (authored docs + loaders + validation, egress model,
-# check evaluator) — extracted so the load generator can share it without
-# pulling the SUT crates. Everything is re-exported under the original
-# `e2e_core::{model,checks,egress,shape,infra}::…` paths.
 e2e-model = { path = "../e2e-model" }
 scenario-harness = { path = "../scenario-harness" }
 seq-report = { path = "../seq-report" }
-media = { path = "../media" }
-media-harness = { path = "../media-harness" }
-layer-harness = { path = "../layer-harness" }
-b2bua-harness = { path = "../b2bua-harness" }
-b2bua = { path = "../b2bua", features = ["testkit"] }
-call = { path = "../call" }
-sip-proxy = { path = "../sip-proxy" }
-sip-net = { path = "../sip-net" }
 sip-net-testkit = { path = "../sip-net-testkit" }
-sip-clock = { path = "../sip-clock", features = ["testkit"] }
-sip-txn = { path = "../sip-txn" }
-sip-message = { path = "../sip-message" }
-async-trait = { workspace = true }
-# `test-util` on top of the workspace `full`: the run executor builds one
-# current-thread runtime per cell, `start_paused(true)` for fake infra cells
-# (the library-side analogue of `#[tokio::test(start_paused = true)]`).
-tokio = { workspace = true, features = ["test-util"] }
 serde = { workspace = true }
-serde_json = { workspace = true }
-schemars = { workspace = true }
-regex = { workspace = true }
 
 [dev-dependencies]
+serde_json = { workspace = true }
 tokio = { workspace = true, features = ["test-util", "macros", "rt-multi-thread"] }

@@ -88,6 +88,9 @@ impl GatedFinding {
 ///     except the finding of a rule that gates the SUT
 ///     ([`rfc_rule_gates_sut`](sip_net_testkit::rfc_rule_gates_sut)) charged
 ///     to a lane bound as SUT;
+///   - any finding of a rule informative inside the system under test whose
+///     charged party and hop's other end are both lanes bound as SUT
+///     ([`RfcFinding::inside_sut`](sip_net_testkit::RfcFinding::inside_sut));
 ///   - any finding whose rule `subject()` does not intersect the originating
 ///     bind's declared roles (default = all roles, so this only narrows when a
 ///     test sets roles);

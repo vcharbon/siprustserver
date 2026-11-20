@@ -1,4 +1,4 @@
-//! [`LoadBalancerStrategy`] — port of `strategies/LoadBalancer.ts`, on a
+//! [`LoadBalancerStrategy`] — the production strategy, on a
 //! worker's two readiness axes (ADR-0050): liveness routes in-dialog
 //! requests, acceptance places new calls.
 //!

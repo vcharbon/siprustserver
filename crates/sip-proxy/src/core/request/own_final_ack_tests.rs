@@ -134,3 +134,43 @@ async fn the_ack_to_an_own_503_is_absorbed_with_no_memo_at_every_proxy_sharing_t
         "a proxy under another key does not take the tag for its own"
     );
 }
+
+/// A request on alice's dialog with bob, CSeq 2, with `max_forwards`.
+fn in_dialog(method: &str, cseq_method: &str, max_forwards: u32) -> SipMessage {
+    parse(&format!(
+        "{method} sip:bob@10.0.0.50:5060 SIP/2.0\r\n\
+Via: SIP/2.0/UDP {UAC}:5060;branch=z9hG4bKreinv;rport\r\n\
+Max-Forwards: {max_forwards}\r\n\
+From: <sip:alice@{UAC}>;tag=tag-a\r\n\
+To: <sip:bob@10.0.0.50>;tag=dialog-b\r\n\
+Call-ID: own-final@test\r\n\
+CSeq: 2 {cseq_method}\r\n\
+Contact: <sip:alice@{UAC}:5060>\r\n\
+Content-Length: 0\r\n\r\n"
+    ))
+}
+
+/// A reject a check before forwarding answers an in-dialog INVITE with
+/// echoes the dialog's To-tag, so only the memo of that reject recognises its
+/// ACK (RFC 3261 §17.1.1.3: the INVITE's branch): the proxy absorbs it and no
+/// worker sees an ACK matching no transaction it created. An ACK on another
+/// branch of the same dialog is forwarded.
+#[tokio::test(start_paused = true)]
+async fn the_ack_to_an_own_reject_of_an_in_dialog_invite_is_absorbed() {
+    let proxy = core(KEY, forward_all(), lru()).await;
+    let refused = proxy.route_request_from(&in_dialog("INVITE", "INVITE", 0), uac()).await;
+    assert_eq!(refused.target, None, "the out-of-hops re-INVITE is answered 483 here");
+
+    let ack = proxy.route_request_from(&in_dialog("ACK", "ACK", 70), uac()).await;
+    assert_eq!(ack.target, None, "the ACK of that 483 ends at the proxy that sent it");
+
+    let SipMessage::Request(other) = in_dialog("ACK", "ACK", 70) else { unreachable!() };
+    let mut raw = String::from_utf8_lossy(other.image()).to_string();
+    raw = raw.replace("branch=z9hG4bKreinv", "branch=z9hG4bKother");
+    let forwarded = proxy.route_request_from(&parse(&raw), uac()).await;
+    assert_eq!(
+        forwarded.target,
+        Some(ProxyAddr::new(W1, 5060)),
+        "an ACK of another transaction on the dialog is forwarded"
+    );
+}

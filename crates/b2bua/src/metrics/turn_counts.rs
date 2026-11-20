@@ -4,7 +4,11 @@
 
 use b2bua_sdk::config::Cap;
 
+use super::catalogue::caps::{MESSAGE_BUDGET_CAP, PEER_KIND};
 use super::B2buaMetrics;
+
+/// The `b2bua_cap_trips_total` row of a call the message budget ended.
+const MESSAGE_BUDGET_ROW: [&str; 2] = [MESSAGE_BUDGET_CAP, PEER_KIND];
 
 impl B2buaMetrics {
     /// Count one dialog-level ladder that ran to its give-up, for
@@ -16,6 +20,17 @@ impl B2buaMetrics {
     /// The give-ups of one obligation kind.
     pub fn repeat_give_ups_total(&self, obligation: &str) -> u64 {
         self.inner.rows.repeat_give_ups.get(&[obligation])
+    }
+
+    /// Count one copy of an INVITE final absorbed past its ladder by the
+    /// answer of `kind`, for `b2bua_copies_past_schedule_total{kind}`.
+    pub fn record_copy_past_schedule(&self, kind: &str) {
+        self.inner.rows.copies_past_schedule.add(&[kind], 1);
+    }
+
+    /// The copies of one kind absorbed past their ladder.
+    pub fn copies_past_schedule_total(&self, kind: &str) -> u64 {
+        self.inner.rows.copies_past_schedule.get(&[kind])
     }
 
     /// Count one model invariant broken or defect met, for
@@ -37,6 +52,17 @@ impl B2buaMetrics {
     /// The turns that crossed `cap`.
     pub fn cap_trips_of(&self, cap: Cap) -> u64 {
         self.inner.rows.cap_trips.get(&[cap.label(), cap.kind().label()])
+    }
+
+    /// Count one call ended by a Call-ID's message budget (ADR-0063 §6), for
+    /// `b2bua_cap_trips_total{cap="messages_per_call_id",kind="peer"}`.
+    pub fn record_message_budget_trip(&self) {
+        self.inner.rows.cap_trips.add(&MESSAGE_BUDGET_ROW, 1);
+    }
+
+    /// The calls ended by a Call-ID's message budget.
+    pub fn message_budget_trips(&self) -> u64 {
+        self.inner.rows.cap_trips.get(&MESSAGE_BUDGET_ROW)
     }
 
     /// Count one turn that grew the collection `cap` bounds across its half,
@@ -76,6 +102,7 @@ impl B2buaMetrics {
     pub(super) fn render_turn_counts(&self, s: &mut String) {
         let rows = &self.inner.rows;
         rows.repeat_give_ups.render(s);
+        rows.copies_past_schedule.render(s);
         rows.model_defects.render(s);
         rows.cap_trips.render(s);
         rows.cap_near.render(s);

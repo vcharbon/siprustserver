@@ -8,7 +8,9 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use b2bua::cdr::{BufferedCdrWriter, CdrEncodeError, CdrEncoder, CdrWriter};
+use b2bua::cdr::{
+    BufferedCdrWriter, CdrDelivery, CdrDeliveryObserver, CdrEncodeError, CdrEncoder, CdrWriter,
+};
 use b2bua::config::B2buaConfig;
 use b2bua::initial_invite::build_initial_call;
 use b2bua::metrics::B2buaMetrics;
@@ -84,6 +86,22 @@ fn writer_to(
     (RabbitMqCdrWriter::new(settings, Arc::new(Sized(size)), metrics.clone()), metrics)
 }
 
+/// Remembers every end it is told, with its time.
+#[derive(Default)]
+struct Ends(std::sync::Mutex<Vec<(CdrDelivery, Duration)>>);
+
+impl Ends {
+    fn told(&self) -> Vec<(CdrDelivery, Duration)> {
+        self.0.lock().unwrap().clone()
+    }
+}
+
+impl CdrDeliveryObserver for Ends {
+    fn ended(&self, delivery: CdrDelivery, took: Duration) {
+        self.0.lock().unwrap().push((delivery, took));
+    }
+}
+
 fn counts(m: &B2buaMetrics) -> (u64, u64) {
     (m.cdr_written_total(), m.cdr_dropped_total())
 }
@@ -126,6 +144,40 @@ async fn an_acked_publish_counts_one_written_record() {
     settle(&m, (20, 0)).await;
     assert_eq!(broker.count(|c| &c.accepted), 1, "one connection carries every record");
     assert_eq!(broker.count(|c| &c.published), 20);
+}
+
+/// The broker acks 150 ms after it read the publish: the observer is told one
+/// written record whose time runs to that ack, not to the write's return.
+#[tokio::test]
+async fn the_observer_is_told_an_acked_record_with_the_time_to_its_ack() {
+    let broker = FakeBroker::start(Reply::AckAfter(150 * MS)).await;
+    let (w, m) = writer_to(broker.url(), bounds(), 64);
+    let ends = Arc::new(Ends::default());
+    let w = w.observed_by(ends.clone());
+    w.write(&a_call(), 2_000).await;
+    assert_eq!(ends.told(), vec![], "handed to the connection is no end");
+    settle(&m, (1, 0)).await;
+    let told = ends.told();
+    let [(delivery, took)] = told[..] else { panic!("one end expected, told {told:?}") };
+    assert_eq!(delivery, CdrDelivery::Written);
+    assert!(took >= 150 * MS, "told {took:?}, before the broker's ack");
+}
+
+/// The broker never confirms: the observer is told one dropped record, at the
+/// confirm bound.
+#[tokio::test]
+async fn the_observer_is_told_an_unconfirmed_record_dropped_at_the_confirm_bound() {
+    let broker = FakeBroker::start(Reply::Silent).await;
+    let quick = CdrDeliveryBounds { confirm_timeout: 200 * MS, ..bounds() };
+    let (w, m) = writer_to(broker.url(), quick, 64);
+    let ends = Arc::new(Ends::default());
+    let w = w.observed_by(ends.clone());
+    w.write(&a_call(), 2_000).await;
+    settle(&m, (0, 1)).await;
+    let told = ends.told();
+    let [(delivery, took)] = told[..] else { panic!("one end expected, told {told:?}") };
+    assert_eq!(delivery, CdrDelivery::Dropped);
+    assert!(took >= 200 * MS, "told {took:?}, before the confirm bound");
 }
 
 #[tokio::test]
@@ -345,8 +397,9 @@ async fn the_window_pipelines_confirms_past_one_per_round_trip() {
 }
 
 /// Every record ends in exactly one of written or dropped, whatever the broker
-/// answers and however the connection ends. Each publish the broker reads
-/// takes the next scripted reply.
+/// answers and however the connection ends, and the observer is told each of
+/// those ends once. Each publish the broker reads takes the next scripted
+/// reply.
 #[tokio::test]
 async fn every_record_ends_written_or_dropped_exactly_once() {
     let broker = FakeBroker::start(Reply::Ack).await;
@@ -357,6 +410,8 @@ async fn every_record_ends_written_or_dropped_exactly_once() {
         ..bounds()
     };
     let (w, m) = writer_to(broker.url(), quick, 64);
+    let ends = Arc::new(Ends::default());
+    let w = w.observed_by(ends.clone());
     let call = a_call();
     let script = [
         Reply::Ack,
@@ -387,6 +442,13 @@ async fn every_record_ends_written_or_dropped_exactly_once() {
     let read = broker.count(|c| &c.published);
     assert!(read >= 2, "the broker read {read} publishes: the script's Ack and Nack need two");
     assert!(written > 0 && dropped > 0, "written {written}, dropped {dropped}");
+    let told = ends.told();
+    let told_written = told.iter().filter(|(d, _)| *d == CdrDelivery::Written).count();
+    assert_eq!(
+        (told_written as u64, told.len() as u64),
+        (written, n),
+        "the observer is told each end once"
+    );
 }
 
 #[tokio::test]

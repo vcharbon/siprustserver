@@ -1,5 +1,5 @@
 //! `ScriptedDecisionEngine` — a deterministic, no-HTTP decision backend that
-//! emulates the jssip reference backend by inspecting the request JSON
+//! emulates a decision backend by inspecting the request JSON
 //! (R-URI / To / `X-*` headers / body). Tests configure it with predicates so
 //! the existing SIPp scenario scripts produce the same call flows; the default
 //! routes every call to a configured destination with mandatory platform

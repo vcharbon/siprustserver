@@ -17,7 +17,7 @@ fn unread() -> Residency {
 
 #[test]
 fn a_quiet_turn_writes_nothing() {
-    for kind in [QuietTurn::OwnRung, QuietTurn::ReAck, QuietTurn::AbsorbedAck] {
+    for kind in QuietTurn::ALL {
         let quiet = Landed { quiet: Some(kind), ..landed(Active, false, false) };
         assert_eq!(classify(quiet, unread), CommitKind::Quiet(kind));
     }

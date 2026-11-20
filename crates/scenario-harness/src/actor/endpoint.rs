@@ -7,8 +7,7 @@
 //! # Downstream-contract feeding is DECLARATIVE ([`CtxFeed`])
 //!
 //! Phases / checkpoints / the 18x ringing gate key the load report's case
-//! buckets (see
-//! `docs/todos/actor-harness-p1-contract-table.md`), and each call body stamps
+//! buckets (each body's contract is on its scenario type), and each call body stamps
 //! a DIFFERENT trail (the refer body stamps only `referred`/`transferred` and
 //! never feeds `mark_ringing`; basic stamps `connected`/`bye_200` and does).
 //! So the reactor stamps NOTHING on its own — each [`ActorSpec`] declares
@@ -223,7 +222,7 @@ impl Feed {
 pub struct CtxFeed {
     /// Feed `ctx.mark_ringing` from this caller's 18x/answer observations (the
     /// cross-call >99% gate). ONLY the shared-establishment bodies feed it —
-    /// the hand-rolled refer/abandon bodies must NOT (contract table §3).
+    /// the hand-rolled refer/abandon bodies must NOT.
     pub ringing_gate: bool,
     /// Stamped when this caller's establishing INVITE is answered (2xx
     /// received) — `time_to_200` on every current body.

@@ -78,6 +78,17 @@ mod tests {
         }
     }
 
+    /// The published record names the call's `call_ref` and its incarnation
+    /// (ADR-0055 §5).
+    #[test]
+    fn the_json_record_names_the_call_ref_and_the_incarnation() {
+        let call = a_call(1_000);
+        let bytes = JsonRecordEncoder.encode(&call, 2_000).expect("encodes");
+        let json: serde_json::Value = serde_json::from_slice(&bytes).expect("JSON");
+        assert_eq!(json["call_ref"], call.call_ref.as_str());
+        assert_eq!(json["incarnation"], call.incarnation());
+    }
+
     /// The encoder is a trait object a sink holds behind an `Arc`.
     #[test]
     fn the_default_encoder_is_usable_as_a_shared_trait_object() {

@@ -389,8 +389,8 @@ async fn a_retired_relays_description_leaves_the_answered_session_alone() {
 }
 
 /// A relay still open in a retired early dialog when the call ends is
-/// answered there like any other (RFC 3261 §8.2.6): the caller's UPDATE into
-/// fork 2, which fork 2 never answers before the BYE ends the call, draws 481;
+/// answered there like any other (RFC 3261 §15.1.2): the caller's UPDATE into
+/// fork 2, which fork 2 never answers before the BYE ends the call, draws 487;
 /// fork 2's own final, coming late, is absorbed.
 #[tokio::test(start_paused = true)]
 async fn a_retired_relay_open_at_call_end_is_answered() {
@@ -419,7 +419,7 @@ async fn a_retired_relay_open_at_call_end_is_answered() {
     let mut bye = dialog.bye().await;
     bob.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
-    update.expect(481).await;
+    update.expect(487).await;
 
     at_fork2.respond(200, "OK").await;
 

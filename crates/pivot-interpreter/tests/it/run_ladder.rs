@@ -19,6 +19,7 @@ mod finals_and_acks;
 mod flow_shapes;
 mod forks;
 mod hunting;
+mod inject;
 mod limiter;
 mod matching;
 mod negative;
@@ -346,9 +347,11 @@ struct Admission {
 /// interpreter reads directly, and the driver reads it too — a dwell this lane
 /// cannot arm exactly is armed at the nearest value it can, and the difference
 /// has to fit the same window the run will judge the arrival by.
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 struct LaneDirectives {
     admission: Option<Admission>,
+    /// What performs the document's `inject` nodes (§6.6); none by default.
+    injector: Option<Arc<dyn pivot_interpreter::Injector>>,
     /// Activate the decision's REFER arm — the platform terminates a REFER
     /// (202 / 400 + `/call/refer`) rather than relaying it to the peer leg.
     local_refer: bool,
@@ -389,10 +392,6 @@ struct B2buaUnderTest<'a>(&'a b2bua_harness::B2buaSut);
 impl Sut for B2buaUnderTest<'_> {
     fn active_calls(&self) -> usize {
         self.0.active_calls()
-    }
-
-    fn cdr_records(&self) -> Vec<BTreeMap<String, String>> {
-        self.0.cdr_records().iter().map(flatten).collect()
     }
 
     fn observe(&self, name: &str) -> Result<Option<String>, String> {
@@ -652,15 +651,35 @@ async fn replay_directed(
         base_dir,
         composer: &composer,
         events: None,
+        injector: directives.injector.clone(),
         reader: std::sync::Arc::new(sip_message::CustomParser::built()),
     };
 
     let dir = bundle_dir(&case);
     let sut = B2buaUnderTest(&scene.b2bua);
-    let outcome = pivot_interpreter::replay(document, config, lane, &sut, &dir)
+    let mut outcome = pivot_interpreter::replay(document, config, lane, &sut, &dir)
         .await
         .expect("the run replays and leaves its bundle");
+    answer_call_records(&plan, &scene.b2bua, &mut outcome);
     (outcome, dir)
+}
+
+/// The ladder's call-records collector: the run's claim answered over the
+/// records the B2BUA wrote, into the outcome's verdict. A run states the claim
+/// exactly when its document states one.
+fn answer_call_records(plan: &Plan, b2bua: &B2buaSut, outcome: &mut Outcome) {
+    let post = plan.document().postconditions.as_ref();
+    let claimed = post.is_some_and(|post| matches!(post.call_records(), Ok(Some(_))));
+    assert_eq!(
+        outcome.call_records.is_some(),
+        claimed,
+        "the run states the call-records claim exactly when its document does"
+    );
+    if let Some(claim) = &outcome.call_records {
+        let records: Vec<BTreeMap<String, String>> =
+            b2bua.cdr_records().iter().map(flatten).collect();
+        pivot_interpreter::records::judge(claim, &records, &mut outcome.verdict);
+    }
 }
 
 /// Every rung asserts the same floor: green verdict, a settled run, and a

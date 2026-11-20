@@ -215,12 +215,12 @@ export const ROUTES: { readonly [K in RouteKind]: RouteDoc<RouteOf<K>> } = {
   },
   job: {
     patterns: ["/jobs/<id>"],
-    page: "one job: its request, progress, log and hooks",
+    page: "one job: its request, progress, log and attachments",
     query: {},
     api: (route) => [
       { label: "job", path: `/api/jobs/${route.id}` },
       { label: "job log", path: `/api/jobs/${route.id}/log` },
-      { label: "hook logs", path: `/api/jobs/${route.id}/hooks` },
+      { label: "attachments", path: `/api/attachments?job=${route.id}` },
       { label: "red cells", path: `/api/jobs/${route.id}/cells?outcome=red` }
     ],
     example: "/jobs/1"

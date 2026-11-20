@@ -294,6 +294,26 @@ fn a_lifetime_message_cap_of_zero_is_refused() {
 }
 
 #[test]
+fn a_call_id_message_budget_of_zero_is_refused() {
+    let c = B2buaConfig { max_messages_per_call_id: 0, ..Default::default() };
+    let err = c.validate().unwrap_err();
+    assert!(err.contains("B2BUA_CAP_MESSAGES_PER_CALL_ID=0"), "{err}");
+}
+
+#[test]
+fn a_call_id_message_budget_under_100_lifetime_caps_is_refused() {
+    let at_floor = B2buaConfig {
+        max_messages_per_call_lifetime: 1_000,
+        max_messages_per_call_id: 100_000,
+        ..Default::default()
+    };
+    assert!(at_floor.validate().is_ok(), "100 lifetime caps is the floor");
+    let under = B2buaConfig { max_messages_per_call_id: 99_999, ..at_floor };
+    let err = under.validate().unwrap_err();
+    assert!(err.contains("B2BUA_CAP_MESSAGES_PER_CALL_ID=99999"), "{err}");
+}
+
+#[test]
 fn a_zero_ceiling_is_refused() {
     let capacity = CapacityConfig {
         rss_bytes: Ceilings { normal: Some(0), emergency: None },

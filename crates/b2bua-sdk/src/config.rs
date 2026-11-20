@@ -79,8 +79,12 @@ pub struct B2buaConfig {
     /// reaches it after `lifetime / max_messages_per_call × keepalive
     /// interval`: 500 windows, about 41.7 h, at the defaults.
     pub max_messages_per_call_lifetime: u64,
-    /// Bounded CDR submit queue; `0` disables buffering (passthrough).
-    pub cdr_buffer_queue_max: usize,
+    /// The message budget of one Call-ID on this node (ADR-0063 §3,
+    /// `B2BUA_CAP_MESSAGES_PER_CALL_ID`): the datagrams the transaction layer
+    /// sends and the ones it receives that match a transaction or draw an
+    /// answer, under that Call-ID. Past it the Call-ID is muted and every call
+    /// holding it ends (§4).
+    pub max_messages_per_call_id: u64,
     /// REFER implicit-subscription expiry (RFC 3515), seconds. Armed at REFER
     /// intercept; fires while still `refer-authorizing` (HTTP hung). Default 60.
     pub refer_subscription_expiry_sec: i64,
@@ -226,8 +230,9 @@ pub struct B2buaConfig {
     pub cps_bucket_rate: u32,
     /// **Panic-ELU rung threshold** (`0..1`).
     /// A *backstop* on the worker's OWN EWMA-smoothed Event-Loop Utilization:
-    /// above it, a non-emergency new INVITE that already passed the CPS bucket
-    /// is still 503'd locally, regardless of the LB's AIMD cap. The LB-side AIMD
+    /// above it, a non-emergency new INVITE is 503'd locally, regardless of
+    /// the LB's AIMD cap; the admission ladder judges this rung before the
+    /// CPS bucket. The LB-side AIMD
     /// (`sip_proxy::load_observer`) is the primary control loop; this catches the
     /// cases where the LB is absent, misconfigured, or itself overloaded. Kept
     /// high so it almost never fires in normal operation. Default **0.75**.

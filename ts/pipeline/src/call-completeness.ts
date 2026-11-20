@@ -7,9 +7,10 @@
  * itself is exempt — its teardown is the system under test's own at replay —
  * and a FAILED attempt is complete.
  */
-import { Flows } from "@sip/contracts"
+import type { Flows } from "@sip/contracts"
+import * as CallFacts from "./call-facts.js"
 import type { CaseRule } from "./case-rules.js"
-import { type CutVantage, vantageIsInbound, vantageLeg, vantageMsgIdxs } from "./cut.js"
+import { assertVantageLeg, type CutVantage, vantageIsInbound, vantageLeg } from "./cut.js"
 import type { RefusalEvidence } from "./policy.js"
 import { type Finding, findingOf } from "./refusal-rule.js"
 import type { SutSet } from "./sut.js"
@@ -18,30 +19,30 @@ import type { SutSet } from "./sut.js"
 export const SOURCE_CALL_INCOMPLETE = "source-call-incomplete"
 
 /**
- * The dialog the capture ESTABLISHED at one vantage — the index of its
- * establishing 2xx — and the index of the BYE that closed it; `undefined` where
- * no 2xx answered the vantage's INVITE.
+ * The dialog the capture ESTABLISHED at one vantage — the index of the 2xx that
+ * answered the leg — and the index of the BYE that closed it; `undefined` where
+ * the leg was not answered.
  *
- * Read off the datagrams the CUT gives this vantage rather than off the leg's
+ * Read off the vantage's own leg facts rather than off the leg's
  * `final_status` / `terminated_by` summary: those are leg-wide, so on a leg the
  * SUT shows at two boundary hops they answer about the wrong dialog.
  *
- * The LAST fresh 2xx is the establishing one, so an attempt retried after a
- * failure is judged on the attempt that succeeded and a 2xx retransmitted after
- * the teardown does not re-open the dialog. Closed means a BYE after it: RFC
- * 3261 §9.1 gives CANCEL no effect on a dialog whose 2xx is already out, and §15
- * makes BYE the only way such a dialog ends.
+ * The answer is the 2xx of the leg's last dialog-opening INVITE, so an attempt
+ * retried after a failure is judged on the retry, and neither a re-INVITE's 2xx
+ * nor a 2xx retransmitted after the teardown re-opens the dialog. Closed means
+ * a BYE: RFC 3261 §9.1 gives CANCEL no effect on a dialog whose 2xx is already
+ * out, and §15 makes BYE the only way such a dialog ends.
  */
 const establishedDialog = (
   flows: Flows.FlowsDoc,
   sut: SutSet,
   v: CutVantage
 ): { readonly answered: number; readonly closedBy: number | undefined } | undefined => {
-  const leg = vantageLeg(flows, v)
-  const idxs = vantageMsgIdxs(flows, v.leg, v.hop, sut)
-  const answered = idxs.filter((i) => !leg.msgs[i]!.retx && Flows.isSuccessToInvite(leg.msgs[i]!)).pop()
-  if (answered === undefined) return undefined
-  return { answered, closedBy: idxs.find((i) => i > answered && Flows.isMethod(leg.msgs[i]!, "BYE")) }
+  assertVantageLeg(flows, v)
+  const facts = CallFacts.atVantage(flows, sut, v)
+  const answer = CallFacts.valueOf(facts.answer)
+  if (answer === undefined) return undefined
+  return { answered: answer.msg, closedBy: CallFacts.valueOf(facts.ending)?.entry.msg }
 }
 
 /** The BYE that closed the dialog the capture established at this vantage, where one did. */
@@ -81,16 +82,15 @@ const unterminatedDialog = (flows: Flows.FlowsDoc, sut: SutSet, v: CutVantage): 
  * it, and the replay hangs on a call the source never resolved. A `100 Trying`
  * ends nothing (RFC 3261 §17.1.1.2) and no provisional counts.
  *
- * The LAST fresh dialog-creating INVITE is the attempt under judgement, matching
+ * The leg's outcome transaction is the attempt under judgement, matching
  * {@link unterminatedDialog}: a call retried after a failure is judged on the
  * retry.
  */
 export const unfinalledInvite = (flows: Flows.FlowsDoc, sut: SutSet, v: CutVantage): RefusalEvidence | undefined => {
   const leg = vantageLeg(flows, v)
-  const idxs = vantageMsgIdxs(flows, v.leg, v.hop, sut)
-  const invited = idxs.filter((i) => !leg.msgs[i]!.retx && Flows.opensDialog(leg.msgs[i]!)).pop()
-  if (invited === undefined) return undefined
-  if (idxs.some((i) => i > invited && Flows.isFinalToInvite(leg.msgs[i]!))) return undefined
+  const outcome = CallFacts.atVantage(flows, sut, v).outcome
+  if (outcome?.request === undefined || outcome.final !== undefined) return undefined
+  const invited = outcome.request.msg
   return {
     leg: v.leg,
     hop: v.hop,

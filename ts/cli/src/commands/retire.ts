@@ -75,8 +75,7 @@ export const command = (facts: CliFacts) =>
       const job = yield* JobStart.runningAs(
         Option.getOrUndefined(input.job),
         "retire",
-        { captures, measure: input.measure },
-        paths.sessions
+        { captures, measure: input.measure }
       ).pipe(Effect.catchIf(JobStart.isNoSuchJob, (refused) => Effect.succeed(refused)))
       if (job instanceof JobStart.NoSuchJob) {
         yield* Console.error(`[retire] refused: ${job.message}`)

@@ -57,6 +57,34 @@ impl CallState {
         resolve_in(&inner.sip_index, &lookup, &mut key)
     }
 
+    /// The resident calls holding `call_id` (ADR-0063 §4), each once: the
+    /// incoming leg opened by each of `caller_tags`, the outgoing leg on
+    /// `call_id`, and each of `call_refs` still resident. A spiral's middle
+    /// Call-ID names two calls.
+    pub fn calls_holding(
+        &self,
+        call_id: &str,
+        caller_tags: &[String],
+        call_refs: &[String],
+    ) -> Vec<String> {
+        let leg = IndexLookup::Leg { call_id };
+        let callers = caller_tags.iter().map(|from_tag| IndexLookup::Invite { call_id, from_tag });
+        let mut key = String::new();
+        let inner = self.locked();
+        let indexed = std::iter::once(leg)
+            .chain(callers)
+            .filter_map(|lookup| resolve_in(&inner.sip_index, &lookup, &mut key))
+            .map(|hit| hit.call_ref);
+        let resident = call_refs.iter().filter(|r| inner.calls.contains_key(r.as_str())).cloned();
+        let mut found: Vec<String> = Vec::new();
+        for call_ref in indexed.chain(resident) {
+            if !found.contains(&call_ref) {
+                found.push(call_ref);
+            }
+        }
+        found
+    }
+
     /// Point every one of `keys` at `call_ref` and make them the keys it
     /// owns, dropping any stale ones. Unchanged keys are only re-pointed
     /// where another call took them over.

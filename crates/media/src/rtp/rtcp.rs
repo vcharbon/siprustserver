@@ -1,6 +1,6 @@
 //! Minimal RTCP — Sender Report (SR) and Receiver Report (RR) framing.
 //!
-//! Port of `../sipjsserver/src/media/rtp/rtcp.ts`. First-cut scope is *counts
+//! First-cut scope is *counts
 //! only*: we generate SR/RR on the standard interval and report aggregated
 //! packet/octet counts via stats; we do not assert SR field contents yet. So
 //! this builds well-formed SR/RR with no report blocks and exposes a demux

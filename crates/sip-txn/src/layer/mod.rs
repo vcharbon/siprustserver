@@ -20,13 +20,20 @@
 //! Module map: `handle` (public API + the command funnel) · `run` (the actor
 //! loop, one pulse-stamped turn per `select!`) · `owner` (map/wheel bookkeeping) ·
 //! `call_txns` (a call's transactions, as the per-call index files them) ·
+//! `call_id_budget` (each Call-ID's message count and mute, ADR-0063) ·
+//! `budget_gate` (every datagram in and out held to its Call-ID's budget) ·
+//! `copies` (a peer's copies of a trigger answered on the RFC schedule,
+//! ADR-0063 §1) · `copy_gate` (where a copy's record is read and kept) ·
 //! `via_marks` (the call attribution a sent request's Via carries) ·
 //! `ingress` (an inbound datagram parsed, a parser panic contained to it) · `client` (RFC 3261 §17.1 UAC FSM) ·
+//! `client_cancel` (a client INVITE's CANCEL: held to the first provisional,
+//! then its Timer-E ladder) ·
 //! `client_give_up` (a client transaction's deadlines and the Timeout it reports) ·
 //! `accepted` (RFC 6026 §7.2: a client INVITE after its 2xx, and who ACKs it) ·
 //! `orphan` (a released call's client transactions, ADR-0034) ·
 //! `commands` (the command funnel's dispatch) · `server` (§17.2 UAS FSM) ·
-//! `trying` (§17.2.1: an INVITE's first provisional) · `server_cancel` (§9.2: a CANCEL of a server
+//! `trying` (§17.2.1: an INVITE's first provisional) · `timer_g` (§17.2.1: a
+//! non-2xx final re-sent until its ACK) · `server_cancel` (§9.2: a CANCEL of a server
 //! INVITE) · `shrink` (a drained table's memory returned) · `lifetime` (when a transaction leaves the map:
 //! its one deadline, and the sweep over it) · `bind` (the To-tag every
 //! outbound response is held to) · `seed` (ADR-0014 seeding + re-offer) ·
@@ -45,12 +52,17 @@ mod accepted;
 mod backlog;
 mod bind;
 mod bound_report;
+mod budget_gate;
+mod call_id_budget;
 mod call_txns;
 mod client;
+mod client_cancel;
 mod client_give_up;
 mod client_key;
 mod commands;
 mod config;
+mod copies;
+mod copy_gate;
 mod event_age;
 mod event_receiver;
 mod events;
@@ -71,6 +83,7 @@ mod seed;
 mod server;
 mod server_cancel;
 mod shrink;
+mod timer_g;
 mod trying;
 mod txn;
 mod unanswered;
@@ -78,9 +91,10 @@ mod via_marks;
 
 pub use backlog::DeferredBound;
 pub use bound_report::BoundPassed;
+pub use call_id_budget::CallIdBudget;
 pub use config::OnBound;
 pub(crate) use event_age::EventAges;
 pub use handle::{TransactionConfig, TransactionEvents, TransactionLayer, TransactionLayerClosed};
 pub use key::ServerTxnKey;
 pub use new_call_gate::NewCallGate;
-pub use refusals::{InviteRefusals, NewCallRefusal, Verdict, REFUSED_MEMO_MAX};
+pub use refusals::{InviteRefusals, NewCallRefusal, RefusedCopy, Verdict, REFUSED_MEMO_MAX};

@@ -12,8 +12,9 @@ binaries = ["sip-proxy-runner", "call-limiter-runner", "route-guard"]
 dockerfiles = ["deploy/docker/Dockerfile"]
 
 # Features no production binary may reach: test support, the schedules no
-# RFC prescribes (ADR-0032 X1), and the line-based raw readers beside the
-# parser (`sip-message/sniff`, tooling only). A bare name is that feature of
+# RFC prescribes (ADR-0032 X1), the line-based raw readers beside the parser
+# (`sip-message/sniff`, tooling only), and the in-process CPU profiler of a
+# profiling build (`probe-http/flamegraph`). A bare name is that feature of
 # any crate.
 test-features = [
   "testkit",
@@ -21,7 +22,12 @@ test-features = [
   "sip-retransmit/authored",
   "sip-message/rvoip-oracle",
   "sip-message/sniff",
+  "probe-http/flamegraph",
 ]
+
+# Crates no production binary may link, whatever pulls them in: the
+# in-process CPU profiler and its tree.
+refused-crates = ["flamegraph-util", "pprof", "inferno"]
 
 # Third-party crates a pure crate may reach through its normal dependencies
 # (proc-macro crates aside): no clock, randomness, filesystem, network,

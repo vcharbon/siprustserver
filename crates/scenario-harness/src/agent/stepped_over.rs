@@ -21,4 +21,10 @@ impl Agent {
     pub(crate) fn repeated_provisional(&self, r: &SipResponse) -> bool {
         self.txn.repeats_a_provisional(r)
     }
+
+    /// Whether `r` repeats a response an expect already read as its own
+    /// transaction's: another transaction's expect steps over it (§13.3.1.4).
+    pub(crate) fn repeated_read_response(&self, r: &SipResponse) -> bool {
+        self.txn.repeats_a_read_response(r)
+    }
 }
