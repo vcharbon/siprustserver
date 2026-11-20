@@ -9,7 +9,9 @@
 //! [`CdrDeliveryObserver`] is told each of those ends, with the time since
 //! `write` was handed the record. `close` publishes nothing more and
 //! returns once every publish of every session is counted, by its deadline at
-//! the latest; a write still in flight then counts its own record.
+//! the latest; a write still in flight then counts its own record. A count is
+//! the last thing a write does, so a write that panics has counted nothing,
+//! and the session it may have left half-used ends ([`CdrWriter::after_panic`]).
 //!
 //! Bounds: the writer runs behind the kit's `BufferedCdrWriter` drainer (the
 //! grammar refuses `B2BUA_CDR_QUEUE=0` beside a URL); every broker wait is
@@ -237,8 +239,16 @@ impl CdrWriter for RabbitMqCdrWriter {
         let deadline = Instant::now() + self.settings.bounds.publish_timeout;
         let published = session.publish(&self.settings.queue, &payload, handed_at, deadline);
         if let Err(refused) = published.await {
-            self.tally.dropped(handed_at);
             tracing::debug!(?refused, "CDR record dropped");
+            self.tally.dropped(handed_at);
+        }
+    }
+
+    /// Ends the current session: the next record opens a fresh one, and the
+    /// ended session's confirm tracker still counts what it was handed.
+    async fn after_panic(&self) {
+        if let Some(session) = &self.link.lock().await.session {
+            session.end("the writer panicked during a record");
         }
     }
 

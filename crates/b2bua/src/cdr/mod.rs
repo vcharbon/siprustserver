@@ -1,7 +1,8 @@
 //! CDR (call detail record) writing. One record is
 //! written per call at termination, carrying the accumulated `Call.cdr_events`.
 //! The in-memory writer ([`InMemoryCdrWriter`]) lets tests assert exactly one
-//! CDR per call; [`BufferedCdrWriter`] is the production drop-on-overload buffer.
+//! CDR per call; [`BufferedCdrWriter`] is the production drop-on-overload buffer,
+//! whose drainer survives a panic of the sink it drives.
 //! A transport sink publishes the bytes of a [`CdrEncoder`], by default
 //! [`JsonRecordEncoder`] (the [`CdrRecord`] as JSON), and tells a
 //! [`CdrDeliveryObserver`] how and when each record ended.
@@ -115,6 +116,9 @@ pub fn build_record(call: &Call, terminated_at: i64) -> CdrRecord {
 /// The CDR sink. `write` is non-blocking-fast; `read_all` is the test accessor.
 #[async_trait]
 pub trait CdrWriter: Send + Sync {
+    /// Takes the record of `call`. A write that panics has counted nothing:
+    /// a sink's count of a record is the last thing its write does, so its
+    /// caller counts that record dropped once.
     async fn write(&self, call: &Call, terminated_at: i64);
     async fn read_all(&self) -> Vec<CdrRecord>;
     /// The exit barrier: deliver the records this sink holds and take no more.
@@ -132,8 +136,14 @@ pub trait CdrWriter: Send + Sync {
         false
     }
 
+    /// Drops what a panic of a `write` may have left half-done (a connection
+    /// in an unknown state), so the next record starts from a clean sink. A
+    /// sink holding no such state does nothing.
+    async fn after_panic(&self) {}
+
     /// The task this sink delivers through, when it has one: the worker ends
-    /// when that task ends.
+    /// when that task ends. A task that survives its own panics hands the
+    /// handle of its supervisor, which ends only when its work does.
     fn task(&self) -> Option<tokio::task::AbortHandle> {
         None
     }

@@ -1,9 +1,9 @@
-//! The worker's restarted long-lived tasks (ADR-0051 §5): each owns no state a
-//! new run cannot rebuild, so a run that panics is counted under its name
-//! (`b2bua_task_restarts_total{task}`) and made again. A task whose state a
-//! new run cannot rebuild (the transaction owner, the router, the timer
-//! driver, the CDR writer, the replication server) joins the
-//! worker's loops instead, whose end exits the process ([`crate::loops`]).
+//! The worker's restarted long-lived tasks (ADR-0051 §5): each keeps its work
+//! in state a new run takes over or rebuilds, so a run that panics is counted
+//! under its name (`b2bua_task_restarts_total{task}`) and made again. A task
+//! whose state a new run cannot rebuild (the transaction owner, the router,
+//! the timer driver, the replication server) joins the worker's loops
+//! instead, whose end exits the process ([`crate::loops`]).
 
 use std::future::Future;
 
@@ -26,9 +26,13 @@ pub const MEMBERSHIP_RECONCILE: &str = "membership_reconcile";
 pub const REPL_PULLER: &str = "repl_puller";
 /// The EndpointSlice informer feeding the replication membership.
 pub const K8S_MEMBERSHIP: &str = "k8s_membership";
+/// The buffered CDR writer's drainer, its queue held across runs: counts each
+/// panic of a run and each panic of the sink it caught
+/// ([`crate::cdr::BufferedCdrWriter`]).
+pub const CDR_DRAINER: &str = "cdr_drainer";
 
 /// Every task name, in counter order: the `task` label's values.
-pub const TASKS: [&str; 8] = [
+pub const TASKS: [&str; 9] = [
     GAUGE_SAMPLER,
     OVERLOAD_SAMPLER,
     CLOCK_DIVERGENCE,
@@ -37,6 +41,7 @@ pub const TASKS: [&str; 8] = [
     MEMBERSHIP_RECONCILE,
     REPL_PULLER,
     K8S_MEMBERSHIP,
+    CDR_DRAINER,
 ];
 
 /// The restarts of the worker's tasks in this process.

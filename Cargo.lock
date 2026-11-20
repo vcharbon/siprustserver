@@ -447,6 +447,7 @@ dependencies = [
  "call",
  "call-limiter",
  "call-limiter-wire",
+ "futures-util",
  "http-net",
  "http-net-testkit",
  "load-shed",

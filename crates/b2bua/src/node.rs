@@ -174,7 +174,7 @@ impl B2buaCore {
         let mut tasks: Vec<tokio::task::JoinHandle<()>> = Vec::new();
         // The tasks the worker ends with (`WorkerLoops::with_vital`).
         let mut vital = vec![("timer_driver", timers.task())];
-        vital.extend(cdr.task().map(|task| ("cdr_drainer", task)));
+        vital.extend(cdr.task().map(|task| (crate::supervise::CDR_DRAINER, task)));
 
         // Replication wiring (opt-in). When present: write the store directly,
         // serve our changelog, start the puller supervisor, gate readiness on

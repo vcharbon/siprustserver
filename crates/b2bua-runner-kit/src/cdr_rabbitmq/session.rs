@@ -2,8 +2,9 @@
 //! confirm mode. A session ends, never to publish again, on the first sign the
 //! broker is not delivering: a publish the connection does not take within its
 //! bound, a confirm missing past its bound, a channel or connection error, a
-//! returned publish, or a connection or channel found closed before a publish.
-//! Ending it shuts its socket down.
+//! returned publish, or a connection or channel found closed before a publish;
+//! and on a panic of the writer or of its confirm tracker. Ending it shuts its
+//! socket down.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
@@ -200,6 +201,12 @@ impl Session {
     /// publishes again.
     pub(super) fn ended_at(&self) -> Option<Instant> {
         self.health.ended_at.get().copied()
+    }
+
+    /// Ends the session for `reason`: it publishes no more, and the writer
+    /// replaces it at its next record.
+    pub(super) fn end(&self, reason: &str) {
+        self.health.end(reason);
     }
 
     /// Whether the broker acked at least one publish of this session.

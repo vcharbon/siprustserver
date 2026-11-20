@@ -51,6 +51,8 @@ sip-ids = { path = "../sip-ids" }
 # The store's locks recover from poison, counted per named lock (ADR-0051 §7).
 lock-poison = { path = "../lock-poison" }
 task-restart = { path = "../task-restart" }
+# The CDR drainer catches a panic of the sink's write (cdr/buffered/drainer.rs).
+futures-util = "0.3"
 # The class a retained emission's ladder paces by (ADR-0032 X3).
 sip-retransmit = { path = "../sip-retransmit" }
 sip-clock = { path = "../sip-clock" }

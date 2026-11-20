@@ -7,18 +7,25 @@
 //! `close` is the exit barrier: the drainer closes the queue (a later `write`
 //! is a counted drop), writes what is queued until the deadline, gives up and
 //! counts the rest, then closes the inner writer within the same deadline.
+//!
+//! The queue, the close deadline and the closed signal outlive a drainer run,
+//! so a panic in the drainer or in the sink it drives loses no queued record
+//! and never ends the worker ([`drainer`]).
+
+mod drainer;
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{mpsc, watch, Mutex};
 use tokio::time::{timeout_at, Instant};
 
 use call::Call;
 
 use super::{CdrRecord, CdrWriter};
 use crate::metrics::B2buaMetrics;
+use drainer::Drainer;
 
 #[derive(Clone)]
 pub struct BufferedCdrWriter {
@@ -29,7 +36,8 @@ pub struct BufferedCdrWriter {
     /// Turns `true` once the drainer has emptied its queue and closed `inner`.
     closed: watch::Receiver<bool>,
     dropped: Dropped,
-    /// The drainer, while buffering.
+    /// The drainer's supervisor, while buffering: it ends once a run returns,
+    /// after a close or once every writer is gone, never on a panic.
     drainer: Option<tokio::task::AbortHandle>,
 }
 
@@ -58,7 +66,7 @@ impl BufferedCdrWriter {
     /// held to it. `metrics` is the shared registry the core exports; overflow
     /// drops are recorded into `cdr_dropped_total`.
     pub fn spawn(inner: Arc<dyn CdrWriter>, queue_max: usize, metrics: B2buaMetrics) -> Self {
-        let (close_by, close_rx) = watch::channel(None);
+        let (close_by, _) = watch::channel(None);
         let (closed_tx, closed) = watch::channel(false);
         let mut writer = Self {
             inner,
@@ -72,82 +80,23 @@ impl BufferedCdrWriter {
             #[expect(clippy::disallowed_methods, reason = "the depth is in 1..=MAX_QUEUE here")]
             let (tx, rx) = mpsc::channel::<(Call, i64)>(queue_max.min(Self::MAX_QUEUE));
             writer.tx = Some(tx);
-            let drainer = Drainer { inner: writer.inner.clone(), dropped: writer.dropped.clone() };
-            let task = observe::spawn_keeping_node(drainer.run(rx, close_rx, closed_tx));
+            let drainer = Drainer {
+                inner: writer.inner.clone(),
+                dropped: writer.dropped.clone(),
+                queue: Arc::new(Mutex::new(rx)),
+                close_by: writer.close_by.clone(),
+                closed: Arc::new(closed_tx),
+            };
+            let task = observe::spawn_keeping_node(drainer.supervise());
             writer.drainer = Some(task.abort_handle());
         }
         writer
     }
 
-    /// Records dropped: a full queue, a write after the close, or a record the
-    /// close gave up.
+    /// Records dropped: a full queue, a write after the close, a record the
+    /// close gave up, or one whose write panicked.
     pub fn dropped_total(&self) -> u64 {
         self.dropped.count.load(Ordering::Relaxed)
-    }
-}
-
-/// The drainer task's half: it holds no sender, so the queue ends once every
-/// writer is gone.
-struct Drainer {
-    inner: Arc<dyn CdrWriter>,
-    dropped: Dropped,
-}
-
-impl Drainer {
-    /// Writes each queued record until a close deadline is set, then closes
-    /// the queue, writes what is left until the deadline (each record past it
-    /// is dropped), closes `inner` and reports `closed`. Ends without a close
-    /// once every writer is gone.
-    async fn run(
-        self,
-        mut rx: mpsc::Receiver<(Call, i64)>,
-        mut close_by: watch::Receiver<Option<Instant>>,
-        closed: watch::Sender<bool>,
-    ) {
-        let deadline = loop {
-            let by = *close_by.borrow_and_update();
-            if let Some(deadline) = by {
-                break deadline;
-            }
-            tokio::select! {
-                biased;
-                Ok(()) = close_by.changed() => {}
-                record = rx.recv() => match record {
-                    Some((call, at)) => self.write(&call, at, &mut close_by).await,
-                    None => return,
-                },
-            }
-        };
-        rx.close();
-        while let Some((call, at)) = rx.recv().await {
-            if Instant::now() < deadline {
-                self.write(&call, at, &mut close_by).await;
-            } else {
-                self.dropped.one();
-            }
-        }
-        self.inner.close(deadline).await;
-        closed.send_replace(true);
-    }
-
-    /// Writes one record; once a close deadline is set the write runs until
-    /// that deadline at most, and a write cut there is dropped.
-    async fn write(&self, call: &Call, at: i64, close_by: &mut watch::Receiver<Option<Instant>>) {
-        let write = self.inner.write(call, at);
-        tokio::pin!(write);
-        loop {
-            let by = *close_by.borrow_and_update();
-            if let Some(deadline) = by {
-                if timeout_at(deadline, &mut write).await.is_err() {
-                    self.dropped.one();
-                }
-                return;
-            }
-            tokio::select! {
-                () = &mut write => return,
-                Ok(()) = close_by.changed() => {}
-            }
-        }
     }
 }
 
@@ -167,7 +116,7 @@ impl CdrWriter for BufferedCdrWriter {
         self.inner.read_all().await
     }
 
-    /// The drainer, while buffering.
+    /// The drainer's supervisor, while buffering.
     fn task(&self) -> Option<tokio::task::AbortHandle> {
         self.drainer.clone()
     }
@@ -181,8 +130,9 @@ impl CdrWriter for BufferedCdrWriter {
         }
     }
 
-    /// The first close waits for the drainer, which ends at its deadline; a
-    /// later one waits for that within its own deadline.
+    /// The first close waits for the drainer, which reports closed by its
+    /// deadline, a panicked run included; a later one waits for that within
+    /// its own deadline.
     async fn close(&self, deadline: Instant) {
         if self.tx.is_none() {
             return self.inner.close(deadline).await;
@@ -206,3 +156,6 @@ impl CdrWriter for BufferedCdrWriter {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod panic_tests;

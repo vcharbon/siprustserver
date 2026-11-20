@@ -2,10 +2,12 @@
 //! exactly one written or dropped record of the writer's [`Tally`], by the
 //! writer's close deadline at the latest.
 
+use std::panic::AssertUnwindSafe;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 
+use futures_util::FutureExt;
 use lapin::{Confirmation, PublisherConfirm};
 use tokio::sync::{mpsc, watch, OwnedSemaphorePermit};
 use tokio::time::{timeout, timeout_at, Instant};
@@ -44,13 +46,42 @@ enum Outcome {
 /// one already confirmed keeps its confirm. A record's end is counted when
 /// the tracker reaches it, so no earlier than the publishes before it. Exits
 /// once the session's publishes stopped and every tracked publish is resolved.
+///
+/// A panic of the tracker ends the session at once and counts dropped the
+/// record it was resolving and every publish still tracked: each count is the
+/// last thing done for its record, so the record a panic interrupts is
+/// uncounted until then.
 pub(super) async fn track_confirms(
     mut rx: mpsc::UnboundedReceiver<Pending>,
     health: Arc<Health>,
     mut close_by: watch::Receiver<Option<Instant>>,
     tally: Tally,
 ) {
+    let mut resolving = None;
+    let tracked = resolve_each(&mut rx, &health, &mut close_by, &tally, &mut resolving);
+    if AssertUnwindSafe(tracked).catch_unwind().await.is_ok() {
+        return;
+    }
+    health.end("the confirm tracker panicked");
+    tracing::error!("the CDR confirm tracker panicked; its pending records are counted dropped");
+    rx.close();
+    let tracked = std::iter::from_fn(|| rx.try_recv().ok().map(|pending| pending.handed_at));
+    for handed_at in resolving.into_iter().chain(tracked) {
+        tally.dropped(handed_at);
+    }
+}
+
+/// [`track_confirms`]' loop; `resolving` holds when the record it is on was
+/// handed to the writer, until that record is counted.
+async fn resolve_each(
+    rx: &mut mpsc::UnboundedReceiver<Pending>,
+    health: &Health,
+    close_by: &mut watch::Receiver<Option<Instant>>,
+    tally: &Tally,
+    resolving: &mut Option<Instant>,
+) {
     while let Some(Pending { confirm, handed_at, deadline, _slot }) = rx.recv().await {
+        *resolving = Some(handed_at);
         let outcome = if health.ended() {
             // Only a confirm already received counts; nothing is awaited.
             match timeout(Duration::ZERO, confirm).await {
@@ -58,33 +89,39 @@ pub(super) async fn track_confirms(
                 Err(_) => Outcome::SessionEnded,
             }
         } else {
-            resolve(confirm, deadline, &mut close_by).await
+            resolve(confirm, deadline, close_by).await
         };
-        match outcome {
-            Outcome::Acked => {
-                health.delivered.store(true, Ordering::SeqCst);
-                tally.written(handed_at);
-            }
-            Outcome::Nacked => {
-                tally.dropped(handed_at);
-                if !health.nack_logged.swap(true, Ordering::SeqCst) {
-                    tracing::warn!("CDR publish nacked by the broker; nacked records are dropped");
-                }
-            }
-            Outcome::Returned => {
-                tally.dropped(handed_at);
-                health.end("publish returned unroutable: the queue is gone");
-            }
-            Outcome::Lost(e) => {
-                tally.dropped(handed_at);
-                health.end(&format!("confirm lost: {e}"));
-            }
-            Outcome::TimedOut => {
-                tally.dropped(handed_at);
-                health.end("no confirm within the confirm bound");
-            }
-            Outcome::Closed | Outcome::SessionEnded => tally.dropped(handed_at),
+        count(outcome, handed_at, health, tally);
+        *resolving = None;
+    }
+}
+
+/// Counts the record handed at `handed_at` by `outcome`, the count last.
+fn count(outcome: Outcome, handed_at: Instant, health: &Health, tally: &Tally) {
+    match outcome {
+        Outcome::Acked => {
+            health.delivered.store(true, Ordering::SeqCst);
+            tally.written(handed_at);
         }
+        Outcome::Nacked => {
+            if !health.nack_logged.swap(true, Ordering::SeqCst) {
+                tracing::warn!("CDR publish nacked by the broker; nacked records are dropped");
+            }
+            tally.dropped(handed_at);
+        }
+        Outcome::Returned => {
+            health.end("publish returned unroutable: the queue is gone");
+            tally.dropped(handed_at);
+        }
+        Outcome::Lost(e) => {
+            health.end(&format!("confirm lost: {e}"));
+            tally.dropped(handed_at);
+        }
+        Outcome::TimedOut => {
+            health.end("no confirm within the confirm bound");
+            tally.dropped(handed_at);
+        }
+        Outcome::Closed | Outcome::SessionEnded => tally.dropped(handed_at),
     }
 }
 
