@@ -538,3 +538,45 @@ async fn a_bodyless_update_in_the_window_over_a_pending_one_is_refused_500() {
     )
     .await;
 }
+
+/// Bob's 200 reaches the B2BUA before alice ACKs the promoted 200: her INVITE
+/// transaction is still in progress on her dialog, so the resync re-INVITE may
+/// not leave yet (RFC 3261 §14.1). Bob is ACKed at once; the resync leaves on
+/// her ACK.
+#[tokio::test(start_paused = true)]
+async fn the_resync_waits_for_the_callers_ack_of_the_promoted_200() {
+    let h = Harness::with_transit_delay("promote-pem-resync-waits-for-the-ack", 0);
+    let alice = h.agent("alice", "127.0.0.1:5864").await;
+    let bob = h.agent("bob", "127.0.0.1:5865").await;
+    let b2bua = b2bua_pem(&h, "b2bua", "127.0.0.1:5866", 5865).await;
+
+    let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
+    let mut uas = bob.receive("INVITE").await;
+    uas.respond(183, "Session Progress")
+        .with_header("P-Early-Media", "sendrecv")
+        .with_sdp(EARLY)
+        .await;
+    call.expect(200).await;
+
+    uas.respond(200, "OK").with_sdp(FINAL_DIFF).await;
+    bob.receive("ACK").await;
+    h.advance(std::time::Duration::from_millis(100)).await;
+    assert!(
+        alice.try_receive_tolerating("INVITE", &[]).await.is_none(),
+        "no resync before her ACK"
+    );
+
+    let mut dialog = call.ack().await;
+    let mut resync = alice.receive("INVITE").await;
+    assert!(
+        String::from_utf8_lossy(resync.request().body()).contains("m=audio 30000"),
+        "the resync re-INVITE carries bob's final SDP",
+    );
+    resync.respond(200, "OK").with_sdp(OFFER).await;
+    alice.receive("ACK").await;
+
+    hangup(&mut dialog, &bob).await;
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
+    let _ = h.finish().await;
+}
