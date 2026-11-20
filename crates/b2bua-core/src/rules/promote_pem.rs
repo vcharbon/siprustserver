@@ -309,7 +309,6 @@ pub fn promote_pem_rules() -> Vec<RuleDefinition> {
                 ok(actions)
             },
         ),
-        // ── Rule 3b: A's ACK sends the resync her ACK held back ──────────────
         rule(
             "promote-resync-on-a-ack",
             &["relay-ack"],
