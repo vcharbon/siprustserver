@@ -20,7 +20,8 @@ use b2bua_runner_kit::{
 use call::Call;
 use sip_message::parser::custom::CustomParser;
 use sip_message::{SipMessage, SipParser};
-use support::fake_broker::{Admit, FakeBroker, Reply};
+use std::sync::atomic::AtomicUsize;
+use support::fake_broker::{Admit, Counters, FakeBroker, Reply, CONNECTION_FORCED, REPLY_SUCCESS};
 use tokio::time::Instant;
 
 const MS: Duration = Duration::from_millis(1);
@@ -265,6 +266,52 @@ async fn a_connection_that_delivered_reconnects_at_once_when_it_ends() {
     broker.reply(Reply::Ack);
     w.write(&call, 2_000).await;
     settle(&m, (2, 1)).await;
+    assert_eq!(broker.count(|c| &c.accepted), 2);
+}
+
+/// Waits (up to 2 s) until the broker counted `n` on `pick`.
+async fn counted(broker: &FakeBroker, pick: impl Fn(&Counters) -> &AtomicUsize, n: usize) {
+    let give_up = Instant::now() + Duration::from_secs(2);
+    while broker.count(&pick) < n && Instant::now() < give_up {
+        tokio::time::sleep(MS).await;
+    }
+    assert_eq!(broker.count(pick), n);
+}
+
+/// The broker closes the idle connection, as at a restart (CONNECTION_FORCED)
+/// or cleanly, which the client reports as no error; once the broker closed
+/// the socket, the next record opens a new connection at once and is written.
+/// The client acts on the close within the broker's 100 ms close timeout.
+#[tokio::test]
+async fn the_record_after_the_broker_closed_the_idle_connection_is_written() {
+    for reply_code in [CONNECTION_FORCED, REPLY_SUCCESS] {
+        let broker = FakeBroker::start(Reply::Ack).await;
+        let (w, m) = writer_to(broker.url(), bounds(), 64);
+        let call = a_call();
+        w.write(&call, 2_000).await;
+        settle(&m, (1, 0)).await;
+        broker.close_idle(reply_code);
+        counted(&broker, |c| &c.closed_by_broker, 1).await;
+        w.write(&call, 2_000).await;
+        settle(&m, (2, 0)).await;
+        assert_eq!(broker.count(|c| &c.accepted), 2, "reply code {reply_code}");
+    }
+}
+
+/// The broker's side of the idle socket ends (a FIN): the session ends as the
+/// client reports it, its socket shut down before any record, and the next
+/// record opens a new connection at once and is written.
+#[tokio::test]
+async fn the_record_after_the_idle_socket_ended_is_written() {
+    let broker = FakeBroker::start(Reply::Ack).await;
+    let (w, m) = writer_to(broker.url(), bounds(), 64);
+    let call = a_call();
+    w.write(&call, 2_000).await;
+    settle(&m, (1, 0)).await;
+    broker.hang_up_idle();
+    counted(&broker, |c| &c.ended_by_client, 1).await;
+    w.write(&call, 2_000).await;
+    settle(&m, (2, 0)).await;
     assert_eq!(broker.count(|c| &c.accepted), 2);
 }
 

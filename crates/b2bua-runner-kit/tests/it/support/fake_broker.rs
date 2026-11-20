@@ -2,7 +2,8 @@
 //! for one publisher (handshake, channel, `confirm.select`, queue declare,
 //! `basic.publish`), each publish answered by the next scripted [`Reply`],
 //! else the current one, and the fault modes a real broker shows (a stalled
-//! handshake, flow control, a socket that stops being read).
+//! handshake, flow control, a socket that stops being read, a connection
+//! ended between publishes).
 
 use std::collections::VecDeque;
 use std::io::Cursor;
@@ -16,7 +17,7 @@ use amq_protocol::protocol::{basic, channel, confirm, connection, queue, AMQPCla
 use amq_protocol::types::{FieldTable, LongString, ShortString};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::mpsc;
+use tokio::sync::{broadcast, mpsc, Notify};
 
 /// How the broker answers the next publish.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -50,12 +51,37 @@ pub enum Admit {
     ServeBlocked,
 }
 
+/// How the broker ends a served connection between publishes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IdleEnd {
+    /// The socket's write side shut down (a FIN), the read side read until
+    /// the client ends its own.
+    Fin,
+    /// `connection.close` with this reply code, the socket closed on the
+    /// client's `close-ok` or at the [`CLOSE_TIMEOUT`].
+    Close(u16),
+}
+
+/// How long the broker waits for the client's `close-ok` before it closes
+/// the socket, as a broker's close handshake timeout. The client acts on the
+/// close when it reads it, and its `close-ok` may never reach the wire.
+const CLOSE_TIMEOUT: Duration = Duration::from_millis(100);
+
+/// `connection.close`'s reply code for a broker shutting down.
+pub const CONNECTION_FORCED: u16 = 320;
+/// `connection.close`'s reply code for a clean close, which is no error.
+pub const REPLY_SUCCESS: u16 = 200;
+
 #[derive(Default)]
 pub struct Counters {
     /// TCP connections accepted.
     pub accepted: AtomicUsize,
-    /// Connections the client closed or shut down (EOF or reset seen).
+    /// Connections the client closed or shut down (EOF or reset seen), the
+    /// broker having sent no `connection.close`.
     pub ended_by_client: AtomicUsize,
+    /// Connections the broker sent `connection.close` on, counted when they
+    /// end: at the client's `close-ok`, EOF or reset, or at the close timeout.
+    pub closed_by_broker: AtomicUsize,
     /// Queue declares answered.
     pub declared: AtomicUsize,
     /// Publishes received whole (method, header, body).
@@ -80,6 +106,8 @@ pub struct FakeBroker {
     pub counters: Arc<Counters>,
     reply: Arc<Mutex<Replies>>,
     admit: Arc<Mutex<Admit>>,
+    /// Every served connection's order to end itself between publishes.
+    idle_ends: broadcast::Sender<IdleEnd>,
 }
 
 impl FakeBroker {
@@ -89,15 +117,29 @@ impl FakeBroker {
         let counters = Arc::new(Counters::default());
         let reply = Arc::new(Mutex::new(Replies { current: reply, script: VecDeque::new() }));
         let admit = Arc::new(Mutex::new(Admit::Serve));
-        let (c, r, a) = (counters.clone(), reply.clone(), admit.clone());
+        let idle_ends = broadcast::Sender::new(8);
+        let (c, r, a, e) = (counters.clone(), reply.clone(), admit.clone(), idle_ends.clone());
         tokio::spawn(async move {
             while let Ok((socket, _)) = listener.accept().await {
                 c.accepted.fetch_add(1, Ordering::SeqCst);
                 let mode = *a.lock().unwrap();
-                tokio::spawn(serve(socket, mode, c.clone(), r.clone()));
+                tokio::spawn(serve(socket, mode, c.clone(), r.clone(), e.subscribe()));
             }
         });
-        Self { addr, counters, reply, admit }
+        Self { addr, counters, reply, admit, idle_ends }
+    }
+
+    /// Shuts down the write side of every connection accepted so far (the
+    /// client reads a FIN), each then read until the client ends its side.
+    pub fn hang_up_idle(&self) {
+        let _ = self.idle_ends.send(IdleEnd::Fin);
+    }
+
+    /// Sends `connection.close` with `reply_code` on every connection accepted
+    /// so far, as a broker shutting down does; each socket closes on the
+    /// client's `close-ok` or at the close timeout.
+    pub fn close_idle(&self, reply_code: u16) {
+        let _ = self.idle_ends.send(IdleEnd::Close(reply_code));
     }
 
     pub fn url(&self) -> String {
@@ -153,6 +195,7 @@ async fn serve(
     admit: Admit,
     counters: Arc<Counters>,
     reply: Arc<Mutex<Replies>>,
+    mut idle_ends: broadcast::Receiver<IdleEnd>,
 ) {
     let (mut rd, mut wr) = socket.into_split();
     if admit == Admit::StallHandshake {
@@ -160,12 +203,22 @@ async fn serve(
         drop(wr);
         return;
     }
-    // One writer task: replies and delayed acks share the socket in order.
+    // One writer task: replies and delayed acks share the socket in order,
+    // until a FIN shuts its side down.
     let (out, mut out_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+    let fin = Arc::new(Notify::new());
+    let fin_ordered = fin.clone();
     tokio::spawn(async move {
-        while let Some(bytes) = out_rx.recv().await {
-            if wr.write_all(&bytes).await.is_err() {
-                break;
+        loop {
+            tokio::select! {
+                bytes = out_rx.recv() => match bytes {
+                    Some(bytes) if wr.write_all(&bytes).await.is_ok() => {}
+                    _ => break,
+                },
+                () = fin_ordered.notified() => {
+                    let _ = wr.shutdown().await;
+                    break;
+                }
             }
         }
     });
@@ -192,10 +245,42 @@ async fn serve(
     // The publish being received: its channel, routing key and the body bytes
     // still due (unknown until its header).
     let mut publishing: Option<(u16, String, Option<u64>)> = None;
+    // Set once the broker sent `connection.close`: when it closes the socket.
+    let mut close_by: Option<tokio::time::Instant> = None;
     loop {
-        let n = match rd.read(&mut chunk).await {
-            Ok(0) | Err(_) => break,
-            Ok(n) => n,
+        let close_timeout = async {
+            match close_by {
+                Some(by) => tokio::time::sleep_until(by).await,
+                None => std::future::pending().await,
+            }
+        };
+        let n = tokio::select! {
+            read = rd.read(&mut chunk) => match read {
+                Ok(0) | Err(_) => break,
+                Ok(n) => n,
+            },
+            Ok(end) = idle_ends.recv() => {
+                match end {
+                    IdleEnd::Fin => fin.notify_one(),
+                    IdleEnd::Close(reply_code) => {
+                        let _ = out.send(method(
+                            0,
+                            AMQPClass::Connection(connection::AMQPMethod::Close(connection::Close {
+                                reply_code,
+                                reply_text: ShortString::from("broker forced connection closure"),
+                                class_id: 0,
+                                method_id: 0,
+                            })),
+                        ));
+                        close_by = Some(tokio::time::Instant::now() + CLOSE_TIMEOUT);
+                    }
+                }
+                continue;
+            }
+            () = close_timeout => {
+                counters.closed_by_broker.fetch_add(1, Ordering::SeqCst);
+                return;
+            }
         };
         buf.extend_from_slice(&chunk[..n]);
         while let Ok((rest, frame)) = parse_frame(buf.as_slice()) {
@@ -228,6 +313,10 @@ async fn serve(
                                 connection::CloseOk {},
                             )),
                         ));
+                    }
+                    connection::AMQPMethod::CloseOk(_) => {
+                        counters.closed_by_broker.fetch_add(1, Ordering::SeqCst);
+                        return;
                     }
                     _ => {}
                 },
@@ -305,7 +394,9 @@ async fn serve(
             }
         }
     }
-    counters.ended_by_client.fetch_add(1, Ordering::SeqCst);
+    let ended =
+        if close_by.is_some() { &counters.closed_by_broker } else { &counters.ended_by_client };
+    ended.fetch_add(1, Ordering::SeqCst);
 }
 
 enum Flow {

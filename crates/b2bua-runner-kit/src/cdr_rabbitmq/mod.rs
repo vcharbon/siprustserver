@@ -18,6 +18,7 @@
 
 mod backoff;
 mod confirms;
+mod connection_watch;
 mod declaration;
 mod resolver;
 mod session;
@@ -156,7 +157,12 @@ impl RabbitMqCdrWriter {
 
     /// The live session, connecting one within the connect bound when there
     /// is none and the backoff allows; `None` when no session can publish now.
+    /// A session whose connection or channel is no longer open is ended and
+    /// replaced, so a connection that died between records costs no record.
     async fn session<'a>(&self, link: &'a mut Link) -> Option<&'a Session> {
+        if let Some(current) = &link.session {
+            current.end_if_disconnected();
+        }
         if let Some(ended) = link.session.take_if(|s| s.ended_at().is_some()) {
             if ended.delivered() {
                 link.backoff.recovered();

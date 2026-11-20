@@ -1,8 +1,9 @@
 //! One AMQP connection of the RabbitMQ CDR sink and its channel in publisher
 //! confirm mode. A session ends, never to publish again, on the first sign the
 //! broker is not delivering: a publish the connection does not take within its
-//! bound, a confirm missing past its bound, a channel or connection error, or a
-//! returned publish. Ending it shuts its socket down.
+//! bound, a confirm missing past its bound, a channel or connection error, a
+//! returned publish, or a connection or channel found closed before a publish.
+//! Ending it shuts its socket down.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
@@ -19,6 +20,7 @@ use tokio::task::JoinHandle;
 use tokio::time::{timeout_at, Instant};
 
 use super::confirms::{track_confirms, Pending};
+use super::connection_watch::watch_connection;
 use super::declaration::declaration;
 use super::resolver::BrokerResolver;
 use super::settings::RabbitMqCdrSettings;
@@ -104,13 +106,15 @@ impl Health {
 /// One connection + confirm-mode channel. Dropping it ends it.
 pub(super) struct Session {
     channel: Channel,
-    _connection: Connection,
+    connection: Connection,
     confirm_timeout: Duration,
     /// Unbounded, yet never holds more than the window: each entry owns a slot.
     /// `None` once the session is closing.
     pending: Option<mpsc::UnboundedSender<Pending>>,
     /// The confirm tracker, awaited by [`Session::close`].
     tracker: Option<JoinHandle<()>>,
+    /// The connection watch, aborted when the session drops.
+    watch: JoinHandle<()>,
     health: Arc<Health>,
 }
 
@@ -118,7 +122,7 @@ impl Session {
     /// Resolves the broker through `resolver`, connects, opens a channel,
     /// selects publisher confirms and declares the queue, then spawns the
     /// confirm tracker counting into `tally`, bounded by the writer's close
-    /// deadline `close_by`. Resolution, the TCP connect and the TLS handshake
+    /// deadline `close_by`, and the connection watch. Resolution, the TCP connect and the TLS handshake
     /// run on this task and stop at `deadline`; the caller bounds the rest by
     /// it, and dropping this future (or a failure half-way) shuts down
     /// whatever socket it connected. The client is handed the connected stream
@@ -159,12 +163,14 @@ impl Session {
         });
         let (pending, rx) = mpsc::unbounded_channel();
         let tracker = tokio::spawn(track_confirms(rx, health.clone(), close_by, tally.clone()));
+        let watch = watch_connection(&connection, health.clone());
         Ok(Self {
             channel,
-            _connection: connection,
+            connection,
             confirm_timeout: settings.bounds.confirm_timeout,
             pending: Some(pending),
             tracker: Some(tracker),
+            watch,
             health,
         })
     }
@@ -194,6 +200,24 @@ impl Session {
     /// Whether the broker acked at least one publish of this session.
     pub(super) fn delivered(&self) -> bool {
         self.health.delivered.load(Ordering::SeqCst)
+    }
+
+    /// Ends the session when its client no longer holds the connection and
+    /// the channel open: the broker closed one of them, or the connection
+    /// failed. The client refuses a publish on either, so a session found so
+    /// is ended before a record is handed to it.
+    pub(super) fn end_if_disconnected(&self) {
+        let connection = self.connection.status();
+        let reason = if connection.errored() {
+            "the connection failed"
+        } else if !connection.connected() {
+            "the connection is closed"
+        } else if !self.channel.status().connected() {
+            "the channel is closed"
+        } else {
+            return;
+        };
+        self.health.end(reason);
     }
 
     /// Publishes `payload`, the record the writer was handed at `handed_at`,
@@ -257,6 +281,7 @@ impl Session {
 
 impl Drop for Session {
     fn drop(&mut self) {
+        self.watch.abort();
         let _ = self.health.ended_at.set(Instant::now());
         self.health.window.close();
         self.health.socket.kill();

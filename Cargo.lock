@@ -571,6 +571,7 @@ dependencies = [
  "b2bua",
  "call",
  "call-limiter",
+ "futures-util",
  "http-net",
  "http-net-testkit",
  "jemalloc-stats",
