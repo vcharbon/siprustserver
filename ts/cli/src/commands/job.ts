@@ -4,7 +4,7 @@
  *   job start replay --request <id> [--prep N] [--batch N] [--concurrency N]
  *                    [--memory-max SIZE] [--starts-per-second N] [--no-cleanup] [--wait S]
  *                    [--collection <level>]
- *   job start ingest <path>... [--set <file>]... [--cut]        (= source add)
+ *   job start ingest <path>... [--set <file>]... [--cut] [--retry-failed]   (= source add)
  *   job start cut [--stale-only | --force] <capture>... | --standing | --all | --known [--slice N]
  *   job start retire <capture>... [--measure]                (= retire --yes, detached)
  *   job start delete <run id>... | --request <id> | --sweep <id> | --of-job <id> | --lane L --older-than H [--measure]
@@ -67,7 +67,7 @@ import { exit, operatorCwd } from "../runner.js"
 
 const usage = (facts: CliFacts): string =>
   `usage: ${facts.invocation("job")} start replay --request <id> [knobs…] | ` +
-  "start ingest <path>… [--set <file>]… [--cut] | " +
+  "start ingest <path>… [--set <file>]… [--cut] [--retry-failed] | " +
   "start cut [--stale-only|--force] <capture>…|--standing|--all|--known [--slice N] | start retire <capture>… | " +
   "start delete <run>…|--request <id>|--sweep <id>|--of-job <id>|--lane L --older-than H | list [--limit N] | " +
   "show <id> | wait <id> [--timeout S] | stop <id> [--grace S] | restart <id> --resume|--again | reap [--dry-run]"
@@ -107,6 +107,10 @@ const startFlags = {
     Flag.atLeast(0)
   ),
   cut: Flag.boolean("cut").pipe(Flag.withDescription("ingest: cut what is stale once it has landed"), Flag.withDefault(false)),
+  retryFailed: Flag.boolean("retry-failed").pipe(
+    Flag.withDescription("ingest: extract again a capture whose last ingest failed, its pcap and the extractor unchanged"),
+    Flag.withDefault(false)
+  ),
   staleOnly: Flag.boolean("stale-only").pipe(
     Flag.withDescription("cut: only the captures whose standing cut is not current (the default)"),
     Flag.withDefault(false)
@@ -222,6 +226,7 @@ const startIngest = Effect.fn("JobCli.startIngest")(function*(facts: CliFacts, i
     set: input.set.map((one) => path.resolve(cwd, one)),
     captures: found.sources.map((source) => source.capture),
     cut: input.cut,
+    retryFailed: input.retryFailed,
     concurrency: Option.getOrElse(input.concurrency, () => DEFAULT_CONCURRENCY),
     memoryMax: Option.getOrElse(input.memoryMax, () => DEFAULT_MEMORY_MAX)
   }).pipe(Effect.catchIf(JobStart.isNotStarted, (refused) => Effect.succeed(refused)))

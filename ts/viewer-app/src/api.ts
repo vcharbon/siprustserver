@@ -967,8 +967,11 @@ export interface PcapFile {
   readonly modifiedAt: string
   /** The capture the population holds it as, or the name its ingest will give it. */
   readonly capture: string
-  /** `new` where never ingested, or written since its last ingest: the fields after it then say nothing. */
-  readonly state: "new" | "ingested" | "cut"
+  /**
+   * `new` where never ingested, or written since its last ingest: the fields after it then say nothing.
+   * `ingest-failed` where its standing ingest failed, `problem` saying why.
+   */
+  readonly state: "new" | "ingest-failed" | "ingested" | "cut"
   /** The standing cut's cases; null unless cut. */
   readonly cases: number | null
   readonly ingest: string | null

@@ -63,6 +63,7 @@ const cuts = Layer.succeed(
             capture: C,
             flowsHash: null,
             broke: null,
+            ingestFailed: null,
             cutAt: "2026-10-12T00:00:00Z",
             cases: [{ caseId: ID, callKey: "root@h", caseHash: "hash754", egressEndpoint: null }]
           }

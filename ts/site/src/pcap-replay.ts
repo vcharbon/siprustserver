@@ -1,6 +1,7 @@
 /**
  * A file of the workspace's `pcaps/` replayed on a lane, as one action: an
- * INGEST job over the file that cuts what it leaves stale, then a REPLAY job
+ * INGEST job over the file that cuts what it leaves stale (a failed ingest of
+ * it retried: the operator asking for the file is asking again), then a REPLAY job
  * launched with `--after` it, over a request meaning the capture whole — a
  * request made before the cut reaches the capture, which grows to every call
  * the cut makes of it once the replay resolves it (`Request.ahead`). Both
@@ -99,6 +100,7 @@ export const launch = Effect.fn("PcapReplay.launch")(function*(
     set: [],
     captures: [capture],
     cut: true,
+    retryFailed: true,
     concurrency: DEFAULT_KNOBS.concurrency,
     memoryMax: DEFAULT_KNOBS.memoryMax
   }).pipe(Effect.catch(notStarted))

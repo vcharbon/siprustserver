@@ -1,7 +1,7 @@
 /**
  * `source` — SOURCES from the command line:
  *
- *   source add <path>... [--paths-from FILE|-] [--set <file>]... [--cut] [--concurrency N] [--memory-max SIZE]
+ *   source add <path>... [--paths-from FILE|-] [--set <file>]... [--cut] [--retry-failed] [--concurrency N] [--memory-max SIZE]
  *   source add --job <id> …          (what the launched ingest job runs)
  *   source list [--stale] [-q NAME] [--limit N] [--offset N]
  *
@@ -74,6 +74,13 @@ export const addFlags = (facts: CliFacts) => ({
     Flag.withDescription("Cut what the ingest left stale once it has landed"),
     Flag.withDefault(false)
   ),
+  retryFailed: Flag.boolean("retry-failed").pipe(
+    Flag.withDescription(
+      "Extract again a capture whose last ingest failed, though neither its pcap nor the extractor changed " +
+        "(the cause was outside both: memory, a missing binary)"
+    ),
+    Flag.withDefault(false)
+  ),
   concurrency: Flag.integer("concurrency").pipe(
     Flag.withDescription("Extractions at once, and captures enriched at once by the cut"),
     Flag.withDefault(DEFAULT_CONCURRENCY)
@@ -137,7 +144,8 @@ const cutOptions = (facts: CliFacts, paths: Paths, input: AddInput, captures: Re
  * recorded, one line each; then, with `--cut`, the captures the cut rule
  * finds stale — the ones just extracted first among them — cut under a prep
  * of this job's own. The row closes with the exit code: 1 where a capture's
- * ingest or cut broke, 0 otherwise.
+ * ingest stands failed (now, or before and left as it stood) or its cut
+ * broke, 0 otherwise.
  */
 const runAsJob = Effect.fn("Source.runAsJob")(function*(
   facts: CliFacts,
@@ -150,16 +158,21 @@ const runAsJob = Effect.fn("Source.runAsJob")(function*(
   for (const said of found.collisions) yield* Console.error(`   ! ${said}`)
   yield* jobs.planned(job, found.sources.length)
   yield* standing
-  const ingested = yield* Source.ingest(found.sources, paths.corpus, Math.max(1, input.concurrency))
-  let broke = 0
+  const ingested = yield* Source.ingest(found.sources, paths.corpus, Math.max(1, input.concurrency), input.retryFailed)
+  let refused = 0
+  let leftFailed = 0
   for (const source of ingested.sources) {
     const outcome = ingested.outcomes.get(source.capture) ?? { _tag: "current" as const }
-    if (outcome._tag === "failed") broke += 1
+    if (outcome._tag === "failed") refused += 1
+    else if (Source.standsFailed(outcome)) leftFailed += 1
     yield* Console.log(Source.line(source.capture, outcome))
   }
+  const broke = refused + leftFailed
   yield* Console.log(
-    `[source] ingest: ${ingested.extracted.size - broke} extracted, ${broke} refused, ` +
-      `${found.sources.length - ingested.extracted.size} already current; +${ingested.added} new in the population`
+    `[source] ingest: ${ingested.extracted.size - refused} extracted, ${refused} refused, ` +
+      `${found.sources.length - ingested.extracted.size} already current` +
+      (leftFailed === 0 ? "" : ` (${leftFailed} of them a failed ingest left as it stood)`) +
+      `; +${ingested.added} new in the population`
   )
   if (!input.cut) return broke > 0 ? 1 : 0
   const captures = ingested.sources.map((source) => source.capture)
@@ -312,6 +325,7 @@ export const command = (facts: CliFacts) => {
         set: absolute(input.set, cwd),
         captures: found.sources.map((source) => source.capture),
         cut: input.cut,
+        retryFailed: input.retryFailed,
         concurrency: Math.max(1, input.concurrency),
         memoryMax: input.memoryMax
       }).pipe(Effect.catchIf(JobStart.isNotStarted, (refused) => Effect.succeed(refused)))

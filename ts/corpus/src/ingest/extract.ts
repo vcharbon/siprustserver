@@ -20,12 +20,13 @@
  * one.
  *
  * An extraction that FAILED is recorded as a capture with no cases and the
- * reason, exactly as a refusal is: silence is never an outcome. It still
- * writes its ingest record, so the failure stands until a pcap or the
- * extractor changes rather than being re-attempted blind on every run.
+ * reason, exactly as a refusal is: silence is never an outcome. The reason is
+ * the failure's line (`extract-failure.ts`): its step, its binary, how it
+ * ended. It still writes its ingest record, so the failure stands until a
+ * pcap or the extractor changes, or an ingest asked to retry failures does,
+ * rather than being re-attempted blind on every run.
  */
-import { runner } from "@sip/toolchain"
-import { IntoFile } from "@sip/toolchain"
+import { IntoFile, Oom, runner, Said } from "@sip/toolchain"
 import * as Cause from "effect/Cause"
 import * as Effect from "effect/Effect"
 import * as FileSystem from "effect/FileSystem"
@@ -34,6 +35,7 @@ import * as path from "node:path"
 import { Extraction, Tools } from "../deployment/index.js"
 import * as Timing from "../timing.js"
 import type { Source } from "./discover.js"
+import * as ExtractFailure from "./extract-failure.js"
 import * as Generation from "./generation.js"
 import * as Record from "./record.js"
 
@@ -56,9 +58,6 @@ export const SCRATCH = ".scratch"
  * walking the store for flows documents cannot read a raw one.
  */
 export const rawFlowsName = (capture: string): string => `${capture}.raw-flows.tmp`
-
-/** What a failed child said, as one line: room for a set refusal naming two paths. */
-const lineOf = (stderr: string): string => stderr.slice(0, 600).replace(/["\n]/g, " ").trim()
 
 /** The source under the generation its capture stands at in the store. */
 export const standing = Effect.fn("Extract.standing")(function*(artifacts: string, source: Source) {
@@ -210,18 +209,18 @@ const extractTimed = (
       yield* fs.makeDirectory(staged)
       // A failed re-extraction leaves the artifacts it would have replaced as they were.
       const keptLine = `${source.capture}: kept seed, its artifacts left as they were`
+      const keptFailed = (failure: ExtractFailure.Failure): Extracted => ({
+        capture: source.capture,
+        source,
+        landed: keptLine,
+        broke: ExtractFailure.lineOf(failure)
+      })
       const read = yield* readRaw(tool, source, raw)
-      if (read !== undefined) return { capture: source.capture, source, landed: keptLine, broke: read }
+      if (read !== undefined) return keptFailed(read)
       watch.lap("sipflow")
-      const request = { raw, dir: staged, artifacts, capture: source.capture, pcaps: source.pcaps }
-      const anonymised = yield* extraction.anonymise(request).pipe(
-        Effect.as(undefined),
-        Effect.catchTag("Corpus.AnonymiseFailed", (failed) => Effect.succeed(failed.line))
-      )
+      const anonymised = yield* anonymiseInto({ raw, dir: staged, artifacts, capture: source.capture, pcaps: source.pcaps })
       watch.lap("auto")
-      if (anonymised !== undefined) {
-        return { capture: source.capture, source, landed: keptLine, broke: anonymised }
-      }
+      if (anonymised !== undefined) return keptFailed(anonymised)
       if (yield* sameBytes(fs, path.join(staged, document), path.join(dir, document))) {
         return yield* into(source, "kept seed, same anonymised bytes", undefined, { _tag: "staged", dir: staged })
       }
@@ -238,31 +237,22 @@ const extractTimed = (
     })
     return yield* run.pipe(
       Effect.catchCause((cause) =>
-        Effect.succeed(
-          {
-            capture: source.capture,
-            source,
-            landed: "",
-            broke: `the extraction died: ${messageOf(Cause.squash(cause))}`
-          } satisfies Extracted
-        )
+        Effect.succeed({ capture: source.capture, source, landed: "", broke: diedOf(cause) } satisfies Extracted)
       ),
       Effect.ensuring(fs.remove(scratch, { recursive: true, force: true }).pipe(Effect.ignore))
     )
   }).pipe(
     Effect.catchCause((cause) =>
-      Effect.succeed(
-        {
-          capture: given.capture,
-          source: given,
-          landed: "",
-          broke: `the extraction died: ${messageOf(Cause.squash(cause))}`
-        } satisfies Extracted
-      )
+      Effect.succeed({ capture: given.capture, source: given, landed: "", broke: diedOf(cause) } satisfies Extracted)
     )
   )
 
-const messageOf = (cause: unknown): string => (cause instanceof Error ? cause.message : String(cause))
+/** The line of an extraction that died outside any child: a defect or a store write. */
+const diedOf = (cause: Cause.Cause<unknown>): string =>
+  ExtractFailure.lineOf({ _tag: "Internal", message: Said.messageOf(Cause.squash(cause)) })
+
+/** How much stderr a read keeps: room for a set refusal naming two paths. */
+const READ_STDERR_HEAD = 600
 
 /**
  * The raw flows document of a capture, read under the deployment's reading
@@ -276,10 +266,38 @@ const readRaw = (tool: string, source: Source, raw: string) =>
       tool,
       [...args, ...source.pcaps, "--contiguous", String(SET_MAX_GAP_MS), "--json"],
       raw,
-      { stderrHead: 600 }
+      { stderrHead: READ_STDERR_HEAD }
     )
-    return ended.broke === undefined && ended.exit === 0 ? undefined : `sipflow failed: ${lineOf(ended.stderr)}`
+    const ending = ExtractFailure.endingOfFile(ended)
+    if (ending === undefined) return undefined
+    return { _tag: "Child", step: "read", binary: tool, ending, stderr: ended.stderr } satisfies ExtractFailure.Failure
   })
+
+/** The kept flows document `document` indexed by the extractor; why not, where it was not. */
+const indexDocument = (tool: string, document: string) =>
+  Effect.gen(function*() {
+    const run = yield* runner
+    const before = yield* Oom.count
+    const ran = yield* run.all(tool, ["index", document]).pipe(
+      Effect.map((output) => ({ _tag: "Output" as const, output })),
+      Effect.catchTag("Toolchain.CliUnavailable", (error) =>
+        Effect.map(Oom.since(before), (oom) => ({ _tag: "Unavailable" as const, error, oom })))
+    )
+    const ending = ExtractFailure.endingOfRun(ran)
+    if (ending === undefined) return undefined
+    const stderr = ran._tag === "Output" ? ran.output.stderr : ""
+    return { _tag: "Child", step: "index", binary: tool, ending, stderr } satisfies ExtractFailure.Failure
+  })
+
+/** The deployment's anonymisation of `request`; its refusal as a failure, where it refused. */
+const anonymiseInto = (request: Extraction.AnonymiseRequest) =>
+  Effect.flatMap(Extraction.Service, (extraction) => extraction.anonymise(request)).pipe(
+    Effect.as(undefined),
+    Effect.catchTag(
+      "Corpus.AnonymiseFailed",
+      (failed) => Effect.succeed({ _tag: "Anonymise", line: failed.line } satisfies ExtractFailure.Failure)
+    )
+  )
 
 /** How much of an extraction an earlier step did: nothing, the raw read, or a whole staged anonymisation. */
 type Done = { readonly _tag: "none" } | { readonly _tag: "read" } | { readonly _tag: "staged"; readonly dir: string }
@@ -318,8 +336,9 @@ const landInto = (
         yield* Record.recordOf(source, extractor, { seedFile, generation: generation.generation, follows })
       )
     })
-    const fail = (broke: string) =>
+    const fail = (failure: ExtractFailure.Failure) =>
       Effect.gen(function*() {
+        const broke = ExtractFailure.lineOf(failure)
         yield* extraction.recordFailure(dir, source.capture, broke)
         yield* record
         return { capture: source.capture, source, landed, broke } satisfies Extracted
@@ -334,20 +353,13 @@ const landInto = (
         yield* fs.rename(path.join(done.dir, file), path.join(dir, file))
       }
     } else {
-      const anonymised = yield* extraction.anonymise({ raw, dir, artifacts, capture: source.capture, pcaps: source.pcaps }).pipe(
-        Effect.as(undefined),
-        Effect.catchTag("Corpus.AnonymiseFailed", (failed) => Effect.succeed(failed.line))
-      )
+      const anonymised = yield* anonymiseInto({ raw, dir, artifacts, capture: source.capture, pcaps: source.pcaps })
       if (anonymised !== undefined) return yield* fail(anonymised)
       watch.lap("auto")
     }
-    const run = yield* runner
     const document = yield* extraction.documentName(source.capture)
-    const indexed = yield* run.all(tool, ["index", path.join(dir, document)]).pipe(
-      Effect.map((output) => (output.exitCode === 0 ? undefined : lineOf(output.stderr))),
-      Effect.catch(() => Effect.succeed(""))
-    )
-    if (indexed !== undefined) return yield* fail(`sipflow index failed: ${indexed}`)
+    const indexed = yield* indexDocument(tool, path.join(dir, document))
+    if (indexed !== undefined) return yield* fail(indexed)
     watch.lap("index")
     yield* record
     watch.lap("record")

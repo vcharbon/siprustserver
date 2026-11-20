@@ -136,13 +136,18 @@ export interface Ingested {
   readonly renamed: ReadonlyMap<string, string>
 }
 
-/** One capture's outcome as a report line. */
+/** Whether the capture's standing ingest is a failure: failed now, or failed before and left as it stood. */
+export const standsFailed = (outcome: Outcome): boolean =>
+  outcome._tag === "failed" || (outcome._tag === "current" && outcome.failed !== undefined)
+
+/** One capture's outcome as a report line; a failure, fresh or standing, is a `!` line. */
 export const line = (capture: string, outcome: Outcome): string => {
   switch (outcome._tag) {
     case "current":
-      return `   =  ${capture}  current${
-        outcome.failed === undefined ? "" : ` (its extraction refused it: ${outcome.failed})`
-      }`
+      return outcome.failed === undefined
+        ? `   =  ${capture}  current`
+        : `   !  ${capture}  its last ingest failed, and stands until the pcap or the extractor changes ` +
+          `(source add --retry-failed retries it): ${outcome.failed}`
     case "ingested":
       return `   +  ${capture}  ingested — ${outcome.landed}`
     case "failed":
@@ -156,12 +161,16 @@ export const line = (capture: string, outcome: Outcome): string => {
  * population row first (`Sources.ingestState` — a row never ingested, or
  * ingested under another extractor than this tree's, is stale whatever the
  * artifact store holds), then the artifact store's own record and files
- * (`Record.staleness`), which the store cannot see.
+ * (`Record.staleness`), which the store cannot see. With `retryFailed`, a
+ * capture whose standing ingest failed is stale too: the failure stands until
+ * the pcap or the extractor changes, and a cause outside both (memory, a
+ * missing binary) is retried only on request.
  */
 export const staleness = Effect.fn("Source.staleness")(function*(
   sources: ReadonlyArray<Source>,
   artifacts: string,
-  extractor: string
+  extractor: string,
+  retryFailed = false
 ) {
   const population = yield* Population.Service
   const rows = new Map((yield* population.list).map((row) => [row.capture, row]))
@@ -174,6 +183,8 @@ export const staleness = Effect.fn("Source.staleness")(function*(
       ? row.ingestedAt === null
         ? "the population has no ingest of it"
         : "the population's extractor is not this tree's"
+      : retryFailed && row.ingestFailed !== null
+      ? "its last ingest failed: retried on request"
       : yield* Record.staleness(artifacts, source, extractor)
     if (why !== undefined) stale.set(source.capture, why)
   }
@@ -187,19 +198,20 @@ export const staleness = Effect.fn("Source.staleness")(function*(
  * are read back off its ingest record, so the row and the artifact store agree
  * without a second extraction. A capture whose extraction FAILED still joins
  * and still carries its ingest record: re-reading the same pcap would only
- * produce the same refusal.
+ * produce the same refusal, unless `retryFailed` asks for it.
  */
 export const ingest = Effect.fn("Source.ingest")(function*(
   sources: ReadonlyArray<Source>,
   artifacts: string,
-  concurrency: number
+  concurrency: number,
+  retryFailed = false
 ) {
   const population = yield* Population.Service
   const extractor = yield* Fingerprint.extractor
   const outcomes = new Map<string, Outcome>()
   // Every capture under the generation it stands at.
   const standing = yield* Effect.forEach(sources, (source) => Extract.standing(artifacts, source))
-  const why = yield* staleness(standing, artifacts, extractor)
+  const why = yield* staleness(standing, artifacts, extractor, retryFailed)
   const stale = standing.filter((source) => {
     if (!why.has(source.capture)) outcomes.set(source.capture, { _tag: "current" })
     return why.has(source.capture)

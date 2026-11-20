@@ -1,8 +1,9 @@
 /**
  * The pcap root, file by file: size, date, where the pipeline stands with it
- * (new, ingested, cut with its case count), its last full run per lane, and
- * one action — replay on a lane, which starts an ingest with its cut and a
- * replay after it, both linked. The lane list says per lane whether a capture
+ * (new, ingest failed with its reason written out, ingested, cut with its
+ * case count), its last full run per lane, and one action — replay on a lane,
+ * which starts an ingest with its cut (a failed ingest retried) and a replay
+ * after it, both linked. The lane list says per lane whether a capture
  * replay fits it, runs there only forced (its results marked so), or runs
  * nowhere. The inbox above it lists what is being taken into the root, each
  * capture with the anonymisation level it is taken at, its state and its job;
@@ -29,8 +30,16 @@ const said = (error: unknown): string => (error instanceof Error ? error.message
 
 const STATE_TONE: Readonly<Record<PcapFile["state"], string>> = {
   new: "muted",
+  "ingest-failed": "error",
   ingested: "state-stale",
   cut: "class-accepted"
+}
+
+const STATE_WORD: Readonly<Record<PcapFile["state"], string>> = {
+  new: "new",
+  "ingest-failed": "ingest failed",
+  ingested: "ingested",
+  cut: "cut"
 }
 
 const INBOX_TONE: Readonly<Record<InboxEntry["state"], string>> = {
@@ -40,12 +49,15 @@ const INBOX_TONE: Readonly<Record<InboxEntry["state"], string>> = {
   refused: "error"
 }
 
-/** Where one file stands: its state, the case count once cut, the problem as a tooltip. */
+/** Where one file stands: its state, the case count once cut, and the problem written out under it. */
 const FileState = ({ file }: { readonly file: PcapFile }): JSX.Element => (
-  <span className={`tag ${file.problem === null ? STATE_TONE[file.state] : "error"}`} title={file.problem ?? undefined}>
-    {file.state}
-    {file.state === "cut" && ` · ${plural(file.cases ?? 0, "case")}`}
-  </span>
+  <>
+    <span className={`tag ${file.problem === null ? STATE_TONE[file.state] : "error"}`}>
+      {STATE_WORD[file.state]}
+      {file.state === "cut" && ` · ${plural(file.cases ?? 0, "case")}`}
+    </span>
+    {file.problem !== null && <div className="error mono break">{file.problem}</div>}
+  </>
 )
 
 /** The last full run per lane: `lane=status(runN[, f failed])`, the lane to the capture's study, the run to its report. */
@@ -128,10 +140,11 @@ const ReplayOn = (
         type="button"
         className="copy-ref"
         disabled={picked === undefined || !startable(picked) || phase.kind === "starting"}
-        title={picked?.refused ?? picked?.line ?? "ingest + cut, then replay"}
+        title={picked?.refused ?? picked?.line ??
+          (file.state === "ingest-failed" ? "retry the failed ingest + cut, then replay" : "ingest + cut, then replay")}
         onClick={() => void start()}
       >
-        {phase.kind === "starting" ? "starting…" : "replay"}
+        {phase.kind === "starting" ? "starting…" : file.state === "ingest-failed" ? "retry + replay" : "replay"}
       </button>
       {phase.kind === "started" && <div className="pcaps-said"><JobLinks jobs={phase.jobs} /></div>}
       {phase.kind === "error" && <div className="error pcaps-said">{phase.detail}</div>}

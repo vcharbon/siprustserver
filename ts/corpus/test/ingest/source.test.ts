@@ -122,9 +122,14 @@ const member = (capture: string, rest: Partial<Model.PopulationMember>): Model.P
   ...rest
 })
 
-const staleness = (sources: ReadonlyArray<Found>, artifacts: string, rows: ReadonlyArray<Model.PopulationMember>) =>
+const staleness = (
+  sources: ReadonlyArray<Found>,
+  artifacts: string,
+  rows: ReadonlyArray<Model.PopulationMember>,
+  retryFailed = false
+) =>
   Effect.runPromise(
-    Source.staleness(sources, artifacts, EXTRACTOR).pipe(
+    Source.staleness(sources, artifacts, EXTRACTOR, retryFailed).pipe(
       Effect.provide(Layer.merge(populationOf(rows), NodeServices.layer))
     )
   )
@@ -179,6 +184,17 @@ describe("Source.staleness — a campaign's `needs ingest` and the source list's
     expect(why.get("absent.pcap.gz")).toBe("not in the population")
     // A failure the caller's own extractor recorded stands: neither side asks for another extraction.
     expect(why.has("failed.pcap.gz")).toBe(false)
+  })
+
+  it("calls a standing failure stale only when a retry of failed ingests is asked for", async () => {
+    const failed = { capture: "retried.pcap.gz", pcaps: [pcap("retried.pcap.gz")] }
+    const fine = { capture: "fine.pcap.gz", pcaps: [pcap("fine.pcap.gz")] }
+    record(failed)
+    record(fine)
+    const rows = [member("retried.pcap.gz", { ingestFailed: "read: sipflow was killed by SIGKILL" }), member("fine.pcap.gz", {})]
+    expect((await staleness([failed, fine], artifacts, rows)).size).toBe(0)
+    const why = await staleness([failed, fine], artifacts, rows, true)
+    expect([...why]).toEqual([["retried.pcap.gz", "its last ingest failed: retried on request"]])
   })
 
   it("asks the artifact store only once the row is current: a pcap whose bytes moved is the campaign's to see", async () => {

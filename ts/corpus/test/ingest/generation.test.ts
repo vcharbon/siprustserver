@@ -255,12 +255,31 @@ describe("Extract.extract after a refused extraction", () => {
     const empty: Source = { capture: "empty", pcaps: [rw("empty.pcap", "")] }
     const broken = tool("noextract", "#!/bin/sh\necho not a capture >&2\nexit 1\n")
     const first = await extract(empty, "x1", { tool: broken })
-    expect(first.broke).toBe("sipflow failed: not a capture")
+    expect(first.broke).toBe("read: noextract exited 1; stderr: not a capture")
     expect(fs.existsSync(seedOf(artifacts, "empty"))).toBe(false)
     const done = await extract(empty, "x2")
     expect(done.capture).toBe("empty")
     expect(done.broke).toBeUndefined()
     expect((await read("empty"))?.seedFile).toBe(seedOf(artifacts, "empty"))
+  })
+})
+
+describe("Extract.extract of a capture whose extractor dies", () => {
+  it("says the step, the signal and the cgroup's OOM record of a read killed with nothing on stderr", async () => {
+    const killed = tool("killed", "#!/bin/sh\nkill -KILL $$\n")
+    const done = await extract({ capture: "killed", pcaps: [rw("killed.pcap", "killed-bytes")] }, "x1", { tool: killed })
+    expect(done.broke).toMatch(
+      /^read: killed was killed by SIGKILL \((cgroup \S+ recorded (no|\d+) OOM kill|OOM kills not readable: ).*\); stderr: \(no stderr\)$/
+    )
+    expect((await failure("killed"))?.error).toBe(done.broke)
+  })
+
+  it("says the extractor could not start, and why", async () => {
+    const missing = path.join(scratch, "no-such-extractor")
+    const done = await extract({ capture: "unstarted", pcaps: [rw("unstarted.pcap", "unstarted-bytes")] }, "x1", {
+      tool: missing
+    })
+    expect(done.broke).toMatch(/^read: no-such-extractor could not start: .+; stderr: \(no stderr\)$/)
   })
 })
 
@@ -304,7 +323,7 @@ describe("Extract.extract of a name whose failure was recorded over anonymised b
     await extract(indexed, "x1")
     const noIndex = tool("noindex", "#!/bin/sh\nif [ \"$1\" = index ]; then echo no index >&2; exit 1; fi\ncat \"$1\"\n")
     const failed = await extract(indexed, "x2", { tool: noIndex })
-    expect(failed.broke).toBe("sipflow index failed: no index")
+    expect(failed.broke).toBe("index: noindex exited 1; stderr: no index")
     expect(await failure("indexed")).toBeDefined()
     expect(fs.existsSync(path.join(artifacts, "indexed", "indexed.flows.json"))).toBe(true)
     const before = snapshot(path.join(artifacts, "indexed"))

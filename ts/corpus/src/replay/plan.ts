@@ -18,9 +18,10 @@
  * document once. What a cell then cites is a directory `Case::load`
  * cannot tell from a hand-authored one.
  *
- * Nothing here runs anything. A capture with no standing cut, a cut that broke
- * and a cut that refused every case are three different answers, and all
- * three come back as plans rather than as silence.
+ * Nothing here runs anything. A capture with no standing cut, a cut that
+ * broke and a cut that refused every case are three different answers, and
+ * all three come back as plans rather than as silence; a capture whose ingest
+ * failed is the last, its detail the ingest's failure.
  */
 import type { Campaign } from "@sip/contracts"
 import { Cuts, type Model, Refusals, type Requests } from "@sip/store"
@@ -93,6 +94,24 @@ export class UnknownCases extends Data.TaggedError("ReplayDb.UnknownCases")<{
 
 const NO_CASES = "the cut refused every case"
 
+/**
+ * The `no-cases` plan of a capture with no cell to run. Where its ingest
+ * failed, the detail is that failure, `ingest failed: <line>`, never `detail`:
+ * the run then never reads as a cut that found no call. The status stays
+ * `no-cases`, as the deployment's source tier files a capture it cannot read.
+ */
+const emptyPlan = (
+  capture: string,
+  kind: Model.SetKind,
+  standing: Model.CaptureCut | null,
+  detail: string
+): CapturePlan => ({
+  _tag: "no-cases",
+  capture,
+  kind,
+  detail: standing === null || standing.ingestFailed === null ? detail : `ingest failed: ${standing.ingestFailed}`
+})
+
 const refOf = (capture: string, entry: Model.CutCase): CellRef => ({
   capture,
   callKey: entry.callKey,
@@ -131,7 +150,7 @@ const planWorkItem = Effect.fn("Plan.planWorkItem")(function*(prepId: number, wo
       return yield* Effect.fail(new UnknownCases({ capture, absences, prepId }))
     }
   }
-  if (standing.cases.length === 0) return { _tag: "no-cases", capture, kind, detail: NO_CASES } satisfies CapturePlan
+  if (standing.cases.length === 0) return emptyPlan(capture, kind, standing, NO_CASES)
   const wanted = work.set.kind === "full" ? null : new Set(work.set.cases)
   const named = wanted === null ? standing.cases : standing.cases.filter((entry) => wanted.has(entry.caseId))
   return {
@@ -170,21 +189,19 @@ export const planRequest = Effect.fn("Plan.planRequest")(function*(resolution: R
   const plans: Array<CapturePlan> = []
   for (const entry of resolution.captures) {
     const { capture, kind } = entry
+    const standing = yield* cuts.standing(capture, resolution.prepId)
     if (entry.planned.length === 0) {
-      // A whole capture whose cut holds no case is the cut's own answer, a
-      // request whose every key is gone says so.
       const refused = entry.gone.filter((cell) => cell.gone === "refused").length
-      plans.push({
-        _tag: "no-cases",
+      plans.push(emptyPlan(
         capture,
         kind,
-        detail: entry.gone.length === 0
+        standing,
+        entry.gone.length === 0
           ? NO_CASES
           : `every cell of the request is gone (${refused} refused, ${entry.gone.length - refused} not in this cut)`
-      })
+      ))
       continue
     }
-    const standing = yield* cuts.standing(capture, resolution.prepId)
     plans.push({
       _tag: "cells",
       capture,

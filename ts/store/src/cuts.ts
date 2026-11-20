@@ -200,6 +200,7 @@ interface CutRow {
   readonly capture: string
   readonly flows_hash: string | null
   readonly broke: string | null
+  readonly ingest_failed: string | null
   readonly cut_at: Date
   readonly cases: ReadonlyArray<CutCase>
 }
@@ -372,6 +373,7 @@ export const layer = Layer.effect(
       // what to materialise never has a use for the head row alone.
       const rows = yield* sql<CutRow>`
         SELECT c.prep_id, c.capture, c.flows_hash, c.broke, c.cut_at,
+               (SELECT p.ingest_failed FROM population p WHERE p.capture = c.capture) AS ingest_failed,
                coalesce((
                  SELECT jsonb_agg(
                           jsonb_build_object(
@@ -397,6 +399,7 @@ export const layer = Layer.effect(
         capture: row.capture,
         flowsHash: row.flows_hash,
         broke: row.broke,
+        ingestFailed: row.ingest_failed,
         cutAt: row.cut_at.toISOString(),
         cases: row.cases ?? []
       } satisfies CaptureCut

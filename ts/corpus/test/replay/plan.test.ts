@@ -272,6 +272,25 @@ describe.skipIf(!served)("the replay plan", () => {
     expect(plans[2]).toMatchObject({ broke: expect.stringContaining("no cut of this capture") })
   })
 
+  it("says a capture whose ingest failed holds no case because of that failure, not because the cut refused", async () => {
+    const UNREAD = "capture_unread.pcap.gz"
+    const why = "read: sipflow was killed by SIGKILL (cgroup /x recorded 1 OOM kill(s) while it ran (memory.max 1G)); stderr: (no stderr)"
+    await withCuts(
+      Effect.gen(function*() {
+        const sql = yield* SqlClient
+        yield* sql`INSERT INTO population (capture, ingested_at, extractor_hash, ingest_failed)
+                   VALUES (${UNREAD}, now(), 'x', ${why})`
+        const cuts = yield* Cuts.Service
+        yield* cuts.record({ prepId: older, capture: UNREAD, flows: null, cases: [], refusals: [] })
+      })
+    )
+    const plans = await planned(older, [UNREAD, REFUSED])
+    expect(plans).toMatchObject([
+      { _tag: "no-cases", detail: `ingest failed: ${why}` },
+      { _tag: "no-cases", detail: "the cut refused every case" }
+    ])
+  })
+
   it("makes a case that cannot be materialised that capture's failure alone", async () => {
     // The cache cannot be written, so every case fails to materialise — and the
     // capture beside it, whose cut refused everything, still answers `no-cases`.

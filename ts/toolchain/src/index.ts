@@ -33,6 +33,7 @@ export { IntoFile } from "./into-file.js"
 export { Logged } from "./logged.js"
 export { Measured } from "./measured.js"
 export { NodeHeap } from "./node-heap.js"
+export { Oom } from "./oom.js"
 export { Said } from "./said.js"
 export {
   CliFailed,

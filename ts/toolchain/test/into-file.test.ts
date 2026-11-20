@@ -61,7 +61,7 @@ describe("IntoFile.run", () => {
   it("names the signal a command was killed by", async () => {
     const dir = dirOf("killed")
     const why = await into("sh", ["-c", "echo dying >&2; kill -KILL $$"], path.join(dir, "out"))
-    expect(why).toContain("killed by SIGKILL")
+    expect(why).toMatch(/killed by SIGKILL \((cgroup \S+ recorded|OOM kills not readable)/)
     expect(fs.readdirSync(dir)).toEqual([])
   })
 
@@ -94,6 +94,18 @@ describe("IntoFile.exec", () => {
         Effect.provide(NodeServices.layer)
       )
     )
-    expect(ended).toEqual({ broke: undefined, exit: 2, signal: null, stderr: "a\"b\nc" })
+    expect(ended).toEqual({ broke: undefined, started: true, exit: 2, signal: null, oom: null, stderr: "a\"b\nc" })
+  })
+
+  it("asks the cgroup about its OOM killer once a signal ended the run, and says it never ran where it did not", async () => {
+    const dir = dirOf("exec-killed")
+    const run = (binary: string, args: ReadonlyArray<string>) =>
+      Effect.runPromise(IntoFile.exec(binary, args, path.join(dir, "out")).pipe(Effect.provide(NodeServices.layer)))
+    const killed = await run("sh", ["-c", "kill -KILL $$"])
+    expect(killed).toMatchObject({ started: true, exit: null, signal: "SIGKILL", stderr: "" })
+    expect(["Recorded", "None", "Unknown"]).toContain(killed.oom?._tag)
+    const missing = await run(path.join(scratch, "no-such-binary"), [])
+    expect(missing).toMatchObject({ started: false, signal: null, oom: null })
+    expect(missing.broke).toBeDefined()
   })
 })
