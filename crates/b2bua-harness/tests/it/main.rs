@@ -201,6 +201,7 @@ mod reinvite_cancel;
 mod reinvite_cancel_prack;
 mod reinvite_final_after_teardown_is_acked;
 mod reinvite_glare_retry_after;
+mod reinvite_in_progress_refused;
 mod relay_policy;
 mod relayed_cseq;
 mod relayed_prack_final;
