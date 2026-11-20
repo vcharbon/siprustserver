@@ -60,6 +60,7 @@ impl RunnerBase {
         tracing::info!(
             service = %self.name,
             sink = "rabbitmq",
+            brokers = %settings.broker_names().join(","),
             queue = %settings.queue,
             declare = ?settings.declare,
             buffer = self.env.cdr_queue,

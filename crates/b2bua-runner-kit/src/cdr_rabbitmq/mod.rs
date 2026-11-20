@@ -17,6 +17,8 @@
 //! never a stalled call path or growing memory.
 
 mod backoff;
+mod broker_list;
+mod brokers;
 mod confirms;
 mod connection_watch;
 mod declaration;
@@ -38,7 +40,7 @@ use tokio::task::JoinHandle;
 use tokio::time::{timeout_at, Instant};
 
 use backoff::Backoff;
-use resolver::BrokerResolver;
+use brokers::{drawn_start, Brokers};
 use session::Session;
 pub use settings::{
     CdrDeliveryBounds, CdrQueueDeclare, RabbitMqCdrSettings, MAX_DRAINER_WAIT_MS, MAX_WAIT_MS,
@@ -106,10 +108,13 @@ struct Link {
     /// publishes, joined by `close`.
     retired: Vec<JoinHandle<()>>,
     backoff: Backoff,
-    resolver: BrokerResolver,
+    brokers: Brokers,
 }
 
 impl RabbitMqCdrWriter {
+    /// The writer of `settings`, its first connect attempt starting at a
+    /// broker drawn at random, so the workers of a cluster spread over its
+    /// nodes ([`Self::starting_at`] fixes it).
     pub fn new(
         settings: RabbitMqCdrSettings,
         encoder: Arc<dyn CdrEncoder>,
@@ -119,14 +124,24 @@ impl RabbitMqCdrWriter {
         let backoff = Backoff::new(bounds.backoff_min, bounds.backoff_max);
         // A parked answer lives through the longest gap between two attempts
         // while records flow.
-        let resolver = BrokerResolver::new(bounds.connect_timeout + bounds.backoff_max);
+        let max_age = bounds.connect_timeout + bounds.backoff_max;
+        let brokers = Brokers::new(&settings.brokers, drawn_start(), max_age);
         Self {
             settings,
             encoder,
-            link: Mutex::new(Link { session: None, retired: Vec::new(), backoff, resolver }),
+            link: Mutex::new(Link { session: None, retired: Vec::new(), backoff, brokers }),
             tally: Tally::new(metrics),
             close_by: watch::Sender::new(None),
         }
+    }
+
+    /// This writer's first connect attempt starting at the broker of index
+    /// `first` in [`RabbitMqCdrSettings::brokers`] (modulo their count), in
+    /// place of the drawn one: a runner that numbers its workers may spread
+    /// them by that number.
+    pub fn starting_at(mut self, first: usize) -> Self {
+        self.link.get_mut().brokers.start_at(first);
+        self
     }
 
     /// This writer telling `observer` the end of each record it is handed:
@@ -164,6 +179,7 @@ impl RabbitMqCdrWriter {
             current.end_if_disconnected();
         }
         if let Some(ended) = link.session.take_if(|s| s.ended_at().is_some()) {
+            link.brokers.ended(ended.delivered());
             if ended.delivered() {
                 link.backoff.recovered();
             } else if let Some(ended_at) = ended.ended_at() {
@@ -178,17 +194,8 @@ impl RabbitMqCdrWriter {
                 return None;
             }
             let deadline = Instant::now() + self.settings.bounds.connect_timeout;
-            let opened = timeout_at(
-                deadline,
-                Session::open(
-                    &self.settings,
-                    &mut link.resolver,
-                    deadline,
-                    &self.tally,
-                    self.close_by.subscribe(),
-                ),
-            )
-            .await;
+            let attempt = link.brokers.open(&self.settings, deadline, &self.tally, &self.close_by);
+            let opened = timeout_at(deadline, attempt).await;
             match opened {
                 Ok(Ok(session)) => link.session = Some(session),
                 Ok(Err(e)) => {
@@ -307,7 +314,7 @@ mod tests {
 
     fn settings(declare: CdrQueueDeclare) -> RabbitMqCdrSettings {
         RabbitMqCdrSettings {
-            url: "amqp://h/%2f".into(),
+            brokers: vec!["amqp://h/%2f".parse().unwrap()],
             queue: "cdr".into(),
             declare,
             bounds: CdrDeliveryBounds::default(),

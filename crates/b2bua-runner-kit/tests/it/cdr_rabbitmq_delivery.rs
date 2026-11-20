@@ -78,7 +78,7 @@ fn writer_to(
 ) -> (RabbitMqCdrWriter, B2buaMetrics) {
     let metrics = B2buaMetrics::new();
     let settings = RabbitMqCdrSettings {
-        url,
+        brokers: vec![url.parse().unwrap()],
         queue: "cdr".into(),
         declare: CdrQueueDeclare::Own { max_len: 100_000 },
         bounds,

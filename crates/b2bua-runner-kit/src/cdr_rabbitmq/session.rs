@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
-use amqp_connect::{connect_stream, open_over, Connected};
+use amqp_connect::{connect_stream_sharing, open_over, try_by, BrokerStream, Connected};
 use lapin::{
     options::{BasicPublishOptions, ConfirmSelectOptions},
     uri::AMQPUri,
@@ -19,10 +19,10 @@ use tokio::sync::{mpsc, watch, Semaphore};
 use tokio::task::JoinHandle;
 use tokio::time::{timeout_at, Instant};
 
+use super::brokers::Broker;
 use super::confirms::{track_confirms, Pending};
 use super::connection_watch::watch_connection;
 use super::declaration::declaration;
-use super::resolver::BrokerResolver;
 use super::settings::RabbitMqCdrSettings;
 use super::socket_kill::{KillOnDrop, SocketKill};
 use super::tally::Tally;
@@ -36,26 +36,29 @@ fn window_permits(window: usize) -> Semaphore {
     permits
 }
 
-/// Why a session could not be opened.
+/// Why a session could not be opened on one broker.
 #[derive(Debug)]
 pub(super) enum OpenError {
-    /// The URL is not an AMQP URI.
-    Uri(String),
-    /// The broker host did not resolve before the connect deadline.
+    /// The broker host did not resolve within its share of the deadline.
     Resolve(std::io::Error),
     /// The TCP connect or the TLS handshake failed or missed the deadline.
     Connect(std::io::Error),
     /// The AMQP handshake, channel, `confirm.select` or declare failed.
     Amqp(lapin::Error),
+    /// The AMQP handshake, channel, `confirm.select` or declare was not done
+    /// by the deadline.
+    AmqpTimedOut,
 }
 
 impl std::fmt::Display for OpenError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            OpenError::Uri(e) => write!(f, "not an AMQP URI: {e}"),
             OpenError::Resolve(e) => write!(f, "broker host unresolved: {e}"),
             OpenError::Connect(e) => write!(f, "broker connect failed: {e}"),
             OpenError::Amqp(e) => write!(f, "{e}"),
+            OpenError::AmqpTimedOut => {
+                f.write_str("AMQP handshake not done by the connect deadline")
+            }
         }
     }
 }
@@ -119,39 +122,41 @@ pub(super) struct Session {
 }
 
 impl Session {
-    /// Resolves the broker through `resolver`, connects, opens a channel,
-    /// selects publisher confirms and declares the queue, then spawns the
-    /// confirm tracker counting into `tally`, bounded by the writer's close
-    /// deadline `close_by`, and the connection watch. Resolution, the TCP connect and the TLS handshake
-    /// run on this task and stop at `deadline`; the caller bounds the rest by
-    /// it, and dropping this future (or a failure half-way) shuts down
-    /// whatever socket it connected. The client is handed the connected stream
-    /// with auto-recovery off: a connection lost is this session's end, and
-    /// the writer opens the next one.
+    /// Resolves `broker`'s host, connects, opens a channel, selects publisher
+    /// confirms and declares the queue, then spawns the confirm tracker
+    /// counting into `tally`, bounded by the writer's close deadline
+    /// `close_by`, and the connection watch. Everything is done by
+    /// `deadline`; the resolution and each TCP connect stop at their share of
+    /// it, counted with the `later` brokers the caller tries after this one
+    /// ([`amqp_connect::try_by`]). Dropping this future, or a failure
+    /// half-way, shuts down whatever socket it connected. The client is
+    /// handed the connected stream with auto-recovery off: a connection lost
+    /// is this session's end, and the writer opens the next one.
     pub(super) async fn open(
         settings: &RabbitMqCdrSettings,
-        resolver: &mut BrokerResolver,
+        broker: &mut Broker,
+        later: usize,
         deadline: Instant,
         tally: &Tally,
         close_by: watch::Receiver<Option<Instant>>,
     ) -> Result<Self, OpenError> {
-        let uri: AMQPUri = settings.url.parse().map_err(OpenError::Uri)?;
-        let addrs = resolver
-            .resolve(&uri.authority.host, uri.authority.port, deadline)
+        let uri = &broker.uri;
+        let addrs = broker
+            .resolver
+            .resolve(&uri.authority.host, uri.authority.port, try_by(deadline, later + 1))
             .await
             .map_err(OpenError::Resolve)?;
         let Connected { stream, socket: descriptor } =
-            connect_stream(&uri, &settings.tls, &addrs, deadline)
+            connect_stream_sharing(uri, &settings.tls, &addrs, later, deadline)
                 .await
                 .map_err(OpenError::Connect)?;
         let socket = Arc::new(SocketKill::default());
         socket.arm(descriptor);
         let guard = KillOnDrop::new(socket.clone());
-        let connection = open_over(uri, stream).await?;
-        let channel = connection.create_channel().await?;
-        channel.confirm_select(ConfirmSelectOptions::default()).await?;
-        let (options, args) = declaration(settings.declare);
-        channel.queue_declare(settings.queue.as_str().into(), options, args).await?;
+        let (connection, channel) =
+            timeout_at(deadline, confirming_channel(settings, uri.clone(), stream))
+                .await
+                .map_err(|_| OpenError::AmqpTimedOut)??;
         guard.disarm();
 
         let health = Arc::new(Health {
@@ -277,6 +282,21 @@ impl Session {
         }
         Ok(())
     }
+}
+
+/// The AMQP connection over `stream` and its channel in confirm mode, the
+/// queue declared on it.
+async fn confirming_channel(
+    settings: &RabbitMqCdrSettings,
+    uri: AMQPUri,
+    stream: BrokerStream,
+) -> Result<(Connection, Channel), lapin::Error> {
+    let connection = open_over(uri, stream).await?;
+    let channel = connection.create_channel().await?;
+    channel.confirm_select(ConfirmSelectOptions::default()).await?;
+    let (options, args) = declaration(settings.declare);
+    channel.queue_declare(settings.queue.as_str().into(), options, args).await?;
+    Ok((connection, channel))
 }
 
 impl Drop for Session {

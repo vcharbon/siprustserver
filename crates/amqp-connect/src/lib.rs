@@ -1,6 +1,7 @@
 //! amqp-connect — opening an AMQP 0-9-1 connection on the running tokio
 //! runtime. The TCP connect and the TLS handshake run on the caller's task,
-//! under the caller's deadline ([`connect_stream`], [`connect_uri`]), over a
+//! under the caller's deadline, each resolved address given its share of it
+//! ([`connect_stream`], [`connect_uri`]), over a
 //! TLS connector built once ([`BrokerTls`]); the
 //! client is then handed the ready stream ([`open_over`]). Its IO loop never
 //! connects itself, so a failed connect never reaches the client and no tokio
@@ -30,6 +31,8 @@ mod tls;
 mod uri;
 
 pub use handover::open_over;
-pub use stream::{connect_stream, BrokerStream, Connected};
+pub use stream::{
+    connect_stream, connect_stream_sharing, try_by, BrokerStream, Connected, MIN_TRY,
+};
 pub use tls::BrokerTls;
 pub use uri::{checked_uri, connect_uri, DEFAULT_HEARTBEAT_SEC};

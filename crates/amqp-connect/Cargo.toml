@@ -23,3 +23,6 @@ tokio = { workspace = true }
 [dev-dependencies]
 # The ClientHello the TLS tests read back (SNI), no certificate involved.
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+# The black-holed address of the connect tests: a listener whose zero backlog
+# is full, so the kernel drops every further SYN.
+socket2 = { workspace = true }
