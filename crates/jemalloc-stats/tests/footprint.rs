@@ -258,7 +258,8 @@ fn a_binary_linking_the_crate_resolves_its_defaults_without_any_setting() {
 /// A thread's held bytes count its own allocations alone: while it keeps a
 /// buffer, another thread frees a larger heap, which lowers the process-wide
 /// `stats.allocated` below its first reading, and the thread's reading still
-/// rises by the buffer.
+/// rises by the buffer alone: a larger buffer it allocates and frees in the
+/// same window leaves no trace.
 #[test]
 fn a_thread_reads_the_buffer_it_keeps_whatever_another_thread_frees() {
     const KEPT: usize = 1 << 20;
@@ -270,11 +271,13 @@ fn a_thread_reads_the_buffer_it_keeps_whatever_another_thread_frees() {
         drop(heap);
         freed_tx.send(()).expect("the freed signal");
     });
-    heap_tx.send((0..16).map(|_| vec![1u8; 4 * KEPT]).collect()).expect("the heap sent");
+    let heap: Vec<Vec<u8>> = (0..16).map(|_| vec![1u8; 4 * KEPT]).collect();
 
     let process_before = jemalloc_stats::footprint_bytes().expect("jemalloc answers").0;
     let held_before = jemalloc_stats::thread_held_bytes().expect("jemalloc answers");
     let kept = vec![1u8; KEPT];
+    drop(std::hint::black_box(vec![1u8; 8 * KEPT]));
+    heap_tx.send(heap).expect("the heap sent");
     freed_rx.recv().expect("the other thread freed its heap");
     let held = jemalloc_stats::thread_held_bytes().expect("jemalloc answers") - held_before;
     let process_after = jemalloc_stats::footprint_bytes().expect("jemalloc answers").0;
@@ -282,7 +285,7 @@ fn a_thread_reads_the_buffer_it_keeps_whatever_another_thread_frees() {
 
     assert!(process_after < process_before, "the other thread's free lowers stats.allocated");
     assert!(
-        held.unsigned_abs().abs_diff(KEPT as u64) <= SLACK && held > 0,
+        u64::try_from(held).is_ok_and(|h| h.abs_diff(KEPT as u64) <= SLACK),
         "the thread holds {held} B for a {KEPT} B buffer"
     );
     drop(kept);
