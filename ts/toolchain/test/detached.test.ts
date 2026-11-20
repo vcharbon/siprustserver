@@ -38,6 +38,18 @@ const exited = async (dir: string): Promise<number> => {
   throw new Error(`${dir} never recorded an exit`)
 }
 
+/**
+ * Polls until the supervisor recorded under `dir` no longer runs: it outlives
+ * the exit record it writes by its own last steps and its reaping.
+ */
+const stopped = async (dir: string): Promise<void> => {
+  for (let at = 0; at < 200; at++) {
+    if (!(await run(Detached.running(dir)))) return
+    await new Promise((resolve) => setTimeout(resolve, 25))
+  }
+  throw new Error(`${dir}'s supervisor never stopped`)
+}
+
 /** Polls until `dir`'s log holds `line`: the command has reached it. */
 const said = async (dir: string, line: string): Promise<void> => {
   for (let at = 0; at < 200; at++) {
@@ -56,7 +68,7 @@ describe("Detached.launch", () => {
     expect(fs.readFileSync(path.join(dir, "cmd"), "utf8")).toBe("sh -c 'echo said; echo '\\''on err'\\'' >&2; exit 3'\n")
     const record = await run(Liveness.recorded(path.join(dir, "pid")))
     expect(record?.pid).toBe(launched.pid)
-    expect(await run(Detached.running(dir))).toBe(false)
+    await stopped(dir)
   })
 
   it("runs in the directory and environment it is given", async () => {
