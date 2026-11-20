@@ -13,12 +13,13 @@
 
 use call::features::{FeatureActivations, RelayFirst18xStrategy};
 use call::{
-    CdrEventType, Direction, LegState, PromotePemState, TerminationCause, TimerKey, TimerType,
+    CdrEventType, Direction, LegState, PendingResync, PromotePemState, TerminationCause, TimerKey,
+    TimerType,
 };
 use sip_message::draft::Entry;
 use sip_message::header::HeaderName;
 use sip_message::sdp_media_equivalent;
-use sip_message::{SipHeader, SipResponse};
+use sip_message::{SipHeader, SipResponse, SipStr};
 
 use super::capabilities::{self, Face};
 use b2bua_sdk::model::{
@@ -62,6 +63,60 @@ fn promoted(ctx: &RuleContext) -> bool {
 
 fn window_open(ctx: &RuleContext) -> bool {
     ctx.call.promote_pem_window_open()
+}
+
+/// The synthetic 200 awaits Alice's ACK: her INVITE transaction is in
+/// progress until it, and no resync re-INVITE may leave (RFC 3261 §14.1).
+fn a_ack_awaited(ctx: &RuleContext) -> bool {
+    call::helpers::carrying_dialog(ctx.call.a_leg()).and_then(call::helpers::answered_2xx).is_some()
+}
+
+/// The lines of B's 200 a resync reads: those describing its body and those
+/// stating his advertisement ([`a_facing_advert`]).
+fn resync_lines(headers: &[SipHeader]) -> Vec<call::SipHeader> {
+    let read =
+        [HeaderName::ContentType, HeaderName::Allow, HeaderName::Supported, HeaderName::Accept];
+    let descriptors = sip_message::generators::body_descriptors(headers);
+    headers
+        .iter()
+        .filter(|h| read.iter().any(|name| name.matches(&h.name)))
+        .chain(descriptors.iter())
+        .map(|h| call::SipHeader { name: h.name.to_string(), value: h.value.to_string() })
+        .collect()
+}
+
+/// The resync re-INVITE toward Alice offering `body`, B's final description
+/// written by the peer of `b`, described and advertised by `lines` of his 200;
+/// the promotion records its CSeq, the a-dialog's next.
+fn resync(
+    ctx: &RuleContext,
+    b: &str,
+    body: &[u8],
+    lines: &[SipHeader],
+    state: PromotePemState,
+) -> Vec<RuleAction> {
+    let a_leg = ctx.call.a_leg();
+    let next_cseq = call::helpers::carrying_dialog(a_leg).map_or(0, |d| d.our_cseq) + 1;
+    vec![
+        RuleAction::SendReinvite {
+            leg_id: a_leg.leg_id.clone(),
+            body: Some(Body::from_leg(body.to_vec(), b).described_by(lines)),
+            add_headers: a_facing_advert(ctx.call.features(), lines),
+        },
+        RuleAction::AddCdrEvent {
+            event_type: CdrEventType::Provisional,
+            leg_id: "a".to_string(),
+            status_code: Some(0),
+            reason: Some("promote-pem-to-200:resync-reinvite".to_string()),
+        },
+        RuleAction::SetPromotePem {
+            state: Some(PromotePemState {
+                resync_reinvite_cseq: Some(next_cseq),
+                pending_resync: None,
+                ..state
+            }),
+        },
+    ]
 }
 
 /// Allow + Supported + Accept header updates for messages we mint toward
@@ -145,6 +200,7 @@ pub fn promote_pem_rules() -> Vec<RuleDefinition> {
                         window_open: true,
                         resync_reinvite_cseq: None,
                         caller_answer: None,
+                        pending_resync: None,
                     }),
                 });
                 ok(actions)
@@ -237,27 +293,44 @@ pub fn promote_pem_rules() -> Vec<RuleDefinition> {
                     actions.push(RuleAction::SetPromotePem { state: None });
                     return ok(actions);
                 }
-                let a_dialog_cseq = call::helpers::carrying_dialog(ctx.call.a_leg())
-                    .map(|d| d.our_cseq)
-                    .unwrap_or(0);
-                let next_cseq = a_dialog_cseq + 1;
-                actions.push(RuleAction::SendReinvite {
-                    leg_id: a,
-                    body: Some(
-                        Body::from_leg(resp.body().to_vec(), ctx.source_leg_id.to_string())
-                            .described_by(resp.headers()),
-                    ),
-                    add_headers: a_facing_advert(ctx.call.features(), resp.headers()),
-                });
-                actions.push(RuleAction::AddCdrEvent {
-                    event_type: CdrEventType::Provisional,
-                    leg_id: "a".to_string(),
-                    status_code: Some(0),
-                    reason: Some("promote-pem-to-200:resync-reinvite".to_string()),
-                });
-                actions.push(RuleAction::SetPromotePem {
-                    state: Some(PromotePemState { resync_reinvite_cseq: Some(next_cseq), ..state }),
-                });
+                if a_ack_awaited(ctx) {
+                    let pending = PendingResync {
+                        leg_id: b,
+                        body: resp.body().to_vec(),
+                        lines: resync_lines(resp.headers()),
+                    };
+                    let pending_resync = Some(pending);
+                    actions.push(RuleAction::SetPromotePem {
+                        state: Some(PromotePemState { pending_resync, ..state }),
+                    });
+                    return ok(actions);
+                }
+                actions.extend(resync(ctx, &b, resp.body(), resp.headers(), state));
+                ok(actions)
+            },
+        ),
+        // ── Rule 3b: A's ACK sends the resync her ACK held back ──────────────
+        rule(
+            "promote-resync-on-a-ack",
+            &["relay-ack"],
+            Match::request().method("ACK").direction(Direction::FromA).filter(|ctx| {
+                promote_pem_active(ctx)
+                    && ctx.call.promote_pem_state().is_some_and(|s| s.pending_resync.is_some())
+            }),
+            |ctx| {
+                let state = ctx.call.promote_pem_state()?.clone();
+                let pending = state.pending_resync.clone()?;
+                let lines: Vec<SipHeader> = pending
+                    .lines
+                    .iter()
+                    .map(|l| SipHeader {
+                        name: SipStr::owned(&l.name),
+                        value: SipStr::owned(&l.value),
+                    })
+                    .collect();
+                let relay_ack = RuleAction::RelayToPeer { transform: MessageTransform::default() };
+                let mut actions = vec![relay_ack];
+                actions.extend(resync(ctx, &pending.leg_id, &pending.body, &lines, state));
                 ok(actions)
             },
         ),

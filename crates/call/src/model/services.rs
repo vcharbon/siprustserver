@@ -140,4 +140,20 @@ pub struct PromotePemState {
     /// ACK of B's 200 carries it.
     #[serde(default, with = "serde_bytes")]
     pub caller_answer: Option<Vec<u8>>,
+    /// The resync re-INVITE B's 200 called for while Alice's ACK of the
+    /// synthetic 200 was awaited: it leaves on that ACK (RFC 3261 §14.1).
+    #[serde(default)]
+    pub pending_resync: Option<PendingResync>,
+}
+
+/// A resync re-INVITE toward Alice waiting for her ACK of the synthetic 200:
+/// B's final description and the lines of his 200 that describe it or state
+/// his advertisement.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingResync {
+    /// B's leg, whose peer wrote the description.
+    pub leg_id: String,
+    #[serde(with = "serde_bytes")]
+    pub body: Vec<u8>,
+    pub lines: Vec<super::SipHeader>,
 }

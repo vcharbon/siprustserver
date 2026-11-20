@@ -116,8 +116,8 @@ pub use request_record::{
 };
 pub use sdp_session::LegSdpSession;
 pub use services::{
-    ExtMap, PromotePemState, RelayFirst18xState, ReleaseEventKind, ReroutePhase, RerouteState,
-    TransferPhase, TransferState,
+    ExtMap, PendingResync, PromotePemState, RelayFirst18xState, ReleaseEventKind, ReroutePhase,
+    RerouteState, TransferPhase, TransferState,
 };
 pub use sm::{MachineId, StateLabel};
 pub use subscription::{NotifyInFlight, Subscription, SubscriptionState};

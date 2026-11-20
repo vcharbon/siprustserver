@@ -103,6 +103,6 @@ pub use model::{
 };
 // Per-service slices + state-machine identifiers (ADR-0016).
 pub use model::{
-    ExtMap, MachineId, PromotePemState, RelayFirst18xState, ReleaseEventKind, ReroutePhase,
-    RerouteState, StateLabel, TransferPhase, TransferState,
+    ExtMap, MachineId, PendingResync, PromotePemState, RelayFirst18xState, ReleaseEventKind,
+    ReroutePhase, RerouteState, StateLabel, TransferPhase, TransferState,
 };
