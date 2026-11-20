@@ -5,9 +5,7 @@
 //! INVITE offer before the final (§5.1); an unreliable one answers nothing.
 
 use call::{Call, Dialog, DialogId, Ladder, Leg, LegState, RequestRecord, Shown};
-use sip_message::header::{HeaderValue, MediaType};
-use sip_message::sip_str::SipStr;
-use sip_message::{HeaderName, SipMessage};
+use sip_message::SipMessage;
 
 /// The owner of the INVITE offer open on the sender's dialog.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -67,7 +65,7 @@ fn initial(call: &Call, shown: &str, peer: Option<(&Leg, &Dialog)>) -> Option<Op
     }
     let invite = &call.a_leg_invite;
     let cseq = i64::from(invite.cseq);
-    if !snapshot_carries_sdp(invite) {
+    if crate::caller_invite::description(invite).is_none() {
         return shown_unpracked_offer(call, shown, cseq).then_some(OpenOffer::Stack);
     }
     if !shown_answer(call, shown, cseq) {
@@ -124,15 +122,4 @@ fn responder_answered(call: &Call, leg_id: &str, tag: &str, cseq: Option<i64>) -
             && cseq.is_none_or(|want| want == p.id.invite_cseq.as_i64())
             && p.responder_sdp
     })
-}
-
-/// The caller's INVITE carried a session description (RFC 5621 §3.1).
-fn snapshot_carries_sdp(invite: &call::ALegInviteSnapshot) -> bool {
-    let first = |name: HeaderName| {
-        invite.headers.iter().find(|h| name.matches(&h.name)).map(|h| h.value.as_str())
-    };
-    let disposition = first(HeaderName::ContentDisposition);
-    first(HeaderName::ContentType)
-        .and_then(|ct| MediaType::parse(&SipStr::owned(ct)).ok())
-        .is_some_and(|ct| sip_message::sdp_range(&ct, disposition, &invite.body).is_some())
 }

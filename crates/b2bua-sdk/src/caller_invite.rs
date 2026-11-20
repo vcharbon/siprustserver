@@ -2,7 +2,7 @@
 //! that reads it (ADR-0052 §11).
 
 use sip_message::draft::{IncompleteDraft, RequestDraft};
-use sip_message::header::{HeaderName, MaxForwards, Uri};
+use sip_message::header::{HeaderName, HeaderValue, MaxForwards, MediaType, Uri};
 use sip_message::{Method, SipRequest, SipStr};
 
 use crate::model::{RuleContext, RuleHandleResult};
@@ -28,6 +28,19 @@ pub fn rebuild(snap: &call::ALegInviteSnapshot) -> Result<SipRequest, Incomplete
     draft.with_body(snap.body.clone().into()).freeze()
 }
 
+/// The session description the caller's INVITE carries, bare or framed in a
+/// `multipart/…` body (RFC 5621 §3.1), as [`sip_message::sdp_range`] reads it
+/// from her `Content-Type` and `Content-Disposition`. `None` for an INVITE
+/// that makes no offer (RFC 3261 §13.2.1), whatever other body it carries.
+pub fn description(snap: &call::ALegInviteSnapshot) -> Option<&[u8]> {
+    let first = |name: HeaderName| {
+        snap.headers.iter().find(|h| name.matches(&h.name)).map(|h| h.value.as_str())
+    };
+    let disposition = first(HeaderName::ContentDisposition);
+    let content_type = MediaType::parse(&SipStr::owned(first(HeaderName::ContentType)?)).ok()?;
+    snap.body.get(sip_message::sdp_range(&content_type, disposition, &snap.body)?)
+}
+
 impl RuleContext<'_> {
     /// The caller's INVITE, rebuilt from the call's record. `None` is a record
     /// that does not rebuild it, which the rule answers with
@@ -43,5 +56,55 @@ impl RuleHandleResult {
     /// unrecoverable.
     pub fn unrecoverable() -> Self {
         Self { unrecoverable: true, ..Self::default() }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::description;
+
+    const SDP: &str =
+        "v=0\r\no=a 1 1 IN IP4 192.0.2.1\r\ns=-\r\nt=0 0\r\nm=audio 4000 RTP/AVP 0\r\n";
+
+    fn invite(content_type: Option<&str>, body: &str) -> call::ALegInviteSnapshot {
+        let line = |v: &str| call::SipHeader { name: "Content-Type".into(), value: v.into() };
+        call::ALegInviteSnapshot {
+            uri: "sip:bob@example.com".into(),
+            headers: content_type.map(line).into_iter().collect(),
+            body: body.as_bytes().to_vec(),
+            cseq: 1,
+            from_tag: "a".into(),
+        }
+    }
+
+    fn framed(parts: &[(&str, &str)]) -> String {
+        let mut body = String::new();
+        for (content_type, text) in parts {
+            body.push_str(&format!("--B\r\nContent-Type: {content_type}\r\n\r\n{text}\r\n"));
+        }
+        body + "--B--\r\n"
+    }
+
+    #[test]
+    fn a_bare_description_is_the_whole_body() {
+        let snap = invite(Some("application/sdp"), SDP);
+        assert_eq!(description(&snap), Some(SDP.as_bytes()));
+    }
+
+    #[test]
+    fn a_framed_description_is_its_part_alone() {
+        let body = framed(&[("application/sdp", SDP), ("text/plain", "a note")]);
+        let snap = invite(Some("multipart/mixed;boundary=B"), &body);
+        assert_eq!(description(&snap), Some(SDP.as_bytes()));
+    }
+
+    /// A body of other parts only makes no offer (RFC 3261 §13.2.1).
+    #[test]
+    fn parts_without_a_description_make_no_offer() {
+        let body = framed(&[("text/plain", "a note"), ("application/pidf+xml", "<presence/>")]);
+        let snap = invite(Some("multipart/mixed;boundary=B"), &body);
+        assert_eq!(description(&snap), None);
+        assert_eq!(description(&invite(Some("text/plain"), "a note")), None);
+        assert_eq!(description(&invite(None, "")), None);
     }
 }
