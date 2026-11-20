@@ -65,7 +65,8 @@ fn confirmed(leg_id: &str, kind: LegKind, vector: &str) -> Leg {
 }
 
 /// Alice ↔ b-1 bridged, the transfer target b-2 and the media leg m-1
-/// confirmed beside them; alice's INVITE carried `caller` where given.
+/// confirmed beside them; alice's INVITE carried `caller` where given and was
+/// answered 200.
 fn call(caller: Option<&str>, option: bool, uncharged: bool) -> call::Call {
     let mut call = super::fixtures::test_call();
     if let Some(own) = caller {
@@ -74,6 +75,7 @@ fn call(caller: Option<&str>, option: bool, uncharged: bool) -> call::Call {
             .push(call::SipHeader { name: "P-Charging-Vector".into(), value: own.into() });
     }
     confirm_a(&mut call);
+    *call.a_leg.invite_final_sent_mut() = Some(200);
     call.a_leg.dialogs =
         vec![super::fixtures::a_dialog(&call, "a-svc", DialogState::Confirmed)].into();
     call.a_leg.own_tag = Some("a-svc".into());

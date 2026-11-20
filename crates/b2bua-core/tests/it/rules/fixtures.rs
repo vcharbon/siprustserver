@@ -346,20 +346,27 @@ pub(super) fn cancel_sent(leg: &mut Leg) {
     leg.outbound_invite_mut().expect("a dialled leg").cancel_sent = true;
 }
 
-/// A call whose a-leg dialog retains the initial-INVITE 2xx under the key the
-/// caller's ACK carries (To-tag `btag`, CSeq 1), its ladder armed — the state
-/// the engine must discharge.
-pub(super) fn call_with_retained_answered_2xx() -> call::Call {
+/// A call whose caller's INVITE was answered 2xx and ACKed, on the a-leg
+/// dialog under To-tag `btag`, its callee's leg confirmed.
+pub(super) fn call_answered_and_acked() -> call::Call {
     let mut call = test_call();
     let mut b = b_leg_pending();
     call::testkit::stage_leg(&mut b, LegState::Confirmed);
     call::helpers::add_b_leg(&mut call, b);
-    // The confirmed a-leg UAS dialog the answer seam retained the 2xx on.
-    let mut answered = a_dialog(&call, "btag", DialogState::Confirmed);
-    call::helpers::hold_answered_2xx(&mut answered, 1, retained_2xx("btag", 1, 5060));
-    call.a_leg.dialogs.insert(answered);
+    call.a_leg.dialogs.insert(a_dialog(&call, "btag", DialogState::Confirmed));
     call.a_leg.own_tag = Some("btag".into());
     *call.a_leg.invite_final_sent_mut() = Some(200);
+    call
+}
+
+/// A call whose a-leg dialog retains the initial-INVITE 2xx under the key the
+/// caller's ACK carries (To-tag `btag`, CSeq 1), its ladder armed — the state
+/// the engine must discharge.
+pub(super) fn call_with_retained_answered_2xx() -> call::Call {
+    let mut call = call_answered_and_acked();
+    if let Some(answered) = call.a_leg.dialogs.iter_mut().find(|d| d.our_tag == "btag") {
+        call::helpers::hold_answered_2xx(answered, 1, retained_2xx("btag", 1, 5060));
+    }
     let obligation = answered_obligation();
     for (key, fire_at) in [
         (TimerKey::obligation(TimerType::Rung, obligation.clone()), 500),

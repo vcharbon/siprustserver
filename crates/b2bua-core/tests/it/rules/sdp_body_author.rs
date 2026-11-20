@@ -12,7 +12,7 @@ const BOB_V5: &str =
 
 fn reinvite_body(author: BodyAuthor) -> String {
     let config = B2buaConfig::default();
-    let mut call = call_with_retained_answered_2xx();
+    let mut call = call_answered_and_acked();
     call.a_leg.sdp_session = call::LegSdpSession {
         sent_origin: Some("bob 202 1 IN IP4 192.0.2.2".into()),
         sent_media: vec!["audio 20000 RTP/AVP 0".into()],
