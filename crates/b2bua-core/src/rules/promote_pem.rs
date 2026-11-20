@@ -71,16 +71,11 @@ fn a_ack_awaited(ctx: &RuleContext) -> bool {
     call::helpers::carrying_dialog(ctx.call.a_leg()).and_then(call::helpers::answered_2xx).is_some()
 }
 
-/// The lines of B's 200 a resync reads: those describing its body and those
-/// stating his advertisement ([`a_facing_advert`]).
+/// The lines of B's 200 a resync reads, kept in the record: those describing
+/// its body and those stating his advertisement ([`a_facing_advert`]).
 fn resync_lines(headers: &[SipHeader]) -> Vec<call::SipHeader> {
-    let read =
-        [HeaderName::ContentType, HeaderName::Allow, HeaderName::Supported, HeaderName::Accept];
-    let descriptors = sip_message::generators::body_descriptors(headers);
-    headers
-        .iter()
-        .filter(|h| read.iter().any(|name| name.matches(&h.name)))
-        .chain(descriptors.iter())
+    sip_message::generators::body_and_advertisement_lines(headers)
+        .into_iter()
         .map(|h| call::SipHeader { name: h.name.to_string(), value: h.value.to_string() })
         .collect()
 }
@@ -299,7 +294,7 @@ pub fn promote_pem_rules() -> Vec<RuleDefinition> {
                         body: resp.body().to_vec(),
                         lines: resync_lines(resp.headers()),
                     };
-                    let pending_resync = Some(pending);
+                    let pending_resync = Some(Box::new(pending));
                     actions.push(RuleAction::SetPromotePem {
                         state: Some(PromotePemState { pending_resync, ..state }),
                     });

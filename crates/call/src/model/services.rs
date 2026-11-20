@@ -142,8 +142,9 @@ pub struct PromotePemState {
     pub caller_answer: Option<Vec<u8>>,
     /// The resync re-INVITE B's 200 called for while Alice's ACK of the
     /// synthetic 200 was awaited: it leaves on that ACK (RFC 3261 §14.1).
+    /// Boxed: every turn future holding a call carries its size.
     #[serde(default)]
-    pub pending_resync: Option<PendingResync>,
+    pub pending_resync: Option<Box<PendingResync>>,
 }
 
 /// A resync re-INVITE toward Alice waiting for her ACK of the synthetic 200:
