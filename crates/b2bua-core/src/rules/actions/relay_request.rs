@@ -140,6 +140,12 @@ impl ActionExecutor<'_> {
             self.refuse_unrelayed(call, fx, ctx, Unrelayed::NotNow);
             return;
         };
+        if *req.method() == Method::Invite
+            && !self.invite_may_leave(call, target_leg, &target_dialog.id(), "relayed INVITE")
+        {
+            self.refuse_glare(call, fx, ctx, ctx.glare_refusal());
+            return;
+        }
 
         // The target dialog's next number (§12.2.1.1).
         let inbound_cseq = req.cseq().seq() as i64;

@@ -108,7 +108,9 @@ impl ActionExecutor<'_> {
     /// `content_type` (`None`: SDP) and described by `descriptors`, plus
     /// `add_headers` (Allow/Supported), the leg's capability set
     /// ([`capabilities::for_reinvite`]) filling what they leave unstated.
-    /// CSeq = the dialog's `our_cseq` + 1. Used by
+    /// CSeq = the dialog's `our_cseq` + 1. Nothing leaves while an INVITE
+    /// transaction is in progress on the dialog ([`Self::invite_may_leave`]).
+    /// Used by
     /// `promote18xPemTo200` to resync Alice when bob's final SDP differs from the
     /// early-media SDP promoted into the synthetic 200 OK. The response comes back
     /// classified from-a (the B2BUA's stamped Via cr/lg) and is claimed by the
@@ -128,6 +130,9 @@ impl ActionExecutor<'_> {
         let Some(leg) = leg_at(call, leg_id) else { return };
         let Some(dialog) = call::helpers::carrying_dialog(leg).cloned() else { return };
         let t_id = dialog.id();
+        if !self.invite_may_leave(call, leg_id, &t_id, "re-INVITE") {
+            return;
+        }
         // The INVITE that created this leg's dialog: the originator's own on
         // hers, the one the stack sent on a leg it dialled.
         let creating = if leg_id == call.a_leg.leg_id {
@@ -305,6 +310,9 @@ impl ActionExecutor<'_> {
         // keepalive OPTIONS re-derives the same CSeq every cycle and the later
         // relayed BYE collides on it — an RFC 3261 violation a real UAS rejects.
         let t_id = dialog.id();
+        if m == InDialogMethod::Invite && !self.invite_may_leave(call, leg_id, &t_id, "INVITE") {
+            return;
+        }
         // `KeepaliveCseqReuse` (the wire-fault seam) emits the keepalive at the
         // CSeq the dialog already used and leaves the dialog un-advanced: the
         // exact defect `cseq-in-dialog-order` gates on, on purpose.

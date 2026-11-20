@@ -75,8 +75,8 @@ pub use compared::{merge_exempt, same_state, with_own_running};
 pub use decision_log::mark_decision;
 pub use dialog::{
     advance_peer_cseq, bump_our_cseq, cache_sdp_on_leg_dialog, cached_sdp_for_leg_dialog,
-    invite_glare, invite_transaction_open, peer_update_pending, sender_invite_unacknowledged,
-    sender_invite_unanswered,
+    invite_glare, invite_in_progress, invite_transaction_open, peer_update_pending,
+    sender_invite_unacknowledged, sender_invite_unanswered, InviteInProgress,
 };
 pub use instants::shift_instants;
 pub use invite_records::{

@@ -56,8 +56,13 @@ pub const STORED_IMAGE_READS: &str = "stored-image-reads";
 /// `NotifyAnswerCap`, `HeldAnswer`); the arm is dropped (ADR-0057 §1).
 pub const FRAMEWORK_TIMER: &str = "framework-arms-its-own-timers";
 
+/// An INVITE this stack would originate or relay on a dialog while another
+/// INVITE transaction is in progress on it, in either direction (RFC 3261
+/// §14.1); the INVITE is not sent.
+pub const ONE_INVITE_PER_DIALOG: &str = "one-invite-in-progress-per-dialog";
+
 /// Every defect a turn reports, by name.
-pub const DEFECTS: [&str; 12] = [
+pub const DEFECTS: [&str; 13] = [
     PRACK_HAS_A_LEG,
     PRACK_HAS_A_DIALOG,
     UNDECLARED_TRANSITION,
@@ -70,6 +75,7 @@ pub const DEFECTS: [&str; 12] = [
     STATED_TEXT_FITS,
     STORED_IMAGE_READS,
     FRAMEWORK_TIMER,
+    ONE_INVITE_PER_DIALOG,
 ];
 
 /// A defect a turn met mid-way: a step that found the record unable to carry
