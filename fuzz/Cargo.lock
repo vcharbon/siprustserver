@@ -53,6 +53,7 @@ dependencies = [
  "b2bua-sdk",
  "call",
  "call-limiter-wire",
+ "futures-util",
  "http-net",
  "load-shed",
  "lock-poison",
