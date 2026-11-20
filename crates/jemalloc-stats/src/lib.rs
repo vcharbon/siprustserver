@@ -58,6 +58,7 @@
 pub mod catalogue;
 pub mod defaults;
 pub mod footprint;
+mod held;
 
 #[cfg(not(target_env = "msvc"))]
 mod imp {
@@ -401,13 +402,6 @@ mod imp {
         live.or_else(|| raw::<usize>(b"opt.lg_prof_sample\0"))
     }
 
-    /// `(allocated, active)` bytes from a fresh stats epoch; `None` when
-    /// jemalloc is not answering.
-    pub fn footprint_bytes() -> Option<(u64, u64)> {
-        epoch::advance().ok()?;
-        Some((stats::allocated::read().ok()? as u64, stats::active::read().ok()? as u64))
-    }
-
     /// Trigger a jemalloc heap profile dump and return the raw profile bytes
     /// (jeprof/pprof text format). Requires the binary built with the
     /// tikv-jemallocator `profiling` feature AND `_RJEM_MALLOC_CONF=prof:true`
@@ -444,9 +438,6 @@ mod imp {
         String::new()
     }
     pub fn log_config() {}
-    pub fn footprint_bytes() -> Option<(u64, u64)> {
-        None
-    }
     /// No allocator to read: the system allocator's footprint is its own.
     pub fn footprint_report() -> Option<crate::footprint::Report> {
         None
@@ -456,7 +447,8 @@ mod imp {
     }
 }
 
-pub use imp::{dump_profile, footprint_bytes, footprint_report, log_config, prometheus_text};
+pub use held::{footprint_bytes, thread_held_bytes};
+pub use imp::{dump_profile, footprint_report, log_config, prometheus_text};
 
 #[cfg(all(test, not(target_env = "msvc")))]
 mod exposition_tests {
