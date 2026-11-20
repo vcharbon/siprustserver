@@ -10,7 +10,9 @@
 //!   awaits its final;
 //! - a re-INVITE asked between the 2xx to this stack's re-INVITE and its ACK;
 //! - a peer's re-INVITE a rule relays over the glare refusal onto a dialog
-//!   whose re-INVITE awaits its final: the sender gets 491 (§14.2).
+//!   whose re-INVITE awaits its final: the sender gets 491 (§14.2);
+//! - a re-INVITE asked toward a peer whose re-INVITE this stack answered 2xx,
+//!   ahead of the peer's ACK.
 
 use std::time::Duration;
 
@@ -315,12 +317,54 @@ mod over_glare {
     }
 }
 
-/// The run's one defect, naming the rule refused.
-fn the_one_defect(b2bua: &mut B2buaSut, rule: &str) {
+/// Relays the caller's 2xx to a callee's re-INVITE and, in the same turn,
+/// asks for a re-INVITE toward that callee.
+mod after_answer {
+    use b2bua::rules::{
+        Match, MessageTransform, RuleAction, RuleCall, RuleContext, RuleDefinition,
+        RuleHandleResult, ServiceDef, ServiceSeed, SERVICE_LAYER,
+    };
+    use call::Direction;
+
+    fn relay_then_reinvite(ctx: &RuleContext) -> Option<RuleHandleResult> {
+        Some(RuleHandleResult::new(vec![
+            RuleAction::RelayToPeer { transform: MessageTransform::default() },
+            super::shared::reinvite_callee(ctx)?,
+        ]))
+    }
+
+    fn rules() -> Vec<RuleDefinition> {
+        vec![RuleDefinition {
+            id: "after-answer-relay",
+            layer: SERVICE_LAYER,
+            overrides: &["relay-reinvite-response"],
+            matcher: Match::response().method("INVITE").status_class(2).direction(Direction::FromA),
+            handle: relay_then_reinvite,
+            machine: None,
+            active_states: &[],
+            transitions: &[],
+            effects: &[],
+            teardown: false,
+        }]
+    }
+
+    fn init(_call: &RuleCall) -> Option<ServiceSeed> {
+        None
+    }
+
+    pub fn service_def() -> ServiceDef {
+        ServiceDef { id: "after-answer", init, rules }
+    }
+}
+
+/// The run's one defect, naming the rule refused and, in `holder`'s words,
+/// what holds the dialog.
+fn the_one_defect(b2bua: &mut B2buaSut, rule: &str, holder: &str) {
     let violations = b2bua.take_model_violations();
     assert_eq!(violations.len(), 1, "the refusal is reported once: {violations:?}");
-    let first = violations.first().map(String::as_str).unwrap_or_default();
-    assert!(first.starts_with(&format!("model defect {DEFECT}: rule '{rule}'")), "{first}");
+    let head = violations.first().and_then(|v| v.lines().next()).unwrap_or_default();
+    assert!(head.starts_with(&format!("model defect {DEFECT}: rule '{rule}'")), "{head}");
+    assert!(head.ends_with(&format!("not sent: {holder}")), "{head}");
     assert_eq!(b2bua.metrics().model_defects_total(DEFECT), 1, "the refusal is counted");
 }
 
@@ -353,6 +397,7 @@ async fn a_second_reinvite_in_the_same_turn_is_refused() {
 
     h.advance(Duration::from_secs(RENEGOTIATE_SEC)).await;
     let mut reinvite = alice.receive("INVITE").await;
+    let cseq = reinvite.request().cseq().seq();
     settle_until(|| b2bua.metrics().model_defects_total(DEFECT) == 1).await;
     assert!(alice.try_receive_tolerating("INVITE", &[]).await.is_none(), "one INVITE leaves");
     reinvite.respond(200, "OK").with_sdp(ALICE_2).await;
@@ -362,7 +407,8 @@ async fn a_second_reinvite_in_the_same_turn_is_refused() {
     bob.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
     settle_until(|| b2bua.is_reaped()).await;
-    the_one_defect(&mut b2bua, "pair-fire");
+    let holder = format!("INVITE CSeq {cseq} sent by rule 'pair-fire' awaits its final or its ACK");
+    the_one_defect(&mut b2bua, "pair-fire", &holder);
     b2bua.assert_fully_reaped();
     let _report = h.finish().await;
 }
@@ -397,7 +443,7 @@ async fn a_reinvite_toward_a_peer_whose_reinvite_is_unanswered_is_refused() {
     bob.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
     settle_until(|| b2bua.is_reaped()).await;
-    the_one_defect(&mut b2bua, "callee-side-fire");
+    the_one_defect(&mut b2bua, "callee-side-fire", "the peer's INVITE has no final");
     b2bua.assert_fully_reaped();
     let _report = h.finish().await;
 }
@@ -417,6 +463,7 @@ async fn a_reinvite_before_the_ack_of_the_last_2xx_is_refused() {
 
     h.advance(Duration::from_secs(RENEGOTIATE_SEC)).await;
     let mut reinvite = alice.receive("INVITE").await;
+    let cseq = reinvite.request().cseq().seq();
     reinvite.respond(200, "OK").with_sdp(ALICE_2).await;
     alice.receive("ACK").await;
     settle_until(|| b2bua.metrics().model_defects_total(DEFECT) == 1).await;
@@ -426,7 +473,9 @@ async fn a_reinvite_before_the_ack_of_the_last_2xx_is_refused() {
     bob.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
     settle_until(|| b2bua.is_reaped()).await;
-    the_one_defect(&mut b2bua, "before-ack-answered");
+    let holder =
+        format!("INVITE CSeq {cseq} sent by rule 'before-ack-fire' awaits its final or its ACK");
+    the_one_defect(&mut b2bua, "before-ack-answered", &holder);
     b2bua.assert_fully_reaped();
     let _report = h.finish().await;
 }
@@ -447,6 +496,7 @@ async fn a_relay_onto_a_dialog_with_an_invite_in_progress_is_491ed() {
 
     h.advance(Duration::from_secs(RENEGOTIATE_SEC)).await;
     let mut reinvite = alice.receive("INVITE").await;
+    let cseq = reinvite.request().cseq().seq();
     let mut bob_reinvite = bob_dialog.request(InDialogMethod::Invite, Some(BOB_2)).await;
     bob_reinvite.expect(491).await;
     assert!(alice.try_receive_tolerating("INVITE", &[]).await.is_none(), "one INVITE to alice");
@@ -458,7 +508,42 @@ async fn a_relay_onto_a_dialog_with_an_invite_in_progress_is_491ed() {
     bob.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
     settle_until(|| b2bua.is_reaped()).await;
-    the_one_defect(&mut b2bua, "over-glare-relay");
+    let holder =
+        format!("INVITE CSeq {cseq} sent by rule 'over-glare-fire' awaits its final or its ACK");
+    the_one_defect(&mut b2bua, "over-glare-relay", &holder);
+    b2bua.assert_fully_reaped();
+    let _report = h.finish().await;
+}
+
+/// The callee's re-INVITE is answered by the caller and her 2xx relayed to
+/// him; a re-INVITE asked toward the callee in that turn, ahead of his ACK, is
+/// refused: the 2xx this stack sent him awaits that ACK.
+#[tokio::test(start_paused = true)]
+async fn a_reinvite_toward_a_peer_owing_the_ack_of_its_2xx_is_refused() {
+    let h = Harness::with_transit_delay("reinvite-in-progress-unacked", 0);
+    let alice = h.agent("alice", "127.0.0.1:5164").await;
+    let bob = h.agent("bob", "127.0.0.1:5174").await;
+    let mut b2bua = B2buaSut::route_all_to("127.0.0.1", 5174)
+        .services(vec![after_answer::service_def()])
+        .start(&h, "b2bua", "127.0.0.1:5184")
+        .await;
+    let (mut alice_dialog, mut bob_dialog) = answered_call!(alice, bob, b2bua);
+
+    let mut bob_reinvite = bob_dialog.request(InDialogMethod::Invite, Some(BOB_2)).await;
+    let cseq = bob_reinvite.sent_invite().expect("bob's re-INVITE").cseq().seq();
+    alice.receive("INVITE").await.respond(200, "OK").with_sdp(ALICE_2).await;
+    bob_reinvite.expect(200).await;
+    settle_until(|| b2bua.metrics().model_defects_total(DEFECT) == 1).await;
+    assert!(bob.try_receive_tolerating("INVITE", &[]).await.is_none(), "no INVITE toward bob");
+    bob_dialog.ack(None).await;
+    alice.receive("ACK").await;
+
+    let mut bye = alice_dialog.bye().await;
+    bob.receive("BYE").await.respond(200, "OK").await;
+    bye.expect(200).await;
+    settle_until(|| b2bua.is_reaped()).await;
+    let holder = format!("2xx to the peer's INVITE CSeq {cseq} sent, its ACK not received");
+    the_one_defect(&mut b2bua, "after-answer-relay", &holder);
     b2bua.assert_fully_reaped();
     let _report = h.finish().await;
 }
