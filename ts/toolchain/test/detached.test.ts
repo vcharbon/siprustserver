@@ -40,7 +40,7 @@ const exited = async (dir: string): Promise<number> => {
 
 /**
  * Polls until the supervisor recorded under `dir` no longer runs: it outlives
- * the exit record it writes by its own last steps and its reaping.
+ * the exit record it writes by its own last steps.
  */
 const stopped = async (dir: string): Promise<void> => {
   for (let at = 0; at < 200; at++) {

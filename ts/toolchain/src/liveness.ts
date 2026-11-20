@@ -21,14 +21,18 @@ export const alive = (pid: number): Effect.Effect<boolean> =>
     }
   })
 
-/** Field 22 of `/proc/<pid>/stat`: the process's start ticks; undefined when gone. */
+/**
+ * Field 22 of `/proc/<pid>/stat`: the process's start ticks; undefined when
+ * gone, or ended and not yet reaped (state `Z` or `X`, field 3).
+ */
 export const ticksOf = Effect.fn("Liveness.ticksOf")(function*(pid: number) {
   const fs = yield* FileSystem.FileSystem
   const stat = yield* fs.readFileString(`/proc/${pid}/stat`).pipe(Effect.orElseSucceed(() => undefined))
   if (stat === undefined) return undefined
   // The command name sits in parentheses and may hold spaces; the fields are
   // counted from after its closing one.
-  return stat.slice(stat.lastIndexOf(")") + 2).split(" ")[22 - 3]
+  const fields = stat.slice(stat.lastIndexOf(")") + 2).split(" ")
+  return fields[3 - 3] === "Z" || fields[3 - 3] === "X" ? undefined : fields[22 - 3]
 })
 
 /** What a pid file records: the pid, and the start ticks where the writer knew them. */
