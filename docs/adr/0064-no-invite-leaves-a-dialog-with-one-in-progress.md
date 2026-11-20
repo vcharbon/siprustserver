@@ -57,8 +57,12 @@ callee's 200, which may overtake the caller's ACK of the promoted 200: the resyn
 in the promotion's state (`PendingResync`) and leaves on that ACK (`promote-resync-on-a-ack`).
 A refusal met later is a rule defect, ticketed on its own.
 
+The transfer realign does not wait for a re-INVITE of the originator's own that is still
+relayed and unanswered when its realign is due: that realign is refused, and the transfer
+rolls back when its re-INVITE watchdog fires.
+
 ## Consequences
 
-- No call is left with two INVITEs crossing on one dialog; a treatment whose re-INVITE is
-  refused ends by its own watchdog.
+- No call is left with two INVITEs crossing on one dialog. A refused re-INVITE leaves its
+  treatment where it stood: the transfer and the release reroute end by their watchdogs.
 - `send_request_to_leg` with `INVITE` takes the same refusal.
