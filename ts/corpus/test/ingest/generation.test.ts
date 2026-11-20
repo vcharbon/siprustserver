@@ -68,6 +68,7 @@ const anonymiser = (broken = false) =>
         return fs.existsSync(file) ? fs.readFileSync(file, "utf8") : undefined
       }),
     recordFailure: (dir, _capture, error) => Effect.sync(() => fs.writeFileSync(path.join(dir, "failed.txt"), error)),
+    clearFailure: (dir) => Effect.sync(() => fs.rmSync(path.join(dir, "failed.txt"), { force: true })),
     sourceRefusal: () => Effect.die("unused")
   })
 
@@ -274,12 +275,14 @@ describe("Extract.extract of a capture whose extractor dies", () => {
     expect((await failure("killed"))?.error).toBe(done.broke)
   })
 
-  it("says the extractor could not start, and why", async () => {
+  it("says the extractor could not be started, and why, in the platform's words", async () => {
     const missing = path.join(scratch, "no-such-extractor")
     const done = await extract({ capture: "unstarted", pcaps: [rw("unstarted.pcap", "unstarted-bytes")] }, "x1", {
       tool: missing
     })
-    expect(done.broke).toMatch(/^read: no-such-extractor could not start: .+; stderr: \(no stderr\)$/)
+    expect(done.broke).toMatch(/^read: no-such-extractor could not be started: NotFound: ChildProcess\.spawn \(.+\); stderr: \(no stderr\)$/)
+    expect(done.broke).not.toContain("Cause(")
+    expect(done.kind).toBe("run")
   })
 })
 
@@ -316,6 +319,18 @@ describe("Extract.extract of a name no citation or real-clock run pins", () => {
 })
 
 describe("Extract.extract of a name whose failure was recorded over anonymised bytes", () => {
+  it("clears the failure once an extraction lands over the same bytes again", async () => {
+    const retried: Source = { capture: "retried", pcaps: [rw("retried.pcap", "retried-bytes")] }
+    mode = "m1"
+    await extract(retried, "x1")
+    const noIndex = tool("noindex-once", "#!/bin/sh\nif [ \"$1\" = index ]; then echo no index >&2; exit 1; fi\ncat \"$1\"\n")
+    const failed = await extract(retried, "x1", { tool: noIndex })
+    expect(failed).toMatchObject({ broke: "index: noindex-once exited 1; stderr: no index", kind: "run" })
+    const done = await extract(retried, "x1")
+    expect(done).toMatchObject({ capture: "retried", broke: undefined, kind: undefined })
+    expect(await failure("retried")).toBeUndefined()
+  })
+
   it("never extracts it again in place: a byte change under its kept seed is the next generation", async () => {
     // The sequence that leaves both: the staged files moved in, then the index failed.
     const indexed: Source = { capture: "indexed", pcaps: [rw("indexed.pcap", "indexed-bytes")] }

@@ -17,6 +17,19 @@ describe("Oom", () => {
     expect(Oom.oomKillsOf("low 0\noom 2\n")).toBeUndefined()
   })
 
+  it("counts the kills between the two reads, none where the count did not grow, and refuses to guess", () => {
+    const at = (kills: number, cgroup = "/run.scope"): Oom.Count => ({ _tag: "Read", cgroup, kills })
+    expect(Oom.evidenceOf(at(2), at(3), "1G")).toEqual({ _tag: "Recorded", cgroup: "/run.scope", kills: 1, memoryMax: "1G" })
+    expect(Oom.evidenceOf(at(2), at(2), "1G")).toEqual({ _tag: "None", cgroup: "/run.scope" })
+    const unreadable: Oom.Count = { _tag: "Unknown", why: "/proc/self/cgroup does not read" }
+    expect(Oom.evidenceOf(unreadable, at(3), "1G")).toEqual(unreadable)
+    expect(Oom.evidenceOf(at(2), unreadable, "1G")).toEqual(unreadable)
+    expect(Oom.evidenceOf(at(2), at(9, "/other.scope"), "1G")).toEqual({
+      _tag: "Unknown",
+      why: "the process moved from cgroup /run.scope to /other.scope"
+    })
+  })
+
   it("words a recorded kill, an absent one and an unreadable cgroup apart", () => {
     expect(Oom.words({ _tag: "Recorded", cgroup: "/run.scope", kills: 1, memoryMax: "1073741824" }))
       .toBe("cgroup /run.scope recorded 1 OOM kill(s) while it ran (memory.max 1073741824)")

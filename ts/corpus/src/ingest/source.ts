@@ -20,6 +20,7 @@ import * as Fingerprint from "../fingerprint.js"
 import type { Paths } from "../paths.js"
 import type { Source } from "./discover.js"
 import * as Extract from "./extract.js"
+import type * as ExtractFailure from "./extract-failure.js"
 import * as Record from "./record.js"
 import * as Settled from "./settled.js"
 
@@ -122,7 +123,7 @@ export const refusal = Effect.fn("Source.refusal")(function*(
 export type Outcome =
   | { readonly _tag: "current"; readonly failed?: string }
   | { readonly _tag: "ingested"; readonly landed: string }
-  | { readonly _tag: "failed"; readonly why: string; readonly landed: string }
+  | { readonly _tag: "failed"; readonly why: string; readonly kind: ExtractFailure.Kind; readonly landed: string }
 
 export interface Ingested {
   /** The sources under the capture names they stand at, a new generation's where one landed. */
@@ -230,7 +231,7 @@ export const ingest = Effect.fn("Source.ingest")(function*(
       one.capture,
       one.broke === undefined
         ? { _tag: "ingested", landed: one.landed }
-        : { _tag: "failed", why: one.broke, landed: one.landed }
+        : { _tag: "failed", why: one.broke, kind: one.kind ?? "run", landed: one.landed }
     )
   })
   const landed = standing.map((source) => landedBy.get(source.capture) ?? source)
@@ -259,7 +260,8 @@ export const ingest = Effect.fn("Source.ingest")(function*(
         sourcePath: source.pcaps.join("\n"),
         ingested: true,
         extractorHash: extractor,
-        ingestFailed: outcome._tag === "failed" ? outcome.why : null
+        ingestFailed: outcome._tag === "failed" ? outcome.why : null,
+        ingestFailureKind: outcome._tag === "failed" ? outcome.kind : null
       }
     }))
   const added = yield* population.add(rows)

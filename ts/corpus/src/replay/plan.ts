@@ -21,7 +21,8 @@
  * Nothing here runs anything. A capture with no standing cut, a cut that
  * broke and a cut that refused every case are three different answers, and
  * all three come back as plans rather than as silence; a capture whose ingest
- * failed is the last, its detail the ingest's failure.
+ * failed is the first where the run broke and the last where the capture
+ * refused, named for the ingest's failure either way (`emptyPlan`).
  */
 import type { Campaign } from "@sip/contracts"
 import { Cuts, type Model, Refusals, type Requests } from "@sip/store"
@@ -95,22 +96,26 @@ export class UnknownCases extends Data.TaggedError("ReplayDb.UnknownCases")<{
 const NO_CASES = "the cut refused every case"
 
 /**
- * The `no-cases` plan of a capture with no cell to run. Where its ingest
- * failed, the detail is that failure, `ingest failed: <line>`, never `detail`:
- * the run then never reads as a cut that found no call. The status stays
- * `no-cases`, as the deployment's source tier files a capture it cannot read.
+ * The plan of a capture with no cell to run, by whose its failed ingest is.
+ * The run's own (`run`: a child killed or never started, an index or internal
+ * failure) is `broke`, an `error` run saying `ingest broke: <line>`: the
+ * capture was never read, and a retry may read it. The capture's own
+ * (`capture`, or a failure older than the kind) is `no-cases` saying
+ * `ingest failed: <line>`, as the deployment's source tier files a capture it
+ * cannot read. With no failed ingest, `no-cases` with `detail`. Either way
+ * the run never reads as a cut that found no call.
  */
 const emptyPlan = (
   capture: string,
   kind: Model.SetKind,
   standing: Model.CaptureCut | null,
   detail: string
-): CapturePlan => ({
-  _tag: "no-cases",
-  capture,
-  kind,
-  detail: standing === null || standing.ingestFailed === null ? detail : `ingest failed: ${standing.ingestFailed}`
-})
+): CapturePlan => {
+  const failure = standing?.ingestFailure ?? null
+  if (failure === null) return { _tag: "no-cases", capture, kind, detail }
+  if (failure.kind === "run") return { _tag: "broke", capture, kind, broke: `ingest broke: ${failure.line}` }
+  return { _tag: "no-cases", capture, kind, detail: `ingest failed: ${failure.line}` }
+}
 
 const refOf = (capture: string, entry: Model.CutCase): CellRef => ({
   capture,

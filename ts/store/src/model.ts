@@ -403,9 +403,9 @@ export const isGone = (resolved: Resolved): resolved is Gone => "gone" in resolv
  * What one prep made of one capture. `broke` non-null is a cut that FAILED.
  * `broke` null with an empty `cases` is the `no-cases` reading — the cut
  * refused every case, which is an answer rather than a failure, and the queue
- * rules on that difference. `ingestFailed` non-null is the capture's standing
- * ingest refused (the population's line, read with the cut): the cut of it
- * holds no case because there was nothing to cut.
+ * rules on that difference. `ingestFailure` non-null is the capture's standing
+ * ingest failed (the population's line and whose it is, read with the cut):
+ * the cut of it holds no case because there was nothing to cut.
  */
 export const CaptureCut = Schema.Struct({
   prepId: Schema.Number,
@@ -413,7 +413,11 @@ export const CaptureCut = Schema.Struct({
   /** The flows document the cases confront; null where the cut never got one. */
   flowsHash: Schema.NullOr(Schema.String),
   broke: Schema.NullOr(Schema.String),
-  ingestFailed: Schema.NullOr(Schema.String),
+  ingestFailure: Schema.NullOr(Schema.Struct({
+    line: Schema.String,
+    /** `capture` or `run`; null where the failure predates the kind. */
+    kind: Schema.NullOr(Schema.Literals(["capture", "run"]))
+  })),
   cutAt: Schema.String,
   cases: Schema.Array(CutCase)
 })

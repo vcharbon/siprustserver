@@ -272,21 +272,30 @@ describe.skipIf(!served)("the replay plan", () => {
     expect(plans[2]).toMatchObject({ broke: expect.stringContaining("no cut of this capture") })
   })
 
-  it("says a capture whose ingest failed holds no case because of that failure, not because the cut refused", async () => {
-    const UNREAD = "capture_unread.pcap.gz"
-    const why = "read: sipflow was killed by SIGKILL (cgroup /x recorded 1 OOM kill(s) while it ran (memory.max 1G)); stderr: (no stderr)"
+  it("plans a capture whose ingest broke as an error, one whose capture refused as no-cases, each naming the failure", async () => {
+    const BROKE_INGEST = "capture_killed.pcap.gz"
+    const REFUSED_INGEST = "capture_not_pcap.pcap.gz"
+    const OLDER_INGEST = "capture_unkinded.pcap.gz"
+    const killed = "read: sipflow was killed by SIGKILL (cgroup /x recorded 1 OOM kill(s) while it ran (memory.max 1G)); stderr: (no stderr)"
+    const exited = "read: sipflow exited 1; stderr: not a pcap or pcapng capture (magic 0x46464952)"
     await withCuts(
       Effect.gen(function*() {
         const sql = yield* SqlClient
-        yield* sql`INSERT INTO population (capture, ingested_at, extractor_hash, ingest_failed)
-                   VALUES (${UNREAD}, now(), 'x', ${why})`
+        yield* sql`INSERT INTO population (capture, ingested_at, extractor_hash, ingest_failed, ingest_failure_kind)
+                   VALUES (${BROKE_INGEST}, now(), 'x', ${killed}, 'run'),
+                          (${REFUSED_INGEST}, now(), 'x', ${exited}, 'capture'),
+                          (${OLDER_INGEST}, now(), 'x', ${exited}, NULL)`
         const cuts = yield* Cuts.Service
-        yield* cuts.record({ prepId: older, capture: UNREAD, flows: null, cases: [], refusals: [] })
+        for (const capture of [BROKE_INGEST, REFUSED_INGEST, OLDER_INGEST]) {
+          yield* cuts.record({ prepId: older, capture, flows: null, cases: [], refusals: [] })
+        }
       })
     )
-    const plans = await planned(older, [UNREAD, REFUSED])
+    const plans = await planned(older, [BROKE_INGEST, REFUSED_INGEST, OLDER_INGEST, REFUSED])
     expect(plans).toMatchObject([
-      { _tag: "no-cases", detail: `ingest failed: ${why}` },
+      { _tag: "broke", broke: `ingest broke: ${killed}` },
+      { _tag: "no-cases", detail: `ingest failed: ${exited}` },
+      { _tag: "no-cases", detail: `ingest failed: ${exited}` },
       { _tag: "no-cases", detail: "the cut refused every case" }
     ])
   })

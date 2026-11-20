@@ -1070,6 +1070,23 @@ const foreignKeyIndexes = Effect.gen(function*() {
 export const FOREIGN_KEY_INDEXES = "22_foreign_key_indexes"
 
 /**
+ * Whose a failed ingest is, beside its line: `capture` (the read exited on
+ * the capture, or the anonymiser refused it) or `run` (the run broke: a child
+ * killed or never started, an index or internal failure). Null where the
+ * ingest succeeded, or where the failure predates the kind.
+ */
+const ingestFailureKind = Effect.gen(function*() {
+  const sql = yield* SqlClient
+  yield* sql`
+    ALTER TABLE population ADD COLUMN ingest_failure_kind text
+      CHECK (ingest_failure_kind IN ('capture', 'run'))
+  `
+})
+
+/** The key of the migration that keeps whose a failed ingest is. */
+export const INGEST_FAILURE_KIND = "23_ingest_failure_kind"
+
+/**
  * The migration record, static so `tsx` and a bundler both resolve it: the
  * filesystem loader would make the package's own layout a runtime dependency.
  */
@@ -1095,7 +1112,8 @@ export const record: Record<string, Effect.Effect<void, unknown, SqlClient>> = {
   [CAMPAIGN_RUNS]: campaignRuns,
   [EVERY_BRANCH]: everyBranch,
   [DIRTY_RUNS_CURRENT]: dirtyRunsCurrent,
-  [FOREIGN_KEY_INDEXES]: foreignKeyIndexes
+  [FOREIGN_KEY_INDEXES]: foreignKeyIndexes,
+  [INGEST_FAILURE_KIND]: ingestFailureKind
 }
 
 export const loader: Migrator.Loader = Migrator.fromRecord(record)

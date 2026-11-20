@@ -54,24 +54,26 @@ export const count: Effect.Effect<Count, never, FileSystem.FileSystem> = Effect.
   return { _tag: "Read", cgroup, kills } satisfies Count
 })
 
+/** What the cgroup recorded between two counts of it; `memoryMax` is its `memory.max` as read after. */
+export const evidenceOf = (before: Count, after: Count, memoryMax: string): Evidence => {
+  if (before._tag === "Unknown") return before
+  if (after._tag === "Unknown") return after
+  if (after.cgroup !== before.cgroup) {
+    return { _tag: "Unknown", why: `the process moved from cgroup ${before.cgroup} to ${after.cgroup}` }
+  }
+  if (after.kills <= before.kills) return { _tag: "None", cgroup: after.cgroup }
+  return { _tag: "Recorded", cgroup: after.cgroup, kills: after.kills - before.kills, memoryMax }
+}
+
 /** What the cgroup recorded between `before` and now. */
 export const since = (before: Count): Effect.Effect<Evidence, never, FileSystem.FileSystem> =>
   Effect.gen(function*() {
-    if (before._tag === "Unknown") return before
     const after = yield* count
-    if (after._tag === "Unknown") return after
-    if (after.cgroup !== before.cgroup) {
-      return { _tag: "Unknown", why: `the process moved from cgroup ${before.cgroup} to ${after.cgroup}` } satisfies Evidence
-    }
-    if (after.kills <= before.kills) return { _tag: "None", cgroup: after.cgroup } satisfies Evidence
     const fs = yield* FileSystem.FileSystem
-    const max = yield* readText(fs, path.join(CGROUP_ROOT, after.cgroup, "memory.max"))
-    return {
-      _tag: "Recorded",
-      cgroup: after.cgroup,
-      kills: after.kills - before.kills,
-      memoryMax: max?.trim() ?? "unreadable"
-    } satisfies Evidence
+    const max = after._tag === "Read"
+      ? yield* readText(fs, path.join(CGROUP_ROOT, after.cgroup, "memory.max"))
+      : undefined
+    return evidenceOf(before, after, max?.trim() ?? "unreadable")
   })
 
 /** The evidence in words, for a failure line. */

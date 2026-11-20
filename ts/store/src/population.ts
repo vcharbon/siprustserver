@@ -38,7 +38,16 @@ export interface Entry {
   readonly extractorHash?: string
   /** Why its standing extraction refused it; null is an extraction that succeeded. Read with `extractorHash`. */
   readonly ingestFailed?: string | null
+  /**
+   * Whose that failure is (`capture` or `run`), stated by an extraction
+   * taken now. Unstated, a row whose failure stands keeps the kind it has;
+   * a row whose failure cleared loses it.
+   */
+  readonly ingestFailureKind?: IngestFailureKind | null
 }
+
+/** Whose a failed ingest is: the capture's own, or the run's. */
+export type IngestFailureKind = "capture" | "run"
 
 export interface Interface {
   /**
@@ -82,18 +91,25 @@ export const layer = Layer.effect(
         // back. A row merely re-pointed at its pcap keeps what it had; the
         // instant moves on an extraction and is otherwise only filled in.
         const stated = entry.extractorHash !== undefined
+        const kindStated = entry.ingestFailureKind !== undefined
         const rows = yield* sql<{ inserted: boolean }>`
-          INSERT INTO population (capture, source_path, ingested_at, extractor_hash, ingest_failed)
+          INSERT INTO population (capture, source_path, ingested_at, extractor_hash, ingest_failed, ingest_failure_kind)
           VALUES (${entry.capture}, ${entry.sourcePath},
                   ${entry.ingested === true ? sql`now()` : entry.ingestedAt ?? null},
                   ${entry.extractorHash ?? null},
-                  ${stated ? entry.ingestFailed ?? null : null})
+                  ${stated ? entry.ingestFailed ?? null : null},
+                  ${stated && typeof entry.ingestFailed === "string" ? entry.ingestFailureKind ?? null : null})
           ON CONFLICT (capture) DO UPDATE SET
             source_path = coalesce(EXCLUDED.source_path, population.source_path),
             ingested_at = CASE WHEN ${entry.ingested === true} THEN EXCLUDED.ingested_at
                                ELSE coalesce(population.ingested_at, EXCLUDED.ingested_at) END,
             extractor_hash = CASE WHEN ${stated} THEN EXCLUDED.extractor_hash ELSE population.extractor_hash END,
-            ingest_failed = CASE WHEN ${stated} THEN EXCLUDED.ingest_failed ELSE population.ingest_failed END
+            ingest_failed = CASE WHEN ${stated} THEN EXCLUDED.ingest_failed ELSE population.ingest_failed END,
+            ingest_failure_kind = CASE
+              WHEN NOT ${stated} THEN population.ingest_failure_kind
+              WHEN EXCLUDED.ingest_failed IS NULL THEN NULL
+              WHEN ${kindStated} THEN EXCLUDED.ingest_failure_kind
+              ELSE population.ingest_failure_kind END
           RETURNING (xmax = 0) AS inserted
         `
         if (rows[0]?.inserted === true) added += 1

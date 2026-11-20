@@ -26,7 +26,7 @@
  * pcap or the extractor changes, or an ingest asked to retry failures does,
  * rather than being re-attempted blind on every run.
  */
-import { IntoFile, Oom, runner, Said } from "@sip/toolchain"
+import { IntoFile, Said } from "@sip/toolchain"
 import * as Cause from "effect/Cause"
 import * as Effect from "effect/Effect"
 import * as FileSystem from "effect/FileSystem"
@@ -68,14 +68,26 @@ export const standing = Effect.fn("Extract.standing")(function*(artifacts: strin
 
 /**
  * What one extraction came to: the capture name it landed under, the source
- * under that name, why it landed there, and why it failed where it did.
+ * under that name, why it landed there, and why it failed where it did, with
+ * whose the failure is (`extract-failure.ts`); both `undefined` where it
+ * landed.
  */
 export interface Extracted {
   readonly capture: string
   readonly source: Source
   readonly landed: string
   readonly broke: string | undefined
+  readonly kind: ExtractFailure.Kind | undefined
 }
+
+/** An extraction of `source` under `capture` that failed. */
+const failedAs = (capture: string, source: Source, landed: string, failure: ExtractFailure.Failure): Extracted => ({
+  capture,
+  source,
+  landed,
+  broke: ExtractFailure.lineOf(failure),
+  kind: ExtractFailure.kindOf(failure)
+})
 
 /** One extraction's clock: the whole of it, split between the read, the anonymisation and the index. */
 export interface ExtractTiming {
@@ -209,12 +221,8 @@ const extractTimed = (
       yield* fs.makeDirectory(staged)
       // A failed re-extraction leaves the artifacts it would have replaced as they were.
       const keptLine = `${source.capture}: kept seed, its artifacts left as they were`
-      const keptFailed = (failure: ExtractFailure.Failure): Extracted => ({
-        capture: source.capture,
-        source,
-        landed: keptLine,
-        broke: ExtractFailure.lineOf(failure)
-      })
+      const keptFailed = (failure: ExtractFailure.Failure): Extracted =>
+        failedAs(source.capture, source, keptLine, failure)
       const read = yield* readRaw(tool, source, raw)
       if (read !== undefined) return keptFailed(read)
       watch.lap("sipflow")
@@ -237,19 +245,21 @@ const extractTimed = (
     })
     return yield* run.pipe(
       Effect.catchCause((cause) =>
-        Effect.succeed({ capture: source.capture, source, landed: "", broke: diedOf(cause) } satisfies Extracted)
+        Effect.succeed(failedAs(source.capture, source, "", diedOf(cause)))
       ),
       Effect.ensuring(fs.remove(scratch, { recursive: true, force: true }).pipe(Effect.ignore))
     )
   }).pipe(
     Effect.catchCause((cause) =>
-      Effect.succeed({ capture: given.capture, source: given, landed: "", broke: diedOf(cause) } satisfies Extracted)
+      Effect.succeed(failedAs(given.capture, given, "", diedOf(cause)))
     )
   )
 
-/** The line of an extraction that died outside any child: a defect or a store write. */
-const diedOf = (cause: Cause.Cause<unknown>): string =>
-  ExtractFailure.lineOf({ _tag: "Internal", message: Said.messageOf(Cause.squash(cause)) })
+/** An extraction that died outside any child: a defect or a store write. */
+const diedOf = (cause: Cause.Cause<unknown>): ExtractFailure.Failure => ({
+  _tag: "Internal",
+  message: Said.messageOf(Cause.squash(cause))
+})
 
 /** How much stderr a read keeps: room for a set refusal naming two paths. */
 const READ_STDERR_HEAD = 600
@@ -268,25 +278,22 @@ const readRaw = (tool: string, source: Source, raw: string) =>
       raw,
       { stderrHead: READ_STDERR_HEAD }
     )
-    const ending = ExtractFailure.endingOfFile(ended)
+    const ending = ExtractFailure.endingOf(ended)
     if (ending === undefined) return undefined
     return { _tag: "Child", step: "read", binary: tool, ending, stderr: ended.stderr } satisfies ExtractFailure.Failure
   })
 
-/** The kept flows document `document` indexed by the extractor; why not, where it was not. */
-const indexDocument = (tool: string, document: string) =>
+/**
+ * The kept flows document `document` indexed by the extractor, which writes
+ * the index beside it; why not, where it was not. Its stdout, which nothing
+ * reads, goes to `out` in the extraction's scratch.
+ */
+const indexDocument = (tool: string, document: string, out: string) =>
   Effect.gen(function*() {
-    const run = yield* runner
-    const before = yield* Oom.count
-    const ran = yield* run.all(tool, ["index", document]).pipe(
-      Effect.map((output) => ({ _tag: "Output" as const, output })),
-      Effect.catchTag("Toolchain.CliUnavailable", (error) =>
-        Effect.map(Oom.since(before), (oom) => ({ _tag: "Unavailable" as const, error, oom })))
-    )
-    const ending = ExtractFailure.endingOfRun(ran)
+    const ended = yield* IntoFile.exec(tool, ["index", document], out, { stderrHead: READ_STDERR_HEAD })
+    const ending = ExtractFailure.endingOf(ended)
     if (ending === undefined) return undefined
-    const stderr = ran._tag === "Output" ? ran.output.stderr : ""
-    return { _tag: "Child", step: "index", binary: tool, ending, stderr } satisfies ExtractFailure.Failure
+    return { _tag: "Child", step: "index", binary: tool, ending, stderr: ended.stderr } satisfies ExtractFailure.Failure
   })
 
 /** The deployment's anonymisation of `request`; its refusal as a failure, where it refused. */
@@ -338,10 +345,9 @@ const landInto = (
     })
     const fail = (failure: ExtractFailure.Failure) =>
       Effect.gen(function*() {
-        const broke = ExtractFailure.lineOf(failure)
-        yield* extraction.recordFailure(dir, source.capture, broke)
+        yield* extraction.recordFailure(dir, source.capture, ExtractFailure.lineOf(failure))
         yield* record
-        return { capture: source.capture, source, landed, broke } satisfies Extracted
+        return failedAs(source.capture, source, landed, failure)
       })
     if (done._tag === "none") {
       const read = yield* readRaw(tool, source, raw)
@@ -358,12 +364,13 @@ const landInto = (
       watch.lap("auto")
     }
     const document = yield* extraction.documentName(source.capture)
-    const indexed = yield* indexDocument(tool, path.join(dir, document))
+    const indexed = yield* indexDocument(tool, path.join(dir, document), `${raw}.index-out`)
     if (indexed !== undefined) return yield* fail(indexed)
     watch.lap("index")
+    if (extraction.clearFailure !== undefined) yield* extraction.clearFailure(dir, source.capture)
     yield* record
     watch.lap("record")
-    return { capture: source.capture, source, landed, broke: undefined } satisfies Extracted
+    return { capture: source.capture, source, landed, broke: undefined, kind: undefined } satisfies Extracted
   })
 
 /**

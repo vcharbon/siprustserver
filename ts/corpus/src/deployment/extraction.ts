@@ -95,6 +95,13 @@ export interface Interface {
   readonly failureOf: (dir: string, capture: string) => Effect.Effect<string | undefined, ExtractionUnstated>
   /** A failed extraction of `capture`, recorded in `dir` as the anonymiser records its own refusals. */
   readonly recordFailure: (dir: string, capture: string, error: string) => Effect.Effect<void, ExtractionUnstated>
+  /**
+   * The failure recorded in `dir` removed, once an extraction of `capture`
+   * has landed there: a landing that moves a staged anonymisation in writes
+   * only what the staging wrote, so a failure record beside it would stand.
+   * Absent where whatever a landing writes replaces the record.
+   */
+  readonly clearFailure?: (dir: string, capture: string) => Effect.Effect<void, ExtractionUnstated>
   /** The refusal a capture whose extraction failed is recorded under at the cut. */
   readonly sourceRefusal: (failure: Failure) => Effect.Effect<ExclusionRecord, ExtractionUnstated>
 }

@@ -54,6 +54,7 @@ export const layer = Layer.effect(
       failureOf: (dir) =>
         fs.readFileString(path.join(dir, FAILURE)).pipe(Effect.orElseSucceed(() => undefined)),
       recordFailure: (dir, _capture, error) => fs.writeFileString(path.join(dir, FAILURE), error).pipe(Effect.orDie),
+      clearFailure: (dir) => fs.remove(path.join(dir, FAILURE), { force: true }).pipe(Effect.orDie),
       sourceRefusal: (failure) => Effect.succeed(sourceRefusalOf(failure))
     })
   })
