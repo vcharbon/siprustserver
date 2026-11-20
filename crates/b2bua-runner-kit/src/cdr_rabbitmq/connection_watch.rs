@@ -1,8 +1,9 @@
 //! The connection watch of one session: it ends the session as soon as the
-//! client reports a connection error (a socket that ended or failed, a missed
-//! heartbeat, a broker's `connection.close` with an error code), so a
-//! connection that dies while no record is publishing is retired then, its
-//! socket shut down and its end logged, rather than at the next record.
+//! client reports an error on its connection or channel (a socket that ended
+//! or failed, a missed heartbeat, a broker's `connection.close` or
+//! `channel.close` with an error code), so a connection that dies while no
+//! record is publishing is retired then, its socket shut down and its end
+//! logged, rather than at the next record.
 
 use std::sync::Arc;
 

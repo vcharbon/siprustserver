@@ -60,6 +60,9 @@ enum IdleEnd {
     /// `connection.close` with this reply code, the socket closed on the
     /// client's `close-ok` or at the [`CLOSE_TIMEOUT`].
     Close(u16),
+    /// `channel.close` with this reply code on the channel the client opened,
+    /// the connection kept.
+    CloseChannel(u16),
 }
 
 /// How long the broker waits for the client's `close-ok` before it closes
@@ -69,7 +72,7 @@ const CLOSE_TIMEOUT: Duration = Duration::from_millis(100);
 
 /// `connection.close`'s reply code for a broker shutting down.
 pub const CONNECTION_FORCED: u16 = 320;
-/// `connection.close`'s reply code for a clean close, which is no error.
+/// The reply code of a clean close, which is no error.
 pub const REPLY_SUCCESS: u16 = 200;
 
 #[derive(Default)]
@@ -82,6 +85,9 @@ pub struct Counters {
     /// Connections the broker sent `connection.close` on, counted when they
     /// end: at the client's `close-ok`, EOF or reset, or at the close timeout.
     pub closed_by_broker: AtomicUsize,
+    /// Channels the broker sent `channel.close` on, counted at the client's
+    /// `close-ok`.
+    pub channels_closed_by_broker: AtomicUsize,
     /// Queue declares answered.
     pub declared: AtomicUsize,
     /// Publishes received whole (method, header, body).
@@ -140,6 +146,12 @@ impl FakeBroker {
     /// client's `close-ok` or at the close timeout.
     pub fn close_idle(&self, reply_code: u16) {
         let _ = self.idle_ends.send(IdleEnd::Close(reply_code));
+    }
+
+    /// Sends `channel.close` with `reply_code` on the open channel of every
+    /// connection accepted so far, each connection kept open.
+    pub fn close_idle_channel(&self, reply_code: u16) {
+        let _ = self.idle_ends.send(IdleEnd::CloseChannel(reply_code));
     }
 
     pub fn url(&self) -> String {
@@ -247,6 +259,8 @@ async fn serve(
     let mut publishing: Option<(u16, String, Option<u64>)> = None;
     // Set once the broker sent `connection.close`: when it closes the socket.
     let mut close_by: Option<tokio::time::Instant> = None;
+    // The channel the client opened last.
+    let mut open_channel: Option<u16> = None;
     loop {
         let close_timeout = async {
             match close_by {
@@ -273,6 +287,19 @@ async fn serve(
                             })),
                         ));
                         close_by = Some(tokio::time::Instant::now() + CLOSE_TIMEOUT);
+                    }
+                    IdleEnd::CloseChannel(reply_code) => {
+                        if let Some(ch) = open_channel {
+                            let _ = out.send(method(
+                                ch,
+                                AMQPClass::Channel(channel::AMQPMethod::Close(channel::Close {
+                                    reply_code,
+                                    reply_text: ShortString::from("broker closed the channel"),
+                                    class_id: 0,
+                                    method_id: 0,
+                                })),
+                            ));
+                        }
                     }
                 }
                 continue;
@@ -321,6 +348,7 @@ async fn serve(
                     _ => {}
                 },
                 AMQPFrame::Method(ch, AMQPClass::Channel(channel::AMQPMethod::Open(_))) => {
+                    open_channel = Some(ch);
                     let _ = out.send(method(
                         ch,
                         AMQPClass::Channel(channel::AMQPMethod::OpenOk(channel::OpenOk {})),
@@ -331,6 +359,9 @@ async fn serve(
                         ch,
                         AMQPClass::Channel(channel::AMQPMethod::CloseOk(channel::CloseOk {})),
                     ));
+                }
+                AMQPFrame::Method(_, AMQPClass::Channel(channel::AMQPMethod::CloseOk(_))) => {
+                    counters.channels_closed_by_broker.fetch_add(1, Ordering::SeqCst);
                 }
                 AMQPFrame::Method(ch, AMQPClass::Confirm(confirm::AMQPMethod::Select(_))) => {
                     let _ = out.send(method(

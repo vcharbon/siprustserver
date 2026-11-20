@@ -298,6 +298,24 @@ async fn the_record_after_the_broker_closed_the_idle_connection_is_written() {
     }
 }
 
+/// The broker closes the idle channel cleanly, keeping the connection: the
+/// client reports no error, and the record after its `close-ok` finds the
+/// channel closed before it is published, opens a new connection at once and
+/// is written.
+#[tokio::test]
+async fn the_record_after_the_broker_closed_the_idle_channel_is_written() {
+    let broker = FakeBroker::start(Reply::Ack).await;
+    let (w, m) = writer_to(broker.url(), bounds(), 64);
+    let call = a_call();
+    w.write(&call, 2_000).await;
+    settle(&m, (1, 0)).await;
+    broker.close_idle_channel(REPLY_SUCCESS);
+    counted(&broker, |c| &c.channels_closed_by_broker, 1).await;
+    w.write(&call, 2_000).await;
+    settle(&m, (2, 0)).await;
+    assert_eq!(broker.count(|c| &c.accepted), 2);
+}
+
 /// The broker's side of the idle socket ends (a FIN): the session ends as the
 /// client reports it, its socket shut down before any record, and the next
 /// record opens a new connection at once and is written.
