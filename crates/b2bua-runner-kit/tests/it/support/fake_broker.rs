@@ -16,8 +16,10 @@ use amq_protocol::frame::{gen_frame, parse_frame, AMQPContentHeader, AMQPFrame, 
 use amq_protocol::protocol::{basic, channel, confirm, connection, queue, AMQPClass};
 use amq_protocol::types::{FieldTable, LongString, ShortString};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::tcp::OwnedWriteHalf;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{broadcast, mpsc, Notify};
+use tokio::time::Instant;
 
 /// How the broker answers the next publish.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -202,24 +204,10 @@ async fn drain_until_end(mut rd: tokio::net::tcp::OwnedReadHalf, counters: &Coun
     counters.ended_by_client.fetch_add(1, Ordering::SeqCst);
 }
 
-async fn serve(
-    socket: TcpStream,
-    admit: Admit,
-    counters: Arc<Counters>,
-    reply: Arc<Mutex<Replies>>,
-    mut idle_ends: broadcast::Receiver<IdleEnd>,
-) {
-    let (mut rd, mut wr) = socket.into_split();
-    if admit == Admit::StallHandshake {
-        drain_until_end(rd, &counters).await;
-        drop(wr);
-        return;
-    }
-    // One writer task: replies and delayed acks share the socket in order,
-    // until a FIN shuts its side down.
+/// Spawns the connection's one writer: replies and delayed acks share the
+/// socket in order, until `fin` shuts its write side down.
+fn spawn_writer(mut wr: OwnedWriteHalf, fin: Arc<Notify>) -> mpsc::UnboundedSender<Vec<u8>> {
     let (out, mut out_rx) = mpsc::unbounded_channel::<Vec<u8>>();
-    let fin = Arc::new(Notify::new());
-    let fin_ordered = fin.clone();
     tokio::spawn(async move {
         loop {
             tokio::select! {
@@ -227,13 +215,79 @@ async fn serve(
                     Some(bytes) if wr.write_all(&bytes).await.is_ok() => {}
                     _ => break,
                 },
-                () = fin_ordered.notified() => {
+                () = fin.notified() => {
                     let _ = wr.shutdown().await;
                     break;
                 }
             }
         }
     });
+    out
+}
+
+/// Starts the idle end `end` of a connection whose client opened
+/// `client_channel`; for a `connection.close`, returns when the broker closes
+/// the socket at the latest.
+fn start_idle_end(
+    end: IdleEnd,
+    client_channel: Option<u16>,
+    out: &mpsc::UnboundedSender<Vec<u8>>,
+    fin: &Notify,
+) -> Option<Instant> {
+    match end {
+        IdleEnd::Fin => fin.notify_one(),
+        IdleEnd::Close(reply_code) => {
+            let _ = out.send(method(
+                0,
+                AMQPClass::Connection(connection::AMQPMethod::Close(connection::Close {
+                    reply_code,
+                    reply_text: ShortString::from("broker forced connection closure"),
+                    class_id: 0,
+                    method_id: 0,
+                })),
+            ));
+            return Some(Instant::now() + CLOSE_TIMEOUT);
+        }
+        IdleEnd::CloseChannel(reply_code) => {
+            if let Some(ch) = client_channel {
+                let _ = out.send(method(
+                    ch,
+                    AMQPClass::Channel(channel::AMQPMethod::Close(channel::Close {
+                        reply_code,
+                        reply_text: ShortString::from("broker closed the channel"),
+                        class_id: 0,
+                        method_id: 0,
+                    })),
+                ));
+            }
+        }
+    }
+    None
+}
+
+/// Sleeps until `at`, forever when `None`.
+async fn sleep_until_some(at: Option<Instant>) {
+    match at {
+        Some(at) => tokio::time::sleep_until(at).await,
+        None => std::future::pending().await,
+    }
+}
+
+async fn serve(
+    socket: TcpStream,
+    admit: Admit,
+    counters: Arc<Counters>,
+    reply: Arc<Mutex<Replies>>,
+    mut idle_ends: broadcast::Receiver<IdleEnd>,
+) {
+    let (mut rd, wr) = socket.into_split();
+    if admit == Admit::StallHandshake {
+        drain_until_end(rd, &counters).await;
+        drop(wr);
+        return;
+    }
+    let fin = Arc::new(Notify::new());
+    let out = spawn_writer(wr, fin.clone());
 
     let mut header = [0u8; 8];
     if rd.read_exact(&mut header).await.is_err() {
@@ -257,54 +311,21 @@ async fn serve(
     // The publish being received: its channel, routing key and the body bytes
     // still due (unknown until its header).
     let mut publishing: Option<(u16, String, Option<u64>)> = None;
-    // Set once the broker sent `connection.close`: when it closes the socket.
-    let mut close_by: Option<tokio::time::Instant> = None;
-    // The channel the client opened last.
-    let mut open_channel: Option<u16> = None;
+    let mut socket_close_at: Option<Instant> = None;
+    let mut client_channel: Option<u16> = None;
     loop {
-        let close_timeout = async {
-            match close_by {
-                Some(by) => tokio::time::sleep_until(by).await,
-                None => std::future::pending().await,
-            }
-        };
         let n = tokio::select! {
             read = rd.read(&mut chunk) => match read {
                 Ok(0) | Err(_) => break,
                 Ok(n) => n,
             },
             Ok(end) = idle_ends.recv() => {
-                match end {
-                    IdleEnd::Fin => fin.notify_one(),
-                    IdleEnd::Close(reply_code) => {
-                        let _ = out.send(method(
-                            0,
-                            AMQPClass::Connection(connection::AMQPMethod::Close(connection::Close {
-                                reply_code,
-                                reply_text: ShortString::from("broker forced connection closure"),
-                                class_id: 0,
-                                method_id: 0,
-                            })),
-                        ));
-                        close_by = Some(tokio::time::Instant::now() + CLOSE_TIMEOUT);
-                    }
-                    IdleEnd::CloseChannel(reply_code) => {
-                        if let Some(ch) = open_channel {
-                            let _ = out.send(method(
-                                ch,
-                                AMQPClass::Channel(channel::AMQPMethod::Close(channel::Close {
-                                    reply_code,
-                                    reply_text: ShortString::from("broker closed the channel"),
-                                    class_id: 0,
-                                    method_id: 0,
-                                })),
-                            ));
-                        }
-                    }
+                if let Some(at) = start_idle_end(end, client_channel, &out, &fin) {
+                    socket_close_at = Some(at);
                 }
                 continue;
             }
-            () = close_timeout => {
+            () = sleep_until_some(socket_close_at) => {
                 counters.closed_by_broker.fetch_add(1, Ordering::SeqCst);
                 return;
             }
@@ -348,7 +369,7 @@ async fn serve(
                     _ => {}
                 },
                 AMQPFrame::Method(ch, AMQPClass::Channel(channel::AMQPMethod::Open(_))) => {
-                    open_channel = Some(ch);
+                    client_channel = Some(ch);
                     let _ = out.send(method(
                         ch,
                         AMQPClass::Channel(channel::AMQPMethod::OpenOk(channel::OpenOk {})),
@@ -425,8 +446,11 @@ async fn serve(
             }
         }
     }
-    let ended =
-        if close_by.is_some() { &counters.closed_by_broker } else { &counters.ended_by_client };
+    let ended = if socket_close_at.is_some() {
+        &counters.closed_by_broker
+    } else {
+        &counters.ended_by_client
+    };
     ended.fetch_add(1, Ordering::SeqCst);
 }
 
