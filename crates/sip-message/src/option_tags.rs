@@ -47,31 +47,59 @@ pub fn not_understood(req: &SipRequest) -> Option<Unsupported> {
 /// extension (§8.2.2.3, §9.1). Tags compare case-insensitively (§7.3.1). A
 /// `Require` line that does not read states no tag here: ingress refuses one.
 pub fn unserved(req: &SipRequest, withheld: &[String]) -> Option<Unsupported> {
-    if matches!(req.method(), Method::Ack | Method::Cancel) {
-        return None;
-    }
-    let required = req.token_set::<Require>()?.ok()?;
-    let withholds = |tag: &str| withheld.iter().any(|w| w.eq_ignore_ascii_case(tag));
-    let refused: Vec<&str> =
-        required.iter().filter(|tag| !understood(tag, req) || withholds(tag)).collect();
-    (!refused.is_empty()).then(|| Unsupported::of(refused))
+    refused(req, |tag| !understood(tag, req) || withholds(withheld, tag))
 }
 
 /// The end-to-end tags `req` requires ([`END_TO_END_OPTION_TAGS`]) that
 /// `relayed`, the lines of its copy toward the peer, no longer requires: the
 /// copy dropped a requirement nobody else serves (a leg the call keeps out of
-/// the session timer, RFC 4028 §7.1). `None` when each rides.
+/// the session timer, RFC 4028 §7.1). `None` when each rides, or on an ACK or
+/// a CANCEL.
 pub fn dropped_on_relay(req: &SipRequest, relayed: &[SipHeader]) -> Option<Unsupported> {
+    let rides = still_required(relayed);
+    refused(req, |tag| is_end_to_end(tag) && !rides.contains(tag))
+}
+
+/// [`unserved`] and [`dropped_on_relay`] as one `Unsupported`, in the order
+/// `req` lists the tags: what the 420 to a request states once its copy
+/// toward the peer, `relayed`, is built.
+pub fn unserved_on_relay(
+    req: &SipRequest,
+    withheld: &[String],
+    relayed: &[SipHeader],
+) -> Option<Unsupported> {
+    let rides = still_required(relayed);
+    refused(req, |tag| {
+        !understood(tag, req)
+            || withholds(withheld, tag)
+            || (is_end_to_end(tag) && !rides.contains(tag))
+    })
+}
+
+/// The tags of `req`'s `Require` that `refuses` picks, in request order;
+/// `None` when it picks none, requires nothing, or is an ACK or a CANCEL,
+/// neither of which imposes an extension (§8.2.2.3, §9.1).
+fn refused(req: &SipRequest, refuses: impl Fn(&str) -> bool) -> Option<Unsupported> {
+    if matches!(req.method(), Method::Ack | Method::Cancel) {
+        return None;
+    }
     let required = req.token_set::<Require>()?.ok()?;
-    let still_required: Vec<Require> = relayed
+    let refused: Vec<&str> = required.iter().filter(|tag| refuses(tag)).collect();
+    (!refused.is_empty()).then(|| Unsupported::of(refused))
+}
+
+/// Whether `withheld` names `tag`, case-insensitively (§7.3.1).
+fn withholds(withheld: &[String], tag: &str) -> bool {
+    withheld.iter().any(|w| w.eq_ignore_ascii_case(tag))
+}
+
+/// The tags the `Require` lines among `lines` state, as one set.
+fn still_required(lines: &[SipHeader]) -> Require {
+    let sets = lines
         .iter()
         .filter(|h| HeaderName::Require.matches(&h.name))
-        .filter_map(|h| Require::parse(&h.value).ok())
-        .collect();
-    let rides = Require::union(still_required).unwrap_or_else(Require::empty);
-    let dropped: Vec<&str> =
-        required.iter().filter(|tag| is_end_to_end(tag) && !rides.contains(tag)).collect();
-    (!dropped.is_empty()).then(|| Unsupported::of(dropped))
+        .filter_map(|h| Require::parse(&h.value).ok());
+    Require::union(sets).unwrap_or_else(Require::empty)
 }
 
 /// Whether `tag` is one of [`END_TO_END_OPTION_TAGS`].
@@ -163,6 +191,17 @@ CSeq: 2 {method}\r\n\
         assert_eq!(dropped(&[line("Supported", "timer")]).as_deref(), Some("timer"));
         assert_eq!(dropped(&[line("Require", "Timer")]), None, "it rides");
         assert_eq!(dropped_on_relay(&request("UPDATE", ""), &[]), None, "nothing required");
+    }
+
+    #[test]
+    fn a_built_copy_adds_its_dropped_tags_to_the_unserved_in_request_order() {
+        let req = out_of_dialog("INVITE", "x-b, timer, 100rel");
+        let withheld = ["100rel".to_string()];
+        let on_relay = |relayed: &[SipHeader]| {
+            unserved_on_relay(&req, &withheld, relayed).map(|u| u.to_wire())
+        };
+        assert_eq!(on_relay(&[]).as_deref(), Some("x-b, timer, 100rel"));
+        assert_eq!(on_relay(&[line("Require", "timer")]).as_deref(), Some("x-b, 100rel"));
     }
 
     #[test]

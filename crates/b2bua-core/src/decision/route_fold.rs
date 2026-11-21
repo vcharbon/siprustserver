@@ -18,7 +18,9 @@ use sip_message::SipRequest;
 use crate::config::B2buaConfig;
 use crate::decision::{header_lines, no_answer_deadline};
 use crate::destination_allowlist::{classify_admission, AdmissionVerdict};
-use crate::effects::{BufferedObservabilityEffect, HandlerEffects, HandlerResult};
+use crate::effects::{
+    BufferedObservabilityEffect, HandlerEffects, HandlerResult, OutboundBody, OutboundSipEffect,
+};
 use crate::initial_invite::refuse_extension;
 use crate::rules::capabilities;
 use crate::rules::relay;
@@ -228,13 +230,13 @@ pub fn admitted(
     let kind = if depth == 0 { DecisionKind::Route } else { DecisionKind::FailoverRoute };
     let leg_id = (depth == 0).then(|| "a".to_string());
     mark_decision(&mut call, now_ms, kind, leg_id, route.label.clone());
-    if let Some(unsupported) = unserved_by(&call, a_invite) {
-        let advertisement = &config.minted_final_advertisement;
-        let refused = refuse_extension(call, a_invite, &unsupported, advertisement, now_ms);
-        return Routed::final_only(refused);
-    }
+    let advertisement = &config.minted_final_advertisement;
 
     if defers_routing(&answer) {
+        if let Some(unsupported) = unserved_before_a_service_dials(&call, a_invite) {
+            let refused = refuse_extension(call, a_invite, &unsupported, advertisement, now_ms);
+            return Routed::final_only(refused);
+        }
         if route.features.platform.arms_cap_at_creation(config.setup_timeout_ms) {
             arm_global_duration(
                 &mut call,
@@ -323,7 +325,7 @@ pub fn admitted(
                 Some(err.to_string()),
                 None,
                 &[],
-                &config.minted_final_advertisement,
+                advertisement,
                 now_ms,
                 TerminationCause::Admission,
             ));
@@ -338,6 +340,10 @@ pub fn admitted(
         &adds.unwrap_or_default(),
         &config.parser_limits.first_ingress,
     ));
+    if let Some(unsupported) = unserved_by_dialling(&call, a_invite, &effect) {
+        let refused = refuse_extension(call, a_invite, &unsupported, advertisement, now_ms);
+        return Routed::final_only(refused);
+    }
     fx.buffered.extend(BufferedObservabilityEffect::skipped("routed INVITE", skipped));
 
     // After the mint read the armed strategy's withhold: the fallback the
@@ -451,11 +457,27 @@ fn disable_fake_prack_on_a_delayed_offer(call: &mut Call, offers_sdp: bool) {
 }
 
 /// The option tags the caller's INVITE `a_invite` requires that `call`, its
-/// route's features attached, cannot serve (RFC 3261 §8.2.2.3,
-/// [`capabilities::unserved_for_originator_in`]): the `Unsupported` of the 420
-/// she is answered before anyone is dialled, whether the route dials or
-/// defers its dial to a service.
-fn unserved_by(call: &Call, a_invite: &SipRequest) -> Option<Unsupported> {
+/// route's features attached, cannot serve once `dialled`, the INVITE built
+/// toward the destination, is known (RFC 3261 §8.2.2.3): those
+/// [`capabilities::unserved_for_originator_in`] names, and the end-to-end
+/// requirement `dialled` no longer states, whichever statement dropped it (a
+/// route's `Supported`, a face's, the call's withhold). The `Unsupported` of
+/// the 420 she is answered instead of the INVITE leaving.
+fn unserved_by_dialling(
+    call: &Call,
+    a_invite: &SipRequest,
+    dialled: &OutboundSipEffect,
+) -> Option<Unsupported> {
+    let OutboundBody::Request(invite) = &dialled.body else { return None };
     let unserved = capabilities::unserved_for_originator_in(call.features.as_ref());
+    sip_message::option_tags::unserved_on_relay(a_invite, &unserved, invite.headers())
+}
+
+/// The option tags the caller's INVITE `a_invite` requires that `call`, on a
+/// route whose dial a service defers, cannot serve
+/// ([`capabilities::unserved_before_a_service_dials_in`]): the `Unsupported`
+/// of the 420 she is answered before the service dials anyone.
+fn unserved_before_a_service_dials(call: &Call, a_invite: &SipRequest) -> Option<Unsupported> {
+    let unserved = capabilities::unserved_before_a_service_dials_in(call.features.as_ref());
     sip_message::option_tags::unserved(a_invite, &unserved)
 }

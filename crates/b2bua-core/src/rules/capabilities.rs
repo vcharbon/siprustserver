@@ -282,32 +282,38 @@ pub fn withheld_option_tags_in(
 }
 
 /// The option tags an originator's INVITE may not require of a call armed
-/// with `features` (RFC 3261 §8.2.2.3): every tag the call withholds from the
-/// destination it dials ([`withheld_option_tags_in`]); `100rel` under any 18x
-/// strategy, which shows the originator unreliable provisionals of its own
-/// whatever the destination sends (RFC 3262 §3); and `timer` where the
-/// destination's face declares a `Supported` without it, which keeps the
-/// session timer off that leg (RFC 4028 §7.1). The offer moves only `100rel`,
-/// so the set is the same whether the INVITE offers or not.
+/// with `features`, whatever INVITE it dials (RFC 3261 §8.2.2.3): every tag
+/// the call withholds from the destination ([`withheld_option_tags_in`]), and
+/// `100rel` under any 18x strategy, which shows the originator unreliable
+/// provisionals of its own whatever the destination sends (RFC 3262 §3). The
+/// offer moves only `100rel`, so the set is the same whether the INVITE offers
+/// or not. Whether the destination is put the session timer the originator
+/// requires is read off the INVITE built for it
+/// (`sip_message::option_tags::unserved_on_relay`).
 pub fn unserved_for_originator_in(features: Option<&FeatureActivations>) -> Vec<String> {
-    use crate::rules::relay::TIMER;
+    let mut tags = withheld_option_tags_in(features, None, true);
     let armed = features.is_some_and(|f| f.relay_first_18x_to_180.is_some());
+    let reliable = sip_message::option_tags::RELIABLE;
+    if armed && !tags.iter().any(|t| t.eq_ignore_ascii_case(reliable)) {
+        tags.push(reliable.to_string());
+    }
+    tags
+}
+
+/// [`unserved_for_originator_in`] for a route whose dial a service defers,
+/// so no INVITE is built to read the session timer off: `timer` too where the
+/// destination's face declares a `Supported` without it, which keeps the
+/// timer off that leg (RFC 4028 §7.1).
+pub fn unserved_before_a_service_dials_in(features: Option<&FeatureActivations>) -> Vec<String> {
+    use crate::rules::relay::TIMER;
     let face_lacks_timer = features
         .and_then(|f| f.advertise_capabilities.as_ref())
         .and_then(|a| a.toward_originated.as_ref())
         .and_then(|declared| declared.supported.as_ref())
         .is_some_and(|supported| !supported.iter().any(|t| t.eq_ignore_ascii_case(TIMER)));
-    let mut tags = withheld_option_tags_in(features, None, true);
-    let mut add = |tag: &str| {
-        if !tags.iter().any(|t| t.eq_ignore_ascii_case(tag)) {
-            tags.push(tag.to_string());
-        }
-    };
-    if armed {
-        add(sip_message::option_tags::RELIABLE);
-    }
-    if face_lacks_timer {
-        add(TIMER);
+    let mut tags = unserved_for_originator_in(features);
+    if face_lacks_timer && !tags.iter().any(|t| t.eq_ignore_ascii_case(TIMER)) {
+        tags.push(TIMER.to_string());
     }
     tags
 }
