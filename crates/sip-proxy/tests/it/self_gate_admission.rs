@@ -129,11 +129,11 @@ impl ProxySelfGate for ForceRejectGate {
 /// given (reason, retry) and assert the on-wire 503 the source receives.
 async fn assert_wire_503(name: &str, gate_reason: ShedReason, retry: u32, expect_retry_after: u32) {
     let h = Harness::with_transit_delay(name, 0);
-    let (bob_ep, _bob_addr) = h.bind_sut("bob", BOB).await;
+    let (bob_ep, _bob_addr) = h.bind_peer("bob", BOB).await;
     let (strategy, registry) = forward_all_with_worker();
     let gate = ForceRejectGate::new(gate_reason, retry);
     let proxy = spawn_proxy_with_gate(&h, strategy, registry, gate.clone()).await;
-    let (client, _client_addr) = h.bind_sut("alice", ALICE).await;
+    let (client, _client_addr) = h.bind_peer("alice", ALICE).await;
 
     client.send_to(&new_invite(ALICE, "z9hG4bK-rej", None), proxy.addr()).await.unwrap();
     let resp = recv_response(&*client).await;
@@ -196,7 +196,7 @@ async fn a_gate_hint_of_zero_goes_on_the_wire_as_one_second() {
 #[tokio::test(start_paused = true)]
 async fn real_gate_cps_drain_yields_a_wire_503_cps() {
     let h = Harness::with_transit_delay("self-gate-real-cps", 1);
-    let (_bob_ep, _bob_addr) = h.bind_sut("bob", BOB).await;
+    let (_bob_ep, _bob_addr) = h.bind_peer("bob", BOB).await;
     let (strategy, registry) = forward_all_with_worker();
     let gate = Arc::new(EluCpsGate::new(
         Arc::new(simulated().0),
@@ -208,7 +208,7 @@ async fn real_gate_cps_drain_yields_a_wire_503_cps() {
         },
     ));
     let proxy = spawn_proxy_with_gate(&h, strategy, registry, gate.clone()).await;
-    let (client, _client_addr) = h.bind_sut("alice", ALICE).await;
+    let (client, _client_addr) = h.bind_peer("alice", ALICE).await;
 
     client.send_to(&new_invite(ALICE, "z9hG4bK-ok", None), proxy.addr()).await.unwrap();
     let bob_uas = _bob_ep;
@@ -239,7 +239,7 @@ async fn real_gate_cps_drain_yields_a_wire_503_cps() {
 #[tokio::test(start_paused = true)]
 async fn real_gate_elu_over_critical_yields_a_wire_503_elu() {
     let h = Harness::with_transit_delay("self-gate-real-elu", 1);
-    let (bob_ep, _bob_addr) = h.bind_sut("bob", BOB).await;
+    let (bob_ep, _bob_addr) = h.bind_peer("bob", BOB).await;
     let (strategy, registry) = forward_all_with_worker();
     let (sampler, ctl) = simulated();
     let gate = Arc::new(EluCpsGate::new(
@@ -257,7 +257,7 @@ async fn real_gate_elu_over_critical_yields_a_wire_503_elu() {
     assert!(gate.elu_ewma() > 0.8, "EWMA must be seated above critical, got {}", gate.elu_ewma());
 
     let proxy = spawn_proxy_with_gate(&h, strategy, registry, gate.clone()).await;
-    let (client, _client_addr) = h.bind_sut("alice", ALICE).await;
+    let (client, _client_addr) = h.bind_peer("alice", ALICE).await;
 
     client.send_to(&new_invite(ALICE, "z9hG4bK-elu", None), proxy.addr()).await.unwrap();
     let resp = recv_response(&*client).await;
@@ -307,11 +307,11 @@ impl ProxySelfGate for BypassProbeGate {
 #[tokio::test]
 async fn emergency_new_dialog_invite_bypasses_the_gate() {
     let h = Harness::with_transit_delay("self-gate-bypass-emergency", 0);
-    let (bob_ep, _bob_addr) = h.bind_sut("bob", BOB).await;
+    let (bob_ep, _bob_addr) = h.bind_peer("bob", BOB).await;
     let (strategy, registry) = forward_all_with_worker();
     let gate = BypassProbeGate::new();
     let proxy = spawn_proxy_with_gate(&h, strategy, registry, gate.clone()).await;
-    let (client, _client_addr) = h.bind_sut("alice", ALICE).await;
+    let (client, _client_addr) = h.bind_peer("alice", ALICE).await;
 
     client.send_to(&new_invite(ALICE, "z9hG4bK-emg", Some("esnet.0")), proxy.addr()).await.unwrap();
 
@@ -327,11 +327,11 @@ async fn emergency_new_dialog_invite_bypasses_the_gate() {
 #[tokio::test]
 async fn worker_outbound_new_dialog_invite_bypasses_the_gate() {
     let h = Harness::with_transit_delay("self-gate-bypass-internal", 0);
-    let (bob_ep, _bob_addr) = h.bind_sut("bob", BOB).await;
+    let (bob_ep, _bob_addr) = h.bind_peer("bob", BOB).await;
     let (strategy, registry) = forward_all_with_worker();
     let gate = BypassProbeGate::new();
     let proxy = spawn_proxy_with_gate(&h, strategy, registry, gate.clone()).await;
-    let (worker_client, _wc_addr) = h.bind_sut("worker", WORKER).await;
+    let (worker_client, _wc_addr) = h.bind_peer("worker", WORKER).await;
 
     worker_client.send_to(&new_invite(WORKER, "z9hG4bK-int", None), proxy.addr()).await.unwrap();
 

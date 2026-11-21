@@ -147,7 +147,7 @@ fn assert_one_refusal(lost: &[Vec<u8>], last: &[u8]) -> SipResponse {
 #[tokio::test(start_paused = true)]
 async fn a_copy_of_a_self_gate_refusal_draws_the_same_503_after_the_bucket_refills() {
     let h = Harness::with_transit_delay("refused-invite-copies-self-gate", 1);
-    let (bob, _) = h.bind_sut("bob", BOB).await;
+    let (bob, _) = h.bind_peer("bob", BOB).await;
     let gate = Arc::new(EluCpsGate::new(
         Arc::new(simulated().0),
         ProxySelfGateConfig { cps_bucket_size: 1, cps_bucket_rate: 1, ..Default::default() },
@@ -232,7 +232,7 @@ impl RoutingStrategy for RefuseThenForward {
 #[tokio::test(start_paused = true)]
 async fn a_copy_of_a_rate_cap_refusal_draws_the_same_503_without_a_new_selection() {
     let h = Harness::with_transit_delay("refused-invite-copies-rate-cap", 1);
-    let (bob, _) = h.bind_sut("bob", BOB).await;
+    let (bob, _) = h.bind_peer("bob", BOB).await;
     let strategy = RefuseThenForward::rate_capped();
     let proxy = spawn_proxy(&h, strategy.clone(), None).await;
     let (alice, lost) = lossy_caller(&h, 1).await;
@@ -259,7 +259,7 @@ async fn a_copy_of_a_rate_cap_refusal_draws_the_same_503_without_a_new_selection
 #[tokio::test(start_paused = true)]
 async fn a_copy_of_a_no_target_refusal_draws_the_same_503() {
     let h = Harness::with_transit_delay("refused-invite-copies-no-target", 1);
-    let (bob, _) = h.bind_sut("bob", BOB).await;
+    let (bob, _) = h.bind_peer("bob", BOB).await;
     let strategy = RefuseThenForward::no_target();
     let proxy = spawn_proxy(&h, strategy.clone(), None).await;
     let (alice, lost) = lossy_caller(&h, 1).await;
@@ -312,7 +312,7 @@ async fn a_cancel_of_a_refused_invite_draws_200_and_is_never_forwarded() {
         )
         .on_party("alice"),
     );
-    let (bob, _) = h.bind_sut("bob", BOB).await;
+    let (bob, _) = h.bind_peer("bob", BOB).await;
     let strategy = RefuseThenForward::rate_capped();
     let proxy = spawn_proxy(&h, strategy.clone(), None).await;
     let (alice, lost) = lossy_caller(&h, 1).await;
