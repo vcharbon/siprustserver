@@ -12,7 +12,7 @@ use sip_txn::{IdGen, ServerTxnKey, TransactionLayer};
 
 use super::admit;
 use super::reply_to::reply_to;
-use super::responses::{build_200, build_481, build_retry_later_500};
+use super::responses::{build_200, build_420, build_481, build_retry_later_500};
 use super::RouterCtx;
 use crate::admission::{class_of, Refusals, Refused};
 use crate::dispatch::{Discard, Owed};
@@ -121,10 +121,16 @@ impl<'a> OwedAnswer<'a> {
         )
     }
 
-    /// A capped call's refusal of a non-INVITE request.
+    /// A capped call's refusal of a non-INVITE request. A BYE requiring an
+    /// option tag this stack does not understand draws 420 naming those tags
+    /// (RFC 3261 §8.2.2.3), which is no overload refusal: its dialog stays up
+    /// for a plain BYE (§15.1.1).
     fn capped_refusal(&self, req: &SipRequest) -> Result<SipResponse, GenerateError> {
         match req.method() {
-            Method::Bye => build_200(req),
+            Method::Bye => match sip_message::option_tags::not_understood(req) {
+                Some(unsupported) => build_420(req, &unsupported, None),
+                None => build_200(req),
+            },
             // The layer binds the tag of the INVITE's final, if any.
             Method::Cancel => build_481(req, None),
             _ => {
