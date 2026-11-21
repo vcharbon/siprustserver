@@ -18,13 +18,17 @@ pub const DEFAULT_HEARTBEAT_SEC: u16 = 30;
 
 /// `url`, the value of the variable `var`, as the URI a connection opens:
 /// `Err` naming `var` when it does not parse or states `heartbeat=0`, which
-/// leaves a silent peer undetected once the link is up. A bracketed IPv6
-/// host (`[2001:db8::1]`) is the URI's host, in its RFC 5952 text and
+/// leaves a silent peer undetected once the link is up. No `Err` quotes
+/// `url`, which may carry a password. A bracketed IPv6 host
+/// (`[2001:db8::1]`) is the URI's host, in its RFC 5952 text and
 /// unbracketed, as name lookup and TLS read it.
 pub fn checked_uri(var: &str, url: &str) -> Result<AMQPUri, String> {
     let not_amqp = |e: String| format!("{var} is not an AMQP URI: {e}");
-    let mut uri: AMQPUri = url.parse().map_err(not_amqp)?;
     let parsed = Url::parse(url).map_err(|e| not_amqp(e.to_string()))?;
+    if parsed.cannot_be_a_base() {
+        return Err(not_amqp("no authority: write amqp://user:password@host:port/vhost".into()));
+    }
+    let mut uri: AMQPUri = url.parse().map_err(not_amqp)?;
     if let Some(Host::Ipv6(address)) = parsed.host() {
         uri.authority.host = address.to_string();
     }

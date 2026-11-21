@@ -38,6 +38,20 @@ fn a_malformed_ipv6_host_is_refused_naming_the_variable() {
 /// The broker listens on 127.0.0.2 alone, which `localhost` never resolves
 /// to, and the URI names it as the IPv4-mapped IPv6 address
 /// `[::ffff:127.0.0.2]` (dual-stack sockets, Linux's default).
+#[test]
+fn a_refusal_never_quotes_the_uri() {
+    for url in [
+        "amqp:u:secret@broker.example.test",
+        "http://u:secret@broker.example.test/",
+        "amqp://u:secret@[2001:db8::1/%2f",
+        "amqp://u:secret@broker.example.test/%2f?heartbeat=x",
+    ] {
+        let err = checked_uri("VAR", url).unwrap_err();
+        assert!(err.starts_with("VAR is not an AMQP URI"), "{url}: {err}");
+        assert!(!err.contains("secret"), "{url}: {err}");
+    }
+}
+
 #[tokio::test]
 async fn a_uri_with_an_ipv6_host_connects_to_that_address() {
     let listener = TcpListener::bind("127.0.0.2:0").unwrap();

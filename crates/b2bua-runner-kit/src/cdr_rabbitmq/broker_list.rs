@@ -90,6 +90,7 @@ mod tests {
             ("amqp://a/%2f,,amqp://b/%2f", "entry 2", "empty"),
             ("amqp://a/%2f,", "entry 2", "empty"),
             ("amqp://a/%2f,http://u:secret@b/", "entry 2", "not an AMQP URI"),
+            ("amqp://a/%2f,amqp:u:secret@b", "entry 2", "no authority"),
             ("amqp://a/%2f,amqp://b/%2f?heartbeat=0", "entry 2", "heartbeat=0"),
             ("amqp://a:5672/%2f,amqp://A/other", "entry 2", "a:5672 again"),
             ("amqp://a/%2f,amqps://u:secret@b/%2f", "entry 2", "same scheme"),
