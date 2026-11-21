@@ -55,8 +55,9 @@ use lookup::{resolution_candidates, resolve_first};
 pub use lookup::{HostResolver, SystemResolver};
 pub(crate) use outcomes::{outcome, refresh_outcome};
 
-/// Told the address a packet to a name is handed to the socket for, before
-/// it is; never told for a packet that does not leave.
+/// Told the address a packet to a name goes to, just before the packet is
+/// handed to the socket, whether or not the socket takes it; never told for a
+/// packet whose name does not resolve.
 pub type OnSent = Arc<dyn Fn(SocketAddr) + Send + Sync>;
 
 /// A packet waiting on its name's resolve.
@@ -405,8 +406,8 @@ impl NamedForwarder {
     /// Send `bytes` to a named target. Cache hits go out inline; a miss spawns
     /// a single-flight resolve-then-send task, or waits on the one running, so
     /// the caller (the recv loop) never waits on DNS. `on_sent` is told the
-    /// address the packet leaves for, before it does, inline or from the
-    /// resolve. Every refusal is counted; the kind of one the socket answered
+    /// address the packet goes to before it is handed to the socket ([`OnSent`]),
+    /// inline or from the resolve. Every refusal is counted; the kind of one the socket answered
     /// inline is returned, and a send the resolve makes later returns `None`.
     pub async fn send(
         &self,

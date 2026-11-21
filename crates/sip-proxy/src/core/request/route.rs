@@ -32,9 +32,10 @@ use super::target::{repeat_hop, Chosen};
 use super::{received_branch, Arrival, RouteOutcome};
 
 impl ProxyCore {
-    /// What a send to `target` tells once it leaves, when `target` is a name:
-    /// the memo entries under `keys`, written for this forward, settle on the
-    /// address it left for ([`CancelBranchLru::settle_name`]). `None` for an
+    /// What a send to `target` tells just before its packet is handed to the
+    /// socket, when `target` is a name: the memo entries under `keys`, written
+    /// for this forward, settle on the address the packet goes to
+    /// ([`CancelBranchLru::settle_name`]). `None` for an
     /// IP literal, which no lookup can move.
     ///
     /// [`CancelBranchLru::settle_name`]: crate::cancel_lru::CancelBranchLru::settle_name
