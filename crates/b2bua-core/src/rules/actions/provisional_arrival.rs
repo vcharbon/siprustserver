@@ -10,7 +10,7 @@
 //! retired its siblings', and no rule reads it.
 
 use call::helpers::Arrival;
-use call::{CSeq, Call, DialogState, OwedAnswer, ProvisionalId, RSeq};
+use call::{CSeq, Call, Dialog, DialogState, OwedAnswer, ProvisionalId, RSeq};
 use sip_message::{Method, SipMessage, SipResponse};
 use sip_retransmit::timers::TIMER_M;
 
@@ -71,7 +71,7 @@ impl ActionExecutor<'_> {
             return Some(Taken::Dropped(arrival));
         }
         if sibling == Some(Sibling::Retired) {
-            set_fork_state(call, &id, DialogState::Retired, DialogState::Early);
+            set_fork_state(call, &id, Dialog::is_retired, DialogState::Early);
         }
         let responder_sdp = resp.sdp().is_some();
         let offer = resp.sdp().filter(|_| {
@@ -89,7 +89,7 @@ impl ActionExecutor<'_> {
         let invite = Owed::Invite { leg: source_leg_id, cseq: id.invite_cseq.as_i64() };
         self.settle_owed_pracks(call, fx, invite, Settle::AtFinal { confirmed: None });
         if sibling != Sibling::Tracked {
-            set_fork_state(call, &id, DialogState::Early, DialogState::Retired);
+            set_fork_state(call, &id, Dialog::awaits_invite_final, DialogState::Retired);
         }
         Some(Taken::PastTheAnswer)
     }
@@ -137,15 +137,16 @@ fn sibling_past_the_answer(call: &Call, id: &ProvisionalId, now_ms: i64) -> Opti
     }
 }
 
-/// Move the early dialog of `id`'s responder from `from` to `to`: reopened
-/// so its PRACK may ride it, or retired behind that PRACK as the answer
-/// retired its siblings (RFC 3261 §12.1.2) — a 2xx of it is then a
-/// straggler, ACKed and BYEd (§13.2.2.4). Nothing for a dialog in another
-/// state.
-fn set_fork_state(call: &mut Call, id: &ProvisionalId, from: DialogState, to: DialogState) {
+/// Move the dialog of `id`'s responder to `to` when it is in a state `from`
+/// holds: a retired one reopened so its PRACK may ride it, or one awaiting
+/// the INVITE's final (early, or opened behind this stack's CANCEL that the
+/// answer outran) retired behind that PRACK as the answer retired its
+/// siblings (RFC 3261 §12.1.2) — a 2xx of it is then a straggler, ACKed and
+/// BYEd (§13.2.2.4). Nothing for a dialog in another state.
+fn set_fork_state(call: &mut Call, id: &ProvisionalId, from: fn(&Dialog) -> bool, to: DialogState) {
     call::helpers::update_leg(call, &id.leg, |leg| {
         if let Some(d) = call::helpers::dialog_with_peer_mut(leg, &id.responder_tag) {
-            if d.state == from {
+            if from(d) {
                 d.state = to;
             }
         }
