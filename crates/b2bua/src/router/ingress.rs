@@ -152,13 +152,14 @@ pub(super) async fn on_event(
     if res.call_ref.is_none() {
         // Acting-backup takeover BACKSTOP. The normal in-dialog key is the R-URI
         // `callref` param the B2BUA Contact stamps and the proxy preserves under
-        // loose routing — so `resolve` (above) already keys the dialog from it.
-        // This branch only fires when that param is absent AND our in-memory
-        // `sip_index` is empty — a pure backup that never primary-served the
-        // call. Re-key the dialog from the replica store's SIP index (the puller
-        // imported it) before declaring the event unroutable, so a failed-over
-        // in-dialog request is not silently dropped and the dialog can still
-        // terminate on the backup.
+        // loose routing — so `resolve` (above) already keys the dialog from it,
+        // and sip-txn `extract_ruri_call_ref` attributes the server txn by the
+        // SAME key (the self-release count gate, ADR-0014). This branch only fires
+        // when that param is absent AND our in-memory `sip_index` is empty — a
+        // pure backup that never primary-served the call. Re-key the dialog from
+        // the replica store's SIP index (the puller imported it) before declaring
+        // the event unroutable, so a failed-over in-dialog request is not silently
+        // dropped and the dialog can still terminate on the backup.
         match replica_takeover(ctx, &event).await {
             Ok(Some(hit)) => res.found_by_index(hit, &event),
             Ok(None) => {}
