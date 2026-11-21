@@ -78,11 +78,11 @@ fn is_emergency_invite(msg: &SipMessage) -> bool {
     }
 }
 
-/// An in-dialog request carries a non-empty To-tag (AIMD/admission is a
-/// new-call knob — never applied to in-dialog traffic).
+/// An in-dialog request carries a To-tag (AIMD/admission is a new-call knob —
+/// never applied to in-dialog traffic).
 fn is_in_dialog(msg: &SipMessage) -> bool {
     match msg {
-        SipMessage::Request(r) => r.to().tag().is_some_and(|t| !t.is_empty()),
+        SipMessage::Request(r) => r.to().tag().is_some(),
         SipMessage::Response(_) => false,
     }
 }

@@ -28,7 +28,7 @@ impl NoTargetDrop {
     pub fn of(req: &SipRequest) -> Self {
         if req.method() == Method::Cancel {
             NoTargetDrop::Cancel
-        } else if req.to().tag().is_some_and(|t| !t.is_empty()) {
+        } else if req.to().tag().is_some() {
             NoTargetDrop::InDialog
         } else {
             NoTargetDrop::Initial

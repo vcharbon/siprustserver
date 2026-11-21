@@ -186,9 +186,8 @@ impl ProxyCore {
             }
         }
 
-        let to = req.to();
-        let has_to_tag = to.tag().is_some_and(|t| !t.is_empty());
-        if method == Method::Invite && to.tag().is_none() && rtx_hit.is_none() {
+        let has_to_tag = req.to().tag().is_some();
+        if method == Method::Invite && !has_to_tag && rtx_hit.is_none() {
             self.metrics.record_call();
             // ADR-0026 §4
             self.activate_trace(req, src, self.trace_ms());

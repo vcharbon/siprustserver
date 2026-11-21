@@ -45,7 +45,7 @@ impl ProxyCore {
         faces: (Face, Face),
     ) -> (RequestDraft, Option<RouteParams>) {
         let method = req.method().as_str();
-        let is_initial_dialog_req = req.to().tag().map(str::is_empty).unwrap_or(true);
+        let is_initial_dialog_req = req.to().tag().is_none();
         if !is_dialog_creating(method) || !is_initial_dialog_req {
             return (draft, None);
         }

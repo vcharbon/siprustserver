@@ -33,7 +33,7 @@ impl ProxyCore {
         let SipMessage::Request(req) = msg else { return false };
         face == Face::External
             && req.method() == Method::Invite
-            && req.to().tag().is_some_and(|t| !t.is_empty())
+            && req.to().tag().is_some()
             && cookie.is_none_or(|c| self.strategy.verified_cookie(c, msg).is_none())
     }
 
