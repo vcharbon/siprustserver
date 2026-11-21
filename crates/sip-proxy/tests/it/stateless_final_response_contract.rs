@@ -78,7 +78,7 @@ fn bob_response(fwd: &SipRequest, from: SocketAddr, status: u16, reason: &str) -
     let contact = establishes.then(|| {
         Contact::parse(&SipStr::from_static("<sip:bob@127.0.0.1:5070>")).expect("a Contact")
     });
-    let extra_headers = match status < 300 && establishes {
+    let extra_headers = match (200..300).contains(&status) && establishes {
         true => options_capabilities(),
         false => Vec::new(),
     };

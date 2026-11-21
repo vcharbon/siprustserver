@@ -206,8 +206,10 @@ fn forwarded_branch(sent: &Arc<Sent>) -> String {
 /// A call that reaches activation twice (the credentialed retry of a
 /// challenged INVITE, or a retransmission whose memo was evicted) records each
 /// datagram once: `activate` reports no success for a call that already has a
-/// span, so the per-packet seam alone records the second INVITE. The call
-/// ends at the ACK of the second INVITE's rejection, which closes the span.
+/// span, so the per-packet seam alone records the second INVITE. Up to the
+/// retry the span holds four `sip.in` records: INVITE 1, its 407, the 407's
+/// ACK and INVITE 2. The call ends at the ACK of the retry's rejection, which
+/// closes the span.
 #[tokio::test]
 async fn a_call_that_reaches_activation_twice_records_each_datagram_once() {
     let (_guard, log) = observe_testkit::test_buffer();
@@ -216,6 +218,16 @@ async fn a_call_that_reaches_activation_twice_records_each_datagram_once() {
     const CALL_ID: &str = "dup@10.0.0.1";
 
     core.handle_request_from(invite(CALL_ID, "z9hG4bK-first", 1), src()).await;
+    let challenged = forwarded_branch(&ep);
+    let challenge = response(
+        CALL_ID,
+        "407 Proxy Authentication Required",
+        &challenged,
+        "z9hG4bK-first",
+        "1 INVITE",
+    );
+    core.handle_response_from(challenge, worker_src()).await;
+    core.handle_request_from(in_dialog("ACK", CALL_ID, "z9hG4bK-first", 1), src()).await;
     core.handle_request_from(invite(CALL_ID, "z9hG4bK-retry", 2), src()).await;
     let proxy_branch = forwarded_branch(&ep);
 
@@ -223,12 +235,17 @@ async fn a_call_that_reaches_activation_twice_records_each_datagram_once() {
     let sip_in = log.matching("kind=sip.in");
     assert_eq!(
         sip_in.len(),
-        2,
+        4,
         "exactly one record per datagram: {:?}",
         sip_in.iter().map(|e| e.line()).collect::<Vec<_>>(),
     );
-    assert!(sip_in.iter().any(|e| e.contains("CSeq: 1 INVITE")));
-    assert!(sip_in.iter().any(|e| e.contains("CSeq: 2 INVITE")));
+    let recorded = |start: &str, cseq: &str| {
+        sip_in.iter().filter(|e| e.contains(start) && e.contains(cseq)).count()
+    };
+    assert_eq!(recorded("INVITE sip:", "CSeq: 1 INVITE"), 1, "the challenged INVITE");
+    assert_eq!(recorded("407 Proxy Authentication", "CSeq: 1 INVITE"), 1, "its challenge");
+    assert_eq!(recorded("ACK sip:", "CSeq: 1 ACK"), 1, "the challenge's ACK");
+    assert_eq!(recorded("INVITE sip:", "CSeq: 2 INVITE"), 1, "the credentialed retry");
 
     core.handle_response_from(
         response(CALL_ID, "486 Busy Here", &proxy_branch, "z9hG4bK-retry", "2 INVITE"),

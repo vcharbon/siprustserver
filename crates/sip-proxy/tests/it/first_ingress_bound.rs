@@ -316,6 +316,7 @@ async fn an_in_dialog_request_past_the_bound_is_forwarded() {
         contact: Some(
             Contact::parse(&SipStr::owned(&format!("<sip:bob@{WORKER}>"))).expect("a Contact"),
         ),
+        extra_headers: crate::common::options_capabilities(),
         ..Default::default()
     };
     let ok = generate_response(&read(&forward), 200, "OK", &opts).expect("the 200");
