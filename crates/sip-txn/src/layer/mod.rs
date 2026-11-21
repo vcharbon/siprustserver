@@ -104,4 +104,5 @@ pub use handle::{TransactionConfig, TransactionEvents, TransactionLayer, Transac
 pub use held_cancel::CancelledInvite;
 pub use key::ServerTxnKey;
 pub use new_call_gate::NewCallGate;
+pub use orphan::OrphanOrigin;
 pub use refusals::{InviteRefusals, NewCallRefusal, RefusedCopy, Verdict, REFUSED_MEMO_MAX};

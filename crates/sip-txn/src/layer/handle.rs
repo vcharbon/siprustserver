@@ -22,6 +22,7 @@ use super::event_age::EventAges;
 pub use super::event_receiver::TransactionEvents;
 use super::held_cancel::CancelledInvite;
 use super::key::{ServerTxnId, ServerTxnKey};
+use super::orphan::OrphanOrigin;
 use super::owner::Owner;
 use super::run::run;
 
@@ -226,8 +227,19 @@ impl TransactionLayer {
     /// each is orphaned and closes its own obligations, the ACK of each later
     /// 2xx among them, surfacing nothing (ADR-0034). Idempotent.
     pub async fn cancel_txns_for_call(&self, call_ref: &str) -> Result<(), TransactionLayerClosed> {
-        self.roundtrip(|reply| Command::CancelTxnsForCall { call_ref: call_ref.to_string(), reply })
-            .await
+        self.cancel_txns_for_call_with_origins(call_ref, Vec::new()).await
+    }
+
+    /// [`Self::cancel_txns_for_call`], each INVITE client transaction
+    /// `origins` names answering an offer its 2xx makes under the origin given
+    /// there ([`OrphanOrigin`]).
+    pub async fn cancel_txns_for_call_with_origins(
+        &self,
+        call_ref: &str,
+        origins: Vec<OrphanOrigin>,
+    ) -> Result<(), TransactionLayerClosed> {
+        let call_ref = call_ref.to_string();
+        self.roundtrip(|reply| Command::CancelTxnsForCall { call_ref, origins, reply }).await
     }
 
     /// How many transactions still serve `call_ref`: those on its books (any

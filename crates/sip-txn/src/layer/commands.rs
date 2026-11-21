@@ -29,8 +29,8 @@ impl Owner {
                 let disposition = self.do_reoffer(endpoint, *message, src).await;
                 let _ = reply.send(disposition);
             }
-            Command::CancelTxnsForCall { call_ref, reply } => {
-                self.do_cancel_txns_for_call(&call_ref);
+            Command::CancelTxnsForCall { call_ref, origins, reply } => {
+                self.do_cancel_txns_for_call(&call_ref, origins);
                 let _ = reply.send(());
             }
             Command::RelinquishCall { call_ref, reply } => {

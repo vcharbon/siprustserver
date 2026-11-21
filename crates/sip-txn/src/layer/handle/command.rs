@@ -14,6 +14,7 @@ use call::TxnKind;
 
 use super::super::held_cancel::CancelledInvite;
 use super::super::key::ServerTxnKey;
+use super::super::orphan::OrphanOrigin;
 
 pub(in crate::layer) enum Command {
     SendRequest {
@@ -49,6 +50,7 @@ pub(in crate::layer) enum Command {
     },
     CancelTxnsForCall {
         call_ref: String,
+        origins: Vec<OrphanOrigin>,
         reply: oneshot::Sender<()>,
     },
     /// Delete every transaction of `call_ref` with nothing sent; replies with

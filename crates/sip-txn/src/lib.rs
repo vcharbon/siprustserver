@@ -62,8 +62,8 @@ pub mod timers;
 // the per-Call-ID message budget.
 pub use layer::{
     BoundPassed, CallIdBudget, CancelledInvite, DeferredBound, InviteRefusals, NewCallGate,
-    NewCallRefusal, OnBound, RefusedCopy, ServerTxnKey, TransactionConfig, TransactionEvents,
-    TransactionLayer, TransactionLayerClosed, Verdict, REFUSED_MEMO_MAX,
+    NewCallRefusal, OnBound, OrphanOrigin, RefusedCopy, ServerTxnKey, TransactionConfig,
+    TransactionEvents, TransactionLayer, TransactionLayerClosed, Verdict, REFUSED_MEMO_MAX,
 };
 // The class a new INVITE is judged in, read off the parsed request.
 pub use invite_class::{class_of, InviteClass};

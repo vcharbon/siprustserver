@@ -8,6 +8,7 @@ use sip_message::generators::{
     generate_ack_for_2xx_from_invite, generate_bye_for_2xx_from_invite, GenerateError,
 };
 use sip_message::sdp_answer::reject_offer;
+use sip_message::under_origin;
 use std::net::SocketAddr;
 
 use sip_message::{BuildHeldSdpOptions, Method, SipRequest, SipResponse};
@@ -17,6 +18,16 @@ use call::TxnKind;
 
 use super::owner::Owner;
 use super::txn::TxnRef;
+
+/// The origin an orphaned INVITE client transaction's ACK states when it
+/// answers an offer its 2xx makes: `origin`, an `o=` value, the next version
+/// of the session the released call stated on the dialog its INVITE at
+/// `branch` was sent in (RFC 3264 §8, RFC 4566 §5.2).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OrphanOrigin {
+    pub branch: String,
+    pub origin: String,
+}
 
 impl Owner {
     /// The first 2xx an orphaned INVITE client txn draws: Accepted for Timer
@@ -76,7 +87,7 @@ impl Owner {
         resp: &SipResponse,
     ) -> Option<(Bytes, SocketAddr)> {
         let t = self.clients.get(branch)?;
-        let answer = owed_answer(invite, resp, &t.reliable_offers);
+        let answer = owed_answer(invite, resp, &t.reliable_offers, t.answer_origin.as_deref());
         let ack = generate_ack_for_2xx_from_invite(invite, resp, &self.id_gen.new_branch(), answer)
             .inspect_err(|e| unbuilt(branch, "ACK", e))
             .ok()?;
@@ -154,8 +165,9 @@ impl Owner {
     /// timers and closes its own obligations — the ACK a final still draws
     /// (RFC 3261 §17.1.1.3, §13.2.2.4), the Timer D / Timer M re-ACK hold,
     /// Timer E to its final or Timer F — and is purged by its own timer.
-    /// Server transactions keep their §17.2 holds.
-    pub(super) fn do_cancel_txns_for_call(&mut self, call_ref: &str) {
+    /// Server transactions keep their §17.2 holds. Each INVITE client txn
+    /// `origins` names keeps the origin its owed answer states.
+    pub(super) fn do_cancel_txns_for_call(&mut self, call_ref: &str, origins: Vec<OrphanOrigin>) {
         // O(k-branches) over just this call's live branches (the lockstep index),
         // not an O(total_txns) scan of the whole map.
         let branches: Vec<String> = match self.txn_index.get(call_ref) {
@@ -165,9 +177,10 @@ impl Owner {
         for branch in branches {
             // A held CANCEL stays parked on the orphan: only the branch's
             // first provisional sends it (§9.1).
-            match self.clients.get_mut(branch.as_str()) {
-                Some(t) => t.orphaned = true,
-                None => continue,
+            let Some(t) = self.clients.get_mut(branch.as_str()) else { continue };
+            t.orphaned = true;
+            if let Some(given) = origins.iter().find(|o| o.branch == branch) {
+                t.answer_origin = Some(given.origin.clone());
             }
             self.detach_from_call(TxnRef::Client(&branch));
             self.metrics
@@ -202,11 +215,13 @@ fn unaddressed<T>(branch: &str, what: &str) -> Option<T> {
 /// `resp` carries an offer when `invite` carried none and no reliable
 /// provisional of its dialog did (`reliable_offers`, RFC 3262 §5). Every
 /// offered stream is rejected (RFC 3264 §6: port 0): the dialog is released,
-/// never used.
+/// never used. The answer states `origin` where one was handed over (§8),
+/// a fresh origin otherwise.
 fn owed_answer(
     invite: &SipRequest,
     resp: &SipResponse,
     reliable_offers: &[String],
+    origin: Option<&str>,
 ) -> Option<Vec<u8>> {
     let offered_reliably =
         resp.to().tag().is_some_and(|tag| reliable_offers.iter().any(|t| t == tag));
@@ -217,7 +232,8 @@ fn owed_answer(
         local_ip: invite.top_via().host().to_string(),
         now_ms: sip_clock::raw_system_wall_ms(),
     };
-    reject_offer(resp.sdp()?, &options)
+    let answer = reject_offer(resp.sdp()?, &options)?;
+    Some(origin.and_then(|o| under_origin(&answer, o)).unwrap_or(answer))
 }
 
 /// Log that the `what` an orphaned transaction at `branch` owes was not sent:

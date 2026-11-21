@@ -71,13 +71,14 @@ pub(super) async fn release_call(ctx: &Arc<RouterCtx>, call_ref: &str, kind: Rel
     ctx.outboxes.release(call_ref).await;
     match kind {
         ReleaseKind::Terminated => {
+            let origins = orphan_origins(ctx, call_ref);
             ctx.state.drop_local(call_ref);
             left_the_map(ctx, call_ref).await;
             // Idempotent with an explicit `CancelAllTimers` effect, but not
             // dependent on every rule remembering to emit one: a terminated call
             // frees EVERY timer slot it owns now, not at its deadline.
             ctx.timers.cancel_all(call_ref.to_string()).await;
-            let _ = ctx.txn.cancel_txns_for_call(call_ref).await;
+            let _ = ctx.txn.cancel_txns_for_call_with_origins(call_ref, origins).await;
             // Nothing answers a request of this call any more: its handler ran
             // and died (ADR-0020), or the answer rode an effect that will not
             // come. This turn's own answers are already sent (the commit
@@ -93,6 +94,7 @@ pub(super) async fn release_call(ctx: &Arc<RouterCtx>, call_ref: &str, kind: Rel
             ctx.dispatcher.release(call_ref, RemovalClass::Terminated);
         }
         ReleaseKind::SelfRelease { ended } => {
+            let origins = orphan_origins(ctx, call_ref);
             if ctx.state.drop_local(call_ref) {
                 left_the_map(ctx, call_ref).await;
                 ctx.timers.cancel_all(call_ref.to_string()).await;
@@ -102,7 +104,7 @@ pub(super) async fn release_call(ctx: &Arc<RouterCtx>, call_ref: &str, kind: Rel
                     // this layer's ACK or BYE (ADR-0034).
                     let _ = ctx.txn.relinquish_accepted_of_call(call_ref).await;
                 }
-                let _ = ctx.txn.cancel_txns_for_call(call_ref).await;
+                let _ = ctx.txn.cancel_txns_for_call_with_origins(call_ref, origins).await;
                 if ended {
                     let _ = ctx.txn.forget_unanswered_of_call(call_ref).await;
                     answer_unanswered_invites(ctx, call_ref).await;
@@ -148,6 +150,23 @@ pub(super) async fn release_call(ctx: &Arc<RouterCtx>, call_ref: &str, kind: Rel
 /// transactions and queue go next.
 async fn left_the_map(ctx: &RouterCtx, call_ref: &str) {
     ctx.turn_probe.release_step(&ctx.config.self_ordinal, call_ref).await;
+}
+
+/// For each re-INVITE the resident call `call_ref` sent and holds on a dialog,
+/// the origin an answer its orphaned transaction composes states: the next
+/// version of the session this stack stated on that dialog (RFC 3264 §8). A
+/// dialling INVITE's record names no transaction: its orphan answers under a
+/// fresh origin, the dialog having no session of this stack's yet.
+fn orphan_origins(ctx: &RouterCtx, call_ref: &str) -> Vec<sip_txn::OrphanOrigin> {
+    let Some(call) = ctx.state.resident(call_ref) else { return Vec::new() };
+    let legs = std::iter::once(&call.a_leg).chain(&call.b_legs);
+    legs.flat_map(|leg| leg.dialogs.iter().map(move |dialog| (leg, dialog)))
+        .filter_map(|(leg, dialog)| {
+            let sent = dialog.sent_invite.as_ref()?.sent.as_ref()?;
+            let origin = b2bua_core::rules::relay::next_origin_on(leg, dialog)?;
+            Some(sip_txn::OrphanOrigin { branch: sent.branch.clone(), origin })
+        })
+        .collect()
 }
 
 /// Answer 481 every in-dialog INVITE of the ended call `call_ref` that has no

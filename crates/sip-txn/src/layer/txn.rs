@@ -267,6 +267,7 @@ impl Transaction {
             past_trying: false,
             dialogs: Vec::new(),
             reliable_offers: Vec::new(),
+            answer_origin: None,
             lifetime,
             orphaned: false,
             held: false,
@@ -450,6 +451,12 @@ pub(super) struct Transaction {
     /// reliable provisionals that carried one, at most [`MAX_DIALOGS`]. Their
     /// PRACK answered it (RFC 3262 §5), so their 2xx's ACK owes no answer.
     pub(super) reliable_offers: Vec<String>,
+    /// On an orphaned INVITE client txn: the `o=` value the answer its ACK
+    /// owes states, as the released call handed it over ([`OrphanOrigin`]);
+    /// `None`, a fresh origin.
+    ///
+    /// [`OrphanOrigin`]: super::OrphanOrigin
+    pub(super) answer_origin: Option<String>,
     /// When this transaction leaves the map, written only by
     /// `layer::lifetime`. An INVITE client txn that gave up is held
     /// [`Hold::GaveUp`](super::lifetime::Hold::GaveUp) in Trying/Proceeding:
