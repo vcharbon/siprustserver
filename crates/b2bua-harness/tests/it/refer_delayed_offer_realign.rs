@@ -70,7 +70,7 @@ impl Realigning {
 
 /// A INVITEs B with no offer, B offers in its 2xx and A answers in her ACK.
 /// B REFERs A to C; the stack dials C with no offer, C offers in its 2xx and
-/// is told nothing more is pending; the stack re-INVITEs C with no body, C
+/// B is told the transfer succeeded; the stack re-INVITEs C with no body, C
 /// offers again in its 2xx, and A receives the re-INVITE carrying that offer.
 /// `watchdog_sec` sets the realign re-INVITEs' answer watchdog, the default
 /// when `None`.
@@ -175,10 +175,11 @@ fn cdr_events(b2bua: &B2buaSut) -> Vec<(CdrEventType, Option<String>)> {
 }
 
 /// The rollback after A's answer can never come: C's held ACK answers its
-/// offer rejecting every stream, on the wire before C's BYE; A, B and C are
-/// BYE'd and the call reaps. `tolerated` are the requests A may still see
-/// re-sent ahead of her BYE.
-async fn rolled_back(t: Realigning, tolerated: &[&str]) -> B2buaSut {
+/// offer rejecting every stream, on the wire at or past `held_until` (the
+/// wire's length when the answer stopped coming) and before C's BYE; A, B and
+/// C are BYE'd and the call reaps. `tolerated` are the requests A may still
+/// see re-sent ahead of her BYE.
+async fn rolled_back(t: Realigning, held_until: usize, tolerated: &[&str]) -> B2buaSut {
     let ack = t.charlie.receive("ACK").await;
     let body = String::from_utf8_lossy(ack.request().body()).into_owned();
     assert!(
@@ -193,6 +194,10 @@ async fn rolled_back(t: Realigning, tolerated: &[&str]) -> B2buaSut {
     let acks = t.c_realign_acks();
     let bye_at = sent(&t.h, t.b2bua.addr, t.charlie.addr(), "BYE ", None);
     assert_eq!(acks.len(), 1, "one ACK of C's c-realign 2xx");
+    assert!(
+        acks[0].0 >= held_until,
+        "C's ACK waits for A's answer: it leaves only once that answer cannot come"
+    );
     assert!(
         bye_at.first().is_some_and(|(bye, _)| acks[0].0 < *bye),
         "C's ACK leaves before the rollback's BYE"
@@ -295,9 +300,10 @@ async fn the_targets_resent_2xx_draws_no_ack_while_the_answer_is_awaited() {
 async fn the_transferees_refusal_releases_a_rejecting_ack_before_the_rollback() {
     let mut t = realigning("refer-delayed-offer-realign-488", 2, None).await;
 
+    let refused_at = t.h.wire_entries().len();
     t.a_realign.respond(488, "Not Acceptable Here").await;
     t.alice.receive("ACK").await;
-    let b2bua = rolled_back(t, &[]).await;
+    let b2bua = rolled_back(t, refused_at, &[]).await;
     let events = cdr_events(&b2bua);
     assert!(
         events.iter().any(|(e, r)| *e == CdrEventType::Reject
@@ -313,9 +319,10 @@ async fn the_transferees_refusal_releases_a_rejecting_ack_before_the_rollback() 
 async fn the_watchdog_releases_a_rejecting_ack_before_the_rollback() {
     let t = realigning("refer-delayed-offer-realign-watchdog", 3, Some(SHORT_WATCHDOG_SEC)).await;
 
+    let expired_at = t.h.wire_entries().len();
     let past_the_watchdog = Duration::from_secs(SHORT_WATCHDOG_SEC as u64 + 1);
     t.h.advance(past_the_watchdog).await;
-    let b2bua = rolled_back(t, &["INVITE", "CANCEL"]).await;
+    let b2bua = rolled_back(t, expired_at, &["INVITE", "CANCEL"]).await;
     let events = cdr_events(&b2bua);
     assert!(
         events.iter().any(|(e, r)| *e == CdrEventType::Timeout
