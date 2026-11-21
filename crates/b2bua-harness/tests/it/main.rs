@@ -61,6 +61,7 @@ mod deferred_routing_failover;
 mod destination_allowlist_gate;
 mod destroy_leg_caller;
 mod destroy_leg_stated_reason;
+mod dialled_2xx_after_a_non_2xx;
 mod dialled_invite_held_once;
 mod dialog_gate;
 mod dialog_states;

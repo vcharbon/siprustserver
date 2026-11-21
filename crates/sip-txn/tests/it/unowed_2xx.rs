@@ -1,9 +1,9 @@
-//! RFC 6026 §7.2, §8.4: a 2xx an INVITE client transaction owes nothing. In
+//! RFC 6026 §7.2, §8.4: a 2xx a re-INVITE client transaction owes nothing. In
 //! Completed, past a non-2xx final, the transaction takes only that final's
-//! repeats; a re-INVITE that gave up at Timer B with no response is over. The
-//! layer absorbs such a 2xx: no ACK, nothing handed up, counted. A dialling
-//! INVITE's Timer B hold still hands its late 2xx up, for the TU to ACK and
-//! end the dialog it confirms.
+//! repeats; one that gave up at Timer B with no response is over. The layer
+//! absorbs such a 2xx: no ACK, nothing handed up, counted. A dialling
+//! INVITE's transaction, Completed or held after Timer B, still hands its
+//! late 2xx up, for the TU to ACK and end the dialog it confirms.
 
 use crate::common;
 
@@ -39,25 +39,43 @@ fn reinvite_response(status: u16, reason: &str, branch: &str) -> Vec<u8> {
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_2xx_after_a_non_2xx_final_is_absorbed() {
+async fn a_2xx_to_a_reinvite_after_its_non_2xx_final_is_absorbed() {
     let mut stack = Stack::build(5, 64, 64).await;
-    let (call_id, branch) = ("callid-rejected-then-2xx", "z9hG4bK-rejected-then-2xx");
-    let invite = invite_with_cr_lg("self|call-rejected", call_id, branch, "b-1");
-    stack.txn.send_request(invite, addr(PEER), TxnKind::Invite).await.unwrap();
-    stack
-        .inject(&response_bytes(488, "Not Acceptable Here", "INVITE", branch, call_id, true))
-        .await;
+    let branch = "z9hG4bK-rejected-then-2xx";
+    stack.txn.send_request(outbound_reinvite(branch), addr(PEER), TxnKind::Invite).await.unwrap();
+    stack.inject(&reinvite_response(488, "Not Acceptable Here", branch)).await;
     elapse_ms(20).await;
     assert_eq!(count_requests(&stack.drain_peer(), "ACK"), 1, "the 488 is hop-ACKed");
     assert_eq!(handed_up(&stack.drain_events(), 488), vec![true]);
 
-    let ok = response_bytes(200, "OK", "INVITE", branch, call_id, true);
+    let ok = reinvite_response(200, "OK", branch);
     stack.inject(&ok).await;
     stack.inject(&ok).await;
     elapse_ms(20).await;
     assert_eq!(count_requests(&stack.drain_peer(), "ACK"), 0, "no ACK answers the 2xx");
     assert_eq!(handed_up(&stack.drain_events(), 200), Vec::<bool>::new(), "nothing is handed up");
     assert_eq!(stack.txn.metrics().late_2xx_dropped(), 2, "the 2xx and its copy are counted");
+}
+
+/// The dialog a 2xx to a dialling INVITE confirms after its non-2xx final is
+/// the TU's to ACK and end (RFC 3261 §13.2.2.4, §15): the Completed
+/// transaction hands that 2xx up, matched, and ACKs nothing itself.
+#[tokio::test(start_paused = true)]
+async fn a_2xx_to_a_dialling_invite_after_its_non_2xx_final_is_handed_up() {
+    let mut stack = Stack::build(5, 64, 64).await;
+    let (call_id, branch) = ("callid-rejected-then-2xx", "z9hG4bK-dialled-rejected-then-2xx");
+    let invite = invite_with_cr_lg("self|call-rejected", call_id, branch, "b-1");
+    stack.txn.send_request(invite, addr(PEER), TxnKind::Invite).await.unwrap();
+    stack.inject(&response_bytes(486, "Busy Here", "INVITE", branch, call_id, true)).await;
+    elapse_ms(20).await;
+    assert_eq!(count_requests(&stack.drain_peer(), "ACK"), 1, "the 486 is hop-ACKed");
+    assert_eq!(handed_up(&stack.drain_events(), 486), vec![true]);
+
+    stack.inject(&response_bytes(200, "OK", "INVITE", branch, call_id, true)).await;
+    elapse_ms(20).await;
+    assert_eq!(count_requests(&stack.drain_peer(), "ACK"), 0, "the layer ACKs no 2xx");
+    assert_eq!(handed_up(&stack.drain_events(), 200), vec![true]);
+    assert_eq!(stack.txn.metrics().late_2xx_dropped(), 0);
 }
 
 #[tokio::test(start_paused = true)]
