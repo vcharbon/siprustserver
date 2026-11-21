@@ -172,8 +172,6 @@ async fn a_relayed_requests_timeout_on_a_full_per_call_queue_reaches_the_call() 
     assert_eq!(s.b2bua.metrics().past_bound_total(), 1, "it waits past the full queue");
     s.h.advance(Duration::from_secs(6)).await;
 
-    // The permit frees: INFO 2 and 3 are relayed, then the Timeout, which
-    // ends the call.
     parked.expect(503).await;
     for _ in 0..2 {
         s.bob.receive("INFO").await.respond(200, "OK").await;

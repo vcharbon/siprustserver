@@ -23,6 +23,8 @@ const MRF_SDP: &str = "v=0\r\no=mrf 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.
 const DEST_SDP: &str = "v=0\r\no=dest 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/AVP 8\r\na=rtpmap:8 PCMA/8000\r\na=sendrecv\r\n";
 
 const MRF_PORT: u16 = 5670;
+/// Past Timer F (64·T1 = 32 s) of the MSCML `<play>` INFO.
+const PAST_THE_PLAY_TIMER_F: Duration = Duration::from_secs(33);
 const DEST_PORT: u16 = 5950;
 
 /// A decision that requests an announcement: it defers normal routing and hands
@@ -428,8 +430,7 @@ async fn announcement_play_info_unanswered_rejects_the_caller() {
     call.expect(183).await;
     let _unanswered = mrf.receive("INFO").await;
 
-    // Past Timer F (64·T1 = 32 s) of the <play> INFO.
-    h.advance(Duration::from_secs(33)).await;
+    h.advance(PAST_THE_PLAY_TIMER_F).await;
     mrf.drain().await; // the INFO's retransmissions
     call.expect(504).await;
     mrf.receive("BYE").await.respond(200, "OK").await;

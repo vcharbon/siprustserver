@@ -25,6 +25,7 @@ stateDiagram-v2
     CRealigning --> CRealigning : INVITE (B) [leg Confirmed] [guard] ⇒ cancel the re-INVITE watchdog · cancel overall · terminate (c-realign rollback — BYE A/B/C)
     CRealigning --> CRealigning : REFER (B) ⇒ 491 → B (second REFER pending)
     CRealigning --> CRealigning : request (B) [guard] ⇒ 481 → B (referrer signalling dead until merge)
+    CRealigning --> CRealigning : timeout  [guard] ⇒ cancel the re-INVITE watchdog · cancel overall-safety · terminate (c-realign timeout rollback)
     CRealigning --> CRealigning : timer ReferOverallSafety ⇒ cancel subscription-expiry · cancel both re-INVITE watchdogs · terminate (overall-safety watchdog rollback)
     CRealigning --> CRealigning : timer ReferReinviteAnswer ⇒ cancel overall-safety · terminate (c-realign timeout rollback)
     CRinging --> CRealigning : INVITE 2xx (B) [leg Trying/Early] [guard] ⇒ ACK → C (answer initial INVITE) · NOTIFY terminated → referrer · re-INVITE → C (c-realign, A's SDP) · arm c-realign re-INVITE watchdog · cancel subscription-expiry · cancel C no-answer

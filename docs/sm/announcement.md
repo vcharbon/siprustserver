@@ -10,6 +10,7 @@ stateDiagram-v2
     Announcing --> Announcing : INVITE (B) [guard] ⇒ MRF failure → A · terminate (MRF failure)
     Announcing --> [*] : INFO (B) [guard] ⇒ 200 OK → media (answer MSCML INFO) · BYE → media leg · INVITE → destination
     Announcing --> [*] : INFO (B) [guard] ⇒ 200 OK → media (answer MSCML INFO) · clip-failed final → A · terminate (announcement clip failed)
+    Announcing --> [*] : timeout  [guard] ⇒ 504 → A (the MRF never answered the play INFO) · terminate (MRF timeout)
     OfferingMrf --> Announcing : INVITE 2xx (B) [leg Trying/Early] [guard] ⇒ ACK → media (confirm early dialog) · early media (MRF SDP) → A · MSCML <play> → media
     OfferingMrf --> OfferingMrf : INVITE (B) [guard] ⇒ MRF failure → A · terminate (MRF failure)
     [*] --> OfferingMrf

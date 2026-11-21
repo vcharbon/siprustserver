@@ -21,6 +21,8 @@ const ORDINAL: &str = "w0";
 const MEDIA_ADDR: &str = "127.0.0.1:5090";
 /// Past Timer F and Timer B (64·T1 = 32 s) of the service's request.
 const PAST_THE_TIMEOUT: Duration = Duration::from_secs(33);
+/// An OPTIONS keepalive interval past the timeout window: no probe rides it.
+const KEEPALIVE_PAST_THE_TIMEOUT_SEC: i64 = 300;
 
 /// A service that, on the caller's MESSAGE, dials a media leg of its own
 /// toward the media server and, once the media server answers, ACKs it and
@@ -150,8 +152,7 @@ async fn the_media_leg_request_times_out(
     let media = h.agent("media", MEDIA_ADDR).await;
     let b2bua = B2buaSut::builder(decision())
         .services(vec![service])
-        // No keepalive inside the timeout window.
-        .tune(|c| c.keepalive_interval_sec = 300)
+        .tune(|c| c.keepalive_interval_sec = KEEPALIVE_PAST_THE_TIMEOUT_SEC)
         .start(&h, "b2bua", "127.0.0.1:5080")
         .await;
 

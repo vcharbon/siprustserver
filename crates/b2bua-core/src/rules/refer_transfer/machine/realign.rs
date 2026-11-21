@@ -144,7 +144,7 @@ pub(super) fn c_realign_timeout() -> RuleDefinition {
         ],
         matcher: Match::timer()
             .timer_type(call::TimerType::ReferReinviteAnswer),
-        handle: c_realign_rollback,
+        handle: |ctx| ok(c_realign_rollback(ctx, None)?),
     }
 }
 
@@ -169,26 +169,22 @@ pub(super) fn c_realign_txn_timeout() -> RuleDefinition {
                 && state(ctx).and_then(|s| s.c_leg_id.as_deref()) == Some(ctx.source_leg_id)
         }),
         handle: |ctx| {
-            let mut result = c_realign_rollback(ctx)?;
-            result.actions.insert(
-                0,
-                RuleAction::cancel(TimerKey::leg(
-                    call::TimerType::ReferReinviteAnswer,
-                    ctx.source_leg_id,
-                )),
-            );
-            Some(result)
+            let watchdog = TimerKey::leg(call::TimerType::ReferReinviteAnswer, ctx.source_leg_id);
+            ok(c_realign_rollback(ctx, Some(watchdog))?)
         },
     }
 }
 
-/// The c-realign rollback: cancel the overall-safety timer, record C's
-/// timeout and end the call (A, B and C are BYE'd).
+/// The c-realign rollback: cancel `watchdog` when it still runs and the
+/// overall-safety timer, record C's timeout and end the call (A, B and C are
+/// BYE'd).
 fn c_realign_rollback(
     ctx: &b2bua_sdk::model::RuleContext,
-) -> Option<b2bua_sdk::model::RuleHandleResult> {
+    watchdog: Option<TimerKey>,
+) -> Option<Vec<RuleAction>> {
     let st = state(ctx)?.clone();
-    let mut actions = vec![RuleAction::cancel(TimerKey::call(call::TimerType::ReferOverallSafety))];
+    let mut actions: Vec<RuleAction> = watchdog.into_iter().map(RuleAction::cancel).collect();
+    actions.push(RuleAction::cancel(TimerKey::call(call::TimerType::ReferOverallSafety)));
     if let Some(c_leg_id) = st.c_leg_id.clone() {
         actions.push(RuleAction::AddCdrEvent {
             event_type: CdrEventType::Timeout,
@@ -202,7 +198,7 @@ fn c_realign_rollback(
         cause: TerminationCause::Timeout(TimeoutKind::NoAnswer),
         by_leg: st.c_leg_id.clone(),
     });
-    ok(actions)
+    Some(actions)
 }
 
 /// transfer-a-realign-200 — A answers the a-realign re-INVITE (200) →

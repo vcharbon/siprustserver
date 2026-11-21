@@ -407,7 +407,6 @@ define_service! {
                 }),
             handle: on_mscml_failed,
         },
-        // The MRF never answered the <play> INFO → 504 to the caller, terminate.
         sm_rule! {
             id: "announcement-play-timeout",
             machine: MACHINE,

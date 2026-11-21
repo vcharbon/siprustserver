@@ -62,9 +62,10 @@ pub(super) fn handle_timeout() -> RuleDefinition {
         .runs_while_terminating()
 }
 
+/// The actions of `handle-timeout` (module doc). The BYE that released a
+/// fork straggler times out the release's alone (§15.1.1): the winning dialog
+/// on the leg never reads it.
 fn timeout_actions(ctx: &RuleContext) -> Vec<RuleAction> {
-    // The BYE that released a fork straggler times out the release's alone
-    // (§15.1.1): the winning dialog on the leg never reads it.
     if straggler_release_timeout(ctx) {
         return vec![];
     }
@@ -133,7 +134,11 @@ fn end_the_leg(ctx: &RuleContext) -> Vec<RuleAction> {
 /// transaction still open: sent if the callee answered a provisional, held
 /// for one otherwise, §9.1), and `call-failure-result` drives the outcome.
 /// Without one the caller is answered in this turn, before the CANCELed leg
-/// resolves (§9.1 lets that wait 64·T1), and the call ends. `None` for any
+/// resolves (§9.1 lets that wait 64·T1), and the call ends. The consult
+/// states which timeout fired, so the decision service routes a dead hop
+/// (`response`: nothing answered) apart from a callee that rang and went
+/// silent (`transaction`), and an empty relayable image: a blackholed hop drew
+/// no final, so an earlier attempt's headers cannot answer it. `None` for any
 /// other timeout.
 fn pending_leg_invite_timeout(ctx: &RuleContext) -> Option<Vec<RuleAction>> {
     let timed_out_invite = ctx.timeout_method().is_some_and(|m| m == "INVITE");
@@ -158,9 +163,6 @@ fn pending_leg_invite_timeout(ctx: &RuleContext) -> Option<Vec<RuleAction>> {
         return Some(actions);
     };
     let leg = ctx.source_leg_id.to_string();
-    // Which timeout fired rides beside the origin so the decision service can
-    // route a dead hop ("response": nothing answered) apart from a callee that
-    // rang and went silent ("transaction").
     let timeout_kind = if response_timeout { "response" } else { "transaction" };
     Some(vec![
         RuleAction::AddCdrEvent {
@@ -170,8 +172,6 @@ fn pending_leg_invite_timeout(ctx: &RuleContext) -> Option<Vec<RuleAction>> {
             reason: Some("transaction_timeout".into()),
         },
         RuleAction::DestroyLeg { leg_id: leg.clone(), headers: vec![] },
-        // A blackholed hop drew no final: this consult states an empty
-        // relayable image, so an earlier attempt's headers cannot answer it.
         RuleAction::MergeCallExt {
             ext: crate::rules::relay::failure_headers_ext(
                 None,
