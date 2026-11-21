@@ -45,8 +45,8 @@ impl<'a> RuleCall<'a> {
     }
 
     /// The routing answer the call's setup applied, as a service's `init`
-    /// reads it (ADR-0016 X8): the route the limiter admitted, or the
-    /// failover route that stood in for a refused one. Its slices are the
+    /// reads it (ADR-0016 X8): the route the setup applied, the first, or
+    /// the failover that stood in for a refused one. Its slices are the
     /// ones the route states; [`ext`](Self::ext) also keeps those a refused
     /// route left. `None` outside `init`, and at a setup that applied no route.
     pub fn setup_route(&self) -> Option<&'a RouteAnswer> {
