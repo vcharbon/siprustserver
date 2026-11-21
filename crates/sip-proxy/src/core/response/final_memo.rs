@@ -55,6 +55,7 @@ impl ProxyCore {
                 stickiness: None,
                 minted: None,
                 via_cookie: None,
+                settled: false,
             },
             Lifetime::Retransmission,
         );

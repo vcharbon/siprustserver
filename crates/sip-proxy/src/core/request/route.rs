@@ -68,7 +68,8 @@ impl ProxyCore {
     ///   hop sent, ends here.
     /// - A retransmission, matched on the whole received transaction so a
     ///   request that only shares the branch is none, repeats its first copy's
-    ///   target (toward a name, the address that copy left for) and both
+    ///   target (toward a name, the address that copy left for, on the name's
+    ///   face) and both
     ///   cookies from the memo. It is not counted as a new call
     ///   and meets no gate. A first target no longer `Alive` is replaced by
     ///   where the first copy's cookie places the call. A CANCEL never takes
@@ -176,6 +177,12 @@ impl ProxyCore {
         );
         let rtx_hit: Option<CancelEntry> =
             if method == Method::Cancel { None } else { self.cancel_lru.lookup(&rtx_key) };
+        let cancelled_invite: Option<CancelEntry> = if method == Method::Cancel {
+            let key = invite_txn_key(req.top_via(), call_id.as_str(), from.tag(), cseq.seq());
+            self.cancel_lru.lookup(&key)
+        } else {
+            None
+        };
 
         let Some((mut draft, c)) = self.classify(msg, req, src, face, req.thaw()) else {
             return self.drop_unforwardable();
@@ -212,7 +219,7 @@ impl ProxyCore {
         let placed_ack =
             if method == Method::Ack && looks_at_invite { self.invite_hop(msg, req) } else { None };
         let chosen: Result<Chosen, RouteOutcome> = if method == Method::Cancel {
-            let target = self.cancel_target(msg, req, arrival, &c).await;
+            let target = self.cancel_target(msg, req, arrival, &c, cancelled_invite.as_ref()).await;
             target.map(|t| (t, RoutingDecisionKind::Cancel, None))
         } else if let Some(found) = ack_hop.filter(|_| !c.worker_outbound) {
             Ok((found.target, RoutingDecisionKind::AckHop, None))
@@ -246,9 +253,12 @@ impl ProxyCore {
             Err(refused) => return refused,
         };
 
+        let memo = rtx_hit.as_ref().or(cancelled_invite.as_ref());
+        let settled_from_a_name = memo.is_some_and(|found| found.settled_on(&target));
         let egress =
             self.egress.request(face, c.worker_outbound, c.loose_route_next_hop.is_some(), || {
-                c.reentry || self.registry.lookup_by_address(&target).is_some()
+                c.reentry
+                    || (!settled_from_a_name && self.registry.lookup_by_address(&target).is_some())
             });
 
         let (src_host, src_port) = observed_source(src);
@@ -301,6 +311,7 @@ impl ProxyCore {
                     stickiness: None,
                     minted: minted_cookie.clone(),
                     via_cookie: via_cookie.clone(),
+                    settled: false,
                 },
                 Lifetime::Retransmission,
             );
@@ -318,6 +329,7 @@ impl ProxyCore {
                 stickiness,
                 minted: None,
                 via_cookie: via_cookie.clone(),
+                settled: false,
             };
             self.cancel_lru.remember(&key, entry, Lifetime::InviteTransaction);
             self.cancel_lru.publish(&self.metrics);

@@ -12,7 +12,9 @@
 //! The inputs are the ingress face and what the message and the registry say,
 //! so any proxy instance picks the same egress with nothing stored: the choice
 //! survives a flow move and a takeover, and a request's copies, its CANCEL and
-//! its ACK state one sent-by (RFC 3261 §17.2.3).
+//! its ACK state one sent-by (RFC 3261 §17.2.3). A copy or a CANCEL sent where
+//! a name's first send went is still a request to the name: the registry is
+//! not asked about that address.
 
 use crate::observability::metrics::Face;
 

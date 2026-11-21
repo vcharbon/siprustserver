@@ -104,8 +104,9 @@ impl Pool {
         self.evict_past_bounds(change);
     }
 
-    /// The entry under `key`, while it targets `from`, targets `to`, keeping
-    /// its place in the write order and its expiry. Past the byte bound the
+    /// The entry under `key`, while it targets `from`, targets `to`, marked
+    /// [`settled`](CancelEntry::settled), keeping its place in the write order
+    /// and its expiry. Past the byte bound the
     /// oldest writes are forgotten.
     pub(super) fn retarget(
         &mut self,
@@ -118,6 +119,7 @@ impl Pool {
             return;
         };
         slot.entry.target = to.clone();
+        slot.entry.settled = true;
         let (old, new) = (slot.bytes, footprint(key, &slot.entry));
         slot.bytes = new;
         self.bytes = self.bytes.saturating_sub(old).saturating_add(new);

@@ -90,25 +90,20 @@ impl ProxyCore {
     /// memo: its loose Route, a worker's Request-URI, its cookie, else the
     /// rendezvous winner among the alive workers (ADR-0009 X7). No CANCEL meets
     /// an admission gate or draws a 503: with no worker to take it, it is dropped
-    /// and counted.
+    /// and counted. `invite` is the INVITE's entry in the memo.
     pub(super) async fn cancel_target(
         &self,
         msg: &SipMessage,
         req: &SipRequest,
         arrival: Arrival,
         c: &Classified,
+        invite: Option<&CancelEntry>,
     ) -> Result<ProxyAddr, RouteOutcome> {
-        let key = invite_txn_key(
-            req.top_via(),
-            req.call_id().as_str(),
-            req.from().tag(),
-            req.cseq().seq(),
-        );
         if let Some(answered) = self.cancel_refused(req, arrival).await {
             self.metrics.record_cancel_lookup(CancelLookup::Hit);
             return Err(answered);
         }
-        let Some(found) = self.cancel_lru.lookup(&key) else {
+        let Some(found) = invite.cloned() else {
             self.metrics.record_cancel_lookup(CancelLookup::Miss);
             if let Some(next) = &c.loose_route_next_hop {
                 return Ok(next.clone());

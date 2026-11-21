@@ -9,6 +9,7 @@ fn entry(branch: &str) -> CancelEntry {
         stickiness: None,
         minted: None,
         via_cookie: None,
+        settled: false,
     }
 }
 
@@ -203,8 +204,8 @@ async fn a_rewrite_refreshes_one_entry() {
 }
 
 /// An entry aimed at a name settles on the address its send left for, in
-/// place: its expiry stays, its bytes are those of the settled entry, and an
-/// entry aimed elsewhere is left alone.
+/// place, marked settled: its expiry stays, its bytes are those of the settled
+/// entry, and an entry aimed elsewhere is left alone.
 #[tokio::test(start_paused = true)]
 async fn a_named_entry_settles_on_its_address_and_keeps_its_expiry() {
     let name = ProxyAddr::new("a-long-peer-name.example.net", 5060);
@@ -218,7 +219,7 @@ async fn a_named_entry_settles_on_its_address_and_keeps_its_expiry() {
     lru.settle_name(&key("named"), &name, sent_to);
     lru.settle_name(&key("literal"), &name, sent_to);
 
-    let settled = CancelEntry { target: ProxyAddr::from(sent_to), ..named };
+    let settled = CancelEntry { target: ProxyAddr::from(sent_to), settled: true, ..named };
     assert_eq!(lru.lookup(&key("named")), Some(settled.clone()));
     assert_eq!(lru.lookup(&key("literal")), Some(entry("b")), "an entry aimed elsewhere stays");
     let fresh = one_stripe(8, usize::MAX);
@@ -289,6 +290,7 @@ fn the_default_bounds_hold_the_heaviest_entries_in_their_bytes() {
         stickiness: None,
         minted: Some(cookie()),
         via_cookie: Some(cookie()),
+        settled: false,
     };
     let rtx = retransmit_key(
         &via,

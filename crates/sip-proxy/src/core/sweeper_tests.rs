@@ -57,6 +57,7 @@ async fn run_sweeps_expired_pending_invite_entries() {
             stickiness: None,
             minted: None,
             via_cookie: None,
+            settled: false,
         },
         Lifetime::Retransmission,
     );

@@ -164,6 +164,17 @@ pub struct CancelEntry {
     pub stickiness: Option<RouteParams>,
     pub minted: Option<RouteParams>,
     pub via_cookie: Option<RouteParams>,
+    /// `target` is the address a send to a name left for, written by
+    /// [`CancelBranchLru::settle_name`] alone. The face a request leaves on is
+    /// the name's, so no registry match of that address moves it.
+    pub settled: bool,
+}
+
+impl CancelEntry {
+    /// Whether `target` is this entry's address settled from a name.
+    pub fn settled_on(&self, target: &ProxyAddr) -> bool {
+        self.settled && self.target == *target
+    }
 }
 
 /// The CANCEL / ACK / retransmission memo: [`DEFAULT_STRIPES`] independently
