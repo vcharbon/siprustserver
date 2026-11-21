@@ -23,9 +23,11 @@ use super::via_marks::{extract_via_custom_params, ViaMarks};
 /// Whether `resp` is a reliable provisional (RFC 3262 §3: a 101–199 with
 /// `Require: 100rel` and an `RSeq` that reads). On an Accepted INVITE client
 /// transaction its call holds, it is a sibling fork's, which its UAC still
-/// PRACKs on that fork's early dialog (§4), so it goes up to the TU; every
-/// other 1xx and every non-2xx is absorbed there until Timer M (RFC 6026
-/// §7.2 passes up only the 2xx).
+/// PRACKs on that fork's early dialog (§4), so it goes up to the TU, an
+/// offer it carries noted as one that PRACK answers
+/// ([`Owner::note_reliable_offer`]); every other 1xx and every non-2xx is
+/// absorbed there until Timer M (RFC 6026 §7.2 passes up only the 2xx), and
+/// so is a reliable one once the call released the transaction.
 pub(super) fn is_reliable_provisional(resp: &SipResponse) -> bool {
     let requires_100rel =
         resp.token_set::<Require>().and_then(Result::ok).is_some_and(|r| r.contains("100rel"));
@@ -123,19 +125,31 @@ impl Owner {
     /// Note the To-tag of `resp`, a provisional to the INVITE client txn at
     /// `branch`, when it is reliable (RFC 3262 §7.1: it bears an RSeq) and
     /// carries the offer the INVITE did not (§5): that dialog's offer is
-    /// answered in its PRACK, never in its 2xx's ACK.
+    /// answered in its PRACK, never in its 2xx's ACK. On an Accepted txn
+    /// too: a sibling fork's reliable provisional handed up there.
     pub(super) fn note_reliable_offer(&mut self, branch: &str, resp: &SipResponse) {
         let Some(tag) = resp.to().tag() else { return };
         if resp.sdp().is_none() || !resp.header::<RSeq>().is_some_and(|r| r.is_ok()) {
             return;
         }
+        if !self.invite_offerless(branch) {
+            return;
+        }
         let Some(txn) = self.clients.get_mut(branch) else { return };
-        let offerless = txn.original_request.as_ref().is_some_and(|o| o.sdp().is_none());
-        if offerless
-            && txn.reliable_offers.len() < MAX_DIALOGS
-            && !txn.reliable_offers.iter().any(|t| t == tag)
+        if txn.reliable_offers.len() < MAX_DIALOGS && !txn.reliable_offers.iter().any(|t| t == tag)
         {
             txn.reliable_offers.push(tag.to_string());
+        }
+    }
+
+    /// Whether the INVITE of the client txn at `branch` carried no offer:
+    /// read off the INVITE it holds, or, once Accepted, off the image it
+    /// keeps ([`Owner::accepted_invite`]).
+    fn invite_offerless(&self, branch: &str) -> bool {
+        let Some(txn) = self.clients.get(branch) else { return false };
+        match txn.original_request.as_ref() {
+            Some(invite) => invite.sdp().is_none(),
+            None => self.accepted_invite(branch).is_some_and(|invite| invite.sdp().is_none()),
         }
     }
 }
