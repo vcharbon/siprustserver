@@ -11,9 +11,10 @@ use crate::rules::ActionExecutor;
 
 /// Record what `resp` from `leg` says before the rules run. `screened`: the
 /// engine dropped it as a reliable provisional's repeat or one out of `RSeq`
-/// order, which records nothing. A 180–189 marks the callee rang; the first
-/// arms the leg's ring deadline (`ring_deadline`). A non-2xx
-/// INVITE final ends the transaction it answers (RFC 3261 §17.1.1.3,
+/// order, or took it as a sibling fork's past the answer and PRACKed it;
+/// either records nothing here, neither the ring nor its deadline. A 180–189
+/// marks the callee rang; the first arms the leg's ring deadline
+/// (`ring_deadline`). A non-2xx INVITE final ends the transaction it answers (RFC 3261 §17.1.1.3,
 /// hop-ACKed below the TU), so the record stops naming that round as in
 /// flight; a final to the INVITE that dialled the leg ends every early dialog
 /// it created (§12.1), the PRACKs its responders are owed leaving first (RFC
