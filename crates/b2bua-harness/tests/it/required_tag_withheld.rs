@@ -134,6 +134,47 @@ async fn a_declared_withhold_refuses_a_required_timer() {
     assert_eq!(listed, ["timer"]);
 }
 
+/// A route whose dial a service defers (an announcement first, the
+/// destination after it) withholds `timer` as any route does: the caller
+/// requiring it is refused before the service dials anyone, the MRF included.
+#[tokio::test(start_paused = true)]
+async fn a_deferred_route_declaring_its_withhold_refuses_a_required_timer() {
+    const MRF_PORT: u16 = 5670;
+    let s = B2buaScene::with_b2bua("withheld-timer-deferred-route", |bob_port| {
+        let decide = move |_req: &_| {
+            let mut r = route_to("127.0.0.1", bob_port);
+            r.features.withhold_option_tags = Some(vec!["timer".into()]);
+            r.service_ext.insert(
+                "announcement".into(),
+                serde_json::json!({
+                    "clip_id": "intro-001",
+                    "mrf_host": "127.0.0.1",
+                    "mrf_port": MRF_PORT,
+                    "dest_host": "127.0.0.1",
+                    "dest_port": bob_port,
+                    "defer_routing": true,
+                }),
+            );
+            NewCallResponse::Route(r)
+        };
+        B2buaSut::builder(Arc::new(ScriptedDecisionEngine::builder().fallback(decide).build()))
+            .services(vec![announcement::service()])
+    })
+    .await;
+    let mrf = s.h.agent("mrf", &format!("127.0.0.1:{MRF_PORT}")).await;
+    let invite = with_timer_offer(s.alice.invite(&s.bob)).with_header("Require", "timer");
+    let mut call = invite.with_sdp(OFFER_SDP).through(s.b2bua.addr).send().await;
+    s.h.advance(RELAY_WINDOW).await;
+    let dialled = (mrf.take_queued().await, s.bob.take_queued().await);
+    assert!(matches!(dialled, (None, None)), "nobody is dialled: {dialled:?}");
+    let refusal = call.expect(420).await;
+    assert_eq!(unsupported(&refusal), ["timer"]);
+    settle_until(|| s.b2bua.cdr_records().len() == 1).await;
+    let cdrs = s.b2bua.cdr_records();
+    assert!(cdrs[0].b_legs.is_empty(), "no leg: {cdrs:?}");
+    let _report = s.finish().await;
+}
+
 /// The callee's face declares a `Supported` without `timer`, which keeps the
 /// session timer off his leg.
 #[tokio::test(start_paused = true)]
