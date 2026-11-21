@@ -17,7 +17,7 @@ use std::time::Duration;
 
 use b2bua_harness::{settle_until, stated, B2buaSut};
 use call::features::RelayFirst18xStrategy;
-use scenario_harness::{Agent, ClientInvite, Dialog, Harness, ServerTxn};
+use scenario_harness::{Agent, ClientInvite, Dialog, Harness, ServerTxn, WaiverScope};
 use sip_net_testkit::{RecordedSipEntry, SendDelay};
 
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 192.0.2.10\r\ns=-\r\nc=IN IP4 192.0.2.10\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
@@ -61,10 +61,16 @@ const HELD_PAST_T1: Duration = Duration::from_millis(600);
 /// BYE's 200 on the harness's 1 ms hops, inside T1.
 const HELD_PAST_THE_RELEASE: Duration = Duration::from_millis(100);
 
-/// How long the fabric holds every CANCEL past its transit: the callee's 2xx
+/// How long the fabric holds each CANCEL, the caller's and this stack's, past
+/// its transit: the callee's 2xx
 /// sent once this stack's CANCEL left reaches this stack before the CANCEL
 /// reaches the callee, and both well before the late fork's 183 ([`HELD`]).
 const CANCEL_HELD: Duration = Duration::from_millis(5);
+
+/// How long the fabric holds the first ACK past its transit: the caller's ACK
+/// of the winner's 2xx reaches this stack after the late fork's 183
+/// ([`HELD`]).
+const ACK_HELD: Duration = Duration::from_millis(40);
 
 /// Past a round trip on the harness's 1 ms transit, well inside T1.
 const PAST_A_ROUND_TRIP: Duration = Duration::from_millis(50);
@@ -129,13 +135,21 @@ fn the_late_183s_held(holds: &'static [Duration]) -> SendDelay {
 }
 
 /// The fabric's hold on the late 183s, as [`the_late_183s_held`], and on
-/// every CANCEL, [`CANCEL_HELD`]: a final its callee sends once this stack's
-/// CANCEL left crosses that CANCEL in flight (RFC 3261 §9.1).
-fn the_late_183s_and_cancels_held(holds: &'static [Duration]) -> SendDelay {
+/// the first `count` requests of `method`, `held` each: a message sent once
+/// such a request left crosses it in flight.
+fn the_late_183s_and_the_first(
+    count: usize,
+    method: &'static str,
+    held: Duration,
+    holds: &'static [Duration],
+) -> SendDelay {
     let late = the_late_183s_held(holds);
+    let request_line = format!("{method} ");
+    let sent = AtomicUsize::new(0);
     Arc::new(move |src, dst, datagram| {
-        if datagram.starts_with(b"CANCEL ") {
-            return Some(CANCEL_HELD);
+        if datagram.starts_with(request_line.as_bytes()) {
+            let n = sent.fetch_add(1, Ordering::Relaxed);
+            return (n < count).then_some(held);
         }
         late(src, dst, datagram)
     })
@@ -204,8 +218,12 @@ async fn rung_over(name: &str, relay: Relay, delay: SendDelay) -> Ringing {
 /// The callee does not ring before the late fork: an offerless INVITE
 /// reaches him.
 async fn offerless_invite(name: &str) -> Ringing {
-    let (h, alice, bob, b2bua) =
-        parties(name, Relay::Transparent, the_late_183s_held(&[HELD])).await;
+    offerless_invite_over(name, the_late_183s_held(&[HELD])).await
+}
+
+/// [`offerless_invite`] over a fabric that holds datagrams as `delay` says.
+async fn offerless_invite_over(name: &str, delay: SendDelay) -> Ringing {
+    let (h, alice, bob, b2bua) = parties(name, Relay::Transparent, delay).await;
     let call =
         alice.invite(&bob).with_header("Supported", "100rel").through(b2bua.addr).send().await;
     let uas = bob.receive("INVITE").await;
@@ -483,7 +501,7 @@ async fn a_late_forks_183_after_its_own_2xx_was_released_draws_no_prack() {
 #[tokio::test(start_paused = true)]
 async fn a_late_forks_183_after_the_answer_crossed_a_cancel_is_pracked_here() {
     let name = "b2bua-prack-late-sibling-cancel-crossed";
-    let delay = the_late_183s_and_cancels_held(&[HELD]);
+    let delay = the_late_183s_and_the_first(2, "CANCEL", CANCEL_HELD, &[HELD]);
     let mut r = rung_over(name, Relay::Transparent, delay).await;
     late_fork_rings(&mut r, ANSWER).await;
     let Ringing { h, alice, bob, b2bua, mut call, mut uas, invite_cseq } = r;
@@ -511,4 +529,90 @@ async fn a_late_forks_183_after_the_answer_crossed_a_cancel_is_pracked_here() {
         pracked(invite_cseq, true),
         "one PRACK per RSeq toward the callee"
     );
+}
+
+/// Transparent relay: the late fork answers this stack's PRACK 481, RFC 3262
+/// §3's answer of a responder that no longer holds the provisional
+/// unacknowledged. The failure is absorbed: nothing reaches the caller, no
+/// request follows it, and the call keeps the winner.
+#[tokio::test(start_paused = true)]
+async fn a_late_forks_prack_refused_481_is_absorbed() {
+    let name = "b2bua-prack-late-sibling-481";
+    let mut r = rung_by_an_early_fork(name, Relay::Transparent, &[HELD]).await;
+    r.h.waive(
+        WaiverScope::rule(
+            "prack-2xx-or-481",
+            "bob deliberately answers the late fork's PRACK 481, contradicting the reliable 183 \
+             he sent: absorbing that failure is what this test measures",
+        )
+        .on_party("bob"),
+    );
+    late_fork_rings(&mut r, ANSWER).await;
+    let a = winner_answers(r, ANSWER, None).await;
+    let mut prack = expect_the_late_forks_prack(&a).await;
+    prack.respond(481, "Call/Transaction Does Not Exist").await;
+    a.h.advance(PAST_A_ROUND_TRIP).await;
+    assert_eq!(a.bob.drain_tu().await, 0, "nothing follows the refusal");
+    let expected = pracked(a.invite_cseq, true);
+    caller_hangs_up(a, &expected).await;
+}
+
+/// Transparent relay: the caller hangs up at once, and the late fork's 183
+/// lands while this stack's BYE to the winner awaits its final. A call
+/// already ending still PRACKs it; one CDR.
+#[tokio::test(start_paused = true)]
+async fn a_late_forks_183_landing_while_the_call_ends_is_pracked_here() {
+    let name = "b2bua-prack-late-sibling-ending";
+    let mut r = rung_by_an_early_fork(name, Relay::Transparent, &[HELD]).await;
+    late_fork_rings(&mut r, ANSWER).await;
+    let mut a = winner_answers(r, ANSWER, None).await;
+    let mut bye = a.dialog.bye().await;
+    let mut bob_bye = a.bob.receive("BYE").await;
+    assert_eq!(bob_bye.request().to().tag(), Some(WINNER), "the call's own BYE");
+    expect_the_late_forks_prack(&a).await.respond(200, "OK").await;
+    bob_bye.respond(200, "OK").await;
+    bye.expect(200).await;
+
+    settle_until(|| a.b2bua.is_reaped()).await;
+    a.b2bua.assert_fully_reaped();
+    assert_eq!(a.b2bua.cdr_records().len(), 1, "one CDR");
+    let report = a.h.finish().await;
+    assert_eq!(
+        pracks_to(&report.entries(), a.b2bua.addr, a.bob.addr()),
+        pracked(a.invite_cseq, true),
+        "one PRACK per RSeq toward the callee"
+    );
+}
+
+/// An offerless INVITE: the fabric holds every ACK, so the late fork's
+/// offering 183 lands between the winner's offering 2xx and the caller's ACK
+/// answering it. The PRACK answers the late fork's offer rejecting its
+/// stream (RFC 3262 §5, RFC 3264 §6), and the ACK relayed to the winner
+/// still carries the caller's answer.
+#[tokio::test(start_paused = true)]
+async fn a_late_forks_offer_landing_before_the_callers_ack_is_answered_in_the_prack() {
+    let name = "b2bua-prack-late-sibling-offer-before-ack";
+    let delay = the_late_183s_and_the_first(1, "ACK", ACK_HELD, &[HELD]);
+    let mut r = offerless_invite_over(name, delay).await;
+    late_fork_rings(&mut r, LATE_FORK_OFFER).await;
+    let Ringing { h, alice, bob, b2bua, mut call, mut uas, invite_cseq } = r;
+    uas.respond(200, "OK").with_to_tag(WINNER).with_sdp(WINNER_OFFER).await;
+    call.expect(200).await;
+    let dialog = call.ack_with(Some(CALLER_ANSWER)).await;
+    let mut prack = expect_prack(&bob, invite_cseq, LATE_FORK, LATE_FORK_RSEQ, 1).await;
+    let body = String::from_utf8_lossy(prack.request().body()).into_owned();
+    assert!(
+        body.lines().any(|l| l.starts_with("m=audio 0 ")),
+        "the PRACK answers the late fork's offer, rejecting its stream: {body:?}"
+    );
+    prack.respond(200, "OK").await;
+    let ack = bob.receive("ACK").await;
+    assert_eq!(ack.request().to().tag(), Some(WINNER), "the caller's ACK reaches the winner");
+    let answer = String::from_utf8_lossy(ack.request().body()).into_owned();
+    assert!(answer.contains("m=audio 10002 "), "carrying the caller's answer: {answer:?}");
+
+    let mut a = Answered { h, alice, bob, b2bua, uas, dialog, invite_cseq };
+    late_fork_answers(&mut a, LATE_FORK_OFFER).await;
+    let expected = pracked(a.invite_cseq, false);
+    caller_hangs_up(a, &expected).await;
 }
