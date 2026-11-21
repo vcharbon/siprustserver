@@ -33,4 +33,4 @@ mod uri;
 pub use handover::open_over;
 pub use stream::{connect_stream, try_by, BrokerStream, Connected, MIN_TRY};
 pub use tls::BrokerTls;
-pub use uri::{checked_uri, connect_uri, DEFAULT_HEARTBEAT_SEC};
+pub use uri::{broker_name, checked_uri, connect_uri, DEFAULT_HEARTBEAT_SEC};

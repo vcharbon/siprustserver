@@ -4,10 +4,10 @@
 
 use std::time::Duration;
 
-use amqp_connect::BrokerTls;
+use amqp_connect::{broker_name, BrokerTls};
 use lapin::uri::AMQPUri;
 
-use super::broker_list::{broker_list, broker_name, URL_VARIABLE};
+use super::broker_list::{broker_list, URL_VARIABLE};
 
 /// How the writer declares its destination queue, `B2BUA_CDR_RABBITMQ_DECLARE`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -11,11 +11,11 @@ use std::collections::hash_map::RandomState;
 use std::hash::BuildHasher;
 use std::time::Duration;
 
+use amqp_connect::broker_name;
 use lapin::uri::AMQPUri;
 use tokio::sync::watch;
 use tokio::time::Instant;
 
-use super::broker_list::broker_name;
 use super::resolver::BrokerResolver;
 use super::session::Session;
 use super::settings::RabbitMqCdrSettings;

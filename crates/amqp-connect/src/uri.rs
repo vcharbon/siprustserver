@@ -2,7 +2,7 @@
 //! one deadline.
 
 use std::io;
-use std::net::SocketAddr;
+use std::net::{Ipv6Addr, SocketAddr};
 
 use lapin::uri::AMQPUri;
 use tokio::time::{timeout_at, Instant};
@@ -35,6 +35,16 @@ pub fn checked_uri(var: &str, url: &str) -> Result<AMQPUri, String> {
         ));
     }
     Ok(uri)
+}
+
+/// The broker `uri` names, as logs name it: `host:port`, an IPv6 host
+/// bracketed (`[2001:db8::1]:5672`), never its credentials.
+pub fn broker_name(uri: &AMQPUri) -> String {
+    let host = uri.authority.host.as_str();
+    match host.parse::<Ipv6Addr>() {
+        Ok(_) => format!("[{host}]:{}", uri.authority.port),
+        Err(_) => format!("{host}:{}", uri.authority.port),
+    }
 }
 
 /// Resolves the host of `uri` and connects its stream over `tls`

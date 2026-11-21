@@ -1,10 +1,10 @@
 //! The host a checked URI names: the one its authority states, an IPv6
-//! literal included, and the one a connection reaches.
+//! literal included, the one a connection reaches, and how logs name it.
 
 use std::net::{SocketAddr, TcpListener};
 use std::time::Duration;
 
-use amqp_connect::{checked_uri, connect_uri, BrokerTls};
+use amqp_connect::{broker_name, checked_uri, connect_uri, BrokerTls};
 use tokio::time::Instant;
 
 #[test]
@@ -48,4 +48,12 @@ async fn a_uri_with_an_ipv6_host_connects_to_that_address() {
     let broker: SocketAddr = format!("[::ffff:127.0.0.2]:{port}").parse().unwrap();
     assert_eq!(connected.socket.peer_addr().unwrap(), broker);
     assert!(listener.accept().is_ok());
+}
+
+#[test]
+fn a_broker_is_named_by_host_and_port_never_its_credentials() {
+    let named = |url: &str| broker_name(&checked_uri("VAR", url).unwrap());
+    assert_eq!(named("amqp://u:secret@broker.example.test/%2f"), "broker.example.test:5672");
+    assert_eq!(named("amqps://u:secret@192.0.2.7/%2f"), "192.0.2.7:5671");
+    assert_eq!(named("amqp://u:secret@[2001:db8::1]:5673/%2f"), "[2001:db8::1]:5673");
 }

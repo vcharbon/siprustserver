@@ -35,7 +35,12 @@ pub struct Broker {
 
 impl Broker {
     pub async fn start(script: Script) -> Self {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        Self::start_on("127.0.0.1", script).await
+    }
+
+    /// A broker listening on `ip` alone.
+    pub async fn start_on(ip: &str, script: Script) -> Self {
+        let listener = TcpListener::bind((ip, 0)).await.unwrap();
         let addr = listener.local_addr().unwrap();
         let ended_by_client = Arc::new(AtomicUsize::new(0));
         let declares = Arc::new(AtomicUsize::new(0));

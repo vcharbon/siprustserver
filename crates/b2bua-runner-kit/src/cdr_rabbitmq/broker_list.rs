@@ -1,28 +1,27 @@
 //! The broker list of the RabbitMQ CDR sink's grammar,
 //! `B2BUA_CDR_RABBITMQ_URL`: one AMQP URI or several separated by commas, one
-//! per node of a cluster, and how logs name each broker.
+//! per node of a cluster.
 
-use std::net::Ipv6Addr;
+use std::net::IpAddr;
 
+use amqp_connect::broker_name;
 use lapin::uri::AMQPUri;
 
 /// The variable listing the brokers.
 pub(super) const URL_VARIABLE: &str = "B2BUA_CDR_RABBITMQ_URL";
 
-/// A broker as logs name it: `host:port`, an IPv6 host bracketed
-/// (`[2001:db8::1]:5672`), never its credentials.
-pub(super) fn broker_name(uri: &AMQPUri) -> String {
-    let host = uri.authority.host.as_str();
-    match host.parse::<Ipv6Addr>() {
-        Ok(_) => format!("[{host}]:{}", uri.authority.port),
-        Err(_) => format!("{host}:{}", uri.authority.port),
-    }
+/// Whether `a` and `b` name one node: the same port on the same host, two IP
+/// literals compared as addresses (an IPv4-mapped IPv6 address is its IPv4
+/// address), a name compared without case.
+fn same_node(a: &AMQPUri, b: &AMQPUri) -> bool {
+    a.authority.port == b.authority.port && same_host(&a.authority.host, &b.authority.host)
 }
 
-/// Whether `a` and `b` name one node: the same port on the same host, its
-/// name compared without case.
-fn same_node(a: &AMQPUri, b: &AMQPUri) -> bool {
-    a.authority.port == b.authority.port && a.authority.host.eq_ignore_ascii_case(&b.authority.host)
+fn same_host(a: &str, b: &str) -> bool {
+    match (a.parse::<IpAddr>(), b.parse::<IpAddr>()) {
+        (Ok(a), Ok(b)) => a.to_canonical() == b.to_canonical(),
+        _ => a.eq_ignore_ascii_case(b),
+    }
 }
 
 /// The brokers `raw` lists, comma-separated, each checked by
@@ -78,6 +77,9 @@ mod tests {
         let twice = "amqp://u:p@[2001:db8::1]/%2f,amqp://u:p@[2001:DB8:0::1]:5672/%2f";
         let e = broker_list(twice).expect_err("one address spelt twice is one node");
         assert!(e.contains("entry 2 lists [2001:db8::1]:5672 again"), "{e}");
+        let mapped = "amqp://u:p@192.0.2.7/%2f,amqp://u:p@[::ffff:192.0.2.7]/%2f";
+        let e = broker_list(mapped).expect_err("an IPv4-mapped address is its IPv4 node");
+        assert!(e.contains("entry 2 lists 192.0.2.7:5672 again"), "{e}");
     }
 
     /// Each refusal names the variable and the entry's position, never the
