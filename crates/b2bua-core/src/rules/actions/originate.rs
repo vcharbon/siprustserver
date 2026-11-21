@@ -16,6 +16,7 @@ use crate::effects::{
 use crate::rules::capabilities;
 use crate::rules::relay;
 
+use super::request_to_leg_method::sent_to_a_leg;
 use super::select::{in_dialog_method, leg_at};
 use super::teardown::Relayed;
 use super::ActionExecutor;
@@ -271,7 +272,9 @@ impl ActionExecutor<'_> {
     /// ([`b2bua_sdk::model::RuleAction::SendRequestToLeg`]): keepalive
     /// OPTIONS, opaque-body INFO (MSCML), deferred-relay re-emission. A BYE
     /// takes the method table's BYE row ([`Self::send_bye`]); an INVITE is the
-    /// re-INVITE [`Self::send_reinvite`] sends, recorded and guarded alike.
+    /// re-INVITE [`Self::send_reinvite`] sends, recorded and guarded alike. A
+    /// method [`sent_to_a_leg`] does not name is not sent
+    /// ([`Self::method_not_sent`]).
     #[allow(clippy::too_many_arguments)]
     pub(super) fn send_request_to_leg(
         &mut self,
@@ -285,9 +288,8 @@ impl ActionExecutor<'_> {
         descriptors: &[sip_message::SipHeader],
         author: relay::Author<'_>,
     ) {
-        let m = match in_dialog_method(&Method::from_wire(method)) {
-            Some(m) => m,
-            None => return,
+        let Some(m) = in_dialog_method(&Method::from_wire(method)).filter(sent_to_a_leg) else {
+            return self.method_not_sent(call, leg_id, method);
         };
         if m == InDialogMethod::Bye {
             let content_type = content_type

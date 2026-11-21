@@ -305,8 +305,8 @@ pub enum RuleAction {
         machine: MachineId,
     },
     /// Originate an in-dialog request toward a leg's confirmed dialog: OPTIONS, INFO,
-    /// UPDATE, MESSAGE, and BYE/INVITE/PRACK/NOTIFY for internal callers; an INVITE is
-    /// the re-INVITE [`RuleAction::SendReinvite`] sends, recorded and guarded alike.
+    /// UPDATE, MESSAGE, BYE, or INVITE (the re-INVITE [`RuleAction::SendReinvite`] sends).
+    /// Any other method is not sent: a NOTIFY is [`RuleAction::SendNotify`]'s.
     /// `body` is **opaque** (MSCML rides as `application/mediaservercontrol+xml`);
     /// its `content_type` defaults to `application/sdp` when none is given.
     ///
