@@ -189,6 +189,7 @@ mod reaper_liveness;
 mod refer_allow;
 mod refer_c_realign;
 mod refer_consult_error;
+mod refer_delayed_offer_realign;
 mod refer_full_transfer;
 mod refer_gating;
 mod refer_no_notify_after_terminated;
