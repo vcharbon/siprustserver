@@ -129,3 +129,41 @@ fn combos(c: &Cell) -> impl Iterator<Item = Combo> {
     let pairs = (0..n).map(move |i| vec![co[i], co[TRANSFER_DIM]]);
     triples.chain(pairs)
 }
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashSet;
+
+    use super::*;
+
+    /// The value tuples `cells` hold on the dimensions `dims`.
+    fn values_on(cells: &[Cell], dims: &[usize]) -> HashSet<Vec<usize>> {
+        cells
+            .iter()
+            .map(|c| {
+                let co = coordinates(c);
+                dims.iter().map(|&d| co[d].1).collect()
+            })
+            .collect()
+    }
+
+    /// Every combination a compatible cell holds (the values of three call
+    /// dimensions, or its transfer value with one call dimension's) is held
+    /// by a sampled cell.
+    #[test]
+    fn the_sample_holds_every_combination_a_compatible_cell_holds() {
+        let legal: Vec<Cell> = cells().into_iter().filter(|c| compatible(c).is_ok()).collect();
+        let sample = sample();
+        let call_dims = 0..TRANSFER_DIM;
+        let triples = call_dims.clone().flat_map(|i| {
+            ((i + 1)..TRANSFER_DIM)
+                .flat_map(move |j| ((j + 1)..TRANSFER_DIM).map(move |k| vec![i, j, k]))
+        });
+        let pairs = call_dims.map(|i| vec![i, TRANSFER_DIM]);
+        for dims in triples.chain(pairs) {
+            let missing: Vec<_> =
+                values_on(&legal, &dims).difference(&values_on(&sample, &dims)).cloned().collect();
+            assert!(missing.is_empty(), "dimensions {dims:?}: no sampled cell holds {missing:?}");
+        }
+    }
+}
