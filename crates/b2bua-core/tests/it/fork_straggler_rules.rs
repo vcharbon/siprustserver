@@ -157,3 +157,31 @@ fn a_late_fork_a_service_tracked_is_pracked_when_it_rings_reliably() {
     assert!(d.awaits_invite_final(), "still early: {:?}", d.state);
     assert_eq!(open_methods(&d), ["PRACK"], "its PRACK open in it");
 }
+
+/// Past 64·T1 (32 s): the bound of a late fork's early dialog, counted from
+/// the 2xx that answered the INVITE (RFC 3261 §13.2.2.4).
+const PAST_64_T1_MS: i64 = 33_000;
+
+/// The record lost the turns of bob's 2xx and of a re-INVITE relayed to him;
+/// his 2xx to that re-INVITE proves the dialled INVITE answered (ADR-0055
+/// §4). The late forks' early dialogs are bounded by 64·T1 from that proof: a
+/// fork ringing reliably inside it is PRACKed, one past it is not.
+#[test]
+fn the_answer_the_evidence_proves_bounds_the_late_forks_early_dialogs() {
+    let driver = Driver::new();
+    let mut call = crate::calls::ringing(&driver);
+    call.lose([Step::Answers("b-1", 200), Step::AliceAcks, Step::Sends("a", Method::Invite)]);
+    let evidence = call.turned(Step::AnswersLast("b-1", Method::Invite, 200));
+    assert_eq!(evidence.rule, Some("evidence-final"), "the 2xx is evidence");
+
+    let inside = call.turned(Step::ForkAnswersReliably("inside", 183));
+    let pracked = |turn: &b2bua_core::turn_driver::Turn| {
+        turn.requests_to("b-1").iter().filter(|r| r.method() == "PRACK").count()
+    };
+    assert_eq!(pracked(inside), 1, "a fork inside the bound is PRACKed");
+
+    call.run([Step::Advance(PAST_64_T1_MS)]);
+    let past = call.try_step(Step::ForkAnswersReliably("past", 183));
+    let past = past.turn().map_or(0, pracked);
+    assert_eq!(past, 0, "a fork past the bound is not");
+}
