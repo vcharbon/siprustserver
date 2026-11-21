@@ -8,6 +8,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use b2bua::config::B2buaConfig;
 use b2bua::decision::test_adapter::route_to;
 use b2bua::decision::{NewCallResponse, ScriptedDecisionEngine};
 use b2bua_harness::{settle_until, B2buaSut};
@@ -21,6 +22,10 @@ const ORDINAL: &str = "w0";
 const MEDIA_ADDR: &str = "127.0.0.1:5090";
 /// Past Timer F and Timer B (64·T1 = 32 s) of the service's request.
 const PAST_THE_TIMEOUT: Duration = Duration::from_secs(33);
+/// Past the bound an INVITE client transaction that drew a provisional gives
+/// up at.
+const PAST_THE_INVITE_BOUND: Duration =
+    Duration::from_secs(B2buaConfig::DEFAULT_INVITE_TXN_TIMEOUT_SEC as u64 + 1);
 /// An OPTIONS keepalive interval past the timeout window: no probe rides it.
 const KEEPALIVE_PAST_THE_TIMEOUT_SEC: i64 = 300;
 
@@ -138,13 +143,23 @@ fn decision() -> Arc<ScriptedDecisionEngine> {
     )
 }
 
+/// How the media server leaves the service's request.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Silence {
+    /// No response at all: Timer F or Timer B ends the transaction.
+    NoResponse,
+    /// A 180, then no final: the INVITE bound ends the transaction.
+    AfterRinging,
+}
+
 /// The caller and the callee are in a call; the service's media leg takes
-/// `method` and never answers it. Past its timeout the media leg alone is
-/// BYE'd; the caller's BYE then ends the call.
+/// `method` and leaves it as `silence` says. Past its timeout the media leg
+/// alone is BYE'd; the caller's BYE then ends the call.
 async fn the_media_leg_request_times_out(
     name: &str,
     service: b2bua::rules::ServiceDef,
     method: &str,
+    silence: Silence,
 ) {
     let h = Harness::new(name);
     let alice = h.agent("alice", "127.0.0.1:5060").await;
@@ -170,9 +185,16 @@ async fn the_media_leg_request_times_out(
     media_inv.respond(200, "OK").with_sdp(MEDIA_ANSWER).await;
     media.receive("ACK").await;
     let mut unanswered = media.receive(method).await;
+    let deadline = match silence {
+        Silence::NoResponse => PAST_THE_TIMEOUT,
+        Silence::AfterRinging => {
+            unanswered.respond(180, "Ringing").await;
+            PAST_THE_INVITE_BOUND
+        }
+    };
 
-    h.advance(PAST_THE_TIMEOUT).await;
-    media.drain().await; // the request's retransmissions
+    h.advance(deadline).await;
+    let _retransmissions = media.drain().await;
     media.receive("BYE").await.respond(200, "OK").await;
     if method == "INVITE" {
         unanswered.respond(487, "Request Terminated").await;
@@ -196,13 +218,38 @@ async fn the_media_leg_request_times_out(
 /// media leg is BYE'd, the call stands.
 #[tokio::test(start_paused = true)]
 async fn an_own_info_timeout_on_a_media_leg_ends_that_leg_alone() {
-    the_media_leg_request_times_out("non-carrying-info-timeout", parked::info(), "INFO").await;
+    the_media_leg_request_times_out(
+        "non-carrying-info-timeout",
+        parked::info(),
+        "INFO",
+        Silence::NoResponse,
+    )
+    .await;
 }
 
 /// A service's own re-INVITE to its media leg draws no response: past Timer B
 /// the media leg is BYE'd, the call stands.
 #[tokio::test(start_paused = true)]
 async fn an_own_reinvite_timeout_on_a_media_leg_ends_that_leg_alone() {
-    the_media_leg_request_times_out("non-carrying-reinvite-timeout", parked::reinvite(), "INVITE")
-        .await;
+    the_media_leg_request_times_out(
+        "non-carrying-reinvite-timeout",
+        parked::reinvite(),
+        "INVITE",
+        Silence::NoResponse,
+    )
+    .await;
+}
+
+/// A service's re-INVITE to its media leg draws a 180 and no final: at the
+/// INVITE bound, which no request record names, the media leg is BYE'd and the
+/// call stands.
+#[tokio::test(start_paused = true)]
+async fn an_own_reinvite_given_up_after_ringing_on_a_media_leg_ends_that_leg_alone() {
+    the_media_leg_request_times_out(
+        "non-carrying-reinvite-bound",
+        parked::reinvite(),
+        "INVITE",
+        Silence::AfterRinging,
+    )
+    .await;
 }

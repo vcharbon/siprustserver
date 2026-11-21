@@ -288,3 +288,104 @@ fn an_own_notify_timeout_on_an_ended_leg_is_handle_timeouts() {
         "{actions:?}",
     );
 }
+
+/// `answered_call`'s caller with a b-leg `leg_id` of `kind` whose dialogs are
+/// `tags` (early, or one confirmed when `tags` holds one), the last holding the
+/// request record of `method` sent with CSeq `cseq` on the branch a timeout of
+/// that leg names.
+fn call_with_b_record(
+    leg_id: &str,
+    kind: call::LegKind,
+    tags: &[&str],
+    method: &str,
+    cseq: i64,
+    origin: call::RequestOrigin,
+) -> call::Call {
+    let mut call = answered_call("INFO", 1, call::RequestOrigin::Own);
+    let mut leg = call::testkit::dialled_leg(leg_id, "btag");
+    leg.kind = Some(kind);
+    let sent = call::SentRequest {
+        branch: format!("z9hG4bK{leg_id}"),
+        image: Vec::new(),
+        destination: call::HostPort { host: "127.0.0.1".into(), port: 5070 },
+    };
+    let author = (method == "OPTIONS").then(|| call::KEEPALIVE_AUTHOR.to_string());
+    let record = call::RequestRecord {
+        origin,
+        sent: Some(sent),
+        author,
+        ..call::RequestRecord::relayed(method, cseq, 4)
+    };
+    let state = if tags.len() == 1 { DialogState::Confirmed } else { DialogState::Early };
+    for (i, tag) in tags.iter().enumerate() {
+        let mut d = call::Dialog::new("btag", *tag, state.clone(), 1);
+        d.remote_target = format!("sip:{tag}@127.0.0.1");
+        if i + 1 == tags.len() {
+            d.requests.push(record.clone());
+        }
+        leg.dialogs.insert(d);
+    }
+    let leg_state = if tags.len() == 1 { LegState::Confirmed } else { LegState::Early };
+    call::testkit::stage_leg(&mut leg, leg_state);
+    call::helpers::add_b_leg(&mut call, leg);
+    call
+}
+
+/// A timeout on a media leg, which carries nothing of the call, ends that leg
+/// alone, its timeout recorded: a request riding its dialog, a keepalive probe
+/// among them. A PRACK's or a NOTIFY's ends what it ends on any leg.
+#[test]
+fn a_timeout_on_a_leg_that_does_not_carry_the_call_ends_that_leg_alone() {
+    for method in ["INFO", "UPDATE", "OPTIONS"] {
+        let call = call_with_b_record(
+            "b-2",
+            call::LegKind::Media,
+            &["media"],
+            method,
+            3,
+            call::RequestOrigin::Own,
+        );
+        let (rule, actions) = handled(&call, "b-2", method, 3, None);
+        assert_eq!(rule, "handle-timeout");
+        assert!(
+            matches!(
+                actions.as_slice(),
+                [
+                    RuleAction::AddCdrEvent { event_type: call::CdrEventType::Timeout, .. },
+                    RuleAction::DestroyLeg { leg_id, .. },
+                ] if leg_id == "b-2"
+            ),
+            "{method}: {actions:?}",
+        );
+    }
+    for method in ["PRACK", "NOTIFY"] {
+        let call = call_with_b_record(
+            "b-2",
+            call::LegKind::Media,
+            &["media"],
+            method,
+            3,
+            call::RequestOrigin::Own,
+        );
+        let (_, actions) = handled(&call, "b-2", method, 3, None);
+        assert!(actions.is_empty(), "{method}: {actions:?}");
+    }
+}
+
+/// A callee leg ringing on two forks carries the call; a relayed UPDATE that
+/// one fork never answers ends nothing beyond its transaction, the other fork
+/// still able to answer.
+#[test]
+fn a_timeout_on_one_early_fork_among_several_ends_nothing_more() {
+    let call = call_with_b_record(
+        "b-1",
+        call::LegKind::Destination,
+        &["fork-1", "fork-2"],
+        "UPDATE",
+        2,
+        call::RequestOrigin::Relayed,
+    );
+    let (rule, actions) = handled(&call, "b-1", "UPDATE", 2, None);
+    assert_eq!(rule, "handle-timeout");
+    assert!(actions.is_empty(), "{actions:?}");
+}

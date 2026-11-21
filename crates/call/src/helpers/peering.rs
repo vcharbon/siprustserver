@@ -56,9 +56,10 @@ pub fn split_leg(call: &mut Call, leg_id: &str) {
 /// originator's, or the one the originator's leg is bridged to now (its live
 /// [`get_peer`]). While the originator's leg is bridged to no live leg (the
 /// setup, a peer gone away), the adopted b-legs dialled for it carry it.
-/// A media leg, a leg dialled beside the bridge before it is merged, and a
-/// leg the call has left carry nothing: a failure on one of those ends that
-/// leg alone.
+/// The bridged peer carries the call whatever its kind; a media leg beside
+/// the bridge, a leg dialled beside it before it is merged, and a leg the
+/// call has left carry nothing: a transaction timeout on one of those ends
+/// that leg alone.
 pub fn carries_call(call: &Call, leg_id: &str) -> bool {
     let Some(leg) = find_leg(call, leg_id) else { return false };
     if leg_is_going_away(call.state, leg) {

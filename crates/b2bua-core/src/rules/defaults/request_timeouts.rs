@@ -12,6 +12,7 @@
 //! | NOTIFY, SUBSCRIBE, REFER | its subscription usage only | the same | own: the leg's end; relayed: nothing |
 //! | keepalive OPTIONS | the call, under the keepalive deadline | the leg | the leg's end |
 //! | any other non-INVITE | the call | the leg | own: the leg's end; relayed: nothing |
+//! | the same, on one early fork among several | the transaction only | the leg | as above |
 //! | re-INVITE, own or relayed | the call | the leg | the leg's end |
 //! | a pending leg's dialling INVITE | the setup's failure reading | the same | the leg's end |
 //!
@@ -103,9 +104,23 @@ pub(super) fn record_timeout_actions(
     match scope {
         Scope::Transaction | Scope::Usage => vec![],
         Scope::Dialog if !ctx.call.carries_call(ctx.source_leg_id) => end_the_leg(ctx),
+        Scope::Dialog if on_an_unchosen_fork(ctx) => vec![],
         Scope::Dialog if record.is_keepalive() => keepalive_failure(ctx, None, "keepalive timeout"),
         Scope::Dialog => dialog_timeout(ctx),
     }
+}
+
+/// Whether the timed-out record rides an early dialog of its leg that is not
+/// the one the leg's requests ride ([`call::Dialogs::carrying`]): one fork
+/// among several. Its silence ends nothing beyond the transaction; the fork
+/// ends with its leg's INVITE.
+fn on_an_unchosen_fork(ctx: &RuleContext) -> bool {
+    let (Some(leg), Some((holder, _))) = (ctx.source_leg(), ctx.resolved.record.as_deref()) else {
+        return false;
+    };
+    let id = holder.id();
+    let early = leg.dialogs.by_tags(&id.our_tag, &id.peer_tag).is_some_and(|d| !d.is_confirmed());
+    early && leg.dialogs.carrying().is_none_or(|d| d.id() != *id)
 }
 
 /// A dialog that did not answer: the call ends where the dialog carries it,
@@ -122,9 +137,19 @@ fn dialog_timeout(ctx: &RuleContext) -> Vec<RuleAction> {
 }
 
 /// The leg that did not answer, carrying nothing of the call, is ended as
-/// its state asks (BYE, or CANCEL while early); the call stands.
+/// its state asks (BYE, or CANCEL while early), its timeout recorded; the
+/// call stands.
 fn end_the_leg(ctx: &RuleContext) -> Vec<RuleAction> {
-    vec![RuleAction::DestroyLeg { leg_id: ctx.source_leg_id.to_string(), headers: vec![] }]
+    let leg_id = ctx.source_leg_id.to_string();
+    vec![
+        RuleAction::AddCdrEvent {
+            event_type: CdrEventType::Timeout,
+            leg_id: leg_id.clone(),
+            status_code: None,
+            reason: Some("transaction_timeout".into()),
+        },
+        RuleAction::DestroyLeg { leg_id, headers: vec![] },
+    ]
 }
 
 /// A pending b-leg's dialling INVITE gave up (Timer B, or the INVITE bound

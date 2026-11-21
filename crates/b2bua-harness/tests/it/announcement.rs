@@ -408,11 +408,11 @@ async fn announcement_caller_cancels_mid_clip() {
     let _ = h.finish().await;
 }
 
-// ── The MRF never answers the MSCML <play> INFO. The media leg carries
-// nothing of the call, so the INFO's timeout (Timer F, 64·T1) ends that leg
-// alone by default; the service owns the failure: the announcement cannot
-// play, so the caller, who saw only a 183 early dialog, is answered 504 and
-// the media leg BYE'd.
+/// The MRF never answers the MSCML `<play>` INFO. The media leg carries
+/// nothing of the call, so the INFO's timeout (Timer F, 64·T1) would end that
+/// leg alone by default; the service owns the failure: the announcement cannot
+/// play, so the caller, who saw only a 183 early dialog, is answered 504 and
+/// the media leg BYE'd.
 #[tokio::test(start_paused = true)]
 async fn announcement_play_info_unanswered_rejects_the_caller() {
     let h = Harness::new("announcement-play-info-timeout");
@@ -431,7 +431,7 @@ async fn announcement_play_info_unanswered_rejects_the_caller() {
     let _unanswered = mrf.receive("INFO").await;
 
     h.advance(PAST_THE_PLAY_TIMER_F).await;
-    mrf.drain().await; // the INFO's retransmissions
+    let _retransmissions = mrf.drain().await;
     call.expect(504).await;
     mrf.receive("BYE").await.respond(200, "OK").await;
 

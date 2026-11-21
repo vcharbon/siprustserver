@@ -154,8 +154,10 @@ impl<'a> RuleCall<'a> {
     pub fn all_peered_legs(&self) -> Vec<String> {
         call::helpers::all_peered_legs(self.0)
     }
-    /// Whether `leg_id` carries the call ([`call::helpers::carries_call`]): a
-    /// failure there ends the call, a failure on any other leg that leg alone.
+    /// Whether `leg_id` carries the call ([`call::helpers::carries_call`]): an
+    /// in-dialog transaction timeout there ends the call, one on any other leg
+    /// that leg alone (ADR-0068). A dialling INVITE's timeout keeps the setup's
+    /// failure reading.
     pub fn carries_call(&self, leg_id: &str) -> bool {
         call::helpers::carries_call(self.0, leg_id)
     }
