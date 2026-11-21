@@ -12,7 +12,7 @@ use b2bua_harness::{settle_until, B2buaScene};
 use call::TerminationCause;
 use scenario_harness::callflow::{ANSWER_SDP, OFFER_SDP};
 use scenario_harness::{Agent, Dialog, Harness};
-use sip_message::generators::InDialogMethod;
+use sip_message::generators::{InDialogMethod, OutOfDialogMethod};
 use sip_message::header::HeaderName;
 use sip_message::{SipRequest, SipResponse};
 
@@ -207,14 +207,27 @@ async fn a_bye_requiring_an_unknown_tag_is_refused_420_and_a_plain_bye_ends_the_
     c.hang_up().await;
 }
 
-/// Of `100rel, x-nonexistent`, the stack understands `100rel`: the 420 lists
+/// Of a re-INVITE's `100rel, x-nonexistent` (RFC 3262 §4 admits `100rel` in
+/// an INVITE's `Require` only), the stack understands `100rel`: the 420 lists
 /// only the other one.
 #[tokio::test(start_paused = true)]
 async fn the_420_lists_only_the_tags_not_understood() {
     let mut c = Confirmed::new("unknown-require-mixed").await;
     let required = format!("100rel, {UNKNOWN}");
-    let listed = c.refused(Side::Caller, InDialogMethod::Info, &required, false).await;
+    let listed = c.refused(Side::Caller, InDialogMethod::Invite, &required, true).await;
     assert_eq!(listed, [UNKNOWN], "100rel is understood, so it is not listed");
+    c.renegotiated(Side::Caller, InDialogMethod::Invite).await;
+    c.hang_up().await;
+}
+
+/// `timer` names the session timer, which this stack relays end to end on a
+/// session request only (RFC 4028 §7.1): an INFO requiring it is refused 420
+/// naming it.
+#[tokio::test(start_paused = true)]
+async fn an_info_requiring_timer_is_refused_420() {
+    let mut c = Confirmed::new("unknown-require-timer-info").await;
+    let listed = c.refused(Side::Caller, InDialogMethod::Info, "timer", false).await;
+    assert_eq!(listed, ["timer"], "timer is no requirement an INFO's UAS takes here");
     c.hang_up().await;
 }
 
@@ -264,6 +277,19 @@ async fn an_options_the_stack_answers_itself_is_refused_420() {
     ours.respond(200, "OK").await;
     settle_until(|| c.s.b2bua.cdr_records().len() == 1).await;
     let _report = c.s.finish().await;
+}
+
+/// An out-of-dialog OPTIONS, which the stack answers itself with its health
+/// report, requiring the unknown tag is refused 420 naming it; a plain one is
+/// still answered 200.
+#[tokio::test(start_paused = true)]
+async fn a_keepalive_options_requiring_an_unknown_tag_is_refused_420() {
+    let s = B2buaScene::new("unknown-require-keepalive").await;
+    let options = || s.alice.request(OutOfDialogMethod::Options, &s.bob).through(s.b2bua.addr);
+    let refusal = options().with_header("Require", UNKNOWN).send().await.expect(420).await;
+    assert_eq!(unsupported(&refusal), [UNKNOWN], "the 420 lists the tag not understood");
+    options().send().await.expect(200).await;
+    let _report = s.finish().await;
 }
 
 /// An initial INVITE requiring the unknown tag is refused 420 naming it before
