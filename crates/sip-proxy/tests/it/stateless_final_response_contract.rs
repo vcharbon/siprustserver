@@ -70,8 +70,9 @@ async fn next(ep: &dyn UdpEndpoint, what: &str) -> UdpPacket {
 
 /// Bob's response to the request `fwd` he received from `from` (RFC 3261
 /// §8.2.6): the Via stack echoed, the proxy's on top, so the proxy's §16.7
-/// response path routes it back; a 2xx to the INVITE states his Contact,
-/// echoes the Record-Route and advertises his capabilities (§13.2.1).
+/// response path routes it back, and the Record-Route echoed past a 100
+/// (§12.1.1); a 18x or 2xx to the INVITE states his Contact, and the 2xx his
+/// capabilities (§13.2.1).
 fn bob_response(fwd: &SipRequest, from: SocketAddr, status: u16, reason: &str) -> SipResponse {
     let establishes = status > 100 && fwd.method() == "INVITE";
     let contact = establishes.then(|| {
