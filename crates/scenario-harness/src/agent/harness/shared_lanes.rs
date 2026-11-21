@@ -1,6 +1,7 @@
-//! A session over a caller-built simulated fabric, and a SUT endpoint on a
-//! lane of its own: the seams several SUT instances serving one shared
-//! address need.
+//! A session over a caller-built simulated fabric, one over a fabric that
+//! holds chosen datagrams in flight, and a SUT endpoint on a lane of its own:
+//! the seams several SUT instances serving one shared address, or a path
+//! that reorders, need.
 
 use std::collections::HashSet;
 use std::net::SocketAddr;
@@ -22,6 +23,20 @@ impl Harness {
     ) -> Self {
         let sim: Arc<dyn SignalingNetwork> = Arc::new(net);
         Self::build(scenario_name.into(), sim, Clock::test_at(0), TransportKind::Fake, RECV_TIMEOUT)
+    }
+
+    /// Like [`with_transit_delay`](Harness::with_transit_delay), plus a
+    /// per-datagram hold on the simulated fabric: a datagram `delay` holds
+    /// arrives that much later than the transit, so one its sender put on the
+    /// wire after it may arrive first. The seam a scenario reorders a path's
+    /// datagrams through while every party stays compliant at its send.
+    pub fn with_transit_delay_and_send_delay(
+        scenario_name: impl Into<String>,
+        transit_delay_ms: u64,
+        delay: sip_net_testkit::SendDelay,
+    ) -> Self {
+        let net = sip_net_testkit::SimulatedSignalingNetwork::new(transit_delay_ms.max(1));
+        Self::with_simulated_network(scenario_name, net.with_send_delay(delay))
     }
 
     /// [`bind_sut_with_roles`](Self::bind_sut_with_roles) on the lane

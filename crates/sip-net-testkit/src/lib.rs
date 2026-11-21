@@ -47,4 +47,4 @@ pub use rfc_audit::{
     rfc_cross_message_rules, rfc_cross_message_rules_scoped, AuditPass, CrossMessageRules,
     RfcAudit, RfcFinding,
 };
-pub use simulated::{FlowPick, SendFault, SimulatedSignalingNetwork};
+pub use simulated::{FlowPick, SendDelay, SendFault, SimulatedSignalingNetwork};

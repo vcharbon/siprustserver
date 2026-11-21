@@ -8,8 +8,9 @@
 //! runs in zero wall-time under a paused tokio clock.
 //!
 //! Per-node partition gating belongs with the cluster harness, not here.
-//! `send_fault` (per-pair send failure injection) lives here, as it's a
-//! pure-network fault primitive.
+//! `send_fault` (per-pair send failure injection) and `send_delay` (a chosen
+//! datagram held in flight past the transit, so later ones overtake it) live
+//! here, as they are pure-network fault primitives.
 //!
 //! A shared address ([`SimulatedSignalingNetwork::share_address`]) is an
 //! address several endpoints serve, each sender's flow delivered to one of
@@ -39,6 +40,12 @@ use crate::types::{
 /// Optional per-pair send-failure injector: `(src, dst) -> Some(reason)` fails
 /// that send synchronously.
 pub type SendFault = Arc<dyn Fn(SocketAddr, SocketAddr) -> Option<String> + Send + Sync>;
+
+/// Optional per-datagram hold: `(src, dst, datagram) -> Some(extra)` delivers
+/// that datagram `extra` later than the fabric's transit, so a datagram sent
+/// after it on the same path may arrive first (see
+/// [`SimulatedSignalingNetwork::with_send_delay`]).
+pub type SendDelay = Arc<dyn Fn(SocketAddr, SocketAddr, &[u8]) -> Option<Duration> + Send + Sync>;
 
 /// The flow picker of a shared address: `src -> slot` names the member a
 /// datagram from `src` is delivered to (see
@@ -85,6 +92,7 @@ struct SimShared {
     in_flight: AtomicI64,
     transit_delay_ms: u64,
     send_fault: Option<SendFault>,
+    send_delay: Option<SendDelay>,
 }
 
 /// The simulated network. Clone shares the routing fabric.
@@ -112,6 +120,7 @@ impl SimulatedSignalingNetwork {
                 in_flight: AtomicI64::new(0),
                 transit_delay_ms,
                 send_fault: None,
+                send_delay: None,
             }),
         }
     }
@@ -122,6 +131,17 @@ impl SimulatedSignalingNetwork {
         Arc::get_mut(&mut self.shared)
             .expect("with_send_fault must run before the fabric is shared")
             .send_fault = Some(fault);
+        self
+    }
+
+    /// Install a per-datagram hold: each datagram `delay` holds arrives that
+    /// much later than the transit, so a datagram sent after it and held
+    /// less overtakes it, as a network reorders. A held send still returns at
+    /// once. Panics once the fabric is shared.
+    pub fn with_send_delay(mut self, delay: SendDelay) -> Self {
+        Arc::get_mut(&mut self.shared)
+            .expect("with_send_delay must run before the fabric is shared")
+            .send_delay = Some(delay);
         self
     }
 
@@ -315,9 +335,10 @@ impl UdpEndpoint for SimEndpoint {
         let shared = self.shared.clone();
         let raw = buf.to_vec();
         let src = self.addr;
-        let delay = self.shared.transit_delay_ms;
+        let held = self.shared.send_delay.as_ref().and_then(|hold| hold(src, dst, buf));
+        let delay = Duration::from_millis(self.shared.transit_delay_ms) + held.unwrap_or_default();
         tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(delay)).await;
+            tokio::time::sleep(delay).await;
             deliver(shared.clone(), raw, src, dst).await;
             shared.in_flight.fetch_sub(1, Ordering::Relaxed);
         });

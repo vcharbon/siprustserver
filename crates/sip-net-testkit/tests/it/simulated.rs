@@ -65,6 +65,28 @@ async fn send_fault_fails_the_send_synchronously() {
     assert!(err.message.contains("EHOSTUNREACH"));
 }
 
+/// A datagram the send delay holds arrives that much past the transit, after
+/// one sent later on the same path and not held.
+#[tokio::test(start_paused = true)]
+async fn send_delay_lets_a_later_datagram_overtake_a_held_one() {
+    let net = SimulatedSignalingNetwork::new(1).with_send_delay(Arc::new(|_src, _dst, raw| {
+        raw.starts_with(b"held").then_some(Duration::from_millis(10))
+    }));
+    let a = net.bind_udp(opts("10.0.0.1:5060", 64)).await.unwrap();
+    let b = net.bind_udp(opts("10.0.0.2:5060", 64)).await.unwrap();
+    let start = tokio::time::Instant::now();
+
+    a.send_to(b"held first", b.local_addr()).await.unwrap();
+    a.send_to(b"sent second", b.local_addr()).await.unwrap();
+
+    let overtaking = b.recv().await.expect("queue open");
+    assert_eq!(overtaking.raw, &b"sent second"[..]);
+    assert_eq!(start.elapsed(), Duration::from_millis(1), "the transit alone");
+    let held = b.recv().await.expect("queue open");
+    assert_eq!(held.raw, &b"held first"[..]);
+    assert_eq!(start.elapsed(), Duration::from_millis(11), "the transit and the hold");
+}
+
 #[tokio::test]
 async fn full_queue_tail_drops() {
     let net = SimulatedSignalingNetwork::new(0);
