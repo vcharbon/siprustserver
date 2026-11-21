@@ -29,10 +29,10 @@ use sip_message::{SipMessage, SipParser};
 #[tokio::test]
 async fn forwarded_invite_decrements_max_forwards_and_stamps_magic_cookie_via() {
     let h = Harness::with_transit_delay("rfc-mf-decrement", 0);
-    let (bob_ep, bob_addr) = h.bind_sut("bob", "127.0.0.1:5070").await;
+    let (bob_ep, bob_addr) = h.bind_peer("bob", "127.0.0.1:5070").await;
     let (strategy, registry) = forward_all(bob_addr);
     let proxy = spawn_proxy(&h, "127.0.0.1:5080", strategy, registry).await;
-    let (client, _client_addr) = h.bind_sut("alice", "127.0.0.1:5060").await;
+    let (client, _client_addr) = h.bind_peer("alice", "127.0.0.1:5060").await;
 
     let invite = "INVITE sip:bob@127.0.0.1:5070 SIP/2.0\r\n\
 Via: SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK-alice\r\n\
@@ -72,16 +72,9 @@ Content-Length: 0\r\n\r\n";
 #[tokio::test]
 async fn response_with_foreign_top_via_is_discarded() {
     let h = Harness::with_transit_delay("rfc-foreign-via", 0);
-    h.waive(
-        scenario_harness::WaiverScope::rule(
-            "response-destination",
-            "raw-injected response sent past its top Via; the proxy is the subject",
-        )
-        .on_party("alice"),
-    );
     let (strategy, registry) = forward_all("127.0.0.1:5070".parse().unwrap());
     let proxy = spawn_proxy(&h, "127.0.0.1:5080", strategy, registry).await;
-    let (alice, _alice_addr) = h.bind_sut("alice", "127.0.0.1:5060").await;
+    let (alice, _alice_addr) = h.bind_peer("alice", "127.0.0.1:5060").await;
 
     let resp = "SIP/2.0 180 Ringing\r\n\
 Via: SIP/2.0/UDP 9.9.9.9:5999;branch=z9hG4bK-foreign\r\n\
@@ -106,10 +99,10 @@ Content-Length: 0\r\n\r\n";
 #[tokio::test]
 async fn response_with_single_via_is_not_forwarded() {
     let h = Harness::with_transit_delay("rfc-single-via", 0);
-    let (bob_ep, bob_addr) = h.bind_sut("bob", "127.0.0.1:5070").await;
+    let (bob_ep, bob_addr) = h.bind_peer("bob", "127.0.0.1:5070").await;
     let (strategy, registry) = forward_all(bob_addr);
     let proxy = spawn_proxy(&h, "127.0.0.1:5080", strategy, registry).await;
-    let (alice, _alice_addr) = h.bind_sut("alice", "127.0.0.1:5060").await;
+    let (alice, _alice_addr) = h.bind_peer("alice", "127.0.0.1:5060").await;
 
     let resp = "SIP/2.0 180 Ringing\r\n\
 Via: SIP/2.0/UDP 127.0.0.1:5080;branch=z9hG4bK-only\r\n\
@@ -140,7 +133,7 @@ async fn relayed_response_has_proxy_top_via_removed() {
     );
     let (strategy, registry) = forward_all("127.0.0.1:5070".parse().unwrap());
     let proxy = spawn_proxy(&h, "127.0.0.1:5080", strategy, registry).await;
-    let (alice, _alice_addr) = h.bind_sut("alice", "127.0.0.1:5060").await;
+    let (alice, _alice_addr) = h.bind_peer("alice", "127.0.0.1:5060").await;
 
     let resp = "SIP/2.0 180 Ringing\r\n\
 Via: SIP/2.0/UDP 127.0.0.1:5080;branch=z9hG4bK-proxy\r\n\
@@ -177,10 +170,10 @@ Content-Length: 0\r\n\r\n";
 #[tokio::test]
 async fn proxy_require_unsupported_option_tag_returns_420() {
     let h = Harness::with_transit_delay("rfc-proxy-require", 0);
-    let (bob_ep, bob_addr) = h.bind_sut("bob", "127.0.0.1:5070").await;
+    let (bob_ep, bob_addr) = h.bind_peer("bob", "127.0.0.1:5070").await;
     let (strategy, registry) = forward_all(bob_addr);
     let proxy = spawn_proxy(&h, "127.0.0.1:5080", strategy, registry).await;
-    let (client, _client_addr) = h.bind_sut("alice", "127.0.0.1:5060").await;
+    let (client, _client_addr) = h.bind_peer("alice", "127.0.0.1:5060").await;
 
     let invite = "INVITE sip:bob@127.0.0.1:5070 SIP/2.0\r\n\
 Via: SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK-pr\r\n\
@@ -233,10 +226,10 @@ Content-Length: 0\r\n\r\n",
 #[tokio::test]
 async fn an_unreadable_proxy_require_is_answered_400_and_not_forwarded() {
     let h = Harness::with_transit_delay("rfc-proxy-require-unreadable", 0);
-    let (bob_ep, bob_addr) = h.bind_sut("bob", "127.0.0.1:5070").await;
+    let (bob_ep, bob_addr) = h.bind_peer("bob", "127.0.0.1:5070").await;
     let (strategy, registry) = forward_all(bob_addr);
     let proxy = spawn_proxy(&h, "127.0.0.1:5080", strategy, registry).await;
-    let (client, _client_addr) = h.bind_sut("alice", "127.0.0.1:5060").await;
+    let (client, _client_addr) = h.bind_peer("alice", "127.0.0.1:5060").await;
 
     let invite = "INVITE sip:bob@127.0.0.1:5070 SIP/2.0\r\n\
 Via: SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK-pr-bad\r\n\
