@@ -130,7 +130,10 @@ pub(super) fn notice_of(event: &CallEvent) -> Option<&str> {
 /// The re-ask turn of `call_ref`, under its per-call lock: the resident call,
 /// still undecided, is consulted as its initial INVITE's turn consults, under
 /// the fresh `budget` its notice started, and the turn lands as that one does;
-/// the budget spent before the turn ran, its caller is refused unasked. A call
+/// the budget spent before the turn ran, its caller is refused unasked, and an
+/// INVITE refused on sight ([`crate::initial_invite::refused_on_sight`]) is
+/// refused as its first owner refuses it, whose death between the call's
+/// creation write and that refusal's left it undecided. A call
 /// gone, decided meanwhile or whose setup the caller CANCELed asks nothing; a
 /// copy its primary wrote over ([`primary_wrote_since`]) asks nothing, and
 /// applies no answer that returns after that write. The turn closes at the
@@ -155,8 +158,14 @@ pub(super) async fn reask_turn(ctx: &Arc<RouterCtx>, call_ref: &str, budget: Set
     // The INVITE as it arrived is in no record: a trace backfills its image.
     let wire = caller.image().to_vec();
     let refused = budget.spent();
+    let advertisement = &ctx.config.minted_final_advertisement;
+    let on_sight = || {
+        crate::initial_invite::refused_on_sight(&call, &caller, advertisement, now_ms).map(Box::new)
+    };
     let (handled, recorded) = if refused {
         (super::initial_turn::refused_unavailable(ctx, call.clone(), &caller, now_ms), false)
+    } else if let Some(refused) = on_sight() {
+        (*refused, false)
     } else {
         let consult = handle_initial_invite(
             call.clone(),
