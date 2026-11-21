@@ -91,11 +91,12 @@ impl ActionExecutor<'_> {
     }
 
     /// Answer the turn's request `420 Bad Extension`, its `Unsupported`
-    /// listing `unsupported`: the tags it requires that its copy toward the
-    /// peer would no longer require, so nobody would serve them (RFC 3261
-    /// §8.2.2.3, [`sip_message::option_tags::dropped_on_relay`]). Nothing is
-    /// relayed; a refused re-INVITE or UPDATE leaves the session as it was
-    /// (§14.1, RFC 3311 §5.2).
+    /// listing `unsupported`: the tags it requires that nobody would serve,
+    /// its copy toward the peer no longer requiring them
+    /// ([`sip_message::option_tags::dropped_on_relay`]) or the stack answering
+    /// in the peer's place ([`Self::refuses_own_success`]) (RFC 3261
+    /// §8.2.2.3). Nothing is relayed; a refused re-INVITE or UPDATE leaves the
+    /// session as it was (§14.1, RFC 3311 §5.2).
     pub(super) fn refuse_unserved(
         &mut self,
         call: &mut Call,

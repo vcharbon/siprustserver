@@ -20,7 +20,8 @@ use super::ActionExecutor;
 
 impl ActionExecutor<'_> {
     /// Apply one action; `Break` ends the rule's list (a `CreateLeg` whose
-    /// leg is refused).
+    /// leg is refused, a `Respond` whose 2xx is refused 420,
+    /// [`Self::refuses_own_success`]).
     pub(super) fn step(
         &mut self,
         action: &RuleAction,
@@ -30,6 +31,11 @@ impl ActionExecutor<'_> {
     ) -> ControlFlow<()> {
         if matches!(action, RuleAction::CreateLeg { .. }) {
             return self.create_leg_of(action, ctx, call, fx);
+        }
+        if let RuleAction::Respond { status, .. } = action {
+            if self.refuses_own_success(call, fx, ctx, *status) {
+                return ControlFlow::Break(());
+            }
         }
         self.apply(action, ctx, call, fx);
         ControlFlow::Continue(())

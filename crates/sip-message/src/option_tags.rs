@@ -76,6 +76,13 @@ pub fn unserved_on_relay(
     })
 }
 
+/// The end-to-end tags `req` requires ([`END_TO_END_OPTION_TAGS`]): those
+/// only its peer serves, so a 2xx this stack writes in the peer's place
+/// cannot accept them. `None` when it requires none, or on an ACK or a CANCEL.
+pub fn required_end_to_end(req: &SipRequest) -> Option<Unsupported> {
+    refused(req, is_end_to_end)
+}
+
 /// The tags of `req`'s `Require` that `refuses` picks, in request order;
 /// `None` when it picks none, requires nothing, or is an ACK or a CANCEL,
 /// neither of which imposes an extension (§8.2.2.3, §9.1).
@@ -202,6 +209,14 @@ CSeq: 2 {method}\r\n\
         };
         assert_eq!(on_relay(&[]).as_deref(), Some("x-b, timer, 100rel"));
         assert_eq!(on_relay(&[line("Require", "timer")]).as_deref(), Some("x-b, 100rel"));
+    }
+
+    #[test]
+    fn only_the_end_to_end_tags_are_required_end_to_end() {
+        let req = request("UPDATE", "Require: 100rel, Timer\r\n");
+        assert_eq!(required_end_to_end(&req).map(|u| u.to_wire()).as_deref(), Some("Timer"));
+        assert!(required_end_to_end(&request("UPDATE", "Require: 100rel\r\n")).is_none());
+        assert!(required_end_to_end(&request("ACK", "Require: timer\r\n")).is_none());
     }
 
     #[test]

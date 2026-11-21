@@ -123,6 +123,30 @@ impl ActionExecutor<'_> {
         }
     }
 
+    /// Refuse the turn's request `420 Bad Extension` in place of the 2xx
+    /// (`status`) a rule's `Respond` writes, where the request requires a tag
+    /// only its peer serves
+    /// ([`sip_message::option_tags::required_end_to_end`]): the stack runs no
+    /// session timer of its own, so its own 2xx cannot accept the requirement
+    /// (RFC 3261 §8.2.2.3, RFC 4028 §7.1). True when refused: the rule's later
+    /// actions, which the 2xx would have settled (an answer cached), are not
+    /// applied.
+    pub(super) fn refuses_own_success(
+        &mut self,
+        call: &mut Call,
+        fx: &mut HandlerEffects,
+        ctx: &RuleContext,
+        status: u16,
+    ) -> bool {
+        if !(200..300).contains(&status) {
+            return false;
+        }
+        let required = ctx.request().and_then(sip_message::option_tags::required_end_to_end);
+        let Some(unsupported) = required else { return false };
+        self.refuse_unserved(call, fx, ctx, &unsupported);
+        true
+    }
+
     /// Refuse the current INVITE that meets glare, or UPDATE over an open
     /// offer, in place (RFC 3261 §14.2, RFC 3311 §5.2): 500 with a
     /// `Retry-After` drawn from [`GLARE_500_RETRY_AFTER`] when the sender's
