@@ -135,11 +135,10 @@ impl Owner {
                         self.note_tu_ack(&msg, &buf, dest);
                     }
                     if let Some(branch) = arm {
-                        self.arm_cancel_retransmit(&branch);
+                        self.arm_cancel_timers(&branch);
                         if first_on_given_up {
                             self.hold(TxnRef::Client(&branch), Hold::GaveUp);
                         }
-                        self.bound_after_cancel(&branch);
                     }
                 }
             }

@@ -180,7 +180,7 @@ pub(super) struct HeldCancel {
     pub(super) wire: CancelWire,
     /// Timer-E pacing for the on-wire datagram (§17.1.2.2). `None` while the
     /// datagram is still [`CancelWire::Held`]; armed, and re-armed from rung
-    /// one, by [`super::owner::Owner`]'s `arm_cancel_retransmit`.
+    /// one, by [`super::owner::Owner`]'s `arm_cancel_timers`.
     pub(super) ladder: Option<Ladder>,
 }
 
