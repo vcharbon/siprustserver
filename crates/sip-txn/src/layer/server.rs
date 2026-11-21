@@ -144,8 +144,10 @@ impl Owner {
     /// passive replay-on-request-retransmit path never fires and a single
     /// dropped reject would otherwise wedge the caller for the full 32 s. 2xx
     /// is exempt (the TU owns §13.3.1.4 2xx retransmission); non-INVITE
-    /// (Timer J) only absorbs, never retransmits.
+    /// (Timer J) only absorbs, never retransmits. An unattributed transaction
+    /// stops serving its call here (`layer::unattributed`).
     pub(super) fn arm_final_hold(&mut self, id: ServerTxnId<'_>, kind: TxnKind, status: u16) {
+        self.unattributed_answered(id);
         self.hold(
             TxnRef::Server(id),
             match (kind, status) {

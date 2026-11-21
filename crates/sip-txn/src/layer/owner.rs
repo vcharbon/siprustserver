@@ -4,7 +4,7 @@
 //! `layer::client`, the UAS FSM is `layer::server`, output-queue discipline is
 //! `layer::events`.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -30,6 +30,7 @@ use super::key::{ServerTxnId, ServerTxnIdentity, ServerTxnKey};
 use super::new_call_gate::NewCallGate;
 use super::parse_refusal::ParseRefusals;
 use super::refusals::InviteRefusals;
+use super::self_release::SelfReleaseWatch;
 use super::shrink::{shrink_idle, SHRINK_MIN_CAPACITY};
 use super::txn::{CancelWire, Timer, Transaction, TxnId, TxnRef, TxnRole};
 use super::unattributed::Unattributed;
@@ -59,12 +60,12 @@ pub(super) struct Owner {
     pub(super) keepalive_tx: Option<mpsc::Sender<TransactionEvent>>,
     pub(super) metrics: Arc<MetricsInner>,
     pub(super) id_gen: Arc<IdGen>,
-    /// call_refs the consumer asked to be told about when their **last**
-    /// transaction clears (ADR-0014 acting-backup self-release). On the
-    /// last-`delete_txn` for a watched call we capture
+    /// The calls the consumer asked to be told about when their **last**
+    /// serving transaction clears (ADR-0014 acting-backup self-release,
+    /// `layer::self_release`). On that clear we capture
     /// [`TransactionEvent::CallQuiesced`] onto the lossless critical path and drop
     /// the watch. Bounded — one entry per live takeover copy, removed when it fires.
-    pub(super) self_release_watch: HashSet<String>,
+    pub(super) self_release_watch: SelfReleaseWatch,
     /// `call_ref → its live transactions, by role`, kept in **lockstep** with
     /// `clients` and `servers` (every `set_txn`/`delete_txn` updates both; the
     /// entry is dropped when it empties). Makes the acting-backup self-release
@@ -174,7 +175,7 @@ impl Owner {
             metrics,
             parse_refusals: ParseRefusals::new(&config.id_gen, config.advertised),
             id_gen: config.id_gen,
-            self_release_watch: HashSet::new(),
+            self_release_watch: SelfReleaseWatch::default(),
             txn_index: HashMap::new(),
             unattributed: Unattributed::default(),
             deferred_events: VecDeque::new(),
@@ -323,14 +324,6 @@ impl Owner {
         }
     }
 
-    /// A watched call left with no transaction on its books hears
-    /// `CallQuiesced` at end of turn (ADR-0014).
-    fn quiesce_if_last(&mut self, cr: String) {
-        if self.self_release_watch.contains(&cr) && !self.has_txns_for(&cr) {
-            self.pending_quiesce.push(cr);
-        }
-    }
-
     pub(super) fn delete_txn(&mut self, id: TxnRef<'_>) -> bool {
         let removed = match id {
             TxnRef::Client(branch) => self.clients.remove(branch),
@@ -353,7 +346,9 @@ impl Owner {
                 self.cancel_timer(t.cleanup_key);
                 self.cancel_timer(t.cancel_retransmit_key);
                 self.untrack_call_ref(&t.call_ref, id);
-                self.unattributed.left(&t.call_id, id);
+                if self.unattributed.left(&t.call_id, id) {
+                    self.unattributed_settled(&t.call_id);
+                }
                 if t.held {
                     self.release_hold(t.branch(), &t.call_id, &t.from_tag);
                 }

@@ -26,7 +26,7 @@ impl Owner {
         call_ref: &str,
         reply: oneshot::Sender<usize>,
     ) {
-        self.self_release_watch.remove(call_ref);
+        self.self_release_watch.disarm(call_ref);
         let txns = self.txn_index.get(call_ref);
         let clients: Vec<String> =
             txns.into_iter().flat_map(|t| t.every_client().map(str::to_string)).collect();

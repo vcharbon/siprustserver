@@ -1,12 +1,14 @@
 //! The in-dialog server transactions opened attributed to no call: their
-//! request's Request-URI named none (an element on its path rewrote it), so
-//! only the consumer attributes them, once it takes the request
-//! (`layer::attach`). Until then the self-release count of a call whose
-//! legs' Call-IDs name theirs counts them (ADR-0014).
+//! request's Request-URI named none (an element on its path rewrote it). They
+//! leave the set as they are attributed, by the consumer once it takes the
+//! request (`layer::attach`) or by a seed of the call whose final one takes
+//! (`layer::seed`), or as they leave the map. Until then the self-release
+//! count of a call whose legs' Call-IDs name theirs counts them, and its watch
+//! holds on them (ADR-0014, `layer::self_release`).
 
 use std::collections::{HashMap, HashSet};
 
-use super::key::{ServerTxnIdentity, ServerTxnKey};
+use super::key::{ServerTxnId, ServerTxnIdentity, ServerTxnKey};
 use super::owner::Owner;
 use super::shrink::shrink_idle;
 use super::txn::TxnRef;
@@ -23,15 +25,22 @@ impl Unattributed {
         self.0.entry(call_id.to_string()).or_default().insert(key);
     }
 
-    /// The transaction `id` of `call_id` was attributed or left the map; a
-    /// client transaction and one never filed change nothing.
-    pub(super) fn left(&mut self, call_id: &str, id: TxnRef<'_>) {
-        let TxnRef::Server(id) = id else { return };
-        let Some(keys) = self.0.get_mut(call_id) else { return };
-        keys.remove(&id as &dyn ServerTxnIdentity);
+    /// The transaction `id` of `call_id` was attributed or left the map;
+    /// whether it was filed. A client transaction and one never filed change
+    /// nothing.
+    pub(super) fn left(&mut self, call_id: &str, id: TxnRef<'_>) -> bool {
+        let TxnRef::Server(id) = id else { return false };
+        let Some(keys) = self.0.get_mut(call_id) else { return false };
+        let filed = keys.remove(&id as &dyn ServerTxnIdentity);
         if keys.is_empty() {
             self.0.remove(call_id);
         }
+        filed
+    }
+
+    /// Whether the server transaction `id` of `call_id` is filed.
+    fn holds(&self, call_id: &str, id: ServerTxnId<'_>) -> bool {
+        self.0.get(call_id).is_some_and(|keys| keys.contains(&id as &dyn ServerTxnIdentity))
     }
 
     /// Give back the table's idle capacity.
@@ -52,5 +61,14 @@ impl Owner {
             .flatten()
             .filter(|key| !self.server(key.id()).is_some_and(|txn| !txn.state.is_active()))
             .count()
+    }
+
+    /// The server transaction `id` sent its final: one unattributed no longer
+    /// serves its call, and the watches naming its Call-ID are checked again.
+    pub(super) fn unattributed_answered(&mut self, id: ServerTxnId<'_>) {
+        let Some(call_id) = self.server(id).map(|txn| txn.call_id.clone()) else { return };
+        if self.unattributed.holds(&call_id, id) {
+            self.unattributed_settled(&call_id);
+        }
     }
 }

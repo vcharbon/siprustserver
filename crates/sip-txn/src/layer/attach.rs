@@ -40,8 +40,10 @@ impl Owner {
         }
         txn.call_ref = Some(call_ref.to_string());
         let call_id = txn.call_id.clone();
-        self.unattributed.left(&call_id, TxnRef::Server(id));
         self.budgets.attributed(&call_id, call_ref);
         self.track_call_ref(&Some(call_ref.to_string()), &TxnId::Server(id.to_key()));
+        if self.unattributed.left(&call_id, TxnRef::Server(id)) {
+            self.unattributed_settled(&call_id);
+        }
     }
 }

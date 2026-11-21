@@ -46,8 +46,10 @@
 //! oldest event waiting in the queue) · `backlog` (new-call admission against
 //! the deferred backlog) · `refusals` (the node's shared refusals of new
 //! INVITEs) · `txn` (per-transaction state) · `unanswered` (server
-//! transactions the consumer will not answer) · `key` (a server transaction's
-//! §17.2.3 identity).
+//! transactions the consumer will not answer) · `unattributed` (in-dialog
+//! server transactions attributed to no call) · `self_release` (the calls
+//! watched for their last serving transaction's clear, ADR-0014) · `key` (a
+//! server transaction's §17.2.3 identity).
 
 mod accepted;
 mod attach;
@@ -82,6 +84,7 @@ mod refusals;
 mod relinquish;
 mod run;
 mod seed;
+mod self_release;
 mod server;
 mod server_cancel;
 mod shrink;
