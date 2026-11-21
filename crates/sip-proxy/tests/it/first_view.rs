@@ -225,7 +225,7 @@ fn spawn_responder(ep: Box<dyn UdpEndpoint>, worker: Arc<Responder>) {
 #[tokio::test(start_paused = true)]
 async fn a_first_round_nobody_answers_completes_at_its_reply_window() {
     let h = Harness::with_transit_delay("first-view-silent", 0);
-    let (worker_ep, _) = h.bind_sut("b2b-1", WORKER).await;
+    let (worker_ep, _) = h.bind_peer("b2b-1", WORKER).await;
     let worker = Arc::new(Responder { answers: false, seen: Mutex::new(Vec::new()) });
     spawn_responder(worker_ep, worker.clone());
     let registry = pool(WorkerHealth::Unknown);
@@ -250,7 +250,7 @@ async fn a_first_round_nobody_answers_completes_at_its_reply_window() {
 #[tokio::test(start_paused = true)]
 async fn the_first_round_leaves_with_the_first_listing() {
     let h = Harness::with_transit_delay("first-view-listing", 0);
-    let (worker_ep, _) = h.bind_sut("b2b-1", WORKER).await;
+    let (worker_ep, _) = h.bind_peer("b2b-1", WORKER).await;
     let worker = Arc::new(Responder { answers: true, seen: Mutex::new(Vec::new()) });
     spawn_responder(worker_ep, worker.clone());
     let membership = SimulatedMembership::unsynced(Clock::test_at(0));
