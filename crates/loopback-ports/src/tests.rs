@@ -25,10 +25,12 @@ fn picks_one_distinct_loopback_address_per_kind_below_the_ephemeral_range() {
     let kinds = [Kind::Udp, Kind::Tcp, Kind::Tcp];
     let picked = free_addresses(&kinds).expect("three free addresses");
     let low = ephemeral_low().expect("the ephemeral range");
+    let (floor, _) = range_below(low).expect("a range below it");
     assert_eq!(picked.len(), 3);
     for at in &picked {
         assert!(at.ip().is_loopback(), "{at} is on loopback");
         assert!(at.port() < low, "{at} lies below the ephemeral range, from {low}");
+        assert!(at.port() >= floor, "{at} lies from the floor {floor} up");
     }
     let ports: Vec<u16> = picked.iter().map(SocketAddr::port).collect();
     assert!(ports[1] != ports[2], "the two TCP addresses differ: {ports:?}");
@@ -62,6 +64,25 @@ fn a_port_an_earlier_address_took_is_not_picked_again() {
     let picked =
         pick(&[Kind::Udp, Kind::Tcp], sequence(&[first, first, second])).expect("two ports");
     assert_eq!(picked.iter().map(SocketAddr::port).collect::<Vec<_>>(), [first, second]);
+}
+
+/// The pick's second candidate is drawn while the first address's socket still holds its port.
+#[test]
+fn a_picked_port_stays_held_until_the_last_address_is_picked() {
+    let free = free_addresses(&[Kind::Udp, Kind::Udp]).expect("two free ports");
+    let (first, second) = (free[0], free[1]);
+    let mut drawn = 0;
+    let picked = pick(&[Kind::Udp, Kind::Udp], || {
+        drawn += 1;
+        if drawn == 1 {
+            return first.port();
+        }
+        assert!(UdpSocket::bind(first).is_err(), "{first} is held while the pick runs");
+        second.port()
+    })
+    .expect("two ports");
+    assert_eq!(picked, [first, second]);
+    UdpSocket::bind(first).expect("released once the pick returns");
 }
 
 #[test]

@@ -1,5 +1,5 @@
-//! Loopback addresses a test hands a process it spawns. Each is free on this
-//! box when it is picked, none repeats another of the same call, and each
+//! Loopback addresses a test hands a process it spawns. Each is free on
+//! 127.0.0.1 when it is picked, none repeats another of the same call, and each
 //! lies below the kernel's ephemeral range: no other process's bind on port 0
 //! nor outbound connect takes one before the spawned process binds it, as a
 //! port read off a bind on port 0 and released can be.
@@ -35,9 +35,9 @@ const RANGE_FILE: &str = "/proc/sys/net/ipv4/ip_local_port_range";
 
 /// A loopback address for each of `kinds`, in order, picked at random below
 /// the ephemeral range, each checked free by binding it and all held until
-/// all are picked. `Err` where the range leaves fewer than 1000
-/// unprivileged ports below it, or where an address finds no free port in
-/// 100 candidates.
+/// all are picked. `Err` where the kernel's range file states no low bound,
+/// where the range leaves fewer than 1000 unprivileged ports below it, or
+/// where an address finds no free port in 100 candidates.
 pub fn free_addresses(kinds: &[Kind]) -> io::Result<Vec<SocketAddr>> {
     let (floor, ceiling) = range_below(ephemeral_low()?)?;
     let random = RandomState::new();

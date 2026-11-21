@@ -3424,6 +3424,7 @@ dependencies = [
  "http-net",
  "http-net-testkit",
  "layer-harness",
+ "loopback-ports",
  "observe",
  "pivot-interpreter",
  "pivot-schema",

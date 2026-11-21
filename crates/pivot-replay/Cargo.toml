@@ -42,3 +42,7 @@ serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 schemars = { workspace = true }
 rustix = { version = "1", features = ["process"] }
+
+[dev-dependencies]
+# The plain batch test's B2BUA ingress, no other process's socket taking it first.
+loopback-ports = { path = "../loopback-ports" }
