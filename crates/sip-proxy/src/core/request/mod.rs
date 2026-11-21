@@ -112,7 +112,7 @@ impl ProxyCore {
 
         let outcome = self.route_request(&msg, src, face).await;
 
-        // ADR-0026 §2
+        // ADR-0026 §4
         if initial_invite && outcome.decision == RoutingDecisionKind::Reject {
             self.traces.close(call_id);
         } else if req.method() == Method::Ack && outcome.target.is_some() {

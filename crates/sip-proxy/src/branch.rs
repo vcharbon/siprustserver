@@ -12,9 +12,14 @@ const COOKIED_VIA: &str = "b";
 const BRANCHLESS_VIA: &str = "v";
 
 /// The Via branch for a forward of `req` (RFC 3261 §16.11): a function of the
-/// message, so a retransmission of a request and the CANCEL and non-2xx ACK
-/// for it map to the branch its first forward carried — at any instance of
-/// this proxy, remembering nothing.
+/// message, so a retransmission of a request with a cookied branch, and the
+/// CANCEL and non-2xx ACK for it, map to the branch its first forward carried,
+/// at any instance of this proxy, remembering nothing.
+///
+/// A top Via without the magic cookie takes §16.11's alternate input set: the
+/// Via, the To tag, the Request-URI, Call-ID, From tag and CSeq number. Its
+/// non-2xx ACK, carrying the final's To tag, maps apart from its INVITE, as
+/// §16.11 states the set.
 ///
 /// A cookied branch is hashed with the received sent-by, Call-ID, From tag and
 /// CSeq number: one branch token from two senders (two transactions, §17.2.3),

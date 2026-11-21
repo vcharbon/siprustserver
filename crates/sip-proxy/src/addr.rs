@@ -15,6 +15,8 @@ impl ProxyAddr {
         Self { host: host.into(), port }
     }
 
+    /// Parses `host:port` (the cookie and registry wire form), split at the
+    /// last `:`. `None` with no `:`, an empty host, or a port that is no `u16`.
     pub fn parse(s: &str) -> Option<Self> {
         let (host, port) = s.rsplit_once(':')?;
         if host.is_empty() {

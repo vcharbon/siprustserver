@@ -110,8 +110,8 @@ pub struct StaticHmacKeyProvider {
 
 impl StaticHmacKeyProvider {
     /// Validate and build: each key id a non-empty run of URI-parameter
-    /// characters, each key at least `MIN_KEY_BYTES` long, and the previous
-    /// key's id other than the current one's.
+    /// characters, each key at least 16 bytes long (`MIN_KEY_BYTES`), and the
+    /// previous key's id other than the current one's.
     pub fn new(
         current: HmacKey,
         previous: Option<HmacKey>,

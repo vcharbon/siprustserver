@@ -83,10 +83,11 @@ async fn reads_the_same(stage: &str, base: &b2bua_runner_kit::RunnerBase) {
     assert!(past.is_none(), "{stage}: past the limit nothing answers: {past:?}");
 }
 
+/// The one test of this target: it sets the environment before any thread
+/// reads it.
 #[tokio::test]
 #[ignore = "slow lane: real clock >= 1 s"]
 async fn a_datagram_reads_the_same_whichever_stage_parses_it() {
-    // SAFETY: the one test of this target, before any thread reads the environment.
     for (key, value) in [
         ("B2BUA_LISTEN", "127.0.0.1:0"),
         ("B2BUA_METRICS", "127.0.0.1:0"),

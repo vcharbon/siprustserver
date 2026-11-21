@@ -79,11 +79,8 @@ bytes = { workspace = true }
 futures = "0.3"
 serde_json = { workspace = true }
 
-# jemalloc global allocator + its stats probe (see the #[global_allocator] note
-# in src/main.rs). The front proxy is single-task but still churns SIP buffers
-# under sustained load; using the same decay-purging allocator as the b2bua
-# keeps RSS bounded and makes the soak's memory story uniform across both tiers.
-# unix-only (jemalloc has no MSVC target).
+# jemalloc global allocator and its stats probe (ADR-0065 §4); unix-only
+# (jemalloc has no MSVC target).
 [target.'cfg(not(target_env = "msvc"))'.dependencies]
 tikv-jemallocator = "0.7"
 jemalloc-stats = { path = "../jemalloc-stats" }
