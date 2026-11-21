@@ -1,26 +1,35 @@
-//! The timeout of a re-INVITE a service sent itself (RFC 3261 §17.1.1.2,
-//! Timer B): the dialog's INVITE record settles before the rules read the
-//! timeout, naming the rule that sent it, so a service rule can claim that
-//! timeout and keep the call. The dialog then holds no INVITE in progress
-//! (§14.1): a later re-INVITE leaves. Without a claiming rule, the core
-//! default ends the session.
+//! The timeout of a re-INVITE a service sent itself. At its Timer B, with no
+//! response at all (RFC 3261 §17.1.1.2), the rules read the dialog's INVITE
+//! record as the timed-out one, naming the rule that sent it, so a service
+//! rule can claim that timeout and keep the call. The dialog then holds no
+//! INVITE in progress (§14.1): a later re-INVITE leaves, and a late 2xx to the
+//! timed-out one still draws its ACK (§13.2.2.4). Without a claiming rule, the
+//! core default ends the session. A re-INVITE that drew a provisional is
+//! still in progress when it gives up at the INVITE bound: no rule claims it.
 
 use std::sync::Arc;
 use std::time::Duration;
 
+use b2bua::config::B2buaConfig;
 use b2bua::decision::test_adapter::route_to;
 use b2bua::decision::{NewCallResponse, ScriptedDecisionEngine};
 use b2bua_harness::{settle_until, B2buaSut};
-use scenario_harness::Harness;
+use scenario_harness::{Agent, Dialog, Harness, ServerTxn};
 use sip_message::generators::InDialogMethod;
 
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
 const ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/AVP 0\r\n";
+/// Alice's next description of her session (RFC 3264 §8).
+const ALICE_2: &str = "v=0\r\no=alice 1 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10002 RTP/AVP 0\r\n";
 const ORDINAL: &str = "w0";
-/// A keepalive interval past the Timer B window: no OPTIONS rides the test.
-const KEEPALIVE_PAST_TIMER_B_SEC: i64 = 300;
+/// A keepalive interval past every test's end: no OPTIONS rides a test.
+const KEEPALIVE_PAST_THE_TEST_SEC: i64 = 3_000;
 /// Past Timer B (64·T1 = 32 s) of the service's re-INVITE.
 const PAST_TIMER_B: Duration = Duration::from_secs(33);
+/// Past the bound an INVITE client transaction that drew a provisional gives
+/// up at.
+const PAST_THE_INVITE_BOUND: Duration =
+    Duration::from_secs(B2buaConfig::DEFAULT_INVITE_TXN_TIMEOUT_SEC as u64 + 1);
 
 /// A service that answers the caller's MESSAGE itself and re-INVITEs the
 /// callee offering the caller's description; it ACKs the callee's 2xx. With
@@ -140,57 +149,98 @@ fn decision() -> Arc<ScriptedDecisionEngine> {
     )
 }
 
+/// An answered call whose service, on alice's MESSAGE, re-INVITEs bob.
+struct Renegotiating {
+    h: Harness,
+    alice: Agent,
+    bob: Agent,
+    b2bua: B2buaSut,
+    alice_dialog: Dialog,
+    /// Bob's server transaction of the service's re-INVITE.
+    reinvite: ServerTxn,
+    call_ref: String,
+}
+
+impl Renegotiating {
+    /// The call set up through `service`, the re-INVITE received by bob.
+    async fn start(name: &str, service: b2bua::rules::ServiceDef) -> Self {
+        let h = Harness::new(name);
+        let alice = h.agent("alice", "127.0.0.1:5060").await;
+        let bob = h.agent("bob", "127.0.0.1:5070").await;
+        let b2bua = B2buaSut::builder(decision())
+            .services(vec![service])
+            .tune(|c| c.keepalive_interval_sec = KEEPALIVE_PAST_THE_TEST_SEC)
+            .start(&h, "b2bua", "127.0.0.1:5080")
+            .await;
+
+        let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
+        let mut b_inv = bob.receive("INVITE").await;
+        b_inv.respond(200, "OK").with_sdp(ANSWER).await;
+        call.expect(200).await;
+        let mut alice_dialog = call.ack().await;
+        bob.receive("ACK").await;
+        let call_ref = call::derive_call_ref(ORDINAL, &call.call_id(), alice_dialog.local_tag());
+
+        let mut message = alice_dialog.send_request(InDialogMethod::Message).send().await;
+        message.expect(200).await;
+        let reinvite = bob.receive("INVITE").await;
+        Renegotiating { h, alice, bob, b2bua, alice_dialog, reinvite, call_ref }
+    }
+
+    /// The call is up and Active.
+    fn assert_kept(&self) {
+        let live = self.b2bua.live_call(&self.call_ref).expect("the call is live");
+        assert_eq!(live.state, call::CallModelState::Active, "the service keeps the call");
+    }
+
+    /// Alice hangs up; bob answers the BYE.
+    async fn alice_hangs_up(&mut self) {
+        let mut alice_bye = self.alice_dialog.bye().await;
+        self.bob.receive("BYE").await.respond(200, "OK").await;
+        alice_bye.expect(200).await;
+    }
+
+    /// Bob, his dialog ended by BYE, answers the re-INVITE still pending at
+    /// him `487` (RFC 3261 §15.1.2), which the transaction ACKs.
+    async fn bob_ends_the_pending_reinvite(&mut self) {
+        self.reinvite.respond(487, "Request Terminated").await;
+        self.bob.receive("ACK").await;
+    }
+
+    async fn finish(self) {
+        settle_until(|| self.b2bua.is_reaped()).await;
+        self.b2bua.assert_fully_reaped();
+        self.h.finish().await;
+    }
+}
+
 /// The service's re-INVITE draws nothing from bob, whose silence is the
 /// test's target; past its Timer B the call is up when the service keeps it,
 /// and torn down by the default when it does not. A kept call's next re-INVITE
 /// reaches bob, who still owes the first its final and so refuses the second
 /// `500` with `Retry-After` (RFC 3261 §14.2); the call then ends by BYE.
 async fn the_service_reinvite_times_out(name: &str, service: b2bua::rules::ServiceDef, kept: bool) {
-    let h = Harness::new(name);
-    let alice = h.agent("alice", "127.0.0.1:5060").await;
-    let bob = h.agent("bob", "127.0.0.1:5070").await;
-    let b2bua = B2buaSut::builder(decision())
-        .services(vec![service])
-        .tune(|c| c.keepalive_interval_sec = KEEPALIVE_PAST_TIMER_B_SEC)
-        .start(&h, "b2bua", "127.0.0.1:5080")
-        .await;
-
-    let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
-    let mut b_inv = bob.receive("INVITE").await;
-    b_inv.respond(200, "OK").with_sdp(ANSWER).await;
-    call.expect(200).await;
-    let mut alice_dialog = call.ack().await;
-    bob.receive("ACK").await;
-    let call_ref = call::derive_call_ref(ORDINAL, &call.call_id(), alice_dialog.local_tag());
-
-    let mut message = alice_dialog.send_request(InDialogMethod::Message).send().await;
-    message.expect(200).await;
-    let unanswered = bob.receive("INVITE").await;
-
-    h.advance(PAST_TIMER_B).await;
-    let _retransmissions = bob.drain().await;
+    let mut call = Renegotiating::start(name, service).await;
+    call.h.advance(PAST_TIMER_B).await;
+    let _retransmissions = call.bob.drain().await;
     if kept {
-        let live = b2bua.live_call(&call_ref).expect("the call is live");
-        assert_eq!(live.state, call::CallModelState::Active, "the service keeps the call");
-        let mut message = alice_dialog.send_request(InDialogMethod::Message).send().await;
+        call.assert_kept();
+        let mut message = call.alice_dialog.send_request(InDialogMethod::Message).send().await;
         message.expect(200).await;
-        let mut reinvite = bob.receive("INVITE").await;
+        let mut reinvite = call.bob.receive("INVITE").await;
         assert!(
-            reinvite.request().cseq().seq() > unanswered.request().cseq().seq(),
+            reinvite.request().cseq().seq() > call.reinvite.request().cseq().seq(),
             "a new INVITE transaction on the dialog"
         );
         reinvite.respond(500, "Server Internal Error").with_header("Retry-After", "5").await;
-        bob.receive("ACK").await;
-        let mut alice_bye = alice_dialog.bye().await;
-        bob.receive("BYE").await.respond(200, "OK").await;
-        alice_bye.expect(200).await;
+        call.bob.receive("ACK").await;
+        call.alice_hangs_up().await;
     } else {
-        alice.receive("BYE").await.respond(200, "OK").await;
-        bob.receive("BYE").await.respond(200, "OK").await;
+        call.alice.receive("BYE").await.respond(200, "OK").await;
+        call.bob.receive("BYE").await.respond(200, "OK").await;
     }
-    settle_until(|| b2bua.is_reaped()).await;
-    b2bua.assert_fully_reaped();
-    h.finish().await;
+    call.bob_ends_the_pending_reinvite().await;
+    call.finish().await;
 }
 
 /// A service rule claims the timeout of the re-INVITE it sent and keeps the
@@ -215,4 +265,60 @@ async fn the_default_ends_the_session_when_an_own_reinvite_times_out() {
         false,
     )
     .await;
+}
+
+/// Bob answers the re-INVITE `200` past its Timer B, the call kept: the 2xx
+/// still answers the INVITE the dialog last sent and draws its ACK
+/// (RFC 3261 §13.2.2.4).
+#[tokio::test(start_paused = true)]
+async fn a_2xx_past_timer_b_to_a_kept_calls_reinvite_is_acked() {
+    let mut call =
+        Renegotiating::start("own-reinvite-late-2xx", renegotiate::keeps_the_call()).await;
+    call.h.advance(PAST_TIMER_B).await;
+    let _retransmissions = call.bob.drain().await;
+    call.assert_kept();
+    call.reinvite.respond(200, "OK").with_sdp(ANSWER).await;
+    let ack = call.bob.receive("ACK").await;
+    assert_eq!(ack.request().cseq().seq(), call.reinvite.request().cseq().seq());
+    call.alice_hangs_up().await;
+    call.finish().await;
+}
+
+/// Bob rings the re-INVITE and answers nothing more: its client transaction
+/// left Calling, so Timer B never ends it, and it gives up at the INVITE
+/// bound still in progress at bob (§14.1). No rule claims that give-up: the
+/// default ends the call, and bob answers the pending re-INVITE `487`
+/// (§15.1.2).
+#[tokio::test(start_paused = true)]
+async fn a_reinvite_giving_up_after_a_provisional_ends_the_call() {
+    let mut call =
+        Renegotiating::start("own-reinvite-proceeding-give-up", renegotiate::keeps_the_call())
+            .await;
+    call.reinvite.respond(180, "Ringing").await;
+    call.h.advance(PAST_THE_INVITE_BOUND).await;
+    call.alice.receive("BYE").await.respond(200, "OK").await;
+    call.bob.receive("BYE").await.respond(200, "OK").await;
+    call.bob_ends_the_pending_reinvite().await;
+    call.finish().await;
+}
+
+/// Past the Timer B of the service's re-INVITE, the call kept, alice
+/// re-INVITEs: bob's dialog holds no INVITE of this stack in progress, so the
+/// glare check lets the relay leave (RFC 3261 §14.2) and bob, still owing the
+/// first its final, refuses it `500` with `Retry-After`, relayed to alice.
+#[tokio::test(start_paused = true)]
+async fn a_peer_reinvite_past_timer_b_is_relayed() {
+    let mut call =
+        Renegotiating::start("own-reinvite-timer-b-glare", renegotiate::keeps_the_call()).await;
+    call.h.advance(PAST_TIMER_B).await;
+    let _retransmissions = call.bob.drain().await;
+    call.assert_kept();
+    let mut alice_reinvite = call.alice_dialog.reinvite(Some(ALICE_2)).await;
+    let mut relayed = call.bob.receive("INVITE").await;
+    relayed.respond(500, "Server Internal Error").with_header("Retry-After", "5").await;
+    call.bob.receive("ACK").await;
+    alice_reinvite.expect(500).await;
+    call.alice_hangs_up().await;
+    call.bob_ends_the_pending_reinvite().await;
+    call.finish().await;
 }
