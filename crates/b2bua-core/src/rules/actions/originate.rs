@@ -1,5 +1,5 @@
-//! Requests the B2BUA originates itself in a leg's dialog: the resync
-//! re-INVITE, NOTIFY and the generic in-dialog request (`SendRequestToLeg`);
+//! Requests the B2BUA originates itself in a leg's dialog: the re-INVITE,
+//! NOTIFY and the generic in-dialog request (`SendRequestToLeg`);
 //! the PRACKs it owes are [`super::prack`]'s. The new leg's INVITE is [`super::create_leg`]'s;
 //! relaying an *inbound* request is [`super::relay_request`]'s.
 
@@ -110,11 +110,12 @@ impl ActionExecutor<'_> {
     /// ([`capabilities::for_reinvite`]) filling what they leave unstated.
     /// CSeq = the dialog's `our_cseq` + 1. Nothing leaves while an INVITE
     /// transaction is in progress on the dialog ([`Self::invite_may_leave`]).
-    /// Used by
-    /// `promote18xPemTo200` to resync Alice when bob's final SDP differs from the
-    /// early-media SDP promoted into the synthetic 200 OK. The response comes back
-    /// classified from-a (the B2BUA's stamped Via cr/lg) and is claimed by the
-    /// `promote-resync-reinvite-response` rule.
+    /// Used by `promote18xPemTo200` to resync Alice when bob's final SDP
+    /// differs from the early-media SDP promoted into the synthetic 200 OK,
+    /// and by a service's in-dialog INVITE ([`Self::send_request_to_leg`]).
+    /// The response comes back classified by the leg the B2BUA's stamped Via
+    /// names (cr/lg) and is claimed by the asker's rules
+    /// (`promote-resync-reinvite-response` for the resync).
     #[allow(clippy::too_many_arguments)]
     pub(super) fn send_reinvite(
         &mut self,
@@ -125,6 +126,31 @@ impl ActionExecutor<'_> {
         content_type: Option<&str>,
         descriptors: &[sip_message::SipHeader],
         add_headers: &[sip_message::draft::Entry],
+        author: relay::Author<'_>,
+    ) {
+        let stated: Vec<sip_message::SipHeader> = add_headers
+            .iter()
+            .map(|e| sip_message::SipHeader {
+                name: sip_message::SipStr::owned(e.name().as_wire_str()),
+                value: e.text(),
+            })
+            .collect();
+        self.reinvite_stating(call, fx, leg_id, body, content_type, descriptors, stated, author);
+    }
+
+    /// [`Self::send_reinvite`] carrying the lines `stated`: the one path an
+    /// INVITE this stack originates on a dialog takes, so each becomes the
+    /// dialog's INVITE record (RFC 3261 §13.2.2.4) and is guarded (§14.1).
+    #[allow(clippy::too_many_arguments)]
+    fn reinvite_stating(
+        &mut self,
+        call: &mut Call,
+        fx: &mut HandlerEffects,
+        leg_id: &str,
+        body: &[u8],
+        content_type: Option<&str>,
+        descriptors: &[sip_message::SipHeader],
+        stated: Vec<sip_message::SipHeader>,
         author: relay::Author<'_>,
     ) {
         let Some(leg) = leg_at(call, leg_id) else { return };
@@ -157,13 +183,6 @@ impl ActionExecutor<'_> {
             return;
         };
         let gen_dialog = relay::to_gen_dialog(leg, &dialog);
-        let stated: Vec<sip_message::SipHeader> = add_headers
-            .iter()
-            .map(|e| sip_message::SipHeader {
-                name: sip_message::SipStr::owned(e.name().as_wire_str()),
-                value: e.text(),
-            })
-            .collect();
         let mut extra = relay::writable_lines("re-INVITE to a leg", stated, fx);
         // RFC 7315 §5.6: the arm's vector for the leg, unless the action states one.
         let vector = sip_message::header::ChargingVector::header_name();
@@ -246,7 +265,7 @@ impl ActionExecutor<'_> {
             body: OutboundBody::Request(out_req),
             mode: OutboundTxnMode::NewClient(TxnKind::Invite),
             destination: dest,
-            label: format!("resync re-INVITE → {leg_id}"),
+            label: format!("re-INVITE → {leg_id}"),
             leg_id: Some(leg_id.to_string()),
             provenance: Provenance::Authored,
         });
@@ -255,7 +274,8 @@ impl ActionExecutor<'_> {
     /// Originate an in-dialog request on `leg_id`'s confirmed dialog
     /// ([`b2bua_sdk::model::RuleAction::SendRequestToLeg`]): keepalive
     /// OPTIONS, opaque-body INFO (MSCML), deferred-relay re-emission. A BYE
-    /// takes the method table's BYE row ([`Self::send_bye`]).
+    /// takes the method table's BYE row ([`Self::send_bye`]); an INVITE is the
+    /// re-INVITE [`Self::send_reinvite`] sends, recorded and guarded alike.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn send_request_to_leg(
         &mut self,
@@ -305,14 +325,24 @@ impl ActionExecutor<'_> {
                 return;
             }
         };
+        if m == InDialogMethod::Invite {
+            let stated = application_lines(headers);
+            return self.reinvite_stating(
+                call,
+                fx,
+                leg_id,
+                body,
+                content_type,
+                descriptors,
+                stated,
+                author,
+            );
+        }
         // Advance + persist the dialog CSeq by exactly one (§12.2.1.1), exactly as
         // every other in-dialog originator here. Without this the in-dialog
         // keepalive OPTIONS re-derives the same CSeq every cycle and the later
         // relayed BYE collides on it — an RFC 3261 violation a real UAS rejects.
         let t_id = dialog.id();
-        if m == InDialogMethod::Invite && !self.invite_may_leave(call, leg_id, &t_id, "INVITE") {
-            return;
-        }
         // `KeepaliveCseqReuse` (the wire-fault seam) emits the keepalive at the
         // CSeq the dialog already used and leaves the dialog un-advanced: the
         // exact defect `cseq-in-dialog-order` gates on, on purpose.
@@ -348,12 +378,8 @@ impl ActionExecutor<'_> {
                 Some(relay::RequestFacts {
                     method,
                     uri: &gen_dialog.remote_target,
-                    route: &if m == InDialogMethod::Invite {
-                        relay::route_past_front(self.config, &gen_dialog.route_set)
-                    } else {
-                        String::new()
-                    },
-                    offer: m == InDialogMethod::Invite && description.is_some(),
+                    route: "",
+                    offer: false,
                 }),
                 branch,
             )),
@@ -388,21 +414,18 @@ impl ActionExecutor<'_> {
             res.request,
             dest,
         );
-        let kind = if m == InDialogMethod::Invite { TxnKind::Invite } else { TxnKind::NonInvite };
         // The one in-dialog OPTIONS this stack originates is the keepalive.
         let provenance =
             if m == InDialogMethod::Options { Provenance::Probe } else { Provenance::Authored };
         let request = OutboundSipEffect {
             body: OutboundBody::Request(out_req),
-            mode: OutboundTxnMode::NewClient(kind),
+            mode: OutboundTxnMode::NewClient(TxnKind::NonInvite),
             destination: dest,
             label: format!("{method} → {leg_id}"),
             leg_id: Some(leg_id.to_string()),
             provenance,
         };
-        if kind == TxnKind::NonInvite {
-            self.record_own_effect(call, leg_id, &t_id, &request);
-        }
+        self.record_own_effect(call, leg_id, &t_id, &request);
         fx.outbound.push(request);
     }
 
@@ -432,7 +455,15 @@ fn stated_lines(
     descriptors: &[sip_message::SipHeader],
     fx: &mut HandlerEffects,
 ) -> Vec<sip_message::SipHeader> {
-    let mut lines: Vec<sip_message::SipHeader> = headers
+    let mut lines = application_lines(headers);
+    relay::describe_body(&mut lines, body, descriptors);
+    relay::writable_lines(&format!("{method} to a leg"), lines, fx)
+}
+
+/// A service's application `headers` as lines, the body-owned
+/// Content-Type and Content-Length left to the body.
+fn application_lines(headers: &[(String, String)]) -> Vec<sip_message::SipHeader> {
+    headers
         .iter()
         .filter(|(n, _)| {
             let named = sip_message::HeaderName::from(n.as_str());
@@ -443,7 +474,5 @@ fn stated_lines(
             name: name.clone().into(),
             value: value.clone().into(),
         })
-        .collect();
-    relay::describe_body(&mut lines, body, descriptors);
-    relay::writable_lines(&format!("{method} to a leg"), lines, fx)
+        .collect()
 }
