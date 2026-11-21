@@ -238,7 +238,7 @@ async fn an_offer_in_a_2xx_crossing_the_bye_is_answered_rejecting_in_its_ack() {
     let _report = h.finish().await;
 }
 
-/// The same 200 landing once the call is reaped: the orphaned client
+/// The same 200, crossing the held CANCEL, landing once the call is reaped: the orphaned client
 /// transaction composes the ACK the released call no longer can (ADR-0034),
 /// and answers the offer the same way, in the session the SUT stated on the
 /// dialog: alice's origin, one version up (RFC 3264 §8, RFC 4566 §5.2).
@@ -269,7 +269,6 @@ async fn an_offer_in_a_2xx_after_the_call_is_reaped_is_answered_rejecting_in_its
     bob_bye.respond(200, "OK").await;
     settle_until(|| b2bua.active_calls() == 0).await;
 
-    // ── the 200 crosses the CANCEL and lands on the reaped call ──────────────
     bob_reinv.respond(200, "OK").with_sdp(BOB_REOFFER).await;
     bob.receive("CANCEL").await.respond(200, "OK").await;
     let answer = expect_rejecting_ack(&bob, &bob_reinv).await;
