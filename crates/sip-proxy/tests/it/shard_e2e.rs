@@ -24,12 +24,37 @@ use sip_proxy::{ForwardAllStrategy, ProxyAddr, ProxyCoreBuilder, ProxyMetrics, R
 use sip_txn::IdGen;
 use tokio::time::timeout;
 
+/// What one shard received: every datagram, and the requests among them.
+#[derive(Default)]
+struct ShardCounts {
+    received: AtomicU64,
+    requests: AtomicU64,
+}
+
+impl ShardCounts {
+    fn count(&self, pkt: &Option<sip_net::UdpPacket>) {
+        let Some(pkt) = pkt else { return };
+        self.received.fetch_add(1, Ordering::Relaxed);
+        if !pkt.raw.starts_with(b"SIP/2.0 ") {
+            self.requests.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    fn received(&self) -> u64 {
+        self.received.load(Ordering::Relaxed)
+    }
+
+    fn requests(&self) -> u64 {
+        self.requests.load(Ordering::Relaxed)
+    }
+}
+
 /// Endpoint decorator counting datagrams its shard actually received — the
 /// bound endpoint's own counters are only snapshot-readable and the endpoint
 /// moves into the core.
 struct CountingEndpoint {
     inner: Box<dyn UdpEndpoint>,
-    received: Arc<AtomicU64>,
+    counts: Arc<ShardCounts>,
 }
 
 #[async_trait]
@@ -43,16 +68,12 @@ impl UdpEndpoint for CountingEndpoint {
     }
     async fn recv(&self) -> Option<sip_net::UdpPacket> {
         let pkt = self.inner.recv().await;
-        if pkt.is_some() {
-            self.received.fetch_add(1, Ordering::Relaxed);
-        }
+        self.counts.count(&pkt);
         pkt
     }
     fn try_recv(&self) -> Option<sip_net::UdpPacket> {
         let pkt = self.inner.try_recv();
-        if pkt.is_some() {
-            self.received.fetch_add(1, Ordering::Relaxed);
-        }
+        self.counts.count(&pkt);
         pkt
     }
     fn local_addr(&self) -> std::net::SocketAddr {
@@ -83,8 +104,15 @@ fn options(uac_port: u16, i: usize, dst: std::net::SocketAddr) -> Vec<u8> {
     .into_bytes()
 }
 
+/// The UAC flows a run opens at most while it waits for the kernel's
+/// reuseport hash to place a request on each shard: the chance that 64 flows
+/// all hash to one shard is 2⁻⁶³.
+const MAX_FLOWS: usize = 64;
+
 /// The worker answers from its one socket, so all its replies form one flow
-/// and land on one shard, whichever shard forwarded each request.
+/// and land on one shard, whichever shard forwarded each request. UAC flows
+/// open, each awaiting its 200, until each shard has received a request: one
+/// of them forwarded a request whose 200 came back through the other.
 #[tokio::test]
 async fn two_shards_serve_many_flows_and_cross_shard_responses() {
     let net = RealSignalingNetwork::new();
@@ -107,9 +135,9 @@ async fn two_shards_serve_many_flows_and_cross_shard_responses() {
         .unwrap();
     let proxy_addr = ep0.local_addr();
     let ep1 = net.bind_udp(BindUdpOpts::new(proxy_addr, 256).with_reuse_port(true)).await.unwrap();
-    let (r0, r1) = (Arc::new(AtomicU64::new(0)), Arc::new(AtomicU64::new(0)));
-    let ep0: Box<dyn UdpEndpoint> = Box::new(CountingEndpoint { inner: ep0, received: r0.clone() });
-    let ep1: Box<dyn UdpEndpoint> = Box::new(CountingEndpoint { inner: ep1, received: r1.clone() });
+    let (c0, c1) = (Arc::new(ShardCounts::default()), Arc::new(ShardCounts::default()));
+    let ep0: Box<dyn UdpEndpoint> = Box::new(CountingEndpoint { inner: ep0, counts: c0.clone() });
+    let ep1: Box<dyn UdpEndpoint> = Box::new(CountingEndpoint { inner: ep1, counts: c1.clone() });
 
     let strategy: Arc<dyn RoutingStrategy> =
         Arc::new(ForwardAllStrategy::new(ProxyAddr::from(worker_addr)));
@@ -134,16 +162,12 @@ async fn two_shards_serve_many_flows_and_cross_shard_responses() {
         tasks.push(tokio::spawn(core.run()));
     }
 
-    const FLOWS: usize = 16;
+    let parser = CustomParser::new();
     let mut uacs = Vec::new();
-    for i in 0..FLOWS {
+    while uacs.len() < MAX_FLOWS && (c0.requests() == 0 || c1.requests() == 0) {
+        let i = uacs.len();
         let uac = net.bind_udp(BindUdpOpts::new("127.0.0.1:0".parse().unwrap(), 64)).await.unwrap();
         uac.send_to(&options(uac.local_addr().port(), i, proxy_addr), proxy_addr).await.unwrap();
-        uacs.push(uac);
-    }
-
-    let parser = CustomParser::new();
-    for (i, uac) in uacs.iter().enumerate() {
         let pkt = timeout(Duration::from_secs(3), uac.recv())
             .await
             .unwrap_or_else(|_| panic!("uac-{i} never got its 200 back"))
@@ -155,11 +179,14 @@ async fn two_shards_serve_many_flows_and_cross_shard_responses() {
             }
             other => panic!("uac-{i} expected a 200 response, got {other:?}"),
         }
+        uacs.push(uac);
     }
 
-    let (n0, n1) = (r0.load(Ordering::Relaxed), r1.load(Ordering::Relaxed));
-    assert_eq!(n0 + n1, FLOWS as u64 * 2, "16 UAC requests + 16 worker replies, no drops");
-    assert!(n0 > 0 && n1 > 0, "both shards must have received traffic (got {n0}/{n1})");
+    let (q0, q1) = (c0.requests(), c1.requests());
+    assert!(q0 > 0 && q1 > 0, "after {MAX_FLOWS} flows a shard received no request ({q0}/{q1})");
+    let flows = uacs.len() as u64;
+    assert_eq!(q0 + q1, flows, "each flow's request reached one shard");
+    assert_eq!(c0.received() + c1.received(), flows * 2, "each request and its 200, no drops");
 
     for t in tasks {
         t.abort();
