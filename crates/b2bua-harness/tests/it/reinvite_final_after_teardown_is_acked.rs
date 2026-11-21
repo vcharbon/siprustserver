@@ -26,6 +26,8 @@
 //!   an_offer_in_a_2xx_…    the re-INVITE carried no offer, so the 2xx crossing
 //!                          the BYE makes it and its ACK answers rejecting every
 //!                          stream (RFC 3264 §6)
+//!   an_offer_…_reaped      the same 2xx on the reaped call: the orphan's ACK
+//!                          answers it in the session stated on the dialog
 //!   a_late_487_…_timer_d   each Timer G repeat re-draws the hop ACK; purged
 //!                          at Timer D, nothing left
 //!   a_late_2xx_…_timer_m   each repeat of the 2xx re-draws the same ACK;
@@ -171,8 +173,9 @@ const BOB_REOFFER: &str = "v=0\r\no=bob 1 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 
 
 /// The ACK `bob` takes for `bob_reinv`'s 2xx: it echoes the re-INVITE's CSeq
 /// (§13.2.2.4) and answers the offer that 2xx made with every stream rejected
-/// (RFC 3261 §13.2.2.4: the ACK MUST carry the answer; RFC 3264 §6: port 0).
-async fn expect_rejecting_ack(bob: &scenario_harness::Agent, bob_reinv: &ServerTxn) {
+/// (RFC 3261 §13.2.2.4: the ACK MUST carry the answer; RFC 3264 §6: port 0),
+/// returned.
+async fn expect_rejecting_ack(bob: &scenario_harness::Agent, bob_reinv: &ServerTxn) -> String {
     let ack = bob.receive("ACK").await;
     assert_eq!(
         ack.request().cseq().seq(),
@@ -185,6 +188,7 @@ async fn expect_rejecting_ack(bob: &scenario_harness::Agent, bob_reinv: &ServerT
         "the re-INVITE carried no offer, so the ACK answers bob's with every stream \
          rejected: {answer:?}"
     );
+    answer
 }
 
 /// The delayed-offer sibling, the call still up: alice's re-INVITE carries no
@@ -230,6 +234,53 @@ async fn an_offer_in_a_2xx_crossing_the_bye_is_answered_rejecting_in_its_ack() {
     settle_until(|| b2bua.is_reaped()).await;
     alice.drain().await;
     bob.drain().await;
+    b2bua.assert_fully_reaped();
+    let _report = h.finish().await;
+}
+
+/// The same 200 landing once the call is reaped: the orphaned client
+/// transaction composes the ACK the released call no longer can (ADR-0034),
+/// and answers the offer the same way, in the session the SUT stated on the
+/// dialog: alice's origin, one version up (RFC 3264 §8, RFC 4566 §5.2).
+#[tokio::test(start_paused = true)]
+async fn an_offer_in_a_2xx_after_the_call_is_reaped_is_answered_rejecting_in_its_ack() {
+    let h = Harness::new("b2bua-reinvite-offer-2xx-after-teardown");
+    let alice = h.agent("alice", "127.0.0.1:5063").await;
+    let bob = h.agent("bob", "127.0.0.1:5073").await;
+    let b2bua =
+        B2buaSut::route_all_to("127.0.0.1", 5073).start(&h, "b2bua", "127.0.0.1:5083").await;
+
+    let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
+    let mut uas = bob.receive("INVITE").await;
+    uas.respond(180, "Ringing").await;
+    call.expect(180).await;
+    uas.respond(200, "OK").with_sdp(ANSWER).await;
+    call.expect(200).await;
+    let mut alice_dialog = call.ack().await;
+    bob.receive("ACK").await;
+
+    let mut reinv = alice_dialog.reinvite(None).await;
+    let mut bob_reinv = bob.receive("INVITE").await;
+    let mut alice_bye = alice_dialog.bye().await;
+    alice_bye.expect(200).await;
+    reinv.expect(487).await;
+    let mut bob_bye = bob.receive("BYE").await;
+    bob_reinv.respond(100, "Trying").await;
+    bob_bye.respond(200, "OK").await;
+    settle_until(|| b2bua.active_calls() == 0).await;
+
+    // ── the 200 crosses the CANCEL and lands on the reaped call ──────────────
+    bob_reinv.respond(200, "OK").with_sdp(BOB_REOFFER).await;
+    bob.receive("CANCEL").await.respond(200, "OK").await;
+    let answer = expect_rejecting_ack(&bob, &bob_reinv).await;
+    assert!(
+        answer.contains("o=alice 1 2 IN IP4 127.0.0.1\r\n"),
+        "the answer continues the session the SUT stated to bob, one version up: {answer:?}"
+    );
+
+    alice.drain().await;
+    bob.drain().await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
     let _report = h.finish().await;
 }
