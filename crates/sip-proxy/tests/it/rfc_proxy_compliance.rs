@@ -16,6 +16,7 @@
 use crate::common;
 use std::time::Duration;
 
+use common::call_end::busy_at_callee;
 use common::{forward_all, spawn_proxy};
 use scenario_harness::{Harness, WaiverScope};
 use sip_message::generators::OutOfDialogMethod;
@@ -26,6 +27,7 @@ use sip_message::{SipMessage, SipParser};
 
 /// RFC 3261 §16.6 steps 3 and 8: a forwarded request's Max-Forwards drops by
 /// exactly one, and the proxy's own Via branch carries the z9hG4bK magic cookie.
+/// Bob then refuses the call, which alice ACKs.
 #[tokio::test]
 async fn forwarded_invite_decrements_max_forwards_and_stamps_magic_cookie_via() {
     let h = Harness::with_transit_delay("rfc-mf-decrement", 0);
@@ -64,6 +66,7 @@ Content-Length: 0\r\n\r\n";
         "proxy Via branch must begin with the z9hG4bK magic cookie, got {:?}",
         top.branch()
     );
+    busy_at_callee(proxy.addr(), &*client, invite.as_bytes(), &*bob_ep, &fwd.raw).await;
     let _ = h.finish().await;
 }
 

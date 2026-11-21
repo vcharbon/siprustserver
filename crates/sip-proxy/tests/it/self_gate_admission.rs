@@ -10,6 +10,7 @@ use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
+use common::call_end::busy_at_callee;
 use common::ProxySut;
 use load_shed::simulated;
 use scenario_harness::Harness;
@@ -196,7 +197,7 @@ async fn a_gate_hint_of_zero_goes_on_the_wire_as_one_second() {
 #[tokio::test(start_paused = true)]
 async fn real_gate_cps_drain_yields_a_wire_503_cps() {
     let h = Harness::with_transit_delay("self-gate-real-cps", 1);
-    let (_bob_ep, _bob_addr) = h.bind_peer("bob", BOB).await;
+    let (bob_uas, _bob_addr) = h.bind_peer("bob", BOB).await;
     let (strategy, registry) = forward_all_with_worker();
     let gate = Arc::new(EluCpsGate::new(
         Arc::new(simulated().0),
@@ -210,17 +211,17 @@ async fn real_gate_cps_drain_yields_a_wire_503_cps() {
     let proxy = spawn_proxy_with_gate(&h, strategy, registry, gate.clone()).await;
     let (client, _client_addr) = h.bind_peer("alice", ALICE).await;
 
-    client.send_to(&new_invite(ALICE, "z9hG4bK-ok", None), proxy.addr()).await.unwrap();
-    let bob_uas = _bob_ep;
-    let mut delivered = false;
+    let admitted = new_invite(ALICE, "z9hG4bK-ok", None);
+    client.send_to(&admitted, proxy.addr()).await.unwrap();
+    let mut delivered = None;
     for _ in 0..20 {
-        if bob_uas.try_recv().is_some() {
-            delivered = true;
+        delivered = bob_uas.try_recv();
+        if delivered.is_some() {
             break;
         }
         h.advance(std::time::Duration::from_millis(5)).await;
     }
-    assert!(delivered, "the first (admitted) INVITE reaches bob");
+    let forward = delivered.expect("the first (admitted) INVITE reaches bob");
 
     client.send_to(&new_invite(ALICE, "z9hG4bK-shed", None), proxy.addr()).await.unwrap();
     let resp = recv_response(&*client).await;
@@ -233,6 +234,7 @@ async fn real_gate_cps_drain_yields_a_wire_503_cps() {
 
     h.advance(std::time::Duration::from_millis(50)).await;
     assert!(bob_uas.try_recv().is_none(), "the shed INVITE must not reach bob");
+    busy_at_callee(proxy.addr(), &*client, &admitted, &*bob_uas, &forward.raw).await;
     let _ = h.finish().await;
 }
 
@@ -313,14 +315,17 @@ async fn emergency_new_dialog_invite_bypasses_the_gate() {
     let proxy = spawn_proxy_with_gate(&h, strategy, registry, gate.clone()).await;
     let (client, _client_addr) = h.bind_peer("alice", ALICE).await;
 
-    client.send_to(&new_invite(ALICE, "z9hG4bK-emg", Some("esnet.0")), proxy.addr()).await.unwrap();
+    let invite = new_invite(ALICE, "z9hG4bK-emg", Some("esnet.0"));
+    client.send_to(&invite, proxy.addr()).await.unwrap();
 
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    assert!(bob_ep.try_recv().is_some(), "an emergency INVITE must bypass the gate and reach bob");
+    let forward =
+        bob_ep.try_recv().expect("an emergency INVITE must bypass the gate and reach bob");
     assert!(client.try_recv().is_none(), "an emergency INVITE must NOT be 503'd");
     assert_eq!(gate.admit_tries.load(Ordering::SeqCst), 0, "the gate must not even be consulted");
     assert_eq!(gate.emergency.load(Ordering::SeqCst), 1, "the emergency bypass must be counted");
     assert_eq!(gate.internal.load(Ordering::SeqCst), 0);
+    busy_at_callee(proxy.addr(), &*client, &invite, &*bob_ep, &forward.raw).await;
     let _ = h.finish().await;
 }
 
@@ -333,13 +338,12 @@ async fn worker_outbound_new_dialog_invite_bypasses_the_gate() {
     let proxy = spawn_proxy_with_gate(&h, strategy, registry, gate.clone()).await;
     let (worker_client, _wc_addr) = h.bind_peer("worker", WORKER).await;
 
-    worker_client.send_to(&new_invite(WORKER, "z9hG4bK-int", None), proxy.addr()).await.unwrap();
+    let invite = new_invite(WORKER, "z9hG4bK-int", None);
+    worker_client.send_to(&invite, proxy.addr()).await.unwrap();
 
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    assert!(
-        bob_ep.try_recv().is_some(),
-        "a worker-outbound INVITE must bypass the gate and reach bob"
-    );
+    let forward =
+        bob_ep.try_recv().expect("a worker-outbound INVITE must bypass the gate and reach bob");
     assert!(worker_client.try_recv().is_none(), "a worker-outbound INVITE must NOT be 503'd");
     assert_eq!(gate.admit_tries.load(Ordering::SeqCst), 0, "the gate must not even be consulted");
     assert_eq!(
@@ -348,5 +352,6 @@ async fn worker_outbound_new_dialog_invite_bypasses_the_gate() {
         "the internal (worker) bypass must be counted"
     );
     assert_eq!(gate.emergency.load(Ordering::SeqCst), 0);
+    busy_at_callee(proxy.addr(), &*worker_client, &invite, &*bob_ep, &forward.raw).await;
     let _ = h.finish().await;
 }

@@ -8,12 +8,14 @@
 //! The core runs its real recv loop on the simulated fabric, so each datagram
 //! arrives on the face whose socket it was sent to.
 
+use crate::common::call_end::{ack_final, busy_at_callee, response_of};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 use sip_clock::Clock;
+use sip_message::SipResponse;
 use sip_net::types::BindUdpOpts;
 use sip_net::{SignalingNetwork, UdpEndpoint};
 use sip_net_testkit::SimulatedSignalingNetwork;
@@ -173,13 +175,13 @@ fn start_line(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).lines().next().unwrap_or("").to_string()
 }
 
-/// The 200 the UAS at `FAR` answers a request with (§8.2.6), sent to its top
+/// The 486 the UAS at `FAR` refuses an INVITE with (§8.2.6), sent to its top
 /// Via, the proxy hop.
-fn ok_for(req: &[u8]) -> (Vec<u8>, SocketAddr) {
+fn busy_for(req: &[u8]) -> (Vec<u8>, SocketAddr) {
     let vias = header_lines(req, "Via");
     let top = vias[0].split_once(':').unwrap().1.trim().to_string();
     let sent_by = top.split_whitespace().nth(1).unwrap().split(';').next().unwrap();
-    let mut out = String::from("SIP/2.0 200 OK\r\n");
+    let mut out = String::from("SIP/2.0 486 Busy Here\r\n");
     for line in &vias {
         out.push_str(&format!("{line}\r\n"));
     }
@@ -214,16 +216,16 @@ async fn settle() {
     tokio::time::sleep(Duration::from_millis(20)).await;
 }
 
-/// `sender` sends `request` to `entry`; a request reaching `FAR` is answered
-/// 200, and whatever comes back to `sender` is collected.
-async fn exchange(lab: &Lab, sender: &dyn UdpEndpoint, entry: SocketAddr, request: String) -> Seen {
+/// `sender` sends `request` to `entry`; an INVITE reaching `FAR` is refused
+/// 486, and whatever comes back to `sender` is collected.
+async fn exchange(lab: &Lab, sender: &dyn UdpEndpoint, entry: SocketAddr, request: &str) -> Seen {
     sender.send_to(request.as_bytes(), entry).await.unwrap();
     settle().await;
     let to_worker = drain(&*lab.worker);
     let to_far = drain(&*lab.far).pop();
     if let Some((_, req)) = &to_far {
-        let (ok, dst) = ok_for(req);
-        lab.far.send_to(&ok, dst).await.unwrap();
+        let (busy, dst) = busy_for(req);
+        lab.far.send_to(&busy, dst).await.unwrap();
         settle().await;
     }
     let back_to_sender = drain(sender).into_iter().map(|(_, b)| b).collect();
@@ -277,10 +279,6 @@ fn counted(lab: &Lab, claim: UntrustedClaim) -> u64 {
     lab.metrics.external_untrusted_total(claim)
 }
 
-fn got_status(seen: &Seen, status: &str) -> bool {
-    seen.back_to_sender.iter().any(|b| start_line(b).starts_with(&format!("SIP/2.0 {status}")))
-}
-
 /// Forwarded to the Request-URI out of the external face, no worker on the
 /// path, the new call taken as the internal plane's (no gate).
 fn assert_worker_outbound(seen: &Seen) {
@@ -291,14 +289,58 @@ fn assert_worker_outbound(seen: &Seen) {
     assert_eq!(seen.bypass_internal, 1);
 }
 
+/// The final in `answers` whose status line starts with `status`.
+fn final_of(answers: &[Vec<u8>], status: &str) -> SipResponse {
+    let raw = answers
+        .iter()
+        .find(|b| start_line(b).starts_with(&format!("SIP/2.0 {status}")))
+        .unwrap_or_else(|| panic!("a {status} among {} answers", answers.len()));
+    response_of(raw)
+}
+
+/// `sender` ACKs the proxy's own `refusal` of `invite` through `entry`
+/// (§17.1.1.3): the proxy absorbs it, and neither a worker nor the far end
+/// sees it.
+async fn acked_at_the_proxy(
+    lab: &Lab,
+    sender: &dyn UdpEndpoint,
+    entry: SocketAddr,
+    invite: &str,
+    refusal: &SipResponse,
+) {
+    ack_final(entry, sender, invite.as_bytes(), refusal).await;
+    settle().await;
+    assert!(drain(&*lab.worker).is_empty(), "the ACK of an own final reaches no worker");
+    assert!(drain(&*lab.far).is_empty(), "the ACK of an own final reaches no far end");
+}
+
+/// `sender` ACKs the far end's 486 to its worker-outbound `invite` through
+/// the internal VIP, and the ACK reaches the far end.
+async fn acked_at_far(lab: &Lab, sender: &dyn UdpEndpoint, invite: &str, busy: &SipResponse) {
+    ack_final(int_vip(), sender, invite.as_bytes(), busy).await;
+    settle().await;
+    let acks = drain(&*lab.far);
+    assert!(
+        acks.iter().any(|(_, b)| start_line(b).starts_with("ACK ")),
+        "the ACK reaches the far end"
+    );
+}
+
 /// Never relayed to the Request-URI: the new call met the gate (closed here,
-/// so the sender has its 503) as any inbound one does.
-fn assert_met_the_gate_and_not_relayed(seen: &Seen) {
+/// so the sender has its 503) as any inbound one does. The sender ACKs the
+/// 503.
+async fn met_the_gate_and_not_relayed(
+    lab: &Lab,
+    sender: &dyn UdpEndpoint,
+    invite: &str,
+    seen: &Seen,
+) {
     assert!(seen.to_far.is_none(), "the Request-URI host never sees it");
     assert!(seen.to_worker.is_empty(), "the closed gate refused it");
     assert_eq!(seen.consulted, 1, "the new call meets the gate");
     assert_eq!(seen.bypass_internal, 0, "nothing marks it as the internal plane's");
-    assert!(got_status(seen, "503"), "the sender has the gate's 503");
+    let refusal = final_of(&seen.back_to_sender, "503");
+    acked_at_the_proxy(lab, sender, ext_vip(), invite, &refusal).await;
 }
 
 #[tokio::test(start_paused = true)]
@@ -306,8 +348,8 @@ async fn an_outbound_marker_on_the_external_face_is_ignored() {
     let lab = proxy_lab(true, false).await;
     let route = outbound_route(EXT_VIP, EXT_PORT);
     let invite = request("INVITE", "ext-marker", &outsider_via(), Some(&route), None);
-    let seen = exchange(&lab, &*lab.outsider, ext_vip(), invite).await;
-    assert_met_the_gate_and_not_relayed(&seen);
+    let seen = exchange(&lab, &*lab.outsider, ext_vip(), &invite).await;
+    met_the_gate_and_not_relayed(&lab, &*lab.outsider, &invite, &seen).await;
     assert_eq!(counted(&lab, UntrustedClaim::OutboundMarker), 1);
 }
 
@@ -315,8 +357,8 @@ async fn an_outbound_marker_on_the_external_face_is_ignored() {
 async fn a_worker_via_on_the_external_face_is_ignored() {
     let lab = proxy_lab(true, false).await;
     let invite = request("INVITE", "ext-via", &worker_via(), None, None);
-    let seen = exchange(&lab, &*lab.outsider, ext_vip(), invite).await;
-    assert_met_the_gate_and_not_relayed(&seen);
+    let seen = exchange(&lab, &*lab.outsider, ext_vip(), &invite).await;
+    met_the_gate_and_not_relayed(&lab, &*lab.outsider, &invite, &seen).await;
     assert_eq!(counted(&lab, UntrustedClaim::WorkerVia), 1);
 }
 
@@ -325,7 +367,7 @@ async fn an_in_dialog_request_with_an_outbound_marker_on_the_external_face_goes_
     let lab = proxy_lab(true, false).await;
     let route = outbound_route(EXT_VIP, EXT_PORT);
     let bye = request("BYE", "ext-bye", &outsider_via(), Some(&route), Some("far-tag"));
-    let seen = exchange(&lab, &*lab.outsider, ext_vip(), bye).await;
+    let seen = exchange(&lab, &*lab.outsider, ext_vip(), &bye).await;
     assert!(seen.to_far.is_none(), "the Request-URI host never sees it");
     assert_eq!(seen.to_worker.len(), 1, "it is routed as an inbound request");
 }
@@ -338,13 +380,14 @@ async fn a_foreign_loose_route_on_the_external_face_is_removed() {
     ] {
         let lab = proxy_lab(true, true).await;
         let invite = request("INVITE", "ext-route", &outsider_via(), Some(&route), None);
-        let seen = exchange(&lab, &*lab.outsider, ext_vip(), invite).await;
+        let seen = exchange(&lab, &*lab.outsider, ext_vip(), &invite).await;
         assert!(seen.to_far.is_none(), "{route}: the Route's host never sees it");
         assert_eq!(seen.to_worker.len(), 1, "{route}: it goes to a worker");
         let (_, forwarded) = &seen.to_worker[0];
         assert!(header_lines(forwarded, "Route").is_empty(), "{route}: no Route rides on");
         assert_eq!(seen.consulted, 1);
         assert_eq!(counted(&lab, UntrustedClaim::ForeignRoute), 1);
+        busy_at_callee(ext_vip(), &*lab.outsider, invite.as_bytes(), &*lab.worker, forwarded).await;
     }
 }
 
@@ -353,16 +396,18 @@ async fn a_request_without_a_marker_meets_the_gate_and_goes_to_a_worker() {
     for dual in [false, true] {
         let lab = proxy_lab(dual, false).await;
         let invite = request("INVITE", "plain-closed", &outsider_via(), None, None);
-        let seen = exchange(&lab, &*lab.outsider, ext_vip(), invite).await;
-        assert_met_the_gate_and_not_relayed(&seen);
+        let seen = exchange(&lab, &*lab.outsider, ext_vip(), &invite).await;
+        met_the_gate_and_not_relayed(&lab, &*lab.outsider, &invite, &seen).await;
         drop(lab);
 
         let lab = proxy_lab(dual, true).await;
         let invite = request("INVITE", "plain-open", &outsider_via(), None, None);
-        let seen = exchange(&lab, &*lab.outsider, ext_vip(), invite).await;
+        let seen = exchange(&lab, &*lab.outsider, ext_vip(), &invite).await;
         assert_eq!(seen.to_worker.len(), 1, "dual={dual}: it goes to the worker");
         assert!(seen.to_far.is_none());
         assert_eq!(seen.consulted, 1);
+        let (_, forwarded) = &seen.to_worker[0];
+        busy_at_callee(ext_vip(), &*lab.outsider, invite.as_bytes(), &*lab.worker, forwarded).await;
     }
 }
 
@@ -370,9 +415,10 @@ async fn a_request_without_a_marker_meets_the_gate_and_goes_to_a_worker() {
 async fn a_registered_worker_on_the_internal_face_is_worker_outbound() {
     let lab = proxy_lab(true, false).await;
     let invite = request("INVITE", "int-worker", &worker_via(), None, None);
-    let seen = exchange(&lab, &*lab.worker, int_vip(), invite).await;
+    let seen = exchange(&lab, &*lab.worker, int_vip(), &invite).await;
     assert_worker_outbound(&seen);
-    assert!(got_status(&seen, "200"), "the far end's 200 comes back to the worker");
+    let busy = final_of(&seen.back_to_sender, "486");
+    acked_at_far(&lab, &*lab.worker, &invite, &busy).await;
 }
 
 #[tokio::test(start_paused = true)]
@@ -381,7 +427,7 @@ async fn an_outbound_marker_on_the_internal_face_is_worker_outbound_from_an_unli
     let route = outbound_route(INT_VIP, INT_PORT);
     let via = format!("{UNLISTED_WORKER}:5060");
     let invite = request("INVITE", "int-marker", &via, Some(&route), None);
-    let seen = exchange(&lab, &*lab.unlisted_worker, int_vip(), invite).await;
+    let seen = exchange(&lab, &*lab.unlisted_worker, int_vip(), &invite).await;
     assert_worker_outbound(&seen);
 }
 
@@ -408,8 +454,8 @@ Content-Length: 0\r\n\r\n"
 async fn a_forged_to_tag_invite_on_the_external_face_meets_the_gate() {
     let lab = proxy_lab(true, false).await;
     let invite = request("INVITE", "forged-tag", &outsider_via(), None, Some("forged"));
-    let seen = exchange(&lab, &*lab.outsider, ext_vip(), invite).await;
-    assert_met_the_gate_and_not_relayed(&seen);
+    let seen = exchange(&lab, &*lab.outsider, ext_vip(), &invite).await;
+    met_the_gate_and_not_relayed(&lab, &*lab.outsider, &invite, &seen).await;
 }
 
 #[tokio::test(start_paused = true)]
@@ -434,13 +480,11 @@ Content-Length: 0\r\n\r\n"
 async fn the_answer_to_a_translated_worker_reaches_it_on_the_external_face() {
     let lab = proxy_lab(true, false).await;
     let invite = request("INVITE", "translated", &worker_via(), None, None);
-    let seen = exchange(&lab, &*lab.translated_worker, int_vip(), invite).await;
+    let seen = exchange(&lab, &*lab.translated_worker, int_vip(), &invite).await;
     assert_worker_outbound(&seen);
-    let to_worker = drain(&*lab.worker);
-    assert!(
-        to_worker.iter().any(|(_, b)| start_line(b).starts_with("SIP/2.0 200")),
-        "the far end's 200 reaches the worker at its registry address"
-    );
+    let to_worker: Vec<Vec<u8>> = drain(&*lab.worker).into_iter().map(|(_, b)| b).collect();
+    let busy = final_of(&to_worker, "486");
+    acked_at_far(&lab, &*lab.translated_worker, &invite, &busy).await;
 }
 
 /// `request`, with its hops spent: the proxy answers it 483 itself.
@@ -477,8 +521,8 @@ async fn own_finals_to_a_sender_near_the_workers_leave_the_external_face() {
     assert!(start_line(answer).starts_with("SIP/2.0 483"), "{}", start_line(answer));
     assert_eq!(*from, ext_vip());
 
-    let refused = request("INVITE", "near-refused", &via, None, None)
-        .replace("Max-Forwards: 70", "Max-Forwards: abc");
+    let invite = request("INVITE", "near-refused", &via, None, None);
+    let refused = invite.replace("Max-Forwards: 70", "Max-Forwards: abc");
     lab.unlisted_worker.send_to(refused.as_bytes(), ext_vip()).await.unwrap();
     settle().await;
     let answers = drain(&*lab.unlisted_worker);
@@ -487,6 +531,7 @@ async fn own_finals_to_a_sender_near_the_workers_leave_the_external_face() {
     assert_eq!(*from, ext_vip());
     let warning = header_lines(answer, "Warning");
     assert!(warning[0].contains(&format!("{EXT_VIP}:{EXT_PORT}")), "{warning:?}");
+    acked_at_the_proxy(&lab, &*lab.unlisted_worker, ext_vip(), &invite, &response_of(answer)).await;
 }
 
 /// The internal face's own finals: a datagram the parser refuses, from a node
@@ -495,8 +540,8 @@ async fn own_finals_to_a_sender_near_the_workers_leave_the_external_face() {
 #[tokio::test(start_paused = true)]
 async fn a_parse_refusal_on_the_internal_face_is_answered_from_it() {
     let lab = proxy_lab(true, true).await;
-    let refused = request("INVITE", "internal-refused", &worker_via(), None, None)
-        .replace("Max-Forwards: 70", "Max-Forwards: abc");
+    let invite = request("INVITE", "internal-refused", &worker_via(), None, None);
+    let refused = invite.replace("Max-Forwards: 70", "Max-Forwards: abc");
     lab.translated_worker.send_to(refused.as_bytes(), int_vip()).await.unwrap();
     settle().await;
     let answers = drain(&*lab.translated_worker);
@@ -505,4 +550,6 @@ async fn a_parse_refusal_on_the_internal_face_is_answered_from_it() {
     assert_eq!(*from, int_vip());
     let warning = header_lines(answer, "Warning");
     assert!(warning[0].contains(&format!("{INT_VIP}:{INT_PORT}")), "{warning:?}");
+    acked_at_the_proxy(&lab, &*lab.translated_worker, int_vip(), &invite, &response_of(answer))
+        .await;
 }
