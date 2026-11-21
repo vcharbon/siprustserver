@@ -7,7 +7,9 @@
 //! puts no requirement to the peer, so none is sure to come reliably (RFC 3262
 //! §3). A request requiring a tag not understood, or one the call keeps from
 //! the peer that would serve it, is answered 420, its `Unsupported` listing
-//! exactly those tags ([`unserved`], [`dropped_on_relay`]).
+//! exactly those tags ([`unserved`], [`dropped_on_relay`]); so is one
+//! requiring an end-to-end tag that the stack answers 2xx itself
+//! ([`required_end_to_end`]).
 
 use crate::generators::B2BUA_SUPPORTED;
 use crate::header::{HeaderName, HeaderValue, Require, TokenSet, Unsupported};
