@@ -182,6 +182,9 @@ mod tests {
             !record_passed(&on_a_leg, Some(&d)),
             "the drawn refusal meets the caller's request"
         );
+        let leg_draw = Drawn { refusals: vec![(Requester::Callee, "INVITE", 488)], ..d.clone() };
+        assert!(record_passed(&on_a_leg, Some(&leg_draw)), "a callee leg's request meets it");
+        assert!(!record_passed(&refused("INVITE", 488), Some(&leg_draw)), "not the caller's");
         assert!(!record_passed(&refused("INVITE", 500), Some(&d)));
         assert!(!record_passed(&refused("UPDATE", 488), Some(&d)));
         assert!(!record_passed(&refused("INVITE", 488), None));

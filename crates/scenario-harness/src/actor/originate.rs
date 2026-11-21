@@ -385,7 +385,10 @@ pub(super) fn schedule_reinvite_retry(st: &mut ActorState<'_>, resp: &SipRespons
         (Some(secs), _) => Duration::from_secs(secs.into()),
         (None, 491) if st.originates => Duration::from_millis(2500),
         (None, 491) => Duration::from_millis(1000),
-        _ => return false,
+        _ => {
+            st.reinvite_retries = 0;
+            return false;
+        }
     };
     st.reinvite_retries += 1;
     st.reinvite_retry = Some(st.dwell(Dwell::Retry, delay));

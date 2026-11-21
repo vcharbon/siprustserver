@@ -31,6 +31,7 @@ mod refused_requests;
 mod reinvite_ack_body;
 mod reliable_give_up;
 mod reneg;
+mod renegotiation_gate;
 mod request_pick;
 mod script_flow;
 mod scripted_cancel;

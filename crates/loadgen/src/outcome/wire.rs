@@ -319,7 +319,7 @@ impl WireFacts {
                     }
                 }
                 self.finals.sent(&mut self.failures, method, cseq);
-                if let Some(key) = pending_key(id) {
+                if let Some(key) = pending_key(id).filter(|_| !untagged(id)) {
                     self.pending.entry(key).or_insert_with(|| (method.to_string(), now));
                 }
             }

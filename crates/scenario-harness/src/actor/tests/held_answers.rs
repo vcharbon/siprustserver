@@ -233,7 +233,7 @@ async fn no_renegotiation_of_its_own_starts_while_the_peers_is_held() {
 #[tokio::test(start_paused = true)]
 async fn a_refusal_asking_no_retry_spends_none_of_the_next_renegotiations_retries() {
     let h = Harness::new("actor-retry-budget-per-round").describe(
-        "a re-INVITE refused 488, then one refused 500 with Retry-After four times: the second \\
+        "a re-INVITE refused 488, then one refused 500 with Retry-After four times: the second \
          takes its three retries",
     );
     let alice = h.agent("alice", "127.0.0.1:5060").await;
@@ -271,6 +271,54 @@ async fn a_refusal_asking_no_retry_spends_none_of_the_next_renegotiations_retrie
         reception_observer: None,
     };
     let verdict = run_call(call, Duration::from_secs(30)).await;
+    assert!(verdict.is_ok(), "{verdict:?}");
+    bob_task.await.expect("the second renegotiation took its three retries");
+    h.finish().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_retried_round_refused_488_leaves_the_next_round_its_retries() {
+    let h = Harness::new("actor-retry-budget-after-retried-488").describe(
+        "a re-INVITE refused 491, retried and refused 488; then one refused 500 with \
+         Retry-After four times: the second takes its three retries",
+    );
+    let alice = h.agent("alice", "127.0.0.1:5060").await;
+    let bob = h.agent("bob", "127.0.0.1:5070").await;
+    let bob_task = {
+        let bob = bob.clone();
+        tokio::spawn(async move {
+            let mut invite = bob.receive("INVITE").await;
+            invite.respond(200, "OK").with_sdp(ANSWER_SDP).await;
+            bob.receive("ACK").await;
+            let mut glare = bob.receive("INVITE").await;
+            glare.respond(491, "Request Pending").await;
+            let mut retried = bob.receive("INVITE").await;
+            retried.respond(488, "Not Acceptable Here").await;
+            for _ in 0..4 {
+                let mut again = bob.receive("INVITE").await;
+                again.respond(500, "Server Internal Error").with_header("Retry-After", "1").await;
+            }
+            bob.receive("BYE").await.respond(200, "OK").await;
+        })
+    };
+    let goals = vec![
+        Goal::new(Barrier::None, GoalStep::Invite { callee: "bob", plan: None }),
+        Goal::new(Barrier::AllConfirmed(&["alice"]), GoalStep::Reinvite),
+        Goal::new(
+            Barrier::pred("first_refused", |s| s.leg("alice").reneg_count() >= 1),
+            GoalStep::Reinvite,
+        ),
+        Goal::new(Barrier::pred("gave_up", |s| s.leg("alice").reneg_count() >= 2), GoalStep::Bye),
+    ];
+    let call = CallPlan {
+        actors: vec![caller_spec("alice", &alice, ("bob", bob.clone()), goals)],
+        plan: vec![phase("established", |s| s.leg_at_least("alice", LegPhase::Confirmed))],
+        settle: SettleBarrier::default_ceiling(),
+        automatics: Automatics::default(),
+        delta_policy: None,
+        reception_observer: None,
+    };
+    let verdict = run_call(call, Duration::from_secs(60)).await;
     assert!(verdict.is_ok(), "{verdict:?}");
     bob_task.await.expect("the second renegotiation took its three retries");
     h.finish().await;

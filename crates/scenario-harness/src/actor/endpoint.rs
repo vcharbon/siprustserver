@@ -195,7 +195,7 @@ impl MediaState {
     }
 
     /// The same endpoint framing under `framing` the description its INVITEs,
-    /// provisionals, PRACKs, UPDATEs and answers to an INVITE carry; the ACK's
+    /// provisionals, PRACKs, UPDATEs and their 2xx carry; the ACK's
     /// delayed-offer answer and a scripted policy 2xx go as bare SDP.
     pub fn framed(self, framing: super::framing::Framing) -> Self {
         Self { framing, ..self }

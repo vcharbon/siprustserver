@@ -375,7 +375,6 @@ async fn a_request_pending_at_the_seal_is_settled_by_its_later_final() {
 /// a PRACK on one and a re-INVITE on the other may share a CSeq number, and
 /// each final is the failure of the request its CSeq method names.
 #[tokio::test(start_paused = true)]
-#[ignore = "slow lane: loadgen"]
 async fn a_final_is_matched_to_its_request_by_cseq_number_and_method() {
     let wire = CallWire::new(Clock::test_at(1_000));
     let events = [
@@ -398,7 +397,6 @@ async fn a_final_is_matched_to_its_request_by_cseq_number_and_method() {
 }
 
 #[tokio::test(start_paused = true)]
-#[ignore = "slow lane: loadgen"]
 async fn sibling_fork_pracks_sharing_a_cseq_are_judged_apart() {
     let wire = CallWire::new(Clock::test_at(1_000));
     let events = [

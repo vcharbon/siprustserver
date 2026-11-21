@@ -353,3 +353,50 @@ async fn the_finals_a_draw_accepts_follow_its_holds_and_requirements() {
     }
     h.finish().await;
 }
+
+/// A refusal drawn on the callee answers the caller's request, a hold's 487
+/// too; one drawn on the caller answers a callee leg's.
+#[tokio::test(start_paused = true)]
+async fn a_drawn_refusal_is_owed_to_the_refusing_partys_peer() {
+    let (h, alice, bob) = agents("callfuzz-refusal-side").await;
+    let mut call = basic(&env(&alice, &bob, "side"));
+    let refuse = scenario_harness::actor::answers::Answer {
+        hold: std::time::Duration::from_secs(1),
+        refuse: Some(488),
+    };
+    let callee = call.actors.iter_mut().find(|a| a.role == "bob").expect("bob");
+    callee.answers.reinvite = refuse;
+    let owed = crate::stamp::refusals(&call);
+    assert!(owed.contains(&(Requester::Caller, "INVITE", 488)), "{owed:?}");
+    assert!(owed.contains(&(Requester::Caller, "INVITE", 487)), "{owed:?}");
+    assert!(!owed.contains(&(Requester::Callee, "INVITE", 488)), "{owed:?}");
+    let caller = call.actors.iter_mut().find(|a| a.role == "alice").expect("alice");
+    caller.answers.update = refuse;
+    let owed = crate::stamp::refusals(&call);
+    assert!(owed.contains(&(Requester::Callee, "UPDATE", 488)), "{owed:?}");
+    h.finish().await;
+}
+
+/// An INFO requires an extension of a proxy only on a proxied path, where it
+/// is drawn too; a UAS ignores `Proxy-Require`.
+#[tokio::test(start_paused = true)]
+async fn proxy_require_is_drawn_only_on_a_proxied_path() {
+    let (h, alice, bob) = agents("callfuzz-proxy-require").await;
+    let env = env(&alice, &bob, "t");
+    let proxy_requires = |proxied| {
+        (0..200).any(|seed| {
+            let mut call = basic(&env);
+            let config = FuzzConfig { unknown_require_pct: 100, proxied, ..payloads_always() };
+            perturb(&mut Rng::new(seed), &mut call, &config, &mut Vec::new());
+            call.actors.iter().flat_map(|a| a.goals.iter()).any(|g| match &g.step {
+                GoalStep::InDialog { headers, .. } => {
+                    headers.iter().any(|(n, _)| n.eq_ignore_ascii_case("Proxy-Require"))
+                }
+                _ => false,
+            })
+        })
+    };
+    assert!(!proxy_requires(false), "no proxy, no Proxy-Require");
+    assert!(proxy_requires(true), "a proxied path draws it");
+    h.finish().await;
+}
