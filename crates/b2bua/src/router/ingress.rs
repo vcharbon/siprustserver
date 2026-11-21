@@ -271,8 +271,11 @@ pub(super) async fn on_event(
 /// ([`attributed_on_resolution`]), as the transaction layer attributes one
 /// whose Request-URI names it: the self-release count (ADR-0014) and the
 /// call's release then reach it. Queued to the layer before the request's
-/// turn is offered, so the layer takes it ahead of every command that turn,
-/// and every turn offered after it, sends for the call.
+/// turn is offered, so the layer takes it ahead of every command that turn
+/// and every turn offered after it send for the call. A turn queued before
+/// it, a self-release notice's, may count the call's transactions first:
+/// that count names the call's Call-IDs, and the layer counts the
+/// transaction by its Call-ID until it is attributed.
 async fn attach_arrival(ctx: &RouterCtx, event: &CallEvent, call_ref: &str) {
     let CallEvent::Sip { message, .. } = event else { return };
     let SipMessage::Request(req) = message.as_ref() else { return };

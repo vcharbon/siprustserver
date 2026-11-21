@@ -229,10 +229,13 @@ impl TransactionLayer {
             .await
     }
 
-    /// How many transactions for `call_ref` are still resident in the map (any
-    /// role/state); `call_ids` names the Call-IDs of its legs. The
-    /// acting-backup self-release (ADR-0014) reads it as a defensive
-    /// re-check — see `Command::ActiveTxnCount`.
+    /// How many transactions still serve `call_ref`: those on its books (any
+    /// role/state), plus the in-dialog server transactions of a Call-ID in
+    /// `call_ids` that opened attributed to no call and have sent no final,
+    /// until [`attach_server_to_call`](Self::attach_server_to_call) takes
+    /// them onto the books. Only the Call-IDs named are read: the
+    /// acting-backup self-release (ADR-0014) names those of the copy's legs
+    /// and reads it as a defensive re-check — see `Command::ActiveTxnCount`.
     pub async fn active_txn_count_for_call(
         &self,
         call_ref: &str,

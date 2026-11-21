@@ -58,9 +58,9 @@ impl Owner {
                     .await;
                 let _ = reply.send(answered);
             }
-            Command::ActiveTxnCount { call_ref, call_ids: _, reply } => {
+            Command::ActiveTxnCount { call_ref, call_ids, reply } => {
                 let on_books = self.txn_index.get(call_ref.as_str()).map_or(0, CallTxns::on_books);
-                let _ = reply.send(on_books);
+                let _ = reply.send(on_books + self.unattributed_serving(&call_ids));
             }
             Command::HoldsClient { branch, reply } => {
                 let _ = reply.send(self.clients.contains_key(&branch));

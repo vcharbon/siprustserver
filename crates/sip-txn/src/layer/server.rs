@@ -279,6 +279,7 @@ impl Owner {
         // ── New server transaction ─────────────────────────────────────────────
 
         let call_ref = extract_ruri_call_ref(&req);
+        let unattributed = call_ref.is_none() && req.to().tag().is_some();
 
         let head = NewTransaction {
             id: TxnId::Server(id.to_key()),
@@ -300,6 +301,9 @@ impl Owner {
             txn.held = held;
             txn.copies = Some(copies);
         });
+        if unattributed {
+            self.unattributed.opened(req.call_id().as_str(), id.to_key());
+        }
 
         // An INVITE's first provisional is its consumer's to release, or this
         // layer's at the §17.2.1 bound (`layer::trying`).
@@ -472,9 +476,10 @@ fn state_after(kind: TxnKind, status: u16) -> TxnState {
 /// remote target is the B2BUA's Contact carries it. `None` for an
 /// out-of-dialog request and for one an element rewrote the Request-URI of:
 /// the router attributes the latter once it finds the call by dialog identity
-/// ([`TransactionLayer::attach_server_to_call`](crate::TransactionLayer::attach_server_to_call)).
-/// The attribution is what the self-release count (ADR-0014) and a release's
-/// forget and answer read.
+/// ([`TransactionLayer::attach_server_to_call`](crate::TransactionLayer::attach_server_to_call)),
+/// and until then the self-release count of a call naming its Call-ID counts
+/// it (`layer::unattributed`). The attribution is what the self-release count
+/// (ADR-0014) and a release's forget and answer read.
 fn extract_ruri_call_ref(req: &SipRequest) -> Option<String> {
     req.request_uri().param("callRef").and_then(ParamValue::as_str).map(decode_param)
 }

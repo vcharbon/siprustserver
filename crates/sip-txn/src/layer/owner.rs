@@ -32,6 +32,7 @@ use super::parse_refusal::ParseRefusals;
 use super::refusals::InviteRefusals;
 use super::shrink::{shrink_idle, SHRINK_MIN_CAPACITY};
 use super::txn::{CancelWire, Timer, Transaction, TxnId, TxnRef, TxnRole};
+use super::unattributed::Unattributed;
 
 pub(super) struct Owner {
     /// The client transactions, by the branch of the request this node sent
@@ -72,6 +73,8 @@ pub(super) struct Owner {
     /// `do_cancel_txns_for_call` O(k) in the call's transactions instead of a
     /// scan of the maps. Never let this drift from the maps.
     pub(super) txn_index: HashMap<String, CallTxns>,
+    /// The in-dialog server transactions attributed to no call (`layer::unattributed`).
+    pub(super) unattributed: Unattributed,
     /// CRITICAL events a full events queue deferred, in FIFO order — re-offered on
     /// the [`Timer::EventRetry`] tick, never dropped while their transaction
     /// lives. These are one-shot signals whose protocol-level redelivery the
@@ -173,6 +176,7 @@ impl Owner {
             id_gen: config.id_gen,
             self_release_watch: HashSet::new(),
             txn_index: HashMap::new(),
+            unattributed: Unattributed::default(),
             deferred_events: VecDeque::new(),
             deferred_bound: config.deferred_bound,
             refusals: config.invite_refusals,
@@ -349,6 +353,7 @@ impl Owner {
                 self.cancel_timer(t.cleanup_key);
                 self.cancel_timer(t.cancel_retransmit_key);
                 self.untrack_call_ref(&t.call_ref, id);
+                self.unattributed.left(&t.call_id, id);
                 if t.held {
                     self.release_hold(t.branch(), &t.call_id, &t.from_tag);
                 }
@@ -471,6 +476,7 @@ impl Owner {
         self.clients.shrink_idle();
         shrink_idle(&mut self.servers);
         shrink_idle(&mut self.txn_index);
+        self.unattributed.shrink_idle();
         // `shrink_to_fit` only trims the slab's free tail and never moves an
         // entry, so every `Key` stored on a txn stays valid (`compact` would not).
         let cap = self.timers.capacity();

@@ -81,7 +81,10 @@ pub(in crate::layer) enum Command {
         call_ref: String,
     },
     /// Count the transactions (any role/state) still attributed to `call_ref`,
-    /// whose legs' Call-IDs `call_ids` names.
+    /// plus the in-dialog server transactions of a Call-ID in `call_ids`
+    /// opened attributed to no call that have sent no final: the consumer
+    /// attributes one only once it takes its request, so a count taken before
+    /// then counts it already. Only the Call-IDs named are read.
     /// The B2BUA's acting-backup **self-release** (ADR-0014) polls this after
     /// serving a takeover event: when it reaches **0** the backup's served
     /// transaction(s) have met their obligation to the call (final response +
