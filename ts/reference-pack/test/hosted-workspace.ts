@@ -1,27 +1,84 @@
 /**
  * A scratch workspace holding the pack's reference lane on loopback addresses
- * free on this box, so two runs of a suite never share a port, and the files
- * its runner writes where the test says.
+ * free on this box and below the kernel's ephemeral range, so no other
+ * process's socket takes one before the runner binds it, and the files its
+ * runner writes where the test says.
  */
 import * as dgram from "node:dgram"
 import * as fs from "node:fs"
 import * as net from "node:net"
 import * as path from "node:path"
 
-/** A loopback address no socket of `kind` held a moment ago. */
-export const freeAddress = async (kind: "udp" | "tcp"): Promise<string> => {
+/** The lowest port a free address is picked from. */
+const FLOOR = 10_000
+
+/** The ephemeral range's low bound where `/proc` does not state it, the IANA dynamic range's being higher. */
+const EPHEMERAL_LOW = 32_768
+
+/** How many taken ports a pick skips before it gives up. */
+const TRIES = 100
+
+/**
+ * The kernel's ephemeral range's low bound: the ports from it up are the
+ * ones it hands to a bind on port 0 and to an outbound connect.
+ */
+const ephemeralLow = (): number => {
+  try {
+    const low = Number(fs.readFileSync("/proc/sys/net/ipv4/ip_local_port_range", "utf8").trim().split(/\s+/)[0])
+    return Number.isInteger(low) && low > FLOOR ? low : EPHEMERAL_LOW
+  } catch {
+    return EPHEMERAL_LOW
+  }
+}
+
+/** A socket of `kind` bound to loopback `port`, its release, or `undefined` where the port is taken. */
+const hold = async (kind: "udp" | "tcp", port: number): Promise<(() => Promise<void>) | undefined> => {
   if (kind === "tcp") {
     const server = net.createServer()
-    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve))
-    const { port } = server.address() as net.AddressInfo
-    await new Promise((resolve) => server.close(resolve))
-    return `127.0.0.1:${port}`
+    const bound = await new Promise<boolean>((resolve) => {
+      server.once("error", () => resolve(false))
+      server.listen(port, "127.0.0.1", () => resolve(true))
+    })
+    return bound ? () => new Promise<void>((resolve) => server.close(() => resolve())) : undefined
   }
   const socket = dgram.createSocket("udp4")
-  await new Promise<void>((resolve) => socket.bind(0, "127.0.0.1", resolve))
-  const { port } = socket.address()
-  await new Promise<void>((resolve) => socket.close(resolve))
-  return `127.0.0.1:${port}`
+  const bound = await new Promise<boolean>((resolve) => {
+    socket.once("error", () => resolve(false))
+    socket.bind(port, "127.0.0.1", () => resolve(true))
+  })
+  if (!bound) socket.close()
+  return bound ? () => new Promise<void>((resolve) => socket.close(() => resolve())) : undefined
+}
+
+/**
+ * A loopback address for each of `kinds`, each free on this box as it was
+ * picked and none another's. Each port is picked at random below the
+ * ephemeral range, so no bind on port 0 nor outbound connect of another
+ * process takes it before the runner binds it; each is held until all are
+ * picked.
+ */
+export const freeAddresses = async (kinds: ReadonlyArray<"udp" | "tcp">): Promise<ReadonlyArray<string>> => {
+  const ceiling = ephemeralLow()
+  const held: Array<() => Promise<void>> = []
+  const picked: Array<number> = []
+  try {
+    for (const kind of kinds) {
+      let port: number | undefined
+      for (let tried = 0; port === undefined && tried < TRIES; tried++) {
+        const candidate = FLOOR + Math.floor(Math.random() * (ceiling - FLOOR))
+        if (picked.includes(candidate)) continue
+        const release = await hold(kind, candidate)
+        if (release === undefined) continue
+        held.push(release)
+        port = candidate
+      }
+      if (port === undefined) throw new Error(`no free ${kind} port below ${ceiling} after ${TRIES} tries`)
+      picked.push(port)
+    }
+  } finally {
+    await Promise.all(held.map((release) => release()))
+  }
+  return picked.map((port) => `127.0.0.1:${port}`)
 }
 
 /** What a hosted workspace's runner writes: its log, its pid file, its packet capture and its call records. */
@@ -66,8 +123,9 @@ const FAIL_BUSY = {
  * `failing` is set.
  */
 export const hostedWorkspace = async (pack: string, dir: string, written: Written, failing = false): Promise<string> => {
+  const [ingress, metrics, admin] = await freeAddresses(["udp", "tcp", "tcp"])
   const lane = fs.readFileSync(path.join(pack, "lanes", "reference.toml"), "utf8")
-    .replace(`ingress = "127.0.0.1:5160"`, `ingress = "${await freeAddress("udp")}"`) +
+    .replace(`ingress = "127.0.0.1:5160"`, `ingress = "${ingress}"`) +
     `\n[collectors.calls-ended]\ndelay_s = 0.1\n`
   fs.mkdirSync(path.join(dir, "lanes"), { recursive: true })
   fs.writeFileSync(path.join(dir, "lanes", "reference.toml"), lane)
@@ -75,7 +133,7 @@ export const hostedWorkspace = async (pack: string, dir: string, written: Writte
     fs.mkdirSync(path.join(dir, "targets", kind), { recursive: true })
     fs.writeFileSync(path.join(dir, "targets", kind, "reference.toml"), content)
   }
-  target("b2bua-runner", `metrics = "${await freeAddress("tcp")}"\nadmin = "${await freeAddress("tcp")}"\n`)
+  target("b2bua-runner", `metrics = "${metrics}"\nadmin = "${admin}"\n`)
   target("runner-log", `file = "${written.log}"\n`)
   target("runner-pid", `file = "${written.pid}"\n`)
   target("sip-capture", `file = "${written.capture}"\n`)
