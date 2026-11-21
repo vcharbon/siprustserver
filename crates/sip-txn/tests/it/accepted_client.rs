@@ -466,6 +466,40 @@ async fn after_release_a_sibling_forks_2xx_after_its_reliable_offer_is_acked_bar
     assert!(ack.body().is_empty(), "its PRACK answered the offer: {:?}", ack.body());
 }
 
+/// Once its call released it, an Accepted transaction absorbs a sibling
+/// fork's reliable provisional too: no TU is left to PRACK it, so nothing
+/// goes up and the layer sends nothing for it. Its offer stays unanswered,
+/// so that fork's 2xx is ACKed answering it, every stream rejected (RFC 3264
+/// §6).
+#[tokio::test(start_paused = true)]
+async fn after_release_a_sibling_forks_reliable_1xx_is_absorbed() {
+    let mut stack = Stack::build(5, 64, 64).await;
+    let (call_ref, call_id, branch) = ("self|call-A18", "callid-A18", "z9hG4bK-A18");
+    let invite = offerless_invite(call_ref, call_id, branch);
+    stack.txn.send_request(invite, addr(CALLEE), TxnKind::Invite).await.unwrap();
+    let sdp = ["Content-Type: application/sdp"];
+    stack.inject(&ok(1, branch, call_id, "t18", &sdp, OFFER)).await;
+    elapse_ms(20).await;
+    stack.drain_peer();
+    let _ = stack.drain_events();
+
+    stack.txn.cancel_txns_for_call(call_ref).await.unwrap();
+    let reliable = ["Require: 100rel", "RSeq: 7", "Content-Type: application/sdp"];
+    let late =
+        provisional_or_final("183 Session Progress", 1, branch, call_id, "t19", &reliable, OFFER);
+    stack.inject(&late).await;
+    elapse_ms(20).await;
+    assert!(responses(&stack.drain_events()).is_empty(), "nothing goes up");
+    assert!(stack.drain_peer().is_empty(), "and nothing is sent");
+
+    stack.inject(&ok(1, branch, call_id, "t19", &sdp, OFFER)).await;
+    elapse_ms(20).await;
+    let ack = reqs(&stack.drain_peer(), "ACK").pop().expect("the fork's 2xx is ACKed");
+    assert_eq!(ack.to().tag(), Some("t19"));
+    let answer = String::from_utf8_lossy(ack.sdp().expect("the ACK answers the offer")).to_string();
+    assert!(answer.contains("m=audio 0 RTP/AVP 0"), "the stream is rejected: {answer}");
+}
+
 /// After its call is released, a repeat of a 2xx whose ACK the TU sent draws
 /// that ACK at the address the TU sent it to, not where the INVITE went.
 #[tokio::test(start_paused = true)]
