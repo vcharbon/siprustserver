@@ -207,17 +207,34 @@ async fn a_bye_requiring_an_unknown_tag_is_refused_420_and_a_plain_bye_ends_the_
     c.hang_up().await;
 }
 
-/// Of a re-INVITE's `100rel, x-nonexistent` (RFC 3262 §4 admits `100rel` in
-/// an INVITE's `Require` only), the stack understands `100rel`: the 420 lists
+/// Of an UPDATE's `timer, x-nonexistent`, the stack understands `timer`, which
+/// it relays end to end on a session request (RFC 4028 §7.1): the 420 lists
 /// only the other one.
 #[tokio::test(start_paused = true)]
 async fn the_420_lists_only_the_tags_not_understood() {
     let mut c = Confirmed::new("unknown-require-mixed").await;
-    let required = format!("100rel, {UNKNOWN}");
-    let listed = c.refused(Side::Caller, InDialogMethod::Invite, &required, true).await;
-    assert_eq!(listed, [UNKNOWN], "100rel is understood, so it is not listed");
-    c.renegotiated(Side::Caller, InDialogMethod::Invite).await;
+    let required = format!("timer, {UNKNOWN}");
+    let listed = c.refused(Side::Caller, InDialogMethod::Update, &required, true).await;
+    assert_eq!(listed, [UNKNOWN], "timer is understood, so it is not listed");
+    c.renegotiated(Side::Caller, InDialogMethod::Update).await;
     c.hang_up().await;
+}
+
+/// A re-INVITE requiring `100rel` asks that every provisional to it come
+/// reliably (RFC 3262 §3); the stack relays the peer's provisionals to a
+/// re-INVITE as they come and never puts the requirement to the peer, so it
+/// refuses the re-INVITE 420 naming `100rel`, from either side.
+#[tokio::test(start_paused = true)]
+async fn a_reinvite_requiring_100rel_is_refused_420() {
+    for (name, side) in
+        [("reinvite-100rel", Side::Caller), ("reinvite-100rel-callee", Side::Callee)]
+    {
+        let mut c = Confirmed::new(name).await;
+        let listed = c.refused(side, InDialogMethod::Invite, "100rel", true).await;
+        assert_eq!(listed, ["100rel"], "the 420 names the requirement the stack cannot meet");
+        c.renegotiated(side, InDialogMethod::Invite).await;
+        c.hang_up().await;
+    }
 }
 
 /// `timer` names the session timer, which this stack relays end to end on a
