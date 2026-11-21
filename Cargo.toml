@@ -8,6 +8,7 @@ members = [
     "crates/wire-mutations",
     "crates/observe",
     "crates/observe-testkit",
+    "crates/loopback-ports",
     "crates/alloc-counter",
     "crates/insn-counter",
     "crates/sip-clock",

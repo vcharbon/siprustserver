@@ -554,6 +554,7 @@ dependencies = [
  "call",
  "jemalloc-stats",
  "layer-harness",
+ "loopback-ports",
  "observe",
  "probe-http",
  "scenario-harness",
@@ -822,6 +823,7 @@ version = "0.1.0"
 dependencies = [
  "call-limiter",
  "http-net",
+ "loopback-ports",
  "observe",
  "serde_json",
  "sip-clock",
@@ -2750,6 +2752,10 @@ checksum = "f9f8bd3e56ce4dfc153cf470fffbfa98c7620958b312ca5c3a4b8d5181fd13c6"
 
 [[package]]
 name = "lookup-map"
+version = "0.1.0"
+
+[[package]]
+name = "loopback-ports"
 version = "0.1.0"
 
 [[package]]

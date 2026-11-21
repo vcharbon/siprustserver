@@ -6,29 +6,20 @@
 //! UDP; bob is the binary's default callee.
 
 use std::io::{Read, Write};
-use std::net::{SocketAddr, TcpListener, TcpStream, UdpSocket};
+use std::net::{SocketAddr, TcpStream};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use layer_harness::TransportKind;
+use loopback_ports::Kind;
 use scenario_harness::{Harness, ANSWER_SDP, OFFER_SDP};
 use sip_clock::Clock;
 use sip_net::{RealSignalingNetwork, SignalingNetwork};
 
 /// The store gauges the scrape reads.
 const STORE: [&str; 2] = ["b2bua_store_calls", "b2bua_store_sip_index"];
-
-/// A loopback UDP address no socket held a moment ago.
-fn free_udp() -> SocketAddr {
-    UdpSocket::bind("127.0.0.1:0").and_then(|s| s.local_addr()).expect("a free UDP port")
-}
-
-/// A loopback TCP address no listener held a moment ago.
-fn free_tcp() -> SocketAddr {
-    TcpListener::bind("127.0.0.1:0").and_then(|l| l.local_addr()).expect("a free TCP port")
-}
 
 /// The running binary, killed on drop.
 struct Runner {
@@ -43,7 +34,12 @@ impl Runner {
     /// call records appended to a file of its own; returned once `/metrics`
     /// answers.
     fn start(callee: SocketAddr) -> Runner {
-        let (sip, metrics, admin) = (free_udp(), free_tcp(), free_tcp());
+        let [sip, metrics, admin] =
+            loopback_ports::free_addresses(&[Kind::Udp, Kind::Tcp, Kind::Tcp])
+                .expect("free loopback addresses")[..]
+        else {
+            unreachable!("one address per kind")
+        };
         let cdr = std::env::temp_dir()
             .join(format!("b2bua-runner-store-gauges-{}.jsonl", std::process::id()));
         let _ = std::fs::remove_file(&cdr);
@@ -133,8 +129,13 @@ async fn a_held_call_reads_in_the_store_gauges_at_once_and_its_hangup_empties_th
         TransportKind::Live,
         Duration::from_secs(5),
     );
-    let alice = h.agent("alice", &free_udp().to_string()).await;
-    let bob = h.agent("bob", &free_udp().to_string()).await;
+    let [alice_at, bob_at] = loopback_ports::free_addresses(&[Kind::Udp, Kind::Udp])
+        .expect("free loopback addresses")[..]
+    else {
+        unreachable!("one address per kind")
+    };
+    let alice = h.agent("alice", &alice_at.to_string()).await;
+    let bob = h.agent("bob", &bob_at.to_string()).await;
     let runner = Runner::start(bob.addr());
 
     let mut call = alice.invite(&bob).with_sdp(OFFER_SDP).through(runner.sip).send().await;

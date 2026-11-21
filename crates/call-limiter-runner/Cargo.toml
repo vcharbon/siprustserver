@@ -27,3 +27,5 @@ tracing = { workspace = true }
 [dev-dependencies]
 http-net = { path = "../http-net", features = ["real"] }
 serde_json = { workspace = true }
+# The SIGTERM test's port, no other process's socket taking it first.
+loopback-ports = { path = "../loopback-ports" }
