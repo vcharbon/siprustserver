@@ -165,8 +165,9 @@ pub struct CancelEntry {
     pub minted: Option<RouteParams>,
     pub via_cookie: Option<RouteParams>,
     /// `target` is the address a send to a name left for, written by
-    /// [`CancelBranchLru::settle_name`] alone. The face a request leaves on is
-    /// the name's, so no registry match of that address moves it.
+    /// [`CancelBranchLru::settle_name`] and kept by a copy's rewrite of the
+    /// entry. The face a request leaves on is the name's, so no registry match
+    /// of that address moves it.
     pub settled: bool,
 }
 

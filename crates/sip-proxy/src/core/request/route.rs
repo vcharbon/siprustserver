@@ -301,6 +301,7 @@ impl ProxyCore {
 
         // ADR-0050 §4
         let went = rtx_hit.as_ref().map_or_else(|| target.clone(), |found| found.target.clone());
+        let went_settled = rtx_hit.as_ref().is_some_and(|found| found.settled);
         let mut memo_keys = Vec::with_capacity(2);
         if method != Method::Cancel {
             self.cancel_lru.remember(
@@ -311,7 +312,7 @@ impl ProxyCore {
                     stickiness: None,
                     minted: minted_cookie.clone(),
                     via_cookie: via_cookie.clone(),
-                    settled: false,
+                    settled: went_settled,
                 },
                 Lifetime::Retransmission,
             );
@@ -329,7 +330,7 @@ impl ProxyCore {
                 stickiness,
                 minted: None,
                 via_cookie: via_cookie.clone(),
-                settled: false,
+                settled: went_settled,
             };
             self.cancel_lru.remember(&key, entry, Lifetime::InviteTransaction);
             self.cancel_lru.publish(&self.metrics);
