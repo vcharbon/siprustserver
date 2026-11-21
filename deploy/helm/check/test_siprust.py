@@ -121,6 +121,18 @@ class Network(unittest.TestCase):
         self.assertEqual((e["PROXY_EXT_INTERFACE"], e["PROXY_EXT_NEXT_HOPS"]),
                          ("eth1", "192.168.60.1"))
 
+    def test_an_ipv6_vip_is_a_bracketed_hostport_wherever_an_address_names_it(self) -> None:
+        docs = render(SIPRUST, *KIND, "--set", "network.proxyVip=fd00::250",
+                      "--set", "network.externalVip=2001:db8::250")
+        proxy = env(container(find(docs, "Deployment", "sip-front-proxy"), "sip-front-proxy"))
+        self.assertEqual((proxy["PROXY_LISTEN"], proxy["PROXY_ADVERTISE"]),
+                         ("[fd00::250]:5060", "[fd00::250]:5060"))
+        self.assertEqual((proxy["PROXY_LISTEN_EXT"], proxy["PROXY_ADVERTISE_EXT"]),
+                         ("[2001:db8::250]:5060", "[2001:db8::250]:5060"))
+        worker = env(container(find(docs, "StatefulSet", "b2bua-worker"), "b2bua-worker"))
+        self.assertEqual((worker["B2BUA_OUTBOUND_PROXY"], worker["B2BUA_CONTACT_ADDRESS"]),
+                         ("[fd00::250]:5060", "[2001:db8::250]:5060"))
+
     def test_the_announcement_follows_readyz_and_the_liveness_probe_healthz(self) -> None:
         # ADR-0056: each VIP is announced from the nodes whose proxy is Ready,
         # through a LoadBalancer Service that carries no SIP port; the

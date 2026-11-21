@@ -151,6 +151,16 @@ A network value the proxy and masq-exempt require, named in the error. Takes
 {{- end }}
 
 {{/*
+The host:port of a network address and the SIP port, an IPv6 address
+bracketed (RFC 3261 §25.1 hostport), as the proxy and the worker read an
+address. Takes (dict "root" $ "key" <network key>).
+*/}}
+{{- define "siprust.netHostPort" -}}
+{{- $host := include "siprust.net" . }}
+{{- printf (ternary "[%s]:%d" "%s:%d" (contains ":" $host)) $host (int .root.Values.network.sipPort) }}
+{{- end }}
+
+{{/*
 An integer env value of a component's final env, or the runner default when
 the env does not state it (unset or null). Takes (list <env map> <name>
 <default>); a value that is not an integer fails the render naming it.

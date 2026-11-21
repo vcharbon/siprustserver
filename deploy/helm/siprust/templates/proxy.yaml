@@ -14,12 +14,13 @@ discovered from the EndpointSlices of the headless b2bua-worker Service
 {{- $p := .Values.proxy }}
 {{- $vip := include "siprust.net" (dict "root" $ "key" "proxyVip") }}
 {{- $extVip := include "siprust.net" (dict "root" $ "key" "externalVip") }}
-{{- $port := int .Values.network.sipPort }}
+{{- $sip := include "siprust.netHostPort" (dict "root" $ "key" "proxyVip") }}
+{{- $extSip := include "siprust.netHostPort" (dict "root" $ "key" "externalVip") }}
 {{- $env := dict
-  "PROXY_LISTEN" (printf "%s:%d" $vip $port)
-  "PROXY_ADVERTISE" (printf "%s:%d" $vip $port)
-  "PROXY_LISTEN_EXT" (printf "%s:%d" $extVip $port)
-  "PROXY_ADVERTISE_EXT" (printf "%s:%d" $extVip $port)
+  "PROXY_LISTEN" $sip
+  "PROXY_ADVERTISE" $sip
+  "PROXY_LISTEN_EXT" $extSip
+  "PROXY_ADVERTISE_EXT" $extSip
   "PROXY_EXT_INTERFACE" (include "siprust.net" (dict "root" $ "key" "externalInterface"))
   "PROXY_METRICS" (include "siprust.proxyMetricsBind" .)
   "PROXY_DEBUG" (include "siprust.proxyDebugBind" .)
