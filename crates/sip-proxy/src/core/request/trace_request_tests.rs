@@ -206,15 +206,18 @@ fn forwarded_branch(sent: &Arc<Sent>) -> String {
 /// A call that reaches activation twice (the credentialed retry of a
 /// challenged INVITE, or a retransmission whose memo was evicted) records each
 /// datagram once: `activate` reports no success for a call that already has a
-/// span, so the per-packet seam alone records the second INVITE.
+/// span, so the per-packet seam alone records the second INVITE. The call
+/// ends at the ACK of the second INVITE's rejection, which closes the span.
 #[tokio::test]
 async fn a_call_that_reaches_activation_twice_records_each_datagram_once() {
     let (_guard, log) = observe_testkit::test_buffer();
     let traces = sample_everything();
-    let (core, _ep) = core_with(traces.clone(), None);
+    let (core, ep) = core_with(traces.clone(), None);
+    const CALL_ID: &str = "dup@10.0.0.1";
 
-    core.handle_request_from(invite("dup@10.0.0.1", "z9hG4bK-first", 1), src()).await;
-    core.handle_request_from(invite("dup@10.0.0.1", "z9hG4bK-retry", 2), src()).await;
+    core.handle_request_from(invite(CALL_ID, "z9hG4bK-first", 1), src()).await;
+    core.handle_request_from(invite(CALL_ID, "z9hG4bK-retry", 2), src()).await;
+    let proxy_branch = forwarded_branch(&ep);
 
     assert_eq!(traces.active(), 1, "one root span per call, however many INVITEs it takes");
     let sip_in = log.matching("kind=sip.in");
@@ -227,8 +230,13 @@ async fn a_call_that_reaches_activation_twice_records_each_datagram_once() {
     assert!(sip_in.iter().any(|e| e.contains("CSeq: 1 INVITE")));
     assert!(sip_in.iter().any(|e| e.contains("CSeq: 2 INVITE")));
 
-    traces.close("dup@10.0.0.1");
-    assert_eq!(traces.active(), 0);
+    core.handle_response_from(
+        response(CALL_ID, "486 Busy Here", &proxy_branch, "z9hG4bK-retry", "2 INVITE"),
+        worker_src(),
+    )
+    .await;
+    core.handle_request_from(in_dialog("ACK", CALL_ID, "z9hG4bK-retry", 2), src()).await;
+    assert_eq!(traces.active(), 0, "the relayed ACK of the rejection closes the span");
 }
 
 /// A shed INVITE's 503 is synthesized by the proxy and reaches no downstream
