@@ -32,6 +32,7 @@ use super::Obligation;
 
 mod keys;
 mod late;
+mod relayed_answer;
 use keys::TxnKey;
 pub use late::NoCancelAfterFinal;
 
@@ -76,6 +77,13 @@ crate::registry::rules! {
 /// `relayed`** — the far endpoint that originated the answer is charged
 /// separately, and consumer policy weighs the hop's finding.
 ///
+/// **An emitter that relayed the INVITE and the CANCEL onward (or held the
+/// CANCEL because its far UAS answered before any provisional, §9.1), and
+/// answers with the 2xx that far UAS gave, is compliant** (§16.10): it
+/// carries back the answer the canceller would have met end to end, whatever
+/// Call-ID its far side wears (`relayed_answer`). The far UAS is judged on its
+/// own occasion.
+///
 /// Charges the UAS side of the cancelled transaction: the endpoint that took
 /// the INVITE and its CANCEL and then answered 2xx anyway. Answering 487 — or
 /// answering nothing this vantage carried — discharges it.
@@ -107,6 +115,18 @@ impl Obligation for No200AfterCancel {
                 });
                 continue;
             };
+            if relayed_answer::relays_far_answer(&seen, emitter, txn, cancel, answer) {
+                out.push(Finding {
+                    rule: RuleId::No200AfterCancel,
+                    emitter: emitter.to_string(),
+                    taker: answer.taker.to_string(),
+                    cseq,
+                    relayed: true,
+                    anchor: answer.msg,
+                    decision: Decision::Compliant,
+                });
+                continue;
+            }
             out.push(Finding {
                 rule: RuleId::No200AfterCancel,
                 emitter: emitter.to_string(),
@@ -168,11 +188,9 @@ impl<'a> Reading<'a> {
         }
         let Some(branch) = msg.via_branch.as_deref().filter(|b| !b.is_empty()) else { return };
         if msg.is_request("INVITE") {
-            self.txns
-                .entry(TxnKey::taken_by(msg, branch))
-                .or_default()
-                .took_invite_us
-                .get_or_insert(msg.at_us);
+            let txn = self.txns.entry(TxnKey::taken_by(msg, branch)).or_default();
+            txn.took_invite_us.get_or_insert(msg.at_us);
+            txn.invite_src.get_or_insert(msg.src.as_str());
         } else if msg.is_request("CANCEL") {
             // A CANCEL rides the top-Via branch of the INVITE it cancels; the
             // earliest arrival is when the UAS took it.
@@ -180,6 +198,11 @@ impl<'a> Reading<'a> {
                 Cancel { msg: mi, hop: msg.hop, ts_us: msg.at_us, src: msg.src.as_str() },
             );
         } else if let Some(status) = msg.status() {
+            if (100..200).contains(&status) && msg.cseq_method.eq_ignore_ascii_case("INVITE") {
+                let txn = self.txns.entry(TxnKey::emitted_by(sides, msg, branch)).or_default();
+                txn.first_1xx_us.get_or_insert(msg.at_us);
+                return;
+            }
             if !(200..300).contains(&status) || !msg.cseq_method.eq_ignore_ascii_case("INVITE") {
                 return;
             }
@@ -213,6 +236,11 @@ struct Txn<'a> {
     /// When this endpoint received the INVITE: it is the transaction's UAS
     /// side.
     took_invite_us: Option<u64>,
+    /// Who sent it that INVITE: the transaction's UAC side.
+    invite_src: Option<&'a str>,
+    /// When it emitted its first provisional to that INVITE: before it, §9.1
+    /// forbids its UAC a CANCEL.
+    first_1xx_us: Option<u64>,
     /// The first CANCEL it took for that INVITE.
     cancel: Option<Cancel<'a>>,
     /// Every distinct 2xx it emitted to that INVITE, in observation order.
