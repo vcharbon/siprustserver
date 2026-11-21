@@ -16,7 +16,6 @@ crates/b2bua-core/src/rules/relay/sdp_session_tests.rs 914
 crates/b2bua-harness/src/lib.rs 816
 crates/b2bua-harness/tests/it/call_keyed_holds.rs 1036
 crates/b2bua-harness/tests/it/fake_prack.rs 807
-crates/b2bua-harness/tests/it/message_ring.rs 831
 crates/b2bua-harness/tests/it/prack_owed_at_final.rs 913
 crates/b2bua-harness/tests/it/prack_reliable_ladder.rs 877
 crates/b2bua-harness/tests/it/reroute_limiter_holds.rs 858
@@ -28,7 +27,6 @@ crates/b2bua/src/repl/s12_tests.rs 888
 crates/b2bua/src/repl/tests.rs 823
 crates/call-limiter/tests/it/keyed_by_call.rs 877
 crates/callshapes/src/plan.rs 1074
-crates/call/tests/it/model_helpers.rs 891
 crates/failover-harness/src/harness.rs 1792
 crates/failover-harness/tests/it/call_terminate_on_backup.rs 986
 crates/failover-harness/tests/it/failover.rs 1315
