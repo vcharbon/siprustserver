@@ -108,9 +108,9 @@ async fn resolves_once_then_serves_from_cache() {
     let (fwd, ep, metrics) = forwarder(resolver.clone(), ResolverConfig::default());
     let target = ProxyAddr::new("uas.example", 5060);
 
-    fwd.send(b"pkt1", &target).await;
+    fwd.send(b"pkt1", &target, None).await;
     settle().await;
-    fwd.send(b"pkt2", &target).await;
+    fwd.send(b"pkt2", &target, None).await;
 
     assert_eq!(resolver.calls.load(Ordering::SeqCst), 1, "second send must be a cache hit");
     let sent = ep.sent.lock().unwrap();
@@ -126,14 +126,14 @@ async fn failed_lookup_is_negatively_cached_then_retried_after_ttl() {
     let (fwd, ep, metrics) = forwarder(resolver.clone(), ResolverConfig::default());
     let target = ProxyAddr::new("gone.example", 5060);
 
-    fwd.send(b"pkt1", &target).await;
+    fwd.send(b"pkt1", &target, None).await;
     settle().await;
-    fwd.send(b"pkt2", &target).await;
+    fwd.send(b"pkt2", &target, None).await;
     assert_eq!(resolver.calls.load(Ordering::SeqCst), 1);
     assert_eq!(metrics.named_send_count("dropped_negative"), 1);
 
     tokio::time::advance(Duration::from_millis(5_001)).await;
-    fwd.send(b"pkt3", &target).await;
+    fwd.send(b"pkt3", &target, None).await;
     settle().await;
     assert_eq!(resolver.calls.load(Ordering::SeqCst), 2);
     assert!(ep.sent.lock().unwrap().is_empty(), "nothing resolvable, nothing sent");
@@ -145,10 +145,10 @@ async fn positive_entry_expires_and_picks_up_new_address() {
     let (fwd, _ep, _metrics) = forwarder(resolver.clone(), ResolverConfig::default());
     let target = ProxyAddr::new("uas.example", 5060);
 
-    fwd.send(b"pkt1", &target).await;
+    fwd.send(b"pkt1", &target, None).await;
     settle().await;
     tokio::time::advance(Duration::from_millis(60_001)).await;
-    fwd.send(b"pkt2", &target).await;
+    fwd.send(b"pkt2", &target, None).await;
     settle().await;
     assert_eq!(resolver.calls.load(Ordering::SeqCst), 2, "expired positive entry must re-resolve");
 }
@@ -160,9 +160,9 @@ async fn concurrent_sends_to_same_name_are_single_flight_and_bounded() {
     let (fwd, ep, metrics) = forwarder(resolver.clone(), cfg);
     let target = ProxyAddr::new("uas.example", 5060);
 
-    fwd.send(b"pkt1", &target).await;
-    fwd.send(b"pkt2", &target).await;
-    fwd.send(b"pkt3", &target).await;
+    fwd.send(b"pkt1", &target, None).await;
+    fwd.send(b"pkt2", &target, None).await;
+    fwd.send(b"pkt3", &target, None).await;
     assert_eq!(metrics.named_send_count("dropped_in_flight"), 1);
     tokio::task::yield_now().await;
     assert_eq!(resolver.calls.load(Ordering::SeqCst), 1, "single-flight: one lookup per name");
@@ -181,8 +181,8 @@ async fn a_packet_racing_a_resolve_waits_for_it_and_follows_in_order() {
     let (fwd, ep, metrics) = forwarder(resolver.clone(), ResolverConfig::default());
     let target = ProxyAddr::new("uas.example", 5060);
 
-    fwd.send(b"pkt1", &target).await;
-    fwd.send(b"pkt2", &target).await;
+    fwd.send(b"pkt1", &target, None).await;
+    fwd.send(b"pkt2", &target, None).await;
     tokio::task::yield_now().await;
     tokio::time::advance(Duration::from_millis(1_000)).await;
     settle().await;
@@ -205,8 +205,8 @@ async fn packets_waiting_on_a_failed_resolve_are_each_counted_failed() {
     let (fwd, ep, metrics) = forwarder(resolver.clone(), ResolverConfig::default());
     let target = ProxyAddr::new("gone.example", 5060);
 
-    fwd.send(b"pkt1", &target).await;
-    fwd.send(b"pkt2", &target).await;
+    fwd.send(b"pkt1", &target, None).await;
+    fwd.send(b"pkt2", &target, None).await;
     tokio::task::yield_now().await;
     tokio::time::advance(Duration::from_millis(1_000)).await;
     settle().await;
@@ -240,12 +240,12 @@ async fn a_packet_arriving_while_the_held_ones_leave_goes_after_them() {
     let (fwd, ep, _metrics) = yielding_forwarder(resolver.clone());
     let target = ProxyAddr::new("uas.example", 5060);
 
-    fwd.send(b"pkt1", &target).await;
-    fwd.send(b"pkt2", &target).await;
+    fwd.send(b"pkt1", &target, None).await;
+    fwd.send(b"pkt2", &target, None).await;
     tokio::task::yield_now().await;
     tokio::time::advance(Duration::from_millis(1_000)).await;
     tokio::task::yield_now().await;
-    fwd.send(b"pkt3", &target).await;
+    fwd.send(b"pkt3", &target, None).await;
     settle().await;
 
     let order: Vec<Vec<u8>> = ep.sent.lock().unwrap().iter().map(|(b, _)| b.clone()).collect();
@@ -263,10 +263,10 @@ async fn a_packet_arriving_while_a_prewarm_releases_starts_no_second_lookup() {
 
     fwd.prewarm(vec![target.clone()]);
     tokio::task::yield_now().await;
-    fwd.send(b"pkt1", &target).await;
+    fwd.send(b"pkt1", &target, None).await;
     tokio::time::advance(Duration::from_millis(1_000)).await;
     tokio::task::yield_now().await;
-    fwd.send(b"pkt2", &target).await;
+    fwd.send(b"pkt2", &target, None).await;
     settle().await;
 
     assert_eq!(resolver.calls.load(Ordering::SeqCst), 1, "one lookup of the name");
@@ -281,7 +281,7 @@ async fn in_flight_cap_bounds_spawned_resolves() {
     let (fwd, _ep, metrics) = forwarder(resolver.clone(), cfg);
 
     for i in 0..5 {
-        fwd.send(b"pkt", &ProxyAddr::new(format!("n{i}.example"), 5060)).await;
+        fwd.send(b"pkt", &ProxyAddr::new(format!("n{i}.example"), 5060), None).await;
     }
     assert_eq!(metrics.named_send_count("dropped_in_flight"), 3);
     tokio::task::yield_now().await;
@@ -297,24 +297,24 @@ async fn a_lookup_past_its_bound_drops_the_packet_and_never_sends_it_late() {
     let (fwd, ep, metrics) = forwarder(resolver.clone(), ResolverConfig::default());
     let target = ProxyAddr::new("stuck.example", 5060);
 
-    fwd.send(b"pkt1", &target).await;
+    fwd.send(b"pkt1", &target, None).await;
     tokio::task::yield_now().await;
-    fwd.send(b"pkt1-copy", &target).await;
+    fwd.send(b"pkt1-copy", &target, None).await;
     tokio::time::advance(Duration::from_millis(2_000)).await;
     settle().await;
     assert_eq!(metrics.named_send_count("lookup_timed_out"), 2, "both dropped at the bound");
-    fwd.send(b"pkt2", &target).await;
+    fwd.send(b"pkt2", &target, None).await;
     assert_eq!(metrics.named_send_count("dropped_negative"), 1, "the negative entry holds");
 
     tokio::time::advance(Duration::from_millis(5_000)).await;
-    fwd.send(b"pkt3", &target).await;
+    fwd.send(b"pkt3", &target, None).await;
     assert_eq!(metrics.named_send_count("dropped_in_flight"), 1);
     assert_eq!(resolver.calls.load(Ordering::SeqCst), 1);
 
     tokio::time::advance(Duration::from_millis(23_000)).await;
     settle().await;
     assert!(ep.sent.lock().unwrap().is_empty(), "nothing is sent after the bound");
-    fwd.send(b"pkt4", &target).await;
+    fwd.send(b"pkt4", &target, None).await;
     tokio::task::yield_now().await;
     assert_eq!(resolver.calls.load(Ordering::SeqCst), 2, "a fresh lookup claims the slot");
 }
@@ -329,9 +329,9 @@ async fn a_name_is_sent_to_its_first_address_in_the_socket_family() {
     let (fwd, ep, _metrics) = forwarder(resolver, ResolverConfig::default());
     let target = ProxyAddr::new("dual.example", 5060);
 
-    fwd.send(b"pkt1", &target).await;
+    fwd.send(b"pkt1", &target, None).await;
     settle().await;
-    fwd.send(b"pkt2", &target).await;
+    fwd.send(b"pkt2", &target, None).await;
     let sent: Vec<SocketAddr> = ep.sent.lock().unwrap().iter().map(|(_, d)| *d).collect();
     assert_eq!(sent, [dst(), dst()]);
 
@@ -348,7 +348,7 @@ async fn a_name_is_sent_to_its_first_address_in_the_socket_family() {
         Clock::test_at(0),
         metrics,
     );
-    fwd.send(b"pkt3", &target).await;
+    fwd.send(b"pkt3", &target, None).await;
     settle().await;
     assert_eq!(ep.sent.lock().unwrap()[0].1, v6);
 }
@@ -450,9 +450,9 @@ async fn used_entry_is_refreshed_before_ttl_and_stays_warm() {
     let (fwd, ep, metrics) = forwarder(resolver.clone(), ResolverConfig::default());
     let target = ProxyAddr::new("uas.example", 5060);
 
-    fwd.send(b"pkt1", &target).await;
+    fwd.send(b"pkt1", &target, None).await;
     settle().await;
-    fwd.send(b"pkt2", &target).await;
+    fwd.send(b"pkt2", &target, None).await;
     assert_eq!(resolver.calls.load(Ordering::SeqCst), 1);
 
     tokio::time::advance(Duration::from_millis(55_000)).await;
@@ -462,7 +462,7 @@ async fn used_entry_is_refreshed_before_ttl_and_stays_warm() {
     assert_eq!(ep.sent.lock().unwrap().len(), 2, "refresh must not send anything");
 
     tokio::time::advance(Duration::from_millis(6_000)).await;
-    fwd.send(b"pkt3", &target).await;
+    fwd.send(b"pkt3", &target, None).await;
     assert_eq!(
         resolver.calls.load(Ordering::SeqCst),
         2,
@@ -480,7 +480,7 @@ async fn unused_entry_refresh_idle_stops_and_expires_normally() {
     let (fwd, _ep, metrics) = forwarder(resolver.clone(), ResolverConfig::default());
     let target = ProxyAddr::new("oneshot.example", 5060);
 
-    fwd.send(b"pkt1", &target).await;
+    fwd.send(b"pkt1", &target, None).await;
     settle().await;
     assert_eq!(resolver.calls.load(Ordering::SeqCst), 1);
 
@@ -491,7 +491,7 @@ async fn unused_entry_refresh_idle_stops_and_expires_normally() {
     assert_eq!(metrics.resolver_refresh_count("refreshed"), 0);
 
     tokio::time::advance(Duration::from_millis(5_001)).await;
-    fwd.send(b"pkt2", &target).await;
+    fwd.send(b"pkt2", &target, None).await;
     settle().await;
     assert_eq!(
         resolver.calls.load(Ordering::SeqCst),
@@ -516,7 +516,7 @@ async fn prewarmed_name_first_send_is_a_cache_hit() {
     assert_eq!(resolver.calls.load(Ordering::SeqCst), 1, "prewarm resolves off the serving path");
     assert_eq!(metrics.resolver_refresh_count("prewarmed"), 1);
 
-    fwd.send(b"pkt1", &target).await;
+    fwd.send(b"pkt1", &target, None).await;
     assert_eq!(
         metrics.named_send_count("cached"),
         1,
@@ -557,7 +557,7 @@ async fn pinned_name_keeps_refreshing_across_ttl_windows_without_sends() {
         "a pinned name must never idle-stop"
     );
 
-    fwd.send(b"pkt", &target).await;
+    fwd.send(b"pkt", &target, None).await;
     assert_eq!(metrics.named_send_count("cached"), 1);
     assert_eq!(resolver.calls.load(Ordering::SeqCst), 4);
 }
@@ -581,7 +581,7 @@ async fn failed_prewarm_retries_at_the_refresh_cadence_and_stores_nothing() {
     assert_eq!(resolver.calls.load(Ordering::SeqCst), 2, "pinned prewarm failure must retry");
     assert_eq!(metrics.resolver_refresh_count("failed"), 1);
 
-    fwd.send(b"pkt", &target).await;
+    fwd.send(b"pkt", &target, None).await;
     assert_eq!(
         metrics.named_send_count("dropped_negative"),
         0,
@@ -596,7 +596,7 @@ async fn cache_is_capped() {
     let (fwd, _ep, metrics) = forwarder(resolver.clone(), cfg);
 
     for i in 0..10 {
-        fwd.send(b"pkt", &ProxyAddr::new(format!("n{i}.example"), 5060)).await;
+        fwd.send(b"pkt", &ProxyAddr::new(format!("n{i}.example"), 5060), None).await;
         settle().await;
     }
     assert!(

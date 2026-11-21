@@ -51,7 +51,7 @@ use crate::observability::{ProxyMetrics, UdpShardStats};
 use crate::parse_refusals::ParseRefusals;
 use crate::refusals::Refusals;
 use crate::registry::WorkerRegistry;
-use crate::resolver::{HostResolver, NamedForwarder, ResolverConfig};
+use crate::resolver::{HostResolver, NamedForwarder, OnSent, ResolverConfig};
 use crate::self_gate::{IntakeAgeRecorder, ProxySelfGate};
 use crate::strategy::RoutingStrategy;
 use crate::trace::ProxyTraces;
@@ -291,7 +291,8 @@ impl ProxyCore {
     /// literals) is sent inline; a DNS name — e.g. a `sipp-uas` pod FQDN in a
     /// worker-outbound b-leg R-URI — goes through the [`NamedForwarder`], which
     /// serves cache hits inline and resolves misses on a spawned task so the
-    /// recv loop NEVER waits on DNS (see [`crate::resolver`]). Every refusal is
+    /// recv loop NEVER waits on DNS (see [`crate::resolver`]); `on_sent` is
+    /// told the address a send to a name leaves for. Every refusal is
     /// counted; the kind of one the socket answered inline is returned, `None`
     /// when the datagram left or a resolve sends it later.
     async fn send_to(
@@ -299,10 +300,11 @@ impl ProxyCore {
         bytes: &[u8],
         target: &ProxyAddr,
         face: Face,
+        on_sent: Option<OnSent>,
     ) -> Option<sip_net::SendErrorKind> {
         self.metrics.record_face_egress(face);
         let Some(dst) = target.to_socket_addr() else {
-            return self.named_of(face).send(bytes, target).await;
+            return self.named_of(face).send(bytes, target, on_sent).await;
         };
         let e = self.endpoint_of(face).send_to(bytes, dst).await.err()?;
         self.metrics.record_send_failure();

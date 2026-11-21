@@ -173,6 +173,12 @@ measures it:
   the rank winner, right for a call placed there, the first residual above for a call
   placed away from it, with no flow move. Cells: `active_active::off_rank`,
   `active_active::residual`.
+- *A named target reached without its entry.* The CANCEL, non-2xx ACK or retransmission of a
+  request sent to a name goes to the address the request left for only at the instance holding
+  its entry (ADR-0066). At another instance (the flow moved, or the entry was evicted) it follows
+  its Request-URI or Route and a fresh lookup; after the name moved, it reaches the new address,
+  and the peer at the old one retransmits its final until Timer H. Cell:
+  `named_ack_tests::at_an_instance_without_the_invites_entry_the_ack_follows_a_fresh_lookup`.
 
 **A non-2xx ACK is told by the ACK-hop memo.** The ACK-hop memo, written for every relayed
 non-2xx INVITE final and keyed with the received branch, tells a non-2xx ACK from a 2xx ACK,

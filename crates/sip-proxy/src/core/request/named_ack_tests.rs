@@ -135,12 +135,17 @@ async fn peer_answers(fx: &Fixture, response: SipMessage) {
 /// A proxy in front of one worker, resolving [`PEER_NAME`] at [`AT_INVITE`]
 /// until the test moves it.
 fn proxy_to_the_name() -> (Fixture, Arc<MovingName>) {
+    let name = Arc::new(MovingName::at(AT_INVITE));
+    (proxy_over(name.clone()), name)
+}
+
+/// A proxy in front of one worker, resolving names through `name`.
+fn proxy_over(name: Arc<MovingName>) -> Fixture {
     let reg = Arc::new(StaticWorkerRegistry::from_entries(vec![WorkerEntry::alive(
         "w1",
         ProxyAddr::new(W1, 5060),
     )]));
-    let name = Arc::new(MovingName::at(AT_INVITE));
-    (dual_face_core_over(reg, Some(name.clone())), name)
+    dual_face_core_over(reg, Some(name))
 }
 
 /// The worker's INVITE leaves for the name at [`AT_INVITE`]; the name then
@@ -260,4 +265,37 @@ async fn a_retransmitted_invite_goes_where_its_first_copy_went_after_the_names_r
     sleep(Duration::from_millis(TIMER_H) + Duration::from_secs(1)).await;
     let sent = fx.take_sent();
     assert!(sent.is_empty(), "nothing follows the transaction's end: {sent:?}");
+}
+
+/// The accepted residual (ADR-0009 X7): an instance without the INVITE's
+/// entry (the worker's flow moved, or the entry was evicted) sends the
+/// worker's ACK by its Request-URI and a fresh lookup, so after the name moved
+/// it reaches the name's new address; the peer at the INVITE's address
+/// retransmits its 486 until Timer H.
+#[tokio::test(start_paused = true)]
+async fn at_an_instance_without_the_invites_entry_the_ack_follows_a_fresh_lookup() {
+    let call_id = "named-ack-elsewhere";
+    let (holder, name) = proxy_to_the_name();
+    let elsewhere = proxy_over(name.clone());
+    holder.core.route_request(&worker_request("INVITE", call_id), worker(), Face::Internal).await;
+    sleep(SETTLE).await;
+    let sent = holder.take_sent();
+    let [(_, dst, invite)] = sent.as_slice() else { panic!("one INVITE: {sent:?}") };
+    assert_eq!(*dst, peer(), "the INVITE leaves for the name's address");
+    let invite = invite.clone();
+    name.move_to(MOVED_TO);
+    peer_answers(&holder, peer_response("486 Busy Here", &invite, call_id)).await;
+
+    let ack = worker_request("ACK", call_id);
+    let outcome = elsewhere.core.route_request(&ack, worker(), Face::Internal).await;
+    assert_eq!(outcome.decision, RoutingDecisionKind::WorkerOutbound, "no hop to read");
+    sleep(SETTLE).await;
+    let sent = elsewhere.take_sent();
+    let [(face, dst, bytes)] = sent.as_slice() else { panic!("one ACK: {sent:?}") };
+    assert!(bytes.starts_with(b"ACK "), "{}", String::from_utf8_lossy(bytes));
+    let moved = SocketAddr::new(MOVED_TO.parse().expect("an address"), PEER_PORT);
+    assert_eq!((*face, *dst), ("ext", moved), "the name's address now");
+
+    sleep(Duration::from_millis(TIMER_H) + Duration::from_secs(1)).await;
+    assert!(holder.take_sent().is_empty() && elsewhere.take_sent().is_empty());
 }

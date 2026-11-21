@@ -33,3 +33,8 @@ the pod's `resolv.conf` was rejected: the proxy does not own it.
 
 - Every send to a name pays a cache read; a cold name costs one bounded lookup (ADR-0046 §8).
 - The search-domain walk costs a lookup only for a name the absolute query misses.
+- A request's memo entries hold the name until its send leaves, then the address it left for:
+  its CANCEL, its non-2xx ACK and its retransmissions go to that address with no lookup (RFC
+  3261 §9.1, §17.1.1.3), whatever the name resolves to since. The pin is per instance: one
+  reaching an instance without the entry (a flow move, an eviction) follows its Request-URI or
+  Route and a fresh lookup (ADR-0009 X7, accepted residuals).

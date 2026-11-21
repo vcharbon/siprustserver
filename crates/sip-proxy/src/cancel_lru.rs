@@ -24,6 +24,7 @@ mod stripe;
 use std::collections::hash_map::RandomState;
 use std::fmt::Write as _;
 use std::hash::BuildHasher;
+use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
@@ -140,7 +141,9 @@ pub fn ack_hop_key(via: &Via, call_id: &str, from_tag: Option<&str>, cseq_num: u
 /// What we cache per remembered INVITE: the downstream target and the branch
 /// we stamped on our outgoing Via (§16.11's function of the message — empty
 /// marks a final the proxy generated itself, whose ACK has no downstream to
-/// reach). The upstream's branch is part of the key.
+/// reach). The upstream's branch is part of the key. A named target becomes
+/// the address its send left for once that send settles it
+/// ([`CancelBranchLru::settle_name`]).
 ///
 /// `stickiness` is the cookie the INVITE's dialog rides on (the params of the
 /// Record-Route this proxy minted for it, or of the Route it carried), kept only
@@ -305,6 +308,17 @@ impl CancelBranchLru {
         let found = stripe.shorten(key, now, &mut change);
         self.account(&change);
         found
+    }
+
+    /// The entry under `key`, while it targets the name `name`, targets `to`,
+    /// the address a send to that name left for: the requests it routes
+    /// (a CANCEL, a non-2xx ACK, a retransmission) go there without a lookup
+    /// (RFC 3261 §9.1, §17.1.1.3). Its expiry stays.
+    pub fn settle_name(&self, key: &str, name: &ProxyAddr, to: SocketAddr) {
+        let mut change = Change::default();
+        let mut stripe = self.stripe(key);
+        stripe.retarget(key, name, &ProxyAddr::from(to), &mut change);
+        self.account(&change);
     }
 
     pub fn size(&self) -> usize {

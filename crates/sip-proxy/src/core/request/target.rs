@@ -20,6 +20,17 @@ use super::{Arrival, RouteOutcome};
 /// cookie's verdict for the traced routing fact.
 pub(super) type Chosen = (ProxyAddr, RoutingDecisionKind, Option<&'static str>);
 
+/// The hop of a request whose message names the next hop `hop`: for a
+/// retransmission (`rtx_hit`) toward a name, where its first copy went, which
+/// is the address that copy left for once its send settled the memo: one
+/// transaction, one destination (RFC 3261 §17.1.1.3). `hop` itself otherwise.
+pub(super) fn repeat_hop(hop: ProxyAddr, rtx_hit: Option<&CancelEntry>) -> ProxyAddr {
+    match rtx_hit {
+        Some(found) if hop.to_socket_addr().is_none() => found.target.clone(),
+        _ => hop,
+    }
+}
+
 impl ProxyCore {
     /// The Request-URI as the target, past §16.4 ([`Classified`]), its `maddr`
     /// where it has one (RFC 3261 §16.5). An out-of-range port is malformed

@@ -121,7 +121,7 @@ impl ProxyCore {
         };
         let next_hop = ProxyAddr::new(host, port);
         let egress = self.egress.response(face, owner_named, marked);
-        let _ = self.send_to(&bytes, &next_hop, egress).await;
+        let _ = self.send_to(&bytes, &next_hop, egress, None).await;
         self.metrics.record_message(Direction::Outbound, MessageResult::Forwarded);
         if let Some(call_id) = &traced {
             emit::relayed(&self.traces, call_id, at_ms, &next_hop, &bytes);

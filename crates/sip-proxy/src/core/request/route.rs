@@ -8,6 +8,7 @@
 //! [`reply`](super::reply).
 
 use std::net::SocketAddr;
+use std::sync::Arc;
 
 use sip_message::emergency::is_emergency_request;
 use sip_message::header::{ProxyRequire, Unsupported, Via};
@@ -20,16 +21,35 @@ use crate::headers::{via_marking_same_face, via_with_cookie};
 use crate::observability::metrics::{
     Direction, Face, MessageResult, NoTargetDrop, RoutingDecisionKind,
 };
+use crate::resolver::OnSent;
 use crate::self_gate::BypassKind;
 use crate::strategy::SelectOpts;
 use sip_message::received::observed_source;
 
 use super::super::ProxyCore;
 use super::reply::extra_header;
-use super::target::Chosen;
+use super::target::{repeat_hop, Chosen};
 use super::{received_branch, Arrival, RouteOutcome};
 
 impl ProxyCore {
+    /// What a send to `target` tells once it leaves, when `target` is a name:
+    /// the memo entries under `keys`, written for this forward, settle on the
+    /// address it left for ([`CancelBranchLru::settle_name`]). `None` for an
+    /// IP literal, which no lookup can move.
+    ///
+    /// [`CancelBranchLru::settle_name`]: crate::cancel_lru::CancelBranchLru::settle_name
+    fn settle_on_send(&self, target: &ProxyAddr, keys: Vec<String>) -> Option<OnSent> {
+        if keys.is_empty() || target.to_socket_addr().is_some() {
+            return None;
+        }
+        let (memo, name) = (self.cancel_lru.clone(), target.clone());
+        Some(Arc::new(move |sent_to| {
+            for key in &keys {
+                memo.settle_name(key, &name, sent_to);
+            }
+        }))
+    }
+
     /// Drops a request whose own edit the draft refuses, counted as a reject:
     /// half an edit on the wire is a request with no path back for its
     /// response.
@@ -47,7 +67,8 @@ impl ProxyCore {
     ///   hop sent, ends here.
     /// - A retransmission, matched on the whole received transaction so a
     ///   request that only shares the branch is none, repeats its first copy's
-    ///   target and both cookies from the memo. It is not counted as a new call
+    ///   target (toward a name, the address that copy left for) and both
+    ///   cookies from the memo. It is not counted as a new call
     ///   and meets no gate. A first target no longer `Alive` is replaced by
     ///   where the first copy's cookie places the call. A CANCEL never takes
     ///   this path; it follows its INVITE's entry.
@@ -198,9 +219,10 @@ impl ProxyCore {
         } else if let Some(found) = placed_ack {
             found.map(|t| (t, RoutingDecisionKind::AckHop, None))
         } else if let Some(next) = c.loose_route_next_hop.clone() {
-            Ok((next, RoutingDecisionKind::LooseRoute, None))
+            Ok((repeat_hop(next, rtx_hit.as_ref()), RoutingDecisionKind::LooseRoute, None))
         } else if c.worker_outbound {
             let target = self.request_uri_target(req, arrival, &c).await;
+            let target = target.map(|t| repeat_hop(t, rtx_hit.as_ref()));
             target.map(|t| (t, RoutingDecisionKind::WorkerOutbound, None))
         } else if let Some(cookie) = &c.cookie {
             self.cookie_target(msg, req, arrival, cookie, rtx_hit.as_ref()).await
@@ -269,6 +291,7 @@ impl ProxyCore {
 
         // ADR-0050 §4
         let went = rtx_hit.as_ref().map_or_else(|| target.clone(), |found| found.target.clone());
+        let mut memo_keys = Vec::with_capacity(2);
         if method != Method::Cancel {
             self.cancel_lru.remember(
                 &rtx_key,
@@ -281,6 +304,7 @@ impl ProxyCore {
                 },
                 Lifetime::Retransmission,
             );
+            memo_keys.push(rtx_key);
         }
 
         if method == Method::Invite {
@@ -297,10 +321,12 @@ impl ProxyCore {
             };
             self.cancel_lru.remember(&key, entry, Lifetime::InviteTransaction);
             self.cancel_lru.publish(&self.metrics);
+            memo_keys.push(key);
         }
 
         let Ok(bytes) = draft.freeze_bytes() else { return self.drop_unforwardable() };
-        let refused = self.send_to(&bytes, &target, egress).await;
+        let on_sent = self.settle_on_send(&target, memo_keys);
+        let refused = self.send_to(&bytes, &target, egress, on_sent).await;
         if refused == Some(sip_net::SendErrorKind::MessageTooLong) {
             return self.reply_too_large(req, arrival).await;
         }

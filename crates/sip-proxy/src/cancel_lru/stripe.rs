@@ -6,6 +6,7 @@
 
 use super::pool::{Change, Pool};
 use super::{CancelEntry, Lifetime, MemoBounds};
+use crate::addr::ProxyAddr;
 
 pub(super) struct Stripe {
     invite: Pool,
@@ -73,6 +74,19 @@ impl Stripe {
         let lifetime = Lifetime::Retransmission;
         self.insert(key, entry.clone(), lifetime, now_ms, change);
         Some(entry)
+    }
+
+    /// The entry under `key`, in whichever pool holds it, while it targets
+    /// `from`, targets `to` ([`Pool::retarget`]).
+    pub(super) fn retarget(
+        &mut self,
+        key: &str,
+        from: &ProxyAddr,
+        to: &ProxyAddr,
+        change: &mut Change,
+    ) {
+        self.invite.retarget(key, from, to, change);
+        self.retransmission.retarget(key, from, to, change);
     }
 
     pub(super) fn get(

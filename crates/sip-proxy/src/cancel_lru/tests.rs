@@ -202,6 +202,35 @@ async fn a_rewrite_refreshes_one_entry() {
     assert_eq!(lru.bytes(), 0, "nothing is accounted once the table is empty");
 }
 
+/// An entry aimed at a name settles on the address its send left for, in
+/// place: its expiry stays, its bytes are those of the settled entry, and an
+/// entry aimed elsewhere is left alone.
+#[tokio::test(start_paused = true)]
+async fn a_named_entry_settles_on_its_address_and_keeps_its_expiry() {
+    let name = ProxyAddr::new("a-long-peer-name.example.net", 5060);
+    let named = CancelEntry { target: name.clone(), ..entry("b") };
+    let lru = one_stripe(8, usize::MAX);
+    lru.remember(&key("named"), named.clone(), Lifetime::Retransmission);
+    lru.remember(&key("literal"), entry("b"), Lifetime::Retransmission);
+    tokio::time::advance(std::time::Duration::from_millis(RTX_ENTRY_TTL_MS / 2)).await;
+
+    let sent_to: SocketAddr = "192.0.2.1:5060".parse().unwrap();
+    lru.settle_name(&key("named"), &name, sent_to);
+    lru.settle_name(&key("literal"), &name, sent_to);
+
+    let settled = CancelEntry { target: ProxyAddr::from(sent_to), ..named };
+    assert_eq!(lru.lookup(&key("named")), Some(settled.clone()));
+    assert_eq!(lru.lookup(&key("literal")), Some(entry("b")), "an entry aimed elsewhere stays");
+    let fresh = one_stripe(8, usize::MAX);
+    fresh.remember(&key("named"), settled, Lifetime::Retransmission);
+    fresh.remember(&key("literal"), entry("b"), Lifetime::Retransmission);
+    assert_eq!(lru.bytes(), fresh.bytes(), "the settled entry's bytes, as written");
+
+    tokio::time::advance(std::time::Duration::from_millis(RTX_ENTRY_TTL_MS / 2)).await;
+    assert_eq!(lru.sweep_expired().removed, 2, "the expiry of the first write");
+    assert_eq!(lru.bytes(), 0);
+}
+
 /// An expiry pass looks at the entries that expired and at the one
 /// entry per stripe that ends it, whatever the size of the table.
 #[tokio::test(start_paused = true)]

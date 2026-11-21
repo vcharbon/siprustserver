@@ -17,7 +17,8 @@
 //! The cache has a positive TTL, a negative TTL and a size cap. A packet that
 //! races an in-flight resolve for its name waits for it, behind the packets
 //! already waiting, and leaves in arrival order to the address the resolve
-//! found. The wait is bounded per name (`max_waiting_per_name`); a packet past
+//! found, telling its sender that address first ([`OnSent`]), as a cache hit
+//! does. The wait is bounded per name (`max_waiting_per_name`); a packet past
 //! it, or one racing a lookup already past its bound, is dropped
 //! (`dropped_in_flight`). Packets waiting on a resolve that fails are each
 //! counted under its outcome.
@@ -54,6 +55,16 @@ use lookup::{resolution_candidates, resolve_first};
 pub use lookup::{HostResolver, SystemResolver};
 pub(crate) use outcomes::{outcome, refresh_outcome};
 
+/// Told the address a packet to a name is handed to the socket for, before
+/// it is; never told for a packet that does not leave.
+pub type OnSent = Arc<dyn Fn(SocketAddr) + Send + Sync>;
+
+/// A packet waiting on its name's resolve.
+struct Waiting {
+    bytes: Vec<u8>,
+    on_sent: Option<OnSent>,
+}
+
 struct Inner {
     endpoint: Arc<dyn UdpEndpoint>,
     resolver: Arc<dyn HostResolver>,
@@ -61,7 +72,7 @@ struct Inner {
     /// Names with a resolve task currently running — the single-flight set —
     /// each with the packets waiting on it in arrival order; `None` once the
     /// lookup passed its bound, when no packet waits on it any more.
-    in_flight: Mutex<HashMap<String, Option<Vec<Vec<u8>>>>>,
+    in_flight: Mutex<HashMap<String, Option<Vec<Waiting>>>>,
     /// Names pinned by [`NamedForwarder::prewarm`] — refreshed every cycle
     /// regardless of use (permanently warm).
     pinned: Mutex<HashSet<String>>,
@@ -95,20 +106,32 @@ enum Join {
 }
 
 impl Inner {
-    /// Send `bytes` to `dst` now, counting a refusal and returning its kind.
-    async fn send_inline(&self, bytes: &[u8], dst: SocketAddr) -> Option<SendErrorKind> {
+    /// Send `bytes` to `dst` now, `on_sent` told first, counting a refusal and
+    /// returning its kind.
+    async fn send_inline(
+        &self,
+        bytes: &[u8],
+        dst: SocketAddr,
+        on_sent: Option<&OnSent>,
+    ) -> Option<SendErrorKind> {
+        if let Some(on_sent) = on_sent {
+            on_sent(dst);
+        }
         let refused = self.endpoint.send_to(bytes, dst).await.err()?;
         self.metrics.record_send_failure();
         Some(refused.kind)
     }
 
-    /// Join `bytes` (a packet for the name `key`, or a refresh with none) to
-    /// that name's resolve: claim one when none runs and the in-flight cap
-    /// allows, else wait on the running one within the per-name bound. A
-    /// packet finding no resolve reads the cache again first: a resolve
-    /// publishes its outcome and frees its slot in one step under this lock
-    /// ([`release`](Self::release)), so the packet sees one or the other.
-    fn join(&self, key: &str, bytes: Option<&[u8]>) -> Join {
+    /// Join `bytes` (a packet for the name `key`, told where it leaves for by
+    /// `on_sent`, or a refresh with none) to that name's resolve: claim one
+    /// when none runs and the in-flight cap allows, else wait on the running
+    /// one within the per-name bound. A packet finding no resolve reads the
+    /// cache again first: a resolve publishes its outcome and frees its slot
+    /// in one step under this lock ([`release`](Self::release)), so the
+    /// packet sees one or the other.
+    fn join(&self, key: &str, bytes: Option<&[u8]>, on_sent: Option<&OnSent>) -> Join {
+        let waiting_for =
+            |bytes: &[u8]| Waiting { bytes: bytes.to_vec(), on_sent: on_sent.cloned() };
         let mut in_flight = locked(&self.in_flight, RESOLVER_IN_FLIGHT);
         if bytes.is_some() && !in_flight.contains_key(key) {
             match self.cache.lookup(key) {
@@ -123,13 +146,13 @@ impl Inner {
                 if waiting.len() >= self.cache.cfg.max_waiting_per_name {
                     return Join::Refused;
                 }
-                waiting.extend(bytes.map(<[u8]>::to_vec));
+                waiting.extend(bytes.map(waiting_for));
                 Join::Waiting
             }
             Some(_) => Join::Refused,
             None if at_cap => Join::Refused,
             None => {
-                let first = bytes.map(<[u8]>::to_vec).into_iter().collect();
+                let first = bytes.map(waiting_for).into_iter().collect();
                 in_flight.insert(key.to_string(), Some(first));
                 Join::Claimed
             }
@@ -148,8 +171,9 @@ impl Inner {
     }
 
     /// Settle the packets waiting on `target`'s resolve, then free its slot:
-    /// each is sent to `resolved` in arrival order, or counted
-    /// `resolve_failed` without one, packets joining meanwhile included. Once
+    /// each is sent to `resolved` in arrival order, its `on_sent` told first,
+    /// or counted `resolve_failed` without one, packets joining meanwhile
+    /// included. Once
     /// the wait is empty the outcome is published (when `publish`) and the
     /// slot freed in one step under the in-flight lock, so no later packet
     /// overtakes a waiting one and none starts a second lookup in between.
@@ -176,12 +200,15 @@ impl Inner {
                 }
                 waiting
             };
-            for bytes in waiting {
+            for Waiting { bytes, on_sent } in waiting {
                 let Some(dst) = resolved else {
                     self.metrics.record_named_send(outcome::RESOLVE_FAILED);
                     continue;
                 };
                 self.metrics.record_named_send(outcome::RESOLVED);
+                if let Some(on_sent) = on_sent {
+                    on_sent(dst);
+                }
                 if self.endpoint.send_to(&bytes, dst).await.is_err() {
                     self.metrics.record_send_failure();
                 }
@@ -294,7 +321,7 @@ impl Inner {
         fail: &'static str,
     ) {
         let key = target.to_string();
-        if !matches!(self.join(&key, None), Join::Claimed) {
+        if !matches!(self.join(&key, None, None), Join::Claimed) {
             self.arm_refresh(target);
             return;
         }
@@ -377,25 +404,31 @@ impl NamedForwarder {
 
     /// Send `bytes` to a named target. Cache hits go out inline; a miss spawns
     /// a single-flight resolve-then-send task, or waits on the one running, so
-    /// the caller (the recv loop) never waits on DNS. Every refusal is counted;
-    /// the kind of one the socket answered inline is returned, and a send the
-    /// resolve makes later returns `None`.
-    pub async fn send(&self, bytes: &[u8], target: &ProxyAddr) -> Option<SendErrorKind> {
+    /// the caller (the recv loop) never waits on DNS. `on_sent` is told the
+    /// address the packet leaves for, before it does, inline or from the
+    /// resolve. Every refusal is counted; the kind of one the socket answered
+    /// inline is returned, and a send the resolve makes later returns `None`.
+    pub async fn send(
+        &self,
+        bytes: &[u8],
+        target: &ProxyAddr,
+        on_sent: Option<OnSent>,
+    ) -> Option<SendErrorKind> {
         let inner = &self.0;
         let key = target.to_string();
         match inner.cache.lookup(&key) {
             CacheLookup::Hit(dst) => {
                 inner.metrics.record_named_send(outcome::CACHED);
-                return inner.send_inline(bytes, dst).await;
+                return inner.send_inline(bytes, dst, on_sent.as_ref()).await;
             }
             CacheLookup::NegativeHit => {
                 inner.metrics.record_named_send(outcome::DROPPED_NEGATIVE);
             }
-            CacheLookup::Miss => match inner.join(&key, Some(bytes)) {
+            CacheLookup::Miss => match inner.join(&key, Some(bytes), on_sent.as_ref()) {
                 Join::Waiting => {}
                 Join::Cached(dst) => {
                     inner.metrics.record_named_send(outcome::CACHED);
-                    return inner.send_inline(bytes, dst).await;
+                    return inner.send_inline(bytes, dst, on_sent.as_ref()).await;
                 }
                 Join::Negative => inner.metrics.record_named_send(outcome::DROPPED_NEGATIVE),
                 Join::Refused => inner.metrics.record_named_send(outcome::DROPPED_IN_FLIGHT),
