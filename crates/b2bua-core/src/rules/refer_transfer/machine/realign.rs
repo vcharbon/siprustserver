@@ -144,27 +144,65 @@ pub(super) fn c_realign_timeout() -> RuleDefinition {
         ],
         matcher: Match::timer()
             .timer_type(call::TimerType::ReferReinviteAnswer),
+        handle: c_realign_rollback,
+    }
+}
+
+/// transfer-c-realign-txn-timeout — the c-realign re-INVITE's client
+/// transaction gave up (Timer B, or the INVITE bound after a provisional)
+/// → the same rollback as its watchdog. C does not carry the call before the
+/// merge, so the default would end C's dialog alone; the transfer machine
+/// owns that failure.
+pub(super) fn c_realign_txn_timeout() -> RuleDefinition {
+    sm_rule! {
+        id: "transfer-c-realign-txn-timeout",
+        machine: TRANSFER_MACHINE,
+        active: [ Phase::CRealigning ],
+        transitions: [],
+        effects: [
+            Effect::GuardTimer { timer: call::TimerType::ReferReinviteAnswer, scope: call::TimerScopeKind::Leg, label: "cancel the re-INVITE watchdog" },
+            Effect::GuardTimer { timer: call::TimerType::ReferOverallSafety, scope: call::TimerScopeKind::Call, label: "cancel overall-safety" },
+            Effect::LifecycleCommand { label: "terminate (c-realign timeout rollback)" },
+        ],
+        matcher: Match::timeout().filter(|ctx| {
+            ctx.timeout_method() == Some("INVITE")
+                && state(ctx).and_then(|s| s.c_leg_id.as_deref()) == Some(ctx.source_leg_id)
+        }),
         handle: |ctx| {
-            let st = state(ctx)?.clone();
-            let mut actions = vec![RuleAction::cancel(TimerKey::call(
-                call::TimerType::ReferOverallSafety,
-            ))];
-            if let Some(c_leg_id) = st.c_leg_id.clone() {
-                actions.push(RuleAction::AddCdrEvent {
-                    event_type: CdrEventType::Timeout,
-                    leg_id: c_leg_id,
-                    status_code: None,
-                    reason: Some("transfer-rollback-c-realign".to_string()),
-                });
-            }
-            actions.push(RuleAction::BeginTermination {
-                reason: None,
-                cause: TerminationCause::Timeout(TimeoutKind::NoAnswer),
-                by_leg: st.c_leg_id.clone(),
-            });
-            ok(actions)
+            let mut result = c_realign_rollback(ctx)?;
+            result.actions.insert(
+                0,
+                RuleAction::cancel(TimerKey::leg(
+                    call::TimerType::ReferReinviteAnswer,
+                    ctx.source_leg_id,
+                )),
+            );
+            Some(result)
         },
     }
+}
+
+/// The c-realign rollback: cancel the overall-safety timer, record C's
+/// timeout and end the call (A, B and C are BYE'd).
+fn c_realign_rollback(
+    ctx: &b2bua_sdk::model::RuleContext,
+) -> Option<b2bua_sdk::model::RuleHandleResult> {
+    let st = state(ctx)?.clone();
+    let mut actions = vec![RuleAction::cancel(TimerKey::call(call::TimerType::ReferOverallSafety))];
+    if let Some(c_leg_id) = st.c_leg_id.clone() {
+        actions.push(RuleAction::AddCdrEvent {
+            event_type: CdrEventType::Timeout,
+            leg_id: c_leg_id,
+            status_code: None,
+            reason: Some("transfer-rollback-c-realign".to_string()),
+        });
+    }
+    actions.push(RuleAction::BeginTermination {
+        reason: None,
+        cause: TerminationCause::Timeout(TimeoutKind::NoAnswer),
+        by_leg: st.c_leg_id.clone(),
+    });
+    ok(actions)
 }
 
 /// transfer-a-realign-200 — A answers the a-realign re-INVITE (200) →

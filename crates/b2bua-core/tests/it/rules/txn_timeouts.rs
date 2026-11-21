@@ -233,17 +233,46 @@ fn an_own_info_timeout_ends_the_session() {
     );
 }
 
-/// A relayed request's timeout is the relayed exchange's: its record is
-/// settled with no 408 to the originator (RFC 4320 §4.2) and the session
-/// stands (RFC 5057 §5.2), whatever the method.
+/// A relayed request's timeout reads as an own request's would, its
+/// originator sent no 408 (RFC 4320 §4.2): on the caller's leg, which carries
+/// the call, a request riding the dialog ends the call (RFC 3261 §12.2.1.2),
+/// one of a subscription usage ends nothing more (RFC 5057 §5.2), a PRACK its
+/// transaction alone.
 #[test]
-fn a_relayed_request_timeout_leaves_the_call() {
-    for method in ["NOTIFY", "INFO", "UPDATE", "MESSAGE", "OPTIONS", "REFER", "PRACK"] {
+fn a_relayed_request_timeout_reads_by_its_method() {
+    for method in ["INFO", "UPDATE", "MESSAGE", "OPTIONS"] {
+        let call = answered_call(method, 7, call::RequestOrigin::Relayed);
+        let (rule, actions) = handled(&call, "a", method, 7, None);
+        assert_eq!(rule, "handle-timeout");
+        assert!(
+            matches!(
+                actions.as_slice(),
+                [RuleAction::BeginTermination {
+                    cause: TerminationCause::Timeout(call::TimeoutKind::Transaction),
+                    ..
+                }]
+            ),
+            "{method}: {actions:?}",
+        );
+    }
+    for method in ["NOTIFY", "SUBSCRIBE", "REFER", "PRACK"] {
         let call = answered_call(method, 7, call::RequestOrigin::Relayed);
         let (rule, actions) = handled(&call, "a", method, 7, None);
         assert_eq!(rule, "handle-timeout");
         assert!(actions.is_empty(), "{method}: {actions:?}");
     }
+}
+
+/// A relayed request timing out on a leg already going away ends nothing
+/// more: the leg's own end proceeds.
+#[test]
+fn a_relayed_request_timeout_on_a_leg_going_away_ends_nothing() {
+    let mut call = answered_call("INFO", 7, call::RequestOrigin::Relayed);
+    call.state = CallModelState::Terminating;
+    end_dialogs(&mut call.a_leg, DialogState::Ending(EndingBy::Bye));
+    let (rule, actions) = handled(&call, "a", "INFO", 7, None);
+    assert_eq!(rule, "handle-timeout");
+    assert!(actions.is_empty(), "{actions:?}");
 }
 
 /// A NOTIFY of this stack timing out on a leg already ended keeps

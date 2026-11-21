@@ -144,10 +144,10 @@ async fn a_relayed_reinvite_timeout_on_a_full_per_call_queue_reaches_the_call() 
 /// alice's INFO is relayed to bob, who never answers it. While a parked call
 /// holds the only handler permit, two more INFOs fill her call's worker and
 /// queue, and the relayed INFO's Timer F expires there: its Timeout waits
-/// past the full queue, and once the permit frees the call settles the
-/// relay's record on it. The relayed exchange alone ends: no 408 reaches
-/// alice (RFC 4320 §4.2) and the session stands (RFC 5057 §5.2), so the
-/// hang-up answers no relay of that INFO.
+/// past the full queue, and once the permit frees the call reads it behind
+/// INFO 2 and 3. bob's leg carries the call, so the timeout ends it (RFC 3261
+/// §12.2.1.2): both sides are BYE'd, and no 408 reaches alice for INFO 1 (RFC
+/// 4320 §4.2).
 #[tokio::test(start_paused = true)]
 async fn a_relayed_requests_timeout_on_a_full_per_call_queue_reaches_the_call() {
     let s = one_permit_one_deep_with("b2bua-info-timeout-queue-full", |c| {
@@ -164,35 +164,31 @@ async fn a_relayed_requests_timeout_on_a_full_per_call_queue_reaches_the_call() 
 
     let mut parked = carol.invite(&s.bob).with_sdp(OFFER_SDP).through(s.b2bua.addr).send().await;
     s.h.advance(Duration::from_millis(300)).await;
-    let mut info2 = dialog.send_request(InDialogMethod::Info).send().await;
+    let _info2 = dialog.send_request(InDialogMethod::Info).send().await;
     s.h.advance(Duration::from_millis(300)).await;
-    let mut info3 = dialog.send_request(InDialogMethod::Info).send().await;
+    let _info3 = dialog.send_request(InDialogMethod::Info).send().await;
     s.h.advance(Duration::from_secs(33)).await;
     assert_eq!(s.b2bua.metrics().queue_drops_total(), 0, "the Timeout is not dropped");
     assert_eq!(s.b2bua.metrics().past_bound_total(), 1, "it waits past the full queue");
     s.h.advance(Duration::from_secs(6)).await;
 
     // The permit frees: INFO 2 and 3 are relayed, then the Timeout, which
-    // settles the first INFO's relay and leaves the call up.
+    // ends the call.
     parked.expect(503).await;
     for _ in 0..2 {
         s.bob.receive("INFO").await.respond(200, "OK").await;
     }
-    info2.expect(200).await;
-    info3.expect(200).await;
-    s.h.advance(Duration::from_secs(1)).await;
-    assert_eq!(s.b2bua.active_calls(), 1, "the relay's timeout leaves the call up");
-
-    s.hangup(&mut dialog).await;
+    s.alice.receive("BYE").await.respond(200, "OK").await;
+    s.bob.receive("BYE").await.respond(200, "OK").await;
     settle_until(|| s.b2bua.is_reaped()).await;
-    let info_finals =
+    let info1_finals =
         s.h.snapshot_report()
             .entries()
             .iter()
             .filter(|e| e.to == s.alice.addr() && e.raw.starts_with(b"SIP/2.0"))
-            .filter(|e| String::from_utf8_lossy(&e.raw).contains(" INFO\r\n"))
+            .filter(|e| String::from_utf8_lossy(&e.raw).contains("CSeq: 2 INFO\r\n"))
             .count();
-    assert_eq!(info_finals, 2, "INFO 2 and 3 are answered; the timed-out INFO 1 never is");
+    assert_eq!(info1_finals, 0, "the timed-out INFO 1 is never answered");
     s.b2bua.assert_fully_reaped();
     let _ = s.finish().await;
 }

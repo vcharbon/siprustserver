@@ -40,7 +40,7 @@
 use b2bua_sdk::rules::{
     leg_kind, AttemptCause, AttemptOpening, Body, CdrEventType, Direction, Effect, LegEnd, LegKind,
     LegState, Match, Method, RouteAnswer, RuleAction, RuleCall, RuleContext, RuleHandleResult,
-    Terminal, TerminationCause,
+    Terminal, TerminationCause, TimeoutKind,
 };
 use b2bua_sdk::{define_service, sm_rule};
 use serde::{Deserialize, Serialize};
@@ -259,6 +259,24 @@ fn on_mscml_failed(ctx: &RuleContext) -> Option<RuleHandleResult> {
     ])
 }
 
+/// @Announcing — the MRF never answered the MSCML `<play>` INFO (its Timer
+/// F): the announcement cannot play. The media leg carries nothing of the
+/// call, so the core default would end that leg alone and leave the caller
+/// ringing; the caller, who saw only a `183` early dialog, is answered 504
+/// (RFC 3261 §21.5.5: the media server did not answer in time) and the call
+/// terminates, the confirmed media leg BYE'd.
+fn on_play_timeout(ctx: &RuleContext) -> Option<RuleHandleResult> {
+    let media = media_leg_id(&ctx.call)?;
+    ok(vec![
+        RuleAction::RelayFailureToALeg { status: 504, reason: "Server Time-out".to_string() },
+        RuleAction::BeginTermination {
+            reason: Some("announcement-mrf-timeout".to_string()),
+            cause: TerminationCause::Timeout(TimeoutKind::Transaction),
+            by_leg: Some(media),
+        },
+    ])
+}
+
 /// @OfferingMrf/@Announcing — the media leg failed (MRF rejected/timed out).
 /// Terminate the call cleanly (the one-hop service → global command).
 fn on_media_failure(ctx: &RuleContext) -> Option<RuleHandleResult> {
@@ -388,6 +406,20 @@ define_service! {
                         && ctx.request().is_some_and(mscml::is_failure_response)
                 }),
             handle: on_mscml_failed,
+        },
+        // The MRF never answered the <play> INFO → 504 to the caller, terminate.
+        sm_rule! {
+            id: "announcement-play-timeout",
+            machine: MACHINE,
+            active: [ State::Announcing ],
+            transitions: [ State::Announcing => Terminal ],
+            effects: [
+                Effect::Relay { label: "504 → A (the MRF never answered the play INFO)" },
+                Effect::LifecycleCommand { label: "terminate (MRF timeout)" },
+            ],
+            matcher: Match::timeout()
+                .filter(|ctx| on_media_leg(ctx) && ctx.timeout_method() == Some("INFO")),
+            handle: on_play_timeout,
         },
         // The media leg failed while offering/announcing → terminate the call.
         sm_rule! {

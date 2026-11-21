@@ -7,7 +7,6 @@
 //! [`super::compose`].
 
 use call::helpers::{PrackDisposition, RAckTokens};
-use call::TxnTimeoutKind;
 use call::{
     ByeDisposition, CSeq, CallModelState, CdrEventType, DialogState, Direction, LegDisposition,
     LegState, Obligation, RSeq, TerminationCause, TimeoutKind, TimerKey, TimerType,
@@ -19,12 +18,9 @@ use b2bua_sdk::model::{
     LegEnd, Match, MessageTransform, RuleAction, RuleCall, RuleContext, RuleDefinition,
     RuleHandleResult, TimerDelay, CORE_LAYER,
 };
-use b2bua_sdk::provisional::{
-    absorbed_provisional_actions, originator_final_sent, shown_to_no_one,
-};
+use b2bua_sdk::provisional::{absorbed_provisional_actions, shown_to_no_one};
 
-use super::request_timeouts::{going_away_timeout, record_timeout_actions};
-use super::straggler::{fork_straggler, straggler_release, straggler_release_timeout};
+use super::straggler::{fork_straggler, straggler_release};
 
 /// A CORE_LAYER rule.
 pub(super) fn rule(
@@ -834,103 +830,7 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
             });
             ok(actions)
         }),
-        rule("handle-timeout", &[], Match::timeout(), |ctx| {
-            // The BYE that released a fork straggler times out the release's
-            // alone (§15.1.1): the winning dialog on the leg never reads it.
-            if straggler_release_timeout(ctx) {
-                return ok(vec![]);
-            }
-            // A request record's timeout reads by the record's origin and the
-            // method table (ADR-0055 §2).
-            if let Some(record) = ctx.timed_out_record() {
-                return ok(record_timeout_actions(ctx, record));
-            }
-            // A **pending b-leg INVITE** transaction timeout (Timer B / the long
-            // INVITE backstop) on a failover-capable call is a failure the
-            // decision backend must get a shot at — the dead-gateway reroute is
-            // the classic failover case. Mirror the
-            // `no-answer` shape: record the timeout, destroy the failed leg
-            // (its CANCEL meets the transaction still open: sent if the callee
-            // answered a provisional, held for one otherwise, §9.1), and let
-            // `call-failure-result` drive the outcome.
-            let timed_out_invite = ctx.timeout_method().map(|m| m == "INVITE").unwrap_or(false);
-            let pending_b_leg = ctx.source_leg().is_some_and(|l| {
-                l.leg_id != ctx.call.a_leg().leg_id
-                    && matches!(l.state(), LegState::Trying | LegState::Early)
-            });
-            // A leg already going away (caller-CANCELed → `Cancelling`, its own
-            // state `Terminated`, or the whole call `Terminating`) makes no
-            // forward progress on its transaction timeout: no /call/failure
-            // consult, and above all no `BeginTermination`, which re-schedules
-            // `TerminatingTimeout` and slides the safety backstop a further
-            // `TERMINATING_TIMEOUT_MS` out on a call that is already tearing
-            // down. The dead transaction resolves the leg locally instead
-            // (`TerminateLeg` clears `Cancelling`), letting the deferred
-            // termination finalize on the deadline it already has.
-            if let Some(leg) = ctx.source_leg() {
-                if call::helpers::leg_is_going_away(ctx.call.state(), leg) {
-                    return ok(going_away_timeout(ctx, leg));
-                }
-            }
-            if timed_out_invite && pending_b_leg {
-                if let Some(cbctx) = ctx.call.callback_context() {
-                    let leg = ctx.source_leg_id.to_string();
-                    // Which timeout fired rides beside the origin so the
-                    // decision service can route a dead hop ("response":
-                    // nothing answered) apart from a callee that rang and
-                    // went silent ("transaction").
-                    let timeout_kind = match ctx.timeout_kind() {
-                        Some(TxnTimeoutKind::Response) => "response",
-                        Some(TxnTimeoutKind::Transaction) | None => "transaction",
-                    };
-                    return ok(vec![
-                        RuleAction::AddCdrEvent {
-                            event_type: CdrEventType::Timeout,
-                            leg_id: leg.clone(),
-                            status_code: None,
-                            reason: Some("transaction_timeout".into()),
-                        },
-                        RuleAction::DestroyLeg { leg_id: leg.clone(), headers: vec![] },
-                        // A blackholed hop drew no final: this consult states an
-                        // empty relayable image, so an earlier attempt's headers
-                        // cannot answer it.
-                        RuleAction::MergeCallExt {
-                            ext: crate::rules::relay::failure_headers_ext(
-                                None,
-                                ctx.call.a_leg_invite(),
-                                ctx.config,
-                            ),
-                        },
-                        RuleAction::FailureAsyncHttp {
-                            request: serde_json::json!({
-                                "callback_context": cbctx,
-                                "origin": "transaction_timeout",
-                                "timeout_kind": timeout_kind,
-                                "failed_leg_id": leg,
-                            }),
-                        },
-                    ]);
-                }
-            }
-            // A caller whose callee's INVITE gave up is answered in this
-            // turn, before the CANCELed leg resolves (RFC 3261 §9.1 lets that
-            // wait 64·T1), as the failure consult's let-stand path answers it.
-            let mut actions = Vec::new();
-            if timed_out_invite && pending_b_leg && !originator_final_sent(&ctx.call) {
-                actions.push(super::failover_rules::timeout_final(
-                    ctx.timeout_kind() == Some(TxnTimeoutKind::Response),
-                ));
-            }
-            actions.push(RuleAction::BeginTermination {
-                reason: Some("timeout".into()),
-                cause: TerminationCause::Timeout(TimeoutKind::Transaction),
-                by_leg: Some(ctx.source_leg_id.to_string()),
-            });
-            ok(actions)
-        })
-        // Teardown rule: on a terminating call the dead transaction still
-        // resolves its leg.
-        .runs_while_terminating(),
+        super::request_timeouts::handle_timeout(),
         // ── timers ──────────────────────────────────────────────────────────
         // The three setup/duration deadlines are teardown rules: on a
         // terminating call they run to scrub their spent ledger entry.

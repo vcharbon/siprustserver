@@ -154,6 +154,16 @@ impl<'a> RuleCall<'a> {
     pub fn all_peered_legs(&self) -> Vec<String> {
         call::helpers::all_peered_legs(self.0)
     }
+    /// Whether `leg_id` carries the call ([`call::helpers::carries_call`]): a
+    /// failure there ends the call, a failure on any other leg that leg alone.
+    pub fn carries_call(&self, leg_id: &str) -> bool {
+        call::helpers::carries_call(self.0, leg_id)
+    }
+    /// The legs that carry the call ([`call::helpers::call_carrying_legs`]),
+    /// the originator's first.
+    pub fn call_carrying_legs(&self) -> Vec<&'a str> {
+        call::helpers::call_carrying_legs(self.0)
+    }
 
     // ── admission ──────────────────────────────────────────────────────────
     /// The set the call limiter last stated it holds for the call: what a

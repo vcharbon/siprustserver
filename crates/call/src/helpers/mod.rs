@@ -105,8 +105,9 @@ pub use obligation::{
     restate_leg_invite, restate_retained, retained_for, Scope,
 };
 pub use peering::{
-    a_tag_shown, all_peered_legs, fronting_dialog, get_peer, merge_leg, note_shown,
-    relay_peer_dialog, relay_peer_dialog_ready, resolve_relay_peer, split_leg, RelayPeer,
+    a_tag_shown, all_peered_legs, call_carrying_legs, carries_call, fronting_dialog, get_peer,
+    merge_leg, note_shown, relay_peer_dialog, relay_peer_dialog_ready, resolve_relay_peer,
+    split_leg, RelayPeer,
 };
 pub use prack_disposition::{
     answerable_shown, named_by, prack_disposition, responder_dialog_carries_prack, AnswerableShown,

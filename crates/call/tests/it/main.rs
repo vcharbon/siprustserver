@@ -10,6 +10,7 @@ mod common;
 
 mod attempts;
 mod callref;
+mod carrying_legs;
 mod codec_roundtrip;
 mod compared;
 mod decode_bounds;
