@@ -219,12 +219,18 @@ def _skip_attributes(code, i):
             i += 1
 
 
+CONTINUES = re.compile(r"\s*(else\b|[.?+\-*/%&|^<>=])")
+
+
 def _next_statement(text, pos):
     """The code of the statement after `pos`, comments and literals blanked and
-    attributes skipped: up to its `;` at depth 0, or the `}` closing a block
-    it opened. An unmatched closer (the comment ends its block) gives ""."""
+    attributes skipped: up to its `;` at depth 0, or, for a statement other
+    than a `let`, the `}` closing a block it opened when no `else`, `.`, `?` or
+    operator carries it on. An unmatched closer (the comment ends its block)
+    ends it."""
     code = _without_literals(strip(text[pos:]))
     start = i = _skip_attributes(code, 0)
+    is_let = re.match(r"let\b", code[start:]) is not None
     depth = 0
     while i < len(code):
         ch = code[i]
@@ -234,7 +240,7 @@ def _next_statement(text, pos):
             if depth == 0:
                 break
             depth -= 1
-            if ch == "}" and depth == 0:
+            if ch == "}" and depth == 0 and not is_let and not CONTINUES.match(code, i + 1):
                 return code[start:i + 1]
         elif ch == ";" and depth == 0:
             return code[start:i + 1]

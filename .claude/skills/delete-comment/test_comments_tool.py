@@ -153,7 +153,7 @@ class Apply(Case):
         repo = self.repo()
         src = "fn x() {\n    // c\n    a();\n}\n"
         repo.write("src/a.rs", src)
-        for at in (0, 99):
+        for at in (0, 5, 99, None, "2"):
             with self.subTest(at=at):
                 rc, out = repo.apply([{"id": "src/a.rs:2", "action": "to-doc", "insert_before": at,
                                        "text": "/// C."}])

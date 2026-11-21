@@ -160,9 +160,9 @@ def edits_of(text, blk, row):
     if action in ("rewrite", "adr-pointer"):
         return [(cut_a, cut_b, new + "\n")]
     lines = text.split("\n")
-    at = int(row["insert_before"])
-    if not 1 <= at <= len(lines):
-        raise ValueError(f"{row['id']}: insert_before {at} is no line of the file")
+    at = row.get("insert_before")
+    if not isinstance(at, int) or not 1 <= at <= len(text.splitlines()):
+        raise ValueError(f"{row['id']}: insert_before {at!r} is no line of the file")
     pos = sum(len(l) + 1 for l in lines[:at - 1])
     return [(cut_a, cut_b, ""), (pos, pos, new + "\n")]
 
@@ -248,7 +248,7 @@ def code_of(text, config):
     formatted, ok = rustfmt(rust_comments.strip(text) + "\n", config)
     literal_ends = rust_comments.in_literal_line_ends(formatted)
     lines = formatted.split("\n")
-    return [l for n, l in enumerate(lines, 1) if l.strip() or (n - 1) in literal_ends], ok
+    return [l for n, l in enumerate(lines, 1) if l.strip() or n in literal_ends], ok
 
 
 def cmd_same_code(root, base, paths):

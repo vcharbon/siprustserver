@@ -83,7 +83,10 @@ class Rule(unittest.TestCase):
         for code in ("let v =\n        unsafe { s.get_unchecked(0) };",
                      "#[allow(unused_unsafe)]\n    unsafe { close(fd) };",
                      "let v = W { x: unsafe { s.get_unchecked(0) } };",
-                     "unsafe impl Send for X {}"):
+                     "unsafe impl Send for X {}",
+                     "let fd = if x < 0 { -1 } else { unsafe { dup(x) } };",
+                     "if a { g() } else { unsafe { h() } }",
+                     "let v = S { a: 1 }.with(unsafe { h() });"):
             with self.subTest(code=code):
                 src = f"fn f() {{\n    // SAFETY: the slice is non-empty\n    {code}\n}}\n"
                 self.assertEqual(banned_lines(src), [])
