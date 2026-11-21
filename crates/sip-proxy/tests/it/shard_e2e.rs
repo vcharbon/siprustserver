@@ -109,10 +109,29 @@ fn options(uac_port: u16, i: usize, dst: std::net::SocketAddr) -> Vec<u8> {
 /// all hash to one shard is 2⁻⁶³.
 const MAX_FLOWS: usize = 64;
 
+/// The UAC flows that send at once once each shard has received a request.
+const FLOWS: usize = 16;
+
+/// UAC `i` receives the 200 to its OPTIONS.
+async fn answered(uac: &dyn UdpEndpoint, i: usize) {
+    let pkt = timeout(Duration::from_secs(3), uac.recv())
+        .await
+        .unwrap_or_else(|_| panic!("uac-{i} never got its 200 back"))
+        .unwrap();
+    match CustomParser::new().parse(&pkt.raw) {
+        Ok(SipMessage::Response(resp)) => {
+            assert_eq!(resp.status(), 200, "uac-{i}");
+            assert_eq!(resp.call_id().as_str(), format!("shard-e2e-{i}@127.0.0.1"));
+        }
+        other => panic!("uac-{i} expected a 200 response, got {other:?}"),
+    }
+}
+
 /// The worker answers from its one socket, so all its replies form one flow
 /// and land on one shard, whichever shard forwarded each request. UAC flows
 /// open, each awaiting its 200, until each shard has received a request: one
-/// of them forwarded a request whose 200 came back through the other.
+/// of them forwarded a request whose 200 came back through the other. Then
+/// many flows send at once, and every one is answered.
 #[tokio::test]
 async fn two_shards_serve_many_flows_and_cross_shard_responses() {
     let net = RealSignalingNetwork::new();
@@ -162,30 +181,29 @@ async fn two_shards_serve_many_flows_and_cross_shard_responses() {
         tasks.push(tokio::spawn(core.run()));
     }
 
-    let parser = CustomParser::new();
     let mut uacs = Vec::new();
     while uacs.len() < MAX_FLOWS && (c0.requests() == 0 || c1.requests() == 0) {
         let i = uacs.len();
         let uac = net.bind_udp(BindUdpOpts::new("127.0.0.1:0".parse().unwrap(), 64)).await.unwrap();
         uac.send_to(&options(uac.local_addr().port(), i, proxy_addr), proxy_addr).await.unwrap();
-        let pkt = timeout(Duration::from_secs(3), uac.recv())
-            .await
-            .unwrap_or_else(|_| panic!("uac-{i} never got its 200 back"))
-            .unwrap();
-        match parser.parse(&pkt.raw) {
-            Ok(SipMessage::Response(resp)) => {
-                assert_eq!(resp.status(), 200, "uac-{i}");
-                assert_eq!(resp.call_id().as_str(), format!("shard-e2e-{i}@127.0.0.1"));
-            }
-            other => panic!("uac-{i} expected a 200 response, got {other:?}"),
-        }
+        answered(&*uac, i).await;
         uacs.push(uac);
     }
-
     let (q0, q1) = (c0.requests(), c1.requests());
     assert!(q0 > 0 && q1 > 0, "after {MAX_FLOWS} flows a shard received no request ({q0}/{q1})");
+
+    let probes = uacs.len();
+    for i in probes..probes + FLOWS {
+        let uac = net.bind_udp(BindUdpOpts::new("127.0.0.1:0".parse().unwrap(), 64)).await.unwrap();
+        uac.send_to(&options(uac.local_addr().port(), i, proxy_addr), proxy_addr).await.unwrap();
+        uacs.push(uac);
+    }
+    for (i, uac) in uacs.iter().enumerate().skip(probes) {
+        answered(&**uac, i).await;
+    }
+
     let flows = uacs.len() as u64;
-    assert_eq!(q0 + q1, flows, "each flow's request reached one shard");
+    assert_eq!(c0.requests() + c1.requests(), flows, "each flow's request reached one shard");
     assert_eq!(c0.received() + c1.received(), flows * 2, "each request and its 200, no drops");
 
     for t in tasks {
