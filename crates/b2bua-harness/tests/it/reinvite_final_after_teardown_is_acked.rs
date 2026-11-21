@@ -23,6 +23,9 @@
 //!       200(BYE), the call is reaped → bob 487(re-INVITE) → the SUT's ACK on
 //!       the 487's branch
 //!   a_2xx_…                the 2xx crossing the CANCEL, ACKed on a fresh branch
+//!   an_offer_in_a_2xx_…    the re-INVITE carried no offer, so the 2xx crossing
+//!                          the BYE makes it and its ACK answers rejecting every
+//!                          stream (RFC 3264 §6)
 //!   a_late_487_…_timer_d   each Timer G repeat re-draws the hop ACK; purged
 //!                          at Timer D, nothing left
 //!   a_late_2xx_…_timer_m   each repeat of the 2xx re-draws the same ACK;
@@ -36,7 +39,7 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use b2bua_harness::{settle_until, B2buaSut};
-use scenario_harness::{Harness, RunReport};
+use scenario_harness::{Harness, RunReport, ServerTxn};
 use sip_txn::timers::{T1, TIMER_B, TIMER_D, TIMER_M};
 
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
@@ -160,6 +163,76 @@ async fn a_2xx_to_a_relayed_reinvite_after_the_bye_is_acked() {
     alice.drain().await;
     bob.drain().await;
     b2bua_harness::settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
+    let _report = h.finish().await;
+}
+
+const BOB_REOFFER: &str = "v=0\r\no=bob 1 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 30002 RTP/AVP 0\r\n";
+
+/// The ACK `bob` takes for `bob_reinv`'s 2xx: it echoes the re-INVITE's CSeq
+/// (§13.2.2.4) and answers the offer that 2xx made with every stream rejected
+/// (RFC 3261 §13.2.2.4: the ACK MUST carry the answer; RFC 3264 §6: port 0).
+async fn expect_rejecting_ack(bob: &scenario_harness::Agent, bob_reinv: &ServerTxn) {
+    let ack = bob.receive("ACK").await;
+    assert_eq!(
+        ack.request().cseq().seq(),
+        bob_reinv.request().cseq().seq(),
+        "§13.2.2.4: the ACK echoes the re-INVITE's CSeq",
+    );
+    let answer = String::from_utf8_lossy(ack.request().body()).to_string();
+    assert!(
+        answer.contains("m=audio 0 "),
+        "the re-INVITE carried no offer, so the ACK answers bob's with every stream \
+         rejected: {answer:?}"
+    );
+}
+
+/// The delayed-offer sibling, the call still up: alice's re-INVITE carries no
+/// offer, and bob holds the 200 that makes his until alice's BYE has reached
+/// the SUT. That 200 crosses the BYE the SUT relays and lands before bob
+/// answers it. The SUT has 487'd alice's re-INVITE and holds the CANCEL of its
+/// relayed copy for a provisional (§9.1); no answer can come from alice, yet
+/// the ACK must carry one (§13.2.2.4).
+#[tokio::test(start_paused = true)]
+async fn an_offer_in_a_2xx_crossing_the_bye_is_answered_rejecting_in_its_ack() {
+    let h = Harness::new("b2bua-reinvite-offer-2xx-crossing-bye");
+    let alice = h.agent("alice", "127.0.0.1:5065").await;
+    let bob = h.agent("bob", "127.0.0.1:5075").await;
+    let b2bua =
+        B2buaSut::route_all_to("127.0.0.1", 5075).start(&h, "b2bua", "127.0.0.1:5085").await;
+
+    let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
+    let mut uas = bob.receive("INVITE").await;
+    uas.respond(180, "Ringing").await;
+    call.expect(180).await;
+    uas.respond(200, "OK").with_sdp(ANSWER).await;
+    call.expect(200).await;
+    let mut alice_dialog = call.ack().await;
+    bob.receive("ACK").await;
+
+    // ── alice re-INVITEs offerless; bob holds his 200 ────────────────────────
+    let mut reinv = alice_dialog.reinvite(None).await;
+    let mut bob_reinv = bob.receive("INVITE").await;
+    assert!(
+        bob_reinv.request().body().is_empty(),
+        "the offerless re-INVITE reached bob as it came"
+    );
+
+    // ── alice hangs up; the BYE reaches bob while the call is still up ───────
+    let mut alice_bye = alice_dialog.bye().await;
+    alice_bye.expect(200).await;
+    reinv.expect(487).await;
+    let mut bob_bye = bob.receive("BYE").await;
+    assert_eq!(b2bua.active_calls(), 1, "the call waits on bob's BYE 200");
+
+    // ── bob's 200, sent before the BYE reached him, makes the offer ──────────
+    bob_reinv.respond(200, "OK").with_sdp(BOB_REOFFER).await;
+    expect_rejecting_ack(&bob, &bob_reinv).await;
+    bob_bye.respond(200, "OK").await;
+
+    settle_until(|| b2bua.is_reaped()).await;
+    alice.drain().await;
+    bob.drain().await;
     b2bua.assert_fully_reaped();
     let _report = h.finish().await;
 }

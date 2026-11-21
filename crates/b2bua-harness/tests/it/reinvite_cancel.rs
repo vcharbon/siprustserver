@@ -234,6 +234,69 @@ async fn cancel_reinvite_crossing_200_is_acked_and_absorbed() {
     let _report = h.finish().await;
 }
 
+/// The delayed-offer crossing: alice's re-INVITE carries no offer, she
+/// CANCELs it, and bob's 200, which makes his offer, crosses the CANCEL. Only
+/// alice can answer that offer, and the ACK must carry the answer (RFC 3261
+/// §13.2.2.4). So bob's final decides alice's: she is not answered 487 at
+/// once but given bob's 200, as she would be end to end (§9.2: a CANCEL that
+/// reaches a UAS after its final has no effect), and her ACK's answer reaches
+/// bob. Both sides then hold the same session.
+#[tokio::test(start_paused = true)]
+async fn a_delayed_offer_200_crossing_the_cancel_is_relayed_and_answered_by_the_canceller() {
+    let h = Harness::new("b2bua-reinvite-cancel-crossing-offer");
+    let alice = h.agent("alice", "127.0.0.1:5065").await;
+    let bob = h.agent("bob", "127.0.0.1:5075").await;
+    let b2bua =
+        B2buaSut::route_all_to("127.0.0.1", 5075).start(&h, "b2bua", "127.0.0.1:5085").await;
+
+    let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
+    let mut uas = bob.receive("INVITE").await;
+    uas.respond(180, "Ringing").await;
+    call.expect(180).await;
+    uas.respond(200, "OK").with_sdp(ANSWER).await;
+    call.expect(200).await;
+    let mut dialog = call.ack().await;
+    bob.receive("ACK").await;
+
+    // ── alice re-INVITEs offerless and CANCELs it; bob's 200 is on its way ──
+    let mut reinv = dialog.reinvite(None).await;
+    let reinvite_cseq = dialog.local_cseq();
+    let mut bob_reinv = bob.receive("INVITE").await;
+    assert!(
+        bob_reinv.request().body().is_empty(),
+        "the offerless re-INVITE reached bob as it came"
+    );
+    bob_reinv.respond(100, "Trying").await;
+    let mut cxl = reinv.cancel().await;
+    cxl.expect(200).await;
+    bob_reinv.respond(200, "OK").with_sdp(REANSWER).await;
+    bob.receive("CANCEL").await.respond(200, "OK").await;
+
+    // ── bob's 200 reaches alice with his offer; she answers in her ACK ───────
+    let ok = reinv.expect(200).await;
+    assert_eq!(ok.body(), REANSWER.as_bytes(), "bob's offer reaches alice");
+    dialog.ack_for(reinvite_cseq, Some(REOFFER)).await;
+    let ack = bob.receive("ACK").await;
+    assert_eq!(
+        ack.request().cseq().seq(),
+        bob_reinv.request().cseq().seq(),
+        "§13.2.2.4: the ACK echoes the re-INVITE's CSeq",
+    );
+    let answer = String::from_utf8_lossy(ack.request().body()).to_string();
+    assert!(answer.contains("m=audio 30000 "), "the ACK carries alice's answer: {answer:?}");
+
+    // ── the call is up in the renegotiated session; a BYE ends it ────────────
+    assert_eq!(b2bua.active_calls(), 1, "the crossing 200 keeps the call up");
+    let mut bye = dialog.bye().await;
+    bob.receive("BYE").await.respond(200, "OK").await;
+    bye.expect(200).await;
+    settle_until(|| b2bua.is_reaped()).await;
+    alice.drain().await;
+    bob.drain().await;
+    b2bua.assert_fully_reaped();
+    let _report = h.finish().await;
+}
+
 /// A CANCEL that arrives after the re-INVITE was answered end-to-end (bob's
 /// 200 already relayed to alice) matches a server INVITE transaction held past
 /// its final: the txn layer answers it 200 (RFC 3261 §9.2, RFC 6026 §7.1) and
