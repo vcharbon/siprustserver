@@ -21,6 +21,15 @@ use sip_net::{RealSignalingNetwork, SignalingNetwork};
 /// The store gauges the scrape reads.
 const STORE: [&str; 2] = ["b2bua_store_calls", "b2bua_store_sip_index"];
 
+/// How long the test waits for an event of the binary, and each party for
+/// its next message: far past any delay a loaded box adds to a process start
+/// or a loopback exchange, and never waited out by a passing run.
+const EVENT_WITHIN: Duration = Duration::from_secs(60);
+
+/// How long the test waits for the gauges to read 0 after the hangup: under
+/// the binary's 5 s gauge sampler period, so only a scrape-time read passes.
+const EMPTIED_WITHIN: Duration = Duration::from_secs(4);
+
 /// The running binary, killed on drop.
 struct Runner {
     child: Child,
@@ -56,7 +65,7 @@ impl Runner {
             .spawn()
             .expect("the runner starts");
         let runner = Runner { child, sip, metrics, cdr };
-        let deadline = Instant::now() + Duration::from_secs(20);
+        let deadline = Instant::now() + EVENT_WITHIN;
         while runner.scrape().is_none() {
             assert!(Instant::now() < deadline, "the runner's /metrics never answered");
             std::thread::sleep(Duration::from_millis(20));
@@ -83,23 +92,24 @@ impl Runner {
         })
     }
 
-    /// [`store`](Self::store) once both read 0, or the last read after 2 s.
+    /// [`store`](Self::store) once both read 0, or the last read after
+    /// [`EMPTIED_WITHIN`].
     fn store_emptied(&self) -> [u64; 2] {
-        settled(|| self.store(), |read| read == &[0, 0])
+        settled(EMPTIED_WITHIN, || self.store(), |read| read == &[0, 0])
     }
 
     /// The call records the binary appended, one per line, once there is
-    /// one, or the last count after 2 s.
+    /// one, or the last count after [`EVENT_WITHIN`].
     fn records(&self) -> usize {
         let count =
             || std::fs::read_to_string(&self.cdr).map(|text| text.lines().count()).unwrap_or(0);
-        settled(count, |n| *n > 0)
+        settled(EVENT_WITHIN, count, |n| *n > 0)
     }
 }
 
-/// `read()` once `done` holds for it, or the last read after 2 s.
-fn settled<T>(read: impl Fn() -> T, done: impl Fn(&T) -> bool) -> T {
-    let deadline = Instant::now() + Duration::from_secs(2);
+/// `read()` once `done` holds for it, or the last read after `within`.
+fn settled<T>(within: Duration, read: impl Fn() -> T, done: impl Fn(&T) -> bool) -> T {
+    let deadline = Instant::now() + within;
     loop {
         let value = read();
         if done(&value) || Instant::now() >= deadline {
@@ -127,7 +137,7 @@ async fn a_held_call_reads_in_the_store_gauges_at_once_and_its_hangup_empties_th
         Arc::new(RealSignalingNetwork::new()) as Arc<dyn SignalingNetwork>,
         Clock::system(),
         TransportKind::Live,
-        Duration::from_secs(5),
+        EVENT_WITHIN,
     );
     let [alice_at, bob_at] = loopback_ports::free_addresses(&[Kind::Udp, Kind::Udp])
         .expect("free loopback addresses")[..]

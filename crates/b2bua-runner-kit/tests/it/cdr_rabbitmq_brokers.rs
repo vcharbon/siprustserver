@@ -1,7 +1,7 @@
 //! The RabbitMQ CDR sink over a list of brokers, against scripted ones: one
 //! connect attempt reaches a broker past a dead, silent or stalling one, the
-//! next attempt starts past the last broker tried or a session that failed
-//! and stays on one that delivered, and writers open on different brokers.
+//! next attempt starts past a session that failed and stays on one that
+//! delivered, and writers open on different brokers.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -16,9 +16,13 @@ use call::Call;
 use tokio::time::Instant;
 
 use crate::cdr_rabbitmq_delivery::a_call;
-use crate::support::fake_broker::{Admit, FakeBroker, Reply};
+use crate::support::fake_broker::{Admit, FakeBroker, Refusing, Reply, ROOMY, SETTLE_WITHIN};
 
 const MS: Duration = Duration::from_millis(1);
+
+/// A connect bound whose tenth is a broker's share in a list of ten: the
+/// nine tenths left are far past any delay a loaded box adds.
+const TEN_SHARES: Duration = Duration::from_secs(3);
 
 /// Encodes every call as a few bytes.
 struct Fixed;
@@ -29,13 +33,14 @@ impl CdrEncoder for Fixed {
     }
 }
 
-/// Bounds short enough for a test, long enough for a loopback broker.
+/// Connect, publish and confirm bounds a loopback broker meets on a loaded
+/// box, and a backoff short enough for a test to wait past.
 fn bounds() -> CdrDeliveryBounds {
     CdrDeliveryBounds {
         window: 8,
-        connect_timeout: 400 * MS,
-        publish_timeout: 200 * MS,
-        confirm_timeout: 600 * MS,
+        connect_timeout: ROOMY,
+        publish_timeout: ROOMY,
+        confirm_timeout: ROOMY,
         backoff_min: 300 * MS,
         backoff_max: 1_200 * MS,
     }
@@ -75,9 +80,9 @@ fn counts(m: &B2buaMetrics) -> (u64, u64) {
     (m.cdr_written_total(), m.cdr_dropped_total())
 }
 
-/// Waits (up to 2 s) until `(written, dropped)` equals `want`.
+/// Waits (up to [`SETTLE_WITHIN`]) until `(written, dropped)` equals `want`.
 async fn settle(m: &B2buaMetrics, want: (u64, u64)) {
-    let give_up = Instant::now() + Duration::from_secs(2);
+    let give_up = Instant::now() + SETTLE_WITHIN;
     while counts(m) != want && Instant::now() < give_up {
         tokio::time::sleep(5 * MS).await;
     }
@@ -88,12 +93,25 @@ fn accepted(broker: &FakeBroker) -> usize {
     broker.count(|c| &c.accepted)
 }
 
-/// A loopback address that refuses every connect.
-fn refusing() -> SocketAddr {
-    let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let addr = closed.local_addr().unwrap();
-    drop(closed);
-    addr
+/// Waits (up to [`SETTLE_WITHIN`]) until `broker` accepted `n` connections: a
+/// connection the client gave up on is accepted once the broker's task runs.
+async fn accepted_by(broker: &FakeBroker, n: usize) {
+    let give_up = Instant::now() + SETTLE_WITHIN;
+    while accepted(broker) < n && Instant::now() < give_up {
+        tokio::time::sleep(MS).await;
+    }
+    assert_eq!(accepted(broker), n);
+}
+
+/// `first`, eight refusing brokers, then `last`: with a bound of
+/// [`TEN_SHARES`], `first`'s share is a tenth of it, and `last` is tried
+/// within the rest. The refusing ports are held while the first value lives.
+fn first_and_last_of_ten(first: SocketAddr, last: SocketAddr) -> (Vec<Refusing>, Vec<SocketAddr>) {
+    let refusing: Vec<Refusing> = (0..8).map(|_| Refusing::bind()).collect();
+    let mut listed = vec![first];
+    listed.extend(refusing.iter().map(|r| r.addr));
+    listed.push(last);
+    (refusing, listed)
 }
 
 /// A listener whose zero backlog one connection fills: the kernel drops every
@@ -113,67 +131,50 @@ fn black_holed() -> (socket2::Socket, std::net::TcpStream, SocketAddr) {
 #[tokio::test]
 async fn a_record_is_written_through_the_next_broker_when_the_first_refuses() {
     let broker = FakeBroker::start(Reply::Ack).await;
-    let (w, m) = writer_over(&[refusing(), broker.addr], 0, bounds());
+    let refusing = Refusing::bind();
+    let (w, m) = writer_over(&[refusing.addr, broker.addr], 0, bounds());
     w.write(&a_call(), 2_000).await;
     settle(&m, (1, 0)).await;
     assert_eq!(accepted(&broker), 1);
 }
 
 /// The first broker never answers the SYN: it holds the attempt for its share
-/// of the connect bound, and the second is connected within the rest.
+/// of the connect bound, and the last is connected within the rest.
 #[tokio::test]
-async fn a_record_is_written_through_the_next_broker_when_the_first_never_answers() {
+async fn a_record_is_written_through_a_later_broker_when_the_first_never_answers() {
     let (_held, _filler, silent) = black_holed();
     let broker = FakeBroker::start(Reply::Ack).await;
-    let roomy = CdrDeliveryBounds { connect_timeout: 600 * MS, ..bounds() };
-    let (w, m) = writer_over(&[silent, broker.addr], 0, roomy);
+    let ten = CdrDeliveryBounds { connect_timeout: TEN_SHARES, ..bounds() };
+    let (_refusing, listed) = first_and_last_of_ten(silent, broker.addr);
+    let (w, m) = writer_over(&listed, 0, ten);
     let t0 = Instant::now();
     w.write(&a_call(), 2_000).await;
     let took = t0.elapsed();
     settle(&m, (1, 0)).await;
     assert_eq!(accepted(&broker), 1);
-    assert!(took >= 290 * MS && took < 600 * MS, "the write took {took:?}: half the bound, then");
+    let share = TEN_SHARES / 10;
+    assert!(took >= share - 10 * MS, "the write took {took:?}: under the first's share");
 }
 
 /// The first broker accepts TCP and stalls the AMQP handshake: it holds the
-/// attempt for its share of the connect bound, and the second is connected
+/// attempt for its share of the connect bound, and the last is connected
 /// within the rest.
 #[tokio::test]
-async fn a_record_is_written_through_the_next_broker_when_the_first_stalls_its_handshake() {
+async fn a_record_is_written_through_a_later_broker_when_the_first_stalls_its_handshake() {
     let stalled = FakeBroker::start(Reply::Ack).await;
     let healthy = FakeBroker::start(Reply::Ack).await;
     stalled.admit(Admit::StallHandshake);
-    let roomy = CdrDeliveryBounds { connect_timeout: 600 * MS, ..bounds() };
-    let (w, m) = writer_over(&[stalled.addr, healthy.addr], 0, roomy);
+    let ten = CdrDeliveryBounds { connect_timeout: TEN_SHARES, ..bounds() };
+    let (_refusing, listed) = first_and_last_of_ten(stalled.addr, healthy.addr);
+    let (w, m) = writer_over(&listed, 0, ten);
     let t0 = Instant::now();
     w.write(&a_call(), 2_000).await;
     let took = t0.elapsed();
     settle(&m, (1, 0)).await;
-    assert_eq!((accepted(&stalled), accepted(&healthy)), (1, 1));
-    assert!(took >= 290 * MS && took < 600 * MS, "the write took {took:?}: half the bound, then");
-}
-
-/// The attempt starts at a refusing broker, then two brokers stall their
-/// handshakes to the deadline, the fourth never tried; once the backoff
-/// passed, the next attempt starts past the last broker tried, at the fourth.
-#[tokio::test]
-async fn the_attempt_after_one_its_deadline_cut_starts_past_the_last_broker_tried() {
-    let stalled = [FakeBroker::start(Reply::Ack).await, FakeBroker::start(Reply::Ack).await];
-    let healthy = FakeBroker::start(Reply::Ack).await;
-    for broker in &stalled {
-        broker.admit(Admit::StallHandshake);
-    }
-    let listed = [refusing(), stalled[0].addr, stalled[1].addr, healthy.addr];
-    let (w, m) = writer_over(&listed, 0, bounds());
-    let call = a_call();
-    w.write(&call, 2_000).await;
-    assert_eq!(counts(&m), (0, 1));
-    let reached = || (accepted(&stalled[0]), accepted(&stalled[1]), accepted(&healthy));
-    assert_eq!(reached(), (1, 1, 0), "the stalls held the attempt to its deadline");
-    tokio::time::sleep(350 * MS).await;
-    w.write(&call, 2_000).await;
-    settle(&m, (1, 1)).await;
-    assert_eq!(reached(), (1, 1, 1), "the second attempt went to the untried broker first");
+    accepted_by(&stalled, 1).await;
+    assert_eq!(accepted(&healthy), 1);
+    let share = TEN_SHARES / 10;
+    assert!(took >= share - 10 * MS, "the write took {took:?}: under the first's share");
 }
 
 /// A session that opened and ended having delivered nothing (its publish

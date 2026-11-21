@@ -72,6 +72,32 @@ enum IdleEnd {
 /// close when it reads it, and its `close-ok` may never reach the wire.
 const CLOSE_TIMEOUT: Duration = Duration::from_millis(100);
 
+/// How long a test waits for an event of the broker or the writer: far past
+/// any delay a loaded box adds, and never waited out by a passing run.
+pub const SETTLE_WITHIN: Duration = Duration::from_secs(30);
+
+/// A delivery bound no exchange with this broker reaches however loaded the
+/// box: a test shortens only the bound whose firing it states.
+pub const ROOMY: Duration = Duration::from_secs(10);
+
+/// A loopback port bound and never listened on, held while the value lives:
+/// every connect to it is refused, and no other socket of the box takes the
+/// port meanwhile.
+pub struct Refusing {
+    _socket: socket2::Socket,
+    pub addr: SocketAddr,
+}
+
+impl Refusing {
+    pub fn bind() -> Self {
+        use socket2::{Domain, Socket, Type};
+        let socket = Socket::new(Domain::IPV4, Type::STREAM, None).unwrap();
+        socket.bind(&SocketAddr::from(([127, 0, 0, 1], 0)).into()).unwrap();
+        let addr = socket.local_addr().unwrap().as_socket().unwrap();
+        Self { _socket: socket, addr }
+    }
+}
+
 /// `connection.close`'s reply code for a broker shutting down.
 pub const CONNECTION_FORCED: u16 = 320;
 /// The reply code of a clean close, which is no error.

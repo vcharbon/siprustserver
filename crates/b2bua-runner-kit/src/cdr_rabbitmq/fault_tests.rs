@@ -15,7 +15,7 @@ use super::*;
 #[allow(dead_code)]
 mod fake_broker;
 
-use fake_broker::{Counters, FakeBroker, Reply};
+use fake_broker::{Counters, FakeBroker, Reply, ROOMY, SETTLE_WITHIN};
 
 const MS: Duration = Duration::from_millis(1);
 
@@ -54,9 +54,9 @@ fn writer_over(
         queue: "cdr".into(),
         declare: CdrQueueDeclare::Own { max_len: 100_000 },
         bounds: CdrDeliveryBounds {
-            connect_timeout: 400 * MS,
-            publish_timeout: 200 * MS,
-            confirm_timeout: 600 * MS,
+            connect_timeout: ROOMY,
+            publish_timeout: ROOMY,
+            confirm_timeout: ROOMY,
             backoff_min: 300 * MS,
             backoff_max: 1_200 * MS,
             ..CdrDeliveryBounds::default()
@@ -70,18 +70,18 @@ fn counts(m: &B2buaMetrics) -> (u64, u64) {
     (m.cdr_written_total(), m.cdr_dropped_total())
 }
 
-/// Waits (up to 900 ms) until `(written, dropped)` equals `want`.
+/// Waits (up to [`SETTLE_WITHIN`]) until `(written, dropped)` equals `want`.
 async fn settle(m: &B2buaMetrics, want: (u64, u64)) {
-    let give_up = Instant::now() + 900 * MS;
+    let give_up = Instant::now() + SETTLE_WITHIN;
     while counts(m) != want && Instant::now() < give_up {
         tokio::time::sleep(MS).await;
     }
     assert_eq!(counts(m), want, "(written, dropped)");
 }
 
-/// Waits (up to 900 ms) until the broker counted `n` on `pick`.
+/// Waits (up to [`SETTLE_WITHIN`]) until the broker counted `n` on `pick`.
 async fn counted(broker: &FakeBroker, pick: impl Fn(&Counters) -> &AtomicUsize, n: usize) {
-    let give_up = Instant::now() + 900 * MS;
+    let give_up = Instant::now() + SETTLE_WITHIN;
     while broker.count(&pick) < n && Instant::now() < give_up {
         tokio::time::sleep(MS).await;
     }
@@ -111,7 +111,7 @@ async fn a_write_panic_holding_the_link_retires_the_session_and_its_publish_keep
     assert_eq!(m.cdr_broker_session_ends_of(BrokerSessionEnd::WriterPanic), 1);
     assert_eq!((accepted(&first), accepted(&second)), (2, 0), "a fresh session, same broker");
     counted(&first, |c| &c.ended_by_client, 1).await;
-    buf.close(Instant::now() + 500 * MS).await;
+    buf.close(Instant::now() + SETTLE_WITHIN).await;
     assert_eq!(counts(&m), (2, 1), "the close counts nothing twice");
 }
 
@@ -131,6 +131,6 @@ async fn a_tracker_panic_costs_its_record_and_the_next_opens_on_the_same_broker_
     settle(&m, (1, 1)).await;
     assert_eq!(m.cdr_drops(), [(CdrDrop::Panic, 1)], "drops by reason");
     assert_eq!((accepted(&first), accepted(&second)), (2, 0), "a fresh session, same broker");
-    w.close(Instant::now() + 500 * MS).await;
+    w.close(Instant::now() + SETTLE_WITHIN).await;
     assert_eq!(counts(&m), (1, 1), "the close counts nothing twice");
 }

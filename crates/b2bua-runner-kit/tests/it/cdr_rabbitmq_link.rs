@@ -8,13 +8,13 @@ use b2bua::metrics::B2buaMetrics;
 use tokio::time::Instant;
 
 use crate::cdr_rabbitmq_delivery::{a_call, bounds, settle, writer_to};
-use crate::support::fake_broker::{FakeBroker, Reply};
+use crate::support::fake_broker::{FakeBroker, Reply, SETTLE_WITHIN};
 
 const MS: Duration = Duration::from_millis(1);
 
-/// Waits (up to 900 ms) until the link gauge reads `want`.
+/// Waits (up to [`SETTLE_WITHIN`]) until the link gauge reads `want`.
 async fn connected(m: &B2buaMetrics, want: u64) {
-    let give_up = Instant::now() + 900 * MS;
+    let give_up = Instant::now() + SETTLE_WITHIN;
     while m.cdr_broker_connected() != want && Instant::now() < give_up {
         tokio::time::sleep(MS).await;
     }
@@ -42,7 +42,7 @@ async fn the_link_gauge_follows_each_session_and_its_connects_and_ends_are_count
     settle(&m, (2, 0)).await;
     assert_eq!(m.cdr_broker_connected(), 1);
     assert_eq!(m.cdr_broker_connects_of(BrokerConnect::Ok), 2);
-    w.close(Instant::now() + 500 * MS).await;
+    w.close(Instant::now() + SETTLE_WITHIN).await;
     assert_eq!(m.cdr_broker_connected(), 0, "the close ends the session");
     assert_eq!(m.cdr_broker_session_ends_of(BrokerSessionEnd::Closed), 1);
     let ends: u64 =

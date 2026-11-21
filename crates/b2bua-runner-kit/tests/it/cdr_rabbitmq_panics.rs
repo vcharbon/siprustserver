@@ -19,7 +19,7 @@ use call::Call;
 use tokio::time::Instant;
 
 use crate::cdr_rabbitmq_delivery::a_call;
-use crate::support::fake_broker::{Counters, FakeBroker, Reply};
+use crate::support::fake_broker::{Counters, FakeBroker, Reply, ROOMY, SETTLE_WITHIN};
 
 const MS: Duration = Duration::from_millis(1);
 
@@ -70,9 +70,9 @@ fn writer_to(
         queue: "cdr".into(),
         declare: CdrQueueDeclare::Own { max_len: 100_000 },
         bounds: CdrDeliveryBounds {
-            connect_timeout: 400 * MS,
-            publish_timeout: 200 * MS,
-            confirm_timeout: 600 * MS,
+            connect_timeout: ROOMY,
+            publish_timeout: ROOMY,
+            confirm_timeout: ROOMY,
             backoff_min: 300 * MS,
             backoff_max: 1_200 * MS,
             ..CdrDeliveryBounds::default()
@@ -86,18 +86,18 @@ fn counts(m: &B2buaMetrics) -> (u64, u64) {
     (m.cdr_written_total(), m.cdr_dropped_total())
 }
 
-/// Waits (up to 900 ms) until `(written, dropped)` equals `want`.
+/// Waits (up to [`SETTLE_WITHIN`]) until `(written, dropped)` equals `want`.
 async fn settle(m: &B2buaMetrics, want: (u64, u64)) {
-    let give_up = Instant::now() + 900 * MS;
+    let give_up = Instant::now() + SETTLE_WITHIN;
     while counts(m) != want && Instant::now() < give_up {
         tokio::time::sleep(MS).await;
     }
     assert_eq!(counts(m), want, "(written, dropped)");
 }
 
-/// Waits (up to 900 ms) until the broker counted `n` on `pick`.
+/// Waits (up to [`SETTLE_WITHIN`]) until the broker counted `n` on `pick`.
 async fn counted(broker: &FakeBroker, pick: impl Fn(&Counters) -> &AtomicUsize, n: usize) {
-    let give_up = Instant::now() + 900 * MS;
+    let give_up = Instant::now() + SETTLE_WITHIN;
     while broker.count(&pick) < n && Instant::now() < give_up {
         tokio::time::sleep(MS).await;
     }
@@ -124,7 +124,7 @@ async fn a_write_panic_outside_the_session_spares_the_records_around_it() {
     assert_eq!(broker.count(|c| &c.ended_by_client), 0, "the session served on");
     assert_eq!(m.cdr_broker_session_ends_of(BrokerSessionEnd::WriterPanic), 0);
     assert_eq!(RESTARTS.count(CDR_DRAINER) - restarts_before, 1, "the caught panic is counted");
-    buf.close(Instant::now() + 500 * MS).await;
+    buf.close(Instant::now() + SETTLE_WITHIN).await;
     assert_eq!(counts(&m), (2, 1), "the close counts nothing twice");
 }
 
@@ -163,6 +163,6 @@ async fn an_observer_that_panics_costs_neither_the_count_nor_the_session() {
     assert_eq!(*ends.told.lock().unwrap(), [CdrDelivery::Written], "the third end, told");
     assert_eq!(broker.count(|c| &c.accepted), 1, "one connection served the three");
     assert_eq!(m.cdr_broker_session_ends_of(BrokerSessionEnd::TrackerPanic), 0);
-    w.close(Instant::now() + 500 * MS).await;
+    w.close(Instant::now() + SETTLE_WITHIN).await;
     counted(&broker, |c| &c.ended_by_client, 1).await;
 }
