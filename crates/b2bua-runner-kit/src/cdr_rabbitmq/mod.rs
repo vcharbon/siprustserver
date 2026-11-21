@@ -4,8 +4,11 @@
 //!
 //! Contract: each record handed to `write` counts once, in `cdr_written_total`
 //! when the broker acked it on a confirm-mode channel, else in
-//! `cdr_dropped_total`. Dropped means unconfirmed, not lost: a record whose ack
-//! never arrived may still reach the queue. The writer's
+//! `cdr_dropped_total` under the [`CdrDrop`] reason of its drop site. Dropped
+//! means unconfirmed, not lost: a record whose ack never arrived may still
+//! reach the queue. The registry also counts the link: the live session
+//! (`b2bua_cdr_broker_connected`), each connect attempt's [`BrokerConnect`]
+//! outcome and each session's [`BrokerSessionEnd`] reason. The writer's
 //! [`CdrDeliveryObserver`] is told each of those ends, with the time since
 //! `write` was handed the record. `close` publishes nothing more and
 //! returns once every publish of every session is counted, by its deadline at
@@ -24,6 +27,7 @@ mod brokers;
 mod confirms;
 mod connection_watch;
 mod declaration;
+mod nack_log;
 mod resolver;
 mod session;
 mod settings;
@@ -33,17 +37,21 @@ mod tally;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use b2bua::cdr::{CdrDeliveryObserver, CdrEncoder, CdrRecord, CdrWriter, JsonRecordEncoder};
+use b2bua::cdr::{
+    BrokerConnect, BrokerSessionEnd, CdrDeliveryObserver, CdrDrop, CdrEncoder, CdrRecord,
+    CdrWriter, JsonRecordEncoder,
+};
 use b2bua::metrics::B2buaMetrics;
 use call::Call;
 use sip_clock::wall::millis_u64;
 use tokio::sync::{watch, Mutex};
 use tokio::task::JoinHandle;
+use tokio::time::error::Elapsed;
 use tokio::time::{timeout_at, Instant};
 
 use backoff::Backoff;
-use brokers::{drawn_start, Brokers};
-use session::Session;
+use brokers::{drawn_start, Brokers, Unreached};
+use session::{PublishRefused, Session};
 pub use settings::{
     CdrDeliveryBounds, CdrQueueDeclare, RabbitMqCdrSettings, MAX_DRAINER_WAIT_MS, MAX_WAIT_MS,
     MAX_WINDOW,
@@ -198,6 +206,7 @@ impl RabbitMqCdrWriter {
             let deadline = Instant::now() + self.settings.bounds.connect_timeout;
             let attempt = link.brokers.open(&self.settings, deadline, &self.tally, &self.close_by);
             let opened = timeout_at(deadline, attempt).await;
+            self.tally.metrics().bump_cdr_broker_connect(connect_outcome(&opened, deadline));
             match opened {
                 Ok(Ok(session)) => link.session = Some(session),
                 Ok(Err(e)) => {
@@ -220,6 +229,20 @@ impl RabbitMqCdrWriter {
     }
 }
 
+/// How the connect attempt bounded by `deadline` ended: timed out when the
+/// bound ran out before a session opened, even where each broker reported
+/// its own share running out, failed when every broker refused before it.
+fn connect_outcome(
+    opened: &Result<Result<Session, Unreached>, Elapsed>,
+    deadline: Instant,
+) -> BrokerConnect {
+    match opened {
+        Ok(Ok(_)) => BrokerConnect::Ok,
+        Ok(Err(_)) if Instant::now() < deadline => BrokerConnect::Failed,
+        Ok(Err(_)) | Err(_) => BrokerConnect::TimedOut,
+    }
+}
+
 #[async_trait]
 impl CdrWriter for RabbitMqCdrWriter {
     /// A record the encoder refuses is one dropped record, never a stopped
@@ -227,20 +250,24 @@ impl CdrWriter for RabbitMqCdrWriter {
     async fn write(&self, call: &Call, terminated_at: i64) {
         let handed_at = Instant::now();
         let Some(payload) = self.payload(call, terminated_at) else {
-            return self.tally.dropped(handed_at);
+            return self.tally.dropped(handed_at, CdrDrop::Encode);
         };
         let mut link = self.link.lock().await;
         if self.close_by.borrow().is_some() {
-            return self.tally.dropped(handed_at);
+            return self.tally.dropped(handed_at, CdrDrop::Closed);
         }
         let Some(session) = self.session(&mut link).await else {
-            return self.tally.dropped(handed_at);
+            return self.tally.dropped(handed_at, CdrDrop::NoBroker);
         };
         let deadline = Instant::now() + self.settings.bounds.publish_timeout;
         let published = session.publish(&self.settings.queue, &payload, handed_at, deadline);
         if let Err(refused) = published.await {
             tracing::debug!(?refused, "CDR record dropped");
-            self.tally.dropped(handed_at);
+            let why = match refused {
+                PublishRefused::WindowFull => CdrDrop::WindowFull,
+                PublishRefused::Ended => CdrDrop::PublishFailed,
+            };
+            self.tally.dropped(handed_at, why);
         }
     }
 
@@ -248,7 +275,7 @@ impl CdrWriter for RabbitMqCdrWriter {
     /// ended session's confirm tracker still counts what it was handed.
     async fn after_panic(&self) {
         if let Some(session) = &self.link.lock().await.session {
-            session.end("the writer panicked during a record");
+            session.end(BrokerSessionEnd::WriterPanic);
         }
     }
 

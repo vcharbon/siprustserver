@@ -10,6 +10,7 @@ mod support;
 
 mod cdr_rabbitmq_brokers;
 mod cdr_rabbitmq_delivery;
+mod cdr_rabbitmq_link;
 mod cdr_rabbitmq_panics;
 mod cdr_rabbitmq_real_broker;
 mod cdr_rabbitmq_runtime_drop;

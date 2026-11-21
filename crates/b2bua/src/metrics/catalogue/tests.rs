@@ -119,6 +119,46 @@ fn a_discard_site_series_carries_its_own_count() {
     assert_eq!(m.invite_discard_answered_of_total(Discard::Capped), 4);
 }
 
+/// Each CDR series carries the count of its own reason or outcome, the
+/// dropped total sums every reason, and the link gauge reads the sessions
+/// opened and not ended, never below 0.
+#[test]
+fn a_cdr_series_carries_its_own_count() {
+    use crate::cdr::{BrokerConnect, BrokerSessionEnd, CdrDrop};
+    let m = B2buaMetrics::new();
+    for (n, why) in CdrDrop::ALL.into_iter().enumerate() {
+        (0..=n).for_each(|_| m.bump_cdr_dropped(why));
+    }
+    for (n, outcome) in BrokerConnect::ALL.into_iter().enumerate() {
+        (0..=n).for_each(|_| m.bump_cdr_broker_connect(outcome));
+    }
+    (0..3).for_each(|_| m.cdr_broker_session_opened());
+    for (n, why) in BrokerSessionEnd::ALL.into_iter().enumerate().take(2) {
+        (0..=n).for_each(|_| m.cdr_broker_session_ended(why));
+    }
+    (0..2).for_each(|_| m.bump_cdr_written());
+    let text = m.prometheus_text();
+    for (n, why) in CdrDrop::ALL.into_iter().enumerate() {
+        let got = value_of(&text, &cdr::DROPPED, &[("reason", why.label())]);
+        assert_eq!(got, (n + 1).to_string(), "{why:?}");
+    }
+    assert_eq!(m.cdr_dropped_total(), (1..=12).sum::<u64>());
+    for (n, outcome) in BrokerConnect::ALL.into_iter().enumerate() {
+        let got = value_of(&text, &cdr::BROKER_CONNECTS, &[("outcome", outcome.label())]);
+        assert_eq!(got, (n + 1).to_string(), "{outcome:?}");
+    }
+    for (n, why) in BrokerSessionEnd::ALL.into_iter().enumerate() {
+        let got = value_of(&text, &cdr::BROKER_SESSION_ENDS, &[("reason", why.label())]);
+        assert_eq!(got, if n < 2 { n + 1 } else { 0 }.to_string(), "{why:?}");
+    }
+    assert_eq!(value_of(&text, &cdr::BROKER_CONNECTED, &[]), "0", "three opened, three ended");
+    assert_eq!(value_of(&text, &cdr::WRITTEN, &[]), "2");
+    m.cdr_broker_session_ended(BrokerSessionEnd::Closed);
+    assert_eq!(m.cdr_broker_connected(), 0, "an end past the opens keeps the gauge at 0");
+    m.cdr_broker_session_opened();
+    assert_eq!(m.cdr_broker_connected(), 1);
+}
+
 /// Each dispatcher counter carries its own count.
 #[test]
 fn a_core_refusal_counter_carries_its_own_count() {

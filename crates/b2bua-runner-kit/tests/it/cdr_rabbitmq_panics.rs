@@ -7,7 +7,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use b2bua::cdr::{
-    BufferedCdrWriter, CdrDelivery, CdrDeliveryObserver, CdrEncodeError, CdrEncoder, CdrWriter,
+    BrokerSessionEnd, BufferedCdrWriter, CdrDelivery, CdrDeliveryObserver, CdrDrop, CdrEncodeError,
+    CdrEncoder, CdrWriter,
 };
 use b2bua::metrics::B2buaMetrics;
 use b2bua::supervise::{CDR_DRAINER, RESTARTS};
@@ -122,8 +123,10 @@ async fn after_a_caught_write_panic_the_next_record_opens_a_fresh_session() {
     settle(&m, (2, 1)).await;
     assert_eq!(broker.count(|c| &c.accepted), 2, "the record after the panic reconnected");
     assert_eq!(RESTARTS.count(CDR_DRAINER) - restarts_before, 1, "the caught panic is counted");
+    assert_eq!(m.cdr_broker_session_ends_of(BrokerSessionEnd::WriterPanic), 1);
     buf.close(Instant::now() + 500 * MS).await;
     assert_eq!(counts(&m), (2, 1), "the close counts nothing twice");
+    assert_eq!(m.cdr_drops(), [(CdrDrop::Panic, 1)]);
 }
 
 /// The confirm tracker panics while it counts an acked record (its observer
@@ -140,6 +143,8 @@ async fn a_panic_of_the_confirm_tracker_ends_its_session_at_once_and_counts_its_
     settle(&m, (0, 1)).await;
     counted(&broker, |c| &c.ended_by_client, 1).await;
     assert_eq!(*ends.told.lock().unwrap(), vec![CdrDelivery::Dropped], "told one end");
+    assert_eq!(m.cdr_drops(), [(CdrDrop::Panic, 1)]);
+    assert_eq!(m.cdr_broker_session_ends_of(BrokerSessionEnd::TrackerPanic), 1);
     w.write(&a_call(), 2_000).await;
     settle(&m, (1, 1)).await;
     assert_eq!(broker.count(|c| &c.accepted), 2);

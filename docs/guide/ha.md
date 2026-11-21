@@ -270,7 +270,7 @@ relation and the effect of a higher or lower value.
 | `b2bua_repl_takeover_hydrated_total` | Copies turned live by a takeover. |
 | `b2bua_drain_exits_total{reason}` | How each planned exit ended. `caught_up` and `quiescent` are the transparent ones. |
 | `b2bua_clock_wall_divergence_ms` | The drift of the wall clock of the host against its monotonic clock. A step of the host clock shows here. The worker warns above 500 ms. |
-| `b2bua_cdr_dropped_total` | CDRs that a worker dropped at a full queue. |
+| `b2bua_cdr_dropped_total{reason}` | CDRs that a worker did not deliver, by reason. `close_deadline` counts the CDRs that the exit bound cut. |
 
 ## How the guarantee is proven
 

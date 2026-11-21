@@ -99,14 +99,6 @@ plain_counters! {
         "b2bua_fast_reject_terminating_total",
         "requests fast-rejected on a terminating call",
     ) => fast_reject_terminating, bump_fast_reject_terminating, fast_reject_terminating_total;
-    CDR_WRITTEN = (
-        "b2bua_cdr_written_total",
-        "CDRs the sink delivered (for a broker sink: acked by the broker)",
-    ) => cdr_written, bump_cdr_written, cdr_written_total;
-    CDR_DROPPED = (
-        "b2bua_cdr_dropped_total",
-        "CDRs dropped (submit-queue overflow, or a record the sink did not deliver)",
-    ) => cdr_dropped, bump_cdr_dropped, cdr_dropped_total;
     // A `/call/new` decision result (route or reject) that landed on a call
     // whose initial INVITE the caller already CANCELed — recorded on the call,
     // never applied: no b-leg launch, no second final on the a-leg's completed

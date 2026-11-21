@@ -27,7 +27,7 @@ use call::Call;
 
 use super::Dropped;
 use crate::abort_on_drop::AbortOnDrop;
-use crate::cdr::CdrWriter;
+use crate::cdr::{CdrDrop, CdrWriter};
 use crate::supervise::{CDR_DRAINER, RESTARTS};
 
 /// The drainer's half of the buffer: it holds no sender, so the queue ends
@@ -94,7 +94,7 @@ impl Drainer {
             if Instant::now() < deadline {
                 self.write(&call, at, &mut close_by).await;
             } else {
-                self.dropped.one();
+                self.dropped.one(CdrDrop::CloseDeadline);
             }
         }
         drop(rx);
@@ -113,14 +113,14 @@ impl Drainer {
                 self.write_panicked(call);
                 let _ = until_close(self.inner.after_panic(), close_by).await;
             }
-            None => self.dropped.one(),
+            None => self.dropped.one(CdrDrop::CloseDeadline),
         }
     }
 
-    /// The one count of a record whose write panicked: dropped, and the panic
-    /// counted under [`CDR_DRAINER`].
+    /// The one count of a record whose write panicked: dropped for
+    /// [`CdrDrop::Panic`], and the panic counted under [`CDR_DRAINER`].
     fn write_panicked(&self, call: &Call) {
-        self.dropped.one();
+        self.dropped.one(CdrDrop::Panic);
         RESTARTS.restarted(CDR_DRAINER);
         tracing::error!(
             call_ref = %call.call_ref,
@@ -138,12 +138,13 @@ impl Drainer {
     }
 
     /// The close after a run panicked in it: every record still queued is
-    /// counted dropped, `inner` closed by `deadline`, and `closed` reported.
+    /// counted dropped for [`CdrDrop::Panic`], `inner` closed by `deadline`,
+    /// and `closed` reported.
     async fn give_up(&self, deadline: Instant) {
         let mut rx = self.queue.lock().await;
         rx.close();
         while rx.try_recv().is_ok() {
-            self.dropped.one();
+            self.dropped.one(CdrDrop::Panic);
         }
         drop(rx);
         self.close_inner(deadline).await;

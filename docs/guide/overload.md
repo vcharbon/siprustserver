@@ -253,7 +253,7 @@ its count falls. With a mean call duration `T`, `L` live calls and a ceiling `C`
 | `b2bua_udp_queue_wait_ms` | The wait of the oldest datagram in the UDP input queue. |
 | `b2bua_cap_trips_total{cap}` | Calls ended for a bound. |
 | `b2bua_limiter_breaker_open`, `b2bua_limiter_uncounted_calls` | The limiter is unreachable, and how many calls run without a count. |
-| `b2bua_cdr_dropped_total` | CDRs lost at a full queue. |
+| `b2bua_cdr_dropped_total{reason}` | CDRs that a worker did not deliver. `buffer_full` counts the CDRs lost at a full queue. |
 | `b2bua_loop_stalled` | 1 while the event loop does not turn. |
 | `sip_proxy_self_external_invites_rejected_total` | New calls the proxy refused for its own load. |
 

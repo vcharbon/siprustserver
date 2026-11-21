@@ -11,8 +11,6 @@ b2bua-runner b2bua_dispatch_new_call_share_waits_total counter fixed {}
 b2bua-runner b2bua_handler_timeouts_total counter fixed {}
 b2bua-runner b2bua_force_purge_total counter fixed {}
 b2bua-runner b2bua_fast_reject_terminating_total counter fixed {}
-b2bua-runner b2bua_cdr_written_total counter fixed {}
-b2bua-runner b2bua_cdr_dropped_total counter fixed {}
 b2bua-runner b2bua_decision_dropped_cancelled_total counter fixed {}
 b2bua-runner b2bua_termination_unrecorded_total counter fixed {}
 b2bua-runner b2bua_second_final_refused_total counter fixed {}
@@ -58,6 +56,11 @@ b2bua-runner b2bua_repl_stand_down_total counter fixed {}
 b2bua-runner b2bua_repl_terminal_lost_total counter fixed {}
 b2bua-runner b2bua_repl_bootstrap_seeded_total counter fixed {}
 b2bua-runner b2bua_repl_bootstrap_stalled_total counter fixed {}
+b2bua-runner b2bua_cdr_written_total counter fixed {}
+b2bua-runner b2bua_cdr_dropped_total counter fixed {reason}
+b2bua-runner b2bua_cdr_broker_connected gauge fixed {}
+b2bua-runner b2bua_cdr_broker_connects_total counter fixed {outcome}
+b2bua-runner b2bua_cdr_broker_session_ends_total counter fixed {reason}
 b2bua-runner b2bua_call_creations_total counter fixed {}
 b2bua-runner b2bua_call_removals_total counter fixed {}
 b2bua-runner b2bua_store_poisoned_lock_recoveries_total counter fixed {lock}

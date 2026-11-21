@@ -3,8 +3,8 @@
 //! [`CdrEncoder`] (default [`JsonRecordEncoder`]), each a line of the file.
 //!
 //! Contract: each record handed to `write` counts once, in `cdr_written_total`
-//! when its line went to the file, else in `cdr_dropped_total`, the first
-//! drop said at warn; the count is the last thing a write does. A line goes
+//! when its line went to the file, else in `cdr_dropped_total` (reason
+//! `encode` or `file_write`), the first drop said at warn; the count is the last thing a write does. A line goes
 //! out in one `write_all` on a file opened for appending, so a reader of a
 //! file several runs appended to reads whole lines. The sink writes inline:
 //! `close` holds nothing.
@@ -16,7 +16,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use b2bua::cdr::{CdrEncoder, CdrRecord, CdrWriter, JsonRecordEncoder};
+use b2bua::cdr::{CdrDrop, CdrEncoder, CdrRecord, CdrWriter, JsonRecordEncoder};
 use b2bua::metrics::B2buaMetrics;
 use call::Call;
 use tokio::time::Instant;
@@ -98,12 +98,14 @@ impl CdrWriter for FileCdrWriter {
             bytes
         });
         let written = match line {
-            Ok(bytes) => (&self.file).write_all(&bytes).map_err(|e| e.to_string()),
-            Err(e) => Err(e.to_string()),
+            Ok(bytes) => {
+                (&self.file).write_all(&bytes).map_err(|e| (CdrDrop::FileWrite, e.to_string()))
+            }
+            Err(e) => Err((CdrDrop::Encode, e.to_string())),
         };
         match written {
             Ok(()) => self.metrics.bump_cdr_written(),
-            Err(refused) => {
+            Err((why, refused)) => {
                 if self.warned.swap(true, Ordering::Relaxed) {
                     tracing::debug!(%refused, file = %self.path.display(), "CDR record dropped");
                 } else {
@@ -111,10 +113,10 @@ impl CdrWriter for FileCdrWriter {
                         %refused,
                         file = %self.path.display(),
                         "CDR record dropped: the file sink refused it; later drops are counted \
-                         in cdr_dropped_total, said at debug"
+                         in b2bua_cdr_dropped_total, said at debug"
                     );
                 }
-                self.metrics.bump_cdr_dropped();
+                self.metrics.bump_cdr_dropped(why);
             }
         }
     }
@@ -202,6 +204,26 @@ mod tests {
         }
         assert_eq!(std::fs::read_to_string(&file).expect("read"), expected);
         assert_eq!((metrics.cdr_written_total(), metrics.cdr_dropped_total()), (2, 0));
+    }
+
+    struct Refuses;
+    impl CdrEncoder for Refuses {
+        fn encode(&self, _: &Call, _: i64) -> Result<Vec<u8>, b2bua::cdr::CdrEncodeError> {
+            Err("no usable record".into())
+        }
+    }
+
+    /// A record the encoder refuses writes no line and is counted dropped for
+    /// its encoding.
+    #[tokio::test]
+    async fn a_record_the_encoder_refuses_is_counted_dropped_for_its_encoding() {
+        let file = scratch("refused").join("cdr.jsonl");
+        let metrics = B2buaMetrics::new();
+        let writer = FileCdrWriter::open(&file, Arc::new(Refuses), metrics.clone()).expect("opens");
+        writer.write(&a_call(1), 2_000).await;
+        assert_eq!(std::fs::read_to_string(&file).expect("read"), "");
+        assert_eq!(metrics.cdr_written_total(), 0);
+        assert_eq!(metrics.cdr_drops(), [(CdrDrop::Encode, 1)]);
     }
 
     /// Unset or blank, no file sink is selected.
@@ -297,7 +319,8 @@ mod tests {
             writer.write(&a_call(n), 2_000).await;
         }
 
-        assert_eq!((metrics.cdr_written_total(), metrics.cdr_dropped_total()), (0, 3));
+        assert_eq!(metrics.cdr_written_total(), 0);
+        assert_eq!(metrics.cdr_drops(), [(CdrDrop::FileWrite, 3)]);
         let log = String::from_utf8(logged.0.lock().expect("the log").clone()).expect("utf-8");
         let warned: Vec<&str> = log.lines().filter(|line| line.contains("WARN")).collect();
         assert_eq!(warned.len(), 1, "{log}");

@@ -96,7 +96,8 @@ async fn the_deadline_cuts_the_close_and_counts_every_record_left_dropped() {
     buf.close(deadline).await;
     assert_eq!(Instant::now(), deadline, "the close returns at its deadline");
     assert_eq!(sink.written(), 2, "two writes fit before the deadline");
-    assert_eq!(metrics.cdr_dropped_total(), 8, "the write cut at the deadline and the queued 7");
+    let cut = [(CdrDrop::CloseDeadline, 8)];
+    assert_eq!(metrics.cdr_drops(), cut, "the write cut at the deadline and the queued 7");
     assert_eq!(buf.dropped_total(), 8);
 }
 
@@ -108,7 +109,7 @@ async fn a_write_after_the_close_is_counted_dropped() {
     buf.write(&a_call(), 3_000).await;
     tokio::time::sleep(Duration::from_millis(10)).await;
     assert_eq!(sink.written(), 1);
-    assert_eq!(metrics.cdr_dropped_total(), 1);
+    assert_eq!(metrics.cdr_drops(), [(CdrDrop::Closed, 1)]);
 }
 
 /// With the drainer held in its first write and two records queued, the
@@ -123,10 +124,12 @@ async fn a_record_that_finds_the_queue_full_is_counted_dropped() {
     for _ in 0..4 {
         buf.write(&a_call(), 2_000).await;
     }
-    assert_eq!((buf.dropped_total(), metrics.cdr_dropped_total()), (2, 2));
+    assert_eq!(buf.dropped_total(), 2);
+    assert_eq!(metrics.cdr_drops(), [(CdrDrop::BufferFull, 2)]);
     buf.close(Instant::now() + Duration::from_secs(10)).await;
     assert_eq!(sink.written(), 3);
-    assert_eq!((buf.dropped_total(), metrics.cdr_dropped_total()), (2, 2));
+    assert_eq!(buf.dropped_total(), 2);
+    assert_eq!(metrics.cdr_drops(), [(CdrDrop::BufferFull, 2)]);
 }
 
 /// A depth past the channel's permit ceiling is held to `MAX_QUEUE`: the

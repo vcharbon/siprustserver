@@ -7,6 +7,7 @@
 
 use std::sync::Arc;
 
+use b2bua::cdr::BrokerSessionEnd;
 use futures_util::StreamExt;
 use lapin::{Connection, Event};
 use tokio::task::JoinHandle;
@@ -21,7 +22,7 @@ pub(super) fn watch_connection(connection: &Connection, health: Arc<Health>) -> 
     tokio::spawn(async move {
         while let Some(event) = events.next().await {
             if let Event::Error(e) = event {
-                health.end(&format!("connection failed: {e}"));
+                health.end_on_error(BrokerSessionEnd::ConnectionLost, &e);
                 return;
             }
         }

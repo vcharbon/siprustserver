@@ -8,6 +8,7 @@
 
 pub mod capacity;
 pub mod caps;
+pub mod cdr;
 pub mod limiter;
 pub mod plain;
 pub mod readiness;
@@ -139,6 +140,11 @@ const WORKER_FAMILIES: [Family; plain::FAMILIES.len() + WORKER_REST.len()] =
     concat(plain::FAMILIES, WORKER_REST);
 
 const WORKER_REST: &[Family] = &[
+    cdr::WRITTEN,
+    cdr::DROPPED,
+    cdr::BROKER_CONNECTED,
+    cdr::BROKER_CONNECTS,
+    cdr::BROKER_SESSION_ENDS,
     worker::CALL_CREATIONS,
     worker::CALL_REMOVALS,
     shell::STORE_POISONED_LOCK_RECOVERIES,

@@ -105,7 +105,8 @@ async fn an_encode_refusal_counts_one_dropped_record_and_tells_the_observer() {
         .observed_by(ends.clone());
     w.write(&a_call(), 2_000).await;
     assert_eq!(enc.calls.load(Ordering::SeqCst), 1);
-    assert_eq!((metrics.cdr_dropped_total(), metrics.cdr_written_total()), (1, 0));
+    assert_eq!(metrics.cdr_written_total(), 0);
+    assert_eq!(metrics.cdr_drops(), [(CdrDrop::Encode, 1)]);
     assert_eq!(*ends.0.lock().unwrap(), vec![b2bua::cdr::CdrDelivery::Dropped]);
 }
 
@@ -202,8 +203,11 @@ async fn a_set_url_selects_the_broker_sink_not_the_discarding_default() {
     .expect("ok")
     .expect("a set URL must select the RabbitMQ sink");
     sink.write(&a_call(), 2_000).await;
-    assert_eq!(metrics.cdr_dropped_total(), 1, "the publish attempt must be counted");
+    let refused = [(CdrDrop::NoBroker, 1)];
+    assert_eq!(metrics.cdr_drops(), refused, "the publish attempt must be counted");
     assert_eq!(metrics.cdr_written_total(), 0);
+    assert_eq!(metrics.cdr_broker_connects_of(BrokerConnect::Failed), 1);
+    assert_eq!(metrics.cdr_broker_connected(), 0);
 }
 
 /// The sink selected with an encoder encodes through it: a refusing encoder
@@ -222,5 +226,7 @@ async fn a_sink_selected_with_an_encoder_encodes_through_it() {
     sink.write(&a_call(), 2_000).await;
     sink.write(&a_call(), 3_000).await;
     assert_eq!(enc.calls.load(Ordering::SeqCst), 2);
-    assert_eq!((metrics.cdr_dropped_total(), metrics.cdr_written_total()), (2, 0));
+    assert_eq!(metrics.cdr_written_total(), 0);
+    assert_eq!(metrics.cdr_drops(), [(CdrDrop::Encode, 2)], "refused before any connect");
+    assert_eq!(metrics.cdr_broker_connects_of(BrokerConnect::Failed), 0);
 }

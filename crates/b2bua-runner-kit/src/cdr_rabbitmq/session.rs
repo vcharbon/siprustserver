@@ -11,6 +11,8 @@ use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use amqp_connect::{connect_stream_sharing, open_over, try_by, BrokerStream, Connected};
+use b2bua::cdr::BrokerSessionEnd;
+use b2bua::metrics::B2buaMetrics;
 use lapin::{
     options::{BasicPublishOptions, ConfirmSelectOptions},
     uri::AMQPUri,
@@ -85,18 +87,51 @@ pub(super) struct Health {
     ended_at: OnceLock<Instant>,
     /// Whether the broker acked at least one publish of this session.
     pub(super) delivered: AtomicBool,
-    /// Whether a nack was already logged for this session.
-    pub(super) nack_logged: AtomicBool,
     window: Arc<Semaphore>,
     socket: Arc<SocketKill>,
+    /// The registry counting the session's open and its one end.
+    metrics: B2buaMetrics,
 }
 
 impl Health {
-    /// Ends the session: no further publish, the window closed (a publish
-    /// waiting for a slot returns), the socket shut down. Logs the first reason.
-    pub(super) fn end(&self, reason: &str) {
+    /// The health of a session just opened, counted live in `metrics` until
+    /// its first [`Health::end`].
+    fn opened(window: usize, socket: Arc<SocketKill>, metrics: B2buaMetrics) -> Self {
+        metrics.cdr_broker_session_opened();
+        Self {
+            ended_at: OnceLock::new(),
+            delivered: AtomicBool::new(false),
+            window: Arc::new(window_permits(window)),
+            socket,
+            metrics,
+        }
+    }
+
+    /// Ends the session for `why`: no further publish, the window closed (a
+    /// publish waiting for a slot returns), the socket shut down. The first
+    /// end alone is logged and counted.
+    pub(super) fn end(&self, why: BrokerSessionEnd) {
+        self.end_with(why, None);
+    }
+
+    /// [`Health::end`], logging `error`, the client's cause of the end.
+    pub(super) fn end_on_error(&self, why: BrokerSessionEnd, error: &dyn std::fmt::Display) {
+        self.end_with(why, Some(error));
+    }
+
+    fn end_with(&self, why: BrokerSessionEnd, error: Option<&dyn std::fmt::Display>) {
         if self.ended_at.set(Instant::now()).is_ok() {
-            tracing::warn!(reason, "CDR broker connection dropped; the next record reconnects");
+            let reason = why.label();
+            if why == BrokerSessionEnd::Closed {
+                tracing::debug!(reason, "CDR broker session closed");
+            } else {
+                tracing::warn!(
+                    reason,
+                    error = error.map(tracing::field::display),
+                    "CDR broker connection dropped; the next record reconnects"
+                );
+            }
+            self.metrics.cdr_broker_session_ended(why);
         }
         self.window.close();
         self.socket.kill();
@@ -160,13 +195,8 @@ impl Session {
                 .map_err(|_| OpenError::AmqpTimedOut)??;
         guard.disarm();
 
-        let health = Arc::new(Health {
-            ended_at: OnceLock::new(),
-            delivered: AtomicBool::new(false),
-            nack_logged: AtomicBool::new(false),
-            window: Arc::new(window_permits(settings.bounds.window)),
-            socket,
-        });
+        let health =
+            Arc::new(Health::opened(settings.bounds.window, socket, tally.metrics().clone()));
         let (pending, rx) = mpsc::unbounded_channel();
         let tracker = tokio::spawn(track_confirms(rx, health.clone(), close_by, tally.clone()));
         let watch = watch_connection(&connection, health.clone());
@@ -203,10 +233,10 @@ impl Session {
         self.health.ended_at.get().copied()
     }
 
-    /// Ends the session for `reason`: it publishes no more, and the writer
+    /// Ends the session for `why`: it publishes no more, and the writer
     /// replaces it at its next record.
-    pub(super) fn end(&self, reason: &str) {
-        self.health.end(reason);
+    pub(super) fn end(&self, why: BrokerSessionEnd) {
+        self.health.end(why);
     }
 
     /// Whether the broker acked at least one publish of this session.
@@ -220,7 +250,7 @@ impl Session {
     /// is ended before a record is handed to it.
     pub(super) fn end_if_disconnected(&self) {
         let connection = self.connection.status();
-        let reason = if connection.errored() {
+        let found = if connection.errored() {
             "the connection failed"
         } else if !connection.connected() {
             "the connection is closed"
@@ -229,7 +259,7 @@ impl Session {
         } else {
             return;
         };
-        self.health.end(reason);
+        self.health.end_on_error(BrokerSessionEnd::ConnectionLost, &found);
     }
 
     /// Publishes `payload`, the record the writer was handed at `handed_at`,
@@ -266,11 +296,11 @@ impl Session {
         let confirm = match timeout_at(deadline, publish).await {
             Ok(Ok(confirm)) => confirm,
             Ok(Err(e)) => {
-                self.health.end(&format!("publish failed: {e}"));
+                self.health.end_on_error(BrokerSessionEnd::PublishFailed, &e);
                 return Err(PublishRefused::Ended);
             }
             Err(_) => {
-                self.health.end("the connection took no publish within the publish bound");
+                self.health.end(BrokerSessionEnd::PublishBound);
                 return Err(PublishRefused::Ended);
             }
         };
@@ -284,7 +314,7 @@ impl Session {
             return Err(PublishRefused::Ended);
         };
         if tracker.send(pending).is_err() {
-            self.health.end("the confirm tracker is gone");
+            self.health.end(BrokerSessionEnd::TrackerGone);
             return Err(PublishRefused::Ended);
         }
         Ok(())
@@ -306,11 +336,11 @@ async fn confirming_channel(
     Ok((connection, channel))
 }
 
+/// A session the writer drops ends as [`BrokerSessionEnd::Closed`] unless it
+/// ended before.
 impl Drop for Session {
     fn drop(&mut self) {
         self.watch.abort();
-        let _ = self.health.ended_at.set(Instant::now());
-        self.health.window.close();
-        self.health.socket.kill();
+        self.health.end(BrokerSessionEnd::Closed);
     }
 }

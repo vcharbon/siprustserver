@@ -165,6 +165,7 @@ async fn a_write_that_panics_counts_its_record_dropped_once_and_the_next_records
     assert_eq!(rig.loops.ended(), None, "the worker serves on");
     rig.buf.close(Instant::now() + Duration::from_secs(1)).await;
     assert_eq!((rig.sink.written(), rig.dropped()), (2, 1), "the close counts nothing twice");
+    assert_eq!(rig.metrics.cdr_drops(), [(CdrDrop::Panic, 1)]);
 }
 
 /// The sink's `after_panic` panics after a caught write panic: the run ends,
@@ -198,6 +199,8 @@ async fn a_close_during_the_restart_delay_ends_by_its_deadline_with_every_record
     assert!(Instant::now() <= deadline, "the close returned past its deadline");
     assert_eq!(rig.sink.written(), 3, "three writes of 100 ms fit before the deadline");
     assert_eq!(rig.dropped(), 7, "the panicked one, the one cut and the five queued");
+    let drops = [(CdrDrop::CloseDeadline, 6), (CdrDrop::Panic, 1)];
+    assert_eq!(rig.metrics.cdr_drops(), drops);
     assert_eq!(rig.sink.closed_by(), Some(deadline), "the sink closed by the same deadline");
 }
 
@@ -211,8 +214,10 @@ async fn a_run_that_panics_during_the_close_gives_the_queue_up_and_the_close_ret
     rig.buf.close(deadline).await;
     assert_eq!(Instant::now(), start, "no restart delay inside a close");
     assert_eq!((rig.sink.written(), rig.dropped()), (0, 5));
+    assert_eq!(rig.metrics.cdr_drops(), [(CdrDrop::Panic, 5)], "the panicked one and the queue");
     assert_eq!(rig.restarts(), 2, "the caught write panic and the run's panic");
     assert_eq!(rig.sink.closed_by(), Some(deadline));
     rig.buf.write(&a_call(), 3_000).await;
     assert_eq!(rig.dropped(), 6, "a write after the close is counted dropped");
+    assert_eq!(rig.metrics.cdr_drops(), [(CdrDrop::Closed, 1), (CdrDrop::Panic, 5)]);
 }

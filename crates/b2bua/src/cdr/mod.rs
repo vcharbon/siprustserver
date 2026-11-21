@@ -5,15 +5,21 @@
 //! whose drainer survives a panic of the sink it drives.
 //! A transport sink publishes the bytes of a [`CdrEncoder`], by default
 //! [`JsonRecordEncoder`] (the [`CdrRecord`] as JSON), and tells a
-//! [`CdrDeliveryObserver`] how and when each record ended.
+//! [`CdrDeliveryObserver`] how and when each record ended. A dropped record
+//! counts its [`CdrDrop`] reason; a broker sink counts its link's
+//! [`BrokerConnect`] and [`BrokerSessionEnd`] events.
 
+mod broker_link;
 mod buffered;
 mod delivery;
+mod drop_reason;
 mod encoder;
 mod memory;
 
+pub use broker_link::{BrokerConnect, BrokerSessionEnd};
 pub use buffered::BufferedCdrWriter;
 pub use delivery::{CdrDelivery, CdrDeliveryObserver};
+pub use drop_reason::CdrDrop;
 pub use encoder::{CdrEncodeError, CdrEncoder, JsonRecordEncoder};
 pub use memory::InMemoryCdrWriter;
 
@@ -123,7 +129,7 @@ pub trait CdrWriter: Send + Sync {
     async fn read_all(&self) -> Vec<CdrRecord>;
     /// The exit barrier: deliver the records this sink holds and take no more.
     /// When it returns, every record whose `write` returned before the close
-    /// began is delivered or counted in `cdr_dropped_total`, and every later
+    /// began is delivered or counted in `b2bua_cdr_dropped_total`, and every later
     /// one is counted there too; it never waits past `deadline`, and a later
     /// close's deadline does not move the first one's. A sink that writes
     /// inline holds nothing to close.

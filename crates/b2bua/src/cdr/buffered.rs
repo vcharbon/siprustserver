@@ -18,12 +18,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::{mpsc, watch, Mutex};
 use tokio::time::{timeout_at, Instant};
 
 use call::Call;
 
-use super::{CdrRecord, CdrWriter};
+use super::{CdrDrop, CdrRecord, CdrWriter};
 use crate::metrics::B2buaMetrics;
 use drainer::Drainer;
 
@@ -42,7 +43,7 @@ pub struct BufferedCdrWriter {
 }
 
 /// The records this buffer dropped: counted locally for `dropped_total()` and
-/// in the shared registry's `cdr_dropped_total`.
+/// in the shared registry's `b2bua_cdr_dropped_total`, by reason.
 #[derive(Clone)]
 struct Dropped {
     count: Arc<AtomicU64>,
@@ -50,9 +51,9 @@ struct Dropped {
 }
 
 impl Dropped {
-    fn one(&self) {
+    fn one(&self, why: CdrDrop) {
         self.count.fetch_add(1, Ordering::Relaxed);
-        self.metrics.bump_cdr_dropped();
+        self.metrics.bump_cdr_dropped(why);
     }
 }
 
@@ -63,8 +64,8 @@ impl BufferedCdrWriter {
 
     /// Wrap `inner` with a bounded submit queue + drainer. `queue_max == 0`
     /// disables buffering (passthrough); a depth above [`Self::MAX_QUEUE`] is
-    /// held to it. `metrics` is the shared registry the core exports; overflow
-    /// drops are recorded into `cdr_dropped_total`.
+    /// held to it. `metrics` is the shared registry the core exports; the
+    /// buffer's drops are recorded into `b2bua_cdr_dropped_total`.
     pub fn spawn(inner: Arc<dyn CdrWriter>, queue_max: usize, metrics: B2buaMetrics) -> Self {
         let (close_by, _) = watch::channel(None);
         let (closed_tx, closed) = watch::channel(false);
@@ -107,7 +108,8 @@ impl CdrWriter for BufferedCdrWriter {
             None => self.inner.write(call, terminated_at).await,
             Some(tx) => match tx.try_reserve() {
                 Ok(slot) => slot.send((call.clone(), terminated_at)),
-                Err(_) => self.dropped.one(),
+                Err(TrySendError::Full(())) => self.dropped.one(CdrDrop::BufferFull),
+                Err(TrySendError::Closed(())) => self.dropped.one(CdrDrop::Closed),
             },
         }
     }
