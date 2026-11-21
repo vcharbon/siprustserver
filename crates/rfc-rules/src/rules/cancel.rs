@@ -77,12 +77,12 @@ crate::registry::rules! {
 /// `relayed`** — the far endpoint that originated the answer is charged
 /// separately, and consumer policy weighs the hop's finding.
 ///
-/// **An emitter that relayed the INVITE and the CANCEL onward (or held the
-/// CANCEL because its far UAS answered before any provisional, §9.1), and
-/// answers with the 2xx that far UAS gave, is compliant** (§16.10): it
-/// carries back the answer the canceller would have met end to end, whatever
-/// Call-ID its far side wears (`relayed_answer`). The far UAS is judged on its
-/// own occasion.
+/// **An emitter that relayed the INVITE and the CANCEL onward (or sent no
+/// CANCEL, the far 2xx reaching it within 64·T1 of its own), and answers with
+/// the 2xx that far UAS gave, its description byte for byte, is compliant**
+/// (§16.10): it carries back the answer the canceller would have met end to
+/// end, whatever Call-ID its far side wears (`relayed_answer`). The far UAS is
+/// judged on its own occasion.
 ///
 /// Charges the UAS side of the cancelled transaction: the endpoint that took
 /// the INVITE and its CANCEL and then answered 2xx anyway. Answering 487 — or
@@ -198,11 +198,6 @@ impl<'a> Reading<'a> {
                 Cancel { msg: mi, hop: msg.hop, ts_us: msg.at_us, src: msg.src.as_str() },
             );
         } else if let Some(status) = msg.status() {
-            if (100..200).contains(&status) && msg.cseq_method.eq_ignore_ascii_case("INVITE") {
-                let txn = self.txns.entry(TxnKey::emitted_by(sides, msg, branch)).or_default();
-                txn.first_1xx_us.get_or_insert(msg.at_us);
-                return;
-            }
             if !(200..300).contains(&status) || !msg.cseq_method.eq_ignore_ascii_case("INVITE") {
                 return;
             }
@@ -239,9 +234,6 @@ struct Txn<'a> {
     took_invite_us: Option<u64>,
     /// Who sent it that INVITE: the transaction's UAC side.
     invite_src: Option<&'a str>,
-    /// When it emitted its first provisional to that INVITE: before it, §9.1
-    /// forbids its UAC a CANCEL.
-    first_1xx_us: Option<u64>,
     /// The first CANCEL it took for that INVITE.
     cancel: Option<Cancel<'a>>,
     /// Every distinct 2xx it emitted to that INVITE, in observation order.

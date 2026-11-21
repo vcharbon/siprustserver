@@ -263,7 +263,6 @@ pub(super) async fn on_event(
         }
         let admitted = item.unborn.is_some();
         OwedAnswer::of(ctx).render(&item.event, why, owed, admitted).await;
-        super::commit::release_discarded(ctx, &item.event).await;
     }
 }
 

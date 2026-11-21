@@ -1,8 +1,11 @@
 //! A CANCEL received for an INVITE server transaction (RFC 3261 §9.2): the
 //! INVITE it names answered 487 and the CANCEL 200 while that INVITE is
-//! active, the CANCEL alone answered 200 once the INVITE took its final, and
-//! handed up through a non-INVITE transaction of its own when no INVITE here
-//! matches it. The rest of the server transaction lives in `layer::server`.
+//! active, the 487 of a re-INVITE left to the consumer
+//! (`consumer_ends_cancelled_reinvite`, `layer::held_cancel`); the CANCEL
+//! alone answered 200 once the INVITE took its final or the CANCEL was taken
+//! already, and handed up through a non-INVITE transaction of its own when no
+//! INVITE here matches it. The rest of the server transaction lives in
+//! `layer::server`.
 
 use std::net::SocketAddr;
 
@@ -24,10 +27,12 @@ use super::txn::{NewTransaction, Transaction, TxnId, TxnRef, TxnState, UnsentCan
 
 impl Owner {
     /// RFC 3261 §9.2 at this layer: a CANCEL matching an active INVITE server
-    /// transaction is answered 200 and its INVITE 487, and `Cancelled` is
-    /// emitted; `true`. Its copies, once the INVITE took its final, draw the
-    /// 200 again on the RFC schedule
-    /// ([`cancel_copy_owed`](Self::cancel_copy_owed)). One matching nothing
+    /// transaction is answered 200 and its INVITE 487, the 487 of a re-INVITE
+    /// left to the consumer instead (`consumer_ends_cancelled_reinvite`), and
+    /// `Cancelled` is emitted; `true`. Its copies, once the INVITE took its
+    /// final or while a re-INVITE left open awaits it, draw the 200 again on
+    /// the RFC schedule ([`cancel_copy_owed`](Self::cancel_copy_owed)), never
+    /// handed up. One matching nothing
     /// here is the TU's to answer — a call it holds for a peer may hold the
     /// INVITE the CANCEL names, and only the TU can rebuild that transaction
     /// and re-offer the CANCEL — so it is handed up unanswered as a `Message`

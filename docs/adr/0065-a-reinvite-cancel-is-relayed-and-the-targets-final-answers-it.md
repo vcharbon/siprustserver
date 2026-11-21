@@ -38,11 +38,11 @@ departs from the §9.2 SHOULD for this one case; the initial INVITE's CANCEL kee
 The layer holds the CANCEL's 200 and the 487 it would answer, at the write path's cancel bound or
 the §17.2.1 bound where that is zero. The turn that took the CANCEL releases them: `Keep` when its
 record holds the relay of that INVITE marked `cancel_relayed`, `End` otherwise (no relay pending,
-the CANCEL not built, no turn took the event, or the call's queue discarded it). The bound sends the
-CANCEL's 200 alone and keeps the 487 for that release however late the turn runs, since the turn
-may still relay the CANCEL; only a release that never comes, 64·T1 past the CANCEL, ends the INVITE
-with it. A final of the INVITE's own drops the held 487 (one final, §17.2.1). A copy of the CANCEL
-draws its 200 again and never reaches the consumer.
+the CANCEL not built, or no turn took the event). The bound sends the CANCEL's 200 alone and keeps
+the 487 for that release however late the turn runs, since the turn may still relay the CANCEL;
+only a release that never comes, 64·T1 past the CANCEL, ends the INVITE with it, and a call that
+ends first answers it 487 itself (§15.1.2). A final of the INVITE's own drops the held 487 (one
+final, §17.2.1). A copy of the CANCEL draws its 200 again and never reaches the consumer.
 
 ### §3 A target that never answers
 
@@ -62,9 +62,9 @@ made answered with every stream rejected (RFC 3264 §6).
 ### §5 The audit
 
 `no-200-after-cancel` judges a UAS that took a CANCEL. An endpoint that relayed the INVITE onward,
-then the CANCEL, or sent none because the far 2xx came first (before any provisional, §9.1, or
-within T1 of the CANCEL it took), and answers with the far 2xx it took, its description carried
-byte for byte, is compliant: it relays. The far UAS is judged on its own occasion. A relay that
+then the CANCEL, or sent none because the far 2xx reached it first (within 64·T1 of the CANCEL it
+took, the canceller's own horizon, §9.1), and answers with the far 2xx it took, its description
+carried byte for byte, is compliant: it relays. The far UAS is judged on its own occasion. A relay that
 restates the description is not told apart from one answering on its own account, and is charged.
 
 ## Consequences

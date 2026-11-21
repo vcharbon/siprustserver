@@ -62,8 +62,10 @@ pub struct TransactionConfig {
     /// The layer then holds the CANCEL's 200 and the 487 it would answer, as
     /// under [`Self::cancel_bound_ms`] (its own bound being the §17.2.1 bound
     /// where that one is `0`), and the consumer's release says whether the 487
-    /// leaves ([`CancelledInvite`](crate::CancelledInvite)); at the bound, it
-    /// does. `false`, the default, answers 487 as the CANCEL arrives.
+    /// leaves ([`CancelledInvite`](crate::CancelledInvite)). At the bound only
+    /// the 200 leaves; a release that never comes ends the INVITE with the 487
+    /// 64·T1 past the CANCEL. `false`, the default, answers 487 as the CANCEL
+    /// arrives.
     pub consumer_ends_cancelled_reinvite: bool,
     /// Told each time a held ACK, or the held answers to a CANCEL, leave at
     /// their bound rather than on their consumer's release, with the

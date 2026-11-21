@@ -71,16 +71,6 @@ fn held_cancel_answers(trigger: &CallEvent) -> Option<HeldCancel> {
     Some(HeldCancel { call_id, from_tag, cseq: (*invite_cseq)?, in_dialog: *in_dialog })
 }
 
-/// Release the answers the layer holds for `event`, a re-INVITE's CANCEL its
-/// call's queue discarded unrun: no turn relays that CANCEL, so the re-INVITE
-/// ends with the layer's 487 (ADR-0065). Nothing for any other event, whose
-/// held answers leave at their bound.
-pub async fn release_discarded(ctx: &RouterCtx, event: &CallEvent) {
-    if matches!(event, CallEvent::Cancelled { in_dialog: true, .. }) {
-        release_untaken(ctx, event).await;
-    }
-}
-
 /// Release what the layer holds for `event`'s turn when no turn's outbox
 /// entry took it: no write records it, so nothing is waited for, and a
 /// cancelled INVITE ends with the layer's 487.
