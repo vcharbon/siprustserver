@@ -78,11 +78,11 @@ impl sip_proxy::registry::control::WorkerRegistryControl for RecordingControl {
 /// worker's drain rate below the probe rate — which would manufacture genuine
 /// reaps (a load artifact, not the late-reply guarantee under test).
 fn spawn_late_responder(
-    ep: Box<dyn UdpEndpoint>,
+    ep: impl Into<Arc<dyn UdpEndpoint>>,
     reply_delay: Duration,
     gate: Arc<AtomicBool>,
 ) -> tokio::task::JoinHandle<()> {
-    let ep: Arc<dyn UdpEndpoint> = Arc::from(ep);
+    let ep: Arc<dyn UdpEndpoint> = ep.into();
     tokio::spawn(async move {
         let parser = CustomParser::new();
         while let Some(pkt) = ep.recv().await {
@@ -328,21 +328,20 @@ async fn stable_alive_across_sustained_late_replies() {
     let _ = h.finish().await;
 }
 
+/// The worker is a simulated peer whose forged 200 is the test's subject: it
+/// reaches the probe while the worker is `Dead` and revives nothing; the
+/// worker's first correlated reply then does.
 #[tokio::test(start_paused = true)]
 async fn uncorrelated_reply_cannot_revive_dead_worker_correlated_one_does() {
     let h = Harness::with_transit_delay("probe-spoof-reject", 5);
-    h.allow_violation(
-        "mid-dialog-tags",
-        "raw-injected spoof response; probe is the SUT, not a real UA",
-    );
 
-    let (worker_ep, worker_sock) = h.bind_sut(WORKER_ID, "127.0.0.1:5075").await;
+    let (worker_ep, worker_sock) = h.bind_peer(WORKER_ID, "127.0.0.1:5075").await;
+    let worker_ep: Arc<dyn UdpEndpoint> = Arc::from(worker_ep);
     let probe_sock: std::net::SocketAddr = "127.0.0.1:5097".parse().unwrap();
 
     let gate = Arc::new(AtomicBool::new(false));
-    let spoof_pkt = synthetic_200("z9hG4bK-totally-forged-branch", &worker_sock, &probe_sock);
-    worker_ep.send_to(&spoof_pkt, probe_sock).await.unwrap();
-    let responder = spawn_late_responder(worker_ep, Duration::from_millis(40), gate.clone());
+    let responder =
+        spawn_late_responder(worker_ep.clone(), Duration::from_millis(40), gate.clone());
 
     let registry = unknown_registry(worker_sock);
     let writes = Arc::new(Mutex::new(Vec::new()));
@@ -363,7 +362,16 @@ async fn uncorrelated_reply_cannot_revive_dead_worker_correlated_one_does() {
     registry.set_health(WORKER_ID, WorkerHealth::Dead);
     wait_for_health(&registry, WorkerHealth::Dead).await;
 
+    const FORGED: &str = "z9hG4bK-totally-forged-branch";
+    worker_ep.send_to(&synthetic_200(FORGED, &worker_sock, &probe_sock), probe_sock).await.unwrap();
     tokio::time::sleep(Duration::from_millis(150)).await;
+    let spoof = h
+        .snapshot_report()
+        .entries()
+        .into_iter()
+        .find(|e| e.to == probe_sock && String::from_utf8_lossy(&e.raw).contains(FORGED))
+        .expect("the forged 200 is on the wire");
+    assert!(spoof.delivered && spoof.recv_note.is_none(), "the probe read the forged 200");
     assert_eq!(
         registry.resolve(WORKER_ID).map(|w| w.health),
         Some(WorkerHealth::Dead),
