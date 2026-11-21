@@ -35,6 +35,7 @@ mod caller_facing_early_dialogs;
 mod cancel_200_crossing;
 mod cancel_200_crossing_internal;
 mod cancel_after_answer;
+mod cancel_after_reliable_offer;
 mod cancel_before_provisional;
 mod cancel_crossed_by_late_answer;
 mod cancel_during_slow_decision;
