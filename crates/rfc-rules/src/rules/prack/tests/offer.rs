@@ -37,6 +37,24 @@ fn the_2xx_waits_for_the_prack_of_an_offer_sent_reliably() {
     ];
     assert!(decide(&Delay2xxOnUnackedReliable1xxWithSdp, &bodiless).is_empty());
 
+    let framed_none = vec![
+        framing_no_description(inv_resp(1_100_000, 183, &reliable_rows(1), true)),
+        inv_resp(1_200_000, 200, "", false),
+    ];
+    assert!(
+        decide(&Delay2xxOnUnackedReliable1xxWithSdp, &framed_none).is_empty(),
+        "a body framing no description holds no 2xx",
+    );
+
+    let unrecorded = vec![
+        unrecorded_body(inv_resp(1_100_000, 183, &reliable_rows(1), true)),
+        inv_resp(1_200_000, 200, "", false),
+    ];
+    assert!(matches!(
+        decide(&Delay2xxOnUnackedReliable1xxWithSdp, &unrecorded)[0].decision,
+        Decision::Undecidable(_)
+    ));
+
     let two = vec![
         inv_resp(1_100_000, 183, &reliable_rows(1), true),
         inv_resp(1_150_000, 183, &reliable_rows(2), true),
@@ -226,9 +244,11 @@ fn a_prack_naming_another_forks_offer_rseq_is_no_occasion() {
     assert!(f.iter().all(|f| matches!(f.decision, Decision::Compliant)), "{f:?}");
 }
 
-/// `prack-answers-1xx-offer`: the 1xx body is the OFFER only where the
-/// INVITE carried none — the standard setup (offer in the INVITE, answer in
-/// the 183, bodiless PRACK) is no occasion at all.
+/// `prack-answers-1xx-offer`: the 1xx description is the OFFER only where
+/// the INVITE carried none — the standard setup (offer in the INVITE, answer
+/// in the 183, bodiless PRACK) is no occasion at all. Each side reads a
+/// description, never a body: a body framing none is neither offer nor
+/// answer, and a body the vantage did not record decides nothing.
 #[test]
 fn a_bodiless_prack_answering_a_1xx_offer_charges_its_sender() {
     let msgs = vec![
@@ -262,4 +282,44 @@ fn a_bodiless_prack_answering_a_1xx_offer_charges_its_sender() {
         decide(&PrackAnswers1xxOffer, &standard).is_empty(),
         "the 183's body is the ANSWER (RFC 3264 §5), so the PRACK owes none",
     );
+
+    let invite_framing_none = vec![
+        framing_no_description(invite_on(1_000_000, "Supported: 100rel\r\n", None, true)),
+        inv_resp(1_100_000, 183, &reliable_rows(1), true),
+        prack_on(1_200_000, "1 1 INVITE", false),
+    ];
+    assert!(
+        decide(&PrackAnswers1xxOffer, &invite_framing_none)[0].violated(),
+        "an INVITE body framing no description is no offer: the 183's is",
+    );
+
+    let prack_framing_none = vec![
+        invite_on(1_000_000, "Supported: 100rel\r\n", None, false),
+        inv_resp(1_100_000, 183, &reliable_rows(1), true),
+        framing_no_description(prack_on(1_200_000, "1 1 INVITE", true)),
+    ];
+    assert!(
+        decide(&PrackAnswers1xxOffer, &prack_framing_none)[0].violated(),
+        "a PRACK body framing no description carries no answer",
+    );
+
+    let provisional_framing_none = vec![
+        invite_on(1_000_000, "Supported: 100rel\r\n", None, false),
+        framing_no_description(inv_resp(1_100_000, 183, &reliable_rows(1), true)),
+        prack_on(1_200_000, "1 1 INVITE", false),
+    ];
+    assert!(
+        decide(&PrackAnswers1xxOffer, &provisional_framing_none).is_empty(),
+        "a provisional body framing no description makes no offer",
+    );
+
+    let prack_unrecorded = vec![
+        invite_on(1_000_000, "Supported: 100rel\r\n", None, false),
+        inv_resp(1_100_000, 183, &reliable_rows(1), true),
+        unrecorded_body(prack_on(1_200_000, "1 1 INVITE", true)),
+    ];
+    assert!(matches!(
+        decide(&PrackAnswers1xxOffer, &prack_unrecorded)[0].decision,
+        Decision::Undecidable(_)
+    ));
 }

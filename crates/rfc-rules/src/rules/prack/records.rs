@@ -87,9 +87,10 @@ pub(super) struct Answer<'a> {
     /// The early dialog it presents — the To tag that keeps two forks
     /// answering one INVITE apart.
     pub(super) to_tag: &'a str,
-    /// Its head declared a body: `Content-Length` above zero, or a
-    /// `Content-Type` where no length reads.
-    pub(super) has_body: bool,
+    /// Whether it carried a session description
+    /// ([`Msg::carries_description`](crate::wire::Msg::carries_description));
+    /// `None` where the vantage did not record its body.
+    pub(super) description: Option<bool>,
     /// The vantage recorded its headers at all — without them nothing here says
     /// which option tags it carried.
     pub(super) readable: bool,

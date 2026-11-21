@@ -41,6 +41,7 @@ fn msg(
     to_tag: Option<&str>,
     head: String,
 ) -> Msg {
+    let body = fixture_body(&head);
     Msg {
         refused: false,
         at_us,
@@ -56,8 +57,36 @@ fn msg(
         from_tag: Some("fa".to_string()),
         to_tag: to_tag.map(str::to_string),
         head: Some(head.into_bytes()),
-        body: None,
+        body: Some(body),
     }
+}
+
+/// The body a fixture's `head` declares: the description [`SDP`] under
+/// `application/sdp`, none otherwise.
+fn fixture_body(head: &str) -> Vec<u8> {
+    match head.contains("Content-Type: application/sdp") {
+        true => SDP.as_bytes().to_vec(),
+        false => Vec::new(),
+    }
+}
+
+/// `m`, whose head declares the description [`SDP`], carrying in its place a
+/// multipart body whose one part is no session description (RFC 5621 §3.1):
+/// a body rides, no offer or answer does.
+fn framing_no_description(mut m: Msg) -> Msg {
+    let part = "--b1\r\nContent-Type: application/vnd.example\r\n\r\npayload\r\n--b1--\r\n";
+    let framed =
+        format!("Content-Type: multipart/mixed;boundary=b1\r\nContent-Length: {}\r\n", part.len());
+    let head = String::from_utf8(m.head.take().unwrap_or_default()).unwrap_or_default();
+    m.head = Some(head.replace(&body_rows(true), &framed).into_bytes());
+    m.body = Some(part.as_bytes().to_vec());
+    m
+}
+
+/// `m` as a vantage that recorded no body bytes sees it.
+fn unrecorded_body(mut m: Msg) -> Msg {
+    m.body = None;
+    m
 }
 
 /// An INVITE offering `100rel`, from `src`.

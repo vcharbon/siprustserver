@@ -108,6 +108,13 @@ impl Msg {
         let body = self.body.as_deref()?;
         body.get(sip_message::head_sdp_range(self.head.as_deref()?, body)?)
     }
+
+    /// Whether this message carried a session description ([`Self::sdp`]):
+    /// a body framing none, or of another type, carried none. `None` where the
+    /// vantage did not record the body, so the rule asking decides nothing.
+    pub fn carries_description(&self) -> Option<bool> {
+        self.body.as_ref().map(|_| self.sdp().is_some())
+    }
 }
 
 /// How long the OBSERVATION ran, and whether its end is the end of evidence.
