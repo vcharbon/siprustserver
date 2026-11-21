@@ -201,6 +201,21 @@ pub fn close_rejected_invite_round(call: &mut Call, leg_id: &str, branch: &str) 
 /// when it carried none.
 pub fn close_untaken_invite(d: &mut Dialog) {
     note_untaken(d);
+    hold_invite_before(d);
+}
+
+/// Leave `d`'s last INVITE, a relay another worker made and still owns, to
+/// that worker: the dialog holds again the INVITE before it, as
+/// [`close_untaken_invite`] does, but its round is not noted untaken
+/// ([`Dialog::untaken_invite`]): it has not ended, and a 2xx to it is that
+/// worker's to take.
+pub fn leave_invite_relay(d: &mut Dialog) {
+    hold_invite_before(d);
+}
+
+/// `d` holds again the INVITE before its last, as the ACK the last carried
+/// ahead states it; nothing when it carried none.
+fn hold_invite_before(d: &mut Dialog) {
     let before = d.sent_invite.as_ref().and_then(|r| r.invite.as_ref()?.ack_ahead.as_ref());
     d.sent_invite = before.map(|ahead| ahead.restored());
 }
