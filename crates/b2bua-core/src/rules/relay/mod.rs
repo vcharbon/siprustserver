@@ -89,7 +89,7 @@ pub(crate) use unbuilt::unbuilt;
 // One session per dialog, whoever authored the description (RFC 3264 §8).
 pub use sdp_dialogs::{
     adopt_answered_caller_dialog, adopt_confirmed_dialog, in_dialog_session, next_origin_in_dialog,
-    next_origin_on,
+    next_origin_on, sent_reinvite_origins,
 };
 pub use sdp_session::{
     continue_on_leg, note_absorbed_offer, note_answered_here, note_request, opened, Author, Carried,

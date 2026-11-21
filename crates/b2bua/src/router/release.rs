@@ -152,21 +152,13 @@ async fn left_the_map(ctx: &RouterCtx, call_ref: &str) {
     ctx.turn_probe.release_step(&ctx.config.self_ordinal, call_ref).await;
 }
 
-/// For each re-INVITE the resident call `call_ref` sent and holds on a dialog,
-/// the origin an answer its orphaned transaction composes states: the next
-/// version of the session this stack stated on that dialog (RFC 3264 §8). A
-/// dialling INVITE's record names no transaction: its orphan answers under a
-/// fresh origin, the dialog having no session of this stack's yet.
+/// The origins the resident call `call_ref`'s orphaned re-INVITE transactions
+/// answer a 2xx offer under: the next version of the session this stack
+/// stated on each one's dialog (RFC 3264 §8).
 fn orphan_origins(ctx: &RouterCtx, call_ref: &str) -> Vec<sip_txn::OrphanOrigin> {
     let Some(call) = ctx.state.resident(call_ref) else { return Vec::new() };
-    let legs = std::iter::once(&call.a_leg).chain(&call.b_legs);
-    legs.flat_map(|leg| leg.dialogs.iter().map(move |dialog| (leg, dialog)))
-        .filter_map(|(leg, dialog)| {
-            let sent = dialog.sent_invite.as_ref()?.sent.as_ref()?;
-            let origin = b2bua_core::rules::relay::next_origin_on(leg, dialog)?;
-            Some(sip_txn::OrphanOrigin { branch: sent.branch.clone(), origin })
-        })
-        .collect()
+    let origins = b2bua_core::rules::relay::sent_reinvite_origins(&call);
+    origins.into_iter().map(|(branch, origin)| sip_txn::OrphanOrigin { branch, origin }).collect()
 }
 
 /// Answer 481 every in-dialog INVITE of the ended call `call_ref` that has no

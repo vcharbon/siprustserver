@@ -267,7 +267,7 @@ async fn an_offer_in_a_2xx_after_the_call_is_reaped_is_answered_rejecting_in_its
     let mut bob_bye = bob.receive("BYE").await;
     bob_reinv.respond(100, "Trying").await;
     bob_bye.respond(200, "OK").await;
-    settle_until(|| b2bua.active_calls() == 0).await;
+    settle_until(|| b2bua.calls_reaped()).await;
 
     bob_reinv.respond(200, "OK").with_sdp(BOB_REOFFER).await;
     bob.receive("CANCEL").await.respond(200, "OK").await;

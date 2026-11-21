@@ -92,6 +92,21 @@ pub fn next_origin_on(leg: &Leg, dialog: &Dialog) -> Option<String> {
     next_version(early.flatten().unwrap_or(&leg.sdp_session))
 }
 
+/// For each re-INVITE `call` sent and holds on a dialog of its legs, the
+/// branch of its client transaction and [`next_origin_on`] that dialog: the
+/// origin an answer composed for its 2xx once the call is released states. A
+/// dialling INVITE's record names no transaction, its dialog holding no
+/// session of this stack's yet.
+pub fn sent_reinvite_origins(call: &Call) -> Vec<(String, String)> {
+    let legs = std::iter::once(&call.a_leg).chain(&call.b_legs);
+    legs.flat_map(|leg| leg.dialogs.iter().map(move |dialog| (leg, dialog)))
+        .filter_map(|(leg, dialog)| {
+            let sent = dialog.sent_invite.as_ref()?.sent.as_ref()?;
+            Some((sent.branch.clone(), next_origin_on(leg, dialog)?))
+        })
+        .collect()
+}
+
 fn next_version(state: &LegSdpSession) -> Option<String> {
     let line = origin_of(state.sent_origin.as_deref()?)?.next_version_line()?;
     Some(line.strip_prefix("o=")?.to_string())

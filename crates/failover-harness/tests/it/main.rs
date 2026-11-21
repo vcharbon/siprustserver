@@ -80,6 +80,7 @@ mod new_call_replication_window;
 mod no_worker_reads_ready;
 mod not_ready_flip_tells_a_dead_verdict;
 mod not_ready_member_stays_pulled;
+mod offer_2xx_after_the_copy_ends;
 mod one_backup_on_every_leg;
 mod outbound_invite_after_the_departure;
 mod prack_repeat_takeover;
