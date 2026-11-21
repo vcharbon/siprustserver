@@ -223,11 +223,11 @@ async fn primary_returns(c: &mut Crashed) -> b2bua::cdr::CdrRecord {
         .expect("the one CDR")
 }
 
+/// bob hangs up; the rewriter aims the BYE at a URI that is not ours, and
+/// the backup ends the call on the outgoing leg.
 #[tokio::test(start_paused = true)]
 async fn a_callee_bye_without_our_request_uri_reaches_the_backup_on_the_outgoing_leg() {
     let mut c = crashed("takeover-request-uri-rewritten", Vec::new).await;
-
-    // bob hangs up; the rewriter aims the BYE at a URI that is not ours.
     let mut bye = c.bob_dialog.bye().await;
     c.rewriter.forward_request_altered(addr(LB), rewritten).await;
     c.alice.receive("BYE").await.respond(200, "OK").await;

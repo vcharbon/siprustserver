@@ -50,7 +50,9 @@ pub(super) fn queue_notice(ctx: &Arc<RouterCtx>, event: CallEvent) -> bool {
 /// Take `event` in, with what the transaction layer states of it, amid the
 /// parks a bulk reclaim deferred, `parks`: a copy of one of those calls'
 /// INVITE is that call's ([`DeferredParks`]). An event the router raises
-/// itself names its call and passes none.
+/// itself names its call and passes none. A request found by dialog
+/// identity, through the acting-backup backstop included, has its server
+/// transaction attributed to its call by [`attach_arrival`].
 pub(super) async fn on_event(
     ctx: &Arc<RouterCtx>,
     event: CallEvent,
@@ -154,8 +156,7 @@ pub(super) async fn on_event(
         // `callref` param the B2BUA Contact stamps and the proxy preserves under
         // loose routing — so `resolve` (above) already keys the dialog from it,
         // and sip-txn `extract_ruri_call_ref` attributes the server txn by the
-        // SAME key (the self-release count gate, ADR-0014; `attach_arrival` the
-        // rest). This branch only fires
+        // SAME key (the self-release count gate, ADR-0014). This branch only fires
         // when that param is absent AND our in-memory `sip_index` is empty — a
         // pure backup that never primary-served the call. Re-key the dialog from
         // the replica store's SIP index (the puller imported it) before declaring
