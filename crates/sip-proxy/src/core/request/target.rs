@@ -193,7 +193,9 @@ impl ProxyCore {
     /// places the call now — whatever the registry remembers of `went`, a
     /// departed address being forgotten after its window or bound by another
     /// worker since. `None`: the cookie verified and names no alive worker. A
-    /// cookie the strategy cannot place keeps `went`.
+    /// cookie the strategy cannot place keeps `went`, and so does one placing
+    /// the call on a name: no worker is a name, and `went` is the address the
+    /// transaction's first send to that name left for (RFC 3261 §9.1).
     pub(super) fn follow_live_hop(
         &self,
         went: ProxyAddr,
@@ -212,11 +214,16 @@ impl ProxyCore {
             return Some(went);
         }
         match self.strategy.decode_stickiness(cookie, msg) {
-            DecodeResult::Forward { target, .. } | DecodeResult::ForwardBackup { target, .. } => {
+            DecodeResult::Forward { target, .. } | DecodeResult::ForwardBackup { target, .. }
+                if target.to_socket_addr().is_some() =>
+            {
                 Some(target)
             }
             DecodeResult::Unroutable => None,
-            DecodeResult::Reject { .. } | DecodeResult::Unknown { .. } => Some(went),
+            DecodeResult::Forward { .. }
+            | DecodeResult::ForwardBackup { .. }
+            | DecodeResult::Reject { .. }
+            | DecodeResult::Unknown { .. } => Some(went),
         }
     }
 

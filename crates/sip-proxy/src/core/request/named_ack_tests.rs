@@ -272,8 +272,7 @@ async fn a_retransmitted_invite_goes_where_its_first_copy_went_after_the_names_r
 /// The accepted residual (ADR-0009 X7): an instance without the INVITE's
 /// entry (the worker's flow moved, or the entry was evicted) sends the
 /// worker's ACK by its Request-URI and a fresh lookup, so after the name moved
-/// it reaches the name's new address; the peer at the INVITE's address
-/// retransmits its 486 until Timer H.
+/// it reaches the name's new address, not the peer that sent the 486.
 #[tokio::test(start_paused = true)]
 async fn at_an_instance_without_the_invites_entry_the_ack_follows_a_fresh_lookup() {
     let call_id = "named-ack-elsewhere";
