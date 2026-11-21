@@ -105,10 +105,11 @@ requirements are `deploy/README.md`'s.
 The proxy's intake knobs are values: `proxy.recvShards`
 (`PROXY_RECV_SHARDS`), `proxy.selfGate.cpsRate` / `cpsSize`
 (`PROXY_SELF_GATE_CPS_RATE` / `_SIZE`); null keeps the runner default. A rate
-set by hand is the deployment's whole new-call rate, which either proxy admits
-alone. The overload settings (`LB_*`) go through `proxy.env`; unset, they take
-the runner's defaults, which are calibration starting points, not measured
-values (ADR-0009 X6).
+set by hand is above the deployment's whole new-call rate, which either proxy
+admits alone. The overload bands, hysteresis and AIMD factors (`LB_ELU_*`,
+`LB_BAND_HYSTERESIS`, `LB_AIMD_*`) go through `proxy.env`; unset, they take the
+runner's defaults, which are calibration starting points, not measured values
+(ADR-0009 X6).
 `check/test_downstream.py` builds such a product chart and checks each point.
 
 `sizing` computes the capacity values from a profile and measured per-call

@@ -198,8 +198,8 @@ it names each problem in one message (ADR-0046).
 | `PROXY_CLUSTER_KEY` | not set | The key of the workers. With it, the proxy tells the workers when it reads one of them dead. Required for HA, see [ha.md](ha.md#what-you-must-provide). |
 | `PROXY_INVITE_TXN_TIMEOUT_SEC` | 158 | The longest INVITE transaction. It must equal the value of the workers. |
 | `HEALTH_INTERVAL_MS`, `HEALTH_TIMEOUT_MS`, `HEALTH_THRESHOLD` | 1000, 1600, 2 | The probe of the workers. |
-| `PROXY_SELF_GATE_CPS_RATE`, `PROXY_SELF_GATE_CPS_SIZE` | 100, 50 | The new calls a second that one proxy accepts from the outside, and the burst. Above the rate, the proxy answers 503. Set the rate to the new calls a second of the full deployment: when one proxy is lost, the other proxy accepts all of them. |
-| `LB_CAP_INITIAL_CPS`, `LB_CAP_CEILING_CPS` | 30, 200 | The new calls a second that the proxy sends to one worker: the first value, and the highest. The proxy moves the value with the load that the worker reports. The defaults are starting points for calibration, not measured values. |
+| `PROXY_SELF_GATE_CPS_RATE`, `PROXY_SELF_GATE_CPS_SIZE` | 100, 50 | The new calls a second that one proxy accepts from the outside, and the burst. Above the rate, the proxy answers 503. Set the rate above the new calls a second of the full deployment: when one proxy is lost, the other proxy accepts all of them. |
+| `LB_CAP_INITIAL_CPS`, `LB_CAP_CEILING_CPS` | 30, 200 | The new calls a second that the proxy sends to one worker: the first value, and the highest. The proxy moves the value with the load that the worker reports. |
 | `PROXY_BRANCH_MEMO_MAX_BYTES` | 192 MiB | The size of the memory of INVITEs. The proxy refuses to start if it cannot hold the calls of the rate above. |
 | `ROUTE_GUARD_PEERS` | none, required | The routers whose BFD and BGP the route guard controls. |
 

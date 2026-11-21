@@ -98,8 +98,9 @@
 //!                    (default 2)
 //!   HEALTH_ISOLATION_MS  no worker answer for this long: /fitz unfit
 //!                    `isolated`, ms ≥ HEALTH_INTERVAL_MS + 500 (default 2000)
-//!   The LB_* defaults below are calibration starting points, not measured
-//!   values (ADR-0009 X6): retune them against an overload sweep.
+//!   The band, hysteresis and AIMD defaults below are calibration starting
+//!   points, not measured values (ADR-0009 X6): retune them against an
+//!   overload sweep.
 //!   LB_ELU_SOFT / LB_ELU_HARD / LB_ELU_CRITICAL  worker ELU bands, each in
 //!                    (0, 1], soft < hard < critical (default 0.4 / 0.5 / 0.65)
 //!   LB_BAND_HYSTERESIS  in [0, 1), below the narrower band gap (default 0.05)
@@ -122,8 +123,8 @@
 //!   PROXY_SELF_GATE_ELU_CRITICAL  ELU shed threshold, (0, 1] (default 0.80)
 //!   PROXY_SELF_GATE_CPS_SIZE      CPS bucket capacity, ≥ 1 (default 50)
 //!   PROXY_SELF_GATE_CPS_RATE      CPS bucket refill /s, ≥ 1 (default 100):
-//!                    the deployment's whole new-call rate, which either
-//!                    proxy of an active pair admits alone
+//!                    above the deployment's whole new-call rate, which
+//!                    either proxy of an active pair admits alone
 //!   PROXY_RETRY_AFTER_JITTER_SEC  spread added to a refusal's Retry-After
 //!                    base, seconds 0..3600; every copy of one request draws
 //!                    the same value                           (default 5)

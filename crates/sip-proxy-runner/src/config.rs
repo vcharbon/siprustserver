@@ -16,7 +16,7 @@ use sip_proxy::cancel_lru::{calls_per_second, MemoBounds};
 use sip_proxy::health::HealthProbeConfig;
 use sip_proxy::load_observer::LoadObserverConfig;
 use sip_proxy::resolver::ResolverConfig;
-use sip_proxy::security::hmac::MIN_KEY_BYTES;
+use sip_proxy::security::hmac;
 use sip_proxy::self_gate::ProxySelfGateConfig;
 use sip_proxy::ProxyAddr;
 
@@ -182,9 +182,9 @@ impl ProxyConfig {
                      memo of {held} calls/s at PROXY_BRANCH_MEMO_MEAN_RING_MS={}, \
                      PROXY_BRANCH_MEMO_INVITES_PER_CALL={} and an INVITE entry cap of {} ms \
                      (PROXY_INVITE_TXN_TIMEOUT_SEC + Timer H), below \
-                     PROXY_SELF_GATE_CPS_RATE={} (the deployment's whole new-call rate, which \
-                     either proxy of the pair admits alone): admitted calls would push out the \
-                     entries their CANCEL and ACK are routed by",
+                     PROXY_SELF_GATE_CPS_RATE={} (above the deployment's whole new-call rate, \
+                     which either proxy of the pair admits alone): admitted calls would push out \
+                     the entries their CANCEL and ACK are routed by",
                     branch_memo.max_entries,
                     branch_memo.max_bytes,
                     branch_memo.mean_ring_ms,
@@ -358,14 +358,15 @@ fn worker_source(env: &mut EnvReader, pod_namespace: &dyn Fn() -> Option<String>
 }
 
 /// `PROXY_HMAC_KEY`, the secret that signs the stickiness cookies: required,
-/// trimmed like every value, at least [`MIN_KEY_BYTES`] long.
+/// trimmed like every value, at least [`hmac::MIN_KEY_BYTES`] long.
 fn hmac_key(env: &mut EnvReader) -> String {
     let unset = env.raw("PROXY_HMAC_KEY").is_none();
     match env.present("PROXY_HMAC_KEY") {
-        Some(key) if key.len() >= MIN_KEY_BYTES => key,
+        Some(key) if key.len() >= hmac::MIN_KEY_BYTES => key,
         Some(key) => {
             env.refuse(format!(
-                "PROXY_HMAC_KEY must be at least {MIN_KEY_BYTES} bytes (got {})",
+                "PROXY_HMAC_KEY must be at least {} bytes (got {})",
+                hmac::MIN_KEY_BYTES,
                 key.len()
             ));
             String::new()
