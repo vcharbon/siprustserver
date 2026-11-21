@@ -3,7 +3,8 @@
 //! the closed signal are shared state a later run takes over.
 //!
 //! - A panic of the inner write is caught: its record is counted dropped
-//!   once, through the sink ([`CdrWriter::dropped`]), the panic counted under
+//!   once, through the sink ([`CdrWriter::dropped`]; in the registry alone
+//!   when that count panics too), the panic counted under
 //!   [`CDR_DRAINER`] and said at most once per [`LINE_INTERVAL`], and the
 //!   sink told to drop its partial state ([`CdrWriter::after_panic`]).
 //! - Any other panic ends the run. It is counted under [`CDR_DRAINER`], and a
@@ -128,10 +129,16 @@ impl Drainer {
     }
 
     /// The one count of a record handed to `inner` at `handed_at` whose write
-    /// counted nothing, through `inner`'s own drops.
+    /// counted nothing, through `inner`'s own drops; when that count panics,
+    /// the registry counts the record instead, its panic counted under
+    /// [`CDR_DRAINER`].
     fn unfinished(&self, why: CdrDrop, handed_at: Instant) {
         self.dropped.local();
-        self.inner.dropped(why, handed_at, &self.dropped.metrics);
+        let told = || self.inner.dropped(why, handed_at, &self.dropped.metrics);
+        if std::panic::catch_unwind(AssertUnwindSafe(told)).is_err() {
+            RESTARTS.survived(CDR_DRAINER);
+            self.dropped.metrics.bump_cdr_dropped(why);
+        }
     }
 
     /// The one count of a record whose write panicked: dropped for

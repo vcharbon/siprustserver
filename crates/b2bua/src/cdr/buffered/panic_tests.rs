@@ -45,12 +45,14 @@ fn a_call() -> Call {
 
 /// Takes `per_record` to write each record. Its next `write_panics` writes
 /// panic before they write, and its next `hook_panics` calls of
-/// `after_panic` panic; it remembers each `after_panic` call, each record its
-/// caller counted dropped through it, and its close.
+/// `after_panic` panic, and its next `drop_panics` counts of a record its
+/// caller drops through it; it remembers each `after_panic` call, each record
+/// its caller counted dropped through it, and its close.
 struct PanickySink {
     per_record: Duration,
     write_panics: AtomicUsize,
     hook_panics: AtomicUsize,
+    drop_panics: AtomicUsize,
     hooks: AtomicUsize,
     written: InMemoryCdrWriter,
     told: std::sync::Mutex<Vec<CdrDrop>>,
@@ -63,6 +65,7 @@ impl PanickySink {
             per_record,
             write_panics: AtomicUsize::new(write_panics),
             hook_panics: AtomicUsize::new(hook_panics),
+            drop_panics: AtomicUsize::new(0),
             hooks: AtomicUsize::new(0),
             written: InMemoryCdrWriter::new(),
             told: Default::default(),
@@ -119,6 +122,9 @@ impl CdrWriter for PanickySink {
     }
 
     fn dropped(&self, why: CdrDrop, _handed_at: Instant, metrics: &B2buaMetrics) {
+        if take(&self.drop_panics) {
+            panic!("expected: the sink's count of a dropped record panics");
+        }
         self.told.lock().unwrap().push(why);
         metrics.bump_cdr_dropped(why);
     }
@@ -180,6 +186,22 @@ async fn a_write_that_panics_counts_its_record_dropped_once_and_the_next_records
     rig.buf.close(Instant::now() + Duration::from_secs(1)).await;
     assert_eq!((rig.sink.written(), rig.dropped()), (2, 1), "the close counts nothing twice");
     assert_eq!(rig.metrics.cdr_drops(), [(CdrDrop::Panic, 1)]);
+}
+
+/// The sink's count of a record whose write panicked panics too: the record
+/// counts once, in the registry, and the same run writes on.
+#[tokio::test(start_paused = true)]
+async fn a_drop_count_that_panics_counts_its_record_once_in_the_registry() {
+    let sink = PanickySink::new(Duration::ZERO, 1, 0);
+    sink.drop_panics.store(1, Ordering::SeqCst);
+    let rig = Rig::new(sink, 3).await;
+    tokio::time::sleep(10 * MS).await;
+    assert_eq!((rig.sink.written(), rig.dropped()), (2, 1));
+    assert_eq!(rig.metrics.cdr_drops(), [(CdrDrop::Panic, 1)]);
+    assert!(rig.sink.told().is_empty(), "the sink's count panicked before it was told");
+    assert_eq!(rig.restarts(), 2, "the write's panic and its count's, both caught");
+    assert_eq!(rig.sink.hooks(), 1, "the same run told the sink to drop its partial state");
+    assert_eq!(rig.loops.ended(), None);
 }
 
 /// The sink's `after_panic` panics after a caught write panic: the run ends,
@@ -267,5 +289,6 @@ async fn a_record_sent_on_a_slot_reserved_before_the_queue_is_given_up_is_counte
     slot.send((a_call(), 2_000));
     closing.await.expect("the close returns");
     assert_eq!(rig.sink.written(), 0);
-    assert_eq!(rig.dropped(), 6, "the five queued and the one sent on its reserved slot");
+    let six = "the one whose write panicked, the four given up and the one sent on its slot";
+    assert_eq!(rig.dropped(), 6, "{six}");
 }

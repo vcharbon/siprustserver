@@ -29,6 +29,8 @@ mod brokers;
 mod confirms;
 mod connection_watch;
 mod declaration;
+#[cfg(test)]
+mod fault;
 mod link;
 mod resolver;
 mod session;
@@ -241,6 +243,8 @@ impl CdrWriter for RabbitMqCdrWriter {
         let Some(session) = self.session(&mut link).await else {
             return self.tally.dropped(handed_at, CdrDrop::NoBroker);
         };
+        #[cfg(test)]
+        fault::panic_if(payload == fault::PANICS_HOLDING_THE_LINK, "holding the link");
         let deadline = Instant::now() + self.settings.bounds.publish_timeout;
         let published = session.publish(&self.settings.queue, &payload, handed_at, deadline);
         if let Err(refused) = published.await {
@@ -303,5 +307,7 @@ impl CdrWriter for RabbitMqCdrWriter {
     }
 }
 
+#[cfg(test)]
+mod fault_tests;
 #[cfg(test)]
 mod tests;

@@ -83,7 +83,7 @@ impl Brokers {
 
     /// One connect attempt by `deadline`: each broker from the cursor in
     /// turn, its host resolved, its addresses connected and its handshakes
-    /// done within their share of the time left, until one opens a session
+    /// done within its one share of the time left, until one opens a session
     /// ([`Session::open`]). The cursor moves past each broker as it is tried,
     /// so a failed or dropped attempt leaves it past the last one tried; a
     /// session opened sets it to its broker.
@@ -189,9 +189,49 @@ mod tests {
                 resolver: BrokerResolver::new(Duration::from_secs(1)),
             },
         ];
+        let (failed, took) = attempt(listed, 600 * MS).await;
+        drop(release);
+        let said = failed.to_string();
+        assert!(said.contains("silent.invalid:5672: broker host unresolved"), "{said}");
+        assert!(said.contains(&format!("{next}: broker connect failed")), "{said}");
+        assert!(took >= 290 * MS && took < 600 * MS, "the attempt took {took:?}: half the bound");
+    }
+
+    /// The first broker's lookup answers after 400 ms, then its AMQP
+    /// handshake is never answered: its one share of the connect bound caps
+    /// the lookup and the handshake together, so it costs half the bound, and
+    /// the broker after it is tried within the rest.
+    #[tokio::test]
+    async fn a_broker_slow_in_two_phases_costs_one_share_of_the_bound() {
+        let unanswering = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = unanswering.local_addr().unwrap();
+        let lookup = move |_: &str, _: u16| {
+            std::thread::sleep(400 * MS);
+            Ok(vec![addr])
+        };
+        let next = refusing();
+        let listed = vec![
+            Broker {
+                uri: "amqp://slow.invalid/%2f".parse().unwrap(),
+                resolver: BrokerResolver::with_lookup(Arc::new(lookup), Duration::from_secs(1)),
+            },
+            Broker {
+                uri: format!("amqp://{next}/%2f").parse().unwrap(),
+                resolver: BrokerResolver::new(Duration::from_secs(1)),
+            },
+        ];
+        let (failed, took) = attempt(listed, 1_200 * MS).await;
+        let said = failed.to_string();
+        assert!(said.contains("slow.invalid:5672: AMQP handshake not done"), "{said}");
+        assert!(said.contains(&format!("{next}: broker connect failed")), "{said}");
+        assert!(took >= 580 * MS && took < 720 * MS, "the attempt took {took:?}: half the bound");
+    }
+
+    /// One connect attempt over `listed` from the first, bounded by `bound`:
+    /// why it failed, and how long it took.
+    async fn attempt(listed: Vec<Broker>, bound: Duration) -> (Unreached, Duration) {
         let mut brokers = Brokers::of(listed, 0);
-        let bounds =
-            CdrDeliveryBounds { connect_timeout: 600 * MS, ..CdrDeliveryBounds::default() };
+        let bounds = CdrDeliveryBounds { connect_timeout: bound, ..CdrDeliveryBounds::default() };
         let settings = RabbitMqCdrSettings {
             brokers: Vec::new(),
             queue: "cdr".into(),
@@ -202,12 +242,7 @@ mod tests {
         let tally = Tally::new(B2buaMetrics::new());
         let close_by = watch::Sender::new(None);
         let t0 = Instant::now();
-        let failed = brokers.open(&settings, t0 + 600 * MS, &tally, &close_by).await.err();
-        let took = t0.elapsed();
-        drop(release);
-        let said = failed.expect("no broker serves").to_string();
-        assert!(said.contains("silent.invalid:5672: broker host unresolved"), "{said}");
-        assert!(said.contains(&format!("{next}: broker connect failed")), "{said}");
-        assert!(took >= 290 * MS && took < 600 * MS, "the attempt took {took:?}: half the bound");
+        let failed = brokers.open(&settings, t0 + bound, &tally, &close_by).await.err();
+        (failed.expect("no broker serves"), t0.elapsed())
     }
 }

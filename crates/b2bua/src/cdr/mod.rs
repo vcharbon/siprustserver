@@ -155,7 +155,8 @@ pub trait CdrWriter: Send + Sync {
     /// `handed_at` that did not count it: the write panicked, or its caller
     /// cut it. The caller calls this once for such a record, and nothing else
     /// counts it. The default counts it into `metrics`; a sink that tells an
-    /// observer each end counts it as its own drops, the observer told.
+    /// observer each end counts it as its own drops, the observer told. When
+    /// this panics, the caller counts the record into `metrics` instead.
     fn dropped(&self, why: CdrDrop, handed_at: Instant, metrics: &B2buaMetrics) {
         let _ = handed_at;
         metrics.bump_cdr_dropped(why);

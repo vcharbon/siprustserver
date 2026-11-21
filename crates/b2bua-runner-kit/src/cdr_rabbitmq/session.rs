@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
-use amqp_connect::{connect_stream_sharing, open_over, try_by, BrokerStream, Connected};
+use amqp_connect::{connect_stream, open_over, try_by, BrokerStream, Connected};
 use b2bua::cdr::BrokerSessionEnd;
 use b2bua::metrics::B2buaMetrics;
 use lapin::{
@@ -115,6 +115,8 @@ impl Health {
     /// Ends the session for `why`: no further publish, the window closed (a
     /// publish waiting for a slot returns), the socket shut down. The first
     /// end alone is logged and counted, unless a retirement counted before.
+    /// The count comes before the end is set, so whoever sees the session
+    /// ended, on any thread, sees its counted reason.
     pub(super) fn end(&self, why: BrokerSessionEnd) {
         self.end_with(why, None);
     }
@@ -125,8 +127,8 @@ impl Health {
     }
 
     fn end_with(&self, why: BrokerSessionEnd, error: Option<&dyn std::fmt::Display>) {
-        let _ = self.ended_at.set(Instant::now());
         self.count(why, error);
+        let _ = self.ended_at.set(Instant::now());
         self.window.close();
         self.socket.kill();
     }
@@ -183,14 +185,16 @@ impl Session {
     /// Resolves `broker`'s host, connects, opens a channel, selects publisher
     /// confirms and declares the queue, then spawns the confirm tracker
     /// counting into `tally`, bounded by the writer's close deadline
-    /// `close_by`, and the connection watch. Everything is done by
-    /// `deadline`; the resolution, each TCP connect and the handshakes (TLS,
-    /// then AMQP through the declare) stop at their share of it, counted
-    /// with the `later` brokers the caller tries after this one
-    /// ([`amqp_connect::try_by`]). Dropping this future, or a failure
-    /// half-way, shuts down whatever socket it connected. The client is
-    /// handed the connected stream with auto-recovery off: a connection lost
-    /// is this session's end, and the writer opens the next one.
+    /// `close_by`, and the connection watch. The broker is given its share
+    /// of the time left to `deadline`, counted with the `later` brokers the
+    /// caller tries after this one ([`amqp_connect::try_by`]): the
+    /// resolution, the TCP connects and the handshakes (TLS, then AMQP
+    /// through the declare) are all done by that one cutoff, so a broker
+    /// slow in every phase costs no more than one slow in one. Dropping this
+    /// future, or a failure half-way, shuts down whatever socket it
+    /// connected. The client is handed the connected stream with
+    /// auto-recovery off: a connection lost is this session's end, and the
+    /// writer opens the next one.
     pub(super) async fn open(
         settings: &RabbitMqCdrSettings,
         broker: &mut Broker,
@@ -199,22 +203,20 @@ impl Session {
         tally: &Tally,
         close_by: watch::Receiver<Option<Instant>>,
     ) -> Result<Self, OpenError> {
+        let cutoff = try_by(deadline, later + 1);
         let uri = &broker.uri;
         let addrs = broker
             .resolver
-            .resolve(&uri.authority.host, uri.authority.port, try_by(deadline, later + 1))
+            .resolve(&uri.authority.host, uri.authority.port, cutoff)
             .await
             .map_err(OpenError::Resolve)?;
         let Connected { stream, socket: descriptor } =
-            connect_stream_sharing(uri, &settings.tls, &addrs, later, deadline)
-                .await
-                .map_err(OpenError::Connect)?;
+            connect_stream(uri, &settings.tls, &addrs, cutoff).await.map_err(OpenError::Connect)?;
         let socket = Arc::new(SocketKill::default());
         socket.arm(descriptor);
         let guard = KillOnDrop::new(socket.clone());
-        let handshake_by = try_by(deadline, later + 1);
         let (connection, channel) =
-            timeout_at(handshake_by, confirming_channel(settings, uri.clone(), stream))
+            timeout_at(cutoff, confirming_channel(settings, uri.clone(), stream))
                 .await
                 .map_err(|_| OpenError::AmqpTimedOut)??;
         guard.disarm();
@@ -342,6 +344,8 @@ impl Session {
             handed_at,
             deadline: Instant::now() + self.confirm_timeout,
             _slot: slot,
+            #[cfg(test)]
+            panics_the_tracker: payload == super::fault::PANICS_THE_TRACKER,
         };
         let Some(tracker) = &self.pending else {
             return Err(PublishRefused::Ended);

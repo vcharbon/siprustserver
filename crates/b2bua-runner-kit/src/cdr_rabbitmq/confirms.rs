@@ -23,6 +23,9 @@ pub(super) struct Pending {
     pub(super) handed_at: Instant,
     pub(super) deadline: Instant,
     pub(super) _slot: OwnedSemaphorePermit,
+    /// The tracker panics on this publish ([`super::fault`]).
+    #[cfg(test)]
+    pub(super) panics_the_tracker: bool,
 }
 
 /// How one confirm resolved.
@@ -83,8 +86,11 @@ async fn resolve_each(
     tally: &Tally,
     resolving: &mut Option<Instant>,
 ) {
-    while let Some(Pending { confirm, handed_at, deadline, _slot }) = rx.recv().await {
-        *resolving = Some(handed_at);
+    while let Some(pending) = rx.recv().await {
+        *resolving = Some(pending.handed_at);
+        #[cfg(test)]
+        super::fault::panic_if(pending.panics_the_tracker, "in the confirm tracker");
+        let Pending { confirm, handed_at, deadline, _slot, .. } = pending;
         let outcome = if health.ended() {
             // Only a confirm already received counts; nothing is awaited.
             match timeout(Duration::ZERO, confirm).await {

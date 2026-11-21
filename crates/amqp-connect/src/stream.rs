@@ -60,19 +60,6 @@ pub async fn connect_stream(
     addrs: &[SocketAddr],
     deadline: Instant,
 ) -> io::Result<Connected> {
-    connect_stream_sharing(uri, tls, addrs, 0, deadline).await
-}
-
-/// [`connect_stream`] for a caller that makes `later` more tries after these
-/// addresses by the same `deadline`: each address's share, and the TLS
-/// handshake's, counts them among the tries left.
-pub async fn connect_stream_sharing(
-    uri: &AMQPUri,
-    tls: &BrokerTls,
-    addrs: &[SocketAddr],
-    later: usize,
-    deadline: Instant,
-) -> io::Result<Connected> {
     let connector = match (&uri.scheme, tls.connector()) {
         (AMQPScheme::AMQP, _) => None,
         (AMQPScheme::AMQPS, Some(connector)) => Some(connector),
@@ -92,7 +79,7 @@ pub async fn connect_stream_sharing(
             last = timed_out();
             break;
         }
-        let by = try_by(deadline, addrs.len() - tried + later);
+        let by = try_by(deadline, addrs.len() - tried);
         match timeout_at(by, runtime.tcp_connect_addr(*addr)).await {
             Ok(Ok(s)) => {
                 connected = Some(s);
@@ -112,11 +99,9 @@ pub async fn connect_stream_sharing(
     let plain = AsyncTcpStream::Plain(tcp);
     let stream = match connector {
         None => plain,
-        Some(connector) => {
-            timeout_at(try_by(deadline, later + 1), plain.into_rustls(connector, host))
-                .await
-                .map_err(|_| timed_out())??
-        }
+        Some(connector) => timeout_at(deadline, plain.into_rustls(connector, host))
+            .await
+            .map_err(|_| timed_out())??,
     };
     Ok(Connected { stream, socket })
 }

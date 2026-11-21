@@ -15,7 +15,7 @@ fn lookup(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
     move |k| map.get(k).cloned()
 }
 
-fn a_call() -> Call {
+pub(super) fn a_call() -> Call {
     let raw = "INVITE sip:bob@example.com SIP/2.0\r\n\
         Via: SIP/2.0/UDP 10.0.0.9:5060;branch=z9hG4bK-sink\r\n\
         Max-Forwards: 70\r\n\
