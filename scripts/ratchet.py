@@ -13,9 +13,9 @@ An allowlist file holds settings and entries:
 `#` starts a comment. Against its version at a base revision, an allowlist may
 only lower or drop entries: a new entry, a raised number or a changed setting
 is a loosening. The one new entry allowed is a file git sees renamed from a
-listed one, the old entry gone and the number no higher; the one changed
-setting allowed is a `scan` or `exclude` path following a scan directory git
-sees renamed whole.
+listed one, the old entry gone and the number no higher; the changed settings
+allowed are a `scan` or `exclude` path following a scan directory git sees
+renamed whole, and `scan` directories added to a base that scans a list.
 
 Each lint measures its files itself (`listed` gives the paths) and words its
 own findings; a setup failure raises `SetupError`.
@@ -212,15 +212,29 @@ def follow_moves(setting, moved):
     return " ".join([key] + [follow(w) for w in words])
 
 
+def scan_grows(base_settings, settings):
+    """Whether `settings` are `base_settings` with only `scan` directories
+    added, the base already scanning a list (no `scan` scans the whole root,
+    so a first `scan` line narrows it)."""
+    def split(lines):
+        scans = [w for x in lines if x.split()[0] == "scan" for w in x.split()[1:]]
+        return scans, [x for x in lines if x.split()[0] != "scan"]
+
+    base_scans, base_rest = split(base_settings)
+    scans, rest = split(settings)
+    return bool(base_scans) and rest == base_rest and set(base_scans) <= set(scans)
+
+
 def against_base(allow, base, renamed, moved):
     """What `allow` loosens against its `base` version, whose settings `allow`
-    keeps as they are or with their `scan` and `exclude` paths following the
-    directories git sees `moved`."""
+    keeps as they are, with their `scan` and `exclude` paths following the
+    directories git sees `moved`, or with `scan` directories added."""
     if base is None:
         return []
     bad = []
     base_settings = [follow_moves(x, moved) for x in base.settings]
-    if allow.settings != base.settings and allow.settings != base_settings:
+    if not (allow.settings == base.settings or allow.settings == base_settings
+            or scan_grows(base_settings, allow.settings)):
         gone = [x for x in base_settings if x not in allow.settings]
         new = [x for x in allow.settings if x not in base_settings]
         change = "; ".join([f"was `{x}`" for x in gone] + [f"now `{x}`" for x in new])

@@ -1,6 +1,6 @@
 ---
 name: delete-comment
-description: Sweep the comments of a crate (or a directory of Rust sources) - classify each as tautology, stale, excuse, decision or contract, delete what goes, move decisions into ADRs, file the hacks the excuses covered, and lower the comment ratchet. Use when asked to delete, scrub, audit or classify comments, or to run the comment sweep on a crate.
+description: Sweep the comments of a crate (or a directory of Rust sources) - classify each as tautology, stale, excuse, decision or contract, delete what goes, move decisions into ADRs, file the hacks the excuses covered, and put the crate under the comment ban. Use when asked to delete, scrub, audit or classify comments, or to run the comment sweep on a crate.
 argument-hint: "crates/<name> [crates/<other> ...]"
 ---
 
@@ -50,14 +50,16 @@ repository root; `T=.claude/skills/delete-comment/comments.py`.
    whole run when an id no longer matches the source, so apply before any other edit to the
    crates.
 
-8. **Prove.** All four must hold:
+8. **Prove.** All three must hold:
    - `$T same-code -C . --base <base> <crate>...` prints `0 with code changes`;
    - the crates' tests pass with unchanged counts, and `cargo doc` of the crates has no new
      warning (a deleted doc comment can leave an intra-doc link dangling);
-   - `scripts/comments.py --update` lowered or removed the crates' entries in
-     `comments.allow`, and `scripts/comments.py` passes;
    - `$T list <crate>...` shows only doc comments and the allowed one-line forms.
 
-9. **Report.** The counts per category and action, the step 1 estimate against the lines the
-   diff actually removed (`git diff --stat`), the ADRs written or extended, and the issues
-   filed with their criticity.
+9. **Activate the ban.** Add one `scan <crate dir>` line per swept crate to `comments.clean`,
+   then `scripts/comments.py` passes: the crate is held to no banned comment from now on. A
+   crate never leaves the list.
+
+10. **Report.** The counts per category and action, the step 1 estimate against the lines the
+    diff actually removed (`git diff --stat`), the ADRs written or extended, and the issues
+    filed with their criticity.

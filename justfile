@@ -117,14 +117,15 @@ test-cpu-quota:
 lint: file-size comments purity panic-sites audit-gate
     cargo clippy --workspace --all-targets
 
-# In-body comment ban: a comment is a doc comment stating its item's contract;
-# every other comment is banned but a lone one-line `// SAFETY:` or ADR
-# pointer. A file `comments.allow` lists holds at most its listed count of
-# banned lines (scripts/comments.py). The pre-commit hook checks the staged files.
+# In-body comment ban on the modules comments.clean lists, those the
+# delete-comment skill swept: a comment is a doc comment stating its item's
+# contract; every other comment is banned but a lone one-line `// SAFETY:` over
+# unsafe code or a bare ADR pointer (scripts/comments.py). The pre-commit hook
+# checks the staged files.
 comments:
     scripts/comments.py
 
-# Lowers each comments.allow entry to its file's count and removes the entries
+# Lowers each comments.clean entry to its file's count and removes the entries
 # of files at 0; never raises nor adds one.
 comments-update:
     scripts/comments.py --update

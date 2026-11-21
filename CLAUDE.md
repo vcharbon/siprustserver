@@ -10,7 +10,8 @@ To show the user an html file or a URL: `xdg-open <path or URL>`.
   ADR-00xx in one line, never retell it.
 - Every other comment is banned: in a body, unclear code takes a better name or an extracted
   function. The exceptions are a lone `// SAFETY:` above an `unsafe` block and a bare
-  `// ADR-00xx [§n]` pointer. `just comments` checks it; `comments.allow` only goes down.
+  `// ADR-00xx [§n]` pointer. `just comments` holds the modules `comments.clean` lists to it: a
+  module joins once the delete-comment skill has swept it, and never leaves.
 - A comment that has to justify wrong behavior is never written: report the defect. A comment
   that needs more than ~5 lines to justify a behavior belongs in an ADR, with a one-line pointer.
 - Implement correct behavior unless asked to delay a named corner case.

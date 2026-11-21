@@ -139,7 +139,7 @@ class Repo:
         self.git("init", "-q")
         self.git("config", "maintenance.auto", "false")
         self.git("config", "gc.auto", "0")
-        self.write("comments.allow", allow)
+        self.write("comments.clean", allow)
 
     def git(self, *args):
         subprocess.run(["git", "-C", self.root, *args], check=True, capture_output=True)
@@ -197,7 +197,7 @@ class Ratchet(unittest.TestCase):
         repo = self.repo(SETTINGS + "src/a.rs 2\n")
         repo.write("src/a.rs", body(2))
         repo.commit()
-        repo.write("comments.allow", SETTINGS + "src/a.rs 3\n")
+        repo.write("comments.clean", SETTINGS + "src/a.rs 3\n")
         repo.write("src/a.rs", body(3))
         rc, out = repo.run("--base", "HEAD")
         self.assertEqual(rc, 1)
@@ -211,7 +211,34 @@ class Ratchet(unittest.TestCase):
         self.assertEqual(repo.run()[0], 1)
         rc, out = repo.run("--update")
         self.assertEqual(rc, 0, out)
-        self.assertEqual(repo.read("comments.allow"), SETTINGS + "src/a.rs 1\n")
+        self.assertEqual(repo.read("comments.clean"), SETTINGS + "src/a.rs 1\n")
+
+    def test_a_module_off_the_list_is_not_held(self):
+        repo = self.repo(SETTINGS)
+        repo.write("src/a.rs", body(0))
+        repo.write("lib/b.rs", body(3))
+        self.assertEqual(repo.run()[0], 0)
+
+    def test_a_module_joins_and_never_leaves(self):
+        repo = self.repo(SETTINGS)
+        repo.write("src/a.rs", body(0))
+        repo.write("lib/b.rs", body(0))
+        repo.commit()
+        repo.write("comments.clean", SETTINGS + "scan lib\n")
+        rc, out = repo.run("--base", "HEAD")
+        self.assertEqual(rc, 0, out)
+        repo.commit()
+        repo.write("comments.clean", SETTINGS)
+        rc, out = repo.run("--base", "HEAD")
+        self.assertEqual(rc, 1)
+        self.assertIn("changes its settings", out)
+
+    def test_a_list_naming_no_module_is_refused(self):
+        repo = self.repo("limit 0\ntest-limit 0\n")
+        repo.write("src/a.rs", body(0))
+        rc, out = repo.run()
+        self.assertEqual(rc, 2)
+        self.assertIn("names no module", out)
 
     def test_staged_checks_the_index_blob(self):
         repo = self.repo(SETTINGS)

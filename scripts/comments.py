@@ -5,22 +5,24 @@
 
 A comment is a doc comment (`///`, `//!`, `/** */`, `/*! */`) stating its
 item's contract. Every other comment is banned, trailing ones included, except
-a one-line `// SAFETY: ...` or a bare one-line ADR pointer (`// ADR-0051 §3`)
-standing alone, with no comment line above or below it
-(scripts/rust_comments.py has the lexer and the rule).
+a one-line `// SAFETY: ...` over an `unsafe` block or `unsafe impl`, or a bare
+one-line ADR pointer (`// ADR-0051 §3`), standing alone, with no comment line
+above or below it (scripts/rust_comments.py has the lexer and the rule).
 
-A scanned file may hold `limit` banned comment lines, a test file
-`test-limit` (both 0), unless the allowlist names it with a budget: a listed
-file may not grow past it. The allowlist (`comments.allow` at the root of
-DIR's repository by default) has file-size.py's settings and entries, and only
-ever tightens against its version at a base (REV, by default the merge-base of
-HEAD and `develop`; HEAD under --staged): scripts/ratchet.py.
+The ban holds the modules the list (`comments.clean` at the root of DIR's
+repository by default) names as `scan` directories: those the delete-comment
+skill has swept clean. A list with no `scan` line is refused. A scanned file
+may hold `limit` banned comment lines, a test file `test-limit` (both 0),
+unless the list names it with a budget it may not grow past. The list has
+file-size.py's settings and entries, and only ever tightens against its
+version at a base (REV, by default the merge-base of HEAD and `develop`; HEAD
+under --staged): a module joins, never leaves (scripts/ratchet.py).
 
-  (no flag)  every scanned file against its budget, and the allowlist
+  (no flag)  every scanned file against its budget, and the list
              against the base; an entry above its file's count, or naming a
              file at 0 or gone, is stale and fails too (`--update` fixes it)
   --staged   the staged blobs of the staged files only, and the staged
-             allowlist against HEAD's (a pre-commit hook)
+             list against HEAD's (a pre-commit hook)
   --update   lowers each entry to its file's count, moves the entry of a
              renamed file, removes the entries of files at 0 or gone
   --report   every file holding banned comments, most first, with its budget
@@ -37,7 +39,7 @@ import rust_comments  # noqa: E402
 from ratchet import SetupError, git, rev_exists, default_base, loosened  # noqa: E402
 
 UNIT = "banned comment lines"
-BASE_HINT = "the allowlist only tightens: a banned comment is removed, never listed or raised"
+BASE_HINT = "the list only tightens: a module joins and never leaves; a banned comment is removed, never listed"
 FIX_HINT = ("a comment is a doc comment stating its item's contract; unclear code takes a "
             "better name or an extracted function, a decision an ADR and a one-line pointer")
 
@@ -96,11 +98,17 @@ def cmd_check(root, allow, base):
     loose = loosened(root, allow, base, base, False)
     rc = report(grown, FIX_HINT if grown else None)
     rc = report(loose, BASE_HINT if loose else None) or rc
-    return report(old, "run `comments.py --update` and commit the allowlist" if old else None) or rc
+    return report(old, "run `comments.py --update` and commit the list" if old else None) or rc
+
+
+def modules_listed(allow):
+    if not allow.scan:
+        raise SetupError(f"{allow.path} names no module (`scan <dir>`): list the cleaned ones")
+    return allow
 
 
 def cmd_staged(root, allow_rel):
-    allow = ratchet.staged_allow(root, allow_rel, 0, 0)
+    allow = modules_listed(ratchet.staged_allow(root, allow_rel, 0, 0))
     found = measure_files(
         root, ratchet.staged(root, allow),
         lambda rel: git(root, "cat-file", "blob", f":{rel}", binary=True).decode(errors="replace"))
@@ -134,18 +142,18 @@ def cmd_report(root, allow):
         budget = allow.budget(rel)
         print(f"{n:7d}  {rel}  (budget {budget}{', OVER' if n > budget else ''})")
     print(f"{len(rows)} file(s) hold {sum(n for n, _ in rows)} {UNIT}; "
-          f"{len(allow.entries)} allowlist entries")
+          f"{len(allow.entries)} list entries; modules: {' '.join(allow.scan)}")
     return 0
 
 
 def load_allow(root, allow_rel):
-    return ratchet.load_allow(root, allow_rel, 0, 0)
+    return modules_listed(ratchet.load_allow(root, allow_rel, 0, 0))
 
 
 def run(a):
     root = git(a.root, "rev-parse", "--show-toplevel").strip()
     if a.staged and a.base:
-        raise SetupError("--staged holds the allowlist to HEAD; --base does not apply")
+        raise SetupError("--staged holds the list to HEAD; --base does not apply")
     if a.staged:
         return cmd_staged(root, a.allow)
     if a.base and not rev_exists(root, a.base):
@@ -162,8 +170,8 @@ def run(a):
 def main():
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument("-C", dest="root", default=".", help="any directory of the repository")
-    p.add_argument("--allow", default="comments.allow", help="relative to the root")
-    p.add_argument("--base", help="the revision the allowlist is held to (not with --staged)")
+    p.add_argument("--allow", default="comments.clean", help="relative to the root")
+    p.add_argument("--base", help="the revision the list is held to (not with --staged)")
     mode = p.add_mutually_exclusive_group()
     mode.add_argument("--staged", action="store_true")
     mode.add_argument("--update", action="store_true")
