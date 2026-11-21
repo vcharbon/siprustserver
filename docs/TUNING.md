@@ -205,7 +205,7 @@ behaviour for another; a value missing where required, or malformed, refuses the
 | `B2BUA_OUTBOUND_PROXY`, `B2BUA_CONTACT_ADDRESS` | required proxied, refused standalone | the proxy's worker-facing `ip:port` every b-leg request goes through; the address the worker's Contacts state |
 | `B2BUA_LISTEN`, `B2BUA_METRICS` | `0.0.0.0:5060`, `0.0.0.0:9091` | the signalling socket; the probe routes and `/metrics` |
 | `B2BUA_ORDINAL`, `POD_UID` | `w0`, a per-boot token | the worker's ordinal and its boot identity (ADR-0055 §6); `POD_UID` is required when replication discovers its peers |
-| `B2BUA_CLUSTER_KEY` | none, required with `B2BUA_REPL` | the key every worker shares to sign and verify the via-extension of its own requests (ADR-0055 §12), 16 to 64 bytes; unset, a worker states and trusts none |
+| `B2BUA_CLUSTER_KEY` | none, required with `B2BUA_REPL` | the key every worker shares to sign and verify the via-extension of its own requests (ADR-0055 §12), 32 to 64 bytes (RFC 2104 §3); unset, a worker states and trusts none |
 | `PROXY_CLUSTER_KEY` | none | the workers' key, which the proxy signs its dead notices with (ADR-0050 §3); unset, the proxy sends no notice |
 | `B2BUA_REPL`, `B2BUA_REPL_LISTEN`, `B2BUA_REPL_PORT` | off, `0.0.0.0:9092`, the listen port | replication, its listener, the port peers are reached on; refused standalone |
 | `B2BUA_PEERS`, `B2BUA_REPL_SERVICE`, `B2BUA_NAMESPACE` | none, `b2bua-worker`, `POD_NAMESPACE` else `sip-test` | a fixed peer list, else the EndpointSlices of that Service in that namespace |

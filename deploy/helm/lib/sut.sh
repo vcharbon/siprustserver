@@ -57,7 +57,7 @@ sut_cluster_key() {
   kubectl -n "$NS" get secret b2bua-worker-cluster-key >/dev/null 2>&1 && return 0
   log "drawing the workers' cluster key (secret b2bua-worker-cluster-key)"
   kubectl -n "$NS" create secret generic b2bua-worker-cluster-key \
-    --from-literal=key="$(head -c 24 /dev/urandom | base64 | tr -d '\n')" >/dev/null \
+    --from-literal=key="$(head -c 32 /dev/urandom | base64 | tr -d '\n')" >/dev/null \
     || die "cannot create secret b2bua-worker-cluster-key in $NS"
 }
 

@@ -51,7 +51,7 @@
 //!   POD_UID         worker identity, the pod UID (downward API); required with
 //!                   discovered peers; unset in a static pool: a per-boot token
 //!   B2BUA_CLUSTER_KEY the key the cluster's workers share to sign the via-extension
-//!                   (16..64 bytes; required with B2BUA_REPL on; unset: none
+//!                   (32..64 bytes; required with B2BUA_REPL on; unset: none
 //!                   stated, none trusted) — ADR-0055 §12
 //!   B2BUA_CDR_QUEUE buffered-CDR submit queue depth    (default 1024, at most 1048576; 0 = unbuffered, refused beside a RabbitMQ URL or a CDR file)
 //!   B2BUA_CDR_RABBITMQ_URL / _QUEUE / _DECLARE / _MAX_LEN / _WINDOW / _*_TIMEOUT_MS / _BACKOFF*_MS

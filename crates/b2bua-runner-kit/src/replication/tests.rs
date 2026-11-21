@@ -5,7 +5,8 @@ use std::collections::HashMap;
 fn lookup(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
     let mut map: HashMap<String, String> =
         pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
-    map.entry("B2BUA_CLUSTER_KEY".into()).or_insert_with(|| "0123456789abcdef".into());
+    map.entry("B2BUA_CLUSTER_KEY".into())
+        .or_insert_with(|| "0123456789abcdef0123456789abcdef".into());
     map.entry("POD_UID".into()).or_insert_with(|| "uid-of-this-pod".into());
     move |k| map.get(k).cloned()
 }

@@ -226,9 +226,17 @@ fn the_metrics_address_reads_an_ipv6_address_without_brackets() {
     assert_eq!(cfg.metrics, "[2001:db8::9]:9090".parse().unwrap());
 }
 
+/// The cluster key holds at least SHA-256's 32-byte output: 31 bytes refuse
+/// the boot, 32 boot.
 #[test]
 fn a_cluster_key_out_of_its_bounds_refuses_the_boot() {
-    refused(&[("PROXY_CLUSTER_KEY", "short")], "PROXY_CLUSTER_KEY");
+    let errors = boot(&[("PROXY_CLUSTER_KEY", &"k".repeat(31))]).expect_err("31 bytes");
+    assert!(
+        errors.iter().any(|e| e == "PROXY_CLUSTER_KEY must hold 32 to 64 bytes, got 31"),
+        "{errors:?}"
+    );
+    let cfg = boot(&[("PROXY_CLUSTER_KEY", &"k".repeat(32))]).expect("32 bytes");
+    assert!(cfg.cluster_key.is_some());
 }
 
 #[test]

@@ -229,7 +229,7 @@ when its next request arrives. This prevents a burst of traffic on each failover
 2. **A fast link between all the workers.** The round trip must complete well below the sync
    cap. Put the pool in one site.
 3. **One shared key, on the workers and on the proxies.** Each worker gets the same
-   `B2BUA_CLUSTER_KEY`. A worker with replication on refuses to start without it. Give the same
+   `B2BUA_CLUSTER_KEY`, 32 to 64 bytes of text. A worker with replication on refuses to start without it. Give the same
    key to each proxy as `PROXY_CLUSTER_KEY`. A proxy with no key cannot tell the backups that a
    worker is dead. The calls with work in flight then wait until Kubernetes removes the pod,
    which takes minutes.

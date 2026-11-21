@@ -82,7 +82,7 @@ pub struct RunnerEnv {
     /// peers. Unset in a static pool: a per-boot token drawn from the OS RNG.
     pub identity: Option<String>,
     /// `B2BUA_CLUSTER_KEY` — the secret every worker of the cluster shares to
-    /// sign the via-extension on its own requests (ADR-0055 §12), 16 to 64
+    /// sign the via-extension on its own requests (ADR-0055 §12), 32 to 64
     /// bytes. Unset: the worker states none and trusts none.
     pub cluster_key: Option<sip_ids::SigningKey>,
     /// `B2BUA_CONCURRENCY` — handler concurrency ceiling (default 8192; a
