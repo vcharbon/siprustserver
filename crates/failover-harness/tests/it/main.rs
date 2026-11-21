@@ -15,6 +15,7 @@ mod a_returned_primary_serves_its_dialogs;
 mod abandoned_callee_via_lb;
 mod answer_lost;
 mod answer_lost_with_primary_no_answer;
+mod answered_invite_copy_holds_the_takeover;
 mod answered_request_repeated_at_the_takeover;
 mod away_backup_among_three_workers;
 mod away_backup_support;
