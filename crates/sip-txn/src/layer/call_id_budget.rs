@@ -309,6 +309,14 @@ impl Budgets {
         self.entries.insert(call_id.to_string(), entry);
     }
 
+    /// A transaction of `call_id`, [`opened`](Self::opened) attributed to no
+    /// call, is attributed to `call_ref` now.
+    pub(super) fn attributed(&mut self, call_id: &str, call_ref: &str) {
+        if let Some(entry) = self.entries.get_mut(call_id) {
+            note(&mut entry.call_refs, call_ref);
+        }
+    }
+
     /// A transaction of `call_id`, [`opened`](Self::opened) before, left the
     /// layer.
     pub(super) fn closed(&mut self, call_id: &str) {

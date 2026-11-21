@@ -21,7 +21,9 @@ use super::admit;
 use super::deferred_parks::DeferredParks;
 use super::owed::OwedAnswer;
 use super::peer_metrics::classify_b2bua_peer;
-use super::resolve::{initial_invite_copy, replica_takeover, resolve, InitialInvite};
+use super::resolve::{
+    attributed_on_resolution, initial_invite_copy, replica_takeover, resolve, InitialInvite,
+};
 use super::responses::build_options_health_response;
 use super::turn::Turn;
 use super::txn_event::Arrival;
@@ -150,14 +152,13 @@ pub(super) async fn on_event(
     if res.call_ref.is_none() {
         // Acting-backup takeover BACKSTOP. The normal in-dialog key is the R-URI
         // `callref` param the B2BUA Contact stamps and the proxy preserves under
-        // loose routing — so `resolve` (above) already keys the dialog from it,
-        // and sip-txn `extract_ruri_call_ref` attributes the server txn by the
-        // SAME key (the self-release count gate, ADR-0014). This branch only fires
-        // when that param is absent AND our in-memory `sip_index` is empty — a
-        // pure backup that never primary-served the call. Re-key the dialog from
-        // the replica store's SIP index (the puller imported it) before declaring
-        // the event unroutable, so a failed-over in-dialog request is not silently
-        // dropped and the dialog can still terminate on the backup.
+        // loose routing — so `resolve` (above) already keys the dialog from it.
+        // This branch only fires when that param is absent AND our in-memory
+        // `sip_index` is empty — a pure backup that never primary-served the
+        // call. Re-key the dialog from the replica store's SIP index (the puller
+        // imported it) before declaring the event unroutable, so a failed-over
+        // in-dialog request is not silently dropped and the dialog can still
+        // terminate on the backup.
         match replica_takeover(ctx, &event).await {
             Ok(Some(hit)) => res.found_by_index(hit, &event),
             Ok(None) => {}
@@ -171,6 +172,7 @@ pub(super) async fn on_event(
             return;
         }
     };
+    attach_arrival(ctx, &event, &call_ref).await;
 
     // ── Setup-CANCEL mark ──────────────────────────────────────────────
     // An out-of-dialog CANCEL means the txn layer just finalized the initial
@@ -258,6 +260,23 @@ pub(super) async fn on_event(
         }
         let admitted = item.unborn.is_some();
         OwedAnswer::of(ctx).render(&item.event, why, owed, admitted).await;
+    }
+}
+
+/// Attribute the server transaction of the request `event` carries to
+/// `call_ref`, the call it resolved to, when its Request-URI named none
+/// ([`attributed_on_resolution`]), as the transaction layer attributes one
+/// whose Request-URI names it: the self-release count (ADR-0014) and the
+/// call's release then reach it. Done before the request's turn is queued, so
+/// every command a turn or a release sends for the call follows it.
+async fn attach_arrival(ctx: &RouterCtx, event: &CallEvent, call_ref: &str) {
+    let CallEvent::Sip { message, .. } = event else { return };
+    let SipMessage::Request(req) = message.as_ref() else { return };
+    if !attributed_on_resolution(req) {
+        return;
+    }
+    if let Some(key) = sip_txn::ServerTxnKey::of(req) {
+        let _ = ctx.txn.attach_server_to_call(key, call_ref).await;
     }
 }
 

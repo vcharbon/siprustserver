@@ -268,7 +268,7 @@ impl Owner {
     /// Add `id` to `call_ref`'s live transactions, in lockstep with a map
     /// insert. A txn with no `call_ref` (out-of-dialog initial INVITE /
     /// OPTIONS) is not indexed.
-    fn track_call_ref(&mut self, call_ref: &Option<String>, id: &TxnId) {
+    pub(super) fn track_call_ref(&mut self, call_ref: &Option<String>, id: &TxnId) {
         let Some(cr) = call_ref else { return };
         let txns = self.txn_index.entry(cr.clone()).or_default();
         match id {

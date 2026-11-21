@@ -145,6 +145,9 @@ pub(crate) struct MetricsInner {
     /// In-dialog INVITE server transactions left without a final at their
     /// call's release, answered there ([`TransactionLayer::answer_unanswered_invites_of_call`](crate::TransactionLayer::answer_unanswered_invites_of_call)).
     pub released_unanswered_invites_answered: AtomicU64,
+    /// Server transactions the consumer resolved to a call other than the one
+    /// they are attributed to ([`TransactionLayer::attach_server_to_call`](crate::TransactionLayer::attach_server_to_call)).
+    pub call_attach_refused: AtomicU64,
     /// Outbound sends the socket refused for a reason other than a full send
     /// buffer (counted by the endpoint as would-block): ENOBUFS, a filter's
     /// EPERM, an unreachable peer. Swallowed so a send error never aborts the
@@ -201,6 +204,7 @@ impl MetricsInner {
             unanswered_forgotten: AtomicU64::new(0),
             released_unanswered_forgotten: AtomicU64::new(0),
             released_unanswered_invites_answered: AtomicU64::new(0),
+            call_attach_refused: AtomicU64::new(0),
             send_errors: AtomicU64::new(0),
             message_budget_trips: AtomicU64::new(0),
             message_budget_uncounted: AtomicU64::new(0),
@@ -478,6 +482,12 @@ impl TransactionMetrics {
     /// call's release, answered there (counter).
     pub fn released_unanswered_invites_answered(&self) -> u64 {
         self.inner.released_unanswered_invites_answered.load(Ordering::Relaxed)
+    }
+
+    /// Server transactions kept on their call against a resolution to another
+    /// (counter).
+    pub fn call_attach_refused(&self) -> u64 {
+        self.inner.call_attach_refused.load(Ordering::Relaxed)
     }
 
     /// Outbound sends the socket refused, a full send buffer aside (counter).

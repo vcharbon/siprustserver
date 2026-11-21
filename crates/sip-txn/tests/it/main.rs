@@ -11,6 +11,7 @@ mod common;
 mod absorb_100;
 mod accepted;
 mod accepted_client;
+mod attach;
 mod bounded_queue;
 mod branch_case;
 mod branch_collision;

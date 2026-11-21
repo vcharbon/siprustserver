@@ -174,6 +174,7 @@ pub fn txn_metrics_text(m: &sip_txn::TransactionMetrics) -> String {
     c::RELEASED_UNANSWERED_INVITES_ANSWERED
         .render_value(&mut s, m.released_unanswered_invites_answered());
     c::RELEASED_UNANSWERED_FORGOTTEN.render_value(&mut s, m.released_unanswered_forgotten());
+    c::CALL_ATTACH_REFUSED.render_value(&mut s, m.call_attach_refused());
     let rows = m.retransmit_rows().into_iter().map(|row| {
         let mut labels = vec![row.ladder.to_owned(), row.method];
         labels.extend(row.code.map(|code| code.to_string()));

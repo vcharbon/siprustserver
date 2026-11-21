@@ -32,6 +32,7 @@
 //! `accepted` (RFC 6026 §7.2: a client INVITE after its 2xx, and who ACKs it) ·
 //! `orphan` (a released call's client transactions, ADR-0034) ·
 //! `commands` (the command funnel's dispatch) · `server` (§17.2 UAS FSM) ·
+//! `attach` (a server transaction attributed to the call the consumer found) ·
 //! `trying` (§17.2.1: an INVITE's first provisional) · `timer_g` (§17.2.1: a
 //! non-2xx final re-sent until its ACK) · `server_cancel` (§9.2: a CANCEL of a server
 //! INVITE) · `shrink` (a drained table's memory returned) · `lifetime` (when a transaction leaves the map:
@@ -49,6 +50,7 @@
 //! §17.2.3 identity).
 
 mod accepted;
+mod attach;
 mod backlog;
 mod bind;
 mod bound_report;

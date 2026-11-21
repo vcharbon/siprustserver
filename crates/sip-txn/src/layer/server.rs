@@ -278,13 +278,6 @@ impl Owner {
 
         // ── New server transaction ─────────────────────────────────────────────
 
-        // Attribute the server txn to its call so the B2BUA's acting-backup
-        // self-release (ADR-0014) can count "transactions still serving this
-        // call". An in-dialog request the proxy routes to the B2BUA carries the
-        // `callRef` in its Request-URI (the dialog remote target = the B2BUA
-        // Contact, which stamps it) — the same key the router resolves on. An
-        // out-of-dialog request (initial INVITE / OPTIONS keepalive) has no
-        // `callRef` param yet → `None`.
         let call_ref = extract_ruri_call_ref(&req);
 
         let head = NewTransaction {
@@ -472,11 +465,16 @@ fn state_after(kind: TxnKind, status: u16) -> TxnState {
     }
 }
 
-/// The Request-URI `callRef` param, URL-decoded (the B2BUA's
-/// `build_call_contact` percent-encodes it). URI parameter names match
-/// case-insensitively per RFC 3261 §19.1.1. `None` for an out-of-dialog request,
-/// which carries no such param. Attributes a server transaction to its call
-/// (ADR-0014 self-release counting).
+/// The call a new server transaction is attributed to as it opens: the
+/// Request-URI `callRef` param, URL-decoded (the B2BUA's `build_call_contact`
+/// percent-encodes it), matched case-insensitively (RFC 3261 §19.1.1); the
+/// key the router resolves on when it is there. An in-dialog request whose
+/// remote target is the B2BUA's Contact carries it. `None` for an
+/// out-of-dialog request and for one an element rewrote the Request-URI of:
+/// the router attributes the latter once it finds the call by dialog identity
+/// ([`TransactionLayer::attach_server_to_call`](crate::TransactionLayer::attach_server_to_call)).
+/// The attribution is what the self-release count (ADR-0014) and a release's
+/// forget and answer read.
 fn extract_ruri_call_ref(req: &SipRequest) -> Option<String> {
     req.request_uri().param("callRef").and_then(ParamValue::as_str).map(decode_param)
 }

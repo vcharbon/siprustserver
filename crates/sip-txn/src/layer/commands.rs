@@ -40,6 +40,9 @@ impl Owner {
             Command::RelinquishUnansweredServer { key, reply } => {
                 self.relinquish_unanswered_server(&key, reply)
             }
+            Command::AttachServerToCall { key, call_ref, reply } => {
+                let _ = reply.send(self.attach_server_to_call(&key, &call_ref));
+            }
             Command::RelinquishClient { branch, reply } => {
                 self.relinquish_client(endpoint, &branch, reply).await
             }

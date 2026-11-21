@@ -205,6 +205,12 @@ pub const RELEASED_UNANSWERED_FORGOTTEN: Family = Family::counter(
     "Non-INVITE server transactions with no final forgotten at their call's release (the handler died or its answer never came), so the retransmission reaches the orphan path.",
 );
 
+pub const CALL_ATTACH_REFUSED: Family = Family::counter(
+    "b2bua_txn_call_attach_refused_total",
+    Labels::None,
+    "Server transactions the router resolved by dialog identity to a call other than the one they are attributed to: each keeps its call. Zero unless resolution and attribution disagree.",
+);
+
 pub const RETRANSMITS: Family = Family::counter(
     "b2bua_txn_retransmits_total",
     RETRANSMIT_LABELS,
