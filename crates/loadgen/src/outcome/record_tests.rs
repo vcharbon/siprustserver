@@ -272,8 +272,8 @@ fn a_call_never_placed_has_no_record() {
 #[ignore = "slow lane: loadgen"]
 fn an_unanswered_in_dialog_request_is_a_failure_without_a_code() {
     let mut wire = WireFacts { bye: Some(Some(200)), ..answered() };
-    wire.pending.insert(2, ("INVITE".into(), 3_000));
-    wire.pending.insert(3, ("BYE".into(), 3_500));
+    wire.pending.insert((2, "INVITE".into()), ("INVITE".into(), 3_000));
+    wire.pending.insert((3, "BYE".into()), ("BYE".into(), 3_500));
     let r = record(&wire, &timeout());
     assert_eq!(
         r["failures"],
@@ -327,7 +327,7 @@ fn a_leg_s_failed_request_is_a_failure_naming_the_leg() {
     let mut callee =
         LegFacts { role: "callee".into(), final_code: Some(200), ..LegFacts::default() };
     callee.failures.push(refer);
-    callee.pending.insert(2002, ("INFO".into(), 8));
+    callee.pending.insert((2002, "INFO".into()), ("INFO".into(), 8));
     let r = build(
         &META,
         &WireFacts { legs: vec![callee], bye: Some(Some(200)), ..answered() },

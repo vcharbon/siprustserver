@@ -50,6 +50,11 @@ struct Bye {
     at_ms: i64,
 }
 
+/// A side's in-dialog requests awaiting a final, by CSeq number and method
+/// (forked early dialogs number apart, so one number may name two requests):
+/// their method and when they were first sent.
+pub(crate) type Pending = HashMap<(u32, String), (String, i64)>;
+
 /// One of a side's in-dialog requests, as its final judges it.
 pub(super) struct Request<'a> {
     pub(super) method: &'a str,
@@ -280,28 +285,24 @@ fn forget(failures: &mut Vec<WireFailure>, failure: &WireFailure) {
 /// request's failure only: the call's ending stays as the seal left it,
 /// never `cut`.
 pub(super) fn settle_pending(
-    (pending, failures, finals): (
-        &mut HashMap<u32, (String, i64)>,
-        &mut Vec<WireFailure>,
-        &mut Finals,
-    ),
+    (pending, failures, finals): (&mut Pending, &mut Vec<WireFailure>, &mut Finals),
     method: &str,
     cseq: u32,
     (code, raw): (u16, &[u8]),
     now: i64,
 ) {
-    let held = pending.get(&cseq).is_some_and(|(m, _)| m == method && m != "BYE");
-    if code < 200 || !held {
+    let key = (cseq, method.to_string());
+    if code < 200 || method == "BYE" {
         return;
     }
-    if let Some((method, sent_at)) = pending.remove(&cseq) {
+    if let Some((method, sent_at)) = pending.remove(&key) {
         finals.judge(failures, &Request { method: &method, cseq, sent_at }, (code, raw), now);
     }
 }
 
 /// The requests of `pending` other than a BYE, as failures without a code,
 /// in the order they were sent.
-pub(super) fn unanswered(pending: &HashMap<u32, (String, i64)>) -> Vec<WireFailure> {
+pub(super) fn unanswered(pending: &Pending) -> Vec<WireFailure> {
     let mut left: Vec<WireFailure> = pending
         .values()
         .filter(|(method, _)| method != "BYE")

@@ -370,3 +370,29 @@ async fn a_request_pending_at_the_seal_is_settled_by_its_later_final() {
     assert_eq!(f.legs[0].unanswered(), vec![]);
     assert_eq!(f.legs[0].failures, vec![]);
 }
+
+/// Two forked early dialogs number their requests apart (RFC 3261 §12.2.1.1):
+/// a PRACK on one and a re-INVITE on the other may share a CSeq number, and
+/// each final is the failure of the request its CSeq method names.
+#[tokio::test(start_paused = true)]
+#[ignore = "slow lane: loadgen"]
+async fn a_final_is_matched_to_its_request_by_cseq_number_and_method() {
+    let wire = CallWire::new(Clock::test_at(1_000));
+    let events = [
+        (Side::Caller, Dir::Out, msg("INVITE sip:b@h SIP/2.0", "c1", "1 INVITE", "", "")),
+        (Side::Caller, Dir::In, msg("SIP/2.0 200 OK", "c1", "1 INVITE", "t2", "")),
+        (Side::Caller, Dir::Out, msg("PRACK sip:b@h SIP/2.0", "c1", "3 PRACK", "t1", "")),
+        (Side::Caller, Dir::Out, msg("INVITE sip:b@h SIP/2.0", "c1", "3 INVITE", "t2", "")),
+        (Side::Caller, Dir::In, msg("SIP/2.0 491 Request Pending", "c1", "3 INVITE", "t2", "")),
+        (Side::Caller, Dir::In, msg("SIP/2.0 200 OK", "c1", "3 PRACK", "t1", "")),
+    ];
+    let facts = feed(&wire, &events);
+    let failed: Vec<(&str, Option<u16>)> =
+        facts.failures.iter().map(|f| (f.method.as_str(), f.code)).collect();
+    assert_eq!(
+        failed,
+        [("INVITE", Some(491))],
+        "the 491 is the re-INVITE's, the PRACK's 200 clean"
+    );
+    assert!(facts.unanswered().is_empty(), "both requests drew their final");
+}
