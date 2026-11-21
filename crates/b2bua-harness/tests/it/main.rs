@@ -147,6 +147,7 @@ mod orphan_reject_no_leak;
 mod overflow_teardown;
 mod own_answer_past_bounds;
 mod own_reinvite_reliable_provisionals;
+mod own_reinvite_timeout;
 mod own_request_timeout_rule;
 mod own_timer_past_bounds;
 mod peer_cseq_across_confirmation;
