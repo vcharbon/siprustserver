@@ -178,6 +178,19 @@ fn a_missing_cookie_signing_key_refuses_the_boot() {
     assert!(errors.iter().any(|e| e.contains("PROXY_HMAC_KEY")), "{errors:?}");
 }
 
+/// The cookie key holds at least SHA-256's 32-byte output: 31 bytes refuse the
+/// boot, 32 boot.
+#[test]
+fn a_cookie_signing_key_shorter_than_the_hash_output_refuses_the_boot() {
+    let errors = boot(&[("PROXY_HMAC_KEY", &"k".repeat(31))]).expect_err("31 bytes");
+    assert!(
+        errors.iter().any(|e| e == "PROXY_HMAC_KEY must be at least 32 bytes (got 31)"),
+        "{errors:?}"
+    );
+    let cfg = boot(&[("PROXY_HMAC_KEY", &"k".repeat(32))]).expect("32 bytes");
+    assert_eq!(cfg.hmac_key, "k".repeat(32));
+}
+
 /// A dual-face proxy binds each face to its own address: a wildcard bind
 /// would deliver external-plane datagrams to the trusted internal socket.
 #[test]

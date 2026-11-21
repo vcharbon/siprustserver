@@ -224,6 +224,6 @@ behaviour for another; a value missing where required, or malformed, refuses the
 | `PROXY_LISTEN`, `PROXY_LISTEN_EXT`, `PROXY_ADVERTISE`, `PROXY_ADVERTISE_EXT`, `PROXY_METRICS` | `0.0.0.0:5060`, none, the listen address, the external listen address, `0.0.0.0:9090` (the chart: `$(HOST_IP):9090`) | the proxy's two faces and its probe and metrics server; an advertise address is required where its listen IP is unspecified |
 | `PROXY_DEBUG` | `127.0.0.1:9097` | the proxy's `/debug/flamegraph` listener (a capture in a build with the `flamegraph` feature, `501` otherwise), a loopback `ip:port` only (refused at start otherwise), reached through `kubectl port-forward`; a failed bind leaves the proxy without it (logged) |
 | `PROXY_WORKERS`, `PROXY_WORKER_SERVICE`, `PROXY_WORKER_PORT`, `PROXY_NAMESPACE` | none, `b2bua-worker`, 5060, `POD_NAMESPACE` | a fixed worker list, else the EndpointSlices of that Service in that namespace |
-| `PROXY_HMAC_KEY`, `PROXY_HMAC_KID` | required, `k0` | the stickiness cookie's signing key, 16 bytes at least, and its id (ADR-0046 §7) |
+| `PROXY_HMAC_KEY`, `PROXY_HMAC_KID` | required, `k0` | the stickiness cookie's signing key, 32 bytes at least (the SHA-256 output, RFC 2104 §3), and its id (ADR-0046 §7) |
 | `PROXY_RESOLVER_PREWARM` | none | the `host:port` names looked up at start |
 | `ROUTE_GUARD_*` | see `crates/route-guard/src/config.rs` | the route guard's reading of the proxy, its peers, its metrics |

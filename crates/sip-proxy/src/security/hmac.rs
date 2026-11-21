@@ -17,7 +17,9 @@ use sha2::Sha256;
 use sip_message::char_class::{is_paramchar, is_run_of};
 use subtle::ConstantTimeEq;
 
-const MIN_KEY_BYTES: usize = 16;
+/// The shortest key accepted: the hash output length L, 32 bytes for SHA-256.
+/// A key under L bytes lowers the MAC's strength (RFC 2104 §3).
+pub const MIN_KEY_BYTES: usize = 32;
 
 /// Canonical cookie-MAC truncation: 128 bits. Signers truncate to this;
 /// `verify_truncated` accepts EXACTLY this many bytes.
@@ -110,7 +112,7 @@ pub struct StaticHmacKeyProvider {
 
 impl StaticHmacKeyProvider {
     /// Validate and build: each key id a non-empty run of URI-parameter
-    /// characters, each key at least 16 bytes long (`MIN_KEY_BYTES`), and the
+    /// characters, each key at least [`MIN_KEY_BYTES`] long, and the
     /// previous key's id other than the current one's.
     pub fn new(
         current: HmacKey,
@@ -185,6 +187,34 @@ mod tests {
             Some(HmacKey::new("k", vec![1u8; 32]))
         )
         .is_err());
+    }
+
+    /// A key shorter than SHA-256's 32-byte output is refused at load, as the
+    /// current key and as the previous one; a 32-byte key loads in both places.
+    #[test]
+    fn a_key_shorter_than_the_hash_output_is_refused() {
+        let short = StaticHmacKeyProvider::new(HmacKey::new("k", vec![0u8; 31]), None);
+        assert_eq!(
+            short.err(),
+            Some(HmacKeyProviderConfigError(
+                "current key must be at least 32 bytes (got 31)".to_string()
+            ))
+        );
+        let short_previous = StaticHmacKeyProvider::new(
+            HmacKey::new("k2", vec![0u8; 32]),
+            Some(HmacKey::new("k1", vec![1u8; 31])),
+        );
+        assert_eq!(
+            short_previous.err(),
+            Some(HmacKeyProviderConfigError(
+                "previous key must be at least 32 bytes (got 31)".to_string()
+            ))
+        );
+        assert!(StaticHmacKeyProvider::new(
+            HmacKey::new("k2", vec![0u8; 32]),
+            Some(HmacKey::new("k1", vec![1u8; 32]))
+        )
+        .is_ok());
     }
 
     /// A prefix of the genuine MAC of any length but the canonical truncation

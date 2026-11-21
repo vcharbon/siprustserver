@@ -88,7 +88,7 @@
 //!                    external interface, its IPv4 next hops, read every 500 ms:
 //!                    /readyz wants it up, one hop resolved (default: no check)
 //!   PROXY_HMAC_KID   stickiness cookie key id              (default k0)
-//!   PROXY_HMAC_KEY   stickiness cookie secret, ≥ 16 bytes  (REQUIRED, no
+//!   PROXY_HMAC_KEY   stickiness cookie secret, ≥ 32 bytes  (REQUIRED, no
 //!                    default; every proxy of a cluster shares it); a key
 //!                    derived from it keys the To-tags of the proxy's own finals
 //!   PROXY_CLUSTER_KEY  the workers' shared key, signing dead notices (none)
@@ -98,6 +98,8 @@
 //!                    (default 2)
 //!   HEALTH_ISOLATION_MS  no worker answer for this long: /fitz unfit
 //!                    `isolated`, ms ≥ HEALTH_INTERVAL_MS + 500 (default 2000)
+//!   The LB_* defaults below are calibration starting points, not measured
+//!   values (ADR-0009 X6): retune them against an overload sweep.
 //!   LB_ELU_SOFT / LB_ELU_HARD / LB_ELU_CRITICAL  worker ELU bands, each in
 //!                    (0, 1], soft < hard < critical (default 0.4 / 0.5 / 0.65)
 //!   LB_BAND_HYSTERESIS  in [0, 1), below the narrower band gap (default 0.05)
@@ -119,7 +121,9 @@
 //!                    always-admit                          (default on)
 //!   PROXY_SELF_GATE_ELU_CRITICAL  ELU shed threshold, (0, 1] (default 0.80)
 //!   PROXY_SELF_GATE_CPS_SIZE      CPS bucket capacity, ≥ 1 (default 50)
-//!   PROXY_SELF_GATE_CPS_RATE      CPS bucket refill /s, ≥ 1 (default 100)
+//!   PROXY_SELF_GATE_CPS_RATE      CPS bucket refill /s, ≥ 1 (default 100):
+//!                    the deployment's whole new-call rate, which either
+//!                    proxy of an active pair admits alone
 //!   PROXY_RETRY_AFTER_JITTER_SEC  spread added to a refusal's Retry-After
 //!                    base, seconds 0..3600; every copy of one request draws
 //!                    the same value                           (default 5)

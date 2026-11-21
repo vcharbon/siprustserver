@@ -190,7 +190,7 @@ it names each problem in one message (ADR-0046).
 
 | Setting | Default | Role |
 |---|---|---|
-| `PROXY_HMAC_KEY` | none, required | The secret that signs the cookie. 16 bytes or more. The same on the two proxies. |
+| `PROXY_HMAC_KEY` | none, required | The secret that signs the cookie. 32 bytes or more. The same on the two proxies. |
 | `PROXY_LISTEN`, `PROXY_ADVERTISE` | `0.0.0.0:5060` | The internal face: the internal VIP and port. With two faces, the proxy refuses the default: set the VIP. |
 | `PROXY_LISTEN_EXT`, `PROXY_ADVERTISE_EXT` | not set | The external face: the external VIP and port. |
 | `PROXY_WORKER_SERVICE`, `PROXY_WORKER_PORT` | `b2bua-worker`, 5060 | The Service whose EndpointSlices list the workers. |
@@ -198,8 +198,8 @@ it names each problem in one message (ADR-0046).
 | `PROXY_CLUSTER_KEY` | not set | The key of the workers. With it, the proxy tells the workers when it reads one of them dead. Required for HA, see [ha.md](ha.md#what-you-must-provide). |
 | `PROXY_INVITE_TXN_TIMEOUT_SEC` | 158 | The longest INVITE transaction. It must equal the value of the workers. |
 | `HEALTH_INTERVAL_MS`, `HEALTH_TIMEOUT_MS`, `HEALTH_THRESHOLD` | 1000, 1600, 2 | The probe of the workers. |
-| `PROXY_SELF_GATE_CPS_RATE`, `PROXY_SELF_GATE_CPS_SIZE` | 100, 50 | The new calls a second that one proxy accepts from the outside, and the burst. Above the rate, the proxy answers 503. |
-| `LB_CAP_INITIAL_CPS`, `LB_CAP_CEILING_CPS` | 30, 200 | The new calls a second that the proxy sends to one worker: the first value, and the highest. The proxy moves the value with the load that the worker reports. |
+| `PROXY_SELF_GATE_CPS_RATE`, `PROXY_SELF_GATE_CPS_SIZE` | 100, 50 | The new calls a second that one proxy accepts from the outside, and the burst. Above the rate, the proxy answers 503. Set the rate to the new calls a second of the full deployment: when one proxy is lost, the other proxy accepts all of them. |
+| `LB_CAP_INITIAL_CPS`, `LB_CAP_CEILING_CPS` | 30, 200 | The new calls a second that the proxy sends to one worker: the first value, and the highest. The proxy moves the value with the load that the worker reports. The defaults are starting points for calibration, not measured values. |
 | `PROXY_BRANCH_MEMO_MAX_BYTES` | 192 MiB | The size of the memory of INVITEs. The proxy refuses to start if it cannot hold the calls of the rate above. |
 | `ROUTE_GUARD_PEERS` | none, required | The routers whose BFD and BGP the route guard controls. |
 

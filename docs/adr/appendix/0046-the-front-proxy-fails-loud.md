@@ -39,7 +39,7 @@ its family.
 | `HEALTH_INTERVAL_MS`, `HEALTH_TIMEOUT_MS` | ≥ 1 ms | 1000, 1600 |
 | `HEALTH_THRESHOLD` | ≥ 1 | 2 |
 | `PROXY_HMAC_KID` | non-empty | `k0` |
-| `PROXY_HMAC_KEY` | ≥ 16 bytes | required |
+| `PROXY_HMAC_KEY` | ≥ 32 bytes | required |
 | `LB_ELU_SOFT`, `LB_ELU_HARD`, `LB_ELU_CRITICAL` | (0, 1], soft < hard < critical | 0.4, 0.5, 0.65 |
 | `LB_BAND_HYSTERESIS` | [0, 1), below the narrower band gap | 0.05 |
 | `LB_AIMD_DECREASE_FACTOR` | (0, 1) | 0.5 |

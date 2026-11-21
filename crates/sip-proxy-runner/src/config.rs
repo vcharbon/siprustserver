@@ -16,6 +16,7 @@ use sip_proxy::cancel_lru::{calls_per_second, MemoBounds};
 use sip_proxy::health::HealthProbeConfig;
 use sip_proxy::load_observer::LoadObserverConfig;
 use sip_proxy::resolver::ResolverConfig;
+use sip_proxy::security::hmac::MIN_KEY_BYTES;
 use sip_proxy::self_gate::ProxySelfGateConfig;
 use sip_proxy::ProxyAddr;
 
@@ -181,8 +182,9 @@ impl ProxyConfig {
                      memo of {held} calls/s at PROXY_BRANCH_MEMO_MEAN_RING_MS={}, \
                      PROXY_BRANCH_MEMO_INVITES_PER_CALL={} and an INVITE entry cap of {} ms \
                      (PROXY_INVITE_TXN_TIMEOUT_SEC + Timer H), below \
-                     PROXY_SELF_GATE_CPS_RATE={}: admitted calls would push out the entries \
-                     their CANCEL and ACK are routed by",
+                     PROXY_SELF_GATE_CPS_RATE={} (the deployment's whole new-call rate, which \
+                     either proxy of the pair admits alone): admitted calls would push out the \
+                     entries their CANCEL and ACK are routed by",
                     branch_memo.max_entries,
                     branch_memo.max_bytes,
                     branch_memo.mean_ring_ms,
@@ -356,13 +358,16 @@ fn worker_source(env: &mut EnvReader, pod_namespace: &dyn Fn() -> Option<String>
 }
 
 /// `PROXY_HMAC_KEY`, the secret that signs the stickiness cookies: required,
-/// trimmed like every value, at least 16 bytes.
+/// trimmed like every value, at least [`MIN_KEY_BYTES`] long.
 fn hmac_key(env: &mut EnvReader) -> String {
     let unset = env.raw("PROXY_HMAC_KEY").is_none();
     match env.present("PROXY_HMAC_KEY") {
-        Some(key) if key.len() >= 16 => key,
-        Some(_) => {
-            env.refuse("PROXY_HMAC_KEY must be at least 16 bytes".to_string());
+        Some(key) if key.len() >= MIN_KEY_BYTES => key,
+        Some(key) => {
+            env.refuse(format!(
+                "PROXY_HMAC_KEY must be at least {MIN_KEY_BYTES} bytes (got {})",
+                key.len()
+            ));
             String::new()
         }
         None => {
