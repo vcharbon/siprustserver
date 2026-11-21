@@ -20,7 +20,7 @@ use super::{Arrival, RouteOutcome};
 /// cookie's verdict for the traced routing fact.
 pub(super) type Chosen = (ProxyAddr, RoutingDecisionKind, Option<&'static str>);
 
-/// The hop of a request whose message names the next hop `hop`: for a
+/// The hop of a request whose message or cookie names the next hop `hop`: for a
 /// retransmission (`rtx_hit`) toward a name, where its first copy went, which
 /// is the address that copy left for once its send settled the memo: one
 /// transaction, one destination (RFC 3261 §17.1.1.3). `hop` itself otherwise.
@@ -235,11 +235,13 @@ impl ProxyCore {
         RouteOutcome { decision: RoutingDecisionKind::Reject, target: None }
     }
 
-    /// The target `cookie` places the request on. A cookie the strategy
-    /// cannot read falls to a fresh selection, which a retransmission
-    /// (`rtx_hit`) repeats from its memo instead of rolling the dice again; a
-    /// verified cookie naming no alive worker drops the request. The request's
-    /// ingress face decides the To-tag rule ([`ProxyCore::admits_as_new`]).
+    /// The target `cookie` places the request on; for a retransmission
+    /// (`rtx_hit`) the cookie places on a name, where its first copy went
+    /// ([`repeat_hop`]). A cookie the strategy cannot read falls to a fresh
+    /// selection, which a retransmission repeats from its memo instead of
+    /// rolling the dice again; a verified cookie naming no alive worker drops
+    /// the request. The request's ingress face decides the To-tag rule
+    /// ([`ProxyCore::admits_as_new`]).
     pub(super) async fn cookie_target(
         &self,
         msg: &SipMessage,
@@ -251,9 +253,11 @@ impl ProxyCore {
         let decoded = self.strategy.decode_stickiness(cookie, msg);
         let miss = match decoded {
             DecodeResult::Forward { target, .. } => {
+                let target = repeat_hop(target, rtx_hit);
                 return Ok((target, RoutingDecisionKind::DecodeForward, Some("hit")));
             }
             DecodeResult::ForwardBackup { target, .. } => {
+                let target = repeat_hop(target, rtx_hit);
                 return Ok((target, RoutingDecisionKind::DecodeForwardBackup, Some("backup")));
             }
             DecodeResult::Reject { status, reason } => {
