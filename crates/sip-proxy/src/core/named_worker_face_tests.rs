@@ -113,26 +113,42 @@ async fn first_copy(fx: &Fixture, request: &SipMessage) -> Vec<u8> {
     first
 }
 
-/// The unlisted sender's Timer A copy of an INVITE the strategy placed on the
-/// name (§17.1.1.2) is its first forward again (§16.11).
+/// Each copy of `request` the proxy routes after its first, `copies` of them,
+/// is `first` again on the name's face (§16.11).
+async fn copies_repeat(fx: &Fixture, request: &SipMessage, first: &[u8], copies: usize) {
+    for n in 1..=copies {
+        let (face, dst, copy) = forwarded(fx, request).await;
+        assert_eq!(
+            (face, dst),
+            ("ext", sa(W1, 5060)),
+            "copy {n}: {}",
+            String::from_utf8_lossy(&copy)
+        );
+        assert_eq!(copy, first, "§16.11: copy {n} is the first forward again");
+    }
+}
+
+/// The unlisted sender's Timer A copies of an INVITE the strategy placed on
+/// the name (§17.1.1.2) are its first forward again (§16.11).
 #[tokio::test(start_paused = true)]
 async fn a_retransmitted_invite_placed_on_a_name_resolving_to_a_worker_keeps_its_face() {
     let fx = proxy_to_the_name();
-    let invite = first_copy(&fx, &unlisted_request("INVITE")).await;
-
-    let (face, dst, copy) = forwarded(&fx, &unlisted_request("INVITE")).await;
-    assert_eq!((face, dst), ("ext", sa(W1, 5060)), "{}", String::from_utf8_lossy(&copy));
-    assert_eq!(copy, invite, "§16.11: the copy is the first forward again");
+    let request = unlisted_request("INVITE");
+    let invite = first_copy(&fx, &request).await;
+    copies_repeat(&fx, &request, &invite, 2).await;
 }
 
-/// The unlisted sender's CANCEL goes where the INVITE went, under the
-/// INVITE's top Via (§9.1). The sender cancels before any provisional, which
-/// §9.1 discourages but allows: this row relays no response to it (a final
-/// arriving external for a sender that is no worker is dropped).
+/// The unlisted sender's CANCEL, after a Timer A copy of its INVITE, goes
+/// where the INVITE went, under the INVITE's top Via (§9.1). The sender
+/// cancels before any provisional, which §9.1 discourages but allows: this row
+/// relays no response to it (a final arriving external for a sender that is no
+/// worker is dropped).
 #[tokio::test(start_paused = true)]
 async fn the_cancel_of_an_invite_to_a_name_resolving_to_a_worker_keeps_its_face() {
     let fx = proxy_to_the_name();
-    let invite = first_copy(&fx, &unlisted_request("INVITE")).await;
+    let request = unlisted_request("INVITE");
+    let invite = first_copy(&fx, &request).await;
+    copies_repeat(&fx, &request, &invite, 1).await;
 
     let (face, dst, cancel) = forwarded(&fx, &unlisted_request("CANCEL")).await;
     assert!(cancel.starts_with(b"CANCEL "), "{}", String::from_utf8_lossy(&cancel));
@@ -140,16 +156,13 @@ async fn the_cancel_of_an_invite_to_a_name_resolving_to_a_worker_keeps_its_face(
     assert_eq!(top_via(&cancel), top_via(&invite), "§9.1: the INVITE's top Via");
 }
 
-/// The unlisted sender's Timer E copy of a BYE its Route's cookie places on
-/// the name (§17.1.2.2) is its first forward again (§16.11).
+/// The unlisted sender's Timer E copies of a BYE its Route's cookie places on
+/// the name (§17.1.2.2) are its first forward again (§16.11).
 #[tokio::test(start_paused = true)]
 async fn a_retransmitted_request_under_a_cookie_naming_a_name_resolving_to_a_worker_keeps_its_face()
 {
     let fx = proxy_to_the_name();
     let bye = unlisted_bye_under_the_cookie();
     let first = first_copy(&fx, &bye).await;
-
-    let (face, dst, copy) = forwarded(&fx, &bye).await;
-    assert_eq!((face, dst), ("ext", sa(W1, 5060)), "{}", String::from_utf8_lossy(&copy));
-    assert_eq!(copy, first, "§16.11: the copy is the first forward again");
+    copies_repeat(&fx, &bye, &first, 2).await;
 }
