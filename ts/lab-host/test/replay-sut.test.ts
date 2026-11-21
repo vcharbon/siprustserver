@@ -35,6 +35,11 @@ const standIn = (script: string) =>
 const run = <A, E>(effect: Effect.Effect<A, E, Sut.Requirements>) =>
   Effect.runPromise(effect.pipe(Effect.provide(NodeServices.layer)))
 
+/** Resolves once `holds` does, checking every 20 ms; the package's test timeout bounds the wait. */
+const until = async (holds: () => boolean): Promise<void> => {
+  while (!holds()) await new Promise((resolve) => setTimeout(resolve, 20))
+}
+
 /** Whether the stand-in's process is still there. */
 const alive = (): boolean => {
   const pid = Number(fs.readFileSync(path.join(dir, "pid"), "utf8").trim())
@@ -94,7 +99,7 @@ describe("a managed worker", () => {
 
   it("says how it died once it dies after it was handed over", async () => {
     const held = await run(Sut.worker(standIn(`echo "${Sut.READY}"; sleep 0.2; exit 7`), path.join(dir, "sut.log"), "lane-x"))
-    await new Promise((resolve) => setTimeout(resolve, 600))
+    await until(() => held.died() !== undefined)
     expect(held.died()).toContain("the lane-x worker exited 7")
     await Effect.runPromise(held.stop)
   })
@@ -106,15 +111,14 @@ describe("a managed lane's worker", () => {
     worker: "stand-in",
     metricsOf: () => undefined,
     ...(logOf === undefined ? {} : { logOf }),
-    command: () => Effect.succeed(standIn(`echo "${Sut.READY}"; echo "a call came"; exec sleep 30`))
+    command: () => Effect.succeed(standIn(`echo "warming up"; echo "${Sut.READY}"; exec sleep 30`))
   })
 
   it("logs to the file its pack states for the lane, its directory made", async () => {
     const log = path.join(dir, "named", "sut.log")
     const held = await run(Sut.stand(packLogging(() => log), lane, path.join(dir, "batch")))
-    await new Promise((resolve) => setTimeout(resolve, 200))
     await Effect.runPromise(held!.stop)
-    expect(fs.readFileSync(log, "utf8")).toContain("a call came")
+    expect(fs.readFileSync(log, "utf8")).toContain("warming up")
     expect(fs.existsSync(path.join(dir, "batch"))).toBe(false)
   })
 

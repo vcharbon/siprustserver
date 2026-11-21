@@ -10,6 +10,7 @@ import * as path from "node:path"
 import type * as Cell from "../src/cell.js"
 import type * as CollectorRun from "../src/collector-run.js"
 import type { Entry } from "./tree.js"
+import { type Ended, phaseSeen, until } from "./waits.js"
 
 const sh = (body: string): Entry => ({ text: `#!/bin/sh\n${body}\n`, executable: true })
 
@@ -206,22 +207,9 @@ export const alive = (pid: number): boolean => {
   }
 }
 
-/** Whether the trace under `root` holds `line` within `withinMs`. */
-export const tracedWithin = async (root: string, line: string, withinMs = 5000): Promise<boolean> => {
-  const deadline = Date.now() + withinMs
-  while (!traceOf(root).includes(line)) {
-    if (Date.now() > deadline) return false
-    await new Promise((resolve) => setTimeout(resolve, 20))
-  }
-  return true
-}
+/** Resolves once the trace under `root` holds `line`; rejects as soon as `ended` names an end of its writer without it. */
+export const traceHolds = (root: string, line: string, ended: Ended): Promise<void> =>
+  phaseSeen(() => traceOf(root), line, ended)
 
-/** Whether process `pid` is gone within `withinMs`, a killed one's reaping by its new parent waited for. */
-export const goneWithin = async (pid: number, withinMs = 2000): Promise<boolean> => {
-  const deadline = Date.now() + withinMs
-  while (alive(pid)) {
-    if (Date.now() > deadline) return false
-    await new Promise((resolve) => setTimeout(resolve, 20))
-  }
-  return true
-}
+/** Resolves once process `pid` is gone, a killed one's reaping by its new parent waited for. */
+export const gone = (pid: number): Promise<void> => until(() => !alive(pid))

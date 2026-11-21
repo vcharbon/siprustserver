@@ -27,12 +27,9 @@ const dirOf = (name: string): string => {
 const written = (dir: string): string =>
   fs.readdirSync(dir).map((entry) => fs.readFileSync(path.join(dir, entry), "utf8")).join("")
 
-const until = async (holds: () => boolean, ms: number): Promise<boolean> => {
-  for (let waited = 0; waited < ms; waited += 10) {
-    if (holds()) return true
-    await new Promise((resume) => setTimeout(resume, 10))
-  }
-  return holds()
+/** Resolves once `holds` does, checking every 10 ms; the package's test timeout bounds the wait. */
+const until = async (holds: () => boolean): Promise<void> => {
+  while (!holds()) await new Promise((resume) => setTimeout(resume, 10))
 }
 
 const into = (binary: string, args: ReadonlyArray<string>, target: string) =>
@@ -42,9 +39,15 @@ describe("IntoFile.run", () => {
   it("writes the command's output as it arrives, holding none of it", async () => {
     const dir = dirOf("streaming")
     const target = path.join(dir, "out")
-    const done = into("sh", ["-c", "printf hello; sleep 2"], target)
+    const release = path.join(scratch, "streaming-release")
+    let ran = true
+    const done = into("sh", ["-c", `printf hello; until [ -e '${release}' ]; do sleep 0.05; done`], target).finally(() => {
+      ran = false
+    })
     // The bytes are on disk while the command still runs, so nothing collected them.
-    expect(await until(() => written(dir) === "hello", 1500)).toBe(true)
+    await until(() => written(dir) === "hello" || !ran)
+    expect(ran).toBe(true)
+    fs.writeFileSync(release, "")
     expect(await done).toBeUndefined()
     expect(fs.readFileSync(target, "utf8")).toBe("hello")
   })

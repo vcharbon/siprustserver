@@ -58,12 +58,9 @@ const row = (id: number, launched: Partial<Jobs.Row>): Jobs.Row => ({
   ...launched
 })
 
-const until = async (ready: () => Promise<boolean>, ms = 5_000): Promise<void> => {
-  const deadline = Date.now() + ms
-  while (!(await ready())) {
-    if (Date.now() > deadline) throw new Error("timed out")
-    await new Promise((resolve) => setTimeout(resolve, 50))
-  }
+/** Resolves once `ready` does, checking every 50 ms; the package's test timeout bounds the wait. */
+const until = async (ready: () => Promise<boolean>): Promise<void> => {
+  while (!(await ready())) await new Promise((resolve) => setTimeout(resolve, 50))
 }
 
 const launch = (id: number, argv: ReadonlyArray<string>) =>

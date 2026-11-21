@@ -8,8 +8,9 @@ import { type ChildProcess, spawn } from "node:child_process"
 import * as fs from "node:fs"
 import * as path from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
-import { alive, goneWithin, SAMPLES, traceOf } from "./collectors.js"
+import { alive, gone, SAMPLES, traceOf } from "./collectors.js"
 import { tree } from "./tree.js"
+import { exitOf, phaseSeen } from "./waits.js"
 
 const RUNNER = path.join(import.meta.dirname, "fixtures", "collector-runner", "main.ts")
 const PACKAGE = path.join(import.meta.dirname, "..")
@@ -31,15 +32,6 @@ const phasesOf = (file: string): ReadonlyArray<string> =>
     })
     : []
 
-/** Resolves once `holds` does, checking every 20 ms for at most `withinMs`. */
-const until = async (holds: () => boolean, withinMs: number, what: string): Promise<void> => {
-  const deadline = Date.now() + withinMs
-  while (!holds()) {
-    if (Date.now() > deadline) throw new Error(`not within ${withinMs} ms: ${what}`)
-    await new Promise((resolve) => setTimeout(resolve, 20))
-  }
-}
-
 describe("a runner killed by a signal during a batch", () => {
   it("closes the batch's collectors, ending what an open left running", async () => {
     const root = tree(SAMPLES)
@@ -50,14 +42,14 @@ describe("a runner killed by a signal during a batch", () => {
       stdio: "ignore"
     })
     running.push(child)
-    const exited = new Promise<number | null>((resolve) => child.once("exit", (code) => resolve(code)))
-    await until(() => phasesOf(events).includes("opened leaves-process"), 60_000, "the batch's collectors opened")
+    const { ended, exited } = exitOf(child)
+    await phaseSeen(() => phasesOf(events), "opened leaves-process", ended)
     const sleeper = Number(fs.readFileSync(path.join(root, "sleeper"), "utf8"))
     expect(alive(sleeper)).toBe(true)
     child.kill("SIGTERM")
-    expect(await exited).toBe(130)
+    expect((await exited).code).toBe(130)
     expect(traceOf(root)).toEqual(["open tidy open", "open leaves-process", "close leaves-process", "close tidy token close"])
     expect(phasesOf(events).slice(-4)).toEqual(["close leaves-process", "closed leaves-process", "close tidy", "closed tidy"])
-    expect(await goneWithin(sleeper)).toBe(true)
+    await gone(sleeper)
   })
 })

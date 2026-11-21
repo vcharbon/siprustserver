@@ -60,8 +60,15 @@ describe("Measured.run", () => {
 
   it("stops the command when the measurement is interrupted, and the wrapper still records its exit", async () => {
     const pidFile = path.join(dir, "child.pid")
-    const fiber = Effect.runFork(measure(request("sh", ["-c", `echo $$ > ${pidFile}; exec sleep 30`])))
-    for (let i = 0; i < 100 && !fs.existsSync(pidFile); i++) await new Promise((r) => setTimeout(r, 50))
+    const fiber = Effect.runFork(
+      measure(request("sh", ["-c", `echo $$ > ${pidFile}.part; mv ${pidFile}.part ${pidFile}; exec sleep 3600`]))
+    )
+    let ended = false
+    void Effect.runPromise(Fiber.await(fiber)).then(() => {
+      ended = true
+    })
+    while (!fs.existsSync(pidFile) && !ended) await new Promise((r) => setTimeout(r, 50))
+    if (!fs.existsSync(pidFile)) throw new Error("the measurement ended before its command wrote its pid")
     const pid = Number(fs.readFileSync(pidFile, "utf8").trim())
     await Effect.runPromise(Fiber.interrupt(fiber))
     expect(await Effect.runPromise(Liveness.alive(pid))).toBe(false)

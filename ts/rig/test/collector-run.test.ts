@@ -23,9 +23,10 @@ import * as CollectorOnDemand from "../src/collector-on-demand.js"
 import * as CollectorPlan from "../src/collector-plan.js"
 import * as CollectorRun from "../src/collector-run.js"
 import * as RigPath from "../src/rig-path.js"
-import { alive, cellOf, goneWithin, memoryLocker, SAMPLES, traceOf, tracedWithin } from "./collectors.js"
+import { alive, cellOf, gone, memoryLocker, SAMPLES, traceHolds, traceOf } from "./collectors.js"
 import { laneOf } from "./operations.js"
 import { run, tree } from "./tree.js"
+import { endOf } from "./waits.js"
 
 const made: Array<string> = []
 
@@ -493,8 +494,7 @@ describe("a scope's collectors", () => {
     const { collected } = await runScope([instanceOf(rig, root, "hanging-collect")], cells, { sink: () => Effect.void, locker: memoryLocker() })
     const [hung] = valueOf(collected)
     expect(hung!.cells.get("c2")!.verifications[0]!.message).toMatch(/^collect timed out after 500 ms/)
-    const sleeper = Number(fs.readFileSync(path.join(root, "sleeper"), "utf8"))
-    expect(await goneWithin(sleeper)).toBe(true)
+    await gone(Number(fs.readFileSync(path.join(root, "sleeper"), "utf8")))
   })
 
   it("lets open leave a process running through the scope, which close ends", async () => {
@@ -505,8 +505,7 @@ describe("a scope's collectors", () => {
     })
     await runScope([instanceOf(rig, root, "leaves-process")], cellsUnder(root), { sink: () => Effect.void, locker: memoryLocker() }, body)
     expect(duringScope).toBe(true)
-    const sleeper = Number(fs.readFileSync(path.join(root, "sleeper"), "utf8"))
-    expect(await goneWithin(sleeper)).toBe(true)
+    await gone(Number(fs.readFileSync(path.join(root, "sleeper"), "utf8")))
   })
 
   it("closes, in reverse order, when the scope fails after open, and does not collect", async () => {
@@ -529,7 +528,7 @@ describe("a scope's collectors", () => {
       { sink: () => Effect.void, locker: memoryLocker() },
       Effect.never
     ))
-    expect(await tracedWithin(root, "open slow-open")).toBe(true)
+    await traceHolds(root, "open slow-open", endOf(fiber))
     const interrupted = Date.now()
     await Effect.runPromise(Fiber.interrupt(fiber))
     expect(Date.now() - interrupted).toBeLessThan(4000)

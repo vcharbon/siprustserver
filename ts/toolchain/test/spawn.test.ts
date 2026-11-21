@@ -28,13 +28,18 @@ const alive = (pid: number): boolean => {
   }
 }
 
-/** Polls until `ready` holds, or fails after a second. */
+/** Resolves once `ready` holds, checking every 20 ms; the package's test timeout bounds the wait. */
 const until = async (ready: () => boolean): Promise<void> => {
-  const deadline = Date.now() + 5_000
-  while (!ready()) {
-    if (Date.now() > deadline) throw new Error("the stub never reported")
-    await new Promise((resolve) => setTimeout(resolve, 20))
-  }
+  while (!ready()) await new Promise((resolve) => setTimeout(resolve, 20))
+}
+
+/** Whether `fiber` ended, read at any time after this call. */
+const endOf = <A, E>(fiber: Fiber.Fiber<A, E>): () => boolean => {
+  let ended = false
+  void Effect.runPromise(Fiber.await(fiber)).then(() => {
+    ended = true
+  })
+  return () => ended
 }
 
 describe("an interrupted run", () => {
@@ -51,7 +56,9 @@ describe("an interrupted run", () => {
         })
       }).pipe(Effect.provide(NodeServices.layer))
     )
-    await until(() => fs.existsSync(pidFile))
+    const ended = endOf(fiber)
+    await until(() => fs.existsSync(pidFile) || ended())
+    if (!fs.existsSync(pidFile)) throw new Error("the run ended before the stub wrote its pid")
     const pid = Number(fs.readFileSync(pidFile, "utf8").trim())
     expect(alive(pid)).toBe(true)
     const started = Date.now()
