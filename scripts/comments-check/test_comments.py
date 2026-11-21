@@ -60,8 +60,21 @@ class Rule(unittest.TestCase):
         self.assertEqual(banned_lines(src), [])
 
     def test_a_safety_note_over_safe_code_is_banned(self):
-        src = "fn f() {\n    // SAFETY: retry until the peer answers\n    let x = 1;\n}\n"
-        self.assertEqual(banned_lines(src), [2])
+        for code in ("let x = 1;", 'log("unsafe");', "/// never unsafe\n    let x = 1;",
+                     "let x = 1; /* unsafe */"):
+            with self.subTest(code=code):
+                src = f"fn f() {{\n    // SAFETY: retry until the peer answers\n    {code}\n}}\n"
+                self.assertIn(2, banned_lines(src))
+
+    def test_a_safety_note_over_an_unsafe_statement_is_allowed(self):
+        for code in ("let v =\n        unsafe { s.get_unchecked(0) };",
+                     "#[allow(unused_unsafe)]\n    unsafe { close(fd) };"):
+            with self.subTest(code=code):
+                src = f"fn f() {{\n    // SAFETY: the slice is non-empty\n    {code}\n}}\n"
+                self.assertEqual(banned_lines(src), [])
+
+    def test_a_pointer_takes_ascii_digits_only(self):
+        self.assertEqual(banned_lines("fn f() {\n    // ADR-٠٠٥١\n    y();\n}\n"), [2])
 
     def test_a_section_token_carrying_words_is_banned(self):
         for text in ("// ADR-0051 §3:deny", "// ADR-0051 §because-the-peer-retransmits"):

@@ -11,7 +11,8 @@ comments, as rustdoc reads them.
 
 A comment is **allowed in a body** when it is one `line` comment alone on its
 line, with no comment line above or below it, that is a `// SAFETY: ...` note
-whose next code line holds `unsafe`, or a bare ADR pointer (`// ADR-0051`,
+whose next statement (attributes skipped, up to its first `;` or `{`, comments
+and literals aside) holds `unsafe`, or a bare ADR pointer (`// ADR-0051`,
 `// ADR-0051 §3`, `// ADR-0009 §X7`, nothing after it). `banned(comments, text)`
 returns the plain comments that are not.
 
@@ -21,7 +22,7 @@ comment text is dropped, a trailing comment and the whitespace before it are cut
 import re
 from dataclasses import dataclass
 
-ADR_POINTER = re.compile(r"^// ADR-\d{4}( §[A-Z]?\d+(\.\d+)*)?\.?$")
+ADR_POINTER = re.compile(r"^// ADR-[0-9]{4}( §[A-Z]?[0-9]+(\.[0-9]+)*)?\.?$")
 SAFETY_NOTE = re.compile(r"^// SAFETY: \S")
 DOC_KINDS = ("outer-doc", "inner-doc")
 
@@ -181,11 +182,29 @@ def blocks(comments):
     return out
 
 
-def _next_code_line(text, pos):
-    for line in text[pos:].split("\n"):
-        if line.strip():
-            return line
-    return ""
+def _without_literals(text):
+    out, i = [], 0
+    while i < len(text):
+        end = literal_end(text, i)
+        if end is None:
+            out.append(text[i])
+            i += 1
+        else:
+            out.append('""')
+            i = end
+    return "".join(out)
+
+
+def _next_statement(text, pos):
+    """The code of the statement after `pos`, comments and literals blanked,
+    attribute lines skipped, up to its first `;` or `{`."""
+    code = _without_literals(strip(text[pos:]))
+    lines = [l for l in code.split("\n") if l.strip()]
+    while lines and lines[0].lstrip().startswith("#"):
+        lines.pop(0)
+    rest = "\n".join(lines)
+    cut = min((k for k in (rest.find(";"), rest.find("{")) if k >= 0), default=len(rest))
+    return rest[:cut + 1]
 
 
 def _allowed(c, text):
@@ -194,7 +213,7 @@ def _allowed(c, text):
         return False
     if ADR_POINTER.match(body):
         return True
-    return bool(SAFETY_NOTE.match(body)) and re.search(r"\bunsafe\b", _next_code_line(text, c.span[1]))
+    return bool(SAFETY_NOTE.match(body)) and bool(re.search(r"\bunsafe\b", _next_statement(text, c.span[1])))
 
 
 def banned(comments, text):

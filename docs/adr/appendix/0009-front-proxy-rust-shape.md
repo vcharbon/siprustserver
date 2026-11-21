@@ -43,8 +43,9 @@ with RFC 3261 §16.11's alternate input set for a Via without the magic cookie. 
 branch, a retransmission, its CANCEL and its non-2xx ACK compute the same branch at any instance,
 so the downstream server transaction (§17.2.3) matches them to the first forward whether or not a
 memo entry survived. The alternate set holds the To tag, so a cookieless upstream's non-2xx ACK,
-carrying the final's To tag, maps apart from its INVITE, as §16.11 states it. Rejected: a random branch kept in the memo. Two active instances share no memo
-(X7), and an evicted entry would split one transaction across two branches.
+carrying the final's To tag, maps apart from its INVITE, as §16.11 states it. Rejected: a random
+branch kept in the memo. Two active instances share no memo (X7), and an evicted entry would split
+one transaction across two branches.
 
 **Two Record-Route entries.** The proxy Record-Routes an initial dialog-creating request with
 two entries of its own: a cookie entry, which the external party's in-dialog requests follow to

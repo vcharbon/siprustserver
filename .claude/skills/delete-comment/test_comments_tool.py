@@ -77,6 +77,22 @@ class SameCode(Case):
     def test_merged_words_are_a_code_change(self):
         self.assertEqual(self.same("fn f() { let x = 1; }\n", "fn f() { letx = 1; }\n"), 1)
 
+    def test_a_one_tuple_of_a_comma_holding_element_losing_its_comma_is_a_code_change(self):
+        for before, after in (("type T = (HashMap<K, V>,);\n", "type T = (HashMap<K, V>);\n"),
+                              ("fn f() { let t = (|a, b| a + b,); }\n",
+                               "fn f() { let t = (|a, b| a + b); }\n")):
+            with self.subTest(before=before):
+                self.assertEqual(self.same(before, after), 1)
+
+    def test_split_operators_are_a_code_change(self):
+        self.assertEqual(self.same("fn f(a: bool, b: bool) -> bool { a && b }\n",
+                                   "fn f(a: bool, b: bool) -> bool { a & &b }\n"), 1)
+
+    def test_a_list_collapsed_once_its_comment_goes_is_the_same_code(self):
+        before = "fn f() {\n    g(\n        // why\n        long_argument_name,\n    );\n}\n"
+        after = "fn f() {\n    g(long_argument_name);\n}\n"
+        self.assertEqual(self.same(before, after), 0)
+
 
 class Apply(Case):
     def test_a_trailing_comment_is_cut_at_its_own_column(self):
@@ -85,6 +101,26 @@ class Apply(Case):
         rc, out = repo.apply([{"id": "src/a.rs:2", "action": "delete"}])
         self.assertEqual(rc, 0, out)
         self.assertEqual(repo.read("src/a.rs"), 'fn f() {\n    let s = "x // c";\n}\n')
+
+    def test_a_block_comment_sharing_a_line_with_code_is_cut_alone(self):
+        repo = self.repo()
+        src = "fn f() {\n    g(/* timeout */ 5);\n    /* old */ let x = 1;\n    let y = 1; /* a\n       b */\n}\n"
+        repo.write("src/a.rs", src)
+        rc, out = repo.apply([{"id": "src/a.rs:2", "action": "delete"},
+                              {"id": "src/a.rs:3", "action": "delete"},
+                              {"id": "src/a.rs:4", "action": "delete"}])
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(repo.read("src/a.rs"), "fn f() {\n    g( 5);\n    let x = 1;\n    let y = 1;\n}\n")
+
+    def test_two_blocks_on_one_line_have_ids_of_their_own(self):
+        repo = self.repo()
+        repo.write("src/a.rs", "fn f() {\n    g(/* a */ 5); // b\n}\n")
+        rc, out = repo.run("list", "src")
+        ids = [json.loads(l)["id"] for l in out.splitlines()]
+        self.assertEqual(ids, ["src/a.rs:2:7", "src/a.rs:2:19"])
+        rc, out = repo.apply([{"id": i, "action": "delete"} for i in ids])
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(repo.read("src/a.rs"), "fn f() {\n    g( 5);\n}\n")
 
     def test_an_id_classified_twice_edits_nothing(self):
         repo = self.repo()
