@@ -48,6 +48,10 @@ plain_counters! {
         "b2bua_unexplained_acks_total",
         "ACKs the dialog gate dropped, the dialog untouched: each names an INVITE the call record holds no final sent for, on a call no other owner served. One increment is one such ACK, not a defect and not a lost write: a re-INVITE refused statelessly before it reached the call, a live copy's write on its way, a returned primary's lost round (the callee's repeat of its 2xx ends that call), or the caller's ACK of her first INVITE ahead of the answer's write",
     ) => unexplained_acks, bump_unexplained_ack, unexplained_acks_total;
+    LATE_2XX_DROPPED = (
+        "b2bua_late_2xx_dropped_total",
+        "2xx responses the dialog gate dropped unread and unanswered, the dialog untouched: each answers an INVITE whose round on its dialog ended with no 2xx taken (rejected, or past its Timer B) and that no client transaction holds any more, so it is owed no ACK (RFC 6026 section 7.2). The peer repeats it to 64*T1 and then ends the dialog with a BYE; the transaction layer counts those its transactions absorbed on b2bua_txn_late_2xx_dropped_total",
+    ) => late_2xx_dropped, bump_late_2xx_dropped, late_2xx_dropped_total;
     MESSAGE_CAP_LIFETIME_CROSSED = (
         "b2bua_message_cap_lifetime_crossed_total",
         "calls that crossed max_messages_per_call_lifetime: more events offered over the call's life than any healthy call sees, counted at dispatch until the call's release is queued; each is sent one verdict that ends it",

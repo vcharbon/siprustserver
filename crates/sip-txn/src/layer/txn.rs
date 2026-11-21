@@ -31,7 +31,8 @@ pub(super) enum TxnRole {
 pub(super) enum TxnState {
     Trying,
     Proceeding,
-    /// A final sent or received; held for Timer D/H/J.
+    /// A final sent or received; held for Timer D/H/J. An INVITE client txn
+    /// here took a non-2xx and absorbs a later 2xx (RFC 6026 §8.4).
     Completed,
     /// INVITE server txn whose non-2xx final is ACKed (RFC 3261 §17.2.1):
     /// held for Timer I, absorbing ACK retransmissions and any further final
@@ -284,6 +285,20 @@ impl Transaction {
         self.id.as_ref().role()
     }
 
+    /// Whether this client INVITE transaction owes a 2xx nothing, neither its
+    /// ACK nor its delivery (RFC 6026 §7.2): in Completed it takes only
+    /// repeats of its non-2xx final (§8.4), and a re-INVITE that gave up at
+    /// Timer B with no response is over (RFC 3261 §17.1.1.2). The hold of a
+    /// dialling INVITE that gave up still takes a 2xx: the dialog it confirms
+    /// is ACKed and ended (§13.2.2.4, §15).
+    pub(super) fn owes_2xx_nothing(&self) -> bool {
+        let reinvite = self.original_request.as_deref().is_some_and(|r| r.to().tag().is_some());
+        let over_at_timer_b =
+            self.lifetime.gave_up() && self.timeout_kind == TxnTimeoutKind::Response;
+        self.kind == TxnKind::Invite
+            && (self.state == TxnState::Completed || (reinvite && over_at_timer_b))
+    }
+
     /// The From-tag of the caller whose tagless INVITE opened this server
     /// transaction; `None` for any other transaction.
     pub(super) fn caller_tag(&self) -> Option<&str> {
@@ -434,8 +449,9 @@ pub(super) struct Transaction {
     /// `layer::lifetime`. An INVITE client txn that gave up is held
     /// [`Hold::GaveUp`](super::lifetime::Hold::GaveUp) in Trying/Proceeding:
     /// its `Timeout` is delivered, a late final is ACKed and handed up
-    /// (§17.1.1.3), it never times out again, and a CANCEL on it before any
-    /// provisional stays held.
+    /// (§17.1.1.3) but a 2xx it owes nothing ([`Self::owes_2xx_nothing`]),
+    /// it never times out again, and a CANCEL on it before any provisional
+    /// stays held.
     pub(super) lifetime: Lifetime,
     /// The call this transaction served has been released while it was still
     /// open or Accepted (`cancel_txns_for_call`). The layer then closes the

@@ -3,7 +3,8 @@
 //! record as the timed-out one, naming the rule that sent it, so a service
 //! rule can claim that timeout and keep the call. The dialog then holds no
 //! INVITE in progress (§14.1): a later re-INVITE leaves, and a late 2xx to the
-//! timed-out one still draws its ACK (§13.2.2.4). Without a claiming rule, the
+//! timed-out one is owed nothing and draws no ACK (RFC 6026 §7.2). Without a
+//! claiming rule, the
 //! core default ends the session. A re-INVITE that drew a provisional is
 //! still in progress when it gives up at the INVITE bound: no rule claims it.
 
@@ -26,6 +27,9 @@ const ORDINAL: &str = "w0";
 const KEEPALIVE_PAST_THE_TEST_SEC: i64 = 3_000;
 /// Past Timer B (64·T1 = 32 s) of the service's re-INVITE.
 const PAST_TIMER_B: Duration = Duration::from_secs(33);
+/// Past a round trip on the harness's 100 ms transit: a message reaches the
+/// SUT and its answer comes back.
+const PAST_A_ROUND_TRIP: Duration = Duration::from_millis(250);
 /// Past the bound an INVITE client transaction that drew a provisional gives
 /// up at.
 const PAST_THE_INVITE_BOUND: Duration =
@@ -267,19 +271,21 @@ async fn the_default_ends_the_session_when_an_own_reinvite_times_out() {
     .await;
 }
 
-/// Bob answers the re-INVITE `200` past its Timer B, the call kept: the 2xx
-/// still answers the INVITE the dialog last sent and draws its ACK
-/// (RFC 3261 §13.2.2.4).
+/// Bob answers the re-INVITE `200` past its Timer B, the call kept: the
+/// transaction that gave up owes it nothing (RFC 6026 §7.2), so it draws no
+/// ACK, the service's ACK rule never reads it, and the call stays up.
 #[tokio::test(start_paused = true)]
-async fn a_2xx_past_timer_b_to_a_kept_calls_reinvite_is_acked() {
+async fn a_2xx_past_timer_b_to_a_kept_calls_reinvite_is_dropped() {
     let mut call =
         Renegotiating::start("own-reinvite-late-2xx", renegotiate::keeps_the_call()).await;
     call.h.advance(PAST_TIMER_B).await;
     let _retransmissions = call.bob.drain().await;
     call.assert_kept();
     call.reinvite.respond(200, "OK").with_sdp(ANSWER).await;
-    let ack = call.bob.receive("ACK").await;
-    assert_eq!(ack.request().cseq().seq(), call.reinvite.request().cseq().seq());
+    call.h.advance(PAST_A_ROUND_TRIP).await;
+    assert_eq!(call.bob.drain_tu().await, 0, "no ACK answers the late 2xx");
+    assert_eq!(call.b2bua.txn_metrics().late_2xx_dropped(), 1, "the transaction absorbs it");
+    call.assert_kept();
     call.alice_hangs_up().await;
     call.finish().await;
 }

@@ -51,6 +51,15 @@ pub fn invite_awaits_final(d: &Dialog) -> bool {
     invite_untaken(d) && !sent_exchange(d).is_some_and(|x| x.ended_at_timer_b)
 }
 
+/// Whether the INVITE numbered `cseq` that `d` sent ended its round with no
+/// 2xx taken, so a 2xx to it is owed nothing (RFC 6026 §7.2): the latest one
+/// a non-2xx closed or a later INVITE replaced ([`Dialog::untaken_invite`]),
+/// or the last, ended at Timer B ([`InviteExchange::ended_at_timer_b`]).
+pub fn invite_round_ended(d: &Dialog, cseq: i64) -> bool {
+    let last = d.sent_invite.as_ref().is_some_and(|r| r.outbound_cseq == cseq);
+    d.untaken_invite == Some(cseq) || (last && invite_untaken(d) && !invite_awaits_final(d))
+}
+
 /// Mark the INVITE `leg_id`'s dialog `id` last sent, untaken, ended at its
 /// Timer B with no response (RFC 3261 §17.1.1.2,
 /// [`InviteExchange::ended_at_timer_b`]).

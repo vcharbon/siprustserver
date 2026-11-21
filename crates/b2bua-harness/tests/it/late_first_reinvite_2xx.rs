@@ -4,8 +4,10 @@
 //! first re-INVITE 488, takes the second with a 200, then sends a 200 to the
 //! first as well. The 488 drew its hop ACK; an ACK to that 200 would be a
 //! second, distinct ACK for one INVITE, so none leaves, nothing reaches the
-//! caller and neither leg reads it. The callee, never ACKed, re-sends it to
-//! 64·T1 and clears the dialog with a BYE (§13.3.1.4): one CDR, fully reaped.
+//! caller and neither leg reads it: the client transaction, still Completed
+//! (Timer D), absorbs it and each copy, and counts them. The callee, never
+//! ACKed, re-sends it to 64·T1 and clears the dialog with a BYE (§13.3.1.4):
+//! one CDR, fully reaped.
 
 use std::net::SocketAddr;
 
@@ -111,6 +113,12 @@ async fn a_2xx_to_a_reinvite_that_took_a_non_2xx_final_is_dropped() {
         "the late 200 reaches no one"
     );
     assert_legs_unchanged(&held, &b2bua.live_call(&call_ref).expect("the call is live"));
+    assert_eq!(
+        b2bua.txn_metrics().late_2xx_dropped(),
+        1 + LADDER_MS.len() as u64,
+        "the transaction, Completed past the 488, absorbs the 200 and each copy"
+    );
+    assert_eq!(b2bua.metrics().late_2xx_dropped_total(), 0, "none reaches the call");
 
     h.advance(to_give_up).await;
     let mut bye = uas.dialog().bye().await;

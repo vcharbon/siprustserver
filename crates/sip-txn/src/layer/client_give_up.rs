@@ -88,8 +88,9 @@ impl Owner {
     /// CANCEL, which still matches it (and restarts the hold), and the final
     /// that CANCEL provokes is ACKed (§17.1.1.3) and handed up, Timer D
     /// replacing the hold. In Calling it is a robustness hold:
-    /// its CANCEL stays held unless a late provisional arrives, and a late
-    /// final is ACKed.
+    /// its CANCEL stays held unless a late provisional arrives, a late
+    /// non-2xx final is ACKed, and a late 2xx to a re-INVITE is absorbed
+    /// (RFC 6026 §7.2, `Transaction::owes_2xx_nothing`).
     fn give_up(&mut self, branch: &str) {
         let retransmit = match self.clients.get_mut(branch) {
             Some(t) if t.kind == TxnKind::Invite => {

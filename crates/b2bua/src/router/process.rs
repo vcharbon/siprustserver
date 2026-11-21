@@ -209,6 +209,7 @@ pub(super) async fn process(
                     .await;
                 return false;
             }
+            super::dialog_gate::Gate::Absorbed => return false,
         };
         super::dialog_gate::note_in_order(&mut call, &res.source_leg_id, &resolved, event);
         probe_failed = probe_timed_out(event, &call, &res.source_leg_id);

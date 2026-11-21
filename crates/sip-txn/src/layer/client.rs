@@ -312,6 +312,18 @@ impl Owner {
         self.hold(TxnRef::Client(branch), Hold::TimerD);
     }
 
+    /// Absorb a 2xx to `method` on the client txn at `branch` when that txn
+    /// owes it nothing ([`Transaction::owes_2xx_nothing`](super::txn::Transaction::owes_2xx_nothing)):
+    /// no ACK, no state change, nothing handed up, counted. Whether it did.
+    fn absorb_unowed_2xx(&mut self, branch: &str, method: &Method) -> bool {
+        let unowed =
+            self.clients.get(branch).is_some_and(|t| t.method == *method && t.owes_2xx_nothing());
+        if unowed {
+            self.metrics.late_2xx_dropped.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        unowed
+    }
+
     pub(super) async fn handle_inbound_response(
         &mut self,
         endpoint: &dyn UdpEndpoint,
@@ -401,6 +413,9 @@ impl Owner {
             // the source goes unchecked (ADR-0007). A 2xx on an Accepted txn its
             // call holds goes to the TU, which owns each ACK, matched to none.
             let is_2xx = (200..300).contains(&resp.status());
+            if is_2xx && self.absorb_unowed_2xx(branch, resp.cseq().method()) {
+                return true;
+            }
             let client_match = self
                 .clients
                 .get(branch)

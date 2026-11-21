@@ -34,7 +34,10 @@ An INVITE transaction is in progress on a dialog while any of these holds
 
 A non-2xx final closes this side's INVITE (`close_rejected_invite_round`). The Timer B of
 an INVITE this side originated, with no response (RFC 3261 §17.1.1.2), ends it in progress:
-the record keeps it marked (`ended_at_timer_b`), so a late 2xx still draws its ACK.
+the record keeps it marked (`ended_at_timer_b`). A late 2xx to an INVITE whose round ended
+with no 2xx taken, rejected or past Timer B, is owed nothing (RFC 6026 §7.2): the client
+transaction absorbs it while it lives, the dialog gate drops it after, no ACK leaves, and
+the peer, never ACKed, ends the dialog with a BYE at 64·T1 (§13.3.1.4).
 
 ### §2 The INVITE is refused, never queued
 

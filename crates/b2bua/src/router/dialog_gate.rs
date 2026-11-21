@@ -3,7 +3,8 @@
 //! 500, 200 (an OPTIONS stating what this stack supports, §11.2) or 487,
 //! each under the call's stated headers — and whether another owner served
 //! the call is read off this node's topology for the ACK the verdict asks it
-//! of. An ACK that proves nothing on a call no other owner served is counted.
+//! of. An ACK that proves nothing on a call no other owner served is counted,
+//! and so is a 2xx to an INVITE whose round ended.
 
 use call::helpers::Resolved;
 use call::Call;
@@ -28,6 +29,9 @@ pub(super) enum Gate {
     Answered { answer: Option<Box<SipResponse>>, in_order: Option<Resolved> },
     /// A response that answers nothing of this stack's, dropped unread.
     Dropped,
+    /// A response owed nothing, dropped unread and unanswered: a 2xx to an
+    /// INVITE whose round ended (RFC 6026 §7.2).
+    Absorbed,
 }
 
 /// Resolve `event` on `call` (its source leg `res.source_leg_id`), answering a
@@ -45,6 +49,10 @@ pub(super) fn admit(
     let refused = match verdict(call, leg_id, event, &ctx.config, served) {
         Verdict::Pass(resolved) => return Gate::Pass(resolved),
         Verdict::Stray => return Gate::Dropped,
+        Verdict::RoundEnded => {
+            ctx.metrics.bump_late_2xx_dropped();
+            return Gate::Absorbed;
+        }
         Verdict::Drop => return Gate::Answered { answer: None, in_order: None },
         Verdict::UnexplainedAck => {
             ctx.metrics.bump_unexplained_ack();
@@ -67,7 +75,8 @@ pub(super) fn admit(
         | Verdict::Pass(_)
         | Verdict::Drop
         | Verdict::UnexplainedAck
-        | Verdict::Stray => {
+        | Verdict::Stray
+        | Verdict::RoundEnded => {
             let minted = req.to().tag().is_none().then(|| ids.new_tag());
             build_481(req, minted.as_deref())
         }

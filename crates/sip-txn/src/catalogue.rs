@@ -60,6 +60,12 @@ pub const SERVER_FINAL_UNSEEN_BRANCH: Family = Family::counter(
     "Non-2xx INVITE finals dropped because no server transaction held their branch (RFC 3261 section 17.2.1, one final per transaction); expected 0.",
 );
 
+pub const LATE_2XX_DROPPED: Family = Family::counter(
+    "b2bua_txn_late_2xx_dropped_total",
+    Labels::None,
+    "2xx responses an INVITE client transaction absorbed, neither ACKed nor handed up, because it owes them nothing (RFC 6026 sections 7.2, 8.4): it took a non-2xx final, or, a re-INVITE, it gave up at Timer B with no response. Each is a peer answering a round that already ended; it repeats the 2xx to 64*T1 and then ends the dialog with a BYE.",
+);
+
 pub const VIA_STAMPS_UNWRITTEN: Family = Family::counter(
     "b2bua_txn_via_stamps_unwritten_total",
     Labels::None,

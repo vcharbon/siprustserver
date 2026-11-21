@@ -50,12 +50,13 @@ impl ClientTxns {
         response(event).and_then(key_of_response).is_some_and(|k| self.open.contains(&k))
     }
 
-    /// Whether `event` repeats the final of a completed client transaction,
-    /// which absorbs it.
+    /// Whether `event` is a final on a completed client transaction, which
+    /// absorbs it: a repeat of its final, or a 2xx to an INVITE that took a
+    /// non-2xx (RFC 6026 §8.4).
     pub(super) fn absorbs(&self, event: &CallEvent) -> bool {
         let completed =
             |r: &SipResponse| key_of_response(r).is_some_and(|k| self.completed.contains(&k));
-        response(event).is_some_and(|r| completes(r) && completed(r))
+        response(event).is_some_and(|r| r.status() >= 200 && completed(r))
     }
 
     /// The transaction `event` answers, completed by its final.

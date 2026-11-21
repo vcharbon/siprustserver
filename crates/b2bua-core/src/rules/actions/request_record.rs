@@ -19,8 +19,9 @@
 //!
 //! The INVITE this stack originates on a dialog settles here at its Timer B,
 //! with no response at all (RFC 3261 §17.1.1.2): the record keeps it, ended
-//! at Timer B, so the dialog holds no INVITE in progress (§14.1) while a late
-//! 2xx still answers it, and the rules read it as the timed-out record. One
+//! at Timer B, so the dialog holds no INVITE in progress (§14.1), a late 2xx
+//! to it is dropped at the dialog gate (RFC 6026 §7.2), and the rules read it
+//! as the timed-out record. One
 //! that drew a provisional and gave up at the INVITE bound is still in
 //! progress at its peer: no record names that timeout.
 

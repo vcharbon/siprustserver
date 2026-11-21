@@ -17,6 +17,7 @@ use crate::invite_class::InviteClass;
 use crate::layer::{EventAges, InviteRefusals};
 
 mod by_class;
+mod client_invite;
 mod copies;
 mod message_budget;
 mod parse;
@@ -87,6 +88,10 @@ pub(crate) struct MetricsInner {
     /// taken its final or is gone — §9.1/§9.2: a CANCEL has no effect on an
     /// answered request; sending it could put a pre-1xx CANCEL on the wire.
     pub cancels_suppressed_on_final: AtomicU64,
+    /// 2xx responses an INVITE client txn absorbed because it owes them
+    /// nothing (RFC 6026 §7.2, §8.4): it took a non-2xx final, or, a
+    /// re-INVITE, it gave up at Timer B with no response (counter).
+    pub late_2xx_dropped: AtomicU64,
     /// Every repeat this layer put on the wire — a transaction-ladder rung or
     /// a cached response replayed to a retransmitted request — by
     /// `{ladder,method,code}`. Zero under no loss (the answer beats the 500 ms
@@ -189,6 +194,7 @@ impl MetricsInner {
             held_cancels_flushed: AtomicU64::new(0),
             held_cancels_dropped: AtomicU64::new(0),
             cancels_suppressed_on_final: AtomicU64::new(0),
+            late_2xx_dropped: AtomicU64::new(0),
             retransmits: RetransmitFamily::new(),
             txn_seeded: AtomicU64::new(0),
             txn_seed_skipped: AtomicU64::new(0),
@@ -360,27 +366,6 @@ impl TransactionMetrics {
     /// the layer, gone once each has been purged by its own timer.
     pub fn orphaned_transactions(&self) -> usize {
         self.inner.orphaned_transactions.load(Ordering::Relaxed)
-    }
-
-    /// CANCELs held back awaiting their INVITE's first provisional (§9.1).
-    pub fn cancels_held(&self) -> u64 {
-        self.inner.cancels_held.load(Ordering::Relaxed)
-    }
-
-    /// Held CANCELs flushed to the wire on the first provisional.
-    pub fn held_cancels_flushed(&self) -> u64 {
-        self.inner.held_cancels_flushed.load(Ordering::Relaxed)
-    }
-
-    /// Held CANCELs cleared without ever reaching the wire (a final came
-    /// first, or the txn died with no provisional).
-    pub fn held_cancels_dropped(&self) -> u64 {
-        self.inner.held_cancels_dropped.load(Ordering::Relaxed)
-    }
-
-    /// CANCELs suppressed at send: the INVITE txn had taken its final or was gone.
-    pub fn cancels_suppressed_on_final(&self) -> u64 {
-        self.inner.cancels_suppressed_on_final.load(Ordering::Relaxed)
     }
 
     /// Every rung `ladder` put on the wire, whatever it repeated (counter).

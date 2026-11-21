@@ -37,7 +37,10 @@
 //! transaction (§9.1) and passes unread, tagged or not. A response whose From-tag is no tag
 //! this stack put on the leg answers nothing of this stack's and is dropped,
 //! save a 2xx to an INVITE whose verified via-extension names a leg the record
-//! lacks (ADR-0055 §4, §12).
+//! lacks (ADR-0055 §4, §12). A 2xx to an INVITE whose round on its dialog
+//! ended with no 2xx taken, rejected or past its Timer B, is owed nothing
+//! (RFC 6026 §7.2): dropped unread and unanswered, and counted
+//! ([`Verdict::RoundEnded`]).
 
 use b2bua_sdk::event::CallEvent;
 use call::helpers::{response_origin, Resolved, ResponseFacts, ResponseOrigin};
@@ -71,6 +74,10 @@ pub enum Verdict {
     UnexplainedAck,
     /// A response that answers nothing of this stack's, dropped unread.
     Stray,
+    /// A 2xx to an INVITE whose round on its dialog ended with no 2xx taken
+    /// ([`call::helpers::invite_round_ended`]): owed nothing (RFC 6026 §7.2),
+    /// dropped unread and unanswered, the dialog untouched, and counted.
+    RoundEnded,
 }
 
 impl Verdict {
@@ -82,7 +89,11 @@ impl Verdict {
             Verdict::OutOfOrder => Some(500),
             Verdict::Absorbed(_) => Some(200),
             Verdict::Terminated(_) => Some(487),
-            Verdict::Pass(_) | Verdict::Drop | Verdict::UnexplainedAck | Verdict::Stray => None,
+            Verdict::Pass(_)
+            | Verdict::Drop
+            | Verdict::UnexplainedAck
+            | Verdict::Stray
+            | Verdict::RoundEnded => None,
         }
     }
 
@@ -285,10 +296,24 @@ fn response_verdict(
         branch: resp.top_via().branch(),
     };
     match response_origin(call, leg_id, facts) {
+        ResponseOrigin::Dialog(resolved) if answers_ended_round(call, leg_id, &resolved, resp) => {
+            Verdict::RoundEnded
+        }
         ResponseOrigin::Dialog(resolved) => Verdict::Pass(resolved),
         ResponseOrigin::Creates | ResponseOrigin::Request => Verdict::Pass(Resolved::default()),
         ResponseOrigin::Stray => Verdict::Stray,
     }
+}
+
+/// Whether `resp`, resolved to a dialog of `leg_id`, is a 2xx to an INVITE
+/// whose round there ended with no 2xx taken.
+fn answers_ended_round(call: &Call, leg_id: &str, resolved: &Resolved, resp: &SipResponse) -> bool {
+    let is_invite_2xx =
+        (200..300).contains(&resp.status()) && resp.cseq().method() == Method::Invite;
+    let Some(id) = resolved.dialog.as_ref().filter(|_| is_invite_2xx) else { return false };
+    let dialog = call::helpers::find_leg(call, leg_id)
+        .and_then(|leg| leg.dialogs.by_tags(&id.our_tag, &id.peer_tag));
+    dialog.is_some_and(|d| call::helpers::invite_round_ended(d, i64::from(resp.cseq().seq())))
 }
 
 /// Whether `resp` is a 2xx to an INVITE whose verified via-extension names

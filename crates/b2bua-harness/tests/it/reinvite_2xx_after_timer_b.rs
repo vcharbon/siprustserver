@@ -9,8 +9,9 @@
 //! reaped.
 //!
 //! The 200 leaves once while the layer still holds the given-up transaction
-//! (64·T1 past Timer B, for the final a CANCEL may draw) and once after it
-//! let it go: dropped either way.
+//! (64·T1 past Timer B, for the final a CANCEL may draw), which absorbs it,
+//! and once after it let it go, when the dialog gate drops it: the record
+//! holds the re-INVITE ended at Timer B. Each counts what it drops.
 
 use std::time::Duration;
 
@@ -129,20 +130,47 @@ mod renegotiate {
     }
 }
 
+/// Which part of the stack drops the late 200 and its copies, each counting
+/// what it drops.
+#[derive(Clone, Copy)]
+enum DroppedBy {
+    /// The given-up transaction, still held, absorbs the 200 and each copy
+    /// but the last: its hold lapses 64·T1 past Timer B, before that copy,
+    /// which the dialog gate drops.
+    Transaction,
+    /// With no transaction left, the dialog gate drops them all: the record
+    /// holds the re-INVITE ended at Timer B.
+    DialogGate,
+}
+
+impl DroppedBy {
+    /// How many of the `sent` 2xx the transaction absorbs and the dialog
+    /// gate drops.
+    fn split(self, sent: u64) -> (u64, u64) {
+        match self {
+            DroppedBy::Transaction => (sent - 1, 1),
+            DroppedBy::DialogGate => (0, sent),
+        }
+    }
+}
+
 /// The given-up transaction is still held when the late 200 arrives.
 #[tokio::test(start_paused = true)]
 async fn a_2xx_to_an_own_reinvite_after_its_timer_b_is_dropped() {
-    the_late_2xx_is_dropped("b2bua-reinvite-2xx-after-timer-b", PAST_TIMER_B).await;
+    let name = "b2bua-reinvite-2xx-after-timer-b";
+    the_late_2xx_is_dropped(name, PAST_TIMER_B, DroppedBy::Transaction).await;
 }
 
 /// The layer let the given-up transaction go before the late 200 arrives.
 #[tokio::test(start_paused = true)]
 async fn a_2xx_to_an_own_reinvite_whose_transaction_is_gone_is_dropped() {
-    the_late_2xx_is_dropped("b2bua-reinvite-2xx-past-its-transaction", PAST_THE_HOLD).await;
+    let name = "b2bua-reinvite-2xx-past-its-transaction";
+    the_late_2xx_is_dropped(name, PAST_THE_HOLD, DroppedBy::DialogGate).await;
 }
 
-/// The callee answers the service's re-INVITE 200 `late_by` after it.
-async fn the_late_2xx_is_dropped(name: &str, late_by: Duration) {
+/// The callee answers the service's re-INVITE 200 `late_by` after it, and
+/// `by` drops it.
+async fn the_late_2xx_is_dropped(name: &str, late_by: Duration, by: DroppedBy) {
     let h = Harness::with_transit_delay(name, 1);
     let alice = h.agent_auto("alice").await;
     let bob = h.agent_auto("bob").await;
@@ -189,6 +217,9 @@ async fn the_late_2xx_is_dropped(name: &str, late_by: Duration) {
     let live = b2bua.live_call(&call_ref).expect("the call is live");
     assert_eq!(live.state, call::CallModelState::Active, "the late 200 leaves the call up");
     assert_legs_unchanged(&held, &live);
+    let (by_txn, by_gate) = by.split(1 + LADDER_MS.len() as u64);
+    assert_eq!(b2bua.txn_metrics().late_2xx_dropped(), by_txn, "absorbed by the transaction");
+    assert_eq!(b2bua.metrics().late_2xx_dropped_total(), by_gate, "dropped by the dialog gate");
 
     h.advance(to_give_up).await;
     let mut bye = uas.dialog().bye().await;

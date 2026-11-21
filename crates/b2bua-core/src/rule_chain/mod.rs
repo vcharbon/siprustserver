@@ -257,7 +257,6 @@ fn chain_turn(
         };
         call = ring.received(call, source_leg_id, received, now_ms);
     }
-    crate::rules::relay::read_untaken_2xx(&mut call, source_leg_id, named, event);
     // An INVITE (offerless included) or an UPDATE offer the leg's peer sends
     // opens an exchange on that leg, counted once as it is received, before
     // the rules read it.

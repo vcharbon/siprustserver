@@ -54,38 +54,16 @@ pub(crate) fn copy_of_taken_2xx(leg: &Leg, dialog: &Dialog, resp: &SipResponse) 
 
 /// Whether `resp` is a copy of the 2xx to an INVITE `dialog` sent before its
 /// last (§13.3.1.4): a 2xx to an INVITE under the dialog's remote tag echoing
-/// a CSeq below that last INVITE's, other than the latest INVITE whose round
-/// ended with no 2xx taken ([`Dialog::untaken_invite`]): that 2xx is its
-/// first. An earlier untaken INVITE is read as taken: the record keeps no
-/// history of it. Every INVITE before the last was settled before it left
-/// (§14.1), so the copy answers nothing pending; only the one whose ACK the
-/// last INVITE carries ahead ([`copy_of_2xx_ahead`]) is re-ACKed.
+/// a CSeq below that last INVITE's. A 2xx to the latest INVITE whose round
+/// ended with no 2xx taken ([`Dialog::untaken_invite`]) never reaches the
+/// rules: the dialog gate drops it (RFC 6026 §7.2). An earlier untaken INVITE
+/// is read as taken: the record keeps no history of it. Every INVITE before
+/// the last was settled before it left (§14.1), so the copy answers nothing
+/// pending; only the one whose ACK the last INVITE carries ahead
+/// ([`copy_of_2xx_ahead`]) is re-ACKed.
 pub(crate) fn copy_of_earlier_2xx(dialog: &Dialog, resp: &SipResponse) -> bool {
     let Some(last) = dialog.sent_invite.as_ref() else { return false };
-    let cseq = i64::from(resp.cseq().seq());
-    invite_2xx_on(dialog, resp) && cseq < last.outbound_cseq && dialog.untaken_invite != Some(cseq)
-}
-
-/// Read `event`, received on `leg_id`'s dialog `named`, once the turn has
-/// counted and recorded it: the first 2xx to the dialog's untaken INVITE
-/// ([`Dialog::untaken_invite`]) takes the mark, so each later copy of that
-/// 2xx reads as a copy ([`copy_of_earlier_2xx`]).
-pub(crate) fn read_untaken_2xx(
-    call: &mut Call,
-    leg_id: &str,
-    named: Option<&DialogId>,
-    event: &CallEvent,
-) {
-    let CallEvent::Sip { message, .. } = event else { return };
-    let SipMessage::Response(resp) = message.as_ref() else { return };
-    let Some(id) = named else { return };
-    let cseq = i64::from(resp.cseq().seq());
-    let first = |d: &Dialog| d.untaken_invite == Some(cseq) && invite_2xx_on(d, resp);
-    let leg = call::helpers::find_leg(call, leg_id);
-    if !leg.and_then(|l| l.dialogs.by_tags(&id.our_tag, &id.peer_tag)).is_some_and(first) {
-        return;
-    }
-    call::helpers::update_dialog(call, leg_id, id, |d| d.untaken_invite = None);
+    invite_2xx_on(dialog, resp) && i64::from(resp.cseq().seq()) < last.outbound_cseq
 }
 
 /// Whether `resp`, a [`copy_of_earlier_2xx`] on the dialog whose last INVITE's
