@@ -197,6 +197,7 @@ mod refer_transparent_relay;
 mod refused_invite_one_answer;
 mod refused_reject_code;
 mod reinvite;
+mod reinvite_2xx_after_timer_b;
 mod reinvite_accept;
 mod reinvite_after_bye;
 mod reinvite_before_ack_glare;
