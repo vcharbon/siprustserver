@@ -52,6 +52,7 @@ fn entry(seq: u32) -> MessageEntry {
         cseq: seq,
         code: None,
         to_tag: None,
+        from_tag: None,
         decision_ordinal: 0,
         headers: Vec::new(),
         turn: seq,

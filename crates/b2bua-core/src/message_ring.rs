@@ -110,7 +110,15 @@ impl Ring {
                     }
                 }
             }
-            CallEvent::Cancelled { invite_cseq, in_dialog, headers, to_tag, at_ms, .. } => {
+            CallEvent::Cancelled {
+                invite_cseq,
+                in_dialog,
+                headers,
+                to_tag,
+                from_tag,
+                at_ms,
+                ..
+            } => {
                 let cseq = invite_cseq.unwrap_or(0);
                 // The CANCEL names the INVITE's dialog: the tag the INVITE
                 // carried when it was in one, none when it was not; both
@@ -124,6 +132,7 @@ impl Ring {
                     cseq,
                     code: None,
                     to_tag: cancel_tag,
+                    from_tag: Some(from_tag.clone()),
                     decision_ordinal: 0,
                     headers: sip_message::capture::captured_headers(headers, &self.names),
                     turn: 0,
@@ -229,6 +238,7 @@ impl Ring {
             cseq: req.cseq().seq(),
             code: None,
             to_tag: req.to().tag().map(str::to_string),
+            from_tag: req.from().tag().map(str::to_string),
             decision_ordinal: 0,
             headers: req.captured_headers(&self.names),
             turn: 0,
@@ -252,6 +262,7 @@ impl Ring {
             cseq: resp.cseq().seq(),
             code: Some(resp.status()),
             to_tag: resp.to().tag().map(str::to_string),
+            from_tag: resp.from().tag().map(str::to_string),
             decision_ordinal: 0,
             headers: resp.captured_headers(names),
             turn: 0,

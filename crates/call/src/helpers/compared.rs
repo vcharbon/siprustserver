@@ -474,6 +474,7 @@ fn same_entry(a: &MessageEntry, b: &MessageEntry) -> bool {
         cseq,
         code,
         to_tag,
+        from_tag,
         decision_ordinal,
         headers,
         turn,
@@ -484,6 +485,7 @@ fn same_entry(a: &MessageEntry, b: &MessageEntry) -> bool {
         && *cseq == b.cseq
         && *code == b.code
         && *to_tag == b.to_tag
+        && *from_tag == b.from_tag
         && *decision_ordinal == b.decision_ordinal
         && *headers == b.headers
         && *turn == b.turn
