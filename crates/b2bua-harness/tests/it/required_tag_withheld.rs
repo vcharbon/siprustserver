@@ -16,7 +16,7 @@ use b2bua_harness::{settle_until, B2buaScene, B2buaSut, B2buaSutBuilder};
 use call::features::{AdvertiseCapabilitiesFeature, AdvertisedCapabilities, RelayFirst18xStrategy};
 use call::TerminationCause;
 use scenario_harness::callflow::{ANSWER_SDP, OFFER_SDP};
-use scenario_harness::{ClientInvite, Dialog, Invite};
+use scenario_harness::{ClientInvite, Dialog, Harness, InDialogRequest, Invite};
 use sip_message::generators::InDialogMethod;
 use sip_message::header::HeaderName;
 use sip_message::SipResponse;
@@ -131,6 +131,15 @@ async fn the_promotion_with_no_offer_lists_every_withheld_tag_required() {
 async fn a_declared_withhold_refuses_a_required_timer() {
     let routing = Routing::withholding(&["timer"]);
     let listed = refused_at_setup("withheld-timer-declared", routing, "timer", true).await;
+    assert_eq!(listed, ["timer"]);
+}
+
+/// The callee's face declares a `Supported` without `timer`, which keeps the
+/// session timer off his leg.
+#[tokio::test(start_paused = true)]
+async fn a_face_declared_without_timer_refuses_a_required_timer() {
+    let routing = Routing { supported_toward_bob: Some(&["100rel"]), ..Routing::PLAIN };
+    let listed = refused_at_setup("withheld-timer-face-setup", routing, "timer", true).await;
     assert_eq!(listed, ["timer"]);
 }
 
@@ -258,4 +267,92 @@ async fn the_callees_update_requiring_timer_still_reaches_the_caller() {
     s.hangup(&mut alice).await;
     settle_until(|| s.b2bua.cdr_records().len() == 1).await;
     let _report = s.finish().await;
+}
+
+/// A transfer target is dialled outside the caller's session timer: its
+/// answer to her INVITE never reached her. Once she is bridged to it, her
+/// refresh requiring the timer is refused 420 naming it, and one offering the
+/// timer reaches the target with no timer at all.
+#[tokio::test(start_paused = true)]
+async fn a_refresh_requiring_timer_toward_a_transfer_target_is_refused_420() {
+    const CHARLIE_PORT: u16 = 5667;
+    const CHARLIE_ANSWER: &str = "v=0\r\no=charlie 9 9 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 30000 RTP/AVP 0\r\n";
+    let h = Harness::new("withheld-timer-transfer-target");
+    let alice = h.agent("alice", "127.0.0.1:5903").await;
+    let bob = h.agent("bob", "127.0.0.1:5913").await;
+    let charlie = h.agent("charlie", &format!("127.0.0.1:{CHARLIE_PORT}")).await.transfer_target();
+    let b2bua = B2buaSut::route_all_with_refer("127.0.0.1", 5913)
+        .start(&h, "b2bua", "127.0.0.1:5923")
+        .await;
+
+    let invite = with_timer_offer(alice.invite(&bob)).with_header("Require", "timer");
+    let mut call = invite.with_sdp(OFFER_SDP).through(b2bua.addr).send().await;
+    let mut bob_uas = bob.receive("INVITE").await;
+    bob_uas.respond(200, "OK").with_sdp(ANSWER_SDP).await;
+    call.expect(200).await;
+    let mut alice_dialog = call.ack().await;
+    bob.receive("ACK").await;
+    let mut bob_dialog = bob_uas.dialog();
+
+    let api = format!(
+        r#"{{"refer_key":"refer-allow-c","destination":{{"host":"127.0.0.1","port":{CHARLIE_PORT}}}}}"#
+    );
+    bob_dialog
+        .send_request(InDialogMethod::Refer)
+        .with_header("Refer-To", &format!("<sip:charlie@127.0.0.1:{CHARLIE_PORT}>"))
+        .with_header("X-Api-Call", &api)
+        .send()
+        .await
+        .expect(202)
+        .await;
+    bob.receive("NOTIFY").await.respond(200, "OK").await;
+    let mut charlie_uas = charlie.receive("INVITE").await;
+    charlie_uas.respond(200, "OK").with_sdp(CHARLIE_ANSWER).await;
+    charlie.receive("ACK").await;
+    bob.receive("NOTIFY").await.respond(200, "OK").await;
+    charlie.receive("INVITE").await.respond(200, "OK").with_sdp(CHARLIE_ANSWER).await;
+    charlie.receive("ACK").await;
+    alice.receive("INVITE").await.respond(200, "OK").with_sdp(ALICE_REALIGN).await;
+    alice.receive("ACK").await;
+
+    let mut refused = refresh(&mut alice_dialog).with_header("Require", "timer").send().await;
+    h.advance(RELAY_WINDOW).await;
+    let relayed = charlie.take_queued().await;
+    assert!(relayed.is_none(), "the refresh is refused, not relayed; charlie got {relayed:?}");
+    let refusal = refused.expect(420).await;
+    assert_eq!(unsupported(&refusal), ["timer"], "the 420 names the timer nobody serves");
+
+    let mut offered = refresh(&mut alice_dialog).send().await;
+    let mut charlie_refresh = charlie.receive("INVITE").await;
+    for name in [HeaderName::SessionExpires, HeaderName::Require] {
+        let lines: Vec<&str> = charlie_refresh.request().raw(name.clone()).collect();
+        assert!(lines.is_empty(), "the refresh toward charlie carries no {name:?}: {lines:?}");
+    }
+    charlie_refresh.respond(200, "OK").with_sdp(CHARLIE_ANSWER).await;
+    offered.expect(200).await;
+    alice_dialog.ack(None).await;
+    charlie.receive("ACK").await;
+
+    let mut alice_bye = alice_dialog.bye().await;
+    charlie.receive("BYE").await.respond(200, "OK").await;
+    bob.receive("BYE").await.respond(200, "OK").await;
+    alice_bye.expect(200).await;
+    settle_until(|| b2bua.cdr_records().len() == 1).await;
+    assert_eq!(b2bua.cdr_records().len(), 1, "one call, one CDR");
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
+    let _ = h.finish().await;
+}
+
+/// alice's session description once she is bridged to a transfer target.
+const ALICE_REALIGN: &str = "v=0\r\no=alice 1 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
+
+/// A refresh re-INVITE on `dialog`, offering the session as it stands and the
+/// session timer with an interval (RFC 4028 §7.1).
+fn refresh(dialog: &mut Dialog) -> InDialogRequest<'_> {
+    dialog
+        .send_request(InDialogMethod::Invite)
+        .with_sdp(ALICE_REALIGN)
+        .with_header("Supported", "timer")
+        .with_header("Session-Expires", "1800;refresher=uac")
 }
