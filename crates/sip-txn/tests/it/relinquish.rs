@@ -36,7 +36,7 @@ async fn a_relinquished_call_sends_nothing_and_its_callees_answer_arrives_unmatc
     let mut stack = Stack::build(5, 64, 64).await;
     let (client, server) = ("z9hG4bK-hb-c", "z9hG4bK-hb-s");
     assert_eq!(stack.txn.seed(CALL_REF, seeds(client, server)).await.unwrap(), 2);
-    stack.txn.watch_self_release(CALL_REF).await.unwrap();
+    stack.txn.watch_self_release(CALL_REF, &[]).await.unwrap();
 
     assert_eq!(stack.txn.relinquish_call(CALL_REF).await.unwrap(), 2, "both go");
     assert_eq!(stack.txn.metrics().active_transactions(), 0);

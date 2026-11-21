@@ -6,6 +6,7 @@
 
 use crate::common::*;
 use sip_txn::timers::{TIMER_J, TIMER_L};
+use sip_txn::TransactionEvent;
 
 const TRANSIT: u64 = 5;
 
@@ -13,6 +14,12 @@ const TRANSIT: u64 = 5;
 async fn count(stack: &Stack, call_ref: &str, call_ids: &[&str]) -> usize {
     let call_ids: Vec<String> = call_ids.iter().map(|id| id.to_string()).collect();
     stack.txn.active_txn_count_for_call(call_ref, &call_ids).await.unwrap()
+}
+
+/// How many `CallQuiesced` of `call_ref` the events queue held.
+fn quiesced(stack: &mut Stack, call_ref: &str) -> usize {
+    let quiesced = |e: &TransactionEvent| matches!(e, TransactionEvent::CallQuiesced { call_ref: cr } if cr == call_ref);
+    stack.drain_events().iter().filter(|e| quiesced(e)).count()
 }
 
 /// The TU answers 200 to the in-dialog `method` on `branch` of `call_id`
@@ -92,4 +99,56 @@ async fn an_unattributed_request_leaves_the_count_on_every_way_out() {
     elapse_ms(5_000).await;
     assert_eq!(count(&stack, "cr1", &ids).await, 0, "the INFO left at Timer J's end");
     assert_eq!(stack.txn.metrics().active_transactions(), 0, "none is resident");
+}
+
+/// The watch of a call with nothing on its books holds while an
+/// unattributed request of one of its Call-IDs serves it: a consumer that
+/// re-arms it on each notice while the count reads the request hears none
+/// while the request stays unanswered, and one once its final leaves.
+#[tokio::test(start_paused = true)]
+async fn the_watch_holds_while_an_unattributed_request_serves_the_call_until_its_final() {
+    let mut stack = Stack::build(TRANSIT, 64, 64).await;
+    let call_ids = ["rw@u".to_string()];
+    let branch = "z9hG4bK-una-watch";
+    stack.inject(&inbound_request("INFO", branch, "rw@u", Some("callee-tag"))).await;
+    elapse_ms(60).await;
+    let _ = stack.drain_events();
+
+    stack.txn.watch_self_release("cr1", &call_ids).await.unwrap();
+    let mut notices = 0;
+    for _ in 0..10 {
+        elapse_ms(100).await;
+        let heard = quiesced(&mut stack, "cr1");
+        notices += heard;
+        if heard > 0 && count(&stack, "cr1", &["rw@u"]).await != 0 {
+            stack.txn.watch_self_release("cr1", &call_ids).await.unwrap();
+        }
+    }
+    assert_eq!(notices, 0, "no notice while the request is unanswered");
+
+    respond(&stack, "INFO", branch, "rw@u").await;
+    elapse_ms(60).await;
+    assert_eq!(quiesced(&mut stack, "cr1"), 1, "its final re-checks the watch");
+}
+
+/// A watch held by unattributed requests alone fires once the last of them
+/// leaves the map, never while another still serves the call.
+#[tokio::test(start_paused = true)]
+async fn the_watch_fires_once_the_last_unattributed_request_leaves() {
+    let mut stack = Stack::build(TRANSIT, 64, 64).await;
+    let info = |branch| inbound_request("INFO", branch, "rw@u", Some("callee-tag"));
+    let (forgotten, relinquished) = (info("z9hG4bK-una-wf"), info("z9hG4bK-una-wr"));
+    stack.inject(&forgotten).await;
+    stack.inject(&relinquished).await;
+    elapse_ms(60).await;
+    let _ = stack.drain_events();
+
+    stack.txn.watch_self_release("cr1", &["rw@u".to_string()]).await.unwrap();
+    stack.txn.forget_unanswered(&key_of(&forgotten), "rw@u", "caller-tag");
+    elapse_ms(60).await;
+    assert_eq!(quiesced(&mut stack, "cr1"), 0, "one request still serves the call");
+
+    assert!(stack.txn.relinquish_server(key_of(&relinquished)).await.unwrap());
+    elapse_ms(60).await;
+    assert_eq!(quiesced(&mut stack, "cr1"), 1, "the last one left");
 }

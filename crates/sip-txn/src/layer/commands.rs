@@ -75,7 +75,7 @@ impl Owner {
             Command::ReleaseTrying { key, reply } => {
                 let _ = reply.send(self.send_first_trying(endpoint, key.id()).await);
             }
-            Command::WatchSelfRelease { call_ref, reply } => {
+            Command::WatchSelfRelease { call_ref, call_ids: _, reply } => {
                 if self.has_txns_for(&call_ref) {
                     // Live txns — arm the watch; the last `delete_txn` fires the
                     // (lossless) CallQuiesced at end-of-turn.

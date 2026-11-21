@@ -372,11 +372,20 @@ impl TransactionLayer {
     }
 
     /// Ask to be notified (via [`TransactionEvent::CallQuiesced`]) when the last
-    /// transaction for `call_ref` clears — the push signal the B2BUA acting-backup
-    /// self-release (ADR-0014) arms when it takes a dialog over. Idempotent.
-    pub async fn watch_self_release(&self, call_ref: &str) -> Result<(), TransactionLayerClosed> {
-        self.roundtrip(|reply| Command::WatchSelfRelease { call_ref: call_ref.to_string(), reply })
-            .await
+    /// transaction serving `call_ref` clears — the push signal the B2BUA
+    /// acting-backup self-release (ADR-0014) arms when it takes a dialog over.
+    /// What serves it is what
+    /// [`active_txn_count_for_call`](Self::active_txn_count_for_call) counts
+    /// with the same `call_ids`: the watch holds while either kind is left,
+    /// and an unattributed transaction's final or leaving re-checks it.
+    /// Idempotent; a second watch replaces the first's `call_ids`.
+    pub async fn watch_self_release(
+        &self,
+        call_ref: &str,
+        call_ids: &[String],
+    ) -> Result<(), TransactionLayerClosed> {
+        let (call_ref, call_ids) = (call_ref.to_string(), call_ids.to_vec());
+        self.roundtrip(|reply| Command::WatchSelfRelease { call_ref, call_ids, reply }).await
     }
 }
 

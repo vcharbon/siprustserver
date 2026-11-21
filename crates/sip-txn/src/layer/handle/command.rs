@@ -149,10 +149,13 @@ pub(in crate::layer) enum Command {
     },
     /// Register `call_ref` for a one-shot
     /// [`TransactionEvent::CallQuiesced`](crate::TransactionEvent::CallQuiesced)
-    /// when its last transaction clears (ADR-0014 self-release). If it already
-    /// has no transactions, `CallQuiesced` is emitted at once.
+    /// when its last serving transaction clears (ADR-0014 self-release): one
+    /// on its books, or one of a Call-ID in `call_ids` that
+    /// [`ActiveTxnCount`](Self::ActiveTxnCount) counts. If none serves it
+    /// already, `CallQuiesced` is emitted at once.
     WatchSelfRelease {
         call_ref: String,
+        call_ids: Vec<String>,
         reply: oneshot::Sender<()>,
     },
 }

@@ -1311,7 +1311,7 @@ async fn self_release_fires_only_after_the_last_call_txn_clears() {
     );
 
     // Arm the watch while txns are live → NO immediate CallQuiesced.
-    stack.txn.watch_self_release(cr).await.unwrap();
+    stack.txn.watch_self_release(cr, &[]).await.unwrap();
     assert!(!drained_quiesced(&mut stack, cr), "must not fire while txns are in flight");
 
     // Clear the FIRST txn (200 → non-INVITE server Timer J eviction). Count → 1.
@@ -1357,7 +1357,7 @@ async fn call_quiesced_survives_a_full_event_queue() {
     elapse_ms(60).await;
 
     // The watch's immediate-fire path (no txns for `cr`) hits the full queue.
-    stack.txn.watch_self_release(cr).await.unwrap();
+    stack.txn.watch_self_release(cr, &[]).await.unwrap();
 
     // The backlog the consumer now drains does NOT contain the notice…
     assert!(
