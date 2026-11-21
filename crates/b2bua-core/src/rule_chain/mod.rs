@@ -188,8 +188,7 @@ fn chain_turn(
     let start = TurnStart::of(&call);
     // A reliable provisional is the engine's before it is any rule's (RFC
     // 3262): recorded with its early dialog and offer, or — a repeat, or out
-    // of `RSeq` order — dropped unread, its turn a write of nothing else; a
-    // sibling fork's past the answer is PRACKed here and read by no rule.
+    // of `RSeq` order — dropped unread, its turn a write of nothing else.
     let taken = exec.take_reliable_provisional(&mut call, &mut ladder_fx, event, source_leg_id);
     let screened = !Taken::read_by_rules(taken);
     // A fire of the setup's deadline once the setup is over reaches no rule:

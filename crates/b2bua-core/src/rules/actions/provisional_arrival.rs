@@ -44,9 +44,10 @@ impl ActionExecutor<'_> {
     /// Take the reliable provisional `event` carries from `source_leg_id`: a
     /// recorded one is a repeat, a new one out of order is dropped, a new one
     /// in order answering an INVITE still open on that leg is recorded, and a
-    /// sibling fork's past the answer ([`sibling_past_the_answer`]) is
-    /// recorded and PRACKed into `fx`. `None` for every other event, which
-    /// the rules read as before.
+    /// sibling fork's first one inside 64·T1 of the 2xx that answered the
+    /// INVITE dialling the leg is recorded and PRACKed into `fx`
+    /// ([`Taken::PastTheAnswer`]). `None` for every other event, which the
+    /// rules read as before.
     pub fn take_reliable_provisional(
         &mut self,
         call: &mut Call,
