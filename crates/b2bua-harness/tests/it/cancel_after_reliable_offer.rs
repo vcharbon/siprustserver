@@ -35,15 +35,15 @@ const WINNER: &str = "fork1";
 /// `RSeq`, and whether it carries that fork's offer.
 type Reliable = (&'static str, u16, u32, bool);
 
-/// Where the offer of the confirmed dialog rides (RFC 3264 §4).
+/// The message that carries the offer of the confirmed dialog (RFC 3264 §4).
 #[derive(Clone, Copy)]
-enum Offer {
-    /// In the caller's INVITE; the callee rings unreliably.
-    InInvite,
-    /// In the callee's reliable provisionals, answered in each PRACK.
-    InReliable(&'static [Reliable]),
-    /// In the callee's 2xx; the callee rings unreliably.
-    InFinal,
+enum OfferIn {
+    /// The caller's INVITE; the callee rings unreliably.
+    Invite,
+    /// The callee's reliable provisionals, each offer answered in its PRACK.
+    Reliable(&'static [Reliable]),
+    /// The callee's 2xx; the callee rings unreliably.
+    Final,
 }
 
 /// One early dialog: its reliable 183 carries the offer.
@@ -60,9 +60,10 @@ const THREE_FORKS: &[Reliable] = &[
     (WINNER, 180, 301, false),
 ];
 
-/// Alice's ACK-less crossing, run on `offer`: bob's ACK is bare, or answers
-/// rejecting where his 2xx made the offer, and the BYE follows it.
-async fn taken_2xx_is_acked_then_byed(name: &str, offer: Offer, ports: [u16; 3]) {
+/// Bob rings, then answers in the instant alice CANCELs, the 2xx taken first:
+/// bob's ACK is bare, or answers rejecting where his 2xx made the offer, and
+/// the BYE follows it on the 2xx's dialog.
+async fn taken_2xx_is_acked_then_byed(name: &str, offer: OfferIn, ports: [u16; 3]) {
     let h = Harness::with_transit_delay(name, 1);
     let [alice_port, bob_port, b2bua_port] = ports;
     let alice = h.agent("alice", &format!("127.0.0.1:{alice_port}")).await;
@@ -73,17 +74,17 @@ async fn taken_2xx_is_acked_then_byed(name: &str, offer: Offer, ports: [u16; 3])
 
     let invite = alice.invite(&bob).with_header("Supported", "100rel").through(b2bua.addr);
     let invite = match offer {
-        Offer::InInvite => invite.with_sdp(ALICE_SDP),
-        Offer::InReliable(_) | Offer::InFinal => invite,
+        OfferIn::Invite => invite.with_sdp(ALICE_SDP),
+        OfferIn::Reliable(_) | OfferIn::Final => invite,
     };
     let mut call = invite.send().await;
     let mut uas = bob.receive("INVITE").await;
     match offer {
-        Offer::InInvite | Offer::InFinal => {
+        OfferIn::Invite | OfferIn::Final => {
             uas.respond(180, "Ringing").with_to_tag(WINNER).await;
             call.expect(180).await;
         }
-        Offer::InReliable(rings) => {
+        OfferIn::Reliable(rings) => {
             for &(tag, code, rseq, offers) in rings {
                 let ring = uas
                     .respond(code, "Ringing")
@@ -111,27 +112,24 @@ async fn taken_2xx_is_acked_then_byed(name: &str, offer: Offer, ports: [u16; 3])
     }
     h.advance(Duration::from_millis(20)).await;
 
-    // ── bob answers and alice CANCELs in the same instant: the 2xx is taken first ──
     let answer = uas.respond(200, "OK").with_to_tag(WINNER);
     match offer {
-        Offer::InInvite => answer.with_sdp(BOB_SDP).await,
-        Offer::InFinal => answer.with_sdp(BOB_SDP).await,
-        Offer::InReliable(_) => answer.await,
+        OfferIn::Invite | OfferIn::Final => answer.with_sdp(BOB_SDP).await,
+        OfferIn::Reliable(_) => answer.await,
     }
     let mut cxl = call.cancel().await;
     cxl.expect(200).await;
     call.expect(487).await;
 
-    // ── this stack ACKs bob's 2xx on its own account, then BYEs that dialog ──
     let ack = bob.receive("ACK").await;
     assert_eq!(ack.request().to().tag(), Some(WINNER), "the ACK names the 2xx's dialog");
     let body = String::from_utf8_lossy(ack.request().body()).into_owned();
     match offer {
-        Offer::InFinal => assert!(
+        OfferIn::Final => assert!(
             body.lines().any(|l| l.starts_with("m=audio 0 ")),
             "the ACK answers the 2xx's offer, rejecting its stream (RFC 3264 §6): {body:?}"
         ),
-        Offer::InInvite | Offer::InReliable(_) => {
+        OfferIn::Invite | OfferIn::Reliable(_) => {
             assert!(body.is_empty(), "the ACK owes no answer (RFC 3264 §4): {body:?}")
         }
     }
@@ -153,7 +151,7 @@ async fn taken_2xx_is_acked_then_byed(name: &str, offer: Offer, ports: [u16; 3])
 async fn a_2xx_after_a_prack_answered_offer_is_acked_bare_then_byed() {
     taken_2xx_is_acked_then_byed(
         "b2bua-cancel-after-reliable-offer",
-        Offer::InReliable(ONE_FORK),
+        OfferIn::Reliable(ONE_FORK),
         [5121, 5122, 5123],
     )
     .await;
@@ -163,7 +161,7 @@ async fn a_2xx_after_a_prack_answered_offer_is_acked_bare_then_byed() {
 async fn a_forked_2xx_after_prack_answered_offers_is_acked_bare_then_byed() {
     taken_2xx_is_acked_then_byed(
         "b2bua-cancel-after-reliable-offer-forked",
-        Offer::InReliable(THREE_FORKS),
+        OfferIn::Reliable(THREE_FORKS),
         [5124, 5125, 5126],
     )
     .await;
@@ -173,7 +171,7 @@ async fn a_forked_2xx_after_prack_answered_offers_is_acked_bare_then_byed() {
 async fn a_2xx_answering_the_invite_offer_is_acked_bare_then_byed() {
     taken_2xx_is_acked_then_byed(
         "b2bua-cancel-after-invite-offer",
-        Offer::InInvite,
+        OfferIn::Invite,
         [5127, 5128, 5129],
     )
     .await;
@@ -183,7 +181,7 @@ async fn a_2xx_answering_the_invite_offer_is_acked_bare_then_byed() {
 async fn a_2xx_making_the_offer_is_acked_rejecting_then_byed() {
     taken_2xx_is_acked_then_byed(
         "b2bua-cancel-after-final-offer",
-        Offer::InFinal,
+        OfferIn::Final,
         [5130, 5131, 5132],
     )
     .await;
