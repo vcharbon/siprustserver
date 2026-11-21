@@ -143,6 +143,9 @@ impl ActionExecutor<'_> {
             RuleAction::RejectPendingReinvite { leg_id, outbound_cseq, status, reason } => {
                 self.reject_pending_reinvite(call, fx, leg_id, *outbound_cseq, *status, reason);
             }
+            RuleAction::ResolveCancelledReinvite { leg_id, outbound_cseq } => {
+                self.resolve_cancelled_reinvite(call, fx, ctx, leg_id, *outbound_cseq);
+            }
             RuleAction::AnswerRelayOriginator { status, reason } => {
                 self.answer_relay_originator(call, fx, ctx, *status, reason);
             }
@@ -163,7 +166,6 @@ impl ActionExecutor<'_> {
             }
             RuleAction::Merge { .. }
             | RuleAction::Split { .. }
-            | RuleAction::ResolveCancelledReinvite { .. }
             | RuleAction::ScheduleTimer { .. }
             | RuleAction::SnoozeTimer { .. }
             | RuleAction::CancelTimer { .. }

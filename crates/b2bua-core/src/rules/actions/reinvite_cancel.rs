@@ -3,6 +3,7 @@
 //! renegotiation ends — on the target's face by the CANCEL, on the
 //! originator's by the transaction layer's 487 or this stack's own final.
 
+use b2bua_sdk::model::RuleContext;
 use call::helpers::Scope;
 use call::{Call, DialogId};
 use sip_message::generators::{self, InviteClientTransactionHandle};
@@ -133,6 +134,31 @@ impl ActionExecutor<'_> {
             provenance: Provenance::Authored,
         });
         self.commit_pending_reinvite_cancel(call, fx, leg_id, outbound_cseq, cancel);
+    }
+
+    /// Resolve the target's final `ctx` carries to the relayed re-INVITE on
+    /// `leg_id`'s dialog under `outbound_cseq`, whose originator already holds
+    /// a final ([`b2bua_sdk::model::RuleAction::ResolveCancelledReinvite`]):
+    /// a 2xx is ACKed (RFC 3261 §13.2.2.4), answering an offer it made with
+    /// every stream rejected (RFC 3264 §6), since no answer can come from the
+    /// originator; the pending snapshot is dropped.
+    pub(super) fn resolve_cancelled_reinvite(
+        &mut self,
+        call: &mut Call,
+        fx: &mut HandlerEffects,
+        ctx: &RuleContext,
+        leg_id: &str,
+        outbound_cseq: i64,
+    ) {
+        if let Some(resp) = ctx.response().filter(|r| (200..300).contains(&r.status())) {
+            match crate::rules::relay::offer_of_2xx(call, leg_id, resp) {
+                Some(offer) => self.ack_rejecting_offer(call, fx, leg_id, &offer),
+                None => self.ack_own_bare(call, fx, leg_id),
+            }
+        }
+        if let Some((t_id, _)) = find_pending_dialog(call, leg_id, outbound_cseq) {
+            call::helpers::remove_relay(call, leg_id, &t_id, outbound_cseq);
+        }
     }
 }
 

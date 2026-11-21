@@ -239,7 +239,21 @@ impl ActionExecutor<'_> {
     /// no answer.
     pub(super) fn ack_rejecting(&mut self, call: &mut Call, fx: &mut HandlerEffects, leg_id: &str) {
         let Some(leg) = call::helpers::find_leg(call, leg_id) else { return };
-        let Some(offer) = relay::offer_owed_in_ack(leg) else { return };
+        let Some(offer) = relay::offer_owed_in_ack(leg).map(<[u8]>::to_vec) else { return };
+        self.ack_rejecting_offer(call, fx, leg_id, &offer);
+    }
+
+    /// ACK `leg_id`'s confirmed dialog on this stack's own account, answering
+    /// `offer`, the offer its 2xx made, with every stream rejected (RFC 3264
+    /// §6), in the session this stack stated on the dialog (§8).
+    pub(super) fn ack_rejecting_offer(
+        &mut self,
+        call: &mut Call,
+        fx: &mut HandlerEffects,
+        leg_id: &str,
+        offer: &[u8],
+    ) {
+        let Some(leg) = call::helpers::find_leg(call, leg_id) else { return };
         let origin = leg.dialogs.confirmed().and_then(|d| relay::next_origin_on(leg, d));
         let options = sip_message::BuildHeldSdpOptions {
             local_ip: self.config.sip_local_ip.clone(),

@@ -281,25 +281,15 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                 }])
             },
         ),
-        // Resolve a response to a relayed re-INVITE the originator CANCELled
-        // (RFC 3261 §9 — `handle-reinvite-cancel` marked its pending-relay
-        // snapshot `cancelled`). The originator's own re-INVITE transaction was
-        // already answered by the txn layer (200 to the CANCEL + 487), so the
-        // target's final must NOT be relayed:
-        //   - 487 / any non-2xx final → drop the snapshot; renegotiation over,
-        //     dialog + call intact (§14.1: a failed re-INVITE leaves the
-        //     session as it was).
-        //   - **crossing 2xx** (the target answered before our CANCEL landed,
-        //     §9.1): ACK it on this dialog (quiesces the target's 2xx
-        //     retransmissions, §13.2.2.4) and absorb. The call stays up. The
-        //     two sides' SDP views may diverge until the next renegotiation
-        //     (the target applied the new offer; the canceller kept the old
-        //     session) — the deliberate minimal-intervention choice: the
-        //     canceller abandoned the renegotiation it initiated, and killing
-        //     the call (or minting a resync re-INVITE) costs more than the
-        //     transient divergence.
-        //   - 1xx → absorb and keep waiting for the final.
-        // Outranks `relay-reinvite-response` (whose filter also skips cancelled
+        // Resolve the target's response to a relayed re-INVITE whose
+        // originator already holds this stack's final (its snapshot
+        // `cancelled`: the call's teardown answered it 487, §15.1.2, or a
+        // service rejected it) and that this stack CANCELled toward the
+        // target. The final is never relayed: a 1xx is absorbed, a non-2xx
+        // drops the snapshot (§14.1: the session stays as it was), and a 2xx
+        // crossing the CANCEL is ACKed and absorbed (§13.2.2.4), an offer it
+        // made answered rejecting every stream.
+        // Outranks `relay-reinvite-response` (whose filter skips cancelled
         // snapshots) and the INVITE-response fallbacks that would otherwise
         // claim the final.
         rule(
@@ -311,18 +301,11 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
             |ctx| {
                 let resp = ctx.response()?;
                 if resp.status() < 200 {
-                    // Provisional on the CANCELled re-INVITE — absorb; the 487
-                    // (or crossing 2xx) is still coming.
                     return ok(vec![]);
                 }
-                let leg = ctx.source_leg_id.to_string();
+                let leg_id = ctx.source_leg_id.to_string();
                 let outbound_cseq = resp.cseq().seq() as i64;
-                let mut actions = Vec::new();
-                if (200..300).contains(&resp.status()) {
-                    actions.push(RuleAction::AckLeg { leg_id: leg.clone(), body: None });
-                }
-                actions.push(RuleAction::ResolveCancelledReinvite { leg_id: leg, outbound_cseq });
-                ok(actions)
+                ok(vec![RuleAction::ResolveCancelledReinvite { leg_id, outbound_cseq }])
             },
         ),
         // Relay a re-INVITE response (1xx/2xx/3xx+) back to the originator. The

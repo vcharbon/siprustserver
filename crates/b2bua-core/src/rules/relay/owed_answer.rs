@@ -40,6 +40,18 @@ pub(crate) fn offered_reliably(call: &Call, leg_id: &str, tag: &str, invite_cseq
     with_sdp && !invite_carried_offer(call, leg_id, invite_cseq)
 }
 
+/// The offer `resp`, a 2xx to an INVITE this stack sent on `leg_id`, made
+/// (RFC 3264 §4): its description, where that INVITE carried none and no
+/// reliable provisional of the 2xx's dialog carried one first (RFC 3262 §5).
+pub(crate) fn offer_of_2xx(call: &Call, leg_id: &str, resp: &SipResponse) -> Option<Vec<u8>> {
+    let description = resp.sdp()?;
+    let tag = resp.to().tag().unwrap_or_default();
+    let invite_cseq = i64::from(resp.cseq().seq());
+    let made = !invite_carried_offer(call, leg_id, invite_cseq)
+        && !offered_reliably(call, leg_id, tag, invite_cseq);
+    made.then(|| description.to_vec())
+}
+
 /// Whether `leg_id`'s confirmed dialog left a provisional's offer to the ACK
 /// its 2xx awaits ([`OwedAnswer::DeferredToAck`]).
 pub(crate) fn offer_deferred_to_ack(call: &Call, leg_id: &str) -> bool {

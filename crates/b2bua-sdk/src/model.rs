@@ -212,10 +212,10 @@ pub enum RuleAction {
         status: u16,
         reason: String,
     },
-    /// Resolve a CANCELled relayed re-INVITE's final response locally: drop the
-    /// cancelled pending-relay snapshot (`outbound_cseq`) from `leg_id`'s
-    /// dialog. Never relayed — the txn layer answered the originator when the
-    /// CANCEL matched.
+    /// Resolve locally, never relayed, the target's final to a relayed re-INVITE
+    /// whose originator already holds this stack's final: a 2xx is ACKed on
+    /// `leg_id`'s dialog (RFC 3261 §13.2.2.4), an offer it made answered with
+    /// every stream rejected (RFC 3264 §6); the snapshot `outbound_cseq` drops.
     ResolveCancelledReinvite {
         leg_id: String,
         outbound_cseq: i64,
