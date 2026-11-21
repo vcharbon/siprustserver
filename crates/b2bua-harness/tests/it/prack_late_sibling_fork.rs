@@ -1,27 +1,24 @@
 //! **RFC 3262 §4 — a sibling fork's first reliable provisional reaching this
 //! stack after another fork's 2xx is PRACKed here.** A forked callee's 2xx on
-//! one fork established the call; another fork's reliable 183 reaches this
-//! stack only afterwards. Its early dialog lives on (RFC 3261 §13.2.2.4), and
-//! this stack, that fork's UAC, is the only party that took the provisional:
-//! it PRACKs it once, on that fork's own early dialog, and relays nothing
-//! toward the caller, whose INVITE transaction already sent its final
-//! (RFC 3261 §13.3.1.1). The early dialog then ends by the fork's own 2xx
-//! (ACKed and BYEd as any straggler) or silently at the 64·T1 bound; the call
-//! keeps the winner. Under the transparent relay and under fake-prack alike.
-//!
-//! The harness's fabric has one transit delay per hop and cannot reorder, so
-//! the callee here sends the late 183 after his 2xx, as a datagram of its own:
-//! on the wire this stack sees, that is the 183 sent before the 2xx and
-//! overtaken by it in flight. Each test waives the two after-final rules on
-//! the callee for that one message.
+//! one fork established the call; another fork's reliable 183, sent before
+//! that 2xx, is held in flight and reaches this stack only afterwards. Its
+//! early dialog lives on (RFC 3261 §13.2.2.4), and this stack, that fork's
+//! UAC, is the only party that took the provisional: it PRACKs it once, on
+//! that fork's own early dialog, and relays nothing toward the caller, whose
+//! INVITE transaction already sent its final (RFC 3261 §13.3.1.1). The early
+//! dialog then ends by the fork's own 2xx (ACKed and BYEd as any straggler) or
+//! silently at the 64·T1 bound; the call keeps the winner. Under the
+//! transparent relay and under fake-prack alike.
 
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use b2bua_harness::{settle_until, stated, B2buaSut};
 use call::features::RelayFirst18xStrategy;
-use scenario_harness::{Agent, Dialog, Harness, ServerTxn, WaiverScope};
-use sip_net_testkit::RecordedSipEntry;
+use scenario_harness::{Agent, ClientInvite, Dialog, Harness, ServerTxn};
+use sip_net_testkit::{RecordedSipEntry, SendDelay};
 
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 192.0.2.10\r\ns=-\r\nc=IN IP4 192.0.2.10\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
 const ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 192.0.2.20\r\ns=-\r\nc=IN IP4 192.0.2.20\r\nt=0 0\r\nm=audio 20000 RTP/AVP 0\r\n";
@@ -44,6 +41,19 @@ const LATE_FORK: &str = "fork3";
 const EARLY_FORK_RSEQ: u32 = 11;
 const LATE_FORK_RSEQ: u32 = 31;
 
+/// RFC 3261 T1: the interval of a reliable provisional's first
+/// retransmission (RFC 3262 §3).
+const T1: Duration = Duration::from_millis(500);
+
+/// How long the fabric holds the late fork's 183 past its transit: past the
+/// winner's 2xx, the caller's ACK and its relay on the harness's 1 ms hops,
+/// well inside T1.
+const HELD: Duration = Duration::from_millis(20);
+
+/// How long the fabric holds the late fork's first 183 when the callee
+/// repeats it: past its retransmission at T1, so the copy arrives first.
+const HELD_PAST_T1: Duration = Duration::from_millis(600);
+
 /// Past a round trip on the harness's 1 ms transit, well inside T1.
 const PAST_A_ROUND_TRIP: Duration = Duration::from_millis(50);
 
@@ -60,6 +70,18 @@ enum Relay {
     FakePrack,
 }
 
+/// The callee has rung and not answered: the caller's INVITE, the callee's
+/// INVITE server transaction, and the INVITE's CSeq.
+struct Ringing {
+    h: Harness,
+    alice: Agent,
+    bob: Agent,
+    b2bua: B2buaSut,
+    call: ClientInvite,
+    uas: ServerTxn,
+    invite_cseq: u32,
+}
+
 /// The established call, the callee's INVITE server transaction, and the
 /// INVITE's CSeq.
 struct Answered {
@@ -72,25 +94,34 @@ struct Answered {
     invite_cseq: u32,
 }
 
-/// The waivers of the callee's late 183: the crossing the fabric cannot stage.
-fn late_183_crossed_the_2xx(h: &Harness) {
-    for rule in ["no-1xx-after-final", "no-new-reliable-1xx-after-final"] {
-        h.waive(
-            WaiverScope::rule(
-                rule,
-                "the late fork's 183 left its UAS before the winner's 2xx and was overtaken by it \
-                 in flight; the fabric cannot reorder, so the callee sends it after",
-            )
-            .on_party("bob"),
-        );
-    }
+/// Whether `datagram` is a 183 of [`LATE_FORK`]'s.
+fn is_the_late_forks_183(datagram: &[u8]) -> bool {
+    let text = String::from_utf8_lossy(datagram);
+    text.starts_with("SIP/2.0 183 ") && text.contains(&format!(";tag={LATE_FORK}"))
 }
 
-/// A harness, its parties and this stack under `relay`, with the keepalive
-/// out of every window these tests wait through.
-async fn parties(name: &str, relay: Relay) -> (Harness, Agent, Agent, B2buaSut) {
-    let h = Harness::with_transit_delay(name, 1);
-    late_183_crossed_the_2xx(&h);
+/// The fabric's hold on [`LATE_FORK`]'s 183s: the n-th one sent is held
+/// `holds[n]`, every later one the last of `holds`; nothing else is held.
+fn the_late_forks_183_held(holds: &'static [Duration]) -> SendDelay {
+    let sent = AtomicUsize::new(0);
+    Arc::new(move |_src, _dst, datagram| {
+        if !is_the_late_forks_183(datagram) {
+            return None;
+        }
+        let n = sent.fetch_add(1, Ordering::Relaxed);
+        holds.get(n).or(holds.last()).copied()
+    })
+}
+
+/// A harness whose fabric holds the late fork's 183s as `holds` says, its
+/// parties and this stack under `relay`, with the keepalive out of every
+/// window these tests wait through.
+async fn parties(
+    name: &str,
+    relay: Relay,
+    holds: &'static [Duration],
+) -> (Harness, Agent, Agent, B2buaSut) {
+    let h = Harness::with_transit_delay_and_send_delay(name, 1, the_late_forks_183_held(holds));
     let alice = h.agent_auto("alice").await;
     let bob = h.agent_auto("bob").await;
     let at = h.next_addr().to_string();
@@ -106,10 +137,9 @@ async fn parties(name: &str, relay: Relay) -> (Harness, Agent, Agent, B2buaSut) 
 }
 
 /// The callee forks: [`EARLY_FORK`] rings with a reliable 183, PRACKed by
-/// the caller or by this stack as `relay` has it, then [`WINNER`] answers
-/// 200 and the caller ACKs.
-async fn answered_after_an_early_fork(name: &str, relay: Relay) -> Answered {
-    let (h, alice, bob, b2bua) = parties(name, relay).await;
+/// the caller or by this stack as `relay` has it.
+async fn rung_by_an_early_fork(name: &str, relay: Relay, holds: &'static [Duration]) -> Ringing {
+    let (h, alice, bob, b2bua) = parties(name, relay, holds).await;
     let mut call = alice
         .invite(&bob)
         .with_sdp(OFFER)
@@ -121,8 +151,7 @@ async fn answered_after_an_early_fork(name: &str, relay: Relay) -> Answered {
     let invite_cseq = uas.request().cseq().seq();
     uas.respond(183, "Session Progress")
         .with_to_tag(EARLY_FORK)
-        .with_header("Require", "100rel")
-        .with_header("RSeq", &EARLY_FORK_RSEQ.to_string())
+        .reliable(EARLY_FORK_RSEQ)
         .with_sdp(ANSWER)
         .await;
     match relay {
@@ -138,65 +167,53 @@ async fn answered_after_an_early_fork(name: &str, relay: Relay) -> Answered {
             bob.receive("PRACK").await.respond(200, "OK").await;
         }
     }
-    uas.respond(200, "OK").with_to_tag(WINNER).with_sdp(ANSWER).await;
-    call.expect(200).await;
-    let dialog = call.ack().await;
-    bob.receive("ACK").await;
-    Answered { h, alice, bob, b2bua, uas, dialog, invite_cseq }
+    Ringing { h, alice, bob, b2bua, call, uas, invite_cseq }
 }
 
-/// The callee does not ring: [`WINNER`] answers an offerless INVITE 200 with
-/// its own offer and the caller answers it on her ACK.
-async fn answered_with_the_winners_offer(name: &str) -> Answered {
-    let (h, alice, bob, b2bua) = parties(name, Relay::Transparent).await;
-    let mut call =
+/// The callee does not ring before the late fork: an offerless INVITE
+/// reaches him.
+async fn offerless_invite(name: &str) -> Ringing {
+    let (h, alice, bob, b2bua) = parties(name, Relay::Transparent, &[HELD]).await;
+    let call =
         alice.invite(&bob).with_header("Supported", "100rel").through(b2bua.addr).send().await;
-    let mut uas = bob.receive("INVITE").await;
+    let uas = bob.receive("INVITE").await;
     assert!(uas.request().sdp().is_none(), "an offerless INVITE reaches the callee");
     let invite_cseq = uas.request().cseq().seq();
-    uas.respond(200, "OK").with_to_tag(WINNER).with_sdp(WINNER_OFFER).await;
+    Ringing { h, alice, bob, b2bua, call, uas, invite_cseq }
+}
+
+/// [`LATE_FORK`] sends its first reliable 183, with `RSeq`
+/// [`LATE_FORK_RSEQ`] and `sdp`, which the fabric holds.
+async fn late_fork_rings(r: &mut Ringing, sdp: &str) {
+    r.uas
+        .respond(183, "Session Progress")
+        .with_to_tag(LATE_FORK)
+        .reliable(LATE_FORK_RSEQ)
+        .with_sdp(sdp)
+        .await;
+}
+
+/// [`LATE_FORK`] retransmits its 183 at T1 (RFC 3262 §3): the same datagram
+/// again, unPRACKed so far as the callee knows.
+async fn late_fork_repeats_its_183(r: &Ringing) {
+    r.h.advance(T1).await;
+    let first =
+        r.h.wire_entries()
+            .into_iter()
+            .find(|e| e.from == r.bob.addr() && is_the_late_forks_183(&e.raw))
+            .expect("the late fork's 183");
+    r.bob.try_send_datagram(&first.raw, r.b2bua.addr).await.expect("the copy leaves");
+}
+
+/// [`WINNER`] answers 200 with `sdp` and the caller ACKs, carrying `answer`
+/// when the 200 offers.
+async fn winner_answers(r: Ringing, sdp: &str, answer: Option<&str>) -> Answered {
+    let Ringing { h, alice, bob, b2bua, mut call, mut uas, invite_cseq } = r;
+    uas.respond(200, "OK").with_to_tag(WINNER).with_sdp(sdp).await;
     call.expect(200).await;
-    let dialog = call.ack_with(Some(CALLER_ANSWER)).await;
+    let dialog = call.ack_with(answer).await;
     bob.receive("ACK").await;
     Answered { h, alice, bob, b2bua, uas, dialog, invite_cseq }
-}
-
-/// [`LATE_FORK`]'s first reliable 183, with `RSeq` [`LATE_FORK_RSEQ`] and
-/// `sdp`: the winner's 2xx as the callee sent it, retagged and turned into a
-/// provisional under the same Via and CSeq.
-fn late_reliable_183(h: &Harness, bob: SocketAddr, b2bua: SocketAddr, sdp: &str) -> Vec<u8> {
-    let answer = h
-        .wire_entries()
-        .into_iter()
-        .filter(|e| e.from == bob && e.to == b2bua && e.raw.starts_with(b"SIP/2.0 200 "))
-        .map(|e| String::from_utf8_lossy(&e.raw).to_string())
-        .find(|text| {
-            text.split("\r\n").any(|l| l.starts_with("CSeq:") && l.trim_end().ends_with("INVITE"))
-        })
-        .expect("the winner's 2xx");
-    let (head, _) = answer.split_once("\r\n\r\n").expect("the 2xx's head");
-    let winner_tag = format!(";tag={WINNER}");
-    let late_tag = format!(";tag={LATE_FORK}");
-    let head: Vec<String> = head
-        .split("\r\n")
-        .skip(1)
-        .filter(|l| !l.to_ascii_lowercase().starts_with("content-"))
-        .map(|l| l.replace(&winner_tag, &late_tag))
-        .collect();
-    format!(
-        "SIP/2.0 183 Session Progress\r\n{}\r\nRequire: 100rel\r\nRSeq: {LATE_FORK_RSEQ}\r\n\
-         Content-Type: application/sdp\r\nContent-Length: {}\r\n\r\n{sdp}",
-        head.join("\r\n"),
-        sdp.len()
-    )
-    .into_bytes()
-}
-
-/// The callee puts [`LATE_FORK`]'s 183 carrying `sdp` on the wire.
-async fn send_late_183(a: &Answered, sdp: &str) -> Vec<u8> {
-    let late = late_reliable_183(&a.h, a.bob.addr(), a.b2bua.addr, sdp);
-    a.bob.try_send_datagram(&late, a.b2bua.addr).await.expect("the late 183 leaves");
-    late
 }
 
 /// The PRACK this stack owes [`LATE_FORK`]: on that fork's early dialog,
@@ -214,7 +231,7 @@ async fn expect_the_late_forks_prack(a: &Answered) -> ServerTxn {
     prack
 }
 
-/// The `(To-tag, RAck)` of each PRACK this stack first sent `to`, in order.
+/// The `(To-tag, RAck)` of each PRACK `from` first sent `to`, in order.
 fn pracks_to(entries: &[RecordedSipEntry], from: SocketAddr, to: SocketAddr) -> Vec<String> {
     entries
         .iter()
@@ -266,8 +283,8 @@ async fn caller_hangs_up(mut a: Answered, expected: &[String]) {
     );
 }
 
-/// The PRACK lines [`pracks_to`] reads for the early fork (when `rang`) and
-/// the late fork, on INVITE CSeq `cseq`.
+/// The PRACK lines [`pracks_to`] reads for the early fork (when
+/// `rang`) and the late fork, on INVITE CSeq `cseq`.
 fn pracked(cseq: u32, rang: bool) -> Vec<String> {
     let early = format!("{EARLY_FORK}: {EARLY_FORK_RSEQ} {cseq} INVITE");
     let late = format!("{LATE_FORK}: {LATE_FORK_RSEQ} {cseq} INVITE");
@@ -282,9 +299,10 @@ fn pracked(cseq: u32, rang: bool) -> Vec<String> {
 /// caller; the late fork then answers 200 and is ACKed and BYEd.
 #[tokio::test(start_paused = true)]
 async fn a_late_forks_reliable_183_is_pracked_here_then_its_2xx_released() {
-    let mut a =
-        answered_after_an_early_fork("b2bua-prack-late-sibling-2xx", Relay::Transparent).await;
-    send_late_183(&a, ANSWER).await;
+    let name = "b2bua-prack-late-sibling-2xx";
+    let mut r = rung_by_an_early_fork(name, Relay::Transparent, &[HELD]).await;
+    late_fork_rings(&mut r, ANSWER).await;
+    let mut a = winner_answers(r, ANSWER, None).await;
     expect_the_late_forks_prack(&a).await.respond(200, "OK").await;
     late_fork_answers(&mut a, ANSWER).await;
     let expected = pracked(a.invite_cseq, true);
@@ -297,9 +315,10 @@ async fn a_late_forks_reliable_183_is_pracked_here_then_its_2xx_released() {
 /// wire, and the call stays up on the winner.
 #[tokio::test(start_paused = true)]
 async fn a_late_forks_reliable_183_is_pracked_here_then_its_early_dialog_lapses() {
-    let a =
-        answered_after_an_early_fork("b2bua-prack-late-sibling-bound", Relay::Transparent).await;
-    send_late_183(&a, ANSWER).await;
+    let name = "b2bua-prack-late-sibling-bound";
+    let mut r = rung_by_an_early_fork(name, Relay::Transparent, &[HELD]).await;
+    late_fork_rings(&mut r, ANSWER).await;
+    let a = winner_answers(r, ANSWER, None).await;
     expect_the_late_forks_prack(&a).await.respond(200, "OK").await;
     a.h.advance(PAST_THE_EARLY_DIALOG_BOUND).await;
     assert_eq!(a.bob.drain_tu().await, 0, "the early dialog lapses with nothing sent");
@@ -311,41 +330,45 @@ async fn a_late_forks_reliable_183_is_pracked_here_then_its_early_dialog_lapses(
 /// draws a PRACK the same way after the answer, and its 2xx is released.
 #[tokio::test(start_paused = true)]
 async fn under_fake_prack_a_late_forks_reliable_183_is_pracked_then_its_2xx_released() {
-    let mut a =
-        answered_after_an_early_fork("b2bua-prack-late-sibling-fake-prack", Relay::FakePrack).await;
-    send_late_183(&a, ANSWER).await;
+    let name = "b2bua-prack-late-sibling-fake-prack";
+    let mut r = rung_by_an_early_fork(name, Relay::FakePrack, &[HELD]).await;
+    late_fork_rings(&mut r, ANSWER).await;
+    let mut a = winner_answers(r, ANSWER, None).await;
     expect_the_late_forks_prack(&a).await.respond(200, "OK").await;
     late_fork_answers(&mut a, ANSWER).await;
     let expected = pracked(a.invite_cseq, true);
     caller_hangs_up(a, &expected).await;
 }
 
-/// The late fork retransmits its 183 while this stack's PRACK awaits its
-/// answer: that copy draws no second PRACK (RFC 3262 §4); the PRACK
-/// transaction re-sends itself.
+/// The late fork retransmits its 183 at T1 and the fabric holds the first
+/// copy past the second: the second arrival, while this stack's PRACK awaits
+/// its answer, draws no second PRACK (RFC 3262 §4).
 #[tokio::test(start_paused = true)]
 async fn a_late_forks_retransmitted_183_draws_one_prack() {
-    let mut a =
-        answered_after_an_early_fork("b2bua-prack-late-sibling-repeat", Relay::Transparent).await;
-    let late = send_late_183(&a, ANSWER).await;
+    let name = "b2bua-prack-late-sibling-repeat";
+    let mut r = rung_by_an_early_fork(name, Relay::Transparent, &[HELD_PAST_T1, HELD]).await;
+    late_fork_rings(&mut r, ANSWER).await;
+    late_fork_repeats_its_183(&r).await;
+    let mut a = winner_answers(r, ANSWER, None).await;
     let mut prack = expect_the_late_forks_prack(&a).await;
-    a.bob.try_send_datagram(&late, a.b2bua.addr).await.expect("the copy leaves");
-    a.h.advance(PAST_A_ROUND_TRIP).await;
-    assert_eq!(a.bob.drain_tu().await, 0, "no second PRACK for the copy");
+    a.h.advance(HELD_PAST_T1 - T1).await;
+    assert_eq!(a.bob.drain_tu().await, 0, "no second PRACK for the first copy");
     prack.respond(200, "OK").await;
     late_fork_answers(&mut a, ANSWER).await;
     let expected = pracked(a.invite_cseq, true);
     caller_hangs_up(a, &expected).await;
 }
 
-/// An offerless INVITE the winner answered with its own offer; the late
-/// fork's reliable 183 carries an offer of its own. The PRACK must answer it
-/// (RFC 3262 §5): the session is the winner's, so the answer rejects every
-/// stream (RFC 3264 §6).
+/// An offerless INVITE: the late fork's reliable 183 carries an offer of its
+/// own, and the winner answers with its own offer, which the caller answers
+/// on her ACK. The PRACK must answer the late fork's offer (RFC 3262 §5):
+/// the session is the winner's, so the answer rejects every stream (RFC 3264
+/// §6).
 #[tokio::test(start_paused = true)]
 async fn a_late_forks_offer_is_answered_rejecting_in_the_prack() {
-    let mut a = answered_with_the_winners_offer("b2bua-prack-late-sibling-offer").await;
-    send_late_183(&a, LATE_FORK_OFFER).await;
+    let mut r = offerless_invite("b2bua-prack-late-sibling-offer").await;
+    late_fork_rings(&mut r, LATE_FORK_OFFER).await;
+    let mut a = winner_answers(r, WINNER_OFFER, Some(CALLER_ANSWER)).await;
     let mut prack = expect_the_late_forks_prack(&a).await;
     let body = String::from_utf8_lossy(prack.request().body()).into_owned();
     assert!(
