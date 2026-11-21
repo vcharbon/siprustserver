@@ -1,7 +1,8 @@
-//! A worker's INVITE to a name the peer answers with a non-2xx final, the
-//! name resolving elsewhere by then: the ACK of that final goes to the
-//! address, port and transport the INVITE was sent to (RFC 3261 §17.1.1.3,
-//! RFC 3263 §4), on the instance that holds the INVITE's entry.
+//! A transaction toward a name that resolves elsewhere once its first request
+//! left: the ACK of its non-2xx final, its CANCEL and its retransmissions go
+//! to the address, port and transport its first request was sent to (RFC 3261
+//! §9.1, §17.1.1.3, RFC 3263 §4), on the instance that holds the entry, whether
+//! the name rides the Request-URI, a loose Route or the stickiness cookie.
 //!
 //! Sends to a name leave from the resolver's task when it looks the name up,
 //! so each step lets that task run ([`SETTLE`]) before reading the wire.
@@ -12,8 +13,8 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use sip_message::SipMessage;
-use sip_txn::timers::{T1, T2, TIMER_H};
-use tokio::time::{sleep, Instant};
+use sip_txn::timers::{T1, T2, TIMER_F, TIMER_H};
+use tokio::time::{sleep, sleep_until, Instant};
 
 use crate::core::dual_face_tests::{
     caller_invite, caller_src, dual_face_core_over, dual_face_core_routing, header_lines,
@@ -69,10 +70,43 @@ fn worker() -> SocketAddr {
     format!("{W1}:5060").parse().expect("an address")
 }
 
+/// How a worker's request reaches the peer's name: its Request-URI and the
+/// value of its Route.
+struct WorkerPath {
+    request_uri: String,
+    route: String,
+}
+
+impl WorkerPath {
+    /// The name in the Request-URI, behind the proxy's own Route.
+    fn by_request_uri() -> Self {
+        Self {
+            request_uri: format!("sip:bob@{PEER_NAME}:{PEER_PORT}"),
+            route: format!("<sip:{INT_VIP}:{INT_PORT};lr>"),
+        }
+    }
+
+    /// An address in the Request-URI, the name in the loose Route below the
+    /// proxy's own (RFC 3261 §16.12).
+    fn by_loose_route() -> Self {
+        Self {
+            request_uri: "sip:bob@198.51.100.7:5060".to_string(),
+            route: format!("<sip:{INT_VIP}:{INT_PORT};lr>, <sip:{PEER_NAME}:{PEER_PORT};lr>"),
+        }
+    }
+}
+
 /// The worker's B-leg INVITE to the peer's name, or its §17.1.1.3 ACK of a
-/// non-2xx final (the INVITE's Request-URI, top Via, Route and CSeq number,
-/// the final's To).
+/// non-2xx final, along [`WorkerPath::by_request_uri`].
 fn worker_request(method: &str, call_id: &str) -> SipMessage {
+    worker_request_along(&WorkerPath::by_request_uri(), method, call_id)
+}
+
+/// The worker's B-leg INVITE along `path`, or its §17.1.1.3 ACK of a non-2xx
+/// final (the INVITE's Request-URI, top Via, Route and CSeq number, the
+/// final's To).
+fn worker_request_along(path: &WorkerPath, method: &str, call_id: &str) -> SipMessage {
+    let WorkerPath { request_uri, route } = path;
     let to_tag = if method == "ACK" { ";tag=peer-1" } else { "" };
     let contact = if method == "INVITE" {
         format!("Contact: <sip:b2bua@{W1}:5060;leg=b>\r\n")
@@ -80,7 +114,7 @@ fn worker_request(method: &str, call_id: &str) -> SipMessage {
         String::new()
     };
     parse_msg(&format!(
-        "{method} sip:bob@{PEER_NAME}:{PEER_PORT} SIP/2.0\r\n\
+        "{method} {request_uri} SIP/2.0\r\n\
 Via: SIP/2.0/UDP {W1}:5060;branch=z9hG4bKnamed1;rport\r\n\
 Max-Forwards: 70\r\n\
 From: <sip:service@{INT_VIP}:{INT_PORT}>;tag=svc\r\n\
@@ -88,7 +122,7 @@ To: <sip:bob@{PEER_NAME}>{to_tag}\r\n\
 Call-ID: {call_id}\r\n\
 CSeq: 1 {method}\r\n\
 {contact}\
-Route: <sip:{INT_VIP}:{INT_PORT};lr>\r\n\
+Route: {route}\r\n\
 Content-Length: 0\r\n\r\n"
     ))
 }
@@ -226,20 +260,24 @@ async fn the_ack_of_a_non_2xx_goes_where_the_invite_went_after_the_names_refresh
     assert_eq!(acks, vec![peer()], "one ACK, to the INVITE's address; the peer stops");
 }
 
-/// The worker's INVITE leaves for the pinned name 300 ms before the name's
-/// refresh stores its new address; the worker's Timer A copy (§17.1.1.2),
-/// after that refresh, goes where the first copy went: one transaction, one
-/// destination (§17.1.1.3). The peer rings, answers 486 and sees the ACK.
-#[tokio::test(start_paused = true)]
-async fn a_retransmitted_invite_goes_where_its_first_copy_went_after_the_names_refresh() {
-    let call_id = "named-invite-rtx";
+/// The worker's INVITE along `path` leaves for the pinned name 300 ms before
+/// the name's refresh stores its new address, routed by `decision`; the
+/// worker's Timer A copy (§17.1.1.2), after that refresh, goes where the first
+/// copy went: one transaction, one destination (§17.1.1.3). The peer rings,
+/// answers 486 and sees the ACK.
+async fn a_retransmitted_invite_after_the_names_refresh(
+    call_id: &str,
+    path: WorkerPath,
+    decision: RoutingDecisionKind,
+) {
     let (fx, name) = proxy_to_the_name();
     fx.core.prewarm_named_targets(vec![ProxyAddr::new(PEER_NAME, PEER_PORT)]);
     let refresh = Duration::from_millis(ResolverConfig::default().refresh_after_ms());
     sleep(refresh - Duration::from_millis(300)).await;
 
-    let invite = worker_request("INVITE", call_id);
-    fx.core.route_request(&invite, worker(), Face::Internal).await;
+    let invite = worker_request_along(&path, "INVITE", call_id);
+    let outcome = fx.core.route_request(&invite, worker(), Face::Internal).await;
+    assert_eq!(outcome.decision, decision);
     sleep(SETTLE).await;
     let sent = fx.take_sent();
     let [(face, dst, first)] = sent.as_slice() else { panic!("one INVITE: {sent:?}") };
@@ -248,7 +286,8 @@ async fn a_retransmitted_invite_goes_where_its_first_copy_went_after_the_names_r
     name.move_to(MOVED_TO);
 
     sleep(Duration::from_millis(T1) - SETTLE).await;
-    fx.core.route_request(&invite, worker(), Face::Internal).await;
+    let outcome = fx.core.route_request(&invite, worker(), Face::Internal).await;
+    assert_eq!(outcome.decision, decision, "the copy takes the first copy's rung");
     sleep(SETTLE).await;
     let sent = fx.take_sent();
     let [(face, dst, copy)] = sent.as_slice() else { panic!("one INVITE copy: {sent:?}") };
@@ -257,7 +296,8 @@ async fn a_retransmitted_invite_goes_where_its_first_copy_went_after_the_names_r
 
     peer_answers(&fx, peer_response("180 Ringing", &first, call_id)).await;
     peer_answers(&fx, peer_response("486 Busy Here", &first, call_id)).await;
-    fx.core.route_request(&worker_request("ACK", call_id), worker(), Face::Internal).await;
+    let ack = worker_request_along(&path, "ACK", call_id);
+    fx.core.route_request(&ack, worker(), Face::Internal).await;
     sleep(SETTLE).await;
     let sent = fx.take_sent();
     let [(face, dst, ack)] = sent.as_slice() else { panic!("one ACK: {sent:?}") };
@@ -267,6 +307,22 @@ async fn a_retransmitted_invite_goes_where_its_first_copy_went_after_the_names_r
     sleep(Duration::from_millis(TIMER_H) + Duration::from_secs(1)).await;
     let sent = fx.take_sent();
     assert!(sent.is_empty(), "nothing follows the transaction's end: {sent:?}");
+}
+
+/// The name in the Request-URI.
+#[tokio::test(start_paused = true)]
+async fn a_retransmitted_invite_goes_where_its_first_copy_went_after_the_names_refresh() {
+    let path = WorkerPath::by_request_uri();
+    let decision = RoutingDecisionKind::WorkerOutbound;
+    a_retransmitted_invite_after_the_names_refresh("named-invite-rtx", path, decision).await;
+}
+
+/// The name in a loose Route (RFC 3261 §16.12).
+#[tokio::test(start_paused = true)]
+async fn a_retransmitted_invite_to_a_loose_route_name_goes_where_its_first_copy_went() {
+    let path = WorkerPath::by_loose_route();
+    let decision = RoutingDecisionKind::LooseRoute;
+    a_retransmitted_invite_after_the_names_refresh("named-route-rtx", path, decision).await;
 }
 
 /// The accepted residual (ADR-0009 X7): an instance without the INVITE's
@@ -303,8 +359,13 @@ async fn at_an_instance_without_the_invites_entry_the_ack_follows_a_fresh_lookup
 
 /// The peer's answer `status` to `request`, a request of the caller's dialog
 /// the proxy forwarded: its Via lines, From, Call-ID and CSeq echoed
-/// (§8.2.6.2), its To tagged.
+/// (§8.2.6.2), its To tagged (an in-dialog request's tag kept).
 fn answer(status: &str, request: &[u8]) -> SipMessage {
+    answer_with(status, request, "")
+}
+
+/// [`answer`], with `extra` header lines.
+fn answer_with(status: &str, request: &[u8], extra: &str) -> SipMessage {
     let mut head = format!("SIP/2.0 {status}\r\n");
     for via in header_lines(request, "Via") {
         head.push_str(&format!("Via: {via}\r\n"));
@@ -313,18 +374,44 @@ fn answer(status: &str, request: &[u8]) -> SipMessage {
         head.push_str(&format!("{name}: {}\r\n", header_lines(request, name)[0]));
     }
     let to = &header_lines(request, "To")[0];
-    parse_msg(&format!("{head}To: {to};tag=peer-1\r\nContent-Length: 0\r\n\r\n"))
+    let tag = if to.contains(";tag=") { "" } else { ";tag=peer-1" };
+    parse_msg(&format!("{head}To: {to}{tag}\r\n{extra}Content-Length: 0\r\n\r\n"))
+}
+
+/// The peer's 200 to the forwarded INVITE `invite`: the INVITE's
+/// Record-Route and the peer's Contact (§12.1.1).
+fn answer_the_invite(invite: &[u8]) -> SipMessage {
+    let mut extra = String::new();
+    for rr in header_lines(invite, "Record-Route") {
+        extra.push_str(&format!("Record-Route: {rr}\r\n"));
+    }
+    extra.push_str(&format!("Contact: <sip:bob@{AT_INVITE}:{PEER_PORT}>\r\n"));
+    answer_with("200 OK", invite, &extra)
 }
 
 /// The peer answers through the proxy, which relays the answer to the
-/// caller, and nothing else.
-async fn peer_answers_the_caller(fx: &Fixture, response: SipMessage) {
+/// caller, and nothing else. Returns the relayed answer.
+async fn peer_answers_the_caller(fx: &Fixture, response: SipMessage) -> Vec<u8> {
     let SipMessage::Response(response) = response else { panic!("a response") };
     let status = response.status();
     fx.core.handle_response(response, peer(), Face::Internal).await;
     let sent = fx.take_sent();
-    let [(face, dst, _)] = sent.as_slice() else { panic!("{status} relays once: {sent:?}") };
+    let [(face, dst, relayed)] = sent.as_slice() else { panic!("{status} relays once: {sent:?}") };
     assert_eq!((*face, *dst), ("ext", caller_src()), "the {status} relays to the caller");
+    relayed.clone()
+}
+
+/// A proxy in front of one worker whose strategy places every call on the
+/// name (the forward-all cookie names it), resolving it at [`AT_INVITE`]
+/// until the test moves it.
+fn proxy_forwarding_all_to_the_name() -> (Fixture, Arc<MovingName>) {
+    let name = Arc::new(MovingName::at(AT_INVITE));
+    let reg = Arc::new(StaticWorkerRegistry::from_entries(vec![WorkerEntry::alive(
+        "w1",
+        ProxyAddr::new(W1, 5060),
+    )]));
+    let strategy = Arc::new(ForwardAllStrategy::new(ProxyAddr::new(PEER_NAME, PEER_PORT)));
+    (dual_face_core_routing(reg, strategy, Some(name.clone())), name)
 }
 
 /// The caller's CANCEL of its INVITE (§9.1), or its ACK of the peer's 487
@@ -351,13 +438,7 @@ Content-Length: 0\r\n\r\n"
 #[tokio::test(start_paused = true)]
 async fn a_cancel_goes_where_a_named_invite_went_after_the_names_entry_expired() {
     let call_id = "named-cancel";
-    let name = Arc::new(MovingName::at(AT_INVITE));
-    let reg = Arc::new(StaticWorkerRegistry::from_entries(vec![WorkerEntry::alive(
-        "w1",
-        ProxyAddr::new(W1, 5060),
-    )]));
-    let strategy = Arc::new(ForwardAllStrategy::new(ProxyAddr::new(PEER_NAME, PEER_PORT)));
-    let fx = dual_face_core_routing(reg, strategy, Some(name.clone()));
+    let (fx, name) = proxy_forwarding_all_to_the_name();
 
     fx.core.route_request(&caller_invite(call_id), caller_src(), Face::External).await;
     sleep(SETTLE).await;
@@ -395,4 +476,72 @@ async fn a_cancel_goes_where_a_named_invite_went_after_the_names_entry_expired()
     sleep(Duration::from_millis(TIMER_H) + Duration::from_secs(1)).await;
     let sent = fx.take_sent();
     assert!(sent.is_empty(), "nothing follows the transaction's end: {sent:?}");
+}
+
+/// The caller's request `method` of the dialog the peer's 200 `answer`
+/// established: to the peer's Contact, along the route set the 200's
+/// Record-Route gives the caller (§12.1.2), under `branch`.
+fn caller_in_dialog(method: &str, cseq: u32, branch: &str, answer: &[u8]) -> SipMessage {
+    let mut head = format!(
+        "{method} {} SIP/2.0\r\n\
+Via: SIP/2.0/UDP {CALLER}:5060;branch={branch};rport\r\n\
+Max-Forwards: 70\r\n",
+        header_lines(answer, "Contact")[0].trim_matches(['<', '>'])
+    );
+    for name in ["From", "To", "Call-ID"] {
+        head.push_str(&format!("{name}: {}\r\n", header_lines(answer, name)[0]));
+    }
+    for rr in header_lines(answer, "Record-Route").iter().rev() {
+        head.push_str(&format!("Route: {rr}\r\n"));
+    }
+    parse_msg(&format!("{head}CSeq: {cseq} {method}\r\nContent-Length: 0\r\n\r\n"))
+}
+
+/// The caller's request `request` reaches the proxy, which the cookie on its
+/// Route places on the name: it leaves for `to`, alone. Returns the forward.
+async fn caller_sends_to(fx: &Fixture, request: &SipMessage, to: SocketAddr) -> Vec<u8> {
+    let outcome = fx.core.route_request(request, caller_src(), Face::External).await;
+    assert_eq!(outcome.decision, RoutingDecisionKind::DecodeForward, "the cookie places it");
+    sleep(SETTLE).await;
+    let sent = fx.take_sent();
+    let [(face, dst, forwarded)] = sent.as_slice() else { panic!("one forward: {sent:?}") };
+    assert_eq!((*face, *dst), ("int", to), "{}", String::from_utf8_lossy(forwarded));
+    forwarded.clone()
+}
+
+/// A call the forward-all cookie places on the name: the INVITE's send
+/// resolves the name, the peer there answers 200, and the caller's ACK
+/// reaches it, a use of the name's entry that keeps it refreshed. The caller's
+/// BYE leaves 300 ms before that refresh stores the name's new address; the
+/// caller's Timer E copy (§17.1.2.2), past the refresh, goes where the first
+/// copy went: one transaction, one destination (§16.11). The peer answers the
+/// BYE.
+#[tokio::test(start_paused = true)]
+async fn a_retransmitted_request_under_a_cookie_naming_a_name_goes_where_its_first_copy_went() {
+    let call_id = "named-cookie-rtx";
+    let (fx, name) = proxy_forwarding_all_to_the_name();
+    let refresh = Duration::from_millis(ResolverConfig::default().refresh_after_ms());
+    let resolved_at = Instant::now();
+
+    fx.core.route_request(&caller_invite(call_id), caller_src(), Face::External).await;
+    sleep(SETTLE).await;
+    let sent = fx.take_sent();
+    let [(face, dst, invite)] = sent.as_slice() else { panic!("one INVITE: {sent:?}") };
+    assert_eq!((*face, *dst), ("int", peer()), "the INVITE leaves for the name's address");
+    let ok = peer_answers_the_caller(&fx, answer_the_invite(invite)).await;
+    caller_sends_to(&fx, &caller_in_dialog("ACK", 1, "z9hG4bKack1", &ok), peer()).await;
+
+    sleep_until(resolved_at + refresh - Duration::from_millis(300)).await;
+    let bye = caller_in_dialog("BYE", 2, "z9hG4bKbye1", &ok);
+    let first = caller_sends_to(&fx, &bye, peer()).await;
+    name.move_to(MOVED_TO);
+
+    sleep(Duration::from_millis(T1) - SETTLE).await;
+    let copy = caller_sends_to(&fx, &bye, peer()).await;
+    assert_eq!(copy, first, "§16.11: the copy is the first forward again");
+
+    peer_answers_the_caller(&fx, answer("200 OK", &first)).await;
+    sleep(Duration::from_millis(TIMER_F) + Duration::from_secs(1)).await;
+    let sent = fx.take_sent();
+    assert!(sent.is_empty(), "nothing follows the call's end: {sent:?}");
 }
