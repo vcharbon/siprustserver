@@ -302,3 +302,18 @@ fn an_exemption_no_name_matches_refuses_the_boot() {
         assert!(refused.iter().any(|e| e.contains("SIP_EXEMPTIONS")), "{blank:?}: {refused:?}");
     }
 }
+
+/// A configured address is an RFC 3261 `hostport`: an IPv6 host written
+/// bracketed is held bare, the form a Via or Record-Route brackets once; the
+/// unbracketed form, whose port no reader can tell, refuses the boot.
+#[test]
+fn a_configured_ipv6_address_is_read_bracketed_only() {
+    let advertise = ("PROXY_ADVERTISE", "[2001:db8::1]:5060");
+    let prewarm = ("PROXY_RESOLVER_PREWARM", "[2001:db8::9]:5070, peer.example.net:5060");
+    let cfg = boot(&[advertise, prewarm]).expect("valid");
+    assert_eq!(cfg.advertise, ProxyAddr::new("2001:db8::1", 5060));
+    let peer = ProxyAddr::new("peer.example.net", 5060);
+    assert_eq!(cfg.prewarm, vec![ProxyAddr::new("2001:db8::9", 5070), peer]);
+    refused(&[("PROXY_ADVERTISE", "2001:db8::1:5060")], "PROXY_ADVERTISE");
+    refused(&[("PROXY_RESOLVER_PREWARM", "2001:db8::9:5070")], "PROXY_RESOLVER_PREWARM");
+}

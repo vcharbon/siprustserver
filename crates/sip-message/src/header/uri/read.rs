@@ -197,6 +197,18 @@ fn read_hostport(value: &SipStr, i: usize, role: UriRole) -> Result<(HostPort, u
     }
 }
 
+/// `text` whole as a `hostport` ([`read_hostport`]), the host read as a
+/// [`UriRole::Target`] URI host. `Err` names the refusal, a byte after the
+/// port among them.
+pub(super) fn read_whole_hostport(text: &str) -> Result<HostPort, String> {
+    let value = SipStr::owned(text);
+    let (hostport, end) = read_hostport(&value, 0, UriRole::Target)?;
+    match byte_at(value.as_bytes(), end) {
+        None => Ok(hostport),
+        Some(b) => Err(format!("byte 0x{b:02x} after the hostport")),
+    }
+}
+
 /// `sent-by = host [ COLON port ]` (RFC 3261 §20.42, `COLON = SWS ":" SWS`)
 /// from byte `i` of one Via value, the host read as a [`UriRole::Target`]
 /// URI host. Yields the host, the port's digits as a number (its range is the

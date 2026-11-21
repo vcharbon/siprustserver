@@ -65,7 +65,9 @@ impl RoutingStrategy for ForwardAllStrategy {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sip_message::header::{ParamValue, Uri};
     use sip_message::parser::custom::CustomParser;
+    use sip_message::sip_str::SipStr;
     use sip_message::SipParser;
 
     fn invite() -> SipMessage {
@@ -95,6 +97,29 @@ Content-Length: 0\r\n\r\n";
             DecodeResult::Forward { target, .. } => {
                 assert_eq!(target, ProxyAddr::new("10.0.0.3", 5070))
             }
+            other => panic!("expected Forward, got {other:?}"),
+        }
+    }
+
+    /// An IPv6 target rides the cookie bracketed, which a Route URI's
+    /// parameter holds as written (RFC 3261 `param-unreserved`), and decodes
+    /// back to the bare address.
+    #[test]
+    fn an_ipv6_target_round_trips_through_a_route_uri() {
+        let target = ProxyAddr::new("2001:db8::7", 5070);
+        let s = ForwardAllStrategy::new(target.clone());
+        let msg = invite();
+        let params = s.encode_stickiness(&target, &msg).unwrap();
+        let cookie = params.get("target").unwrap();
+        assert_eq!(cookie, "[2001:db8::7]:5070");
+
+        let text = format!("sip:192.0.2.250:5060;target={cookie};lr");
+        let route = Uri::parse(&SipStr::owned(&text)).unwrap_or_else(|e| panic!("{}", e.reason));
+        let read = route.param("target").and_then(ParamValue::as_str).unwrap();
+        let mut carried = RouteParams::new();
+        carried.insert("target".into(), read.to_string());
+        match s.decode_stickiness(&carried, &msg) {
+            DecodeResult::Forward { target: decoded, .. } => assert_eq!(decoded, target),
             other => panic!("expected Forward, got {other:?}"),
         }
     }

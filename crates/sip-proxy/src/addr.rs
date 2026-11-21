@@ -4,6 +4,8 @@
 
 use std::net::SocketAddr;
 
+use sip_message::header::HostPort;
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ProxyAddr {
     pub host: String,
@@ -15,15 +17,15 @@ impl ProxyAddr {
         Self { host: host.into(), port }
     }
 
-    /// Parses `host:port` (the cookie and registry wire form), split at the
-    /// last `:`. `None` with no `:`, an empty host, or a port that is no `u16`.
+    /// Parses `host:port` (the cookie, registry and configuration form) as an
+    /// RFC 3261 `hostport` with its port ([`HostPort::parse`]): `host` holds
+    /// the bare address, an IPv6 literal written only bracketed
+    /// (`[2001:db8::7]:5060`). `None` for a host the URI grammar refuses
+    /// (empty, malformed, an unbracketed IPv6 address), no port, a port of 0
+    /// or past 65535, or any byte after the port.
     pub fn parse(s: &str) -> Option<Self> {
-        let (host, port) = s.rsplit_once(':')?;
-        if host.is_empty() {
-            return None;
-        }
-        let port: u16 = port.parse().ok()?;
-        Some(Self { host: host.to_string(), port })
+        let read = HostPort::parse(s).ok()?;
+        Some(Self { host: read.host().to_string(), port: read.port()? })
     }
 
     /// The socket address of an IP-literal host (IPv6 bracketed or not); `None`
@@ -33,9 +35,15 @@ impl ProxyAddr {
     }
 }
 
+/// `host:port`, an IPv6 host bracketed: the form [`ProxyAddr::parse`] reads
+/// back.
 impl std::fmt::Display for ProxyAddr {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}:{}", self.host, self.port)
+        if self.host.contains(':') {
+            write!(f, "[{}]:{}", self.host, self.port)
+        } else {
+            write!(f, "{}:{}", self.host, self.port)
+        }
     }
 }
 
@@ -61,6 +69,27 @@ mod tests {
         assert!(ProxyAddr::parse("nope").is_none());
         assert!(ProxyAddr::parse(":5060").is_none());
         assert!(ProxyAddr::parse("host:notaport").is_none());
+    }
+
+    /// An IPv6 literal is read only bracketed and held bare; `Display`
+    /// brackets it again, so the text round-trips.
+    #[test]
+    fn an_ipv6_host_is_read_bracketed_and_held_bare() {
+        let a = ProxyAddr::parse("[2001:db8::7]:5060").unwrap();
+        assert_eq!(a, ProxyAddr::new("2001:db8::7", 5060));
+        assert_eq!(a.to_socket_addr(), Some("[2001:db8::7]:5060".parse().unwrap()));
+        assert_eq!(a.to_string(), "[2001:db8::7]:5060");
+        assert_eq!(ProxyAddr::parse(&a.to_string()), Some(a));
+        assert!(ProxyAddr::parse("2001:db8::7:5060").is_none(), "unbracketed: no port to tell");
+        assert!(ProxyAddr::parse("[2001:db8::7]").is_none(), "no port");
+    }
+
+    #[test]
+    fn a_port_is_from_1_to_65535() {
+        assert_eq!(ProxyAddr::parse("host.example:1"), Some(ProxyAddr::new("host.example", 1)));
+        assert!(ProxyAddr::parse("host.example:65535").is_some());
+        assert!(ProxyAddr::parse("host.example:0").is_none());
+        assert!(ProxyAddr::parse("host.example:65536").is_none());
     }
 
     #[test]

@@ -30,9 +30,11 @@ pub struct StaticRegistryParseError {
 
 /// Parses `id@host:port,...` into `WorkerEntry`s, all `alive`. A blank string
 /// yields an empty set. Refuses an empty entry, a missing, leading or trailing
-/// `@`, an empty or duplicate id, a malformed `host:port` or port 0, and a host
-/// that is no IP literal: `lookup_by_address` compares host strings against
-/// datagram source addresses, so a named worker would never match.
+/// `@`, an empty or duplicate id, a malformed `host:port` or port 0 (an IPv6
+/// host bracketed), and a host that is no IP literal: `lookup_by_address`
+/// compares host strings against datagram source addresses, so a named worker
+/// would never match. A host is held in its canonical text, as a source
+/// address prints.
 pub fn parse_worker_list(
     source: &str,
     raw: &str,
@@ -61,19 +63,20 @@ pub fn parse_worker_list(
                 if !seen.insert(id.to_string()) {
                     return Err(err(format!("duplicate worker id \"{id}\"")));
                 }
-                let addr =
-                    ProxyAddr::parse(host_port).filter(|a| a.port >= 1).ok_or_else(|| {
-                        err(format!(
-                            "entry \"{part}\" has malformed host:port (port must be 1..65535)"
-                        ))
-                    })?;
-                if addr.host.parse::<std::net::IpAddr>().is_err() {
+                let addr = ProxyAddr::parse(host_port).ok_or_else(|| {
+                    err(format!(
+                        "entry \"{part}\" has malformed host:port (port must be 1..65535, an \
+                         IPv6 host bracketed)"
+                    ))
+                })?;
+                let Ok(ip) = addr.host.parse::<std::net::IpAddr>() else {
                     return Err(err(format!(
                         "entry \"{part}\": worker host must be an IP literal — a DNS name breaks \
                          worker-outbound classification (lookup_by_address compares raw host strings)"
                     )));
-                }
-                out.push(WorkerEntry::alive(id, addr));
+                };
+                let canonical = std::net::SocketAddr::new(ip, addr.port);
+                out.push(WorkerEntry::alive(id, ProxyAddr::from(canonical)));
             }
         }
     }
@@ -211,6 +214,18 @@ mod tests {
         assert!(parse_worker_list("t", "id@host:notaport").is_err());
         assert!(parse_worker_list("t", "a@h:1,a@h:2").is_err());
         assert!(parse_worker_list("t", "a@h:1,,b@h:2").is_err());
+    }
+
+    /// An IPv6 worker is written bracketed (RFC 3261 `hostport`) and held as
+    /// the bare canonical address a datagram's source prints; the unbracketed
+    /// form is refused, its port being no part of it a reader can tell.
+    #[test]
+    fn an_ipv6_worker_is_read_bracketed_only() {
+        let r = StaticWorkerRegistry::from_string("w@[2001:DB8:0::7]:5060", "test").unwrap();
+        let src: std::net::SocketAddr = "[2001:db8::7]:5060".parse().unwrap();
+        assert_eq!(r.resolve("w").unwrap().address, ProxyAddr::from(src));
+        assert!(r.lookup_by_address(&ProxyAddr::from(src)).is_some());
+        assert!(parse_worker_list("t", "w@2001:db8::7:5060").is_err());
     }
 
     #[test]

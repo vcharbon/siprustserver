@@ -270,7 +270,7 @@ fn advertise(env: &mut EnvReader, key: &str, listen: Option<SocketAddr>) -> Prox
     let fallback = ProxyAddr::new(listen.ip().to_string(), listen.port());
     match env.present(key) {
         Some(s) => ProxyAddr::parse(&s).unwrap_or_else(|| {
-            env.refuse(format!("{key} must be host:port, got {s:?}"));
+            env.refuse(format!("{key} must be host:port, an IPv6 host bracketed, got {s:?}"));
             fallback
         }),
         None if listen.ip().is_unspecified() => {
@@ -458,7 +458,9 @@ fn prewarm(env: &mut EnvReader) -> Vec<ProxyAddr> {
     for entry in raw.split(',').map(str::trim).filter(|s| !s.is_empty()) {
         match ProxyAddr::parse(entry) {
             Some(t) => targets.push(t),
-            None => env.refuse(format!("PROXY_RESOLVER_PREWARM entry {entry:?} is not host:port")),
+            None => env.refuse(format!(
+                "PROXY_RESOLVER_PREWARM entry {entry:?} is not host:port (an IPv6 host bracketed)"
+            )),
         }
     }
     targets
