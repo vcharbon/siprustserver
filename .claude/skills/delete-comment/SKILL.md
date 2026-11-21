@@ -29,9 +29,11 @@ repository root; `T=.claude/skills/delete-comment/comments.py`.
    script, and send a slice's missing ids back to a new agent.
 
 4. **Review the calls.** Read every `excuse`, every `decision`, every `to-doc` and every
-   `rewrite` text: each must name real code, be in present tense, and read as public content
-   (the repository's CLAUDE.md content rules). Fix a row in the `OUT` file. Sample `delete`
-   rows of doc comments on `pub` items: a deleted contract is the costly mistake.
+   `rewrite` text: each must name real code, be in present tense, and read as public content:
+   generic terms, no private names. Fix a row in the `OUT` file. Read every `delete` row of a
+   doc comment on a `pub` item: a deleted contract is the costly mistake, and an `excuse` mixed
+   with a contract (a function's `None` cases, say) is a `rewrite` keeping the contract. A
+   rewrite links only public items from a public item's doc.
 
 5. **Record decisions.** Group the `decision` rows by `topic`. A row naming an existing ADR
    whose text lacks its `decision` gets that text added to the ADR. Each topic with `adr:

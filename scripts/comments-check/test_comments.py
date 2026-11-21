@@ -19,7 +19,7 @@ def kinds(src):
 
 
 def banned_lines(src):
-    return [c.start for c in rust_comments.banned(rust_comments.scan(src))]
+    return [c.start for c in rust_comments.banned(rust_comments.scan(src), src)]
 
 
 class Lexer(unittest.TestCase):
@@ -55,8 +55,21 @@ class Lexer(unittest.TestCase):
 
 class Rule(unittest.TestCase):
     def test_lone_safety_and_adr_pointer_are_allowed(self):
-        src = "fn f() {\n    // SAFETY: the slice is non-empty\n    x();\n    // ADR-0051 §3\n    y();\n}\n"
+        src = ("fn f() {\n    // SAFETY: the slice is non-empty\n    unsafe { x() };\n"
+               "    // ADR-0051 §3\n    y();\n    // ADR-0009 §X7\n    z();\n}\n")
         self.assertEqual(banned_lines(src), [])
+
+    def test_a_safety_note_over_safe_code_is_banned(self):
+        src = "fn f() {\n    // SAFETY: retry until the peer answers\n    let x = 1;\n}\n"
+        self.assertEqual(banned_lines(src), [2])
+
+    def test_a_section_token_carrying_words_is_banned(self):
+        for text in ("// ADR-0051 §3:deny", "// ADR-0051 §because-the-peer-retransmits"):
+            with self.subTest(text=text):
+                self.assertEqual(banned_lines(f"fn f() {{\n    {text}\n    y();\n}}\n"), [2])
+
+    def test_a_crlf_pointer_is_allowed(self):
+        self.assertEqual(banned_lines("fn f() {\r\n    // ADR-0051\r\n    y();\r\n}\r\n"), [])
 
     def test_a_pointer_with_text_after_it_is_banned(self):
         src = "fn f() {\n    // ADR-0051 §3: deny\n    y();\n}\n"

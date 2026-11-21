@@ -24,20 +24,23 @@ classified; an id it does not find refuses the whole run before any edit.
 `adr-pointer` replace its lines by `text`, `to-doc` inserts `text` before line
 `insert_before` and cuts the block. Run `cargo fmt` after.
 
-`same-code` compares each file at REV with the worktree, both without comments,
-whitespace, and the trailing commas rustfmt adds when a comment's removal lets
-it reflow a list: a diff that only edits comments (and the formatting rustfmt
-then picks) exits 0; otherwise it names each file whose code changed and exits 1.
+`same-code` compares each file at REV with the worktree as rustfmt cannot
+change it: no comments, literals verbatim, whitespace only between two word
+characters, no trailing comma a reflow adds (a 1-tuple's kept). A diff that
+only edits comments, and the formatting rustfmt then picks, exits 0; otherwise
+it names each file whose code changed and exits 1.
+
+`apply` refuses an id classified twice, like an id that names no block.
 
 `estimate` counts, per PATH, the lines of its files now and after rustfmt of
 the copy without (a) its plain comments, (b) its doc comments, (c) both, split
 into test files (under `tests/`, a `tests.rs` or `*_tests.rs`) and the rest.
 """
 import argparse
+import collections
 import fnmatch
 import json
 import os
-import re
 import subprocess
 import sys
 
@@ -68,7 +71,7 @@ def read(path):
 def cmd_list(paths):
     for path in rust_files(paths):
         found = rust_comments.scan(read(path))
-        banned = {id(c) for c in rust_comments.banned(found)}
+        banned = {id(c) for c in rust_comments.banned(found, read(path))}
         for blk in rust_comments.blocks(found):
             first, last = blk[0], blk[-1]
             print(json.dumps({
@@ -104,7 +107,8 @@ def blocks_of(root, rel):
 
 
 def edits_of(blk, row):
-    """`[(line, remove_count, new_lines, trailing_span)]` for one block, by its row."""
+    """`[(line, remove_count, new, trailing)]` for one block, by its row: `new`
+    is the replacement lines, or for a trailing comment its offset in the file."""
     first, last = blk[0], blk[-1]
     action = row["action"]
     if action == "keep":
@@ -112,7 +116,7 @@ def edits_of(blk, row):
     if first.trailing:
         if action != "delete":
             raise ValueError(f"{row['id']}: a trailing comment takes `delete` only")
-        return [(first.start, 0, None, True)]
+        return [(first.start, 0, first.span[0], True)]
     count = last.end - first.start + 1
     if action == "delete":
         return [(first.start, count, [], False)]
@@ -135,6 +139,11 @@ def cmd_apply(root, paths):
             return 2
         rel, _, _ = row["id"].rpartition(":")
         per_file.setdefault(rel, []).append(row)
+    twice = sorted(i for i, n in collections.Counter(r["id"] for r in rows).items() if n > 1)
+    if twice:
+        print(f"apply: {len(twice)} id(s) classified twice, first {twice[0]}; nothing edited",
+              file=sys.stderr)
+        return 2
     plan = {}
     for rel, frows in per_file.items():
         frows.sort(key=lambda r: int(r["id"].rpartition(":")[2]))
@@ -152,16 +161,15 @@ def cmd_apply(root, paths):
     changed = 0
     for rel, (found, edits) in plan.items():
         path = os.path.join(root, rel)
-        lines = read(path).split("\n")
+        source = read(path)
+        lines = source.split("\n")
         # Bottom-up so earlier line numbers hold; at one line, a removal before an
         # insertion, and insertions last-classified first so they read in file order.
         order = sorted(range(len(edits)), key=lambda k: (edits[k][0], edits[k][1], k), reverse=True)
         for line, count, new, trailing in (edits[k] for k in order):
             if trailing:
-                c = found[f"{rel}:{line}"][0]
-                text = lines[line - 1]
-                col = text.find(c.text)
-                lines[line - 1] = text[:col].rstrip()
+                col = new - (source.rfind("\n", 0, new) + 1)
+                lines[line - 1] = lines[line - 1][:col].rstrip()
             else:
                 lines[line - 1:line - 1 + count] = new
         with open(path, "w", encoding="utf-8") as f:
@@ -171,11 +179,49 @@ def cmd_apply(root, paths):
     return 0
 
 
+OPEN = {"(": ")", "[": "]", "{": "}"}
+
+
+def _word(ch):
+    return ch.isalnum() or ch == "_"
+
+
 def code_only(text):
-    """The source's code with comments, whitespace and the trailing commas
-    rustfmt adds or drops when it reflows a list removed."""
-    code = re.sub(r"\s+", "", rust_comments.strip(text))
-    return re.sub(r",(?=[}\])])", "", code)
+    """The source's code as rustfmt cannot change it: no comments, literals
+    verbatim, whitespace outside them kept only between two word characters,
+    and a trailing comma dropped before `]` or `}`, and before `)` when the
+    group holds another comma (a 1-tuple's `(x,)` keeps it)."""
+    src = rust_comments.strip(text)
+    out = []
+    groups = []
+    i, n = 0, len(src)
+    while i < n:
+        end = rust_comments.literal_end(src, i)
+        if end is not None:
+            out.append(src[i:end])
+            i = end
+            continue
+        ch = src[i]
+        if ch.isspace():
+            j = i
+            while j < n and src[j].isspace():
+                j += 1
+            if out and j < n and _word(out[-1][-1]) and _word(src[j]):
+                out.append(" ")
+            i = j
+            continue
+        if ch in OPEN:
+            groups.append(0)
+        elif ch == ",":
+            if groups:
+                groups[-1] += 1
+        elif ch in ")]}":
+            commas = groups.pop() if groups else 0
+            if out and out[-1] == "," and (ch != ")" or commas >= 2):
+                out.pop()
+        out.append(ch)
+        i += 1
+    return "".join(out)
 
 
 def cmd_same_code(root, base, paths):

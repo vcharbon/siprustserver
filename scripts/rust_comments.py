@@ -10,9 +10,10 @@ Kinds: `outer-doc` (`///`, `/** */`), `inner-doc` (`//!`, `/*! */`), `line`
 comments, as rustdoc reads them.
 
 A comment is **allowed in a body** when it is one `line` comment alone on its
-line, with no comment line above or below it, that is a `// SAFETY: ...` note or
-a bare ADR pointer (`// ADR-0051`, `// ADR-0051 §3`). `banned(comments)` returns
-the plain comments that are not.
+line, with no comment line above or below it, that is a `// SAFETY: ...` note
+whose next code line holds `unsafe`, or a bare ADR pointer (`// ADR-0051`,
+`// ADR-0051 §3`, `// ADR-0009 §X7`, nothing after it). `banned(comments, text)`
+returns the plain comments that are not.
 
 `strip(text)` returns the source without its comments: a line that held only
 comment text is dropped, a trailing comment and the whitespace before it are cut.
@@ -20,7 +21,8 @@ comment text is dropped, a trailing comment and the whitespace before it are cut
 import re
 from dataclasses import dataclass
 
-ALLOWED = re.compile(r"^// (SAFETY:\s*\S.*|ADR-\d{4}( §\S+)?\.?)$")
+ADR_POINTER = re.compile(r"^// ADR-\d{4}( §[A-Z]?\d+(\.\d+)*)?\.?$")
+SAFETY_NOTE = re.compile(r"^// SAFETY: \S")
 DOC_KINDS = ("outer-doc", "inner-doc")
 
 
@@ -85,14 +87,24 @@ def _skip_string(text, i):
 _CHAR = re.compile(r"'(?:\\(?:x[0-9a-fA-F]{2}|u\{[0-9a-fA-F_]+\}|.)|[^\\'\n])'")
 
 
-def _skip_quote(text, i):
-    """`i` at a `'`: a char literal, or a lifetime/label left as code."""
-    m = _CHAR.match(text, i)
-    return m.end() if m else i + 1
-
-
 def _ident_before(text, i):
     return i > 0 and (text[i - 1].isalnum() or text[i - 1] == "_")
+
+
+def literal_end(text, i):
+    """The index past the string, raw string or char literal starting at `i`,
+    or None when none starts there (a `b`/`c` prefix: the literal starts at
+    the quote after it; a lifetime or label: no literal)."""
+    c = text[i]
+    if c == '"':
+        return _skip_string(text, i)
+    if c in "rbc" and not _ident_before(text, i):
+        at = i + 1 if c in "bc" and text[i + 1 : i + 2] == "r" else i
+        return _skip_raw_string(text, at) if text[at] == "r" else None
+    if c == "'":
+        m = _CHAR.match(text, i)
+        return m.end() if m else None
+    return None
 
 
 def scan(text):
@@ -144,18 +156,9 @@ def scan(text):
                 Comment(_kind_of_block(body), line_of(i), line_of(max(i, j - 1)), body, code_before(i), (i, j))
             )
             i = j
-        elif c == '"':
-            i = _skip_string(text, i)
-        elif c in "rbc" and not _ident_before(text, i):
-            # `r"`, `br"`, `cr"` with any `#`s: no escapes inside. `b"`, `c"`
-            # and `b'` fall to the `"` and `'` branches on the next character.
-            at = i + 1 if c in "bc" and nxt == "r" else i
-            end = _skip_raw_string(text, at) if text[at] == "r" else None
-            i = end if end is not None else i + 1
-        elif c == "'":
-            i = _skip_quote(text, i)
         else:
-            i += 1
+            end = literal_end(text, i)
+            i = end if end is not None else i + 1
     return comments
 
 
@@ -178,12 +181,29 @@ def blocks(comments):
     return out
 
 
-def banned(comments):
+def _next_code_line(text, pos):
+    for line in text[pos:].split("\n"):
+        if line.strip():
+            return line
+    return ""
+
+
+def _allowed(c, text):
+    body = c.text.rstrip("\r")
+    if c.kind != "line" or c.trailing:
+        return False
+    if ADR_POINTER.match(body):
+        return True
+    return bool(SAFETY_NOTE.match(body)) and re.search(r"\bunsafe\b", _next_code_line(text, c.span[1]))
+
+
+def banned(comments, text):
+    """The plain comments of `text` (scanned as `comments`) the rule bans."""
     out = []
     for blk in blocks(comments):
         if blk[0].kind in DOC_KINDS:
             continue
-        if len(blk) == 1 and blk[0].kind == "line" and not blk[0].trailing and ALLOWED.match(blk[0].text):
+        if len(blk) == 1 and _allowed(blk[0], text):
             continue
         out.extend(blk)
     return out

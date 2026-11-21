@@ -130,12 +130,14 @@ comments-update:
     scripts/comments.py --update
 
 # Every file holding banned comments, most first, with its budget.
-comment-report:
+comments-report:
     @scripts/comments.py --report
 
-# The comment lexer and its ratchet on throwaway repositories (under a second).
+# The comment lexer, its ratchet and the delete-comment skill's tool on
+# throwaway repositories (under a second).
 comments-check:
     PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts/comments-check
+    PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s .claude/skills/delete-comment -p 'test_*.py'
 
 # The RustSec audit of Cargo.lock (scripts/audit.py, .cargo/audit.toml): a
 # vulnerability not ignored there fails when the branch touches Cargo.lock or

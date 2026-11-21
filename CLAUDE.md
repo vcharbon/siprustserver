@@ -8,6 +8,9 @@ To show the user an html file or a URL: `xdg-open <path or URL>`.
 - Doc comments state present-tense contracts and invariants. History (dates, commit hashes,
   ticket IDs, "previously", "replaces", "no longer") lives in git and ADRs. A comment may cite
   ADR-00xx in one line, never retell it.
+- Every other comment is banned: in a body, unclear code takes a better name or an extracted
+  function. The exceptions are a lone `// SAFETY:` above an `unsafe` block and a bare
+  `// ADR-00xx [§n]` pointer. `just comments` checks it; `comments.allow` only goes down.
 - A comment that has to justify wrong behavior is never written: report the defect. A comment
   that needs more than ~5 lines to justify a behavior belongs in an ADR, with a one-line pointer.
 - Implement correct behavior unless asked to delay a named corner case.

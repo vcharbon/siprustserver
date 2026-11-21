@@ -45,7 +45,7 @@ FIX_HINT = ("a comment is a doc comment stating its item's contract; unclear cod
 def banned_lines(text):
     """`[(line, text)]` of the banned comment lines of a source."""
     out = []
-    for c in rust_comments.banned(rust_comments.scan(text)):
+    for c in rust_comments.banned(rust_comments.scan(text), text):
         for k, line in enumerate(c.text.split("\n")):
             out.append((c.start + k, line.strip()))
     return out

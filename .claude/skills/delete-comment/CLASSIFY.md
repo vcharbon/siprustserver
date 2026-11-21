@@ -10,9 +10,10 @@ before you classify its blocks: you judge each comment against the code it sits 
 ## Input
 
 `SLICE` (named in your prompt): one JSON line per comment block, with `id` (`<file>:<start>`),
-`file` (relative to the repository), `start`/`end` (1-based lines), `kind` (`outer-doc` `///`,
-`inner-doc` `//!`, `line` plain `//`), `trailing` (code before it on its line), `banned` (true
-for every plain comment) and `text`.
+`file` (relative to the repository), `start`/`end` (1-based lines), `kind` (`outer-doc` `///`
+or `/** */`, `inner-doc` `//!` or `/*! */`, `line` plain `//`, `block` plain `/* */`),
+`trailing` (code before it on its line), `banned` (true for every plain comment but a lone
+allowed `// SAFETY:` note or bare ADR pointer) and `text`.
 
 The house rule this sweep enforces: a comment is the doc comment of a function, type, field or
 module, and states its **contract** (behaviour, invariants, preconditions, units, error cases,
