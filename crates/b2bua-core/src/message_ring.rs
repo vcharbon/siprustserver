@@ -132,7 +132,7 @@ impl Ring {
                     cseq,
                     code: None,
                     to_tag: cancel_tag,
-                    from_tag: Some(from_tag.clone()),
+                    from_tag: (!from_tag.is_empty()).then(|| from_tag.clone()),
                     decision_ordinal: 0,
                     headers: sip_message::capture::captured_headers(headers, &self.names),
                     turn: 0,
