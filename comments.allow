@@ -81,7 +81,7 @@ crates/b2bua-core/src/rules/relay/egress.rs 56
 crates/b2bua-core/src/rules/relay_first_18x.rs 109
 crates/b2bua-core/src/rules/relay/mod.rs 7
 crates/b2bua-core/src/rules/relay/originate_charging_tests.rs 1
-crates/b2bua-core/src/rules/relay/originate.rs 103
+crates/b2bua-core/src/rules/relay/originate.rs 101
 crates/b2bua-core/src/rules/relay/originate_tests.rs 41
 crates/b2bua-core/src/rules/relay/sdp_session_tests.rs 2
 crates/b2bua-core/src/rules/release_reroute.rs 50
