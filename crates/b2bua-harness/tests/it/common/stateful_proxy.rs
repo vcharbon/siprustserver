@@ -424,8 +424,11 @@ impl Proxy {
     }
 
     /// Send the forwarded non-INVITE `forwarded` to `next_hop` again on Timer
-    /// E until its final arrives ([`Self::on_response`]) or Timer F.
+    /// E until its final arrives ([`Self::on_response`]) or Timer F. The
+    /// ladders that reached Timer F go first, entry and task.
     fn arm_timer_e(&mut self, forwarded: SipRequest, next_hop: SocketAddr) {
+        self.timer_e.retain(|_, ladder| !ladder.is_finished());
+        while self.retransmits.try_join_next().is_some() {}
         let downstream = forwarded.top_via().branch().unwrap_or_default().to_string();
         let agent = self.agent().clone();
         let wire = forwarded.image().to_vec();
