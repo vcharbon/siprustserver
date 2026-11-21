@@ -89,6 +89,9 @@ pub struct B2buaConfig {
     /// intercept; fires while still `refer-authorizing` (HTTP hung). Default 60.
     pub refer_subscription_expiry_sec: i64,
     /// Per re-INVITE answer watchdog during REFER realignment, seconds. Default 32.
+    /// While the ACK of the target's offering 2xx waits for the transferee's
+    /// answer, her watchdog runs at most 60·T1 (30 s), so the rollback's ACK
+    /// reaches the target inside its 64·T1 give-up (RFC 3261 §13.3.1.4).
     pub refer_reinvite_answer_sec: i64,
     /// Overall REFER safety timer covering the whole transfer FSM, seconds. Default 120.
     pub refer_overall_safety_sec: i64,

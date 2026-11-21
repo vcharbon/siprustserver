@@ -122,7 +122,7 @@ impl ActionExecutor<'_> {
             }
             RuleAction::AckLeg { leg_id, body } => self.ack_authored(call, fx, leg_id, body),
             RuleAction::AckLegAnswering { leg_id, answer } => {
-                self.ack_answering(call, fx, leg_id, answer)
+                self.ack_answering(call, fx, ctx, leg_id, answer)
             }
             RuleAction::EndOnEvidence { leg_id } => self.end_on_evidence(call, fx, ctx, leg_id),
             RuleAction::ReleaseStraggler2xx { leg_id } => {

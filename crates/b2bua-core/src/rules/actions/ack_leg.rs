@@ -198,14 +198,20 @@ impl ActionExecutor<'_> {
     /// ACK `leg_id`'s confirmed dialog with `answer`, another leg's answer
     /// ([`b2bua_sdk::model::RuleAction::AckLegAnswering`]): carried where the
     /// dialog's 2xx made an offer its ACK owes the answer to, awaited where it
-    /// did and none is given yet, left out where it made none.
+    /// did and none is given yet, left out where it made none. `ctx`'s event,
+    /// the first 2xx to an INVITE this stack sent on its own account there,
+    /// arms that wait itself ([`relay::owe_answer_in_own_ack`]).
     pub(super) fn ack_answering(
         &mut self,
         call: &mut Call,
         fx: &mut HandlerEffects,
+        ctx: &RuleContext,
         leg_id: &str,
         answer: &Option<Body>,
     ) {
+        if let Some(resp) = ctx.response().filter(|_| ctx.source_leg_id == leg_id) {
+            relay::owe_answer_in_own_ack(call, leg_id, resp);
+        }
         let owed = call::helpers::find_leg(call, leg_id).and_then(relay::offer_owed_in_ack);
         match (owed.is_some(), answer) {
             (true, None) => {}

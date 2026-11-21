@@ -125,6 +125,31 @@ pub(crate) fn owe_answer_in_ack(call: &mut Call, leg_id: &str, resp: &SipRespons
     });
 }
 
+/// Note on `leg_id`'s confirmed dialog that the ACK of `resp`, the first 2xx
+/// to the INVITE this stack last sent there on its own account, owes the
+/// answer to the offer `resp` made ([`offer_of_2xx`]): the obligation is armed
+/// under that INVITE's CSeq, the number the ACK this stack composes carries
+/// (RFC 3261 §13.2.2.4), until that ACK leaves with the answer. No peer ACK is
+/// relayed onto it: the answer arrives in another leg's response, not an ACK.
+/// Nothing where `resp` made no offer, answers another INVITE or dialog, or
+/// the dialog's obligation is already armed or discharged.
+pub(crate) fn owe_answer_in_own_ack(call: &mut Call, leg_id: &str, resp: &SipResponse) {
+    let Some(d) = call::helpers::find_leg(call, leg_id).and_then(|l| l.dialogs.confirmed()) else {
+        return;
+    };
+    let cseq = i64::from(resp.cseq().seq());
+    let last = d.sent_invite.as_ref().is_some_and(|r| r.outbound_cseq == cseq);
+    let on_dialog = resp.to().tag().unwrap_or_default() == d.peer_tag;
+    if !last || !on_dialog || call::helpers::invite_taken(d) {
+        return;
+    }
+    if offer_of_2xx(call, leg_id, resp).is_none() {
+        return;
+    }
+    call::helpers::set_awaited_ack_cseq(call, leg_id, Some(cseq));
+    owe_answer_in_ack(call, leg_id, resp, cseq);
+}
+
 /// The offer `leg`'s confirmed dialog left to the ACK its 2xx still awaits
 /// ([`OwedAnswer::InAck`]): the ACK owes its answer (RFC 3264 §4).
 pub(crate) fn offer_owed_in_ack(leg: &Leg) -> Option<&[u8]> {

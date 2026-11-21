@@ -93,7 +93,9 @@ pub enum RuleAction {
     /// ACK a leg's confirmed dialog with the answer another leg gave (RFC
     /// 3264 §4), read off that dialog's own offer/answer state: where its 2xx
     /// made an offer the ACK answers, `answer` rides the ACK, and with no
-    /// answer yet the ACK waits for the relayed one that brings it; where the
+    /// answer yet the ACK waits for the relayed ACK, or the later
+    /// `AckLegAnswering` on that leg, that brings it (the first 2xx to an
+    /// INVITE this stack sent on its own account arms that wait); where the
     /// 2xx made none (its INVITE carried the offer, or a reliable provisional
     /// did and its PRACK answers it, RFC 3262 §5) the ACK is bare.
     AckLegAnswering {
