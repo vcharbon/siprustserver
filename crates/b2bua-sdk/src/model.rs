@@ -550,15 +550,15 @@ pub enum RuleAction {
     },
     /// Author a decision-layer **Reject** or **Redirect** treatment on the a-leg
     /// INVITE server txn (ADR-0017 failover path). `header_updates` add
-    /// non-structural headers (e.g. `Reason:`, RFC 3326); `contacts` (`uri`, `q`)
-    /// render `Contact:` headers for a 3xx redirect. Distinct from
+    /// non-structural headers (e.g. `Reason:`, RFC 3326); `contacts` render one
+    /// `Contact:` header each for a 3xx redirect. Distinct from
     /// [`RelayFailureToALeg`](Self::RelayFailureToALeg), which relays the b-leg's
     /// own failure with the B2BUA Contact.
     RespondToALeg {
         status: u16,
         reason: String,
         header_updates: Vec<(String, Option<String>)>,
-        contacts: Vec<(String, Option<f32>)>,
+        contacts: Vec<crate::redirect_contact::RedirectContact>,
     },
     /// **A-side fork-confirm** (RFC 3261 §12.1 forked-request dialog
     /// establishment + RFC 3264 §5.1 one-answer-per-dialog): answer the a-leg

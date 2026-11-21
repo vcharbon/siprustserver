@@ -252,8 +252,8 @@ pub fn setup_event(call: &Call, a_invite: &SipRequest) -> CallEvent {
 /// Answer the a-leg with a final failure / redirect the decision layer authors,
 /// or one this stack authors on its own account (an unavailable backend, a
 /// refused target). `update_headers` adds non-structural headers (e.g.
-/// `Reason:`, RFC 3326); `contacts` renders one `Contact: <uri>;q=…` header
-/// per entry (used for a 3xx redirect — ADR-0017). Structural headers are
+/// `Reason:`, RFC 3326); `contacts` renders one `Contact: <uri>;q=…;params…`
+/// header per entry (used for a 3xx redirect — ADR-0017). Structural headers are
 /// skipped (the generator owns them, header-ownership matrix X2). Marks no
 /// decision: the caller marks the one it applies, and a final of the stack's
 /// own is none. `cause` is the termination record's: the decision layer's
@@ -418,14 +418,14 @@ fn end_to_end_headers(update_headers: Option<&SipHeaderUpdates>) -> Vec<SipHeade
     out
 }
 
-/// One `Contact: <uri>;q=…` per redirect target, or the error of the first
-/// that does not read: the whole redirect is refused, never partially
+/// One `Contact: <uri>;q=…;params…` per redirect target, or the error of the
+/// first that does not read: the whole redirect is refused, never partially
 /// authored (dropping the unreadable entry would send the caller at whichever
 /// targets happened to parse).
 fn contact_headers(
     contacts: &[RedirectContact],
 ) -> Result<Vec<SipHeader>, relay::UnreadableAddress> {
-    contacts.iter().map(|c| relay::redirect_contact(&c.uri, c.q)).collect()
+    contacts.iter().map(relay::redirect_contact).collect()
 }
 
 #[cfg(test)]

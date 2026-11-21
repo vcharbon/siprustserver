@@ -4,8 +4,9 @@
 //! [`UnreadableAddress`] refusal, never a fabricated target. Dialog-state text
 //! readback does NOT live here — see [`super::dialog`].
 
+use b2bua_sdk::redirect_contact::RedirectContact;
 use sip_message::generators::GenerateError;
-use sip_message::header::{self, HeaderName, HeaderValue, NameAddr, ParamValue, Uri};
+use sip_message::header::{self, HeaderName, HeaderValue, NameAddr, Uri};
 use sip_message::{SipHeader as MsgHeader, SipStr};
 
 /// An address a decision named that no reader accepts, so the B2BUA has nothing
@@ -72,14 +73,41 @@ pub(super) fn identity(field: &'static str, text: &str) -> Result<NameAddr, Unre
     })
 }
 
-/// One `Contact: <uri>;q=…` redirect target (RFC 3261 §20.10) for a 3xx the
-/// B2BUA authors. A target no reader accepts is refused: the caller dials what
-/// a 3xx Contact names, so an invented one sends it at an address the decision
-/// never stated.
-pub fn redirect_contact(uri: &str, q: Option<f32>) -> Result<MsgHeader, UnreadableAddress> {
-    let mut contact = header::Contact::new(NameAddr::new(address("contact", uri)?));
-    if let Some(q) = q {
-        contact = contact.with_param("q", ParamValue::text(SipStr::owned(&q.to_string())));
+/// One `Contact: <uri>;q=…;params…` redirect target (RFC 3261 §20.10) for a
+/// 3xx the B2BUA authors, the URI inside the brackets and every contact-param
+/// after them. A target no reader accepts is refused: the caller dials what a
+/// 3xx Contact names, so an invented one sends it at an address the decision
+/// never stated. So is one whose contact-params the §20.10 grammar refuses: a
+/// `q` outside the qvalue range, a second `q` in `params`, an `expires` that is
+/// no delta-seconds, a parameter that does not read as one `generic-param`.
+pub fn redirect_contact(target: &RedirectContact) -> Result<MsgHeader, UnreadableAddress> {
+    let refused = |reason: &str| UnreadableAddress {
+        field: "contact",
+        value: target.uri.clone(),
+        reason: reason.to_string(),
+    };
+    let mut wire = header::Contact::new(NameAddr::new(address("contact", &target.uri)?)).to_wire();
+    if let Some(q) = target.q {
+        let q = header::qvalue_text(q).ok_or_else(|| refused("q is not a qvalue"))?;
+        wire.push_str(&format!(";q={q}"));
+    }
+    for param in &target.params {
+        if param.name.eq_ignore_ascii_case("q") {
+            return Err(refused("q stated among the other contact-params"));
+        }
+        wire.push(';');
+        wire.push_str(&param.name);
+        if let Some(value) = &param.value {
+            wire.push('=');
+            wire.push_str(value);
+        }
+    }
+    let contact = header::Contact::parse(&SipStr::owned(&wire)).map_err(|e| refused(&e.reason))?;
+    if contact.params().len() != target.params.len() + usize::from(target.q.is_some()) {
+        return Err(refused("a contact-param reads as more than one"));
+    }
+    if contact.param("expires").is_some_and(|v| !v.as_str().is_some_and(header::is_delta_seconds)) {
+        return Err(refused("expires is not delta-seconds"));
     }
     Ok(MsgHeader {
         name: SipStr::owned(HeaderName::Contact.as_wire_str()),
@@ -93,10 +121,11 @@ mod unreadable_address_tests {
     //! a fabricated value: an opaque URI's host would be the whole raw text,
     //! so originating on one dials an address nobody named — or dies later as
     //! an unattributable transport error.
-    use super::{redirect_contact, UnreadableAddress};
+    use super::{redirect_contact, RedirectContact, UnreadableAddress};
     use crate::config::B2buaConfig;
     use crate::effects::{OutboundBody, OutboundSipEffect};
     use crate::rules::relay::{build_b_leg, CallMarks};
+    use b2bua_sdk::redirect_contact::ContactParam;
     use call::Leg;
     use sip_ids::TurnIds;
     use sip_message::generators::CapabilitySet;
@@ -321,14 +350,64 @@ Content-Length: 0\r\n\r\n";
     #[test]
     fn an_unreadable_redirect_target_is_refused() {
         for text in UNREADABLE {
-            let err = redirect_contact(text, Some(0.5))
+            let target = RedirectContact { q: Some(0.5), ..RedirectContact::new(*text) };
+            let err = redirect_contact(&target)
                 .err()
                 .unwrap_or_else(|| panic!("redirect target {text:?} must be refused"));
             assert_eq!(err.field, "contact");
         }
-        let header = redirect_contact("sip:carol@10.244.2.11:5060", Some(0.7))
-            .expect("a readable redirect target must render");
-        assert!(header.value.contains("sip:carol@10.244.2.11:5060"));
-        assert!(header.value.contains("q=0.7"));
+        let target =
+            RedirectContact { q: Some(0.7), ..RedirectContact::new("sip:carol@10.244.2.11:5060") };
+        let header = redirect_contact(&target).expect("a readable redirect target must render");
+        assert_eq!(header.value.as_str(), "<sip:carol@10.244.2.11:5060>;q=0.7");
+    }
+
+    fn param(name: &str, value: Option<&str>) -> ContactParam {
+        ContactParam { name: name.into(), value: value.map(str::to_string) }
+    }
+
+    /// RFC 3261 §20.10: the URI's own parameters stay inside the brackets, `q`
+    /// and the other contact-params follow them in the order stated, a quoted
+    /// value as written.
+    #[test]
+    fn a_redirect_targets_contact_params_follow_the_brackets() {
+        let target = RedirectContact {
+            uri: "sip:carol@192.0.2.11;transport=tcp".into(),
+            q: Some(0.5),
+            params: vec![
+                param("expires", Some("60")),
+                param("+sip.text", Some("\"a b\"")),
+                param("lr", None),
+            ],
+        };
+        let header = redirect_contact(&target).expect("renders");
+        assert_eq!(
+            header.value.as_str(),
+            "<sip:carol@192.0.2.11;transport=tcp>;q=0.5;expires=60;+sip.text=\"a b\";lr"
+        );
+    }
+
+    /// A contact-param the §20.10 grammar refuses refuses the target, never a
+    /// Contact the caller cannot read.
+    #[test]
+    fn a_contact_param_off_its_grammar_refuses_the_target() {
+        let uri = "sip:carol@192.0.2.11";
+        for (q, params) in [
+            (Some(1.5), vec![]),
+            (Some(f32::NAN), vec![]),
+            (Some(0.5), vec![param("q", Some("0.1"))]),
+            (None, vec![param("expires", Some("soon"))]),
+            (None, vec![param("expires", None)]),
+            (None, vec![param("a b", Some("1"))]),
+            (None, vec![param("x", Some("a,b"))]),
+            (None, vec![param("x", Some("1;y=2"))]),
+            (None, vec![param("expires", Some("60")), param("EXPIRES", Some("60"))]),
+        ] {
+            let target = RedirectContact { uri: uri.into(), q, params: params.clone() };
+            let err = redirect_contact(&target)
+                .err()
+                .unwrap_or_else(|| panic!("{q:?} {params:?} must be refused"));
+            assert_eq!(err.field, "contact");
+        }
     }
 }

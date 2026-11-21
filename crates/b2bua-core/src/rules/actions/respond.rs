@@ -533,7 +533,7 @@ pub(super) struct AuthoredFinal<'a> {
     pub status: u16,
     pub reason: &'a str,
     pub header_updates: &'a [(String, Option<String>)],
-    pub contacts: &'a [(String, Option<f32>)],
+    pub contacts: &'a [b2bua_sdk::redirect_contact::RedirectContact],
 }
 
 /// The failing peer's relayable headers, but ONLY on a final that answers the
@@ -569,11 +569,11 @@ fn failure_headers_answering(
 /// never partially authored.
 fn build_a_leg_response_headers(
     header_updates: &[(String, Option<String>)],
-    contacts: &[(String, Option<f32>)],
+    contacts: &[b2bua_sdk::redirect_contact::RedirectContact],
 ) -> Result<Vec<SipHeader>, relay::UnreadableAddress> {
     let mut out = relay::set_lines(header_updates);
-    for (uri, q) in contacts {
-        out.push(relay::redirect_contact(uri, *q)?);
+    for contact in contacts {
+        out.push(relay::redirect_contact(contact)?);
     }
     Ok(out)
 }

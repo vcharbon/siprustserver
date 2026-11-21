@@ -60,6 +60,7 @@ pub mod model;
 pub mod open_offer;
 pub mod provisional;
 pub mod reason_phrase;
+pub mod redirect_contact;
 pub mod relayed_final;
 pub mod release_reason;
 mod request_record;

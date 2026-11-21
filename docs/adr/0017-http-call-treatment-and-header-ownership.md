@@ -109,8 +109,10 @@ deserialize the full body, context included.
   (`BTreeMap<String, Option<String>>`) carries one value per name, so a single `Reason` is
   expressible. The response generator's `extra_headers: Vec` permits duplicates, so a typed
   `reason: Vec<...>` field can lift this without a wire change.
-- **302 Contact ordering**: `contacts` is an ordered `Vec<{uri, q}>`, rendered in list order with
-  `;q=` params, with no platform reordering (the q-value is advisory for the caller).
+- **302 Contact ordering**: `contacts` is an ordered `Vec<{uri, q, params}>`, rendered in list
+  order as `<uri>;q=…;params…` (RFC 3261 §20.10: the URI inside the brackets, `expires` and every
+  other contact-param after them), with no platform reordering (the q-value is advisory for the
+  caller).
 - **Redirect mid-reroute**: a `call_failure` hop may return `Redirect`, abandoning the hunt.
 
 ## Considered alternatives

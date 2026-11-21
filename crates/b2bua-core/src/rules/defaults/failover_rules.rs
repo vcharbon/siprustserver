@@ -8,6 +8,7 @@ use call::TimeoutKind;
 
 use b2bua_sdk::header_update::final_adds;
 use b2bua_sdk::model::{Match, RuleAction, RuleDefinition};
+use b2bua_sdk::redirect_contact::RedirectContact;
 
 use super::core_rules::{ok, rule};
 use super::route_fold::{
@@ -55,11 +56,6 @@ pub(super) fn timeout_final(unavailable: bool) -> RuleAction {
         header_updates: vec![],
         contacts: vec![],
     }
-}
-
-/// A redirect Contact's stated q-value, read as written (RFC 3261 §20.10).
-fn q_value(q: &serde_json::Value) -> Option<f32> {
-    q.to_string().parse().ok()
 }
 
 /// The failover resolution rules, in registration (priority) order.
@@ -272,18 +268,10 @@ fn failover_redirect() -> RuleDefinition {
                 .unwrap_or("Moved Temporarily")
                 .to_string();
             let header_updates = parse_header_updates(payload);
-            let contacts: Vec<(String, Option<f32>)> = payload
+            let contacts: Vec<RedirectContact> = payload
                 .get("contacts")
                 .and_then(|v| v.as_array())
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|c| {
-                            let uri = c.get("uri")?.as_str()?.to_string();
-                            let q = c.get("q").filter(|v| v.is_number()).and_then(q_value);
-                            Some((uri, q))
-                        })
-                        .collect()
-                })
+                .map(|arr| arr.iter().filter_map(RedirectContact::from_json).collect())
                 .unwrap_or_default();
             let mut actions = Vec::new();
             // A redirect seeds its service slices exactly as a route does.

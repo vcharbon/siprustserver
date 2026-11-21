@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 pub use call::features::FeatureActivations;
 
 use b2bua_sdk::header_update::SipHeaderUpdates;
+use b2bua_sdk::redirect_contact::RedirectContact;
 
 /// The decision request sent on a new INVITE (the call context the backend
 /// keys decisions off — R-URI, From/To, all non-structural `X-*` headers, body).
@@ -182,15 +183,6 @@ pub struct RejectDecision {
     pub service_ext: BTreeMap<String, serde_json::Value>,
     /// See [`RouteDecision::label`].
     pub label: Option<String>,
-}
-
-/// One redirect target in a [`RedirectDecision`]'s Contact list. `q` is the
-/// advisory caller-side preference (RFC 3261 §20.10); rendered verbatim in list
-/// order (the platform does not reorder — ADR-0017 X5).
-#[derive(Debug, Clone, Serialize)]
-pub struct RedirectContact {
-    pub uri: String,
-    pub q: Option<f32>,
 }
 
 /// A "redirect" decision — answer the caller with a 3xx (default 302) carrying an

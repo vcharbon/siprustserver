@@ -48,6 +48,18 @@ impl ParamValue {
         matches!(self, ParamValue::Flag)
     }
 
+    /// The `gen-value` as the wire writes it: a token bare, a quoted string
+    /// quoted and escaped; `None` for a bare flag.
+    pub fn as_written(&self) -> Option<String> {
+        let mut out = Wire::new();
+        match self {
+            ParamValue::Flag => return None,
+            ParamValue::Token(v) => out.str(v.as_str()),
+            ParamValue::Quoted(v) => out.quoted(v.as_str()),
+        }
+        Some(out.as_str().to_string())
+    }
+
     /// A token value, quoting it only if the text could not survive bare.
     pub fn text(value: impl Into<SipStr>) -> Self {
         let v: SipStr = value.into();

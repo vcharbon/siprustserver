@@ -275,7 +275,7 @@ fn redirect(
     RedirectDecision {
         code: 302,
         reason: Some("Moved Temporarily".into()),
-        contacts: vec![RedirectContact { uri: contact.into(), q: None }],
+        contacts: vec![RedirectContact::new(contact)],
         update_headers: None,
         service_ext,
         label: Some(label.into()),

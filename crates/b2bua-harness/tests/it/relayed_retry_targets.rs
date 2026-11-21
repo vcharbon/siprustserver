@@ -187,7 +187,7 @@ fn redirect(code: u16, target: &str) -> CallTreatment {
     CallTreatment::Redirect(RedirectDecision {
         code,
         reason: None,
-        contacts: vec![RedirectContact { uri: target.into(), q: None }],
+        contacts: vec![RedirectContact::new(target)],
         update_headers: None,
         service_ext: Default::default(),
         label: None,

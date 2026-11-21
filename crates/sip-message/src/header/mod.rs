@@ -23,6 +23,7 @@ mod authority;
 mod cardinality;
 mod charging;
 mod class;
+mod contact_params;
 mod credentials;
 mod equivalence;
 mod geolocation;
@@ -67,6 +68,7 @@ pub use cardinality::{
 };
 pub use charging::ChargingVector;
 pub use class::HeaderClass;
+pub use contact_params::{is_delta_seconds, qvalue_text, read_qvalue};
 pub use credentials::Credentials;
 pub use equivalence::{canonical_header_items, header_forms_equivalent};
 pub use geolocation::{Geolocation, GeolocationError, GeolocationRouting};
