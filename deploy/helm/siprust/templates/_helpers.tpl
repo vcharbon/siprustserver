@@ -151,12 +151,34 @@ A network value the proxy and masq-exempt require, named in the error. Takes
 {{- end }}
 
 {{/*
-The host:port of a network address and the SIP port, an IPv6 address
-bracketed (RFC 3261 §25.1 hostport), as the proxy and the worker read an
-address. Takes (dict "root" $ "key" <network key>).
+A VIP (network.proxyVip, network.externalVip), a bare IP literal: each reader
+brackets an IPv6 one where its grammar asks, so a bracketed value fails the
+render. Takes (dict "root" $ "key" <network key>).
+*/}}
+{{- define "siprust.vip" -}}
+{{- $v := include "siprust.net" . }}
+{{- if or (contains "[" $v) (contains "]" $v) }}
+{{- fail (printf "network.%s=%s is bracketed: state the bare address, %s" .key $v (trimAll "[]" $v)) }}
+{{- end }}
+{{- $v }}
+{{- end }}
+
+{{/*
+A VIP as the one-address prefix that holds it: /32, /128 for IPv6. Takes
+(dict "root" $ "key" <network key>).
+*/}}
+{{- define "siprust.vipCidr" -}}
+{{- $v := include "siprust.vip" . }}
+{{- printf "%s/%s" $v (ternary "128" "32" (contains ":" $v)) }}
+{{- end }}
+
+{{/*
+The host:port of a VIP and the SIP port, an IPv6 address bracketed (RFC 3261
+§25.1 hostport), as the proxy and the worker read an address. Takes (dict
+"root" $ "key" <network key>).
 */}}
 {{- define "siprust.netHostPort" -}}
-{{- $host := include "siprust.net" . }}
+{{- $host := include "siprust.vip" . }}
 {{- printf (ternary "[%s]:%d" "%s:%d" (contains ":" $host)) $host (int .root.Values.network.sipPort) }}
 {{- end }}
 

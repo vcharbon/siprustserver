@@ -25,7 +25,7 @@ metadata:
   labels:
     {{- include "siprust.labels" (dict "root" $ "app" "sip-front-proxy") | nindent 4 }}
   annotations:
-    metallb.io/loadBalancerIPs: {{ include "siprust.net" (dict "root" $ "key" $key) | quote }}
+    metallb.io/loadBalancerIPs: {{ include "siprust.vip" (dict "root" $ "key" $key) | quote }}
 spec:
   type: LoadBalancer
   {{- with $a.loadBalancerClass }}

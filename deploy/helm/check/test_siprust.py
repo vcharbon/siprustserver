@@ -133,6 +133,12 @@ class Network(unittest.TestCase):
         self.assertEqual((worker["B2BUA_OUTBOUND_PROXY"], worker["B2BUA_CONTACT_ADDRESS"]),
                          ("[fd00::250]:5060", "[2001:db8::250]:5060"))
 
+    def test_a_bracketed_vip_fails_the_render_naming_the_bare_address(self) -> None:
+        for key in ("proxyVip", "externalVip"):
+            err = render_error(SIPRUST, *KIND, "--set-string", f"network.{key}=[2001:db8::250]")
+            self.assertIn(f"network.{key}=[2001:db8::250] is bracketed: state the bare address, "
+                          "2001:db8::250", err)
+
     def test_the_announcement_follows_readyz_and_the_liveness_probe_healthz(self) -> None:
         # ADR-0056: each VIP is announced from the nodes whose proxy is Ready,
         # through a LoadBalancer Service that carries no SIP port; the

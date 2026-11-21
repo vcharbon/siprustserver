@@ -33,8 +33,7 @@ spec:
       {{- fail "worker.networkPolicy.proxyNodeCidrs is required while the proxy is enabled: the CIDRs of the proxy nodes' internal-plane addresses, the source of their OPTIONS probes and dead notices (or worker.networkPolicy.enabled=false)" }}
       {{- end }}
       from:
-        {{- $vip := include "siprust.net" (dict "root" $ "key" "proxyVip") }}
-        - ipBlock: { cidr: {{ printf "%s/%s" $vip (ternary "128" "32" (contains ":" $vip)) }} }
+        - ipBlock: { cidr: {{ include "siprust.vipCidr" (dict "root" $ "key" "proxyVip") }} }
         {{- range $np.proxyNodeCidrs }}
         - ipBlock: { cidr: {{ . }} }
         {{- end }}

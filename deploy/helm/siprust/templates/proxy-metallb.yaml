@@ -44,7 +44,7 @@ metadata:
     {{- include "siprust.labels" (dict "root" $ "app" "sip-front-proxy") | nindent 4 }}
 spec:
   addresses:
-    - {{ printf "%s/32" (include "siprust.net" (dict "root" $ "key" $key)) }}
+    - {{ include "siprust.vipCidr" (dict "root" $ "key" $key) }}
   autoAssign: false
 ---
 apiVersion: metallb.io/v1beta1
