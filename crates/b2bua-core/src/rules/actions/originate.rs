@@ -110,12 +110,8 @@ impl ActionExecutor<'_> {
     /// ([`capabilities::for_reinvite`]) filling what they leave unstated.
     /// CSeq = the dialog's `our_cseq` + 1. Nothing leaves while an INVITE
     /// transaction is in progress on the dialog ([`Self::invite_may_leave`]).
-    /// Used by `promote18xPemTo200` to resync Alice when bob's final SDP
-    /// differs from the early-media SDP promoted into the synthetic 200 OK,
-    /// and by a service's in-dialog INVITE ([`Self::send_request_to_leg`]).
     /// The response comes back classified by the leg the B2BUA's stamped Via
-    /// names (cr/lg) and is claimed by the asker's rules
-    /// (`promote-resync-reinvite-response` for the resync).
+    /// names (cr/lg) and is claimed by the asking rule's service.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn send_reinvite(
         &mut self,
