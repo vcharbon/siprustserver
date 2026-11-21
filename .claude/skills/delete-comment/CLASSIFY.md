@@ -9,8 +9,8 @@ before you classify its blocks: you judge each comment against the code it sits 
 
 ## Input
 
-`SLICE` (named in your prompt): one JSON line per comment block, with `id` (`<file>:<start>`),
-`file` (relative to the repository), `start`/`end` (1-based lines), `kind` (`outer-doc` `///`
+`SLICE` (named in your prompt): one JSON line per comment block, with `id` (`<file>:<line>`, or
+`<file>:<line>:<column>` when two blocks start on one line), `file` (relative to the repository), `start`/`end` (1-based lines), `kind` (`outer-doc` `///`
 or `/** */`, `inner-doc` `//!` or `/*! */`, `line` plain `//`, `block` plain `/* */`),
 `trailing` (code before it on its line), `banned` (true for every plain comment but a lone
 allowed `// SAFETY:` note or bare ADR pointer) and `text`.
@@ -51,8 +51,8 @@ rest.
   indentation and `///`/`//!` prefix): the contract alone, present tense, no history, no
   restating of the signature. A `decision` whose ADR exists may keep a one-line `See ADR-00xx.`
   inside a contract doc comment this way.
-- `to-doc` (plain in-body comments only, rare): its content is a contract of the enclosing item
-  that the item's doc comment lacks. Give `insert_before` (the line number before which new doc
+- `to-doc` (plain comments only; a plain comment above a test is the usual case): its content
+  is a contract of the enclosing item that the item's doc comment lacks. Give `insert_before` (the line number before which new doc
   lines go: the item's first attribute or keyword line, below its existing doc comment) and `text`
   (the doc lines, indented, `///`).
 - `adr-pointer` (plain comments only): the block becomes a bare one-line `// ADR-00xx[ §n]`
