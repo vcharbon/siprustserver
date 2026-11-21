@@ -104,12 +104,16 @@ pub struct RequestRecord {
     pub source_call_id: String,
     pub source_from: String,
     pub source_to: String,
-    /// The originator CANCELled this relayed (re-)INVITE (RFC 3261 §9): the
-    /// B2BUA CANCELled the outbound client transaction and the txn layer
-    /// already answered the originator (200 + 487), so the target's eventual
-    /// final response is resolved locally — never relayed. A crossing 2xx
-    /// (target answered before the CANCEL landed) is ACKed and absorbed.
+    /// This relayed (re-)INVITE's originator holds this stack's final (the
+    /// call's teardown 487, §15.1.2, or a service's reject) and the request
+    /// toward the target is CANCELled (RFC 3261 §9.1): the target's final
+    /// resolves locally, never relayed; a crossing 2xx is ACKed and absorbed.
     pub cancelled: bool,
+    /// The originator CANCELled this relayed re-INVITE and the CANCEL went on
+    /// toward its target, while the originator holds no final yet: the
+    /// target's final, a 487 or a 2xx that crossed the CANCEL, is relayed to
+    /// her as any relayed final (ADR-0065).
+    pub cancel_relayed: bool,
     /// The originator's request offered reliable provisionals — `100rel` in its
     /// own `Require` or `Supported` (RFC 3262 §3). The request this stack built
     /// toward the target may offer it where the originator did not (a declared
@@ -169,6 +173,7 @@ impl RequestRecord {
             source_from: String::new(),
             source_to: String::new(),
             cancelled: false,
+            cancel_relayed: false,
             offered_100rel: false,
             offered: false,
             source_timestamp: None,

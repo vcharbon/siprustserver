@@ -233,6 +233,7 @@ fn same_record(a: &RequestRecord, b: &RequestRecord) -> bool {
         source_from,
         source_to,
         cancelled,
+        cancel_relayed,
         offered_100rel,
         offered,
         source_timestamp,
@@ -252,6 +253,7 @@ fn same_record(a: &RequestRecord, b: &RequestRecord) -> bool {
         && *source_from == b.source_from
         && *source_to == b.source_to
         && *cancelled == b.cancelled
+        && *cancel_relayed == b.cancel_relayed
         && *offered_100rel == b.offered_100rel
         && *offered == b.offered
         && *source_timestamp == b.source_timestamp

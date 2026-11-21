@@ -86,7 +86,7 @@ impl TurnEntry {
             let _ = ctx.txn.release_ack(branch).await;
         }
         if let Some(held) = &self.cancel {
-            held.release(ctx).await;
+            held.release(ctx, &self.call).await;
         }
         for via in &self.relinquish {
             if let Some(branch) = via.branch() {

@@ -139,6 +139,7 @@ impl Owner {
                         if first_on_given_up {
                             self.hold(TxnRef::Client(&branch), Hold::GaveUp);
                         }
+                        self.bound_after_cancel(&branch);
                     }
                 }
             }

@@ -42,6 +42,7 @@ fn relaying_by(mut call: Call, method: &str, owner: RelayOwner) -> Call {
         sent: None,
         deadline_ms: None,
         cancelled: false,
+        cancel_relayed: false,
         offered_100rel: false,
         offered: false,
         source_timestamp: None,

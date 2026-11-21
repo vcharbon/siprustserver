@@ -210,7 +210,6 @@ async fn an_offer_in_a_2xx_crossing_the_bye_is_answered_rejecting_in_its_ack() {
     let mut alice_dialog = call.ack().await;
     bob.receive("ACK").await;
 
-    // ── alice re-INVITEs offerless; bob holds his 200 ────────────────────────
     let mut reinv = alice_dialog.reinvite(None).await;
     let mut bob_reinv = bob.receive("INVITE").await;
     assert!(
@@ -218,14 +217,12 @@ async fn an_offer_in_a_2xx_crossing_the_bye_is_answered_rejecting_in_its_ack() {
         "the offerless re-INVITE reached bob as it came"
     );
 
-    // ── alice hangs up; the BYE reaches bob while the call is still up ───────
     let mut alice_bye = alice_dialog.bye().await;
     alice_bye.expect(200).await;
     reinv.expect(487).await;
     let mut bob_bye = bob.receive("BYE").await;
     assert_eq!(b2bua.active_calls(), 1, "the call waits on bob's BYE 200");
 
-    // ── bob's 200, sent before the BYE reached him, makes the offer ──────────
     bob_reinv.respond(200, "OK").with_sdp(BOB_REOFFER).await;
     expect_rejecting_ack(&bob, &bob_reinv).await;
     bob_bye.respond(200, "OK").await;

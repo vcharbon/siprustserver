@@ -149,6 +149,37 @@ pub fn cancel_relay(call: &mut Call, leg_id: &str, id: &DialogId, outbound_cseq:
     })
 }
 
+/// Mark the relayed re-INVITE `leg_id`'s dialog `id` holds under
+/// `outbound_cseq` as CANCELled by its originator, the CANCEL relayed toward
+/// its target ([`RequestRecord::cancel_relayed`]): the target's final is
+/// relayed back.
+pub fn relay_cancel(call: &mut Call, leg_id: &str, id: &DialogId, outbound_cseq: i64) {
+    update_dialog(call, leg_id, id, |d| {
+        let relay = d.sent_invite.as_mut().filter(|p| p.is_relay());
+        if let Some(p) = relay.filter(|p| p.outbound_cseq == outbound_cseq) {
+            p.cancel_relayed = true;
+        }
+    })
+}
+
+/// Whether `call` holds the relay of the INVITE its originator sent under
+/// Call-ID `call_id` and CSeq number `cseq` with the originator's CANCEL
+/// relayed toward the target and no final held by the originator
+/// ([`RequestRecord::cancel_relayed`]): the originator's INVITE stays open
+/// for the target's final.
+pub fn holds_relayed_cancel(call: &Call, call_id: &str, cseq: i64) -> bool {
+    std::iter::once(&call.a_leg)
+        .chain(call.b_legs.iter())
+        .flat_map(|leg| leg.dialogs.iter())
+        .filter_map(super::invite_records::invite_relay)
+        .any(|p| {
+            p.cancel_relayed
+                && !p.cancelled
+                && p.inbound_cseq == cseq
+                && p.source_call_id == call_id
+        })
+}
+
 /// Close the relay `leg_id`'s dialog `id` holds with outbound CSeq
 /// `outbound_cseq`: a relayed INVITE no 2xx was taken for is closed, the
 /// INVITE before it held again, from the ACK the closed one carried ahead;

@@ -10,11 +10,14 @@
 //! (§9.2), and the 487 unless another node serves the call: both are sent at
 //! the end of the layer's turn.
 //!
+//! A re-INVITE whose CANCEL leaves its final to the consumer
+//! (`consumer_ends_cancelled_reinvite`) is held so at any bound, and stays
+//! active until the release: [`CancelledInvite::End`] sends the 487 and
+//! completes it as above; [`CancelledInvite::Keep`] drops the 487 and leaves
+//! the INVITE to the consumer's own final. The bound ends it.
+//!
 //! [`TransactionLayer::release_cancel`]: crate::TransactionLayer::release_cancel
 
-use std::net::SocketAddr;
-
-use bytes::Bytes;
 use sip_clock::{deadline, delay_queue};
 use sip_net::UdpEndpoint;
 use tokio::time::Instant;
@@ -26,27 +29,38 @@ use super::owner::Owner;
 use super::txn::{Timer, TxnRef, UnsentCancel};
 use crate::timers::ms;
 
+/// What the release of a CANCEL's held answers does with the cancelled INVITE
+/// left open for its consumer
+/// ([`TransactionConfig::consumer_ends_cancelled_reinvite`](crate::TransactionConfig)).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CancelledInvite {
+    /// The INVITE ends with the layer's 487 (RFC 3261 §9.2).
+    End,
+    /// The INVITE stays active: the consumer answers it with the final the
+    /// CANCEL it relayed draws (§16.10).
+    Keep,
+}
+
 impl Owner {
     /// Whether the answers to a CANCEL are held rather than sent.
     pub(super) fn holds_cancel_answers(&self) -> bool {
         self.cancel_bound_ms > 0
     }
 
-    /// Hold `cancel_ok` and `terminated` on the server INVITE transaction
-    /// `key` names, the INVITE identified as `held_as`, and arm their bound.
-    pub(super) fn hold_cancel_answers(
-        &mut self,
-        key: &ServerTxnKey,
-        held_as: (String, String, u32),
-        cancel_ok: Option<(Bytes, SocketAddr)>,
-        terminated: Option<(Bytes, SocketAddr)>,
-    ) {
+    /// Hold `answers` on the server INVITE transaction `key` names and arm
+    /// their bound: `cancel_bound_ms`, else the §17.2.1 bound for an INVITE
+    /// left open.
+    pub(super) fn hold_cancel_answers(&mut self, key: &ServerTxnKey, answers: UnsentCancel) {
+        let bound = match self.cancel_bound_ms {
+            0 => crate::timers::TRYING_BOUND,
+            bound => bound,
+        };
         let Some(txn) = self.server_mut(key.id()) else { return };
         let opened = txn.created_at;
-        txn.unsent_cancel =
-            Some(Box::new(UnsentCancel { cancel_ok, terminated, held_as: held_as.clone() }));
+        let held_as = answers.held_as.clone();
+        txn.unsent_cancel = Some(Box::new(answers));
         self.held_cancels.insert(held_as, key.clone());
-        let at = deadline::after(Instant::now(), ms(self.cancel_bound_ms));
+        let at = deadline::after(Instant::now(), ms(bound));
         delay_queue::insert_at(&mut self.timers, Timer::CancelBound(key.clone(), opened), at);
     }
 
@@ -65,7 +79,7 @@ impl Owner {
         opened: Instant,
     ) {
         if self.server(key.id()).is_some_and(|t| t.created_at == opened)
-            && self.send_held_cancel(endpoint, key).await
+            && self.send_held_cancel(endpoint, key, CancelledInvite::End).await
         {
             self.told_bound(TxnRef::Server(key.id()));
         }
@@ -96,33 +110,44 @@ impl Owner {
         }
     }
 
-    /// Send the answers held for the INVITE `held_as` names; `true` when they
-    /// left.
+    /// Send the answers held for the INVITE `held_as` names, the INVITE left
+    /// open ending as `invite` says; `true` when they left.
     pub(super) async fn release_held_cancel(
         &mut self,
         endpoint: &dyn UdpEndpoint,
         held_as: &(String, String, u32),
+        invite: CancelledInvite,
     ) -> bool {
         let Some(key) = self.held_cancels.get(held_as).cloned() else { return false };
-        self.send_held_cancel(endpoint, &key).await
+        self.send_held_cancel(endpoint, &key, invite).await
     }
 
     /// Send the answers the transaction `key` names holds, then start the
     /// 487's Timer G and Timer H (RFC 3261 §17.2.1); `true` when they left.
+    /// An INVITE left open takes the 487 as its final under
+    /// [`CancelledInvite::End`] while it holds none, and keeps no 487 under
+    /// [`CancelledInvite::Keep`].
     pub(super) async fn send_held_cancel(
         &mut self,
         endpoint: &dyn UdpEndpoint,
         key: &ServerTxnKey,
+        invite: CancelledInvite,
     ) -> bool {
         let Some(held) = self.server_mut(key.id()).and_then(|t| t.unsent_cancel.take()) else {
             return false;
         };
         self.held_cancels.remove(&held.held_as);
-        let UnsentCancel { cancel_ok, terminated, held_as: (call_id, ..), .. } = *held;
+        let UnsentCancel { cancel_ok, terminated, held_as: (call_id, ..), invite_open } = *held;
         if let Some((buf, dest)) = cancel_ok {
             self.send_buffer(endpoint, &call_id, &buf, dest).await;
         }
-        if let Some((buf, dest)) = terminated {
+        let ends = !invite_open
+            || (invite == CancelledInvite::End
+                && self.server(key.id()).is_some_and(|t| t.state.is_active()));
+        if let Some((buf, dest)) = terminated.filter(|_| ends) {
+            if invite_open {
+                self.complete_with_487(key.id(), buf.clone());
+            }
             self.send_buffer(endpoint, &call_id, &buf, dest).await;
             self.arm_final_hold(key.id(), TxnKind::Invite, 487);
         }

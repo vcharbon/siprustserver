@@ -56,6 +56,15 @@ pub struct TransactionConfig {
     /// and sends them itself this long after the CANCEL arrived. `0`, the
     /// default, sends them as the CANCEL arrives (RFC 3261 §9.2).
     pub cancel_bound_ms: u64,
+    /// Whether a CANCEL of an in-dialog INVITE (a re-INVITE) leaves that
+    /// INVITE's final to the consumer, which may relay the CANCEL on and
+    /// answer with the final the CANCEL draws there (RFC 3261 §9.2, §16.10).
+    /// The layer then holds the CANCEL's 200 and the 487 it would answer, as
+    /// under [`Self::cancel_bound_ms`] (its own bound being the §17.2.1 bound
+    /// where that one is `0`), and the consumer's release says whether the 487
+    /// leaves ([`CancelledInvite`](crate::CancelledInvite)); at the bound, it
+    /// does. `false`, the default, answers 487 as the CANCEL arrives.
+    pub consumer_ends_cancelled_reinvite: bool,
     /// Told each time a held ACK, or the held answers to a CANCEL, leave at
     /// their bound rather than on their consumer's release, with the
     /// transaction that held them.
@@ -138,6 +147,7 @@ impl TransactionConfig {
             trying_bound_ms: crate::timers::TRYING_BOUND,
             ack_bound_ms: 0,
             cancel_bound_ms: 0,
+            consumer_ends_cancelled_reinvite: false,
             on_bound: None,
             strict_to_tag: true,
             deferred_bound: None,

@@ -62,15 +62,6 @@ async fn scene(name: &str, rig: Option<&WitnessRig>) -> B2buaScene {
         )
         .on_party("alice"),
     );
-    // An accepted SUT deviation, charged to the b2bua at each re-INVITE.
-    s.h.waive(
-        WaiverScope::rule(
-            "concurrent-re-invite-500-or-491",
-            "a CANCEL that reaches a re-INVITE before its final draws 487 (RFC 3261 §9.2); the \
-             flooded overflow path answers no concurrent re-INVITE before it",
-        )
-        .on_party("b2bua"),
-    );
     s
 }
 

@@ -158,6 +158,7 @@ fn relayed_reinvite(outbound_cseq: i64, cancelled: bool) -> RequestRecord {
         sent: None,
         deadline_ms: None,
         cancelled,
+        cancel_relayed: false,
         offered_100rel: false,
         offered: false,
         source_timestamp: None,

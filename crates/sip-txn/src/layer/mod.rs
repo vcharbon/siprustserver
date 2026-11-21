@@ -101,6 +101,7 @@ pub use call_id_budget::CallIdBudget;
 pub use config::OnBound;
 pub(crate) use event_age::EventAges;
 pub use handle::{TransactionConfig, TransactionEvents, TransactionLayer, TransactionLayerClosed};
+pub use held_cancel::CancelledInvite;
 pub use key::ServerTxnKey;
 pub use new_call_gate::NewCallGate;
 pub use refusals::{InviteRefusals, NewCallRefusal, RefusedCopy, Verdict, REFUSED_MEMO_MAX};

@@ -20,6 +20,7 @@ use call::TxnKind;
 pub use super::config::TransactionConfig;
 use super::event_age::EventAges;
 pub use super::event_receiver::TransactionEvents;
+use super::held_cancel::CancelledInvite;
 use super::key::{ServerTxnId, ServerTxnKey};
 use super::owner::Owner;
 use super::run::run;
@@ -359,16 +360,20 @@ impl TransactionLayer {
     /// INVITE named by its Call-ID, From-tag and CSeq number as the
     /// `Cancelled` event states them
     /// ([`TransactionConfig::cancel_bound_ms`](crate::TransactionConfig)):
-    /// they leave now if still held. `true` when they left; `false` when none
-    /// are held for that INVITE.
+    /// they leave now if still held, an INVITE left open for this consumer
+    /// ending as `invite` says
+    /// ([`TransactionConfig::consumer_ends_cancelled_reinvite`](crate::TransactionConfig)).
+    /// `true` when they left; `false` when none are held for that INVITE.
     pub async fn release_cancel(
         &self,
         call_id: &str,
         from_tag: &str,
         cseq: u32,
+        invite: CancelledInvite,
     ) -> Result<bool, TransactionLayerClosed> {
         let (call_id, from_tag) = (call_id.to_string(), from_tag.to_string());
-        self.roundtrip(|reply| Command::ReleaseCancel { call_id, from_tag, cseq, reply }).await
+        self.roundtrip(|reply| Command::ReleaseCancel { call_id, from_tag, cseq, invite, reply })
+            .await
     }
 
     /// Ask to be notified (via [`TransactionEvent::CallQuiesced`]) when the last

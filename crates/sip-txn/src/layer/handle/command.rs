@@ -12,6 +12,7 @@ use crate::event::ClientTransactionHandle;
 use crate::seed::{Reoffer, TxnSeed};
 use call::TxnKind;
 
+use super::super::held_cancel::CancelledInvite;
 use super::super::key::ServerTxnKey;
 
 pub(in crate::layer) enum Command {
@@ -133,6 +134,7 @@ pub(in crate::layer) enum Command {
         call_id: String,
         from_tag: String,
         cseq: u32,
+        invite: CancelledInvite,
         reply: oneshot::Sender<bool>,
     },
     /// Send the held ACK of the client INVITE transaction at `branch`;

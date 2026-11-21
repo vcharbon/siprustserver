@@ -18,8 +18,9 @@ impl Owner {
     /// Put a held CANCEL on the wire — called when its INVITE client txn takes
     /// its first provisional (RFC 3261 §9.1 "wait for the arrival of a
     /// provisional response before sending") — and arm its Timer-E ladder. A
-    /// send on an INVITE that gave up restarts its hold: §9.1's 64·T1 runs
-    /// from the CANCEL.
+    /// send on an INVITE that gave up restarts its hold, and one on a live
+    /// INVITE brings its give-up within 64·T1 ([`Owner::bound_after_cancel`]):
+    /// §9.1's 64·T1 runs from the CANCEL.
     pub(super) async fn flush_cancel_on_provisional(
         &mut self,
         endpoint: &dyn UdpEndpoint,
@@ -42,6 +43,7 @@ impl Owner {
             self.send_buffer(endpoint, &call_id, &buf, dest).await;
             self.metrics.held_cancels_flushed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             self.arm_cancel_retransmit(branch);
+            self.bound_after_cancel(branch);
         }
     }
 

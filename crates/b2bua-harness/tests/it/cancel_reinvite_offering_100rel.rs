@@ -1,12 +1,12 @@
 //! A CANCELled re-INVITE that drew a reliable provisional stops its ladder: the
 //! re-INVITE half of the per-transaction cancel.
 //!
-//! A CANCELled re-INVITE resolves through `ResolveCancelledReinvite` and never
-//! reaches the relayed-final hook, so the ladder this stack armed toward the
-//! caller for that transaction's reliable provisional is cancelled on its own
-//! path. RFC 3262 §3 has the retransmissions run until the provisional is
-//! PRACKed or the transaction ends; the 487 ends it, so no copy may follow.
-//! RFC 3261 §14.1 leaves the dialog in its prior state — the call carries on.
+//! The caller's CANCEL is relayed and the responder's 487 answers her
+//! (ADR-0065), through the relayed-final hook, which ends the ladder this
+//! stack armed toward her for that transaction's reliable provisional. RFC
+//! 3262 §3 has the retransmissions run until the provisional is PRACKed or the
+//! transaction ends; the 487 ends it, so no copy may follow. RFC 3261 §14.1
+//! leaves the dialog in its prior state — the call carries on.
 
 use std::net::SocketAddr;
 
@@ -58,7 +58,7 @@ fn responses_to(
 /// ```text
 ///   INVITE(100rel) → 180 → 200 → ACK
 ///   re-INVITE(100rel) → 180(100rel,RSeq 4711) ← 180(100rel,RSeq n)
-///   CANCEL → 200(CANCEL) ; CANCEL → 487 ← 487 → ACK
+///   CANCEL → 200(CANCEL) ; CANCEL → 487 → ACK, PRACK ; 487 relayed
 ///   [no further copy of the 180 — the transaction's ladder died with it]
 ///   BYE → 200(BYE)
 /// ```
@@ -118,11 +118,9 @@ async fn cancelling_a_reinvite_stops_its_reliable_provisional_ladder() {
     // ── alice CANCELs it before the first ladder rung falls ──
     let mut cancel = reinv.cancel().await;
     cancel.expect(200).await;
-    // The provisional no one PRACKed end to end is acknowledged by this stack as
-    // it CANCELs the transaction (RFC 3262 §4).
-    bob.receive("PRACK").await.respond(200, "OK").await;
     bob.receive("CANCEL").await.respond(200, "OK").await;
     re_uas.respond(487, "Request Terminated").await;
+    bob.receive("PRACK").await.respond(200, "OK").await;
     reinv.expect(487).await;
 
     // ── two ladder rungs' worth of silence: the transaction is over ──

@@ -33,7 +33,9 @@ pub enum TransactionEvent {
         opened_at: Option<Instant>,
     },
     /// A CANCEL matched a server INVITE txn; this layer sent the 200/487, or
-    /// holds them for release (`TransactionConfig::cancel_bound_ms`). RFC 3261
+    /// holds them for release (`TransactionConfig::cancel_bound_ms`; a
+    /// re-INVITE's under `consumer_ends_cancelled_reinvite`, whose release may
+    /// keep the INVITE open, ADR-0065). RFC 3261
     /// §9 scopes a CANCEL to the one INVITE *transaction* it matched, so the
     /// event carries enough for the consumer to tell an initial-INVITE CANCEL
     /// (tear the call down) from one targeting an in-dialog re-INVITE (end

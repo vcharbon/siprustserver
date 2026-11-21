@@ -166,6 +166,10 @@ pub(super) struct UnsentCancel {
     pub(super) terminated: Option<(Bytes, SocketAddr)>,
     /// The key the transaction is held under in `Owner::held_cancels`.
     pub(super) held_as: (String, String, u32),
+    /// The INVITE is still active, its 487 not yet its final: the release
+    /// says whether it ends with it
+    /// ([`TransactionConfig::consumer_ends_cancelled_reinvite`](crate::TransactionConfig)).
+    pub(super) invite_open: bool,
 }
 
 /// A CANCEL datagram parked on its INVITE client txn (see

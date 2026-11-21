@@ -114,6 +114,8 @@ pub(super) struct Owner {
     pub(super) ack_bound_ms: u64,
     /// [`TransactionConfig::cancel_bound_ms`](crate::TransactionConfig).
     pub(super) cancel_bound_ms: u64,
+    /// [`TransactionConfig::consumer_ends_cancelled_reinvite`](crate::TransactionConfig).
+    pub(super) consumer_ends_cancelled_reinvite: bool,
     /// [`TransactionConfig::on_bound`](crate::TransactionConfig).
     pub(super) on_bound: Option<super::config::OnBound>,
     /// [`TransactionConfig::first_hop`].
@@ -189,6 +191,7 @@ impl Owner {
             trying_bound_ms: config.trying_bound_ms,
             ack_bound_ms: config.ack_bound_ms,
             cancel_bound_ms: config.cancel_bound_ms,
+            consumer_ends_cancelled_reinvite: config.consumer_ends_cancelled_reinvite,
             on_bound: config.on_bound.clone(),
             first_hop: config.first_hop,
             held_cancels: HashMap::new(),

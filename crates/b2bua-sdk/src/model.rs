@@ -180,15 +180,12 @@ pub enum RuleAction {
     CancelLeg {
         leg_id: String,
     },
-    /// CANCEL a relayed, still-unanswered **re-INVITE** client transaction on
-    /// `leg_id`'s dialog (RFC 3261 §9.1) — transaction-scoped: no leg state or
-    /// disposition change, the established dialog and the call stay up. Builds
-    /// the CANCEL from the INVITE the dialog's record holds (same
-    /// branch / Route set / wire destination as the re-INVITE) and marks the
-    /// matching pending-relay snapshot (`outbound_cseq`) cancelled so the
-    /// peer's eventual final is resolved locally instead of relayed: the
-    /// originator already holds its final — the txn layer's 487 to its own
-    /// CANCEL here, this stack's reject under [`Self::RejectPendingReinvite`].
+    /// Relay the originator's CANCEL onto the relayed, still-unanswered
+    /// **re-INVITE** on `leg_id`'s dialog (RFC 3261 §9.1): no leg state or
+    /// disposition change, the dialogs and the call stay up. The CANCEL reuses
+    /// the re-INVITE's branch, Route set and wire destination; the snapshot
+    /// (`outbound_cseq`) is marked `cancel_relayed`, and the peer's final is
+    /// relayed to the originator, whose re-INVITE stays open for it.
     CancelPendingReinvite {
         leg_id: String,
         outbound_cseq: i64,

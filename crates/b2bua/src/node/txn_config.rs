@@ -64,6 +64,7 @@ pub(super) fn txn_config(
         ack_bound_ms: u64::try_from(write_path.ack_bound.as_millis()).unwrap_or(u64::MAX),
         // The answers to a CANCEL likewise, with the turn that took it.
         cancel_bound_ms: u64::try_from(write_path.cancel_bound.as_millis()).unwrap_or(u64::MAX),
+        consumer_ends_cancelled_reinvite: true,
         // A probe hears of what left at its bound, before its turn's write.
         on_bound: probe.installed().then(|| bound_report(probe, &config.self_ordinal)),
         strict_to_tag: true,

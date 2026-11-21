@@ -1,7 +1,9 @@
 //! **The PRACK this stack owes when a relayed re-INVITE ends** — CANCELled,
-//! or rejected by its responder — and what follows it. As the CANCEL goes out
-//! or the final comes in, this stack PRACKs the responder's reliable
-//! provisional itself (RFC 3262 §4), so:
+//! or rejected by its responder — and what follows it. The originator's
+//! CANCEL leaves the transaction running end to end until the responder's
+//! final (ADR-0065), so her PRACK in that window is relayed. As the final
+//! comes in, this stack PRACKs a reliable provisional nobody acknowledged
+//! itself (RFC 3262 §4), so:
 //!
 //! - the originator's own PRACK arriving afterwards names a provisional already
 //!   acknowledged toward the responder: it is answered here with 200 (§3: a
@@ -32,11 +34,11 @@ const RSEQ: u32 = 4711;
 const T1_MS: u64 = 500;
 const BOUND_MS: u64 = 64 * T1_MS;
 
-/// The caller's PRACK reaches this stack after her CANCEL did: the B2BUA
-/// PRACKed bob as it CANCELled, so hers is answered here and bob sees one
-/// PRACK only.
+/// The caller's PRACK reaches this stack after her CANCEL did: her re-INVITE
+/// still awaits bob's final (ADR-0065), so her PRACK is relayed to bob as end
+/// to end, and bob's 487 then answers her. Bob sees one PRACK only.
 #[tokio::test(start_paused = true)]
-async fn a_callers_prack_after_her_reinvite_cancel_is_answered_here() {
+async fn a_callers_prack_after_her_reinvite_cancel_is_relayed() {
     let h = Harness::with_transit_delay("b2bua-reinvite-cancel-late-prack-caller", 1);
     let alice = h.agent("alice", "127.0.0.1:5241").await;
     let bob = h.agent("bob", "127.0.0.1:5242").await;
@@ -64,21 +66,19 @@ async fn a_callers_prack_after_her_reinvite_cancel_is_answered_here() {
     let p183 = reinv.expect(183).await;
     let shown = stated_rseq(&p183);
 
-    // ── alice CANCELs; this stack PRACKs bob's 183 as it CANCELs him ──
     let mut cancel = reinv.cancel().await;
     cancel.expect(200).await;
-    bob.receive("PRACK").await.respond(200, "OK").await;
     bob.receive("CANCEL").await.respond(200, "OK").await;
 
-    // ── alice's own PRACK, crossing the 487 this stack answered her CANCEL with ──
-    reinv.expect(487).await;
     let mut prack = alice_dialog
         .send_request(InDialogMethod::Prack)
         .with_rack(&format!("{shown} {} INVITE", p183.cseq().seq()))
         .send()
         .await;
+    bob.receive("PRACK").await.respond(200, "OK").await;
     prack.expect(200).await;
     re_uas.respond(487, "Request Terminated").await;
+    reinv.expect(487).await;
     h.advance(Duration::from_millis(2 * T1_MS)).await;
     assert!(
         bob.try_receive_tolerating("PRACK", &[]).await.is_none(),
@@ -94,9 +94,9 @@ async fn a_callers_prack_after_her_reinvite_cancel_is_answered_here() {
 }
 
 /// The mirror: bob re-INVITEs, alice answers reliably, bob CANCELs; his late
-/// PRACK is answered here and alice sees one PRACK only.
+/// PRACK is relayed and alice sees one PRACK only.
 #[tokio::test(start_paused = true)]
-async fn a_callees_prack_after_his_reinvite_cancel_is_answered_here() {
+async fn a_callees_prack_after_his_reinvite_cancel_is_relayed() {
     let h = Harness::with_transit_delay("b2bua-reinvite-cancel-late-prack-callee", 1);
     let alice = h.agent("alice", "127.0.0.1:5244").await;
     let bob = h.agent("bob", "127.0.0.1:5245").await;
@@ -127,17 +127,17 @@ async fn a_callees_prack_after_his_reinvite_cancel_is_answered_here() {
 
     let mut cancel = reinv.cancel().await;
     cancel.expect(200).await;
-    alice.receive("PRACK").await.respond(200, "OK").await;
     alice.receive("CANCEL").await.respond(200, "OK").await;
 
-    reinv.expect(487).await;
     let mut prack = bob_dialog
         .send_request(InDialogMethod::Prack)
         .with_rack(&format!("{shown} {} INVITE", p183.cseq().seq()))
         .send()
         .await;
+    alice.receive("PRACK").await.respond(200, "OK").await;
     prack.expect(200).await;
     re_uas.respond(487, "Request Terminated").await;
+    reinv.expect(487).await;
     h.advance(Duration::from_millis(2 * T1_MS)).await;
     assert!(
         alice.try_receive_tolerating("PRACK", &[]).await.is_none(),
@@ -211,9 +211,11 @@ async fn a_prack_after_the_callees_reinvite_reject_is_answered_here() {
     let _report = h.finish().await;
 }
 
-/// Bob answers the CANCEL and the 487 but never this stack's own PRACK: its
-/// Timer F expiry denies that one transaction (RFC 3261 §17.1.2.2, §14.1) and
-/// the established call carries on.
+/// alice CANCELs without PRACKing bob's reliable 183; bob answers the CANCEL
+/// and the 487, which this stack relays to alice and PRACKs bob's 183 at, as
+/// at any final (RFC 3262 §4). Bob never answers that PRACK: its Timer F
+/// expiry denies that one transaction (RFC 3261 §17.1.2.2, §14.1) and the
+/// established call carries on.
 #[tokio::test(start_paused = true)]
 async fn an_unanswered_prack_of_this_stacks_own_leaves_the_call_up() {
     let h = Harness::with_transit_delay("b2bua-reinvite-cancel-prack-timeout", 0);
@@ -253,9 +255,9 @@ async fn an_unanswered_prack_of_this_stacks_own_leaves_the_call_up() {
 
     let mut cancel = reinv.cancel().await;
     cancel.expect(200).await;
-    let _unanswered = bob.receive("PRACK").await; // bob never answers it
     bob.receive("CANCEL").await.respond(200, "OK").await;
     re_uas.respond(487, "Request Terminated").await;
+    let _unanswered = bob.receive("PRACK").await; // bob never answers it
     reinv.expect(487).await;
 
     // ── past Timer F, the PRACK's retransmissions drained as they come ──

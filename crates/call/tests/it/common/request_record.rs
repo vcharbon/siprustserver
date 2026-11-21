@@ -79,6 +79,7 @@ pub(super) fn arb_pending_request() -> impl Strategy<Value = RequestRecord> {
                     source_from,
                     source_to,
                     cancelled: false,
+                    cancel_relayed: false,
                     offered_100rel: false,
                     offered: false,
                     source_timestamp,

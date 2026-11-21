@@ -1,19 +1,23 @@
 //! Transaction-scoped CANCEL of a **re-INVITE** (RFC 3261 §9). CANCEL targets
-//! the one pending INVITE transaction it matches: cancelling a re-INVITE ends
-//! that renegotiation — 487 to the re-INVITE, CANCEL relayed to the peer's
-//! pending relayed re-INVITE — and leaves the established dialog and the call
-//! intact: an in-dialog CANCEL never begins termination of the whole call.
+//! the one pending INVITE transaction it matches: the CANCEL is answered 200
+//! and relayed to the peer's pending relayed re-INVITE, whose final, a 487 or
+//! a 200 that crossed the CANCEL, answers the canceller (ADR-0065). The
+//! established dialog and the call stay intact: an in-dialog CANCEL never
+//! begins termination of the whole call.
 //!
 //! ```text
 //!   cancel_reinvite_ends_renegotiation_keeps_call
-//!       alice re-INVITE → relayed to bob → alice CANCELs → the CANCEL is
-//!       held until bob's branch has a provisional (§9.1) → relayed to bob
-//!       (same txn), bob 200+487 → alice 200(CANCEL)+487(INVITE) →
-//!       call still up → BYE completes
-//!   cancel_reinvite_crossing_200_is_acked_and_absorbed
+//!       alice re-INVITE → relayed to bob → alice CANCELs → 200(CANCEL) →
+//!       the CANCEL is held until bob's branch has a provisional (§9.1) →
+//!       relayed to bob (same txn), bob 200+487 → 487(INVITE) relayed to
+//!       alice → call still up → BYE completes
+//!   cancel_reinvite_crossing_200_is_relayed_to_the_canceller
 //!       bob answers 200 while the CANCEL is still held → the CANCEL dies
-//!       with the answered txn (never on the wire); B2BUA ACKs bob, relays
-//!       nothing to alice (she has her 487) → call still up
+//!       with the answered txn (never on the wire); bob's 200 is relayed to
+//!       alice, whose ACK reaches bob → call still up
+//!   a_delayed_offer_200_crossing_the_cancel_…
+//!       the same with an offerless re-INVITE: bob's 200 makes the offer and
+//!       alice's ACK answers it
 //!   callee_cancel_reinvite_ends_renegotiation_keeps_call
 //!       the mirror from the called side: bob re-INVITEs, then CANCELs; the
 //!       CANCEL names bob's dialog tag as its From-tag and reaches the call
@@ -27,6 +31,8 @@
 //! `cancel_during_slow_decision.rs` / `cancel_200_crossing.rs` /
 //! `teardown_races.rs`.
 
+use std::time::Duration;
+
 use b2bua_harness::{settle_until, B2buaSut};
 use scenario_harness::{Harness, WaiverScope};
 
@@ -36,10 +42,10 @@ const REOFFER: &str = "v=0\r\no=alice 1 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 12
 const REANSWER: &str = "v=0\r\no=bob 1 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 30001 RTP/AVP 0\r\n";
 
 /// alice sends a re-INVITE, the B2BUA relays it to bob, and alice CANCELs
-/// before bob answers. The B2BUA must (a) let the txn layer answer alice
-/// (200 to the CANCEL, 487 to the re-INVITE), (b) CANCEL the *relayed*
-/// re-INVITE toward bob — same transaction (branch + CSeq) as the relayed
-/// re-INVITE — and (c) keep the dialog and the call alive: a subsequent BYE
+/// before bob answers. The B2BUA must (a) answer her CANCEL 200, (b) CANCEL
+/// the *relayed* re-INVITE toward bob — same transaction (branch + CSeq) as
+/// the relayed re-INVITE — (c) relay bob's 487 to alice as her re-INVITE's
+/// final, and (d) keep the dialog and the call alive: a subsequent BYE
 /// completes normally on the original dialog state.
 #[tokio::test]
 async fn cancel_reinvite_ends_renegotiation_keeps_call() {
@@ -65,13 +71,8 @@ async fn cancel_reinvite_ends_renegotiation_keeps_call() {
     let mut bob_reinv_uas = bob.receive("INVITE").await;
     let relayed_reinvite = bob_reinv_uas.request().clone();
 
-    // ── alice CANCELs the pending re-INVITE ──
-    // The txn layer answers alice immediately: 200 OK to the CANCEL, then 487
-    // Request Terminated on the re-INVITE — both on the established dialog's
-    // To-tag (RFC 3261 §9.1). The call must NOT be torn down.
     let mut cxl = reinv.cancel().await;
     cxl.expect(200).await;
-    reinv.expect(487).await;
 
     // ── the B2BUA CANCELs the relayed re-INVITE toward bob — HELD until bob's
     //    branch has a provisional (§9.1), then the SAME transaction it relayed
@@ -92,8 +93,8 @@ async fn cancel_reinvite_ends_renegotiation_keeps_call() {
     // bob is a normal UAS: 200 the CANCEL, 487 the re-INVITE (RFC 3261 §9.2).
     bob_cxl.respond(200, "OK").await;
     bob_reinv_uas.respond(487, "Request Terminated").await;
-    // The B2BUA's client transaction auto-ACKs bob's 487 (§17.1.1.3).
     bob.receive("ACK").await;
+    reinv.expect(487).await;
 
     // ── the call is STILL alive: the cancelled renegotiation must not have
     //    touched the established dialog ──
@@ -150,7 +151,6 @@ async fn callee_cancel_reinvite_ends_renegotiation_keeps_call() {
 
     let mut cxl = reinv.cancel().await;
     cxl.expect(200).await;
-    reinv.expect(487).await;
 
     alice_reinv_uas.respond(100, "Trying").await;
     let mut alice_cxl =
@@ -159,6 +159,7 @@ async fn callee_cancel_reinvite_ends_renegotiation_keeps_call() {
     alice_cxl.respond(200, "OK").await;
     alice_reinv_uas.respond(487, "Request Terminated").await;
     alice.receive("ACK").await;
+    reinv.expect(487).await;
     assert_eq!(b2bua.active_calls(), 1, "re-INVITE CANCEL must not tear the call down");
 
     let mut bye = dialog.bye().await;
@@ -170,16 +171,13 @@ async fn callee_cancel_reinvite_ends_renegotiation_keeps_call() {
     let _report = h.finish().await;
 }
 
-/// The crossing case: bob's 200 OK to the relayed re-INVITE crosses the
-/// B2BUA's CANCEL on the wire (RFC 3261 §9.1 — cancellation is best-effort;
-/// the UAS may have already committed its final). Alice was already 487'd by
-/// the txn layer, so the B2BUA must NOT relay the 200; it ACKs bob (quiescing
-/// his 2xx retransmissions, §13.2.2.4) and keeps the call up. The two sides'
-/// SDP views may diverge until the next renegotiation — the documented
-/// minimal-intervention choice (the alternative, killing the call or minting
-/// a resync re-INVITE, costs more than the transient divergence).
+/// The crossing case: bob's 200 OK to the relayed re-INVITE beats the
+/// B2BUA's CANCEL, held for bob's first provisional (RFC 3261 §9.1). The 200
+/// is relayed to alice as her re-INVITE's final, as she would meet it end to
+/// end (§9.2: the CANCEL had no effect), and her ACK reaches bob: both sides
+/// hold the renegotiated session and the call stays up.
 #[tokio::test]
-async fn cancel_reinvite_crossing_200_is_acked_and_absorbed() {
+async fn cancel_reinvite_crossing_200_is_relayed_to_the_canceller() {
     let h = Harness::with_transit_delay("b2bua-reinvite-cancel-crossing", 0);
     let alice = h.agent("alice", "127.0.0.1:5062").await;
     let bob = h.agent("bob", "127.0.0.1:5072").await;
@@ -198,28 +196,25 @@ async fn cancel_reinvite_crossing_200_is_acked_and_absorbed() {
 
     // ── alice re-INVITEs; bob receives it; alice CANCELs ──
     let mut reinv = dialog.reinvite(Some(REOFFER)).await;
+    let reinvite_cseq = dialog.local_cseq();
     let mut bob_reinv_uas = bob.receive("INVITE").await;
     let mut cxl = reinv.cancel().await;
     cxl.expect(200).await;
-    reinv.expect(487).await;
 
     // The B2BUA's CANCEL is HELD — bob's branch has no response yet (§9.1) —
     // and bob commits his 200 OK first (the crossing): the 200 ends the client
     // transaction and the held CANCEL dies with it, never reaching the wire.
     bob_reinv_uas.respond(200, "OK").with_sdp(REANSWER).await;
 
-    // ── the B2BUA ACKs bob's crossing 200 on the confirmed dialog (re-INVITE
-    //    CSeq, §13.2.2.4) instead of relaying it — alice already has her 487 ──
-    bob.receive("ACK").await;
+    let ok = reinv.expect(200).await;
+    assert_eq!(ok.body(), REANSWER.as_bytes(), "bob's answer reaches alice");
+    dialog.ack_for(reinvite_cseq, None).await;
+    let ack = bob.receive("ACK").await;
+    assert_eq!(ack.request().cseq().seq(), bob_reinv_uas.request().cseq().seq());
     assert_eq!(
         bob.drain().await,
         0,
         "the held CANCEL died with the answered transaction — never on the wire"
-    );
-    assert_eq!(
-        alice.drain().await,
-        0,
-        "nothing further toward alice — the crossing 200 is absorbed, not relayed"
     );
 
     // ── the call is STILL alive; a normal BYE completes ──
@@ -240,7 +235,9 @@ async fn cancel_reinvite_crossing_200_is_acked_and_absorbed() {
 /// §13.2.2.4). So bob's final decides alice's: she is not answered 487 at
 /// once but given bob's 200, as she would be end to end (§9.2: a CANCEL that
 /// reaches a UAS after its final has no effect), and her ACK's answer reaches
-/// bob. Both sides then hold the same session.
+/// bob. Both sides then hold the same session. bob's 200 leaves half a transit
+/// after alice's CANCEL: it reaches the SUT after her CANCEL, and bob answered
+/// before the relayed CANCEL reached him.
 #[tokio::test(start_paused = true)]
 async fn a_delayed_offer_200_crossing_the_cancel_is_relayed_and_answered_by_the_canceller() {
     let h = Harness::new("b2bua-reinvite-cancel-crossing-offer");
@@ -258,7 +255,6 @@ async fn a_delayed_offer_200_crossing_the_cancel_is_relayed_and_answered_by_the_
     let mut dialog = call.ack().await;
     bob.receive("ACK").await;
 
-    // ── alice re-INVITEs offerless and CANCELs it; bob's 200 is on its way ──
     let mut reinv = dialog.reinvite(None).await;
     let reinvite_cseq = dialog.local_cseq();
     let mut bob_reinv = bob.receive("INVITE").await;
@@ -268,11 +264,11 @@ async fn a_delayed_offer_200_crossing_the_cancel_is_relayed_and_answered_by_the_
     );
     bob_reinv.respond(100, "Trying").await;
     let mut cxl = reinv.cancel().await;
-    cxl.expect(200).await;
+    h.advance(Duration::from_millis(50)).await;
     bob_reinv.respond(200, "OK").with_sdp(REANSWER).await;
+    cxl.expect(200).await;
     bob.receive("CANCEL").await.respond(200, "OK").await;
 
-    // ── bob's 200 reaches alice with his offer; she answers in her ACK ───────
     let ok = reinv.expect(200).await;
     assert_eq!(ok.body(), REANSWER.as_bytes(), "bob's offer reaches alice");
     dialog.ack_for(reinvite_cseq, Some(REOFFER)).await;
@@ -285,11 +281,100 @@ async fn a_delayed_offer_200_crossing_the_cancel_is_relayed_and_answered_by_the_
     let answer = String::from_utf8_lossy(ack.request().body()).to_string();
     assert!(answer.contains("m=audio 30000 "), "the ACK carries alice's answer: {answer:?}");
 
-    // ── the call is up in the renegotiated session; a BYE ends it ────────────
     assert_eq!(b2bua.active_calls(), 1, "the crossing 200 keeps the call up");
     let mut bye = dialog.bye().await;
     bob.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
+    settle_until(|| b2bua.is_reaped()).await;
+    alice.drain().await;
+    bob.drain().await;
+    b2bua.assert_fully_reaped();
+    let _report = h.finish().await;
+}
+
+/// alice CANCELs her re-INVITE, then hangs up before bob's final: her
+/// re-INVITE still holds no final, so her BYE draws this stack's 487 to it
+/// (RFC 3261 §15.1.2), and the CANCEL already on its way to bob is not sent
+/// again. bob's late 487 is ACKed and goes no further.
+#[tokio::test(start_paused = true)]
+async fn a_bye_after_the_relayed_cancel_answers_the_reinvite_487_without_a_second_cancel() {
+    let h = Harness::new("b2bua-reinvite-cancel-then-bye");
+    let alice = h.agent("alice", "127.0.0.1:5066").await;
+    let bob = h.agent("bob", "127.0.0.1:5076").await;
+    let b2bua =
+        B2buaSut::route_all_to("127.0.0.1", 5076).start(&h, "b2bua", "127.0.0.1:5086").await;
+
+    let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
+    let mut uas = bob.receive("INVITE").await;
+    uas.respond(200, "OK").with_sdp(ANSWER).await;
+    call.expect(200).await;
+    let mut dialog = call.ack().await;
+    bob.receive("ACK").await;
+
+    let mut reinv = dialog.reinvite(Some(REOFFER)).await;
+    let mut bob_reinv = bob.receive("INVITE").await;
+    bob_reinv.respond(100, "Trying").await;
+    let mut cxl = reinv.cancel().await;
+    cxl.expect(200).await;
+    bob.receive("CANCEL").await.respond(200, "OK").await;
+
+    let mut bye = dialog.bye().await;
+    bye.expect(200).await;
+    reinv.expect(487).await;
+    bob.receive("BYE").await.respond(200, "OK").await;
+    bob_reinv.respond(487, "Request Terminated").await;
+    bob.receive("ACK").await;
+
+    settle_until(|| b2bua.is_reaped()).await;
+    alice.drain().await;
+    let report = h.finish().await;
+    let cancels_to_bob = report
+        .entries()
+        .iter()
+        .filter(|e| e.from == b2bua.addr && e.to == bob.addr() && e.raw.starts_with(b"CANCEL "))
+        .count();
+    assert_eq!(cancels_to_bob, 1, "one CANCEL toward bob: the BYE sends no second one");
+    b2bua.assert_fully_reaped();
+}
+
+/// alice CANCELs her re-INVITE and bob never answers it, nor the CANCEL: the
+/// relayed re-INVITE's client transaction gives up 64·T1 past the CANCEL (RFC
+/// 3261 §9.1), not at the INVITE's own later bound. bob's dialog timed out
+/// (§12.2.1.2), so the call ends: alice's re-INVITE takes the teardown's 487
+/// (§15.1.2) and both dialogs a BYE.
+#[tokio::test(start_paused = true)]
+async fn a_relayed_cancel_bob_never_answers_ends_at_64_t1_past_the_cancel() {
+    let h = Harness::new("b2bua-reinvite-cancel-unanswered");
+    let alice = h.agent("alice", "127.0.0.1:5067").await;
+    let bob = h.agent("bob", "127.0.0.1:5077").await;
+    let b2bua = B2buaSut::route_all_to("127.0.0.1", 5077)
+        .tune(|c| c.keepalive_interval_sec = 600)
+        .start(&h, "b2bua", "127.0.0.1:5087")
+        .await;
+
+    let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
+    let mut uas = bob.receive("INVITE").await;
+    uas.respond(200, "OK").with_sdp(ANSWER).await;
+    call.expect(200).await;
+    let mut dialog = call.ack().await;
+    bob.receive("ACK").await;
+
+    let mut reinv = dialog.reinvite(Some(REOFFER)).await;
+    let mut bob_reinv = bob.receive("INVITE").await;
+    bob_reinv.respond(100, "Trying").await;
+    let mut cxl = reinv.cancel().await;
+    cxl.expect(200).await;
+    let _unanswered = bob.receive("CANCEL").await;
+    let cancelled_at = tokio::time::Instant::now();
+
+    h.advance(Duration::from_millis(sip_txn::timers::TIMER_B + 1_000)).await;
+    reinv.expect(487).await;
+    assert!(
+        cancelled_at.elapsed() < Duration::from_millis(2 * sip_txn::timers::TIMER_B),
+        "the give-up runs from the CANCEL, not from the INVITE's own bound"
+    );
+    alice.receive("BYE").await.respond(200, "OK").await;
+    bob.receive_absorbing("BYE", &["CANCEL"]).await.respond(200, "OK").await;
     settle_until(|| b2bua.is_reaped()).await;
     alice.drain().await;
     bob.drain().await;

@@ -20,7 +20,7 @@ use super::call_id_budget::Retired;
 use super::copy_gate::opening_copies;
 use super::key::{ServerTxnId, ServerTxnKey};
 use super::owner::Owner;
-use super::txn::{NewTransaction, Transaction, TxnId, TxnRef, TxnState};
+use super::txn::{NewTransaction, Transaction, TxnId, TxnRef, TxnState, UnsentCancel};
 
 impl Owner {
     /// RFC 3261 §9.2 at this layer: a CANCEL matching an active INVITE server
@@ -126,18 +126,22 @@ impl Owner {
             .and_then(|t| t.original_request.as_ref())
             .map(|r| (Some(r.cseq().seq()), r.to().tag().is_some()))
             .unwrap_or((None, false));
+        if self.server(id).is_some_and(|t| t.cancel_copies.is_some()) {
+            return self.answer_cancel_copy(endpoint, &req, id, cancel_dest).await;
+        }
 
         // Resolve (and lazily pin) the UAS To-tag on the matched INVITE: the
         // tag both answers carry, reported upstream with the event.
         let uas_to_tag = self.uas_to_tag_of(id);
         self.note_first_cancel(id);
+        let invite_open = in_dialog && self.consumer_ends_cancelled_reinvite;
 
         // 200 OK to the CANCEL itself. This 200 and the 487 below are the
         // layer's own answers: they carry no header the TU states on its
         // messages.
         // A request whose lines no response can echo draws none.
         let opts = GenerateResponseOpts { to_tag: uas_to_tag.clone(), ..Default::default() };
-        let hold = self.holds_cancel_answers();
+        let hold = self.holds_cancel_answers() || invite_open;
         let cancel_ok = generate_response(&req, 200, "OK", &opts).ok();
         let cancel_ok = cancel_ok.map(|ok| (ok.image().clone(), cancel_dest));
         if let Some((buf, _)) = cancel_ok.as_ref() {
@@ -161,11 +165,8 @@ impl Owner {
                 self.send_buffer(endpoint, call_id.as_str(), &terminated_buf, invite_dest).await;
             }
             self.record_uas_tag(id, &terminated);
-            if let Some(txn) = self.server_mut(id) {
-                txn.state = TxnState::Completed;
-                txn.last_response = Some(terminated_buf);
-                txn.last_response_status = Some(487);
-                txn.original_request = None;
+            if !invite_open {
+                self.complete_with_487(id, terminated_buf);
             }
             // The layer's own final holds the transaction like a TU's: Timer G
             // repeats the 487 until the ACK, Timer H bounds it (§17.2.1);
@@ -180,7 +181,8 @@ impl Owner {
                 from_tag.to_string(),
                 invite_cseq.unwrap_or_default(),
             );
-            self.hold_cancel_answers(&key, held_as, cancel_ok, held_487);
+            let answers = UnsentCancel { cancel_ok, terminated: held_487, held_as, invite_open };
+            self.hold_cancel_answers(&key, answers);
         }
 
         // Critical: the 200 and the 487 are sent or held for this event's turn; a
@@ -194,6 +196,40 @@ impl Owner {
             to_tag: uas_to_tag,
         });
         true
+    }
+
+    /// A copy of the CANCEL `req` the still active INVITE server transaction
+    /// `id` already took, its INVITE left open for the consumer's final
+    /// ([`TransactionConfig::consumer_ends_cancelled_reinvite`](crate::TransactionConfig)):
+    /// answered 200 again on the RFC schedule (§17.2.2), handed up never;
+    /// `true`.
+    async fn answer_cancel_copy(
+        &mut self,
+        endpoint: &dyn UdpEndpoint,
+        req: &SipRequest,
+        id: ServerTxnId<'_>,
+        dest: SocketAddr,
+    ) -> bool {
+        if !self.cancel_copy_owed(id) {
+            return true;
+        }
+        let to_tag = self.uas_to_tag_of(id);
+        let opts = GenerateResponseOpts { to_tag, ..Default::default() };
+        if let Ok(ok) = generate_response(req, 200, "OK", &opts) {
+            self.send_buffer(endpoint, req.call_id().as_str(), ok.image(), dest).await;
+        }
+        true
+    }
+
+    /// The INVITE server transaction `id` takes `terminated`, the layer's 487,
+    /// as its final: Completed, its request gone (§17.2.1).
+    pub(super) fn complete_with_487(&mut self, id: ServerTxnId<'_>, terminated: Bytes) {
+        if let Some(txn) = self.server_mut(id) {
+            txn.state = TxnState::Completed;
+            txn.last_response = Some(terminated);
+            txn.last_response_status = Some(487);
+            txn.original_request = None;
+        }
     }
 
     /// A CANCEL received from `src` as `datagram` that names no INVITE here

@@ -162,4 +162,34 @@ impl Owner {
             txn.timeout_kind = TxnTimeoutKind::Transaction;
         }
     }
+
+    /// Bring the give-up of the INVITE client txn at `branch`, live and in
+    /// Proceeding, forward to 64·T1 past the CANCEL that just left on it (RFC
+    /// 3261 §9.1: with no final by then the client considers the original
+    /// transaction cancelled), where its own bound falls later. No-op for a txn
+    /// that gave up or whose hop was reported dead, and where its bound falls
+    /// sooner.
+    pub(super) fn bound_after_cancel(&mut self, branch: &str) {
+        let at = tokio::time::Instant::now() + ms(TIMER_B);
+        let later = match self.clients.get(branch) {
+            Some(t)
+                if t.kind == TxnKind::Invite
+                    && t.timeout_kind == TxnTimeoutKind::Transaction
+                    && !t.lifetime.gave_up()
+                    && !t.dead_hop_reported =>
+            {
+                t.timeout_key.as_ref().is_some_and(|k| self.timers.deadline(k) > at)
+            }
+            _ => false,
+        };
+        if !later {
+            return;
+        }
+        let old = self.clients.get_mut(branch).and_then(|t| t.timeout_key.take());
+        self.cancel_timer(old);
+        let key = self.arm(Timer::ClientTimeout(branch.to_string()), ms(TIMER_B));
+        if let Some(txn) = self.clients.get_mut(branch) {
+            txn.timeout_key = Some(key);
+        }
+    }
 }

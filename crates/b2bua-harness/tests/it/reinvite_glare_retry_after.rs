@@ -234,47 +234,6 @@ async fn a_newcomer_while_its_first_awaits_the_final_is_refused_500() {
     b2bua.assert_fully_reaped();
 }
 
-/// Bob CANCELs his relayed re-INVITE (487) and re-INVITEs again before alice
-/// answers the relayed copy: his own INVITE is over, only the stack's toward
-/// alice is open, so the 491 carries no Retry-After.
-#[tokio::test]
-async fn a_newcomer_after_its_cancelled_reinvite_carries_no_retry_after() {
-    let h = Harness::with_transit_delay("b2bua-glare-ra-cancelled", 0);
-    let alice = h.agent("alice", "127.0.0.1:6318").await;
-    let bob = h.agent("bob", "127.0.0.1:6319").await;
-    let b2bua = sut(6319, Some(FIXED)).start(&h, "b2bua", "127.0.0.1:6320").await;
-
-    let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
-    let mut uas = bob.receive("INVITE").await;
-    uas.respond(200, "OK").with_sdp(ANSWER).await;
-    call.expect(200).await;
-    let mut alice_dialog = call.ack().await;
-    bob.receive("ACK").await;
-    let mut bob_dialog = uas.dialog();
-
-    let mut reinv1 = bob_dialog.reinvite(Some(BOB_V2)).await;
-    let mut alice_uas = alice.receive("INVITE").await;
-    let mut cxl = reinv1.cancel().await;
-    cxl.expect(200).await;
-    reinv1.expect(487).await;
-
-    let mut reinv2 = bob_dialog.request(InDialogMethod::Invite, Some(BOB_V3)).await;
-    let refused = reinv2.expect(491).await;
-    assert_eq!(stated_by_response(&refused, "Retry-After"), None);
-
-    alice_uas.respond(100, "Trying").await;
-    alice.receive("CANCEL").await.respond(200, "OK").await;
-    alice_uas.respond(487, "Request Terminated").await;
-    alice.receive("ACK").await;
-    let mut bye = alice_dialog.bye().await;
-    bob.receive("BYE").await.respond(200, "OK").await;
-    bye.expect(200).await;
-
-    let _report = h.finish().await;
-    settle_until(|| b2bua.is_reaped()).await;
-    b2bua.assert_fully_reaped();
-}
-
 /// Crossing re-INVITEs: alice's is relayed to bob, bob's crosses it. The stack's
 /// own INVITE is in progress on bob's face, so its 491 carries no Retry-After.
 #[tokio::test]
