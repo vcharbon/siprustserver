@@ -45,7 +45,9 @@ pub(super) async fn dispatch_loop(mux: std::sync::Weak<MuxSocket>, endpoint: Arc
 /// by a finished call (`released`) or the call's caller has not sent its
 /// INVITE yet (`early`); (4) a final to the INVITE a released caller dialog
 /// last sent, answered with the datagrams this returns (its ACK, and for a 2xx
-/// the BYE ending the dialog); (5) orphan. The datagram is sniffed once,
+/// the BYE ending the dialog); (5) the answer to a copy the simulated network
+/// delivered after the call ended, or the ACK of an echoed final, counted
+/// and dropped; (6) orphan. The datagram is sniffed once,
 /// here, for every step and every watcher.
 fn route(mux: &MuxSocket, pkt: &UdpPacket) -> Vec<(Arc<[u8]>, SocketAddr)> {
     let (raw, src) = (&pkt.raw[..], pkt.src);
@@ -221,7 +223,10 @@ fn route(mux: &MuxSocket, pkt: &UdpPacket) -> Vec<(Arc<[u8]>, SocketAddr)> {
         }
         Reply::NotHeld => {}
     }
-    // 5. Not a known dialog and not an initial INVITE → a late straggler.
+    if mux.stats.answers_a_copy(dg.id()) {
+        mux.stats.copy_answered.fetch_add(1, Ordering::Relaxed);
+        return Vec::new();
+    }
     mux.stats.orphan(OrphanReason::Stray, raw);
     Vec::new()
 }

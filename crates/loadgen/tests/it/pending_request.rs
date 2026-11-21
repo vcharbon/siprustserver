@@ -67,6 +67,7 @@ impl ActorScenario for InfoByeCrossing {
             feed: CtxFeed::default(),
             cseq: None,
             delayed: vec![],
+            answers: Default::default(),
             claim: None,
         };
         let bob = ActorSpec {
@@ -83,6 +84,7 @@ impl ActorScenario for InfoByeCrossing {
             feed: CtxFeed::default(),
             cseq: None,
             delayed: vec![],
+            answers: Default::default(),
             claim: None,
         };
         Ok(ActorCall::new(

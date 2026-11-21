@@ -32,6 +32,7 @@ mod call_id_message_budget;
 mod call_keyed_holds;
 mod call_shape_cells;
 mod caller_facing_early_dialogs;
+mod callfuzz_lane;
 mod cancel_200_crossing;
 mod cancel_200_crossing_internal;
 mod cancel_after_answer;

@@ -38,6 +38,7 @@ async fn two_actor_toy_call_reaches_torn_down() {
 
                 cseq: None,
                 delayed: vec![],
+                answers: Default::default(),
                 claim: None,
             },
             ActorSpec {
@@ -52,6 +53,7 @@ async fn two_actor_toy_call_reaches_torn_down() {
 
                 cseq: None,
                 delayed: vec![],
+                answers: Default::default(),
                 claim: None,
             },
         ],
@@ -107,6 +109,7 @@ async fn two_actor_crossing_bye_both_terminate() {
 
                 cseq: None,
                 delayed: vec![],
+                answers: Default::default(),
                 claim: None,
             },
             ActorSpec {
@@ -122,6 +125,7 @@ async fn two_actor_crossing_bye_both_terminate() {
 
                 cseq: None,
                 delayed: vec![],
+                answers: Default::default(),
                 claim: None,
             },
         ],

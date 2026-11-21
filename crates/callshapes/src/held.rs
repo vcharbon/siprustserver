@@ -44,6 +44,7 @@ pub(crate) fn held_callee(
 
         cseq: None,
         delayed: vec![],
+        answers: Default::default(),
         claim: None,
     }
 }

@@ -231,6 +231,22 @@ pub struct Args {
     /// Per-scenario override: `--scenario basic_call=4,drop=0.002`.
     #[arg(long, default_value_t = 0.0)]
     pub drop_rate: f64,
+    /// Probability that a datagram a call's leg sends is sent twice, the copy
+    /// within `--late-max-ms` (RFC 3261 §18: UDP may duplicate). 0 = off.
+    #[arg(long, default_value_t = 0.0)]
+    pub dup_rate: f64,
+    /// Probability that a datagram a call's leg sends is held back up to
+    /// `--late-max-ms`, so later datagrams overtake it (UDP may reorder). 0 = off.
+    #[arg(long, default_value_t = 0.0)]
+    pub late_rate: f64,
+    /// The longest a duplicate or a held-back datagram trails its send.
+    #[arg(long, default_value_t = 2000)]
+    pub late_max_ms: u64,
+    /// Probability that a call's endpoint is an echo peer: it sends its final
+    /// again on every ACK of it and its request again on every final to it,
+    /// and the run counts each one the SUT loops with. 0 = off.
+    #[arg(long, default_value_t = 0.0)]
+    pub echo_rate: f64,
     /// Shorthand for `--drop-rate 0.001` (the default 1/1000 loss, so P(3 drops in
     /// a row) ≈ 1e-9). Ignored when `--drop-rate` is set > 0.
     #[arg(long, default_value_t = false)]
@@ -309,8 +325,10 @@ pub(super) fn base_tuning(args: &Args, profile: &LoadProfile) -> CallTuning {
             drop_rate: profile.robustness.drop_rate,
             retransmit: profile.robustness.retransmit,
             drop_nth: None,
+            faults: Default::default(),
         }
     };
+    t.faults = faults(args);
     if explicit_drop {
         t.drop_rate = default_tuning(args).drop_rate;
     }
@@ -330,7 +348,17 @@ fn default_tuning(args: &Args) -> CallTuning {
     } else {
         0.0
     };
-    CallTuning { drop_rate, retransmit: args.auto_retransmit, drop_nth: None }
+    CallTuning { drop_rate, retransmit: args.auto_retransmit, drop_nth: None, faults: faults(args) }
+}
+
+/// The duplication and late delivery the flags ask for.
+fn faults(args: &Args) -> crate::mux::NetFaults {
+    crate::mux::NetFaults {
+        dup_rate: args.dup_rate,
+        late_rate: args.late_rate,
+        late_max: std::time::Duration::from_millis(args.late_max_ms),
+        echo_rate: args.echo_rate,
+    }
 }
 
 /// The `infraShape` label the flag-synthesized [`EndpointConfig`] carries. A

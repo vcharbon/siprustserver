@@ -23,6 +23,7 @@ async fn txn_rig_with(taps: Option<Arc<Taps>>) -> (Arc<CallTxns>, TokioUdp, Sock
         Arc::new(DropModel::new(0.0, 1, None)),
         Arc::new(MuxStats::new(4)),
         taps,
+        None,
     ));
     (txns, peer, peer_addr)
 }

@@ -41,6 +41,7 @@ fn caller(env: &CallEnv<'_>, goals: Vec<Goal>) -> ActorSpec {
         feed: CtxFeed::default(),
         cseq: None,
         delayed: vec![],
+        answers: Default::default(),
         claim: None,
     }
 }
@@ -64,6 +65,7 @@ fn callee(
         feed: CtxFeed::default(),
         cseq: None,
         delayed: vec![],
+        answers: Default::default(),
         claim: None,
     }
 }

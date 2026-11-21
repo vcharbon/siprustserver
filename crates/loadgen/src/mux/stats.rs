@@ -70,6 +70,17 @@ pub struct MuxStats {
     /// direction: `out` = never hit the wire (dropped in `send_to`); `in` =
     /// demuxed to the call but discarded before the app read it.
     pub dropped_out: AtomicU64,
+    /// Responses past their call's end to a request the simulated network
+    /// duplicated or held back ([`super::NetFaults`]): the answerer's server
+    /// transaction answering the copy (RFC 3261 §17.2). No orphan.
+    pub copy_answered: AtomicU64,
+    /// Messages echo peers sent again on a reaction to them.
+    pub echoes: AtomicU64,
+    /// Echo peers an answerer looped with: a message echoed past the cap
+    /// ([`NetFaults::echo_rate`](super::NetFaults)).
+    pub echo_overruns: AtomicU64,
+    /// The Call-IDs of the first 16 echo overruns, for the report.
+    echo_overrun_calls: Mutex<Vec<String>>,
     pub dropped_in: AtomicU64,
     sample_cap: usize,
     samples: Mutex<Vec<String>>,
@@ -82,11 +93,55 @@ pub struct MuxStats {
     orphan_by_method: OrphanRows,
     /// The load stream every series names (`main` until set).
     stream: std::sync::OnceLock<String>,
+    /// The requests the simulated network duplicated or held back, by
+    /// (Call-ID, CSeq number, method), so a response to one is told from a
+    /// stray.
+    copies: std::sync::Mutex<std::collections::HashSet<(String, u32, String)>>,
 }
 
 impl MuxStats {
     pub(super) fn new(sample_cap: usize) -> Self {
         Self { sample_cap, ..Default::default() }
+    }
+
+    /// Note a datagram of identity `id` the simulated network delivers a copy
+    /// of, or late: a request, or a response by its request's method.
+    pub(super) fn note_copy(&self, id: &sip_message::sniff::Identity<'_>) {
+        if let (Some(cid), Some(cseq), Some(method)) =
+            (id.call_id, id.cseq, id.method.or(id.cseq_method))
+        {
+            let mut copies = self.copies.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            copies.insert((cid.to_string(), cseq, method.to_string()));
+        }
+    }
+
+    /// Whether `id` answers a datagram [`note_copy`](Self::note_copy) noted:
+    /// a response to a request, or the ACK of an INVITE's final.
+    pub(super) fn answers_a_copy(&self, id: &sip_message::sniff::Identity<'_>) -> bool {
+        let method = match (id.status, id.method) {
+            (Some(_), _) => id.cseq_method,
+            (None, Some("ACK")) => Some("INVITE"),
+            _ => None,
+        };
+        let (Some(cid), Some(cseq), Some(method)) = (id.call_id, id.cseq, method) else {
+            return false;
+        };
+        let copies = self.copies.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        copies.contains(&(cid.to_string(), cseq, method.to_string()))
+    }
+
+    /// Count an echo peer the answerer looped with on Call-ID `call_id`.
+    pub(super) fn note_echo_overrun(&self, call_id: Option<&str>) {
+        self.echo_overruns.fetch_add(1, Ordering::Relaxed);
+        let mut calls = self.echo_overrun_calls.lock().unwrap_or_else(|e| e.into_inner());
+        if calls.len() < 16 {
+            calls.push(call_id.unwrap_or("?").to_string());
+        }
+    }
+
+    /// The Call-IDs of the first echo overruns.
+    pub fn echo_overrun_calls(&self) -> Vec<String> {
+        self.echo_overrun_calls.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     /// The load stream every series names.

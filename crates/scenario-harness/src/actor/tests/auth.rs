@@ -115,6 +115,7 @@ async fn actor_caller_retries_through_a_401_challenge() {
 
             cseq: None,
             delayed: vec![],
+            answers: Default::default(),
             claim: None,
         }],
         plan: vec![phase("confirmed", alice_confirmed)],
@@ -200,6 +201,7 @@ async fn actor_caller_without_responder_classifies_401_unchanged() {
 
             cseq: None,
             delayed: vec![],
+            answers: Default::default(),
             claim: None,
         }],
         plan: vec![phase("confirmed", alice_confirmed)],

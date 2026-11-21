@@ -23,6 +23,7 @@ fn forking_bob_plan(bob: &crate::Agent, disposition: Disposition) -> CallPlan {
 
             cseq: None,
             delayed: vec![],
+            answers: Default::default(),
             claim: None,
         }],
         plan: vec![phase("established", |s| s.leg_at_least("bob", LegPhase::Confirmed))],
@@ -244,6 +245,7 @@ fn forked_pair_plan(
 
                 cseq: None,
                 delayed: vec![],
+                answers: Default::default(),
                 claim: None,
             },
             ActorSpec {
@@ -258,6 +260,7 @@ fn forked_pair_plan(
 
                 cseq: None,
                 delayed: vec![],
+                answers: Default::default(),
                 claim: None,
             },
         ],

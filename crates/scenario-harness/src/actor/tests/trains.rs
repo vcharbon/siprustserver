@@ -37,6 +37,7 @@ fn caller(alice: &Agent, bob: &Agent, bye: bool) -> ActorSpec {
         feed: CtxFeed::default(),
         cseq: None,
         delayed: vec![],
+        answers: Default::default(),
         claim: None,
     }
 }
@@ -53,6 +54,7 @@ fn held(bob: &Agent, goals: Vec<Goal>) -> ActorSpec {
         feed: CtxFeed::default(),
         cseq: None,
         delayed: vec![],
+        answers: Default::default(),
         claim: None,
     }
 }

@@ -6,6 +6,10 @@
 
 use crate::Rng;
 
+/// An option tag no party implements: a request requiring it is refused 420
+/// (RFC 3261 §8.2.2.3).
+pub const UNKNOWN_EXTENSION: &str = "x-nonexistent";
+
 /// One hostile header: (name, value, label).
 pub fn header(rng: &mut Rng) -> (String, String, &'static str) {
     let pick = rng.below(16);

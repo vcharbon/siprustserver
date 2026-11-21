@@ -51,4 +51,7 @@ pub struct CallTuning {
     /// distinct inbound request of a given CSeq method, once or permanently —
     /// see [`crate::mux::TargetedDrop`]. Default off.
     pub drop_nth: Option<crate::mux::TargetedDrop>,
+    /// Duplication and late delivery of the datagrams this call's legs send
+    /// (RFC 3261 §18), on top of `drop_rate`. Default off.
+    pub faults: crate::mux::NetFaults,
 }

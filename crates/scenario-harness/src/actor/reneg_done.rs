@@ -27,6 +27,7 @@ pub(super) fn refused_reneg(st: &ActorState<'_>, resp: &SipResponse, now: Instan
 /// CSeq (the `sent_reinvites` guard), so a re-emitted 2xx cannot double-count.
 pub(super) fn complete_originated_reinvite(st: &mut ActorState<'_>, cseq: u32, now: Instant) {
     if st.sent_reinvites.remove(&cseq) {
+        st.reinvite_retries = 0;
         st.sent_reinvite_txns.remove(&cseq);
         st.reinvite_ordinals.remove(&cseq);
         let key = ObligationKey::new(st.role, ObligationKind::ReInvite, cseq);

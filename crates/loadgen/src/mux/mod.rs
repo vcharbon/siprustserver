@@ -86,7 +86,7 @@ pub use endpoint::MuxNetwork;
 pub use routing::CallRouting;
 // The data-driven claim rules live in their shared home, `scenario-harness`
 // (like the LegPicker below); the mux consumes them as its claim demux tier.
-pub use loss::{DropDir, TargetedDrop};
+pub use loss::{DropDir, NetFaults, TargetedDrop};
 pub use retransmit::RELEASE_HOLD;
 pub use rtt::{Exchange, RttSink};
 pub use scenario_harness::claim::ClaimRule;

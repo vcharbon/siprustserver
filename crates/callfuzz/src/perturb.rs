@@ -1,5 +1,6 @@
 //! The perturbation any compiled call takes: jittered dwells, hostile INVITE
-//! headers under the size budget, odd INFO bodies on the confirmed dialog.
+//! headers under the size budget, odd INFO bodies on the confirmed dialog,
+//! the offer mode and the body framings.
 
 use std::time::Duration;
 
@@ -24,7 +25,10 @@ fn header_bytes(name: &str, value: &str) -> usize {
 /// (one per name, compact forms counted as their long name, inside
 /// `config.header_budget`) and up to two parties
 /// send an INFO with an odd body once both they and the caller are confirmed,
-/// before their BYE. A call's draws are a function of `rng` alone.
+/// before their BYE; with `config.offer_pct` percent, the offer mode and the
+/// framings ([`crate::media`]); with `config.hold_pct` percent, a held ACK,
+/// held or refused renegotiation finals and a held PRACK ([`crate::holds`]).
+/// A call's draws are a function of `rng` alone.
 pub fn perturb(rng: &mut Rng, call: &mut ActorCall, config: &FuzzConfig, notes: &mut Vec<String>) {
     if rng.chance(config.jitter_pct) {
         jitter(rng, call, notes);
@@ -39,6 +43,10 @@ pub fn perturb(rng: &mut Rng, call: &mut ActorCall, config: &FuzzConfig, notes: 
             odd_info(rng, call, config, notes);
         }
     }
+    crate::media::draw_media(rng, call, config, notes);
+    crate::holds::hold_acks(rng, call, config.hold_pct, notes);
+    crate::holds::hold_answers(rng, call, config, notes);
+    crate::holds::hold_pracks(rng, call, config, notes);
 }
 
 /// Some goal delays grow by up to a drawn span.
@@ -83,8 +91,9 @@ fn hostile_headers(
 }
 
 /// One drawn party sends an INFO with an odd body on its confirmed dialog,
-/// ahead of its BYE; a party with no BYE goal, or one of `config.quiet`,
-/// sends none.
+/// ahead of its BYE, requiring an extension no party implements of its UAS
+/// or of a proxy on the path with `config.unknown_require_pct` percent; a
+/// party with no BYE goal, or one of `config.quiet`, sends none.
 fn odd_info(rng: &mut Rng, call: &mut ActorCall, config: &FuzzConfig, notes: &mut Vec<String>) {
     let idx = rng.below(call.actors.len() as u64) as usize;
     let caller = scenario_harness::actor::originating_role(&call.actors);
@@ -103,6 +112,11 @@ fn odd_info(rng: &mut Rng, call: &mut ActorCall, config: &FuzzConfig, notes: &mu
         let (name, value, l) = payload::header(rng);
         headers.push((name, value));
         notes.push(format!("info-hdr:{l}"));
+    }
+    if rng.chance(config.unknown_require_pct) {
+        let name = *rng.pick(&["Require", "Proxy-Require"]);
+        headers.push((name.to_string(), payload::UNKNOWN_EXTENSION.to_string()));
+        notes.push(format!("info-{}", name.to_ascii_lowercase()));
     }
     let sender = actor.role;
     let confirmed = Barrier::pred("fz_confirmed", move |s| {

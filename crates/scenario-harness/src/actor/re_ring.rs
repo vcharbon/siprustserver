@@ -9,6 +9,7 @@ use std::time::Duration;
 use tokio::time::Instant;
 
 use super::barrier::await_pred;
+use super::framing::CarriesBody;
 use super::runner::ActorState;
 use super::state::{ObservedState, StateInner};
 use crate::realcall::LostMessage;
@@ -37,6 +38,7 @@ pub(super) async fn fire(st: &mut ActorState<'_>) -> Result<(), StepError> {
     let lost: Vec<LostMessage> =
         st.obs.with_snapshot(|s| lost_rings(s, st.role).into_iter().skip(st.rerung).collect());
     let sdp = st.answer_body();
+    let framing = st.media.framing();
     for ring in &lost {
         let txn = st
             .held_silent
@@ -49,7 +51,7 @@ pub(super) async fn fire(st: &mut ActorState<'_>) -> Result<(), StepError> {
             r = r.with_to_tag(&ring.to_tag);
         }
         if ring.sdp {
-            r = r.with_sdp(sdp);
+            r = r.framed(framing, sdp);
         }
         r.try_send().await?;
     }

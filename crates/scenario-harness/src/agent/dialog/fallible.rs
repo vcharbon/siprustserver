@@ -40,7 +40,7 @@ impl Dialog {
         self.try_ack_carrying(invite_cseq, body, &[]).await
     }
 
-    pub(super) async fn try_ack_carrying(
+    pub(crate) async fn try_ack_carrying(
         &mut self,
         invite_cseq: u32,
         body: Option<(&str, Vec<u8>)>,

@@ -15,6 +15,13 @@ use super::super::{routing, CallGate, CallRouting, MuxCore, TargetedDrop};
 use super::MuxNetwork;
 
 impl MuxNetwork {
+    /// Duplicate and hold back the datagrams this network's endpoints send
+    /// ([`NetFaults`](crate::mux::NetFaults)).
+    pub fn with_faults(mut self, faults: crate::mux::NetFaults) -> Self {
+        self.faults = faults;
+        self
+    }
+
     /// Measure the SIP round trips of every endpoint bound on this network
     /// into `sink`.
     pub fn with_rtt_sink(mut self, sink: RttSink) -> Self {
@@ -111,6 +118,7 @@ impl MuxCore {
             retransmit,
             drop_seed: AtomicU64::new(seed | 1),
             drop_nth,
+            faults: Default::default(),
             rtt_sink: None,
             tally: None,
             wire_tap: None,

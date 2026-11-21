@@ -144,17 +144,21 @@ pub struct Automatics {
 pub struct MediaState {
     offer: Option<&'static str>,
     answer: Option<&'static str>,
+    /// How each description this endpoint sends is framed.
+    framing: super::framing::Framing,
+    /// What an originated INVITE with no offer carries instead.
+    no_offer: Option<super::framing::NoOffer>,
 }
 
 impl MediaState {
     /// A caller's media (carries the offer on the INVITE).
     pub fn offer(sdp: &'static str) -> Self {
-        Self { offer: Some(sdp), answer: None }
+        Self { offer: Some(sdp), ..Self::default() }
     }
 
     /// A callee's media (carries the answer on the 2xx).
     pub fn answer(sdp: &'static str) -> Self {
-        Self { offer: None, answer: Some(sdp) }
+        Self { answer: Some(sdp), ..Self::default() }
     }
 
     /// Both sides: `offer` rides an originated INVITE, `answer` every answer we
@@ -162,7 +166,7 @@ impl MediaState {
     /// opened — same `o=` identity, the next `sess-version` (RFC 3264 §8); a
     /// caller answering on its own dialog uses [`Self::offer`] alone.
     pub fn full(offer: &'static str, answer: &'static str) -> Self {
-        Self { offer: Some(offer), answer: Some(answer) }
+        Self { offer: Some(offer), answer: Some(answer), ..Self::default() }
     }
 
     /// No media (a signalling-only endpoint).
@@ -180,6 +184,34 @@ impl MediaState {
     /// The SDP to offer on an originated INVITE.
     pub(super) fn offer_sdp(&self) -> Option<&'static str> {
         self.offer
+    }
+
+    /// The same endpoint making no offer on the INVITEs it originates (RFC
+    /// 3261 §13.2.1): its description answers the offer the callee then
+    /// makes, and opens its own renegotiations. `body` is what the INVITE
+    /// carries instead, a body that is no description.
+    pub fn delayed(self, body: Option<super::framing::NoOffer>) -> Self {
+        Self { offer: None, answer: self.answer.or(self.offer), no_offer: body, ..self }
+    }
+
+    /// The same endpoint framing every description it sends under `framing`.
+    pub fn framed(self, framing: super::framing::Framing) -> Self {
+        Self { framing, ..self }
+    }
+
+    /// Whether this endpoint's originated INVITEs carry an offer.
+    pub fn makes_offer(&self) -> bool {
+        self.offer.is_some()
+    }
+
+    /// How this endpoint frames a description.
+    pub fn framing(&self) -> super::framing::Framing {
+        self.framing
+    }
+
+    /// The body an originated INVITE with no offer carries.
+    pub(super) fn no_offer(&self) -> Option<super::framing::NoOffer> {
+        self.no_offer
     }
 
     /// The SDP this endpoint offers on a renegotiation: its own session
@@ -295,6 +327,9 @@ pub struct ActorSpec {
     /// its originated INVITE transactions, or unscoped (every ACK-to-2xx).
     /// Empty = every automatic fires immediately.
     pub delayed: Vec<DelayedAutomatic>,
+    /// How the endpoint answers the renegotiations it takes: at once by
+    /// default, or held or refused ([`super::answers`]).
+    pub answers: super::answers::Answers,
     /// The rule by which an inbound INITIAL INVITE arriving on this actor's
     /// endpoint is THIS actor's, when several actors share the endpoint (see
     /// [`crate::actor::shared_endpoint`]). `None` = the actor claims no inbound

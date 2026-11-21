@@ -204,9 +204,9 @@ async fn loadgen_fake_net_recovers_targeted_dropped_bye() {
 
     let mut c = cfg(b2bua.addr, 2.0, 2, 4, 0x2D07);
     c.default_tuning = CallTuning {
-        drop_rate: 0.0,
         retransmit: true,
         drop_nth: Some(TargetedDrop::request("BYE", 1, DropDir::Outbound)),
+        ..Default::default()
     };
     let driver = Driver::new(c, vec![mix("refer", 1.0)], reporter.clone(), transport);
     driver.run().await;
@@ -364,9 +364,9 @@ async fn loadgen_fake_net_crossing_bye_recovers_dropped_byes() {
 
     let mut c = cfg(b2bua.addr, 2.0, 2, 4, 0xB7EE);
     c.default_tuning = CallTuning {
-        drop_rate: 0.0,
         retransmit: true,
         drop_nth: Some(TargetedDrop::request("BYE", 1, DropDir::Outbound)),
+        ..Default::default()
     };
     let driver = Driver::new(c, vec![mix("crossing_bye", 1.0)], reporter.clone(), transport);
     driver.run().await;
@@ -750,9 +750,9 @@ async fn loadgen_fake_net_recovers_dropped_early_update() {
 
     let mut c = cfg(b2bua.addr, 2.0, 2, 4, 0x0DDE);
     c.default_tuning = CallTuning {
-        drop_rate: 0.0,
         retransmit: true,
         drop_nth: Some(TargetedDrop::request("UPDATE", 1, DropDir::Outbound)),
+        ..Default::default()
     };
     let driver = Driver::new(c, vec![mix("prack_update_early", 1.0)], reporter.clone(), transport);
     driver.run().await;
@@ -842,9 +842,9 @@ async fn loadgen_fake_net_recovers_dropped_prack() {
 
     let mut c = cfg(b2bua.addr, 2.0, 2, 4, 0x9ACA);
     c.default_tuning = CallTuning {
-        drop_rate: 0.0,
         retransmit: true,
         drop_nth: Some(TargetedDrop::request("PRACK", 1, DropDir::Outbound)),
+        ..Default::default()
     };
     let driver = Driver::new(c, vec![mix("forked_reliable", 1.0)], reporter.clone(), transport);
     driver.run().await;

@@ -7,7 +7,7 @@
 
 use b2bua_harness::{settle_until, B2buaScene, B2buaSut};
 use call::{Call, CallBodyCodec, DialogState, EndingBy, MsgpackCodec};
-use callshapes::generator;
+use callshapes::generator::{self, Transferred};
 use callshapes::shapes::default_binder;
 use scenario_harness::actor::ScenarioVerdict;
 use scenario_harness::realcall::{run_actor_collecting, CallEnv};
@@ -116,10 +116,11 @@ async fn forked_call() -> Vec<Seed> {
 }
 
 /// The terminated call of each of the first [`SHAPES`] cells of the fixed
-/// sample.
+/// sample that transfer nothing: the scene has no transfer target.
 async fn call_shapes() -> Vec<Seed> {
     let mut seeds = Vec::new();
-    for cell in generator::sample().into_iter().take(SHAPES) {
+    let untransferred = generator::sample().into_iter().filter(|c| c.transfer == Transferred::None);
+    for cell in untransferred.take(SHAPES) {
         let scene = B2buaScene::with_b2bua(&format!("snapshot-lane cell {cell}"), |bob_port| {
             B2buaSut::route_all_to("127.0.0.1", bob_port).keep_terminated_calls()
         })

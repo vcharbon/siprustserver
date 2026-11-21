@@ -43,6 +43,7 @@ async fn absent_consumes_the_bodyless_reinvite() {
                 feed: CtxFeed::default(),
                 cseq: None,
                 delayed: vec![],
+                answers: Default::default(),
                 claim: None,
             },
             scripted_spec(

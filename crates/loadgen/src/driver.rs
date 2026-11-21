@@ -277,11 +277,6 @@ pub(crate) async fn run_one(
                 return record_unrun(&reporter, &outcomes, id, CallOutcome::Rejected(reason))
             }
         };
-        // Simulated packet loss + auto-retransmit both ride the mux transport
-        // (the mux dispatcher is the background pump that reacts to inbound
-        // datagrams). The loss RNG is seeded off the call seed so a run is
-        // reproducible; 0 rate is a no-op, and retransmit off leaves the
-        // transport untouched.
         let mux_net = transport
             .core
             .network_tuned(
@@ -291,6 +286,7 @@ pub(crate) async fn run_one(
                 next_seed(seed_base),
                 tuning.drop_nth,
             )
+            .with_faults(tuning.faults)
             .with_rtt_sink(rtts.sink())
             .with_tally(tally.clone())
             .with_loss_tap(loss::loss_tap(&ctx, wire.as_ref()));

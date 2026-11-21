@@ -8,16 +8,21 @@
 //! tables, the SUT's own checks) turn a wrong state it reaches into a failure
 //! without a rule written for that cell.
 
-use std::collections::HashSet;
 use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
 
 use crate::binder::RouteBinder;
 use crate::plan::{
-    ByeFeed, CancelAt, DwellKnob, EarlyMethod, Establishment, ForkWinner, Forks, Party, Script,
-    ShapePlan, Stage, Teardown,
+    ByeFeed, CancelAt, DwellKnob, EarlyMethod, Establishment, ForkWinner, Forks, Hangup, Party,
+    Script, ShapePlan, Stage, Teardown, Transfer,
 };
+
+mod sample;
+pub use sample::sample;
+
+/// The refer key the reference decision engine authorizes a transfer under.
+pub const REFER_KEY: &str = "refer-allow-c";
 
 /// The fork tags a forked cell rings under.
 const FORK_TAGS: &[&str] = &["fk1", "fk2"];
@@ -57,6 +62,25 @@ pub enum AfterAnswer {
     Update,
     Options,
     Bye,
+    /// Both parties re-INVITE at once (RFC 3261 §14.1).
+    GlareReinvite,
+    /// Both parties UPDATE at once (RFC 3311 §5.2).
+    GlareUpdate,
+    /// The caller re-INVITEs while the callee UPDATEs.
+    GlareMixed,
+}
+
+/// The blind transfer (RFC 3515) the callee makes once the call is answered
+/// and its request after the answer is done.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Transferred {
+    None,
+    /// To charlie, who answers; the caller then talks to charlie.
+    Blind,
+    /// To charlie, who declines.
+    Declined,
+    /// To charlie, the transferor hanging up its own leg at a phase.
+    Hangup(Hangup),
 }
 
 /// The early dialog that answers.
@@ -99,12 +123,20 @@ pub struct Cell {
     pub reliable: bool,
     pub ending: Ending,
     pub talk: Talk,
+    pub transfer: Transferred,
 }
 
 const SENDERS: [Sender; 2] = [Sender::Caller, Sender::Callee];
 const EARLIES: [Early; 3] = [Early::None, Early::Update, Early::Info];
-const AFTERS: [AfterAnswer; 4] =
-    [AfterAnswer::Reinvite, AfterAnswer::Update, AfterAnswer::Options, AfterAnswer::Bye];
+const AFTERS: [AfterAnswer; 7] = [
+    AfterAnswer::Reinvite,
+    AfterAnswer::Update,
+    AfterAnswer::Options,
+    AfterAnswer::Bye,
+    AfterAnswer::GlareReinvite,
+    AfterAnswer::GlareUpdate,
+    AfterAnswer::GlareMixed,
+];
 const WINNERS: [Winner; 4] = [Winner::Sole, Winner::First, Winner::Later, Winner::Unrung];
 const RELIABLES: [bool; 2] = [false, true];
 const ENDINGS: [Ending; 8] = [
@@ -118,6 +150,25 @@ const ENDINGS: [Ending; 8] = [
     Ending::Cancel(CancelAt::AfterFinal),
 ];
 const TALKS: [Talk; 2] = [Talk::Short, Talk::PastKeepalive];
+const TRANSFERS: [Transferred; 7] = [
+    Transferred::None,
+    Transferred::Blind,
+    Transferred::Declined,
+    Transferred::Hangup(Hangup::BeforeTargetAnswer),
+    Transferred::Hangup(Hangup::DuringTargetRealign),
+    Transferred::Hangup(Hangup::DuringCallerRealign),
+    Transferred::Hangup(Hangup::AtMerge),
+];
+
+impl AfterAnswer {
+    /// Whether both parties send the request after the answer.
+    pub fn both_send(self) -> bool {
+        matches!(
+            self,
+            AfterAnswer::GlareReinvite | AfterAnswer::GlareUpdate | AfterAnswer::GlareMixed
+        )
+    }
+}
 
 /// The cell where the callee sends early UPDATEs, then a re-INVITE after the
 /// answer: its requests after the answer must continue the CSeq sequence its
@@ -130,6 +181,7 @@ pub const CALLEE_EARLY_UPDATES_THEN_REINVITE: Cell = Cell {
     reliable: true,
     ending: Ending::CallerBye,
     talk: Talk::Short,
+    transfer: Transferred::None,
 };
 
 /// Every cell of the cross product, in a fixed order, the RFC-illegal ones
@@ -143,15 +195,18 @@ pub fn cells() -> Vec<Cell> {
                     for reliable in RELIABLES {
                         for ending in ENDINGS {
                             for talk in TALKS {
-                                all.push(Cell {
-                                    sender,
-                                    early,
-                                    after,
-                                    winner,
-                                    reliable,
-                                    ending,
-                                    talk,
-                                });
+                                for transfer in TRANSFERS {
+                                    all.push(Cell {
+                                        sender,
+                                        early,
+                                        after,
+                                        winner,
+                                        reliable,
+                                        ending,
+                                        talk,
+                                        transfer,
+                                    });
+                                }
                             }
                         }
                     }
@@ -171,6 +226,14 @@ pub fn compatible(cell: &Cell) -> Result<(), &'static str> {
     if cancelled && cell.talk != Talk::Short {
         return Err("a cancelled call has no talk phase to hold");
     }
+    if cancelled && cell.transfer != Transferred::None {
+        return Err("a cancelled call is never answered, so nothing is transferred");
+    }
+    if cell.transfer == Transferred::Hangup(Hangup::BeforeTargetAnswer)
+        && cell.ending != Ending::CallerBye
+    {
+        return Err("the transferor's early BYE ends the call: no callee is left to hang up");
+    }
     if matches!(
         cell.ending,
         Ending::Cancel(CancelAt::BeforeProvisional | CancelAt::CrossingProvisional)
@@ -185,6 +248,10 @@ pub fn compatible(cell: &Cell) -> Result<(), &'static str> {
     if cell.early != Early::None && cell.sender == Sender::Callee && !cell.reliable {
         return Err("RFC 3262: the callee learns the caller holds its early dialog \
                     only from the PRACK");
+    }
+    if cell.early == Early::None && cell.after.both_send() && cell.sender == Sender::Callee {
+        return Err("both parties send the request after the answer, so the sender is moot \
+                    (the caller's cell stands for it)");
     }
     if cell.early == Early::None && cell.after == AfterAnswer::Bye && cell.sender == Sender::Callee
     {
@@ -216,17 +283,44 @@ pub fn plan(cell: &Cell, binder: Arc<dyn RouteBinder>) -> ShapePlan {
             stages.push(Stage::Early { by, method: EarlyMethod::Info, count: EARLY_COUNT })
         }
     }
+    let glare = |caller, callee| Stage::Glare { caller, callee };
+    let (reinvite, update) = (Script::Reinvite { n: 1 }, Script::UpdatePostConnect);
     let script = match cell.after {
-        AfterAnswer::Reinvite => Some(Script::Reinvite { n: 1 }),
-        AfterAnswer::Update => Some(Script::UpdatePostConnect),
+        AfterAnswer::Reinvite => Some(reinvite),
+        AfterAnswer::Update => Some(update),
         AfterAnswer::Options => Some(Script::Ping),
         AfterAnswer::Bye => None,
+        AfterAnswer::GlareReinvite => {
+            stages.push(glare(reinvite, reinvite));
+            None
+        }
+        AfterAnswer::GlareUpdate => {
+            stages.push(glare(update, update));
+            None
+        }
+        AfterAnswer::GlareMixed => {
+            stages.push(glare(reinvite, update));
+            None
+        }
     };
     if let Some(script) = script {
         stages.push(match by {
             Party::Caller => Stage::Script(script),
             Party::Callee => Stage::Callee(script),
         });
+    }
+    let refer_key = REFER_KEY.to_string();
+    match cell.transfer {
+        Transferred::None => {}
+        Transferred::Blind => {
+            stages.push(Stage::Transfer(Transfer::Blind { refer_key, hangup: None }))
+        }
+        Transferred::Declined => {
+            stages.push(Stage::Transfer(Transfer::BlindDeclined { refer_key, code: 603 }))
+        }
+        Transferred::Hangup(h) => {
+            stages.push(Stage::Transfer(Transfer::Blind { refer_key, hangup: Some(h) }))
+        }
     }
     let talk = DwellKnob::Fixed(match cell.talk {
         Talk::Short => SHORT_TALK,
@@ -248,64 +342,9 @@ pub fn plan(cell: &Cell, binder: Arc<dyn RouteBinder>) -> ShapePlan {
     }
 }
 
-/// The fixed sample a default lane runs: the [`CALLEE_EARLY_UPDATES_THEN_REINVITE`]
-/// cell first, then compatible cells picked greedily (the earliest in
-/// [`cells`] order among the best) until every triple of dimension values
-/// some compatible cell holds is held by a picked cell, so every pair and
-/// every value appears too.
-pub fn sample() -> Vec<Cell> {
-    let legal: Vec<Cell> = cells().into_iter().filter(|c| compatible(c).is_ok()).collect();
-    let mut uncovered: HashSet<Triple> = legal.iter().flat_map(triples).collect();
-    let mut picked = Vec::new();
-    let mut pick = |cell: Cell, uncovered: &mut HashSet<Triple>| {
-        for t in triples(&cell) {
-            uncovered.remove(&t);
-        }
-        picked.push(cell);
-    };
-    pick(CALLEE_EARLY_UPDATES_THEN_REINVITE, &mut uncovered);
-    while !uncovered.is_empty() {
-        let gain = |c: &Cell| triples(c).filter(|t| uncovered.contains(t)).count();
-        let (_, best) = legal
-            .iter()
-            .enumerate()
-            .map(|(i, c)| ((gain(c), std::cmp::Reverse(i)), *c))
-            .max_by_key(|(key, _)| *key)
-            .expect("a compatible cell holds each uncovered triple");
-        pick(best, &mut uncovered);
-    }
-    picked
-}
-
-/// Three `(dimension, value index)` coordinates of one cell, by dimension.
-type Triple = [(usize, usize); 3];
-
-/// Each dimension's value as `(dimension, value index)`.
-fn coordinates(c: &Cell) -> [(usize, usize); 7] {
-    let at = |i: Option<usize>| i.expect("every value is listed");
-    [
-        (0, at(SENDERS.iter().position(|v| *v == c.sender))),
-        (1, at(EARLIES.iter().position(|v| *v == c.early))),
-        (2, at(AFTERS.iter().position(|v| *v == c.after))),
-        (3, at(WINNERS.iter().position(|v| *v == c.winner))),
-        (4, at(RELIABLES.iter().position(|v| *v == c.reliable))),
-        (5, at(ENDINGS.iter().position(|v| *v == c.ending))),
-        (6, at(TALKS.iter().position(|v| *v == c.talk))),
-    ]
-}
-
-/// The triples of dimension values `c` holds, dimensions ascending.
-fn triples(c: &Cell) -> impl Iterator<Item = Triple> {
-    let co = coordinates(c);
-    let n = co.len();
-    (0..n).flat_map(move |i| {
-        ((i + 1)..n).flat_map(move |j| ((j + 1)..n).map(move |k| [co[i], co[j], co[k]]))
-    })
-}
-
 impl fmt::Display for Cell {
     /// Every dimension's value, in one line: `by=… early=… then=… win=…
-    /// 1xx=… end=… talk=…`.
+    /// 1xx=… end=… talk=… xfer=…`.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let sender = match self.sender {
             Sender::Caller => "caller",
@@ -321,6 +360,9 @@ impl fmt::Display for Cell {
             AfterAnswer::Update => "update",
             AfterAnswer::Options => "options",
             AfterAnswer::Bye => "bye",
+            AfterAnswer::GlareReinvite => "glare-reinvite",
+            AfterAnswer::GlareUpdate => "glare-update",
+            AfterAnswer::GlareMixed => "glare-mixed",
         };
         let winner = match self.winner {
             Winner::Sole => "sole",
@@ -343,16 +385,28 @@ impl fmt::Display for Cell {
             Talk::Short => "short",
             Talk::PastKeepalive => "past-keepalive",
         };
+        let transfer = match self.transfer {
+            Transferred::None => "none",
+            Transferred::Blind => "blind",
+            Transferred::Declined => "declined",
+            Transferred::Hangup(Hangup::BeforeTargetAnswer) => "bye-before-target-answer",
+            Transferred::Hangup(Hangup::DuringTargetRealign) => "bye-in-target-realign",
+            Transferred::Hangup(Hangup::DuringCallerRealign) => "bye-in-caller-realign",
+            Transferred::Hangup(Hangup::AtMerge) => "bye-at-merge",
+        };
         write!(
             f,
             "by={sender} early={early} then={after} win={winner} 1xx={reliable} \
-             end={ending} talk={talk}"
+             end={ending} talk={talk} xfer={transfer}"
         )
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
+    use super::sample::coordinates;
     use super::*;
     use crate::shapes::default_binder;
 
@@ -360,7 +414,7 @@ mod tests {
     #[test]
     fn every_compatible_cell_is_a_valid_plan() {
         let all = cells();
-        assert_eq!(all.len(), 2 * 3 * 4 * 4 * 2 * 8 * 2);
+        assert_eq!(all.len(), 2 * 3 * AFTERS.len() * 4 * 2 * 8 * 2 * TRANSFERS.len());
         for cell in all.iter().filter(|c| compatible(c).is_ok()) {
             plan(cell, default_binder()).validate().unwrap_or_else(|e| panic!("{cell}: {e:?}"));
         }

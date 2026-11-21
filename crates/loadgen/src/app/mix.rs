@@ -157,6 +157,7 @@ pub(super) fn resolve_profile_mix(
         drop_rate: m.drop_rate.unwrap_or(base.drop_rate),
         retransmit: m.retransmit.unwrap_or(base.retransmit),
         drop_nth: None,
+        faults: base.faults,
     };
     (entry, t)
 }

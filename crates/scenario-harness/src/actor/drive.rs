@@ -210,6 +210,8 @@ pub(super) async fn drive_goal(st: &mut ActorState<'_>, step: GoalStep) -> Resul
             // obligation — the terminating dialog subsumes them, and the fresh
             // BYE obligation below is still held to the 200.
             super::held_acks::flush_held_acks(st).await?;
+            super::answers::fire(st, None).await?;
+            super::held_pracks::fire(st, None).await?;
             discharge_on_teardown(st, now);
             let (key, dialog_clone) = {
                 let dialog =
@@ -235,7 +237,9 @@ pub(super) async fn drive_goal(st: &mut ActorState<'_>, step: GoalStep) -> Resul
                 return Ok(());
             }
             let now = Instant::now();
-            super::held_acks::flush_held_acks(st).await?; // see GoalStep::Bye
+            super::held_acks::flush_held_acks(st).await?;
+            super::answers::fire(st, None).await?; // see GoalStep::Bye
+            super::held_pracks::fire(st, None).await?;
             discharge_on_teardown(st, now);
             let (key, dialog_clone) = {
                 let dialog = st.dialogs.confirmed.as_mut().expect("checked Some above");
@@ -248,7 +252,9 @@ pub(super) async fn drive_goal(st: &mut ActorState<'_>, step: GoalStep) -> Resul
         }
         GoalStep::ByeWith { headers } => {
             let now = Instant::now();
-            super::held_acks::flush_held_acks(st).await?; // see GoalStep::Bye
+            super::held_acks::flush_held_acks(st).await?;
+            super::answers::fire(st, None).await?; // see GoalStep::Bye
+            super::held_pracks::fire(st, None).await?;
             discharge_on_teardown(st, now); // see GoalStep::Bye — subsume pending in-dialog acks
             let (key, dialog_clone) = {
                 let dialog =

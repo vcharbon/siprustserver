@@ -43,7 +43,7 @@ fn uac_route_set(resp: &SipResponse) -> Vec<String> {
 /// The `RAck` acknowledging a reliable provisional (RFC 3262 §7.2):
 /// `<RSeq> <CSeq-num> <CSeq-method>`, all read off the 1xx itself. `None` when
 /// the response carries no parseable `RSeq` (it is not a reliable provisional).
-fn rack_for(reliable_1xx: &SipResponse) -> Option<String> {
+pub(crate) fn rack_for(reliable_1xx: &SipResponse) -> Option<String> {
     let rseq = reliable_1xx.header::<header::RSeq>()?.ok()?;
     let cseq = reliable_1xx.cseq();
     Some(header::RAck::new(rseq.value(), cseq.seq(), cseq.method().clone()).to_wire())
@@ -95,6 +95,12 @@ pub struct ClientInvite {
 }
 
 impl ClientInvite {
+    /// Whether the INVITE carried a session description: an offer (RFC 3261
+    /// §13.2.1).
+    pub fn offered(&self) -> bool {
+        self.original_invite.sdp().is_some()
+    }
+
     /// The Call-ID of the dialog this INVITE creates — the identity a
     /// per-endpoint demux binds the originating actor to.
     pub fn call_id(&self) -> String {
@@ -431,6 +437,17 @@ impl ClientInvite {
         &mut self,
         reliable_1xx: &SipResponse,
     ) -> Result<(InDialogTxn, SipRequest), StepError> {
+        self.try_prack_carrying(reliable_1xx, None).await
+    }
+
+    /// [`try_prack_with_request`](Self::try_prack_with_request) carrying
+    /// `body`, `(Content-Type, bytes)`: the answer to an offer the reliable
+    /// provisional made (RFC 3262 §5).
+    pub async fn try_prack_carrying(
+        &mut self,
+        reliable_1xx: &SipResponse,
+        body: Option<(String, Vec<u8>)>,
+    ) -> Result<(InDialogTxn, SipRequest), StepError> {
         let rack = rack_for(reliable_1xx).ok_or_else(|| StepError::UnexpectedKind {
             who: self.agent.name.clone(),
             detail: format!(
@@ -443,6 +460,9 @@ impl ClientInvite {
         let mut req = self.send_request(InDialogMethod::Prack).with_rack(&rack);
         if let Some(tag) = &fork_tag {
             req = req.with_to_tag(tag);
+        }
+        if let Some((content_type, bytes)) = body {
+            req = req.with_body(&content_type, bytes);
         }
         req.try_send_with_request().await
     }

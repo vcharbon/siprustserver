@@ -5,7 +5,9 @@
 //!   drop for reproducing a specific lost-message scenario. Pure test
 //!   machinery, so it lives here in the loadgen, NOT in the network layer.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
+use std::time::Duration;
 
 use sip_message::sniff::Identity;
 use sip_net_testkit::RandomLoss;
@@ -99,6 +101,53 @@ struct TargetState {
     fired: bool,
 }
 
+/// What the simulated network does to a datagram past losing it (RFC 3261
+/// §18: UDP may duplicate and reorder): each sent datagram is, with
+/// `dup_rate`, sent again within `late_max`, and each sent response or ACK,
+/// with `late_rate`, held back up to `late_max` so later datagrams overtake
+/// it. With `echo_rate`, an endpoint is an echo peer, which sends its message
+/// again on every reaction to it. Off by default.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct NetFaults {
+    pub dup_rate: f64,
+    pub late_rate: f64,
+    pub late_max: Duration,
+    pub echo_rate: f64,
+}
+
+/// The per-endpoint draws of [`NetFaults`], from their own generator.
+struct FaultDraws {
+    faults: NetFaults,
+    dup: RandomLoss,
+    late: RandomLoss,
+    echo: RandomLoss,
+    span: AtomicU64,
+}
+
+impl FaultDraws {
+    fn new(faults: NetFaults, seed: u64) -> Self {
+        let salt = |k: u64| (seed ^ k.wrapping_mul(0x9E37_79B9_7F4A_7C15)) | 1;
+        Self {
+            faults,
+            dup: RandomLoss::new(faults.dup_rate, salt(1)),
+            late: RandomLoss::new(faults.late_rate, salt(2)),
+            echo: RandomLoss::new(faults.echo_rate, salt(4)),
+            span: AtomicU64::new(salt(3)),
+        }
+    }
+
+    /// A delay in `[1 ms, late_max]`.
+    fn delay(&self) -> Duration {
+        let mut x = self.span.load(Ordering::Relaxed);
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        self.span.store(x, Ordering::Relaxed);
+        let max = u64::try_from(self.faults.late_max.as_millis()).unwrap_or(u64::MAX).max(1);
+        Duration::from_millis(1 + x % max)
+    }
+}
+
 /// One call endpoint's loss verdicts: the network-layer random model (applied
 /// on `send_to` and on inbound route, each datagram independent with
 /// probability `rate` — default 1/1000 when enabled, so P(3 consecutive
@@ -106,6 +155,7 @@ struct TargetState {
 pub(super) struct DropModel {
     random: RandomLoss,
     targeted: Option<(TargetedDrop, Mutex<TargetState>)>,
+    faults: Option<FaultDraws>,
 }
 
 impl DropModel {
@@ -113,7 +163,37 @@ impl DropModel {
         Self {
             random: RandomLoss::new(rate, seed),
             targeted: targeted.map(|t| (t, Mutex::new(TargetState::default()))),
+            faults: None,
         }
+    }
+
+    /// The same model, sent datagrams also duplicated and held back as
+    /// `faults` states, drawn from `seed`.
+    pub(super) fn with_faults(mut self, faults: NetFaults, seed: u64) -> Self {
+        if faults != NetFaults::default() {
+            self.faults = Some(FaultDraws::new(faults, seed));
+        }
+        self
+    }
+
+    /// When a second copy of the datagram being sent goes out, if one does.
+    pub(super) fn copy_after(&self) -> Option<Duration> {
+        let f = self.faults.as_ref()?;
+        f.dup.drops().then(|| f.delay())
+    }
+
+    /// Whether this endpoint is an echo peer, drawn once at its bind, and the
+    /// pace of its echoes.
+    pub(super) fn echo_pace(&self) -> Option<Duration> {
+        let f = self.faults.as_ref()?;
+        let paces = super::retransmit::ECHO_PACES;
+        f.echo.drops().then(|| paces[usize::from(f.delay().as_millis() % 2 == 1)])
+    }
+
+    /// How long the datagram being sent is held back, if it is.
+    pub(super) fn held_for(&self) -> Option<Duration> {
+        let f = self.faults.as_ref()?;
+        f.late.drops().then(|| f.delay())
     }
 
     /// Whether THIS datagram is dropped by the random model. `false` (no RNG

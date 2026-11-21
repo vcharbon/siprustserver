@@ -42,7 +42,7 @@ crates/b2bua/src/router/callouts.rs 605
 crates/b2bua/src/store/mod.rs 735
 crates/call-limiter/src/store.rs 578
 crates/call-limiter/tests/it/keyed_by_call.rs 877
-crates/callshapes/src/plan.rs 1123
+crates/callshapes/src/plan.rs 1074
 crates/call/tests/it/model_helpers.rs 891
 crates/failover-harness/src/harness.rs 1792
 crates/failover-harness/src/runner.rs 615
@@ -68,8 +68,8 @@ crates/rfc-rules/src/rules/cseq.rs 561
 crates/rfc-rules/src/rules/cseq/tests.rs 815
 crates/rfc-rules/src/rules/wellformed.rs 656
 crates/rfc-rules/src/verdict/evidence.rs 1659
-crates/scenario-harness/src/actor/runner.rs 547
-crates/scenario-harness/src/actor/scenarios.rs 895
+crates/scenario-harness/src/actor/runner.rs 542
+crates/scenario-harness/src/actor/scenarios.rs 893
 crates/scenario-harness/src/actor/script.rs 530
 crates/scenario-harness/src/actor/state.rs 529
 crates/scenario-harness/src/agent/dialog.rs 600

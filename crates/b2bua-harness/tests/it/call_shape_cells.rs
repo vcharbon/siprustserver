@@ -10,13 +10,28 @@
 
 use std::panic::AssertUnwindSafe;
 
-use b2bua_harness::{model_gate, B2buaScene};
+use b2bua_harness::{model_gate, B2buaScene, B2buaSut};
 use callshapes::generator::{self, Cell, Ending, Winner};
 use callshapes::shapes::default_binder;
 use callshapes::CancelAt;
 use futures::FutureExt;
 use scenario_harness::actor::ScenarioVerdict;
 use scenario_harness::realcall::{run_actor_collecting, CallEnv};
+
+/// The port the transfer target, charlie, answers on.
+const CHARLIE_PORT: u16 = 5090;
+
+/// A scene whose B2BUA routes every call to bob and authorizes a transfer
+/// (`generator::REFER_KEY`), with charlie bound as the transfer target.
+pub(crate) async fn refer_scene(name: &str) -> (B2buaScene, scenario_harness::Agent) {
+    let scene = B2buaScene::with_b2bua(name, |bob_port| {
+        B2buaSut::route_all_with_refer("127.0.0.1", bob_port)
+    })
+    .await;
+    let charlie =
+        scene.h.agent("charlie", &format!("127.0.0.1:{CHARLIE_PORT}")).await.transfer_target();
+    (scene, charlie)
+}
 
 /// Which cells a pending SUT defect fails.
 type CellsOf = fn(&Cell) -> bool;
@@ -30,11 +45,11 @@ const PENDING_SUT_DEFECTS: &[(CellsOf, &str)] = &[];
 /// model invariant a SUT turn broke, when one did, before what the call met.
 async fn run_cell(cell: Cell) {
     let since = model_gate::Mark::now();
-    let scene = B2buaScene::new(&format!("cell {cell}")).await;
+    let (scene, charlie) = refer_scene(&format!("cell {cell}")).await;
     let env = CallEnv::for_functional(
         &scene.alice,
         &scene.bob,
-        None,
+        Some(&charlie),
         scene.b2bua.addr,
         "X-Loadgen-Id",
         "cell-tok",
@@ -146,3 +161,15 @@ slow_slice!(cancel_after_1xx, Ending::Cancel(CancelAt::AfterProvisional), None);
 slow_slice!(cancel_then_early_bye, Ending::Cancel(CancelAt::AfterProvisionalThenEarlyBye), None);
 slow_slice!(cancel_crossing_final, Ending::Cancel(CancelAt::CrossingFinal), None);
 slow_slice!(cancel_after_final, Ending::Cancel(CancelAt::AfterFinal), None);
+
+/// The one cell `SHAPE_CELL` names by its label (`by=… … xfer=…`), when set:
+/// a failing cell of the lanes above, run alone.
+#[tokio::test(start_paused = true)]
+async fn the_cell_named_by_shape_cell() {
+    let Ok(label) = std::env::var("SHAPE_CELL") else { return };
+    let cell = generator::cells()
+        .into_iter()
+        .find(|c| c.to_string() == label)
+        .unwrap_or_else(|| panic!("no cell is labelled {label:?}"));
+    run_cell(cell).await;
+}

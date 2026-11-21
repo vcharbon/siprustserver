@@ -26,6 +26,7 @@ async fn bob_bye_answer_lost(base: u16, retransmit: bool) {
         drop_rate: 0.0,
         retransmit,
         drop_nth: Some(TargetedDrop::final_response("BYE", 1, DropDir::Outbound).on_leg("bob")),
+        faults: Default::default(),
     };
     Driver::new(c, vec![mix("basic_call", 1.0)], reporter.clone(), transport).run().await;
     settle_until(|| core.registry_size() == 0).await;

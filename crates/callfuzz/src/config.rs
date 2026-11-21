@@ -9,8 +9,23 @@ pub struct FuzzConfig {
     pub call_seed: Option<u64>,
     /// Percent of calls carrying hostile headers and odd INFO bodies.
     pub payload_pct: u64,
+    /// Percent of odd INFOs requiring an extension no party implements, of
+    /// their UAS (`Require`) or of a proxy (`Proxy-Require`).
+    pub unknown_require_pct: u64,
     /// Percent of calls whose goal dwells are jittered.
     pub jitter_pct: u64,
+    /// Percent of calls whose offer mode and body framings are drawn.
+    pub offer_pct: u64,
+    /// Percent of calls whose caller holds an ACK to a 2xx, and, drawn apart,
+    /// whose parties hold or refuse the renegotiations they take.
+    pub hold_pct: u64,
+    /// A party drawn to answer renegotiations late may refuse them too.
+    pub refuse: bool,
+    /// The longest drawn PRACK hold. The default, 3000 ms, is past the
+    /// provisional's third re-send at T1 = 500 ms and inside the 64·T1 its
+    /// sender re-sends it for (RFC 3262 §3); a call whose answer timing its
+    /// expected ending derives from states a shorter one.
+    pub prack_hold_max_ms: u64,
     /// Bytes the fuzzer may add to one INVITE's headers, so the message stays
     /// inside the receiver's size bound with room for what a proxy adds.
     pub header_budget: usize,
@@ -28,7 +43,8 @@ pub struct FuzzConfig {
 }
 
 impl Default for FuzzConfig {
-    /// Run seed 1, payloads on half the calls, jitter on 70 %, a 6000-byte
+    /// Run seed 1, payloads on half the calls, jitter on 70 %, offer modes and
+    /// framings on half, a held ACK on a fifth, a 6000-byte
     /// header budget, legal messages only, no trains unless asked (30 at most),
     /// every party free to send an odd INFO.
     fn default() -> Self {
@@ -37,6 +53,11 @@ impl Default for FuzzConfig {
             call_seed: None,
             payload_pct: 50,
             jitter_pct: 70,
+            unknown_require_pct: 25,
+            offer_pct: 50,
+            hold_pct: 20,
+            refuse: true,
+            prack_hold_max_ms: 3000,
             header_budget: 6000,
             illegal: false,
             train: false,

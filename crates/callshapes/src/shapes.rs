@@ -299,7 +299,10 @@ pub fn refer(binder: Arc<dyn RouteBinder>, refer_key: impl Into<String>) -> Shap
         id: "refer",
         binder,
         establish: Establishment::Transparent,
-        stages: vec![Stage::Transfer(Transfer::Blind { refer_key: refer_key.into() })],
+        stages: vec![Stage::Transfer(Transfer::Blind {
+            refer_key: refer_key.into(),
+            hangup: None,
+        })],
         teardown: Teardown::CallerBye { after: DwellKnob::None, feed: ByeFeed::NoFeed },
         ringing_gate: false,
         stamp_connected: false,

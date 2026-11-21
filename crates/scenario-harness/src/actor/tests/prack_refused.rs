@@ -49,6 +49,7 @@ async fn a_prack_refused_481_leaves_no_hole_in_the_sequence() {
             feed: CtxFeed::default(),
             cseq: None,
             delayed: vec![],
+            answers: Default::default(),
             claim: None,
         }],
         plan: vec![],

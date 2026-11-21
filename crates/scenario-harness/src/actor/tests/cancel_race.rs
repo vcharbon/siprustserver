@@ -35,6 +35,7 @@ fn cancel_crossing_plan(
 
                 cseq: None,
                 delayed: vec![],
+                answers: Default::default(),
                 claim: None,
             },
             ActorSpec {
@@ -59,6 +60,7 @@ fn cancel_crossing_plan(
 
                 cseq: None,
                 delayed: vec![],
+                answers: Default::default(),
                 claim: None,
             },
         ],
@@ -204,6 +206,7 @@ async fn ring_then_silent_487s_on_cancel_and_settles() {
 
                 cseq: None,
                 delayed: vec![],
+                answers: Default::default(),
                 claim: None,
             },
             ActorSpec {
@@ -218,6 +221,7 @@ async fn ring_then_silent_487s_on_cancel_and_settles() {
 
                 cseq: None,
                 delayed: vec![],
+                answers: Default::default(),
                 claim: None,
             },
         ],

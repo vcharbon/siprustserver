@@ -108,6 +108,7 @@ pub(crate) mod waiver;
 mod weak_agent;
 mod wire_out;
 
+pub(crate) use client_invite::rack_for;
 pub use client_invite::{CancelHandle, ClientInvite};
 pub(crate) use cseq_applier::shared_cseq_applier;
 pub use dialog::{ClientReinvite, Dialog, InDialogRequest, InDialogTxn};

@@ -68,7 +68,7 @@ impl ClientInvite {
 
     /// [`ack_reporting`](Self::ack_reporting) carrying `body` typed
     /// `content_type`; with no type, a non-empty body goes as `application/sdp`.
-    async fn ack_typed_reporting(
+    pub(crate) async fn ack_typed_reporting(
         &mut self,
         content_type: Option<&str>,
         body: &[u8],

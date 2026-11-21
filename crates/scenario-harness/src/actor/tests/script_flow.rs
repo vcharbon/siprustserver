@@ -138,6 +138,7 @@ async fn expect_response_fails_fast_when_final_precedes_provisional() {
 
                 cseq: None,
                 delayed: vec![],
+                answers: Default::default(),
                 claim: None,
             },
         ],
@@ -264,6 +265,7 @@ async fn scripted_originator_attribution_keys_on_first_goal() {
 
             cseq: None,
             delayed: vec![],
+            answers: Default::default(),
             claim: None,
         },
         scripted_spec("bob", &bob, vec![]),

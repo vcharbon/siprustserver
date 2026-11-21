@@ -12,8 +12,10 @@ use tokio::time::Instant;
 
 use super::endpoint::{Disposition, ForkWinner};
 use super::facts::received_stream;
+use super::framing::{CarriesBody, Framing};
 use super::ledger::{ObligationKey, ObligationKind};
 use super::pacing::Dwell;
+use super::provisional::reliable_allowed;
 use super::runner::{ActorState, ParkedRequest, PendingRejectAck};
 use super::script::scripted_wants_initial;
 use super::state::Observation;
@@ -112,8 +114,12 @@ pub(super) fn discharge_on_teardown(st: &mut ActorState<'_>, now: Instant) {
 /// arm, and the immediate-answer disposition. Always carries SDP on an
 /// answer-to-INVITE/UPDATE (never a bodyless 200, RFC 3264 §5); callers pass the
 /// media-resolved answer via [`ActorState::answer_body`].
-pub(super) async fn respond_200_sdp(uas: &mut ServerTxn, sdp: &str) -> Result<(), StepError> {
-    uas.respond(200, "OK").with_sdp(sdp).try_send().await
+pub(super) async fn respond_200_sdp(
+    uas: &mut ServerTxn,
+    framing: Framing,
+    sdp: &str,
+) -> Result<(), StepError> {
+    uas.respond(200, "OK").framed(framing, sdp).try_send().await
 }
 
 /// Answer a dialog-creating INVITE `200` + SDP: confirm the UAS dialog, seed
@@ -135,19 +141,33 @@ pub(super) async fn answer_initial_invite(
     fork: Option<ForkAnswer>,
 ) -> Result<(), StepError> {
     let sdp = st.answer_body();
-    match fork.as_ref().map(|f| f.winner) {
-        Some(ForkWinner::Tag(tag)) => uas.adopt_to_tag(tag),
+    let framing = st.media.framing();
+    let offered = uas.request().sdp().is_some();
+    let key = match fork.as_ref().map(|f| f.winner) {
+        Some(ForkWinner::Tag(tag)) => {
+            uas.adopt_to_tag(tag);
+            Some(tag)
+        }
         Some(ForkWinner::Unrung) => {
             uas.answer_unrung();
+            None
         }
-        None => {}
+        None => Some(""),
+    };
+    let mut ok = uas.respond(200, "OK");
+    if key.is_none_or(|k| st.offers.final_carries(offered, k)) {
+        ok = ok.framed(framing, sdp);
     }
-    respond_200_sdp(&mut uas, sdp).await?;
+    ok.try_send().await?;
     note_uas_answered(st, &uas);
     if let Some(loser) = fork.and_then(|f| f.loser_late_200) {
         // The losing fork's LATE 200 — after the winner's, under the losing
         // fork's own tag (the txn's sticky tag stays the winner's).
-        uas.respond(200, "OK").with_sdp(sdp).with_to_tag(loser).try_send().await?;
+        let mut late = uas.respond(200, "OK").with_to_tag(loser);
+        if st.offers.final_carries(offered, loser) {
+            late = late.framed(framing, sdp);
+        }
+        late.try_send().await?;
     }
     st.feed.on_answer_sent.stamp(st.ctx);
     Ok(())
@@ -195,7 +215,9 @@ pub(super) async fn fire_timed_answer(st: &mut ActorState<'_>) -> Result<(), Ste
 }
 
 /// Apply the endpoint's initial-INVITE disposition — the entry policy of the
-/// endpoint state machine.
+/// endpoint state machine. A disposition ringing reliably does so only where
+/// the INVITE allows it (RFC 3262 §3), else it rings with an unreliable 183.
+/// To an INVITE that made no offer, each fork's first reliable 183 offers.
 pub(super) async fn apply_disposition(
     st: &mut ActorState<'_>,
     mut uas: ServerTxn,
@@ -206,6 +228,7 @@ pub(super) async fn apply_disposition(
     // into the policy snapshot. A retransmit re-inserts the same tags.
     st.early_provisionals.clear();
     st.unpracked.clear();
+    st.offers.reset();
     st.ctx.anchor(&st.agent, "initialInvite", uas.request());
     // The rerouted winning leg stamps `rerouted` on receiving its INVITE
     // (default NONE for every other body — see `CtxFeed::on_invite_rx`).
@@ -241,6 +264,7 @@ pub(super) async fn apply_disposition(
         // 200 under the winner's tag — timed (plain 180s) or on the winner's
         // PRACK (reliable 183s, MUST-014).
         Disposition::ForkingRing { tags, winner, ring, reliable, loser_late_200 } => {
+            let reliable = reliable && reliable_allowed(&uas);
             let wired_ok = match winner {
                 ForkWinner::Tag(w) => {
                     tags.contains(&w) && loser_late_200.is_none_or(|l| l != w && tags.contains(&l))
@@ -255,14 +279,17 @@ pub(super) async fn apply_disposition(
                 });
             }
             let sdp = st.answer_body();
+            let framing = st.media.framing();
+            let offered = uas.request().sdp().is_some();
             for tag in tags {
                 if reliable {
                     // RFC 3262 §3: each fork's reliable 183 carries its own RSeq
                     // space (RSeq:1 per early dialog) + the answer SDP.
+                    st.offers.provisional_carries(offered, tag, true, true);
                     uas.respond(183, "Session Progress")
                         .with_to_tag(tag)
                         .reliable(1)
-                        .with_sdp(sdp)
+                        .framed(framing, sdp)
                         .try_send()
                         .await?;
                     st.unpracked.entry((*tag).to_string()).or_insert(now);
@@ -298,9 +325,28 @@ pub(super) async fn apply_disposition(
         // the INVITE. They differ only in WHEN the held 200 is released: the
         // plain one on the PRACK (MUST-014); the early-UPDATE one after the
         // early UPDATE is answered (C5, RFC 3311 §5.1 — see the PRACK/UPDATE arms).
+        Disposition::ReliableAnswer | Disposition::ReliableAnswerEarlyUpdate
+            if !reliable_allowed(&uas) =>
+        {
+            let offered = uas.request().sdp().is_some();
+            let mut r = uas.respond(183, "Session Progress");
+            if st.offers.provisional_carries(offered, "", false, true) {
+                r = r.framed(st.media.framing(), st.answer_body());
+            }
+            r.try_send().await?;
+            st.early_provisionals.insert(String::new());
+            st.obs.record(Observation::LegEarly { leg: st.role }, now);
+            answer_initial_invite(st, uas, None).await?;
+        }
         Disposition::ReliableAnswer | Disposition::ReliableAnswerEarlyUpdate => {
             let sdp = st.answer_body();
-            uas.respond(183, "Session Progress").reliable(1).with_sdp(sdp).try_send().await?;
+            let framing = st.media.framing();
+            st.offers.provisional_carries(uas.request().sdp().is_some(), "", true, true);
+            uas.respond(183, "Session Progress")
+                .reliable(1)
+                .framed(framing, sdp)
+                .try_send()
+                .await?;
             st.unpracked.insert(uas.dialog().local_tag().to_string(), now);
             st.early_provisionals.insert(String::new());
             st.obs.record(Observation::LegEarly { leg: st.role }, now);

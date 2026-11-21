@@ -23,6 +23,7 @@ fn answering_bob(bob: &crate::Agent) -> CallPlan {
             feed: CtxFeed::default(),
             cseq: None,
             delayed: vec![],
+            answers: Default::default(),
             claim: None,
         }],
         plan: vec![phase("established", |s| s.leg_at_least("bob", LegPhase::Confirmed))],

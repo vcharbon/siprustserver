@@ -16,6 +16,43 @@ pub struct Drawn {
     pub call_id: String,
     /// The draw in one line: the shape's choices, then the perturbations.
     pub desc: String,
+    /// The non-2xx finals its in-dialog requests may meet, `(method, code)`:
+    /// a refusal a party was drawn to give, `487` to a request a party holds
+    /// when a BYE crosses it (RFC 3261 §15.1.2), `491` to a renegotiation
+    /// still refused once its retries ran out while a party held an ACK or an
+    /// answer (§14.1), and `420` to one requiring an extension no party
+    /// implements, of its UAS (§8.2.2.3) or of a proxy (§16.3).
+    pub refusals: Vec<(&'static str, u16)>,
+}
+
+/// The in-dialog finals `call`'s draw asks for ([`Drawn::refusals`]).
+pub(crate) fn refusals(call: &ActorCall) -> Vec<(&'static str, u16)> {
+    let mut out = Vec::new();
+    for a in &call.actors {
+        let requires_unknown = a.goals.iter().any(|g| match &g.step {
+            GoalStep::InDialog { headers, .. } => {
+                headers.iter().any(|(_, v)| v == crate::payload::UNKNOWN_EXTENSION)
+            }
+            _ => false,
+        });
+        if requires_unknown {
+            out.push(("INFO", 420));
+        }
+        let mut holds = !a.delayed.is_empty();
+        for (method, answer) in [("INVITE", a.answers.reinvite), ("UPDATE", a.answers.update)] {
+            out.extend(answer.refuse.map(|code| (method, code)));
+            if !answer.hold.is_zero() {
+                out.push((method, 487));
+                holds = true;
+            }
+        }
+        if holds {
+            out.extend([("INVITE", 491), ("UPDATE", 491)]);
+        }
+    }
+    out.sort_unstable();
+    out.dedup();
+    out
 }
 
 /// The prefix of a stamped Call-ID; the seed's 16 hex digits follow it.
@@ -78,7 +115,7 @@ pub fn seal(call: &mut ActorCall, seed: u64, token: &str, desc: String, log: boo
         let id = used.split('@').next().unwrap_or(&used);
         eprintln!("FUZZ-DRAW {id} seed={seed:#018x} {desc}");
     }
-    let draw = Drawn { seed, call_id: used, desc };
+    let draw = Drawn { seed, call_id: used, desc, refusals: refusals(call) };
     drawn().lock().unwrap_or_else(PoisonError::into_inner).insert(token.to_string(), draw);
 }
 

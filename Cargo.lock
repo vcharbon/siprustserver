@@ -518,6 +518,7 @@ dependencies = [
  "b2bua-sdk",
  "call",
  "call-limiter",
+ "callfuzz",
  "callshapes",
  "futures",
  "http-net",

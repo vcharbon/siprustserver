@@ -43,6 +43,7 @@ fn reject_drift_plan(
                 feed: CtxFeed::default(),
                 cseq: None,
                 delayed: vec![],
+                answers: Default::default(),
                 claim: None,
             },
         ],

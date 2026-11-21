@@ -87,6 +87,9 @@ pub enum ObligationKind {
     /// A PRACK we took whose 200 we hold, until we send it; keyed by the
     /// hold's ordinal, as forks' PRACKs may share a CSeq number.
     HeldPrack200,
+    /// A renegotiation we took whose final we hold, until we send it; keyed
+    /// by the hold's ordinal.
+    HeldAnswer,
 }
 
 impl ObligationKind {
@@ -104,6 +107,7 @@ impl ObligationKind {
             ObligationKind::RejectFinal => "reject-final",
             ObligationKind::Cancel => "CANCEL",
             ObligationKind::HeldPrack200 => "held PRACK 200",
+            ObligationKind::HeldAnswer => "held final",
         }
     }
 
@@ -219,6 +223,7 @@ impl ObligationLedger {
                     | ObligationKind::ForkBye
                     | ObligationKind::Cancel
                     | ObligationKind::HeldPrack200
+                    | ObligationKind::HeldAnswer
             )
         };
         let stranded: Vec<ObligationKey> = self

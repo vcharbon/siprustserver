@@ -16,9 +16,13 @@ use super::datagram::{key_of, Datagram};
 use super::loss::DropModel;
 use super::stats::MuxStats;
 use super::taps::Taps;
+use echo::{Echo, Verdict};
 use resender::{spawn_resender, Reports, ResendCtl, Sent};
 
+mod echo;
 mod resender;
+
+pub(crate) use echo::PACES as ECHO_PACES;
 
 /// RFC 3261 default transaction timers driving the engine.
 const T1: Duration = Duration::from_millis(500); // first retransmit interval
@@ -62,6 +66,9 @@ pub(super) struct CallTxns {
     sendtap: Arc<OnceLock<SendTap>>,
     /// The endpoint's taps, told of every re-send.
     taps: Option<Arc<Taps>>,
+    /// Cleared when the call ends: an echo still waiting out its pace is
+    /// not sent.
+    live: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// A transaction's key: its top-Via branch and its (CSeq) method, hashed. A
@@ -117,6 +124,8 @@ struct TxnInner {
     /// Inbound datagrams already delivered, by branch and discriminator,
     /// hashed — duplicate detection.
     seen_in: HashSet<u64>,
+    /// An echo peer's state, on an endpoint drawn to echo.
+    echo: Option<Echo>,
     /// Call ended: stop tracking and reject new resenders.
     closed: bool,
 }
@@ -144,14 +153,17 @@ impl CallTxns {
         drop: Arc<DropModel>,
         stats: Arc<MuxStats>,
         taps: Option<Arc<Taps>>,
+        echo: Option<Duration>,
     ) -> Self {
+        let inner = TxnInner { echo: echo.map(Echo::new), ..TxnInner::default() };
         Self {
             endpoint,
             drop,
             stats,
-            inner: Mutex::new(TxnInner::default()),
+            inner: Mutex::new(inner),
             sendtap: Arc::new(OnceLock::new()),
             taps,
+            live: Arc::new(std::sync::atomic::AtomicBool::new(true)),
         }
     }
 
@@ -189,6 +201,28 @@ impl CallTxns {
         });
     }
 
+    /// Send `sent` again after `pace`, as an echo peer does, unless the call
+    /// ended meanwhile; an answer to it past the call's end is no orphan.
+    fn echo(&self, sent: Sent, pace: Duration) {
+        self.stats.echoes.fetch_add(1, Ordering::Relaxed);
+        self.stats.note_copy(&sip_message::sniff::identity(&sent.bytes));
+        let (reports, endpoint, drop) = (self.reports(), self.endpoint.clone(), self.drop.clone());
+        let (stats, live) = (self.stats.clone(), self.live.clone());
+        tokio::spawn(async move {
+            tokio::time::sleep(pace).await;
+            if !live.load(Ordering::Relaxed) {
+                return;
+            }
+            if drop.drops() {
+                stats.dropped_out.fetch_add(1, Ordering::Relaxed);
+                reports.lost(&sent.bytes, sent.dst);
+                return;
+            }
+            reports.reemitted(&sent.bytes, sent.dst, ReEmitKind::Retransmit);
+            let _ = endpoint.as_ref().send_to(&sent.bytes, sent.dst).await;
+        });
+    }
+
     /// Record an outbound datagram and arm any retransmission it needs.
     pub(super) fn on_outbound(&self, d: &Datagram<'_>, dst: SocketAddr) {
         let mut g = self.inner.lock().unwrap();
@@ -196,6 +230,9 @@ impl CallTxns {
             return;
         }
         let id = d.id();
+        if let Some(echo) = g.echo.as_mut() {
+            echo.on_outbound(id, &self.sent(d, dst));
+        }
         if let Some(status) = id.status {
             let Some(branch) = id.branch else { return };
             let method = id.cseq_method.unwrap_or_default();
@@ -309,6 +346,14 @@ impl CallTxns {
             return true;
         }
         let id = d.id();
+        if let Some(echo) = g.echo.as_mut() {
+            let pace = echo.pace;
+            match echo.on_inbound(id) {
+                Verdict::Echo(sent) => self.echo(sent, pace),
+                Verdict::Overrun => self.stats.note_echo_overrun(id.call_id),
+                Verdict::None => {}
+            }
+        }
         let branch = id.branch.unwrap_or_default();
         if let Some(status) = id.status {
             let method = id.cseq_method.unwrap_or_default();
@@ -400,6 +445,7 @@ impl CallTxns {
     pub(super) fn shutdown(&self) {
         let mut g = self.inner.lock().unwrap();
         g.closed = true;
+        self.live.store(false, Ordering::Relaxed);
         for (_, ctl) in g.client.drain() {
             ctl.stop();
         }
@@ -427,6 +473,8 @@ impl CallTxns {
 // reliable-1xx-until-PRACK server obligation. These tests drive `CallTxns`
 // directly over a loopback UDP pair on the real clock (T1 = 500 ms, so each
 // stays a few seconds).
+#[cfg(test)]
+mod echo_tests;
 #[cfg(test)]
 mod teardown_tests;
 #[cfg(test)]

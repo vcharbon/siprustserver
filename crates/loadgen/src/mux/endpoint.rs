@@ -56,6 +56,8 @@ pub struct MuxNetwork {
     /// Optional deterministic targeted drop, applied per endpoint (each bound
     /// endpoint tracks its own matching-request arrivals).
     pub(super) drop_nth: Option<TargetedDrop>,
+    /// Duplication and late delivery on top of the loss.
+    pub(super) faults: super::NetFaults,
     /// Where each bound endpoint's measured SIP round trips go; `None` = not
     /// measured.
     pub(super) rtt_sink: Option<RttSink>,
@@ -127,7 +129,10 @@ impl SignalingNetwork for MuxNetwork {
             None => true,
             Some(leg) => uas.as_ref().map(|(l, _)| l.as_str()) == Some(leg),
         });
-        let drop = Arc::new(DropModel::new(self.drop_rate, self.next_drop_seed(), drop_nth));
+        let seed = self.next_drop_seed();
+        let drop = Arc::new(
+            DropModel::new(self.drop_rate, seed, drop_nth).with_faults(self.faults, !seed),
+        );
         let leg = uas.as_ref().map(|(label, _)| label.as_str());
         let taps = Taps::new(
             self.rtt_sink.clone(),
@@ -142,6 +147,7 @@ impl SignalingNetwork for MuxNetwork {
                 drop.clone(),
                 mux.stats.clone(),
                 taps.clone(),
+                drop.echo_pace(),
             ))
         });
         if let Some(txns) = &txns {
@@ -372,6 +378,14 @@ impl MuxEndpoint {
 
 #[async_trait]
 impl UdpEndpoint for MuxEndpoint {
+    /// One datagram out, through the call's loss model and network faults. A
+    /// duplicated or held-back copy leaves from a detached task, the fabric
+    /// recording it when sent. Only responses and ACKs are held back: a request
+    /// would meet the 500 a request behind a later CSeq draws (RFC 3261
+    /// §12.2.2), and a reliable provisional owes a PRACK by its arrival before
+    /// the final (RFC 3262 §4), which its lane, recording the send, cannot
+    /// tell. A held-back unreliable provisional is told lost: its taker may
+    /// discard it after the final.
     async fn send_to(&self, buf: &[u8], dst: SocketAddr) -> Result<(), SendError> {
         let d = Datagram::sniff(buf);
         let dropped = {
@@ -402,6 +416,29 @@ impl UdpEndpoint for MuxEndpoint {
             self.mux.stats.dropped_out.fetch_add(1, Ordering::Relaxed);
             self.sendtap.get().inspect(|tap| tap(buf, dst, SendNote::LossModel));
             self.taps.iter().for_each(|t| t.on_lost(Dir::Out, &d));
+            return Ok(());
+        }
+        let later = |after: std::time::Duration| {
+            let endpoint = self.mux.endpoint.clone();
+            let bytes = buf.to_vec();
+            tokio::spawn(async move {
+                tokio::time::sleep(after).await;
+                let _ = endpoint.as_ref().send_to(&bytes, dst).await;
+            });
+        };
+        if let Some(after) = self.drop.copy_after() {
+            self.mux.stats.note_copy(d.id());
+            later(after);
+        }
+        let reliable_ring = d.id().reliable && d.id().status.is_some_and(|s| s < 200);
+        let holdable = (d.id().status.is_some() && !reliable_ring) || d.id().method == Some("ACK");
+        if let Some(after) = self.drop.held_for().filter(|_| holdable) {
+            self.mux.stats.note_copy(d.id());
+            let ring = d.id().status.is_some_and(|s| (101..200).contains(&s)) && !d.id().reliable;
+            if ring {
+                self.taps.iter().for_each(|t| t.on_lost(Dir::Out, &d));
+            }
+            later(after);
             return Ok(());
         }
         self.mux.endpoint.as_ref().send_to(buf, dst).await

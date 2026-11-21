@@ -291,3 +291,60 @@ async fn fuzzed_calls_run_to_a_legal_ending() {
         assert!(gating.is_empty(), "seed {seed}: {gating:?}");
     }
 }
+
+/// Offer modes and framings drawn on every call, trains on, alice to bob:
+/// the delayed offer is answered in a PRACK or the ACK, a framed description
+/// is read, and the RFC audit charges nothing.
+#[tokio::test(start_paused = true)]
+async fn every_offer_mode_runs_to_a_legal_ending() {
+    let config = FuzzConfig { train: true, offer_pct: 100, ..payloads_always() };
+    let mut delayed = 0;
+    for seed in 0..48u64 {
+        let name = format!("callfuzz-offer-{seed}");
+        let (h, alice, bob) = agents(&name).await;
+        let env = env(&alice, &bob, &name);
+        let call =
+            wrap(FuzzConfig { run_seed: seed, ..config }).build(&env).expect("the call builds");
+        delayed +=
+            usize::from(call.actors.iter().any(|a| a.role == "alice" && !a.media.makes_offer()));
+        let verdict = run_built_actor_call(call, &env, &CallCtx::new()).await;
+        let (_report, findings) = h.finish_collecting().await;
+        assert!(matches!(verdict, ScenarioVerdict::Success { .. }), "seed {seed}: {verdict:?}");
+        let gating: Vec<_> = findings.iter().filter(|f| !f.advisory).collect();
+        assert!(gating.is_empty(), "seed {seed}: {gating:?}");
+    }
+    assert!(delayed > 10, "{delayed} of 48 calls made no offer in the INVITE");
+}
+
+/// A call whose party holds an ACK or an answer may leave a renegotiation
+/// refused 491 once its retries ran out (RFC 3261 §14.1); one holding nothing
+/// may not, and an INFO requiring an unknown extension draws its 420.
+#[tokio::test(start_paused = true)]
+async fn the_finals_a_draw_accepts_follow_its_holds_and_requirements() {
+    let h = Harness::new("callfuzz-refusals");
+    let alice = h.agent("alice", "127.0.0.1:5060").await;
+    let bob = h.agent("bob", "127.0.0.1:5070").await;
+    let mut call = basic(&env(&alice, &bob, "refusals"));
+    let none = crate::stamp::refusals(&call);
+    assert!(!none.contains(&("INVITE", 491)), "nothing held: {none:?}");
+    let caller = call.actors.iter_mut().find(|a| a.role == "alice").expect("alice");
+    caller.delayed.push(sip_message::DelayedAutomatic::ack_after(1000));
+    let bye = caller.goals.iter().position(|g| matches!(g.step, GoalStep::Bye)).expect("a BYE");
+    caller.goals.insert(
+        bye,
+        scenario_harness::actor::Goal::new(
+            scenario_harness::actor::Barrier::None,
+            GoalStep::InDialog {
+                method: sip_message::generators::InDialogMethod::Info,
+                content_type: None,
+                body: None,
+                headers: vec![("Require".into(), crate::payload::UNKNOWN_EXTENSION.into())],
+            },
+        ),
+    );
+    let held = crate::stamp::refusals(&call);
+    for owed in [("INVITE", 491), ("UPDATE", 491), ("INFO", 420)] {
+        assert!(held.contains(&owed), "{owed:?} accepted: {held:?}");
+    }
+    h.finish().await;
+}
