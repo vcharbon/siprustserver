@@ -105,35 +105,54 @@ fn cells_of(ending: Ending, winner: Option<Winner>) -> Vec<Cell> {
         .collect()
 }
 
-/// The quarter `part` (0..4) of the generator's fixed sample.
-fn sample_part(part: usize) -> Vec<Cell> {
+/// Part `part` (0..`of`) of the generator's fixed sample: the cells from
+/// `len * part / of` up to `len * (part + 1) / of`, so the `of` parts hold
+/// every cell of the sample exactly once and differ in size by one cell at
+/// most.
+fn sample_part(part: usize, of: usize) -> Vec<Cell> {
     let sample = generator::sample();
-    let quarter = sample.len().div_ceil(4);
-    sample.into_iter().skip(part * quarter).take(quarter).collect()
+    let len = sample.len();
+    sample[len * part / of..len * (part + 1) / of].to_vec()
 }
 
-/// The fixed sample, every triple of dimension values, in four parts that
-/// run in parallel; the first holds the callee's early UPDATEs then its
-/// re-INVITE.
-#[tokio::test(start_paused = true)]
-async fn the_sample_of_call_shapes_part_1() {
-    run_cells(sample_part(0)).await;
+/// One default-lane test per name, each running its part of the fixed sample
+/// (every triple of dimension values), so the parts run in parallel and each
+/// stays well inside the lane's per-test timeout on a loaded box. The part
+/// count, `SAMPLE_PARTS`, is the number of names. The first part opens with
+/// the callee's early UPDATEs then its re-INVITE, the sample's first cell.
+macro_rules! sample_parts {
+    ($($name:ident),+ $(,)?) => {
+        const SAMPLE_PARTS: usize = [$(stringify!($name)),+].len();
+        sample_parts!(@part 0; $($name),+);
+    };
+    (@part $part:expr; $name:ident $(, $rest:ident)*) => {
+        #[tokio::test(start_paused = true)]
+        async fn $name() {
+            run_cells(sample_part($part, SAMPLE_PARTS)).await;
+        }
+        sample_parts!(@part $part + 1; $($rest),*);
+    };
+    (@part $part:expr;) => {};
 }
 
-#[tokio::test(start_paused = true)]
-async fn the_sample_of_call_shapes_part_2() {
-    run_cells(sample_part(1)).await;
-}
-
-#[tokio::test(start_paused = true)]
-async fn the_sample_of_call_shapes_part_3() {
-    run_cells(sample_part(2)).await;
-}
-
-#[tokio::test(start_paused = true)]
-async fn the_sample_of_call_shapes_part_4() {
-    run_cells(sample_part(3)).await;
-}
+sample_parts!(
+    the_sample_of_call_shapes_part_01,
+    the_sample_of_call_shapes_part_02,
+    the_sample_of_call_shapes_part_03,
+    the_sample_of_call_shapes_part_04,
+    the_sample_of_call_shapes_part_05,
+    the_sample_of_call_shapes_part_06,
+    the_sample_of_call_shapes_part_07,
+    the_sample_of_call_shapes_part_08,
+    the_sample_of_call_shapes_part_09,
+    the_sample_of_call_shapes_part_10,
+    the_sample_of_call_shapes_part_11,
+    the_sample_of_call_shapes_part_12,
+    the_sample_of_call_shapes_part_13,
+    the_sample_of_call_shapes_part_14,
+    the_sample_of_call_shapes_part_15,
+    the_sample_of_call_shapes_part_16,
+);
 
 /// One slow-lane test per slice of the compatible cells, so the slices run
 /// in parallel.

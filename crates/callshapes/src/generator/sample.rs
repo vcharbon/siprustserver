@@ -1,7 +1,8 @@
 //! The fixed sample of [`cells`] a default lane runs, covering every
 //! combination of dimensions a compatible cell holds.
 
-use std::collections::HashSet;
+use std::cmp::Reverse;
+use std::collections::HashMap;
 
 use super::{
     cells, compatible, Cell, AFTERS, CALLEE_EARLY_UPDATES_THEN_REINVITE, EARLIES, ENDINGS,
@@ -15,31 +16,87 @@ use super::{
 /// dimensions, and every transfer value with every other dimension's value.
 pub fn sample() -> Vec<Cell> {
     let legal: Vec<Cell> = cells().into_iter().filter(|c| compatible(c).is_ok()).collect();
-    let mut uncovered: HashSet<Combo> = legal.iter().flat_map(combos).collect();
-    let mut picked = Vec::new();
-    let mut pick = |cell: Cell, uncovered: &mut HashSet<Combo>| {
-        for t in combos(&cell) {
-            uncovered.remove(&t);
-        }
-        picked.push(cell);
-    };
-    pick(CALLEE_EARLY_UPDATES_THEN_REINVITE, &mut uncovered);
-    while !uncovered.is_empty() {
-        let gain = |c: &Cell| combos(c).filter(|t| uncovered.contains(t)).count();
-        let (_, best) = legal
-            .iter()
-            .enumerate()
-            .map(|(i, c)| ((gain(c), std::cmp::Reverse(i)), *c))
-            .max_by_key(|(key, _)| *key)
-            .expect("a compatible cell holds each uncovered combination");
-        pick(best, &mut uncovered);
+    let mut cover = Cover::of(&legal);
+    let first = legal
+        .iter()
+        .position(|c| *c == CALLEE_EARLY_UPDATES_THEN_REINVITE)
+        .expect("the first cell of the sample is compatible");
+    let mut picked = vec![first];
+    cover.pick(first);
+    while cover.uncovered > 0 {
+        let best = cover.best();
+        cover.pick(best);
+        picked.push(best);
     }
-    picked
+    picked.into_iter().map(|i| legal[i]).collect()
 }
 
 /// The `(dimension, value index)` coordinates the sample covers together:
 /// three of the call's dimensions, or the transfer and one other.
 type Combo = Vec<(usize, usize)>;
+
+/// The greedy cover's state over the compatible cells, each named by its index
+/// among them, and their combinations, each named by an index of its own.
+struct Cover {
+    /// Each cell's combinations.
+    held: Vec<Vec<usize>>,
+    /// Each combination's cells.
+    holders: Vec<Vec<usize>>,
+    /// Whether a picked cell holds the combination.
+    covered: Vec<bool>,
+    /// How many of the cell's combinations no picked cell holds.
+    gain: Vec<usize>,
+    /// How many combinations no picked cell holds.
+    uncovered: usize,
+}
+
+impl Cover {
+    /// The cover of `legal` with no cell picked: every combination uncovered.
+    fn of(legal: &[Cell]) -> Self {
+        let mut index: HashMap<Combo, usize> = HashMap::new();
+        let mut holders: Vec<Vec<usize>> = Vec::new();
+        let mut held = Vec::with_capacity(legal.len());
+        for (cell, c) in legal.iter().enumerate() {
+            let mut of_cell = Vec::new();
+            for combo in combos(c) {
+                let id = *index.entry(combo).or_insert(holders.len());
+                if id == holders.len() {
+                    holders.push(Vec::new());
+                }
+                holders[id].push(cell);
+                of_cell.push(id);
+            }
+            held.push(of_cell);
+        }
+        Self {
+            gain: held.iter().map(Vec::len).collect(),
+            covered: vec![false; holders.len()],
+            uncovered: holders.len(),
+            held,
+            holders,
+        }
+    }
+
+    /// Cover every combination `cell` holds.
+    fn pick(&mut self, cell: usize) {
+        for &id in &self.held[cell] {
+            if !std::mem::replace(&mut self.covered[id], true) {
+                self.uncovered -= 1;
+                for &holder in &self.holders[id] {
+                    self.gain[holder] -= 1;
+                }
+            }
+        }
+    }
+
+    /// The cell holding the most uncovered combinations, the earliest among
+    /// equals.
+    fn best(&self) -> usize {
+        (0..self.gain.len())
+            .max_by_key(|&cell| (self.gain[cell], Reverse(cell)))
+            .expect("some cell is compatible")
+    }
+}
 
 /// The dimension index of [`Cell::transfer`], covered pairwise only: a
 /// transfer's interplay with each other dimension, at a sample size the
