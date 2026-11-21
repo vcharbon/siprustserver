@@ -1,8 +1,9 @@
 //! A fork straggler's 2xx (RFC 3261 §13.2.2.4) through the real turn: the
 //! dialog its release retires keeps the requests still open in it, whose
 //! finals still reach their originators (§8.1.3.3), whichever rule sends the
-//! release; a fork heard only after the winner's 2xx opens no dialog, so its
-//! 2xx is a straggler's.
+//! release; a fork heard only after the winner's 2xx opens no dialog, or,
+//! when that is a reliable provisional, one retired at once behind its PRACK,
+//! so its 2xx is a straggler's.
 
 use b2bua_core::rules::{Match, RuleAction, RuleDefinition, RuleHandleResult, SERVICE_LAYER};
 use b2bua_core::turn_driver::{Driver, Step};
@@ -71,24 +72,46 @@ fn a_straggler_released_from_its_early_dialog_keeps_its_open_prack() {
     assert_eq!(open_methods(&d), ["BYE"], "bob's 200 settled the PRACK");
 }
 
-/// A fork that rings only after the winner's 2xx confirmed the leg: its
-/// provisional, reliable or not, opens no dialog (no rule relays a 1xx on a
-/// confirmed leg, and the INVITE it answers has its final), so its 2xx names
-/// none and is released as a straggler's.
-#[test]
-fn a_fork_ringing_after_the_winner_answered_opens_no_dialog() {
-    let driver = Driver::new();
-    let answered = [Step::Answers("b-1", 180), Step::Answers("b-1", 200), Step::AliceAcks];
-    for late in [Step::ForkAnswers("latefork", 180), Step::ForkAnswersReliably("latefork", 183)] {
-        let mut call = driver.dial();
-        call.run(answered.clone());
-        call.turned(late.clone());
-        assert_eq!(fork(call.call(), "latefork"), None, "{late:?} opens no dialog");
-        assert_eq!(call.sent(), ["b-1 ACK"], "{late:?} draws nothing");
-    }
+/// The callee rings, answers 200, and the caller ACKs.
+const ANSWERED: [Step; 3] = [Step::Answers("b-1", 180), Step::Answers("b-1", 200), Step::AliceAcks];
 
+/// A fork that rings unreliably only after the winner's 2xx confirmed the
+/// leg opens no dialog (no rule relays a 1xx on a confirmed leg, and the
+/// INVITE it answers has its final), so its 2xx names none and is released as
+/// a straggler's.
+#[test]
+fn a_fork_ringing_unreliably_after_the_winner_answered_opens_no_dialog() {
+    let driver = Driver::new();
     let mut call = driver.dial();
-    call.run(answered).run([Step::ForkAnswers("latefork", 180)]);
+    call.run(ANSWERED.clone());
+    call.turned(Step::ForkAnswers("latefork", 180));
+    assert_eq!(fork(call.call(), "latefork"), None, "the 180 opens no dialog");
+    assert_eq!(call.sent(), ["b-1 ACK"], "and draws nothing");
+
+    let late = call.turned(Step::ForkAnswers("latefork", 200));
+    assert_eq!(
+        late.rule,
+        Some("release-fork-straggler-2xx"),
+        "the late fork's 2xx is a straggler's"
+    );
+}
+
+/// A fork whose first reliable provisional reaches this stack only after the
+/// winner's 2xx confirmed the leg is PRACKed on its own early dialog, which
+/// is retired at once as the 2xx retired its siblings' (RFC 3262 §4, RFC 3261
+/// §13.2.2.4); no rule reads it, and its 2xx is a straggler's.
+#[test]
+fn a_fork_ringing_reliably_after_the_winner_answered_is_pracked_on_a_retired_dialog() {
+    let driver = Driver::new();
+    let mut call = driver.dial();
+    call.run(ANSWERED.clone());
+    let ring = call.turned(Step::ForkAnswersReliably("latefork", 183));
+    assert_eq!(ring.rule, None, "no rule reads it");
+    let d = fork(call.call(), "latefork").expect("the late fork's early dialog");
+    assert!(d.is_retired(), "retired at once");
+    assert_eq!(open_methods(&d), ["PRACK"], "its PRACK open in it");
+    assert_eq!(call.sent(), ["b-1 ACK", "b-1 PRACK"], "PRACKed here");
+
     let late = call.turned(Step::ForkAnswers("latefork", 200));
     assert_eq!(
         late.rule,
