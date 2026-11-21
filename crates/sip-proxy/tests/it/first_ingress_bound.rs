@@ -2,15 +2,23 @@
 //! here, and one past it is answered here. Everything after it reads with room:
 //! what this proxy forwards reads at the next hop whatever the forward added,
 //! and a response reads on its way back whatever a hop added to its lines.
+//! Every call ends: a forwarded INVITE is refused at its next hop and ACKed
+//! through the proxy, and the ACK of the proxy's own 400 ends at the proxy.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
 use sip_clock::Clock;
-use sip_message::generators::{generate_response, GenerateResponseOpts};
-use sip_message::header::MaxForwards;
-use sip_message::{CustomParser, Exemptions, SipMessage, SipParser, SipParserLimits, SipRequest};
+use sip_message::generators::{
+    generate_ack_for_2xx_from_invite, generate_ack_for_non_2xx, generate_bye_for_2xx_from_invite,
+    generate_response, GenerateResponseOpts,
+};
+use sip_message::header::{Contact, HeaderValue, MaxForwards};
+use sip_message::{
+    CustomParser, Exemptions, HeaderName, SipMessage, SipParser, SipParserLimits, SipRequest,
+    SipResponse, SipStr,
+};
 use sip_net::{BindUdpOpts, SignalingNetwork, UdpEndpoint};
 use sip_net_testkit::SimulatedSignalingNetwork;
 use sip_proxy::registry::static_reg::StaticWorkerRegistry;
@@ -22,6 +30,8 @@ use tokio::task::JoinHandle;
 const PROXY: &str = "192.0.2.1:5060";
 const CALLER: &str = "192.0.2.20:5060";
 const WORKER: &str = "10.0.0.2:5070";
+/// The host a worker's own request names in its Request-URI.
+const CALLEE: &str = "192.0.2.30:5060";
 
 /// The bound on a line and on a Request-URI.
 const LINE_BOUND: usize = 8_192;
@@ -35,8 +45,10 @@ fn addr(s: &str) -> SocketAddr {
 struct Rig {
     task: JoinHandle<()>,
     metrics: Arc<ProxyMetrics>,
+    limits: SipParserLimits,
     caller: Box<dyn UdpEndpoint>,
     worker: Box<dyn UdpEndpoint>,
+    callee: Box<dyn UdpEndpoint>,
 }
 
 impl Drop for Rig {
@@ -56,6 +68,7 @@ impl Rig {
         let endpoint = bind(PROXY).await.expect("bind the proxy");
         let caller = bind(CALLER).await.expect("bind the caller");
         let worker = bind(WORKER).await.expect("bind the worker");
+        let callee = bind(CALLEE).await.expect("bind the callee");
         let strategy: Arc<dyn RoutingStrategy> =
             Arc::new(ForwardAllStrategy::new(ProxyAddr::from(addr(WORKER))));
         let registry: Arc<dyn WorkerRegistry> =
@@ -69,18 +82,27 @@ impl Rig {
             strategy,
             registry,
             Arc::new(IdGen::seeded(0x847)),
-            CustomParser::with_limits(limits),
+            CustomParser::with_limits(limits.clone()),
         )
         .clock(Clock::test_at(0))
         .metrics(metrics.clone())
         .build(endpoint);
-        Rig { task: tokio::spawn(core.run()), metrics, caller, worker }
+        Rig { task: tokio::spawn(core.run()), metrics, limits, caller, worker, callee }
     }
 
     async fn forward_of(&self, invite: &str) -> Option<Vec<u8>> {
         self.caller.send_to(invite.as_bytes(), addr(PROXY)).await.expect("sent");
         settle().await;
         self.worker.try_recv().map(|p| p.raw.to_vec())
+    }
+
+    /// The caller's `request` as the caller itself reads it, on the proxy's
+    /// setting.
+    fn caller_request(&self, request: &str) -> SipRequest {
+        match CustomParser::with_limits(self.limits.clone()).parse(request.as_bytes()) {
+            Ok(SipMessage::Request(req)) => req,
+            other => panic!("the caller's request: {other:?}"),
+        }
     }
 }
 
@@ -133,7 +155,7 @@ fn to_of(len: usize) -> String {
     format!("To: <sip:{}@192.0.2.30>", "b".repeat(len - frame))
 }
 
-/// The request a worker reads off `forward`: this stack's reader, no setting.
+/// The request a hop reads off `forward`: this stack's reader, no setting.
 fn read(forward: &[u8]) -> SipRequest {
     match CustomParser::new().parse(forward) {
         Ok(SipMessage::Request(req)) => req,
@@ -144,27 +166,71 @@ fn read(forward: &[u8]) -> SipRequest {
     }
 }
 
+/// The response a party reads off `packet`.
+fn read_response(packet: &[u8]) -> SipResponse {
+    match CustomParser::new().parse(packet) {
+        Ok(SipMessage::Response(resp)) => resp,
+        other => panic!("a response: {other:?}"),
+    }
+}
+
+/// The `status` final, To-tagged `own-tag-123`, of the UAS that read the
+/// request in `forward`, with `extra` lines.
+fn final_to(forward: &[u8], status: u16, extra: Vec<sip_message::SipHeader>) -> SipResponse {
+    let opts = GenerateResponseOpts {
+        to_tag: Some("own-tag-123".into()),
+        extra_headers: extra,
+        ..Default::default()
+    };
+    generate_response(&read(forward), status, "As Stated", &opts).expect("the final")
+}
+
 /// The worker's `status` final to the request it read in `forward`, as the
 /// caller receives it through the proxy.
-async fn answered_through(rig: &Rig, forward: &[u8], status: u16) -> SipMessage {
-    let opts = GenerateResponseOpts { to_tag: Some("own-tag-123".into()), ..Default::default() };
-    let answer = generate_response(&read(forward), status, "As Stated", &opts).expect("the final");
+async fn answered_through(rig: &Rig, forward: &[u8], status: u16) -> SipResponse {
+    let answer = final_to(forward, status, Vec::new());
     rig.worker.send_to(answer.image(), addr(PROXY)).await.expect("sent");
     settle().await;
     let packet = rig.caller.try_recv().expect("the final reaches the caller");
-    CustomParser::new().parse(&packet.raw).expect("the caller reads it")
+    let answer = read_response(&packet.raw);
+    assert_eq!(answer.status(), status);
+    answer
 }
 
-/// The one answer the caller holds to a request past the bound: nothing forwarded.
-#[track_caller]
-fn answered_400_at_first_ingress(rig: &Rig, forward: Option<Vec<u8>>) {
+/// The caller ACKs `refused`, the non-2xx final to its `invite`, through the
+/// proxy (RFC 3261 §17.1.1.3), and the ACK reaches the worker.
+async fn acked_to_the_worker(rig: &Rig, invite: &str, refused: &SipResponse) {
+    let ack = generate_ack_for_non_2xx(&rig.caller_request(invite), refused, &[]).expect("an ACK");
+    rig.caller.send_to(ack.image(), addr(PROXY)).await.expect("sent");
+    settle().await;
+    let packet = rig.worker.try_recv().expect("the ACK reaches the worker");
+    assert_eq!(read(&packet.raw).method(), "ACK");
+}
+
+/// The worker refuses the forward of the caller's `invite` with a 486, which
+/// the caller ACKs: the call ends.
+async fn refused_at_the_worker(rig: &Rig, invite: &str, forward: &[u8]) {
+    let busy = answered_through(rig, forward, 486).await;
+    acked_to_the_worker(rig, invite, &busy).await;
+}
+
+/// The one answer the caller holds to a request past the bound: nothing
+/// forwarded. The caller's ACK of that 400 ends at the proxy, which neither
+/// forwards it nor refuses it.
+async fn answered_400_at_first_ingress(rig: &Rig, request: &str, forward: Option<Vec<u8>>) {
     assert!(forward.is_none(), "nothing is forwarded");
     let packet = rig.caller.try_recv().expect("the caller is answered at first ingress");
-    match CustomParser::new().parse(&packet.raw) {
-        Ok(SipMessage::Response(r)) => assert_eq!(r.status(), 400, "{r:?}"),
-        other => panic!("a response: {other:?}"),
-    }
+    let refusal = read_response(&packet.raw);
+    assert_eq!(refusal.status(), 400, "{refusal:?}");
     assert_eq!(rig.metrics.parse_refusals_answered(), 1);
+
+    let ack = generate_ack_for_non_2xx(&read(request.as_bytes()), &refusal, &[]).expect("an ACK");
+    rig.caller.send_to(ack.image(), addr(PROXY)).await.expect("sent");
+    settle().await;
+    assert!(rig.worker.try_recv().is_none(), "the ACK of the proxy's own 400 is not forwarded");
+    assert!(rig.caller.try_recv().is_none(), "nor answered");
+    assert_eq!(rig.metrics.parse_refusals_answered(), 1, "nor refused");
+    assert_eq!(rig.metrics.parse_errors(), 0, "it reads");
 }
 
 /// On a deployment naming `max-forwards:absent`, a request with no hop count at
@@ -180,6 +246,7 @@ async fn an_invite_at_the_line_bound_with_no_max_forwards_reads_at_the_next_hop(
     let hops = read(&forward).header::<MaxForwards>().expect("stated").expect("reads");
     assert_eq!(hops.value(), 70, "RFC 3261 §16.6 step 3: an absent count is added as 70");
     assert!(lines_of(&forward) > LINES_BOUND, "the forward carries the proxy's additions");
+    refused_at_the_worker(&rig, &request, &forward).await;
 }
 
 /// A comma-folded top Via stays one line through the proxy's stamp: a forward
@@ -195,6 +262,7 @@ async fn a_folded_top_via_at_the_line_bound_stays_one_line_on_the_forward() {
     let read = read(&forward);
     assert_eq!(read.via().iter().count(), 5, "the proxy's and the caller's four");
     assert_eq!(lines_of(&forward), LINES_BOUND + 3, "its Via and its two Record-Routes");
+    refused_at_the_worker(&rig, &request, &forward).await;
 }
 
 #[tokio::test(start_paused = true)]
@@ -204,8 +272,7 @@ async fn a_top_via_at_the_line_length_bound_draws_its_final() {
     let forward = rig.forward_of(&request).await.expect("the proxy forwards it");
     let line = String::from_utf8_lossy(&forward).to_string();
     assert!(line.lines().any(|l| l.starts_with("Via:") && l.len() > LINE_BOUND), "stamped");
-    let answer = answered_through(&rig, &forward, 486).await;
-    assert!(matches!(answer, SipMessage::Response(r) if r.status() == 486));
+    refused_at_the_worker(&rig, &request, &forward).await;
 }
 
 #[tokio::test(start_paused = true)]
@@ -213,8 +280,7 @@ async fn a_to_at_the_line_length_bound_draws_its_final() {
     let rig = Rig::new().await;
     let request = invite(&plain_via(), &to_of(LINE_BOUND), true, 0);
     let forward = rig.forward_of(&request).await.expect("the proxy forwards it");
-    let answer = answered_through(&rig, &forward, 486).await;
-    assert!(matches!(answer, SipMessage::Response(r) if r.status() == 486));
+    refused_at_the_worker(&rig, &request, &forward).await;
 }
 
 #[tokio::test(start_paused = true)]
@@ -233,18 +299,69 @@ async fn a_request_one_past_the_bound_is_answered_at_first_ingress() {
     ] {
         let rig = Rig::new().await;
         let forward = rig.forward_of(&request).await;
-        answered_400_at_first_ingress(&rig, forward);
+        answered_400_at_first_ingress(&rig, &request, forward).await;
     }
 }
 
 /// An in-dialog request carries what a hop added to the dialog's lines, a tag
-/// on its To among them: only a new request meets the bound.
+/// on its To among them: only a new request meets the bound. A dialog whose To
+/// sits at the bound before its tag has its ACK and BYE forwarded.
 #[tokio::test(start_paused = true)]
 async fn an_in_dialog_request_past_the_bound_is_forwarded() {
     let rig = Rig::new().await;
-    let request = invite(&plain_via(), &format!("{};tag=dialog", to_of(LINE_BOUND)), true, 0);
+    let request = invite(&plain_via(), &to_of(LINE_BOUND), true, 0);
     let forward = rig.forward_of(&request).await.expect("the proxy forwards it");
-    read(&forward);
+    let opts = GenerateResponseOpts {
+        to_tag: Some("dialog".into()),
+        contact: Some(
+            Contact::parse(&SipStr::owned(&format!("<sip:bob@{WORKER}>"))).expect("a Contact"),
+        ),
+        ..Default::default()
+    };
+    let ok = generate_response(&read(&forward), 200, "OK", &opts).expect("the 200");
+    rig.worker.send_to(ok.image(), addr(PROXY)).await.expect("sent");
+    settle().await;
+    let ok = read_response(&rig.caller.try_recv().expect("the 200 reaches the caller").raw);
+    assert_eq!(ok.status(), 200);
+
+    let initial = rig.caller_request(&request);
+    let ack =
+        generate_ack_for_2xx_from_invite(&initial, &ok, "z9hG4bK-bound-ack", None).expect("an ACK");
+    rig.caller.send_to(ack.image(), addr(PROXY)).await.expect("sent");
+    settle().await;
+    let ack = read(&rig.worker.try_recv().expect("the ACK is forwarded").raw);
+    assert_eq!(ack.method(), "ACK");
+    let to = ack.raw_text(HeaderName::To).next().expect("a To").to_string();
+    assert!("To: ".len() + to.len() > LINE_BOUND, "the tagged To is past the bound");
+
+    let bye =
+        generate_bye_for_2xx_from_invite(&initial, &ok, 2, "z9hG4bK-bound-bye").expect("a BYE");
+    rig.caller.send_to(bye.image(), addr(PROXY)).await.expect("sent");
+    settle().await;
+    let forward = rig.worker.try_recv().expect("the BYE is forwarded").raw.to_vec();
+    assert_eq!(read(&forward).method(), "BYE");
+    let bye_ok = final_to(&forward, 200, Vec::new());
+    rig.worker.send_to(bye_ok.image(), addr(PROXY)).await.expect("sent");
+    settle().await;
+    let bye_ok = read_response(&rig.caller.try_recv().expect("the BYE's 200 relays").raw);
+    assert_eq!(bye_ok.status(), 200);
+}
+
+/// The callee refuses the forward of a worker's own `request`, sent from
+/// `sender`; the final returns to `sender` by the request's Via, and `sender`
+/// ACKs it: the ACK reaches the callee.
+async fn refused_at_the_callee(rig: &Rig, request: &str, sender: &dyn UdpEndpoint) {
+    let forward = rig.callee.try_recv().expect("the callee receives the forward").raw.to_vec();
+    let busy = final_to(&forward, 486, Vec::new());
+    rig.callee.send_to(busy.image(), addr(PROXY)).await.expect("sent");
+    settle().await;
+    let busy = read_response(&sender.try_recv().expect("the final reaches the worker").raw);
+    assert_eq!(busy.status(), 486);
+    let ack = generate_ack_for_non_2xx(&read(request.as_bytes()), &busy, &[]).expect("an ACK");
+    sender.send_to(ack.image(), addr(PROXY)).await.expect("sent");
+    settle().await;
+    let ack = read(&rig.callee.try_recv().expect("the ACK reaches the callee").raw);
+    assert_eq!(ack.method(), "ACK");
 }
 
 /// A worker's own request grows what the caller sent: it reads with room.
@@ -258,19 +375,22 @@ async fn a_workers_request_past_the_bound_is_forwarded() {
     settle().await;
     assert_eq!(rig.metrics.parse_errors(), 0, "the request reads");
     assert_eq!(rig.metrics.parse_refusals_answered(), 0, "and is not refused");
+    refused_at_the_callee(&rig, &request, &*rig.worker).await;
 }
 
 /// A worker whose source address is translated on its way to the proxy is named
-/// by its top Via's sent-by: its request reads with room too.
+/// by its top Via's sent-by: its request reads with room too. Its Via asks for
+/// `rport` (RFC 3581 §4), so its final returns to the translated source.
 #[tokio::test(start_paused = true)]
 async fn a_request_whose_top_via_names_a_worker_past_the_bound_is_forwarded() {
     let rig = Rig::new().await;
-    let via = format!("SIP/2.0/UDP {WORKER};branch=z9hG4bK-translated");
+    let via = format!("SIP/2.0/UDP {WORKER};branch=z9hG4bK-translated;rport");
     let request = invite(&via, &to_of(LINE_BOUND + 40), true, 0);
     rig.caller.send_to(request.as_bytes(), addr(PROXY)).await.expect("sent");
     settle().await;
     assert_eq!(rig.metrics.parse_refusals_answered(), 0, "the request is not refused");
     assert!(rig.caller.try_recv().is_none(), "nothing answers it here");
+    refused_at_the_callee(&rig, &request, &*rig.caller).await;
 }
 
 /// A response is no request at first ingress, whatever its size.
@@ -279,17 +399,15 @@ async fn a_response_past_the_bound_is_relayed() {
     let rig = Rig::new().await;
     let request = invite(&plain_via(), PLAIN_TO, true, 0);
     let forward = rig.forward_of(&request).await.expect("the proxy forwards it");
-    let mut opts = GenerateResponseOpts { to_tag: Some("t".into()), ..Default::default() };
-    opts.extra_headers = vec![sip_message::SipHeader {
+    let long = sip_message::SipHeader {
         name: "X-Long".to_string().into(),
         value: "a".repeat(LINE_BOUND + 100).into(),
-    }];
-    let answer = generate_response(&read(&forward), 486, "As Stated", &opts).expect("the final");
+    };
+    let answer = final_to(&forward, 486, vec![long]);
     rig.worker.send_to(answer.image(), addr(PROXY)).await.expect("sent");
     settle().await;
     let packet = rig.caller.try_recv().expect("the final reaches the caller");
-    assert!(matches!(
-        CustomParser::new().parse(&packet.raw),
-        Ok(SipMessage::Response(r)) if r.status() == 486
-    ));
+    let busy = read_response(&packet.raw);
+    assert_eq!(busy.status(), 486);
+    acked_to_the_worker(&rig, &request, &busy).await;
 }
