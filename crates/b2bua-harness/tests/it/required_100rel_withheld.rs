@@ -1,9 +1,9 @@
 //! A caller requiring `100rel` (RFC 3262 §3) on a call whose strategy keeps
-//! the callee's provisionals from reaching her reliably, by withholding
-//! `100rel` toward the callee and relaying what he sends unreliably: the
-//! stack cannot meet the requirement, so it answers her `420 Bad Extension`
-//! naming `100rel` in `Unsupported` (RFC 3261 §8.2.2.3) before it dials
-//! anyone. Each case ends with its CDR.
+//! the callee's provisionals from reaching her reliably: every strategy shows
+//! her its own unreliable 180, and most withhold `100rel` toward the callee
+//! besides. The stack cannot meet the requirement, so it answers her `420 Bad
+//! Extension` naming `100rel` in `Unsupported` (RFC 3261 §8.2.2.3) before it
+//! dials anyone. Each case ends with its CDR.
 
 use std::time::Duration;
 
@@ -64,6 +64,32 @@ async fn fake_prack_with_no_offer_refuses_a_required_100rel() {
         (5872, 5882, 5892),
         RelayFirst18xStrategy::FakePrack,
         false,
+    )
+    .await;
+}
+
+/// With an offer the promotion offers `100rel` toward the callee, yet shows
+/// the caller an unreliable 180 of its own.
+#[tokio::test(start_paused = true)]
+async fn the_promotion_with_an_offer_refuses_a_required_100rel() {
+    refused_420(
+        "required-100rel-promote-offer",
+        (5875, 5885, 5895),
+        RelayFirst18xStrategy::PromotePemTo200,
+        true,
+    )
+    .await;
+}
+
+/// With an offer `fake-prack` acknowledges the callee's reliable provisionals
+/// itself and shows the caller an unreliable 180.
+#[tokio::test(start_paused = true)]
+async fn fake_prack_with_an_offer_refuses_a_required_100rel() {
+    refused_420(
+        "required-100rel-fake-prack-offer",
+        (5876, 5886, 5896),
+        RelayFirst18xStrategy::FakePrack,
+        true,
     )
     .await;
 }

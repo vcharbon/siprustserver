@@ -231,6 +231,7 @@ mod reoffer_on_an_ended_identity;
 mod repeated_2xx_before_caller_ack;
 mod repeated_uri_parameter;
 mod required_100rel_withheld;
+mod required_tag_withheld;
 mod reroute_limiter_holds;
 mod reroute_realign_copy;
 mod reroute_rejection_tag;
