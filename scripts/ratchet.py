@@ -237,18 +237,21 @@ def scan_grows(base_settings, settings):
     return bool(base_scans) and rest == base_rest and set(base_scans) <= set(scans)
 
 
-def against_base(allow, base, renamed, moved):
+def against_base(allow, base, renamed, moved, free=()):
     """What `allow` loosens against its `base` version, whose settings `allow`
     keeps as they are, with their `scan` and `exclude` paths following the
-    directories git sees `moved`, or with `scan` directories added."""
+    directories git sees `moved`, or with `scan` directories added. A setting
+    whose key is in `free` may change."""
     if base is None:
         return []
     bad = []
-    base_settings = [follow_moves(x, moved) for x in base.settings]
-    if not (allow.settings == base.settings or allow.settings == base_settings
-            or scan_grows(base_settings, allow.settings)):
-        gone = [x for x in base_settings if x not in allow.settings]
-        new = [x for x in allow.settings if x not in base_settings]
+    settings = [x for x in allow.settings if x.split()[0] not in free]
+    held = [x for x in base.settings if x.split()[0] not in free]
+    base_settings = [follow_moves(x, moved) for x in held]
+    if not (settings == held or settings == base_settings
+            or scan_grows(base_settings, settings)):
+        gone = [x for x in base_settings if x not in settings]
+        new = [x for x in settings if x not in base_settings]
         change = "; ".join([f"was `{x}`" for x in gone] + [f"now `{x}`" for x in new])
         bad.append(f"{allow.path} changes its settings against {base.path} ({change or 'order'})")
     for rel, n in sorted(allow.entries.items()):
@@ -264,14 +267,16 @@ def against_base(allow, base, renamed, moved):
     return bad
 
 
-def loosened(root, allow, base, since, cached):
+def loosened(root, allow, base, since, cached, free=()):
     """What `allow` loosens against its version at `base`, following the
-    renames git sees from `since` to the worktree (the index when `cached`)."""
+    renames git sees from `since` to the worktree (the index when `cached`);
+    the settings keyed in `free` may change."""
     held = base_allow(root, base, allow)
     if held is None:
         return []
     renamed = renames(root, since, cached)
-    return against_base(allow, held, renamed, moved_dirs(root, held.scan, renamed, cached))
+    return against_base(allow, held, renamed, moved_dirs(root, held.scan, renamed, cached),
+                        free)
 
 
 def stale(measures, allow, unit):

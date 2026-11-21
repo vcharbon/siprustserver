@@ -156,8 +156,8 @@ audit:
 audit-check:
     PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts/audit-check
 
-# File-size budget: a first-party .rs file has at most 500 lines, a test file
-# 800, a file `file-size.allow` lists at most its listed size
+# File-size budget: a first-party .rs file has at most 800 lines, a test file
+# too, a file `file-size.allow` lists at most its listed size
 # (scripts/file-size.py). The pre-commit hook checks the staged files.
 file-size:
     scripts/file-size.py

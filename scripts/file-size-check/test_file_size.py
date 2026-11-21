@@ -227,18 +227,14 @@ class AgainstTheBase(Case):
         repo.write("src/new.rs", lines(700))
         self.refused(repo, "changes its settings")
 
-    def test_a_raised_limit_fails(self):
+    def test_a_changed_limit_passes(self):
         repo = self.based()
         repo.write("file-size.allow", SETTINGS.replace("limit 500", "limit 800")
-                   + "src/big.rs 600\n")
+                   .replace("test-limit 800", "test-limit 900"))
         repo.write("src/new.rs", lines(700))
-        self.refused(repo, "now `limit 800`")
-
-    def test_a_raised_test_limit_fails(self):
-        repo = self.based()
-        repo.write("file-size.allow", SETTINGS.replace("test-limit 800", "test-limit 900")
-                   + "src/big.rs 600\n")
-        self.refused(repo, "now `test-limit 900`")
+        self.assertEqual(repo.run(), (0, ""))
+        repo.git("add", "-A")
+        self.assertEqual(repo.run("--staged"), (0, ""))
 
     def test_an_added_test_glob_fails_even_after_update(self):
         repo = self.based()

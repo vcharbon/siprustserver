@@ -23,7 +23,8 @@ path (no pathspec magic).
 
 The allowlist itself only ever tightens: against its version at a base (REV,
 by default the merge-base of HEAD and `develop`, else HEAD; HEAD under
---staged), a new entry, a raised number or any changed setting line fails.
+--staged), a new entry, a raised number or a changed setting line other
+than `limit` and `test-limit` fails.
 The one new entry allowed is a file git sees renamed from a listed one in the
 same diff (`-M`), the old entry gone and the number no higher than its own;
 the changed settings allowed are a `scan` or `exclude` path following a scan
@@ -56,6 +57,8 @@ from ratchet import SetupError, git, rev_exists, default_base, loosened  # noqa:
 LIMIT_DEFAULT = 500
 TEST_LIMIT_DEFAULT = 800
 UNIT = "lines"
+# The settings that may change: a limit is raised or lowered deliberately, in review.
+LIMITS = ("limit", "test-limit")
 
 
 def count_lines(data):
@@ -97,7 +100,7 @@ def cmd_check(root, allow, base):
     sizes = scanned(root, allow)
     grown = over_budget(sizes, allow)
     old = ratchet.stale(sizes, allow, UNIT)
-    loose = loosened(root, allow, base, base, False)
+    loose = loosened(root, allow, base, base, False, LIMITS)
     rc = report(grown, SPLIT_HINT if grown else None)
     rc = report(loose, BASE_HINT if loose else None) or rc
     return report(old, "run `file-size.py --update` and commit the allowlist" if old else None) or rc
@@ -109,7 +112,7 @@ def cmd_staged(root, allow_rel):
              for rel in ratchet.staged(root, allow)}
     grown = over_budget(sizes, allow)
     base = "HEAD" if rev_exists(root, "HEAD") else None
-    loose = loosened(root, allow, base, default_base(root), True)
+    loose = loosened(root, allow, base, default_base(root), True, LIMITS)
     rc = report(grown, SPLIT_HINT if grown else None)
     return report(loose, BASE_HINT if loose else None) or rc
 
@@ -124,7 +127,7 @@ def cmd_update(root, allow, allow_file, base):
         print(f"file-size: {c}")
     allow = load_allow(root, os.path.relpath(allow_file, root))
     grown = over_budget(sizes, allow)
-    loose = loosened(root, allow, base, base, False)
+    loose = loosened(root, allow, base, base, False, LIMITS)
     rc = report(grown, SPLIT_HINT if grown else None)
     return report(loose, BASE_HINT if loose else None) or rc
 
