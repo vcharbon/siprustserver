@@ -16,12 +16,14 @@ use sip_txn::timers::{T1, T2, TIMER_H};
 use tokio::time::{sleep, Instant};
 
 use crate::core::dual_face_tests::{
-    dual_face_core_over, header_lines, parse_msg, Fixture, INT_PORT, INT_VIP, W1,
+    caller_invite, caller_src, dual_face_core_over, dual_face_core_routing, header_lines,
+    parse_msg, Fixture, CALLEE, CALLER, INT_PORT, INT_VIP, W1,
 };
 use crate::observability::metrics::{Face, RoutingDecisionKind};
 use crate::registry::static_reg::StaticWorkerRegistry;
 use crate::registry::WorkerEntry;
 use crate::resolver::{HostResolver, ResolverConfig};
+use crate::strategies::forward_all::ForwardAllStrategy;
 use crate::ProxyAddr;
 
 /// The peer's name, which the worker's INVITE and ACK carry in their
@@ -298,4 +300,100 @@ async fn at_an_instance_without_the_invites_entry_the_ack_follows_a_fresh_lookup
 
     sleep(Duration::from_millis(TIMER_H) + Duration::from_secs(1)).await;
     assert!(holder.take_sent().is_empty() && elsewhere.take_sent().is_empty());
+}
+
+/// The peer's answer `status` to `request`, a request of the caller's dialog
+/// the proxy forwarded: its Via lines, From, Call-ID and CSeq echoed
+/// (§8.2.6.2), its To tagged.
+fn answer(status: &str, request: &[u8]) -> SipMessage {
+    let mut head = format!("SIP/2.0 {status}\r\n");
+    for via in header_lines(request, "Via") {
+        head.push_str(&format!("Via: {via}\r\n"));
+    }
+    for name in ["From", "Call-ID", "CSeq"] {
+        head.push_str(&format!("{name}: {}\r\n", header_lines(request, name)[0]));
+    }
+    let to = &header_lines(request, "To")[0];
+    parse_msg(&format!("{head}To: {to};tag=peer-1\r\nContent-Length: 0\r\n\r\n"))
+}
+
+/// The peer answers through the proxy, which relays the answer to the
+/// caller, and nothing else.
+async fn peer_answers_the_caller(fx: &Fixture, response: SipMessage) {
+    let SipMessage::Response(response) = response else { panic!("a response") };
+    let status = response.status();
+    fx.core.handle_response(response, peer(), Face::Internal).await;
+    let sent = fx.take_sent();
+    let [(face, dst, _)] = sent.as_slice() else { panic!("{status} relays once: {sent:?}") };
+    assert_eq!((*face, *dst), ("ext", caller_src()), "the {status} relays to the caller");
+}
+
+/// The caller's CANCEL of its INVITE (§9.1), or its ACK of the peer's 487
+/// (§17.1.1.3).
+fn caller_request(method: &str, call_id: &str) -> SipMessage {
+    let to_tag = if method == "ACK" { ";tag=peer-1" } else { "" };
+    parse_msg(&format!(
+        "{method} sip:bob@{CALLEE}:5060 SIP/2.0\r\n\
+Via: SIP/2.0/UDP {CALLER}:5060;branch=z9hG4bKcaller1;rport\r\n\
+Max-Forwards: 70\r\n\
+From: <sip:alice@{CALLER}>;tag=tag-a\r\n\
+To: <sip:bob@{CALLEE}>{to_tag}\r\n\
+Call-ID: {call_id}\r\n\
+CSeq: 1 {method}\r\n\
+Content-Length: 0\r\n\r\n"
+    ))
+}
+
+/// A caller's INVITE placed by a strategy whose target is the name (the
+/// forward-all cookie names it) leaves for the name's address; the name's
+/// entry expires and the name moves while the peer rings. The caller's CANCEL
+/// goes where the INVITE went (RFC 3261 §9.1): the peer there answers 200 and
+/// 487, and the caller's ACK of the 487 reaches it.
+#[tokio::test(start_paused = true)]
+async fn a_cancel_goes_where_a_named_invite_went_after_the_names_entry_expired() {
+    let call_id = "named-cancel";
+    let name = Arc::new(MovingName::at(AT_INVITE));
+    let reg = Arc::new(StaticWorkerRegistry::from_entries(vec![WorkerEntry::alive(
+        "w1",
+        ProxyAddr::new(W1, 5060),
+    )]));
+    let strategy = Arc::new(ForwardAllStrategy::new(ProxyAddr::new(PEER_NAME, PEER_PORT)));
+    let fx = dual_face_core_routing(reg, strategy, Some(name.clone()));
+
+    fx.core.route_request(&caller_invite(call_id), caller_src(), Face::External).await;
+    sleep(SETTLE).await;
+    let sent = fx.take_sent();
+    let [(face, dst, invite)] = sent.as_slice() else { panic!("one INVITE: {sent:?}") };
+    assert_eq!((*face, *dst), ("int", peer()), "the INVITE leaves for the name's address");
+    let invite = invite.clone();
+    name.move_to(MOVED_TO);
+    peer_answers_the_caller(&fx, answer("180 Ringing", &invite)).await;
+    let past_the_entry =
+        Duration::from_millis(ResolverConfig::default().positive_ttl_ms) + Duration::from_secs(1);
+    sleep(past_the_entry).await;
+
+    let outcome = fx
+        .core
+        .route_request(&caller_request("CANCEL", call_id), caller_src(), Face::External)
+        .await;
+    assert_eq!(outcome.decision, RoutingDecisionKind::Cancel);
+    sleep(SETTLE).await;
+    let sent = fx.take_sent();
+    let [(face, dst, cancel)] = sent.as_slice() else { panic!("one CANCEL: {sent:?}") };
+    assert!(cancel.starts_with(b"CANCEL "), "{}", String::from_utf8_lossy(cancel));
+    assert_eq!((*face, *dst), ("int", peer()), "the CANCEL goes where the INVITE went");
+    let cancel = cancel.clone();
+
+    peer_answers_the_caller(&fx, answer("200 OK", &cancel)).await;
+    peer_answers_the_caller(&fx, answer("487 Request Terminated", &invite)).await;
+    fx.core.route_request(&caller_request("ACK", call_id), caller_src(), Face::External).await;
+    sleep(SETTLE).await;
+    let sent = fx.take_sent();
+    let [(face, dst, ack)] = sent.as_slice() else { panic!("one ACK: {sent:?}") };
+    assert!(ack.starts_with(b"ACK "), "{}", String::from_utf8_lossy(ack));
+    assert_eq!((*face, *dst), ("int", peer()), "the ACK reaches the peer that sent the 487");
+
+    sleep(Duration::from_millis(TIMER_H) + Duration::from_secs(1)).await;
+    let sent = fx.take_sent();
+    assert!(sent.is_empty(), "nothing follows the transaction's end: {sent:?}");
 }
