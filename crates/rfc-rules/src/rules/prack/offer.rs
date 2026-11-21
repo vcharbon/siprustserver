@@ -137,19 +137,21 @@ impl Obligation for Delay2xxOnUnackedReliable1xxWithSdp {
 /// own server transactions.
 pub struct PrackAnswers1xxOffer;
 
-/// A reliable provisional's description read as an offer: where it was first
-/// seen, and whether this vantage recorded enough to decide its PRACK.
+/// A reliable provisional's description read as an offer, keyed by its
+/// Call-ID, early dialog and `RSeq`: where it was first seen, and whether
+/// this vantage recorded enough to decide its PRACK.
 struct Offer {
     msg: usize,
     decidable: bool,
 }
 
+/// Whether each INVITE, by Call-ID and CSeq number, carried the offer: `None`
+/// where a copy's body is not at this vantage.
+type InviteOffers<'a> = BTreeMap<(&'a str, u32), Option<bool>>;
+
 impl Obligation for PrackAnswers1xxOffer {
     fn eval(&self, wire: &WireView<'_>) -> Vec<Finding> {
-        // Per INVITE (call and CSeq): whether it carried the offer, `None`
-        // where a copy's body is not at this vantage; and each offer-bearing
-        // reliable provisional's `RSeq`.
-        let mut invite_offered: BTreeMap<(&str, u32), Option<bool>> = BTreeMap::new();
+        let mut invite_offered = InviteOffers::new();
         let mut offers: BTreeMap<(&str, &str, u64), Offer> = BTreeMap::new();
         let mut out = Vec::new();
 
