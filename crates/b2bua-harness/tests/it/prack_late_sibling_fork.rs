@@ -326,6 +326,22 @@ async fn a_late_forks_reliable_183_is_pracked_here_then_its_early_dialog_lapses(
     caller_hangs_up(a, &expected).await;
 }
 
+/// The fabric holds the late fork's 183 past 64·T1 after the winner's 2xx:
+/// this stack, its UAC, holds that early dialog terminated by then (RFC 3261
+/// §13.2.2.4), so the 183 draws no PRACK and the call stays up on the winner.
+#[tokio::test(start_paused = true)]
+async fn a_late_forks_183_past_the_early_dialog_bound_draws_no_prack() {
+    let name = "b2bua-prack-late-sibling-past-bound";
+    let holds = &[PAST_THE_EARLY_DIALOG_BOUND];
+    let mut r = rung_by_an_early_fork(name, Relay::Transparent, holds).await;
+    late_fork_rings(&mut r, ANSWER).await;
+    let a = winner_answers(r, ANSWER, None).await;
+    a.h.advance(PAST_THE_EARLY_DIALOG_BOUND).await;
+    assert_eq!(a.bob.drain_tu().await, 0, "no PRACK past the bound");
+    let early_only = vec![format!("{EARLY_FORK}: {EARLY_FORK_RSEQ} {} INVITE", a.invite_cseq)];
+    caller_hangs_up(a, &early_only).await;
+}
+
 /// Fake-prack: this stack PRACKed the early fork itself; the late fork's 183
 /// draws a PRACK the same way after the answer, and its 2xx is released.
 #[tokio::test(start_paused = true)]

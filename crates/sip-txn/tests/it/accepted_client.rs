@@ -388,11 +388,11 @@ async fn relinquishing_a_calls_accepted_transactions_leaves_the_others() {
     assert!(stack.drain_peer().is_empty(), "no ACK, no BYE from the layer");
 }
 
-/// RFC 6026 §8.4: an Accepted transaction passes only 2xx up. A provisional
-/// or a non-2xx on its branch is absorbed: nothing reaches the TU and nothing
-/// is sent.
+/// RFC 6026 §8.4: an Accepted transaction passes 2xx up. An unreliable
+/// provisional or a non-2xx on its branch is absorbed: nothing reaches the TU
+/// and nothing is sent.
 #[tokio::test(start_paused = true)]
-async fn an_accepted_transaction_hands_only_2xx_up() {
+async fn an_accepted_transaction_absorbs_an_unreliable_1xx_and_a_non_2xx() {
     let mut stack = Stack::build(5, 64, 64).await;
     let (call_ref, call_id, branch) = ("self|call-A11", "callid-A11", "z9hG4bK-A11");
     let invite = offerless_invite(call_ref, call_id, branch);
@@ -410,6 +410,29 @@ async fn an_accepted_transaction_hands_only_2xx_up() {
     stack.inject(&ok(1, branch, call_id, "t11", &[], "")).await;
     elapse_ms(20).await;
     assert_eq!(responses(&stack.drain_events()), vec![(200, false)], "a 2xx still goes up");
+}
+
+/// RFC 3262 §4: a sibling fork's reliable provisional reaching an Accepted
+/// transaction its call holds goes up to the TU, matched to it, which owes
+/// that fork its PRACK; the layer sends nothing for it.
+#[tokio::test(start_paused = true)]
+async fn an_accepted_transaction_hands_a_sibling_forks_reliable_1xx_up() {
+    let mut stack = Stack::build(5, 64, 64).await;
+    let (call_ref, call_id, branch) = ("self|call-A14", "callid-A14", "z9hG4bK-A14");
+    let invite = offerless_invite(call_ref, call_id, branch);
+    stack.txn.send_request(invite, addr(CALLEE), TxnKind::Invite).await.unwrap();
+    stack.inject(&ok(1, branch, call_id, "t14", &[], "")).await;
+    elapse_ms(20).await;
+    stack.drain_peer();
+    let _ = stack.drain_events();
+
+    let reliable = ["Require: 100rel", "RSeq: 7"];
+    let late =
+        provisional_or_final("183 Session Progress", 1, branch, call_id, "t15", &reliable, "");
+    stack.inject(&late).await;
+    elapse_ms(20).await;
+    assert_eq!(responses(&stack.drain_events()), vec![(183, true)], "it reaches the TU");
+    assert!(stack.drain_peer().is_empty(), "and draws nothing from the layer");
 }
 
 /// After its call is released, a repeat of a 2xx whose ACK the TU sent draws
