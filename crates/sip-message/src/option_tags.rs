@@ -114,7 +114,10 @@ fn is_end_to_end(tag: &str) -> bool {
     END_TO_END_OPTION_TAGS.iter().any(|e| e.eq_ignore_ascii_case(tag))
 }
 
-/// Whether this stack understands `tag` required of it by `req`.
+/// Whether this stack understands `tag` required of it by `req`. A refresh
+/// re-INVITE requiring `100rel` draws 420, neither a 408 nor a 481, so the
+/// session stands and its refresher may refresh again without the requirement
+/// (RFC 4028 §10).
 fn understood(tag: &str, req: &SipRequest) -> bool {
     let names = |t: &str| t.eq_ignore_ascii_case(tag);
     let reinvite = *req.method() == Method::Invite && req.to().tag().is_some();

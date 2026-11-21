@@ -58,8 +58,9 @@ of). A positional read picks a wrong dialog as soon as a leg holds two.
 
    A dialog exists until the BYE or CANCEL ending it completes (§15.1.2), so
    requests crossing it are answered in it. A request below its dialog's
-   last CSeq draws 500 (§12.2.2); one requiring an option tag this stack
-   does not understand draws 420 in place of the table's answer (§8.2.2.3).
+   last CSeq draws 500 (§12.2.2). Past the 481 rows and that 500, one
+   requiring an option tag this stack does not understand draws 420 in place
+   of the table's pass, 200 and 487 (§8.2.2.3).
    An ACK passes on any dialog a 2xx established, ended since or not (RFC
    5407 §2), and is otherwise dropped unanswered (§17.1.1.3), as is one of an
    INVITE the record holds no final sent for on a call no other owner served
