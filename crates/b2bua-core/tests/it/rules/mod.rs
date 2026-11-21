@@ -34,6 +34,7 @@ use std::net::SocketAddr;
 mod ack_leg_body;
 mod answer_a_leg_new_dialog;
 mod answered_2xx_discharge;
+mod authored_final_bound_headers;
 mod body_descriptors;
 mod bye_order;
 mod charging_in_dialog;
