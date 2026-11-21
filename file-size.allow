@@ -20,7 +20,6 @@ crates/b2bua-harness/tests/it/message_ring.rs 831
 crates/b2bua-harness/tests/it/prack_owed_at_final.rs 913
 crates/b2bua-harness/tests/it/prack_reliable_ladder.rs 877
 crates/b2bua-harness/tests/it/reroute_limiter_holds.rs 858
-crates/b2bua-harness/tests/it/session_timer_transparency.rs 818
 crates/b2bua-harness/tests/it/stated_headers.rs 1453
 crates/b2bua-harness/tests/it/suppress_18x.rs 814
 crates/b2bua/src/decision/test_adapter.rs 807

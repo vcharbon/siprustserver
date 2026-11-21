@@ -439,7 +439,8 @@ async fn a_reroute_leg_carries_the_caller_negotiation() {
 /// Under the promote-PEM strategy the callee's 2xx is absorbed: the caller was
 /// answered by a synthetic 200 and never hears the callee's interval, so
 /// nobody would refresh it. The strategy withholds the timer from the leg, as
-/// the 180 strategies withhold `100rel`.
+/// the 180 strategies withhold `100rel`. The caller here offers the timer; one
+/// requiring it is refused 420 (`required_tag_withheld`).
 #[tokio::test(start_paused = true)]
 async fn promote_pem_withholds_the_session_timer_from_the_callee() {
     let s = B2buaScene::with_b2bua("session-timer-promote-pem", |bob_port| {
@@ -450,8 +451,6 @@ async fn promote_pem_withholds_the_session_timer_from_the_callee() {
         )
     })
     .await;
-    // The caller offers the timer and states the interval; one requiring it
-    // is refused 420 (`required_tag_withheld`).
     let mut call = s
         .alice
         .invite(&s.bob)
