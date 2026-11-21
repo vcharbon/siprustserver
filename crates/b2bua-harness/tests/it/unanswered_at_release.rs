@@ -269,10 +269,10 @@ async fn a_reinvite_reaching_the_b2bua_without_its_uri_params_is_answered_481_at
 
 /// bob's INFO reaches the B2BUA with no `callRef` and kills its handler; the
 /// reaper's BYEs end both dialogs and the call is released with the INFO
-/// unanswered. The release forgets its server transaction, so a copy of the
-/// INFO meets the orphan path instead of a transaction absorbing it (RFC
-/// 3261 §17.2.2). The proxy absorbs bob's own copies and sends none of its
-/// own: the forgotten transaction is what the run shows.
+/// unanswered. The release forgets its server transaction, so the proxy's
+/// Timer E copy of the INFO (RFC 3261 §17.1.2.2) meets the orphan path
+/// instead of a transaction absorbing it (§17.2.2): it draws 481, which the
+/// proxy relays to bob.
 #[tokio::test(start_paused = true)]
 async fn an_info_reaching_the_b2bua_without_its_uri_params_is_forgotten_at_release() {
     let (s, _proxy) = rewritten_scene(
@@ -289,7 +289,7 @@ async fn an_info_reaching_the_b2bua_without_its_uri_params_is_forgotten_at_relea
     s.bob.receive("ACK").await;
     let mut bob_dialog = uas.dialog();
 
-    let _info = bob_dialog.send_request(InDialogMethod::Info).send().await;
+    let mut info = bob_dialog.send_request(InDialogMethod::Info).send().await;
     let mut a_bye = s.alice.try_receive("BYE").await.expect("the reaper sends alice a BYE");
     let mut b_bye = s.bob.try_receive("BYE").await.expect("the reaper sends bob a BYE");
     a_bye.respond(200, "OK").await;
@@ -301,6 +301,9 @@ async fn an_info_reaching_the_b2bua_without_its_uri_params_is_forgotten_at_relea
         s.b2bua.txn_metrics().released_unanswered_forgotten(),
         1,
         "the release forgets the INFO's server transaction"
+    );
+    info.try_expect(481).await.expect(
+        "the proxy's copy of the INFO reaches the orphan path, not a transaction absorbing it",
     );
     s.b2bua.assert_fully_reaped();
     let _ = s.finish().await;

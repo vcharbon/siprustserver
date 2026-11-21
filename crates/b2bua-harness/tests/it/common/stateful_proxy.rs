@@ -25,6 +25,9 @@
 //! - A non-2xx final to a forwarded INVITE is ACKed downstream by this hop,
 //!   its repeats re-ACKed and absorbed, and the caller's ACK to it absorbed
 //!   (§17.1.1.3); a 2xx and its repeats are forwarded (§16.7).
+//! - A non-INVITE it forwards is sent again on Timer E, every T1 doubling up
+//!   to T2, until a final arrives or Timer F ends its client transaction
+//!   (§17.1.2.2, UDP).
 //! - Started with a second target ([`spawn_forking_proxy`]), it forks every
 //!   dialog-creating INVITE in parallel (§16.6): one branch where Route or
 //!   Request-URI names, one to the second target. Every provisional and every
@@ -41,6 +44,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
+use std::time::Duration;
 
 use scenario_harness::{
     forwarded_request, forwarded_response, request_next_hop, response_next_hop, Agent, Harness,
@@ -54,7 +58,12 @@ use sip_message::generators::{
 use sip_message::header::{HeaderName, RecordRouteEntry, RouteEntry, Uri};
 use sip_message::hops::hops_exhausted;
 use sip_message::{SipRequest, SipResponse};
-use tokio::task::JoinHandle;
+use tokio::task::{AbortHandle, JoinHandle, JoinSet};
+
+/// RFC 3261 §17.1.2.2 timers of a forwarded non-INVITE, at the defaults.
+const T1: Duration = Duration::from_millis(500);
+const T2: Duration = Duration::from_secs(4);
+const TIMER_F: Duration = Duration::from_millis(64 * 500);
 
 /// A running third-party proxy. Aborts its loop on drop.
 pub struct StatefulProxy {
@@ -328,6 +337,11 @@ struct Proxy {
     /// Downstream branch of a fork → (upstream branch, branch index).
     fork_branches: HashMap<String, (String, usize)>,
     routing: DialogRouting,
+    /// The Timer E ladders of the forwarded non-INVITEs, aborted with the
+    /// proxy.
+    retransmits: JoinSet<()>,
+    /// Downstream branch → its Timer E ladder, while it awaits a final.
+    timer_e: HashMap<String, AbortHandle>,
 }
 
 impl Proxy {
@@ -403,9 +417,28 @@ impl Proxy {
                     .insert(branch, InviteClient { forwarded, next_hop, final_status: None });
             }
             _ => {
-                self.forward(&req, &branch).await;
+                let (forwarded, next_hop) = self.forward(&req, &branch).await;
+                self.arm_timer_e(forwarded, next_hop);
             }
         }
+    }
+
+    /// Send the forwarded non-INVITE `forwarded` to `next_hop` again on Timer
+    /// E until its final arrives ([`Self::on_response`]) or Timer F.
+    fn arm_timer_e(&mut self, forwarded: SipRequest, next_hop: SocketAddr) {
+        let downstream = forwarded.top_via().branch().unwrap_or_default().to_string();
+        let agent = self.agent().clone();
+        let wire = forwarded.image().to_vec();
+        let ladder = self.retransmits.spawn(async move {
+            let (mut interval, mut elapsed) = (T1, Duration::ZERO);
+            while elapsed + interval < TIMER_F {
+                tokio::time::sleep(interval).await;
+                elapsed += interval;
+                let _ = agent.try_send_datagram(&wire, next_hop).await;
+                interval = (interval * 2).min(T2);
+            }
+        });
+        self.timer_e.insert(downstream, ladder);
     }
 
     async fn on_response(&mut self, resp: SipResponse) {
@@ -414,6 +447,11 @@ impl Proxy {
             return;
         }
         let downstream = resp.top_via().branch().unwrap_or_default().to_string();
+        if method != "INVITE" && resp.status() >= 200 {
+            if let Some(ladder) = self.timer_e.remove(&downstream) {
+                ladder.abort();
+            }
+        }
         if let Some((up, index)) = self.fork_branches.get(&downstream).cloned() {
             self.on_fork_response(resp, up, index).await;
             return;
