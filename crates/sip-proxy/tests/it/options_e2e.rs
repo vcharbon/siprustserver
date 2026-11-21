@@ -107,7 +107,7 @@ struct Probed {
 
 async fn probed(name: &str, mode: Mode) -> Probed {
     let h = Harness::with_transit_delay(name, 0);
-    let (worker_ep, worker_sock) = h.bind_sut("b2b-1", "127.0.0.1:5071").await;
+    let (worker_ep, worker_sock) = h.bind_peer("b2b-1", "127.0.0.1:5071").await;
     let worker = Arc::new(Mutex::new(Worker { mode, incarnation: 1 }));
     let _responder = spawn_responder(worker_ep, worker.clone());
     let registry = Arc::new(SimulatedWorkerRegistry::with_clock(
@@ -205,7 +205,7 @@ async fn a_new_incarnation_at_the_same_address_resets_the_worker_to_unknown() {
 #[tokio::test(start_paused = true)]
 async fn a_restart_answered_200_is_read_alive_in_one_write() {
     let h = Harness::with_transit_delay("options-e2e-restart-200", 0);
-    let (worker_ep, worker_sock) = h.bind_sut("b2b-1", "127.0.0.1:5071").await;
+    let (worker_ep, worker_sock) = h.bind_peer("b2b-1", "127.0.0.1:5071").await;
     let worker = Arc::new(Mutex::new(Worker { mode: Mode::Accepting, incarnation: 1 }));
     let _responder = spawn_responder(worker_ep, worker.clone());
     let registry = Arc::new(SimulatedWorkerRegistry::with_clock(
@@ -251,8 +251,8 @@ async fn a_restart_answered_200_is_read_alive_in_one_write() {
 async fn the_stale_sweep_floors_a_silent_worker_and_never_a_refusing_one() {
     let h = Harness::with_transit_delay("options-e2e-refusing-sweep", 0);
     let clock = Clock::test_at(0);
-    let (refusing_ep, refusing_sock) = h.bind_sut("refusing", "127.0.0.1:5071").await;
-    let (silent_ep, silent_sock) = h.bind_sut("silent", "127.0.0.1:5072").await;
+    let (refusing_ep, refusing_sock) = h.bind_peer("refusing", "127.0.0.1:5071").await;
+    let (silent_ep, silent_sock) = h.bind_peer("silent", "127.0.0.1:5072").await;
     let worker = |mode| Arc::new(Mutex::new(Worker { mode, incarnation: 1 }));
     let _r1 = spawn_responder(refusing_ep, worker(Mode::Refusing));
     let _r2 = spawn_responder(silent_ep, worker(Mode::Bare));
@@ -338,7 +338,7 @@ impl sip_proxy::registry::control::WorkerRegistryControl for RecordingControl {
 async fn single_packet_loss_is_absorbed_by_timer_e_retransmit() {
     let h = Harness::with_transit_delay("options-retransmit", 0);
     let worker_addr = "127.0.0.1:5072";
-    let (worker_ep, worker_sock) = h.bind_sut("b2b-rtx", worker_addr).await;
+    let (worker_ep, worker_sock) = h.bind_peer("b2b-rtx", worker_addr).await;
 
     let _responder = tokio::spawn(async move {
         let parser = CustomParser::new();

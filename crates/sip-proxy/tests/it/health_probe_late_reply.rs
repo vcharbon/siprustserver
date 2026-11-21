@@ -240,7 +240,7 @@ fn unknown_registry(worker_sock: std::net::SocketAddr) -> Arc<SimulatedWorkerReg
 #[tokio::test(start_paused = true)]
 async fn late_replies_past_the_reap_window_keep_the_worker_alive() {
     let h = Harness::with_transit_delay("probe-late-reply", 5);
-    let (worker_ep, worker_sock) = h.bind_sut(WORKER_ID, "127.0.0.1:5071").await;
+    let (worker_ep, worker_sock) = h.bind_peer(WORKER_ID, "127.0.0.1:5071").await;
 
     let responder = spawn_late_responder(
         worker_ep,
@@ -285,7 +285,7 @@ async fn late_replies_past_the_reap_window_keep_the_worker_alive() {
 #[tokio::test(start_paused = true)]
 async fn stable_alive_across_sustained_late_replies() {
     let h = Harness::with_transit_delay("probe-late-reply-sustained", 5);
-    let (worker_ep, worker_sock) = h.bind_sut(WORKER_ID, "127.0.0.1:5073").await;
+    let (worker_ep, worker_sock) = h.bind_peer(WORKER_ID, "127.0.0.1:5073").await;
     let responder = spawn_late_responder(
         worker_ep,
         Duration::from_millis(150),
@@ -393,7 +393,7 @@ async fn uncorrelated_reply_cannot_revive_dead_worker_correlated_one_does() {
 #[tokio::test(start_paused = true)]
 async fn branch_correlated_reply_from_moved_worker_cannot_revive() {
     let h = Harness::with_transit_delay("probe-stale-origin", 5);
-    let (worker_ep, worker_sock) = h.bind_sut(WORKER_ID, "127.0.0.1:5077").await;
+    let (worker_ep, worker_sock) = h.bind_peer(WORKER_ID, "127.0.0.1:5077").await;
 
     let (responder, ctl) = spawn_capture_responder(worker_ep);
 
