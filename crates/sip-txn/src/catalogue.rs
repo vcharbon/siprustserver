@@ -63,7 +63,7 @@ pub const SERVER_FINAL_UNSEEN_BRANCH: Family = Family::counter(
 pub const LATE_2XX_DROPPED: Family = Family::counter(
     "b2bua_txn_late_2xx_dropped_total",
     Labels::None,
-    "2xx responses an INVITE client transaction absorbed, neither ACKed nor handed up, because it owes them nothing (RFC 6026 sections 7.2, 8.4): it took a non-2xx final, or, a re-INVITE, it gave up at Timer B with no response. Each is a peer answering a round that already ended; it repeats the 2xx to 64*T1 and then ends the dialog with a BYE.",
+    "2xx responses a re-INVITE client transaction absorbed, neither ACKed nor handed up, because it owes them nothing (RFC 6026 sections 7.2, 8.4): it took a non-2xx final, or it gave up at Timer B with no response. Each is a peer answering a round that already ended; it repeats the 2xx to 64*T1 and then ends the dialog with a BYE.",
 );
 
 pub const VIA_STAMPS_UNWRITTEN: Family = Family::counter(

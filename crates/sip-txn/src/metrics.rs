@@ -88,9 +88,9 @@ pub(crate) struct MetricsInner {
     /// taken its final or is gone — §9.1/§9.2: a CANCEL has no effect on an
     /// answered request; sending it could put a pre-1xx CANCEL on the wire.
     pub cancels_suppressed_on_final: AtomicU64,
-    /// 2xx responses an INVITE client txn absorbed because it owes them
-    /// nothing (RFC 6026 §7.2, §8.4): it took a non-2xx final, or, a
-    /// re-INVITE, it gave up at Timer B with no response (counter).
+    /// 2xx responses a re-INVITE client txn absorbed because it owes them
+    /// nothing (RFC 6026 §7.2, §8.4): it took a non-2xx final, or it gave up
+    /// at Timer B with no response (counter).
     pub late_2xx_dropped: AtomicU64,
     /// Every repeat this layer put on the wire — a transaction-ladder rung or
     /// a cached response replayed to a retransmitted request — by

@@ -28,7 +28,7 @@ impl TransactionMetrics {
         self.inner.cancels_suppressed_on_final.load(Ordering::Relaxed)
     }
 
-    /// 2xx responses absorbed by an INVITE client txn that owes them nothing
+    /// 2xx responses absorbed by a re-INVITE client txn that owes them nothing
     /// (counter).
     pub fn late_2xx_dropped(&self) -> u64 {
         self.inner.late_2xx_dropped.load(Ordering::Relaxed)

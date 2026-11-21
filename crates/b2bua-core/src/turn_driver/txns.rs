@@ -21,25 +21,39 @@ pub(super) struct ClientTxns {
     /// The transactions a final completed: a non-INVITE's, or an INVITE's
     /// non-2xx (§17.1.1.2, §17.1.2.2).
     completed: BTreeSet<Key>,
+    /// The transactions of the re-INVITEs among them: INVITEs sent inside a
+    /// dialog, under a To-tag.
+    reinvites: BTreeSet<Key>,
 }
 
 impl ClientTxns {
     /// The transactions of `invite`, sent as the call was dialled.
     pub(super) fn of(invite: &SipRequest) -> Self {
         let mut txns = Self::default();
-        txns.open.extend(key_of_request(invite));
+        txns.open_one(invite);
         txns
     }
 
     /// The transactions of the requests `result` sends.
     pub(super) fn sent(&mut self, result: &HandlerResult) {
-        self.open.extend(keys(result));
+        for req in requests(result) {
+            self.open_one(req);
+        }
+    }
+
+    /// The transaction `req` opens.
+    fn open_one(&mut self, req: &SipRequest) {
+        let Some(key) = key_of_request(req) else { return };
+        if req.method() == Method::Invite && req.to().tag().is_some() {
+            self.reinvites.insert(key.clone());
+        }
+        self.open.insert(key);
     }
 
     /// The transactions of the requests `result` sent, which a copy whose
     /// write was lost opened: none of them is this node's.
     pub(super) fn lost(&mut self, result: &HandlerResult) {
-        for key in keys(result) {
+        for key in requests(result).filter_map(key_of_request) {
             self.open.remove(&key);
         }
     }
@@ -51,12 +65,14 @@ impl ClientTxns {
     }
 
     /// Whether `event` is a final on a completed client transaction, which
-    /// absorbs it: a repeat of its final, or a 2xx to an INVITE that took a
-    /// non-2xx (RFC 6026 §8.4).
+    /// absorbs it: a repeat of its final, or a 2xx to a re-INVITE that took a
+    /// non-2xx (RFC 6026 §8.4). A dialling INVITE's hands that 2xx up.
     pub(super) fn absorbs(&self, event: &CallEvent) -> bool {
-        let completed =
-            |r: &SipResponse| key_of_response(r).is_some_and(|k| self.completed.contains(&k));
-        response(event).is_some_and(|r| r.status() >= 200 && completed(r))
+        let Some(resp) = response(event) else { return false };
+        let Some(key) = key_of_response(resp).filter(|k| self.completed.contains(k)) else {
+            return false;
+        };
+        completes(resp) || (resp.status() >= 200 && self.reinvites.contains(&key))
     }
 
     /// The transaction `event` answers, completed by its final.
@@ -86,10 +102,10 @@ fn response(event: &CallEvent) -> Option<&SipResponse> {
     }
 }
 
-/// The transactions of the requests `result` sends.
-fn keys(result: &HandlerResult) -> impl Iterator<Item = Key> + '_ {
+/// The requests `result` sends.
+fn requests(result: &HandlerResult) -> impl Iterator<Item = &SipRequest> + '_ {
     result.effects.outbound.iter().filter_map(|e| match &e.body {
-        OutboundBody::Request(r) => key_of_request(r),
+        OutboundBody::Request(r) => Some(r),
         _ => None,
     })
 }

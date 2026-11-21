@@ -32,7 +32,8 @@ pub(super) enum TxnState {
     Trying,
     Proceeding,
     /// A final sent or received; held for Timer D/H/J. An INVITE client txn
-    /// here took a non-2xx and absorbs a later 2xx (RFC 6026 §8.4).
+    /// here took a non-2xx; a re-INVITE's absorbs a later 2xx (RFC 6026
+    /// §8.4), a dialling INVITE's hands it up.
     Completed,
     /// INVITE server txn whose non-2xx final is ACKed (RFC 3261 §17.2.1):
     /// held for Timer I, absorbing ACK retransmissions and any further final
@@ -285,18 +286,18 @@ impl Transaction {
         self.id.as_ref().role()
     }
 
-    /// Whether this client INVITE transaction owes a 2xx nothing, neither its
-    /// ACK nor its delivery (RFC 6026 §7.2): in Completed it takes only
-    /// repeats of its non-2xx final (§8.4), and a re-INVITE that gave up at
-    /// Timer B with no response is over (RFC 3261 §17.1.1.2). The hold of a
-    /// dialling INVITE that gave up still takes a 2xx: the dialog it confirms
-    /// is ACKed and ended (§13.2.2.4, §15).
+    /// Whether this client re-INVITE transaction owes a 2xx nothing, neither
+    /// its ACK nor its delivery (RFC 6026 §7.2): in Completed it takes only
+    /// repeats of its non-2xx final (§8.4), and one that gave up at Timer B
+    /// with no response is over (RFC 3261 §17.1.1.2). A dialling INVITE's
+    /// transaction still hands a 2xx up, in Completed or held after it gave
+    /// up: the dialog it confirms is ACKed and ended (§13.2.2.4, §15).
     pub(super) fn owes_2xx_nothing(&self) -> bool {
-        let reinvite = self.original_request.as_deref().is_some_and(|r| r.to().tag().is_some());
+        let reinvite = self.kind == TxnKind::Invite
+            && self.original_request.as_deref().is_some_and(|r| r.to().tag().is_some());
         let over_at_timer_b =
             self.lifetime.gave_up() && self.timeout_kind == TxnTimeoutKind::Response;
-        self.kind == TxnKind::Invite
-            && (self.state == TxnState::Completed || (reinvite && over_at_timer_b))
+        reinvite && (self.state == TxnState::Completed || over_at_timer_b)
     }
 
     /// The From-tag of the caller whose tagless INVITE opened this server
