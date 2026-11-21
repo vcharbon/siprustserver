@@ -160,7 +160,7 @@ worker:
   # (workers never resolve an external name). Empty leaves the runner default.
   dest: ""
   # The Secret holding the key the workers share to sign the via-extension
-  # on their own requests (ADR-0055 §12), key `key` (16 to 64 bytes). The
+  # on their own requests (ADR-0055 §12), key `key` (32 to 64 bytes). The
   # front proxy signs its dead notices to the workers with it (ADR-0050 §3).
   # Required with `replication.enabled`: the chart never draws it, so every
   # render (helm template, GitOps) yields the same pods on the same key.
@@ -285,7 +285,9 @@ proxy:
     cpsSize: null
   # The stickiness-cookie signing key both proxies share (ADR-0046), keys
   # `kid` and `key`, in the Secret `existingSecret` names; required, so every
-  # render (helm template, GitOps) yields the same pods on the same key.
+  # render (helm template, GitOps) yields the same pods on the same key. The
+  # proxy reads `key` as text of at least 32 bytes (`openssl rand -base64 32`)
+  # and refuses to boot on a shorter one.
   # `drawInCluster` (a release installed against its cluster only, the kind
   # lab): with no `existingSecret` the chart keeps one Secret
   # (sip-front-proxy-hmac) whose key is drawn on the first install and read

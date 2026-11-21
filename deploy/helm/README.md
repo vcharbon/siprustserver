@@ -104,13 +104,13 @@ requirements are `deploy/README.md`'s.
 
 The proxy's intake knobs are values: `proxy.recvShards`
 (`PROXY_RECV_SHARDS`), `proxy.selfGate.cpsRate` / `cpsSize`
-(`PROXY_SELF_GATE_CPS_RATE` / `_SIZE`); null keeps the runner default. A rate
-set by hand is above the deployment's whole new-call rate, which either proxy
-admits alone. The overload bands, hysteresis and AIMD factors (`LB_ELU_*`,
-`LB_BAND_HYSTERESIS`, `LB_AIMD_*`) go through `proxy.env`; unset, they take the
-runner's defaults, which are calibration starting points, not measured values
-(ADR-0009 X6).
+(`PROXY_SELF_GATE_CPS_RATE` / `_SIZE`); null keeps the runner default.
 `check/test_downstream.py` builds such a product chart and checks each point.
+A rate set by hand is above the deployment's whole new-call rate: when one
+proxy is lost, the other admits all of it. The overload bands, hysteresis, AIMD
+factors and per-worker caps (`LB_ELU_*`, `LB_BAND_HYSTERESIS`, `LB_AIMD_*`,
+`LB_CAP_*`) go through `proxy.env`; unset, they take the runner's defaults,
+which are calibration starting points, not measured values (ADR-0009 X6).
 
 `sizing` computes the capacity values from a profile and measured per-call
 costs instead: the workers' call, transaction and RSS ceilings and memory,
@@ -126,7 +126,9 @@ without a cluster, so a key drawn at render would change at every render. Only
 a release installed against its cluster may set `proxy.hmac.drawInCluster`
 (the kind lab does): the chart then keeps the Secret `sip-front-proxy-hmac`,
 its key drawn on the first install and read back by every upgrade through
-`lookup`, `proxy.hmac.kid` applying to that first draw only.
+`lookup`, `proxy.hmac.kid` applying to that first draw only. The proxy reads
+the Secret's `key` as text of at least 32 bytes, such as the output of
+`openssl rand -base64 32`, and refuses to boot on a shorter one.
 
 ## Deployment requirements
 

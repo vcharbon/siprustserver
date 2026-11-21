@@ -182,9 +182,9 @@ impl ProxyConfig {
                      memo of {held} calls/s at PROXY_BRANCH_MEMO_MEAN_RING_MS={}, \
                      PROXY_BRANCH_MEMO_INVITES_PER_CALL={} and an INVITE entry cap of {} ms \
                      (PROXY_INVITE_TXN_TIMEOUT_SEC + Timer H), below \
-                     PROXY_SELF_GATE_CPS_RATE={} (above the deployment's whole new-call rate, \
-                     which either proxy of the pair admits alone): admitted calls would push out \
-                     the entries their CANCEL and ACK are routed by",
+                     PROXY_SELF_GATE_CPS_RATE={} (which must exceed the deployment's whole \
+                     new-call rate): admitted calls would push out the entries their CANCEL and \
+                     ACK are routed by",
                     branch_memo.max_entries,
                     branch_memo.max_bytes,
                     branch_memo.mean_ring_ms,

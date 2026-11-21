@@ -91,16 +91,17 @@
 //!   PROXY_HMAC_KEY   stickiness cookie secret, ≥ 32 bytes  (REQUIRED, no
 //!                    default; every proxy of a cluster shares it); a key
 //!                    derived from it keys the To-tags of the proxy's own finals
-//!   PROXY_CLUSTER_KEY  the workers' shared key, signing dead notices (none)
+//!   PROXY_CLUSTER_KEY  the workers' shared key, 32..64 bytes, signing dead
+//!                    notices (none)
 //!   HEALTH_INTERVAL_MS / HEALTH_TIMEOUT_MS  OPTIONS probe tick and reply
 //!                    window, ms ≥ 1                  (default 1000 / 1600)
 //!   HEALTH_THRESHOLD  consecutive misses that mark a worker Dead, ≥ 1
 //!                    (default 2)
 //!   HEALTH_ISOLATION_MS  no worker answer for this long: /fitz unfit
 //!                    `isolated`, ms ≥ HEALTH_INTERVAL_MS + 500 (default 2000)
-//!   The band, hysteresis and AIMD defaults below are calibration starting
-//!   points, not measured values (ADR-0009 X6): retune them against an
-//!   overload sweep.
+//!   The band, hysteresis, AIMD and cap defaults below (LB_*) are calibration
+//!   starting points, not measured values (ADR-0009 X6): retune them against
+//!   an overload sweep.
 //!   LB_ELU_SOFT / LB_ELU_HARD / LB_ELU_CRITICAL  worker ELU bands, each in
 //!                    (0, 1], soft < hard < critical (default 0.4 / 0.5 / 0.65)
 //!   LB_BAND_HYSTERESIS  in [0, 1), below the narrower band gap (default 0.05)
@@ -123,8 +124,9 @@
 //!   PROXY_SELF_GATE_ELU_CRITICAL  ELU shed threshold, (0, 1] (default 0.80)
 //!   PROXY_SELF_GATE_CPS_SIZE      CPS bucket capacity, ≥ 1 (default 50)
 //!   PROXY_SELF_GATE_CPS_RATE      CPS bucket refill /s, ≥ 1 (default 100):
-//!                    above the deployment's whole new-call rate, which
-//!                    either proxy of an active pair admits alone
+//!                    above the deployment's whole new-call rate: when one
+//!                    proxy of an active pair is lost, the other admits all
+//!                    of it
 //!   PROXY_RETRY_AFTER_JITTER_SEC  spread added to a refusal's Retry-After
 //!                    base, seconds 0..3600; every copy of one request draws
 //!                    the same value                           (default 5)

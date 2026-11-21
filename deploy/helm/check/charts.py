@@ -85,7 +85,7 @@ def workloads(docs: list[Doc]) -> list[Doc]:
 
 
 def secret_key_bytes(secret: Doc) -> bytes:
-    """The signing key the proxy reads: the Secret's value is base64 text of the bytes."""
+    """The random bytes the drawn key encodes; the proxy reads their base64 text as its key."""
     text = base64.b64decode(secret["data"]["key"])
     return base64.b64decode(text)
 
