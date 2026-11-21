@@ -57,12 +57,11 @@ of). A positional read picks a wrong dialog as soon as a leg holds two.
    | `Retired` | PRACK passes on the caller face (RFC 3262 §3); others 481, or as `Ending` while its release BYE is in flight |
 
    A dialog exists until the BYE or CANCEL ending it completes (§15.1.2), so
-   requests crossing it are answered in it: a 200 the gate sends goes no
-   further, and a 487 refuses what the dialog will no longer act on. A
-   request below its
-   dialog's last CSeq draws 500 (§12.2.2). An ACK passes on any dialog a 2xx
-   established, ended since or not (RFC 5407 §2), and is otherwise dropped
-   unanswered (§17.1.1.3), as is one of an INVITE the record holds no final
+   requests crossing it are answered in it. A request below its dialog's
+   last CSeq draws 500 (§12.2.2); one requiring an option tag this stack
+   does not understand draws 420 in place of the table's answer (§8.2.2.3).
+   An ACK passes on any dialog a 2xx established, ended since or not (RFC
+   5407 §2), and is otherwise dropped unanswered (§17.1.1.3), as is one of an INVITE the record holds no final
    sent for on a call no other owner served (ADR-0055 §4); a CANCEL is matched
    by transaction (§9.1). A request with no To-tag names no dialog: one of a
    method carried only in a dialog draws 481 under a minted tag (§8.2.6.2);

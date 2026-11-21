@@ -24,7 +24,11 @@
 //! no further; any other request, an INVITE, UPDATE, REFER or SUBSCRIBE among
 //! them, is answered 487 (§21.4.25). A request below its dialog's last CSeq
 //! draws 500 (§12.2.2); one the gate passes or answers sets that last CSeq
-//! ([`note_in_order`]). An ACK passes on a dialog a 2xx established, ended by
+//! ([`note_in_order`]). A request of a method this stack carries in a dialog
+//! that the gate would pass, absorb or terminate, and that requires an option
+//! tag this stack does not understand, draws 420 instead, naming those tags
+//! in `Unsupported` (§8.2.2.3, [`Verdict::BadExtension`]): nothing reaches
+//! the rules or the peer, and the dialog and its session stay as they were. An ACK passes on a dialog a 2xx established, ended by
 //! a BYE since or not (RFC 5407 §2); it is never answered (§17.1.1.3), so one
 //! the gate refuses is dropped. An ACK naming an INVITE on its leg for which
 //! the record holds no final sent reaches the rules only on a call another
@@ -46,6 +50,7 @@ use b2bua_sdk::event::CallEvent;
 use call::helpers::{response_origin, Resolved, ResponseFacts, ResponseOrigin};
 use call::{Call, Dialog, DialogEnd, DialogState};
 use sip_message::generators::InDialogMethod;
+use sip_message::header::Unsupported;
 use sip_message::{Method, SipMessage, SipRequest, SipResponse};
 
 use crate::config::B2buaConfig;
@@ -66,6 +71,9 @@ pub enum Verdict {
     Absorbed(Resolved),
     /// A request its ending dialog will not act on: 487 (§21.4.25).
     Terminated(Resolved),
+    /// A request requiring option tags this stack does not understand: 420,
+    /// its `Unsupported` listing exactly those (§8.2.2.3).
+    BadExtension(Resolved, Unsupported),
     /// An ACK naming no dialog that takes it: dropped unanswered (§17.1.1.3).
     Drop,
     /// An ACK of an INVITE the record holds no final sent for, on a call no
@@ -89,6 +97,7 @@ impl Verdict {
             Verdict::OutOfOrder => Some(500),
             Verdict::Absorbed(_) => Some(200),
             Verdict::Terminated(_) => Some(487),
+            Verdict::BadExtension(..) => Some(420),
             Verdict::Pass(_)
             | Verdict::Drop
             | Verdict::UnexplainedAck
@@ -100,8 +109,16 @@ impl Verdict {
     /// The dialog a request the gate answers was taken in order on, if any.
     pub fn in_order(&self) -> Option<&Resolved> {
         match self {
-            Verdict::Absorbed(resolved) | Verdict::Terminated(resolved) => Some(resolved),
-            _ => None,
+            Verdict::Absorbed(resolved)
+            | Verdict::Terminated(resolved)
+            | Verdict::BadExtension(resolved, _) => Some(resolved),
+            Verdict::Pass(_)
+            | Verdict::NoDialog
+            | Verdict::OutOfOrder
+            | Verdict::Drop
+            | Verdict::UnexplainedAck
+            | Verdict::Stray
+            | Verdict::RoundEnded => None,
         }
     }
 }
@@ -165,7 +182,20 @@ pub fn request_verdict(call: &Call, leg_id: &str, req: &SipRequest) -> Verdict {
     if *method != Method::Ack && dialog.peer_cseq.is_some_and(|last| cseq < last) {
         return Verdict::OutOfOrder;
     }
-    taken(Resolved { dialog: Some(dialog.id()), record: None })
+    let resolved = Resolved { dialog: Some(dialog.id()), record: None };
+    match bad_extension(req) {
+        Some(unsupported) => Verdict::BadExtension(resolved, unsupported),
+        None => taken(resolved),
+    }
+}
+
+/// The option tags `req` requires that this stack does not understand (RFC
+/// 3261 §8.2.2.3, [`sip_message::option_tags::not_understood`]), on a method
+/// this stack carries in a dialog: any other method draws its rules' 405 or
+/// 489 first (§8.2.1).
+fn bad_extension(req: &SipRequest) -> Option<Unsupported> {
+    InDialogMethod::try_from(req.method()).ok()?;
+    sip_message::option_tags::not_understood(req)
 }
 
 /// What the gate makes of a request with no To-tag, which names no dialog

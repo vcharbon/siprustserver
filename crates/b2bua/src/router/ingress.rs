@@ -12,9 +12,10 @@
 //! turn, a copy's included, carries the setup budget from its own receipt, a
 //! re-ask's a fresh one ([`SetupBudget`]).
 
+use std::net::SocketAddr;
 use std::sync::Arc;
 
-use sip_message::SipMessage;
+use sip_message::{SipMessage, SipRequest};
 use tokio::time::Instant;
 
 use super::admit;
@@ -24,7 +25,7 @@ use super::peer_metrics::classify_b2bua_peer;
 use super::resolve::{
     attributed_on_resolution, initial_invite_copy, replica_takeover, resolve, InitialInvite,
 };
-use super::responses::build_options_health_response;
+use super::responses::{build_420, build_options_health_response};
 use super::turn::Turn;
 use super::txn_event::Arrival;
 use super::unroutable::Lookup;
@@ -108,17 +109,7 @@ pub(super) async fn on_event(
     if let CallEvent::Sip { message, src, .. } = &event {
         if let SipMessage::Request(req) = message.as_ref() {
             if req.method() == "OPTIONS" && req.to().tag().is_none() {
-                let resp = build_options_health_response(
-                    &ctx.readiness,
-                    &ctx.overload,
-                    &ctx.options_tagger,
-                    req,
-                    &ctx.config.node_capabilities,
-                );
-                if let Ok(resp) = resp {
-                    let _ = ctx.txn.send_response(resp, super::reply_to::reply_to(req, *src)).await;
-                }
-                super::dead_verdict::on_options(ctx, req);
+                answer_keepalive(ctx, req, *src).await;
                 return;
             }
         }
@@ -285,6 +276,32 @@ async fn attach_arrival(ctx: &RouterCtx, event: &CallEvent, call_ref: &str) {
     }
     if let Some(key) = sip_txn::ServerTxnKey::of(req) {
         let _ = ctx.txn.attach_server_to_call(key, call_ref).await;
+    }
+}
+
+/// Answer `req`, an out-of-dialog OPTIONS from `src`, with this node's health
+/// report, then take the proxy's dead verdicts it carries. One requiring an
+/// option tag this stack does not understand is answered 420 naming those
+/// tags (RFC 3261 §8.2.2.3), and its verdicts are not taken.
+async fn answer_keepalive(ctx: &Arc<RouterCtx>, req: &SipRequest, src: SocketAddr) {
+    let refused = sip_message::option_tags::not_understood(req);
+    let resp = match &refused {
+        Some(unsupported) => {
+            build_420(req, unsupported, Some(ctx.options_tagger.for_request(req).0))
+        }
+        None => build_options_health_response(
+            &ctx.readiness,
+            &ctx.overload,
+            &ctx.options_tagger,
+            req,
+            &ctx.config.node_capabilities,
+        ),
+    };
+    if let Ok(resp) = resp {
+        let _ = ctx.txn.send_response(resp, super::reply_to::reply_to(req, src)).await;
+    }
+    if refused.is_none() {
+        super::dead_verdict::on_options(ctx, req);
     }
 }
 

@@ -7,7 +7,7 @@ use super::emit;
 use super::relay_policy::{RelayPolicy, RelaySituation};
 use crate::draft::{Entry, ResponseDraft};
 use crate::header::{self, HeaderClass, HeaderName, HeaderValue, MediaType};
-use crate::method::Method;
+use crate::option_tags::{negotiates_session, END_TO_END_OPTION_TAGS};
 use crate::sip_str::SipStr;
 use crate::types::{SipHeader, SipRequest, SipResponse};
 
@@ -235,20 +235,6 @@ const WITHHELD_ON_REQUEST: &[HeaderName] = &[
     // the leg it is sent on, both of which the generator restates.
     HeaderName::RAck,
 ];
-
-/// The option tags of a session request's `Require` that ride to the peer:
-/// extensions whose headers and messages this stack relays end to end without
-/// taking part, so the peer is the UAS the requirement is put to. RFC 4028
-/// §7.1: `timer` asks the UAS to support the session timer, whose negotiation
-/// and refreshes cross the back-to-back UA unchanged.
-const END_TO_END_OPTION_TAGS: &[&str] = &["timer"];
-
-/// True iff `method` negotiates the session, so a requirement on its UAS
-/// concerns the session's extensions: the INVITE and the two requests that
-/// refresh it (RFC 4028 §7.4: re-INVITE, UPDATE).
-fn negotiates_session(method: &Method) -> bool {
-    matches!(method, Method::Invite | Method::Update)
-}
 
 /// A request's `Require` line as it rides to the peer: only its
 /// [`END_TO_END_OPTION_TAGS`], verbatim when it names nothing else, `None`

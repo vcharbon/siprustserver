@@ -195,33 +195,18 @@ pub(super) async fn initial_invite_turn(
     behind_the_write(ctx, call_ref, Rider::Trying(Box::new(req.clone()))).await;
     // Born: the call counts as live from here.
     drop(unborn);
-    // RFC 3261 §8.1.1.3: a dialog-forming INVITE MUST carry a From tag. The
-    // caller's From tag IS the a-leg dialog's remote tag, so admitting a
-    // tag-less INVITE would seed an un-probeable a-leg dialog (its in-dialog
-    // keepalive OPTIONS could never be built — see `send_request_to_leg`),
-    // producing the "OPTIONS to called, not calling" asymmetry that also
-    // round-trips through HA hydration. Reject malformed at ingest instead.
-    // Created-then-rejected mirrors the decision-reject path so the Terminated
-    // invariant reaps the call + propagates the delete.
     // The consult reads the setup-CANCEL mark itself, after its last await;
     // the other arms await nothing and leave it to the drop guard below.
     let (mut consulted, mut recorded) = (false, false);
+    let advertisement = &ctx.config.minted_final_advertisement;
+    let on_sight =
+        || crate::initial_invite::refused_on_sight(&call, &caller, advertisement, now_ms);
     let mut handled = if cancelled {
         cancelled_setup(call.clone(), &caller, datagram, now_ms)
     } else if cordoned || spent {
         refused_unavailable(ctx, call.clone(), &caller, now_ms)
-    } else if call.a_leg_invite.from_tag.is_empty() {
-        crate::initial_invite::reject_call(
-            call.clone(),
-            &caller,
-            400,
-            Some("Bad Request - missing From tag".into()),
-            None,
-            &[],
-            &ctx.config.minted_final_advertisement,
-            now_ms,
-            TerminationCause::Admission,
-        )
+    } else if let Some(refused) = on_sight() {
+        refused
     } else {
         consulted = true;
         // `datagram` is the only place the INVITE as it arrived exists (the

@@ -26,7 +26,8 @@ use crate::types::SipHeader;
 pub const B2BUA_ALLOW: &str =
     "INVITE, ACK, CANCEL, BYE, OPTIONS, UPDATE, INFO, REFER, NOTIFY, PRACK";
 /// RFC 3261 §20.37 — the option tags the stack understands, on a message it
-/// answers on its own behalf. An option tag obliges whoever advertises it, so
+/// answers on its own behalf, and the tags any request may require of it
+/// ([`crate::option_tags`]). An option tag obliges whoever advertises it, so
 /// a tag no part of this stack exercises is not a member: RFC 4028's `timer`
 /// would promise a session refresh nothing here performs.
 pub const B2BUA_SUPPORTED: &str = "100rel, replaces";

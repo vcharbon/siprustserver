@@ -1,6 +1,7 @@
 //! The dialog gate's shell (ADR-0041): the verdict is the core's
 //! ([`b2bua_core::dialog_gate`]); here a refused request is answered — 481,
-//! 500, 200 (an OPTIONS stating what this stack supports, §11.2) or 487,
+//! 500, 200 (an OPTIONS stating what this stack supports, §11.2), 487 or 420
+//! (an option tag required that this stack does not understand, §8.2.2.3),
 //! each under the call's stated headers — and whether another owner served
 //! the call is read off this node's topology for the ACK the verdict asks it
 //! of. An ACK that proves nothing on a call no other owner served is counted,
@@ -12,7 +13,9 @@ use sip_ids::TurnIds;
 use sip_message::{Method, SipMessage, SipResponse};
 
 use super::resolve::Resolution;
-use super::responses::{build_200, build_200_advertising, build_481, build_487, build_bare_500};
+use super::responses::{
+    build_200, build_200_advertising, build_420, build_481, build_487, build_bare_500,
+};
 use super::RouterCtx;
 use b2bua_core::dialog_gate::{verdict, Verdict};
 use b2bua_sdk::event::CallEvent;
@@ -70,6 +73,7 @@ pub(super) fn admit(
         }
         Verdict::Absorbed(_) => build_200(req),
         Verdict::Terminated(_) => build_487(req),
+        Verdict::BadExtension(_, unsupported) => build_420(req, &unsupported, None),
         Verdict::OutOfOrder => build_bare_500(req),
         Verdict::NoDialog
         | Verdict::Pass(_)

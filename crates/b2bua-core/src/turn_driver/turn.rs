@@ -15,7 +15,7 @@ pub enum Outcome {
     /// The event took a turn.
     Turned(Box<Turn>),
     /// The dialog gate kept the event from the rules: answered (481, 500,
-    /// 200 or 487, [`Verdict::status`]) or dropped. The record keeps the
+    /// 200, 487 or 420, [`Verdict::status`]) or dropped. The record keeps the
     /// gate's in-order note.
     Gated(Verdict),
     /// The timer screen refused the fire: its instance is not the ledger's.

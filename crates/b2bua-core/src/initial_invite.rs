@@ -14,7 +14,7 @@ use call::{
 use sip_ids::TurnIds;
 use sip_message::emergency::is_emergency_request;
 use sip_message::generators::CapabilitySet;
-use sip_message::header::{HeaderName, Minted};
+use sip_message::header::{HeaderName, HeaderValue, Minted, Unsupported};
 use sip_message::write_check::WriteRefusal;
 use sip_message::{SipHeader, SipMessage, SipRequest, SipStr};
 
@@ -24,8 +24,8 @@ use b2bua_sdk::reason_phrase::default_reason;
 
 use crate::decision::apply_reject::{apply_redirect, apply_reject};
 use crate::decision::{
-    CallDecisionError, NewCallRequest, NewCallResponse, RedirectContact, RouteDecision,
-    SipHeaderUpdates,
+    CallDecisionError, HeaderUpdate, NewCallRequest, NewCallResponse, RedirectContact,
+    RouteDecision, SipHeaderUpdates,
 };
 use crate::effects::{BufferedObservabilityEffect, HandlerEffects, HandlerResult};
 use crate::rules::relay;
@@ -300,6 +300,56 @@ pub fn reject_call(
             reject_with(call, a_invite, 500, reason, stated, now_ms, TerminationCause::Admission)
         }
     }
+}
+
+/// The stack's refusal of the caller's INVITE `a_invite` on `call` before any
+/// decision is asked, or `None` when the INVITE is fit to route. One with no
+/// From tag draws 400 (RFC 3261 §8.1.1.3): that tag is the caller dialog's
+/// remote tag, which every request of the stack's in her dialog names. One
+/// requiring an option tag this stack does not understand draws 420
+/// ([`refuse_extension`]). Nobody is dialled; the call is born and ended, so
+/// the reaper takes it and its delete propagates, as for a decision's reject.
+pub fn refused_on_sight(
+    call: &Call,
+    a_invite: &SipRequest,
+    advertisement: &CapabilitySet,
+    now_ms: i64,
+) -> Option<HandlerResult> {
+    if call.a_leg_invite.from_tag.is_empty() {
+        let reason = Some("Bad Request - missing From tag".into());
+        let cause = TerminationCause::Admission;
+        let call = call.clone();
+        return Some(reject_call(
+            call,
+            a_invite,
+            400,
+            reason,
+            None,
+            &[],
+            advertisement,
+            now_ms,
+            cause,
+        ));
+    }
+    let unsupported = sip_message::option_tags::not_understood(a_invite)?;
+    Some(refuse_extension(call.clone(), a_invite, &unsupported, advertisement, now_ms))
+}
+
+/// `call` refused 420 Bad Extension, its `Unsupported` listing `unsupported`,
+/// the option tags the caller's INVITE `a_invite` requires and this call
+/// cannot serve (RFC 3261 §8.2.2.3); the call ends with cause `Admission`.
+pub fn refuse_extension(
+    call: Call,
+    a_invite: &SipRequest,
+    unsupported: &Unsupported,
+    advertisement: &CapabilitySet,
+    now_ms: i64,
+) -> HandlerResult {
+    let name = HeaderName::Unsupported.as_wire_str().to_string();
+    let stated: SipHeaderUpdates =
+        [(name, HeaderUpdate::line(unsupported.to_wire()))].into_iter().collect();
+    let cause = TerminationCause::Admission;
+    reject_call(call, a_invite, 420, None, Some(&stated), &[], advertisement, now_ms, cause)
 }
 
 /// The headers a rejecting final carries: what the decision stated, the

@@ -55,6 +55,7 @@ pub mod info_package;
 pub mod ip_literal;
 pub mod mscml;
 pub mod multipart;
+pub mod option_tags;
 pub mod param_codec;
 #[cfg(feature = "sniff")]
 pub mod payload;

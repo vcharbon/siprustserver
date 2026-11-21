@@ -46,11 +46,8 @@ const FINALS: &[Row] = &[
     // A Relay treatment with no captured failure to relay.
     ("b2bua-core/src/decision/failover_fold.rs", "480", NoCalleeAnswered),
     ("b2bua-core/src/decision/failover_fold.rs", "503", InternalError),
-    // RFC 3261 §16.3, a required extension the call withholds (§8.2.2.3), the
-    // destination allow-list, a route that does not mint.
     ("b2bua-core/src/decision/route_fold.rs", "483", Rfc3261),
     ("b2bua-core/src/decision/route_fold.rs", "400", Rfc3261),
-    ("b2bua-core/src/decision/route_fold.rs", "420", Rfc3261),
     ("b2bua-core/src/decision/route_fold.rs", "503", InternalError),
     ("b2bua-core/src/decision/route_fold.rs", "500", InternalError),
     // A Relay treatment with no captured failure to relay; an unavailable
@@ -58,6 +55,8 @@ const FINALS: &[Row] = &[
     ("b2bua-core/src/initial_invite.rs", "480", NoCalleeAnswered),
     ("b2bua-core/src/initial_invite.rs", "503", InternalError),
     ("b2bua-core/src/initial_invite.rs", "500", RefusedAnswer),
+    ("b2bua-core/src/initial_invite.rs", "400", Rfc3261),
+    ("b2bua-core/src/initial_invite.rs", "420", Rfc3261),
     ("b2bua-core/src/initial_invite.rs", "status", Builder),
     ("b2bua-core/src/initial_invite.rs", "status", Builder),
     // What the callee answered, relayed.
@@ -88,8 +87,6 @@ const FINALS: &[Row] = &[
     ("b2bua-core/src/rules/actions/respond.rs", "status", Builder),
     // The admission ladder's refusal.
     ("b2bua/src/admission/render.rs", "503", InternalError),
-    // The turn's own refusals: no From tag; a cordon or a spent setup budget.
-    ("b2bua/src/router/initial_turn.rs", "400", Rfc3261),
     ("b2bua/src/router/initial_turn.rs", "503", InternalError),
     ("b2bua/src/router/responses.rs", "482", Rfc3261),
     ("b2bua/src/router/responses.rs", "500", InternalError),
@@ -97,6 +94,7 @@ const FINALS: &[Row] = &[
     // A copy of a deferred call's INVITE whose call is gone by its turn.
     ("b2bua/src/router/responses.rs", "503", InternalError),
     ("b2bua/src/router/responses.rs", "487", OtherRequest),
+    ("b2bua/src/router/responses.rs", "420", OtherRequest),
     ("b2bua/src/router/responses.rs", "481", OtherRequest),
     ("b2bua/src/router/responses.rs", "405", OtherRequest),
     ("b2bua/src/router/responses.rs", "500", OtherRequest),

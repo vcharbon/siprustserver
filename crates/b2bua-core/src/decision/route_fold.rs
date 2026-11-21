@@ -279,22 +279,12 @@ pub fn admitted(
     // from the callee cannot be shown a reliable provisional: she is answered
     // 420 naming it (RFC 3261 §8.2.2.3), and nobody is dialled.
     if withheld.iter().any(|tag| tag.eq_ignore_ascii_case(RELIABLE)) && requires_100rel(a_invite) {
-        let unsupported: call::header_update::SipHeaderUpdates = [(
-            "Unsupported".to_string(),
-            call::header_update::HeaderUpdate::Set(vec![RELIABLE.to_string()]),
-        )]
-        .into_iter()
-        .collect();
-        return Routed::final_only(crate::initial_invite::reject_call(
+        return Routed::final_only(crate::initial_invite::refuse_extension(
             call,
             a_invite,
-            420,
-            None,
-            Some(&unsupported),
-            &[],
+            &sip_message::header::Unsupported::of([RELIABLE]),
             &config.minted_final_advertisement,
             now_ms,
-            TerminationCause::Admission,
         ));
     }
     // A decision field that does not read has no destination behind it: refuse
