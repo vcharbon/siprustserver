@@ -75,23 +75,23 @@ impl Fixture {
         while self.observer.try_consume_for(id, 0).is_ok() {}
     }
 
-    async fn select(&self, call_id: &str, to_tag: Option<&str>) -> Result<ProxyAddr, SelectError> {
+    fn select(&self, call_id: &str, to_tag: Option<&str>) -> Result<ProxyAddr, SelectError> {
         self.strategy.select_for_new_dialog(&invite(call_id, to_tag), SelectOpts::default())
     }
 
     /// The worker the call lands on while every bucket has tokens.
-    async fn winner_of(&self, call_id: &str) -> &'static str {
-        id_at(&self.select(call_id, None).await.unwrap())
+    fn winner_of(&self, call_id: &str) -> &'static str {
+        id_at(&self.select(call_id, None).unwrap())
     }
 }
 
 #[tokio::test(start_paused = true)]
 async fn a_rate_capped_winner_spills_the_new_call_to_the_next_alive_worker() {
     let f = fixture(2);
-    let winner = f.winner_of("call-spill@h").await;
+    let winner = f.winner_of("call-spill@h");
     f.drain(winner);
 
-    let target = f.select("call-spill@h", None).await;
+    let target = f.select("call-spill@h", None);
     let landed = id_at(&target.expect("a worker with a token takes the call"));
     assert_ne!(landed, winner, "the rate-capped winner takes no new call");
     assert_eq!(f.metrics.lb_rate_cap_spilled_total(), 1);
@@ -106,27 +106,27 @@ async fn the_spill_follows_the_rendezvous_order() {
     for i in 0..16 {
         let call_id = format!("call-rank-{i}@h");
         let f = fixture(3);
-        let winner = f.winner_of(&call_id).await;
+        let winner = f.winner_of(&call_id);
         let second = {
             let g = fixture(3);
             g.observer.apply_payload(winner, &OverloadPayload { elu: 0.99, gc: 0.0, adm: 0.0 }, 0);
-            g.winner_of(&call_id).await
+            g.winner_of(&call_id)
         };
         f.drain(winner);
 
-        assert_eq!(id_at(&f.select(&call_id, None).await.unwrap()), second, "{call_id}");
+        assert_eq!(id_at(&f.select(&call_id, None).unwrap()), second, "{call_id}");
     }
 }
 
 #[tokio::test(start_paused = true)]
 async fn every_candidate_rate_capped_is_refused_naming_the_winner() {
     let f = fixture(2);
-    let winner = f.winner_of("call-full@h").await;
+    let winner = f.winner_of("call-full@h");
     for (id, _) in &WORKERS[..2] {
         f.drain(id);
     }
 
-    match f.select("call-full@h", None).await {
+    match f.select("call-full@h", None) {
         Err(SelectError::RateCapExhausted { worker_id, retry_after_sec }) => {
             assert_eq!(worker_id, winner);
             assert!(retry_after_sec >= 1, "a usable Retry-After");
@@ -140,9 +140,9 @@ async fn every_candidate_rate_capped_is_refused_naming_the_winner() {
 #[tokio::test(start_paused = true)]
 async fn an_in_dialog_request_stays_on_its_rate_capped_owner() {
     let f = fixture(2);
-    let winner = f.winner_of("call-dlg@h").await;
+    let winner = f.winner_of("call-dlg@h");
     f.drain(winner);
 
-    assert_eq!(id_at(&f.select("call-dlg@h", Some("bobtag")).await.unwrap()), winner);
+    assert_eq!(id_at(&f.select("call-dlg@h", Some("bobtag")).unwrap()), winner);
     assert_eq!(f.metrics.lb_rate_cap_spilled_total(), 0);
 }

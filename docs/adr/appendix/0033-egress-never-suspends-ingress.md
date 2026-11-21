@@ -116,24 +116,23 @@ draw the refusal on arrival from the queue's age (ADR-0037 item 11).
 
 ### 5. The invariant, stated
 
-**The invariant, stated:** an ingress loop awaits nothing whose completion
-a third party controls. The `RoutingStrategy` trait is synchronous and the
-recv loop calls it inline; a strategy that needs a network answer resolves
-it off-loop and reads the result from a cache (the DNS resolver's spawned
-single-flight is the pattern). A replicated flush that needs a call's lock is queued as a turn
-of that call (`router/flush_turn.rs`), as a stand-down and a drop on a
-backup's delete are, since a call's turn holds its lock across a decision
-round trip: the loop goes on answering the proxy's probes, and a message
-queued before the flush is served first (ADR-0010 X2). A flush offered behind
-the call's queued release is lost with the other notices of that row
+**The invariant, stated:** an ingress loop awaits nothing whose completion a
+third party controls. The `RoutingStrategy` trait is synchronous and the recv
+loop calls it inline; a strategy that needs a network answer resolves it
+off-loop and reads the result from a cache (the DNS resolver's spawned
+single-flight is the pattern). A replicated flush that needs a call's lock is
+queued as a turn of that call (`router/flush_turn.rs`), as a stand-down and a
+drop on a backup's delete are, since a call's turn holds its lock across a
+decision round trip: the loop goes on answering the proxy's probes, and a
+message queued before the flush is served first (ADR-0010 X2). A flush offered
+behind the call's queued release is lost with the other notices of that row
 (`dispatch::class`): a refused copy, whose body rode the flush, is gone with
 it, the call it would have met being released, and a stored one waits for a
 later message, the next flush or the reap. A flush that finds no call releases
 the queue only with nothing queued behind it, so an item that makes the call
-live keeps the queue for the offers that follow. The bulk
-reclaim's passes, run as a restarted node
-returns, before a proxy reads it alive, still take each call's lock on the
-loop.
+live keeps the queue for the offers that follow. The bulk reclaim's passes,
+run as a restarted node returns, before a proxy reads it alive, still take
+each call's lock on the loop.
 
 ## Alternatives considered
 

@@ -43,9 +43,8 @@ The stickiness cookie (`v=3|w_pri|w_bak|e|c`), on a Record-Route entry or on the
 (X1), is signed with HMAC-SHA256 (`hmac` + `sha2`), truncated to 128 bits (RFC 4868 §2.6), and
 base64url-no-pad encoded (`base64`). Verify compares the prefix in constant time (`subtle`),
 trying the current then the previous key. Rendezvous (HRW) worker selection uses SHA-1 (`sha1`)
-as a fast, well-distributed hash only: the top 8 bytes as a `u64` are the score, every worker
-weighing the same. The root manifest justifies the six deps (`hmac`/`sha2`/`sha1`/`base64`/`subtle`/
-`arc-swap`).
+as a fast, well-distributed hash only: the top 8 bytes as a `u64` are the score. The root
+manifest justifies the six deps (`hmac`/`sha2`/`sha1`/`base64`/`subtle`/`arc-swap`).
 
 ## Decision X4. Proxy self-gate; overload = self-gate + OPTIONS health + tail-drop
 

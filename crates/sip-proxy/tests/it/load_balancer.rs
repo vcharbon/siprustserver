@@ -100,8 +100,8 @@ fn two_worker_registry(clock: Clock) -> SimulatedWorkerRegistry {
 /// present), and a cookie whose signature is altered is refused with a 403.
 /// The altered signature keeps its length, so the refusal is the MAC
 /// mismatch, not a malformed MAC.
-#[tokio::test]
-async fn hmac_tampering_rejected() {
+#[test]
+fn hmac_tampering_rejected() {
     let reg = two_worker_registry(Clock::test_at(0));
     let s = strategy(reg, Clock::test_at(0));
     let invite = request("INVITE", "call-tamper@h", None);
@@ -132,8 +132,8 @@ async fn hmac_tampering_rejected() {
     }
 }
 
-#[tokio::test]
-async fn cookie_round_trips_to_alive_primary() {
+#[test]
+fn cookie_round_trips_to_alive_primary() {
     let clock = Clock::test_at(0);
     let reg = two_worker_registry(clock.clone());
     let s = strategy(reg, clock);
@@ -151,8 +151,8 @@ async fn cookie_round_trips_to_alive_primary() {
 
 /// The v3 `e=1` emergency flag survives an encode → decode round-trip: an
 /// emergency dialog encodes `e=1`, and a decoded `e=1` is an emergency dialog.
-#[tokio::test]
-async fn emergency_cookie_round_trips_e1_and_is_emergency() {
+#[test]
+fn emergency_cookie_round_trips_e1_and_is_emergency() {
     let clock = Clock::test_at(0);
     let reg = two_worker_registry(clock.clone());
     let s = strategy(reg, clock);
@@ -173,8 +173,8 @@ async fn emergency_cookie_round_trips_e1_and_is_emergency() {
     }
 }
 
-#[tokio::test]
-async fn cookie_route_fallback_when_primary_dead() {
+#[test]
+fn cookie_route_fallback_when_primary_dead() {
     let clock = Clock::test_at(0);
     let reg = two_worker_registry(clock.clone());
     let s = strategy(reg.clone(), clock);
@@ -198,8 +198,8 @@ async fn cookie_route_fallback_when_primary_dead() {
 
 /// A primary refusing new calls keeps every in-dialog request: acceptance is
 /// never read by the decode (ADR-0050 §4).
-#[tokio::test]
-async fn an_in_dialog_request_goes_to_a_refusing_primary() {
+#[test]
+fn an_in_dialog_request_goes_to_a_refusing_primary() {
     let clock = Clock::test_at(0);
     let reg = two_worker_registry(clock.clone());
     let s = strategy(reg.clone(), clock);
@@ -216,8 +216,8 @@ async fn an_in_dialog_request_goes_to_a_refusing_primary() {
 /// A primary not alive passes the request to the backup only while the
 /// backup is alive; with neither alive the request is unroutable, never
 /// placed afresh (ADR-0050 §4, §5).
-#[tokio::test]
-async fn an_in_dialog_request_takes_an_alive_backup_and_nothing_else() {
+#[test]
+fn an_in_dialog_request_takes_an_alive_backup_and_nothing_else() {
     let clock = Clock::test_at(0);
     let reg = two_worker_registry(clock.clone());
     let s = strategy(reg.clone(), clock);
@@ -239,8 +239,8 @@ async fn an_in_dialog_request_takes_an_alive_backup_and_nothing_else() {
     }
 }
 
-#[tokio::test]
-async fn unresolvable_primary_falls_back_to_backup() {
+#[test]
+fn unresolvable_primary_falls_back_to_backup() {
     let clock = Clock::test_at(0);
     let reg = two_worker_registry(clock.clone());
     let s = strategy(reg.clone(), clock);
@@ -256,8 +256,8 @@ async fn unresolvable_primary_falls_back_to_backup() {
 
 /// A primary read alive is served from that read on, however recently it
 /// joined: the registry holds no join instant (ADR-0050 §8).
-#[tokio::test]
-async fn a_primary_read_alive_is_served_at_once_after_it_joined() {
+#[test]
+fn a_primary_read_alive_is_served_at_once_after_it_joined() {
     let clock = Clock::test_at(0);
     let reg =
         SimulatedWorkerRegistry::with_clock(vec![WorkerEntry::alive(W2, addr(A2))], clock.clone());
@@ -275,8 +275,8 @@ async fn a_primary_read_alive_is_served_at_once_after_it_joined() {
 /// The cookie's backup is chosen among the alive workers accepting new
 /// calls; when none but the primary accepts, among every alive one, so a
 /// cluster refusing everywhere still replicates (ADR-0050 §7).
-#[tokio::test]
-async fn the_backup_is_chosen_among_accepting_workers_else_among_alive_ones() {
+#[test]
+fn the_backup_is_chosen_among_accepting_workers_else_among_alive_ones() {
     const W3: &str = "b2b-3";
     let a3 = ("10.0.0.4", 5070);
     let clock = Clock::test_at(0);
@@ -304,8 +304,8 @@ async fn the_backup_is_chosen_among_accepting_workers_else_among_alive_ones() {
     }
 }
 
-#[tokio::test]
-async fn initial_health_unknown_workers_are_not_selectable() {
+#[test]
+fn initial_health_unknown_workers_are_not_selectable() {
     let clock = Clock::test_at(0);
     let reg = SimulatedWorkerRegistry::with_clock(
         vec![WorkerEntry { health: WorkerHealth::Unknown, ..WorkerEntry::alive(W1, addr(A1)) }],
@@ -323,8 +323,8 @@ async fn initial_health_unknown_workers_are_not_selectable() {
 
 /// No alive worker accepts: a new dialog goes to an alive refusing one,
 /// which answers it itself (ADR-0050 §6); a dead worker takes nothing.
-#[tokio::test]
-async fn a_new_dialog_falls_back_to_a_refusing_worker_when_none_accepts() {
+#[test]
+fn a_new_dialog_falls_back_to_a_refusing_worker_when_none_accepts() {
     let clock = Clock::test_at(0);
     let reg = two_worker_registry(clock.clone());
     reg.set_health(W1, WorkerHealth::Dead);
@@ -338,8 +338,8 @@ async fn a_new_dialog_falls_back_to_a_refusing_worker_when_none_accepts() {
 }
 
 /// While one alive worker accepts, no new dialog goes to a refusing one.
-#[tokio::test]
-async fn a_new_dialog_skips_a_refusing_worker_while_one_accepts() {
+#[test]
+fn a_new_dialog_skips_a_refusing_worker_while_one_accepts() {
     let clock = Clock::test_at(0);
     let reg = two_worker_registry(clock.clone());
     reg.set_acceptance(W2, Acceptance::Refuse);
@@ -357,8 +357,8 @@ async fn a_new_dialog_skips_a_refusing_worker_while_one_accepts() {
 /// `is_emergency_invite` on the select path directly, and the explicit
 /// `emergency_override` opts shortcut (used by the dispatcher-marked in-dialog
 /// path) bypasses the filter on a non-RPH INVITE.
-#[tokio::test]
-async fn above_critical_band_filtered_for_non_emergency_only() {
+#[test]
+fn above_critical_band_filtered_for_non_emergency_only() {
     let clock = Clock::test_at(0);
     let observer = Arc::new(WorkerLoadObserver::new(LoadObserverConfig::default()));
     let reg =
@@ -429,8 +429,8 @@ async fn a_dialog_admitted_as_new_meets_the_empty_bucket() {
 
 /// A worker no load payload was read from has no bucket and is admitted: no
 /// rate cap applies before its first OPTIONS answer.
-#[tokio::test]
-async fn unobserved_worker_is_admitted_without_a_bucket() {
+#[test]
+fn unobserved_worker_is_admitted_without_a_bucket() {
     let clock = Clock::test_at(0);
     let reg = two_worker_registry(clock.clone());
     let s = strategy(reg, clock);
@@ -471,8 +471,8 @@ async fn in_dialog_sticks_to_owner_in_above_critical_and_bypasses_empty_bucket()
 /// The cookie path reads the signed `w_pri` over the live registry, never the
 /// ELU band or the bucket: a valid cookie reaches its alive owner above the
 /// critical band.
-#[tokio::test]
-async fn decode_stickiness_routes_to_alive_w_pri_regardless_of_elu_band() {
+#[test]
+fn decode_stickiness_routes_to_alive_w_pri_regardless_of_elu_band() {
     let clock = Clock::test_at(0);
     let observer = Arc::new(WorkerLoadObserver::new(LoadObserverConfig::default()));
     let reg = two_worker_registry(clock.clone());
@@ -501,8 +501,8 @@ async fn decode_stickiness_routes_to_alive_w_pri_regardless_of_elu_band() {
 /// BYE) passes the band filter and the bucket, so it is never shed, and lands
 /// on the rendezvous winner over the current alive set, which a reshard may
 /// have moved off the dialog's owner.
-#[tokio::test]
-async fn no_cookie_in_dialog_request_uses_new_dialog_path_and_can_scatter() {
+#[test]
+fn no_cookie_in_dialog_request_uses_new_dialog_path_and_can_scatter() {
     let clock = Clock::test_at(0);
     let observer = Arc::new(WorkerLoadObserver::new(LoadObserverConfig::default()));
     let reg = two_worker_registry(clock.clone());
@@ -521,8 +521,8 @@ async fn no_cookie_in_dialog_request_uses_new_dialog_path_and_can_scatter() {
     );
 }
 
-#[tokio::test]
-async fn resharding_keeps_in_dialog_on_cookie_primary() {
+#[test]
+fn resharding_keeps_in_dialog_on_cookie_primary() {
     let clock = Clock::test_at(0);
     let reg = two_worker_registry(clock.clone());
     let s = strategy(reg.clone(), clock);

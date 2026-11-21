@@ -1,8 +1,8 @@
 //! Rendezvous (highest-random-weight) hashing: a pure function from a
 //! routing key (the SIP Call-ID) and candidate workers to the candidate
 //! maximising `H(key:id)`, `H` the top 8 bytes (big-endian) of `SHA1(key:id)`
-//! as a `u64` (integer, no float). Every candidate weighs the same. A
-//! membership change moves the keys of the changed worker only. See ADR-0009 X3.
+//! as a `u64` (integer, no float), which is the score. A membership change
+//! moves the keys of the changed worker only. See ADR-0009 X3.
 
 use sha1::{Digest, Sha1};
 

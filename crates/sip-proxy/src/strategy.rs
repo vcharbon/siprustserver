@@ -112,6 +112,8 @@ pub enum RankPlacement {
     Unranked,
 }
 
+/// How the proxy places a request. The receive loop calls it inline and it never blocks: a
+/// network answer is resolved elsewhere and read from a cache (ADR-0033).
 pub trait RoutingStrategy: Send + Sync {
     fn name(&self) -> &str;
 

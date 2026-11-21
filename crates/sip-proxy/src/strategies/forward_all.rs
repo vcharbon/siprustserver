@@ -80,8 +80,8 @@ Content-Length: 0\r\n\r\n";
         CustomParser::new().parse(raw).unwrap()
     }
 
-    #[tokio::test]
-    async fn selects_static_target_and_round_trips_cookie() {
+    #[test]
+    fn selects_static_target_and_round_trips_cookie() {
         let s = ForwardAllStrategy::new(ProxyAddr::new("10.0.0.3", 5070));
         let msg = invite();
         assert_eq!(
@@ -99,8 +99,8 @@ Content-Length: 0\r\n\r\n";
         }
     }
 
-    #[tokio::test]
-    async fn missing_or_bad_cookie_is_unknown() {
+    #[test]
+    fn missing_or_bad_cookie_is_unknown() {
         let s = ForwardAllStrategy::new(ProxyAddr::new("10.0.0.3", 5070));
         let msg = invite();
         assert!(matches!(
