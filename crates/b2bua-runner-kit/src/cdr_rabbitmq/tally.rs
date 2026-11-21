@@ -1,30 +1,36 @@
 //! The one count of each record's end: `b2bua_cdr_written_total` or
 //! `b2bua_cdr_dropped_total{reason}` in the shared registry, and the writer's
 //! observer told the same end with the time since the writer was handed the
-//! record.
+//! record. An observer that panics costs neither the count nor its caller.
 
+use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 
-use b2bua::cdr::{CdrDelivery, CdrDeliveryObserver, CdrDrop};
+use b2bua::cdr::{CdrDelivery, CdrDeliveryObserver, CdrDrop, LineRate, LINE_INTERVAL};
 use b2bua::metrics::B2buaMetrics;
 use sip_clock::wall::millis_u64;
 use tokio::time::Instant;
-
-use super::nack_log::{NackLog, NACK_LOG_INTERVAL};
 
 /// Counts the ends of the records one writer was handed.
 #[derive(Clone)]
 pub(super) struct Tally {
     metrics: B2buaMetrics,
     observer: Option<Arc<dyn CdrDeliveryObserver>>,
-    /// The writer's nacks, every session's, and their rate-limited warning.
-    nacks: Arc<NackLog>,
+    /// The writer's nacks, every session's, and the rate of their warning.
+    nacks: Arc<LineRate>,
+    /// The observer's panics and the rate of their error line.
+    observer_panics: Arc<LineRate>,
 }
 
 impl Tally {
     /// A tally counting into `metrics`, with no observer.
     pub(super) fn new(metrics: B2buaMetrics) -> Self {
-        Self { metrics, observer: None, nacks: Arc::new(NackLog::new()) }
+        Self {
+            metrics,
+            observer: None,
+            nacks: Arc::new(LineRate::new()),
+            observer_panics: Arc::new(LineRate::new()),
+        }
     }
 
     /// Tells `observer` every end counted from here on.
@@ -53,12 +59,12 @@ impl Tally {
 
     /// The record handed at `handed_at` was nacked: dropped for
     /// [`CdrDrop::Nacked`], after the warning when one is due
-    /// ([`NackLog::nacked`]).
+    /// ([`LineRate::counted`]).
     pub(super) fn nacked(&self, handed_at: Instant) {
-        if let Some(nacked) = self.nacks.nacked() {
+        if let Some(nacked) = self.nacks.counted() {
             tracing::warn!(
                 nacked,
-                interval_ms = millis_u64(NACK_LOG_INTERVAL),
+                interval_ms = millis_u64(LINE_INTERVAL),
                 "CDR publishes nacked by the broker since the last such line, each dropped; \
                  said at most once per interval"
             );
@@ -66,9 +72,25 @@ impl Tally {
         self.dropped(handed_at, CdrDrop::Nacked);
     }
 
+    /// Tells the observer, which returns or panics: a panic is caught here,
+    /// said at most once per [`LINE_INTERVAL`], and the end counts all the
+    /// same.
     fn tell(&self, delivery: CdrDelivery, handed_at: Instant) {
-        if let Some(observer) = &self.observer {
+        let Some(observer) = &self.observer else {
+            return;
+        };
+        let told = std::panic::catch_unwind(AssertUnwindSafe(|| {
             observer.ended(delivery, handed_at.elapsed());
+        }));
+        if told.is_err() {
+            if let Some(panics) = self.observer_panics.counted() {
+                tracing::error!(
+                    panics,
+                    interval_ms = millis_u64(LINE_INTERVAL),
+                    "the CDR delivery observer panicked since the last such line; each record \
+                     counts all the same; said at most once per interval"
+                );
+            }
         }
     }
 }

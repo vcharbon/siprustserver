@@ -24,7 +24,7 @@ use tokio::time::{timeout_at, Instant};
 
 use call::Call;
 
-use super::{CdrDrop, CdrRecord, CdrWriter};
+use super::{CdrDrop, CdrRecord, CdrWriter, LineRate};
 use crate::metrics::B2buaMetrics;
 use drainer::Drainer;
 
@@ -51,9 +51,16 @@ struct Dropped {
 }
 
 impl Dropped {
+    /// One record the buffer dropped before the inner sink took it.
     fn one(&self, why: CdrDrop) {
-        self.count.fetch_add(1, Ordering::Relaxed);
+        self.local();
         self.metrics.bump_cdr_dropped(why);
+    }
+
+    /// One record counted for `dropped_total()` alone: the inner sink counts
+    /// it in the registry ([`CdrWriter::dropped`]).
+    fn local(&self) {
+        self.count.fetch_add(1, Ordering::Relaxed);
     }
 }
 
@@ -87,6 +94,7 @@ impl BufferedCdrWriter {
                 queue: Arc::new(Mutex::new(rx)),
                 close_by: writer.close_by.clone(),
                 closed: Arc::new(closed_tx),
+                write_panics: Arc::new(LineRate::new()),
             };
             let task = observe::spawn_keeping_node(drainer.supervise());
             writer.drainer = Some(task.abort_handle());

@@ -4,10 +4,10 @@
 //!
 //! Contract: each record handed to `write` counts once, in `cdr_written_total`
 //! when its line went to the file, else in `cdr_dropped_total` (reason
-//! `encode` or `file_write`), the first drop said at warn; the count is the last thing a write does. A line goes
-//! out in one `write_all` on a file opened for appending, so a reader of a
-//! file several runs appended to reads whole lines. The sink writes inline:
-//! `close` holds nothing.
+//! `encode` or `file_write`), the first drop said at warn; the count is the
+//! last thing a write does. A line goes out in one `write_all` on a file
+//! opened for appending, so a reader of a file several runs appended to reads
+//! whole lines. The sink writes inline: `close` holds nothing.
 
 use std::fs::{File, OpenOptions};
 use std::io::Write;

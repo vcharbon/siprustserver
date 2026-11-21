@@ -31,7 +31,7 @@ pub enum CdrDrop {
     /// The file refused the record's line.
     FileWrite,
     /// The sink, its drainer or its confirm tracker panicked holding the
-    /// record.
+    /// record, or the drainer gave its queue up after two panics in a close.
     Panic,
 }
 

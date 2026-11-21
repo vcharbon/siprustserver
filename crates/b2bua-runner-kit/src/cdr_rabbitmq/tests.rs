@@ -230,3 +230,38 @@ async fn a_sink_selected_with_an_encoder_encodes_through_it() {
     assert_eq!(metrics.cdr_drops(), [(CdrDrop::Encode, 2)], "refused before any connect");
     assert_eq!(metrics.cdr_broker_connects_of(BrokerConnect::Failed), 0);
 }
+
+/// A panic unwinding through a write holding the link marks it for
+/// `after_panic`, which takes the mark; a hold that ends without a panic
+/// marks nothing.
+#[tokio::test]
+async fn only_a_panic_through_the_held_link_marks_it_for_after_panic() {
+    use futures_util::FutureExt;
+    let w = writer(OWN_DEFAULT, Arc::new(JsonRecordEncoder));
+    drop(Held(w.link.lock().await));
+    assert!(!w.link.lock().await.panicked, "a hold that returns marks nothing");
+    let held = std::panic::AssertUnwindSafe(async {
+        let _held = Held(w.link.lock().await);
+        panic!("expected: a panic holding the link");
+    });
+    assert!(held.catch_unwind().await.is_err());
+    assert!(w.link.lock().await.panicked, "the panic marked the link");
+    w.after_panic().await;
+    assert!(!w.link.lock().await.panicked, "after_panic took the mark");
+}
+
+/// The caller's count of a record whose write did not finish goes through
+/// the writer's own drops: the registry counts it once, the observer told.
+#[tokio::test]
+async fn a_record_its_caller_drops_counts_once_and_tells_the_observer() {
+    let metrics = B2buaMetrics::new();
+    let ends = Arc::new(Ends::default());
+    let w =
+        RabbitMqCdrWriter::new(settings(OWN_DEFAULT), Arc::new(JsonRecordEncoder), metrics.clone())
+            .observed_by(ends.clone());
+    let elsewhere = B2buaMetrics::new();
+    w.dropped(CdrDrop::Panic, Instant::now(), &elsewhere);
+    assert_eq!(metrics.cdr_drops(), [(CdrDrop::Panic, 1)]);
+    assert_eq!(elsewhere.cdr_dropped_total(), 0, "counted in the writer's registry alone");
+    assert_eq!(*ends.0.lock().unwrap(), vec![b2bua::cdr::CdrDelivery::Dropped]);
+}

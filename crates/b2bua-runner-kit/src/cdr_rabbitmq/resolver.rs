@@ -37,7 +37,9 @@ impl BrokerResolver {
         )
     }
 
-    fn with_lookup(lookup: Lookup, max_age: Duration) -> Self {
+    /// Resolves through `lookup`; a parked answer older than `max_age` is
+    /// not used.
+    pub(super) fn with_lookup(lookup: Lookup, max_age: Duration) -> Self {
         Self { lookup, max_age, in_flight: None }
     }
 

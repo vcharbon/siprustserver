@@ -49,9 +49,9 @@ enum Outcome {
 /// once the session's publishes stopped and every tracked publish is resolved.
 ///
 /// A panic of the tracker ends the session at once and counts dropped the
-/// record it was resolving and every publish still tracked: each count is the
-/// last thing done for its record, so the record a panic interrupts is
-/// uncounted until then.
+/// record it was resolving and every publish still tracked, a publish handed
+/// over while the tracker closed included: each count is the last thing done
+/// for its record, so the record a panic interrupts is uncounted until then.
 pub(super) async fn track_confirms(
     mut rx: mpsc::UnboundedReceiver<Pending>,
     health: Arc<Health>,
@@ -65,10 +65,12 @@ pub(super) async fn track_confirms(
     }
     health.end(BrokerSessionEnd::TrackerPanic);
     tracing::error!("the CDR confirm tracker panicked; its pending records are counted dropped");
-    rx.close();
-    let tracked = std::iter::from_fn(|| rx.try_recv().ok().map(|pending| pending.handed_at));
-    for handed_at in resolving.into_iter().chain(tracked) {
+    if let Some(handed_at) = resolving {
         tally.dropped(handed_at, CdrDrop::Panic);
+    }
+    rx.close();
+    while let Some(pending) = rx.recv().await {
+        tally.dropped(pending.handed_at, CdrDrop::Panic);
     }
 }
 
@@ -111,7 +113,7 @@ fn count(outcome: Outcome, handed_at: Instant, health: &Health, tally: &Tally) {
             tally.dropped(handed_at, CdrDrop::Returned);
         }
         Outcome::Lost(e) => {
-            health.end_on_error(BrokerSessionEnd::ConfirmLost, &e);
+            health.end_on_error(BrokerSessionEnd::ConnectionLost, &e);
             tally.dropped(handed_at, CdrDrop::Unconfirmed);
         }
         Outcome::TimedOut => {

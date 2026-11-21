@@ -3,22 +3,25 @@
 //! the closed signal are shared state a later run takes over.
 //!
 //! - A panic of the inner write is caught: its record is counted dropped
-//!   once, the panic counted under [`CDR_DRAINER`], and the sink told to drop
-//!   its partial state ([`CdrWriter::after_panic`]).
+//!   once, through the sink ([`CdrWriter::dropped`]), the panic counted under
+//!   [`CDR_DRAINER`] and said at most once per [`LINE_INTERVAL`], and the
+//!   sink told to drop its partial state ([`CdrWriter::after_panic`]).
 //! - Any other panic ends the run. It is counted under [`CDR_DRAINER`], and a
 //!   new run starts [`RESTART_DELAY`] later, at once when a close begins
 //!   meanwhile, by telling the sink to drop its partial state; records keep
 //!   queuing until then. A run's own code panics only after the record it
 //!   holds is counted.
-//! - A run that panics once a close began is not made again: the rest of the
-//!   queue is counted dropped, the sink closed and the close reported, so a
-//!   close ends by its deadline.
+//! - Once a close began, a run that panics is made again at once, and that
+//!   run writes the queue until the deadline. A second run that panics in
+//!   the close is not made again: the rest of the queue is counted dropped,
+//!   the sink closed and the close reported, so a close ends by its deadline.
 
 use std::future::Future;
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 
 use futures_util::FutureExt;
+use sip_clock::wall::millis_u64;
 use task_restart::RESTART_DELAY;
 use tokio::sync::{mpsc, watch, Mutex};
 use tokio::time::{timeout, timeout_at, Instant};
@@ -27,7 +30,7 @@ use call::Call;
 
 use super::Dropped;
 use crate::abort_on_drop::AbortOnDrop;
-use crate::cdr::{CdrDrop, CdrWriter};
+use crate::cdr::{CdrDrop, CdrWriter, LineRate, LINE_INTERVAL};
 use crate::supervise::{CDR_DRAINER, RESTARTS};
 
 /// The drainer's half of the buffer: it holds no sender, so the queue ends
@@ -40,6 +43,8 @@ pub(super) struct Drainer {
     pub(super) queue: Arc<Mutex<mpsc::Receiver<(Call, i64)>>>,
     pub(super) close_by: Arc<watch::Sender<Option<Instant>>>,
     pub(super) closed: Arc<watch::Sender<bool>>,
+    /// The caught write panics, every run's, and the rate of their line.
+    pub(super) write_panics: Arc<LineRate>,
 }
 
 impl Drainer {
@@ -48,19 +53,23 @@ impl Drainer {
     /// (the module's rules). Aborting this task aborts the run in flight.
     pub(super) async fn supervise(self) {
         let mut after_panic = false;
+        let mut panicked_in_close = false;
         loop {
             let mut run = AbortOnDrop(observe::spawn_keeping_node(self.clone().run(after_panic)));
             match (&mut run.0).await {
                 Err(e) if e.is_panic() => RESTARTS.restarted(CDR_DRAINER),
                 Ok(()) | Err(_) => return,
             }
-            let closing = *self.close_by.borrow();
-            if let Some(deadline) = closing {
-                return self.give_up(deadline).await;
-            }
-            let mut close_by = self.close_by.subscribe();
-            let _ = timeout(RESTART_DELAY, close_by.wait_for(Option::is_some)).await;
             after_panic = true;
+            let closing = *self.close_by.borrow();
+            match closing {
+                Some(deadline) if panicked_in_close => return self.give_up(deadline).await,
+                Some(_) => panicked_in_close = true,
+                None => {
+                    let mut close_by = self.close_by.subscribe();
+                    let _ = timeout(RESTART_DELAY, close_by.wait_for(Option::is_some)).await;
+                }
+            }
         }
     }
 
@@ -107,44 +116,66 @@ impl Drainer {
     /// panics counts its record dropped, then `inner` drops its partial state
     /// within the same bound.
     async fn write(&self, call: &Call, at: i64, close_by: &mut watch::Receiver<Option<Instant>>) {
+        let handed_at = Instant::now();
         match until_close(caught(self.inner.write(call, at)), close_by).await {
             Some(Ok(())) => {}
             Some(Err(Panicked)) => {
-                self.write_panicked(call);
+                self.write_panicked(call, handed_at);
                 let _ = until_close(self.inner.after_panic(), close_by).await;
             }
-            None => self.dropped.one(CdrDrop::CloseDeadline),
+            None => self.unfinished(CdrDrop::CloseDeadline, handed_at),
         }
     }
 
+    /// The one count of a record handed to `inner` at `handed_at` whose write
+    /// counted nothing, through `inner`'s own drops.
+    fn unfinished(&self, why: CdrDrop, handed_at: Instant) {
+        self.dropped.local();
+        self.inner.dropped(why, handed_at, &self.dropped.metrics);
+    }
+
     /// The one count of a record whose write panicked: dropped for
-    /// [`CdrDrop::Panic`], and the panic counted under [`CDR_DRAINER`].
-    fn write_panicked(&self, call: &Call) {
-        self.dropped.one(CdrDrop::Panic);
-        RESTARTS.restarted(CDR_DRAINER);
-        tracing::error!(
-            call_ref = %call.call_ref,
-            "the CDR sink panicked writing a record; the record is counted dropped"
-        );
+    /// [`CdrDrop::Panic`], the panic counted under [`CDR_DRAINER`], and the
+    /// line saying it due at most once per [`LINE_INTERVAL`].
+    fn write_panicked(&self, call: &Call, handed_at: Instant) {
+        self.unfinished(CdrDrop::Panic, handed_at);
+        RESTARTS.survived(CDR_DRAINER);
+        if let Some(panics) = self.write_panics.counted() {
+            tracing::error!(
+                call_ref = %call.call_ref,
+                panics,
+                interval_ms = millis_u64(LINE_INTERVAL),
+                "the CDR sink panicked writing records since the last such line, each \
+                 counted dropped; said at most once per interval"
+            );
+        }
     }
 
     /// Closes `inner` by `deadline`; a close that panics is counted under
     /// [`CDR_DRAINER`] and over.
     async fn close_inner(&self, deadline: Instant) {
         if caught(self.inner.close(deadline)).await.is_err() {
-            RESTARTS.restarted(CDR_DRAINER);
+            RESTARTS.survived(CDR_DRAINER);
             tracing::error!("the CDR sink panicked closing; its close is over");
         }
     }
 
-    /// The close after a run panicked in it: every record still queued is
-    /// counted dropped for [`CdrDrop::Panic`], `inner` closed by `deadline`,
-    /// and `closed` reported.
+    /// The close after a second run panicked in it: every record still
+    /// queued, or sent by `deadline` on a slot reserved before the queue
+    /// closed, is counted dropped for [`CdrDrop::Panic`], `inner` closed by
+    /// `deadline`, and `closed` reported.
     async fn give_up(&self, deadline: Instant) {
         let mut rx = self.queue.lock().await;
         rx.close();
-        while rx.try_recv().is_ok() {
-            self.dropped.one(CdrDrop::Panic);
+        let reserved = async {
+            while rx.recv().await.is_some() {
+                self.dropped.one(CdrDrop::Panic);
+            }
+        };
+        if timeout_at(deadline, reserved).await.is_err() {
+            while rx.try_recv().is_ok() {
+                self.dropped.one(CdrDrop::Panic);
+            }
         }
         drop(rx);
         self.close_inner(deadline).await;

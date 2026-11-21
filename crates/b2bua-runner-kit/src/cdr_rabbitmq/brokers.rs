@@ -3,8 +3,9 @@
 //! a cursor, each given its share of the connect bound, so a dead or silent
 //! node never keeps the sink down while another answers. The cursor starts
 //! where the writer's seed points, so workers spread over the nodes; it stays
-//! on a node whose session delivered, and moves past one whose attempt or
-//! session failed, so a dead node is not tried first again.
+//! on a node whose session delivered, moves past one whose session failed,
+//! and after a failed attempt starts past the last node it tried, so a node
+//! that held an attempt to its deadline is not tried first again.
 
 use std::collections::hash_map::RandomState;
 use std::hash::BuildHasher;
@@ -64,6 +65,12 @@ impl Brokers {
             .iter()
             .map(|uri| Broker { uri: uri.clone(), resolver: BrokerResolver::new(max_age) })
             .collect();
+        Self::of(brokers, first)
+    }
+
+    /// The list `brokers`, the first attempt starting at `first` (modulo
+    /// their count).
+    fn of(brokers: Vec<Broker>, first: usize) -> Self {
         let mut this = Self { brokers, next: 0, current: None };
         this.start_at(first);
         this
@@ -75,11 +82,11 @@ impl Brokers {
     }
 
     /// One connect attempt by `deadline`: each broker from the cursor in
-    /// turn, its host resolved and its addresses connected within their
-    /// share of the time left, its AMQP handshake within `deadline`, until one
-    /// opens a session ([`Session::open`]). A failed or dropped attempt moves
-    /// the cursor to the broker after the one it started at; a session opened
-    /// sets it to its broker.
+    /// turn, its host resolved, its addresses connected and its handshakes
+    /// done within their share of the time left, until one opens a session
+    /// ([`Session::open`]). The cursor moves past each broker as it is tried,
+    /// so a failed or dropped attempt leaves it past the last one tried; a
+    /// session opened sets it to its broker.
     pub(super) async fn open(
         &mut self,
         settings: &RabbitMqCdrSettings,
@@ -90,13 +97,13 @@ impl Brokers {
         let count = self.brokers.len();
         let start = self.next;
         self.current = None;
-        self.start_at(start + 1);
         let mut failures = Vec::new();
         for tried in 0..count {
             if tried > 0 && Instant::now() >= deadline {
                 break;
             }
             let index = (start + tried) % count;
+            self.start_at(index + 1);
             let Some(broker) = self.brokers.get_mut(index) else {
                 break;
             };
@@ -119,18 +126,26 @@ impl Brokers {
         Err(Unreached(failures))
     }
 
-    /// The live session ended: the next attempt starts at its broker when it
-    /// delivered, else at the broker after it.
-    pub(super) fn ended(&mut self, delivered: bool) {
+    /// The live session ended: the next attempt starts at its broker when
+    /// `stay` (it delivered, or its end tells nothing of the broker), else
+    /// at the broker after it.
+    pub(super) fn ended(&mut self, stay: bool) {
         if let Some(index) = self.current.take() {
-            self.start_at(if delivered { index } else { index + 1 });
+            self.start_at(if stay { index } else { index + 1 });
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{mpsc, Arc, Mutex};
+
+    use b2bua::metrics::B2buaMetrics;
+
+    use super::super::settings::{CdrDeliveryBounds, CdrQueueDeclare};
     use super::*;
+
+    const MS: Duration = Duration::from_millis(1);
 
     /// Two writers of one process drawing the same start is a coin toss: 64
     /// of them all on one of two brokers would be a fixed draw.
@@ -138,5 +153,61 @@ mod tests {
     fn writers_draw_starts_spread_over_the_brokers() {
         let starts: std::collections::HashSet<usize> = (0..64).map(|_| drawn_start() % 2).collect();
         assert_eq!(starts.len(), 2, "every writer drew the same start");
+    }
+
+    /// A broker named `host` whose lookup answers only once `gate` is
+    /// released or dropped.
+    fn gated(host: &str, gate: mpsc::Receiver<()>) -> Broker {
+        let gate = Mutex::new(gate);
+        let lookup = move |_: &str, _: u16| {
+            let _ = gate.lock().unwrap().recv();
+            Err(std::io::Error::other("released"))
+        };
+        Broker {
+            uri: format!("amqp://{host}/%2f").parse().unwrap(),
+            resolver: BrokerResolver::with_lookup(Arc::new(lookup), Duration::from_secs(1)),
+        }
+    }
+
+    /// A loopback address that refuses every connect.
+    fn refusing() -> std::net::SocketAddr {
+        let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        closed.local_addr().unwrap()
+    }
+
+    /// The first broker's lookup never answers: it holds the attempt for its
+    /// share of the connect bound, and the broker after it is tried within
+    /// the rest.
+    #[tokio::test]
+    async fn a_lookup_that_never_answers_costs_its_share_and_the_next_broker_is_tried() {
+        let (release, gate) = mpsc::channel();
+        let next = refusing();
+        let listed = vec![
+            gated("silent.invalid", gate),
+            Broker {
+                uri: format!("amqp://{next}/%2f").parse().unwrap(),
+                resolver: BrokerResolver::new(Duration::from_secs(1)),
+            },
+        ];
+        let mut brokers = Brokers::of(listed, 0);
+        let bounds =
+            CdrDeliveryBounds { connect_timeout: 600 * MS, ..CdrDeliveryBounds::default() };
+        let settings = RabbitMqCdrSettings {
+            brokers: Vec::new(),
+            queue: "cdr".into(),
+            declare: CdrQueueDeclare::Own { max_len: 100 },
+            bounds,
+            tls: amqp_connect::BrokerTls::PLAIN,
+        };
+        let tally = Tally::new(B2buaMetrics::new());
+        let close_by = watch::Sender::new(None);
+        let t0 = Instant::now();
+        let failed = brokers.open(&settings, t0 + 600 * MS, &tally, &close_by).await.err();
+        let took = t0.elapsed();
+        drop(release);
+        let said = failed.expect("no broker serves").to_string();
+        assert!(said.contains("silent.invalid:5672: broker host unresolved"), "{said}");
+        assert!(said.contains(&format!("{next}: broker connect failed")), "{said}");
+        assert!(took >= 290 * MS && took < 600 * MS, "the attempt took {took:?}: half the bound");
     }
 }

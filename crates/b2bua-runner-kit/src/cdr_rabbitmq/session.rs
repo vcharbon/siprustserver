@@ -3,8 +3,9 @@
 //! broker is not delivering: a publish the connection does not take within its
 //! bound, a confirm missing past its bound, a channel or connection error, a
 //! returned publish, or a connection or channel found closed before a publish;
-//! and on a panic of the writer or of its confirm tracker. Ending it shuts its
-//! socket down.
+//! and on a panic of its confirm tracker. Ending it shuts its socket down. A
+//! session the writer panicked holding is retired instead: it publishes no
+//! more, its confirms resolve, then it closes.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
@@ -49,7 +50,7 @@ pub(super) enum OpenError {
     /// The AMQP handshake, channel, `confirm.select` or declare failed.
     Amqp(lapin::Error),
     /// The AMQP handshake, channel, `confirm.select` or declare was not done
-    /// by the deadline.
+    /// within its share of the deadline.
     AmqpTimedOut,
 }
 
@@ -60,7 +61,7 @@ impl std::fmt::Display for OpenError {
             OpenError::Connect(e) => write!(f, "broker connect failed: {e}"),
             OpenError::Amqp(e) => write!(f, "{e}"),
             OpenError::AmqpTimedOut => {
-                f.write_str("AMQP handshake not done by the connect deadline")
+                f.write_str("AMQP handshake not done within its share of the connect deadline")
             }
         }
     }
@@ -85,6 +86,9 @@ pub(super) enum PublishRefused {
 pub(super) struct Health {
     /// When the session ended; set once.
     ended_at: OnceLock<Instant>,
+    /// The session's one counted end: the reason of its first end or
+    /// retirement.
+    counted: OnceLock<BrokerSessionEnd>,
     /// Whether the broker acked at least one publish of this session.
     pub(super) delivered: AtomicBool,
     window: Arc<Semaphore>,
@@ -95,11 +99,12 @@ pub(super) struct Health {
 
 impl Health {
     /// The health of a session just opened, counted live in `metrics` until
-    /// its first [`Health::end`].
+    /// its first end or retirement.
     fn opened(window: usize, socket: Arc<SocketKill>, metrics: B2buaMetrics) -> Self {
         metrics.cdr_broker_session_opened();
         Self {
             ended_at: OnceLock::new(),
+            counted: OnceLock::new(),
             delivered: AtomicBool::new(false),
             window: Arc::new(window_permits(window)),
             socket,
@@ -109,7 +114,7 @@ impl Health {
 
     /// Ends the session for `why`: no further publish, the window closed (a
     /// publish waiting for a slot returns), the socket shut down. The first
-    /// end alone is logged and counted.
+    /// end alone is logged and counted, unless a retirement counted before.
     pub(super) fn end(&self, why: BrokerSessionEnd) {
         self.end_with(why, None);
     }
@@ -120,25 +125,42 @@ impl Health {
     }
 
     fn end_with(&self, why: BrokerSessionEnd, error: Option<&dyn std::fmt::Display>) {
-        if self.ended_at.set(Instant::now()).is_ok() {
-            let reason = why.label();
-            if why == BrokerSessionEnd::Closed {
-                tracing::debug!(reason, "CDR broker session closed");
-            } else {
-                tracing::warn!(
-                    reason,
-                    error = error.map(tracing::field::display),
-                    "CDR broker connection dropped; the next record reconnects"
-                );
-            }
-            self.metrics.cdr_broker_session_ended(why);
-        }
+        let _ = self.ended_at.set(Instant::now());
+        self.count(why, error);
         self.window.close();
         self.socket.kill();
     }
 
+    /// Logs and counts the session's end for `why`, the first call alone; the
+    /// session is no longer counted live from then on.
+    fn count(&self, why: BrokerSessionEnd, error: Option<&dyn std::fmt::Display>) {
+        if self.counted.set(why).is_err() {
+            return;
+        }
+        let reason = why.label();
+        if why == BrokerSessionEnd::Closed {
+            tracing::debug!(reason, "CDR broker session closed");
+        } else {
+            tracing::warn!(
+                reason,
+                error = error.map(tracing::field::display),
+                "CDR broker session ended"
+            );
+        }
+        self.metrics.cdr_broker_session_ended(why);
+    }
+
     pub(super) fn ended(&self) -> bool {
         self.ended_at.get().is_some()
+    }
+
+    /// Whether the session ended for a panic of the sink's own code, which
+    /// tells nothing of the broker.
+    fn ended_by_panic(&self) -> bool {
+        matches!(
+            self.counted.get(),
+            Some(BrokerSessionEnd::TrackerPanic | BrokerSessionEnd::WriterPanic)
+        )
     }
 }
 
@@ -162,8 +184,9 @@ impl Session {
     /// confirms and declares the queue, then spawns the confirm tracker
     /// counting into `tally`, bounded by the writer's close deadline
     /// `close_by`, and the connection watch. Everything is done by
-    /// `deadline`; the resolution and each TCP connect stop at their share of
-    /// it, counted with the `later` brokers the caller tries after this one
+    /// `deadline`; the resolution, each TCP connect and the handshakes (TLS,
+    /// then AMQP through the declare) stop at their share of it, counted
+    /// with the `later` brokers the caller tries after this one
     /// ([`amqp_connect::try_by`]). Dropping this future, or a failure
     /// half-way, shuts down whatever socket it connected. The client is
     /// handed the connected stream with auto-recovery off: a connection lost
@@ -189,8 +212,9 @@ impl Session {
         let socket = Arc::new(SocketKill::default());
         socket.arm(descriptor);
         let guard = KillOnDrop::new(socket.clone());
+        let handshake_by = try_by(deadline, later + 1);
         let (connection, channel) =
-            timeout_at(deadline, confirming_channel(settings, uri.clone(), stream))
+            timeout_at(handshake_by, confirming_channel(settings, uri.clone(), stream))
                 .await
                 .map_err(|_| OpenError::AmqpTimedOut)??;
         guard.disarm();
@@ -227,16 +251,25 @@ impl Session {
         self.tracker.take()
     }
 
+    /// Retires the session for `why`, its end counted now: it publishes no
+    /// more, the confirms of its publishes still resolve within their bounds
+    /// (the writer's close deadline included), then it closes. The task
+    /// returned does that; its socket stays open until then.
+    pub(super) fn retire(self, why: BrokerSessionEnd) -> JoinHandle<()> {
+        self.health.count(why, None);
+        tokio::spawn(self.close())
+    }
+
     /// When the session ended, `None` while it lives; an ended session never
     /// publishes again.
     pub(super) fn ended_at(&self) -> Option<Instant> {
         self.health.ended_at.get().copied()
     }
 
-    /// Ends the session for `why`: it publishes no more, and the writer
-    /// replaces it at its next record.
-    pub(super) fn end(&self, why: BrokerSessionEnd) {
-        self.health.end(why);
+    /// Whether the session ended for a panic of the sink's own code: its end
+    /// tells nothing of the broker.
+    pub(super) fn ended_by_panic(&self) -> bool {
+        self.health.ended_by_panic()
     }
 
     /// Whether the broker acked at least one publish of this session.

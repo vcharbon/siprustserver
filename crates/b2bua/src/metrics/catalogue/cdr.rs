@@ -39,7 +39,6 @@ assert_exposition_order!(
     BrokerSessionEnd: PublishFailed,
     PublishBound,
     ConfirmBound,
-    ConfirmLost,
     Returned,
     ConnectionLost,
     TrackerGone,
@@ -63,7 +62,7 @@ pub const DROPPED: Family = Family::counter(
 pub const BROKER_CONNECTED: Family = Family::gauge(
     "b2bua_cdr_broker_connected",
     Labels::None,
-    "1 while the broker CDR sink holds a live session, 0 before its first connect and from a session's end to the next session's open",
+    "1 while the broker CDR sink holds a live session, 0 before its first connect and from a session's end to the next session's open; a channel the broker closes without an error, its connection kept, reads live until the next record finds it closed",
 );
 
 pub const BROKER_CONNECTS: Family = Family::counter(
@@ -75,5 +74,5 @@ pub const BROKER_CONNECTS: Family = Family::counter(
 pub const BROKER_SESSION_ENDS: Family = Family::counter(
     "b2bua_cdr_broker_session_ends_total",
     Labels::Product(&[SESSION_END]),
-    "broker sessions of the CDR sink ended, by reason: publish_failed (the client failed a publish), publish_bound (the connection took no publish within the publish bound), confirm_bound (no confirm within the confirm bound), confirm_lost (the channel or connection failed with a confirm outstanding), returned (a publish came back unroutable), connection_lost (the connection or channel failed or closed, between records or before a publish), tracker_gone, tracker_panic (the confirm tracker stopped or panicked), writer_panic (the writer panicked during a record), closed (the writer closed it)",
+    "broker sessions of the CDR sink ended, by reason: publish_failed (the client failed a publish), publish_bound (the connection took no publish within the publish bound), confirm_bound (no confirm within the confirm bound), returned (a publish came back unroutable), connection_lost (the connection or channel failed or closed: between records, before a publish or with a confirm outstanding), tracker_gone, tracker_panic (the confirm tracker stopped or panicked), writer_panic (the writer panicked holding the session; its publishes still resolve), closed (the writer closed it)",
 );

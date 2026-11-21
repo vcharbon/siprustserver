@@ -1,7 +1,7 @@
 //! The RabbitMQ CDR sink over a list of brokers, against scripted ones: one
-//! connect attempt reaches a broker past a dead or silent one, the next
-//! attempt starts past a broker that failed and stays on one that delivered,
-//! and writers given different starts open on different brokers.
+//! connect attempt reaches a broker past a dead, silent or stalling one, the
+//! next attempt starts past the last broker tried or a session that failed
+//! and stays on one that delivered, and writers open on different brokers.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -41,10 +41,10 @@ fn bounds() -> CdrDeliveryBounds {
     }
 }
 
-/// A writer over `addrs`, in order, its first attempt starting at `first`.
-fn writer_over(
+/// A writer over `addrs`, in order, its first attempt starting at the broker
+/// it draws.
+fn drawing_writer_over(
     addrs: &[SocketAddr],
-    first: usize,
     bounds: CdrDeliveryBounds,
 ) -> (RabbitMqCdrWriter, B2buaMetrics) {
     let metrics = B2buaMetrics::new();
@@ -58,7 +58,16 @@ fn writer_over(
         bounds,
         tls: amqp_connect::BrokerTls::PLAIN,
     };
-    let writer = RabbitMqCdrWriter::new(settings, Arc::new(Fixed), metrics.clone());
+    (RabbitMqCdrWriter::new(settings, Arc::new(Fixed), metrics.clone()), metrics)
+}
+
+/// A writer over `addrs`, in order, its first attempt starting at `first`.
+fn writer_over(
+    addrs: &[SocketAddr],
+    first: usize,
+    bounds: CdrDeliveryBounds,
+) -> (RabbitMqCdrWriter, B2buaMetrics) {
+    let (writer, metrics) = drawing_writer_over(addrs, bounds);
     (writer.starting_at(first), metrics)
 }
 
@@ -126,24 +135,45 @@ async fn a_record_is_written_through_the_next_broker_when_the_first_never_answer
     assert!(took >= 290 * MS && took < 600 * MS, "the write took {took:?}: half the bound, then");
 }
 
-/// The first broker accepts TCP and stalls the AMQP handshake through the
-/// whole attempt; once the backoff passed, the next attempt starts at the
-/// second broker, though the first serves again.
+/// The first broker accepts TCP and stalls the AMQP handshake: it holds the
+/// attempt for its share of the connect bound, and the second is connected
+/// within the rest.
 #[tokio::test]
-async fn the_attempt_after_a_failed_one_starts_at_the_next_broker() {
-    let first = FakeBroker::start(Reply::Ack).await;
-    let second = FakeBroker::start(Reply::Ack).await;
-    first.admit(Admit::StallHandshake);
-    let (w, m) = writer_over(&[first.addr, second.addr], 0, bounds());
+async fn a_record_is_written_through_the_next_broker_when_the_first_stalls_its_handshake() {
+    let stalled = FakeBroker::start(Reply::Ack).await;
+    let healthy = FakeBroker::start(Reply::Ack).await;
+    stalled.admit(Admit::StallHandshake);
+    let roomy = CdrDeliveryBounds { connect_timeout: 600 * MS, ..bounds() };
+    let (w, m) = writer_over(&[stalled.addr, healthy.addr], 0, roomy);
+    let t0 = Instant::now();
+    w.write(&a_call(), 2_000).await;
+    let took = t0.elapsed();
+    settle(&m, (1, 0)).await;
+    assert_eq!((accepted(&stalled), accepted(&healthy)), (1, 1));
+    assert!(took >= 290 * MS && took < 600 * MS, "the write took {took:?}: half the bound, then");
+}
+
+/// The attempt starts at a refusing broker, then two brokers stall their
+/// handshakes to the deadline, the fourth never tried; once the backoff
+/// passed, the next attempt starts past the last broker tried, at the fourth.
+#[tokio::test]
+async fn the_attempt_after_one_its_deadline_cut_starts_past_the_last_broker_tried() {
+    let stalled = [FakeBroker::start(Reply::Ack).await, FakeBroker::start(Reply::Ack).await];
+    let healthy = FakeBroker::start(Reply::Ack).await;
+    for broker in &stalled {
+        broker.admit(Admit::StallHandshake);
+    }
+    let listed = [refusing(), stalled[0].addr, stalled[1].addr, healthy.addr];
+    let (w, m) = writer_over(&listed, 0, bounds());
     let call = a_call();
     w.write(&call, 2_000).await;
     assert_eq!(counts(&m), (0, 1));
-    assert_eq!((accepted(&first), accepted(&second)), (1, 0), "the stall held the attempt");
-    first.admit(Admit::Serve);
+    let reached = || (accepted(&stalled[0]), accepted(&stalled[1]), accepted(&healthy));
+    assert_eq!(reached(), (1, 1, 0), "the stalls held the attempt to its deadline");
     tokio::time::sleep(350 * MS).await;
     w.write(&call, 2_000).await;
     settle(&m, (1, 1)).await;
-    assert_eq!((accepted(&first), accepted(&second)), (1, 1));
+    assert_eq!(reached(), (1, 1, 1), "the second attempt went to the untried broker first");
 }
 
 /// A session that opened and ended having delivered nothing (its publish
@@ -195,4 +225,23 @@ async fn writers_with_different_starts_open_on_different_brokers() {
     settle(&m1, (1, 0)).await;
     settle(&m2, (1, 0)).await;
     assert_eq!((accepted(&first), accepted(&second)), (1, 1));
+}
+
+/// Writers given no start draw one each: 24 of them all opening on one of
+/// two brokers is a fixed draw (a chance of 2 in 2^24 otherwise).
+#[tokio::test]
+async fn writers_given_no_start_open_on_both_brokers() {
+    let first = FakeBroker::start(Reply::Ack).await;
+    let second = FakeBroker::start(Reply::Ack).await;
+    let call = a_call();
+    let mut writers = Vec::new();
+    for _ in 0..24 {
+        let (w, m) = drawing_writer_over(&[first.addr, second.addr], bounds());
+        w.write(&call, 2_000).await;
+        settle(&m, (1, 0)).await;
+        writers.push(w);
+    }
+    let (one, other) = (accepted(&first), accepted(&second));
+    assert_eq!(one + other, 24, "each writer opened one connection");
+    assert!(one > 0 && other > 0, "every writer opened on one broker: ({one}, {other})");
 }

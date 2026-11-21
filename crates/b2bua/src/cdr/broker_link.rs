@@ -37,18 +37,17 @@ pub enum BrokerSessionEnd {
     PublishBound,
     /// No confirm came within the confirm bound.
     ConfirmBound,
-    /// The channel or connection failed with a confirm outstanding.
-    ConfirmLost,
     /// The broker returned a publish unroutable.
     Returned,
-    /// The client found the connection or channel failed or closed, between
-    /// records or before a publish.
+    /// The client found the connection or channel failed or closed: between
+    /// records, before a publish, or with a confirm outstanding.
     ConnectionLost,
     /// The confirm tracker took no more publishes.
     TrackerGone,
     /// The confirm tracker panicked.
     TrackerPanic,
-    /// The writer panicked during a record.
+    /// The writer panicked while it held the session; the session's
+    /// publishes still resolve.
     WriterPanic,
     /// The writer closed or dropped the session.
     Closed,
@@ -56,11 +55,10 @@ pub enum BrokerSessionEnd {
 
 impl BrokerSessionEnd {
     /// Every reason, in declaration order.
-    pub const ALL: [BrokerSessionEnd; 10] = [
+    pub const ALL: [BrokerSessionEnd; 9] = [
         BrokerSessionEnd::PublishFailed,
         BrokerSessionEnd::PublishBound,
         BrokerSessionEnd::ConfirmBound,
-        BrokerSessionEnd::ConfirmLost,
         BrokerSessionEnd::Returned,
         BrokerSessionEnd::ConnectionLost,
         BrokerSessionEnd::TrackerGone,
@@ -75,7 +73,6 @@ impl BrokerSessionEnd {
             BrokerSessionEnd::PublishFailed => "publish_failed",
             BrokerSessionEnd::PublishBound => "publish_bound",
             BrokerSessionEnd::ConfirmBound => "confirm_bound",
-            BrokerSessionEnd::ConfirmLost => "confirm_lost",
             BrokerSessionEnd::Returned => "returned",
             BrokerSessionEnd::ConnectionLost => "connection_lost",
             BrokerSessionEnd::TrackerGone => "tracker_gone",

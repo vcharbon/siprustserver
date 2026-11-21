@@ -64,15 +64,19 @@ log writer and exits with a failure code.
 The CDR drainer is supervised, its queue, close deadline and closed signal in state each run
 takes over (`cdr/buffered/drainer.rs`), counted as `task="cdr_drainer"`:
 
-- a panic of the sink's write is caught: the record counts dropped once (a sink's count is the
-  last thing its write does, so a write that panics counted nothing), and the sink drops its
-  partial state (`CdrWriter::after_panic`; the RabbitMQ sink ends its session);
+- a panic of the sink's write is caught: the record counts dropped once, through the sink so
+  its observer is told (`CdrWriter::dropped`; a sink's count is the last thing its write does,
+  so a write that panics counted nothing), one error line per minute carries the count, and
+  the sink drops its partial state (`CdrWriter::after_panic`; the RabbitMQ sink retires a
+  session the panic unwound through, its earlier publishes still resolving, and keeps one the
+  panic never touched);
 - any other panic of a run starts a new one after the restart delay, at once when a close
   begins meanwhile, the sink told first; records keep queuing, bounded;
-- a run that panics during a close is not made again: the rest of the queue counts dropped and
-  the close ends by its deadline;
+- in a close, one run that panics is made again at once and writes until the deadline; a
+  second is not: the rest of the queue counts dropped and the close ends by its deadline;
 - the RabbitMQ sink's confirm tracker is not restarted: its panic ends its session at once and
-  counts its pending records dropped.
+  counts its pending records dropped. An observer's panic is caught where it is told, and its
+  record counts all the same.
 
 The worker's vital list holds the drainer's supervisor, which ends only when the drainer's work
 does.

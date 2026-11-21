@@ -67,14 +67,21 @@ impl<const N: usize> Restarts<N> {
 
     /// Count and log one panicked run of the task `name`, about to run again.
     pub fn restarted(&self, name: &'static str) {
-        let total = match self.slot(name) {
+        let total = self.survived(name);
+        tracing::error!(task = name, total, "a supervised task panicked; it runs again");
+    }
+
+    /// Count one panic the task `name` caught and survived in the same run,
+    /// with no line: the task says it, at the rate it chooses. Returns the
+    /// task's count, this panic included.
+    pub fn survived(&self, name: &'static str) -> u64 {
+        match self.slot(name) {
             Some(count) => count.fetch_add(1, Ordering::Relaxed).saturating_add(1),
             None => {
                 debug_assert!(false, "{name} is no task of this table");
                 0
             }
-        };
-        tracing::error!(task = name, total, "a supervised task panicked; it runs again");
+        }
     }
 }
 

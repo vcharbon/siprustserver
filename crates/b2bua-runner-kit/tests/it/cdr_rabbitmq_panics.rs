@@ -1,6 +1,6 @@
-//! The RabbitMQ CDR sink through a panic: a panic of the writer's work ends
-//! its session, the next record opens a fresh one, and every record counts
-//! once.
+//! The RabbitMQ CDR sink through a panic outside its session (its encoder,
+//! its observer): the session serves on, every record counts once, and the
+//! observer is told each end.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -104,48 +104,65 @@ async fn counted(broker: &FakeBroker, pick: impl Fn(&Counters) -> &AtomicUsize, 
     assert_eq!(broker.count(pick), n);
 }
 
-/// The drainer catches a panic inside the writer's `write`: that record
-/// counts dropped once, the writer ends its session, and the next record is
-/// written over a new connection.
+/// A record's encode panics while the record before it, published on a
+/// healthy session, awaits an ack the broker sends 100 ms later, and the
+/// record after it follows at once: the panic counts its own record dropped
+/// once, and the records around it are written over the same connection.
 #[tokio::test]
-async fn after_a_caught_write_panic_the_next_record_opens_a_fresh_session() {
-    let broker = FakeBroker::start(Reply::Ack).await;
+async fn a_write_panic_outside_the_session_spares_the_records_around_it() {
+    let broker = FakeBroker::start(Reply::AckAfter(100 * MS)).await;
     let encoder = Arc::new(PanicsAt { panics_at: 1, encoded: AtomicUsize::new(0) });
     let (w, m) = writer_to(&broker, encoder);
     let restarts_before = RESTARTS.count(CDR_DRAINER);
     let buf = BufferedCdrWriter::spawn(Arc::new(w), 64, m.clone());
+    for _ in 0..3 {
+        buf.write(&a_call(), 2_000).await;
+    }
+    settle(&m, (2, 1)).await;
+    assert_eq!(m.cdr_drops(), [(CdrDrop::Panic, 1)], "drops by reason");
+    assert_eq!(broker.count(|c| &c.accepted), 1, "one connection served the three");
+    assert_eq!(broker.count(|c| &c.ended_by_client), 0, "the session served on");
+    assert_eq!(m.cdr_broker_session_ends_of(BrokerSessionEnd::WriterPanic), 0);
+    assert_eq!(RESTARTS.count(CDR_DRAINER) - restarts_before, 1, "the caught panic is counted");
+    buf.close(Instant::now() + 500 * MS).await;
+    assert_eq!(counts(&m), (2, 1), "the close counts nothing twice");
+}
+
+/// The observer is told one end per record handed to the writer, the record
+/// whose write panicked included, in the order the records ended.
+#[tokio::test]
+async fn the_observer_is_told_the_end_of_a_record_whose_write_panicked() {
+    let broker = FakeBroker::start(Reply::Ack).await;
+    let encoder = Arc::new(PanicsAt { panics_at: 1, encoded: AtomicUsize::new(0) });
+    let (w, m) = writer_to(&broker, encoder);
+    let ends = Arc::new(Ends { panics: AtomicUsize::new(0), told: Default::default() });
+    let buf = BufferedCdrWriter::spawn(Arc::new(w.observed_by(ends.clone())), 64, m.clone());
     buf.write(&a_call(), 2_000).await;
     settle(&m, (1, 0)).await;
     buf.write(&a_call(), 2_000).await;
     settle(&m, (1, 1)).await;
-    counted(&broker, |c| &c.ended_by_client, 1).await;
     buf.write(&a_call(), 2_000).await;
     settle(&m, (2, 1)).await;
-    assert_eq!(broker.count(|c| &c.accepted), 2, "the record after the panic reconnected");
-    assert_eq!(RESTARTS.count(CDR_DRAINER) - restarts_before, 1, "the caught panic is counted");
-    assert_eq!(m.cdr_broker_session_ends_of(BrokerSessionEnd::WriterPanic), 1);
-    buf.close(Instant::now() + 500 * MS).await;
-    assert_eq!(counts(&m), (2, 1), "the close counts nothing twice");
-    assert_eq!(m.cdr_drops(), [(CdrDrop::Panic, 1)]);
+    let told = ends.told.lock().unwrap().clone();
+    assert_eq!(told, [CdrDelivery::Written, CdrDelivery::Dropped, CdrDelivery::Written]);
 }
 
-/// The confirm tracker panics while it counts an acked record (its observer
-/// panics): the session ends at once, before any further record, the record
-/// counts dropped once, and the next record is written over a new connection.
+/// The observer panics on its first two calls: each record still counts
+/// once, as the broker answered it, and the session serves on.
 #[tokio::test]
-async fn a_panic_of_the_confirm_tracker_ends_its_session_at_once_and_counts_its_record_once() {
+async fn an_observer_that_panics_costs_neither_the_count_nor_the_session() {
     let broker = FakeBroker::start(Reply::Ack).await;
     let encoder = Arc::new(PanicsAt { panics_at: usize::MAX, encoded: AtomicUsize::new(0) });
     let (w, m) = writer_to(&broker, encoder);
-    let ends = Arc::new(Ends { panics: AtomicUsize::new(1), told: Default::default() });
+    let ends = Arc::new(Ends { panics: AtomicUsize::new(2), told: Default::default() });
     let w = w.observed_by(ends.clone());
-    w.write(&a_call(), 2_000).await;
-    settle(&m, (0, 1)).await;
+    for written in 1..=3 {
+        w.write(&a_call(), 2_000).await;
+        settle(&m, (written, 0)).await;
+    }
+    assert_eq!(*ends.told.lock().unwrap(), [CdrDelivery::Written], "the third end, told");
+    assert_eq!(broker.count(|c| &c.accepted), 1, "one connection served the three");
+    assert_eq!(m.cdr_broker_session_ends_of(BrokerSessionEnd::TrackerPanic), 0);
+    w.close(Instant::now() + 500 * MS).await;
     counted(&broker, |c| &c.ended_by_client, 1).await;
-    assert_eq!(*ends.told.lock().unwrap(), vec![CdrDelivery::Dropped], "told one end");
-    assert_eq!(m.cdr_drops(), [(CdrDrop::Panic, 1)]);
-    assert_eq!(m.cdr_broker_session_ends_of(BrokerSessionEnd::TrackerPanic), 1);
-    w.write(&a_call(), 2_000).await;
-    settle(&m, (1, 1)).await;
-    assert_eq!(broker.count(|c| &c.accepted), 2);
 }

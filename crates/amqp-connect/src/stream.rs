@@ -64,8 +64,8 @@ pub async fn connect_stream(
 }
 
 /// [`connect_stream`] for a caller that makes `later` more tries after these
-/// addresses by the same `deadline`: each address's share counts them among
-/// the tries left.
+/// addresses by the same `deadline`: each address's share, and the TLS
+/// handshake's, counts them among the tries left.
 pub async fn connect_stream_sharing(
     uri: &AMQPUri,
     tls: &BrokerTls,
@@ -112,9 +112,11 @@ pub async fn connect_stream_sharing(
     let plain = AsyncTcpStream::Plain(tcp);
     let stream = match connector {
         None => plain,
-        Some(connector) => timeout_at(deadline, plain.into_rustls(connector, host))
-            .await
-            .map_err(|_| timed_out())??,
+        Some(connector) => {
+            timeout_at(try_by(deadline, later + 1), plain.into_rustls(connector, host))
+                .await
+                .map_err(|_| timed_out())??
+        }
     };
     Ok(Connected { stream, socket })
 }

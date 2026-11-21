@@ -13,8 +13,10 @@
 //! `write` was handed the record. `close` publishes nothing more and
 //! returns once every publish of every session is counted, by its deadline at
 //! the latest; a write still in flight then counts its own record. A count is
-//! the last thing a write does, so a write that panics has counted nothing,
-//! and the session it may have left half-used ends ([`CdrWriter::after_panic`]).
+//! the last thing a write does, so a write that panics has counted nothing
+//! (its caller counts it, [`CdrWriter::dropped`]); a session the panic left
+//! half-used is retired, its earlier publishes still counted by their confirms
+//! ([`CdrWriter::after_panic`]).
 //!
 //! Bounds: the writer runs behind the kit's `BufferedCdrWriter` drainer (the
 //! grammar refuses `B2BUA_CDR_QUEUE=0` beside a URL); every broker wait is
@@ -27,7 +29,7 @@ mod brokers;
 mod confirms;
 mod connection_watch;
 mod declaration;
-mod nack_log;
+mod link;
 mod resolver;
 mod session;
 mod settings;
@@ -45,12 +47,12 @@ use b2bua::metrics::B2buaMetrics;
 use call::Call;
 use sip_clock::wall::millis_u64;
 use tokio::sync::{watch, Mutex};
-use tokio::task::JoinHandle;
 use tokio::time::error::Elapsed;
 use tokio::time::{timeout_at, Instant};
 
 use backoff::Backoff;
 use brokers::{drawn_start, Brokers, Unreached};
+use link::{Held, Link};
 use session::{PublishRefused, Session};
 pub use settings::{
     CdrDeliveryBounds, CdrQueueDeclare, RabbitMqCdrSettings, MAX_DRAINER_WAIT_MS, MAX_WAIT_MS,
@@ -111,16 +113,6 @@ pub struct RabbitMqCdrWriter {
     close_by: watch::Sender<Option<Instant>>,
 }
 
-struct Link {
-    /// `None` until the first connect, and after a session ended.
-    session: Option<Session>,
-    /// The confirm trackers of ended sessions still resolving their
-    /// publishes, joined by `close`.
-    retired: Vec<JoinHandle<()>>,
-    backoff: Backoff,
-    brokers: Brokers,
-}
-
 impl RabbitMqCdrWriter {
     /// The writer of `settings`, its first connect attempt starting at a
     /// broker drawn at random, so the workers of a cluster spread over its
@@ -139,7 +131,7 @@ impl RabbitMqCdrWriter {
         Self {
             settings,
             encoder,
-            link: Mutex::new(Link { session: None, retired: Vec::new(), backoff, brokers }),
+            link: Mutex::new(Link::new(backoff, brokers)),
             tally: Tally::new(metrics),
             close_by: watch::Sender::new(None),
         }
@@ -188,17 +180,7 @@ impl RabbitMqCdrWriter {
         if let Some(current) = &link.session {
             current.end_if_disconnected();
         }
-        if let Some(ended) = link.session.take_if(|s| s.ended_at().is_some()) {
-            link.brokers.ended(ended.delivered());
-            if ended.delivered() {
-                link.backoff.recovered();
-            } else if let Some(ended_at) = ended.ended_at() {
-                // The backoff counts from the end, not from this record.
-                link.backoff.failed(ended_at);
-            }
-            link.retired.retain(|tracker| !tracker.is_finished());
-            link.retired.extend(ended.into_tracker());
-        }
+        link.take_ended();
         if link.session.is_none() {
             if !link.backoff.ready(Instant::now()) {
                 return None;
@@ -252,7 +234,7 @@ impl CdrWriter for RabbitMqCdrWriter {
         let Some(payload) = self.payload(call, terminated_at) else {
             return self.tally.dropped(handed_at, CdrDrop::Encode);
         };
-        let mut link = self.link.lock().await;
+        let mut link = Held(self.link.lock().await);
         if self.close_by.borrow().is_some() {
             return self.tally.dropped(handed_at, CdrDrop::Closed);
         }
@@ -271,12 +253,27 @@ impl CdrWriter for RabbitMqCdrWriter {
         }
     }
 
-    /// Ends the current session: the next record opens a fresh one, and the
-    /// ended session's confirm tracker still counts what it was handed.
+    /// Retires the live session when a panic unwound through a write holding
+    /// it, its end counted as [`BrokerSessionEnd::WriterPanic`]: it publishes
+    /// no more, its confirms still count its publishes, and neither the
+    /// backoff nor the broker cursor moves, so the next record opens a fresh
+    /// session on the same broker. A panic outside the link (the encoder, the
+    /// drainer between records) leaves the session serving.
     async fn after_panic(&self) {
-        if let Some(session) = &self.link.lock().await.session {
-            session.end(BrokerSessionEnd::WriterPanic);
+        let mut link = self.link.lock().await;
+        if !std::mem::take(&mut link.panicked) {
+            return;
         }
+        let Some(session) = link.session.take_if(|s| s.ended_at().is_none()) else {
+            return;
+        };
+        link.brokers.ended(true);
+        link.retire(Some(session.retire(BrokerSessionEnd::WriterPanic)));
+    }
+
+    /// Counts the record through the writer's own drops, its observer told.
+    fn dropped(&self, why: CdrDrop, handed_at: Instant, _metrics: &B2buaMetrics) {
+        self.tally.dropped(handed_at, why);
     }
 
     async fn read_all(&self) -> Vec<CdrRecord> {

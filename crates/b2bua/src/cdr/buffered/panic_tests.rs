@@ -45,13 +45,15 @@ fn a_call() -> Call {
 
 /// Takes `per_record` to write each record. Its next `write_panics` writes
 /// panic before they write, and its next `hook_panics` calls of
-/// `after_panic` panic; it remembers each `after_panic` call and its close.
+/// `after_panic` panic; it remembers each `after_panic` call, each record its
+/// caller counted dropped through it, and its close.
 struct PanickySink {
     per_record: Duration,
     write_panics: AtomicUsize,
     hook_panics: AtomicUsize,
     hooks: AtomicUsize,
     written: InMemoryCdrWriter,
+    told: std::sync::Mutex<Vec<CdrDrop>>,
     closed_by: std::sync::Mutex<Option<Instant>>,
 }
 
@@ -63,12 +65,18 @@ impl PanickySink {
             hook_panics: AtomicUsize::new(hook_panics),
             hooks: AtomicUsize::new(0),
             written: InMemoryCdrWriter::new(),
+            told: Default::default(),
             closed_by: Default::default(),
         })
     }
 
     fn written(&self) -> usize {
         self.written.snapshot().len()
+    }
+
+    /// The reasons of the records its caller counted dropped through it.
+    fn told(&self) -> Vec<CdrDrop> {
+        self.told.lock().unwrap().clone()
     }
 
     fn hooks(&self) -> usize {
@@ -108,6 +116,11 @@ impl CdrWriter for PanickySink {
         if take(&self.hook_panics) {
             panic!("expected: the sink's after_panic panics");
         }
+    }
+
+    fn dropped(&self, why: CdrDrop, _handed_at: Instant, metrics: &B2buaMetrics) {
+        self.told.lock().unwrap().push(why);
+        metrics.bump_cdr_dropped(why);
     }
 }
 
@@ -160,6 +173,7 @@ async fn a_write_that_panics_counts_its_record_dropped_once_and_the_next_records
     let rig = Rig::new(PanickySink::new(Duration::ZERO, 1, 0), 3).await;
     tokio::time::sleep(10 * MS).await;
     assert_eq!((rig.sink.written(), rig.dropped()), (2, 1));
+    assert_eq!(rig.sink.told(), [CdrDrop::Panic], "counted through the sink");
     assert_eq!(rig.restarts(), 1, "the caught panic is counted");
     assert_eq!(rig.sink.hooks(), 1, "the sink dropped its partial state once");
     assert_eq!(rig.loops.ended(), None, "the worker serves on");
@@ -201,23 +215,57 @@ async fn a_close_during_the_restart_delay_ends_by_its_deadline_with_every_record
     assert_eq!(rig.dropped(), 7, "the panicked one, the one cut and the five queued");
     let drops = [(CdrDrop::CloseDeadline, 6), (CdrDrop::Panic, 1)];
     assert_eq!(rig.metrics.cdr_drops(), drops);
+    let told = [CdrDrop::Panic, CdrDrop::CloseDeadline];
+    assert_eq!(rig.sink.told(), told, "the two records the sink was handed, through it");
     assert_eq!(rig.sink.closed_by(), Some(deadline), "the sink closed by the same deadline");
 }
 
-/// A run that panics during the close is not made again: the records still
-/// queued count dropped and the close returns at once.
+/// A run that panics during the close is made again at once: the new run
+/// writes the queue until the deadline, and the close returns once it did.
 #[tokio::test(start_paused = true)]
-async fn a_run_that_panics_during_the_close_gives_the_queue_up_and_the_close_returns() {
+async fn a_run_that_panics_during_the_close_is_made_again_at_once_and_writes_the_queue() {
     let rig = Rig::new(PanickySink::new(100 * MS, 1, 1), 5).await;
+    let start = Instant::now();
+    let deadline = start + Duration::from_secs(10);
+    rig.buf.close(deadline).await;
+    assert_eq!(Instant::now(), start + 400 * MS, "no restart delay, four writes of 100 ms");
+    assert_eq!((rig.sink.written(), rig.dropped()), (4, 1));
+    assert_eq!(rig.metrics.cdr_drops(), [(CdrDrop::Panic, 1)], "the panicked one alone");
+    assert_eq!(rig.restarts(), 2, "the caught write panic and the run's panic");
+    assert_eq!(rig.sink.hooks(), 2, "the new run told the sink first");
+    assert_eq!(rig.sink.closed_by(), Some(deadline));
+    rig.buf.write(&a_call(), 3_000).await;
+    assert_eq!(rig.dropped(), 2, "a write after the close is counted dropped");
+    assert_eq!(rig.metrics.cdr_drops(), [(CdrDrop::Closed, 1), (CdrDrop::Panic, 1)]);
+}
+
+/// A second run that panics during the close is not made again: the records
+/// still queued count dropped and the close returns at once.
+#[tokio::test(start_paused = true)]
+async fn a_second_run_that_panics_during_the_close_gives_the_queue_up_and_the_close_returns() {
+    let rig = Rig::new(PanickySink::new(100 * MS, 1, 2), 5).await;
     let start = Instant::now();
     let deadline = start + Duration::from_secs(10);
     rig.buf.close(deadline).await;
     assert_eq!(Instant::now(), start, "no restart delay inside a close");
     assert_eq!((rig.sink.written(), rig.dropped()), (0, 5));
     assert_eq!(rig.metrics.cdr_drops(), [(CdrDrop::Panic, 5)], "the panicked one and the queue");
-    assert_eq!(rig.restarts(), 2, "the caught write panic and the run's panic");
+    assert_eq!(rig.restarts(), 3, "the caught write panic and the two runs' panics");
     assert_eq!(rig.sink.closed_by(), Some(deadline));
-    rig.buf.write(&a_call(), 3_000).await;
-    assert_eq!(rig.dropped(), 6, "a write after the close is counted dropped");
-    assert_eq!(rig.metrics.cdr_drops(), [(CdrDrop::Closed, 1), (CdrDrop::Panic, 5)]);
+}
+
+/// A writer holds a queue slot, its record not sent yet, when the close
+/// gives the queue up: the record it sends on that slot is counted.
+#[tokio::test(start_paused = true)]
+async fn a_record_sent_on_a_slot_reserved_before_the_queue_is_given_up_is_counted() {
+    let rig = Rig::new(PanickySink::new(100 * MS, 1, 2), 5).await;
+    let slot = rig.buf.tx.as_ref().expect("buffering").try_reserve().expect("a free slot");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let buf = rig.buf.clone();
+    let closing = tokio::spawn(async move { buf.close(deadline).await });
+    tokio::time::sleep(10 * MS).await;
+    slot.send((a_call(), 2_000));
+    closing.await.expect("the close returns");
+    assert_eq!(rig.sink.written(), 0);
+    assert_eq!(rig.dropped(), 6, "the five queued and the one sent on its reserved slot");
 }
