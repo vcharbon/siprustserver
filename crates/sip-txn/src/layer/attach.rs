@@ -1,6 +1,8 @@
 //! A server transaction attributed to its call after it opened: the consumer
 //! found the call of a request whose Request-URI named none (`layer::server`
-//! attributes by the Request-URI `callRef` as the transaction opens).
+//! attributes by the Request-URI `callRef` as the transaction opens), or a
+//! seed of the call hands its final to a transaction a copy of its request
+//! opened (`layer::seed`).
 
 use std::sync::atomic::Ordering::Relaxed;
 

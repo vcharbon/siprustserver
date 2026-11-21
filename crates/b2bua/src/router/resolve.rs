@@ -356,8 +356,10 @@ fn stated_call_ref(req: &sip_message::SipRequest) -> Option<String> {
 /// it resolves `req` to: `req` states no `callRef` (an element rewrote its
 /// Request-URI, so the call is found by dialog identity) and opens a
 /// transaction the transaction layer attributes by the Request-URI when it
-/// states one. An ACK opens none; a CANCEL's transaction and an out-of-dialog
-/// INVITE's, which opens or copies a call, are attributed to no call.
+/// states one. An ACK opens none and a CANCEL's transaction is attributed to
+/// no call. An out-of-dialog INVITE's is not attributed here: one that opens
+/// a call is attributed to none, and one that copies a call's INVITE is
+/// relinquished or takes the attribution of the seed whose final it takes.
 pub(super) fn attributed_on_resolution(req: &sip_message::SipRequest) -> bool {
     let method = req.method();
     let opens_call = method == Method::Invite && req.to().tag().is_none();
