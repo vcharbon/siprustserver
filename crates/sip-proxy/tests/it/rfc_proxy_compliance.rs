@@ -72,7 +72,6 @@ Content-Length: 0\r\n\r\n";
 #[tokio::test]
 async fn response_with_foreign_top_via_is_discarded() {
     let h = Harness::with_transit_delay("rfc-foreign-via", 0);
-    h.allow_violation("mid-dialog-tags", "raw-injected response; proxy is the SUT, not a real UA");
     h.waive(
         scenario_harness::WaiverScope::rule(
             "response-destination",
@@ -107,7 +106,6 @@ Content-Length: 0\r\n\r\n";
 #[tokio::test]
 async fn response_with_single_via_is_not_forwarded() {
     let h = Harness::with_transit_delay("rfc-single-via", 0);
-    h.allow_violation("mid-dialog-tags", "raw-injected response; proxy is the SUT, not a real UA");
     let (bob_ep, bob_addr) = h.bind_sut("bob", "127.0.0.1:5070").await;
     let (strategy, registry) = forward_all(bob_addr);
     let proxy = spawn_proxy(&h, "127.0.0.1:5080", strategy, registry).await;
