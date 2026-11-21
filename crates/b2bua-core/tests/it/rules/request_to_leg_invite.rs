@@ -58,6 +58,78 @@ fn an_in_dialog_invite_becomes_the_dialogs_invite_record() {
     assert!(call::helpers::invite_untaken(dialog), "no 2xx taken yet");
 }
 
+/// An in-dialog INVITE toward the callee's leg `b-1` offering [`OFFER`].
+fn invite_to_callee() -> RuleAction {
+    RuleAction::SendRequestToLeg {
+        leg_id: "b-1".into(),
+        method: "INVITE".into(),
+        body: Some(Body::own(OFFER.as_bytes().to_vec(), Some("application/sdp".into()))),
+        headers: vec![],
+    }
+}
+
+/// `actions` run on `call` in turn `turn` for `event` arriving on `b-1`.
+fn on_callee(
+    call: &call::Call,
+    turn: u64,
+    event: &CallEvent,
+    actions: &[RuleAction],
+) -> HandlerResult {
+    let config = B2buaConfig::default();
+    let mut id_gen = scope(turn);
+    exec_on(call, event, "b-1", &config, &mut id_gen, actions)
+}
+
+/// The callee's 200 to `invite`.
+fn ok_to(invite: &SipRequest) -> CallEvent {
+    let opts = sip_message::generators::GenerateResponseOpts::default();
+    let ok = sip_message::generators::generate_response(invite, 200, "OK", &opts)
+        .expect("a 200 to the INVITE");
+    CallEvent::sip(SipMessage::Response(ok), "10.0.0.2:5070".parse().unwrap())
+}
+
+#[test]
+fn it_carries_the_capability_set_declared_toward_the_leg() {
+    let mut call = super::body_descriptors::bridged();
+    let mut features = b2bua_core::decision::default_platform_features();
+    features.advertise_capabilities = Some(call::features::AdvertiseCapabilitiesFeature {
+        toward_originator: None,
+        toward_originated: Some(call::features::AdvertisedCapabilities {
+            allow: Some(["INVITE", "ACK", "BYE"].iter().map(|s| s.to_string()).collect()),
+            supported: None,
+        }),
+    });
+    call.features = Some(features);
+    let event = CallEvent::sip(SipMessage::Request(invite()), "127.0.0.1:5060".parse().unwrap());
+    let result = on_callee(&call, 2, &event, &[invite_to_callee()]);
+    let [invite] = invites(&result).try_into().expect("one INVITE leaves");
+    let allow = invite.raw_text(HeaderName::Allow).next().map(|v| v.as_str().to_string());
+    assert_eq!(allow.as_deref(), Some("INVITE, ACK, BYE"));
+}
+
+#[test]
+fn its_2xx_is_acked_at_its_cseq_on_a_branch_of_its_own() {
+    let call = super::body_descriptors::bridged();
+    let event = CallEvent::sip(SipMessage::Request(invite()), "127.0.0.1:5060".parse().unwrap());
+    let sent = on_callee(&call, 2, &event, &[invite_to_callee()]);
+    let [invite] = invites(&sent).try_into().expect("one INVITE leaves");
+    let ack_leg = RuleAction::AckLeg { leg_id: "b-1".into(), body: None };
+    let answered = on_callee(&sent.call, 3, &ok_to(&invite), &[ack_leg]);
+    let ack = answered
+        .effects
+        .outbound
+        .iter()
+        .find_map(|e| match &e.body {
+            OutboundBody::Request(r) if r.method() == Method::Ack => Some(r.clone()),
+            _ => None,
+        })
+        .expect("the 2xx is ACKed");
+    assert_eq!(ack.cseq().seq(), invite.cseq().seq(), "the ACK echoes the INVITE's CSeq");
+    let branch = ack.top_via().branch().expect("a branch");
+    assert_ne!(branch, "z9hG4bKb1-ack", "not the dialling INVITE's ACK");
+    assert_ne!(Some(branch), invite.top_via().branch(), "not the INVITE's transaction");
+}
+
 #[test]
 fn a_re_invite_after_it_in_the_same_turn_is_not_sent() {
     let reinvite = RuleAction::SendReinvite {
