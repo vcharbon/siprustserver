@@ -27,7 +27,9 @@ use super::ActionExecutor;
 impl ActionExecutor<'_> {
     /// Relay an inbound SIP request to `target_leg`, in its dialog
     /// `target_dialog`; with no live dialog there to carry it, the sender is
-    /// told to retry ([`Unrelayed::NotNow`]). The relayed copy carries the
+    /// told to retry ([`Unrelayed::NotNow`]), and one whose copy would lose a
+    /// requirement only the peer serves is refused 420
+    /// ([`Self::refuse_unserved`]). The relayed copy carries the
     /// target dialog's next number (RFC 3261 §12.2.1.1: each dialog numbers
     /// its own requests; a gap in the sender's sequence is not reproduced),
     /// the PRACK `RAck` CSeq rewrite (RFC 3262 §7.2), and the pending-request
@@ -147,6 +149,14 @@ impl ActionExecutor<'_> {
             return;
         }
 
+        let target_face = capabilities::Face::of_leg(target_leg);
+        let (extra_headers, advertised) =
+            relayed_request_headers(call, req, target_leg, target_face, self.config, self.now_ms);
+        if let Some(unsupported) = sip_message::option_tags::dropped_on_relay(req, &extra_headers) {
+            self.refuse_unserved(call, fx, ctx, &unsupported);
+            return;
+        }
+
         // The target dialog's next number (§12.2.1.1).
         let inbound_cseq = req.cseq().seq() as i64;
         let target_invite_cseq = leg_at(call, target_leg)
@@ -194,9 +204,6 @@ impl ActionExecutor<'_> {
             None
         };
         let content_type = req.raw(HeaderName::ContentType).next().and_then(relay::media_type);
-        let target_face = capabilities::Face::of_leg(target_leg);
-        let (extra_headers, advertised) =
-            relayed_request_headers(call, req, target_leg, target_face, self.config, self.now_ms);
         let body = relay::continue_on_leg(
             call,
             target_leg,

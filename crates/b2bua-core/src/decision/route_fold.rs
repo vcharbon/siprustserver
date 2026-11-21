@@ -12,12 +12,14 @@ use call::{
     TimerKey, TimerType,
 };
 use sip_ids::TurnIds;
+use sip_message::header::Unsupported;
 use sip_message::SipRequest;
 
 use crate::config::B2buaConfig;
 use crate::decision::{header_lines, no_answer_deadline};
 use crate::destination_allowlist::{classify_admission, AdmissionVerdict};
 use crate::effects::{BufferedObservabilityEffect, HandlerEffects, HandlerResult};
+use crate::initial_invite::refuse_extension;
 use crate::rules::capabilities;
 use crate::rules::relay;
 use crate::timer_arm::arm;
@@ -226,6 +228,11 @@ pub fn admitted(
     let kind = if depth == 0 { DecisionKind::Route } else { DecisionKind::FailoverRoute };
     let leg_id = (depth == 0).then(|| "a".to_string());
     mark_decision(&mut call, now_ms, kind, leg_id, route.label.clone());
+    if let Some(unsupported) = unserved_by(&call, a_invite) {
+        let advertisement = &config.minted_final_advertisement;
+        let refused = refuse_extension(call, a_invite, &unsupported, advertisement, now_ms);
+        return Routed::final_only(refused);
+    }
 
     if defers_routing(&answer) {
         if route.features.platform.arms_cap_at_creation(config.setup_timeout_ms) {
@@ -275,18 +282,6 @@ pub fn admitted(
     // `fake-prack` delayed-offer fallback both read it.
     let offers_sdp = relay::mints_offer(a_invite, body_override.as_ref());
     let withheld = capabilities::withheld_option_tags(&call, None, offers_sdp);
-    // A caller requiring `100rel` (RFC 3262 §3) where the call withholds it
-    // from the callee cannot be shown a reliable provisional: she is answered
-    // 420 naming it (RFC 3261 §8.2.2.3), and nobody is dialled.
-    if withheld.iter().any(|tag| tag.eq_ignore_ascii_case(RELIABLE)) && requires_100rel(a_invite) {
-        return Routed::final_only(crate::initial_invite::refuse_extension(
-            call,
-            a_invite,
-            &sip_message::header::Unsupported::of([RELIABLE]),
-            &config.minted_final_advertisement,
-            now_ms,
-        ));
-    }
     // A decision field that does not read has no destination behind it: refuse
     // the route rather than originate toward a fabricated address. The
     // caller gets a final (ADR-0022's guarantee holds) and the CDR names the
@@ -455,13 +450,12 @@ fn disable_fake_prack_on_a_delayed_offer(call: &mut Call, offers_sdp: bool) {
     }
 }
 
-/// The option tag of reliable provisionals (RFC 3262).
-const RELIABLE: &str = "100rel";
-
-/// Whether `invite` requires reliable provisionals (RFC 3262 §3).
-fn requires_100rel(invite: &SipRequest) -> bool {
-    invite
-        .token_set::<sip_message::header::Require>()
-        .and_then(Result::ok)
-        .is_some_and(|required| required.contains(RELIABLE))
+/// The option tags the caller's INVITE `a_invite` requires that `call`, its
+/// route's features attached, cannot serve (RFC 3261 §8.2.2.3,
+/// [`capabilities::unserved_for_originator_in`]): the `Unsupported` of the 420
+/// she is answered before anyone is dialled, whether the route dials or
+/// defers its dial to a service.
+fn unserved_by(call: &Call, a_invite: &SipRequest) -> Option<Unsupported> {
+    let unserved = capabilities::unserved_for_originator_in(call.features.as_ref());
+    sip_message::option_tags::unserved(a_invite, &unserved)
 }

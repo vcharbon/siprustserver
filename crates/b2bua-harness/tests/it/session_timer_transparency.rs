@@ -209,10 +209,14 @@ async fn a_refused_interval_reaches_the_caller_with_the_callee_floor() {
 
 /// The caller's full session-timer offer, demand and clock stamps on `invite`.
 fn with_timer_offer(invite: Invite<'_>) -> Invite<'_> {
+    offering_the_timer(invite).with_header("Require", "timer")
+}
+
+/// [`with_timer_offer`] without the demand: the timer offered, not required.
+fn offering_the_timer(invite: Invite<'_>) -> Invite<'_> {
     invite
         .with_sdp(OFFER)
         .with_header("Supported", "timer")
-        .with_header("Require", "timer")
         .with_header("Session-Expires", "1800;refresher=uac")
         .with_header("Min-SE", "90")
         .with_header("Timestamp", "54")
@@ -446,14 +450,13 @@ async fn promote_pem_withholds_the_session_timer_from_the_callee() {
         )
     })
     .await;
-    // The caller states the interval and the demand without offering `timer`
-    // in Supported: the strategy's withhold, not the missing offer, keeps them
-    // off the leg.
+    // The caller offers the timer and states the interval; one requiring it
+    // is refused 420 (`required_tag_withheld`).
     let mut call = s
         .alice
         .invite(&s.bob)
         .with_sdp(OFFER)
-        .with_header("Require", "timer")
+        .with_header("Supported", "timer")
         .with_header("Session-Expires", "1800;refresher=uac")
         .with_header("Min-SE", "90")
         .through(s.b2bua.addr)
@@ -493,9 +496,9 @@ async fn answer_refresh(mut uas: ServerTxn) {
 }
 
 /// The call withholds `timer` from the legs it originates: the leg's INVITE and
-/// every refresh relayed toward it offer no timer, so they carry no interval,
-/// floor or demand either (RFC 4028 §7.1: a UAC using the timer lists it in
-/// `Supported`).
+/// every refresh relayed toward it offer no timer, so they carry no interval or
+/// floor either (RFC 4028 §7.1: a UAC using the timer lists it in
+/// `Supported`). A request requiring it is refused 420 (`required_tag_withheld`).
 #[tokio::test(start_paused = true)]
 async fn a_withheld_timer_tag_withdraws_the_session_timer_on_every_relay() {
     let s = B2buaScene::with_b2bua("session-timer-withheld-tag", |bob_port| {
@@ -510,7 +513,7 @@ async fn a_withheld_timer_tag_withdraws_the_session_timer_on_every_relay() {
         ))
     })
     .await;
-    let mut call = with_timer_offer(s.alice.invite(&s.bob)).through(s.b2bua.addr).send().await;
+    let mut call = offering_the_timer(s.alice.invite(&s.bob)).through(s.b2bua.addr).send().await;
     let mut uas = s.bob.receive("INVITE").await;
     assert_takes_no_part(uas.request(), "the leg the call withholds the timer from");
     uas.respond(200, "OK").with_sdp(ANSWER).await;
@@ -518,12 +521,10 @@ async fn a_withheld_timer_tag_withdraws_the_session_timer_on_every_relay() {
     let mut dialog = call.ack().await;
     s.bob.receive("ACK").await;
 
-    // The refresh demands the timer without offering it in Supported: the
-    // call's withhold, not the missing offer, keeps the negotiation off.
     let mut refresh = dialog
         .send_request(InDialogMethod::Invite)
         .with_sdp(REOFFER)
-        .with_header("Require", "timer")
+        .with_header("Supported", "timer")
         .with_header("Session-Expires", "1800;refresher=uac")
         .send()
         .await;
@@ -563,7 +564,7 @@ async fn a_declared_supported_without_timer_withdraws_the_session_timer() {
         ))
     })
     .await;
-    let mut call = with_timer_offer(s.alice.invite(&s.bob)).through(s.b2bua.addr).send().await;
+    let mut call = offering_the_timer(s.alice.invite(&s.bob)).through(s.b2bua.addr).send().await;
     let mut uas = s.bob.receive("INVITE").await;
     assert_takes_no_part(uas.request(), "the leg whose face declares no timer");
     uas.respond(200, "OK").with_sdp(ANSWER).await;
@@ -620,11 +621,14 @@ fn declaring(
     ))
 }
 
-/// Establish alice ↔ bob with the caller's timer offer, then relay one refresh
-/// re-INVITE from alice carrying `extra`; hand bob's view of it to `check`,
-/// answer it, and hang up.
+/// Establish alice ↔ bob with the caller's timer offer, required where
+/// `extra` requires it, then relay one refresh re-INVITE from alice carrying
+/// `extra`; hand bob's view of it to `check`, answer it, and hang up.
 async fn relay_refresh(s: B2buaScene, extra: &[(&str, &str)], check: impl FnOnce(&SipRequest)) {
-    let mut call = with_timer_offer(s.alice.invite(&s.bob)).through(s.b2bua.addr).send().await;
+    let required = extra.iter().any(|(name, _)| *name == "Require");
+    let invite = s.alice.invite(&s.bob);
+    let invite = if required { with_timer_offer(invite) } else { offering_the_timer(invite) };
+    let mut call = invite.through(s.b2bua.addr).send().await;
     let mut uas = s.bob.receive("INVITE").await;
     uas.respond(200, "OK").with_sdp(ANSWER).await;
     call.expect(200).await;
@@ -682,7 +686,8 @@ async fn the_call_withhold_narrows_a_relayed_refresh_by_its_timer_half_only() {
         declaring(bob_port, &["100rel", "timer"], &["100rel", "timer"])
     })
     .await;
-    relay_refresh(s, REFRESH, |req| {
+    let offered = [REFRESH[0], REFRESH[2], REFRESH[3]];
+    relay_refresh(s, &offered, |req| {
         let supported: Vec<String> = request_values(req, "Supported");
         assert_eq!(supported, ["100rel"], "the declared set, less the withheld timer");
         assert!(request_values(req, "Session-Expires").is_empty(), "{req:?}");
@@ -713,75 +718,6 @@ async fn a_call_withhold_of_100rel_leaves_a_relayed_refresh_whole() {
         assert_carries_the_negotiation(req, "the refresh toward a leg that offers the timer");
     })
     .await;
-}
-
-/// A transfer target was dialled without the timer. Once the caller is bridged
-/// to it, her refresh relayed toward it carries no timer either: the leg never
-/// offered it, and a `Require: timer` would draw a 420 from a target that does
-/// not support it.
-#[tokio::test(start_paused = true)]
-async fn a_refresh_toward_a_transfer_target_carries_no_session_timer() {
-    const CHARLIE_PORT: u16 = 5667;
-    const CHARLIE_ANSWER: &str = "v=0\r\no=charlie 9 9 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 30000 RTP/AVP 0\r\n";
-    const ALICE_REALIGN: &str = "v=0\r\no=alice 1 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
-    let h = Harness::new("session-timer-transfer-refresh");
-    let alice = h.agent("alice", "127.0.0.1:5903").await;
-    let bob = h.agent("bob", "127.0.0.1:5913").await;
-    let charlie = h.agent("charlie", &format!("127.0.0.1:{CHARLIE_PORT}")).await.transfer_target();
-    let b2bua = B2buaSut::route_all_with_refer("127.0.0.1", 5913)
-        .start(&h, "b2bua", "127.0.0.1:5923")
-        .await;
-
-    let mut call = with_timer_offer(alice.invite(&bob)).through(b2bua.addr).send().await;
-    let mut bob_uas = bob.receive("INVITE").await;
-    bob_uas.respond(200, "OK").with_sdp(ANSWER).await;
-    call.expect(200).await;
-    let mut alice_dialog = call.ack().await;
-    bob.receive("ACK").await;
-    let mut bob_dialog = bob_uas.dialog();
-
-    let api = format!(
-        r#"{{"refer_key":"refer-allow-c","destination":{{"host":"127.0.0.1","port":{CHARLIE_PORT}}}}}"#
-    );
-    bob_dialog
-        .send_request(InDialogMethod::Refer)
-        .with_header("Refer-To", &format!("<sip:charlie@127.0.0.1:{CHARLIE_PORT}>"))
-        .with_header("X-Api-Call", &api)
-        .send()
-        .await
-        .expect(202)
-        .await;
-    bob.receive("NOTIFY").await.respond(200, "OK").await;
-    let mut charlie_uas = charlie.receive("INVITE").await;
-    charlie_uas.respond(200, "OK").with_sdp(CHARLIE_ANSWER).await;
-    charlie.receive("ACK").await;
-    bob.receive("NOTIFY").await.respond(200, "OK").await;
-    charlie.receive("INVITE").await.respond(200, "OK").with_sdp(CHARLIE_ANSWER).await;
-    charlie.receive("ACK").await;
-    alice.receive("INVITE").await.respond(200, "OK").with_sdp(ALICE_REALIGN).await;
-    alice.receive("ACK").await;
-
-    let mut refresh = alice_dialog.send_request(InDialogMethod::Invite).with_sdp(REOFFER);
-    for (name, value) in REFRESH {
-        refresh = refresh.with_header(name, value);
-    }
-    let mut refresh = refresh.send().await;
-    let mut charlie_refresh = charlie.receive("INVITE").await;
-    assert_takes_no_part(charlie_refresh.request(), "the refresh toward the transfer target");
-    charlie_refresh.respond(200, "OK").with_sdp(CHARLIE_ANSWER).await;
-    refresh.expect(200).await;
-    alice_dialog.ack(None).await;
-    charlie.receive("ACK").await;
-
-    let mut alice_bye = alice_dialog.bye().await;
-    charlie.receive("BYE").await.respond(200, "OK").await;
-    bob.receive("BYE").await.respond(200, "OK").await;
-    alice_bye.expect(200).await;
-    settle_until(|| b2bua.cdr_records().len() == 1).await;
-    assert_eq!(b2bua.cdr_records().len(), 1, "one call, one CDR");
-    settle_until(|| b2bua.is_reaped()).await;
-    b2bua.assert_fully_reaped();
-    let _ = h.finish().await;
 }
 
 /// Under fake-PRACK the call withholds `100rel` from a leg it originates

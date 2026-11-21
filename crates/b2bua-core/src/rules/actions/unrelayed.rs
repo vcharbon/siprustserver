@@ -1,10 +1,11 @@
 //! The final an in-dialog request draws when the relay it was given to has no
-//! dialog to carry it, or builds a copy that cannot leave ([`Unrelayed`]): a
-//! relay never leaves its sender to run out Timer F (RFC 3261 §8.2, §17.2.2).
+//! dialog to carry it, or builds a copy that cannot leave ([`Unrelayed`]) or
+//! that would drop what the request requires (a 420): a relay never leaves its
+//! sender to run out Timer F (RFC 3261 §8.2, §17.2.2).
 
 use call::Call;
 use sip_message::datagram::max_udp_payload;
-use sip_message::header::HeaderName;
+use sip_message::header::{HeaderName, HeaderValue, Unsupported};
 use sip_message::info_package::names_info_package;
 use sip_message::ip_literal::ip_socket_addr;
 use sip_message::{Method, SipHeader, SipRequest, SipStr};
@@ -87,5 +88,25 @@ impl ActionExecutor<'_> {
                 self.respond(call, fx, ctx, 513, "Message Too Large", &[], None, vec![]);
             }
         }
+    }
+
+    /// Answer the turn's request `420 Bad Extension`, its `Unsupported`
+    /// listing `unsupported`: the tags it requires that its copy toward the
+    /// peer would no longer require, so nobody would serve them (RFC 3261
+    /// §8.2.2.3, [`sip_message::option_tags::dropped_on_relay`]). Nothing is
+    /// relayed; a refused re-INVITE or UPDATE leaves the session as it was
+    /// (§14.1, RFC 3311 §5.2).
+    pub(super) fn refuse_unserved(
+        &mut self,
+        call: &mut Call,
+        fx: &mut HandlerEffects,
+        ctx: &RuleContext,
+        unsupported: &Unsupported,
+    ) {
+        let line = SipHeader {
+            name: SipStr::owned(HeaderName::Unsupported.as_wire_str()),
+            value: SipStr::owned(&unsupported.to_wire()),
+        };
+        self.respond(call, fx, ctx, 420, "Bad Extension", &[], None, vec![line]);
     }
 }
