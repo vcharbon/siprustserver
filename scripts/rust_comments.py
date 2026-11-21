@@ -11,8 +11,8 @@ comments, as rustdoc reads them.
 
 A comment is **allowed in a body** when it is one `line` comment alone on its
 line, with no comment line above or below it, that is a `// SAFETY: ...` note
-whose next statement (attributes skipped, up to its first `;` or `{`, comments
-and literals aside) holds `unsafe`, or a bare ADR pointer (`// ADR-0051`,
+whose next statement (attributes skipped, comments and literals aside) holds
+an `unsafe` block or an `unsafe impl`, or a bare ADR pointer (`// ADR-0051`,
 `// ADR-0051 §3`, `// ADR-0009 §X7`, nothing after it). `banned(comments, text)`
 returns the plain comments that are not.
 
@@ -109,7 +109,18 @@ def literal_end(text, i):
 
 
 def scan(text):
+    """Every comment of `text`, in order."""
+    return _lex(text)[0]
+
+
+def literals(text):
+    """The `(start, end)` spans of every string, raw string and char literal."""
+    return _lex(text)[1]
+
+
+def _lex(text):
     comments = []
+    spans = []
     line_starts = [0]
     for m in re.finditer("\n", text):
         line_starts.append(m.end())
@@ -159,8 +170,10 @@ def scan(text):
             i = j
         else:
             end = literal_end(text, i)
+            if end is not None:
+                spans.append((i, end))
             i = end if end is not None else i + 1
-    return comments
+    return comments, spans
 
 
 def blocks(comments):
@@ -183,28 +196,53 @@ def blocks(comments):
 
 
 def _without_literals(text):
-    out, i = [], 0
-    while i < len(text):
-        end = literal_end(text, i)
-        if end is None:
-            out.append(text[i])
-            i += 1
-        else:
-            out.append('""')
-            i = end
+    out, pos = [], 0
+    for a, b in literals(text):
+        out.append(text[pos:a])
+        out.append('""')
+        pos = b
+    out.append(text[pos:])
     return "".join(out)
 
 
+def _skip_attributes(code, i):
+    """`i` past the blanks and `#[...]`/`#![...]` attributes starting at `i`."""
+    while True:
+        while i < len(code) and code[i].isspace():
+            i += 1
+        m = re.match(r"#!?\s*\[", code[i:])
+        if not m:
+            return i
+        depth, i = 1, i + m.end()
+        while i < len(code) and depth:
+            depth += {"[": 1, "]": -1}.get(code[i], 0)
+            i += 1
+
+
 def _next_statement(text, pos):
-    """The code of the statement after `pos`, comments and literals blanked,
-    attribute lines skipped, up to its first `;` or `{`."""
+    """The code of the statement after `pos`, comments and literals blanked and
+    attributes skipped: up to its `;` at depth 0, or the `}` closing a block
+    it opened. An unmatched closer (the comment ends its block) gives ""."""
     code = _without_literals(strip(text[pos:]))
-    lines = [l for l in code.split("\n") if l.strip()]
-    while lines and lines[0].lstrip().startswith("#"):
-        lines.pop(0)
-    rest = "\n".join(lines)
-    cut = min((k for k in (rest.find(";"), rest.find("{")) if k >= 0), default=len(rest))
-    return rest[:cut + 1]
+    start = i = _skip_attributes(code, 0)
+    depth = 0
+    while i < len(code):
+        ch = code[i]
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            if depth == 0:
+                break
+            depth -= 1
+            if ch == "}" and depth == 0:
+                return code[start:i + 1]
+        elif ch == ";" and depth == 0:
+            return code[start:i + 1]
+        i += 1
+    return code[start:i]
+
+
+UNSAFE_CODE = re.compile(r"\bunsafe\s*(\{|impl\b)")
 
 
 def _allowed(c, text):
@@ -213,7 +251,7 @@ def _allowed(c, text):
         return False
     if ADR_POINTER.match(body):
         return True
-    return bool(SAFETY_NOTE.match(body)) and bool(re.search(r"\bunsafe\b", _next_statement(text, c.span[1])))
+    return bool(SAFETY_NOTE.match(body)) and bool(UNSAFE_CODE.search(_next_statement(text, c.span[1])))
 
 
 def banned(comments, text):
@@ -228,8 +266,23 @@ def banned(comments, text):
     return out
 
 
+def in_literal_line_ends(text):
+    """The 1-based numbers of the lines whose ending newline lies inside a
+    literal: their trailing blanks, and a blank such line, are literal text."""
+    found, spans = set(), literals(text)
+    for a, b in spans:
+        line = text.count("\n", 0, a) + 1
+        for k in range(a, b):
+            if text[k] == "\n":
+                found.add(line)
+                line += 1
+    return found
+
+
 def strip(text, keep=lambda c: False):
-    """The source without the comments `keep` refuses (by default: all)."""
+    """The source without the comments `keep` refuses (by default: all). A
+    line a cut comment touched loses its trailing blanks, and goes when left
+    blank, unless its end lies inside a literal."""
     chars = list(text)
     touched = set()
     for c in scan(text):
@@ -240,10 +293,11 @@ def strip(text, keep=lambda c: False):
             if chars[k] != "\n":
                 chars[k] = ""
         touched.update(range(c.start, c.end + 1))
+    literal = in_literal_line_ends(text)
     lines = "".join(chars).split("\n")
     kept = []
     for idx, line in enumerate(lines, 1):
-        if idx in touched:
+        if idx in touched and idx not in literal:
             if line.strip() == "":
                 continue
             line = line.rstrip()

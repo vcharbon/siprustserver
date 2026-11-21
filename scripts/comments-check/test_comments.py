@@ -66,9 +66,24 @@ class Rule(unittest.TestCase):
                 src = f"fn f() {{\n    // SAFETY: retry until the peer answers\n    {code}\n}}\n"
                 self.assertIn(2, banned_lines(src))
 
+    def test_a_safety_note_with_no_unsafe_statement_after_it_is_banned(self):
+        cases = {
+            "the note ends its block": "fn f() {\n    if a {\n        g();\n        // SAFETY: we retry\n    }\n"
+                                       "    let v = unsafe { h() };\n}\n",
+            "the note ends a function": "fn f() {\n    g();\n    // SAFETY: we retry\n}\nunsafe fn h() {}\n",
+            "an unsafe fn type": "fn f() {\n    // SAFETY: we retry\n    let p: unsafe fn() = h;\n}\n",
+            "an attribute on safe code": "fn f() {\n    // SAFETY: we retry\n    #[allow(unused)] let x = 1;\n"
+                                         "    let v = unsafe { h() };\n}\n",
+        }
+        for name, src in cases.items():
+            with self.subTest(name):
+                self.assertTrue(banned_lines(src), src)
+
     def test_a_safety_note_over_an_unsafe_statement_is_allowed(self):
         for code in ("let v =\n        unsafe { s.get_unchecked(0) };",
-                     "#[allow(unused_unsafe)]\n    unsafe { close(fd) };"):
+                     "#[allow(unused_unsafe)]\n    unsafe { close(fd) };",
+                     "let v = W { x: unsafe { s.get_unchecked(0) } };",
+                     "unsafe impl Send for X {}"):
             with self.subTest(code=code):
                 src = f"fn f() {{\n    // SAFETY: the slice is non-empty\n    {code}\n}}\n"
                 self.assertEqual(banned_lines(src), [])

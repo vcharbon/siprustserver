@@ -88,6 +88,17 @@ class SameCode(Case):
         self.assertEqual(self.same("fn f(a: bool, b: bool) -> bool { a && b }\n",
                                    "fn f(a: bool, b: bool) -> bool { a & &b }\n"), 1)
 
+    def test_blank_and_trailing_blanks_inside_a_literal_are_code(self):
+        for before, after in (('const S: &str = "Via: a\n\nbody";\n', 'const S: &str = "Via: a\nbody";\n'),
+                              ('const S: &str = r"a\nb";\n', 'const S: &str = r"a\n\n\nb";\n'),
+                              ('const S: &str = "a\n   \nb";\n', 'const S: &str = "a\n\nb";\n'),
+                              ('fn f() { g(/* c */ "a  \nb"); }\n', 'fn f() { g("a\nb"); }\n')):
+            with self.subTest(before=before):
+                self.assertEqual(self.same(before, after), 1)
+
+    def test_a_file_rustfmt_cannot_format_is_not_proved(self):
+        self.assertEqual(self.same("fn f( {\n// c\n}\n", "fn f( {\n}\n"), 1)
+
     def test_a_list_collapsed_once_its_comment_goes_is_the_same_code(self):
         before = "fn f() {\n    g(\n        // why\n        long_argument_name,\n    );\n}\n"
         after = "fn f() {\n    g(long_argument_name);\n}\n"
@@ -121,6 +132,33 @@ class Apply(Case):
         rc, out = repo.apply([{"id": i, "action": "delete"} for i in ids])
         self.assertEqual(rc, 0, out)
         self.assertEqual(repo.read("src/a.rs"), "fn f() {\n    g( 5);\n}\n")
+
+    def test_overlapping_edits_edit_nothing(self):
+        repo = self.repo()
+        src = "fn x() {\n// one\n// two\n// three\na();\n// contract\nb();\n}\n"
+        repo.write("src/a.rs", src)
+        rc, out = repo.apply([{"id": "src/a.rs:2", "action": "delete"},
+                              {"id": "src/a.rs:6", "action": "to-doc", "insert_before": 3, "text": "/// C."}])
+        self.assertEqual(rc, 2)
+        self.assertIn("overlap", out)
+        self.assertEqual(repo.read("src/a.rs"), src)
+        src2 = "fn x() {\n    /* a */ /* b */x();\n}\n"
+        repo.write("src/b.rs", src2)
+        rc, out = repo.apply([{"id": "src/b.rs:2:5", "action": "delete"},
+                              {"id": "src/b.rs:2:13", "action": "delete"}])
+        self.assertEqual(rc, 2)
+        self.assertEqual(repo.read("src/b.rs"), src2)
+
+    def test_an_insert_before_outside_the_file_edits_nothing(self):
+        repo = self.repo()
+        src = "fn x() {\n    // c\n    a();\n}\n"
+        repo.write("src/a.rs", src)
+        for at in (0, 99):
+            with self.subTest(at=at):
+                rc, out = repo.apply([{"id": "src/a.rs:2", "action": "to-doc", "insert_before": at,
+                                       "text": "/// C."}])
+                self.assertEqual(rc, 2)
+                self.assertEqual(repo.read("src/a.rs"), src)
 
     def test_an_id_classified_twice_edits_nothing(self):
         repo = self.repo()

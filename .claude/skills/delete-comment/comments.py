@@ -19,8 +19,8 @@ trailing comment are blocks alone): `id` (`<file>:<line>`, or
 of them; DIR the root the ids are relative to, by default the current
 directory): `id` and `action` (`keep`, `delete`, `rewrite`, `adr-pointer`,
 `to-doc`), with `text` for the last three and `insert_before` for `to-doc`.
-Every id must name a block `list` finds now, once; otherwise nothing is
-edited. `delete` cuts a block that fills its lines with them, else its own
+Every id must name a block `list` finds now, once, and no two edits may
+overlap; otherwise nothing is edited. `delete` cuts a block that fills its lines with them, else its own
 characters and the blanks between it and the code it shares a line with; `rewrite` and `adr-pointer` replace the lines of
 a block that fills them by `text`; `to-doc` inserts `text` before line
 `insert_before` and cuts the block. Run `cargo fmt` after.
@@ -161,11 +161,33 @@ def edits_of(text, blk, row):
         return [(cut_a, cut_b, new + "\n")]
     lines = text.split("\n")
     at = int(row["insert_before"])
+    if not 1 <= at <= len(lines):
+        raise ValueError(f"{row['id']}: insert_before {at} is no line of the file")
     pos = sum(len(l) + 1 for l in lines[:at - 1])
     return [(cut_a, cut_b, ""), (pos, pos, new + "\n")]
 
 
+def overlap(edits):
+    """The first pair of edits whose ranges overlap, an insertion strictly
+    inside a cut included, or None."""
+    cuts = sorted((a, b) for a, b, _ in edits if a < b)
+    for (a1, b1), (a2, b2) in zip(cuts, cuts[1:]):
+        if a2 < b1:
+            return (a1, b1), (a2, b2)
+    for a, b, _ in edits:
+        if a == b:
+            for ca, cb in cuts:
+                if ca < a < cb:
+                    return (ca, cb), (a, b)
+    return None
+
+
 def cmd_apply(root, paths):
+    """Edits every classified file, or none: a row naming no block, an id
+    classified twice, a bad `insert_before` or two overlapping edits refuse the
+    run. Edits apply back to front, so earlier offsets hold; at one offset a
+    cut goes before an insertion, and insertions there read in file order of
+    their blocks."""
     rows = classified(paths)
     bad = [r for r in rows if r.get("action") not in ACTIONS]
     if bad:
@@ -195,10 +217,13 @@ def cmd_apply(root, paths):
         except ValueError as e:
             print(f"apply: {e}; nothing edited", file=sys.stderr)
             return 2
+        clash = overlap(plan[rel][1])
+        if clash:
+            print(f"apply: {rel}: edits at {clash[0]} and {clash[1]} overlap; nothing edited",
+                  file=sys.stderr)
+            return 2
     changed = 0
     for rel, (text, edits) in plan.items():
-        # Back to front so earlier offsets hold; at one offset a removal before
-        # an insertion, and insertions last-classified first so they read in order.
         order = sorted(range(len(edits)), key=lambda k: (edits[k][0], edits[k][1], k), reverse=True)
         for a, b, new in (edits[k] for k in order):
             text = text[:a] + new + text[b:]
@@ -218,8 +243,12 @@ def rustfmt(text, config):
 
 
 def code_of(text, config):
+    """`(lines, ok)`: rustfmt of `text` stripped of comments, its blank lines
+    dropped but those inside a literal."""
     formatted, ok = rustfmt(rust_comments.strip(text) + "\n", config)
-    return [l for l in formatted.split("\n") if l.strip()], ok
+    literal_ends = rust_comments.in_literal_line_ends(formatted)
+    lines = formatted.split("\n")
+    return [l for n, l in enumerate(lines, 1) if l.strip() or (n - 1) in literal_ends], ok
 
 
 def cmd_same_code(root, base, paths):
