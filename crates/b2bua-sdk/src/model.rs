@@ -304,9 +304,9 @@ pub enum RuleAction {
     ClearState {
         machine: MachineId,
     },
-    /// Originate an in-dialog request toward a leg's confirmed dialog: OPTIONS, INFO,
-    /// UPDATE, MESSAGE, BYE, or INVITE (the re-INVITE [`RuleAction::SendReinvite`] sends).
-    /// Any other method is not sent: a NOTIFY is [`RuleAction::SendNotify`]'s.
+    /// Originate an in-dialog request toward a leg's confirmed dialog: OPTIONS, INFO, UPDATE,
+    /// MESSAGE, BYE, or INVITE (as [`RuleAction::SendReinvite`]). Another method is a turn
+    /// defect, not sent: NOTIFY is [`RuleAction::SendNotify`]'s, PRACK the stack's own.
     /// `body` is **opaque** (MSCML rides as `application/mediaservercontrol+xml`);
     /// its `content_type` defaults to `application/sdp` when none is given.
     ///
