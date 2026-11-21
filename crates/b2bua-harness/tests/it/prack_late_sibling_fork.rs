@@ -47,7 +47,8 @@ const LATE_FORK_RSEQ: u32 = 31;
 /// Past a round trip on the harness's 1 ms transit, well inside T1.
 const PAST_A_ROUND_TRIP: Duration = Duration::from_millis(50);
 
-/// Past 64·T1 (32 s) after the late fork's 183: the bound of its early dialog.
+/// Past 64·T1 (32 s) after the winner's 2xx: the bound of the late fork's
+/// early dialog (RFC 3261 §13.2.2.4).
 const PAST_THE_EARLY_DIALOG_BOUND: Duration = Duration::from_secs(33);
 
 /// Who relays the callee's provisionals before the answer.
