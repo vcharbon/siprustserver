@@ -395,7 +395,21 @@ async fn a_relayed_cancel_bob_never_answers_ends_at_64_t1_past_the_cancel() {
 /// final per transaction).
 #[tokio::test(start_paused = true)]
 async fn a_cancel_turn_past_the_layers_bound_still_relays_the_crossing_200() {
-    let h = Harness::new("b2bua-reinvite-cancel-past-the-bound");
+    cancel_turn_past_the_bound("b2bua-reinvite-cancel-past-the-bound", 350, 150).await;
+}
+
+/// The same with the turn running more than T1 late (bob's 200 650 ms after
+/// alice's CANCEL): the wire is the same, and the relayed 200 is no
+/// §9.2 violation of this stack's.
+#[tokio::test(start_paused = true)]
+async fn a_cancel_turn_past_t1_still_relays_the_crossing_200() {
+    cancel_turn_past_the_bound("b2bua-reinvite-cancel-past-t1", 650, 100).await;
+}
+
+/// alice's CANCEL taken with the router held; bob's crossing 200 sent
+/// `before_200_ms` after it, the router freed `after_200_ms` later.
+async fn cancel_turn_past_the_bound(name: &str, before_200_ms: u64, after_200_ms: u64) {
+    let h = Harness::new(name);
     let alice = h.agent("alice", "127.0.0.1:5068").await;
     let bob = h.agent("bob", "127.0.0.1:5078").await;
     let pace = RouterPace::new();
@@ -419,10 +433,10 @@ async fn a_cancel_turn_past_the_layers_bound_still_relays_the_crossing_200() {
 
     pace.set("w0", Pace::Frozen);
     let mut cxl = reinv.cancel().await;
-    h.advance(Duration::from_millis(350)).await;
+    h.advance(Duration::from_millis(before_200_ms)).await;
     cxl.expect(200).await;
     bob_reinv.respond(200, "OK").with_sdp(REANSWER).await;
-    h.advance(Duration::from_millis(150)).await;
+    h.advance(Duration::from_millis(after_200_ms)).await;
     pace.set("w0", Pace::Free);
 
     let ok = reinv.expect(200).await;

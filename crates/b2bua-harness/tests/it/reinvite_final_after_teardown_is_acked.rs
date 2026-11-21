@@ -234,6 +234,68 @@ async fn an_offer_in_a_2xx_crossing_the_bye_is_answered_rejecting_in_its_ack() {
     let _report = h.finish().await;
 }
 
+/// The same crossing when bob made his offer in a reliable 183 and alice's
+/// PRACK answered it end to end (RFC 3262 §5): the round is closed, so his 200
+/// repeating that description makes no offer, and its ACK carries no body
+/// (RFC 3264 §4: a second answer would be an offer nobody asked for). bob's
+/// 200 leaves half a transit after alice's BYE: it reaches the SUT after her
+/// BYE, and leaves bob before the SUT's CANCEL and BYE reach him.
+#[tokio::test(start_paused = true)]
+async fn a_2xx_after_a_prack_answered_offer_crossing_the_bye_is_acked_bare() {
+    let h = Harness::new("b2bua-reinvite-prack-answered-2xx-crossing-bye");
+    let alice = h.agent("alice", "127.0.0.1:5062").await;
+    let bob = h.agent("bob", "127.0.0.1:5072").await;
+    let b2bua = B2buaSut::route_all_to("127.0.0.1", 5072)
+        .tune(|c| c.keepalive_interval_sec = 600)
+        .start(&h, "b2bua", "127.0.0.1:5082")
+        .await;
+
+    let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
+    let mut uas = bob.receive("INVITE").await;
+    uas.respond(180, "Ringing").await;
+    call.expect(180).await;
+    uas.respond(200, "OK").with_sdp(ANSWER).await;
+    call.expect(200).await;
+    let mut alice_dialog = call.ack().await;
+    bob.receive("ACK").await;
+
+    let mut reinv = alice_dialog
+        .send_request(sip_message::generators::InDialogMethod::Invite)
+        .with_header("Allow", "INVITE, ACK, CANCEL, BYE, OPTIONS, UPDATE, INFO, PRACK")
+        .with_header("Supported", "100rel")
+        .send_cancellable()
+        .await;
+    let mut bob_reinv = bob.receive("INVITE").await;
+    bob_reinv.respond(183, "Session Progress").reliable(4711).with_sdp(BOB_REOFFER).await;
+    let p183 = reinv.expect(183).await;
+    let rseq = b2bua_harness::stated_by_response(&p183, "RSeq").expect("a reliable 183");
+    let mut prack = alice_dialog
+        .send_request(sip_message::generators::InDialogMethod::Prack)
+        .with_rack(&format!("{} {} INVITE", rseq.trim(), p183.cseq().seq()))
+        .with_sdp(REOFFER)
+        .send()
+        .await;
+    bob.receive("PRACK").await.respond(200, "OK").await;
+    prack.expect(200).await;
+
+    let mut alice_bye = alice_dialog.bye().await;
+    h.advance(Duration::from_millis(50)).await;
+    bob_reinv.respond(200, "OK").with_sdp(BOB_REOFFER).await;
+    alice_bye.expect(200).await;
+    reinv.expect(487).await;
+    let mut bob_bye = bob.receive_absorbing("BYE", &["CANCEL"]).await;
+    let ack = bob.receive_absorbing("ACK", &["CANCEL"]).await;
+    assert_eq!(ack.request().cseq().seq(), bob_reinv.request().cseq().seq());
+    assert!(ack.request().body().is_empty(), "the PRACK closed the round: a bare ACK");
+    bob_bye.respond(200, "OK").await;
+
+    settle_until(|| b2bua.is_reaped()).await;
+    alice.drain().await;
+    bob.drain().await;
+    b2bua.assert_fully_reaped();
+    let _report = h.finish().await;
+}
+
 /// Every ACK the SUT put on `callee`'s socket, in wire order.
 fn acks_to(report: &RunReport, sut: SocketAddr, callee: SocketAddr) -> Vec<Vec<u8>> {
     report

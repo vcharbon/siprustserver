@@ -103,24 +103,24 @@ fn a_relayed_200_drawn_before_any_provisional_is_compliant() {
     assert!(matches!(relay.decision, Decision::Compliant), "{relay:?}");
 }
 
-/// A far 200 that reaches the relay within T1 of the CANCEL it took beat the
-/// CANCEL it would have relayed: the relay that forwards that 200 is
-/// compliant.
+/// A far 200 that reaches the relay before it relayed the CANCEL it took, the
+/// relay's turn running late (650 ms here), beat that CANCEL, which then had
+/// no transaction to cancel: the relay that forwards that 200 is compliant.
 #[test]
 fn a_relayed_200_that_beat_the_relays_cancel_is_compliant() {
-    let mut msgs = relayed_crossing(400_000);
+    let mut msgs = relayed_crossing(650_000);
     msgs.remove(4);
     let f = No200AfterCancel.eval(&WireView { msgs: &msgs, obs: &obs(&msgs) });
     let relay = f.iter().find(|f| f.emitter == RELAY).expect("the relay's occasion");
     assert!(matches!(relay.decision, Decision::Compliant), "{relay:?}");
 }
 
-/// A relay that never CANCELled its far leg, the far 200 coming more than T1
-/// after the CANCEL past the provisional that let it go, answers its UAC's
+/// A relay that never CANCELled its far leg, the far 200 coming past 64·T1
+/// after the CANCEL (the canceller's own horizon, §9.1), answers its UAC's
 /// cancelled INVITE 200 on its own account: violated.
 #[test]
-fn a_200_long_after_the_cancel_with_no_relayed_cancel_is_violated() {
-    let mut msgs = relayed_crossing(600_000);
+fn a_200_past_64_t1_after_the_cancel_with_no_relayed_cancel_is_violated() {
+    let mut msgs = relayed_crossing(33_000_000);
     msgs.remove(4);
     let f = No200AfterCancel.eval(&WireView { msgs: &msgs, obs: &obs(&msgs) });
     let relay = f.iter().find(|f| f.emitter == RELAY).expect("the relay's occasion");
