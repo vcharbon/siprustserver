@@ -63,7 +63,7 @@ async fn a_rate_cap_hint_of_zero_goes_on_the_wire_as_one_second() {
     }));
     let registry: Arc<dyn WorkerRegistry> = Arc::new(StaticWorkerRegistry::from_entries(vec![]));
     let proxy = spawn_proxy(&h, PROXY, strategy, registry).await;
-    let (client, _) = h.bind_sut("alice", ALICE).await;
+    let (client, _) = h.bind_peer("alice", ALICE).await;
 
     client.send_to(&new_invite(), proxy.addr()).await.unwrap();
     let reply = tokio::time::timeout(std::time::Duration::from_secs(2), client.recv())

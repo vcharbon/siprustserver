@@ -61,10 +61,10 @@ async fn happy_call_invite_200_ack_bye_through_real_proxy() {
 #[tokio::test]
 async fn max_forwards_zero_returns_483() {
     let h = Harness::with_transit_delay("transit-mf0", 0);
-    let (bob_ep, bob_addr) = h.bind_sut("bob", "127.0.0.1:5070").await;
+    let (bob_ep, bob_addr) = h.bind_peer("bob", "127.0.0.1:5070").await;
     let (strategy, registry) = forward_all(bob_addr);
     let proxy = spawn_proxy(&h, "127.0.0.1:5080", strategy, registry).await;
-    let (client, _client_addr) = h.bind_sut("alice", "127.0.0.1:5060").await;
+    let (client, _client_addr) = h.bind_peer("alice", "127.0.0.1:5060").await;
 
     let invite = "INVITE sip:bob@127.0.0.1:5070 SIP/2.0\r\n\
 Via: SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK-mf\r\n\
@@ -107,10 +107,10 @@ Content-Length: 0\r\n\r\n",
 #[tokio::test]
 async fn malformed_datagram_dropped_silently() {
     let h = Harness::with_transit_delay("transit-malformed", 0);
-    let (bob_ep, bob_addr) = h.bind_sut("bob", "127.0.0.1:5070").await;
+    let (bob_ep, bob_addr) = h.bind_peer("bob", "127.0.0.1:5070").await;
     let (strategy, registry) = forward_all(bob_addr);
     let proxy = spawn_proxy(&h, "127.0.0.1:5080", strategy, registry).await;
-    let (client, _client_addr) = h.bind_sut("alice", "127.0.0.1:5060").await;
+    let (client, _client_addr) = h.bind_peer("alice", "127.0.0.1:5060").await;
 
     client.send_to(b"this is not a SIP message at all\r\n\r\n", proxy.addr()).await.unwrap();
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
