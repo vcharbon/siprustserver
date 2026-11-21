@@ -132,6 +132,17 @@ async fn peer_answers(fx: &Fixture, response: SipMessage) {
     assert!(bytes.starts_with(format!("SIP/2.0 {status} ").as_bytes()));
 }
 
+/// A proxy in front of one worker, resolving [`PEER_NAME`] at [`AT_INVITE`]
+/// until the test moves it.
+fn proxy_to_the_name() -> (Fixture, Arc<MovingName>) {
+    let reg = Arc::new(StaticWorkerRegistry::from_entries(vec![WorkerEntry::alive(
+        "w1",
+        ProxyAddr::new(W1, 5060),
+    )]));
+    let name = Arc::new(MovingName::at(AT_INVITE));
+    (dual_face_core_over(reg, Some(name.clone())), name)
+}
+
 /// The worker's INVITE leaves for the name at [`AT_INVITE`]; the name then
 /// resolves to [`MOVED_TO`]. The peer rings for `ring`, then answers 486 and
 /// retransmits it on Timer G until it sees the ACK or Timer H fires (§17.2.1);
@@ -141,12 +152,7 @@ async fn peer_answers(fx: &Fixture, response: SipMessage) {
 /// moves the entry; else the INVITE's send resolves the name and the entry
 /// expires during the ring.
 async fn acks_of_a_busy_peer(call_id: &str, prewarmed: bool, ring: Duration) -> Vec<SocketAddr> {
-    let reg = Arc::new(StaticWorkerRegistry::from_entries(vec![WorkerEntry::alive(
-        "w1",
-        ProxyAddr::new(W1, 5060),
-    )]));
-    let name = Arc::new(MovingName::at(AT_INVITE));
-    let fx = dual_face_core_over(reg, Some(name.clone()));
+    let (fx, name) = proxy_to_the_name();
     if prewarmed {
         fx.core.prewarm_named_targets(vec![ProxyAddr::new(PEER_NAME, PEER_PORT)]);
         sleep(Duration::from_secs(1)).await;
@@ -211,4 +217,47 @@ async fn the_ack_of_a_non_2xx_goes_where_the_invite_went_after_the_names_refresh
         Duration::from_millis(ResolverConfig::default().positive_ttl_ms) - Duration::from_secs(3);
     let acks = acks_of_a_busy_peer("named-ack-refreshed", true, past_the_refresh).await;
     assert_eq!(acks, vec![peer()], "one ACK, to the INVITE's address; the peer stops");
+}
+
+/// The worker's INVITE leaves for the pinned name 300 ms before the name's
+/// refresh stores its new address; the worker's Timer A copy (§17.1.1.2),
+/// after that refresh, goes where the first copy went: one transaction, one
+/// destination (§17.1.1.3). The peer rings, answers 486 and sees the ACK.
+#[tokio::test(start_paused = true)]
+async fn a_retransmitted_invite_goes_where_its_first_copy_went_after_the_names_refresh() {
+    let call_id = "named-invite-rtx";
+    let (fx, name) = proxy_to_the_name();
+    fx.core.prewarm_named_targets(vec![ProxyAddr::new(PEER_NAME, PEER_PORT)]);
+    let refresh = Duration::from_millis(ResolverConfig::default().refresh_after_ms());
+    sleep(refresh - Duration::from_millis(300)).await;
+
+    let invite = worker_request("INVITE", call_id);
+    fx.core.route_request(&invite, worker(), Face::Internal).await;
+    sleep(SETTLE).await;
+    let sent = fx.take_sent();
+    let [(face, dst, first)] = sent.as_slice() else { panic!("one INVITE: {sent:?}") };
+    assert_eq!((*face, *dst), ("ext", peer()), "the INVITE leaves for the name's address");
+    let first = first.clone();
+    name.move_to(MOVED_TO);
+
+    sleep(Duration::from_millis(T1) - SETTLE).await;
+    fx.core.route_request(&invite, worker(), Face::Internal).await;
+    sleep(SETTLE).await;
+    let sent = fx.take_sent();
+    let [(face, dst, copy)] = sent.as_slice() else { panic!("one INVITE copy: {sent:?}") };
+    assert_eq!(copy, &first, "§16.11: the copy is the first forward again");
+    assert_eq!((*face, *dst), ("ext", peer()), "the copy goes where the first went");
+
+    peer_answers(&fx, peer_response("180 Ringing", &first, call_id)).await;
+    peer_answers(&fx, peer_response("486 Busy Here", &first, call_id)).await;
+    fx.core.route_request(&worker_request("ACK", call_id), worker(), Face::Internal).await;
+    sleep(SETTLE).await;
+    let sent = fx.take_sent();
+    let [(face, dst, ack)] = sent.as_slice() else { panic!("one ACK: {sent:?}") };
+    assert!(ack.starts_with(b"ACK "), "{}", String::from_utf8_lossy(ack));
+    assert_eq!((*face, *dst), ("ext", peer()), "the ACK goes where the INVITE went");
+
+    sleep(Duration::from_millis(TIMER_H) + Duration::from_secs(1)).await;
+    let sent = fx.take_sent();
+    assert!(sent.is_empty(), "nothing follows the transaction's end: {sent:?}");
 }
