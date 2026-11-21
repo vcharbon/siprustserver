@@ -239,6 +239,45 @@ class Ratchet(unittest.TestCase):
         rc, out = repo.run()
         self.assertEqual(rc, 2)
         self.assertIn("names no module", out)
+        repo.git("add", "comments.clean", "src/a.rs")
+        self.assertEqual(repo.run("--staged")[0], 2)
+
+    def test_a_scan_word_with_pathspec_magic_is_refused(self):
+        for word in (":!src", ":(exclude)src/a.rs", "src/*"):
+            with self.subTest(word=word):
+                repo = self.repo(SETTINGS + f"scan {word}\n")
+                repo.write("src/a.rs", body(2))
+                rc, out = repo.run()
+                self.assertEqual(rc, 2)
+                self.assertIn("no plain directory path", out)
+
+    def test_a_listed_module_holding_no_file_fails(self):
+        repo = self.repo(SETTINGS)
+        repo.write("src/a.rs", body(0))
+        repo.commit()
+        repo.git("mv", "src", "lib")
+        rc, out = repo.run()
+        self.assertEqual(rc, 1)
+        self.assertIn("scans src, which holds no file", out)
+
+    def test_a_first_scan_narrowing_the_whole_root_is_refused(self):
+        repo = self.repo("limit 0\ntest-limit 0\n")
+        repo.write("src/a.rs", body(0))
+        repo.commit()
+        repo.write("comments.clean", SETTINGS)
+        rc, out = repo.run("--base", "HEAD")
+        self.assertEqual(rc, 1)
+        self.assertIn("changes its settings", out)
+
+    def test_a_scan_added_beside_a_raised_limit_is_refused(self):
+        repo = self.repo(SETTINGS)
+        repo.write("src/a.rs", body(0))
+        repo.write("lib/b.rs", body(0))
+        repo.commit()
+        repo.write("comments.clean", SETTINGS.replace("limit 0\n", "limit 3\n", 1) + "scan lib\n")
+        rc, out = repo.run("--base", "HEAD")
+        self.assertEqual(rc, 1)
+        self.assertIn("changes its settings", out)
 
     def test_staged_checks_the_index_blob(self):
         repo = self.repo(SETTINGS)

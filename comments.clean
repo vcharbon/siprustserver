@@ -2,8 +2,8 @@
 # comment is a doc comment stating its item's contract; every other comment is banned,
 # except a lone `// SAFETY: ...` over an `unsafe` block or `unsafe impl` and a bare ADR
 # pointer (`// ADR-0051 §3`, nothing after it). A module joins with one `scan` line once
-# the delete-comment skill has swept it clean; it never leaves. An entry (`<path> <n>`)
-# would be a file of a listed module allowed n banned lines: it only goes down.
+# the delete-comment skill has swept it clean; it never leaves, and a listed path that
+# holds no file (renamed, gone, misspelt) fails the check.
 limit 0
 test-limit 0
 ext .rs

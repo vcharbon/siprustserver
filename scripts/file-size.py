@@ -18,15 +18,17 @@ by default) holds the settings and the entries:
   crates/a/src/big.rs 812        an entry: a file over the limit, its budget
 
 `#` starts a comment. The files scanned are those git sees under the scan
-directories: tracked, or untracked and not ignored.
+directories: tracked, or untracked and not ignored. A scan directory is a plain
+path (no pathspec magic).
 
 The allowlist itself only ever tightens: against its version at a base (REV,
 by default the merge-base of HEAD and `develop`, else HEAD; HEAD under
 --staged), a new entry, a raised number or any changed setting line fails.
 The one new entry allowed is a file git sees renamed from a listed one in the
 same diff (`-M`), the old entry gone and the number no higher than its own;
-the one changed setting allowed is a `scan` or `exclude` path following a scan
-directory git sees renamed whole, none of its files left behind.
+the changed settings allowed are a `scan` or `exclude` path following a scan
+directory git sees renamed whole, none of its files left behind, and `scan`
+directories added to a base that already scans a list (scripts/ratchet.py).
 
   (no flag)  every scanned file against its budget, and the allowlist
              against the base; an entry above its file's size, or naming a

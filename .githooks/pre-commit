@@ -4,8 +4,8 @@
 # (scripts/file-size.py), or whose staged panic-sites.allow or purity.toml
 # loosens against HEAD (scripts/panic-sites.py, scripts/purity.py). Checks the
 # index blobs, not the worktree, so a formatted worktree cannot vouch for an
-# unformatted stage. Staged .rs files are held to the in-body comment ban too
-# (scripts/comments.py). Installed by `just hooks`.
+# unformatted stage. Staged .rs files of the modules comments.clean lists are
+# held to the in-body comment ban (scripts/comments.py). Installed by `just hooks`.
 set -euo pipefail
 top="$(git rev-parse --show-toplevel)"
 rc=0

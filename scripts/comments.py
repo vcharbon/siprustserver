@@ -11,7 +11,9 @@ above or below it (scripts/rust_comments.py has the lexer and the rule).
 
 The ban holds the modules the list (`comments.clean` at the root of DIR's
 repository by default) names as `scan` directories: those the delete-comment
-skill has swept clean. A list with no `scan` line is refused. A scanned file
+skill has swept clean. A list with no `scan` line is refused, a `scan` word
+must be a plain path, and a listed module holding no file (renamed, gone or
+misspelt) fails the check. A scanned file
 may hold `limit` banned comment lines, a test file `test-limit` (both 0),
 unless the list names it with a budget it may not grow past. The list has
 file-size.py's settings and entries, and only ever tightens against its
@@ -95,9 +97,11 @@ def cmd_check(root, allow, base):
     found = measure_files(root, ratchet.listed(root, allow), read_worktree(root))
     grown = over_budget(found, allow, True)
     old = ratchet.stale(counts(found), allow, UNIT)
+    gone = ratchet.empty_scans(found, allow)
     loose = loosened(root, allow, base, base, False)
     rc = report(grown, FIX_HINT if grown else None)
     rc = report(loose, BASE_HINT if loose else None) or rc
+    rc = report(gone) or rc
     return report(old, "run `comments.py --update` and commit the list" if old else None) or rc
 
 

@@ -22,9 +22,11 @@ own findings; a setup failure raises `SetupError`.
 """
 import fnmatch
 import os
+import re
 import subprocess
 
 SETTING_KEYS = ("limit", "test-limit", "test", "exclude", "scan", "ext")
+PLAIN_PATH = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_./-]*$")
 TEST_DEFAULT = ["tests/*", "*/tests/*", "*/tests.rs", "*_tests.rs"]
 EXT_DEFAULT = (".rs",)
 
@@ -62,6 +64,9 @@ class Allow:
             elif key == "ext" and rest:
                 self.ext = tuple(rest)
             elif key == "scan" and rest:
+                odd = [r for r in rest if not PLAIN_PATH.match(r)]
+                if odd:
+                    raise SetupError(f"{path}:{n}: scan `{odd[0]}` is no plain directory path")
                 self.scan.extend(r.rstrip("/") for r in rest)
             elif key == "exclude" and len(rest) == 1:
                 self.exclude.append(rest[0])
@@ -104,10 +109,17 @@ def git(root, *args, binary=False):
 def listed(root, allow):
     """The in-scope files git sees under the scan directories, tracked or
     untracked and not ignored, that exist in the worktree."""
-    out = git(root, "ls-files", "-z", "--cached", "--others", "--exclude-standard", "--",
-              *(allow.scan or ["."]))
+    out = git(root, "--literal-pathspecs", "ls-files", "-z", "--cached", "--others",
+              "--exclude-standard", "--", *(allow.scan or ["."]))
     return [rel for rel in sorted(set(filter(None, out.split("\0"))))
             if allow.in_scope(rel) and os.path.isfile(os.path.join(root, rel))]
+
+
+def empty_scans(measures, allow):
+    """The scan directories holding no measured file: gone, renamed, or
+    misspelt, each one a module the lint silently stopped holding."""
+    return [f"{allow.path} scans {d}, which holds no file it checks: name the module's path"
+            for d in allow.scan if not any(rel.startswith(d + "/") for rel in measures)]
 
 
 def staged(root, allow):

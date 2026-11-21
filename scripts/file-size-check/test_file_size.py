@@ -191,6 +191,30 @@ class AgainstTheBase(Case):
         repo.write("src/big.rs", lines(700))
         self.refused(repo, "lists src/big.rs at 700, above its 600")
 
+    def test_an_added_scan_directory_passes(self):
+        repo = self.based()
+        repo.write("lib/x.rs", lines(10))
+        repo.write("file-size.allow", SETTINGS + "scan lib\nsrc/big.rs 600\n")
+        self.assertEqual(repo.run(), (0, ""))
+        repo.git("add", "-A")
+        self.assertEqual(repo.run("--staged"), (0, ""))
+
+    def test_a_first_scan_on_a_whole_root_base_fails(self):
+        whole = SETTINGS.replace("scan src\n", "")
+        repo = self.repo(whole)
+        repo.write("src/a.rs", lines(10))
+        repo.write("lib/b.rs", lines(10))
+        repo.commit()
+        repo.write("file-size.allow", whole + "scan src\n")
+        self.refused(repo, "changes its settings")
+
+    def test_a_scan_word_with_pathspec_magic_is_refused(self):
+        repo = self.based()
+        repo.write("file-size.allow", SETTINGS + "scan :(exclude)src/big.rs\nsrc/big.rs 600\n")
+        rc, out = repo.run()
+        self.assertEqual(rc, 2)
+        self.assertIn("no plain directory path", out)
+
     def test_a_new_entry_fails(self):
         repo = self.based()
         repo.write("file-size.allow", SETTINGS + "src/big.rs 600\nsrc/new.rs 700\n")
