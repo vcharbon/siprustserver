@@ -1,16 +1,22 @@
 /**
  * A scratch workspace holding the pack's reference lane on loopback addresses
  * free on this box and below the kernel's ephemeral range, so no other
- * process's socket takes one before the runner binds it, and the files its
- * runner writes where the test says.
+ * process's bind on port 0 nor outbound connect takes one before the runner
+ * binds it, and the files its runner writes where the test says.
  */
 import * as dgram from "node:dgram"
 import * as fs from "node:fs"
 import * as net from "node:net"
 import * as path from "node:path"
 
-/** The lowest port a free address is picked from. */
+/** The lowest port a free address is picked from, where the ephemeral range leaves room above it. */
 const FLOOR = 10_000
+
+/** The lowest unprivileged port, the floor where the ephemeral range starts at or below {@link FLOOR}. */
+const UNPRIVILEGED = 1024
+
+/** The fewest ports a pick needs below the ephemeral range. */
+const SPAN = 1000
 
 /** The ephemeral range's low bound where `/proc` does not state it, the IANA dynamic range's being higher. */
 const EPHEMERAL_LOW = 32_768
@@ -23,12 +29,29 @@ const TRIES = 100
  * ones it hands to a bind on port 0 and to an outbound connect.
  */
 const ephemeralLow = (): number => {
+  let stated: string
   try {
-    const low = Number(fs.readFileSync("/proc/sys/net/ipv4/ip_local_port_range", "utf8").trim().split(/\s+/)[0])
-    return Number.isInteger(low) && low > FLOOR ? low : EPHEMERAL_LOW
+    stated = fs.readFileSync("/proc/sys/net/ipv4/ip_local_port_range", "utf8")
   } catch {
     return EPHEMERAL_LOW
   }
+  const low = Number(stated.trim().split(/\s+/)[0])
+  if (!Number.isInteger(low)) throw new Error(`ip_local_port_range states no low bound: ${JSON.stringify(stated)}`)
+  return low
+}
+
+/**
+ * The ports `[floor, ceiling)` a free address is picked from: below the
+ * ephemeral range, from {@link FLOOR} where it leaves {@link SPAN} ports
+ * there, else from {@link UNPRIVILEGED}. Fails where fewer remain.
+ */
+const pickRange = (): { readonly floor: number; readonly ceiling: number } => {
+  const ceiling = ephemeralLow()
+  const floor = ceiling - FLOOR >= SPAN ? FLOOR : UNPRIVILEGED
+  if (ceiling - floor < SPAN) {
+    throw new Error(`the ephemeral range starts at ${ceiling}: fewer than ${SPAN} unprivileged ports lie below it`)
+  }
+  return { floor, ceiling }
 }
 
 /** A socket of `kind` bound to loopback `port`, its release, or `undefined` where the port is taken. */
@@ -58,14 +81,14 @@ const hold = async (kind: "udp" | "tcp", port: number): Promise<(() => Promise<v
  * picked.
  */
 export const freeAddresses = async (kinds: ReadonlyArray<"udp" | "tcp">): Promise<ReadonlyArray<string>> => {
-  const ceiling = ephemeralLow()
+  const { floor, ceiling } = pickRange()
   const held: Array<() => Promise<void>> = []
   const picked: Array<number> = []
   try {
     for (const kind of kinds) {
       let port: number | undefined
       for (let tried = 0; port === undefined && tried < TRIES; tried++) {
-        const candidate = FLOOR + Math.floor(Math.random() * (ceiling - FLOOR))
+        const candidate = floor + Math.floor(Math.random() * (ceiling - floor))
         if (picked.includes(candidate)) continue
         const release = await hold(kind, candidate)
         if (release === undefined) continue
