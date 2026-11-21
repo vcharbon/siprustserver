@@ -152,7 +152,9 @@ async fn an_invite_copy_at_the_instance_that_never_saw_it_reaches_the_same_worke
 
 /// A rings long while its memo, at its bound, forgets the call's INVITE entry
 /// for newer calls, and its buckets run dry: the caller's CANCEL, which A no
-/// longer correlates, still reaches the worker holding the INVITE.
+/// longer correlates, still reaches the worker holding the INVITE. The newer
+/// calls are refused once the long call has ended, so no final of theirs
+/// writes the memo before the CANCEL.
 #[tokio::test(start_paused = true)]
 async fn a_long_ringing_call_whose_entry_was_evicted_is_cancelled_at_its_worker() {
     let small =
@@ -168,10 +170,13 @@ async fn a_long_ringing_call_whose_entry_was_evicted_is_cancelled_at_its_worker(
     pair.send(owner, &SipMessage::Response(ringing)).await;
     pair.response(Party::Caller, 180).await;
 
+    let mut newer_calls = Vec::new();
     for n in 0..16 {
-        let newer = format!("newer-{n}@caller");
-        pair.send(Party::Caller, &SipMessage::Request(caller_invite(&newer))).await;
-        pair.request(winner_of(&newer), "INVITE").await;
+        let newer = caller_invite(&format!("newer-{n}@caller"));
+        let worker = winner_of(newer.call_id().as_str());
+        pair.send(Party::Caller, &SipMessage::Request(newer.clone())).await;
+        let (at_worker, from) = pair.request(worker, "INVITE").await;
+        newer_calls.push((newer, worker, at_worker, from));
     }
     assert!(pair.a.memo.evicted() > 0, "the memo forgot entries at its bound");
 
@@ -189,4 +194,17 @@ async fn a_long_ringing_call_whose_entry_was_evicted_is_cancelled_at_its_worker(
     let final_at_caller = pair.response(Party::Caller, 487).await;
     pair.send(Party::Caller, &SipMessage::Request(ack_non_2xx(&invite, &final_at_caller))).await;
     pair.request(owner, "ACK").await;
+
+    for (newer, worker, at_worker, from) in newer_calls {
+        let busy = answer(&at_worker, from, worker, 486, "Busy Here", "uas-1");
+        pair.send(worker, &SipMessage::Response(busy)).await;
+        let final_at_caller = pair.response(Party::Caller, 486).await;
+        pair.send(Party::Caller, &SipMessage::Request(ack_non_2xx(&newer, &final_at_caller))).await;
+        let (ack, _) = pair.request(worker, "ACK").await;
+        assert_eq!(
+            top_branch(&ack),
+            top_branch(&at_worker),
+            "the ACK ends its INVITE's transaction"
+        );
+    }
 }
