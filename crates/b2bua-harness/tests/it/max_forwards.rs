@@ -83,9 +83,10 @@ async fn a_spent_hop_count_reaches_the_decision_engine() {
 
 /// The count is READ-ONLY across the decision seam: `Max-Forwards` is
 /// structural, so a decision restating it is dropped rather than carried — the
-/// b-leg states ONE count, the stack's own decrement. Without the drop the
-/// decision's line would ride BESIDE the generator's, and a backend could refill
-/// a budget it does not own.
+/// b-leg states ONE count, the stack's own decrement — and the drop is counted
+/// as a model defect, as is the removal of the stack's `Content-Length`.
+/// Without the drop the decision's line would ride BESIDE the generator's, and
+/// a backend could refill a budget it does not own.
 #[tokio::test]
 async fn a_decision_cannot_restate_the_hop_count() {
     let h = Harness::with_transit_delay("b2bua-max-forwards-read-only", 0)
@@ -107,7 +108,7 @@ async fn a_decision_cannot_restate_the_hop_count() {
             })
             .build(),
     );
-    let b2bua = B2buaSut::builder(decision).start(&h, "b2bua", "127.0.0.1:5082").await;
+    let mut b2bua = B2buaSut::builder(decision).start(&h, "b2bua", "127.0.0.1:5082").await;
 
     let mut call =
         alice.invite(&bob).with_sdp(OFFER).max_forwards(20).through(b2bua.addr).send().await;
@@ -134,6 +135,11 @@ async fn a_decision_cannot_restate_the_hop_count() {
     bye.expect(200).await;
     settle_until(|| b2bua.cdr_records().len() == 1).await;
     b2bua_harness::settle_until(|| b2bua.is_reaped()).await;
+    assert_eq!(b2bua.metrics().model_defects_total("stated-text-fits-its-position"), 2);
+    let defects = b2bua.take_model_violations();
+    for name in ["Max-Forwards", "Content-Length"] {
+        assert!(defects.iter().any(|d| d.contains(name)), "{name}: {defects:?}");
+    }
     b2bua.assert_fully_reaped();
 
     let _r = h.finish().await;

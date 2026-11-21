@@ -191,10 +191,10 @@ pub(crate) fn dialling_invite(leg: &Leg) -> Option<SipRequest> {
 /// affected leg instead of dialing a fabricated target.
 ///
 /// A `header_updates` statement, set or removal, of a header the mint does
-/// not take from a decision ([`admitted`]) is refused onto `skipped` and
-/// reaches no line: the INVITE carries the stack's own, the relayed one, or
-/// the line describing the minted body, as though nothing was stated. Every
-/// entity header is the minted body's ([`minted_body`]), never a decision's.
+/// not take from a decision ([`HeaderName::stated_at_mint`]) is refused onto
+/// `skipped` and reaches no line: the INVITE carries the stack's own, the
+/// relayed one, or the line describing the minted body, as though nothing was
+/// stated. Every entity header is the minted body's, never a decision's.
 #[allow(clippy::too_many_arguments)]
 pub fn build_b_leg(
     // The call's marks, stamped on the originated b-leg INVITE's Via + Contact.

@@ -91,8 +91,10 @@ impl HeaderName {
     /// Whether `minted` takes a statement of `name` (any casing, compact or
     /// long form) from a party outside the stack, a decision's or a
     /// service's, set or removal: every name but a [`Restatement::Never`]
-    /// one, and on a final the bound header its status is defined by
-    /// ([`DEFINING`]). The refusal names the class.
+    /// one, and on a final the bound header its status is defined by (a
+    /// 401's `WWW-Authenticate`, a 407's `Proxy-Authenticate`, a 420's
+    /// `Unsupported`, a 421's `Require`, a 422's `Min-SE`). The refusal names
+    /// the class.
     pub fn stated_at_mint(name: &str, minted: Minted) -> Result<(), WriteRefusal> {
         if Self::restatement_of(name) != Restatement::Never {
             return Ok(());

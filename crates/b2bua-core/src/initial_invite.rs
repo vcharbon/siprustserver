@@ -256,7 +256,7 @@ pub fn setup_event(call: &Call, a_invite: &SipRequest) -> CallEvent {
 /// `Reason:`, RFC 3326); `contacts` renders one `Contact: <uri>;q=…;params…`
 /// header per entry (used for a 3xx redirect — ADR-0017). A set of a header the
 /// final does not take from the decision, a structural one or one the stack
-/// binds, is left out and reported ([`end_to_end_headers`]). Marks no
+/// binds, is left out and reported ([`HeaderName::stated_at_mint`]). Marks no
 /// decision: the caller marks the one it applies, and a final of the stack's
 /// own is none. `cause` is the termination record's: the decision layer's
 /// refusal, or the stack's own admission. A failure final carries the
