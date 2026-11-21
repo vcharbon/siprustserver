@@ -50,11 +50,11 @@ async fn an_attached_transaction_is_reached_by_its_calls_release() {
     elapse_ms(60).await;
     let _ = stack.drain_events();
     let _ = stack.drain_peer();
-    assert_eq!(stack.txn.active_txn_count_for_call("cr1").await.unwrap(), 0);
+    assert_eq!(stack.txn.active_txn_count_for_call("cr1", &[]).await.unwrap(), 0);
 
     stack.txn.attach_server_to_call(key_of(&info), "cr1").await.unwrap();
     stack.txn.attach_server_to_call(key_of(&reinvite), "cr1").await.unwrap();
-    assert_eq!(stack.txn.active_txn_count_for_call("cr1").await.unwrap(), 2);
+    assert_eq!(stack.txn.active_txn_count_for_call("cr1", &[]).await.unwrap(), 2);
 
     assert_eq!(stack.txn.forget_unanswered_of_call("cr1").await.unwrap(), 1);
     let answered = stack
@@ -75,7 +75,7 @@ async fn an_attached_transaction_is_reached_by_its_calls_release() {
     elapse_ms(60).await;
     assert!(!handed_up(&stack.drain_events(), "ACK"), "the 481's transaction absorbs the ACK");
     assert_eq!(
-        stack.txn.active_txn_count_for_call("cr1").await.unwrap(),
+        stack.txn.active_txn_count_for_call("cr1", &[]).await.unwrap(),
         0,
         "the forgotten INFO and the ACKed re-INVITE left the call's books"
     );
@@ -102,14 +102,14 @@ async fn an_attribution_is_never_moved_and_an_answered_transaction_is_left_alone
     let _ = stack.drain_peer();
 
     stack.txn.attach_server_to_call(key_of(&stamped), "cr2").await.unwrap();
-    assert_eq!(stack.txn.active_txn_count_for_call("cr2").await.unwrap(), 0);
+    assert_eq!(stack.txn.active_txn_count_for_call("cr2", &[]).await.unwrap(), 0);
     assert_eq!(stack.txn.metrics().call_attach_refused(), 1);
     stack.txn.attach_server_to_call(key_of(&stamped), "cr1").await.unwrap();
-    assert_eq!(stack.txn.active_txn_count_for_call("cr1").await.unwrap(), 1);
+    assert_eq!(stack.txn.active_txn_count_for_call("cr1", &[]).await.unwrap(), 1);
 
     let unseen = inbound_request("INFO", "z9hG4bK-att-unseen", "unseen@u", Some("callee-tag"));
     stack.txn.attach_server_to_call(key_of(&unseen), "cr3").await.unwrap();
     stack.txn.attach_server_to_call(key_of(&done), "cr3").await.unwrap();
-    assert_eq!(stack.txn.active_txn_count_for_call("cr3").await.unwrap(), 0);
+    assert_eq!(stack.txn.active_txn_count_for_call("cr3", &[]).await.unwrap(), 0);
     assert_eq!(stack.txn.metrics().call_attach_refused(), 1, "neither is a refusal");
 }

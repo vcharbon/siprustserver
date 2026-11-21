@@ -76,7 +76,7 @@ async fn t1_an_evicted_active_invite_runs_to_its_own_timer_b() {
     assert_eq!(stack.txn.metrics().active_transactions(), 1, "orphaned, still resident");
     assert_eq!(stack.txn.metrics().orphaned_transactions(), 1);
     assert_eq!(stack.txn.metrics().txn_orphaned_on_call_evict(), 1);
-    assert_eq!(stack.txn.active_txn_count_for_call(call_ref).await.unwrap(), 0);
+    assert_eq!(stack.txn.active_txn_count_for_call(call_ref, &[]).await.unwrap(), 0);
 
     elapse_ms(TIMER_B + 100).await;
     assert_eq!(
@@ -207,8 +207,8 @@ async fn t3_cancel_targets_only_the_owning_callref() {
 
     stack.txn.cancel_txns_for_call(ref_a).await.unwrap();
     assert_eq!(stack.txn.metrics().active_transactions(), 2, "A is orphaned, not gone");
-    assert_eq!(stack.txn.active_txn_count_for_call(ref_a).await.unwrap(), 0);
-    assert_eq!(stack.txn.active_txn_count_for_call(ref_b).await.unwrap(), 1);
+    assert_eq!(stack.txn.active_txn_count_for_call(ref_a, &[]).await.unwrap(), 0);
+    assert_eq!(stack.txn.active_txn_count_for_call(ref_b, &[]).await.unwrap(), 1);
 
     // Drive the initial-INVITE backstop (158 s) both were sent under: A's
     // orphan times out naming no call, B naming B.
@@ -242,6 +242,6 @@ async fn t5_url_encoded_cr_lg_round_trip_matches_decoded_callref() {
 
     // Caller passes the natural (decoded) callRef.
     stack.txn.cancel_txns_for_call(decoded).await.unwrap();
-    assert_eq!(stack.txn.active_txn_count_for_call(decoded).await.unwrap(), 0);
+    assert_eq!(stack.txn.active_txn_count_for_call(decoded, &[]).await.unwrap(), 0);
     assert!(stack.txn.metrics().txn_orphaned_on_call_evict() >= 1);
 }

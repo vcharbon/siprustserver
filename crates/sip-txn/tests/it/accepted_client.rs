@@ -134,7 +134,7 @@ async fn a_2xx_holds_the_transaction_accepted_until_timer_m_and_the_tu_owns_the_
     assert_eq!(responses(&stack.drain_events()), vec![(200, true)], "the 2xx is the final");
     assert_eq!(stack.txn.metrics().active_transactions(), 1, "Accepted holds the transaction");
     assert_eq!(
-        stack.txn.active_txn_count_for_call(call_ref).await.unwrap(),
+        stack.txn.active_txn_count_for_call(call_ref, &[]).await.unwrap(),
         0,
         "the 2xx met the transaction's obligation to its call"
     );

@@ -105,7 +105,7 @@ async fn the_ack_takes_an_accepted_transaction_off_its_calls_books() {
     let (branch, call_id) = ("z9hG4bK-accepted-books", "accepted-books");
     answer_200(&mut stack, &in_dialog_request("INVITE", branch, call_id, call_ref)).await;
     assert_eq!(
-        stack.txn.active_txn_count_for_call(call_ref).await.unwrap(),
+        stack.txn.active_txn_count_for_call(call_ref, &[]).await.unwrap(),
         1,
         "the answered INVITE counts for its call until its ACK"
     );
@@ -115,7 +115,7 @@ async fn the_ack_takes_an_accepted_transaction_off_its_calls_books() {
     assert_eq!(handed_up(&stack.drain_events(), "ACK"), 1);
     assert_eq!(active(&stack), 1, "still Accepted");
     assert_eq!(
-        stack.txn.active_txn_count_for_call(call_ref).await.unwrap(),
+        stack.txn.active_txn_count_for_call(call_ref, &[]).await.unwrap(),
         0,
         "an ACKed Accepted transaction no longer counts for its call"
     );

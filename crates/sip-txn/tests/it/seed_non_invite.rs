@@ -67,7 +67,7 @@ async fn a_seeded_client_non_invite_retransmits_its_request_and_takes_its_final(
     let image = request.image().clone();
     let seed = TxnSeed::ClientNonInvite { request, dest: addr(PEER), bound_ms: TIMER_F };
     assert_eq!(stack.txn.seed(CALL_REF, vec![seed]).await.unwrap(), 1);
-    assert_eq!(stack.txn.active_txn_count_for_call(CALL_REF).await.unwrap(), 1);
+    assert_eq!(stack.txn.active_txn_count_for_call(CALL_REF, &[]).await.unwrap(), 1);
     elapse_ms(TRANSIT + 1).await;
     let at_seed = stack.peer.try_recv().expect("the request leaves at the seed");
     assert_eq!(at_seed.raw, image, "the recorded image, byte for byte, under its own branch");
@@ -121,7 +121,7 @@ async fn a_seeded_server_non_invite_absorbs_copies_until_its_final() {
     let raw = inbound_request("INFO", branch, call_id, Some("peer-tag"));
     let seed = TxnSeed::ServerNonInvite { request: request_bytes(&raw), leg_id: Some("a".into()) };
     assert_eq!(stack.txn.seed(CALL_REF, vec![seed]).await.unwrap(), 1);
-    assert_eq!(stack.txn.active_txn_count_for_call(CALL_REF).await.unwrap(), 1);
+    assert_eq!(stack.txn.active_txn_count_for_call(CALL_REF, &[]).await.unwrap(), 1);
 
     stack.inject(&raw).await;
     elapse_ms(60).await;
@@ -168,7 +168,7 @@ async fn a_seeded_answered_server_non_invite_repeats_its_final_until_timer_j() {
 
     elapse_ms(J_LEFT).await;
     assert_eq!(
-        stack.txn.active_txn_count_for_call(CALL_REF).await.unwrap(),
+        stack.txn.active_txn_count_for_call(CALL_REF, &[]).await.unwrap(),
         0,
         "Timer J ends the transaction"
     );

@@ -58,7 +58,7 @@ impl Owner {
                     .await;
                 let _ = reply.send(answered);
             }
-            Command::ActiveTxnCount { call_ref, reply } => {
+            Command::ActiveTxnCount { call_ref, call_ids: _, reply } => {
                 let on_books = self.txn_index.get(call_ref.as_str()).map_or(0, CallTxns::on_books);
                 let _ = reply.send(on_books);
             }

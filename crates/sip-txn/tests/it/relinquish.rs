@@ -40,7 +40,7 @@ async fn a_relinquished_call_sends_nothing_and_its_callees_answer_arrives_unmatc
 
     assert_eq!(stack.txn.relinquish_call(CALL_REF).await.unwrap(), 2, "both go");
     assert_eq!(stack.txn.metrics().active_transactions(), 0);
-    assert_eq!(stack.txn.active_txn_count_for_call(CALL_REF).await.unwrap(), 0);
+    assert_eq!(stack.txn.active_txn_count_for_call(CALL_REF, &[]).await.unwrap(), 0);
     assert_eq!(stack.txn.metrics().timer_queue_len(), 0, "their timers with them");
     elapse_ms(64_000).await;
     assert!(stack.drain_peer().is_empty(), "no ACK, CANCEL, final or retransmission");
@@ -79,7 +79,11 @@ async fn a_relinquished_server_invite_draws_no_final_and_the_rest_stays() {
 
     let key = sip_txn::ServerTxnKey::invite(server.to_string(), peer_sent_by());
     assert!(stack.txn.relinquish_server(key.clone()).await.unwrap(), "it was there");
-    assert_eq!(stack.txn.active_txn_count_for_call(CALL_REF).await.unwrap(), 1, "the client stays");
+    assert_eq!(
+        stack.txn.active_txn_count_for_call(CALL_REF, &[]).await.unwrap(),
+        1,
+        "the client stays"
+    );
     let answered = stack.txn.answer_unanswered_invites_of_call(CALL_REF, 481, "Gone").await;
     assert_eq!(answered.unwrap(), 0, "no INVITE left to answer");
     elapse_ms(100).await;
@@ -99,7 +103,11 @@ async fn a_relinquished_client_invite_never_times_out_and_the_rest_stays() {
 
     assert!(stack.txn.relinquish_client(client).await.unwrap(), "the client goes");
     assert!(!stack.txn.holds_client(client).await.unwrap());
-    assert_eq!(stack.txn.active_txn_count_for_call(CALL_REF).await.unwrap(), 1, "the server stays");
+    assert_eq!(
+        stack.txn.active_txn_count_for_call(CALL_REF, &[]).await.unwrap(),
+        1,
+        "the server stays"
+    );
     elapse_ms(200_000).await;
     let out = stack.drain_peer();
     assert_eq!(count_requests(&out, "INVITE") + count_requests(&out, "CANCEL"), 0, "nothing sent");

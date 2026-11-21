@@ -118,7 +118,7 @@ async fn a_seeded_client_invite_acks_a_486_and_holds_timer_d() {
     assert_eq!(stack.txn.metrics().txn_seeded(), 1);
     assert_eq!(active(&stack), 1, "the seed is a resident transaction");
     assert_eq!(
-        stack.txn.active_txn_count_for_call(CALL_REF).await.unwrap(),
+        stack.txn.active_txn_count_for_call(CALL_REF, &[]).await.unwrap(),
         1,
         "a seed is visible to the self-release count (ADR-0014)"
     );
@@ -199,7 +199,7 @@ async fn a_seeded_server_invite_ladders_a_final_on_timer_g_until_the_ack() {
     let branch = "z9hG4bK-seed-s";
     let call_id = "seed-s";
     assert_eq!(stack.txn.seed(CALL_REF, vec![server_seed(branch, call_id)]).await.unwrap(), 1);
-    assert_eq!(stack.txn.active_txn_count_for_call(CALL_REF).await.unwrap(), 1);
+    assert_eq!(stack.txn.active_txn_count_for_call(CALL_REF, &[]).await.unwrap(), 1);
 
     let resp = parse_response(&response_bytes(486, "Busy Here", "INVITE", branch, call_id, true));
     stack.txn.send_response(resp, addr(PEER)).await.unwrap();
@@ -220,7 +220,7 @@ async fn a_seeded_server_invite_ladders_a_final_on_timer_g_until_the_ack() {
     elapse_ms(60).await;
     assert_eq!(active(&stack), 1, "the ACK on the INVITE's branch holds the seed in Confirmed");
     assert_eq!(
-        stack.txn.active_txn_count_for_call(CALL_REF).await.unwrap(),
+        stack.txn.active_txn_count_for_call(CALL_REF, &[]).await.unwrap(),
         0,
         "a Confirmed seed no longer counts for its call"
     );
@@ -305,7 +305,7 @@ async fn an_accepted_seed_answers_the_first_copy_of_its_invite_with_its_2xx() {
     let (branch, call_id) = ("z9hG4bK-seed-accepted", "seed-accepted");
     let seeded = stack.txn.seed(CALL_REF, vec![accepted_seed(branch, call_id)]).await.unwrap();
     assert_eq!(seeded, 1);
-    assert_eq!(stack.txn.active_txn_count_for_call(CALL_REF).await.unwrap(), 1);
+    assert_eq!(stack.txn.active_txn_count_for_call(CALL_REF, &[]).await.unwrap(), 1);
     elapse_ms(3_000).await;
     assert!(stack.drain_peer().is_empty(), "a seed re-sends nothing on its own");
 
@@ -325,7 +325,7 @@ async fn an_accepted_seed_answers_the_first_copy_of_its_invite_with_its_2xx() {
     elapse_ms(60).await;
     assert_eq!(messages(&stack.drain_events()), vec![(false, 0, false)], "the ACK passes up");
     assert_eq!(
-        stack.txn.active_txn_count_for_call(CALL_REF).await.unwrap(),
+        stack.txn.active_txn_count_for_call(CALL_REF, &[]).await.unwrap(),
         0,
         "an ACKed Accepted seed no longer counts for its call"
     );
@@ -368,7 +368,7 @@ async fn a_rejected_seed_sends_its_final_until_the_ack() {
     assert!(stack.drain_events().is_empty(), "the ACK is absorbed");
     elapse_ms(10_000).await;
     assert_eq!(count_responses(&stack.drain_peer(), 486), 0, "the ACK stopped Timer G");
-    assert_eq!(stack.txn.active_txn_count_for_call(CALL_REF).await.unwrap(), 0);
+    assert_eq!(stack.txn.active_txn_count_for_call(CALL_REF, &[]).await.unwrap(), 0);
 }
 
 // ── Occupancy and the unseen branch ─────────────────────────────────────────
@@ -398,7 +398,7 @@ async fn a_seed_on_an_occupied_branch_is_skipped_and_counted() {
     assert_eq!(stack.txn.metrics().txn_seed_skipped(), 1);
     assert_eq!(active(&stack), 2);
     assert_eq!(
-        stack.txn.active_txn_count_for_call(CALL_REF).await.unwrap(),
+        stack.txn.active_txn_count_for_call(CALL_REF, &[]).await.unwrap(),
         1,
         "the occupant keeps its own attribution (none here); only the seed counts for the call"
     );

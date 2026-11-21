@@ -62,7 +62,7 @@ pub(super) async fn self_release_turn(ctx: &Arc<RouterCtx>, call_ref: &str) {
     if ends_for_departed_primary(ctx, call_ref) || awaits_an_answer(ctx, call_ref) {
         return;
     }
-    if ctx.txn.active_txn_count_for_call(call_ref).await.unwrap_or(0) != 0 {
+    if serving_txns(ctx, call_ref).await != 0 {
         // A transaction opened since the notice, and the layer's watch is
         // one-shot — it was consumed delivering this notice. Re-arm it so the
         // next clear notifies again.
@@ -85,12 +85,22 @@ pub(super) async fn shed_if_quiesced(ctx: &Arc<RouterCtx>, call_ref: &str) -> bo
     if !ctx.state.is_takeover(call_ref)
         || ends_for_departed_primary(ctx, call_ref)
         || awaits_an_answer(ctx, call_ref)
-        || ctx.txn.active_txn_count_for_call(call_ref).await.unwrap_or(0) != 0
+        || serving_txns(ctx, call_ref).await != 0
     {
         return false;
     }
     shed(ctx, call_ref).await;
     true
+}
+
+/// How many transactions still serve the copy of `call_ref`: those on its
+/// books, and those its legs' Call-IDs name that the router has yet to
+/// attribute to it (`ingress::attach_arrival`).
+async fn serving_txns(ctx: &RouterCtx, call_ref: &str) -> usize {
+    let call_ids: Vec<String> = ctx.state.resident(call_ref).map_or_else(Vec::new, |call| {
+        std::iter::once(&call.a_leg).chain(&call.b_legs).map(|leg| leg.call_id.clone()).collect()
+    });
+    ctx.txn.active_txn_count_for_call(call_ref, &call_ids).await.unwrap_or(0)
 }
 
 /// Whether the copy of `call_ref` here holds the end of a call whose primary

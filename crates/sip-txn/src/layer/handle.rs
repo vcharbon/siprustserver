@@ -230,14 +230,16 @@ impl TransactionLayer {
     }
 
     /// How many transactions for `call_ref` are still resident in the map (any
-    /// role/state). The acting-backup self-release (ADR-0014) reads it as a
-    /// defensive re-check — see `Command::ActiveTxnCount`.
+    /// role/state); `call_ids` names the Call-IDs of its legs. The
+    /// acting-backup self-release (ADR-0014) reads it as a defensive
+    /// re-check — see `Command::ActiveTxnCount`.
     pub async fn active_txn_count_for_call(
         &self,
         call_ref: &str,
+        call_ids: &[String],
     ) -> Result<usize, TransactionLayerClosed> {
-        self.roundtrip(|reply| Command::ActiveTxnCount { call_ref: call_ref.to_string(), reply })
-            .await
+        let (call_ref, call_ids) = (call_ref.to_string(), call_ids.to_vec());
+        self.roundtrip(|reply| Command::ActiveTxnCount { call_ref, call_ids, reply }).await
     }
 
     /// Whether this layer holds a client transaction on `branch`: the final to
