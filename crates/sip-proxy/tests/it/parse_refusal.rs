@@ -6,6 +6,7 @@
 //! dropped unanswered; the 400s are capped by a token bucket, an answer it
 //! refuses dropped and counted.
 
+use crate::common::call_end::{ack_final, busy_at_callee};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -25,6 +26,8 @@ const PROXY: &str = "192.0.2.1:5060";
 const CALLER: &str = "192.0.2.20:5060";
 const WORKER: &str = "10.0.0.2:5070";
 const FROM: &str = "<sip:alice@192.0.2.20>;tag=alice-tag";
+/// The INVITE client transaction's timeout, 64·T1 (RFC 3261 §17.1.1.2).
+const TIMER_B: Duration = Duration::from_secs(32);
 
 fn addr(s: &str) -> SocketAddr {
     s.parse().expect("an address")
@@ -86,6 +89,25 @@ impl Rig {
     fn counters(&self) -> (u64, u64, u64) {
         let m = &self.metrics;
         (m.parse_errors(), m.parse_refusals_answered(), m.parse_refusals_capped())
+    }
+
+    /// `from` ACKs the proxy's `refusal` of the malformed `invite` (RFC 3261
+    /// §17.1.1.3), its lines the INVITE's with a Max-Forwards that reads: the
+    /// proxy absorbs it.
+    async fn acked(&self, from: &dyn UdpEndpoint, invite: &[u8], refusal: &SipResponse) {
+        let readable =
+            String::from_utf8_lossy(invite).replace("Max-Forwards: abc", "Max-Forwards: 70");
+        ack_final(addr(PROXY), from, readable.as_bytes(), refusal).await;
+        self.settle().await;
+        assert!(self.to_worker().is_empty(), "the ACK to the proxy's own 400 ends here");
+    }
+
+    /// A call nothing answers ends at its caller's Timer B (RFC 3261
+    /// §17.1.1.2, 64·T1): the clock runs past it and nothing more arrives.
+    async fn past_timer_b(&self) {
+        tokio::time::sleep(TIMER_B + Duration::from_millis(1)).await;
+        assert!(self.to_caller().is_empty(), "nothing reaches the caller after Timer B");
+        assert!(self.to_worker().is_empty(), "nothing reaches the worker after Timer B");
     }
 }
 
@@ -203,8 +225,11 @@ async fn a_request_with_a_malformed_from_is_dropped_unanswered() {
     assert!(rig.to_caller().is_empty(), "no From to echo: no answer");
     assert!(rig.to_worker().is_empty());
     assert_eq!(rig.counters(), (1, 0, 0));
+    rig.past_timer_b().await;
 }
 
+/// The burst's 400s are each ACKed; the INVITE past the burst, never answered,
+/// ends at its caller's Timer B.
 #[tokio::test(start_paused = true)]
 async fn past_the_burst_a_refusal_is_dropped_and_counted() {
     let rig = Rig::new().await;
@@ -213,12 +238,21 @@ async fn past_the_burst_a_refusal_is_dropped_and_counted() {
         rig.send(&malformed_invite(&format!("z9hG4bK-flood-{i}"), FROM)).await;
     }
     rig.settle().await;
-    assert_eq!(rig.to_caller().len(), burst, "the burst is answered, the one past it is not");
+    let answered = rig.to_caller();
+    assert_eq!(answered.len(), burst, "the burst is answered, the one past it is not");
     assert_eq!(rig.counters(), (0, u64::from(PARSE_REFUSAL_BURST), 1));
+
+    for raw in &answered {
+        let refusal = response(raw);
+        let branch = refusal.top_via().branch().expect("the INVITE's branch").to_string();
+        rig.acked(&*rig.caller, &malformed_invite(&branch, FROM), &refusal).await;
+    }
+    rig.past_timer_b().await;
 }
 
 /// The ordinary counterpart: a well-formed INVITE is forwarded, draws no
-/// 400 and moves no refusal counter.
+/// 400 and moves no refusal counter. The worker refuses it and the caller
+/// ACKs.
 #[tokio::test(start_paused = true)]
 async fn well_formed_traffic_draws_no_400() {
     let rig = Rig::new().await;
@@ -227,12 +261,14 @@ async fn well_formed_traffic_draws_no_400() {
         .replace("Max-Forwards: abc", "Max-Forwards: 70");
     rig.send(invite.as_bytes()).await;
     rig.settle().await;
-    assert_eq!(rig.to_worker().len(), 1, "forwarded");
+    let forwarded = rig.to_worker();
+    assert_eq!(forwarded.len(), 1, "forwarded");
     assert!(
         rig.to_caller().iter().all(|raw| response(raw).status() != 400),
         "no 400 to a well-formed request"
     );
     assert_eq!(rig.counters(), (0, 0, 0));
+    busy_at_callee(addr(PROXY), &*rig.caller, invite.as_bytes(), &*rig.worker, &forwarded[0]).await;
 }
 
 /// The peer's own sender socket, on another port than the sent-by the Rig's
@@ -255,13 +291,16 @@ fn malformed_invite_via(branch: &str, via_tail: &str) -> Vec<u8> {
 async fn without_rport_the_400_reaches_the_sent_by_port() {
     let rig = Rig::new().await;
     let sender = rig.bind(SENDER).await;
-    sender.send_to(&malformed_invite_via("z9hG4bK-no-rport", ""), addr(PROXY)).await.expect("sent");
+    let invite = malformed_invite_via("z9hG4bK-no-rport", "");
+    sender.send_to(&invite, addr(PROXY)).await.expect("sent");
     rig.settle().await;
 
     let sent = rig.to_caller();
     assert_eq!(sent.len(), 1, "the 400 reaches the sent-by port");
-    assert_eq!(response(&sent[0]).status(), 400);
+    let refusal = response(&sent[0]);
+    assert_eq!(refusal.status(), 400);
     assert!(sender.try_recv().is_none(), "nothing reaches the source port");
+    rig.acked(&*sender, &invite, &refusal).await;
 }
 
 /// RFC 3581 §4: a requested `rport` is the source port.
@@ -269,15 +308,15 @@ async fn without_rport_the_400_reaches_the_sent_by_port() {
 async fn with_rport_the_400_reaches_the_source_port() {
     let rig = Rig::new().await;
     let sender = rig.bind(SENDER).await;
-    sender
-        .send_to(&malformed_invite_via("z9hG4bK-rport", ";rport"), addr(PROXY))
-        .await
-        .expect("sent");
+    let invite = malformed_invite_via("z9hG4bK-rport", ";rport");
+    sender.send_to(&invite, addr(PROXY)).await.expect("sent");
     rig.settle().await;
 
     let packet = sender.try_recv().expect("the 400 reaches the source port");
-    assert_eq!(response(&packet.raw).status(), 400);
+    let refusal = response(&packet.raw);
+    assert_eq!(refusal.status(), 400);
     assert!(rig.to_caller().is_empty(), "nothing reaches the sent-by port");
+    rig.acked(&*sender, &invite, &refusal).await;
 }
 
 /// A Via's `maddr` chooses no destination (ADR-0001), with no `rport`: `received`
@@ -303,4 +342,5 @@ async fn a_via_maddr_draws_nothing_and_the_400_reaches_received_at_the_sent_by_p
     assert!(aimed.try_recv().is_none(), "nothing reaches the maddr");
     assert!(named.try_recv().is_none(), "nothing reaches the sent-by host");
     assert!(sender.try_recv().is_none(), "nothing reaches the source port");
+    rig.acked(&*sender, invite.as_bytes(), &refusal).await;
 }
