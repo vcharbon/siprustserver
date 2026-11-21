@@ -7,6 +7,7 @@
 //! an MSCML control channel, then a BYE+dial+bridge to the real destination.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use b2bua::decision::test_adapter::route_to;
 use b2bua::decision::{NewCallResponse, ScriptedDecisionEngine};
@@ -398,6 +399,39 @@ async fn announcement_caller_cancels_mid_clip() {
 
     // The confirmed (unadopted) media leg is BYE'd by the ordinary teardown —
     // no announcement rule is involved (the generic termination reaps it).
+    mrf.receive("BYE").await.respond(200, "OK").await;
+
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
+    let _ = h.finish().await;
+}
+
+// ── The MRF never answers the MSCML <play> INFO. The media leg carries
+// nothing of the call, so the INFO's timeout (Timer F, 64·T1) ends that leg
+// alone by default; the service owns the failure: the announcement cannot
+// play, so the caller, who saw only a 183 early dialog, is answered 504 and
+// the media leg BYE'd.
+#[tokio::test(start_paused = true)]
+async fn announcement_play_info_unanswered_rejects_the_caller() {
+    let h = Harness::new("announcement-play-info-timeout");
+    let alice = h.agent("alice", "127.0.0.1:5906").await;
+    let mrf = h.agent("mrf", &format!("127.0.0.1:{MRF_PORT}")).await;
+    let b2bua = B2buaSut::builder(announcement_decision())
+        .services(vec![announcement::service()])
+        .start(&h, "b2bua", "127.0.0.1:5926")
+        .await;
+
+    let mut call = alice.invite(&mrf).with_sdp(OFFER).through(b2bua.addr).send().await;
+    let mut mrf_uas = mrf.receive("INVITE").await;
+    mrf_uas.respond(200, "OK").with_sdp(MRF_SDP).await;
+    mrf.receive("ACK").await;
+    call.expect(183).await;
+    let _unanswered = mrf.receive("INFO").await;
+
+    // Past Timer F (64·T1 = 32 s) of the <play> INFO.
+    h.advance(Duration::from_secs(33)).await;
+    mrf.drain().await; // the INFO's retransmissions
+    call.expect(504).await;
     mrf.receive("BYE").await.respond(200, "OK").await;
 
     settle_until(|| b2bua.is_reaped()).await;
