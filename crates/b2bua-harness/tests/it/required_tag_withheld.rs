@@ -4,8 +4,9 @@
 //! `Unsupported` (RFC 3261 §8.2.2.3), never relays the request with the
 //! requirement silently dropped. The session timer (RFC 4028 §7.1) is served
 //! end to end by the peer; a call that withholds `timer` from that peer (a
-//! strategy's withhold, a declared one, a leg dialled outside the timer)
-//! serves no one's `Require: timer`. Each case ends with its CDR.
+//! strategy's withhold, a declared one, a `Supported` without it, a leg
+//! dialled outside the timer) serves no one's `Require: timer`. Each case ends
+//! with its CDR.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -14,6 +15,7 @@ use b2bua::decision::test_adapter::{route_to, route_to_with_18x};
 use b2bua::decision::{NewCallResponse, ScriptedDecisionEngine};
 use b2bua_harness::{settle_until, B2buaScene, B2buaSut, B2buaSutBuilder};
 use call::features::{AdvertiseCapabilitiesFeature, AdvertisedCapabilities, RelayFirst18xStrategy};
+use call::header_update::HeaderUpdate;
 use call::TerminationCause;
 use scenario_harness::callflow::{ANSWER_SDP, OFFER_SDP};
 use scenario_harness::{ClientInvite, Dialog, Harness, InDialogRequest, Invite};
@@ -44,10 +46,18 @@ struct Routing {
     withheld: &'static [&'static str],
     /// The declared `Supported` toward the originated face.
     supported_toward_bob: Option<&'static [&'static str]>,
+    /// The `Supported` line the route states on bob's INVITE
+    /// (`update_headers`), which outranks the face's declaration.
+    supported_stated: Option<&'static [&'static str]>,
 }
 
 impl Routing {
-    const PLAIN: Routing = Routing { strategy: None, withheld: &[], supported_toward_bob: None };
+    const PLAIN: Routing = Routing {
+        strategy: None,
+        withheld: &[],
+        supported_toward_bob: None,
+        supported_stated: None,
+    };
 
     fn under(strategy: RelayFirst18xStrategy) -> Self {
         Routing { strategy: Some(strategy), ..Self::PLAIN }
@@ -75,6 +85,10 @@ impl Routing {
                         supported: Some(supported.iter().map(|t| t.to_string()).collect()),
                     }),
                 });
+            }
+            if let Some(supported) = self.supported_stated {
+                let line = HeaderUpdate::line(supported.join(", "));
+                r.update_headers = Some([("Supported".to_string(), line)].into_iter().collect());
             }
             NewCallResponse::Route(r)
         };
@@ -182,6 +196,48 @@ async fn a_face_declared_without_timer_refuses_a_required_timer() {
     let routing = Routing { supported_toward_bob: Some(&["100rel"]), ..Routing::PLAIN };
     let listed = refused_at_setup("withheld-timer-face-setup", routing, "timer", true).await;
     assert_eq!(listed, ["timer"]);
+}
+
+/// The route states bob's INVITE a `Supported` without `timer`, which keeps
+/// the session timer off his leg whatever the face declares.
+#[tokio::test(start_paused = true)]
+async fn a_route_stating_supported_without_timer_refuses_a_required_timer() {
+    let routing = Routing { supported_stated: Some(&["100rel"]), ..Routing::PLAIN };
+    let listed = refused_at_setup("withheld-timer-stated-setup", routing, "timer", true).await;
+    assert_eq!(listed, ["timer"]);
+}
+
+/// The route states bob's INVITE a `Supported` naming `timer` over a face
+/// declared without it: the INVITE offers the timer, so alice's requirement
+/// rides to bob, who answers it.
+#[tokio::test(start_paused = true)]
+async fn a_route_stating_timer_over_a_face_declared_without_it_dials_the_requirement() {
+    let routing = Routing {
+        supported_toward_bob: Some(&["100rel"]),
+        supported_stated: Some(&["100rel", "timer"]),
+        ..Routing::PLAIN
+    };
+    let s = B2buaScene::with_b2bua("withheld-timer-stated-over-face", |bob_port| {
+        routing.builder(bob_port)
+    })
+    .await;
+    let invite = with_timer_offer(s.alice.invite(&s.bob)).with_header("Require", "timer");
+    let mut call = invite.with_sdp(OFFER_SDP).through(s.b2bua.addr).send().await;
+    let mut uas = s.bob.receive("INVITE").await;
+    let required: Vec<&str> = uas.request().raw(HeaderName::Require).collect();
+    assert_eq!(required, ["timer"], "the requirement rides to bob");
+    uas.respond(200, "OK")
+        .with_header("Require", "timer")
+        .with_header("Session-Expires", "1800;refresher=uac")
+        .with_sdp(ANSWER_SDP)
+        .await;
+    call.expect(200).await;
+    let mut alice = call.ack().await;
+    s.bob.receive("ACK").await;
+    s.hangup(&mut alice).await;
+    settle_until(|| s.b2bua.cdr_records().len() == 1).await;
+    assert_eq!(s.b2bua.cdr_records().len(), 1, "one call, one CDR");
+    let _report = s.finish().await;
 }
 
 /// A confirmed call alice ↔ b2bua ↔ bob under `routing`.
