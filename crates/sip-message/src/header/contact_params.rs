@@ -58,6 +58,7 @@ mod tests {
     fn a_preference_renders_as_its_shortest_qvalue() {
         assert_eq!(qvalue_text(1.0).as_deref(), Some("1"));
         assert_eq!(qvalue_text(0.0).as_deref(), Some("0"));
+        assert_eq!(qvalue_text(-0.0).as_deref(), Some("0"));
         assert_eq!(qvalue_text(0.5).as_deref(), Some("0.5"));
         assert_eq!(qvalue_text(0.1).as_deref(), Some("0.1"));
         assert_eq!(qvalue_text(0.1234).as_deref(), Some("0.123"));

@@ -398,6 +398,7 @@ Content-Length: 0\r\n\r\n";
             (Some(0.5), vec![param("q", Some("0.1"))]),
             (None, vec![param("expires", Some("soon"))]),
             (None, vec![param("expires", None)]),
+            (None, vec![param("expires", Some("\"60\""))]),
             (None, vec![param("a b", Some("1"))]),
             (None, vec![param("x", Some("a,b"))]),
             (None, vec![param("x", Some("1;y=2"))]),
