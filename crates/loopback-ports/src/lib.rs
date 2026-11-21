@@ -35,19 +35,22 @@ const RANGE_FILE: &str = "/proc/sys/net/ipv4/ip_local_port_range";
 
 /// A loopback address for each of `kinds`, in order, picked at random below
 /// the ephemeral range, each checked free by binding it and all held until
-/// all are picked. `Err` where the range leaves fewer than [`SPAN`]
+/// all are picked. `Err` where the range leaves fewer than 1000
 /// unprivileged ports below it, or where an address finds no free port in
-/// [`TRIES`] candidates.
+/// 100 candidates.
 pub fn free_addresses(kinds: &[Kind]) -> io::Result<Vec<SocketAddr>> {
     let (floor, ceiling) = range_below(ephemeral_low()?)?;
-    let span = u64::from(ceiling - floor);
     let random = RandomState::new();
     let mut drawn = 0u64;
     pick(kinds, || {
         drawn += 1;
-        // `% span` keeps the offset under `ceiling - floor`, a `u16`.
-        floor + (random.hash_one(drawn) % span) as u16
+        floor + offset_below(random.hash_one(drawn), ceiling - floor)
     })
+}
+
+/// `hash` reduced below `span`, so it fits the `u16` it is cast to.
+fn offset_below(hash: u64, span: u16) -> u16 {
+    (hash % u64::from(span)) as u16
 }
 
 /// The kernel's ephemeral range's low bound: the ports from it up are those

@@ -54,11 +54,11 @@ fn a_taken_port_is_skipped_for_the_next_candidate() {
     );
 }
 
+/// A UDP and a TCP socket can share a port, so only the repeat check refuses the second `first`.
 #[test]
 fn a_port_an_earlier_address_took_is_not_picked_again() {
     let free = free_addresses(&[Kind::Tcp, Kind::Tcp]).expect("two free ports");
     let (first, second) = (free[0].port(), free[1].port());
-    // A UDP and a TCP socket can share a port: only the repeat check refuses it.
     let picked =
         pick(&[Kind::Udp, Kind::Tcp], sequence(&[first, first, second])).expect("two ports");
     assert_eq!(picked.iter().map(SocketAddr::port).collect::<Vec<_>>(), [first, second]);
