@@ -1,7 +1,9 @@
 //! Stated text the wire cannot carry whole (ADR-0053) never costs the message
 //! it rides on: an authored final still reaches the caller, its reason phrase
 //! the status's default and the line left out; a BYE still leaves its leg
-//! without the line. Each skip is reported for the model-defect count.
+//! without the line; a response to the caller stating a To tag off `token`
+//! leaves under the stack's own. Each skip is reported for the model-defect
+//! count.
 
 use super::body_descriptors::{bridged, sent_request, values};
 use super::fixtures::*;
@@ -108,6 +110,78 @@ fn a_service_reported_skip_is_counted() {
         &[RuleAction::ReportStatedTextSkipped { detail: "INFO part line".into() }],
     );
     assert_eq!(skips(&result), 1);
+}
+
+/// To tags no `token` spells (RFC 3261 §19.3, `tag-param = "tag" EQUAL token`).
+const OFF_TOKEN_TAGS: [&str; 3] = ["", "two words", "a;b"];
+
+/// The one response the caller was sent.
+fn response_to_a(result: &HandlerResult) -> sip_message::SipResponse {
+    let sent: Vec<_> = result
+        .effects
+        .outbound
+        .iter()
+        .filter(|e| e.leg_id.as_deref() == Some("a"))
+        .filter_map(|e| match &e.body {
+            OutboundBody::Response(r) => Some(r.clone()),
+            _ => None,
+        })
+        .collect();
+    let [resp] = sent.as_slice() else { panic!("one response to the caller: {sent:?}") };
+    resp.clone()
+}
+
+/// An early-media provisional stating a To tag off `token` still reaches the
+/// caller, under a tag the stack mints, which her early dialog holds; the skip
+/// is reported.
+#[test]
+fn a_provisional_stating_a_tag_off_token_leaves_under_a_minted_tag() {
+    for stated in OFF_TOKEN_TAGS {
+        let result = execute_on(
+            &test_call(),
+            &[RuleAction::SendProvisionalToLeg {
+                leg_id: "a".into(),
+                status: 183,
+                reason: "Session Progress".into(),
+                body: None,
+                to_tag: Some(stated.into()),
+                p_early_media: None,
+            }],
+        );
+        let resp = response_to_a(&result);
+        assert_eq!(resp.status(), 183, "{stated:?}");
+        let tag = resp.to().tag().expect("a To tag").to_string();
+        assert!(!tag.is_empty() && tag != stated, "{stated:?}: tag {tag:?}");
+        assert!(call::helpers::caller_dialog(&result.call, &tag).is_some(), "{stated:?}");
+        assert_eq!(skips(&result), 1, "{stated:?}");
+    }
+}
+
+/// A new-dialog answer stating a To tag off `token` still answers the caller,
+/// under a tag the stack mints, which the confirmed dialog holds; the skip is
+/// reported.
+#[test]
+fn a_new_dialog_answer_stating_a_tag_off_token_leaves_under_a_minted_tag() {
+    for stated in OFF_TOKEN_TAGS {
+        let result = execute_on(
+            &call_with_early_a_dialog("A1early"),
+            &[RuleAction::AnswerALegNewDialog {
+                status: 200,
+                reason: "OK".into(),
+                body: None,
+                to_tag: Some(stated.into()),
+                header_updates: vec![],
+                relayed: b2bua_core::rules::RelayedFinal::none(),
+            }],
+        );
+        let resp = response_to_a(&result);
+        assert_eq!(resp.status(), 200, "{stated:?}");
+        let tag = resp.to().tag().expect("a To tag").to_string();
+        assert!(!tag.is_empty() && tag != stated && tag != "A1early", "{stated:?}: tag {tag:?}");
+        let confirmed = result.call.a_leg.dialogs.confirmed().expect("a confirmed a-dialog");
+        assert_eq!(confirmed.our_tag, tag, "{stated:?}");
+        assert_eq!(skips(&result), 1, "{stated:?}");
+    }
 }
 
 /// A re-INVITE whose stamped lines state a single-valued header twice still

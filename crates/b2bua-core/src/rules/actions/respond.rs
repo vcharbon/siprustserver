@@ -345,7 +345,7 @@ impl ActionExecutor<'_> {
         // The 2xx confirms the caller-facing dialog its To-tag names (RFC 3261
         // §12.1.1) and retires her other early dialogs.
         if let OutboundBody::Response(resp) = &effect.body {
-            if let Some(tag) = resp.to().tag().filter(|t| !t.is_empty()) {
+            if let Some(tag) = resp.to().tag() {
                 super::dialog_track::adopt_a_tag(call, tag);
             }
         }

@@ -1,7 +1,7 @@
 //! Stated text a message the stack builds cannot carry whole (ADR-0053): a
 //! header line with a name off `token` or a CR, LF or NUL in its value, a
 //! single-valued header stated on more than one line (§7), a reason phrase
-//! with a CR, LF or NUL; and a statement of a header the message the stack
+//! with a CR, LF or NUL, a To tag off `token`; and a statement of a header the message the stack
 //! mints does not take from its author ([`admitted`]). Such text is left out —
 //! the line dropped, the phrase giving way to the status's default — and each
 //! skip is reported ([`BufferedObservabilityEffect::StatedTextSkipped`]), so
@@ -140,6 +140,24 @@ pub(crate) fn writable_status<'a>(
         detail: format!("{what}: {status} is no status code"),
     });
     (500, default_reason(500))
+}
+
+/// `tag` when the wire carries it as a To tag (RFC 3261 §19.3, a `token`),
+/// else `None`, so the stack's own tag stands in its place, the refusal
+/// reported on `fx` under `what`.
+pub(crate) fn writable_tag<'a>(
+    what: &str,
+    tag: Option<&'a str>,
+    fx: &mut HandlerEffects,
+) -> Option<&'a str> {
+    let stated = tag?;
+    match write_check::tag(stated) {
+        Ok(()) => Some(stated),
+        Err(refusal) => {
+            fx.buffered.extend(BufferedObservabilityEffect::skipped(what, vec![refusal]));
+            None
+        }
+    }
 }
 
 /// `reason` when the wire carries it, else the default phrase of `status`,

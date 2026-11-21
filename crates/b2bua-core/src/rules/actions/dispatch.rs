@@ -217,6 +217,8 @@ impl ActionExecutor<'_> {
                 p_early_media,
             } => {
                 let (bytes, content_type, author, descriptors) = parts(body);
+                let to_tag =
+                    relay::writable_tag("provisional to the caller", to_tag.as_deref(), fx);
                 self.send_provisional_to_leg(
                     call,
                     fx,
@@ -226,7 +228,7 @@ impl ActionExecutor<'_> {
                     bytes,
                     content_type,
                     descriptors,
-                    to_tag.as_deref(),
+                    to_tag,
                     p_early_media.as_deref(),
                     author,
                 );
@@ -289,6 +291,7 @@ impl ActionExecutor<'_> {
                 relayed,
             } => {
                 let (bytes, content_type, author, descriptors) = parts(body);
+                let to_tag = relay::writable_tag("final to the caller", to_tag.as_deref(), fx);
                 self.answer_a_leg_new_dialog(
                     call,
                     fx,
@@ -297,7 +300,7 @@ impl ActionExecutor<'_> {
                     bytes,
                     content_type,
                     descriptors,
-                    to_tag.as_deref(),
+                    to_tag,
                     header_updates,
                     relayed,
                     author,
