@@ -2,11 +2,12 @@
 //! the INVITE's Timer B, is dropped (RFC 6026 §7.2): the client transaction
 //! that gave up matches it no more, so it never reaches the TU and the ACK of
 //! RFC 3261 §13.2.2.4 is not owed. A service re-INVITEs the callee and keeps
-//! the call when that re-INVITE times out; the callee, silent past Timer B,
-//! then answers it 200. No ACK leaves, nothing reaches the caller, neither
-//! leg reads it and the call stays up. The callee, never ACKed, re-sends it
-//! to 64·T1 and clears the dialog with a BYE (§13.3.1.4): one CDR, fully
-//! reaped.
+//! the call when that re-INVITE times out, its rule ACKing a 2xx to it still
+//! live, so any 2xx the stack passes up draws an ACK; the callee, silent past
+//! Timer B, then answers it 200. No ACK leaves, nothing reaches the caller,
+//! neither leg reads it and the call stays up. The callee, never ACKed,
+//! re-sends it to 64·T1 and clears the dialog with a BYE (§13.3.1.4): one
+//! CDR, fully reaped.
 //!
 //! The 200 leaves once while the layer still holds the given-up transaction
 //! (64·T1 past Timer B, for the final a CANCEL may draw), which absorbs it,
@@ -40,7 +41,8 @@ const PAST_TIMER_B: Duration = Duration::from_secs(33);
 const PAST_THE_HOLD: Duration = Duration::from_secs(65);
 
 /// On its timer, re-INVITEs the callee with the caller's next description;
-/// ACKs the 2xx that answers it, and keeps the call when it times out.
+/// keeps the call when that re-INVITE times out, and ACKs any 2xx to it that
+/// reaches the rules, before the timeout or after.
 mod renegotiate {
     use b2bua::rules::{
         Effect, Match, RuleAction, RuleCall, RuleContext, RuleDefinition, RuleHandleResult,
@@ -56,7 +58,7 @@ mod renegotiate {
     define_service! {
         id: "renegotiate",
         machine: RENEGOTIATE_MACHINE,
-        states: RenegotiateState { Armed, Renegotiating },
+        states: RenegotiateState { Armed, Renegotiating, TimedOut },
         init: arm,
         rules: [ fire(), answered(), timed_out() ],
     }
@@ -93,14 +95,24 @@ mod renegotiate {
         }
     }
 
+    /// The 2xx to the re-INVITE [`fire`] sent, the one the callee's dialog
+    /// last sent: ACKed, whether it comes before that re-INVITE's timeout or
+    /// after, so a late 2xx the stack passes up draws an ACK on the wire.
     fn answered() -> RuleDefinition {
         sm_rule! {
             id: "renegotiate-answered",
             machine: RENEGOTIATE_MACHINE,
-            active: [ RenegotiateState::Renegotiating ],
-            transitions: [ RenegotiateState::Renegotiating => Terminal ],
+            active: [ RenegotiateState::Renegotiating, RenegotiateState::TimedOut ],
+            transitions: [
+                RenegotiateState::Renegotiating => Terminal,
+                RenegotiateState::TimedOut => Terminal,
+            ],
             effects: [ Effect::Originate { method: Method::Ack, label: "ACK → callee" } ],
-            matcher: Match::response().method("INVITE").status_class(2).direction(Direction::FromB),
+            matcher: Match::response()
+                .method("INVITE")
+                .status_class(2)
+                .direction(Direction::FromB)
+                .filter(|ctx: &RuleContext| ctx.answers_last_sent_invite()),
             handle: |ctx: &RuleContext| {
                 Some(RuleHandleResult::new(vec![
                     RuleAction::AckLeg { leg_id: ctx.source_leg_id.to_string(), body: None },
@@ -111,19 +123,21 @@ mod renegotiate {
     }
 
     /// The timeout of the re-INVITE [`fire`] sent, the one INVITE in progress
-    /// while the service renegotiates (RFC 3261 §14.1): the call stays.
+    /// while the service renegotiates (RFC 3261 §14.1): the call stays, and
+    /// [`answered`] still reads a 2xx to it.
     fn timed_out() -> RuleDefinition {
         sm_rule! {
             id: "renegotiate-timed-out",
             machine: RENEGOTIATE_MACHINE,
             active: [ RenegotiateState::Renegotiating ],
-            transitions: [ RenegotiateState::Renegotiating => Terminal ],
+            transitions: [ RenegotiateState::Renegotiating => RenegotiateState::TimedOut ],
             effects: [],
             matcher: Match::timeout()
                 .filter(|ctx: &RuleContext| ctx.timeout_method().is_some_and(|m| m == "INVITE")),
             handle: |_ctx: &RuleContext| {
-                Some(RuleHandleResult::new(vec![RuleAction::ClearState {
+                Some(RuleHandleResult::new(vec![RuleAction::SetState {
                     machine: RENEGOTIATE_MACHINE,
+                    to: RenegotiateState::TimedOut.label(),
                 }]))
             },
         }
