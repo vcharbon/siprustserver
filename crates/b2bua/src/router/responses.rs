@@ -2,9 +2,10 @@
 //! call-layer-stateless store-fault 500, the 481 and 405 a request naming
 //! no call draws, the 200 and 487 an ending dialog answers, the 420 a request
 //! requiring an option tag this stack does not understand draws, the
-//! out-of-order 500, the retry-later 500 and the merged-request 482. The 503 refusing a new INVITE is the admission
-//! ladder's ([`crate::admission::Refusals`]). A request whose lines no
-//! response can echo draws none: each builder returns why.
+//! out-of-order 500, the retry-later 500 and the merged-request 482. The 503
+//! refusing a new INVITE is the admission ladder's
+//! ([`crate::admission::Refusals`]). A request whose lines no response can
+//! echo draws none: each builder returns why.
 
 use sip_ids::TurnIds;
 use sip_message::generators::{

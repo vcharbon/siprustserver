@@ -28,7 +28,8 @@
 //! that the gate would pass, absorb or terminate, and that requires an option
 //! tag this stack does not understand, draws 420 instead, naming those tags
 //! in `Unsupported` (§8.2.2.3, [`Verdict::BadExtension`]): nothing reaches
-//! the rules or the peer, and the dialog and its session stay as they were. An ACK passes on a dialog a 2xx established, ended by
+//! the rules or the peer, and the dialog and its session stay as they were.
+//! An ACK passes on a dialog a 2xx established, ended by
 //! a BYE since or not (RFC 5407 §2); it is never answered (§17.1.1.3), so one
 //! the gate refuses is dropped. An ACK naming an INVITE on its leg for which
 //! the record holds no final sent reaches the rules only on a call another

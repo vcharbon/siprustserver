@@ -61,8 +61,9 @@ of). A positional read picks a wrong dialog as soon as a leg holds two.
    last CSeq draws 500 (§12.2.2); one requiring an option tag this stack
    does not understand draws 420 in place of the table's answer (§8.2.2.3).
    An ACK passes on any dialog a 2xx established, ended since or not (RFC
-   5407 §2), and is otherwise dropped unanswered (§17.1.1.3), as is one of an INVITE the record holds no final
-   sent for on a call no other owner served (ADR-0055 §4); a CANCEL is matched
+   5407 §2), and is otherwise dropped unanswered (§17.1.1.3), as is one of an
+   INVITE the record holds no final sent for on a call no other owner served
+   (ADR-0055 §4); a CANCEL is matched
    by transaction (§9.1). A request with no To-tag names no dialog: one of a
    method carried only in a dialog draws 481 under a minted tag (§8.2.6.2);
    an INVITE, an ACK or a method relayed in no dialog passes. A
