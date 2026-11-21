@@ -21,7 +21,7 @@ use crate::config::B2buaConfig;
 use crate::effects::{HandlerEffects, HandlerResult, QuietTurn};
 use crate::obligations::ObligationSet;
 use crate::owners::Owners;
-use crate::rules::actions::{possibly_confirmed, Owed, Settle};
+use crate::rules::actions::{possibly_confirmed, Owed, Settle, Taken};
 use crate::rules::lifecycle_delivery::{close_turn, TurnStart};
 use crate::rules::relay::CountedCopy;
 use crate::rules::{execute_turn, ActionExecutor, RuleCall, RuleContext, RuleDefinition};
@@ -188,9 +188,10 @@ fn chain_turn(
     let start = TurnStart::of(&call);
     // A reliable provisional is the engine's before it is any rule's (RFC
     // 3262): recorded with its early dialog and offer, or — a repeat, or out
-    // of `RSeq` order — dropped unread, its turn a write of nothing else.
-    let arrival = exec.take_reliable_provisional(&mut call, event, source_leg_id);
-    let screened = matches!(arrival, Some(Arrival::Repeat | Arrival::OutOfOrder));
+    // of `RSeq` order — dropped unread, its turn a write of nothing else; a
+    // sibling fork's past the answer is PRACKed here and read by no rule.
+    let taken = exec.take_reliable_provisional(&mut call, &mut ladder_fx, event, source_leg_id);
+    let screened = !Taken::read_by_rules(taken);
     // A fire of the setup's deadline once the setup is over reaches no rule:
     // its scope is read as the call stands at the fire.
     let rules_read = rules_read && !screened && !setup_spent(event, &call);
@@ -247,7 +248,7 @@ fn chain_turn(
     // turn sends follows what it received.
     if let Some(ring) = crate::message_ring::Ring::of(fw.config) {
         let dialog = resolved.dialog.as_ref();
-        let repeat = arrival == Some(Arrival::Repeat);
+        let repeat = taken == Some(Taken::Dropped(Arrival::Repeat));
         let received = crate::message_ring::Received {
             event,
             matched_client_txn,

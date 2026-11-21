@@ -3,12 +3,13 @@
 //! while the call holds the transaction the TU sends every ACK, and the layer
 //! records the one it sends for each dialog; once the call releases the
 //! transaction the layer sends them (`layer::orphan`). Also kept here: the
-//! reliable provisionals that carried the offer of an offerless INVITE.
+//! reliable provisionals that carried the offer of an offerless INVITE, and
+//! the one kind of provisional an Accepted transaction still hands up.
 
 use std::net::SocketAddr;
 
 use bytes::Bytes;
-use sip_message::header::RSeq;
+use sip_message::header::{RSeq, Require};
 use sip_message::{SipMessage, SipRequest, SipResponse};
 use sip_net::parse_datagram;
 use sip_retransmit::Class;
@@ -18,6 +19,20 @@ use super::lifetime::Hold;
 use super::owner::Owner;
 use super::txn::{CancelWire, TxnRef, TxnState, MAX_DIALOGS};
 use super::via_marks::{extract_via_custom_params, ViaMarks};
+
+/// Whether `resp` is a reliable provisional (RFC 3262 §3: a 101–199 with
+/// `Require: 100rel` and an `RSeq` that reads). On an Accepted INVITE client
+/// transaction its call holds, it is a sibling fork's, which its UAC still
+/// PRACKs on that fork's early dialog (§4), so it goes up to the TU; every
+/// other 1xx and every non-2xx is absorbed there until Timer M (RFC 6026
+/// §7.2 passes up only the 2xx).
+pub(super) fn is_reliable_provisional(resp: &SipResponse) -> bool {
+    let requires_100rel =
+        resp.token_set::<Require>().and_then(Result::ok).is_some_and(|r| r.contains("100rel"));
+    (101..200).contains(&resp.status())
+        && requires_100rel
+        && resp.header::<RSeq>().is_some_and(|rseq| rseq.is_ok())
+}
 
 impl Owner {
     /// Move the client INVITE txn at `branch` to Accepted on its first 2xx:

@@ -192,6 +192,7 @@ Severity = operational risk if the behaviour is wrong.
 | PRACK-FORK-1 | 3262 §3 | Multiple early dialogs, per-dialog RSeq | Track RSeq per remote tag, PRACK each | high | ✅ | prack_forking `two_early_dialogs` |
 | PRACK-FORK-3 | 3262 §4 | RSeq per-dialog not global | RSeq=1 from fork B in-order despite fork A | high | 🟡 | prack_forking covers two dialogs; add explicit concurrent-RSeq assert |
 | PRACK-FORK-4 | 3264 §5 | Collapse to single A-leg O/A | One consistent answer to A | high | ✅ | prack_forking / prack_update_forking (answer on chosen fork) |
+| PRACK-FORK-5 | 3262 §4, 3261 §13.2.2.4 | A sibling fork's first reliable 1xx reaches the B2BUA after another fork's 2xx | PRACKed once on its own early dialog (an offer in it answered rejecting every stream), nothing to A, early dialog retired; none past 64·T1 | high | ✅ | b2bua-harness `prack_late_sibling_fork::*` (transparent, fake-prack, repeat, offer, past the bound); sip-txn `accepted_client::an_accepted_transaction_hands_a_sibling_forks_reliable_1xx_up` |
 | EARLY-MEDIA-1 | 3262 §5 | Reliable 183+SDP early media | Bridge to A-leg before 200 | high | ✅ | promote_pem suite, fake_prack |
 | EARLY-MEDIA-2 | 3264 §8 | Early→final SDP change | Re-anchor without dropping media | med | ✅ | promote_pem `resync_sdp_changed` |
 | EARLY-MEDIA-4 | 3262 §5 | 183-SDP is the answer (not offer) | PRACK carries no body | high | ✅ | rfc-audit `prack-answers-1xx-offer` |

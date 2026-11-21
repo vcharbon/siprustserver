@@ -87,7 +87,7 @@ use b2bua_sdk::model::{RuleAction, RuleContext};
 
 pub use ladder::ladder_bound;
 pub use prack::{Owed, Settle};
-pub use provisional_arrival::invite_open;
+pub use provisional_arrival::{invite_open, Taken};
 pub(crate) use settle::{settle, Cause, Legs};
 pub(crate) use subscription::holds_requests;
 
