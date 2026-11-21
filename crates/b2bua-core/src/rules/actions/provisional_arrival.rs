@@ -74,7 +74,7 @@ fn reliable_provisional(resp: &SipResponse, leg_id: &str) -> Option<ProvisionalI
         return None;
     }
     let rseq = u32::try_from(relay::reliable_rseq(resp)?).ok()?;
-    let tag = resp.to().tag().filter(|t| !t.is_empty())?;
+    let tag = resp.to().tag()?;
     Some(ProvisionalId {
         leg: leg_id.to_string(),
         responder_tag: tag.to_string(),
