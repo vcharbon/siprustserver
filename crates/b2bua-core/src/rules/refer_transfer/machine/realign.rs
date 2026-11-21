@@ -5,9 +5,7 @@
 
 use b2bua_sdk::sm_rule;
 use call::{CdrEventType, Direction, LegState, TerminationCause, TimeoutKind, TransferPhase};
-use sip_message::Method;
-
-use sip_message::SipResponse;
+use sip_message::{Method, SipResponse};
 
 use super::{state, Phase, TRANSFER_MACHINE};
 use crate::rules::refer_transfer::ok;

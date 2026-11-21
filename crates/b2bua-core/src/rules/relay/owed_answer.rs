@@ -129,8 +129,9 @@ pub(crate) fn owe_answer_in_ack(call: &mut Call, leg_id: &str, resp: &SipRespons
 /// to the INVITE this stack last sent there on its own account, owes the
 /// answer to the offer `resp` made ([`offer_of_2xx`]): the obligation is armed
 /// under that INVITE's CSeq, the number the ACK this stack composes carries
-/// (RFC 3261 §13.2.2.4), until that ACK leaves with the answer. No peer ACK is
-/// relayed onto it: the answer arrives in another leg's response, not an ACK.
+/// (RFC 3261 §13.2.2.4), until that ACK leaves with the answer another leg's
+/// response brings (`RuleAction::AckLegAnswering`), or rejecting every stream
+/// when none can come (RFC 3264 §6, the BYE's own ACK).
 /// Nothing where `resp` made no offer, answers another INVITE or dialog, or
 /// the dialog's obligation is already armed or discharged.
 pub(crate) fn owe_answer_in_own_ack(call: &mut Call, leg_id: &str, resp: &SipResponse) {
