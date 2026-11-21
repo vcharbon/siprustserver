@@ -104,7 +104,7 @@ async fn lossy_caller(h: &Harness, lose: u32) -> (Box<dyn UdpEndpoint>, Arc<Mute
             PreIngressAction::Accept
         }
     });
-    let (ep, _) = h.bind_sut_with_opts("alice", ALICE, sip_net::all_ua_roles(), Some(hook)).await;
+    let (ep, _) = h.bind_peer_with_pre_ingress("alice", ALICE, hook).await;
     (ep, lost)
 }
 
@@ -297,8 +297,10 @@ Content-Length: 0\r\n\r\n"
     .into_bytes()
 }
 
-/// The INVITE is refused and its 503 lost; the caller gives up and CANCELs.
-/// This hop answered the INVITE itself, so it is the UAS the CANCEL reaches
+/// The INVITE is refused and its 503 lost; the caller gives up and CANCELs
+/// before any provisional, the §9.1 breach of a simulated caller this test is
+/// for: a stateless hop sends no provisional, so no compliant caller CANCELs
+/// through it. This hop answered the INVITE itself, so it is the UAS the CANCEL reaches
 /// (§9.2): a 200 carrying the INVITE final's To-tag, nothing forwarded. The
 /// INVITE's retransmission then draws its 503, which the caller ACKs.
 #[tokio::test(start_paused = true)]
@@ -307,8 +309,9 @@ async fn a_cancel_of_a_refused_invite_draws_200_and_is_never_forwarded() {
     h.waive(
         WaiverScope::rule(
             "cancel-after-1xx",
-            "alice CANCELs before any provisional (RFC 3261 §9.1): a stateless hop sends \
-             none, so only such a caller ever CANCELs an INVITE it refused, the case under test",
+            "the simulated caller CANCELs before any provisional (RFC 3261 §9.1): a stateless \
+             hop sends none, so only such a caller ever CANCELs an INVITE it refused, the case \
+             under test",
         )
         .on_party("alice"),
     );

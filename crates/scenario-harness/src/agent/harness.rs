@@ -36,6 +36,7 @@ use super::{Agent, Proxy};
 use crate::absorption::Absorption;
 use crate::dialogs::{DialogJudge, DialogJudging, DialogOptIns};
 use crate::run::RunReport;
+mod peer_binds;
 mod shared_lanes;
 
 /// Fake-fabric per-`recv` silent-wait bound (virtual time — a paused clock
@@ -604,26 +605,6 @@ impl Harness {
         if let Some(hook) = pre_ingress {
             opts = opts.with_pre_ingress(hook);
         }
-        let ep =
-            self.network.bind_udp(opts).await.unwrap_or_else(|e| panic!("bind {addr} failed: {e}"));
-        (ep, addr)
-    }
-
-    /// Bind a raw endpoint for a SIMULATED party (a byte-level fixture peer) on
-    /// the shared, recording-wrapped fabric: a UA-role (`{Uac, Uas}`) bind on
-    /// an `Ext` lane, so its findings are the party's own, never the SUT's
-    /// (a party-less waiver covers them). The SUT itself binds with
-    /// [`bind_sut`](Self::bind_sut).
-    pub async fn bind_peer(
-        &self,
-        name: impl Into<String>,
-        addr: &str,
-    ) -> (Box<dyn UdpEndpoint>, SocketAddr) {
-        let addr: SocketAddr = addr.parse().unwrap_or_else(|e| panic!("bad addr {addr:?}: {e}"));
-        self.addrs.note_bound(addr);
-        self.recorder.register_lane(addr, name.into(), NetworkTag::Ext);
-        let roles = HashSet::from([sip_net::UaRole::Uac, sip_net::UaRole::Uas]);
-        let opts = BindUdpOpts::new(addr, SUT_QUEUE_MAX).with_roles(roles);
         let ep =
             self.network.bind_udp(opts).await.unwrap_or_else(|e| panic!("bind {addr} failed: {e}"));
         (ep, addr)
