@@ -274,6 +274,7 @@ fn same_exchange(a: &InviteExchange, b: &InviteExchange) -> bool {
         rejection,
         provisional,
         answer_preempted,
+        ended_at_timer_b,
     } = a;
     let same_2xx = |x: &Unacked2xx, y: &Unacked2xx| {
         let Unacked2xx { dialog_tag, cseq, emission } = x;
@@ -291,6 +292,7 @@ fn same_exchange(a: &InviteExchange, b: &InviteExchange) -> bool {
         && *rejection == b.rejection
         && *provisional == b.provisional
         && *answer_preempted == b.answer_preempted
+        && *ended_at_timer_b == b.ended_at_timer_b
 }
 
 /// A reliable provisional, the rung of its shown ladder left out.

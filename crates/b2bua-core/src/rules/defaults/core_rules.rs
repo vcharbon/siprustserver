@@ -950,9 +950,6 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
             // (its CANCEL meets the transaction still open: sent if the callee
             // answered a provisional, held for one otherwise, §9.1), and let
             // `call-failure-result` drive the outcome.
-            // Everything else (a-leg, confirmed-leg re-INVITE, BYE/OPTIONS
-            // timeouts, no callback context) keeps the unconditional
-            // termination below.
             let timed_out_invite = ctx.timeout_method().map(|m| m == "INVITE").unwrap_or(false);
             let pending_b_leg = ctx.source_leg().is_some_and(|l| {
                 l.leg_id != ctx.call.a_leg().leg_id

@@ -16,13 +16,21 @@
 //! ([`super::relay_pending_response`]); every other final and every timeout
 //! settles its record before the rules read the event, which they read
 //! through [`call::helpers::Resolved::record`].
+//!
+//! The INVITE this stack originates on a dialog settles here at its Timer B,
+//! with no response at all (RFC 3261 §17.1.1.2): the record keeps it, ended
+//! at Timer B, so the dialog holds no INVITE in progress (§14.1) while a late
+//! 2xx still answers it, and the rules read it as the timed-out record. One
+//! that drew a provisional and gave up at the INVITE bound is still in
+//! progress at its peer: no record names that timeout.
 
 use call::helpers::{
-    add_record, close_held, close_record, disarm_timer, find_leg, held_record, next_held_deadline,
-    record_with_branch, take_overdue_held, Resolved,
+    add_record, close_held, close_record, disarm_timer, end_invite_at_timer_b, find_leg,
+    held_record, next_held_deadline, record_with_branch, take_overdue_held, Resolved,
 };
 use call::{
     Call, DialogId, HostPort, RequestOrigin, RequestRecord, SentRequest, TimerKey, TimerType,
+    TxnTimeoutKind,
 };
 use sip_message::generators::{self, GenerateError};
 use sip_message::header::{HeaderName, MediaType};
@@ -113,9 +121,10 @@ impl ActionExecutor<'_> {
     }
 
     /// Settle the record `event` ends before the rules read it, noting it on
-    /// `resolved`: this stack's own request answered by a final, or any
-    /// request whose transaction on `leg_id` timed out. A relay answered by a
-    /// final is settled as that final is relayed.
+    /// `resolved`: this stack's own request answered by a final, any
+    /// non-INVITE request whose transaction on `leg_id` timed out, or this
+    /// stack's own INVITE at its Timer B. A relay answered by a final is
+    /// settled as that final is relayed.
     pub(crate) fn settle_before_rules(
         &mut self,
         call: &mut Call,
@@ -134,11 +143,17 @@ impl ActionExecutor<'_> {
                     close_record(call, leg_id, holder, record.outbound_cseq);
                 }
             }
-            CallEvent::Timeout { branch, .. } => {
+            CallEvent::Timeout { branch, timeout_kind, .. } => {
                 let Some((holder, record)) = record_with_branch(call, leg_id, branch) else {
                     return;
                 };
-                close_record(call, leg_id, &holder, record.outbound_cseq);
+                if !record.is_invite() {
+                    close_record(call, leg_id, &holder, record.outbound_cseq);
+                } else if *timeout_kind == TxnTimeoutKind::Response {
+                    end_invite_at_timer_b(call, leg_id, holder.id());
+                } else {
+                    return;
+                }
                 resolved.record = Some(Box::new((holder, record)));
             }
             _ => {}

@@ -32,7 +32,9 @@ An INVITE transaction is in progress on a dialog while any of these holds
 - the peer's INVITE on it has no final from this side: relayed and unanswered, or the
   originator's dialog-creating INVITE.
 
-A non-2xx final, or a timeout, closes this side's INVITE (`close_rejected_invite_round`).
+A non-2xx final closes this side's INVITE (`close_rejected_invite_round`). The Timer B of
+an INVITE this side originated, with no response (RFC 3261 §17.1.1.2), ends it in progress:
+the record keeps it marked (`ended_at_timer_b`), so a late 2xx still draws its ACK.
 
 ### §2 The INVITE is refused, never queued
 

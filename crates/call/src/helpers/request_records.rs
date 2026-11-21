@@ -74,7 +74,9 @@ pub fn answered_record(
 }
 
 /// The sent record whose transaction left on `branch` from `leg_id`, and
-/// where it is kept: what a transaction timeout names (RFC 3261 §17.1.2.2).
+/// where it is kept: what a transaction timeout names (RFC 3261 §17.1.1.2,
+/// §17.1.2.2). A non-INVITE record, or the INVITE this stack originated on
+/// the dialog; a relayed INVITE is no record a timeout names.
 pub fn record_with_branch(
     call: &Call,
     leg_id: &str,
@@ -87,7 +89,8 @@ pub fn record_with_branch(
     leg.dialogs.iter().find_map(|d| {
         // A branch compares ignoring case (RFC 3261 §7.3.1).
         let named = |r: &&RequestRecord| r.branch().is_some_and(|b| b.eq_ignore_ascii_case(branch));
-        d.requests.iter().find(named).map(|r| (holder_of(d), r.clone()))
+        let own_invite = d.sent_invite.iter().filter(|r| r.is_own());
+        d.requests.iter().chain(own_invite).find(named).map(|r| (holder_of(d), r.clone()))
     })
 }
 

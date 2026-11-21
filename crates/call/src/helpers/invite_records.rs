@@ -45,6 +45,26 @@ pub fn invite_untaken(d: &Dialog) -> bool {
     d.sent_invite.is_some() && !invite_taken(d)
 }
 
+/// Whether `d`'s last INVITE awaits its final: [`invite_untaken`], its client
+/// transaction not ended at Timer B ([`InviteExchange::ended_at_timer_b`]).
+pub fn invite_awaits_final(d: &Dialog) -> bool {
+    invite_untaken(d) && !sent_exchange(d).is_some_and(|x| x.ended_at_timer_b)
+}
+
+/// Mark the INVITE `leg_id`'s dialog `id` last sent, untaken, ended at its
+/// Timer B with no response (RFC 3261 §17.1.1.2,
+/// [`InviteExchange::ended_at_timer_b`]).
+pub fn end_invite_at_timer_b(call: &mut Call, leg_id: &str, id: &DialogId) {
+    update_dialog(call, leg_id, id, |d| {
+        if invite_taken(d) {
+            return;
+        }
+        if let Some(x) = sent_exchange_mut(d) {
+            x.ended_at_timer_b = true;
+        }
+    })
+}
+
 /// The relay `d` last sent an INVITE for, while no final settled it — a 2xx
 /// taken, or a non-2xx closing it — CANCELled toward its target or not.
 pub fn invite_relay(d: &Dialog) -> Option<&RequestRecord> {

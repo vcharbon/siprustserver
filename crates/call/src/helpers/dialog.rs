@@ -6,7 +6,7 @@ use std::fmt;
 
 use crate::model::{Call, Dialog, DialogId, Leg};
 
-use super::invite_records::{invite_taken, invite_untaken, relayed_invite_pending, sent_exchange};
+use super::invite_records::{invite_awaits_final, relayed_invite_pending, sent_exchange};
 use super::leg::find_leg;
 use super::lens::{update_dialog, update_leg};
 use super::peering::relay_peer_dialog;
@@ -33,8 +33,9 @@ pub fn advance_peer_cseq(call: &mut Call, leg_id: &str, id: &DialogId, cseq: i64
 // ── INVITE glare ────────────────────────────────────────────────────────────
 
 /// Whether an INVITE transaction is still open on this dialog (RFC 3261
-/// §14.1): an INVITE this side sent on the dialog, relayed or its own, with
-/// no 2xx taken (rule 1), or a 2xx un-ACKed on either face — one this side
+/// §14.1): an INVITE this side sent on the dialog, relayed or its own,
+/// awaiting its final (rule 1; [`invite_awaits_final`]: one ended at Timer B
+/// does not), or a 2xx un-ACKed on either face — one this side
 /// sent (a re-INVITE's or the call's own answer) or one taken here whose ACK
 /// has not left yet (rule 2; RFC 6026 names the interval *Accepted*). While
 /// any holds, a new INVITE on the dialog is glare and is refused, 491 or 500
@@ -42,7 +43,7 @@ pub fn advance_peer_cseq(call: &mut Call, leg_id: &str, id: &DialogId, cseq: i64
 /// re-INVITE ([`super::close_rejected_invite_round`]); on a leg holding no
 /// confirmed dialog the dialling INVITE stays, and its early dialogs end.
 pub fn invite_transaction_open(dialog: &Dialog) -> bool {
-    invite_untaken(dialog)
+    invite_awaits_final(dialog)
         || dialog.answered_invite.is_some()
         || sent_exchange(dialog).is_some_and(|x| x.awaited_ack_cseq.is_some())
 }
@@ -52,8 +53,9 @@ pub fn invite_transaction_open(dialog: &Dialog) -> bool {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InviteInProgress {
     /// An INVITE this side sent on the dialog, relayed or its own, numbered
-    /// `cseq`, with no 2xx taken: it awaits its final, or the ACK of its 2xx
-    /// is not composed yet. `author` names the rule that sent an own one.
+    /// `cseq`, with no 2xx taken and not ended at Timer B: it awaits its
+    /// final, or the ACK of its 2xx is not composed yet. `author` names the
+    /// rule that sent an own one.
     Sent { cseq: i64, author: Option<String> },
     /// A 2xx this side took to its INVITE numbered `cseq`, whose ACK has not
     /// left.
@@ -94,7 +96,7 @@ impl fmt::Display for InviteInProgress {
 pub fn invite_in_progress(call: &Call, leg_id: &str, id: &DialogId) -> Option<InviteInProgress> {
     let d = named_dialog(call, leg_id, Some(id))?;
     if let Some(sent) = d.sent_invite.as_ref() {
-        if !invite_taken(d) {
+        if invite_awaits_final(d) {
             return Some(InviteInProgress::Sent {
                 cseq: sent.outbound_cseq,
                 author: sent.author.clone(),

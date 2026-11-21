@@ -357,7 +357,8 @@ fn a_relayed_reinvite_in_flight_seeds_both_halves_of_the_round() {
 /// A re-INVITE this stack originated itself (no relayed snapshot) is in
 /// flight until its final: seeded as a client INVITE so its late final is
 /// ACKed and bounded here. Once a 2xx is taken — the ACK still owed — or a
-/// non-2xx final closed the round on the record, nothing is in flight.
+/// non-2xx final closed the round on the record, or its Timer B ended it
+/// (RFC 3261 §17.1.1.2), nothing is in flight.
 #[test]
 fn a_self_originated_reinvite_in_flight_seeds_its_client_invite() {
     let mut leg = b_leg(LegState::Confirmed, Some(b_handle(B_BRANCH, 1)));
@@ -379,6 +380,11 @@ fn a_self_originated_reinvite_in_flight_seeds_its_client_invite() {
     let mut rejected = open;
     call::helpers::close_rejected_invite_round(&mut rejected, "b-1", REINVITE_BRANCH);
     assert!(seeds_for(&rejected, 0).is_empty(), "a non-2xx final closed the round on the record");
+
+    let mut ended = call_with(LegState::Confirmed, leg);
+    let id = ended.b_legs[0].dialogs.confirmed().expect("the confirmed dialog").id();
+    call::helpers::end_invite_at_timer_b(&mut ended, "b-1", &id);
+    assert!(seeds_for(&ended, 0).is_empty(), "Timer B ended the client transaction");
 }
 
 /// A re-INVITE opened on a dialog whose 2xx before it drew an ACK carries

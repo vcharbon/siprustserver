@@ -105,6 +105,7 @@ fn arb_exchange() -> impl Strategy<Value = InviteExchange> {
             proptest::option::of((arb_tag(), any::<i64>(), proptest::option::of(100u16..700))),
             proptest::option::of(100u16..700),
             proptest::option::of(200u16..300),
+            any::<bool>(),
         ),
         (
             proptest::option::of((
@@ -121,7 +122,7 @@ fn arb_exchange() -> impl Strategy<Value = InviteExchange> {
         .prop_map(
             |(
                 (ack_branch, emitted_ack, awaited_ack_cseq, answered_2xx),
-                (dialled, final_sent, answer_preempted),
+                (dialled, final_sent, answer_preempted, ended_at_timer_b),
                 (ack_ahead, rejection, provisional, copies_received, re_acked),
             )| InviteExchange {
                 ack_branch,
@@ -150,6 +151,7 @@ fn arb_exchange() -> impl Strategy<Value = InviteExchange> {
                 rejection,
                 provisional,
                 answer_preempted,
+                ended_at_timer_b,
             },
         )
 }

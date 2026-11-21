@@ -232,8 +232,9 @@ fn rejected_seed_reading(leg: &Leg, reads: &ImageReads) -> Option<TxnSeed> {
 }
 
 /// The client seed of the INVITE `leg`'s `dialog` last sent, `record`: while
-/// the leg's dialling INVITE has no final, or no 2xx was taken for it and,
-/// for a relay, it was not CANCELled toward its target. A re-INVITE records
+/// the leg's dialling INVITE has no final, or it awaits its final (no 2xx
+/// taken, not ended at Timer B) and, for a relay, it was not CANCELled toward
+/// its target. A re-INVITE records
 /// no provisional, and carries the ACK of the 2xx before it.
 fn sent_invite_seed(
     leg: &Leg,
@@ -243,7 +244,7 @@ fn sent_invite_seed(
 ) -> Option<TxnSeed> {
     let sent = call::helpers::invite_image(leg, record)?;
     let initial_in_flight = leg.outbound_invite().is_some_and(|i| i.final_received.is_none());
-    let round_open = !call::helpers::invite_taken(dialog) && !record.cancelled;
+    let round_open = call::helpers::invite_awaits_final(dialog) && !record.cancelled;
     if !(initial_in_flight || round_open) {
         return None;
     }
