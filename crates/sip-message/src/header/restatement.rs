@@ -1,7 +1,7 @@
 //! Whether a header may be restated, by a party outside the transaction, on a
 //! message the stack has already built — a routing decision's header
 //! statements, for one — and whether such a party may state it on a message
-//! the stack mints.
+//! the stack mints or sends on its behalf.
 
 use super::class::HeaderClass;
 use super::name::HeaderName;
@@ -100,15 +100,28 @@ impl HeaderName {
         if Self::restatement_of(name) != Restatement::Never {
             return Ok(());
         }
-        let class = if Self::class_of(name) == HeaderClass::Structural {
-            "is the stack's own (RFC 3261 §16.6)"
-        } else if matches!(minted, Minted::Final(status) if defines(status, name)) {
+        Self::stated_by_author(name)?;
+        if matches!(minted, Minted::Final(status) if defines(status, name)) {
             return Ok(());
-        } else {
-            "is bound to the transaction, a negotiation, an authentication exchange, a dialog \
-             reference or the body"
-        };
+        }
+        let class = "is bound to the transaction, a negotiation, an authentication exchange, a \
+                     dialog reference or the body";
         Err(WriteRefusal { position: Position::HeaderName, reason: format!("{name} {class}") })
+    }
+
+    /// Whether a request the stack sends on a service's behalf, the service
+    /// its author, takes the service's line naming `name` (any casing,
+    /// compact or long form): every name but a structural one, which the
+    /// stack writes from its own state (RFC 3261 §16.6). A bound name is the
+    /// author's to state.
+    pub fn stated_by_author(name: &str) -> Result<(), WriteRefusal> {
+        if Self::class_of(name) != HeaderClass::Structural {
+            return Ok(());
+        }
+        Err(WriteRefusal {
+            position: Position::HeaderName,
+            reason: format!("{name} is the stack's own (RFC 3261 §16.6)"),
+        })
     }
 }
 
@@ -214,5 +227,17 @@ mod tests {
         }
         assert!(HeaderName::stated_at_mint("Proxy-Authenticate", Minted::Final(401)).is_err());
         assert!(HeaderName::stated_at_mint("Content-Length", Minted::Final(401)).is_err());
+    }
+
+    #[test]
+    fn an_author_states_every_name_but_a_structural_one() {
+        for name in ["Timestamp", "require", "Reason", "X-Custom", "User-to-User"] {
+            assert_eq!(HeaderName::stated_by_author(name), Ok(()), "{name}");
+        }
+        for name in ["Via", "f", "To", "i", "cseq", "m", "Route", "Record-Route", "Max-Forwards"] {
+            let own = HeaderName::stated_by_author(name).unwrap_err();
+            assert_eq!(own.position, Position::HeaderName);
+            assert!(own.reason.starts_with(&format!("{name} is the stack's own")), "{name}");
+        }
     }
 }

@@ -180,7 +180,7 @@ impl ActionExecutor<'_> {
             return;
         };
         let gen_dialog = relay::to_gen_dialog(leg, &dialog);
-        let mut extra = relay::writable_lines("re-INVITE to a leg", stated, fx);
+        let mut extra = relay::authored_lines("re-INVITE to a leg", stated, fx);
         // RFC 7315 §5.6: the arm's vector for the leg, unless the action states one.
         let vector = sip_message::header::ChargingVector::header_name();
         if !extra.iter().any(|h| vector.matches(&h.name)) {
@@ -445,7 +445,8 @@ impl ActionExecutor<'_> {
 /// application headers verbatim (a held `User-To-User` re-emitted toward the
 /// peer on a deferred relay) and the descriptors of the body. Body-owned
 /// headers are left to `body` and its content type. A line the wire cannot
-/// carry whole is left out: the request still leaves.
+/// carry whole, or of a name the stack writes itself, is left out
+/// ([`relay::authored_lines`]): the request still leaves.
 fn stated_lines(
     method: &str,
     headers: &[(String, String)],
@@ -455,7 +456,7 @@ fn stated_lines(
 ) -> Vec<sip_message::SipHeader> {
     let mut lines = application_lines(headers);
     relay::describe_body(&mut lines, body, descriptors);
-    relay::writable_lines(&format!("{method} to a leg"), lines, fx)
+    relay::authored_lines(&format!("{method} to a leg"), lines, fx)
 }
 
 /// A service's application `headers` as lines, the body-owned

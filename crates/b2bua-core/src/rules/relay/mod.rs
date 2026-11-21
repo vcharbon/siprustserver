@@ -84,7 +84,7 @@ pub(crate) use repeat::{
 };
 pub(crate) use session_timer::{settle_session_timer, TIMER};
 pub(crate) use stated_text::{
-    admitted, set_lines, writable_lines, writable_status, writable_tag, Statements,
+    admitted, authored_lines, set_lines, writable_lines, writable_status, writable_tag, Statements,
 };
 pub(crate) use unbuilt::unbuilt;
 

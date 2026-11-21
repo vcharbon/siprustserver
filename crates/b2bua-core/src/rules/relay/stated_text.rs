@@ -1,11 +1,12 @@
 //! Stated text a message the stack builds cannot carry whole (ADR-0053): a
 //! header line with a name off `token` or a CR, LF or NUL in its value, a
 //! single-valued header stated on more than one line (§7), a reason phrase
-//! with a CR, LF or NUL, a To tag off `token`; and a statement of a header the message the stack
-//! mints does not take from its author ([`admitted`]). Such text is left out —
-//! the line dropped, the phrase giving way to the status's default — and each
-//! skip is reported ([`BufferedObservabilityEffect::StatedTextSkipped`]), so
-//! the message still leaves.
+//! with a CR, LF or NUL, a To tag off `token`; and a statement of a header the
+//! message the stack mints does not take from its author ([`admitted`],
+//! [`authored_lines`]). Such text is left out — the line dropped, the phrase
+//! giving way to the status's default — and each skip is reported
+//! ([`BufferedObservabilityEffect::StatedTextSkipped`]), so the message still
+//! leaves.
 
 use b2bua_sdk::reason_phrase::default_reason;
 use sip_message::header::{HeaderClass, HeaderName, Minted};
@@ -49,10 +50,35 @@ pub(crate) fn writable_lines(
     fx: &mut HandlerEffects,
 ) -> Vec<MsgHeader> {
     let mut skipped = Vec::new();
-    let lines = write_check::one_line_each(lines, &mut skipped);
-    let kept = lines.into_iter().filter(|line| writable(line, &mut skipped)).collect();
+    let kept = checked(lines, &mut skipped);
     fx.buffered.extend(BufferedObservabilityEffect::skipped(what, skipped));
     kept
+}
+
+/// [`writable_lines`] of the lines a service states on a request it authors
+/// on a leg, less every line of a structural name, the stack's own
+/// ([`HeaderName::stated_by_author`]): the generator writes those, and a
+/// stated one would ride beside it.
+pub(crate) fn authored_lines(
+    what: &str,
+    lines: Vec<MsgHeader>,
+    fx: &mut HandlerEffects,
+) -> Vec<MsgHeader> {
+    let mut skipped = Vec::new();
+    let lines = lines
+        .into_iter()
+        .filter(|line| kept(HeaderName::stated_by_author(&line.name), &mut skipped))
+        .collect();
+    let kept = checked(lines, &mut skipped);
+    fx.buffered.extend(BufferedObservabilityEffect::skipped(what, skipped));
+    kept
+}
+
+/// `lines` the wire carries whole, one line each for a single-valued header;
+/// each refusal pushed onto `skipped`.
+fn checked(lines: Vec<MsgHeader>, skipped: &mut Vec<WriteRefusal>) -> Vec<MsgHeader> {
+    let lines = write_check::one_line_each(lines, skipped);
+    lines.into_iter().filter(|line| writable(line, skipped)).collect()
 }
 
 /// `updates` less every statement, set or removal, of a header `minted` does

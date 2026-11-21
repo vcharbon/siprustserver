@@ -103,6 +103,59 @@ fn a_bye_with_a_line_break_in_a_stated_line_still_leaves() {
     assert_eq!(skips(&result), 1);
 }
 
+/// A structural name is the stack's own (RFC 3261 §16.6): a service stating
+/// one on a request it authors on a leg leaves the generator's line alone on
+/// the wire, the skip reported; a bound name stays the author's.
+#[test]
+fn a_bye_stating_a_cseq_leaves_with_the_dialogs_own() {
+    let result = execute_on(
+        &bridged(),
+        &[RuleAction::SendRequestToLeg {
+            leg_id: "b-1".into(),
+            method: "BYE".into(),
+            body: None,
+            headers: vec![
+                ("CSeq".into(), "9 BYE".into()),
+                ("Timestamp".into(), "54".into()),
+                ("X-Kept".into(), "fine".into()),
+            ],
+        }],
+    );
+    let bye = sent_request(&result, "b-1");
+    assert_eq!(bye.method(), "BYE");
+    let cseq = values(&bye, "CSeq");
+    assert_eq!(cseq.len(), 1, "{cseq:?}");
+    assert_ne!(cseq[0], "9 BYE");
+    assert_eq!(values(&bye, "Timestamp"), ["54"]);
+    assert_eq!(values(&bye, "X-Kept"), ["fine"]);
+    assert_eq!(skips(&result), 1);
+}
+
+/// The INVITE row of a service's in-dialog request is the re-INVITE, its
+/// stated lines judged alike.
+#[test]
+fn a_reinvite_stating_a_via_leaves_with_the_stacks_own() {
+    let result = execute_on(
+        &bridged(),
+        &[RuleAction::SendRequestToLeg {
+            leg_id: "b-1".into(),
+            method: "INVITE".into(),
+            body: None,
+            headers: vec![
+                ("v".into(), "SIP/2.0/UDP 192.0.2.66:5060;branch=z9hG4bKstated".into()),
+                ("X-Kept".into(), "fine".into()),
+            ],
+        }],
+    );
+    let reinvite = sent_request(&result, "b-1");
+    assert_eq!(reinvite.method(), "INVITE");
+    let via = values(&reinvite, "Via");
+    assert_eq!(via.len(), 1, "{via:?}");
+    assert!(!via[0].contains("192.0.2.66"), "{via:?}");
+    assert_eq!(values(&reinvite, "X-Kept"), ["fine"]);
+    assert_eq!(skips(&result), 1);
+}
+
 #[test]
 fn a_service_reported_skip_is_counted() {
     let result = execute_on(
