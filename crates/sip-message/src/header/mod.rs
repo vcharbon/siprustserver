@@ -86,7 +86,7 @@ pub(crate) use params::read_params;
 pub use params::{ParamReading, ParamValue, Params};
 pub(crate) use reading::Reading;
 pub use reason::{cause_key, q850_cause_alone, readable_reasons, reason_for, Q850};
-pub use restatement::Restatement;
+pub use restatement::{Minted, Restatement};
 pub use retry_after::retry_after_seconds;
 pub(crate) use scan::quoted_close;
 pub use sent_by::{SentBy, SentByRef};

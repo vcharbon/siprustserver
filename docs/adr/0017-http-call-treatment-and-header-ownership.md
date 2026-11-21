@@ -56,10 +56,11 @@ or the core engine. For a normal service:
 | Contact | core engine, **except** decision layer on a **302** | redirect targets |
 | Via, CSeq, Call-ID, branch, Max-Forwards | core engine | always |
 | PAI, PANI, any `X-*` | decision layer (additive) | flat `update_headers` |
+| Bound (`Require`, credentials, `Replaces`, `Session-Expires`, entity headers) | core engine; decision layer on the final its status defines (401, 407, 420-422) | refused (`HeaderName::stated_at_mint`) |
 
 Structural rewrites (From/To URI) go through typed identity fields (`new_from`, `new_to`), never
-the flat map. The map only appends and removes non-structural headers. Tags are never
-HTTP-settable.
+the flat map. The map only appends and removes headers neither structural nor bound. Tags are
+never HTTP-settable.
 
 A non-structural header neither party states has a third source, at the bottom of the precedence
 ladder. A final that answers a `/call/failure` consult also carries that consult's failing b-leg

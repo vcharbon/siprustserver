@@ -82,7 +82,7 @@ pub(crate) use repeat::{
     re_ack, re_ack_ahead_owed, re_ack_owed, read_untaken_2xx, retransmitted_2xx, CountedCopy,
 };
 pub(crate) use session_timer::{settle_session_timer, TIMER};
-pub(crate) use stated_text::{set_lines, writable_lines, writable_status, Statements};
+pub(crate) use stated_text::{admitted, set_lines, writable_lines, writable_status, Statements};
 pub(crate) use unbuilt::unbuilt;
 
 // One session per dialog, whoever authored the description (RFC 3264 §8).

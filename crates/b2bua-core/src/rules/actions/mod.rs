@@ -43,6 +43,7 @@
 //! - `straggler` — the ACK and BYE a fork straggler's 2xx draws
 
 mod ack_leg;
+mod authored_final;
 mod bye;
 mod confirm;
 mod create_leg;

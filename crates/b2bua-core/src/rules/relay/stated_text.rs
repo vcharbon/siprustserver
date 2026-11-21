@@ -1,13 +1,14 @@
 //! Stated text a message the stack builds cannot carry whole (ADR-0053): a
 //! header line with a name off `token` or a CR, LF or NUL in its value, a
 //! single-valued header stated on more than one line (§7), a reason phrase
-//! with a CR, LF or NUL. Such text is left out — the line
-//! dropped, the phrase giving way to the status's default — and each skip is
-//! reported ([`BufferedObservabilityEffect::StatedTextSkipped`]), so the
-//! message still leaves.
+//! with a CR, LF or NUL; and a statement of a header the message the stack
+//! mints does not take from its author ([`admitted`]). Such text is left out —
+//! the line dropped, the phrase giving way to the status's default — and each
+//! skip is reported ([`BufferedObservabilityEffect::StatedTextSkipped`]), so
+//! the message still leaves.
 
 use b2bua_sdk::reason_phrase::default_reason;
-use sip_message::header::{HeaderClass, HeaderName};
+use sip_message::header::{HeaderClass, HeaderName, Minted};
 use sip_message::write_check::{self, WriteRefusal};
 use sip_message::{FirstIngressBound, SipHeader as MsgHeader, SipStr};
 
@@ -54,6 +55,28 @@ pub(crate) fn writable_lines(
     kept
 }
 
+/// `updates` less every statement, set or removal, of a header `minted` does
+/// not take from the decision or service stating it
+/// ([`HeaderName::stated_at_mint`]): the stack's own, or one the transaction,
+/// a negotiation, an authentication exchange, a dialog reference or the body
+/// binds (RFC 3261 §16.6). Each such name's refusal is pushed onto `skipped`
+/// once.
+pub(crate) fn admitted(
+    updates: &[(String, Option<String>)],
+    minted: Minted,
+    skipped: &mut Vec<WriteRefusal>,
+) -> Vec<(String, Option<String>)> {
+    let mut kept = Vec::new();
+    for (name, value) in updates {
+        match HeaderName::stated_at_mint(name, minted) {
+            Ok(()) => kept.push((name.clone(), value.clone())),
+            Err(refusal) if !skipped.contains(&refusal) => skipped.push(refusal),
+            Err(_) => {}
+        }
+    }
+    kept
+}
+
 /// The non-structural `header_updates` *sets*. Removals and structural keys
 /// drop: the response generator owns the stack-owned set (ADR-0017 X2).
 pub(crate) fn set_lines(header_updates: &[(String, Option<String>)]) -> Vec<MsgHeader> {
@@ -68,35 +91,36 @@ pub(crate) fn set_lines(header_updates: &[(String, Option<String>)]) -> Vec<MsgH
 }
 
 /// What a service's `header_updates` state on a response this stack authors:
-/// the lines it sets ([`set_lines`]) less every line of a single-valued header
-/// set more than once, which is as though never stated (ADR-0053 §7).
-pub(crate) struct Statements<'a> {
-    updates: &'a [(String, Option<String>)],
+/// the statements the response takes ([`admitted`]), the lines they set
+/// ([`set_lines`]) less every line of a single-valued header set more than
+/// once, which is as though never stated (ADR-0053 §7).
+pub(crate) struct Statements {
+    updates: Vec<(String, Option<String>)>,
     pub(crate) lines: Vec<MsgHeader>,
 }
 
-impl<'a> Statements<'a> {
-    /// The statements of `updates`, a skip reported on `fx` under `what`.
+impl Statements {
+    /// The statements of `updates` on the final of `status`, a skip reported
+    /// on `fx` under `what`.
     pub(crate) fn of(
         what: &str,
-        updates: &'a [(String, Option<String>)],
+        updates: &[(String, Option<String>)],
+        status: u16,
         fx: &mut HandlerEffects,
     ) -> Self {
         let mut skipped = Vec::new();
-        let lines = write_check::one_line_each(set_lines(updates), &mut skipped);
+        let updates = admitted(updates, Minted::Final(status), &mut skipped);
+        let lines = write_check::one_line_each(set_lines(&updates), &mut skipped);
         fx.buffered.extend(BufferedObservabilityEffect::skipped(what, skipped));
         Self { updates, lines }
     }
 
-    /// Whether the header `name` names is the service's: a line kept, a
-    /// removal, or a name the generator owns.
+    /// Whether the header `name` names is the service's: a line kept, or a
+    /// removal the response takes.
     pub(crate) fn states(&self, name: &str) -> bool {
         let named = HeaderName::from(name);
-        let unwritten = |n: &str, v: &Option<String>| {
-            v.is_none() || HeaderName::class_of(n) != HeaderClass::EndToEnd
-        };
         self.lines.iter().any(|h| named.matches(&h.name))
-            || self.updates.iter().any(|(n, v)| unwritten(n, v) && named.matches(n))
+            || self.updates.iter().any(|(n, v)| v.is_none() && named.matches(n))
     }
 }
 

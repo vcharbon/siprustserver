@@ -264,7 +264,7 @@ impl ActionExecutor<'_> {
                 self.relay_failure_to_a_leg(call, fx, ctx, *status, reason);
             }
             RuleAction::RespondToALeg { status, reason, header_updates, contacts } => {
-                let authored = super::respond::AuthoredFinal {
+                let authored = super::authored_final::AuthoredFinal {
                     status: *status,
                     reason,
                     header_updates,

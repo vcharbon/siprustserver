@@ -14,7 +14,8 @@ use call::{
 use sip_ids::TurnIds;
 use sip_message::emergency::is_emergency_request;
 use sip_message::generators::CapabilitySet;
-use sip_message::header::{HeaderClass, HeaderName};
+use sip_message::header::{HeaderName, Minted};
+use sip_message::write_check::WriteRefusal;
 use sip_message::{SipHeader, SipMessage, SipRequest, SipStr};
 
 use crate::config::B2buaConfig;
@@ -253,8 +254,9 @@ pub fn setup_event(call: &Call, a_invite: &SipRequest) -> CallEvent {
 /// or one this stack authors on its own account (an unavailable backend, a
 /// refused target). `update_headers` adds non-structural headers (e.g.
 /// `Reason:`, RFC 3326); `contacts` renders one `Contact: <uri>;q=…;params…`
-/// header per entry (used for a 3xx redirect — ADR-0017). Structural headers are
-/// skipped (the generator owns them, header-ownership matrix X2). Marks no
+/// header per entry (used for a 3xx redirect — ADR-0017). A set of a header the
+/// final does not take from the decision, a structural one or one the stack
+/// binds, is left out and reported ([`end_to_end_headers`]). Marks no
 /// decision: the caller marks the one it applies, and a final of the stack's
 /// own is none. `cause` is the termination record's: the decision layer's
 /// refusal, or the stack's own admission. A failure final carries the
@@ -274,7 +276,8 @@ pub fn reject_call(
     now_ms: i64,
     cause: TerminationCause,
 ) -> HandlerResult {
-    let mut extra_headers = end_to_end_headers(update_headers);
+    let mut skipped = Vec::new();
+    let mut extra_headers = end_to_end_headers(update_headers, status, &mut skipped);
     // A redirect whose target does not read cannot be authored: the caller dials
     // what a 3xx Contact names, so an invented one sends it at an address the
     // decision never stated. Answer the plain server error instead, with no
@@ -282,7 +285,7 @@ pub fn reject_call(
     match contact_headers(contacts) {
         Ok(headers) => {
             extra_headers.extend(headers);
-            let stated = Stated { update_headers, extra_headers, advertisement };
+            let stated = Stated { update_headers, extra_headers, advertisement, skipped };
             reject_with(call, a_invite, status, reason, stated, now_ms, cause)
         }
         Err(err) => {
@@ -291,7 +294,7 @@ pub fn reject_call(
                 detail = %err.detail(),
                 "redirect refused"
             );
-            let stated = Stated { update_headers, extra_headers, advertisement };
+            let stated = Stated { update_headers, extra_headers, advertisement, skipped };
             let reason = Some(err.to_string());
             reject_with(call, a_invite, 500, reason, stated, now_ms, TerminationCause::Admission)
         }
@@ -299,11 +302,13 @@ pub fn reject_call(
 }
 
 /// The headers a rejecting final carries: what the decision stated, the
-/// headers built from it, and the deployment's advertisement.
+/// headers built from it, the deployment's advertisement, and the statements
+/// already left out.
 struct Stated<'a> {
     update_headers: Option<&'a SipHeaderUpdates>,
     extra_headers: Vec<SipHeader>,
     advertisement: &'a CapabilitySet,
+    skipped: Vec<WriteRefusal>,
 }
 
 /// The final `status` to the caller under `stated`, and the call ended
@@ -317,8 +322,7 @@ fn reject_with(
     now_ms: i64,
     cause: TerminationCause,
 ) -> HandlerResult {
-    let Stated { update_headers, mut extra_headers, advertisement } = stated;
-    let mut skipped = Vec::new();
+    let Stated { update_headers, mut extra_headers, advertisement, mut skipped } = stated;
     let reason = reason.unwrap_or_else(|| default_reason(status).to_string());
     // A failure final refused in this element's own name carries the
     // deployment's advertisement, each half under the decision's statements.
@@ -393,26 +397,28 @@ pub fn build_request(invite: &SipRequest) -> NewCallRequest {
     }
 }
 
-/// The extra response headers a reject/redirect takes from `update_headers`:
-/// the non-structural *sets* (e.g. `Reason:`), one line per stated line — its
-/// adds yield to the final as built ([`reject_call`]). Removals and stack-owned
-/// keys are dropped — the response generator owns the structural set
-/// (ADR-0017 X2), including the Contact a redirect authors from its typed
-/// target list.
-fn end_to_end_headers(update_headers: Option<&SipHeaderUpdates>) -> Vec<SipHeader> {
+/// The extra response headers a reject/redirect of `status` takes from
+/// `update_headers`: the *sets* (e.g. `Reason:`) of a header the final takes
+/// from the decision ([`HeaderName::stated_at_mint`]), one line per stated
+/// line — its adds yield to the final as built ([`reject_call`]), and a
+/// removal finds nothing to remove. A set of the stack's own header, the
+/// Contact a redirect authors from its typed target list included (ADR-0017
+/// X2), or of one the transaction, a negotiation or the body binds, is
+/// refused onto `skipped`.
+fn end_to_end_headers(
+    update_headers: Option<&SipHeaderUpdates>,
+    status: u16,
+    skipped: &mut Vec<WriteRefusal>,
+) -> Vec<SipHeader> {
     let mut out: Vec<SipHeader> = Vec::new();
-    if let Some(map) = update_headers {
-        for (name, val) in map {
-            let named = HeaderName::from(name.as_str());
-            if named.class() != HeaderClass::EndToEnd {
-                continue;
-            }
-            if val.adds() {
-                continue;
-            }
-            for v in val.lines() {
-                out.push(SipHeader { name: SipStr::owned(name), value: SipStr::owned(v) });
-            }
+    let sets = update_headers.into_iter().flatten().filter(|(_, val)| !val.adds());
+    for (name, val) in sets.filter(|(_, val)| !val.lines().is_empty()) {
+        if let Err(refusal) = HeaderName::stated_at_mint(name, Minted::Final(status)) {
+            skipped.push(refusal);
+            continue;
+        }
+        for v in val.lines() {
+            out.push(SipHeader { name: SipStr::owned(name), value: SipStr::owned(v) });
         }
     }
     out
