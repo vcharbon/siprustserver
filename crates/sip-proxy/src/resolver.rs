@@ -55,9 +55,9 @@ use lookup::{resolution_candidates, resolve_first};
 pub use lookup::{HostResolver, SystemResolver};
 pub(crate) use outcomes::{outcome, refresh_outcome};
 
-/// Told the address a packet to a name goes to, just before the packet is
-/// handed to the socket, whether or not the socket takes it; never told for a
-/// packet whose name does not resolve.
+/// Told the address a packet to a name goes to if and only if the packet is
+/// handed to the socket, just before it is, whether or not the socket takes
+/// it.
 pub type OnSent = Arc<dyn Fn(SocketAddr) + Send + Sync>;
 
 /// A packet waiting on its name's resolve.
