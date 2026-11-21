@@ -96,7 +96,6 @@ async fn the_ack_of_a_513_to_a_reinvite_goes_no_further() {
     assert!(sent.is_empty(), "the ACK of the 513 goes no further: {sent:?}");
 }
 
-/// A worker's INVITE arriving on the internal face is answered there.
 #[tokio::test]
 async fn a_workers_invite_that_cannot_leave_is_answered_513_on_the_internal_face() {
     let fx = dual_face_core();
@@ -148,7 +147,6 @@ async fn an_invite_to_a_name_is_answered_513_once_the_name_is_resolved() {
     assert!(bytes.starts_with(b"SIP/2.0 513 "), "{}", String::from_utf8_lossy(bytes));
 }
 
-/// An ACK of that size is dropped, answered by nothing.
 #[tokio::test]
 async fn an_ack_that_cannot_leave_draws_nothing() {
     let fx = dual_face_core();

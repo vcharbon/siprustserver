@@ -33,7 +33,6 @@ impl Stripe {
         }
     }
 
-    /// Forget the expired entries of both pools.
     pub(super) fn expire(&mut self, now_ms: u64, change: &mut Change) {
         self.invite.expire(now_ms, change);
         self.retransmission.expire(now_ms, change);
@@ -76,7 +75,6 @@ impl Stripe {
         Some(entry)
     }
 
-    /// The live entry under `key`, from whichever pool holds it.
     pub(super) fn get(
         &mut self,
         key: &str,

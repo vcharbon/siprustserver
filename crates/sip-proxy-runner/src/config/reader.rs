@@ -50,7 +50,6 @@ impl<'a> EnvReader<'a> {
         Self { get, errors: Vec::new() }
     }
 
-    /// The problems met so far.
     pub(super) fn into_errors(self) -> Vec<String> {
         self.errors
     }
@@ -87,13 +86,11 @@ impl<'a> EnvReader<'a> {
         }
     }
 
-    /// [`int`](Self::int) as a `u16`, within `min..=max`.
     pub(super) fn int_u16(&mut self, key: &str, default: u16, min: u16, max: u16) -> u16 {
         let n = self.int(key, u64::from(default), u64::from(min), u64::from(max));
         u16::try_from(n).unwrap_or(default)
     }
 
-    /// [`int`](Self::int) as a `u32`, within `min..=max`.
     pub(super) fn int_u32(&mut self, key: &str, default: u32, min: u32, max: u32) -> u32 {
         let n = self.int(key, u64::from(default), u64::from(min), u64::from(max));
         u32::try_from(n).unwrap_or(default)

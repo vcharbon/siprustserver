@@ -104,6 +104,8 @@ struct Fixture {
     metrics: Arc<ProxyMetrics>,
 }
 
+/// A proxy selecting `targets` in order behind the admit-once gate, over a
+/// registry listing only `W1`, so `W1`'s own CANCEL is worker-outbound by its Via.
 async fn fixture(targets: &[ProxyAddr]) -> Fixture {
     let net = SimulatedSignalingNetwork::new(1);
     let ep = net
@@ -113,7 +115,6 @@ async fn fixture(targets: &[ProxyAddr]) -> Fixture {
     let strategy = QueueStrategy::of(targets);
     let gate = Arc::new(AdmitOnceGate::default());
     let metrics = Arc::new(ProxyMetrics::new());
-    // W1 is a registry worker: its own b-leg CANCEL is worker-outbound by its Via.
     let reg: Arc<dyn WorkerRegistry> =
         Arc::new(StaticWorkerRegistry::from_entries(vec![WorkerEntry::alive(
             "w1",
@@ -216,10 +217,10 @@ fn src() -> std::net::SocketAddr {
     format!("{UAC}:5060").parse().unwrap()
 }
 
-// Guards: an INVITE retransmission that re-runs the strategy while reusing
-// the memoized branch would, under a changed candidate set, send the same
-// branch to a DIFFERENT worker — one transaction split into two B2BUA
-// calls. The retransmit must repeat the original forward.
+/// An INVITE retransmission repeats the original forward: re-running the
+/// strategy under a changed candidate set while reusing the memoized branch
+/// would send one branch to a different worker, one transaction split into two
+/// B2BUA calls.
 #[tokio::test(start_paused = true)]
 async fn retransmitted_invite_repeats_the_original_selection() {
     let f = fixture(&[ProxyAddr::new(W1, 5060), ProxyAddr::new(W2, 5060)]).await;
@@ -241,8 +242,9 @@ async fn retransmitted_invite_repeats_the_original_selection() {
     );
 }
 
-// A retransmit of an admitted INVITE must bypass the gate (no 503 to a
-// setup already ringing downstream) and not inflate sip_proxy_calls_total.
+/// A retransmission of an admitted INVITE bypasses the gate, so a setup already
+/// ringing downstream draws no 503, and is not counted again in
+/// `sip_proxy_calls_total`.
 #[tokio::test(start_paused = true)]
 async fn retransmitted_invite_is_not_regated_or_recounted() {
     let f = fixture(&[ProxyAddr::new(W1, 5060)]).await;
@@ -258,10 +260,10 @@ async fn retransmitted_invite_is_not_regated_or_recounted() {
     assert_eq!(f.metrics.calls_total(), 1, "one call, not one per transmission");
 }
 
-// Guards the entry TTL: it must cover the legal ringing window (B2BUA
-// SetupTimeout / the default sip-txn initial-INVITE bound, 158 s) — a TTL
-// below it forwards a CANCEL after half a minute of ringing via fresh
-// selection with a fresh branch → downstream 481 and the callee keeps ringing.
+/// The INVITE's entry outlives the legal ringing window (the transaction
+/// layer's initial-INVITE bound plus Timer H): a CANCEL after a minute of
+/// ringing follows its INVITE. Forwarded by a fresh selection with a fresh
+/// branch, it would draw a 481 downstream while the callee keeps ringing.
 #[tokio::test(start_paused = true)]
 async fn cancel_after_a_minute_of_ringing_still_follows_the_invite() {
     let f = fixture(&[ProxyAddr::new(W1, 5060), ProxyAddr::new(W2, 5060)]).await;
@@ -281,10 +283,10 @@ async fn cancel_after_a_minute_of_ringing_still_follows_the_invite() {
     assert_eq!(f.strategy.calls.load(Ordering::SeqCst), 1, "no fallback selection for the CANCEL");
 }
 
-// A worker's b-leg CANCEL whose INVITE this proxy never saw (the INVITE copy
-// was lost before it arrived) still goes where the INVITE went — the R-URI.
-// Re-selecting would forward a worker's own CANCEL to a worker: the
-// downstream endpoint, the only party that can answer it, never sees it.
+/// A worker's b-leg CANCEL whose INVITE this proxy never saw (that copy was
+/// lost before it arrived) goes where the INVITE went, the R-URI. Re-selecting
+/// would forward the worker's own CANCEL to a worker, and the downstream
+/// endpoint, the only party that can answer it, would never see it.
 #[tokio::test(start_paused = true)]
 async fn a_worker_cancel_without_its_invite_goes_to_the_request_uri() {
     let f = fixture(&[ProxyAddr::new(W1, 5060), ProxyAddr::new(W2, 5060)]).await;
@@ -299,13 +301,10 @@ async fn a_worker_cancel_without_its_invite_goes_to_the_request_uri() {
     assert_eq!(f.strategy.calls.load(Ordering::SeqCst), 0, "a worker's CANCEL never selects");
 }
 
-// Every CANCEL counts how its lookup of the INVITE's remembered hop ended:
-// one series per outcome, each moved only by its own outcome.
 #[tokio::test(start_paused = true)]
 async fn each_cancel_lookup_counts_its_outcome() {
     let f = fixture(&[ProxyAddr::new(W1, 5060)]).await;
     f.core.route_request_from(&invite("lookup-1@test", "tag-a", 1, "z9hG4bKl1"), src()).await;
-    // The CANCEL and its retransmission each look the INVITE up.
     let cxl = cancel("lookup-1@test", "tag-a", 1, "z9hG4bKl1");
     for _ in 0..2 {
         let out = f.core.route_request_from(&cxl, src()).await;
@@ -319,9 +318,9 @@ async fn each_cancel_lookup_counts_its_outcome() {
     assert!(txt.contains("\nsip_proxy_cancel_lookups_total{outcome=\"miss\"} 1\n"), "{txt}");
 }
 
-// Same window for the response side: a late non-2xx final must still find
-// the INVITE entry, so the upstream's ACK for it is still relayed to the
-// final's sender on the INVITE's branch (never a fresh selection).
+/// A non-2xx final arriving after a minute of ringing still finds the INVITE's
+/// entry, so the upstream's ACK for it is relayed to the final's sender on the
+/// INVITE's branch, never by a fresh selection.
 #[tokio::test(start_paused = true)]
 async fn late_non_2xx_final_ack_still_follows_the_invite() {
     let f = fixture(&[ProxyAddr::new(W1, 5060)]).await;
@@ -356,10 +355,10 @@ Content-Length: 0\r\n\r\n"
     assert_eq!(f.strategy.calls.load(Ordering::SeqCst), 1, "no fresh selection for the ACK");
 }
 
-// The two directions of one Call-ID (independent CSeq spaces, both
-// remembered here) keep one entry each when their CSeq numbers coincide —
-// here on one branch token from one sent-by, so the From tag alone separates
-// them: each CANCEL is forwarded to the party its own INVITE went to.
+/// The two directions of one Call-ID (independent CSeq spaces, both
+/// remembered here) keep one entry each when their CSeq numbers coincide, here
+/// on one branch token from one sent-by, so the From tag alone separates them:
+/// each CANCEL is forwarded to the party its own INVITE went to.
 #[tokio::test(start_paused = true)]
 async fn same_callid_same_cseq_different_from_tags_do_not_collide() {
     let f = fixture(&[ProxyAddr::new(W1, 5060), ProxyAddr::new(W2, 5060)]).await;
@@ -387,9 +386,9 @@ async fn same_callid_same_cseq_different_from_tags_do_not_collide() {
     );
 }
 
-// §17.2.3 matches a transaction on branch AND sent-by: one branch token from
-// two senders is two transactions, each with its own forward and its own
-// CANCEL route, even under one Call-ID, From tag and CSeq.
+/// §17.2.3 matches a transaction on branch and sent-by: one branch token from
+/// two senders is two transactions, each with its own forward and its own
+/// CANCEL route, even under one Call-ID, From tag and CSeq.
 #[tokio::test(start_paused = true)]
 async fn one_branch_token_from_two_sent_bys_is_two_transactions() {
     let f = fixture(&[ProxyAddr::new(W1, 5060), ProxyAddr::new(W2, 5060)]).await;
@@ -420,10 +419,10 @@ async fn one_branch_token_from_two_sent_bys_is_two_transactions() {
     assert_eq!(out.target, Some(ProxyAddr::new(W2, 5060)), "b's CANCEL follows b's INVITE");
 }
 
-// §16.10: a CANCEL that matches no remembered INVITE transaction (here one
-// that breaks §9.1 with a branch of its own) is forwarded statelessly, an
-// external one through new-dialog selection. The worker it reaches matches
-// it by its transaction (§9.2) and answers 481 when it holds no such INVITE.
+/// §16.10: a CANCEL that matches no remembered INVITE transaction (here one
+/// that breaks §9.1 with a branch of its own) is forwarded statelessly, an
+/// external one through new-dialog selection. The worker it reaches matches it
+/// by its transaction (§9.2) and answers 481 when it holds no such INVITE.
 #[tokio::test(start_paused = true)]
 async fn an_external_cancel_matching_no_invite_takes_new_dialog_selection() {
     let f = fixture(&[ProxyAddr::new(W1, 5060), ProxyAddr::new(W2, 5060)]).await;

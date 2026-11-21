@@ -5,7 +5,6 @@
 //! Select one (the workspace build `just test` made, no rebuild):
 //! `cargo nextest run --workspace -E 'package(=sip-proxy) & binary(it)' <module>::`.
 
-// Shared fixtures, reached from a test module as `crate::common::…`.
 mod common;
 
 mod active_active;

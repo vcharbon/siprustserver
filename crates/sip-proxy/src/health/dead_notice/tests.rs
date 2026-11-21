@@ -56,7 +56,6 @@ async fn three_alive_workers() -> Fixture {
     Fixture { registry, workers, task }
 }
 
-/// The OPTIONS `worker` received within a second, if any.
 async fn received(worker: &dyn UdpEndpoint) -> Option<SipRequest> {
     let packet = tokio::time::timeout(Duration::from_secs(1), worker.recv()).await.ok()??;
     match CustomParser::new().parse(&packet.raw).ok()? {
@@ -143,7 +142,6 @@ async fn a_worker_already_dead_is_no_new_verdict() {
     f.registry.set_health("w1", WorkerHealth::Dead);
     assert!(received(f.workers[1].as_ref()).await.is_some(), "the first verdict is told");
     f.registry.set_health("w1", WorkerHealth::Dead);
-    // The first notice's Timer E repeats carry its own instant.
     let repeat = received(f.workers[1].as_ref()).await.expect("Timer E repeats the notice");
     assert_eq!(
         dead_notice(&repeat).expect("a notice").notice.at_ms,

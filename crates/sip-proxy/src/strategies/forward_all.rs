@@ -18,7 +18,6 @@ use crate::strategy::{
 
 const TARGET_PARAM: &str = "target";
 
-/// Forwards everything to one static target.
 pub struct ForwardAllStrategy {
     target: ProxyAddr,
 }

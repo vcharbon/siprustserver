@@ -25,7 +25,6 @@ pub(super) struct Checked<'p> {
     pub(super) is_emergency: bool,
 }
 
-/// Why a cookie did not verify.
 pub(super) enum Fault {
     /// A field is absent, empty where it must not be, or `e` is not 0/1.
     Missing,
@@ -59,15 +58,12 @@ impl Fault {
 }
 
 impl LoadBalancerStrategy {
-    /// Read and verify the cookie in `params` for `msg`'s call.
     pub(super) fn check<'p>(
         &self,
         params: &'p RouteParams,
         msg: &SipMessage,
     ) -> Result<Checked<'p>, Fault> {
         let [w_pri, w_bak, e, v, kid, sig] = FIELDS.map(|f| params.get(f).map(String::as_str));
-        // `w_bak` may legitimately be present-but-empty; `w_pri`/`kid`/`sig` must
-        // be non-empty; `e` must be "0" or "1".
         let (Some(w_pri), Some(w_bak), Some(e), Some(v), Some(kid), Some(sig)) =
             (w_pri, w_bak, e, v, kid, sig)
         else {

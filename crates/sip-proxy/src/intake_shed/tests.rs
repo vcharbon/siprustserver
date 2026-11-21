@@ -1,5 +1,5 @@
-//! Pins [`intake_shed_hook`]: the hook is pure over `(arrival, depth)`
-//! — no socket needed — so each case invokes it directly.
+//! [`intake_shed_hook`] and [`intake_shed_watermark`], each case invoking the
+//! hook directly over a datagram and a queue depth, with no socket.
 
 use super::*;
 use sip_message::Bytes;
@@ -14,18 +14,15 @@ fn src() -> SocketAddr {
     "192.0.2.9:5060".parse().unwrap()
 }
 
-/// The hook at [`WATERMARK`], and the metrics it counts its drops in.
 fn shed_hook() -> (PreIngressHook, Arc<ProxyMetrics>) {
     let metrics = Arc::new(ProxyMetrics::new());
     (intake_shed_hook(WATERMARK, metrics.clone(), CustomParser::new()), metrics)
 }
 
-/// The hook's verdict on `raw` arriving at queue depth `depth`.
 fn judge(hook: &PreIngressHook, raw: &[u8], depth: usize) -> PreIngressAction {
     hook(&mut Arrival::new(Bytes::copy_from_slice(raw)), src(), QueueLoad::at_depth(depth))
 }
 
-/// A new INVITE whose To header line is `to`.
 fn invite_with_to(to: &str) -> Vec<u8> {
     format!(
         "INVITE sip:bob@192.0.2.20:5070 SIP/2.0\r\nContact: <sip:fixture@192.0.2.99>\r\n\

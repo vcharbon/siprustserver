@@ -38,7 +38,6 @@ const COOKIE_KEY: [u8; 32] = [7u8; 32];
 /// How long a party waits for a datagram before the cell fails.
 const RECV_BOUND: Duration = Duration::from_secs(5);
 
-/// One of the two instances.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Side {
     A,
@@ -70,7 +69,6 @@ impl Party {
         at.parse().expect("a socket address")
     }
 
-    /// The worker ordinal, for a worker.
     pub fn ordinal(self) -> &'static str {
         match self {
             Party::W1 => "w1",
@@ -79,7 +77,6 @@ impl Party {
         }
     }
 
-    /// The other worker, for a worker.
     pub fn other_worker(self) -> Party {
         match self {
             Party::W1 => Party::W2,
@@ -124,7 +121,6 @@ pub fn winner_of(call_id: &str) -> Party {
     }
 }
 
-/// How an instance is built.
 #[derive(Clone, Copy, Default)]
 pub struct InstanceOpts {
     pub memo: MemoBounds,
@@ -159,7 +155,6 @@ impl Instance {
         self.registry.set_acceptance(worker.ordinal(), acceptance);
     }
 
-    /// This instance reads `worker` with `health`.
     pub fn read(&self, worker: Party, health: WorkerHealth) {
         self.registry.set_health(worker.ordinal(), health);
     }
@@ -238,7 +233,6 @@ impl Pair {
         (msg, pkt.src)
     }
 
-    /// The next request `at` receives, of `method`.
     pub async fn request(&self, at: Party, method: &str) -> (SipRequest, SocketAddr) {
         match self.recv(at).await {
             (SipMessage::Request(r), src) if r.method().as_str() == method => (r, src),
@@ -246,7 +240,6 @@ impl Pair {
         }
     }
 
-    /// The next response `at` receives, of `status`.
     pub async fn response(&self, at: Party, status: u16) -> SipResponse {
         match self.recv(at).await {
             (SipMessage::Response(r), _) if r.status() == status => r,

@@ -122,8 +122,6 @@ impl ProxyCore {
                 worker_outbound = true;
             }
         }
-        // §7.3.1: a UA may fold its whole route set into one comma-combined
-        // header, so the pop drops ENTRIES, never the line.
         draft = draft.pop_top_values::<RouteEntry>(self_routes).ok()?;
         let request_uri_past_own_maddr = self.past_own_maddr(req.request_uri());
         if let Some(uri) = &request_uri_past_own_maddr {
@@ -154,21 +152,12 @@ impl ProxyCore {
             return Some((draft, classified));
         }
 
-        // A worker-originated in-dialog request (a keepalive OPTIONS toward
-        // the caller) carries the proxy's cookie entry with no `;outbound`:
-        // its source or its Via names the worker, and that makes it
-        // worker-outbound instead of bouncing it back to a worker by the
-        // cookie. The Via lookup runs only when something consumes it.
         let via_worker = if !worker_outbound || is_dialog_creating(req.method().as_str()) {
             self.worker_via_sent_by(req)
         } else {
             None
         };
-        // A run of two or more whole pairs whose last pair carries a cookie that
-        // verifies for this call is a request re-entering through a later pass:
-        // its worker Via is the earlier pass's origin and does not make it
-        // worker-outbound. Entries naming this proxy prove no pass: a peer's
-        // Record-Route may state them.
+        // ADR-0048 §10
         let spiral_reentry = self_routes > 2
             && self_routes % 2 == 0
             && cookie.as_ref().is_some_and(|c| self.strategy.verified_cookie(c, msg).is_some());

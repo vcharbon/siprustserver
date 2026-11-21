@@ -1,15 +1,9 @@
-//! [`ProxyAddr`] — the proxy's `(host, port)` policy address.
-//!
-//! A `{ host, port }` pair, NOT `std::net::SocketAddr`. It is
-//! kept as a *string host + u16 port* on purpose: the stickiness cookie's
-//! `ForwardAll` form is literally `target=host:port`, and a worker registry
-//! entry is addressed by host string. The proxy resolves a `ProxyAddr` to a
-//! real [`std::net::SocketAddr`] only at the `send_to` boundary
-//! ([`ProxyAddr::to_socket_addr`]).
+//! [`ProxyAddr`], the proxy's `(host, port)` target. The host stays a string,
+//! an IP literal or a name, until the send: [`ProxyAddr::to_socket_addr`]
+//! reads a literal, and the named forwarder resolves a name.
 
 use std::net::SocketAddr;
 
-/// A downstream UDP target — the `host:port` pair the core forwards to.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ProxyAddr {
     pub host: String,
@@ -21,10 +15,6 @@ impl ProxyAddr {
         Self { host: host.into(), port }
     }
 
-    /// Parse a `host:port` string (the cookie / registry wire form). Returns
-    /// `None` on a missing/empty host or an unparseable port. IPv6 literals are
-    /// not split here (a registry names host names / IPv4); a bracketed
-    /// `[::1]:5060` form is left for the registry parser if ever needed.
     pub fn parse(s: &str) -> Option<Self> {
         let (host, port) = s.rsplit_once(':')?;
         if host.is_empty() {

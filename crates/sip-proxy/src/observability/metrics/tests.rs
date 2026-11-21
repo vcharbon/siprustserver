@@ -127,11 +127,10 @@ fn per_method_request_response_and_calls_render() {
     assert!(txt.contains("sip_proxy_calls_total 1"));
 }
 
+/// The keyed rejection counter and the stale-decrease aggregate both render,
+/// so a rate-capped or floored worker shows in Prometheus.
 #[test]
 fn overload_shed_counters_render() {
-    // Both the keyed rejection counter and the coarse stale-decrease aggregate
-    // must surface in the exposition — a silently rate-capped or floored worker
-    // is otherwise invisible in Prometheus.
     let m = ProxyMetrics::new();
     m.record_overload_rejection("bucket_empty");
     m.record_overload_rejection("bucket_empty");
@@ -147,7 +146,6 @@ fn overload_shed_counters_render() {
     assert!(txt
         .contains("sip_proxy_overload_rejections_total{reason=\"no_target_critical_filtered\"} 1"));
     assert!(txt.contains("sip_proxy_worker_stale_decrease_total 3"));
-    // Emergency-bypass visibility series (the LB critical-filter + AIMD skip).
     assert!(txt.contains("sip_proxy_lb_emergency_bypassed_total 2"));
     assert!(txt.contains("# TYPE sip_proxy_lb_emergency_bypassed_total counter"));
 }
@@ -162,11 +160,10 @@ fn rate_cap_spill_counter_renders() {
     assert!(txt.contains("# TYPE sip_proxy_lb_rate_cap_spilled_total counter"));
 }
 
+/// Every reject reason renders as its own labelled series, so a locally
+/// generated 503 is attributable beyond the aggregate `kind="reject"`.
 #[test]
 fn reject_reason_counter_renders() {
-    // Every reason must surface as its own labelled series — the aggregate
-    // kind="reject" bucket alone leaves a locally generated 503
-    // unattributable from metrics.
     let m = ProxyMetrics::new();
     m.record_reject("worker_rate_capped");
     m.record_reject("worker_rate_capped");
@@ -215,11 +212,11 @@ fn worker_health_gauges_render() {
     assert!(!txt.contains("draining"), "{txt}");
 }
 
+/// Invented methods get a series each only up to the cap; the rest land on
+/// the overflow series and are counted, so the wire cannot grow the label set
+/// without bound.
 #[test]
 fn wire_controlled_labels_are_bounded() {
-    // A flood of invented methods must not grow label cardinality without
-    // bound: each gets its own series up to the cap, the rest land on the
-    // overflow series and are counted (remote memory-exhaustion guard).
     use metric_catalogue::{DEFAULT_CAP, OVERFLOW};
     let m = ProxyMetrics::new();
     for i in 0..1_000 {

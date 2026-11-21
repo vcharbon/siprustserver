@@ -14,19 +14,14 @@ use sip_proxy::self_gate::EluCpsGate;
 use sip_proxy::supervise::{self, SELF_GATE_SAMPLER, STALE_FLOOR_SWEEP};
 use tokio::task::JoinHandle;
 
-/// How often the stale-payload sweep runs.
 const STALE_SWEEP_PERIOD: Duration = Duration::from_secs(1);
 
-/// The stale-payload sweep: every `STALE_SWEEP_PERIOD` the observer's
-/// `sweep_stale` decreases, once `payload_stale_ms` has passed, any Alive
-/// worker whose OPTIONS replies stopped carrying a fresh `X-Overload` payload
-/// (or whose probe stalls), instead of keeping its last AIMD cap while the
-/// balancer admits at full rate into a worker it has lost telemetry on.
-/// Every 200 carries a payload, a refusing worker's included, and the probe
-/// cycle (interval 1000 + timeout 1600) is well inside the stale window, so a
-/// worker that answers is never floored (ADR-0050 §6). Each sweep's floored
-/// count feeds the `stale_decrease` counter, so a silently floored cap is
-/// diagnosable in Prometheus.
+/// Spawns the supervised stale-payload sweep: every `STALE_SWEEP_PERIOD`,
+/// `sweep_alive` decreases the AIMD cap of each Alive worker whose last
+/// `X-Overload` payload is older than `payload_stale_ms`, and adds the floored
+/// count to the `stale_decrease` counter. A worker that answers its probes is
+/// never floored: every `200` carries a payload, a refusing worker's included,
+/// and the probe cycle sits inside the stale window. See ADR-0050 §6.
 pub fn spawn_stale_floor_sweep(
     observer: Arc<WorkerLoadObserver>,
     registry: Arc<dyn WorkerRegistry>,
@@ -40,7 +35,7 @@ pub fn spawn_stale_floor_sweep(
             #[expect(clippy::disallowed_methods, reason = "STALE_SWEEP_PERIOD is not zero")]
             let mut t = tokio::time::interval(STALE_SWEEP_PERIOD);
             t.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-            t.tick().await; // skip the immediate first tick — first sweep fires a period in
+            t.tick().await;
             loop {
                 t.tick().await;
                 let floored = sweep_alive(&observer, registry.as_ref(), clock.now_ms());
@@ -52,9 +47,9 @@ pub fn spawn_stale_floor_sweep(
     })
 }
 
-/// The self-gate sampler: each tick of the gate's sampler interval drains the
-/// shared intake-age recorder's window max into the gate's EWMA. Rides
-/// `tokio::time::interval`, so behaviour stays on one clock.
+/// Spawns the supervised self-gate sampler: each tick of the gate's sampler
+/// interval drains the shared intake-age recorder's window max into the
+/// gate's EWMA.
 pub fn spawn_self_gate_sampler(gate: EluCpsGate) -> JoinHandle<()> {
     supervise::spawn(SELF_GATE_SAMPLER, move || {
         let gate = gate.clone();
@@ -63,7 +58,7 @@ pub fn spawn_self_gate_sampler(gate: EluCpsGate) -> JoinHandle<()> {
             #[expect(clippy::disallowed_methods, reason = "the period is held above zero")]
             let mut tick = tokio::time::interval(period);
             tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-            tick.tick().await; // skip the immediate first tick
+            tick.tick().await;
             loop {
                 tick.tick().await;
                 gate.sample();

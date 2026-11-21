@@ -49,6 +49,8 @@ impl WorkerRegistry for PanicsOnce {
     }
 }
 
+/// The first sweep, a period in, panics; the restarted run sweeps a restart
+/// delay and a period later and keeps running.
 #[tokio::test(start_paused = true)]
 async fn a_stale_sweep_that_panics_is_restarted_and_counted() {
     let pool = Arc::new(PanicsOnce::default());
@@ -59,8 +61,6 @@ async fn a_stale_sweep_that_panics_is_restarted_and_counted() {
         Clock::test_at(0),
         Arc::new(ProxyMetrics::new()),
     );
-    // The first sweep, a period in, panics; the restarted run sweeps a delay
-    // and a period later.
     tokio::time::sleep(STALE_SWEEP_PERIOD + RESTART_DELAY + STALE_SWEEP_PERIOD * 2).await;
     assert_eq!(RESTARTS.count(STALE_FLOOR_SWEEP), 1, "the panicked run is counted");
     assert!(pool.listings.load(Ordering::SeqCst) >= 2, "the sweep runs again after the panic");

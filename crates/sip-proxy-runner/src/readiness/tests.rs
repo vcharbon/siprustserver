@@ -25,7 +25,6 @@ async fn get(addr: std::net::SocketAddr, path: &str) -> String {
     String::from_utf8_lossy(&resp).into_owned()
 }
 
-/// One worker `w0` read as `health`.
 fn pool(health: WorkerHealth) -> Arc<dyn WorkerRegistry> {
     Arc::new(StaticWorkerRegistry::from_entries(vec![WorkerEntry {
         health,
@@ -33,9 +32,6 @@ fn pool(health: WorkerHealth) -> Arc<dyn WorkerRegistry> {
     }]))
 }
 
-/// The probe answers' sources for `pool`, `pulse` and `view`, read at 10 s
-/// on the test clock, with no external face check, a worker answer heard
-/// just now and no drain.
 fn sources(
     pool: Arc<dyn WorkerRegistry>,
     pulse: Arc<ShardPulse>,
@@ -56,7 +52,6 @@ fn sources(
     }
 }
 
-/// A probe server over [`probes`] of `sources`.
 async fn serve(sources: ProbeSources) -> ProbeServer {
     let p = probes(sources);
     let routes = ProbeRoutes { metrics: Arc::new(String::new), ready: p.ready, fit: Some(p.fit) };
@@ -80,7 +75,6 @@ async fn server_with_face(
     serve(ProbeSources { external_face: face, ..sources(pool, pulse, view) }).await
 }
 
-/// A probe server with one `Alive` worker and its first view in.
 async fn server(pulse: Arc<ShardPulse>) -> ProbeServer {
     server_over(pool(WorkerHealth::Alive), pulse, FirstView::given()).await
 }
@@ -147,7 +141,6 @@ async fn with_the_view_in_and_no_worker_alive_readyz_fails() {
     assert!(get(s.addr(), "/readyz").await.starts_with("HTTP/1.1 503"));
 }
 
-/// Two workers whose endpoints read not ready, `w0` read as `health`.
 fn pool_none_ready(health: WorkerHealth) -> Arc<dyn WorkerRegistry> {
     let unprobed = |id, host| WorkerEntry {
         health: WorkerHealth::Unknown,

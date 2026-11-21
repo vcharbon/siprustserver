@@ -29,11 +29,9 @@ use crate::resolver::HostResolver;
 use crate::strategies::forward_all::ForwardAllStrategy;
 use crate::{ProxyMetrics, RoutingStrategy};
 
-// Internal plane (the workers).
 pub(super) const INT_VIP: &str = "10.244.255.250";
 pub(super) const INT_PORT: u16 = 5080;
 pub(super) const W1: &str = "10.244.5.8";
-// External plane (callers/callees).
 pub(super) const EXT_VIP: &str = "192.168.60.250";
 pub(super) const EXT_PORT: u16 = 5060;
 pub(super) const CALLER: &str = "192.168.60.10";
@@ -89,7 +87,6 @@ pub(super) struct Fixture {
 }
 
 impl Fixture {
-    /// Drain the captured sends.
     pub(super) fn take_sent(&self) -> Vec<Sent> {
         std::mem::take(&mut *self.sent.lock().unwrap())
     }
@@ -108,8 +105,6 @@ pub(super) fn dual_face_core() -> Fixture {
     dual_face_core_over(reg, None)
 }
 
-/// A dual-face core over `reg` routing by `strategy`, resolving names through
-/// `resolver` when one is given.
 pub(super) fn dual_face_core_routing(
     reg: Arc<dyn WorkerRegistry>,
     strategy: Arc<dyn RoutingStrategy>,
@@ -141,8 +136,6 @@ pub(super) fn dual_face_core_routing(
     Fixture { core, sent, metrics }
 }
 
-/// A dual-face core over `reg`, forwarding every new dialog to `W1`, resolving
-/// names through `resolver` when one is given.
 pub(super) fn dual_face_core_over(
     reg: Arc<dyn WorkerRegistry>,
     resolver: Option<Arc<dyn HostResolver>>,
@@ -174,7 +167,6 @@ pub(super) fn header_lines(bytes: &[u8], name: &str) -> Vec<String> {
         .collect()
 }
 
-/// An initial INVITE from the external caller toward the callee's AOR.
 pub(super) fn caller_invite(call_id: &str) -> SipMessage {
     parse_msg(&format!(
         "INVITE sip:bob@{CALLEE}:5060 SIP/2.0\r\n\
@@ -206,8 +198,11 @@ Content-Length: 0\r\n\r\n"
     ))
 }
 
-// ── (a) the egress face + (3) per-face Via ───────────────────────────────────
-
+/// A caller's INVITE egresses the internal socket toward the worker. Its
+/// pushed Via carries the internal face's advertise (RFC 3261 §18.1.1), and
+/// its double Record-Route (§16.6) is per face: the internal entry, with the
+/// cookie and the `;outbound` marker, on top facing the worker, and the
+/// external entry, with the cookie, below facing the caller.
 #[tokio::test]
 async fn inbound_invite_egresses_internal_with_internal_via_and_per_face_rr() {
     let f = dual_face_core();
@@ -222,7 +217,6 @@ async fn inbound_invite_egresses_internal_with_internal_via_and_per_face_rr() {
     assert_eq!(*face, "int", "a worker-bound forward must egress the INTERNAL socket");
     assert_eq!(*dst, format!("{W1}:5060").parse::<SocketAddr>().unwrap());
 
-    // §18.1.1: the pushed Via carries the EGRESS (internal) face's advertise.
     let vias = header_lines(bytes, "Via");
     assert!(
         vias[0].contains(&format!("{INT_VIP}:{INT_PORT}")),
@@ -230,9 +224,6 @@ async fn inbound_invite_egresses_internal_with_internal_via_and_per_face_rr() {
         vias[0],
     );
 
-    // §16.6 double-RR, per-face: topmost (facing the worker) = INTERNAL face
-    // with the cookie AND the `;outbound` direction marker; below it the
-    // caller-facing entry = EXTERNAL face with the cookie.
     let rrs = header_lines(bytes, "Record-Route");
     assert_eq!(rrs.len(), 2, "double record-route, got {rrs:?}");
     assert!(
@@ -262,12 +253,15 @@ async fn inbound_invite_egresses_internal_with_internal_via_and_per_face_rr() {
     );
     assert!(!rrs[1].contains(";outbound"), "caller-facing RR is NOT the outbound half: {}", rrs[1]);
 
-    // Per-face egress metric.
     use crate::observability::metrics::Direction;
     assert_eq!(f.metrics.face_messages_total(Face::Internal, Direction::Outbound), 1);
     assert_eq!(f.metrics.face_messages_total(Face::External, Direction::Outbound), 0);
 }
 
+/// A worker's outbound INVITE egresses the external socket toward the callee,
+/// its Via at the external advertise, its double Record-Route mirrored: the
+/// external cookie entry on top facing the callee, the internal `;outbound`
+/// entry below, each cookie naming the originating worker.
 #[tokio::test]
 async fn worker_outbound_invite_egresses_external_with_external_via_and_mirrored_rr() {
     let f = dual_face_core();
@@ -290,9 +284,6 @@ async fn worker_outbound_invite_egresses_external_with_external_via_and_mirrored
         vias[0],
     );
 
-    // Mirrored order: topmost (facing the callee) = EXTERNAL cookie entry;
-    // below it the worker-facing INTERNAL `;outbound` entry (cookie encoded
-    // for the ORIGINATING worker's identity).
     let rrs = header_lines(bytes, "Record-Route");
     assert_eq!(rrs.len(), 2, "double record-route, got {rrs:?}");
     assert!(
@@ -319,14 +310,15 @@ async fn worker_outbound_invite_egresses_external_with_external_via_and_mirrored
     );
 }
 
-// ── (a) a response's egress, both directions ────────────────────────────────
-
+/// A response relays on the face of its next Via, both ways: an a-leg
+/// response under the proxy's internal Via goes to the caller on the external
+/// socket; a b-leg response arriving on the external face, under the proxy's
+/// external Via, which the proxy takes as its own (RFC 3261 §16.7.3), goes to
+/// the worker on the internal socket.
 #[tokio::test]
 async fn responses_route_by_next_via_face_in_both_directions() {
     let f = dual_face_core();
 
-    // a-leg response: proxy's INTERNAL Via on top (the INVITE egressed toward
-    // the worker), next Via = the external caller → relays on the EXT socket.
     let raw = format!(
         "SIP/2.0 180 Ringing\r\n\
 Via: SIP/2.0/UDP {INT_VIP}:{INT_PORT};branch=z9hG4bKout1\r\n\
@@ -344,10 +336,6 @@ Content-Length: 0\r\n\r\n"
     assert_eq!(sent[0].0, "ext", "a caller-bound response must egress the EXTERNAL socket");
     assert_eq!(sent[0].1, caller_src());
 
-    // b-leg response: the callee's answer arrives on the EXTERNAL face, the
-    // proxy's EXTERNAL Via on top (the b-leg INVITE egressed toward the
-    // callee), next Via = the worker → relays on the INT socket.
-    // The external-face top Via must be accepted as "us" (§16.7.3).
     let raw = format!(
         "SIP/2.0 200 OK\r\nContact: <sip:fixture@192.0.2.98>\r\n\
 Via: SIP/2.0/UDP {EXT_VIP}:{EXT_PORT};branch=z9hG4bKout2\r\n\
@@ -366,8 +354,10 @@ Content-Length: 0\r\n\r\n"
     assert_eq!(sent[0].1, format!("{W1}:5060").parse::<SocketAddr>().unwrap());
 }
 
-// ── (d) the relayed non-2xx hop ACK stays on the INVITE's face ──────────────
-
+/// A relayed non-2xx final draws no ACK from the proxy (ADR-0022 X4). The
+/// caller's own ACK (RFC 3261 §17.1.1.3) relays on the INVITE's internal hop,
+/// its proxy Via carrying that face's advertise and the INVITE's outbound
+/// branch, so the UAS matches it to the INVITE.
 #[tokio::test]
 async fn relayed_non_2xx_ack_follows_the_invite_face() {
     let f = dual_face_core();
@@ -394,9 +384,6 @@ Content-Length: 0\r\n\r\n"
     f.core.handle_response(resp, format!("{W1}:5060").parse().unwrap(), Face::Internal).await;
 
     let sent = f.take_sent();
-    // No synthesized hop ACK (ADR-0022 X4: the proxy is transaction-less; the
-    // worker's Timer G + the caller's own relayed ACK are the reliability
-    // layer) — the 486 relay is the only send, to the caller's external face.
     assert_eq!(
         sent.len(),
         1,
@@ -406,9 +393,6 @@ Content-Length: 0\r\n\r\n"
     assert_eq!(sent[0].0, "ext");
     assert_eq!(sent[0].1, caller_src());
 
-    // The caller's own §17.1.1.3 ACK (same branch as its INVITE) relays on
-    // the INVITE's (internal) hop, its proxy Via stamped with THAT face's
-    // advertise AND the INVITE's outbound branch so the UAS correlates it.
     let raw_ack = format!(
         "ACK sip:bob@{CALLEE}:5060 SIP/2.0\r\n\
 Via: SIP/2.0/UDP {CALLER}:5060;branch=z9hG4bKcaller1;rport\r\n\
@@ -445,13 +429,13 @@ Content-Length: 0\r\n\r\n"
     );
 }
 
-// ── (c) in-dialog requests pop BOTH self-Route halves, both directions ─────
-
+/// A callee's in-dialog BYE carries its route set in UAS order (RFC 3261
+/// §12.1.1), the external cookie entry on top and the internal `;outbound`
+/// entry below: both are the proxy's own and both pop, and the top entry's
+/// cookie sends the BYE to the worker on the internal socket.
 #[tokio::test]
 async fn callee_in_dialog_bye_pops_both_faces_routes_and_decodes_to_worker() {
     let f = dual_face_core();
-    // The callee's route set (UAS order, §12.1.1): cookie/EXT on top, then
-    // outbound/INT — both are the proxy's own entries and must BOTH pop.
     let raw = format!(
         "BYE sip:b2bua@{W1}:5060 SIP/2.0\r\n\
 Via: SIP/2.0/UDP {CALLEE}:5060;branch=z9hG4bKbye1;rport\r\n\
@@ -486,11 +470,13 @@ Content-Length: 0\r\n\r\n"
     );
 }
 
+/// A worker's in-dialog keepalive carries its route set in UAC order (RFC 3261
+/// §12.1.2), the internal `;outbound` entry on top and the external cookie
+/// entry below: both pop, and the OPTIONS reaches the caller on the external
+/// socket.
 #[tokio::test]
 async fn worker_in_dialog_keepalive_pops_both_faces_routes_and_goes_external() {
     let f = dual_face_core();
-    // The worker's route set (UAC order, §12.1.2 reversed): outbound/INT on
-    // top, then cookie/EXT.
     let raw = format!(
         "OPTIONS sip:alice@{CALLER}:5060 SIP/2.0\r\n\
 Via: SIP/2.0/UDP {W1}:5060;branch=z9hG4bKka1;lg=a;rport\r\n\
@@ -521,14 +507,11 @@ Content-Length: 0\r\n\r\n"
     );
 }
 
-// ── (g) single-face regression guard: RR bytes unchanged ────────────────────
-
+/// With no external face the double Record-Route keeps its single-face wire
+/// shape: both entries at the one advertise, the `;outbound` entry on top with
+/// no cookie, the cookie entry below.
 #[tokio::test]
 async fn single_face_rr_format_is_unchanged() {
-    // The SAME flow with NO external face: the single-face double-RR — both
-    // entries at the one advertise, the outbound half param-less. Dual-face
-    // plumbing must be inert here (the rest of the suite is the wider
-    // guard; this pins the exact wire shape).
     let sent: Arc<Mutex<Vec<Sent>>> = Arc::new(Mutex::new(Vec::new()));
     let int_ep = TapEndpoint {
         face: "int",
@@ -560,11 +543,8 @@ async fn single_face_rr_format_is_unchanged() {
     );
 }
 
-// ── §17.1.1.2: the non-2xx ACK of a worker's INVITE goes where the INVITE went ─
-
 const CALLEE_SEND_PORT: u16 = 40000;
 
-/// A callee's 486 to the b-leg INVITE the proxy forwarded under `proxy_branch`.
 fn callee_486(call_id: &str, proxy_branch: &str) -> SipMessage {
     parse_msg(&format!(
         "SIP/2.0 486 Busy Here\r\n\
@@ -604,9 +584,11 @@ fn top_via_branch_of(bytes: &[u8]) -> String {
         .to_string()
 }
 
-/// One instance forwards the INVITE; the callee's 486 comes back to it from a
-/// send socket; the worker's ACK then crosses `ack_instance`, or the same
-/// instance. Returns the ACK's destination and the branches of INVITE and ACK.
+/// One instance forwards the worker's INVITE and relays the callee's 486,
+/// sent from another port than the INVITE reached; the worker's ACK then
+/// crosses another instance when `through_another_instance`, else the same
+/// one. Returns the ACK's decision, target and destination, and the branches
+/// of the INVITE and of the ACK.
 async fn ack_of_a_final_from_another_port(
     call_id: &str,
     through_another_instance: bool,

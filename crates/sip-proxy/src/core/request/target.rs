@@ -65,20 +65,21 @@ impl ProxyCore {
     /// §16.11 on the INVITE's branch, which the survivor's rebuilt INVITE
     /// transaction is keyed by. The CANCEL's Via is its INVITE's top Via, so
     /// it finds the entry of its own INVITE transaction, never another pass of
-    /// a spiral sharing its Call-ID, From tag and CSeq. It goes where the
-    /// INVITE went while that node is not a worker the proxy reads not alive:
-    /// the INVITE's client transaction lives there and only there (§16.10).
-    /// Toward a worker no longer alive it follows the INVITE's stickiness
-    /// cookie, the workers being ONE logical UAS: the alive primary, else the
-    /// backup holding the call's replica (ADR-0014), else nowhere — dropped
-    /// and counted (ADR-0050 §5). With no entry (the INVITE crossed another
-    /// instance, or the entry was forgotten), the CANCEL of an INVITE this
-    /// hop refused is answered 200 here (`Err`, §9.2); any other repeats its
-    /// INVITE's Request-URI and Route, so it takes the route the INVITE took
-    /// without the memo: its loose Route, a worker's Request-URI, its cookie,
-    /// else the rendezvous winner among the alive workers (ADR-0009 X7). No
-    /// CANCEL meets an admission gate or draws a 503: with no worker to take
-    /// it, it is dropped and counted.
+    /// a spiral sharing its Call-ID, From tag and CSeq. The CANCEL of an INVITE
+    /// this hop answered itself, a 513 after its forward attempt included, is
+    /// answered 200 here (`Err`, §9.2), its hop remembered or not. Otherwise it
+    /// goes where the INVITE went while that node is not a worker the proxy reads
+    /// not alive: the INVITE's client transaction lives there and only there
+    /// (§16.10). Toward a worker no longer alive it follows the INVITE's
+    /// stickiness cookie, the workers being ONE logical UAS: the alive primary,
+    /// else the backup holding the call's replica (ADR-0014), else nowhere,
+    /// dropped and counted (ADR-0050 §5). With no entry (the INVITE crossed
+    /// another instance, or the entry was forgotten) it repeats its INVITE's
+    /// Request-URI and Route, so it takes the route the INVITE took without the
+    /// memo: its loose Route, a worker's Request-URI, its cookie, else the
+    /// rendezvous winner among the alive workers (ADR-0009 X7). No CANCEL meets
+    /// an admission gate or draws a 503: with no worker to take it, it is dropped
+    /// and counted.
     pub(super) async fn cancel_target(
         &self,
         msg: &SipMessage,
@@ -92,8 +93,6 @@ impl ProxyCore {
             req.from().tag(),
             req.cseq().seq(),
         );
-        // An INVITE this hop answered itself is cancelled here (§9.2), its
-        // hop remembered or not: a 513 follows the forward attempt.
         if let Some(answered) = self.cancel_refused(req, arrival).await {
             self.metrics.record_cancel_lookup(CancelLookup::Hit);
             return Err(answered);
@@ -245,8 +244,6 @@ impl ProxyCore {
                 return Ok((target, RoutingDecisionKind::DecodeForwardBackup, Some("backup")));
             }
             DecodeResult::Reject { status, reason } => {
-                // The decode reasons are free-form diagnostics — one static
-                // label keeps the reason set bounded.
                 let metric = "stickiness_decode_rejected";
                 return Err(self.reply_reject(req, arrival, status, &reason, &[], metric).await);
             }

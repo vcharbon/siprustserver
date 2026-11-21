@@ -16,22 +16,17 @@ use sip_proxy::ProxyMetrics;
 
 use crate::config::{ExternalFace, ProxyConfig};
 
-/// The proxy's sockets.
 pub struct Sockets {
     /// The metrics/probe HTTP listener, its address read; its accept loop
     /// starts later.
     pub metrics: tokio::net::TcpListener,
-    /// The signalling endpoints of each recv shard.
     pub shards: Vec<ShardSockets>,
-    /// The OPTIONS health probe's own source socket.
     pub probe: Box<dyn UdpEndpoint>,
     /// The dead notifier's own source socket (ADR-0050 §3).
     pub notice: Box<dyn UdpEndpoint>,
 }
 
-/// One recv shard's signalling endpoints.
 pub struct ShardSockets {
-    /// Its internal-face endpoint.
     pub internal: Box<dyn UdpEndpoint>,
     /// Its external-face endpoint: one exactly when the proxy has an
     /// external face.
@@ -39,19 +34,13 @@ pub struct ShardSockets {
 }
 
 /// Bind every socket `cfg` names, each signalling endpoint stamping arrivals
-/// on `clock`.
-///
-/// BIND ORDER: metrics/probe HTTP listener FIRST, then the internal-face
-/// signaling sockets, then the external-face sockets LAST. The SIP stack is
-/// never exposed unless the process can already report health, and the
-/// metrics port — inherently exclusive TCP — is the node-singleton lock:
-/// holding it proves no other proxy instance is alive on the node in every
-/// shard config, whereas the data sockets may carry SO_REUSEPORT
-/// (recv_shards > 1) and would silently overlap a predecessor. The accept
-/// loop starts later (ProbeServer::serve_on) — the bind is the lock.
+/// on `clock`, in this order: the metrics/probe HTTP listener, the
+/// internal-face signalling sockets, the external-face signalling sockets, the
+/// probe and notice sockets. The metrics listener is the node-singleton lock;
+/// its accept loop starts later.
 ///
 /// `Err` names the first socket that did not bind: the boot stops on it.
-/// `proxy_metrics` counts what the signaling sockets' intake hook drops.
+/// `proxy_metrics` counts what the signalling sockets' intake hook drops.
 pub async fn bind_sockets(
     cfg: &ProxyConfig,
     clock: &Clock,
@@ -70,18 +59,8 @@ pub async fn bind_sockets(
             tokio::net::TcpListener::bind(metrics_sa)
         })
         .await?;
-    // The probe server reads the address when it starts: a listener that
-    // cannot name it refuses the boot here, before any SIP socket is bound.
     metrics.local_addr().map_err(|e| format!("metrics listener on {metrics_sa}: {e}"))?;
 
-    // Main signaling endpoint(s) — one per recv shard. With N > 1 every bind
-    // (including the first) sets SO_REUSEPORT; the kernel flow-hashes on the
-    // 4-tuple so all datagrams from one UAC src:port land on ONE socket and
-    // per-flow ordering (INVITE→CANCEL, retransmits) is preserved.
-    //
-    // Every signaling bind (both faces, all shards) carries the selective
-    // intake-shed hook — a blind tail-drop at the queue cap would otherwise
-    // kill emergency and in-dialog traffic first-come-first-served.
     let watermark = intake_shed_watermark(queue_max, cfg.intake_shed_pct);
     let intake_shed = intake_shed_hook(watermark, proxy_metrics.clone(), cfg.parser());
     let with_buffers = |mut opts: BindUdpOpts| {
@@ -115,10 +94,6 @@ pub async fn bind_sockets(
         internal.push(ep);
     }
 
-    // External-face sockets, one per recv shard — the SO_REUSEPORT recv
-    // sharding applies to BOTH faces identically (kernel flow-hashing keeps
-    // each caller src:port on one socket per face, so per-flow ordering holds
-    // on the external plane too).
     let mut external = Vec::new();
     if let Some(ExternalFace { listen: ext_sa, .. }) = &cfg.external {
         for _ in 0..recv_shards {
@@ -142,8 +117,6 @@ pub async fn bind_sockets(
             external.push(ep);
         }
     }
-    // Every shard of a face requests the same buffers: its first socket speaks
-    // for the face.
     if let Some(ep) = internal.first() {
         log_socket_buffers("internal", ep.as_ref(), udp_rcvbuf, udp_sndbuf);
     }
@@ -151,9 +124,6 @@ pub async fn bind_sockets(
         log_socket_buffers("external", ep.as_ref(), udp_rcvbuf, udp_sndbuf);
     }
 
-    // Separate endpoint for the OPTIONS health probe (its own source socket).
-    // Port 0 (ephemeral) never conflicts; the retry wrapper keeps the fatal
-    // contract uniform across every bind.
     let probe_sa = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0);
     let probe = bind_with_retry(
         "probe socket",
@@ -168,7 +138,6 @@ pub async fn bind_sockets(
     )
     .await?;
 
-    // The dead notifier's endpoint, ephemeral like the probe's.
     let notice = bind_with_retry(
         "notice socket",
         probe_sa,
@@ -223,17 +192,15 @@ fn log_socket_buffers(
 
 /// Bounded bind retry for a port a predecessor process may still hold.
 ///
-/// A recreated `hostNetwork` pod lands in the node netns its predecessor just
-/// vacated, so a bind can hit a transient `EADDRINUSE` while the old sockets
-/// linger. Re-attempts `bind` every `interval` while `is_addr_in_use(&err)`,
-/// logging each wait so a slow release is visible, until `deadline`. The
-/// default deadline (10 s) deliberately exceeds the 5 s SIGTERM drain grace so
-/// a fast pod recreation waits out its predecessor — instances serialize on
-/// the node, never overlap.
+/// Re-attempts `bind` every `interval` while `is_addr_in_use(&err)`, logging
+/// each wait, until `deadline`. The configured deadline exceeds the SIGTERM
+/// drain grace (the configuration refuses otherwise), so a recreated
+/// `hostNetwork` pod waits out its predecessor: instances on one node
+/// serialize, never overlap.
 ///
 /// Any other bind error, or addr-in-use past the deadline, returns a message
-/// naming the address. The caller MUST treat that as fatal (a refused boot,
-/// non-zero exit): the process never runs with a subset of its ports.
+/// naming the address. The caller treats it as fatal: the process never runs
+/// with a subset of its ports.
 pub async fn bind_with_retry<T, E, Fut>(
     what: &str,
     addr: SocketAddr,

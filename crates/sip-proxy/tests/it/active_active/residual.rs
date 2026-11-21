@@ -34,8 +34,6 @@ async fn a_spilled_call_meeting_a_rehash_is_cancelled_at_its_rendezvous_winner()
     pair.send(winner, &SipMessage::Response(unknown)).await;
     pair.response(Party::Caller, 481).await;
 
-    // The accepted outcome: the worker holding the INVITE never hears the
-    // CANCEL, and the call ends by that worker's own final.
     let unanswered = answer(&at_placed, from, placed, 480, "Temporarily Unavailable", "uas-1");
     pair.send(placed, &SipMessage::Response(unanswered)).await;
     let final_at_caller = pair.response(Party::Caller, 480).await;
@@ -72,6 +70,10 @@ async fn a_spilled_calls_ack_meeting_a_rehash_reaches_its_rendezvous_winner() {
 /// token for the call's rendezvous winner: B cannot tell the copy from a new
 /// call and places it on the other worker, under the INVITE's branch. That
 /// worker holds no transaction on that branch and opens a second call.
+///
+/// Both workers answer through B: the caller's transaction takes the first
+/// final and sends its ACK again on the second (RFC 3261 §17.1.1.2), and B
+/// relays each ACK to the worker whose final it relayed last.
 #[tokio::test(start_paused = true)]
 async fn an_invite_copy_meeting_a_spill_at_the_other_instance_opens_a_second_call() {
     let pair = Pair::new().await;
@@ -89,9 +91,6 @@ async fn an_invite_copy_meeting_a_spill_at_the_other_instance_opens_a_second_cal
     let (copy, copy_from) = pair.request(other, "INVITE").await;
     assert_eq!(top_branch(&copy), top_branch(&first), "the copy keeps the INVITE's branch");
 
-    // Both workers answer through B. The caller's transaction takes the
-    // first final and re-sends its ACK on the second (§17.1.1.2); B relays
-    // each ACK to the worker whose final it relayed last.
     pair.assign(winner, Side::B);
     pair.assign(other, Side::B);
     let busy = answer(&first, from, winner, 486, "Busy Here", "uas-1");

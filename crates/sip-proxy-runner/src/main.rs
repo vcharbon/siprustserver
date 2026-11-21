@@ -133,7 +133,7 @@
 //!   PROXY_INVITE_TXN_TIMEOUT_SEC  the workers' INVITE bound, 33..=600 (default
 //!                    158): an INVITE memo entry lives it + Timer H at most
 
-// The panic set at deny outside test code (ADR-0051 §3).
+// ADR-0051 §3
 #![cfg_attr(
     not(test),
     deny(
@@ -151,13 +151,6 @@
     )
 )]
 
-// Use jemalloc instead of glibc malloc (mirrors b2bua-runner). glibc retains
-// freed arena chunks and ratchets RSS under sustained churn; jemalloc's decay
-// purging returns pages to the OS and bounds steady-state RSS. The proxy is
-// single-task and far less alloc-heavy than the b2bua, so this is mostly for a
-// uniform memory story across tiers — but it also lets the same jemalloc_*
-// /metrics probe rule the proxy in or out during a soak. Tuned via
-// _RJEM_MALLOC_CONF on the container (see deploy/helm/siprust/values-kind.yaml).
 #[cfg(not(target_env = "msvc"))]
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
@@ -194,8 +187,6 @@ fn main() -> std::process::ExitCode {
 /// writer runs; a refused boot or a data-path task that ended exits
 /// non-zero, after the writer has drained.
 async fn serve() {
-    // Subscriber first (ADR-0026): every line below it is a lifecycle log, and
-    // the guard drains the writer + flushes spans at exit.
     let observe_guard = match observe::init_production("sip-proxy-runner") {
         Ok(guard) => guard,
         Err(e) => {
@@ -210,7 +201,6 @@ async fn serve() {
             1
         }
     };
-    // `process::exit` runs no destructor: the writer drains first.
     drop(observe_guard);
     if exit_code != 0 {
         std::process::exit(exit_code);
@@ -220,13 +210,9 @@ async fn serve() {
 /// Boot and serve until a signal or a data-path task's end: the exit code,
 /// or the refusal of a boot that cannot serve.
 async fn run() -> Result<i32, String> {
-    // Loud confirmation the jemalloc decay config (_RJEM_MALLOC_CONF) parsed —
-    // a typo is silently ignored. Mirrored by the jemalloc_opt_*_decay_ms gauges.
     #[cfg(not(target_env = "msvc"))]
     jemalloc_stats::log_config();
 
-    // Every variable is read and checked before the first bind: a value the
-    // proxy cannot honour refuses the boot, naming every problem at once.
     let cfg = ProxyConfig::from_env()?;
     let watchdog = poll_watchdog::Watchdog::process();
     watchdog
@@ -241,10 +227,6 @@ async fn run() -> Result<i32, String> {
     let face = FaceMonitor::start(cfg.external_face_check.clone(), cfg.external_face_period);
     tracing::info!(observer = ?cfg.observer, "load-observer bands and AIMD ladder");
 
-    // ONE process clock, built before the first bind: every signaling endpoint
-    // stamps `UdpPacket::arrival_ms` on it and every `ProxyCore` ages dequeued
-    // packets against it, so the self-gate's intake age is a difference of two
-    // readings of a SINGLE monotonic-anchored timeline.
     let clock = Clock::checked_system().map_err(|e| e.to_string())?;
     let metrics = Arc::new(ProxyMetrics::new());
     let Sockets { metrics: metrics_listener, shards, probe: probe_ep, notice: notice_ep } =
@@ -260,16 +242,7 @@ async fn run() -> Result<i32, String> {
     let observer = Arc::new(WorkerLoadObserver::new(cfg.observer));
     let id_gen = Arc::new(entropy::keyed_id_gen()?);
 
-    // Proxy-self ELU/CPS admission gate. On by default; the ELU
-    // arm observes intake saturation — every recv shard records each packet's
-    // age at dequeue into this ONE shared recorder, and the 100 ms sampler task
-    // spawned below drains the window max into the gate's EWMA.
-    // `PROXY_SELF_GATE=0` reverts to the always-admit gate (then `self_gate` is
-    // `None`, no sampler task, no self-gate /metrics). Build the concrete
-    // `EluCpsGate` once so the sampler task + the /metrics exposition can read
-    // it; hand each core an `Arc<dyn ProxySelfGate>` view of the same gate.
     let intake_age = IntakeAgeRecorder::default();
-    // ONE liveness pulse across every recv shard: the readiness gate reads it.
     let pulse = Arc::new(sip_proxy::liveness::ShardPulse::new(recv_shards));
     let self_gate: Option<EluCpsGate> =
         cfg.self_gate.map(|gate_cfg| EluCpsGate::intake(intake_age.clone(), gate_cfg));
@@ -278,10 +251,6 @@ async fn run() -> Result<i32, String> {
         None => Arc::new(AlwaysAdmitGate),
     };
 
-    // Worker pool + its health-write seam. Static PROXY_WORKERS (dev/local) or the
-    // k8s EndpointSlice informer (ADR-0012 D4). Either way the OPTIONS probe writes
-    // observed health through `health_control` so an unanswered worker is demoted
-    // (Dead/NotReady/Draining) and in-dialog requests fail over to the backup.
     let pool = match &cfg.workers {
         WorkerSource::Static(list) => {
             static_pool(list, clock.clone()).map_err(|e| refusal(&[e]))?
@@ -301,35 +270,21 @@ async fn run() -> Result<i32, String> {
         clock.clone(),
     ));
 
-    // The stale-payload sweep shares the probe's observer.
     let sweep_observer = observer.clone();
 
-    // The CANCEL/rtx LRU, the refusal memo and the cap on parse-refusal 400s
-    // are ONE instance across shards (`SharedRouting`).
     let cancel_lru = Arc::new(sip_proxy::cancel_lru::CancelBranchLru::with_bounds(
         clock.clone(),
         cfg.branch_memo,
     ));
     let metrics_memo = cancel_lru.clone();
-    // Their To-tags are keyed by the shared cookie key (ADR-0046 §7).
     let tagger = own_final_tagger(cfg.hmac_key.as_bytes(), &id_gen);
     let jitter = cfg.retry_after_jitter_sec;
     let refusals = Arc::new(Refusals::keyed(tagger.clone(), jitter, REFUSED_MEMO_MAX));
     let parse_refusals = Arc::new(sip_proxy::parse_refusals::ParseRefusals::keyed(tagger));
 
-    // Named-target resolver tuning + startup prewarm. A COLD
-    // name (fresh deploy, CoreDNS restart, TTL expiry) would cost the first
-    // b-leg forward a full in-path resolve — 3.5–7.5 s under kube ndots:5
-    // search expansion, blowing the downstream 2 s connect timer. Prewarm
-    // targets are resolved off the serving path right after core construction
-    // (boot never blocks or fails on a slow/failed prewarm — outcomes land in
-    // sip_proxy_resolver_refresh_total{outcome=prewarmed|prewarm_failed}) and
-    // pinned so the proactive refresh keeps them permanently warm.
     let resolver_cfg = cfg.resolver;
     let prewarm_targets = cfg.prewarm.clone();
 
-    // ONE trace registry across every recv shard: the active-trace cap and the
-    // "anything sampled?" flag bound the process, not a socket (ADR-0026).
     let traces = Arc::new(sip_proxy::ProxyTraces::from_env(clock.now_ms()));
 
     let shared = SharedRouting {
@@ -351,9 +306,6 @@ async fn run() -> Result<i32, String> {
         reach: WorkerReach::unheard(),
         parser: cfg.parser(),
     };
-    // Health probe: OPTIONS to the pool from the first listing on, feeding the
-    // band observer, and latching the first worker view the recv shards and
-    // the probe routes read (ADR-0050 §5, §11).
     let probe = shared.health_probe(probe_ep, health_control, observer, cfg.probe);
     let mut cores = Vec::with_capacity(recv_shards);
     for (shard, ShardSockets { internal, external }) in shards.into_iter().enumerate() {
@@ -365,7 +317,6 @@ async fn run() -> Result<i32, String> {
         cores.push(builder.build(internal));
     }
     if !prewarm_targets.is_empty() {
-        // Each recv shard owns its own resolver cache, so prewarm every core.
         for core in &cores {
             core.prewarm_named_targets(prewarm_targets.clone());
         }
@@ -379,23 +330,10 @@ async fn run() -> Result<i32, String> {
 
     log_listening(&cfg, registry.as_ref());
 
-    // Readiness gate (ADR-0012 D4, ADR-0050 §11, ADR-0056): the first worker
-    // view in, ≥1 `Alive` worker, the external face usable; the node announces
-    // the VIPs exactly while it passes. An empty informer pool makes a loud
-    // rollout timeout. SIGTERM latches Draining here.
     let draining = Arc::new(AtomicBool::new(false));
-    // A stalled recv shard (parked on one packet past PROXY_SHARD_STALL_MS —
-    // see `sip_proxy::liveness`) is a proxy that black-holes a share of its
-    // flows while every activity meter reads idle: it fails `/readyz` and
-    // `/healthz` (ADR-0046 D4), and raises the gauge.
-    // `/fitz` asks the same but the drain, plus a worker answer within
-    // HEALTH_ISOLATION_MS: the node's route guard withdraws the node while
-    // it fails (ADR-0056).
     let proxy_probes =
         shared.probes(draining.clone(), shard_stall_ms, face.clone(), cfg.isolation_window);
 
-    // Health sampler: the worker-health, acceptance, shard-stall and
-    // discovery gauges every 2 s.
     HealthSampler {
         registry: registry.clone(),
         discovery: pool.discovery.clone(),
@@ -407,18 +345,11 @@ async fn run() -> Result<i32, String> {
     }
     .spawn();
 
-    // The observer's stale-payload sweep, and the self-gate sampler when the
-    // real gate is on; each restarted and counted when a run panics.
     spawn_stale_floor_sweep(sweep_observer, registry.clone(), clock.clone(), metrics.clone());
     if let Some(gate) = self_gate.clone() {
         spawn_self_gate_sampler(gate);
     }
 
-    // Prometheus + readiness endpoint (shared `probe-http`). NOTE: `ProbeServer`
-    // aborts its accept loop on Drop, so the handle must stay live for the whole
-    // process lifetime. The `/metrics` body appends the proxy-self gate gauges
-    // + the jemalloc mallctl exposition (footprint/purge/decay config) per
-    // scrape — the latter same cfg as the allocator dep.
     let metrics_gate = self_gate.clone();
     let routes = probe_http::ProbeRoutes {
         metrics: Arc::new(move || {
@@ -433,9 +364,6 @@ async fn run() -> Result<i32, String> {
         ready: proxy_probes.ready,
         fit: Some(proxy_probes.fit),
     };
-    // The listener was bound FIRST (metrics-first bind order above); this only
-    // starts the accept loop. A failure here is fatal — a proxy without its
-    // health endpoint gets liveness-killed 30 s later with a lying /readyz.
     let _metrics_server =
         probe_http::ProbeServer::serve_on_live(metrics_listener, routes, proxy_probes.live)
             .map_err(|e| format!("metrics server on {metrics_sa} failed to start: {e}"))?;
@@ -448,21 +376,10 @@ async fn run() -> Result<i32, String> {
         core_tasks.spawn(core.run());
     }
 
-    // Graceful shutdown on SIGTERM: latch-then-grace. `/readyz` turns
-    // Draining, the node's routes are withdrawn, and the proxy keeps
-    // forwarding for the grace that covers the withdrawal (ADR-0056). Ctrl-C
-    // (interactive) exits at once.
+    // ADR-0056 §4
     let drain_grace = cfg.drain_grace;
     let drain_grace_ms = u64::try_from(drain_grace.as_millis()).unwrap_or(u64::MAX);
 
-    // Supervise every data-path task: a panicked/exited recv loop must not
-    // leave the process alive with /healthz green — k8s would never restart the
-    // pod and every datagram would be silently black-holed. Exiting non-zero makes
-    // the container restart the moment ANY recv shard or the probe dies.
-    //
-    // The select only DECIDES the exit code: `process::exit` runs no
-    // destructor, so the fatal line would die queued on the log writer. It runs
-    // in `serve`, after the observe guard has drained.
     let exit_code = tokio::select! {
         _ = tokio::signal::ctrl_c() => {
             tracing::info!(signal = "SIGINT", "shutting down");
@@ -483,8 +400,7 @@ async fn run() -> Result<i32, String> {
             tracing::error!(outcome = ?res, "FATAL: health probe or dead notifier exited — exiting for restart");
             1
         }
-        // The watchdog logged the poll; it ends the process itself past its
-        // bound when this arm cannot run.
+        // ADR-0057 §6
         _ = watchdog.stuck() => i32::from(poll_watchdog::EXIT_CODE),
     };
     drop(_metrics_server);

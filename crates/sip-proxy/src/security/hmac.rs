@@ -1,24 +1,22 @@
-//! [`HmacKeyProvider`] — signs/verifies the routing cookie the proxy stamps on
-//! the Record-Route URI. The `static` impl only; a kubernetes-secret fs-watch
-//! variant is deferred (ADR-0009).
+//! [`HmacKeyProvider`]: signs and verifies the routing cookie the proxy stamps
+//! on its Record-Route URI and Via (ADR-0009 X3), and its static implementation.
 //!
-//! - `sign(input)` MACs `input` with the **current** key (HMAC-SHA256) and
-//!   returns `{ kid, mac }` (the full 32-byte digest; the LB truncates to 128
-//!   bits before base64url-encoding into the cookie).
+//! - `sign(input)` MACs `input` with the current key (HMAC-SHA256) and returns
+//!   `{ kid, mac }`, the full 32-byte digest; the load balancer truncates it to
+//!   [`TRUNCATED_MAC_BYTES`] before base64url-encoding it into the cookie.
 //! - `verify_truncated(input, kid, mac_prefix)` recomputes the digest under the
-//!   named key (current OR previous, for the rotation overlap window) and
-//!   compares the leading [`TRUNCATED_MAC_BYTES`] in constant time
-//!   (`subtle`). `false` on unknown kid, on ANY prefix
-//!   length other than the canonical truncation, or on mismatch — the provider
-//!   enforces the length so no caller can accidentally accept a 1-byte prefix
-//!   (a ≤256-guess forgery).
+//!   named key (the current one, or the previous one during a rotation overlap)
+//!   and compares its leading [`TRUNCATED_MAC_BYTES`] in constant time. It
+//!   returns `false` on an unknown kid, on any prefix length other than
+//!   [`TRUNCATED_MAC_BYTES`], or on a mismatch: the provider enforces the
+//!   length, so no caller accepts a short prefix (a 1-byte one is 256 guesses
+//!   from a forgery).
 
 use hmac::{Hmac, KeyInit, Mac};
 use sha2::Sha256;
 use sip_message::char_class::{is_paramchar, is_run_of};
 use subtle::ConstantTimeEq;
 
-/// RFC 2104 §3: keys shorter than the hash output should be avoided.
 const MIN_KEY_BYTES: usize = 16;
 
 /// Canonical cookie-MAC truncation: 128 bits. Signers truncate to this;
@@ -45,15 +43,13 @@ impl HmacKey {
 #[error("HMAC key provider config error: {0}")]
 pub struct HmacKeyProviderConfigError(pub String);
 
-/// Result of [`HmacKeyProvider::sign`].
 pub struct HmacSignResult {
     pub kid: String,
     /// Full HMAC-SHA256 digest (32 bytes).
     pub mac: [u8; 32],
 }
 
-/// The signing/verifying seam. A trait so the
-/// LB depends on the seam and a k8s-secret impl can drop in later.
+/// The seam that signs and verifies the routing cookie's MAC.
 pub trait HmacKeyProvider: Send + Sync {
     fn sign(&self, input: &[u8]) -> HmacSignResult;
     /// Verify a truncated MAC prefix under `kid` (current or previous key).
@@ -83,12 +79,13 @@ impl Keyed {
     }
 }
 
+/// A key's id rides the Record-Route cookie unescaped, as a URI parameter value
+/// (`pvalue = 1*paramchar`, RFC 3261 §25.1): it must be a non-empty run of
+/// paramchars, and the key at least [`MIN_KEY_BYTES`] long.
 fn validate_key(key: &HmacKey, label: &str) -> Result<(), HmacKeyProviderConfigError> {
     if key.id.is_empty() {
         return Err(HmacKeyProviderConfigError(format!("{label} key id must be non-empty")));
     }
-    // The key id rides the Record-Route cookie as a URI parameter value
-    // (`pvalue = 1*paramchar`, RFC 3261 §25.1), written unescaped.
     if !is_run_of(&key.id, is_paramchar, false) {
         return Err(HmacKeyProviderConfigError(format!(
             "{label} key id {:?} must be URI-parameter characters (RFC 3261 §25.1 paramchar)",
@@ -112,8 +109,9 @@ pub struct StaticHmacKeyProvider {
 }
 
 impl StaticHmacKeyProvider {
-    /// Validate and build. Checks a non-empty kid, a minimum key length, and a
-    /// previous key whose id differs from current.
+    /// Validate and build: each key id a non-empty run of URI-parameter
+    /// characters, each key at least `MIN_KEY_BYTES` long, and the previous
+    /// key's id other than the current one's.
     pub fn new(
         current: HmacKey,
         previous: Option<HmacKey>,
@@ -147,9 +145,6 @@ impl HmacKeyProvider for StaticHmacKeyProvider {
         let Some(key) = self.lookup_key(kid) else {
             return false;
         };
-        // Exactly the canonical truncation — a shorter prefix would shrink the
-        // forgery space (1 byte = a 256-guess cookie), so the check lives here,
-        // not only in the caller.
         if mac_prefix.len() != TRUNCATED_MAC_BYTES {
             return false;
         }
@@ -192,11 +187,11 @@ mod tests {
         .is_err());
     }
 
+    /// A prefix of the genuine MAC of any length but the canonical truncation
+    /// never verifies: a 1-byte prefix would leave the cookie 256 guesses from a
+    /// forgery.
     #[test]
     fn short_prefix_is_rejected_even_if_it_matches() {
-        // A 1-byte "prefix" of the genuine MAC must NOT verify: accepting it
-        // would shrink the cookie's forgery space to 256 guesses. Only the
-        // exact canonical truncation is acceptable.
         let p = provider();
         let signed = p.sign(b"input");
         for n in [0usize, 1, 8, 15, 17, 32] {
@@ -242,11 +237,9 @@ mod tests {
             Some(HmacKey::new("k1", vec![7u8; 32])),
         )
         .unwrap();
-        // A MAC minted under the old key (k1) still verifies during overlap.
         let old = StaticHmacKeyProvider::new(HmacKey::new("k1", vec![7u8; 32]), None).unwrap();
         let signed = old.sign(b"rotated");
         assert!(p.verify_truncated(b"rotated", "k1", &signed.mac[..16]));
-        // The current key signs as k2.
         assert_eq!(p.sign(b"rotated").kid, "k2");
     }
 }

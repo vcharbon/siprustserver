@@ -62,7 +62,6 @@ Content-Length: 0\r\n\r\n"
     ))
 }
 
-/// One out-of-dialog OPTIONS of a flood, each its own transaction.
 fn flood_options(i: usize) -> SipMessage {
     parse(&format!(
         "OPTIONS sip:probe@10.0.0.50:5060 SIP/2.0\r\n\
@@ -76,7 +75,6 @@ Content-Length: 0\r\n\r\n"
     ))
 }
 
-/// The callee's 486 to the INVITE, relayed by the proxy.
 fn busy_486() -> sip_message::SipResponse {
     let raw = format!(
         "SIP/2.0 486 Busy Here\r\n\
@@ -102,6 +100,10 @@ async fn flood(core: &ProxyCore, from: usize, count: usize) {
     }
 }
 
+/// A flood of out-of-dialog requests holds the branch memo at its cap and
+/// the cap forgets the flood's entries: the INVITE's CANCEL still reaches its
+/// hop, and the ACK of a 486 sent by the node that took the transaction over
+/// reaches that node.
 #[tokio::test(start_paused = true)]
 async fn cancel_and_ack_find_their_hop_through_a_flood_at_the_cap() {
     let lru = Arc::new(CancelBranchLru::with_bounds(
@@ -126,7 +128,6 @@ async fn cancel_and_ack_find_their_hop_through_a_flood_at_the_cap() {
         "the CANCEL follows its INVITE's remembered hop"
     );
 
-    // The 486 comes from the node that took the transaction over.
     let survivor: SocketAddr = format!("{W2}:5060").parse().unwrap();
     core.handle_response_from(busy_486(), survivor).await;
     flood(&core, 3 * CAP, 2).await;

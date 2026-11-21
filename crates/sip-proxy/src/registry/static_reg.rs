@@ -1,10 +1,10 @@
-//! Static worker registry — a fixed worker pool from `id@host:port,...` (the
-//! `PROXY_WORKERS` grammar). Now a thin wrapper over the shared `WorkerSet`: the
-//! identity (ordinal + host) is a [`topology::StaticMembership`]; the per-worker
-//! port + health are presets in the annotation overlay. Because a static
-//! membership never changes, the projection is composed once at construction; the
-//! OPTIONS [`HealthProbe`](crate::health::HealthProbe) still updates health live
-//! through [`control`](StaticWorkerRegistry::control).
+//! Static worker registry: a fixed worker pool from `id@host:port,...` (the
+//! `PROXY_WORKERS` grammar) over the shared `WorkerSet`. The identity (ordinal
+//! and host) is a [`topology::StaticMembership`]; each worker's port and health
+//! are presets in the annotation overlay. The membership never changes, so the
+//! projection is composed once at construction, and the OPTIONS
+//! [`HealthProbe`](crate::health::HealthProbe) updates health live through
+//! [`control`](StaticWorkerRegistry::control).
 
 use std::sync::Arc;
 
@@ -17,9 +17,8 @@ use super::control::{WorkerRegistryControl, WorkerSetControl};
 use super::projection::WorkerSet;
 use super::{WorkerEntry, WorkerRegistry};
 
-/// Fallback port for a peer with no per-worker `port_override`. Unused in
-/// practice — every parsed/seeded static entry carries an explicit port — but the
-/// projection needs a default.
+/// The projection's default port. Every static entry presets its own port, so
+/// no static worker takes this one.
 const DEFAULT_PORT: u16 = 5060;
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -29,10 +28,11 @@ pub struct StaticRegistryParseError {
     pub reason: String,
 }
 
-/// Parse `id@host:port,...` into `WorkerEntry`s (all `alive`). An empty/blank
-/// string yields an empty set. Rejects empty entries, missing/edge `@`, empty
-/// ids, duplicate ids, malformed `host:port`, and DNS-named hosts (the pool
-/// must be IP literals — see the in-loop comment).
+/// Parses `id@host:port,...` into `WorkerEntry`s, all `alive`. A blank string
+/// yields an empty set. Refuses an empty entry, a missing, leading or trailing
+/// `@`, an empty or duplicate id, a malformed `host:port` or port 0, and a host
+/// that is no IP literal: `lookup_by_address` compares host strings against
+/// datagram source addresses, so a named worker would never match.
 pub fn parse_worker_list(
     source: &str,
     raw: &str,
@@ -50,7 +50,6 @@ pub fn parse_worker_list(
             return Err(err(format!("empty entry in {source}")));
         }
         match part.split_once('@') {
-            // No `@`, a leading `@` or a trailing `@` is invalid.
             None | Some(("", _)) | Some((_, "")) => {
                 return Err(err(format!("entry \"{part}\" must be of the form id@host:port")))
             }
@@ -68,10 +67,6 @@ pub fn parse_worker_list(
                             "entry \"{part}\" has malformed host:port (port must be 1..65535)"
                         ))
                     })?;
-                // IP literals only: `lookup_by_address` (worker-outbound
-                // classification) compares raw host strings against datagram
-                // source IPs, so a DNS-named pool silently never matches —
-                // fail loudly at startup instead.
                 if addr.host.parse::<std::net::IpAddr>().is_err() {
                     return Err(err(format!(
                         "entry \"{part}\": worker host must be an IP literal — a DNS name breaks \
@@ -98,7 +93,6 @@ impl StaticWorkerRegistry {
         Self::from_string_with_clock(raw, source, Clock::system())
     }
 
-    /// [`from_string`](Self::from_string) with an injected clock.
     pub fn from_string_with_clock(
         raw: &str,
         source: &str,
@@ -215,8 +209,8 @@ mod tests {
         assert!(parse_worker_list("t", "@10.0.0.2:5070").is_err());
         assert!(parse_worker_list("t", "id@").is_err());
         assert!(parse_worker_list("t", "id@host:notaport").is_err());
-        assert!(parse_worker_list("t", "a@h:1,a@h:2").is_err()); // duplicate id
-        assert!(parse_worker_list("t", "a@h:1,,b@h:2").is_err()); // empty entry
+        assert!(parse_worker_list("t", "a@h:1,a@h:2").is_err());
+        assert!(parse_worker_list("t", "a@h:1,,b@h:2").is_err());
     }
 
     #[test]

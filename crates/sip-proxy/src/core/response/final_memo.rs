@@ -5,19 +5,15 @@
 //! final crosses the other instance lives to its cap.
 //!
 //! A non-2xx final leaves its ACK hop, whether or not the INVITE crossed this
-//! instance: the node the final ARRIVED from, which after a failover is the
-//! survivor, not the INVITE's target. Only a caller's ACK follows it; a worker's
-//! ACK goes where its INVITE went (RFC 3261 §17.1.1.2), the memo only telling a
-//! non-2xx ACK from a takeover's 2xx ACK. This transaction-less proxy (ADR-0022
-//! X4) synthesizes no §17.1.1.3 hop ACK: the UAS retransmits the final through
-//! this relay until the upstream's own ACK arrives, which the request path
-//! relays on this hop. The branch the sender's server transaction is keyed on
-//! is §16.11's function of the ACK itself (`crate::branch`). Gating the relay
-//! on this memo, not on the INVITE's entry, keeps a takeover worker's 2xx ACK
-//! safe when its reset `IdGen` re-mints a branch aliasing the dead primary's
-//! INVITE: no non-2xx final was relayed for a confirmed call (see
-//! `core/request`). Short TTL: the upstream ACKs within the final's
-//! retransmit window, and a re-sent final refreshes it.
+//! instance: the node the final arrived from, which after a failover is the
+//! survivor, not the INVITE's target. Only a caller's ACK follows it; a
+//! worker's ACK goes where its INVITE went (§17.1.1.2). The proxy keeps no
+//! transaction (ADR-0022 X4) and sends no §17.1.1.3 ACK of its own: the UAS
+//! retransmits the final through this relay until the upstream's ACK arrives,
+//! and the request path relays that ACK on this hop, on the branch §16.11
+//! derives from the ACK itself (`crate::branch`). A confirmed call's 2xx ACK
+//! finds no hop: no non-2xx final was relayed for it. The hop lives one
+//! retransmission TTL, and a re-sent final refreshes it.
 
 use std::net::SocketAddr;
 
@@ -44,9 +40,6 @@ impl ProxyCore {
         if resp.status() < 200 || *cseq.method() != Method::Invite {
             return;
         }
-        // The response echoes the request's From (tag included), and the Via
-        // below ours is the upstream's as the INVITE carried it, so this
-        // re-builds exactly the key the INVITE was remembered under.
         let call_id = resp.call_id();
         let from = resp.from();
         let key = invite_txn_key(next, call_id.as_str(), from.tag(), cseq.seq());

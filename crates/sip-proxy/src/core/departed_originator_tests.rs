@@ -33,7 +33,6 @@ const UAS: &str = "10.244.7.13";
 const PROXY_VIP: &str = "192.0.2.250";
 const CALL_ID: &str = "departed-1@10.244.5.8";
 
-/// Endpoint double keeping every datagram sent, with its destination.
 #[derive(Default)]
 struct Wire {
     sent: Mutex<Vec<(SocketAddr, Vec<u8>)>>,
@@ -174,10 +173,10 @@ Content-Length: 0\r\n\r\n"
     resp
 }
 
-// The proxy departed w1 a moment before w1's INVITE reached it: the INVITE is
-// still worker-outbound (its Via names a tombstoned worker address), and the
-// cookie it is Record-Routed with names w1 and the backup w1 states, w2,
-// signed for the call. The UAS's 180 and 200 for the departed w1 fail over to w2.
+/// The proxy departed w1 a moment before w1's INVITE reached it: the INVITE is
+/// still worker-outbound (its Via names a tombstoned worker address), and the
+/// cookie it is Record-Routed with names w1 and the backup w1 states, w2,
+/// signed for the call. The UAS's 180 and 200 for the departed w1 fail over to w2.
 #[tokio::test]
 async fn a_departed_workers_invite_is_recorded_with_its_ordinal_and_its_stated_backup() {
     let f = fixture();
@@ -206,9 +205,10 @@ async fn a_departed_workers_invite_is_recorded_with_its_ordinal_and_its_stated_b
     }
 }
 
-// A live worker read not ready, another ready, stays a worker for as long as it is
-// a member: its INVITE past the departed address's window, on a failover chain or a
-// transfer, leaves for the callee, and is not read as a new call from outside.
+/// A live worker read not ready, another ready, stays a worker for as long as it
+/// is a member: its INVITE past the departed address's window, on a failover
+/// chain or a transfer, leaves for the callee and is not read as a new call from
+/// outside.
 #[tokio::test(start_paused = true)]
 async fn a_not_ready_workers_invite_past_the_window_still_leaves_for_the_callee() {
     let f = fixture();
@@ -248,9 +248,9 @@ fn uas() -> SocketAddr {
     format!("{UAS}:5060").parse().unwrap()
 }
 
-// The dialog, not the tombstone's window, carries the departed worker's
-// INVITE: a 200 answered after the window lapsed still fails over to the
-// cookie's backup, as do its retransmissions.
+/// The dialog, not the tombstone's window, carries the departed worker's
+/// INVITE: a 200 answered after the window lapsed still fails over to the
+/// cookie's backup, as do its retransmissions.
 #[tokio::test(start_paused = true)]
 async fn a_200_answered_past_the_tombstone_still_reaches_the_backup() {
     let f = fixture();
@@ -262,8 +262,6 @@ async fn a_200_answered_past_the_tombstone_still_reaches_the_backup() {
     }
 }
 
-// Past the window, a worker that holds the departed ordinal at a new address
-// takes the INVITE's 200, as it would inside it.
 #[tokio::test(start_paused = true)]
 async fn a_200_answered_past_the_tombstone_reaches_the_ordinal_at_its_new_address() {
     let f = fixture();
@@ -274,9 +272,9 @@ async fn a_200_answered_past_the_tombstone_reaches_the_ordinal_at_its_new_addres
     assert_eq!(f.one_sent().0, replacement);
 }
 
-// Past the window, neither the cookie's worker nor its backup holds an
-// address: the 200 goes nowhere, counted as dropped, and never along the Via
-// to the departed address.
+/// Past the window, neither the cookie's worker nor its backup holds an
+/// address: the 200 goes nowhere, counted as dropped, and never along the Via
+/// to the departed address.
 #[tokio::test(start_paused = true)]
 async fn a_200_past_the_tombstone_with_no_usable_backup_is_dropped() {
     let f = fixture();
@@ -288,9 +286,9 @@ async fn a_200_past_the_tombstone_with_no_usable_backup_is_dropped() {
     assert!(text.contains("sip_messages_total{label=\"outbound:dropped\"} 1\n"), "{text}");
 }
 
-// Past the window, another worker took the departed worker's address: the
-// address names neither of the cookie's workers, so the cookie carries the 200
-// to the backup, never to the address's new holder.
+/// Past the window, another worker took the departed worker's address: the
+/// address names neither of the cookie's workers, so the cookie carries the 200
+/// to the backup, never to the address's new holder.
 #[tokio::test(start_paused = true)]
 async fn a_200_past_the_tombstone_skips_a_worker_that_took_the_address() {
     let f = fixture();
@@ -301,10 +299,10 @@ async fn a_200_past_the_tombstone_skips_a_worker_that_took_the_address() {
     assert_eq!(f.one_sent().0, w2, "the cookie's backup takes the 200");
 }
 
-// The cookie's backup serves the dialog as a takeover copy while its primary
-// is still alive and sends a re-INVITE carrying the dialog's cookie: the
-// address names the cookie's backup, so the 200 follows the Via to it, the
-// node holding the transaction.
+/// The cookie's backup serves the dialog as a takeover copy while its primary
+/// is still alive and sends a re-INVITE carrying the dialog's cookie: the
+/// address names the cookie's backup, so the 200 follows the Via to it, the
+/// node holding the transaction.
 #[tokio::test]
 async fn a_200_to_the_cookies_backup_follows_the_via() {
     let f = fixture();
@@ -325,8 +323,6 @@ async fn a_200_to_the_cookies_backup_follows_the_via() {
     assert_eq!(f.one_sent().0, w2, "the 200 returns to the copy that sent the re-INVITE");
 }
 
-// An address neither in the worker set nor tombstoned names no worker: no
-// cookie is minted for it.
 #[tokio::test]
 async fn an_address_no_worker_ever_held_gets_no_cookie() {
     let f = fixture();

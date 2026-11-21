@@ -82,8 +82,6 @@ Content-Length: 0\r\n\r\n"
     CustomParser::new().parse(raw.as_bytes()).unwrap()
 }
 
-// SelectError::NoTarget → 503 with Reason text "no_target_available"; the
-// reject counter carries the same reason.
 #[tokio::test]
 async fn no_target_select_failure_attributes_its_reject() {
     let (core, metrics) =
@@ -98,8 +96,6 @@ async fn no_target_select_failure_attributes_its_reject() {
         .contains("sip_proxy_rejects_total{reason=\"no_target_available\"} 1"));
 }
 
-// SelectError::RateCapExhausted → 503 with Reason text "worker_rate_capped";
-// the reject counter splits it from the outage bucket.
 #[tokio::test]
 async fn rate_cap_select_failure_attributes_its_reject() {
     let (core, metrics) = core_failing_with(|| SelectError::RateCapExhausted {
@@ -117,7 +113,8 @@ async fn rate_cap_select_failure_attributes_its_reject() {
         .contains("sip_proxy_rejects_total{reason=\"worker_rate_capped\"} 1"));
 }
 
-// A non-ACK request at Max-Forwards 0 is answered 483 — and attributed.
+/// A non-ACK request at Max-Forwards 0 is answered 483, counted
+/// `too_many_hops`.
 #[tokio::test]
 async fn too_many_hops_attributes_its_reject() {
     let (core, metrics) =
@@ -180,8 +177,8 @@ Content-Length: 0\r\n\r\n"
     CustomParser::new().parse(raw.as_bytes()).unwrap()
 }
 
-// RFC 3261 §17.1.1.3/§17.2.1: an ACK is never answered. With no worker to
-// take it, it is dropped and counted as a request no worker takes, never 503'd.
+/// An ACK is never answered (RFC 3261 §17.1.1.3, §17.2.1): with no worker to
+/// take it, it is dropped and counted `no_target_dropped`.
 #[tokio::test]
 async fn an_ack_with_no_target_is_dropped_not_answered() {
     let (core, metrics) =
@@ -192,7 +189,6 @@ async fn an_ack_with_no_target_is_dropped_not_answered() {
     assert_eq!(metrics.reject_count("no_target_dropped"), 1);
 }
 
-// An ACK whose stickiness cookie is refused is dropped and counted, never 403'd.
 #[tokio::test]
 async fn an_ack_whose_cookie_is_refused_is_dropped_not_answered() {
     let net = SimulatedSignalingNetwork::new(1);

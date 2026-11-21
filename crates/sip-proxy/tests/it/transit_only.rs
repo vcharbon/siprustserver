@@ -23,7 +23,6 @@ async fn happy_call_invite_200_ack_bye_through_real_proxy() {
     let (strategy, registry) = forward_all(bob.addr());
     let proxy = spawn_proxy(&h, "127.0.0.1:5080", strategy, registry).await;
 
-    // INVITE — addressed to bob, sent through the proxy. The SUT forwards it.
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(proxy.addr()).send().await;
     let mut uas = bob.receive("INVITE").await;
     let recvd = uas.request();
@@ -42,13 +41,10 @@ async fn happy_call_invite_200_ack_bye_through_real_proxy() {
     let ok = call.expect(200).await;
     assert!(ok.raw(HeaderName::RecordRoute).next().is_some(), "200 OK echoes the proxy RR");
 
-    // ACK — alice's learned route set sends it to the proxy, which strips its
-    // Route and forwards to bob.
     let mut dialog = call.ack().await;
     let ack = bob.receive("ACK").await;
     assert!(!ack.request().has(&HeaderName::Route), "proxy strips its own Route from the ACK");
 
-    // BYE — same loose-routing path.
     let mut bye = dialog.bye().await;
     let mut bob_bye = bob.receive("BYE").await;
     bob_bye.respond(200, "OK").await;
@@ -60,6 +56,8 @@ async fn happy_call_invite_200_ack_bye_through_real_proxy() {
     assert_eq!(report.scenario().lanes.len(), 3, "alice + proxy + bob lanes");
 }
 
+/// Max-Forwards 0 draws the proxy's own 483; the ACK of that 483 is absorbed
+/// at this hop (RFC 3261 §17.1.1.3), and bob sees neither.
 #[tokio::test]
 async fn max_forwards_zero_returns_483() {
     let h = Harness::with_transit_delay("transit-mf0", 0);
@@ -88,8 +86,6 @@ Content-Length: 0\r\n\r\n";
     };
     assert_eq!(resp.status(), 483, "Max-Forwards: 0 → 483 Too Many Hops");
 
-    // §17.1.1.3: ACK the 483 (same branch/CSeq, To echoed from the final). The
-    // proxy generated the final itself, so it absorbs the ACK at this hop.
     let ack = format!(
         "ACK sip:bob@127.0.0.1:5070 SIP/2.0\r\n\
 Via: SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK-mf\r\n\
@@ -103,7 +99,6 @@ Content-Length: 0\r\n\r\n",
     );
     client.send_to(ack.as_bytes(), proxy.addr()).await.unwrap();
 
-    // Bob must not have received the over-hopped INVITE (nor its ACK).
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     assert!(bob_ep.try_recv().is_none(), "bob must see nothing on a 483");
     let _ = h.finish().await;

@@ -12,7 +12,6 @@ use sip_message::HeaderName;
 /// The extension header workers publish their overload triple on.
 pub const X_OVERLOAD: HeaderName = HeaderName::Other(SipStr::from_static("X-Overload"));
 
-/// The `(elu, gc, adm)` triple parsed off an `X-Overload` header.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct OverloadPayload {
     /// Event-loop utilization EWMA, clamped to `0..=1`.

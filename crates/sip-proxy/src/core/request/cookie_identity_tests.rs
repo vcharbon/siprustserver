@@ -96,12 +96,11 @@ Content-Length: 0\r\n\r\n"
     CustomParser::new().parse(raw.as_bytes()).unwrap()
 }
 
-// The b-leg long-call-loss class: through a masquerading node
-// the worker's INVITE arrives with src = SNAT node IP + ephemeral port. The
-// cookie must be encoded for the worker's REGISTRY identity (the SNAT-immune
-// top-Via sent-by) — encoding it for `src` makes encode_stickiness miss the
-// registry and emit a param-less cookie RR, so the callee's later in-dialog
-// requests decode Unknown and are re-sharded to an arbitrary worker.
+/// Through a masquerading node a worker's INVITE arrives from the node's address
+/// and an ephemeral port: the cookie is encoded for the worker's registry
+/// identity, its top-Via sent-by. A cookie encoded for the source misses the
+/// registry and carries no parameters, so the callee's later in-dialog requests
+/// decode `Unknown` and reach an arbitrary worker.
 #[tokio::test]
 async fn snat_masqueraded_bleg_invite_encodes_cookie_for_the_via_worker() {
     let f = fixture().await;
@@ -118,13 +117,13 @@ async fn snat_masqueraded_bleg_invite_encodes_cookie_for_the_via_worker() {
     );
 }
 
-// Pod-direct fallback: the top Via names an unregistered host (e.g. a
-// just-rebooted pod) but the UDP source IS the registered worker — the
-// cookie falls back to the source identity.
+/// The top Via names a host the registry does not list, a pod just rebooted,
+/// while the UDP source is the registered worker: the cookie falls back to the
+/// source's identity.
 #[tokio::test]
 async fn pod_direct_source_remains_the_cookie_fallback() {
     let f = fixture().await;
-    let req = bleg_invite("10.244.9.99"); // not in the registry
+    let req = bleg_invite("10.244.9.99");
     let pod_src = format!("{W1_POD}:5060").parse().unwrap();
 
     let outcome = f.core.route_request_from(&req, pod_src).await;

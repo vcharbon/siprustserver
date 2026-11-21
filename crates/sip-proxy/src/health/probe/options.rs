@@ -12,6 +12,7 @@ use crate::registry::WorkerEntry;
 
 impl HealthProbe {
     /// The OPTIONS probing `w`; `None` where its address does not make one.
+    /// Its Call-ID is diagnostic only: a reply correlates by the Via branch.
     pub(super) fn build_options(
         &self,
         w: &WorkerEntry,
@@ -24,7 +25,6 @@ impl HealthProbe {
                 request_uri: Some(
                     Uri::sip(SipStr::owned(&w.address.host)).with_port(w.address.port),
                 ),
-                // Diagnostic only — correlation is the transaction branch.
                 call_id: format!("probe-{}-{}@{}", w.id, now_ms, self.probe_host),
                 from: Some(
                     header::From::from_uri(Uri::sip_user(
@@ -42,8 +42,6 @@ impl HealthProbe {
                     Via::udp(SipStr::owned(&self.probe_host), self.probe_port)
                         .with_branch(SipStr::owned(branch))
                         .requesting_rport()
-                        // A `token` (RFC 3261 §25.1), which the reader of
-                        // `cr` decodes back to the call ref.
                         .with_param(
                             "cr",
                             ParamValue::Token(SipStr::owned(&encode_param(&probe_call_ref(

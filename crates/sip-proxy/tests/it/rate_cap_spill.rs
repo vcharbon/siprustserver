@@ -98,18 +98,17 @@ async fn a_rate_capped_winner_spills_the_new_call_to_the_next_alive_worker() {
     assert_eq!(f.metrics.overload_rejection_count("bucket_empty"), 0);
 }
 
+/// With three workers and the winner drained, each call lands on its next
+/// rendezvous rank: where it lands once an `above_critical` band takes the
+/// winner out of the candidate set.
 #[tokio::test(start_paused = true)]
 async fn the_spill_follows_the_rendezvous_order() {
-    // With three workers and the winner drained, each call lands where it
-    // lands once the winner is out of the candidate set: the next HRW rank.
     for i in 0..16 {
         let call_id = format!("call-rank-{i}@h");
         let f = fixture(3);
         let winner = f.winner_of(&call_id).await;
         let second = {
             let g = fixture(3);
-            // Taken out of the set by an above_critical band: the plain HRW
-            // winner of the remaining two, no spill involved.
             g.observer.apply_payload(winner, &OverloadPayload { elu: 0.99, gc: 0.0, adm: 0.0 }, 0);
             g.winner_of(&call_id).await
         };

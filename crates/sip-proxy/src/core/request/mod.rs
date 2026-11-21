@@ -1,18 +1,17 @@
 //! Request path, RFC 3261 §16: preflight (Max-Forwards 483, a request from this
-//! proxy's own address 482, Proxy-Require 420), the non-2xx ACK hop decision (relay on the INVITE's hop, or absorb the
-//! ACK to a self-generated final), top-Route strip + direction under the
-//! ingress face's trust (ADR-0048), self-gate (ELU/CPS) admission, target
-//! selection (CANCEL LRU → loose-route next hop → worker-outbound R-URI →
-//! cookie decode → select), received/rport stamping, Record-Route insertion,
-//! Via push, retransmission memos, serialize + forward, and a 513 for a forward
-//! the socket refused as too long.
+//! proxy's own address 482, Proxy-Require 420), the non-2xx ACK hop decision
+//! (relay on the INVITE's hop, or absorb the ACK to a self-generated final),
+//! top-Route strip and direction under the ingress face's trust (ADR-0048),
+//! self-gate (ELU/CPS) admission, target selection (CANCEL memo, loose-route
+//! next hop, worker-outbound R-URI, cookie decode, select), received/rport
+//! stamping, Record-Route insertion, Via push, retransmission memos, serialize
+//! and forward, and a 513 for a forward the socket refused as too long.
 //!
 //! The routing ladder lives in [`route`], Route preprocessing in [`classify`],
 //! the gate in [`admission`], the target's steps in [`target`], the
-//! double-Record-Route insertion in
-//! [`record_route`], the cookie on a worker's Via in [`via_cookie`],
-//! self-generated UAS finals in [`reply`]. The response relay does NOT live
-//! here — see `core/response`.
+//! double-Record-Route insertion in [`record_route`], the cookie on a worker's
+//! Via in [`via_cookie`], self-generated UAS finals in [`reply`]. The response
+//! relay lives in `core/response`.
 
 mod admission;
 mod classify;
@@ -93,7 +92,9 @@ fn top_via_branch(req: &SipRequest) -> Option<String> {
 }
 
 impl ProxyCore {
-    /// Route one request received from `src` on `face`.
+    /// The request is recorded on its call's trace (ADR-0026) before it is routed:
+    /// a datagram of a traced call after the one that opens its span is recorded
+    /// here and only here, a repeat that reaches activation again included.
     pub(super) async fn handle_request(&self, msg: SipMessage, src: SocketAddr, face: Face) {
         let start_ms = self.now_ms();
         let SipMessage::Request(req) = &msg else { return };
@@ -102,22 +103,8 @@ impl ProxyCore {
             return;
         }
         self.metrics.record_message(Direction::Inbound, MessageResult::Forwarded);
-        // A known method is its upper-case spelling (RFC 3261 §7.1); any
-        // other token is an extension method on its own row under the
-        // family's cap, `_overflow` past it.
         self.metrics.record_request(req.method().as_str());
-        // (`sip_proxy_calls_total` is counted inside `route_request`, where the
-        // retransmission memo can exclude re-sent copies of the same INVITE.)
 
-        // Per-call trace tier (ADR-0026): the Call-ID is the one the routing
-        // ladder already parsed — the hot path never re-scans the datagram —
-        // and the whole check is one predicted branch while nothing is sampled.
-        // A brand-new call is not in the map yet, so this is a miss and the
-        // activation that opens its span records the INVITE. Every LATER
-        // datagram of a traced call — including one that reaches activation
-        // again (a digest retry, a retransmit whose memo has been evicted) — is
-        // recorded HERE and only here: that activation reports `AlreadyOpen`
-        // and records nothing.
         let at_ms = i64::try_from(start_ms).unwrap_or(i64::MAX);
         let call_id = req.call_id().as_str();
         emit::sip_in(&self.traces, call_id, at_ms, src, req.image());
@@ -125,16 +112,7 @@ impl ProxyCore {
 
         let outcome = self.route_request(&msg, src, face).await;
 
-        // Close on the last fact this hop sees about the call, rather than
-        // holding its span, its active-cap slot and the process-wide sampled
-        // flag for the full idle TTL:
-        //  • an initial INVITE the ladder refused — nothing will ever name that
-        //    Call-ID again;
-        //  • the ACK of a setup this hop saw rejected for good (486, 603, and
-        //    the CANCEL flow's 487) — that call is over once its ACK is on the
-        //    wire. Which ACK that is was decided on the response path, where
-        //    the final's status is known, by arming the span: any other ACK
-        //    (a re-INVITE's 488, an auth challenge's, a 2xx's) leaves it open.
+        // ADR-0026 §2
         if initial_invite && outcome.decision == RoutingDecisionKind::Reject {
             self.traces.close(call_id);
         } else if req.method() == Method::Ack && outcome.target.is_some() {

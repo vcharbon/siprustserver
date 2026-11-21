@@ -45,7 +45,6 @@ pub const TASKS: [&str; 9] = [
 /// The restarts of the proxy's tasks in this process.
 pub static RESTARTS: Restarts<{ TASKS.len() }> = Restarts::new(TASKS);
 
-/// The restarts, by task.
 pub const TASK_RESTARTS: Family = Family::counter(
     "sip_proxy_task_restarts_total",
     Labels::Product(&[Dim::new("task", &TASKS)]),

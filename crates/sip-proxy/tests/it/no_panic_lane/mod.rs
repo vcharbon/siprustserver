@@ -1,7 +1,7 @@
 //! The no-panic property lane of the proxy's per-datagram path (ADR-0051
 //! §8): whatever datagram a caller, a worker or a callee sends, the recv loop
-//! every call shares keeps turning — its Via, cookie and branch decoding and
-//! its stateless forward decision included — and the parser it calls never
+//! every call shares keeps turning, its Via, cookie and branch decoding and
+//! its stateless forward decision included, and the parser it calls never
 //! panics.
 //!
 //! A case ([`rig::case`]) runs one proxy core over the simulated fabric with
@@ -14,28 +14,9 @@
 //! the rig's variants ([`rig::Variant`]): its self-gate closed, no worker
 //! alive, one worker down, two faces, names that resolve to nothing. The
 //! health probe reading a worker's answer ([`probe::case`]) and the load
-//! report's value codec ([`report::case`]) run beside it.
-//!
-//! - [`every_seed_survives_every_variant`] (default lane): every seed,
-//!   unmutated, on every variant;
-//! - [`every_variant_reaches_its_path`] (default lane): each variant reaches
-//!   the path it exists for — the proxy's own refusal, both faces, the
-//!   other owner, a negative entry;
-//! - [`a_probe_answer_feeds_the_observer`] (default lane): each seed answer
-//!   of the probe is read and routed on;
-//!
-//! Two slow-lane tests (`just test-slow` runs them in the test profile, so
-//! overflow checks and debug assertions are on), on threads with the lane's
-//! small stack:
-//!
-//! - [`structured_corpus_never_panics`]: every deterministic structured
-//!   mutation of every seed ([`wire_mutations::mutate::families`]);
-//! - [`random_mutations_never_panic`]: proptest over stacked random
-//!   mutations on any variant, a fixed case count, failures persisted under
-//!   `proptest-regressions/` beside this file;
-//! - [`random_probe_answers_never_panic`]: proptest over stacked random
-//!   mutations of the probe's seed answers;
-//! - [`random_reports_never_panic`]: proptest over load reports of any text.
+//! report's value codec ([`report::case`]) run beside it. The `#[ignore]`d
+//! tests are the slow lane (`just test-slow`, the test profile, overflow
+//! checks and debug assertions on), on threads with the lane's small stack.
 
 use std::fmt::Write as _;
 
@@ -55,7 +36,6 @@ use rig::{Peer, Variant};
 use sip_proxy::load_observer::EluBand;
 use sip_proxy::ProxyMetrics;
 
-/// Cases of the proptest property.
 const CASES: u32 = 1024;
 
 /// Threads the corpus is spread over, each on the lane's stack.

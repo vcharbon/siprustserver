@@ -1,45 +1,35 @@
 //! The shared worker-registry core: a [`topology::Membership`] identity/address
 //! set + a proxy-only `WorkerAnnotations` overlay, composed into the
-//! [`WorkerEntry`] set the LB reads.
-//!
-//! This is "the rest" that every registry impl shares. Once **health** (the
-//! one genuinely proxy-only, OPTIONS-driven field) is lifted out of the worker
-//! set, the set *is* membership, and a `WorkerEntry` is a pure projection:
+//! [`WorkerEntry`] set the LB reads:
 //!
 //! ```text
 //!   WorkerEntry = membership.host  ⊕  annotation{ port, health, acceptance }
 //! ```
 //!
-//! - **Identity + host** live in `topology::Membership` — one container, one diff
-//!   (`reconcile_to_desired`), one self-heal loop (`spawn_membership_reconcile`),
-//!   shared with the b2bua replication supervisor.
+//! - **Identity + host** live in `topology::Membership`, shared with the b2bua
+//!   replication supervisor; membership is port-agnostic (ADR-0011).
 //! - **Port + health + acceptance** live in `WorkerAnnotations`, keyed by ordinal.
-//!   Port is here (not in membership) because topology is deliberately
-//!   port-agnostic — the port is a consumer concern. In production every worker
-//!   uses the cluster-wide `default_port`; `static`/`simulated` may set a
-//!   per-worker `port_override`.
+//!   Every worker takes the cluster-wide `default_port` unless `static`/`simulated`
+//!   set a per-worker `port_override`.
 //! - **Departed addresses** live in `Tombstones`, keyed by address: an address
 //!   the set stopped serving still resolves as `Dead` for Timer H, so a response
 //!   from a node that left the pool is recognised as such.
-//! - **Only a `ready` member is routable, while one reads ready** (ADR-0031 D1).
-//!   The filter is applied here, at the projection, so a member whose endpoint is
-//!   not ready departs exactly as a removed one: its ordinal leaves the projection
-//!   and its address is tombstoned. Filtering in the LB instead would keep a live
-//!   entry and never insert the tombstone. The flip of a worker read `Alive`,
-//!   unless its endpoint reads `terminating`, is also a dead verdict (ADR-0050 §3).
+//! - **Only a `ready` member is routable, while one reads ready**: a member whose
+//!   endpoint is not ready departs exactly as a removed one, its ordinal out of
+//!   the projection and its address tombstoned (ADR-0031 D1). The flip of a
+//!   worker read `Alive`, unless its endpoint reads `terminating`, is also a dead
+//!   verdict (ADR-0050 §3).
 //! - **A view where no member reads ready routes on the probe.** Every member
 //!   present and not `terminating` is projected, and the workers that answer are
-//!   `Alive`: the slice speaks of the orchestrator's reach to the nodes, the probe
-//!   of the workers (ADR-0050 §11). The rule reads the slice and the health as they
-//!   stand now, so it holds no state, no timer, and a proxy started inside such a
+//!   `Alive` (ADR-0050 §11). The rule reads the slice and the health as they
+//!   stand now: it holds no state and no timer, and a proxy started inside such a
 //!   view needs no memory of an earlier one.
 //! - **The probe judges every member present and not `terminating`**, projected
 //!   or not (`WorkerSet::probed`), so a worker that flips keeps a health
 //!   as current as any other's when the view empties or it returns.
-//! - **The projection** is cached in one [`ArcSwap`] for lock-free hot reads and
-//!   is a pure function of the two authoritative sources — never an independent
-//!   source of truth, always re-derivable, inherently lag-immune (it recomposes
-//!   from the snapshot, never replays deltas).
+//! - **The projection** is cached in one [`ArcSwap`] for lock-free reads
+//!   (ADR-0009 X5). It is a pure function of the two sources, recomposed from
+//!   their snapshots, never from deltas.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -65,7 +55,6 @@ fn reads_down(peer: &Peer) -> bool {
     !peer.ready && !peer.terminating
 }
 
-/// Whether no member of the view reads `ready`.
 fn no_member_ready(members: &[Peer]) -> bool {
     !members.iter().any(|p| p.ready)
 }
@@ -108,10 +97,7 @@ pub(crate) struct WorkerSet {
     annotations: WorkerAnnotations,
     tombstones: Tombstones,
     projection: ArcSwap<Vec<WorkerEntry>>,
-    /// Every worker the probe judges, whether the projection holds it or not.
     probed: ArcSwap<Vec<WorkerEntry>>,
-    /// The projection routes on the probe's answers: members are present and
-    /// none reads ready.
     routing_on_answers: AtomicBool,
     /// The projection was composed from an authoritative listing.
     listed: AtomicBool,
@@ -220,13 +206,10 @@ impl WorkerSet {
         }
     }
 
-    /// Annotate a worker's health (the OPTIONS write seam) and recompose.
     pub(crate) fn set_health(&self, id: &str, health: WorkerHealth) {
         self.set_view(id, Some(health), None);
     }
 
-    /// Annotate a worker's acceptance of new calls (the OPTIONS write seam)
-    /// and recompose.
     pub(crate) fn set_acceptance(&self, id: &str, acceptance: Acceptance) {
         self.set_view(id, None, Some(acceptance));
     }
@@ -323,8 +306,6 @@ impl WorkerSet {
         self.tombstones.insert(address, id.to_string(), self.now_ms());
     }
 
-    // ---- read seam (lock-free, hot path) ----
-
     pub(crate) fn snapshot(&self) -> Vec<WorkerEntry> {
         self.projection.load().as_ref().clone()
     }
@@ -344,7 +325,7 @@ impl WorkerSet {
     /// The ordinals the set knows and does not route: members whose endpoint
     /// reads not ready, and the last ordinals of departed addresses whose
     /// tombstone is open, less every ordinal the projection holds. Sorted, no
-    /// duplicate. Read from the two sources the set already keeps.
+    /// duplicate.
     pub(crate) fn away_ordinals(&self) -> Vec<WorkerId> {
         let projected = self.projection.load();
         let mut away: Vec<WorkerId> = self

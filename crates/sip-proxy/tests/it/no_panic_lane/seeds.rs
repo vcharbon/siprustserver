@@ -4,10 +4,10 @@
 //! branch, the caller's ACK and BYE routed by the cookie the Record-Route
 //! carries, a CANCEL), a worker-outbound INVITE stating the call's other
 //! owner, with the callee's responses, and worker-outbound INVITEs toward
-//! names the resolver answers. Each seed names the unmutated datagrams sent before it. A
-//! variant's seeds are recorded on the rig its cookies and Record-Routes
-//! belong to ([`Variant::recorded_on`]). Addresses are documentation ranges
-//! (RFC 5737) and private worker ones.
+//! names the resolver answers. Each seed names the unmutated datagrams sent
+//! before and after it. A variant's seeds are recorded on the rig its cookies
+//! and Record-Routes belong to ([`Variant::recorded_on`]). Addresses are
+//! documentation ranges (RFC 5737) and private worker ones.
 
 use sip_message::generators::{generate_response, GenerateResponseOpts};
 use sip_message::types::SipHeader;
@@ -65,7 +65,6 @@ pub fn caller_invite() -> Vec<u8> {
     )
 }
 
-/// The caller's CANCEL of [`caller_invite`].
 pub fn caller_cancel() -> Vec<u8> {
     message(
         "CANCEL sip:bob@192.0.2.1:5060 SIP/2.0",

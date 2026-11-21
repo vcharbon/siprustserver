@@ -3,7 +3,7 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
-/// Add one to the counter at `slot` of `counters`.
+/// Add one to the counter at `slot` of `counters`; a slot past them is ignored.
 pub(super) fn bump(counters: &[AtomicU64], slot: usize) {
     if let Some(counter) = counters.get(slot) {
         counter.fetch_add(1, Ordering::Relaxed);

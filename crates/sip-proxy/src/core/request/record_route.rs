@@ -18,15 +18,19 @@ use crate::strategy::RouteParams;
 use super::super::{is_dialog_creating, ProxyCore};
 
 impl ProxyCore {
-    /// Insert the double Record-Route on an INITIAL dialog-creating request
-    /// (no To-tag); a no-op otherwise. A mid-dialog re-INVITE / target-refresh
-    /// (To-tag present) reuses the route set already fixed at dialog creation
-    /// (RFC 3261 §12.2), so re-inserting RR is inert bloat and never alters
-    /// the established route set. Returns the draft and the stickiness cookie
-    /// the inserted RR carries (`None` when nothing was inserted or the
-    /// strategy has no per-dialog stickiness). `repeated` is the cookie the
-    /// first copy of a retransmitted request carried: it is used again. `faces`
-    /// is the request's ingress and egress face.
+    /// Insert the double Record-Route on an initial dialog-creating request
+    /// (no To-tag); a no-op otherwise, since a mid-dialog request reuses the
+    /// route set fixed at dialog creation (RFC 3261 §12.2). Returns the draft
+    /// and the stickiness cookie the inserted entries carry (`None` when nothing
+    /// was inserted or the strategy has no per-dialog stickiness). `repeated` is
+    /// the cookie the first copy of a retransmitted request carried: it is used
+    /// again. `faces` is the request's ingress and egress face.
+    /// The cookie of a worker's dialog names the owners the worker states for
+    /// its call (ADR-0055 §8); the cookie of a dialog the proxy places names the
+    /// backup the strategy picks.
+    /// Cross-face the cookie rides both entries, so a reverse failover finds it
+    /// on whichever of this proxy's entries it reads; within one face the
+    /// `;outbound` entry carries none.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn insert_double_record_route(
         &self,
@@ -45,36 +49,11 @@ impl ProxyCore {
         if !is_dialog_creating(method) || !is_initial_dialog_req {
             return (draft, None);
         }
-        // Double record-route so in-dialog DIRECTION is intrinsic to the
-        // proxy's own Record-Route — no worker-stamped `;outbound`. We insert
-        // two RRs:
-        //   • cookie RR  — used by the EXTERNAL party to reach the worker
-        //     (decode → w_pri, registry-keyed, so it survives a worker pod-IP
-        //     change after reboot).
-        //   • outbound RR — used by the WORKER to reach the external party
-        //     (classified `;outbound` → forward to the R-URI).
-        // The §12.1.1 (UAS, forward) / §12.1.2 (UAC, reverse) route-set rule
-        // then puts the right half on top of each party's route set on its
-        // own; here we only choose which faces the *next hop*: forwarding TO a
-        // worker (inbound) puts the outbound/worker-facing RR on top, forwarding
-        // to the external party (worker-outbound) puts the cookie RR on top.
-        // `push_front` puts a line at the top of the message (§16.6 places the
-        // proxy's own headers there), so push the lower half first.
-        // For a worker-originated request the cookie identifies the
-        // ORIGINATING worker, taken from the SNAT-immune Via identity —
-        // NOT the UDP source: behind a masquerading node the source is the
-        // node IP + an ephemeral port, which matches no registry entry, so
-        // encoding for the source silently produces a param-less cookie RR and
-        // the callee's later in-dialog requests decode Unknown and are
-        // re-sharded to an arbitrary worker (the b-leg variant of the
-        // long-call-loss class). `src` stays as the pod-direct fallback.
         let cookie_addr = if is_worker_outbound {
             via_worker_addr.clone().unwrap_or_else(|| ProxyAddr::from(src))
         } else {
             target.clone()
         };
-        // A worker's dialog names the owners the worker states for its call
-        // (ADR-0055 §8); a dialog the proxy places names the backup it picks.
         let stickiness = repeated.cloned().or_else(|| {
             if is_worker_outbound {
                 let stated = stated_owners(req.top_via());
@@ -83,13 +62,6 @@ impl ProxyCore {
                 self.strategy.encode_stickiness(&cookie_addr, msg)
             }
         });
-        // Dual-face (§16.6/§16.7 multi-homed): the §12.1.1/§12.1.2 route-set
-        // rules put the top entry first for the party this request goes to and
-        // the lower entry first for the party it came from, so each party's
-        // requests reach the proxy on the face that party talks to: the top
-        // entry states the egress face, the lower one the ingress face. The
-        // marker stays on the worker's half. When both are one face (single-face
-        // mode) this is byte-identical to the single-advertise double-RR.
         let (ingress, egress) = faces;
         let (ingress_adv, egress_adv) = (self.advertised_of(ingress), self.advertised_of(egress));
         let (external_party_adv, worker_party_adv) =
@@ -99,10 +71,6 @@ impl ProxyCore {
             Some(params) => record_route(external_party_adv, params.iter()),
             None => record_route(external_party_adv, std::iter::empty()),
         };
-        // Cross-face, the stickiness cookie rides BOTH entries: whichever
-        // self-RR a response's reverse-failover (or a diagnostic) recovers
-        // params from, the signed worker pin is present. Intra-face keeps
-        // the param-less `;outbound;lr` form.
         let outbound_rr = match (&stickiness, cross_face) {
             (Some(params), true) => {
                 record_route_flagged(worker_party_adv, params.iter(), "outbound")

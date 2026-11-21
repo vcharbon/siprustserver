@@ -135,7 +135,6 @@ async fn the_ack_to_an_own_503_is_absorbed_with_no_memo_at_every_proxy_sharing_t
     );
 }
 
-/// A request on alice's dialog with bob, CSeq 2, with `max_forwards`.
 fn in_dialog(method: &str, cseq_method: &str, max_forwards: u32) -> SipMessage {
     parse(&format!(
         "{method} sip:bob@10.0.0.50:5060 SIP/2.0\r\n\

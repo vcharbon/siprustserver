@@ -26,7 +26,6 @@ use crate::external_face::FaceCheck;
 use branch_memo::branch_memo;
 use external_face::external_face_check;
 
-/// Where the worker pool comes from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WorkerSource {
     /// `PROXY_WORKERS`: a fixed `id@host:port,..` list.
@@ -43,7 +42,6 @@ pub struct ExternalFace {
     pub advertise: ProxyAddr,
 }
 
-/// The proxy's boot configuration.
 #[derive(Debug, Clone)]
 pub struct ProxyConfig {
     pub listen: SocketAddr,
@@ -82,7 +80,6 @@ pub struct ProxyConfig {
     pub self_gate: Option<ProxySelfGateConfig>,
     /// The spread, seconds, added to a refusal's `Retry-After` base.
     pub retry_after_jitter_sec: u32,
-    /// The entry cap and byte budget of the CANCEL/ACK branch memo.
     pub branch_memo: MemoBounds,
     pub resolver: ResolverConfig,
     pub prewarm: Vec<ProxyAddr>,
@@ -117,6 +114,8 @@ impl ProxyConfig {
     /// Reads every boot variable through `get` (`None` = unset).
     /// `pod_namespace` reads the namespace of the pod the proxy runs in.
     /// `Err` holds every problem, one line each.
+    /// `observe::TRACE_HEADER_ENV` is read by the trace registry and refused
+    /// here unless on or off.
     pub fn from_lookup(
         get: &dyn Fn(&str) -> Option<String>,
         pod_namespace: &dyn Fn() -> Option<String>,
@@ -166,7 +165,6 @@ impl ProxyConfig {
         let external_face_check = external_face_check(&mut env);
         let external_face_period =
             Duration::from_millis(env.int("PROXY_EXT_FACE_CHECK_MS", 500, 10, 60_000));
-        // Read by the trace registry; refused here unless on or off.
         env.flag(observe::TRACE_HEADER_ENV, false);
 
         let mut errors = env.into_errors();
@@ -175,10 +173,6 @@ impl ProxyConfig {
         if let Err(violations) = validate_config(timings, &observer) {
             errors.extend(violations);
         }
-        // The memo holds the entries of every call the self-gate admits. The
-        // gate counts the external INVITEs; the B-legs the workers send
-        // bypass it, so the check holds while the system's whole rate stays
-        // within one proxy's gate, each B-leg pairing an admitted call.
         if let Some(gate) = &self_gate {
             let held = calls_per_second(&branch_memo);
             if held < usize::try_from(gate.cps_bucket_rate).unwrap_or(usize::MAX) {
@@ -198,8 +192,6 @@ impl ProxyConfig {
                 ));
             }
         }
-        // A healthy proxy whose probes to every worker lose their first copy
-        // still hears the answer to a Timer E copy inside the window.
         let isolation_floor = probe.interval_ms.saturating_add(T1_MS);
         if isolation_ms < isolation_floor {
             errors.push(format!(
@@ -209,8 +201,6 @@ impl ProxyConfig {
                 probe.interval_ms
             ));
         }
-        // A recreated pod on the same host binds the faces its predecessor
-        // holds until that one's drain ends.
         if bind_retry_deadline <= drain_grace {
             errors.push(format!(
                 "PROXY_BIND_RETRY_DEADLINE_MS={} must exceed PROXY_DRAIN_GRACE_MS={}: a \
@@ -412,7 +402,6 @@ fn socket_buffer(env: &mut EnvReader, key: &str) -> Option<usize> {
     }
 }
 
-/// The `LB_*` band, AIMD and cap overrides onto `cfg`.
 fn observer_overrides(env: &mut EnvReader, mut cfg: LoadObserverConfig) -> LoadObserverConfig {
     let mut set = |key: &str, field: &mut f64, span: Span| *field = env.real(key, *field, span);
     set("LB_ELU_SOFT", &mut cfg.elu_soft, Span::Fraction);
@@ -441,7 +430,6 @@ fn self_gate(env: &mut EnvReader) -> Option<ProxySelfGateConfig> {
     on.then_some(cfg)
 }
 
-/// The named-target resolver's cache and lookup bounds.
 fn resolver(env: &mut EnvReader) -> ResolverConfig {
     let d = ResolverConfig::default();
     ResolverConfig {

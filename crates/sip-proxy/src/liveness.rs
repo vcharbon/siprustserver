@@ -1,11 +1,7 @@
-//! Recv-shard liveness: is every shard turning its loop?
-//!
-//! Every activity meter the proxy has (intake age, ELU) reads zero for a
-//! shard that took a packet and never came back, so a parked shard is
-//! indistinguishable from an idle one. This is the one signal that tells
-//! them apart: each shard stamps the instant it dequeued a packet and clears
-//! the stamp when it returns to waiting on its sockets. A stamp older than
-//! the stall threshold is a shard that is neither idle nor turning.
+//! Recv-shard liveness: each shard stamps the instant it dequeued a packet
+//! and clears the stamp when it returns to waiting on its sockets. A stamp
+//! older than the stall threshold is a shard that is neither idle nor
+//! turning. See ADR-0033 §4.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -33,7 +29,6 @@ impl ShardPulse {
         }
     }
 
-    /// `shard` is back to waiting on its sockets.
     pub fn waiting(&self, shard: usize) {
         if let Some(cell) = self.busy_since_ms.get(shard) {
             cell.store(0, Ordering::Relaxed);

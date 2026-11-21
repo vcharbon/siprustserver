@@ -73,7 +73,6 @@ fn signed_core() -> (Fixture, Arc<LoadBalancerStrategy>) {
     (dual_face_core_routing(registry, strategy.clone(), None), strategy)
 }
 
-/// `params` as the fields of a Route URI.
 fn fields(params: &RouteParams) -> String {
     let field = |(k, v): (&String, &String)| format!(";{k}={v}");
     params.iter().map(field).collect()
@@ -122,7 +121,6 @@ Content-Length: 0\r\n\r\n"
     ))
 }
 
-/// A BYE from `sender`, stating `route`, to the Request-URI `uri`.
 fn bye(sender: &str, route: &str, uri: &str) -> SipMessage {
     parse_msg(&format!(
         "BYE {uri} SIP/2.0\r\n\
@@ -152,8 +150,8 @@ fn top_via(bytes: &[u8]) -> String {
     header_lines(bytes, "Via").remove(0)
 }
 
-// ── Request, arrived external ───────────────────────────────────────────────
-
+/// A caller's request arriving external leaves internal whatever her address,
+/// and records both faces so her later requests come back to the face she reached.
 #[tokio::test]
 async fn a_request_arriving_external_leaves_internal_whatever_its_source_address() {
     let f = dual_face_core();
@@ -162,7 +160,6 @@ async fn a_request_arriving_external_leaves_internal_whatever_its_source_address
     let (face, dst, bytes) = one_sent(&f);
     assert_eq!((face, dst), ("int", sa(W1, 5060)));
     assert!(top_via(&bytes).contains(&int_advertise()));
-    // The caller's own later requests come back to the face she reached.
     let rrs = header_lines(&bytes, "Record-Route");
     assert!(rrs[0].contains(&int_advertise()) && rrs[0].contains(";outbound"), "{rrs:?}");
     assert!(rrs[1].contains(&ext_advertise()) && !rrs[1].contains(";outbound"), "{rrs:?}");
@@ -178,8 +175,6 @@ async fn a_request_arriving_external_leaves_internal_whatever_its_target_address
     assert_eq!((face, dst), ("int", sa(W_ELSEWHERE, 5060)));
     assert!(top_via(&bytes).contains(&int_advertise()));
 }
-
-// ── Request, arrived internal: worker-outbound or a loose hop ───────────────
 
 /// A caller's Contact is hers to write: naming a host on the workers' prefix
 /// aims the worker's request at nothing on the internal plane.
@@ -244,8 +239,6 @@ Content-Length: 0\r\n\r\n"
     assert!(rrs[1].contains(&int_advertise()) && rrs[1].contains(";outbound"), "{rrs:?}");
 }
 
-// ── Request, arrived internal: neither ──────────────────────────────────────
-
 /// The in-dialog request of a call that looped back through the platform with
 /// no Record-Routing hop between its passes: two own pairs back to back, the
 /// last pair naming the other call's worker. It re-enters and its response
@@ -281,6 +274,7 @@ Content-Length: 0\r\n\r\n"
 
 /// A flow that moved reaches the other proxy, which holds no memo and picks the
 /// same egress and the same sent-by from the message alone.
+/// Its response crosses back through the instance that did not forward it.
 #[tokio::test]
 async fn the_other_instance_picks_the_same_egress_with_no_memo() {
     let (one, strategy) = signed_core();
@@ -294,7 +288,6 @@ async fn the_other_instance_picks_the_same_egress_with_no_memo() {
     let via = |bytes: &[u8]| top_via(bytes).split(';').next().unwrap().to_string();
     assert_eq!(via(&first.2), via(&second.2), "one sent-by at either instance");
 
-    // The response crosses back through the instance that did not forward it.
     let vias: String =
         header_lines(&first.2, "Via").iter().map(|v| format!("Via: {v}\r\n")).collect();
     let SipMessage::Response(resp) = parse_msg(&format!(
@@ -322,8 +315,6 @@ async fn a_request_arriving_internal_for_any_other_target_leaves_external() {
     assert_eq!((face, dst), ("ext", sa(NEAR_HOST, 5060)));
     assert!(top_via(&bytes).contains(&ext_advertise()));
 }
-
-// ── A name and the address it resolves to ───────────────────────────────────
 
 struct NearResolver;
 
@@ -376,8 +367,6 @@ async fn a_prewarmed_name_is_warm_on_the_face_its_request_leaves() {
     assert_eq!((face, dst), ("ext", sa(NEAR_HOST, 5060)));
     assert_eq!(lookups.load(Ordering::SeqCst), 1, "no second lookup");
 }
-
-// ── Responses ───────────────────────────────────────────────────────────────
 
 fn response_with_vias(vias: &str) -> sip_message::types::SipResponse {
     let SipMessage::Response(resp) = parse_msg(&format!(
@@ -530,8 +519,6 @@ Via: SIP/2.0/UDP {NEAR_CALLER}:5060;branch=z9hG4bKc\r\n"
     assert_eq!(f.metrics().face_messages_total(Face::Internal, Direction::Outbound), 0);
 }
 
-// ── Own finals ──────────────────────────────────────────────────────────────
-
 fn out_of_hops(sender: &str) -> SipMessage {
     parse_msg(&format!(
         "OPTIONS sip:bob@example.com SIP/2.0\r\n\
@@ -564,8 +551,6 @@ async fn an_own_final_leaves_the_internal_face_it_was_asked_on() {
     assert!(String::from_utf8_lossy(&bytes).starts_with("SIP/2.0 483"));
     assert_eq!((face, dst), ("int", src));
 }
-
-// ── The residuals ADR-0048 states ───────────────────────────────────────────
 
 /// A sender no registry lists, whose request stayed internal: the marker brings
 /// its response back the way it came.

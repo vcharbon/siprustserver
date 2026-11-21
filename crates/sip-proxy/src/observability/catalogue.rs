@@ -358,8 +358,6 @@ pub const PEER_FAILURES_OVERFLOW: Family = Family::counter(
     "observations of sip_proxy_peer_failures_total past its cap, each counted on its series whose peer reads _overflow",
 );
 
-// ── The proxy-self gate ──
-
 pub const SELF_GATE_ELU_EWMA: Family = Family::gauge(
     "sip_proxy_self_elu_ewma",
     Labels::None,

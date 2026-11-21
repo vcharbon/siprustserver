@@ -4,8 +4,6 @@ use sip_proxy::registry::WorkerRegistry;
 
 use crate::config::ProxyConfig;
 
-/// The lifecycle line of a proxy about to serve: its faces, its workers and
-/// its socket settings.
 pub fn log_listening(cfg: &ProxyConfig, registry: &dyn WorkerRegistry) {
     let face_note = match &cfg.external {
         Some(ext) => format!(

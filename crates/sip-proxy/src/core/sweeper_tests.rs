@@ -45,13 +45,10 @@ impl UdpEndpoint for PendingEndpoint {
 /// and `sip_proxy_pending_invite_lru_size` would climb without bound.
 #[tokio::test(start_paused = true)]
 async fn run_sweeps_expired_pending_invite_entries() {
-    // (Cadence ≤ shortest TTL is a compile-time invariant in cancel_lru.rs.)
     let clock = Clock::test_at(0);
     let lru = Arc::new(CancelBranchLru::with_clock(clock.clone()));
     let metrics = Arc::new(ProxyMetrics::new());
 
-    // Remember one entry at the SHORT (rtx) TTL and publish the gauge, as
-    // the request path does on every forward.
     lru.remember(
         "call-leaky-memo",
         CancelEntry {
@@ -76,8 +73,6 @@ async fn run_sweeps_expired_pending_invite_entries() {
         .build(Box::new(PendingEndpoint));
     let task = tokio::spawn(core.run());
 
-    // Advance past the 32 s TTL so a sweep tick lands after the entry expires;
-    // the map must drain and the gauge follow it down.
     for _ in 0..50 {
         tokio::time::advance(Duration::from_secs(1)).await;
         tokio::task::yield_now().await;
@@ -134,13 +129,9 @@ impl UdpEndpoint for DrainOnceEndpoint {
 #[tokio::test(start_paused = true)]
 async fn run_records_packet_age_at_dequeue() {
     let clock = Clock::test_at(0);
-    // Move the paused clock to now_ms = 700 in 100 ms chunks (no pending
-    // timers exist yet — nothing can fire mid-advance).
     for _ in 0..7 {
         tokio::time::advance(Duration::from_millis(100)).await;
     }
-    // Two packets queued in the past: ages at dequeue 500 ms and 200 ms.
-    // Raw bytes are deliberately unparseable — no SIP flow is involved.
     let ep = DrainOnceEndpoint(Mutex::new(vec![
         UdpPacket::unparsed(&b"not-sip"[..], "127.0.0.1:9999".parse().unwrap(), 200),
         UdpPacket::unparsed(&b"not-sip"[..], "127.0.0.1:9999".parse().unwrap(), 500),
@@ -155,7 +146,6 @@ async fn run_records_packet_age_at_dequeue() {
         .intake_age(recorder.clone())
         .build(Box::new(ep));
 
-    // Drain both packets; the endpoint then closes and run() returns.
     core.run().await;
 
     assert_eq!(recorder.drain_max(), 500, "the window max is the OLDEST packet's dequeue age");
@@ -174,12 +164,8 @@ async fn intake_age_is_immune_to_wall_versus_monotonic_divergence() {
 
     use crate::self_gate::AGE_CRITICAL_MS;
 
-    // 20× the age at which the ELU arm reads fully saturated.
     let clock = Clock::test_at(sip_clock::raw_system_wall_ms() + 20 * AGE_CRITICAL_MS as i64);
 
-    // The arrival stamp comes from a REAL bind told that clock — the seam
-    // the runner wires; the bytes are deliberately unparseable (the age is
-    // recorded before the parse).
     let net = SimulatedSignalingNetwork::new(1);
     let uas: SocketAddr = "127.0.0.1:5061".parse().unwrap();
     let uac = net

@@ -25,7 +25,6 @@ fn health_write_composes_and_survives_membership_recompose() {
     let (set, sim) = ws(&[("w0", "10.0.0.1")], 5060);
     set.set_health("w0", WorkerHealth::Alive);
     assert_eq!(set.resolve("w0").unwrap().health, WorkerHealth::Alive);
-    // A membership change (new peer) must not stomp w0's probe-written health.
     sim.add(Peer::new("w1", "10.0.0.2"));
     set.recompose();
     assert_eq!(set.resolve("w0").unwrap().health, WorkerHealth::Alive);
@@ -94,6 +93,9 @@ async fn a_departed_address_reads_dead_for_timer_h_then_nothing() {
     assert!(set.lookup_by_address(&gone).is_none(), "the window closed at Timer H");
 }
 
+/// A host move tombstones the old address `Dead` and leaves the new one
+/// `Unknown`. The tombstone is keyed by address, so the worker's later health
+/// writes never reach it.
 #[test]
 fn a_host_move_tombstones_the_old_address_and_leaves_the_new_one_unknown() {
     let (set, sim) = ws(&[("w0", "10.0.0.1")], 5060);
@@ -109,8 +111,6 @@ fn a_host_move_tombstones_the_old_address_and_leaves_the_new_one_unknown() {
     assert_eq!(new.health, WorkerHealth::Unknown, "the fresh endpoint awaits its probe");
     assert_eq!(set.resolve("w0").unwrap().address, ProxyAddr::new("10.0.0.2", 5060));
 
-    // The tombstone is address-keyed, so the live ordinal's health writes
-    // never reach it.
     set.set_health("w0", WorkerHealth::Alive);
     assert_eq!(
         set.lookup_by_address(&ProxyAddr::new("10.0.0.1", 5060)).unwrap().health,
@@ -256,7 +256,6 @@ fn the_flip_that_empties_the_view_tells_nothing_and_returns_the_workers_left_bef
     assert_eq!(told(&mut verdicts), ["w1"]);
     assert!(set.resolve("w0").is_none() && set.resolve("w1").is_none());
 
-    // w1 answered no probe since its flip; w2 flips last and empties the view.
     sim.set_conditions("w2", false, false);
     set.recompose();
     assert_eq!(told(&mut verdicts), Vec::<WorkerId>::new(), "the last flip is no verdict");

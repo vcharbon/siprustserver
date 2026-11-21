@@ -187,9 +187,9 @@ fn uas() -> SocketAddr {
     format!("{UAS}:5060").parse().unwrap()
 }
 
-// A worker's re-INVITE carries the dialog's cookie on the Via the proxy
-// pushes, signed as the strategy signs it and without the Route's routing
-// flags; its CANCEL carries the same Via (RFC 3261 §9.1).
+/// A worker's re-INVITE carries the dialog's cookie on the Via the proxy
+/// pushes, signed as the strategy signs it and without the Route's routing
+/// flags; its CANCEL carries the same Via (RFC 3261 §9.1).
 #[tokio::test]
 async fn a_workers_reinvite_and_its_cancel_carry_the_dialog_cookie_on_the_pushed_via() {
     let f = fixture();
@@ -210,8 +210,8 @@ async fn a_workers_reinvite_and_its_cancel_carry_the_dialog_cookie_on_the_pushed
     assert_eq!(top_via(&cxl), via, "the CANCEL's Via is its INVITE's");
 }
 
-// The ACK of a worker's re-INVITE's non-2xx final carries the re-INVITE's
-// Via (RFC 3261 §17.1.1.3): the same route set, the same cookie.
+/// The ACK of a worker's re-INVITE's non-2xx final carries the re-INVITE's
+/// Via (RFC 3261 §17.1.1.3): the same route set, the same cookie.
 #[tokio::test]
 async fn a_workers_reinvite_and_its_non_2xx_ack_carry_one_via() {
     let f = fixture();
@@ -228,10 +228,10 @@ async fn a_workers_reinvite_and_its_non_2xx_ack_carry_one_via() {
     assert_eq!(top_via(&one_sent(&f).1), top_via(&fwd), "the non-2xx ACK's Via is its INVITE's");
 }
 
-// A worker's initial INVITE states no cookie of its own (its preloaded Route
-// carries none): its Via carries the cookie minted for the worker, the one its
-// Record-Route carries, and so do its CANCEL (§9.1) and its non-2xx ACK
-// (§17.1.1.3), which carry the same Route.
+/// A worker's initial INVITE states no cookie of its own (its preloaded Route
+/// carries none): its Via carries the cookie minted for the worker, the one its
+/// Record-Route carries, and so do its CANCEL (§9.1) and its non-2xx ACK
+/// (§17.1.1.3), which carry the same Route.
 #[tokio::test]
 async fn a_workers_initial_invite_and_its_cancel_and_ack_carry_the_minted_cookie() {
     let f = fixture();
@@ -265,9 +265,9 @@ async fn reinvite_forwarded_then_w1_dead(f: &Fixture) -> Vec<u8> {
     fwd
 }
 
-// An INVITE response with no Record-Route, bound for a dead worker, fails over
-// to the backup on the cookie of the proxy's own Via: the 2xx and the 100
-// alike.
+/// An INVITE response with no Record-Route, bound for a dead worker, fails over
+/// to the backup on the cookie of the proxy's own Via: the 2xx and the 100
+/// alike.
 #[tokio::test]
 async fn a_response_without_record_route_fails_over_on_the_via_cookie() {
     let f = fixture();
@@ -279,8 +279,8 @@ async fn a_response_without_record_route_fails_over_on_the_via_cookie() {
     }
 }
 
-// A Via cookie whose signature does not verify is not honoured: the response
-// bound for the dead worker is dropped, never failed over.
+/// A Via cookie whose signature does not verify is not honoured: the response
+/// bound for the dead worker is dropped, never failed over.
 #[tokio::test]
 async fn a_tampered_via_cookie_is_not_honoured() {
     let f = fixture();
@@ -294,10 +294,10 @@ async fn a_tampered_via_cookie_is_not_honoured() {
     assert!(f.wire.take().is_empty(), "a forged cookie routes nothing");
 }
 
-// A param on the proxy's Route entry that is not one of the cookie's fields —
-// a downstream party's echo of the Record-Route, say — never reaches the Via,
-// and never replaces a param the proxy set there itself: the §16.11 branch
-// stays the proxy's, and no `maddr` steers the response (§18.2.2).
+/// A param on the proxy's Route entry that is not one of the cookie's fields —
+/// a downstream party's echo of the Record-Route, say — never reaches the Via,
+/// and never replaces a param the proxy set there itself: the §16.11 branch
+/// stays the proxy's, and no `maddr` steers the response (§18.2.2).
 #[tokio::test]
 async fn only_the_cookie_fields_reach_the_via() {
     let f = fixture();
@@ -315,9 +315,9 @@ async fn only_the_cookie_fields_reach_the_via() {
     assert!(via.contains(&format!(";sig={}", cookie["sig"])), "the cookie rides on: {via}");
 }
 
-// A cookie on the route set whose signature does not verify for the call is
-// never carried onto the proxy's Via: the Via carries the cookie minted for
-// the sending worker in its place.
+/// A cookie on the route set whose signature does not verify for the call is
+/// never carried onto the proxy's Via: the Via carries the cookie minted for
+/// the sending worker in its place.
 #[tokio::test]
 async fn a_forged_route_cookie_is_not_carried() {
     let f = fixture();
@@ -354,8 +354,8 @@ fn preloaded() -> String {
     format!("Route: <sip:{PROXY_VIP}:5060;lr>\r\n")
 }
 
-// An emergency INVITE's cookie says so (`e=1`); its CANCEL carries no
-// Resource-Priority, and still carries the INVITE's Via (§9.1).
+/// An emergency INVITE's cookie says so (`e=1`); its CANCEL carries no
+/// Resource-Priority, and still carries the INVITE's Via (§9.1).
 #[tokio::test]
 async fn an_emergency_invites_cancel_carries_its_via() {
     let f = fixture();
@@ -367,8 +367,8 @@ async fn an_emergency_invites_cancel_carries_its_via() {
     assert_eq!(top_via(&one_sent(&f).1), via, "the CANCEL's Via is its INVITE's");
 }
 
-// The worker set moves between an INVITE and its CANCEL: the CANCEL still
-// carries the INVITE's Via, whose backup the set no longer offers.
+/// The worker set moves between an INVITE and its CANCEL: the CANCEL still
+/// carries the INVITE's Via, whose backup the set no longer offers.
 #[tokio::test]
 async fn a_cancel_after_the_worker_set_moved_carries_its_invites_via() {
     let f = fixture();
@@ -380,8 +380,8 @@ async fn a_cancel_after_the_worker_set_moved_carries_its_invites_via() {
     assert_eq!(top_via(&one_sent(&f).1), via, "the CANCEL's Via is its INVITE's");
 }
 
-// The INVITE's worker departs and its address's window lapses on a long ring:
-// the CANCEL it still sends carries the INVITE's Via.
+/// The INVITE's worker departs and its address's window lapses on a long ring:
+/// the CANCEL it still sends carries the INVITE's Via.
 #[tokio::test(start_paused = true)]
 async fn a_cancel_past_its_workers_tombstone_carries_its_invites_via() {
     let f = fixture();
@@ -395,8 +395,8 @@ async fn a_cancel_past_its_workers_tombstone_carries_its_invites_via() {
     assert_eq!(top_via(&one_sent(&f).1), via, "the CANCEL's Via is its INVITE's");
 }
 
-// A retransmission of a worker's INVITE repeats the cookie its first copy
-// carried, on the Record-Route and on the Via, whatever the set did since.
+/// A retransmission of a worker's INVITE repeats the cookie its first copy
+/// carried, on the Record-Route and on the Via, whatever the set did since.
 #[tokio::test]
 async fn a_retransmitted_invite_repeats_its_first_copys_cookies() {
     let f = fixture();

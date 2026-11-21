@@ -1,15 +1,15 @@
-//! [`WorkerRegistryControl`] — the health-write seam. The HealthProbe writes worker health
-//! through this seam so it does not depend on a concrete registry's internals.
-//! The one impl is the adapter over the shared `WorkerSet` — every registry
-//! (static, composed, simulated) wraps a `WorkerSet`, so each hands out the
-//! same adapter from its `control()`.
+//! [`WorkerRegistryControl`]: the health-write seam. The health probe writes
+//! worker health through it, never through a concrete registry's internals.
+//! Its one impl adapts the shared `WorkerSet` that every registry (static,
+//! composed, simulated) wraps, so each hands out the same adapter from its
+//! `control()`.
 
 use std::sync::Arc;
 
 use super::projection::WorkerSet;
 use super::{Acceptance, WorkerHealth};
 
-/// The write seam. Suspending allowed (the routing hot path never calls this).
+/// The write seam of worker health. The routing hot path never calls it.
 pub trait WorkerRegistryControl: Send + Sync {
     /// Annotate a worker's health. No-op if the worker is unknown or unchanged.
     fn set_health(&self, id: &str, health: WorkerHealth);

@@ -53,7 +53,6 @@ pub struct SharedRouting {
 }
 
 impl SharedRouting {
-    /// The builder of recv shard `shard`'s core over the shared state.
     pub fn shard(&self, shard: usize) -> ProxyCoreBuilder {
         ProxyCoreBuilder::new(
             self.advertised.clone(),

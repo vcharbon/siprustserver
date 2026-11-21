@@ -1,7 +1,7 @@
 //! The proxy-only overlay on the worker set, keyed by ordinal: each worker's
-//! health and acceptance as the OPTIONS probe reads them, and its port. Lifted
-//! out of the worker set, so that the set is membership and a
-//! [`WorkerEntry`](super::WorkerEntry) a pure projection.
+//! health and acceptance as the OPTIONS probe reads them, and its port. The
+//! worker set holds membership alone, and a [`WorkerEntry`](super::WorkerEntry)
+//! is the projection of both.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -47,7 +47,6 @@ impl Annot {
     }
 }
 
-/// A member's standing in the view this recompose reads.
 #[derive(Debug, Clone, Copy)]
 pub(super) struct Standing {
     pub(super) ready: bool,
@@ -72,8 +71,6 @@ pub(super) struct Departed {
     pub(super) flipped: bool,
 }
 
-/// Proxy-only worker annotations keyed by ordinal — the OPTIONS/health + port
-/// concerns lifted out of the worker set. Lock-free reads via [`ArcSwap`].
 #[derive(Default)]
 pub(super) struct WorkerAnnotations {
     records: ArcSwap<HashMap<WorkerId, Annot>>,
@@ -84,13 +81,11 @@ impl WorkerAnnotations {
         self.records.load_full()
     }
 
-    /// Read-modify-write helper (annotations only mutate off the hot path).
-    /// `rcu`, not load-clone-store: the probe task's `set_health` and the
-    /// reconcile task's `sync_membership` run concurrently, and a plain store
-    /// could publish a map cloned BEFORE the other writer's update — silently
-    /// erasing a `Dead` mark until the next probe tick re-wrote it (a window
-    /// where new dialogs kept routing to a dead worker). `rcu` re-runs the
-    /// closure on contention, so `f` must be idempotent over its captures.
+    /// Read-modify-write of the records, off the hot path. The probe task's
+    /// `set_health` and the reconcile task's `sync_membership` write
+    /// concurrently, so the write is an `rcu`: a load-clone-store could publish
+    /// a map cloned before the other writer's update and erase it. `rcu` re-runs
+    /// `f` on contention, so `f` must be idempotent over its captures.
     pub(super) fn update(&self, f: impl Fn(&mut HashMap<WorkerId, Annot>)) {
         self.records.rcu(|cur| {
             let mut next = (**cur).clone();
@@ -144,7 +139,6 @@ impl WorkerAnnotations {
             address: ProxyAddr::new(rec.host.clone(), rec.port_override.unwrap_or(default_port)),
             flipped,
         };
-        // Membership deltas are rare state changes: each gets its own line.
         let mut departed = Vec::new();
         for (id, rec) in replaced.iter() {
             if !live.contains(id.as_str()) {

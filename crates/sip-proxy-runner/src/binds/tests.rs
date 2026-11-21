@@ -1,11 +1,6 @@
-//! The bind retry, over real sockets.
+//! The bind retry and the signalling sockets' intake hook, over real sockets
+//! and the real clock, with test-short intervals.
 use super::*;
-
-// ── bind_with_retry — bounded EADDRINUSE wait ───────────────────────────
-//
-// Real sockets ⇒ real clock (docs/testing/test-clock.md forbids pausing
-// tokio time under real socket readiness). Intervals are test-short
-// (10 ms / 300 ms) so the whole group stays sub-second — default lane.
 
 const TEST_INTERVAL: Duration = Duration::from_millis(10);
 const TEST_DEADLINE: Duration = Duration::from_millis(300);
@@ -14,8 +9,8 @@ fn tcp_in_use(e: &std::io::Error) -> bool {
     e.kind() == std::io::ErrorKind::AddrInUse
 }
 
-/// (a) The holder releases the port mid-retry: the bind lands well before
-/// the deadline instead of the process dying on the first attempt.
+/// The holder releases the port mid-retry: the bind lands before the
+/// deadline instead of the process dying on the first attempt.
 #[tokio::test]
 async fn bind_retry_succeeds_once_the_holder_releases() {
     let holder = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -33,9 +28,9 @@ async fn bind_retry_succeeds_once_the_holder_releases() {
     release.await.unwrap();
 }
 
-/// (b) The holder never releases: the deadline expires and the error names
-/// the contested address. Exercises the UDP side end-to-end — the real
-/// network's `BindError` classifies EADDRINUSE structurally.
+/// The holder never releases: the deadline expires and the error names the
+/// contested address. Runs over the real network, whose `BindError`
+/// classifies EADDRINUSE structurally.
 #[tokio::test]
 async fn bind_retry_gives_up_at_the_deadline_naming_the_addr() {
     let holder = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
@@ -50,7 +45,6 @@ async fn bind_retry_gives_up_at_the_deadline_naming_the_addr() {
         || async move { net.bind_udp(BindUdpOpts::new(addr, 8)).await },
     )
     .await;
-    // Manual unwrap of the Err arm — `Box<dyn UdpEndpoint>` is not Debug.
     let err = match err {
         Ok(_) => panic!("the addr stays held — the deadline must expire"),
         Err(e) => e,

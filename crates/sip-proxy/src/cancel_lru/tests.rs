@@ -59,10 +59,10 @@ fn key_format_is_branch_sent_by_then_dialog_fields() {
     );
 }
 
+/// A spiral crosses the proxy twice under one Call-ID, From tag and CSeq: the
+/// received branch and sent-by keep the two passes' keys apart.
 #[test]
 fn the_received_transaction_disambiguates_one_dialog_identity() {
-    // A spiral crosses the proxy twice under one Call-ID, From tag and
-    // CSeq: the branch and the sent-by keep the two passes apart.
     let first = via("SIP/2.0/UDP 10.0.0.1:5060;branch=z9hG4bKa");
     for other in [
         "SIP/2.0/UDP 10.0.0.1:5060;branch=z9hG4bKb",
@@ -78,10 +78,10 @@ fn the_received_transaction_disambiguates_one_dialog_identity() {
     }
 }
 
+/// The two directions of a dialog share its Call-ID and their independent CSeq
+/// spaces can collide: the From tag keeps their keys apart.
 #[test]
 fn from_tag_disambiguates_the_two_dialog_directions() {
-    // Both directions share the Call-ID; CSeq spaces are independent and
-    // can collide on the same number — the From-tag keeps them apart.
     let v = via("SIP/2.0/UDP 10.0.0.1:5060;branch=z9hG4bKa");
     assert_ne!(
         invite_txn_key(&v, "c1", Some("uac"), 5),

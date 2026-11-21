@@ -27,7 +27,6 @@ const UAC: &str = "10.244.7.13";
 const PROXY_VIP: &str = "192.0.2.250";
 const SNAT_NODE: &str = "192.0.2.11";
 
-/// Endpoint double recording every send's destination.
 #[derive(Default)]
 struct CapturingEndpoint {
     sent: Mutex<Vec<SocketAddr>>,
@@ -59,7 +58,6 @@ impl UdpEndpoint for CapturingEndpoint {
     }
 }
 
-/// Strategy double whose cookie decode fails over to w2.
 struct BackupStrategy;
 
 #[async_trait]
@@ -85,7 +83,6 @@ impl RoutingStrategy for BackupStrategy {
     }
 }
 
-/// A strategy double whose cookie decode finds no usable backup.
 struct NoBackupStrategy;
 
 #[async_trait]
@@ -183,12 +180,14 @@ impl UdpEndpoint for CapturingEndpointHandle {
 /// proxy, next Via = the worker's sent-by, SNAT'd received/rport stamped by
 /// the request path, `record_route` as the UAS echoes it back (empty for a
 /// request that copies none).
+///
+/// A 2xx to an INVITE carries a Contact naming its remote target (RFC 3261
+/// §12.1.1) unless `extra_headers` holds one.
 fn worker_bound_200_routed(
     cseq: &str,
     record_route: &str,
     extra_headers: &str,
 ) -> sip_message::types::SipResponse {
-    // A 2xx to INVITE names its remote target (RFC 3261 §12.1.1).
     let contact = match cseq.ends_with("INVITE") && !extra_headers.contains("Contact:") {
         true => format!("Contact: <sip:sipp@{UAC}:5060>\r\n"),
         false => String::new(),
@@ -225,7 +224,6 @@ fn invite_200() -> sip_message::types::SipResponse {
     worker_bound_200("1 INVITE", &format!("Contact: <sip:sipp@{UAC}:5060>\r\n"))
 }
 
-/// The 200 to a worker's in-dialog keepalive OPTIONS.
 fn keepalive_200() -> sip_message::types::SipResponse {
     worker_bound_200("2 OPTIONS", "")
 }
@@ -236,7 +234,6 @@ fn cancel_200() -> sip_message::types::SipResponse {
     worker_bound_200("1 CANCEL", "")
 }
 
-/// The 200 to a worker's in-dialog BYE.
 fn bye_200() -> sip_message::types::SipResponse {
     worker_bound_200("3 BYE", "")
 }
@@ -248,11 +245,10 @@ fn cancel_200_without_record_route() -> sip_message::types::SipResponse {
     worker_bound_200_routed("1 CANCEL", "", "")
 }
 
-// A Dead-worker lookup keyed on the received/rport-derived address — behind
-// the VIP that is the SNAT node IP + ephemeral port — matches no registry
-// entry, so the failover branch is unreachable and a dead worker's responses
-// are blackholed at its stale SNAT address. The worker must be identified by
-// its Via SENT-BY (registry identity).
+/// A response to a `Dead` worker fails over to the cookie's backup. Behind
+/// the VIP its `received`/`rport` is the SNAT node address and an ephemeral
+/// port, which no registry entry holds, so the worker is identified by its Via
+/// sent-by.
 #[tokio::test]
 async fn response_to_a_dead_worker_fails_over_to_the_backup() {
     let (core, ep) = core_with(WorkerHealth::Dead);
@@ -340,10 +336,10 @@ Record-Route: <sip:{PROXY_VIP}:5060;w_pri=w1;w_bak=w2;lr>, <sip:{PROXY_VIP}:5060
     )
 }
 
-// A spiral puts two of this proxy's Record-Route pairs on one response.
-// Single-face, the topmost own entry is the inbound pair's cookie-less
-// `;outbound` half: read by position, the dead worker's response finds no
-// cookie and is dropped.
+/// A spiral puts two of this proxy's Record-Route pairs on one response.
+/// Single-face, the topmost own entry is the inbound pair's cookie-less
+/// `;outbound` half; the dead worker's response still fails over, on the
+/// cookie of the pair recorded relaying its request out (w2).
 #[tokio::test]
 async fn a_spiralled_response_to_a_dead_worker_fails_over_on_its_own_cookie() {
     let (core, ep) = spiral_core();
@@ -359,9 +355,9 @@ async fn a_spiralled_response_to_a_dead_worker_fails_over_on_its_own_cookie() {
     assert_eq!(sent.as_slice(), &[format!("{W2_POD}:5060").parse::<SocketAddr>().unwrap()]);
 }
 
-// Cross-face, both halves of the inbound pair carry its cookie, which names
-// the worker the spiral reached (w3): read by position, w1's response goes
-// to w3's backup. The cookie that names w1 is the one for this hop.
+/// Cross-face, both halves of the inbound pair carry the cookie of the worker
+/// the spiral reached (w3). w1's response ignores it and fails over on the
+/// cookie that names w1 (w2).
 #[tokio::test]
 async fn a_spiralled_response_to_a_dead_worker_ignores_the_other_calls_cookie() {
     let (core, ep) = spiral_core();
@@ -379,9 +375,9 @@ async fn a_spiralled_response_to_a_dead_worker_ignores_the_other_calls_cookie() 
     assert_eq!(sent.as_slice(), &[format!("{W2_POD}:5060").parse::<SocketAddr>().unwrap()]);
 }
 
-// Both passes reached w1, and the alive set changed between them: the
-// later pass recorded another backup (w4). The pair recorded relaying w1's
-// request out is the bottom one, and its backup (w2) takes the response.
+/// Both passes reached w1, and the alive set changed between them: the
+/// later pass recorded another backup (w4). The pair recorded relaying w1's
+/// request out is the bottom one, and its backup (w2) takes the response.
 #[tokio::test]
 async fn a_spiralled_response_to_a_dead_worker_reads_the_bottommost_matching_cookie() {
     let (core, ep) = spiral_core();
@@ -397,9 +393,9 @@ async fn a_spiralled_response_to_a_dead_worker_reads_the_bottommost_matching_coo
     assert_eq!(sent.as_slice(), &[format!("{W2_POD}:5060").parse::<SocketAddr>().unwrap()]);
 }
 
-// Control: an Alive worker keeps its response, delivered to the SNAT'd
-// received/rport return path per §18.2.2/RFC 3581 — identity changes the
-// LOOKUP key, never the send target.
+/// Control: an `Alive` worker keeps its response, delivered to the SNAT'd
+/// `received`/`rport` return path (§18.2.2, RFC 3581). Identity changes the
+/// lookup key, never the send target.
 #[tokio::test]
 async fn response_to_an_alive_worker_keeps_the_received_rport_target() {
     let (core, ep) = core_with(WorkerHealth::Alive);
@@ -409,9 +405,9 @@ async fn response_to_an_alive_worker_keeps_the_received_rport_target() {
     assert_eq!(sent.as_slice(), &[format!("{SNAT_NODE}:63522").parse::<SocketAddr>().unwrap()]);
 }
 
-// A worker that left the pool can still be bound and still answering. Its
-// address stays resolvable as `Dead` for Timer H, so its response follows the
-// cookie's backup instead of returning to a node the pool no longer routes to.
+/// A worker that left the pool can still be bound and still answering. Its
+/// address stays resolvable as `Dead` for Timer H, so its response follows the
+/// cookie's backup instead of returning to a node the pool no longer routes to.
 #[tokio::test(start_paused = true)]
 async fn response_from_a_departed_address_fails_over_to_the_backup() {
     let (core, ep) = core_over(
@@ -425,8 +421,9 @@ async fn response_from_a_departed_address_fails_over_to_the_backup() {
     assert_eq!(sent.as_slice(), &[format!("{W2_POD}:5060").parse::<SocketAddr>().unwrap()]);
 }
 
-// Past Timer H the departed address is a stranger again — no transaction there
-// can still be answering — and the response goes where the Via says.
+/// Past Timer H the departed address is a stranger again, since no
+/// transaction there can still be answering, and the response goes where the
+/// Via says.
 #[tokio::test(start_paused = true)]
 async fn response_from_an_expired_departed_address_follows_the_via() {
     let (core, ep) = core_over(
@@ -441,9 +438,9 @@ async fn response_from_an_expired_departed_address_follows_the_via() {
     assert_eq!(sent.as_slice(), &[format!("{SNAT_NODE}:63522").parse::<SocketAddr>().unwrap()]);
 }
 
-// Every response for a departed address re-arms its window: one seen at T keeps
-// the address `Dead` until T + Timer H, whatever time it departed at, so a
-// worker whose drain outlasts Timer H keeps its responses on the backup.
+/// Every response for a departed address re-arms its window: one seen at T keeps
+/// the address `Dead` until T + Timer H, whatever time it departed at, so a
+/// worker whose drain outlasts Timer H keeps its responses on the backup.
 #[tokio::test(start_paused = true)]
 async fn a_response_for_a_departed_address_re_arms_its_window_to_timer_h() {
     let (core, ep) = core_over(
@@ -472,8 +469,8 @@ async fn a_response_for_a_departed_address_re_arms_its_window_to_timer_h() {
     );
 }
 
-// An address the pool never knew is not a worker at all (Alice, Bob, an
-// external SBC): its response is relayed by the Via, unconditionally.
+/// An address the pool never knew is not a worker at all (Alice, Bob, an
+/// external SBC): its response is relayed by the Via, unconditionally.
 #[tokio::test]
 async fn response_from_an_address_the_pool_never_knew_follows_the_via() {
     let reg: Arc<dyn WorkerRegistry> =
@@ -488,9 +485,9 @@ async fn response_from_an_address_the_pool_never_knew_follows_the_via() {
     assert_eq!(sent.as_slice(), &[format!("{SNAT_NODE}:63522").parse::<SocketAddr>().unwrap()]);
 }
 
-// A departed sender whose cookie names no usable backup: the response is
-// dropped rather than delivered to the node that left — the same outcome a
-// confirmed-`Dead` sender has.
+/// A departed sender whose cookie names no usable backup: the response is
+/// dropped rather than delivered to the node that left, the same outcome a
+/// confirmed-`Dead` sender has.
 #[tokio::test(start_paused = true)]
 async fn a_departed_sender_with_no_usable_backup_drops_the_response() {
     let (core, ep) = core_over(
@@ -503,11 +500,11 @@ async fn a_departed_sender_with_no_usable_backup_drops_the_response() {
     assert!(ep.sent.lock().unwrap().is_empty());
 }
 
-// One rule for every method (ADR-0055 §8): a non-INVITE response from a
-// departed address fails over to the backup the cookie names, as an INVITE
-// response does; one whose cookie no header echoes back (a CANCEL copies no
-// Record-Route, §9.1, and this double's cookie rides no Via) names no owner
-// and is dropped, never delivered to the node that left.
+/// One rule for every method (ADR-0055 §8): a non-INVITE response from a
+/// departed address fails over to the backup the cookie names, as an INVITE
+/// response does; one whose cookie no header echoes back (a CANCEL copies no
+/// Record-Route, §9.1, and this double's cookie rides no Via) names no owner
+/// and is dropped, never delivered to the node that left.
 #[tokio::test(start_paused = true)]
 async fn a_non_invite_response_from_a_departed_address_fails_over_to_the_backup() {
     let backup = [format!("{W2_POD}:5060").parse::<SocketAddr>().unwrap()];
@@ -527,7 +524,6 @@ async fn a_non_invite_response_from_a_departed_address_fails_over_to_the_backup(
     }
 }
 
-// The same for a worker the health probe confirmed Dead.
 #[tokio::test]
 async fn a_non_invite_response_to_a_dead_worker_fails_over_to_the_backup() {
     for resp in [cancel_200(), keepalive_200(), bye_200()] {
@@ -540,8 +536,8 @@ async fn a_non_invite_response_to_a_dead_worker_fails_over_to_the_backup() {
     }
 }
 
-// A departed sender whose cookie names no usable backup: a non-INVITE
-// response is dropped, as an INVITE response is.
+/// A departed sender whose cookie names no usable backup: a non-INVITE
+/// response is dropped, as an INVITE response is.
 #[tokio::test(start_paused = true)]
 async fn a_non_invite_response_with_no_usable_backup_is_dropped() {
     let (core, ep) = core_over(

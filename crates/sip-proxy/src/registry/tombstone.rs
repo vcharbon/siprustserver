@@ -26,8 +26,6 @@ use super::{Acceptance, WorkerEntry, WorkerHealth, WorkerId};
 /// response (RFC 3261 §17.2.1).
 pub(crate) const DEPARTED_ADDRESS_TTL_MS: u64 = 32_000;
 
-/// One departed address: the ordinal it was last known as, and when it stops
-/// being resolvable.
 #[derive(Debug, Clone)]
 struct Tombstone {
     id: WorkerId,
@@ -86,7 +84,6 @@ impl Tombstones {
         });
     }
 
-    /// Drop every tombstone whose window has closed. No-op unless one has.
     pub(crate) fn prune(&self, now_ms: u64) {
         if !self.records.load().values().any(|t| t.expires_at_ms <= now_ms) {
             return;

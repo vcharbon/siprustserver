@@ -1,58 +1,36 @@
-//! [`HealthProbe`] — OPTIONS health probing toward the B2BUA workers, riding
-//! the `sip-txn` non-INVITE client transaction.
+//! [`HealthProbe`]: OPTIONS health probing of the workers, each probe a
+//! `sip-txn` non-INVITE client transaction.
 //!
-//! The first tick fires as soon as the registry holds its first listing, and
-//! its round latches the proxy's [`FirstView`] (ADR-0050 §11). Per tick (every
-//! `interval_ms`): prune per-worker state for departed/recreated workers, then
-//! fan one OPTIONS client transaction out to every worker the registry holds for
-//! judging ([`WorkerRegistry::probed`]), ready or not (ADR-0050 §11). Each
-//! probe is reaped at the end of its own `timeout_ms` reply window (each reap =
-//! one miss; `threshold` consecutive misses → `Dead`), so the verdict lands
-//! [`HealthProbeConfig::verdict_after_first_miss`] after the first unanswered
-//! probe left. Replies arrive as
-//! transaction events and correlate by Via branch, and are read on the two
-//! axes of ADR-0050 §3 ([`read_answer`]): a `200` makes the worker `Alive`
-//! and sets its acceptance from `X-Readiness` (absent reads `accept`); a
-//! `503` sets acceptance to `refuse` and leaves health as it was; any other
-//! final makes it `Alive` and keeps acceptance. An answer naming another
-//! `X-Incarnation` than the last one read is a new process at the same
-//! address: the worker is reset to `Unknown` and its miss count and overload
-//! band cleared before the answer applies. Each reply's `X-Overload` payload
-//! feeds the [`WorkerLoadObserver`]. Health and acceptance are written through
-//! the [`WorkerRegistryControl`] seam. Every correlated final also stamps the
-//! proxy's [`WorkerReach`], whatever worker sent it.
+//! The first round leaves as soon as the registry holds its first listing and
+//! latches the proxy's [`FirstView`] (ADR-0050 §11); then one round leaves every
+//! `interval_ms`. A round drops the state of departed workers, resets a moved
+//! worker's, and sends one OPTIONS to every worker the registry holds for
+//! judging ([`WorkerRegistry::probed`]), ready or not. Each probe is reaped at
+//! the end of its own `timeout_ms` reply window: one miss, its transaction
+//! cancelled. `threshold` consecutive misses make the worker `Dead`, so the
+//! verdict lands [`HealthProbeConfig::verdict_after_first_miss`] after the first
+//! unanswered probe left.
 //!
-//! Why the transaction layer: a fan-out of ONE datagram per worker per tick
-//! turns a single lost packet into a full miss, and two losses in ~2.5 s
-//! falsely flip a healthy worker `Dead` (shedding it from selection).
-//! Timer E retransmits at T1 inside the reply window, absorbing
-//! single-packet loss; correlation is the transaction branch instead of a
-//! minted-Call-ID parse. The probe keeps its own reply window — Timer F is a
-//! fixed 32 s, far too slow for health detection — and **cancels** the
-//! transaction when the window expires, so per-probe state (here and in the
-//! transaction map) does not outlive `timeout_ms`.
+//! A reply correlates by its Via branch to a probe still in its window, however
+//! many ticks the window spans; a reply past its window, or naming no pending
+//! probe, is dropped and never revives a worker. Every correlated final stamps
+//! the proxy's [`WorkerReach`] and retires the worker's other in-flight probes,
+//! whose reap would count a spurious miss. From the worker's current address it
+//! also clears the miss count, feeds its `X-Overload` payload to the
+//! [`WorkerLoadObserver`], and is read on the two
+//! axes of ADR-0050 §3 ([`read_answer`]): a `200` makes the worker `Alive` and
+//! sets its acceptance from `X-Readiness` (absent reads `accept`); a `503` sets
+//! acceptance to `refuse` and leaves health as it was; any other final makes it
+//! `Alive` and keeps acceptance. Health and acceptance are written through the
+//! [`WorkerRegistryControl`] seam.
 //!
-//! Late replies: a probe stays in `pending`, keyed by its durable transaction
-//! Via branch, for its whole reply window, however many ticks the window
-//! spans, so a reply that lands ticks after the tick that sent it still
-//! correlates and resets the miss counter. A reply proving liveness also
-//! retires every other in-flight probe to the same worker so their reap cannot
-//! count a spurious miss. A reply that lands after its window ended, or that
-//! correlates to no `pending` probe at all (a forged/replayed branch), is
-//! dropped: it can never revive a worker. Locked by
-//! `tests/it/health_probe_late_reply.rs`.
-//!
-//! Identity hygiene (the dead-pod resurrection race): every pending probe
-//! carries the ADDRESS it was sent to, and a reply or miss only counts while
-//! the worker's *current* registry address still matches — a late 200 from a
-//! dead pod's old IP cannot mark the recreated (never-probed) pod `Alive`. A
-//! host move also resets the worker's miss count and overload band, so the
-//! fresh pod is judged from scratch instead of inheriting the dead pod's
-//! state (which would exclude an idle fresh pod from selection until its first
-//! `X-Overload` reply).
-//!
-//! Scheduling rides `tokio::time` directly (per the sip-clock ADR); the tick
-//! period is `interval_ms` (not `interval + timeout`).
+//! A reply or a miss counts only while the worker's current registry address is
+//! the one the probe went to: a late answer to a recreated worker's old address
+//! never marks the new one `Alive`. A host move resets the worker's miss count
+//! and overload band. An answer naming another `X-Incarnation` than the last one
+//! read is a new process at the same address: the worker is reset to `Unknown`
+//! and its miss count and overload band cleared before the answer applies
+//! (ADR-0050 §8).
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -102,7 +80,6 @@ struct PendingProbe {
 /// The probe's mutable per-run state (one owner: the `run` loop).
 #[derive(Default)]
 struct ProbeState {
-    /// branch → in-flight probe.
     pending: HashMap<String, PendingProbe>,
     /// Consecutive misses per worker id.
     misses: HashMap<String, u32>,
@@ -133,12 +110,8 @@ pub struct HealthProbe {
     clock: Clock,
     id_gen: Arc<IdGen>,
     config: HealthProbeConfig,
-    /// Optional `/metrics` sink for the per-peer failure family
-    /// (`sip_proxy_peer_failures_total`). Workers we probe are always INTERNAL
-    /// peers; a probe miss is a `response_timeout` against the worker's address.
-    /// Off (`None`) in tests/harnesses that don't scrape; set by the runner via
-    /// [`with_metrics`](Self::with_metrics) so the existing constructors and the
-    /// failover harness stay untouched.
+    /// The sink of probe misses, each a `response_timeout` of an internal peer
+    /// at the probed worker's address; `None` records nothing.
     metrics: Option<Arc<ProxyMetrics>>,
     /// Latched once the first round over the first listing has completed.
     first_view: Arc<FirstView>,
@@ -200,9 +173,9 @@ impl HealthProbe {
         self
     }
 
-    /// Attach a `/metrics` sink so probe misses (worker OPTIONS timeouts) record
-    /// `sip_proxy_peer_failures_total{scope="internal",kind="response_timeout"}`.
-    /// Opt-in (the runner calls it); harnesses/tests leave it off.
+    /// Records each probe miss as
+    /// `sip_proxy_peer_failures_total{scope="internal",kind="response_timeout"}`;
+    /// without it misses are not recorded.
     pub fn with_metrics(mut self, metrics: Arc<ProxyMetrics>) -> Self {
         self.metrics = Some(metrics);
         self
@@ -220,6 +193,9 @@ impl HealthProbe {
     /// every probe of the first round has left the in-flight set or the
     /// round's reply window (`timeout_ms`) has run out, after the answers'
     /// health is written.
+    ///
+    /// An answer queued by the end of its reply window is read before that
+    /// window is reaped, and is no miss.
     pub async fn run(mut self) {
         let mut state = ProbeState::default();
         while !self.registry.synced() {
@@ -231,7 +207,6 @@ impl HealthProbe {
         let mut first_round = Some(FirstRound::of(state.pending.keys().cloned()));
         let round_window = tokio::time::sleep(Duration::from_millis(self.config.timeout_ms));
         tokio::pin!(round_window);
-        // A round at most every millisecond: a zero interval rounds that often.
         let period = self.config.period();
         #[expect(clippy::disallowed_methods, reason = "the period is at least 1 ms")]
         let mut tick = tokio::time::interval_at(sip_clock::deadline::from_now(period), period);
@@ -243,18 +218,15 @@ impl HealthProbe {
                 first_round = None;
             }
             let reap_at = state.pending.values().map(|p| p.window_ends).min();
-            // Events first: an answer queued at its window's end is no miss.
             tokio::select! {
                 biased;
                 ev = self.events.recv() => match ev {
-                    None => return, // transaction layer gone (endpoint closed)
+                    None => return,
                     Some(TransactionEvent::Message { message, .. }) => {
                         if let SipMessage::Response(resp) = *message {
                             self.handle_reply(resp, &mut state).await;
                         }
                     }
-                    // Timer F (32 s) backstop — the reap normally cancelled the
-                    // transaction long before; count it only if still pending.
                     Some(TransactionEvent::Timeout { branch, .. }) => {
                         if let Some(p) = state.pending.remove(branch.as_str()) {
                             self.count_miss(p, &mut state.misses);
@@ -299,14 +271,14 @@ impl HealthProbe {
         Ok(())
     }
 
+    /// One round: drops the state of every worker the registry no longer
+    /// probes, resets the miss count, incarnation and overload band of a worker
+    /// at a new address, and sends one OPTIONS client transaction to each
+    /// probed worker.
     async fn tick(&self, state: &mut ProbeState) -> Result<(), TransactionLayerClosed> {
         let now = self.now_ms();
         let window = Duration::from_millis(self.config.timeout_ms);
 
-        // ── Keep per-worker state in lockstep with membership ────────────
-        // Departed ordinals are dropped (bounded maps under worker churn); a
-        // host move (recreated pod under the same ordinal) resets the miss
-        // count and the overload band — the fresh pod is judged from scratch.
         let snapshot = self.registry.probed();
         for w in &snapshot {
             if state.last_addr.get(&w.id).is_some_and(|prev| prev != &w.address) {
@@ -322,7 +294,6 @@ impl HealthProbe {
         state.incarnation.retain(|id, _| live(id));
         self.observer.retain(live);
 
-        // ── Fan out one OPTIONS client transaction per worker ────────────
         for w in &snapshot {
             let Some(dst) = w.address.to_socket_addr() else { continue };
             let branch = self.id_gen.new_branch();
@@ -340,18 +311,20 @@ impl HealthProbe {
         Ok(())
     }
 
+    /// Applies a final that correlates to a pending probe. Its load payload
+    /// lands before the health it comes with is published, so no sweep reads a
+    /// worker alive on an old payload.
+    ///
+    /// Health and acceptance are published in one write: a restarted worker
+    /// that answers `200` reads `Alive` at once, never `Unknown` in between.
     async fn handle_reply(&self, resp: SipResponse, state: &mut ProbeState) {
         if resp.status() < 200 {
             return;
         }
         let Some(branch) = resp.via().first().branch().map(str::to_owned) else { return };
         let Some(p) = state.pending.remove(branch.as_str()) else { return };
-        // A correlated final crossed the proxy-to-worker path both ways.
         self.reach.answered();
 
-        // A reply proves liveness — retire any other in-flight probes to the
-        // same worker so their later reap can't count a spurious miss against
-        // a worker that just answered.
         let stale: Vec<String> = state
             .pending
             .iter()
@@ -363,15 +336,10 @@ impl HealthProbe {
             let _ = self.txn.cancel_txns_for_call(&probe_call_ref(&b)).await;
         }
 
-        // Stale-origin guard: only the worker's CURRENT registry address may
-        // report its health — a late 200 from a dead pod's old IP must not
-        // resurrect the recreated, never-probed pod.
         if !self.still_at(&p) {
             return;
         }
 
-        // A new process at the same address is judged from scratch: nothing
-        // routes on the health the previous one earned (ADR-0050 §8).
         let mut restarted = false;
         if let Some(gen) = worker_report::incarnation(&resp) {
             let previous = state.incarnation.insert(p.worker_id.clone(), gen);
@@ -389,22 +357,12 @@ impl HealthProbe {
         }
         state.misses.insert(p.worker_id.clone(), 0);
 
-        // The load payload lands before the view it comes with is published,
-        // so no sweep reads a worker alive on an old payload. The observer is
-        // decoupled from the clock (it takes `now_ms` explicitly), so hand it
-        // the same monotonic-anchored epoch-ms the probe timestamps with —
-        // under a paused runtime this advances in lockstep with `tokio::time`
-        // (CLAUDE.md).
         if let Some(payload) = parse_x_overload_header(resp.raw(X_OVERLOAD).next()) {
             self.observer.apply_payload(&p.worker_id, &payload, self.clock.now_ms());
         } else {
-            // OPTIONS reply without a usable X-Overload header — no AIMD step,
-            // just the diagnostic counter.
             self.observer.note_payload_missing(&p.worker_id, self.clock.now_ms());
         }
 
-        // Health and acceptance published in one write: a restart answered
-        // 200 reads Alive at once, never Unknown in between.
         let readiness = worker_report::readiness(&resp);
         let reading = read_answer(resp.status(), readiness.as_ref());
         let health = reading.health.or(restarted.then_some(WorkerHealth::Unknown));
@@ -423,9 +381,6 @@ impl HealthProbe {
         if !self.still_at(&p) {
             return;
         }
-        // Per-peer attribution: a probe OPTIONS to a worker got no final response.
-        // The worker is, by construction, an INTERNAL (cluster) peer — it lives in
-        // the registry — so this is a `response_timeout` pinned to its address.
         if let Some(metrics) = &self.metrics {
             if let Some(dst) = p.addr.to_socket_addr() {
                 metrics.record_peer_failure(
@@ -443,7 +398,6 @@ impl HealthProbe {
     }
 }
 
-/// Sleep until `at`, or forever when there is nothing to wait for.
 async fn sleep_until_or_never(at: Option<Instant>) {
     match at {
         Some(at) => tokio::time::sleep_until(at).await,

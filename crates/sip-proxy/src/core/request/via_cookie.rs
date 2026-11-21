@@ -1,27 +1,10 @@
 //! The stickiness cookie on the Via this proxy pushes on a worker's request,
 //! whatever its method. A response bound for a worker comes back along the Via
-//! (RFC 3261 §18.2.2), so the response path (`core/response`) reads off this
-//! Via the cookie naming the call's owners (ADR-0055 §8). It stands in for the
-//! Record-Route an in-dialog request's answer lacks (this proxy never
-//! Record-Routes an in-dialog request, and a callee's answer carries the
-//! Record-Route only of a dialog-creating request, §12.1.1), and outlives
-//! that worker's address naming it.
-//!
-//! A request's cookie is the dialog's own, read off the request's route set;
-//! a request whose route set holds none — an initial request's preloaded
-//! Route — carries the cookie its Record-Route is minted with, else the one
-//! minted for its worker and the owners the worker states. A CANCEL (§9.1) and
-//! a non-2xx ACK (§17.1.1.3) carry their INVITE's Via, cookie included: the
-//! one the INVITE's entry remembers, whatever the worker set did since,
-//! whatever the INVITE's own headers said that theirs do not (an emergency
-//! Resource-Priority), and after the worker's address stopped naming it. With
-//! no entry they carry the cookie the INVITE would have carried. Only the
-//! strategy's own fields ride, and only once they verify for the call
-//! (`RoutingStrategy::verified_cookie`): a strategy whose cookie names no
-//! worker puts none on the Via. The Via of a leg's dialling INVITE whose
-//! worker states the call's primary carries the strategy's signed dialling
-//! mark beside the cookie (`RoutingStrategy::dialling_mark`), and so do its
-//! CANCEL and non-2xx ACK.
+//! (RFC 3261 §18.2.2), and the response path (`core/response`) reads the call's
+//! owners off it (ADR-0055 §8) where the answer carries no Record-Route of this
+//! proxy. A CANCEL (§9.1) and a non-2xx ACK (§17.1.1.3) carry their INVITE's
+//! cookie, whatever the worker set did since. Only the strategy's own fields
+//! ride, once they verify for the call. See ADR-0009 X1.
 
 use sip_message::{Method, SipMessage, SipRequest};
 
@@ -40,7 +23,10 @@ impl ProxyCore {
     /// cookie its INVITE's entry remembers. Else, for a worker-outbound
     /// request of any method, the first verified cookie of the proxy's own
     /// route entries, else `minted`, else the cookie minted for `originator`
-    /// and the owners it states. `None` for any other request.
+    /// and the owners it states, with the strategy's signed dialling mark
+    /// beside it when the top Via states the call's primary (a leg's dialling
+    /// INVITE, its CANCEL and its non-2xx ACK, ADR-0055 §8). `None` for any
+    /// other request.
     pub(super) fn via_cookie(
         &self,
         msg: &SipMessage,
@@ -72,8 +58,6 @@ impl ProxyCore {
                 })?;
                 self.strategy.verified_cookie(&own, msg)
             })?;
-        // A worker states the primary on a leg's dialling INVITE alone, and
-        // on the CANCEL and non-2xx ACK that share its Via (ADR-0055 §8).
         if states_primary(req.top_via()) {
             cookie.extend(self.strategy.dialling_mark(&cookie));
         }

@@ -35,7 +35,6 @@ pub(crate) fn sample(src: SocketAddr, error: &impl Display, raw: &[u8], now_ms: 
     );
 }
 
-/// Whether one more sample fits the budget of second `now_s`.
 fn admit(now_s: u64) -> bool {
     if WINDOW_S.swap(now_s, Ordering::Relaxed) != now_s {
         SPENT.store(0, Ordering::Relaxed);

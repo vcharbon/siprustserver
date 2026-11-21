@@ -96,7 +96,6 @@ fn call_id_of(msg: &SipMessage) -> Option<&str> {
     (!id.is_empty()).then_some(id)
 }
 
-/// Adapter so a `WorkerEntry` (by id) can feed `rendezvous_select`.
 struct WorkerKey(String);
 impl RendezvousCandidate for WorkerKey {
     fn id(&self) -> &str {
@@ -125,7 +124,6 @@ fn placeable<'w>(workers: impl Iterator<Item = &'w WorkerEntry> + Clone) -> Vec<
     }
 }
 
-/// The production routing strategy.
 pub struct LoadBalancerStrategy {
     registry: Arc<dyn WorkerRegistry>,
     hmac: Arc<dyn HmacKeyProvider>,
@@ -145,7 +143,6 @@ impl LoadBalancerStrategy {
         Self { registry, hmac, observer, metrics, clock }
     }
 
-    /// The cookie naming `primary` and `backup` for `msg`'s call (`call_id`).
     fn sign(&self, primary: &str, backup: &str, msg: &SipMessage, call_id: &str) -> RouteParams {
         let emergency_flag = if is_emergency_invite(msg) { "1" } else { "0" };
         let input = build_stickiness_input(primary, backup, emergency_flag, call_id);
@@ -207,7 +204,6 @@ impl LoadBalancerStrategy {
         rendezvous_select(call_id, &away).map(|k| k.0.clone()).unwrap_or_default()
     }
 
-    /// The address of worker `id` while it is `Alive`.
     fn alive_address(&self, id: &str) -> Option<ProxyAddr> {
         if id.is_empty() {
             return None;
@@ -232,8 +228,6 @@ impl RoutingStrategy for LoadBalancerStrategy {
         let in_dialog = is_in_dialog(msg) && !opts.admit_as_new;
         let snapshot = self.registry.snapshot();
 
-        // The accepting workers, or every alive one when none accepts: a
-        // refusing worker answers the call itself (ADR-0050 §6).
         let alive = placeable(snapshot.iter());
         let candidates: Vec<_> = if is_emergency || in_dialog {
             alive.clone()
@@ -268,15 +262,7 @@ impl RoutingStrategy for LoadBalancerStrategy {
             return Err(SelectError::NoTarget { reason });
         };
 
-        // Emergency and in-dialog requests bypass the per-worker AIMD bucket
-        // and stay on the rendezvous winner — in-dialog: the call is already
-        // admitted, AIMD is a new-call knob; the bypass still records the admit
-        // so `own_admitted_rate`/`share` stays truthful. A new call takes the
-        // first candidate in rank whose bucket has a token (ADR-0009 X6).
         if is_emergency || in_dialog {
-            // Emergency bypasses BOTH the above_critical critical-filter (above)
-            // and this AIMD bucket — count emergency new-dialog bypasses so the
-            // skip is observable under flood (in-dialog is not a new-call admit).
             if is_emergency && !in_dialog {
                 self.metrics.record_lb_emergency_bypass();
             }
@@ -308,7 +294,6 @@ impl RoutingStrategy for LoadBalancerStrategy {
             }
         };
 
-        // MAC verified: liveness alone places it, never a fresh selection.
         if let Some(target) = self.alive_address(w_pri) {
             return DecodeResult::Forward { target, is_emergency };
         }
@@ -332,7 +317,6 @@ impl RoutingStrategy for LoadBalancerStrategy {
         stated: &StatedOwners,
     ) -> Option<RouteParams> {
         let call_id = call_id_of(msg)?;
-        // A departed-address tombstone answers as the ordinal last bound there.
         let sender = self.registry.lookup_by_address(origin)?;
         let primary = if stated.primary.is_empty() { &sender.id } else { &stated.primary };
         let backup = if stated.backup == *primary { "" } else { stated.backup.as_str() };

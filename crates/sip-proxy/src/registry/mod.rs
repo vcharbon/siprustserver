@@ -1,10 +1,8 @@
-//! [`WorkerRegistry`] — the B2BUA worker set the proxy load-balances across.
+//! [`WorkerRegistry`]: the B2BUA worker set the proxy load-balances across.
 //!
-//! The routing hot path reads `snapshot`/`resolve`/`lookup_by_address`
-//! **synchronously and lock-free** (the worker set lives behind an
-//! [`arc_swap::ArcSwap`]); only background mutators (health probe, k8s watcher)
-//! write. `changes()` is a `tokio::sync::broadcast` of deltas (no backfill —
-//! subscribers `snapshot` first).
+//! The routing hot path reads `snapshot`, `resolve` and `lookup_by_address`
+//! synchronously and lock-free; only background mutators (the health probe,
+//! the membership watcher) write.
 
 use crate::addr::ProxyAddr;
 
@@ -41,7 +39,6 @@ pub enum Acceptance {
     Refuse,
 }
 
-/// A registered worker.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkerEntry {
     pub id: WorkerId,
@@ -51,7 +48,6 @@ pub struct WorkerEntry {
 }
 
 impl WorkerEntry {
-    /// An `Alive` worker accepting new calls.
     pub fn alive(id: impl Into<WorkerId>, address: ProxyAddr) -> Self {
         Self { id: id.into(), address, health: WorkerHealth::Alive, acceptance: Acceptance::Accept }
     }
@@ -61,19 +57,17 @@ impl WorkerEntry {
         self.health == WorkerHealth::Alive
     }
 
-    /// Whether it is alive and accepts new calls.
     pub fn accepts_new_calls(&self) -> bool {
         self.is_alive() && self.acceptance == Acceptance::Accept
     }
 }
 
-/// The read seam consumers (LB, health probe) depend on. All reads are sync +
-/// lock-free per the D4 non-blocking invariant.
+/// The read seam the load balancer and the health probe depend on. Every
+/// read is synchronous and lock-free.
 ///
-/// There is no delta/`changes()` subscription: the worker set is a projection of
-/// `topology::Membership` ⊕ health, and consumers read the projection directly.
-/// Membership deltas, where needed, are observed via `topology::Membership`;
-/// the one event a reader subscribes to is a dead verdict ([`read_dead`]).
+/// The worker set is a projection of `topology::Membership` and health, read
+/// directly; membership deltas are observed on `topology::Membership`, and the
+/// one event a reader subscribes to is a dead verdict ([`read_dead`]).
 ///
 /// [`read_dead`]: WorkerRegistry::read_dead
 pub trait WorkerRegistry: Send + Sync {
@@ -89,10 +83,7 @@ pub trait WorkerRegistry: Send + Sync {
     ///
     /// [`snapshot`]: WorkerRegistry::snapshot
     fn routes_on_answers(&self) -> bool;
-    /// Resolve a worker by id (`None` if unregistered/removed).
     fn resolve(&self, id: &str) -> Option<WorkerEntry>;
-    /// Reverse-lookup the worker bound at `addr` (`None` for any non-worker
-    /// source — Alice, Bob, an external SBC).
     fn lookup_by_address(&self, addr: &ProxyAddr) -> Option<WorkerEntry>;
     /// The ordinals the pool knows but does not route: members whose
     /// endpoint reads not ready, and the last ordinals of departed addresses

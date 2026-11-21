@@ -25,7 +25,6 @@ impl FirstView {
         Arc::new(Self(AtomicBool::new(true)))
     }
 
-    /// Whether the first view is in.
     pub fn is_in(&self) -> bool {
         self.0.load(Ordering::Acquire)
     }

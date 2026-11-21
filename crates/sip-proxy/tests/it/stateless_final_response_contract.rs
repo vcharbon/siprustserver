@@ -6,20 +6,11 @@
 //! downstream sent one, and a downstream that never answers leaves the
 //! caller's own Timer A/B armed (§17.1.1): *the caller*, not a proxy timer,
 //! gives up on it (local 408 at 64·T1). The proxy has no Timer C and no
-//! synthesized final. These tests pin both halves:
-//!
-//!  1. `proxy_emits_no_100_and_relays_the_downstream_100_18x_and_final` — the
-//!     caller hears nothing until the downstream's 100, then the 100, 180 and
-//!     200 relay in order.
-//!  2. `blackholed_worker_leaves_caller_silent_and_retransmits_reforward` —
-//!     a worker that never answers produces ZERO proxy-originated messages
-//!     toward the caller (no 100, no 408/5xx); the caller's Timer-A INVITE
-//!     retransmits are re-forwarded to the SAME target (the rtx memo), so the
-//!     caller's own transaction timers own the give-up.
+//! synthesized final.
 //!
 //! The b2bua-side counterpart (a caller that heard a 100 must get its final
 //! within the decision deadline) lives in
-//! `b2bua-harness/tests/decision_deadline.rs`.
+//! `b2bua-harness/tests/it/decision_deadline.rs`.
 
 use crate::common;
 use std::time::Duration;
@@ -69,15 +60,12 @@ fn bob_response(fwd: &SipRequest, status: u16, reason: &str, to_tag: Option<&str
     )
 }
 
-// ── 1. no proxy 100; the downstream's 100, 180 and 200 relay ─────────────
+/// The proxy sends no 100 of its own: the caller hears nothing until the
+/// downstream's 100, then the 100, 180 and 200 relay in order, the proxy's
+/// Via popped from each.
 #[tokio::test]
 async fn proxy_emits_no_100_and_relays_the_downstream_100_18x_and_final() {
     let h = Harness::with_transit_delay("stateless-no-100", 0);
-    // Raw-injected responses: bob is a bare bind, not a real UA — the audit
-    // rules for a full UA dialog legitimately fire on the fixture (same spirit
-    // as the sibling §16.7 tests). The proxy is the SUT; waive the UA-side
-    // rules: locally-minted tag, the 200-terminus that is never ACKed/BYE'd,
-    // and Allow/Supported absence on the bare INVITE.
     h.allow_violation("mid-dialog-tags", "raw-injected responses; proxy is the SUT, not a real UA");
     h.allow_violation(
         "unacked-2xx-not-cleared",
@@ -100,14 +88,12 @@ async fn proxy_emits_no_100_and_relays_the_downstream_100_18x_and_final() {
         .expect("queue open");
     let fwd = parse_request(&fwd.raw);
 
-    // The proxy forwarded WITHOUT answering: no proxy-originated 100 upstream.
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert!(
         alice.try_recv().is_none(),
         "the stateless proxy must never generate a provisional of its own"
     );
 
-    // Bob's 100 is relayed by its Via (§16.11): the first thing alice hears.
     bob_ep.send_to(bob_response(&fwd, 100, "Trying", None).as_bytes(), proxy.addr()).await.unwrap();
     let relayed = tokio::time::timeout(Duration::from_secs(2), alice.recv())
         .await
@@ -119,7 +105,6 @@ async fn proxy_emits_no_100_and_relays_the_downstream_100_18x_and_final() {
     assert_eq!(resp.status(), 100, "the downstream's 100 reaches the caller");
     assert_eq!(resp.via().iter().count(), 1, "the proxy's own Via is popped");
 
-    // The 180 relays next, then the 200.
     bob_ep
         .send_to(bob_response(&fwd, 180, "Ringing", Some("b1")).as_bytes(), proxy.addr())
         .await
@@ -149,7 +134,10 @@ async fn proxy_emits_no_100_and_relays_the_downstream_100_18x_and_final() {
     let _ = h.finish().await;
 }
 
-// ── 2. blackholed worker: proxy stays silent; caller's timers decide ────────
+/// A worker that never answers draws no proxy-originated message toward the
+/// caller, neither a 100 nor a final; the caller's Timer A retransmission is
+/// re-forwarded to the same target through the retransmission memo, so the
+/// caller's own transaction timers own the give-up.
 #[tokio::test]
 async fn blackholed_worker_leaves_caller_silent_and_retransmits_reforward() {
     let h = Harness::with_transit_delay("stateless-blackhole", 0);
@@ -163,10 +151,7 @@ async fn blackholed_worker_leaves_caller_silent_and_retransmits_reforward() {
         .await
         .expect("bob gets the forwarded INVITE")
         .expect("queue open");
-    // Bob never responds — crashed / blackholed worker.
 
-    // Alice's Timer-A retransmit (same branch) re-forwards to the SAME target
-    // via the rtx memo — the proxy keeps pumping, it does not answer.
     alice.send_to(ALICE_INVITE.as_bytes(), proxy.addr()).await.unwrap();
     let second = tokio::time::timeout(Duration::from_secs(2), bob_ep.recv())
         .await
@@ -175,10 +160,6 @@ async fn blackholed_worker_leaves_caller_silent_and_retransmits_reforward() {
     let second = parse_request(&second.raw);
     assert_eq!(second.method(), "INVITE");
 
-    // The contract under test: over the whole window the proxy sent alice
-    // NOTHING — no 100, no synthesized 408/5xx. With zero provisionals
-    // received, alice's own Timer B stays armed and the CALLER owns the
-    // give-up (local 408 at 64·T1). No proxy timer exists, by design.
     tokio::time::sleep(Duration::from_millis(500)).await;
     assert!(
         alice.try_recv().is_none(),

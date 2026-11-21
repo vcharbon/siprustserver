@@ -1,6 +1,5 @@
 //! The named-target resolver's cache and concurrency policy.
 
-/// Cache + concurrency policy for [`NamedForwarder`](super::NamedForwarder).
 #[derive(Debug, Clone, Copy)]
 pub struct ResolverConfig {
     /// How long a successful resolution is served from cache.

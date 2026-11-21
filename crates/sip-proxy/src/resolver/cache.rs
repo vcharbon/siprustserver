@@ -33,7 +33,6 @@ pub(super) struct NameCache {
 }
 
 impl NameCache {
-    /// An empty cache under `cfg`, timed by `clock`.
     pub(super) fn new(clock: Clock, cfg: ResolverConfig) -> Self {
         Self { entries: Mutex::new(HashMap::new()), clock, cfg }
     }

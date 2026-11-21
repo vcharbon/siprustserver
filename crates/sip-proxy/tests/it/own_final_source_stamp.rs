@@ -143,13 +143,13 @@ async fn an_unsupported_proxy_require_420_carries_received_and_rport() {
     let _ = h.finish().await;
 }
 
+/// A request on the worker-outbound path goes to its Request-URI, and this
+/// one names no host.
 #[tokio::test(start_paused = true)]
 async fn an_unsupported_uri_scheme_416_carries_received_and_rport() {
     let h = Harness::with_transit_delay("own-final-stamp-416", 1);
     let proxy = proxy(&h).await;
     let (client, alice) = h.bind_sut("alice", ALICE).await;
-    // A request on the worker-outbound path goes to its Request-URI, and
-    // this one names no host.
     let options = request(
         "OPTIONS",
         "urn:service:sos",

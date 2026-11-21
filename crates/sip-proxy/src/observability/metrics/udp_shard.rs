@@ -3,8 +3,6 @@
 
 use sip_net::UdpEndpoint;
 
-/// One recv shard's endpoint state: receive-queue gauges and the endpoints'
-/// lifetime counters, every field summed over the shard's faces.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct UdpShardStats {
     pub queue_depth: u64,
@@ -71,7 +69,6 @@ impl super::ProxyMetrics {
             .insert(shard, stats);
     }
 
-    /// Cross-shard aggregate.
     pub(super) fn udp_totals(&self) -> UdpShardStats {
         let mut t = UdpShardStats::default();
         for v in crate::poison::locked(&self.udp_shards, crate::poison::UDP_SHARD_STATS).values() {

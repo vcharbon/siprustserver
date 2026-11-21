@@ -26,7 +26,6 @@ impl ProxyMetrics {
         self.intake.shed.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// New non-emergency INVITEs dropped by the intake shed (counter).
     pub fn intake_shed(&self) -> u64 {
         self.intake.shed.load(Ordering::Relaxed)
     }
@@ -37,7 +36,6 @@ impl ProxyMetrics {
         self.intake.unanswerable.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// Datagrams no response can answer dropped at intake (counter).
     pub fn intake_unanswerable(&self) -> u64 {
         self.intake.unanswerable.load(Ordering::Relaxed)
     }

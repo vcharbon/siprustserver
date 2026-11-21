@@ -1,8 +1,8 @@
-//! The external face read every `PROXY_EXT_FACE_CHECK_MS` on a blocking
-//! thread, whether it is usable published for `/readyz` and the health
-//! sampler: no reader waits on the kernel on the async runtime. Before the
-//! first reading completes the face reads unusable. Each change is logged
-//! once, with the reading that made it, and so is each reading held once.
+//! The external face, read every `PROXY_EXT_FACE_CHECK_MS` on a blocking
+//! thread so no reader waits on the kernel on the async runtime. Whether it is
+//! usable is published for `/readyz` and the health sampler; before the first
+//! reading completes the face reads unusable. Each change is logged once, with
+//! the reading that made it, and so is each reading held once.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -17,7 +17,6 @@ use super::{FaceCheck, FaceLatch, FaceState};
 /// How a reading is taken: the kernel's, or a test's.
 pub type ReadFn = Arc<dyn Fn(&mut FaceLatch) -> FaceState + Send + Sync>;
 
-/// The latest reading of one external face.
 pub struct FaceMonitor {
     pub check: FaceCheck,
     usable: AtomicBool,
@@ -44,7 +43,6 @@ impl FaceMonitor {
         Some(monitor)
     }
 
-    /// Whether the latest reading found the face usable.
     pub fn usable(&self) -> bool {
         self.usable.load(Ordering::Acquire)
     }
@@ -52,6 +50,8 @@ impl FaceMonitor {
     /// Read with `read` every `period` (positive) on a blocking thread and
     /// publish each reading; a run that panics is restarted and counted
     /// ([`sip_proxy::supervise`]), the latch kept across runs.
+    /// Two readings are always at least `period` apart, so a runtime stall
+    /// never reads a flap shorter than the period down twice.
     pub fn spawn_reading(self: &Arc<Self>, period: Duration, read: ReadFn) -> JoinHandle<()> {
         let monitor = self.clone();
         sip_proxy::supervise::spawn(sip_proxy::supervise::EXTERNAL_FACE_MONITOR, move || {
@@ -60,8 +60,6 @@ impl FaceMonitor {
             async move {
                 #[expect(clippy::disallowed_methods, reason = "the period is validated positive")]
                 let mut ticker = tokio::time::interval(period);
-                // Two readings are always a period apart, or a runtime stall
-                // would make a flap shorter than the period read down twice.
                 ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
                 loop {
                     ticker.tick().await;

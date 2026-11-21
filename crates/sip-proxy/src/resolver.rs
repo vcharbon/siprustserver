@@ -1,79 +1,34 @@
-//! DNS resolution seam for **named** forward targets ([`HostResolver`] +
+//! DNS resolution seam for named forward targets ([`HostResolver`] and
 //! [`NamedForwarder`]).
 //!
-//! The proxy forwards almost exclusively to IP literals (registry workers, the
-//! simulated fabric); the exception is a worker-outbound b-leg whose R-URI
-//! carries a DNS name (e.g. a `sipp-uas` pod FQDN). Resolution must never run
-//! on the recv-loop task: the loop is single-task, so one slow/unresolvable
-//! name awaited inline head-of-line blocks ALL proxy traffic for the resolver
-//! timeout — the starvation shape of a keepalive-burst collapse, but
-//! sustained. The send path is therefore tiered:
+//! The recv loop never waits on DNS. An IP literal is sent inline by the core
+//! and never reaches this module; a fresh positive cache hit is sent inline
+//! here; anything else is handed to a spawned single-flight resolve task.
 //!
-//! 1. **IP literal** — sent inline by the core, never touches this module.
-//! 2. **Fresh positive cache hit** — sent inline here (lock-only, no await
-//!    under the lock).
-//! 3. **Anything else** — handed to a spawned single-flight resolve task; the
-//!    recv loop never waits on DNS.
-//!
-//! Each lookup is bounded (`lookup_timeout_ms`, 2 s). At the bound the packets
+//! Each lookup is bounded (`lookup_timeout_ms`). At the bound the packets
 //! waiting on it are dropped and a negative entry written: a packet leaves
-//! within the bound of the lookup it waits on, or never, so a request never
-//! leaves after its sender's transaction gave up. The
-//! lookup's slot stays taken until the lookup itself returns (a getaddrinfo
-//! thread cannot be cancelled), so at most `max_in_flight` lookup threads are
-//! stuck per forwarder.
+//! within the bound of the lookup it waits on, or never. The lookup's slot
+//! stays taken until the lookup itself returns (a getaddrinfo thread cannot be
+//! cancelled), so at most `max_in_flight` lookup threads are stuck per
+//! forwarder, and a lookup past its bound starts no further attempt. Of a
+//! name's addresses the first of the egress socket's family is used and kept
+//! for the cache lifetime. Only A/AAAA records are used (ADR-0046 §8, §9).
 //!
-//! A lookup past its bound starts no further attempt (no second name form):
-//! its slot frees when the attempt already running returns. Of a name's
-//! addresses, the first the egress socket can reach is used (the socket of
-//! the face it leaves on; an unspecified IPv6 bind reaches both families),
-//! and kept for the cache lifetime. A name's answer may change between an INVITE
-//! and its ACK, costing the hop a repeated final to Timer H on a call that already
-//! failed. Only A/AAAA records are used: no NAPTR/SRV selection (RFC 3263 §4.1-4.2,
-//! ADR-0046).
+//! The cache has a positive TTL, a negative TTL and a size cap. A packet that
+//! races an in-flight resolve for its name waits for it, behind the packets
+//! already waiting, and leaves in arrival order to the address the resolve
+//! found. The wait is bounded per name (`max_waiting_per_name`); a packet past
+//! it, or one racing a lookup already past its bound, is dropped
+//! (`dropped_in_flight`). Packets waiting on a resolve that fails are each
+//! counted under its outcome.
 //!
-//! The cache is bounded and TTL'd in both directions:
-//! - a **positive TTL** so a restarted callee pod's new A record is picked up
-//!   (a forever-cache would pin the dead IP for the process lifetime);
-//! - a **negative TTL** so an unresolvable name costs one lookup per window,
-//!   not one per packet;
-//! - a **size cap**, because every sender on the internal plane (any sender of
-//!   a single-face proxy, ADR-0048) can steer arbitrary R-URI hostnames into
-//!   resolution — uncapped, each distinct name would be a permanent map entry.
-//!
-//! A packet that races an in-flight resolve for its name waits for it, behind
-//! the packets already waiting, and leaves in arrival order to the address the
-//! resolve found: neither a 2xx ACK nor a non-INVITE response is retransmitted,
-//! so a drop here would be a loss. The wait is bounded per name
-//! (`max_waiting_per_name`); a packet past it, or one racing a lookup already
-//! past its bound, is dropped (`dropped_in_flight`). Packets waiting on a
-//! resolve that fails are each counted under its outcome.
-//!
-//! Cold-cache latency is attacked from three sides, so the
-//! FIRST b-leg forward after a deploy / CoreDNS restart / TTL expiry is
-//! warm-equivalent instead of a 3.5–7.5 s stall that blows the downstream 2 s
-//! connect timer:
-//! - **Absolute-first resolution** (`resolution_candidates`): kube ships
-//!   `ndots:5`, so a dotted Service FQDN is search-domain-expanded through
-//!   several serial lookups before being tried as-is. Querying the
-//!   absolutely-qualified `{host}.` first collapses that to ONE lookup; the
-//!   raw name stays as the fallback for names that genuinely need expansion.
-//! - **Proactive refresh**: a positive entry that was USED since the last
-//!   refresh is re-resolved off-path shortly *before* its TTL (margin =
-//!   min(ttl/4, 5 s)), so an active name never expires cold. An entry that
-//!   went unused stops refreshing and expires naturally — no unbounded churn
-//!   for one-shot names. The armed set is capped at `max_entries` (names are
-//!   wire-influenceable; a name-flood must not pin unbounded sleeping tasks) —
-//!   pinned names are exempt from the cap.
-//! - **Prewarm + pin** ([`NamedForwarder::prewarm`], `PROXY_RESOLVER_PREWARM`):
-//!   operator-configured targets are resolved at startup (off the serving
-//!   path, never blocking boot) and pinned, so they refresh every cycle
-//!   regardless of use and stay permanently warm.
-//!
-//! Refresh/prewarm outcomes are counted in
-//! `sip_proxy_resolver_refresh_total{outcome}`. A failed refresh never
-//! clobbers the still-valid positive entry (it keeps serving until its TTL)
-//! and never stores a negative entry — it just retries at the same cadence.
+//! A dotted name is queried absolutely qualified (`{host}.`) first, the raw
+//! name as the fallback. A positive entry used since its last refresh is
+//! re-resolved off-path before its TTL (margin min(ttl/4, 5 s)); an unused one
+//! expires. The refresh set is capped at `max_entries`, names pinned by
+//! [`NamedForwarder::prewarm`] exempt. Refresh and prewarm outcomes are counted
+//! in `sip_proxy_resolver_refresh_total{outcome}`; a failed refresh keeps the
+//! positive entry and stores no negative one.
 
 mod cache;
 mod config;
@@ -234,7 +189,6 @@ impl Inner {
         }
     }
 
-    /// When a lookup starting now reaches its bound.
     fn lookup_deadline(&self) -> tokio::time::Instant {
         sip_clock::deadline::from_now(Duration::from_millis(self.cache.cfg.lookup_timeout_ms))
     }
@@ -287,7 +241,7 @@ impl Inner {
             let pinned = locked(&self.pinned, RESOLVER_PINS).contains(&key);
             let mut armed = locked(&self.refresh_armed, RESOLVER_REFRESHES);
             if !pinned && armed.len() >= self.cache.cfg.max_entries {
-                return; // flood guard: names beyond the cache cap get no proactive refresh
+                return;
             }
             if !armed.insert(key.clone()) {
                 return;
@@ -299,15 +253,12 @@ impl Inner {
         });
     }
 
-    /// The refresh [`arm_refresh`](Self::arm_refresh) schedules, run once due.
     async fn refresh_when_due(self: Arc<Self>, target: ProxyAddr, key: String) {
         tokio::time::sleep(Duration::from_millis(self.cache.cfg.refresh_after_ms())).await;
         locked(&self.refresh_armed, RESOLVER_REFRESHES).remove(&key);
         let pinned = locked(&self.pinned, RESOLVER_PINS).contains(&key);
         let used = self.cache.take_used(&key).unwrap_or(false);
         if !pinned && !used {
-            // One-shot name: stop refreshing; the entry (if still there)
-            // expires at its natural TTL — bounded churn.
             self.metrics.record_resolver_refresh(refresh_outcome::IDLE_STOPPED);
             return;
         }
@@ -361,7 +312,6 @@ impl Inner {
                 return;
             }
         };
-        // A failed refresh keeps the positive entry: it publishes nothing.
         self.release(target, resolved, resolved.is_some()).await;
         match resolved {
             Some(_) => self.metrics.record_resolver_refresh(ok),
@@ -380,7 +330,8 @@ fn reaches(local: SocketAddr, dst: SocketAddr) -> bool {
     local.is_ipv4() == dst.is_ipv4()
 }
 
-/// The named-target send path (tiers 2–3 of the module doc). Cheap to clone.
+/// The named-target send path: the inline cache hit and the spawned resolve of
+/// the module doc. Cheap to clone.
 #[derive(Clone)]
 pub struct NamedForwarder(Arc<Inner>);
 

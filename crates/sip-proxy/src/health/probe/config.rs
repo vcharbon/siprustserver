@@ -8,7 +8,6 @@ use tokio::time::Instant;
 /// millisecond past it, so an answer due at that last instant is read first.
 const REAP_PAST_WINDOW: Duration = Duration::from_millis(1);
 
-/// When a reply window whose last instant is `window_ends` is reaped.
 pub(super) fn past_the_window(window_ends: Instant) -> Instant {
     sip_clock::deadline::after(window_ends, REAP_PAST_WINDOW)
 }
@@ -32,7 +31,6 @@ impl Default for HealthProbeConfig {
 }
 
 impl HealthProbeConfig {
-    /// The tick period the probe runs at: `interval_ms`, at least 1 ms.
     pub fn period(&self) -> Duration {
         Duration::from_millis(self.interval_ms.max(1))
     }

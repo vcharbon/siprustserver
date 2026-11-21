@@ -11,11 +11,10 @@ use super::ProxyMetrics;
 
 pub(super) struct OverloadCounts {
     rejections: FixedCounts,
-    /// Coarse (registry-aggregate) count of `WorkerLoadObserver::sweep_stale`
-    /// floor events: an Alive worker whose OPTIONS answers stopped carrying a
-    /// fresh `X-Overload` within `payload_stale_ms`, so AIMD halved its cap.
-    /// Non-zero while ELU is healthy means the probe cycle exceeds the stale
-    /// threshold (config invariant).
+    /// `WorkerLoadObserver::sweep_stale` floor events, summed over the workers:
+    /// an alive worker whose OPTIONS answers carried no fresh `X-Overload` within
+    /// `payload_stale_ms` had its AIMD cap decreased. Non-zero while ELU is
+    /// healthy means the probe cycle exceeds the stale window.
     stale_decrease: AtomicU64,
     /// Emergency new-dialog INVITEs that skipped the `above_critical` filter
     /// and the per-worker AIMD bucket.
@@ -52,9 +51,7 @@ impl ProxyMetrics {
         self.overload.rejections.add(&[reason], 1);
     }
 
-    /// Add `n` `sweep_stale` floor events (one per worker the sweep just
-    /// conservatively decreased). The runner's 1 s sweep task calls this with
-    /// the per-sweep floored count.
+    /// Add `n` `sweep_stale` floor events, one per worker a sweep decreased.
     pub fn record_overload_stale_decrease(&self, n: u64) {
         self.overload.stale_decrease.fetch_add(n, Ordering::Relaxed);
     }

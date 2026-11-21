@@ -32,24 +32,20 @@ async fn each_instance_routes_a_call_by_its_own_view_of_the_primary() {
 
     pair.a.read(primary, WorkerHealth::Dead);
 
-    // A: the caller's request goes to the backup.
     pair.send(Party::Caller, &SipMessage::Request(in_dialog(&ack, "INFO", 2))).await;
     let (info, info_from) = pair.request(backup, "INFO").await;
     let ok = answer(&info, info_from, backup, 200, "OK", "uas-1");
     pair.send(backup, &SipMessage::Response(ok)).await;
     pair.response(Party::Caller, 200).await;
 
-    // B: the primary's own request reaches the caller.
     let keepalive = uas_in_dialog(&at_primary, primary, "uas-1", "OPTIONS", 1);
     pair.send(primary, &SipMessage::Request(keepalive)).await;
     let (at_caller, at_caller_from) = pair.request(Party::Caller, "OPTIONS").await;
 
-    // A: the caller's answer to it goes to the backup.
     let ok = answer(&at_caller, at_caller_from, Party::Caller, 200, "OK", "caller-split-view");
     pair.send(Party::Caller, &SipMessage::Response(ok)).await;
     pair.response(backup, 200).await;
 
-    // A reads the primary alive again: the call's traffic converges on it.
     pair.a.read(primary, WorkerHealth::Alive);
     pair.send(Party::Caller, &SipMessage::Request(in_dialog(&ack, "BYE", 3))).await;
     let (bye, bye_from) = pair.request(primary, "BYE").await;

@@ -32,7 +32,6 @@ fn word(text: &str) -> String {
     text.replace(['@', '.'], "-")
 }
 
-/// The caller's dialling INVITE of call `call_id`.
 pub fn caller_invite(call_id: &str) -> SipRequest {
     let at = Party::Caller.addr();
     let callee = Party::Callee.addr();
@@ -51,7 +50,6 @@ Content-Length: 0\r\n\r\n",
     ))
 }
 
-/// A worker's dialling INVITE of its leg `call_id` toward the callee.
 pub fn worker_invite(worker: Party, call_id: &str) -> SipRequest {
     worker_invite_routed(worker, call_id, "")
 }
@@ -129,7 +127,6 @@ pub fn answer(
     generate_response(req, status, reason, &opts).expect("a response")
 }
 
-/// The ACK of the non-2xx `final_response` to `invite` (§17.1.1.3).
 pub fn ack_non_2xx(invite: &SipRequest, final_response: &SipResponse) -> SipRequest {
     generate_ack_for_non_2xx(invite, final_response, &[]).expect("an ACK")
 }
@@ -169,12 +166,10 @@ Contact: <sip:alice@{host}:{port}>\r\n\
     ))
 }
 
-/// The whole top Via of `req`, as written on the wire.
 pub fn top_via(req: &SipRequest) -> String {
     req.top_via().to_wire()
 }
 
-/// The top Via branch of `req`.
 pub fn top_branch(req: &SipRequest) -> String {
     req.top_via().branch().expect("a branch").to_string()
 }

@@ -16,7 +16,6 @@ use metric_values::OpenRows;
 
 use super::catalogue;
 
-/// Internal (cluster) vs external (off-cluster) peer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PeerScope {
     Internal,
@@ -24,10 +23,8 @@ pub enum PeerScope {
 }
 
 impl PeerScope {
-    /// Every scope, in declaration order.
     pub const ALL: [PeerScope; 2] = [PeerScope::Internal, PeerScope::External];
 
-    /// The `scope` label.
     pub const fn label(self) -> &'static str {
         match self {
             PeerScope::Internal => "internal",
@@ -36,14 +33,11 @@ impl PeerScope {
     }
 }
 
-/// The closed set of failure kinds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PeerFailureKind {
-    /// Sent a request, NO final SIP response arrived: client Timer B (INVITE) /
-    /// Timer F (non-INVITE) fired.
+    /// A health probe's OPTIONS drew no final response within its reply
+    /// window.
     ResponseTimeout,
-    /// The longer-horizon give-up: the configured out-of-dialog INVITE bound
-    /// (default 158 s) fired (distinct from [`Self::ResponseTimeout`]).
     TransactionTimeout,
     /// Outbound send to the peer failed (ENOBUFS/EPERM/…).
     SendFailure,
@@ -54,7 +48,6 @@ pub enum PeerFailureKind {
 }
 
 impl PeerFailureKind {
-    /// Every kind, in declaration order.
     pub const ALL: [PeerFailureKind; 4] = [
         PeerFailureKind::ResponseTimeout,
         PeerFailureKind::TransactionTimeout,
@@ -62,7 +55,6 @@ impl PeerFailureKind {
         PeerFailureKind::MessageTooLong,
     ];
 
-    /// The `kind` label.
     pub const fn label(self) -> &'static str {
         match self {
             PeerFailureKind::ResponseTimeout => "response_timeout",
@@ -81,12 +73,10 @@ pub struct PeerFailures {
 }
 
 impl PeerFailures {
-    /// No failure counted.
     pub fn new() -> Self {
         Self { rows: OpenRows::new(&catalogue::PEER_FAILURES) }
     }
 
-    /// Count one failure of `kind` against `peer` in `scope`.
     pub fn record(&self, peer: &SocketAddr, scope: PeerScope, kind: PeerFailureKind) {
         let peer = peer.to_string();
         let row = [peer.as_str(), scope.label(), kind.label()];
@@ -96,7 +86,6 @@ impl PeerFailures {
         }
     }
 
-    /// The count of one `{peer,scope,kind}` series.
     pub fn get(&self, peer: &str, scope: PeerScope, kind: PeerFailureKind) -> u64 {
         self.rows.get(&[peer, scope.label(), kind.label()])
     }
@@ -123,8 +112,6 @@ mod tests {
         SocketAddr::from(([10, (n >> 16) as u8, (n >> 8) as u8, n as u8], 5060))
     }
 
-    /// Past the cap an external peer's count lands on the overflow series and
-    /// is counted there; every count is kept.
     #[test]
     fn external_peers_past_the_cap_land_on_the_overflow_series() {
         let pf = PeerFailures::new();
@@ -147,8 +134,6 @@ mod tests {
         assert_eq!(catalogue::PEER_FAILURES.check(&text), Ok(()));
     }
 
-    /// An internal peer keeps its own series however many external peers
-    /// filled the cap.
     #[test]
     fn internal_peers_keep_their_series_past_the_cap() {
         let pf = PeerFailures::new();
@@ -163,8 +148,6 @@ mod tests {
         );
     }
 
-    /// Internal peers spend none of the cap: past any number of them, the
-    /// external peers still get the whole budget under their own labels.
     #[test]
     fn internal_peers_leave_the_external_budget_whole() {
         let pf = PeerFailures::new();

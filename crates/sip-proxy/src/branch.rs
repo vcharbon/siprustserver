@@ -15,18 +15,19 @@ const BRANCHLESS_VIA: &str = "v";
 /// message, so a retransmission of a request and the CANCEL and non-2xx ACK
 /// for it map to the branch its first forward carried — at any instance of
 /// this proxy, remembering nothing.
+///
+/// A cookied branch is hashed with the received sent-by, Call-ID, From tag and
+/// CSeq number: one branch token from two senders (two transactions, §17.2.3),
+/// or reused by one upstream across a restart, maps to two branches. The
+/// received branch is folded to lower case (§7.3.1), so a re-cased one maps to
+/// the same forward.
+///
+/// The branch is `z9hG4bK` and 16 hex digits of a SHA-256 digest, the same in
+/// every process, build and instance.
 pub(crate) fn stateless_branch(req: &SipRequest) -> String {
     let mut hasher = Sha256::new();
     let top = req.top_via();
     match top.branch().filter(|b| has_magic_cookie(b)) {
-        // The received sent-by, Call-ID, From tag and CSeq number ride beside
-        // the received branch (the last three fed below): identical across a
-        // request, its retransmissions, its CANCEL and its non-2xx ACK, so
-        // §16.11's mapping holds — while one branch token from two senders
-        // (two transactions, §17.2.3), or spent twice by one upstream across
-        // a restart (§8.1.1.7 violated), still maps to two branches. The
-        // branch is folded to lower case: one re-cased in transit is the
-        // same branch (§7.3.1), so it maps to the same forward.
         Some(received) => {
             field(&mut hasher, COOKIED_VIA);
             fold_branch(received, |chunk| hasher.update(chunk));
@@ -34,11 +35,6 @@ pub(crate) fn stateless_branch(req: &SipRequest) -> String {
             let _ = top.sent_by_ref().write_canonical(&mut HashText(&mut hasher));
             hasher.update([0u8]);
         }
-        // §16.11's alternate input set for a pre-RFC-3261 upstream, which
-        // carries no branch to derive from. Its non-2xx ACK hashes APART from
-        // its INVITE, carrying the final's To tag — the RFC keeps that tag to
-        // separate a 2xx ACK whose Request-URI equals the INVITE's, and the
-        // recipe stands as stated.
         None => {
             field(&mut hasher, BRANCHLESS_VIA);
             field(&mut hasher, &top.to_wire());
@@ -50,9 +46,6 @@ pub(crate) fn stateless_branch(req: &SipRequest) -> String {
     field(&mut hasher, req.from().tag().unwrap_or_default());
     field(&mut hasher, &req.cseq().seq().to_string());
 
-    // `z9hG4bK` + 16 hex chars — the §8.1.1.7 shape every branch this stack
-    // emits has. SHA-256 rather than a `std` hasher: the value must be the
-    // same at another process, another build and another proxy instance.
     let digest = hasher.finalize();
     let mut branch = String::with_capacity(BRANCH_MAGIC_COOKIE.len() + 16);
     branch.push_str(BRANCH_MAGIC_COOKIE);
@@ -62,7 +55,6 @@ pub(crate) fn stateless_branch(req: &SipRequest) -> String {
     branch
 }
 
-/// Text written straight into the hash, for a writer that renders a field.
 struct HashText<'a>(&'a mut Sha256);
 
 impl std::fmt::Write for HashText<'_> {

@@ -27,7 +27,6 @@ fn addr(t: (&str, u16)) -> ProxyAddr {
     ProxyAddr::new(t.0, t.1)
 }
 
-/// Build a request with a given method / Call-ID / optional To-tag (in-dialog).
 fn request(method: &str, call_id: &str, to_tag: Option<&str>) -> SipMessage {
     request_with_rph(method, call_id, to_tag, None)
 }
@@ -35,6 +34,8 @@ fn request(method: &str, call_id: &str, to_tag: Option<&str>) -> SipMessage {
 /// As [`request`], optionally stamping a `Resource-Priority` header (the on-wire
 /// emergency signal `is_emergency_invite` detects, `Resource-Priority:
 /// esnet.0`).
+/// Its Via branch is the Call-ID with `@` replaced, a branch being a token
+/// (RFC 3261 §25.1).
 fn request_with_rph(
     method: &str,
     call_id: &str,
@@ -49,7 +50,6 @@ fn request_with_rph(
         Some(v) => format!("Resource-Priority: {v}\r\n"),
         None => String::new(),
     };
-    // A branch is a token (RFC 3261 §25.1): the Call-ID's `@` stays out of it.
     let branch = call_id.replace('@', ".");
     let raw = format!(
         "{method} sip:bob@10.0.0.3:5070 SIP/2.0\r\nContact: <sip:fixture@192.0.2.99>\r\n\
@@ -98,6 +98,8 @@ fn two_worker_registry(clock: Clock) -> SimulatedWorkerRegistry {
 
 /// The proxy stamps the v3 cookie wire format (v=3, e=0, w_pri/w_bak/kid/sig
 /// present), and a cookie whose signature is altered is refused with a 403.
+/// The altered signature keeps its length, so the refusal is the MAC
+/// mismatch, not a malformed MAC.
 #[tokio::test]
 async fn hmac_tampering_rejected() {
     let reg = two_worker_registry(Clock::test_at(0));
@@ -113,9 +115,6 @@ async fn hmac_tampering_rejected() {
     assert!(!params.get("kid").unwrap().is_empty(), "kid present");
     assert!(!params.get("sig").unwrap().is_empty(), "sig present");
 
-    // Flip ONE base64url char (length-preserving) so the truncated MAC stays
-    // 16 bytes — this exercises the verify-MISMATCH reject branch specifically,
-    // not the length!=16 "malformed" branch. Decode must Reject 403.
     let sig = params.get("sig").unwrap().clone();
     let first = sig.chars().next().expect("non-empty sig");
     let replacement = if first == 'A' { 'B' } else { 'A' };
@@ -158,17 +157,12 @@ async fn emergency_cookie_round_trips_e1_and_is_emergency() {
     let reg = two_worker_registry(clock.clone());
     let s = strategy(reg, clock);
 
-    // (a) ENCODE: an emergency INVITE (`Resource-Priority: esnet.0`) mints a
-    //     cookie whose encoded params carry `e=1` (and stays v=3).
     let invite = emergency_invite("call-em-rt@h");
     let target = s.select_for_new_dialog(&invite, SelectOpts::default()).await.unwrap();
     let params = s.encode_stickiness(&target, &invite).unwrap();
     assert_eq!(params.get("v").unwrap(), "3");
     assert_eq!(params.get("e").unwrap(), "1", "emergency INVITE ⇒ e=1");
 
-    // (b) DECODE: an in-dialog request carrying that `e=1` cookie yields a
-    //     DecodeResult whose `is_emergency` flag is true (here a Forward to the
-    //     still-alive primary).
     let bye = request("BYE", "call-em-rt@h", Some("bobtag"));
     match s.decode_stickiness(&params, &bye).await {
         DecodeResult::Forward { target: t, is_emergency, .. } => {
@@ -191,7 +185,6 @@ async fn cookie_route_fallback_when_primary_dead() {
     let backup_id = params.get("w_bak").unwrap().clone();
     assert!(!backup_id.is_empty(), "two-worker cluster should name a backup");
 
-    // Primary dies; in-dialog BYE must route to the cookie's alive backup.
     reg.set_health(&primary_id, WorkerHealth::Dead);
     let backup_addr = reg.resolve(&backup_id).unwrap().address;
     let bye = request("BYE", "call-fb@h", Some("bobtag"));
@@ -199,7 +192,6 @@ async fn cookie_route_fallback_when_primary_dead() {
         DecodeResult::ForwardBackup { target, .. } => assert_eq!(target, backup_addr),
         other => panic!("expected ForwardBackup, got {other:?}"),
     }
-    // ACK after death also follows the backup (dead primary ⇒ no alive-ACK exemption).
     let ack = request("ACK", "call-fb@h", Some("bobtag"));
     assert!(matches!(s.decode_stickiness(&params, &ack).await, DecodeResult::ForwardBackup { .. }));
 }
@@ -257,7 +249,6 @@ async fn unresolvable_primary_falls_back_to_backup() {
     let params = s.encode_stickiness(&primary, &invite).unwrap();
     let primary_id = params.get("w_pri").unwrap().clone();
 
-    // Primary scaled down entirely → the cookie's (alive) backup serves it.
     reg.remove(&primary_id);
     let bye = request("BYE", "call-un@h", Some("bobtag"));
     assert!(matches!(s.decode_stickiness(&params, &bye).await, DecodeResult::ForwardBackup { .. }));
@@ -326,7 +317,6 @@ async fn initial_health_unknown_workers_are_not_selectable() {
         s.select_for_new_dialog(&invite, SelectOpts::default()).await,
         Err(SelectError::NoTarget { .. })
     ));
-    // After it goes alive, it is selectable.
     reg.set_health(W1, WorkerHealth::Alive);
     assert_eq!(s.select_for_new_dialog(&invite, SelectOpts::default()).await.unwrap(), addr(A1));
 }
@@ -371,13 +361,11 @@ async fn a_new_dialog_skips_a_refusing_worker_while_one_accepts() {
 async fn above_critical_band_filtered_for_non_emergency_only() {
     let clock = Clock::test_at(0);
     let observer = Arc::new(WorkerLoadObserver::new(LoadObserverConfig::default()));
-    // Single worker, pinned above_critical.
     let reg =
         SimulatedWorkerRegistry::with_clock(vec![WorkerEntry::alive(W1, addr(A1))], clock.clone());
     observer.apply_payload(W1, &OverloadPayload { elu: 0.95, gc: 0.0, adm: 0.0 }, clock.now_ms());
     let s = strategy_with_observer(reg, clock, observer);
 
-    // Non-emergency new dialog is filtered out → NoTarget.
     let invite = request("INVITE", "call-ov@h", None);
     assert!(matches!(
         s.select_for_new_dialog(&invite, SelectOpts::default()).await,
@@ -393,29 +381,20 @@ async fn above_critical_band_filtered_for_non_emergency_only() {
 }
 
 /// The per-worker AIMD bucket gates admission: a non-emergency new dialog
-/// whose rendezvous winner has a drained bucket is rejected with
-/// `RateCapExhausted`, and re-INVITE / emergency on the SAME worker bypass the
-/// bucket and are still admitted.
-///
-/// `start_paused` freezes `tokio::time`, so every `clock.now_ms()` (the drain
-/// loop's and the strategy's own read inside `select_for_new_dialog`) returns
-/// the same instant, and the bucket refills by a provable zero between the
-/// drain and the assert.
+/// whose rendezvous winner has a drained bucket is refused with
+/// `RateCapExhausted`, and a re-INVITE or an emergency dialog on the same
+/// worker bypasses the bucket. The paused clock keeps the bucket from
+/// refilling between the drain and the selection.
 #[tokio::test(start_paused = true)]
 async fn rate_cap_exhausted_when_winners_bucket_is_empty() {
     let clock = Clock::test_at(0);
     let observer = Arc::new(WorkerLoadObserver::new(LoadObserverConfig::default()));
-    // Single worker so the rendezvous winner is deterministic; seed a cool
-    // payload (below_soft) so the bucket exists and is NOT band-filtered, then
-    // drain every token at the same instant.
     let reg =
         SimulatedWorkerRegistry::with_clock(vec![WorkerEntry::alive(W1, addr(A1))], clock.clone());
     observer.apply_payload(W1, &OverloadPayload { elu: 0.1, gc: 0.0, adm: 0.0 }, clock.now_ms());
     while observer.try_consume_for(W1, clock.now_ms()).is_ok() {}
     let s = strategy_with_observer(reg, clock, observer);
 
-    // Non-emergency new dialog on the empty bucket → 503-bound RateCapExhausted
-    // with a finite, non-zero Retry-After (the real per-bucket value, >= 1).
     let invite = request("INVITE", "call-rc@h", None);
     match s.select_for_new_dialog(&invite, SelectOpts::default()).await {
         Err(SelectError::RateCapExhausted { worker_id, retry_after_sec }) => {
@@ -425,21 +404,18 @@ async fn rate_cap_exhausted_when_winners_bucket_is_empty() {
         other => panic!("expected RateCapExhausted, got {other:?}"),
     }
 
-    // In-dialog re-INVITE (To-tag present) bypasses the bucket — still admitted
-    // despite the empty bucket (AIMD is a new-call knob only).
     let reinvite = request("INVITE", "call-rc@h", Some("bobtag"));
     assert_eq!(s.select_for_new_dialog(&reinvite, SelectOpts::default()).await.unwrap(), addr(A1));
 
-    // Emergency new dialog also bypasses the bucket.
     let emergency = request("INVITE", "call-rc-em@h", None);
     let opts = SelectOpts { emergency_override: true, ..SelectOpts::default() };
     assert_eq!(s.select_for_new_dialog(&emergency, opts).await.unwrap(), addr(A1));
 }
 
+/// A request naming a dialog no verified cookie backs (`admit_as_new`) is a
+/// new call: the empty bucket an in-dialog request bypasses refuses it.
 #[tokio::test(start_paused = true)]
 async fn a_dialog_admitted_as_new_meets_the_empty_bucket() {
-    // A request naming a dialog no verified cookie backs (`admit_as_new`) is a
-    // new call: the bucket that an in-dialog request bypasses refuses it.
     let clock = Clock::test_at(0);
     let observer = Arc::new(WorkerLoadObserver::new(LoadObserverConfig::default()));
     let reg =
@@ -454,87 +430,62 @@ async fn a_dialog_admitted_as_new_meets_the_empty_bucket() {
     assert!(matches!(refused, Err(SelectError::RateCapExhausted { .. })), "{refused:?}");
 }
 
+/// A worker no load payload was read from has no bucket and is admitted: no
+/// rate cap applies before its first OPTIONS answer.
 #[tokio::test]
 async fn unobserved_worker_is_admitted_without_a_bucket() {
-    // Bootstrap-friendly: a worker the LB has never seen a payload from has no
-    // bucket, so `try_consume_for` admits it (no rate cap before first OPTIONS).
     let clock = Clock::test_at(0);
     let reg = two_worker_registry(clock.clone());
-    let s = strategy(reg, clock); // fresh observer, no payloads applied
+    let s = strategy(reg, clock);
     let invite = request("INVITE", "call-boot@h", None);
-    // Succeeds (lands on one of the two alive workers) — no RateCapExhausted.
     let target = s.select_for_new_dialog(&invite, SelectOpts::default()).await.unwrap();
     assert!(target == addr(A1) || target == addr(A2));
 }
 
-// ── in-dialog stickiness under CPU starvation ───────────────────────────────
-//
-// The emergency-under-starvation work makes the LB shed NEW non-emergency far
-// more aggressively (a CPU-starved worker lands in AboveCritical and its bucket
-// drains). These tests PIN the invariant that already-established (in-dialog)
-// traffic is NEVER caught by that shedding — an in-dialog request must stay on
-// its owning worker even when that worker is fully loaded, so an established
-// call is not torn down by overload protection. Both the band filter
-// (select path) and the AIMD token bucket are new-call knobs only.
-
+/// Under default `SelectOpts`, an in-dialog request (To-tag present) whose
+/// owner is both above the critical band and out of tokens still selects that
+/// owner: the band filter and the bucket shed new calls only.
 #[tokio::test(start_paused = true)]
 async fn in_dialog_sticks_to_owner_in_above_critical_and_bypasses_empty_bucket() {
-    // Worst case under starve: the owning worker is BOTH pinned AboveCritical AND
-    // its token bucket is drained. An in-dialog request (To-tag present) must
-    // still select that worker — neither the AboveCritical candidate filter nor
-    // the empty bucket may shed it.
     let clock = Clock::test_at(0);
     let observer = Arc::new(WorkerLoadObserver::new(LoadObserverConfig::default()));
-    // Single worker so the rendezvous winner is deterministic.
     let reg =
         SimulatedWorkerRegistry::with_clock(vec![WorkerEntry::alive(W1, addr(A1))], clock.clone());
-    // Pin AboveCritical (elu 0.95 > the new 0.65 critical threshold) so the
-    // worker WOULD be filtered out of NON-emergency new-dialog candidates…
     observer.apply_payload(W1, &OverloadPayload { elu: 0.95, gc: 0.0, adm: 0.0 }, clock.now_ms());
-    // …and drain its bucket to empty (a NEW non-emergency call would 503 here).
     while observer.try_consume_for(W1, clock.now_ms()).is_ok() {}
     let s = strategy_with_observer(reg, clock, observer);
 
-    // Sanity: a NEW non-emergency dialog on this worker IS shed (AboveCritical
-    // filter → NoTarget, since it is the only worker).
     let new_call = request("INVITE", "call-new@h", None);
     assert!(matches!(
         s.select_for_new_dialog(&new_call, SelectOpts::default()).await,
         Err(SelectError::NoTarget { .. })
     ));
 
-    // But an in-dialog request to the SAME owner is admitted, on the SAME worker,
-    // despite AboveCritical + the empty bucket.
-    let in_dialog = request("INVITE", "call-est@h", Some("bobtag")); // re-INVITE
+    let in_dialog = request("INVITE", "call-est@h", Some("bobtag"));
     assert_eq!(
         s.select_for_new_dialog(&in_dialog, SelectOpts::default()).await.unwrap(),
         addr(A1),
         "in-dialog must stick to its AboveCritical owner (no band filter, no rate cap)"
     );
-    // A second in-dialog request still admits — proves the bucket is bypassed,
-    // not merely that one stray token existed.
     let bye = request("BYE", "call-est@h", Some("bobtag"));
     assert_eq!(s.select_for_new_dialog(&bye, SelectOpts::default()).await.unwrap(), addr(A1));
 }
 
+/// The cookie path reads the signed `w_pri` over the live registry, never the
+/// ELU band or the bucket: a valid cookie reaches its alive owner above the
+/// critical band.
 #[tokio::test]
 async fn decode_stickiness_routes_to_alive_w_pri_regardless_of_elu_band() {
-    // The cookie path (`decode_stickiness`) reads the signed `w_pri` and routes
-    // back to that owner over the live registry — it never consults the ELU band
-    // or the AIMD bucket. So an in-dialog request with a valid cookie pins to its
-    // alive owner even when that owner is pegged AboveCritical under starve.
     let clock = Clock::test_at(0);
     let observer = Arc::new(WorkerLoadObserver::new(LoadObserverConfig::default()));
     let reg = two_worker_registry(clock.clone());
     let s = strategy_with_observer(reg.clone(), clock, observer.clone());
 
-    // Mint a cookie for a non-emergency call (names w_pri = the selected owner).
     let invite = request("INVITE", "call-band@h", None);
     let primary = s.select_for_new_dialog(&invite, SelectOpts::default()).await.unwrap();
     let params = s.encode_stickiness(&primary, &invite).unwrap();
     let primary_id = params.get("w_pri").unwrap().clone();
 
-    // Peg the owning worker AboveCritical — irrelevant to the cookie path.
     observer.apply_payload(&primary_id, &OverloadPayload { elu: 0.99, gc: 0.0, adm: 0.0 }, 0);
     assert_eq!(
         observer.band_for(&primary_id),
@@ -542,7 +493,6 @@ async fn decode_stickiness_routes_to_alive_w_pri_regardless_of_elu_band() {
         "owner is pegged AboveCritical"
     );
 
-    // In-dialog BYE still forwards to the alive primary (band ignored).
     let bye = request("BYE", "call-band@h", Some("bobtag"));
     match s.decode_stickiness(&params, &bye).await {
         DecodeResult::Forward { target, .. } => assert_eq!(target, primary),
@@ -550,21 +500,15 @@ async fn decode_stickiness_routes_to_alive_w_pri_regardless_of_elu_band() {
     }
 }
 
+/// Under default `SelectOpts`, a request with a To-tag and no cookie (here a
+/// BYE) passes the band filter and the bucket, so it is never shed, and lands
+/// on the rendezvous winner over the current alive set, which a reshard may
+/// have moved off the dialog's owner.
 #[tokio::test]
 async fn no_cookie_in_dialog_request_uses_new_dialog_path_and_can_scatter() {
-    // SCATTER RISK: an in-dialog-LOOKING request (To-tag present)
-    // that arrives WITHOUT a valid Route cookie does NOT reach `decode_stickiness`
-    // — the core only decodes when a signed Route param is present. It would fall
-    // through to `select_for_new_dialog`. There, the `is_in_dialog` branch still
-    // protects it from the band filter + bucket (it gets ALL alive workers and
-    // bypasses AIMD), so it is never SHED — but its target is chosen by
-    // rendezvous over the CURRENT alive set, which may differ from the original
-    // owner if the cluster resharded. This test documents that contract: no-cookie
-    // in-dialog is admitted (never 503'd) but is NOT pinned to the original owner.
     let clock = Clock::test_at(0);
     let observer = Arc::new(WorkerLoadObserver::new(LoadObserverConfig::default()));
     let reg = two_worker_registry(clock.clone());
-    // Peg BOTH workers AboveCritical + drain their buckets — the harshest starve.
     for (w, a) in [(W1, A1), (W2, A2)] {
         let _ = a;
         observer.apply_payload(w, &OverloadPayload { elu: 0.99, gc: 0.0, adm: 0.0 }, 0);
@@ -572,10 +516,6 @@ async fn no_cookie_in_dialog_request_uses_new_dialog_path_and_can_scatter() {
     }
     let s = strategy_with_observer(reg, clock, observer);
 
-    // An in-dialog request with NO cookie (the proxy core would call this when
-    // the Route param is absent). It is ADMITTED (in-dialog bypasses both the
-    // AboveCritical filter and the empty bucket) and lands on one of the alive
-    // workers — never a RateCapExhausted / NoTarget.
     let in_dialog = request("BYE", "call-nocookie@h", Some("bobtag"));
     let target = s.select_for_new_dialog(&in_dialog, SelectOpts::default()).await.unwrap();
     assert!(
@@ -586,8 +526,6 @@ async fn no_cookie_in_dialog_request_uses_new_dialog_path_and_can_scatter() {
 
 #[tokio::test]
 async fn resharding_keeps_in_dialog_on_cookie_primary() {
-    // Stickiness wins over re-shard: a cookie minted for the original primary
-    // still decodes to it after a third worker joins.
     let clock = Clock::test_at(0);
     let reg = two_worker_registry(clock.clone());
     let s = strategy(reg.clone(), clock);

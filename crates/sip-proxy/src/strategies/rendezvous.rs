@@ -1,28 +1,20 @@
-//! Rendezvous (Highest-Random-Weight, HRW) hashing.
-//!
-//! Pure function. Given a routing key (the SIP Call-ID) and a list of candidate
-//! workers, return the candidate maximising `weight * H(key + ":" + id)`. With
-//! consistent weights this gives O(N) lookup, no virtual nodes, and 1/N
-//! expected key churn on membership change.
-//!
-//! `SHA-1` is **not** a cryptographic primitive here — only a fast,
-//! well-distributed hash. We interpret the top 8 bytes (big-endian) of
-//! `SHA1(key:id)` as a `u64`, then multiply by the weight in `u128` space
-//! (exact for weights up to `u64::MAX`, no 2^53 float-precision loss).
+//! Rendezvous (highest-random-weight) hashing: a pure function from a
+//! routing key (the SIP Call-ID) and candidate workers to the candidate
+//! maximising `weight × H(key:id)`, `H` the top 8 bytes (big-endian) of
+//! `SHA1(key:id)` as a `u64`, multiplied in `u128` (exact, no float). A
+//! membership change moves the keys of the changed worker only. See ADR-0009 X3.
 
 use sha1::{Digest, Sha1};
 
-/// A worker that can be picked by HRW. `weight` defaults to 1 via
-/// [`weight`](Self::weight).
 pub trait RendezvousCandidate {
     fn id(&self) -> &str;
-    /// Optional weight; higher → proportionally more keys land here.
+    /// Optional weight; `None` and `0` read as 1. The score is the hash times
+    /// the weight, so a higher weight wins more keys, not in proportion.
     fn weight(&self) -> Option<u32> {
         None
     }
 }
 
-/// Top 64 bits of `SHA1(key:id)` as a `u64`.
 fn score64(key: &str, id: &str) -> u64 {
     let mut hasher = Sha1::new();
     hasher.update(key.as_bytes());
@@ -134,7 +126,6 @@ mod tests {
 
     #[test]
     fn weight_biases_selection() {
-        // A heavily-weighted worker should win a large majority of keys.
         struct Wt(&'static str, u32);
         impl RendezvousCandidate for Wt {
             fn id(&self) -> &str {

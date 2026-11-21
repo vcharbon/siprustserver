@@ -124,7 +124,6 @@ impl Pool {
         None
     }
 
-    /// Forget the entry under `key`, if held.
     pub(super) fn remove(&mut self, key: &str, change: &mut Change) {
         if let Some(seq) = self.table.get(key).map(|slot| slot.seq) {
             self.remove_seq(seq, change);

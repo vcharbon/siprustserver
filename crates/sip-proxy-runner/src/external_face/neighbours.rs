@@ -33,10 +33,8 @@ const NLM_F_REQUEST: u16 = 0x1;
 const NLM_F_DUMP: u16 = 0x300;
 const NDA_DST: u16 = 1;
 const AF_INET: u8 = 2;
-/// The bound on one read of the dump's answer.
 const READ_TIMEOUT: Duration = Duration::from_secs(1);
 
-/// The dump of every IPv4 neighbour entry.
 pub fn dump_ipv4() -> std::io::Result<Vec<Neighbour>> {
     let mut socket = Socket::new(
         Domain::from(libc::AF_NETLINK),

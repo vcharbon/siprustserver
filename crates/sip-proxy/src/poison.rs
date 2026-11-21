@@ -39,17 +39,14 @@ pub const LOCKS: [&str; 12] = [
 /// The recoveries of the proxy's locks in this process.
 pub(crate) static RECOVERIES: Recoveries<{ LOCKS.len() }> = Recoveries::new(LOCKS);
 
-/// Lock `m`, the lock `name`.
 pub(crate) fn locked<'a, T>(m: &'a Mutex<T>, name: &'static str) -> MutexGuard<'a, T> {
     RECOVERIES.mutex(m, name)
 }
 
-/// Read-lock `rw`, the lock `name`.
 pub(crate) fn read<'a, T>(rw: &'a RwLock<T>, name: &'static str) -> RwLockReadGuard<'a, T> {
     RECOVERIES.read(rw, name)
 }
 
-/// Write-lock `rw`, the lock `name`.
 pub(crate) fn write<'a, T>(rw: &'a RwLock<T>, name: &'static str) -> RwLockWriteGuard<'a, T> {
     RECOVERIES.write(rw, name)
 }

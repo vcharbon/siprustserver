@@ -9,7 +9,6 @@ use std::net::SocketAddr;
 /// `;rport` has the answer sent to the packet's source (RFC 3581 §4).
 const UNBOUND_HOST: &str = "proxy.invalid";
 
-/// The host a sender on the socket bound at `local` states.
 pub(super) fn stated_host(local: SocketAddr) -> String {
     if local.ip().is_unspecified() {
         UNBOUND_HOST.to_string()

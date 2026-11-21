@@ -82,7 +82,6 @@ impl Drop for Lab {
     }
 }
 
-/// A generator drawing identifiers deterministically from `seed`.
 fn id_gen(seed: u64) -> Arc<sip_txn::IdGen> {
     Arc::new(sip_txn::IdGen::seeded(seed))
 }

@@ -1,15 +1,13 @@
-//! Simulated worker registry — drives worker membership + health from a test. It
-//! is both a [`WorkerRegistry`] (read seam) and a control handle
+//! Simulated worker registry: drives worker membership and health from a test.
+//! It is both a [`WorkerRegistry`] (the read seam) and a control handle
 //! (`add`/`remove`/`set_health`/`set_acceptance`/`set_address`).
 //!
-//! Like every registry it is a thin wrapper over the shared `WorkerSet`: the
-//! identity (ordinal + host) is a [`topology::SimulatedMembership`] sharing the
-//! injected [`Clock`]; the per-worker port, health and acceptance are
-//! annotation presets. Each
-//! mutator drives the membership and/or the overlay, then **recomposes eagerly**,
-//! so the public seam stays synchronous (tests assert right after a mutation, no
-//! `.await`). Because the recompose reads the authoritative membership snapshot,
-//! it is inherently lag-immune — there is no delta replay to overflow.
+//! It wraps the shared `WorkerSet`: the identity (ordinal and host) is a
+//! [`topology::SimulatedMembership`] sharing the injected [`Clock`]; the
+//! per-worker port, health and acceptance are annotation presets. Each mutator
+//! drives the membership or the overlay, then recomposes before it returns, so a
+//! test asserts right after a mutation with no `.await`. The recompose reads the
+//! membership snapshot, so no delta can be lost.
 
 use std::sync::Arc;
 
@@ -22,8 +20,8 @@ use crate::poison::{locked, SIMULATED_REGISTRY};
 use super::projection::WorkerSet;
 use super::{Acceptance, WorkerEntry, WorkerHealth, WorkerRegistry};
 
-/// Fallback port for a worker with no per-worker `port_override`. Unused in
-/// practice — every simulated worker is added with an explicit port.
+/// The `WorkerSet` port for a worker with no per-worker port; every simulated
+/// worker carries its own.
 const DEFAULT_PORT: u16 = 5060;
 
 /// A registry whose membership/health is driven imperatively by a test. Cheap to
@@ -140,6 +138,7 @@ impl SimulatedWorkerRegistry {
     /// not ready: the worker is judged at it, routed or not). The host is
     /// membership identity (driven through topology, preserving health); the
     /// port is the proxy's per-worker annotation.
+    /// The address a host change leaves reads departed for its window.
     pub fn set_address(&self, id: &str, address: ProxyAddr) {
         let Some(cur) = self.set.probed().into_iter().find(|w| w.id == id) else {
             return;
@@ -149,9 +148,6 @@ impl SimulatedWorkerRegistry {
         }
         locked(&self.ports, SIMULATED_REGISTRY).insert(id.to_string(), address.port);
         if cur.address.host != address.host {
-            // Host change is membership identity. Re-seed the annotation at the new
-            // host (carrying the current health/acceptance + new port) so the
-            // recompose preserves it rather than resetting to a fresh endpoint.
             self.set.preset(id, address.host.clone(), address.port, cur.health, cur.acceptance);
             let member = self.membership.resolve(id);
             let conditions = member.map_or((true, false), |m| (m.ready, m.terminating));
@@ -162,10 +158,8 @@ impl SimulatedWorkerRegistry {
                 conditions.1,
             ));
             self.set.recompose();
-            // The preset hid the move from the recompose: tombstone the old address.
             self.set.depart(cur.address, id);
         } else {
-            // Pure port change (same host): a proxy-only annotation.
             self.set.set_port_override(id, address.port);
             self.set.recompose();
         }
@@ -256,7 +250,6 @@ mod tests {
         reg.set_ready("w", true);
         assert_eq!(reg.resolve("w").unwrap().health, WorkerHealth::Unknown);
         assert_eq!(reg.resolve("w").unwrap().address, addr, "the per-worker port survives");
-        // Unknown ordinal: nothing.
         reg.set_ready("ghost", false);
     }
 
@@ -264,13 +257,10 @@ mod tests {
     fn set_address_host_change_flows_through_topology() {
         let reg = SimulatedWorkerRegistry::with_clock(vec![], Clock::test_at(0));
         reg.add(WorkerEntry::alive("w", ProxyAddr::new("10.0.0.1", 5070)));
-        // Host change: identity flows through topology, port preserved, health kept.
         reg.set_address("w", ProxyAddr::new("10.0.0.9", 5070));
         assert_eq!(reg.resolve("w").unwrap().address, ProxyAddr::new("10.0.0.9", 5070));
         assert_eq!(reg.resolve("w").unwrap().health, WorkerHealth::Alive);
         assert_eq!(reg.membership().resolve("w").unwrap().host, "10.0.0.9");
-        // The address the worker left answers as departed, as a host move
-        // through membership does (Timer H).
         let left = reg.lookup_by_address(&ProxyAddr::new("10.0.0.1", 5070));
         assert_eq!(left.map(|w| (w.id, w.health)), Some(("w".into(), WorkerHealth::Dead)));
     }
@@ -281,13 +271,11 @@ mod tests {
         reg.add(WorkerEntry::alive("w", ProxyAddr::new("10.0.0.1", 5070)));
         reg.set_address("w", ProxyAddr::new("10.0.0.1", 5080));
         assert_eq!(reg.resolve("w").unwrap().address, ProxyAddr::new("10.0.0.1", 5080));
-        // topology host unchanged (port is port-agnostic to membership).
         assert_eq!(reg.membership().resolve("w").unwrap().host, "10.0.0.1");
     }
 
-    /// The snapshot-based recompose is inherently lag-immune: there is no delta
-    /// channel to overflow (no `Lagged` resync hazard). Driving many
-    /// membership changes then a real removal still converges to the current set.
+    /// Many membership changes then a removal converge to the current set: the
+    /// recompose reads the snapshot, so no delta can be lost.
     #[test]
     fn bulk_membership_changes_converge() {
         let reg = SimulatedWorkerRegistry::with_clock(

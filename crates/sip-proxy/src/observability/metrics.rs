@@ -42,7 +42,6 @@ pub enum Direction {
 }
 
 impl Direction {
-    /// Every direction, in declaration order.
     pub const ALL: [Direction; 2] = [Direction::Inbound, Direction::Outbound];
 }
 
@@ -56,7 +55,6 @@ pub enum MessageResult {
 }
 
 impl MessageResult {
-    /// Every result, in declaration order.
     pub const ALL: [MessageResult; 3] =
         [MessageResult::Forwarded, MessageResult::Responded, MessageResult::Dropped];
 }
@@ -75,7 +73,6 @@ pub enum RoutingDecisionKind {
 }
 
 impl RoutingDecisionKind {
-    /// Every kind, in declaration order.
     pub const ALL: [RoutingDecisionKind; 8] = [
         RoutingDecisionKind::SelectNew,
         RoutingDecisionKind::DecodeForward,
@@ -113,10 +110,8 @@ pub enum CancelLookup {
 }
 
 impl CancelLookup {
-    /// Every outcome, in declaration order.
     pub const ALL: [CancelLookup; 2] = [CancelLookup::Hit, CancelLookup::Miss];
 
-    /// The `outcome` label.
     pub const fn as_str(self) -> &'static str {
         match self {
             CancelLookup::Hit => "hit",
@@ -141,13 +136,8 @@ fn count_outcome(counters: &[AtomicU64], labels: &[&str], label: &str) {
     }
 }
 
-/// Live proxy metrics. Cheap to share behind an `Arc`.
 pub struct ProxyMetrics {
-    /// `[direction][result]` — fixed slots, lock-free (multiple increments per
-    /// packet on the hot path).
     messages: [[AtomicU64; MessageResult::ALL.len()]; Direction::ALL.len()],
-    /// One slot per native method — lock-free; an extension method's count
-    /// sits in `request_extensions`.
     requests: [AtomicU64; Method::NATIVE_TOKENS.len()],
     /// Extension methods, each under its own label, under the family's cap
     /// (the method token is wire-controlled).
@@ -155,8 +145,8 @@ pub struct ProxyMetrics {
     /// By CSeq method and status, under the family's cap (both are
     /// wire-controlled; the parser bounds the status to 100..=699).
     responses: OpenRows,
-    calls: AtomicU64, // initial (dialog-creating, no To-tag) INVITEs
-    routing_decisions: [AtomicU64; RoutingDecisionKind::ALL.len()], // indexed by RoutingDecisionKind
+    calls: AtomicU64,
+    routing_decisions: [AtomicU64; RoutingDecisionKind::ALL.len()],
     hmac_failures: [AtomicU64; HmacFailureReason::ALL.len()],
     /// Locally decided rejections (`RouteOutcome` kind `reject`), keyed by a
     /// bounded static reason — where the reject also answers on the wire, the
@@ -166,7 +156,6 @@ pub struct ProxyMetrics {
     rejects: FixedCounts,
     cancel_lookups: FixedCounts,
     no_target_dropped: FixedCounts,
-    /// The load balancer's per-worker overload path.
     overload: OverloadCounts,
     routing_duration_count: AtomicU64,
     routing_duration_sum_us: AtomicU64,
@@ -174,12 +163,10 @@ pub struct ProxyMetrics {
     pending_invite_lru_size: AtomicU64,
     /// By outcome, indexed like `crate::resolver::outcome::ALL`.
     named_sends: [AtomicU64; outcome::ALL.len()],
-    /// Proactive resolver refresh + startup prewarm events, keyed outcome
-    /// (crate::resolver::refresh_outcome — closed set:
-    /// refreshed|failed|idle_stopped|prewarmed|prewarm_failed). The
-    /// cold-cache-kill visibility: `refreshed` moving means
-    /// active names never expire cold; `prewarm_failed`/`failed` climbing
-    /// means DNS is unhealthy while the old entries keep serving.
+    /// Resolver refresh and startup prewarm events, indexed like
+    /// `crate::resolver::refresh_outcome::ALL`. `refreshed` moving means active
+    /// names never expire cold; `failed` or `prewarm_failed` climbing means DNS
+    /// is unhealthy while the old entries keep serving.
     resolver_refresh: [AtomicU64; refresh_outcome::ALL.len()],
     resolver_cache_size: AtomicU64,
     /// Outbound datagrams the endpoint failed to send (EPERM/ENOBUFS/...).
@@ -203,10 +190,8 @@ pub struct ProxyMetrics {
     /// 1 while the external face is usable (or unchecked).
     external_face_usable: AtomicU64,
     routing_on_answers: AtomicU64,
-    /// Per-face traffic counters (dual-face mode): `[face][direction]` where
-    /// face ∈ {int, ext} and direction ∈ {inbound (recv), outbound (egress)}.
-    /// A single-face proxy only ever touches the `int` slots — cheap fixed
-    /// atomics, no restructuring of the existing counters.
+    /// Per-face traffic, `[face][direction]`: inbound is received, outbound is
+    /// sent. A single-face proxy touches only the internal slots.
     face_messages: [[AtomicU64; Direction::ALL.len()]; Face::ALL.len()],
     /// Claims of the internal plane the external face does not honour.
     external_untrusted: FixedCounts,
@@ -376,7 +361,6 @@ impl ProxyMetrics {
         use catalogue as c;
         let mut s = String::new();
         let load = |a: &AtomicU64| a.load(Ordering::Relaxed);
-        // A series of a two-label family is its row-major cell.
         c::MESSAGES.render(&mut s, |series| read(self.messages.as_flattened(), series.at(0)));
         c::FACE_MESSAGES
             .render(&mut s, |series| read(self.face_messages.as_flattened(), series.at(0)));
@@ -394,7 +378,6 @@ impl ProxyMetrics {
         c::HMAC_FAILURES.render(&mut s, |series| read(&self.hmac_failures, series.at(0)));
         self.cancel_lookups.render(&mut s);
         self.no_target_dropped.render(&mut s);
-        // A histogram without finite buckets: the count and the sum.
         let count = load(&self.routing_duration_count);
         let sum = load(&self.routing_duration_sum_us) as f64 / 1_000_000.0;
         c::ROUTING_DURATION_SECONDS.render_histogram(&mut s, |_| HistogramValue {
@@ -421,8 +404,6 @@ impl ProxyMetrics {
 
         self.pool.render_health(&mut s);
 
-        // Per-peer failure/timeout family: internal = known worker
-        // (registry), external = under the cap.
         self.per_peer.render(&mut s);
         s
     }

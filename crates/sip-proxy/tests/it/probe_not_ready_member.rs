@@ -26,7 +26,7 @@ const SILENT: (&str, &str) = ("w-silent", "192.0.2.42:5070");
 const PROBE: &str = "192.0.2.1:5098";
 const TRANSIT_MS: u64 = 5;
 
-/// Answer every OPTIONS `ep` receives 200.
+/// Answer 200 to the first copy of each request `ep` receives.
 fn answer(ep: Box<dyn UdpEndpoint>) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let parser = CustomParser::new();

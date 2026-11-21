@@ -5,14 +5,14 @@ use std::net::Ipv4Addr;
 
 use super::*;
 
-/// A lookup over `pairs`.
 fn lookup(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
     let map: std::collections::HashMap<String, String> =
         pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
     move |key| map.get(key).cloned()
 }
 
-/// A complete, valid single-face boot with a fixed pool, plus `extra`.
+/// A complete, valid single-face boot with a fixed pool; each `extra` pair
+/// replaces the base pair of its key or adds one.
 fn boot(extra: &[(&str, &str)]) -> Result<ProxyConfig, Vec<String>> {
     let mut pairs = vec![
         ("PROXY_LISTEN", "127.0.0.1:5060"),
@@ -77,8 +77,6 @@ fn the_branch_memo_bounds_are_read() {
     assert!(errors.iter().any(|e| e.contains("PROXY_BRANCH_MEMO_INVITES_PER_CALL")), "{errors:?}");
 }
 
-// ── LB_* operator overrides ─────────────────────────────────────────────
-
 /// Each `LB_*` value replaces exactly its field; a coherent set boots.
 #[test]
 fn lb_overrides_replace_their_fields() {
@@ -107,7 +105,6 @@ fn lb_overrides_replace_their_fields() {
     assert_eq!(cfg.observer.cap_floor_cps, 2.0);
 }
 
-/// An initial cap above the ceiling refuses the boot.
 #[test]
 fn an_initial_cap_above_the_ceiling_refuses_the_boot() {
     refused(&[("LB_CAP_INITIAL_CPS", "300")], "cap_initial_cps");
@@ -119,7 +116,6 @@ fn a_cooldown_shorter_than_a_probe_cycle_refuses_the_boot() {
     refused(&[("LB_AIMD_COOLDOWN_TICKS", "2")], "aimd cooldown");
 }
 
-/// An incoherent set (reversed bands) refuses the boot.
 #[test]
 fn lb_overrides_that_reverse_the_bands_refuse_the_boot() {
     let e = boot(&[("LB_ELU_SOFT", "0.8"), ("LB_ELU_HARD", "0.5"), ("LB_ELU_CRITICAL", "0.3")])
@@ -127,9 +123,6 @@ fn lb_overrides_that_reverse_the_bands_refuse_the_boot() {
     assert!(e.join("\n").contains("elu_soft < elu_hard < elu_critical"), "{e:?}");
 }
 
-// ── refusals: one per class ──────────────────────────────────────────────
-
-/// `Err` from `boot(extra)`, naming `key`.
 fn refused(extra: &[(&str, &str)], key: &str) -> Vec<String> {
     let errors = boot(extra).expect_err("the boot must be refused");
     assert!(errors.iter().any(|e| e.contains(key)), "no problem names {key}: {errors:?}");
@@ -199,8 +192,6 @@ fn a_dual_face_wildcard_bind_refuses_the_boot() {
     refused(&external, "PROXY_LISTEN_EXT 0.0.0.0:5060");
 }
 
-/// The debug routes listen on loopback: by default, and refused on any other
-/// address, naming the variable.
 #[test]
 fn the_debug_address_defaults_to_loopback_and_refuses_any_other() {
     assert_eq!(boot(&[]).expect("valid").debug, "127.0.0.1:9097".parse().unwrap());

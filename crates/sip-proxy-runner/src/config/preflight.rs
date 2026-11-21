@@ -4,24 +4,22 @@
 
 use sip_proxy::load_observer::LoadObserverConfig;
 
-/// The health probe timings the cross-component checks need.
 #[derive(Debug, Clone, Copy)]
 pub struct ProbeTimingConfig {
     pub interval_ms: u64,
     pub timeout_ms: u64,
 }
 
-/// Cross-component config validation for the SIP front proxy.
+/// Checks the invariants between the health probe and the load observer and
+/// returns one line per violation, all of them, so one boot attempt names
+/// every problem. Pure: no I/O, no logging, no `tokio`.
 ///
-/// Pure (no I/O, no logging, no `tokio`). Returns one human-readable line per
-/// violated invariant, all of them, so the first boot attempt names every
-/// problem.
-///
-/// Example: `interval_ms=2000 timeout_ms=1500` (cycle=3500 ms) with
-/// `payload_stale_ms=3000` lets the 1 s sweep catch `age > 3000` between
-/// probe-recv events on about half of the cycles, halving the per-worker admit
-/// cap each time; the cap collapses to `cap_floor_cps` and never recovers. The
-/// `payload_stale_ms ≥ 2 × probe_cycle` check refuses that configuration.
+/// `payload_stale_ms` is at least two probe cycles (`interval_ms +
+/// timeout_ms`). Probe replies arrive one cycle apart, and a shorter window
+/// lets `sweep_stale` halve the per-worker admit cap between two replies until
+/// it sits at `cap_floor_cps` for good. The second cycle survives one dropped
+/// probe. The AIMD cooldown is at least one probe cycle, so one noisy probe
+/// cannot drive a decrease and the next increase.
 pub fn validate_config(
     probe: ProbeTimingConfig,
     observer: &LoadObserverConfig,
@@ -47,10 +45,6 @@ pub fn validate_config(
         ));
     }
 
-    // Payload staleness outlasts two probe cycles: replies arrive
-    // `interval + timeout` apart, and a shorter stale window lets
-    // `sweep_stale` halve the cap between two replies. One cycle of margin
-    // survives a single dropped probe.
     let probe_cycle_ms = probe.interval_ms.saturating_add(probe.timeout_ms);
     let min_stale = 2u64.saturating_mul(probe_cycle_ms);
     let stale_ms = u64::try_from(observer.payload_stale_ms).unwrap_or(0);
@@ -85,11 +79,8 @@ pub fn validate_config(
         ));
     }
 
-    // Band ordering and hysteresis bounds belong to the band classifier.
     observer.validate_bands(&mut violations);
 
-    // A cooldown shorter than one probe cycle lets the AIMD ladder follow a
-    // single noisy probe.
     let cooldown_ms = observer.aimd_cooldown_ticks * observer.options_interval_ms as f64;
     if cooldown_ms < probe_cycle_ms as f64 {
         violations.push(format!(

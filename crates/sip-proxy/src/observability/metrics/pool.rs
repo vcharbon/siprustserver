@@ -64,7 +64,6 @@ impl PoolGauges {
             .store(watch_broken_since_unix_ms.unwrap_or(0), Ordering::Relaxed);
     }
 
-    /// The pool-empty and discovery families.
     pub(super) fn render_pool(&self, out: &mut String) {
         let load = |a: &AtomicU64| a.load(Ordering::Relaxed);
         c::WORKER_POOL_EMPTY.render_value(out, load(&self.empty));
@@ -72,7 +71,6 @@ impl PoolGauges {
         c::DISCOVERY_WATCH_BROKEN_SINCE.render_value(out, load(&self.watch_broken_since_ms) / 1000);
     }
 
-    /// The worker-health and worker-acceptance families.
     pub(super) fn render_health(&self, out: &mut String) {
         c::WORKER_HEALTH.render(out, |series| super::read(&self.health, series.at(0)));
         c::WORKER_ACCEPTANCE.render(out, |series| super::read(&self.acceptance, series.at(0)));

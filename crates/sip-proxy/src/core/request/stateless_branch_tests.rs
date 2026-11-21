@@ -86,7 +86,6 @@ impl Fabric {
         req.top_via().to_wire()
     }
 
-    /// Just its `branch` token, for the shape and no-merge assertions.
     async fn pushed_branch(&self) -> String {
         let pkt = self.downstream.recv().await.expect("the proxy forwards a datagram");
         let SipMessage::Request(req) = CustomParser::new().parse(&pkt.raw).unwrap() else {
@@ -153,10 +152,10 @@ fn worker_src() -> std::net::SocketAddr {
     format!("{WORKER}:5060").parse().unwrap()
 }
 
-// §16.11's whole point: a second proxy instance that never saw the INVITE
-// still puts the CANCEL on the INVITE's branch. A branch drawn at random
-// would not match the downstream server transaction (§17.2.3 keys on branch
-// + sent-by + method), which answers 481 and keeps ringing.
+/// §16.11's whole point: a second proxy instance that never saw the INVITE
+/// still puts the CANCEL on the INVITE's branch. A branch drawn at random
+/// would not match the downstream server transaction (§17.2.3 keys on branch
+/// + sent-by + method), which answers 481 and keeps ringing.
 #[tokio::test(start_paused = true)]
 async fn cancel_at_a_second_proxy_instance_carries_the_invites_branch() {
     let f = fabric().await;
@@ -185,8 +184,8 @@ async fn cancel_at_a_second_proxy_instance_carries_the_invites_branch() {
     );
 }
 
-// A branch compares ignoring case (§7.3.1): a CANCEL whose branch a hop
-// re-cased, at a second instance, still carries the INVITE's pushed branch.
+/// A branch compares ignoring case (§7.3.1): a CANCEL whose branch a hop
+/// re-cased, at a second instance, still carries the INVITE's pushed branch.
 #[tokio::test(start_paused = true)]
 async fn a_recased_cancel_at_a_second_proxy_instance_carries_the_invites_branch() {
     let f = fabric().await;
@@ -202,8 +201,8 @@ async fn a_recased_cancel_at_a_second_proxy_instance_carries_the_invites_branch(
     assert_eq!(f.pushed_via().await, invite_via, "the re-cased CANCEL on the INVITE's branch");
 }
 
-// The §16.11 function itself: the INVITE, its CANCEL and its non-2xx ACK map
-// to one branch whatever the case their received branch is written in.
+/// The §16.11 function itself: the INVITE, its CANCEL and its non-2xx ACK map
+/// to one branch whatever the case their received branch is written in.
 #[test]
 fn a_recased_cancel_and_ack_map_to_the_invites_branch() {
     let of = |msg: SipMessage| match msg {
@@ -225,8 +224,9 @@ Content-Length: 0\r\n\r\n"
     assert_eq!(of(ack), pushed);
 }
 
-// The same mapping when the INVITE's memo has aged out of the one instance
-// that wrote it: a CANCEL is legal for the whole INVITE window and beyond.
+/// A CANCEL after the INVITE's memo aged out of the one instance that wrote
+/// it still carries the INVITE's branch: a CANCEL is legal for the whole
+/// INVITE window and beyond.
 #[tokio::test(start_paused = true)]
 async fn cancel_after_the_invite_memo_expired_carries_the_same_branch() {
     let f = fabric().await;
@@ -260,10 +260,10 @@ async fn cancel_after_the_invite_memo_expired_carries_the_same_branch() {
     );
 }
 
-// §16.11's retransmission clause across instances: the re-sent copy reaching
-// a different proxy still rides the branch the first copy got, so the
-// downstream transaction absorbs it as a retransmission rather than opening a
-// second transaction at the same CSeq.
+/// §16.11's retransmission clause across instances: the re-sent copy reaching
+/// a different proxy still rides the branch the first copy got, so the
+/// downstream transaction absorbs it as a retransmission rather than opening a
+/// second transaction at the same CSeq.
 #[tokio::test(start_paused = true)]
 async fn retransmission_through_a_second_proxy_carries_the_same_branch() {
     let f = fabric().await;
@@ -282,10 +282,10 @@ async fn retransmission_through_a_second_proxy_carries_the_same_branch() {
     );
 }
 
-// A branch function of the RECEIVED branch alone would merge two distinct
-// transactions whose upstream spent one token twice (a UA that restarts and
-// violates §8.1.1.7 uniqueness). Folding Call-ID, From tag and CSeq number in
-// keeps them apart while leaving the §16.11 mapping intact.
+/// A branch function of the RECEIVED branch alone would merge two distinct
+/// transactions whose upstream spent one token twice (a UA that restarts and
+/// violates §8.1.1.7 uniqueness). Folding Call-ID, From tag and CSeq number in
+/// keeps them apart while leaving the §16.11 mapping intact.
 #[tokio::test(start_paused = true)]
 async fn one_received_branch_token_on_two_call_ids_maps_to_two_branches() {
     let f = fabric().await;
@@ -301,8 +301,8 @@ async fn one_received_branch_token_on_two_call_ids_maps_to_two_branches() {
     assert_ne!(first, second, "two transactions must not merge onto one downstream branch");
 }
 
-// §8.1.1.7 shape: the magic cookie, then an opaque token. It is this proxy's
-// own value, never the upstream's.
+/// §8.1.1.7 shape: the magic cookie, then an opaque token. It is this proxy's
+/// own value, never the upstream's.
 #[tokio::test(start_paused = true)]
 async fn the_pushed_branch_carries_the_magic_cookie_and_is_opaque_hex() {
     let f = fabric().await;
@@ -317,10 +317,10 @@ async fn the_pushed_branch_carries_the_magic_cookie_and_is_opaque_hex() {
     assert_ne!(branch, "z9hG4bKup4", "the pushed branch is ours, not the received one");
 }
 
-// The §16.11 alternate input set, for a received Via with no branch: the
-// topmost Via, the To and From tags, the Call-ID, the CSeq NUMBER and the
-// Request-URI. Two copies of one request map together; a different CSeq
-// number is a different transaction and must not.
+/// The §16.11 alternate input set, for a received Via with no branch: the
+/// topmost Via, the To and From tags, the Call-ID, the CSeq NUMBER and the
+/// Request-URI. Two copies of one request map together; a different CSeq
+/// number is a different transaction and must not.
 #[tokio::test(start_paused = true)]
 async fn a_branchless_received_via_maps_by_the_alternate_input_set() {
     let f = fabric().await;
@@ -357,11 +357,11 @@ CSeq: 1 {method}\r\n\
     ))
 }
 
-// §17.2.3 matches a server transaction on branch AND sent-by, so one branch
-// token from two senders is two transactions. Forwarded to the same worker,
-// they must leave on two branches, or the worker absorbs the second INVITE as
-// a retransmission of the first and the second sender's CANCEL cancels the
-// first sender's call. Each CANCEL repeats its own INVITE's branch.
+/// §17.2.3 matches a server transaction on branch AND sent-by, so one branch
+/// token from two senders is two transactions. Forwarded to the same worker,
+/// they must leave on two branches, or the worker absorbs the second INVITE as
+/// a retransmission of the first and the second sender's CANCEL cancels the
+/// first sender's call. Each CANCEL repeats its own INVITE's branch.
 #[tokio::test(start_paused = true)]
 async fn one_branch_token_from_two_senders_leaves_on_two_branches() {
     let f = fabric().await;

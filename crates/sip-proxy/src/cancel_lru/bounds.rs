@@ -15,7 +15,6 @@ pub const fn invite_entry_ttl_ms(bound_sec: u64) -> u64 {
     bound_sec.saturating_mul(1000).saturating_add(TIMER_H)
 }
 
-/// [`invite_entry_ttl_ms`] at the transaction layer's default bound.
 pub const INVITE_ENTRY_TTL_MS: u64 = INVITE_INITIAL_TIMEOUT + TIMER_H;
 
 /// The default mean ring, ms, the bounds are sized on: the time an INVITE
@@ -50,11 +49,8 @@ pub const DEFAULT_MAX_BYTES: usize = 192 << 20;
 /// the Record-Route it minted and the cookie of its Via.
 pub const TYPICAL_ENTRY_BYTES: usize = 2_560;
 
-/// The default entry cap: what [`DEFAULT_MAX_BYTES`] holds of
-/// [`TYPICAL_ENTRY_BYTES`] entries.
 pub const DEFAULT_MAX_ENTRIES: usize = DEFAULT_MAX_BYTES / TYPICAL_ENTRY_BYTES;
 
-/// The independently locked stripes of a default memo.
 pub const DEFAULT_STRIPES: usize = 16;
 
 /// The bounds of a branch memo, on the bytes it accounts for its entries,
@@ -96,7 +92,6 @@ impl Default for MemoBounds {
 }
 
 impl MemoBounds {
-    /// The INVITEs per call beyond a basic call's two, thousandths.
     const fn further_invites_milli(&self) -> u64 {
         self.invites_per_call_milli.saturating_sub(DEFAULT_INVITES_PER_CALL_MILLI)
     }
@@ -116,12 +111,10 @@ impl MemoBounds {
             .saturating_add(further.saturating_mul(self.invite_ttl_ms) / 1_000)
     }
 
-    /// The stripe count, at least one.
     pub(super) fn stripe_count(&self) -> usize {
         self.stripes.max(1)
     }
 
-    /// How long an entry of `lifetime` lives.
     pub(super) fn ttl_ms(&self, lifetime: Lifetime) -> u64 {
         match lifetime {
             Lifetime::InviteTransaction => self.invite_ttl_ms,
@@ -144,7 +137,6 @@ impl MemoBounds {
         (split(self.max_entries), split(self.max_bytes))
     }
 
-    /// The INVITE-transaction pool's part of `n`.
     fn invite_share(&self, n: usize) -> usize {
         let whole = usize::try_from(entry_ms_per_call(self)).unwrap_or(usize::MAX);
         let part = usize::try_from(self.invite_ms_per_call()).unwrap_or(0);

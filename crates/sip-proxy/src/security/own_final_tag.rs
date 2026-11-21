@@ -30,6 +30,10 @@ fn derived_key(cookie_key: &[u8]) -> Option<[u8; 32]> {
 mod tests {
     use super::*;
 
+    /// One key derives one tag and another key another. The golden key's tag is
+    /// pinned: every proxy of a deployment, whatever its build, derives it, so a
+    /// change of derivation fails here before a rolling upgrade stops absorbing
+    /// the other proxies' ACKs.
     #[test]
     fn one_key_derives_one_pinned_tag_and_another_key_another() {
         let parse = |raw: &str| match sip_message::CustomParser::new().parse(raw.as_bytes()) {
@@ -46,9 +50,6 @@ mod tests {
         let tag = |key: &[u8]| own_final_tagger(key, &id_gen).for_request(&invite).0;
         assert_eq!(tag(b"0123456789abcdef-one"), tag(b"0123456789abcdef-one"));
         assert_ne!(tag(b"0123456789abcdef-one"), tag(b"0123456789abcdef-two"));
-        // Pinned: every proxy of a deployment, whatever its build, derives
-        // this tag, so a change of derivation shows here before a rolling
-        // upgrade stops absorbing the other proxies' ACKs.
         assert_eq!(tag(b"0123456789abcdef-golden"), "16bf91b42197364c");
     }
 }

@@ -4,7 +4,6 @@
 
 use sip_txn::IdGen;
 
-/// A generator keyed from the OS RNG; `Err` when there is none.
 pub(crate) fn keyed_id_gen() -> Result<IdGen, String> {
     IdGen::from_entropy().map_err(|e| e.to_string())
 }

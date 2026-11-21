@@ -57,7 +57,6 @@ fn strategy(reg: SimulatedWorkerRegistry, clock: Clock) -> LoadBalancerStrategy 
     LoadBalancerStrategy::new(Arc::new(reg), hmac, observer, Arc::new(ProxyMetrics::new()), clock)
 }
 
-/// A pool of `workers`, every one read alive.
 fn pool(workers: &[(&str, (&str, u16))], clock: Clock) -> SimulatedWorkerRegistry {
     SimulatedWorkerRegistry::with_clock(
         workers.iter().map(|(id, a)| WorkerEntry::alive(*id, addr(*a))).collect(),
@@ -83,7 +82,6 @@ impl RendezvousCandidate for Key {
     }
 }
 
-/// The rendezvous winner for `call_id` among `ids`.
 fn ranked_first(call_id: &str, ids: &[&'static str]) -> &'static str {
     let keys: Vec<Key> = ids.iter().map(|i| Key(i)).collect();
     rendezvous_select(call_id, &keys).expect("a candidate").0

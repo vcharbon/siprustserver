@@ -18,7 +18,6 @@ use crate::observability::metrics::{Face, RoutingDecisionKind};
 
 use super::registry::ProxyTraces;
 
-/// A datagram the proxy received for the call, with its raw wire bytes.
 pub fn sip_in(traces: &ProxyTraces, call_id: &str, at_ms: i64, src: SocketAddr, wire: &[u8]) {
     traces.with_span(call_id, at_ms, |span| {
         span.record(TraceEvent::new("sip.in", at_ms, &format!("from {src}")).with_body(wire));
@@ -44,8 +43,6 @@ pub fn response_in(
     })
 }
 
-/// A request the proxy forwarded: the datagram it put on the wire, plus the
-/// routing facts that chose the hop.
 pub fn forwarded(
     traces: &ProxyTraces,
     call_id: &str,
@@ -61,17 +58,14 @@ pub fn forwarded(
     });
 }
 
-/// A response the proxy relayed toward the caller, with its raw wire bytes.
 pub fn relayed(traces: &ProxyTraces, call_id: &str, at_ms: i64, next_hop: &ProxyAddr, wire: &[u8]) {
     traces.with_span(call_id, at_ms, |span| {
         span.record(TraceEvent::new("sip.out", at_ms, &format!("to {next_hop}")).with_body(wire));
     });
 }
 
-/// A final the proxy SYNTHESIZED and sent back to the packet source: a shed
-/// 503, a 483, a 420, a 400, a select-failure 503. It is the only `sip.out` a
-/// call that never reached a downstream hop has — without it a traced shed
-/// shows an INVITE arriving and nothing leaving.
+/// A final the proxy built and sent back toward the request's sender: the only
+/// `sip.out` of a call that never reached a downstream hop.
 pub fn responded(traces: &ProxyTraces, call_id: &str, at_ms: i64, dst: SocketAddr, wire: &[u8]) {
     traces.with_span(call_id, at_ms, |span| {
         span.record(TraceEvent::new("sip.out", at_ms, &format!("to {dst}")).with_body(wire));
@@ -90,11 +84,8 @@ pub fn shed(traces: &ProxyTraces, call_id: &str, at_ms: i64, reason: &str) {
 /// hop it picked, the egress face it leaves on, and — when a stickiness cookie
 /// was consulted — whether it named a worker.
 pub struct RouteFacts<'a> {
-    /// The ladder's outcome (`select_new`, `decode_forward`, `ack_hop`, …).
     pub decision: RoutingDecisionKind,
-    /// The hop the request was forwarded to.
     pub target: &'a ProxyAddr,
-    /// The face it egresses on.
     pub face: Face,
     /// `hit` / `backup` / `miss` when the stickiness cookie was consulted,
     /// `None` when the decision never looked at one.

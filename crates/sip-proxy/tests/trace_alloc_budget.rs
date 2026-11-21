@@ -1,4 +1,4 @@
-// Own binary (ADR-0030 X2): installs the global allocation counter.
+// ADR-0030 §X2
 //! Allocation budget for the proxy's per-call trace tier on an UNSAMPLED call
 //! (ADR-0026).
 //!
@@ -56,7 +56,6 @@ fn untraced() -> Arc<ProxyTraces> {
     ))
 }
 
-/// One named emission site, as the data path calls it.
 type Site<'a> = (&'a str, Box<dyn Fn() + 'a>);
 
 /// The allocation cost of running `op` [`ITERS`] times, after one warm-up call
@@ -90,16 +89,11 @@ fn assert_every_site_is_free(traces: &ProxyTraces, regime: &str) {
         (
             "response sip.in",
             Box::new(|| {
-                // The relay path clones the Call-ID off THIS answer: an
-                // unsampled call must be told it is unsampled.
                 assert!(!emit::response_in(t(), CALL_ID, 0, 200, "INVITE", INVITE));
             }),
         ),
         ("sip.out + route", Box::new(|| emit::forwarded(t(), CALL_ID, 0, facts(), INVITE))),
         ("route.shed", Box::new(|| emit::shed(t(), CALL_ID, 0, "proxy_overload_cps"))),
-        // The span-close seam is per-datagram too: every relayed non-2xx INVITE
-        // final offers the registry an arm, and every relayed ACK asks it
-        // whether this call is over.
         ("arm close-on-ack", Box::new(|| t().arm_close_on_ack(CALL_ID, Some("a"), 1))),
         ("close on ack", Box::new(|| assert!(!t().close_on_ack(CALL_ID)))),
         ("close", Box::new(|| t().close(CALL_ID))),
@@ -120,6 +114,9 @@ fn an_unsampled_call_allocates_nothing_per_packet() {
     one_other_call_traced();
 }
 
+/// Nothing sampled: the flag read, every emission site and the
+/// X-Trace-Sample read of the parsed INVITE, which the sampling decision runs
+/// on the same path, allocate nothing.
 fn nothing_sampled() {
     let traces = untraced();
     assert_eq!(
@@ -137,8 +134,6 @@ fn nothing_sampled() {
     assert_eq!(allocs, 0, "the flag read must not allocate; it allocated {allocs}");
     assert_every_site_is_free(&traces, "nothing sampled");
 
-    // The X-Trace-Sample read the sampling decision runs on a lab-gated process
-    // is on the same path, and reads the parsed INVITE in place.
     let invite = match CustomParser::new().parse(INVITE) {
         Ok(SipMessage::Request(req)) => req,
         other => panic!("the fixture INVITE parses: {other:?}"),
@@ -149,11 +144,6 @@ fn nothing_sampled() {
     assert_eq!(allocs, 0, "the X-Trace-Sample read must not allocate; it allocated {allocs}");
 }
 
-// The production steady state: a traced call holds its slot for its whole life,
-// so the process-wide "anything sampled?" flag is up essentially continuously.
-// Every OTHER call on the box — tens of thousands of datagrams a second on a
-// front LB — must still cost zero allocations, which means no site may spend
-// anything on the strength of that flag alone.
 fn one_other_call_traced() {
     let traces = Arc::new(ProxyTraces::new(
         SampleAdmission::new(true, 1.0, 200, RateDraw::seeded(1), activation_bucket(0)),

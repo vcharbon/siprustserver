@@ -70,12 +70,10 @@ struct Answers {
     answered: usize,
 }
 
-/// What the worker saw and did.
 #[derive(Default)]
 struct Seen {
     /// When each OPTIONS (first copy) arrived, in order.
     arrivals: Vec<Instant>,
-    /// When the worker sent its last answer.
     last_answer: Option<Instant>,
 }
 
@@ -121,7 +119,6 @@ fn respond(
     (task, seen)
 }
 
-/// What one run of the probe left.
 struct Run {
     /// When each probe the worker saw was sent.
     sent: Vec<Instant>,

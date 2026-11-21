@@ -132,7 +132,6 @@ impl ProxyCore {
     }
 }
 
-/// Whether `msg` answers an INVITE.
 fn is_invite_response(msg: &SipMessage) -> bool {
     matches!(msg, SipMessage::Response(r) if r.cseq().method() == Method::Invite)
 }

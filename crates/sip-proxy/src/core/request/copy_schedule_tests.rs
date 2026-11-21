@@ -130,7 +130,6 @@ async fn rejected_on_the_ladder(
     assert_eq!(answered, 1 + resends, "{status}: the reject and the ladder's re-sends");
 }
 
-/// The caller's INVITE with Max-Forwards exhausted.
 fn exhausted() -> SipMessage {
     rewritten(&caller_invite("preflight-copies@test"), &[("Max-Forwards: 70", "Max-Forwards: 0")])
 }

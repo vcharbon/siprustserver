@@ -107,7 +107,6 @@ pub struct ProxyProbes {
     pub fit: FitFn,
 }
 
-/// What the probe answers read.
 pub struct ProbeSources {
     /// Latched by SIGTERM.
     pub draining: Arc<AtomicBool>,

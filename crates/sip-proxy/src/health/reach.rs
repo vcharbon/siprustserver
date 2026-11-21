@@ -14,7 +14,6 @@ use tokio::time::Instant;
 /// The last worker answer this proxy heard, on its own monotonic timeline.
 #[derive(Debug)]
 pub struct WorkerReach {
-    /// The origin of the timeline.
     origin: Instant,
     /// Milliseconds from `origin` to the last answer, plus one; `0` while no
     /// worker has answered.
@@ -22,12 +21,10 @@ pub struct WorkerReach {
 }
 
 impl WorkerReach {
-    /// A proxy that has heard no worker yet.
     pub fn unheard() -> Arc<Self> {
         Arc::new(Self { origin: Instant::now(), last_answer: AtomicU64::new(0) })
     }
 
-    /// A worker answered now.
     pub fn answered(&self) {
         self.last_answer.store(self.elapsed_ms().saturating_add(1), Ordering::Relaxed);
     }

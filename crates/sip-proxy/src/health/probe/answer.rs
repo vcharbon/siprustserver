@@ -13,7 +13,10 @@ pub struct AnswerReading {
     pub acceptance: Option<Acceptance>,
 }
 
-/// Read one OPTIONS answer: its status and its `X-Readiness`, if any.
+/// Read one OPTIONS answer from its status and its `X-Readiness`: a 200 reads
+/// `Alive`, accepting new calls unless its report refuses them; a 503 refuses new
+/// calls and leaves the health; any other status reads `Alive` and keeps the
+/// acceptance.
 pub fn read_answer(status: u16, readiness: Option<&Readiness>) -> AnswerReading {
     match status {
         200 => AnswerReading {

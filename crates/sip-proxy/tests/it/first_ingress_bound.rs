@@ -50,7 +50,6 @@ impl Rig {
         Self::reading(SipParserLimits::DEFAULT).await
     }
 
-    /// A proxy whose parser reads under `limits`.
     async fn reading(limits: SipParserLimits) -> Rig {
         let net = SimulatedSignalingNetwork::new(1);
         let bind = |at| net.bind_udp(BindUdpOpts::new(addr(at), 64));
@@ -78,7 +77,6 @@ impl Rig {
         Rig { task: tokio::spawn(core.run()), metrics, caller, worker }
     }
 
-    /// What the worker receives once the caller sent `invite`, as bytes.
     async fn forward_of(&self, invite: &str) -> Option<Vec<u8>> {
         self.caller.send_to(invite.as_bytes(), addr(PROXY)).await.expect("sent");
         settle().await;
@@ -90,7 +88,6 @@ async fn settle() {
     tokio::time::sleep(Duration::from_millis(20)).await;
 }
 
-/// The lines a datagram's head holds.
 fn lines_of(raw: &[u8]) -> usize {
     let text = String::from_utf8_lossy(raw);
     text.split("\r\n\r\n").next().unwrap_or_default().lines().count()
@@ -147,8 +144,8 @@ fn read(forward: &[u8]) -> SipRequest {
     }
 }
 
-/// `final_` of the worker's, for the request it read in `forward`, relayed by
-/// the proxy to the caller.
+/// The worker's `status` final to the request it read in `forward`, as the
+/// caller receives it through the proxy.
 async fn answered_through(rig: &Rig, forward: &[u8], status: u16) -> SipMessage {
     let opts = GenerateResponseOpts { to_tag: Some("own-tag-123".into()), ..Default::default() };
     let answer = generate_response(&read(forward), status, "As Stated", &opts).expect("the final");

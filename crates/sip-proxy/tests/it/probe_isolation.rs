@@ -103,7 +103,6 @@ async fn run(answered: [usize; 2], run_for: Duration) -> Run {
     .with_reach(reach.clone());
     let task = tokio::spawn(probe.run());
 
-    // Past the first answers, so the start's own isolation is behind.
     tokio::time::sleep(Duration::from_millis(100)).await;
     let until = Instant::now() + run_for;
     let mut isolated_at = None;

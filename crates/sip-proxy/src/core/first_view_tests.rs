@@ -2,7 +2,7 @@
 //! (ADR-0050 §5, §11): a new call, an in-dialog request and a CANCEL with no
 //! alive target are dropped and counted, never answered `503`; the sender's
 //! retransmission meets the view. Once the view is in, an alive worker takes
-//! them, and a new call with no alive worker is refused as before.
+//! them, and a new call with no alive worker is refused `503`.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -102,13 +102,13 @@ Content-Length: 0\r\n\r\n"
 }
 
 /// The proxy's own Record-Route URI carrying the cookie for `primary`.
+/// An empty-valued parameter is written as a flag, as the proxy writes it
+/// (RFC 3261 §25.1).
 fn cookie_uri(f: &Fixture, primary: &str) -> String {
     let params: RouteParams = f
         .strategy
         .encode_stickiness(&ProxyAddr::new(primary, 5060), &initial("INVITE", "z9hG4bKinv"))
         .unwrap();
-    // A URI parameter's value is never empty (RFC 3261 §25.1): an empty one
-    // rides as a flag, as the proxy writes it.
     let params: String = params
         .iter()
         .map(|(k, v)| if v.is_empty() { format!(";{k}") } else { format!(";{k}={v}") })
@@ -138,7 +138,6 @@ fn assert_unanswered(f: &Fixture) {
     assert_eq!(f.metrics.reject_count("no_target_available"), 0, "never a 503");
 }
 
-/// A new call before the first view: dropped and counted, never a 503.
 #[tokio::test]
 async fn a_new_call_before_the_first_view_is_dropped_unanswered() {
     let f = starting().await;
@@ -180,8 +179,6 @@ async fn after_the_first_view_an_alive_worker_takes_them() {
     assert_eq!(f.metrics.no_target_dropped_count(NoTargetDrop::Initial), 0);
 }
 
-/// The view in and no worker alive: a new call is refused, as by any proxy
-/// that has read its workers.
 #[tokio::test]
 async fn after_the_first_view_a_new_call_with_no_alive_worker_is_refused() {
     let f = starting().await;
