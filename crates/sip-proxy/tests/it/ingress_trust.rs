@@ -8,11 +8,13 @@
 //! The core runs its real recv loop on the simulated fabric, so each datagram
 //! arrives on the face whose socket it was sent to.
 
-use crate::common::call_end::{ack_final, busy_at_callee, response_of};
+use crate::common::call_end::{ack_final, answered_at_callee, busy_at_callee, response_of};
+use crate::common::retransmits::{timer_a_copies, timer_g_copies, TIMER_B, TIMER_H};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::time::Instant;
 
 use sip_clock::Clock;
 use sip_message::SipResponse;
@@ -199,6 +201,8 @@ fn busy_for(req: &[u8]) -> (Vec<u8>, SocketAddr) {
 struct Seen {
     to_worker: Vec<(SocketAddr, Vec<u8>)>,
     to_far: Option<(SocketAddr, Vec<u8>)>,
+    /// When `FAR` sent its 486, if the request reached it.
+    far_refused_at: Option<Instant>,
     back_to_sender: Vec<Vec<u8>>,
     consulted: u32,
     bypass_internal: u32,
@@ -223,8 +227,10 @@ async fn exchange(lab: &Lab, sender: &dyn UdpEndpoint, entry: SocketAddr, reques
     settle().await;
     let to_worker = drain(&*lab.worker);
     let to_far = drain(&*lab.far).pop();
+    let mut far_refused_at = None;
     if let Some((_, req)) = &to_far {
         let (busy, dst) = busy_for(req);
+        far_refused_at = Some(Instant::now());
         lab.far.send_to(&busy, dst).await.unwrap();
         settle().await;
     }
@@ -232,6 +238,7 @@ async fn exchange(lab: &Lab, sender: &dyn UdpEndpoint, entry: SocketAddr, reques
     Seen {
         to_worker,
         to_far,
+        far_refused_at,
         back_to_sender,
         consulted: lab.gate.consulted.load(Ordering::SeqCst),
         bypass_internal: lab.gate.bypass_internal.load(Ordering::SeqCst),
@@ -362,6 +369,8 @@ async fn a_worker_via_on_the_external_face_is_ignored() {
     assert_eq!(counted(&lab, UntrustedClaim::WorkerVia), 1);
 }
 
+/// The worker holds no such dialog and answers 481 (RFC 3261 §12.2.2), relayed
+/// to the outsider.
 #[tokio::test(start_paused = true)]
 async fn an_in_dialog_request_with_an_outbound_marker_on_the_external_face_goes_to_a_worker() {
     let lab = proxy_lab(true, false).await;
@@ -370,6 +379,9 @@ async fn an_in_dialog_request_with_an_outbound_marker_on_the_external_face_goes_
     let seen = exchange(&lab, &*lab.outsider, ext_vip(), &bye).await;
     assert!(seen.to_far.is_none(), "the Request-URI host never sees it");
     assert_eq!(seen.to_worker.len(), 1, "it is routed as an inbound request");
+    let (_, forwarded) = &seen.to_worker[0];
+    let unknown = "Call/Transaction Does Not Exist";
+    answered_at_callee(&*lab.outsider, &*lab.worker, forwarded, 481, unknown).await;
 }
 
 #[tokio::test(start_paused = true)]
@@ -421,14 +433,61 @@ async fn a_registered_worker_on_the_internal_face_is_worker_outbound() {
     acked_at_far(&lab, &*lab.worker, &invite, &busy).await;
 }
 
+/// What a party resends while the unlisted worker's call winds down.
+#[derive(Clone, Copy)]
+enum Resend {
+    /// The worker's INVITE copy, which the far end answers with its 486 again.
+    Invite,
+    /// The far end's 486, on its own Timer G.
+    Busy,
+}
+
+/// The unlisted worker's INVITE leaves as worker-outbound, and it loses the
+/// answers (ADR-0048 § Consequences): the far end's 486 is dropped, and so is
+/// every copy of it, those resent on Timer G until Timer H (RFC 3261 §17.2.1)
+/// and those answering the worker's INVITE copies, each re-forwarded on Timer
+/// A until Timer B (§17.1.1.2). Nothing moves past both timers.
 #[tokio::test(start_paused = true)]
 async fn an_outbound_marker_on_the_internal_face_is_worker_outbound_from_an_unlisted_worker() {
     let lab = proxy_lab(true, false).await;
     let route = outbound_route(INT_VIP, INT_PORT);
     let via = format!("{UNLISTED_WORKER}:5060");
     let invite = request("INVITE", "int-marker", &via, Some(&route), None);
+    let sent_at = Instant::now();
     let seen = exchange(&lab, &*lab.unlisted_worker, int_vip(), &invite).await;
     assert_worker_outbound(&seen);
+    assert!(seen.back_to_sender.is_empty(), "the far end's 486 never reaches the worker");
+    assert_eq!(counted(&lab, UntrustedClaim::ResponseNotToWorker), 1);
+
+    let (_, forwarded) = seen.to_far.as_ref().expect("forwarded to the far end");
+    let (busy, busy_hop) = busy_for(forwarded);
+    let refused_at = seen.far_refused_at.expect("the far end refused it");
+    let mut resends: Vec<(Instant, Resend)> = timer_a_copies()
+        .into_iter()
+        .map(|at| (sent_at + at, Resend::Invite))
+        .chain(timer_g_copies().into_iter().map(|at| (refused_at + at, Resend::Busy)))
+        .collect();
+    resends.sort_by_key(|(at, _)| *at);
+    let mut dropped = 1;
+    for (at, resend) in resends {
+        tokio::time::sleep_until(at).await;
+        if let Resend::Invite = resend {
+            lab.unlisted_worker.send_to(invite.as_bytes(), int_vip()).await.unwrap();
+            settle().await;
+            assert_eq!(drain(&*lab.far).len(), 1, "the INVITE copy is re-forwarded");
+        }
+        lab.far.send_to(&busy, busy_hop).await.unwrap();
+        dropped += 1;
+        settle().await;
+        assert!(drain(&*lab.unlisted_worker).is_empty(), "no 486 copy reaches the worker");
+        assert_eq!(counted(&lab, UntrustedClaim::ResponseNotToWorker), dropped);
+    }
+
+    tokio::time::sleep_until((sent_at + TIMER_B).max(refused_at + TIMER_H)).await;
+    settle().await;
+    for (party, ep) in [("far end", &lab.far), ("worker", &lab.unlisted_worker)] {
+        assert!(drain(&**ep).is_empty(), "nothing reaches the {party} past Timers B and H");
+    }
 }
 
 #[tokio::test(start_paused = true)]

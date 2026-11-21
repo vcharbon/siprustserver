@@ -6,7 +6,10 @@
 //! caller's ACK of that final reaches the worker through the instance the
 //! final passed.
 
-use sip_message::SipMessage;
+use sip_message::{SipMessage, SipRequest};
+use tokio::time::Instant;
+
+use crate::common::retransmits::{timer_g_copies, TIMER_H};
 
 use super::parties::{ack_non_2xx, answer, caller_invite, cancel_of, top_branch};
 use super::rig::{winner_of, Pair, Party, Side};
@@ -44,7 +47,9 @@ async fn a_spilled_call_meeting_a_rehash_is_cancelled_at_its_rendezvous_winner()
 /// The same residual for the ACK: the spilled call's final passes A, the
 /// caller's flow has moved to B, and B, holding nothing of the call, sends
 /// the ACK to the rendezvous winner, which discards it. The worker holding
-/// the INVITE stops retransmitting its final at Timer H.
+/// the INVITE resends its final on Timer G (RFC 3261 §17.2.1); A relays each
+/// copy, the caller ACKs it again (§17.1.1.2) and B sends that ACK to the
+/// winner too. The placed worker hears no ACK, and its Timer H ends the call.
 #[tokio::test(start_paused = true)]
 async fn a_spilled_calls_ack_meeting_a_rehash_reaches_its_rendezvous_winner() {
     let pair = Pair::new().await;
@@ -56,14 +61,30 @@ async fn a_spilled_calls_ack_meeting_a_rehash_reaches_its_rendezvous_winner() {
     let invite = caller_invite(call_id);
     pair.send(Party::Caller, &SipMessage::Request(invite.clone())).await;
     let (at_placed, from) = pair.request(placed, "INVITE").await;
-    let busy = answer(&at_placed, from, placed, 486, "Busy Here", "uas-1");
-    pair.send(placed, &SipMessage::Response(busy)).await;
-    let final_at_caller = pair.response(Party::Caller, 486).await;
-
+    let busy = SipMessage::Response(answer(&at_placed, from, placed, 486, "Busy Here", "uas-1"));
+    let refused_at = Instant::now();
+    pair.send(placed, &busy).await;
     pair.assign(Party::Caller, Side::B);
-    pair.send(Party::Caller, &SipMessage::Request(ack_non_2xx(&invite, &final_at_caller))).await;
-    pair.request(winner, "ACK").await;
-    pair.silent(placed).await;
+    acked_at(&pair, &invite, winner).await;
+    for resend_at in timer_g_copies() {
+        tokio::time::sleep_until(refused_at + resend_at).await;
+        pair.send(placed, &busy).await;
+        acked_at(&pair, &invite, winner).await;
+    }
+
+    tokio::time::sleep_until(refused_at + TIMER_H).await;
+    for party in [placed, winner, Party::Caller] {
+        pair.silent(party).await;
+    }
+}
+
+/// The caller reads a 486 to its `invite` and ACKs it, and the ACK reaches
+/// `worker`.
+async fn acked_at(pair: &Pair, invite: &SipRequest, worker: Party) {
+    let final_at_caller = pair.response(Party::Caller, 486).await;
+    let ack = ack_non_2xx(invite, &final_at_caller);
+    pair.send(Party::Caller, &SipMessage::Request(ack)).await;
+    pair.request(worker, "ACK").await;
 }
 
 /// A copy of the INVITE reaches B after the caller's flow moved, and B has no

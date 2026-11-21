@@ -7,6 +7,7 @@
 //! refuses dropped and counted.
 
 use crate::common::call_end::{ack_final, busy_at_callee};
+use crate::common::retransmits::{timer_a_copies, TIMER_B};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -21,13 +22,12 @@ use sip_proxy::{ForwardAllStrategy, ProxyAddr, ProxyCoreBuilder, ProxyMetrics, R
 use sip_txn::parse_refusal::PARSE_REFUSAL_BURST;
 use sip_txn::IdGen;
 use tokio::task::JoinHandle;
+use tokio::time::Instant;
 
 const PROXY: &str = "192.0.2.1:5060";
 const CALLER: &str = "192.0.2.20:5060";
 const WORKER: &str = "10.0.0.2:5070";
 const FROM: &str = "<sip:alice@192.0.2.20>;tag=alice-tag";
-/// The INVITE client transaction's timeout, 64·T1 (RFC 3261 §17.1.1.2).
-const TIMER_B: Duration = Duration::from_secs(32);
 
 fn addr(s: &str) -> SocketAddr {
     s.parse().expect("an address")
@@ -95,19 +95,17 @@ impl Rig {
     /// §17.1.1.3), its lines the INVITE's with a Max-Forwards that reads: the
     /// proxy absorbs it.
     async fn acked(&self, from: &dyn UdpEndpoint, invite: &[u8], refusal: &SipResponse) {
-        let readable =
-            String::from_utf8_lossy(invite).replace("Max-Forwards: abc", "Max-Forwards: 70");
-        ack_final(addr(PROXY), from, readable.as_bytes(), refusal).await;
+        Self::send_ack(from, invite, refusal).await;
         self.settle().await;
         assert!(self.to_worker().is_empty(), "the ACK to the proxy's own 400 ends here");
     }
 
-    /// A call nothing answers ends at its caller's Timer B (RFC 3261
-    /// §17.1.1.2, 64·T1): the clock runs past it and nothing more arrives.
-    async fn past_timer_b(&self) {
-        tokio::time::sleep(TIMER_B + Duration::from_millis(1)).await;
-        assert!(self.to_caller().is_empty(), "nothing reaches the caller after Timer B");
-        assert!(self.to_worker().is_empty(), "nothing reaches the worker after Timer B");
+    /// `from` sends its ACK of the proxy's `refusal` of the malformed
+    /// `invite`, as [`Rig::acked`] does, without reading what follows.
+    async fn send_ack(from: &dyn UdpEndpoint, invite: &[u8], refusal: &SipResponse) {
+        let readable =
+            String::from_utf8_lossy(invite).replace("Max-Forwards: abc", "Max-Forwards: 70");
+        ack_final(addr(PROXY), from, readable.as_bytes(), refusal).await;
     }
 }
 
@@ -217,23 +215,38 @@ async fn a_malformed_response_is_dropped_unanswered() {
     assert_eq!(rig.counters(), (1, 0, 0));
 }
 
+/// The first send and every copy the caller's Timer A sends (RFC 3261
+/// §17.1.1.2) are dropped unanswered and counted; the caller's transaction
+/// ends at Timer B with nothing heard.
 #[tokio::test(start_paused = true)]
 async fn a_request_with_a_malformed_from_is_dropped_unanswered() {
     let rig = Rig::new().await;
-    rig.send(&malformed_invite("z9hG4bK-bad-from", "<sip:alice@192.0.2.20>junk;tag=a")).await;
-    rig.settle().await;
-    assert!(rig.to_caller().is_empty(), "no From to echo: no answer");
-    assert!(rig.to_worker().is_empty());
-    assert_eq!(rig.counters(), (1, 0, 0));
-    rig.past_timer_b().await;
+    let invite = malformed_invite("z9hG4bK-bad-from", "<sip:alice@192.0.2.20>junk;tag=a");
+    let sent_at = Instant::now();
+    let sends = std::iter::once(Duration::ZERO).chain(timer_a_copies());
+    for (sent, at) in (1..).zip(sends) {
+        tokio::time::sleep_until(sent_at + at).await;
+        rig.send(&invite).await;
+        rig.settle().await;
+        assert!(rig.to_caller().is_empty(), "no From to echo: send {sent} draws no answer");
+        assert!(rig.to_worker().is_empty(), "send {sent} is not forwarded");
+        assert_eq!(rig.counters(), (sent, 0, 0));
+    }
+    assert_eq!(rig.metrics.parse_errors(), 7, "the first send and its six Timer A copies");
+
+    tokio::time::sleep_until(sent_at + TIMER_B).await;
+    assert!(rig.to_caller().is_empty(), "nothing reaches the caller by Timer B");
+    assert!(rig.to_worker().is_empty(), "nothing reaches the worker by Timer B");
 }
 
-/// The burst's 400s are each ACKed; the INVITE past the burst, never answered,
-/// ends at its caller's Timer B.
+/// The burst's 400s are each ACKed. The INVITE past the burst is dropped; its
+/// first Timer A copy (RFC 3261 §17.1.1.2), T1 later, meets a refilled bucket
+/// and draws the 400 the caller ACKs.
 #[tokio::test(start_paused = true)]
 async fn past_the_burst_a_refusal_is_dropped_and_counted() {
     let rig = Rig::new().await;
     let burst = usize::try_from(PARSE_REFUSAL_BURST).expect("a count");
+    let sent_at = Instant::now();
     for i in 0..=burst {
         rig.send(&malformed_invite(&format!("z9hG4bK-flood-{i}"), FROM)).await;
     }
@@ -241,13 +254,24 @@ async fn past_the_burst_a_refusal_is_dropped_and_counted() {
     let answered = rig.to_caller();
     assert_eq!(answered.len(), burst, "the burst is answered, the one past it is not");
     assert_eq!(rig.counters(), (0, u64::from(PARSE_REFUSAL_BURST), 1));
-
     for raw in &answered {
         let refusal = response(raw);
         let branch = refusal.top_via().branch().expect("the INVITE's branch").to_string();
-        rig.acked(&*rig.caller, &malformed_invite(&branch, FROM), &refusal).await;
+        Rig::send_ack(&*rig.caller, &malformed_invite(&branch, FROM), &refusal).await;
     }
-    rig.past_timer_b().await;
+    rig.settle().await;
+    assert!(rig.to_worker().is_empty(), "the ACKs to the proxy's own 400s end here");
+    assert!(rig.to_caller().is_empty(), "the ACKs draw nothing");
+
+    let past = malformed_invite(&format!("z9hG4bK-flood-{burst}"), FROM);
+    tokio::time::sleep_until(sent_at + timer_a_copies()[0]).await;
+    rig.send(&past).await;
+    rig.settle().await;
+    let [copy_answer] = rig.to_caller().try_into().expect("the copy draws one answer");
+    let refusal = response(&copy_answer);
+    assert_eq!(refusal.status(), 400, "the copy meets a refilled bucket");
+    assert_eq!(rig.counters(), (0, u64::from(PARSE_REFUSAL_BURST) + 1, 1));
+    rig.acked(&*rig.caller, &past, &refusal).await;
 }
 
 /// The ordinary counterpart: a well-formed INVITE is forwarded, draws no

@@ -3,7 +3,7 @@
 //! and the core routes the queued message, or answers the queued refusal with
 //! its stateless 400 (RFC 3261 §16.3), without parsing the datagram again.
 
-use crate::common::call_end::ack_final;
+use crate::common::call_end::{ack_final, answered_at_callee};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -168,7 +168,7 @@ async fn the_core_routes_and_answers_the_parse_the_production_hook_queued() {
 /// stage parses them: the production hook below its watermark and the core with
 /// no hook refuse the same well-formed OPTIONS past three header lines with no
 /// partial, drop it unanswered, and count one parse error. The default limits
-/// route the same datagram.
+/// route the same datagram, and the worker's 200 reaches the caller.
 #[tokio::test(start_paused = true)]
 async fn the_limit_the_process_states_is_read_at_every_stage() {
     let strict = || {
@@ -195,5 +195,8 @@ async fn the_limit_the_process_states_is_read_at_every_stage() {
     let default = Rig::new(Arc::new(ProxyMetrics::new()), None, CustomParser::new()).await;
     default.caller.send_to(&options("default"), addr(PROXY)).await.expect("sent");
     default.settle().await;
-    assert_eq!(Rig::received(default.worker.as_ref()).len(), 1, "the default limits route it");
+    let forwarded = default.worker.try_recv().expect("the default limits route it");
+    assert!(default.worker.try_recv().is_none(), "routed once");
+    answered_at_callee(default.caller.as_ref(), default.worker.as_ref(), &forwarded.raw, 200, "OK")
+        .await;
 }

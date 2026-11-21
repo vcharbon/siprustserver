@@ -1,6 +1,6 @@
 //! The end of a call a test drives by raw datagrams through the proxy: the
-//! callee refuses the INVITE it was forwarded, the caller ACKs the refusal,
-//! and each message is read where it lands.
+//! callee answers the request it was forwarded, refusing an INVITE, the
+//! caller ACKs the refusal, and each message is read where it lands.
 
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -50,16 +50,29 @@ pub async fn busy_at_callee(
     callee: &dyn UdpEndpoint,
     forward: &[u8],
 ) -> SipResponse {
-    let forwarded = request_of(forward);
-    let opts = GenerateResponseOpts { to_tag: Some(CALLEE_TAG.into()), ..Default::default() };
-    let busy = generate_response(&forwarded, 486, "Busy Here", &opts).expect("a 486");
-    callee.send_to(busy.image(), response_hop(&forwarded)).await.expect("sent");
-    let relayed = response_of(&next_raw(caller, "the 486").await);
-    assert_eq!(relayed.status(), 486, "the callee's refusal reaches the caller");
-
+    let relayed = answered_at_callee(caller, callee, forward, 486, "Busy Here").await;
     ack_final(entry, caller, invite, &relayed).await;
     let acked = request_of(&next_raw(callee, "the ACK").await);
     assert_eq!(acked.method(), "ACK", "the caller's ACK reaches the callee");
+    relayed
+}
+
+/// The callee answers `status` to the request it read in `forward`, sending
+/// it to the proxy's Via, and the answer reaches the caller. Returns the
+/// answer the caller read.
+pub async fn answered_at_callee(
+    caller: &dyn UdpEndpoint,
+    callee: &dyn UdpEndpoint,
+    forward: &[u8],
+    status: u16,
+    reason: &str,
+) -> SipResponse {
+    let forwarded = request_of(forward);
+    let opts = GenerateResponseOpts { to_tag: Some(CALLEE_TAG.into()), ..Default::default() };
+    let answer = generate_response(&forwarded, status, reason, &opts).expect("an answer");
+    callee.send_to(answer.image(), response_hop(&forwarded)).await.expect("sent");
+    let relayed = response_of(&next_raw(caller, "the callee's answer").await);
+    assert_eq!(relayed.status(), status, "the callee's answer reaches the caller");
     relayed
 }
 
