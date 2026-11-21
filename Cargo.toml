@@ -216,6 +216,9 @@ reqwest = { version = "0.13", default-features = false }
 # `x-max-length` + drop-head overflow — the "max buffer" guarantee end to end.
 lapin = { version = "4.12.3", default-features = false, features = ["tokio", "rustls--ring", "rustls-native-certs"] }
 async-rs = { version = "0.8.13", default-features = false, features = ["tokio"] }
+# The URI parser lapin's own runs on: `amqp-connect` reads an AMQP URI's IPv6
+# host literal with it, which lapin's parser drops.
+url = "2.5"
 
 # Keep line tables in release builds so CPU profiles (the /debug/flamegraph
 # route of a `flamegraph` feature build, see crates/flamegraph-util, and an

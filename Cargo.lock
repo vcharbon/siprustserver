@@ -138,6 +138,7 @@ dependencies = [
  "rustls",
  "socket2",
  "tokio",
+ "url",
 ]
 
 [[package]]

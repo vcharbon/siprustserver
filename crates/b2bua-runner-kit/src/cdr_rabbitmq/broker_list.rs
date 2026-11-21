@@ -2,14 +2,21 @@
 //! `B2BUA_CDR_RABBITMQ_URL`: one AMQP URI or several separated by commas, one
 //! per node of a cluster, and how logs name each broker.
 
+use std::net::Ipv6Addr;
+
 use lapin::uri::AMQPUri;
 
 /// The variable listing the brokers.
 pub(super) const URL_VARIABLE: &str = "B2BUA_CDR_RABBITMQ_URL";
 
-/// A broker as logs name it: `host:port`, never its credentials.
+/// A broker as logs name it: `host:port`, an IPv6 host bracketed
+/// (`[2001:db8::1]:5672`), never its credentials.
 pub(super) fn broker_name(uri: &AMQPUri) -> String {
-    format!("{}:{}", uri.authority.host, uri.authority.port)
+    let host = uri.authority.host.as_str();
+    match host.parse::<Ipv6Addr>() {
+        Ok(_) => format!("[{host}]:{}", uri.authority.port),
+        Err(_) => format!("{host}:{}", uri.authority.port),
+    }
 }
 
 /// Whether `a` and `b` name one node: the same port on the same host, its
@@ -60,6 +67,17 @@ mod tests {
         let names: Vec<String> = brokers.iter().map(broker_name).collect();
         assert_eq!(names, ["node-a:5672", "node-b:5672", "node-a:5673"]);
         assert_eq!(brokers[1].authority.userinfo.password, "p");
+    }
+
+    #[test]
+    fn an_ipv6_broker_is_named_bracketed_and_one_address_is_one_node() {
+        let brokers = broker_list("amqp://u:p@[2001:db8::1]/%2f,amqp://u:p@[2001:db8::2]:5673/%2f")
+            .expect("a list of two");
+        let names: Vec<String> = brokers.iter().map(broker_name).collect();
+        assert_eq!(names, ["[2001:db8::1]:5672", "[2001:db8::2]:5673"]);
+        let twice = "amqp://u:p@[2001:db8::1]/%2f,amqp://u:p@[2001:DB8:0::1]:5672/%2f";
+        let e = broker_list(twice).expect_err("one address spelt twice is one node");
+        assert!(e.contains("entry 2 lists [2001:db8::1]:5672 again"), "{e}");
     }
 
     /// Each refusal names the variable and the entry's position, never the

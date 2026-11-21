@@ -3,3 +3,4 @@
 
 mod connect;
 mod tls;
+mod uri;

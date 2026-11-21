@@ -19,6 +19,7 @@ workspace = true
 lapin = { workspace = true }
 async-rs = { workspace = true }
 tokio = { workspace = true }
+url = { workspace = true }
 
 [dev-dependencies]
 # The ClientHello the TLS tests read back (SNI), no certificate involved.
