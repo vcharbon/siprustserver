@@ -307,15 +307,17 @@ pub enum RuleAction {
     /// `body` is **opaque** (MSCML rides as `application/mediaservercontrol+xml`);
     /// its `content_type` defaults to `application/sdp` when none is given.
     ///
-    /// `headers` forwards arbitrary application headers verbatim onto the
-    /// re-originated request (mirrors [`RuleAction::ServiceHttpRequest`]'s header
-    /// list). This is the seam a service uses to **reconstruct a deferred relay**:
-    /// e.g. a deferred User-to-User relay stashes the inbound INFO's
-    /// `User-To-User` header across an async decision, then re-emits it toward the peer here with
-    /// `headers: [("User-To-User", value)]`. The B2BUA rebuilds
-    /// every dialog/transport header itself (Via/CSeq/From/To/Call-ID/Contact), so
-    /// only application headers belong here. `Content-Type`/`Content-Length` are
-    /// owned by `body` and are ignored if listed (never duplicated).
+    /// `headers` forwards application headers verbatim onto the re-originated
+    /// request (mirrors [`RuleAction::ServiceHttpRequest`]'s header list). This is
+    /// the seam a service uses to **reconstruct a deferred relay**: e.g. a deferred
+    /// User-to-User relay stashes the inbound INFO's `User-To-User` header across
+    /// an async decision, then re-emits it toward the peer here with
+    /// `headers: [("User-To-User", value)]`. The B2BUA writes every structural
+    /// header itself (Via, From, To, Call-ID, CSeq, Contact, Route, Record-Route,
+    /// Max-Forwards; RFC 3261 §16.6): a line naming one, or a line the wire cannot
+    /// carry whole, is left out and reported as a skipped line, and the request
+    /// still leaves. `Content-Type`/`Content-Length` are owned by `body` and are
+    /// ignored if listed (never duplicated).
     SendRequestToLeg {
         leg_id: String,
         method: String,

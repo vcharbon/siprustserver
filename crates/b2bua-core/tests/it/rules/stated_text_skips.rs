@@ -108,8 +108,10 @@ fn a_bye_with_a_line_break_in_a_stated_line_still_leaves() {
 /// the wire, the skip reported; a bound name stays the author's.
 #[test]
 fn a_bye_stating_a_cseq_leaves_with_the_dialogs_own() {
+    let call = bridged();
+    let next = call.b_legs[0].dialogs.confirmed().expect("b-1's dialog").our_cseq + 1;
     let result = execute_on(
-        &bridged(),
+        &call,
         &[RuleAction::SendRequestToLeg {
             leg_id: "b-1".into(),
             method: "BYE".into(),
@@ -123,9 +125,7 @@ fn a_bye_stating_a_cseq_leaves_with_the_dialogs_own() {
     );
     let bye = sent_request(&result, "b-1");
     assert_eq!(bye.method(), "BYE");
-    let cseq = values(&bye, "CSeq");
-    assert_eq!(cseq.len(), 1, "{cseq:?}");
-    assert_ne!(cseq[0], "9 BYE");
+    assert_eq!(values(&bye, "CSeq"), [format!("{next} BYE")]);
     assert_eq!(values(&bye, "Timestamp"), ["54"]);
     assert_eq!(values(&bye, "X-Kept"), ["fine"]);
     assert_eq!(skips(&result), 1);
@@ -256,6 +256,27 @@ fn a_reinvite_stamping_a_single_valued_header_twice_leaves_without_it() {
     let reinvite = sent_request(&result, "b-1");
     assert_eq!(reinvite.method(), "INVITE");
     assert!(values(&reinvite, "Subject").is_empty());
+    assert_eq!(values(&reinvite, "X-Kept"), ["fine"]);
+    assert_eq!(skips(&result), 1);
+}
+
+/// A re-INVITE's stamped lines leave a structural name to the stack too.
+#[test]
+fn a_reinvite_stamping_a_max_forwards_leaves_with_the_stacks_own() {
+    let result = execute_on(
+        &bridged(),
+        &[RuleAction::SendReinvite {
+            leg_id: "b-1".into(),
+            body: None,
+            add_headers: vec![
+                sip_message::draft::Entry::raw(HeaderName::MaxForwards, SipStr::owned("5")),
+                sip_message::draft::Entry::raw(HeaderName::from("X-Kept"), SipStr::owned("fine")),
+            ],
+        }],
+    );
+    let reinvite = sent_request(&result, "b-1");
+    assert_eq!(reinvite.method(), "INVITE");
+    assert_eq!(values(&reinvite, "Max-Forwards"), ["70"]);
     assert_eq!(values(&reinvite, "X-Kept"), ["fine"]);
     assert_eq!(skips(&result), 1);
 }
