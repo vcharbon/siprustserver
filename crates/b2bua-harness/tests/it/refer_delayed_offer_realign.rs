@@ -89,13 +89,41 @@ impl Realigning {
     }
 }
 
+/// The parties of a transfer whose c-realign re-INVITE, carrying no offer,
+/// C holds unanswered.
+struct CRealigning {
+    h: Harness,
+    b2bua: B2buaSut,
+    alice: Agent,
+    bob: Agent,
+    charlie: Agent,
+    alice_dialog: Dialog,
+    bob_dialog: Dialog,
+    c_realign: ServerTxn,
+}
+
+/// [`c_realigning`], then C offers in its 2xx to the c-realign re-INVITE and
+/// A receives the re-INVITE carrying that offer.
+async fn realigning(name: &str, n: u16) -> Realigning {
+    let CRealigning { h, b2bua, alice, bob, charlie, alice_dialog, bob_dialog, mut c_realign } =
+        c_realigning(name, n).await;
+    c_realign.respond(200, "OK").with_sdp(CHARLIE_REALIGN_OFFER).await;
+
+    let a_realign = alice.receive("INVITE").await;
+    assert_eq!(
+        apart_from_origin(&String::from_utf8_lossy(a_realign.request().body())),
+        apart_from_origin(CHARLIE_REALIGN_OFFER),
+        "the a-realign re-INVITE carries C's offer"
+    );
+    Realigning { h, b2bua, alice, bob, charlie, alice_dialog, bob_dialog, c_realign, a_realign }
+}
+
 /// A INVITEs B with no offer, B offers in its 2xx and A answers in her ACK.
 /// B REFERs A to C; the stack dials C with no offer, C offers in its 2xx and
-/// B is told the transfer succeeded; the stack re-INVITEs C with no body, C
-/// offers again in its 2xx, and A receives the re-INVITE carrying that offer.
-/// The stack runs its default realign watchdog, and its production keepalive
-/// interval, past every scenario's span.
-async fn realigning(name: &str, n: u16) -> Realigning {
+/// B is told the transfer succeeded; C receives the c-realign re-INVITE, with
+/// no body. The stack runs its default realign watchdog, and its production
+/// keepalive interval, past every scenario's span.
+async fn c_realigning(name: &str, n: u16) -> CRealigning {
     let (alice_port, bob_port, b2bua_port, charlie_port) = (5541 + n, 5551 + n, 5561 + n, 5571 + n);
     let h = Harness::with_transit_delay(name, 1);
     let alice = h.agent("alice", &format!("127.0.0.1:{alice_port}")).await;
@@ -139,20 +167,12 @@ async fn realigning(name: &str, n: u16) -> Realigning {
     assert!(sipfrag.starts_with("SIP/2.0 200"), "B is told the transfer succeeded: {sipfrag:?}");
     success.respond(200, "OK").await;
 
-    let mut c_realign = charlie.receive("INVITE").await;
+    let c_realign = charlie.receive("INVITE").await;
     assert!(
         c_realign.request().body().is_empty(),
         "A's INVITE made no offer: the c-realign re-INVITE carries none, C makes it"
     );
-    c_realign.respond(200, "OK").with_sdp(CHARLIE_REALIGN_OFFER).await;
-
-    let a_realign = alice.receive("INVITE").await;
-    assert_eq!(
-        apart_from_origin(&String::from_utf8_lossy(a_realign.request().body())),
-        apart_from_origin(CHARLIE_REALIGN_OFFER),
-        "the a-realign re-INVITE carries C's offer"
-    );
-    Realigning { h, b2bua, alice, bob, charlie, alice_dialog, bob_dialog, c_realign, a_realign }
+    CRealigning { h, b2bua, alice, bob, charlie, alice_dialog, bob_dialog, c_realign }
 }
 
 /// Every datagram `from` sent `to` whose start line begins `start`, on CSeq
@@ -432,4 +452,49 @@ async fn the_targets_own_bye_leaves_it_owed_no_ack() {
     assert!(t.c_realign_acks().is_empty(), "C's own BYE leaves it owed no ACK, before or after");
     t.b2bua.assert_fully_reaped();
     let _ = t.h.finish().await;
+}
+
+/// C's own BYE ends the call while the ACK waits, and A's 2xx to the
+/// a-realign re-INVITE crosses the teardown's BYE to her: the stack ACKs that
+/// 2xx (RFC 3261 §13.2.2.4) though no transfer follows, and sends C nothing
+/// more.
+#[tokio::test(start_paused = true)]
+async fn the_transferees_answer_crossing_the_teardown_is_acked() {
+    let mut t = realigning("refer-delayed-offer-realign-crossed-answer", 7).await;
+
+    let mut charlie_dialog = t.c_realign.dialog();
+    let mut charlie_bye = charlie_dialog.bye().await;
+    charlie_bye.expect(200).await;
+    t.a_realign.respond(200, "OK").with_sdp(ALICE_REALIGN_ANSWER).await;
+    t.alice.receive("BYE").await.respond(200, "OK").await;
+    t.alice.receive("ACK").await;
+    t.bob.receive("BYE").await.respond(200, "OK").await;
+
+    settle_until(|| t.b2bua.is_reaped()).await;
+    assert!(t.c_realign_acks().is_empty(), "C's own BYE leaves it owed no ACK");
+    t.b2bua.assert_fully_reaped();
+    let _ = t.h.finish().await;
+}
+
+/// A hangs up while C holds the c-realign re-INVITE, and C's 2xx offering to
+/// it crosses the teardown: its ACK answers the offer rejecting every stream
+/// (RFC 3261 §13.2.2.4, RFC 3264 §6), since no answer of A's can come.
+#[tokio::test(start_paused = true)]
+async fn the_targets_offer_crossing_the_teardown_is_answered_rejecting() {
+    let CRealigning { h, b2bua, bob, charlie, mut alice_dialog, mut c_realign, .. } =
+        c_realigning("refer-delayed-offer-realign-crossed-offer", 8).await;
+
+    let mut alice_bye = alice_dialog.bye().await;
+    alice_bye.expect(200).await;
+    bob.receive("BYE").await.respond(200, "OK").await;
+    c_realign.respond(200, "OK").with_sdp(CHARLIE_REALIGN_OFFER).await;
+    let ack = charlie.receive_tolerating("ACK", &["BYE", "CANCEL"]).await;
+    let body = String::from_utf8_lossy(ack.request().body()).into_owned();
+    assert!(
+        rejects_every_stream(&body),
+        "C's offer crossing the teardown is answered rejecting every stream, never bare: {body:?}"
+    );
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
+    let _ = h.finish().await;
 }
