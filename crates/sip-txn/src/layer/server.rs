@@ -92,6 +92,7 @@ impl Owner {
                     // for retransmit absorption.
                     if is_final {
                         txn.original_request = None;
+                        drop_parked_487(txn);
                         let kind = txn.kind;
                         self.arm_final_hold(id, kind, status);
                     }
@@ -457,6 +458,16 @@ impl Owner {
             txn.uas_to_tag = Some(pinned.clone());
         }
         Some(pinned)
+    }
+}
+
+/// The 487 `txn`, an INVITE left open by its CANCEL, keeps for its consumer's
+/// release is no longer owed once the INVITE takes a final of its own: dropped,
+/// so no release and no leaving sends a second final (RFC 3261 §17.2.1). The
+/// CANCEL's 200 still held stays owed.
+fn drop_parked_487(txn: &mut super::txn::Transaction) {
+    if let Some(held) = txn.unsent_cancel.as_mut().filter(|u| u.invite_open) {
+        held.terminated = None;
     }
 }
 

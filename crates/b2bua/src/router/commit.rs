@@ -28,8 +28,8 @@ use crate::effects::{
     QuietTurn, SoftBoundedEffect,
 };
 use crate::turn_probe::TurnPoint;
-pub(super) use held::release_untaken;
 use held::HeldCancel;
+pub(super) use held::{release_discarded, release_untaken};
 pub(super) use rider::{behind_the_write, Rider};
 use turn_entry::TurnEntry;
 

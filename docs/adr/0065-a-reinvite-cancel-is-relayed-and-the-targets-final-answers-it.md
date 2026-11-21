@@ -38,15 +38,20 @@ departs from the §9.2 SHOULD for this one case; the initial INVITE's CANCEL kee
 The layer holds the CANCEL's 200 and the 487 it would answer, at the write path's cancel bound or
 the §17.2.1 bound where that is zero. The turn that took the CANCEL releases them: `Keep` when its
 record holds the relay of that INVITE marked `cancel_relayed`, `End` otherwise (no relay pending,
-the CANCEL not built, no turn took the event). The bound ends the INVITE with the 487 too, so a
-CANCEL no consumer acts on still draws today's answer. A copy of the CANCEL draws its 200 again and
-never reaches the consumer.
+the CANCEL not built, no turn took the event, or the call's queue discarded it). The bound sends the
+CANCEL's 200 alone and keeps the 487 for that release however late the turn runs, since the turn
+may still relay the CANCEL; only a release that never comes, 64·T1 past the CANCEL, ends the INVITE
+with it. A final of the INVITE's own drops the held 487 (one final, §17.2.1). A copy of the CANCEL
+draws its 200 again and never reaches the consumer.
 
 ### §3 A target that never answers
 
 A CANCEL leaving on an INVITE client transaction in Proceeding brings its give-up within 64·T1
 (§9.1). The relayed re-INVITE's timeout then ends the target's dialog (§12.2.1.2) and the call:
 the sender takes the teardown's 487 (§15.1.2).
+
+A survivor taking the call over rebuilds the target's side of a `cancel_relayed` round with the
+CANCEL it owes, held for a provisional (§9.1) like the dialling INVITE's.
 
 ### §4 A teardown meanwhile
 
@@ -56,10 +61,11 @@ made answered with every stream rejected (RFC 3264 §6).
 
 ### §5 The audit
 
-`no-200-after-cancel` judges a UAS that took a CANCEL. An endpoint that relayed the INVITE and the
-CANCEL onward, or held that CANCEL because its far UAS answered before any provisional (§9.1), and
-answers with the far 2xx it took, is compliant: it relays. The far UAS is judged on its own
-occasion.
+`no-200-after-cancel` judges a UAS that took a CANCEL. An endpoint that relayed the INVITE onward,
+then the CANCEL, or sent none because the far 2xx came first (before any provisional, §9.1, or
+within T1 of the CANCEL it took), and answers with the far 2xx it took, its description carried
+byte for byte, is compliant: it relays. The far UAS is judged on its own occasion. A relay that
+restates the description is not told apart from one answering on its own account, and is charged.
 
 ## Consequences
 

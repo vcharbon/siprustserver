@@ -27,9 +27,13 @@ use crate::registry::Rule;
 use crate::verdict::Finding;
 use crate::wire::WireView;
 
+/// T1 at its default (RFC 3261 §17, Table 4), microseconds: the first
+/// retransmission interval.
+pub(crate) const T1_US: u64 = 500_000;
+
 /// 64·T1 over UDP at the default T1 (RFC 3261 §17, Table 4), microseconds:
 /// Timers B, F, H and J, and the 2xx retransmission envelope (§13.3.1.4).
-pub(crate) const T1_64_US: u64 = 32_000_000;
+pub(crate) const T1_64_US: u64 = 64 * T1_US;
 
 /// One RFC obligation, decided off the wire. `eval` returns EVERY occasion —
 /// violated, compliant and undecidable alike — so the population contract

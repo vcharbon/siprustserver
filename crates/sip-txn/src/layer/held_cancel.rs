@@ -14,7 +14,10 @@
 //! (`consumer_ends_cancelled_reinvite`) is held so at any bound, and stays
 //! active until the release: [`CancelledInvite::End`] sends the 487 and
 //! completes it as above; [`CancelledInvite::Keep`] drops the 487 and leaves
-//! the INVITE to the consumer's own final. The bound ends it.
+//! the INVITE to the consumer's own final. Its bound sends the CANCEL's 200
+//! alone, whose copies it then answers again, and keeps the 487 for the
+//! release however late the consumer's turn runs: only a release that never
+//! comes, 64·T1 past the CANCEL (§9.1), ends the INVITE with it.
 //!
 //! [`TransactionLayer::release_cancel`]: crate::TransactionLayer::release_cancel
 
@@ -47,14 +50,19 @@ impl Owner {
         self.cancel_bound_ms > 0
     }
 
-    /// Hold `answers` on the server INVITE transaction `key` names and arm
-    /// their bound: `cancel_bound_ms`, else the §17.2.1 bound for an INVITE
-    /// left open.
-    pub(super) fn hold_cancel_answers(&mut self, key: &ServerTxnKey, answers: UnsentCancel) {
-        let bound = match self.cancel_bound_ms {
+    /// The bound held answers wait for their release: `cancel_bound_ms`,
+    /// else, for an INVITE left open, the §17.2.1 bound.
+    fn answers_bound(&self) -> u64 {
+        match self.cancel_bound_ms {
             0 => crate::timers::TRYING_BOUND,
             bound => bound,
-        };
+        }
+    }
+
+    /// Hold `answers` on the server INVITE transaction `key` names and arm
+    /// their bound ([`Self::answers_bound`]).
+    pub(super) fn hold_cancel_answers(&mut self, key: &ServerTxnKey, answers: UnsentCancel) {
+        let bound = self.answers_bound();
         let Some(txn) = self.server_mut(key.id()) else { return };
         let opened = txn.created_at;
         let held_as = answers.held_as.clone();
@@ -71,18 +79,50 @@ impl Owner {
     }
 
     /// The bound of the transaction `key` names, opened at `opened`, passed:
-    /// its held answers leave unless they already did.
+    /// its held answers leave unless they already did. Of an INVITE left open
+    /// whose CANCEL's 200 is still held, only that 200 leaves, and the 487
+    /// waits for the release to 64·T1 past the CANCEL.
     pub(super) async fn fire_cancel_bound(
         &mut self,
         endpoint: &dyn UdpEndpoint,
         key: &ServerTxnKey,
         opened: Instant,
     ) {
-        if self.server(key.id()).is_some_and(|t| t.created_at == opened)
-            && self.send_held_cancel(endpoint, key, CancelledInvite::End).await
-        {
+        if !self.server(key.id()).is_some_and(|t| t.created_at == opened) {
+            return;
+        }
+        if self.send_cancel_ok_alone(endpoint, key, opened).await {
+            self.told_bound(TxnRef::Server(key.id()));
+            return;
+        }
+        if self.send_held_cancel(endpoint, key, CancelledInvite::End).await {
             self.told_bound(TxnRef::Server(key.id()));
         }
+    }
+
+    /// Send the held CANCEL's 200 of the INVITE left open that `key` names,
+    /// opened at `opened`, keeping its 487 for the release, and arm the bound
+    /// that ends it with no release 64·T1 past the CANCEL; `false` when the
+    /// INVITE is not left open or its 200 already left.
+    async fn send_cancel_ok_alone(
+        &mut self,
+        endpoint: &dyn UdpEndpoint,
+        key: &ServerTxnKey,
+        opened: Instant,
+    ) -> bool {
+        let Some(held) = self.server_mut(key.id()).and_then(|t| t.unsent_cancel.as_mut()) else {
+            return false;
+        };
+        if !held.invite_open {
+            return false;
+        }
+        let Some((buf, dest)) = held.cancel_ok.take() else { return false };
+        let call_id = held.held_as.0.clone();
+        self.send_buffer(endpoint, &call_id, &buf, dest).await;
+        let rest = crate::timers::TIMER_B.saturating_sub(self.answers_bound());
+        let at = deadline::after(Instant::now(), ms(rest));
+        delay_queue::insert_at(&mut self.timers, Timer::CancelBound(key.clone(), opened), at);
+        true
     }
 
     /// What a transaction leaving the map with `held` owes: queued for the

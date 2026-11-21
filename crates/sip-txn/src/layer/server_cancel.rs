@@ -282,10 +282,14 @@ impl Owner {
         }
     }
 
-    /// Whether the answers to a CANCEL with top Via `via` (its 200 and its
-    /// INVITE's 487) are still held: they answer its copies when released.
+    /// Whether the 200 to a CANCEL with top Via `via` is still held: it
+    /// answers the CANCEL's copies when released. Once it left with the 487 of
+    /// an INVITE left open still held, a copy is answered again
+    /// ([`Self::answer_cancel_copy`]).
     fn cancel_answers_held(&self, via: &Via) -> bool {
-        self.cancelled_invite(via, |t| t.unsent_cancel.is_some()).is_some()
+        let held =
+            |t: &Transaction| t.unsent_cancel.as_ref().is_some_and(|u| u.cancel_ok.is_some());
+        self.cancelled_invite(via, held).is_some()
     }
 
     /// Whether the CANCEL `req`'s own server transaction (a stray CANCEL's,

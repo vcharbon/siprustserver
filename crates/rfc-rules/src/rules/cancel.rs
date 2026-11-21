@@ -224,6 +224,7 @@ impl<'a> Reading<'a> {
                 status,
                 taker: msg.dst.as_str(),
                 relayed,
+                body: msg.body.as_deref(),
             });
         }
     }
@@ -267,6 +268,8 @@ struct Answer<'a> {
     /// The emitter had already been sent this same 2xx: it forwarded an answer
     /// the far endpoint originated.
     relayed: bool,
+    /// The body it carried, where the vantage kept it.
+    body: Option<&'a [u8]>,
 }
 
 /// **RFC 3261 §9.1 — a CANCEL carries the INVITE's Route values.**
