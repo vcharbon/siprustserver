@@ -4,9 +4,9 @@
 //! rule can claim that timeout and keep the call. The dialog then holds no
 //! INVITE in progress (§14.1): a later re-INVITE leaves, and a late 2xx to the
 //! timed-out one is owed nothing and draws no ACK (RFC 6026 §7.2). Without a
-//! claiming rule, the
-//! core default ends the session. A re-INVITE that drew a provisional is
-//! still in progress when it gives up at the INVITE bound: no rule claims it.
+//! claiming rule, the core default ends the session. A re-INVITE that drew a
+//! provisional is still in progress when it gives up at the INVITE bound: no
+//! rule claims it.
 
 use std::sync::Arc;
 use std::time::Duration;
