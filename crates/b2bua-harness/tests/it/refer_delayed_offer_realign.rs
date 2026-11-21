@@ -41,6 +41,9 @@ const HOLD_BOUND: Duration = Duration::from_secs(30);
 /// C's give-up on its unacknowledged 2xx: 64·T1 (RFC 3261 §13.3.1.4).
 const TARGET_GIVE_UP: Duration = Duration::from_secs(32);
 
+/// RFC 3261's T1, the first rung of C's 2xx ladder (§13.3.1.4).
+const T1: Duration = Duration::from_millis(500);
+
 /// The parties of a transfer parked on the flow-I hold: C has sent the 2xx
 /// that offers to the offerless re-INVITE, and A holds the re-INVITE that
 /// carries that offer, unanswered.
@@ -90,14 +93,17 @@ impl Realigning {
 /// B REFERs A to C; the stack dials C with no offer, C offers in its 2xx and
 /// B is told the transfer succeeded; the stack re-INVITEs C with no body, C
 /// offers again in its 2xx, and A receives the re-INVITE carrying that offer.
-/// The stack runs its default configuration.
+/// The stack runs its default realign watchdog, and its production keepalive
+/// interval, past every scenario's span.
 async fn realigning(name: &str, n: u16) -> Realigning {
     let (alice_port, bob_port, b2bua_port, charlie_port) = (5541 + n, 5551 + n, 5561 + n, 5571 + n);
     let h = Harness::with_transit_delay(name, 1);
     let alice = h.agent("alice", &format!("127.0.0.1:{alice_port}")).await;
     let bob = h.agent("bob", &format!("127.0.0.1:{bob_port}")).await;
     let charlie = h.agent("charlie", &format!("127.0.0.1:{charlie_port}")).await.transfer_target();
+    let production = b2bua::B2buaConfig::default().keepalive_interval_sec;
     let b2bua = B2buaSut::route_all_with_refer("127.0.0.1", bob_port)
+        .tune(move |c| c.keepalive_interval_sec = production)
         .start(&h, "b2bua", &format!("127.0.0.1:{b2bua_port}"))
         .await;
 
@@ -279,16 +285,17 @@ async fn the_ack_to_the_targets_offer_carries_the_transferees_answer() {
 async fn the_targets_resent_2xx_draws_no_ack_while_the_answer_is_awaited() {
     let mut t = realigning("refer-delayed-offer-realign-2xx-copies", 1).await;
 
-    for _ in 0..3 {
-        t.h.advance(Duration::from_millis(600)).await;
+    for rung in [T1, 2 * T1, 4 * T1] {
+        t.h.advance(rung).await;
+        t.c_realign.respond(200, "OK").with_sdp(CHARLIE_REALIGN_OFFER).await;
     }
+    t.h.advance(T1).await;
     assert_eq!(
         t.c_realign_acks().len(),
         0,
         "C's 2xx and its copies draw no ACK before A's answer: no bare or rejecting ACK leaves"
     );
-    let sent_2xx = t.c_realign_2xx().len();
-    assert!(sent_2xx >= 3, "C re-sent its 2xx on its ladder: {sent_2xx} sent");
+    assert_eq!(t.c_realign_2xx().len(), 4, "C sent its 2xx and three copies on its ladder");
     t.alice.drain().await;
 
     alice_answers(&mut t).await;
