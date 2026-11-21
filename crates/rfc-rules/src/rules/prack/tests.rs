@@ -83,6 +83,15 @@ fn framing_no_description(mut m: Msg) -> Msg {
     m
 }
 
+/// `m`, an INVITE or a response to it, moved onto the INVITE transaction
+/// numbered `cseq`: a re-INVITE's.
+fn on_invite_cseq(mut m: Msg, cseq: u32) -> Msg {
+    let head = String::from_utf8(m.head.take().unwrap_or_default()).unwrap_or_default();
+    m.head = Some(head.replace("CSeq: 1 INVITE", &format!("CSeq: {cseq} INVITE")).into_bytes());
+    m.cseq = cseq;
+    m
+}
+
 /// `m` as a vantage that recorded no body bytes sees it.
 fn unrecorded_body(mut m: Msg) -> Msg {
     m.body = None;

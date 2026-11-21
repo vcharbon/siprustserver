@@ -19,14 +19,15 @@ use super::reading::Reading;
 ///
 /// The occasion is ONE INVITE 2xx the UAS sent on a transaction where it had
 /// already sent a reliable provisional carrying a description
-/// ([`Msg::carries_description`](crate::wire::Msg::carries_description); a body framing none, or of another type,
-/// carries none) — one finding naming EVERY `RSeq` still outstanding, since
-/// the 2xx is the single act judged. A provisional whose body the vantage did
-/// not record leaves the occasion `Undecidable` where no recorded one opens
-/// it. Each `RSeq` is judged once, from its first emission: §3 has the UAS
-/// repeat the provisional until the PRACK reaches it, so a retransmission
-/// crossing the acknowledgement on the wire carries the same `RSeq`, answers
-/// to the same PRACK, and re-opens nothing. The PRACK names the `RSeq` and
+/// ([`Msg::carries_description`](crate::wire::Msg::carries_description); a
+/// body framing none, or of another type, carries none) — one finding naming
+/// EVERY `RSeq` still outstanding, since the 2xx is the single act judged. A
+/// provisional whose body the vantage did not record leaves the occasion
+/// `Undecidable` unless a recorded one still outstanding decides it. Each
+/// `RSeq` is judged once, from its first emission: §3 has the UAS repeat the
+/// provisional until the PRACK reaches it, so a retransmission crossing the
+/// acknowledgement on the wire carries the same `RSeq`, answers to the same
+/// PRACK, and re-opens nothing. The PRACK names the `RSeq` and
 /// the INVITE CSeq on the early dialog, and is either taken at the UAS's
 /// address (it may come straight from a UAC behind a proxy) or sent by the
 /// provisional's taker (it reaches the UAS at its Contact, §4, which need not
@@ -81,17 +82,15 @@ impl Obligation for Delay2xxOnUnackedReliable1xxWithSdp {
                     anchor: a.msg,
                     decision,
                 };
+                let undecided =
+                    Decision::Undecidable("a reliable provisional's body is not at this vantage");
                 let Some(offer_1xx_msg) = offer_1xx_msg else {
                     if unrecorded {
-                        out.push(finding(Decision::Undecidable(
-                            "a reliable provisional's body is not at this vantage",
-                        )));
+                        out.push(finding(undecided));
                     }
                     continue;
                 };
-                out.push(finding(if unacked.is_empty() {
-                    Decision::Compliant
-                } else {
+                out.push(finding(if !unacked.is_empty() {
                     Decision::Violated(Evidence::AnsweredOverUnackedOffer {
                         early_2xx_msg: a.msg,
                         early_2xx_hop: a.hop,
@@ -101,6 +100,10 @@ impl Obligation for Delay2xxOnUnackedReliable1xxWithSdp {
                         offer_1xx_msg,
                         branch: key.branch.to_string(),
                     })
+                } else if unrecorded {
+                    undecided
+                } else {
+                    Decision::Compliant
                 }));
             }
         }
@@ -125,11 +128,13 @@ impl Obligation for Delay2xxOnUnackedReliable1xxWithSdp {
 /// or PRACK whose body the vantage did not record leaves the occasion
 /// `Undecidable`.
 ///
-/// The occasion is ONE PRACK, keyed by the offer's `RSeq` in its early dialog
-/// (the To tag, which both directions carry) rather than by direction: the
-/// offer and the answer are two ends of one negotiation and either party's
-/// copy is the same fact, and each fork numbers its `RSeq`s on its own (§3,
-/// errata 4600). Charges the PRACK's sender.
+/// The occasion is ONE PRACK, keyed by the offer's early dialog (the To tag,
+/// which both directions carry) rather than by direction, its INVITE's CSeq
+/// and its `RSeq`, the pair the `RAck` names (§7.2): the offer and the answer
+/// are two ends of one negotiation and either party's copy is the same fact,
+/// each fork numbers its `RSeq`s on its own (errata 4600), and each INVITE
+/// transaction its own (§3), so a re-INVITE's provisional restarts them.
+/// Charges the PRACK's sender.
 ///
 /// **This reads DESCRIPTION PRESENCE, never the offer/answer state machine**
 /// — it walks the view directly rather than through the family's `Reading`,
@@ -137,13 +142,15 @@ impl Obligation for Delay2xxOnUnackedReliable1xxWithSdp {
 /// own server transactions.
 pub struct PrackAnswers1xxOffer;
 
-/// A reliable provisional's description read as an offer, keyed by its
-/// Call-ID, early dialog and `RSeq`: where it was first seen, and whether
-/// this vantage recorded enough to decide its PRACK.
+/// A reliable provisional's description read as an offer: where it was first
+/// seen, and whether this vantage recorded enough to decide its PRACK.
 struct Offer {
     msg: usize,
     decidable: bool,
 }
+
+/// Each offer by Call-ID, early dialog, INVITE CSeq number and `RSeq`.
+type Offers<'a> = BTreeMap<(&'a str, &'a str, u32, u64), Offer>;
 
 /// Whether each INVITE, by Call-ID and CSeq number, carried the offer: `None`
 /// where a copy's body is not at this vantage.
@@ -152,7 +159,7 @@ type InviteOffers<'a> = BTreeMap<(&'a str, u32), Option<bool>>;
 impl Obligation for PrackAnswers1xxOffer {
     fn eval(&self, wire: &WireView<'_>) -> Vec<Finding> {
         let mut invite_offered = InviteOffers::new();
-        let mut offers: BTreeMap<(&str, &str, u64), Offer> = BTreeMap::new();
+        let mut offers = Offers::new();
         let mut out = Vec::new();
 
         for (mi, msg) in wire.msgs.iter().enumerate() {
@@ -171,9 +178,10 @@ impl Obligation for PrackAnswers1xxOffer {
                 continue;
             }
             if msg.is_request("PRACK") {
-                let Some(rseq) = head.and_then(sniff::rack_rseq) else { continue };
+                let rack = head.and_then(|h| Some((sniff::rack_cseq(h)?, sniff::rack_rseq(h)?)));
+                let Some((invite_cseq, rseq)) = rack else { continue };
                 let dialog = msg.to_tag.as_deref().unwrap_or_default();
-                let Some(offer) = offers.get(&(call, dialog, rseq)) else { continue };
+                let Some(offer) = offers.get(&(call, dialog, invite_cseq, rseq)) else { continue };
                 let answered = msg.carries_description().filter(|_| offer.decidable);
                 out.push(Finding {
                     rule: RuleId::PrackAnswers1xxOffer,
@@ -210,13 +218,15 @@ impl Obligation for PrackAnswers1xxOffer {
                 continue;
             }
             let invite = invite_offered.get(&(call, msg.cseq)).copied();
-            if invite == Some(Some(true)) {
-                continue; // the INVITE carried the offer: this description is the answer
+            let answers_the_invite_offer = invite == Some(Some(true));
+            if answers_the_invite_offer {
+                continue;
             }
             if let Some(rseq) = sniff::rseq_of(head) {
                 let dialog = msg.to_tag.as_deref().unwrap_or_default();
                 let decidable = described.is_some() && invite != Some(None);
-                offers.entry((call, dialog, rseq)).or_insert(Offer { msg: mi, decidable });
+                let key = (call, dialog, msg.cseq, rseq);
+                offers.entry(key).or_insert(Offer { msg: mi, decidable });
             }
         }
         out
