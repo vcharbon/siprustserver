@@ -119,6 +119,7 @@ async fn cancelling_a_reinvite_stops_its_reliable_provisional_ladder() {
     let mut cancel = reinv.cancel().await;
     cancel.expect(200).await;
     bob.receive("CANCEL").await.respond(200, "OK").await;
+    assert!(alice.take_queued().await.is_none(), "alice's re-INVITE waits for bob's final");
     re_uas.respond(487, "Request Terminated").await;
     bob.receive("PRACK").await.respond(200, "OK").await;
     reinv.expect(487).await;

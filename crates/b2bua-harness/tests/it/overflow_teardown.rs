@@ -100,8 +100,16 @@ async fn flood_past_the_ceiling(name: &str, rig: Option<&WitnessRig>) -> Flooded
 }
 
 /// Three re-INVITEs from alice at CSeq `base + 1 ..= base + 3`, each CANCELed
-/// at once, and the hop-by-hop ACK to each re-INVITE's final.
+/// at once, every one answered before its first Timer G copy (T1), and the
+/// hop-by-hop ACK to each final.
 async fn burst(s: &B2buaScene, ids: &DialogIds, base: u32) {
+    let finals = send_burst(s, ids, base).await;
+    assert_eq!(finals.len(), 3, "every re-INVITE drew its final: {finals:?}");
+}
+
+/// The burst of [`burst`], the CSeqs of the finals alice took within T1, each
+/// ACKed hop by hop.
+async fn send_burst(s: &B2buaScene, ids: &DialogIds, base: u32) -> Vec<u32> {
     for cseq in base + 1..=base + 3 {
         let branch = format!("burst-{cseq}");
         let reinvite = ids.reinvite(&s.alice, cseq, &branch);
@@ -109,8 +117,12 @@ async fn burst(s: &B2buaScene, ids: &DialogIds, base: u32) {
         s.alice.try_send_datagram(&reinvite, s.b2bua.addr).await.expect("the re-INVITE leaves");
         s.alice.try_send_datagram(&cancel, s.b2bua.addr).await.expect("the CANCEL leaves");
     }
-    // The answers arrive before their first Timer G copy (T1).
     s.h.advance(Duration::from_millis(450)).await;
+    ack_finals(s, ids).await
+}
+
+/// The CSeqs of the re-INVITE finals queued at alice, each ACKed hop by hop.
+async fn ack_finals(s: &B2buaScene, ids: &DialogIds) -> Vec<u32> {
     let mut finals = Vec::new();
     while let Some(msg) = s.alice.take_queued().await {
         if let SipMessage::Response(r) = msg {
@@ -123,7 +135,7 @@ async fn burst(s: &B2buaScene, ids: &DialogIds, base: u32) {
         let ack = ids.ack_non_2xx(&s.alice, *cseq, &format!("burst-{cseq}"));
         s.alice.try_send_datagram(&ack, s.b2bua.addr).await.expect("the ACK leaves");
     }
-    assert_eq!(finals.len(), 3, "every re-INVITE drew its final: {finals:?}");
+    finals
 }
 
 /// Once the permit frees: the INFOs relayed and answered, the Cancelled the
@@ -187,6 +199,9 @@ async fn a_call_flooded_past_its_overflow_ceiling_is_torn_down_on_the_wire() {
 /// holds the permit and her burst fills the call's queue. Both events are
 /// kept past the full queue, so once the permit frees the call is forced
 /// terminal and writes its CDR — not left Terminating while the flood goes on.
+/// The two re-INVITEs the queue discards are answered at once; the one it
+/// keeps, with its CANCEL behind it, takes its 487 when the call ends, its
+/// CANCEL relayed by no turn (ADR-0065).
 #[tokio::test(start_paused = true)]
 async fn a_condemned_call_ends_at_its_terminating_timeout_while_the_flood_goes_on() {
     let mut f = flood_past_the_ceiling("b2bua-overflow-teardown-under-flood", None).await;
@@ -200,13 +215,16 @@ async fn a_condemned_call_ends_at_its_terminating_timeout_while_the_flood_goes_o
     let mut parked = dave.invite(&f.s.bob).with_sdp(OFFER_SDP).through(f.s.b2bua.addr).send().await;
     f.s.h.advance(Duration::from_millis(300)).await;
     let base = f.dialog.local_cseq() + 3;
-    burst(&f.s, &f.ids, base).await;
+    let discarded = send_burst(&f.s, &f.ids, base).await;
+    assert_eq!(discarded.len(), 2, "the two re-INVITEs discarded are answered at once");
     f.s.h.advance(Duration::from_millis(4_000)).await;
     assert!(f.s.b2bua.active_calls() >= 1, "the flooded call waits on the held permit");
 
     parked.expect(503).await;
     let s = &f.s;
     settle_until(|| s.b2bua.is_reaped()).await;
+    let kept = ack_finals(s, &f.ids).await;
+    assert_eq!(kept.len(), 1, "the re-INVITE the queue kept is answered as the call ends");
     assert!(
         torn_down_at.elapsed() < Duration::from_millis(TERMINATING_TIMEOUT_MS as u64 + 10_000),
         "the call ended within TerminatingTimeout of its teardown, give or take the held permit"

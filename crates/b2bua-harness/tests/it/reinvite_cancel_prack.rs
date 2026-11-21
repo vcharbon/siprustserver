@@ -69,6 +69,7 @@ async fn a_callers_prack_after_her_reinvite_cancel_is_relayed() {
     let mut cancel = reinv.cancel().await;
     cancel.expect(200).await;
     bob.receive("CANCEL").await.respond(200, "OK").await;
+    assert!(alice.take_queued().await.is_none(), "alice's re-INVITE waits for bob's final");
 
     let mut prack = alice_dialog
         .send_request(InDialogMethod::Prack)
@@ -128,6 +129,7 @@ async fn a_callees_prack_after_his_reinvite_cancel_is_relayed() {
     let mut cancel = reinv.cancel().await;
     cancel.expect(200).await;
     alice.receive("CANCEL").await.respond(200, "OK").await;
+    assert!(bob.take_queued().await.is_none(), "bob's re-INVITE waits for alice's final");
 
     let mut prack = bob_dialog
         .send_request(InDialogMethod::Prack)
@@ -256,6 +258,7 @@ async fn an_unanswered_prack_of_this_stacks_own_leaves_the_call_up() {
     let mut cancel = reinv.cancel().await;
     cancel.expect(200).await;
     bob.receive("CANCEL").await.respond(200, "OK").await;
+    assert!(alice.take_queued().await.is_none(), "alice's re-INVITE waits for bob's final");
     re_uas.respond(487, "Request Terminated").await;
     let _unanswered = bob.receive("PRACK").await; // bob never answers it
     reinv.expect(487).await;

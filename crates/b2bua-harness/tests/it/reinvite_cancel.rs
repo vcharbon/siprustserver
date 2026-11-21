@@ -33,7 +33,8 @@
 
 use std::time::Duration;
 
-use b2bua_harness::{settle_until, B2buaSut};
+use b2bua::TurnProbes;
+use b2bua_harness::{settle_until, B2buaSut, Pace, RouterPace};
 use scenario_harness::{Harness, WaiverScope};
 
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
@@ -79,6 +80,7 @@ async fn cancel_reinvite_ends_renegotiation_keeps_call() {
     //    (CANCEL echoes the INVITE's branch and CSeq number) ──
     bob_reinv_uas.respond(100, "Trying").await;
     let mut bob_cxl = bob.receive("CANCEL").await;
+    assert!(alice.take_queued().await.is_none(), "alice's re-INVITE waits for bob's final");
     assert_eq!(
         bob_cxl.request().top_via().branch(),
         relayed_reinvite.top_via().branch(),
@@ -155,6 +157,7 @@ async fn callee_cancel_reinvite_ends_renegotiation_keeps_call() {
     alice_reinv_uas.respond(100, "Trying").await;
     let mut alice_cxl =
         alice.try_receive("CANCEL").await.expect("the B2BUA CANCELs the re-INVITE it relayed");
+    assert!(bob.take_queued().await.is_none(), "bob's re-INVITE waits for alice's final");
     assert_eq!(alice_cxl.request().cseq().seq(), relayed_reinvite.cseq().seq());
     alice_cxl.respond(200, "OK").await;
     alice_reinv_uas.respond(487, "Request Terminated").await;
@@ -317,6 +320,7 @@ async fn a_bye_after_the_relayed_cancel_answers_the_reinvite_487_without_a_secon
     let mut cxl = reinv.cancel().await;
     cxl.expect(200).await;
     bob.receive("CANCEL").await.respond(200, "OK").await;
+    assert!(alice.take_queued().await.is_none(), "alice's re-INVITE waits for bob's final");
 
     let mut bye = dialog.bye().await;
     bye.expect(200).await;
@@ -365,6 +369,7 @@ async fn a_relayed_cancel_bob_never_answers_ends_at_64_t1_past_the_cancel() {
     let mut cxl = reinv.cancel().await;
     cxl.expect(200).await;
     let _unanswered = bob.receive("CANCEL").await;
+    assert!(alice.take_queued().await.is_none(), "alice's re-INVITE waits for bob's final");
     let cancelled_at = tokio::time::Instant::now();
 
     h.advance(Duration::from_millis(sip_txn::timers::TIMER_B + 1_000)).await;
@@ -380,6 +385,68 @@ async fn a_relayed_cancel_bob_never_answers_ends_at_64_t1_past_the_cancel() {
     bob.drain().await;
     b2bua.assert_fully_reaped();
     let _report = h.finish().await;
+}
+
+/// alice's CANCEL reaches the call only after the transaction layer's bound
+/// on its held answers passed (the router held for half a second): the bound
+/// sends the CANCEL's 200 alone and keeps alice's re-INVITE open for the turn
+/// that relays the CANCEL, so bob's crossing 200 still answers her, her ACK's
+/// answer reaches bob, and no 487 ever reaches her (RFC 3261 §17.2.1: one
+/// final per transaction).
+#[tokio::test(start_paused = true)]
+async fn a_cancel_turn_past_the_layers_bound_still_relays_the_crossing_200() {
+    let h = Harness::new("b2bua-reinvite-cancel-past-the-bound");
+    let alice = h.agent("alice", "127.0.0.1:5068").await;
+    let bob = h.agent("bob", "127.0.0.1:5078").await;
+    let pace = RouterPace::new();
+    let b2bua = B2buaSut::route_all_to("127.0.0.1", 5078)
+        .turn_probe(TurnProbes::new(pace.clone()))
+        .start(&h, "b2bua", "127.0.0.1:5088")
+        .await;
+
+    let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
+    let mut uas = bob.receive("INVITE").await;
+    uas.respond(200, "OK").with_sdp(ANSWER).await;
+    call.expect(200).await;
+    let mut dialog = call.ack().await;
+    bob.receive("ACK").await;
+
+    let mut reinv = dialog.reinvite(None).await;
+    let reinvite_cseq = dialog.local_cseq();
+    let mut bob_reinv = bob.receive("INVITE").await;
+    bob_reinv.respond(100, "Trying").await;
+    h.advance(Duration::from_millis(20)).await;
+
+    pace.set("w0", Pace::Frozen);
+    let mut cxl = reinv.cancel().await;
+    h.advance(Duration::from_millis(350)).await;
+    cxl.expect(200).await;
+    bob_reinv.respond(200, "OK").with_sdp(REANSWER).await;
+    h.advance(Duration::from_millis(150)).await;
+    pace.set("w0", Pace::Free);
+
+    let ok = reinv.expect(200).await;
+    assert_eq!(ok.body(), REANSWER.as_bytes(), "bob's offer reaches alice");
+    dialog.ack_for(reinvite_cseq, Some(REOFFER)).await;
+    let ack = bob.receive("ACK").await;
+    let answer = String::from_utf8_lossy(ack.request().body()).to_string();
+    assert!(answer.contains("m=audio 30000 "), "the ACK carries alice's answer: {answer:?}");
+
+    let mut bye = dialog.bye().await;
+    bob.receive("BYE").await.respond(200, "OK").await;
+    bye.expect(200).await;
+    settle_until(|| b2bua.is_reaped()).await;
+    alice.drain().await;
+    bob.drain().await;
+    b2bua.assert_fully_reaped();
+    let report = h.finish().await;
+    let terminated = report
+        .entries()
+        .iter()
+        .filter(|e| e.from == b2bua.addr && e.to == alice.addr())
+        .filter(|e| e.raw.starts_with(b"SIP/2.0 487 "))
+        .count();
+    assert_eq!(terminated, 0, "alice's re-INVITE takes bob's 200 as its one final");
 }
 
 /// A CANCEL that arrives after the re-INVITE was answered end-to-end (bob's

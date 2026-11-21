@@ -18,7 +18,7 @@ use failover_harness::{total_cdrs_for, TurnAt, TurnPoint};
 use sip_message::parser::custom::CustomParser;
 use sip_message::{Method, SipMessage, SipParser};
 
-use crate::call_terminate_on_backup::OFFER;
+use crate::call_terminate_on_backup::{ANSWER, OFFER};
 use crate::inflight_resend::last_request_sent;
 
 #[tokio::test(start_paused = true)]
@@ -98,6 +98,64 @@ async fn cancel_lost_with_its_node(name: &str, point: TurnPoint) {
         1,
         "the backup discharges the call of its departed primary once"
     );
+    cluster.fh.linger_peers(&[&alice, &bob], Duration::from_secs(3)).await;
+    cluster.fh.assert_sip_rfc_clean(name);
+}
+
+/// The re-INVITE sibling: alice's re-INVITE is relayed to bob, who answers it
+/// 100, and alice CANCELs it. The CANCEL's turn relays the CANCEL toward bob
+/// and leaves alice's re-INVITE open for bob's final (ADR-0065); the backup
+/// applies that write and the primary dies before the turn's entry leaves.
+/// The backup's takeover copy rebuilds bob's side of the round with the CANCEL
+/// it owes (held for a provisional, RFC 3261 §9.1), answers alice's repeated
+/// CANCEL 200, and relays bob's 487 to her: the call lives on to its BYE.
+#[tokio::test(start_paused = true)]
+async fn a_relayed_reinvite_cancel_whose_write_the_backup_applied_still_cancels_the_callee() {
+    let name = "reinvite-cancel-applied-after-the-kill";
+    let recipe = ClusterRecipe::routing_to(BOB.parse().unwrap());
+    let mut cluster = Cluster::start(name, &recipe).await;
+    let alice = cluster.fh.agent("alice", ALICE).await;
+    let bob = cluster.fh.agent("bob", BOB).await;
+    let placement = cluster.place_next_call(&alice, "b1");
+
+    let mut call = alice.invite(&bob).with_sdp(OFFER).through(cluster.proxy.addr()).send().await;
+    let mut uas = bob.receive("INVITE").await;
+    uas.respond(200, "OK").with_sdp(ANSWER).await;
+    call.expect(200).await;
+    let mut dialog = call.ack().await;
+    bob.receive("ACK").await;
+    cluster.fh.advance(Duration::from_millis(500)).await;
+    let call_ref = cluster.fh.turn_points().first_call().expect("a call").0;
+
+    let mut reinv = dialog.reinvite(None).await;
+    let mut bob_reinv = bob.receive("INVITE").await;
+    bob_reinv.respond(100, "Trying").await;
+    cluster.fh.advance(Duration::from_millis(300)).await;
+    let cancelled = cluster.fh.turn_points().turns(&call_ref).len() + 1;
+    let reached =
+        cluster.fh.turn_points().arm(TurnAt { turn: cancelled, point: TurnPoint::Applied });
+    let mut cancel = reinv.cancel().await;
+    let held = reached.await.expect("the backup applies the CANCEL's turn");
+    assert_eq!(held.node, placement.backup, "held where the backup applied the write");
+    cluster.kill(&placement.primary, &placement.backup);
+    held.release();
+
+    cluster.fh.advance(Duration::from_millis(500)).await;
+    let (wire, dst) = last_request_sent(&cluster.fh, alice.addr(), &Method::Cancel);
+    alice.try_send_datagram(&wire, dst).await.expect("the caller's repeat leaves");
+    cancel.expect(200).await;
+    bob.receive_absorbing("CANCEL", &["INVITE"]).await.respond(200, "OK").await;
+    bob_reinv.respond(487, "Request Terminated").await;
+    bob.receive_absorbing("ACK", &["INVITE"]).await;
+    reinv.expect(487).await;
+
+    let mut bye = dialog.bye().await;
+    bob.receive_tolerating("BYE", &["OPTIONS"]).await.respond(200, "OK").await;
+    bye.expect_tolerating(200, &["OPTIONS"]).await;
+    cluster.node(&placement.backup).simulate_peer_removed(&placement.primary);
+    let drained = cluster.fh.settle_terminal(async || cluster.is_clear_of(&call_ref).await).await;
+    assert!(drained, "the cluster forgets the call");
+    assert_eq!(total_cdrs_for(&cluster.nodes(), &call_ref), 1, "one CDR");
     cluster.fh.linger_peers(&[&alice, &bob], Duration::from_secs(3)).await;
     cluster.fh.assert_sip_rfc_clean(name);
 }

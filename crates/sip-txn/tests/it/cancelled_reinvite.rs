@@ -1,8 +1,10 @@
 //! A CANCEL of an in-dialog INVITE under a consumer that ends it
 //! (`consumer_ends_cancelled_reinvite`, RFC 3261 §9.2, §16.10): the CANCEL's
 //! 200 and the 487 are held at any bound, the release keeps the INVITE open or
-//! ends it, the bound ends it, and a copy of the CANCEL draws its 200 again and
-//! reaches the consumer never. The initial INVITE keeps the immediate 487.
+//! ends it however late it comes, the bound sends the 200 alone, a release
+//! never coming ends it 64·T1 past the CANCEL, a final of its own drops the
+//! 487, and a copy of the CANCEL draws its 200 again and reaches the consumer
+//! never. The initial INVITE keeps the immediate 487.
 //! The client side: a CANCEL on an INVITE in Proceeding brings its give-up
 //! within 64·T1 (§9.1).
 
@@ -100,15 +102,87 @@ async fn ended_on_release_the_reinvite_takes_the_487() {
     assert_eq!(answers(&stack).1, 1, "the 487 repeats on Timer G until the ACK");
 }
 
+/// The bound sends the CANCEL's 200 alone; the 487 waits for a release that
+/// keeps the re-INVITE open however late it comes, and a copy of the CANCEL
+/// draws the 200 again meanwhile.
 #[tokio::test(start_paused = true)]
-async fn unreleased_the_reinvite_ends_with_the_487_at_the_bound() {
+async fn past_the_bound_a_late_keep_still_leaves_no_487() {
     let mut stack = ending_stack().await;
-    let branch = "z9hG4bK-reinvite-cxl-bound";
-    let _ = cancelled(&mut stack, branch, Some(OUR_TAG)).await;
+    let branch = "z9hG4bK-reinvite-cxl-late-keep";
+    let (cseq, from_tag, _) = cancelled(&mut stack, branch, Some(OUR_TAG)).await;
     elapse_ms(TRYING_BOUND - 60).await;
     assert_eq!(answers(&stack), (0, 0), "held inside the bound");
     elapse_ms(60).await;
-    assert_eq!(answers(&stack), (1, 1), "the bound sends both");
+    assert_eq!(answers(&stack), (1, 0), "the bound sends the CANCEL's 200 alone");
+    stack.inject(&inbound_request("CANCEL", branch, CALL_ID, Some(OUR_TAG))).await;
+    elapse_ms(20).await;
+    assert_eq!(answers(&stack), (1, 0), "a copy of the CANCEL draws its 200 again");
+
+    elapse_ms(2_000).await;
+    let keep = CancelledInvite::Keep;
+    assert!(stack.txn.release_cancel(CALL_ID, &from_tag, cseq, keep).await.unwrap());
+    elapse_ms(TIMER_B).await;
+    assert_eq!(answers(&stack), (0, 0), "kept open, the re-INVITE takes no 487");
+}
+
+/// Past the bound, a release that ends the re-INVITE sends its 487.
+#[tokio::test(start_paused = true)]
+async fn past_the_bound_a_late_end_sends_the_487() {
+    let mut stack = ending_stack().await;
+    let branch = "z9hG4bK-reinvite-cxl-late-end";
+    let (cseq, from_tag, _) = cancelled(&mut stack, branch, Some(OUR_TAG)).await;
+    elapse_ms(TRYING_BOUND + 1_000).await;
+    assert_eq!(answers(&stack), (1, 0), "the bound sent the CANCEL's 200 alone");
+    let end = CancelledInvite::End;
+    assert!(stack.txn.release_cancel(CALL_ID, &from_tag, cseq, end).await.unwrap());
+    elapse_ms(20).await;
+    assert_eq!(answers(&stack), (0, 1), "the late release ends the re-INVITE");
+}
+
+/// No release ever comes: the re-INVITE ends with the 487 64·T1 past the
+/// CANCEL (RFC 3261 §9.1).
+#[tokio::test(start_paused = true)]
+async fn unreleased_the_reinvite_ends_with_the_487_64_t1_past_the_cancel() {
+    let mut stack = ending_stack().await;
+    let branch = "z9hG4bK-reinvite-cxl-unreleased";
+    let _ = cancelled(&mut stack, branch, Some(OUR_TAG)).await;
+    elapse_ms(TRYING_BOUND).await;
+    assert_eq!(answers(&stack), (1, 0), "the bound sends the CANCEL's 200 alone");
+    elapse_ms(TIMER_B - TRYING_BOUND - 200).await;
+    assert_eq!(answers(&stack), (0, 0), "inside 64·T1 of the CANCEL, still open");
+    elapse_ms(400).await;
+    assert_eq!(answers(&stack), (0, 1), "64·T1 past the CANCEL, the 487 ends it");
+}
+
+/// The re-INVITE takes a final of its own while its 487 is held: that 487 is
+/// no longer owed, so neither a release nor the transaction's end sends a
+/// second final (RFC 3261 §17.2.1).
+#[tokio::test(start_paused = true)]
+async fn a_final_of_its_own_drops_the_held_487() {
+    let mut stack = ending_stack().await;
+    let branch = "z9hG4bK-reinvite-cxl-own-final";
+    let (cseq, from_tag, _) = cancelled(&mut stack, branch, Some(OUR_TAG)).await;
+    let busy = parse_response(
+        format!(
+            "SIP/2.0 500 Server Internal Error\r\n\
+             Via: SIP/2.0/UDP 10.0.0.1:5555;branch={branch}\r\n\
+             From: <sip:caller@10.0.0.1:5555>;tag=caller-tag\r\n\
+             To: <sip:b2bua@127.0.0.1:5070>;tag={OUR_TAG}\r\n\
+             Call-ID: {CALL_ID}\r\n\
+             CSeq: 1 INVITE\r\n\
+             Retry-After: 5\r\n\
+             Content-Length: 0\r\n\r\n"
+        )
+        .as_bytes(),
+    );
+    stack.txn.send_response(busy, addr(PEER)).await.unwrap();
+    elapse_ms(20).await;
+    let end = CancelledInvite::End;
+    assert!(stack.txn.release_cancel(CALL_ID, &from_tag, cseq, end).await.unwrap());
+    elapse_ms(TIMER_B + 10_000).await;
+    let out = stack.drain_peer();
+    assert_eq!(count_responses(&out, 487), 0, "no second final: {out:?}");
+    assert_eq!(count_responses(&out, 200), 1, "the CANCEL's 200 still leaves");
 }
 
 #[tokio::test(start_paused = true)]
