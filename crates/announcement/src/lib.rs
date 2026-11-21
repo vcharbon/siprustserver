@@ -19,7 +19,8 @@
 //!    own, opens the MSCML control channel with an INFO `<play>`, and advances
 //!    to `Announcing`.
 //! 3. **@Announcing**, on the MRF's INFO MSCML `<response>` success: BYEs the
-//!    media leg, dials the real destination (an adopted leg), and **deactivates**
+//!    media leg, dials the real destination (an adopted leg, under the attempt
+//!    `init` read from the setup route: its cause, label and slices), and **deactivates**
 //!    the machine (ADR-0016 X9 — the terminal `[*]`). The destination is now a
 //!    normal adopted leg, so the framework's core `confirm-dialog` rule answers
 //!    the caller with its SDP, under a tag of its own whose dialog the 2xx
@@ -42,18 +43,20 @@ use b2bua_sdk::rules::{
     Terminal, TerminationCause,
 };
 use b2bua_sdk::{define_service, sm_rule};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 pub mod mscml;
 
 /// The ext key this service stores its data under (== the service/machine id).
 pub const EXT_KEY: &str = "announcement";
 
-/// The announcement service's per-call data, carried in `call.ext["announcement"]`
-/// (seeded from the routing decision's `service_ext`). Replication-safe: it is a
-/// plain JSON object on the already-replicated `ext` map.
+/// The ext key, inside the service's slice, of the destination dial `init`
+/// records ([`Dial`]).
+const DIAL_KEY: &str = "dial";
+
+/// The announcement a route requests: its `service_ext["announcement"]` slice.
 #[derive(Debug, Clone, Deserialize)]
-struct AnnData {
+struct Request {
     /// The clip to play (opaque id / URI handed to the MRF in the MSCML `<play>`).
     clip_id: String,
     /// The media server to offer the announcement.
@@ -64,16 +67,57 @@ struct AnnData {
     dest_port: u16,
 }
 
+/// The attempt the destination dial opens, as `init` reads it from the route
+/// the setup applied: a failover's when an earlier attempt exists, dialling
+/// that route's answer.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct Dial {
+    cause: AttemptCause,
+    label: Option<String>,
+    service_ext: std::collections::BTreeMap<String, serde_json::Value>,
+}
+
+impl Dial {
+    fn at_setup(call: &RuleCall, route: &RouteAnswer) -> Self {
+        let cause =
+            if call.attempts().is_empty() { AttemptCause::Route } else { AttemptCause::Failover };
+        Self { cause, label: route.label.clone(), service_ext: route.service_ext.clone() }
+    }
+
+    fn opening(self) -> AttemptOpening {
+        AttemptOpening::new(
+            self.cause,
+            RouteAnswer { label: self.label, service_ext: self.service_ext },
+        )
+    }
+}
+
+/// The announcement service's per-call data, carried in `call.ext["announcement"]`:
+/// the setup route's slice verbatim, with the destination [`Dial`] `init`
+/// records under `"dial"`. Replication-safe: it is a plain JSON object on the
+/// already-replicated `ext` map.
+#[derive(Debug, Clone, Deserialize)]
+struct AnnData {
+    #[serde(flatten)]
+    request: Request,
+    dial: Dial,
+}
+
 fn ann_data(call: &RuleCall) -> Option<AnnData> {
     let v = call.ext()?.get(EXT_KEY)?.clone();
     serde_json::from_value(v).ok()
 }
 
-/// The announcement the route the setup applied requests: its own slice, never
-/// one a route the limiter refused left on the call.
-fn requested(call: &RuleCall) -> Option<AnnData> {
-    let v = call.setup_route()?.service_ext.get(EXT_KEY)?.clone();
-    serde_json::from_value(v).ok()
+/// The announcement the route the setup applied requests, and the service's
+/// data for it: the route's own slice, never one a route the limiter refused
+/// left on the call, with the destination dial beside it.
+fn requested(call: &RuleCall) -> Option<(Request, serde_json::Value)> {
+    let route = call.setup_route()?;
+    let mut slice = route.service_ext.get(EXT_KEY)?.clone();
+    let request = serde_json::from_value(slice.clone()).ok()?;
+    let dial = serde_json::to_value(Dial::at_setup(call, route)).ok()?;
+    slice.as_object_mut()?.insert(DIAL_KEY.to_string(), dial);
+    Some((request, slice))
 }
 
 /// The parked media leg toward the MRF (the single unadopted `media`-kind leg
@@ -117,7 +161,7 @@ fn on_media_answer(ctx: &RuleContext) -> Option<RuleHandleResult> {
             leg_id: media,
             method: "INFO".to_string(),
             body: Some(Body::own(
-                mscml::build_play(&data.clip_id),
+                mscml::build_play(&data.request.clip_id),
                 Some(mscml::CONTENT_TYPE.to_string()),
             )),
             headers: vec![],
@@ -127,10 +171,10 @@ fn on_media_answer(ctx: &RuleContext) -> Option<RuleHandleResult> {
 }
 
 /// @Announcing — the MRF reports the clip finished (MSCML `<response>` success).
-/// Answer the INFO, BYE the media leg, dial the real destination, advance to
-/// `Bridging` (where the framework's core bridge takes over).
+/// Answer the INFO, BYE the media leg, dial the real destination under the
+/// attempt the setup route states ([`Dial`]), and deactivate.
 fn on_mscml_done(ctx: &RuleContext) -> Option<RuleHandleResult> {
-    let data = ann_data(&ctx.call)?;
+    let AnnData { request, dial } = ann_data(&ctx.call)?;
     let media = media_leg_id(&ctx.call)?;
     ok(vec![
         // Answer the MRF's in-dialog INFO (the B2BUA is its UAS).
@@ -145,8 +189,8 @@ fn on_mscml_done(ctx: &RuleContext) -> Option<RuleHandleResult> {
         // Dial the real destination as a normal adopted leg; core `confirm-dialog`
         // will answer the caller with its SDP and bridge on its 200.
         RuleAction::CreateLeg {
-            destination: (data.dest_host.clone(), data.dest_port),
-            new_ruri: Some(format!("sip:{}:{}", data.dest_host, data.dest_port)),
+            new_ruri: Some(format!("sip:{}:{}", request.dest_host, request.dest_port)),
+            destination: (request.dest_host, request.dest_port),
             new_from: None,
             new_to: None,
             callback_context: None,
@@ -154,8 +198,7 @@ fn on_mscml_done(ctx: &RuleContext) -> Option<RuleHandleResult> {
             header_updates: vec![],
             header_adds: vec![],
             kind: None,
-            // The route's own destination, its dial deferred to this service.
-            attempt: Some(AttemptOpening::new(AttemptCause::Route, RouteAnswer::default())),
+            attempt: Some(dial.opening()),
         },
         // The announcement is done: hand off to the destination leg + core bridge
         // and **deactivate** the machine (ADR-0016 X9) rather than lingering at a
@@ -263,9 +306,13 @@ define_service! {
     // Activate iff the routing decision requested an announcement; seed the
     // cursor and launch the unadopted media leg toward the MRF.
     init: |call: &RuleCall| {
-        let data = requested(call)?;
+        let (data, slice) = requested(call)?;
+        let seed = b2bua_sdk::rules::ServiceSeed::new(State::OfferingMrf.label())
+            .with_data(move |c| {
+                c.ext.get_or_insert_with(Default::default).insert(EXT_KEY.to_string(), slice);
+            });
         Some(
-            b2bua_sdk::rules::ServiceSeed::new(State::OfferingMrf.label()).with_actions(vec![
+            seed.with_actions(vec![
                 RuleAction::CreateLeg {
                     destination: (data.mrf_host.clone(), data.mrf_port),
                     new_ruri: Some(format!("sip:mrf@{}:{}", data.mrf_host, data.mrf_port)),
