@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use b2bua::decision::test_adapter::{route_to, route_to_with_18x};
-use b2bua::decision::{NewCallResponse, ScriptedDecisionEngine};
+use b2bua::decision::{NewCallResponse, RouteDecision, ScriptedDecisionEngine};
 use b2bua_harness::{settle_until, B2buaScene, B2buaSut, B2buaSutBuilder};
 use call::features::{AdvertiseCapabilitiesFeature, AdvertisedCapabilities, RelayFirst18xStrategy};
 use call::header_update::HeaderUpdate;
@@ -153,17 +153,46 @@ async fn a_declared_withhold_refuses_a_required_timer() {
 /// requiring it is refused before the service dials anyone, the MRF included.
 #[tokio::test(start_paused = true)]
 async fn a_deferred_route_declaring_its_withhold_refuses_a_required_timer() {
-    const MRF_PORT: u16 = 5670;
-    let s = B2buaScene::with_b2bua("withheld-timer-deferred-route", |bob_port| {
+    let declare: fn(&mut RouteDecision) = |r| {
+        r.features.withhold_option_tags = Some(vec!["timer".into()]);
+    };
+    refused_before_the_service_dials("withheld-timer-deferred-route", 5670, declare).await;
+}
+
+/// A deferred route declaring bob's face a `Supported` without `timer`: no
+/// INVITE is built yet, and the declaration alone keeps the timer off his leg.
+#[tokio::test(start_paused = true)]
+async fn a_deferred_route_declaring_a_face_without_timer_refuses_a_required_timer() {
+    let declare: fn(&mut RouteDecision) = |r| {
+        r.features.advertise_capabilities = Some(AdvertiseCapabilitiesFeature {
+            toward_originator: None,
+            toward_originated: Some(AdvertisedCapabilities {
+                allow: None,
+                supported: Some(vec!["100rel".into()]),
+            }),
+        });
+    };
+    refused_before_the_service_dials("withheld-timer-deferred-face", 5671, declare).await;
+}
+
+/// alice's INVITE requiring `timer` on a route `declare` keeps the timer off
+/// bob's leg, whose dial an announcement service on `mrf_port` defers: she is
+/// answered 420 naming it, and nobody is dialled.
+async fn refused_before_the_service_dials(
+    name: &str,
+    mrf_port: u16,
+    declare: fn(&mut RouteDecision),
+) {
+    let s = B2buaScene::with_b2bua(name, |bob_port| {
         let decide = move |_req: &_| {
             let mut r = route_to("127.0.0.1", bob_port);
-            r.features.withhold_option_tags = Some(vec!["timer".into()]);
+            declare(&mut r);
             r.service_ext.insert(
                 "announcement".into(),
                 serde_json::json!({
                     "clip_id": "intro-001",
                     "mrf_host": "127.0.0.1",
-                    "mrf_port": MRF_PORT,
+                    "mrf_port": mrf_port,
                     "dest_host": "127.0.0.1",
                     "dest_port": bob_port,
                     "defer_routing": true,
@@ -175,7 +204,7 @@ async fn a_deferred_route_declaring_its_withhold_refuses_a_required_timer() {
             .services(vec![announcement::service()])
     })
     .await;
-    let mrf = s.h.agent("mrf", &format!("127.0.0.1:{MRF_PORT}")).await;
+    let mrf = s.h.agent("mrf", &format!("127.0.0.1:{mrf_port}")).await;
     let invite = with_timer_offer(s.alice.invite(&s.bob)).with_header("Require", "timer");
     let mut call = invite.with_sdp(OFFER_SDP).through(s.b2bua.addr).send().await;
     s.h.advance(RELAY_WINDOW).await;
