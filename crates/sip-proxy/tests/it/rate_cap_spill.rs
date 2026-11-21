@@ -76,7 +76,7 @@ impl Fixture {
     }
 
     async fn select(&self, call_id: &str, to_tag: Option<&str>) -> Result<ProxyAddr, SelectError> {
-        self.strategy.select_for_new_dialog(&invite(call_id, to_tag), SelectOpts::default()).await
+        self.strategy.select_for_new_dialog(&invite(call_id, to_tag), SelectOpts::default())
     }
 
     /// The worker the call lands on while every bucket has tokens.

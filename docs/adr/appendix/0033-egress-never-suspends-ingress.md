@@ -117,10 +117,10 @@ draw the refusal on arrival from the queue's age (ADR-0037 item 11).
 ### 5. The invariant, stated
 
 **The invariant, stated:** an ingress loop awaits nothing whose completion
-a third party controls. The `RoutingStrategy` trait is `async` and its
-three call sites sit on the recv loop; a strategy that consults a network
-service must resolve off-loop (the DNS resolver's spawned single-flight is
-the pattern). A replicated flush that needs a call's lock is queued as a turn
+a third party controls. The `RoutingStrategy` trait is synchronous and the
+recv loop calls it inline; a strategy that needs a network answer resolves
+it off-loop and reads the result from a cache (the DNS resolver's spawned
+single-flight is the pattern). A replicated flush that needs a call's lock is queued as a turn
 of that call (`router/flush_turn.rs`), as a stand-down and a drop on a
 backup's delete are, since a call's turn holds its lock across a decision
 round trip: the loop goes on answering the proxy's probes, and a message

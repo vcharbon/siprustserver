@@ -4,7 +4,6 @@
 
 use std::sync::{Arc, Mutex};
 
-use async_trait::async_trait;
 use sip_clock::Clock;
 use sip_message::parser::custom::CustomParser;
 use sip_message::{SipMessage, SipParser};
@@ -32,19 +31,18 @@ struct CookieCaptureStrategy {
     encoded_for: Mutex<Option<ProxyAddr>>,
 }
 
-#[async_trait]
 impl RoutingStrategy for CookieCaptureStrategy {
     fn name(&self) -> &str {
         "CookieCapture"
     }
-    async fn select_for_new_dialog(
+    fn select_for_new_dialog(
         &self,
         _msg: &SipMessage,
         _opts: SelectOpts,
     ) -> Result<ProxyAddr, SelectError> {
         Err(SelectError::NoTarget { reason: "worker-outbound tests never select".into() })
     }
-    async fn decode_stickiness(&self, _params: &RouteParams, _msg: &SipMessage) -> DecodeResult {
+    fn decode_stickiness(&self, _params: &RouteParams, _msg: &SipMessage) -> DecodeResult {
         DecodeResult::Unknown { is_emergency: false }
     }
     fn encode_stickiness(&self, target: &ProxyAddr, _msg: &SipMessage) -> Option<RouteParams> {

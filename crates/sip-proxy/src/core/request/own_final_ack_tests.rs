@@ -6,7 +6,6 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use sip_clock::Clock;
 use sip_message::parser::custom::CustomParser;
 use sip_message::{SipMessage, SipParser};
@@ -34,19 +33,18 @@ const KEY: &[u8] = b"0123456789abcdef-shared-cookie-key";
 /// A selection that always fails: every new INVITE draws the proxy's 503.
 struct NoWorker;
 
-#[async_trait]
 impl RoutingStrategy for NoWorker {
     fn name(&self) -> &str {
         "NoWorker"
     }
-    async fn select_for_new_dialog(
+    fn select_for_new_dialog(
         &self,
         _msg: &SipMessage,
         _opts: SelectOpts,
     ) -> Result<ProxyAddr, SelectError> {
         Err(SelectError::NoTarget { reason: "no worker alive".into() })
     }
-    async fn decode_stickiness(&self, _params: &RouteParams, _msg: &SipMessage) -> DecodeResult {
+    fn decode_stickiness(&self, _params: &RouteParams, _msg: &SipMessage) -> DecodeResult {
         DecodeResult::Unknown { is_emergency: false }
     }
     fn encode_stickiness(&self, _target: &ProxyAddr, _msg: &SipMessage) -> Option<RouteParams> {

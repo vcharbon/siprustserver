@@ -60,19 +60,18 @@ impl UdpEndpoint for CapturingEndpoint {
 
 struct BackupStrategy;
 
-#[async_trait]
 impl RoutingStrategy for BackupStrategy {
     fn name(&self) -> &str {
         "Backup"
     }
-    async fn select_for_new_dialog(
+    fn select_for_new_dialog(
         &self,
         _msg: &SipMessage,
         _opts: SelectOpts,
     ) -> Result<ProxyAddr, SelectError> {
         Err(SelectError::NoTarget { reason: "unused".into() })
     }
-    async fn decode_stickiness(&self, _params: &RouteParams, _msg: &SipMessage) -> DecodeResult {
+    fn decode_stickiness(&self, _params: &RouteParams, _msg: &SipMessage) -> DecodeResult {
         DecodeResult::ForwardBackup { target: ProxyAddr::new(W2_POD, 5060), is_emergency: false }
     }
     fn encode_stickiness(&self, _target: &ProxyAddr, _msg: &SipMessage) -> Option<RouteParams> {
@@ -85,19 +84,18 @@ impl RoutingStrategy for BackupStrategy {
 
 struct NoBackupStrategy;
 
-#[async_trait]
 impl RoutingStrategy for NoBackupStrategy {
     fn name(&self) -> &str {
         "NoBackup"
     }
-    async fn select_for_new_dialog(
+    fn select_for_new_dialog(
         &self,
         _msg: &SipMessage,
         _opts: SelectOpts,
     ) -> Result<ProxyAddr, SelectError> {
         Err(SelectError::NoTarget { reason: "unused".into() })
     }
-    async fn decode_stickiness(&self, _params: &RouteParams, _msg: &SipMessage) -> DecodeResult {
+    fn decode_stickiness(&self, _params: &RouteParams, _msg: &SipMessage) -> DecodeResult {
         DecodeResult::Unknown { is_emergency: false }
     }
     fn encode_stickiness(&self, _target: &ProxyAddr, _msg: &SipMessage) -> Option<RouteParams> {
@@ -272,19 +270,18 @@ fn pod_of(worker: &str) -> &'static str {
 /// and finds none in an entry carrying no cookie.
 struct CookieBackupStrategy;
 
-#[async_trait]
 impl RoutingStrategy for CookieBackupStrategy {
     fn name(&self) -> &str {
         "CookieBackup"
     }
-    async fn select_for_new_dialog(
+    fn select_for_new_dialog(
         &self,
         _msg: &SipMessage,
         _opts: SelectOpts,
     ) -> Result<ProxyAddr, SelectError> {
         Err(SelectError::NoTarget { reason: "unused".into() })
     }
-    async fn decode_stickiness(&self, params: &RouteParams, _msg: &SipMessage) -> DecodeResult {
+    fn decode_stickiness(&self, params: &RouteParams, _msg: &SipMessage) -> DecodeResult {
         match params.get("w_bak") {
             Some(backup) => DecodeResult::ForwardBackup {
                 target: ProxyAddr::new(pod_of(backup), 5060),

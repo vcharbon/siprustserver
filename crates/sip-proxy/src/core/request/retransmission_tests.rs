@@ -9,7 +9,6 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use async_trait::async_trait;
 use sip_clock::Clock;
 use sip_message::parser::custom::CustomParser;
 use sip_message::{SipMessage, SipParser};
@@ -47,12 +46,11 @@ impl QueueStrategy {
     }
 }
 
-#[async_trait]
 impl RoutingStrategy for QueueStrategy {
     fn name(&self) -> &str {
         "Queue"
     }
-    async fn select_for_new_dialog(
+    fn select_for_new_dialog(
         &self,
         _msg: &SipMessage,
         _opts: SelectOpts,
@@ -60,7 +58,7 @@ impl RoutingStrategy for QueueStrategy {
         self.calls.fetch_add(1, Ordering::SeqCst);
         Ok(self.targets.lock().unwrap().pop_front().expect("selection queue exhausted"))
     }
-    async fn decode_stickiness(&self, _params: &RouteParams, _msg: &SipMessage) -> DecodeResult {
+    fn decode_stickiness(&self, _params: &RouteParams, _msg: &SipMessage) -> DecodeResult {
         DecodeResult::Unknown { is_emergency: false }
     }
     fn encode_stickiness(&self, _target: &ProxyAddr, _msg: &SipMessage) -> Option<RouteParams> {

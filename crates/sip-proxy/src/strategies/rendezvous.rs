@@ -1,21 +1,16 @@
 //! Rendezvous (highest-random-weight) hashing: a pure function from a
 //! routing key (the SIP Call-ID) and candidate workers to the candidate
-//! maximising `weight × H(key:id)`, `H` the top 8 bytes (big-endian) of
-//! `SHA1(key:id)` as a `u64`, multiplied in `u128` (exact, no float). A
+//! maximising `H(key:id)`, `H` the top 8 bytes (big-endian) of `SHA1(key:id)`
+//! as a `u64` (integer, no float). Every candidate weighs the same. A
 //! membership change moves the keys of the changed worker only. See ADR-0009 X3.
 
 use sha1::{Digest, Sha1};
 
 pub trait RendezvousCandidate {
     fn id(&self) -> &str;
-    /// Optional weight; `None` and `0` read as 1. The score is the hash times
-    /// the weight, so a higher weight wins more keys, not in proportion.
-    fn weight(&self) -> Option<u32> {
-        None
-    }
 }
 
-fn score64(key: &str, id: &str) -> u64 {
+fn score(key: &str, id: &str) -> u64 {
     let mut hasher = Sha1::new();
     hasher.update(key.as_bytes());
     hasher.update(b":");
@@ -28,18 +23,18 @@ fn score64(key: &str, id: &str) -> u64 {
     acc
 }
 
-/// Pick the candidate with the highest weighted score for `key`. Stable on
-/// ties via candidate-slice order (strict `>` keeps the first winner), so the
-/// result is deterministic across snapshots that order workers identically.
+/// Pick the candidate with the highest score for `key`. Stable on ties via
+/// candidate-slice order (strict `>` keeps the first winner), so the result
+/// is deterministic across snapshots that order workers identically.
 /// Returns `None` only when `candidates` is empty.
 pub fn rendezvous_select<'a, T: RendezvousCandidate>(
     key: &str,
     candidates: &'a [T],
 ) -> Option<&'a T> {
     let mut best: Option<&T> = None;
-    let mut best_score: u128 = 0;
+    let mut best_score: u64 = 0;
     for c in candidates {
-        let s = weighted_score(key, c);
+        let s = score(key, c.id());
         if best.is_none() || s > best_score {
             best = Some(c);
             best_score = s;
@@ -48,19 +43,13 @@ pub fn rendezvous_select<'a, T: RendezvousCandidate>(
     best
 }
 
-/// Every candidate in descending weighted score for `key`, ties in slice
-/// order: the first is [`rendezvous_select`]'s winner, each next one the
-/// winner once those before it are taken out.
+/// Every candidate in descending score for `key`, ties in slice order: the
+/// first is [`rendezvous_select`]'s winner, each next one the winner once
+/// those before it are taken out.
 pub fn rendezvous_rank<'a, T: RendezvousCandidate>(key: &str, candidates: &'a [T]) -> Vec<&'a T> {
-    let mut ranked: Vec<(u128, &T)> =
-        candidates.iter().map(|c| (weighted_score(key, c), c)).collect();
-    ranked.sort_by_key(|&(score, _)| std::cmp::Reverse(score));
+    let mut ranked: Vec<(u64, &T)> = candidates.iter().map(|c| (score(key, c.id()), c)).collect();
+    ranked.sort_by_key(|&(s, _)| std::cmp::Reverse(s));
     ranked.into_iter().map(|(_, c)| c).collect()
-}
-
-fn weighted_score<T: RendezvousCandidate>(key: &str, c: &T) -> u128 {
-    let w = u128::from(c.weight().unwrap_or(1).max(1));
-    u128::from(score64(key, c.id())) * w
 }
 
 #[cfg(test)]
@@ -122,26 +111,5 @@ mod tests {
             let c = *counts.get(w.0).unwrap_or(&0);
             assert!((94..=156).contains(&c), "worker {} got {c} (out of ±25% band)", w.0);
         }
-    }
-
-    #[test]
-    fn weight_biases_selection() {
-        struct Wt(&'static str, u32);
-        impl RendezvousCandidate for Wt {
-            fn id(&self) -> &str {
-                self.0
-            }
-            fn weight(&self) -> Option<u32> {
-                Some(self.1)
-            }
-        }
-        let cs = [Wt("light", 1), Wt("heavy", 1_000_000)];
-        let mut heavy = 0;
-        for i in 0..200 {
-            if rendezvous_select(&format!("k{i}"), &cs).unwrap().0 == "heavy" {
-                heavy += 1;
-            }
-        }
-        assert!(heavy > 180, "heavy won only {heavy}/200");
     }
 }

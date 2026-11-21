@@ -10,7 +10,6 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use async_trait::async_trait;
 use common::ProxySut;
 use load_shed::simulated;
 use scenario_harness::{Harness, WaiverScope};
@@ -203,12 +202,11 @@ impl RefuseThenForward {
     }
 }
 
-#[async_trait]
 impl RoutingStrategy for RefuseThenForward {
     fn name(&self) -> &str {
         "RefuseThenForward"
     }
-    async fn select_for_new_dialog(
+    fn select_for_new_dialog(
         &self,
         _msg: &SipMessage,
         _opts: SelectOpts,
@@ -218,7 +216,7 @@ impl RoutingStrategy for RefuseThenForward {
         }
         Ok(ProxyAddr::from(BOB.parse::<SocketAddr>().unwrap()))
     }
-    async fn decode_stickiness(&self, _params: &RouteParams, _msg: &SipMessage) -> DecodeResult {
+    fn decode_stickiness(&self, _params: &RouteParams, _msg: &SipMessage) -> DecodeResult {
         DecodeResult::Unknown { is_emergency: false }
     }
     fn encode_stickiness(&self, _target: &ProxyAddr, _msg: &SipMessage) -> Option<RouteParams> {

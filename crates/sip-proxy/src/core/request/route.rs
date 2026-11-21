@@ -190,11 +190,8 @@ impl ProxyCore {
         } else {
             ack_hop.is_none() && c.loose_route_next_hop.is_none()
         };
-        let placed_ack = if method == Method::Ack && looks_at_invite {
-            self.invite_hop(msg, req).await
-        } else {
-            None
-        };
+        let placed_ack =
+            if method == Method::Ack && looks_at_invite { self.invite_hop(msg, req) } else { None };
         let chosen: Result<Chosen, RouteOutcome> = if method == Method::Cancel {
             let target = self.cancel_target(msg, req, arrival, &c).await;
             target.map(|t| (t, RoutingDecisionKind::Cancel, None))
@@ -211,12 +208,12 @@ impl ProxyCore {
             self.cookie_target(msg, req, arrival, cookie, rtx_hit.as_ref()).await
         } else if let Some(found) = &rtx_hit {
             let went = found.target.clone();
-            match self.follow_live_hop(went, found.minted.as_ref(), msg).await {
+            match self.follow_live_hop(went, found.minted.as_ref(), msg) {
                 Some(target) => Ok((target, RoutingDecisionKind::SelectNew, None)),
                 None => Err(self.drop_without_target(NoTargetDrop::Initial)),
             }
         } else if method == Method::Ack {
-            let target = self.admitted_target(msg, None, NoTargetDrop::Initial).await;
+            let target = self.admitted_target(msg, None, NoTargetDrop::Initial);
             target.map(|t| (t, RoutingDecisionKind::AckHop, None))
         } else {
             let admit_as_new = self.admits_as_new(msg, face, None);

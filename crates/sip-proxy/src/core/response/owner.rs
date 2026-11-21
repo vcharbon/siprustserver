@@ -51,7 +51,7 @@ impl ProxyCore {
     /// The owner rule for `msg`, a response whose top Via is `ours` and whose
     /// next Via's sent-by is `sent_by`. With `for_a_worker` false the registry
     /// names nothing: only a cookie on `ours` can name an owner.
-    pub(super) async fn owner_route(
+    pub(super) fn owner_route(
         &self,
         msg: &SipMessage,
         ours: &Via,
@@ -75,7 +75,7 @@ impl ProxyCore {
         let held_by_primary =
             is_invite_response(msg) && self.strategy.marks_dialling(&via_cookie_params(ours));
         if held_by_primary && named.as_ref().is_none_or(|n| n.id != primary) {
-            return self.placed_on(&cookie, msg).await;
+            return self.placed_on(&cookie, msg);
         }
         let holder = named
             .as_ref()
@@ -88,13 +88,13 @@ impl ProxyCore {
         if let Some(holder) = at_now {
             return OwnerRoute::To(holder.address);
         }
-        self.placed_on(&cookie, msg).await
+        self.placed_on(&cookie, msg)
     }
 
     /// Where the strategy places `msg` on `cookie`, as it places a request on
     /// it (`RoutingStrategy::decode_stickiness`).
-    async fn placed_on(&self, cookie: &RouteParams, msg: &SipMessage) -> OwnerRoute {
-        match self.strategy.decode_stickiness(cookie, msg).await {
+    fn placed_on(&self, cookie: &RouteParams, msg: &SipMessage) -> OwnerRoute {
+        match self.strategy.decode_stickiness(cookie, msg) {
             DecodeResult::Forward { target, .. } | DecodeResult::ForwardBackup { target, .. } => {
                 OwnerRoute::To(target)
             }

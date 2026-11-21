@@ -38,7 +38,6 @@ pub enum PeerFailureKind {
     /// A health probe's OPTIONS drew no final response within its reply
     /// window.
     ResponseTimeout,
-    TransactionTimeout,
     /// Outbound send to the peer failed (ENOBUFS/EPERM/…).
     SendFailure,
     /// Outbound send refused the datagram as too long (`EMSGSIZE`): the message
@@ -48,9 +47,8 @@ pub enum PeerFailureKind {
 }
 
 impl PeerFailureKind {
-    pub const ALL: [PeerFailureKind; 4] = [
+    pub const ALL: [PeerFailureKind; 3] = [
         PeerFailureKind::ResponseTimeout,
-        PeerFailureKind::TransactionTimeout,
         PeerFailureKind::SendFailure,
         PeerFailureKind::MessageTooLong,
     ];
@@ -58,7 +56,6 @@ impl PeerFailureKind {
     pub const fn label(self) -> &'static str {
         match self {
             PeerFailureKind::ResponseTimeout => "response_timeout",
-            PeerFailureKind::TransactionTimeout => "transaction_timeout",
             PeerFailureKind::SendFailure => "send_failure",
             PeerFailureKind::MessageTooLong => "message_too_long",
         }

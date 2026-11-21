@@ -20,7 +20,6 @@
 
 use std::collections::BTreeMap;
 
-use async_trait::async_trait;
 use sip_message::SipMessage;
 
 use crate::addr::ProxyAddr;
@@ -113,12 +112,11 @@ pub enum RankPlacement {
     Unranked,
 }
 
-#[async_trait]
 pub trait RoutingStrategy: Send + Sync {
     fn name(&self) -> &str;
 
     /// Pick a downstream target for a request with no usable stickiness cookie.
-    async fn select_for_new_dialog(
+    fn select_for_new_dialog(
         &self,
         msg: &SipMessage,
         opts: SelectOpts,
@@ -134,7 +132,7 @@ pub trait RoutingStrategy: Send + Sync {
     /// Recover the target a cookie of the proxy's own names: a request's
     /// direction Route entry (the core already popped the proxy's entries), or
     /// the Via or Record-Route cookie of a response the core places.
-    async fn decode_stickiness(&self, route_param: &RouteParams, msg: &SipMessage) -> DecodeResult;
+    fn decode_stickiness(&self, route_param: &RouteParams, msg: &SipMessage) -> DecodeResult;
 
     /// Build the URI params to stamp into the Record-Route for dialog-creating
     /// requests the proxy places on `target`. `None` → this strategy has no

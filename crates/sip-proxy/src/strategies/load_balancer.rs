@@ -48,7 +48,6 @@
 
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use sip_clock::Clock;
@@ -212,13 +211,12 @@ impl LoadBalancerStrategy {
     }
 }
 
-#[async_trait]
 impl RoutingStrategy for LoadBalancerStrategy {
     fn name(&self) -> &str {
         "LoadBalancer"
     }
 
-    async fn select_for_new_dialog(
+    fn select_for_new_dialog(
         &self,
         msg: &SipMessage,
         opts: SelectOpts,
@@ -285,7 +283,7 @@ impl RoutingStrategy for LoadBalancerStrategy {
             .map_or(RankPlacement::NoNode, |w| RankPlacement::Node(w.address.clone()))
     }
 
-    async fn decode_stickiness(&self, route_param: &RouteParams, msg: &SipMessage) -> DecodeResult {
+    fn decode_stickiness(&self, route_param: &RouteParams, msg: &SipMessage) -> DecodeResult {
         let (w_pri, w_bak, is_emergency) = match self.check(route_param, msg) {
             Ok(cookie) => (cookie.w_pri, cookie.w_bak, cookie.is_emergency),
             Err(fault) => {

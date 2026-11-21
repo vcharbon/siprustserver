@@ -130,12 +130,7 @@ assert_exposition_order!(CancelLookup: Hit, Miss);
 assert_exposition_order!(NoTargetDrop: InDialog, Cancel, Initial);
 assert_exposition_order!(ShedReason: IntakeAge, Cps);
 assert_exposition_order!(PeerScope: Internal, External);
-assert_exposition_order!(
-    PeerFailureKind: ResponseTimeout,
-    TransactionTimeout,
-    SendFailure,
-    MessageTooLong,
-);
+assert_exposition_order!(PeerFailureKind: ResponseTimeout, SendFailure, MessageTooLong);
 
 pub const MESSAGES: Family = Family::counter(
     "sip_messages_total",

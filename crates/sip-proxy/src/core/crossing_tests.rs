@@ -706,24 +706,23 @@ Content-Length: 0\r\n\r\n"
 /// address it states.
 struct PlacedOnTheCookie(ForwardAllStrategy);
 
-#[async_trait]
 impl RoutingStrategy for PlacedOnTheCookie {
     fn name(&self) -> &str {
         "PlacedOnTheCookie"
     }
-    async fn select_for_new_dialog(
+    fn select_for_new_dialog(
         &self,
         msg: &SipMessage,
         opts: crate::strategy::SelectOpts,
     ) -> Result<ProxyAddr, crate::strategy::SelectError> {
-        self.0.select_for_new_dialog(msg, opts).await
+        self.0.select_for_new_dialog(msg, opts)
     }
-    async fn decode_stickiness(
+    fn decode_stickiness(
         &self,
         params: &RouteParams,
         msg: &SipMessage,
     ) -> crate::strategy::DecodeResult {
-        self.0.decode_stickiness(params, msg).await
+        self.0.decode_stickiness(params, msg)
     }
     fn encode_stickiness(&self, target: &ProxyAddr, msg: &SipMessage) -> Option<RouteParams> {
         self.0.encode_stickiness(target, msg)

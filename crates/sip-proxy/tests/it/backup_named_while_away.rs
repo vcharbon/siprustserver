@@ -68,7 +68,7 @@ fn pool(workers: &[(&str, (&str, u16))], clock: Clock) -> SimulatedWorkerRegistr
 /// placed by the strategy, then its stickiness encoded.
 async fn placed(s: &LoadBalancerStrategy, call_id: &str) -> (String, String) {
     let msg = invite(call_id);
-    let target = s.select_for_new_dialog(&msg, SelectOpts::default()).await.expect("a target");
+    let target = s.select_for_new_dialog(&msg, SelectOpts::default()).expect("a target");
     let cookie = s.encode_stickiness(&target, &msg).expect("a cookie");
     let field = |name: &str| cookie.get(name).cloned().unwrap_or_default();
     (field("w_pri"), field("w_bak"))

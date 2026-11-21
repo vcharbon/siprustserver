@@ -55,7 +55,7 @@ impl ProxyCore {
         if opts.admit_as_new {
             self.admit_new_call(req, arrival, is_emergency_request(req)).await?;
         }
-        match self.strategy.select_for_new_dialog(msg, opts).await {
+        match self.strategy.select_for_new_dialog(msg, opts) {
             Ok(target) => Ok(target),
             Err(e) => Err(self.reply_select_failure(req, arrival, e).await),
         }
@@ -106,10 +106,10 @@ impl ProxyCore {
                 return self.request_uri_target(req, arrival, c).await;
             }
             let cookie = c.cookie.as_ref();
-            return self.admitted_target(msg, cookie, NoTargetDrop::Cancel).await;
+            return self.admitted_target(msg, cookie, NoTargetDrop::Cancel);
         };
         self.metrics.record_cancel_lookup(CancelLookup::Hit);
-        match self.follow_live_hop(found.target, found.stickiness.as_ref(), msg).await {
+        match self.follow_live_hop(found.target, found.stickiness.as_ref(), msg) {
             Some(target) => Ok(target),
             None => Err(self.drop_without_target(NoTargetDrop::Cancel)),
         }
@@ -120,7 +120,7 @@ impl ProxyCore {
     /// the ACK repeats the INVITE's, branch included). Toward a worker no
     /// longer alive, where the INVITE's cookie places the call. `None`: no
     /// entry, or no branch to tell the ACK's transaction by.
-    pub(super) async fn invite_hop(
+    pub(super) fn invite_hop(
         &self,
         msg: &SipMessage,
         req: &SipRequest,
@@ -133,7 +133,7 @@ impl ProxyCore {
             req.cseq().seq(),
         );
         let found = self.cancel_lru.lookup(&key)?;
-        Some(match self.follow_live_hop(found.target, found.stickiness.as_ref(), msg).await {
+        Some(match self.follow_live_hop(found.target, found.stickiness.as_ref(), msg) {
             Some(target) => Ok(target),
             None => Err(self.drop_without_target(NoTargetDrop::Initial)),
         })
@@ -143,13 +143,13 @@ impl ProxyCore {
     /// instance places it (ADR-0009 X7), [`admitted_hop`](Self::admitted_hop).
     /// It meets no admission gate and is never answered: with no worker to
     /// take it, it is dropped and counted under `drop`.
-    pub(super) async fn admitted_target(
+    pub(super) fn admitted_target(
         &self,
         msg: &SipMessage,
         cookie: Option<&RouteParams>,
         drop: NoTargetDrop,
     ) -> Result<ProxyAddr, RouteOutcome> {
-        match self.admitted_hop(msg, cookie).await {
+        match self.admitted_hop(msg, cookie) {
             Some(target) => Ok(target),
             None => Err(self.drop_without_target(drop)),
         }
@@ -159,13 +159,9 @@ impl ProxyCore {
     /// places its dialog, else where the strategy places the call by rank
     /// among the alive workers, with no filter, spill or token. A strategy
     /// that places by no rank selects afresh. `None`: no worker takes it.
-    async fn admitted_hop(
-        &self,
-        msg: &SipMessage,
-        cookie: Option<&RouteParams>,
-    ) -> Option<ProxyAddr> {
+    fn admitted_hop(&self, msg: &SipMessage, cookie: Option<&RouteParams>) -> Option<ProxyAddr> {
         if let Some(cookie) = cookie {
-            match self.strategy.decode_stickiness(cookie, msg).await {
+            match self.strategy.decode_stickiness(cookie, msg) {
                 DecodeResult::Forward { target, .. }
                 | DecodeResult::ForwardBackup { target, .. } => return Some(target),
                 DecodeResult::Unroutable => return None,
@@ -176,7 +172,7 @@ impl ProxyCore {
             RankPlacement::Node(target) => Some(target),
             RankPlacement::NoNode => None,
             RankPlacement::Unranked => {
-                self.strategy.select_for_new_dialog(msg, SelectOpts::default()).await.ok()
+                self.strategy.select_for_new_dialog(msg, SelectOpts::default()).ok()
             }
         }
     }
@@ -188,7 +184,7 @@ impl ProxyCore {
     /// departed address being forgotten after its window or bound by another
     /// worker since. `None`: the cookie verified and names no alive worker. A
     /// cookie the strategy cannot place keeps `went`.
-    pub(super) async fn follow_live_hop(
+    pub(super) fn follow_live_hop(
         &self,
         went: ProxyAddr,
         cookie: Option<&RouteParams>,
@@ -205,7 +201,7 @@ impl ProxyCore {
         if live_there {
             return Some(went);
         }
-        match self.strategy.decode_stickiness(cookie, msg).await {
+        match self.strategy.decode_stickiness(cookie, msg) {
             DecodeResult::Forward { target, .. } | DecodeResult::ForwardBackup { target, .. } => {
                 Some(target)
             }
@@ -235,7 +231,7 @@ impl ProxyCore {
         cookie: &RouteParams,
         rtx_hit: Option<&CancelEntry>,
     ) -> Result<Chosen, RouteOutcome> {
-        let decoded = self.strategy.decode_stickiness(cookie, msg).await;
+        let decoded = self.strategy.decode_stickiness(cookie, msg);
         let miss = match decoded {
             DecodeResult::Forward { target, .. } => {
                 return Ok((target, RoutingDecisionKind::DecodeForward, Some("hit")));

@@ -105,7 +105,7 @@ async fn hmac_tampering_rejected() {
     let reg = two_worker_registry(Clock::test_at(0));
     let s = strategy(reg, Clock::test_at(0));
     let invite = request("INVITE", "call-tamper@h", None);
-    let target = s.select_for_new_dialog(&invite, SelectOpts::default()).await.unwrap();
+    let target = s.select_for_new_dialog(&invite, SelectOpts::default()).unwrap();
     let mut params = s.encode_stickiness(&target, &invite).unwrap();
 
     assert_eq!(params.get("v").unwrap(), "3");
@@ -123,7 +123,7 @@ async fn hmac_tampering_rejected() {
     assert_ne!(tampered, sig, "flip actually changed the signature");
     params.insert("sig".into(), tampered);
     let bye = request("BYE", "call-tamper@h", Some("bobtag"));
-    match s.decode_stickiness(&params, &bye).await {
+    match s.decode_stickiness(&params, &bye) {
         DecodeResult::Reject { status, reason } => {
             assert_eq!(status, 403);
             assert!(reason.contains("mismatch"), "expected MAC-mismatch reject, got: {reason}");
@@ -138,12 +138,12 @@ async fn cookie_round_trips_to_alive_primary() {
     let reg = two_worker_registry(clock.clone());
     let s = strategy(reg, clock);
     let invite = request("INVITE", "call-rt@h", None);
-    let target = s.select_for_new_dialog(&invite, SelectOpts::default()).await.unwrap();
+    let target = s.select_for_new_dialog(&invite, SelectOpts::default()).unwrap();
     let params = s.encode_stickiness(&target, &invite).unwrap();
     assert_eq!(params.get("v").unwrap(), "3");
 
     let bye = request("BYE", "call-rt@h", Some("bobtag"));
-    match s.decode_stickiness(&params, &bye).await {
+    match s.decode_stickiness(&params, &bye) {
         DecodeResult::Forward { target: t, .. } => assert_eq!(t, target),
         other => panic!("expected Forward to primary, got {other:?}"),
     }
@@ -158,13 +158,13 @@ async fn emergency_cookie_round_trips_e1_and_is_emergency() {
     let s = strategy(reg, clock);
 
     let invite = emergency_invite("call-em-rt@h");
-    let target = s.select_for_new_dialog(&invite, SelectOpts::default()).await.unwrap();
+    let target = s.select_for_new_dialog(&invite, SelectOpts::default()).unwrap();
     let params = s.encode_stickiness(&target, &invite).unwrap();
     assert_eq!(params.get("v").unwrap(), "3");
     assert_eq!(params.get("e").unwrap(), "1", "emergency INVITE ⇒ e=1");
 
     let bye = request("BYE", "call-em-rt@h", Some("bobtag"));
-    match s.decode_stickiness(&params, &bye).await {
+    match s.decode_stickiness(&params, &bye) {
         DecodeResult::Forward { target: t, is_emergency, .. } => {
             assert_eq!(t, target);
             assert!(is_emergency, "e=1 cookie must decode to is_emergency: true");
@@ -179,7 +179,7 @@ async fn cookie_route_fallback_when_primary_dead() {
     let reg = two_worker_registry(clock.clone());
     let s = strategy(reg.clone(), clock);
     let invite = request("INVITE", "call-fb@h", None);
-    let primary = s.select_for_new_dialog(&invite, SelectOpts::default()).await.unwrap();
+    let primary = s.select_for_new_dialog(&invite, SelectOpts::default()).unwrap();
     let params = s.encode_stickiness(&primary, &invite).unwrap();
     let primary_id = params.get("w_pri").unwrap().clone();
     let backup_id = params.get("w_bak").unwrap().clone();
@@ -188,12 +188,12 @@ async fn cookie_route_fallback_when_primary_dead() {
     reg.set_health(&primary_id, WorkerHealth::Dead);
     let backup_addr = reg.resolve(&backup_id).unwrap().address;
     let bye = request("BYE", "call-fb@h", Some("bobtag"));
-    match s.decode_stickiness(&params, &bye).await {
+    match s.decode_stickiness(&params, &bye) {
         DecodeResult::ForwardBackup { target, .. } => assert_eq!(target, backup_addr),
         other => panic!("expected ForwardBackup, got {other:?}"),
     }
     let ack = request("ACK", "call-fb@h", Some("bobtag"));
-    assert!(matches!(s.decode_stickiness(&params, &ack).await, DecodeResult::ForwardBackup { .. }));
+    assert!(matches!(s.decode_stickiness(&params, &ack), DecodeResult::ForwardBackup { .. }));
 }
 
 /// A primary refusing new calls keeps every in-dialog request: acceptance is
@@ -208,7 +208,7 @@ async fn an_in_dialog_request_goes_to_a_refusing_primary() {
     reg.set_acceptance(W2, Acceptance::Refuse);
     for method in ["BYE", "INVITE", "ACK", "CANCEL"] {
         let req = request(method, "call-rf@h", Some("bobtag"));
-        let decoded = s.decode_stickiness(&params, &req).await;
+        let decoded = s.decode_stickiness(&params, &req);
         assert_eq!(decoded, DecodeResult::Forward { target: addr(A1), is_emergency: false });
     }
 }
@@ -227,11 +227,11 @@ async fn an_in_dialog_request_takes_an_alive_backup_and_nothing_else() {
     for primary in [WorkerHealth::Dead, WorkerHealth::Unknown] {
         reg.set_health(W1, primary);
         reg.set_health(W2, WorkerHealth::Alive);
-        assert_eq!(s.decode_stickiness(&params, &bye).await, backup, "{primary:?} primary");
+        assert_eq!(s.decode_stickiness(&params, &bye), backup, "{primary:?} primary");
         for not_alive in [WorkerHealth::Dead, WorkerHealth::Unknown] {
             reg.set_health(W2, not_alive);
             assert_eq!(
-                s.decode_stickiness(&params, &bye).await,
+                s.decode_stickiness(&params, &bye),
                 DecodeResult::Unroutable,
                 "{primary:?} primary, {not_alive:?} backup"
             );
@@ -245,13 +245,13 @@ async fn unresolvable_primary_falls_back_to_backup() {
     let reg = two_worker_registry(clock.clone());
     let s = strategy(reg.clone(), clock);
     let invite = request("INVITE", "call-un@h", None);
-    let primary = s.select_for_new_dialog(&invite, SelectOpts::default()).await.unwrap();
+    let primary = s.select_for_new_dialog(&invite, SelectOpts::default()).unwrap();
     let params = s.encode_stickiness(&primary, &invite).unwrap();
     let primary_id = params.get("w_pri").unwrap().clone();
 
     reg.remove(&primary_id);
     let bye = request("BYE", "call-un@h", Some("bobtag"));
-    assert!(matches!(s.decode_stickiness(&params, &bye).await, DecodeResult::ForwardBackup { .. }));
+    assert!(matches!(s.decode_stickiness(&params, &bye), DecodeResult::ForwardBackup { .. }));
 }
 
 /// A primary read alive is served from that read on, however recently it
@@ -266,10 +266,10 @@ async fn a_primary_read_alive_is_served_at_once_after_it_joined() {
     let params = s.encode_stickiness(&addr(A1), &request("INVITE", "call-jn@h", None)).unwrap();
     let bye = request("BYE", "call-jn@h", Some("bobtag"));
     let backup = DecodeResult::ForwardBackup { target: addr(A2), is_emergency: false };
-    assert_eq!(s.decode_stickiness(&params, &bye).await, backup, "unknown: the backup");
+    assert_eq!(s.decode_stickiness(&params, &bye), backup, "unknown: the backup");
     reg.set_health(W1, WorkerHealth::Alive);
     let primary = DecodeResult::Forward { target: addr(A1), is_emergency: false };
-    assert_eq!(s.decode_stickiness(&params, &bye).await, primary, "alive: the primary");
+    assert_eq!(s.decode_stickiness(&params, &bye), primary, "alive: the primary");
 }
 
 /// The cookie's backup is chosen among the alive workers accepting new
@@ -314,11 +314,11 @@ async fn initial_health_unknown_workers_are_not_selectable() {
     let s = strategy(reg.clone(), clock);
     let invite = request("INVITE", "call-ih@h", None);
     assert!(matches!(
-        s.select_for_new_dialog(&invite, SelectOpts::default()).await,
+        s.select_for_new_dialog(&invite, SelectOpts::default()),
         Err(SelectError::NoTarget { .. })
     ));
     reg.set_health(W1, WorkerHealth::Alive);
-    assert_eq!(s.select_for_new_dialog(&invite, SelectOpts::default()).await.unwrap(), addr(A1));
+    assert_eq!(s.select_for_new_dialog(&invite, SelectOpts::default()).unwrap(), addr(A1));
 }
 
 /// No alive worker accepts: a new dialog goes to an alive refusing one,
@@ -332,7 +332,7 @@ async fn a_new_dialog_falls_back_to_a_refusing_worker_when_none_accepts() {
     let s = strategy(reg, clock);
     for n in 0..8 {
         let invite = request("INVITE", &format!("call-rf-fallback-{n}@h"), None);
-        let selected = s.select_for_new_dialog(&invite, SelectOpts::default()).await;
+        let selected = s.select_for_new_dialog(&invite, SelectOpts::default());
         assert_eq!(selected.ok(), Some(addr(A2)), "call {n}: the refusing worker takes it");
     }
 }
@@ -346,7 +346,7 @@ async fn a_new_dialog_skips_a_refusing_worker_while_one_accepts() {
     let s = strategy(reg, clock);
     for n in 0..32 {
         let invite = request("INVITE", &format!("call-rf-skip-{n}@h"), None);
-        let selected = s.select_for_new_dialog(&invite, SelectOpts::default()).await.unwrap();
+        let selected = s.select_for_new_dialog(&invite, SelectOpts::default()).unwrap();
         assert_eq!(selected, addr(A1), "call {n} goes to the accepting worker");
     }
 }
@@ -368,16 +368,13 @@ async fn above_critical_band_filtered_for_non_emergency_only() {
 
     let invite = request("INVITE", "call-ov@h", None);
     assert!(matches!(
-        s.select_for_new_dialog(&invite, SelectOpts::default()).await,
+        s.select_for_new_dialog(&invite, SelectOpts::default()),
         Err(SelectError::NoTarget { .. })
     ));
     let rph_invite = emergency_invite("call-ov-rph@h");
-    assert_eq!(
-        s.select_for_new_dialog(&rph_invite, SelectOpts::default()).await.unwrap(),
-        addr(A1)
-    );
+    assert_eq!(s.select_for_new_dialog(&rph_invite, SelectOpts::default()).unwrap(), addr(A1));
     let emergency = SelectOpts { emergency_override: true, ..SelectOpts::default() };
-    assert_eq!(s.select_for_new_dialog(&invite, emergency).await.unwrap(), addr(A1));
+    assert_eq!(s.select_for_new_dialog(&invite, emergency).unwrap(), addr(A1));
 }
 
 /// The per-worker AIMD bucket gates admission: a non-emergency new dialog
@@ -396,7 +393,7 @@ async fn rate_cap_exhausted_when_winners_bucket_is_empty() {
     let s = strategy_with_observer(reg, clock, observer);
 
     let invite = request("INVITE", "call-rc@h", None);
-    match s.select_for_new_dialog(&invite, SelectOpts::default()).await {
+    match s.select_for_new_dialog(&invite, SelectOpts::default()) {
         Err(SelectError::RateCapExhausted { worker_id, retry_after_sec }) => {
             assert_eq!(worker_id, W1);
             assert!(retry_after_sec >= 1, "Retry-After must be a usable, non-zero value");
@@ -405,11 +402,11 @@ async fn rate_cap_exhausted_when_winners_bucket_is_empty() {
     }
 
     let reinvite = request("INVITE", "call-rc@h", Some("bobtag"));
-    assert_eq!(s.select_for_new_dialog(&reinvite, SelectOpts::default()).await.unwrap(), addr(A1));
+    assert_eq!(s.select_for_new_dialog(&reinvite, SelectOpts::default()).unwrap(), addr(A1));
 
     let emergency = request("INVITE", "call-rc-em@h", None);
     let opts = SelectOpts { emergency_override: true, ..SelectOpts::default() };
-    assert_eq!(s.select_for_new_dialog(&emergency, opts).await.unwrap(), addr(A1));
+    assert_eq!(s.select_for_new_dialog(&emergency, opts).unwrap(), addr(A1));
 }
 
 /// A request naming a dialog no verified cookie backs (`admit_as_new`) is a
@@ -426,7 +423,7 @@ async fn a_dialog_admitted_as_new_meets_the_empty_bucket() {
 
     let reinvite = request("INVITE", "call-unbacked@h", Some("forged"));
     let opts = SelectOpts { admit_as_new: true, ..SelectOpts::default() };
-    let refused = s.select_for_new_dialog(&reinvite, opts).await;
+    let refused = s.select_for_new_dialog(&reinvite, opts);
     assert!(matches!(refused, Err(SelectError::RateCapExhausted { .. })), "{refused:?}");
 }
 
@@ -438,7 +435,7 @@ async fn unobserved_worker_is_admitted_without_a_bucket() {
     let reg = two_worker_registry(clock.clone());
     let s = strategy(reg, clock);
     let invite = request("INVITE", "call-boot@h", None);
-    let target = s.select_for_new_dialog(&invite, SelectOpts::default()).await.unwrap();
+    let target = s.select_for_new_dialog(&invite, SelectOpts::default()).unwrap();
     assert!(target == addr(A1) || target == addr(A2));
 }
 
@@ -457,18 +454,18 @@ async fn in_dialog_sticks_to_owner_in_above_critical_and_bypasses_empty_bucket()
 
     let new_call = request("INVITE", "call-new@h", None);
     assert!(matches!(
-        s.select_for_new_dialog(&new_call, SelectOpts::default()).await,
+        s.select_for_new_dialog(&new_call, SelectOpts::default()),
         Err(SelectError::NoTarget { .. })
     ));
 
     let in_dialog = request("INVITE", "call-est@h", Some("bobtag"));
     assert_eq!(
-        s.select_for_new_dialog(&in_dialog, SelectOpts::default()).await.unwrap(),
+        s.select_for_new_dialog(&in_dialog, SelectOpts::default()).unwrap(),
         addr(A1),
         "in-dialog must stick to its AboveCritical owner (no band filter, no rate cap)"
     );
     let bye = request("BYE", "call-est@h", Some("bobtag"));
-    assert_eq!(s.select_for_new_dialog(&bye, SelectOpts::default()).await.unwrap(), addr(A1));
+    assert_eq!(s.select_for_new_dialog(&bye, SelectOpts::default()).unwrap(), addr(A1));
 }
 
 /// The cookie path reads the signed `w_pri` over the live registry, never the
@@ -482,7 +479,7 @@ async fn decode_stickiness_routes_to_alive_w_pri_regardless_of_elu_band() {
     let s = strategy_with_observer(reg.clone(), clock, observer.clone());
 
     let invite = request("INVITE", "call-band@h", None);
-    let primary = s.select_for_new_dialog(&invite, SelectOpts::default()).await.unwrap();
+    let primary = s.select_for_new_dialog(&invite, SelectOpts::default()).unwrap();
     let params = s.encode_stickiness(&primary, &invite).unwrap();
     let primary_id = params.get("w_pri").unwrap().clone();
 
@@ -494,7 +491,7 @@ async fn decode_stickiness_routes_to_alive_w_pri_regardless_of_elu_band() {
     );
 
     let bye = request("BYE", "call-band@h", Some("bobtag"));
-    match s.decode_stickiness(&params, &bye).await {
+    match s.decode_stickiness(&params, &bye) {
         DecodeResult::Forward { target, .. } => assert_eq!(target, primary),
         other => panic!("expected Forward to the AboveCritical owner, got {other:?}"),
     }
@@ -517,7 +514,7 @@ async fn no_cookie_in_dialog_request_uses_new_dialog_path_and_can_scatter() {
     let s = strategy_with_observer(reg, clock, observer);
 
     let in_dialog = request("BYE", "call-nocookie@h", Some("bobtag"));
-    let target = s.select_for_new_dialog(&in_dialog, SelectOpts::default()).await.unwrap();
+    let target = s.select_for_new_dialog(&in_dialog, SelectOpts::default()).unwrap();
     assert!(
         target == addr(A1) || target == addr(A2),
         "no-cookie in-dialog is admitted (rendezvous over alive set), never shed"
@@ -530,12 +527,12 @@ async fn resharding_keeps_in_dialog_on_cookie_primary() {
     let reg = two_worker_registry(clock.clone());
     let s = strategy(reg.clone(), clock);
     let invite = request("INVITE", "call-rs@h", None);
-    let primary = s.select_for_new_dialog(&invite, SelectOpts::default()).await.unwrap();
+    let primary = s.select_for_new_dialog(&invite, SelectOpts::default()).unwrap();
     let params = s.encode_stickiness(&primary, &invite).unwrap();
 
     reg.add(WorkerEntry::alive("b2b-3", ProxyAddr::new("10.0.0.4", 5070)));
     let bye = request("BYE", "call-rs@h", Some("bobtag"));
-    match s.decode_stickiness(&params, &bye).await {
+    match s.decode_stickiness(&params, &bye) {
         DecodeResult::Forward { target, .. } => assert_eq!(target, primary),
         other => panic!("expected stickiness to original primary, got {other:?}"),
     }

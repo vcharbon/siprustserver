@@ -5,7 +5,6 @@
 
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use sip_clock::Clock;
 use sip_message::parser::custom::CustomParser;
 use sip_message::{SipMessage, SipParser};
@@ -28,19 +27,18 @@ const PROXY_VIP: &str = "192.0.2.250";
 /// `reply_select_failure` through the public routing path.
 struct FailingSelect(fn() -> SelectError);
 
-#[async_trait]
 impl RoutingStrategy for FailingSelect {
     fn name(&self) -> &str {
         "FailingSelect"
     }
-    async fn select_for_new_dialog(
+    fn select_for_new_dialog(
         &self,
         _msg: &SipMessage,
         _opts: SelectOpts,
     ) -> Result<ProxyAddr, SelectError> {
         Err((self.0)())
     }
-    async fn decode_stickiness(&self, _params: &RouteParams, _msg: &SipMessage) -> DecodeResult {
+    fn decode_stickiness(&self, _params: &RouteParams, _msg: &SipMessage) -> DecodeResult {
         DecodeResult::Unknown { is_emergency: false }
     }
     fn encode_stickiness(&self, _target: &ProxyAddr, _msg: &SipMessage) -> Option<RouteParams> {
@@ -138,19 +136,18 @@ Content-Length: 0\r\n\r\n"
 /// Strategy double whose cookie decode always refuses with a 403.
 struct RejectingDecode;
 
-#[async_trait]
 impl RoutingStrategy for RejectingDecode {
     fn name(&self) -> &str {
         "RejectingDecode"
     }
-    async fn select_for_new_dialog(
+    fn select_for_new_dialog(
         &self,
         _msg: &SipMessage,
         _opts: SelectOpts,
     ) -> Result<ProxyAddr, SelectError> {
         Err(SelectError::NoTarget { reason: "unused".into() })
     }
-    async fn decode_stickiness(&self, _params: &RouteParams, _msg: &SipMessage) -> DecodeResult {
+    fn decode_stickiness(&self, _params: &RouteParams, _msg: &SipMessage) -> DecodeResult {
         DecodeResult::Reject { status: 403, reason: "Forbidden".into() }
     }
     fn encode_stickiness(&self, _target: &ProxyAddr, _msg: &SipMessage) -> Option<RouteParams> {
