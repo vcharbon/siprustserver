@@ -65,6 +65,7 @@ assert_exposition_order!(
     Unrecoverable,
     EventQueue,
     SetupBudget,
+    OnSight,
 );
 assert_exposition_order!(Class: Normal, Emergency, InDialog);
 
@@ -123,7 +124,7 @@ pub const NEW_CALLS: Family = Family::counter(
         &[Dim::new("outcome", &["rejected"]), REFUSAL, CLASS],
         &[Dim::new("outcome", &["rejected"]), BACKLOG_REASON, IN_DIALOG],
     ]),
-    "New initial INVITEs by admission outcome, once per INVITE (a copy is not counted): accepted (the call is born), cancelled (its caller CANCELed it before its turn ran: the call is born and ends with no decision and no limiter admit) or rejected (reason: a rung of the admission ladder, the store-fault 500, or a dispatch discard of the INVITE's turn); class emergency carries an RFC 4412 Resource-Priority, class in_dialog is an INVITE carrying a To-tag the deferred backlog refused.",
+    "New initial INVITEs by admission outcome, once per INVITE (a copy is not counted): accepted (the call is born), cancelled (its caller CANCELed it before its turn ran: the call is born and ends with no decision and no limiter admit) or rejected (reason: a rung of the admission ladder, the store-fault 500, a dispatch discard of the INVITE's turn, or the INVITE refused on sight: no From tag, or an option tag required that the stack does not understand); class emergency carries an RFC 4412 Resource-Priority, class in_dialog is an INVITE carrying a To-tag the deferred backlog refused.",
 );
 
 pub const NEW_CALL_REFUSED_COPIES: Family = Family::counter(

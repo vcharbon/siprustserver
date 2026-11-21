@@ -302,37 +302,62 @@ pub fn reject_call(
     }
 }
 
-/// The stack's refusal of the caller's INVITE `a_invite` on `call` before any
-/// decision is asked, or `None` when the INVITE is fit to route. One with no
-/// From tag draws 400 (RFC 3261 §8.1.1.3): that tag is the caller dialog's
-/// remote tag, which every request of the stack's in her dialog names. One
-/// requiring an option tag this stack does not understand draws 420
-/// ([`refuse_extension`]). Nobody is dialled; the call is born and ended, so
-/// the reaper takes it and its delete propagates, as for a decision's reject.
+/// Why the stack refuses a caller's INVITE on sight, before any decision is
+/// asked ([`OnSight::of`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OnSight {
+    /// It carries no From tag: 400 (RFC 3261 §8.1.1.3). That tag is the
+    /// caller dialog's remote tag, which every request of the stack's in her
+    /// dialog names.
+    NoFromTag,
+    /// It requires option tags this stack does not understand: 420 naming
+    /// them ([`refuse_extension`]).
+    BadExtension(Unsupported),
+}
+
+impl OnSight {
+    /// Why `a_invite`, the caller's INVITE of `call`, is refused on sight;
+    /// `None` when it is fit to route.
+    pub fn of(call: &Call, a_invite: &SipRequest) -> Option<Self> {
+        if call.a_leg_invite.from_tag.is_empty() {
+            return Some(Self::NoFromTag);
+        }
+        sip_message::option_tags::not_understood(a_invite).map(Self::BadExtension)
+    }
+
+    /// `call` refused for this reason. Nobody is dialled; the call is born and
+    /// ended, so the reaper takes it and its delete propagates, as for a
+    /// decision's reject. Its cause is `Admission`.
+    pub fn refuse(
+        self,
+        call: Call,
+        a_invite: &SipRequest,
+        advertisement: &CapabilitySet,
+        now_ms: i64,
+    ) -> HandlerResult {
+        match self {
+            Self::NoFromTag => {
+                let reason = Some("Bad Request - missing From tag".into());
+                let cause = TerminationCause::Admission;
+                reject_call(call, a_invite, 400, reason, None, &[], advertisement, now_ms, cause)
+            }
+            Self::BadExtension(unsupported) => {
+                refuse_extension(call, a_invite, &unsupported, advertisement, now_ms)
+            }
+        }
+    }
+}
+
+/// The caller's INVITE `a_invite` on `call` refused on sight
+/// ([`OnSight::of`], [`OnSight::refuse`]), or `None` when it is fit to route.
 pub fn refused_on_sight(
     call: &Call,
     a_invite: &SipRequest,
     advertisement: &CapabilitySet,
     now_ms: i64,
 ) -> Option<HandlerResult> {
-    if call.a_leg_invite.from_tag.is_empty() {
-        let reason = Some("Bad Request - missing From tag".into());
-        let cause = TerminationCause::Admission;
-        let call = call.clone();
-        return Some(reject_call(
-            call,
-            a_invite,
-            400,
-            reason,
-            None,
-            &[],
-            advertisement,
-            now_ms,
-            cause,
-        ));
-    }
-    let unsupported = sip_message::option_tags::not_understood(a_invite)?;
-    Some(refuse_extension(call.clone(), a_invite, &unsupported, advertisement, now_ms))
+    let why = OnSight::of(call, a_invite)?;
+    Some(why.refuse(call.clone(), a_invite, advertisement, now_ms))
 }
 
 /// `call` refused 420 Bad Extension, its `Unsupported` listing `unsupported`,

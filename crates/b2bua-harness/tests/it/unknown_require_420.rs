@@ -8,6 +8,8 @@
 
 use std::time::Duration;
 
+use b2bua::admission::Class;
+use b2bua::new_calls::Refusal;
 use b2bua_harness::{settle_until, B2buaScene};
 use call::TerminationCause;
 use scenario_harness::callflow::{ANSWER_SDP, OFFER_SDP};
@@ -310,7 +312,9 @@ async fn a_keepalive_options_requiring_an_unknown_tag_is_refused_420() {
 }
 
 /// An initial INVITE requiring the unknown tag is refused 420 naming it before
-/// any leg is dialled, and the refused call has its CDR.
+/// any leg is dialled, and the refused call has its CDR. It is counted a
+/// refusal on sight, never an admitted call: the `adm` the load balancer
+/// reads off `X-Overload` stays at zero.
 #[tokio::test(start_paused = true)]
 async fn an_initial_invite_requiring_an_unknown_tag_is_refused_before_any_dial() {
     let s = B2buaScene::new("unknown-require-initial-invite").await;
@@ -332,5 +336,10 @@ async fn an_initial_invite_requiring_an_unknown_tag_is_refused_before_any_dial()
     let cdr = cdrs.iter().find(|r| r.a_leg.call_id == call.call_id()).expect("its CDR");
     assert!(cdr.b_legs.is_empty(), "no b-leg: {cdr:?}");
     assert_eq!(cdr.termination.as_ref().map(|t| t.cause), Some(TerminationCause::Admission));
+    let counts = s.b2bua.new_calls();
+    assert_eq!(counts.rejected(Refusal::OnSight, Class::Normal), 1, "refused on sight");
+    assert_eq!(counts.accepted(Class::Normal), 0, "no admitted call");
+    let header = s.b2bua.overload().x_overload_header_value();
+    assert!(header.ends_with("adm=0"), "the refused call is not counted as treated: {header}");
     let _report = s.finish().await;
 }

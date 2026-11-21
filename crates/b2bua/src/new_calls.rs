@@ -3,9 +3,10 @@
 //! CANCELed it before its turn ran: the call is born and ends at once, with
 //! no decision and no limiter admit) or refused by a rung of the admission
 //! ladder ([`crate::admission`]) before any call state exists, and why. A
-//! cordoned worker's refusal and the refusal of a turn past its setup budget
-//! are refusals too, though their call is born to write the record of a call
-//! no decision reached.
+//! cordoned worker's refusal, the refusal of a turn past its setup budget and
+//! an INVITE refused on sight (no From tag, an option tag required that the
+//! stack does not understand) are refusals too, though their call is born to
+//! write the record of a call no decision reached.
 //!
 //! A new call is a new initial INVITE (no To-tag). Its first refusal is
 //! counted once, on `b2bua_new_calls_total`, in the class it was judged in;
@@ -23,8 +24,8 @@
 //! [`NewCallTally`] (its rungs, the store-fault 500, the discards, every
 //! accept and cancelled setup), the transaction layer's backlog refusals and copies, and the
 //! ingress brake's ([`IngressBrakeCounters`]). An accepted call may still end
-//! with a final the call path authors (a routing reject, a malformed-INVITE
-//! 400): that is the call's outcome, not an admission one.
+//! with a final the call path authors (a routing reject): that is the call's
+//! outcome, not an admission one.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -76,11 +77,16 @@ pub enum Refusal {
     /// answered the bare 503 before any decision. Its call is born only to
     /// write its record.
     SetupBudget,
+    /// The INVITE is refused on sight, before any decision
+    /// ([`b2bua_core::initial_invite::OnSight`]): 400 without a From tag, 420
+    /// requiring an option tag the stack does not understand. Its call is born
+    /// only to write its record.
+    OnSight,
 }
 
 impl Refusal {
     /// Every reason, in exposition order.
-    pub const ALL: [Refusal; 15] = [
+    pub const ALL: [Refusal; 16] = [
         Refusal::BucketEmpty,
         Refusal::PanicElu,
         Refusal::CapacityCalls,
@@ -96,6 +102,7 @@ impl Refusal {
         Refusal::Unrecoverable,
         Refusal::EventQueue,
         Refusal::SetupBudget,
+        Refusal::OnSight,
     ];
 
     /// Stable `reason` label.
@@ -116,6 +123,7 @@ impl Refusal {
             Refusal::Unrecoverable => "unrecoverable",
             Refusal::EventQueue => "event_queue",
             Refusal::SetupBudget => "setup_budget",
+            Refusal::OnSight => "on_sight",
         }
     }
 

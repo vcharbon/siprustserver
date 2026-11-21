@@ -46,9 +46,11 @@ pub(super) enum Turn {
 /// identity guard, then build + rule the new call. A setup its caller
 /// CANCELed before this turn ran is born and ruled by no one: no decision, no
 /// limiter admit. A setup whose budget ran out before this turn ran is refused
-/// as an unavailable decision, its call born only to write its record. The
-/// probe's 500, the identity guard's 500, the cancelled setup, the cordon's or
-/// the budget's 503, or the accept counts the INVITE's outcome once
+/// as an unavailable decision, its call born only to write its record; so is
+/// an INVITE refused on sight ([`crate::initial_invite::OnSight`]), which no
+/// decision is asked for and which is no admitted call. The probe's 500, the
+/// identity guard's 500, the cancelled setup, the cordon's or the budget's
+/// 503, the refusal on sight, or the accept counts the INVITE's outcome once
 /// ([`crate::new_calls`]); a copy is answered 482 and refused as a copy.
 /// `admitted` is the hold and the setup budget of a new call, `None` for a
 /// copy, whose budget only ends its wait for its permits: it asks nothing and
@@ -156,12 +158,19 @@ pub(super) async fn initial_invite_turn(
     let cancelled = ctx.state.is_setup_cancelled(call_ref, cseq);
     let cordoned = !cancelled && ctx.readiness.state() == ReadinessState::Cordoned;
     let spent = !cancelled && !cordoned && budget.spent();
+    let on_sight = if cancelled || cordoned || spent {
+        None
+    } else {
+        crate::initial_invite::OnSight::of(&call, &caller)
+    };
     if cancelled {
         ctx.metrics.new_calls().cancel(class);
     } else if cordoned {
         ctx.metrics.new_calls().reject(Refusal::Cordoned, class);
     } else if spent {
         ctx.metrics.new_calls().reject(Refusal::SetupBudget, class);
+    } else if on_sight.is_some() {
+        ctx.metrics.new_calls().reject(Refusal::OnSight, class);
     } else {
         ctx.metrics.new_calls().accept(class);
         // The `adm` published on X-Overload counts non-emergency calls only:
@@ -199,15 +208,12 @@ pub(super) async fn initial_invite_turn(
     // the other arms await nothing and leave it to the drop guard below.
     let (mut consulted, mut recorded) = (false, false);
     let advertisement = &ctx.config.minted_final_advertisement;
-    let on_sight = || {
-        crate::initial_invite::refused_on_sight(&call, &caller, advertisement, now_ms).map(Box::new)
-    };
     let mut handled = if cancelled {
         cancelled_setup(call.clone(), &caller, datagram, now_ms)
     } else if cordoned || spent {
         refused_unavailable(ctx, call.clone(), &caller, now_ms)
-    } else if let Some(refused) = on_sight() {
-        *refused
+    } else if let Some(why) = on_sight {
+        why.refuse(call.clone(), &caller, advertisement, now_ms)
     } else {
         consulted = true;
         // `datagram` is the only place the INVITE as it arrived exists (the
