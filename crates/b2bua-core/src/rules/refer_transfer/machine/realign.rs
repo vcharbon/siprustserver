@@ -16,7 +16,7 @@ use call::TimerKey;
 /// The longest the ACK of C's offering c-realign 2xx waits for A's answer:
 /// four T1 inside C's 64·T1 give-up on that 2xx (RFC 3261 §13.3.1.4), so the
 /// rollback's ACK reaches C before C gives the 2xx up.
-const HELD_ACK_BOUND_MS: i64 = (64 - 4) * sip_retransmit::timers::T1 as i64;
+const HELD_ACK_BOUND_MS: u64 = (64 - 4) * sip_retransmit::timers::T1;
 
 /// transfer-c-realign-200 — C answers the c-realign re-INVITE (200).
 /// Distinguished from `transfer-c-200-initial` by `legState: confirmed`
@@ -61,7 +61,8 @@ pub(super) fn c_realign_200() -> RuleDefinition {
             let c_realign_sdp = resp.body().clone();
             let watchdog = TimerDelay::secs(ctx.config.refer_reinvite_answer_sec);
             let watchdog = if offers_to_its_ack(ctx, &c_leg_id) {
-                TimerDelay::millis(watchdog.as_millis().min(HELD_ACK_BOUND_MS))
+                let bound = i64::try_from(HELD_ACK_BOUND_MS).unwrap_or(i64::MAX);
+                TimerDelay::millis(watchdog.as_millis().min(bound))
             } else {
                 watchdog
             };
