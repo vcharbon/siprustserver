@@ -21,6 +21,7 @@
 use std::time::Duration;
 
 use b2bua_harness::{settle_until, B2buaSut};
+use call::TerminationCause;
 use scenario_harness::{Harness, Party};
 use sip_message::generators::InDialogMethod;
 use sip_message::header::RSeq;
@@ -40,8 +41,10 @@ type Reliable = (&'static str, u16, u32, bool);
 enum OfferIn {
     /// The caller's INVITE; the callee rings unreliably.
     Invite,
-    /// The callee's reliable provisionals, each offer answered in its PRACK.
-    Reliable(&'static [Reliable]),
+    /// The callee's reliable provisionals `rings`, each offer answered in its
+    /// PRACK; `restated`: the 2xx repeats the callee's description, which
+    /// makes no new offer (RFC 3262 §5).
+    Reliable { rings: &'static [Reliable], restated: bool },
     /// The callee's 2xx; the callee rings unreliably.
     Final,
 }
@@ -61,8 +64,8 @@ const THREE_FORKS: &[Reliable] = &[
 ];
 
 /// Bob rings, then answers in the instant alice CANCELs, the 2xx taken first:
-/// bob's ACK is bare, or answers rejecting where his 2xx made the offer, and
-/// the BYE follows it on the 2xx's dialog.
+/// bob's ACK is bare, or answers rejecting where his 2xx made the offer, the
+/// BYE follows it on the 2xx's dialog, and the record ends on her CANCEL.
 async fn taken_2xx_is_acked_then_byed(name: &str, offer: OfferIn, ports: [u16; 3]) {
     let h = Harness::with_transit_delay(name, 1);
     let [alice_port, bob_port, b2bua_port] = ports;
@@ -75,7 +78,7 @@ async fn taken_2xx_is_acked_then_byed(name: &str, offer: OfferIn, ports: [u16; 3
     let invite = alice.invite(&bob).with_header("Supported", "100rel").through(b2bua.addr);
     let invite = match offer {
         OfferIn::Invite => invite.with_sdp(ALICE_SDP),
-        OfferIn::Reliable(_) | OfferIn::Final => invite,
+        OfferIn::Reliable { .. } | OfferIn::Final => invite,
     };
     let mut call = invite.send().await;
     let mut uas = bob.receive("INVITE").await;
@@ -84,7 +87,7 @@ async fn taken_2xx_is_acked_then_byed(name: &str, offer: OfferIn, ports: [u16; 3
             uas.respond(180, "Ringing").with_to_tag(WINNER).await;
             call.expect(180).await;
         }
-        OfferIn::Reliable(rings) => {
+        OfferIn::Reliable { rings, .. } => {
             for &(tag, code, rseq, offers) in rings {
                 let ring = uas
                     .respond(code, "Ringing")
@@ -114,8 +117,10 @@ async fn taken_2xx_is_acked_then_byed(name: &str, offer: OfferIn, ports: [u16; 3
 
     let answer = uas.respond(200, "OK").with_to_tag(WINNER);
     match offer {
-        OfferIn::Invite | OfferIn::Final => answer.with_sdp(BOB_SDP).await,
-        OfferIn::Reliable(_) => answer.await,
+        OfferIn::Invite | OfferIn::Final | OfferIn::Reliable { restated: true, .. } => {
+            answer.with_sdp(BOB_SDP).await
+        }
+        OfferIn::Reliable { restated: false, .. } => answer.await,
     }
     let mut cxl = call.cancel().await;
     cxl.expect(200).await;
@@ -129,7 +134,7 @@ async fn taken_2xx_is_acked_then_byed(name: &str, offer: OfferIn, ports: [u16; 3
             body.lines().any(|l| l.starts_with("m=audio 0 ")),
             "the ACK answers the 2xx's offer, rejecting its stream (RFC 3264 §6): {body:?}"
         ),
-        OfferIn::Invite | OfferIn::Reliable(_) => {
+        OfferIn::Invite | OfferIn::Reliable { .. } => {
             assert!(body.is_empty(), "the ACK owes no answer (RFC 3264 §4): {body:?}")
         }
     }
@@ -142,7 +147,11 @@ async fn taken_2xx_is_acked_then_byed(name: &str, offer: OfferIn, ports: [u16; 3
     b2bua.assert_fully_reaped();
     let cdrs = b2bua.cdr_records();
     assert_eq!(cdrs.len(), 1, "one record");
-    assert!(cdrs[0].termination.is_some(), "the cancelled call terminated");
+    assert_eq!(
+        cdrs[0].termination.as_ref().map(|t| t.cause),
+        Some(TerminationCause::RemoteCancel),
+        "the caller's CANCEL ended the call"
+    );
 
     let _report = h.finish().await;
 }
@@ -151,8 +160,18 @@ async fn taken_2xx_is_acked_then_byed(name: &str, offer: OfferIn, ports: [u16; 3
 async fn a_2xx_after_a_prack_answered_offer_is_acked_bare_then_byed() {
     taken_2xx_is_acked_then_byed(
         "b2bua-cancel-after-reliable-offer",
-        OfferIn::Reliable(ONE_FORK),
+        OfferIn::Reliable { rings: ONE_FORK, restated: false },
         [5121, 5122, 5123],
+    )
+    .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_2xx_restating_a_prack_answered_offer_is_acked_bare_then_byed() {
+    taken_2xx_is_acked_then_byed(
+        "b2bua-cancel-after-reliable-offer-restated",
+        OfferIn::Reliable { rings: ONE_FORK, restated: true },
+        [5133, 5134, 5135],
     )
     .await;
 }
@@ -161,7 +180,7 @@ async fn a_2xx_after_a_prack_answered_offer_is_acked_bare_then_byed() {
 async fn a_forked_2xx_after_prack_answered_offers_is_acked_bare_then_byed() {
     taken_2xx_is_acked_then_byed(
         "b2bua-cancel-after-reliable-offer-forked",
-        OfferIn::Reliable(THREE_FORKS),
+        OfferIn::Reliable { rings: THREE_FORKS, restated: false },
         [5124, 5125, 5126],
     )
     .await;

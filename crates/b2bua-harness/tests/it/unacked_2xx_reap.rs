@@ -32,12 +32,18 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use b2bua_harness::{settle_until, B2buaSut};
-use scenario_harness::{Harness, RunReport, WaiverScope};
+use scenario_harness::{Harness, Party, RunReport, WaiverScope};
+use sip_message::generators::InDialogMethod;
+use sip_message::header::RSeq;
 use sip_message::{CustomParser, Method, SipMessage, SipParser};
 use sip_retransmit::{Class, Ladder, Schedule};
 
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
 const ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/AVP 0\r\n";
+/// bob's description as the offer of his reliable 183, on an offerless INVITE.
+const EARLY_OFFER: &str = ANSWER;
+/// alice's description as the answer her PRACK carries (RFC 3262 §5).
+const PRACK_ANSWER: &str = OFFER;
 const REOFFER: &str = "v=0\r\no=bob 1 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 30000 RTP/AVP 0\r\n";
 const REANSWER: &str = "v=0\r\no=alice 1 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 30001 RTP/AVP 0\r\n";
 
@@ -432,6 +438,90 @@ async fn a_delayed_offer_callee_gets_the_give_up_ack_rejecting_every_stream() {
     settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
     let _report = h.finish().await;
+}
+
+/// alice INVITEs bodyless and bob offers in a reliable 183 that alice's PRACK
+/// answers (RFC 3262 §5): bob's 2xx makes no offer, bodyless or `restated`
+/// (repeating his description), so its ACK owes no answer (RFC 3264 §4). At
+/// the give-up this stack ACKs bob's 2xx bare, then BYEs (RFC 3261 §13.2.2.4).
+async fn prack_answered_offer_gives_up_with_a_bare_ack(
+    name: &str,
+    restated: bool,
+    ports: [u16; 3],
+) {
+    let h = Harness::new(name);
+    h.waive(
+        WaiverScope::rule(
+            "no-ack-to-dialog-creating-2xx",
+            "the caller deliberately never ACKs the 2xx relayed to her; that silence is \
+             the give-up under test",
+        )
+        .on_party("alice"),
+    );
+    let [alice_port, bob_port, b2bua_port] = ports;
+    let alice = h.agent("alice", &format!("127.0.0.1:{alice_port}")).await;
+    let bob = h.agent("bob", &format!("127.0.0.1:{bob_port}")).await;
+    let b2bua_addr = format!("127.0.0.1:{b2bua_port}");
+    let b2bua = b2bua_with_ack_timeout(&h, "b2bua", &b2bua_addr, bob_port, ACK_TIMEOUT_SEC).await;
+
+    let mut call =
+        alice.invite(&bob).with_header("Supported", "100rel").through(b2bua.addr).send().await;
+    let mut uas = bob.receive("INVITE").await;
+    uas.respond(183, "Session Progress")
+        .with_header("Require", "100rel")
+        .with_header("RSeq", "7")
+        .with_sdp(EARLY_OFFER)
+        .await;
+    let shown = call.expect(183).await;
+    let a_tag = shown.to().tag().expect("an a-facing tag").to_string();
+    let rseq = shown.header::<RSeq>().expect("an RSeq").expect("a readable RSeq");
+    let mut prack = call
+        .send_request(InDialogMethod::Prack)
+        .with_to_tag(&a_tag)
+        .with_rack(&format!("{} {} INVITE", rseq.value(), Party::Caller.first_cseq()))
+        .with_sdp(PRACK_ANSWER)
+        .send()
+        .await;
+    bob.receive("PRACK").await.respond(200, "OK").await;
+    prack.expect(200).await;
+    let answer = uas.respond(200, "OK");
+    if restated {
+        answer.with_sdp(EARLY_OFFER).await;
+    } else {
+        answer.await;
+    }
+    call.expect(200).await;
+
+    h.advance(Duration::from_secs(ACK_TIMEOUT_SEC as u64)).await;
+    alice.drain().await;
+    alice.receive("BYE").await.respond(200, "OK").await;
+    let ack = bob.receive("ACK").await;
+    assert!(ack.request().body().is_empty(), "a bare ACK: {:?}", ack.request().body());
+    bob.receive("BYE").await.respond(200, "OK").await;
+
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
+    let _report = h.finish().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_bodyless_2xx_after_a_prack_answered_offer_gets_the_give_up_ack_bare() {
+    prack_answered_offer_gives_up_with_a_bare_ack(
+        "b2bua-unacked-2xx-prack-answered-give-up",
+        false,
+        [5136, 5137, 5138],
+    )
+    .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_restating_2xx_after_a_prack_answered_offer_gets_the_give_up_ack_bare() {
+    prack_answered_offer_gives_up_with_a_bare_ack(
+        "b2bua-unacked-2xx-prack-answered-restated-give-up",
+        true,
+        [5139, 5140, 5141],
+    )
+    .await;
 }
 
 /// The ACK `bob` receives answers his offer with every stream rejected

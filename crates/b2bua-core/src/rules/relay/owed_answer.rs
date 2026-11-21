@@ -80,10 +80,11 @@ pub(crate) fn ack_answer_on_leg(
 
 /// Whether `leg`'s confirmed dialog holds a 2xx whose ACK this stack composes
 /// alone: the §13.2.2.4 obligation is armed and undischarged, and the ACK
-/// owes no answer body (RFC 3264 §4) — no offer of the 2xx awaits its answer
-/// in that ACK ([`OwedAnswer::InAck`]). The INVITE this stack sent carried the
-/// offer, or a reliable provisional carried it and a PRACK answers it, sent or
-/// still owed (RFC 3262 §5).
+/// owes no answer body (RFC 3264 §4): the dialog holds no offer of its 2xx
+/// awaiting the answer in that ACK ([`OwedAnswer::InAck`]). That covers an
+/// INVITE that carried the offer, a reliable provisional that carried it with
+/// a PRACK answering it, sent or still owed (RFC 3262 §5), and a 2xx to an
+/// offerless INVITE carrying no description at all.
 pub(crate) fn bare_ack_owed(leg: &Leg) -> bool {
     leg.dialogs.confirmed().is_some_and(|d| {
         call::helpers::sent_exchange(d).is_some_and(|x| x.awaited_ack_cseq.is_some())
