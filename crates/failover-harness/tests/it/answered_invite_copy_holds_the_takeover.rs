@@ -53,6 +53,7 @@ async fn the_callers_copy_of_an_answered_invite_holds_the_takeover_copy_until_it
     let hydrated = kill_serving_node(&mut fh, primary, survivor, &pri_ord, &proxy).await;
     fh.restore_signalling("alice", alice.addr());
 
+    let copied = tokio::time::Instant::now();
     call.retransmit().await;
     call.expect(200).await;
     let mut dialog = call.ack().await;
@@ -69,15 +70,15 @@ async fn the_callers_copy_of_an_answered_invite_holds_the_takeover_copy_until_it
         survivor_of(&pri_ord, &w_b1, &w_b2).serves(&call_ref),
         "the INVITE transaction the caller's copy opened holds the takeover copy",
     );
-    let mut held = T1;
-    while survivor_of(&pri_ord, &w_b1, &w_b2).serves(&call_ref) && held < TIMER_L * 2 {
+    while survivor_of(&pri_ord, &w_b1, &w_b2).serves(&call_ref) && copied.elapsed() < TIMER_L * 2 {
         fh.advance(T1).await;
-        held += T1;
     }
+    let held = copied.elapsed();
     assert!(
         !survivor_of(&pri_ord, &w_b1, &w_b2).serves(&call_ref),
         "the copy is shed once the INVITE transaction's Timer L clears it, held {held:?}",
     );
+    assert!(held >= TIMER_L, "the copy is held until Timer L, held {held:?}");
 
     scenario_harness::callflow::hangup(&mut dialog, &bob).await;
     let (primary, survivor) = split_mut(&pri_ord, &mut w_b1, &mut w_b2);
