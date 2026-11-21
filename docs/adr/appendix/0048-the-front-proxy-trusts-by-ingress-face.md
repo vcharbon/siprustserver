@@ -99,6 +99,10 @@ port when asked. Tests:
 `via::tests::stamping_replaces_a_received_the_sender_wrote`,
 `via::tests::stamping_adds_received_when_the_source_differs_or_rport_asks`.
 
+The worker a response is for is named by its next Via's sent-by, the worker's
+advertised registry address, never by that Via's `received`/`rport` send target,
+which behind address translation is a node address and an ephemeral port.
+
 ### 7. The `;outbound` marker stays unsigned
 
 Under this boundary only the

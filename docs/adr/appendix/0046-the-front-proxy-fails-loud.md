@@ -55,6 +55,36 @@ its family.
 | `PROXY_RESOLVER_POSITIVE_TTL_MS`, `PROXY_RESOLVER_NEGATIVE_TTL_MS`, `PROXY_RESOLVER_LOOKUP_TIMEOUT_MS` | ≥ 1 ms | 60000, 5000, 2000 |
 | `PROXY_RESOLVER_PREWARM` | `host:port` list | none |
 
+## Binds, a dead task, and lookups off the loop
+
+- **Bind order.** The metrics/probe TCP listener binds before any SIP socket, the internal
+  face before the external one. The metrics port is exclusive TCP, so holding it proves no
+  other proxy runs on the node; the signalling sockets carry `SO_REUSEPORT` when
+  `PROXY_RECV_SHARDS` > 1 and would bind beside a live predecessor, so they cannot be that
+  lock. The SIP stack is never reachable before the process can report health, and the
+  untrusted external face opens last.
+- **A bind retries `EADDRINUSE`, nothing else.** A recreated hostNetwork pod lands in the
+  netns its predecessor is still vacating. Every bind retries addr-in-use on a fixed interval
+  up to a deadline the configuration requires to exceed the drain grace, then refuses the
+  boot; any other bind error refuses it at once. Rejected: starting with a subset of ports (a
+  proxy black-holing a face) and failing on the first `EADDRINUSE` (a crash loop on every fast
+  recreation).
+- **A task that ends ends the process.** A recv shard or the health probe task that ends, by
+  panic or by return, exits the process non-zero so the container restarts. Restarting it in
+  process was rejected: a dead recv loop leaves `/healthz` green while the flows hashed to its
+  socket are black-holed. The process exits in its outermost function after the log writer
+  drains, since `process::exit` runs no destructor and the fatal line would die queued.
+- **Name resolution never runs on the recv loop.** The loop is one task, so a slow name
+  awaited inline would head-of-line block every flow for the resolver timeout. The cache is
+  TTL'd both ways and size-capped: the positive TTL picks up a restarted callee's new address,
+  the negative TTL makes an unresolvable name cost one lookup per window, the cap bounds the
+  names an internal-plane sender can steer into resolution. A packet racing an in-flight lookup
+  waits on it rather than being dropped, since a 2xx ACK or a non-INVITE response is never
+  retransmitted. Cold-cache latency is cut three ways (absolute-name queries, ADR-0066; a used
+  entry refreshes before it expires; `PROXY_RESOLVER_PREWARM` targets are resolved and pinned at
+  startup), and a failed refresh keeps the positive entry, so a transient DNS failure never
+  colds a warm name.
+
 ## Tests that pin it
 
 `sip-proxy-runner` `config::tests` (one refusal per class: a malformed, empty and out-of-range
@@ -63,4 +93,4 @@ address, a missing key), `discovery::tests` (a kube client that fails then build
 no stand-in worker, then the pool fills; a watch that restarts quietly ends its broken episode),
 `readiness::tests` (a stalled shard fails `/healthz` and `/readyz`, a proxy with none passes
 them; before the first worker view `/readyz` fails); `sip-proxy` `resolver::tests` (a lookup past
-its bound, no candidate past the deadline, the address family and a dual-stack bind).
+its bound, no candidate past the deadline, a name's first address in the socket's family).

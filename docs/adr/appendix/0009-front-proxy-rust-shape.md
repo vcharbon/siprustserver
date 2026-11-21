@@ -2,13 +2,11 @@
 
 The decision part is [ADR-0009](../0009-front-proxy-rust-shape.md).
 
-## Decision X1. Stateless proxy: reuse `IdGen`, not the transaction FSMs
+## Decision X1. Stateless proxy: a branch computed from the message, no transaction FSMs
 
 `ProxyCore` is stateless (RFC 3261 §16): it manipulates Via / Record-Route /
-Route directly and forwards, never instantiating a transaction state machine.
-So `sip-proxy` does **not** depend on `sip-txn`'s FSMs; it reuses only
-`sip-txn::IdGen` (the RNG seam) for Via branch generation, and `sip-clock::Clock`
-for timestamps. CANCEL/ACK correlation is a proxy-local LRU (`cancel_lru`) keyed
+Route directly and forwards, never instantiating a transaction state machine on
+its data path, and `sip-clock::Clock` gives its timestamps. CANCEL/ACK correlation is a proxy-local LRU (`cancel_lru`) keyed
 on the INVITE transaction as received, its top-Via branch and sent-by (RFC 3261
 §9.1, §17.2.3), so it works at any hop, keeps a spiral's two passes apart, and
 survives the load balancer re-sharding a fallback selection. A CANCEL matching no
@@ -39,6 +37,57 @@ of own entries is no run of pairs this proxy recorded: its first entry decides,
 and a worker Via still makes the request worker-outbound. These direction rules
 hold on the internal face only (ADR-0048).
 
+**The branch is a function of the message.** The pushed branch is a SHA-256 over the received
+top Via's branch and sent-by, the Call-ID, the From tag and the CSeq number (`crate::branch`),
+with RFC 3261 §16.11's alternate input set for a Via without the magic cookie. A
+retransmission, its CANCEL and its non-2xx ACK compute the same branch at any instance, so the
+downstream server transaction (§17.2.3) matches them to the first forward whether or not a memo
+entry survived. Rejected: a random branch kept in the memo. Two active instances share no memo
+(X7), and an evicted entry would split one transaction across two branches.
+
+**Two Record-Route entries.** The proxy Record-Routes an initial dialog-creating request with
+two entries of its own: a cookie entry, which the external party's in-dialog requests follow to
+the worker (decoded to `w_pri` and looked up in the registry, so it survives a worker's address
+change), and an `;outbound` entry, which the worker's requests follow toward the external party.
+In-dialog direction is read off the proxy's own Record-Route, never off a marker the worker
+stamps: the §12.1.1/§12.1.2 route-set rules put the right entry on top for each party, and the
+proxy only orders the pair for the next hop. For a worker-originated request the cookie names
+the worker by its top Via sent-by, not the UDP source: behind a masquerading node the source is
+the node address and an ephemeral port that names no worker.
+
+## Decision X3. Why rendezvous placement
+
+HRW is chosen over a consistent-hash ring: an O(N) scan over a pool of a few workers, no virtual
+nodes to tune, and a membership change moves only the keys of the worker that joined or left
+(1/N expected churn). The winner is a pure function of the Call-ID and the alive set, so every
+instance, and a restarted one, places a call on the same worker with no shared state (X7).
+
+## Decision X4. The self-gate's shape
+
+The gate sheds only external, new-dialog, non-emergency INVITEs. A worker's own INVITE always
+bypasses it: refusing a worker's outbound leg causes rerouting churn, not less load. It reads
+intake pressure as packet age at dequeue, full pressure at T1 (500 ms, when callers' Timer A
+retransmissions start compounding the overload), not runtime utilisation: a saturated serial
+recv shard reads busy while the runtime's other threads idle. It is binary (a threshold and a
+hard CPS bucket), not AIMD like the per-worker caps, because the proxy's load is its own, with no
+second party to converge with. Its token bucket refills on a `tokio::time::Instant` timeline.
+
+## Decision X6. The overload observer
+
+- **Explicit time.** `WorkerLoadObserver` takes the current time as a `now_ms` argument on every
+  call and arms no timer, so its ladder is a pure state machine tests drive with literal
+  timestamps. The production caller passes `Clock::now_ms()`, which advances with a paused
+  tokio runtime, so no second clock needs syncing.
+- **A stale payload floors the cap.** A worker whose `X-Overload` payload stops arriving while
+  it stays Alive has its cap decreased once per sweep after `payload_stale_ms`. Keeping its last
+  cap was rejected: it admits at full rate into a worker the proxy has no telemetry on. The stale
+  window sits well above the probe cycle (interval plus reply window), so a worker that answers
+  is never floored, and each floor is counted.
+- **Aggressive defaults.** The shipped bands and AIMD factors (soft 0.4, hard 0.5, critical 0.65,
+  decrease 0.5) take a loaded worker out of non-emergency new-dialog selection early, so it keeps
+  CPU for emergency and established calls: a worker that saturates before it sheds degrades the
+  calls it holds. They are calibration starting points, not measured values; every band,
+  hysteresis, AIMD and cap field is an environment setting.
 
 ## Decision X7. Two active instances: the memo, and every path without it
 
@@ -123,6 +172,16 @@ measures it:
   the rank winner, right for a call placed there, the first residual above for a call
   placed away from it, with no flow move. Cells: `active_active::off_rank`,
   `active_active::residual`.
+
+**A non-2xx ACK is told by the ACK-hop memo.** The ACK-hop memo, written for every relayed
+non-2xx INVITE final and keyed with the received branch, tells a non-2xx ACK from a 2xx ACK,
+not the INVITE's own entry and not a Route header. A worker's outbound INVITE carries a
+preloaded Route and §17.1.1.3 makes its non-2xx ACK copy it, so a Route test would route exactly
+that ACK as a 2xx ACK. A takeover worker or a restarted UA whose reset branch generator repeats
+the INVITE's branch sends a 2xx ACK matching that INVITE's entry; no non-2xx final is relayed for
+a confirmed call, so it finds no ACK hop and routes in-dialog. The proxy never sends the
+hop-by-hop ACK itself (ADR-0022 X4): the caller's ACK is the only one, and a lost ACK on the
+caller's hop recovers by the final's retransmission.
 
 **A CANCEL or ACK matching no call** costs one forward to a worker and that worker's 481
 (an ACK draws nothing), never more: no state is written for it and nothing is
