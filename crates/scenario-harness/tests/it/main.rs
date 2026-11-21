@@ -6,6 +6,7 @@
 //! `cargo nextest run --workspace -E 'package(=scenario-harness) & binary(it)' <module>::`.
 
 mod ack_obligation;
+mod ack_typed_body;
 mod actor_plan_deviations;
 mod advance_settles;
 mod alice_calls_bob;
