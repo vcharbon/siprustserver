@@ -35,6 +35,8 @@ mod copy_schedule_tests;
 #[cfg(test)]
 mod memo_bound_tests;
 #[cfg(test)]
+mod named_ack_tests;
+#[cfg(test)]
 mod own_final_ack_tests;
 #[cfg(test)]
 mod own_final_seam_tests;
