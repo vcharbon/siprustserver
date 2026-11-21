@@ -114,8 +114,28 @@ test-cpu-quota:
 
 # ── review gates ───────────────────────────────────────────────────────
 
-lint: file-size purity panic-sites audit-gate
+lint: file-size comments purity panic-sites audit-gate
     cargo clippy --workspace --all-targets
+
+# In-body comment ban: a comment is a doc comment stating its item's contract;
+# every other comment is banned but a lone one-line `// SAFETY:` or ADR
+# pointer. A file `comments.allow` lists holds at most its listed count of
+# banned lines (scripts/comments.py). The pre-commit hook checks the staged files.
+comments:
+    scripts/comments.py
+
+# Lowers each comments.allow entry to its file's count and removes the entries
+# of files at 0; never raises nor adds one.
+comments-update:
+    scripts/comments.py --update
+
+# Every file holding banned comments, most first, with its budget.
+comment-report:
+    @scripts/comments.py --report
+
+# The comment lexer and its ratchet on throwaway repositories (under a second).
+comments-check:
+    PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts/comments-check
 
 # The RustSec audit of Cargo.lock (scripts/audit.py, .cargo/audit.toml): a
 # vulnerability not ignored there fails when the branch touches Cargo.lock or
