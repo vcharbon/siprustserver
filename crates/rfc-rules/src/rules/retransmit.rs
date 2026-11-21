@@ -96,7 +96,7 @@ crate::registry::rules! {
 
 /// 64·T1, RFC 3261 §17: the envelope inside which a copy is a rung of the same
 /// transaction rather than a fresh emission under a reused key.
-const ENVELOPE_US: u64 = 32_000_000;
+const ENVELOPE_US: u64 = super::T1_64_US;
 
 /// **RFC 3261 §17 / §13.3.1.4, RFC 3262 §3 — a rung is byte-identical to the
 /// emission it repeats** (see the module doc). Charges the sender of the

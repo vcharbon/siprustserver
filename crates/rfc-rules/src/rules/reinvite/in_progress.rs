@@ -47,7 +47,7 @@ pub struct NoReInviteWhileInviteInProgress;
 
 /// Timer B over UDP at the default T1 (RFC 3261 §17.1.1.2, 64·T1): an INVITE
 /// client transaction that drew no response by then is terminated.
-const TIMER_B_US: u64 = 32_000_000;
+const TIMER_B_US: u64 = super::super::T1_64_US;
 
 /// The INVITE transactions a UAC sent, by when each first left, and those
 /// that drew a response: what tells one Timer B ended from one in progress.
