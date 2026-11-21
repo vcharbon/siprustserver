@@ -57,32 +57,43 @@ async fn a_cancelled_setup_records_the_layer_answered_cancel() {
         ],
         "the b-leg: the CANCEL this stack sent, its answers, the 487's hop ACK"
     );
-    // The 487 carries the a-dialog tag the 180 established; the CANCEL,
-    // like the INVITE it cancels, none.
-    assert_eq!(done.a_leg.messages.entries[3].to_tag, None);
-    assert_eq!(done.a_leg.messages.entries[5].to_tag, done.a_leg.messages.entries[2].to_tag);
+    assert_eq!(
+        done.a_leg.messages.entries[3].to_tag, None,
+        "the CANCEL, like the INVITE it cancels, carries no To tag"
+    );
+    assert_eq!(
+        done.a_leg.messages.entries[5].to_tag, done.a_leg.messages.entries[2].to_tag,
+        "the 487 carries the a-dialog tag the 180 established"
+    );
     let invite_from = &done.a_leg.messages.entries[0].from_tag;
     assert!(invite_from.is_some(), "the INVITE records alice's From tag");
     assert!(
         done.a_leg.messages.entries[3..].iter().all(|e| e.from_tag == *invite_from),
         "the CANCEL and its two answers carry the INVITE's From tag (RFC 3261 §9.1)"
     );
-    // The layer's answers carry the turn that handles the CANCEL they answer,
-    // the CANCEL sent on too; the hop ACK the callee's 487 draws, the 487's.
-    assert_eq!(turns(&done.a_leg.messages.entries), vec![1, 1, 2, 3, 3, 3]);
-    assert_eq!(turns(&b_leg(&done).messages.entries), vec![1, 2, 3, 4, 5, 5]);
+    assert_eq!(
+        turns(&done.a_leg.messages.entries),
+        vec![1, 1, 2, 3, 3, 3],
+        "the layer's answers carry the turn that handles the CANCEL they answer"
+    );
+    assert_eq!(
+        turns(&b_leg(&done).messages.entries),
+        vec![1, 2, 3, 4, 5, 5],
+        "the CANCEL sent on carries that turn too; the hop ACK the callee's 487 draws, the 487's"
+    );
 
     let _report = h.finish().await;
 }
 
 /// A callee's 200 to a CANCEL carries the INVITE's CSeq number and tag: it is
 /// a message of its own, never a copy of the INVITE 2xx the stack ACKed when
-/// the answer crossed the CANCEL.
+/// the answer crossed the CANCEL. bob answers the INVITE before the CANCEL
+/// takes effect, then answers the CANCEL (RFC 3261 §9.2); the stack ACKs
+/// the answer and BYEs the leg. The waiver covers bob's deliberate 200
+/// alone: the SUT's own output stays under the audit.
 #[tokio::test(start_paused = true)]
 async fn a_200_to_cancel_crossing_the_answer_is_recorded() {
     let h = Harness::new("message-ring-cancel-crossing");
-    // The crossing under test is bob's deliberate 200 after the CANCEL (RFC
-    // 3261 §9.2); the SUT's own output stays under the audit.
     h.waive(
         WaiverScope::rule(
             "no-200-after-cancel",
@@ -103,8 +114,6 @@ async fn a_200_to_cancel_crossing_the_answer_is_recorded() {
     cxl.expect(200).await;
     call.expect(487).await;
     let mut bob_cancel = bob.receive("CANCEL").await;
-    // Crossing: bob answers the INVITE before the CANCEL takes effect, then
-    // answers the CANCEL; the stack ACKs the answer and BYEs the leg.
     uas.respond(200, "OK").with_sdp(ANSWER).await;
     bob_cancel.respond(200, "OK").await;
     bob.receive("ACK").await;

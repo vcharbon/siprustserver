@@ -5,8 +5,11 @@
 
 use super::*;
 
-/// `(method, code, from_tag, to_tag)` of every entry.
-fn tags(entries: &[MessageEntry]) -> Vec<(&str, Option<u16>, Option<&str>, Option<&str>)> {
+/// `(method, code, from_tag, to_tag)` of an entry.
+type TagRow<'a> = (&'a str, Option<u16>, Option<&'a str>, Option<&'a str>);
+
+/// The [`TagRow`] of every entry.
+fn tags(entries: &[MessageEntry]) -> Vec<TagRow<'_>> {
     entries
         .iter()
         .map(|e| (e.method.as_str(), e.code, e.from_tag.as_deref(), e.to_tag.as_deref()))
