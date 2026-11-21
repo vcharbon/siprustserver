@@ -45,12 +45,10 @@ impl Owner {
     /// `call_ids` names still serve their call: each is counted until it has
     /// sent its final, once however often its Call-ID is named.
     pub(super) fn unattributed_serving(&self, call_ids: &[String]) -> usize {
-        let named_first = |(at, call_id): &(usize, &String)| !call_ids[..*at].contains(*call_id);
-        call_ids
-            .iter()
-            .enumerate()
-            .filter(named_first)
-            .filter_map(|(_, call_id)| self.unattributed.0.get(call_id))
+        let named: HashSet<&str> = call_ids.iter().map(String::as_str).collect();
+        named
+            .into_iter()
+            .filter_map(|call_id| self.unattributed.0.get(call_id))
             .flatten()
             .filter(|key| !self.server(key.id()).is_some_and(|txn| !txn.state.is_active()))
             .count()
