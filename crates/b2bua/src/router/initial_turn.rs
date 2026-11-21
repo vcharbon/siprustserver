@@ -199,14 +199,15 @@ pub(super) async fn initial_invite_turn(
     // the other arms await nothing and leave it to the drop guard below.
     let (mut consulted, mut recorded) = (false, false);
     let advertisement = &ctx.config.minted_final_advertisement;
-    let on_sight =
-        || crate::initial_invite::refused_on_sight(&call, &caller, advertisement, now_ms);
+    let on_sight = || {
+        crate::initial_invite::refused_on_sight(&call, &caller, advertisement, now_ms).map(Box::new)
+    };
     let mut handled = if cancelled {
         cancelled_setup(call.clone(), &caller, datagram, now_ms)
     } else if cordoned || spent {
         refused_unavailable(ctx, call.clone(), &caller, now_ms)
     } else if let Some(refused) = on_sight() {
-        refused
+        *refused
     } else {
         consulted = true;
         // `datagram` is the only place the INVITE as it arrived exists (the
