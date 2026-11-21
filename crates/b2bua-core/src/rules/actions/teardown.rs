@@ -336,8 +336,8 @@ pub(super) fn without_reason(headers: &[SipHeader]) -> Vec<SipHeader> {
 /// Remove every service machine's cursor: a terminating call is the core
 /// teardown's alone, so no machine-bound rule is a candidate on it. The
 /// `global-call` projection stays — it is the lifecycle itself, re-projected
-/// by `invariants::finalize`, which also restores the engine's own
-/// projections (`transfer`, `relayFirst18x`) from their authoritative slices.
+/// by `invariants::finalize`, which also restores the engine's `relayFirst18x`
+/// projection from its authoritative slice; the `transfer` one stays off.
 fn deactivate_service_machines(call: &mut Call) {
     call.sm_cursors.retain(|machine, _| *machine == GLOBAL_CALL_MACHINE);
 }
