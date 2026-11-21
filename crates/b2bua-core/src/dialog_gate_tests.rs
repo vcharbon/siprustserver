@@ -377,7 +377,7 @@ fn a_request_requiring_a_tag_not_understood_draws_420_naming_only_that_tag() {
     let named = Some(("x-nonexistent".to_string(), Some("ours".to_string())));
     for leg in ["a", "b-1"] {
         for method in carried.clone() {
-            let req = requiring(caller_request(method.clone(), 2), "100rel, x-nonexistent");
+            let req = requiring(caller_request(method.clone(), 2), "replaces, x-nonexistent");
             let verdict = request_verdict(&call, leg, &req);
             assert_eq!(verdict.status(), Some(420), "{leg}: {method}");
             assert_eq!(refusal(&verdict), named, "{leg}: {method}");
@@ -403,6 +403,16 @@ fn timer_is_understood_on_a_session_request_only() {
     let info = requiring(caller_request(Method::Info, 2), "timer");
     let refused = refusal(&request_verdict(&call, "a", &info)).map(|(tags, _)| tags);
     assert_eq!(refused.as_deref(), Some("timer"));
+}
+
+/// A re-INVITE requiring `100rel` draws 420 naming it (RFC 3262 §3): the stack
+/// relays the peer's provisionals to it as they come.
+#[test]
+fn a_reinvite_requiring_100rel_draws_420_naming_it() {
+    let call = call_with_caller_dialog(true);
+    let reinvite = requiring(caller_request(Method::Invite, 2), "100rel");
+    let refused = refusal(&request_verdict(&call, "a", &reinvite)).map(|(tags, _)| tags);
+    assert_eq!(refused.as_deref(), Some("100rel"));
 }
 
 /// On a dialog this side is ending, the extension is refused before the

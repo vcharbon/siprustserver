@@ -2,7 +2,10 @@
 //! §8.2.2.3): on any request, the tags it advertises in `Supported`
 //! ([`B2BUA_SUPPORTED`]); on a request that negotiates the session, also the
 //! tags whose requirement it relays to the peer end to end
-//! ([`END_TO_END_OPTION_TAGS`]). A request requiring a tag not understood, or one the call keeps from
+//! ([`END_TO_END_OPTION_TAGS`]). A re-INVITE requiring `100rel` is not
+//! understood: the stack relays the peer's provisionals to it as they come and
+//! puts no requirement to the peer, so none is sure to come reliably (RFC 3262
+//! §3). A request requiring a tag not understood, or one the call keeps from
 //! the peer that would serve it, is answered 420, its `Unsupported` listing
 //! exactly those tags ([`unserved`], [`dropped_on_relay`]).
 
@@ -79,6 +82,10 @@ fn is_end_to_end(tag: &str) -> bool {
 /// Whether this stack understands `tag` required of it by `req`.
 fn understood(tag: &str, req: &SipRequest) -> bool {
     let names = |t: &str| t.eq_ignore_ascii_case(tag);
+    let reinvite = *req.method() == Method::Invite && req.to().tag().is_some();
+    if reinvite && names(RELIABLE) {
+        return false;
+    }
     B2BUA_SUPPORTED.split(',').map(crate::whitespace::trim).any(names)
         || (negotiates_session(req.method()) && is_end_to_end(tag))
 }
@@ -112,11 +119,28 @@ CSeq: 2 {method}\r\n\
         not_understood(&request(method, &format!("Require: {require}\r\n"))).map(|u| u.to_wire())
     }
 
+    /// `method` out of any dialog: its To carries no tag.
+    fn out_of_dialog(method: &str, require: &str) -> SipRequest {
+        let req = request(method, &format!("Require: {require}\r\n"));
+        let text = String::from_utf8(req.image().to_vec()).expect("the request is text");
+        match CustomParser::new().parse(text.replace(";tag=b1", "").as_bytes()) {
+            Ok(SipMessage::Request(req)) => req,
+            other => unreachable!("a request was written: {other:?}"),
+        }
+    }
+
     #[test]
-    fn every_advertised_tag_is_understood_on_any_request() {
-        for method in ["INFO", "BYE", "INVITE", "MESSAGE", "NOTIFY", "REFER", "PRACK"] {
+    fn every_advertised_tag_is_understood_on_any_request_but_a_reinvite() {
+        for method in ["INFO", "BYE", "MESSAGE", "NOTIFY", "REFER", "PRACK", "UPDATE"] {
             assert_eq!(refused(method, "100rel, replaces"), None, "{method}");
         }
+        let initial = out_of_dialog("INVITE", "100rel, replaces");
+        assert!(not_understood(&initial).is_none(), "an initial INVITE");
+    }
+
+    #[test]
+    fn a_reinvite_requiring_100rel_is_refused_it() {
+        assert_eq!(refused("INVITE", "replaces, 100rel").as_deref(), Some("100rel"));
     }
 
     #[test]
