@@ -70,8 +70,9 @@ impl ActionExecutor<'_> {
     /// §12.2.1.1); an INVITE final is ACKed, the round becoming the dialog's
     /// INVITE exchange, and one above the dialled INVITE's number on a dialog
     /// awaiting that INVITE's final (early, or its CANCEL out and crossed)
-    /// proves that dialog confirmed and the dialled INVITE answered, so the
-    /// teardown BYEs it instead of cancelling an answered INVITE; a BYE's
+    /// proves that dialog confirmed and the dialled INVITE answered, dated
+    /// at the turn's instant, the first this record knows of the answer, so
+    /// the teardown BYEs it instead of cancelling an answered INVITE; a BYE's
     /// final ends its dialog. A relayed INVITE the dialog holds open under
     /// another branch stays open on top of that round, its ACK carried ahead,
     /// so the teardown answers its originator and CANCELs it (§15.1.2).
@@ -88,12 +89,13 @@ impl ActionExecutor<'_> {
         let invite = resp.cseq().method() == Method::Invite;
         let branch = resp.top_via().branch();
         let mut open_relay = None;
+        let now_ms = self.now_ms;
         update_leg(call, leg_id, |leg| {
             // A re-INVITE rides a confirmed dialog (RFC 3261 §14).
             let reinvite = invite && leg.dialled_cseq().is_some_and(|dialled| cseq > dialled);
             if reinvite && leg.outbound_invite().is_some_and(|i| i.our_tag == id.our_tag) {
                 if let Some(dialled) = leg.outbound_invite_mut() {
-                    dialled.record_final(200);
+                    dialled.record_final_at(200, now_ms);
                 }
             }
             if let Some(d) = leg.dialogs.by_tags_mut(&id.our_tag, &id.peer_tag) {
