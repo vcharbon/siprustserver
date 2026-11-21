@@ -89,7 +89,7 @@ pub(crate) fn unacked_2xx_give_up_actions(
 /// Every leg still holding a 2xx whose ACK this stack can compose alone
 /// ([`crate::rules::relay::bare_ack_owed`]). Either face qualifies — a b-leg
 /// answering the call, or the caller's face answering a relayed callee
-/// re-INVITE. Absent: a delayed-offer 2xx, whose ACK the teardown composes
+/// re-INVITE. Absent: a 2xx that made the offer, whose ACK the teardown composes
 /// rejecting every stream (RFC 3264 §6), and the a-leg's initial round, where
 /// this stack sent no INVITE and owes no ACK.
 pub(crate) fn still_owed_bare_ack<'a>(call: &'a RuleCall) -> impl Iterator<Item = String> + 'a {
