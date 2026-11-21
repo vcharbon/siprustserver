@@ -3,7 +3,9 @@
 //! still owed one, called by the engine after the rules and inside each
 //! primitive that ends a dialog or an INVITE — the CANCEL and BYE builders,
 //! the fork retirement of a 2xx, the final that rejects an INVITE — so the
-//! PRACK leaves ahead of what ends its dialog. No rule PRACKs.
+//! PRACK leaves ahead of what ends its dialog, and by the take step of a
+//! sibling fork's provisional past the answer, before its dialog retires.
+//! No rule PRACKs.
 
 use call::helpers::bump_our_cseq;
 use call::TxnKind;

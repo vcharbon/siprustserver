@@ -432,7 +432,6 @@ impl Owner {
                     if orphaned || !super::accepted::is_reliable_provisional(&resp) {
                         return true;
                     }
-                    self.note_reliable_offer(branch, &resp);
                 }
                 if resp.status() < 200 {
                     // Provisional 1xx>100 — Proceeding. Ignore once Completed or

@@ -4,10 +4,10 @@
 //! dropped here, so no rule, CDR or PRACK sees them; any other answering an
 //! INVITE still open is recorded, owed its PRACK, with the early dialog it
 //! creates (RFC 3261 §12.1.2) and the offer it makes (RFC 3264 §4). A rule
-//! only decides whether it is shown. A sibling fork's first one reaching this
-//! stack after a 2xx answered the INVITE is shown to no one: it is PRACKed
-//! here at once and its early dialog retired, as that 2xx retired its
-//! siblings', and no rule reads it.
+//! only decides whether it is shown. A sibling fork's reaching this stack
+//! after a 2xx answered the INVITE is shown to no one: it is PRACKed here at
+//! once on its early dialog, which stays or becomes retired as that 2xx
+//! retired its siblings', and no rule reads it.
 
 use call::helpers::Arrival;
 use call::{CSeq, Call, DialogState, OwedAnswer, ProvisionalId, RSeq};
@@ -29,7 +29,8 @@ pub enum Taken {
     /// Dropped unread: a repeat, or out of `RSeq` order.
     Dropped(Arrival),
     /// A sibling fork's, past the 2xx that answered the INVITE: PRACKed, its
-    /// early dialog retired, read by no rule.
+    /// early dialog retired unless a service tracked it early, read by no
+    /// rule.
     PastTheAnswer,
 }
 
@@ -44,7 +45,7 @@ impl ActionExecutor<'_> {
     /// Take the reliable provisional `event` carries from `source_leg_id`: a
     /// recorded one is a repeat, a new one out of order is dropped, a new one
     /// in order answering an INVITE still open on that leg is recorded, and a
-    /// sibling fork's first one inside 64·T1 of the 2xx that answered the
+    /// sibling fork's in order inside 64·T1 of the 2xx that answered the
     /// INVITE dialling the leg is recorded and PRACKed into `fx`
     /// ([`Taken::PastTheAnswer`]). `None` for every other event, which the
     /// rules read as before.
@@ -62,12 +63,15 @@ impl ActionExecutor<'_> {
         if arrival == Arrival::Repeat {
             return Some(Taken::Dropped(arrival));
         }
-        let past_the_answer = sibling_past_the_answer(call, &id, self.now_ms);
-        if !past_the_answer && !invite_open(call, &id) {
+        let sibling = sibling_past_the_answer(call, &id, self.now_ms);
+        if sibling.is_none() && !invite_open(call, &id) {
             return None;
         }
         if arrival == Arrival::OutOfOrder {
             return Some(Taken::Dropped(arrival));
+        }
+        if sibling == Some(Sibling::Retired) {
+            set_fork_state(call, &id, DialogState::Retired, DialogState::Early);
         }
         let responder_sdp = resp.sdp().is_some();
         let offer = resp.sdp().filter(|_| {
@@ -81,39 +85,68 @@ impl ActionExecutor<'_> {
         if let Some(offer) = offer {
             owe_answer_in_prack(call, &id, offer);
         }
-        if !past_the_answer {
-            return Some(Taken::Recorded);
-        }
+        let Some(sibling) = sibling else { return Some(Taken::Recorded) };
         let invite = Owed::Invite { leg: source_leg_id, cseq: id.invite_cseq.as_i64() };
         self.settle_owed_pracks(call, fx, invite, Settle::AtFinal { confirmed: None });
-        retire_early_dialog(call, &id);
+        if sibling != Sibling::Tracked {
+            set_fork_state(call, &id, DialogState::Early, DialogState::Retired);
+        }
         Some(Taken::PastTheAnswer)
     }
 }
 
-/// Whether `id` is a sibling fork's reliable provisional reaching this stack
-/// after a 2xx answered the INVITE that dialled its leg: its To-tag names no
-/// dialog of the leg, and it arrives at `now_ms` inside 64·T1 of that 2xx,
-/// past which the UAC holds the fork's early dialog terminated (RFC 3261
-/// §13.2.2.4). A 2xx the record holds no arrival instant of reads as inside.
-fn sibling_past_the_answer(call: &Call, id: &ProvisionalId, now_ms: i64) -> bool {
-    let Some(leg) = call::helpers::find_leg(call, &id.leg) else { return false };
+/// The dialog a sibling fork's reliable provisional past the answer names on
+/// its leg: one of those the straggler reading (`fork_straggler`) takes a 2xx
+/// of that fork on for a straggler's.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Sibling {
+    /// None: the fork is heard for the first time.
+    Unheard,
+    /// One the answer retired, which released no 2xx of its own.
+    Retired,
+    /// One still early on the confirmed leg (a fork a service tracked late).
+    Tracked,
+}
+
+/// Which [`Sibling`] `id` is, when it is a sibling fork's reliable
+/// provisional reaching this stack after a 2xx answered the INVITE that
+/// dialled its leg, inside 64·T1 of that 2xx at `now_ms`, past which the UAC
+/// holds the fork's early dialog terminated (RFC 3261 §13.2.2.4). A 2xx the
+/// record holds no arrival instant of reads as inside. A retired dialog
+/// whose own 2xx was released, or whose release is in flight, is no sibling's.
+fn sibling_past_the_answer(call: &Call, id: &ProvisionalId, now_ms: i64) -> Option<Sibling> {
+    let leg = call::helpers::find_leg(call, &id.leg)?;
     let dialling = leg.dialled_cseq() == Some(id.invite_cseq.as_i64());
-    let Some(invite) = leg.outbound_invite().filter(|_| dialling) else { return false };
+    let invite = leg.outbound_invite().filter(|_| dialling)?;
     let answered = invite.final_received.is_some_and(|status| (200..300).contains(&status));
     let bound = i64::try_from(TIMER_M).unwrap_or(i64::MAX);
     let inside = invite.final_at_ms.is_none_or(|at| now_ms < at.saturating_add(bound));
-    answered && inside && call::helpers::callee_dialog(leg, &id.responder_tag).is_none()
+    if !answered || !inside {
+        return None;
+    }
+    let Some(d) = call::helpers::callee_dialog(leg, &id.responder_tag) else {
+        return Some(Sibling::Unheard);
+    };
+    let released = call::helpers::sent_exchange(d).is_some_and(|x| x.emitted_ack.is_some());
+    if d.is_retired() && !released && !d.release_in_flight() {
+        Some(Sibling::Retired)
+    } else if d.awaits_invite_final() {
+        Some(Sibling::Tracked)
+    } else {
+        None
+    }
 }
 
-/// Retire the early dialog of `id`'s responder (RFC 3261 §12.1.2): the call
-/// lets it go without a BYE, as the answer let its siblings go; a 2xx of it
-/// is then a straggler, ACKed and BYEd (§13.2.2.4).
-fn retire_early_dialog(call: &mut Call, id: &ProvisionalId) {
+/// Move the early dialog of `id`'s responder from `from` to `to`: reopened
+/// so its PRACK may ride it, or retired behind that PRACK as the answer
+/// retired its siblings (RFC 3261 §12.1.2) — a 2xx of it is then a
+/// straggler, ACKed and BYEd (§13.2.2.4). Nothing for a dialog in another
+/// state.
+fn set_fork_state(call: &mut Call, id: &ProvisionalId, from: DialogState, to: DialogState) {
     call::helpers::update_leg(call, &id.leg, |leg| {
         if let Some(d) = call::helpers::dialog_with_peer_mut(leg, &id.responder_tag) {
-            if d.state == DialogState::Early {
-                d.state = DialogState::Retired;
+            if d.state == from {
+                d.state = to;
             }
         }
     });
