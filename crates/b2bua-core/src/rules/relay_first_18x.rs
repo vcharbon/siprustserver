@@ -96,12 +96,14 @@ fn is_fake_prack_masking(ctx: &RuleContext) -> bool {
 }
 
 /// fake-prack AND the current UPDATE carries **no body** — the session-refresh
-/// case the local-answer handler is meant for. An UPDATE that carries an SDP
-/// *offer* must NOT be answered locally with a bodyless 200 (that leaves the
-/// offer unanswered, RFC 3264 §5); it declines here and falls through to CORE
-/// `relay-update`, which forwards it to the b-leg early dialog and returns the
-/// callee's real answer (an early-dialog UPDATE is the RFC 3311 §5.1 normal
-/// case; the b-leg dialog carries its callee tag, so the relay is well-formed).
+/// case the local-answer handler is meant for, the one form that carries
+/// neither an offer nor anything else the callee must see. An UPDATE with any
+/// body, an SDP offer (alone or framed) or a part of another type, declines
+/// here and falls through to CORE `relay-update`: a bodyless local 200 would
+/// leave an offer unanswered (RFC 3264 §5) and drop the rest. The relay
+/// forwards it to the b-leg early dialog and returns the callee's own answer
+/// (an early-dialog UPDATE is the RFC 3311 §5.1 normal case; the b-leg dialog
+/// carries its callee tag, so the relay is well-formed).
 fn is_fake_prack_bodyless_update(ctx: &RuleContext) -> bool {
     is_fake_prack(ctx) && ctx.request().map(|r| r.body().is_empty()).unwrap_or(false)
 }
