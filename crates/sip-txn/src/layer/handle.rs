@@ -272,15 +272,17 @@ impl TransactionLayer {
     /// call's books as one the Request-URI attributed (the self-release count,
     /// the release's forget and answer). One attributed to another call keeps
     /// it and the refusal is counted (`call_attach_refused`); a key naming no
-    /// transaction changes nothing. Returns whether `key` is attributed to
-    /// `call_ref` now.
+    /// transaction changes nothing. Returns once the command is queued, never
+    /// awaiting the owner's turn: every command sent after it is taken after
+    /// it.
     pub async fn attach_server_to_call(
         &self,
         key: ServerTxnKey,
         call_ref: &str,
-    ) -> Result<bool, TransactionLayerClosed> {
+    ) -> Result<(), TransactionLayerClosed> {
         let call_ref = call_ref.to_string();
-        self.roundtrip(|reply| Command::AttachServerToCall { key, call_ref, reply }).await
+        let attach = Command::AttachServerToCall { key, call_ref };
+        self.cmd_tx.send(attach).await.map_err(|_| TransactionLayerClosed)
     }
 
     /// The consumer released `call_ref` for good: nothing will answer a request

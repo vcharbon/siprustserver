@@ -99,6 +99,27 @@ async fn a_trip_names_the_caller_of_a_tagless_invite_and_the_calls_of_its_transa
     assert_eq!(tripped[0].call_refs, ["call-2"], "the dialled INVITE's Via names its call");
 }
 
+/// An in-dialog request whose Request-URI names no call, attributed to its
+/// call by the consumer once it opened, names that call in its Call-ID's
+/// trip (ADR-0063 §4): it is the Call-ID's only link to a call.
+#[tokio::test(start_paused = true)]
+async fn a_trip_names_the_call_a_transaction_was_attributed_to_after_it_opened() {
+    let mut stack = stack(4).await;
+    let info = inbound_request("INFO", "z9hG4bK-rewritten", "rewritten", Some("b2bua-tag"));
+    stack.inject(&info).await;
+    elapse_ms(TRANSIT + 1).await;
+    stack.txn.attach_server_to_call(key_of(&info), "call-3").await.expect("the layer runs");
+    for _ in 0..4 {
+        stack.txn.send_raw("rewritten", b"raw".to_vec(), addr(PEER)).await.expect("the layer runs");
+    }
+    elapse_ms(TRANSIT + 1).await;
+
+    let events = stack.drain_events();
+    let tripped = trips(&events);
+    assert_eq!(tripped.len(), 1, "{events:?}");
+    assert_eq!(tripped[0].call_refs, ["call-3"], "the attributed INFO names its call");
+}
+
 #[tokio::test(start_paused = true)]
 async fn out_of_dialog_options_on_the_keepalive_lane_spend_no_budget() {
     let mut stack = stack(1).await;

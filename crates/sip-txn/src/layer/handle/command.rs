@@ -74,11 +74,11 @@ pub(in crate::layer) enum Command {
         reply: oneshot::Sender<bool>,
     },
     /// Attribute the server transaction `key`, opened attributed to no call,
-    /// to `call_ref`; replies whether it is attributed to `call_ref` now.
+    /// to `call_ref`. Nothing replies: the commands sent after it are taken
+    /// after it.
     AttachServerToCall {
         key: ServerTxnKey,
         call_ref: String,
-        reply: oneshot::Sender<bool>,
     },
     /// Count the transactions (any role/state) still attributed to `call_ref`.
     /// The B2BUA's acting-backup **self-release** (ADR-0014) polls this after

@@ -1,8 +1,8 @@
 //! A server transaction attributed to its call after it opened, as the
 //! consumer resolves a request whose Request-URI names no call (an element on
-//! its path rewrote it): from then on the call's books count it and
-//! the call's release forgets or answers it, as one the Request-URI
-//! attributed.
+//! its path rewrote it): from then on the call's books count it, the call's
+//! release forgets or answers it, and its leaving takes it off the books, as
+//! one the Request-URI attributed.
 
 use crate::common::*;
 use sip_message::SipMessage;
@@ -38,7 +38,8 @@ fn handed_up(events: &[TransactionEvent], method: &str) -> bool {
 /// An in-dialog INFO and re-INVITE whose Request-URI names no call are on no
 /// call's books until the consumer attributes them; then the call counts
 /// both, its release forgets the INFO and answers the re-INVITE 481 through
-/// its transaction (§12.2.2), which absorbs the ACK.
+/// its transaction (§12.2.2), which absorbs the ACK. Forgotten and ACKed,
+/// neither is on the call's books any more.
 #[tokio::test(start_paused = true)]
 async fn an_attached_transaction_is_reached_by_its_calls_release() {
     let mut stack = Stack::build(TRANSIT, 64, 64).await;
@@ -51,8 +52,8 @@ async fn an_attached_transaction_is_reached_by_its_calls_release() {
     let _ = stack.drain_peer();
     assert_eq!(stack.txn.active_txn_count_for_call("cr1").await.unwrap(), 0);
 
-    assert!(stack.txn.attach_server_to_call(key_of(&info), "cr1").await.unwrap());
-    assert!(stack.txn.attach_server_to_call(key_of(&reinvite), "cr1").await.unwrap());
+    stack.txn.attach_server_to_call(key_of(&info), "cr1").await.unwrap();
+    stack.txn.attach_server_to_call(key_of(&reinvite), "cr1").await.unwrap();
     assert_eq!(stack.txn.active_txn_count_for_call("cr1").await.unwrap(), 2);
 
     assert_eq!(stack.txn.forget_unanswered_of_call("cr1").await.unwrap(), 1);
@@ -73,6 +74,11 @@ async fn an_attached_transaction_is_reached_by_its_calls_release() {
     stack.inject(&inbound_request("ACK", "z9hG4bK-att-reinv", "rw@u", Some("callee-tag"))).await;
     elapse_ms(60).await;
     assert!(!handed_up(&stack.drain_events(), "ACK"), "the 481's transaction absorbs the ACK");
+    assert_eq!(
+        stack.txn.active_txn_count_for_call("cr1").await.unwrap(),
+        0,
+        "the forgotten INFO and the ACKed re-INVITE left the call's books"
+    );
     assert_eq!(stack.txn.metrics().call_attach_refused(), 0);
 }
 
@@ -95,15 +101,15 @@ async fn an_attribution_is_never_moved_and_an_answered_transaction_is_left_alone
     elapse_ms(60).await;
     let _ = stack.drain_peer();
 
-    assert!(!stack.txn.attach_server_to_call(key_of(&stamped), "cr2").await.unwrap());
-    assert_eq!(stack.txn.metrics().call_attach_refused(), 1);
+    stack.txn.attach_server_to_call(key_of(&stamped), "cr2").await.unwrap();
     assert_eq!(stack.txn.active_txn_count_for_call("cr2").await.unwrap(), 0);
-    assert!(stack.txn.attach_server_to_call(key_of(&stamped), "cr1").await.unwrap());
+    assert_eq!(stack.txn.metrics().call_attach_refused(), 1);
+    stack.txn.attach_server_to_call(key_of(&stamped), "cr1").await.unwrap();
     assert_eq!(stack.txn.active_txn_count_for_call("cr1").await.unwrap(), 1);
 
     let unseen = inbound_request("INFO", "z9hG4bK-att-unseen", "unseen@u", Some("callee-tag"));
-    assert!(!stack.txn.attach_server_to_call(key_of(&unseen), "cr3").await.unwrap());
-    assert!(!stack.txn.attach_server_to_call(key_of(&done), "cr3").await.unwrap());
+    stack.txn.attach_server_to_call(key_of(&unseen), "cr3").await.unwrap();
+    stack.txn.attach_server_to_call(key_of(&done), "cr3").await.unwrap();
     assert_eq!(stack.txn.active_txn_count_for_call("cr3").await.unwrap(), 0);
     assert_eq!(stack.txn.metrics().call_attach_refused(), 1, "neither is a refusal");
 }

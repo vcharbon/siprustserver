@@ -154,7 +154,8 @@ pub(super) async fn on_event(
         // `callref` param the B2BUA Contact stamps and the proxy preserves under
         // loose routing — so `resolve` (above) already keys the dialog from it,
         // and sip-txn `extract_ruri_call_ref` attributes the server txn by the
-        // SAME key (the self-release count gate, ADR-0014). This branch only fires
+        // SAME key (the self-release count gate, ADR-0014; `attach_arrival` the
+        // rest). This branch only fires
         // when that param is absent AND our in-memory `sip_index` is empty — a
         // pure backup that never primary-served the call. Re-key the dialog from
         // the replica store's SIP index (the puller imported it) before declaring
@@ -268,8 +269,9 @@ pub(super) async fn on_event(
 /// `call_ref`, the call it resolved to, when its Request-URI named none
 /// ([`attributed_on_resolution`]), as the transaction layer attributes one
 /// whose Request-URI names it: the self-release count (ADR-0014) and the
-/// call's release then reach it. Done before the request's turn is queued, so
-/// every command a turn or a release sends for the call follows it.
+/// call's release then reach it. Queued to the layer before the request's
+/// turn is offered, so the layer takes it ahead of every command that turn,
+/// and every turn offered after it, sends for the call.
 async fn attach_arrival(ctx: &RouterCtx, event: &CallEvent, call_ref: &str) {
     let CallEvent::Sip { message, .. } = event else { return };
     let SipMessage::Request(req) = message.as_ref() else { return };
