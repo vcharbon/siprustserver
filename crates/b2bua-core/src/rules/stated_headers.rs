@@ -27,7 +27,7 @@ use call::features::StatedHeaders;
 use call::header_update::{HeaderUpdate, SipHeaderUpdates};
 use call::{Call, LegKind};
 use sip_message::draft::StartKind;
-use sip_message::header::{HeaderName, Restatement};
+use sip_message::header::{HeaderName, Minted, Restatement};
 use sip_message::write_check::{self, WriteRefusal};
 use sip_message::{FirstIngressBound, Method, SipRequest, SipResponse};
 
@@ -168,7 +168,7 @@ fn stamped_request(
         sets.push(&stated.launched_invite);
     }
     let bound = req.to().tag().is_none().then_some(first_ingress);
-    restated(&sets, |_| false, |name| carried(req.raw(name)), || req.thaw(), bound, skipped)?
+    restated(&sets, restatable, |name| carried(req.raw(name)), || req.thaw(), bound, skipped)?
         .freeze()
         .inspect_err(|e| unstamped(call, leg_id, e, skipped))
         .ok()
@@ -197,8 +197,8 @@ fn stamped_response(
     let own_reason = authored
         && final_to_initial
         && ((500..600).contains(&resp.status()) || resp.has(&HeaderName::Reason));
-    let withheld = |name: &str| own_reason && HeaderName::Reason.matches(name);
-    restated(&sets, withheld, |name| carried(resp.raw(name)), || resp.thaw(), None, skipped)?
+    let takes = |name: &str| restatable(name) && !(own_reason && HeaderName::Reason.matches(name));
+    restated(&sets, takes, |name| carried(resp.raw(name)), || resp.thaw(), None, skipped)?
         .freeze()
         .inspect_err(|e| unstamped(call, leg_id, e, skipped))
         .ok()
@@ -235,18 +235,24 @@ fn applied(update: &HeaderUpdate, lines: Vec<String>) -> Vec<String> {
     }
 }
 
+/// Whether a message already built takes a statement of `name`: only a
+/// [`Restatement::Free`] header is restated on one.
+fn restatable(name: &str) -> bool {
+    HeaderName::restatement_of(name) == Restatement::Free
+}
+
 /// The message's draft with `sets` applied in order — each set's statement of
 /// a name resolved against what the sets before it left — or `None` where the
 /// message already carries the result. Names compare case-insensitively;
-/// `withheld` names what the message keeps as it is whatever is stated,
-/// `carried` reads the message's lines of a name, `thaw` opens its draft,
-/// `first_ingress` the bound of a new request. A name whose resolved lines
-/// the wire cannot carry whole, or that resolves to a second line of a
-/// single-valued header, keeps its carried lines, its refusal pushed onto
-/// `skipped`.
+/// `takes` names what the message takes a statement of, any other name
+/// keeping its lines whatever is stated, `carried` reads the message's lines
+/// of a name, `thaw` opens its draft, `first_ingress` the bound of a new
+/// request. A name whose resolved lines the wire cannot carry whole, or that
+/// resolves to a second line of a single-valued header, keeps its carried
+/// lines, its refusal pushed onto `skipped`.
 fn restated<D: Draft>(
     sets: &[&SipHeaderUpdates],
-    withheld: impl Fn(&str) -> bool,
+    takes: impl Fn(&str) -> bool,
     carried: impl Fn(HeaderName) -> Vec<String>,
     thaw: impl FnOnce() -> D,
     first_ingress: Option<&FirstIngressBound>,
@@ -260,7 +266,7 @@ fn restated<D: Draft>(
     }
     let mut edits: Vec<(HeaderName, Vec<String>)> = Vec::new();
     for name in names {
-        if HeaderName::restatement_of(name) != Restatement::Free || withheld(name) {
+        if !takes(name) {
             continue;
         }
         let header = HeaderName::from(name);
@@ -338,28 +344,38 @@ pub fn with_adds(
     first_ingress: &FirstIngressBound,
     skipped: &mut Vec<WriteRefusal>,
 ) -> SipRequest {
-    let set = as_adds(adds);
+    let set = as_adds(adds.iter());
     let bound = Some(first_ingress);
-    restated(&[&set], |_| false, |name| carried(req.raw(name)), || req.thaw(), bound, skipped)
+    restated(&[&set], restatable, |name| carried(req.raw(name)), || req.thaw(), bound, skipped)
         .and_then(|d| d.freeze().ok())
         .unwrap_or(req)
 }
 
-/// `resp` with every add of `adds` whose name it carries no line of. An add
-/// skipped is pushed onto `skipped`.
+/// `resp`, a final of its status the stack mints, with every add of `adds`
+/// the final takes ([`HeaderName::stated_at_mint`]) whose name it carries no
+/// line of. An add of a header the final does not take, or one the wire
+/// cannot carry whole, is skipped, its refusal pushed onto `skipped`.
 pub fn response_with_adds(
     resp: SipResponse,
     adds: &[(String, Vec<String>)],
     skipped: &mut Vec<WriteRefusal>,
 ) -> SipResponse {
-    let set = as_adds(adds);
-    restated(&[&set], |_| false, |name| carried(resp.raw(name)), || resp.thaw(), None, skipped)
+    let minted = Minted::Final(resp.status());
+    let taken = adds.iter().filter(|(name, _)| match HeaderName::stated_at_mint(name, minted) {
+        Ok(()) => true,
+        Err(refusal) => {
+            skipped.push(refusal);
+            false
+        }
+    });
+    let set = as_adds(taken);
+    restated(&[&set], |_| true, |name| carried(resp.raw(name)), || resp.thaw(), None, skipped)
         .and_then(|d| d.freeze().ok())
         .unwrap_or(resp)
 }
 
-fn as_adds(adds: &[(String, Vec<String>)]) -> SipHeaderUpdates {
-    adds.iter().map(|(n, l)| (n.clone(), HeaderUpdate::Add(l.clone()))).collect()
+fn as_adds<'a>(adds: impl Iterator<Item = &'a (String, Vec<String>)>) -> SipHeaderUpdates {
+    adds.map(|(n, l)| (n.clone(), HeaderUpdate::Add(l.clone()))).collect()
 }
 
 #[cfg(test)]

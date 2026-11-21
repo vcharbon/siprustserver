@@ -141,34 +141,43 @@ fn refuses(skipped: &[WriteRefusal], name: &str) -> bool {
 /// dialog reference or the body binds is the stack's to state on the INVITE
 /// it mints (RFC 3261 §16.6, §20): a decision's set of one is left out and
 /// handed back, so the minted body keeps its own `Content-Type`. The
-/// originator's session interval still rides, and so does a capability set
-/// the mint narrows.
+/// originator's session interval rides whatever the decision states of it
+/// (RFC 4028 §8.1: the stack runs no session timer), and so does a capability
+/// set the mint narrows.
 #[test]
 fn a_bound_header_a_decision_sets_is_left_out_of_the_minted_invite() {
-    let updates = [
-        ("Require", "zz-ext"),
-        ("Authorization", "Digest username=\"mallory\""),
-        ("Replaces", "other@192.0.2.1;to-tag=t;from-tag=f"),
-        ("Content-Type", "text/plain"),
-        ("Allow", "INVITE, ACK, BYE"),
-        ("X-Kept", "fine"),
-    ]
-    .map(|(name, value)| (name.to_string(), Some(value.to_string())));
-    let a = a_leg_invite_carrying(&[("Session-Expires", "1800;refresher=uac")]);
-    let sdp = b"v=0\r\no=- 1 1 IN IP4 192.0.2.5\r\ns=-\r\nt=0 0\r\n".to_vec();
-    let body = Body::own(sdp.clone(), None);
-    let (invite, skipped) = minted_from(&a, &updates, None, Some(&body));
-    for name in ["Require", "Authorization", "Replaces"] {
-        assert!(lines(&invite, name).is_empty(), "{name} rides: {:?}", invite.headers());
-    }
-    assert_eq!(lines(&invite, "Content-Type"), ["application/sdp"]);
-    assert_eq!(&invite.body()[..], &sdp[..]);
-    assert_eq!(lines(&invite, "Session-Expires"), ["1800;refresher=uac"]);
-    assert_eq!(lines(&invite, "Allow"), ["INVITE, ACK, BYE"]);
-    assert_eq!(lines(&invite, "X-Kept"), ["fine"]);
-    assert_eq!(skipped.len(), 4, "{skipped:?}");
-    for name in ["Require", "Authorization", "Replaces", "Content-Type"] {
-        assert!(refuses(&skipped, name), "{name} is handed back: {skipped:?}");
+    for session_expires in [Some("90"), None] {
+        let mut updates = [
+            ("Require", "zz-ext"),
+            ("Authorization", "Digest username=\"mallory\""),
+            ("Replaces", "other@192.0.2.1;to-tag=t;from-tag=f"),
+            ("Content-Type", "text/plain"),
+            ("Allow", "INVITE, ACK, BYE"),
+            ("X-Kept", "fine"),
+        ]
+        .map(|(name, value)| (name.to_string(), Some(value.to_string())))
+        .to_vec();
+        updates.push(("Session-Expires".to_string(), session_expires.map(str::to_string)));
+        let a = a_leg_invite_carrying(&[("Session-Expires", "1800;refresher=uac")]);
+        let sdp = b"v=0\r\no=- 1 1 IN IP4 192.0.2.5\r\ns=-\r\nt=0 0\r\n".to_vec();
+        let body = Body::own(sdp.clone(), None);
+        let (invite, skipped) = minted_from(&a, &updates, None, Some(&body));
+        for name in ["Require", "Authorization", "Replaces"] {
+            assert!(lines(&invite, name).is_empty(), "{name} rides: {:?}", invite.headers());
+        }
+        assert_eq!(lines(&invite, "Content-Type"), ["application/sdp"]);
+        assert_eq!(&invite.body()[..], &sdp[..]);
+        assert_eq!(
+            lines(&invite, "Session-Expires"),
+            ["1800;refresher=uac"],
+            "the originator's under {session_expires:?}"
+        );
+        assert_eq!(lines(&invite, "Allow"), ["INVITE, ACK, BYE"]);
+        assert_eq!(lines(&invite, "X-Kept"), ["fine"]);
+        assert_eq!(skipped.len(), 5, "{skipped:?}");
+        for name in ["Require", "Authorization", "Replaces", "Content-Type", "Session-Expires"] {
+            assert!(refuses(&skipped, name), "{name} is handed back: {skipped:?}");
+        }
     }
 }
 

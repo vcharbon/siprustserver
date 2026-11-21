@@ -254,11 +254,12 @@ pub fn setup_event(call: &Call, a_invite: &SipRequest) -> CallEvent {
 /// or one this stack authors on its own account (an unavailable backend, a
 /// refused target). `update_headers` adds non-structural headers (e.g.
 /// `Reason:`, RFC 3326); `contacts` renders one `Contact: <uri>;q=…;params…`
-/// header per entry (used for a 3xx redirect — ADR-0017). A set of a header the
-/// final does not take from the decision, a structural one or one the stack
-/// binds, is left out and reported ([`HeaderName::stated_at_mint`]). Marks no
-/// decision: the caller marks the one it applies, and a final of the stack's
-/// own is none. `cause` is the termination record's: the decision layer's
+/// header per entry (used for a 3xx redirect — ADR-0017). A statement, set,
+/// removal or add, of a header the final does not take from the decision, a
+/// structural one or one the stack binds, is left out and reported
+/// ([`HeaderName::stated_at_mint`]); an add yields to a line the final
+/// carries, the advertisement's included. Marks no decision: the caller marks
+/// the one it applies, and a final of the stack's own is none. `cause` is the termination record's: the decision layer's
 /// refusal, or the stack's own admission. A failure final carries the
 /// deployment's `advertisement` for a minted final under the decision's
 /// statements. Stated text the wire cannot carry is left out where every
@@ -329,7 +330,7 @@ fn reject_with(
     if crate::rules::capabilities::is_minted_failure(status) {
         crate::rules::capabilities::stamp_own_advertisement(
             advertisement,
-            |name| update_headers.is_some_and(|u| u.keys().any(|n| name.matches(n))),
+            |name| update_headers.is_some_and(|u| restates(u, name)),
             &mut extra_headers,
         );
     }
@@ -397,14 +398,20 @@ pub fn build_request(invite: &SipRequest) -> NewCallRequest {
     }
 }
 
+/// Whether `updates` set or remove the header `name` names: an add of it
+/// yields to the line the final carries, the advertisement's included.
+fn restates(updates: &SipHeaderUpdates, name: &HeaderName) -> bool {
+    updates.iter().any(|(n, update)| !update.adds() && name.matches(n))
+}
+
 /// The extra response headers a reject/redirect of `status` takes from
 /// `update_headers`: the *sets* (e.g. `Reason:`) of a header the final takes
 /// from the decision ([`HeaderName::stated_at_mint`]), one line per stated
 /// line — its adds yield to the final as built ([`reject_call`]), and a
-/// removal finds nothing to remove. A set of the stack's own header, the
-/// Contact a redirect authors from its typed target list included (ADR-0017
-/// X2), or of one the transaction, a negotiation or the body binds, is
-/// refused onto `skipped`.
+/// removal finds nothing to remove. A set or removal of the stack's own
+/// header, the Contact a redirect authors from its typed target list included
+/// (ADR-0017 X2), or of one the transaction, a negotiation or the body binds,
+/// is refused onto `skipped`.
 fn end_to_end_headers(
     update_headers: Option<&SipHeaderUpdates>,
     status: u16,
@@ -412,7 +419,7 @@ fn end_to_end_headers(
 ) -> Vec<SipHeader> {
     let mut out: Vec<SipHeader> = Vec::new();
     let sets = update_headers.into_iter().flatten().filter(|(_, val)| !val.adds());
-    for (name, val) in sets.filter(|(_, val)| !val.lines().is_empty()) {
+    for (name, val) in sets {
         if let Err(refusal) = HeaderName::stated_at_mint(name, Minted::Final(status)) {
             skipped.push(refusal);
             continue;

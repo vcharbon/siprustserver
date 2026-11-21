@@ -24,7 +24,7 @@ fn edits(
             .flat_map(|(_, l)| lines(l))
             .collect()
     };
-    restated(&sets, |_| false, carried_of, Vec::new, None, &mut Vec::new())
+    restated(&sets, restatable, carried_of, Vec::new, None, &mut Vec::new())
 }
 
 /// A statement the wire cannot carry whole is skipped and handed back; the
@@ -47,7 +47,7 @@ fn a_statement_with_a_line_break_or_a_non_token_name_is_skipped() {
             Vec::new()
         }
     };
-    let edited = restated(&sets, |_| false, carried_of, Vec::new, None, &mut skipped);
+    let edited = restated(&sets, restatable, carried_of, Vec::new, None, &mut skipped);
     assert_eq!(edited, Some(vec![("X-C".to_string(), lines(&["kept"]))]));
     assert_eq!(skipped.len(), 3, "{skipped:?}");
 }
@@ -71,7 +71,7 @@ fn a_single_valued_header_stated_twice_is_skipped() {
             Vec::new()
         }
     };
-    let edited = restated(&sets, |_| false, carried_of, Vec::new, None, &mut skipped);
+    let edited = restated(&sets, restatable, carried_of, Vec::new, None, &mut skipped);
     assert_eq!(edited, Some(vec![("X-Note".to_string(), lines(&["one", "two"]))]));
     assert_eq!(skipped.len(), 2, "{skipped:?}");
 }

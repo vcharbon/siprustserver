@@ -54,7 +54,8 @@ const ADVERTISED: &[&str] = &["Allow", "Supported", "Accept"];
 /// The bound header a final's status is defined by, which the final's author
 /// states: the challenge of a 401 and a 407 (RFC 3261 §21.4.2, §21.4.8), the
 /// extensions a 420 refuses and a 421 demands (§21.4.15, §21.4.16), the
-/// floor of a 422 (RFC 4028 §6).
+/// floor of a 422 (RFC 4028 §6). The author is no aggregating proxy (RFC 3261
+/// §16.7 step 7): a 401 takes no `Proxy-Authenticate`, a 407 no `WWW-Authenticate`.
 const DEFINING: &[(u16, &str)] = &[
     (401, "WWW-Authenticate"),
     (407, "Proxy-Authenticate"),
