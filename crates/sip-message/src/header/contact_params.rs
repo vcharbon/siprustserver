@@ -17,12 +17,13 @@ pub fn read_qvalue(text: &str) -> Option<f32> {
 }
 
 /// The `qvalue` text of the preference `q`, rounded to the three decimals the
-/// grammar holds and with no trailing zero; `None` for a `q` outside `0..=1`.
+/// grammar holds, with no trailing zero and no sign; `None` for a `q` outside
+/// `0..=1`.
 pub fn qvalue_text(q: f32) -> Option<String> {
     if !(0.0..=1.0).contains(&q) {
         return None;
     }
-    let text = format!("{q:.3}");
+    let text = format!("{:.3}", q.abs());
     Some(text.trim_end_matches('0').trim_end_matches('.').to_string())
 }
 

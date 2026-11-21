@@ -79,7 +79,8 @@ pub(super) fn identity(field: &'static str, text: &str) -> Result<NameAddr, Unre
 /// 3xx Contact names, so an invented one sends it at an address the decision
 /// never stated. So is one whose contact-params the §20.10 grammar refuses: a
 /// `q` outside the qvalue range, a second `q` in `params`, an `expires` that is
-/// no delta-seconds, a parameter that does not read as one `generic-param`.
+/// no bare delta-seconds token, a parameter that does not read as one
+/// `generic-param`.
 pub fn redirect_contact(target: &RedirectContact) -> Result<MsgHeader, UnreadableAddress> {
     let refused = |reason: &str| UnreadableAddress {
         field: "contact",
@@ -106,7 +107,8 @@ pub fn redirect_contact(target: &RedirectContact) -> Result<MsgHeader, Unreadabl
     if contact.params().len() != target.params.len() + usize::from(target.q.is_some()) {
         return Err(refused("a contact-param reads as more than one"));
     }
-    if contact.param("expires").is_some_and(|v| !v.as_str().is_some_and(header::is_delta_seconds)) {
+    if contact.param("expires").is_some_and(|v| !v.as_token().is_some_and(header::is_delta_seconds))
+    {
         return Err(refused("expires is not delta-seconds"));
     }
     Ok(MsgHeader {

@@ -44,6 +44,16 @@ impl ParamValue {
         }
     }
 
+    /// The text of a token value; `None` for a flag or a quoted string, which a
+    /// parameter whose grammar is a token alone (`delta-seconds`, `qvalue`)
+    /// never takes.
+    pub fn as_token(&self) -> Option<&str> {
+        match self {
+            ParamValue::Token(v) => Some(v.as_str()),
+            ParamValue::Flag | ParamValue::Quoted(_) => None,
+        }
+    }
+
     pub fn is_flag(&self) -> bool {
         matches!(self, ParamValue::Flag)
     }

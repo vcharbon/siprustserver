@@ -29,6 +29,15 @@ fn a_value_as_written_reads_back_as_itself() {
     );
 }
 
+/// Only a token value reads as a token: a quoted string of the same text and a
+/// flag do not.
+#[test]
+fn only_a_token_value_reads_as_a_token() {
+    let p = header_params(";expires=60;lr;tok=\"60\"");
+    let tokens: Vec<Option<&str>> = p.iter().map(|(_, v)| v.as_token()).collect();
+    assert_eq!(tokens, [Some("60"), None, None]);
+}
+
 /// The lenient reading keeps an empty value apart from a flag; the strict
 /// one refuses it, `gen-value` being no empty run.
 #[test]
