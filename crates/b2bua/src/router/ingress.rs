@@ -275,7 +275,8 @@ pub(super) async fn on_event(
 /// and every turn offered after it send for the call. A turn queued before
 /// it, a self-release notice's, may count the call's transactions first:
 /// that count names the call's Call-IDs, and the layer counts the
-/// transaction by its Call-ID until it is attributed.
+/// transaction by its Call-ID until it is attributed; the watch the turn
+/// re-arms holds on it the same way.
 async fn attach_arrival(ctx: &RouterCtx, event: &CallEvent, call_ref: &str) {
     let CallEvent::Sip { message, .. } = event else { return };
     let SipMessage::Request(req) = message.as_ref() else { return };

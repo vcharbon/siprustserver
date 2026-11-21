@@ -100,7 +100,8 @@ pub enum TransactionEvent {
     /// **The last transaction for a *watched* call reached a terminal state** —
     /// every transaction attributed to `call_ref` has left the map (final response
     /// and ACK→Timer H for an INVITE, Timer J for a non-INVITE, or Timer B/F on
-    /// failure). Emitted only for call_refs the consumer registered via
+    /// failure), and every unattributed one of a Call-ID its watch names has
+    /// sent its final or left. Emitted only for call_refs the consumer registered via
     /// [`watch_self_release`](crate::TransactionLayer::watch_self_release); the
     /// B2BUA's acting-backup self-release (ADR-0014) keys on it to shed its live
     /// takeover copy without polling.
