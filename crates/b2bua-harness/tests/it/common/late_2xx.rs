@@ -58,8 +58,8 @@ pub fn sent_to(h: &Harness, b2bua: SocketAddr, to: SocketAddr, from: usize) -> V
 pub fn last_2xx(h: &Harness, from: SocketAddr, to: SocketAddr) -> Vec<u8> {
     h.wire_entries()
         .into_iter()
-        .filter(|e| e.from == from && e.to == to && e.raw.starts_with(b"SIP/2.0 2"))
-        .last()
+        .rev()
+        .find(|e| e.from == from && e.to == to && e.raw.starts_with(b"SIP/2.0 2"))
         .expect("a 2xx on the wire")
         .raw
 }
