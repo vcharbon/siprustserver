@@ -57,6 +57,7 @@ mod decision_context;
 mod decision_deadline;
 mod decision_lands_on_cancelled_call;
 mod decision_log;
+mod deferred_routing_failover;
 mod destination_allowlist_gate;
 mod destroy_leg_caller;
 mod destroy_leg_stated_reason;
