@@ -47,7 +47,7 @@ pub use held::{hold_callees, inject_cancel, offer_100rel};
 pub use join::{join, Joined};
 pub use perturb::perturb;
 pub use rng::{call_seed, Rng};
-pub use stamp::{drawn, seal, seed_of_call_id, take_drawn, Drawn};
+pub use stamp::{drawn, seal, seed_of_call_id, take_drawn, Drawn, Requester};
 pub use train::draw_trains;
 pub use wrap::{wrapped_id, wrapped_shapes, FuzzWrap, Policy};
 

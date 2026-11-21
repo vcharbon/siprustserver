@@ -90,8 +90,9 @@ pub(super) async fn ring(
 }
 
 /// Whether a held-INVITE step may fire: each waits for what RFC 3262 §3 asks
-/// of it, and a renegotiation of our own waits while we hold the peer's
-/// (RFC 3261 §14.1). Any other step is not gated here.
+/// of it, and a renegotiation of our own waits while the peer's is in
+/// progress ([`super::answers::may_renegotiate`]). Any other step is not gated
+/// here.
 pub(super) fn held_step_ready(st: &ActorState<'_>, step: &GoalStep) -> bool {
     match step {
         GoalStep::Ring { .. } => ring_ready(st),
@@ -99,7 +100,7 @@ pub(super) fn held_step_ready(st: &ActorState<'_>, step: &GoalStep) -> bool {
         GoalStep::Reject { .. } => reject_ready(st),
         GoalStep::Provisional(p) => provisional_ready(st, p),
         GoalStep::Final(f) => final_ready(st, f),
-        GoalStep::Reinvite | GoalStep::Update => st.holds.answered.is_empty(),
+        GoalStep::Reinvite | GoalStep::Update => super::answers::may_renegotiate(st),
         _ => true,
     }
 }

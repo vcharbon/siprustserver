@@ -396,3 +396,21 @@ async fn a_final_is_matched_to_its_request_by_cseq_number_and_method() {
     );
     assert!(facts.unanswered().is_empty(), "both requests drew their final");
 }
+
+#[tokio::test(start_paused = true)]
+#[ignore = "slow lane: loadgen"]
+async fn sibling_fork_pracks_sharing_a_cseq_are_judged_apart() {
+    let wire = CallWire::new(Clock::test_at(1_000));
+    let events = [
+        (Side::Caller, Dir::Out, msg("INVITE sip:b@h SIP/2.0", "c1", "1 INVITE", "", "")),
+        (Side::Caller, Dir::Out, msg("PRACK sip:b@h SIP/2.0", "c1", "2 PRACK", "t1", "")),
+        (Side::Caller, Dir::Out, msg("PRACK sip:b@h SIP/2.0", "c1", "2 PRACK", "t2", "")),
+        (Side::Caller, Dir::In, msg("SIP/2.0 200 OK", "c1", "2 PRACK", "t2", "")),
+        (Side::Caller, Dir::In, msg("SIP/2.0 481 Call Does Not Exist", "c1", "2 PRACK", "t1", "")),
+        (Side::Caller, Dir::In, msg("SIP/2.0 200 OK", "c1", "1 INVITE", "t2", "")),
+    ];
+    let facts = feed(&wire, &events);
+    let failed: Vec<(&str, Option<u16>)> =
+        facts.failures.iter().map(|f| (f.method.as_str(), f.code)).collect();
+    assert_eq!(failed, [("PRACK", Some(481))], "fork t1's PRACK drew 481");
+}

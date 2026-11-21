@@ -217,7 +217,7 @@ fn take_invite(st: &mut ActorState<'_>, uas: &ServerTxn) -> bool {
 /// requeue-on-advance auto-react (a re-recorded `InDialogRequest` observation
 /// is idempotent, so re-entry for a previously parked request is harmless).
 /// A request requiring an extension this UA does not implement is refused 420
-/// (RFC 3261 §8.2.2.3), a BYE aside. A BYE ending the dialog still sends the
+/// (RFC 3261 §8.2.2.3), an ACK or CANCEL aside. A BYE ending the dialog sends the
 /// held PRACKs of sibling forks' reliable provisionals (RFC 3262 §4).
 pub(super) async fn react_in_dialog_request(
     st: &mut ActorState<'_>,
@@ -227,12 +227,15 @@ pub(super) async fn react_in_dialog_request(
     let cseq = uas.request().cseq().seq();
     let now = Instant::now();
 
-    if !matches!(method.as_str(), "ACK" | "BYE") {
+    if !matches!(method.as_str(), "ACK" | "CANCEL") {
         if let Some(unknown) = super::extensions::unsupported_required(uas.request()) {
             uas.respond(420, "Bad Extension")
                 .with_header("Unsupported", &unknown)
                 .try_send()
                 .await?;
+            if method == "INVITE" {
+                arm_reject_final(st, &uas, 420);
+            }
             st.obs.record(in_dialog_arrival(st.role, uas.request()), now);
             return Ok(());
         }
@@ -434,7 +437,9 @@ pub(super) async fn react_queued(
 
 /// A renegotiation under this endpoint's [`Answers`](super::answers::Answers):
 /// held, refused, or answered at once; one on an early dialog is answered at
-/// once. Returns whether it was held or refused rather than answered.
+/// once, and one arriving while another is held is refused 500 with
+/// Retry-After (RFC 3261 §14.2, RFC 3311 §5.2). Returns whether it was held or
+/// refused rather than answered.
 async fn held_or_refused(st: &mut ActorState<'_>, uas: ServerTxn) -> Result<bool, StepError> {
     let confirmed = st.dialogs.confirmed.as_ref().is_some_and(|d| {
         uas.request().to().tag() == Some(d.local_tag())
@@ -446,8 +451,12 @@ async fn held_or_refused(st: &mut ActorState<'_>, uas: ServerTxn) -> Result<bool
         super::answers::Answer::default()
     };
     st.obs.record(in_dialog_arrival(st.role, uas.request()), Instant::now());
+    if !st.holds.answered.is_empty() {
+        super::answers::refuse(st, uas, 500).await?;
+        return Ok(true);
+    }
     if !answer.hold.is_zero() {
-        super::answers::hold(st, uas, answer);
+        super::answers::hold(st, uas, answer).await?;
         return Ok(true);
     }
     if let Some(status) = answer.refuse {

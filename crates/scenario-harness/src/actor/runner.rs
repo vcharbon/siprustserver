@@ -20,6 +20,7 @@ use tokio::time::Instant;
 use sip_message::{CseqDeviation, DelayedAutomatic};
 
 use super::answer::{fire_timed_answer, ForkAnswer, TimedAnswer};
+use super::answers::may_renegotiate;
 use super::delta::AcceptedDeltaPolicy;
 use super::dialog_table::DialogTable;
 use super::drive::drive_goal;
@@ -48,10 +49,9 @@ pub(super) struct ParkedRequest {
     pub(super) initial: bool,
 }
 
-/// A non-2xx final we sent to an initial INVITE, awaiting its hop-ACK (RFC 3261 §17.1.1.3). The
-/// receive core claims that ACK below `recv_any`, so the actor watches its fulfilment in a
-/// `select!` arm and closes the `reject-final` obligation there: a rejected leg stays reactive
-/// until a lost hop-ACK is recovered (Timer G, the peer's §17.1.1.2 re-ACK), Timer-H-bounded.
+/// A non-2xx final we sent to an initial INVITE, awaiting its hop-ACK (RFC 3261 §17.1.1.3), which
+/// the receive core claims below `recv_any`: a `select!` arm closes the `reject-final` obligation,
+/// and the rejected leg stays reactive until a lost hop-ACK is recovered, Timer-H-bounded.
 pub(super) struct PendingRejectAck {
     pub(super) key: ObligationKey,
     pub(super) call_id: String,
@@ -476,13 +476,13 @@ pub(super) async fn react_until_done(st: &mut ActorState<'_>) -> Result<(), Step
             // re-INVITE now the owner/non-owner back-off has elapsed — the peer's
             // own re-INVITE was 491'd and is no longer pending, so this retry is
             // 200'd and the round completes.
-            _ = wait_reinvite_retry(&st.reinvite_retry), if st.reinvite_retry.is_some() => {
+            _ = wait_reinvite_retry(&st.reinvite_retry), if st.reinvite_retry.is_some() && may_renegotiate(st) => {
                 st.reinvite_retry = None;
                 Box::pin(originate_reinvite(st)).await?;
             }
             // The S6 UPDATE-collision retry deadline (C4/S6): re-originate the
             // UPDATE now the peer's colliding offer has cleared.
-            _ = wait_update_retry(&st.update_retry), if st.update_retry.is_some() => {
+            _ = wait_update_retry(&st.update_retry), if st.update_retry.is_some() && may_renegotiate(st) => {
                 st.update_retry = None;
                 Box::pin(originate_update(st)).await?;
             }

@@ -114,7 +114,9 @@ fn odd_info(rng: &mut Rng, call: &mut ActorCall, config: &FuzzConfig, notes: &mu
         notes.push(format!("info-hdr:{l}"));
     }
     if rng.chance(config.unknown_require_pct) {
-        let name = *rng.pick(&["Require", "Proxy-Require"]);
+        let names: &[&str] =
+            if config.proxied { &["Require", "Proxy-Require"] } else { &["Require"] };
+        let name = *rng.pick(names);
         headers.push((name.to_string(), payload::UNKNOWN_EXTENSION.to_string()));
         notes.push(format!("info-{}", name.to_ascii_lowercase()));
     }

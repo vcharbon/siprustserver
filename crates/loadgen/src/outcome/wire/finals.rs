@@ -50,10 +50,20 @@ struct Bye {
     at_ms: i64,
 }
 
-/// A side's in-dialog requests awaiting a final, by CSeq number and method
-/// (forked early dialogs number apart, so one number may name two requests):
-/// their method and when they were first sent.
-pub(crate) type Pending = HashMap<(u32, String), (String, i64)>;
+/// A side's in-dialog request, by its dialog's To-tag, CSeq number and method:
+/// forked early dialogs number apart (RFC 3261 §12.2.1.1), so one number may
+/// name a request on each.
+pub(crate) type PendingKey = (String, u32, String);
+
+/// A side's in-dialog requests awaiting a final, by [`PendingKey`]: their
+/// method and when they were first sent.
+pub(crate) type Pending = HashMap<PendingKey, (String, i64)>;
+
+/// The [`PendingKey`] of the request or response of identity `id`.
+pub(crate) fn pending_key(id: &sip_message::sniff::Identity<'_>) -> Option<PendingKey> {
+    let tag = id.to_tag.unwrap_or_default().to_string();
+    Some((tag, id.cseq?, id.cseq_method?.to_string()))
+}
 
 /// One of a side's in-dialog requests, as its final judges it.
 pub(super) struct Request<'a> {
@@ -286,13 +296,12 @@ fn forget(failures: &mut Vec<WireFailure>, failure: &WireFailure) {
 /// never `cut`.
 pub(super) fn settle_pending(
     (pending, failures, finals): (&mut Pending, &mut Vec<WireFailure>, &mut Finals),
-    method: &str,
-    cseq: u32,
+    key: PendingKey,
     (code, raw): (u16, &[u8]),
     now: i64,
 ) {
-    let key = (cseq, method.to_string());
-    if code < 200 || method == "BYE" {
+    let cseq = key.1;
+    if code < 200 || key.2 == "BYE" {
         return;
     }
     if let Some((method, sent_at)) = pending.remove(&key) {

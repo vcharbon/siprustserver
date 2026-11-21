@@ -326,7 +326,7 @@ async fn the_finals_a_draw_accepts_follow_its_holds_and_requirements() {
     let bob = h.agent("bob", "127.0.0.1:5070").await;
     let mut call = basic(&env(&alice, &bob, "refusals"));
     let none = crate::stamp::refusals(&call);
-    assert!(!none.contains(&("INVITE", 491)), "nothing held: {none:?}");
+    assert!(none.is_empty(), "nothing held: {none:?}");
     let caller = call.actors.iter_mut().find(|a| a.role == "alice").expect("alice");
     caller.delayed.push(sip_message::DelayedAutomatic::ack_after(1000));
     let bye = caller.goals.iter().position(|g| matches!(g.step, GoalStep::Bye)).expect("a BYE");
@@ -343,7 +343,12 @@ async fn the_finals_a_draw_accepts_follow_its_holds_and_requirements() {
         ),
     );
     let held = crate::stamp::refusals(&call);
-    for owed in [("INVITE", 491), ("UPDATE", 491), ("INFO", 420)] {
+    let owed = [
+        (Requester::Either, "INVITE", 491),
+        (Requester::Either, "UPDATE", 491),
+        (Requester::Caller, "INFO", 420),
+    ];
+    for owed in owed {
         assert!(held.contains(&owed), "{owed:?} accepted: {held:?}");
     }
     h.finish().await;

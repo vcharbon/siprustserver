@@ -9,9 +9,12 @@ pub struct FuzzConfig {
     pub call_seed: Option<u64>,
     /// Percent of calls carrying hostile headers and odd INFO bodies.
     pub payload_pct: u64,
-    /// Percent of odd INFOs requiring an extension no party implements, of
-    /// their UAS (`Require`) or of a proxy (`Proxy-Require`).
+    /// Percent of odd INFOs requiring an extension no party implements: of
+    /// their UAS (`Require`), or, on a path through a proxy, of the proxy
+    /// (`Proxy-Require`), which a UAS ignores.
     pub unknown_require_pct: u64,
+    /// The calls cross a proxy that Record-Routes.
+    pub proxied: bool,
     /// Percent of calls whose goal dwells are jittered.
     pub jitter_pct: u64,
     /// Percent of calls whose offer mode and body framings are drawn.
@@ -54,6 +57,7 @@ impl Default for FuzzConfig {
             payload_pct: 50,
             jitter_pct: 70,
             unknown_require_pct: 25,
+            proxied: false,
             offer_pct: 50,
             hold_pct: 20,
             refuse: true,

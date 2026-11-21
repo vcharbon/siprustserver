@@ -378,7 +378,6 @@ pub(super) fn schedule_reinvite_retry(st: &mut ActorState<'_>, resp: &SipRespons
         st.reinvite_retries = 0;
         return false;
     }
-    st.reinvite_retries += 1;
     let asked_later = (resp.status() == 500)
         .then(|| retry_after_seconds(resp.raw(HeaderName::RetryAfter).map(SipStr::owned)))
         .flatten();
@@ -388,6 +387,7 @@ pub(super) fn schedule_reinvite_retry(st: &mut ActorState<'_>, resp: &SipRespons
         (None, 491) => Duration::from_millis(1000),
         _ => return false,
     };
+    st.reinvite_retries += 1;
     st.reinvite_retry = Some(st.dwell(Dwell::Retry, delay));
     true
 }

@@ -194,7 +194,9 @@ impl MediaState {
         Self { offer: None, answer: self.answer.or(self.offer), no_offer: body, ..self }
     }
 
-    /// The same endpoint framing every description it sends under `framing`.
+    /// The same endpoint framing under `framing` the description its INVITEs,
+    /// provisionals, PRACKs, UPDATEs and answers to an INVITE carry; the ACK's
+    /// delayed-offer answer and a scripted policy 2xx go as bare SDP.
     pub fn framed(self, framing: super::framing::Framing) -> Self {
         Self { framing, ..self }
     }

@@ -6,7 +6,7 @@ use std::path::Path;
 
 use serde_json::{json, Value};
 
-use crate::stamp::Drawn;
+use crate::stamp::{Drawn, Requester};
 
 /// A run's records, each joined to its draw.
 #[derive(Debug, Default)]
@@ -28,10 +28,17 @@ pub struct Joined {
 /// (`producer_verdict` `ok:<branch>`) with no failure in it but the refused
 /// in-dialog requests its draw asked for ([`Drawn::refusals`]).
 pub fn record_passed(record: &Value, draw: Option<&Drawn>) -> bool {
+    let side = |f: &Value, r: Requester| match r {
+        Requester::Caller => f["leg"].is_null(),
+        Requester::Callee => !f["leg"].is_null(),
+        Requester::Either => true,
+    };
     let asked = |f: &Value| {
         f["kind"] == "dialog_request"
             && draw.is_some_and(|d| {
-                d.refusals.iter().any(|(m, c)| f["method"] == *m && f["code"] == *c)
+                d.refusals
+                    .iter()
+                    .any(|(r, m, c)| side(f, *r) && f["method"] == *m && f["code"] == *c)
             })
     };
     record["failures"].as_array().is_none_or(|f| f.iter().all(asked))
@@ -94,7 +101,7 @@ mod tests {
             seed,
             call_id: call_id.into(),
             desc: format!("draw {seed:#x}"),
-            refusals: vec![("INVITE", 488)],
+            refusals: vec![(Requester::Caller, "INVITE", 488)],
         }
     }
 
@@ -169,6 +176,12 @@ mod tests {
             r
         };
         assert!(record_passed(&refused("INVITE", 488), Some(&d)));
+        let mut on_a_leg = refused("INVITE", 488);
+        on_a_leg["failures"][0]["leg"] = json!("bob");
+        assert!(
+            !record_passed(&on_a_leg, Some(&d)),
+            "the drawn refusal meets the caller's request"
+        );
         assert!(!record_passed(&refused("INVITE", 500), Some(&d)));
         assert!(!record_passed(&refused("UPDATE", 488), Some(&d)));
         assert!(!record_passed(&refused("INVITE", 488), None));

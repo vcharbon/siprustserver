@@ -88,15 +88,23 @@ pub(super) fn answer_for(st: &ActorState<'_>, method: &str) -> Answer {
     }
 }
 
-/// Hold `uas`'s final for `answer.hold`; the obligation keeps the call open
-/// until it is sent.
-pub(super) fn hold(st: &mut ActorState<'_>, uas: ServerTxn, answer: Answer) {
+/// Hold `uas`'s final for `answer.hold`, a re-INVITE's after its 100 Trying
+/// (RFC 3261 §17.2.1); the obligation keeps the call open until it is sent.
+pub(super) async fn hold(
+    st: &mut ActorState<'_>,
+    mut uas: ServerTxn,
+    answer: Answer,
+) -> Result<(), StepError> {
+    if uas.request().method().as_str() == "INVITE" {
+        uas.respond(100, "Trying").try_send().await?;
+    }
     let now = Instant::now();
     st.holds.opened += 1;
     let key = ObligationKey::new(st.role, ObligationKind::HeldAnswer, st.holds.opened);
     let detail = format!("{} final held", uas.request().method().as_str());
     st.obs.record(Observation::RequestSent { key, detail }, now);
     st.holds.answered.push(Held { at: now + answer.hold, key, uas: Box::new(uas), answer });
+    Ok(())
 }
 
 /// Send a refusal of `uas`: a re-INVITE's then awaits its hop-ACK.
@@ -136,6 +144,13 @@ pub(super) async fn fire(st: &mut ActorState<'_>, until: Option<Instant>) -> Res
         }
     }
     Ok(())
+}
+
+/// Whether this endpoint may start a renegotiation of its own: none of the
+/// peer's is in progress, held, or answered with its ACK still owed (RFC 3261
+/// §14.1).
+pub(super) fn may_renegotiate(st: &ActorState<'_>) -> bool {
+    st.holds.answered.is_empty() && st.answered_reinvites.is_empty()
 }
 
 /// A BYE ended the dialog: every held request draws `487` (RFC 3261 §15.1.2).
