@@ -141,3 +141,19 @@ fn a_late_fork_a_service_tracked_is_released_as_a_straggler() {
         "the tracked fork's 2xx is a straggler's"
     );
 }
+
+/// A fork a service tracked early on the confirmed leg then rings reliably:
+/// this stack PRACKs it on that dialog (RFC 3262 §4), which stays the
+/// service's, early; no rule reads the provisional.
+#[test]
+fn a_late_fork_a_service_tracked_is_pracked_when_it_rings_reliably() {
+    let driver = Driver::new().with_rule(tracks_every_1xx());
+    let mut call = driver.dial();
+    call.run(ANSWERED.clone()).run([Step::ForkAnswers("latefork", 180)]);
+    let ring = call.turned(Step::ForkAnswersReliably("latefork", 183));
+    assert_eq!(ring.rule, None, "no rule reads it");
+    assert_eq!(call.sent(), ["b-1 ACK", "b-1 PRACK"], "PRACKed here");
+    let d = fork(call.call(), "latefork").expect("the tracked fork");
+    assert!(d.awaits_invite_final(), "still early: {:?}", d.state);
+    assert_eq!(open_methods(&d), ["PRACK"], "its PRACK open in it");
+}

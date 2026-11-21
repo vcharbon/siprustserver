@@ -40,6 +40,8 @@ const WINNER: &str = "fork2";
 const LATE_FORK: &str = "fork3";
 const EARLY_FORK_RSEQ: u32 = 11;
 const LATE_FORK_RSEQ: u32 = 31;
+/// The early fork's next reliable provisional, after its first was PRACKed.
+const EARLY_FORK_NEXT_RSEQ: u32 = EARLY_FORK_RSEQ + 1;
 
 /// RFC 3261 T1: the interval of a reliable provisional's first
 /// retransmission (RFC 3262 §3).
@@ -94,18 +96,21 @@ struct Answered {
     invite_cseq: u32,
 }
 
-/// Whether `datagram` is a 183 of [`LATE_FORK`]'s.
-fn is_the_late_forks_183(datagram: &[u8]) -> bool {
+/// Whether `datagram` is a 183 the fabric holds past the winner's 2xx: one
+/// numbered [`LATE_FORK_RSEQ`] or [`EARLY_FORK_NEXT_RSEQ`].
+fn is_a_late_183(datagram: &[u8]) -> bool {
     let text = String::from_utf8_lossy(datagram);
-    text.starts_with("SIP/2.0 183 ") && text.contains(&format!(";tag={LATE_FORK}"))
+    let late = [LATE_FORK_RSEQ, EARLY_FORK_NEXT_RSEQ].map(|rseq| format!("RSeq: {rseq}"));
+    text.starts_with("SIP/2.0 183 ") && text.lines().any(|l| late.iter().any(|r| r == l))
 }
 
-/// The fabric's hold on [`LATE_FORK`]'s 183s: the n-th one sent is held
-/// `holds[n]`, every later one the last of `holds`; nothing else is held.
-fn the_late_forks_183_held(holds: &'static [Duration]) -> SendDelay {
+/// The fabric's hold on the late 183s ([`is_a_late_183`]): the n-th one sent
+/// is held `holds[n]`, every later one the last of `holds`; nothing else is
+/// held.
+fn the_late_183s_held(holds: &'static [Duration]) -> SendDelay {
     let sent = AtomicUsize::new(0);
     Arc::new(move |_src, _dst, datagram| {
-        if !is_the_late_forks_183(datagram) {
+        if !is_a_late_183(datagram) {
             return None;
         }
         let n = sent.fetch_add(1, Ordering::Relaxed);
@@ -113,15 +118,15 @@ fn the_late_forks_183_held(holds: &'static [Duration]) -> SendDelay {
     })
 }
 
-/// A harness whose fabric holds the late fork's 183s as `holds` says, its
-/// parties and this stack under `relay`, with the keepalive out of every
-/// window these tests wait through.
+/// A harness whose fabric holds the late 183s as `holds` says, its parties
+/// and this stack under `relay`, with the keepalive out of every window these
+/// tests wait through.
 async fn parties(
     name: &str,
     relay: Relay,
     holds: &'static [Duration],
 ) -> (Harness, Agent, Agent, B2buaSut) {
-    let h = Harness::with_transit_delay_and_send_delay(name, 1, the_late_forks_183_held(holds));
+    let h = Harness::with_transit_delay_and_send_delay(name, 1, the_late_183s_held(holds));
     let alice = h.agent_auto("alice").await;
     let bob = h.agent_auto("bob").await;
     let at = h.next_addr().to_string();
@@ -200,7 +205,7 @@ async fn late_fork_repeats_its_183(r: &Ringing) {
     let first =
         r.h.wire_entries()
             .into_iter()
-            .find(|e| e.from == r.bob.addr() && is_the_late_forks_183(&e.raw))
+            .find(|e| e.from == r.bob.addr() && is_a_late_183(&e.raw))
             .expect("the late fork's 183");
     r.bob.try_send_datagram(&first.raw, r.b2bua.addr).await.expect("the copy leaves");
 }
@@ -219,15 +224,22 @@ async fn winner_answers(r: Ringing, sdp: &str, answer: Option<&str>) -> Answered
 /// The PRACK this stack owes [`LATE_FORK`]: on that fork's early dialog,
 /// naming its `RSeq` and the INVITE, first on that dialog's CSeq sequence.
 async fn expect_the_late_forks_prack(a: &Answered) -> ServerTxn {
+    expect_prack(a, LATE_FORK, LATE_FORK_RSEQ, 1).await
+}
+
+/// The PRACK this stack owes the fork `tag` for its provisional `rseq`: on
+/// that fork's early dialog, naming `rseq` and the INVITE, the dialog's
+/// `nth` request past the INVITE.
+async fn expect_prack(a: &Answered, tag: &str, rseq: u32, nth: u32) -> ServerTxn {
     let prack = a.bob.receive("PRACK").await;
     let req = prack.request();
-    assert_eq!(req.to().tag(), Some(LATE_FORK), "the late fork's own early dialog");
+    assert_eq!(req.to().tag(), Some(tag), "the fork's own early dialog");
     assert_eq!(
         stated(req, "RAck").as_deref(),
-        Some(format!("{LATE_FORK_RSEQ} {} INVITE", a.invite_cseq).as_str()),
-        "the PRACK names the late fork's provisional"
+        Some(format!("{rseq} {} INVITE", a.invite_cseq).as_str()),
+        "the PRACK names the fork's provisional"
     );
-    assert_eq!(req.cseq().seq(), a.invite_cseq + 1, "that dialog's first request");
+    assert_eq!(req.cseq().seq(), a.invite_cseq + nth, "on that dialog's own sequence");
     prack
 }
 
@@ -340,6 +352,27 @@ async fn a_late_forks_183_past_the_early_dialog_bound_draws_no_prack() {
     assert_eq!(a.bob.drain_tu().await, 0, "no PRACK past the bound");
     let early_only = vec![format!("{EARLY_FORK}: {EARLY_FORK_RSEQ} {} INVITE", a.invite_cseq)];
     caller_hangs_up(a, &early_only).await;
+}
+
+/// Transparent relay: the early fork, its first 183 PRACKed by the caller,
+/// sends its next reliable 183 before the winner's 2xx, and the fabric holds
+/// it past that 2xx. The answer retired that fork's early dialog, but the
+/// fork's INVITE transaction is still open: this stack PRACKs it on that
+/// dialog's own sequence (RFC 3262 §4) and shows the caller nothing.
+#[tokio::test(start_paused = true)]
+async fn the_early_forks_next_reliable_183_past_the_answer_is_pracked_here() {
+    let name = "b2bua-prack-late-sibling-early-next";
+    let mut r = rung_by_an_early_fork(name, Relay::Transparent, &[HELD]).await;
+    r.uas
+        .respond(183, "Session Progress")
+        .with_to_tag(EARLY_FORK)
+        .reliable(EARLY_FORK_NEXT_RSEQ)
+        .await;
+    let a = winner_answers(r, ANSWER, None).await;
+    expect_prack(&a, EARLY_FORK, EARLY_FORK_NEXT_RSEQ, 2).await.respond(200, "OK").await;
+    let early = |rseq| format!("{EARLY_FORK}: {rseq} {} INVITE", a.invite_cseq);
+    let expected = vec![early(EARLY_FORK_RSEQ), early(EARLY_FORK_NEXT_RSEQ)];
+    caller_hangs_up(a, &expected).await;
 }
 
 /// Fake-prack: this stack PRACKed the early fork itself; the late fork's 183
