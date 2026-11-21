@@ -59,6 +59,7 @@ mod worker_outbound_tests;
 
 use std::net::SocketAddr;
 
+use sip_message::header::has_magic_cookie;
 use sip_message::{Method, SipMessage, SipRequest};
 
 use crate::addr::ProxyAddr;
@@ -82,15 +83,13 @@ pub(super) struct RouteOutcome {
     pub(super) target: Option<ProxyAddr>,
 }
 
-/// The `branch=` token of the TOP (first) `Via` header of an inbound request —
-/// the immediate upstream's client-transaction id (RFC 3261 §8.1.1.7: globally
-/// unique per transaction thanks to the `z9hG4bK` magic cookie). A
-/// retransmission reuses this exact token, so it is the correlator the proxy
-/// keys its retransmission TARGET memo on, and the §17.1.1.3 discriminator the
-/// non-2xx ACK hop decision compares.
-fn top_via_branch(req: &SipRequest) -> Option<String> {
-    let top = req.top_via();
-    top.branch().filter(|b| !b.is_empty()).map(str::to_owned)
+/// The RFC 3261 branch of an inbound request's top Via (§8.1.1.7, the
+/// `z9hG4bK` magic cookie first): the immediate upstream's client-transaction
+/// id, which a retransmission, its CANCEL and its non-2xx ACK repeat. The wire
+/// parser refuses a top Via without one, so `None` is a request no receive
+/// path parsed.
+fn received_branch(req: &SipRequest) -> Option<&str> {
+    req.top_via().branch().filter(|b| has_magic_cookie(b))
 }
 
 impl ProxyCore {

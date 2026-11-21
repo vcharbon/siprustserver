@@ -38,12 +38,11 @@ and a worker Via still makes the request worker-outbound. These direction rules
 hold on the internal face only (ADR-0048).
 
 **The branch is a function of the message.** The pushed branch is a SHA-256 over the received
-top Via's branch and sent-by, the Call-ID, the From tag and the CSeq number (`crate::branch`),
-with RFC 3261 §16.11's alternate input set for a Via without the magic cookie. For a cookied
-branch, a retransmission, its CANCEL and its non-2xx ACK compute the same branch at any instance,
-so the downstream server transaction (§17.2.3) matches them to the first forward whether or not a
-memo entry survived. The alternate set holds the To tag, so a cookieless upstream's non-2xx ACK,
-carrying the final's To tag, maps apart from its INVITE, as §16.11 states it. Rejected: a random
+top Via's branch and sent-by, the Call-ID, the From tag and the CSeq number (`crate::branch`).
+A retransmission, its CANCEL and its non-2xx ACK compute the same branch at any instance, so the
+downstream server transaction (§17.2.3) matches them to the first forward whether or not a memo
+entry survived. The proxy receives only RFC 3261 branches (the parser refuses a top Via without
+the magic cookie), so the branch input set is §16.11's first. Rejected: a random
 branch kept in the memo. Two active instances share no memo (X7), and an evicted entry would split
 one transaction across two branches.
 

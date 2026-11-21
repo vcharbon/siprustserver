@@ -10,7 +10,6 @@ use std::time::Duration;
 use sip_clock::Clock;
 use sip_message::header::{HeaderValue, BRANCH_MAGIC_COOKIE};
 use sip_message::parser::custom::CustomParser;
-use sip_message::parser::SipParserLimits;
 use sip_message::{SipMessage, SipParser};
 use sip_net::types::BindUdpOpts;
 use sip_net::{SignalingNetwork, UdpEndpoint};
@@ -130,24 +129,6 @@ Content-Length: 0\r\n\r\n"
     ))
 }
 
-/// A pre-RFC-3261 upstream: a top Via with no `branch` parameter at all. The
-/// §8.1.1.7 magic-cookie gate is a wire-grammar rule, so such a message is
-/// hydrated rather than read off the wire.
-fn branchless_options(call_id: &str, cseq: u32) -> SipMessage {
-    let limits = SipParserLimits { wire_grammar: false, ..SipParserLimits::DEFAULT };
-    let raw = format!(
-        "OPTIONS sip:bob@{DOWNSTREAM}:5060 SIP/2.0\r\n\
-Via: SIP/2.0/UDP {WORKER}:5060;rport\r\n\
-Max-Forwards: 70\r\n\
-From: <sip:alice@{WORKER}>;tag=legacy-a\r\n\
-To: <sip:bob@{DOWNSTREAM}>;tag=legacy-b\r\n\
-Call-ID: {call_id}\r\n\
-CSeq: {cseq} OPTIONS\r\n\
-Content-Length: 0\r\n\r\n"
-    );
-    CustomParser::with_limits(limits).parse(raw.as_bytes()).unwrap()
-}
-
 fn worker_src() -> std::net::SocketAddr {
     format!("{WORKER}:5060").parse().unwrap()
 }
@@ -206,7 +187,10 @@ async fn a_recased_cancel_at_a_second_proxy_instance_carries_the_invites_branch(
 #[test]
 fn a_recased_cancel_and_ack_map_to_the_invites_branch() {
     let of = |msg: SipMessage| match msg {
-        SipMessage::Request(req) => crate::branch::stateless_branch(&req),
+        SipMessage::Request(req) => {
+            let received = req.top_via().branch().expect("a branch").to_string();
+            crate::branch::stateless_branch(&req, &received)
+        }
         SipMessage::Response(_) => panic!("a request"),
     };
     let ack = parse_req(&format!(
@@ -287,7 +271,7 @@ async fn retransmission_through_a_second_proxy_carries_the_same_branch() {
 /// violates §8.1.1.7 uniqueness). Folding Call-ID, From tag and CSeq number in
 /// keeps them apart while leaving the §16.11 mapping intact.
 #[tokio::test(start_paused = true)]
-async fn one_received_branch_token_on_two_call_ids_maps_to_two_branches() {
+async fn one_received_branch_token_in_two_transactions_maps_to_two_branches() {
     let f = fabric().await;
     let core = f.proxy(NODE_A).await;
 
@@ -296,9 +280,13 @@ async fn one_received_branch_token_on_two_call_ids_maps_to_two_branches() {
     let first = f.pushed_branch().await;
     core.route_request_from(&invite("collide-b@test", "tag-a", 1, "z9hG4bKdup"), worker_src())
         .await;
-    let second = f.pushed_branch().await;
+    let other_call_id = f.pushed_branch().await;
+    core.route_request_from(&invite("collide-a@test", "tag-a", 2, "z9hG4bKdup"), worker_src())
+        .await;
+    let other_cseq = f.pushed_branch().await;
 
-    assert_ne!(first, second, "two transactions must not merge onto one downstream branch");
+    assert_ne!(other_call_id, first, "two transactions must not merge onto one downstream branch");
+    assert_ne!(other_cseq, first, "a different CSeq number is a different transaction");
 }
 
 /// §8.1.1.7 shape: the magic cookie, then an opaque token. It is this proxy's
@@ -315,26 +303,6 @@ async fn the_pushed_branch_carries_the_magic_cookie_and_is_opaque_hex() {
     assert_eq!(token.len(), 16, "16 opaque characters after the cookie, got {branch}");
     assert!(token.bytes().all(|c| c.is_ascii_hexdigit()), "hex token, got {branch}");
     assert_ne!(branch, "z9hG4bKup4", "the pushed branch is ours, not the received one");
-}
-
-/// The §16.11 alternate input set, for a received Via with no branch: the
-/// topmost Via, the To and From tags, the Call-ID, the CSeq NUMBER and the
-/// Request-URI. Two copies of one request map together; a different CSeq
-/// number is a different transaction and must not.
-#[tokio::test(start_paused = true)]
-async fn a_branchless_received_via_maps_by_the_alternate_input_set() {
-    let f = fabric().await;
-    let core = f.proxy(NODE_A).await;
-
-    core.route_request_from(&branchless_options("legacy-1@test", 3), worker_src()).await;
-    let original = f.pushed_branch().await;
-    core.route_request_from(&branchless_options("legacy-1@test", 3), worker_src()).await;
-    let repeat = f.pushed_branch().await;
-    core.route_request_from(&branchless_options("legacy-1@test", 4), worker_src()).await;
-    let other_cseq = f.pushed_branch().await;
-
-    assert_eq!(repeat, original, "§16.11: a retransmission maps to the first copy's branch");
-    assert_ne!(other_cseq, original, "a different CSeq number is a different transaction");
 }
 
 /// A request from an outside sender at `host:5060`, which the proxy forwards

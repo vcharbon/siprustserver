@@ -78,8 +78,8 @@ const _: () = assert!(RTX_ENTRY_TTL_MS == TIMER_H);
 /// Call-ID, From tag and CSeq number, which the INVITE, its CANCEL, its non-2xx
 /// ACK and every response to them repeat. The three dialog fields keep apart
 /// two transactions on one branch token (an upstream that spends a token twice
-/// across a restart, or a pre-RFC-3261 one that sends none). `|` is illegal in
-/// every component, so the join is unambiguous; a missing part keys as empty.
+/// across a restart). `|` is illegal in every component, so the join is
+/// unambiguous; a missing part keys as empty.
 pub fn invite_txn_key(via: &Via, call_id: &str, from_tag: Option<&str>, cseq_num: u32) -> String {
     txn_key(&["inv"], via, call_id, from_tag, cseq_num)
 }

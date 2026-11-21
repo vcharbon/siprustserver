@@ -27,7 +27,7 @@ use sip_message::received::observed_source;
 use super::super::ProxyCore;
 use super::reply::extra_header;
 use super::target::Chosen;
-use super::{top_via_branch, Arrival, RouteOutcome};
+use super::{received_branch, Arrival, RouteOutcome};
 
 impl ProxyCore {
     /// Drops a request whose own edit the draft refuses, counted as a reject:
@@ -66,6 +66,10 @@ impl ProxyCore {
         let SipMessage::Request(req) = msg else {
             self.metrics.record_reject("non_request");
             return RouteOutcome { decision: RoutingDecisionKind::Reject, target: None };
+        };
+        let Some(received_branch) = received_branch(req) else {
+            tracing::error!("DEFECT: a request past ingress has no RFC 3261 branch");
+            return self.drop_unforwardable();
         };
         let method = req.method().clone();
         let call_id = req.call_id();
@@ -138,24 +142,18 @@ impl ProxyCore {
                 from.tag(),
                 cseq.seq(),
             );
-            if let Some(found) = self.cancel_lru.lookup(&key) {
-                let same_txn = top_via_branch(req).is_some();
-                let legacy_routeless = !same_txn && !req.has(&sip_message::HeaderName::Route);
-                if same_txn || legacy_routeless {
-                    ack_hop = Some(found);
-                }
-            }
+            ack_hop = self.cancel_lru.lookup(&key);
         }
 
-        let incoming_branch = top_via_branch(req);
-        let rtx_key = incoming_branch.as_ref().map(|_| {
-            retransmit_key(req.top_via(), call_id.as_str(), from.tag(), method.as_str(), cseq.seq())
-        });
-        let rtx_hit: Option<CancelEntry> = if method == Method::Cancel {
-            None
-        } else {
-            rtx_key.as_ref().and_then(|k| self.cancel_lru.lookup(k))
-        };
+        let rtx_key = retransmit_key(
+            req.top_via(),
+            call_id.as_str(),
+            from.tag(),
+            method.as_str(),
+            cseq.seq(),
+        );
+        let rtx_hit: Option<CancelEntry> =
+            if method == Method::Cancel { None } else { self.cancel_lru.lookup(&rtx_key) };
 
         let Some((mut draft, c)) = self.classify(msg, req, src, face, req.thaw()) else {
             return self.drop_unforwardable();
@@ -257,7 +255,7 @@ impl ProxyCore {
             None => self.via_cookie(msg, req, &c, &originator, minted_cookie.as_ref()),
         };
 
-        let our_branch = stateless_branch(req);
+        let our_branch = stateless_branch(req, received_branch);
         let egress_adv = self.advertised_of(egress);
         let pushed = Via::udp(egress_adv.host.as_str(), egress_adv.port)
             .with_branch(our_branch.as_str())
@@ -272,19 +270,17 @@ impl ProxyCore {
         // ADR-0050 §4
         let went = rtx_hit.as_ref().map_or_else(|| target.clone(), |found| found.target.clone());
         if method != Method::Cancel {
-            if let Some(k) = &rtx_key {
-                self.cancel_lru.remember(
-                    k,
-                    CancelEntry {
-                        target: went.clone(),
-                        branch: our_branch.clone(),
-                        stickiness: None,
-                        minted: minted_cookie.clone(),
-                        via_cookie: via_cookie.clone(),
-                    },
-                    Lifetime::Retransmission,
-                );
-            }
+            self.cancel_lru.remember(
+                &rtx_key,
+                CancelEntry {
+                    target: went.clone(),
+                    branch: our_branch.clone(),
+                    stickiness: None,
+                    minted: minted_cookie.clone(),
+                    via_cookie: via_cookie.clone(),
+                },
+                Lifetime::Retransmission,
+            );
         }
 
         if method == Method::Invite {

@@ -119,13 +119,12 @@ impl ProxyCore {
     /// read off that INVITE's entry, which the ACK's top Via keys (§17.1.1.3:
     /// the ACK repeats the INVITE's, branch included). Toward a worker no
     /// longer alive, where the INVITE's cookie places the call. `None`: no
-    /// entry, or no branch to tell the ACK's transaction by.
+    /// entry.
     pub(super) fn invite_hop(
         &self,
         msg: &SipMessage,
         req: &SipRequest,
     ) -> Option<Result<ProxyAddr, RouteOutcome>> {
-        super::top_via_branch(req)?;
         let key = invite_txn_key(
             req.top_via(),
             req.call_id().as_str(),
