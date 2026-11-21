@@ -9,6 +9,8 @@ use call::{
     Obligation, PromotePemState, StateLabel, TransferState,
 };
 
+use crate::lifecycle::RouteAnswer;
+
 /// The **refined view** of a [`Call`] a rule reads (ADR-0020 X8) — the entire
 /// read surface a rule handler, `Match::filter` guard, or service `init` hook
 /// gets. A borrowed newtype exposing only the *semantic* call state; there is
@@ -26,14 +28,29 @@ use call::{
 /// `emergency`. Add an accessor only when a real rule needs it — never
 /// speculatively.
 #[derive(Clone, Copy)]
-pub struct RuleCall<'a>(pub(crate) &'a Call);
+pub struct RuleCall<'a>(pub(crate) &'a Call, Option<&'a RouteAnswer>);
 
 impl<'a> RuleCall<'a> {
     /// Wrap a call for rule consumption. Built by the engine at the dispatch
     /// boundary (router / seed path); constructing one grants only the narrow
     /// read surface below.
     pub fn new(call: &'a Call) -> Self {
-        Self(call)
+        Self(call, None)
+    }
+
+    /// The view a service's `init` reads at call setup: `call` as the setup
+    /// routed it, and `route`, the routing answer the setup applied.
+    pub fn at_setup(call: &'a Call, route: &'a RouteAnswer) -> Self {
+        Self(call, Some(route))
+    }
+
+    /// The routing answer the call's setup applied, as a service's `init`
+    /// reads it (ADR-0016 X8): the route the limiter admitted, or the
+    /// failover route that stood in for a refused one. Its slices are the
+    /// ones the route states; [`ext`](Self::ext) also keeps those a refused
+    /// route left. `None` outside `init`, and at a setup that applied no route.
+    pub fn setup_route(&self) -> Option<&'a RouteAnswer> {
+        self.1
     }
 
     // ── identity / lifecycle ─────────────────────────────────────────────

@@ -8,9 +8,9 @@
 //!
 //! ## Flow (`OfferingMrf → Announcing → [*]`)
 //!
-//! When the routing decision requests an announcement (its
-//! `service_ext["announcement"]` lands on `call.ext`, and `apply_route` defers
-//! the normal destination routing), the service:
+//! When the route the setup applies requests an announcement (its own
+//! `service_ext["announcement"]`, which lands on `call.ext` and defers the
+//! normal destination routing), the service:
 //!
 //! 1. **init** seeds the cursor at `OfferingMrf` and launches an unadopted
 //!    `media` leg toward the MRF (in parallel with setup).
@@ -66,6 +66,13 @@ struct AnnData {
 
 fn ann_data(call: &RuleCall) -> Option<AnnData> {
     let v = call.ext()?.get(EXT_KEY)?.clone();
+    serde_json::from_value(v).ok()
+}
+
+/// The announcement the route the setup applied requests: its own slice, never
+/// one a route the limiter refused left on the call.
+fn requested(call: &RuleCall) -> Option<AnnData> {
+    let v = call.setup_route()?.service_ext.get(EXT_KEY)?.clone();
     serde_json::from_value(v).ok()
 }
 
@@ -256,7 +263,7 @@ define_service! {
     // Activate iff the routing decision requested an announcement; seed the
     // cursor and launch the unadopted media leg toward the MRF.
     init: |call: &RuleCall| {
-        let data = ann_data(call)?;
+        let data = requested(call)?;
         Some(
             b2bua_sdk::rules::ServiceSeed::new(State::OfferingMrf.label()).with_actions(vec![
                 RuleAction::CreateLeg {

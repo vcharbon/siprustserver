@@ -15,7 +15,7 @@ use crate::effects::HandlerResult;
 use b2bua_sdk::event::CallEvent;
 
 use super::actions::ActionExecutor;
-use b2bua_sdk::model::{RuleCall, RuleContext};
+use b2bua_sdk::model::{RouteAnswer, RuleCall, RuleContext};
 
 // Re-export the authoring registry types so `crate::rules::{ServiceDef,
 // ServiceSeed}` and the macros' `$crate::rules::…` references resolve identically
@@ -37,13 +37,15 @@ pub fn compose_rules(services: &[ServiceDef], core: Vec<RuleDefinition>) -> Vec<
 
 /// Run every service's `init` once at call setup and fold the returned seeds —
 /// cursor + data backing + initial actions — through the normal executor/effects
-/// pipeline (ADR-0016 X8). The cursor is keyed by the service id (== machine
-/// id). A dormant service (`init` → `None`) is skipped. A seed that ends the
-/// call (a refused `CreateLeg`) ends the seeding: no later service is seeded on
-/// a terminating call. With an empty service list this returns `result`
-/// unchanged.
+/// pipeline (ADR-0016 X8). Each `init` reads `route`, the routing answer the
+/// setup applied ([`RuleCall::setup_route`]). The cursor is keyed by the service
+/// id (== machine id). A dormant service (`init` → `None`) is skipped. A seed
+/// that ends the call (a refused `CreateLeg`) ends the seeding: no later service
+/// is seeded on a terminating call. With an empty service list this returns
+/// `result` unchanged.
 pub fn seed_services(
     mut result: HandlerResult,
+    route: Option<&RouteAnswer>,
     services: &[ServiceDef],
     exec: &mut ActionExecutor,
     setup_event: &CallEvent,
@@ -54,7 +56,11 @@ pub fn seed_services(
         if matches!(result.call.state, CallModelState::Terminating | CallModelState::Terminated) {
             break;
         }
-        let Some(seed) = (def.init)(&RuleCall::new(&result.call)) else {
+        let view = match route {
+            Some(route) => RuleCall::at_setup(&result.call, route),
+            None => RuleCall::new(&result.call),
+        };
+        let Some(seed) = (def.init)(&view) else {
             continue;
         };
         // 1) seed the cursor (the service id is its machine id),

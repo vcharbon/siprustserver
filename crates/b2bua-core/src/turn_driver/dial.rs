@@ -13,7 +13,7 @@ use sip_message::SipRequest;
 
 use super::landed::landed;
 use super::{Driver, Session};
-use crate::decision::route_fold::{self, Admitting};
+use crate::decision::route_fold::{self, Admitting, Routed};
 use crate::effects::HandlerResult;
 use crate::initial_invite::{build_initial_call, reject_call, setup_event};
 use crate::owners::Owners;
@@ -67,13 +67,15 @@ pub(super) fn fold(driver: &Driver, invite: &SipRequest) -> Option<HandlerResult
 fn routed(driver: &Driver, call: Call, caller: &SipRequest, turn: &mut TurnScope) -> HandlerResult {
     let config = &driver.config;
     let ids = &mut turn.ids;
-    let result = match route_fold::up_to_admit(call, driver.route.clone(), caller, config, 0, 0) {
-        Admitting::Final(result) => *result,
-        Admitting::Admit(admitting) => {
-            route_fold::admitted(*admitting, caller, config, Owners::none(), ids, 0, 0)
-        }
-    };
+    let Routed { result, route } =
+        match route_fold::up_to_admit(call, driver.route.clone(), caller, config, 0, 0) {
+            Admitting::Final(result) => Routed::final_only(*result),
+            Admitting::Admit(admitting) => {
+                route_fold::admitted(*admitting, caller, config, Owners::none(), ids, 0, 0)
+            }
+        };
     let setup = setup_event(&result.call, caller);
     let mut exec = executor(config, turn);
-    seed_services(result, &driver.services, &mut exec, &setup, "a", Direction::FromA)
+    let services = &driver.services;
+    seed_services(result, route.as_ref(), services, &mut exec, &setup, "a", Direction::FromA)
 }

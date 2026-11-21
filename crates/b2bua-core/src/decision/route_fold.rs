@@ -179,10 +179,32 @@ pub fn refused(route: AdmittingRoute) -> (Call, HandlerEffects) {
     (call, fx)
 }
 
+/// What a route decision applied on the setup turn comes to: the turn's
+/// result, and the route it applied, the first or the failover that stood in
+/// for a refused one.
+pub struct Routed {
+    pub result: HandlerResult,
+    /// The routing answer the setup applied, which the services seeded after
+    /// it read (`RuleCall::setup_route`): the admitted route's, its dial made
+    /// or deferred to a service. `None` when the call was answered its final
+    /// instead.
+    pub route: Option<RouteAnswer>,
+}
+
+impl Routed {
+    /// The call answered its final: no route applied.
+    pub fn final_only(result: HandlerResult) -> Self {
+        Self { result, route: None }
+    }
+}
+
 /// Dial the admitted route's b-leg under the attempt it opens, its INVITE
 /// leaving at `sent_ms`, after the admission the turn waited on: the INVITE's
 /// `Timestamp` and `OutboundInvite::sent_at_ms` read it. A route whose dial a
-/// service defers opens none here. `now_ms` is the turn's timestamp: every CDR
+/// service defers (`defers_routing`, ADR-0016) opens none here: the
+/// service's `init` creates the legs (e.g. a media leg toward an MRF, the
+/// destination later), and the duration cap and the setup deadline still arm
+/// under their anchors. `now_ms` is the turn's timestamp: every CDR
 /// entry and the setup deadline and duration cap read it; `owners` are the
 /// call's, as the shell states them.
 #[allow(clippy::too_many_arguments)]
@@ -194,7 +216,7 @@ pub fn admitted(
     ids: &mut TurnIds,
     now_ms: i64,
     sent_ms: i64,
-) -> HandlerResult {
+) -> Routed {
     let AdmittingRoute { mut call, mut fx, route, answer, cause, ring, depth } = route;
     // The route is admitted: it is what the call is handled under from here
     // on, and the leg it dials, or the service that dials for it, is stamped
@@ -205,13 +227,7 @@ pub fn admitted(
     let leg_id = (depth == 0).then(|| "a".to_string());
     mark_decision(&mut call, now_ms, kind, leg_id, route.label.clone());
 
-    // Announcement / deferred-routing services (ADR-0016): when the decision
-    // attaches a `service_ext` slice that defers routing (it set
-    // `call.ext[<id>].defer_routing == true`), the normal destination leg is NOT
-    // created here — the service's `init` owns leg creation (e.g. an unadopted
-    // media leg toward an MRF, dialing the real destination later). The
-    // GlobalDuration backstop below still arms for the call under its anchor.
-    if defers_routing(&call) {
+    if defers_routing(&answer) {
         if route.features.platform.arms_cap_at_creation(config.setup_timeout_ms) {
             arm_global_duration(
                 &mut call,
@@ -221,7 +237,7 @@ pub fn admitted(
             );
         }
         arm_setup_timeout(&mut call, &mut fx, config.setup_timeout_ms, now_ms);
-        return HandlerResult { call, effects: fx };
+        return Routed { result: HandlerResult { call, effects: fx }, route: Some(answer) };
     }
 
     // NOTE: a DNS-name b-leg callee (e.g. a headless-StatefulSet `sipp-uas` pod
@@ -269,7 +285,7 @@ pub fn admitted(
         )]
         .into_iter()
         .collect();
-        return crate::initial_invite::reject_call(
+        return Routed::final_only(crate::initial_invite::reject_call(
             call,
             a_invite,
             420,
@@ -279,7 +295,7 @@ pub fn admitted(
             &config.minted_final_advertisement,
             now_ms,
             TerminationCause::Admission,
-        );
+        ));
     }
     // A decision field that does not read has no destination behind it: refuse
     // the route rather than originate toward a fabricated address. The
@@ -315,7 +331,7 @@ pub fn admitted(
                 detail = %err.detail(),
                 "routing decision refused"
             );
-            return crate::initial_invite::reject_call(
+            return Routed::final_only(crate::initial_invite::reject_call(
                 call,
                 a_invite,
                 500,
@@ -325,7 +341,7 @@ pub fn admitted(
                 &config.minted_final_advertisement,
                 now_ms,
                 TerminationCause::Admission,
-            );
+            ));
         }
     };
 
@@ -354,8 +370,8 @@ pub fn admitted(
     fx.outbound.push(effect);
     // The leg rings for the attempt's deadline from its first 18x
     // (`ring_deadline`).
-    let attempt =
-        crate::attempts::open(&mut call, &mut fx, AttemptOpening::new(cause, answer).ringing(ring));
+    let opening = AttemptOpening::new(cause, answer.clone()).ringing(ring);
+    let attempt = crate::attempts::open(&mut call, &mut fx, opening);
     call::helpers::join_attempt(&mut call, attempt, leg_id);
 
     // Global-duration backstop, armed at *call creation* (not just at answer).
@@ -387,7 +403,7 @@ pub fn admitted(
     }
     arm_setup_timeout(&mut call, &mut fx, config.setup_timeout_ms, now_ms);
 
-    HandlerResult { call, effects: fx }
+    Routed { result: HandlerResult { call, effects: fx }, route: Some(answer) }
 }
 
 /// Arm the GlobalDuration absolute-cap backstop on the call, replacing the
@@ -416,12 +432,15 @@ fn arm_setup_timeout(call: &mut Call, fx: &mut HandlerEffects, setup_timeout_ms:
     }
 }
 
-/// Whether any service-ext slice asks the framework to defer normal destination
-/// routing (its `defer_routing` flag is `true`), so the owning service's `init`
-/// creates the legs instead (ADR-0016). Generic — no service is named here.
-fn defers_routing(call: &Call) -> bool {
-    call.ext.as_ref().is_some_and(|ext| {
-        ext.values().any(|v| v.get("defer_routing").and_then(|d| d.as_bool()) == Some(true))
+/// Whether a service slice the applied route states asks the framework to
+/// defer normal destination routing (its `defer_routing` flag is `true`), so
+/// the owning service's `init` creates the legs instead (ADR-0016). A slice an
+/// earlier, refused route left on `call.ext` defers nothing; a core-reserved
+/// key is no slice. Generic — no service is named here.
+fn defers_routing(answer: &RouteAnswer) -> bool {
+    answer.service_ext.iter().any(|(key, slice)| {
+        !crate::rules::relay::is_core_reserved_ext(key)
+            && slice.get("defer_routing").and_then(|d| d.as_bool()) == Some(true)
     })
 }
 
