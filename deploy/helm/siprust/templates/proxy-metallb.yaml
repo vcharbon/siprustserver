@@ -1,8 +1,8 @@
 {{- if and .Values.proxy.enabled .Values.proxy.announce.metallb.enabled }}
 {{- /*
 The MetalLB objects of the proxy's announcement (ADR-0056), in MetalLB's own
-namespace, where MetalLB reads them: one address pool per VIP (a /32, never
-auto-assigned), one BGP advertisement per pool to that face's routers only,
+namespace, where MetalLB reads them: one address pool per VIP (its
+one-address prefix, /32 or /128 for IPv6, never auto-assigned), one BGP advertisement per pool to that face's routers only,
 one peer per router from the proxy's nodes, all under one BFD profile. No
 BGP graceful restart: a dead node's routes go with its BFD session. Each
 peer's connect retry is connectTimeSeconds, so a node its route guard lets
