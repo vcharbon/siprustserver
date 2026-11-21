@@ -286,6 +286,7 @@ mod unacked_reinvite_2xx_reap;
 mod unaddressable_next_hop;
 mod unanswered_at_release;
 mod unanswered_failure_consult;
+mod unknown_require_420;
 mod unparseable_final;
 mod unreadable_reliable_provisional;
 mod unreadable_routing_target;
