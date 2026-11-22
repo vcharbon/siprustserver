@@ -113,8 +113,9 @@ struct Dialog {
     /// sent: a repeat of one is its server transaction's replay (RFC 3261
     /// §17.2.2), judged once.
     answered: BTreeSet<(u32, String)>,
-    /// Whether the UA, as UAS, ended it with a non-2xx final the peer has not
-    /// provably seen: neither the caller's ACK of that final (RFC 3261
+    /// Whether the UA, as UAS, ended it early with a non-2xx final the peer
+    /// has not provably seen (one the final opens is seen with its tag):
+    /// neither the caller's ACK of that final (RFC 3261
     /// §17.2.1) nor a new INVITE of the caller (§8.1.3.5) reached the UA yet,
     /// so a request the peer sent on it, or a 2xx to one the UA sent, may
     /// cross the final. The peer's messages are taken to reach the UA in the
@@ -381,13 +382,13 @@ impl DialogTable {
                 }
             }
             300.. => {
-                self.dialogs.entry(id).or_insert_with(|| fresh(DialogState::Early));
                 for d in self.dialogs.values_mut() {
                     if d.invite == key && d.state == DialogState::Early {
                         d.state = DialogState::EndedByFinal(status);
                         d.final_unseen = key.role == Role::Uas;
                     }
                 }
+                self.dialogs.entry(id).or_insert_with(|| fresh(DialogState::EndedByFinal(status)));
             }
             _ => {}
         }

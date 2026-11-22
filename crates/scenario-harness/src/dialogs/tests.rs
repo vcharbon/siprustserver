@@ -429,6 +429,20 @@ fn a_request_after_the_ack_of_the_uas_own_final_is_a_finding() {
     assert_eq!(v.kind, VerdictKind::CrossedFinal { by: 487 });
 }
 
+/// A non-2xx final with no provisional before it is the first message to
+/// carry its To-tag: a request naming that tag follows the final, so it is a
+/// finding.
+#[test]
+fn a_request_on_the_tag_of_a_final_with_no_provisional_is_a_finding() {
+    let mut t = DialogTable::new(BackwardsCseq::Verdict);
+    assert_eq!(t.judge_received(&request("INVITE", 1, "A1", None), 0), None);
+    t.note_sent_response(&response(487, "INVITE", 1, "A1", "B1"), 0);
+    assert_eq!(
+        kind(t.judge_received(&callers_info(), 0)),
+        Some(VerdictKind::Ended { by: Some(487) })
+    );
+}
+
 /// RFC 3261 §17.2.2: the peer's server transaction replays its 2xx for each
 /// retransmission of the request it answers. A 2xx the UA took on a dialog
 /// is judged once: its replay after the ACK of the UA's final is no verdict.

@@ -11,12 +11,23 @@ use crate::{Harness, WaiverScope, ANSWER_SDP, OFFER_SDP};
 
 /// bob, an actor that answers at once and stays up until the caller's BYE.
 fn answering_bob(bob: &crate::Agent) -> CallPlan {
+    bob_until(bob, Disposition::Answer, MediaState::answer(ANSWER_SDP), LegPhase::Confirmed)
+}
+
+/// bob, an actor of `disposition`, in a plan whose one phase waits for his
+/// leg to reach `until`.
+fn bob_until(
+    bob: &crate::Agent,
+    disposition: Disposition,
+    media: MediaState,
+    until: LegPhase,
+) -> CallPlan {
     CallPlan {
         actors: vec![ActorSpec {
             role: "bob",
             agent: bob.clone(),
-            disposition: Disposition::Answer,
-            media: MediaState::answer(ANSWER_SDP),
+            disposition,
+            media,
             goals: vec![],
             invite_targets: vec![],
             via: None,
@@ -26,7 +37,7 @@ fn answering_bob(bob: &crate::Agent) -> CallPlan {
             answers: Default::default(),
             claim: None,
         }],
-        plan: vec![phase("established", |s| s.leg_at_least("bob", LegPhase::Confirmed))],
+        plan: vec![phase("bob's leg reached", move |s| s.leg_at_least("bob", until))],
         settle: SettleBarrier::default_ceiling(),
         automatics: Automatics::default(),
         delta_policy: None,
@@ -74,6 +85,38 @@ async fn the_actor_refuses_a_request_on_no_dialog_with_481() {
         WaiverScope::rule(DIALOG_UNKNOWN, "alice forges the To-tag on purpose").on_party("bob"),
     );
     forged_options_drawn_481(&h).await;
+    h.finish().await;
+}
+
+/// RFC 3261 §12.3: alice CANCELs bob's ringing call, then sends him an INFO
+/// on the early dialog before his 487 reaches her. bob's actor answers it
+/// 481 on its own, and the run passes: the INFO crossed his final.
+#[tokio::test(start_paused = true)]
+async fn the_actor_refuses_a_request_crossing_its_final_with_481_and_passes() {
+    let h = Harness::new("actor-dialog-crossing-final").describe(
+        "alice CANCELs bob's ring and sends an early INFO before his 487 reaches her: \
+         bob answers it 481 and no dialog verdict fails the run",
+    );
+    let alice = h.agent("alice", "127.0.0.1:5060").await;
+    let bob = h.agent("bob", "127.0.0.1:5070").await;
+    let alice_task = {
+        let (alice, bob) = (alice.clone(), bob.clone());
+        tokio::spawn(async move {
+            let mut call = alice.invite(&bob).with_sdp(OFFER_SDP).send().await;
+            call.expect(180).await;
+            let mut cancel = call.cancel().await;
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            let mut info = call.send_request(InDialogMethod::Info).send().await;
+            info.expect(481).await;
+            cancel.expect(200).await;
+            call.expect(487).await;
+        })
+    };
+    let silent =
+        bob_until(&bob, Disposition::RingThenSilent, MediaState::none(), LegPhase::Terminated);
+    let verdict = run_call(silent, Duration::from_secs(5)).await;
+    assert!(verdict.is_ok(), "the refused call completes, got {verdict:?}");
+    alice_task.await.unwrap();
     h.finish().await;
 }
 

@@ -68,7 +68,9 @@ Automatic (you cannot opt out, only waive per-rule):
   in-dialog request on no dialog it holds, on an ended dialog, or with a
   CSeq that goes backwards or skips is a verdict: a scripted `receive` fails
   at once with a `StepError::Dialog`, the actor answers it 481 (500, 491) on
-  its own, and `finish()` fails on it. A test that sends such a message on
+  its own, and `finish()` fails on it. A request that crosses the UA's own
+  non-2xx final is answered 481 and fails nothing (the module doc says when
+  it crosses). A test that sends such a message on
   purpose waives the `dialog-…` rule on the receiving UA
   (`h.waive(WaiverScope::rule(DIALOG_UNKNOWN, why).on_party("alice"))`); a
   dialog waiver naming no UA covers nothing.
