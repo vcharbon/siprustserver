@@ -6,7 +6,7 @@ use layer_harness::{LaneKey, Stamped};
 use sip_message::{SipMessage, SipParser};
 
 use crate::contracts::SignalingNetworkEvent;
-use crate::rfc_audit::msg_reads::{call_id, cseq_seq, request_method, status, to_tag};
+use crate::rfc_audit::msg_reads::{call_id, cseq_method, cseq_seq, request_method, status, to_tag};
 use crate::types::RecvDisposition;
 
 /// One datagram the loss model dropped between `lane` and the party address
@@ -23,6 +23,7 @@ struct Lost {
     /// The response status; `None` for a request.
     status: Option<u16>,
     cseq: u32,
+    cseq_method: String,
     to_tag: Option<String>,
 }
 
@@ -94,6 +95,24 @@ impl Dropped {
     }
 
     /// Whether the loss model dropped, on its way from `party` to `lane` on
+    /// the call `call_id`, a `status` final to the request `method` `cseq`:
+    /// the party issued it, and the lane took a later copy, if any.
+    pub(crate) fn final_to(
+        &self,
+        (lane, party, call_id): (&str, &str, &str),
+        (method, cseq): (&str, u32),
+        status: u16,
+    ) -> bool {
+        self.0.iter().any(|l| {
+            l.toward_lane
+                && l.between(lane, party, call_id)
+                && l.status == Some(status)
+                && l.cseq == cseq
+                && l.cseq_method.eq_ignore_ascii_case(method)
+        })
+    }
+
+    /// Whether the loss model dropped, on its way from `party` to `lane` on
     /// the call `call_id`, a provisional above 100 carrying the To tag
     /// `to_tag`.
     pub(crate) fn provisional_to(
@@ -120,6 +139,7 @@ impl Lost {
             method: request_method(m).map(|method| method.as_str().to_string()),
             status: Some(status(m)).filter(|s| *s != 0),
             cseq: cseq_seq(m),
+            cseq_method: cseq_method(m).to_string(),
             to_tag: to_tag(m).map(str::to_string),
         }
     }

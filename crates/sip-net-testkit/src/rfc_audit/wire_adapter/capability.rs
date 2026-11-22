@@ -7,8 +7,16 @@ pub(super) const LIVE: &[Live] = &[
     Live::taker(RuleId::AllowSupportedOnInvite, allow_supported_on_invite)
         .advisory()
         .skip(Skip::RelayLanes),
-    Live::emitter(RuleId::UnsupportedMethod405Allow, unsupported_method_405_allow),
-    Live::emitter(RuleId::UnsupportedExtension420, unsupported_extension_420),
+    Live::emitter_unless(
+        RuleId::UnsupportedMethod405Allow,
+        rejection_405_lost,
+        unsupported_method_405_allow,
+    ),
+    Live::emitter_unless(
+        RuleId::UnsupportedExtension420,
+        rejection_420_lost,
+        unsupported_extension_420,
+    ),
     Live::emitter(RuleId::Unsupported415Accepts, unsupported_415_accepts),
     Live::emitter(RuleId::UnsupportedExtension421, unsupported_extension_421),
     Live::emitter(RuleId::OptionsResponseEchoes, options_response_echoes),
@@ -37,6 +45,53 @@ fn allow_supported_on_invite(f: &rfc_rules::Finding, _cid: &str) -> String {
         })
         .collect::<Vec<_>>()
         .join("; ")
+}
+
+/// A 405 the lane's view misses whose copy the loss model dropped on its way
+/// there from the emitter ([`rejection_lost`]).
+fn rejection_405_lost(
+    dropped: &Dropped,
+    lane: &LaneKey,
+    f: &rfc_rules::Finding,
+    cid: &str,
+    _: &[Msg],
+) -> bool {
+    rejection_lost(dropped, lane, f, cid, 405)
+}
+
+/// A 420 the lane's view misses whose copy the loss model dropped on its way
+/// there from the emitter ([`rejection_lost`]).
+fn rejection_420_lost(
+    dropped: &Dropped,
+    lane: &LaneKey,
+    f: &rfc_rules::Finding,
+    cid: &str,
+    _: &[Msg],
+) -> bool {
+    rejection_lost(dropped, lane, f, cid, 420)
+}
+
+/// A rejection the taker `lane` never took, the loss model having dropped a
+/// `status` final to that request on its way there from the emitter: the
+/// emitter issued the rejection, and its §17.2.2 re-sent copy fell outside
+/// the view. A wrong final the view holds, or one of another status lost, is
+/// never excused.
+fn rejection_lost(
+    dropped: &Dropped,
+    lane: &LaneKey,
+    f: &rfc_rules::Finding,
+    cid: &str,
+    status: u16,
+) -> bool {
+    let Decision::Violated(rfc_rules::Evidence::RejectionNotIssued {
+        method,
+        answered_status: 0,
+        ..
+    }) = &f.decision
+    else {
+        return false;
+    };
+    dropped.final_to((lane, &f.emitter, cid), (method, f.cseq), status)
 }
 
 fn unsupported_method_405_allow(f: &rfc_rules::Finding, cid: &str) -> String {
