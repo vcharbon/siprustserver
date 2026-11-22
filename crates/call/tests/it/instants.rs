@@ -27,6 +27,7 @@ fn every_instant_present() -> Call {
         started_at_ms: 1_779_440_060_000,
         last_c_leg_provisional_status: None,
         c_initial_sdp: None,
+        pending_a_realign: None,
     });
     call.termination = Some(Termination {
         at_ms: 1_779_440_070_000,

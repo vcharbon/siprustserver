@@ -13,15 +13,15 @@
 
 use call::features::{FeatureActivations, RelayFirst18xStrategy};
 use call::{
-    CdrEventType, Direction, LegState, PendingResync, PromotePemState, TerminationCause, TimerKey,
-    TimerType,
+    CdrEventType, Direction, LegState, PromotePemState, TerminationCause, TimerKey, TimerType,
 };
 use sip_message::draft::Entry;
 use sip_message::header::HeaderName;
 use sip_message::sdp_media_equivalent;
-use sip_message::{SipHeader, SipResponse, SipStr};
+use sip_message::{SipHeader, SipResponse};
 
 use super::capabilities::{self, Face};
+use super::pending_reinvite;
 use b2bua_sdk::model::{
     Body, LegEnd, Match, MessageTransform, RuleAction, RuleContext, RuleDefinition,
     RuleHandleResult, TimerDelay, SERVICE_LAYER,
@@ -69,15 +69,6 @@ fn window_open(ctx: &RuleContext) -> bool {
 /// progress until it, and no resync re-INVITE may leave (RFC 3261 §14.1).
 fn a_ack_awaited(ctx: &RuleContext) -> bool {
     call::helpers::carrying_dialog(ctx.call.a_leg()).and_then(call::helpers::answered_2xx).is_some()
-}
-
-/// The lines of B's 200 a resync reads, kept in the record: those describing
-/// its body and those stating his advertisement ([`a_facing_advert`]).
-fn resync_lines(headers: &[SipHeader]) -> Vec<call::SipHeader> {
-    sip_message::generators::body_and_advertisement_lines(headers)
-        .into_iter()
-        .map(|h| call::SipHeader { name: h.name.to_string(), value: h.value.to_string() })
-        .collect()
 }
 
 /// The resync re-INVITE toward Alice offering `body`, B's final description
@@ -289,11 +280,7 @@ pub fn promote_pem_rules() -> Vec<RuleDefinition> {
                     return ok(actions);
                 }
                 if a_ack_awaited(ctx) {
-                    let pending = PendingResync {
-                        leg_id: b,
-                        body: resp.body().to_vec(),
-                        lines: resync_lines(resp.headers()),
-                    };
+                    let pending = pending_reinvite::park(&b, resp.body(), resp.headers());
                     let pending_resync = Some(Box::new(pending));
                     actions.push(RuleAction::SetPromotePem {
                         state: Some(PromotePemState { pending_resync, ..state }),
@@ -314,14 +301,7 @@ pub fn promote_pem_rules() -> Vec<RuleDefinition> {
             |ctx| {
                 let state = ctx.call.promote_pem_state()?.clone();
                 let pending = state.pending_resync.clone()?;
-                let lines: Vec<SipHeader> = pending
-                    .lines
-                    .iter()
-                    .map(|l| SipHeader {
-                        name: SipStr::owned(&l.name),
-                        value: SipStr::owned(&l.value),
-                    })
-                    .collect();
+                let lines = pending_reinvite::lines(&pending);
                 let relay_ack = RuleAction::RelayToPeer { transform: MessageTransform::default() };
                 let mut actions = vec![relay_ack];
                 actions.extend(resync(ctx, &pending.leg_id, &pending.body, &lines, state));

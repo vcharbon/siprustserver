@@ -58,6 +58,11 @@ pub struct TransferState {
     /// a-realign re-INVITE can offer it back to A.
     #[serde(with = "serde_bytes")]
     pub c_initial_sdp: Option<Vec<u8>>,
+    /// The a-realign re-INVITE C's c-realign 2xx called for while A's ACK of
+    /// a 2xx this stack sent her was awaited: it leaves on that ACK (RFC 3261
+    /// §14.1). Boxed: every turn future holding a call carries its size.
+    #[serde(default)]
+    pub pending_a_realign: Option<Box<PendingResync>>,
 }
 
 /// An internal release event the decision backend can subscribe to on a
@@ -147,12 +152,14 @@ pub struct PromotePemState {
     pub pending_resync: Option<Box<PendingResync>>,
 }
 
-/// A resync re-INVITE toward Alice waiting for her ACK of the synthetic 200:
-/// B's final description and the lines of his 200 that describe it or state
-/// his advertisement.
+/// A re-INVITE toward Alice waiting for her ACK of a 2xx this stack sent her
+/// (RFC 3261 §14.1): the description it offers and the lines of the message
+/// that carried it that describe it or state its sender's advertisement. The
+/// promotion's resync offers B's final description, the transfer's a-realign
+/// C's c-realign answer.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingResync {
-    /// B's leg, whose peer wrote the description.
+    /// The leg whose peer wrote the description.
     pub leg_id: String,
     #[serde(with = "serde_bytes")]
     pub body: Vec<u8>,
