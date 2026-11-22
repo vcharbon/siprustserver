@@ -1,7 +1,8 @@
 //! A backend client on the real transport and the real clock, on loopback,
 //! well under 1 s each: what the paused clock and the simulated fabric cannot
 //! show — timer rounding against the retry's room, the pool's connections
-//! against a moved name, and an answer past the body cap at the breaker.
+//! against a moved name, and an answer past the body cap at the breaker and
+//! its probe.
 
 #![cfg(feature = "real")]
 
@@ -10,11 +11,12 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use async_trait::async_trait;
 use http_net::backend::metrics;
 use http_net::failures::FailureCause;
 use http_net::{
-    AttemptError, BackendClient, BreakerConfig, Budgets, ClientSettings, HttpRequest,
-    MemoryResolver, RealHttpNetwork, ResolvedTarget,
+    AttemptError, BackendClient, BreakerConfig, Budgets, ClientSettings, HttpRequest, HttpResponse,
+    HttpService, HttpTransport, MemoryResolver, RealHttpNetwork, ResolvedTarget,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -188,4 +190,48 @@ async fn answers_past_the_body_cap_keep_the_breaker_closed() {
 
     assert!(!client.is_open(), "three answers inside the window: the backend is alive");
     assert_eq!(metrics::retries(&addr.to_string()), 0, "a body past the cap is not retried");
+}
+
+/// Answers every request 200 with a body of 2048 bytes, counting them.
+#[derive(Default)]
+struct LargeHealth {
+    served: AtomicUsize,
+}
+
+#[async_trait]
+impl HttpService for LargeHealth {
+    async fn handle(&self, _req: HttpRequest) -> HttpResponse {
+        self.served.fetch_add(1, Ordering::SeqCst);
+        HttpResponse::ok(vec![b'x'; 2048])
+    }
+}
+
+/// A probe of an open breaker answered with a body past the cap: the backend
+/// answered, so the first probe closes the breaker.
+#[tokio::test]
+async fn a_probe_answered_past_the_body_cap_closes_the_breaker() {
+    let net = RealHttpNetwork::new();
+    let health = Arc::new(LargeHealth::default());
+    let server = net.serve("127.0.0.1:0".parse().unwrap(), health.clone()).await.unwrap();
+    let settings = ClientSettings { max_body_bytes: 1024, ..ClientSettings::default() };
+    let breaker =
+        BreakerConfig { probe_period: Duration::from_millis(50), ..BreakerConfig::probing("/") };
+    let target = Arc::new(ResolvedTarget::addr(server.local_addr()));
+    let client = BackendClient::new(real(), target, settings, breaker);
+    let mut open = client.breaker_state();
+
+    client.trip();
+    let closed = tokio::time::timeout(Duration::from_millis(500), async {
+        while *open.borrow_and_update() {
+            open.changed().await.unwrap();
+        }
+    })
+    .await;
+
+    assert!(
+        closed.is_ok(),
+        "the breaker closed, probes served: {}",
+        health.served.load(Ordering::SeqCst)
+    );
+    assert_eq!(health.served.load(Ordering::SeqCst), 1, "one probe, answered past the cap");
 }

@@ -146,7 +146,10 @@ multi-thread runtime hyper-util may put the connection back in its pool as
 the answer resolves, before the poison, and a request on another thread may
 take it in that window: a connection the rules close carries at most two
 requests, its close counted once. The verdict and the poison come before
-anything is counted, so the window is the answer's own poll. A refused
+anything is counted, so the window is the answer's own poll. A second
+answer in that window still draws on the close budget, and may be counted
+as kept (`http_request_error_answers_total{connection}`) although its
+connection is already closing. A refused
 connect (a dead backend) stays a connect failure, retried under 7.
 
 An answer body is read under `<P>_MAX_BODY_BYTES` (10 MiB unless a backend
@@ -163,7 +166,9 @@ Every close is counted by cause in `http_request_connection_closes_total`:
 end of stream, or an answer with `Connection: close` or HTTP/1.0 without
 keep-alive), that a failed exchange or a refused body ended, or that a
 client keeping no pool (the probe) closed, is not a close of the client's.
-Each 5xx is counted by what became of its connection
+An answer its peer cut before the end of its body is the exception: its
+head is still judged, and a close it calls for is counted, although the
+peer ended the connection. Each 5xx is counted by what became of its connection
 (`http_request_error_answers_total{connection}`). The simulated fabric's
 pooled client applies the same rules and the same body cap.
 
