@@ -1,8 +1,9 @@
 //! A party's transaction layer outlives its scenario's last step over a
 //! network that loses datagrams: a copy of a request it answered draws that
 //! final again until Timer J (RFC 3261 §17.2.2), a repeat of a non-2xx final
-//! it ACKed draws its ACK again until Timer D (§17.1.1.2), so the SUT's own
-//! retransmissions complete its transactions and the call is reaped.
+//! it ACKed draws its ACK again until Timer D (§17.1.1.2), and a final it
+//! sent goes again until its ACK (§17.2.1), so the SUT's transactions
+//! complete and the call is reaped.
 
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -80,5 +81,36 @@ async fn a_non_2xx_final_repeated_after_a_lost_ack_draws_the_ack_again() {
     s.bob.receive("INVITE").await.respond(486, "Busy Here").await;
     s.bob.receive("ACK").await;
     call.expect(486).await;
+    s.finish().await;
+}
+
+fn request_terminated(raw: &[u8]) -> bool {
+    sniff::resp_status(raw) == Some(487)
+}
+
+/// Alice cancels her ringing call; bob's 487 to the B2BUA's INVITE is lost.
+/// Bob's INVITE server transaction sends the 487 again on Timer G after the
+/// scenario's last step, unasked, until the B2BUA's ACK; the B2BUA takes it
+/// and reaps the call.
+#[tokio::test(start_paused = true)]
+async fn a_lost_487_goes_again_until_its_ack_and_the_call_is_reaped() {
+    let bob_addr: SocketAddr = format!("127.0.0.1:{}", b2bua_harness::BOB_PORT).parse().unwrap();
+    let h = Harness::with_transit_delay_and_send_fate(
+        "served-after-the-call-487",
+        SIMULATED_TRANSIT_DELAY_MS,
+        lose_first(1, bob_addr, request_terminated),
+    );
+    let s =
+        B2buaScene::on_harness(h, |bob_port| B2buaSut::route_all_to("127.0.0.1", bob_port)).await;
+    assert_eq!(s.bob.addr(), bob_addr);
+    let mut call = s.alice.invite(&s.bob).with_sdp(OFFER_SDP).through(s.b2bua.addr).send().await;
+    let mut uas = s.bob.receive("INVITE").await;
+    uas.respond(180, "Ringing").await;
+    call.expect(180).await;
+    let mut cancel = call.cancel().await;
+    cancel.expect(200).await;
+    call.expect(487).await;
+    s.bob.receive("CANCEL").await.respond(200, "OK").await;
+    uas.respond(487, "Request Terminated").await;
     s.finish().await;
 }
