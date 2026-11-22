@@ -23,46 +23,53 @@ worker comes back after an outage the supervisor returns the whole POP's traffic
 ## Decision
 
 1. **The late-answer stamp.** A probe entry is kept `HEALTH_SLOW_WINDOW_MS` (2000) after its
-   send. An answer after the reply window and inside that one is a late answer: it stamps the
-   worker as answering late, counts nothing else, resets no miss and revives no worker.
+   send. An answer after the reply window (1.6 s) and inside that one is a late answer. It
+   stamps the worker as answering late when it would read the worker `Alive` (a `200`, not a
+   `503`) and names no other `X-Incarnation` than the last one read; it counts nothing else,
+   resets no miss and revives no worker. Any late answer gives the proxy reach.
 2. **Four states.** Health is `Unknown | Alive | Slow | Dead`.
-   - `Alive` or `Unknown` turn `Slow` at `HEALTH_THRESHOLD` misses while a late answer is
-     within the slow window; `Dead` at that count with none.
+   - `Alive` turns `Slow` at `HEALTH_THRESHOLD` misses while a late stamp is within the slow
+     window, and so does `Unknown` on an endpoint that reads ready; `Dead` at that count with
+     none. A worker answering later than the slow window reads `Dead`, as a silent one does.
    - `Slow` turns `Alive` after `HEALTH_RECOVER_PROBES` (3) answers in time in a row, and
-     `Dead` at a miss with no late answer within the slow window, or once
-     `HEALTH_SLOW_MAX_MS` (20000) was spent `Slow`, counted over its `Slow` spells until an
-     `Alive` spell as long.
+     `Dead` at a miss with no late stamp within the slow window. A worker answering inside it
+     stays `Slow`; a wedged one goes silent and its stalled-loop exit ends it.
    - `Dead` turns `Alive` on one answer in time.
    - A `Slow` or `Alive` worker's endpoint read not ready while its stamp is fresh reads
      `Slow`, not a dead verdict, until the endpoint reads ready again or the probe reads it
      dead.
-3. **A slow worker serves its dialogs.** Its cookie routes to it as primary or as backup, and
-   the dead notice reaches it. It gets no new dialog, except an emergency one while no worker
-   is `Alive`. A turn from `Alive` or `Slow` to `Dead` is a dead verdict; a turn from `Slow`
-   to `Alive` tells the worker every standing verdict again.
+3. **A slow worker serves its dialogs.** Its cookie routes to it as primary or as backup, a
+   request no memo places ranks it with the `Alive` ones, and the dead notice reaches it. It
+   gets no new dialog, except an emergency one while no worker is `Alive`. A turn to `Dead` is
+   a dead verdict from `Alive`, and from `Slow` or `Unknown` on an endpoint that reads ready or a
+   worker held `Slow`; a turn from `Slow` to `Alive` tells the worker every standing verdict
+   again.
 4. **Readiness and fitness.** The proxy is ready and fit while a worker is `Alive` or `Slow`.
    With every worker `Slow` it answers a normal new call `503` from its gates, places an
    emergency one, and its node keeps the VIPs.
 5. **The supervision answer.** An out-of-dialog OPTIONS with no To-tag whose Request-URI names
-   the proxy with no user part, at either face's address and port, with no parameter but
-   `transport`, is the proxy's own (RFC 3261 §11). While a worker is `Alive` or `Slow`, once
-   the first view is in, it is answered `200` with a To-tag and the `Allow`, `Supported` and
-   `Accept` a worker last stated on a probe answer. Otherwise it is dropped unanswered and
-   counted. It meets no gate and spends no token. `PROXY_LOCAL_OPTIONS=off` relays every
-   OPTIONS.
+   the proxy with no user part, at either face's advertise or specific bound address (an
+   unspecified bind names none) and port, with no parameter but `transport`, is the proxy's own
+   (RFC 3261 §11). While a worker is `Alive` or `Slow`, once the first view is in, it is
+   answered `200` with a To-tag and the `Allow`, `Supported` and `Accept` of the last `200` a
+   worker answered a probe with. Otherwise it is dropped unanswered and counted. It meets no gate
+   and spends no token. `PROXY_LOCAL_OPTIONS=off` relays every OPTIONS.
 6. **The intake ramp.** The proxy turning fit after an unfit spell that read no worker `Alive`
    or `Slow` starts a ramp: the self-gate admits `PROXY_RAMP_START_PCT` (20) percent of its rate
-   from a bucket scaled alike, rising linearly to the whole over `PROXY_RAMP_MS` (30000). The
-   process start, an isolation that ended before any verdict, a stalled shard and the external
-   face start none: a peer proxy carried the POP meanwhile.
+   from a bucket scaled alike until the first external INVITE, then rises linearly to the whole
+   over `PROXY_RAMP_MS` (30000) from it. The process start, an isolation that ended before any
+   verdict, a spell that began isolated and ended on the processes read serving before it (by
+   `X-Incarnation`), a stalled shard and the external face start none: a peer proxy carried the
+   POP meanwhile. A start of 100 or a span of 0 ramps nothing.
 7. **The per-worker cap restarts.** A worker turning `Alive` from `Dead` or `Slow` restarts its
-   AIMD cap at `PROXY_RAMP_START_PCT` percent of `LB_CAP_INITIAL_CPS`, the floor at least.
+   AIMD cap at `PROXY_RAMP_START_PCT` percent of `LB_CAP_INITIAL_CPS`, the floor at least, never
+   above the cap it holds. It climbs by the AIMD steps once a new dialog is placed on it.
 8. **Bounds.** The slow window is at least the reply window and lengthens no verdict on silence:
    `HEALTH_SLOW_WINDOW_MS` + `HEALTH_INTERVAL_MS` ≤ `HEALTH_THRESHOLD` × `HEALTH_INTERVAL_MS` +
-   `HEALTH_TIMEOUT_MS`, so a silent worker reads dead within ADR-0050's bound. The proxy refuses
-   a set that breaks it at startup, naming every variable. `HEALTH_SLOW_MAX_MS` exceeds the
-   worker's `B2BUA_LOOP_EXIT_MS`, checked at render: a wedged worker exits before it is read
-   dead for being slow too long.
+   `HEALTH_TIMEOUT_MS`. The dead verdict lands at most `HEALTH_THRESHOLD` × `HEALTH_INTERVAL_MS`
+   + `HEALTH_TIMEOUT_MS` (3.6 s) after the last answer the proxy received, in time or late;
+   after a late one, at most `HEALTH_SLOW_WINDOW_MS` + `HEALTH_INTERVAL_MS` (3 s). The proxy
+   refuses a set that breaks the relation at startup, naming every variable.
 
 ## Consequences
 
@@ -71,11 +78,14 @@ worker comes back after an outage the supervisor returns the whole POP's traffic
   reads dead as a silent one does.
 - A one-way partition that drops the answers reads dead; one that delays them reads slow.
 - The supervisor's verdict on a POP follows whether any worker serves, not one worker's load.
-- A POP back from a total outage takes its traffic over `PROXY_RAMP_MS`.
+- A POP back from a total outage takes its traffic over `PROXY_RAMP_MS` from its first call.
 
 ## Rejected
 
 - **A longer `HEALTH_TIMEOUT_MS`.** It slows every dead verdict, the one a crash needs fast.
+- **A cap on the time a worker stays `Slow`.** A worker answering inside the slow window
+  serves; a wedged one goes silent and reads dead, and its own stalled-loop exit ends it. A cap
+  would take the calls of a live worker over.
 - **Answering the supervision OPTIONS `503` with no worker.** A peer proxy's node withdrawing
   its route and the supervisor's own timeout take the POP out. A proxy answering `503` would
   differ from one whose node is already out.
@@ -84,5 +94,11 @@ worker comes back after an outage the supervisor returns the whole POP's traffic
 
 ## Residuals
 
-- An isolation that outlasts the dead verdict reads no worker serving, so it ramps on its end.
-  The proxy cannot tell its own partition from every worker failing.
+- Every worker turning late in one round: from the last answer in time, the next one is late by
+  the rise in lateness, so the proxy reads isolated for up to one interval plus that rise, less
+  `HEALTH_ISOLATION_MS`. A rise above about 1 s on every worker withdraws every proxy of the
+  POP, which returns after the first late answer and the route guard's hold.
+- A worker alive that answers later than the slow window reads dead: its in-dialog requests go
+  to its backup while it still runs, until it exits or answers in time again.
+- An isolation healed on workers that state no `X-Incarnation` ramps: the proxy cannot tell its
+  partition from every worker restarting.

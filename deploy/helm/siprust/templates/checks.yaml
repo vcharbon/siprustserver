@@ -32,7 +32,6 @@ each runner's startup check.
 | every RSS ceiling (B2BUA_MAX_RSS, _EMERGENCY, B2BUA_REPL_BACKUP_MAX_RSS) < worker `resources.limits.memory` | a ceiling at the limit is never reached before the OOM kill |
 | worker B2BUA_INVITE_TXN_TIMEOUT_SEC = proxy PROXY_INVITE_TXN_TIMEOUT_SEC (`inviteTxnTimeoutSec`) | the proxy keeps an INVITE's memo entry for the bound the workers ring under |
 | worker B2BUA_CALL_CONTROL_TIMEOUT_MS > proxy HEALTH_THRESHOLD × HEALTH_INTERVAL_MS + HEALTH_TIMEOUT_MS | a consult in flight outlasts the proxy's dead verdict on its worker, so a call whose worker dies unannounced is taken over before its consult gives up; the slow window lengthens no verdict on silence (the proxy's startup check, ADR-0069) |
-| proxy HEALTH_SLOW_MAX_MS > worker B2BUA_LOOP_EXIT_MS (its default: the larger of 15000 and B2BUA_LOOP_STALL_MS + 5000, B2BUA_LOOP_STALL_MS the larger of 10000 and B2BUA_CALL_CONTROL_TIMEOUT_MS + 5000) | a worker whose loop stalls exits before the proxy reads it dead for being slow too long, so a wedged worker's calls are taken over once it is gone (ADR-0069) |
 | proxy PROXY_BRANCH_MEMO_MAX_BYTES < proxy `resources.limits.memory` | the memo's accounted bytes fit the process |
 | `callLimiter.leaseSeconds` > 2 × worker LIMITER_REFRESH_SECONDS + LIMITER_REFRESH_BATCH_MS | a counted call's lease survives one missed refresh |
 | `proxy.hmac.existingSecret` set, or `proxy.hmac.drawInCluster` | a render without a cluster (helm template, GitOps) draws a new cookie key each time |
@@ -200,12 +199,6 @@ grammar, the call limiter's lease. */ -}}
 {{- $verdict := add (mul $threshold $interval) $window }}
 {{- if and (gt $consult 0) (le $consult $verdict) }}
 {{- fail (printf "worker B2BUA_CALL_CONTROL_TIMEOUT_MS=%d must exceed proxy HEALTH_THRESHOLD=%d × HEALTH_INTERVAL_MS=%d + HEALTH_TIMEOUT_MS=%d: a consult would give up before the proxy's dead verdict on its worker" $consult $threshold $interval $window) }}
-{{- end }}
-{{- $stall := include "siprust.envInt" (list $wenv "B2BUA_LOOP_STALL_MS" (max 10000 (add $consult 5000))) | int64 }}
-{{- $exit := include "siprust.envInt" (list $wenv "B2BUA_LOOP_EXIT_MS" (max 15000 (add $stall 5000))) | int64 }}
-{{- $slowMax := include "siprust.envInt" (list $penv "HEALTH_SLOW_MAX_MS" 20000) | int64 }}
-{{- if le $slowMax $exit }}
-{{- fail (printf "proxy HEALTH_SLOW_MAX_MS=%d must exceed worker B2BUA_LOOP_EXIT_MS=%d (B2BUA_LOOP_STALL_MS=%d, B2BUA_CALL_CONTROL_TIMEOUT_MS=%d): the proxy would read a worker dead for being slow while its stalled loop may still recover or exit" $slowMax $exit $stall $consult) }}
 {{- end }}
 {{- end }}
 {{- if .Values.proxy.enabled }}

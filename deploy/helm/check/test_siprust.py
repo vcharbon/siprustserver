@@ -299,16 +299,6 @@ class RenderRelations(unittest.TestCase):
         render(SIPRUST, *KIND, *args, "--set", "worker.terminationGracePeriodSeconds=32")
 
 
-    def test_a_slow_max_inside_the_workers_loop_exit_fails_the_render(self) -> None:
-        # The worker's loop exit defaults to max(15000, max(10000, 5000 + 5000) + 5000) = 15 s.
-        err = render_error(SIPRUST, *KIND, "--set-string", "proxy.env.HEALTH_SLOW_MAX_MS=15000")
-        for named in ("HEALTH_SLOW_MAX_MS=15000", "B2BUA_LOOP_EXIT_MS=15000",
-                      "B2BUA_LOOP_STALL_MS=10000", "B2BUA_CALL_CONTROL_TIMEOUT_MS=5000"):
-            self.assertIn(named, err)
-        render(SIPRUST, *KIND, "--set-string", "proxy.env.HEALTH_SLOW_MAX_MS=15001")
-        err = render_error(SIPRUST, *KIND, "--set-string", "worker.env.B2BUA_LOOP_EXIT_MS=20000")
-        self.assertIn("B2BUA_LOOP_EXIT_MS=20000", err)
-
     def test_a_replication_cap_below_the_peers_flows_fails_the_render(self) -> None:
         # 20 workers: 19 peers x 2 flows x a reconnect each = 76 above the default 64.
         err = render_error(SIPRUST, *KIND, "--set", "worker.replicas=20")
