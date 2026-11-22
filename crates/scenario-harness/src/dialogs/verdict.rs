@@ -27,7 +27,8 @@ pub enum VerdictKind {
     /// an early dialog). `reinvite` tells the two apart.
     OnEarlyDialog { reinvite: bool },
     /// A `status` 2xx answered a request the UA sent in dialog, on a dialog a
-    /// `by` non-2xx final had ended when the 2xx arrived (RFC 3261 §12.1.2).
+    /// `by` non-2xx final had ended when the 2xx arrived (RFC 3261 §12.1.2);
+    /// a final the UA sent counts once the peer showed it saw it.
     EndedAnswered { status: u16, by: u16 },
 }
 
