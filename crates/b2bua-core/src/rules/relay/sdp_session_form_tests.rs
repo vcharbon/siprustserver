@@ -238,16 +238,77 @@ fn a_kept_version_leaves_in_the_bytes_it_first_left_in() {
 }
 
 /// Where the version moves the description leaves in the service's form; that
-/// version's unchanged re-send leaves in that form again, in a dialog or in
-/// the initial INVITE's exchange.
+/// version's unchanged re-send leaves in that form again.
 #[test]
 fn a_kept_version_first_reformed_leaves_reformed_again() {
     let mut c = transferring();
     let moved = peer_sdp(ALICE_2, 10002);
-    for carried in [Carried::InDialog, Carried::InDialog, Carried::Opening] {
-        let out = send_in(&mut c, "b-1", Author::Leg("a"), carried, &moved, SdpForm::Canonical);
-        assert_eq!(out, in_form(ALICE_2, 10002), "{carried:?}");
+    for _ in 0..2 {
+        let out =
+            send_in(&mut c, "b-1", Author::Leg("a"), Carried::InDialog, &moved, SdpForm::Canonical);
+        assert_eq!(out, in_form(ALICE_2, 10002));
     }
+}
+
+/// What reaches the caller of `body`, written by `author`, in her early
+/// dialog `tag`, under [`CanonicalOnceRestated`].
+fn to_caller_in(
+    c: &mut Call,
+    tag: &str,
+    author: Author<'_>,
+    carried: Carried,
+    body: &str,
+) -> String {
+    let id = super::caller::face(c, tag);
+    let whole = Some(0..body.len());
+    let out = continue_on_leg(
+        c,
+        "a",
+        Some(&id),
+        author,
+        carried,
+        body.as_bytes().to_vec(),
+        whole,
+        policy(SdpForm::Canonical),
+    );
+    String::from_utf8(out).unwrap()
+}
+
+/// The callee's UPDATE in the caller's early dialog `x` moves the version
+/// after the call's restatement (in her early dialog `y`) and leaves in the
+/// service's form; the final of her INVITE repeating that version in `x`
+/// leaves in that form again, and so does a re-send once `x` confirms.
+#[test]
+fn a_final_repeating_an_early_update_leaves_in_its_form() {
+    let mut c = super::caller::early_caller();
+    let ringing = peer_sdp("bob 1 1 IN IP4 192.0.2.2", 20000);
+    let shown = to_caller_in(&mut c, "x", Author::Leg("b-1"), Carried::Opening, &ringing);
+    assert_eq!(shown, ringing, "before any restatement, as written");
+    to_caller_in(
+        &mut c,
+        "y",
+        Author::Leg("b-2"),
+        Carried::Opening,
+        &peer_sdp("mrf 4 1 IN IP4 192.0.2.4", 40000),
+    );
+    let second = to_caller_in(
+        &mut c,
+        "y",
+        Author::Leg("b-3"),
+        Carried::Opening,
+        &peer_sdp("mrf 5 1 IN IP4 192.0.2.5", 40002),
+    );
+    assert_eq!(o_line(&second), "o=mrf 4 2 IN IP4 192.0.2.4", "the call's restatement");
+    let moved = peer_sdp("bob 1 2 IN IP4 192.0.2.2", 20002);
+    let update = to_caller_in(&mut c, "x", Author::Leg("b-1"), Carried::InDialog, &moved);
+    assert_eq!(update, in_form("bob 1 2 IN IP4 192.0.2.2", 20002), "the version moved");
+    let fin = to_caller_in(&mut c, "x", Author::Leg("b-1"), Carried::Opening, &moved);
+    assert_eq!(fin, update, "the same version, the same bytes");
+    let caller = c.a_leg_invite.from_tag.clone();
+    crate::rules::relay::adopt_answered_caller_dialog(&mut c.a_leg, "x", &caller);
+    let again =
+        send_in(&mut c, "a", Author::Leg("b-1"), Carried::InDialog, &moved, SdpForm::Canonical);
+    assert_eq!(again, update, "the confirmed dialog keeps the bytes of its version");
 }
 
 /// A repeat the stack restates at the version the peer holds (the author's
