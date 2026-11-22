@@ -48,8 +48,8 @@ pub enum RecvNote {
     InboxOverflow,
     /// Arrived after the endpoint closed its inbox.
     InboxClosed,
-    /// Discarded by the simulated packet-loss model (loadgen `--drop-rate`),
-    /// on arrival or on send.
+    /// Discarded by the simulated packet-loss model (loadgen `--drop-rate`, a
+    /// simulated fabric's lost fate), on arrival or on send.
     LossModel,
     /// Correlated to the call but no live logical endpoint accepted it —
     /// rendered on the `ip:port#noendpoint` sub-lane.
