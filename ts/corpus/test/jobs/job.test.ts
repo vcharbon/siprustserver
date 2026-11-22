@@ -156,7 +156,7 @@ describe("a job's process", () => {
   })
 
   it("answers for a foreground job by its pid alone", async () => {
-    const child = spawn("sleep", ["30"], { stdio: "ignore" })
+    const child = spawn("sleep", ["3600"], { stdio: "ignore" })
     const foreground = row(3, { pid: child.pid! })
     expect(await live(Job.liveness(foreground))).toEqual({ _tag: "running" })
     child.kill("SIGKILL")

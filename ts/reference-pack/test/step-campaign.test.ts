@@ -60,12 +60,12 @@ beforeAll(async () => {
   if (!served) return
   await fresh(SCRATCH)
   await on(SCRATCH, migrated)
-}, 120_000)
+})
 
 afterAll(async () => {
   fs.rmSync(work, { recursive: true, force: true })
   if (served) await drop(SCRATCH)
-}, 120_000)
+})
 
 /**
  * How long `call-records` waits for a record of each cell's call. The killed

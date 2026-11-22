@@ -54,16 +54,17 @@ rl.on("line", (line) => {
 rl.on("close", () => console.log(JSON.stringify({ end: { dirty: null } })))
 `
 
+/** The stand-in batch process attached and ready, its readiness and its end bounded by the package's test timeout. */
 const standIn = async () => {
   const script = path.join(dir, "batch.cjs")
   fs.writeFileSync(script, STAND_IN)
   const child = spawn(process.execPath, [script], { stdio: ["pipe", "pipe", "pipe"] })
-  const attached = attach(child, "lane-x", { endWithin: 5_000, servedLine: () => "" })
+  const attached = attach(child, "lane-x", { readyWithin: 300_000, endWithin: 300_000, servedLine: () => "" })
   await Effect.runPromise(attached.ready)
   return attached.host
 }
 
-describe("an inject the batch process asks", { timeout: 20_000 }, () => {
+describe("an inject the batch process asks", () => {
   it("is answered injected once the cell's injector did its work, with what it was asked", async () => {
     const host = await standIn()
     const asked: Array<unknown> = []

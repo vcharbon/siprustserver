@@ -41,12 +41,12 @@ beforeAll(async () => {
     })
   )
   await on(SCRATCH, Server.migrated)
-}, 60_000)
+})
 
 afterAll(async () => {
   if (!served) return
   await on("postgres", Server.dropDatabase(SCRATCH))
-}, 60_000)
+})
 
 const open = (sweepId?: number) =>
   Effect.flatMap(Runs.Service, (runs) =>

@@ -36,16 +36,29 @@ describe("Client.inUse", () => {
 
 const SCRATCH = await Server.scratch("store_drop_database_test")
 
+/** Resolves once a session on `database` runs a `pg_sleep`. */
+const sleepingOn = async (database: string): Promise<void> => {
+  const held = await Server.on(
+    "postgres",
+    Effect.flatMap(SqlClient, (sql) =>
+      sql<{ n: number }>`SELECT count(*)::int AS n FROM pg_stat_activity
+        WHERE datname = ${database} AND state = 'active' AND query LIKE '%pg_sleep%'`)
+  )
+  if (held[0]!.n > 0) return
+  await new Promise((resolve) => setTimeout(resolve, 25))
+  return sleepingOn(database)
+}
+
 describe.skipIf(!Server.served)("Client.dropDatabase", () => {
   it("drops a database a session of this role still holds", async () => {
     await Server.fresh(SCRATCH)
     const held = Effect.runPromise(
       Effect.gen(function*() {
         const sql = yield* SqlClient
-        yield* sql`SELECT pg_sleep(30)`
+        yield* sql`SELECT pg_sleep(3600)`
       }).pipe(Effect.provide(Client.layerFromUrl(Server.urlFor(SCRATCH))), Effect.exit)
     )
-    await new Promise((resolve) => setTimeout(resolve, 300))
+    await sleepingOn(SCRATCH)
     await Server.drop(SCRATCH)
     const left = await Server.on(
       "postgres",
@@ -53,5 +66,5 @@ describe.skipIf(!Server.served)("Client.dropDatabase", () => {
     )
     expect(left[0]!.n).toBe(0)
     await held
-  }, 20_000)
+  })
 })

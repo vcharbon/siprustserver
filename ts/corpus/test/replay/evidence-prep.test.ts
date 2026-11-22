@@ -207,12 +207,12 @@ beforeAll(async () => {
       return prep
     })
   )
-}, 120_000)
+})
 
 afterAll(async () => {
   if (!served) return
   await drop(SCRATCH)
-}, 60_000)
+})
 
 beforeEach(() => {
   cutAsked = []

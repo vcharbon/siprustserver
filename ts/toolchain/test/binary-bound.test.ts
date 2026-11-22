@@ -33,7 +33,7 @@ const vitest = (extra: NodeJS.ProcessEnv) => {
   const run = spawnSync(
     path.join(PACKAGE, "node_modules", ".bin", "vitest"),
     ["run", "--reporter=json", `--outputFile=${out}`, ...SUITES],
-    { cwd: PACKAGE, env, encoding: "utf8", timeout: 120_000 }
+    { cwd: PACKAGE, env, encoding: "utf8", timeout: 300_000 }
   )
   const report = fs.existsSync(out)
     ? JSON.parse(fs.readFileSync(out, "utf8")) as { testResults: ReadonlyArray<FileResult> }
@@ -59,7 +59,7 @@ describe("the suites held to the real pivot-schema", () => {
       expect(message).toContain("cargo build --release -p pivot-schema")
       expect(message).toContain("TOOLCHAIN_TEST_SKIP=1")
     }
-  }, 150_000)
+  })
 
   it("skip where the binary is missing and the run opts out", () => {
     const run = vitest({ TOOLCHAIN_TEST_SKIP: "1" })
@@ -67,5 +67,5 @@ describe("the suites held to the real pivot-schema", () => {
     const tests = bound(run.results)
     expect(tests.length).toBeGreaterThan(0)
     expect(tests.every((test) => test.status === "skipped" || test.status === "pending")).toBe(true)
-  }, 150_000)
+  })
 })

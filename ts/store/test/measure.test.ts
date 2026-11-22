@@ -85,7 +85,7 @@ beforeAll(async () => {
     })
   )
   await on(SCRATCH, Server.migrated)
-}, 60_000)
+})
 
 afterAll(async () => {
   if (!served) return
@@ -95,7 +95,7 @@ afterAll(async () => {
       yield* Server.dropDatabase(SCRATCH)
     })
   )
-}, 60_000)
+})
 
 describe.skipIf(!served)("Measure", () => {
   it("re-measures a run's error columns without touching its verdict", () =>

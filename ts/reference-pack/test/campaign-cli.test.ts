@@ -38,12 +38,12 @@ beforeAll(async () => {
   if (!served) return
   await fresh(SCRATCH)
   await on(SCRATCH, migrated)
-}, 120_000)
+})
 
 afterAll(async () => {
   fs.rmSync(work, { recursive: true, force: true })
   if (served) await drop(SCRATCH)
-}, 120_000)
+})
 
 /** `siprig-campaign run --lanes simulated --out <run>` with the pack `pack` named; its exit code and its output. */
 const campaign = (pack: string) => {

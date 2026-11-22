@@ -169,12 +169,12 @@ beforeAll(async () => {
   if (!Server.served) return
   await Server.fresh(SCRATCH)
   await Server.on(SCRATCH, Server.migrated)
-}, 60_000)
+})
 
 afterAll(async () => {
   if (!Server.served) return
   await Server.drop(SCRATCH)
-}, 60_000)
+})
 
 describe.skipIf(!Server.served)("a side read from the store", () => {
   it("counts its cells', batches' and job's attachments and lines and its log records, the job once", async () => {

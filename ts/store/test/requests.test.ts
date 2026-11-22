@@ -111,7 +111,7 @@ beforeAll(async () => {
     })
   )
   await on(SCRATCH, Server.migrated)
-}, 60_000)
+})
 
 afterAll(async () => {
   if (!served) return
@@ -121,7 +121,7 @@ afterAll(async () => {
       yield* Server.dropDatabase(SCRATCH)
     })
   )
-}, 60_000)
+})
 
 describe.skipIf(!served)("Requests", () => {
   it("resolves a whole-capture request against two preps: a kept case by key, a refused key gone with its reasons, the new case added", () =>

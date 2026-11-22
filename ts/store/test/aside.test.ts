@@ -74,12 +74,12 @@ beforeAll(async () => {
   if (!Server.served) return
   await Server.fresh(SCRATCH)
   await Server.on(SCRATCH, Server.migrated)
-}, 60_000)
+})
 
 afterAll(async () => {
   if (!Server.served) return
   await Server.drop(SCRATCH)
-}, 60_000)
+})
 
 describe.skipIf(!Server.served)("a run recorded aside", () => {
   const ONLY = "aside_only.pcap.gz"
@@ -95,7 +95,7 @@ describe.skipIf(!Server.served)("a run recorded aside", () => {
       const only = yield* ran(ONLY, [result(`${ONLY}-k1`, true)], ASIDE, "cases")
       return { current, task, aside, only }
     }))
-  }, 60_000)
+  })
 
   it("is no capture the lane already ran", async () => {
     const ranOn = await withStore(Effect.flatMap(Runs.Service, (runs) => runs.ranOn(LANE)))

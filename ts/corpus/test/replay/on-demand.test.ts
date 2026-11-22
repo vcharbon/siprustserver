@@ -32,13 +32,13 @@ beforeAll(async () => {
   if (!served) return
   await fresh(SCRATCH)
   await on(SCRATCH, migrated)
-}, 120_000)
+})
 
 afterAll(async () => {
   fs.rmSync(TREE, { recursive: true, force: true })
   if (!served) return
   await drop(SCRATCH)
-}, 120_000)
+})
 
 /** A rig path with the batch collector `asked`, on-demand by default, which attaches a log to each cell it reads and answers a failing line. */
 const deployment = async () => {

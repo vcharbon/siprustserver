@@ -37,12 +37,12 @@ beforeAll(async () => {
     })
   )
   await on(SCRATCH, Server.migrated)
-}, 60_000)
+})
 
 afterAll(async () => {
   if (!Server.served) return
   await on("postgres", Server.dropDatabase(SCRATCH))
-}, 60_000)
+})
 
 const campaignJob = Effect.flatMap(Jobs.Service, (jobs) =>
   jobs.create({ kind: "campaign", args: { capture: "c", lanes: ["paused"] }, createdBy: "test" }))

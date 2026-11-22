@@ -32,12 +32,12 @@ const before = Migrator.make({})({
 beforeAll(async () => {
   if (!served) return
   await Server.fresh(SCRATCH)
-}, 60_000)
+})
 
 afterAll(async () => {
   if (!served) return
   await Server.drop(SCRATCH)
-}, 60_000)
+})
 
 describe.skipIf(!served)("the source-fault migration", () => {
   it("keeps each stored row's fault of the former token as its source fault, its main error unmeasured", () =>

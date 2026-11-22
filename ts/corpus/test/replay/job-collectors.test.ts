@@ -41,14 +41,14 @@ beforeAll(async () => {
   if (!served) return
   await fresh(SCRATCH)
   await on(SCRATCH, migrated)
-}, 120_000)
+})
 
 afterAll(async () => {
   fs.rmSync(TREE, { recursive: true, force: true })
   fs.rmSync(ELSEWHERE, { recursive: true, force: true })
   if (!served) return
   await drop(SCRATCH)
-}, 120_000)
+})
 
 /**
  * The deployment's collectors: the job collector `lab` on {@link LANE}, its

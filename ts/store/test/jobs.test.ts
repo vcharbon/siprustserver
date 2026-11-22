@@ -50,7 +50,7 @@ beforeAll(async () => {
     })
   )
   await on(SCRATCH, Server.migrated)
-}, 60_000)
+})
 
 afterAll(async () => {
   if (!served) return
@@ -60,7 +60,7 @@ afterAll(async () => {
       yield* Server.dropDatabase(SCRATCH)
     })
   )
-}, 60_000)
+})
 
 const KNOBS: Requests.Knobs = { concurrency: 8, batchSize: 1000, memoryMax: "4G", startsPerSecond: 0, cleanup: true }
 

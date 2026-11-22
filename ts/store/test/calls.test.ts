@@ -151,7 +151,7 @@ beforeAll(async () => {
     })
   )
   await on(SCRATCH, Server.migrated)
-}, 60_000)
+})
 
 afterAll(async () => {
   if (!served) return
@@ -161,7 +161,7 @@ afterAll(async () => {
       yield* Server.dropDatabase(SCRATCH)
     })
   )
-}, 60_000)
+})
 
 describe.skipIf(!served)("Calls", () => {
   it("serves the source fault a writer stored: beside a failing call's main error, and on a passing call alone", () =>

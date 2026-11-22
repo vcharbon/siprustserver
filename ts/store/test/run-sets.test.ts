@@ -140,7 +140,7 @@ beforeAll(async () => {
     const twinE = yield* ran(E, "fake", ENV, "t3", [result(`${E}-auto`, true)])
     return { sweep, currentA, currentB, refA, currentR, recutR, dirtyD, envA, envAgain, envR, envD, twinE }
   }))
-}, 60_000)
+})
 
 afterAll(async () => {
   if (!served) return
@@ -150,7 +150,7 @@ afterAll(async () => {
       yield* Server.dropDatabase(SCRATCH)
     })
   )
-}, 60_000)
+})
 
 const runsOf = (text: string) =>
   withStore(Effect.flatMap(RunSets.Service, (sets) => sets.runs(parse(text), 100))).then((rows) =>

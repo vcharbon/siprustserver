@@ -42,7 +42,7 @@ beforeAll(async () => {
     })
   )
   await on(SCRATCH, Server.migrated)
-}, 60_000)
+})
 
 afterAll(async () => {
   if (!served) return
@@ -52,7 +52,7 @@ afterAll(async () => {
       yield* Server.dropDatabase(SCRATCH)
     })
   )
-}, 60_000)
+})
 
 describe.skipIf(!served)("Refusals", () => {
   it("names the standing cuts with their row count, and records one after the fact", () =>

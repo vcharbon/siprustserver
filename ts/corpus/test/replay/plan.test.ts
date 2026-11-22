@@ -111,12 +111,12 @@ beforeAll(async () => {
       })
     })
   )
-}, 120_000)
+})
 
 afterAll(async () => {
   if (!served) return
   await drop(SCRATCH)
-}, 120_000)
+})
 
 beforeEach(() => {
   sessions = fs.mkdtempSync(path.join(os.tmpdir(), "plan-test-"))

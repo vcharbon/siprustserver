@@ -114,13 +114,13 @@ beforeAll(async () => {
   if (!served) return
   await fresh(SCRATCH)
   await on(SCRATCH, migrated)
-}, 120_000)
+})
 
 afterAll(async () => {
   fs.rmSync(TREE, { recursive: true, force: true })
   if (!served) return
   await drop(SCRATCH)
-}, 120_000)
+})
 
 const jobOf = Effect.flatMap(Jobs.Service, (jobs) => jobs.create({ kind: "campaign", args: {}, createdBy: "test" }))
 

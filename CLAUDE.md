@@ -39,8 +39,9 @@ change does not call for Fable.
 
 ## Read before the matching work
 
-- A timed test, written or modified: [docs/testing/test-clock.md](docs/testing/test-clock.md).
-  Most flaky tests here break one of its rules.
+- A timed test, Rust or TypeScript, written or modified:
+  [docs/testing/test-clock.md](docs/testing/test-clock.md). Most flaky tests here break one of its
+  rules.
 - Choosing a harness, what `finish()` gates, writing a b2bua or failover test:
   [docs/testing/harness-layers.md](docs/testing/harness-layers.md).
 - Lanes, building, adding an integration test, build concurrency:
