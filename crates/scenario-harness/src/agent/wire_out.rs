@@ -2,7 +2,8 @@
 //! ([`Absorption`](crate::absorption::Absorption)) sends again: the finals a
 //! copy of an answered request draws (RFC 3261 §17.2.1, §17.2.2), the finals
 //! to an INVITE until their ACK (§13.3.1.4, §17.2.1), the requests until
-//! their answer (§17.1.1.2, §17.1.2.2), and the ACK a final draws again.
+//! their answer (§17.1.1.2, §17.1.2.2), the reliable provisionals until their
+//! PRACK (RFC 3262 §3), and the ACK a final draws again.
 
 use std::net::SocketAddr;
 

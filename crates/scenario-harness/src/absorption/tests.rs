@@ -315,3 +315,66 @@ fn a_repeated_non_2xx_final_to_its_own_invite_draws_its_ack_again() {
     let SipMessage::Response(ok) = parse(OK) else { unreachable!() };
     assert!(a.rejected_ack_for(&ok).is_none(), "a 2xx is the UAC core's to re-ACK");
 }
+
+const RELIABLE_183: &str = "SIP/2.0 183 Session Progress\r\nContact: <sip:fixture@192.0.2.98>\r\n\
+    Via: SIP/2.0/UDP 10.0.0.1:5060;branch=z9hG4bK-1\r\n\
+    From: <sip:alice@10.0.0.1>;tag=a1\r\n\
+    To: <sip:bob@10.0.0.2>;tag=b1\r\n\
+    Call-ID: c1\r\n\
+    CSeq: 1 INVITE\r\n\
+    Require: 100rel\r\n\
+    RSeq: 7\r\n\
+    Content-Length: 0\r\n\r\n";
+
+/// The PRACK of `RELIABLE_183` when `rseq` is 7.
+fn prack(rseq: u32) -> String {
+    format!(
+        "PRACK sip:bob@10.0.0.2 SIP/2.0\r\nMax-Forwards: 70\r\n\
+        Via: SIP/2.0/UDP 10.0.0.1:5060;branch=z9hG4bK-p{rseq}\r\n\
+        From: <sip:alice@10.0.0.1>;tag=a1\r\n\
+        To: <sip:bob@10.0.0.2>;tag=b1\r\n\
+        Call-ID: c1\r\n\
+        CSeq: 2 PRACK\r\n\
+        RAck: {rseq} 1 INVITE\r\n\
+        Content-Length: 0\r\n\r\n"
+    )
+}
+
+/// A reliable provisional goes again after T1, the interval doubling with no
+/// cap, until 64·T1 (RFC 3262 §3); its PRACK, or the INVITE's final, ends the
+/// ladder, and a PRACK of another RSeq does not.
+#[tokio::test(start_paused = true)]
+async fn a_reliable_provisional_goes_again_until_its_prack_or_the_final() {
+    use std::time::Duration;
+    let dst: SocketAddr = "10.0.0.1:5060".parse().unwrap();
+    let SipMessage::Response(p183) = parse(RELIABLE_183) else { unreachable!() };
+    let start = tokio::time::Instant::now();
+
+    let ladder = unpracked::Unpracked::default();
+    ladder.note_sent(&p183, RELIABLE_183.as_bytes(), dst);
+    let mut sent_at = Vec::new();
+    while let Some(due) = ladder.next_due() {
+        let sent = ladder.take_due(due);
+        assert!(sent.iter().all(|(wire, to)| wire == RELIABLE_183.as_bytes() && *to == dst));
+        if !sent.is_empty() {
+            sent_at.push(due - start);
+        }
+    }
+    let ms = |v: &[u64]| v.iter().map(|&n| Duration::from_millis(n)).collect::<Vec<_>>();
+    assert_eq!(sent_at, ms(&[500, 1_500, 3_500, 7_500, 15_500, 31_500]), "no cap, 64·T1");
+
+    let pracked = unpracked::Unpracked::default();
+    pracked.note_sent(&p183, RELIABLE_183.as_bytes(), dst);
+    let SipMessage::Request(other) = parse(&prack(8)) else { unreachable!() };
+    pracked.sight(&other);
+    assert!(pracked.next_due().is_some(), "a PRACK of another RSeq leaves it");
+    let SipMessage::Request(its) = parse(&prack(7)) else { unreachable!() };
+    pracked.sight(&its);
+    assert_eq!(pracked.next_due(), None, "its PRACK ends it");
+
+    let answered = unpracked::Unpracked::default();
+    answered.note_sent(&p183, RELIABLE_183.as_bytes(), dst);
+    let SipMessage::Response(busy) = parse(BUSY) else { unreachable!() };
+    answered.note_sent(&busy, BUSY.as_bytes(), dst);
+    assert_eq!(answered.next_due(), None, "the INVITE's final ends it");
+}
