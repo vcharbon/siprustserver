@@ -180,32 +180,6 @@ const steppedOrigin = (readings: { readonly versionStepOne?: true }): Probe.Prob
     sdp: { section: "session", line: "o=", ...readings }
   })
 
-/**
- * An in-dialog ACK's `document:bytes` row: the captured description as its
- * author wrote it, the replay's re-serialized under `replayedOrigin`, its lines
- * ended by `eol`.
- */
-const reorderedBytes = (
-  capturedOrigin: string,
-  replayedOrigin: string,
-  eol: string,
-  readings: { readonly orderOnly?: true; readonly versionStepOne?: true }
-): Probe.Probe => {
-  const head = (origin: string) => ["v=0", origin, "s=-", "c=IN IP4 192.0.2.10", "t=0 0", "m=audio 4000 RTP/SAVP 8"]
-  const keys = ["a=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "a=crypto:2 AES_CM_128_HMAC_SHA1_32 inline:BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"]
-  const written = [...head(capturedOrigin), "a=sendrecv", ...keys, "a=rtpmap:8 PCMA/8000", ""].join("\r\n")
-  const inForm = [...head(replayedOrigin), "a=rtpmap:8 PCMA/8000", ...(readings.orderOnly ? keys : [keys[1]!, keys[0]!]), "a=sendrecv", ""]
-  return bodyProbe({
-    mediaType: "application/sdp",
-    scope: onAck,
-    compare: "sdp",
-    step: "s34",
-    captured: [written],
-    replayed: [inForm.join(eol)],
-    sdp: { section: "document", line: "bytes", ...readings }
-  })
-}
-
 /** An in-dialog INVITE's To or From toward the caller at s13, as the capture and the replay carried it. */
 const towardCaller = (name: "To" | "From", captured: string, replayed: string): Probe.Probe =>
   headerProbe({ name, step: "s13", scope: inDialog("INVITE"), captured: [captured], replayed: [replayed], leg: { role: "caller", direction: "to-caller" } })
@@ -509,13 +483,7 @@ const STACK_OWNED: ReadonlyArray<RfcFixture> = [
   },
   {
     id: "sdp-session-id-restated",
-    named: [
-      { probe: restatedOrigin("o=- 111 105 IN IP4 192.0.2.10"), facts: sessionOpenedAt8 },
-      {
-        probe: reorderedBytes("o=- 222 105 IN IP4 192.0.2.10", "o=- 111 105 IN IP4 192.0.2.10", "\r\n", { orderOnly: true }),
-        facts: sessionOpenedAt8
-      }
-    ],
+    named: [{ probe: restatedOrigin("o=- 111 105 IN IP4 192.0.2.10"), facts: sessionOpenedAt8 }],
     visible: [
       {
         defect: "a sess-id that is not the one the leg's session opened with: the replay minted it",
@@ -524,43 +492,29 @@ const STACK_OWNED: ReadonlyArray<RfcFixture> = [
         facts: sessionOpenedAt8
       },
       {
-        defect: "a re-serialization out of RFC 4566 §5 line order (v= not first, a= ahead of c=)",
+        defect: "the restated description out of RFC 4566 §5 line order (a= ahead of c=): its `order` row",
         leftTo: undefined,
         probe: bodyProbe({
           mediaType: "application/sdp",
           scope: onAck,
           compare: "sdp",
           step: "s34",
-          captured: [["v=0", "o=- 222 105 IN IP4 192.0.2.10", "s=-", "c=IN IP4 192.0.2.10", "t=0 0", "m=audio 4000 RTP/AVP 8", "c=IN IP4 192.0.2.10", "a=sendrecv", ""].join("\r\n")],
-          replayed: [["o=- 111 105 IN IP4 192.0.2.10", "t=0 0", "v=0", "s=-", "c=IN IP4 192.0.2.10", "m=audio 4000 RTP/AVP 8", "a=sendrecv", "c=IN IP4 192.0.2.10", ""].join("\r\n")],
-          sdp: { section: "document", line: "bytes" }
+          captured: ["m=audio 4000 RTP/AVP 8", "c=IN IP4 192.0.2.10", "a=sendrecv"],
+          replayed: ["m=audio 4000 RTP/AVP 8", "a=sendrecv", "c=IN IP4 192.0.2.10"],
+          sdp: { section: "m0", line: "order" }
         }),
-        facts: sessionOpenedAt8
-      },
-      {
-        defect: "the restated session's bytes the confrontation did not read as order-only",
-        leftTo: undefined,
-        probe: reorderedBytes("o=- 222 105 IN IP4 192.0.2.10", "o=- 111 105 IN IP4 192.0.2.10", "\r\n", {}),
         facts: sessionOpenedAt8
       }
     ]
   },
   {
     id: "sdp-version-step-one",
-    named: [
-      { probe: steppedOrigin({ versionStepOne: true }) },
-      { probe: reorderedBytes("o=- 222 107 IN IP4 192.0.2.10", "o=- 222 106 IN IP4 192.0.2.10", "\r\n", { orderOnly: true, versionStepOne: true }) }
-    ],
+    named: [{ probe: steppedOrigin({ versionStepOne: true }) }],
     visible: [
       {
         defect: "the same gap the confrontation did not read as a step of one: the replay jumped too, or stands above the capture",
         leftTo: undefined,
         probe: steppedOrigin({})
-      },
-      {
-        defect: "a version-step bytes row the confrontation did not read as order-only (no orderOnly reading)",
-        leftTo: undefined,
-        probe: reorderedBytes("o=- 222 107 IN IP4 192.0.2.10", "o=- 222 106 IN IP4 192.0.2.10", "\n", { versionStepOne: true })
       }
     ]
   }

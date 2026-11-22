@@ -183,17 +183,14 @@ export interface BodyProbe extends ProbeSite {
    * `originNotContinued` one where the replay breaks RFC 3264 §8 against its
    * previous description on the leg while the capture keeps its session, and
    * `versionStepOne` one whose sess-version the capture skips where the
-   * replay steps by one (`./sdporigin.ts`); `orderOnly` marks a
-   * `document:bytes` row whose texts differ in attribute order alone
-   * (`./sdpfold.ts`), and carries `versionStepOne` beside it where its origin
-   * row does. The signature carries none of them.
+   * replay steps by one (`./sdporigin.ts`). The signature carries none of
+   * them.
    */
   readonly sdp?: {
     readonly section: string
     readonly line: string
     readonly mintedOrigin?: true
     readonly originNotContinued?: true
-    readonly orderOnly?: true
     readonly versionStepOne?: true
   }
 }

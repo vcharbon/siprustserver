@@ -8,9 +8,9 @@
  * the XML declaration is dropped, whitespace-only text between two tags is
  * removed wherever it sits (mixed content included), and the ends are
  * trimmed. Attributes keep their order and entities stay as written. `sdp`
- * reads both sides as a session description under a mask (`./sdpfold.ts`),
- * the one fold that takes a parameter: the mask is the document's and the
- * run's, never the fold's own, and on a verbatim run it is identity. Widening
+ * reads both sides as a session description for its meaning under a mask
+ * (`./sdpfold.ts`), the one fold that takes a parameter: the mask is the
+ * document's and the run's, never the fold's own. Widening
  * a fold is how a body oracle goes blind, so what it does not list, it does
  * not do.
  */

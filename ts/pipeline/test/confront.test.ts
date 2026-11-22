@@ -717,12 +717,13 @@ describe("an expected body held against the one received", () => {
       ])
     })
 
-    it("on a verbatim run the same structure in other bytes is one `document:bytes` row", () => {
+    it("on every run a description in other bytes of the same meaning states nothing", () => {
       const bareLf = OFFER.replace(/\r\n/g, "\n")
       expect(runSdp(bareLf, "rebooked")).toEqual([])
-      const probes = runSdp(bareLf, "verbatim")
-      expect(probes.map((p) => signature(p.probe))).toEqual(["body:sdp:document:bytes:request:INFO:in-dialog"])
-      expect(probes[0]!.probe.kind === "body" && probes[0]!.probe).toMatchObject({ captured: [OFFER], replayed: [bareLf] })
+      expect(runSdp(bareLf, "verbatim")).toEqual([])
+      const directionDropped = OFFER.replace("a=sendrecv\r\n", "")
+      expect(OFFER).not.toBe(directionDropped)
+      expect(runSdp(directionDropped, "verbatim")).toEqual([])
     })
 
     it("a body the system dropped whole is one `document` row, the captured text against the empty one", () => {

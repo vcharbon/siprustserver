@@ -1,7 +1,7 @@
 # The attribute order of `canonical_form`, case by case: a description, then
 # its form. Read by `tests/it/sdp_form.rs` against `canonical_form` and by
-# `ts/pipeline/test/sdpform.test.ts` against its TypeScript twin, so the two
-# order rules cannot drift apart.
+# `ts/pipeline/test/sdpfold-form.test.ts`, which holds the replay's `sdp`
+# compare to reading each description as equal to its form.
 #
 # `=== <name>` opens a case and `---` ends its description; every line below
 # is one SDP line, written with CRLF. Every live media section states its

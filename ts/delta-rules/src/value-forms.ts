@@ -82,9 +82,6 @@ export const rackParts = (item: string): { rseq: string; method: string } | unde
   return m ? { rseq: m[1]!, method: m[3]! } : undefined
 }
 
-/** A description's first `o=` line, or `undefined` where it states none. */
-export const originLine = (text: string): string | undefined => /^o=[^\r\n]*/m.exec(text)?.[0]
-
 /** Two `o=` lines with six fields that differ in the sess-id and nothing else. */
 export const sessIdAlone = (captured: string, replayed: string): boolean => {
   const a = captured.trim().split(/\s+/)
