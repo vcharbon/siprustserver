@@ -257,10 +257,11 @@ async fn bob_hangs_up_stating_why(t: &mut Transferred) -> InDialogTxn {
 
 /// B's BYE ends B's leg of a call that goes on, and the record its turn
 /// lands crosses the record-size cap. A BYE is a teardown, never refused: it
-/// is answered 200, no cap trips, and the transferred call goes on until C
-/// hangs up, which BYEs A.
+/// is answered 200 and no cap trips. The call's next held write, C's 200 to
+/// the realigning re-INVITE, trips: A and C are BYEd, one CDR, the call
+/// reaped.
 #[tokio::test(start_paused = true)]
-async fn the_transferors_bye_past_the_record_size_cap_is_answered_200() {
+async fn the_transferors_bye_past_the_record_size_cap_lands_and_the_next_write_ends_the_call() {
     const NAME: &str = "transferor-bye-record-cap";
     let (before, after) = {
         let mut t = transfer_reported_under(NAME, 4866, 4876, ringed(1 << 30)).await;
@@ -279,13 +280,14 @@ async fn the_transferors_bye_past_the_record_size_cap_is_answered_200() {
     let m = t.b2bua.metrics();
     assert!(Cap::ALL.iter().all(|c| m.cap_trips_of(*c) == 0), "no cap trips");
     let live = t.b2bua.live_call(&call_ref()).map(|c| c.state);
-    assert_eq!(live, Some(CallModelState::Active), "the transferred call goes on");
+    assert_eq!(live, Some(CallModelState::Active), "B's BYE leaves the call up");
 
-    let mut charlie_bye = t.charlie_dialog.bye().await;
-    charlie_bye.expect(200).await;
+    t.c_realign.respond(200, "OK").with_sdp(CHARLIE_ACTIVE_ANSWER).await;
     t.alice.receive("BYE").await.respond(200, "OK").await;
+    t.charlie.receive("BYE").await.respond(200, "OK").await;
     settle_until(|| t.b2bua.is_reaped()).await;
     t.b2bua.assert_fully_reaped();
     assert_eq!(t.b2bua.cdr_records().len(), 1, "one CDR");
+    assert_eq!(t.b2bua.metrics().cap_trips_of(Cap::RecordBytes), 1, "C's 200 tripped the cap");
     let _ = t.h.finish().await;
 }
