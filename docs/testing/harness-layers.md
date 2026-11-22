@@ -138,9 +138,11 @@ is, and the verdict records it (`Observation::EndedCleanly`). A request left
 without its final or a dialog left open still fails the call.
 
 **Lost datagrams.** The goals and endings read the datagrams the call's loss
-model dropped (`CallCtx::loss_notes`): a 2xx lost on its way to the caller
-before her CANCEL's final arrived crossed the CANCEL, a lost provisional
-stands for her ringing. The load generator's loss model notes them; on a
+model dropped (`CallCtx::loss_notes`): a 2xx lost on its way to the caller,
+sent before any final to her CANCEL (arrived or itself lost), crossed the
+CANCEL; a lost provisional sent unreliably stands for her ringing, a
+reliable one being recovered by its retransmission. The load generator's
+loss model notes them; on a
 harness fabric with a loss model, `Harness::note_losses` notes each
 `SendLost` the recording shows to or from a party of the call, ordered
 against the responses delivered to that party before it and, for a datagram
