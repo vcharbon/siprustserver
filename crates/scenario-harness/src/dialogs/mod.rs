@@ -13,6 +13,10 @@
 //! - a PRACK on an early dialog a non-2xx final ended (RFC 3262 §3);
 //! - a NOTIFY of a subscription the UA opened, after a BYE (RFC 5057 §5.2).
 //!
+//! A 2xx to a request the UA sent on an early dialog its own non-2xx final
+//! ended draws none until the peer's ACK of that final, or a new INVITE of the
+//! caller, reached the UA (RFC 3261 §17.2.1): till then it may cross the final.
+//!
 //! A verdict fails the run unless a `dialog-…` waiver naming the receiving UA
 //! opts it out (`WaiverScope::rule(DIALOG_UNKNOWN, why).on_party("alice")`);
 //! one naming no UA covers nothing.

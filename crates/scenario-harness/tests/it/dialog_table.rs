@@ -209,8 +209,7 @@ async fn a_2xx_crossing_the_callees_final_passes() {
     let h = Harness::new("dialog-table-crossing-final");
     let alice = h.agent("alice", "127.0.0.1:5060").await;
     let bob = h.agent("bob", "127.0.0.1:5070").await;
-    let (mut call, mut uas, mut at_alice, mut info) =
-        refused_after_an_early_info(&alice, &bob).await;
+    let (mut call, uas, mut at_alice, mut info) = refused_after_an_early_info(&alice, &bob).await;
     at_alice.respond(200, "OK").await;
     info.expect(200).await;
     call.expect(487).await;
@@ -226,8 +225,7 @@ async fn a_2xx_after_the_ack_of_the_callees_final_fails() {
     let h = Harness::new("dialog-table-answered-after-ack");
     let alice = h.agent("alice", "127.0.0.1:5060").await;
     let bob = h.agent("bob", "127.0.0.1:5070").await;
-    let (mut call, mut uas, mut at_alice, mut info) =
-        refused_after_an_early_info(&alice, &bob).await;
+    let (mut call, uas, mut at_alice, mut info) = refused_after_an_early_info(&alice, &bob).await;
     call.expect(487).await;
     uas.expect_ack().await;
     at_alice.respond(200, "OK").await;

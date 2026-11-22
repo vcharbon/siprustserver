@@ -6,7 +6,9 @@
 //! ended by a non-2xx final to its INVITE (the early dialogs of that INVITE
 //! end with it, §12.1.2), or ended by a BYE once the BYE's transaction took
 //! its final (§15); a subscription the UA opened on it keeps its NOTIFYs
-//! legal past that BYE (RFC 5057 §5.2). It keeps the last remote CSeq: as UAS
+//! legal past that BYE (RFC 5057 §5.2). A non-2xx final the UA sent ends the
+//! dialog for the peer's 2xx answers only once the peer shows it saw that
+//! final. It keeps the last remote CSeq: as UAS
 //! it starts at the initial INVITE's CSeq, as UAC it is empty until the peer's
 //! first request (§12.1.1, §12.1.2).
 
@@ -102,6 +104,11 @@ struct Dialog {
     /// The `(CSeq, method, top-Via branch)` of every request received on it:
     /// a repeat of one is a retransmission of its transaction, judged once.
     received: BTreeSet<(u32, String, String)>,
+    /// Whether the UA, as UAS, ended it with a non-2xx final the peer has not
+    /// provably seen: neither the ACK of that final (RFC 3261 §17.2.1) nor a
+    /// new INVITE of the caller (§8.1.3.5) reached the UA yet, so a 2xx to a
+    /// request the UA sent on it may cross the final.
+    final_unseen: bool,
 }
 
 /// The dialog table of one UA.
@@ -259,7 +266,9 @@ impl DialogTable {
     /// judge it: `Some` when it is a 2xx to an in-dialog request the UA sent
     /// on a dialog a non-2xx final ended by the time it arrives (RFC 3261
     /// §12.1.2: that dialog is gone, so nothing on it is answered 2xx). A
-    /// PRACK is excepted (RFC 3262 §3), and a CANCEL is hop-by-hop.
+    /// PRACK is excepted (RFC 3262 §3), and a CANCEL is hop-by-hop. A final
+    /// the UA sent ends the dialog for this judgement only once the peer
+    /// provably saw it (`Dialog::final_unseen`).
     pub fn note_received_response(
         &mut self,
         response: &SipResponse,
@@ -282,7 +291,8 @@ impl DialogTable {
             self.invites.get(&key).is_some_and(|i| i.cseq == response.cseq().seq())
         };
         if (200..300).contains(&status) && !initial && !matches!(method, "PRACK" | "CANCEL") {
-            if let Some(DialogState::EndedByFinal(by)) = self.dialogs.get(&id).map(|d| d.state) {
+            let seen_state = self.dialogs.get(&id).filter(|d| !d.final_unseen).map(|d| d.state);
+            if let Some(DialogState::EndedByFinal(by)) = seen_state {
                 return Some(DialogVerdict {
                     method: method.to_string(),
                     call_id: id.call_id.clone(),
@@ -335,6 +345,7 @@ impl DialogTable {
             pending_bye: None,
             subscriptions: 0,
             received: BTreeSet::new(),
+            final_unseen: false,
         };
         match status {
             101..=199 => {
@@ -352,14 +363,31 @@ impl DialogTable {
                 }
             }
             300.. => {
+                self.dialogs.entry(id).or_insert_with(|| fresh(DialogState::Early));
                 for d in self.dialogs.values_mut() {
                     if d.invite == key && d.state == DialogState::Early {
                         d.state = DialogState::EndedByFinal(status);
+                        d.final_unseen = key.role == Role::Uas;
                     }
                 }
-                self.dialogs.entry(id).or_insert_with(|| fresh(DialogState::EndedByFinal(status)));
             }
             _ => {}
+        }
+    }
+
+    /// Whether an ACK numbered `cseq` on `dialog` acknowledges the non-2xx
+    /// final the UA, as UAS, ended it with (RFC 3261 §17.2.1).
+    fn acks_own_final(&self, dialog: &Dialog, cseq: u32) -> bool {
+        dialog.invite.role == Role::Uas
+            && matches!(dialog.state, DialogState::EndedByFinal(_))
+            && self.invites.get(&dialog.invite).is_some_and(|i| i.cseq == cseq)
+    }
+
+    /// The peer showed it saw the final the UA sent to the INVITE `key`: the
+    /// early dialogs that final ended are ended for it too.
+    fn final_seen(&mut self, key: &InviteKey) {
+        for d in self.dialogs.values_mut().filter(|d| d.invite == *key) {
+            d.final_unseen = false;
         }
     }
 
@@ -369,7 +397,9 @@ impl DialogTable {
     /// §12.2.2). A request with no To-tag is out of
     /// dialog and only teaches the table an initial INVITE. An ACK or a
     /// CANCEL carries its INVITE's number, so only its dialog is judged, and
-    /// a retransmission of a request already taken is not judged again.
+    /// a retransmission of a request already taken is not judged again. The
+    /// ACK of a non-2xx final the UA sent, or a new INVITE of the same caller
+    /// at a higher CSeq, shows the peer saw that final.
     pub fn judge_received(&mut self, request: &SipRequest, now_us: u64) -> Option<DialogVerdict> {
         let call_id = request.call_id().to_string();
         let method = request.method().as_str().to_string();
@@ -380,10 +410,14 @@ impl DialogTable {
                 // is a new transaction: its responses are the initial ones.
                 let key = InviteKey { call_id, caller_tag: remote, role: Role::Uas };
                 let cseq = request.cseq().seq();
+                let retry = self.invites.get(&key).is_some_and(|i| cseq > i.cseq);
                 self.invites
-                    .entry(key)
+                    .entry(key.clone())
                     .and_modify(|i| i.cseq = cseq)
                     .or_insert(Invite { cseq, answered_at_us: None });
+                if retry {
+                    self.final_seen(&key);
+                }
             }
             return None;
         };
@@ -406,6 +440,11 @@ impl DialogTable {
             }
             return Some(verdict(self.unknown(&id)));
         };
+        if method == "ACK" && self.acks_own_final(dialog, cseq) {
+            let key = dialog.invite.clone();
+            self.final_seen(&key);
+            return None;
+        }
         let txn = (cseq, method.clone(), top_via_branch(request).unwrap_or_default());
         if !sequenced || dialog.received.contains(&txn) {
             return None;

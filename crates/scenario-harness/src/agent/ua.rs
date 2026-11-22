@@ -400,7 +400,8 @@ impl Agent {
     /// `None` means the transaction layer kept it — a §17.2 duplicate, or a
     /// final this UA re-ACKed ([`Agent::re_ack`]).
     /// A txn-owned hop ACK still SURFACES here: the pull sites claim it, so an
-    /// explicit `receive("ACK")` keeps working.
+    /// explicit `receive("ACK")` keeps working. The dialog table sights it
+    /// with what the TU sees: it shows the peer saw this UA's non-2xx final.
     pub(crate) async fn surface(&self, pkt: &UdpPacket, msg: SipMessage) -> Option<SipMessage> {
         let sighting = self.txn.sight(&pkt.raw, &msg, self.arrived(pkt));
         if let SipMessage::Response(r) = &msg {
@@ -412,7 +413,7 @@ impl Agent {
         if matches!(sighting.owner, Owner::TxnDuplicate | Owner::TxnCompleted) {
             return None;
         }
-        if sighting.owner == Owner::Tu && !sighting.repeat {
+        if matches!(sighting.owner, Owner::Tu | Owner::TxnHopAck) && !sighting.repeat {
             self.dialogs.sight(&msg);
         }
         Some(msg)

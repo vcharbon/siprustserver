@@ -314,11 +314,13 @@ fn info_ok() -> SipResponse {
 
 /// RFC 3261 §12.3, §17.2.1: until the peer's ACK of the final the UA sent
 /// reaches it, the peer may answer a request it took on the live early
-/// dialog; an ACK of another INVITE proves nothing.
+/// dialog; an ACK of another INVITE, or a retransmission of the INVITE,
+/// proves nothing.
 #[test]
 fn a_2xx_crossing_the_uas_own_final_is_no_verdict() {
     let mut t = refused_after_its_own_info();
     assert_eq!(t.judge_received(&request("ACK", 2, "A1", Some("B1")), 0), None);
+    assert_eq!(t.judge_received(&request("INVITE", 1, "A1", None), 0), None);
     assert_eq!(t.note_received_response(&info_ok(), 0), None);
     assert_eq!(t.state(CALL, "B1", "A1"), Some(DialogState::EndedByFinal(487)));
 }
