@@ -87,6 +87,10 @@ struct Invite {
     cseq: u32,
     /// When the first 2xx to it was sent or received, on the table's clock.
     answered_at_us: Option<u64>,
+    /// How many Via entries it carried as the UA received it; `None` for one
+    /// the UA sent. The caller's ACK of a non-2xx final arrives with as many
+    /// (RFC 3261 §17.1.1.3, §16.6 step 8), a hop's own ACK of it with one.
+    received_vias: Option<usize>,
 }
 
 #[derive(Debug, Clone)]
@@ -104,10 +108,17 @@ struct Dialog {
     /// The `(CSeq, method, top-Via branch)` of every request received on it:
     /// a repeat of one is a retransmission of its transaction, judged once.
     received: BTreeSet<(u32, String, String)>,
+    /// The `(CSeq, method)` of every 2xx the UA received on it to a request it
+    /// sent: a repeat of one is its server transaction's replay (RFC 3261
+    /// §17.2.2), judged once.
+    answered: BTreeSet<(u32, String)>,
     /// Whether the UA, as UAS, ended it with a non-2xx final the peer has not
-    /// provably seen: neither the ACK of that final (RFC 3261 §17.2.1) nor a
-    /// new INVITE of the caller (§8.1.3.5) reached the UA yet, so a 2xx to a
-    /// request the UA sent on it may cross the final.
+    /// provably seen: neither the caller's ACK of that final (RFC 3261
+    /// §17.2.1) nor a new INVITE of the caller (§8.1.3.5) reached the UA yet,
+    /// so a request the peer sent on it, or a 2xx to one the UA sent, may
+    /// cross the final. The peer's messages are taken to reach the UA in the
+    /// order it sent them: one sent before that ACK and delivered after it is
+    /// judged as sent after.
     final_unseen: bool,
 }
 
@@ -205,10 +216,11 @@ impl DialogTable {
             None if method == "INVITE" => {
                 let key = InviteKey { call_id, caller_tag: local, role: Role::Uac };
                 let cseq = request.cseq().seq();
-                self.invites
-                    .entry(key)
-                    .and_modify(|i| i.cseq = cseq)
-                    .or_insert(Invite { cseq, answered_at_us: None });
+                self.invites.entry(key).and_modify(|i| i.cseq = cseq).or_insert(Invite {
+                    cseq,
+                    answered_at_us: None,
+                    received_vias: None,
+                });
             }
             Some(remote) if method == "BYE" => {
                 if let Some(d) = self.dialogs.get_mut(&DialogId { call_id, local, remote }) {
@@ -268,7 +280,8 @@ impl DialogTable {
     /// §12.1.2: that dialog is gone, so nothing on it is answered 2xx). A
     /// PRACK is excepted (RFC 3262 §3), and a CANCEL is hop-by-hop. A final
     /// the UA sent ends the dialog for this judgement only once the peer
-    /// provably saw it (`Dialog::final_unseen`).
+    /// provably saw it (`Dialog::final_unseen`), and a repeat of a 2xx
+    /// already taken on the dialog is not judged again.
     pub fn note_received_response(
         &mut self,
         response: &SipResponse,
@@ -290,9 +303,12 @@ impl DialogTable {
             };
             self.invites.get(&key).is_some_and(|i| i.cseq == response.cseq().seq())
         };
-        if (200..300).contains(&status) && !initial && !matches!(method, "PRACK" | "CANCEL") {
-            let seen_state = self.dialogs.get(&id).filter(|d| !d.final_unseen).map(|d| d.state);
-            if let Some(DialogState::EndedByFinal(by)) = seen_state {
+        let judged =
+            (200..300).contains(&status) && !initial && !matches!(method, "PRACK" | "CANCEL");
+        let dialog = self.dialogs.get_mut(&id).filter(|_| judged);
+        if let Some(d) = dialog {
+            let first = d.answered.insert((response.cseq().seq(), method.to_string()));
+            if let (true, false, DialogState::EndedByFinal(by)) = (first, d.final_unseen, d.state) {
                 return Some(DialogVerdict {
                     method: method.to_string(),
                     call_id: id.call_id.clone(),
@@ -345,6 +361,7 @@ impl DialogTable {
             pending_bye: None,
             subscriptions: 0,
             received: BTreeSet::new(),
+            answered: BTreeSet::new(),
             final_unseen: false,
         };
         match status {
@@ -375,12 +392,17 @@ impl DialogTable {
         }
     }
 
-    /// Whether an ACK numbered `cseq` on `dialog` acknowledges the non-2xx
-    /// final the UA, as UAS, ended it with (RFC 3261 §17.2.1).
-    fn acks_own_final(&self, dialog: &Dialog, cseq: u32) -> bool {
+    /// Whether `ack` on `dialog` is the caller's own ACK of the non-2xx final
+    /// the UA, as UAS, ended it with (RFC 3261 §17.2.1): its INVITE's number
+    /// and as many Via entries as that INVITE carried when the UA received
+    /// it. A transaction-stateful hop's own ACK of the final (§17.1.1.3)
+    /// carries one Via fewer at least, and shows nothing the caller saw.
+    fn acks_own_final(&self, dialog: &Dialog, ack: &SipRequest) -> bool {
         dialog.invite.role == Role::Uas
             && matches!(dialog.state, DialogState::EndedByFinal(_))
-            && self.invites.get(&dialog.invite).is_some_and(|i| i.cseq == cseq)
+            && self.invites.get(&dialog.invite).is_some_and(|i| {
+                i.cseq == ack.cseq().seq() && i.received_vias == Some(ack.via().len())
+            })
     }
 
     /// The peer showed it saw the final the UA sent to the INVITE `key`: the
@@ -410,11 +432,15 @@ impl DialogTable {
                 // is a new transaction: its responses are the initial ones.
                 let key = InviteKey { call_id, caller_tag: remote, role: Role::Uas };
                 let cseq = request.cseq().seq();
+                let vias = Some(request.via().len());
                 let retry = self.invites.get(&key).is_some_and(|i| cseq > i.cseq);
                 self.invites
                     .entry(key.clone())
-                    .and_modify(|i| i.cseq = cseq)
-                    .or_insert(Invite { cseq, answered_at_us: None });
+                    .and_modify(|i| {
+                        i.cseq = cseq;
+                        i.received_vias = vias;
+                    })
+                    .or_insert(Invite { cseq, answered_at_us: None, received_vias: vias });
                 if retry {
                     self.final_seen(&key);
                 }
@@ -440,7 +466,7 @@ impl DialogTable {
             }
             return Some(verdict(self.unknown(&id)));
         };
-        if method == "ACK" && self.acks_own_final(dialog, cseq) {
+        if method == "ACK" && self.acks_own_final(dialog, request) {
             let key = dialog.invite.clone();
             self.final_seen(&key);
             return None;

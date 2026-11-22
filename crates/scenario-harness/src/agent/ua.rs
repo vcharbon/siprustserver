@@ -401,7 +401,8 @@ impl Agent {
     /// final this UA re-ACKed ([`Agent::re_ack`]).
     /// A txn-owned hop ACK still SURFACES here: the pull sites claim it, so an
     /// explicit `receive("ACK")` keeps working. The dialog table sights it
-    /// with what the TU sees: it shows the peer saw this UA's non-2xx final.
+    /// with what the TU sees, and takes it as the caller's sight of this UA's
+    /// non-2xx final only when it is the caller's own ACK, not a hop's.
     pub(crate) async fn surface(&self, pkt: &UdpPacket, msg: SipMessage) -> Option<SipMessage> {
         let sighting = self.txn.sight(&pkt.raw, &msg, self.arrived(pkt));
         if let SipMessage::Response(r) = &msg {
