@@ -5,10 +5,11 @@
 //!
 //! A connection's end is counted once, by why the client closed it
 //! ([`CloseCause`]): an answer's verdict and an abandoned request are
-//! counted where they happen; a connection the peer ended, or that a failed
-//! exchange or a refused body ended, is not counted; any other is closed by
-//! its pool, [`CloseCause::Rotation`] once its client retired, else
-//! [`CloseCause::Idle`] (a client that keeps no pool counts none). A
+//! counted where they happen; a connection its peer ended (an end of stream,
+//! or an answer that disables keep-alive, [`keeps_alive`]), or that a failed
+//! exchange or a refused body ended, is not counted. Any other is closed by
+//! its pool: [`CloseCause::Rotation`] once its client retired, else
+//! [`CloseCause::Idle`]; a client that keeps no pool counts neither. A
 //! connection a request abandoned is closed by a reset (`SO_LINGER` 0, no
 //! FIN first), so it leaves no socket in `TIME_WAIT`.
 
@@ -51,10 +52,13 @@ impl ClientLife {
     }
 
     fn unmarked_close(&self) -> Option<CloseCause> {
+        if !self.pools {
+            return None;
+        }
         if self.retired.load(Ordering::Relaxed) {
             Some(CloseCause::Rotation)
         } else {
-            self.pools.then_some(CloseCause::Idle)
+            Some(CloseCause::Idle)
         }
     }
 }
@@ -68,14 +72,30 @@ pub(super) struct Tracked {
     life: Arc<ClientLife>,
     /// Its end is counted, or is not to be.
     settled: AtomicBool,
+    /// A request was written on it and its answer is not judged yet: an end
+    /// meanwhile is its exchange's to settle (hyper may drop a connection
+    /// whose answer disables keep-alive before the exchange reads the head).
+    answer_due: AtomicBool,
     /// It closes by a reset.
     reset: AtomicBool,
 }
 
 impl Tracked {
-    /// An answer's verdict closed it, and counted it.
-    pub(super) fn closed_by_answer(&self) {
+    /// An answer's verdict closed it. `true` the first time its end is
+    /// settled so, for the caller to count.
+    pub(super) fn closed_by_answer(&self) -> bool {
+        !self.settled.swap(true, Ordering::Relaxed)
+    }
+
+    /// An answer on it disabled keep-alive: its peer ends it, no close of
+    /// the client's.
+    pub(super) fn ended_by_peer(&self) {
         self.settled.store(true, Ordering::Relaxed);
+    }
+
+    /// The answer due on it was judged, its end settled first when it was.
+    pub(super) fn judged(&self) {
+        self.answer_due.store(false, Ordering::Release);
     }
 
     /// A request abandoned it: it closes by a reset. `true` the first time
@@ -90,6 +110,44 @@ impl Tracked {
     pub(super) fn failed(&self) {
         self.settled.store(true, Ordering::Relaxed);
     }
+
+    /// A write on it ended `written`: bytes are a request whose answer is
+    /// due, an error a failed exchange.
+    fn wrote(&self, written: &Poll<io::Result<usize>>) {
+        match written {
+            Poll::Ready(Ok(n)) if *n > 0 => self.answer_due.store(true, Ordering::Relaxed),
+            Poll::Ready(Err(_)) => self.failed(),
+            _ => {}
+        }
+    }
+
+    /// The close its end is counted as, if any: none once settled or while
+    /// an answer is due on it.
+    fn unmarked_close(&self) -> Option<CloseCause> {
+        if self.answer_due.load(Ordering::Acquire) || self.settled.load(Ordering::Relaxed) {
+            return None;
+        }
+        self.life.unmarked_close()
+    }
+}
+
+/// Whether the answer `head` leaves its connection open for another
+/// request (RFC 9112 §9.3): no `close` connection option, and on HTTP/1.0 a
+/// `keep-alive` one.
+pub(super) fn keeps_alive(head: &hyper::http::response::Parts) -> bool {
+    let options = head
+        .headers
+        .get_all(hyper::header::CONNECTION)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .flat_map(|v| v.split(','))
+        .map(str::trim);
+    let (mut close, mut keep_alive) = (false, false);
+    for option in options {
+        close |= option.eq_ignore_ascii_case("close");
+        keep_alive |= option.eq_ignore_ascii_case("keep-alive");
+    }
+    !close && (head.version != hyper::Version::HTTP_10 || keep_alive)
 }
 
 /// [`Tracked`] as `Connected::extra` carries it.
@@ -129,9 +187,7 @@ impl AsyncWrite for TrackedStream {
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
         let written = Pin::new(&mut self.stream).poll_write(cx, buf);
-        if matches!(written, Poll::Ready(Err(_))) {
-            self.tracked.failed();
-        }
+        self.tracked.wrote(&written);
         written
     }
 
@@ -141,9 +197,7 @@ impl AsyncWrite for TrackedStream {
         bufs: &[io::IoSlice<'_>],
     ) -> Poll<io::Result<usize>> {
         let written = Pin::new(&mut self.stream).poll_write_vectored(cx, bufs);
-        if matches!(written, Poll::Ready(Err(_))) {
-            self.tracked.failed();
-        }
+        self.tracked.wrote(&written);
         written
     }
 
@@ -175,10 +229,8 @@ impl Drop for TrackedStream {
         if tracked.reset.load(Ordering::Relaxed) {
             let _ = socket2::SockRef::from(&self.stream).set_linger(Some(Duration::ZERO));
         }
-        if !tracked.settled.load(Ordering::Relaxed) {
-            if let Some(cause) = tracked.life.unmarked_close() {
-                ejection::closed(&tracked.peer, cause);
-            }
+        if let Some(cause) = tracked.unmarked_close() {
+            ejection::closed(&tracked.peer, cause);
         }
     }
 }
@@ -238,6 +290,7 @@ impl tower_service::Service<Uri> for Connector {
                 peer,
                 life,
                 settled: AtomicBool::new(false),
+                answer_due: AtomicBool::new(false),
                 reset: AtomicBool::new(false),
             });
             Ok(TokioIo::new(TrackedStream { stream, tracked }))

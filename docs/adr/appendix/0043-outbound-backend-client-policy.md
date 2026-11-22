@@ -52,7 +52,8 @@ is open, never for a name that does not resolve or a request never sent.
 A response is a whole one, status, headers and the body to its end: a body
 that stalls is a request timeout and one the peer closes before its declared
 end is an EOF, both retried, and neither is a response for the breaker (8).
-A body past the size cap is not retried. The backend may therefore serve a
+A body past the size cap is not retried, and is a response for the breaker:
+its head arrived. The backend may therefore serve a
 retried request twice: retry suits a request that is safe to repeat.
 The pool hands out the most recently returned idle connection first, so a
 retry lands on a connection that just proved itself. `hyper-util`'s own
@@ -71,12 +72,15 @@ one HTTP response of any status arrived inside it, evaluated each time a
 request ends without one. One dead peer among several never opens it (the
 others answer); a total outage or a hung application does, whatever the
 attempt budget against the window. A request never sent (no slot) is not
-counted; one its caller gives up on stays counted but opens nothing. While
+counted; one its caller gives up on stays counted but opens nothing. An
+answer whose body the client refused past its cap (14) is a response: a
+backend answering bodies past the cap is alive, and opening on it would
+fail every request at once and gate the node's OPTIONS (11). While
 open, a request fails at once, nothing sent, and a probe runs every period:
 it forgets the addresses, looks the name up afresh, and asks the backend's
 health path, under at most one period by default, on a client that keeps
-no pool; any HTTP response closes the breaker. A probe that panics runs
-again the next period.
+no pool; any HTTP response closes the breaker, one refused past the cap
+included. A probe that panics runs again the next period.
 
 ### 10. A decision backend failure is a bare 503
 
@@ -137,22 +141,35 @@ misbehaves:
   on the services it calls in turn.
 
 A connection the rules close is poisoned before the request yields again,
-so the pool never hands it out; it closes once its answer is read. A
-refused connect (a dead backend) stays a connect failure, retried under 7.
+so the pool never hands it out; it closes once its answer is read. On a
+multi-thread runtime hyper-util may put the connection back in its pool as
+the answer resolves, before the poison, and a request on another thread may
+take it in that window: a connection the rules close carries at most two
+requests, its close counted once. The verdict and the poison come before
+anything is counted, so the window is the answer's own poll. A refused
+connect (a dead backend) stays a connect failure, retried under 7.
 
 An answer body is read under `<P>_MAX_BODY_BYTES` (10 MiB unless a backend
 states less): a declared length past it is refused before any of the body
-is read, a body streamed past it is cut there, both `BodyTooLarge`, never
-retried, and their connection closed. The buffer grows by doubling and
-never past the cap. Counted as `http_request_body_refused_total{cause}`.
+is read; a body with no declared length (chunked, or read to the close) is
+read up to the cap and cut there, partly read. Both fail `BodyTooLarge`, are never retried,
+count as a response for the breaker (8), and close their connection. The
+buffer grows by doubling and never past the cap. Counted as
+`http_request_body_refused_total{cause}`.
 
 Every close is counted by cause in `http_request_connection_closes_total`:
 `status`, `shed`, `timeout`, `rotation` (its client retired) and `idle`
-(past the idle timeout or the idle cap). A connection its peer ended, or
-that a failed exchange or a refused body ended, is not a close of the
-client's. Each 5xx is counted by what became of its connection
+(past the idle timeout or the idle cap). A connection its peer ended (an
+end of stream, or an answer with `Connection: close` or HTTP/1.0 without
+keep-alive), that a failed exchange or a refused body ended, or that a
+client keeping no pool (the probe) closed, is not a close of the client's.
+Each 5xx is counted by what became of its connection
 (`http_request_error_answers_total{connection}`). The simulated fabric's
-pooled client applies the same rules.
+pooled client applies the same rules and the same body cap.
+
+The client sends only the headers its caller states, `Host` and the body's
+framing aside: no `Accept` unless the caller sets one (the `reqwest` client before it sent
+`Accept: */*`).
 
 ### Settings and their env keys
 
@@ -216,10 +233,12 @@ refuses boot with one error naming every variable involved.
   body cut before its end, the size cap), `tests/it/real_backend.rs`
   (the retry's room, a cut answer retried and a moved name, on the real clock),
   `tests/it/real_closes.rs` and `tests/it/real_timeout.rs` (ejection on the
-  real client behind a balancing front, the timeout's reset),
+  real client behind a balancing front, on a multi-thread runtime too, the
+  timeout's reset), `tests/it/real_peer_ends.rs` (the closes not counted),
+  `real_backend.rs` (a body past the cap at the breaker),
   `tests/body_cap_alloc.rs` (the body cap at the allocator), `ejection.rs`
   (the rules and the budget); `http-net-testkit` `tests/it/simulated_balanced.rs`
-  (the same rules on the simulated fabric),
+  (the same rules and body cap on the simulated fabric),
   `resolved_target/tests.rs` (stuck lookups, serve stale); `b2bua-harness`
   `unanswered_failure_consult`, `decision_deadline`, `refer_consult_error`,
   `service_http` (the adaptation port's retry),

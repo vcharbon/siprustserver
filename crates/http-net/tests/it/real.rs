@@ -1,7 +1,7 @@
 //! Real-transport (`feature = "real"`) round-trip of the fields the unary model
 //! now carries: a query string on the request target, request headers, and
 //! response headers. Runs on a real (non-paused) loopback runtime — the wire is
-//! hyper server ⇄ pooled reqwest client, so this exercises the actual
+//! hyper server ⇄ pooled hyper-util client, so this exercises the actual
 //! `path_and_query`/`HeaderMap` mapping, not the in-memory fabric.
 
 #![cfg(feature = "real")]
@@ -60,10 +60,10 @@ async fn real_transport_round_trips_query_and_headers() {
 
 /// A rule-configured callout endpoint may be named anything — `/tls/admit`,
 /// `/v1/certificates`. When that backend is down the operator must read
-/// `cause="refused"`, not `cause="tls"`: the url is part of the reqwest error's
-/// own message, so it must never reach the text classifier. Drives the real
-/// client against a closed port, so the whole chain (reqwest → hyper → io) is
-/// the one production produces.
+/// `cause="refused"`, not `cause="tls"`: the url may be part of the client
+/// error's own message, so it must never reach the text classifier. Drives
+/// the real client against a closed port, so the whole chain (hyper-util →
+/// hyper → io) is the one production produces.
 #[tokio::test]
 async fn a_refused_backend_behind_a_tls_named_path_counts_as_refused() {
     // A closed port: bind to learn a free one, then drop the listener.

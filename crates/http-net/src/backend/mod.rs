@@ -222,7 +222,11 @@ impl BackendClient {
         self.attempt_on(&client, req, budget).await
     }
 
-    /// One attempt of `req` under `budget` on `client`.
+    /// One attempt of `req` under `budget` on `client`. An answer whose body
+    /// the client refused past its cap is an answer for the breaker, and the
+    /// attempt fails ([`FailureCause::was_answered`]).
+    ///
+    /// [`FailureCause::was_answered`]: crate::failures::FailureCause::was_answered
     async fn attempt_on(
         &self,
         client: &Arc<dyn HttpClient>,
@@ -262,6 +266,10 @@ impl BackendClient {
             Ok(Ok(resp)) => {
                 sent.answered();
                 Ok(resp)
+            }
+            Ok(Err(e)) if e.cause.was_answered() => {
+                sent.answered();
+                Err(AttemptError::Transport(e))
             }
             Ok(Err(e)) => {
                 sent.unanswered();

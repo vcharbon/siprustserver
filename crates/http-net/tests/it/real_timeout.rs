@@ -1,9 +1,12 @@
 //! A request that times out on the real client, on loopback and the real
-//! clock (each run well under 1 s): its connection never goes back to the
+//! clock (each test well under 1 s): its connection never goes back to the
 //! pool, it is closed by a reset, and the answer that comes late on it is
-//! never read as the answer of another request. Both ways a request times
-//! out: the client's own ceiling, and a caller that drops the request at the
-//! end of its budget (`BackendClient::attempt`).
+//! never read as the answer of another request. That the connection is
+//! never reused is behaviour kept, the reset is new (ADR-0043 §14). Both
+//! ways a request times out: the client's own ceiling, and a caller that
+//! drops the request at the end of its budget (`BackendClient::attempt`),
+//! each on a current-thread runtime and, run after run, on a multi-thread
+//! one.
 
 #![cfg(feature = "real")]
 
@@ -15,8 +18,8 @@ use http_net::backend::metrics;
 use http_net::ejection::CloseCause;
 use http_net::failures::FailureCause;
 use http_net::{
-    AttemptError, BackendClient, BreakerConfig, ClientSettings, HttpError, HttpRequest,
-    HttpResponse, HttpTransport, RealHttpNetwork, ResolvedTarget,
+    AttemptError, BackendClient, BreakerConfig, ClientSettings, HttpRequest, HttpTransport,
+    RealHttpNetwork, ResolvedTarget,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -101,13 +104,14 @@ async fn peer() -> (SocketAddr, mpsc::UnboundedReceiver<Ending>, Arc<Mutex<usize
     (addr, rx, accepted)
 }
 
-/// The request after the timed-out one, sent right after it.
-async fn next(send: impl std::future::Future<Output = Result<HttpResponse, HttpError>>) -> Vec<u8> {
-    send.await.expect("the next request is answered").body
-}
+/// Runs of each case on a multi-thread runtime, where the connection's task
+/// may run on another thread as the request is dropped.
+const RUNS: usize = 5;
 
-#[tokio::test]
-async fn a_request_past_the_ceiling_resets_its_connection_never_pooled() {
+/// A request past the client's ceiling, then the next one on the same
+/// client. The ceiling bounds the next request too: on a loaded box it may
+/// be cut as well, never answered `late`.
+async fn past_the_ceiling() {
     let (addr, mut ended, accepted) = peer().await;
     let settings = ClientSettings { ceiling: TIMEOUT, ..ClientSettings::default() };
     let client = Arc::new(RealHttpNetwork::with_settings(&settings))
@@ -115,15 +119,50 @@ async fn a_request_past_the_ceiling_resets_its_connection_never_pooled() {
 
     let err = client.request(HttpRequest::get("/")).await.expect_err("past the ceiling");
     assert_eq!(err.cause, FailureCause::RequestTimeout, "{err:?}");
-    assert_eq!(next(client.request(HttpRequest::get("/"))).await, b"fresh");
+    let next_cut = match client.request(HttpRequest::get("/")).await {
+        Ok(resp) => {
+            assert_eq!(resp.body, b"fresh");
+            0
+        }
+        Err(e) => {
+            assert_eq!(e.cause, FailureCause::RequestTimeout, "{e:?}");
+            1
+        }
+    };
 
     assert_eq!(ended.recv().await, Some(Ending::Reset));
     assert_eq!(*accepted.lock().unwrap(), 2, "the next request opened a connection");
-    assert_eq!(metrics::connection_closes(&addr.to_string(), CloseCause::Timeout), 1);
+    let closes = metrics::connection_closes(&addr.to_string(), CloseCause::Timeout);
+    assert_eq!(closes, 1 + next_cut);
+}
+
+#[tokio::test]
+async fn a_request_past_the_ceiling_resets_its_connection_never_pooled() {
+    past_the_ceiling().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_request_past_the_ceiling_resets_its_connection_on_a_multi_thread_runtime() {
+    for _ in 0..RUNS {
+        past_the_ceiling().await;
+    }
 }
 
 #[tokio::test]
 async fn a_request_its_caller_drops_at_the_budget_resets_its_connection_never_pooled() {
+    dropped_at_the_budget().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_request_its_caller_drops_at_the_budget_resets_its_connection_on_a_multi_thread_runtime()
+{
+    for _ in 0..RUNS {
+        dropped_at_the_budget().await;
+    }
+}
+
+/// A request its caller drops at the end of its budget, then the next one.
+async fn dropped_at_the_budget() {
     let (addr, mut ended, accepted) = peer().await;
     let client = BackendClient::new(
         Arc::new(RealHttpNetwork::new()),

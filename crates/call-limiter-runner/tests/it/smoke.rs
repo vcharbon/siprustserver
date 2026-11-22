@@ -1,6 +1,6 @@
 //! Real-transport smoke test: bind the `LimiterServer` on a real loopback TCP
 //! port via `RealHttpNetwork` and drive admit/refuse/release/metrics over a
-//! real pooled `reqwest` client. Runs on a real (non-paused) runtime.
+//! real pooled hyper-util client. Runs on a real (non-paused) runtime.
 
 use std::sync::Arc;
 
@@ -64,7 +64,6 @@ async fn real_http_admit_reject_release_metrics() {
 #[tokio::test]
 async fn real_http_connect_error_when_no_server() {
     let net = RealHttpNetwork::new();
-    // Nothing bound here; reqwest should fail to connect.
     let err = net
         .request("127.0.0.1:1".parse().unwrap(), HttpRequest::get("/healthz"))
         .await

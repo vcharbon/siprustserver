@@ -3,7 +3,8 @@
 //! target's lookup bound), then asks `GET` [`BreakerConfig::health_path`]
 //! under [`BreakerConfig::probe_timeout`] on a client of its own that keeps
 //! no pool, so each probe opens a new connection. Any HTTP response, of any status,
-//! closes the breaker; a probe with none forgets the addresses again. A probe
+//! closes the breaker, one whose body the client refused past its cap
+//! included; a probe with none forgets the addresses again. A probe
 //! that panics runs again the next period. Closed, the probe waits for the
 //! next opening; it ends with the client.
 //!
@@ -72,12 +73,15 @@ async fn probe_until_closed(inner: Weak<Inner>) -> bool {
         if let Some(report) = report {
             report(answer.as_ref());
         }
-        match answer {
-            Ok(_) => {
-                inner.closed();
-                return true;
-            }
-            Err(_) => inner.target.forget(),
+        let answered = match &answer {
+            Ok(_) => true,
+            Err(AttemptError::Transport(e)) => e.cause.was_answered(),
+            Err(_) => false,
+        };
+        if answered {
+            inner.closed();
+            return true;
         }
+        inner.target.forget();
     }
 }

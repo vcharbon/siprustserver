@@ -10,6 +10,9 @@
 //!   answers, within the client's budget); the answer is returned whole
 //!   either way. One whose exchange failed is closed. One whose request its
 //!   caller dropped mid-flight is closed and counted as a timeout close.
+//! - An answer whose body passes `max_body_bytes` fails `BodyTooLarge`,
+//!   counted as a declared refusal, after the ejection rules judged its
+//!   status; its connection is closed.
 //! - An idle connection is closed past `pool_idle_timeout`, or when the pool
 //!   holds `max_idle_per_host` already (counted as idle closes), and when its
 //!   backend closed it (see [`SimulatedHttpNetwork`]); a closed one is never
@@ -22,7 +25,9 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use async_trait::async_trait;
+use http_net::backend::metrics::{self, BodyRefusal};
 use http_net::ejection::{self, CloseCause, Ejector};
+use http_net::failures::FailureCause;
 use http_net::{HttpClient, ResolvedTarget};
 use tokio::time::Instant;
 
@@ -39,6 +44,8 @@ pub(super) struct PooledClient {
     /// Idle connections and when each came back, the most recent last.
     idle: Mutex<Vec<(Connection, Instant)>>,
     ejector: Ejector,
+    /// The largest answer body returned.
+    max_body: usize,
     /// The target as configured: the close counters' `peer`.
     peer: String,
 }
@@ -56,6 +63,7 @@ impl PooledClient {
             max_idle: settings.max_idle_per_host,
             idle: Mutex::new(Vec::new()),
             ejector: Ejector::new(&settings.ejection),
+            max_body: settings.max_body_bytes,
             peer: target.to_string(),
         }
     }
@@ -131,11 +139,18 @@ impl HttpClient for PooledClient {
         let mut in_flight = InFlight { client: self, ended: false };
         let outcome = self.net.exchange(&mut conn, req).await;
         in_flight.ended = true;
-        if let Ok(resp) = &outcome {
-            if self.ejector.answered(&self.peer, &conn.record, resp.status).is_none() {
-                self.give_back(conn);
-            }
+        let resp = outcome?;
+        let verdict = self.ejector.answered(&conn.record, resp.status);
+        let closes = verdict.closes().is_some();
+        verdict.count(&self.peer);
+        if resp.body.len() > self.max_body {
+            metrics::body_refused(&self.peer, BodyRefusal::Declared);
+            let why = format!("response body past {} bytes", self.max_body);
+            return Err(HttpError::new(&self.peer, FailureCause::BodyTooLarge, why));
         }
-        outcome
+        if !closes {
+            self.give_back(conn);
+        }
+        Ok(resp)
     }
 }

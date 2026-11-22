@@ -52,10 +52,11 @@ as whatever final the engine chooses, and a cluster-wide outage leaves every wor
 7. **Retry rule** (`BackendClient::send_with_retry`): one retry, on the same client, after a
    connection-level failure or a request timeout, when the total budget leaves room for a whole
    attempt. Never after an HTTP response of any status, never while the breaker is open, never
-   for a name that does not resolve or a request never sent. A response, here and in 8, is a
-   whole one: one cut or stalled before the end of its body is a connection-level failure or a
-   timeout, so the backend may serve a retried request twice. A caller that must not retry uses
-   `BackendClient::attempt`. The adaptation port (`AdaptationHttpPort`) follows the rule.
+   for a name that does not resolve or a request never sent. A response, here and in 8, is
+   whole, or past the body cap: one cut or stalled before the end of its body is a
+   connection-level failure or a timeout, so the backend may serve a retried request twice. A
+   caller that must not retry uses `BackendClient::attempt`. The adaptation port
+   (`AdaptationHttpPort`) follows the rule.
    Detail: [appendix §7](appendix/0043-outbound-backend-client-policy.md#7-retry-rule).
 8. **Breaker** (`WindowBreaker`, one per backend): it opens when at least the configured number
    of requests were in flight during the last window and not one HTTP response of any status
@@ -82,7 +83,7 @@ as whatever final the engine chooses, and a cluster-wide outage leaves every wor
     is not attributed.
 14. **Per-connection ejection** (`http_net::ejection`): a connection is closed on the first
     500, 502 or 504, after three 503, 429 or 408 in a row (20 a second at most), by a reset on
-    a timeout. A body past the cap is refused unread. Detail:
+    a timeout. A body past the cap is refused. Detail:
     [appendix §14](appendix/0043-outbound-backend-client-policy.md#14-per-connection-ejection).
 
 ### Settings and their env keys

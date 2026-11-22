@@ -95,6 +95,12 @@ impl FailureCause {
                 | FailureCause::Unreachable
         )
     }
+
+    /// Whether a request that failed so was answered: the answer's head
+    /// arrived and the client refused the rest (a body past the cap).
+    pub const fn was_answered(self) -> bool {
+        matches!(self, FailureCause::BodyTooLarge)
+    }
 }
 
 impl std::fmt::Display for FailureCause {

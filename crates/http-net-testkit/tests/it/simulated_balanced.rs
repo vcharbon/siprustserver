@@ -1,6 +1,7 @@
 //! `SimulatedHttpNetwork` connections: a backend client's pool (most recently
 //! returned first, idle timeout, a closed connection never handed out, the
-//! ejection rules closing a broken or shedding backend's connection) and a
+//! ejection rules closing a broken or shedding backend's connection, the
+//! body cap) and a
 //! balanced address choosing a backend per new connection, on the paused
 //! clock.
 
@@ -14,8 +15,8 @@ use http_net::backend::metrics;
 use http_net::ejection::CloseCause;
 use http_net::failures::FailureCause;
 use http_net::{
-    ClientSettings, HttpClient, HttpRequest, HttpResponse, HttpService, HttpTransport,
-    ResolvedTarget,
+    AttemptError, BackendClient, BreakerConfig, ClientSettings, HttpClient, HttpRequest,
+    HttpResponse, HttpService, HttpTransport, ResolvedTarget,
 };
 use http_net_testkit::{Behaviour, Fault, Pick, SimulatedHttpNetwork};
 
@@ -27,9 +28,11 @@ fn addr(s: &str) -> SocketAddr {
     s.parse().unwrap()
 }
 
-/// Answers `status` after `delay`, counting the connections it hears of.
+/// Answers `status` and `body` after `delay`, counting the connections it
+/// hears of.
 struct Backend {
     status: Mutex<u16>,
+    body: Mutex<Vec<u8>>,
     delay: Mutex<Duration>,
     served: AtomicUsize,
     opened: AtomicUsize,
@@ -40,6 +43,7 @@ impl Backend {
     fn new(status: u16) -> Arc<Self> {
         Arc::new(Self {
             status: Mutex::new(status),
+            body: Mutex::new(Vec::new()),
             delay: Mutex::new(Duration::ZERO),
             served: AtomicUsize::new(0),
             opened: AtomicUsize::new(0),
@@ -60,7 +64,8 @@ impl HttpService for Backend {
         if !delay.is_zero() {
             tokio::time::sleep(delay).await;
         }
-        HttpResponse::status(*self.status.lock().unwrap())
+        let body = self.body.lock().unwrap().clone();
+        HttpResponse::status(*self.status.lock().unwrap()).with_body(body)
     }
 
     fn connection_opened(&self) {
@@ -196,6 +201,34 @@ async fn past_the_close_budget_an_error_answer_keeps_the_connection() {
     }
     assert_eq!(p.a.served(), 5, "every request back on the backend that answered 500");
     assert_eq!(p.net.connections_opened(addr(A)), 1);
+}
+
+/// Every answer passes the body cap: each fails `BodyTooLarge` on a
+/// connection of its own, spread again, and the backend answered, so its
+/// breaker stays closed.
+#[tokio::test(start_paused = true)]
+async fn answers_past_the_body_cap_close_their_connections_and_keep_the_breaker_closed() {
+    let p = pair(200).await;
+    *p.a.body.lock().unwrap() = b"answer".to_vec();
+    *p.b.body.lock().unwrap() = b"answer".to_vec();
+    let settings = ClientSettings { max_body_bytes: 4, ..ClientSettings::with_max_in_flight(8) };
+    let target = Arc::new(ResolvedTarget::addr(addr(FRONT)));
+    let backend =
+        BackendClient::new(Arc::new(p.net.clone()), target, settings, BreakerConfig::probing("/"));
+
+    for _ in 0..4 {
+        let outcome = backend.attempt(HttpRequest::get("/"), Duration::from_millis(500)).await;
+        let cause = match outcome {
+            Err(AttemptError::Transport(e)) => Some(e.cause),
+            _ => None,
+        };
+        assert_eq!(cause, Some(FailureCause::BodyTooLarge));
+    }
+
+    assert!(!backend.is_open(), "four answers inside the window: the backend is alive");
+    assert_eq!((p.a.served(), p.b.served()), (2, 2), "a new connection each, spread again");
+    assert_eq!(p.net.connections_open(addr(A)) + p.net.connections_open(addr(B)), 0);
+    assert_eq!(metrics::bodies_refused(FRONT, metrics::BodyRefusal::Declared), 4);
 }
 
 #[tokio::test(start_paused = true)]

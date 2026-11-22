@@ -1,7 +1,7 @@
 //! A backend client on the real transport and the real clock, on loopback,
 //! well under 1 s each: what the paused clock and the simulated fabric cannot
-//! show — timer rounding against the retry's room, and the pool's connections
-//! against a moved name.
+//! show — timer rounding against the retry's room, the pool's connections
+//! against a moved name, and an answer past the body cap at the breaker.
 
 #![cfg(feature = "real")]
 
@@ -10,9 +10,11 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use http_net::backend::metrics;
+use http_net::failures::FailureCause;
 use http_net::{
-    BackendClient, BreakerConfig, Budgets, ClientSettings, HttpRequest, MemoryResolver,
-    RealHttpNetwork, ResolvedTarget,
+    AttemptError, BackendClient, BreakerConfig, Budgets, ClientSettings, HttpRequest,
+    MemoryResolver, RealHttpNetwork, ResolvedTarget,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -159,4 +161,31 @@ async fn an_answer_cut_before_its_end_is_retried() {
     let outcome = client.send_with_retry(HttpRequest::get("/"), budgets).await;
     assert_eq!(outcome.map(|r| r.body), Ok(b"whole".to_vec()));
     assert_eq!(conns.load(Ordering::SeqCst), 2, "the cut answer was served too");
+}
+
+/// Three answers inside the breaker's window, each past the body cap: the
+/// backend answered, so the breaker stays closed; each attempt fails
+/// `BodyTooLarge`, sent once.
+#[tokio::test]
+async fn answers_past_the_body_cap_keep_the_breaker_closed() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    serve_tag(listener, b"answer");
+    let settings = ClientSettings { max_body_bytes: 4, ..ClientSettings::default() };
+    let target = Arc::new(ResolvedTarget::addr(addr));
+    let client = BackendClient::new(real(), target, settings, BreakerConfig::probing("/"));
+    let budgets =
+        Budgets { attempt: Duration::from_millis(300), total: Duration::from_millis(600) };
+
+    for _ in 0..3 {
+        let outcome = client.send_with_retry(HttpRequest::get("/"), budgets).await;
+        let cause = match outcome {
+            Err(AttemptError::Transport(e)) => Some(e.cause),
+            _ => None,
+        };
+        assert_eq!(cause, Some(FailureCause::BodyTooLarge));
+    }
+
+    assert!(!client.is_open(), "three answers inside the window: the backend is alive");
+    assert_eq!(metrics::retries(&addr.to_string()), 0, "a body past the cap is not retried");
 }

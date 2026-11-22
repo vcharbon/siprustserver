@@ -1,4 +1,4 @@
-//! `ScriptedHttpService` behind the real transport (hyper server, reqwest
+//! `ScriptedHttpService` behind the real transport (hyper server, hyper-util
 //! client, loopback sockets, real clock): the same program served over the
 //! wire, and the faults as a peer on a socket sees them.
 

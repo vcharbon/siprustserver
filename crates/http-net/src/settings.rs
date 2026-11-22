@@ -126,13 +126,17 @@ impl ClientSettings {
     ) -> Self {
         let max_in_flight = env.count("MAX_IN_FLIGHT", 1, defaults.max_in_flight);
         let d = &defaults.ejection;
+        let before_lists = env.refusals();
+        let close_statuses = env.statuses("CONN_CLOSE_STATUSES", &d.close_statuses);
+        let shed_statuses = env.statuses("CONN_SHED_STATUSES", &d.shed_statuses);
+        let lists_read = env.refusals() == before_lists;
         let ejection = EjectionRules {
-            close_statuses: env.statuses("CONN_CLOSE_STATUSES", &d.close_statuses),
-            shed_statuses: env.statuses("CONN_SHED_STATUSES", &d.shed_statuses),
+            close_statuses,
+            shed_statuses,
             shed_close_after: env.count_u32("CONN_SHED_CLOSE_AFTER", 1, d.shed_close_after),
             closes_per_s: env.count_u32("ERROR_CLOSES_PER_S", 0, d.closes_per_s),
         };
-        if !ejection.close_statuses.is_disjoint(&ejection.shed_statuses) {
+        if lists_read && !ejection.close_statuses.is_disjoint(&ejection.shed_statuses) {
             let (close, shed) = (env.key("CONN_CLOSE_STATUSES"), env.key("CONN_SHED_STATUSES"));
             env.refuse(format!(
                 "{close}={} and {shed}={} share a status: one closes on its first answer, the \
@@ -274,6 +278,10 @@ mod tests {
         }
         let e = from(&[("B_CONN_SHED_STATUSES", "429,200")]).expect_err("not a 4xx or 5xx");
         assert!(e.starts_with("B_CONN_SHED_STATUSES=\"429,200\": \"200\""), "{e}");
+        let e = from(&[("B_CONN_CLOSE_STATUSES", "500,x"), ("B_CONN_SHED_STATUSES", "500")])
+            .expect_err("a list that does not read");
+        assert!(e.starts_with("B_CONN_CLOSE_STATUSES=\"500,x\""), "{e}");
+        assert!(!e.contains("share a status"), "no overlap read against a default: {e}");
     }
 
     #[test]

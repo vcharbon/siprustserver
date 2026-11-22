@@ -1,4 +1,4 @@
-//! `Stub` behind the real transport (hyper server, reqwest client, loopback
+//! `Stub` behind the real transport (hyper server, hyper-util client, loopback
 //! sockets, real clock): the query as the wire carries it, a close, and a
 //! shutdown ending a pending answer.
 

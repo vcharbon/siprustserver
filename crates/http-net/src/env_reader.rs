@@ -29,6 +29,11 @@ impl<L: Fn(&str) -> Option<String>> EnvReader<L> {
         (self.lookup)(&self.key(suffix)).map(|v| v.trim().to_string()).filter(|v| !v.is_empty())
     }
 
+    /// The refusals so far.
+    pub(crate) fn refusals(&self) -> usize {
+        self.refused.len()
+    }
+
     /// Refuse the set, `why` naming the variables involved.
     pub(crate) fn refuse(&mut self, why: String) {
         self.refused.push(why);

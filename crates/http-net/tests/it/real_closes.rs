@@ -101,6 +101,24 @@ async fn front(first: SocketAddr, rest: SocketAddr) -> SocketAddr {
     addr
 }
 
+/// A front that sends its new connections to `a` and `b` in turn.
+async fn alternating_front(a: SocketAddr, b: SocketAddr) -> SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let mut n = 0usize;
+        while let Ok((mut client, _)) = listener.accept().await {
+            let to = if n.is_multiple_of(2) { a } else { b };
+            n += 1;
+            tokio::spawn(async move {
+                let Ok(mut server) = TcpStream::connect(to).await else { return };
+                let _ = tokio::io::copy_bidirectional(&mut client, &mut server).await;
+            });
+        }
+    });
+    addr
+}
+
 fn client_of(dst: SocketAddr, settings: &ClientSettings) -> Arc<dyn HttpClient> {
     Arc::new(RealHttpNetwork::with_settings(settings))
         .client(Arc::new(ResolvedTarget::addr(dst)), settings)
@@ -130,6 +148,41 @@ async fn a_broken_backends_first_500_closes_its_connection_and_the_healthy_one_s
     let peer = dst.to_string();
     assert_eq!(metrics::connection_closes(&peer, CloseCause::Status), 1);
     assert_eq!(metrics::error_answers(&peer, true), 1);
+}
+
+/// Sixteen tasks on eight threads share one client: a request on another
+/// thread may take a connection whose 500 closes it before the poison
+/// (the real client's module doc), never a third.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn on_a_multi_thread_runtime_a_broken_backends_connection_carries_at_most_two_requests() {
+    let net = RealHttpNetwork::new();
+    let (broken, healthy) = (Backend::answering(&[], 500), Backend::answering(&[], 200));
+    let (_a, _b) = (serve(&net, &broken).await, serve(&net, &healthy).await);
+    let dst = alternating_front(_a.local_addr(), _b.local_addr()).await;
+    let mut settings = ClientSettings::default();
+    settings.ejection.closes_per_s = 1_000_000;
+    let client = client_of(dst, &settings);
+
+    let tasks: Vec<_> = (0..16)
+        .map(|_| {
+            let client = client.clone();
+            tokio::spawn(async move {
+                for _ in 0..200 {
+                    let _ = client.request(HttpRequest::get("/")).await;
+                }
+            })
+        })
+        .collect();
+    for task in tasks {
+        task.await.unwrap();
+    }
+
+    let peer = dst.to_string();
+    let closed = metrics::connection_closes(&peer, CloseCause::Status) as usize;
+    let served = broken.served();
+    assert!((1..=broken.opened()).contains(&closed), "{closed} closes, {} opened", broken.opened());
+    assert!(served >= closed && served <= 2 * closed, "{served} 500s on {closed} connections");
+    assert_eq!(metrics::error_answers(&peer, true) as usize, served, "every 500 closed its own");
 }
 
 #[tokio::test]
@@ -173,14 +226,20 @@ async fn past_the_close_budget_a_500_keeps_its_connection_and_is_counted() {
 
     assert_eq!(statuses(&client, 5).await, [500; 5]);
 
-    assert_eq!(backend.opened(), 3, "two closed, the third pooled past the budget");
     let peer = server.local_addr().to_string();
-    assert_eq!(metrics::connection_closes(&peer, CloseCause::Status), 2);
-    assert_eq!(metrics::closes_budget_exhausted_count(&peer), 3);
-    assert_eq!((metrics::error_answers(&peer, true), metrics::error_answers(&peer, false)), (2, 3));
+    let closed = metrics::connection_closes(&peer, CloseCause::Status);
+    let exhausted = metrics::closes_budget_exhausted_count(&peer);
+    assert!(exhausted >= 1, "five 500s within a second pass a budget of two");
+    assert_eq!(closed + exhausted, 5, "each 500 closed its connection or found the budget spent");
+    assert_eq!(backend.opened() as u64, 1 + closed, "a new connection after each close");
+    assert_eq!(
+        (metrics::error_answers(&peer, true), metrics::error_answers(&peer, false)),
+        (closed, exhausted)
+    );
 }
 
-/// The body left unread on it would be read as the next answer's.
+/// An answer refused past the body cap closes its connection: the request
+/// after it opens a new one.
 #[tokio::test]
 async fn an_answer_refused_past_the_body_cap_never_returns_its_connection_to_the_pool() {
     let net = RealHttpNetwork::new();

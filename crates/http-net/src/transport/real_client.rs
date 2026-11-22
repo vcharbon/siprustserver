@@ -9,7 +9,13 @@
 //!   fails [`FailureCause::RequestTimeout`].
 //! - Its answer's status goes to the client's [`Ejector`]: a connection the
 //!   rules close is poisoned before the request yields again, so the pool
-//!   never hands it out, and closes once the answer is read.
+//!   never hands it out, and closes once the answer is read. On a
+//!   multi-thread runtime hyper-util may put the connection back in its pool
+//!   as the answer resolves, before the poison, and a request on another
+//!   thread may take it then: a connection the rules close carries at most
+//!   two requests, and its close is counted once.
+//! - An answer that disables keep-alive leaves its connection to its peer
+//!   to end: no close of the client's, nothing taken from its budget.
 //! - Its body is read under `max_body_bytes` (`capped_body`): past it the
 //!   answer fails [`FailureCause::BodyTooLarge`] and its connection closes.
 //! - A request dropped, or cut by the ceiling, before its answer was read
@@ -28,6 +34,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use bytes::Bytes;
 use http_body_util::Full;
+use hyper::http::response::Parts;
 use hyper::http::Extensions;
 use hyper::{Method, Request};
 use hyper_util::client::legacy::connect::{capture_connection, CaptureConnection};
@@ -35,10 +42,10 @@ use hyper_util::client::legacy::Client;
 use hyper_util::rt::{TokioExecutor, TokioTimer};
 
 use super::capped_body::{self, BodyError};
-use super::connection::{ClientLife, Connector, Tag, Tracked};
+use super::connection::{keeps_alive, ClientLife, Connector, Tag, Tracked};
 use super::{HttpClient, HttpError, HttpRequest, HttpResponse};
 use crate::backend::metrics::{self, BodyRefusal};
-use crate::ejection::Ejector;
+use crate::ejection::{Ejector, Verdict};
 use crate::failures::FailureCause;
 use crate::resolved_target::ResolvedTarget;
 use crate::settings::ClientSettings;
@@ -129,10 +136,7 @@ impl RealClient {
         let (head, mut body) = answer.into_parts();
         let status = head.status.as_u16();
         if let Some(Tag(tracked)) = head.extensions.get::<Tag>() {
-            if self.ejector.answered(peer, &tracked.record, status).is_some() {
-                tracked.closed_by_answer();
-                taken.poison();
-            }
+            self.judge(taken, peer, tracked, &head);
         }
         let body = match capped_body::read(&mut body, self.max_body).await {
             Ok(body) => body,
@@ -157,6 +161,34 @@ impl RealClient {
             .map(|(k, v)| (k.as_str().to_string(), v.to_str().unwrap_or("").to_string()))
             .collect();
         Ok(HttpResponse { status, headers, body })
+    }
+
+    /// The verdict on `tracked`, the connection the answer `head` came on to
+    /// `taken`: one its peer ends is settled so; one the rules close is
+    /// poisoned first, then counted, its close once whatever carried it.
+    fn judge(&self, taken: Taken<'_>, peer: &str, tracked: &Tracked, head: &Parts) {
+        let verdict = self.verdict(taken, tracked, head);
+        tracked.judged();
+        verdict.count(peer);
+    }
+
+    /// The verdict of [`RealClient::judge`], acted on, not counted.
+    fn verdict(&self, taken: Taken<'_>, tracked: &Tracked, head: &Parts) -> Verdict {
+        let status = head.status.as_u16();
+        if !keeps_alive(head) {
+            tracked.ended_by_peer();
+            return Verdict::peer_ends(status);
+        }
+        let verdict = self.ejector.answered(&tracked.record, status);
+        if verdict.closes().is_none() {
+            return verdict;
+        }
+        taken.poison();
+        if tracked.closed_by_answer() {
+            verdict
+        } else {
+            verdict.close_counted()
+        }
     }
 }
 

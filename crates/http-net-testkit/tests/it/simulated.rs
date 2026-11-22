@@ -425,7 +425,7 @@ async fn a_request_its_caller_abandons_leaves_the_flight() {
     assert_eq!(net.in_flight(dst), 0, "a dropped request is no longer in flight");
 }
 
-/// Each scripted behaviour is the outcome `reqwest` produces for it, one per
+/// Each scripted behaviour is the outcome the real client produces for it, one per
 /// request in order, then the standing behaviour; `StallBody` is served but
 /// never completes, `Eof` is never served.
 #[tokio::test(start_paused = true)]

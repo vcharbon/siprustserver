@@ -249,7 +249,7 @@ pub(crate) fn closes_budget_exhausted(peer: &str) {
 }
 
 /// An answer body of `peer` was refused past the client's cap.
-pub(crate) fn body_refused(peer: &str, refusal: BodyRefusal) {
+pub fn body_refused(peer: &str, refusal: BodyRefusal) {
     rows().body_refused.add(&[peer, refusal.label()], 1);
 }
 

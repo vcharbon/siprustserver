@@ -95,31 +95,15 @@ impl Ejector {
         Self { rules: rules.clone(), budget: ErrorCloses::new(rules.closes_per_s) }
     }
 
-    /// Whether the connection `record` keeps, which carried an answer of
-    /// `status` from `peer`, is closed, and why. Every close is counted by
-    /// its cause, every close the budget refused, and every 5xx by what
-    /// became of its connection.
-    pub fn answered(
-        &self,
-        peer: &str,
-        record: &ConnectionRecord,
-        status: u16,
-    ) -> Option<CloseCause> {
+    /// The verdict on the connection `record` keeps, which carried an answer
+    /// of `status`: the record's run moved on, a close taken from the
+    /// budget, nothing counted yet.
+    pub fn answered(&self, record: &ConnectionRecord, status: u16) -> Verdict {
         let wanted = self.wanted(record, status);
-        let closed = wanted.filter(|_| self.rules.closes_per_s > 0).filter(|_| {
-            let took = self.budget.take();
-            if !took {
-                metrics::closes_budget_exhausted(peer);
-            }
-            took
-        });
-        if (500..=599).contains(&status) {
-            metrics::error_answered(peer, closed.is_some());
-        }
-        if let Some(cause) = closed {
-            metrics::connection_closed(peer, cause);
-        }
-        closed
+        let wanted = wanted.filter(|_| self.rules.closes_per_s > 0);
+        let closed = wanted.filter(|_| self.budget.take());
+        let refused = wanted.is_some() && closed.is_none();
+        Verdict { status, closed, refused, ends: closed.is_some() }
     }
 
     /// What the rules ask of the connection after an answer of `status`,
@@ -141,6 +125,55 @@ impl Ejector {
     }
 }
 
+/// What becomes of a connection after one answer on it. The caller acts on
+/// it first ([`Verdict::closes`]) and counts it after ([`Verdict::count`]),
+/// so a connection to close leaves the pool as soon as its answer resolves.
+#[must_use]
+#[derive(Debug, PartialEq, Eq)]
+pub struct Verdict {
+    status: u16,
+    /// The client closes the connection, and why.
+    closed: Option<CloseCause>,
+    /// The rules would close it and the budget refused.
+    refused: bool,
+    /// The connection ends, the client's close or its peer's.
+    ends: bool,
+}
+
+impl Verdict {
+    /// The verdict on an answer of `status` whose connection its peer ends:
+    /// no close of the client's, no budget taken.
+    pub fn peer_ends(status: u16) -> Self {
+        Self { status, closed: None, refused: false, ends: true }
+    }
+
+    /// Whether the client closes the connection, and why.
+    pub fn closes(&self) -> Option<CloseCause> {
+        self.closed
+    }
+
+    /// The connection's end was counted already, by another answer on it or
+    /// otherwise: this verdict counts no close.
+    pub fn close_counted(mut self) -> Self {
+        self.closed = None;
+        self
+    }
+
+    /// Count it under `peer`: its close by cause, a close the budget
+    /// refused, and a 5xx by what became of its connection.
+    pub fn count(self, peer: &str) {
+        if self.refused {
+            metrics::closes_budget_exhausted(peer);
+        }
+        if (500..=599).contains(&self.status) {
+            metrics::error_answered(peer, self.ends);
+        }
+        if let Some(cause) = self.closed {
+            metrics::connection_closed(peer, cause);
+        }
+    }
+}
+
 /// A client closed a connection to `peer` for `cause` outside any answer:
 /// [`CloseCause::Idle`] or [`CloseCause::Rotation`].
 pub fn closed(peer: &str, cause: CloseCause) {
@@ -157,12 +190,21 @@ mod tests {
         Ejector::new(&EjectionRules { closes_per_s, ..EjectionRules::default() })
     }
 
+    /// The close `e` decides on an answer of `status` on `conn`, counted
+    /// under `peer`.
+    fn answer(e: &Ejector, peer: &str, conn: &ConnectionRecord, status: u16) -> Option<CloseCause> {
+        let verdict = e.answered(conn, status);
+        let closes = verdict.closes();
+        verdict.count(peer);
+        closes
+    }
+
     #[tokio::test(start_paused = true)]
     async fn a_close_status_closes_on_its_first_answer_and_a_shed_status_after_three_in_a_row() {
         let e = ejector(20);
         let conn = ConnectionRecord::default();
         let answers = [200, 500, 502, 504, 404, 429, 503, 503, 200, 503, 503, 408, 408];
-        let verdicts: Vec<_> = answers.iter().map(|s| e.answered("ej-a", &conn, *s)).collect();
+        let verdicts: Vec<_> = answers.iter().map(|s| answer(&e, "ej-a", &conn, *s)).collect();
         use CloseCause::{Shed, Status};
         assert_eq!(
             verdicts,
@@ -192,7 +234,7 @@ mod tests {
     async fn past_the_budget_a_close_is_refused_and_counted_until_the_budget_refills() {
         let e = ejector(2);
         let conn = ConnectionRecord::default();
-        let closes = || e.answered("ej-b", &conn, 500).is_some();
+        let closes = || answer(&e, "ej-b", &conn, 500).is_some();
         assert_eq!([closes(), closes(), closes()], [true, true, false]);
         assert_eq!(metrics::closes_budget_exhausted_count("ej-b"), 1);
         tokio::time::advance(Duration::from_millis(500)).await;
@@ -204,8 +246,19 @@ mod tests {
     async fn a_budget_of_zero_never_closes_and_counts_no_refusal() {
         let e = ejector(0);
         let conn = ConnectionRecord::default();
-        assert_eq!(e.answered("ej-c", &conn, 500), None);
+        assert_eq!(answer(&e, "ej-c", &conn, 500), None);
         assert_eq!(metrics::closes_budget_exhausted_count("ej-c"), 0);
         assert_eq!(metrics::error_answers("ej-c", false), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_close_counted_already_or_a_connection_its_peer_ends_counts_no_close() {
+        let e = ejector(20);
+        let conn = ConnectionRecord::default();
+        e.answered(&conn, 500).close_counted().count("ej-d");
+        Verdict::peer_ends(502).count("ej-d");
+        assert_eq!(metrics::connection_closes("ej-d", CloseCause::Status), 0);
+        assert_eq!(metrics::error_answers("ej-d", true), 2, "both connections end");
+        assert_eq!(metrics::closes_budget_exhausted_count("ej-d"), 0);
     }
 }
