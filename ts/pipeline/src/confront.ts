@@ -17,10 +17,11 @@
  *   held against that resource's text, both sides folded under the
  *   expectation's `compare` mode; the expected texts come from the caller,
  *   keyed by ref, and a ref the caller did not supply is the caller's error.
- *   Under `sdp` the fold masks the lane-owned fields the expect's `rewrite`
- *   names only where the run's media mode says the lane rebooked them, and
- *   on a verbatim run holds the two texts to the same bytes, an origin the
- *   replayed endpoint mints marked on its `o=` row (`./sdporigin.ts`).
+ *   Under `sdp` the two texts compare by meaning (`./sdpfold.ts`): the fold
+ *   masks the lane-owned fields the expect's `rewrite` names only where the
+ *   run's media mode says the lane rebooked them, and on a verbatim run an
+ *   origin the replayed endpoint mints is marked on its `o=` row
+ *   (`./sdporigin.ts`).
  * - **shape** — the verdict's structural failures, restated in the delta-record
  *   vocabulary (a final answered with another status, a datagram nothing
  *   expected — serviced by the leg or not — an expectation nothing satisfied,

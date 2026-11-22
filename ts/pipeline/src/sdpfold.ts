@@ -161,7 +161,7 @@ interface Stated {
   readonly form: ReadonlyArray<string>
 }
 
-/** One section read for meaning: its keys in first-appearance order, and where its RFC-ordered lines stand. */
+/** One section read for meaning: its keys in first-appearance order, `a=direction` last, and where its RFC-ordered lines stand. */
 interface Reading {
   readonly lines: ReadonlyArray<string>
   readonly keys: ReadonlyMap<string, Stated>
@@ -304,7 +304,7 @@ const diffStructure = (mask: SdpMask, captured: string, replayed: string): Reado
   return out
 }
 
-/** One difference per key whose forms differ, keys in first-appearance order, captured side first; else the `order` row where the layouts differ. */
+/** One difference per key whose forms differ, keys in each reading's order, captured side first; else the `order` row where the layouts differ. */
 const diffSection = (section: string, captured: Reading, replayed: Reading): ReadonlyArray<SdpDifference> => {
   const keys = [...new Set([...captured.keys.keys(), ...replayed.keys.keys()])]
   const none: Stated = { lines: [], form: [] }
