@@ -41,7 +41,7 @@ impl Harness {
 
     /// Like [`with_transit_delay`](Harness::with_transit_delay), plus a
     /// per-datagram fate on the simulated fabric ([`sip_net_testkit::Fate`]):
-    /// the losses, holds and copies an unreliable transport makes, which every
+    /// the losses and holds an unreliable transport makes, which every
     /// party's transaction layer must ride out (RFC 3261 §17, §18). The run
     /// declares a loss model: [`serve_parties_until`](Self::serve_parties_until)
     /// waits out the SUT's own 64·T1 give-up.

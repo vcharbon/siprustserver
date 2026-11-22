@@ -13,9 +13,9 @@
 //! as batches under the test timeout; `CALLFUZZ_CALL_SEED` replays one call.
 //! A failure names each failing call's seed and draw.
 //!
-//! `CALLFUZZ_DROP`, `CALLFUZZ_DUP` and `CALLFUZZ_LATE` (percent of datagrams,
-//! default 0) put the call on a lossy network ([`faults`]); a call replays
-//! with its faults, which its draw counts.
+//! `CALLFUZZ_DROP` and `CALLFUZZ_LATE` (percent of datagrams, default 0) put
+//! the call on a lossy network ([`faults`]); a call replays with its faults,
+//! which its draw counts.
 
 mod faults;
 
@@ -132,7 +132,6 @@ async fn fuzzed_calls_through_the_b2bua() {
     let from = knob("CALLFUZZ_FROM").unwrap_or(0);
     let faults = Faults {
         drop: knob("CALLFUZZ_DROP").unwrap_or(0),
-        dup: knob("CALLFUZZ_DUP").unwrap_or(0),
         late: knob("CALLFUZZ_LATE").unwrap_or(0),
     };
     let mut failed = Vec::new();

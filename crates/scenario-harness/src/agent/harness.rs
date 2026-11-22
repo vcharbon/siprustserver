@@ -111,8 +111,8 @@ pub struct Harness {
     dialog_opt_ins: DialogOptIns,
     /// The loopback addresses [`next_addr`](Self::next_addr) hands out.
     addrs: AddrAlloc,
-    /// Whether the fabric runs a loss model: its datagrams may be lost, held
-    /// or copied ([`with_transit_delay_and_send_fate`](Self::with_transit_delay_and_send_fate)).
+    /// Whether the fabric runs a loss model: its datagrams may be lost or
+    /// held ([`with_transit_delay_and_send_fate`](Self::with_transit_delay_and_send_fate)).
     lossy: bool,
 }
 

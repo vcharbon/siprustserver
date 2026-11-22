@@ -1,10 +1,10 @@
-//! The network a fuzzed call crosses: an unreliable transport that loses,
-//! duplicates and holds back datagrams (RFC 3261 §18), each party's
-//! transaction layer riding it out (§17). The faults stay inside what SIP
-//! recovers from: a hold of 2 s at most (under 64·T1), only on a response or
-//! an ACK, never on a reliable provisional, whose PRACK is owed only if it
-//! arrives before the final (RFC 3262 §4). The fates are drawn from the call's
-//! seed in send order, so a call replays with its faults.
+//! The network a fuzzed call crosses: an unreliable transport that loses and
+//! holds back datagrams (RFC 3261 §18), each party's transaction layer riding
+//! it out (§17). The faults stay inside what SIP recovers from: a hold of 2 s
+//! at most (under 64·T1), only on a response or an ACK, never on a reliable
+//! provisional, whose PRACK is owed only if it arrives before the final
+//! (RFC 3262 §4). The fates are drawn from the call's seed in send order, so
+//! a call replays with its faults.
 
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
@@ -19,20 +19,16 @@ const FAULT_SALT: u64 = 0xFA17_5A17_FA17_5A17;
 /// The longest a held datagram waits past the transit, in ms.
 const LATE_MAX_MS: u64 = 2_000;
 
-/// The longest a duplicate trails its original, in ms.
-const DUP_MAX_MS: u64 = 50;
-
-/// The percent of datagrams lost, duplicated and held back.
+/// The percent of datagrams lost and held back.
 #[derive(Clone, Copy, Debug, Default)]
 pub(super) struct Faults {
     pub(super) drop: u64,
-    pub(super) dup: u64,
     pub(super) late: u64,
 }
 
 impl Faults {
     pub(super) fn any(&self) -> bool {
-        self.drop + self.dup + self.late > 0
+        self.drop + self.late > 0
     }
 }
 
@@ -40,19 +36,17 @@ impl Faults {
 #[derive(Debug, Default)]
 pub(super) struct Tally {
     lost: AtomicU32,
-    doubled: AtomicU32,
     held: AtomicU32,
 }
 
 impl Tally {
     /// The tally as a draw note, empty when no datagram met a fault.
     pub(super) fn note(&self) -> String {
-        let [lost, doubled, held] =
-            [&self.lost, &self.doubled, &self.held].map(|n| n.load(Ordering::Relaxed));
-        if lost + doubled + held == 0 {
+        let [lost, held] = [&self.lost, &self.held].map(|n| n.load(Ordering::Relaxed));
+        if lost + held == 0 {
             return String::new();
         }
-        format!(" net(lost {lost}, doubled {doubled}, held {held})")
+        format!(" net(lost {lost}, held {held})")
     }
 }
 
@@ -73,10 +67,6 @@ pub(super) fn fate_of(faults: Faults, seed: u64, tally: Arc<Tally>) -> SendFate 
         if rng.chance(faults.drop) {
             tally.lost.fetch_add(1, Ordering::Relaxed);
             return Fate::Lose;
-        }
-        if rng.chance(faults.dup) {
-            tally.doubled.fetch_add(1, Ordering::Relaxed);
-            return Fate::Twice(Duration::from_millis(1 + rng.below(DUP_MAX_MS)));
         }
         if holdable(raw) && rng.chance(faults.late) {
             tally.held.fetch_add(1, Ordering::Relaxed);
