@@ -85,7 +85,7 @@ async fn a_request_copy_sent_before_its_dialogs_final_is_refused_and_no_finding(
 }
 
 #[tokio::test(start_paused = true)]
-#[should_panic(expected = "names a dialog a 487 final ended")]
+#[should_panic(expected = "names a dialog a 487 final ended at step")]
 async fn a_request_held_past_its_dialogs_final_with_nothing_lost_is_a_finding() {
     let h = Harness::with_transit_delay_and_send_delay(
         "request-held-past-the-final",

@@ -67,12 +67,14 @@ impl std::fmt::Debug for SentBeforeEnd {
 /// The recorded events, in record order: the first `SendCalled` of
 /// `request` (its Call-ID, CSeq, method and top-Via branch) is lost, its
 /// `SendLost` recorded on its lane before that lane's next send; and that
-/// lane shows the `end` after it. An end the peer sent is a `SendCalled` of
-/// its own after that first one. An end the UA sent is one the lane took
-/// from its socket (`RecvConsumed`) at no instant strictly earlier than that
-/// send: an end that arrived but was not read yet is not known, and one read
-/// at the same instant is not ordered against the send (two lanes' events of
-/// one instant have no order), so it crossed.
+/// lane shows the `end` after it. An end the peer sent is the lane's first
+/// `SendCalled` of it, after that first copy: a retransmission of the end
+/// (§17.1.2.2, §17.2.1) was sent when its first copy left. An end the UA
+/// sent is one the lane took from its socket (`RecvConsumed`) at no instant
+/// strictly earlier than the request's first copy: an end that arrived but
+/// was not read yet is not known, and one read at the same instant is not
+/// ordered against the send (two lanes' events of one instant have no
+/// order), so it crossed.
 fn sent_before_end(
     events: &[Stamped<SignalingNetworkEvent>],
     request: &SipRequest,
@@ -102,10 +104,11 @@ fn sent_before_end(
         .any(|e| matches!(e, SignalingNetworkEvent::SendLost { bind_key, msg, .. } if bind_key == lane && msg == first));
     let is_the_end = |raw: &[u8]| is_end_of(request, end, &sniff::identity(raw));
     let known_before = if end.by_peer {
-        !events[at + 1..].iter().any(|s| {
+        let first_end = events.iter().position(|s| {
             matches!(&s.event, SignalingNetworkEvent::SendCalled { bind_key, msg, .. }
             if bind_key == lane && is_the_end(msg))
-        })
+        });
+        !first_end.is_some_and(|i| i > at)
     } else {
         let sent_at_ms = events[at].at_ms;
         events.iter().any(|s| {

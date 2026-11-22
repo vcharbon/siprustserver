@@ -170,6 +170,17 @@ async fn a_first_copy_sent_after_the_peers_own_end_crossed_nothing() {
     assert!(!fact_after(false, &steps, peers_487(1)).await);
 }
 
+/// The peer's own final or BYE goes again on its timer (RFC 3261 §17.2.1,
+/// §17.1.2.2): it was sent when its first copy left, so a copy of it after
+/// the request's first copy is no end sent after that one.
+#[tokio::test(start_paused = true)]
+async fn a_peers_end_sent_again_counts_from_its_first_send() {
+    let steps = [PeerSends(PEERS_487), PeerCopy, PeerSends(PEERS_487), PeerCopy];
+    assert!(!fact_after(true, &steps, peers_487(1)).await);
+    let steps = [PeerSends(PEERS_BYE), PeerCopy, PeerSends(PEERS_BYE), PeerCopy];
+    assert!(!fact_after(true, &steps, peers_bye(8)).await);
+}
+
 /// An end of the peer's the lane never shows is no end it sent after its
 /// first copy: a final to another INVITE, a BYE of another number.
 #[tokio::test(start_paused = true)]
