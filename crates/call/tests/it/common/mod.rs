@@ -375,6 +375,16 @@ fn arb_uri() -> impl Strategy<Value = String> {
 fn arb_bytes(max: usize) -> impl Strategy<Value = Vec<u8>> {
     proptest::collection::vec(any::<u8>(), 0..max)
 }
+/// A re-INVITE parked in a service's state: its describing leg, body and
+/// lines.
+fn arb_pending_resync() -> impl Strategy<Value = Box<PendingResync>> {
+    (arb_tag(), arb_bytes(64), proptest::collection::vec((arb_tag(), arb_tag()), 0..3)).prop_map(
+        |(leg_id, body, lines)| {
+            let lines = lines.iter().map(|(n, v)| header(n, v)).collect();
+            Box::new(PendingResync { leg_id, body, lines })
+        },
+    )
+}
 
 fn arb_json() -> impl Strategy<Value = serde_json::Value> {
     prop_oneof![
@@ -653,19 +663,26 @@ pub fn arb_call() -> impl Strategy<Value = Call> {
         arb_termination(),
         proptest::collection::vec(Just(ReleaseEventKind::MaxCallDuration), 0..2),
         proptest::option::of(
-            (arb_tag(), proptest::option::of(arb_tag()), any::<i64>(), any::<bool>()).prop_map(
-                |(new_leg_id, old_leg_id, started_at_ms, realigning)| RerouteState {
-                    phase: if realigning {
-                        ReroutePhase::ARealigning
-                    } else {
-                        ReroutePhase::BLegDialing
+            (
+                arb_tag(),
+                proptest::option::of(arb_tag()),
+                any::<i64>(),
+                any::<bool>(),
+                proptest::option::of(arb_pending_resync()),
+            )
+                .prop_map(
+                    |(new_leg_id, old_leg_id, started_at_ms, realigning, parked)| RerouteState {
+                        phase: if realigning {
+                            ReroutePhase::ARealigning
+                        } else {
+                            ReroutePhase::BLegDialing
+                        },
+                        new_leg_id,
+                        old_leg_id,
+                        started_at_ms,
+                        pending_a_realign: parked,
                     },
-                    new_leg_id,
-                    old_leg_id,
-                    started_at_ms,
-                    pending_a_realign: None,
-                },
-            ),
+                ),
         ),
         any::<u32>(),
     );
