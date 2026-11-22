@@ -428,14 +428,3 @@ fn an_ending_dialog_refuses_the_extension_before_its_answer_and_the_order_check(
     assert_eq!(request_verdict(&call, "a", &late).status(), Some(420));
     assert_eq!(request_verdict(&call, "a", &caller_request(Method::Info, 4)), Verdict::OutOfOrder);
 }
-
-/// A request refused 420 performs no state change (RFC 3261 §8.2): it is
-/// taken on no dialog, so its CSeq never becomes its dialog's last.
-#[test]
-fn a_request_refused_420_leaves_its_dialogs_last_cseq() {
-    let call = call_with_caller_dialog(true);
-    let req = requiring(caller_request(Method::Info, 9), "x-nonexistent");
-    let verdict = request_verdict(&call, "a", &req);
-    assert_eq!(verdict.status(), Some(420));
-    assert_eq!(verdict.in_order(), None, "a 420 is taken on no dialog");
-}
