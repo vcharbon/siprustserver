@@ -210,7 +210,7 @@ fn ended_by_its_own_bye(crossed: bool) -> DialogTable {
 }
 
 /// RFC 3261 §15.1.2, §17.1.2.2: the caller's BYE whose lost first copy left
-/// before she received the UAS's BYE goes again past that BYE's final. The
+/// no later than she received the UAS's BYE goes again past that BYE's final. The
 /// UAS refuses it 481 and it is no finding; a repeat is not judged again.
 #[test]
 fn a_request_crossing_the_uas_own_bye_is_refused_and_no_finding() {
@@ -223,7 +223,7 @@ fn a_request_crossing_the_uas_own_bye_is_refused_and_no_finding() {
     assert_eq!(
         v.to_string(),
         "BYE From-tag A1 To-tag B1 names a dialog the BYE this UA sent ended, its lost first \
-         copy sent before the peer received that BYE"
+         copy sent no later than the peer received that BYE"
     );
     assert_eq!(t.judge_received(&request("BYE", 2, "A1", Some("B1")), 0), None, "a repeat");
 }

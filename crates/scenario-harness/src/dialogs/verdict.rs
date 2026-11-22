@@ -23,7 +23,7 @@ pub enum VerdictKind {
     /// final the UA sent ended (`by: Some(status)`), the peer not yet shown to
     /// have seen it (RFC 3261 §12.3); or a dialog the UA's own BYE ended
     /// (`by: None`), the request a retransmission whose lost first copy left
-    /// before the peer received that BYE (§15.1.2, §17.1.2.2). The UA refuses
+    /// no later than the peer received that BYE (§15.1.2, §17.1.2.2). The UA refuses
     /// it as it refuses [`VerdictKind::Ended`]. Judged as on the dialog
     /// before it ended, it is a finding only of the rule it `broke` there.
     Crossed { by: Option<u16>, broke: Option<Box<VerdictKind>> },
@@ -181,7 +181,7 @@ impl fmt::Display for DialogVerdict {
             VerdictKind::Crossed { by: None, broke: None } => write!(
                 f,
                 "{m} From-tag {} To-tag {} names a dialog the BYE this UA sent ended, its \
-                 lost first copy sent before the peer received that BYE",
+                 lost first copy sent no later than the peer received that BYE",
                 self.from_tag, self.to_tag
             ),
             VerdictKind::Crossed { by, broke: Some(broke) } => {

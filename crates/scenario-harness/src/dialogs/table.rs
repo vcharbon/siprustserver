@@ -441,7 +441,7 @@ impl DialogTable {
     /// provably saw it is a [`VerdictKind::Crossed`], refused, judged as on
     /// the still early dialog and a finding only of a rule it broke there
     /// (`Dialog::final_unseen`); so is one on a dialog the UA's own BYE ended
-    /// that the wire record shows sent before the peer read that BYE
+    /// that the wire record shows sent no later than the peer read that BYE
     /// ([`SentBeforeBye`]), judged as on the dialog before the BYE. A request
     /// with no To-tag is out of
     /// dialog and only teaches the table an initial INVITE. An ACK or a

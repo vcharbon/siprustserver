@@ -40,6 +40,8 @@ enum Step {
     UasBye,
     /// The peer takes what its socket holds.
     PeerReads,
+    /// The clock moves on a millisecond.
+    Tick,
 }
 
 /// The fact of the peer's BYE and the UA's BYE numbered `bye_cseq`, on a
@@ -69,13 +71,14 @@ async fn fact_after(lose: bool, steps: &[Step], bye_cseq: u32) -> bool {
             Step::PeerCopy => s.send_to(PEERS_BYE.as_bytes(), u.local_addr()).await.unwrap(),
             Step::UasBye => u.send_to(UAS_BYE.as_bytes(), s.local_addr()).await.unwrap(),
             Step::PeerReads => while s.try_recv().is_some() {},
+            Step::Tick => tokio::time::advance(Duration::from_millis(1)).await,
         }
         net.await_in_flight(Duration::from_secs(1)).await;
     }
     SentBeforeBye::from_wire(wrapped.recording.channel()).holds(&peers_bye(), bye_cseq)
 }
 
-use Step::{PeerCopy, PeerReads, UasBye};
+use Step::{PeerCopy, PeerReads, Tick, UasBye};
 
 /// The peer's first copy, lost, left before it took the UA's BYE: its
 /// retransmission crossed that BYE.
@@ -98,16 +101,23 @@ async fn a_delivered_first_copy_crossed_nothing() {
     assert!(!fact_after(false, &[PeerCopy, UasBye, PeerReads, PeerCopy], 3).await);
 }
 
-/// The peer took the UA's BYE before its first copy left: it sent it
-/// knowing the dialog ended.
+/// The peer took the UA's BYE at an earlier instant than its first copy
+/// left: it sent it knowing the dialog ended.
 #[tokio::test(start_paused = true)]
 async fn a_first_copy_sent_after_the_uas_bye_was_received_crossed_nothing() {
-    assert!(!fact_after(true, &[UasBye, PeerReads, PeerCopy, PeerCopy], 3).await);
+    assert!(!fact_after(true, &[UasBye, PeerReads, Tick, PeerCopy, PeerCopy], 3).await);
+}
+
+/// The peer took the UA's BYE at the instant its first copy left: two
+/// events of one instant have no order, so the copy crossed that BYE.
+#[tokio::test(start_paused = true)]
+async fn a_first_copy_sent_as_the_uas_bye_was_received_crossed_it() {
+    assert!(fact_after(true, &[UasBye, PeerReads, PeerCopy, Tick, PeerCopy], 3).await);
 }
 
 /// Only the BYE that ended the dialog counts: the UA's BYE numbered 3 says
 /// nothing of one numbered 4, which never reached the peer.
 #[tokio::test(start_paused = true)]
 async fn only_the_bye_that_ended_the_dialog_counts() {
-    assert!(fact_after(true, &[UasBye, PeerReads, PeerCopy, PeerCopy], 4).await);
+    assert!(fact_after(true, &[UasBye, PeerReads, Tick, PeerCopy, PeerCopy], 4).await);
 }

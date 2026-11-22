@@ -70,7 +70,7 @@ Automatic (you cannot opt out, only waive per-rule):
   at once with a `StepError::Dialog`, the actor answers it 481 (500, 491) on
   its own, and `finish()` fails on it. A request that crosses the UA's own
   non-2xx final, or its own BYE (a retransmission whose lost first copy left
-  before its sender read that BYE from its socket, by the run's recording), is
+  no later than its sender read that BYE from its socket, by the run's recording), is
   answered 481 and fails only on a rule it breaks on the dialog before that
   end (the module doc says when it crosses). A test that sends such a message on
   purpose waives the `dialog-…` rule on the receiving UA
