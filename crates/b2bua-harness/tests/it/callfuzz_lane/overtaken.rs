@@ -4,8 +4,8 @@
 //! reached it 500, its CSeq gone backwards (RFC 3261 §12.2.2, §17.1.2.2).
 //! The 500 is the receiver's right answer, so the call's scenario may fail on
 //! that request's transaction, or on its direct consequence on the request's
-//! leg ([`excuses`]); any other failure stays one, and every other net still
-//! judges the call.
+//! leg, each read from the wire ([`excuses`]); any other failure stays one,
+//! and every other net still judges the call.
 
 use std::net::SocketAddr;
 
@@ -20,48 +20,45 @@ use sip_net_testkit::SignalingNetworkEvent;
 #[derive(Debug)]
 pub(super) struct Overtaken {
     method: String,
-    /// The addresses its leg joins: its receiver, its sender (the 500's
-    /// addressee), and each address its sender passed a 500 to a request of
-    /// its method on to after that refusal (a B2BUA relaying the refusal to
-    /// the party whose request it carried).
-    leg: Vec<SocketAddr>,
+    /// The addresses its 500 reached: its sender, and each address its
+    /// sender passed a 500 to a request of its method on to after that
+    /// refusal (a B2BUA relaying the refusal to the party whose request it
+    /// carried).
+    refused: Vec<SocketAddr>,
     /// For a PRACK, the addresses the give-up of the INVITE whose reliable
     /// provisional it acknowledged reached (RFC 3262 §3): its sender, which
     /// its receiver sent a 5xx final to an INVITE of its Call-ID after the
     /// refusal, and each address that sender passed a 5xx final to an INVITE
     /// on to after it; empty for any other method, or with no such final.
     invite_failed: Vec<SocketAddr>,
+    /// Whether the recording shows a 2xx final to an INVITE of its Call-ID:
+    /// its leg's call got past setup.
+    answered: bool,
 }
 
 /// Every request `events` show refused 500 after the loss of its first copy
 /// and after its sender sent a request of the same dialog numbered above it.
 pub(super) fn overtaken_requests(events: &[Stamped<SignalingNetworkEvent>]) -> Vec<Overtaken> {
-    events
-        .iter()
-        .enumerate()
-        .filter_map(|(at, s)| match &s.event {
-            SignalingNetworkEvent::SendLost { bind_key, to, msg } => {
-                overtaken_at(&events[at + 1..], bind_key, *to, msg)
-            }
-            _ => None,
-        })
-        .collect()
+    (0..events.len()).filter_map(|at| overtaken_at(events, at)).collect()
 }
 
 /// Whether a failure of the call at `at` for `cause` is the overtaken
-/// request's own transaction or its direct consequence on its leg, `party`
-/// naming the address of each role, none for a barrier. Excused, for some
-/// `overtaken` request R, are only:
+/// request's own transaction or its direct consequence on its leg, as the
+/// wire shows them, `party` naming the address of each role, none for a
+/// barrier. Excused, for some `overtaken` request R, are only:
 ///
-/// - R's refusal: a `WrongStatus` 500 met by a party on R's leg;
+/// - R's refusal: a `WrongStatus` 500 met by a party R's 500 reached (the
+///   status names no method, so a 500 that party met to another request of
+///   it counts too);
 /// - R a PRACK, the give-up of the INVITE whose reliable provisional it
 ///   acknowledged (RFC 3262 §3): a `WrongStatus` 5xx at the `invite` goal of
 ///   a party that give-up reached;
-/// - the call state a goal of a party on R's leg waited for behind R: a
-///   barrier's `Timeout` failing that party.
+/// - the call state the scenario waited for behind R: a barrier's `Timeout`,
+///   whichever wait gave up on it, on a call whose INVITE on R's leg took no
+///   2xx.
 ///
-/// A barrier's own failure, a failure of a party off R's leg, and any other
-/// cause stay failures.
+/// A barrier's timeout on a call R's leg set up, any other status or party,
+/// and any other cause stay failures.
 pub(super) fn excuses(
     overtaken: &[Overtaken],
     at: &FailedAt,
@@ -72,22 +69,21 @@ pub(super) fn excuses(
     let at_invite = at.goal.is_some_and(|(kind, _)| kind == "invite");
     overtaken.iter().any(|r| match cause {
         StepError::WrongStatus { who, got, .. } => {
-            (*got == 500 && among(&r.leg, who))
+            (*got == 500 && among(&r.refused, who))
                 || ((500..600).contains(got) && at_invite && among(&r.invite_failed, who))
         }
-        StepError::Timeout { who, .. } => party(who).is_none() && among(&r.leg, at.who),
+        StepError::Timeout { who, .. } => party(who).is_none() && !r.answered,
         _ => false,
     })
 }
 
-/// The request whose first copy `lane` sent to `to` as `msg` was lost, when
-/// the events `after` it show it overtaken and refused 500.
-fn overtaken_at(
-    after: &[Stamped<SignalingNetworkEvent>],
-    lane: &LaneKey,
-    to: SocketAddr,
-    msg: &[u8],
-) -> Option<Overtaken> {
+/// The request `events[at]` names when it is the `SendLost` of a request's
+/// first copy that the events after it show overtaken and refused 500.
+fn overtaken_at(events: &[Stamped<SignalingNetworkEvent>], at: usize) -> Option<Overtaken> {
+    let SignalingNetworkEvent::SendLost { bind_key: lane, msg, .. } = &events[at].event else {
+        return None;
+    };
+    let after = &events[at + 1..];
     let lost = sniff::identity(msg);
     let method = lost.method.filter(|m| !matches!(*m, "ACK" | "CANCEL"))?;
     lost.cseq?;
@@ -104,12 +100,18 @@ fn overtaken_at(
         let id = sniff::identity(answer);
         (l == lane && id.status == Some(500) && id.cseq_method == Some(method)).then_some(dst)
     });
-    let leg = [to, sender].into_iter().chain(relayed).collect();
+    let refused = std::iter::once(sender).chain(relayed).collect();
     let invite_failed = match method {
         "PRACK" => invite_given_up(&after[refusal + 1..], refusal_lane, sender, lane, &lost),
         _ => Vec::new(),
     };
-    Some(Overtaken { method: method.to_string(), leg, invite_failed })
+    let answered = events.iter().filter_map(sent).any(|(_, _, raw)| {
+        let id = sniff::identity(raw);
+        id.status.is_some_and(|s| (200..300).contains(&s))
+            && id.cseq_method == Some("INVITE")
+            && id.call_id == lost.call_id
+    });
+    Some(Overtaken { method: method.to_string(), refused, invite_failed, answered })
 }
 
 /// The addresses the give-up of the INVITE reached, as the events `after`

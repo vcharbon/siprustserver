@@ -85,17 +85,22 @@ async fn overtaken_after(lose: bool, sent: &[Sent]) -> Vec<Overtaken> {
 }
 
 /// The `method` numbered 2 lost, the UPDATE numbered 3 overtaking it, the
-/// retransmission refused 500 (RFC 3261 §12.2.2), then the UA's 504 to the
-/// INVITE numbered 1.
-fn overtaken_by_an_update(method: &str) -> [Sent; 6] {
+/// retransmission refused 500 (RFC 3261 §12.2.2), then the UA's
+/// `invite_final` to the INVITE numbered 1.
+fn overtaken_by_an_update(method: &str, invite_final: u16) -> [Sent; 6] {
     [
         Sent::Peer(request(method, 2)),
         Sent::Peer(request("UPDATE", 3)),
         Sent::Ua(answer(200, "UPDATE", 3)),
         Sent::Peer(request(method, 2)),
         Sent::Ua(answer(500, method, 2)),
-        Sent::Ua(answer(504, "INVITE", 1)),
+        Sent::Ua(answer(invite_final, "INVITE", 1)),
     ]
+}
+
+/// The overtaken PRACK whose INVITE the UA then gave up 504.
+async fn prack_given_up() -> Vec<Overtaken> {
+    overtaken_after(true, &overtaken_by_an_update("PRACK", 504)).await
 }
 
 /// The roles of the recording: `s` is the peer, `u` the UA, `x` a party off
@@ -128,16 +133,21 @@ fn barrier_timeout(barrier: &str) -> StepError {
     StepError::timeout(barrier, None, format!("the call state to reach {barrier}"))
 }
 
+/// The overtaken request's 500 reached its sender; the INVITE's 504 after an
+/// overtaken PRACK is its give-up, and a 2xx to it shows the call set up.
 #[tokio::test(start_paused = true)]
 async fn a_500_to_an_overtaken_lost_request_holds() {
-    let overtaken = overtaken_after(true, &overtaken_by_an_update("PRACK")).await;
+    let overtaken = prack_given_up().await;
     assert_eq!(overtaken.len(), 1, "{overtaken:?}");
     assert_eq!(overtaken[0].method, "PRACK");
-    let (peer, ua): (SocketAddr, SocketAddr) = (PEER.parse().unwrap(), UA.parse().unwrap());
-    assert_eq!(overtaken[0].leg, [ua, peer]);
+    let peer: SocketAddr = PEER.parse().unwrap();
+    assert_eq!(overtaken[0].refused, [peer]);
     assert_eq!(overtaken[0].invite_failed, [peer], "the UA's 504 to the INVITE");
-    let info = overtaken_after(true, &overtaken_by_an_update("INFO")).await;
+    assert!(!overtaken[0].answered);
+    let info = overtaken_after(true, &overtaken_by_an_update("INFO", 504)).await;
     assert!(info[0].invite_failed.is_empty(), "an INFO acknowledges no provisional");
+    let answered = overtaken_after(true, &overtaken_by_an_update("PRACK", 200)).await;
+    assert!(answered[0].answered && answered[0].invite_failed.is_empty(), "{answered:?}");
 }
 
 /// Nothing lost, nothing overtaking the lost request, a final other than
@@ -145,7 +155,7 @@ async fn a_500_to_an_overtaken_lost_request_holds() {
 /// does not hold.
 #[tokio::test(start_paused = true)]
 async fn any_other_500_or_loss_does_not_hold() {
-    assert!(overtaken_after(false, &overtaken_by_an_update("PRACK")).await.is_empty());
+    assert!(overtaken_after(false, &overtaken_by_an_update("PRACK", 504)).await.is_empty());
     let alone = [
         Sent::Peer(request("PRACK", 2)),
         Sent::Peer(request("PRACK", 2)),
@@ -168,23 +178,27 @@ async fn any_other_500_or_loss_does_not_hold() {
 }
 
 /// The overtaken PRACK's own 500, the INVITE's 5xx when its reliable
-/// provisional went unacknowledged, and a barrier its leg's party waited on
-/// are excused on that leg.
+/// provisional went unacknowledged, and a barrier's timeout on a call its
+/// leg never set up, whichever wait gave up on it, are excused.
 #[tokio::test(start_paused = true)]
 async fn the_overtaken_requests_transaction_and_its_consequence_on_its_leg_are_excused() {
-    let overtaken = overtaken_after(true, &overtaken_by_an_update("PRACK")).await;
+    let overtaken = prack_given_up().await;
     assert!(excuses(&overtaken, &at_goal("s", "early_request"), &wrong_status("s", 500), party));
     assert!(excuses(&overtaken, &at_goal("s", "invite"), &wrong_status("s", 504), party));
     let held = barrier_timeout("early_exchanged");
-    assert!(excuses(&overtaken, &at_goal("u", "final"), &held, party));
+    assert!(excuses(&overtaken, &at_goal("u", "final"), &held, party), "a party's wait");
+    assert!(excuses(&overtaken, &at_goal("x", "bye"), &barrier_timeout("merged"), party));
+    let barrier = FailedAt::at_barrier("established");
+    assert!(excuses(&overtaken, &barrier, &barrier_timeout("established"), party), "its own");
 }
 
-/// An unrelated failure stays one: another status, another cause, a party
-/// off the overtaken request's leg, a barrier's own failure, and a 5xx to
-/// the INVITE when the overtaken request is no PRACK.
+/// An unrelated failure stays one: another status, another cause, a 500 to
+/// a party the refusal did not reach, a barrier's timeout on a call the
+/// overtaken request's leg set up, and a 5xx to the INVITE when the
+/// overtaken request is no PRACK.
 #[tokio::test(start_paused = true)]
 async fn a_failure_unrelated_to_the_overtaken_request_stays_a_failure() {
-    let overtaken = overtaken_after(true, &overtaken_by_an_update("PRACK")).await;
+    let overtaken = prack_given_up().await;
     let at = at_goal("s", "bye");
     assert!(!excuses(&overtaken, &at, &wrong_status("s", 481), party), "another status");
     let method = StepError::WrongMethod {
@@ -195,12 +209,12 @@ async fn a_failure_unrelated_to_the_overtaken_request_stays_a_failure() {
     assert!(!excuses(&overtaken, &at, &method, party), "another cause");
     let own_timeout = StepError::timeout("s", None, "BYE");
     assert!(!excuses(&overtaken, &at, &own_timeout, party), "the party's own wait");
+    assert!(!excuses(&overtaken, &at_goal("u", "bye"), &wrong_status("u", 500), party));
     assert!(!excuses(&overtaken, &at_goal("x", "bye"), &wrong_status("x", 500), party));
-    let held = barrier_timeout("merged");
-    assert!(!excuses(&overtaken, &at_goal("x", "bye"), &held, party), "off the leg");
-    let barrier = FailedAt::at_barrier("established");
-    assert!(!excuses(&overtaken, &barrier, &barrier_timeout("established"), party));
-    let info = overtaken_after(true, &overtaken_by_an_update("INFO")).await;
+    let answered = overtaken_after(true, &overtaken_by_an_update("PRACK", 200)).await;
+    let barrier = FailedAt::at_barrier("merged");
+    assert!(!excuses(&answered, &barrier, &barrier_timeout("merged"), party), "set up");
+    let info = overtaken_after(true, &overtaken_by_an_update("INFO", 504)).await;
     assert!(!excuses(&info, &at_goal("s", "invite"), &wrong_status("s", 504), party));
     assert!(!excuses(&[], &at_goal("s", "early_request"), &wrong_status("s", 500), party));
 }
