@@ -137,6 +137,15 @@ answers 200) drops her remaining goals; once the caller is ended so, the call
 is, and the verdict records it (`Observation::EndedCleanly`). A request left
 without its final or a dialog left open still fails the call.
 
+**Lost datagrams.** The goals and endings read the datagrams the call's loss
+model dropped (`CallCtx::loss_notes`): a 2xx lost on its way to the caller
+before her CANCEL's final arrived crossed the CANCEL, a lost provisional
+stands for her ringing. The load generator's loss model notes them; on a
+harness fabric with a loss model, `Harness::note_losses` notes each
+`SendLost` the recording shows to or from a party of the call, ordered
+against the responses delivered to that party before it and, for a datagram
+lost on its way to the party, those sent to it before it and not lost.
+
 ## The failover sweep
 
 `failover-harness::sweep` is the in-process proof of
