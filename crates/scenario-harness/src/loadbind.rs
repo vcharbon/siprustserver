@@ -380,9 +380,11 @@ impl AgentBinder {
             let lost = notes.by_party(&caller);
             let gated = judges.iter().flat_map(|j| {
                 let party = j.party().to_string();
-                j.gated()
-                    .into_iter()
-                    .map(move |(verdict, _)| GatedVerdict { party: party.clone(), verdict })
+                j.gated().into_iter().map(move |r| GatedVerdict {
+                    party: party.clone(),
+                    verdict: r.verdict,
+                    sender: r.sender,
+                })
             });
             gated
                 .filter(|g| g.explained_by_loss(&lost))

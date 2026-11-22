@@ -1,5 +1,6 @@
-//! The dialog table's CSeq verdicts on a run that declares a loss model: a
-//! CSeq out of the remote sequence that a loss on the way explains.
+//! The dialog table's verdicts on a run that declares a loss model: a CSeq
+//! out of the remote sequence that a loss on the way explains, and a 2xx to a
+//! request the wire record shows reaching the peer behind the UA's own final.
 
 use super::*;
 
@@ -85,4 +86,22 @@ fn a_skip_over_numbers_no_loss_accounts_for_is_a_finding() {
     let mut t = uas_losing(&[(2, "INFO")]);
     let v = t.judge_received(&request("INFO", 5, "A1", Some("B1")), 0).expect("the skip");
     assert_eq!(v.kind, VerdictKind::CseqSkip { cseq: 5, last: 1 });
+}
+
+/// The wire record, not the UAS's send order, tells whether its INFO reached
+/// the caller ahead of its 487 (RFC 3261 §17.1.2.2): an INFO sent before the
+/// final whose copies ahead of it were all lost reached the caller behind it,
+/// and the 200 to it is a verdict; one the record shows ahead draws none.
+#[test]
+fn the_wire_record_tells_whether_the_uas_request_reached_ahead_of_its_final() {
+    for ahead in [false, true] {
+        let mut t = refused_after_its_own_info();
+        t.set_ahead_of_final(AheadOfFinal::new(move |answer, invite_cseq, status| {
+            let asked = (answer.cseq().seq(), answer.cseq().method().as_str(), invite_cseq, status);
+            assert_eq!(asked, (1, "INFO", 1, 487), "the INFO and the final that ended its dialog");
+            ahead
+        }));
+        let verdict = (!ahead).then_some(VerdictKind::EndedAnswered { status: 200, by: 487 });
+        assert_eq!(kind(t.note_received_response(&info_ok(), 0)), verdict, "ahead: {ahead}");
+    }
 }

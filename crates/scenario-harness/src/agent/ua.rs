@@ -133,7 +133,7 @@ impl Agent {
         }
         for pkt in self.ep.peek_queued() {
             if let Ok(msg) = self.parse(&pkt.raw) {
-                self.dialogs.sight(&msg);
+                self.dialogs.sight(&msg, pkt.src);
             }
         }
     }
@@ -415,7 +415,7 @@ impl Agent {
             return None;
         }
         if matches!(sighting.owner, Owner::Tu | Owner::TxnHopAck) && !sighting.repeat {
-            self.dialogs.sight(&msg);
+            self.dialogs.sight(&msg, pkt.src);
         }
         Some(msg)
     }
@@ -585,7 +585,7 @@ impl Agent {
         let mut n = 0;
         while let Some(pkt) = self.ep.try_recv() {
             if let Ok(msg) = self.parse(&pkt.raw) {
-                self.dialogs.sight(&msg);
+                self.dialogs.sight(&msg, pkt.src);
             }
             n += 1;
         }

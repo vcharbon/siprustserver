@@ -3,16 +3,19 @@
 //! waiver that covers one is used.
 
 use std::collections::{BTreeMap, HashSet};
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use super::waiver::WaiverState;
-use crate::dialogs::{covers_at, DialogJudge, DialogVerdict};
+use crate::dialogs::{covers_at, DialogJudge, DialogVerdict, RecordedVerdict};
 use crate::realcall::LostMessage;
 
-/// One verdict that survived the waivers, with the UA that recorded it.
+/// One verdict that survived the waivers, with the UA that recorded it and
+/// the address it read the judged message from.
 pub(crate) struct GatedVerdict {
     pub party: String,
     pub verdict: DialogVerdict,
+    pub sender: SocketAddr,
 }
 
 impl GatedVerdict {
@@ -58,7 +61,7 @@ pub(crate) fn classify(
     let mut out = Vec::new();
     let mut covered_dialogs: HashSet<(usize, String, String, String, String)> = HashSet::new();
     for judge in judges {
-        for (verdict, at) in judge.gated() {
+        for RecordedVerdict { verdict, at, sender } in judge.gated() {
             let mut first = None;
             for (i, w) in waivers.iter().enumerate() {
                 if !covers_at(&w.scope, judge.party(), &verdict, at) {
@@ -79,7 +82,7 @@ pub(crate) fn classify(
                 w.used.set(true);
                 first.get_or_insert(i);
             }
-            out.push((GatedVerdict { party: judge.party().to_string(), verdict }, first));
+            out.push((GatedVerdict { party: judge.party().to_string(), verdict, sender }, first));
         }
     }
     out
@@ -109,7 +112,8 @@ pub(crate) fn render_dialog_panic(name: &str, verdicts: &[GatedVerdict]) -> Stri
 }
 
 /// The verdicts as gating audit findings, for a run that collects instead of
-/// panicking.
+/// panicking: each reported on its UA and charged to the sender of the
+/// message it judges, by the bare source address the UA read it from.
 pub(crate) fn as_findings(verdicts: Vec<GatedVerdict>) -> Vec<sip_net_testkit::RfcFinding> {
     verdicts
         .into_iter()
@@ -119,7 +123,7 @@ pub(crate) fn as_findings(verdicts: Vec<GatedVerdict>) -> Vec<sip_net_testkit::R
             detail: g.verdict.to_string(),
             advisory: false,
             offending: None,
-            charged: None,
+            charged: Some(g.sender.to_string()),
             counterpart: None,
         })
         .collect()

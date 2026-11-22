@@ -12,18 +12,23 @@
 //!   a request reaching a dialog a final or a BYE ended.
 //! - `wire_loss` — [`LostOnTheWay`]: what the run's recording shows of the
 //!   requests the network lost on their way to the UA.
+//! - `wire_ahead` — [`AheadOfFinal`]: what the run's recording shows of a
+//!   request the UA sent reaching the peer ahead of the UA's own final.
 //!
 //! Two requests on an ended dialog draw no verdict:
 //! - a PRACK on an early dialog a non-2xx final ended (RFC 3262 §3);
 //! - a NOTIFY of a subscription the UA opened, after a BYE (RFC 5057 §5.2).
 //!
-//! On an early dialog the UA's own non-2xx final ended, a 2xx to a request the
-//! UA sent draws none, and a request of the peer draws a 481 that is a finding
-//! only of a rule it broke on the early dialog ([`VerdictKind::Crossed`]),
-//! until the caller's own ACK of that final,
-//! or a new INVITE of the caller, reached the UA (RFC 3261 §17.2.1): till then
-//! either may cross the final. The peer's messages are taken to reach the UA
-//! in the order it sent them.
+//! On an early dialog the UA's own non-2xx final ended, a request of the peer
+//! draws a 481 that is a finding only of a rule it broke on the early dialog
+//! ([`VerdictKind::Crossed`]), until the caller's own ACK of that final, or a
+//! new INVITE of the caller, reached the UA (RFC 3261 §17.2.1): till then it
+//! may cross the final. A 2xx to a request the UA sent on that dialog is a
+//! `dialog-ended-answered` finding only when the request reached the peer
+//! behind the final, whenever the 2xx arrives: the peer took one ahead of it
+//! on the live dialog (§12.3). Each side's messages are taken to reach the
+//! other in the order it sent them; on a run that declares a loss model, the
+//! wire record shows which copy of the UA's request reached the peer.
 //!
 //! On a run that declares a loss model, on a dialog a final or a BYE ended,
 //! whichever side sent it, a request of the peer draws a 481 that is a
@@ -47,17 +52,20 @@ mod judge;
 mod reliable;
 mod table;
 mod verdict;
+mod wire_ahead;
 mod wire_crossing;
 mod wire_loss;
 
 pub use judge::{
     covers, covers_at, is_partyless_dialog_waiver, DialogJudge, DialogJudging, DialogOptIns,
+    RecordedVerdict,
 };
 pub use table::{BackwardsCseq, DialogState, DialogTable};
 pub use verdict::{
     DialogVerdict, VerdictKind, DIALOG_CSEQ_BACKWARDS, DIALOG_CSEQ_SKIP, DIALOG_EARLY_REQUEST,
     DIALOG_ENDED, DIALOG_ENDED_ANSWERED, DIALOG_UNKNOWN,
 };
+pub use wire_ahead::AheadOfFinal;
 pub use wire_crossing::{DialogEnd, Ending, SentBeforeEnd};
 pub(crate) use wire_loss::send_lost;
 pub use wire_loss::{LostOnTheWay, LostRequest};

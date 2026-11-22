@@ -7,9 +7,12 @@
 //! end with it, §12.1.2), or ended by a BYE once the BYE's transaction took
 //! its final (§15); a subscription the UA opened on it keeps its NOTIFYs
 //! legal past that BYE (RFC 5057 §5.2). A non-2xx final the UA sent makes the
-//! peer's requests and 2xx answers on the dialog findings only once the peer
-//! shows it saw that final; till then the UA still refuses its requests, and
-//! judges them as on the early dialog. A request reaching a dialog a BYE or a
+//! peer's requests on the dialog findings only once the peer shows it saw
+//! that final; till then the UA still refuses them, and judges them as on the
+//! early dialog. It makes a 2xx to a request the UA sent on the dialog a
+//! finding only when that request reached the peer behind the final: sent
+//! after it, or, on a run that declares a loss model, every copy ahead of it
+//! lost ([`AheadOfFinal`]). A request reaching a dialog a BYE or a
 //! final ended, whichever side sent it, is a finding unless, on a run that
 //! declares a loss model, the wire record shows it a retransmission whose
 //! lost first copy left before its sender knew of that end
@@ -27,6 +30,7 @@ use sip_message::header;
 use sip_message::{SipRequest, SipResponse};
 
 use super::verdict::{DialogVerdict, VerdictKind};
+use super::wire_ahead::AheadOfFinal;
 use super::wire_crossing::{DialogEnd, Ending, SentBeforeEnd};
 use super::wire_loss::LostOnTheWay;
 use crate::agent::top_via_branch;
@@ -126,14 +130,18 @@ struct Dialog {
     /// sent: a repeat of one is its server transaction's replay (RFC 3261
     /// §17.2.2), judged once.
     answered: BTreeSet<(u32, String)>,
+    /// The `(CSeq, method)` of every request the UA first sent on it while it
+    /// was early or confirmed. The UA's messages are taken to reach the peer
+    /// in the order it sent them, so each reached the peer ahead of a final
+    /// the UA sent after it.
+    sent_live: BTreeSet<(u32, String)>,
     /// Whether the UA, as UAS, ended it early with a non-2xx final the peer
     /// has not provably seen (one the final opens is seen with its tag):
     /// neither the caller's ACK of that final (RFC 3261
     /// §17.2.1) nor a new INVITE of the caller (§8.1.3.5) reached the UA yet,
-    /// so a request the peer sent on it, or a 2xx to one the UA sent, may
-    /// cross the final. The peer's messages are taken to reach the UA in the
-    /// order it sent them: one sent before that ACK and delivered after it is
-    /// judged as sent after.
+    /// so a request the peer sent on it may cross the final. The peer's
+    /// messages are taken to reach the UA in the order it sent them: one sent
+    /// before that ACK and delivered after it is judged as sent after.
     final_unseen: bool,
 }
 
@@ -167,6 +175,10 @@ pub struct DialogTable {
     /// UA, on a run that declares a loss model; with none, no loss explains
     /// a CSeq out of the remote sequence.
     lost_on_the_way: Option<LostOnTheWay>,
+    /// What the wire record shows of a request the UA sent reaching the peer
+    /// ahead of the UA's own final, on a run that declares a loss model; with
+    /// none, the UA's send order (`Dialog::sent_live`) tells.
+    ahead_of_final: Option<AheadOfFinal>,
 }
 
 /// Whether a REFER or SUBSCRIBE opens a subscription: a REFER stating
@@ -215,6 +227,12 @@ impl DialogTable {
         self.lost_on_the_way = Some(wire);
     }
 
+    /// Read from `wire` whether a request the UA sent reached the peer ahead
+    /// of the UA's own final, in place of the UA's send order.
+    pub fn set_ahead_of_final(&mut self, wire: AheadOfFinal) {
+        self.ahead_of_final = Some(wire);
+    }
+
     /// The state of the dialog `(call_id, local, remote)`, if the UA holds it.
     pub fn state(&self, call_id: &str, local: &str, remote: &str) -> Option<DialogState> {
         let id = DialogId {
@@ -261,28 +279,25 @@ impl DialogTable {
         let call_id = request.call_id().to_string();
         let Some(local) = tag_of(request.from().tag()) else { return };
         let method = request.method().as_str();
-        match tag_of(request.to().tag()) {
-            None if method == "INVITE" => {
+        let cseq = request.cseq().seq();
+        let Some(remote) = tag_of(request.to().tag()) else {
+            if method == "INVITE" {
                 let key = InviteKey { call_id, caller_tag: local, role: Role::Uac };
-                let cseq = request.cseq().seq();
                 self.invites.entry(key).and_modify(|i| i.cseq = cseq).or_insert(Invite {
                     cseq,
                     answered_at_us: None,
                     received_vias: None,
                 });
             }
-            Some(remote) if method == "BYE" => {
-                if let Some(d) = self.dialogs.get_mut(&DialogId { call_id, local, remote }) {
-                    d.pending_bye = Some(request.cseq().seq());
-                }
-            }
-            Some(remote)
-                if matches!(method, "REFER" | "SUBSCRIBE") && opens_subscription(request) =>
-            {
-                if let Some(d) = self.dialogs.get_mut(&DialogId { call_id, local, remote }) {
-                    d.subscriptions += 1;
-                }
-            }
+            return;
+        };
+        let Some(d) = self.dialogs.get_mut(&DialogId { call_id, local, remote }) else { return };
+        if matches!(d.state, DialogState::Early | DialogState::Confirmed) {
+            d.sent_live.insert((cseq, method.to_string()));
+        }
+        match method {
+            "BYE" => d.pending_bye = Some(cseq),
+            "REFER" | "SUBSCRIBE" if opens_subscription(request) => d.subscriptions += 1,
             _ => {}
         }
     }
@@ -328,9 +343,9 @@ impl DialogTable {
     /// on a dialog a non-2xx final ended by the time it arrives (RFC 3261
     /// §12.1.2: that dialog is gone, so nothing on it is answered 2xx). A
     /// PRACK is excepted (RFC 3262 §3), and a CANCEL is hop-by-hop. A final
-    /// the UA sent ends the dialog for this judgement only once the peer
-    /// provably saw it (`Dialog::final_unseen`), and a repeat of a 2xx
-    /// already taken on the dialog is not judged again.
+    /// the UA sent ends the dialog for this judgement only for a request that
+    /// reached the peer behind it ([`Self::reached_ahead`]), and a repeat of
+    /// a 2xx already taken on the dialog is not judged again.
     pub fn note_received_response(
         &mut self,
         response: &SipResponse,
@@ -354,10 +369,10 @@ impl DialogTable {
         };
         let judged =
             (200..300).contains(&status) && !initial && !matches!(method, "PRACK" | "CANCEL");
-        let dialog = self.dialogs.get_mut(&id).filter(|_| judged);
-        if let Some(d) = dialog {
+        let ahead = self.dialogs.get(&id).is_some_and(|d| self.reached_ahead(d, response));
+        if let Some(d) = self.dialogs.get_mut(&id).filter(|_| judged) {
             let first = d.answered.insert((response.cseq().seq(), method.to_string()));
-            if let (true, false, DialogState::EndedByFinal(by)) = (first, d.final_unseen, d.state) {
+            if let (true, false, DialogState::EndedByFinal(by)) = (first, ahead, d.state) {
                 return Some(DialogVerdict {
                     method: method.to_string(),
                     call_id: id.call_id.clone(),
@@ -395,6 +410,26 @@ impl DialogTable {
         None
     }
 
+    /// Whether the request `answer` answers on `dialog` reached the peer
+    /// ahead of the UA's own non-2xx final that ended the dialog: on a run
+    /// that declares a loss model as the wire record shows it
+    /// ([`AheadOfFinal`]), else by the UA's send order (`Dialog::sent_live`).
+    /// `false` on a dialog no final of the UA's ended.
+    fn reached_ahead(&self, dialog: &Dialog, answer: &SipResponse) -> bool {
+        let Some(DialogEnd { ending: Ending::Final { invite_cseq, status }, by_peer: false }) =
+            dialog.end
+        else {
+            return false;
+        };
+        match &self.ahead_of_final {
+            Some(wire) => wire.holds(answer, invite_cseq, status),
+            None => {
+                let cseq = answer.cseq();
+                dialog.sent_live.contains(&(cseq.seq(), cseq.method().as_str().to_string()))
+            }
+        }
+    }
+
     /// A response to an initial INVITE, sent or received under the dialog ID
     /// `id`: a 1xx opens an early dialog, a 2xx confirms one, a non-2xx final
     /// ends the INVITE's early dialogs (RFC 3261 §12.1, §13.2.2.4).
@@ -416,6 +451,7 @@ impl DialogTable {
             subscriptions: 0,
             received: BTreeSet::new(),
             answered: BTreeSet::new(),
+            sent_live: BTreeSet::new(),
             final_unseen: false,
         };
         match status {
