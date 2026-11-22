@@ -44,7 +44,7 @@ impl RampTrigger {
     }
 }
 
-/// Spawns the supervised watch: every [`PERIOD`] it reads `fit` and starts
+/// Spawns the supervised watch: every 250 ms it reads `fit` and starts
 /// `gate`'s ramp on the turn [`RampTrigger`] names. A restarted run starts
 /// with no memory, so it ramps on no turn before it read the proxy fit.
 pub fn spawn_intake_ramp(fit: FitFn, gate: EluCpsGate) -> JoinHandle<()> {
