@@ -68,9 +68,9 @@ bounded by its re-INVITE watchdog. The release reroute's a-realign waits the sam
 reroute state (`reroute-a-realign-on-a-ack`), bounded by the reroute guard. A refusal met later
 is a rule defect, ticketed on its own.
 
-The transfer realign does not wait for a re-INVITE of the originator's own that is still
-relayed and unanswered when its realign is due: that realign is refused, and the transfer
-rolls back when its re-INVITE watchdog fires.
+Neither the transfer's nor the reroute's a-realign waits for a re-INVITE of the originator's
+own that is still relayed and unanswered when it is due: that realign is refused, the transfer rolls back when its re-INVITE
+watchdog fires, and the reroute ends the call when its guard fires.
 
 ## Consequences
 
