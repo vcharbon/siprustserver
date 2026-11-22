@@ -211,6 +211,11 @@ pub struct CallCaps {
     pub service_http_timeout_ms: u64,
 }
 
+/// The upstream record-size cap, 16 MiB: about 2 700 times a plain answered
+/// call's body (6 KiB), and a quarter of the replication frame (64 MiB), so a
+/// body at the cap always frames.
+const DEFAULT_RECORD_BYTES: u64 = 16 << 20;
+
 impl CallCaps {
     /// The upstream defaults: the heaviest catalogue shape times the factor
     /// of its cap's cost (ADR-0057 §9).
@@ -243,10 +248,7 @@ impl CallCaps {
         // chain with every service's start; above the teardown of a call at
         // its base leg cap, one action per unresolved leg and two more.
         actions_per_turn: 100_000,
-        // 16 MiB: about 2 700 times a plain answered call's body (6 KiB),
-        // and a quarter of the replication frame (64 MiB), so a body at the
-        // cap always frames.
-        record_bytes: 16 << 20,
+        record_bytes: DEFAULT_RECORD_BYTES,
         // A held request's answer deadline (Timer F less T2, 28 s) less the
         // 2 s answer margin (ADR-0039): the longest a service's answer can
         // take and still answer the request it holds.

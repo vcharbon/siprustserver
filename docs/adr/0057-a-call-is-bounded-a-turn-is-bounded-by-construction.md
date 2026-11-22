@@ -34,10 +34,9 @@ Detail: [appendix §1](appendix/0057-a-call-is-bounded-a-turn-is-bounded-by-cons
 ### 2. The call record's collections are capped at the insert
 
 `b2bua-core` checks each collection's length when an action would grow it: `B2BUA_CAP_LEGS`,
-`_ATTEMPTS`, `_TIMERS`, `_REQUESTS`, `_CDR_EVENTS`, `_DIALOGS`, `_HEADER_UPDATES`, `_EXT_BYTES`.
-The caps are collection lengths, not new counters. A service's HTTP timeout is clamped to
-`B2BUA_CAP_SERVICE_HTTP_TIMEOUT_MS`. The shell's commit holds each live write's encoded record
-to `B2BUA_CAP_RECORD_BYTES`; past it the turn trips (§4).
+`_ATTEMPTS`, `_TIMERS`, `_REQUESTS`, `_CDR_EVENTS`, `_DIALOGS`, `_HEADER_UPDATES`, `_EXT_BYTES`;
+the commit checks a live write's body: `_RECORD_BYTES`. A service's HTTP timeout is
+clamped to `B2BUA_CAP_SERVICE_HTTP_TIMEOUT_MS`.
 Detail: [appendix §2](appendix/0057-a-call-is-bounded-a-turn-is-bounded-by-construction.md#2-the-call-records-collections-are-capped-at-the-insert).
 
 ### 3. A turn carries fuel

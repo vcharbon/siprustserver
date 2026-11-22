@@ -57,7 +57,7 @@ struct Inner {
     drain_seconds: durations::Durations<{ DRAIN_BUCKETS.len() }>,
     // A new call's turn wait and permit hold (ADR-0022 X1).
     setup_times: setup_times::SetupTimes,
-    // The size of each record the record-size cap held (ADR-0057).
+    /// The size of each record the record-size cap held (ADR-0057).
     record_sizes: record_sizes::RecordSizes,
     // What every operator release-all reached, by kind (ADR-0050 §10).
     operator_releases: operator::OperatorReleases,
