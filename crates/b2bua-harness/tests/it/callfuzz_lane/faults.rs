@@ -5,10 +5,12 @@
 //! provisional, whose PRACK is owed only if it arrives before the final
 //! (RFC 3262 §4). A loss is recoverable: only a message's first copy may be
 //! lost, never a retransmission, so one retransmission recovers each loss.
-//! The fates are drawn from the call's seed in send order, so a call replays
-//! with its faults.
+//! Each datagram's fate is drawn from the call's seed and the datagram's place
+//! in its sender's flow, never from the order of sends across parties, so a
+//! call replays with its faults.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -80,13 +82,42 @@ fn copy_key(raw: &[u8]) -> CopyKey {
     }
 }
 
+/// A datagram's place in its sender's flow, free of the tokens a party mints
+/// at random (tags, branches, Call-ID suffixes): its path, its start line's
+/// method or status, its CSeq, and how many datagrams of that same place were
+/// sent before it.
+fn place_of(
+    src: SocketAddr,
+    dst: SocketAddr,
+    raw: &[u8],
+    seen: &mut HashMap<String, u32>,
+) -> String {
+    let kind = sip_message::sniff::resp_status(raw)
+        .map(|s| s.to_string())
+        .or_else(|| sip_message::sniff::req_method(raw))
+        .unwrap_or_default();
+    let cseq = sip_message::sniff::cseq_number(raw).unwrap_or_default();
+    let cseq_method = sip_message::sniff::cseq_method_token(raw).unwrap_or_default();
+    let place = format!("{src}>{dst} {kind} {cseq} {cseq_method}");
+    let nth = seen.entry(place.clone()).or_default();
+    *nth += 1;
+    format!("{place} #{nth}")
+}
+
+/// FNV-1a: a hash stable across runs and builds, unlike the std hasher.
+fn stable_hash(text: &str) -> u64 {
+    text.bytes()
+        .fold(0xcbf2_9ce4_8422_2325, |h, b| (h ^ u64::from(b)).wrapping_mul(0x100_0000_01b3))
+}
+
 /// The fate of each datagram of the call of `seed`, counted in `tally`: the
 /// first copy of a message draws its loss, a later copy is never lost.
 pub(super) fn fate_of(faults: Faults, seed: u64, tally: Arc<Tally>) -> SendFate {
-    let rng = Mutex::new(Rng::new(seed ^ FAULT_SALT));
     let sent = Mutex::new(HashSet::new());
-    Arc::new(move |_src, _dst, raw| {
-        let mut rng = rng.lock().expect("fault draws");
+    let places = Mutex::new(HashMap::new());
+    Arc::new(move |src, dst, raw| {
+        let place = place_of(src, dst, raw, &mut places.lock().expect("places"));
+        let mut rng = Rng::new(seed ^ FAULT_SALT ^ stable_hash(&place));
         let first_copy = sent.lock().expect("sent copies").insert(copy_key(raw));
         if first_copy && rng.chance(faults.drop) {
             tally.lost.fetch_add(1, Ordering::Relaxed);
