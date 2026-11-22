@@ -57,11 +57,9 @@ of). A positional read picks a wrong dialog as soon as a leg holds two.
    | `Retired` | PRACK passes on the caller face (RFC 3262 §3); others 481, or as `Ending` while its release BYE is in flight |
 
    A dialog exists until the BYE or CANCEL ending it completes (§15.1.2), so
-   requests crossing it are answered in it. Past the 481s, the §8.2 checks
-   come before the CSeq order (§12.2.2): a request requiring an option tag
-   this stack does not understand draws 420 for a pass, 200 or 487
-   (§8.2.2.3), whatever its CSeq; then one below its dialog's last CSeq
-   draws 500. Neither refusal changes the dialog's state (§8.2).
+   requests crossing it are answered in it. Past the 481s, a request
+   requiring an option tag not understood draws 420 for a pass, 200 or 487
+   (§8.2.2.3); then one below its dialog's last CSeq draws 500 (§12.2.2).
    An ACK passes on any dialog a 2xx established, ended since or not (RFC
    5407 §2), and is otherwise dropped unanswered (§17.1.1.3), as is one of an
    INVITE the record holds no final sent for on a call no other owner served
@@ -82,8 +80,8 @@ of). A positional read picks a wrong dialog as soon as a leg holds two.
    403 (§21.4.4).
 7. **Each dialog numbers its own requests.** A dialog holds `our_cseq`, the
    last CSeq this side sent there, and `peer_cseq`, the peer's last, which
-   serves the §12.2.2 order check alone and is set by the gate for every
-   request it passes or answers 200 or 487, never one it refuses. A relayed request takes the target dialog's next
+   serves the §12.2.2 order check alone and is set by every request the
+   gate takes, never one it refuses (§8.2). A relayed request takes the target dialog's next
    number, `our_cseq + 1`, never a copy of or a distance from the sender's
    (§12.2.1.1): a gap in the sender's sequence is not reproduced on the other
    face. Our sequence on a caller-facing dialog starts at 1, as on a dialled
