@@ -416,10 +416,11 @@ fn a_reinvite_requiring_100rel_draws_420_naming_it() {
 }
 
 /// On a dialog this side is ending, the extension is refused before the
-/// dialog's own answer (200, 487 or the crossing BYE's pass), and the order
-/// check comes before both.
+/// dialog's own answer (200, 487 or the crossing BYE's pass) and before the
+/// order check (RFC 3261 §12.2.2 applies §8.2 first): a request below the
+/// dialog's last CSeq draws 420 too, and a plain one 500.
 #[test]
-fn an_ending_dialog_refuses_the_extension_first_and_judges_the_order_before_it() {
+fn an_ending_dialog_refuses_the_extension_before_its_answer_and_the_order_check() {
     let mut call = call_with_caller_dialog(true);
     let d = call.a_leg.dialogs.by_tags_mut("ours", CALLER_TAG).expect("the dialog");
     d.state = DialogState::Ending(EndingBy::Bye);
@@ -429,18 +430,17 @@ fn an_ending_dialog_refuses_the_extension_first_and_judges_the_order_before_it()
         assert_eq!(request_verdict(&call, "a", &req).status(), Some(420), "{method}");
     }
     let late = requiring(caller_request(Method::Info, 4), "x-nonexistent");
-    assert_eq!(request_verdict(&call, "a", &late), Verdict::OutOfOrder);
+    assert_eq!(request_verdict(&call, "a", &late).status(), Some(420));
+    assert_eq!(request_verdict(&call, "a", &caller_request(Method::Info, 4)), Verdict::OutOfOrder);
 }
 
-/// A request refused 420 was taken in order: its CSeq becomes its dialog's
-/// last (RFC 3261 §12.2.2).
+/// A request refused 420 performs no state change (RFC 3261 §8.2): it is
+/// taken on no dialog, so its CSeq never becomes its dialog's last.
 #[test]
-fn a_request_refused_420_sets_its_dialogs_last_cseq() {
-    let mut call = call_with_caller_dialog(true);
+fn a_request_refused_420_leaves_its_dialogs_last_cseq() {
+    let call = call_with_caller_dialog(true);
     let req = requiring(caller_request(Method::Info, 9), "x-nonexistent");
-    let resolved = request_verdict(&call, "a", &req).in_order().cloned().expect("taken in order");
-    let event = CallEvent::sip(SipMessage::Request(req), src());
-    note_in_order(&mut call, "a", &resolved, &event);
-    let dialog = call.a_leg.dialogs.by_tags("ours", CALLER_TAG).expect("the dialog");
-    assert_eq!(dialog.peer_cseq, Some(9));
+    let verdict = request_verdict(&call, "a", &req);
+    assert_eq!(verdict.status(), Some(420));
+    assert_eq!(verdict.in_order(), None, "a 420 is taken on no dialog");
 }
