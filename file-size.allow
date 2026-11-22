@@ -12,7 +12,6 @@ ext .rs
 # `exclude <path glob>`.
 
 crates/b2bua-core/src/rules/defaults/core_rules.rs 1120
-crates/b2bua-core/src/rules/relay/sdp_session_tests.rs 914
 crates/b2bua-harness/src/lib.rs 816
 crates/b2bua-harness/tests/it/call_keyed_holds.rs 1036
 crates/b2bua-harness/tests/it/fake_prack.rs 807
