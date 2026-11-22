@@ -72,7 +72,8 @@ impl Agent {
 
     /// When a datagram this UA sent is due again for want of its answer, its
     /// ACK or its PRACK. The actor layer drives it during a call,
-    /// the harness past the scenario's last step
+    /// the harness past the scenario's last step on a fabric that runs a
+    /// loss model
     /// ([`Harness::serve_parties_until`](crate::Harness::serve_parties_until));
     /// a hand-scripted body sends each retransmission of its own steps itself.
     pub(crate) fn next_due(&self) -> Option<tokio::time::Instant> {

@@ -3,9 +3,10 @@
 //! stack does whether or not its user still reads: a copy of a request it
 //! answered draws that final again until Timer J (RFC 3261 §17.2.2), a repeat
 //! of a non-2xx final it ACKed draws the ACK again until Timer D
-//! (§17.1.1.2), and its own requests, finals and reliable provisionals go
-//! again until answered (§17.1, §17.2.1, RFC 3262 §3). At the end of the run
-//! its dialog table judges what it left unread.
+//! (§17.1.1.2), and, on a fabric that runs a loss model, its own requests,
+//! finals and reliable provisionals go again until answered (§17.1, §17.2.1,
+//! RFC 3262 §3). At the end of the run its dialog table judges what it left
+//! unread.
 
 use std::time::Duration;
 
@@ -54,6 +55,8 @@ impl Harness {
     /// until `cond` holds and no datagram reached a party for T2 and a T1,
     /// at most past the SUT's own 64·T1 give-up. Bounded, so a `cond` that
     /// never holds falls through to the caller's assertions.
+    /// ([`serve_parties`](Self::serve_parties) says what a pass sends on
+    /// each.)
     pub async fn serve_parties_until(&self, cond: impl Fn() -> bool) {
         let start = Instant::now();
         let bound = if self.lossy { LOSSY_BOUND } else { RELIABLE_BOUND };
@@ -72,9 +75,11 @@ impl Harness {
     }
 
     /// One pass over every bound UA: sight what it has queued, which answers
-    /// a copy and re-ACKs a repeated final, and send what its timers owe.
-    /// What its user would read is held back for a later receive. Whether a
-    /// datagram had reached one.
+    /// a copy and re-ACKs a repeated final, and, on a fabric that runs a
+    /// loss model, send what its timers owe; on one that loses nothing its
+    /// timers send nothing past its scenario's last step. What its user
+    /// would read is held back for a later receive. Whether a datagram had
+    /// reached one.
     async fn serve_parties(&self) -> bool {
         let agents: Vec<Agent> =
             self.bound.borrow().iter().filter_map(WeakAgent::upgrade).collect();
@@ -82,7 +87,9 @@ impl Harness {
         for agent in agents {
             heard |= agent.ep.queue_depth() > 0;
             agent.sight_queued().await;
-            agent.send_due().await;
+            if self.lossy {
+                agent.send_due().await;
+            }
         }
         heard
     }

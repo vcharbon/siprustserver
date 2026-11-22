@@ -1,5 +1,6 @@
 //! The leg's transaction layer over the unreliable transport, driven by its
-//! own reactor arm during the call (past the scenario's last step, by
+//! own reactor arm during the call (past the scenario's last step, on a
+//! fabric that runs a loss model, by
 //! [`Harness::serve_parties_until`](crate::Harness::serve_parties_until)).
 //! Every request but ACK goes again until it is answered:
 //! an INVITE on Timer A until any response, any other request on Timer E
