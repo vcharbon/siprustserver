@@ -200,7 +200,8 @@ impl ActionExecutor<'_> {
     /// dialog's 2xx made an offer its ACK owes the answer to, awaited where it
     /// did and none is given yet, left out where it made none. `ctx`'s event,
     /// the first 2xx to an INVITE this stack sent on its own account there,
-    /// arms that wait itself ([`relay::owe_answer_in_own_ack`]).
+    /// arms that wait itself ([`relay::owe_answer_in_own_ack`]); a rule that
+    /// ACKs its own event's leg selects a 2xx to that dialog's last INVITE.
     pub(super) fn ack_answering(
         &mut self,
         call: &mut Call,

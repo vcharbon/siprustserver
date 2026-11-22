@@ -95,7 +95,9 @@ pub enum RuleAction {
     /// made an offer the ACK answers, `answer` rides the ACK, and with no
     /// answer yet the ACK waits for the relayed ACK, or the later
     /// `AckLegAnswering` on that leg, that brings it (the first 2xx to an
-    /// INVITE this stack sent on its own account arms that wait); where the
+    /// INVITE this stack sent on its own account arms that wait, so a rule
+    /// emitting it on its 2xx's own leg selects a 2xx to that dialog's last
+    /// INVITE, on that dialog); where the
     /// 2xx made none (its INVITE carried the offer, or a reliable provisional
     /// did and its PRACK answers it, RFC 3262 §5) the ACK is bare.
     AckLegAnswering {

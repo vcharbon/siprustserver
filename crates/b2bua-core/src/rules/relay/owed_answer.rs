@@ -132,9 +132,10 @@ pub(crate) fn owe_answer_in_ack(call: &mut Call, leg_id: &str, resp: &SipRespons
 /// (RFC 3261 §13.2.2.4), until that ACK leaves with the answer another leg's
 /// response brings (`RuleAction::AckLegAnswering`), or rejecting every stream
 /// when none can come (RFC 3264 §6, the BYE's own ACK).
-/// The caller's `resp` is a 2xx to that dialog's last sent INVITE, on that
-/// dialog: the rule that ACKs it selects on both. Nothing where `resp` made
-/// no offer, or the dialog's obligation is already armed or discharged.
+/// Requires `resp` to be a 2xx to that dialog's last sent INVITE, on that
+/// dialog: every rule emitting `AckLegAnswering` on the 2xx's own leg selects
+/// on both. Nothing where `resp` made no offer, or the dialog's obligation is
+/// already armed or discharged.
 pub(crate) fn owe_answer_in_own_ack(call: &mut Call, leg_id: &str, resp: &SipResponse) {
     let Some(d) = call::helpers::find_leg(call, leg_id).and_then(|l| l.dialogs.confirmed()) else {
         return;
