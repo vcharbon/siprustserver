@@ -10,12 +10,13 @@
 //! peer's requests and 2xx answers on the dialog findings only once the peer
 //! shows it saw that final; till then the UA still refuses its requests, and
 //! judges them as on the early dialog. A request reaching a dialog a BYE or a
-//! final ended, whichever side sent it, is a finding unless the wire record
-//! shows it a retransmission whose lost first copy left before the peer knew
-//! of that end ([`SentBeforeEnd`]); the UA refuses it either way. A CSeq out
-//! of the remote sequence that a loss the wire record shows explains, on a run
-//! that declares a loss model, is answered as ever and no finding
-//! ([`LostOnTheWay`]). It keeps the last remote CSeq: as UAS it starts at the
+//! final ended, whichever side sent it, is a finding unless, on a run that
+//! declares a loss model, the wire record shows it a retransmission whose
+//! lost first copy left before its sender knew of that end
+//! ([`SentBeforeEnd`]); the UA refuses it either way. A CSeq out of the
+//! remote sequence that a loss the wire record shows explains, on such a run,
+//! is answered as ever and no finding ([`LostOnTheWay`]). It keeps the last
+//! remote CSeq: as UAS it starts at the
 //! initial INVITE's CSeq, as UAC it is empty until the peer's first request
 //! (§12.1.1, §12.1.2).
 
@@ -158,7 +159,9 @@ pub struct DialogTable {
     /// `481`): the hop ACK of such a refused INVITE names them legitimately.
     refused: HashSet<DialogId>,
     /// What the wire record shows of a request reaching a dialog a final or
-    /// a BYE ended; with none, every such request is a finding.
+    /// a BYE ended, on a run that declares a loss model; with none, every
+    /// such request is a finding (the UA's own final unseen by the peer
+    /// excepted).
     sent_before_end: Option<SentBeforeEnd>,
     /// What the wire record shows of the requests lost on their way to the
     /// UA, on a run that declares a loss model; with none, no loss explains

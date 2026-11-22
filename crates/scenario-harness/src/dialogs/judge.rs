@@ -69,20 +69,19 @@ impl DialogJudge {
         }
     }
 
-    /// A judge for the UA `party`, gated by the harness under `opt_ins`, its
-    /// table reading from `wire` whether a request reaching a dialog a final
-    /// or a BYE ended crossed that end.
-    pub fn harnessed(party: impl Into<String>, opt_ins: DialogOptIns, wire: SentBeforeEnd) -> Self {
-        let mut judge = DialogJudge::new(party, opt_ins, DialogJudging::Harness);
-        judge.inner.get_mut().unwrap().table.set_sent_before_end(wire);
-        judge
+    /// A judge for the UA `party`, gated by the harness under `opt_ins`.
+    pub fn harnessed(party: impl Into<String>, opt_ins: DialogOptIns) -> Self {
+        DialogJudge::new(party, opt_ins, DialogJudging::Harness)
     }
 
-    /// This judge, its table reading from `wire` which requests the network
-    /// lost on their way to the UA: the judge of a run that declares a loss
-    /// model.
-    pub fn explaining_losses(mut self, wire: LostOnTheWay) -> Self {
-        self.inner.get_mut().unwrap().table.set_lost_on_the_way(wire);
+    /// This judge, its table reading from the wire record which requests the
+    /// network lost on their way to the UA (`lost`) and whether a request
+    /// reaching a dialog a final or a BYE ended crossed that end (`crossed`):
+    /// the judge of a run that declares a loss model.
+    pub fn explaining_losses(mut self, lost: LostOnTheWay, crossed: SentBeforeEnd) -> Self {
+        let table = &mut self.inner.get_mut().unwrap().table;
+        table.set_lost_on_the_way(lost);
+        table.set_sent_before_end(crossed);
         self
     }
 

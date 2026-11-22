@@ -67,7 +67,7 @@ async fn a_bye_copy_sent_before_the_callees_own_bye_arrived_is_refused_and_no_fi
 }
 
 #[tokio::test(start_paused = true)]
-#[should_panic(expected = "dialog-ended")]
+#[should_panic(expected = "names a dialog a BYE ended")]
 async fn a_bye_crossing_after_a_loss_on_a_run_declaring_no_loss_model_is_a_finding() {
     let net = SimulatedSignalingNetwork::new(SIMULATED_TRANSIT_DELAY_MS)
         .with_send_fate(lose_first_bye(b2bua_addr()));

@@ -21,18 +21,20 @@ pub enum VerdictKind {
     /// The request names a dialog a non-2xx final (`by: Some(status)`) or a
     /// BYE (`by: None`) ended, and the peer may have sent it before it knew
     /// of that end: an early dialog a final the UA sent ended, the peer not
-    /// yet shown to have seen it (RFC 3261 §12.3); or a dialog a final or a
-    /// BYE of either side ended, the request a retransmission whose lost
-    /// first copy left before the peer sent or read that end (§12.2.2,
+    /// yet shown to have seen it (RFC 3261 §12.3); or, on a run that
+    /// declares a loss model, a dialog a final or a BYE of either side ended,
+    /// the request a retransmission whose lost first copy left before the
+    /// peer sent or read that end (§12.2.2,
     /// §15.1.2, §17.1.2.2). The UA refuses it as it refuses
     /// [`VerdictKind::Ended`]. Judged as on the dialog before it ended, it is
     /// a finding only of the rule it `broke` there.
     Crossed { by: Option<u16>, broke: Option<Box<VerdictKind>> },
     /// The request `broke` the remote sequence (a CSeq gone backwards, or
     /// one skipping), and on a run that declares a loss model the wire record
-    /// shows a loss that explains it: the network lost the request's own
-    /// first copy, overtaken since by a later request, or one numbered in the
-    /// gap (RFC 3261 §12.2.2, §17.1.2.2). The UA answers it as it answers
+    /// shows a loss that explains it: the network lost a first copy of the
+    /// request's own transaction, overtaken since by a later request, or one
+    /// request numbered each number of the gap (RFC 3261 §12.2.2,
+    /// §17.1.2.2). The UA answers it as it answers
     /// `broke`; it is no finding.
     LossExplained { broke: Box<VerdictKind> },
     /// The CSeq is below the last one the peer used on this dialog.

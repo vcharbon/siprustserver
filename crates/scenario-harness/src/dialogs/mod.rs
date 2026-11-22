@@ -25,17 +25,19 @@
 //! either may cross the final. The peer's messages are taken to reach the UA
 //! in the order it sent them.
 //!
-//! On a dialog a final or a BYE ended, whichever side sent it, a request of
-//! the peer draws a 481 that is a finding only of a rule it broke on the
-//! dialog before that end when the wire record shows it a retransmission
-//! whose lost first copy the peer sent before it sent that end itself, or no
-//! later than it read the UA's from its socket (§12.2.2, §15.1.2, §17.1.2.2);
-//! any other is a `dialog-ended` finding.
+//! On a run that declares a loss model, on a dialog a final or a BYE ended,
+//! whichever side sent it, a request of the peer draws a 481 that is a
+//! finding only of a rule it broke on the dialog before that end when the
+//! wire record shows it a retransmission whose lost first copy the peer sent
+//! before it sent that end itself, or no later than it read the UA's from
+//! its socket (§12.2.2, §15.1.2, §17.1.2.2); any other, and any on a run that
+//! declares none, is a `dialog-ended` finding.
 //!
 //! On a run that declares a loss model, a CSeq gone backwards whose request's
-//! first copy the network lost on its way to the UA (a later request overtook
-//! it), or a CSeq skipping over a request so lost, is answered as ever (500,
-//! taken) and no finding ([`VerdictKind::LossExplained`], RFC 3261 §12.2.2).
+//! first copy (that transaction's) the network lost on its way to the UA (a
+//! later request overtook it), or a CSeq skipping over requests all so lost,
+//! is answered as ever (500, taken) and no finding
+//! ([`VerdictKind::LossExplained`], RFC 3261 §12.2.2).
 //!
 //! A verdict fails the run unless a `dialog-…` waiver naming the receiving UA
 //! opts it out (`WaiverScope::rule(DIALOG_UNKNOWN, why).on_party("alice")`);
