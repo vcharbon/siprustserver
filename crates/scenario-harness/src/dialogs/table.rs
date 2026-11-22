@@ -10,9 +10,9 @@
 //! peer's requests on the dialog findings only once the peer shows it saw
 //! that final; till then the UA still refuses them, and judges them as on the
 //! early dialog. It makes a 2xx to a request the UA sent on the dialog a
-//! finding only when that request reached the peer behind the final: sent
-//! after it, or, on a run that declares a loss model, every copy ahead of it
-//! lost ([`AheadOfFinal`]). A request reaching a dialog a BYE or a
+//! finding only when that request reached the peer behind the final: by the
+//! UA's send order, or, on a run that declares a loss model, as the wire
+//! record shows it ([`AheadOfFinal`]). A request reaching a dialog a BYE or a
 //! final ended, whichever side sent it, is a finding unless, on a run that
 //! declares a loss model, the wire record shows it a retransmission whose
 //! lost first copy left before its sender knew of that end
@@ -344,7 +344,7 @@ impl DialogTable {
     /// §12.1.2: that dialog is gone, so nothing on it is answered 2xx). A
     /// PRACK is excepted (RFC 3262 §3), and a CANCEL is hop-by-hop. A final
     /// the UA sent ends the dialog for this judgement only for a request that
-    /// reached the peer behind it ([`Self::reached_ahead`]), and a repeat of
+    /// reached the peer behind it (`DialogTable::reached_ahead`), and a repeat of
     /// a 2xx already taken on the dialog is not judged again.
     pub fn note_received_response(
         &mut self,
@@ -369,7 +369,8 @@ impl DialogTable {
         };
         let judged =
             (200..300).contains(&status) && !initial && !matches!(method, "PRACK" | "CANCEL");
-        let ahead = self.dialogs.get(&id).is_some_and(|d| self.reached_ahead(d, response));
+        let ahead =
+            judged && self.dialogs.get(&id).is_some_and(|d| self.reached_ahead(d, response));
         if let Some(d) = self.dialogs.get_mut(&id).filter(|_| judged) {
             let first = d.answered.insert((response.cseq().seq(), method.to_string()));
             if let (true, false, DialogState::EndedByFinal(by)) = (first, ahead, d.state) {
