@@ -256,7 +256,7 @@ async fn calltxns_counts_every_resend_on_the_tally() {
     use sip_message::sniff::identity;
 
     let tally = Arc::new(CallTally::new("alice"));
-    let taps = Taps::new(None, Some(tally.clone()), None, None, None);
+    let taps = Taps::new(None, Some(tally.clone()), None, None, None, None);
     let (txns, peer, peer_addr) = txn_rig_with(taps).await;
     let (update, ack) = (update_req("z9hG4bK-u1"), ack_req("z9hG4bK-a9", 1));
     let now = tokio::time::Instant::now();

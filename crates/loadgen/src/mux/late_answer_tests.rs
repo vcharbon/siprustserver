@@ -197,7 +197,7 @@ async fn a_late_reanswer_is_reported_on_the_arrow_of_its_request() {
     let sink = seen.clone();
     let tally = CallTally::new("alice")
         .with_late_sink(Arc::new(move |arrow: &ArrowKey| sink.lock().unwrap().push(arrow.clone())));
-    let taps = Taps::new(None, Some(Arc::new(tally)), None, None, Some("bob")).unwrap();
+    let taps = Taps::new(None, Some(Arc::new(tally)), None, None, None, Some("bob")).unwrap();
     let (bye, ok) = (req("BYE", 3, "z9hG4bKbye"), resp(200, "BYE", 3, "z9hG4bKbye"));
     taps.on_inbound(&Datagram::sniff(&bye), Instant::now());
     let answers = SentAnswers::default();

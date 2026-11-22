@@ -15,6 +15,8 @@
 //! - `wire_ahead` — [`AheadOfFinal`]: what the run's recording shows of a
 //!   request the UA sent reaching the peer before the final that ended its
 //!   dialog took effect there.
+//! - `departures` — [`Departures`]: the order a load call's datagrams left
+//!   for the wire, where no recording shows the peer's arrivals.
 //!
 //! Two requests on an ended dialog draw no verdict:
 //! - a PRACK on an early dialog a non-2xx final ended (RFC 3262 §3);
@@ -33,7 +35,9 @@
 //! peer took one before on the live dialog (§12.3). The UA's messages are
 //! taken to reach the peer in the order it sent them, so one it sent before
 //! its own final, or before the peer's reached it, was so taken; on a run
-//! that declares a loss model, the wire record shows when a copy arrived.
+//! that declares a loss model, the wire record shows when a copy arrived, and
+//! on a load call, the call's departure log when a copy left ahead of the
+//! UA's own final.
 //!
 //! On a run that declares a loss model, on a dialog a final or a BYE ended,
 //! whichever side sent it, a request of the peer draws a 481 that is a
@@ -53,6 +57,7 @@
 //! opts it out (`WaiverScope::rule(DIALOG_UNKNOWN, why).on_party("alice")`);
 //! one naming no UA covers nothing.
 
+mod departures;
 mod judge;
 mod reliable;
 mod table;
@@ -61,6 +66,7 @@ mod wire_ahead;
 mod wire_crossing;
 mod wire_loss;
 
+pub use departures::Departures;
 pub use judge::{
     covers, covers_at, is_partyless_dialog_waiver, DialogJudge, DialogJudging, DialogOptIns,
     RecordedVerdict,

@@ -176,3 +176,88 @@ async fn a_drop_is_noted_after_the_responses_delivered_before_it() {
     let read = alice.recv().await.expect("the CANCEL's 200, still unread");
     assert_eq!(read.raw[..], ok(1, "CANCEL")[..]);
 }
+
+/// The ACK alice sends for her INVITE's final, carrying the call's key.
+fn ack() -> Vec<u8> {
+    format!(
+        "ACK sip:bob@{PEER} SIP/2.0\r\nMax-Forwards: 70\r\n\
+         Via: SIP/2.0/UDP {CALLER};branch=z9hG4bK-l1\r\nX-Loadgen-Id: lgLOSS\r\n\
+         Call-ID: loss-1@h\r\nFrom: <sip:alice@h>;tag=a1\r\nTo: <sip:bob@h>;tag=b1\r\nCSeq: 1 ACK\r\n\
+         Content-Length: 0\r\n\r\n"
+    )
+    .into_bytes()
+}
+
+/// The departure tap of a call `network` builds, and the methods or statuses
+/// it saw leave, in order.
+fn departures(network: crate::mux::MuxNetwork) -> (crate::mux::MuxNetwork, DepartureLog) {
+    let log = DepartureLog::default();
+    let noted = log.clone();
+    let tap: crate::mux::DepartureTap = Arc::new(move |id| {
+        let what = id.method.map(str::to_string).or(id.status.map(|s| s.to_string()));
+        noted.lock().unwrap().push(what.unwrap_or_default());
+    });
+    (network.with_departure_tap(tap), log)
+}
+
+type DepartureLog = Arc<std::sync::Mutex<Vec<String>>>;
+
+/// A send the loss model drops never departs; the engine's Timer A re-send
+/// of it does, when it leaves.
+#[tokio::test(start_paused = true)]
+async fn a_dropped_send_never_departs_and_its_resend_does() {
+    let (caller, peer): (SocketAddr, SocketAddr) = (CALLER.parse().unwrap(), PEER.parse().unwrap());
+    let sim = SimulatedSignalingNetwork::new(1);
+    let core = MuxCore::bind_on(
+        &sim,
+        vec![EndpointSpec { addr: caller, role: Role::Caller }],
+        Correlation::header("X-Loadgen-Id"),
+        64,
+        4,
+        Duration::from_secs(5),
+        Clock::test_at(0),
+    )
+    .await
+    .unwrap();
+    let first_lost = crate::TargetedDrop::request("INVITE", 1, crate::DropDir::Outbound);
+    let (lossy, log) =
+        departures(core.network_tuned(CallRouting::new("lgLOSS"), 0.0, true, 7, Some(first_lost)));
+    let alice = lossy.bind_udp(BindUdpOpts::new(caller, 64)).await.unwrap();
+    alice.send_to(&invite(), peer).await.unwrap();
+    assert!(log.lock().unwrap().is_empty(), "the dropped first copy never left");
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    assert_eq!(*log.lock().unwrap(), ["INVITE"], "the Timer A re-send left");
+}
+
+/// A datagram the loss model holds departs when its hold ends: an ACK held,
+/// a request sent after it leaves first.
+#[tokio::test(start_paused = true)]
+async fn a_held_send_departs_when_its_hold_ends() {
+    let (caller, peer): (SocketAddr, SocketAddr) = (CALLER.parse().unwrap(), PEER.parse().unwrap());
+    let sim = SimulatedSignalingNetwork::new(1);
+    let core = MuxCore::bind_on(
+        &sim,
+        vec![EndpointSpec { addr: caller, role: Role::Caller }],
+        Correlation::header("X-Loadgen-Id"),
+        64,
+        4,
+        Duration::from_secs(5),
+        Clock::test_at(0),
+    )
+    .await
+    .unwrap();
+    let held = crate::mux::NetFaults {
+        dup_rate: 0.0,
+        late_rate: 1.0,
+        late_max: Duration::from_millis(300),
+        echo_rate: 0.0,
+    };
+    let tuned = core.network_tuned(CallRouting::new("lgLOSS"), 0.0, false, 7, None);
+    let (lossy, log) = departures(tuned.with_faults(held));
+    let alice = lossy.bind_udp(BindUdpOpts::new(caller, 64)).await.unwrap();
+    alice.send_to(&ack(), peer).await.unwrap();
+    alice.send_to(&invite(), peer).await.unwrap();
+    assert_eq!(*log.lock().unwrap(), ["INVITE"], "the held ACK has not left yet");
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert_eq!(*log.lock().unwrap(), ["INVITE", "ACK"], "the ACK left when its hold ended");
+}

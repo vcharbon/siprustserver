@@ -20,6 +20,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures::FutureExt;
+use scenario_harness::dialogs::Departures;
 use scenario_harness::{AgentBinder, WaiverScope};
 use sip_clock::Clock;
 use tokio::sync::{OwnedSemaphorePermit, RwLock, Semaphore};
@@ -277,6 +278,7 @@ pub(crate) async fn run_one(
                 return record_unrun(&reporter, &outcomes, id, CallOutcome::Rejected(reason))
             }
         };
+        let departures = Departures::default();
         let mux_net = transport
             .core
             .network_tuned(
@@ -289,13 +291,15 @@ pub(crate) async fn run_one(
             .with_faults(tuning.faults)
             .with_rtt_sink(rtts.sink())
             .with_tally(tally.clone())
-            .with_loss_tap(loss::loss_tap(&ctx, wire.as_ref()));
+            .with_loss_tap(loss::loss_tap(&ctx, wire.as_ref()))
+            .with_departure_tap(loss::departure_tap(&departures));
         let net = Arc::new(match &wire {
             Some(w) => mux_net.with_wire_tap(w.tap()),
             None => mux_net,
         });
         let binder =
             AgentBinder::mux(net.clone(), transport.clock.clone(), transport.recv_timeout, record);
+        binder.judge_departures(departures);
         binder.seed_ids(next_seed(seed_base));
         if let Some(sink) = &outcomes {
             // The run (and its call-id tag) is the Call-ID nonce: no two share one.

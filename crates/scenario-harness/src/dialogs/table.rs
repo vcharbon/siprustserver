@@ -11,9 +11,9 @@
 //! that final; till then the UA still refuses them, and judges them as on the
 //! early dialog. A non-2xx final of either side makes a 2xx to a request the
 //! UA sent on the dialog a finding only when that request reached the peer
-//! after the final took effect there: by the UA's send order, or, on a run
-//! that declares a loss model, as the wire record shows it
-//! ([`AheadOfFinal`]). A request reaching a dialog a BYE or a
+//! after the final took effect there: by the UA's send order, or as a run
+//! that declares a loss model, or a load call, shows it ([`AheadOfFinal`]). A
+//! request reaching a dialog a BYE or a
 //! final ended, whichever side sent it, is a finding unless, on a run that
 //! declares a loss model, the wire record shows it a retransmission whose
 //! lost first copy left before its sender knew of that end
@@ -177,10 +177,11 @@ pub struct DialogTable {
     /// UA, on a run that declares a loss model; with none, no loss explains
     /// a CSeq out of the remote sequence.
     lost_on_the_way: Option<LostOnTheWay>,
-    /// What the wire record shows of a request the UA sent reaching the peer
-    /// before the final that ended its dialog took effect there, on a run
-    /// that declares a loss model; with none, or where the record shows no
-    /// copy delivered, the UA's send order (`Dialog::sent_live`) tells.
+    /// What the wire record, or a load call's departure log, shows of a
+    /// request the UA sent reaching the peer before the final that ended its
+    /// dialog took effect there, on a run that declares a loss model or a
+    /// load call; with none, or where it cannot tell, the UA's send order
+    /// (`Dialog::sent_live`) tells.
     ahead_of_final: Option<AheadOfFinal>,
 }
 

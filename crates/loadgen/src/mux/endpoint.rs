@@ -28,7 +28,7 @@ use super::retransmit::CallTxns;
 use super::routing::BindDecl;
 use super::rtt::RttSink;
 use super::tally::CallTally;
-use super::taps::{Dir, LossTap, Taps, WireTap};
+use super::taps::{DepartureTap, Dir, LossTap, Taps, WireTap};
 use super::{
     CallGate, CallSlot, Delivery, Key, MuxCore, MuxSocket, ReceiverEntry, Role, RELEASE_HOLD,
 };
@@ -67,6 +67,8 @@ pub struct MuxNetwork {
     pub(super) wire_tap: Option<WireTap>,
     /// The call's loss tap; `None` = drops are only counted.
     pub(super) loss_tap: Option<LossTap>,
+    /// The call's departure tap; `None` = departures are not watched.
+    pub(super) departure_tap: Option<DepartureTap>,
     /// The retransmit engine of every endpoint bound on this network.
     pub(super) engines: Mutex<Vec<Arc<CallTxns>>>,
 }
@@ -139,6 +141,7 @@ impl SignalingNetwork for MuxNetwork {
             self.tally.clone(),
             self.wire_tap.clone(),
             self.loss_tap.clone(),
+            self.departure_tap.clone(),
             leg,
         );
         let txns = self.retransmit.then(|| {
@@ -420,9 +423,11 @@ impl UdpEndpoint for MuxEndpoint {
         }
         let later = |after: std::time::Duration| {
             let endpoint = self.mux.endpoint.clone();
+            let taps = self.taps.clone();
             let bytes = buf.to_vec();
             tokio::spawn(async move {
                 tokio::time::sleep(after).await;
+                taps.iter().for_each(|t| t.on_departed(&bytes));
                 let _ = endpoint.as_ref().send_to(&bytes, dst).await;
             });
         };
@@ -441,6 +446,7 @@ impl UdpEndpoint for MuxEndpoint {
             later(after);
             return Ok(());
         }
+        self.taps.iter().for_each(|t| t.on_departed(buf));
         self.mux.endpoint.as_ref().send_to(buf, dst).await
     }
 

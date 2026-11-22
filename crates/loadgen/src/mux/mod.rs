@@ -93,7 +93,7 @@ pub use scenario_harness::claim::ClaimRule;
 pub use stats::MuxStats;
 pub(crate) use stats::OrphanReason;
 pub use tally::{ArrowKey, ArrowStat, CallMessages, CallTally, LateSink, SUT_LANE};
-pub use taps::{notes_tap, Dir, LossTap, Side, WireTap};
+pub use taps::{notes_tap, DepartureTap, Dir, LossTap, Side, WireTap};
 
 use late_answer::SentAnswers;
 use late_final::SentInvites;

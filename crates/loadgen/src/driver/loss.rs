@@ -1,6 +1,9 @@
-//! A call's loss tap: what the loss model's drops tell the call.
+//! A call's loss and departure taps: what the loss model's drops, and the
+//! datagrams that left despite it, tell the call.
 
 use std::sync::Arc;
+
+use scenario_harness::dialogs::Departures;
 
 use crate::ctx::CallCtx;
 use crate::outcome::CallWire;
@@ -14,4 +17,11 @@ pub(super) fn loss_tap(ctx: &CallCtx, wire: Option<&CallWire>) -> crate::mux::Lo
         notes(side, dir, d, arrived_before);
         wire(side, dir, d, arrived_before);
     })
+}
+
+/// The call's departure tap: each datagram that left noted in `log`, which
+/// its agents' dialog judges read.
+pub(super) fn departure_tap(log: &Departures) -> crate::mux::DepartureTap {
+    let log = log.clone();
+    Arc::new(move |id| log.note(id))
 }

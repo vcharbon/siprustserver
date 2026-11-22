@@ -105,6 +105,12 @@ impl DialogJudge {
         self
     }
 
+    /// Read from `ahead` whether a request the UA sent reached the peer before
+    /// the final that ended its dialog took effect there, from now on.
+    pub fn set_ahead_of_final(&self, ahead: AheadOfFinal) {
+        self.inner.lock().unwrap().table.set_ahead_of_final(ahead);
+    }
+
     /// The UA this judge belongs to.
     pub fn party(&self) -> &str {
         &self.party

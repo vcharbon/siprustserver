@@ -42,6 +42,12 @@ pub type WireTap = Arc<dyn Fn(Side<'_>, Dir, &Datagram<'_>) + Send + Sync>;
 /// drop, each distinct `(status, CSeq method)` once, in arrival order.
 pub type LossTap = Arc<dyn Fn(Side<'_>, Dir, &Datagram<'_>, &[(u16, String)]) + Send + Sync>;
 
+/// A call's departure tap: every datagram its endpoints put on the wire, as
+/// it leaves: first transmissions, the copies the loss model holds when their
+/// hold ends, and the engine's re-sends; one the loss model drops never
+/// leaves. A peer's link delivers them in this order.
+pub type DepartureTap = Arc<dyn Fn(&Identity<'_>) + Send + Sync>;
+
 /// The responses the mux delivered to one endpoint, each distinct
 /// `(status, CSeq method)` once, in arrival order: the order the network
 /// delivered them in, which the endpoint's agent reads them after.
@@ -92,6 +98,7 @@ pub(in crate::mux) struct Taps {
     tally: Option<Arc<CallTally>>,
     wire: Option<WireTap>,
     loss: Option<LossTap>,
+    departure: Option<DepartureTap>,
     /// What the loss tap is told was delivered before each drop.
     arrived: Arrived,
     /// The callee leg's role; `None` on the caller.
@@ -106,14 +113,24 @@ impl Taps {
         tally: Option<Arc<CallTally>>,
         wire: Option<WireTap>,
         loss: Option<LossTap>,
+        departure: Option<DepartureTap>,
         leg: Option<&str>,
     ) -> Option<Arc<Self>> {
-        if rtt.is_none() && tally.is_none() && wire.is_none() && loss.is_none() {
+        let watched = [rtt.is_some(), tally.is_some(), wire.is_some(), loss.is_some()];
+        if !watched.contains(&true) && departure.is_none() {
             return None;
         }
         let rtt = rtt.map(RttTracker::new);
         let leg = leg.map(str::to_string);
-        Some(Arc::new(Self { rtt, tally, wire, loss, arrived: Arrived::default(), leg }))
+        let arrived = Arrived::default();
+        Some(Arc::new(Self { rtt, tally, wire, loss, departure, arrived, leg }))
+    }
+
+    /// The datagram `bytes` left the endpoint for the wire.
+    pub(in crate::mux) fn on_departed(&self, bytes: &[u8]) {
+        if let Some(departure) = &self.departure {
+            departure(&sip_message::sniff::identity(bytes));
+        }
     }
 
     /// The loss model dropped `d` travelling `dir`.

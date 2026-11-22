@@ -4,7 +4,8 @@
 //! the peer sending its own (RFC 3261 §12.3, §17.1.2.2). The UA's table knows
 //! only the first copy it sent and its own send order, so on a run that
 //! declares a loss model, whose fabric loses and holds copies, it reads the
-//! fact from the run's recording.
+//! fact from the run's recording, and on a load call from the call's
+//! [`Departures`].
 
 use std::sync::Arc;
 
@@ -14,6 +15,7 @@ use sip_message::SipResponse;
 use sip_net::RecvDisposition;
 use sip_net_testkit::SignalingNetworkEvent;
 
+use super::departures::Departures;
 use super::wire_crossing::{DialogEnd, Ending};
 
 /// Whether the request a 2xx answers reached its receiver before the final
@@ -36,6 +38,12 @@ impl AheadOfFinal {
     /// The fact as the run's recording `channel` shows it at each call.
     pub fn from_wire(channel: Channel<SignalingNetworkEvent>) -> Self {
         Self::new(move |answer, end| reached_ahead(&channel.snapshot(), answer, end))
+    }
+
+    /// The fact as a load call's departure log `log` shows it at each call:
+    /// for the UA's own final only ([`Departures`]).
+    pub fn from_departures(log: Departures) -> Self {
+        Self::new(move |answer, end| log.ahead(answer, end))
     }
 
     /// Whether the request `answer` answers reached its receiver before the

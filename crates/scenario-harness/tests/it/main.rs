@@ -22,6 +22,7 @@ mod fluent_dialog;
 mod fork_route_set;
 mod harness_log_capture;
 mod http_exchanges;
+mod load_dialog_judges;
 mod non_2xx_ack_hop;
 mod proxy_record_route;
 mod response_destination_gate;
