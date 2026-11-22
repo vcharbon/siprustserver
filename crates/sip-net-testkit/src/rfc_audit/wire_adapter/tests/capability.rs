@@ -85,6 +85,89 @@ fn an_unsupported_require_served_is_flagged() {
     assert!(out[0].1.contains("[frobnicate]") && out[0].1.contains("420"), "{}", out[0].1);
 }
 
+/// At the requester's lane, the UAS no recorded bind, a request owed a
+/// rejection followed by `then`: the findings of `rule` the full audit
+/// reports.
+fn owed_rejection(
+    rule: RuleId,
+    request: Vec<u8>,
+    then: Vec<Stamped<SignalingNetworkEvent>>,
+) -> Vec<RfcFinding> {
+    let mut evs = vec![sent(ALICE, request, SUT, 0)];
+    evs.extend(then);
+    evaluate_rfc_findings(&evs).into_iter().filter(|f| f.rule == rule.token()).collect()
+}
+
+/// What a lane's view misses when the rejection's only copy it was sent is
+/// dropped on arrival, and what a drop on the call does not explain: the
+/// rejection the loss model dropped toward the lane is excused, and with no
+/// such drop the finding stands, charged to the unrecorded UAS.
+fn a_lost_rejection_is_excused_and_no_other_drop_is(
+    rule: RuleId,
+    request: fn(&str) -> Vec<u8>,
+    method: &str,
+    rejection: (u16, &str),
+) {
+    use crate::types::RecvDisposition::LossModel;
+    let (status, owed_header) = rejection;
+    let branch = "z9hG4bK-n";
+    let answer = |status: u16, cseq: u32| resp_with(status, cseq, method, branch, owed_header);
+
+    let lost = vec![arrival(ALICE, answer(status, 1), SUT, 1, LossModel, None)];
+    let excused = owed_rejection(rule, request(branch), lost);
+    assert!(excused.is_empty(), "the {status} was sent and lost: {excused:?}");
+
+    let lost_on_send = Stamped {
+        event: SignalingNetworkEvent::SendLost {
+            bind_key: ALICE.to_string(),
+            to: SUT.parse().unwrap(),
+            msg: request(branch),
+        },
+        seq: 1,
+        at_ms: 1,
+    };
+    let unexplained = [
+        ("no drop", vec![]),
+        ("a provisional lost", vec![arrival(ALICE, answer(100, 1), SUT, 1, LossModel, None)]),
+        ("another final lost", vec![arrival(ALICE, answer(500, 1), SUT, 1, LossModel, None)]),
+        (
+            "another CSeq's final lost",
+            vec![arrival(ALICE, answer(status, 2), SUT, 1, LossModel, None)],
+        ),
+        ("the request lost on send", vec![lost_on_send]),
+    ];
+    for (case, then) in unexplained {
+        let found = owed_rejection(rule, request(branch), then);
+        assert_eq!(found.len(), 1, "{case}: {found:?}");
+        assert_eq!((found[0].lane.as_str(), found[0].charged.as_deref()), (ALICE, Some(SUT)));
+        assert!(found[0].detail.contains("got 0"), "{case}: {}", found[0].detail);
+    }
+}
+
+/// §8.2.2 on a lossy wire: a 420 the loss model dropped on its way to the
+/// requester was issued, whose re-sent copy the view does not hold.
+#[test]
+fn a_420_lost_toward_the_requester_is_excused_and_no_other_drop_is() {
+    a_lost_rejection_is_excused_and_no_other_drop_is(
+        RuleId::UnsupportedExtension420,
+        |branch| req_with("INFO", branch, "Require: frobnicate\r\n"),
+        "INFO",
+        (420, "Unsupported: frobnicate\r\n"),
+    );
+}
+
+/// §8.2.1 on a lossy wire: a 405 the loss model dropped on its way to the
+/// requester was issued, whose re-sent copy the view does not hold.
+#[test]
+fn a_405_lost_toward_the_requester_is_excused_and_no_other_drop_is() {
+    a_lost_rejection_is_excused_and_no_other_drop_is(
+        RuleId::UnsupportedMethod405Allow,
+        |branch| req_with("FROBNICATE", branch, ""),
+        "FROBNICATE",
+        (405, "Allow: INVITE, BYE\r\n"),
+    );
+}
+
 /// §8.2.3 and §21.4.15 at the sender: the lane that SENT the bare final is
 /// the lane charged.
 #[test]

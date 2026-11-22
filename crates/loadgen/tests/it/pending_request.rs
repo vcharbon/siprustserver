@@ -165,3 +165,114 @@ async fn an_info_whose_final_is_lost_as_a_bye_crosses_it_is_answered_by_its_retr
     settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 }
+
+const REQUIRE_SHAPE: &str = "require_info_bye_crossing";
+
+/// The caller sends an INFO requiring an option tag no UA supports once the
+/// call is established; the callee hangs up as soon as it is established.
+struct RequireInfoByeCrossing;
+
+impl ActorScenario for RequireInfoByeCrossing {
+    fn id(&self) -> ScenarioId {
+        REQUIRE_SHAPE
+    }
+
+    fn build(&self, env: &CallEnv<'_>) -> Result<ActorCall, StepError> {
+        let info = GoalStep::InDialog {
+            method: InDialogMethod::Info,
+            content_type: None,
+            body: None,
+            headers: vec![("Require".into(), "frobnicate".into())],
+        };
+        let alice = ActorSpec {
+            role: "alice",
+            agent: env.alice.clone(),
+            disposition: Disposition::Caller,
+            media: MediaState::offer(OFFER_SDP),
+            goals: vec![
+                Goal::new(
+                    Barrier::None,
+                    GoalStep::Invite { callee: "bob", plan: Some(env.invite_plan(&["bob"])) },
+                ),
+                Goal::new(Barrier::pred("established", established), info),
+            ],
+            invite_targets: vec![("bob", env.bob.clone())],
+            via: None,
+            feed: CtxFeed::default(),
+            cseq: None,
+            delayed: vec![],
+            answers: Default::default(),
+            claim: None,
+        };
+        let bob = ActorSpec {
+            role: "bob",
+            agent: env.bob.clone(),
+            disposition: Disposition::Answer,
+            media: MediaState::answer(ANSWER_SDP),
+            goals: vec![Goal::new(Barrier::pred("established", established), GoalStep::Bye)],
+            invite_targets: vec![],
+            via: None,
+            feed: CtxFeed::default(),
+            cseq: None,
+            delayed: vec![],
+            answers: Default::default(),
+            claim: None,
+        };
+        Ok(ActorCall::new(
+            vec![alice, bob],
+            vec![phase("established", established)],
+            SettleBarrier::default_ceiling(),
+            Expect::answered(),
+        ))
+    }
+}
+
+/// The audit of a recorded call judges an in-dialog request by its client
+/// transaction (RFC 3261 §17.1.2): the caller's INFO requiring an unsupported
+/// option tag is lost on its way out, the callee's BYE ends the call, and the
+/// INFO's retransmission draws the B2BUA's rejection after the verdict. The
+/// call is clean: the audit reads that rejection.
+#[tokio::test(start_paused = true)]
+async fn a_rejection_drawn_by_a_retransmission_after_the_verdict_is_audited() {
+    let (h, b2bua, core, transport) = setup_fake(7910).await;
+    let mut registry = ShapeRegistry::with_defaults();
+    registry.register(
+        ShapeDescriptor::new(REQUIRE_SHAPE).load_shared(Arc::new(RequireInfoByeCrossing)),
+    );
+    let mix = MixEntry::by_id(&registry, REQUIRE_SHAPE, &ScenarioInputs::default(), 1.0).unwrap();
+    let reporter =
+        Arc::new(Reporter::new(ReporterCfg { sample_cap: 0, background_record_every: 1 }));
+    let file = std::env::temp_dir().join(format!("loadgen-rejection-{}.jsonl", std::process::id()));
+    let _ = std::fs::remove_file(&file);
+    let sink = Arc::new(OutcomeSink::new("run-1", "loadgen", "main", &file, None).unwrap());
+    let mut c = cfg(b2bua.addr, 1.0, 1, 4, 0x0824);
+    c.default_tuning = CallTuning {
+        retransmit: true,
+        drop_nth: Some(TargetedDrop::request("INFO", 1, DropDir::Outbound)),
+        ..CallTuning::default()
+    };
+    let driver = Driver::new(c, vec![mix], reporter.clone(), transport).with_outcomes(sink.clone());
+    driver.run().await;
+    sink.close();
+    let records: Vec<Value> = std::fs::read_to_string(&file)
+        .unwrap()
+        .lines()
+        .map(|l| serde_json::from_str(l).expect("one JSON record per line"))
+        .collect();
+    let _ = std::fs::remove_file(&file);
+
+    assert_eq!(records.len(), 1, "one call placed");
+    let r = &records[0];
+    let infos = caller_infos(&h, b2bua.addr);
+    assert_eq!(infos.len(), 1, "only the INFO's retransmission reached the B2BUA: {infos:?}");
+    let ended = r["ended_at_ms"].as_u64().unwrap();
+    assert!(ended < infos[0], "the call ended before the retransmission: {ended} {infos:?}");
+    let prometheus = reporter.render_prometheus();
+    assert_eq!(reporter.count(REQUIRE_SHAPE, &ResultClass::RfcAuditFail), 0, "{prometheus}\n{r}");
+    assert_eq!(reporter.count(REQUIRE_SHAPE, &ResultClass::Ok), 1, "{prometheus}\n{r}");
+
+    settle_until(|| core.registry_size() == 0).await;
+    h.advance(std::time::Duration::from_secs(40)).await;
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
+}
