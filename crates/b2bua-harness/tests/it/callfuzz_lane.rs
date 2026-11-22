@@ -12,6 +12,12 @@
 //! 1); `CALLFUZZ_FROM` the first call's index (default 0), so a campaign runs
 //! as batches under the test timeout; `CALLFUZZ_CALL_SEED` replays one call.
 //! A failure names each failing call's seed and draw.
+//!
+//! `CALLFUZZ_DROP`, `CALLFUZZ_DUP` and `CALLFUZZ_LATE` (percent of datagrams,
+//! default 0) put the call on a lossy network ([`faults`]); a call replays
+//! with its faults, which its draw counts.
+
+mod faults;
 
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
@@ -23,6 +29,9 @@ use callshapes::shapes::default_binder;
 use futures::FutureExt;
 use scenario_harness::actor::ScenarioVerdict;
 use scenario_harness::realcall::{run_actor_collecting, CallEnv};
+use scenario_harness::{Harness, SIMULATED_TRANSIT_DELAY_MS};
+
+use faults::{fate_of, Faults, Tally};
 
 /// The salt of the cell pick: a call's cell is drawn apart from its fuzz draw.
 const CELL_SALT: u64 = 0xCE11_5A17_CE11_5A17;
@@ -47,7 +56,7 @@ fn cell_of(seed: u64) -> generator::Cell {
 /// panics with why, naming the model invariant a SUT turn broke first. A
 /// transfer cell's parties hold their answers but never refuse: a refused
 /// realign rolls the transfer back, an ending no transfer stage states.
-async fn run_call(config: FuzzConfig, token: &str, cell: generator::Cell) {
+async fn run_call(config: FuzzConfig, token: &str, cell: generator::Cell, net: Harness) {
     let wrap = FuzzWrap {
         id: "fz_cell",
         inner: Arc::new(generator::plan(&cell, default_binder())),
@@ -59,7 +68,7 @@ async fn run_call(config: FuzzConfig, token: &str, cell: generator::Cell) {
         config: FuzzConfig { refuse: cell.transfer == generator::Transferred::None, ..config },
     };
     let since = model_gate::Mark::now();
-    let (scene, charlie) = super::call_shape_cells::refer_scene(&format!("callfuzz {token}")).await;
+    let (scene, charlie) = super::call_shape_cells::refer_scene_on(net).await;
     let env = CallEnv::for_functional(
         &scene.alice,
         &scene.bob,
@@ -79,17 +88,26 @@ async fn run_call(config: FuzzConfig, token: &str, cell: generator::Cell) {
 }
 
 /// Run call `i`; `Err` names its seed, cell, draw and the first line of why.
-async fn fuzz_one(config: FuzzConfig, i: u64) -> Result<(), String> {
+async fn fuzz_one(config: FuzzConfig, faults: Faults, i: u64) -> Result<(), String> {
     let token = format!("fz-{i}");
     let seed = config.seed_of(&token);
     let cell = cell_of(seed);
     let label = cell.to_string();
-    let outcome = AssertUnwindSafe(run_call(config, &token, cell)).catch_unwind().await;
+    let name = format!("callfuzz {token}");
+    let tally = Arc::new(Tally::default());
+    let net = if faults.any() {
+        let fate = fate_of(faults, seed, tally.clone());
+        Harness::with_transit_delay_and_send_fate(name, SIMULATED_TRANSIT_DELAY_MS, fate)
+    } else {
+        Harness::new(name)
+    };
+    let outcome = AssertUnwindSafe(run_call(config, &token, cell, net)).catch_unwind().await;
     let draw = callfuzz::take_drawn()
         .into_values()
         .map(|d| format!("{d:?}"))
         .collect::<Vec<_>>()
-        .join(" ");
+        .join(" ")
+        + &tally.note();
     let Err(payload) = outcome else { return Ok(()) };
     let why = payload
         .downcast_ref::<String>()
@@ -112,9 +130,14 @@ async fn fuzzed_calls_through_the_b2bua() {
     };
     let calls = if config.call_seed.is_some() { 1 } else { calls };
     let from = knob("CALLFUZZ_FROM").unwrap_or(0);
+    let faults = Faults {
+        drop: knob("CALLFUZZ_DROP").unwrap_or(0),
+        dup: knob("CALLFUZZ_DUP").unwrap_or(0),
+        late: knob("CALLFUZZ_LATE").unwrap_or(0),
+    };
     let mut failed = Vec::new();
     for i in from..from + calls {
-        if let Err(why) = fuzz_one(config, i).await {
+        if let Err(why) = fuzz_one(config, faults, i).await {
             failed.push(why);
         }
     }

@@ -39,6 +39,19 @@ impl Harness {
         Self::with_simulated_network(scenario_name, net.with_send_delay(delay))
     }
 
+    /// Like [`with_transit_delay`](Harness::with_transit_delay), plus a
+    /// per-datagram fate on the simulated fabric ([`sip_net_testkit::Fate`]):
+    /// the losses, holds and copies an unreliable transport makes, which every
+    /// party's transaction layer must ride out (RFC 3261 §17, §18).
+    pub fn with_transit_delay_and_send_fate(
+        scenario_name: impl Into<String>,
+        transit_delay_ms: u64,
+        fate: sip_net_testkit::SendFate,
+    ) -> Self {
+        let net = sip_net_testkit::SimulatedSignalingNetwork::new(transit_delay_ms.max(1));
+        Self::with_simulated_network(scenario_name, net.with_send_fate(fate))
+    }
+
     /// [`bind_sut_with_roles`](Self::bind_sut_with_roles) on the lane
     /// `addr#label`: one of several SUT endpoints serving one shared address
     /// keeps a ladder column and an audit stream of its own.

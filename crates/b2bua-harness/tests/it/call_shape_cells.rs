@@ -24,10 +24,16 @@ const CHARLIE_PORT: u16 = 5090;
 /// A scene whose B2BUA routes every call to bob and authorizes a transfer
 /// (`generator::REFER_KEY`), with charlie bound as the transfer target.
 pub(crate) async fn refer_scene(name: &str) -> (B2buaScene, scenario_harness::Agent) {
-    let scene = B2buaScene::with_b2bua(name, |bob_port| {
-        B2buaSut::route_all_with_refer("127.0.0.1", bob_port)
-    })
-    .await;
+    refer_scene_on(scenario_harness::Harness::new(name)).await
+}
+
+/// [`refer_scene`] on a harness the caller built, over the fabric it chose.
+pub(crate) async fn refer_scene_on(
+    h: scenario_harness::Harness,
+) -> (B2buaScene, scenario_harness::Agent) {
+    let scene =
+        B2buaScene::on_harness(h, |bob_port| B2buaSut::route_all_with_refer("127.0.0.1", bob_port))
+            .await;
     let charlie =
         scene.h.agent("charlie", &format!("127.0.0.1:{CHARLIE_PORT}")).await.transfer_target();
     (scene, charlie)

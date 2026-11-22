@@ -87,6 +87,32 @@ async fn send_delay_lets_a_later_datagram_overtake_a_held_one() {
     assert_eq!(start.elapsed(), Duration::from_millis(11), "the transit and the hold");
 }
 
+/// A datagram's fate decides its arrivals: a lost one never arrives though its
+/// send succeeds, a doubled one arrives at the transit and again past it.
+#[tokio::test(start_paused = true)]
+async fn send_fate_loses_or_doubles_a_datagram() {
+    use sip_net_testkit::Fate;
+    let net =
+        SimulatedSignalingNetwork::new(1).with_send_fate(Arc::new(|_src, _dst, raw| match raw {
+            b"lost" => Fate::Lose,
+            b"twice" => Fate::Twice(Duration::from_millis(5)),
+            _ => Fate::Deliver,
+        }));
+    let a = net.bind_udp(opts("10.0.0.1:5060", 64)).await.unwrap();
+    let b = net.bind_udp(opts("10.0.0.2:5060", 64)).await.unwrap();
+    let start = tokio::time::Instant::now();
+
+    a.send_to(b"lost", b.local_addr()).await.expect("a lost send still succeeds");
+    a.send_to(b"twice", b.local_addr()).await.unwrap();
+
+    let first = b.recv().await.expect("queue open");
+    assert_eq!((&first.raw[..], start.elapsed()), (&b"twice"[..], Duration::from_millis(1)));
+    let copy = b.recv().await.expect("queue open");
+    assert_eq!((&copy.raw[..], start.elapsed()), (&b"twice"[..], Duration::from_millis(6)));
+    net.await_in_flight(Duration::from_secs(1)).await;
+    assert!(b.try_recv().is_none(), "the lost datagram never arrives");
+}
+
 #[tokio::test]
 async fn full_queue_tail_drops() {
     let net = SimulatedSignalingNetwork::new(0);

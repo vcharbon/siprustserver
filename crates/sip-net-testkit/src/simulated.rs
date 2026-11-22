@@ -8,9 +8,9 @@
 //! runs in zero wall-time under a paused tokio clock.
 //!
 //! Per-node partition gating belongs with the cluster harness, not here.
-//! `send_fault` (per-pair send failure injection) and `send_delay` (a chosen
-//! datagram held in flight past the transit, so later ones overtake it) live
-//! here, as they are pure-network fault primitives.
+//! `send_fault` (per-pair send failure injection) and `send_fate` (a chosen
+//! datagram lost, held in flight past the transit so later ones overtake it,
+//! or delivered twice) live here, as they are pure-network fault primitives.
 //!
 //! A shared address ([`SimulatedSignalingNetwork::share_address`]) is an
 //! address several endpoints serve, each sender's flow delivered to one of
@@ -46,6 +46,25 @@ pub type SendFault = Arc<dyn Fn(SocketAddr, SocketAddr) -> Option<String> + Send
 /// after it on the same path may arrive first (see
 /// [`SimulatedSignalingNetwork::with_send_delay`]).
 pub type SendDelay = Arc<dyn Fn(SocketAddr, SocketAddr, &[u8]) -> Option<Duration> + Send + Sync>;
+
+/// What the fabric does with one datagram a sender handed it: what an
+/// unreliable transport may do to it (RFC 3261 §18: UDP loses, delays and
+/// duplicates; the transaction layer's retransmissions recover).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Fate {
+    /// Delivered after the fabric's transit.
+    Deliver,
+    /// Never delivered; the send still succeeds.
+    Lose,
+    /// Delivered this much later than the transit.
+    Late(Duration),
+    /// Delivered after the transit, and a copy this much later again.
+    Twice(Duration),
+}
+
+/// Optional per-datagram fate: `(src, dst, datagram) -> Fate` (see
+/// [`SimulatedSignalingNetwork::with_send_fate`]).
+pub type SendFate = Arc<dyn Fn(SocketAddr, SocketAddr, &[u8]) -> Fate + Send + Sync>;
 
 /// The flow picker of a shared address: `src -> slot` names the member a
 /// datagram from `src` is delivered to (see
@@ -92,7 +111,7 @@ struct SimShared {
     in_flight: AtomicI64,
     transit_delay_ms: u64,
     send_fault: Option<SendFault>,
-    send_delay: Option<SendDelay>,
+    send_fate: Option<SendFate>,
 }
 
 /// The simulated network. Clone shares the routing fabric.
@@ -120,7 +139,7 @@ impl SimulatedSignalingNetwork {
                 in_flight: AtomicI64::new(0),
                 transit_delay_ms,
                 send_fault: None,
-                send_delay: None,
+                send_fate: None,
             }),
         }
     }
@@ -138,10 +157,20 @@ impl SimulatedSignalingNetwork {
     /// much later than the transit, so a datagram sent after it and held
     /// less overtakes it, as a network reorders. A held send still returns at
     /// once. Panics once the fabric is shared.
-    pub fn with_send_delay(mut self, delay: SendDelay) -> Self {
+    pub fn with_send_delay(self, delay: SendDelay) -> Self {
+        self.with_send_fate(Arc::new(move |src, dst, buf| {
+            delay(src, dst, buf).map_or(Fate::Deliver, Fate::Late)
+        }))
+    }
+
+    /// Install a per-datagram fate: each datagram is delivered, lost, held
+    /// past the transit or delivered twice as `fate` says ([`Fate`]). A send
+    /// still returns at once, whatever its fate. Panics once the fabric is
+    /// shared.
+    pub fn with_send_fate(mut self, fate: SendFate) -> Self {
         Arc::get_mut(&mut self.shared)
-            .expect("with_send_delay must run before the fabric is shared")
-            .send_delay = Some(delay);
+            .expect("with_send_fate must run before the fabric is shared")
+            .send_fate = Some(fate);
         self
     }
 
@@ -331,17 +360,25 @@ impl UdpEndpoint for SimEndpoint {
                 return Err(SendError::stated(reason));
             }
         }
-        self.shared.in_flight.fetch_add(1, Ordering::Relaxed);
-        let shared = self.shared.clone();
-        let raw = buf.to_vec();
         let src = self.addr;
-        let held = self.shared.send_delay.as_ref().and_then(|hold| hold(src, dst, buf));
-        let delay = Duration::from_millis(self.shared.transit_delay_ms) + held.unwrap_or_default();
-        tokio::spawn(async move {
-            tokio::time::sleep(delay).await;
-            deliver(shared.clone(), raw, src, dst).await;
-            shared.in_flight.fetch_sub(1, Ordering::Relaxed);
-        });
+        let fate = self.shared.send_fate.as_ref().map_or(Fate::Deliver, |f| f(src, dst, buf));
+        let transit = Duration::from_millis(self.shared.transit_delay_ms);
+        let arrivals = match fate {
+            Fate::Deliver => vec![transit],
+            Fate::Lose => vec![],
+            Fate::Late(extra) => vec![transit + extra],
+            Fate::Twice(extra) => vec![transit, transit + extra],
+        };
+        for delay in arrivals {
+            self.shared.in_flight.fetch_add(1, Ordering::Relaxed);
+            let shared = self.shared.clone();
+            let raw = buf.to_vec();
+            tokio::spawn(async move {
+                tokio::time::sleep(delay).await;
+                deliver(shared.clone(), raw, src, dst).await;
+                shared.in_flight.fetch_sub(1, Ordering::Relaxed);
+            });
+        }
         Ok(())
     }
 
