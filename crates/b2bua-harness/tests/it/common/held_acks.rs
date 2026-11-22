@@ -14,6 +14,19 @@ use sip_net_testkit::SendDelay;
 /// `holds[n]`, every later one the last of `holds`; with `holds` empty,
 /// nothing is held.
 pub fn reinvite_acks_held(ua: SocketAddr, holds: &'static [Duration]) -> SendDelay {
+    held(ua, true, holds)
+}
+
+/// The hold on every ACK `ua` sends, as [`reinvite_acks_held`] counts them:
+/// for a callee, whose every ACK is one of a re-INVITE's 2xx.
+pub fn acks_held(ua: SocketAddr, holds: &'static [Duration]) -> SendDelay {
+    held(ua, false, holds)
+}
+
+/// The hold on the ACKs `ua` sends, but those on her first ACK's CSeq number
+/// where `spare_first`: the n-th held one is held `holds[n]`, every later
+/// one the last of `holds`.
+fn held(ua: SocketAddr, spare_first: bool, holds: &'static [Duration]) -> SendDelay {
     let first_cseq = AtomicU32::new(0);
     let sent = AtomicUsize::new(0);
     Arc::new(move |src, _dst, datagram| {
@@ -26,7 +39,7 @@ pub fn reinvite_acks_held(ua: SocketAddr, holds: &'static [Duration]) -> SendDel
             Ok(_) => cseq,
             Err(seen) => seen,
         };
-        if cseq == first {
+        if spare_first && cseq == first {
             return None;
         }
         let n = sent.fetch_add(1, Ordering::Relaxed);
