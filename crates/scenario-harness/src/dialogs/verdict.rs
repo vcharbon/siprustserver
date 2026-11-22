@@ -18,12 +18,15 @@ pub enum VerdictKind {
     /// The request names a dialog a non-2xx final (`by: Some(status)`) or a
     /// BYE (`by: None`) ended.
     Ended { by: Option<u16> },
-    /// The request names an early dialog a `by` non-2xx final the UA sent
-    /// ended, and the peer has not yet shown it saw that final: it may have
-    /// sent the request before the final reached it (RFC 3261 §12.3). The UA
-    /// refuses it as it refuses [`VerdictKind::Ended`]. Judged as on the
-    /// still early dialog, it is a finding only of the rule it `broke` there.
-    CrossedFinal { by: u16, broke: Option<Box<VerdictKind>> },
+    /// The request names a dialog the UA's own act ended, and the peer may
+    /// have sent it before it learnt of that act: an early dialog a non-2xx
+    /// final the UA sent ended (`by: Some(status)`), the peer not yet shown to
+    /// have seen it (RFC 3261 §12.3); or a dialog the UA's own BYE ended
+    /// (`by: None`), the request a retransmission whose lost first copy left
+    /// before the peer received that BYE (§15.1.2, §17.1.2.2). The UA refuses
+    /// it as it refuses [`VerdictKind::Ended`]. Judged as on the dialog
+    /// before it ended, it is a finding only of the rule it `broke` there.
+    Crossed { by: Option<u16>, broke: Option<Box<VerdictKind>> },
     /// The CSeq is below the last one the peer used on this dialog.
     CseqBackwards { cseq: u32, last: u32 },
     /// The CSeq is more than one above the last one the peer used.
@@ -43,10 +46,8 @@ impl VerdictKind {
     pub fn rule(&self) -> &'static str {
         match self {
             VerdictKind::UnknownDialog { .. } => DIALOG_UNKNOWN,
-            VerdictKind::CrossedFinal { broke: Some(broke), .. } => broke.rule(),
-            VerdictKind::Ended { .. } | VerdictKind::CrossedFinal { broke: None, .. } => {
-                DIALOG_ENDED
-            }
+            VerdictKind::Crossed { broke: Some(broke), .. } => broke.rule(),
+            VerdictKind::Ended { .. } | VerdictKind::Crossed { broke: None, .. } => DIALOG_ENDED,
             VerdictKind::CseqBackwards { .. } => DIALOG_CSEQ_BACKWARDS,
             VerdictKind::CseqSkip { .. } => DIALOG_CSEQ_SKIP,
             VerdictKind::OnEarlyDialog { .. } => DIALOG_EARLY_REQUEST,
@@ -62,10 +63,10 @@ impl VerdictKind {
 
     /// Whether the verdict is a finding against the peer, gated by the
     /// harness or failed by a driver: every kind but a
-    /// [`VerdictKind::CrossedFinal`] that broke no rule, which only tells the
-    /// UA to refuse.
+    /// [`VerdictKind::Crossed`] that broke no rule, which only tells the UA to
+    /// refuse.
     pub fn is_finding(&self) -> bool {
-        !matches!(self, VerdictKind::CrossedFinal { broke: None, .. })
+        !matches!(self, VerdictKind::Crossed { broke: None, .. })
     }
 
     /// Whether the receiving UA refuses the request on the wire: `481` for a
@@ -78,7 +79,7 @@ impl VerdictKind {
         match self {
             VerdictKind::UnknownDialog { .. }
             | VerdictKind::Ended { .. }
-            | VerdictKind::CrossedFinal { .. } => Some((481, "Call/Transaction Does Not Exist")),
+            | VerdictKind::Crossed { .. } => Some((481, "Call/Transaction Does Not Exist")),
             VerdictKind::CseqBackwards { .. } => Some((500, "Server Internal Error")),
             VerdictKind::CseqSkip { .. } | VerdictKind::EndedAnswered { .. } => None,
             VerdictKind::OnEarlyDialog { reinvite: true } => Some((491, "Request Pending")),
@@ -127,14 +128,15 @@ impl DialogVerdict {
     /// the dialog carried; a CSeq going backwards, or a request on a dialog a
     /// BYE ended, that is the retransmission of a dropped copy (RFC 3261
     /// §17.1.2: it was sent before the later request or the BYE arrived). A
-    /// request crossing the UA's final is explained as the rule it broke is.
+    /// request crossing the UA's final or BYE is explained as the rule it
+    /// broke is.
     pub fn explained_by(&self, lost: &[&LostMessage]) -> bool {
         let of_dialog =
             |m: &&&LostMessage| m.call_id == self.call_id && m.from_tag == self.from_tag;
         let same =
             |m: &LostMessage| m.cseq == self.cseq && m.method.as_deref() == Some(&self.method);
         let kind = match &self.kind {
-            VerdictKind::CrossedFinal { broke: Some(broke), .. } => broke.as_ref(),
+            VerdictKind::Crossed { broke: Some(broke), .. } => broke.as_ref(),
             kind => kind,
         };
         match *kind {
@@ -170,15 +172,24 @@ impl fmt::Display for DialogVerdict {
                     self.from_tag, self.to_tag
                 )
             }
-            VerdictKind::CrossedFinal { by, broke: None } => write!(
+            VerdictKind::Crossed { by: Some(by), broke: None } => write!(
                 f,
                 "{m} From-tag {} To-tag {} names a dialog a {by} final this UA sent ended, \
                  before the peer showed it saw that final",
                 self.from_tag, self.to_tag
             ),
-            VerdictKind::CrossedFinal { by, broke: Some(broke) } => {
-                let on_early = DialogVerdict { kind: broke.as_ref().clone(), ..self.clone() };
-                write!(f, "{on_early}, crossing the {by} final this UA sent")
+            VerdictKind::Crossed { by: None, broke: None } => write!(
+                f,
+                "{m} From-tag {} To-tag {} names a dialog the BYE this UA sent ended, its \
+                 lost first copy sent before the peer received that BYE",
+                self.from_tag, self.to_tag
+            ),
+            VerdictKind::Crossed { by, broke: Some(broke) } => {
+                let before = DialogVerdict { kind: broke.as_ref().clone(), ..self.clone() };
+                match by {
+                    Some(by) => write!(f, "{before}, crossing the {by} final this UA sent"),
+                    None => write!(f, "{before}, crossing the BYE this UA sent"),
+                }
             }
             VerdictKind::CseqBackwards { cseq, last } => write!(
                 f,

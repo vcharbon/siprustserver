@@ -69,8 +69,10 @@ Automatic (you cannot opt out, only waive per-rule):
   CSeq that goes backwards or skips is a verdict: a scripted `receive` fails
   at once with a `StepError::Dialog`, the actor answers it 481 (500, 491) on
   its own, and `finish()` fails on it. A request that crosses the UA's own
-  non-2xx final is answered 481 and fails only on a rule it breaks on the
-  early dialog (the module doc says when it crosses). A test that sends such a message on
+  non-2xx final, or its own BYE (a retransmission whose lost first copy left
+  before that BYE reached its sender, read from the run's recording), is
+  answered 481 and fails only on a rule it breaks on the dialog before that
+  end (the module doc says when it crosses). A test that sends such a message on
   purpose waives the `dialog-…` rule on the receiving UA
   (`h.waive(WaiverScope::rule(DIALOG_UNKNOWN, why).on_party("alice"))`); a
   dialog waiver naming no UA covers nothing.

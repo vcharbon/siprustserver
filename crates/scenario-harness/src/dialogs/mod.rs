@@ -8,6 +8,8 @@
 //!   name, and the wire answer a UA gives it.
 //! - `judge` — [`DialogJudge`]: one UA's table and the verdicts it recorded,
 //!   gated by the harness or handed to a driver.
+//! - `wire_crossing` — [`SentBeforeBye`]: what the run's recording shows of
+//!   a request reaching a dialog the UA's own BYE ended.
 //!
 //! Two requests on an ended dialog draw no verdict:
 //! - a PRACK on an early dialog a non-2xx final ended (RFC 3262 §3);
@@ -15,11 +17,17 @@
 //!
 //! On an early dialog the UA's own non-2xx final ended, a 2xx to a request the
 //! UA sent draws none, and a request of the peer draws a 481 that is a finding
-//! only of a rule it broke on the early dialog ([`VerdictKind::CrossedFinal`]),
+//! only of a rule it broke on the early dialog ([`VerdictKind::Crossed`]),
 //! until the caller's own ACK of that final,
 //! or a new INVITE of the caller, reached the UA (RFC 3261 §17.2.1): till then
 //! either may cross the final. The peer's messages are taken to reach the UA
 //! in the order it sent them.
+//!
+//! On a dialog the UA's own BYE ended, a request of the peer draws a 481 that
+//! is a finding only of a rule it broke on the dialog before that BYE when
+//! the wire record shows it a retransmission whose lost first copy the peer
+//! sent before that BYE reached it (§15.1.2, §17.1.2.2); any other is a
+//! `dialog-ended` finding.
 //!
 //! A verdict fails the run unless a `dialog-…` waiver naming the receiving UA
 //! opts it out (`WaiverScope::rule(DIALOG_UNKNOWN, why).on_party("alice")`);
@@ -29,6 +37,7 @@ mod judge;
 mod reliable;
 mod table;
 mod verdict;
+mod wire_crossing;
 
 pub use judge::{
     covers, covers_at, is_partyless_dialog_waiver, DialogJudge, DialogJudging, DialogOptIns,
@@ -38,6 +47,7 @@ pub use verdict::{
     DialogVerdict, VerdictKind, DIALOG_CSEQ_BACKWARDS, DIALOG_CSEQ_SKIP, DIALOG_EARLY_REQUEST,
     DIALOG_ENDED, DIALOG_ENDED_ANSWERED, DIALOG_UNKNOWN,
 };
+pub use wire_crossing::SentBeforeBye;
 
 #[cfg(test)]
 mod tests;
