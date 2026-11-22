@@ -73,7 +73,7 @@ pub(super) fn admit(
         }
         Verdict::Absorbed(_) => build_200(req),
         Verdict::Terminated(_) => build_487(req),
-        Verdict::BadExtension(_, unsupported) => build_420(req, &unsupported, None),
+        Verdict::BadExtension(unsupported) => build_420(req, &unsupported, None),
         Verdict::OutOfOrder => build_bare_500(req),
         Verdict::NoDialog
         | Verdict::Pass(_)

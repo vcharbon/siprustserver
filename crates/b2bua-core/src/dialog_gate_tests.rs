@@ -348,18 +348,16 @@ fn requiring(req: SipRequest, require: &str) -> SipRequest {
         .expect("a request with one more header is complete")
 }
 
-/// What the gate's 420 names: the `Unsupported` it states, and the dialog it
-/// took the request in order on. `None` for any other verdict.
-fn refusal(verdict: &Verdict) -> Option<(String, Option<String>)> {
-    let Verdict::BadExtension(resolved, unsupported) = verdict else { return None };
-    Some((unsupported.to_wire(), resolved.dialog.as_ref().map(|d| d.our_tag.clone())))
+/// The `Unsupported` the gate's 420 states; `None` for any other verdict.
+fn refusal(verdict: &Verdict) -> Option<String> {
+    let Verdict::BadExtension(unsupported) = verdict else { return None };
+    Some(unsupported.to_wire())
 }
 
 /// Every method this stack carries in a dialog, on either face, requiring a
 /// tag it does not understand draws 420 naming only that tag (RFC 3261
-/// §8.2.2.3), taken in order on its dialog. A SUBSCRIBE or a PUBLISH, which
-/// it does not carry, reaches its rules' refusal first (§8.2.1); an ACK
-/// imposes nothing.
+/// §8.2.2.3). A SUBSCRIBE or a PUBLISH, which it does not carry, reaches its
+/// rules' refusal first (§8.2.1); an ACK imposes nothing.
 #[test]
 fn a_request_requiring_a_tag_not_understood_draws_420_naming_only_that_tag() {
     let call = call_with_ringing_callee();
@@ -374,13 +372,12 @@ fn a_request_requiring_a_tag_not_understood_draws_420_naming_only_that_tag() {
         Method::Update,
         Method::Refer,
     ];
-    let named = Some(("x-nonexistent".to_string(), Some("ours".to_string())));
     for leg in ["a", "b-1"] {
         for method in carried.clone() {
             let req = requiring(caller_request(method.clone(), 2), "replaces, x-nonexistent");
             let verdict = request_verdict(&call, leg, &req);
             assert_eq!(verdict.status(), Some(420), "{leg}: {method}");
-            assert_eq!(refusal(&verdict), named, "{leg}: {method}");
+            assert_eq!(refusal(&verdict).as_deref(), Some("x-nonexistent"), "{leg}: {method}");
         }
         for method in [Method::Subscribe, Method::Publish, Method::Ack] {
             let req = requiring(caller_request(method.clone(), 2), "x-nonexistent");
@@ -401,8 +398,7 @@ fn timer_is_understood_on_a_session_request_only() {
         assert!(matches!(request_verdict(&call, "a", &req), Verdict::Pass(_)), "{method}");
     }
     let info = requiring(caller_request(Method::Info, 2), "timer");
-    let refused = refusal(&request_verdict(&call, "a", &info)).map(|(tags, _)| tags);
-    assert_eq!(refused.as_deref(), Some("timer"));
+    assert_eq!(refusal(&request_verdict(&call, "a", &info)).as_deref(), Some("timer"));
 }
 
 /// A re-INVITE requiring `100rel` draws 420 naming it (RFC 3262 §3): the stack
@@ -411,8 +407,7 @@ fn timer_is_understood_on_a_session_request_only() {
 fn a_reinvite_requiring_100rel_draws_420_naming_it() {
     let call = call_with_caller_dialog(true);
     let reinvite = requiring(caller_request(Method::Invite, 2), "100rel");
-    let refused = refusal(&request_verdict(&call, "a", &reinvite)).map(|(tags, _)| tags);
-    assert_eq!(refused.as_deref(), Some("100rel"));
+    assert_eq!(refusal(&request_verdict(&call, "a", &reinvite)).as_deref(), Some("100rel"));
 }
 
 /// On a dialog this side is ending, the extension is refused before the

@@ -22,13 +22,15 @@
 //! ([`crate::rules::method_table`]) — a BYE crossing ours and a PRACK pass to
 //! their rules; an INFO, MESSAGE, NOTIFY or OPTIONS is answered 200 and goes
 //! no further; any other request, an INVITE, UPDATE, REFER or SUBSCRIBE among
-//! them, is answered 487 (§21.4.25). A request below its dialog's last CSeq
-//! draws 500 (§12.2.2); one the gate passes or answers sets that last CSeq
-//! ([`note_in_order`]). A request of a method this stack carries in a dialog
-//! that the gate would pass, absorb or terminate, and that requires an option
-//! tag this stack does not understand, draws 420 instead, naming those tags
-//! in `Unsupported` (§8.2.2.3, [`Verdict::BadExtension`]): nothing reaches
-//! the rules or the peer, and the dialog and its session stay as they were.
+//! them, is answered 487 (§21.4.25). Past the 481s, the §8.2 checks come
+//! before the dialog's CSeq order (§12.2.2): a request of a method this stack
+//! carries in a dialog that requires an option tag this stack does not
+//! understand draws 420, naming those tags in `Unsupported` (§8.2.2.3,
+//! [`Verdict::BadExtension`]), whatever its CSeq. Then a request below its
+//! dialog's last CSeq draws 500 (§12.2.2). A refusal changes no state (§8.2):
+//! nothing reaches the rules or the peer, and the dialog, its last CSeq and
+//! its session stay as they were. A request the gate passes, or answers 200
+//! or 487, sets that last CSeq ([`note_in_order`]).
 //! An ACK passes on a dialog a 2xx established, ended by
 //! a BYE since or not (RFC 5407 §2); it is never answered (§17.1.1.3), so one
 //! the gate refuses is dropped. An ACK naming an INVITE on its leg for which
@@ -73,8 +75,9 @@ pub enum Verdict {
     /// A request its ending dialog will not act on: 487 (§21.4.25).
     Terminated(Resolved),
     /// A request requiring option tags this stack does not understand: 420,
-    /// its `Unsupported` listing exactly those (§8.2.2.3).
-    BadExtension(Resolved, Unsupported),
+    /// its `Unsupported` listing exactly those (§8.2.2.3). It changes no state
+    /// of its dialog (§8.2).
+    BadExtension(Unsupported),
     /// An ACK naming no dialog that takes it: dropped unanswered (§17.1.1.3).
     Drop,
     /// An ACK of an INVITE the record holds no final sent for, on a call no
@@ -98,7 +101,7 @@ impl Verdict {
             Verdict::OutOfOrder => Some(500),
             Verdict::Absorbed(_) => Some(200),
             Verdict::Terminated(_) => Some(487),
-            Verdict::BadExtension(..) => Some(420),
+            Verdict::BadExtension(_) => Some(420),
             Verdict::Pass(_)
             | Verdict::Drop
             | Verdict::UnexplainedAck
@@ -107,15 +110,15 @@ impl Verdict {
         }
     }
 
-    /// The dialog a request the gate answers was taken in order on, if any.
+    /// The dialog a request the gate answers was taken in order on, if any:
+    /// a 200 or a 487 of its ending dialog's. A refusal is taken on none.
     pub fn in_order(&self) -> Option<&Resolved> {
         match self {
-            Verdict::Absorbed(resolved)
-            | Verdict::Terminated(resolved)
-            | Verdict::BadExtension(resolved, _) => Some(resolved),
+            Verdict::Absorbed(resolved) | Verdict::Terminated(resolved) => Some(resolved),
             Verdict::Pass(_)
             | Verdict::NoDialog
             | Verdict::OutOfOrder
+            | Verdict::BadExtension(_)
             | Verdict::Drop
             | Verdict::UnexplainedAck
             | Verdict::Stray
@@ -179,15 +182,14 @@ pub fn request_verdict(call: &Call, leg_id: &str, req: &SipRequest) -> Verdict {
         Admission::Refuse => return Verdict::NoDialog,
     };
     let Some(dialog) = dialog else { return Verdict::NoDialog };
+    if let Some(unsupported) = bad_extension(req) {
+        return Verdict::BadExtension(unsupported);
+    }
     let cseq = i64::from(req.cseq().seq());
     if *method != Method::Ack && dialog.peer_cseq.is_some_and(|last| cseq < last) {
         return Verdict::OutOfOrder;
     }
-    let resolved = Resolved { dialog: Some(dialog.id()), record: None };
-    match bad_extension(req) {
-        Some(unsupported) => Verdict::BadExtension(resolved, unsupported),
-        None => taken(resolved),
-    }
+    taken(Resolved { dialog: Some(dialog.id()), record: None })
 }
 
 /// The option tags `req` requires that this stack does not understand (RFC
