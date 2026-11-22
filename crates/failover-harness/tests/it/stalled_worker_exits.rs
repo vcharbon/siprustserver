@@ -68,7 +68,7 @@ const REFUTED_WITHIN: Duration = Duration::from_secs(1);
 
 /// The cluster on the production probe, read alive, one call established and
 /// one ringing on `b1`, both backed up on `b2`.
-async fn place_probed(name: &str) -> Placed {
+pub(crate) async fn place_probed(name: &str) -> Placed {
     let mut fh = FailoverHarness::new(name, &["b1", "b2"]);
     let alice = fh.agent("alice", ALICE).await;
     let bob = fh.agent("bob", BOB).await;

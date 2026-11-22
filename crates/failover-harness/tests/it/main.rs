@@ -124,6 +124,7 @@ mod round_the_primary_never_read;
 mod service_answer_deadline;
 mod setup_cancelled_during_its_decision;
 mod silent_replication_stream;
+mod slow_primary;
 mod spiral_takeover;
 mod split_dialog_sequence;
 mod split_proxy_views;

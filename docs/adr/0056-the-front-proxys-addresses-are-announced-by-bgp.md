@@ -2,7 +2,7 @@
 
 **Status:** accepted. Supersedes ADR-0012 D7, ADR-0015 D5, ADR-0046 D4 and the virtual-address
 check of ADR-0050 §11; amends ADR-0046 (a total backend outage), ADR-0009, ADR-0033 and
-ADR-0048.
+ADR-0048. Amended by ADR-0069 (§3: a `Slow` worker keeps the node ready and announced).
 
 The [appendix](appendix/0056-the-front-proxys-addresses-are-announced-by-bgp.md) holds the owning
 files, the full rules, the timing bounds and measurements, the lab and every residual.

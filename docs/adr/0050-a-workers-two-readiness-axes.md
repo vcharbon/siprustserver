@@ -1,6 +1,7 @@
 # A worker's two readiness axes: serving dialogs, accepting new calls
 
-**Status:** accepted.
+**Status:** accepted. Amended by ADR-0069 (§3 to §6 and §11: a worker answering late reads
+`Slow`, serves its dialogs and keeps the proxy ready).
 
 **Owner:** the worker's state in `crates/b2bua/src/repl/readiness.rs`, the proxy's view in
 `crates/sip-proxy/src/registry/` and `health/probe.rs`; the full list is in the

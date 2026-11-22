@@ -68,6 +68,7 @@ mod repl_wiring;
 mod replacement;
 mod rfc_audit;
 mod settle;
+mod signalling;
 mod strike;
 pub use proxy_sut::ProxySut;
 pub(crate) use repl_wiring::sync_level_from_env;
@@ -865,12 +866,8 @@ pub struct FailoverHarness {
     /// [`spawn_replacement`](Self::spawn_replacement) can stand a second
     /// incarnation of an ordinal up with the original's wiring.
     worker_specs: HashMap<String, WorkerSpec>,
-    /// SIP addresses cut off the signalling fabric: every send from or to one
-    /// of them fails at its endpoint, so the node is unreachable while its
-    /// process keeps running and keeps firing its own timers. Read by the
-    /// fabric's send-fault hook; written by
-    /// [`cut_signalling`](Self::cut_signalling).
-    sip_cut: Arc<Mutex<std::collections::BTreeSet<SocketAddr>>>,
+    /// The SIP addresses the signalling fabric cuts or holds.
+    sip_faults: signalling::SignallingFaults,
     /// The turn points of every call the cluster serves; every worker reports
     /// to it (ADR-0055 §13).
     turn_points: Arc<TurnPoints>,
@@ -948,17 +945,7 @@ impl FailoverHarness {
         // Every call's rule trace reaches a failing cell's dump.
         b2bua_harness::failure_view::trace_every_call();
         let clock = Clock::test_at(0);
-        // SIP plane: a recording harness with 1 ms transit (0 is coerced anyway).
-        let sip_cut: Arc<Mutex<std::collections::BTreeSet<SocketAddr>>> =
-            Arc::new(Mutex::new(std::collections::BTreeSet::new()));
-        let cut = sip_cut.clone();
-        let fault: sip_net_testkit::SendFault =
-            Arc::new(move |src: SocketAddr, dst: SocketAddr| {
-                let cut = cut.lock().unwrap();
-                (cut.contains(&src) || cut.contains(&dst))
-                    .then(|| format!("{src} is cut off the signalling fabric"))
-            });
-        let sip_net = sip_net_testkit::SimulatedSignalingNetwork::new(1).with_send_fault(fault);
+        let (sip_net, sip_faults) = signalling::SignallingFaults::fabric();
         let harness = Harness::with_simulated_network(name, sip_net.clone()).describe(
             "S10b goal-2 simulated failover: alice → proxy → 2 replicating b2buas \
              over the SIM SIP + SIM repl fabrics under one fake clock.",
@@ -1025,7 +1012,7 @@ impl FailoverHarness {
             worker_compose: b2bua::rules::ComposeOptions::default(),
             views: ViewLedger::new(clock.clone(), event_seq_for_views),
             worker_specs: HashMap::new(),
-            sip_cut,
+            sip_faults,
             turn_points: TurnPoints::stamped(capture_seq.clone()),
             callouts: crate::callouts::Callouts::new(capture_seq, clock.clone()),
         }
@@ -1377,23 +1364,6 @@ impl FailoverHarness {
             kind: kind.to_string(),
             detail: detail.to_string(),
         });
-    }
-
-    /// **Cut `addr` off the signalling fabric, both directions** — the node is
-    /// unreachable on the SIP plane while its process keeps running, keeps its
-    /// calls and keeps firing their timers. Every datagram it sends and every
-    /// datagram addressed to it fails at the sending endpoint, so nothing
-    /// crosses and nothing queues. The replication fabric is separate
-    /// ([`partition`](Self::partition)). Marker.
-    pub fn cut_signalling(&mut self, ordinal: &str, addr: SocketAddr) {
-        self.sip_cut.lock().unwrap().insert(addr);
-        self.mark(ordinal, None, "sip-partition", &format!("{addr} unreachable on the SIP plane"));
-    }
-
-    /// Restore a signalling cut. Marker.
-    pub fn restore_signalling(&mut self, ordinal: &str, addr: SocketAddr) {
-        self.sip_cut.lock().unwrap().remove(&addr);
-        self.mark(ordinal, None, "sip-heal", &format!("{addr} reachable again"));
     }
 
     /// **Begin a graceful drain of `node`** ([`B2buaCore::drain`]): latch
