@@ -26,14 +26,14 @@
 //! before the dialog's CSeq order (§12.2.2): a request of a method this stack
 //! carries in a dialog that requires an option tag this stack does not
 //! understand draws 420, naming those tags in `Unsupported` (§8.2.2.3,
-//! [`Verdict::BadExtension`]), whatever its CSeq. Then such a request below
-//! its dialog's last CSeq draws 500 (§12.2.2). A refusal changes no state
-//! (§8.2): nothing reaches the rules or the peer, and the dialog, its last
-//! CSeq and its session stay as they were. Such a request the gate passes, or
-//! answers 200 or 487, sets that last CSeq ([`note_in_order`]). A request of
-//! a method this stack carries in no dialog, which it only ever refuses (405
-//! or 489, §8.2.1; 487 on an ending dialog), is held to no order and sets
-//! nothing.
+//! [`Verdict::BadExtension`]), whatever its CSeq. Then a request of such a
+//! method below its dialog's last CSeq draws 500 (§12.2.2). A refusal changes
+//! no state (§8.2): nothing reaches the rules or the peer, and the dialog, its
+//! last CSeq and its session stay as they were. A request of such a method
+//! the gate passes, or answers 200 or 487, sets that last CSeq
+//! ([`note_in_order`]). A request of a method this stack carries in no
+//! dialog, which it only ever refuses (405 or 489, §8.2.1; 487 on an ending
+//! dialog), is held to no order and sets nothing.
 //! An ACK passes on a dialog a 2xx established, ended by
 //! a BYE since or not (RFC 5407 §2); it is never answered (§17.1.1.3), so one
 //! the gate refuses is dropped. An ACK naming an INVITE on its leg for which
@@ -238,7 +238,7 @@ fn names_losing_fork(dialog: Option<&Dialog>, method: &Method) -> bool {
 /// Note the request the gate passed or answered in order on the dialog it
 /// names: its CSeq becomes that dialog's remote sequence number (RFC 3261
 /// §12.2.2). An ACK numbers nothing (§13.2.2.4), nor does a method this stack
-/// carries in no dialog, which its rules refuse (§8.2.1).
+/// carries in no dialog, which it only ever refuses (§8.2.1).
 pub fn note_in_order(call: &mut Call, leg_id: &str, resolved: &Resolved, event: &CallEvent) {
     let CallEvent::Sip { message, .. } = event else { return };
     let (SipMessage::Request(req), Some(dialog)) = (message.as_ref(), &resolved.dialog) else {
