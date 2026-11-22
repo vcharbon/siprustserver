@@ -15,9 +15,12 @@
 //!
 //! `CALLFUZZ_DROP` and `CALLFUZZ_LATE` (percent of datagrams, default 0) put
 //! the call on a lossy network ([`faults`]); a call replays with its faults,
-//! which its draw counts.
+//! which its draw counts. A call one of whose requests a later one overtook
+//! after a loss, refused 500 for it, may miss its drawn ending; the other
+//! nets judge it still ([`overtaken`]).
 
 mod faults;
+mod overtaken;
 
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
@@ -54,6 +57,8 @@ fn cell_of(seed: u64) -> generator::Cell {
 
 /// Drive the call of `token` to its end and run every net over it; a failure
 /// panics with why, naming the model invariant a SUT turn broke first. A
+/// scenario that missed its ending after an overtaken request's 500 fails no
+/// further than the nets after it say. A
 /// transfer cell's parties hold their answers but never refuse: a refused
 /// realign rolls the transfer back, an ending no transfer stage states.
 async fn run_call(config: FuzzConfig, token: &str, cell: generator::Cell, net: Harness) {
@@ -79,9 +84,11 @@ async fn run_call(config: FuzzConfig, token: &str, cell: generator::Cell, net: H
     );
     if let ScenarioVerdict::Failure { at, cause } = run_actor_collecting(&wrap, &env).await {
         let broken = model_gate::first_violation(since)
-            .map(|b| format!("red because {}; then ", b.lines().next().unwrap_or_default()))
-            .unwrap_or_default();
-        panic!("{broken}failed at {at}: {cause:?}");
+            .map(|b| format!("red because {}; then ", b.lines().next().unwrap_or_default()));
+        let events = scene.h.recording().channel().snapshot();
+        if broken.is_some() || !overtaken::refused_after_being_overtaken(&events) {
+            panic!("{}failed at {at}: {cause:?}", broken.unwrap_or_default());
+        }
     }
     let report = scene.finish().await;
     assert!(report.passed(), "the RFC audit failed");
