@@ -5,7 +5,9 @@
  * left to the drop's own signal instead of refusing it. A drop refused as in
  * use (SQLSTATE 55006) is retried; any other refusal is final.
  */
+import * as Cause from "effect/Cause"
 import * as Effect from "effect/Effect"
+import * as Exit from "effect/Exit"
 import { SqlClient } from "effect/unstable/sql/SqlClient"
 import { SqlError, SqlSyntaxError, UnknownError } from "effect/unstable/sql/SqlError"
 import { describe, expect, it } from "vitest"
@@ -36,8 +38,11 @@ describe("Client.inUse", () => {
 
 const SCRATCH = await Server.scratch("store_drop_database_test")
 
-/** Resolves once a session on `database` runs a `pg_sleep`. */
-const sleepingOn = async (database: string): Promise<void> => {
+/**
+ * Resolves once a session on `database` runs a `pg_sleep`; rejects as soon as
+ * `ended` names that session's end before it, saying how it ended.
+ */
+const sleepingOn = async (database: string, ended: () => string | undefined): Promise<void> => {
   const held = await Server.on(
     "postgres",
     Effect.flatMap(SqlClient, (sql) =>
@@ -45,8 +50,10 @@ const sleepingOn = async (database: string): Promise<void> => {
         WHERE datname = ${database} AND state = 'active' AND query LIKE '%pg_sleep%'`)
   )
   if (held[0]!.n > 0) return
+  const how = ended()
+  if (how !== undefined) throw new Error(`the held session ${how} before it slept on ${database}`)
   await new Promise((resolve) => setTimeout(resolve, 25))
-  return sleepingOn(database)
+  return sleepingOn(database, ended)
 }
 
 describe.skipIf(!Server.served)("Client.dropDatabase", () => {
@@ -58,7 +65,11 @@ describe.skipIf(!Server.served)("Client.dropDatabase", () => {
         yield* sql`SELECT pg_sleep(3600)`
       }).pipe(Effect.provide(Client.layerFromUrl(Server.urlFor(SCRATCH))), Effect.exit)
     )
-    await sleepingOn(SCRATCH)
+    let how: string | undefined
+    void held.then((exit) => {
+      how = Exit.isSuccess(exit) ? "succeeded" : `failed: ${Cause.pretty(exit.cause)}`
+    })
+    await sleepingOn(SCRATCH, () => how)
     await Server.drop(SCRATCH)
     const left = await Server.on(
       "postgres",

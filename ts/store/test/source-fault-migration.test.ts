@@ -80,5 +80,5 @@ describe.skipIf(!served)("the source-fault migration", () => {
         const viewed = yield* sql<{ error_source: unknown }>`SELECT error_source FROM run_cells`
         expect(viewed).toEqual([{ error_source: source }])
       })
-    ), 60_000)
+    ))
 })
