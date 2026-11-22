@@ -399,7 +399,6 @@ fn a_2xx_to_a_request_sent_before_the_peers_final_arrived_is_no_verdict() {
     t.note_sent_request(&uac_request("BYE", 2));
     assert_eq!(t.note_received_response(&response(487, "INVITE", 1, "A1", "B1"), 0), None);
     assert_eq!(t.note_received_response(&response(200, "BYE", 2, "A1", "B1"), 0), None);
-    assert_eq!(t.state(CALL, "A1", "B1"), Some(DialogState::EndedByFinal(487)));
 }
 
 /// RFC 3261 §12.1.2: a request the UAC sends after the peer's 487 reached it

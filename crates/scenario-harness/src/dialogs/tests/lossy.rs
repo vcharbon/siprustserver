@@ -88,20 +88,46 @@ fn a_skip_over_numbers_no_loss_accounts_for_is_a_finding() {
     assert_eq!(v.kind, VerdictKind::CseqSkip { cseq: 5, last: 1 });
 }
 
+/// The wire record's answer to whether a request reached the peer before the
+/// final that ended its dialog, asserting it is asked of `method` numbered
+/// `cseq` and of `end`.
+fn wire_says(ahead: Option<bool>, cseq: u32, method: &'static str, end: DialogEnd) -> AheadOfFinal {
+    AheadOfFinal::new(move |answer, asked| {
+        let of = (answer.cseq().seq(), answer.cseq().method().as_str(), asked);
+        assert_eq!(of, (cseq, method, end), "the request and the final that ended its dialog");
+        ahead
+    })
+}
+
 /// The wire record, not the UAS's send order, tells whether its INFO reached
 /// the caller ahead of its 487 (RFC 3261 §17.1.2.2): an INFO sent before the
 /// final whose copies ahead of it were all lost reached the caller behind it,
-/// and the 200 to it is a verdict; one the record shows ahead draws none.
+/// and the 200 to it is a verdict; one the record shows ahead draws none, and
+/// where the record shows no copy delivered the send order tells.
 #[test]
 fn the_wire_record_tells_whether_the_uas_request_reached_ahead_of_its_final() {
-    for ahead in [false, true] {
+    let own = DialogEnd { ending: Ending::Final { invite_cseq: 1, status: 487 }, by_peer: false };
+    for (ahead, verdict) in [(Some(false), true), (Some(true), false), (None, false)] {
         let mut t = refused_after_its_own_info();
-        t.set_ahead_of_final(AheadOfFinal::new(move |answer, invite_cseq, status| {
-            let asked = (answer.cseq().seq(), answer.cseq().method().as_str(), invite_cseq, status);
-            assert_eq!(asked, (1, "INFO", 1, 487), "the INFO and the final that ended its dialog");
-            ahead
-        }));
-        let verdict = (!ahead).then_some(VerdictKind::EndedAnswered { status: 200, by: 487 });
-        assert_eq!(kind(t.note_received_response(&info_ok(), 0)), verdict, "ahead: {ahead}");
+        t.set_ahead_of_final(wire_says(ahead, 1, "INFO", own));
+        let verdict = verdict.then_some(VerdictKind::EndedAnswered { status: 200, by: 487 });
+        assert_eq!(kind(t.note_received_response(&info_ok(), 0)), verdict, "ahead: {ahead:?}");
+    }
+}
+
+/// The same on the peer's own 487: a BYE the UAC sent before that final
+/// reached it draws a verdict on its 200 only when the record shows it
+/// arrived after the peer sent the final.
+#[test]
+fn the_wire_record_tells_whether_the_uacs_request_reached_the_peer_before_its_final() {
+    let peers = DialogEnd { ending: Ending::Final { invite_cseq: 1, status: 487 }, by_peer: true };
+    for (ahead, verdict) in [(Some(false), true), (Some(true), false), (None, false)] {
+        let mut t = ringing_uac();
+        t.set_ahead_of_final(wire_says(ahead, 2, "BYE", peers));
+        t.note_sent_request(&uac_request("BYE", 2));
+        assert_eq!(t.note_received_response(&response(487, "INVITE", 1, "A1", "B1"), 0), None);
+        let ok = response(200, "BYE", 2, "A1", "B1");
+        let verdict = verdict.then_some(VerdictKind::EndedAnswered { status: 200, by: 487 });
+        assert_eq!(kind(t.note_received_response(&ok, 0)), verdict, "ahead: {ahead:?}");
     }
 }

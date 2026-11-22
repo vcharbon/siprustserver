@@ -1,44 +1,48 @@
-//! What the wire record shows of a request a UA sent on an early dialog its
-//! own non-2xx final then ended: whether a copy of it reached the peer ahead
-//! of that final (RFC 3261 §12.3, §17.1.2.2). The UA's table knows only the
-//! first copy it sent, so on a run that declares a loss model, where that copy
-//! may be lost and a retransmission taken instead, it reads the fact from the
-//! run's recording.
+//! What the wire record shows of a request a UA sent on an early dialog a
+//! non-2xx final then ended: whether a copy of it reached the peer before
+//! that final took effect there, the UA's own final arriving at the peer or
+//! the peer sending its own (RFC 3261 §12.3, §17.1.2.2). The UA's table knows
+//! only the first copy it sent and its own send order, so on a run that
+//! declares a loss model, whose fabric loses and holds copies, it reads the
+//! fact from the run's recording.
 
 use std::sync::Arc;
 
 use layer_harness::{Channel, Stamped};
 use sip_message::sniff::{self, Identity};
 use sip_message::SipResponse;
+use sip_net::RecvDisposition;
 use sip_net_testkit::SignalingNetworkEvent;
 
-use super::wire_loss::send_lost;
+use super::wire_crossing::{DialogEnd, Ending};
 
-/// Whether the request a 2xx answers reached its receiver ahead of the
-/// sender's own non-2xx final to the INVITE numbered `invite_cseq`.
+/// Whether the request a 2xx answers reached its receiver before the final
+/// that ended its dialog took effect there; `None` when the record shows no
+/// copy of it delivered.
 #[derive(Clone)]
 pub struct AheadOfFinal(Arc<Ahead>);
 
-/// The fact of a 2xx, the INVITE's number and the final's status.
-type Ahead = dyn Fn(&SipResponse, u32, u16) -> bool + Send + Sync;
+/// The fact of a 2xx and the end of its dialog.
+type Ahead = dyn Fn(&SipResponse, DialogEnd) -> Option<bool> + Send + Sync;
 
 impl AheadOfFinal {
     /// The fact as `ahead` states it.
-    pub fn new(ahead: impl Fn(&SipResponse, u32, u16) -> bool + Send + Sync + 'static) -> Self {
+    pub fn new(
+        ahead: impl Fn(&SipResponse, DialogEnd) -> Option<bool> + Send + Sync + 'static,
+    ) -> Self {
         AheadOfFinal(Arc::new(ahead))
     }
 
     /// The fact as the run's recording `channel` shows it at each call.
     pub fn from_wire(channel: Channel<SignalingNetworkEvent>) -> Self {
-        Self::new(move |answer, invite_cseq, status| {
-            reached_ahead(&channel.snapshot(), answer, invite_cseq, status)
-        })
+        Self::new(move |answer, end| reached_ahead(&channel.snapshot(), answer, end))
     }
 
-    /// Whether the request `answer` answers reached its receiver ahead of the
-    /// `status` final its sender sent to the INVITE numbered `invite_cseq`.
-    pub fn holds(&self, answer: &SipResponse, invite_cseq: u32, status: u16) -> bool {
-        (self.0)(answer, invite_cseq, status)
+    /// Whether the request `answer` answers reached its receiver before the
+    /// final `end` of its dialog took effect there; `None` when the record
+    /// shows no copy of it delivered, or `end` is no final.
+    pub fn holds(&self, answer: &SipResponse, end: DialogEnd) -> Option<bool> {
+        (self.0)(answer, end)
     }
 }
 
@@ -48,17 +52,19 @@ impl std::fmt::Debug for AheadOfFinal {
     }
 }
 
-/// The recorded events, in record order: the lane of the first `SendCalled`
-/// of the request `answer` answers (its Call-ID, CSeq, method and top-Via
-/// branch) sends a copy of it the network delivers before that lane's first
-/// delivered copy of the final. A lane's datagrams reach their receiver in
-/// the order it sent them, so that copy was taken while the dialog lived.
+/// The recorded events, in record order: the lane the first delivered copy
+/// of the request `answer` answers arrived on (its Call-ID, CSeq, method and
+/// top-Via branch: the UA's own copy, not one a hop relayed) is the
+/// receiver's, and that copy arrived before the final took effect there: the
+/// first delivered copy of the UA's own final arriving on that lane, or that
+/// lane first sending the peer's own final, lost or not. An arrival is its
+/// `RecvItem` at delivery, so a copy the fabric held arrives when it lands.
 fn reached_ahead(
     events: &[Stamped<SignalingNetworkEvent>],
     answer: &SipResponse,
-    invite_cseq: u32,
-    status: u16,
-) -> bool {
+    end: DialogEnd,
+) -> Option<bool> {
+    let Ending::Final { invite_cseq, status } = end.ending else { return None };
     let call_id = answer.call_id().as_str();
     let cseq = answer.cseq().seq();
     let method = answer.cseq().method().as_str();
@@ -75,22 +81,31 @@ fn reached_ahead(
             && id.cseq == Some(invite_cseq)
             && id.call_id == Some(call_id)
     };
-    let sent = |i: usize| match &events[i].event {
-        SignalingNetworkEvent::SendCalled { bind_key, msg, .. } => {
-            Some((bind_key, sniff::identity(msg)))
+    let (arrived_at, lane) = events.iter().enumerate().find_map(|(i, s)| {
+        arrival(s).filter(|(_, id)| is_request(id)).map(|(lane, _)| (i, lane))
+    })?;
+    let in_effect = events.iter().position(|s| match (&s.event, end.by_peer) {
+        (SignalingNetworkEvent::SendCalled { bind_key, msg, .. }, true) => {
+            bind_key == lane && is_final(&sniff::identity(msg))
         }
+        (_, false) => arrival(s).is_some_and(|(at, id)| at == lane && is_final(&id)),
+        _ => false,
+    });
+    Some(in_effect.is_none_or(|at| arrived_at < at))
+}
+
+/// The lane and the identity of `s` when it is a datagram delivered into its
+/// endpoint's inbox.
+fn arrival(s: &Stamped<SignalingNetworkEvent>) -> Option<(&str, Identity<'_>)> {
+    match &s.event {
+        SignalingNetworkEvent::RecvItem {
+            bind_key,
+            packet,
+            disposition: RecvDisposition::Delivered,
+            ..
+        } => Some((bind_key.as_str(), sniff::identity(&packet.raw))),
         _ => None,
-    };
-    let Some(lane) =
-        (0..events.len()).filter_map(sent).find(|(_, id)| is_request(id)).map(|(lane, _)| lane)
-    else {
-        return false;
-    };
-    let delivered = |i: usize, of: &dyn Fn(&Identity<'_>) -> bool| {
-        sent(i).is_some_and(|(at, id)| at == lane && of(&id)) && !send_lost(events, i)
-    };
-    let final_at = (0..events.len()).find(|&i| delivered(i, &is_final)).unwrap_or(events.len());
-    (0..final_at).any(|i| delivered(i, &is_request))
+    }
 }
 
 #[cfg(test)]

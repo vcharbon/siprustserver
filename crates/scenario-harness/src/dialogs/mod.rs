@@ -13,7 +13,8 @@
 //! - `wire_loss` — [`LostOnTheWay`]: what the run's recording shows of the
 //!   requests the network lost on their way to the UA.
 //! - `wire_ahead` — [`AheadOfFinal`]: what the run's recording shows of a
-//!   request the UA sent reaching the peer ahead of the UA's own final.
+//!   request the UA sent reaching the peer before the final that ended its
+//!   dialog took effect there.
 //!
 //! Two requests on an ended dialog draw no verdict:
 //! - a PRACK on an early dialog a non-2xx final ended (RFC 3262 §3);
@@ -23,12 +24,16 @@
 //! draws a 481 that is a finding only of a rule it broke on the early dialog
 //! ([`VerdictKind::Crossed`]), until the caller's own ACK of that final, or a
 //! new INVITE of the caller, reached the UA (RFC 3261 §17.2.1): till then it
-//! may cross the final. A 2xx to a request the UA sent on that dialog is a
-//! `dialog-ended-answered` finding only when the request reached the peer
-//! behind the final, whenever the 2xx arrives: the peer took one ahead of it
-//! on the live dialog (§12.3). Each side's messages are taken to reach the
-//! other in the order it sent them; on a run that declares a loss model, the
-//! wire record shows which copy of the UA's request reached the peer.
+//! may cross the final.
+//!
+//! On an early dialog a non-2xx final of either side ended, a 2xx to a
+//! request the UA sent is a `dialog-ended-answered` finding only when the
+//! request reached the peer after the final took effect there, the UA's own
+//! final arriving or the peer sending its own, whenever the 2xx arrives: the
+//! peer took one before on the live dialog (§12.3). The UA's messages are
+//! taken to reach the peer in the order it sent them, so one it sent before
+//! its own final, or before the peer's reached it, was so taken; on a run
+//! that declares a loss model, the wire record shows when a copy arrived.
 //!
 //! On a run that declares a loss model, on a dialog a final or a BYE ended,
 //! whichever side sent it, a request of the peer draws a 481 that is a

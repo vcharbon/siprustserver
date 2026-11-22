@@ -11,8 +11,9 @@ impl Harness {
     /// [`finish`](Self::finish). On a fabric that runs a loss model it reads
     /// from the recording the losses that explain a CSeq out of sequence,
     /// the requests that crossed the final or the BYE that ended their
-    /// dialog, and the requests of the UA that reached the peer ahead of its
-    /// own final; on any other run no loss explains a verdict.
+    /// dialog, and the requests of the UA that reached the peer before the
+    /// final ending their dialog took effect there; on any other run no loss
+    /// explains a verdict.
     pub(crate) fn dialog_judge(&self, party: &str) -> Arc<DialogJudge> {
         let mut judge = DialogJudge::harnessed(party, self.dialog_opt_ins.clone());
         if self.lossy {

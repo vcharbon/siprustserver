@@ -9,10 +9,11 @@
 //! legal past that BYE (RFC 5057 §5.2). A non-2xx final the UA sent makes the
 //! peer's requests on the dialog findings only once the peer shows it saw
 //! that final; till then the UA still refuses them, and judges them as on the
-//! early dialog. It makes a 2xx to a request the UA sent on the dialog a
-//! finding only when that request reached the peer behind the final: by the
-//! UA's send order, or, on a run that declares a loss model, as the wire
-//! record shows it ([`AheadOfFinal`]). A request reaching a dialog a BYE or a
+//! early dialog. A non-2xx final of either side makes a 2xx to a request the
+//! UA sent on the dialog a finding only when that request reached the peer
+//! after the final took effect there: by the UA's send order, or, on a run
+//! that declares a loss model, as the wire record shows it
+//! ([`AheadOfFinal`]). A request reaching a dialog a BYE or a
 //! final ended, whichever side sent it, is a finding unless, on a run that
 //! declares a loss model, the wire record shows it a retransmission whose
 //! lost first copy left before its sender knew of that end
@@ -133,7 +134,8 @@ struct Dialog {
     /// The `(CSeq, method)` of every request the UA first sent on it while it
     /// was early or confirmed. The UA's messages are taken to reach the peer
     /// in the order it sent them, so each reached the peer ahead of a final
-    /// the UA sent after it.
+    /// the UA sent after it, and may have reached it before it sent a final
+    /// that reached the UA after it.
     sent_live: BTreeSet<(u32, String)>,
     /// Whether the UA, as UAS, ended it early with a non-2xx final the peer
     /// has not provably seen (one the final opens is seen with its tag):
@@ -176,8 +178,9 @@ pub struct DialogTable {
     /// a CSeq out of the remote sequence.
     lost_on_the_way: Option<LostOnTheWay>,
     /// What the wire record shows of a request the UA sent reaching the peer
-    /// ahead of the UA's own final, on a run that declares a loss model; with
-    /// none, the UA's send order (`Dialog::sent_live`) tells.
+    /// before the final that ended its dialog took effect there, on a run
+    /// that declares a loss model; with none, or where the record shows no
+    /// copy delivered, the UA's send order (`Dialog::sent_live`) tells.
     ahead_of_final: Option<AheadOfFinal>,
 }
 
@@ -227,8 +230,9 @@ impl DialogTable {
         self.lost_on_the_way = Some(wire);
     }
 
-    /// Read from `wire` whether a request the UA sent reached the peer ahead
-    /// of the UA's own final, in place of the UA's send order.
+    /// Read from `wire` whether a request the UA sent reached the peer before
+    /// the final that ended its dialog took effect there, in place of the
+    /// UA's send order.
     pub fn set_ahead_of_final(&mut self, wire: AheadOfFinal) {
         self.ahead_of_final = Some(wire);
     }
@@ -342,10 +346,12 @@ impl DialogTable {
     /// judge it: `Some` when it is a 2xx to an in-dialog request the UA sent
     /// on a dialog a non-2xx final ended by the time it arrives (RFC 3261
     /// §12.1.2: that dialog is gone, so nothing on it is answered 2xx). A
-    /// PRACK is excepted (RFC 3262 §3), and a CANCEL is hop-by-hop. A final
-    /// the UA sent ends the dialog for this judgement only for a request that
-    /// reached the peer behind it (`DialogTable::reached_ahead`), and a repeat of
-    /// a 2xx already taken on the dialog is not judged again.
+    /// PRACK is excepted (RFC 3262 §3), and a CANCEL is hop-by-hop. The final
+    /// ends the dialog for this judgement only for a request that reached the
+    /// peer after it took effect there, the UA's own final arriving or the
+    /// peer sending its own (`DialogTable::reached_ahead`): one the peer took
+    /// before met a live dialog (§12.3). A repeat of a 2xx already taken on
+    /// the dialog is not judged again.
     pub fn note_received_response(
         &mut self,
         response: &SipResponse,
@@ -412,23 +418,23 @@ impl DialogTable {
     }
 
     /// Whether the request `answer` answers on `dialog` reached the peer
-    /// ahead of the UA's own non-2xx final that ended the dialog: on a run
-    /// that declares a loss model as the wire record shows it
-    /// ([`AheadOfFinal`]), else by the UA's send order (`Dialog::sent_live`).
-    /// `false` on a dialog no final of the UA's ended.
+    /// before the non-2xx final that ended the dialog took effect there: on a
+    /// run that declares a loss model as the wire record shows it
+    /// ([`AheadOfFinal`]), else, or where the record shows no copy
+    /// delivered, by the UA's send order (`Dialog::sent_live`). `false` on a
+    /// dialog no final ended.
     fn reached_ahead(&self, dialog: &Dialog, answer: &SipResponse) -> bool {
-        let Some(DialogEnd { ending: Ending::Final { invite_cseq, status }, by_peer: false }) =
-            dialog.end
-        else {
+        let Some(end @ DialogEnd { ending: Ending::Final { .. }, .. }) = dialog.end else {
             return false;
         };
-        match &self.ahead_of_final {
-            Some(wire) => wire.holds(answer, invite_cseq, status),
-            None => {
-                let cseq = answer.cseq();
-                dialog.sent_live.contains(&(cseq.seq(), cseq.method().as_str().to_string()))
-            }
-        }
+        let sent_live = || {
+            let cseq = answer.cseq();
+            dialog.sent_live.contains(&(cseq.seq(), cseq.method().as_str().to_string()))
+        };
+        self.ahead_of_final
+            .as_ref()
+            .and_then(|wire| wire.holds(answer, end))
+            .unwrap_or_else(sent_live)
     }
 
     /// A response to an initial INVITE, sent or received under the dialog ID

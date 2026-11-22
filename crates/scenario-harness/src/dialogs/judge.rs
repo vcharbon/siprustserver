@@ -89,8 +89,9 @@ impl DialogJudge {
     /// This judge, its table reading from the wire record which requests the
     /// network lost on their way to the UA (`lost`), whether a request
     /// reaching a dialog a final or a BYE ended crossed that end (`crossed`),
-    /// and whether a request the UA sent reached the peer ahead of the UA's
-    /// own final (`ahead`): the judge of a run that declares a loss model.
+    /// and whether a request the UA sent reached the peer before the final
+    /// that ended its dialog took effect there (`ahead`): the judge of a run
+    /// that declares a loss model.
     pub fn explaining_losses(
         mut self,
         lost: LostOnTheWay,
