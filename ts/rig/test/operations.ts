@@ -42,6 +42,13 @@ export const HANGING_INJECT_S = 5
  */
 export const STALLING_PROBE_S = 5
 
+/**
+ * The `probe_interval_s` of `never-recovers`, far past its `probe_s` of 60: an
+ * attempt ends on its probe's first "not yet", the next call being due past
+ * the bound; one that slept the interval instead would outlast the test.
+ */
+const NEVER_RECOVERS_INTERVAL_S = 3600
+
 /** Every sample operation, as one rig path's files. */
 export const SAMPLES: Readonly<Record<string, Entry>> = {
   ...operation("first", {}),
@@ -64,7 +71,7 @@ export const SAMPLES: Readonly<Record<string, Entry>> = {
   ...operation("late-recovery", {
     probe: traced("probe late-recovery", `n=$(cat "$SIPRIG_STATE/probes" 2>/dev/null || echo 0)\necho $((n+1)) > "$SIPRIG_STATE/probes"\n[ "$n" -ge 2 ] && exit 0\nexit 75`)
   }, `[timeouts]\nprobe_s = 60\nprobe_interval_s = 0.05`),
-  ...operation("never-recovers", { probe: traced("probe never-recovers", "exit 75") }, `[timeouts]\nprobe_s = 60\nprobe_interval_s = 120`),
+  ...operation("never-recovers", { probe: traced("probe never-recovers", "exit 75") }, `[timeouts]\nprobe_s = 60\nprobe_interval_s = ${NEVER_RECOVERS_INTERVAL_S}`),
   ...operation("hanging-probe", { probe: traced("probe hanging-probe", "exec sleep 3600") }, `[timeouts]\nprobe_s = 0.5`),
   ...operation("stalls-after-not-yet", {
     probe: traced("probe stalls-after-not-yet", `[ -e "$SIPRIG_STATE/asked" ] && rm "$SIPRIG_STATE/asked" && exec sleep 3600\ntouch "$SIPRIG_STATE/asked"\nexit 75`)

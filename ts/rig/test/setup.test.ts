@@ -18,6 +18,7 @@ import type * as Lanes from "../src/lanes.js"
 import type * as OperationRun from "../src/operation-run.js"
 import * as RigPath from "../src/rig-path.js"
 import * as Setup from "../src/setup.js"
+import { gone } from "./collectors.js"
 import { HANGING_INJECT_S, laneOf, SAMPLES, STALLING_PROBE_S, traceOf } from "./operations.js"
 import { run, tree } from "./tree.js"
 
@@ -129,7 +130,7 @@ describe("a job's setup", () => {
     const timedOut = `inject timed out after ${HANGING_INJECT_S * 1000} ms`
     expect(Exit.isFailure(exit) && String(exit.cause)).toContain(timedOut)
     const sleeper = Number(fs.readFileSync(path.join(planned[0]!.dir, "state", "sleeper"), "utf8"))
-    expect(() => process.kill(sleeper, 0)).toThrow()
+    await gone(sleeper)
     expect(events.find((event) => event.phase === "failed")?.message).toMatch(new RegExp(`^${timedOut}, its log .*inject\\.log$`))
     expect(traceOf(root)).toEqual(["inject hanging-inject", "heal hanging-inject"])
   })
