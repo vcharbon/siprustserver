@@ -151,6 +151,7 @@ mod options_overload_refusal;
 mod options_queue_delay;
 mod orphan_reject_no_leak;
 mod overflow_teardown;
+mod overtaken_after_a_loss;
 mod overtaken_require_refusal;
 mod overtaken_unrelayable_request;
 mod own_answer_past_bounds;
