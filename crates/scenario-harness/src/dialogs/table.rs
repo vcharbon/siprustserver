@@ -8,8 +8,8 @@
 //! its final (§15); a subscription the UA opened on it keeps its NOTIFYs
 //! legal past that BYE (RFC 5057 §5.2). A non-2xx final the UA sent makes the
 //! peer's requests and 2xx answers on the dialog findings only once the peer
-//! shows it saw that final; till then the UA still refuses its requests. It
-//! keeps the last remote CSeq: as UAS
+//! shows it saw that final; till then the UA still refuses its requests, and
+//! judges them as on the early dialog. It keeps the last remote CSeq: as UAS
 //! it starts at the initial INVITE's CSeq, as UAC it is empty until the peer's
 //! first request (§12.1.1, §12.1.2).
 
@@ -90,7 +90,8 @@ struct Invite {
     answered_at_us: Option<u64>,
     /// How many Via entries it carried as the UA received it; `None` for one
     /// the UA sent. The caller's ACK of a non-2xx final arrives with as many
-    /// (RFC 3261 §17.1.1.3, §16.6 step 8), a hop's own ACK of it with one.
+    /// (RFC 3261 §17.1.1.3, §16.6 step 8), a hop's own ACK of it with one
+    /// fewer at least.
     received_vias: Option<usize>,
 }
 
@@ -419,8 +420,9 @@ impl DialogTable {
     /// dialog the UA holds, a dialog that ended (a PRACK excepted on a dialog
     /// a non-2xx final ended), or a CSeq out of the remote sequence (RFC 3261
     /// §12.2.2). One on a dialog the UA's own final ended before the peer
-    /// provably saw it is a [`VerdictKind::CrossedFinal`], refused and no
-    /// finding (`Dialog::final_unseen`). A request with no To-tag is out of
+    /// provably saw it is a [`VerdictKind::CrossedFinal`], refused, judged as
+    /// on the still early dialog and a finding only of a rule it broke there
+    /// (`Dialog::final_unseen`). A request with no To-tag is out of
     /// dialog and only teaches the table an initial INVITE. An ACK or a
     /// CANCEL carries its INVITE's number, so only its dialog is judged, and
     /// a retransmission of a request already taken is not judged again. The
@@ -479,57 +481,74 @@ impl DialogTable {
         if !sequenced || dialog.received.contains(&txn) {
             return None;
         }
-        let abandoned = dialog.state == DialogState::Early
-            && self.invites.get(&dialog.invite).and_then(|i| i.answered_at_us).is_some_and(|at| {
-                now_us > at.saturating_add(EARLY_DIALOG_WINDOW_US)
-                    || matches!(method.as_str(), "BYE" | "INVITE")
-            });
         let state = dialog.state;
         let final_unseen = dialog.final_unseen;
-        let last = dialog.remote_cseq;
-        let role = dialog.invite.role;
         let subscribed = method == "NOTIFY" && dialog.subscriptions > 0;
         let dialog = self.dialogs.get_mut(&id).expect("looked up above");
         dialog.received.insert(txn);
         if subscribed && notify_terminates(request) {
             dialog.subscriptions -= 1;
         }
-        match state {
+        let crossing = match state {
             // A NOTIFY of a subscription the UA opened outlives the BYE that
             // ended the invite usage (RFC 5057 §5.2).
-            DialogState::EndedByBye if subscribed => {}
+            DialogState::EndedByBye if subscribed => None,
             // A PRACK names a reliable provisional, and its transaction does
             // not end with the INVITE's (RFC 3262 §3, §4): one owed before the
             // final may follow it.
-            DialogState::EndedByFinal(_) if method == "PRACK" => {}
-            DialogState::EndedByFinal(by) if final_unseen => {
-                return Some(verdict(VerdictKind::CrossedFinal { by }))
-            }
+            DialogState::EndedByFinal(_) if method == "PRACK" => None,
+            DialogState::EndedByFinal(by) if final_unseen => Some(by),
             DialogState::EndedByFinal(status) => {
                 return Some(verdict(VerdictKind::Ended { by: Some(status) }))
             }
             DialogState::EndedByBye => return Some(verdict(VerdictKind::Ended { by: None })),
-            DialogState::Early | DialogState::Confirmed => {}
+            DialogState::Early | DialogState::Confirmed => None,
+        };
+        let early = state == DialogState::Early || crossing.is_some();
+        let broke = self.judge_in_sequence(&id, &method, cseq, early, now_us);
+        match crossing {
+            Some(by) => Some(verdict(VerdictKind::CrossedFinal { by, broke: broke.map(Box::new) })),
+            None => broke.map(verdict),
         }
+    }
+
+    /// The rule a request numbered `cseq` on the dialog `id` breaks, judged
+    /// as on an early dialog when `early`: an early dialog another branch's
+    /// 2xx abandoned (§13.2.2.4), a re-INVITE on an early dialog (§14.1: its
+    /// INVITE is in progress), a callee's BYE on one (§15), a CSeq out of the
+    /// remote sequence (§12.2.2). A CSeq not going backwards becomes the last
+    /// remote CSeq.
+    fn judge_in_sequence(
+        &mut self,
+        id: &DialogId,
+        method: &str,
+        cseq: u32,
+        early: bool,
+        now_us: u64,
+    ) -> Option<VerdictKind> {
+        let dialog = self.dialogs.get(id)?;
+        let abandoned = early
+            && self.invites.get(&dialog.invite).and_then(|i| i.answered_at_us).is_some_and(|at| {
+                now_us > at.saturating_add(EARLY_DIALOG_WINDOW_US)
+                    || matches!(method, "BYE" | "INVITE")
+            });
         if abandoned {
-            return Some(verdict(self.unknown(&id)));
+            return Some(self.unknown(id));
         }
-        // An early dialog takes no re-INVITE while its INVITE is in progress
-        // (§14.1), and the callee never BYEs one (§15).
-        let early_forbidden = state == DialogState::Early
-            && (method == "INVITE" || (method == "BYE" && role == Role::Uac));
-        if early_forbidden {
-            return Some(verdict(VerdictKind::OnEarlyDialog { reinvite: method == "INVITE" }));
+        let role = dialog.invite.role;
+        if early && (method == "INVITE" || (method == "BYE" && role == Role::Uac)) {
+            return Some(VerdictKind::OnEarlyDialog { reinvite: method == "INVITE" });
         }
-        let dialog = self.dialogs.get_mut(&id).expect("looked up above");
-        match last {
-            Some(last) if cseq < last => match self.backwards {
-                BackwardsCseq::Verdict => Some(verdict(VerdictKind::CseqBackwards { cseq, last })),
+        let backwards = self.backwards;
+        let dialog = self.dialogs.get_mut(id)?;
+        match dialog.remote_cseq {
+            Some(last) if cseq < last => match backwards {
+                BackwardsCseq::Verdict => Some(VerdictKind::CseqBackwards { cseq, last }),
                 BackwardsCseq::Accept => None,
             },
             Some(last) if cseq > last.saturating_add(1) => {
                 dialog.remote_cseq = Some(cseq);
-                Some(verdict(VerdictKind::CseqSkip { cseq, last }))
+                Some(VerdictKind::CseqSkip { cseq, last })
             }
             _ => {
                 dialog.remote_cseq = Some(cseq);

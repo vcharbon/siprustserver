@@ -405,7 +405,7 @@ fn callers_info() -> SipRequest {
 fn a_request_crossing_the_uas_own_final_is_refused_and_no_finding() {
     let mut t = refused_after_its_own_info();
     let v = t.judge_received(&callers_info(), 0).expect("refused");
-    assert_eq!(v.kind, VerdictKind::CrossedFinal { by: 487 });
+    assert_eq!(v.kind, VerdictKind::CrossedFinal { by: 487, broke: None });
     assert_eq!(v.rule(), DIALOG_ENDED);
     assert_eq!(v.kind.refusal(), Some((481, "Call/Transaction Does Not Exist")));
     assert!(!v.kind.is_finding());
@@ -426,7 +426,7 @@ fn a_request_after_the_ack_of_the_uas_own_final_is_a_finding() {
     let mut through = refused_through(1);
     assert_eq!(through.judge_received(&request("ACK", 1, "A1", Some("B1")), 0), None);
     let v = through.judge_received(&callers_info(), 0).expect("refused");
-    assert_eq!(v.kind, VerdictKind::CrossedFinal { by: 487 });
+    assert_eq!(v.kind, VerdictKind::CrossedFinal { by: 487, broke: None });
 }
 
 /// A non-2xx final with no provisional before it is the first message to
@@ -604,6 +604,16 @@ fn a_verdict_is_explained_only_by_a_drop_of_its_own_request() {
     assert!(backwards.explained_by(&[&lost_request("OPTIONS", "a", 4)]));
     let by_final = verdict_of("PRACK", 3, VerdictKind::Ended { by: Some(487) });
     assert!(!by_final.explained_by(&[&prack3]), "a final's end is not the loss's");
+}
+
+/// A request crossing the UA's final is explained as the rule it broke on
+/// the early dialog is.
+#[test]
+fn a_crossing_verdict_is_explained_as_the_rule_it_broke() {
+    let broke = Some(Box::new(VerdictKind::CseqSkip { cseq: 4, last: 2 }));
+    let skip = verdict_of("INFO", 4, VerdictKind::CrossedFinal { by: 487, broke });
+    assert!(skip.explained_by(&[&lost_request("INFO", "a", 3)]));
+    assert!(!skip.explained_by(&[&lost_request("INFO", "a", 4)]), "not in the gap");
 }
 
 const REFUSED_481: Option<(u16, &str)> = Some((481, "Call/Transaction Does Not Exist"));

@@ -14,8 +14,9 @@
 //! - a NOTIFY of a subscription the UA opened, after a BYE (RFC 5057 §5.2).
 //!
 //! On an early dialog the UA's own non-2xx final ended, a 2xx to a request the
-//! UA sent draws none, and a request of the peer draws a 481 that is no finding
-//! ([`VerdictKind::CrossedFinal`]), until the caller's own ACK of that final,
+//! UA sent draws none, and a request of the peer draws a 481 that is a finding
+//! only of a rule it broke on the early dialog ([`VerdictKind::CrossedFinal`]),
+//! until the caller's own ACK of that final,
 //! or a new INVITE of the caller, reached the UA (RFC 3261 §17.2.1): till then
 //! either may cross the final. The peer's messages are taken to reach the UA
 //! in the order it sent them.
