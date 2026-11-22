@@ -151,13 +151,13 @@ impl DialogJudge {
             .cloned()
     }
 
-    /// The verdict on `request` that fails a scripted receive: one recorded
-    /// under harness judging and not opted in.
+    /// The verdict on `request` that fails a scripted receive: a finding
+    /// recorded under harness judging and not opted in.
     pub fn failure_for(&self, request: &SipRequest) -> Option<DialogVerdict> {
         if self.inner.lock().unwrap().judging != DialogJudging::Harness {
             return None;
         }
-        self.verdict_for(request).filter(|v| !self.opted_in(v))
+        self.verdict_for(request).filter(|v| v.kind.is_finding() && !self.opted_in(v))
     }
 
     /// The verdict on `response` that fails a scripted expect: one recorded
@@ -208,17 +208,20 @@ impl DialogJudge {
             DialogJudging::Driver(_) | DialogJudging::Off => " (its driver answers for it)",
         };
         for (v, _) in &inner.recorded {
-            lines.push(format!("verdict [{}]{judged_by}: {v}", v.rule()));
+            let finding = if v.kind.is_finding() { "" } else { " (refused, no finding)" };
+            lines.push(format!("verdict [{}]{judged_by}{finding}: {v}", v.rule()));
         }
         lines
     }
 
-    /// Every verdict the harness gates — those recorded under harness
+    /// Every verdict the harness gates — the findings recorded under harness
     /// judging — with when it was first recorded.
     pub fn gated(&self) -> Vec<(DialogVerdict, Instant)> {
         let inner = self.inner.lock().unwrap();
         match inner.judging {
-            DialogJudging::Harness => inner.recorded.clone(),
+            DialogJudging::Harness => {
+                inner.recorded.iter().filter(|(v, _)| v.kind.is_finding()).cloned().collect()
+            }
             DialogJudging::Driver(_) | DialogJudging::Off => Vec::new(),
         }
     }

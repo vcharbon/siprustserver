@@ -80,7 +80,7 @@ impl<'a, 'p> Runner<'a, 'p> {
         }
         if let Some((leg, verdict)) = self.dialog_verdict(actor, &message) {
             if verdict.kind.refusal().is_some() {
-                self.refuse_foreign_dialog(actor, &leg, &message, bytes, repeat).await;
+                self.refuse_foreign_dialog(actor, &leg, &message, &verdict, bytes, repeat).await;
                 return;
             }
             self.report_dialog_verdict(&leg, &message, &verdict);

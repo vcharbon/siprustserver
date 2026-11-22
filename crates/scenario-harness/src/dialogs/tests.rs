@@ -393,6 +393,42 @@ fn the_callers_ack_through_a_proxy_shows_it_saw_the_uas_final() {
     );
 }
 
+/// The caller's INFO (CSeq 2) on the early dialog the UAS's 487 ended.
+fn callers_info() -> SipRequest {
+    request("INFO", 2, "A1", Some("B1"))
+}
+
+/// RFC 3261 §12.3, §17.2.1: the caller may send a request on the early
+/// dialog before the UAS's final reaches it. The UAS refuses it 481 and it is
+/// no finding; its retransmission after the ACK is not judged again.
+#[test]
+fn a_request_crossing_the_uas_own_final_is_refused_and_no_finding() {
+    let mut t = refused_after_its_own_info();
+    let v = t.judge_received(&callers_info(), 0).expect("refused");
+    assert_eq!(v.kind, VerdictKind::CrossedFinal { by: 487 });
+    assert_eq!(v.rule(), DIALOG_ENDED);
+    assert_eq!(v.kind.refusal(), Some((481, "Call/Transaction Does Not Exist")));
+    assert!(!v.kind.is_finding());
+    assert_eq!(t.judge_received(&request("ACK", 1, "A1", Some("B1")), 0), None);
+    assert_eq!(t.judge_received(&callers_info(), 0), None, "a retransmission");
+}
+
+/// Once the caller's ACK of the UAS's final arrived, a request it sends on
+/// the dialog is one it knew ended; a hop's own ACK shows nothing of that.
+#[test]
+fn a_request_after_the_ack_of_the_uas_own_final_is_a_finding() {
+    let mut t = refused_after_its_own_info();
+    assert_eq!(t.judge_received(&request("ACK", 1, "A1", Some("B1")), 0), None);
+    let v = t.judge_received(&callers_info(), 0).expect("a verdict");
+    assert_eq!(v.kind, VerdictKind::Ended { by: Some(487) });
+    assert!(v.kind.is_finding());
+
+    let mut through = refused_through(1);
+    assert_eq!(through.judge_received(&request("ACK", 1, "A1", Some("B1")), 0), None);
+    let v = through.judge_received(&callers_info(), 0).expect("refused");
+    assert_eq!(v.kind, VerdictKind::CrossedFinal { by: 487 });
+}
+
 /// RFC 3261 §17.2.2: the peer's server transaction replays its 2xx for each
 /// retransmission of the request it answers. A 2xx the UA took on a dialog
 /// is judged once: its replay after the ACK of the UA's final is no verdict.

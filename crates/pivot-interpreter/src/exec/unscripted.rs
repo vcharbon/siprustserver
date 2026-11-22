@@ -138,23 +138,27 @@ impl<'a, 'p> Runner<'a, 'p> {
 
     /// Answer `message` 481 (RFC 3261 §12.2.2): it names no dialog its leg
     /// holds (none, or one that ended), so it is recorded, refused, taught to
-    /// nothing, and failed as the unexpected datagram it is — mid-flow and
-    /// during settle alike. `false` when the 481 could not be sent.
+    /// nothing, and, when `verdict` is a finding, failed as the unexpected
+    /// datagram it is — mid-flow and during settle alike. `false` when the
+    /// 481 could not be sent.
     pub(super) async fn refuse_foreign_dialog(
         &mut self,
         actor: &str,
         leg: &str,
         message: &SipMessage,
+        verdict: &DialogVerdict,
         bytes: Vec<u8>,
         repeat: bool,
     ) -> bool {
         let SipMessage::Request(request) = message else { return true };
         self.record_arrival(leg, bytes, None, Some(FOREIGN_DIALOG), repeat);
-        self.instance.fail(Failure::UnexpectedDatagram {
-            leg: leg.to_string(),
-            arrived: Inbound::of(message).arrived(),
-            detail: Some(FOREIGN_DIALOG.to_string()),
-        });
+        if verdict.kind.is_finding() {
+            self.instance.fail(Failure::UnexpectedDatagram {
+                leg: leg.to_string(),
+                arrived: Inbound::of(message).arrived(),
+                detail: Some(FOREIGN_DIALOG.to_string()),
+            });
+        }
         let Some(agent) = self.lane.agents.get(actor).cloned() else { return true };
         let response = sip_message::generators::generate_response(
             request,

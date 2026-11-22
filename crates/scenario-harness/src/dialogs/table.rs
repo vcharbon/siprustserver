@@ -6,9 +6,10 @@
 //! ended by a non-2xx final to its INVITE (the early dialogs of that INVITE
 //! end with it, §12.1.2), or ended by a BYE once the BYE's transaction took
 //! its final (§15); a subscription the UA opened on it keeps its NOTIFYs
-//! legal past that BYE (RFC 5057 §5.2). A non-2xx final the UA sent ends the
-//! dialog for the peer's 2xx answers only once the peer shows it saw that
-//! final. It keeps the last remote CSeq: as UAS
+//! legal past that BYE (RFC 5057 §5.2). A non-2xx final the UA sent makes the
+//! peer's requests and 2xx answers on the dialog findings only once the peer
+//! shows it saw that final; till then the UA still refuses its requests. It
+//! keeps the last remote CSeq: as UAS
 //! it starts at the initial INVITE's CSeq, as UAC it is empty until the peer's
 //! first request (§12.1.1, §12.1.2).
 
@@ -416,7 +417,9 @@ impl DialogTable {
     /// Feed a request the UA received and judge it: `Some` when it names no
     /// dialog the UA holds, a dialog that ended (a PRACK excepted on a dialog
     /// a non-2xx final ended), or a CSeq out of the remote sequence (RFC 3261
-    /// §12.2.2). A request with no To-tag is out of
+    /// §12.2.2). One on a dialog the UA's own final ended before the peer
+    /// provably saw it is a [`VerdictKind::CrossedFinal`], refused and no
+    /// finding (`Dialog::final_unseen`). A request with no To-tag is out of
     /// dialog and only teaches the table an initial INVITE. An ACK or a
     /// CANCEL carries its INVITE's number, so only its dialog is judged, and
     /// a retransmission of a request already taken is not judged again. The
@@ -481,6 +484,7 @@ impl DialogTable {
                     || matches!(method.as_str(), "BYE" | "INVITE")
             });
         let state = dialog.state;
+        let final_unseen = dialog.final_unseen;
         let last = dialog.remote_cseq;
         let role = dialog.invite.role;
         let subscribed = method == "NOTIFY" && dialog.subscriptions > 0;
@@ -497,6 +501,9 @@ impl DialogTable {
             // not end with the INVITE's (RFC 3262 §3, §4): one owed before the
             // final may follow it.
             DialogState::EndedByFinal(_) if method == "PRACK" => {}
+            DialogState::EndedByFinal(by) if final_unseen => {
+                return Some(verdict(VerdictKind::CrossedFinal { by }))
+            }
             DialogState::EndedByFinal(status) => {
                 return Some(verdict(VerdictKind::Ended { by: Some(status) }))
             }

@@ -18,6 +18,11 @@ pub enum VerdictKind {
     /// The request names a dialog a non-2xx final (`by: Some(status)`) or a
     /// BYE (`by: None`) ended.
     Ended { by: Option<u16> },
+    /// The request names an early dialog a `by` non-2xx final the UA sent
+    /// ended, and the peer has not yet shown it saw that final: it may have
+    /// sent the request before the final reached it (RFC 3261 §12.3). The UA
+    /// refuses it as it refuses [`VerdictKind::Ended`], and it is no finding.
+    CrossedFinal { by: u16 },
     /// The CSeq is below the last one the peer used on this dialog.
     CseqBackwards { cseq: u32, last: u32 },
     /// The CSeq is more than one above the last one the peer used.
@@ -37,7 +42,7 @@ impl VerdictKind {
     pub fn rule(&self) -> &'static str {
         match self {
             VerdictKind::UnknownDialog { .. } => DIALOG_UNKNOWN,
-            VerdictKind::Ended { .. } => DIALOG_ENDED,
+            VerdictKind::Ended { .. } | VerdictKind::CrossedFinal { .. } => DIALOG_ENDED,
             VerdictKind::CseqBackwards { .. } => DIALOG_CSEQ_BACKWARDS,
             VerdictKind::CseqSkip { .. } => DIALOG_CSEQ_SKIP,
             VerdictKind::OnEarlyDialog { .. } => DIALOG_EARLY_REQUEST,
@@ -51,6 +56,13 @@ impl VerdictKind {
         matches!(self, VerdictKind::EndedAnswered { .. })
     }
 
+    /// Whether the verdict is a finding against the peer, gated by the
+    /// harness or failed by a driver: every kind but
+    /// [`VerdictKind::CrossedFinal`], which only tells the UA to refuse.
+    pub fn is_finding(&self) -> bool {
+        !matches!(self, VerdictKind::CrossedFinal { .. })
+    }
+
     /// Whether the receiving UA refuses the request on the wire: `481` for a
     /// request on no dialog or an ended one, `500` for a CSeq going backwards
     /// (RFC 3261 §12.2.2), `491` for a re-INVITE while its INVITE is in
@@ -58,9 +70,9 @@ impl VerdictKind {
     /// taken.
     pub fn refusal(&self) -> Option<(u16, &'static str)> {
         match self {
-            VerdictKind::UnknownDialog { .. } | VerdictKind::Ended { .. } => {
-                Some((481, "Call/Transaction Does Not Exist"))
-            }
+            VerdictKind::UnknownDialog { .. }
+            | VerdictKind::Ended { .. }
+            | VerdictKind::CrossedFinal { .. } => Some((481, "Call/Transaction Does Not Exist")),
             VerdictKind::CseqBackwards { .. } => Some((500, "Server Internal Error")),
             VerdictKind::CseqSkip { .. } | VerdictKind::EndedAnswered { .. } => None,
             VerdictKind::OnEarlyDialog { reinvite: true } => Some((491, "Request Pending")),
@@ -147,6 +159,12 @@ impl fmt::Display for DialogVerdict {
                     self.from_tag, self.to_tag
                 )
             }
+            VerdictKind::CrossedFinal { by } => write!(
+                f,
+                "{m} From-tag {} To-tag {} names a dialog a {by} final this UA sent ended, \
+                 before the peer showed it saw that final",
+                self.from_tag, self.to_tag
+            ),
             VerdictKind::CseqBackwards { cseq, last } => write!(
                 f,
                 "{m} CSeq {cseq} goes backwards on From-tag {} (last remote CSeq {last})",
