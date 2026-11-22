@@ -190,8 +190,8 @@ struct Setup {
     guard: Option<Duration>,
     /// Whether B refreshes the session first: his re-INVITE re-offers his
     /// description unchanged, A answers hers unchanged (RFC 3264 §8) and B
-    /// ACKs at once. Only where A re-INVITEs before the cap, so the fabric
-    /// holds none of B's ACKs.
+    /// ACKs. Where B also re-INVITEs before the cap, the fabric holds that
+    /// ACK as the first of `holds`.
     refresh: bool,
 }
 
@@ -463,6 +463,31 @@ async fn the_a_realign_leaves_on_the_callees_ack_relayed_to_the_caller() {
         relayed_at < invites[0].0,
         "the a-realign re-INVITE leaves after B's ACK, relayed to A"
     );
+    reroute_completes(t, a_realign).await;
+}
+
+/// B refreshed the session earlier. While his ACK of A's 2xx to his re-INVITE
+/// before the cap is in flight, the fabric delivers a copy of his ACK of the
+/// refresh: her dialog owes it nothing, so it releases nothing and the
+/// a-realign re-INVITE goes on waiting. The held ACK, relayed to A, then
+/// releases it.
+#[tokio::test(start_paused = true)]
+async fn a_copy_of_an_earlier_callee_ack_releases_nothing() {
+    let name = "reroute-realign-awaits-callee-ack-earlier-copy";
+    let holds = &[Duration::ZERO, ACK_HELD];
+    let setup = Setup { refresh: true, ..Setup::bob_acks_held(holds) };
+    let mut t = a_realign_due(name, 7, setup).await;
+
+    let earlier = t.sent(t.bob.addr(), t.b2bua.addr, "ACK ", None);
+    let earlier = earlier.first().expect("B's ACK of the refresh's 2xx").1.raw.clone();
+    t.bob.try_send_datagram(&earlier, t.b2bua.addr).await.expect("the copy leaves");
+    t.h.advance(PAST_THE_REROUTES_ROUND_TRIPS).await;
+    t.assert_no_refusal();
+    assert!(t.invites_to_alice().is_empty(), "the earlier ACK's copy releases no re-INVITE");
+
+    t.alice.receive("ACK").await;
+    let a_realign = t.alice.receive("INVITE").await;
+    assert_eq!(t.invites_to_alice().len(), 1, "the held ACK releases the a-realign re-INVITE");
     reroute_completes(t, a_realign).await;
 }
 
