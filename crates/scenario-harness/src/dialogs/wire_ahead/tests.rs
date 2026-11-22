@@ -111,3 +111,43 @@ async fn the_final_counts_from_its_first_delivered_copy() {
     assert!(fact_after(&[Final, Info, Final], &[0]).await);
     assert!(!fact_after(&[Final, Info], &[]).await);
 }
+
+/// The INFO's first copy lost, the 487 held 1 s by the fabric, the INFO's
+/// retransmission sent 500 ms later overtakes it: the peer met the INFO first,
+/// on the live dialog. Arrival at the peer counts, not the UA's send order.
+#[tokio::test(start_paused = true)]
+async fn a_retransmission_overtaking_a_held_final_reached_ahead() {
+    let ua: SocketAddr = "192.0.2.2:5060".parse().unwrap();
+    let sent = AtomicUsize::new(0);
+    let fabric = SimulatedSignalingNetwork::new(1).with_send_fate(Arc::new(move |src, _, _| {
+        if src != ua {
+            return Fate::Deliver;
+        }
+        match sent.fetch_add(1, Ordering::SeqCst) {
+            0 => Fate::Lose,
+            1 => Fate::Late(Duration::from_millis(1000)),
+            _ => Fate::Deliver,
+        }
+    }));
+    let wrapped = with_all_contracts(
+        Arc::new(fabric),
+        Recorder::fake(),
+        RunContext::TestWithRecorder,
+        ScopedAuditOptions::default(),
+        true,
+    );
+    let net = wrapped.network.clone();
+    let s = net.bind_udp(BindUdpOpts::new("192.0.2.1:5060".parse().unwrap(), 64)).await.unwrap();
+    let u = net.bind_udp(BindUdpOpts::new(ua, 64)).await.unwrap();
+    u.send_to(UAS_INFO.as_bytes(), s.local_addr()).await.unwrap();
+    u.send_to(UAS_487.as_bytes(), s.local_addr()).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    u.send_to(UAS_INFO.as_bytes(), s.local_addr()).await.unwrap();
+    let arrived: Vec<String> = [s.recv().await, s.recv().await]
+        .iter()
+        .flatten()
+        .map(|p| String::from_utf8_lossy(&p.raw).lines().next().unwrap_or_default().to_string())
+        .collect();
+    assert_eq!(arrived, ["INFO sip:s@192.0.2.1 SIP/2.0", "SIP/2.0 487 Request Terminated"]);
+    assert!(AheadOfFinal::from_wire(wrapped.recording.channel()).holds(&peers_200(), 1, 487));
+}

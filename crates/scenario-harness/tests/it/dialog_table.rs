@@ -4,6 +4,10 @@
 //! fails the run at `finish`; a `dialog-…` waiver on the UA opts a deliberate
 //! one out, and a waiver that covers nothing is dead.
 
+use std::net::SocketAddr;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+
 use scenario_harness::dialogs::{DIALOG_CSEQ_SKIP, DIALOG_UNKNOWN};
 use scenario_harness::{
     Agent, ClientInvite, Dialog, Harness, InDialogTxn, ServerTxn, StepError, WaiverScope,
@@ -11,6 +15,7 @@ use scenario_harness::{
 use sip_message::generators::InDialogMethod;
 use sip_message::parser::custom::CustomParser;
 use sip_message::{SipMessage, SipParser};
+use sip_net_testkit::Fate;
 
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 49170 RTP/AVP 0\r\n";
 const ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 49180 RTP/AVP 0\r\n";
@@ -252,6 +257,49 @@ async fn a_2xx_to_an_info_taken_before_the_callees_final_passes_after_its_ack() 
     call.expect(487).await;
     uas.expect_ack().await;
     at_alice.respond(200, "OK").await;
+    info.expect(200).await;
+    h.finish().await;
+}
+
+/// The fabric loses the first INFO bob sends; every other datagram arrives.
+fn lose_bobs_first_info() -> sip_net_testkit::SendFate {
+    let lost = AtomicBool::new(false);
+    let bob: SocketAddr = "127.0.0.1:5070".parse().expect("bob's address");
+    Arc::new(move |src, _dst, raw| match src == bob && raw.starts_with(b"INFO ") {
+        true if !lost.swap(true, Ordering::SeqCst) => Fate::Lose,
+        _ => Fate::Deliver,
+    })
+}
+
+/// On a run that declares a loss model: bob's early INFO is lost, he refuses
+/// the call 487 and alice ACKs it; bob's INFO sent again reaches alice behind
+/// that final, on a dialog gone (RFC 3261 §12.1.2), so her 200 to it is a
+/// verdict at bob, though the INFO's first copy left before the 487.
+#[tokio::test(start_paused = true)]
+#[should_panic(expected = "bob: 200 to INFO on a dialog a 487 ended")]
+async fn a_2xx_to_an_info_that_reached_the_caller_behind_the_callees_final_fails() {
+    let h = Harness::with_transit_delay_and_send_fate(
+        "dialog-table-answered-behind-final",
+        1,
+        lose_bobs_first_info(),
+    );
+    let alice = h.agent("alice", "127.0.0.1:5060").await;
+    let bob = h.agent("bob", "127.0.0.1:5070").await;
+    let mut call = alice.invite(&bob).with_sdp(OFFER).send().await;
+    let mut uas = bob.receive("INVITE").await;
+    uas.respond(180, "Ringing").send().await;
+    call.expect(180).await;
+    let mut bob_dialog = uas.dialog();
+    let (mut info, sent) = bob_dialog
+        .send_request(InDialogMethod::Info)
+        .try_send_with_request()
+        .await
+        .expect("the INFO leaves");
+    uas.respond(487, "Request Terminated").await;
+    call.expect(487).await;
+    uas.expect_ack().await;
+    bob.try_send_datagram(sent.image(), alice.addr()).await.expect("the INFO leaves again");
+    alice.receive("INFO").await.respond(200, "OK").await;
     info.expect(200).await;
     h.finish().await;
 }

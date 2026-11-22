@@ -390,14 +390,27 @@ fn uac_request(method: &str, cseq: u32) -> SipRequest {
     request(method, cseq, "A1", Some("B1"))
 }
 
-/// RFC 3261 §12.1.2: a non-2xx final ended the early dialog, so a 2xx to a
-/// request the UA sent on it answers a dialog that is gone. The message names
-/// the status, the method, the final and the dialog.
+/// RFC 3261 §12.3, §9.2: the UAC's BYE left before the peer's 487 reached
+/// it, so it may have reached the peer on the live early dialog, and the
+/// peer's 200 to it after that 487 is no verdict.
 #[test]
-fn a_2xx_on_a_dialog_a_final_ended_is_a_verdict() {
+fn a_2xx_to_a_request_sent_before_the_peers_final_arrived_is_no_verdict() {
     let mut t = ringing_uac();
     t.note_sent_request(&uac_request("BYE", 2));
     assert_eq!(t.note_received_response(&response(487, "INVITE", 1, "A1", "B1"), 0), None);
+    assert_eq!(t.note_received_response(&response(200, "BYE", 2, "A1", "B1"), 0), None);
+    assert_eq!(t.state(CALL, "A1", "B1"), Some(DialogState::EndedByFinal(487)));
+}
+
+/// RFC 3261 §12.1.2: a request the UAC sends after the peer's 487 reached it
+/// reaches the peer after the peer ended the dialog, so a 2xx to it answers a
+/// dialog that is gone. The message names the status, the method, the final
+/// and the dialog.
+#[test]
+fn a_2xx_to_a_request_sent_after_the_peers_final_arrived_is_a_verdict() {
+    let mut t = ringing_uac();
+    assert_eq!(t.note_received_response(&response(487, "INVITE", 1, "A1", "B1"), 0), None);
+    t.note_sent_request(&uac_request("BYE", 2));
     let v = t.note_received_response(&response(200, "BYE", 2, "A1", "B1"), 0).expect("a verdict");
     assert_eq!(v.rule(), DIALOG_ENDED_ANSWERED);
     assert_eq!(
