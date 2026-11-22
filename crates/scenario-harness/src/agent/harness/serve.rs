@@ -54,9 +54,8 @@ impl Harness {
     /// that holds at once serves nothing; on one that runs a loss model,
     /// until `cond` holds and no datagram reached a party for T2 and a T1,
     /// at most past the SUT's own 64·T1 give-up. Bounded, so a `cond` that
-    /// never holds falls through to the caller's assertions.
-    /// ([`serve_parties`](Self::serve_parties) says what a pass sends on
-    /// each.)
+    /// never holds falls through to the caller's assertions. A party sends
+    /// what its own timers owe only on a fabric that runs a loss model.
     pub async fn serve_parties_until(&self, cond: impl Fn() -> bool) {
         let start = Instant::now();
         let bound = if self.lossy { LOSSY_BOUND } else { RELIABLE_BOUND };
