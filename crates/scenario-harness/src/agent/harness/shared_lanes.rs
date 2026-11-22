@@ -61,7 +61,9 @@ impl Harness {
     /// per-datagram fate on the simulated fabric ([`sip_net_testkit::Fate`]):
     /// the losses and holds an unreliable transport makes, which every
     /// party's transaction layer must ride out (RFC 3261 §17, §18). The run
-    /// declares a loss model: [`serve_parties_until`](Self::serve_parties_until)
+    /// declares a loss model: [`note_losses`](Self::note_losses) notes each
+    /// datagram lost to or from a call's party for its goals and endings;
+    /// [`serve_parties_until`](Self::serve_parties_until)
     /// sends what the parties' timers owe and waits out the SUT's own 64·T1
     /// give-up; a UA's CSeq out of sequence that a recorded loss explains is
     /// no finding ([`LostOnTheWay`](crate::dialogs::LostOnTheWay)), nor is a

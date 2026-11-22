@@ -6,7 +6,7 @@
 //! it and hangs up. The B2BUA answered before it settled the CANCEL, so the
 //! call is answered despite the CANCEL. The same 2xx held back past the
 //! CANCEL's 200 with nothing lost arrives after the CANCEL was settled: no
-//! accepted ending.
+//! accepted ending; so is the lost 2xx on a run that declares no loss model.
 
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -19,7 +19,7 @@ use scenario_harness::actor::{run_actor_scenario, ScenarioVerdict};
 use scenario_harness::realcall::{CallCtx, CallEnv};
 use scenario_harness::{Harness, StepError, SIMULATED_TRANSIT_DELAY_MS};
 use sip_message::sniff;
-use sip_net_testkit::{Fate, SendDelay, SendFate};
+use sip_net_testkit::{Fate, SendDelay, SendFate, SimulatedSignalingNetwork};
 
 /// Whether `raw`, sent by `src`, is the B2BUA's 2xx to the caller's INVITE,
 /// the first time `first` is asked of one.
@@ -86,6 +86,15 @@ async fn a_2xx_sent_before_the_cancel_final_and_lost_first_is_answered_despite_c
     );
 }
 
+/// Fails unless `verdict` is the call ending on no accepted branch.
+fn assert_no_accepted_ending(verdict: &ScenarioVerdict) {
+    let ScenarioVerdict::Failure { cause: StepError::UnexpectedKind { detail, .. }, .. } = verdict
+    else {
+        panic!("a 2xx after the CANCEL was settled is no accepted ending, got {verdict:?}");
+    };
+    assert_eq!(detail, "the call ended on no accepted branch");
+}
+
 #[tokio::test(start_paused = true)]
 async fn a_2xx_held_past_the_cancel_final_with_nothing_lost_is_no_accepted_ending() {
     let h = Harness::with_transit_delay_and_send_delay(
@@ -93,10 +102,16 @@ async fn a_2xx_held_past_the_cancel_final_with_nothing_lost_is_no_accepted_endin
         SIMULATED_TRANSIT_DELAY_MS,
         hold_first_relayed_answer(),
     );
-    let verdict = answer_crossing_the_callers_cancel(h).await;
-    let ScenarioVerdict::Failure { cause: StepError::UnexpectedKind { detail, .. }, .. } = &verdict
-    else {
-        panic!("a 2xx after the CANCEL was settled is no accepted ending, got {verdict:?}");
-    };
-    assert_eq!(detail, "the call ended on no accepted branch");
+    assert_no_accepted_ending(&answer_crossing_the_callers_cancel(h).await);
+}
+
+/// A run that declares no loss model notes no loss, though its fabric loses
+/// the 2xx's first copy: the 2xx reads as arriving after the CANCEL was
+/// settled.
+#[tokio::test(start_paused = true)]
+async fn a_lost_2xx_on_a_run_declaring_no_loss_model_is_no_accepted_ending() {
+    let net = SimulatedSignalingNetwork::new(SIMULATED_TRANSIT_DELAY_MS)
+        .with_send_fate(lose_first_relayed_answer());
+    let h = Harness::with_simulated_network("answer-lost-undeclared", net);
+    assert_no_accepted_ending(&answer_crossing_the_callers_cancel(h).await);
 }
