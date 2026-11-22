@@ -227,7 +227,11 @@ impl DialogJudge {
             DialogJudging::Driver(_) | DialogJudging::Off => " (its driver answers for it)",
         };
         for (v, _) in &inner.recorded {
-            let finding = if v.kind.is_finding() { "" } else { " (refused, no finding)" };
+            let finding = match (v.kind.is_finding(), v.kind.refusal()) {
+                (true, _) => "",
+                (false, Some(_)) => " (refused, no finding)",
+                (false, None) => " (taken, no finding)",
+            };
             lines.push(format!("verdict [{}]{judged_by}{finding}: {v}", v.rule()));
         }
         lines
