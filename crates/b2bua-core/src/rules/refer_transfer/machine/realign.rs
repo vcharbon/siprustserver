@@ -28,9 +28,10 @@ const HELD_ACK_BOUND_MS: u64 = (64 - 4) * sip_retransmit::timers::T1;
 /// Where the re-INVITE carried no offer and C offers in its 2xx, C's ACK
 /// waits for A's answer to the a-realign re-INVITE, which carries C's offer
 /// (RFC 3725 §4.1, flow I), and A's watchdog runs at most
-/// [`HELD_ACK_BOUND_MS`]; otherwise C is ACKed bare now. While a 2xx this
-/// stack sent A awaits her ACK, the a-realign re-INVITE waits in the transfer
-/// state and leaves on that ACK ([`a_realign_on_a_ack`]), under A's watchdog.
+/// [`HELD_ACK_BOUND_MS`]; otherwise C is ACKed bare now. While A's dialog
+/// awaits an ACK, hers or B's of her 2xx, the a-realign re-INVITE waits in
+/// the transfer state and leaves on that ACK ([`a_realign_on_ack`]), under
+/// A's watchdog.
 ///
 /// [`RuleContext::answers_last_sent_invite`]: b2bua_sdk::model::RuleContext::answers_last_sent_invite
 pub(super) fn c_realign_200() -> RuleDefinition {
@@ -41,7 +42,7 @@ pub(super) fn c_realign_200() -> RuleDefinition {
         transitions: [ Phase::CRealigning => Phase::ARealigning ],
         effects: [
             Effect::Originate { method: Method::Ack, label: "ACK → C (c-realign answered; held for A's answer when C offers)" },
-            Effect::Originate { method: Method::Invite, label: "re-INVITE → A (a-realign, C's active SDP; parked while A's ACK is awaited)" },
+            Effect::Originate { method: Method::Invite, label: "re-INVITE → A (a-realign, C's active SDP; parked while A's dialog awaits an ACK)" },
             Effect::GuardTimer { timer: call::TimerType::ReferReinviteAnswer, scope: call::TimerScopeKind::Leg, label: "cancel C / arm A re-INVITE watchdog" },
         ],
         matcher: Match::response()
@@ -79,7 +80,7 @@ pub(super) fn c_realign_200() -> RuleDefinition {
                 RuleAction::cancel(TimerKey::leg(call::TimerType::ReferReinviteAnswer, &c_leg_id)),
                 RuleAction::arm(TimerKey::leg(call::TimerType::ReferReinviteAnswer, "a"), watchdog),
             ];
-            if pending_reinvite::her_ack_awaited(ctx) {
+            if pending_reinvite::ack_awaited_on_her_dialog(ctx) {
                 let parked = pending_reinvite::park(&c_leg_id, &c_realign_sdp, resp.headers());
                 new_state.pending_a_realign = Some(Box::new(parked));
             } else {
@@ -98,28 +99,27 @@ fn a_realign(body: Body) -> RuleAction {
     RuleAction::SendReinvite { leg_id: "a".to_string(), body: Some(body), add_headers: vec![] }
 }
 
-/// transfer-a-realign-on-a-ack — A's ACK while the a-realign re-INVITE waits
-/// for it ([`c_realign_200`]): the ACK is relayed to her peer, as `relay-ack`
-/// relays it, then the parked re-INVITE leaves, carrying C's description
-/// (ADR-0064 §3). It matches once that ACK discharged the awaited 2xx, so a
-/// re-INVITE may leave her dialog; any other ACK of hers is `relay-ack`'s,
-/// and A's watchdog bounds the wait.
-pub(super) fn a_realign_on_a_ack() -> RuleDefinition {
+/// transfer-a-realign-on-ack — the ACK the a-realign re-INVITE waits for
+/// ([`c_realign_200`]): A's, or B's ACK of her 2xx. The ACK is relayed to
+/// its peer, as `relay-ack` relays it, then the parked re-INVITE leaves,
+/// carrying C's description (ADR-0064 §3). It matches only an ACK that frees
+/// her dialog ([`pending_reinvite::ack_frees_her_dialog`]); any other ACK is
+/// `relay-ack`'s, and A's watchdog bounds the wait.
+pub(super) fn a_realign_on_ack() -> RuleDefinition {
     sm_rule! {
-        id: "transfer-a-realign-on-a-ack",
+        id: "transfer-a-realign-on-ack",
         machine: TRANSFER_MACHINE,
         active: [ Phase::ARealigning ],
         transitions: [],
         effects: [
-            Effect::Relay { label: "ACK → B (A's ACK relayed to her peer)" },
+            Effect::Relay { label: "ACK → its peer (A's to B, or B's to A)" },
             Effect::Originate { method: Method::Invite, label: "re-INVITE → A (the parked a-realign, C's active SDP)" },
         ],
         matcher: Match::request()
             .method("ACK")
-            .direction(Direction::FromA)
             .filter(|ctx| {
                 state(ctx).is_some_and(|s| s.pending_a_realign.is_some())
-                    && ctx.call.invite_in_progress("a").is_none()
+                    && pending_reinvite::ack_frees_her_dialog(ctx)
             }),
         handle: |ctx| {
             let mut st = state(ctx)?.clone();

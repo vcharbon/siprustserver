@@ -15,10 +15,10 @@
 //!     body), on its 2xx ACK it and **re-INVITE the a-leg** with the new
 //!     leg's answer SDP (the bridge — same one-way-audio discipline as the
 //!     REFER machine's a-realign, `refer_transfer.rs`), and on A's 2xx
-//!     `Merge(a, new)` + **BYE the old b-leg**. While a 2xx this stack sent
-//!     A awaits her ACK, that re-INVITE waits in the slice and leaves on the
-//!     ACK (ADR-0064 §3). The whole treatment is bounded by one overall guard
-//!     timer (`release_reroute_guard_sec`).
+//!     `Merge(a, new)` + **BYE the old b-leg**. While A's dialog awaits an
+//!     ACK, hers or the old b-leg's of her 2xx, that re-INVITE waits in the
+//!     slice and leaves on that ACK (ADR-0064 §3). The whole treatment is
+//!     bounded by one overall guard timer (`release_reroute_guard_sec`).
 //!
 //! **Failure policy (documented choice):** any failure of the treatment — the
 //! replacement leg rejects / never answers, A rejects the realign re-INVITE,
@@ -141,20 +141,20 @@ fn a_realign(body: Body) -> RuleAction {
     RuleAction::SendReinvite { leg_id: "a".to_string(), body: Some(body), add_headers: vec![] }
 }
 
-/// `reroute-a-realign-on-a-ack` — A's ACK while the a-realign re-INVITE waits
-/// for it (`reroute-b-200`): the ACK is relayed to her peer, still the
-/// displaced b-leg, as `relay-ack` relays it, then the parked re-INVITE
-/// leaves, carrying the description of the replacement leg's 2xx (ADR-0064
-/// §3). It matches once that ACK discharged the awaited 2xx, so a re-INVITE
-/// may leave her dialog; any other ACK of hers is `relay-ack`'s, and the
-/// reroute guard bounds the wait.
-fn a_realign_on_a_ack() -> RuleDefinition {
+/// `reroute-a-realign-on-ack` — the ACK the a-realign re-INVITE waits for
+/// (`reroute-b-200`): A's, or the displaced b-leg's ACK of her 2xx. The ACK
+/// is relayed to its peer as `relay-ack` relays it, then the parked
+/// re-INVITE leaves, carrying the description of the replacement leg's 2xx
+/// (ADR-0064 §3). It matches only an ACK that frees her dialog
+/// ([`pending_reinvite::ack_frees_her_dialog`]); any other ACK is
+/// `relay-ack`'s, and the reroute guard bounds the wait.
+fn a_realign_on_ack() -> RuleDefinition {
     rule(
-        "reroute-a-realign-on-a-ack",
+        "reroute-a-realign-on-ack",
         &["relay-ack"],
-        Match::request().method("ACK").direction(Direction::FromA).filter(|ctx| {
+        Match::request().method("ACK").filter(|ctx| {
             ctx.call.reroute_state().is_some_and(|r| r.pending_a_realign.is_some())
-                && ctx.call.invite_in_progress("a").is_none()
+                && pending_reinvite::ack_frees_her_dialog(ctx)
         }),
         |ctx| {
             let mut st = ctx.call.reroute_state()?.clone();
@@ -314,7 +314,7 @@ pub fn release_reroute_rules() -> Vec<RuleDefinition> {
                         RuleAction::cancel(TimerKey::leg(TimerType::NoAnswer, &new_leg)),
                     ])
                     .collect();
-                if pending_reinvite::her_ack_awaited(ctx) {
+                if pending_reinvite::ack_awaited_on_her_dialog(ctx) {
                     let parked = pending_reinvite::park(&new_leg, resp.body(), resp.headers());
                     new_state.pending_a_realign = Some(Box::new(parked));
                 } else {
@@ -334,7 +334,7 @@ pub fn release_reroute_rules() -> Vec<RuleDefinition> {
                 ok(actions)
             },
         ),
-        a_realign_on_a_ack(),
+        a_realign_on_ack(),
         // ── replacement leg fails (3xx–6xx) → the documented fail-teardown.
         rule(
             "reroute-b-fail",

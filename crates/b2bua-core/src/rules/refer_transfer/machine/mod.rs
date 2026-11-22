@@ -48,7 +48,7 @@ define_service! {
         realign::c_realign_timeout(),
         realign::c_realign_txn_timeout(),
         guards::c_glare_reinvite(),
-        realign::a_realign_on_a_ack(),
+        realign::a_realign_on_ack(),
         realign::a_realign_200(),
         realign::a_realign_fail(),
         realign::a_realign_timeout(),

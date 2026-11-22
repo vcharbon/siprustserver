@@ -83,7 +83,7 @@ pub use invite_records::{
     answered_2xx, answered_2xx_mut, close_rejected_invite_round, close_untaken_invite,
     end_invite_at_timer_b, hold_answered_2xx, invite_awaits_final, invite_image, invite_relay,
     invite_round_ended, invite_taken, invite_untaken, leave_invite_relay, open_sent_invite,
-    relayed_invite_pending, retain_ack_branch, retain_emitted_ack, sent_exchange,
+    relayed_ack_owed, relayed_invite_pending, retain_ack_branch, retain_emitted_ack, sent_exchange,
     sent_exchange_mut, sent_invite_image, set_awaited_ack_cseq,
 };
 pub use leg::{

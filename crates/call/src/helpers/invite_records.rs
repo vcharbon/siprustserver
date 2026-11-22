@@ -163,6 +163,13 @@ pub fn set_awaited_ack_cseq(call: &mut Call, leg_id: &str, cseq: Option<i64>) {
     })
 }
 
+/// Whether `leg`'s established dialog owes the ACK numbered `cseq` that a
+/// peer's relayed ACK discharges: a 2xx in hand that nothing has ACKed yet,
+/// armed under that number ([`set_awaited_ack_cseq`], RFC 3261 §13.2.2.4).
+pub fn relayed_ack_owed(leg: &Leg, cseq: i64) -> bool {
+    leg.dialogs.established().and_then(sent_exchange).and_then(|x| x.awaited_ack_cseq) == Some(cseq)
+}
+
 /// Close the INVITE `leg_id`'s dialogs last sent on the client transaction
 /// `branch`, which a non-2xx final answered (RFC 3261 §17.1.1.3: the
 /// transaction ends with that final, hop-ACKed below the TU), so the record

@@ -58,9 +58,10 @@ pub struct TransferState {
     /// a-realign re-INVITE can offer it back to A.
     #[serde(with = "serde_bytes")]
     pub c_initial_sdp: Option<Vec<u8>>,
-    /// The a-realign re-INVITE C's c-realign 2xx called for while A's ACK of
-    /// a 2xx this stack sent her was awaited: it leaves on that ACK (RFC 3261
-    /// §14.1). Boxed: every turn future holding a call carries its size.
+    /// The a-realign re-INVITE C's c-realign 2xx called for while A's dialog
+    /// awaited an ACK, hers of a 2xx this stack sent her or B's of hers: it
+    /// leaves on that ACK (RFC 3261 §14.1). Boxed: every turn future holding
+    /// a call carries its size.
     #[serde(default)]
     pub pending_a_realign: Option<Box<PendingResync>>,
 }
@@ -88,7 +89,8 @@ pub enum ReroutePhase {
     /// Replacement b-leg INVITE sent, awaiting its final response.
     BLegDialing,
     /// Re-INVITE toward A with the replacement leg's answer SDP in flight, or
-    /// parked until A's ACK ([`RerouteState::pending_a_realign`]).
+    /// parked until the ACK A's dialog awaits
+    /// ([`RerouteState::pending_a_realign`]).
     ARealigning,
 }
 
@@ -108,9 +110,9 @@ pub struct RerouteState {
     /// Wall-clock ms when the reroute was applied.
     pub started_at_ms: i64,
     /// The a-realign re-INVITE the replacement leg's 2xx called for while A's
-    /// ACK of a 2xx this stack sent her was awaited: it leaves on that ACK
-    /// (RFC 3261 §14.1). Boxed: every turn future holding a call carries its
-    /// size.
+    /// dialog awaited an ACK, hers of a 2xx this stack sent her or the old
+    /// b-leg's of hers: it leaves on that ACK (RFC 3261 §14.1). Boxed: every
+    /// turn future holding a call carries its size.
     #[serde(default)]
     pub pending_a_realign: Option<Box<PendingResync>>,
 }
