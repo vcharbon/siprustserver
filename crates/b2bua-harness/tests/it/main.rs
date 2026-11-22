@@ -226,6 +226,7 @@ mod release_all_owed;
 mod release_consult_answer;
 mod release_event;
 mod release_reason;
+mod release_reroute_awaits_ack;
 mod reliable_1xx_crossing_cancel;
 mod reliable_1xx_giveup_in_dialog;
 mod reliable_1xx_out_of_order;

@@ -12,17 +12,16 @@
 //! that offer rejecting every stream ahead of the rollback's BYE.
 
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
-use std::sync::Arc;
 use std::time::Duration;
 
 use b2bua_harness::{settle_until, B2buaSut};
 use call::CdrEventType;
 
+use crate::common::held_acks::reinvite_acks_held;
 use crate::common::sdp::apart_from_origin;
 use scenario_harness::{Agent, Dialog, Harness, ServerTxn};
 use sip_message::generators::InDialogMethod;
-use sip_net_testkit::{RecordedSipEntry, SendDelay};
+use sip_net_testkit::RecordedSipEntry;
 
 /// A's offer in her INVITE, where she makes one.
 const ALICE_OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 8\r\na=rtpmap:8 PCMA/8000\r\na=sendrecv\r\n";
@@ -157,31 +156,6 @@ impl ARealignDue {
     }
 }
 
-/// The fabric's hold on A's ACKs of her re-INVITE's 2xx, those on another
-/// CSeq number than her first ACK's (the ACK of her INVITE's 2xx, never
-/// held): the n-th of them is held `holds[n]`, every later one the last of
-/// `holds`; with `holds` empty, nothing is held.
-fn alices_reinvite_acks_held(alice: SocketAddr, holds: &'static [Duration]) -> SendDelay {
-    let first_cseq = AtomicU32::new(0);
-    let sent = AtomicUsize::new(0);
-    Arc::new(move |src, _dst, datagram| {
-        if src != alice || !datagram.starts_with(b"ACK ") {
-            return None;
-        }
-        let cseq = sip_message::sniff::cseq_number(datagram)?;
-        let first = match first_cseq.compare_exchange(0, cseq, Ordering::Relaxed, Ordering::Relaxed)
-        {
-            Ok(_) => cseq,
-            Err(seen) => seen,
-        };
-        if cseq == first {
-            return None;
-        }
-        let n = sent.fetch_add(1, Ordering::Relaxed);
-        holds.get(n).or(holds.last()).copied()
-    })
-}
-
 /// A INVITEs B, with the first offer as `first` has it, and the call is set
 /// up. A re-INVITEs B with an offer, B answers 200 and A receives it; she
 /// ACKs it when `alice_acks`, over a fabric holding her ACKs as `holds` says.
@@ -198,11 +172,8 @@ async fn a_realign_due(
 ) -> ARealignDue {
     let (alice_port, bob_port, b2bua_port, charlie_port) = (5641 + n, 5651 + n, 5661 + n, 5671 + n);
     let alice_addr: SocketAddr = format!("127.0.0.1:{alice_port}").parse().expect("an address");
-    let h = Harness::with_transit_delay_and_send_delay(
-        name,
-        1,
-        alices_reinvite_acks_held(alice_addr, holds),
-    );
+    let h =
+        Harness::with_transit_delay_and_send_delay(name, 1, reinvite_acks_held(alice_addr, holds));
     let alice = h.agent("alice", &alice_addr.to_string()).await;
     let bob = h.agent("bob", &format!("127.0.0.1:{bob_port}")).await;
     let charlie = h.agent("charlie", &format!("127.0.0.1:{charlie_port}")).await.transfer_target();
