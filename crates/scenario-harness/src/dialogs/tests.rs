@@ -296,6 +296,57 @@ fn a_2xx_on_a_dialog_a_final_ended_is_a_verdict() {
     assert_eq!(v.kind.refusal(), None, "a response is taken");
 }
 
+/// A UAS (local tag `B1`) that sent a 183 to the caller `A1`'s INVITE (CSeq
+/// 1), an INFO (CSeq 1) on that early dialog, then a 487 to the INVITE.
+fn refused_after_its_own_info() -> DialogTable {
+    let mut t = DialogTable::new(BackwardsCseq::Verdict);
+    assert_eq!(t.judge_received(&request("INVITE", 1, "A1", None), 0), None);
+    t.note_sent_response(&response(183, "INVITE", 1, "A1", "B1"), 0);
+    t.note_sent_request(&request("INFO", 1, "B1", Some("A1")));
+    t.note_sent_response(&response(487, "INVITE", 1, "A1", "B1"), 0);
+    t
+}
+
+/// The caller's 200 to the UAS's INFO, From the UAS's tag `B1`.
+fn info_ok() -> SipResponse {
+    response(200, "INFO", 1, "B1", "A1")
+}
+
+/// RFC 3261 §12.3, §17.2.1: until the peer's ACK of the final the UA sent
+/// reaches it, the peer may answer a request it took on the live early
+/// dialog; an ACK of another INVITE proves nothing.
+#[test]
+fn a_2xx_crossing_the_uas_own_final_is_no_verdict() {
+    let mut t = refused_after_its_own_info();
+    assert_eq!(t.judge_received(&request("ACK", 2, "A1", Some("B1")), 0), None);
+    assert_eq!(t.note_received_response(&info_ok(), 0), None);
+    assert_eq!(t.state(CALL, "B1", "A1"), Some(DialogState::EndedByFinal(487)));
+}
+
+/// Once the peer's ACK of the UA's final arrived, the peer knew the dialog
+/// ended: a 2xx it sends after is a verdict.
+#[test]
+fn a_2xx_after_the_ack_of_the_uas_own_final_is_a_verdict() {
+    let mut t = refused_after_its_own_info();
+    assert_eq!(t.judge_received(&request("ACK", 1, "A1", Some("B1")), 0), None);
+    assert_eq!(
+        kind(t.note_received_response(&info_ok(), 0)),
+        Some(VerdictKind::EndedAnswered { status: 200, by: 487 })
+    );
+}
+
+/// A new INVITE of the same caller follows the final of its first one (RFC
+/// 3261 §8.1.3.5): a 2xx after it is a verdict, its ACK unseen.
+#[test]
+fn a_2xx_after_the_callers_retry_invite_is_a_verdict() {
+    let mut t = refused_after_its_own_info();
+    assert_eq!(t.judge_received(&request("INVITE", 2, "A1", None), 0), None);
+    assert_eq!(
+        kind(t.note_received_response(&info_ok(), 0)),
+        Some(VerdictKind::EndedAnswered { status: 200, by: 487 })
+    );
+}
+
 /// The 481 such a request deserves, a PRACK's 2xx (RFC 3262 §3) and a 2xx
 /// before the final draw nothing.
 #[test]

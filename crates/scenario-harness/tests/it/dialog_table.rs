@@ -5,7 +5,9 @@
 //! one out, and a waiver that covers nothing is dead.
 
 use scenario_harness::dialogs::{DIALOG_CSEQ_SKIP, DIALOG_UNKNOWN};
-use scenario_harness::{Agent, Dialog, Harness, StepError, WaiverScope};
+use scenario_harness::{
+    Agent, ClientInvite, Dialog, Harness, InDialogTxn, ServerTxn, StepError, WaiverScope,
+};
 use sip_message::generators::InDialogMethod;
 use sip_message::parser::custom::CustomParser;
 use sip_message::{SipMessage, SipParser};
@@ -181,6 +183,56 @@ async fn a_drained_request_fails_a_harness_dropped_without_finish() {
     h.advance(std::time::Duration::from_millis(200)).await;
     assert_eq!(alice.drain().await, 1);
     drop(h);
+}
+
+/// alice calls bob, who rings and sends her an INFO on the early dialog,
+/// which she takes; then bob refuses the call 487. Returns her INVITE, bob's
+/// server transaction, the INFO as alice holds it and bob's INFO transaction.
+async fn refused_after_an_early_info(
+    alice: &Agent,
+    bob: &Agent,
+) -> (ClientInvite, ServerTxn, ServerTxn, InDialogTxn) {
+    let mut call = alice.invite(bob).with_sdp(OFFER).send().await;
+    let mut uas = bob.receive("INVITE").await;
+    uas.respond(180, "Ringing").send().await;
+    call.expect(180).await;
+    let info = uas.dialog().send_request(InDialogMethod::Info).send().await;
+    let at_alice = alice.receive("INFO").await;
+    uas.respond(487, "Request Terminated").await;
+    (call, uas, at_alice, info)
+}
+
+/// RFC 3261 §17.2.1: alice answers bob's early INFO before his 487 reaches
+/// her, so her 200 crosses his final and is no verdict at bob.
+#[tokio::test(start_paused = true)]
+async fn a_2xx_crossing_the_callees_final_passes() {
+    let h = Harness::new("dialog-table-crossing-final");
+    let alice = h.agent("alice", "127.0.0.1:5060").await;
+    let bob = h.agent("bob", "127.0.0.1:5070").await;
+    let (mut call, mut uas, mut at_alice, mut info) =
+        refused_after_an_early_info(&alice, &bob).await;
+    at_alice.respond(200, "OK").await;
+    info.expect(200).await;
+    call.expect(487).await;
+    uas.expect_ack().await;
+    h.finish().await;
+}
+
+/// alice answers bob's early INFO 200 after she ACKed his 487: the ACK of
+/// his final reached bob first, so the 200 answers a dialog she knew ended.
+#[tokio::test(start_paused = true)]
+#[should_panic(expected = "bob: 200 to INFO on a dialog a 487 ended")]
+async fn a_2xx_after_the_ack_of_the_callees_final_fails() {
+    let h = Harness::new("dialog-table-answered-after-ack");
+    let alice = h.agent("alice", "127.0.0.1:5060").await;
+    let bob = h.agent("bob", "127.0.0.1:5070").await;
+    let (mut call, mut uas, mut at_alice, mut info) =
+        refused_after_an_early_info(&alice, &bob).await;
+    call.expect(487).await;
+    uas.expect_ack().await;
+    at_alice.respond(200, "OK").await;
+    info.expect(200).await;
+    h.finish().await;
 }
 
 /// A `dialog-…` waiver naming no UA covers nothing: every dialog verdict is a
