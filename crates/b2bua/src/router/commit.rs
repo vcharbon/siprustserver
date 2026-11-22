@@ -179,7 +179,7 @@ pub(super) async fn commit_turn(
     now_ms: i64,
     turn: &(dyn std::fmt::Display + Sync),
     trigger: Option<&CallEvent>,
-    mut notes: Option<&mut TurnScope>,
+    notes: Option<&mut TurnScope>,
 ) -> bool {
     let Some(prepared) = prepare(ctx, call_ref, result, now_ms, turn, trigger) else {
         drain_notes(ctx, call_ref, notes);
@@ -193,7 +193,7 @@ pub(super) async fn commit_turn(
         }
         Err(tripped) => {
             drop(prepared);
-            if let Some(scope) = notes.as_deref_mut() {
+            if let Some(scope) = notes {
                 super::notes::drain_discarded(ctx, scope);
             }
             let safepoint = ctx.state.peek(call_ref);
