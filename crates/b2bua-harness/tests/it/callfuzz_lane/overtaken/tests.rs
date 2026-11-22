@@ -218,3 +218,48 @@ async fn a_failure_unrelated_to_the_overtaken_request_stays_a_failure() {
     assert!(!excuses(&info, &at_goal("s", "invite"), &wrong_status("s", 504), party));
     assert!(!excuses(&[], &at_goal("s", "early_request"), &wrong_status("s", 500), party));
 }
+
+/// The barrier's timeouts, the controller's own and a party's wait, on an
+/// answered call.
+fn barrier_timeouts_excused(overtaken: &[Overtaken]) -> [bool; 2] {
+    let own = excuses(
+        overtaken,
+        &FailedAt::at_barrier("transferred"),
+        &barrier_timeout("transferred"),
+        party,
+    );
+    let waited = excuses(overtaken, &at_goal("s", "bye"), &barrier_timeout("transferred"), party);
+    [own, waited]
+}
+
+/// A REFER, or an INVITE inside its dialog, overtaken on an answered call and
+/// never made good: the call state waited for behind it never comes, and the
+/// barrier's timeout is excused, whichever wait gave up; the 2xx to the
+/// INVITE that set the call up, sent after the refusal, is no later INVITE.
+#[tokio::test(start_paused = true)]
+async fn a_barrier_behind_an_overtaken_refer_or_reinvite_left_undone_is_excused() {
+    for method in ["REFER", "INVITE"] {
+        let overtaken = overtaken_after(true, &overtaken_by_an_update(method, 200)).await;
+        assert!(overtaken[0].answered && overtaken[0].left_undone, "{overtaken:?}");
+        assert_eq!(barrier_timeouts_excused(&overtaken), [true; 2], "{method}");
+    }
+}
+
+/// A REFER or an in-dialog INVITE a later one of its method on its dialog
+/// made good, and any other overtaken request on an answered call, leave a
+/// barrier's timeout a failure.
+#[tokio::test(start_paused = true)]
+async fn a_barrier_behind_an_overtaken_request_made_good_or_of_another_method_stays_a_failure() {
+    for method in ["REFER", "INVITE"] {
+        let mut sent = Vec::from(overtaken_by_an_update(method, 200));
+        let success = if method == "REFER" { 202 } else { 200 };
+        sent.extend([Sent::Peer(request(method, 4)), Sent::Ua(answer(success, method, 4))]);
+        let overtaken = overtaken_after(true, &sent).await;
+        assert!(!overtaken[0].left_undone, "{overtaken:?}");
+        assert_eq!(barrier_timeouts_excused(&overtaken), [false; 2], "{method} made good");
+    }
+    for method in ["INFO", "UPDATE", "PRACK"] {
+        let overtaken = overtaken_after(true, &overtaken_by_an_update(method, 200)).await;
+        assert_eq!(barrier_timeouts_excused(&overtaken), [false; 2], "{method}");
+    }
+}

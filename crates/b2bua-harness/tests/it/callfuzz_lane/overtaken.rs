@@ -34,6 +34,12 @@ pub(super) struct Overtaken {
     /// Whether the recording shows a 2xx final to an INVITE of its Call-ID:
     /// its leg's call got past setup.
     answered: bool,
+    /// Whether it is a REFER or an INVITE inside its dialog (a To-tag) and no
+    /// later request of its sender of that method on that dialog (its
+    /// Call-ID, From-tag and To-tag, a CSeq above its own) took a 2xx after
+    /// the refusal: the transfer or the session change it asked for never
+    /// happened.
+    left_undone: bool,
 }
 
 /// Every request `events` show refused 500 after the loss of its first copy
@@ -55,10 +61,12 @@ pub(super) fn overtaken_requests(events: &[Stamped<SignalingNetworkEvent>]) -> V
 ///   a party that give-up reached;
 /// - the call state the scenario waited for behind R: a barrier's `Timeout`,
 ///   whichever wait gave up on it, on a call whose INVITE on R's leg took no
-///   2xx.
+///   2xx, or with R a REFER or an in-dialog INVITE left undone (no later one
+///   of its method on its dialog took a 2xx).
 ///
-/// A barrier's timeout on a call R's leg set up, any other status or party,
-/// and any other cause stay failures.
+/// A barrier's timeout on a call R's leg set up behind any other R, or behind
+/// a REFER or an in-dialog INVITE a later one of its method made good, any
+/// other status or party, and any other cause stay failures.
 pub(super) fn excuses(
     overtaken: &[Overtaken],
     at: &FailedAt,
@@ -72,7 +80,7 @@ pub(super) fn excuses(
             (*got == 500 && among(&r.refused, who))
                 || ((500..600).contains(got) && at_invite && among(&r.invite_failed, who))
         }
-        StepError::Timeout { who, .. } => party(who).is_none() && !r.answered,
+        StepError::Timeout { who, .. } => party(who).is_none() && (!r.answered || r.left_undone),
         _ => false,
     })
 }
@@ -111,7 +119,29 @@ fn overtaken_at(events: &[Stamped<SignalingNetworkEvent>], at: usize) -> Option<
             && id.cseq_method == Some("INVITE")
             && id.call_id == lost.call_id
     });
-    Some(Overtaken { method: method.to_string(), refused, invite_failed, answered })
+    let mid_call = lost.to_tag.is_some() && matches!(method, "REFER" | "INVITE");
+    let left_undone = mid_call && !made_good(&after[refusal + 1..], method, &lost, &from_tag);
+    Some(Overtaken { method: method.to_string(), refused, invite_failed, answered, left_undone })
+}
+
+/// Whether the events `after` the refusal show a 2xx to a later request of
+/// `lost`'s sender of `method` on its dialog: its Call-ID, From-tag and
+/// To-tag, a CSeq above `lost`'s.
+fn made_good(
+    after: &[Stamped<SignalingNetworkEvent>],
+    method: &str,
+    lost: &Identity<'_>,
+    from_tag: &str,
+) -> bool {
+    after.iter().filter_map(sent).any(|(_, _, raw)| {
+        let id = sniff::identity(raw);
+        id.status.is_some_and(|s| (200..300).contains(&s))
+            && id.cseq_method == Some(method)
+            && id.call_id == lost.call_id
+            && id.to_tag == lost.to_tag
+            && sniff::from_tag(raw) == from_tag
+            && id.cseq > lost.cseq
+    })
 }
 
 /// The addresses the give-up of the INVITE reached, as the events `after`
