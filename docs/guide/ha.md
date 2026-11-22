@@ -211,12 +211,16 @@ All values are the defaults.
 | Worker killed or node lost | The probe of the proxy reads it dead in 2.6 to 3.6 s. Each backup confirms on its own replication stream. | The backup takes over the calls with work in flight, 6 to 8 s at most after the verdict. A quiet call moves on its next request (ADR-0047). | Retransmissions, then the call continues. |
 | Worker slow: its probe answers arrive between 1.6 s and 2 s after the probe | The proxy reads it slow in 2.6 to 3.6 s, and alive after three answers in time. | Nothing is taken over. The worker keeps its calls and gets no new call (ADR-0069). | Slower answers from that worker. |
 | Worker slow, then killed | The proxy reads it dead at most 3 s after the last answer it received from it: the slow window and one probe interval. | As for a kill. | As for a kill. |
+| Worker slow, then restarted | Its first answer names a new identity: the proxy reads it dead. | As for a kill. | As for a kill. |
+| A CANCEL crosses to the other proxy while a worker is slow | That proxy holds no memo of the INVITE. It sends the CANCEL to the first worker in rank that serves dialogs, which can be the slow worker the INVITE went past. | The worker holding the INVITE does not get the CANCEL. | The call rings until its own timers end it. |
+| One proxy reads every worker slow, the other reads them alive | The proxy stays announced. | It answers the normal new calls of its flows 503. | The SBC retries those calls elsewhere. |
 | Worker alive, its answers later than 2 s | The proxy reads it dead, as a killed worker. Its backup still hears its stream. | Its requests inside a dialog go to the backup while it runs, until it exits or answers in time again. | Requests of its calls answered by the backup. |
 | Every worker turns slow in the same probe round | From the last answer in time to the first late one, more than 2 s can pass: each proxy reads isolated meanwhile. | The route guards withdraw the POP. It returns after the first late answer and the guard's hold. | The SBC sends the POP's traffic to the other POPs for about 10 s. |
 | Worker restarted | It returns empty, with a new identity. | It takes its calls back from the backups. It reads ready when it holds them, or after 10 s if it cannot reach a peer (ADR-0014). | Nothing more than for the kill. |
 | Backup lost | The stream of the primary to it ends. | The primary continues. Its calls have no backup until the backup returns and completes its bootstrap. | Nothing. |
 | Replication link cut, then restored | A stream with no data for 2 s reads down. | The puller connects again and continues from its position (ADR-0045). | Nothing, if the cut is short. |
 | One proxy lost | The routers remove its routes. | The other proxy routes with the cookie. | Retransmissions. |
+| The POP returns after a total outage | Its proxies read fit again. | It takes its full share at once. The workers' admission refuses the excess with fast 503s. | The SBC retries the refused calls elsewhere. |
 | A backend answers slowly, inside its budget | The request has a deadline (ADR-0039). | The call waits for the answer. | A longer setup. |
 
 At the end of the grace of a planned exit, the worker ends each call that no backup holds. A

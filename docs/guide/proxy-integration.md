@@ -42,11 +42,8 @@ proxy binds by name (not `0.0.0.0`), with no user part and no To-tag, is answere
 of a worker. With no such worker it gets no answer, and the supervisor's timeout takes the POP
 out. It uses none of the new-call budget.
 
-**The return after an outage.** When the proxy is fit again after a spell with no worker alive
-or slow, it takes 20 % of its new-call rate until the first new call, rising to the whole in
-30 s from it. No ramp follows an isolation of the proxy healed on the same worker processes. A
-worker back from dead or slow gets 20 % of its first per-worker rate, and climbs from there
-once a new call is placed on it.
+**The return after an outage.** A POP back in rotation takes its full share of new calls at
+once. The workers' admission refuses any excess with fast 503s, which the SBC retries elsewhere.
 
 ## The recommended mode
 
@@ -215,7 +212,6 @@ it names each problem in one message (ADR-0046).
 | `HEALTH_INTERVAL_MS`, `HEALTH_TIMEOUT_MS`, `HEALTH_THRESHOLD` | 1000, 1600, 2 | The probe of the workers. |
 | `HEALTH_SLOW_WINDOW_MS`, `HEALTH_RECOVER_PROBES` | 2000, 3 | A late answer inside the window makes a worker slow, not dead. The answers in time that make a slow worker alive. |
 | `PROXY_LOCAL_OPTIONS` | `auto` | `auto`: the proxy answers the supervision OPTIONS. `off`: it sends every OPTIONS to a worker. |
-| `PROXY_RAMP_START_PCT`, `PROXY_RAMP_MS` | 20, 30 000 | The return after an outage: the share of the rate at the start, and the time to the whole. |
 | `PROXY_SELF_GATE_CPS_RATE`, `PROXY_SELF_GATE_CPS_SIZE` | 100, 50 | The new calls a second that one proxy accepts from the outside, and the burst. Above the rate, the proxy answers 503. Set the rate above the new calls a second of the full deployment: when one proxy is lost, the other proxy accepts all of them. |
 | `LB_CAP_INITIAL_CPS`, `LB_CAP_CEILING_CPS` | 30, 200 | The new calls a second that the proxy sends to one worker: the first value, and the highest. The proxy moves the value with the load that the worker reports. |
 | `PROXY_BRANCH_MEMO_MAX_BYTES` | 192 MiB | The size of the memory of INVITEs. The proxy refuses to start if it cannot hold the calls of the rate above. |
@@ -238,7 +234,6 @@ internal VIP and `B2BUA_CONTACT_ADDRESS` set to the external VIP.
 | `sip_proxy_worker_slow_total{worker}` | Each turn of a worker to slow. |
 | `sip_proxy_probe_late_answers_total{worker}` | Probe answers that came after the reply window and inside the slow window. |
 | `sip_proxy_local_options_total{answer}` | Supervision OPTIONS answered by the proxy (`ok`) or dropped with no worker (`dropped`). |
-| `sip_proxy_intake_ramp_active` | 1 while the proxy takes a reduced rate after an outage. |
 | `sip_proxy_self_external_invites_rejected_total` | New calls the proxy refused for its own load. |
 | `sip_proxy_lb_rate_cap_spilled_total` | New calls moved to the next worker in rank. |
 | `sip_proxy_external_untrusted_total{kind}` | Messages on the external face that claimed an internal role. |
