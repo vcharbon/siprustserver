@@ -1,5 +1,6 @@
 //! `SimulatedHttpNetwork` connections: a backend client's pool (most recently
-//! returned first, idle timeout, a closed connection never handed out) and a
+//! returned first, idle timeout, a closed connection never handed out, the
+//! ejection rules closing a broken or shedding backend's connection) and a
 //! balanced address choosing a backend per new connection, on the paused
 //! clock.
 
@@ -9,6 +10,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
+use http_net::backend::metrics;
+use http_net::ejection::CloseCause;
 use http_net::failures::FailureCause;
 use http_net::{
     ClientSettings, HttpClient, HttpRequest, HttpResponse, HttpService, HttpTransport,
@@ -26,7 +29,7 @@ fn addr(s: &str) -> SocketAddr {
 
 /// Answers `status` after `delay`, counting the connections it hears of.
 struct Backend {
-    status: u16,
+    status: Mutex<u16>,
     delay: Mutex<Duration>,
     served: AtomicUsize,
     opened: AtomicUsize,
@@ -36,7 +39,7 @@ struct Backend {
 impl Backend {
     fn new(status: u16) -> Arc<Self> {
         Arc::new(Self {
-            status,
+            status: Mutex::new(status),
             delay: Mutex::new(Duration::ZERO),
             served: AtomicUsize::new(0),
             opened: AtomicUsize::new(0),
@@ -57,7 +60,7 @@ impl HttpService for Backend {
         if !delay.is_zero() {
             tokio::time::sleep(delay).await;
         }
-        HttpResponse::status(self.status)
+        HttpResponse::status(*self.status.lock().unwrap())
     }
 
     fn connection_opened(&self) {
@@ -119,8 +122,8 @@ async fn a_pooled_client_keeps_its_backend_for_every_sequential_request() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn an_error_answer_closes_its_connection_and_the_next_one_spreads_again() {
-    let p = pair(503).await;
+async fn a_broken_backends_first_answer_closes_its_connection_and_the_next_one_spreads_again() {
+    let p = pair(500).await;
     let c = client(&p.net);
     for _ in 0..4 {
         get(&c).await.unwrap();
@@ -128,22 +131,70 @@ async fn an_error_answer_closes_its_connection_and_the_next_one_spreads_again() 
     assert_eq!(
         (p.a.served(), p.b.served()),
         (1, 3),
-        "A's 503 closed it; the new connection, B's, stays"
+        "A's 500 closed it; the new connection, B's, stays"
     );
     assert_eq!(p.net.connections_open(addr(A)), 0);
     assert_eq!(p.net.connections_open(addr(B)), 1);
 }
 
+/// Each close the client makes outside an answer is counted by its cause,
+/// under the target's own name.
+#[tokio::test(start_paused = true)]
+async fn an_expired_an_abandoned_and_a_retired_connection_are_counted_by_cause() {
+    const COUNTED: &str = "10.0.0.8:80";
+    let p = pair(200).await;
+    p.net.balance(addr(COUNTED), &[addr(A)], Pick::RoundRobin);
+    let target = Arc::new(ResolvedTarget::addr(addr(COUNTED)));
+    let c = Arc::new(p.net.clone()).client(target, &ClientSettings::with_max_in_flight(8));
+    get(&c).await.unwrap();
+    tokio::time::sleep(ClientSettings::default().pool_idle_timeout).await;
+    get(&c).await.unwrap();
+    *p.a.delay.lock().unwrap() = Duration::from_millis(100);
+    assert!(tokio::time::timeout(Duration::from_millis(50), get(&c)).await.is_err());
+    *p.a.delay.lock().unwrap() = Duration::ZERO;
+    get(&c).await.unwrap();
+    drop(c);
+    let closes = |cause| metrics::connection_closes(COUNTED, cause);
+    assert_eq!(
+        (closes(CloseCause::Idle), closes(CloseCause::Timeout), closes(CloseCause::Rotation)),
+        (1, 1, 1)
+    );
+    assert_eq!(p.net.connections_open(addr(A)), 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_shedding_backends_third_answer_in_a_row_closes_its_connection() {
+    let p = pair(503).await;
+    let c = client(&p.net);
+    for _ in 0..5 {
+        get(&c).await.unwrap();
+    }
+    assert_eq!((p.a.served(), p.b.served()), (3, 2), "three 503s on A's connection, then B's");
+    assert_eq!(p.net.connections_open(addr(A)), 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_shed_answer_between_two_successes_closes_nothing() {
+    let p = pair(200).await;
+    let c = client(&p.net);
+    for status in [200, 503, 200, 503, 503, 200, 429, 200] {
+        *p.a.status.lock().unwrap() = status;
+        assert_eq!(get(&c).await.unwrap().status, status);
+    }
+    assert_eq!((p.a.served(), p.b.served()), (8, 0), "one connection throughout");
+    assert_eq!(p.net.connections_opened(addr(A)), 1);
+}
+
 #[tokio::test(start_paused = true)]
 async fn past_the_close_budget_an_error_answer_keeps_the_connection() {
-    let p = pair(503).await;
+    let p = pair(500).await;
     let mut settings = ClientSettings::with_max_in_flight(8);
-    settings.error_closes_per_s = 0;
+    settings.ejection.closes_per_s = 0;
     let c = Arc::new(p.net.clone()).client(Arc::new(ResolvedTarget::addr(addr(FRONT))), &settings);
     for _ in 0..5 {
-        assert_eq!(get(&c).await.unwrap().status, 503);
+        assert_eq!(get(&c).await.unwrap().status, 500);
     }
-    assert_eq!(p.a.served(), 5, "every request back on the backend that answered 503");
+    assert_eq!(p.a.served(), 5, "every request back on the backend that answered 500");
     assert_eq!(p.net.connections_opened(addr(A)), 1);
 }
 

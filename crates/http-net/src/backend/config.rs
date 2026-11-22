@@ -15,12 +15,14 @@
 //! | `<P>_LOOKUP_MAX_STUCK` | lookups left running past their bound before none starts | 4 |
 //!
 //! Unset or blank takes the backend's default; a duration or a count that is
-//! not a positive integer, or a health path not starting with `/`, is an
-//! error naming it.
+//! not a positive integer, or a health path not starting with `/`, refuses
+//! the set with the transport keys' refusals, one error naming every
+//! variable that does not read.
 
 use std::time::Duration;
 
 use super::BreakerConfig;
+use crate::env_reader::EnvReader;
 use crate::resolved_target::LookupSettings;
 use crate::settings::ClientSettings;
 
@@ -53,56 +55,40 @@ impl BackendConfig {
     }
 
     /// The config the env states under `prefix`, each unset value taken from
-    /// `defaults`. See the module doc.
+    /// `defaults`; an `Err` naming every variable that does not read. See the
+    /// module doc.
     pub fn from_lookup(
         prefix: &str,
         defaults: &BackendConfig,
         lookup: impl Fn(&str) -> Option<String>,
     ) -> Result<Self, String> {
-        let stated = |suffix: &str| {
-            let key = format!("{prefix}_{suffix}");
-            let value = lookup(&key).filter(|v| !v.trim().is_empty());
-            (key, value)
-        };
-        let positive = |suffix: &str, default: u64| -> Result<u64, String> {
-            match stated(suffix) {
-                (_, None) => Ok(default),
-                (key, Some(v)) => match v.trim().parse::<u64>() {
-                    Ok(0) => Err(format!("{key}=0: must be positive")),
-                    Ok(n) => Ok(n),
-                    Err(e) => Err(format!("{key}={v:?}: {e}")),
-                },
+        let mut env = EnvReader::new(prefix, lookup);
+        let health_path = match env.stated("HEALTH_PATH") {
+            None => defaults.breaker.health_path.clone(),
+            Some(path) if path.starts_with('/') => path,
+            Some(path) => {
+                let key = env.key("HEALTH_PATH");
+                env.refuse(format!("{key}={path:?}: a path starts with /"));
+                defaults.breaker.health_path.clone()
             }
         };
-        let ms = |suffix: &str, default: Duration| -> Result<Duration, String> {
-            let default = u64::try_from(default.as_millis()).unwrap_or(u64::MAX);
-            positive(suffix, default).map(Duration::from_millis)
-        };
-        let count = |suffix: &str, default: usize| -> Result<usize, String> {
-            let n = positive(suffix, default as u64)?;
-            usize::try_from(n).map_err(|_| format!("{prefix}_{suffix}={n}: past this platform"))
-        };
-        let health_path = match stated("HEALTH_PATH") {
-            (_, None) => defaults.breaker.health_path.clone(),
-            (_, Some(path)) if path.trim().starts_with('/') => path.trim().to_string(),
-            (key, Some(path)) => return Err(format!("{key}={path:?}: a path starts with /")),
-        };
         let d = &defaults.breaker;
-        Ok(Self {
-            client: ClientSettings::from_lookup(prefix, &defaults.client, &lookup)?,
+        let config = Self {
+            client: ClientSettings::read(&mut env, &defaults.client),
             breaker: BreakerConfig {
-                window: ms("BREAKER_WINDOW_MS", d.window)?,
-                min_sent: count("BREAKER_REQUESTS", d.min_sent)?,
-                probe_period: ms("BREAKER_PROBE_MS", d.probe_period)?,
-                probe_timeout: ms("BREAKER_PROBE_TIMEOUT_MS", d.probe_timeout)?,
+                window: env.ms("BREAKER_WINDOW_MS", d.window),
+                min_sent: env.count("BREAKER_REQUESTS", 1, d.min_sent),
+                probe_period: env.ms("BREAKER_PROBE_MS", d.probe_period),
+                probe_timeout: env.ms("BREAKER_PROBE_TIMEOUT_MS", d.probe_timeout),
                 health_path,
             },
             lookup: LookupSettings {
-                bound: ms("LOOKUP_TIMEOUT_MS", defaults.lookup.bound)?,
-                max_stuck: count("LOOKUP_MAX_STUCK", defaults.lookup.max_stuck)?,
+                bound: env.ms("LOOKUP_TIMEOUT_MS", defaults.lookup.bound),
+                max_stuck: env.count("LOOKUP_MAX_STUCK", 1, defaults.lookup.max_stuck),
             },
-            attempt: ms("TIMEOUT_MS", defaults.attempt)?,
-        })
+            attempt: env.ms("TIMEOUT_MS", defaults.attempt),
+        };
+        env.finish(config)
     }
 }
 
@@ -177,5 +163,19 @@ mod tests {
             let e = from(&[(key, value)]).expect_err(key);
             assert!(e.contains(key), "{e}");
         }
+    }
+
+    #[test]
+    fn one_refusal_names_every_bad_value_of_both_grammars() {
+        let e = from(&[
+            ("DECIDE_HEALTH_PATH", "health"),
+            ("DECIDE_MAX_BODY_BYTES", "12"),
+            ("DECIDE_LOOKUP_MAX_STUCK", "0"),
+        ])
+        .expect_err("three bad values");
+        for key in ["DECIDE_HEALTH_PATH", "DECIDE_MAX_BODY_BYTES", "DECIDE_LOOKUP_MAX_STUCK"] {
+            assert!(e.contains(key), "{key} in {e}");
+        }
+        assert_eq!(e.matches("; ").count(), 2, "{e}");
     }
 }

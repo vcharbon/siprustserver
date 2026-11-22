@@ -240,6 +240,12 @@ b2bua-runner http_request_breaker_transitions_total counter capped:256 {peer,to}
 b2bua-runner http_request_breaker_transitions_overflow_total counter fixed {}
 b2bua-runner http_request_error_answers_total counter capped:256 {peer,connection}
 b2bua-runner http_request_error_answers_overflow_total counter fixed {}
+b2bua-runner http_request_connection_closes_total counter capped:256 {peer,cause}
+b2bua-runner http_request_connection_closes_overflow_total counter fixed {}
+b2bua-runner http_request_connection_closes_budget_exhausted_total counter capped:256 {peer}
+b2bua-runner http_request_connection_closes_budget_exhausted_overflow_total counter fixed {}
+b2bua-runner http_request_body_refused_total counter capped:256 {peer,cause}
+b2bua-runner http_request_body_refused_overflow_total counter fixed {}
 b2bua-runner http_request_poisoned_lock_recoveries_total counter fixed {lock}
 b2bua-runner metric_values_poisoned_lock_recoveries_total counter fixed {lock}
 b2bua-runner sip_net_poisoned_lock_recoveries_total counter fixed {lock}

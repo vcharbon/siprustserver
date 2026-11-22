@@ -18,7 +18,7 @@ use std::sync::OnceLock;
 use metric_catalogue::{label_values, Dim, Family, Labels};
 use metric_values::OpenRows;
 
-/// The classified cause of a failed request. Everything the reqwest/hyper error
+/// The classified cause of a failed request. Everything the client's error
 /// chain can tell us apart, and nothing invented.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum FailureCause {
@@ -39,9 +39,10 @@ pub enum FailureCause {
     Unreachable,
     /// The name did not resolve.
     Dns,
-    /// The response body passed [`MAX_BODY_BYTES`], declared or streamed.
+    /// The response body passed the client's cap
+    /// ([`ClientSettings::max_body_bytes`]), declared or streamed.
     ///
-    /// [`MAX_BODY_BYTES`]: crate::MAX_BODY_BYTES
+    /// [`ClientSettings::max_body_bytes`]: crate::ClientSettings::max_body_bytes
     BodyTooLarge,
     /// Anything the chain does not identify.
     Other,

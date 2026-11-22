@@ -7,7 +7,11 @@ use async_trait::async_trait;
 
 mod addressed;
 #[cfg(feature = "real")]
+mod capped_body;
+#[cfg(feature = "real")]
 mod cause;
+#[cfg(feature = "real")]
+mod connection;
 #[cfg(feature = "real")]
 mod listener;
 pub mod peer;
@@ -17,7 +21,7 @@ mod real;
 mod real_client;
 mod receipt;
 #[cfg(feature = "real")]
-mod reqwest_resolve;
+mod target_resolve;
 
 pub use addressed::AddressedClient;
 #[cfg(feature = "real")]
@@ -28,9 +32,11 @@ use crate::failures::FailureCause;
 use crate::resolved_target::ResolvedTarget;
 use crate::settings::ClientSettings;
 
-/// The largest body the real transport carries either way: a response past
-/// it fails [`FailureCause::BodyTooLarge`], a request past it is answered
-/// `413 Content Too Large` without reaching the service.
+/// The largest request body the real server carries, a request past it
+/// answered `413 Content Too Large` without reaching the service; and the
+/// largest answer body a client reads unless its settings state another
+/// (`max_body_bytes`), an answer past it failing
+/// [`FailureCause::BodyTooLarge`].
 pub const MAX_BODY_BYTES: usize = 10 * 1024 * 1024;
 
 /// A one-shot HTTP request.
@@ -198,7 +204,7 @@ pub trait HttpTransport: Send + Sync + 'static {
     /// A client of its own for the backend `target`, holding its connections
     /// as `settings` state. The default resolves `target` on each request and
     /// sends through [`request`](Self::request); the real transport builds a
-    /// `reqwest` client whose URL carries the target's name and whose name
+    /// pooled client whose URL carries the target's name and whose name
     /// lookups go through `target`.
     fn client(
         self: Arc<Self>,
@@ -230,8 +236,8 @@ pub enum BindError {
     Io(String),
 }
 
-/// A transport-level request failure, classified as `reqwest` failures are
-/// ([`FailureCause`]). Distinct from a non-2xx response: a [`HttpResponse`]
+/// A transport-level request failure, classified as the real client's
+/// failures are ([`FailureCause`]). Distinct from a non-2xx response: a [`HttpResponse`]
 /// with `status >= 400` is still `Ok` here.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("{cause} to {peer}: {detail}")]

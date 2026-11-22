@@ -119,7 +119,7 @@ Full definitions: [docs/glossary/http-call-decision.md](docs/glossary/http-call-
 
 Full definitions: [docs/glossary/outbound-backend.md](docs/glossary/outbound-backend.md).
 
-- **Backend client**: one backend's rotated `reqwest` client, resolved target, in-flight cap, breaker and retry rule (`http_net`).
+- **Backend client**: one backend's rotated pooled client, resolved target, in-flight cap, breaker, retry, ejection (`http_net`).
 - **Resolved target**: a backend's address, or its name looked up on the request path; forget, refresh, serve stale.
 - **Backend breaker**: opens when its window saw requests sent and no HTTP response at all; any answer to a health probe closes it.
 - **Decision backend failure**: no usable answer from the decision backend; the stack answers a bare 503. A reject is not one.

@@ -4,7 +4,7 @@ version = "0.1.0"
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
-description = "Reusable unary HTTP transport seam (request/response, no streaming) and the outbound backend client on it (name lookup, in-flight cap, rotation, breaker, retry), and a feature-gated RealHttpNetwork (hyper + reqwest) for production. The simulated fabric, the recording decorator and the scripted service live in http-net-testkit. Bodies are opaque bytes — JSON/serde lives in the consumer."
+description = "Reusable unary HTTP transport seam (request/response, no streaming) and the outbound backend client on it (name lookup, in-flight cap, rotation, breaker, retry, per-connection ejection, a body cap), and a feature-gated RealHttpNetwork (hyper server, hyper-util pooled client) for production. The simulated fabric, the recording decorator and the scripted service live in http-net-testkit. Bodies are opaque bytes — JSON/serde lives in the consumer."
 
 [package.metadata.purity]
 tier = "shell"
@@ -16,14 +16,16 @@ side = "blind"
 workspace = true
 
 [features]
-# The real (hyper server + pooled reqwest client) transport. Off by default so
-# leaf test crates never compile the HTTP-framework tree; the runner turns it on.
+# The real (hyper server + pooled hyper-util client) transport. Off by default
+# so leaf test crates never compile the HTTP-framework tree; the runner turns it
+# on.
 real = [
-    "dep:reqwest",
     "dep:hyper",
     "dep:hyper-util",
     "dep:http-body-util",
     "dep:bytes",
+    "dep:socket2",
+    "dep:tower-service",
 ]
 
 [dependencies]
@@ -36,15 +38,17 @@ async-trait = { workspace = true }
 tracing = { workspace = true }
 
 # --- real transport only (feature "real") ---
-# Pooled, keep-alive HTTP client (the b2bua makes many small calls). No TLS —
-# internal cluster http:// only. Workspace-pinned so the process links exactly
-# one reqwest major (shared with the OTLP exporter).
-reqwest = { workspace = true, optional = true }
-# Real HTTP/1.1 server with connection keep-alive.
-hyper = { version = "1", features = ["http1", "server"], optional = true }
-hyper-util = { version = "0.1", features = ["tokio"], optional = true }
+# HTTP/1.1 server with connection keep-alive, and the pooled keep-alive client
+# (the b2bua makes many small calls) whose connections it closes one by one. No
+# TLS — internal cluster http:// only.
+hyper = { version = "1", features = ["http1", "server", "client"], optional = true }
+hyper-util = { version = "0.1", features = ["tokio", "client-legacy", "http1"], optional = true }
 http-body-util = { version = "0.1", optional = true }
 bytes = { version = "1", optional = true }
+# A connection a timed-out request abandons is reset (SO_LINGER 0).
+socket2 = { workspace = true, optional = true }
+# The client's connector and name resolver are tower services.
+tower-service = { version = "0.3", optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true }
@@ -55,3 +59,5 @@ http-net-testkit = { path = "../http-net-testkit" }
 sip-clock = { path = "../sip-clock", features = ["testkit"] }
 # The loopback classifier test resets a connection (SO_LINGER 0).
 socket2 = { workspace = true }
+# The body cap test measures the largest block the client asks for.
+alloc-counter = { path = "../alloc-counter" }

@@ -1,25 +1,29 @@
 //! [`PooledClient`] — the fabric's backend client: keep-alive connections
-//! held as a pooled HTTP/1.1 client holds them.
+//! held as the real pooled client holds them.
 //!
 //! - A request takes the idle connection returned most recently, else opens
 //!   a new one (to a backend its [`Front`](super::front) chooses when the
 //!   target's address is balanced).
 //! - A connection that carried an answer goes back to the pool, at most
-//!   `max_idle_per_host` of them; one that failed, or whose request its
-//!   caller dropped mid-flight, is closed. One that carried a 5xx is closed
-//!   within the client's [`ErrorCloses`] budget (`error_closes_per_s`), the
-//!   answer returned with its body dropped.
-//! - An idle connection is closed past `pool_idle_timeout`, and when its
+//!   `max_idle_per_host` of them, unless the client's ejection rules close
+//!   it ([`Ejector`]: the first answer of a close status, a run of shed
+//!   answers, within the client's budget); the answer is returned whole
+//!   either way. One whose exchange failed is closed. One whose request its
+//!   caller dropped mid-flight is closed and counted as a timeout close.
+//! - An idle connection is closed past `pool_idle_timeout`, or when the pool
+//!   holds `max_idle_per_host` already (counted as idle closes), and when its
 //!   backend closed it (see [`SimulatedHttpNetwork`]); a closed one is never
 //!   handed out.
-//! - Dropping the client closes its idle connections.
+//! - Dropping the client closes its idle connections (counted as rotation
+//!   closes).
 
 use std::net::SocketAddr;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use http_net::{ErrorCloses, HttpClient, ResolvedTarget};
+use http_net::ejection::{self, CloseCause, Ejector};
+use http_net::{HttpClient, ResolvedTarget};
 use tokio::time::Instant;
 
 use super::{Connection, SimulatedHttpNetwork};
@@ -34,8 +38,8 @@ pub(super) struct PooledClient {
     max_idle: usize,
     /// Idle connections and when each came back, the most recent last.
     idle: Mutex<Vec<(Connection, Instant)>>,
-    closes: ErrorCloses,
-    /// The target as configured: the close counter's `peer`.
+    ejector: Ejector,
+    /// The target as configured: the close counters' `peer`.
     peer: String,
 }
 
@@ -51,7 +55,7 @@ impl PooledClient {
             idle_timeout: settings.pool_idle_timeout,
             max_idle: settings.max_idle_per_host,
             idle: Mutex::new(Vec::new()),
-            closes: ErrorCloses::new(settings.error_closes_per_s),
+            ejector: Ejector::new(&settings.ejection),
             peer: target.to_string(),
         }
     }
@@ -62,7 +66,14 @@ impl PooledClient {
         let now = Instant::now();
         let mut idle = self.idle.lock().unwrap();
         idle.retain(|(conn, since)| {
-            now.duration_since(*since) < self.idle_timeout && self.net.is_open(conn)
+            if !self.net.is_open(conn) {
+                return false;
+            }
+            let fresh = now.duration_since(*since) < self.idle_timeout;
+            if !fresh {
+                ejection::closed(&self.peer, CloseCause::Idle);
+            }
+            fresh
         });
         let at = idle.iter().rposition(|(conn, _)| conn.front() == addr)?;
         Some(idle.remove(at).0)
@@ -75,6 +86,34 @@ impl PooledClient {
         let mut idle = self.idle.lock().unwrap();
         if idle.len() < self.max_idle {
             idle.push((conn, Instant::now()));
+        } else if self.max_idle > 0 {
+            ejection::closed(&self.peer, CloseCause::Idle);
+        }
+    }
+}
+
+impl Drop for PooledClient {
+    fn drop(&mut self) {
+        let idle = self.idle.get_mut().unwrap_or_else(PoisonError::into_inner);
+        for (conn, _) in idle.iter() {
+            if self.net.is_open(conn) {
+                ejection::closed(&self.peer, CloseCause::Rotation);
+            }
+        }
+    }
+}
+
+/// A request in flight on a connection: dropped before its exchange ended,
+/// it abandons the connection.
+struct InFlight<'a> {
+    client: &'a PooledClient,
+    ended: bool,
+}
+
+impl Drop for InFlight<'_> {
+    fn drop(&mut self) {
+        if !self.ended {
+            self.client.ejector.abandoned(&self.client.peer);
         }
     }
 }
@@ -89,11 +128,13 @@ impl HttpClient for PooledClient {
             Some(conn) => conn,
             None => self.net.connect(addr),
         };
-        let mut outcome = self.net.exchange(&mut conn, req).await;
-        match &mut outcome {
-            Ok(resp) if self.closes.close_after(&self.peer, resp.status) => resp.body.clear(),
-            Ok(_) => self.give_back(conn),
-            Err(_) => {}
+        let mut in_flight = InFlight { client: self, ended: false };
+        let outcome = self.net.exchange(&mut conn, req).await;
+        in_flight.ended = true;
+        if let Ok(resp) = &outcome {
+            if self.ejector.answered(&self.peer, &conn.record, resp.status).is_none() {
+                self.give_back(conn);
+            }
         }
         outcome
     }

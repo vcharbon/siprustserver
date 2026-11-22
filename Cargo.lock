@@ -2047,6 +2047,7 @@ dependencies = [
 name = "http-net"
 version = "0.1.0"
 dependencies = [
+ "alloc-counter",
  "async-trait",
  "bytes",
  "http-body-util",
@@ -2057,11 +2058,11 @@ dependencies = [
  "lock-poison",
  "metric-catalogue",
  "metric-values",
- "reqwest",
  "sip-clock",
  "socket2",
  "thiserror 2.0.21",
  "tokio",
+ "tower-service",
  "tracing",
 ]
 

@@ -12,13 +12,22 @@
 //! | `<P>_CEILING_MS` | the bound on any one request, whatever its caller's budget | 5000 |
 //! | `<P>_MAX_IN_FLIGHT` | requests in flight at once, and idle connections kept | per backend |
 //! | `<P>_ROTATION_MS` | a new client takes new requests this often | 60000 |
-//! | `<P>_ERROR_CLOSES_PER_S` | connections a client closes after a 5xx answer, at most, per second ([`crate::ErrorCloses`]); 0 never. The simulated fabric's pooled client closes them; the `reqwest` client cannot close one pooled connection and pools them | 20 |
+//! | `<P>_CONN_CLOSE_STATUSES` | statuses whose first answer closes its connection ([`crate::ejection`]) | `500,502,504` |
+//! | `<P>_CONN_SHED_STATUSES` | statuses whose answers in a row close their connection | `408,429,503` |
+//! | `<P>_CONN_SHED_CLOSE_AFTER` | the run of shed answers on one connection that closes it | 3 |
+//! | `<P>_ERROR_CLOSES_PER_S` | connections a client closes on its answers, at most, per second ([`crate::ErrorCloses`]); 0 never | 20 |
+//! | `<P>_MAX_BODY_BYTES` | the largest answer body read: one declared or streamed past it is refused | [`crate::MAX_BODY_BYTES`] |
 //!
-//! Unset or blank takes the default; a value that is not a positive integer
-//! (or, for `<P>_ERROR_CLOSES_PER_S`, not a non-negative one) is an error
-//! naming it.
+//! Unset or blank takes the default. A duration or a count that is not a
+//! positive integer, `<P>_ERROR_CLOSES_PER_S` that is not a non-negative
+//! one, a status list with an entry that is not a status from 400 to 599,
+//! two status lists sharing a status, or `<P>_MAX_BODY_BYTES` under
+//! [`MIN_BODY_BYTES`] refuses the set, naming every variable involved.
 
 use std::time::Duration;
+
+use crate::ejection::EjectionRules;
+use crate::env_reader::EnvReader;
 
 /// One backend client's connection and request bounds.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -48,14 +57,21 @@ pub struct ClientSettings {
     /// A new client takes new requests this often; the old one finishes the
     /// requests it carries and closes its connections.
     pub rotation: Duration,
-    /// Connections closed after a 5xx answer, at most, per second and
-    /// client; past it they are pooled. `0` never closes one.
-    pub error_closes_per_s: u32,
+    /// Which answers close the connection they came on, and how many such
+    /// closes a client makes a second.
+    pub ejection: EjectionRules,
+    /// The largest answer body the client reads, at least
+    /// [`MIN_BODY_BYTES`]: an answer declaring a longer one is refused before
+    /// any of it is read, and one streaming past it is cut there.
+    pub max_body_bytes: usize,
 }
 
 /// The cap on requests in flight a backend client runs with unless told
 /// otherwise.
 pub const DEFAULT_MAX_IN_FLIGHT: usize = 256;
+
+/// The smallest answer body cap the env may state.
+pub const MIN_BODY_BYTES: usize = 1024;
 
 impl Default for ClientSettings {
     fn default() -> Self {
@@ -78,7 +94,8 @@ impl ClientSettings {
             max_in_flight,
             max_idle_per_host: max_in_flight,
             rotation: Duration::from_millis(60_000),
-            error_closes_per_s: crate::error_close::DEFAULT_ERROR_CLOSES_PER_S,
+            ejection: EjectionRules::default(),
+            max_body_bytes: crate::MAX_BODY_BYTES,
         }
     }
 
@@ -89,53 +106,58 @@ impl ClientSettings {
     }
 
     /// The settings the env states under `prefix`, each unset value taken
-    /// from `defaults`. A value that is not a positive integer is an `Err`
-    /// naming it.
+    /// from `defaults`; an `Err` naming every variable that does not read
+    /// (see the module doc).
     pub fn from_lookup(
         prefix: &str,
         defaults: &ClientSettings,
         lookup: impl Fn(&str) -> Option<String>,
     ) -> Result<Self, String> {
-        let positive = |suffix: &str, default: u64| -> Result<u64, String> {
-            let key = format!("{prefix}_{suffix}");
-            match lookup(&key).filter(|v| !v.trim().is_empty()) {
-                None => Ok(default),
-                Some(v) => match v.trim().parse::<u64>() {
-                    Ok(0) => Err(format!("{key}=0: must be positive")),
-                    Ok(n) => Ok(n),
-                    Err(e) => Err(format!("{key}={v:?}: {e}")),
-                },
-            }
+        let mut env = EnvReader::new(prefix, lookup);
+        let settings = Self::read(&mut env, defaults);
+        env.finish(settings)
+    }
+
+    /// The settings `env` states, each unset or refused value taken from
+    /// `defaults`, every refusal kept in `env`.
+    pub(crate) fn read<L: Fn(&str) -> Option<String>>(
+        env: &mut EnvReader<L>,
+        defaults: &ClientSettings,
+    ) -> Self {
+        let max_in_flight = env.count("MAX_IN_FLIGHT", 1, defaults.max_in_flight);
+        let d = &defaults.ejection;
+        let ejection = EjectionRules {
+            close_statuses: env.statuses("CONN_CLOSE_STATUSES", &d.close_statuses),
+            shed_statuses: env.statuses("CONN_SHED_STATUSES", &d.shed_statuses),
+            shed_close_after: env.count_u32("CONN_SHED_CLOSE_AFTER", 1, d.shed_close_after),
+            closes_per_s: env.count_u32("ERROR_CLOSES_PER_S", 0, d.closes_per_s),
         };
-        let ms = |suffix: &str, default: Duration| -> Result<Duration, String> {
-            let default = u64::try_from(default.as_millis()).unwrap_or(u64::MAX);
-            positive(suffix, default).map(Duration::from_millis)
-        };
-        let max_in_flight = positive("MAX_IN_FLIGHT", defaults.max_in_flight as u64)?;
-        let max_in_flight = usize::try_from(max_in_flight)
-            .map_err(|_| format!("{prefix}_MAX_IN_FLIGHT={max_in_flight}: past this platform"))?;
-        let retries = positive("KEEPALIVE_RETRIES", u64::from(defaults.keepalive_retries))?;
-        let closes = {
-            let key = format!("{prefix}_ERROR_CLOSES_PER_S");
-            match lookup(&key).filter(|v| !v.trim().is_empty()) {
-                None => defaults.error_closes_per_s,
-                Some(v) => v.trim().parse::<u32>().map_err(|e| format!("{key}={v:?}: {e}"))?,
-            }
-        };
-        Ok(Self {
-            connect_timeout: ms("CONNECT_TIMEOUT_MS", defaults.connect_timeout)?,
-            pool_idle_timeout: ms("POOL_IDLE_MS", defaults.pool_idle_timeout)?,
-            keepalive_idle: ms("KEEPALIVE_IDLE_MS", defaults.keepalive_idle)?,
-            keepalive_interval: ms("KEEPALIVE_INTERVAL_MS", defaults.keepalive_interval)?,
-            keepalive_retries: u32::try_from(retries)
-                .map_err(|_| format!("{prefix}_KEEPALIVE_RETRIES={retries}: too large"))?,
-            user_timeout: ms("USER_TIMEOUT_MS", defaults.user_timeout)?,
-            ceiling: ms("CEILING_MS", defaults.ceiling)?,
+        if !ejection.close_statuses.is_disjoint(&ejection.shed_statuses) {
+            let (close, shed) = (env.key("CONN_CLOSE_STATUSES"), env.key("CONN_SHED_STATUSES"));
+            env.refuse(format!(
+                "{close}={} and {shed}={} share a status: one closes on its first answer, the \
+                 other after a run",
+                ejection.close_statuses, ejection.shed_statuses
+            ));
+        }
+        Self {
+            connect_timeout: env.ms("CONNECT_TIMEOUT_MS", defaults.connect_timeout),
+            pool_idle_timeout: env.ms("POOL_IDLE_MS", defaults.pool_idle_timeout),
+            keepalive_idle: env.ms("KEEPALIVE_IDLE_MS", defaults.keepalive_idle),
+            keepalive_interval: env.ms("KEEPALIVE_INTERVAL_MS", defaults.keepalive_interval),
+            keepalive_retries: env.count_u32("KEEPALIVE_RETRIES", 1, defaults.keepalive_retries),
+            user_timeout: env.ms("USER_TIMEOUT_MS", defaults.user_timeout),
+            ceiling: env.ms("CEILING_MS", defaults.ceiling),
             max_in_flight,
             max_idle_per_host: max_in_flight,
-            rotation: ms("ROTATION_MS", defaults.rotation)?,
-            error_closes_per_s: closes,
-        })
+            rotation: env.ms("ROTATION_MS", defaults.rotation),
+            ejection,
+            max_body_bytes: env.count(
+                "MAX_BODY_BYTES",
+                MIN_BODY_BYTES as u64,
+                defaults.max_body_bytes,
+            ),
+        }
     }
 }
 
@@ -144,6 +166,7 @@ mod tests {
     use std::collections::HashMap;
 
     use super::*;
+    use crate::ejection::StatusSet;
 
     fn from(pairs: &[(&str, &str)]) -> Result<ClientSettings, String> {
         let env: HashMap<String, String> =
@@ -167,7 +190,13 @@ mod tests {
         assert_eq!(settings.ceiling, Duration::from_secs(5));
         assert_eq!(settings.rotation, Duration::from_secs(60));
         assert_eq!((settings.max_in_flight, settings.max_idle_per_host), (64, 64));
-        assert_eq!(settings.error_closes_per_s, 20);
+        let e = &settings.ejection;
+        assert_eq!(
+            (e.close_statuses.to_string(), e.shed_statuses.to_string()),
+            ("500,502,504".to_string(), "408,429,503".to_string())
+        );
+        assert_eq!((e.shed_close_after, e.closes_per_s), (3, 20));
+        assert_eq!(settings.max_body_bytes, 10 * 1024 * 1024);
     }
 
     #[test]
@@ -182,7 +211,11 @@ mod tests {
             ("B_CEILING_MS", "4000"),
             ("B_MAX_IN_FLIGHT", "16"),
             ("B_ROTATION_MS", "30000"),
+            ("B_CONN_CLOSE_STATUSES", "500, 503"),
+            ("B_CONN_SHED_STATUSES", "429"),
+            ("B_CONN_SHED_CLOSE_AFTER", "1"),
             ("B_ERROR_CLOSES_PER_S", "0"),
+            ("B_MAX_BODY_BYTES", "1024"),
         ])
         .unwrap();
         assert_eq!(
@@ -198,7 +231,13 @@ mod tests {
                 max_in_flight: 16,
                 max_idle_per_host: 16,
                 rotation: Duration::from_millis(30_000),
-                error_closes_per_s: 0,
+                ejection: EjectionRules {
+                    close_statuses: StatusSet::of(&[500, 503]).unwrap(),
+                    shed_statuses: StatusSet::of(&[429]).unwrap(),
+                    shed_close_after: 1,
+                    closes_per_s: 0,
+                },
+                max_body_bytes: 1024,
             }
         );
     }
@@ -212,6 +251,29 @@ mod tests {
         let e = from(&[("B_ERROR_CLOSES_PER_S", "-1")]).expect_err("negative");
         assert!(e.contains("B_ERROR_CLOSES_PER_S"), "{e}");
         assert_eq!(from(&[("B_CEILING_MS", " ")]).unwrap().ceiling, Duration::from_secs(5));
+    }
+
+    #[test]
+    fn an_invalid_ejection_set_is_refused_naming_every_variable_involved() {
+        let e = from(&[
+            ("B_CONN_CLOSE_STATUSES", "500,503"),
+            ("B_CONN_SHED_CLOSE_AFTER", "0"),
+            ("B_MAX_BODY_BYTES", "1023"),
+            ("B_CEILING_MS", "soon"),
+        ])
+        .expect_err("four refusals");
+        let refusals: Vec<&str> = e.split("; ").collect();
+        assert_eq!(refusals.len(), 4, "{e}");
+        for named in [
+            "B_CONN_SHED_CLOSE_AFTER=0: must be positive",
+            "B_CONN_CLOSE_STATUSES=500,503 and B_CONN_SHED_STATUSES=408,429,503 share a status",
+            "B_CEILING_MS=\"soon\"",
+            "B_MAX_BODY_BYTES=1023: must be at least 1024",
+        ] {
+            assert!(refusals.iter().any(|r| r.starts_with(named)), "{named} in {e}");
+        }
+        let e = from(&[("B_CONN_SHED_STATUSES", "429,200")]).expect_err("not a 4xx or 5xx");
+        assert!(e.starts_with("B_CONN_SHED_STATUSES=\"429,200\": \"200\""), "{e}");
     }
 
     #[test]

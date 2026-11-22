@@ -1,33 +1,35 @@
-//! Classification of a `reqwest` client error into a [`FailureCause`].
+//! Classification of a client error into a [`FailureCause`].
 //!
-//! The useful signal lives *below* the top of the chain. `reqwest`'s own
-//! `Display` names the error kind and the target url and nothing else — it does
-//! not append its source — while hyper and `std::io` underneath carry the
-//! refused/reset/dns detail. So the typed API answers "timeout?" and
-//! "connect?", the chain **below** the reqwest error answers "why", and
-//! anything the chain does not identify is `other` rather than a guess.
+//! The useful signal lives *below* the top of the chain. The client's own
+//! error names its kind (connect, send) and nothing else, while hyper and
+//! `std::io` underneath carry the refused/reset/dns detail. So the typed API
+//! answers "connect?", the chain **below** the top answers "why", and
+//! anything the chain does not identify is `other` rather than a guess. The
+//! client bounds a request with its own ceiling, so no error of the chain is
+//! a request timeout; a connect that timed out is an `io` leaf.
 
 use std::error::Error;
 
 use crate::failures::FailureCause;
 
-/// Classify one `reqwest` send/body error.
-pub fn classify(err: &reqwest::Error) -> FailureCause {
-    if err.is_timeout() {
-        return if err.is_connect() {
-            FailureCause::ConnectTimeout
-        } else {
-            FailureCause::RequestTimeout
-        };
-    }
+/// Classify one error of a request, before its answer's head.
+pub fn classify(err: &hyper_util::client::legacy::Error) -> FailureCause {
     classify_below(err, err.is_connect())
+}
+
+/// Classify one error reading an answer's body.
+pub fn classify_body(err: &hyper::Error) -> FailureCause {
+    if err.is_incomplete_message() {
+        return FailureCause::Eof;
+    }
+    classify_below(err, false)
 }
 
 /// Walk the error chain **below** `top` and return the first definite cause.
 ///
-/// `top`'s own text is never matched: it is the url-bearing reqwest message, so
-/// matching it would let a target named `/tls/admit` report a refused
-/// connection as a TLS failure. The kind `top` names is already read off the
+/// `top`'s own text is never matched: a message that names its target, as a
+/// client's top error may, would let a target named `/tls/admit` report a
+/// refused connection as a TLS failure. The kind `top` names is read off the
 /// typed API by [`classify`], so nothing is lost. `connect` says whether the
 /// failure happened while connecting, which is what splits a timed-out io leaf
 /// between the connect and request budgets.
@@ -103,8 +105,8 @@ mod tests {
 
     use super::*;
 
-    /// A chain link with a chosen message — the shape `reqwest` wraps: a
-    /// url-bearing top, a hyper middle, an `io::Error` leaf.
+    /// A chain link with a chosen message — the shape a client error wraps:
+    /// a top that may name the url, a hyper middle, an `io::Error` leaf.
     #[derive(Debug)]
     struct Link {
         text: &'static str,
@@ -150,9 +152,6 @@ mod tests {
 
     #[test]
     fn a_target_named_tls_does_not_disguise_the_transport_failure() {
-        // The real reqwest shape: the top-level message carries the request url
-        // and NOT its source, so the url's own `/tls/admit` is the only `tls` in
-        // it. The refused leaf below must still win.
         let top = Link::new(
             "error sending request for url (http://limiter.svc:8080/tls/admit)",
             Link::new(

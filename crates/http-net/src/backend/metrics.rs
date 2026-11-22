@@ -1,15 +1,21 @@
-//! Backend client counters, by backend (`peer`, the target as configured; a
-//! share's slot counters `<peer>/<name>`, [`super::BackendClient::share`]):
-//! the in-flight cap's saturation and wait, retries, breaker transitions,
-//! and the 5xx answers by what became of their connection. Counters only, never a per-request log line (ADR-0026). A
-//! runner appends [`prometheus_text`] to its `/metrics` body. Capped like
-//! [`crate::failures`]: each family has its overflow counter.
+//! Backend client counters, by backend (`peer`, the target as configured, or
+//! the address of an addressed request; a share's slot counters
+//! `<peer>/<name>`, [`super::BackendClient::share`]): the in-flight cap's
+//! saturation and wait, retries, breaker transitions, the 5xx answers by
+//! what became of their connection, the connections a client closed by
+//! cause ([`crate::ejection`]) and the closes its budget refused, and the
+//! answer bodies refused past the client's cap. Counters only, never a
+//! per-request log line (ADR-0026). A runner appends [`prometheus_text`] to
+//! its `/metrics` body. Capped like [`crate::failures`]: each family has its
+//! overflow counter.
 
 use std::sync::OnceLock;
 use std::time::Duration;
 
-use metric_catalogue::{Dim, Family, Labels};
+use metric_catalogue::{label_values, Dim, Family, Labels};
 use metric_values::OpenRows;
+
+use crate::ejection::CloseCause;
 
 /// Requests that found every in-flight slot taken and waited for one.
 pub const SLOT_WAITS: Family = Family::counter(
@@ -78,7 +84,7 @@ const CONNECTION: &[&str] = &["closed", "pooled"];
 pub const ERROR_ANSWERS: Family = Family::counter(
     "http_request_error_answers_total",
     Labels::Product(&[Dim::new("peer", &[]), Dim::new("connection", CONNECTION)]),
-    "Backend 5xx answers, by what became of their connection: closed, or pooled past the client's close budget.",
+    "Backend 5xx answers, by what became of their connection: closed, or pooled (a status that closes none, a shed run not yet long enough, or the client's close budget spent).",
 )
 .capped(&ERROR_ANSWERS_OVERFLOW, &["peer"]);
 
@@ -87,6 +93,81 @@ pub const ERROR_ANSWERS_OVERFLOW: Family = Family::counter(
     "http_request_error_answers_overflow_total",
     Labels::None,
     "observations of http_request_error_answers_total past its cap, each counted on its series whose peer reads _overflow",
+);
+
+/// The `cause` label values of [`CONNECTION_CLOSES`].
+const CLOSE_CAUSES: [&str; 5] = label_values!(CloseCause::ALL, CloseCause::label);
+
+/// Connections a client closed, by cause.
+pub const CONNECTION_CLOSES: Family = Family::counter(
+    "http_request_connection_closes_total",
+    Labels::Product(&[Dim::new("peer", &[]), Dim::new("cause", &CLOSE_CAUSES)]),
+    "Connections a backend client closed, by cause: status (a close status), shed (a run of shed statuses), timeout (a request abandoned before its answer, a reset), rotation (its client retired), idle (past the idle timeout or the idle cap). A connection its peer ended, or that a failed exchange or a refused body ended, is not counted.",
+)
+.capped(&CONNECTION_CLOSES_OVERFLOW, &["peer"]);
+
+/// Observations of [`CONNECTION_CLOSES`] past its cap.
+pub const CONNECTION_CLOSES_OVERFLOW: Family = Family::counter(
+    "http_request_connection_closes_overflow_total",
+    Labels::None,
+    "observations of http_request_connection_closes_total past its cap, each counted on its series whose peer reads _overflow",
+);
+
+/// Closes the client's budget refused: the connection pooled instead.
+pub const CLOSES_BUDGET_EXHAUSTED: Family = Family::counter(
+    "http_request_connection_closes_budget_exhausted_total",
+    Labels::Product(&[Dim::new("peer", &[])]),
+    "Answers whose status or shed run would close their connection, pooled instead: the client's close budget was spent.",
+)
+.capped(&CLOSES_BUDGET_EXHAUSTED_OVERFLOW, &["peer"]);
+
+/// Observations of [`CLOSES_BUDGET_EXHAUSTED`] past its cap.
+pub const CLOSES_BUDGET_EXHAUSTED_OVERFLOW: Family = Family::counter(
+    "http_request_connection_closes_budget_exhausted_overflow_total",
+    Labels::None,
+    "observations of http_request_connection_closes_budget_exhausted_total past its cap, each counted on its series whose peer reads _overflow",
+);
+
+/// Why an answer body was refused: the `cause` label of [`BODY_REFUSED`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BodyRefusal {
+    /// Its declared length passed the cap: none of it was read.
+    Declared,
+    /// The bytes read passed the cap: the rest was left unread.
+    Read,
+}
+
+impl BodyRefusal {
+    /// Every refusal, in declaration order.
+    pub const ALL: [BodyRefusal; 2] = [BodyRefusal::Declared, BodyRefusal::Read];
+
+    /// The `cause` label value.
+    pub const fn label(self) -> &'static str {
+        match self {
+            BodyRefusal::Declared => "declared",
+            BodyRefusal::Read => "read",
+        }
+    }
+}
+
+metric_catalogue::assert_exposition_order!(BodyRefusal: Declared, Read);
+
+/// The `cause` label values of [`BODY_REFUSED`].
+const BODY_REFUSALS: [&str; 2] = label_values!(BodyRefusal::ALL, BodyRefusal::label);
+
+/// Answer bodies refused past the client's cap.
+pub const BODY_REFUSED: Family = Family::counter(
+    "http_request_body_refused_total",
+    Labels::Product(&[Dim::new("peer", &[]), Dim::new("cause", &BODY_REFUSALS)]),
+    "Answers a backend client refused because their body passed its cap: declared (the declared length, none of it read) or read (the bytes read).",
+)
+.capped(&BODY_REFUSED_OVERFLOW, &["peer"]);
+
+/// Observations of [`BODY_REFUSED`] past its cap.
+pub const BODY_REFUSED_OVERFLOW: Family = Family::counter(
+    "http_request_body_refused_overflow_total",
+    Labels::None,
+    "observations of http_request_body_refused_total past its cap, each counted on its series whose peer reads _overflow",
 );
 
 /// The `to` label values of [`BREAKER_TRANSITIONS`].
@@ -121,6 +202,12 @@ pub const FAMILIES: &[Family] = &[
     BREAKER_TRANSITIONS_OVERFLOW,
     ERROR_ANSWERS,
     ERROR_ANSWERS_OVERFLOW,
+    CONNECTION_CLOSES,
+    CONNECTION_CLOSES_OVERFLOW,
+    CLOSES_BUDGET_EXHAUSTED,
+    CLOSES_BUDGET_EXHAUSTED_OVERFLOW,
+    BODY_REFUSED,
+    BODY_REFUSED_OVERFLOW,
 ];
 
 struct Rows {
@@ -130,6 +217,9 @@ struct Rows {
     retries: OpenRows,
     transitions: OpenRows,
     error_answers: OpenRows,
+    closes: OpenRows,
+    budget_exhausted: OpenRows,
+    body_refused: OpenRows,
 }
 
 static ROWS: OnceLock<Rows> = OnceLock::new();
@@ -142,7 +232,40 @@ fn rows() -> &'static Rows {
         retries: OpenRows::new(&RETRIES),
         transitions: OpenRows::new(&BREAKER_TRANSITIONS),
         error_answers: OpenRows::new(&ERROR_ANSWERS),
+        closes: OpenRows::new(&CONNECTION_CLOSES),
+        budget_exhausted: OpenRows::new(&CLOSES_BUDGET_EXHAUSTED),
+        body_refused: OpenRows::new(&BODY_REFUSED),
     })
+}
+
+/// A client closed a connection to `peer` for `cause`.
+pub(crate) fn connection_closed(peer: &str, cause: CloseCause) {
+    rows().closes.add(&[peer, cause.label()], 1);
+}
+
+/// A close of a connection to `peer` found the client's budget spent.
+pub(crate) fn closes_budget_exhausted(peer: &str) {
+    rows().budget_exhausted.add(&[peer], 1);
+}
+
+/// An answer body of `peer` was refused past the client's cap.
+pub(crate) fn body_refused(peer: &str, refusal: BodyRefusal) {
+    rows().body_refused.add(&[peer, refusal.label()], 1);
+}
+
+/// Connections to `peer` a client closed for `cause`.
+pub fn connection_closes(peer: &str, cause: CloseCause) -> u64 {
+    rows().closes.get(&[peer, cause.label()])
+}
+
+/// Closes of connections to `peer` the client's budget refused.
+pub fn closes_budget_exhausted_count(peer: &str) -> u64 {
+    rows().budget_exhausted.get(&[peer])
+}
+
+/// Answer bodies of `peer` refused as `refusal` states.
+pub fn bodies_refused(peer: &str, refusal: BodyRefusal) -> u64 {
+    rows().body_refused.get(&[peer, refusal.label()])
 }
 
 /// A request to `peer` found every slot taken.
@@ -215,6 +338,9 @@ pub fn prometheus_text() -> String {
     rows.retries.render(&mut s);
     rows.transitions.render(&mut s);
     rows.error_answers.render(&mut s);
+    rows.closes.render(&mut s);
+    rows.budget_exhausted.render(&mut s);
+    rows.body_refused.render(&mut s);
     s
 }
 
@@ -229,6 +355,9 @@ mod tests {
         retried("10.9.0.1:80");
         breaker_moved("10.9.0.1:80", true);
         error_answered("10.9.0.1:80", true);
+        connection_closed("10.9.0.1:80", CloseCause::Shed);
+        closes_budget_exhausted("10.9.0.1:80");
+        body_refused("10.9.0.1:80", BodyRefusal::Read);
         let text = prometheus_text();
         for family in FAMILIES {
             assert_eq!(family.check(&text), Ok(()), "{}", family.name);
@@ -243,5 +372,12 @@ mod tests {
             ),
             "{text}"
         );
+        for line in [
+            "http_request_connection_closes_total{peer=\"10.9.0.1:80\",cause=\"shed\"} 1",
+            "http_request_connection_closes_budget_exhausted_total{peer=\"10.9.0.1:80\"} 1",
+            "http_request_body_refused_total{peer=\"10.9.0.1:80\",cause=\"read\"} 1",
+        ] {
+            assert!(text.contains(line), "{line} in {text}");
+        }
     }
 }

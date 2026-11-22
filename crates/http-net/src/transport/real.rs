@@ -4,13 +4,15 @@
 //! errors) handing each connection, `TCP_NODELAY` set, to hyper's HTTP/1.1
 //! `serve_connection` (keep-alive on by default, so a client's pooled
 //! connection serves many requests). Each request is answered with its remote
-//! address (`peer`) and its receipt (`receipt`) in scope. Client: a pooled `reqwest::Client` built
-//! from [`ClientSettings`] (connect timeout, idle timeout, TCP keepalive, TCP
-//! user timeout, a ceiling on every request), shared by the addressed
+//! address (`peer`) and its receipt (`receipt`) in scope. Client: a pooled
+//! hyper-util client built from [`ClientSettings`] (connect timeout, idle
+//! timeout, TCP keepalive, TCP user timeout, a ceiling on every request, the
+//! ejection rules, the answer body cap), shared by the addressed
 //! [`request`](HttpTransport::request); a backend gets a client of its own
 //! ([`HttpTransport::client`], `real_client`).
 //!
-//! A body is carried up to [`MAX_BODY_BYTES`] either way.
+//! The server carries a request body up to [`MAX_BODY_BYTES`]; the client
+//! reads an answer body up to its settings' `max_body_bytes`.
 //!
 //! No TLS: this is internal cluster `http://` traffic. The caller owns its
 //! budget; this layer surfaces transport failures as [`HttpError`],
@@ -41,7 +43,7 @@ use crate::settings::ClientSettings;
 /// The real HTTP transport. Clone shares the pooled client.
 #[derive(Clone)]
 pub struct RealHttpNetwork {
-    client: super::real_client::Built,
+    client: Arc<super::real_client::RealClient>,
 }
 
 impl Default for RealHttpNetwork {
@@ -59,7 +61,7 @@ impl RealHttpNetwork {
 
     /// Build with a pooled keep-alive client under `settings` (no TLS).
     pub fn with_settings(settings: &ClientSettings) -> Self {
-        Self { client: super::real_client::build(settings, None) }
+        Self { client: Arc::new(super::real_client::RealClient::new(settings, None, None)) }
     }
 }
 
@@ -127,8 +129,8 @@ impl HttpTransport for RealHttpNetwork {
 
     async fn request(&self, dst: SocketAddr, req: HttpRequest) -> Result<HttpResponse, HttpError> {
         // `req.path` is a path-and-query target, so the query string rides along.
-        let url = format!("http://{dst}{}", req.path);
-        super::real_client::send(&self.client, &dst.to_string(), &url, req).await
+        let uri = format!("http://{dst}{}", req.path);
+        self.client.send(&dst.to_string(), &uri, req).await
     }
 
     fn client(
