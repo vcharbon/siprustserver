@@ -241,6 +241,7 @@ mod reoffer_late_events_of_the_first_call;
 mod reoffer_on_an_ended_identity;
 mod repeated_2xx_before_caller_ack;
 mod repeated_uri_parameter;
+mod request_across_a_lost_copy;
 mod required_100rel_withheld;
 mod required_tag_withheld;
 mod reroute_limiter_holds;
