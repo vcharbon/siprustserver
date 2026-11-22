@@ -43,7 +43,7 @@ crates/repl-net-testkit/src/simulated.rs 955
 crates/rfc-rules/src/rules/cseq/tests.rs 815
 crates/rfc-rules/src/verdict/evidence.rs 1659
 crates/scenario-harness/src/actor/scenarios.rs 893
-crates/scenario-harness/src/agent/harness.rs 835
+crates/scenario-harness/src/agent/harness.rs 827
 crates/scenario-harness/tests/it/template_emission.rs 1012
 crates/seq-report/src/html.rs 1002
 crates/sip-message/tests/it/generators.rs 1400
