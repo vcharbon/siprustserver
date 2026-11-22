@@ -382,6 +382,47 @@ async fn a_datagram_the_fabric_loses_is_recorded_lost_on_its_senders_lane() {
     );
 }
 
+/// The loss watch is handed each `SendLost` as the send it records is lost,
+/// once the recording holds it, and nothing for a datagram delivered.
+#[tokio::test]
+async fn the_loss_watch_is_handed_each_send_lost_once_recorded() {
+    let first = std::sync::atomic::AtomicBool::new(true);
+    let fabric = SimulatedSignalingNetwork::new(0).with_send_fate(Arc::new(move |_, _, _| {
+        if first.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            Fate::Lose
+        } else {
+            Fate::Deliver
+        }
+    }));
+    let wrapped = with_all_contracts(
+        Arc::new(fabric),
+        Recorder::fake(),
+        RunContext::TestWithRecorder,
+        ScopedAuditOptions::default(),
+        true,
+    );
+    let handed = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let (sink, channel) = (handed.clone(), wrapped.recording.channel());
+    wrapped.recording.watch_losses(move |event| {
+        let recorded = channel.snapshot().last().map(|s| s.event.clone());
+        sink.lock().unwrap().push((event.clone(), recorded));
+    });
+    let net = wrapped.network.clone();
+
+    let a = net.bind_udp(opts("10.0.0.1:5060", 64)).await.unwrap();
+    let b = net.bind_udp(opts("10.0.0.2:5060", 64)).await.unwrap();
+    a.send_to(b"BYE sip:x SIP/2.0\r\n", b.local_addr()).await.unwrap();
+    a.send_to(b"BYE sip:x SIP/2.0\r\n", b.local_addr()).await.unwrap();
+    net.await_in_flight(Duration::from_secs(1)).await;
+
+    let lost = SignalingNetworkEvent::SendLost {
+        bind_key: "10.0.0.1:5060".to_string(),
+        to: b.local_addr(),
+        msg: b"BYE sip:x SIP/2.0\r\n".to_vec(),
+    };
+    assert_eq!(*handed.lock().unwrap(), vec![(lost.clone(), Some(lost))]);
+}
+
 #[test]
 fn audit_view_hides_consumption_markers_and_modeled_loss() {
     use sip_net::{RecvDisposition, UdpPacket};

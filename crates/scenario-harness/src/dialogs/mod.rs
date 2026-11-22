@@ -59,6 +59,7 @@ pub use verdict::{
     DIALOG_ENDED, DIALOG_ENDED_ANSWERED, DIALOG_UNKNOWN,
 };
 pub use wire_crossing::{DialogEnd, Ending, SentBeforeEnd};
+pub(crate) use wire_loss::send_lost;
 pub use wire_loss::{LostOnTheWay, LostRequest};
 
 #[cfg(test)]

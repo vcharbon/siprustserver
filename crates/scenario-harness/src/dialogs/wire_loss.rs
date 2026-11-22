@@ -67,6 +67,20 @@ impl std::fmt::Debug for LostOnTheWay {
     }
 }
 
+/// Whether the `SendCalled` at `at` in `events` was lost: its lane records
+/// the `SendLost` of its bytes before that lane's next `SendCalled`.
+pub(crate) fn send_lost(events: &[Stamped<SignalingNetworkEvent>], at: usize) -> bool {
+    let SignalingNetworkEvent::SendCalled { bind_key: lane, msg: sent, .. } = &events[at].event
+    else {
+        return false;
+    };
+    events[at + 1..]
+        .iter()
+        .map(|s| &s.event)
+        .take_while(|e| !matches!(e, SignalingNetworkEvent::SendCalled { bind_key, .. } if bind_key == lane))
+        .any(|e| matches!(e, SignalingNetworkEvent::SendLost { bind_key, msg, .. } if bind_key == lane && msg == sent))
+}
+
 /// Every `SendLost` of a request carrying `call_id`, `from_tag` and `to_tag`,
 /// in record order.
 fn lost_requests(

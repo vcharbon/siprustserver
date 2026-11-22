@@ -37,6 +37,7 @@ use crate::absorption::Absorption;
 use crate::dialogs::{DialogJudging, DialogOptIns};
 use crate::run::RunReport;
 mod dialog_judges;
+mod loss_notes;
 mod peer_binds;
 mod serve;
 mod shared_lanes;
@@ -135,24 +136,6 @@ impl Harness {
     /// deterministically. See [`sip_net_testkit::SimulatedSignalingNetwork::new`].
     pub fn with_transit_delay(scenario_name: impl Into<String>, transit_delay_ms: u64) -> Self {
         Self::with_transit_delay_and_send_fault(scenario_name, transit_delay_ms, None)
-    }
-
-    /// Like [`with_transit_delay`](Harness::with_transit_delay), plus an optional
-    /// per-pair send-fault injector on the simulated fabric: a `fault(src, dst)`
-    /// that answers `Some(reason)` fails that send, so the datagram never leaves
-    /// its endpoint. The seam a scenario uses to cut a node off the signalling
-    /// plane while its process keeps running and keeps firing its own timers.
-    pub fn with_transit_delay_and_send_fault(
-        scenario_name: impl Into<String>,
-        transit_delay_ms: u64,
-        fault: Option<sip_net_testkit::SendFault>,
-    ) -> Self {
-        let net = sip_net_testkit::SimulatedSignalingNetwork::new(transit_delay_ms.max(1));
-        let net = match fault {
-            Some(fault) => net.with_send_fault(fault),
-            None => net,
-        };
-        Self::with_simulated_network(scenario_name, net)
     }
 
     /// Start a session over a **caller-supplied** network + clock — the seam

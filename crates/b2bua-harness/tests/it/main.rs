@@ -18,6 +18,7 @@ mod admit_owes_release;
 mod advertisement_policy;
 mod after_slow_decision;
 mod announcement;
+mod answer_across_a_lost_copy;
 mod answer_new_dialog_relays_the_final;
 mod asserted_identity_privacy;
 mod attached_parts;

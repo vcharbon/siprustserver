@@ -1,7 +1,7 @@
 //! A session over a caller-built simulated fabric, one over a fabric that
-//! holds chosen datagrams in flight, and a SUT endpoint on a lane of its own:
-//! the seams several SUT instances serving one shared address, or a path
-//! that reorders, need.
+//! fails, holds or loses chosen datagrams, and a SUT endpoint on a lane of its
+//! own: the seams several SUT instances serving one shared address, a node
+//! cut off, or a path that reorders or loses, need.
 
 use std::collections::HashSet;
 use std::net::SocketAddr;
@@ -23,6 +23,24 @@ impl Harness {
     ) -> Self {
         let sim: Arc<dyn SignalingNetwork> = Arc::new(net);
         Self::build(scenario_name.into(), sim, Clock::test_at(0), TransportKind::Fake, RECV_TIMEOUT)
+    }
+
+    /// Like [`with_transit_delay`](Harness::with_transit_delay), plus an optional
+    /// per-pair send-fault injector on the simulated fabric: a `fault(src, dst)`
+    /// that answers `Some(reason)` fails that send, so the datagram never leaves
+    /// its endpoint. The seam a scenario uses to cut a node off the signalling
+    /// plane while its process keeps running and keeps firing its own timers.
+    pub fn with_transit_delay_and_send_fault(
+        scenario_name: impl Into<String>,
+        transit_delay_ms: u64,
+        fault: Option<sip_net_testkit::SendFault>,
+    ) -> Self {
+        let net = sip_net_testkit::SimulatedSignalingNetwork::new(transit_delay_ms.max(1));
+        let net = match fault {
+            Some(fault) => net.with_send_fault(fault),
+            None => net,
+        };
+        Self::with_simulated_network(scenario_name, net)
     }
 
     /// Like [`with_transit_delay`](Harness::with_transit_delay), plus a

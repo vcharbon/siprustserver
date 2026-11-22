@@ -12,6 +12,7 @@ use sip_message::sniff::{self, Identity};
 use sip_message::SipRequest;
 use sip_net_testkit::SignalingNetworkEvent;
 
+use super::wire_loss::send_lost;
 use crate::agent::top_via_branch;
 
 /// The message that ended a dialog at a UA, and which side sent it.
@@ -87,21 +88,17 @@ fn sent_before_end(
             && id.cseq == Some(request.cseq().seq())
             && id.branch == branch.as_deref()
     };
-    let Some((at, lane, first)) = events.iter().enumerate().find_map(|(i, s)| match &s.event {
+    let Some((at, lane)) = events.iter().enumerate().find_map(|(i, s)| match &s.event {
         SignalingNetworkEvent::SendCalled { bind_key, msg, .. }
             if is_request(&sniff::identity(msg)) =>
         {
-            Some((i, bind_key, msg))
+            Some((i, bind_key))
         }
         _ => None,
     }) else {
         return false;
     };
-    let lost = events[at + 1..]
-        .iter()
-        .map(|s| &s.event)
-        .take_while(|e| !matches!(e, SignalingNetworkEvent::SendCalled { bind_key, .. } if bind_key == lane))
-        .any(|e| matches!(e, SignalingNetworkEvent::SendLost { bind_key, msg, .. } if bind_key == lane && msg == first));
+    let lost = send_lost(events, at);
     let is_the_end = |raw: &[u8]| is_end_of(request, end, &sniff::identity(raw));
     let known_before = if end.by_peer {
         let first_end = events.iter().position(|s| {

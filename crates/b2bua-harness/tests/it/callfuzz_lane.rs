@@ -31,8 +31,8 @@ use callfuzz::{FuzzConfig, FuzzWrap, Policy, Rng, CANCEL_ENDINGS};
 use callshapes::generator;
 use callshapes::shapes::default_binder;
 use futures::FutureExt;
-use scenario_harness::actor::ScenarioVerdict;
-use scenario_harness::realcall::{run_actor_collecting, CallEnv};
+use scenario_harness::actor::{run_actor_scenario, ScenarioVerdict};
+use scenario_harness::realcall::{CallCtx, CallEnv};
 use scenario_harness::{Harness, SIMULATED_TRANSIT_DELAY_MS};
 
 use faults::{fate_of, Faults, Tally};
@@ -57,12 +57,14 @@ fn cell_of(seed: u64) -> generator::Cell {
 }
 
 /// Drive the call of `token` to its end and run every net over it; a failure
-/// panics with why, naming the model invariant a SUT turn broke first. A
-/// scenario that failed on an overtaken request's 500 or its direct
-/// consequence on that request's leg ([`overtaken::excuses`]) fails no
-/// further than the nets after it say. A
-/// transfer cell's parties hold their answers but never refuse: a refused
-/// realign rolls the transfer back, an ending no transfer stage states.
+/// panics with why, naming the model invariant a SUT turn broke first. The
+/// call's goals and endings read the datagrams the fabric loses
+/// ([`Harness::note_losses`]). A scenario that failed on an overtaken
+/// request's 500 or its direct consequence on that request's leg
+/// ([`overtaken::excuses`]) fails no further than the nets after it say. A
+/// transfer cell's parties hold their answers but never refuse, so only an
+/// overtaking loss refuses its realign re-INVITE: the rollback that follows,
+/// each party's dialog ended by a BYE, is such a consequence, accepted.
 async fn run_call(config: FuzzConfig, token: &str, cell: generator::Cell, net: Harness) {
     let wrap = FuzzWrap {
         id: "fz_cell",
@@ -84,7 +86,9 @@ async fn run_call(config: FuzzConfig, token: &str, cell: generator::Cell, net: H
         "X-Loadgen-Id",
         token,
     );
-    if let ScenarioVerdict::Failure { at, cause } = run_actor_collecting(&wrap, &env).await {
+    let ctx = CallCtx::new();
+    scene.h.note_losses(ctx.loss_notes(), &scene.alice, &[&scene.bob, &charlie]);
+    if let ScenarioVerdict::Failure { at, cause } = run_actor_scenario(&wrap, &env, &ctx).await {
         let broken = model_gate::first_violation(since)
             .map(|b| format!("red because {}; then ", b.lines().next().unwrap_or_default()));
         let events = scene.h.recording().channel().snapshot();
