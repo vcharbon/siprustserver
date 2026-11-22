@@ -37,6 +37,7 @@ use crate::absorption::Absorption;
 use crate::dialogs::{DialogJudge, DialogJudging, DialogOptIns};
 use crate::run::RunReport;
 mod peer_binds;
+mod serve;
 mod shared_lanes;
 
 /// Fake-fabric per-`recv` silent-wait bound (virtual time — a paused clock
@@ -110,6 +111,9 @@ pub struct Harness {
     dialog_opt_ins: DialogOptIns,
     /// The loopback addresses [`next_addr`](Self::next_addr) hands out.
     addrs: AddrAlloc,
+    /// Whether the fabric runs a loss model: its datagrams may be lost, held
+    /// or copied ([`with_transit_delay_and_send_fate`](Self::with_transit_delay_and_send_fate)).
+    lossy: bool,
 }
 
 impl Harness {
@@ -240,6 +244,7 @@ impl Harness {
             steps: StepCounter::default(),
             dialog_opt_ins: DialogOptIns::default(),
             addrs: AddrAlloc::default(),
+            lossy: false,
         }
     }
 
@@ -495,19 +500,6 @@ impl Harness {
         };
         self.keep_bound(&agent);
         agent
-    }
-
-    /// Hold `agent` for the end-of-run sighting of what it left unread.
-    pub(crate) fn keep_bound(&self, agent: &Agent) {
-        self.bound.borrow_mut().push(agent.downgrade());
-    }
-
-    /// Let every UA's dialog table judge what it still has queued, left
-    /// unread, so a request no step pulled still meets its table.
-    fn judge_unread(&self) {
-        for agent in self.bound.borrow().iter().filter_map(WeakAgent::upgrade) {
-            agent.judge_unread();
-        }
     }
 
     /// Begin a **multi-callee group** — several logical [`Agent`]s that share

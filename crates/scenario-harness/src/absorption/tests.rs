@@ -304,8 +304,11 @@ async fn a_copy_of_an_answered_non_invite_request_draws_its_final_again() {
     assert_eq!(sight(&a, &later).owner, Owner::Tu, "Timer J ends the transaction");
 }
 
-#[test]
-fn a_repeated_non_2xx_final_to_its_own_invite_draws_its_ack_again() {
+/// A repeat of a non-2xx final this endpoint ACKed draws the ACK again until
+/// Timer D, 32 s from the first ACK, ends its transaction (RFC 3261
+/// §17.1.1.2); a re-sent ACK does not restart it.
+#[tokio::test(start_paused = true)]
+async fn a_repeated_non_2xx_final_to_its_own_invite_draws_its_ack_again() {
     let a = Absorption::transaction_view();
     let SipMessage::Response(busy) = parse(BUSY) else { unreachable!() };
     assert!(a.rejected_ack_for(&busy).is_none(), "nothing to repeat before the ACK left");
@@ -314,6 +317,11 @@ fn a_repeated_non_2xx_final_to_its_own_invite_draws_its_ack_again() {
     assert_eq!(a.rejected_ack_for(&busy), Some((HOP_ACK.as_bytes().to_vec(), dst)));
     let SipMessage::Response(ok) = parse(OK) else { unreachable!() };
     assert!(a.rejected_ack_for(&ok).is_none(), "a 2xx is the UAC core's to re-ACK");
+    tokio::time::sleep(std::time::Duration::from_secs(31)).await;
+    a.note_sent(&parse(HOP_ACK), HOP_ACK.as_bytes(), dst, 0);
+    assert!(a.rejected_ack_for(&busy).is_some(), "inside Timer D");
+    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    assert!(a.rejected_ack_for(&busy).is_none(), "Timer D ended the transaction");
 }
 
 const RELIABLE_183: &str = "SIP/2.0 183 Session Progress\r\nContact: <sip:fixture@192.0.2.98>\r\n\
