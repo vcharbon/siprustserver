@@ -14,6 +14,7 @@
 //! | [`Cap::HeaderUpdates`] | `B2BUA_CAP_HEADER_UPDATES` | header statements stored | defect |
 //! | [`Cap::ExtBytes`] | `B2BUA_CAP_EXT_BYTES` | one service's ext value, JSON-encoded | defect |
 //! | [`Cap::ActionsPerTurn`] | `B2BUA_CAP_ACTIONS_PER_TURN` | actions one turn returns | defect |
+//! | [`Cap::RecordBytes`] | `B2BUA_CAP_RECORD_BYTES` | the call record's encoded body, bytes | peer |
 //!
 //! `B2BUA_CAP_SERVICE_HTTP_TIMEOUT_MS` clamps a service's HTTP timeout; it
 //! trips nothing.
@@ -35,6 +36,7 @@ pub enum Cap {
     HeaderUpdates,
     ExtBytes,
     ActionsPerTurn,
+    RecordBytes,
 }
 
 /// Who can reach a cap: a peer's traffic, or only a defect in a service, the
@@ -61,7 +63,7 @@ impl CapKind {
 
 impl Cap {
     /// Every cap, in exposition order.
-    pub const ALL: [Cap; 9] = [
+    pub const ALL: [Cap; 10] = [
         Cap::Legs,
         Cap::Attempts,
         Cap::Timers,
@@ -71,6 +73,7 @@ impl Cap {
         Cap::HeaderUpdates,
         Cap::ExtBytes,
         Cap::ActionsPerTurn,
+        Cap::RecordBytes,
     ];
 
     /// The cap's name: its metric label value, its log field and its CDR
@@ -86,6 +89,7 @@ impl Cap {
             Cap::HeaderUpdates => "header-updates",
             Cap::ExtBytes => "ext-bytes",
             Cap::ActionsPerTurn => "actions-per-turn",
+            Cap::RecordBytes => "record-bytes",
         }
     }
 
@@ -125,13 +129,16 @@ impl Cap {
             Cap::HeaderUpdates => "cap-header-updates",
             Cap::ExtBytes => "cap-ext-bytes",
             Cap::ActionsPerTurn => "cap-actions-per-turn",
+            Cap::RecordBytes => "cap-record-bytes",
         }
     }
 
     /// Who can reach the cap.
     pub const fn kind(self) -> CapKind {
         match self {
-            Cap::Legs | Cap::Requests | Cap::CdrEvents | Cap::Dialogs => CapKind::Peer,
+            Cap::Legs | Cap::Requests | Cap::CdrEvents | Cap::Dialogs | Cap::RecordBytes => {
+                CapKind::Peer
+            }
             Cap::Attempts
             | Cap::Timers
             | Cap::HeaderUpdates
@@ -153,6 +160,7 @@ impl Cap {
             Cap::HeaderUpdates => "B2BUA_CAP_HEADER_UPDATES",
             Cap::ExtBytes => "B2BUA_CAP_EXT_BYTES",
             Cap::ActionsPerTurn => "B2BUA_CAP_ACTIONS_PER_TURN",
+            Cap::RecordBytes => "B2BUA_CAP_RECORD_BYTES",
         }
     }
 }
@@ -191,6 +199,13 @@ pub struct CallCaps {
     pub header_updates: u64,
     pub ext_bytes: u64,
     pub actions_per_turn: u64,
+    /// The bytes of the call record's body as the call codec encodes it for
+    /// a store write, its envelope left out. The decoded record holds a few
+    /// times its body in process (about 4.5 times for a record grown to every
+    /// count cap, 6 for a plain call), so the body bounds what the call holds
+    /// in memory, the products the per-leg and per-value caps leave open
+    /// included.
+    pub record_bytes: u64,
     /// The longest timeout a service's HTTP request runs under, in ms; a
     /// longer one, the port's default included, is clamped to it.
     pub service_http_timeout_ms: u64,
@@ -228,6 +243,10 @@ impl CallCaps {
         // chain with every service's start; above the teardown of a call at
         // its base leg cap, one action per unresolved leg and two more.
         actions_per_turn: 100_000,
+        // 16 MiB: about 2 700 times a plain answered call's body (6 KiB),
+        // and a quarter of the replication frame (64 MiB), so a body at the
+        // cap always frames.
+        record_bytes: 16 << 20,
         // A held request's answer deadline (Timer F less T2, 28 s) less the
         // 2 s answer margin (ADR-0039): the longest a service's answer can
         // take and still answer the request it holds.
@@ -246,6 +265,7 @@ impl CallCaps {
             Cap::HeaderUpdates => self.header_updates,
             Cap::ExtBytes => self.ext_bytes,
             Cap::ActionsPerTurn => self.actions_per_turn,
+            Cap::RecordBytes => self.record_bytes,
         }
     }
 }

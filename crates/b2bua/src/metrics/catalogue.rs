@@ -171,6 +171,7 @@ const WORKER_REST: &[Family] = &[
     caps::CAP_NEAR,
     caps::CAP_PEAK,
     caps::CAP_PEAK_PER_HOUR,
+    caps::CALL_RECORD_BYTES,
     worker::REPL_QUIET_TURNS,
     worker::REPL_APPLIED,
     worker::REPL_NOOPS_SENT,

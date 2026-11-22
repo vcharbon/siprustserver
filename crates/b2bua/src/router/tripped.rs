@@ -14,7 +14,7 @@ use b2bua_sdk::event::CallEvent;
 use call::Call;
 use sip_message::{Method, SipMessage};
 
-use super::commit::commit_turn;
+use super::commit::commit_safepoint;
 use super::RouterCtx;
 use crate::dispatch::HandlerFailure;
 use crate::effects::HandlerResult;
@@ -51,7 +51,7 @@ pub(super) async fn fail_turn(
         }
         call.limiter.owe_release();
         let label = &"the safepoint of a turn past a per-call cap";
-        commit_turn(ctx, call_ref, HandlerResult::new(call), now_ms, label, None).await;
+        commit_safepoint(ctx, call_ref, HandlerResult::new(call), now_ms, label).await;
     }
     if let Some(event) = in_hand {
         answer_500(ctx, call_ref, event).await;

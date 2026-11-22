@@ -14,6 +14,7 @@ mod callref;
 mod carrying_legs;
 mod codec_roundtrip;
 mod compared;
+mod counted_body;
 mod decode_bounds;
 mod index_key;
 mod instants;

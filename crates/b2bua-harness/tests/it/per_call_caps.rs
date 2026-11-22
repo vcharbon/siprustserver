@@ -14,6 +14,7 @@ use b2bua::decision::{CallDecisionEngine, CallTreatment, NewCallResponse, Script
 use b2bua::limiter::LimiterEntry;
 use b2bua_harness::{settle_until, B2buaScene, B2buaSut};
 use scenario_harness::callflow::{ANSWER_SDP, OFFER_SDP};
+use scenario_harness::{Dialog, InDialogTxn};
 use sip_message::generators::InDialogMethod;
 use sip_message::header::HeaderName;
 use sip_message::SipResponse;
@@ -171,7 +172,7 @@ async fn the_default_caps_trip_no_valid_call() {
     assert!(Cap::ALL.iter().all(|c| m.cap_trips_of(*c) == 0));
     assert_eq!(m.cap_peak_of(Cap::Legs), 1);
     assert!(m.cap_peak_of(Cap::Requests) >= 1, "the INFO relay");
-    for cap in [Cap::Timers, Cap::CdrEvents, Cap::ActionsPerTurn] {
+    for cap in [Cap::Timers, Cap::CdrEvents, Cap::ActionsPerTurn, Cap::RecordBytes] {
         assert!(m.cap_peak_of(cap) > 0, "{cap:?} read");
     }
     let _ = s.finish().await;
@@ -282,6 +283,73 @@ const FROM_TAG: &str = "cap-terminating-tag";
 /// The CDR events an answered call of this scene holds: the cap that holds it
 /// exactly there.
 const CDR_EVENTS_ANSWERED: u64 = 3;
+
+/// The record-size cap of the scenes below: well above an answered call's
+/// record, and below the record a relayed INFO leaves when its body alone
+/// is larger, since the record holds the relayed request byte for byte.
+const RECORD_CAP: u64 = 32 << 10;
+
+/// The media type of the INFO bodies that grow a record.
+const INFO_BODY_TYPE: &str = "application/example-binary";
+
+/// alice's INFO on her answered call, carrying a body of `bytes`.
+async fn info_carrying(dialog: &mut Dialog, bytes: u64) -> InDialogTxn {
+    let body = vec![b'x'; usize::try_from(bytes).expect("a body length")];
+    dialog.send_request(InDialogMethod::Info).with_body(INFO_BODY_TYPE, body).send().await
+}
+
+/// A route that would leave the initial turn's record past the record-size
+/// cap trips that turn: bob is never dialled and alice is answered the bare
+/// 503, not the 500 an in-dialog request in hand draws.
+#[tokio::test(start_paused = true)]
+async fn an_initial_record_past_its_size_cap_answers_the_caller_a_bare_503() {
+    let s = scene("cap-record-setup", |c| c.record_bytes = 1).await;
+    let mut call = s.alice.invite(&s.bob).with_sdp(OFFER_SDP).through(s.b2bua.addr).send().await;
+    let (resp, _) = call.try_expect_final(503).await.expect("alice is answered 503");
+    assert_bare_503(&resp);
+    assert!(s.bob.try_receive_tolerating("INVITE", &[]).await.is_none(), "bob is never dialled");
+    assert_ended_by(&s, Cap::RecordBytes, 1).await;
+    let _ = s.finish().await;
+}
+
+/// alice's INFO carries a body larger than the record-size cap: the turn
+/// that would relay it is discarded before its write, so bob never sees the
+/// INFO, alice's is answered 500 and both legs are BYEd.
+#[tokio::test(start_paused = true)]
+async fn an_info_growing_the_record_past_its_size_cap_byes_both_legs() {
+    let s = scene("cap-record-answered", |c| c.record_bytes = RECORD_CAP).await;
+    let mut dialog = s.establish().await;
+    let answered = s.b2bua.metrics().cap_peak_of(Cap::RecordBytes);
+    assert!(answered > 0 && answered < RECORD_CAP / 2, "the answered call's {answered} B landed");
+    let mut info = info_carrying(&mut dialog, RECORD_CAP + 1).await;
+    info.expect(500).await;
+    s.alice.receive("BYE").await.respond(200, "OK").await;
+    s.bob.receive("BYE").await.respond(200, "OK").await;
+    assert_ended_by(&s, Cap::RecordBytes, 1).await;
+    let _ = s.finish().await;
+}
+
+/// alice's INFO carries the record past half the record-size cap and stays
+/// under it: it is relayed and answered, the write is counted near, and the
+/// call ends with its hangup, no cap tripped.
+#[tokio::test(start_paused = true)]
+async fn a_record_past_half_its_size_cap_lands_and_is_counted_near() {
+    let s = scene("cap-record-near", |c| c.record_bytes = RECORD_CAP).await;
+    let mut dialog = s.establish().await;
+    let m = s.b2bua.metrics();
+    assert_eq!(m.cap_near_of(Cap::RecordBytes), 0, "the answered call is under half the cap");
+    let mut info = info_carrying(&mut dialog, RECORD_CAP * 5 / 8).await;
+    let mut at_bob = s.bob.receive("INFO").await;
+    let relayed = m.cap_peak_of(Cap::RecordBytes);
+    assert!(relayed > RECORD_CAP / 2 && relayed <= RECORD_CAP, "the relay's {relayed} B landed");
+    assert!(m.cap_near_of(Cap::RecordBytes) >= 1, "the relay's write is counted near");
+    at_bob.respond(200, "OK").await;
+    info.expect(200).await;
+    s.hangup(&mut dialog).await;
+    settle_until(|| s.b2bua.is_reaped()).await;
+    assert!(Cap::ALL.iter().all(|c| m.cap_trips_of(*c) == 0));
+    let _ = s.finish().await;
+}
 
 /// A turn that grows a collection across half its cap is counted, and lands.
 #[tokio::test(start_paused = true)]

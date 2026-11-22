@@ -52,6 +52,7 @@ pub(crate) fn caps_from_lookup(
         header_updates: count(Cap::HeaderUpdates.variable(), d.header_updates)?,
         ext_bytes: count(Cap::ExtBytes.variable(), d.ext_bytes)?,
         actions_per_turn: count(Cap::ActionsPerTurn.variable(), d.actions_per_turn)?,
+        record_bytes: count(Cap::RecordBytes.variable(), d.record_bytes)?,
         service_http_timeout_ms: count(SERVICE_HTTP_TIMEOUT, d.service_http_timeout_ms)?,
     })
 }
@@ -159,6 +160,18 @@ mod caps_env_tests {
         );
         let caps = CallCaps { actions_per_turn: 1203, ..caps };
         assert_eq!(check_caps(&caps), Ok(()));
+    }
+
+    #[test]
+    fn the_record_size_cap_is_read_and_refused_at_zero() {
+        let caps = caps_from_lookup(lookup(&[("B2BUA_CAP_RECORD_BYTES", "65536")]))
+            .expect("the value parses");
+        assert_eq!(caps.record_bytes, 65_536);
+        assert_eq!(check_caps(&caps), Ok(()));
+        let caps =
+            caps_from_lookup(lookup(&[("B2BUA_CAP_RECORD_BYTES", "0")])).expect("the value parses");
+        let err = check_caps(&caps).unwrap_err();
+        assert!(err.contains("B2BUA_CAP_RECORD_BYTES=0"), "{err}");
     }
 
     #[test]

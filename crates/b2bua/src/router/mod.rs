@@ -7,7 +7,8 @@
 //! lane first), `resolve` keys events to calls, `ingress` is
 //! the pre-dispatch pipeline, `admit` a new INVITE's router rungs of the
 //! admission ladder, `process` the per-call handler body,
-//! `commit` the tail of a turn, `turn_mark` a turn's marks at the turn-point
+//! `commit` the tail of a turn, `record_cap` the record-size cap its write is
+//! held to, `turn_mark` a turn's marks at the turn-point
 //! seam, `callouts` the fire-and-forget
 //! async-HTTP folds, `materialise` the one path a stored replica takes to
 //! become the live copy this node serves (takeover or reclaim), `departure`
@@ -72,6 +73,9 @@ mod provisional_turn_tests;
 mod quiesced;
 mod readmission;
 mod reclaim;
+mod record_cap;
+#[cfg(test)]
+mod record_cap_tests;
 mod refer_result;
 mod release;
 mod reply_to;

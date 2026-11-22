@@ -62,6 +62,30 @@ impl MsgpackCodec {
     pub fn new() -> Self {
         MsgpackCodec
     }
+
+    /// The length [`encode`](CallBodyCodec::encode) gives `call`'s body,
+    /// counted without building it; `None` when the serializer refuses the
+    /// call.
+    pub fn encoded_len(&self, call: &Call) -> Option<u64> {
+        let mut counter = Counter(0);
+        rmp_serde::encode::write(&mut counter, call).ok()?;
+        Some(counter.0)
+    }
+}
+
+/// A writer that keeps only the count of the bytes written to it.
+struct Counter(u64);
+
+impl std::io::Write for Counter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let n = u64::try_from(buf.len()).unwrap_or(u64::MAX);
+        self.0 = self.0.saturating_add(n);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 impl CallBodyCodec for MsgpackCodec {

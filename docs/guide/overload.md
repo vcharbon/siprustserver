@@ -175,6 +175,7 @@ These bounds stop a call that grows without end, by a fault of a peer or a defec
 | Timers of one call, open requests of one call | 400 each | The same. |
 | Dialogs of one leg | 100 | The same. |
 | Actions of one turn | 100 000 | The same. |
+| Size of the record of one call, encoded | 16 MiB | The same. The record is measured when the worker writes it, so a record above the bound is not written and not sent to the backup. |
 | Events queued for one call | 64 | See [What is never refused](#what-is-never-refused). |
 
 You can raise a bound. You cannot remove one. A worker refuses to start with a bound at zero.
@@ -252,6 +253,7 @@ its count falls. With a mean call duration `T`, `L` live calls and a ceiling `C`
 | `b2bua_event_queue_refusing` | 1 while check 7 refuses. |
 | `b2bua_udp_queue_wait_ms` | The wait of the oldest datagram in the UDP input queue. |
 | `b2bua_cap_trips_total{cap}` | Calls ended for a bound. |
+| `b2bua_cap_peak{cap}`, `b2bua_call_record_bytes` | How near calls come to each bound. The histogram gives the size of each call record that a worker writes. |
 | `b2bua_limiter_breaker_open`, `b2bua_limiter_uncounted_calls` | The limiter is unreachable, and how many calls run without a count. |
 | `b2bua_cdr_dropped_total{reason}` | CDRs that a worker did not deliver. `buffer_full` counts the CDRs lost at a full queue. |
 | `b2bua_loop_stalled` | 1 while the event loop does not turn. |
