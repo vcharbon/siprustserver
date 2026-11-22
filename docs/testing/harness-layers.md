@@ -104,7 +104,12 @@ NOT automatic (deliberately — timeout/reap/stall fixtures would false-fail):
   `B2buaScene::finish()` runs `B2buaSut::assert_fully_reaped()` for you; a test on a bare `Harness`
   asserts it explicitly (single-SUT), or `assert_call_fully_over` /
   `assert_call_fully_released` in failover tests. Drain async teardown first
-  with `settle_until`.
+  with `settle_until`. `B2buaScene::finish()` waits through
+  `Harness::serve_parties_until`: every UA the harness bound keeps serving
+  its transactions (answers a request copy, re-ACKs a repeated final, sends
+  what its own timers owe) until the SUT is reaped, within 1 s, or, on a
+  fabric with a loss model (`with_transit_delay_and_send_fate`), until the
+  parties' side is quiet for T2 + T1, within 66·T1.
 
 ## The actor parties
 

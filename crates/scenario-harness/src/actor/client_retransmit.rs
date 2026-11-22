@@ -1,5 +1,7 @@
 //! The leg's transaction layer over the unreliable transport, driven by its
-//! own reactor arm. Every request but ACK goes again until it is answered:
+//! own reactor arm during the call (past the scenario's last step, by
+//! [`Harness::serve_parties_until`](crate::Harness::serve_parties_until)).
+//! Every request but ACK goes again until it is answered:
 //! an INVITE on Timer A until any response, any other request on Timer E
 //! until its final (RFC 3261 §17.1.1.2, §17.1.2.2). Every final to an INVITE
 //! goes again until its ACK (§13.3.1.4, §17.2.1), every reliable provisional
