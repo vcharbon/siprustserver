@@ -1,7 +1,8 @@
 //! Cross-phase guards + the overall-safety watchdog: a second REFER (491),
 //! glare re-INVITEs from C or A during realign (491), the referrer B's
-//! in-dialog requests during realign (its BYE ends its leg alone, anything
-//! else 481), and the whole-transfer safety timeout (rollback).
+//! in-dialog requests during realign (its BYE ends its leg alone, its ACK is
+//! `relay-ack`'s, anything else 481), and the whole-transfer safety timeout
+//! (rollback).
 
 use b2bua_sdk::sm_rule;
 use call::{CdrEventType, Direction, TerminationCause, TimeoutKind};

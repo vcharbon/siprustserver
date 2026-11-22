@@ -373,7 +373,7 @@ async fn refer_allow_c_realign_c_glare() {
     let _ = h.finish().await;
 }
 
-// ── 5. B-leg non-BYE during c-realigning → 481, then resume ─────────────
+// ── 5. B-leg non-BYE, non-ACK during c-realigning → 481, then resume ────
 
 #[tokio::test]
 async fn refer_allow_c_realign_b_non_bye() {
