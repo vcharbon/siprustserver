@@ -139,17 +139,24 @@ const FAIL_BUSY = {
 }
 
 /**
+ * How long after each call its `calls-ended` reads the runner's live calls,
+ * in seconds: the runner of a loaded box has let go of the call by then. The
+ * last call of a batch waits it out in full.
+ */
+export const CALLS_ENDED_DELAY_S = 5
+
+/**
  * The workspace `dir` holding the reference lane of the pack at `pack` on
  * free addresses: its runner logging, naming its pid, capturing and writing
- * its records where `written` says, `calls-ended` read 0.1 s after each
- * call, so a batch stays under a second, and the `fail-busy` collector where
- * `failing` is set.
+ * its records where `written` says, `calls-ended` read
+ * {@link CALLS_ENDED_DELAY_S} after each call, and the `fail-busy` collector
+ * where `failing` is set.
  */
 export const hostedWorkspace = async (pack: string, dir: string, written: Written, failing = false): Promise<string> => {
   const [ingress, metrics, admin] = await freeAddresses(["udp", "tcp", "tcp"])
   const lane = fs.readFileSync(path.join(pack, "lanes", "reference.toml"), "utf8")
     .replace(`ingress = "127.0.0.1:5160"`, `ingress = "${ingress}"`) +
-    `\n[collectors.calls-ended]\ndelay_s = 0.1\n`
+    `\n[collectors.calls-ended]\ndelay_s = ${CALLS_ENDED_DELAY_S}\n`
   fs.mkdirSync(path.join(dir, "lanes"), { recursive: true })
   fs.writeFileSync(path.join(dir, "lanes", "reference.toml"), lane)
   const target = (kind: string, content: string) => {

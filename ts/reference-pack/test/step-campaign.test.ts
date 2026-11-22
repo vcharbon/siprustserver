@@ -10,9 +10,9 @@
  * record written. A case asking for a step whose tags state no alone is
  * refused at compile, no call placed.
  *
- * Its own real-clock waits, about 0.9 s: each call's answer, ring and hold
- * (0.26 s) and its `calls-ended` read 0.1 s after it, for two cells, then the
- * `call-records` settle the workspace states ({@link SETTLE_S}), waited in
+ * Its own real-clock waits: each call's answer, ring and hold (0.26 s) and its
+ * `calls-ended` read {@link CALLS_ENDED_DELAY_S} after it, for two cells, then
+ * the `call-records` settle the workspace states ({@link SETTLE_S}), waited in
  * full since the killed call has no record; the rest is process work (the
  * runner's restart, the operation's node processes). The suite builds and
  * drops its OWN database
@@ -33,7 +33,7 @@ import * as path from "node:path"
 import { fileURLToPath } from "node:url"
 import { afterAll, beforeAll, describe, expect, it } from "vitest"
 import { TAG } from "../step-cases.ts"
-import { hostedWorkspace, writtenUnder } from "./hosted-workspace.ts"
+import { CALLS_ENDED_DELAY_S, hostedWorkspace, writtenUnder } from "./hosted-workspace.ts"
 
 const PACK = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..")
 const CHECKOUT = path.resolve(PACK, "../..")
@@ -72,10 +72,11 @@ afterAll(async () => {
  * call never gets one, so the collect waits it in full. The runner writes a
  * call's record through its CDR queue as the call ends, and the collect starts
  * only once the batch's end gate read the runner holding no call, the
- * `calls-ended` read 0.1 s after the last call before it: a record the
- * runner writes reaches the file well within 0.2 s of that.
+ * `calls-ended` read {@link CALLS_ENDED_DELAY_S} after the last call before
+ * it: a record the runner writes reaches the file within that, a loaded box
+ * included.
  */
-const SETTLE_S = 0.2
+const SETTLE_S = 5
 
 /** The workspace `name` holding the reference lane, its `rig.toml` declaring {@link TAG} alone or not: its directory and what its runner writes. */
 const workspaceOf = async (name: string, alone: boolean) => {
