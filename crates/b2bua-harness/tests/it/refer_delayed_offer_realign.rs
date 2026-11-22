@@ -10,6 +10,8 @@
 //! ahead of the teardown's BYE; it never leaves bare. The wait ends inside
 //! C's 64·T1 window, so that ACK reaches C before C gives the 2xx up
 //! (§13.3.1.4); a C that gives up first by its own BYE is owed nothing more.
+//! Where A's INVITE did carry the offer, C answers in its 2xx: its ACK leaves
+//! bare at once, and A's answer to the a-realign adds none.
 
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -32,6 +34,12 @@ const CHARLIE_FIRST_OFFER: &str = "v=0\r\no=charlie 9 8 IN IP4 127.0.0.1\r\ns=-\
 const CHARLIE_REALIGN_OFFER: &str = "v=0\r\no=charlie 9 9 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 30002 RTP/AVP 8\r\na=rtpmap:8 PCMA/8000\r\na=sendrecv\r\n";
 /// A's answer to [`CHARLIE_REALIGN_OFFER`], her session one version up.
 const ALICE_REALIGN_ANSWER: &str = "v=0\r\no=alice 1 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10002 RTP/AVP 8\r\na=rtpmap:8 PCMA/8000\r\na=sendrecv\r\n";
+/// A's offer in her INVITE, where she makes one.
+const ALICE_OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 8\r\na=rtpmap:8 PCMA/8000\r\na=sendrecv\r\n";
+/// B's answer to [`ALICE_OFFER`] in its 2xx.
+const BOB_ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/AVP 8\r\na=rtpmap:8 PCMA/8000\r\na=sendrecv\r\n";
+/// C's answer in its 2xx to the c-realign re-INVITE carrying A's offer.
+const CHARLIE_REALIGN_ANSWER: &str = "v=0\r\no=charlie 9 9 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 30002 RTP/AVP 8\r\na=rtpmap:8 PCMA/8000\r\na=sendrecv\r\n";
 
 /// The longest the ACK of C's offering 2xx waits for A's answer: 60·T1, four
 /// T1 inside C's 64·T1 (32 s) give-up on the unacknowledged 2xx (RFC 3261
@@ -478,7 +486,9 @@ async fn the_transferees_answer_crossing_the_teardown_is_acked() {
 
 /// A hangs up while C holds the c-realign re-INVITE, and C's 2xx offering to
 /// it crosses the teardown: its ACK answers the offer rejecting every stream
-/// (RFC 3261 §13.2.2.4, RFC 3264 §6), since no answer of A's can come.
+/// (RFC 3261 §13.2.2.4, RFC 3264 §6), since no answer of A's can come. The
+/// teardown's own ACK does this, with no hold armed; the scenario pins that
+/// the hold leaves it so.
 #[tokio::test(start_paused = true)]
 async fn the_targets_offer_crossing_the_teardown_is_answered_rejecting() {
     let CRealigning { h, b2bua, bob, charlie, mut alice_dialog, mut c_realign, .. } =
@@ -494,6 +504,71 @@ async fn the_targets_offer_crossing_the_teardown_is_answered_rejecting() {
         rejects_every_stream(&body),
         "C's offer crossing the teardown is answered rejecting every stream, never bare: {body:?}"
     );
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
+    let _ = h.finish().await;
+}
+
+/// A's INVITE carries the offer, so the c-realign re-INVITE re-offers it to
+/// C and C answers in its 2xx: the ACK leaves bare at once, and a copy of
+/// that 2xx draws it again (RFC 3261 §13.2.2.4). C's ACK owes no answer, so
+/// A's 2xx to the a-realign re-INVITE sends C no further ACK.
+#[tokio::test(start_paused = true)]
+async fn a_transferees_offer_leaves_the_targets_ack_bare_and_unrepeated() {
+    let n = 9u16;
+    let (alice_port, bob_port, b2bua_port, charlie_port) = (5541 + n, 5551 + n, 5561 + n, 5571 + n);
+    let h = Harness::with_transit_delay("refer-delayed-offer-realign-offerful", 1);
+    let alice = h.agent("alice", &format!("127.0.0.1:{alice_port}")).await;
+    let bob = h.agent("bob", &format!("127.0.0.1:{bob_port}")).await;
+    let charlie = h.agent("charlie", &format!("127.0.0.1:{charlie_port}")).await.transfer_target();
+    let b2bua = B2buaSut::route_all_with_refer("127.0.0.1", bob_port)
+        .start(&h, "b2bua", &format!("127.0.0.1:{b2bua_port}"))
+        .await;
+
+    let mut call = alice.invite(&bob).with_sdp(ALICE_OFFER).through(b2bua.addr).send().await;
+    let mut bob_uas = bob.receive("INVITE").await;
+    bob_uas.respond(200, "OK").with_sdp(BOB_ANSWER).await;
+    call.expect(200).await;
+    let mut alice_dialog = call.ack().await;
+    bob.receive("ACK").await;
+    let mut bob_dialog = bob_uas.dialog();
+
+    let x_api_call = format!(
+        r#"{{"refer_key":"refer-allow-c","destination":{{"host":"127.0.0.1","port":{charlie_port}}}}}"#
+    );
+    let mut refer = bob_dialog
+        .send_request(InDialogMethod::Refer)
+        .with_header("Refer-To", &format!("<sip:charlie@127.0.0.1:{charlie_port}>"))
+        .with_header("X-Api-Call", &x_api_call)
+        .send()
+        .await;
+    refer.expect(202).await;
+    bob.receive("NOTIFY").await.respond(200, "OK").await;
+    let mut charlie_uas = charlie.receive("INVITE").await;
+    charlie_uas.respond(200, "OK").with_sdp(CHARLIE_FIRST_OFFER).await;
+    charlie.receive("ACK").await;
+    bob.receive("NOTIFY").await.respond(200, "OK").await;
+
+    let mut c_realign = charlie.receive("INVITE").await;
+    assert!(!c_realign.request().body().is_empty(), "the c-realign re-INVITE carries A's offer");
+    let c_cseq = Some(c_realign.request().cseq().seq());
+    c_realign.respond(200, "OK").with_sdp(CHARLIE_REALIGN_ANSWER).await;
+    let ack = charlie.receive("ACK").await;
+    assert!(ack.request().body().is_empty(), "C's 2xx answered: its ACK is bare");
+    let mut a_realign = alice.receive("INVITE").await;
+    h.advance(T1).await;
+    c_realign.respond(200, "OK").with_sdp(CHARLIE_REALIGN_ANSWER).await;
+    charlie.receive("ACK").await;
+
+    a_realign.respond(200, "OK").with_sdp(ALICE_REALIGN_ANSWER).await;
+    alice.receive("ACK").await;
+    bob.receive("BYE").await.respond(200, "OK").await;
+    let acks = sent(&h, b2bua.addr, charlie.addr(), "ACK ", c_cseq);
+    assert_eq!(acks.len(), 2, "C's 2xx and its copy draw one ACK each; A's answer draws none");
+
+    let mut alice_bye = alice_dialog.bye().await;
+    charlie.receive("BYE").await.respond(200, "OK").await;
+    alice_bye.expect(200).await;
     settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
     let _ = h.finish().await;
