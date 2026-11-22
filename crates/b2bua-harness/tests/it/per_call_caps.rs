@@ -320,18 +320,23 @@ async fn an_initial_record_past_its_size_cap_answers_the_caller_a_bare_503() {
 
 /// alice's INFO carries a body larger than the record-size cap: the turn
 /// that would relay it is discarded before its write, so bob never sees the
-/// INFO, alice's is answered 500 and both legs are BYEd.
+/// INFO, alice's is answered 500 and both legs are BYEd. The discarded turn
+/// reads nothing against the other caps: the requests' peak stays the
+/// answered call's, without the relay in flight.
 #[tokio::test(start_paused = true)]
 async fn an_info_growing_the_record_past_its_size_cap_byes_both_legs() {
     let s = scene("cap-record-answered", |c| c.record_bytes = RECORD_CAP).await;
     let mut dialog = s.establish().await;
-    let answered = s.b2bua.metrics().cap_peak_of(Cap::RecordBytes);
+    let m = s.b2bua.metrics();
+    let answered = m.cap_peak_of(Cap::RecordBytes);
     assert!(answered > 0 && answered < RECORD_CAP / 2, "the answered call's {answered} B landed");
+    let requests = m.cap_peak_of(Cap::Requests);
     let mut info = info_carrying(&mut dialog, RECORD_CAP + 1).await;
     info.expect(500).await;
     s.alice.receive("BYE").await.respond(200, "OK").await;
     s.bob.receive("BYE").await.respond(200, "OK").await;
     assert_ended_by(&s, Cap::RecordBytes, 1).await;
+    assert_eq!(m.cap_peak_of(Cap::Requests), requests, "the discarded relay reads nothing");
     let _ = s.finish().await;
 }
 
