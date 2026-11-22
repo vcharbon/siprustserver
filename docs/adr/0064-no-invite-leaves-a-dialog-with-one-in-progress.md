@@ -62,15 +62,18 @@ The transfer realign and the release reroute ACK the answer that calls for their
 earlier in the same action list. The early-media promotion's resync is called for by the
 callee's 200, which may overtake the caller's ACK of the promoted 200: the resync then waits
 in the promotion's state (`PendingResync`) and leaves on that ACK (`promote-resync-on-a-ack`).
-The transfer's a-realign, due while a 2xx this side sent the originator awaits her ACK, waits
-the same way in the transfer state and leaves on that ACK (`transfer-a-realign-on-a-ack`),
-bounded by its re-INVITE watchdog. The release reroute's a-realign waits the same way in the
-reroute state (`reroute-a-realign-on-a-ack`), bounded by the reroute guard. A refusal met later
-is a rule defect, ticketed on its own.
+The transfer's a-realign, due while the originator's dialog awaits an ACK, waits the same way
+in the transfer state and leaves on that ACK (`transfer-a-realign-on-ack`), bounded by its
+re-INVITE watchdog. The ACK is hers, of a 2xx this side sent her, or her peer's, of her 2xx to
+his re-INVITE, which this side relays to her. The release reroute's a-realign waits the same
+way in the reroute state (`reroute-a-realign-on-ack`), bounded by the reroute guard. Until the
+a-realign leaves, no response of hers answers it. A refusal met later is a rule defect,
+ticketed on its own.
 
 Neither the transfer's nor the reroute's a-realign waits for a re-INVITE of the originator's
-own that is still relayed and unanswered when it is due: that realign is refused, the transfer rolls back when its re-INVITE
-watchdog fires, and the reroute ends the call when its guard fires.
+own that is still relayed and unanswered when it is due: that realign is refused, the transfer
+rolls back when its re-INVITE watchdog fires, and the reroute ends the call when its guard
+fires.
 
 ## Consequences
 
