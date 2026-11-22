@@ -20,10 +20,27 @@ fn tagged(name: &str, tag: Option<&str>) -> String {
 
 /// A request from `from_tag` to `to_tag`, numbered `cseq`.
 fn request(method: &str, cseq: u32, from_tag: &str, to_tag: Option<&str>) -> SipRequest {
-    let cseq_method = if method == "ACK" { "ACK" } else { method };
+    request_through(method, cseq, from_tag, to_tag, 0)
+}
+
+/// [`request`] as it arrives through `proxies` hops, each stacking its Via on
+/// the sender's.
+fn request_through(
+    method: &str,
+    cseq: u32,
+    from_tag: &str,
+    to_tag: Option<&str>,
+    proxies: usize,
+) -> SipRequest {
+    let hops: String = (1..=proxies)
+        .rev()
+        .map(|n| {
+            format!("Via: SIP/2.0/UDP 192.0.2.{n}:5060;branch=z9hG4bK-p{n}-{cseq}{method}\r\n")
+        })
+        .collect();
     let text = format!(
-        "{method} sip:x@host SIP/2.0\r\nContact: <sip:fixture@192.0.2.99>\r\nVia: SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK-{cseq}{method}\r\n\
-         From: {}\r\nTo: {}\r\nCall-ID: {CALL}\r\nCSeq: {cseq} {cseq_method}\r\n\
+        "{method} sip:x@host SIP/2.0\r\nContact: <sip:fixture@192.0.2.99>\r\n{hops}Via: SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK-{cseq}{method}\r\n\
+         From: {}\r\nTo: {}\r\nCall-ID: {CALL}\r\nCSeq: {cseq} {method}\r\n\
          Max-Forwards: 70\r\nContent-Length: 0\r\n\r\n",
         tagged("a", Some(from_tag)),
         tagged("b", to_tag),
@@ -299,8 +316,13 @@ fn a_2xx_on_a_dialog_a_final_ended_is_a_verdict() {
 /// A UAS (local tag `B1`) that sent a 183 to the caller `A1`'s INVITE (CSeq
 /// 1), an INFO (CSeq 1) on that early dialog, then a 487 to the INVITE.
 fn refused_after_its_own_info() -> DialogTable {
+    refused_through(0)
+}
+
+/// [`refused_after_its_own_info`], the INVITE arriving through `proxies` hops.
+fn refused_through(proxies: usize) -> DialogTable {
     let mut t = DialogTable::new(BackwardsCseq::Verdict);
-    assert_eq!(t.judge_received(&request("INVITE", 1, "A1", None), 0), None);
+    assert_eq!(t.judge_received(&request_through("INVITE", 1, "A1", None, proxies), 0), None);
     t.note_sent_response(&response(183, "INVITE", 1, "A1", "B1"), 0);
     t.note_sent_request(&request("INFO", 1, "B1", Some("A1")));
     t.note_sent_response(&response(487, "INVITE", 1, "A1", "B1"), 0);
@@ -347,6 +369,39 @@ fn a_2xx_after_the_callers_retry_invite_is_a_verdict() {
         kind(t.note_received_response(&info_ok(), 0)),
         Some(VerdictKind::EndedAnswered { status: 200, by: 487 })
     );
+}
+
+/// RFC 3261 §17.1.1.3: a transaction-stateful proxy ACKs the UA's non-2xx
+/// final itself, under its own single Via, before the caller sees the final:
+/// that ACK proves nothing, so a 2xx after it may still cross the final.
+#[test]
+fn a_hops_own_ack_of_the_uas_final_proves_nothing() {
+    let mut t = refused_through(1);
+    assert_eq!(t.judge_received(&request("ACK", 1, "A1", Some("B1")), 0), None);
+    assert_eq!(t.note_received_response(&info_ok(), 0), None);
+}
+
+/// The caller's own ACK of the UA's final, relayed by a proxy, carries the
+/// INVITE's Via stack as the UA received it: a 2xx after it is a verdict.
+#[test]
+fn the_callers_ack_through_a_proxy_shows_it_saw_the_uas_final() {
+    let mut t = refused_through(1);
+    assert_eq!(t.judge_received(&request_through("ACK", 1, "A1", Some("B1"), 1), 0), None);
+    assert_eq!(
+        kind(t.note_received_response(&info_ok(), 0)),
+        Some(VerdictKind::EndedAnswered { status: 200, by: 487 })
+    );
+}
+
+/// RFC 3261 §17.2.2: the peer's server transaction replays its 2xx for each
+/// retransmission of the request it answers. A 2xx the UA took on a dialog
+/// is judged once: its replay after the ACK of the UA's final is no verdict.
+#[test]
+fn a_replayed_crossing_2xx_after_the_ack_is_no_verdict() {
+    let mut t = refused_after_its_own_info();
+    assert_eq!(t.note_received_response(&info_ok(), 0), None);
+    assert_eq!(t.judge_received(&request("ACK", 1, "A1", Some("B1")), 0), None);
+    assert_eq!(t.note_received_response(&info_ok(), 0), None);
 }
 
 /// The 481 such a request deserves, a PRACK's 2xx (RFC 3262 §3) and a 2xx

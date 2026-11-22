@@ -233,6 +233,51 @@ async fn a_2xx_after_the_ack_of_the_callees_final_fails() {
     h.finish().await;
 }
 
+/// alice calls bob, who rings, then refuses the call 487. Returns her INVITE
+/// and bob's server transaction.
+async fn refused_after_ringing(alice: &Agent, bob: &Agent) -> (ClientInvite, ServerTxn) {
+    let mut call = alice.invite(bob).with_sdp(OFFER).send().await;
+    let mut uas = bob.receive("INVITE").await;
+    uas.respond(180, "Ringing").send().await;
+    call.expect(180).await;
+    uas.respond(487, "Request Terminated").await;
+    (call, uas)
+}
+
+/// RFC 3261 §12.3, §17.2.1: alice sends bob an INFO on the early dialog
+/// before his 487 reaches her. Bob owes it a 481, and it is no verdict.
+#[tokio::test(start_paused = true)]
+async fn a_request_crossing_the_callees_final_is_refused_and_passes() {
+    let h = Harness::new("dialog-table-request-crossing-final");
+    let alice = h.agent("alice", "127.0.0.1:5060").await;
+    let bob = h.agent("bob", "127.0.0.1:5070").await;
+    let (mut call, uas) = refused_after_ringing(&alice, &bob).await;
+    let mut info = call.send_request(InDialogMethod::Info).send().await;
+    let mut at_bob = bob.receive("INFO").await;
+    let refusal = bob.dialog_verdict(at_bob.request()).and_then(|v| v.kind.refusal());
+    assert_eq!(refusal, Some((481, "Call/Transaction Does Not Exist")));
+    at_bob.respond(481, "Call/Transaction Does Not Exist").await;
+    info.expect(481).await;
+    call.expect(487).await;
+    uas.expect_ack().await;
+    h.finish().await;
+}
+
+/// alice sends bob an INFO on the early dialog after she ACKed his 487: she
+/// knew the dialog ended, and the INFO is a verdict at bob.
+#[tokio::test(start_paused = true)]
+#[should_panic(expected = "names a dialog a 487 final ended")]
+async fn a_request_after_the_ack_of_the_callees_final_fails() {
+    let h = Harness::new("dialog-table-request-after-ack");
+    let alice = h.agent("alice", "127.0.0.1:5060").await;
+    let bob = h.agent("bob", "127.0.0.1:5070").await;
+    let (mut call, uas) = refused_after_ringing(&alice, &bob).await;
+    call.expect(487).await;
+    uas.expect_ack().await;
+    call.send_request(InDialogMethod::Info).send().await;
+    bob.receive("INFO").await;
+}
+
 /// A `dialog-…` waiver naming no UA covers nothing: every dialog verdict is a
 /// finding against the SUT, so it is a dead waiver, conditional or not.
 #[tokio::test(start_paused = true)]
