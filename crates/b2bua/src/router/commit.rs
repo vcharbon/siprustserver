@@ -25,8 +25,8 @@ use super::release::{release_call, ReleaseKind};
 use super::turn_mark::{reach, TurnKind};
 use super::RouterCtx;
 use crate::effects::{
-    BufferedObservabilityEffect, CriticalStateEffect, FireAndForgetEffect, HandlerResult,
-    QuietTurn, SoftBoundedEffect,
+    BufferedObservabilityEffect, CriticalStateEffect, FireAndForgetEffect, HandlerEffects,
+    HandlerResult, QuietTurn, SoftBoundedEffect,
 };
 use crate::store::Measured;
 use crate::turn_probe::TurnPoint;
@@ -138,7 +138,10 @@ fn classify(landed: Landed, residency: impl FnOnce() -> Residency) -> CommitKind
 
 /// A turn's result landed on its call and classified, before its write.
 struct Prepared<'a> {
-    result: HandlerResult,
+    /// The landed record, shared with the store from its write on: what
+    /// follows only reads it.
+    call: Arc<Call>,
+    effects: HandlerEffects,
     /// The turn's unheld answers, taken back unless its entry reaches the
     /// call's outbox.
     admission: super::unheld_book::Admission<'a>,
@@ -156,7 +159,7 @@ impl Prepared<'_> {
     /// The turn writes the record of a live call: the one write the
     /// record-size cap holds.
     fn writes_live(&self) -> bool {
-        self.commit == CommitKind::Write && self.result.call.state == CallModelState::Active
+        self.commit == CommitKind::Write && self.call.state == CallModelState::Active
     }
 }
 
@@ -175,8 +178,7 @@ pub(super) async fn commit_turn(
     let Some(prepared) = prepare(ctx, call_ref, result, now_ms, turn, trigger) else {
         return;
     };
-    let call = &prepared.result.call;
-    match super::record_cap::hold(ctx, call, prepared.writes_live(), trigger) {
+    match super::record_cap::hold(ctx, &prepared.call, prepared.writes_live(), trigger) {
         Ok(measured) => write_and_send(ctx, call_ref, prepared, measured, now_ms).await,
         Err(tripped) => {
             drop(prepared);
@@ -260,7 +262,20 @@ fn prepare<'a>(
     let commit = classify(Landed::of(&result), || Residency::of(ctx, call_ref));
     let cdr =
         result.effects.buffered.iter().any(|e| matches!(e, BufferedObservabilityEffect::WriteCdr));
-    Some(Prepared { result, admission, commit, kind, cdr, awaited_before, received, ack, cancel })
+    let HandlerResult { call, effects } = result;
+    let call = Arc::new(call);
+    Some(Prepared {
+        call,
+        effects,
+        admission,
+        commit,
+        kind,
+        cdr,
+        awaited_before,
+        received,
+        ack,
+        cancel,
+    })
 }
 
 /// Write the `prepared` turn's record, `measured` when the record-size cap
@@ -272,12 +287,18 @@ async fn write_and_send(
     measured: Option<Measured>,
     now_ms: i64,
 ) {
-    let Prepared { result, admission, commit, kind, cdr, awaited_before, received, ack, cancel } =
-        prepared;
-    // The landed record is shared with the store from here on: what follows
-    // only reads it.
-    let HandlerResult { call, effects } = result;
-    let call = Arc::new(call);
+    let Prepared {
+        call,
+        effects,
+        admission,
+        commit,
+        kind,
+        cdr,
+        awaited_before,
+        received,
+        ack,
+        cancel,
+    } = prepared;
     if fenced(ctx, call_ref) {
         return;
     }
