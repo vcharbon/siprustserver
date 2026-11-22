@@ -74,9 +74,8 @@ pub(crate) use option_tags::{apply_withheld_option_tags, offers_100rel};
 pub use originate::build_b_leg;
 pub(crate) use originate::{decided_sets, dialling_invite};
 pub(crate) use owed_answer::{
-    ack_answer_on_leg, answer_never_comes, bare_ack_owed, invite_carried_offer,
-    offer_deferred_to_ack, offer_of_2xx, offer_owed_in_ack, offered_reliably, owe_answer_in_ack,
-    owe_answer_in_own_ack, owes_bare_ack,
+    ack_answer_on_leg, bare_ack_owed, invite_carried_offer, offer_deferred_to_ack, offer_of_2xx,
+    offer_owed_in_ack, offered_reliably, owe_answer_in_ack, owe_answer_in_own_ack, owes_bare_ack,
 };
 pub(crate) use repeat::{
     copy_of_2xx_ahead, copy_of_acked_failure, copy_of_earlier_2xx, copy_of_taken_2xx, count_copy,

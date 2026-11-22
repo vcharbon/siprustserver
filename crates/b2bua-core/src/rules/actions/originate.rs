@@ -297,7 +297,7 @@ impl ActionExecutor<'_> {
                 .or_else(|| (!body.is_empty()).then(relay::sdp));
             let lines = stated_lines(method, headers, body, descriptors, fx);
             let relayed = Relayed { headers: lines, body: body.to_vec(), content_type };
-            return self.send_bye(call, fx, leg_id, None, relayed, None, false);
+            return self.send_bye(call, fx, leg_id, None, relayed, None);
         }
         let Some(leg) = leg_at(call, leg_id) else { return };
         // Probe the dialog the leg's requests ride ([`call::helpers::carrying_dialog`]).

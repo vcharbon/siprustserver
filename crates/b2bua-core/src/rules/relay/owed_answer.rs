@@ -131,7 +131,7 @@ pub(crate) fn owe_answer_in_ack(call: &mut Call, leg_id: &str, resp: &SipRespons
 /// under that INVITE's CSeq, the number the ACK this stack composes carries
 /// (RFC 3261 §13.2.2.4), until that ACK leaves with the answer another leg's
 /// response brings (`RuleAction::AckLegAnswering`), or rejecting every stream
-/// when none can come (RFC 3264 §6, the BYE's own ACK).
+/// when the dialog is BYEd first (RFC 3264 §6, the BYE's own ACK).
 /// Requires `resp` to be a 2xx to that dialog's last sent INVITE, on that
 /// dialog: every rule emitting `AckLegAnswering` on the 2xx's own leg selects
 /// on both. Nothing where `resp` made no offer, or the dialog's obligation is
@@ -165,28 +165,4 @@ pub(crate) fn offer_owed_in_ack(leg: &Leg) -> Option<&[u8]> {
 /// [`bare_ack_owed`] for `leg_id` of `call`.
 pub(crate) fn owes_bare_ack(call: &Call, leg_id: &str) -> bool {
     call::helpers::find_leg(call, leg_id).is_some_and(bare_ack_owed)
-}
-
-/// Whether the answer `leg_id`'s ACK owes ([`OwedAnswer::InAck`], RFC 3264
-/// §4) can no longer come: the ACK that would carry it acknowledges a 2xx
-/// another leg was given, and no leg awaits that ACK any more (RFC 3261
-/// §13.3.1.4) — it was given nowhere, its ACK went elsewhere, or its record
-/// ended with its leg.
-pub(crate) fn answer_never_comes(call: &Call, leg_id: &str) -> bool {
-    let Some(leg) = call::helpers::find_leg(call, leg_id) else { return false };
-    let Some(cseq) = leg
-        .dialogs
-        .confirmed()
-        .and_then(call::helpers::sent_exchange)
-        .and_then(|x| x.awaited_ack_cseq)
-    else {
-        return false;
-    };
-    let awaited = std::iter::once(&call.a_leg)
-        .chain(call.b_legs.iter())
-        .filter(|l| l.leg_id != leg_id)
-        .flat_map(|l| l.dialogs.iter())
-        .filter_map(call::helpers::answered_2xx)
-        .any(|u| u.cseq == cseq);
-    offer_owed_in_ack(leg).is_some() && !awaited
 }

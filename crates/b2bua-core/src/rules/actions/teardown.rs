@@ -80,10 +80,6 @@ impl ActionExecutor<'_> {
             relayed_teardown(ctx, RelaySituation::request(method, relay::toward_leg(leg_id)))
         };
         let hops = relayed_teardown_hops(ctx);
-        // A teardown a peer's BYE asked for, or the give-up of a 2xx awaiting
-        // its ACK: the ACK an owed answer would ride will not come.
-        let answer_lost = ctx.request().is_some_and(|r| r.method() == Method::Bye)
-            || matches!(ended.0, TerminationCause::Timeout(call::TimeoutKind::Ack));
         // RFC 3326: the firing rule's teardown cause rides each BYE only when
         // it is a structured `SIP;cause=…` value (the `promote18xPemTo200`
         // diagnostic teardown). The CORE rules pass opaque labels
@@ -104,7 +100,7 @@ impl ActionExecutor<'_> {
                 LegState::Confirmed => {
                     let relayed = relayed(&Method::Bye, &id);
                     let reason = reason_header.or_else(|| own_release_reason(ctx));
-                    self.send_bye(call, fx, &id, reason, relayed, hops, answer_lost);
+                    self.send_bye(call, fx, &id, reason, relayed, hops);
                     super::dialog_end::end_dialogs(call, ctx, &id, LegEnd::OurByeSent);
                 }
                 // The caller's INVITE is answered by the firing rule, or by
@@ -188,7 +184,7 @@ impl ActionExecutor<'_> {
                 // where the rule states none (RFC 3326 §2).
                 let stated_reason = stated.iter().any(|h| HeaderName::Reason.matches(&h.name));
                 let own = own_release_reason(ctx).filter(|_| !stated_reason);
-                self.send_bye(call, fx, leg_id, own, Relayed::headers(stated), None, false);
+                self.send_bye(call, fx, leg_id, own, Relayed::headers(stated), None);
                 super::dialog_end::end_dialogs(call, ctx, leg_id, LegEnd::OurByeSent);
             }
             // The CANCEL leaves the leg `Cancelling`: a 200 OK crossing it
