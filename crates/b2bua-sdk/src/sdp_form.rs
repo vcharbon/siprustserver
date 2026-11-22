@@ -27,8 +27,11 @@ pub struct SdpCrossing {
     pub call_restated: bool,
 }
 
-/// Decides the form of an in-dialog description the stack sends. An opening
-/// description (the initial INVITE's exchange) always leaves as written.
+/// Decides the form of an in-dialog description the stack sends that moves
+/// the version the peer holds. One keeping that version leaves in the form
+/// the version first left in, so the peer receives the same bytes at it (RFC
+/// 3264 §8); otherwise an opening description (the initial INVITE's exchange)
+/// leaves as written. The policy is asked about neither.
 pub trait SdpFormPolicy: Debug + Send + Sync {
     fn form(&self, crossing: &SdpCrossing) -> SdpForm;
 }

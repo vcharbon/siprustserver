@@ -155,6 +155,7 @@ pub fn representative_call() -> Call {
             sent_origin: Some("bob 202 3 IN IP4 203.0.113.42".into()),
             sent_media: vec!["audio 20000 RTP/AVP 8".into(), "video 0 RTP/AVP 96".into()],
             sent_digest: Some(0x5eed_d16e_5700_0001),
+            sent_canonical: true,
             absorbed_origin: Some("bob 202 2 IN IP4 203.0.113.42".into()),
             sent_slots: vec![Some(0), None],
             sent_slots_author: Some("b-3".into()),
