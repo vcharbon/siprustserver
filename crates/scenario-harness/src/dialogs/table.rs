@@ -9,15 +9,15 @@
 //! legal past that BYE (RFC 5057 §5.2). A non-2xx final the UA sent makes the
 //! peer's requests and 2xx answers on the dialog findings only once the peer
 //! shows it saw that final; till then the UA still refuses its requests, and
-//! judges them as on the early dialog. A request reaching a dialog the UA's
-//! own BYE ended is a finding unless the wire record shows it a
-//! retransmission whose lost first copy left before the peer received that
-//! BYE ([`SentBeforeBye`]); the UA refuses it either way. A CSeq out of the
-//! remote sequence that a loss the wire record shows explains, on a run that
-//! declares a loss model, is answered as ever and no finding
-//! ([`LostOnTheWay`]). It keeps the last
-//! remote CSeq: as UAS it starts at the initial INVITE's CSeq, as UAC it is
-//! empty until the peer's first request (§12.1.1, §12.1.2).
+//! judges them as on the early dialog. A request reaching a dialog a BYE or a
+//! final ended, whichever side sent it, is a finding unless the wire record
+//! shows it a retransmission whose lost first copy left before the peer knew
+//! of that end ([`SentBeforeEnd`]); the UA refuses it either way. A CSeq out
+//! of the remote sequence that a loss the wire record shows explains, on a run
+//! that declares a loss model, is answered as ever and no finding
+//! ([`LostOnTheWay`]). It keeps the last remote CSeq: as UAS it starts at the
+//! initial INVITE's CSeq, as UAC it is empty until the peer's first request
+//! (§12.1.1, §12.1.2).
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
@@ -26,7 +26,7 @@ use sip_message::header;
 use sip_message::{SipRequest, SipResponse};
 
 use super::verdict::{DialogVerdict, VerdictKind};
-use super::wire_crossing::SentBeforeBye;
+use super::wire_crossing::{DialogEnd, Ending, SentBeforeEnd};
 use super::wire_loss::LostOnTheWay;
 use crate::agent::top_via_branch;
 
@@ -111,9 +111,9 @@ struct Dialog {
     remote_cseq: Option<u32>,
     /// The CSeq of the last BYE the UA sent on it.
     pending_bye: Option<u32>,
-    /// Whether the final to that BYE ended it, the peer's own BYE not having
-    /// ended it before.
-    ended_by_own_bye: bool,
+    /// The final or the BYE that ended it, the first of them; `None` while it
+    /// is early or confirmed.
+    end: Option<DialogEnd>,
     /// Subscriptions the UA opened on it (a REFER's implicit one, RFC 3515
     /// §2.4.4, or a SUBSCRIBE) not yet terminated: a BYE ends the invite
     /// usage only, and their NOTIFYs stay legal (RFC 5057 §5.2).
@@ -136,6 +136,18 @@ struct Dialog {
     final_unseen: bool,
 }
 
+impl Dialog {
+    /// The transaction of the BYE numbered `cseq`, which the peer sent when
+    /// `by_peer`, took its final: it ends the dialog unless a BYE ended it
+    /// before.
+    fn end_by_bye(&mut self, cseq: u32, by_peer: bool) {
+        if self.state != DialogState::EndedByBye {
+            self.end = Some(DialogEnd { ending: Ending::Bye { cseq }, by_peer });
+        }
+        self.state = DialogState::EndedByBye;
+    }
+}
+
 /// The dialog table of one UA.
 #[derive(Debug, Default)]
 pub struct DialogTable {
@@ -145,9 +157,9 @@ pub struct DialogTable {
     /// Dialog IDs the UA answered a request on without holding them (its
     /// `481`): the hop ACK of such a refused INVITE names them legitimately.
     refused: HashSet<DialogId>,
-    /// What the wire record shows of a request reaching a dialog the UA's
-    /// own BYE ended; with none, every such request is a finding.
-    sent_before_bye: Option<SentBeforeBye>,
+    /// What the wire record shows of a request reaching a dialog a final or
+    /// a BYE ended; with none, every such request is a finding.
+    sent_before_end: Option<SentBeforeEnd>,
     /// What the wire record shows of the requests lost on their way to the
     /// UA, on a run that declares a loss model; with none, no loss explains
     /// a CSeq out of the remote sequence.
@@ -187,10 +199,10 @@ impl DialogTable {
         self.backwards = backwards;
     }
 
-    /// Read from `wire` whether a request reaching a dialog the UA's own BYE
-    /// ended crossed that BYE.
-    pub fn set_sent_before_bye(&mut self, wire: SentBeforeBye) {
-        self.sent_before_bye = Some(wire);
+    /// Read from `wire` whether a request reaching a dialog a final or a BYE
+    /// ended crossed that end.
+    pub fn set_sent_before_end(&mut self, wire: SentBeforeEnd) {
+        self.sent_before_end = Some(wire);
     }
 
     /// Read from `wire` which requests the network lost on their way to the
@@ -298,7 +310,7 @@ impl DialogTable {
             }
             "BYE" if (200..300).contains(&status) => {
                 if let Some(d) = self.dialogs.get_mut(&id) {
-                    d.state = DialogState::EndedByBye;
+                    d.end_by_bye(response.cseq().seq(), true);
                 }
             }
             _ if status >= 300 && !self.dialogs.contains_key(&id) => {
@@ -366,8 +378,7 @@ impl DialogTable {
             "BYE" if status >= 200 => {
                 if let Some(d) = self.dialogs.get_mut(&id) {
                     if d.pending_bye == Some(response.cseq().seq()) {
-                        d.ended_by_own_bye |= d.state != DialogState::EndedByBye;
-                        d.state = DialogState::EndedByBye;
+                        d.end_by_bye(response.cseq().seq(), false);
                     }
                 }
             }
@@ -389,12 +400,16 @@ impl DialogTable {
         // As UAS the remote sequence starts at the INVITE's CSeq; as UAC it
         // starts empty (§12.1.1, §12.1.2).
         let remote_cseq = (key.role == Role::Uas).then_some(invite.cseq);
+        let final_end = DialogEnd {
+            ending: Ending::Final { invite_cseq: invite.cseq, status },
+            by_peer: key.role == Role::Uac,
+        };
         let fresh = |state| Dialog {
             state,
             invite: key.clone(),
             remote_cseq,
             pending_bye: None,
-            ended_by_own_bye: false,
+            end: matches!(state, DialogState::EndedByFinal(_)).then_some(final_end),
             subscriptions: 0,
             received: BTreeSet::new(),
             answered: BTreeSet::new(),
@@ -413,12 +428,14 @@ impl DialogTable {
                 // drew that final); only a BYE's end is final.
                 if matches!(d.state, DialogState::Early | DialogState::EndedByFinal(_)) {
                     d.state = DialogState::Confirmed;
+                    d.end = None;
                 }
             }
             300.. => {
                 for d in self.dialogs.values_mut() {
                     if d.invite == key && d.state == DialogState::Early {
                         d.state = DialogState::EndedByFinal(status);
+                        d.end = Some(final_end);
                         d.final_unseen = key.role == Role::Uas;
                     }
                 }
@@ -455,9 +472,10 @@ impl DialogTable {
     /// §12.2.2). One on a dialog the UA's own final ended before the peer
     /// provably saw it is a [`VerdictKind::Crossed`], refused, judged as on
     /// the still early dialog and a finding only of a rule it broke there
-    /// (`Dialog::final_unseen`); so is one on a dialog the UA's own BYE ended
-    /// that the wire record shows sent no later than the peer read that BYE
-    /// ([`SentBeforeBye`]), judged as on the dialog before the BYE. A CSeq out
+    /// (`Dialog::final_unseen`); so is one on a dialog a final or a BYE ended,
+    /// whichever side sent it, that the wire record shows a retransmission
+    /// whose lost first copy left before the peer knew of that end
+    /// ([`SentBeforeEnd`]), judged as on the dialog before it. A CSeq out
     /// of sequence that a loss on the way to the UA explains is a
     /// [`VerdictKind::LossExplained`] ([`LostOnTheWay`]). A request
     /// with no To-tag is out of
@@ -522,15 +540,14 @@ impl DialogTable {
         let state = dialog.state;
         let final_unseen = dialog.final_unseen;
         let subscribed = method == "NOTIFY" && dialog.subscriptions > 0;
-        let own_bye = dialog.pending_bye.filter(|_| dialog.ended_by_own_bye);
+        let end = dialog.end;
         let dialog = self.dialogs.get_mut(&id).expect("looked up above");
         dialog.received.insert(txn);
         if subscribed && notify_terminates(request) {
             dialog.subscriptions -= 1;
         }
-        let crossed_bye = || {
-            own_bye.zip(self.sent_before_bye.as_ref()).is_some_and(|(bye, w)| w.holds(request, bye))
-        };
+        let crossed_end =
+            || end.zip(self.sent_before_end.as_ref()).is_some_and(|(end, w)| w.holds(request, end));
         let crossed_by = match state {
             // A NOTIFY of a subscription the UA opened outlives the BYE that
             // ended the invite usage (RFC 5057 §5.2).
@@ -539,11 +556,11 @@ impl DialogTable {
             // not end with the INVITE's (RFC 3262 §3, §4): one owed before the
             // final may follow it.
             DialogState::EndedByFinal(_) if method == "PRACK" => None,
-            DialogState::EndedByFinal(by) if final_unseen => Some(Some(by)),
+            DialogState::EndedByFinal(by) if final_unseen || crossed_end() => Some(Some(by)),
             DialogState::EndedByFinal(status) => {
                 return Some(verdict(VerdictKind::Ended { by: Some(status) }))
             }
-            DialogState::EndedByBye if crossed_bye() => Some(None),
+            DialogState::EndedByBye if crossed_end() => Some(None),
             DialogState::EndedByBye => return Some(verdict(VerdictKind::Ended { by: None })),
             DialogState::Early | DialogState::Confirmed => None,
         };

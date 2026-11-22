@@ -10,7 +10,7 @@ use tokio::time::Instant;
 use super::reliable::ReliableSent;
 use super::table::{BackwardsCseq, DialogTable};
 use super::verdict::DialogVerdict;
-use super::wire_crossing::SentBeforeBye;
+use super::wire_crossing::SentBeforeEnd;
 use super::wire_loss::LostOnTheWay;
 use crate::WaiverScope;
 
@@ -70,11 +70,11 @@ impl DialogJudge {
     }
 
     /// A judge for the UA `party`, gated by the harness under `opt_ins`, its
-    /// table reading from `wire` whether a request reaching a dialog the
-    /// UA's own BYE ended crossed that BYE.
-    pub fn harnessed(party: impl Into<String>, opt_ins: DialogOptIns, wire: SentBeforeBye) -> Self {
+    /// table reading from `wire` whether a request reaching a dialog a final
+    /// or a BYE ended crossed that end.
+    pub fn harnessed(party: impl Into<String>, opt_ins: DialogOptIns, wire: SentBeforeEnd) -> Self {
         let mut judge = DialogJudge::new(party, opt_ins, DialogJudging::Harness);
-        judge.inner.get_mut().unwrap().table.set_sent_before_bye(wire);
+        judge.inner.get_mut().unwrap().table.set_sent_before_end(wire);
         judge
     }
 

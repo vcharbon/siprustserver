@@ -18,14 +18,15 @@ pub enum VerdictKind {
     /// The request names a dialog a non-2xx final (`by: Some(status)`) or a
     /// BYE (`by: None`) ended.
     Ended { by: Option<u16> },
-    /// The request names a dialog the UA's own act ended, and the peer may
-    /// have sent it before it learnt of that act: an early dialog a non-2xx
-    /// final the UA sent ended (`by: Some(status)`), the peer not yet shown to
-    /// have seen it (RFC 3261 §12.3); or a dialog the UA's own BYE ended
-    /// (`by: None`), the request a retransmission whose lost first copy left
-    /// no later than the peer received that BYE (§15.1.2, §17.1.2.2). The UA refuses
-    /// it as it refuses [`VerdictKind::Ended`]. Judged as on the dialog
-    /// before it ended, it is a finding only of the rule it `broke` there.
+    /// The request names a dialog a non-2xx final (`by: Some(status)`) or a
+    /// BYE (`by: None`) ended, and the peer may have sent it before it knew
+    /// of that end: an early dialog a final the UA sent ended, the peer not
+    /// yet shown to have seen it (RFC 3261 §12.3); or a dialog a final or a
+    /// BYE of either side ended, the request a retransmission whose lost
+    /// first copy left before the peer sent or read that end (§12.2.2,
+    /// §15.1.2, §17.1.2.2). The UA refuses it as it refuses
+    /// [`VerdictKind::Ended`]. Judged as on the dialog before it ended, it is
+    /// a finding only of the rule it `broke` there.
     Crossed { by: Option<u16>, broke: Option<Box<VerdictKind>> },
     /// The request `broke` the remote sequence (a CSeq gone backwards, or
     /// one skipping), and on a run that declares a loss model the wire record
@@ -188,21 +189,20 @@ impl fmt::Display for DialogVerdict {
             }
             VerdictKind::Crossed { by: Some(by), broke: None } => write!(
                 f,
-                "{m} From-tag {} To-tag {} names a dialog a {by} final this UA sent ended, \
-                 before the peer showed it saw that final",
+                "{m} From-tag {} To-tag {} names a dialog a {by} final ended, crossing that \
+                 final",
                 self.from_tag, self.to_tag
             ),
             VerdictKind::Crossed { by: None, broke: None } => write!(
                 f,
-                "{m} From-tag {} To-tag {} names a dialog the BYE this UA sent ended, its \
-                 lost first copy sent no later than the peer received that BYE",
+                "{m} From-tag {} To-tag {} names a dialog a BYE ended, crossing that BYE",
                 self.from_tag, self.to_tag
             ),
             VerdictKind::Crossed { by, broke: Some(broke) } => {
                 let before = DialogVerdict { kind: broke.as_ref().clone(), ..self.clone() };
                 match by {
-                    Some(by) => write!(f, "{before}, crossing the {by} final this UA sent"),
-                    None => write!(f, "{before}, crossing the BYE this UA sent"),
+                    Some(by) => write!(f, "{before}, crossing the {by} final that ended it"),
+                    None => write!(f, "{before}, crossing the BYE that ended it"),
                 }
             }
             VerdictKind::LossExplained { broke } => {

@@ -5,6 +5,7 @@ use sip_message::{SipMessage, SipParser, SipRequest, SipResponse};
 
 use super::*;
 
+mod crossing;
 mod lossy;
 
 const CALL: &str = "c1@host";
@@ -194,11 +195,14 @@ fn uas_bye_ok() -> SipResponse {
     }
 }
 
+/// The end [`uas_bye`] puts to the dialog, its final taken.
+const UAS_BYE_END: DialogEnd = DialogEnd { ending: Ending::Bye { cseq: 1 }, by_peer: false };
+
 /// A UAS whose wire record shows every request crossing its BYE numbered 1
 /// when `crossed`, and none else.
 fn uas_reading_the_wire(crossed: bool) -> DialogTable {
     let mut t = ringing_uas(BackwardsCseq::Verdict);
-    t.set_sent_before_bye(SentBeforeBye::new(move |_, bye| crossed && bye == 1));
+    t.set_sent_before_end(SentBeforeEnd::new(move |_, end| crossed && end == UAS_BYE_END));
     t.note_sent_response(&response(200, "INVITE", 1, "A1", "B1"), 0);
     t
 }
@@ -224,8 +228,7 @@ fn a_request_crossing_the_uas_own_bye_is_refused_and_no_finding() {
     assert!(!v.kind.is_finding());
     assert_eq!(
         v.to_string(),
-        "BYE From-tag A1 To-tag B1 names a dialog the BYE this UA sent ended, its lost first \
-         copy sent no later than the peer received that BYE"
+        "BYE From-tag A1 To-tag B1 names a dialog a BYE ended, crossing that BYE"
     );
     assert_eq!(t.judge_received(&request("BYE", 2, "A1", Some("B1")), 0), None, "a repeat");
 }
@@ -241,7 +244,8 @@ fn a_request_after_the_uas_own_bye_that_crossed_nothing_is_a_finding() {
 }
 
 /// A dialog the caller's BYE ended, before the final to the UAS's own BYE
-/// arrived, is not ended by the UAS's BYE: a later request crosses nothing.
+/// arrived, is not ended by the UAS's BYE: a later request is judged against
+/// the caller's BYE, which the wire record shows it did not cross.
 #[test]
 fn a_dialog_the_peers_bye_ended_first_is_crossed_by_nothing() {
     let mut t = uas_reading_the_wire(true);

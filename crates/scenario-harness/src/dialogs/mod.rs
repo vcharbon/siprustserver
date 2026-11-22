@@ -8,8 +8,8 @@
 //!   name, and the wire answer a UA gives it.
 //! - `judge` — [`DialogJudge`]: one UA's table and the verdicts it recorded,
 //!   gated by the harness or handed to a driver.
-//! - `wire_crossing` — [`SentBeforeBye`]: what the run's recording shows of
-//!   a request reaching a dialog the UA's own BYE ended.
+//! - `wire_crossing` — [`SentBeforeEnd`]: what the run's recording shows of
+//!   a request reaching a dialog a final or a BYE ended.
 //! - `wire_loss` — [`LostOnTheWay`]: what the run's recording shows of the
 //!   requests the network lost on their way to the UA.
 //!
@@ -25,12 +25,12 @@
 //! either may cross the final. The peer's messages are taken to reach the UA
 //! in the order it sent them.
 //!
-//! On a dialog the UA's own BYE ended, a request of the peer draws a 481 that
-//! is a finding only of a rule it broke on the dialog before that BYE when
-//! the wire record shows it a retransmission whose lost first copy the peer
-//! sent no later than it read that BYE from its socket (§15.1.2, §17.1.2.2); any
-//! other is a
-//! `dialog-ended` finding.
+//! On a dialog a final or a BYE ended, whichever side sent it, a request of
+//! the peer draws a 481 that is a finding only of a rule it broke on the
+//! dialog before that end when the wire record shows it a retransmission
+//! whose lost first copy the peer sent before it sent that end itself, or no
+//! later than it read the UA's from its socket (§12.2.2, §15.1.2, §17.1.2.2);
+//! any other is a `dialog-ended` finding.
 //!
 //! On a run that declares a loss model, a CSeq gone backwards whose request's
 //! first copy the network lost on its way to the UA (a later request overtook
@@ -56,7 +56,7 @@ pub use verdict::{
     DialogVerdict, VerdictKind, DIALOG_CSEQ_BACKWARDS, DIALOG_CSEQ_SKIP, DIALOG_EARLY_REQUEST,
     DIALOG_ENDED, DIALOG_ENDED_ANSWERED, DIALOG_UNKNOWN,
 };
-pub use wire_crossing::SentBeforeBye;
+pub use wire_crossing::{DialogEnd, Ending, SentBeforeEnd};
 pub use wire_loss::LostOnTheWay;
 
 #[cfg(test)]
