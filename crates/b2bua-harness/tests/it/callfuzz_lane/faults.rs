@@ -218,11 +218,12 @@ mod tests {
         format!("SIP/2.0 486 Busy Here\r\nVia: SIP/2.0/UDP 192.0.2.2;branch=z9hG4bK-f{n}\r\nCSeq: {n} INVITE\r\n\r\n").into_bytes()
     }
 
-    /// The fates of two flows, 192.0.2.1's requests and 192.0.2.2's finals,
-    /// sent one after the other or interleaved across the two senders, each
-    /// flow in its own order: `(requests' fates, finals' fates)`.
-    fn fates_of_two_flows(interleaved: bool) -> (Vec<Fate>, Vec<Fate>) {
-        let fate = fate_of(Faults { drop: 30, late: 30 }, 7, Arc::new(Tally::default()));
+    /// The fates of two flows of the call of `seed`, 192.0.2.1's requests and
+    /// 192.0.2.2's finals, sent one after the other or interleaved across the
+    /// two senders, each flow in its own order: `(requests' fates, finals'
+    /// fates)`.
+    fn fates_of_two_flows(seed: u64, interleaved: bool) -> (Vec<Fate>, Vec<Fate>) {
+        let fate = fate_of(Faults { drop: 30, late: 30 }, seed, Arc::new(Tally::default()));
         let (a, b) = ("192.0.2.1:5060".parse().unwrap(), "192.0.2.2:5060".parse().unwrap());
         let (mut requests, mut finals) = (Vec::new(), Vec::new());
         if interleaved {
@@ -237,15 +238,19 @@ mod tests {
         (requests, finals)
     }
 
-    /// A datagram's fate follows from its place in its sender's flow alone:
-    /// two flows sent interleaved draw the same fates, each loss and each
-    /// hold's length, as the same flows sent one after the other.
+    /// A datagram's fate follows from the call's seed and its place in its
+    /// sender's flow alone: on each of several calls, two flows sent
+    /// interleaved draw the same fates, each loss and each hold's length, as
+    /// the same flows sent one after the other.
     #[test]
     fn a_fate_is_the_same_whatever_the_order_of_sends_across_senders() {
-        let (requests, finals) = fates_of_two_flows(true);
-        assert_eq!((requests.clone(), finals.clone()), fates_of_two_flows(false));
-        let all = || requests.iter().chain(&finals);
-        assert!(all().any(|f| *f == Fate::Lose), "some datagram lost: {requests:?} {finals:?}");
-        assert!(all().any(|f| matches!(f, Fate::Late(_))), "some datagram held: {finals:?}");
+        let mut fates = Vec::new();
+        for seed in 1..=8 {
+            let (requests, finals) = fates_of_two_flows(seed, true);
+            assert_eq!((requests.clone(), finals.clone()), fates_of_two_flows(seed, false));
+            fates.extend(requests.into_iter().chain(finals));
+        }
+        assert!(fates.contains(&Fate::Lose), "some datagram lost: {fates:?}");
+        assert!(fates.iter().any(|f| matches!(f, Fate::Late(_))), "some held: {fates:?}");
     }
 }
