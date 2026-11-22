@@ -18,8 +18,8 @@ const run = <A>(effect: Effect.Effect<A, never, FileSystem.FileSystem>) =>
 
 /**
  * Polls until `pid` is a zombie; its `/proc` stat fields from field 3 on.
- * Fails as soon as `pid` is gone from `/proc`. The test's timeout is its only
- * bound.
+ * Fails as soon as `/proc` no longer holds `pid`. The test's timeout is its
+ * only bound.
  */
 const zombie = async (pid: number): Promise<Array<string>> => {
   for (;;) {
