@@ -468,13 +468,14 @@ async fn the_a_realign_leaves_on_the_callees_ack_relayed_to_the_caller() {
 
 /// B refreshed the session earlier. While his ACK of A's 2xx to his re-INVITE
 /// before the cap is in flight, the fabric delivers a copy of his ACK of the
-/// refresh: her dialog owes it nothing, so it releases nothing and the
+/// refresh at once (the third ACK of his it carries, held for nothing): her
+/// dialog owes it nothing, so it releases nothing and the
 /// a-realign re-INVITE goes on waiting. The held ACK, relayed to A, then
 /// releases it.
 #[tokio::test(start_paused = true)]
 async fn a_copy_of_an_earlier_callee_ack_releases_nothing() {
     let name = "reroute-realign-awaits-callee-ack-earlier-copy";
-    let holds = &[Duration::ZERO, ACK_HELD];
+    let holds = &[Duration::ZERO, ACK_HELD, Duration::ZERO];
     let setup = Setup { refresh: true, ..Setup::bob_acks_held(holds) };
     let mut t = a_realign_due(name, 7, setup).await;
 
