@@ -67,8 +67,9 @@ fn finals_of(report: &RunReport, to: SocketAddr, method: &str) -> Vec<u16> {
 }
 
 /// alice's `method` on her early dialog is pending at bob when she ends that
-/// dialog by `ending`: it draws `owed` from this stack, bob's 200 to it is
-/// absorbed, and the call ends on her release with one final per transaction.
+/// dialog by `ending`: it draws `owed` from this stack before bob answers it,
+/// bob's 200 to it is absorbed, and the call ends on her release with one
+/// final per transaction.
 /// A pending PRACK is the PRACK of the 183; any other request follows it.
 async fn pending_request_draws(name: &str, method: InDialogMethod, ending: Ending, owed: u16) {
     let h = Harness::with_transit_delay(name, 1);
@@ -124,8 +125,8 @@ async fn pending_request_draws(name: &str, method: InDialogMethod, ending: Endin
         }
     }
     call.expect(487).await;
-    at_bob.respond(200, "OK").await;
     pending.expect(owed).await;
+    at_bob.respond(200, "OK").await;
 
     bob.receive("CANCEL").await.respond(200, "OK").await;
     uas.respond(487, "Request Terminated").await;
