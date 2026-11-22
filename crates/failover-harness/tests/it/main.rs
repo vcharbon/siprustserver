@@ -94,6 +94,7 @@ mod reask_deadline_runs_from_the_decision;
 mod reclaim_takes_the_copys_consult;
 mod reclaim_takes_the_copys_dialled_invite;
 mod reclaim_waits_for_a_routable_endpoint;
+mod record_size_cap_trip;
 mod reinvite_2xx_acked_through_the_primary;
 mod reinvite_2xx_acked_while_the_copy_stalls;
 mod reinvite_answer_failover;
