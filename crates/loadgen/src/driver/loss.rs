@@ -23,5 +23,5 @@ pub(super) fn loss_tap(ctx: &CallCtx, wire: Option<&CallWire>) -> crate::mux::Lo
 /// its agents' dialog judges read.
 pub(super) fn departure_tap(log: &Departures) -> crate::mux::DepartureTap {
     let log = log.clone();
-    Arc::new(move |id| log.note(id))
+    Arc::new(move |raw| log.note(raw))
 }

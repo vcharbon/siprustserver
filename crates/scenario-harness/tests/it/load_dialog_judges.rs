@@ -8,7 +8,6 @@ use std::time::Duration;
 use scenario_harness::dialogs::{Departures, DIALOG_ENDED_ANSWERED};
 use scenario_harness::AgentBinder;
 use sip_message::generators::InDialogMethod;
-use sip_message::sniff;
 
 /// bob rings alice's call, sends her an INFO on the early dialog and refuses
 /// the call 487; alice answers the INFO 200. The call's log has the INFO
@@ -35,7 +34,9 @@ async fn findings_when(info_first: bool) -> Vec<String> {
     call.expect(487).await;
     uas.expect_ack().await;
     let refusal = format!(
-        "SIP/2.0 487 Request Terminated\r\nCall-ID: {}\r\nCSeq: {} INVITE\r\n\r\n",
+        "SIP/2.0 487 Request Terminated\r\nTo: <sip:bob@h>;tag={}\r\nCall-ID: {}\r\n\
+         CSeq: {} INVITE\r\n\r\n",
+        sent.from().tag().expect("bob's tag"),
         sent.call_id().as_str(),
         uas.request().cseq().seq()
     );
@@ -43,7 +44,7 @@ async fn findings_when(info_first: bool) -> Vec<String> {
         true => [sent.image(), refusal.as_bytes()],
         false => [refusal.as_bytes(), sent.image()],
     };
-    departed.iter().for_each(|raw| log.note(&sniff::identity(raw)));
+    departed.iter().for_each(|raw| log.note(raw));
     at_alice.respond(200, "OK").await;
     let answered = info.try_expect(200).await;
     assert_eq!(answered.is_ok(), info_first, "the scripted expect fails on the verdict");

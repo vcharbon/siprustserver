@@ -49,9 +49,13 @@ enum Out {
     Final,
     /// The peer's own 487.
     PeerFinal,
+    /// A 487 of another UA `V` (192.0.2.3), a fork of the same INVITE.
+    ForksFinal,
+    /// The peer's own 487 to that fork `V`.
+    PeerFinalToFork,
 }
 
-use Out::{Final, Info, PeerFinal};
+use Out::{Final, ForksFinal, Info, PeerFinal, PeerFinalToFork};
 
 fn peers_200() -> SipResponse {
     match CustomParser::new().parse(PEERS_200.as_bytes()).expect("a well-formed 200") {
@@ -82,11 +86,14 @@ async fn fact_after(sends: &[Out], lost: &'static [usize], end: DialogEnd) -> Op
     let net = wrapped.network.clone();
     let s = net.bind_udp(BindUdpOpts::new("192.0.2.1:5060".parse().unwrap(), 64)).await.unwrap();
     let u = net.bind_udp(BindUdpOpts::new(ua, 64)).await.unwrap();
+    let v = net.bind_udp(BindUdpOpts::new("192.0.2.3:5060".parse().unwrap(), 64)).await.unwrap();
     for send in sends {
         match send {
             Info => u.send_to(UA_INFO.as_bytes(), s.local_addr()).await.unwrap(),
             Final => u.send_to(UAS_487.as_bytes(), s.local_addr()).await.unwrap(),
             PeerFinal => s.send_to(PEERS_487.as_bytes(), u.local_addr()).await.unwrap(),
+            ForksFinal => v.send_to(UAS_487.as_bytes(), s.local_addr()).await.unwrap(),
+            PeerFinalToFork => s.send_to(PEERS_487.as_bytes(), v.local_addr()).await.unwrap(),
         }
         net.await_in_flight(Duration::from_secs(1)).await;
     }
@@ -133,6 +140,18 @@ async fn the_peers_own_final_counts_from_its_send() {
     assert_eq!(fact_after(&[Info, PeerFinal], &[], PEERS_OWN_487).await, Some(true));
     assert_eq!(fact_after(&[Info, PeerFinal, Info], &[0], PEERS_OWN_487).await, Some(false));
     assert_eq!(fact_after(&[PeerFinal, Info], &[], PEERS_OWN_487).await, Some(false));
+}
+
+/// A final of another fork of the same INVITE, the same Call-ID and number,
+/// ends no dialog of the UA's: one the fork sent the peer, or one the peer
+/// sent the fork, before the INFO arrived leaves the INFO ahead of the UA's
+/// own final.
+#[tokio::test(start_paused = true)]
+async fn a_forks_final_is_no_end_of_the_uas_dialog() {
+    let steps = [ForksFinal, Info, Final];
+    assert_eq!(fact_after(&steps, &[], OWN_487).await, Some(true));
+    let steps = [PeerFinalToFork, Info, PeerFinal];
+    assert_eq!(fact_after(&steps, &[], PEERS_OWN_487).await, Some(true));
 }
 
 /// The INFO's first copy lost, the 487 held 1 s by the fabric, the INFO's

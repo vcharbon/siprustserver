@@ -6,7 +6,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use sip_message::sniff::Identity;
+use sip_message::sniff;
 use sip_message::SipResponse;
 
 use super::wire_crossing::{DialogEnd, Ending};
@@ -17,7 +17,7 @@ use super::wire_crossing::{DialogEnd, Ending};
 pub struct Departures(Arc<Mutex<Vec<Departed>>>);
 
 /// What names one departed datagram: its request's transaction, or the
-/// response's request.
+/// response's request, and the UA that sent it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Departed {
     call_id: String,
@@ -29,12 +29,19 @@ struct Departed {
     status: Option<u16>,
     /// The top-Via branch.
     branch: Option<String>,
+    /// The sender's tag: the From-tag of a request, the To-tag of a response.
+    sender_tag: String,
 }
 
 impl Departures {
-    /// Note a datagram of identity `id` leaving for the wire.
-    pub fn note(&self, id: &Identity<'_>) {
+    /// Note the datagram `raw` leaving for the wire.
+    pub fn note(&self, raw: &[u8]) {
+        let id = sniff::identity(raw);
         let owned = |s: Option<&str>| s.map(str::to_string);
+        let sender_tag = match id.status {
+            Some(_) => id.to_tag.unwrap_or_default().to_string(),
+            None => sniff::from_tag(raw),
+        };
         self.0.lock().unwrap().push(Departed {
             call_id: id.call_id.unwrap_or_default().to_string(),
             cseq: id.cseq.unwrap_or_default(),
@@ -42,13 +49,16 @@ impl Departures {
             method: owned(id.method),
             status: id.status,
             branch: owned(id.branch),
+            sender_tag,
         });
     }
 
     /// Whether a copy of the request `answer` answers (its Call-ID, CSeq,
     /// method and top-Via branch) left before the first departed copy of the
-    /// UA's own final `end`; `None` when no copy of it left, or `end` is the
-    /// peer's own final, which never leaves through the UA.
+    /// UA's own final `end`, the one its To-tag names the request's sender:
+    /// another fork's final to the same INVITE ends no dialog of the UA's.
+    /// `None` when no copy of it left, or `end` is the peer's own final,
+    /// which never leaves through the UA.
     pub(super) fn ahead(&self, answer: &SipResponse, end: DialogEnd) -> Option<bool> {
         let (Ending::Final { invite_cseq, status }, false) = (end.ending, end.by_peer) else {
             return None;
@@ -63,13 +73,15 @@ impl Departures {
                 && d.cseq == answer.cseq().seq()
                 && d.branch.as_deref() == branch
         };
+        let left = log.iter().position(|d| is_request(&d))?;
+        let ua = &log[left].sender_tag;
         let is_final = |d: &&Departed| {
             d.status == Some(status)
                 && d.cseq_method == "INVITE"
                 && d.cseq == invite_cseq
                 && d.call_id == call_id
+                && d.sender_tag == *ua
         };
-        let left = log.iter().position(|d| is_request(&d))?;
         Some(log.iter().position(|d| is_final(&d)).is_none_or(|at| left < at))
     }
 }

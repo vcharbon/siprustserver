@@ -4,7 +4,7 @@
 //! ends.
 
 use sip_message::parser::custom::CustomParser;
-use sip_message::{sniff, SipMessage, SipParser, SipResponse};
+use sip_message::{SipMessage, SipParser, SipResponse};
 
 use super::Departures;
 use crate::dialogs::{DialogEnd, Ending};
@@ -31,11 +31,25 @@ fn peers_200() -> SipResponse {
     }
 }
 
+/// The 487 of another fork `V` of the same INVITE.
+const FORKS_487: &str = "SIP/2.0 487 Request Terminated\r\n\
+     Via: SIP/2.0/UDP 192.0.2.1:5060;branch=z9hG4bK-s1\r\n\
+     From: <sip:s@host>;tag=S\r\nTo: <sip:v@host>;tag=V\r\nCall-ID: c1@host\r\n\
+     CSeq: 1 INVITE\r\nContent-Length: 0\r\n\r\n";
+
 /// The fact after the departures `left`, in that order.
 fn fact_after(left: &[&str], end: DialogEnd) -> Option<bool> {
     let log = Departures::default();
-    left.iter().for_each(|raw| log.note(&sniff::identity(raw.as_bytes())));
+    left.iter().for_each(|raw| log.note(raw.as_bytes()));
     log.ahead(&peers_200(), end)
+}
+
+/// Another fork's 487 to the same INVITE, its To-tag not the UA's, ends no
+/// dialog of the UA's: the INFO leaving after it is still ahead of the UA's
+/// own 487.
+#[test]
+fn a_forks_final_is_no_end_of_the_uas_dialog() {
+    assert_eq!(fact_after(&[FORKS_487, UA_INFO, UAS_487], OWN_487), Some(true));
 }
 
 /// An INFO copy that left before the 487's first departure reached the peer

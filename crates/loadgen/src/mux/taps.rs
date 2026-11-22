@@ -46,7 +46,7 @@ pub type LossTap = Arc<dyn Fn(Side<'_>, Dir, &Datagram<'_>, &[(u16, String)]) + 
 /// it leaves: first transmissions, the copies the loss model holds when their
 /// hold ends, and the engine's re-sends; one the loss model drops never
 /// leaves. A peer's link delivers them in this order.
-pub type DepartureTap = Arc<dyn Fn(&Identity<'_>) + Send + Sync>;
+pub type DepartureTap = Arc<dyn Fn(&[u8]) + Send + Sync>;
 
 /// The responses the mux delivered to one endpoint, each distinct
 /// `(status, CSeq method)` once, in arrival order: the order the network
@@ -129,7 +129,7 @@ impl Taps {
     /// The datagram `bytes` left the endpoint for the wire.
     pub(in crate::mux) fn on_departed(&self, bytes: &[u8]) {
         if let Some(departure) = &self.departure {
-            departure(&sip_message::sniff::identity(bytes));
+            departure(bytes);
         }
     }
 

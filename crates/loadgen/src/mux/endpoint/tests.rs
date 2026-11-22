@@ -193,7 +193,8 @@ fn ack() -> Vec<u8> {
 fn departures(network: crate::mux::MuxNetwork) -> (crate::mux::MuxNetwork, DepartureLog) {
     let log = DepartureLog::default();
     let noted = log.clone();
-    let tap: crate::mux::DepartureTap = Arc::new(move |id| {
+    let tap: crate::mux::DepartureTap = Arc::new(move |raw| {
+        let id = sip_message::sniff::identity(raw);
         let what = id.method.map(str::to_string).or(id.status.map(|s| s.to_string()));
         noted.lock().unwrap().push(what.unwrap_or_default());
     });

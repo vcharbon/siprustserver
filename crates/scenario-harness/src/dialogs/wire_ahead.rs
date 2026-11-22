@@ -7,6 +7,7 @@
 //! fact from the run's recording, and on a load call from the call's
 //! [`Departures`].
 
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use layer_harness::{Channel, Stamped};
@@ -64,9 +65,11 @@ impl std::fmt::Debug for AheadOfFinal {
 /// of the request `answer` answers arrived on (its Call-ID, CSeq, method and
 /// top-Via branch: the UA's own copy, not one a hop relayed) is the
 /// receiver's, and that copy arrived before the final took effect there: the
-/// first delivered copy of the UA's own final arriving on that lane, or that
-/// lane first sending the peer's own final, lost or not. An arrival is its
-/// `RecvItem` at delivery, so a copy the fabric held arrives when it lands.
+/// first delivered copy of the UA's own final arriving on that lane from the
+/// UA's address, or that lane first sending the peer's own final to it, lost
+/// or not. Another UA's final to an INVITE of the same Call-ID and number (a
+/// fork's) is no end of this dialog. An arrival is its `RecvItem` at
+/// delivery, so a copy the fabric held arrives when it lands.
 fn reached_ahead(
     events: &[Stamped<SignalingNetworkEvent>],
     answer: &SipResponse,
@@ -89,29 +92,31 @@ fn reached_ahead(
             && id.cseq == Some(invite_cseq)
             && id.call_id == Some(call_id)
     };
-    let (arrived_at, lane) = events.iter().enumerate().find_map(|(i, s)| {
-        arrival(s).filter(|(_, id)| is_request(id)).map(|(lane, _)| (i, lane))
+    let (arrived_at, lane, ua) = events.iter().enumerate().find_map(|(i, s)| {
+        arrival(s).filter(|(.., id)| is_request(id)).map(|(lane, src, _)| (i, lane, src))
     })?;
     let in_effect = events.iter().position(|s| match (&s.event, end.by_peer) {
-        (SignalingNetworkEvent::SendCalled { bind_key, msg, .. }, true) => {
-            bind_key == lane && is_final(&sniff::identity(msg))
+        (SignalingNetworkEvent::SendCalled { bind_key, to, msg }, true) => {
+            bind_key == lane && *to == ua && is_final(&sniff::identity(msg))
         }
-        (_, false) => arrival(s).is_some_and(|(at, id)| at == lane && is_final(&id)),
+        (_, false) => {
+            arrival(s).is_some_and(|(at, src, id)| at == lane && src == ua && is_final(&id))
+        }
         _ => false,
     });
     Some(in_effect.is_none_or(|at| arrived_at < at))
 }
 
-/// The lane and the identity of `s` when it is a datagram delivered into its
-/// endpoint's inbox.
-fn arrival(s: &Stamped<SignalingNetworkEvent>) -> Option<(&str, Identity<'_>)> {
+/// The lane, the source address and the identity of `s` when it is a
+/// datagram delivered into its endpoint's inbox.
+fn arrival(s: &Stamped<SignalingNetworkEvent>) -> Option<(&str, SocketAddr, Identity<'_>)> {
     match &s.event {
         SignalingNetworkEvent::RecvItem {
             bind_key,
             packet,
             disposition: RecvDisposition::Delivered,
             ..
-        } => Some((bind_key.as_str(), sniff::identity(&packet.raw))),
+        } => Some((bind_key.as_str(), packet.src, sniff::identity(&packet.raw))),
         _ => None,
     }
 }
