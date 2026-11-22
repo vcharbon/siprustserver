@@ -123,7 +123,7 @@ fn discharge<'a>(
     body: Enveloped,
     now_ms: i64,
     how: Discharge,
-) -> Option<impl Future<Output = ()> + Send + 'a> {
+) -> Option<impl Future<Output = bool> + Send + 'a> {
     if !ctx.state.materialize_if_absent(body.clone(), MaterialiseOrigin::Reclaim) {
         return None;
     }

@@ -62,8 +62,9 @@ pub(super) fn scope(ctx: &RouterCtx) -> TurnScope {
 }
 
 /// End `call_ref` off the wire at `now_ms`: the ending lands at once, and
-/// the returned future commits it. `label` names what the turn handled, for a
-/// model-invariant violation. The caller holds the per-call lock.
+/// the returned future commits it, as [`commit_turn`] states. `label` names
+/// what the turn handled, for a model-invariant violation. The caller holds
+/// the per-call lock.
 pub(super) fn end<'a>(
     ctx: &'a Arc<RouterCtx>,
     call_ref: &'a str,
@@ -71,11 +72,9 @@ pub(super) fn end<'a>(
     caller: Caller,
     now_ms: i64,
     label: &'static &'static str,
-) -> impl Future<Output = ()> + Send + 'a {
+) -> impl Future<Output = bool> + Send + 'a {
     let result = landed(ctx, call_ref, ending, caller, now_ms);
-    async move {
-        commit_turn(ctx, call_ref, result, now_ms, label, None, None).await;
-    }
+    commit_turn(ctx, call_ref, result, now_ms, label, None, None)
 }
 
 /// The result `ending` lands, enforced and its turn's notes drained.
