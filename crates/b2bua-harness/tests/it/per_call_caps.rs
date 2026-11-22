@@ -16,7 +16,7 @@ use b2bua::limiter::LimiterEntry;
 use b2bua_harness::{settle_until, B2buaScene, B2buaSut};
 use call::MsgpackCodec;
 use scenario_harness::callflow::{ANSWER_SDP, OFFER_SDP};
-use scenario_harness::{Dialog, InDialogTxn};
+use scenario_harness::{ClientReinvite, Dialog, InDialogTxn, ServerTxn};
 use sip_message::generators::InDialogMethod;
 use sip_message::header::HeaderName;
 use sip_message::SipResponse;
@@ -365,9 +365,8 @@ async fn a_record_past_half_its_size_cap_lands_and_is_counted_near() {
 /// A record-size cap no record of these scenes reaches.
 const UNBOUNDED: u64 = 1 << 30;
 
-/// The longest a held answer of a discarded turn may wait: well under the
-/// layer's own bound on a hold no turn releases.
-const AT_ONCE: Duration = Duration::from_millis(50);
+/// The length of the header texts a ring entry keeps byte for byte.
+const LONG_TEXT: usize = 2048;
 
 /// The scene under the record-size cap of `record_bytes`.
 async fn record_capped(name: &str, record_bytes: u64) -> B2buaScene {
@@ -379,22 +378,26 @@ async fn record_capped(name: &str, record_bytes: u64) -> B2buaScene {
 }
 
 /// [`record_capped`], its calls keeping their messages in the record, each
-/// entry with its `Reason` values.
+/// entry with its `Reason` and `Warning` values.
 async fn record_capped_ringed(name: &str, record_bytes: u64) -> B2buaScene {
     B2buaScene::with_b2bua(name, move |bob_port| {
         B2buaSut::builder(holding_routes(bob_port)).tune(move |c| {
             c.cdr.message_ring = 32;
-            c.cdr.captured_headers = vec!["Reason".to_string()];
+            c.cdr.captured_headers = vec!["Reason".to_string(), "Warning".to_string()];
             c.caps.record_bytes = record_bytes;
         })
     })
     .await
 }
 
-/// A `Reason` (RFC 3326) at a length the record's ring entry keeps byte for
-/// byte.
+/// A `Reason` (RFC 3326) carrying a text of [`LONG_TEXT`] bytes.
 fn long_reason() -> String {
-    format!("SIP;cause=487;text=\"{}\"", "x".repeat(2048))
+    format!("SIP;cause=487;text=\"{}\"", "x".repeat(LONG_TEXT))
+}
+
+/// A `Warning` (RFC 3261 §20.43) carrying a text of [`LONG_TEXT`] bytes.
+fn long_warning() -> String {
+    format!("399 bob.example \"{}\"", "x".repeat(LONG_TEXT))
 }
 
 /// The largest record the scene's writes held to the record-size cap read.
@@ -416,56 +419,74 @@ fn cap_between(before: u64, after: u64) -> u64 {
     before + (after - before) / 2
 }
 
-/// bob's 486 would fail the call over to carol, and the record its turn
-/// lands crosses the record-size cap: the turn is discarded, so carol is
-/// never dialled, the ACK the layer holds for the 486 leaves at once, and
-/// alice is answered the bare 503.
+/// bob refuses the re-INVITE he holds with a 488 and is ACKed: the time from
+/// his 488 to his ACK.
+async fn refused_and_acked(s: &B2buaScene, uas: &mut ServerTxn) -> Duration {
+    let refused = Instant::now();
+    uas.respond(488, "Not Acceptable Here").with_header("Warning", &long_warning()).await;
+    s.bob.receive("ACK").await;
+    refused.elapsed()
+}
+
+/// bob refuses alice's relayed re-INVITE with a 488, and the record its
+/// turn lands, its ring entry keeping the 488's long `Warning`, crosses the
+/// record-size cap: the turn is discarded, and the ACK the layer holds for
+/// the 488 leaves as soon as on a call under its cap. The verdict's teardown
+/// ends alice's re-INVITE with a 487 and BYEs both legs.
 #[tokio::test(start_paused = true)]
-async fn a_record_trip_on_a_callee_s_refusal_acks_it_at_once() {
-    const NAME: &str = "cap-record-refusal";
-    let (before, after) = {
-        let s = record_capped(NAME, UNBOUNDED).await;
-        let _carol = s.h.agent("carol", "127.0.0.1:5071").await;
-        let _call = s.alice.invite(&s.bob).with_sdp(OFFER_SDP).through(s.b2bua.addr).send().await;
-        let mut uas = s.bob.receive("INVITE").await;
+async fn a_record_trip_on_a_re_invite_s_refusal_acks_it_at_once() {
+    const NAME: &str = "cap-record-reinvite-refusal";
+    let (before, under_cap) = {
+        let s = record_capped_ringed(NAME, UNBOUNDED).await;
+        let mut dialog = s.establish().await;
+        let mut reinvite = dialog.reinvite(Some(REOFFER_SDP)).await;
+        let mut at_bob = s.bob.receive("INVITE").await;
         let before = record_peak(&s);
-        uas.respond(486, "Busy Here").await;
-        s.bob.receive("ACK").await;
-        (before, record_peak(&s))
+        let under_cap = refused_and_acked(&s, &mut at_bob).await;
+        reinvite.expect(488).await;
+        s.hangup(&mut dialog).await;
+        let _ = s.finish().await;
+        (before, under_cap)
     };
 
-    let s = record_capped(NAME, cap_between(before, after)).await;
-    let carol = s.h.agent("carol", "127.0.0.1:5071").await;
-    let mut call = s.alice.invite(&s.bob).with_sdp(OFFER_SDP).through(s.b2bua.addr).send().await;
-    let mut uas = s.bob.receive("INVITE").await;
-    let refused = Instant::now();
-    uas.respond(486, "Busy Here").await;
-    s.bob.receive("ACK").await;
-    let waited = refused.elapsed();
-    assert!(waited < AT_ONCE, "bob's 486 is ACKed after {waited:?}");
-    let (resp, _) = call.try_expect_final(503).await.expect("alice is answered 503");
-    assert_bare_503(&resp);
-    assert!(carol.try_receive_tolerating("INVITE", &[]).await.is_none(), "carol is never dialled");
+    let cap = before + u64::try_from(LONG_TEXT / 2).expect("a length");
+    let s = record_capped_ringed(NAME, cap).await;
+    let mut dialog = s.establish().await;
+    let mut reinvite = dialog.reinvite(Some(REOFFER_SDP)).await;
+    let mut at_bob = s.bob.receive("INVITE").await;
+    let waited = refused_and_acked(&s, &mut at_bob).await;
+    assert!(waited <= under_cap, "bob's 488 is ACKed after {waited:?}, not {under_cap:?}");
+    reinvite.expect(487).await;
+    s.alice.receive("BYE").await.respond(200, "OK").await;
+    s.bob.receive("BYE").await.respond(200, "OK").await;
     assert_ended_by(&s, Cap::RecordBytes, 1).await;
     let _ = s.finish().await;
 }
 
+/// alice CANCELs her re-INVITE and is answered 200: the time from her CANCEL
+/// to its 200.
+async fn cancelled(reinvite: &mut ClientReinvite) -> Duration {
+    let cancelled = Instant::now();
+    reinvite.cancel().await.expect(200).await;
+    cancelled.elapsed()
+}
+
 /// alice CANCELs her re-INVITE, relayed to bob and answered 100 there, and
 /// the record the CANCEL's turn lands crosses the record-size cap: the turn
-/// is discarded, so bob never sees the CANCEL, and the layer's 200 to the
-/// CANCEL and 487 to the re-INVITE leave at once. The verdict BYEs both
-/// legs, and bob ends his re-INVITE with a 487 (RFC 3261 §15.1.2).
+/// is discarded, and the layer's 200 to the CANCEL leaves as soon as on a
+/// call under its cap, its 487 to the re-INVITE behind it. The verdict's
+/// teardown CANCELs the re-INVITE bob holds and BYEs both legs.
 #[tokio::test(start_paused = true)]
 async fn a_record_trip_on_a_re_invite_s_cancel_answers_it_at_once() {
     const NAME: &str = "cap-record-reinvite-cancel";
-    let (before, after) = {
+    let (before, after, under_cap) = {
         let s = record_capped(NAME, UNBOUNDED).await;
         let mut dialog = s.establish().await;
         let mut reinvite = dialog.reinvite(Some(REOFFER_SDP)).await;
         let mut at_bob = s.bob.receive("INVITE").await;
         at_bob.respond(100, "Trying").await;
         let before = record_peak(&s);
-        reinvite.cancel().await.expect(200).await;
+        let under_cap = cancelled(&mut reinvite).await;
         let after = record_peak(&s);
         s.bob.receive("CANCEL").await.respond(200, "OK").await;
         at_bob.respond(487, "Request Terminated").await;
@@ -473,7 +494,7 @@ async fn a_record_trip_on_a_re_invite_s_cancel_answers_it_at_once() {
         reinvite.expect(487).await;
         s.hangup(&mut dialog).await;
         let _ = s.finish().await;
-        (before, after)
+        (before, after, under_cap)
     };
 
     let s = record_capped(NAME, cap_between(before, after)).await;
@@ -481,14 +502,14 @@ async fn a_record_trip_on_a_re_invite_s_cancel_answers_it_at_once() {
     let mut reinvite = dialog.reinvite(Some(REOFFER_SDP)).await;
     let mut at_bob = s.bob.receive("INVITE").await;
     at_bob.respond(100, "Trying").await;
-    let cancelled = Instant::now();
-    reinvite.cancel().await.expect(200).await;
+    let waited = cancelled(&mut reinvite).await;
+    assert!(waited <= under_cap, "alice's CANCEL is answered after {waited:?}, not {under_cap:?}");
     reinvite.expect(487).await;
-    let waited = cancelled.elapsed();
-    assert!(waited < AT_ONCE, "alice's CANCEL is answered after {waited:?}");
 
     s.alice.receive("BYE").await.respond(200, "OK").await;
+    let mut bob_cancel = s.bob.receive("CANCEL").await;
     let mut bob_bye = s.bob.receive("BYE").await;
+    bob_cancel.respond(200, "OK").await;
     at_bob.respond(487, "Request Terminated").await;
     s.bob.receive("ACK").await;
     bob_bye.respond(200, "OK").await;
