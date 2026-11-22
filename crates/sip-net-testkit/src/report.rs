@@ -23,6 +23,7 @@
 //! wants method/status/Call-ID labels parses `raw` itself with `sip-message`.
 //! Keeping the parser out is what lets this projection sit in the network layer.
 
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 
 use layer_harness::Stamped;
@@ -176,6 +177,35 @@ fn claim_lost_send(
     at.map(|i| lost.remove(i)).is_some()
 }
 
+/// The `SendCalled` stamps whose own call recorded the `SendLost` of their
+/// bytes (between that `SendCalled` and its lane's next `SendResult`), with
+/// the stamps of those `SendLost`s: a send the loss model dropped as it was
+/// handed over, whatever later copy of the same bytes is delivered.
+fn lost_in_their_call(events: &[Stamped<SignalingNetworkEvent>]) -> (HashSet<u64>, HashSet<u64>) {
+    let mut open: HashMap<&str, (u64, SocketAddr, &[u8])> = HashMap::new();
+    let (mut sends, mut losses) = (HashSet::new(), HashSet::new());
+    for s in events {
+        match &s.event {
+            SignalingNetworkEvent::SendCalled { bind_key, to, msg } => {
+                open.insert(bind_key, (s.seq, *to, msg));
+            }
+            SignalingNetworkEvent::SendResult { bind_key, .. } => {
+                open.remove(bind_key.as_str());
+            }
+            SignalingNetworkEvent::SendLost { bind_key, to, msg } => {
+                if let Some((send, ..)) =
+                    open.get(bind_key.as_str()).filter(|(_, t, m)| t == to && *m == &msg[..])
+                {
+                    sends.insert(*send);
+                    losses.insert(s.seq);
+                }
+            }
+            _ => {}
+        }
+    }
+    (sends, losses)
+}
+
 /// Pair every `SendCalled` on the channel with its delivering `RecvItem` and
 /// return one [`RecordedSipEntry`] per send, in capture order. A send whose
 /// `SendLost` follows it is undelivered, noted [`RecvNote::LossModel`].
@@ -277,8 +307,10 @@ fn paired_sip_entries(
         }
     }
 
+    let (lost_sends, claimed) = lost_in_their_call(events);
     let mut lost: Vec<LostSend<'_>> = events
         .iter()
+        .filter(|s| !claimed.contains(&s.seq))
         .filter_map(|s| match &s.event {
             SignalingNetworkEvent::SendLost { bind_key, to, msg } => {
                 Some(LostSend { seq: s.seq, bind_key, to: *to, msg })
@@ -298,8 +330,10 @@ fn paired_sip_entries(
 
         // Earliest unpaired delivery: receiver == `to`, packet.src == `from`,
         // same bytes, and observed at-or-after this send (seq order).
+        let lost_in_call = lost_sends.contains(&s.seq);
         let matched = recvs.iter_mut().find(|r| {
-            !r.paired
+            !lost_in_call
+                && !r.paired
                 && r.receiver == *to
                 && r.src == from
                 && r.raw == msg.as_slice()
@@ -311,7 +345,7 @@ fn paired_sip_entries(
                 r.paired = true;
                 (Some(r.at_ms), r.note(), Some(r.bind_key.to_string()), Some(r.seq), false)
             }
-            None if claim_lost_send(&mut lost, s.seq, bind_key, *to, msg) => {
+            None if lost_in_call || claim_lost_send(&mut lost, s.seq, bind_key, *to, msg) => {
                 (None, Some(RecvNote::LossModel), None, None, true)
             }
             None => (None, None, None, None, false),

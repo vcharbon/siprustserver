@@ -21,7 +21,7 @@ use std::future::Future;
 use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicI64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -33,8 +33,8 @@ use sip_net::Arrival;
 use crate::net::{Counters, SignalingNetwork, UdpEndpoint};
 use crate::queue::PacketQueue;
 use crate::types::{
-    BindError, BindErrorReason, BindUdpOpts, PreIngressAction, PreIngressHook, SendError,
-    UdpEndpointCounters, UdpPacket, UndeliveredPacket,
+    BindError, BindErrorReason, BindUdpOpts, PreIngressAction, PreIngressHook, SendError, SendNote,
+    SendTap, UdpEndpointCounters, UdpPacket, UndeliveredPacket,
 };
 
 /// Optional per-pair send-failure injector: `(src, dst) -> Some(reason)` fails
@@ -54,7 +54,8 @@ pub type SendDelay = Arc<dyn Fn(SocketAddr, SocketAddr, &[u8]) -> Option<Duratio
 pub enum Fate {
     /// Delivered after the fabric's transit.
     Deliver,
-    /// Never delivered; the send still succeeds.
+    /// Never delivered; the send still succeeds, and the sender's send tap
+    /// is told of the loss ([`SendNote::LossModel`]).
     Lose,
     /// Delivered this much later than the transit.
     Late(Duration),
@@ -239,6 +240,7 @@ impl SignalingNetwork for SimulatedSignalingNetwork {
             counters,
             queue_max: opts.queue_max,
             shared: self.shared.clone(),
+            send_tap: OnceLock::new(),
         }))
     }
 
@@ -342,6 +344,8 @@ struct SimEndpoint {
     counters: Arc<Counters>,
     queue_max: usize,
     shared: Arc<SimShared>,
+    /// Told of each datagram of this endpoint the fabric loses.
+    send_tap: OnceLock<SendTap>,
 }
 
 #[async_trait]
@@ -363,6 +367,9 @@ impl UdpEndpoint for SimEndpoint {
         let src = self.addr;
         let fate = self.shared.send_fate.as_ref().map_or(Fate::Deliver, |f| f(src, dst, buf));
         let transit = Duration::from_millis(self.shared.transit_delay_ms);
+        if fate == Fate::Lose {
+            self.send_tap.get().inspect(|tap| tap(buf, dst, SendNote::LossModel));
+        }
         let arrivals = match fate {
             Fate::Deliver => vec![transit],
             Fate::Lose => vec![],
@@ -416,6 +423,11 @@ impl UdpEndpoint for SimEndpoint {
 
     fn install_recv_tap(&self, tap: crate::types::RecvTap) -> bool {
         self.queue.install_tap(tap);
+        true
+    }
+
+    fn install_send_tap(&self, tap: SendTap) -> bool {
+        let _ = self.send_tap.set(tap);
         true
     }
 }

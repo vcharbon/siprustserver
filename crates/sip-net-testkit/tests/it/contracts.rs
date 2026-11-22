@@ -7,7 +7,7 @@ use std::time::Duration;
 use layer_harness::{Recorder, RunContext, Severity, Stamped};
 use sip_net::BindUdpOpts;
 use sip_net_testkit::{
-    with_all_contracts, PeerAuditRule, ScopedAuditOptions, SignalingNetworkEvent,
+    with_all_contracts, Fate, PeerAuditRule, RecvNote, ScopedAuditOptions, SignalingNetworkEvent,
     SimulatedSignalingNetwork,
 };
 use tokio::time::timeout;
@@ -324,6 +324,62 @@ async fn overflow_arrival_is_recorded_with_its_disposition() {
             .unwrap()
             .event
     ));
+}
+
+/// A datagram the fabric loses is a `SendLost` on its sender's lane, after
+/// its `SendCalled`: the ladder renders that send lost, and its
+/// retransmission, the same bytes, delivered.
+#[tokio::test]
+async fn a_datagram_the_fabric_loses_is_recorded_lost_on_its_senders_lane() {
+    let recorder = Recorder::fake();
+    let first = std::sync::atomic::AtomicBool::new(true);
+    let fabric = SimulatedSignalingNetwork::new(0).with_send_fate(Arc::new(move |_, _, _| {
+        if first.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            Fate::Lose
+        } else {
+            Fate::Deliver
+        }
+    }));
+    let wrapped = with_all_contracts(
+        Arc::new(fabric),
+        recorder,
+        RunContext::TestWithRecorder,
+        ScopedAuditOptions::default(),
+        true,
+    );
+    let net = wrapped.network.clone();
+
+    let a = net.bind_udp(opts("10.0.0.1:5060", 64)).await.unwrap();
+    let b = net.bind_udp(opts("10.0.0.2:5060", 64)).await.unwrap();
+    a.send_to(b"BYE sip:x SIP/2.0\r\n", b.local_addr()).await.unwrap();
+    a.send_to(b"BYE sip:x SIP/2.0\r\n", b.local_addr()).await.unwrap();
+    net.await_in_flight(Duration::from_secs(1)).await;
+
+    let snapshot = wrapped.recording.channel().snapshot();
+    let lost: Vec<_> = snapshot
+        .iter()
+        .filter_map(|s| match &s.event {
+            SignalingNetworkEvent::SendLost { bind_key, to, msg } => {
+                Some((bind_key.clone(), *to, msg.clone()))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        lost,
+        vec![("10.0.0.1:5060".to_string(), b.local_addr(), b"BYE sip:x SIP/2.0\r\n".to_vec())]
+    );
+
+    let byes: Vec<_> = sip_net_testkit::to_sip_entries(&snapshot)
+        .into_iter()
+        .filter(|e| e.raw.starts_with(b"BYE"))
+        .map(|e| (e.delivered, e.recv_note))
+        .collect();
+    assert_eq!(
+        byes,
+        vec![(false, Some(RecvNote::LossModel)), (true, Some(RecvNote::Unconsumed))],
+        "the first send lost, its retransmission delivered"
+    );
 }
 
 #[test]

@@ -58,7 +58,8 @@ pub enum SignalingNetworkEvent {
         kind: crate::types::ReEmitKind,
     },
     /// The `SendCalled` of these bytes, from `bind_key` to `to`, that the
-    /// endpoint's loss model then dropped (loadgen `--drop-rate`): it never
+    /// endpoint's loss model then dropped (loadgen `--drop-rate`, the
+    /// simulated fabric's [`Fate::Lose`](crate::Fate::Lose)): it never
     /// reached its taker. Rules never judge it; the projection renders its
     /// send lost and the cross pass reads it as loss evidence.
     SendLost {
