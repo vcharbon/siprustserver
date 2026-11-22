@@ -207,7 +207,9 @@ impl ActionExecutor<'_> {
     }
 
     /// CANCEL a ringing b-leg, which then reads `Cancelling`
-    /// ([`b2bua_sdk::model::RuleAction::CancelLeg`]).
+    /// ([`b2bua_sdk::model::RuleAction::CancelLeg`]). The leg ends with its
+    /// CANCEL: the requests relayed toward it are settled (§15.1.2), so its
+    /// later finals to them are never relayed.
     pub(super) fn cancel_leg(
         &mut self,
         call: &mut Call,
@@ -220,6 +222,7 @@ impl ActionExecutor<'_> {
         self.retire(call, fx, Scope::Leg(leg_id));
         let situation = RelaySituation::request(&Method::Cancel, relay::toward_leg(leg_id));
         self.send_cancel(call, fx, leg_id, &relayed_teardown(ctx, situation).headers);
+        settle(call, fx, Legs::One(leg_id), Cause::LegEnd, self.now_ms);
     }
 
     /// End `leg_id` as `end` records

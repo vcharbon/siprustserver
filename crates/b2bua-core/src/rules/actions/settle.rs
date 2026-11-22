@@ -8,6 +8,7 @@
 //! | the caller's INVITE carries its final at termination | `begin_termination` | the caller's | [`Cause::LegEnd`] |
 //! | a ringing leg's CANCEL leaves at termination | `begin_termination` | that leg | [`Cause::LegEnd`] |
 //! | a rule destroys a leg (`DestroyLeg`) | `destroy_leg` | that leg | [`Cause::LegEnd`] |
+//! | a rule CANCELs a ringing leg (`CancelLeg`) | `cancel_leg` | that leg | [`Cause::LegEnd`] |
 //! | a rule ends a leg (`TerminateLeg`) | `terminate_leg` | that leg | [`Cause::LegEnd`] |
 //! | the call is released at once (`TerminateCall`) | `dispatch` | every | [`Cause::LegEnd`] |
 //! | the unanswered caller's 503 leaves, at termination (ADR-0022) or under the possibly-confirmed hold (ADR-0055 §4) | `answer_unanswered_caller` | the caller's | [`Cause::LegEnd`] |
