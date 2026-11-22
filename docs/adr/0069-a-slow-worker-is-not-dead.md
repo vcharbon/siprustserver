@@ -36,8 +36,8 @@ worker's load and spent a token of the gates that exist to protect the workers.
      whose answer names another `X-Incarnation` reads `Dead` first: its process died.
    - `Dead` turns `Alive` on one answer in time.
    - A `Slow` or `Alive` worker's endpoint read not ready while its stamp is fresh reads
-     `Slow`, not a dead verdict, until the endpoint reads ready again or the probe reads it
-     dead.
+     `Slow`, not a dead verdict, until the endpoint reads ready again, the probe reads it
+     dead, or an answer in time names another process.
 3. **A slow worker serves its dialogs.** Its cookie routes to it as primary or as backup, a
    request no memo places ranks it with the `Alive` ones, and the dead notice reaches it. It
    gets no new dialog, except an emergency one while no worker is `Alive`. A turn to `Dead` is
