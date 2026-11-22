@@ -68,14 +68,18 @@ Automatic (you cannot opt out, only waive per-rule):
   in-dialog request on no dialog it holds, on an ended dialog, or with a
   CSeq that goes backwards or skips is a verdict: a scripted `receive` fails
   at once with a `StepError::Dialog`, the actor answers it 481 (500, 491) on
-  its own, and `finish()` fails on it. A request that crosses the UA's own
-  non-2xx final, or its own BYE (a retransmission whose lost first copy left
-  no later than its sender read that BYE from its socket, by the run's recording), is
-  answered 481 and fails only on a rule it breaks on the dialog before that
-  end (the module doc says when it crosses). On a fabric that runs a loss
-  model, a CSeq gone backwards or skipping that the recorded loss of a
-  request on its way to the UA explains is answered as ever (500, taken) and
-  is no finding. A test that sends such a message on
+  its own, and `finish()` fails on it. A request that crosses an end of its
+  dialog is answered 481 and fails only on a rule it breaks on the dialog
+  before that end (the module doc says when it crosses): on any run, the
+  UA's own non-2xx final before the peer showed it saw it; on a fabric that
+  runs a loss model, also a non-2xx final or a BYE of either side, the
+  request a retransmission whose first copy the run's recording shows lost
+  and sent before its sender sent that end itself, or at an instant no
+  later than its sender read the UA's end from its socket. On such a
+  fabric, a CSeq gone backwards that the recorded loss of a first copy of
+  that same transaction explains, or skipping over numbers all recorded
+  lost on their way to the UA, is answered as ever (500, taken) and is no
+  finding. A test that sends such a message on
   purpose waives the `dialog-…` rule on the receiving UA
   (`h.waive(WaiverScope::rule(DIALOG_UNKNOWN, why).on_party("alice"))`); a
   dialog waiver naming no UA covers nothing.
@@ -111,10 +115,10 @@ NOT automatic (deliberately — timeout/reap/stall fixtures would false-fail):
   `assert_call_fully_released` in failover tests. Drain async teardown first
   with `settle_until`. `B2buaScene::finish()` waits through
   `Harness::serve_parties_until`: every UA the harness bound keeps serving
-  its transactions (answers a request copy, re-ACKs a repeated final, sends
-  what its own timers owe) until the SUT is reaped, within 1 s, or, on a
-  fabric with a loss model (`with_transit_delay_and_send_fate`), until the
-  parties' side is quiet for T2 + T1, within 66·T1.
+  its transactions (answers a request copy, re-ACKs a repeated final) until
+  the SUT is reaped, within 1 s, or, on a fabric with a loss model
+  (`with_transit_delay_and_send_fate`), also sends what its own timers owe,
+  until the parties' side is quiet for T2 + T1, within 66·T1.
 
 ## The actor parties
 
