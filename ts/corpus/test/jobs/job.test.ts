@@ -106,7 +106,7 @@ const groupLeads = (pid: number): boolean => {
 
 describe("a job's process", () => {
   it("is alive by its record while it runs, and died once its group is killed with no exit written", async () => {
-    const launched = await launch(1, ["sleep", "30"])
+    const launched = await launch(1, ["sleep", "3600"])
     const running = row(1, launched)
     expect(fs.existsSync(launched.logPath)).toBe(true)
     expect(await live(Job.liveness(running))).toEqual({ _tag: "running" })
@@ -123,7 +123,7 @@ describe("a job's process", () => {
     const launched = await launchSlowed(
       { setsid: (real) => `sleep 0.3\nexec ${real} /bin/sh -c 'sleep 0.3; exec "$@"' sh "$@"` },
       7,
-      ["sleep", "30"]
+      ["sleep", "3600"]
     )
     try {
       expect(fs.existsSync(launched.logPath)).toBe(true)
@@ -226,9 +226,9 @@ describe("an inbox job", () => {
 
 describe("reaping jobs", () => {
   it("closes a died job and the runs it left open, and leaves a running one alone", async () => {
-    const dead = await launch(4, ["sleep", "30"])
+    const dead = await launch(4, ["sleep", "3600"])
     process.kill(-dead.pid, "SIGKILL")
-    const alive = await launch(5, ["sleep", "30"])
+    const alive = await launch(5, ["sleep", "3600"])
     const died = row(4, dead)
     const running = row(5, alive)
     await until(async () => !(await live(Job.processAlive(died))))

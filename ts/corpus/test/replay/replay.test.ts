@@ -468,9 +468,11 @@ const crashingDrive: typeof runCell = ((cell: Campaign.CampaignCell, context: { 
 /**
  * The deployment's collectors: on {@link BATCHED}, a real-clock lane, the
  * cell-scope collector `after-call`, whose collect answers it passed at once,
- * or, over a cell of a case ending `-b`, only after 10 s.
+ * naming its `SIPRIG_OUT` in the file `answered` as it does, or, over a cell
+ * of a case ending `-b`, runs until it is killed. The runner removes that
+ * directory once it read the answer.
  */
-const afterCallOf = async (): Promise<Layer.Layer<Collectors.Service>> => {
+const afterCallOf = async (): Promise<{ readonly layer: Layer.Layer<Collectors.Service>; readonly answered: string }> => {
   const root = fs.mkdtempSync(path.join(ROOT, "rig-"))
   const dir = path.join(root, "collectors", "after-call")
   fs.mkdirSync(dir, { recursive: true })
@@ -480,7 +482,13 @@ const afterCallOf = async (): Promise<Layer.Layer<Collectors.Service>> => {
   )
   fs.writeFileSync(
     path.join(dir, "collect"),
-    `#!/bin/sh\nif grep -q -- '-b",' "$SIPRIG_CONTEXT"; then sleep 10; fi\necho '{"verification":"after-call","answer":"pass"}'\n`,
+    [
+      `#!/bin/sh`,
+      `if grep -q -- '-b",' "$SIPRIG_CONTEXT"; then exec sleep 3600; fi`,
+      `echo "$SIPRIG_OUT" > ../../answered.part && mv ../../answered.part ../../answered`,
+      `echo '{"verification":"after-call","answer":"pass"}'`,
+      ``
+    ].join("\n"),
     { mode: 0o755 }
   )
   const rig = await Effect.runPromise(RigPath.load({ workspace: root }).pipe(Effect.provide(NodeServices.layer)))
@@ -492,14 +500,30 @@ const afterCallOf = async (): Promise<Layer.Layer<Collectors.Service>> => {
     operations: new Map(),
     capabilities: new Set()
   }
-  return Collectors.layerOf(rig, [lane])
+  return { layer: Collectors.layerOf(rig, [lane]), answered: path.join(root, "answered") }
 }
 
-/** A driver like {@link describedDrive} whose cell `<TWO>-a` fails its batch 0.5 s after it started, the others landed by then. */
-const failingBatchDrive: typeof runCell = ((cell: Campaign.CampaignCell, context: { runDir: string }) =>
-  Campaign.cellCaseId(cell) === `${TWO}-a`
-    ? Effect.andThen(Effect.sleep(500), Effect.die(new Error("the driver broke")))
-    : describedDrive(cell, context as never)) as unknown as typeof runCell
+/** Whether a collect of {@link afterCallOf} named its out directory in `answered` and the runner read its answer, removing that directory. */
+const answerRead = (answered: string): boolean => {
+  if (!fs.existsSync(answered)) return false
+  return !fs.existsSync(fs.readFileSync(answered, "utf8").trim())
+}
+
+/**
+ * A driver like {@link describedDrive} whose cell `<TWO>-a` fails its batch
+ * once the answer of an {@link afterCallOf} collect named in `answered` was
+ * read, the other cells landed by then. The test's timeout bounds the wait.
+ */
+const failingBatchDrive = (answered: string): typeof runCell =>
+  ((cell: Campaign.CampaignCell, context: { runDir: string }) =>
+    Campaign.cellCaseId(cell) === `${TWO}-a`
+      ? Effect.andThen(
+        Effect.promise(async () => {
+          while (!answerRead(answered)) await new Promise((resolve) => setTimeout(resolve, 20))
+        }),
+        Effect.die(new Error("the driver broke"))
+      )
+      : describedDrive(cell, context as never)) as unknown as typeof runCell
 
 describe.skipIf(!served)("the replay phase", () => {
   beforeEach(() => {
@@ -711,7 +735,7 @@ for (const cell of context.cells) {
   })
 
   it("keeps what a failed batch's cell-scope collectors answered, and leaves unverified a landed cell whose collectors it cut short", async () => {
-    const layer = await afterCallOf()
+    const { layer, answered } = await afterCallOf()
     const { failed, lines, statuses } = await withStore(
       Effect.gen(function*() {
         const captures = yield* planWork([{ capture: ONE, set: { kind: "full" } }, { capture: TWO, set: { kind: "full" } }], prep, 2)
@@ -719,7 +743,7 @@ for (const cell of context.cells) {
           captures,
           options: options(BATCHED),
           prepId: prep,
-          drive: failingBatchDrive,
+          drive: failingBatchDrive(answered),
           binaries: () => Effect.void,
           identity: (_lane, load) => Effect.succeed({ ...CURRENT, load }),
           provenance: Effect.succeed([])
