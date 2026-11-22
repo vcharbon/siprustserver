@@ -41,10 +41,11 @@ fn the_retry_after_jitter_is_bounded() {
     assert!(errors.iter().any(|e| e.contains("PROXY_RETRY_AFTER_JITTER_SEC")), "{errors:?}");
 }
 
-/// The slow axis reads its defaults; a slow window shorter than the reply
-/// window, or one that would lengthen a verdict on silence, is refused naming
-/// every variable it involves, and so is a recovery of no probe or a ramp start
-/// outside (0, 100] percent.
+/// The slow axis, the intake ramp and the supervision answer read their
+/// defaults; a slow window shorter than the reply window, or one that would
+/// lengthen a verdict on silence, is refused naming every variable it
+/// involves, and so is a recovery of no probe, a ramp start outside (0, 100]
+/// percent, a negative ramp and a supervision answer neither auto nor off.
 #[test]
 fn the_slow_axis_is_read_and_its_incoherent_sets_refused() {
     let cfg = boot(&[]).expect("valid");
@@ -53,6 +54,19 @@ fn the_slow_axis_is_read_and_its_incoherent_sets_refused() {
         (2_000, 20_000, 3)
     );
     assert_eq!(cfg.observer.cap_restart_pct, 20.0);
+    let gate = cfg.self_gate.expect("the gate is on by default");
+    assert_eq!((gate.ramp_start_pct, gate.ramp), (20.0, Duration::from_secs(30)));
+    assert!(cfg.local_options, "auto by default");
+    let cfg = boot(&[
+        ("PROXY_RAMP_START_PCT", "100"),
+        ("PROXY_RAMP_MS", "0"),
+        ("PROXY_LOCAL_OPTIONS", "off"),
+    ])
+    .expect("valid");
+    let gate = cfg.self_gate.expect("on");
+    assert_eq!((gate.ramp_start_pct, gate.ramp), (100.0, Duration::ZERO));
+    assert_eq!(cfg.observer.cap_restart_pct, 100.0);
+    assert!(!cfg.local_options);
     let cfg = boot(&[("HEALTH_SLOW_WINDOW_MS", "2600")]).expect("the bound itself fits");
     assert_eq!(cfg.probe.slow_window_ms, 2_600);
     let named = |errors: &[String], keys: &[&str]| {
@@ -68,6 +82,8 @@ fn the_slow_axis_is_read_and_its_incoherent_sets_refused() {
         ("HEALTH_RECOVER_PROBES", "0"),
         ("PROXY_RAMP_START_PCT", "0"),
         ("PROXY_RAMP_START_PCT", "101"),
+        ("PROXY_RAMP_MS", "-1"),
+        ("PROXY_LOCAL_OPTIONS", "on"),
     ] {
         let errors = boot(&[(key, bad)]).expect_err(key);
         assert!(named(&errors, &[key]), "{key}={bad}: {errors:?}");

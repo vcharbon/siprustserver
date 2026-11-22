@@ -9,7 +9,7 @@ use sip_txn::IdGen;
 
 use crate::addr::ProxyAddr;
 use crate::cancel_lru::CancelBranchLru;
-use crate::health::FirstView;
+use crate::health::{FirstView, WorkerCapabilities};
 use crate::liveness::ShardPulse;
 use crate::observability::ProxyMetrics;
 use crate::parse_refusals::ParseRefusals;
@@ -47,6 +47,7 @@ pub struct ProxyCoreBuilder {
     pulse: Option<Arc<ShardPulse>>,
     first_view: Option<Arc<FirstView>>,
     parser: CustomParser,
+    supervision: Option<Arc<WorkerCapabilities>>,
 }
 
 impl ProxyCoreBuilder {
@@ -81,6 +82,7 @@ impl ProxyCoreBuilder {
             pulse: None,
             first_view: None,
             parser,
+            supervision: None,
         }
     }
 
@@ -185,6 +187,13 @@ impl ProxyCoreBuilder {
         self.first_view = Some(view);
         self
     }
+    /// Answer a supervision OPTIONS here, stating `capabilities`, the
+    /// workers' last advertisement its [`HealthProbe`](crate::health::HealthProbe)
+    /// writes (ADR-0069). The default relays every OPTIONS.
+    pub fn supervision(mut self, capabilities: Arc<WorkerCapabilities>) -> Self {
+        self.supervision = Some(capabilities);
+        self
+    }
     pub fn build(self, endpoint: Box<dyn UdpEndpoint>) -> ProxyCore {
         let clock = self.clock.unwrap_or_else(Clock::system);
         let traces = self.traces.unwrap_or_else(|| Arc::new(ProxyTraces::from_env(clock.now_ms())));
@@ -213,6 +222,7 @@ impl ProxyCoreBuilder {
             pulse: self.pulse.unwrap_or_else(|| Arc::new(ShardPulse::new(self.shard + 1))),
             first_view: self.first_view.unwrap_or_else(FirstView::given),
             parser: self.parser,
+            supervision: self.supervision,
         })
     }
 }

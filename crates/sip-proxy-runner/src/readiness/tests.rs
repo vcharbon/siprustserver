@@ -260,3 +260,12 @@ fn fitness_names_each_cause_in_order() {
     assert_eq!(fitness(false, true, true, true, dead.as_ref()), Err(Unfit::NoWorkerAlive));
     assert_eq!(fitness(false, true, true, true, alive.as_ref()), Err(Unfit::Isolated));
 }
+
+/// A pool of `Slow` workers keeps the proxy ready and fit: it still serves
+/// their dialogs, and the node keeps its addresses announced (ADR-0069).
+#[test]
+fn a_pool_of_slow_workers_is_ready_and_fit() {
+    let slow = pool(WorkerHealth::Slow);
+    assert_eq!(probe_state(false, false, true, true, slow.as_ref()), ProbeState::Ready);
+    assert_eq!(fitness(false, true, true, false, slow.as_ref()), Ok(()));
+}

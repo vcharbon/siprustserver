@@ -31,6 +31,8 @@ mod owner_rule_tests;
 mod request;
 mod response;
 #[cfg(test)]
+mod supervision_tests;
+#[cfg(test)]
 mod worker_ack_tests;
 
 use std::net::SocketAddr;
@@ -46,7 +48,7 @@ use sip_net::{parse_datagram, ParserPanicked, UdpEndpoint, UdpPacket};
 use crate::addr::ProxyAddr;
 use crate::cancel_lru::CancelBranchLru;
 use crate::face::EgressPolicy;
-use crate::health::FirstView;
+use crate::health::{FirstView, WorkerCapabilities};
 use crate::liveness::ShardPulse;
 use crate::observability::metrics::Face;
 use crate::observability::{ProxyMetrics, UdpShardStats};
@@ -136,6 +138,9 @@ pub(crate) struct ProxyCoreParts {
     pub first_view: Arc<FirstView>,
     /// What reads a datagram no intake hook parsed: the process's one parser.
     pub parser: CustomParser,
+    /// The workers' last advertisement the proxy answers a supervision OPTIONS
+    /// with; `None` relays every OPTIONS.
+    pub supervision: Option<Arc<WorkerCapabilities>>,
 }
 
 pub struct ProxyCore {
@@ -163,6 +168,7 @@ pub struct ProxyCore {
     pub(super) traces: Arc<ProxyTraces>,
     pulse: Arc<ShardPulse>,
     first_view: Arc<FirstView>,
+    supervision: Option<Arc<WorkerCapabilities>>,
 }
 
 impl ProxyCore {
@@ -205,6 +211,7 @@ impl ProxyCore {
             pulse: parts.pulse,
             traces: parts.traces,
             first_view: parts.first_view,
+            supervision: parts.supervision,
         }
     }
 

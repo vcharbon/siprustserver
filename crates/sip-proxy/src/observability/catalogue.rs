@@ -8,7 +8,7 @@ use sip_message::method::Method;
 use sip_message::status::STACK_CODES;
 
 use super::metrics::{
-    CancelLookup, Direction, Face, HmacFailureReason, MessageResult, NoTargetDrop,
+    CancelLookup, Direction, Face, HmacFailureReason, LocalOptions, MessageResult, NoTargetDrop,
     RoutingDecisionKind, UntrustedClaim,
 };
 use super::peer_failures::{PeerFailureKind, PeerScope};
@@ -69,7 +69,7 @@ pub const ANSWERED_METHOD: Dim = Dim::new("method", &ANSWERED_METHOD_VALUES);
 /// code gets its own series (the parser bounds codes to 100..=699).
 pub const CODE: Dim = Dim::new("code", &STACK_CODES);
 
-const ROUTING_KIND_VALUES: [&str; 8] =
+const ROUTING_KIND_VALUES: [&str; 9] =
     label_values!(RoutingDecisionKind::ALL, RoutingDecisionKind::as_str);
 /// A routing decision, indexed like [`RoutingDecisionKind::ALL`].
 pub const ROUTING_KIND: Dim = Dim::new("kind", &ROUTING_KIND_VALUES);
@@ -85,6 +85,8 @@ const UNTRUSTED_CLAIM_VALUES: [&str; 5] =
 const CANCEL_LOOKUP_VALUES: [&str; 2] = label_values!(CancelLookup::ALL, CancelLookup::as_str);
 
 const NO_TARGET_DROP_VALUES: [&str; 3] = label_values!(NoTargetDrop::ALL, NoTargetDrop::as_str);
+
+const LOCAL_OPTIONS_VALUES: [&str; 2] = label_values!(LocalOptions::ALL, LocalOptions::as_str);
 
 const SHED_REASON_VALUES: [&str; 2] = label_values!(ShedReason::ALL, ShedReason::label);
 
@@ -126,10 +128,12 @@ assert_exposition_order!(
     Cancel,
     AckHop,
     Reject,
+    LocalAnswer,
 );
 assert_exposition_order!(HmacFailureReason: Missing, Decode, Mismatch);
 assert_exposition_order!(CancelLookup: Hit, Miss);
 assert_exposition_order!(NoTargetDrop: InDialog, Cancel, Initial);
+assert_exposition_order!(LocalOptions: Ok, Dropped);
 assert_exposition_order!(ShedReason: IntakeAge, Cps);
 assert_exposition_order!(PeerScope: Internal, External);
 assert_exposition_order!(PeerFailureKind: ResponseTimeout, SendFailure, MessageTooLong);
@@ -194,6 +198,12 @@ pub const NO_TARGET_DROPPED: Family = Family::counter(
     "sip_proxy_no_target_dropped_total",
     Labels::Product(&[Dim::new("kind", &NO_TARGET_DROP_VALUES)]),
     "Requests dropped unanswered because neither the primary nor the backup of the stickiness cookie placing them is alive: an in-dialog request (in_dialog), a CANCEL following its INVITE's cookie (cancel), a retransmitted out-of-dialog request following the cookie its first copy minted (initial); retransmissions included. The sender's retransmission meets the next worker view.",
+);
+
+pub const LOCAL_OPTIONS: Family = Family::counter(
+    "sip_proxy_local_options_total",
+    Labels::Product(&[Dim::new("answer", &LOCAL_OPTIONS_VALUES)]),
+    "Supervision OPTIONS (no To-tag, a Request-URI naming the proxy with no user part) the proxy answers itself (PROXY_LOCAL_OPTIONS=auto), by answer: ok, a 200 while a worker reads alive or slow; dropped, unanswered while none does or before the first worker view. Retransmissions included.",
 );
 
 pub const ROUTING_DURATION_SECONDS: Family =
@@ -418,6 +428,7 @@ pub const PROXY: &[Family] = &[
     HMAC_FAILURES,
     CANCEL_LOOKUPS,
     NO_TARGET_DROPPED,
+    LOCAL_OPTIONS,
     ROUTING_DURATION_SECONDS,
     RECORD_ROUTE_INSERTED,
     PENDING_INVITE_LRU_SIZE,
@@ -460,6 +471,12 @@ pub const PROXY: &[Family] = &[
     PEER_FAILURES_OVERFLOW,
 ];
 
+pub const SELF_GATE_INTAKE_RAMP_ACTIVE: Family = Family::gauge(
+    "sip_proxy_intake_ramp_active",
+    Labels::None,
+    "1 while an intake ramp holds the proxy-self CPS bucket below its whole rate: the proxy turned fit after a spell with no worker alive or slow, and admits PROXY_RAMP_START_PCT percent of its rate rising to the whole over PROXY_RAMP_MS.",
+);
+
 /// The proxy-self gate, as `self_gate_text` writes it.
 pub const SELF_GATE: &[Family] = &[
     SELF_GATE_ELU_EWMA,
@@ -470,4 +487,5 @@ pub const SELF_GATE: &[Family] = &[
     SELF_GATE_EXTERNAL_INVITES_REJECTED,
     SELF_GATE_EMERGENCY_BYPASSED,
     SELF_GATE_INTERNAL_BYPASSED,
+    SELF_GATE_INTAKE_RAMP_ACTIVE,
 ];

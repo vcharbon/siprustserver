@@ -58,6 +58,7 @@ use sip_txn::{
 };
 use tokio::time::Instant;
 
+use super::capabilities::WorkerCapabilities;
 use super::first_view::{FirstRound, FirstView};
 use super::reach::WorkerReach;
 use super::stated_host::stated_host;
@@ -148,6 +149,8 @@ pub struct HealthProbe {
     first_view: Arc<FirstView>,
     /// Stamped by every answer a probe correlates.
     reach: Arc<WorkerReach>,
+    /// What every answer inside its reply window advertises.
+    capabilities: Arc<WorkerCapabilities>,
 }
 
 impl HealthProbe {
@@ -185,6 +188,7 @@ impl HealthProbe {
             metrics: None,
             first_view: FirstView::pending(),
             reach: WorkerReach::unheard(),
+            capabilities: WorkerCapabilities::unheard(),
         }
     }
 
@@ -201,6 +205,14 @@ impl HealthProbe {
     /// reach of its own nobody reads.
     pub fn with_reach(mut self, reach: Arc<WorkerReach>) -> Self {
         self.reach = reach;
+        self
+    }
+
+    /// The workers' last advertisement, which every answer inside its reply
+    /// window writes; the routing core's supervision answer reads the same
+    /// one. Without it the probe writes one of its own nobody reads.
+    pub fn with_capabilities(mut self, capabilities: Arc<WorkerCapabilities>) -> Self {
+        self.capabilities = capabilities;
         self
     }
 
@@ -417,6 +429,7 @@ impl HealthProbe {
         }
         state.misses.insert(p.worker_id.clone(), 0);
         let in_time = state.ledger.answered_in_time(&p.worker_id);
+        self.capabilities.advertised(resp.headers());
 
         if let Some(payload) = parse_x_overload_header(resp.raw(X_OVERLOAD).next()) {
             self.observer.apply_payload(&p.worker_id, &payload, self.clock.now_ms());

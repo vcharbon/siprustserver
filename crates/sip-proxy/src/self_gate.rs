@@ -8,6 +8,10 @@
 //!     [`LoadSampler`] seam's.
 //!   - the CPS token bucket empty: rejected `proxy_overload_cps`.
 //!
+//! An intake ramp ([`EluCpsGate::begin_ramp`], ADR-0069) scales the bucket's
+//! rate and size to `ramp_start_pct` percent and back to the whole over
+//! `ramp`, while the POP returns to rotation.
+//!
 //! `crate::core::request` classifies emergency, in-dialog and
 //! worker-originated requests before the gate; a worker's request always
 //! bypasses it. The token bucket, EWMA and [`LoadSampler`] seam are the
@@ -26,6 +30,10 @@ use std::time::Duration;
 use load_shed::{clamp01, Ewma, LoadSampler, TokenBucket};
 
 use crate::poison::{locked, SELF_GATE};
+
+mod ramp;
+
+use ramp::IntakeRamp;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AdmitDecision {
@@ -100,6 +108,12 @@ pub struct ProxySelfGateConfig {
     /// Sampler cadence — the period of the runner task that drives
     /// [`EluCpsGate::sample`].
     pub sampler_interval: std::time::Duration,
+    /// Percent of the bucket's rate and size an intake ramp starts at
+    /// (`PROXY_RAMP_START_PCT`), in (0, 100].
+    pub ramp_start_pct: f64,
+    /// How long an intake ramp takes to reach the whole rate
+    /// (`PROXY_RAMP_MS`); zero ramps nothing.
+    pub ramp: std::time::Duration,
 }
 
 impl Default for ProxySelfGateConfig {
@@ -114,6 +128,8 @@ impl Default for ProxySelfGateConfig {
             cps_bucket_rate: 100,
             elu_smoothing_alpha: 0.2,
             sampler_interval: std::time::Duration::from_millis(100),
+            ramp_start_pct: 20.0,
+            ramp: std::time::Duration::from_secs(30),
         }
     }
 }
@@ -201,6 +217,8 @@ pub struct ProxySelfGateMetrics {
     /// Worker-originated INVITEs that bypassed the gate (`is_worker_outbound`).
     pub internal_bypassed_total: u64,
     pub emergency_bypassed_total: u64,
+    /// An intake ramp holds the bucket below its whole rate.
+    pub ramp_active: bool,
 }
 
 struct GateInner {
@@ -209,11 +227,29 @@ struct GateInner {
     gc_fraction: f64,
     bucket: TokenBucket,
     epoch: tokio::time::Instant,
+    /// The bucket's whole size and rate, which a ramp scales.
+    size: f64,
+    rate: f64,
+    ramp: Option<IntakeRamp>,
 }
 
 impl GateInner {
     fn now(&self) -> Duration {
         tokio::time::Instant::now().saturating_duration_since(self.epoch)
+    }
+
+    /// Set the bucket to the share of its whole size and rate the ramp admits
+    /// at `now`, the whole once it ran out; a size of at least one token.
+    fn follow_ramp(&mut self, now: Duration) {
+        let Some(ramp) = self.ramp else { return };
+        let share = ramp.share(now);
+        if share.is_none() {
+            self.ramp = None;
+            tracing::info!(node = observe::node(), "intake ramp done");
+        }
+        let share = share.unwrap_or(1.0);
+        let (size, rate) = ((self.size * share).max(1.0), self.rate * share);
+        self.bucket.set_rate(size, rate, now);
     }
 }
 
@@ -226,6 +262,8 @@ pub struct EluCpsGate {
     inner: Arc<Mutex<GateInner>>,
     elu_critical: f64,
     sampler_interval: std::time::Duration,
+    ramp_start_pct: f64,
+    ramp: Duration,
     /// Intake-shed aggregation keyed by rejection reason (ADR-0026): a shedding
     /// window is ONE episode — shed-on line, ~5 s summaries with the shed
     /// count, shed-off line with the totals — ended once admits have run clean
@@ -255,9 +293,14 @@ impl EluCpsGate {
                     Duration::ZERO,
                 ),
                 epoch: tokio::time::Instant::now(),
+                size: f64::from(config.cps_bucket_size),
+                rate: f64::from(config.cps_bucket_rate),
+                ramp: None,
             })),
             elu_critical: config.elu_critical,
             sampler_interval: config.sampler_interval,
+            ramp_start_pct: config.ramp_start_pct,
+            ramp: config.ramp,
             shed: shed_waves(),
             external_admitted: Arc::new(AtomicU64::new(0)),
             rejected_intake_age: Arc::new(AtomicU64::new(0)),
@@ -287,6 +330,24 @@ impl EluCpsGate {
         inner.gc_fraction = gc;
     }
 
+    /// Start an intake ramp now (ADR-0069): the bucket admits
+    /// `ramp_start_pct` percent of its rate, its size scaled alike, rising
+    /// linearly to the whole over `ramp`; one under way starts again. A ramp
+    /// of zero does nothing.
+    pub fn begin_ramp(&self) {
+        let mut inner = locked(&self.inner, SELF_GATE);
+        let now = inner.now();
+        let Some(ramp) = IntakeRamp::starting(now, self.ramp_start_pct, self.ramp) else { return };
+        inner.ramp = Some(ramp);
+        inner.follow_ramp(now);
+        tracing::info!(
+            node = observe::node(),
+            start_pct = self.ramp_start_pct,
+            ramp_ms = u64::try_from(self.ramp.as_millis()).unwrap_or(u64::MAX),
+            "intake ramp: the POP returns to rotation"
+        );
+    }
+
     /// The current smoothed intake reading (`0..=1`).
     pub fn elu_ewma(&self) -> f64 {
         locked(&self.inner, SELF_GATE).elu_ewma.get()
@@ -295,10 +356,12 @@ impl EluCpsGate {
     /// Snapshot of the gate's published state. A read changes nothing:
     /// `cps_bucket_level` is the level projected to now.
     pub fn metrics(&self) -> ProxySelfGateMetrics {
-        let (elu_ewma, gc_fraction, cps_bucket_level, cps_bucket_max) = {
+        let (elu_ewma, gc_fraction, cps_bucket_level, cps_bucket_max, ramp_active) = {
             let inner = locked(&self.inner, SELF_GATE);
-            let level = inner.bucket.projected_level(inner.now());
-            (inner.elu_ewma.get(), inner.gc_fraction, level, inner.bucket.capacity())
+            let now = inner.now();
+            let level = inner.bucket.projected_level(now);
+            let ramp_active = inner.ramp.is_some_and(|r| r.share(now).is_some());
+            (inner.elu_ewma.get(), inner.gc_fraction, level, inner.bucket.capacity(), ramp_active)
         };
         ProxySelfGateMetrics {
             elu_ewma,
@@ -310,6 +373,7 @@ impl EluCpsGate {
             rejected_cps_total: self.rejected_cps.load(Ordering::Relaxed),
             internal_bypassed_total: self.internal_bypassed.load(Ordering::Relaxed),
             emergency_bypassed_total: self.emergency_bypassed.load(Ordering::Relaxed),
+            ramp_active,
         }
     }
 }
@@ -336,6 +400,7 @@ impl ProxySelfGate for EluCpsGate {
         }
 
         let now = inner.now();
+        inner.follow_ramp(now);
         if let Err(retry) = inner.bucket.try_take(now) {
             drop(inner);
             self.rejected_cps.fetch_add(1, Ordering::Relaxed);

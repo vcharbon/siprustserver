@@ -266,3 +266,44 @@ async fn running_sampler_task_drives_the_gate_to_shed_on_injected_elu() {
 
     task.abort();
 }
+
+/// Admits over `span` from now, taking one call every millisecond.
+async fn admits_over(g: &EluCpsGate, span: Duration) -> usize {
+    let mut admitted = 0;
+    for _ in 0..span.as_millis() {
+        admitted += usize::from(g.try_admit_external().is_admit());
+        tokio::time::advance(Duration::from_millis(1)).await;
+    }
+    admitted
+}
+
+/// An intake ramp admits 20 % of the rate, from a bucket of 20 % of its size,
+/// rising linearly to the whole over its span, then the whole: the first
+/// second at 1000 offers/s takes about 20 tokens of the bucket and 20 of
+/// refill; a second past the span, the whole rate of 100 and the tokens the
+/// bucket held. The gauge reads it.
+#[tokio::test(start_paused = true)]
+async fn an_intake_ramp_admits_its_start_share_rising_to_the_whole_rate() {
+    let (g, _ctl) = gate(100, 100, 0.8);
+    g.begin_ramp();
+    assert!(g.metrics().ramp_active);
+    assert_eq!(g.metrics().cps_bucket_max, 20.0);
+    let first = admits_over(&g, Duration::from_secs(1)).await;
+    assert!((38..=44).contains(&first), "{first} admitted in the ramp's first second");
+    tokio::time::advance(Duration::from_secs(30)).await;
+    let after = admits_over(&g, Duration::from_secs(1)).await;
+    assert!(after >= 120, "{after} admitted once the ramp ran out");
+    assert!(!g.metrics().ramp_active);
+    assert_eq!(g.metrics().cps_bucket_max, 100.0);
+}
+
+/// A ramp of zero does nothing.
+#[tokio::test(start_paused = true)]
+async fn a_ramp_of_zero_does_nothing() {
+    let (sampler, _ctl) = simulated();
+    let config = ProxySelfGateConfig { ramp: Duration::ZERO, ..Default::default() };
+    let g = EluCpsGate::new(Arc::new(sampler), config);
+    g.begin_ramp();
+    assert!(!g.metrics().ramp_active);
+    assert_eq!(g.metrics().cps_bucket_max, f64::from(config.cps_bucket_size));
+}

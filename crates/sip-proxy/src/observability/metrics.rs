@@ -16,6 +16,7 @@ use super::catalogue;
 mod face;
 mod hmac;
 mod intake;
+mod local_options;
 mod no_target;
 mod overload;
 mod parse;
@@ -28,6 +29,7 @@ use crate::resolver::{outcome, refresh_outcome};
 pub use face::{Face, UntrustedClaim};
 pub use hmac::HmacFailureReason;
 use intake::IntakeCounts;
+pub use local_options::LocalOptions;
 pub use no_target::NoTargetDrop;
 use overload::OverloadCounts;
 use parse::ParseCounts;
@@ -72,10 +74,12 @@ pub enum RoutingDecisionKind {
     Cancel,
     AckHop,
     Reject,
+    /// The proxy answered the request itself: a supervision OPTIONS.
+    LocalAnswer,
 }
 
 impl RoutingDecisionKind {
-    pub const ALL: [RoutingDecisionKind; 8] = [
+    pub const ALL: [RoutingDecisionKind; 9] = [
         RoutingDecisionKind::SelectNew,
         RoutingDecisionKind::DecodeForward,
         RoutingDecisionKind::DecodeForwardBackup,
@@ -84,6 +88,7 @@ impl RoutingDecisionKind {
         RoutingDecisionKind::Cancel,
         RoutingDecisionKind::AckHop,
         RoutingDecisionKind::Reject,
+        RoutingDecisionKind::LocalAnswer,
     ];
 
     /// The decision's metrics label, and the value a trace event names it by.
@@ -97,6 +102,7 @@ impl RoutingDecisionKind {
             RoutingDecisionKind::Cancel => "cancel",
             RoutingDecisionKind::AckHop => "ack_hop",
             RoutingDecisionKind::Reject => "reject",
+            RoutingDecisionKind::LocalAnswer => "local_answer",
         }
     }
 }
@@ -158,6 +164,7 @@ pub struct ProxyMetrics {
     rejects: FixedCounts,
     cancel_lookups: FixedCounts,
     no_target_dropped: FixedCounts,
+    local_options: FixedCounts,
     overload: OverloadCounts,
     routing_duration_count: AtomicU64,
     routing_duration_sum_us: AtomicU64,
@@ -219,6 +226,7 @@ impl Default for ProxyMetrics {
             rejects: FixedCounts::new(&catalogue::REJECTS),
             cancel_lookups: FixedCounts::new(&catalogue::CANCEL_LOOKUPS),
             no_target_dropped: FixedCounts::new(&catalogue::NO_TARGET_DROPPED),
+            local_options: FixedCounts::new(&catalogue::LOCAL_OPTIONS),
             overload: Default::default(),
             routing_duration_count: Default::default(),
             routing_duration_sum_us: Default::default(),
@@ -383,6 +391,7 @@ impl ProxyMetrics {
         c::HMAC_FAILURES.render(&mut s, |series| read(&self.hmac_failures, series.at(0)));
         self.cancel_lookups.render(&mut s);
         self.no_target_dropped.render(&mut s);
+        self.local_options.render(&mut s);
         let count = load(&self.routing_duration_count);
         let sum = load(&self.routing_duration_sum_us) as f64 / 1_000_000.0;
         c::ROUTING_DURATION_SECONDS.render_histogram(&mut s, |_| HistogramValue {
@@ -434,6 +443,7 @@ pub fn self_gate_text(gate: Option<&crate::self_gate::ProxySelfGateMetrics>) -> 
         .render(&mut s, |series| rejected.get(series.at(0)).copied().unwrap_or(0));
     c::SELF_GATE_EMERGENCY_BYPASSED.render_value(&mut s, count(|m| m.emergency_bypassed_total));
     c::SELF_GATE_INTERNAL_BYPASSED.render_value(&mut s, count(|m| m.internal_bypassed_total));
+    c::SELF_GATE_INTAKE_RAMP_ACTIVE.render_value(&mut s, count(|m| u64::from(m.ramp_active)));
     s
 }
 

@@ -63,6 +63,8 @@ impl ProxyCore {
     /// Routes one request down the RFC 3261 §16 ladder: forwards it, answers it
     /// or drops it.
     ///
+    /// - A supervision OPTIONS is the proxy's own to answer, ahead of the hop
+    ///   count: at `Max-Forwards: 0` the proxy is its final recipient (§16.3).
     /// - An ACK is never answered (§17): an ACK past its hops, with an
     ///   unsupported or unreadable Proxy-Require, or acknowledging a final this
     ///   hop sent, ends here.
@@ -100,6 +102,9 @@ impl ProxyCore {
         let cseq = req.cseq();
         let select = RoutingDecisionKind::SelectNew;
 
+        if let Some(answered) = self.answer_supervision(req, arrival).await {
+            return answered;
+        }
         if hops::hops_exhausted(req) {
             if method == Method::Ack {
                 self.metrics.record_reject("ack_max_forwards_exhausted");

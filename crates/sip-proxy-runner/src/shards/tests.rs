@@ -42,6 +42,8 @@ fn shared() -> SharedRouting {
         pulse: Arc::new(ShardPulse::new(2)),
         first_view: FirstView::given(),
         reach: WorkerReach::unheard(),
+        capabilities: WorkerCapabilities::unheard(),
+        local_options: false,
         clock,
     }
 }
