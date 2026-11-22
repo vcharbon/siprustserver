@@ -210,7 +210,7 @@ fn ended_by_its_own_bye(crossed: bool) -> DialogTable {
 }
 
 /// RFC 3261 §15.1.2, §17.1.2.2: the caller's BYE whose lost first copy left
-/// before the UAS's BYE reached her goes again past that BYE's final. The
+/// before she received the UAS's BYE goes again past that BYE's final. The
 /// UAS refuses it 481 and it is no finding; a repeat is not judged again.
 #[test]
 fn a_request_crossing_the_uas_own_bye_is_refused_and_no_finding() {

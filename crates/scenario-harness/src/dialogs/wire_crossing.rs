@@ -1,6 +1,6 @@
 //! What the wire record shows of a request that reaches a dialog the
 //! receiving UA's own BYE ended: whether its sender sent it, as a first copy
-//! the network lost, before that BYE reached the sender (RFC 3261 §15.1.2,
+//! the network lost, before it received that BYE (RFC 3261 §15.1.2,
 //! §17.1.2.2). The fact lives on the sender's lane only, so the receiving
 //! UA's dialog table reads it from the run's recording.
 
@@ -15,7 +15,7 @@ use crate::agent::top_via_branch;
 
 /// Whether a request, received on a dialog the UA's BYE numbered `bye_cseq`
 /// ended, is a retransmission whose first copy the network lost, and whose
-/// first copy its sender sent before that BYE arrived at it.
+/// first copy its sender sent before it received that BYE.
 #[derive(Clone)]
 pub struct SentBeforeBye(Arc<dyn Fn(&SipRequest, u32) -> bool + Send + Sync>);
 
@@ -42,11 +42,12 @@ impl std::fmt::Debug for SentBeforeBye {
     }
 }
 
-/// The recorded sends and arrivals, in record order (`seq`): the first
-/// `SendCalled` of `request` (its Call-ID, CSeq, method and top-Via branch)
-/// is lost, its `SendLost` recorded on its lane before that lane's next
-/// send; and that lane's first arrival (`RecvItem`) of the UA's BYE
-/// numbered `bye_cseq` on the dialog, if any, comes after it.
+/// The recorded events, in record order: the first `SendCalled` of
+/// `request` (its Call-ID, CSeq, method and top-Via branch) is lost, its
+/// `SendLost` recorded on its lane before that lane's next send; and that
+/// lane had not yet taken the UA's BYE numbered `bye_cseq` from its socket
+/// (`RecvConsumed`): a BYE that arrived but was not read yet is not
+/// received.
 fn sent_before_bye(
     events: &[Stamped<SignalingNetworkEvent>],
     request: &SipRequest,
@@ -80,11 +81,11 @@ fn sent_before_bye(
         .map(|s| &s.event)
         .take_while(|e| !matches!(e, SignalingNetworkEvent::SendCalled { bind_key, .. } if bind_key == lane))
         .any(|e| matches!(e, SignalingNetworkEvent::SendLost { bind_key, msg, .. } if bind_key == lane && msg == first));
-    let bye_arrived_first = events[..at].iter().any(|s| {
-        matches!(&s.event, SignalingNetworkEvent::RecvItem { bind_key, packet, .. }
+    let bye_received_first = events[..at].iter().any(|s| {
+        matches!(&s.event, SignalingNetworkEvent::RecvConsumed { bind_key, packet }
             if bind_key == lane && is_the_bye(&sniff::identity(&packet.raw)))
     });
-    lost && !bye_arrived_first
+    lost && !bye_received_first
 }
 
 #[cfg(test)]

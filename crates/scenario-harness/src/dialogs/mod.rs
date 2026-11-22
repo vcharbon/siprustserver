@@ -26,7 +26,8 @@
 //! On a dialog the UA's own BYE ended, a request of the peer draws a 481 that
 //! is a finding only of a rule it broke on the dialog before that BYE when
 //! the wire record shows it a retransmission whose lost first copy the peer
-//! sent before that BYE reached it (§15.1.2, §17.1.2.2); any other is a
+//! sent before it read that BYE from its socket (§15.1.2, §17.1.2.2); any
+//! other is a
 //! `dialog-ended` finding.
 //!
 //! A verdict fails the run unless a `dialog-…` waiver naming the receiving UA

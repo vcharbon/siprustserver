@@ -10,7 +10,7 @@ use std::time::Duration;
 use layer_harness::{Recorder, RunContext};
 use sip_message::parser::custom::CustomParser;
 use sip_message::{SipMessage, SipParser, SipRequest};
-use sip_net::{BindUdpOpts, UdpEndpoint};
+use sip_net::BindUdpOpts;
 use sip_net_testkit::{with_all_contracts, Fate, ScopedAuditOptions, SimulatedSignalingNetwork};
 
 use super::SentBeforeBye;
@@ -31,11 +31,20 @@ fn peers_bye() -> SipRequest {
     }
 }
 
+/// One step of a scenario, each delivered before the next.
+#[derive(Clone, Copy)]
+enum Step {
+    /// The peer sends a copy of its BYE.
+    PeerCopy,
+    /// The UA sends its BYE.
+    UasBye,
+    /// The peer takes what its socket holds.
+    PeerReads,
+}
+
 /// The fact of the peer's BYE and the UA's BYE numbered `bye_cseq`, on a
-/// fabric that loses the peer's first datagram when `lose`, after the sends
-/// `script` makes: `true` a copy of the peer's BYE, `false` the UA's BYE,
-/// each delivered before the next.
-async fn fact_after(lose: bool, script: &[bool], bye_cseq: u32) -> bool {
+/// fabric that loses the peer's first datagram when `lose`, after `steps`.
+async fn fact_after(lose: bool, steps: &[Step], bye_cseq: u32) -> bool {
     let peer: SocketAddr = "192.0.2.1:5060".parse().unwrap();
     let first = AtomicBool::new(lose);
     let fabric = SimulatedSignalingNetwork::new(1).with_send_fate(Arc::new(move |src, _, _| {
@@ -55,41 +64,50 @@ async fn fact_after(lose: bool, script: &[bool], bye_cseq: u32) -> bool {
     let net = wrapped.network.clone();
     let s = net.bind_udp(BindUdpOpts::new(peer, 64)).await.unwrap();
     let u = net.bind_udp(BindUdpOpts::new("192.0.2.2:5060".parse().unwrap(), 64)).await.unwrap();
-    for &from_peer in script {
-        let (from, to, raw): (&dyn UdpEndpoint, _, _) = match from_peer {
-            true => (s.as_ref(), u.local_addr(), PEERS_BYE),
-            false => (u.as_ref(), s.local_addr(), UAS_BYE),
-        };
-        from.send_to(raw.as_bytes(), to).await.unwrap();
+    for step in steps {
+        match step {
+            Step::PeerCopy => s.send_to(PEERS_BYE.as_bytes(), u.local_addr()).await.unwrap(),
+            Step::UasBye => u.send_to(UAS_BYE.as_bytes(), s.local_addr()).await.unwrap(),
+            Step::PeerReads => while s.try_recv().is_some() {},
+        }
         net.await_in_flight(Duration::from_secs(1)).await;
     }
     SentBeforeBye::from_wire(wrapped.recording.channel()).holds(&peers_bye(), bye_cseq)
 }
 
-/// The peer's first copy, lost, left before the UA's BYE reached it: its
+use Step::{PeerCopy, PeerReads, UasBye};
+
+/// The peer's first copy, lost, left before it took the UA's BYE: its
 /// retransmission crossed that BYE.
 #[tokio::test(start_paused = true)]
-async fn a_lost_first_copy_sent_before_the_uas_bye_arrived_crossed_it() {
-    assert!(fact_after(true, &[true, false, true], 3).await);
+async fn a_lost_first_copy_sent_before_the_uas_bye_was_received_crossed_it() {
+    assert!(fact_after(true, &[PeerCopy, UasBye, PeerReads, PeerCopy], 3).await);
+}
+
+/// A BYE that reached the peer's socket but was not read yet is not
+/// received: a first copy sent then crossed it.
+#[tokio::test(start_paused = true)]
+async fn a_bye_waiting_unread_is_not_received() {
+    assert!(fact_after(true, &[UasBye, PeerCopy, PeerReads, PeerCopy], 3).await);
 }
 
 /// The peer's first copy was delivered: what reached the UA later is no
 /// crossing of a lost copy.
 #[tokio::test(start_paused = true)]
 async fn a_delivered_first_copy_crossed_nothing() {
-    assert!(!fact_after(false, &[true, false, true], 3).await);
+    assert!(!fact_after(false, &[PeerCopy, UasBye, PeerReads, PeerCopy], 3).await);
 }
 
-/// The UA's BYE reached the peer before its first copy left: the peer sent
-/// it knowing the dialog ended.
+/// The peer took the UA's BYE before its first copy left: it sent it
+/// knowing the dialog ended.
 #[tokio::test(start_paused = true)]
-async fn a_first_copy_sent_after_the_uas_bye_arrived_crossed_nothing() {
-    assert!(!fact_after(true, &[false, true, true], 3).await);
+async fn a_first_copy_sent_after_the_uas_bye_was_received_crossed_nothing() {
+    assert!(!fact_after(true, &[UasBye, PeerReads, PeerCopy, PeerCopy], 3).await);
 }
 
-/// Only the arrival of the BYE that ended the dialog counts: the UA's BYE
-/// numbered 3 says nothing of one numbered 4, which never reached the peer.
+/// Only the BYE that ended the dialog counts: the UA's BYE numbered 3 says
+/// nothing of one numbered 4, which never reached the peer.
 #[tokio::test(start_paused = true)]
 async fn only_the_bye_that_ended_the_dialog_counts() {
-    assert!(fact_after(true, &[false, true, true], 4).await);
+    assert!(fact_after(true, &[UasBye, PeerReads, PeerCopy, PeerCopy], 4).await);
 }
