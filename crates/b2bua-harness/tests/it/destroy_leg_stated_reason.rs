@@ -331,12 +331,13 @@ async fn a_callee_destroyed_before_the_callers_ack_is_acked_before_its_bye() {
 }
 
 /// A service ends an answered callee whose 2xx made the offer (the caller's
-/// INVITE carried none) before the caller ACKed: the callee is BYEd (RFC 5407
-/// §2 keeps the ACK owed past it), and the caller's ACK, still awaited, brings
-/// the answer the callee's ACK owes (RFC 3264 §4) — her answer, never one
-/// rejecting every stream.
+/// INVITE carried none) before the caller ACKed: the UAC core ACKs the 2xx
+/// with a valid answer and then sends the BYE (RFC 3261 §13.2.2.4), so the
+/// callee sees an ACK answering every stream rejected (RFC 3264 §6) on the
+/// INVITE's CSeq, then the BYE. The caller's late ACK, carrying her answer,
+/// reaches no one, and her BYE follows it (§15).
 #[tokio::test(start_paused = true)]
-async fn a_delayed_offer_callee_destroyed_before_the_callers_ack_gets_her_answer() {
+async fn a_delayed_offer_callee_destroyed_before_the_callers_ack_is_acked_rejecting_then_byed() {
     let h = Harness::new("destroy-leg-unacked-delayed-offer-2xx");
     let alice = h.agent("alice", "127.0.0.1:7456").await;
     let bob = h.agent("bob", "127.0.0.1:7457").await;
@@ -354,14 +355,22 @@ async fn a_delayed_offer_callee_destroyed_before_the_callers_ack_gets_her_answer
 
     h.advance(Duration::from_secs(releaser::FIRE_SEC as u64 + 1)).await;
     alice.drain().await;
-    bob.receive("BYE").await.respond(200, "OK").await;
-    let _dialog = call.ack_with(Some(OFFER)).await;
     let ack = bob.receive("ACK").await;
     let body = String::from_utf8_lossy(ack.request().body()).into_owned();
-    assert!(body.contains("m=audio 10000 "), "the caller's answer: {body:?}");
+    assert!(body.lines().any(|l| l.starts_with("m=audio 0 ")), "rejecting answer: {body:?}");
+    assert_eq!(ack.request().cseq().seq(), uas.request().cseq().seq(), "the 2xx's INVITE");
+    bob.receive("BYE").await.respond(200, "OK").await;
+    let _dialog = call.ack_with(Some(OFFER)).await;
     alice.receive("BYE").await.respond(200, "OK").await;
 
     settle_until(|| b2bua.is_reaped()).await;
+    bob.drain().await;
     b2bua.assert_fully_reaped();
-    let _report = h.finish().await;
+    let report = h.finish().await;
+    let acks = report
+        .entries()
+        .iter()
+        .filter(|e| e.from == b2bua.addr && e.to == bob.addr() && e.raw.starts_with(b"ACK "))
+        .count();
+    assert_eq!(acks, 1, "the caller's late ACK is absorbed");
 }

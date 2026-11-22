@@ -18,17 +18,17 @@ use std::time::Duration;
 use b2bua::decision::test_adapter::route_to;
 use b2bua::decision::{NewCallResponse, ScriptedDecisionEngine};
 use b2bua_harness::{settle_until, B2buaSut};
+use call::features::MaxDurationAnchor;
 use call::TerminationCause;
 use scenario_harness::Harness;
+use sip_message::SipMessage;
 
 const OFFER: &str = "v=0\r\no=bob 1 1 IN IP4 192.0.2.20\r\ns=-\r\nc=IN IP4 192.0.2.20\r\nt=0 0\r\nm=audio 20000 RTP/AVP 0\r\nm=video 20002 RTP/AVP 96\r\na=rtpmap:96 H264/90000\r\n";
 const ANSWER: &str = "v=0\r\no=alice 1 1 IN IP4 192.0.2.10\r\ns=-\r\nc=IN IP4 192.0.2.10\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\nm=video 10002 RTP/AVP 96\r\na=rtpmap:96 H264/90000\r\n";
 
-/// The cap, from the call's creation.
-const CAP: Duration = Duration::from_millis(2_000);
-/// The ring before the answer: the cap fires 300 ms after the 2xx, inside
-/// the first rung (T1) of the 2xx ladder toward the caller.
-const RING: Duration = Duration::from_millis(1_700);
+/// The cap, from the answer: it fires inside the first rung (T1, 500 ms) of
+/// the 2xx ladder toward the caller.
+const CAP: Duration = Duration::from_millis(300);
 
 /// The callee's offer-carrying 2xx awaits the caller's ACK when the cap ends
 /// the call: the callee gets an ACK rejecting every stream, then the BYE; a
@@ -45,6 +45,7 @@ async fn a_dialog_byed_while_its_ack_owes_an_answer_is_acked_rejecting_then_byed
             .fallback(move |_| {
                 let mut route = route_to(&bob_ip, bob_port);
                 route.features.platform.max_duration_ms = CAP.as_millis() as i64;
+                route.features.platform.max_duration_anchor = MaxDurationAnchor::Answer;
                 NewCallResponse::Route(route)
             })
             .build(),
@@ -57,11 +58,10 @@ async fn a_dialog_byed_while_its_ack_owes_an_answer_is_acked_rejecting_then_byed
     assert!(uas.request().body().is_empty(), "the INVITE leaves the offer to bob");
     uas.respond(180, "Ringing").await;
     call.expect(180).await;
-    h.advance(RING).await;
     uas.respond(200, "OK").with_sdp(OFFER).await;
     call.expect(200).await;
 
-    h.advance(Duration::from_millis(400)).await;
+    h.advance(CAP + Duration::from_millis(10)).await;
     let ack = bob
         .try_receive("ACK")
         .await
@@ -73,7 +73,9 @@ async fn a_dialog_byed_while_its_ack_owes_an_answer_is_acked_rejecting_then_byed
     uas.respond(200, "OK").with_sdp(OFFER).await;
     h.advance(Duration::from_millis(10)).await;
     let mut bob_bye = bob.receive("BYE").await;
-    assert_eq!(alice.drain_tu().await, 0, "the caller's BYE waits for her ACK");
+    while let Some(m) = alice.take_queued().await {
+        assert!(!matches!(m, SipMessage::Request(_)), "the caller's BYE waits for her ACK: {m:?}");
+    }
 
     let _dialog = call.ack_with(Some(ANSWER)).await;
     alice.receive("BYE").await.respond(200, "OK").await;
