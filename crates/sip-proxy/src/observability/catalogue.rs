@@ -470,12 +470,6 @@ pub const PROXY: &[Family] = &[
     PEER_FAILURES_OVERFLOW,
 ];
 
-pub const SELF_GATE_INTAKE_RAMP_ACTIVE: Family = Family::gauge(
-    "sip_proxy_intake_ramp_active",
-    Labels::None,
-    "1 while an intake ramp holds the proxy-self CPS bucket below its whole rate: the proxy turned fit after a spell with no worker alive or slow, and admits PROXY_RAMP_START_PCT percent of its rate rising to the whole over PROXY_RAMP_MS.",
-);
-
 /// The proxy-self gate, as `self_gate_text` writes it.
 pub const SELF_GATE: &[Family] = &[
     SELF_GATE_ELU_EWMA,
@@ -486,5 +480,4 @@ pub const SELF_GATE: &[Family] = &[
     SELF_GATE_EXTERNAL_INVITES_REJECTED,
     SELF_GATE_EMERGENCY_BYPASSED,
     SELF_GATE_INTERNAL_BYPASSED,
-    SELF_GATE_INTAKE_RAMP_ACTIVE,
 ];

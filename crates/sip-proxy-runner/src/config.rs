@@ -168,11 +168,9 @@ impl ProxyConfig {
         };
         let isolation_ms = env.int("HEALTH_ISOLATION_MS", DEFAULT_ISOLATION_MS, 1, MAX_MS);
         let isolation_window = Duration::from_millis(isolation_ms);
-        let ramp_start_pct = f64::from(env.int_u32("PROXY_RAMP_START_PCT", 20, 1, 100));
-        let mut observer = observer_overrides(&mut env, LoadObserverConfig::default());
-        observer.cap_restart_pct = ramp_start_pct;
+        let observer = observer_overrides(&mut env, LoadObserverConfig::default());
         let intake_shed_pct = env.int("PROXY_INTAKE_SHED_PCT", 50, 0, 100);
-        let self_gate = self_gate(&mut env, ramp_start_pct);
+        let self_gate = self_gate(&mut env);
         let local_options = local_options(&mut env);
         let retry_after_jitter_sec = env.int_u32("PROXY_RETRY_AFTER_JITTER_SEC", 5, 0, 3600);
         let branch_memo = branch_memo(&mut env);
@@ -466,18 +464,14 @@ fn observer_overrides(env: &mut EnvReader, mut cfg: LoadObserverConfig) -> LoadO
     cfg
 }
 
-/// The proxy-self gate, `None` when `PROXY_SELF_GATE` turns it off; its
-/// intake ramp starts at `ramp_start_pct` and lasts `PROXY_RAMP_MS`.
-fn self_gate(env: &mut EnvReader, ramp_start_pct: f64) -> Option<ProxySelfGateConfig> {
+/// The proxy-self gate, `None` when `PROXY_SELF_GATE` turns it off.
+fn self_gate(env: &mut EnvReader) -> Option<ProxySelfGateConfig> {
     let on = env.flag("PROXY_SELF_GATE", true);
     let d = ProxySelfGateConfig::default();
-    let ramp_ms = env.int("PROXY_RAMP_MS", 30_000, 0, MAX_MS);
     let cfg = ProxySelfGateConfig {
         elu_critical: env.real("PROXY_SELF_GATE_ELU_CRITICAL", d.elu_critical, Span::Fraction),
         cps_bucket_size: env.int_u32("PROXY_SELF_GATE_CPS_SIZE", d.cps_bucket_size, 1, u32::MAX),
         cps_bucket_rate: env.int_u32("PROXY_SELF_GATE_CPS_RATE", d.cps_bucket_rate, 1, u32::MAX),
-        ramp_start_pct,
-        ramp: Duration::from_millis(ramp_ms),
         ..d
     };
     on.then_some(cfg)

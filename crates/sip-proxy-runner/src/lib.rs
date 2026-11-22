@@ -22,7 +22,6 @@ pub mod debug_server;
 pub mod discovery;
 pub mod external_face;
 pub mod health_sampler;
-pub mod intake_ramp;
 pub mod listening;
 pub mod metrics_body;
 pub mod readiness;

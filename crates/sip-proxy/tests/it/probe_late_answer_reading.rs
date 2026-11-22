@@ -2,10 +2,9 @@
 //! answer stamps the worker only when it would read it `Alive` and comes from
 //! the process last read; only a `200` in time writes the capabilities the
 //! workers advertise; a worker never read serving on an endpoint that
-//! reads not ready is no dead verdict however it answered; late answers keep
-//! the proxy's reach, which their onset interrupts for at most the rise in
-//! lateness past the isolation window; and the end of a spell with no worker
-//! serving says whether the process back is the one read before.
+//! reads not ready is no dead verdict however it answered; and late answers
+//! keep the proxy's reach, which their onset interrupts for at most the rise
+//! in lateness past the isolation window.
 //!
 //! Timing axes: each probe is answered as its script says after its `i`-th
 //! OPTIONS arrives (5 ms transit each way); one probe leaves per 1 s interval,
@@ -37,24 +36,24 @@ const ISOLATION: Duration = Duration::from_millis(2_000);
 /// `incarnation` when it is `Some`, and `allow` as its `Allow` when it is
 /// `Some`, the default capabilities otherwise.
 #[derive(Clone, Copy)]
-struct Answer {
-    delay: Duration,
-    status: u16,
-    incarnation: Option<u64>,
-    allow: Option<&'static str>,
+pub(crate) struct Answer {
+    pub(crate) delay: Duration,
+    pub(crate) status: u16,
+    pub(crate) incarnation: Option<u64>,
+    pub(crate) allow: Option<&'static str>,
 }
 
 impl Answer {
-    fn ok(delay: Duration, incarnation: Option<u64>) -> Option<Self> {
+    pub(crate) fn ok(delay: Duration, incarnation: Option<u64>) -> Option<Self> {
         Some(Self { delay, status: 200, incarnation, allow: None })
     }
 }
 
 /// The answer to the `i`-th OPTIONS; `None` leaves it unanswered.
-type Script = Arc<dyn Fn(usize) -> Option<Answer> + Send + Sync>;
+pub(crate) type Script = Arc<dyn Fn(usize) -> Option<Answer> + Send + Sync>;
 
 /// A worker answering each first copy of an OPTIONS as `script` says.
-fn respond(ep: Box<dyn UdpEndpoint>, script: Script) -> tokio::task::JoinHandle<()> {
+pub(crate) fn respond(ep: Box<dyn UdpEndpoint>, script: Script) -> tokio::task::JoinHandle<()> {
     let ep: Arc<dyn UdpEndpoint> = Arc::from(ep);
     tokio::spawn(async move {
         let parser = CustomParser::new();
@@ -211,30 +210,4 @@ async fn the_onset_of_late_answers_reads_the_proxy_isolated_at_most_the_rise_pas
     assert!(isolated <= bound, "isolated {isolated:?}, past the {bound:?} the rise allows");
     p.task.abort();
     responder.abort();
-}
-
-/// The only worker falls silent past its dead verdict, then answers again:
-/// as the process it was (an isolation of the proxy healed), the reach reads
-/// it rejoined known; as a new process, or a worker stating no incarnation,
-/// not.
-#[tokio::test(start_paused = true)]
-async fn the_end_of_a_spell_with_no_worker_serving_names_whether_the_process_is_the_same() {
-    for (was, back_as, known) in
-        [(Some(4), Some(4), true), (Some(4), Some(5), false), (None, None, false)]
-    {
-        let script: Script = Arc::new(move |i| match i {
-            0 | 1 => Answer::ok(PROMPT, was),
-            2..=6 => None,
-            _ => Answer::ok(PROMPT, back_as),
-        });
-        let (p, responder) = probed(script).await;
-        run_for(Duration::from_secs(6)).await;
-        assert_eq!(p.health(), Some(WorkerHealth::Dead), "{back_as:?}");
-        assert!(!p.reach.rejoined_known());
-        run_for(Duration::from_secs(3)).await;
-        assert_eq!(p.health(), Some(WorkerHealth::Alive), "{back_as:?}");
-        assert_eq!(p.reach.rejoined_known(), known, "back as {back_as:?}");
-        p.task.abort();
-        responder.abort();
-    }
 }

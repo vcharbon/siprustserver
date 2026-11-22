@@ -124,3 +124,25 @@ fn a_slow_worker_keeps_the_view_from_reading_blind() {
     set.set_health("w0", WorkerHealth::Alive);
     assert_eq!(health(&set, "w2"), Some(WorkerHealth::Dead));
 }
+
+/// A view where no member reads ready routes on the probe. A worker read
+/// `Alive` turning `Dead` there is a verdict (`w2`, the control); one read
+/// `Alive`, then `Slow`, then `Dead` is the same death and tells the same.
+#[test]
+fn slow_to_dead_in_a_view_with_no_ready_member_is_a_verdict() {
+    let (set, sim) = ws(&[("w0", "192.0.2.1"), ("w1", "192.0.2.2"), ("w2", "192.0.2.3")]);
+    for id in ["w0", "w1", "w2"] {
+        set.set_health(id, WorkerHealth::Alive);
+    }
+    for id in ["w0", "w1", "w2"] {
+        sim.set_conditions(id, false, false);
+    }
+    set.recompose();
+    assert_eq!(health(&set, "w1"), Some(WorkerHealth::Alive), "routed on its answers");
+    let mut verdicts = set.read_dead();
+    set.set_health("w2", WorkerHealth::Dead);
+    assert_eq!(told(&mut verdicts), ["w2"], "alive to dead with no member ready");
+    set.set_health("w1", WorkerHealth::Slow);
+    set.set_health("w1", WorkerHealth::Dead);
+    assert_eq!(told(&mut verdicts), ["w1"], "alive, slow, then dead with no member ready");
+}

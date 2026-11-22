@@ -351,7 +351,6 @@ sip-proxy-runner sip_proxy_self_external_invites_admitted_total counter fixed {}
 sip-proxy-runner sip_proxy_self_external_invites_rejected_total counter fixed {reason}
 sip-proxy-runner sip_proxy_self_emergency_bypassed_total counter fixed {}
 sip-proxy-runner sip_proxy_self_internal_bypassed_total counter fixed {}
-sip-proxy-runner sip_proxy_intake_ramp_active gauge fixed {}
 sip-proxy-runner sip_proxy_branch_memo_bytes gauge fixed {}
 sip-proxy-runner sip_proxy_branch_memo_evictions_total counter fixed {}
 sip-proxy-runner sip_proxy_task_restarts_total counter fixed {task}

@@ -25,8 +25,8 @@ pub(super) struct Annot {
     /// production/k8s case; every worker shares the cluster SIP port).
     pub(super) port_override: Option<u16>,
     /// Its endpoint read `ready` at the last recompose. A turn to `Dead` of a
-    /// worker neither ready nor read `Alive` is no verdict: a booting pod, or
-    /// a worker whose flip was told already.
+    /// worker neither ready, held nor read `Alive` or `Slow` is no verdict: a
+    /// booting pod, or a worker whose flip was told already.
     pub(super) ready: bool,
     /// The projection holds it: what a departure tombstones.
     pub(super) routed: bool,
@@ -237,9 +237,9 @@ impl WorkerAnnotations {
     /// still booting serves no dialog.
     ///
     /// Returns [`Turn::Dead`] for a dead verdict: the write turned the worker's
-    /// health `Dead` from `Alive`, or from `Unknown` or `Slow` on an endpoint
+    /// health `Dead` from `Alive` or `Slow`, or from `Unknown` on an endpoint
     /// that reads ready or a worker held. A worker not ready and never read
-    /// `Alive` since its flip's verdict or its join stands on no answer that
+    /// serving since its flip's verdict or its join stands on no answer that
     /// could turn out wrong. Returns [`Turn::Recovered`] for a turn from `Slow`
     /// to `Alive`.
     ///
@@ -312,10 +312,8 @@ impl WorkerAnnotations {
             }
         });
         match (previous.0, next.0) {
-            (WorkerHealth::Alive, WorkerHealth::Dead) => Turn::Dead,
-            (WorkerHealth::Unknown | WorkerHealth::Slow, WorkerHealth::Dead) if standing => {
-                Turn::Dead
-            }
+            (WorkerHealth::Alive | WorkerHealth::Slow, WorkerHealth::Dead) => Turn::Dead,
+            (WorkerHealth::Unknown, WorkerHealth::Dead) if standing => Turn::Dead,
             (WorkerHealth::Slow, WorkerHealth::Alive) => Turn::Recovered,
             _ => Turn::None,
         }

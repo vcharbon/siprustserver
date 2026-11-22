@@ -181,7 +181,6 @@ use sip_proxy_runner::config::{refusal, ProxyConfig, WorkerSource};
 use sip_proxy_runner::discovery::{discovered_pool, static_pool};
 use sip_proxy_runner::external_face::FaceMonitor;
 use sip_proxy_runner::health_sampler::HealthSampler;
-use sip_proxy_runner::intake_ramp::spawn_intake_ramp;
 use sip_proxy_runner::listening::log_listening;
 use sip_proxy_runner::shards::SharedRouting;
 use sip_proxy_runner::signal::sigterm;
@@ -357,8 +356,7 @@ async fn run() -> Result<i32, String> {
 
     spawn_stale_floor_sweep(sweep_observer, registry.clone(), clock.clone(), metrics.clone());
     if let Some(gate) = self_gate.clone() {
-        spawn_self_gate_sampler(gate.clone());
-        spawn_intake_ramp(proxy_probes.fit.clone(), shared.reach.clone(), gate);
+        spawn_self_gate_sampler(gate);
     }
 
     let metrics_gate = self_gate.clone();

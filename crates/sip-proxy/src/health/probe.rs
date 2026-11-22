@@ -33,11 +33,7 @@
 //!
 //! The `threshold`-th consecutive miss reads the worker `Slow` while it
 //! answered late within the slow window, `Dead` otherwise; a `Dead` worker
-//! stays so. A worker turning `Alive` from `Dead` or `Slow` restarts its admit
-//! cap low ([`WorkerLoadObserver::restart_cap`]). A write that ends a spell in
-//! which no worker served tells the [`WorkerReach`] whether the worker it reads
-//! serving is the process last read serving before the spell
-//! ([`WorkerReach::rejoined`]).
+//! stays so.
 //!
 //! A reply or a miss counts only while the worker's current registry address is
 //! the one the probe went to: a late answer to a recreated worker's old address
@@ -45,7 +41,9 @@
 //! and overload band. An answer naming another `X-Incarnation` than the last one
 //! read is a new process at the same address: the worker is reset to `Unknown`
 //! and its miss count and overload band cleared before the answer applies
-//! (ADR-0050 §8).
+//! (ADR-0050 §8). A worker read `Slow`, held or not, that so answers is first
+//! read `Dead`: the process that served its dialogs died, a dead verdict
+//! (ADR-0069).
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -71,7 +69,7 @@ use crate::addr::ProxyAddr;
 use crate::load_observer::{parse_x_overload_header, WorkerLoadObserver, X_OVERLOAD};
 use crate::observability::ProxyMetrics;
 use crate::registry::control::WorkerRegistryControl;
-use crate::registry::{WorkerEntry, WorkerHealth, WorkerRegistry};
+use crate::registry::{WorkerHealth, WorkerRegistry};
 use slow::SlowLedger;
 
 mod answer;
@@ -124,8 +122,6 @@ struct ProbeState {
     /// The `X-Incarnation` each worker last answered with — detects a restart
     /// at the same address.
     incarnation: HashMap<String, u64>,
-    /// The `X-Incarnation` each worker had when last read serving.
-    served_as: HashMap<String, u64>,
     /// Each worker's lateness (ADR-0069).
     ledger: SlowLedger,
 }
@@ -350,7 +346,6 @@ impl HealthProbe {
             if state.last_addr.get(&w.id).is_some_and(|prev| prev != &w.address) {
                 state.misses.remove(&w.id);
                 state.incarnation.remove(&w.id);
-                state.served_as.remove(&w.id);
                 state.ledger.forget(&w.id);
                 self.observer.reset(&w.id);
             }
@@ -360,7 +355,6 @@ impl HealthProbe {
         state.last_addr.retain(|id, _| live(id));
         state.misses.retain(|id, _| live(id));
         state.incarnation.retain(|id, _| live(id));
-        state.served_as.retain(|id, _| live(id));
         state.ledger.retain(live);
         self.observer.retain(live);
         for w in &snapshot {
@@ -450,20 +444,30 @@ impl HealthProbe {
         let readiness = worker_report::readiness(&resp);
         let reading = read_answer(resp.status(), readiness.as_ref());
         let before = self.health_of(&p.worker_id);
+        if restarted && before == Some(WorkerHealth::Slow) {
+            self.slow_process_ended(&p.worker_id, state);
+        }
         let recovering = before == Some(WorkerHealth::Slow) && !restarted;
         let health = match reading.health {
             Some(WorkerHealth::Alive) if recovering && in_time < self.config.recover_probes => None,
             health => health.or(restarted.then_some(WorkerHealth::Unknown)),
         };
-        let blind = self.blind();
         self.control.set_view(&p.worker_id, health, reading.acceptance);
-        let after = self.health_of(&p.worker_id);
-        if after == Some(WorkerHealth::Alive)
-            && matches!(before, Some(WorkerHealth::Dead | WorkerHealth::Slow))
-        {
-            self.observer.restart_cap(&p.worker_id, self.clock.now_ms());
-        }
-        self.wrote(&p.worker_id, after, blind, state);
+        self.wrote(&p.worker_id, state);
+    }
+
+    /// A worker read `Slow`, held or not, answered as another process: the
+    /// process it was died with the dialogs it served. Its death is the dead
+    /// verdict, which also ends a hold, before the new process's answer
+    /// applies.
+    fn slow_process_ended(&self, id: &str, state: &mut ProbeState) {
+        tracing::info!(
+            node = observe::node(),
+            worker = id,
+            "a slow worker answers as another process: a dead verdict"
+        );
+        self.control.set_health(id, WorkerHealth::Dead);
+        self.wrote(id, state);
     }
 
     /// A probe of `p`'s worker was answered past its reply window, inside its
@@ -495,28 +499,11 @@ impl HealthProbe {
         self.registry.probed().into_iter().find(|w| w.id == id).map(|w| w.health)
     }
 
-    /// Whether the view reads no worker serving its dialogs.
-    fn blind(&self) -> bool {
-        !self.registry.snapshot().iter().any(WorkerEntry::serves_dialogs)
-    }
-
-    /// After a health write that left `id` reading `after`, on a view `blind`
-    /// before it: reads its `Slow` spell, and, when it serves, the incarnation
-    /// it serves as. A write that ends the blind view tells the reach whether
-    /// `id` is the process last read serving.
-    fn wrote(&self, id: &str, after: Option<WorkerHealth>, blind: bool, state: &mut ProbeState) {
-        let Some(health) = after else { return };
-        self.read_spell(id, health, state);
-        if !matches!(health, WorkerHealth::Alive | WorkerHealth::Slow) {
-            return;
-        }
-        let current = state.incarnation.get(id).copied();
-        if blind && !self.blind() {
-            let known = current.is_some() && state.served_as.get(id).copied() == current;
-            self.reach.rejoined(known);
-        }
-        if let Some(gen) = current {
-            state.served_as.insert(id.to_string(), gen);
+    /// After a health write: reads the health `id` was left at into its `Slow`
+    /// spell.
+    fn wrote(&self, id: &str, state: &mut ProbeState) {
+        if let Some(health) = self.health_of(id) {
+            self.read_spell(id, health, state);
         }
     }
 
@@ -566,10 +553,8 @@ impl HealthProbe {
             _ if late => WorkerHealth::Slow,
             _ => WorkerHealth::Dead,
         };
-        let blind = self.blind();
         self.control.set_health(&p.worker_id, verdict);
-        let after = self.health_of(&p.worker_id);
-        self.wrote(&p.worker_id, after, blind, state);
+        self.wrote(&p.worker_id, state);
     }
 }
 

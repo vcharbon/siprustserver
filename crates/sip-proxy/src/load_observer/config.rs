@@ -21,10 +21,6 @@ pub struct LoadObserverConfig {
     /// Cap a worker's bucket is created at, on its first OPTIONS reply; the
     /// AIMD step of a reply carrying a payload follows at once.
     pub cap_initial_cps: f64,
-    /// Percent of `cap_initial_cps` the cap of a worker turning `Alive` from
-    /// `Dead` or `Slow` restarts at (`PROXY_RAMP_START_PCT`, ADR-0069), in
-    /// (0, 100]; the AIMD steps climb from there.
-    pub cap_restart_pct: f64,
     /// Cap never decreases below this.
     pub cap_floor_cps: f64,
     /// Cap never increases above this.
@@ -95,7 +91,6 @@ impl Default for LoadObserverConfig {
             aimd_decrease_factor: 0.5,
             aimd_cooldown_ticks: 5.0,
             cap_initial_cps: 30.0,
-            cap_restart_pct: 20.0,
             cap_floor_cps: 1.0,
             cap_ceiling_cps: 200.0,
             payload_stale_ms: 8000,

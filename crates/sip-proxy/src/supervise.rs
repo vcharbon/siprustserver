@@ -28,11 +28,9 @@ pub const K8S_MEMBERSHIP: &str = "k8s_membership";
 pub const REGISTRY_MEMBERSHIP: &str = "registry_membership";
 /// The runner's reader of the external face's kernel state.
 pub const EXTERNAL_FACE_MONITOR: &str = "external_face_monitor";
-/// The runner's watch of the fitness that starts an intake ramp.
-pub const INTAKE_RAMP: &str = "intake_ramp";
 
 /// Every task name, in counter order: the `task` label's values.
-pub const TASKS: [&str; 10] = [
+pub const TASKS: [&str; 9] = [
     BRANCH_MEMO_SWEEP,
     SHARD_STATS,
     RESOLVER_LOOKUP,
@@ -42,7 +40,6 @@ pub const TASKS: [&str; 10] = [
     K8S_MEMBERSHIP,
     REGISTRY_MEMBERSHIP,
     EXTERNAL_FACE_MONITOR,
-    INTAKE_RAMP,
 ];
 
 /// The restarts of the proxy's tasks in this process.

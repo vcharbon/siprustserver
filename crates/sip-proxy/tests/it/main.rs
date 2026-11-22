@@ -36,6 +36,7 @@ mod select_failure_503;
 mod self_gate_admission;
 mod shard_e2e;
 mod single_face_wire;
+mod slow_worker_back_as_another_process;
 mod slow_worker_routing;
 mod stateless_final_response_contract;
 mod surrogate_pair_display_name;

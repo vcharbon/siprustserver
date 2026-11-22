@@ -443,7 +443,6 @@ pub fn self_gate_text(gate: Option<&crate::self_gate::ProxySelfGateMetrics>) -> 
         .render(&mut s, |series| rejected.get(series.at(0)).copied().unwrap_or(0));
     c::SELF_GATE_EMERGENCY_BYPASSED.render_value(&mut s, count(|m| m.emergency_bypassed_total));
     c::SELF_GATE_INTERNAL_BYPASSED.render_value(&mut s, count(|m| m.internal_bypassed_total));
-    c::SELF_GATE_INTAKE_RAMP_ACTIVE.render_value(&mut s, count(|m| u64::from(m.ramp_active)));
     s
 }
 

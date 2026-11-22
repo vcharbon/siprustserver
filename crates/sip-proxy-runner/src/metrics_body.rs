@@ -66,7 +66,6 @@ mod tests {
             rejected_cps_total: 3,
             internal_bypassed_total: 4,
             emergency_bypassed_total: 5,
-            ramp_active: true,
         };
         for gate in [Some(&gate), None] {
             let memo = CancelBranchLru::new();

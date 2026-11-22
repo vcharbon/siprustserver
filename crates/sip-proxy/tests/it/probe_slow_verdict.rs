@@ -1,9 +1,7 @@
 //! When the health probe reads a worker `Slow` (ADR-0069): its probe answers
 //! arrive past their reply window and inside the slow window. A `Slow` worker
 //! is no dead verdict; it reads `Alive` again after `recover_probes` answers in
-//! time and `Dead` once it answers nothing within the slow window. A worker
-//! turning `Alive` from `Dead` or `Slow` restarts its admit cap at
-//! `cap_restart_pct` of `cap_initial_cps`.
+//! time and `Dead` once it answers nothing within the slow window.
 //!
 //! Timing axes: each probe is answered `delay(i)` after its `i`-th OPTIONS
 //! arrives (5 ms transit each way); one probe leaves per 1 s interval, its
@@ -43,10 +41,11 @@ pub(crate) const PROMPT: Duration = Duration::from_millis(10);
 /// When the `i`-th OPTIONS is answered after it arrives; `None` drops it.
 pub(crate) type Delays = Arc<dyn Fn(usize) -> Option<Duration> + Send + Sync>;
 
-/// Every health write, in order, forwarded to the registry.
+/// Every health write and late stamp, in order, forwarded to the registry.
 struct Writes {
     inner: Arc<dyn WorkerRegistryControl>,
     log: Arc<Mutex<Vec<(Instant, WorkerHealth)>>>,
+    late: Arc<Mutex<Vec<Instant>>>,
 }
 
 impl WorkerRegistryControl for Writes {
@@ -66,6 +65,7 @@ impl WorkerRegistryControl for Writes {
         self.inner.set_view(worker_id, health, acceptance);
     }
     fn note_late_answer(&self, worker_id: &str, fresh_for: Duration) {
+        self.late.lock().unwrap().push(Instant::now());
         self.inner.note_late_answer(worker_id, fresh_for);
     }
 }
@@ -105,12 +105,11 @@ fn respond(ep: Box<dyn UdpEndpoint>, delays: Delays) -> tokio::task::JoinHandle<
 /// One proxy's probe of the worker, with what it wrote and counted.
 pub(crate) struct Proxy {
     pub(crate) registry: Arc<SimulatedWorkerRegistry>,
-    observer: Arc<WorkerLoadObserver>,
     pub(crate) metrics: Arc<ProxyMetrics>,
     pub(crate) reach: Arc<WorkerReach>,
     pub(crate) capabilities: Arc<WorkerCapabilities>,
     writes: Arc<Mutex<Vec<(Instant, WorkerHealth)>>>,
-    clock: Clock,
+    late: Arc<Mutex<Vec<Instant>>>,
     pub(crate) task: tokio::task::JoinHandle<()>,
 }
 
@@ -132,8 +131,9 @@ impl Proxy {
             }],
             clock.clone(),
         ));
-        let writes = Arc::new(Mutex::new(Vec::new()));
-        let control = Arc::new(Writes { inner: registry.control(), log: writes.clone() });
+        let (writes, late) = (Arc::new(Mutex::new(Vec::new())), Arc::new(Mutex::new(Vec::new())));
+        let control =
+            Arc::new(Writes { inner: registry.control(), log: writes.clone(), late: late.clone() });
         let observer = Arc::new(WorkerLoadObserver::new(LoadObserverConfig::default()));
         let metrics = Arc::new(ProxyMetrics::new());
         let reach = WorkerReach::unheard();
@@ -143,8 +143,8 @@ impl Proxy {
             CustomParser::new(),
             registry.clone(),
             control,
-            observer.clone(),
-            clock.clone(),
+            observer,
+            clock,
             Arc::new(IdGen::seeded(u64::from(seed_of(probe)))),
             config,
         )
@@ -152,7 +152,7 @@ impl Proxy {
         .with_reach(reach.clone())
         .with_capabilities(capabilities.clone());
         let task = tokio::spawn(probe.run());
-        Self { registry, observer, metrics, reach, capabilities, writes, clock, task }
+        Self { registry, metrics, reach, capabilities, writes, late, task }
     }
 
     pub(crate) fn health(&self) -> Option<WorkerHealth> {
@@ -163,10 +163,9 @@ impl Proxy {
         self.writes.lock().unwrap().iter().find(|(_, h)| *h == health).map(|(at, _)| *at)
     }
 
-    /// The tokens the worker's admit bucket yields now, at most 1000.
-    fn tokens(&self) -> usize {
-        let now = self.clock.now_ms();
-        (0..1000).take_while(|_| self.observer.try_consume_for(WORKER_ID, now).is_ok()).count()
+    /// When the probe read the worker's last late answer.
+    fn last_late(&self) -> Option<Instant> {
+        self.late.lock().unwrap().last().copied()
     }
 }
 
@@ -241,10 +240,9 @@ async fn an_answer_past_the_slow_window_is_none_and_the_worker_reads_dead() {
 }
 
 /// A `Slow` worker answering in time again reads `Alive` at its third answer
-/// in time in a row, not before; its admit cap restarts at 20 % of the
-/// initial 30 calls/s.
+/// in time in a row, not before.
 #[tokio::test(start_paused = true)]
-async fn a_slow_worker_reads_alive_after_three_answers_in_time_its_cap_restarted() {
+async fn a_slow_worker_reads_alive_after_three_answers_in_time() {
     let config = HealthProbeConfig::default();
     let delays: Delays = Arc::new(|i| Some(if i < 5 { LATE } else { PROMPT }));
     let (net, responder) = net_and_worker(delays).await;
@@ -257,53 +255,53 @@ async fn a_slow_worker_reads_alive_after_three_answers_in_time_its_cap_restarted
     let alive = p.first(WorkerHealth::Alive).expect("read alive");
     assert!(alive > slow);
     assert_eq!(p.first(WorkerHealth::Dead), None);
-    assert_eq!(p.tokens(), 6, "the cap restarts at 20 % of LB_CAP_INITIAL_CPS");
     p.task.abort();
     responder.abort();
 }
 
 /// A `Slow` worker that falls silent reads `Dead` once no answer, late or
-/// not, came within the slow window, within `verdict_within` of its last
-/// answer: the slow window lengthens no verdict on silence.
+/// not, came within the slow window: within `slow_window + interval` of the
+/// instant the probe read its last late answer, so the slow window lengthens
+/// no verdict on silence.
 #[tokio::test(start_paused = true)]
 async fn a_slow_worker_falling_silent_reads_dead_within_the_silence_bound() {
     let config = HealthProbeConfig::default();
     assert!(config.slow_window_fits());
     let delays: Delays = Arc::new(|i| (i < 4).then_some(LATE));
     let (net, responder) = net_and_worker(delays).await;
-    let start = Instant::now();
     let p = Proxy::spawn(&net, "192.0.2.1:5098", config).await;
     run_for(Duration::from_secs(12)).await;
     let slow = p.first(WorkerHealth::Slow).expect("read slow");
     let dead = p.first(WorkerHealth::Dead).expect("read dead");
-    assert!(dead > slow);
-    let last_answer = start + Duration::from_secs(3) + LATE + TRANSIT * 2;
+    let last_answer = p.last_late().expect("late answers read");
+    assert!(slow < last_answer && last_answer < dead);
+    let bound = config.slow_window() + config.period();
     assert!(
-        dead <= last_answer + config.verdict_within() + TRANSIT * 2,
-        "read dead {:?} after its last answer, past {:?}",
-        dead - last_answer,
-        config.verdict_within()
+        dead <= last_answer + bound,
+        "read dead {:?} after its last answer, past {bound:?}",
+        dead - last_answer
     );
     p.task.abort();
     responder.abort();
 }
 
 /// A worker read `Dead` that answers in time again reads `Alive` at its first
-/// answer, its admit cap restarted at 20 % of the initial 30 calls/s; a worker
-/// read `Alive` from `Unknown` keeps the full initial cap.
+/// answer, not after `recover_probes` as a `Slow` one does.
 #[tokio::test(start_paused = true)]
-async fn a_dead_worker_answering_again_reads_alive_its_cap_restarted() {
+async fn a_dead_worker_answering_again_reads_alive_at_its_first_answer() {
     let config = HealthProbeConfig::default();
     let delays: Delays = Arc::new(|i| (!(1..5).contains(&i)).then_some(PROMPT));
     let (net, responder) = net_and_worker(delays).await;
     let p = Proxy::spawn(&net, "192.0.2.1:5098", config).await;
     run_for(Duration::from_millis(500)).await;
     assert_eq!(p.health(), Some(WorkerHealth::Alive));
-    assert_eq!(p.tokens(), 30, "a first answer keeps LB_CAP_INITIAL_CPS");
-    run_for(Duration::from_secs(5)).await;
+    run_for(Duration::from_millis(4_600)).await;
     assert!(p.first(WorkerHealth::Dead).is_some(), "the silent spell reads dead");
-    assert_eq!(p.health(), Some(WorkerHealth::Alive));
-    assert_eq!(p.tokens(), 6, "the cap restarts at 20 % of LB_CAP_INITIAL_CPS");
+    assert_eq!(
+        p.health(),
+        Some(WorkerHealth::Alive),
+        "back at the answer to the probe sent at 5 s"
+    );
     p.task.abort();
     responder.abort();
 }

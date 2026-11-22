@@ -111,12 +111,12 @@ pub trait WorkerRegistry: Send + Sync {
     /// has listed the workers (`topology::Membership::synced`).
     fn synced(&self) -> bool;
     /// Every later dead verdict: the ordinal of a worker whose health turns
-    /// `Dead` from `Alive`, or from `Unknown` or `Slow` while its endpoint reads
-    /// ready or it is held as `Slow`, or of a worker read `Alive` whose endpoint
-    /// flips not ready and not
-    /// terminating while another member reads ready and no late answer of its is
-    /// fresh (ADR-0050 §3, ADR-0069). A departure, a terminating flip and a flip
-    /// that empties the view of ready members are none.
+    /// `Dead` from `Alive` or `Slow`, or from `Unknown` while its endpoint reads
+    /// ready, or of a worker read `Alive` or `Slow` whose endpoint flips not
+    /// ready and not terminating while another member reads ready and no late
+    /// answer of its is fresh (ADR-0050 §3, ADR-0069). A departure, a
+    /// terminating flip and a flip that empties the view of ready members are
+    /// none.
     fn read_dead(&self) -> tokio::sync::broadcast::Receiver<WorkerId>;
     /// Every later recovery: the ordinal of a worker whose health turns `Alive`
     /// from `Slow`, which is told the standing verdicts again (ADR-0069).
