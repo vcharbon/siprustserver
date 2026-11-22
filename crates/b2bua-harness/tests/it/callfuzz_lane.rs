@@ -89,6 +89,8 @@ async fn run_call(config: FuzzConfig, token: &str, cell: generator::Cell, net: H
         if broken.is_some() || !overtaken::refused_after_being_overtaken(&events) {
             panic!("{}failed at {at}: {cause:?}", broken.unwrap_or_default());
         }
+        let seed = config.seed_of(token);
+        eprintln!("[callfuzz {token}] seed {seed:#018x} overtaken, its 500 met at {at}: {cause:?}");
     }
     let report = scene.finish().await;
     assert!(report.passed(), "the RFC audit failed");

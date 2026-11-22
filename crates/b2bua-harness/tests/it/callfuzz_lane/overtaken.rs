@@ -37,12 +37,13 @@ pub(super) fn refused_after_being_overtaken(events: &[Stamped<SignalingNetworkEv
     })
 }
 
-/// Whether `next` is a request of `lost`'s dialog (its Call-ID and From-tag)
-/// numbered above it.
+/// Whether `next` is a request of `lost`'s dialog (its Call-ID, From-tag and
+/// To-tag) numbered above it.
 fn numbered_above(lost: &Identity<'_>, from_tag: &str, next: &[u8]) -> bool {
     let id = sniff::identity(next);
     id.method.is_some_and(|m| !matches!(m, "ACK" | "CANCEL"))
         && id.call_id == lost.call_id
+        && id.to_tag == lost.to_tag
         && sniff::from_tag(next) == from_tag
         && id.cseq > lost.cseq
 }

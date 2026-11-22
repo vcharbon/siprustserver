@@ -5,7 +5,8 @@
 //! with a CSeq gone backwards: the callee answers it 500 (§12.2.2). On a run
 //! that declares a loss model, the recorded loss of the PRACK's first copy
 //! explains both the gap and the 500, and neither is a finding. The same
-//! overtaking with nothing lost, the fabric holding the PRACK back, is one.
+//! overtaking with nothing lost, the fabric holding the PRACK back, is one;
+//! so is the loss on a run that declares no loss model.
 
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -16,7 +17,7 @@ use b2bua_harness::{B2buaScene, B2buaSut, ANSWER_SDP, OFFER_SDP};
 use scenario_harness::{Harness, SIMULATED_TRANSIT_DELAY_MS};
 use sip_message::generators::InDialogMethod;
 use sip_message::sniff;
-use sip_net_testkit::{Fate, SendDelay, SendFate};
+use sip_net_testkit::{Fate, SendDelay, SendFate, SimulatedSignalingNetwork};
 
 /// Bob's own `RSeq`.
 const BOB_RSEQ: u32 = 4711;
@@ -104,5 +105,14 @@ async fn a_request_overtaken_with_nothing_lost_is_a_finding() {
         SIMULATED_TRANSIT_DELAY_MS,
         hold_first_relayed_prack(),
     );
+    prack_overtaken_by_an_update(h).await;
+}
+
+#[tokio::test(start_paused = true)]
+#[should_panic(expected = "bob: UPDATE CSeq 3 skips")]
+async fn a_request_overtaken_after_a_loss_on_a_run_declaring_no_loss_model_is_a_finding() {
+    let net = SimulatedSignalingNetwork::new(SIMULATED_TRANSIT_DELAY_MS)
+        .with_send_fate(lose_first_relayed_prack());
+    let h = Harness::with_simulated_network("overtaken-with-no-loss-model", net);
     prack_overtaken_by_an_update(h).await;
 }
