@@ -204,6 +204,26 @@ fn a_request_the_gate_passes_sets_its_dialogs_last_cseq_and_an_ack_does_not() {
     assert_eq!(last_cseq_after(call, caller_request(Method::Ack, 9)), Some(1));
 }
 
+/// The methods this stack carries in no dialog, which it only ever refuses.
+fn carried_in_no_dialog() -> [Method; 3] {
+    [Method::Subscribe, Method::Publish, Method::Other("FOO".into())]
+}
+
+/// A request of a method this stack carries in no dialog reaches its rules'
+/// refusal whatever its CSeq (RFC 3261 §8.2.1 before §12.2.2), and leaves its
+/// dialog's last CSeq as it was.
+#[test]
+fn a_method_carried_in_no_dialog_is_held_to_no_order_and_numbers_nothing() {
+    let mut call = call_with_caller_dialog(true);
+    call.a_leg.dialogs.by_tags_mut("ours", CALLER_TAG).expect("the dialog").peer_cseq = Some(5);
+    for method in carried_in_no_dialog() {
+        let below = request_verdict(&call, "a", &caller_request(method.clone(), 4));
+        assert!(matches!(below, Verdict::Pass(_)), "{method} below: {below:?}");
+        let above = caller_request(method.clone(), 9);
+        assert_eq!(last_cseq_after(call.clone(), above), Some(5), "{method} numbers nothing");
+    }
+}
+
 #[test]
 fn a_rejected_caller_dialog_refuses_her_bye_and_takes_her_prack() {
     let mut call = call_with_caller_dialog(true);
@@ -235,6 +255,8 @@ fn an_ending_dialog_answers_in_its_own_dialog_and_judges_the_order_first() {
     assert!(matches!(update, Verdict::Terminated(_)), "{update:?}");
     assert_eq!(named(update), Some("ours".to_string()));
     assert_eq!(request_verdict(&call, "a", &caller_request(Method::Info, 4)), Verdict::OutOfOrder);
+    let subscribe = request_verdict(&call, "a", &caller_request(Method::Subscribe, 4));
+    assert!(matches!(subscribe, Verdict::Terminated(_)), "held to no order: {subscribe:?}");
 }
 
 /// A PRACK on a retired dialog reaches its rule on the caller face, where a

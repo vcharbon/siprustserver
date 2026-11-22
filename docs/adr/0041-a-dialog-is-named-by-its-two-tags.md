@@ -9,9 +9,9 @@
 A back-to-back UA leg holds several dialogs at once: a leg the stack dialled
 holds one per callee fork (RFC 3261 §12.1.2), the caller's leg one per tag the
 stack showed her. Which dialog a message belongs to was read differently per
-leg role, by position ("the first dialog"), and through side tables (a map
-from caller-facing tags to callee forks, slots for dialogs the answer let go
-of). A positional read picks a wrong dialog as soon as a leg holds two.
+leg role, by position ("the first dialog"), and through side tables (from
+caller-facing tags to callee forks). A positional read picks a wrong dialog
+as soon as a leg holds two.
 
 ## Decision
 
@@ -30,11 +30,10 @@ of). A positional read picks a wrong dialog as soon as a leg holds two.
    of it, or our CANCEL of its INVITE, in flight; the INVITE's final ends a
    cancelled one), `Ended(Rejected | PeerBye | EarlyPeerBye | OurBye)` (an end
    is written once; only a 2xx-established dialog counts as established) and
-   `Retired` — an early
-   dialog the call let go of without a BYE (a losing fork, a caller-facing
-   dialog the answer did not take, a leg given up before its INVITE's final),
-   holding the relays still open in it and
-   the ACK/BYE that released its late 2xx (§13.2.2.4). No record is removed
+   `Retired` — an early dialog the call let go of without a BYE (a losing
+   fork, a caller-facing dialog the answer did not take, a leg given up
+   before its INVITE's final), holding the relays still open in it and the
+   ACK/BYE that released its late 2xx (§13.2.2.4). No record is removed
    before the call is: a late message is answered by what its dialog was.
 4. **A caller-facing dialog states the callee dialogs it relays**
    (`fronts`): one, or several a masking policy shows the caller as one; her
@@ -63,13 +62,13 @@ of). A positional read picks a wrong dialog as soon as a leg holds two.
    An ACK passes on any dialog a 2xx established, ended since or not (RFC
    5407 §2), and is otherwise dropped unanswered (§17.1.1.3), as is one of an
    INVITE the record holds no final sent for on a call no other owner served
-   (ADR-0055 §4); a CANCEL is matched
-   by transaction (§9.1). A request with no To-tag names no dialog: one of a
-   method carried only in a dialog draws 481 under a minted tag (§8.2.6.2);
-   an INVITE, an ACK or a method relayed in no dialog passes. A
-   response resolves to the relay it answers (by dialog, method and CSeq),
-   to its dialog, or to the request this stack sent; one whose From-tag is
-   no tag of this stack's on the leg answers nothing and is dropped.
+   (ADR-0055 §4); a CANCEL is matched by transaction (§9.1). A request with
+   no To-tag names no dialog: one of a method carried only in a dialog draws
+   481 under a minted tag (§8.2.6.2); an INVITE, an ACK or a method relayed
+   in no dialog passes. A response resolves to the relay it answers (by
+   dialog, method and CSeq), to its dialog, or to the request this stack
+   sent; one whose From-tag is no tag of this stack's on the leg answers
+   nothing and is dropped.
 6. **A relay always ends its request's turn with a final.** No dialog to
    carry it now — no peer leg while the call lives, a peer leg with no
    dialog yet or several early ones and none named, a peer dialog its party
@@ -80,9 +79,10 @@ of). A positional read picks a wrong dialog as soon as a leg holds two.
    403 (§21.4.4).
 7. **Each dialog numbers its own requests.** A dialog holds `our_cseq`, the
    last CSeq this side sent there, and `peer_cseq`, the peer's last, which
-   serves the §12.2.2 order check alone and is set by every request the
-   gate takes, never one it refuses (§8.2). A relayed request takes the target dialog's next
-   number, `our_cseq + 1`, never a copy of or a distance from the sender's
+   only the §12.2.2 order check reads, on every request but an ACK or a
+   method relayed in no dialog: one taken sets it, one refused never does
+   (§8.2). A relayed request takes the target dialog's next number,
+   `our_cseq + 1`, never a copy of or a distance from the sender's
    (§12.2.1.1): a gap in the sender's sequence is not reproduced on the other
    face. Our sequence on a caller-facing dialog starts at 1, as on a dialled
    leg (§8.1.1.5 allows any start below 2³¹).

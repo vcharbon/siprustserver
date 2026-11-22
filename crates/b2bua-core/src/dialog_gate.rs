@@ -26,11 +26,14 @@
 //! before the dialog's CSeq order (§12.2.2): a request of a method this stack
 //! carries in a dialog that requires an option tag this stack does not
 //! understand draws 420, naming those tags in `Unsupported` (§8.2.2.3,
-//! [`Verdict::BadExtension`]), whatever its CSeq. Then a request below its
-//! dialog's last CSeq draws 500 (§12.2.2). A refusal changes no state (§8.2):
-//! nothing reaches the rules or the peer, and the dialog, its last CSeq and
-//! its session stay as they were. A request the gate passes, or answers 200
-//! or 487, sets that last CSeq ([`note_in_order`]).
+//! [`Verdict::BadExtension`]), whatever its CSeq. Then such a request below
+//! its dialog's last CSeq draws 500 (§12.2.2). A refusal changes no state
+//! (§8.2): nothing reaches the rules or the peer, and the dialog, its last
+//! CSeq and its session stay as they were. Such a request the gate passes, or
+//! answers 200 or 487, sets that last CSeq ([`note_in_order`]). A request of
+//! a method this stack carries in no dialog, which it only ever refuses (405
+//! or 489, §8.2.1; 487 on an ending dialog), is held to no order and sets
+//! nothing.
 //! An ACK passes on a dialog a 2xx established, ended by
 //! a BYE since or not (RFC 5407 §2); it is never answered (§17.1.1.3), so one
 //! the gate refuses is dropped. An ACK naming an INVITE on its leg for which
@@ -186,10 +189,17 @@ pub fn request_verdict(call: &Call, leg_id: &str, req: &SipRequest) -> Verdict {
         return Verdict::BadExtension(unsupported);
     }
     let cseq = i64::from(req.cseq().seq());
-    if *method != Method::Ack && dialog.peer_cseq.is_some_and(|last| cseq < last) {
+    if carried_in_dialog(method) && dialog.peer_cseq.is_some_and(|last| cseq < last) {
         return Verdict::OutOfOrder;
     }
     taken(Resolved { dialog: Some(dialog.id()), record: None })
+}
+
+/// Whether this stack carries a request of `method` in a dialog. A request of
+/// any other method is held to no CSeq order and numbers nothing: an ACK
+/// (RFC 3261 §13.2.2.4), or a method this stack only ever refuses (§8.2.1).
+fn carried_in_dialog(method: &Method) -> bool {
+    InDialogMethod::try_from(method).is_ok()
 }
 
 /// The option tags `req` requires that this stack does not understand (RFC
@@ -197,7 +207,9 @@ pub fn request_verdict(call: &Call, leg_id: &str, req: &SipRequest) -> Verdict {
 /// this stack carries in a dialog: any other method draws its rules' 405 or
 /// 489 first (§8.2.1).
 fn bad_extension(req: &SipRequest) -> Option<Unsupported> {
-    InDialogMethod::try_from(req.method()).ok()?;
+    if !carried_in_dialog(req.method()) {
+        return None;
+    }
     sip_message::option_tags::not_understood(req)
 }
 
@@ -225,13 +237,14 @@ fn names_losing_fork(dialog: Option<&Dialog>, method: &Method) -> bool {
 
 /// Note the request the gate passed or answered in order on the dialog it
 /// names: its CSeq becomes that dialog's remote sequence number (RFC 3261
-/// §12.2.2). An ACK numbers nothing (§13.2.2.4).
+/// §12.2.2). An ACK numbers nothing (§13.2.2.4), nor does a method this stack
+/// carries in no dialog, which its rules refuse (§8.2.1).
 pub fn note_in_order(call: &mut Call, leg_id: &str, resolved: &Resolved, event: &CallEvent) {
     let CallEvent::Sip { message, .. } = event else { return };
     let (SipMessage::Request(req), Some(dialog)) = (message.as_ref(), &resolved.dialog) else {
         return;
     };
-    if *req.method() == Method::Ack {
+    if !carried_in_dialog(req.method()) {
         return;
     }
     call::helpers::advance_peer_cseq(call, leg_id, dialog, i64::from(req.cseq().seq()));
