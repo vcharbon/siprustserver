@@ -12,7 +12,7 @@
 //! that offer rejecting every stream ahead of the rollback's BYE.
 
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -157,18 +157,28 @@ impl ARealignDue {
     }
 }
 
-/// The fabric's hold on A's ACKs past the first (the ACK of her INVITE's 2xx,
-/// never held): the n-th of them is held `holds[n]`, every later one the last
-/// of `holds`; with `holds` empty, nothing is held.
-fn alices_later_acks_held(alice: SocketAddr, holds: &'static [Duration]) -> SendDelay {
+/// The fabric's hold on A's ACKs of her re-INVITE's 2xx, those on another
+/// CSeq number than her first ACK's (the ACK of her INVITE's 2xx, never
+/// held): the n-th of them is held `holds[n]`, every later one the last of
+/// `holds`; with `holds` empty, nothing is held.
+fn alices_reinvite_acks_held(alice: SocketAddr, holds: &'static [Duration]) -> SendDelay {
+    let first_cseq = AtomicU32::new(0);
     let sent = AtomicUsize::new(0);
     Arc::new(move |src, _dst, datagram| {
         if src != alice || !datagram.starts_with(b"ACK ") {
             return None;
         }
+        let cseq = sip_message::sniff::cseq_number(datagram)?;
+        let first = match first_cseq.compare_exchange(0, cseq, Ordering::Relaxed, Ordering::Relaxed)
+        {
+            Ok(_) => cseq,
+            Err(seen) => seen,
+        };
+        if cseq == first {
+            return None;
+        }
         let n = sent.fetch_add(1, Ordering::Relaxed);
-        let later = n.checked_sub(1)?;
-        holds.get(later).or(holds.last()).copied()
+        holds.get(n).or(holds.last()).copied()
     })
 }
 
@@ -191,7 +201,7 @@ async fn a_realign_due(
     let h = Harness::with_transit_delay_and_send_delay(
         name,
         1,
-        alices_later_acks_held(alice_addr, holds),
+        alices_reinvite_acks_held(alice_addr, holds),
     );
     let alice = h.agent("alice", &alice_addr.to_string()).await;
     let bob = h.agent("bob", &format!("127.0.0.1:{bob_port}")).await;
@@ -335,8 +345,12 @@ async fn the_a_realign_leaves_on_the_transferees_ack(name: &str, n: u16, first: 
     t.h.advance(PAST_THE_TRANSFERS_ROUND_TRIPS).await;
     t.assert_no_refusal();
     assert!(t.invites_to_alice().is_empty(), "no a-realign re-INVITE before A's ACK arrives");
-    let held_for_a = usize::from(first == FirstOffer::Transferee);
-    assert_eq!(t.c_realign_acks().len(), held_for_a, "C's ACK waits for A's answer when C offers");
+    let acked_at_once = usize::from(first == FirstOffer::Transferee);
+    assert_eq!(
+        t.c_realign_acks().len(),
+        acked_at_once,
+        "C's ACK waits for A's answer when C offers"
+    );
 
     t.bob.receive("ACK").await;
     let a_realign = t.alice.receive("INVITE").await;
@@ -367,6 +381,29 @@ async fn the_a_realign_leaves_on_the_transferees_ack_c_answering() {
 async fn the_a_realign_leaves_on_the_transferees_ack_c_offering() {
     let name = "refer-realign-awaits-ack-c-offers";
     the_a_realign_leaves_on_the_transferees_ack(name, 3, FirstOffer::Callee).await;
+}
+
+/// While A's ACK of her re-INVITE's 2xx is in flight, the fabric delivers a
+/// copy of her earlier ACK, the one of her INVITE's 2xx: it discharges
+/// nothing, so the 2xx to her re-INVITE still awaits its ACK and the
+/// a-realign re-INVITE goes on waiting. The held ACK then releases it.
+#[tokio::test(start_paused = true)]
+async fn a_copy_of_an_earlier_ack_releases_nothing() {
+    let name = "refer-realign-awaits-ack-earlier-copy";
+    let mut t = a_realign_due(name, 4, FirstOffer::Transferee, &[ACK_HELD], true).await;
+
+    let earlier = t.sent(t.alice.addr(), t.b2bua.addr, "ACK ", None);
+    let earlier = earlier.first().expect("A's ACK of her INVITE's 2xx").1.raw.clone();
+    t.alice.try_send_datagram(&earlier, t.b2bua.addr).await.expect("the copy leaves");
+    t.h.advance(PAST_THE_TRANSFERS_ROUND_TRIPS).await;
+    t.assert_no_refusal();
+    assert!(t.invites_to_alice().is_empty(), "the earlier ACK's copy releases no re-INVITE");
+    t.bob.drain().await;
+
+    let a_realign = t.alice.receive("INVITE").await;
+    assert_eq!(t.invites_to_alice().len(), 1, "the held ACK releases the a-realign re-INVITE");
+    t.bob.drain().await;
+    transfer_completes(t, a_realign, FirstOffer::Transferee).await;
 }
 
 /// The fabric holds A's ACK past T1: the stack re-sends its 2xx, A ACKs the
