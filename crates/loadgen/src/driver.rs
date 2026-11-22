@@ -242,7 +242,7 @@ pub(crate) async fn run_one(
     tuning: CallTuning,
     overload_reject: Option<u16>,
     outcomes: Option<Arc<OutcomeSink>>,
-    _permit: OwnedSemaphorePermit,
+    permit: OwnedSemaphorePermit,
     tails: Arc<RwLock<()>>,
 ) {
     let wire = outcomes.as_ref().map(|_| CallWire::new(transport.clock.clone()));
@@ -391,11 +391,13 @@ pub(crate) async fn run_one(
 
     tally.mark_outcome(); // a call whose runner never resolved (its build failed)
     let ended_at_ms = transport.clock.now_ms();
+    let e2e = ctx.elapsed();
     let failed = !matches!(result, Ok(ScenarioVerdict::Success { .. }));
     // A request awaiting its final is judged by its transaction (RFC 3261 §17.1.2).
     let (open, awaits) = (net.client_txn_open(), wire.as_ref().is_some_and(CallWire::awaits));
     let (agents, quiesce) = (&callee_agents, call.teardown_quiesce);
-    let tail = failed_call::hold(failed, open, tails, net, &alice, agents, quiesce).await;
+    let (tail, _held) =
+        failed_call::hold(failed, open, permit, tails, net, &alice, agents, quiesce).await;
 
     // The per-call audit policy (ADR-0024 §6): the merged structural waivers —
     // the attached case's lowered `allowViolations` PLUS the plan's declared
@@ -459,7 +461,6 @@ pub(crate) async fn run_one(
     if transport.correlation.is_from_user() {
         transport.core.release_key(&key, class.is_ok());
     }
-    let e2e = ctx.elapsed();
     let checkpoints = ctx.take_checkpoints();
     // Fold this call's 18x outcome into the cross-call ringing-delivery gate (a
     // dropped non-PRACK 18x is expected, so it is a rate, not a per-call failure).
