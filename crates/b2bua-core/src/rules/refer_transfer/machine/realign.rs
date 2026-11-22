@@ -298,10 +298,11 @@ fn c_realign_rollback(
 /// `refer_reinvite_answer` + the overall-safety timer, `merge(a, cLegId)`
 /// (A↔C now bridged), release the referrer B when it has not hung up (BYE;
 /// a BYE of B's crossing it is `resolve-cross-bye`'s), CDR answer
-/// "transfer-completed", and clear the slice. A copy of the 2xx to an earlier
-/// INVITE on A's dialog answers nothing pending, also while the a-realign
-/// re-INVITE waits for A's ACK ([`a_realign_sent`]); it is
-/// `re-ack-2xx-ahead`'s.
+/// "transfer-completed", and clear the slice. A copy of an earlier 2xx of A's
+/// answers nothing pending: once the a-realign re-INVITE has left it is
+/// `re-ack-2xx-ahead`'s; while that re-INVITE still waits for an ACK
+/// ([`a_realign_sent`]), the copy is of the 2xx to her dialog's last INVITE,
+/// `re-ack-retransmitted-2xx`'s once its ACK left.
 /// C's ACK held for A's answer leaves after A's, carrying it (RFC 3725 §4.1).
 pub(super) fn a_realign_200() -> RuleDefinition {
     sm_rule! {
