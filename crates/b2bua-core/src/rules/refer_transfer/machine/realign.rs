@@ -135,6 +135,13 @@ pub(super) fn a_realign_on_a_ack() -> RuleDefinition {
     }
 }
 
+/// The a-realign re-INVITE has left toward A: none waits in the transfer
+/// state for her ACK. Only then can a response of hers in `ARealigning`
+/// answer it.
+fn a_realign_sent(ctx: &RuleContext) -> bool {
+    state(ctx).is_some_and(|s| s.pending_a_realign.is_none())
+}
+
 /// Whether `ctx`'s 2xx, C's to the c-realign re-INVITE on `c_leg_id`, makes
 /// an offer its ACK owes the answer to: it carries a session description and
 /// the re-INVITE carried none (RFC 3264 §4). It reads the rule's view of the
@@ -292,7 +299,9 @@ fn c_realign_rollback(
 /// (A↔C now bridged), release the referrer B when it has not hung up (BYE;
 /// a BYE of B's crossing it is `resolve-cross-bye`'s), CDR answer
 /// "transfer-completed", and clear the slice. A copy of the 2xx to an earlier
-/// INVITE on A's dialog answers nothing pending; it is `re-ack-2xx-ahead`'s.
+/// INVITE on A's dialog answers nothing pending, also while the a-realign
+/// re-INVITE waits for A's ACK ([`a_realign_sent`]); it is
+/// `re-ack-2xx-ahead`'s.
 /// C's ACK held for A's answer leaves after A's, carrying it (RFC 3725 §4.1).
 pub(super) fn a_realign_200() -> RuleDefinition {
     sm_rule! {
@@ -312,7 +321,9 @@ pub(super) fn a_realign_200() -> RuleDefinition {
             .method("INVITE")
             .status_class(2)
             .direction(Direction::FromA)
-            .filter(|ctx| ctx.source_leg_id == "a" && ctx.answers_last_sent_invite()),
+            .filter(|ctx| {
+                ctx.source_leg_id == "a" && a_realign_sent(ctx) && ctx.answers_last_sent_invite()
+            }),
         handle: |ctx| {
             let st = state(ctx)?.clone();
             let c_leg_id = st.c_leg_id.clone()?;
@@ -340,7 +351,8 @@ pub(super) fn a_realign_200() -> RuleDefinition {
     }
 }
 
-/// transfer-a-realign-fail — A rejects the a-realign re-INVITE → rollback.
+/// transfer-a-realign-fail — A rejects the a-realign re-INVITE → rollback,
+/// once that re-INVITE has left ([`a_realign_sent`]).
 /// begin-termination BYEs all three confirmed legs (A, B, C); the slice is
 /// dropped as the call terminates.
 pub(super) fn a_realign_fail() -> RuleDefinition {
@@ -359,7 +371,7 @@ pub(super) fn a_realign_fail() -> RuleDefinition {
             .direction(Direction::FromA)
             .filter(|ctx| {
                 let is_fail = ctx.response().map(|r| r.status() >= 300).unwrap_or(false);
-                is_fail && ctx.source_leg_id == "a"
+                is_fail && ctx.source_leg_id == "a" && a_realign_sent(ctx)
             }),
         handle: |ctx| {
             let resp = ctx.response()?;

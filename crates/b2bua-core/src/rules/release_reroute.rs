@@ -86,6 +86,14 @@ fn is_new_leg(ctx: &RuleContext) -> bool {
     ctx.call.reroute_state().map(|r| r.new_leg_id.as_str()) == Some(ctx.source_leg_id)
 }
 
+/// The a-realign re-INVITE has left toward A: the reroute realigns her and
+/// none waits for her ACK. Only then can a response of hers answer it.
+fn a_realign_sent(ctx: &RuleContext) -> bool {
+    ctx.call
+        .reroute_state()
+        .is_some_and(|r| r.phase == ReroutePhase::ARealigning && r.pending_a_realign.is_none())
+}
+
 /// Local teardown with the reroute-failure reason: force the call down like
 /// the `release` outcome would, recording why. `BeginTermination` BYEs every
 /// confirmed leg (A + old B + a confirmed new leg) and CANCELs a still-ringing
@@ -388,8 +396,7 @@ pub fn release_reroute_rules() -> Vec<RuleDefinition> {
             Match::response().method("INVITE").status_class(2).direction(Direction::FromA).filter(
                 |ctx| {
                     ctx.source_leg_id == "a"
-                        && ctx.call.reroute_state().map(|r| r.phase)
-                            == Some(ReroutePhase::ARealigning)
+                        && a_realign_sent(ctx)
                         && ctx.answers_last_sent_invite()
                 },
             ),
@@ -423,7 +430,7 @@ pub fn release_reroute_rules() -> Vec<RuleDefinition> {
             Match::response().method("INVITE").direction(Direction::FromA).filter(|ctx| {
                 ctx.response().map(|r| r.status() >= 300).unwrap_or(false)
                     && ctx.source_leg_id == "a"
-                    && ctx.call.reroute_state().map(|r| r.phase) == Some(ReroutePhase::ARealigning)
+                    && a_realign_sent(ctx)
             }),
             |ctx| {
                 let resp = ctx.response()?;
