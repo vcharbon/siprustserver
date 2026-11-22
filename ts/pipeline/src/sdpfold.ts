@@ -11,9 +11,10 @@
  * difference is one {@link SdpDifference} per differing key, carrying that
  * key's VERBATIM lines on both sides: the fold decides, it edits nothing.
  *
- * Two descriptions that differ in a serialization choice alone compare equal,
- * and these are the choices, each one the RFC leaves to the writer:
- * - the line ending (CRLF or bare LF), whitespace trailing a line, a blank line;
+ * Two descriptions that differ in these serialization choices alone, each
+ * one the RFC leaves to the writer, compare equal:
+ * - the line ending (CRLF or bare LF), a blank line, whitespace trailing a
+ *   line other than the `s=` and `i=` text lines, whose value runs to the end;
  * - the order of attributes of different names: RFC 4566 §5 fixes the order of
  *   every other line, not of attributes among themselves;
  * - the order of `a=rtpmap` and of `a=fmtp` lines across formats: each is bound
@@ -24,10 +25,11 @@
  *   §6, RFC 3264 §5.1), so the session-level direction compares in each media
  *   section it reaches and the session section of a description with media
  *   compares none of its own.
- * Everything else is strict: every value, the relative order of same-name
- * attributes (an attribute's own spec may give it meaning: an `a=crypto` list
- * is ordered by preference) and of one format's lines, and the order of the
- * lines RFC 4566 §5 fixes, one `order` row where nothing else differs.
+ * Any other choice is a row, and so is every value, the relative order of
+ * same-name attributes (an attribute's own spec may give it meaning: an
+ * `a=crypto` list is ordered by preference) and of one format's lines, and
+ * the order of the lines RFC 4566 §5 fixes, one `order` row beside whatever
+ * else differs.
  *
  * The mask is the contract between the document and the run, and it states
  * exactly what the render writes (`sip_message::rewrite_connection_and_ports`).
@@ -101,11 +103,14 @@ const DEFAULT_DIRECTION = "a=sendrecv"
 /** The attributes bound to the format they name, whose order across formats states nothing (RFC 4566 §6). */
 const FORMAT_BOUND: ReadonlySet<string> = new Set(["a=rtpmap", "a=fmtp"])
 
-/** The wire lines of a text, line terminators and trailing whitespace dropped, blank lines dropped. */
+/** The lines whose text runs to the line's end, trailing whitespace included (RFC 4566 §5.3, §5.4). */
+const TEXT_LINES: ReadonlyArray<string> = ["s=", "i="]
+
+/** The wire lines of a text, line terminators and trailing whitespace dropped but from a text line, blank lines dropped. */
 const linesOf = (text: string): ReadonlyArray<string> =>
   text
     .split(/\r?\n/)
-    .map((line) => line.trimEnd())
+    .map((line) => (TEXT_LINES.some((type) => line.startsWith(type)) ? line : line.trimEnd()))
     .filter((line) => line !== "")
 
 /** Whether the lines open a session description (RFC 4566 §5: `v=` first). */
@@ -121,12 +126,12 @@ const sectionsOf = (lines: ReadonlyArray<string>): ReadonlyArray<ReadonlyArray<s
   return out
 }
 
-/** The key a line compares under: `<type>=`, `a=<name>`, `b=<bwtype>`, direction attributes as one. */
+/** The key a line compares under: `<type>=`, `a=<name>`, `b=<bwtype>`, direction attributes in any case as one. */
 export const lineKey = (line: string): string => {
   const type = line.slice(0, 2)
   if (type !== "a=" && type !== "b=") return type
   const name = line.slice(2).split(":")[0] ?? ""
-  if (type === "a=" && DIRECTIONS.has(name)) return DIRECTION
+  if (type === "a=" && DIRECTIONS.has(name.toLowerCase())) return DIRECTION
   return `${type}${name}`
 }
 
@@ -182,15 +187,21 @@ const formOf = (mask: SdpMask, key: string, lines: ReadonlyArray<string>): Reado
     .map((entry) => entry.line)
 }
 
+/** The mark a layout entry carries where an attribute stands ahead of its line. */
+const AFTER_ATTRIBUTE = "a=… "
+
 const layoutOf = (lines: ReadonlyArray<string>): ReadonlyArray<string> => {
   let attributeSeen = false
   const out: Array<string> = []
   for (const line of lines) {
     if (line.startsWith("a=")) attributeSeen = true
-    else out.push(attributeSeen ? `a=… ${lineKey(line)}` : lineKey(line))
+    else out.push(attributeSeen ? `${AFTER_ATTRIBUTE}${lineKey(line)}` : lineKey(line))
   }
   return out
 }
+
+/** The line key a layout entry stands for, its mark dropped. */
+const layoutKey = (entry: string): string => (entry.startsWith(AFTER_ATTRIBUTE) ? entry.slice(AFTER_ATTRIBUTE.length) : entry)
 
 /**
  * One section's reading. `inherited` is the direction a section stating none
@@ -304,7 +315,11 @@ const diffStructure = (mask: SdpMask, captured: string, replayed: string): Reado
   return out
 }
 
-/** One difference per key whose forms differ, keys in each reading's order, captured side first; else the `order` row where the layouts differ. */
+/**
+ * One difference per key whose forms differ, keys in each reading's order,
+ * captured side first; then the `order` row where the lines both sides state
+ * as often stand in another order, whatever else differs.
+ */
 const diffSection = (section: string, captured: Reading, replayed: Reading): ReadonlyArray<SdpDifference> => {
   const keys = [...new Set([...captured.keys.keys(), ...replayed.keys.keys()])]
   const none: Stated = { lines: [], form: [] }
@@ -314,8 +329,14 @@ const diffSection = (section: string, captured: Reading, replayed: Reading): Rea
     const b = replayed.keys.get(key) ?? none
     if (!sameForm(a.form, b.form)) out.push({ section, line: key, captured: a.lines, replayed: b.lines })
   }
-  if (out.length === 0 && !sameForm(captured.layout, replayed.layout)) {
+  if (!sameForm(sharedLayout(captured, replayed), sharedLayout(replayed, captured))) {
     out.push({ section, line: "order", captured: captured.lines, replayed: replayed.lines })
   }
   return out
+}
+
+/** `reading`'s layout kept to the keys `other` states as many times: a line one side adds or drops is its key's row, not an order. */
+const sharedLayout = (reading: Reading, other: Reading): ReadonlyArray<string> => {
+  const count = (layout: ReadonlyArray<string>, key: string) => layout.filter((entry) => layoutKey(entry) === key).length
+  return reading.layout.filter((entry) => count(reading.layout, layoutKey(entry)) === count(other.layout, layoutKey(entry)))
 }

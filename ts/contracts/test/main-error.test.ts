@@ -380,13 +380,14 @@ describe("mainErrorOf", () => {
     })
 
     it("names the first line that differs of a whole-document row", () => {
-      const bytes = bodyRow({
-        signature: "body:sdp:document:bytes:initial-invite",
-        captured: ["v=0\r\no=- 1 1 IN IP4 192.0.2.1\r\ns=-\r\na=ptime:20\r\na=sendrecv\r\n"],
-        replayed: ["v=0\r\no=- 1 1 IN IP4 192.0.2.1\r\ns=-\r\na=sendrecv\r\na=ptime:20\r\n"]
+      const text = bodyRow({
+        signature: "body:text/plain:initial-invite",
+        name: "text/plain",
+        captured: ["first\r\nsecond\r\nthird\r\n"],
+        replayed: ["first\r\nthird\r\nsecond\r\n"]
       })
-      expect(mainErrorOf({ ...clean, body: [bytes] })?.detail)
-        .toEqual("body:sdp:document:bytes:initial-invite: a=ptime:20 → a=sendrecv")
+      expect(mainErrorOf({ ...clean, body: [text] })?.detail)
+        .toEqual("body:text/plain:initial-invite: second → third")
     })
 
     it("names a side that carries no line as (none), and an unattributed row has no step", () => {
@@ -421,19 +422,21 @@ describe("mainErrorOf", () => {
 
     it("names what a whole-document row differs by where every line is the same", () => {
       const endings = bodyRow({
-        signature: "body:sdp:document:bytes:initial-invite",
-        captured: ["v=0\r\ns=-\r\n"],
-        replayed: ["v=0\ns=-\n"]
+        signature: "body:text/plain:initial-invite",
+        name: "text/plain",
+        captured: ["first\r\nsecond\r\n"],
+        replayed: ["first\nsecond\n"]
       })
       expect(mainErrorOf({ ...clean, body: [endings] })?.detail)
-        .toEqual("body:sdp:document:bytes:initial-invite: line endings differ (CRLF → LF)")
+        .toEqual("body:text/plain:initial-invite: line endings differ (CRLF → LF)")
       const blank = bodyRow({
-        signature: "body:sdp:document:bytes:initial-invite",
-        captured: ["v=0\r\ns=-\r\n"],
-        replayed: ["v=0\r\n\r\ns=-\r\n"]
+        signature: "body:text/plain:initial-invite",
+        name: "text/plain",
+        captured: ["first\r\nsecond\r\n"],
+        replayed: ["first\r\n\r\nsecond\r\n"]
       })
       expect(mainErrorOf({ ...clean, body: [blank] })?.detail)
-        .toEqual("body:sdp:document:bytes:initial-invite: blank lines differ")
+        .toEqual("body:text/plain:initial-invite: blank lines differ")
     })
 
     it("is bad-body for a body of any media type, the first differing line its detail", () => {

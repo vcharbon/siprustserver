@@ -16,8 +16,7 @@ import {
   parseOrigin,
   readings,
   readOrigins,
-  versionStepOne,
-  withOriginOf
+  versionStepOne
 } from "../src/sdporigin.js"
 
 const sdp = (origin: string, port = 6000): string =>
@@ -49,12 +48,6 @@ describe("parseOrigin", () => {
     const origin = originOf(sdp(o(7, 9)))!
     expect(identityOf(origin)).toBe("- 7 IN IP4 192.0.2.10")
     expect(originOf("v=0\r\ns=-\r\n")).toBeUndefined()
-  })
-
-  it("withOriginOf reads one text's origin line into another, and nothing else", () => {
-    expect(withOriginOf(sdp(o(9, 9)), sdp(o(1, 2)))).toBe(sdp(o(1, 2)))
-    expect(withOriginOf(sdp(o(9, 9), 7000), sdp(o(1, 2)))).toBe(sdp(o(1, 2), 7000))
-    expect(withOriginOf("v=0\r\n", sdp(o(1, 2)))).toBe("v=0\r\n")
   })
 })
 

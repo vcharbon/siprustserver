@@ -259,6 +259,22 @@ describe("a session the endpoint does not continue where the capture did", () =>
     expect(notContinued(run(sdp(o(7, 7)), sdp(o(7, 7)))).some((r) => r.notContinued)).toBe(false)
   })
 
+  it("a description that keeps its version in other bytes than the endpoint's previous one is a break, its meaning the same", () => {
+    const written = (origin: string, attributes: ReadonlyArray<string>): string =>
+      ["v=0", origin, "s=-", "c=IN IP4 192.0.2.10", "t=0 0", "m=audio 6000 RTP/AVP 8", ...attributes, ""].join("\r\n")
+    const attributes = ["a=rtpmap:8 PCMA/8000", "a=ptime:20"]
+    const captured = { offer: written(o(1000, 1000), attributes), ack: written(o(1000, 1001), attributes) }
+    const offer = written(o(7, 7), attributes)
+    const kept = notContinued(run(offer, written(o(7, 7), attributes), captured))
+    expect(kept).toEqual([{ step: "s2", minted: true, notContinued: false }, { step: "s3", minted: false, notContinued: false }])
+    for (const reformed of [["a=ptime:20", "a=rtpmap:8 PCMA/8000"], [...attributes, "a=sendrecv"]]) {
+      expect(notContinued(run(offer, written(o(7, 7), reformed), captured))).toEqual([
+        { step: "s2", minted: true, notContinued: false },
+        { step: "s3", minted: false, notContinued: true }
+      ])
+    }
+  })
+
   it("a minted continuation is never marked not continued", () => {
     expect(notContinued(run(sdp(o(7, 7)), sdp(o(7, 8)))).some((r) => r.notContinued)).toBe(false)
   })

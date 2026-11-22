@@ -289,9 +289,3 @@ export const answering = (answers: ReadonlyArray<OriginReading>): Ledger => {
   let next = 0
   return { at: () => ({ read: () => answers[next++] }) }
 }
-
-/** The text with its first `o=` line replaced by the first one of `from`; the text itself where either states none. */
-export const withOriginOf = (text: string, from: string): string => {
-  const line = ORIGIN_LINE.exec(from)?.[0]
-  return line === undefined ? text : text.replace(ORIGIN_LINE, () => line)
-}

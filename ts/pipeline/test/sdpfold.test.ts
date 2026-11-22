@@ -53,7 +53,7 @@ describe("lineKey", () => {
     expect(lineKey("a=rtpmap:8 PCMA/8000")).toBe("a=rtpmap")
     expect(lineKey("a=ptime:20")).toBe("a=ptime")
     expect(lineKey("b=AS:64")).toBe("b=AS")
-    for (const d of ["sendrecv", "sendonly", "recvonly", "inactive"]) expect(lineKey(`a=${d}`)).toBe("a=direction")
+    for (const d of ["sendrecv", "sendonly", "recvonly", "inactive", "SENDONLY", "RecvOnly"]) expect(lineKey(`a=${d}`)).toBe("a=direction")
   })
 })
 
@@ -147,7 +147,16 @@ describe("diffSdp: a difference in meaning is one row per key, on every run", ()
     ["a direction against the implicit `sendrecv`", without(OFFER, "a=sendrecv"), swap(OFFER, "a=sendrecv", "a=inactive"), ["m0:a=direction"]],
     ["the `a=rtcp` port, which no lane writes", OFFER, swap(OFFER, "a=rtcp:6001 IN IP4 192.0.2.10", "a=rtcp:6003 IN IP4 192.0.2.10"), ["m0:a=rtcp"]],
     ["a session name", OFFER, swap(OFFER, "s=-", "s=call"), ["session:s="]],
-    ["a bandwidth added", OFFER, [...OFFER.slice(0, 6), "b=AS:64", ...OFFER.slice(6)], ["m0:b=AS"]]
+    ["a bandwidth added", OFFER, [...OFFER.slice(0, 6), "b=AS:64", ...OFFER.slice(6)], ["m0:b=AS"]],
+    [
+      "an upper-case direction beside an added `a=sendrecv`",
+      swap(OFFER, "a=sendrecv", "a=SENDONLY"),
+      [...swap(OFFER, "a=sendrecv", "a=SENDONLY"), "a=sendrecv"],
+      ["m0:a=direction"]
+    ],
+    ["an upper-case direction against the implicit `sendrecv`", without(OFFER, "a=sendrecv"), swap(OFFER, "a=sendrecv", "a=INACTIVE"), ["m0:a=direction"]],
+    ["whitespace trailing the session name, which is its text", OFFER, swap(OFFER, "s=-", "s=- "), ["session:s="]],
+    ["whitespace trailing the session information", [...OFFER.slice(0, 3), "i=call", ...OFFER.slice(3)], [...OFFER.slice(0, 3), "i=call ", ...OFFER.slice(3)], ["session:i="]]
   ]
   for (const [name, captured, replayed, keys] of strict) {
     it(name, () => {
@@ -200,6 +209,26 @@ describe("diffSdp: a difference in meaning is one row per key, on every run", ()
     const twoTimes = [...OFFER.slice(0, 5), "r=7d 1h 0 25h", "t=1 2", ...OFFER.slice(5)]
     const regrouped = [...OFFER.slice(0, 5), "t=1 2", "r=7d 1h 0 25h", ...OFFER.slice(5)]
     expect(keysOf(diffSdp(VERBATIM, crlf(twoTimes), crlf(regrouped)))).toEqual(["session:order"])
+  })
+
+  it("a session section out of RFC 4566 §5 order beside a marked origin keeps its `order` row", () => {
+    const minted = "o=- 99 100 IN IP4 192.0.2.10"
+    const tFirst = ["v=0", minted, "s=-", "t=0 0", "c=IN IP4 192.0.2.10", ...OFFER.slice(5)]
+    const oLate = ["v=0", "s=-", minted, "c=IN IP4 192.0.2.10", "t=0 0", ...OFFER.slice(5)]
+    for (const replayed of [tFirst, oLate]) {
+      for (const reading of ["minted", "version-step-one", "not-continued"] as const) {
+        const rows = diffSdp(VERBATIM, crlf(OFFER), crlf(replayed), reading)
+        expect(keysOf(rows)).toEqual(["session:o=", "session:order"])
+        expect(rows[1]).toEqual({ section: "session", line: "order", captured: OFFER.slice(0, 5), replayed: replayed.slice(0, 5) })
+      }
+      expect(keysOf(diffSdp(FLOOR, crlf(OFFER), crlf(replayed)))).toEqual(["session:order"])
+    }
+  })
+
+  it("a line added or dropped is its key's row and no `order` row", () => {
+    const added = [...OFFER.slice(0, 6), "b=AS:64", ...OFFER.slice(6)]
+    expect(keysOf(diffSdp(VERBATIM, crlf(OFFER), crlf(added)))).toEqual(["m0:b=AS"])
+    expect(keysOf(diffSdp(VERBATIM, crlf(added), crlf(OFFER)))).toEqual(["m0:b=AS"])
   })
 
   describe("the origin", () => {
