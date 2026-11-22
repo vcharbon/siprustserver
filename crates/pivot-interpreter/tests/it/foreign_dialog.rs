@@ -30,7 +30,7 @@ const ANSWER: &str = "v=0\r\no=sys 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0
 const PAST_THE_WINDOW: Duration = Duration::from_secs(33);
 
 /// The caller's own number on this lane; every other address is frozen.
-struct Composer;
+pub(super) struct Composer;
 
 impl UriComposer for Composer {
     fn compose(&self, pos: &str, _form: Option<&str>, _is_ruri: bool) -> Option<String> {
@@ -44,8 +44,8 @@ impl UriComposer for Composer {
 
 /// A system with no CDR oracle whose call stays active until its script ends.
 #[derive(Default)]
-struct ScriptedSystem {
-    done: AtomicBool,
+pub(super) struct ScriptedSystem {
+    pub(super) done: AtomicBool,
 }
 
 impl Sut for ScriptedSystem {
@@ -96,10 +96,11 @@ fn caller_document(id: &str, sys: SocketAddr, bye_after_ms: u64) -> PivotV3 {
     PivotV3::from_json(&doc.to_string()).expect("the document parses")
 }
 
-/// Run `document` with `alice` as the caller against the scripted system.
-async fn run(
+/// Run `document` with `agent` playing its one actor, `actor`, against the
+/// scripted system.
+pub(super) async fn run(
     document: PivotV3,
-    alice: &Agent,
+    (actor, agent): (&str, &Agent),
     sys: SocketAddr,
     system: &ScriptedSystem,
     case: &str,
@@ -108,7 +109,7 @@ async fn run(
     let config = RunConfig::new("upstream-demo", ClockMode::Virtual, sys.to_string())
         .with_identities(IdentityBindings::new().bind("caller", "private", "0009001"));
     let lane = Lane {
-        agents: BTreeMap::from([("uac1".to_string(), alice.clone())]),
+        agents: BTreeMap::from([(actor.to_string(), agent.clone())]),
         route_target: sys,
         media: Booking::new("127.0.0.1", 40000),
         base_dir,
@@ -134,17 +135,21 @@ async fn ring_f1_answer_f2(sys: &Agent) -> scenario_harness::ServerTxn {
     uas
 }
 
-/// The 481 the caller sent, with its recording note, and the refused request's
-/// own line before it.
-fn refusal(outcome: &Outcome, method: &str) -> (RecordedMessage, RecordedMessage) {
+/// The 481 leg `leg` sent, with its recording note, and the refused
+/// request's own line before it.
+pub(super) fn refusal(
+    outcome: &Outcome,
+    leg: &str,
+    method: &str,
+) -> (RecordedMessage, RecordedMessage) {
     let legs = outcome.recording.legs();
-    let ladder = &legs["A"];
+    let ladder = &legs[leg];
     let at = ladder
         .iter()
         .position(|m| {
             m.dir == Dir::Out && String::from_utf8_lossy(m.wire()).starts_with("SIP/2.0 481")
         })
-        .unwrap_or_else(|| panic!("the caller answered 481: {ladder:#?}"));
+        .unwrap_or_else(|| panic!("leg {leg} answered 481: {ladder:#?}"));
     let refused = ladder[..at]
         .iter()
         .rev()
@@ -193,9 +198,10 @@ async fn a_request_under_an_abandoned_fork_tag_is_refused_481_mid_flow() {
         bye.respond(200, "OK").await;
         sut.done.store(true, Ordering::SeqCst);
     };
-    let (outcome, ()) = tokio::join!(run(document, &alice, sys.addr(), &sut, "mid-flow"), system);
+    let (outcome, ()) =
+        tokio::join!(run(document, ("uac1", &alice), sys.addr(), &sut, "mid-flow"), system);
 
-    let (refused, answer) = refusal(&outcome, "OPTIONS");
+    let (refused, answer) = refusal(&outcome, "A", "OPTIONS");
     assert!(refused.note.as_deref().is_some_and(|n| n.contains("names no dialog")), "{refused:#?}");
     assert!(answer.note.as_deref().is_some_and(|n| n.starts_with("481")), "{answer:#?}");
     assert_eq!(foreign_failures(&outcome, "OPTIONS"), 1, "{:#?}", outcome.verdict.failures);
@@ -229,9 +235,10 @@ async fn a_request_under_an_abandoned_fork_tag_is_refused_481_during_settle() {
         stray.expect(481).await;
         sut.done.store(true, Ordering::SeqCst);
     };
-    let (outcome, ()) = tokio::join!(run(document, &alice, sys.addr(), &sut, "settle"), system);
+    let (outcome, ()) =
+        tokio::join!(run(document, ("uac1", &alice), sys.addr(), &sut, "settle"), system);
 
-    let (refused, answer) = refusal(&outcome, "OPTIONS");
+    let (refused, answer) = refusal(&outcome, "A", "OPTIONS");
     assert!(refused.note.as_deref().is_some_and(|n| n.contains("names no dialog")), "{refused:#?}");
     assert!(answer.note.as_deref().is_some_and(|n| n.starts_with("481")), "{answer:#?}");
     assert_eq!(foreign_failures(&outcome, "OPTIONS"), 1, "{:#?}", outcome.verdict.failures);
