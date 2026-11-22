@@ -60,3 +60,27 @@ fn a_cseq_out_of_sequence_no_loss_explains_is_a_finding() {
     let v = t.judge_received(&request("UPDATE", 3, "A1", Some("B1")), 0).expect("the skip");
     assert_eq!(v.kind, VerdictKind::CseqSkip { cseq: 3, last: 1 });
 }
+
+/// A loss explains only its own transaction going backwards: the INFO
+/// numbered 2 lost once, its retransmission and the INFO numbered 3 taken in
+/// order, a new transaction (another top-Via branch) reusing the number 2 is
+/// a CSeq gone backwards and a finding (RFC 3261 §12.2.2, §17.2.3).
+#[test]
+fn a_new_transaction_reusing_a_lost_requests_cseq_is_a_finding() {
+    let mut t = uas_losing(&[(2, "INFO")]);
+    assert_eq!(t.judge_received(&request("INFO", 2, "A1", Some("B1")), 0), None);
+    assert_eq!(t.judge_received(&request("INFO", 3, "A1", Some("B1")), 0), None);
+    let reused = request_through("INFO", 2, "A1", Some("B1"), 1);
+    let v = t.judge_received(&reused, 0).expect("backwards");
+    assert_eq!(v.kind, VerdictKind::CseqBackwards { cseq: 2, last: 3 });
+}
+
+/// A skip is explained only when every number in its gap is a request lost on
+/// the way: the INFO numbered 2 lost, an INFO numbered 5 over the never sent 3
+/// and 4 is a CSeq skip and a finding (RFC 3261 §12.2.2).
+#[test]
+fn a_skip_over_numbers_no_loss_accounts_for_is_a_finding() {
+    let mut t = uas_losing(&[(2, "INFO")]);
+    let v = t.judge_received(&request("INFO", 5, "A1", Some("B1")), 0).expect("the skip");
+    assert_eq!(v.kind, VerdictKind::CseqSkip { cseq: 5, last: 1 });
+}
