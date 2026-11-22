@@ -6,10 +6,11 @@
 //! up by the time A↔C is bridged, the stack releases B itself; a BYE of B's
 //! crossing that release is answered 200 (RFC 3261 §15.1.2).
 
+use b2bua::config::{B2buaConfig, Cap};
 use b2bua_harness::{settle_until, B2buaSut};
-use call::CdrEventType;
+use call::{CallModelState, CdrEventType, MsgpackCodec};
 
-use scenario_harness::{Agent, Dialog, Harness, ServerTxn};
+use scenario_harness::{Agent, Dialog, Harness, InDialogTxn, ServerTxn};
 use sip_message::generators::InDialogMethod;
 
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 8\r\na=rtpmap:8 PCMA/8000\r\na=sendrecv\r\n";
@@ -34,18 +35,39 @@ struct Transferred {
     c_realign: ServerTxn,
 }
 
+/// The call's Call-ID and alice's From-tag.
+const CALL_ID: &str = "transferor-hangup@127.0.0.1";
+const FROM_TAG: &str = "transferor-hangup-tag";
+
 /// A↔B established through the stack, B REFERs to C, C answers: B is told
 /// the transfer succeeded and the stack re-INVITEs C onto A's session.
 async fn transfer_reported_to_bob(name: &str, alice_port: u16, bob_port: u16) -> Transferred {
+    transfer_reported_under(name, alice_port, bob_port, |_| {}).await
+}
+
+/// [`transfer_reported_to_bob`] on a stack whose configuration `tune` sets.
+async fn transfer_reported_under(
+    name: &str,
+    alice_port: u16,
+    bob_port: u16,
+    tune: impl FnOnce(&mut B2buaConfig) + 'static,
+) -> Transferred {
     let h = Harness::with_transit_delay(name, 1);
     let alice = h.agent("alice", &format!("127.0.0.1:{alice_port}")).await;
     let bob = h.agent("bob", &format!("127.0.0.1:{bob_port}")).await;
     let charlie = h.agent("charlie", &format!("127.0.0.1:{CHARLIE_PORT}")).await.transfer_target();
     let b2bua = B2buaSut::route_all_with_refer("127.0.0.1", bob_port)
+        .tune(tune)
         .start(&h, "b2bua", &format!("127.0.0.1:{}", bob_port + 10))
         .await;
 
-    let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
+    let mut call = alice
+        .invite(&bob)
+        .identity(CALL_ID, FROM_TAG)
+        .with_sdp(OFFER)
+        .through(b2bua.addr)
+        .send()
+        .await;
     let mut bob_uas = bob.receive("INVITE").await;
     bob_uas.respond(200, "OK").with_sdp(ANSWER).await;
     call.expect(200).await;
@@ -203,4 +225,67 @@ async fn the_transferors_bye_crossing_its_release_leaves_the_transferred_call_up
     bob_bye.expect(200).await;
 
     charlie_hangs_up(t).await;
+}
+
+/// The transferred call's callRef.
+fn call_ref() -> String {
+    call::derive_call_ref("w0", CALL_ID, FROM_TAG)
+}
+
+/// The encoded size of the transferred call's live record.
+fn live_record_bytes(b2bua: &B2buaSut) -> u64 {
+    let call = b2bua.live_call(&call_ref()).expect("the call is live");
+    MsgpackCodec::new().encoded_len(&call).expect("the call encodes")
+}
+
+/// A stack whose calls keep their messages in the record, each entry with
+/// its `Reason` values, under the record-size cap of `record_bytes`.
+fn ringed(record_bytes: u64) -> impl FnOnce(&mut B2buaConfig) + 'static {
+    move |c| {
+        c.cdr.message_ring = 32;
+        c.cdr.captured_headers = vec!["Reason".to_string()];
+        c.caps.record_bytes = record_bytes;
+    }
+}
+
+/// B hangs up stating why (RFC 3326) at a length the record's ring entry
+/// keeps byte for byte.
+async fn bob_hangs_up_stating_why(t: &mut Transferred) -> InDialogTxn {
+    let reason = format!("SIP;cause=200;text=\"{}\"", "x".repeat(2048));
+    t.bob_dialog.send_request(InDialogMethod::Bye).with_header("Reason", &reason).send().await
+}
+
+/// B's BYE ends B's leg of a call that goes on, and the record its turn
+/// lands crosses the record-size cap. A BYE is a teardown, never refused: it
+/// is answered 200, no cap trips, and the transferred call goes on until C
+/// hangs up, which BYEs A.
+#[tokio::test(start_paused = true)]
+async fn the_transferors_bye_past_the_record_size_cap_is_answered_200() {
+    const NAME: &str = "transferor-bye-record-cap";
+    let (before, after) = {
+        let mut t = transfer_reported_under(NAME, 4866, 4876, ringed(1 << 30)).await;
+        let before = t.b2bua.metrics().cap_peak_of(Cap::RecordBytes);
+        bob_hangs_up_stating_why(&mut t).await.expect(200).await;
+        let after = live_record_bytes(&t.b2bua);
+        bridge(&mut t).await;
+        charlie_hangs_up(t).await;
+        (before, after)
+    };
+    assert!(after > before + 1, "B's BYE grows the record: {before} B, then {after} B");
+    let cap = before + (after - before) / 2;
+
+    let mut t = transfer_reported_under(NAME, 4866, 4876, ringed(cap)).await;
+    bob_hangs_up_stating_why(&mut t).await.expect(200).await;
+    let m = t.b2bua.metrics();
+    assert!(Cap::ALL.iter().all(|c| m.cap_trips_of(*c) == 0), "no cap trips");
+    let live = t.b2bua.live_call(&call_ref()).map(|c| c.state);
+    assert_eq!(live, Some(CallModelState::Active), "the transferred call goes on");
+
+    let mut charlie_bye = t.charlie_dialog.bye().await;
+    charlie_bye.expect(200).await;
+    t.alice.receive("BYE").await.respond(200, "OK").await;
+    settle_until(|| t.b2bua.is_reaped()).await;
+    t.b2bua.assert_fully_reaped();
+    assert_eq!(t.b2bua.cdr_records().len(), 1, "one CDR");
+    let _ = t.h.finish().await;
 }

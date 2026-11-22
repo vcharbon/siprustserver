@@ -7,17 +7,23 @@
 //! nothing on the wire names the cap.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use b2bua::config::{AgeCap, CallCaps, Cap};
 use b2bua::decision::test_adapter::route_to;
 use b2bua::decision::{CallDecisionEngine, CallTreatment, NewCallResponse, ScriptedDecisionEngine};
 use b2bua::limiter::LimiterEntry;
 use b2bua_harness::{settle_until, B2buaScene, B2buaSut};
+use call::MsgpackCodec;
 use scenario_harness::callflow::{ANSWER_SDP, OFFER_SDP};
 use scenario_harness::{Dialog, InDialogTxn};
 use sip_message::generators::InDialogMethod;
 use sip_message::header::HeaderName;
 use sip_message::SipResponse;
+use tokio::time::Instant;
+
+/// alice's re-offer on her answered call (RFC 3264 §8: the version moves on).
+const REOFFER_SDP: &str = "v=0\r\no=alice 1 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 30000 RTP/AVP 0\r\n";
 
 /// Routes to `bob_port` holding `trunk-a`, with a callback context; a
 /// failure fails over to carol (5071), holding `trunk-b`.
@@ -348,6 +354,200 @@ async fn a_record_past_half_its_size_cap_lands_and_is_counted_near() {
     s.hangup(&mut dialog).await;
     settle_until(|| s.b2bua.is_reaped()).await;
     assert!(Cap::ALL.iter().all(|c| m.cap_trips_of(*c) == 0));
+    let _ = s.finish().await;
+}
+
+/// A record-size cap no record of these scenes reaches.
+const UNBOUNDED: u64 = 1 << 30;
+
+/// The longest a held answer of a discarded turn may wait: well under the
+/// layer's own bound on a hold no turn releases.
+const AT_ONCE: Duration = Duration::from_millis(50);
+
+/// The scene under the record-size cap of `record_bytes`.
+async fn record_capped(name: &str, record_bytes: u64) -> B2buaScene {
+    B2buaScene::with_b2bua(name, move |bob_port| {
+        B2buaSut::builder(holding_routes(bob_port))
+            .tune(move |c| c.caps.record_bytes = record_bytes)
+    })
+    .await
+}
+
+/// [`record_capped`], its calls keeping their messages in the record, each
+/// entry with its `Reason` values.
+async fn record_capped_ringed(name: &str, record_bytes: u64) -> B2buaScene {
+    B2buaScene::with_b2bua(name, move |bob_port| {
+        B2buaSut::builder(holding_routes(bob_port)).tune(move |c| {
+            c.cdr.message_ring = 32;
+            c.cdr.captured_headers = vec!["Reason".to_string()];
+            c.caps.record_bytes = record_bytes;
+        })
+    })
+    .await
+}
+
+/// A `Reason` (RFC 3326) at a length the record's ring entry keeps byte for
+/// byte.
+fn long_reason() -> String {
+    format!("SIP;cause=487;text=\"{}\"", "x".repeat(2048))
+}
+
+/// The largest record the scene's writes held to the record-size cap read.
+fn record_peak(s: &B2buaScene) -> u64 {
+    s.b2bua.metrics().cap_peak_of(Cap::RecordBytes)
+}
+
+/// The encoded size of `call_ref`'s live record.
+fn live_record_bytes(s: &B2buaScene, call_ref: &str) -> u64 {
+    let call = s.b2bua.live_call(call_ref).expect("the call is live");
+    MsgpackCodec::new().encoded_len(&call).expect("the call encodes")
+}
+
+/// A record-size cap one turn alone crosses: `before`, the largest record
+/// written ahead of the turn, stays under it, and `after`, the record the
+/// turn lands, is past it.
+fn cap_between(before: u64, after: u64) -> u64 {
+    assert!(after > before + 1, "the turn grows the record: {before} B, then {after} B");
+    before + (after - before) / 2
+}
+
+/// bob's 486 would fail the call over to carol, and the record its turn
+/// lands crosses the record-size cap: the turn is discarded, so carol is
+/// never dialled, the ACK the layer holds for the 486 leaves at once, and
+/// alice is answered the bare 503.
+#[tokio::test(start_paused = true)]
+async fn a_record_trip_on_a_callee_s_refusal_acks_it_at_once() {
+    const NAME: &str = "cap-record-refusal";
+    let (before, after) = {
+        let s = record_capped(NAME, UNBOUNDED).await;
+        let _carol = s.h.agent("carol", "127.0.0.1:5071").await;
+        let _call = s.alice.invite(&s.bob).with_sdp(OFFER_SDP).through(s.b2bua.addr).send().await;
+        let mut uas = s.bob.receive("INVITE").await;
+        let before = record_peak(&s);
+        uas.respond(486, "Busy Here").await;
+        s.bob.receive("ACK").await;
+        (before, record_peak(&s))
+    };
+
+    let s = record_capped(NAME, cap_between(before, after)).await;
+    let carol = s.h.agent("carol", "127.0.0.1:5071").await;
+    let mut call = s.alice.invite(&s.bob).with_sdp(OFFER_SDP).through(s.b2bua.addr).send().await;
+    let mut uas = s.bob.receive("INVITE").await;
+    let refused = Instant::now();
+    uas.respond(486, "Busy Here").await;
+    s.bob.receive("ACK").await;
+    let waited = refused.elapsed();
+    assert!(waited < AT_ONCE, "bob's 486 is ACKed after {waited:?}");
+    let (resp, _) = call.try_expect_final(503).await.expect("alice is answered 503");
+    assert_bare_503(&resp);
+    assert!(carol.try_receive_tolerating("INVITE", &[]).await.is_none(), "carol is never dialled");
+    assert_ended_by(&s, Cap::RecordBytes, 1).await;
+    let _ = s.finish().await;
+}
+
+/// alice CANCELs her re-INVITE, relayed to bob and answered 100 there, and
+/// the record the CANCEL's turn lands crosses the record-size cap: the turn
+/// is discarded, so bob never sees the CANCEL, and the layer's 200 to the
+/// CANCEL and 487 to the re-INVITE leave at once. The verdict BYEs both
+/// legs, and bob ends his re-INVITE with a 487 (RFC 3261 §15.1.2).
+#[tokio::test(start_paused = true)]
+async fn a_record_trip_on_a_re_invite_s_cancel_answers_it_at_once() {
+    const NAME: &str = "cap-record-reinvite-cancel";
+    let (before, after) = {
+        let s = record_capped(NAME, UNBOUNDED).await;
+        let mut dialog = s.establish().await;
+        let mut reinvite = dialog.reinvite(Some(REOFFER_SDP)).await;
+        let mut at_bob = s.bob.receive("INVITE").await;
+        at_bob.respond(100, "Trying").await;
+        let before = record_peak(&s);
+        reinvite.cancel().await.expect(200).await;
+        let after = record_peak(&s);
+        s.bob.receive("CANCEL").await.respond(200, "OK").await;
+        at_bob.respond(487, "Request Terminated").await;
+        s.bob.receive("ACK").await;
+        reinvite.expect(487).await;
+        s.hangup(&mut dialog).await;
+        let _ = s.finish().await;
+        (before, after)
+    };
+
+    let s = record_capped(NAME, cap_between(before, after)).await;
+    let mut dialog = s.establish().await;
+    let mut reinvite = dialog.reinvite(Some(REOFFER_SDP)).await;
+    let mut at_bob = s.bob.receive("INVITE").await;
+    at_bob.respond(100, "Trying").await;
+    let cancelled = Instant::now();
+    reinvite.cancel().await.expect(200).await;
+    reinvite.expect(487).await;
+    let waited = cancelled.elapsed();
+    assert!(waited < AT_ONCE, "alice's CANCEL is answered after {waited:?}");
+
+    s.alice.receive("BYE").await.respond(200, "OK").await;
+    let mut bob_bye = s.bob.receive("BYE").await;
+    at_bob.respond(487, "Request Terminated").await;
+    s.bob.receive("ACK").await;
+    bob_bye.respond(200, "OK").await;
+    assert_ended_by(&s, Cap::RecordBytes, 1).await;
+    let _ = s.finish().await;
+}
+
+/// alice CANCELs her call while bob rings, and the record her CANCEL's turn
+/// lands crosses the record-size cap: that turn ends the call, which the cap
+/// never holds, so bob is CANCELled, alice is answered 487 and the call ends
+/// with one CDR, no cap tripped.
+#[tokio::test(start_paused = true)]
+async fn a_cancel_ending_a_call_past_its_record_size_cap_lands() {
+    const NAME: &str = "cap-record-cancel";
+    const CALL_ID: &str = "cap-record-cancel@127.0.0.1";
+    const FROM_TAG: &str = "cap-record-cancel-tag";
+    let call_ref = call::derive_call_ref("w0", CALL_ID, FROM_TAG);
+    let reason = long_reason();
+    let (before, after) = {
+        let s = record_capped_ringed(NAME, UNBOUNDED).await;
+        let mut call = s
+            .alice
+            .invite(&s.bob)
+            .identity(CALL_ID, FROM_TAG)
+            .with_sdp(OFFER_SDP)
+            .through(s.b2bua.addr)
+            .send()
+            .await;
+        let mut uas = s.bob.receive("INVITE").await;
+        uas.respond(180, "Ringing").await;
+        call.expect(180).await;
+        let before = record_peak(&s);
+        call.cancel_stating(&[("Reason", &reason)]).await.expect(200).await;
+        call.expect(487).await;
+        let mut at_bob = s.bob.receive("CANCEL").await;
+        let after = live_record_bytes(&s, &call_ref);
+        at_bob.respond(200, "OK").await;
+        uas.respond(487, "Request Terminated").await;
+        s.bob.receive("ACK").await;
+        let _ = s.finish().await;
+        (before, after)
+    };
+
+    let s = record_capped_ringed(NAME, cap_between(before, after)).await;
+    let mut call = s
+        .alice
+        .invite(&s.bob)
+        .identity(CALL_ID, FROM_TAG)
+        .with_sdp(OFFER_SDP)
+        .through(s.b2bua.addr)
+        .send()
+        .await;
+    let mut uas = s.bob.receive("INVITE").await;
+    uas.respond(180, "Ringing").await;
+    call.expect(180).await;
+    call.cancel_stating(&[("Reason", &reason)]).await.expect(200).await;
+    call.expect(487).await;
+    s.bob.receive("CANCEL").await.respond(200, "OK").await;
+    uas.respond(487, "Request Terminated").await;
+    s.bob.receive("ACK").await;
+    settle_until(|| s.b2bua.is_reaped()).await;
+    assert_eq!(s.b2bua.cdr_records().len(), 1, "one CDR");
+    let m = s.b2bua.metrics();
+    assert!(Cap::ALL.iter().all(|c| m.cap_trips_of(*c) == 0), "no cap trips");
     let _ = s.finish().await;
 }
 
