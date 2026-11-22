@@ -14,8 +14,8 @@ pub struct LegSdpSession {
     /// The `m=` values of that description, in order.
     pub sent_media: Vec<String>,
     /// A digest (64-bit FNV-1a) of that description apart from its `o=`
-    /// line: a later one with the same digest repeats it (RFC 3264 §8 keeps a
-    /// repeat at its version).
+    /// line, as composed before its form: a later one with the same digest
+    /// repeats it (RFC 3264 §8 keeps a repeat at its version).
     #[serde(default)]
     pub sent_digest: Option<u64>,
     /// That description left re-serialized in canonical form rather than as

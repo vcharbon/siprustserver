@@ -63,12 +63,12 @@ fn a_restatement_leaves_in_canonical_form() {
     assert_eq!(out, peer_sdp("bob 202 2 IN IP4 192.0.2.2", 30000));
 }
 
-/// Once the call has a restatement, a peer's description leaves in canonical
-/// form on every leg, restated or not: the caller's answer opening the
-/// transfer target's dialog, and the target's own next description relayed
-/// back as its author's.
+/// Once the call has a restatement, a peer's description moving the version
+/// leaves in canonical form on every leg, restated or not: the caller's answer
+/// opening the transfer target's dialog, and the target's own next description
+/// relayed back as its author's.
 #[test]
-fn after_a_restatement_every_peer_description_leaves_in_canonical_form() {
+fn after_a_restatement_every_new_peer_version_leaves_in_canonical_form() {
     let (mut c, _) = restated_once(SdpForm::Canonical);
     let answer = send_in(
         &mut c,
@@ -238,15 +238,15 @@ fn a_kept_version_leaves_in_the_bytes_it_first_left_in() {
 }
 
 /// Where the version moves the description leaves in the service's form; that
-/// version's unchanged re-send leaves in that form again.
+/// version's unchanged re-send leaves in that form again, in a dialog or in
+/// the initial INVITE's exchange.
 #[test]
 fn a_kept_version_first_reformed_leaves_reformed_again() {
     let mut c = transferring();
     let moved = peer_sdp(ALICE_2, 10002);
-    for _ in 0..2 {
-        let out =
-            send_in(&mut c, "b-1", Author::Leg("a"), Carried::InDialog, &moved, SdpForm::Canonical);
-        assert_eq!(out, in_form(ALICE_2, 10002));
+    for carried in [Carried::InDialog, Carried::InDialog, Carried::Opening] {
+        let out = send_in(&mut c, "b-1", Author::Leg("a"), carried, &moved, SdpForm::Canonical);
+        assert_eq!(out, in_form(ALICE_2, 10002), "{carried:?}");
     }
 }
 
@@ -296,8 +296,9 @@ impl SdpFormPolicy for Recording {
     }
 }
 
-/// The seam asks the policy about in-dialog descriptions only, and states
-/// who wrote each and whether the call, or this description, is restated.
+/// The seam asks the policy about in-dialog descriptions moving the version
+/// only, and states who wrote each and whether the call, or this description,
+/// is restated.
 #[test]
 fn the_policy_sees_each_in_dialog_crossing_as_it_stands() {
     let rec = Recording::default();
@@ -308,6 +309,7 @@ fn the_policy_sees_each_in_dialog_crossing_as_it_stands() {
     };
     cross(&mut c, Author::Leg("b-1"), Carried::Opening, peer_sdp("bob 202 1 IN IP4 192.0.2.2", 1));
     cross(&mut c, Author::Leg("b-1"), Carried::InDialog, peer_sdp("bob 202 2 IN IP4 192.0.2.2", 2));
+    cross(&mut c, Author::Leg("b-1"), Carried::InDialog, peer_sdp("bob 202 2 IN IP4 192.0.2.2", 2));
     cross(&mut c, Author::Leg("b-2"), Carried::InDialog, peer_sdp("carol 3 1 IN IP4 192.0.2.3", 3));
     cross(&mut c, Author::Stack, Carried::InDialog, peer_sdp("as 7 7 IN IP4 192.0.2.9", 4));
     let seen = rec.0.lock().unwrap().clone();
@@ -316,6 +318,6 @@ fn the_policy_sees_each_in_dialog_crossing_as_it_stands() {
     assert_eq!(
         seen,
         vec![crossing(true, false, false), crossing(true, true, true), crossing(false, true, true)],
-        "the opening description is not asked about"
+        "neither the opening description nor the kept version is asked about"
     );
 }
