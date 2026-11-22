@@ -14,7 +14,9 @@
 //!   request it holds was answered;
 //! - `B2BUA_CAP_ACTIONS_PER_TURN` at or below `B2BUA_CAP_LEGS` plus the
 //!   teardown's two further actions: a call at its base leg cap could not be
-//!   torn down.
+//!   torn down;
+//! - `B2BUA_CAP_RECORD_BYTES` above [`LONGEST_RECORD_BYTES`]: a record at the
+//!   cap would not always frame for its backup.
 
 use b2bua::config::{AgeCap, CallCaps, Cap};
 
@@ -24,6 +26,11 @@ const SERVICE_HTTP_TIMEOUT: &str = "B2BUA_CAP_SERVICE_HTTP_TIMEOUT_MS";
 
 /// The actions a teardown takes beside one per unresolved leg.
 const TEARDOWN_ACTIONS: u64 = 2;
+
+/// The largest record-size cap: half the replication frame's cap. The frame
+/// that carries a record's body also carries its envelope and its index
+/// keys, which repeat the identifiers of the dialogs the body holds.
+const LONGEST_RECORD_BYTES: u64 = repl_net::MAX_FRAME_LEN as u64 / 2;
 
 /// The caps `lookup` states over the defaults. An unparsable value is an
 /// `Err` naming it.
@@ -111,6 +118,14 @@ pub(crate) fn check_caps(caps: &CallCaps) -> Result<(), String> {
             caps.service_http_timeout_ms
         ));
     }
+    if caps.record_bytes > LONGEST_RECORD_BYTES {
+        out.push(format!(
+            "B2BUA_CAP_RECORD_BYTES={} > {LONGEST_RECORD_BYTES}: a record at the cap, with its \
+             envelope and index keys, would not always frame for its backup (half the \
+             replication frame's cap)",
+            caps.record_bytes
+        ));
+    }
     if out.is_empty() {
         Ok(())
     } else {
@@ -172,6 +187,16 @@ mod caps_env_tests {
             caps_from_lookup(lookup(&[("B2BUA_CAP_RECORD_BYTES", "0")])).expect("the value parses");
         let err = check_caps(&caps).unwrap_err();
         assert!(err.contains("B2BUA_CAP_RECORD_BYTES=0"), "{err}");
+    }
+
+    #[test]
+    fn a_record_size_cap_past_half_the_replication_frame_is_refused() {
+        let caps = caps_from_lookup(lookup(&[("B2BUA_CAP_RECORD_BYTES", "33554432")]))
+            .expect("the value parses");
+        assert_eq!(check_caps(&caps), Ok(()));
+        let caps = CallCaps { record_bytes: 33_554_433, ..caps };
+        let err = check_caps(&caps).unwrap_err();
+        assert!(err.contains("B2BUA_CAP_RECORD_BYTES=33554433 > 33554432"), "{err}");
     }
 
     #[test]
