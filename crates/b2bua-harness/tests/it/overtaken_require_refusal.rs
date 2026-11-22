@@ -66,22 +66,23 @@ async fn hang_up(s: B2buaScene, mut alice: Dialog) {
     let _report = s.finish().await;
 }
 
-/// alice's two INFOs both require the unknown tag; the second overtakes the
-/// first. Each draws 420 naming the tag, the overtaken one included, and bob
-/// is sent neither.
+/// alice's INFO requiring the unknown tag is overtaken by her next, plain one,
+/// which reaches bob and is answered: her dialog's last CSeq is now above the
+/// overtaken INFO's. That INFO still draws 420, not the out-of-order 500, and
+/// bob is sent nothing of it.
 #[tokio::test(start_paused = true)]
 async fn an_overtaken_request_requiring_an_unknown_tag_is_refused_420() {
     let (s, mut alice) = confirmed("overtaken-require-420").await;
     let mut first =
         alice.send_request(InDialogMethod::Info).with_header("Require", UNKNOWN).send().await;
-    let mut second =
-        alice.send_request(InDialogMethod::Info).with_header("Require", UNKNOWN).send().await;
-    second.expect(420).await;
+    let mut second = alice.send_request(InDialogMethod::Info).send().await;
+    s.bob.receive("INFO").await.respond(200, "OK").await;
+    second.expect(200).await;
     let overtaken = first.try_expect(420).await;
     assert!(overtaken.is_ok(), "the overtaken INFO is refused 420, not {overtaken:?}");
     s.h.advance(RELAY_WINDOW).await;
     let relayed = s.bob.take_queued().await;
-    assert!(relayed.is_none(), "neither INFO reaches bob, got {relayed:?}");
+    assert!(relayed.is_none(), "nothing of the refused INFO reaches bob, got {relayed:?}");
     hang_up(s, alice).await;
 }
 
