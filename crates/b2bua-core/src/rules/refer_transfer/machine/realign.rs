@@ -90,7 +90,10 @@ pub(super) fn c_realign_200() -> RuleDefinition {
 
 /// Whether `ctx`'s 2xx, C's to the c-realign re-INVITE on `c_leg_id`, makes
 /// an offer its ACK owes the answer to: it carries a session description and
-/// the re-INVITE carried none (RFC 3264 §4).
+/// the re-INVITE carried none (RFC 3264 §4). It reads the rule's view of the
+/// call, so it also answers `true` where a reliable provisional carried C's
+/// offer first, which the hold's arming (`relay::offer_of_2xx`) excludes:
+/// the watchdog is then bounded with no hold, never longer.
 fn offers_to_its_ack(ctx: &RuleContext, c_leg_id: &str) -> bool {
     let described = ctx.response().is_some_and(|r| r.sdp().is_some());
     let offerless = ctx.call.b_legs().iter().find(|l| l.leg_id == c_leg_id).is_some_and(|l| {
