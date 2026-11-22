@@ -3,12 +3,14 @@
 //! keeps them once the turn's entry is on the call's outbox, holds the
 //! landed record to the record-size cap, persists it, reports the turn
 //! `Logged`, takes in the turn what never leaves the node (timers, the CDR,
-//! metrics, re-entries), queues everything
-//! the turn sends on the call's outbox behind the write that records it, and
-//! ends the call once that outbox drained, as its [`CommitKind`] states. Only
-//! the commit pushes on a call's outbox and reports a turn's marks. A turn on
-//! the body a poll watchdog read stuck, fenced off before its call's
-//! discharge, stops at the next of the commit's fence checks (ADR-0057 §6).
+//! metrics, re-entries), queues everything the turn sends on the call's
+//! outbox behind the write that records it, and ends the call once that
+//! outbox drained, as its [`CommitKind`] states. Only the commit pushes on a
+//! call's outbox and reports a turn's marks. A turn on the body a poll
+//! watchdog read stuck, fenced off before its call's discharge, stops at the
+//! next of the commit's fence checks (ADR-0057 §6). The model invariants and
+//! the stated text a turn's messages left out are reported only for a turn
+//! whose record the commit keeps: a turn a cap discards reads nothing.
 
 mod held;
 mod rider;
@@ -181,12 +183,13 @@ pub(super) async fn commit_turn(
     trigger: Option<&CallEvent>,
     notes: Option<&mut TurnScope>,
 ) -> bool {
-    let Some(prepared) = prepare(ctx, call_ref, result, now_ms, turn, trigger) else {
+    let Some(prepared) = prepare(ctx, call_ref, result, now_ms, trigger) else {
         drain_notes(ctx, call_ref, notes);
         return true;
     };
     match super::record_cap::hold(ctx, &prepared.call, prepared.writes_live(), trigger) {
         Ok(measured) => {
+            report_model(ctx, call_ref, &prepared, turn);
             drain_notes(ctx, call_ref, notes);
             write_and_send(ctx, call_ref, prepared, measured, now_ms).await;
             true
@@ -223,7 +226,8 @@ pub(super) async fn commit_safepoint(
     now_ms: i64,
     turn: &(dyn std::fmt::Display + Sync),
 ) {
-    if let Some(prepared) = prepare(ctx, call_ref, result, now_ms, turn, None) {
+    if let Some(prepared) = prepare(ctx, call_ref, result, now_ms, None) {
+        report_model(ctx, call_ref, &prepared, turn);
         write_and_send(ctx, call_ref, prepared, None, now_ms).await;
     }
 }
@@ -243,7 +247,6 @@ fn prepare<'a>(
     call_ref: &str,
     result: HandlerResult,
     now_ms: i64,
-    turn: &(dyn std::fmt::Display + Sync),
     trigger: Option<&'a CallEvent>,
 ) -> Option<Prepared<'a>> {
     if fenced(ctx, call_ref) {
@@ -262,25 +265,6 @@ fn prepare<'a>(
     let result = crate::landing::land(result, &ctx.landing(), now_ms);
     let kind = TurnKind::of(&result, received);
     let awaited_before = ctx.state.resident(call_ref).is_some_and(|c| !c.awaited.is_empty());
-    // Stated text the turn's messages left out is a defect of the model that
-    // stated it, reported whichever node sends them.
-    for eff in &result.effects.buffered {
-        if let BufferedObservabilityEffect::StatedTextSkipped { detail } = eff {
-            crate::model_invariants::stated_text_skipped(&ctx.metrics, &result.call, detail);
-        }
-    }
-    // The record this turn lands states the model invariants, against the
-    // one the previous turn landed.
-    if ctx.config.model_invariants {
-        let before = ctx.state.resident(call_ref);
-        let turn_record = crate::model_invariants::Turn {
-            before: before.as_deref(),
-            after: &result.call,
-            received,
-            sent: &result.effects.outbound,
-        };
-        crate::model_invariants::check(&turn_record, turn, &ctx.metrics);
-    }
     let commit = classify(Landed::of(&result), || Residency::of(ctx, call_ref));
     let cdr =
         result.effects.buffered.iter().any(|e| matches!(e, BufferedObservabilityEffect::WriteCdr));
@@ -298,6 +282,34 @@ fn prepare<'a>(
         ack,
         cancel,
     })
+}
+
+/// Report what the `prepared` turn of `call_ref` states against the model,
+/// before its write: the stated text its messages left out, a defect of the
+/// model that stated it whichever node sends them, and the model invariants
+/// of its record against the one the previous turn landed. `turn` names what
+/// the turn handled.
+fn report_model(
+    ctx: &RouterCtx,
+    call_ref: &str,
+    prepared: &Prepared<'_>,
+    turn: &(dyn std::fmt::Display + Sync),
+) {
+    for eff in &prepared.effects.buffered {
+        if let BufferedObservabilityEffect::StatedTextSkipped { detail } = eff {
+            crate::model_invariants::stated_text_skipped(&ctx.metrics, &prepared.call, detail);
+        }
+    }
+    if ctx.config.model_invariants {
+        let before = ctx.state.resident(call_ref);
+        let turn_record = crate::model_invariants::Turn {
+            before: before.as_deref(),
+            after: &prepared.call,
+            received: prepared.received,
+            sent: &prepared.effects.outbound,
+        };
+        crate::model_invariants::check(&turn_record, turn, &ctx.metrics);
+    }
 }
 
 /// Write the `prepared` turn's record, `measured` when the record-size cap

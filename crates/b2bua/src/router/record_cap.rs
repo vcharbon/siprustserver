@@ -1,15 +1,17 @@
 //! The record-size cap (ADR-0057): the record a turn lands, measured as its
 //! write encodes it ([`crate::store::Measured`]), past
-//! `B2BUA_CAP_RECORD_BYTES` trips the turn before the write, so a record past
-//! the cap is never stored, replicated or followed by the turn's effects.
+//! `B2BUA_CAP_RECORD_BYTES` trips the turn before the write: the turn's
+//! record is neither stored nor replicated, and its effects never leave.
 //! Only a write of a live call is held: a quiet turn writes nothing, and a
 //! reaper verdict's turn and the turns of a call going away run with the cap
 //! off, as with the collection caps. So does the turn of a BYE, which ends
 //! its dialog whatever the call holds (RFC 3261 §15): a teardown is never
-//! refused, also when the call goes on without the leg it ends. A held
-//! write's size is read against the
-//! cap (`b2bua_cap_peak`), counted near past half of it
-//! (`b2bua_cap_near_total`) and observed in `b2bua_call_record_bytes`.
+//! refused, also when the call goes on without the leg it ends. A record
+//! past the cap is thus stored by such a turn, by the union of two diverged
+//! copies, or on a node whose cap is lower than the writer's (a takeover, a
+//! reclaim); the call's next held write trips and ends it. A held write's
+//! size is read against the cap (`b2bua_cap_peak`), counted near past half
+//! of it (`b2bua_cap_near_total`) and observed in `b2bua_call_record_bytes`.
 
 use b2bua_sdk::event::CallEvent;
 use call::Call;
