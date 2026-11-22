@@ -1,10 +1,10 @@
 //! What a probe answer says of a worker, late or in time (ADR-0069): a late
 //! answer stamps the worker only when it would read it `Alive` and comes from
 //! the process last read; only a `200` in time writes the capabilities the
-//! workers advertise; a worker never read serving on an endpoint that
-//! reads not ready is no dead verdict however it answered; and late answers
-//! keep the proxy's reach, which their onset interrupts for at most the rise
-//! in lateness past the isolation window.
+//! workers advertise; a worker never read serving on an endpoint that reads
+//! not ready, another reading ready, is no dead verdict however it answered;
+//! and late answers keep the proxy's reach, which their onset interrupts for at
+//! most the rise in lateness past the isolation window.
 //!
 //! Timing axes: each probe is answered as its script says after its `i`-th
 //! OPTIONS arrives (5 ms transit each way); one probe leaves per 1 s interval,
@@ -24,12 +24,15 @@ use sip_message::{CustomParser, SipMessage, SipParser};
 use sip_net::{BindUdpOpts, SignalingNetwork, UdpEndpoint};
 use sip_net_testkit::SimulatedSignalingNetwork;
 use sip_proxy::health::HealthProbeConfig;
-use sip_proxy::registry::{WorkerHealth, WorkerRegistry};
+use sip_proxy::registry::{WorkerEntry, WorkerHealth, WorkerRegistry};
+use sip_proxy::ProxyAddr;
 use tokio::time::Instant;
 
 use crate::probe_slow_verdict::{run_for, Proxy, LATE, PROMPT, TRANSIT, WORKER, WORKER_ID};
 
 const PROBE: &str = "192.0.2.1:5098";
+const READY_WORKER_ID: &str = "w-ready";
+const READY_WORKER: &str = "192.0.2.52:5070";
 const ISOLATION: Duration = Duration::from_millis(2_000);
 
 /// How the worker answers one OPTIONS: after `delay`, `status`, stating
@@ -163,22 +166,35 @@ async fn a_late_answer_of_another_process_is_no_stamp() {
     responder.abort();
 }
 
-/// A restarted pod whose endpoint reads not ready, never read serving, that
-/// answers its probes late then falls silent: it is never read `Slow`, and
-/// its `Dead` is no verdict, so no dead notice names it.
+/// A restarted pod whose endpoint reads not ready while another member reads
+/// ready, never read serving, that answers its probes late then falls silent:
+/// out of the routing, it is never read `Slow`, and its `Dead` is no verdict,
+/// so no dead notice names it. The ready member answers in time throughout.
 #[tokio::test(start_paused = true)]
 async fn a_booting_worker_answering_late_then_silent_draws_no_dead_notice() {
-    let script: Script = Arc::new(|i| if i < 3 { Answer::ok(LATE, Some(9)) } else { None });
-    let (p, responder) = probed(script).await;
+    let net = SimulatedSignalingNetwork::new(TRANSIT.as_millis() as u64);
+    let bind = |addr: &str| net.bind_udp(BindUdpOpts::new(addr.parse().unwrap(), 4096));
+    let booting = respond(
+        bind(WORKER).await.unwrap(),
+        Arc::new(|i| if i < 3 { Answer::ok(LATE, Some(9)) } else { None }),
+    );
+    let serving =
+        respond(bind(READY_WORKER).await.unwrap(), Arc::new(|_| Answer::ok(PROMPT, None)));
+    let p = Proxy::spawn(&net, PROBE, HealthProbeConfig::default()).await;
+    let address = ProxyAddr::from(READY_WORKER.parse::<std::net::SocketAddr>().unwrap());
+    p.registry.add(WorkerEntry::alive(READY_WORKER_ID, address));
     p.registry.set_ready(WORKER_ID, false);
     let mut verdicts = p.registry.read_dead();
+    let judged = || p.registry.probed().into_iter().find(|w| w.id == WORKER_ID).map(|w| w.health);
     run_for(Duration::from_secs(3)).await;
-    assert_eq!(p.health(), Some(WorkerHealth::Dead), "a booting pod's misses read it dead");
+    assert_eq!(judged(), Some(WorkerHealth::Dead), "a booting pod's misses read it dead");
     run_for(Duration::from_secs(6)).await;
-    assert_eq!(p.health(), Some(WorkerHealth::Dead));
+    assert_eq!(judged(), Some(WorkerHealth::Dead));
+    assert!(p.registry.resolve(READY_WORKER_ID).is_some_and(|w| w.is_alive()));
     assert!(verdicts.try_recv().is_err(), "a dead notice named a pod that never served");
     p.task.abort();
-    responder.abort();
+    booting.abort();
+    serving.abort();
 }
 
 /// The only worker turns from answers in time to late ones. The proxy reads

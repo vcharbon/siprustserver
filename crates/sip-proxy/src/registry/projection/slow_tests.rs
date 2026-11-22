@@ -146,3 +146,33 @@ fn slow_to_dead_in_a_view_with_no_ready_member_is_a_verdict() {
     set.set_health("w1", WorkerHealth::Dead);
     assert_eq!(told(&mut verdicts), ["w1"], "alive, slow, then dead with no member ready");
 }
+
+/// In a view where no member reads ready, the proxy reached no worker and read
+/// each `Dead`; at the heal a worker read `Alive` returns the others to
+/// `Unknown`. One of them answering late reads `Slow`, routed with no verdict,
+/// so its dialogs stay on it and no backup serves them beside it; its silence
+/// after is its dead verdict.
+#[test]
+fn a_worker_answering_late_at_a_heal_with_no_ready_member_reads_slow() {
+    let (set, sim) = ws(&[("w0", "192.0.2.1"), ("w1", "192.0.2.2"), ("w2", "192.0.2.3")]);
+    for id in ["w0", "w1", "w2"] {
+        set.set_health(id, WorkerHealth::Alive);
+        sim.set_conditions(id, false, false);
+    }
+    set.recompose();
+    for id in ["w0", "w1", "w2"] {
+        set.set_health(id, WorkerHealth::Dead);
+    }
+    let mut verdicts = set.read_dead();
+    set.set_health("w0", WorkerHealth::Alive);
+    assert_eq!(
+        health(&set, "w1"),
+        Some(WorkerHealth::Unknown),
+        "a verdict taken blind is forgotten"
+    );
+    set.set_health("w1", WorkerHealth::Slow);
+    assert_eq!(health(&set, "w1"), Some(WorkerHealth::Slow), "routed on its late answers");
+    assert_eq!(told(&mut verdicts), Vec::<WorkerId>::new());
+    set.set_health("w1", WorkerHealth::Dead);
+    assert_eq!(told(&mut verdicts), ["w1"], "slow, then dead with no member ready");
+}

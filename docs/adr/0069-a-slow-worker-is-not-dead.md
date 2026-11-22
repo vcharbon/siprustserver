@@ -27,8 +27,9 @@ worker's load and spent a token of the gates that exist to protect the workers.
    resets no miss and revives no worker. Any late answer gives the proxy reach.
 2. **Four states.** Health is `Unknown | Alive | Slow | Dead`.
    - `Alive` turns `Slow` at `HEALTH_THRESHOLD` misses while a late stamp is within the slow
-     window, and so does `Unknown` on an endpoint that reads ready; `Dead` at that count with
-     none. A worker answering later than the slow window reads `Dead`, as a silent one does.
+     window, and so does `Unknown` on an endpoint that reads ready, or in a view where none
+     does; `Dead` at that count with none. A worker answering later than the slow window
+     reads `Dead`, as a silent one does.
    - `Slow` turns `Alive` after `HEALTH_RECOVER_PROBES` (3) answers in time in a row, and
      `Dead` at a miss with no late stamp within the slow window. A worker answering inside it
      stays `Slow`; a wedged one goes silent and its stalled-loop exit ends it. A `Slow` worker
@@ -88,9 +89,6 @@ worker's load and spent a token of the gates that exist to protect the workers.
   POP, which returns after the first late answer and the route guard's hold.
 - A worker alive that answers later than the slow window reads dead: its in-dialog requests go
   to its backup while it still runs, until it exits or answers in time again.
-- In a view where no endpoint reads ready, a worker read `Dead` while the proxy was isolated
-  returns `Unknown` at the heal; answering late, it then reads `Dead` with no verdict, as a
-  booting pod does, and its in-dialog requests go to its backup until it answers in time.
 - A POP back in rotation takes its full share at once. The workers' admission sheds any excess
   with fast `503`s, which the sender retries elsewhere.
 - A CANCEL that crosses to the proxy holding no memo of its INVITE during a `Slow` spell goes to

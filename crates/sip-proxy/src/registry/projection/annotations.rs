@@ -232,9 +232,11 @@ impl WorkerAnnotations {
     /// Annotate health and acceptance of new calls in one write, `None`
     /// leaving that one as it is. No-op if the worker is unknown or unchanged.
     /// A worker held in the routing while its endpoint reads not ready reads
-    /// `Slow` where the write says `Alive`. A worker `Unknown` on an endpoint
-    /// that reads not ready reads `Dead` where the write says `Slow`: a pod
-    /// still booting serves no dialog.
+    /// `Slow` where the write says `Alive`. A worker `Unknown` out of the
+    /// routing, its endpoint not ready while another reads ready, reads `Dead`
+    /// where the write says `Slow`: a pod still booting serves no dialog. In a
+    /// view where no endpoint reads ready, every member is routed and reads
+    /// `Slow` as written.
     ///
     /// Returns [`Turn::Dead`] for a dead verdict: the write turned the worker's
     /// health `Dead` from `Alive` or `Slow`, or from `Unknown` on an endpoint
@@ -262,7 +264,7 @@ impl WorkerAnnotations {
         let standing = record.ready || record.held;
         let written = health.map(|h| match (record.health, h) {
             (_, WorkerHealth::Alive) if record.held => WorkerHealth::Slow,
-            (WorkerHealth::Unknown, WorkerHealth::Slow) if !standing => WorkerHealth::Dead,
+            (WorkerHealth::Unknown, WorkerHealth::Slow) if !record.routed => WorkerHealth::Dead,
             _ => h,
         });
         let next = (written.unwrap_or(previous.0), acceptance.unwrap_or(previous.1));
