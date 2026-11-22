@@ -233,9 +233,8 @@ pub(super) async fn reask_turn(ctx: &Arc<RouterCtx>, call_ref: &str, budget: Set
         };
     // A decision another node may have asked.
     result.effects.reasked = !refused;
-    super::notes::drain(ctx, call_ref, &mut turn);
     let turn_label = &"the re-ask of an undecided call's decision";
-    commit_turn(ctx, call_ref, result, now_ms, turn_label, None).await;
+    commit_turn(ctx, call_ref, result, now_ms, turn_label, None, Some(&mut turn)).await;
 }
 
 /// Whether `call_ref` is a takeover copy whose primary wrote the call since

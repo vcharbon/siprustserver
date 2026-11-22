@@ -73,7 +73,9 @@ pub(super) fn end<'a>(
     label: &'static &'static str,
 ) -> impl Future<Output = ()> + Send + 'a {
     let result = landed(ctx, call_ref, ending, caller, now_ms);
-    commit_turn(ctx, call_ref, result, now_ms, label, None)
+    async move {
+        commit_turn(ctx, call_ref, result, now_ms, label, None, None).await;
+    }
 }
 
 /// The result `ending` lands, enforced and its turn's notes drained.

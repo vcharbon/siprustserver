@@ -30,6 +30,7 @@ use crate::effects::{
 };
 use crate::store::Measured;
 use crate::turn_probe::TurnPoint;
+use crate::turn_scope::TurnScope;
 pub(super) use held::release_untaken;
 use held::HeldCancel;
 pub(super) use rider::{behind_the_write, Rider};
@@ -144,7 +145,7 @@ struct Prepared<'a> {
     effects: HandlerEffects,
     /// The turn's unheld answers, taken back unless its entry reaches the
     /// call's outbox.
-    admission: super::unheld_book::Admission<'a>,
+    admission: super::unheld_book::TurnAdmission<'a>,
     commit: CommitKind,
     kind: TurnKind,
     cdr: bool,
@@ -165,8 +166,12 @@ impl Prepared<'_> {
 
 /// Commit the handler `result` of `call_ref`'s turn. `turn` names what the
 /// turn handled, for a model-invariant violation, and `trigger` is the event
-/// it handled, when it handled one. A landed record past the record-size cap
-/// fails the turn before its write ([`super::record_cap`]).
+/// it handled, when it handled one. `notes` is the turn's scope when its
+/// notes are still undrained: they are drained once the record-size cap held
+/// the landed record, and drained as a discarded turn's when it tripped
+/// ([`super::record_cap`]): the turn then fails before its write. `false`
+/// when it tripped, so no outbox entry took what the layer holds for
+/// `trigger` ([`release_untaken`]).
 pub(super) async fn commit_turn(
     ctx: &Arc<RouterCtx>,
     call_ref: &str,
@@ -174,20 +179,37 @@ pub(super) async fn commit_turn(
     now_ms: i64,
     turn: &(dyn std::fmt::Display + Sync),
     trigger: Option<&CallEvent>,
-) {
+    mut notes: Option<&mut TurnScope>,
+) -> bool {
     let Some(prepared) = prepare(ctx, call_ref, result, now_ms, turn, trigger) else {
-        return;
+        drain_notes(ctx, call_ref, notes);
+        return true;
     };
     match super::record_cap::hold(ctx, &prepared.call, prepared.writes_live(), trigger) {
-        Ok(measured) => write_and_send(ctx, call_ref, prepared, measured, now_ms).await,
+        Ok(measured) => {
+            drain_notes(ctx, call_ref, notes);
+            write_and_send(ctx, call_ref, prepared, measured, now_ms).await;
+            true
+        }
         Err(tripped) => {
             drop(prepared);
+            if let Some(scope) = notes.as_deref_mut() {
+                super::notes::drain_discarded(ctx, scope);
+            }
             let safepoint = ctx.state.peek(call_ref);
             let in_hand = trigger.filter(|event| !opens_the_call(event));
             let fail =
                 super::tripped::fail_turn(ctx, call_ref, in_hand, tripped, safepoint, now_ms);
             Box::pin(fail).await;
+            false
         }
+    }
+}
+
+/// Drain the notes of the turn whose scope is `notes`, when undrained.
+fn drain_notes(ctx: &RouterCtx, call_ref: &str, notes: Option<&mut TurnScope>) {
+    if let Some(scope) = notes {
+        super::notes::drain(ctx, call_ref, scope);
     }
 }
 
@@ -330,7 +352,7 @@ async fn write_and_send(
             return;
         }
         push(ctx, call_ref, entry).await;
-        admission.sent();
+        admission.sent(ctx);
         ctx.outboxes.drained(call_ref).await;
         release_call(ctx, call_ref, ReleaseKind::SelfRelease { ended: true }).await;
         return;
@@ -389,7 +411,7 @@ async fn write_and_send(
         return;
     }
     push(ctx, call_ref, entry).await;
-    admission.sent();
+    admission.sent(ctx);
     if fenced(ctx, call_ref) {
         return;
     }

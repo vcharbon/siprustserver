@@ -36,7 +36,8 @@ use b2bua_sdk::event::CallEvent;
 /// transaction the transaction layer holds. `admitted` is a new call admitted
 /// at ingress: its hold, until its call is created (every other exit drops
 /// it), and its setup budget. `true` when a turn's outbox entry took the event,
-/// and with it what the transaction layer holds for that entry's release.
+/// and with it what the transaction layer holds for that entry's release; a
+/// turn discarded past a per-call cap took nothing.
 pub(super) async fn process(
     ctx: &Arc<RouterCtx>,
     event: &CallEvent,
@@ -260,13 +261,12 @@ pub(super) async fn process(
     if super::commit::fenced(ctx, &call_ref) {
         return true;
     }
-    let unrecoverable = turn.notes.unrecoverable();
-    if result.is_ok() {
-        super::notes::drain(ctx, &call_ref, &mut turn);
-    } else {
-        super::notes::drain_discarded(ctx, &mut turn);
-    }
-    if unrecoverable {
+    if turn.notes.unrecoverable() {
+        if result.is_ok() {
+            super::notes::drain(ctx, &call_ref, &mut turn);
+        } else {
+            super::notes::drain_discarded(ctx, &mut turn);
+        }
         let ids = &mut turn.ids;
         if !discharge_after_turn(ctx, &call_ref, event, now_ms, ids).await {
             drop(_guard);
@@ -277,6 +277,7 @@ pub(super) async fn process(
     let result = match result {
         Ok(result) => result,
         Err(tripped) => {
+            super::notes::drain_discarded(ctx, &mut turn);
             let safepoint = ctx.state.peek(&call_ref);
             let in_hand = (!res.initial_invite).then_some(event);
             super::tripped::fail_turn(ctx, &call_ref, in_hand, tripped, safepoint, now_ms).await;
@@ -288,9 +289,8 @@ pub(super) async fn process(
         record_keepalive_failure_peer(ctx, &res.source_leg_id, &result.call);
     }
 
-    let turn = super::turn_label::EventSummary { call_ref: &call_ref, event };
-    commit_turn(ctx, &call_ref, result, now_ms, &turn, Some(event)).await;
-    true
+    let label = super::turn_label::EventSummary { call_ref: &call_ref, event };
+    commit_turn(ctx, &call_ref, result, now_ms, &label, Some(event), Some(&mut turn)).await
 }
 
 /// How a pre-handler gate resolved the event.
