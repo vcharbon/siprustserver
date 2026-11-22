@@ -168,8 +168,12 @@ async fn an_info_whose_final_is_lost_as_a_bye_crosses_it_is_answered_by_its_retr
 
 const REQUIRE_SHAPE: &str = "require_info_bye_crossing";
 
-/// The caller sends an INFO requiring an option tag no UA supports once the
-/// call is established; the callee hangs up as soon as it is established.
+fn caller_confirmed(s: &StateInner) -> bool {
+    s.leg_at_least("alice", LegPhase::Confirmed)
+}
+
+/// The caller sends an INFO requiring an option tag no UA supports as soon as
+/// it confirmed its dialog; the callee hangs up once the call is established.
 struct RequireInfoByeCrossing;
 
 impl ActorScenario for RequireInfoByeCrossing {
@@ -194,7 +198,7 @@ impl ActorScenario for RequireInfoByeCrossing {
                     Barrier::None,
                     GoalStep::Invite { callee: "bob", plan: Some(env.invite_plan(&["bob"])) },
                 ),
-                Goal::new(Barrier::pred("established", established), info),
+                Goal::new(Barrier::pred("caller_confirmed", caller_confirmed), info),
             ],
             invite_targets: vec![("bob", env.bob.clone())],
             via: None,
@@ -228,10 +232,11 @@ impl ActorScenario for RequireInfoByeCrossing {
 }
 
 /// The audit of a recorded call judges an in-dialog request by its client
-/// transaction (RFC 3261 §17.1.2): the caller's INFO requiring an unsupported
-/// option tag is lost on its way out, the callee's BYE ends the call, and the
-/// INFO's retransmission draws the B2BUA's rejection after the verdict. The
-/// call is clean: the audit reads that rejection.
+/// transaction (RFC 3261 §17.1.2): the B2BUA rejects the caller's INFO,
+/// which requires an unsupported option tag, and that 420 is lost on its way
+/// to the caller; the callee's BYE ends the call, and the INFO's
+/// retransmission draws the 420 again from the B2BUA's server transaction
+/// (§17.2.2) after the verdict. The call is clean.
 #[tokio::test(start_paused = true)]
 async fn a_rejection_drawn_by_a_retransmission_after_the_verdict_is_audited() {
     let (h, b2bua, core, transport) = setup_fake(7910).await;
@@ -248,7 +253,7 @@ async fn a_rejection_drawn_by_a_retransmission_after_the_verdict_is_audited() {
     let mut c = cfg(b2bua.addr, 1.0, 1, 4, 0x0824);
     c.default_tuning = CallTuning {
         retransmit: true,
-        drop_nth: Some(TargetedDrop::request("INFO", 1, DropDir::Outbound)),
+        drop_nth: Some(TargetedDrop::final_response("INFO", 1, DropDir::Inbound)),
         ..CallTuning::default()
     };
     let driver = Driver::new(c, vec![mix], reporter.clone(), transport).with_outcomes(sink.clone());
@@ -264,9 +269,9 @@ async fn a_rejection_drawn_by_a_retransmission_after_the_verdict_is_audited() {
     assert_eq!(records.len(), 1, "one call placed");
     let r = &records[0];
     let infos = caller_infos(&h, b2bua.addr);
-    assert_eq!(infos.len(), 1, "only the INFO's retransmission reached the B2BUA: {infos:?}");
+    assert_eq!(infos.len(), 2, "the INFO was retransmitted once: {infos:?}");
     let ended = r["ended_at_ms"].as_u64().unwrap();
-    assert!(ended < infos[0], "the call ended before the retransmission: {ended} {infos:?}");
+    assert!(infos[0] < ended && ended < infos[1], "the BYE crossed: {ended} {infos:?}");
     let prometheus = reporter.render_prometheus();
     assert_eq!(reporter.count(REQUIRE_SHAPE, &ResultClass::RfcAuditFail), 0, "{prometheus}\n{r}");
     assert_eq!(reporter.count(REQUIRE_SHAPE, &ResultClass::Ok), 1, "{prometheus}\n{r}");
