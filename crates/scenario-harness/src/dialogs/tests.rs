@@ -428,63 +428,54 @@ fn info_ok() -> SipResponse {
     response(200, "INFO", 1, "B1", "A1")
 }
 
-/// RFC 3261 §12.3, §17.2.1: until the peer's ACK of the final the UA sent
-/// reaches it, the peer may answer a request it took on the live early
-/// dialog; an ACK of another INVITE, or a retransmission of the INVITE,
-/// proves nothing.
+/// RFC 3261 §12.3, §9.2: the UAS's INFO left before its 487, so it reached
+/// the caller on the live early dialog, and the caller's 200 to it is no
+/// verdict whenever it arrives: before anything shows the caller saw the
+/// final, or after the caller's own ACK of it, a hop's own ACK, the caller's
+/// own ACK through a proxy, or the caller's new INVITE (§8.1.3.5).
 #[test]
-fn a_2xx_crossing_the_uas_own_final_is_no_verdict() {
-    let mut t = refused_after_its_own_info();
-    assert_eq!(t.judge_received(&request("ACK", 2, "A1", Some("B1")), 0), None);
-    assert_eq!(t.judge_received(&request("INVITE", 1, "A1", None), 0), None);
-    assert_eq!(t.note_received_response(&info_ok(), 0), None);
-    assert_eq!(t.state(CALL, "B1", "A1"), Some(DialogState::EndedByFinal(487)));
+fn a_2xx_to_a_request_sent_before_the_uas_own_final_is_no_verdict() {
+    let shown: [(&str, usize, Option<SipRequest>); 5] = [
+        ("nothing", 0, None),
+        ("the caller's ACK", 0, Some(request("ACK", 1, "A1", Some("B1")))),
+        ("a hop's own ACK", 1, Some(request("ACK", 1, "A1", Some("B1")))),
+        (
+            "the caller's ACK through a proxy",
+            1,
+            Some(request_through("ACK", 1, "A1", Some("B1"), 1)),
+        ),
+        ("the caller's new INVITE", 0, Some(request("INVITE", 2, "A1", None))),
+    ];
+    for (what, proxies, seen) in shown {
+        let mut t = refused_through(proxies);
+        if let Some(seen) = seen {
+            assert_eq!(t.judge_received(&seen, 0), None, "{what}");
+        }
+        assert_eq!(t.note_received_response(&info_ok(), 0), None, "after {what}");
+        assert_eq!(t.state(CALL, "B1", "A1"), Some(DialogState::EndedByFinal(487)));
+    }
 }
 
-/// Once the peer's ACK of the UA's final arrived, the peer knew the dialog
-/// ended: a 2xx it sends after is a verdict.
+/// RFC 3261 §12.1.2: an INFO the UAS sends after its own 487 reaches the
+/// caller after that final, on a dialog gone: a 200 to it is a verdict,
+/// whether or not the caller's ACK of the final arrived first.
 #[test]
-fn a_2xx_after_the_ack_of_the_uas_own_final_is_a_verdict() {
-    let mut t = refused_after_its_own_info();
-    assert_eq!(t.judge_received(&request("ACK", 1, "A1", Some("B1")), 0), None);
-    assert_eq!(
-        kind(t.note_received_response(&info_ok(), 0)),
-        Some(VerdictKind::EndedAnswered { status: 200, by: 487 })
-    );
-}
-
-/// A new INVITE of the same caller follows the final of its first one (RFC
-/// 3261 §8.1.3.5): a 2xx after it is a verdict, its ACK unseen.
-#[test]
-fn a_2xx_after_the_callers_retry_invite_is_a_verdict() {
-    let mut t = refused_after_its_own_info();
-    assert_eq!(t.judge_received(&request("INVITE", 2, "A1", None), 0), None);
-    assert_eq!(
-        kind(t.note_received_response(&info_ok(), 0)),
-        Some(VerdictKind::EndedAnswered { status: 200, by: 487 })
-    );
-}
-
-/// RFC 3261 §17.1.1.3: a transaction-stateful proxy ACKs the UA's non-2xx
-/// final itself, under its own single Via, before the caller sees the final:
-/// that ACK proves nothing, so a 2xx after it may still cross the final.
-#[test]
-fn a_hops_own_ack_of_the_uas_final_proves_nothing() {
-    let mut t = refused_through(1);
-    assert_eq!(t.judge_received(&request("ACK", 1, "A1", Some("B1")), 0), None);
-    assert_eq!(t.note_received_response(&info_ok(), 0), None);
-}
-
-/// The caller's own ACK of the UA's final, relayed by a proxy, carries the
-/// INVITE's Via stack as the UA received it: a 2xx after it is a verdict.
-#[test]
-fn the_callers_ack_through_a_proxy_shows_it_saw_the_uas_final() {
-    let mut t = refused_through(1);
-    assert_eq!(t.judge_received(&request_through("ACK", 1, "A1", Some("B1"), 1), 0), None);
-    assert_eq!(
-        kind(t.note_received_response(&info_ok(), 0)),
-        Some(VerdictKind::EndedAnswered { status: 200, by: 487 })
-    );
+fn a_2xx_to_a_request_sent_after_the_uas_own_final_is_a_verdict() {
+    for acked in [false, true] {
+        let mut t = DialogTable::new(BackwardsCseq::Verdict);
+        assert_eq!(t.judge_received(&request("INVITE", 1, "A1", None), 0), None);
+        t.note_sent_response(&response(183, "INVITE", 1, "A1", "B1"), 0);
+        t.note_sent_response(&response(487, "INVITE", 1, "A1", "B1"), 0);
+        t.note_sent_request(&request("INFO", 1, "B1", Some("A1")));
+        if acked {
+            assert_eq!(t.judge_received(&request("ACK", 1, "A1", Some("B1")), 0), None);
+        }
+        assert_eq!(
+            kind(t.note_received_response(&info_ok(), 0)),
+            Some(VerdictKind::EndedAnswered { status: 200, by: 487 }),
+            "acked: {acked}"
+        );
+    }
 }
 
 /// The caller's INFO (CSeq 2) on the early dialog the UAS's 487 ended.

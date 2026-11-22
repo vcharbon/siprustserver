@@ -170,6 +170,29 @@ async fn a_request_left_queued_fails_the_run_at_finish() {
     h.finish().await;
 }
 
+/// A collected dialog verdict charges the sender of the message it judges,
+/// by the source address the UA read it from.
+#[tokio::test(start_paused = true)]
+async fn a_collected_dialog_verdict_charges_its_messages_sender() {
+    let h = Harness::new("dialog-table-charged");
+    let alice = h.agent("alice", "127.0.0.1:5060").await;
+    let bob = h.agent("bob", "127.0.0.1:5070").await;
+    let (mut alice_dialog, mut bob_dialog) = established(&alice, &bob).await;
+    forged_options(&h, &alice, &bob, &mut bob_dialog, "bob-forged").await;
+    h.advance(std::time::Duration::from_millis(200)).await;
+    assert_eq!(alice.drain_tu().await, 1, "the forged OPTIONS reached alice");
+    let mut bye = alice_dialog.bye().await;
+    bob.receive("BYE").await.respond(200, "OK").await;
+    bye.expect(200).await;
+    let (_report, findings) = h.finish_collecting().await;
+    let charged: Vec<(&str, Option<&str>)> = findings
+        .iter()
+        .filter(|f| f.rule == DIALOG_UNKNOWN)
+        .map(|f| (f.lane.as_str(), f.charged.as_deref()))
+        .collect();
+    assert_eq!(charged, [("alice", Some("127.0.0.1:5070"))]);
+}
+
 /// A request `drain` discards is sighted, and a harness dropped without
 /// `finish` still fails on its verdict.
 #[tokio::test(start_paused = true)]
@@ -217,11 +240,11 @@ async fn a_2xx_crossing_the_callees_final_passes() {
     h.finish().await;
 }
 
-/// alice answers bob's early INFO 200 after she ACKed his 487: the ACK of
-/// his final reached bob first, so the 200 answers a dialog she knew ended.
+/// RFC 3261 §12.3, §9.2: alice took bob's early INFO before his 487 reached
+/// her, so her 200 to it is no verdict at bob though it follows her ACK of
+/// that final.
 #[tokio::test(start_paused = true)]
-#[should_panic(expected = "bob: 200 to INFO on a dialog a 487 ended")]
-async fn a_2xx_after_the_ack_of_the_callees_final_fails() {
+async fn a_2xx_to_an_info_taken_before_the_callees_final_passes_after_its_ack() {
     let h = Harness::new("dialog-table-answered-after-ack");
     let alice = h.agent("alice", "127.0.0.1:5060").await;
     let bob = h.agent("bob", "127.0.0.1:5070").await;
