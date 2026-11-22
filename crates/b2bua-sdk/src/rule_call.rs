@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 
 use call::features::{FeatureActivations, RelayFirst18xStrategy};
-use call::helpers::{PrackDisposition, RAckTokens};
+use call::helpers::{InviteInProgress, PrackDisposition, RAckTokens};
 use call::{
     ALegInviteSnapshot, ActivePeer, Call, CallModelState, CdrEvent, Dialog, ExtMap, Leg, MachineId,
     Obligation, PromotePemState, StateLabel, TransferState,
@@ -165,6 +165,15 @@ impl<'a> RuleCall<'a> {
     /// the originator's first.
     pub fn call_carrying_legs(&self) -> Vec<&'a str> {
         call::helpers::call_carrying_legs(self.0)
+    }
+    /// What holds an INVITE transaction in progress on the dialog a re-INVITE
+    /// of this stack toward `leg_id` rides ([`call::helpers::carrying_dialog`]),
+    /// as that re-INVITE's own guard reads it (RFC 3261 §14.1,
+    /// [`call::helpers::invite_in_progress`]). `None`: a re-INVITE may leave.
+    pub fn invite_in_progress(&self, leg_id: &str) -> Option<InviteInProgress> {
+        let leg = call::helpers::find_leg(self.0, leg_id)?;
+        let dialog = call::helpers::carrying_dialog(leg)?;
+        call::helpers::invite_in_progress(self.0, leg_id, &dialog.id())
     }
 
     // ── admission ──────────────────────────────────────────────────────────
