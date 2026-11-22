@@ -3,7 +3,7 @@
 //! the network lost, that first copy sent before its sender knew the dialog
 //! ended (RFC 3261 §12.2.2, §15.1.2, §17.1.2.2). The fact lives on the
 //! sender's lane only, so the receiving UA's dialog table reads it from the
-//! run's recording.
+//! run's recording; only a run that declares a loss model hands it over.
 
 use std::sync::Arc;
 
