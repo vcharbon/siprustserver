@@ -156,7 +156,7 @@ pub struct PromotePemState {
 /// (RFC 3261 §14.1): the description it offers and the lines of the message
 /// that carried it that describe it or state its sender's advertisement. The
 /// promotion's resync offers B's final description, the transfer's a-realign
-/// C's c-realign answer.
+/// the description of C's c-realign 2xx.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingResync {
     /// The leg whose peer wrote the description.
