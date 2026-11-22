@@ -17,17 +17,22 @@ pub mod tombstone;
 /// empty/malformed ids at build time.
 pub type WorkerId = String;
 
-/// Whether a worker serves its dialogs, as the proxy reads it (ADR-0050 §3).
+/// Whether a worker serves its dialogs, as the proxy reads it (ADR-0050 §3,
+/// ADR-0069).
 ///
 /// `Unknown` is a worker no probe has answered `200` since it joined, since
 /// the proxy started, or since its incarnation changed; `Alive` one that
-/// answered; `Dead` one that missed its probes or whose address departed.
-/// Only an `Alive` worker is routed to, for a new dialog and an in-dialog
-/// request alike.
+/// answers within its reply windows; `Slow` one that missed its probes but
+/// answered one of them late, inside the slow window, or whose endpoint flipped
+/// not ready while it did; `Dead` one that missed its probes with no answer at
+/// all, stayed `Slow` too long, or whose address departed. An `Alive` or `Slow`
+/// worker serves its dialogs; only an `Alive` one takes a new dialog, but for an
+/// emergency one when no worker is `Alive`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WorkerHealth {
     Unknown,
     Alive,
+    Slow,
     Dead,
 }
 
@@ -52,9 +57,14 @@ impl WorkerEntry {
         Self { id: id.into(), address, health: WorkerHealth::Alive, acceptance: Acceptance::Accept }
     }
 
-    /// Whether requests may be routed to it: it answered its probe.
+    /// Whether a new dialog may be placed on it: it answers its probes in time.
     pub fn is_alive(&self) -> bool {
         self.health == WorkerHealth::Alive
+    }
+
+    /// Whether its dialogs are routed to it: `Alive` or `Slow`.
+    pub fn serves_dialogs(&self) -> bool {
+        matches!(self.health, WorkerHealth::Alive | WorkerHealth::Slow)
     }
 
     pub fn accepts_new_calls(&self) -> bool {
@@ -100,11 +110,15 @@ pub trait WorkerRegistry: Send + Sync {
     /// has listed the workers (`topology::Membership::synced`).
     fn synced(&self) -> bool;
     /// Every later dead verdict: the ordinal of a worker whose health turns
-    /// `Dead` from `Alive`, or from `Unknown` while its endpoint reads ready, or
-    /// of a worker read `Alive` whose endpoint flips not ready and not terminating
-    /// while another member reads ready (ADR-0050 §3). A departure, a terminating
-    /// flip and a flip that empties the view of ready members are none.
+    /// `Dead` from `Alive` or `Slow`, or from `Unknown` while its endpoint reads
+    /// ready, or of a worker read `Alive` whose endpoint flips not ready and not
+    /// terminating while another member reads ready and no late answer of its is
+    /// fresh (ADR-0050 §3, ADR-0069). A departure, a terminating flip and a flip
+    /// that empties the view of ready members are none.
     fn read_dead(&self) -> tokio::sync::broadcast::Receiver<WorkerId>;
+    /// Every later recovery: the ordinal of a worker whose health turns `Alive`
+    /// from `Slow`, which is told the standing verdicts again (ADR-0069).
+    fn read_recovered(&self) -> tokio::sync::broadcast::Receiver<WorkerId>;
     /// The ordinals a verdict may stand on now, for a reader that lagged
     /// behind [`read_dead`]: every worker read `Dead`, and every unrouted member
     /// whose endpoint reads not ready and not terminating.

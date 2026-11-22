@@ -150,10 +150,24 @@ impl ProxyConfig {
             interval_ms: env.int("HEALTH_INTERVAL_MS", probe_default.interval_ms, 1, MAX_MS),
             timeout_ms: env.int("HEALTH_TIMEOUT_MS", probe_default.timeout_ms, 1, MAX_MS),
             threshold: env.int_u32("HEALTH_THRESHOLD", probe_default.threshold, 1, u32::MAX),
+            slow_window_ms: env.int(
+                "HEALTH_SLOW_WINDOW_MS",
+                probe_default.slow_window_ms,
+                1,
+                MAX_MS,
+            ),
+            slow_max_ms: env.int("HEALTH_SLOW_MAX_MS", probe_default.slow_max_ms, 1, MAX_MS),
+            recover_probes: env.int_u32(
+                "HEALTH_RECOVER_PROBES",
+                probe_default.recover_probes,
+                1,
+                u32::MAX,
+            ),
         };
         let isolation_ms = env.int("HEALTH_ISOLATION_MS", DEFAULT_ISOLATION_MS, 1, MAX_MS);
         let isolation_window = Duration::from_millis(isolation_ms);
-        let observer = observer_overrides(&mut env, LoadObserverConfig::default());
+        let mut observer = observer_overrides(&mut env, LoadObserverConfig::default());
+        observer.cap_restart_pct = f64::from(env.int_u32("PROXY_RAMP_START_PCT", 20, 1, 100));
         let intake_shed_pct = env.int("PROXY_INTAKE_SHED_PCT", 50, 0, 100);
         let self_gate = self_gate(&mut env);
         let retry_after_jitter_sec = env.int_u32("PROXY_RETRY_AFTER_JITTER_SEC", 5, 0, 3600);
@@ -194,6 +208,7 @@ impl ProxyConfig {
                 ));
             }
         }
+        errors.extend(slow_window_refusals(&probe));
         let isolation_floor = probe.interval_ms.saturating_add(T1_MS);
         if isolation_ms < isolation_floor {
             errors.push(format!(
@@ -247,6 +262,29 @@ impl ProxyConfig {
             external_face_period,
         })
     }
+}
+
+/// The slow window is awaited past the reply window, and lengthens no dead
+/// verdict on silence: `HEALTH_TIMEOUT_MS ≤ HEALTH_SLOW_WINDOW_MS ≤
+/// (HEALTH_THRESHOLD − 1) × HEALTH_INTERVAL_MS + HEALTH_TIMEOUT_MS` (ADR-0069).
+fn slow_window_refusals(probe: &HealthProbeConfig) -> Vec<String> {
+    let mut refusals = Vec::new();
+    if probe.slow_window_ms < probe.timeout_ms {
+        refusals.push(format!(
+            "HEALTH_SLOW_WINDOW_MS={} must be at least HEALTH_TIMEOUT_MS={}: a late answer \
+             is one past the reply window",
+            probe.slow_window_ms, probe.timeout_ms
+        ));
+    } else if !probe.slow_window_fits() {
+        refusals.push(format!(
+            "HEALTH_SLOW_WINDOW_MS={} must be at most (HEALTH_THRESHOLD={} - 1) x \
+             HEALTH_INTERVAL_MS={} + HEALTH_TIMEOUT_MS={}: a longer one lengthens the dead \
+             verdict of a worker silent after a late answer past threshold x interval + \
+             timeout",
+            probe.slow_window_ms, probe.threshold, probe.interval_ms, probe.timeout_ms
+        ));
+    }
+    refusals
 }
 
 /// The default limits with the exemptions `SIP_EXEMPTIONS` states.

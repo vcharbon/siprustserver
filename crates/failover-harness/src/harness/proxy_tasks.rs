@@ -32,8 +32,12 @@ static NOTIFIERS: AtomicU16 = AtomicU16::new(0);
 /// Both values are multiples of the 100 ms advance chunk, so there is no
 /// paused-clock reply race. A cell that measures the verdict's timing states
 /// the production cadence ([`FailoverHarness::spawn_proxy_with_probe_cadence`]).
-pub(super) const HARNESS_PROBE_CADENCE: HealthProbeConfig =
-    HealthProbeConfig { interval_ms: 10_000, timeout_ms: 1_500, threshold: 2 };
+pub(super) const HARNESS_PROBE_CADENCE: HealthProbeConfig = HealthProbeConfig {
+    interval_ms: 10_000,
+    timeout_ms: 1_500,
+    threshold: 2,
+    ..HealthProbeConfig::DEFAULT
+};
 
 impl FailoverHarness {
     /// Like [`spawn_proxy`](Self::spawn_proxy) but with the REAL OPTIONS health

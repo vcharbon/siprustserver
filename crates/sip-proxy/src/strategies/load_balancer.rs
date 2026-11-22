@@ -5,7 +5,9 @@
 //! - `select_for_new_dialog`: Call-ID → snapshot the registry → the `Alive`
 //!   workers that accept new calls, or every `Alive` one when none accepts (a
 //!   refusing worker answers the call itself and writes its record, §6) → for
-//!   non-emergency new dialogs, drop `above_critical`-band workers → rank them
+//!   non-emergency new dialogs, drop `above_critical`-band workers; an
+//!   emergency or in-dialog one, with no worker `Alive`, takes the `Slow` ones
+//!   (ADR-0069) → rank them
 //!   by rendezvous → spend one token from the per-worker AIMD bucket of the
 //!   first in rank that has one (ADR-0009 X6) → address. `NoTarget` when the
 //!   candidate set is empty; `RateCapExhausted` when no candidate's bucket has
@@ -39,9 +41,9 @@
 //!   signature under its key, which the response path reads as that INVITE's
 //!   (ADR-0055 §8): the far end echoes the worker's Via, so its unsigned `pri`
 //!   decides nothing there.
-//! - `decode_stickiness`: verify the MAC, then `w_pri` while it is `Alive`,
-//!   else `w_bak` while it is `Alive`, else `Unroutable` (§4, §5); acceptance
-//!   is never read. It resolves the primary by ORDINAL, so a departed-address
+//! - `decode_stickiness`: verify the MAC, then `w_pri` while it is `Alive` or
+//!   `Slow`, else `w_bak` while it is `Alive` or `Slow`, else `Unroutable` (§4,
+//!   §5, ADR-0069); acceptance is never read. It resolves the primary by ORDINAL, so a departed-address
 //!   tombstone (address-keyed, always `Dead` — see `registry::tombstone`)
 //!   never reaches it: an ordinal that left membership resolves to nothing and
 //!   takes the backup.
@@ -56,7 +58,7 @@ use sip_message::SipMessage;
 use crate::addr::ProxyAddr;
 use crate::load_observer::{EluBand, WorkerLoadObserver};
 use crate::observability::metrics::ProxyMetrics;
-use crate::registry::{WorkerEntry, WorkerRegistry};
+use crate::registry::{WorkerEntry, WorkerHealth, WorkerRegistry};
 use crate::security::hmac::{HmacKeyProvider, TRUNCATED_MAC_BYTES};
 use crate::strategy::{
     DecodeResult, RankPlacement, RouteParams, RoutingStrategy, SelectError, SelectOpts,
@@ -203,11 +205,11 @@ impl LoadBalancerStrategy {
         rendezvous_select(call_id, &away).map(|k| k.0.clone()).unwrap_or_default()
     }
 
-    fn alive_address(&self, id: &str) -> Option<ProxyAddr> {
+    fn serving_address(&self, id: &str) -> Option<ProxyAddr> {
         if id.is_empty() {
             return None;
         }
-        self.registry.resolve(id).filter(WorkerEntry::is_alive).map(|w| w.address)
+        self.registry.resolve(id).filter(WorkerEntry::serves_dialogs).map(|w| w.address)
     }
 }
 
@@ -228,7 +230,11 @@ impl RoutingStrategy for LoadBalancerStrategy {
 
         let alive = placeable(snapshot.iter());
         let candidates: Vec<_> = if is_emergency || in_dialog {
-            alive.clone()
+            if alive.is_empty() {
+                snapshot.iter().filter(|w| w.health == WorkerHealth::Slow).collect()
+            } else {
+                alive.clone()
+            }
         } else {
             alive
                 .iter()
@@ -292,10 +298,10 @@ impl RoutingStrategy for LoadBalancerStrategy {
             }
         };
 
-        if let Some(target) = self.alive_address(w_pri) {
+        if let Some(target) = self.serving_address(w_pri) {
             return DecodeResult::Forward { target, is_emergency };
         }
-        match self.alive_address(w_bak) {
+        match self.serving_address(w_bak) {
             Some(target) => DecodeResult::ForwardBackup { target, is_emergency },
             None => DecodeResult::Unroutable,
         }

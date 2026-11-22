@@ -41,6 +41,39 @@ fn the_retry_after_jitter_is_bounded() {
     assert!(errors.iter().any(|e| e.contains("PROXY_RETRY_AFTER_JITTER_SEC")), "{errors:?}");
 }
 
+/// The slow axis reads its defaults; a slow window shorter than the reply
+/// window, or one that would lengthen a verdict on silence, is refused naming
+/// every variable it involves, and so is a recovery of no probe or a ramp start
+/// outside (0, 100] percent.
+#[test]
+fn the_slow_axis_is_read_and_its_incoherent_sets_refused() {
+    let cfg = boot(&[]).expect("valid");
+    assert_eq!(
+        (cfg.probe.slow_window_ms, cfg.probe.slow_max_ms, cfg.probe.recover_probes),
+        (2_000, 20_000, 3)
+    );
+    assert_eq!(cfg.observer.cap_restart_pct, 20.0);
+    let cfg = boot(&[("HEALTH_SLOW_WINDOW_MS", "2600")]).expect("the bound itself fits");
+    assert_eq!(cfg.probe.slow_window_ms, 2_600);
+    let named = |errors: &[String], keys: &[&str]| {
+        errors.iter().any(|e| keys.iter().all(|k| e.contains(k)))
+    };
+    let errors = boot(&[("HEALTH_SLOW_WINDOW_MS", "1599")]).expect_err("inside the reply window");
+    assert!(named(&errors, &["HEALTH_SLOW_WINDOW_MS", "HEALTH_TIMEOUT_MS"]), "{errors:?}");
+    let errors = boot(&[("HEALTH_SLOW_WINDOW_MS", "2601")]).expect_err("lengthens a verdict");
+    let all =
+        ["HEALTH_SLOW_WINDOW_MS", "HEALTH_THRESHOLD", "HEALTH_INTERVAL_MS", "HEALTH_TIMEOUT_MS"];
+    assert!(named(&errors, &all), "{errors:?}");
+    for (key, bad) in [
+        ("HEALTH_RECOVER_PROBES", "0"),
+        ("PROXY_RAMP_START_PCT", "0"),
+        ("PROXY_RAMP_START_PCT", "101"),
+    ] {
+        let errors = boot(&[(key, bad)]).expect_err(key);
+        assert!(named(&errors, &[key]), "{key}={bad}: {errors:?}");
+    }
+}
+
 /// The stuck-poll threshold takes 100..=600000 ms, 10 s by default.
 #[test]
 fn the_stuck_poll_threshold_is_bounded() {

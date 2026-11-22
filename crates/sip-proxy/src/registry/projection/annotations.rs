@@ -30,12 +30,19 @@ pub(super) struct Annot {
     pub(super) ready: bool,
     /// The projection holds it: what a departure tombstones.
     pub(super) routed: bool,
+    /// The registry clock's millisecond up to which the worker's last late
+    /// probe answer is fresh; `None` with no late answer.
+    pub(super) slow_until_ms: Option<u64>,
+    /// Its endpoint reads not ready and another member ready, but it flipped
+    /// while a late answer was fresh: routed as `Slow` while it reads so
+    /// (ADR-0069).
+    pub(super) held: bool,
 }
 
 impl Annot {
     /// A brand-new annotation for a just-(re)joined endpoint: `Unknown`, not
     /// routable until the OPTIONS probe reads it `Alive` (ADR-0050 §8).
-    fn fresh(host: String, standing: Standing) -> Self {
+    pub(super) fn fresh(host: String, standing: Standing) -> Self {
         Self {
             health: WorkerHealth::Unknown,
             acceptance: Acceptance::Accept,
@@ -43,8 +50,26 @@ impl Annot {
             port_override: None,
             ready: standing.ready,
             routed: standing.routed,
+            slow_until_ms: None,
+            held: false,
         }
     }
+
+    fn serves_dialogs(&self) -> bool {
+        matches!(self.health, WorkerHealth::Alive | WorkerHealth::Slow)
+    }
+}
+
+/// How a health write turned a worker, for the readers of the registry's
+/// verdicts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Turn {
+    /// No turn a reader is told of.
+    None,
+    /// A dead verdict.
+    Dead,
+    /// `Slow` to `Alive`.
+    Recovered,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -98,9 +123,11 @@ impl WorkerAnnotations {
     /// longer judges, seed a fresh record for a new one, and **reset** one whose
     /// host moved (a recreated pod must be re-probed — a stale `Dead`/`Alive` must
     /// not survive). An unchanged ordinal keeps its probe-written health and
-    /// port, unless it is a flip of a worker read `Alive`: the flip is its verdict
-    /// and its health `Unknown` until it answers again, so one death tells once.
-    /// This is the only proxy-specific lifecycle rule; it has no membership twin.
+    /// port, unless it is a flip of a worker read `Alive` or `Slow`: with a late
+    /// answer fresh at `now_ms` it reads `Slow` and stays routed while it does;
+    /// else the flip is its verdict and its health `Unknown` until it answers
+    /// again, so one death tells once. This is the only proxy-specific lifecycle
+    /// rule; it has no membership twin.
     ///
     /// Returns what the projection stopped serving for the caller to tombstone.
     /// The diff is read from the map this write replaced, so of two recomposes
@@ -111,6 +138,7 @@ impl WorkerAnnotations {
         members: &[Peer],
         no_ready: bool,
         default_port: u16,
+        now_ms: u64,
     ) -> Vec<Departed> {
         let kept: Vec<(&Peer, Standing)> =
             members.iter().filter_map(|p| Some((p, standing_of(p, no_ready)?))).collect();
@@ -121,11 +149,14 @@ impl WorkerAnnotations {
             for (p, standing) in &kept {
                 match recs.get_mut(&p.ordinal) {
                     Some(rec) if rec.host == p.host => {
+                        let held = held_after(rec, *standing, now_ms);
                         if flips(rec, *standing) {
-                            rec.health = WorkerHealth::Unknown;
+                            rec.health =
+                                if held { WorkerHealth::Slow } else { WorkerHealth::Unknown };
                         }
+                        rec.held = held;
                         rec.ready = standing.ready;
-                        rec.routed = standing.routed;
+                        rec.routed = standing.routed || held;
                     }
                     _ => {
                         recs.insert(p.ordinal.clone(), Annot::fresh(p.host.clone(), *standing));
@@ -156,7 +187,16 @@ impl WorkerAnnotations {
         for (p, standing) in &kept {
             match replaced.get(&p.ordinal) {
                 Some(rec) if rec.host == p.host => {
-                    if rec.routed && !standing.routed {
+                    let held = held_after(rec, *standing, now_ms);
+                    if held && !rec.held {
+                        tracing::info!(
+                            node = observe::node(),
+                            worker = %p.ordinal,
+                            host = %p.host,
+                            "worker reads not ready while a late answer of its is fresh: slow"
+                        );
+                    }
+                    if rec.routed && !standing.routed && !held {
                         tracing::info!(
                             node = observe::node(),
                             worker = %p.ordinal,
@@ -191,13 +231,17 @@ impl WorkerAnnotations {
 
     /// Annotate health and acceptance of new calls in one write, `None`
     /// leaving that one as it is. No-op if the worker is unknown or unchanged.
-    /// Returns whether the write is a dead verdict: it turned the worker's
-    /// health `Dead` from `Alive`, or from `Unknown` on an endpoint that reads
-    /// ready. A worker not ready and never read `Alive` since its flip's verdict
-    /// or its join stands on no answer that could turn out wrong.
+    /// A worker held in the routing while its endpoint reads not ready reads
+    /// `Slow` where the write says `Alive`.
     ///
-    /// A write reading a worker `Alive` while the view reads no worker alive
-    /// returns every other worker read `Dead` to `Unknown`: verdicts taken
+    /// Returns [`Turn::Dead`] for a dead verdict: the write turned the worker's
+    /// health `Dead` from `Alive` or `Slow`, or from `Unknown` on an endpoint
+    /// that reads ready. A worker not ready and never read `Alive` since its
+    /// flip's verdict or its join stands on no answer that could turn out wrong.
+    /// Returns [`Turn::Recovered`] for a turn from `Slow` to `Alive`.
+    ///
+    /// A write reading a worker `Alive` while the view reads no worker alive or
+    /// slow returns every other worker read `Dead` to `Unknown`: verdicts taken
     /// while the proxy reached no worker speak of its own reach, not of the
     /// workers, so a rejoining proxy routes no response or request away from
     /// a worker on them. Its probe judges each afresh.
@@ -206,18 +250,25 @@ impl WorkerAnnotations {
         id: &str,
         health: Option<WorkerHealth>,
         acceptance: Option<Acceptance>,
-    ) -> bool {
+    ) -> Turn {
         let snapshot = self.snapshot();
         let Some(record) = snapshot.get(id) else {
-            return false;
+            return Turn::None;
         };
         let previous = (record.health, record.acceptance);
         let was_ready = record.ready;
-        let next = (health.unwrap_or(previous.0), acceptance.unwrap_or(previous.1));
+        let written = health.map(|h| {
+            if record.held && h == WorkerHealth::Alive {
+                WorkerHealth::Slow
+            } else {
+                h
+            }
+        });
+        let next = (written.unwrap_or(previous.0), acceptance.unwrap_or(previous.1));
         if next == previous {
-            return false;
+            return Turn::None;
         }
-        let blind = !snapshot.values().any(|r| r.health == WorkerHealth::Alive);
+        let blind = !snapshot.values().any(Annot::serves_dialogs);
         let forgotten: Vec<WorkerId> = if blind && next.0 == WorkerHealth::Alive {
             snapshot
                 .iter()
@@ -259,18 +310,42 @@ impl WorkerAnnotations {
                 }
             }
         });
-        next.0 == WorkerHealth::Dead
-            && match previous.0 {
-                WorkerHealth::Alive => true,
-                WorkerHealth::Unknown => was_ready,
-                WorkerHealth::Dead => false,
+        match (previous.0, next.0) {
+            (WorkerHealth::Alive | WorkerHealth::Slow, WorkerHealth::Dead) => Turn::Dead,
+            (WorkerHealth::Unknown, WorkerHealth::Dead) if was_ready => Turn::Dead,
+            (WorkerHealth::Slow, WorkerHealth::Alive) => Turn::Recovered,
+            _ => Turn::None,
+        }
+    }
+
+    /// Stamp the worker's last late probe answer fresh up to `until_ms`.
+    /// No-op if the worker is unknown.
+    pub(super) fn note_late_answer(&self, id: &str, until_ms: u64) {
+        self.update(|recs| {
+            if let Some(rec) = recs.get_mut(id) {
+                rec.slow_until_ms = Some(rec.slow_until_ms.map_or(until_ms, |u| u.max(until_ms)));
             }
+        });
     }
 }
 
-/// Whether a worker this record describes flips with `standing`: read `Alive`,
-/// its endpoint ready until now and not ready any more, and out of the routing
-/// for it, a ready member remaining.
+/// Whether a worker this record describes flips with `standing`: read `Alive`
+/// or `Slow`, its endpoint ready until now and not ready any more, and out of
+/// the routing for it, a ready member remaining.
 fn flips(rec: &Annot, standing: Standing) -> bool {
-    rec.health == WorkerHealth::Alive && rec.ready && !standing.ready && !standing.routed
+    rec.serves_dialogs() && rec.ready && !standing.ready && !standing.routed
+}
+
+/// Whether the worker this record describes stays in the routing as `Slow`
+/// with `standing`, out of it otherwise: its flip comes while a late answer is
+/// fresh at `now_ms`, or it was held and still reads `Slow`. A worker whose
+/// endpoint reads ready, or that the view routes anyway, is never held.
+fn held_after(rec: &Annot, standing: Standing, now_ms: u64) -> bool {
+    if standing.ready || standing.routed {
+        return false;
+    }
+    if rec.held {
+        return rec.health == WorkerHealth::Slow;
+    }
+    flips(rec, standing) && rec.slow_until_ms.is_some_and(|until| now_ms <= until)
 }

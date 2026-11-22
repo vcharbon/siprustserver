@@ -17,8 +17,9 @@
 //! - **Only a `ready` member is routable, while one reads ready**: a member whose
 //!   endpoint is not ready departs exactly as a removed one, its ordinal out of
 //!   the projection and its address tombstoned (ADR-0031 D1). The flip of a
-//!   worker read `Alive`, unless its endpoint reads `terminating`, is also a dead
-//!   verdict (ADR-0050 §3).
+//!   worker read `Alive` or `Slow`, unless its endpoint reads `terminating`, is
+//!   also a dead verdict (ADR-0050 §3), but while a late probe answer of its is
+//!   fresh: then it reads `Slow` and stays routed while it does (ADR-0069).
 //! - **A view where no member reads ready routes on the probe.** Every member
 //!   present and not `terminating` is projected, and the workers that answer are
 //!   `Alive` (ADR-0050 §11). The rule reads the slice and the health as they
@@ -47,7 +48,7 @@ use super::{Acceptance, WorkerEntry, WorkerHealth, WorkerId};
 
 mod annotations;
 
-use annotations::{standing_of, Annot, Departed, WorkerAnnotations};
+use annotations::{standing_of, Annot, Departed, Turn, WorkerAnnotations};
 
 /// Whether `peer`'s endpoint reads the way a process that died on a live node
 /// does: not `ready`, and no orchestrator removal under way (ADR-0031 case 4).
@@ -105,6 +106,8 @@ pub(crate) struct WorkerSet {
     clock: Clock,
     /// Each worker the health view turns `Dead` (ADR-0050 §3).
     read_dead: broadcast::Sender<WorkerId>,
+    /// Each worker the health view turns `Alive` from `Slow` (ADR-0069).
+    read_recovered: broadcast::Sender<WorkerId>,
 }
 
 /// How many dead verdicts a slow reader of [`WorkerSet::read_dead`] may fall
@@ -117,6 +120,8 @@ impl WorkerSet {
     pub(crate) fn new(membership: Arc<dyn Membership>, default_port: u16, clock: Clock) -> Self {
         #[expect(clippy::disallowed_methods, reason = "READ_DEAD_BACKLOG is non-zero")]
         let (read_dead, _) = broadcast::channel(READ_DEAD_BACKLOG);
+        #[expect(clippy::disallowed_methods, reason = "READ_DEAD_BACKLOG is non-zero")]
+        let (read_recovered, _) = broadcast::channel(READ_DEAD_BACKLOG);
         let set = Self {
             membership,
             annotations: WorkerAnnotations::default(),
@@ -128,6 +133,7 @@ impl WorkerSet {
             default_port,
             clock,
             read_dead,
+            read_recovered,
         };
         set.recompose();
         set
@@ -143,20 +149,23 @@ impl WorkerSet {
     /// in step: an address the set stopped serving — the member left, or it no
     /// longer stands in the projection — is tombstoned, an address a worker joined
     /// at is forgotten. A `terminating` flip on a ready member changes nothing.
-    /// A worker read `Alive` whose endpoint flips not `ready`, not `terminating`,
-    /// with another member still ready, is a dead verdict, told to every
-    /// [`read_dead`](Self::read_dead) reader once the projection holds it: its
-    /// health turns `Unknown` with it, so one flip tells once. Idempotent; the
-    /// single write path for every registry.
+    /// A worker read `Alive` or `Slow` whose endpoint flips not `ready`, not
+    /// `terminating`, with another member still ready, is a dead verdict, told to
+    /// every [`read_dead`](Self::read_dead) reader once the projection holds it:
+    /// its health turns `Unknown` with it, so one flip tells once. A flip while a
+    /// late answer is fresh reads the worker `Slow` instead, routed until it
+    /// reads otherwise. Idempotent; the single write path for every registry.
     pub(crate) fn recompose(&self) {
         let members = self.membership.snapshot();
         let no_ready = no_member_ready(&members);
         let now_ms = self.now_ms();
-        let departed = self.annotations.sync_membership(&members, no_ready, self.default_port);
+        let departed =
+            self.annotations.sync_membership(&members, no_ready, self.default_port, now_ms);
         let annots = self.annotations.snapshot();
         let judged = |p: &&Peer| standing_of(p, no_ready).is_some();
         let probed: Vec<Peer> = members.iter().filter(judged).cloned().collect();
-        let routed = |p: &&Peer| standing_of(p, no_ready).is_some_and(|s| s.routed);
+        let held = |p: &&Peer| annots.get(&p.ordinal).is_some_and(|a| a.held);
+        let routed = |p: &&Peer| standing_of(p, no_ready).is_some_and(|s| s.routed) || held(p);
         let peers: Vec<Peer> = members.iter().filter(routed).cloned().collect();
         let entries = project(&peers, &annots, self.default_port);
         let mut flipped = Vec::new();
@@ -224,17 +233,36 @@ impl WorkerSet {
         health: Option<WorkerHealth>,
         acceptance: Option<Acceptance>,
     ) {
-        let verdict = self.annotations.set_view(id, health, acceptance);
+        let turn = self.annotations.set_view(id, health, acceptance);
         self.recompose();
-        if verdict {
-            let _ = self.read_dead.send(id.to_string());
+        match turn {
+            Turn::Dead => {
+                let _ = self.read_dead.send(id.to_string());
+            }
+            Turn::Recovered => {
+                let _ = self.read_recovered.send(id.to_string());
+            }
+            Turn::None => {}
         }
     }
 
+    /// Stamp `id`'s last late probe answer fresh for `fresh_for` from now: an
+    /// endpoint flip inside it reads the worker `Slow` (ADR-0069).
+    pub(crate) fn note_late_answer(&self, id: &str, fresh_for: std::time::Duration) {
+        let fresh_ms = u64::try_from(fresh_for.as_millis()).unwrap_or(u64::MAX);
+        self.annotations.note_late_answer(id, self.now_ms().saturating_add(fresh_ms));
+    }
+
+    /// Every later turn of a worker from `Slow` to `Alive`.
+    pub(crate) fn read_recovered(&self) -> broadcast::Receiver<WorkerId> {
+        self.read_recovered.subscribe()
+    }
+
     /// Every later dead verdict: a worker whose health the view turns `Dead`
-    /// from `Alive`, or from `Unknown` while its endpoint reads ready, and a
-    /// worker read `Alive` whose endpoint flips not `ready` and not `terminating`
-    /// while another member reads ready (ADR-0050 §3). A membership departure, a
+    /// from `Alive` or `Slow`, or from `Unknown` while its endpoint reads ready,
+    /// and a worker read `Alive` or `Slow` whose endpoint flips not `ready` and
+    /// not `terminating` while another member reads ready and no late answer of
+    /// its is fresh (ADR-0050 §3, ADR-0069). A membership departure, a
     /// `terminating` flip and a flip that empties the view of ready members are
     /// none.
     pub(crate) fn read_dead(&self) -> broadcast::Receiver<WorkerId> {
@@ -295,6 +323,8 @@ impl WorkerSet {
                     port_override: Some(port),
                     ready,
                     routed,
+                    slow_until_ms: None,
+                    held: false,
                 },
             );
         });
@@ -386,3 +416,6 @@ impl WorkerSet {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod slow_tests;

@@ -201,15 +201,41 @@ async fn an_intake_age_shed_is_labelled_for_the_dequeue_age() {
 #[test]
 fn worker_health_gauges_render() {
     let m = ProxyMetrics::new();
-    m.set_worker_health_counts(1, 2, 0);
+    m.set_worker_health_counts(1, 3, 2, 0);
     m.set_worker_acceptance_counts(0, 1);
     let txt = m.prometheus_text();
     assert!(txt.contains("sip_worker_acceptance{acceptance=\"accept\"} 0"));
     assert!(txt.contains("sip_worker_acceptance{acceptance=\"refuse\"} 1"));
     assert!(txt.contains("sip_worker_health{health=\"alive\"} 1"));
+    assert!(txt.contains("sip_worker_health{health=\"slow\"} 3"));
     assert!(txt.contains("sip_worker_health{health=\"unknown\"} 2"));
     assert!(txt.contains("sip_worker_health{health=\"dead\"} 0"));
     assert!(!txt.contains("draining"), "{txt}");
+}
+
+/// Each routed worker reads 1 on its state alone, and one gone from the census
+/// drops out; the per-worker slow counters count per worker.
+#[test]
+fn the_worker_states_are_a_census_and_the_slow_counters_count_per_worker() {
+    use crate::registry::WorkerHealth;
+    let m = ProxyMetrics::new();
+    m.set_worker_states([("w0", WorkerHealth::Slow), ("w1", WorkerHealth::Alive)]);
+    let txt = m.prometheus_text();
+    assert!(txt.contains("sip_proxy_worker_health{worker=\"w0\",state=\"slow\"} 1"), "{txt}");
+    assert!(txt.contains("sip_proxy_worker_health{worker=\"w0\",state=\"alive\"} 0"), "{txt}");
+    assert!(txt.contains("sip_proxy_worker_health{worker=\"w1\",state=\"alive\"} 1"), "{txt}");
+    m.set_worker_states([("w1", WorkerHealth::Dead)]);
+    let txt = m.prometheus_text();
+    assert!(!txt.contains("worker=\"w0\",state"), "{txt}");
+    assert!(txt.contains("sip_proxy_worker_health{worker=\"w1\",state=\"dead\"} 1"), "{txt}");
+    m.record_worker_slow("w0");
+    m.record_probe_late_answer("w0");
+    m.record_probe_late_answer("w0");
+    m.record_slow_max_dead("w1");
+    let txt = m.prometheus_text();
+    assert!(txt.contains("sip_proxy_worker_slow_total{worker=\"w0\"} 1"), "{txt}");
+    assert!(txt.contains("sip_proxy_probe_late_answers_total{worker=\"w0\"} 2"), "{txt}");
+    assert!(txt.contains("sip_proxy_slow_max_dead_total{worker=\"w1\"} 1"), "{txt}");
 }
 
 /// Invented methods get a series each only up to the cap; the rest land on

@@ -35,12 +35,20 @@ const WORKER: &str = "127.0.0.1:5071";
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 49170 RTP/AVP 0\r\n";
 const ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 49180 RTP/AVP 0\r\n";
 
-const PRODUCTION: HealthProbeConfig =
-    HealthProbeConfig { interval_ms: 1_000, timeout_ms: 1_500, threshold: 2 };
+const PRODUCTION: HealthProbeConfig = HealthProbeConfig {
+    interval_ms: 1_000,
+    timeout_ms: 1_500,
+    threshold: 2,
+    ..HealthProbeConfig::DEFAULT
+};
 
 /// A tick long enough that only the first round leaves within a test.
-const FIRST_ROUND_ONLY: HealthProbeConfig =
-    HealthProbeConfig { interval_ms: 10_000, timeout_ms: 1_500, threshold: 2 };
+const FIRST_ROUND_ONLY: HealthProbeConfig = HealthProbeConfig {
+    interval_ms: 10_000,
+    timeout_ms: 1_500,
+    threshold: 2,
+    ..HealthProbeConfig::DEFAULT
+};
 
 fn hmac() -> Arc<StaticHmacKeyProvider> {
     Arc::new(StaticHmacKeyProvider::new(HmacKey::new("k1", vec![7u8; 32]), None).unwrap())

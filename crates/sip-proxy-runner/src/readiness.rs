@@ -1,6 +1,7 @@
 //! The proxy's probe answers (ADR-0012 D4, ADR-0046 D4, ADR-0050 §11,
-//! ADR-0056): `/readyz` is fit for traffic once the first worker view is in,
-//! with at least one `Alive` worker whatever its acceptance of new calls,
+//! ADR-0056, ADR-0069): `/readyz` is fit for traffic once the first worker
+//! view is in, with at least one `Alive` or `Slow` worker whatever its
+//! acceptance of new calls,
 //! every recv shard turning, the external face usable, and no drain latched.
 //! The node announces the proxy's addresses through MetalLB while `/readyz`
 //! passes. `/fitz` asks the same and, in place of the drain latch, that some
@@ -26,6 +27,7 @@ pub enum Unfit {
     ShardStalled,
     NoFirstView,
     ExternalFace,
+    /// No worker reads `Alive` or `Slow`.
     NoWorkerAlive,
     /// No worker answered a probe within the isolation window.
     Isolated,
@@ -57,7 +59,7 @@ fn serving(
         Err(Unfit::NoFirstView)
     } else if !external_face_usable {
         Err(Unfit::ExternalFace)
-    } else if !registry.snapshot().iter().any(|w| w.is_alive()) {
+    } else if !registry.snapshot().iter().any(|w| w.serves_dialogs()) {
         Err(Unfit::NoWorkerAlive)
     } else {
         Ok(())
@@ -66,7 +68,7 @@ fn serving(
 
 /// Draining once SIGTERM latched; else NotReady while a recv shard is
 /// stalled, before the first worker view, with the external face unusable,
-/// or with no worker `Alive`; else Ready.
+/// or with no worker `Alive` or `Slow`; else Ready.
 pub fn probe_state(
     draining: bool,
     shard_stalled: bool,

@@ -1,5 +1,6 @@
 //! The health sampler: every 2 s it publishes the recv shards' stall gauge,
-//! the external face gauge, the worker-health and acceptance gauges and the
+//! the external face gauge, the worker-health, per-worker state and acceptance
+//! gauges and the
 //! discovery's own health, so an empty or unprobed pool, an unusable external
 //! face and the reason for each are observable in Prometheus, not only
 //! through readiness. A shard's stall and its recovery are logged once.
@@ -67,16 +68,19 @@ impl HealthSampler {
                 );
             }
         }
-        let (mut alive, mut unknown, mut dead, mut accepting) = (0, 0, 0, 0);
-        for w in self.registry.snapshot() {
+        let (mut alive, mut slow, mut unknown, mut dead, mut accepting) = (0, 0, 0, 0, 0);
+        let workers = self.registry.snapshot();
+        for w in &workers {
             match w.health {
                 WorkerHealth::Alive => alive += 1,
+                WorkerHealth::Slow => slow += 1,
                 WorkerHealth::Unknown => unknown += 1,
                 WorkerHealth::Dead => dead += 1,
             }
             accepting += u64::from(w.accepts_new_calls());
         }
-        m.set_worker_health_counts(alive, unknown, dead);
+        m.set_worker_health_counts(alive, slow, unknown, dead);
+        m.set_worker_states(workers.iter().map(|w| (w.id.as_str(), w.health)));
         m.set_worker_acceptance_counts(accepting, alive - accepting);
         m.set_routing_on_answers(self.registry.routes_on_answers());
         match self.discovery.as_ref().map(|watch| watch.watch_health()) {

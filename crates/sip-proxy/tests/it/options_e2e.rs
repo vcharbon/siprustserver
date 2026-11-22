@@ -127,7 +127,12 @@ async fn probed(name: &str, mode: Mode) -> Probed {
         observer.clone(),
         Clock::test_at(0),
         Arc::new(IdGen::seeded(1)),
-        HealthProbeConfig { interval_ms: 30, timeout_ms: 40, threshold: 2 },
+        HealthProbeConfig {
+            interval_ms: 30,
+            timeout_ms: 40,
+            threshold: 2,
+            ..HealthProbeConfig::default()
+        },
     );
     let task = tokio::spawn(probe.run());
     Probed { h, registry, observer, worker, task }
@@ -227,7 +232,12 @@ async fn a_restart_answered_200_is_read_alive_in_one_write() {
         observer,
         Clock::test_at(0),
         Arc::new(IdGen::seeded(4)),
-        HealthProbeConfig { interval_ms: 30, timeout_ms: 40, threshold: 2 },
+        HealthProbeConfig {
+            interval_ms: 30,
+            timeout_ms: 40,
+            threshold: 2,
+            ..HealthProbeConfig::default()
+        },
     );
     let task = tokio::spawn(probe.run());
     wait_for_view(&registry, (WorkerHealth::Alive, Acceptance::Accept)).await;
@@ -328,6 +338,9 @@ impl sip_proxy::registry::control::WorkerRegistryControl for RecordingControl {
         self.writes.lock().unwrap().extend(health);
         self.inner.set_view(worker_id, health, acceptance);
     }
+    fn note_late_answer(&self, worker_id: &str, fresh_for: std::time::Duration) {
+        self.inner.note_late_answer(worker_id, fresh_for);
+    }
 }
 
 /// The probe rides the transaction layer: Timer E retransmits the OPTIONS at
@@ -383,7 +396,12 @@ async fn single_packet_loss_is_absorbed_by_timer_e_retransmit() {
         observer,
         Clock::test_at(0),
         Arc::new(IdGen::seeded(2)),
-        HealthProbeConfig { interval_ms: 1_000, timeout_ms: 800, threshold: 1 },
+        HealthProbeConfig {
+            interval_ms: 1_000,
+            timeout_ms: 800,
+            threshold: 1,
+            ..HealthProbeConfig::default()
+        },
     );
     let probe_task = tokio::spawn(probe.run());
 

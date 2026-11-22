@@ -47,6 +47,9 @@ impl WorkerRegistry for PanicsOnce {
     fn read_dead_now(&self) -> Vec<String> {
         Vec::new()
     }
+    fn read_recovered(&self) -> tokio::sync::broadcast::Receiver<String> {
+        tokio::sync::broadcast::channel(1).1
+    }
 }
 
 /// The first sweep, a period in, panics; the restarted run sweeps a restart

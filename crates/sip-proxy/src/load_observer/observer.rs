@@ -32,6 +32,8 @@ pub enum AimdAction {
     Cooldown,
     /// `sweep_stale` fired (no fresh payload within `payload_stale_ms`).
     StaleDecrease,
+    /// The worker turned `Alive` from `Dead` or `Slow`: the cap restarted low.
+    Restart,
 }
 
 /// One AIMD bucket's state, as the tests read it.
@@ -334,6 +336,21 @@ impl WorkerLoadObserver {
     /// worker churn (nothing else ever removes an entry).
     pub fn retain(&self, keep: impl Fn(&str) -> bool) {
         locked(&self.workers, LOAD_OBSERVER).retain(|id, _| keep(id));
+    }
+
+    /// The worker turned `Alive` from `Dead` or `Slow` (ADR-0069): its cap
+    /// restarts at `cap_restart_pct` of `cap_initial_cps`, never below the
+    /// floor, its band and cooldown kept, so the AIMD steps climb from there
+    /// and a recovered worker is not handed its peers' whole load at once.
+    pub fn restart_cap(&self, worker_id: &str, now_ms: i64) {
+        let c = &self.config;
+        let cap = c.cap_floor_cps.max(c.cap_initial_cps * c.cap_restart_pct / 100.0);
+        let mut workers = locked(&self.workers, LOAD_OBSERVER);
+        let state = workers
+            .entry(worker_id.to_string())
+            .or_insert_with(|| WorkerState::fresh(&self.config, now_ms));
+        state.set_cap(cap, now_ms);
+        state.last_action = AimdAction::Restart;
     }
 
     /// Forget a worker's state: a recreated worker (same ordinal, new host)

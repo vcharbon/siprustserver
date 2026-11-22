@@ -184,7 +184,8 @@ impl ProxyCore {
 
     /// The node a request goes to whose transaction already went to `went`:
     /// with no `cookie`, `went` itself; with one, `went` while it is the
-    /// address of an alive worker the cookie names, else where the cookie
+    /// address of a worker the cookie names that serves its dialogs (`Alive` or
+    /// `Slow`), else where the cookie
     /// places the call now — whatever the registry remembers of `went`, a
     /// departed address being forgotten after its window or bound by another
     /// worker since. `None`: the cookie verified and names no alive worker. A
@@ -204,7 +205,7 @@ impl ProxyCore {
             .into_iter()
             .flatten()
             .filter_map(|id| self.registry.resolve(id))
-            .any(|w| w.address == went && w.is_alive());
+            .any(|w| w.address == went && w.serves_dialogs());
         if live_there {
             return Some(went);
         }

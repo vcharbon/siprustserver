@@ -150,3 +150,41 @@ async fn a_worker_already_dead_is_no_new_verdict() {
     );
     f.task.abort();
 }
+
+/// A `Slow` worker is told a dead verdict as an `Alive` one is (ADR-0069).
+#[tokio::test(start_paused = true)]
+async fn a_dead_verdict_reaches_a_slow_worker() {
+    let f = three_alive_workers().await;
+    f.registry.set_health("w2", WorkerHealth::Slow);
+    f.registry.set_health("w1", WorkerHealth::Dead);
+    for worker in [&f.workers[1], &f.workers[2]] {
+        let req = received(worker.as_ref()).await.expect("told");
+        assert_eq!(dead_notice(&req).expect("a notice").notice.ordinal, "w1");
+    }
+    f.task.abort();
+}
+
+/// A worker turning `Alive` from `Slow` is told every verdict standing then,
+/// at the instant it turned, whatever it was told while slow.
+#[tokio::test(start_paused = true)]
+async fn a_worker_turning_alive_from_slow_is_told_the_standing_verdicts_again() {
+    let f = three_alive_workers().await;
+    f.registry.set_health("w2", WorkerHealth::Slow);
+    f.registry.set_health("w1", WorkerHealth::Dead);
+    assert!(received(f.workers[1].as_ref()).await.is_some(), "told while slow");
+    tokio::time::advance(Duration::from_secs(5)).await;
+    f.registry.set_health("w2", WorkerHealth::Alive);
+    let mut retold = None;
+    for _ in 0..64 {
+        let Some(req) = received(f.workers[1].as_ref()).await else { break };
+        let notice = dead_notice(&req).expect("a notice").notice;
+        if notice.at_ms > 1_000 {
+            retold = Some(notice);
+            break;
+        }
+    }
+    let retold = retold.expect("the standing verdict is told again");
+    assert_eq!(retold.ordinal, "w1");
+    assert!(retold.at_ms >= 6_000, "told at the turn, {}", retold.at_ms);
+    f.task.abort();
+}

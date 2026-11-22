@@ -65,6 +65,9 @@ impl sip_proxy::registry::control::WorkerRegistryControl for RecordingControl {
         }
         self.inner.set_view(worker_id, health, acceptance);
     }
+    fn note_late_answer(&self, worker_id: &str, fresh_for: std::time::Duration) {
+        self.inner.note_late_answer(worker_id, fresh_for);
+    }
 }
 
 /// Spawn a responder that answers every OPTIONS with 200 OK, but only AFTER
@@ -260,7 +263,12 @@ async fn late_replies_past_the_reap_window_keep_the_worker_alive() {
         control,
         observer.clone(),
         1,
-        HealthProbeConfig { interval_ms: 50, timeout_ms: 600, threshold: 3 },
+        HealthProbeConfig {
+            interval_ms: 50,
+            timeout_ms: 600,
+            threshold: 3,
+            ..HealthProbeConfig::default()
+        },
     )
     .await;
 
@@ -304,7 +312,12 @@ async fn stable_alive_across_sustained_late_replies() {
         control,
         observer,
         2,
-        HealthProbeConfig { interval_ms: 50, timeout_ms: 600, threshold: 3 },
+        HealthProbeConfig {
+            interval_ms: 50,
+            timeout_ms: 600,
+            threshold: 3,
+            ..HealthProbeConfig::default()
+        },
     )
     .await;
 
@@ -355,7 +368,12 @@ async fn uncorrelated_reply_cannot_revive_dead_worker_correlated_one_does() {
         control,
         observer,
         3,
-        HealthProbeConfig { interval_ms: 20, timeout_ms: 200, threshold: 2 },
+        HealthProbeConfig {
+            interval_ms: 20,
+            timeout_ms: 200,
+            threshold: 2,
+            ..HealthProbeConfig::default()
+        },
     )
     .await;
 
@@ -409,7 +427,12 @@ async fn branch_correlated_reply_from_moved_worker_cannot_revive() {
         control,
         observer,
         4,
-        HealthProbeConfig { interval_ms: 30, timeout_ms: 600, threshold: 2 },
+        HealthProbeConfig {
+            interval_ms: 30,
+            timeout_ms: 600,
+            threshold: 2,
+            ..HealthProbeConfig::default()
+        },
     )
     .await;
 

@@ -20,6 +20,7 @@ mod intake;
 mod overload;
 mod parse;
 mod rejects;
+mod slow;
 pub use branch_memo::{BRANCH_MEMO, BRANCH_MEMO_BYTES, BRANCH_MEMO_EVICTIONS};
 pub use intake::{INTAKE_SHED, INTAKE_UNANSWERABLE};
 pub use overload::{
@@ -27,6 +28,7 @@ pub use overload::{
 };
 pub use parse::{PARSE_ERRORS, PARSE_PANICS, PARSE_REFUSALS_ANSWERED, PARSE_REFUSALS_CAPPED};
 pub use rejects::REJECTS;
+pub use slow::{PROBE_LATE_ANSWERS, SLOW_MAX_DEAD, WORKER_SLOW, WORKER_STATE};
 
 /// `direction:result`, every direction then every result.
 const MESSAGE_LABELS: [&str; Direction::ALL.len() * MessageResult::ALL.len()] = [
@@ -87,7 +89,7 @@ const NO_TARGET_DROP_VALUES: [&str; 3] = label_values!(NoTargetDrop::ALL, NoTarg
 const SHED_REASON_VALUES: [&str; 2] = label_values!(ShedReason::ALL, ShedReason::label);
 
 /// A worker's health state, in the order the registry counts them.
-pub const HEALTH_STATES: [&str; 3] = ["alive", "unknown", "dead"];
+pub const HEALTH_STATES: [&str; 4] = ["alive", "slow", "unknown", "dead"];
 
 /// An alive worker's acceptance of new calls, in the order the registry
 /// counts them.
@@ -302,7 +304,7 @@ pub const ROUTING_ON_ANSWERS: Family = Family::gauge(
 pub const WORKER_POOL_EMPTY: Family = Family::gauge(
     "sip_proxy_worker_pool_empty",
     Labels::None,
-    "1 iff no worker is Alive (routable) — the proxy can serve no new dialog.",
+    "1 iff no worker is Alive: the proxy places no new normal dialog (an emergency one goes to a slow worker).",
 );
 
 pub const DISCOVERY_NO_CLIENT: Family = Family::gauge(
@@ -450,6 +452,10 @@ pub const PROXY: &[Family] = &[
     LB_RATE_CAP_SPILLED,
     WORKER_HEALTH,
     WORKER_ACCEPTANCE,
+    WORKER_STATE,
+    WORKER_SLOW,
+    PROBE_LATE_ANSWERS,
+    SLOW_MAX_DEAD,
     PEER_FAILURES,
     PEER_FAILURES_OVERFLOW,
 ];

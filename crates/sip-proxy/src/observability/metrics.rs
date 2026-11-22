@@ -22,6 +22,7 @@ mod parse;
 mod pool;
 mod readers;
 mod slots;
+mod slow;
 mod udp_shard;
 use crate::resolver::{outcome, refresh_outcome};
 pub use face::{Face, UntrustedClaim};
@@ -31,6 +32,7 @@ pub use no_target::NoTargetDrop;
 use overload::OverloadCounts;
 use parse::ParseCounts;
 use slots::{bump, read};
+pub use slow::health_label;
 pub use udp_shard::UdpShardStats;
 
 /// Inbound vs outbound: the first half of `sip_messages_total`'s
@@ -185,6 +187,8 @@ pub struct ProxyMetrics {
     intake: IntakeCounts,
     /// The worker pool: health counts, empty, discovery health.
     pool: pool::PoolGauges,
+    /// The slow axis of worker health, per worker.
+    slow: slow::SlowCounts,
     /// Recv shards currently past the stall threshold (see `liveness`).
     recv_shards_stalled: AtomicU64,
     /// 1 while the external face is usable (or unchecked).
@@ -228,6 +232,7 @@ impl Default for ProxyMetrics {
             udp_shards: Default::default(),
             intake: Default::default(),
             pool: Default::default(),
+            slow: Default::default(),
             recv_shards_stalled: Default::default(),
             external_face_usable: AtomicU64::new(1),
             routing_on_answers: AtomicU64::new(0),
@@ -403,6 +408,7 @@ impl ProxyMetrics {
         self.overload.render(&mut s);
 
         self.pool.render_health(&mut s);
+        self.slow.render(&mut s);
 
         self.per_peer.render(&mut s);
         s
