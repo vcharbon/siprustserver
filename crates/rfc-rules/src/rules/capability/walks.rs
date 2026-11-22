@@ -27,6 +27,10 @@ pub(super) struct Rejectable<'a> {
     pub(super) on_ended_dialog: bool,
 }
 
+/// `(socket, dialog)`: each socket of both ends of a dialog a 2xx to a BYE
+/// ended, with that dialog ([`dialog_of`]), from that 2xx on.
+type EndedDialogs<'a> = BTreeSet<(&'a str, (&'a str, [&'a str; 2]))>;
+
 /// The dialog a message names, `(Call-ID, tags)` with its two tags in a fixed
 /// order, so both directions of the dialog name it alike; `None` without
 /// both tags.
@@ -63,9 +67,7 @@ pub(super) fn rejections<'a>(
     let mut occasions: Vec<Rejectable<'a>> = Vec::new();
     let mut opened: BTreeMap<TxnKey<'a>, usize> = BTreeMap::new();
     let mut answers: BTreeMap<TxnKey<'a>, Answer> = BTreeMap::new();
-    // `(socket, dialog)`: each socket of both ends of a dialog a 2xx to a BYE
-    // ended, from that 2xx on.
-    let mut ended: BTreeSet<(&'a str, (&'a str, [&'a str; 2]))> = BTreeSet::new();
+    let mut ended: EndedDialogs<'a> = BTreeSet::new();
     for (mi, msg) in wire.msgs.iter().enumerate() {
         let ends_dialog = msg.cseq_method.eq_ignore_ascii_case("BYE")
             && msg.status().is_some_and(|s| (200..300).contains(&s));
