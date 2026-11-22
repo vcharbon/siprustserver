@@ -64,7 +64,9 @@ callee's 200, which may overtake the caller's ACK of the promoted 200: the resyn
 in the promotion's state (`PendingResync`) and leaves on that ACK (`promote-resync-on-a-ack`).
 The transfer's a-realign, due while a 2xx this side sent the originator awaits her ACK, waits
 the same way in the transfer state and leaves on that ACK (`transfer-a-realign-on-a-ack`),
-bounded by its re-INVITE watchdog. A refusal met later is a rule defect, ticketed on its own.
+bounded by its re-INVITE watchdog. The release reroute's a-realign waits the same way in the
+reroute state (`reroute-a-realign-on-a-ack`), bounded by the reroute guard. A refusal met later
+is a rule defect, ticketed on its own.
 
 The transfer realign does not wait for a re-INVITE of the originator's own that is still
 relayed and unanswered when its realign is due: that realign is refused, and the transfer

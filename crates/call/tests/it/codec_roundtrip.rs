@@ -63,10 +63,11 @@ fn service_timer_entry_round_trips_with_its_key_and_generation() {
 /// the in-flight `reroute` slice are ordinary replicated `Call` fields — a
 /// restored record must keep honoring the subscription and be able to resume /
 /// tear down a mid-reroute call. Round-trips through the production msgpack
-/// codec across all three shapes (none / subscribed-idle / mid-reroute).
+/// codec across its shapes (none / subscribed-idle / mid-reroute / a-realign
+/// parked for A's ACK).
 #[test]
 fn release_subscriptions_and_reroute_round_trip() {
-    use call::{ReleaseEventKind, ReroutePhase, RerouteState};
+    use call::{PendingResync, ReleaseEventKind, ReroutePhase, RerouteState};
 
     let codec = MsgpackCodec::new();
     let mut call = representative_call();
@@ -87,9 +88,27 @@ fn release_subscriptions_and_reroute_round_trip() {
         new_leg_id: "b-2".into(),
         old_leg_id: Some("b-1".into()),
         started_at_ms: 1_779_440_099_000,
+        pending_a_realign: None,
     });
     let decoded = codec.decode(&codec.encode(&call).unwrap()).unwrap();
     assert_eq!(decoded, call, "mid-reroute shape");
+
+    call.reroute = Some(RerouteState {
+        phase: ReroutePhase::ARealigning,
+        new_leg_id: "b-2".into(),
+        old_leg_id: Some("b-1".into()),
+        started_at_ms: 1_779_440_099_000,
+        pending_a_realign: Some(Box::new(PendingResync {
+            leg_id: "b-2".into(),
+            body: b"v=0\r\n".to_vec(),
+            lines: vec![call::SipHeader {
+                name: "Content-Type".into(),
+                value: "application/sdp".into(),
+            }],
+        })),
+    });
+    let decoded = codec.decode(&codec.encode(&call).unwrap()).unwrap();
+    assert_eq!(decoded, call, "a-realign parked for A's ACK shape");
 }
 
 /// The decision log and the ordinal stamped on events and ring entries are

@@ -4,7 +4,6 @@
 //! (begin-termination BYEs A, B and C).
 
 use b2bua_sdk::sm_rule;
-use call::helpers::InviteInProgress;
 use call::{CdrEventType, Direction, LegState, TerminationCause, TimeoutKind, TransferPhase};
 use sip_message::{Method, SipResponse};
 
@@ -80,7 +79,7 @@ pub(super) fn c_realign_200() -> RuleDefinition {
                 RuleAction::cancel(TimerKey::leg(call::TimerType::ReferReinviteAnswer, &c_leg_id)),
                 RuleAction::arm(TimerKey::leg(call::TimerType::ReferReinviteAnswer, "a"), watchdog),
             ];
-            if her_ack_awaited(ctx) {
+            if pending_reinvite::her_ack_awaited(ctx) {
                 let parked = pending_reinvite::park(&c_leg_id, &c_realign_sdp, resp.headers());
                 new_state.pending_a_realign = Some(Box::new(parked));
             } else {
@@ -97,16 +96,6 @@ pub(super) fn c_realign_200() -> RuleDefinition {
 /// The a-realign re-INVITE toward A, offering `body`.
 fn a_realign(body: Body) -> RuleAction {
     RuleAction::SendReinvite { leg_id: "a".to_string(), body: Some(body), add_headers: vec![] }
-}
-
-/// Whether a 2xx this stack sent A awaits her ACK: an INVITE transaction is
-/// in progress on her dialog until it arrives, and no re-INVITE of this
-/// stack's may leave there (RFC 3261 §14.1).
-fn her_ack_awaited(ctx: &RuleContext) -> bool {
-    matches!(
-        ctx.call.invite_in_progress("a"),
-        Some(InviteInProgress::AnsweredUnacknowledged { .. })
-    )
 }
 
 /// transfer-a-realign-on-a-ack — A's ACK while the a-realign re-INVITE waits

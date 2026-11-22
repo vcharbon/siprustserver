@@ -1,10 +1,22 @@
 //! A re-INVITE toward the originator that waits in a service's state for her
-//! ACK of a 2xx this stack sent her (RFC 3261 §14.1, ADR-0064 §3): what it
-//! keeps of the message whose description it offers, and the lines it reads
-//! back when it leaves.
+//! ACK of a 2xx this stack sent her (RFC 3261 §14.1, ADR-0064 §3): when it
+//! waits, what it keeps of the message whose description it offers, and the
+//! lines it reads back when it leaves.
 
+use b2bua_sdk::model::RuleContext;
+use call::helpers::InviteInProgress;
 use call::PendingResync;
 use sip_message::{SipHeader, SipStr};
+
+/// Whether a 2xx this stack sent A awaits her ACK: an INVITE transaction is
+/// in progress on her dialog until it arrives, and no re-INVITE of this
+/// stack's may leave there (RFC 3261 §14.1).
+pub(crate) fn her_ack_awaited(ctx: &RuleContext) -> bool {
+    matches!(
+        ctx.call.invite_in_progress("a"),
+        Some(InviteInProgress::AnsweredUnacknowledged { .. })
+    )
+}
 
 /// The re-INVITE offering `body`, written by the peer of `leg_id`, with the
 /// lines of `headers` that describe it or state its sender's advertisement.

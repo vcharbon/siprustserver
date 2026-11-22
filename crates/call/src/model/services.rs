@@ -87,7 +87,8 @@ pub enum ReleaseEventKind {
 pub enum ReroutePhase {
     /// Replacement b-leg INVITE sent, awaiting its final response.
     BLegDialing,
-    /// Re-INVITE toward A with the replacement leg's answer SDP in flight.
+    /// Re-INVITE toward A with the replacement leg's answer SDP in flight, or
+    /// parked until A's ACK ([`RerouteState::pending_a_realign`]).
     ARealigning,
 }
 
@@ -106,6 +107,12 @@ pub struct RerouteState {
     pub old_leg_id: Option<String>,
     /// Wall-clock ms when the reroute was applied.
     pub started_at_ms: i64,
+    /// The a-realign re-INVITE the replacement leg's 2xx called for while A's
+    /// ACK of a 2xx this stack sent her was awaited: it leaves on that ACK
+    /// (RFC 3261 §14.1). Boxed: every turn future holding a call carries its
+    /// size.
+    #[serde(default)]
+    pub pending_a_realign: Option<Box<PendingResync>>,
 }
 
 /// Runtime state for the `relayFirst18xTo180` service. Strategy itself lives on
@@ -156,7 +163,8 @@ pub struct PromotePemState {
 /// (RFC 3261 §14.1): the description it offers and the lines of the message
 /// that carried it that describe it or state its sender's advertisement. The
 /// promotion's resync offers B's final description, the transfer's a-realign
-/// the description of C's c-realign 2xx.
+/// the description of C's c-realign 2xx, the release reroute's a-realign the
+/// description of the replacement leg's 2xx.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingResync {
     /// The leg whose peer wrote the description.

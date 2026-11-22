@@ -15,8 +15,10 @@
 //!     body), on its 2xx ACK it and **re-INVITE the a-leg** with the new
 //!     leg's answer SDP (the bridge — same one-way-audio discipline as the
 //!     REFER machine's a-realign, `refer_transfer.rs`), and on A's 2xx
-//!     `Merge(a, new)` + **BYE the old b-leg**. The whole treatment is
-//!     bounded by one overall guard timer (`release_reroute_guard_sec`).
+//!     `Merge(a, new)` + **BYE the old b-leg**. While a 2xx this stack sent
+//!     A awaits her ACK, that re-INVITE waits in the slice and leaves on the
+//!     ACK (ADR-0064 §3). The whole treatment is bounded by one overall guard
+//!     timer (`release_reroute_guard_sec`).
 //!
 //! **Failure policy (documented choice):** any failure of the treatment — the
 //! replacement leg rejects / never answers, A rejects the realign re-INVITE,
@@ -46,9 +48,11 @@ use call::{
 };
 
 use b2bua_sdk::model::{
-    Body, LegEnd, Match, RuleAction, RuleContext, RuleDefinition, RuleHandleResult, TimerDelay,
-    CORE_LAYER,
+    Body, LegEnd, Match, MessageTransform, RuleAction, RuleContext, RuleDefinition,
+    RuleHandleResult, TimerDelay, CORE_LAYER,
 };
+
+use super::pending_reinvite;
 
 /// The duration cap the reroute's features arm at the replacement leg's
 /// answer: under the answer anchor (`MaxDurationAnchor`), where the fold did
@@ -122,6 +126,40 @@ fn release_fold_cause(payload: &serde_json::Value) -> TerminationCause {
     match event {
         ReleaseEventKind::MaxCallDuration => TerminationCause::MaxDuration,
     }
+}
+
+/// The a-realign re-INVITE toward A, offering `body`.
+fn a_realign(body: Body) -> RuleAction {
+    RuleAction::SendReinvite { leg_id: "a".to_string(), body: Some(body), add_headers: vec![] }
+}
+
+/// `reroute-a-realign-on-a-ack` — A's ACK while the a-realign re-INVITE waits
+/// for it (`reroute-b-200`): the ACK is relayed to her peer, still the
+/// displaced b-leg, as `relay-ack` relays it, then the parked re-INVITE
+/// leaves, carrying the description of the replacement leg's 2xx (ADR-0064
+/// §3). It matches once that ACK discharged the awaited 2xx, so a re-INVITE
+/// may leave her dialog; any other ACK of hers is `relay-ack`'s, and the
+/// reroute guard bounds the wait.
+fn a_realign_on_a_ack() -> RuleDefinition {
+    rule(
+        "reroute-a-realign-on-a-ack",
+        &["relay-ack"],
+        Match::request().method("ACK").direction(Direction::FromA).filter(|ctx| {
+            ctx.call.reroute_state().is_some_and(|r| r.pending_a_realign.is_some())
+                && ctx.call.invite_in_progress("a").is_none()
+        }),
+        |ctx| {
+            let mut st = ctx.call.reroute_state()?.clone();
+            let parked = st.pending_a_realign.take()?;
+            let lines = pending_reinvite::lines(&parked);
+            let body = Body::from_leg(parked.body, parked.leg_id).described_by(&lines);
+            ok(vec![
+                RuleAction::RelayToPeer { transform: MessageTransform::default() },
+                a_realign(body),
+                RuleAction::SetReroute { state: Some(st) },
+            ])
+        },
+    )
 }
 
 /// The release/reroute rule set (CORE; registered before the generic core
@@ -225,6 +263,7 @@ pub fn release_reroute_rules() -> Vec<RuleDefinition> {
                         new_leg_id,
                         old_leg_id,
                         started_at_ms: ctx.now_ms,
+                        pending_a_realign: None,
                     }),
                 });
                 // One overall guard bounding the whole treatment (dial +
@@ -259,31 +298,35 @@ pub fn release_reroute_rules() -> Vec<RuleDefinition> {
                 new_state.phase = ReroutePhase::ARealigning;
                 let cap = cap_at_answer(ctx)
                     .map(|delay| RuleAction::arm(TimerKey::call(TimerType::GlobalDuration), delay));
-                ok(cap
+                let mut actions: Vec<RuleAction> = cap
                     .into_iter()
                     .chain([
                         RuleAction::ConfirmDialog { leg_id: new_leg.clone() },
                         RuleAction::AckLeg { leg_id: new_leg.clone(), body: None },
                         RuleAction::cancel(TimerKey::leg(TimerType::NoAnswer, &new_leg)),
-                        RuleAction::SendReinvite {
-                            leg_id: "a".to_string(),
-                            body: Some(
-                                Body::from_leg(resp.body().to_vec(), new_leg.clone())
-                                    .described_by(resp.headers()),
-                            ),
-                            add_headers: vec![],
-                        },
-                        RuleAction::AddCdrEvent {
-                            event_type: CdrEventType::Answer,
-                            leg_id: new_leg,
-                            status_code: Some(200),
-                            reason: Some("release-reroute".into()),
-                        },
-                        RuleAction::SetReroute { state: Some(new_state) },
                     ])
-                    .collect())
+                    .collect();
+                if pending_reinvite::her_ack_awaited(ctx) {
+                    let parked = pending_reinvite::park(&new_leg, resp.body(), resp.headers());
+                    new_state.pending_a_realign = Some(Box::new(parked));
+                } else {
+                    let body = Body::from_leg(resp.body().to_vec(), new_leg.clone())
+                        .described_by(resp.headers());
+                    actions.push(a_realign(body));
+                }
+                actions.extend([
+                    RuleAction::AddCdrEvent {
+                        event_type: CdrEventType::Answer,
+                        leg_id: new_leg,
+                        status_code: Some(200),
+                        reason: Some("release-reroute".into()),
+                    },
+                    RuleAction::SetReroute { state: Some(new_state) },
+                ]);
+                ok(actions)
             },
         ),
+        a_realign_on_a_ack(),
         // ── replacement leg fails (3xx–6xx) → the documented fail-teardown.
         rule(
             "reroute-b-fail",
