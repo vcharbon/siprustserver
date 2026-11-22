@@ -4,9 +4,10 @@
 //! after it, and its 200 to the CANCEL reaches her first (RFC 3261 §9.2);
 //! the 2xx goes again on its retransmission timer (§13.3.1.4) and she ACKs
 //! it and hangs up. The B2BUA answered before it settled the CANCEL, so the
-//! call is answered despite the CANCEL. The same 2xx held back past the
-//! CANCEL's 200 with nothing lost arrives after the CANCEL was settled: no
-//! accepted ending; so is the lost 2xx on a run that declares no loss model.
+//! call is answered despite the CANCEL. On a run that declares no loss model
+//! the judge stays strict: the same 2xx held back past the CANCEL's 200 with
+//! nothing lost, or lost with no loss noted, arrives after the CANCEL was
+//! settled: no accepted ending.
 
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -95,6 +96,10 @@ fn assert_no_accepted_ending(verdict: &ScenarioVerdict) {
     assert_eq!(detail, "the call ended on no accepted branch");
 }
 
+/// A 2xx held back past the CANCEL's 200 on a run that declares no loss
+/// model: the judge stays strict, and the 2xx reads as arriving after the
+/// CANCEL was settled. The fuzz lane's loss model never holds a 2xx to an
+/// INVITE.
 #[tokio::test(start_paused = true)]
 async fn a_2xx_held_past_the_cancel_final_with_nothing_lost_is_no_accepted_ending() {
     let h = Harness::with_transit_delay_and_send_delay(

@@ -3,7 +3,9 @@
 //! it out (§17). The faults stay inside what SIP recovers from: a hold of 2 s
 //! at most (under 64·T1), only on a response or an ACK, never on a reliable
 //! provisional, whose PRACK is owed only if it arrives before the final
-//! (RFC 3262 §4). A loss is recoverable: only a message's first copy may be
+//! (RFC 3262 §4), nor on a 2xx to an INVITE, which a hold could carry past
+//! the final to the caller's CANCEL with no loss to explain the order
+//! (RFC 3261 §9.2). A loss is recoverable: only a message's first copy may be
 //! lost, never a retransmission, so one retransmission recovers each loss,
 //! and never a provisional response sent unreliably, which nothing
 //! retransmits.
@@ -58,9 +60,10 @@ impl Tally {
 }
 
 /// Whether a hold keeps `raw` within what SIP recovers from: a response that
-/// is not a reliable provisional, or an ACK.
+/// is neither a reliable provisional nor a 2xx to an INVITE, or an ACK.
 fn holdable(raw: &[u8]) -> bool {
     match sip_message::sniff::resp_status(raw) {
+        Some(200..=299) => sip_message::sniff::cseq_method_token(raw).as_deref() != Some("INVITE"),
         Some(status) => status >= 200 || sip_message::sniff::header_value(raw, "RSeq").is_none(),
         None => sip_message::sniff::req_method(raw).as_deref() == Some("ACK"),
     }
@@ -187,5 +190,62 @@ mod tests {
         let delivered = vec![Fate::Deliver; 4];
         let sent = [TRYING, RINGING, TRYING, RINGING];
         assert_eq!(fates_losing_all(&sent), (delivered, String::new()));
+    }
+
+    /// On a fabric that holds every datagram it may, a 2xx to an INVITE and
+    /// a reliable provisional arrive in turn; a 2xx to a CANCEL, a non-2xx
+    /// final, an unreliable provisional and an ACK are held.
+    #[test]
+    fn a_2xx_to_an_invite_is_never_held() {
+        const CANCEL_OK: &[u8] = b"SIP/2.0 200 OK\r\nVia: SIP/2.0/UDP 192.0.2.1;branch=z9hG4bK-1\r\nCSeq: 1 CANCEL\r\n\r\n";
+        const BUSY: &[u8] = b"SIP/2.0 486 Busy Here\r\nVia: SIP/2.0/UDP 192.0.2.1;branch=z9hG4bK-1\r\nCSeq: 1 INVITE\r\n\r\n";
+        const ACK: &[u8] = b"ACK sip:bob@192.0.2.2 SIP/2.0\r\nVia: SIP/2.0/UDP 192.0.2.1;branch=z9hG4bK-1\r\nCSeq: 1 ACK\r\n\r\n";
+        let fate = fate_of(Faults { drop: 0, late: 100 }, 1, Arc::new(Tally::default()));
+        let (a, b) = ("192.0.2.1:5060".parse().unwrap(), "192.0.2.2:5060".parse().unwrap());
+        let held = |raw: &[u8]| matches!(fate(b, a, raw), Fate::Late(_));
+        let sent = [OK, PROGRESS, CANCEL_OK, BUSY, RINGING, ACK];
+        let got: Vec<bool> = sent.iter().map(|raw| held(raw)).collect();
+        assert_eq!(got, [false, false, true, true, true, true]);
+    }
+
+    /// The `n`th request of a flow from 192.0.2.1, on a transaction of its own.
+    fn request(n: u32) -> Vec<u8> {
+        format!("OPTIONS sip:bob@192.0.2.2 SIP/2.0\r\nVia: SIP/2.0/UDP 192.0.2.1;branch=z9hG4bK-r{n}\r\nCSeq: {n} OPTIONS\r\n\r\n").into_bytes()
+    }
+
+    /// The `n`th final of a flow from 192.0.2.2, on a transaction of its own.
+    fn final_response(n: u32) -> Vec<u8> {
+        format!("SIP/2.0 486 Busy Here\r\nVia: SIP/2.0/UDP 192.0.2.2;branch=z9hG4bK-f{n}\r\nCSeq: {n} INVITE\r\n\r\n").into_bytes()
+    }
+
+    /// The fates of two flows, 192.0.2.1's requests and 192.0.2.2's finals,
+    /// sent one after the other or interleaved across the two senders, each
+    /// flow in its own order: `(requests' fates, finals' fates)`.
+    fn fates_of_two_flows(interleaved: bool) -> (Vec<Fate>, Vec<Fate>) {
+        let fate = fate_of(Faults { drop: 30, late: 30 }, 7, Arc::new(Tally::default()));
+        let (a, b) = ("192.0.2.1:5060".parse().unwrap(), "192.0.2.2:5060".parse().unwrap());
+        let (mut requests, mut finals) = (Vec::new(), Vec::new());
+        if interleaved {
+            for n in 1..=16 {
+                requests.push(fate(a, b, &request(n)));
+                finals.push(fate(b, a, &final_response(n)));
+            }
+        } else {
+            finals.extend((1..=16).map(|n| fate(b, a, &final_response(n))));
+            requests.extend((1..=16).map(|n| fate(a, b, &request(n))));
+        }
+        (requests, finals)
+    }
+
+    /// A datagram's fate follows from its place in its sender's flow alone:
+    /// two flows sent interleaved draw the same fates, each loss and each
+    /// hold's length, as the same flows sent one after the other.
+    #[test]
+    fn a_fate_is_the_same_whatever_the_order_of_sends_across_senders() {
+        let (requests, finals) = fates_of_two_flows(true);
+        assert_eq!((requests.clone(), finals.clone()), fates_of_two_flows(false));
+        let all = || requests.iter().chain(&finals);
+        assert!(all().any(|f| *f == Fate::Lose), "some datagram lost: {requests:?} {finals:?}");
+        assert!(all().any(|f| matches!(f, Fate::Late(_))), "some datagram held: {finals:?}");
     }
 }
