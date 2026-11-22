@@ -87,7 +87,7 @@ fn a_request_crossing_the_peers_own_bye_is_refused_and_no_finding() {
     for (crossed, finding) in [(true, false), (false, true)] {
         let mut t = ringing_uas(BackwardsCseq::Verdict);
         t.set_sent_before_end(crossing(PEERS_BYE_3, crossed));
-        t.set_lost_on_the_way(LostOnTheWay::new(|_, _, _| vec![(2, "INFO".to_string())]));
+        t.set_lost_on_the_way(LostOnTheWay::new(|_, _, _| vec![lost(2, "INFO")]));
         t.note_sent_response(&response(200, "INVITE", 1, "A1", "B1"), 0);
         let bye = t.judge_received(&request("BYE", 3, "A1", Some("B1")), 0).expect("a skip");
         assert!(!bye.kind.is_finding(), "{bye}");

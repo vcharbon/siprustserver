@@ -26,6 +26,16 @@ fn request(method: &str, cseq: u32, from_tag: &str, to_tag: Option<&str>) -> Sip
     request_through(method, cseq, from_tag, to_tag, 0)
 }
 
+/// The loss of a copy of the [`request`] numbered `cseq` of `method`, its
+/// top-Via branch included.
+fn lost(cseq: u32, method: &str) -> LostRequest {
+    LostRequest {
+        cseq,
+        method: method.to_string(),
+        branch: Some(format!("z9hG4bK-{cseq}{method}")),
+    }
+}
+
 /// [`request`] as it arrives through `proxies` hops, each stacking its Via on
 /// the sender's.
 fn request_through(

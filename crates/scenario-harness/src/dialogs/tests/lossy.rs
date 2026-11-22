@@ -3,12 +3,13 @@
 
 use super::*;
 
-/// A confirmed UAS whose table reads that the network lost `lost`, each a
-/// `(CSeq, method)` of the dialog `A1`/`B1`, on their way to it.
-fn uas_losing(lost: &'static [(u32, &'static str)]) -> DialogTable {
+/// A confirmed UAS whose table reads that the network lost on their way to
+/// it a copy of each [`request`] `losses` names by `(CSeq, method)` on the
+/// dialog `A1`/`B1`.
+fn uas_losing(losses: &'static [(u32, &'static str)]) -> DialogTable {
     let mut t = ringing_uas(BackwardsCseq::Verdict);
     t.set_lost_on_the_way(LostOnTheWay::new(move |call_id, from, to| match (call_id, from, to) {
-        (CALL, "A1", "B1") => lost.iter().map(|(c, m)| (*c, m.to_string())).collect(),
+        (CALL, "A1", "B1") => losses.iter().map(|(c, m)| lost(*c, m)).collect(),
         _ => Vec::new(),
     }));
     t.note_sent_response(&response(200, "INVITE", 1, "A1", "B1"), 0);
@@ -41,20 +42,21 @@ fn a_cseq_out_of_sequence_a_loss_explains_is_no_finding() {
     );
 }
 
-/// A loss explains only what it caused: a request going backwards whose own
-/// copy was not lost, a skip over no lost request, or a skip over a lost ACK
-/// (it carries its INVITE's number) stays a finding; and with no loss read at
-/// all, none is explained.
+/// A loss explains only what it caused: a skip over requests all lost is
+/// explained, but a request going backwards whose own copy was not lost (a
+/// lost request of another method had its number), or a skip over a lost
+/// ACK (it carries its INVITE's number), stays a finding; and with no loss
+/// read at all, none is explained.
 #[test]
 fn a_cseq_out_of_sequence_no_loss_explains_is_a_finding() {
-    let mut t = uas_losing(&[(2, "PRACK"), (6, "ACK")]);
+    let mut t = uas_losing(&[(2, "PRACK"), (3, "UPDATE"), (5, "ACK")]);
     assert!(t
         .judge_received(&request("INFO", 4, "A1", Some("B1")), 0)
         .is_some_and(|v| !v.kind.is_finding()));
     let v = t.judge_received(&request("INFO", 3, "A1", Some("B1")), 0).expect("backwards");
     assert_eq!(v.kind, VerdictKind::CseqBackwards { cseq: 3, last: 4 });
-    let v = t.judge_received(&request("INFO", 7, "A1", Some("B1")), 0).expect("a skip");
-    assert_eq!(v.kind, VerdictKind::CseqSkip { cseq: 7, last: 4 });
+    let v = t.judge_received(&request("INFO", 6, "A1", Some("B1")), 0).expect("a skip");
+    assert_eq!(v.kind, VerdictKind::CseqSkip { cseq: 6, last: 4 });
     let mut t = ringing_uas(BackwardsCseq::Verdict);
     t.note_sent_response(&response(200, "INVITE", 1, "A1", "B1"), 0);
     let v = t.judge_received(&request("UPDATE", 3, "A1", Some("B1")), 0).expect("the skip");

@@ -11,7 +11,12 @@ use layer_harness::{Recorder, RunContext};
 use sip_net::BindUdpOpts;
 use sip_net_testkit::{with_all_contracts, Fate, ScopedAuditOptions, SimulatedSignalingNetwork};
 
-use super::LostOnTheWay;
+use super::{LostOnTheWay, LostRequest};
+
+/// The loss of the PRACK numbered 2, its transaction's branch included.
+fn lost_prack_2() -> LostRequest {
+    LostRequest { cseq: 2, method: "PRACK".to_string(), branch: Some("z9hG4bK-2".to_string()) }
+}
 
 /// A request of the peer `S` to the UA `U`, From-tag `from`, To-tag `to`.
 fn request(method: &str, cseq: u32, from: &str, to: &str) -> String {
@@ -50,12 +55,12 @@ async fn lost_after(sent: &[String]) -> LostOnTheWay {
     LostOnTheWay::from_wire(wrapped.recording.channel())
 }
 
-/// The lost request is named by its CSeq and method on its own dialog; the
-/// one delivered after it is not lost.
+/// The lost request is named by its CSeq, method and top-Via branch on its
+/// own dialog; the one delivered after it is not lost.
 #[tokio::test(start_paused = true)]
 async fn the_lost_request_is_named_on_its_dialog() {
     let wire = lost_after(&[request("PRACK", 2, "S", "U"), request("UPDATE", 3, "S", "U")]).await;
-    assert_eq!(wire.lost("c1@host", "S", "U"), [(2, "PRACK".to_string())]);
+    assert_eq!(wire.lost("c1@host", "S", "U"), [lost_prack_2()]);
 }
 
 /// Another dialog's loss, or the other direction's, is none of this
@@ -66,5 +71,5 @@ async fn a_loss_on_another_dialog_is_not_this_dialogs() {
     assert!(wire.lost("c1@host", "S", "U").is_empty());
     assert!(wire.lost("c1@host", "U2", "S").is_empty());
     assert!(wire.lost("other@host", "S", "U2").is_empty());
-    assert_eq!(wire.lost("c1@host", "S", "U2"), [(2, "PRACK".to_string())]);
+    assert_eq!(wire.lost("c1@host", "S", "U2"), [lost_prack_2()]);
 }

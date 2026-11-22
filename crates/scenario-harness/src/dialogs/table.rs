@@ -206,7 +206,7 @@ impl DialogTable {
     }
 
     /// Read from `wire` which requests the network lost on their way to the
-    /// UA: a CSeq out of the remote sequence one of them explains is a
+    /// UA: a CSeq out of the remote sequence they explain is a
     /// [`VerdictKind::LossExplained`].
     pub fn set_lost_on_the_way(&mut self, wire: LostOnTheWay) {
         self.lost_on_the_way = Some(wire);
@@ -565,9 +565,10 @@ impl DialogTable {
             DialogState::Early | DialogState::Confirmed => None,
         };
         let early = state == DialogState::Early || matches!(crossed_by, Some(Some(_)));
+        let branch = top_via_branch(request);
         let broke = self
             .judge_in_sequence(&id, &method, cseq, early, now_us)
-            .map(|kind| self.explained_by_loss(&id, &method, kind));
+            .map(|kind| self.explained_by_loss(&id, &method, branch.as_deref(), kind));
         match crossed_by {
             Some(by) => Some(verdict(VerdictKind::Crossed { by, broke: broke.map(Box::new) })),
             None => broke.map(verdict),
@@ -619,22 +620,33 @@ impl DialogTable {
         }
     }
 
-    /// `kind`, the rule a `method` request on the dialog `id` broke, as a
-    /// [`VerdictKind::LossExplained`] when the wire record shows the network
-    /// lost on its way to the UA the request itself, for a CSeq gone
-    /// backwards (this is a retransmission of it, overtaken), or a request
-    /// numbered in the gap, for a CSeq skipping (RFC 3261 §12.2.2,
+    /// `kind`, the rule a `method` request of top-Via `branch` on the dialog
+    /// `id` broke, as a [`VerdictKind::LossExplained`] when the wire record
+    /// shows the network lost on its way to the UA a copy of the request
+    /// itself, its CSeq, method and branch, for a CSeq gone backwards (this
+    /// is a retransmission of it, overtaken); or, for a CSeq skipping, a
+    /// request numbered each number of the gap (RFC 3261 §12.2.2,
     /// §17.1.2.2). Any other kind, or one no loss explains, stays.
-    fn explained_by_loss(&self, id: &DialogId, method: &str, kind: VerdictKind) -> VerdictKind {
+    fn explained_by_loss(
+        &self,
+        id: &DialogId,
+        method: &str,
+        branch: Option<&str>,
+        kind: VerdictKind,
+    ) -> VerdictKind {
         let Some(wire) = &self.lost_on_the_way else { return kind };
         let lost = || wire.lost(&id.call_id, &id.remote, &id.local);
         let explained = match kind {
             VerdictKind::CseqBackwards { cseq, .. } => {
-                lost().iter().any(|(c, m)| *c == cseq && m == method)
+                lost().iter().any(|l| l.is_copy_of(cseq, method, branch))
             }
-            VerdictKind::CseqSkip { cseq, last } => lost().iter().any(|(c, m)| {
-                (last + 1..cseq).contains(c) && !matches!(m.as_str(), "ACK" | "CANCEL")
-            }),
+            VerdictKind::CseqSkip { cseq, last } => {
+                let lost = lost();
+                (last + 1..cseq).all(|n| {
+                    lost.iter()
+                        .any(|l| l.cseq == n && !matches!(l.method.as_str(), "ACK" | "CANCEL"))
+                })
+            }
             _ => false,
         };
         match explained {
