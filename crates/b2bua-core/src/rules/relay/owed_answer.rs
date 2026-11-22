@@ -130,8 +130,8 @@ pub(crate) fn owe_answer_in_ack(call: &mut Call, leg_id: &str, resp: &SipRespons
 /// answer to the offer `resp` made ([`offer_of_2xx`]): the obligation is armed
 /// under that INVITE's CSeq, the number the ACK this stack composes carries
 /// (RFC 3261 §13.2.2.4), until that ACK leaves with the answer another leg's
-/// response brings (`RuleAction::AckLegAnswering`), or rejecting every stream
-/// when the dialog is BYEd first (RFC 3264 §6, the BYE's own ACK).
+/// response brings (`RuleAction::AckLegAnswering`), or answering the offer on
+/// this stack's own account with every stream rejected (RFC 3264 §6).
 /// Requires `resp` to be a 2xx to that dialog's last sent INVITE, on that
 /// dialog: every rule emitting `AckLegAnswering` on the 2xx's own leg selects
 /// on both. Nothing where `resp` made no offer, or the dialog's obligation is
