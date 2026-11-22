@@ -24,6 +24,13 @@ import {
 
 const envelope = { schema: 5, groups: [], legs: [] }
 
+/**
+ * How long a window of 2 legs of a 30,100-leg capture may take to read and
+ * draw: a few milliseconds when its cost is per leg read, tens of seconds
+ * when every leg of the span is drawn, so a loaded box stays far below it.
+ */
+const DRAWN_WITHIN_MS = 5000
+
 const legOf = (index: number) => ({
   call_id: `call-${index}@10.0.0.1`,
   final_status: 200,
@@ -252,7 +259,7 @@ describe("windowedFlows", () => {
     const started = performance.now()
     const families = callIdFamilies(read.document)
     const layout = buildFlowsLayout(read.document, { title: "big" })
-    expect(performance.now() - started).toBeLessThan(500)
+    expect(performance.now() - started).toBeLessThan(DRAWN_WITHIN_MS)
     expect(families.families).toHaveLength(2)
     expect(layout.rows.map((row) => row.legIndex)).toEqual([20_000, 20_001])
     expect(layout.legs.map((leg) => leg.legIndex)).toEqual([20_000, 20_001])

@@ -16,15 +16,18 @@ import * as Liveness from "../src/liveness.js"
 const run = <A>(effect: Effect.Effect<A, never, FileSystem.FileSystem>) =>
   Effect.runPromise(effect.pipe(Effect.provide(NodeServices.layer)))
 
-/** Polls until `pid` is a zombie; its `/proc` stat fields from field 3 on. */
+/**
+ * Polls until `pid` is a zombie; its `/proc` stat fields from field 3 on.
+ * Fails as soon as `pid` is gone from `/proc`. The test's timeout is its only
+ * bound.
+ */
 const zombie = async (pid: number): Promise<Array<string>> => {
-  for (let at = 0; at < 200; at++) {
+  for (;;) {
     const stat = fs.readFileSync(`/proc/${pid}/stat`, "utf8")
     const fields = stat.slice(stat.lastIndexOf(")") + 2).split(" ")
     if (fields[0] === "Z") return fields
     await new Promise((resolve) => setTimeout(resolve, 25))
   }
-  throw new Error(`${pid} never became a zombie`)
 }
 
 describe("Liveness", () => {
@@ -38,7 +41,7 @@ describe("Liveness", () => {
 
   it("reads an ended process its parent has not reaped as gone", async () => {
     // The inner shell ends at once; its parent, exec'd into sleep, never reaps it.
-    const parent = child_process.spawn("sh", ["-c", "sh -c 'exit 0' & echo $!; exec sleep 30"], {
+    const parent = child_process.spawn("sh", ["-c", "sh -c 'exit 0' & echo $!; exec sleep 3600"], {
       stdio: ["ignore", "pipe", "ignore"]
     })
     try {

@@ -28,35 +28,44 @@ afterEach(() => {
   for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true })
 })
 
-/** Polls until `dir` holds an exit code. */
+/** A pause between two looks at a detached command's record. */
+const poll = () => new Promise((resolve) => setTimeout(resolve, 25))
+
+/**
+ * Polls until `dir` holds an exit code; fails as soon as its supervisor no
+ * longer runs with none recorded. The test's timeout is its only bound.
+ */
 const exited = async (dir: string): Promise<number> => {
-  for (let at = 0; at < 200; at++) {
+  for (;;) {
+    const running = await run(Detached.running(dir))
     const code = await run(Detached.exitOf(dir))
     if (code !== undefined) return code
-    await new Promise((resolve) => setTimeout(resolve, 25))
+    if (!running) throw new Error(`${dir}'s supervisor stopped without recording an exit`)
+    await poll()
   }
-  throw new Error(`${dir} never recorded an exit`)
 }
 
 /**
  * Polls until the supervisor recorded under `dir` no longer runs: it outlives
- * the exit record it writes by its own last steps.
+ * the exit record it writes by its own last steps. The test's timeout is its
+ * only bound.
  */
 const stopped = async (dir: string): Promise<void> => {
-  for (let at = 0; at < 200; at++) {
-    if (!(await run(Detached.running(dir)))) return
-    await new Promise((resolve) => setTimeout(resolve, 25))
-  }
-  throw new Error(`${dir}'s supervisor never stopped`)
+  while (await run(Detached.running(dir))) await poll()
 }
 
-/** Polls until `dir`'s log holds `line`: the command has reached it. */
+/**
+ * Polls until `dir`'s log holds `line`: the command has reached it. Fails as
+ * soon as the command recorded its exit without it. The test's timeout is
+ * its only bound.
+ */
 const said = async (dir: string, line: string): Promise<void> => {
-  for (let at = 0; at < 200; at++) {
+  for (;;) {
+    const code = await run(Detached.exitOf(dir))
     if (fs.readFileSync(path.join(dir, "log"), "utf8").includes(line)) return
-    await new Promise((resolve) => setTimeout(resolve, 25))
+    if (code !== undefined) throw new Error(`${dir}'s command exited ${code} without saying ${line}`)
+    await poll()
   }
-  throw new Error(`${dir} never said ${line}`)
 }
 
 describe("Detached.launch", () => {
@@ -81,7 +90,7 @@ describe("Detached.launch", () => {
 
   it("takes a TERM to its group in the command and records the command's own exit; refuses a launch over a running record", async () => {
     const dir = dirOf()
-    const launched = await run(Detached.launch(dir, ["sh", "-c", "trap 'exit 7' TERM; echo ready; sleep 30 & wait"]))
+    const launched = await run(Detached.launch(dir, ["sh", "-c", "trap 'exit 7' TERM; echo ready; sleep 3600 & wait"]))
     await said(dir, "ready")
     expect(await run(Detached.running(dir))).toBe(true)
     const again = await Effect.runPromiseExit(
