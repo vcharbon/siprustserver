@@ -3,9 +3,12 @@
 //! it out (§17). The faults stay inside what SIP recovers from: a hold of 2 s
 //! at most (under 64·T1), only on a response or an ACK, never on a reliable
 //! provisional, whose PRACK is owed only if it arrives before the final
-//! (RFC 3262 §4). The fates are drawn from the call's seed in send order, so
-//! a call replays with its faults.
+//! (RFC 3262 §4). A loss is recoverable: only a message's first copy may be
+//! lost, never a retransmission, so one retransmission recovers each loss.
+//! The fates are drawn from the call's seed in send order, so a call replays
+//! with its faults.
 
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -59,12 +62,33 @@ fn holdable(raw: &[u8]) -> bool {
     }
 }
 
-/// The fate of each datagram of the call of `seed`, counted in `tally`.
+/// What makes a datagram a copy of one sent before: a request other than an
+/// ACK is retransmitted on its transaction, its top Via branch and method (a
+/// CANCEL shares its INVITE's branch, RFC 3261 §9.1); a response, an ACK, or
+/// a request naming no branch is retransmitted as the same bytes (§17).
+#[derive(Debug, PartialEq, Eq, Hash)]
+enum CopyKey {
+    Transaction { branch: String, method: String },
+    Bytes(Vec<u8>),
+}
+
+fn copy_key(raw: &[u8]) -> CopyKey {
+    let method = sip_message::sniff::req_method(raw).filter(|m| m != "ACK");
+    match (method, sip_message::sniff::via_branch(raw)) {
+        (Some(method), Some(branch)) => CopyKey::Transaction { branch, method },
+        _ => CopyKey::Bytes(raw.to_vec()),
+    }
+}
+
+/// The fate of each datagram of the call of `seed`, counted in `tally`: the
+/// first copy of a message draws its loss, a later copy is never lost.
 pub(super) fn fate_of(faults: Faults, seed: u64, tally: Arc<Tally>) -> SendFate {
     let rng = Mutex::new(Rng::new(seed ^ FAULT_SALT));
+    let sent = Mutex::new(HashSet::new());
     Arc::new(move |_src, _dst, raw| {
         let mut rng = rng.lock().expect("fault draws");
-        if rng.chance(faults.drop) {
+        let first_copy = sent.lock().expect("sent copies").insert(copy_key(raw));
+        if first_copy && rng.chance(faults.drop) {
             tally.lost.fetch_add(1, Ordering::Relaxed);
             return Fate::Lose;
         }
@@ -74,4 +98,30 @@ pub(super) fn fate_of(faults: Faults, seed: u64, tally: Arc<Tally>) -> SendFate 
         }
         Fate::Deliver
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const INVITE: &[u8] = b"INVITE sip:bob@192.0.2.2 SIP/2.0\r\nVia: SIP/2.0/UDP 192.0.2.1;branch=z9hG4bK-1\r\nCSeq: 1 INVITE\r\n\r\n";
+    const RETRY: &[u8] = b"INVITE sip:bob@192.0.2.2 SIP/2.0\r\nVia: SIP/2.0/UDP 192.0.2.1;branch=z9hG4bK-1;rport\r\nCSeq: 1 INVITE\r\n\r\n";
+    const CANCEL: &[u8] = b"CANCEL sip:bob@192.0.2.2 SIP/2.0\r\nVia: SIP/2.0/UDP 192.0.2.1;branch=z9hG4bK-1\r\nCSeq: 1 CANCEL\r\n\r\n";
+    const RINGING: &[u8] = b"SIP/2.0 180 Ringing\r\nVia: SIP/2.0/UDP 192.0.2.1;branch=z9hG4bK-1\r\nCSeq: 1 INVITE\r\n\r\n";
+
+    /// On a fabric that loses every datagram it may, the first copy of each
+    /// message is lost and every later copy of it delivered: a request
+    /// retransmitted on its transaction, a response sent again as the same
+    /// bytes. A CANCEL on its INVITE's branch is a message of its own.
+    #[test]
+    fn only_the_first_copy_of_a_message_is_lost() {
+        let tally = Arc::new(Tally::default());
+        let fate = fate_of(Faults { drop: 100, late: 0 }, 1, tally.clone());
+        let (a, b) = ("192.0.2.1:5060".parse().unwrap(), "192.0.2.2:5060".parse().unwrap());
+        let fates: Vec<Fate> =
+            [INVITE, RETRY, CANCEL, CANCEL, RINGING, RINGING].map(|raw| fate(a, b, raw)).into();
+        use Fate::{Deliver, Lose};
+        assert_eq!(fates, [Lose, Deliver, Lose, Deliver, Lose, Deliver]);
+        assert_eq!(tally.note(), " net(lost 3, held 0)");
+    }
 }
