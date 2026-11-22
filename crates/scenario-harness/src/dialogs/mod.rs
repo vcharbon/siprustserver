@@ -10,6 +10,8 @@
 //!   gated by the harness or handed to a driver.
 //! - `wire_crossing` — [`SentBeforeBye`]: what the run's recording shows of
 //!   a request reaching a dialog the UA's own BYE ended.
+//! - `wire_loss` — [`LostOnTheWay`]: what the run's recording shows of the
+//!   requests the network lost on their way to the UA.
 //!
 //! Two requests on an ended dialog draw no verdict:
 //! - a PRACK on an early dialog a non-2xx final ended (RFC 3262 §3);
@@ -30,6 +32,11 @@
 //! other is a
 //! `dialog-ended` finding.
 //!
+//! On a run that declares a loss model, a CSeq gone backwards whose request's
+//! first copy the network lost on its way to the UA (a later request overtook
+//! it), or a CSeq skipping over a request so lost, is answered as ever (500,
+//! taken) and no finding ([`VerdictKind::LossExplained`], RFC 3261 §12.2.2).
+//!
 //! A verdict fails the run unless a `dialog-…` waiver naming the receiving UA
 //! opts it out (`WaiverScope::rule(DIALOG_UNKNOWN, why).on_party("alice")`);
 //! one naming no UA covers nothing.
@@ -39,6 +46,7 @@ mod reliable;
 mod table;
 mod verdict;
 mod wire_crossing;
+mod wire_loss;
 
 pub use judge::{
     covers, covers_at, is_partyless_dialog_waiver, DialogJudge, DialogJudging, DialogOptIns,
@@ -49,6 +57,7 @@ pub use verdict::{
     DIALOG_ENDED, DIALOG_ENDED_ANSWERED, DIALOG_UNKNOWN,
 };
 pub use wire_crossing::SentBeforeBye;
+pub use wire_loss::LostOnTheWay;
 
 #[cfg(test)]
 mod tests;

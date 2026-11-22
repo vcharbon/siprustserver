@@ -11,6 +11,7 @@ use super::reliable::ReliableSent;
 use super::table::{BackwardsCseq, DialogTable};
 use super::verdict::DialogVerdict;
 use super::wire_crossing::SentBeforeBye;
+use super::wire_loss::LostOnTheWay;
 use crate::WaiverScope;
 
 /// The opt-ins a run declared for dialog verdicts: the `dialog-…` waivers,
@@ -75,6 +76,14 @@ impl DialogJudge {
         let mut judge = DialogJudge::new(party, opt_ins, DialogJudging::Harness);
         judge.inner.get_mut().unwrap().table.set_sent_before_bye(wire);
         judge
+    }
+
+    /// This judge, its table reading from `wire` which requests the network
+    /// lost on their way to the UA: the judge of a run that declares a loss
+    /// model.
+    pub fn explaining_losses(mut self, wire: LostOnTheWay) -> Self {
+        self.inner.get_mut().unwrap().table.set_lost_on_the_way(wire);
+        self
     }
 
     /// The UA this judge belongs to.

@@ -34,8 +34,9 @@ use super::waiver::{unused_waivers, WaiverScope, WaiverState};
 use super::weak_agent::WeakAgent;
 use super::{Agent, Proxy};
 use crate::absorption::Absorption;
-use crate::dialogs::{DialogJudge, DialogJudging, DialogOptIns, SentBeforeBye};
+use crate::dialogs::{DialogJudging, DialogOptIns};
 use crate::run::RunReport;
+mod dialog_judges;
 mod peer_binds;
 mod serve;
 mod shared_lanes;
@@ -246,15 +247,6 @@ impl Harness {
             addrs: AddrAlloc::default(),
             lossy: false,
         }
-    }
-
-    /// A harness-judged dialog table for the UA `party`, gated at
-    /// [`finish`](Self::finish), reading BYE crossings from the recording.
-    pub(crate) fn dialog_judge(&self, party: &str) -> Arc<DialogJudge> {
-        let wire = SentBeforeBye::from_wire(self.recording.channel());
-        let judge = Arc::new(DialogJudge::harnessed(party, self.dialog_opt_ins.clone(), wire));
-        self.judges.borrow_mut().push(judge.clone());
-        judge
     }
 
     /// Register what a SUT bound on this harness adds to the run's failure

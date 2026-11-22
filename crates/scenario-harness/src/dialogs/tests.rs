@@ -5,6 +5,8 @@ use sip_message::{SipMessage, SipParser, SipRequest, SipResponse};
 
 use super::*;
 
+mod lossy;
+
 const CALL: &str = "c1@host";
 
 fn parse(text: String) -> SipMessage {

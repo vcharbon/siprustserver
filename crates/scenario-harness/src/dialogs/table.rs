@@ -12,7 +12,10 @@
 //! judges them as on the early dialog. A request reaching a dialog the UA's
 //! own BYE ended is a finding unless the wire record shows it a
 //! retransmission whose lost first copy left before the peer received that
-//! BYE ([`SentBeforeBye`]); the UA refuses it either way. It keeps the last
+//! BYE ([`SentBeforeBye`]); the UA refuses it either way. A CSeq out of the
+//! remote sequence that a loss the wire record shows explains, on a run that
+//! declares a loss model, is answered as ever and no finding
+//! ([`LostOnTheWay`]). It keeps the last
 //! remote CSeq: as UAS it starts at the initial INVITE's CSeq, as UAC it is
 //! empty until the peer's first request (§12.1.1, §12.1.2).
 
@@ -24,6 +27,7 @@ use sip_message::{SipRequest, SipResponse};
 
 use super::verdict::{DialogVerdict, VerdictKind};
 use super::wire_crossing::SentBeforeBye;
+use super::wire_loss::LostOnTheWay;
 use crate::agent::top_via_branch;
 
 /// What a CSeq below the last remote CSeq draws.
@@ -144,6 +148,10 @@ pub struct DialogTable {
     /// What the wire record shows of a request reaching a dialog the UA's
     /// own BYE ended; with none, every such request is a finding.
     sent_before_bye: Option<SentBeforeBye>,
+    /// What the wire record shows of the requests lost on their way to the
+    /// UA, on a run that declares a loss model; with none, no loss explains
+    /// a CSeq out of the remote sequence.
+    lost_on_the_way: Option<LostOnTheWay>,
 }
 
 /// Whether a REFER or SUBSCRIBE opens a subscription: a REFER stating
@@ -183,6 +191,13 @@ impl DialogTable {
     /// ended crossed that BYE.
     pub fn set_sent_before_bye(&mut self, wire: SentBeforeBye) {
         self.sent_before_bye = Some(wire);
+    }
+
+    /// Read from `wire` which requests the network lost on their way to the
+    /// UA: a CSeq out of the remote sequence one of them explains is a
+    /// [`VerdictKind::LossExplained`].
+    pub fn set_lost_on_the_way(&mut self, wire: LostOnTheWay) {
+        self.lost_on_the_way = Some(wire);
     }
 
     /// The state of the dialog `(call_id, local, remote)`, if the UA holds it.
@@ -442,7 +457,9 @@ impl DialogTable {
     /// the still early dialog and a finding only of a rule it broke there
     /// (`Dialog::final_unseen`); so is one on a dialog the UA's own BYE ended
     /// that the wire record shows sent no later than the peer read that BYE
-    /// ([`SentBeforeBye`]), judged as on the dialog before the BYE. A request
+    /// ([`SentBeforeBye`]), judged as on the dialog before the BYE. A CSeq out
+    /// of sequence that a loss on the way to the UA explains is a
+    /// [`VerdictKind::LossExplained`] ([`LostOnTheWay`]). A request
     /// with no To-tag is out of
     /// dialog and only teaches the table an initial INVITE. An ACK or a
     /// CANCEL carries its INVITE's number, so only its dialog is judged, and
@@ -531,7 +548,9 @@ impl DialogTable {
             DialogState::Early | DialogState::Confirmed => None,
         };
         let early = state == DialogState::Early || matches!(crossed_by, Some(Some(_)));
-        let broke = self.judge_in_sequence(&id, &method, cseq, early, now_us);
+        let broke = self
+            .judge_in_sequence(&id, &method, cseq, early, now_us)
+            .map(|kind| self.explained_by_loss(&id, &method, kind));
         match crossed_by {
             Some(by) => Some(verdict(VerdictKind::Crossed { by, broke: broke.map(Box::new) })),
             None => broke.map(verdict),
@@ -580,6 +599,30 @@ impl DialogTable {
                 dialog.remote_cseq = Some(cseq);
                 None
             }
+        }
+    }
+
+    /// `kind`, the rule a `method` request on the dialog `id` broke, as a
+    /// [`VerdictKind::LossExplained`] when the wire record shows the network
+    /// lost on its way to the UA the request itself, for a CSeq gone
+    /// backwards (this is a retransmission of it, overtaken), or a request
+    /// numbered in the gap, for a CSeq skipping (RFC 3261 §12.2.2,
+    /// §17.1.2.2). Any other kind, or one no loss explains, stays.
+    fn explained_by_loss(&self, id: &DialogId, method: &str, kind: VerdictKind) -> VerdictKind {
+        let Some(wire) = &self.lost_on_the_way else { return kind };
+        let lost = || wire.lost(&id.call_id, &id.remote, &id.local);
+        let explained = match kind {
+            VerdictKind::CseqBackwards { cseq, .. } => {
+                lost().iter().any(|(c, m)| *c == cseq && m == method)
+            }
+            VerdictKind::CseqSkip { cseq, last } => lost().iter().any(|(c, m)| {
+                (last + 1..cseq).contains(c) && !matches!(m.as_str(), "ACK" | "CANCEL")
+            }),
+            _ => false,
+        };
+        match explained {
+            true => VerdictKind::LossExplained { broke: Box::new(kind) },
+            false => kind,
         }
     }
 

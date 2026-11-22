@@ -44,7 +44,9 @@ impl Harness {
     /// the losses and holds an unreliable transport makes, which every
     /// party's transaction layer must ride out (RFC 3261 §17, §18). The run
     /// declares a loss model: [`serve_parties_until`](Self::serve_parties_until)
-    /// waits out the SUT's own 64·T1 give-up.
+    /// waits out the SUT's own 64·T1 give-up, and a UA's CSeq out of sequence
+    /// that a recorded loss explains is no finding
+    /// ([`LostOnTheWay`](crate::dialogs::LostOnTheWay)).
     pub fn with_transit_delay_and_send_fate(
         scenario_name: impl Into<String>,
         transit_delay_ms: u64,
