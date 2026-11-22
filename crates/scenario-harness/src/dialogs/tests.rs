@@ -605,3 +605,69 @@ fn a_verdict_is_explained_only_by_a_drop_of_its_own_request() {
     let by_final = verdict_of("PRACK", 3, VerdictKind::Ended { by: Some(487) });
     assert!(!by_final.explained_by(&[&prack3]), "a final's end is not the loss's");
 }
+
+const REFUSED_481: Option<(u16, &str)> = Some((481, "Call/Transaction Does Not Exist"));
+
+/// The verdict on `request`, received by `t`, as a crossing request that
+/// breaks `rule`: a finding of that rule, still refused 481 on the ended
+/// dialog.
+fn assert_crossing_breaks(t: &mut DialogTable, request: &SipRequest, rule: &str) {
+    let v = t.judge_received(request, 0).expect("a verdict");
+    assert_eq!((v.rule(), v.kind.is_finding()), (rule, true), "got {:?}", v.kind);
+    assert_eq!(v.kind.refusal(), REFUSED_481, "got {:?}", v.kind);
+}
+
+/// RFC 3261 §14.1: a UAC does not start a re-INVITE while its INVITE is in
+/// progress, so one on the early dialog, crossing the UAS's final, is still a
+/// finding.
+#[test]
+fn a_reinvite_crossing_the_uas_own_final_is_a_finding() {
+    let mut t = refused_after_its_own_info();
+    assert_crossing_breaks(&mut t, &request("INVITE", 2, "A1", Some("B1")), DIALOG_EARLY_REQUEST);
+}
+
+/// RFC 3261 §12.2.1.1: the caller numbers its requests on the early dialog
+/// one up from its INVITE's; a crossing request that skips is a finding.
+#[test]
+fn a_cseq_skip_crossing_the_uas_own_final_is_a_finding() {
+    let mut t = refused_after_its_own_info();
+    assert_crossing_breaks(&mut t, &request("INFO", 5, "A1", Some("B1")), DIALOG_CSEQ_SKIP);
+}
+
+/// RFC 3261 §12.2.2: a crossing request numbered below the INVITE's is a
+/// finding.
+#[test]
+fn a_cseq_backwards_crossing_the_uas_own_final_is_a_finding() {
+    let mut t = DialogTable::new(BackwardsCseq::Verdict);
+    assert_eq!(t.judge_received(&request("INVITE", 3, "A1", None), 0), None);
+    t.note_sent_response(&response(183, "INVITE", 3, "A1", "B1"), 0);
+    t.note_sent_response(&response(487, "INVITE", 3, "A1", "B1"), 0);
+    assert_crossing_breaks(&mut t, &request("INFO", 2, "A1", Some("B1")), DIALOG_CSEQ_BACKWARDS);
+}
+
+/// A crossing request advances the remote sequence: the next one in order
+/// is no finding, one past it skips.
+#[test]
+fn a_crossing_request_advances_the_remote_cseq() {
+    let mut t = refused_after_its_own_info();
+    for cseq in [2, 3] {
+        let v = t.judge_received(&request("INFO", cseq, "A1", Some("B1")), 0).expect("refused");
+        assert!(!v.kind.is_finding(), "CSeq {cseq}: got {:?}", v.kind);
+        assert_eq!(v.kind.refusal(), REFUSED_481);
+    }
+    assert_crossing_breaks(&mut t, &request("INFO", 5, "A1", Some("B1")), DIALOG_CSEQ_SKIP);
+}
+
+/// A crossing request whose CSeq goes backwards, under
+/// [`BackwardsCseq::Accept`], is no finding and still refused: the dialog
+/// ended, so nothing on it is taken.
+#[test]
+fn a_backwards_crossing_request_accepted_is_still_refused() {
+    let mut t = DialogTable::new(BackwardsCseq::Accept);
+    assert_eq!(t.judge_received(&request("INVITE", 3, "A1", None), 0), None);
+    t.note_sent_response(&response(183, "INVITE", 3, "A1", "B1"), 0);
+    t.note_sent_response(&response(487, "INVITE", 3, "A1", "B1"), 0);
+    let v = t.judge_received(&request("INFO", 2, "A1", Some("B1")), 0).expect("refused");
+    assert!(!v.kind.is_finding(), "got {:?}", v.kind);
+    assert_eq!(v.kind.refusal(), REFUSED_481);
+}
