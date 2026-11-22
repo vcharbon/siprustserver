@@ -25,6 +25,7 @@ mod attempts;
 mod basic_call;
 mod basic_call_media;
 mod body_override_typing;
+mod bye_across_a_lost_bye;
 mod bye_no_200_reap;
 mod bye_on_an_ended_early_dialog;
 mod bye_reinvite_2xx_ack_cross;
