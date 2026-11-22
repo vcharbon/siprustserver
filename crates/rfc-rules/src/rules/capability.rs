@@ -219,8 +219,9 @@ impl Obligation for AllowSupportedOnInvite {
 ///
 /// The occasion is ONE unrecognised request the endpoint TOOK, keyed by its
 /// transaction. Charges that endpoint. The answer that discharges it is a 405
-/// carrying at least one `Allow` row — any other final, or none at all, is the
-/// miss. A request the vantage carried no branch for names no transaction and
+/// carrying at least one `Allow` row, or a 481 to a request naming a dialog a
+/// BYE had ended at its taker (§12.2.2: the dialog is matched first) — any
+/// other final, or none at all, is the miss. A request the vantage carried no branch for names no transaction and
 /// is no occasion; an answer whose header block the vantage lost is
 /// `Undecidable`.
 pub struct UnsupportedMethod405Allow;
@@ -260,7 +261,9 @@ impl Obligation for UnsupportedMethod405Allow {
 ///
 /// The occasion is ONE request the endpoint TOOK whose `Require` names a tag
 /// outside the recognised set, keyed by its transaction. Charges that endpoint.
-/// A 420 carrying at least one `Unsupported` row discharges it. A request whose
+/// A 420 carrying at least one `Unsupported` row discharges it, and so does a
+/// 481 to a request naming a dialog a BYE had ended at its taker: the taker
+/// matches the dialog before it reads `Require` (§12.2.2). A request whose
 /// header block the vantage lost is NOT an occasion — the `Require` tags are
 /// what would make it one.
 pub struct UnsupportedExtension420;
