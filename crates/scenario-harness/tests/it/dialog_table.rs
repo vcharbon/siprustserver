@@ -283,6 +283,10 @@ async fn a_2xx_to_an_info_that_reached_the_caller_behind_the_callees_final_fails
         1,
         lose_bobs_first_info(),
     );
+    h.waive(
+        WaiverScope::rule("unknown-dialog-481", "alice answers 200 where she owes 481")
+            .on_party("alice"),
+    );
     let alice = h.agent("alice", "127.0.0.1:5060").await;
     let bob = h.agent("bob", "127.0.0.1:5070").await;
     let mut call = alice.invite(&bob).with_sdp(OFFER).send().await;
