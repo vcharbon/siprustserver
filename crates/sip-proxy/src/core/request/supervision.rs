@@ -4,17 +4,18 @@
 //! here, never relayed to a worker as a new dialog.
 //!
 //! - While a worker reads `Alive` or `Slow`, once the first view is in: `200`
-//!   with a To-tag, stating the `Allow`, `Supported` and `Accept` the workers
-//!   last advertised, whatever their capacity. It meets no self-gate and spends
-//!   no worker's token.
+//!   with a To-tag, stating the `Allow`, `Supported` and `Accept` of the last
+//!   `200` a worker answered a probe with, whatever their capacity. It meets no
+//!   self-gate and spends no worker's token.
 //! - Otherwise it is dropped unanswered and counted, as a request with no
 //!   target is (ADR-0050 §5): the node's withdrawal and the supervisor's own
 //!   timeout take the POP out, never a `503` a healthy peer proxy would not
 //!   send.
 //!
-//! The Request-URI names this proxy by either face's advertise or bind
-//! address, its port, when stated, one of theirs, and carries no parameter
-//! but `transport` and no header. Every other OPTIONS is relayed.
+//! The Request-URI names this proxy by either face's advertise or specific
+//! bound address (an unspecified bind, `0.0.0.0` or `::`, names none), its
+//! port, when stated, one of theirs, and carries no parameter but `transport`
+//! and no header. Every other OPTIONS is relayed.
 
 use sip_message::generators::{generate_response, GenerateResponseOpts};
 use sip_message::header::Uri;

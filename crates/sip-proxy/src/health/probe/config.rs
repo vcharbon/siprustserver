@@ -22,15 +22,13 @@ pub(super) fn past_the_window(window_ends: Instant) -> Instant {
 /// The slow axis (ADR-0069): a probe's answer is awaited `slow_window_ms`
 /// from its send, a late one stamping the worker; `threshold` misses read it
 /// `Slow` while a late answer is that recent, `Dead` otherwise. `Slow` turns
-/// `Alive` after `recover_probes` answers in time in a row, and `Dead` once the
-/// worker has spent `slow_max_ms` `Slow` in all.
+/// `Alive` after `recover_probes` answers in time in a row.
 #[derive(Debug, Clone, Copy)]
 pub struct HealthProbeConfig {
     pub interval_ms: u64,
     pub timeout_ms: u64,
     pub threshold: u32,
     pub slow_window_ms: u64,
-    pub slow_max_ms: u64,
     pub recover_probes: u32,
 }
 
@@ -46,7 +44,6 @@ impl HealthProbeConfig {
         timeout_ms: 1_600,
         threshold: 2,
         slow_window_ms: 2_000,
-        slow_max_ms: 20_000,
         recover_probes: 3,
     };
 
@@ -58,10 +55,6 @@ impl HealthProbeConfig {
     /// window at least.
     pub fn slow_window(&self) -> Duration {
         Duration::from_millis(self.slow_window_ms.max(self.timeout_ms))
-    }
-
-    pub fn slow_max(&self) -> Duration {
-        Duration::from_millis(self.slow_max_ms)
     }
 
     /// From the send of the first probe a worker leaves unanswered to its
@@ -77,13 +70,14 @@ impl HealthProbeConfig {
             .saturating_add(REAP_PAST_WINDOW)
     }
 
-    /// The latest `Dead` verdict after a worker falls silent:
-    /// `threshold × interval + timeout`. The first probe it leaves unanswered
-    /// leaves within one interval of its silence (at once when the silence
-    /// swallows a probe already sent, one interval later when the worker
-    /// answered the probe of the tick just before). A worker silent after a
-    /// late answer is read `Dead` at the first reap past the slow window,
-    /// within the same bound while [`slow_window_fits`](Self::slow_window_fits).
+    /// The latest `Dead` verdict after the last answer the proxy received from
+    /// a worker, in time or late: `threshold × interval + timeout`. After an
+    /// answer in time, the first probe it leaves unanswered leaves within one
+    /// interval (at once when the silence swallows a probe already sent, one
+    /// interval later when the worker answered the probe of the tick just
+    /// before). After a late answer the worker is read `Dead` at the first reap
+    /// past the slow window, within `slow_window + interval`, which this bound
+    /// holds while [`slow_window_fits`](Self::slow_window_fits).
     pub fn verdict_within(&self) -> Duration {
         self.period().saturating_add(self.verdict_after_first_miss())
     }

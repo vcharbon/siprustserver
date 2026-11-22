@@ -1,9 +1,9 @@
 //! When the health probe reads a worker `Slow` (ADR-0069): its probe answers
 //! arrive past their reply window and inside the slow window. A `Slow` worker
 //! is no dead verdict; it reads `Alive` again after `recover_probes` answers in
-//! time, `Dead` once it answers nothing at all, and `Dead` once it has spent
-//! `slow_max_ms` `Slow`. A worker turning `Alive` from `Dead` or `Slow`
-//! restarts its admit cap at `cap_restart_pct` of `cap_initial_cps`.
+//! time and `Dead` once it answers nothing within the slow window. A worker
+//! turning `Alive` from `Dead` or `Slow` restarts its admit cap at
+//! `cap_restart_pct` of `cap_initial_cps`.
 //!
 //! Timing axes: each probe is answered `delay(i)` after its `i`-th OPTIONS
 //! arrives (5 ms transit each way); one probe leaves per 1 s interval, its
@@ -21,7 +21,7 @@ use sip_message::received::observed_source;
 use sip_message::{CustomParser, SipMessage, SipParser};
 use sip_net::{BindUdpOpts, SignalingNetwork, UdpEndpoint};
 use sip_net_testkit::SimulatedSignalingNetwork;
-use sip_proxy::health::{HealthProbe, HealthProbeConfig};
+use sip_proxy::health::{HealthProbe, HealthProbeConfig, WorkerCapabilities, WorkerReach};
 use sip_proxy::load_observer::{LoadObserverConfig, WorkerLoadObserver};
 use sip_proxy::observability::ProxyMetrics;
 use sip_proxy::registry::control::WorkerRegistryControl;
@@ -31,17 +31,17 @@ use sip_proxy::ProxyAddr;
 use sip_txn::IdGen;
 use tokio::time::Instant;
 
-const WORKER_ID: &str = "w-late";
-const WORKER: &str = "192.0.2.51:5070";
-const TRANSIT: Duration = Duration::from_millis(5);
+pub(crate) const WORKER_ID: &str = "w-late";
+pub(crate) const WORKER: &str = "192.0.2.51:5070";
+pub(crate) const TRANSIT: Duration = Duration::from_millis(5);
 
 /// A late answer: past the 1.6 s reply window, inside the 2 s slow window.
-const LATE: Duration = Duration::from_millis(1_800);
+pub(crate) const LATE: Duration = Duration::from_millis(1_800);
 /// An answer in time.
-const PROMPT: Duration = Duration::from_millis(10);
+pub(crate) const PROMPT: Duration = Duration::from_millis(10);
 
 /// When the `i`-th OPTIONS is answered after it arrives; `None` drops it.
-type Delays = Arc<dyn Fn(usize) -> Option<Duration> + Send + Sync>;
+pub(crate) type Delays = Arc<dyn Fn(usize) -> Option<Duration> + Send + Sync>;
 
 /// Every health write, in order, forwarded to the registry.
 struct Writes {
@@ -103,17 +103,19 @@ fn respond(ep: Box<dyn UdpEndpoint>, delays: Delays) -> tokio::task::JoinHandle<
 }
 
 /// One proxy's probe of the worker, with what it wrote and counted.
-struct Proxy {
-    registry: Arc<SimulatedWorkerRegistry>,
+pub(crate) struct Proxy {
+    pub(crate) registry: Arc<SimulatedWorkerRegistry>,
     observer: Arc<WorkerLoadObserver>,
-    metrics: Arc<ProxyMetrics>,
+    pub(crate) metrics: Arc<ProxyMetrics>,
+    pub(crate) reach: Arc<WorkerReach>,
+    pub(crate) capabilities: Arc<WorkerCapabilities>,
     writes: Arc<Mutex<Vec<(Instant, WorkerHealth)>>>,
     clock: Clock,
-    task: tokio::task::JoinHandle<()>,
+    pub(crate) task: tokio::task::JoinHandle<()>,
 }
 
 impl Proxy {
-    async fn spawn(
+    pub(crate) async fn spawn(
         net: &SimulatedSignalingNetwork,
         probe: &str,
         config: HealthProbeConfig,
@@ -134,6 +136,8 @@ impl Proxy {
         let control = Arc::new(Writes { inner: registry.control(), log: writes.clone() });
         let observer = Arc::new(WorkerLoadObserver::new(LoadObserverConfig::default()));
         let metrics = Arc::new(ProxyMetrics::new());
+        let reach = WorkerReach::unheard();
+        let capabilities = WorkerCapabilities::unheard();
         let probe = HealthProbe::new(
             ep,
             CustomParser::new(),
@@ -144,16 +148,18 @@ impl Proxy {
             Arc::new(IdGen::seeded(u64::from(seed_of(probe)))),
             config,
         )
-        .with_metrics(metrics.clone());
+        .with_metrics(metrics.clone())
+        .with_reach(reach.clone())
+        .with_capabilities(capabilities.clone());
         let task = tokio::spawn(probe.run());
-        Self { registry, observer, metrics, writes, clock, task }
+        Self { registry, observer, metrics, reach, capabilities, writes, clock, task }
     }
 
-    fn health(&self) -> Option<WorkerHealth> {
+    pub(crate) fn health(&self) -> Option<WorkerHealth> {
         self.registry.resolve(WORKER_ID).map(|w| w.health)
     }
 
-    fn first(&self, health: WorkerHealth) -> Option<Instant> {
+    pub(crate) fn first(&self, health: WorkerHealth) -> Option<Instant> {
         self.writes.lock().unwrap().iter().find(|(_, h)| *h == health).map(|(at, _)| *at)
     }
 
@@ -169,7 +175,7 @@ fn seed_of(probe: &str) -> u32 {
     probe.bytes().map(u32::from).sum()
 }
 
-async fn net_and_worker(
+pub(crate) async fn net_and_worker(
     delays: Delays,
 ) -> (SimulatedSignalingNetwork, tokio::task::JoinHandle<()>) {
     let net = SimulatedSignalingNetwork::new(TRANSIT.as_millis() as u64);
@@ -180,7 +186,7 @@ async fn net_and_worker(
 
 /// Advance the paused clock by `span` in 1 ms steps, so every reply and reap
 /// on the way is read where it falls.
-async fn run_for(span: Duration) {
+pub(crate) async fn run_for(span: Duration) {
     let until = Instant::now() + span;
     while Instant::now() < until {
         tokio::time::sleep(Duration::from_millis(1)).await;
@@ -192,7 +198,7 @@ async fn run_for(span: Duration) {
 /// takeover. Each counts its late answers and one `Slow` spell.
 #[tokio::test(start_paused = true)]
 async fn a_worker_answering_late_reads_slow_on_both_proxies_and_never_dead() {
-    let config = HealthProbeConfig { slow_max_ms: 600_000, ..HealthProbeConfig::default() };
+    let config = HealthProbeConfig::default();
     let (net, responder) = net_and_worker(Arc::new(|_| Some(LATE))).await;
     let start = Instant::now();
     let a = Proxy::spawn(&net, "192.0.2.1:5098", config).await;
@@ -278,25 +284,6 @@ async fn a_slow_worker_falling_silent_reads_dead_within_the_silence_bound() {
         dead - last_answer,
         config.verdict_within()
     );
-    p.task.abort();
-    responder.abort();
-}
-
-/// A worker answering late for good reads `Dead` once it has spent
-/// `slow_max_ms` `Slow`, within one interval past it, and the verdict is
-/// counted.
-#[tokio::test(start_paused = true)]
-async fn a_worker_slow_for_slow_max_reads_dead() {
-    let config = HealthProbeConfig { slow_max_ms: 6_000, ..HealthProbeConfig::default() };
-    let (net, responder) = net_and_worker(Arc::new(|_| Some(LATE))).await;
-    let p = Proxy::spawn(&net, "192.0.2.1:5098", config).await;
-    run_for(Duration::from_secs(12)).await;
-    let slow = p.first(WorkerHealth::Slow).expect("read slow");
-    let dead = p.first(WorkerHealth::Dead).expect("read dead");
-    assert!(dead >= slow + config.slow_max(), "read dead {:?} after slow", dead - slow);
-    assert!(dead <= slow + config.slow_max() + config.period(), "{:?}", dead - slow);
-    assert_eq!(p.metrics.slow_max_dead(WORKER_ID), 1);
-    assert_eq!(p.health(), Some(WorkerHealth::Dead), "late answers never revive it");
     p.task.abort();
     responder.abort();
 }

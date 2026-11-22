@@ -28,7 +28,7 @@ pub use overload::{
 };
 pub use parse::{PARSE_ERRORS, PARSE_PANICS, PARSE_REFUSALS_ANSWERED, PARSE_REFUSALS_CAPPED};
 pub use rejects::REJECTS;
-pub use slow::{PROBE_LATE_ANSWERS, SLOW_MAX_DEAD, WORKER_SLOW, WORKER_STATE};
+pub use slow::{PROBE_LATE_ANSWERS, WORKER_SLOW, WORKER_STATE};
 
 /// `direction:result`, every direction then every result.
 const MESSAGE_LABELS: [&str; Direction::ALL.len() * MessageResult::ALL.len()] = [
@@ -466,7 +466,6 @@ pub const PROXY: &[Family] = &[
     WORKER_STATE,
     WORKER_SLOW,
     PROBE_LATE_ANSWERS,
-    SLOW_MAX_DEAD,
     PEER_FAILURES,
     PEER_FAILURES_OVERFLOW,
 ];

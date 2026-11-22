@@ -470,3 +470,36 @@ fn the_band_change_line_reports_the_cap_the_transition_produced() {
         lines[0].line(),
     );
 }
+
+/// A worker whose cap the AIMD halved to 3.75 calls/s under the load it
+/// reports is handed no more by turning `Alive` again: the restart lowers a
+/// cap, never raises one.
+#[test]
+fn a_cap_restart_never_raises_a_cap_the_aimd_holds_lower() {
+    let o = obs();
+    for tick in 0..3 {
+        o.apply_payload(W, &payload(0.6), tick * 1_000);
+    }
+    assert_eq!(snap1(&o, 3_000).cap_cps, 3.75, "three decreases from 30");
+    o.restart_cap(W, 3_000);
+    assert_eq!(snap1(&o, 3_000).cap_cps, 3.75, "the 6 calls/s restart is above it");
+}
+
+/// A restarted cap holds at its start share while no new dialog is placed on
+/// the worker, however many cool payloads it reports; the first placed
+/// releases the AIMD steps.
+#[test]
+fn a_restarted_cap_climbs_only_once_a_new_dialog_is_placed() {
+    let o = obs();
+    o.apply_payload(W, &payload(0.1), 0);
+    assert_eq!(snap1(&o, 0).cap_cps, 32.0);
+    o.restart_cap(W, 1_000);
+    for tick in 2..=10 {
+        o.apply_payload(W, &payload(0.1), tick * 1_000);
+    }
+    let held = snap1(&o, 10_000);
+    assert_eq!((held.cap_cps, held.last_action), (6.0, AimdAction::Restart));
+    assert_eq!(o.try_consume_for(W, 10_500), Ok(()));
+    o.apply_payload(W, &payload(0.1), 11_000);
+    assert_eq!(snap1(&o, 11_000).cap_cps, 8.0, "one increase step once a dialog was placed");
+}

@@ -358,7 +358,7 @@ async fn run() -> Result<i32, String> {
     spawn_stale_floor_sweep(sweep_observer, registry.clone(), clock.clone(), metrics.clone());
     if let Some(gate) = self_gate.clone() {
         spawn_self_gate_sampler(gate.clone());
-        spawn_intake_ramp(proxy_probes.fit.clone(), gate);
+        spawn_intake_ramp(proxy_probes.fit.clone(), shared.reach.clone(), gate);
     }
 
     let metrics_gate = self_gate.clone();

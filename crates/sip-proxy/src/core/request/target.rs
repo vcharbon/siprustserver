@@ -88,7 +88,7 @@ impl ProxyCore {
     /// another instance, or the entry was forgotten) it repeats its INVITE's
     /// Request-URI and Route, so it takes the route the INVITE took without the
     /// memo: its loose Route, a worker's Request-URI, its cookie, else the
-    /// rendezvous winner among the alive workers (ADR-0009 X7). No CANCEL meets
+    /// rendezvous winner among the serving workers (ADR-0009 X7). No CANCEL meets
     /// an admission gate or draws a 503: with no worker to take it, it is dropped
     /// and counted. `invite` is the INVITE's entry in the memo.
     pub(super) async fn cancel_target(
@@ -162,7 +162,7 @@ impl ProxyCore {
 
     /// The memo-free hop of a request of an admitted call: where `cookie`
     /// places its dialog, else where the strategy places the call by rank
-    /// among the alive workers, with no filter, spill or token. A strategy
+    /// among the workers serving dialogs, with no filter, spill or token. A strategy
     /// that places by no rank selects afresh. `None`: no worker takes it.
     fn admitted_hop(&self, msg: &SipMessage, cookie: Option<&RouteParams>) -> Option<ProxyAddr> {
         if let Some(cookie) = cookie {

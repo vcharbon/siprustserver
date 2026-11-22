@@ -23,9 +23,10 @@ pub type WorkerId = String;
 /// `Unknown` is a worker no probe has answered `200` since it joined, since
 /// the proxy started, or since its incarnation changed; `Alive` one that
 /// answers within its reply windows; `Slow` one that missed its probes but
-/// answered one of them late, inside the slow window, or whose endpoint flipped
-/// not ready while it did; `Dead` one that missed its probes with no answer at
-/// all, stayed `Slow` too long, or whose address departed. An `Alive` or `Slow`
+/// answered one of them late, past the reply window and inside the slow window,
+/// or whose endpoint flipped not ready while it did; `Dead` one that missed its
+/// probes with no answer at all within the slow window, or whose address
+/// departed. An `Alive` or `Slow`
 /// worker serves its dialogs; only an `Alive` one takes a new dialog, but for an
 /// emergency one when no worker is `Alive`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -110,8 +111,9 @@ pub trait WorkerRegistry: Send + Sync {
     /// has listed the workers (`topology::Membership::synced`).
     fn synced(&self) -> bool;
     /// Every later dead verdict: the ordinal of a worker whose health turns
-    /// `Dead` from `Alive` or `Slow`, or from `Unknown` while its endpoint reads
-    /// ready, or of a worker read `Alive` whose endpoint flips not ready and not
+    /// `Dead` from `Alive`, or from `Unknown` or `Slow` while its endpoint reads
+    /// ready or it is held as `Slow`, or of a worker read `Alive` whose endpoint
+    /// flips not ready and not
     /// terminating while another member reads ready and no late answer of its is
     /// fresh (ADR-0050 §3, ADR-0069). A departure, a terminating flip and a flip
     /// that empties the view of ready members are none.

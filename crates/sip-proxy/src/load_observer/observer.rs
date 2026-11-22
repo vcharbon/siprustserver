@@ -32,7 +32,8 @@ pub enum AimdAction {
     Cooldown,
     /// `sweep_stale` fired (no fresh payload within `payload_stale_ms`).
     StaleDecrease,
-    /// The worker turned `Alive` from `Dead` or `Slow`: the cap restarted low.
+    /// The worker turned `Alive` from `Dead` or `Slow`: the cap restarted low,
+    /// held there until a new dialog is placed on the worker.
     Restart,
 }
 
@@ -66,6 +67,9 @@ struct WorkerState {
     bucket: TokenBucket,
     cooldown_until_ms: i64,
     last_action: AimdAction,
+    /// Its cap restarted low and no new dialog has been placed since: no
+    /// increase step climbs it.
+    restarted: bool,
 
     elu: f64,
     gc: f64,
@@ -95,6 +99,7 @@ impl WorkerState {
             ),
             cooldown_until_ms: 0,
             last_action: AimdAction::Init,
+            restarted: false,
             elu: 0.0,
             gc: 0.0,
             band: EluBand::BelowSoft,
@@ -181,7 +186,9 @@ impl WorkerLoadObserver {
                 state.last_action = AimdAction::Hold;
             }
             EluBand::BelowSoft => {
-                if now_ms < state.cooldown_until_ms {
+                if state.restarted {
+                    state.last_action = AimdAction::Restart;
+                } else if now_ms < state.cooldown_until_ms {
                     state.last_action = AimdAction::Cooldown;
                 } else {
                     let cap = c.cap_ceiling_cps.min(state.cap() + c.aimd_increase_step_cps);
@@ -268,7 +275,11 @@ impl WorkerLoadObserver {
     pub fn try_consume_for(&self, worker_id: &str, now_ms: i64) -> Result<(), u32> {
         let mut workers = locked(&self.workers, LOAD_OBSERVER);
         match workers.get_mut(worker_id) {
-            Some(state) => state.bucket.try_take(at_ms(now_ms)),
+            Some(state) => {
+                state.bucket.try_take(at_ms(now_ms))?;
+                state.restarted = false;
+                Ok(())
+            }
             None => Ok(()),
         }
     }
@@ -340,16 +351,20 @@ impl WorkerLoadObserver {
 
     /// The worker turned `Alive` from `Dead` or `Slow` (ADR-0069): its cap
     /// restarts at `cap_restart_pct` of `cap_initial_cps`, never below the
-    /// floor, its band and cooldown kept, so the AIMD steps climb from there
-    /// and a recovered worker is not handed its peers' whole load at once.
+    /// floor nor above the cap it holds, its band and cooldown kept. It holds
+    /// there until a new dialog is placed on the worker, and the AIMD steps
+    /// climb from there, so a recovered worker is not handed its peers' whole
+    /// load at once.
     pub fn restart_cap(&self, worker_id: &str, now_ms: i64) {
         let c = &self.config;
-        let cap = c.cap_floor_cps.max(c.cap_initial_cps * c.cap_restart_pct / 100.0);
+        let restart = c.cap_floor_cps.max(c.cap_initial_cps * c.cap_restart_pct / 100.0);
         let mut workers = locked(&self.workers, LOAD_OBSERVER);
         let state = workers
             .entry(worker_id.to_string())
             .or_insert_with(|| WorkerState::fresh(&self.config, now_ms));
+        let cap = state.cap().min(restart);
         state.set_cap(cap, now_ms);
+        state.restarted = true;
         state.last_action = AimdAction::Restart;
     }
 

@@ -14,25 +14,30 @@
 //! A reply correlates by its Via branch to a probe still in its window, however
 //! many ticks the window spans. A reaped probe stays awaited until its slow
 //! window (`slow_window_ms` from its send) ends: an answer then is late
-//! (ADR-0069). It stamps the proxy's [`WorkerReach`] and the worker's late
-//! stamp, and does nothing else: it never clears a miss, revives a worker or
-//! retires a probe. A reply naming no awaited probe is dropped. Every final
-//! inside its window stamps the [`WorkerReach`] and retires the worker's other
-//! awaited probes, whose reap would count a spurious miss. From the worker's
-//! current address it also clears the miss count, feeds its `X-Overload`
-//! payload to the [`WorkerLoadObserver`], and is read on the two axes of
-//! ADR-0050 §3 ([`read_answer`]): a `200` makes the worker `Alive` and sets its
-//! acceptance from `X-Readiness` (absent reads `accept`); a `503` sets
-//! acceptance to `refuse` and leaves health as it was; any other final makes it
-//! `Alive` and keeps acceptance. A `Slow` worker reads `Alive` only at its
-//! `recover_probes`-th answer in time in a row. Health and acceptance are
-//! written through the [`WorkerRegistryControl`] seam.
+//! (ADR-0069). It stamps the proxy's [`WorkerReach`], and the worker's late
+//! stamp when it would read the worker `Alive` and names no other
+//! `X-Incarnation` than the last one read; it does nothing else: it never
+//! clears a miss, revives a worker or retires a probe. A reply naming no
+//! awaited probe is dropped. Every final inside its window stamps the
+//! [`WorkerReach`] and retires the worker's other awaited probes, whose reap
+//! would count a spurious miss. From the worker's current address it also
+//! clears the miss count, feeds its `X-Overload` payload to the
+//! [`WorkerLoadObserver`], and is read on the two axes of ADR-0050 §3
+//! ([`read_answer`]): a `200` makes the worker `Alive`, sets its acceptance from
+//! `X-Readiness` (absent reads `accept`) and writes the workers' advertised
+//! capabilities; a `503` sets acceptance to `refuse` and leaves health as it
+//! was; any other final makes it `Alive` and keeps acceptance. A `Slow` worker
+//! reads `Alive` only at its `recover_probes`-th answer in time in a row.
+//! Health and acceptance are written through the [`WorkerRegistryControl`]
+//! seam.
 //!
 //! The `threshold`-th consecutive miss reads the worker `Slow` while it
 //! answered late within the slow window, `Dead` otherwise; a `Dead` worker
-//! stays so. A worker that has spent `slow_max_ms` `Slow` in all reads `Dead`
-//! at the next round. A worker turning `Alive` from `Dead` or `Slow` restarts
-//! its admit cap low ([`WorkerLoadObserver::restart_cap`]).
+//! stays so. A worker turning `Alive` from `Dead` or `Slow` restarts its admit
+//! cap low ([`WorkerLoadObserver::restart_cap`]). A write that ends a spell in
+//! which no worker served tells the [`WorkerReach`] whether the worker it reads
+//! serving is the process last read serving before the spell
+//! ([`WorkerReach::rejoined`]).
 //!
 //! A reply or a miss counts only while the worker's current registry address is
 //! the one the probe went to: a late answer to a recreated worker's old address
@@ -66,8 +71,8 @@ use crate::addr::ProxyAddr;
 use crate::load_observer::{parse_x_overload_header, WorkerLoadObserver, X_OVERLOAD};
 use crate::observability::ProxyMetrics;
 use crate::registry::control::WorkerRegistryControl;
-use crate::registry::{WorkerHealth, WorkerRegistry};
-use slow::{SlowLedger, Spell};
+use crate::registry::{WorkerEntry, WorkerHealth, WorkerRegistry};
+use slow::SlowLedger;
 
 mod answer;
 mod config;
@@ -119,6 +124,8 @@ struct ProbeState {
     /// The `X-Incarnation` each worker last answered with — detects a restart
     /// at the same address.
     incarnation: HashMap<String, u64>,
+    /// The `X-Incarnation` each worker had when last read serving.
+    served_as: HashMap<String, u64>,
     /// Each worker's lateness (ADR-0069).
     ledger: SlowLedger,
 }
@@ -149,7 +156,7 @@ pub struct HealthProbe {
     first_view: Arc<FirstView>,
     /// Stamped by every answer a probe correlates.
     reach: Arc<WorkerReach>,
-    /// What every answer inside its reply window advertises.
+    /// What every `200` inside its reply window advertises.
     capabilities: Arc<WorkerCapabilities>,
 }
 
@@ -208,7 +215,7 @@ impl HealthProbe {
         self
     }
 
-    /// The workers' last advertisement, which every answer inside its reply
+    /// The workers' last advertisement, which every `200` inside its reply
     /// window writes; the routing core's supervision answer reads the same
     /// one. Without it the probe writes one of its own nobody reads.
     pub fn with_capabilities(mut self, capabilities: Arc<WorkerCapabilities>) -> Self {
@@ -330,7 +337,7 @@ impl HealthProbe {
     }
 
     /// One round: drops the state of every worker the registry no longer
-    /// probes, resets the miss count, incarnation, lateness and overload band
+    /// probes, resets the miss count, incarnations, lateness and overload band
     /// of a worker at a new address, reads every worker's `Slow` spell, and
     /// sends one OPTIONS client transaction to each probed worker.
     async fn tick(&self, state: &mut ProbeState) -> Result<(), TransactionLayerClosed> {
@@ -343,6 +350,7 @@ impl HealthProbe {
             if state.last_addr.get(&w.id).is_some_and(|prev| prev != &w.address) {
                 state.misses.remove(&w.id);
                 state.incarnation.remove(&w.id);
+                state.served_as.remove(&w.id);
                 state.ledger.forget(&w.id);
                 self.observer.reset(&w.id);
             }
@@ -352,6 +360,7 @@ impl HealthProbe {
         state.last_addr.retain(|id, _| live(id));
         state.misses.retain(|id, _| live(id));
         state.incarnation.retain(|id, _| live(id));
+        state.served_as.retain(|id, _| live(id));
         state.ledger.retain(live);
         self.observer.retain(live);
         for w in &snapshot {
@@ -392,7 +401,7 @@ impl HealthProbe {
         let Some(p) = state.pending.remove(branch.as_str()) else { return };
         self.reach.answered();
         if p.missed {
-            self.answered_late(&p, state);
+            self.answered_late(&p, &resp, state);
             return;
         }
 
@@ -423,13 +432,14 @@ impl HealthProbe {
                     "worker incarnation changed"
                 );
                 self.observer.reset(&p.worker_id);
-                state.ledger.forget(&p.worker_id);
                 restarted = true;
             }
         }
         state.misses.insert(p.worker_id.clone(), 0);
         let in_time = state.ledger.answered_in_time(&p.worker_id);
-        self.capabilities.advertised(resp.headers());
+        if resp.status() == 200 {
+            self.capabilities.advertised(resp.headers());
+        }
 
         if let Some(payload) = parse_x_overload_header(resp.raw(X_OVERLOAD).next()) {
             self.observer.apply_payload(&p.worker_id, &payload, self.clock.now_ms());
@@ -445,6 +455,7 @@ impl HealthProbe {
             Some(WorkerHealth::Alive) if recovering && in_time < self.config.recover_probes => None,
             health => health.or(restarted.then_some(WorkerHealth::Unknown)),
         };
+        let blind = self.blind();
         self.control.set_view(&p.worker_id, health, reading.acceptance);
         let after = self.health_of(&p.worker_id);
         if after == Some(WorkerHealth::Alive)
@@ -452,15 +463,24 @@ impl HealthProbe {
         {
             self.observer.restart_cap(&p.worker_id, self.clock.now_ms());
         }
-        if let Some(health) = after {
-            self.read_spell(&p.worker_id, health, state);
-        }
+        self.wrote(&p.worker_id, after, blind, state);
     }
 
     /// A probe of `p`'s worker was answered past its reply window, inside its
-    /// slow window: the worker's late stamp, here and in the registry.
-    fn answered_late(&self, p: &PendingProbe, state: &mut ProbeState) {
+    /// slow window: the worker's late stamp, here and in the registry, when
+    /// the answer would read it `Alive` and names no other incarnation than
+    /// the last one read. A late `503`, or a new process's late answer, says
+    /// nothing of whether the worker serves its dialogs.
+    fn answered_late(&self, p: &PendingProbe, resp: &SipResponse, state: &mut ProbeState) {
         if !self.still_at(p) {
+            return;
+        }
+        let reading = read_answer(resp.status(), worker_report::readiness(resp).as_ref());
+        let last_read = state.incarnation.get(&p.worker_id).copied();
+        let other_process = worker_report::incarnation(resp)
+            .zip(last_read)
+            .is_some_and(|(stated, last)| stated != last);
+        if reading.health != Some(WorkerHealth::Alive) || other_process {
             return;
         }
         state.ledger.answered_late(&p.worker_id, Instant::now());
@@ -475,32 +495,38 @@ impl HealthProbe {
         self.registry.probed().into_iter().find(|w| w.id == id).map(|w| w.health)
     }
 
+    /// Whether the view reads no worker serving its dialogs.
+    fn blind(&self) -> bool {
+        !self.registry.snapshot().iter().any(WorkerEntry::serves_dialogs)
+    }
+
+    /// After a health write that left `id` reading `after`, on a view `blind`
+    /// before it: reads its `Slow` spell, and, when it serves, the incarnation
+    /// it serves as. A write that ends the blind view tells the reach whether
+    /// `id` is the process last read serving.
+    fn wrote(&self, id: &str, after: Option<WorkerHealth>, blind: bool, state: &mut ProbeState) {
+        let Some(health) = after else { return };
+        self.read_spell(id, health, state);
+        if !matches!(health, WorkerHealth::Alive | WorkerHealth::Slow) {
+            return;
+        }
+        let current = state.incarnation.get(id).copied();
+        if blind && !self.blind() {
+            let known = current.is_some() && state.served_as.get(id).copied() == current;
+            self.reach.rejoined(known);
+        }
+        if let Some(gen) = current {
+            state.served_as.insert(id.to_string(), gen);
+        }
+    }
+
     /// Read `id`'s health into its `Slow` spell: a spell that begins is
-    /// counted, and one that has lasted `slow_max_ms` in all reads the worker
-    /// `Dead`.
+    /// counted.
     fn read_spell(&self, id: &str, health: WorkerHealth, state: &mut ProbeState) {
-        match state.ledger.read(id, health, Instant::now(), self.config.slow_max()) {
-            Spell::SlowBegan => {
-                if let Some(metrics) = &self.metrics {
-                    metrics.record_worker_slow(id);
-                }
+        if state.ledger.read(id, health) {
+            if let Some(metrics) = &self.metrics {
+                metrics.record_worker_slow(id);
             }
-            Spell::SlowTooLong => {
-                tracing::warn!(
-                    node = observe::node(),
-                    worker = id,
-                    slow_max_ms = self.config.slow_max_ms,
-                    "worker slow too long: read dead"
-                );
-                if let Some(metrics) = &self.metrics {
-                    metrics.record_slow_max_dead(id);
-                }
-                self.control.set_health(id, WorkerHealth::Dead);
-                if let Some(health) = self.health_of(id) {
-                    state.ledger.read(id, health, Instant::now(), self.config.slow_max());
-                }
-            }
-            Spell::Other => {}
         }
     }
 
@@ -540,10 +566,10 @@ impl HealthProbe {
             _ if late => WorkerHealth::Slow,
             _ => WorkerHealth::Dead,
         };
+        let blind = self.blind();
         self.control.set_health(&p.worker_id, verdict);
-        if let Some(health) = self.health_of(&p.worker_id) {
-            self.read_spell(&p.worker_id, health, state);
-        }
+        let after = self.health_of(&p.worker_id);
+        self.wrote(&p.worker_id, after, blind, state);
     }
 }
 

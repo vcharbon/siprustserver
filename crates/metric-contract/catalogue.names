@@ -341,7 +341,6 @@ sip-proxy-runner sip_worker_acceptance gauge fixed {acceptance}
 sip-proxy-runner sip_proxy_worker_health gauge semi_open {worker,state}
 sip-proxy-runner sip_proxy_worker_slow_total counter semi_open {worker}
 sip-proxy-runner sip_proxy_probe_late_answers_total counter semi_open {worker}
-sip-proxy-runner sip_proxy_slow_max_dead_total counter semi_open {worker}
 sip-proxy-runner sip_proxy_peer_failures_total counter capped:256 {peer,scope,kind}
 sip-proxy-runner sip_proxy_peer_failures_overflow_total counter fixed {}
 sip-proxy-runner sip_proxy_self_elu_ewma gauge fixed {}

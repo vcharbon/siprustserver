@@ -49,10 +49,7 @@ fn the_retry_after_jitter_is_bounded() {
 #[test]
 fn the_slow_axis_is_read_and_its_incoherent_sets_refused() {
     let cfg = boot(&[]).expect("valid");
-    assert_eq!(
-        (cfg.probe.slow_window_ms, cfg.probe.slow_max_ms, cfg.probe.recover_probes),
-        (2_000, 20_000, 3)
-    );
+    assert_eq!((cfg.probe.slow_window_ms, cfg.probe.recover_probes), (2_000, 3));
     assert_eq!(cfg.observer.cap_restart_pct, 20.0);
     let gate = cfg.self_gate.expect("the gate is on by default");
     assert_eq!((gate.ramp_start_pct, gate.ramp), (20.0, Duration::from_secs(30)));

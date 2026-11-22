@@ -1,5 +1,5 @@
 //! [`WorkerCapabilities`]: the `Allow`, `Supported` and `Accept` the workers
-//! last advertised, on a probe answer inside its reply window. The proxy
+//! last advertised, on a `200` to a probe inside its reply window. The proxy
 //! states them on its own answer to a supervision OPTIONS (ADR-0069), a claim
 //! it relays and never widens.
 

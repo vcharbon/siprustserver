@@ -1,6 +1,5 @@
 //! The families of the slow axis of worker health (ADR-0069): each worker's
-//! state, its late probe answers, its `Slow` spells and the dead verdicts a
-//! spell too long draws.
+//! state, its late probe answers and its `Slow` spells.
 
 use metric_catalogue::{Dim, Family, Labels};
 
@@ -28,12 +27,5 @@ pub const PROBE_LATE_ANSWERS: Family = Family::counter(
     "sip_proxy_probe_late_answers_total",
     Labels::Product(&[WORKER]),
     "Probe answers per worker that arrived past their reply window (HEALTH_TIMEOUT_MS) and inside the slow window (HEALTH_SLOW_WINDOW_MS) of their send.",
-)
-.semi_open();
-
-pub const SLOW_MAX_DEAD: Family = Family::counter(
-    "sip_proxy_slow_max_dead_total",
-    Labels::Product(&[WORKER]),
-    "Dead verdicts per worker drawn by HEALTH_SLOW_MAX_MS spent slow in all: its calls are taken over while it may still run.",
 )
 .semi_open();

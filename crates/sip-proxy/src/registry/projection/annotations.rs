@@ -232,13 +232,16 @@ impl WorkerAnnotations {
     /// Annotate health and acceptance of new calls in one write, `None`
     /// leaving that one as it is. No-op if the worker is unknown or unchanged.
     /// A worker held in the routing while its endpoint reads not ready reads
-    /// `Slow` where the write says `Alive`.
+    /// `Slow` where the write says `Alive`. A worker `Unknown` on an endpoint
+    /// that reads not ready reads `Dead` where the write says `Slow`: a pod
+    /// still booting serves no dialog.
     ///
     /// Returns [`Turn::Dead`] for a dead verdict: the write turned the worker's
-    /// health `Dead` from `Alive` or `Slow`, or from `Unknown` on an endpoint
-    /// that reads ready. A worker not ready and never read `Alive` since its
-    /// flip's verdict or its join stands on no answer that could turn out wrong.
-    /// Returns [`Turn::Recovered`] for a turn from `Slow` to `Alive`.
+    /// health `Dead` from `Alive`, or from `Unknown` or `Slow` on an endpoint
+    /// that reads ready or a worker held. A worker not ready and never read
+    /// `Alive` since its flip's verdict or its join stands on no answer that
+    /// could turn out wrong. Returns [`Turn::Recovered`] for a turn from `Slow`
+    /// to `Alive`.
     ///
     /// A write reading a worker `Alive` while the view reads no worker alive or
     /// slow returns every other worker read `Dead` to `Unknown`: verdicts taken
@@ -256,13 +259,11 @@ impl WorkerAnnotations {
             return Turn::None;
         };
         let previous = (record.health, record.acceptance);
-        let was_ready = record.ready;
-        let written = health.map(|h| {
-            if record.held && h == WorkerHealth::Alive {
-                WorkerHealth::Slow
-            } else {
-                h
-            }
+        let standing = record.ready || record.held;
+        let written = health.map(|h| match (record.health, h) {
+            (_, WorkerHealth::Alive) if record.held => WorkerHealth::Slow,
+            (WorkerHealth::Unknown, WorkerHealth::Slow) if !standing => WorkerHealth::Dead,
+            _ => h,
         });
         let next = (written.unwrap_or(previous.0), acceptance.unwrap_or(previous.1));
         if next == previous {
@@ -311,8 +312,10 @@ impl WorkerAnnotations {
             }
         });
         match (previous.0, next.0) {
-            (WorkerHealth::Alive | WorkerHealth::Slow, WorkerHealth::Dead) => Turn::Dead,
-            (WorkerHealth::Unknown, WorkerHealth::Dead) if was_ready => Turn::Dead,
+            (WorkerHealth::Alive, WorkerHealth::Dead) => Turn::Dead,
+            (WorkerHealth::Unknown | WorkerHealth::Slow, WorkerHealth::Dead) if standing => {
+                Turn::Dead
+            }
             (WorkerHealth::Slow, WorkerHealth::Alive) => Turn::Recovered,
             _ => Turn::None,
         }

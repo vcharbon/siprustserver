@@ -259,8 +259,9 @@ impl WorkerSet {
     }
 
     /// Every later dead verdict: a worker whose health the view turns `Dead`
-    /// from `Alive` or `Slow`, or from `Unknown` while its endpoint reads ready,
-    /// and a worker read `Alive` or `Slow` whose endpoint flips not `ready` and
+    /// from `Alive`, or from `Unknown` or `Slow` while its endpoint reads ready
+    /// or it is held as `Slow`, and a worker read `Alive` or `Slow` whose
+    /// endpoint flips not `ready` and
     /// not `terminating` while another member reads ready and no late answer of
     /// its is fresh (ADR-0050 §3, ADR-0069). A membership departure, a
     /// `terminating` flip and a flip that empties the view of ready members are

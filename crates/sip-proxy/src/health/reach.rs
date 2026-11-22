@@ -4,8 +4,12 @@
 //! isolated, whatever each worker's own health still reads: the verdict is
 //! about the proxy's own reach and comes before the per-worker dead verdicts,
 //! which stay the routing's.
+//!
+//! It also keeps how the last spell in which no worker served ended: on a
+//! process the probe read serving before the spell, the proxy lost its reach
+//! and the workers kept theirs (ADR-0069).
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -18,15 +22,34 @@ pub struct WorkerReach {
     /// Milliseconds from `origin` to the last answer, plus one; `0` while no
     /// worker has answered.
     last_answer: AtomicU64,
+    /// The last spell with no worker serving ended on a process read serving
+    /// before it.
+    rejoined_known: AtomicBool,
 }
 
 impl WorkerReach {
     pub fn unheard() -> Arc<Self> {
-        Arc::new(Self { origin: Instant::now(), last_answer: AtomicU64::new(0) })
+        Arc::new(Self {
+            origin: Instant::now(),
+            last_answer: AtomicU64::new(0),
+            rejoined_known: AtomicBool::new(false),
+        })
     }
 
     pub fn answered(&self) {
         self.last_answer.store(self.elapsed_ms().saturating_add(1), Ordering::Relaxed);
+    }
+
+    /// A spell in which no worker served ended on a worker; `known`: the
+    /// process the probe last read serving, by its `X-Incarnation`.
+    pub fn rejoined(&self, known: bool) {
+        self.rejoined_known.store(known, Ordering::Relaxed);
+    }
+
+    /// Whether the last spell with no worker serving ended on a process read
+    /// serving before it; false before any such spell ended.
+    pub fn rejoined_known(&self) -> bool {
+        self.rejoined_known.load(Ordering::Relaxed)
     }
 
     /// Whether no worker answered within the last `window`: true before the

@@ -278,32 +278,42 @@ async fn admits_over(g: &EluCpsGate, span: Duration) -> usize {
 }
 
 /// An intake ramp admits 20 % of the rate, from a bucket of 20 % of its size,
-/// rising linearly to the whole over its span, then the whole: the first
-/// second at 1000 offers/s takes about 20 tokens of the bucket and 20 of
-/// refill; a second past the span, the whole rate of 100 and the tokens the
-/// bucket held. The gauge reads it.
+/// until the first external INVITE, however long none comes; then it rises
+/// linearly to the whole over its span from that INVITE: the first second at
+/// 1000 offers/s takes about 20 tokens of the bucket and 20 of refill; a
+/// second past the span, the whole rate of 100 and the tokens the bucket held.
+/// The gauge reads it.
 #[tokio::test(start_paused = true)]
-async fn an_intake_ramp_admits_its_start_share_rising_to_the_whole_rate() {
+async fn an_intake_ramp_holds_its_start_share_until_offered_then_rises_to_the_whole_rate() {
     let (g, _ctl) = gate(100, 100, 0.8);
     g.begin_ramp();
-    assert!(g.metrics().ramp_active);
+    tokio::time::advance(Duration::from_secs(60)).await;
+    assert!(g.metrics().ramp_active, "no INVITE offered: the ramp waits");
     assert_eq!(g.metrics().cps_bucket_max, 20.0);
     let first = admits_over(&g, Duration::from_secs(1)).await;
     assert!((38..=44).contains(&first), "{first} admitted in the ramp's first second");
-    tokio::time::advance(Duration::from_secs(30)).await;
+    tokio::time::advance(Duration::from_secs(28)).await;
+    assert!(g.metrics().ramp_active, "the span runs from the first INVITE");
+    tokio::time::advance(Duration::from_secs(1)).await;
     let after = admits_over(&g, Duration::from_secs(1)).await;
     assert!(after >= 120, "{after} admitted once the ramp ran out");
     assert!(!g.metrics().ramp_active);
     assert_eq!(g.metrics().cps_bucket_max, 100.0);
 }
 
-/// A ramp of zero does nothing.
+/// A ramp of zero, or one starting at the whole rate, does nothing.
 #[tokio::test(start_paused = true)]
-async fn a_ramp_of_zero_does_nothing() {
+async fn a_ramp_of_zero_or_from_the_whole_rate_does_nothing() {
     let (sampler, _ctl) = simulated();
-    let config = ProxySelfGateConfig { ramp: Duration::ZERO, ..Default::default() };
-    let g = EluCpsGate::new(Arc::new(sampler), config);
-    g.begin_ramp();
-    assert!(!g.metrics().ramp_active);
-    assert_eq!(g.metrics().cps_bucket_max, f64::from(config.cps_bucket_size));
+    let sampler = Arc::new(sampler);
+    let idle = ProxySelfGateConfig::default();
+    for config in [
+        ProxySelfGateConfig { ramp: Duration::ZERO, ..idle },
+        ProxySelfGateConfig { ramp_start_pct: 100.0, ..idle },
+    ] {
+        let g = EluCpsGate::new(sampler.clone(), config);
+        g.begin_ramp();
+        assert!(!g.metrics().ramp_active);
+        assert_eq!(g.metrics().cps_bucket_max, f64::from(config.cps_bucket_size));
+    }
 }

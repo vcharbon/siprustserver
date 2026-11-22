@@ -231,11 +231,9 @@ fn the_worker_states_are_a_census_and_the_slow_counters_count_per_worker() {
     m.record_worker_slow("w0");
     m.record_probe_late_answer("w0");
     m.record_probe_late_answer("w0");
-    m.record_slow_max_dead("w1");
     let txt = m.prometheus_text();
     assert!(txt.contains("sip_proxy_worker_slow_total{worker=\"w0\"} 1"), "{txt}");
     assert!(txt.contains("sip_proxy_probe_late_answers_total{worker=\"w0\"} 2"), "{txt}");
-    assert!(txt.contains("sip_proxy_slow_max_dead_total{worker=\"w1\"} 1"), "{txt}");
 }
 
 /// Invented methods get a series each only up to the cap; the rest land on

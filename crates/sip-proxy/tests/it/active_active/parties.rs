@@ -33,6 +33,16 @@ fn word(text: &str) -> String {
 }
 
 pub fn caller_invite(call_id: &str) -> SipRequest {
+    caller_invite_with(call_id, "")
+}
+
+/// The caller's INVITE of an emergency call: `Resource-Priority` in the
+/// emergency namespace (RFC 4412).
+pub fn emergency_invite(call_id: &str) -> SipRequest {
+    caller_invite_with(call_id, "Resource-Priority: esnet.0\r\n")
+}
+
+fn caller_invite_with(call_id: &str, extra: &str) -> SipRequest {
     let at = Party::Caller.addr();
     let callee = Party::Callee.addr();
     parse_request(&format!(
@@ -44,7 +54,7 @@ To: <sip:bob@{callee}>\r\n\
 Call-ID: {call_id}\r\n\
 CSeq: 1 INVITE\r\n\
 Contact: <sip:alice@{at}>\r\n\
-Content-Length: 0\r\n\r\n",
+{extra}Content-Length: 0\r\n\r\n",
         branch(call_id),
         word(call_id)
     ))

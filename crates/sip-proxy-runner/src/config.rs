@@ -159,7 +159,6 @@ impl ProxyConfig {
                 1,
                 MAX_MS,
             ),
-            slow_max_ms: env.int("HEALTH_SLOW_MAX_MS", probe_default.slow_max_ms, 1, MAX_MS),
             recover_probes: env.int_u32(
                 "HEALTH_RECOVER_PROBES",
                 probe_default.recover_probes,

@@ -10,7 +10,8 @@
 //!
 //! An intake ramp ([`EluCpsGate::begin_ramp`], ADR-0069) scales the bucket's
 //! rate and size to `ramp_start_pct` percent and back to the whole over
-//! `ramp`, while the POP returns to rotation.
+//! `ramp` from the first external INVITE it meets, while the POP returns to
+//! rotation.
 //!
 //! `crate::core::request` classifies emergency, in-dialog and
 //! worker-originated requests before the gate; a worker's request always
@@ -331,13 +332,14 @@ impl EluCpsGate {
     }
 
     /// Start an intake ramp now (ADR-0069): the bucket admits
-    /// `ramp_start_pct` percent of its rate, its size scaled alike, rising
-    /// linearly to the whole over `ramp`; one under way starts again. A ramp
-    /// of zero does nothing.
+    /// `ramp_start_pct` percent of its rate, its size scaled alike, until the
+    /// first external INVITE, then rises linearly to the whole over `ramp`
+    /// from it; one under way starts again. A ramp of zero, or a start of the
+    /// whole rate, does nothing.
     pub fn begin_ramp(&self) {
         let mut inner = locked(&self.inner, SELF_GATE);
         let now = inner.now();
-        let Some(ramp) = IntakeRamp::starting(now, self.ramp_start_pct, self.ramp) else { return };
+        let Some(ramp) = IntakeRamp::starting(self.ramp_start_pct, self.ramp) else { return };
         inner.ramp = Some(ramp);
         inner.follow_ramp(now);
         tracing::info!(
@@ -388,6 +390,10 @@ impl ProxySelfGate for EluCpsGate {
     /// 3. Otherwise **admit** (a token was consumed in step 2).
     fn try_admit_external(&self) -> AdmitDecision {
         let mut inner = locked(&self.inner, SELF_GATE);
+        let now = inner.now();
+        if let Some(ramp) = inner.ramp.as_mut() {
+            ramp.offered(now);
+        }
 
         if inner.elu_ewma.get() > self.elu_critical {
             drop(inner);
@@ -399,7 +405,6 @@ impl ProxySelfGate for EluCpsGate {
             };
         }
 
-        let now = inner.now();
         inner.follow_ramp(now);
         if let Err(retry) = inner.bucket.try_take(now) {
             drop(inner);

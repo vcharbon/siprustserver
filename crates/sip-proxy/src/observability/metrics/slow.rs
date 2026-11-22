@@ -1,7 +1,6 @@
 //! The slow axis of worker health (ADR-0069): each routed worker's state, and
-//! per worker its late probe answers, its `Slow` spells and the dead verdicts
-//! a spell too long draws. The worker label is drawn from the pool, which
-//! bounds it.
+//! per worker its late probe answers and its `Slow` spells. The worker label
+//! is drawn from the pool, which bounds it.
 
 use metric_values::OpenRows;
 
@@ -13,7 +12,6 @@ pub(super) struct SlowCounts {
     states: OpenRows,
     slow: OpenRows,
     late: OpenRows,
-    slow_max_dead: OpenRows,
 }
 
 impl Default for SlowCounts {
@@ -22,7 +20,6 @@ impl Default for SlowCounts {
             states: OpenRows::new(&c::WORKER_STATE),
             slow: OpenRows::new(&c::WORKER_SLOW),
             late: OpenRows::new(&c::PROBE_LATE_ANSWERS),
-            slow_max_dead: OpenRows::new(&c::SLOW_MAX_DEAD),
         }
     }
 }
@@ -32,7 +29,6 @@ impl SlowCounts {
         self.states.render(s);
         self.slow.render(s);
         self.late.render(s);
-        self.slow_max_dead.render(s);
     }
 }
 
@@ -75,20 +71,11 @@ impl ProxyMetrics {
         self.slow.late.add_pinned(&[worker], 1);
     }
 
-    /// `worker` read `Dead` for the time it spent `Slow` in all.
-    pub fn record_slow_max_dead(&self, worker: &str) {
-        self.slow.slow_max_dead.add_pinned(&[worker], 1);
-    }
-
     pub fn worker_slow(&self, worker: &str) -> u64 {
         self.slow.slow.get(&[worker])
     }
 
     pub fn probe_late_answers(&self, worker: &str) -> u64 {
         self.slow.late.get(&[worker])
-    }
-
-    pub fn slow_max_dead(&self, worker: &str) -> u64 {
-        self.slow.slow_max_dead.get(&[worker])
     }
 }
