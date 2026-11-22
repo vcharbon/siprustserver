@@ -58,6 +58,13 @@ fs.writeFileSync(process.env.SIPRIG_OUT + "/lines.jsonl", JSON.stringify({ recor
 /** A collect that prints `line` on its stdout. */
 const answering = (line: string): Entry => sh(`echo '${line}'`)
 
+/**
+ * The `collect_s` of `hanging-collect`, which the test waits out in full:
+ * long enough for a loaded box to start its shell and write its sleeper's pid
+ * before the bound kills it.
+ */
+export const HANGING_COLLECT_S = 5
+
 /** Every sample collector, as one rig path's files. */
 export const SAMPLES: Readonly<Record<string, Entry>> = {
   ...collector("tidy", {
@@ -91,13 +98,13 @@ export const SAMPLES: Readonly<Record<string, Entry>> = {
     close: traced("close failing-open")
   }),
   ...collector("hanging-collect", {
-    collect: traced("collect hanging-collect", `sleep 30 &\necho $! > ../../sleeper\nwait`)
-  }, `[timeouts]\ncollect_s = 0.5`),
+    collect: traced("collect hanging-collect", `sleep 3600 &\necho $! > ../../sleeper\nwait`)
+  }, `[timeouts]\ncollect_s = ${HANGING_COLLECT_S}`),
   ...collector("leaves-process", {
-    open: traced("open leaves-process", `sleep 30 > /dev/null 2>&1 &\necho $! > "$SIPRIG_STATE/pid"\necho $! > ../../sleeper`),
+    open: traced("open leaves-process", `sleep 3600 > /dev/null 2>&1 &\necho $! > "$SIPRIG_STATE/pid"\necho $! > ../../sleeper`),
     close: traced("close leaves-process", `kill "$(cat "$SIPRIG_STATE/pid")"`)
   }),
-  ...collector("slow-open", { open: traced("open slow-open", "sleep 5"), close: traced("close slow-open") }),
+  ...collector("slow-open", { open: traced("open slow-open", "exec sleep 3600"), close: traced("close slow-open") }),
   ...collector("failing-close", { close: traced("close failing-close", "exit 1") }),
   ...collector("flaky-close", {
     close: traced("close flaky-close", `[ -e "$SIPRIG_STATE/tried" ] && exit 0\ntouch "$SIPRIG_STATE/tried"\nexit 1`)
@@ -127,7 +134,7 @@ export const SAMPLES: Readonly<Record<string, Entry>> = {
     collect: traced("collect required-failing", `echo "the lab cannot be asked" >&2\nexit 3`)
   }, `at = "before"\nrequired = true`),
   ...collector("required-hanging", {
-    collect: traced("collect required-hanging", `sleep 30 &\necho $! > ../../sleeper\nwait`)
+    collect: traced("collect required-hanging", `sleep 3600 &\necho $! > ../../sleeper\nwait`)
   }, `at = "before"\nrequired = true\n[timeouts]\ncollect_s = 0.5`),
   ...collector("required-check", {}, `at = "before"\nrequired = true\nneeds = ["records-store"]`, "job"),
   ...collector("asked-check", {

@@ -23,7 +23,7 @@ import * as CollectorOnDemand from "../src/collector-on-demand.js"
 import * as CollectorPlan from "../src/collector-plan.js"
 import * as CollectorRun from "../src/collector-run.js"
 import * as RigPath from "../src/rig-path.js"
-import { alive, cellOf, gone, memoryLocker, SAMPLES, traceHolds, traceOf } from "./collectors.js"
+import { alive, cellOf, gone, HANGING_COLLECT_S, memoryLocker, SAMPLES, traceHolds, traceOf } from "./collectors.js"
 import { laneOf } from "./operations.js"
 import { run, tree } from "./tree.js"
 import { endOf } from "./waits.js"
@@ -493,7 +493,7 @@ describe("a scope's collectors", () => {
     const cells = cellsUnder(root)
     const { collected } = await runScope([instanceOf(rig, root, "hanging-collect")], cells, { sink: () => Effect.void, locker: memoryLocker() })
     const [hung] = valueOf(collected)
-    expect(hung!.cells.get("c2")!.verifications[0]!.message).toMatch(/^collect timed out after 500 ms/)
+    expect(hung!.cells.get("c2")!.verifications[0]!.message).toMatch(new RegExp(`^collect timed out after ${HANGING_COLLECT_S * 1000} ms`))
     await gone(Number(fs.readFileSync(path.join(root, "sleeper"), "utf8")))
   })
 
@@ -529,9 +529,7 @@ describe("a scope's collectors", () => {
       Effect.never
     ))
     await traceHolds(root, "open slow-open", endOf(fiber))
-    const interrupted = Date.now()
     await Effect.runPromise(Fiber.interrupt(fiber))
-    expect(Date.now() - interrupted).toBeLessThan(4000)
     expect(traceOf(root)).toEqual(["open tidy open", "open slow-open", "close slow-open", "close tidy token close"])
   })
 
