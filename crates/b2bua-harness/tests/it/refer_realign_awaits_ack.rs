@@ -147,6 +147,24 @@ impl ARealignDue {
         self.sent(self.reinviter, self.b2bua.addr, "ACK ", Some(self.reinvite_cseq))
     }
 
+    /// Every response the stack sent the re-inviter on an ACK of his: none
+    /// where it holds to RFC 3261 §17.1.1.3, an ACK drawing no response.
+    fn responses_to_reinviters_acks(&self) -> Vec<String> {
+        self.sent(self.b2bua.addr, self.reinviter, "SIP/2.0 ", None)
+            .iter()
+            .filter(|(_, e)| {
+                sip_message::sniff::cseq_method_token(&e.raw).as_deref() == Some("ACK")
+            })
+            .map(|(_, e)| sip_message::sniff::first_line(&e.raw))
+            .collect()
+    }
+
+    /// Every ACK the stack sent A: the ACKs it relayed her of her 2xx to B's
+    /// re-INVITE, then those of her 2xx to the a-realign re-INVITE.
+    fn acks_to_alice(&self) -> Vec<(usize, RecordedSipEntry)> {
+        self.sent(self.b2bua.addr, self.alice.addr(), "ACK ", None)
+    }
+
     /// Every ACK the stack sent C on the c-realign re-INVITE's CSeq.
     fn c_realign_acks(&self) -> Vec<(usize, RecordedSipEntry)> {
         let cseq = Some(self.c_realign.request().cseq().seq());
@@ -196,14 +214,18 @@ struct Setup {
     /// ACKs at once. Only where A re-INVITEs before the REFER, so the fabric
     /// holds none of B's ACKs.
     refresh: bool,
+    /// How long C waits before answering the c-realign re-INVITE, where it
+    /// does not answer at once.
+    c_answers_after: Option<Duration>,
 }
 
 impl Setup {
     /// The first offer as `first` has it; A re-INVITEs and ACKs the 2xx over
-    /// a fabric holding her ACKs as `holds` says; no refresh.
+    /// a fabric holding her ACKs as `holds` says; no refresh; C answers the
+    /// c-realign re-INVITE at once.
     fn alice_acks_held(first: FirstOffer, holds: &'static [Duration]) -> Self {
         let reinviter = ReInviter::Transferee;
-        Setup { first, reinviter, holds, acks: true, refresh: false }
+        Setup { first, reinviter, holds, acks: true, refresh: false, c_answers_after: None }
     }
 
     /// [`Setup::alice_acks_held`] where B re-INVITEs, his ACKs held.
@@ -221,7 +243,7 @@ impl Setup {
 /// offer, receives its ACK at once). The stack runs its production keepalive
 /// interval, past every scenario's span.
 async fn a_realign_due(name: &str, n: u16, setup: Setup) -> ARealignDue {
-    let Setup { first, reinviter, holds, acks, refresh } = setup;
+    let Setup { first, reinviter, holds, acks, refresh, c_answers_after } = setup;
     let (alice_port, bob_port, b2bua_port, charlie_port) = (5641 + n, 5651 + n, 5661 + n, 5671 + n);
     let alice_addr: SocketAddr = format!("127.0.0.1:{alice_port}").parse().expect("an address");
     let bob_addr: SocketAddr = format!("127.0.0.1:{bob_port}").parse().expect("an address");
@@ -313,6 +335,9 @@ async fn a_realign_due(name: &str, n: u16, setup: Setup) -> ARealignDue {
     success.respond(200, "OK").await;
 
     let mut c_realign = charlie.receive("INVITE").await;
+    if let Some(wait) = c_answers_after {
+        h.advance(wait).await;
+    }
     match first {
         FirstOffer::Transferee => {
             c_realign.respond(200, "OK").with_sdp(CHARLIE_REALIGN_ANSWER).await;
@@ -464,11 +489,78 @@ async fn the_a_realign_leaves_on_the_referrers_ack_relayed_to_the_transferee() {
     let acks = t.reinviters_acks();
     let invites = t.invites_to_alice();
     assert_eq!((acks.len(), invites.len()), (1, 1), "one ACK of B's, one a-realign re-INVITE");
-    let relayed = t.sent(t.b2bua.addr, t.alice.addr(), "ACK ", None);
+    let relayed = t.acks_to_alice();
     let relayed_at = relayed.last().expect("B's ACK relayed to A").0;
     assert!(
         relayed_at < invites[0].0,
         "the a-realign re-INVITE leaves after B's ACK, relayed to A"
+    );
+    transfer_completes(t, a_realign, FirstOffer::Transferee).await;
+}
+
+/// B re-INVITEs before his REFER, and his ACK of A's 2xx reaches the stack
+/// while C is yet to answer the c-realign re-INVITE: the ACK draws no
+/// response (RFC 3261 §17.1.1.3) and is relayed to A, so her dialog awaits
+/// nothing once C answers, and the a-realign re-INVITE leaves on C's 2xx;
+/// the transfer completes.
+#[tokio::test(start_paused = true)]
+async fn the_referrers_ack_arriving_while_c_realigns_is_relayed_to_the_transferee() {
+    let name = "refer-realign-referrer-ack-in-c-realign";
+    let setup = Setup {
+        c_answers_after: Some(ACK_HELD * 2),
+        ..Setup::bob_acks_held(FirstOffer::Transferee, &[ACK_HELD])
+    };
+    let mut t = a_realign_due(name, 7, setup).await;
+
+    t.h.advance(PAST_THE_TRANSFERS_ROUND_TRIPS).await;
+    t.assert_no_refusal();
+    let summary = (
+        t.reinviters_acks().len(),
+        t.responses_to_reinviters_acks(),
+        t.acks_to_alice().len(),
+        t.invites_to_alice().len(),
+    );
+    assert_eq!(
+        summary,
+        (1, vec![], 1, 1),
+        "B's one ACK draws no response and is relayed to A; one a-realign re-INVITE: {:?}",
+        cdr_events(&t.b2bua)
+    );
+    t.alice.receive("ACK").await;
+    let a_realign = t.alice.receive("INVITE").await;
+    transfer_completes(t, a_realign, FirstOffer::Transferee).await;
+}
+
+/// B re-INVITEs before his REFER and the fabric holds his ACK past T1: the
+/// stack re-sends A's 2xx to him, B ACKs the copy too, and his two ACKs
+/// arrive in turn. The first is relayed to A and releases the a-realign
+/// re-INVITE; the second, arriving while that re-INVITE awaits A's final,
+/// draws no response (RFC 3261 §17.1.1.3), is owed A no more and releases
+/// nothing more.
+#[tokio::test(start_paused = true)]
+async fn a_repeated_referrers_ack_releases_the_a_realign_once() {
+    let name = "refer-realign-referrer-ack-repeat";
+    let setup =
+        Setup::bob_acks_held(FirstOffer::Transferee, &[FIRST_ACK_HELD_PAST_T1, REPEAT_HELD]);
+    let mut t = a_realign_due(name, 8, setup).await;
+
+    t.h.advance(T1).await;
+    t.bob.drain_tu().await;
+    assert_eq!(t.reinviters_acks().len(), 2, "B ACKs the stack's 2xx copy as well");
+    t.assert_no_refusal();
+    assert!(t.invites_to_alice().is_empty(), "no a-realign re-INVITE before B's ACK arrives");
+
+    t.alice.receive("ACK").await;
+    let a_realign = t.alice.receive("INVITE").await;
+    t.h.advance(REPEAT_HELD).await;
+    t.assert_no_refusal();
+    let summary =
+        (t.responses_to_reinviters_acks(), t.acks_to_alice().len(), t.invites_to_alice().len());
+    assert_eq!(
+        summary,
+        (vec![], 1, 1),
+        "B's repeated ACK draws no response, is not relayed to A again and releases no second \
+         re-INVITE"
     );
     transfer_completes(t, a_realign, FirstOffer::Transferee).await;
 }
