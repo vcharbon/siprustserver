@@ -181,6 +181,10 @@ pub enum RuleAction {
         leg_id: String,
         headers: Vec<(String, String)>,
     },
+    /// CANCEL b-leg `leg_id`'s ringing INVITE (RFC 3261 §9.1); the leg reads
+    /// `Cancelling` until that INVITE's final. Each request relayed toward the
+    /// leg draws this stack's final at a leg's end (§15.1.2), and the leg's
+    /// later final to it is not relayed.
     CancelLeg {
         leg_id: String,
     },
