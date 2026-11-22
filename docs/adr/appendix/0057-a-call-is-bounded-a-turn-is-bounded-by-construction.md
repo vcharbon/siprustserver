@@ -255,7 +255,10 @@ settings' documentation, on by default. Startup refuses:
 - `B2BUA_CAP_ACTIONS_PER_TURN` at or below `B2BUA_CAP_LEGS` (its base) plus the
   teardown's two further actions: a call at its leg cap before any grant could
   not be torn down. A teardown takes one action per unresolved leg, far fewer
-  than the legs a granted call may have dialled.
+  than the legs a granted call may have dialled;
+- `B2BUA_CAP_RECORD_BYTES` above half the replication frame's cap: the frame
+  that carries a record at the cap also carries its envelope and its index
+  keys, which repeat the identifiers of the dialogs the record holds.
 
 The upstream defaults are constants stated with their derivation from the
 scenario catalogue's heaviest shapes; a deployment sets its own from measurement
@@ -344,9 +347,6 @@ ladder covering the ACK in flight. A leg its BYE terminated still owes it
 - **A memo of the bytes of a request that stuck a poll**: §5 and the fuzz
   campaign keep such a request from existing; the exit's discharge keeps the
   record from carrying it.
-- **An encoded-size check of the record**: it exists only where a replicating
-  store is wired, and runs after the turn has landed, where the turn can no
-  longer be discarded. The per-collection caps bound the record on every node.
 - **Replicated per-call counters**: they need merge rules and diverge on quiet
   turns; collection lengths need neither.
 - **A Q.850 cause, or the cap's name, on the trip's final**: the wire learns

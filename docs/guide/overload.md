@@ -175,10 +175,11 @@ These bounds stop a call that grows without end, by a fault of a peer or a defec
 | Timers of one call, open requests of one call | 400 each | The same. |
 | Dialogs of one leg | 100 | The same. |
 | Actions of one turn | 100 000 | The same. |
-| Size of the record of one call, encoded | 16 MiB | The same. The record is measured when the worker writes it, so a record above the bound is not written and not sent to the backup. |
+| Size of the record of one call, encoded | 16 MiB | The same. The record is measured when the worker writes it, so the turn's record is not written and not sent to the backup. A BYE is never refused, so a BYE can leave a record above the bound. A worker with a lower bound can take over a record above its bound. In both cases the next write of the call ends it. |
 | Events queued for one call | 64 | See [What is never refused](#what-is-never-refused). |
 
-You can raise a bound. You cannot remove one. A worker refuses to start with a bound at zero.
+You can raise a bound. You cannot remove one. A worker refuses to start with a bound at zero, or
+with a record size above 32 MiB, half of the 64 MiB replication frame.
 
 A call that the worker ends for a bound gets a normal teardown. Each leg gets a BYE or a CANCEL,
 and a caller with no answer gets 503. The name of the bound does not go on the wire. It goes in
