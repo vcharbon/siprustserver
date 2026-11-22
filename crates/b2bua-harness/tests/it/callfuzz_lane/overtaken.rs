@@ -2,39 +2,155 @@
 //! one overtook: the network lost its first copy, its sender sent the next
 //! request of the dialog after it, and its receiver refused the copy that
 //! reached it 500, its CSeq gone backwards (RFC 3261 §12.2.2, §17.1.2.2).
-//! The 500 is the receiver's right answer, so the call's scenario may not
-//! reach the ending it was drawn for; every other net still judges it.
+//! The 500 is the receiver's right answer, so the call's scenario may fail on
+//! that request's transaction, or on its direct consequence on the request's
+//! leg ([`excuses`]); any other failure stays one, and every other net still
+//! judges the call.
 
-use layer_harness::Stamped;
+use std::net::SocketAddr;
+
+use layer_harness::{LaneKey, Stamped};
+use scenario_harness::actor::FailedAt;
+use scenario_harness::StepError;
 use sip_message::sniff::{self, Identity};
 use sip_net_testkit::SignalingNetworkEvent;
 
-/// Whether `events` show a request whose first copy was lost refused 500
-/// after its sender sent a request of the same dialog numbered above it.
-pub(super) fn refused_after_being_overtaken(events: &[Stamped<SignalingNetworkEvent>]) -> bool {
-    events.iter().enumerate().any(|(at, s)| match &s.event {
-        SignalingNetworkEvent::SendLost { bind_key, msg, .. } => {
-            let lost = sniff::identity(msg);
-            let sequenced =
-                lost.cseq.is_some() && lost.method.is_some_and(|m| !matches!(m, "ACK" | "CANCEL"));
-            let from_tag = sniff::from_tag(msg);
-            let mut overtaken = false;
-            sequenced
-                && events[at + 1..].iter().any(|later| match &later.event {
-                    SignalingNetworkEvent::SendCalled { bind_key: lane, msg: next, .. }
-                        if lane == bind_key =>
-                    {
-                        overtaken |= numbered_above(&lost, &from_tag, next);
-                        false
-                    }
-                    SignalingNetworkEvent::SendCalled { msg: answer, .. } => {
-                        overtaken && refuses_500(&lost, answer)
-                    }
-                    _ => false,
-                })
+/// A request a later one overtook after the loss of its first copy, refused
+/// 500 for it.
+#[derive(Debug)]
+pub(super) struct Overtaken {
+    method: String,
+    /// The addresses its leg joins: its receiver, its sender (the 500's
+    /// addressee), and each address its sender passed a 500 to a request of
+    /// its method on to after that refusal (a B2BUA relaying the refusal to
+    /// the party whose request it carried).
+    leg: Vec<SocketAddr>,
+    /// For a PRACK, the addresses the give-up of the INVITE whose reliable
+    /// provisional it acknowledged reached (RFC 3262 §3): its sender, which
+    /// its receiver sent a 5xx final to an INVITE of its Call-ID after the
+    /// refusal, and each address that sender passed a 5xx final to an INVITE
+    /// on to after it; empty for any other method, or with no such final.
+    invite_failed: Vec<SocketAddr>,
+}
+
+/// Every request `events` show refused 500 after the loss of its first copy
+/// and after its sender sent a request of the same dialog numbered above it.
+pub(super) fn overtaken_requests(events: &[Stamped<SignalingNetworkEvent>]) -> Vec<Overtaken> {
+    events
+        .iter()
+        .enumerate()
+        .filter_map(|(at, s)| match &s.event {
+            SignalingNetworkEvent::SendLost { bind_key, to, msg } => {
+                overtaken_at(&events[at + 1..], bind_key, *to, msg)
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// Whether a failure of the call at `at` for `cause` is the overtaken
+/// request's own transaction or its direct consequence on its leg, `party`
+/// naming the address of each role, none for a barrier. Excused, for some
+/// `overtaken` request R, are only:
+///
+/// - R's refusal: a `WrongStatus` 500 met by a party on R's leg;
+/// - R a PRACK, the give-up of the INVITE whose reliable provisional it
+///   acknowledged (RFC 3262 §3): a `WrongStatus` 5xx at the `invite` goal of
+///   a party that give-up reached;
+/// - the call state a goal of a party on R's leg waited for behind R: a
+///   barrier's `Timeout` failing that party.
+///
+/// A barrier's own failure, a failure of a party off R's leg, and any other
+/// cause stay failures.
+pub(super) fn excuses(
+    overtaken: &[Overtaken],
+    at: &FailedAt,
+    cause: &StepError,
+    party: impl Fn(&str) -> Option<SocketAddr>,
+) -> bool {
+    let among = |addrs: &[SocketAddr], who: &str| party(who).is_some_and(|a| addrs.contains(&a));
+    let at_invite = at.goal.is_some_and(|(kind, _)| kind == "invite");
+    overtaken.iter().any(|r| match cause {
+        StepError::WrongStatus { who, got, .. } => {
+            (*got == 500 && among(&r.leg, who))
+                || ((500..600).contains(got) && at_invite && among(&r.invite_failed, who))
         }
+        StepError::Timeout { who, .. } => party(who).is_none() && among(&r.leg, at.who),
         _ => false,
     })
+}
+
+/// The request whose first copy `lane` sent to `to` as `msg` was lost, when
+/// the events `after` it show it overtaken and refused 500.
+fn overtaken_at(
+    after: &[Stamped<SignalingNetworkEvent>],
+    lane: &LaneKey,
+    to: SocketAddr,
+    msg: &[u8],
+) -> Option<Overtaken> {
+    let lost = sniff::identity(msg);
+    let method = lost.method.filter(|m| !matches!(*m, "ACK" | "CANCEL"))?;
+    lost.cseq?;
+    let from_tag = sniff::from_tag(msg);
+    let overtaking = after.iter().position(|e| {
+        sent(e).is_some_and(|(l, _, next)| l == lane && numbered_above(&lost, &from_tag, next))
+    })?;
+    let after = &after[overtaking + 1..];
+    let refusal = after.iter().position(|e| {
+        sent(e).is_some_and(|(l, _, answer)| l != lane && refuses_500(&lost, answer))
+    })?;
+    let (refusal_lane, sender, _) = sent(&after[refusal])?;
+    let relayed = after[refusal + 1..].iter().filter_map(sent).filter_map(|(l, dst, answer)| {
+        let id = sniff::identity(answer);
+        (l == lane && id.status == Some(500) && id.cseq_method == Some(method)).then_some(dst)
+    });
+    let leg = [to, sender].into_iter().chain(relayed).collect();
+    let invite_failed = match method {
+        "PRACK" => invite_given_up(&after[refusal + 1..], refusal_lane, sender, lane, &lost),
+        _ => Vec::new(),
+    };
+    Some(Overtaken { method: method.to_string(), leg, invite_failed })
+}
+
+/// The addresses the give-up of the INVITE reached, as the events `after`
+/// the refusal show it: a 5xx final to an INVITE of `lost`'s Call-ID that
+/// its receiver (on `receiver`) sent its sender at `sender`, then each
+/// address that sender (on `lane`) passed a 5xx final to an INVITE on to.
+fn invite_given_up(
+    after: &[Stamped<SignalingNetworkEvent>],
+    receiver: &LaneKey,
+    sender: SocketAddr,
+    lane: &LaneKey,
+    lost: &Identity<'_>,
+) -> Vec<SocketAddr> {
+    let invite_5xx = |raw: &[u8]| {
+        let id = sniff::identity(raw);
+        id.status.is_some_and(|s| (500..600).contains(&s)) && id.cseq_method == Some("INVITE")
+    };
+    let Some(given_up) = after.iter().position(|e| {
+        sent(e).is_some_and(|(l, dst, raw)| {
+            l == receiver
+                && dst == sender
+                && invite_5xx(raw)
+                && sniff::identity(raw).call_id == lost.call_id
+        })
+    }) else {
+        return Vec::new();
+    };
+    let passed_on = after[given_up + 1..]
+        .iter()
+        .filter_map(sent)
+        .filter(|(l, _, raw)| *l == lane && invite_5xx(raw))
+        .map(|(_, dst, _)| dst);
+    std::iter::once(sender).chain(passed_on).collect()
+}
+
+/// The lane, the destination and the bytes of a `SendCalled`.
+fn sent(e: &Stamped<SignalingNetworkEvent>) -> Option<(&LaneKey, SocketAddr, &[u8])> {
+    match &e.event {
+        SignalingNetworkEvent::SendCalled { bind_key, to, msg } => Some((bind_key, *to, msg)),
+        _ => None,
+    }
 }
 
 /// Whether `next` is a request of `lost`'s dialog (its Call-ID, From-tag and
@@ -48,129 +164,17 @@ fn numbered_above(lost: &Identity<'_>, from_tag: &str, next: &[u8]) -> bool {
         && id.cseq > lost.cseq
 }
 
-/// Whether `answer` is a 500 to `lost`'s request: its Call-ID, CSeq and
-/// method.
+/// Whether `answer` is a 500 to `lost`'s transaction: its Call-ID, CSeq,
+/// method and top-Via branch.
 fn refuses_500(lost: &Identity<'_>, answer: &[u8]) -> bool {
     let id = sniff::identity(answer);
     id.status == Some(500)
         && id.call_id == lost.call_id
         && id.cseq == lost.cseq
         && id.cseq_method == lost.method
+        && lost.branch.is_some()
+        && id.branch == lost.branch
 }
 
 #[cfg(test)]
-mod tests {
-    use std::net::SocketAddr;
-    use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::Arc;
-    use std::time::Duration;
-
-    use layer_harness::{Recorder, RunContext};
-    use sip_net::BindUdpOpts;
-    use sip_net_testkit::{
-        with_all_contracts, Fate, ScopedAuditOptions, SimulatedSignalingNetwork,
-    };
-
-    use super::refused_after_being_overtaken;
-
-    const HEAD: &str = "Via: SIP/2.0/UDP 192.0.2.1:5060;branch=z9hG4bK-";
-
-    /// A request of the peer `S` (192.0.2.1) on the dialog `S`/`U`.
-    fn request(method: &str, cseq: u32) -> String {
-        format!(
-            "{method} sip:u@192.0.2.2 SIP/2.0\r\n{HEAD}{cseq}\r\nFrom: <sip:s@host>;tag=S\r\n\
-             To: <sip:u@host>;tag=U\r\nCall-ID: c1@host\r\nCSeq: {cseq} {method}\r\n\
-             Max-Forwards: 70\r\nContent-Length: 0\r\n\r\n"
-        )
-    }
-
-    /// The UA `U`'s `status` to that request.
-    fn answer(status: u16, method: &str, cseq: u32) -> String {
-        format!(
-            "SIP/2.0 {status} Reason\r\n{HEAD}{cseq}\r\nFrom: <sip:s@host>;tag=S\r\n\
-             To: <sip:u@host>;tag=U\r\nCall-ID: c1@host\r\nCSeq: {cseq} {method}\r\n\
-             Content-Length: 0\r\n\r\n"
-        )
-    }
-
-    /// One datagram: the peer's request, or the UA's answer.
-    enum Sent {
-        Peer(String),
-        Ua(String),
-    }
-
-    /// The fact after `sent`, on a fabric that loses the peer's first
-    /// datagram when `lose`.
-    async fn fact_after(lose: bool, sent: &[Sent]) -> bool {
-        let peer: SocketAddr = "192.0.2.1:5060".parse().unwrap();
-        let first = AtomicBool::new(lose);
-        let fabric =
-            SimulatedSignalingNetwork::new(1).with_send_fate(Arc::new(move |src, _, _| {
-                if src == peer && first.swap(false, Ordering::SeqCst) {
-                    Fate::Lose
-                } else {
-                    Fate::Deliver
-                }
-            }));
-        let wrapped = with_all_contracts(
-            Arc::new(fabric),
-            Recorder::fake(),
-            RunContext::TestWithRecorder,
-            ScopedAuditOptions::default(),
-            true,
-        );
-        let net = wrapped.network.clone();
-        let s = net.bind_udp(BindUdpOpts::new(peer, 64)).await.unwrap();
-        let u =
-            net.bind_udp(BindUdpOpts::new("192.0.2.2:5060".parse().unwrap(), 64)).await.unwrap();
-        for datagram in sent {
-            match datagram {
-                Sent::Peer(raw) => s.send_to(raw.as_bytes(), u.local_addr()).await.unwrap(),
-                Sent::Ua(raw) => u.send_to(raw.as_bytes(), s.local_addr()).await.unwrap(),
-            }
-            net.await_in_flight(Duration::from_secs(1)).await;
-        }
-        refused_after_being_overtaken(&wrapped.recording.channel().snapshot())
-    }
-
-    /// The PRACK numbered 2 is lost, the UPDATE numbered 3 overtakes it, and
-    /// the PRACK's retransmission is refused 500 (RFC 3261 §12.2.2).
-    #[tokio::test(start_paused = true)]
-    async fn a_500_to_an_overtaken_lost_request_holds() {
-        let sent = [
-            Sent::Peer(request("PRACK", 2)),
-            Sent::Peer(request("UPDATE", 3)),
-            Sent::Ua(answer(200, "UPDATE", 3)),
-            Sent::Peer(request("PRACK", 2)),
-            Sent::Ua(answer(500, "PRACK", 2)),
-        ];
-        assert!(fact_after(true, &sent).await);
-    }
-
-    /// Nothing lost, nothing overtaking the lost request, or a final other
-    /// than 500 to it: the fact does not hold.
-    #[tokio::test(start_paused = true)]
-    async fn any_other_500_or_loss_does_not_hold() {
-        let overtaken = || {
-            [
-                Sent::Peer(request("PRACK", 2)),
-                Sent::Peer(request("UPDATE", 3)),
-                Sent::Peer(request("PRACK", 2)),
-                Sent::Ua(answer(500, "PRACK", 2)),
-            ]
-        };
-        assert!(!fact_after(false, &overtaken()).await, "nothing lost");
-        let alone = [
-            Sent::Peer(request("PRACK", 2)),
-            Sent::Peer(request("PRACK", 2)),
-            Sent::Ua(answer(500, "PRACK", 2)),
-        ];
-        assert!(!fact_after(true, &alone).await, "not overtaken");
-        let other = [
-            Sent::Peer(request("PRACK", 2)),
-            Sent::Peer(request("UPDATE", 3)),
-            Sent::Ua(answer(500, "UPDATE", 3)),
-        ];
-        assert!(!fact_after(true, &other).await, "a 500 to another request");
-    }
-}
+mod tests;

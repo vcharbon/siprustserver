@@ -16,8 +16,9 @@
 //! `CALLFUZZ_DROP` and `CALLFUZZ_LATE` (percent of datagrams, default 0) put
 //! the call on a lossy network ([`faults`]); a call replays with its faults,
 //! which its draw counts. A call one of whose requests a later one overtook
-//! after a loss, refused 500 for it, may miss its drawn ending; the other
-//! nets judge it still ([`overtaken`]).
+//! after a loss, refused 500 for it, may fail on that request's transaction
+//! or its direct consequence on the request's leg; the other nets judge it
+//! still ([`overtaken`]).
 
 mod faults;
 mod overtaken;
@@ -57,7 +58,8 @@ fn cell_of(seed: u64) -> generator::Cell {
 
 /// Drive the call of `token` to its end and run every net over it; a failure
 /// panics with why, naming the model invariant a SUT turn broke first. A
-/// scenario that missed its ending after an overtaken request's 500 fails no
+/// scenario that failed on an overtaken request's 500 or its direct
+/// consequence on that request's leg ([`overtaken::excuses`]) fails no
 /// further than the nets after it say. A
 /// transfer cell's parties hold their answers but never refuse: a refused
 /// realign rolls the transfer back, an ending no transfer stage states.
@@ -86,7 +88,14 @@ async fn run_call(config: FuzzConfig, token: &str, cell: generator::Cell, net: H
         let broken = model_gate::first_violation(since)
             .map(|b| format!("red because {}; then ", b.lines().next().unwrap_or_default()));
         let events = scene.h.recording().channel().snapshot();
-        if broken.is_some() || !overtaken::refused_after_being_overtaken(&events) {
+        let overtaken = overtaken::overtaken_requests(&events);
+        let party = |role: &str| {
+            [&scene.alice, &scene.bob, &charlie]
+                .into_iter()
+                .find(|p| p.name() == role)
+                .map(|p| p.addr())
+        };
+        if broken.is_some() || !overtaken::excuses(&overtaken, &at, &cause, party) {
             panic!("{}failed at {at}: {cause:?}", broken.unwrap_or_default());
         }
         let seed = config.seed_of(token);
