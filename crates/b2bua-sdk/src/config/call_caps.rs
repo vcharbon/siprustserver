@@ -201,10 +201,13 @@ pub struct CallCaps {
     pub actions_per_turn: u64,
     /// The bytes of the call record's body as the call codec encodes it for
     /// a store write, its envelope left out. The decoded record holds a few
-    /// times its body in process (about 4.5 times for a record grown to every
-    /// count cap, 6 for a plain call), so the body bounds what the call holds
+    /// times its body in process (measured on a reference worker: about 4.5
+    /// times for a record grown to every count cap, 6 for a plain call), so
+    /// the body bounds what the call holds
     /// in memory, the products the per-leg and per-value caps leave open
-    /// included.
+    /// included. A peer can grow a record to it, so it is a peer cap: a
+    /// service defect that grows its ext values shows as trips of this cap,
+    /// never as a defect alert.
     pub record_bytes: u64,
     /// The longest timeout a service's HTTP request runs under, in ms; a
     /// longer one, the port's default included, is clamped to it.
@@ -212,8 +215,8 @@ pub struct CallCaps {
 }
 
 /// The upstream record-size cap, 16 MiB: about 2 700 times a plain answered
-/// call's body (6 KiB), and a quarter of the replication frame (64 MiB), so a
-/// body at the cap always frames.
+/// call's body (6 KiB), and a quarter of the replication frame (64 MiB),
+/// under the half the runner's startup check allows.
 const DEFAULT_RECORD_BYTES: u64 = 16 << 20;
 
 impl CallCaps {
