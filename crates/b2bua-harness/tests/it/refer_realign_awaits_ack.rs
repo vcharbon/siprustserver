@@ -105,35 +105,38 @@ struct ARealignDue {
 impl ARealignDue {
     /// Every datagram `from` sent `to` whose start line begins `start`, on
     /// CSeq number `cseq` when one is given, first sends only (no re-emitted
-    /// copy).
+    /// copy), with its place on the wire.
     fn sent(
         &self,
         from: SocketAddr,
         to: SocketAddr,
         start: &str,
         cseq: Option<u32>,
-    ) -> Vec<RecordedSipEntry> {
+    ) -> Vec<(usize, RecordedSipEntry)> {
         self.h
             .wire_entries()
             .into_iter()
-            .filter(|e| e.from == from && e.to == to && e.reemit.is_none())
-            .filter(|e| e.raw.starts_with(start.as_bytes()))
-            .filter(|e| cseq.is_none_or(|n| sip_message::sniff::cseq_number(&e.raw) == Some(n)))
+            .enumerate()
+            .filter(|(_, e)| e.from == from && e.to == to && e.reemit.is_none())
+            .filter(|(_, e)| e.raw.starts_with(start.as_bytes()))
+            .filter(|(_, e)| {
+                cseq.is_none_or(|n| sip_message::sniff::cseq_number(&e.raw) == Some(n))
+            })
             .collect()
     }
 
     /// Every INVITE the stack sent A: the a-realign re-INVITEs.
-    fn invites_to_alice(&self) -> Vec<RecordedSipEntry> {
+    fn invites_to_alice(&self) -> Vec<(usize, RecordedSipEntry)> {
         self.sent(self.b2bua.addr, self.alice.addr(), "INVITE ", None)
     }
 
     /// Every ACK A sent of her re-INVITE's 2xx.
-    fn alices_acks(&self) -> Vec<RecordedSipEntry> {
+    fn alices_acks(&self) -> Vec<(usize, RecordedSipEntry)> {
         self.sent(self.alice.addr(), self.b2bua.addr, "ACK ", Some(self.reinvite_cseq))
     }
 
     /// Every ACK the stack sent C on the c-realign re-INVITE's CSeq.
-    fn c_realign_acks(&self) -> Vec<RecordedSipEntry> {
+    fn c_realign_acks(&self) -> Vec<(usize, RecordedSipEntry)> {
         let cseq = Some(self.c_realign.request().cseq().seq());
         self.sent(self.b2bua.addr, self.charlie.addr(), "ACK ", cseq)
     }
@@ -280,18 +283,33 @@ fn rejects_every_stream(sdp: &str) -> bool {
     !ports.is_empty() && ports.iter().all(|p| *p == "0")
 }
 
-/// A receives the a-realign re-INVITE, carrying C's active answer, and
-/// answers it: the stack ACKs her, releases B and the transfer completes. A's
-/// BYE then ends the call on C, and the call reaps fully.
-async fn transfer_completes(mut t: ARealignDue, mut a_realign: ServerTxn) {
+/// A receives the a-realign re-INVITE, carrying C's description of the
+/// c-realign 2xx (its answer, or its offer as `first` has it), and answers
+/// it: the stack ACKs her, ACKs C carrying her answer where C offered,
+/// releases B and the transfer completes. A's BYE then ends the call on C,
+/// and the call reaps fully.
+async fn transfer_completes(mut t: ARealignDue, mut a_realign: ServerTxn, first: FirstOffer) {
+    let c_description = match first {
+        FirstOffer::Transferee => CHARLIE_REALIGN_ANSWER,
+        FirstOffer::Callee => CHARLIE_REALIGN_OFFER,
+    };
     assert_eq!(
         apart_from_origin(&String::from_utf8_lossy(a_realign.request().body())),
-        apart_from_origin(CHARLIE_REALIGN_ANSWER),
-        "the a-realign re-INVITE carries C's active answer"
+        apart_from_origin(c_description),
+        "the a-realign re-INVITE carries C's description of its c-realign 2xx"
     );
     a_realign.respond(200, "OK").with_sdp(ALICE_REALIGN_ANSWER).await;
     t.alice.receive("ACK").await;
-    t.bob.receive_tolerating("BYE", &["ACK"]).await.respond(200, "OK").await;
+    if first == FirstOffer::Callee {
+        let ack = t.charlie.receive("ACK").await;
+        assert_eq!(
+            apart_from_origin(&String::from_utf8_lossy(ack.request().body())),
+            apart_from_origin(ALICE_REALIGN_ANSWER),
+            "C's 2xx offered: its ACK carries A's answer (RFC 3261 §13.2.2.4, RFC 3725 §4.1)"
+        );
+        assert_eq!(t.c_realign_acks().len(), 1, "one ACK of C's c-realign 2xx");
+    }
+    t.bob.receive("BYE").await.respond(200, "OK").await;
     let mut alice_bye = t.alice_dialog.bye().await;
     t.charlie.receive("BYE").await.respond(200, "OK").await;
     alice_bye.expect(200).await;
@@ -307,32 +325,48 @@ async fn transfer_completes(mut t: ARealignDue, mut a_realign: ServerTxn) {
     let _ = t.h.finish().await;
 }
 
-/// A's ACK of her re-INVITE's 2xx is in flight while B REFERs, C answers and
-/// C answers the c-realign: the a-realign re-INVITE does not leave while the
-/// stack's 2xx to A awaits that ACK, and leaves once it arrives; the transfer
-/// completes.
-#[tokio::test(start_paused = true)]
-async fn the_a_realign_leaves_on_the_transferees_ack() {
-    let mut t =
-        a_realign_due("refer-realign-awaits-ack", 0, FirstOffer::Transferee, &[ACK_HELD], true)
-            .await;
+/// A's ACK of her re-INVITE's 2xx is in flight while B REFERs, C answers
+/// its INVITE and the c-realign re-INVITE: the a-realign re-INVITE does not
+/// leave while the stack's 2xx to A awaits that ACK, and leaves once it
+/// arrives, the ACK relayed to B; the transfer completes. Under `first`.
+async fn the_a_realign_leaves_on_the_transferees_ack(name: &str, n: u16, first: FirstOffer) {
+    let mut t = a_realign_due(name, n, first, &[ACK_HELD], true).await;
 
     t.h.advance(PAST_THE_TRANSFERS_ROUND_TRIPS).await;
     t.assert_no_refusal();
     assert!(t.invites_to_alice().is_empty(), "no a-realign re-INVITE before A's ACK arrives");
+    let held_for_a = usize::from(first == FirstOffer::Transferee);
+    assert_eq!(t.c_realign_acks().len(), held_for_a, "C's ACK waits for A's answer when C offers");
 
     t.bob.receive("ACK").await;
     let a_realign = t.alice.receive("INVITE").await;
     let acks = t.alices_acks();
     let invites = t.invites_to_alice();
     assert_eq!((acks.len(), invites.len()), (1, 1), "one ACK of A's, one a-realign re-INVITE");
-    let arrived_ms = acks[0].sent_ms + ACK_HELD.as_millis() as u64;
+    let arrived_ms = acks[0].1.sent_ms + ACK_HELD.as_millis() as u64;
     assert!(
-        invites[0].sent_ms >= arrived_ms,
+        invites[0].1.sent_ms >= arrived_ms,
         "the a-realign re-INVITE leaves on A's ACK: sent at {} ms, the ACK arrived at {arrived_ms} ms",
-        invites[0].sent_ms
+        invites[0].1.sent_ms
     );
-    transfer_completes(t, a_realign).await;
+    transfer_completes(t, a_realign, first).await;
+}
+
+/// [`the_a_realign_leaves_on_the_transferees_ack`] where A's INVITE made the
+/// first offer: C answers it in the c-realign 2xx, ACKed bare at once.
+#[tokio::test(start_paused = true)]
+async fn the_a_realign_leaves_on_the_transferees_ack_c_answering() {
+    let name = "refer-realign-awaits-ack";
+    the_a_realign_leaves_on_the_transferees_ack(name, 0, FirstOffer::Transferee).await;
+}
+
+/// [`the_a_realign_leaves_on_the_transferees_ack`] where B made the first
+/// offer: C offers in the c-realign 2xx, the parked a-realign re-INVITE
+/// carries that offer, and C's ACK, held for A's answer, carries it.
+#[tokio::test(start_paused = true)]
+async fn the_a_realign_leaves_on_the_transferees_ack_c_offering() {
+    let name = "refer-realign-awaits-ack-c-offers";
+    the_a_realign_leaves_on_the_transferees_ack(name, 3, FirstOffer::Callee).await;
 }
 
 /// The fabric holds A's ACK past T1: the stack re-sends its 2xx, A ACKs the
@@ -356,11 +390,13 @@ async fn a_repeated_ack_releases_the_a_realign_once() {
     t.assert_no_refusal();
     assert!(t.invites_to_alice().is_empty(), "no a-realign re-INVITE before A's ACK arrives");
 
+    t.bob.receive("ACK").await;
     let a_realign = t.alice.receive("INVITE").await;
     t.h.advance(REPEAT_HELD).await;
     t.assert_no_refusal();
     assert_eq!(t.invites_to_alice().len(), 1, "A's repeated ACK releases no second re-INVITE");
-    transfer_completes(t, a_realign).await;
+    t.bob.drain().await;
+    transfer_completes(t, a_realign, FirstOffer::Transferee).await;
 }
 
 /// A's ACK of her re-INVITE's 2xx never comes, and C's c-realign 2xx offers:
@@ -393,10 +429,11 @@ async fn the_watchdog_ends_an_a_realign_still_waiting_for_the_transferees_ack() 
     let byes = t.sent(t.b2bua.addr, t.charlie.addr(), "BYE ", None);
     assert_eq!(acks.len(), 1, "one ACK of C's c-realign 2xx");
     assert!(
-        byes.first().is_some_and(|bye| acks[0].sent_ms <= bye.sent_ms),
+        byes.first().is_some_and(|(bye, _)| acks[0].0 < *bye),
         "C's ACK leaves before the rollback's BYE"
     );
     t.alice.receive("BYE").await.respond(200, "OK").await;
+    t.bob.receive("ACK").await;
     t.bob.receive("BYE").await.respond(200, "OK").await;
 
     t.assert_no_refusal();
