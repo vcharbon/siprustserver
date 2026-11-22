@@ -17,7 +17,10 @@ use crate::agent::top_via_branch;
 /// ended, is a retransmission whose first copy the network lost, and whose
 /// first copy its sender sent before it received that BYE.
 #[derive(Clone)]
-pub struct SentBeforeBye(Arc<dyn Fn(&SipRequest, u32) -> bool + Send + Sync>);
+pub struct SentBeforeBye(Arc<Holds>);
+
+/// The fact of a request and the CSeq of the UA's BYE.
+type Holds = dyn Fn(&SipRequest, u32) -> bool + Send + Sync;
 
 impl SentBeforeBye {
     /// The fact as `holds` states it.
