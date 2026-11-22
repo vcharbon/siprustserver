@@ -4,7 +4,9 @@
 //! at most (under 64·T1), only on a response or an ACK, never on a reliable
 //! provisional, whose PRACK is owed only if it arrives before the final
 //! (RFC 3262 §4). A loss is recoverable: only a message's first copy may be
-//! lost, never a retransmission, so one retransmission recovers each loss.
+//! lost, never a retransmission, so one retransmission recovers each loss,
+//! and never a provisional response sent unreliably, which nothing
+//! retransmits.
 //! Each datagram's fate is drawn from the call's seed and the datagram's place
 //! in its sender's flow, never from the order of sends across parties, so a
 //! call replays with its faults.
@@ -64,6 +66,18 @@ fn holdable(raw: &[u8]) -> bool {
     }
 }
 
+/// Whether a retransmission recovers the loss of `raw`: any message but a
+/// provisional response sent unreliably (a 1xx without RSeq, the 100
+/// included): its sender sends it again only on a retransmission of its
+/// request (RFC 3261 §17.2.1), and an INVITE's client sends none past its
+/// first provisional (§17.1.1.2).
+fn losable(raw: &[u8]) -> bool {
+    match sip_message::sniff::resp_status(raw) {
+        Some(status) => status >= 200 || sip_message::sniff::header_value(raw, "RSeq").is_some(),
+        None => true,
+    }
+}
+
 /// What makes a datagram a copy of one sent before: a request other than an
 /// ACK is retransmitted on its transaction, its top Via branch and method (a
 /// CANCEL shares its INVITE's branch, RFC 3261 §9.1); a response, an ACK, or
@@ -111,7 +125,8 @@ fn stable_hash(text: &str) -> u64 {
 }
 
 /// The fate of each datagram of the call of `seed`, counted in `tally`: the
-/// first copy of a message draws its loss, a later copy is never lost.
+/// first copy of a [`losable`] message draws its loss, a later copy is never
+/// lost.
 pub(super) fn fate_of(faults: Faults, seed: u64, tally: Arc<Tally>) -> SendFate {
     let sent = Mutex::new(HashSet::new());
     let places = Mutex::new(HashMap::new());
@@ -119,7 +134,7 @@ pub(super) fn fate_of(faults: Faults, seed: u64, tally: Arc<Tally>) -> SendFate 
         let place = place_of(src, dst, raw, &mut places.lock().expect("places"));
         let mut rng = Rng::new(seed ^ FAULT_SALT ^ stable_hash(&place));
         let first_copy = sent.lock().expect("sent copies").insert(copy_key(raw));
-        if first_copy && rng.chance(faults.drop) {
+        if first_copy && rng.chance(faults.drop) && losable(raw) {
             tally.lost.fetch_add(1, Ordering::Relaxed);
             return Fate::Lose;
         }
@@ -138,21 +153,39 @@ mod tests {
     const INVITE: &[u8] = b"INVITE sip:bob@192.0.2.2 SIP/2.0\r\nVia: SIP/2.0/UDP 192.0.2.1;branch=z9hG4bK-1\r\nCSeq: 1 INVITE\r\n\r\n";
     const RETRY: &[u8] = b"INVITE sip:bob@192.0.2.2 SIP/2.0\r\nVia: SIP/2.0/UDP 192.0.2.1;branch=z9hG4bK-1;rport\r\nCSeq: 1 INVITE\r\n\r\n";
     const CANCEL: &[u8] = b"CANCEL sip:bob@192.0.2.2 SIP/2.0\r\nVia: SIP/2.0/UDP 192.0.2.1;branch=z9hG4bK-1\r\nCSeq: 1 CANCEL\r\n\r\n";
+    const TRYING: &[u8] = b"SIP/2.0 100 Trying\r\nVia: SIP/2.0/UDP 192.0.2.1;branch=z9hG4bK-1\r\nCSeq: 1 INVITE\r\n\r\n";
     const RINGING: &[u8] = b"SIP/2.0 180 Ringing\r\nVia: SIP/2.0/UDP 192.0.2.1;branch=z9hG4bK-1\r\nCSeq: 1 INVITE\r\n\r\n";
+    const PROGRESS: &[u8] = b"SIP/2.0 183 Session Progress\r\nVia: SIP/2.0/UDP 192.0.2.1;branch=z9hG4bK-1\r\nCSeq: 1 INVITE\r\nRSeq: 1\r\n\r\n";
+    const OK: &[u8] =
+        b"SIP/2.0 200 OK\r\nVia: SIP/2.0/UDP 192.0.2.1;branch=z9hG4bK-1\r\nCSeq: 1 INVITE\r\n\r\n";
 
-    /// On a fabric that loses every datagram it may, the first copy of each
-    /// message is lost and every later copy of it delivered: a request
-    /// retransmitted on its transaction, a response sent again as the same
-    /// bytes. A CANCEL on its INVITE's branch is a message of its own.
-    #[test]
-    fn only_the_first_copy_of_a_message_is_lost() {
+    /// The fates of `sent`, in order, from 192.0.2.1 to 192.0.2.2 on a fabric
+    /// that loses every datagram it may, and its tally's note.
+    fn fates_losing_all(sent: &[&[u8]]) -> (Vec<Fate>, String) {
         let tally = Arc::new(Tally::default());
         let fate = fate_of(Faults { drop: 100, late: 0 }, 1, tally.clone());
         let (a, b) = ("192.0.2.1:5060".parse().unwrap(), "192.0.2.2:5060".parse().unwrap());
-        let fates: Vec<Fate> =
-            [INVITE, RETRY, CANCEL, CANCEL, RINGING, RINGING].map(|raw| fate(a, b, raw)).into();
+        (sent.iter().map(|raw| fate(a, b, raw)).collect(), tally.note())
+    }
+
+    /// The first copy of each message is lost and every later copy of it
+    /// delivered: a request retransmitted on its transaction, a response
+    /// sent again as the same bytes, a reliable provisional and a final among
+    /// them. A CANCEL on its INVITE's branch is a message of its own.
+    #[test]
+    fn only_the_first_copy_of_a_message_is_lost() {
+        let sent = [INVITE, RETRY, CANCEL, CANCEL, PROGRESS, PROGRESS, OK, OK];
         use Fate::{Deliver, Lose};
-        assert_eq!(fates, [Lose, Deliver, Lose, Deliver, Lose, Deliver]);
-        assert_eq!(tally.note(), " net(lost 3, held 0)");
+        let lost_once = [Lose, Deliver, Lose, Deliver, Lose, Deliver, Lose, Deliver];
+        assert_eq!(fates_losing_all(&sent), (lost_once.into(), " net(lost 4, held 0)".into()));
+    }
+
+    /// A provisional response sent unreliably, the 100 or another 1xx with
+    /// no RSeq, is never lost, its first copy included.
+    #[test]
+    fn an_unreliable_provisional_is_never_lost() {
+        let delivered = vec![Fate::Deliver; 4];
+        let sent = [TRYING, RINGING, TRYING, RINGING];
+        assert_eq!(fates_losing_all(&sent), (delivered, String::new()));
     }
 }
