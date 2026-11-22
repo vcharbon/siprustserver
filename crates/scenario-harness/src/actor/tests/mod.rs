@@ -30,6 +30,7 @@ mod reception_observer;
 mod refused_requests;
 mod reinvite_ack_body;
 mod reliable_give_up;
+mod reliable_retransmit;
 mod reneg;
 mod renegotiation_gate;
 mod request_pick;
