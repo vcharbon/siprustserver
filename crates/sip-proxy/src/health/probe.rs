@@ -386,7 +386,9 @@ impl HealthProbe {
     /// reads a worker alive on an old payload.
     ///
     /// Health and acceptance are published in one write: a restarted worker
-    /// that answers `200` reads `Alive` at once, never `Unknown` in between.
+    /// that answers `200` reads `Alive` at once, never `Unknown` in between;
+    /// one read `Slow` reads `Dead` first
+    /// ([`slow_process_ended`](Self::slow_process_ended)).
     async fn handle_reply(&self, resp: SipResponse, state: &mut ProbeState) {
         if resp.status() < 200 {
             return;
