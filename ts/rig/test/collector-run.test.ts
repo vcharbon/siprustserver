@@ -522,15 +522,19 @@ describe("a scope's collectors", () => {
 
   it("closes when the scope is interrupted after open, and when an open under way is interrupted", async () => {
     const { root, rig } = await samples()
+    const { events, sink } = collecting()
     const fiber = Effect.runFork(scope(
       ["tidy", "slow-open"].map((name) => instanceOf(rig, root, name)),
       cellsUnder(root),
-      { sink: () => Effect.void, locker: memoryLocker() },
+      { sink, locker: memoryLocker() },
       Effect.never
     ))
     await traceHolds(root, "open slow-open", endOf(fiber))
     await Effect.runPromise(Fiber.interrupt(fiber))
     expect(traceOf(root)).toEqual(["open tidy open", "open slow-open", "close slow-open", "close tidy token close"])
+    expect(events.filter((event) => event.collector === "slow-open" && event.phase === "failed").map((event) => event.message)).toEqual([
+      "open interrupted, its process group killed"
+    ])
   })
 
   it("marks the lab left changed when close fails twice, and closes the others still", async () => {
