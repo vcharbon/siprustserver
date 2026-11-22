@@ -71,6 +71,7 @@ mod discarded_request_readmitted;
 mod duplicate_ack_absorbed;
 mod early_dialog_bye;
 mod early_fork_bye;
+mod early_request_at_cancel;
 mod early_session_body;
 mod ended_leg_481;
 mod ended_leg_txn_timeout;
