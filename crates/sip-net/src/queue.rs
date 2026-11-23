@@ -186,14 +186,22 @@ impl PacketQueue {
 
     /// Await the next packet. Returns `None` once the queue is closed and
     /// drained. Cancellation-safe.
+    ///
+    /// Each packet returned spends one unit of the task's cooperative budget,
+    /// as a tokio channel's `recv` does: a reader whose queue never empties
+    /// still ends its task poll once the budget is spent, its packet left
+    /// queued for the next poll, so the other tasks of its thread run and the
+    /// poll watchdog never reads an overload as a stuck poll.
     pub async fn take(&self) -> Option<UdpPacket> {
         loop {
             // Arm the notification BEFORE inspecting the buffer so a packet
             // offered between the check and the await is not lost.
             let notified = self.notify.notified();
             {
+                let budget = std::future::poll_fn(tokio::task::coop::poll_proceed).await;
                 let mut g = self.lock();
                 if let Some(pkt) = g.pop() {
+                    budget.made_progress();
                     return Some(pkt);
                 }
                 if g.closed {

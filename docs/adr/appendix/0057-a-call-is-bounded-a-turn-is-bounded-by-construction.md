@@ -188,7 +188,11 @@ registered thread's CPU time
 on the same sequence number while its thread spent more than
 `B2BUA_STUCK_POLL_CPU_MS` (default 10 000) of CPU. A thread that is throttled,
 starved, stopped or blocked spends no CPU and never reads stuck; driver work
-between polls is never charged; wall time is never read. A thread blocked behind
+between polls is never charged; wall time is never read. An overload is never a
+stuck poll: every ready source a loop reads spends the task's cooperative budget
+(tokio's channels, timers and sockets by tokio's own rule, `PacketQueue::take` one
+unit per datagram), so a loop whose input queue never empties still ends its poll
+every budget of 128 items. A thread blocked behind
 a stuck one is not stuck, and needs not be: the stuck one is. A node whose
 `schedstat` cannot be read refuses to boot.
 

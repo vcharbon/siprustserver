@@ -33,6 +33,17 @@ enum Work {
 }
 
 /// Run the owner until every handle drops or the endpoint closes.
+///
+/// Each turn polls its arms in order (`biased`): a forget first, so a
+/// retransmission read after it was posted meets no transaction and is
+/// admitted afresh; then commands, due timers and the sweep; inbound packets
+/// last, so a flood that keeps the queue non-empty never starves the timer
+/// wheel nor the sweep that bounds the maps under it. Every arm spends one
+/// unit of the task's cooperative budget per item it yields, the packet arm
+/// in [`sip_net::queue::PacketQueue::take`]: once a poll has spent the
+/// budget every arm is pending, the poll ends, and the next one starts again
+/// in this order. A command or a timer cannot flood without packets: the
+/// router issues commands only in response to events.
 pub(super) async fn run(
     mut owner: Owner,
     endpoint: Arc<dyn UdpEndpoint>,
@@ -51,18 +62,6 @@ pub(super) async fn run(
     sweep.tick().await;
 
     loop {
-        // `biased` polls the arms top-to-bottom and the INBOUND PACKET arm is LAST
-        // on purpose: a sustained packet flood keeps `endpoint.recv()` ready every
-        // iteration, so if it were polled first it would starve the timer wheel and
-        // the safety-net sweep indefinitely — retransmits/timeouts/cleanups would
-        // stall and the transaction maps + DelayQueue would grow unbounded exactly under
-        // the overload the sweep exists to bound. Polling commands, due timers, and
-        // the sweep ahead of new packets guarantees the internal machinery always
-        // makes progress; the flood source (packets) can only be drained once
-        // nothing else is pending. (cmd/timer can't themselves flood without
-        // packets — the router only issues commands in response to events.)
-        // A forget goes first: a retransmission read after it was posted then
-        // meets no transaction and is admitted afresh.
         let work = tokio::select! {
             biased;
             Some(f) = forget_rx.recv() => Work::Forget(f),

@@ -356,6 +356,10 @@ impl ProxyCore {
     /// identity and live and die together, and the runner exits for a restart.
     /// A packet's intake age is read on the core's [`Clock`], the clock its
     /// endpoint stamps arrivals on (`BindUdpOpts::clock`).
+    /// Each read spends a unit of the task's cooperative budget
+    /// ([`sip_net::queue::PacketQueue::take`]): a queue an overload never
+    /// empties still ends the shard's poll every budget, so its thread runs
+    /// its other tasks and the poll watchdog never reads the shard stuck.
     pub async fn run(self) {
         self.cancel_lru.ensure_sweeper(self.metrics.clone());
 

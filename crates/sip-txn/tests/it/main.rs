@@ -54,6 +54,7 @@ mod seed_occupant;
 mod seed_provisional;
 mod shared_refusals;
 mod stateless_options;
+mod timer_burst;
 mod to_tag_binding;
 mod unanswered;
 mod unattributed;

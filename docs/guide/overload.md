@@ -206,6 +206,11 @@ A call cannot stay in a worker with no owner.
 | A long-lived task panics | Immediate | The task starts again after 1 s. |
 | The logic of one call panics | Immediate | That call is torn down on the wire and released. The other calls continue. |
 
+An overload is none of these faults. A UDP input queue that never empties holds no event loop:
+the worker and the proxy read at most 128 datagrams of it in a row, then the other work of
+their thread runs, as the timers, the answers to the probes and the finals of the calls. The
+watchdog thus never reads an overload as a stuck step.
+
 The code of the worker and the proxy is written so that input cannot cause a panic. See
 [engineering-rules.md](engineering-rules.md). The rows above are the second line of defence.
 
