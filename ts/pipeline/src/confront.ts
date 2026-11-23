@@ -906,12 +906,18 @@ export const shapeProbes = (
   recordings: ReadonlyMap<string, ReadonlyArray<Bundle.RecordedMessage>>
 ): ReadonlyArray<ProbeAt> => {
   const answered = answeredTransactions(recordings)
+  const received = receivedRequests(recordings)
   const out: Array<ProbeAt> = []
   for (const failure of verdict.failures ?? []) {
     switch (failure.failure) {
       case "unmatched-datagram": {
         const { arrived, gated_on } = failure
         const step = steps.get(failure.step)
+        const repeat = repeatProbe(failure.step, failure.leg, arrived, received)
+        if (repeat !== undefined) {
+          out.push(repeat)
+          break
+        }
         if (arrived.kind === "response" && gated_on.kind === "response") {
           out.push({
             step: failure.step,
@@ -961,8 +967,16 @@ export const shapeProbes = (
         break
       }
       case "unexpected-datagram":
+        out.push(
+          repeatProbe("", failure.leg, failure.arrived, received) ??
+            strayProbe("", failure.leg, failure.arrived, answered, failure.detail)
+        )
+        break
       case "datagram-after-flow":
-        out.push(strayProbe("", failure.leg, failure.arrived, answered))
+        out.push(
+          repeatProbe("", failure.leg, failure.arrived, received) ??
+            strayProbe("", failure.leg, failure.arrived, answered)
+        )
         break
       case "expect-timed-out":
         out.push({
@@ -1017,6 +1031,49 @@ const answeredTransactions = (
   return out
 }
 
+/** Per leg, how many requests it received under each `"<CSeq number> <METHOD>"`. */
+const receivedRequests = (
+  recordings: ReadonlyMap<string, ReadonlyArray<Bundle.RecordedMessage>>
+): ReadonlyMap<string, ReadonlyMap<string, number>> => {
+  const out = new Map<string, ReadonlyMap<string, number>>()
+  for (const [leg, recording] of recordings) {
+    const received = new Map<string, number>()
+    for (const message of recording) {
+      if (message.dir !== "in") continue
+      const start = startLineOf(headText(message))
+      if (start === undefined || start.kind !== "request") continue
+      const cseq = (headerValuesOf(headersInOrder(message), "CSeq")[0] ?? "").trim()
+      const [number = "", method = ""] = cseq.split(/\s+/)
+      const key = `${number} ${method.toUpperCase()}`
+      received.set(key, (received.get(key) ?? 0) + 1)
+    }
+    out.set(leg, received)
+  }
+  return out
+}
+
+/**
+ * A refused ACK the leg had already received under its CSeq, as the repeat it
+ * is, or `undefined` for a first copy. Only an ACK: a 2xx ACK has no
+ * transaction to absorb a copy (RFC 3261 §17.1.1.3), where any other repeated
+ * request is a retransmission whose refusal the other shapes state.
+ */
+const repeatProbe = (
+  step: string,
+  leg: string,
+  arrived: Bundle.Arrived,
+  received: ReadonlyMap<string, ReadonlyMap<string, number>>
+): ProbeAt | undefined => {
+  if (arrived.kind !== "request" || arrived.method.toUpperCase() !== "ACK") return undefined
+  const method = "ACK"
+  const copies = (received.get(leg)?.get(`${arrived.cseq} ${method}`) ?? 0) - 1
+  if (copies < 1) return undefined
+  return {
+    step,
+    probe: { kind: "shape", step, shapeKind: { shape: "repeated-request", method, copies }, scope: undefined }
+  }
+}
+
 /**
  * A datagram the script refused, as a shape: `serviced-stray` where the leg
  * answered it, `extra-message` where nothing did. The split is a real
@@ -1024,29 +1081,40 @@ const answeredTransactions = (
  * RFC 3261 §15.1.2 running, one nobody answered is a transaction left open —
  * so the two carry different signatures and a lane blesses them separately.
  * Only a REQUEST can be serviced; a stray response answers nothing and stays an
- * extra message.
+ * extra message. A request the leg serviced although its CSeq skipped the
+ * dialog's sequence (RFC 3261 §12.2.1.1) is the sender's numbering fault, not
+ * a request the script did not expect: its action is `cseq-skip`.
  */
 const strayProbe = (
   step: string,
   leg: string,
   arrived: Bundle.Arrived,
-  answered: ReadonlyMap<string, ReadonlySet<string>>
+  answered: ReadonlyMap<string, ReadonlySet<string>>,
+  detail?: string
 ): ProbeAt => {
   const serviced =
     arrived.kind === "request" &&
     (answered.get(leg)?.has(`${arrived.cseq} ${arrived.method.toUpperCase()}`) ?? false)
+  const action = detail !== undefined && CSEQ_SKIP.test(detail) ? "cseq-skip" : "auto-reacted"
   return {
     step,
     probe: {
       kind: "shape",
       step,
       shapeKind: serviced
-        ? { shape: "serviced-stray", method: arrivedToken(arrived), action: "auto-reacted" }
+        ? { shape: "serviced-stray", method: arrivedToken(arrived), action }
         : { shape: "extra-message", method: arrivedToken(arrived) },
       scope: undefined
     }
   }
 }
+
+/**
+ * The dialog verdict of a CSeq skip as an `unexpected-datagram` failure's
+ * `detail` states it: the interpreter writes the scenario harness's
+ * `DialogVerdict` display there (`<method> CSeq <n> skips on From-tag ...`).
+ */
+const CSEQ_SKIP = /^\S+ CSeq \d+ skips on From-tag /
 
 /** The scope a substitution pins: the initial-INVITE final, or the answered transaction. */
 const substitutionScope = (step: Flow.Step | undefined, observed: number): MsgScope => {

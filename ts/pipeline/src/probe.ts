@@ -48,6 +48,11 @@ export type ShapeKind =
    * first (RFC 3261 §17.2.1); `afterMs` is the final's arrival from the INVITE.
    */
   | { readonly shape: "trying-omitted"; readonly final: number; readonly afterMs: number }
+  /**
+   * An ACK the leg received again under the CSeq of one it already received,
+   * past the script; `copies` counts the leg's extra copies.
+   */
+  | { readonly shape: "repeated-request"; readonly method: string; readonly copies: number }
   | {
       readonly shape: "retransmission"
       readonly cseqMethod: string
@@ -71,6 +76,8 @@ const shapeText = (kind: ShapeKind): string => {
       return `alignment-lost:${kind.method}`
     case "trying-omitted":
       return "trying-omitted"
+    case "repeated-request":
+      return `repeated-request:${kind.method}:${kind.copies}`
     case "retransmission":
       return `retransmission:${kind.cseqMethod}:2xx`
   }

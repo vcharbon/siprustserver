@@ -31,7 +31,7 @@ export const [
     why:
       "An advertisement or P-Charging-Vector the capture carried on the in-dialog OPTIONS exchange " +
       "and the replay does not, every captured item one a peer handed in: the captured side relayed " +
-      "a peer's OPTIONS or its answer end to end, where the stack answers it itself (RFC 3261 §11.2).",
+      "a peer's OPTIONS or its answer end to end, where the replay's stack answered it itself (RFC 3261 §11.2).",
     also: (h) => onlyCaptured(h) && allHanded(h, itemsOf(h, "captured"))
   },
   {

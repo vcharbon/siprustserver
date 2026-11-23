@@ -7,7 +7,7 @@
  */
 import { strays, substitution } from "@sip/delta-rules/families"
 import { statusOf } from "@sip/delta-rules/scope"
-import { autoAnswered, message, statusSubstitution, substituted, TRYING_DEADLINE_MS } from "@sip/delta-rules/shapes"
+import { autoAnswered, message, statusSubstitution, stray, substituted, TRYING_DEADLINE_MS } from "@sip/delta-rules/shapes"
 import type { RfcFacts } from "./facts.js"
 import type { RfcRow } from "./row.js"
 
@@ -30,6 +30,33 @@ export const byeTeardownCrossStray: RfcRow = {
     "auto-answered 200 (RFC 3261 §15.1.2): both ends released at once and the captured side " +
     "absorbed the cross, or the capture missed the datagram. Every leg ends and the CDR is written.",
   shape: (s) => autoAnswered(s, "BYE")
+}
+
+export const ackCopyRelayedOnce: RfcRow = {
+  id: "ack-copy-relayed-once",
+  on: { kind: "shape", family: ["repeated-request"] },
+  rfc: "RFC 3261 §13.2.2.4, §17.1.1.3",
+  why:
+    "One extra copy of an ACK the leg already received: the caller ACKs each 2xx copy it receives " +
+    "(RFC 3261 §13.2.2.4) and a 2xx ACK has no transaction to absorb a repeat, so the relay may " +
+    "carry it on. A second extra copy stays visible.",
+  shape: (s) => s.shapeKind.shape === "repeated-request" && s.shapeKind.method === "ACK" && s.shapeKind.copies === 1
+}
+
+export const referProgressTerminalNotify: RfcRow = {
+  id: "refer-progress-terminal-notify",
+  on: { kind: "shape", family: ["serviced-stray", "extra-message", "method-substitution"] },
+  gate: "referOutcomeAtStep",
+  rfc: "RFC 3515 §2.4.4, §2.4.5",
+  why:
+    "The terminal NOTIFY of a REFER whose scripted NOTIFY the stack answered with `100` first " +
+    "(RFC 3515 §2.4.5): the outcome rides a second NOTIFY the script never expected. Only on a " +
+    "document scripting a REFER outcome; a NOTIFY anywhere else stays visible.",
+  shape: (s, facts) => {
+    if (facts.referOutcomeAtStep.size === 0) return false
+    const kind = s.shapeKind
+    return stray(s, "NOTIFY") || (kind.shape === "method-substitution" && kind.observed === "NOTIFY")
+  }
 }
 
 export const tryingOnNonInviteNotReproduced: RfcRow = {

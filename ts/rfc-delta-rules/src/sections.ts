@@ -53,6 +53,7 @@ export const RFC_SECTIONS: ReadonlyArray<{ readonly name: RfcSection; readonly r
       StackOwned.fromToTagStackOwned,
       StackOwned.dialogDisplayNameDropped,
       StackOwned.callerDialogAddressKept,
+      StackOwned.responseIdentityCopiedFromRequest,
       StackOwned.sdpOriginStackOwned,
       StackOwned.sdpSessionIdRestated,
       StackOwned.sdpVersionStepOne
@@ -105,12 +106,14 @@ export const RFC_SECTIONS: ReadonlyArray<{ readonly name: RfcSection; readonly r
     rows: [
       Shape.prackAutomaticStray,
       Shape.byeTeardownCrossStray,
+      Shape.ackCopyRelayedOnce,
       Shape.tryingOnNonInviteNotReproduced,
       Shape.byeNotRelayedOntoCancelledEarlyDialog,
       Shape.cancelledCallNotDialled,
       Shape.cancelPastAnswerNotRelayed,
       Shape.answerRelayedAheadOfCrossingCancel,
       Shape.referProgressNotifyReport,
+      Shape.referProgressTerminalNotify,
       Shape.tryingProvisionalUnscripted,
       Shape.tryingOmittedBeforeFinal,
       Shape.requestPastReleaseAnswered481

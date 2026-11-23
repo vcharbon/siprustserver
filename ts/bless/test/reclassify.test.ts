@@ -504,6 +504,48 @@ describe("the reclassifier", () => {
     expect(got.reason).toContain("teardown-cross-unrelayed")
   })
 
+  describe("a failed header check", () => {
+    const check = {
+      failure: "check-failed" as const,
+      site: 'step "s13"',
+      field: "header(Diversion)",
+      op: "eq",
+      expected: "<sip:1555@192.0.2.1>;reason=unconditional",
+      observed: "absent"
+    }
+    const headerRecord = (over: Partial<Confrontation.ConfrontationRecord>) =>
+      record({
+        step: "s13",
+        kind: "header",
+        name: "Diversion",
+        signature: "header:diversion:request:INVITE:in-dialog",
+        scope: "request:INVITE:in-dialog",
+        captured: ["<sip:1555@192.0.2.1>;reason=unconditional"],
+        class: "known-bug",
+        rule: "diversion-dropped",
+        ticket: "KEY/1",
+        ...over
+      })
+    const run = (records: ReadonlyArray<Confrontation.ConfrontationRecord>) =>
+      reclassify(
+        outcome({
+          dir: cellDir(records),
+          verdict: { case: "cap-case1", lane: "lab", status: "failed", failures: [check] }
+        })
+      )
+
+    it("is covered by that header's own record at its step, ruled under a named rule", async () => {
+      const got = await run([headerRecord({})])
+      expect(got.passed).toBe(true)
+      expect(got.reason).toContain("diversion-dropped")
+    })
+
+    it("is not covered by the header's record at another step, nor by one no rule names", async () => {
+      expect((await run([headerRecord({ step: "s27" })])).passed).toBe(false)
+      expect((await run([headerRecord({ class: "unknown", rule: "", ticket: "" })])).passed).toBe(false)
+    })
+  })
+
   it("an expect that timed out is NOT covered by a stray at that step, which states no absence", async () => {
     const absent = {
       failure: "expect-timed-out" as const,

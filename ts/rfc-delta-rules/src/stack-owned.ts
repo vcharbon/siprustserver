@@ -210,6 +210,22 @@ export const callerDialogAddressKept: RfcRow = {
   }
 }
 
+export const responseIdentityCopiedFromRequest: RfcRow = {
+  id: "response-identity-copied-from-request",
+  on: { kind: "header", family: ["from", "to"] },
+  rfc: "RFC 3261 §8.2.6.2",
+  why:
+    "On a response to the caller's INVITE, a From/To the replay copied from her request, every " +
+    "part but the tag, where the capture's differs: RFC 3261 §8.2.6.2 makes the response's From " +
+    "and To the request's, which the captured side rewrote.",
+  header: (h, { facts }) => {
+    const replayed = single(h, "replayed")
+    const asked = openerValue(facts, h.step, canon(h.name))
+    return onLeg(h, ["caller"]) && statusOf(h.scope, "INVITE") !== undefined &&
+      replayed !== undefined && asked !== undefined && sameAddressButTag(asked, replayed)
+  }
+}
+
 export const sdpOriginStackOwned: RfcRow = {
   id: "sdp-origin-stack-owned",
   on: { kind: "body" },

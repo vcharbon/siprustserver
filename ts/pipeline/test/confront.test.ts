@@ -398,6 +398,85 @@ describe("shapeProbes", () => {
     expect(signature(probes[0]!.probe)).toBe("shape:serviced-stray:BYE:auto-reacted")
   })
 
+  it("a serviced request whose CSeq skipped the dialog's sequence is a cseq-skip, not a stray the script missed", () => {
+    const answer = crlf(["SIP/2.0 200 OK", "To: <sip:+15551@h.example>;tag=b", "Call-ID: cid-1", "CSeq: 4 BYE"])
+    const recordings = new Map([
+      ["B", [{ seq: 1, dir: "out", at_us: 10, raw: answer }] as Array<Bundle.RecordedMessage>]
+    ])
+    const refused = (detail?: string) =>
+      shapeProbes(
+        verdictWith([
+          {
+            failure: "unexpected-datagram",
+            leg: "B",
+            arrived: { kind: "request", method: "BYE", cseq: 4 },
+            ...(detail === undefined ? {} : { detail })
+          }
+        ]),
+        new Map(),
+        recordings
+      )
+    expect(signature(refused("BYE CSeq 4 skips on From-tag b (last remote CSeq 2)")[0]!.probe)).toBe(
+      "shape:serviced-stray:BYE:cseq-skip"
+    )
+    expect(signature(refused("BYE CSeq 4 goes backwards on From-tag b (last remote CSeq 7)")[0]!.probe)).toBe(
+      "shape:serviced-stray:BYE:auto-reacted"
+    )
+    expect(signature(refused()[0]!.probe)).toBe("shape:serviced-stray:BYE:auto-reacted")
+  })
+
+  it("a refused request the leg already received under its method and CSeq is a repeat, counted per extra copy", () => {
+    const ack = (branch: string) =>
+      crlf([`ACK sip:b@h.example SIP/2.0`, `Via: SIP/2.0/UDP h.example;branch=${branch}`, "Call-ID: cid-1", "CSeq: 1 ACK"])
+    const refusedAck = (copies: number) =>
+      shapeProbes(
+        verdictWith([
+          {
+            failure: "unmatched-datagram",
+            step: "s9",
+            leg: "B",
+            gated_on: { kind: "request", method: "UPDATE" },
+            reason: "gated on request UPDATE; ACK arrived",
+            arrived: { kind: "request", method: "ACK", cseq: 1 }
+          }
+        ]),
+        new Map(),
+        new Map([
+          [
+            "B",
+            Array.from({ length: copies }, (_, i) => ({ seq: i + 1, dir: "in", at_us: 10 + i, raw: ack(`z9hG4bK-${i}`) })) as Array<
+              Bundle.RecordedMessage
+            >
+          ]
+        ])
+      )
+    expect(signature(refusedAck(2)[0]!.probe)).toBe("shape:repeated-request:ACK:1")
+    expect(signature(refusedAck(3)[0]!.probe)).toBe("shape:repeated-request:ACK:2")
+    expect(signature(refusedAck(1)[0]!.probe)).toBe("shape:method-substitution:UPDATE->ACK")
+  })
+
+  it("a repeated request of another method keeps the shape its refusal states", () => {
+    const invite = (branch: string) =>
+      crlf([`INVITE sip:b@h.example SIP/2.0`, `Via: SIP/2.0/UDP h.example;branch=${branch}`, "Call-ID: cid-1", "CSeq: 2 INVITE"])
+    const probes = shapeProbes(
+      verdictWith([
+        {
+          failure: "unmatched-datagram",
+          step: "s9",
+          leg: "B",
+          gated_on: { kind: "request", method: "ACK" },
+          reason: "gated on request ACK; INVITE arrived",
+          arrived: { kind: "request", method: "INVITE", cseq: 2 }
+        }
+      ]),
+      new Map(),
+      new Map([
+        ["B", [0, 1].map((i) => ({ seq: i + 1, dir: "in", at_us: 10 + i, raw: invite(`z9hG4bK-${i}`) })) as Array<Bundle.RecordedMessage>]
+      ])
+    )
+    expect(signature(probes[0]!.probe)).toBe("shape:method-substitution:ACK->INVITE")
+  })
+
   it("an answer on another leg does not service the stray", () => {
     const answer = crlf(["SIP/2.0 200 OK", "To: <sip:+15551@h.example>;tag=b", "Call-ID: cid-1", "CSeq: 2 BYE"])
     const probes = shapeProbes(

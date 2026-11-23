@@ -477,6 +477,33 @@ const STACK_OWNED: ReadonlyArray<RfcFixture> = [
     ]
   },
   {
+    id: "response-identity-copied-from-request",
+    named: [{
+      probe: headerProbe({
+        name: "From",
+        step: "s2",
+        scope: answering(100, "INVITE"),
+        captured: ['"Alice A. Liddell" <sip:+15555550101@atlanta.example.com>;tag=c'],
+        replayed: ['"Alice" <sip:+15555550101@atlanta.example.com>;tag=d'],
+        leg: { role: "caller", direction: "to-caller" }
+      }),
+      facts: callerSent({ from: '"Alice" <sip:+15555550101@atlanta.example.com>;tag=d' }, "s2")
+    }],
+    visible: [{
+      defect: "a response From toward the caller that is not the From her INVITE carried",
+      leftTo: undefined,
+      probe: headerProbe({
+        name: "From",
+        step: "s2",
+        scope: answering(100, "INVITE"),
+        captured: ['"Alice A. Liddell" <sip:+15555550101@atlanta.example.com>;tag=c'],
+        replayed: ['"Al" <sip:+15555550101@atlanta.example.com>;tag=d'],
+        leg: { role: "caller", direction: "to-caller" }
+      }),
+      facts: callerSent({ from: '"Alice" <sip:+15555550101@atlanta.example.com>;tag=d' }, "s2")
+    }]
+  },
+  {
     id: "sdp-origin-stack-owned",
     named: [{ probe: mintedOrigin(true) }],
     visible: [{ defect: "the same numbers-only row the confrontation did not read as a minted origin", leftTo: undefined, probe: mintedOrigin(false) }]
@@ -779,6 +806,13 @@ const SHAPE: ReadonlyArray<RfcFixture> = [
     visible: [{ defect: "a BYE the system sent that no endpoint answered on its own", leftTo: undefined, probe: shape({ shape: "extra-message", method: "BYE" }) }]
   },
   {
+    id: "ack-copy-relayed-once",
+    named: [{ probe: shape({ shape: "repeated-request", method: "ACK", copies: 1 }) }],
+    visible: [
+      { defect: "a second extra copy of the same ACK", leftTo: undefined, probe: shape({ shape: "repeated-request", method: "ACK", copies: 2 }) }
+    ]
+  },
+  {
     id: "trying-on-non-invite-not-reproduced",
     named: [
       {
@@ -870,6 +904,18 @@ const SHAPE: ReadonlyArray<RfcFixture> = [
       leftTo: undefined,
       probe: referReport,
       facts: factsWith({ referOutcomeAtStep: new Map([["s11", 486]]) })
+    }]
+  },
+  {
+    id: "refer-progress-terminal-notify",
+    named: [
+      { probe: shape({ shape: "serviced-stray", method: "NOTIFY", action: "auto-reacted" }), facts: factsWith({ referOutcomeAtStep: new Map([["s11", 403]]) }) },
+      { probe: shape({ shape: "method-substitution", expected: "BYE", observed: "NOTIFY" }, undefined, "s15"), facts: factsWith({ referOutcomeAtStep: new Map([["s11", 403]]) }) }
+    ],
+    visible: [{
+      defect: "a NOTIFY the flow never scripted on a document with no REFER outcome",
+      leftTo: undefined,
+      probe: shape({ shape: "serviced-stray", method: "NOTIFY", action: "auto-reacted" })
     }]
   },
   {
