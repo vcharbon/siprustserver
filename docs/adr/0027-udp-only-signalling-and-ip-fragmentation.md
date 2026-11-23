@@ -96,9 +96,8 @@ alone keeps a reassembled datagram from becoming a torn SIP message.
 The kernel holds an incomplete datagram's fragments for `ipfrag_time` (30 s,
 IPv6 60 s) in a per-namespace pool of `ipfrag_high_thresh` (4 MiB). Over the
 cap it drops every incoming fragment, a sound peer's included, until queues
-expire. One peer behind a middlebox that drops non-first fragments fills the
-default pool at about 45 datagrams a second, and the INVITE retransmissions
-multiply its rate. The proxy node, where every external datagram is
+expire. One peer whose path drops non-first fragments fills the default pool
+at about 45 datagrams a second, retransmissions included. The proxy node, where every external datagram is
 reassembled, sets a timeout of 2 s and a pool of 64 MiB (chart values
 `proxy.reassembly.*`) for IPv4, and for IPv6 and its conntrack defrag pool where
 present. The fragments of one datagram leave back to back; a tail later than
