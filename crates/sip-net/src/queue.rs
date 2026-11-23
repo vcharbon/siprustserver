@@ -271,8 +271,10 @@ impl Drop for CloseOnDrop {
 
 #[cfg(test)]
 mod tests {
+    use std::future::Future;
     use std::net::SocketAddr;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::task::Poll;
 
     use sip_message::Bytes;
 
@@ -368,6 +370,24 @@ mod tests {
             ran_at.is_some_and(|at| at <= COOP_BUDGET),
             "the other task runs within a budget of takes (after {ran_at:?})"
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_take_out_of_budget_leaves_its_packet_queued() {
+        let queue = PacketQueue::new(4);
+        while tokio::task::coop::has_budget_remaining() {
+            tokio::task::consume_budget().await;
+        }
+        let sent = Bytes::from_static(b"P");
+        assert!(queue.offer(UdpPacket { raw: sent.clone(), ..packet() }));
+        {
+            let mut take = std::pin::pin!(queue.take());
+            let first = std::future::poll_fn(|cx| Poll::Ready(take.as_mut().poll(cx))).await;
+            assert!(first.is_pending(), "a take out of budget is pending");
+        }
+        assert_eq!(queue.depth(), 1, "the dropped take left its packet queued");
+        let taken = queue.take().await.map(|p| p.raw);
+        assert_eq!(taken, Some(sent), "the next take returns it");
     }
 
     #[tokio::test(start_paused = true)]
