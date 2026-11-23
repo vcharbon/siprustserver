@@ -300,20 +300,12 @@ proxy:
   # Per-neighbour bound of the unresolved ARP queue in the proxy node's
   # network namespace (ADR-0033), set by the vip-loopback init container.
   unresQlenBytes: 16384
-  # IP reassembly in the proxy node's network namespace, IPv4 and IPv6, the
-  # IPv6 conntrack defrag pool included where loaded, set by the vip-loopback
-  # init container (ADR-0027 X5). A datagram whose tail a peer's path drops holds
-  # its first fragment for timeoutSeconds; while the pool is over poolBytes the
-  # kernel drops every fragment, those of the peers whose path is sound
-  # included. The fragments of one datagram leave back to back, and a SIP
-  # retransmission resends the whole message under a new IP ID, so a tail late
-  # by timeoutSeconds never completes a message. At about 3 KB per stuck
-  # datagram the pool fills at poolBytes / (timeoutSeconds × 3 KB) a second:
-  # about 11 000 here, 45 at the kernel's defaults (30 s, 4 MiB). poolBytes is
-  # never below the kernel default, which keeps it above ipfrag_low_thresh.
-  # Without the proxy the workers face the peers from their own namespaces:
-  # worker.sysctls takes net.ipv4.ipfrag_time and net.ipv4.ipfrag_high_thresh
-  # once the kubelet allows them (--allowed-unsafe-sysctls).
+  # IP reassembly in the proxy node's network namespace (ADR-0027 X5), set by the
+  # vip-loopback init container: the life of an incomplete datagram and the pool's
+  # cap, for IPv4, and for IPv6 and its conntrack defrag where present. poolBytes
+  # must exceed the node's ipfrag_low_thresh, or the init container fails.
+  # Without the proxy, worker.sysctls takes the IPv4 pair once the kubelet allows
+  # them (--allowed-unsafe-sysctls).
   reassembly:
     timeoutSeconds: 2
     poolBytes: 67108864

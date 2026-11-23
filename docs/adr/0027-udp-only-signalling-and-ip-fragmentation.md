@@ -100,11 +100,12 @@ expire. One peer behind a middlebox that drops non-first fragments fills the
 default pool at about 45 datagrams a second, and the INVITE retransmissions
 multiply its rate. The proxy node, where every external datagram is
 reassembled, sets a timeout of 2 s and a pool of 64 MiB (chart values
-`proxy.reassembly.*`) for IPv4, IPv6 and the IPv6 conntrack defrag pool: the
-fragments of one datagram leave back to back, and a retransmission resends the
-whole message under a new IP ID, so a later tail completes nothing. The pool
-then fills at about 11 000 stuck datagrams a second, a flood rather than a
-misbehaving path.
+`proxy.reassembly.*`) for IPv4, and for IPv6 and its conntrack defrag pool where
+present. The fragments of one datagram leave back to back; a tail later than
+2 s is dropped, and the retransmission resends the whole message under a new IP
+ID. The pool then fills at about 11 000 stuck datagrams a second, a flood
+rather than a misbehaving path. A pool must exceed the node's
+`ipfrag_low_thresh`, or the init container fails and names the sysctl.
 
 ## Consequences
 

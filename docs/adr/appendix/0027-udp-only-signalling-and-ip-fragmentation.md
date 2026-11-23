@@ -20,6 +20,8 @@ The decision part: [ADR-0027](../0027-udp-only-signalling-and-ip-fragmentation.m
   hooks and non-first fragments carry no UDP ports to match on) and pins that
   the receiver then sees *nothing*: a message missing a fragment is never
   delivered in part.
-- The chart's render tests (`deploy/helm/check/test_siprust.py`) pin X5: the
-  proxy node's init script writes both reassembly bounds for each family, and
-  the schema refuses a pool below the kernel default.
+- The chart's tests (`deploy/helm/check/test_siprust.py`) pin X5: the proxy
+  node's reassembly lines run in an unprivileged network namespace and every
+  pool they name reads back both bounds; a node whose `ipfrag_low_thresh` sits
+  above the pool fails them, naming the sysctl; the schema refuses a pool below
+  the kernel default.

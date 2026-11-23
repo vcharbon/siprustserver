@@ -28,8 +28,9 @@
 #
 # Every datagram of the external face is reassembled here. A peer whose path
 # drops non-first fragments leaves first fragments queued until REASM_TIMEOUT_S,
-# and a pool over REASM_POOL_BYTES drops every peer's fragments (ADR-0027 X5):
-# IPv4 must take both, IPv6 and its conntrack defrag take them where present.
+# and a pool over REASM_POOL_BYTES drops every peer's fragments (ADR-0027 X5).
+# IPv4 must take both; IPv6 and its conntrack defrag take them where present
+# when this runs, and the log names the pools set.
 #
 # Traffic from the external VIP is routed through the external interface
 # (ADR-0056 §11). A rule sends it to a table of its own, whose unreachable default
@@ -70,15 +71,24 @@ neigh_set ucast_solicit "$NEIGH_UCAST_SOLICIT"
 neigh_set mcast_solicit "$NEIGH_MCAST_SOLICIT"
 neigh_set retrans_time_ms "$NEIGH_RETRANS_TIME_MS"
 echo 1 > /proc/sys/net/ipv4/fib_multipath_use_neigh
-echo "$REASM_POOL_BYTES" > /proc/sys/net/ipv4/ipfrag_high_thresh
-echo "$REASM_TIMEOUT_S" > /proc/sys/net/ipv4/ipfrag_time
+reasm_set() {
+  echo "$2" > "$1" || {
+    echo "vip-loopback: $1 refused $2 (a pool must exceed the node's low_thresh)" >&2
+    exit 1
+  }
+}
+reasm_set /proc/sys/net/ipv4/ipfrag_high_thresh "$REASM_POOL_BYTES"
+reasm_set /proc/sys/net/ipv4/ipfrag_time "$REASM_TIMEOUT_S"
+reasm_pools=ipv4
 if [ -e /proc/sys/net/ipv6/ip6frag_time ]; then
-  echo "$REASM_POOL_BYTES" > /proc/sys/net/ipv6/ip6frag_high_thresh
-  echo "$REASM_TIMEOUT_S" > /proc/sys/net/ipv6/ip6frag_time
+  reasm_set /proc/sys/net/ipv6/ip6frag_high_thresh "$REASM_POOL_BYTES"
+  reasm_set /proc/sys/net/ipv6/ip6frag_time "$REASM_TIMEOUT_S"
+  reasm_pools="$reasm_pools ipv6"
 fi
 if [ -e /proc/sys/net/netfilter/nf_conntrack_frag6_timeout ]; then
-  echo "$REASM_POOL_BYTES" > /proc/sys/net/netfilter/nf_conntrack_frag6_high_thresh
-  echo "$REASM_TIMEOUT_S" > /proc/sys/net/netfilter/nf_conntrack_frag6_timeout
+  reasm_set /proc/sys/net/netfilter/nf_conntrack_frag6_high_thresh "$REASM_POOL_BYTES"
+  reasm_set /proc/sys/net/netfilter/nf_conntrack_frag6_timeout "$REASM_TIMEOUT_S"
+  reasm_pools="$reasm_pools conntrack6"
 fi
 ip route replace table 5060 unreachable default metric 4294967295
 ip rule show priority 5060 | grep -Fq "from $EXTERNAL_VIP lookup 5060" \
@@ -103,4 +113,4 @@ else
   iptables -F SIP-EXT-EGRESS 2>/dev/null || true
   iptables -X SIP-EXT-EGRESS 2>/dev/null || true
 fi
-echo "vip-loopback: $PROXY_VIP $EXTERNAL_VIP on lo + strict ARP + no ICMP port unreachable from them + neigh unres_qlen_bytes=$UNRES_QLEN_BYTES base_reachable_time_ms=$NEIGH_BASE_REACHABLE_TIME_MS delay_first_probe_time=$NEIGH_DELAY_FIRST_PROBE_S ucast_solicit=$NEIGH_UCAST_SOLICIT mcast_solicit=$NEIGH_MCAST_SOLICIT retrans_time_ms=$NEIGH_RETRANS_TIME_MS + multipath off unresolved next hops + reassembly ${REASM_TIMEOUT_S} s within $REASM_POOL_BYTES B +$EXTERNAL_VIP routed through $EXTERNAL_INTERFACE, its drop $EXTERNAL_EGRESS_DROP + route guard $ROUTE_GUARD ready"
+echo "vip-loopback: $PROXY_VIP $EXTERNAL_VIP on lo + strict ARP + no ICMP port unreachable from them + neigh unres_qlen_bytes=$UNRES_QLEN_BYTES base_reachable_time_ms=$NEIGH_BASE_REACHABLE_TIME_MS delay_first_probe_time=$NEIGH_DELAY_FIRST_PROBE_S ucast_solicit=$NEIGH_UCAST_SOLICIT mcast_solicit=$NEIGH_MCAST_SOLICIT retrans_time_ms=$NEIGH_RETRANS_TIME_MS + multipath off unresolved next hops + reassembly ${REASM_TIMEOUT_S} s within $REASM_POOL_BYTES B on $reasm_pools + $EXTERNAL_VIP routed through $EXTERNAL_INTERFACE, its drop $EXTERNAL_EGRESS_DROP + route guard $ROUTE_GUARD ready"
