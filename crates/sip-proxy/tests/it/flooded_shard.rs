@@ -31,6 +31,10 @@ const DEPTH: usize = 64;
 /// Tokio's cooperative budget: the ready operations one task poll completes
 /// before its next ready one returns pending.
 const COOP_BUDGET: u64 = 128;
+/// The most datagrams the shard takes between two turns of another task:
+/// the current-thread scheduler wakes the tasks a round deferred last first,
+/// so the shard may take two polls in a row.
+const TURN_GAP: u64 = 2 * COOP_BUDGET;
 
 fn addr(s: &str) -> SocketAddr {
     s.parse().expect("an address")
@@ -125,8 +129,8 @@ fn a_flooded_shard_ends_each_poll_within_a_budget_and_its_thread_runs_on() {
         shard.abort();
 
         assert!(
-            widest_gap <= COOP_BUDGET,
-            "another task of the thread runs within a budget of datagrams \
+            widest_gap <= TURN_GAP,
+            "another task of the thread runs within two budgets of datagrams \
              ({widest_gap} taken between two of its turns, {turns} turns)"
         );
     });

@@ -264,7 +264,7 @@ impl Drop for CloseOnDrop {
 #[cfg(test)]
 mod tests {
     use std::net::SocketAddr;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use sip_message::Bytes;
 
@@ -346,16 +346,20 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn a_reader_of_a_queue_that_never_empties_leaves_the_thread_every_budget() {
         let queue = PacketQueue::new(4);
-        let other_ran = Arc::new(AtomicBool::new(false));
-        let flag = other_ran.clone();
-        tokio::spawn(async move { flag.store(true, Ordering::SeqCst) });
-        let mut taken = 0;
-        while taken < 100 * COOP_BUDGET && !other_ran.load(Ordering::SeqCst) {
+        let taken = Arc::new(AtomicUsize::new(0));
+        let other_ran_at = Arc::new(OnceLock::new());
+        let (seen, at) = (taken.clone(), other_ran_at.clone());
+        tokio::spawn(async move { at.set(seen.load(Ordering::SeqCst)) });
+        while taken.load(Ordering::SeqCst) < 100 * COOP_BUDGET && other_ran_at.get().is_none() {
             assert!(queue.offer(packet()));
             assert!(queue.take().await.is_some());
-            taken += 1;
+            taken.fetch_add(1, Ordering::SeqCst);
         }
-        assert!(taken <= COOP_BUDGET, "the other task ran after {taken} takes");
+        let ran_at = other_ran_at.get().copied();
+        assert!(
+            ran_at.is_some_and(|at| at <= COOP_BUDGET),
+            "the other task runs within a budget of takes (after {ran_at:?})"
+        );
     }
 
     #[tokio::test(start_paused = true)]
