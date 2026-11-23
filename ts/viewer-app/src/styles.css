@@ -2387,14 +2387,6 @@ tr.rule-unrostered td {
   height: auto;
 }
 
-/* Until the workbench is docked its boxes do not scroll: a wheel over it
-   scrolls the page and stops where it docks (components/dock.ts). */
-.study-workbench:not([data-docked="true"]) .ladder-scroll,
-.study-workbench:not([data-docked="true"]) .pane-detail pre,
-.study-workbench:not([data-docked="true"]) .pane-controls {
-  overflow: hidden;
-}
-
 .study-workbench > .pane-toolbar {
   flex: none;
   height: 30px;
