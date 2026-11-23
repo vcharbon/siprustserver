@@ -347,19 +347,12 @@ impl ProxyCore {
         }
     }
 
-    /// The recv loop, over both faces' sockets on a dual-face proxy; the face a
-    /// datagram arrived on is its trust (ADR-0048). A datagram is parsed once: the
-    /// loop takes the parse its receive path made and parses only a datagram that
-    /// came without one. A refused one is answered or dropped (ADR-0054); one the
-    /// parser panics on is dropped and counted, and the loop goes on.
-    /// The loop ends when either face's socket closes: the two faces are one
-    /// identity and live and die together, and the runner exits for a restart.
-    /// A packet's intake age is read on the core's [`Clock`], the clock its
-    /// endpoint stamps arrivals on (`BindUdpOpts::clock`).
-    /// Each read spends a unit of the task's cooperative budget
-    /// ([`sip_net::queue::PacketQueue::take`]): a queue an overload never
-    /// empties still ends the shard's poll every budget, so its thread runs
-    /// its other tasks and the poll watchdog never reads the shard stuck.
+    /// The recv loop over both faces' sockets: a datagram's face is its trust
+    /// (ADR-0048); it is parsed once, a refused one answered or dropped (ADR-0054),
+    /// one the parser panics on dropped and counted. The loop ends when either
+    /// face's socket closes, and the runner exits for a restart. Each read spends a
+    /// unit of the cooperative budget: a flood ends the poll every 128 datagrams.
+    /// ADR-0057 §6.
     pub async fn run(self) {
         self.cancel_lru.ensure_sweeper(self.metrics.clone());
 

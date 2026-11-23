@@ -32,18 +32,13 @@ enum Work {
     Packet(UdpPacket),
 }
 
-/// Run the owner until every handle drops or the endpoint closes.
-///
-/// Each turn polls its arms in order (`biased`): a forget first, so a
-/// retransmission read after it was posted meets no transaction and is
-/// admitted afresh; then commands, due timers and the sweep; inbound packets
-/// last, so a flood that keeps the queue non-empty never starves the timer
-/// wheel nor the sweep that bounds the maps under it. Every arm spends one
-/// unit of the task's cooperative budget per item it yields, the packet arm
-/// in [`sip_net::queue::PacketQueue::take`]: once a poll has spent the
-/// budget every arm is pending, the poll ends, and the next one starts again
-/// in this order. A command or a timer cannot flood without packets: the
-/// router issues commands only in response to events.
+/// Run the owner until every handle drops or the endpoint closes. Each turn
+/// polls in order (`biased`): a forget, so a retransmission read after it meets
+/// no transaction, then commands, due timers and the sweep, packets last. Every
+/// arm spends a unit of the cooperative budget per item, so a packet flood ends
+/// the poll every 128 items and never starves the arms above it.
+/// A backlog of N due timers, which only packets refill, delays a packet read by ⌈N/128⌉ polls.
+/// ADR-0057 §6.
 pub(super) async fn run(
     mut owner: Owner,
     endpoint: Arc<dyn UdpEndpoint>,

@@ -189,10 +189,15 @@ on the same sequence number while its thread spent more than
 `B2BUA_STUCK_POLL_CPU_MS` (default 10 000) of CPU. A thread that is throttled,
 starved, stopped or blocked spends no CPU and never reads stuck; driver work
 between polls is never charged; wall time is never read. An overload is never a
-stuck poll: every ready source a loop reads spends the task's cooperative budget
-(tokio's channels, timers and sockets by tokio's own rule, `PacketQueue::take` one
-unit per datagram), so a loop whose input queue never empties still ends its poll
-every budget of 128 items. A thread blocked behind
+stuck poll: `PacketQueue::take` spends one unit of the task's cooperative budget
+per datagram it returns, as tokio's own channels, timers and sockets do, and the
+proxy's resolver one per packet it releases, so a loop whose input queue never
+empties still ends its poll every budget of 128 items. Two residuals remain. A
+task that yields on its budget on a multi-thread runtime is woken again on its
+own worker and is not stolen, so a stuck poll on that worker delays it until the
+watchdog's exit. A backlog of N timers due at once delays the next packet read,
+the probe's among them, by ⌈N/128⌉ polls; the backlog is bounded, and without
+packets nothing refills it. A thread blocked behind
 a stuck one is not stuck, and needs not be: the stuck one is. A node whose
 `schedstat` cannot be read refuses to boot.
 

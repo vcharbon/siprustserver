@@ -178,6 +178,7 @@ impl Inner {
     /// the wait is empty the outcome is published (when `publish`) and the
     /// slot freed in one step under the in-flight lock, so no later packet
     /// overtakes a waiting one and none starts a second lookup in between.
+    /// Each packet released spends a unit of the task's cooperative budget.
     async fn release(
         self: &Arc<Self>,
         target: &ProxyAddr,
@@ -202,6 +203,7 @@ impl Inner {
                 waiting
             };
             for Waiting { bytes, on_sent } in waiting {
+                tokio::task::consume_budget().await;
                 let Some(dst) = resolved else {
                     self.metrics.record_named_send(outcome::RESOLVE_FAILED);
                     continue;

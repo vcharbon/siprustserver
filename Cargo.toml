@@ -111,7 +111,7 @@ memchr = "2"
 proptest = "1"
 criterion = "0.8.2"
 # Network layer onward: all async I/O + logic-path time goes through tokio.
-tokio = { version = "1", features = ["full"] }
+tokio = { version = "1.47", features = ["full"] }
 # DelayQueue (the transaction layer's single timer-wheel driver — see
 # docs/adr/0007). `time` pulls in the keyed timer set; rides `tokio::time`, so
 # `pause`/`advance` controls it in tests exactly like every other behavioural

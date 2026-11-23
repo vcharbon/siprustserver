@@ -103,6 +103,8 @@ impl ProxyCoreBuilder {
         )
     }
 
+    /// The clock a packet's intake age is read on: the one its endpoint stamps
+    /// arrivals on (`BindUdpOpts::clock`).
     pub fn clock(mut self, clock: Clock) -> Self {
         self.clock = Some(clock);
         self
