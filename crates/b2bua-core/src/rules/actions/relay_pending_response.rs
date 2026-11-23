@@ -79,8 +79,8 @@ impl ActionExecutor<'_> {
         // A 2xx answer to a B2BUA-relayed re-INVITE advertises this
         // face's capability set (RFC 3261 §13.2.1/§20.37) — the source
         // response's own, carried through, unless the call declares one;
-        // a 2xx to OPTIONS states what `relayed_options_advertisement`
-        // names (§11.2). Other responses keep verbatim passthrough.
+        // a 2xx to OPTIONS states this UA's own set (§11.2). Other
+        // responses keep verbatim passthrough.
         if r.cseq_method == "INVITE" && (200..300).contains(&status) {
             let caps = capabilities::relaying_for_leg(call, target_leg, &transparent_headers);
             relay::stamp_advertisement(&mut transparent_headers, &r.transform.add_headers, &caps);
