@@ -11,6 +11,7 @@ mod active_active;
 mod backup_named_while_away;
 mod first_ingress_bound;
 mod first_view;
+mod flooded_shard;
 mod health_probe_late_reply;
 mod ingress_trust;
 mod load_balancer;

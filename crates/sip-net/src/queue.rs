@@ -264,6 +264,7 @@ impl Drop for CloseOnDrop {
 #[cfg(test)]
 mod tests {
     use std::net::SocketAddr;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     use sip_message::Bytes;
 
@@ -336,6 +337,25 @@ mod tests {
             }
         }
         assert_eq!(from_the_queue, [1, 2, 3, 4], "every other take is the queue's");
+    }
+
+    /// Tokio's cooperative budget: the ready operations one task poll
+    /// completes before its next ready one returns pending.
+    const COOP_BUDGET: usize = 128;
+
+    #[tokio::test(start_paused = true)]
+    async fn a_reader_of_a_queue_that_never_empties_leaves_the_thread_every_budget() {
+        let queue = PacketQueue::new(4);
+        let other_ran = Arc::new(AtomicBool::new(false));
+        let flag = other_ran.clone();
+        tokio::spawn(async move { flag.store(true, Ordering::SeqCst) });
+        let mut taken = 0;
+        while taken < 100 * COOP_BUDGET && !other_ran.load(Ordering::SeqCst) {
+            assert!(queue.offer(packet()));
+            assert!(queue.take().await.is_some());
+            taken += 1;
+        }
+        assert!(taken <= COOP_BUDGET, "the other task ran after {taken} takes");
     }
 
     #[tokio::test(start_paused = true)]

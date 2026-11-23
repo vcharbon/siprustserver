@@ -10,7 +10,8 @@
 //!     [`ParanoidSignalingNetwork`]. ADR-0004 states the wrapper pattern.
 //!   - [`report`] — the wire-trace projection of a recording; [`repeat`] — the
 //!     RFC 3261 §17.2 repeat classification; [`RandomLoss`] — the fabric's
-//!     random-loss model.
+//!     random-loss model; [`Flood`] — an endpoint whose inbound queue an
+//!     overload holds non-empty.
 //!
 //! The crate declares no purity tier (ADR-0051 §1): a production binary that
 //! links it fails the closure check.
@@ -19,6 +20,7 @@ mod audit_rules;
 mod audit_view;
 pub mod contracts;
 mod event;
+pub mod flood;
 pub mod loss;
 mod paranoid;
 pub mod repeat;
@@ -36,6 +38,7 @@ pub use contracts::{
     ScopedAuditOptions, SendOutcome, SignalingAuditViolation, SignalingNetworkEvent, WireStamp,
     WrappedNetwork, SIGNALING_TAG,
 };
+pub use flood::Flood;
 pub use loss::RandomLoss;
 pub use report::{to_sip_entries, wire_positions_by_stamp, RecordedSipEntry, RecvNote};
 pub use rfc_audit::capture_index::{CaptureIndex, Captured, DialogKey, Kind, Transaction, TxnKey};
