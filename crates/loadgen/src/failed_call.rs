@@ -2,8 +2,9 @@
 //! teardown transactions run to their end, and its callee legs answer what
 //! the SUT still sends them; then what the call leaves once its traffic is
 //! over. A call that did not fail, with a client transaction still open at
-//! its end, settles in place: that transaction runs to its end before the
-//! call is audited and recorded.
+//! its end, is held the same way with no quiesce; a recorded one settles in
+//! place instead: that transaction runs to its end before the call is
+//! audited and recorded.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -49,36 +50,44 @@ pub(crate) enum Held {
     Tails { _tails: OwnedRwLockReadGuard<()> },
 }
 
-/// Hold the call when it `failed`, releasing it in the background
-/// ([`release`]). A call that did not fail with a client transaction still
-/// `open` (RFC 3261 §17.1.2) settles in place: every client transaction of
-/// its endpoints runs to its end, retransmitted until its final, so the
-/// audit that follows reads the final a retransmission draws after the
-/// verdict. Any other call ends at once.
-#[allow(clippy::too_many_arguments)] // the call's parts, each moved or borrowed once
+/// How a call stands at its verdict.
+pub(crate) struct CallEnd {
+    /// The call's scenario failed.
+    pub(crate) failed: bool,
+    /// A client transaction of its endpoints is still open (RFC 3261 §17.1.2).
+    pub(crate) open: bool,
+    /// The call records, so its RFC audit reads the recording.
+    pub(crate) recorded: bool,
+}
+
+/// Hold the call when it failed, or did not fail with a client transaction
+/// still open, releasing it in the background ([`release`]); a recorded call
+/// of the latter settles in place instead: every client transaction of its
+/// endpoints runs to its end, retransmitted until its final, so the audit
+/// that follows reads the final a retransmission draws after the verdict.
+/// Any other call ends at once.
 pub(crate) async fn hold(
-    failed: bool,
-    open: bool,
+    end: CallEnd,
     permit: OwnedSemaphorePermit,
     tails: Arc<RwLock<()>>,
     net: Arc<MuxNetwork>,
-    caller: &Agent,
-    callees: &[(&str, Agent)],
+    (caller, callees): (&Agent, &[(&str, Agent)]),
     quiesce: Duration,
 ) -> (Tail, Held) {
-    match (failed, open) {
-        (false, false) => (Tail(None), Held::Permit { _permit: permit }),
-        (true, _) => {
-            let tail = release(tails, net, caller, callees, quiesce).await;
-            (tail, Held::Permit { _permit: permit })
-        }
-        (false, true) => {
+    let CallEnd { failed, open, recorded } = end;
+    let quiesce = match (failed, open, recorded) {
+        (false, false, _) => return (Tail(None), Held::Permit { _permit: permit }),
+        (false, true, true) => {
             let held = tails.read_owned().await;
             drop(permit);
             net.client_txns_ended().await;
-            (Tail(None), Held::Tails { _tails: held })
+            return (Tail(None), Held::Tails { _tails: held });
         }
-    }
+        (true, ..) => quiesce,
+        (false, true, false) => Duration::ZERO,
+    };
+    let tail = release(tails, net, caller, callees, quiesce).await;
+    (tail, Held::Permit { _permit: permit })
 }
 
 /// Release a held call in the background, holding its endpoints until done

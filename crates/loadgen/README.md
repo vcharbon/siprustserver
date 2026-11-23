@@ -307,9 +307,9 @@ incident window it fell in (ADR-0049 §3.5). With `--auto-retransmit`, a call
 whose in-dialog request (not a BYE) still awaits its final when the call ends
 is held until the final or Timer F (64·T1); the request then fails stamped at
 the call's end. A held call does not count against `--max-in-flight` and
-delays the drain by up to 32 s. A held call that did not fail is audited when
-its client transactions end, so its RFC audit reads the final that a
-retransmission gets after the call ends.
+delays the drain by up to 32 s. A held call that did not fail and records is
+audited when its client transactions end, so its RFC audit reads the final
+that a retransmission gets after the call ends.
 
 ### Call-outcome records
 

@@ -395,9 +395,9 @@ pub(crate) async fn run_one(
     let failed = !matches!(result, Ok(ScenarioVerdict::Success { .. }));
     // A request awaiting its final is judged by its transaction (RFC 3261 §17.1.2).
     let (open, awaits) = (net.client_txn_open(), wire.as_ref().is_some_and(CallWire::awaits));
-    let (agents, quiesce) = (&callee_agents, call.teardown_quiesce);
-    let (tail, _held) =
-        failed_call::hold(failed, open, permit, tails, net, &alice, agents, quiesce).await;
+    let end = failed_call::CallEnd { failed, open, recorded: binder.is_recording() };
+    let (agents, quiesce) = ((&alice, &callee_agents[..]), call.teardown_quiesce);
+    let (tail, _held) = failed_call::hold(end, permit, tails, net, agents, quiesce).await;
 
     // The per-call audit policy (ADR-0024 §6): the merged structural waivers —
     // the attached case's lowered `allowViolations` PLUS the plan's declared
