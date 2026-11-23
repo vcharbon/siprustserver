@@ -1,7 +1,7 @@
 /**
  * The relay placement moves only what a relay can be: a provisional to an
  * INVITE, behind the emission carrying its session description or, on a
- * platform relaying provisionals as they arrive, the emission first delivering
+ * platform relaying provisionals as they arrive, the one emission delivering
  * the identifying values it carries. An ACK to a
  * non-2xx is hop-by-hop (RFC 3261 §17.1.1.3) and relays nothing, so no step of
  * a leg is moved ahead of an earlier step of that leg's own transaction.
@@ -70,6 +70,82 @@ describe("two relays stamped before their sources", () => {
       timing("B", true, "resp:183:INVITE", 221, 1, sdp)
     ]
     expect(placed(timings)).toEqual([2, 3, 4, 1])
+  })
+})
+
+describe("two relays stamped before their sources, the bare one carrying the callee's values", () => {
+  /**
+   * The caller-side 183 with an answer, then a bare one, both stamped before
+   * the callee's bare 183 and its 183 with that answer. The answering relay
+   * moves behind its own source whatever the bare one carries; the bare one
+   * moves only behind the one callee message its values single out, so the
+   * caller leg lists each relay right after its source.
+   */
+  const sdp = "sdp:o=x 1 1 IN IP4 h"
+  const shape = (bareSource: Array<string>, answerSource: Array<string>) => [
+    marked(timing("A", false, "resp:183:INVITE", 100, 1, sdp), ...answerSource),
+    marked(timing("A", false, "resp:183:INVITE", 101, 1, "bare"), ...bareSource),
+    marked(timing("B", true, "resp:183:INVITE", 220, 1, "bare"), ...bareSource),
+    marked(timing("B", true, "resp:183:INVITE", 221, 1, sdp), ...answerSource)
+  ]
+
+  it("keeps the bare one where it was stamped when both callee messages carry its values", () => {
+    const callee = ["x-trace:callee-1"]
+    expect(placed(shape(callee, callee))).toEqual([2, 3, 4, 1])
+  })
+
+  it("moves each behind its own source when the values single the bare one's out", () => {
+    expect(placed(shape(["x-trace:callee-1", "x-route:r-1"], ["x-trace:callee-1", "x-route:r-2"]))).toEqual([3, 2, 4, 1])
+  })
+
+  it("moves a bare 180 and an answering 183 each behind its own source", () => {
+    const callee = ["x-trace:callee-1"]
+    const timings = [
+      marked(timing("A", false, "resp:183:INVITE", 100, 1, sdp), ...callee),
+      marked(timing("A", false, "resp:180:INVITE", 101, 1, "bare"), ...callee),
+      marked(timing("B", true, "resp:180:INVITE", 220, 1, "bare"), ...callee),
+      marked(timing("B", true, "resp:183:INVITE", 221, 1, sdp), ...callee)
+    ]
+    expect(placed(timings)).toEqual([3, 2, 4, 1])
+  })
+})
+
+describe("a relay its values pair and the order of its leg's other relays", () => {
+  /**
+   * A move by values is made only where every other relay of the caller
+   * leg's transaction whose source is known still follows the sources'
+   * order once the mover sits behind its own.
+   */
+  const x = "sdp:o=x 1 1 IN IP4 h"
+  const callee = ["x-trace:callee-1"]
+
+  it("moves none when an earlier relay's own source comes later", () => {
+    const timings = [
+      timing("A", false, "resp:183:INVITE", 100, 1, x),
+      marked(timing("A", false, "resp:183:INVITE", 101, 1, "sdp:o=y 1 1 IN IP4 h"), ...callee),
+      marked(timing("B", true, "resp:183:INVITE", 220, 1, "bare"), ...callee),
+      timing("B", true, "resp:183:INVITE", 221, 1, x)
+    ]
+    expect(placed(timings)).toEqual([1, 2, 3, 4])
+  })
+
+  it("moves none when a later relay's own source comes earlier", () => {
+    const timings = [
+      marked(timing("A", false, "resp:183:INVITE", 100, 1, "bare"), ...callee),
+      timing("B", true, "resp:183:INVITE", 220, 1, x),
+      marked(timing("B", true, "resp:183:INVITE", 221, 1, "bare"), ...callee),
+      timing("A", false, "resp:183:INVITE", 222, 1, x)
+    ]
+    expect(placed(timings)).toEqual([1, 2, 3, 4])
+  })
+
+  it("moves none of two relays whose values name one source", () => {
+    const timings = [
+      marked(timing("A", false, "resp:183:INVITE", 100, 1, "bare"), ...callee),
+      marked(timing("A", false, "resp:183:INVITE", 101, 1, "bare"), ...callee),
+      marked(timing("B", true, "resp:183:INVITE", 220, 1, "bare"), ...callee)
+    ]
+    expect(placed(timings)).toEqual([1, 2, 3])
   })
 })
 

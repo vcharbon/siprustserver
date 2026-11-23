@@ -25,12 +25,15 @@
  *   platform that relays provisionals as they arrive, an arrival no listed
  *   emission explains, carrying identifying header values (`RelayMarker`) no
  *   earlier emission delivered, all of which an emission of the same message
- *   type on another leg delivers at most `RELAY_SKEW_US` later, before that
- *   leg's final to its INVITE — is moved to just after that emission. Such a
- *   value is the far side's, so the platform cannot have stated it first. The
- *   move passes at most one step of the arrival's leg, a relayed provisional
- *   of its transaction whose source is listed, and no step of a third leg or
- *   of another transaction on the source's leg.
+ *   type on another leg, and only that one, delivers at most `RELAY_SKEW_US`
+ *   later, before that leg's final to its INVITE — is moved to just after
+ *   that emission. Such a value is the far side's, so the platform cannot
+ *   have stated it first. These moves follow every move by description. One
+ *   passes at most one step of the arrival's leg, a relayed provisional of
+ *   its transaction whose source is listed, and no step of a third leg or of
+ *   another transaction on the source's leg; and it leaves every relay of the
+ *   arrival's transaction whose source is known in the order of the sources,
+ *   or it is not made.
  * - **Relays out of their sources' order** — two arrivals of one message type,
  *   adjacent on one leg, whose sources run the other way — swap places.
  *
@@ -88,10 +91,11 @@ const finalToInvite = (t: StepTiming): boolean => /^resp:[2-6]\d\d:INVITE$/.test
 
 /**
  * The emission the arrival at `i` relays by its identifying values, or -1: the
- * first emission of the arrival's type on another leg, stamped at most
+ * one emission of the arrival's type on another leg, stamped at most
  * `RELAY_SKEW_US` after it and before its leg's final to its INVITE, that
  * delivers every value of the arrival no emission listed before it delivered.
- * An arrival with no such value has none.
+ * An arrival with no such value has none, and one whose values two emissions
+ * deliver has none either: the values do not single its source out.
  */
 const valuesSourceOf = (timings: ReadonlyArray<StepTiming>, i: number): number => {
   const s = timings[i]!
@@ -99,16 +103,57 @@ const valuesSourceOf = (timings: ReadonlyArray<StepTiming>, i: number): number =
   const unseen = (s.marks ?? []).filter((m) => !delivered.has(m))
   if (unseen.length === 0) return -1
   const ended = new Set<string>()
+  let source = -1
   for (let k = i + 1; k < timings.length; k++) {
     const c = timings[k]!
-    if (c.ts_us - s.ts_us > RELAY_SKEW_US) return -1
+    if (c.ts_us - s.ts_us > RELAY_SKEW_US) break
     if (c.leg === s.leg) continue
     const transaction = `${c.leg}\u0000${transactionOf(c)}`
     if (finalToInvite(c)) ended.add(transaction)
     const delivers = unseen.every((m) => c.marks?.includes(m) === true)
-    if (c.emits && c.typeKey === s.typeKey && !ended.has(transaction) && delivers) return k
+    if (!c.emits || c.typeKey !== s.typeKey || ended.has(transaction) || !delivers) continue
+    if (source >= 0) return -1
+    source = k
   }
-  return -1
+  return source
+}
+
+/**
+ * Whether the step at `i` is a relayed provisional no listed emission
+ * explains: the one kind of step this pass moves behind a later source.
+ */
+const earlyRelay = (timings: ReadonlyArray<StepTiming>, i: number): boolean => {
+  const s = timings[i]!
+  return !s.emits && relayedProvisional(s) && relayOriginOf(timings, i) < 0
+}
+
+/**
+ * The emission the arrival at `i` relays, or -1 where none is known: its
+ * listed origin, else the later source its session description or its
+ * identifying values name.
+ */
+const knownSourceOf = (timings: ReadonlyArray<StepTiming>, i: number): number => {
+  const origin = relayOriginOf(timings, i)
+  if (origin >= 0) return origin
+  const bySession = identifiesSession(timings[i]!.image) ? sessionSourceOf(timings, i) : -1
+  return bySession >= 0 ? bySession : valuesSourceOf(timings, i)
+}
+
+/**
+ * Whether listing the arrival at `a` just after its source at `b` keeps every
+ * relayed provisional of its leg and transaction in the order of the sources
+ * they relay: each one listed before it then relays an earlier emission, each
+ * one listed after it a later one. A relay whose source is unknown constrains
+ * nothing.
+ */
+const keepsSourceOrder = (timings: ReadonlyArray<StepTiming>, a: number, b: number): boolean => {
+  const s = timings[a]!
+  return timings.every((t, k) => {
+    if (k === a || t.leg !== s.leg || t.emits || !relayedProvisional(t) || transactionOf(t) !== transactionOf(s)) return true
+    const source = knownSourceOf(timings, k)
+    if (source < 0) return true
+    return k > b ? source > b : source < b
+  })
 }
 
 /**
@@ -128,6 +173,37 @@ const blocksValuesMove = (timings: ReadonlyArray<StepTiming>, a: number, b: numb
       relayedProvisional(t) && !t.emits && transactionOf(t) === transactionOf(s) && relayOriginOf(timings, a + 1 + k) >= 0
     return own > 1 || !listedRelay
   })
+}
+
+/**
+ * Every move by session description, last arrival to first: a later early
+ * relay is placed before an earlier one tries to pass it, so two early answers
+ * both land behind their own sources. `move(from, to)` lists the step at
+ * `from` just after the one at `to`.
+ */
+const placeBySession = (timings: ReadonlyArray<StepTiming>, move: (from: number, to: number) => void): void => {
+  for (let i = timings.length - 1; i >= 0; i--) {
+    if (!earlyRelay(timings, i) || !identifiesSession(timings[i]!.image)) continue
+    const source = sessionSourceOf(timings, i)
+    if (source >= 0 && !blocksSessionMove(timings, timings[i]!.leg, i, source)) move(i, source)
+  }
+}
+
+/**
+ * Every move by identifying values, last arrival to first, once every move by
+ * session description is made: a relay placed by its values never stands in
+ * the way of one its description places. An arrival whose description names a
+ * source stays where that move left it, and a move that would list the
+ * arrival's leg out of its sources' order is not made.
+ */
+const placeByValues = (timings: ReadonlyArray<StepTiming>, move: (from: number, to: number) => void): void => {
+  for (let i = timings.length - 1; i >= 0; i--) {
+    if (!earlyRelay(timings, i)) continue
+    if (identifiesSession(timings[i]!.image) && sessionSourceOf(timings, i) >= 0) continue
+    const source = valuesSourceOf(timings, i)
+    if (source < 0 || blocksValuesMove(timings, i, source) || !keepsSourceOrder(timings, i, source)) continue
+    move(i, source)
+  }
 }
 
 /** One arrival this pass moved, for the flag. */
@@ -163,20 +239,15 @@ export const placeRelaysAfterSources = (input: PlacementInput): Array<Placed> =>
     }
   }
 
-  // Last to first: a later early relay is placed before an earlier one tries
-  // to pass it, so two early answers both land behind their own sources.
-  for (let i = steps.length - 1; i >= 0; i--) {
-    const s = timings[i]!
-    if (s.emits || !relayedProvisional(s) || relayOriginOf(timings, i) >= 0) continue
-    const bySession = identifiesSession(s.image) ? sessionSourceOf(timings, i) : -1
-    const byValues = bySession < 0 && transparent18x ? valuesSourceOf(timings, i) : -1
-    if (bySession >= 0 && !blocksSessionMove(timings, s.leg, i, bySession)) {
-      placed.push({ step: steps[i]!, source: steps[bySession]!, why: "stamped-before-source" })
-      move(i, bySession)
-    } else if (byValues >= 0 && !blocksValuesMove(timings, i, byValues)) {
-      placed.push({ step: steps[i]!, source: steps[byValues]!, why: "stamped-before-values-source" })
-      move(i, byValues)
-    }
+  placeBySession(timings, (from, to) => {
+    placed.push({ step: steps[from]!, source: steps[to]!, why: "stamped-before-source" })
+    move(from, to)
+  })
+  if (transparent18x) {
+    placeByValues(timings, (from, to) => {
+      placed.push({ step: steps[from]!, source: steps[to]!, why: "stamped-before-values-source" })
+      move(from, to)
+    })
   }
 
   const origins = timings.map((t, i) => (t.emits || !relayedProvisional(t) ? -1 : relayOriginOf(timings, i)))
