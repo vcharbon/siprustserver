@@ -231,6 +231,63 @@ impl ActorScenario for RequireInfoByeCrossing {
     }
 }
 
+/// One recorded [`RequireInfoByeCrossing`] call on the paused-clock rig with
+/// the retransmission engine on and `drop` armed; asserts the B2BUA received
+/// `infos_before_end` INFO copies before the call ended and one after it
+/// ([`caller_infos`]), and returns the call's record and the run's reporter
+/// once the SUT is reaped.
+async fn require_info_call(
+    base: u16,
+    drop: TargetedDrop,
+    infos_before_end: usize,
+) -> (Value, Arc<Reporter>) {
+    let (h, b2bua, core, transport) = setup_fake(base).await;
+    let mut registry = ShapeRegistry::with_defaults();
+    registry.register(
+        ShapeDescriptor::new(REQUIRE_SHAPE).load_shared(Arc::new(RequireInfoByeCrossing)),
+    );
+    let mix = MixEntry::by_id(&registry, REQUIRE_SHAPE, &ScenarioInputs::default(), 1.0).unwrap();
+    let reporter =
+        Arc::new(Reporter::new(ReporterCfg { sample_cap: 0, background_record_every: 1 }));
+    let file =
+        std::env::temp_dir().join(format!("loadgen-rejection-{base}-{}.jsonl", std::process::id()));
+    let _ = std::fs::remove_file(&file);
+    let sink = Arc::new(OutcomeSink::new("run-1", "loadgen", "main", &file, None).unwrap());
+    let mut c = cfg(b2bua.addr, 1.0, 1, 4, 0x0824);
+    c.default_tuning =
+        CallTuning { retransmit: true, drop_nth: Some(drop), ..CallTuning::default() };
+    let driver = Driver::new(c, vec![mix], reporter.clone(), transport).with_outcomes(sink.clone());
+    driver.run().await;
+    sink.close();
+    let mut records: Vec<Value> = std::fs::read_to_string(&file)
+        .unwrap()
+        .lines()
+        .map(|l| serde_json::from_str(l).expect("one JSON record per line"))
+        .collect();
+    let _ = std::fs::remove_file(&file);
+
+    assert_eq!(records.len(), 1, "one call placed");
+    let r = records.remove(0);
+    let infos = caller_infos(&h, b2bua.addr);
+    let ended = r["ended_at_ms"].as_u64().unwrap();
+    let before = infos.iter().filter(|at| **at < ended).count();
+    assert_eq!(before, infos_before_end, "INFO copies before the end {ended}: {infos:?}");
+    assert!(infos.iter().any(|at| *at > ended), "a retransmission after the end: {infos:?}");
+
+    settle_until(|| core.registry_size() == 0).await;
+    h.advance(std::time::Duration::from_secs(40)).await;
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
+    (r, reporter)
+}
+
+/// The call is clean and classed ok.
+fn assert_clean(r: &Value, reporter: &Reporter) {
+    let prometheus = reporter.render_prometheus();
+    assert_eq!(reporter.count(REQUIRE_SHAPE, &ResultClass::RfcAuditFail), 0, "{prometheus}\n{r}");
+    assert_eq!(reporter.count(REQUIRE_SHAPE, &ResultClass::Ok), 1, "{prometheus}\n{r}");
+}
+
 /// The audit of a recorded call judges an in-dialog request by its client
 /// transaction (RFC 3261 §17.1.2): the B2BUA rejects the caller's INFO,
 /// which requires an unsupported option tag, and that 420 is lost on its way
@@ -239,45 +296,19 @@ impl ActorScenario for RequireInfoByeCrossing {
 /// (§17.2.2) after the verdict. The call is clean.
 #[tokio::test(start_paused = true)]
 async fn a_rejection_drawn_by_a_retransmission_after_the_verdict_is_audited() {
-    let (h, b2bua, core, transport) = setup_fake(7910).await;
-    let mut registry = ShapeRegistry::with_defaults();
-    registry.register(
-        ShapeDescriptor::new(REQUIRE_SHAPE).load_shared(Arc::new(RequireInfoByeCrossing)),
-    );
-    let mix = MixEntry::by_id(&registry, REQUIRE_SHAPE, &ScenarioInputs::default(), 1.0).unwrap();
-    let reporter =
-        Arc::new(Reporter::new(ReporterCfg { sample_cap: 0, background_record_every: 1 }));
-    let file = std::env::temp_dir().join(format!("loadgen-rejection-{}.jsonl", std::process::id()));
-    let _ = std::fs::remove_file(&file);
-    let sink = Arc::new(OutcomeSink::new("run-1", "loadgen", "main", &file, None).unwrap());
-    let mut c = cfg(b2bua.addr, 1.0, 1, 4, 0x0824);
-    c.default_tuning = CallTuning {
-        retransmit: true,
-        drop_nth: Some(TargetedDrop::final_response("INFO", 1, DropDir::Inbound)),
-        ..CallTuning::default()
-    };
-    let driver = Driver::new(c, vec![mix], reporter.clone(), transport).with_outcomes(sink.clone());
-    driver.run().await;
-    sink.close();
-    let records: Vec<Value> = std::fs::read_to_string(&file)
-        .unwrap()
-        .lines()
-        .map(|l| serde_json::from_str(l).expect("one JSON record per line"))
-        .collect();
-    let _ = std::fs::remove_file(&file);
+    let drop = TargetedDrop::final_response("INFO", 1, DropDir::Inbound);
+    let (r, reporter) = require_info_call(7910, drop, 1).await;
+    assert_clean(&r, &reporter);
+}
 
-    assert_eq!(records.len(), 1, "one call placed");
-    let r = &records[0];
-    let infos = caller_infos(&h, b2bua.addr);
-    assert_eq!(infos.len(), 2, "the INFO was retransmitted once: {infos:?}");
-    let ended = r["ended_at_ms"].as_u64().unwrap();
-    assert!(infos[0] < ended && ended < infos[1], "the BYE crossed: {ended} {infos:?}");
-    let prometheus = reporter.render_prometheus();
-    assert_eq!(reporter.count(REQUIRE_SHAPE, &ResultClass::RfcAuditFail), 0, "{prometheus}\n{r}");
-    assert_eq!(reporter.count(REQUIRE_SHAPE, &ResultClass::Ok), 1, "{prometheus}\n{r}");
-
-    settle_until(|| core.registry_size() == 0).await;
-    h.advance(std::time::Duration::from_secs(40)).await;
-    settle_until(|| b2bua.is_reaped()).await;
-    b2bua.assert_fully_reaped();
+/// The caller's INFO requiring an unsupported option tag is lost on its way
+/// out, the callee's BYE ends the call, and the INFO's retransmission reaches
+/// the B2BUA after the dialog ended, which answers 481 (§12.2.2) after the
+/// verdict. No drop toward the caller explains a missing answer: the call is
+/// clean because its audit reads that 481.
+#[tokio::test(start_paused = true)]
+async fn a_481_drawn_by_a_retransmission_after_the_verdict_is_audited() {
+    let drop = TargetedDrop::request("INFO", 1, DropDir::Outbound);
+    let (r, reporter) = require_info_call(7920, drop, 0).await;
+    assert_clean(&r, &reporter);
 }
