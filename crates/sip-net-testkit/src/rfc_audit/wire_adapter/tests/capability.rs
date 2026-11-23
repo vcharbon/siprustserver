@@ -126,21 +126,44 @@ fn a_lost_rejection_is_excused_and_no_other_drop_is(
         seq: 1,
         at_ms: 1,
     };
+    let other_method = resp_with(status, 1, "OPTIONS", branch, owed_header);
     let unexplained = [
-        ("no drop", vec![]),
-        ("a provisional lost", vec![arrival(ALICE, answer(100, 1), SUT, 1, LossModel, None)]),
-        ("another final lost", vec![arrival(ALICE, answer(500, 1), SUT, 1, LossModel, None)]),
+        ("no drop", vec![], "got 0"),
+        (
+            "a provisional lost",
+            vec![arrival(ALICE, answer(100, 1), SUT, 1, LossModel, None)],
+            "got 0",
+        ),
+        (
+            "another final lost",
+            vec![arrival(ALICE, answer(500, 1), SUT, 1, LossModel, None)],
+            "got 0",
+        ),
         (
             "another CSeq's final lost",
             vec![arrival(ALICE, answer(status, 2), SUT, 1, LossModel, None)],
+            "got 0",
         ),
-        ("the request lost on send", vec![lost_on_send]),
+        (
+            "another method's final lost",
+            vec![arrival(ALICE, other_method, SUT, 1, LossModel, None)],
+            "got 0",
+        ),
+        ("the request lost on send", vec![lost_on_send], "got 0"),
+        (
+            "a wrong final taken after the lost one",
+            vec![
+                arrival(ALICE, answer(status, 1), SUT, 1, LossModel, None),
+                recv(ALICE, answer(200, 1), SUT, 2),
+            ],
+            "got 200",
+        ),
     ];
-    for (case, then) in unexplained {
+    for (case, then, got) in unexplained {
         let found = owed_rejection(rule, request(branch), then);
         assert_eq!(found.len(), 1, "{case}: {found:?}");
         assert_eq!((found[0].lane.as_str(), found[0].charged.as_deref()), (ALICE, Some(SUT)));
-        assert!(found[0].detail.contains("got 0"), "{case}: {}", found[0].detail);
+        assert!(found[0].detail.contains(got), "{case}: {}", found[0].detail);
     }
 }
 
