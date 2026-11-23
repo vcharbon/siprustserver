@@ -1,8 +1,9 @@
 /**
  * The study workbench docked under the top bar: its top on the bar's bottom,
  * so the whole block, and every scrollbar in it, is on screen. Its boxes
- * always scroll; while it is not docked, a wheel over it that moves toward the
- * dock scrolls the page and stops the page where the workbench docks.
+ * always scroll; while it is not docked, a mostly vertical wheel over it that
+ * moves toward the dock scrolls the page and stops the page where the
+ * workbench docks.
  */
 import { useCallback, useEffect, useRef, type RefObject } from "react"
 
@@ -43,7 +44,7 @@ export const useDock = (): {
   useEffect(() => {
     const wheel = (event: WheelEvent): void => {
       const box = ref.current
-      if (box === null) return
+      if (box === null || Math.abs(event.deltaY) <= Math.abs(event.deltaX)) return
       const top = box.getBoundingClientRect().top
       if (isDocked(top, barBottom())) return
       const next = wheelTo(window.scrollY, wheelPixels(event), top, barBottom())
