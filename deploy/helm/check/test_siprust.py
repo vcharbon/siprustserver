@@ -82,6 +82,31 @@ class ShellScripts(unittest.TestCase):
              "NEIGH_UCAST_SOLICIT": "12", "NEIGH_MCAST_SOLICIT": "12",
              "NEIGH_RETRANS_TIME_MS": "250"})
 
+    def test_vip_loopback_bounds_ip_reassembly_on_both_families(self) -> None:
+        # ADR-0027 X5: a short queue life and a pool above the kernel default.
+        proxy = find(render(SIPRUST, *KIND), "Deployment", "sip-front-proxy")
+        c = container(proxy, "vip-loopback")
+        script = script_of(c)
+        for line in ('echo "$REASM_POOL_BYTES" > /proc/sys/net/ipv4/ipfrag_high_thresh',
+                     'echo "$REASM_TIMEOUT_S" > /proc/sys/net/ipv4/ipfrag_time',
+                     'echo "$REASM_POOL_BYTES" > /proc/sys/net/ipv6/ip6frag_high_thresh',
+                     'echo "$REASM_TIMEOUT_S" > /proc/sys/net/ipv6/ip6frag_time',
+                     'echo "$REASM_POOL_BYTES" > /proc/sys/net/netfilter/nf_conntrack_frag6_high_thresh',
+                     'echo "$REASM_TIMEOUT_S" > /proc/sys/net/netfilter/nf_conntrack_frag6_timeout'):
+            self.assertIn(line, script)
+        self.assertEqual((env(c)["REASM_TIMEOUT_S"], env(c)["REASM_POOL_BYTES"]), ("2", "67108864"))
+
+    def test_reassembly_follows_its_values_and_never_shrinks_the_pool(self) -> None:
+        proxy = find(render(SIPRUST, *KIND, "--set", "proxy.reassembly.timeoutSeconds=5",
+                            "--set", "proxy.reassembly.poolBytes=4194304"),
+                     "Deployment", "sip-front-proxy")
+        e = env(container(proxy, "vip-loopback"))
+        self.assertEqual((e["REASM_TIMEOUT_S"], e["REASM_POOL_BYTES"]), ("5", "4194304"))
+        self.assertIn("poolBytes", render_error(SIPRUST, *KIND, "--set",
+                                                "proxy.reassembly.poolBytes=4194303"))
+        self.assertIn("timeoutSeconds", render_error(SIPRUST, *KIND, "--set",
+                                                     "proxy.reassembly.timeoutSeconds=0"))
+
     def test_masq_exempt_reads_only_what_it_is_given(self) -> None:
         ds = find(render(SIPRUST, *KIND), "DaemonSet", "masq-exempt")
         self.check_script(ds, "masq-exempt", "masq-exempt.sh")

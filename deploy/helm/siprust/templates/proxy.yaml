@@ -136,6 +136,8 @@ spec:
             - { name: EXTERNAL_INTERFACE, value: {{ include "siprust.net" (dict "root" $ "key" "externalInterface") | quote }} }
             - { name: EXTERNAL_EGRESS_DROP, value: {{ ternary "on" "off" .Values.network.externalEgressDrop | quote }} }
             - { name: UNRES_QLEN_BYTES, value: {{ int $p.unresQlenBytes | toString | quote }} }
+            - { name: REASM_TIMEOUT_S, value: {{ int $p.reassembly.timeoutSeconds | toString | quote }} }
+            - { name: REASM_POOL_BYTES, value: {{ int64 $p.reassembly.poolBytes | toString | quote }} }
             - { name: NEIGH_BASE_REACHABLE_TIME_MS, value: {{ int $p.neighbour.baseReachableTimeMs | toString | quote }} }
             - { name: NEIGH_DELAY_FIRST_PROBE_S, value: {{ int $p.neighbour.delayFirstProbeSeconds | toString | quote }} }
             - { name: NEIGH_UCAST_SOLICIT, value: {{ int $p.neighbour.ucastSolicit | toString | quote }} }

@@ -435,6 +435,14 @@
           "type": "integer",
           "minimum": 1
         },
+        "reassembly": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "timeoutSeconds": { "type": "integer", "minimum": 1, "maximum": 30 },
+            "poolBytes": { "type": "integer", "minimum": 4194304 }
+          }
+        },
         "neighbour": {
           "type": "object",
           "additionalProperties": false,

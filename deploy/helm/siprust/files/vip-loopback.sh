@@ -1,8 +1,8 @@
 #!/bin/sh
 # The proxy pod's init container, on the node's network namespace
 # (hostNetwork). Reads PROXY_VIP, EXTERNAL_VIP, EXTERNAL_INTERFACE,
-# EXTERNAL_EGRESS_DROP, UNRES_QLEN_BYTES, the NEIGH_* timers and ROUTE_GUARD from
-# its env; the chart never rewrites this text.
+# EXTERNAL_EGRESS_DROP, UNRES_QLEN_BYTES, the NEIGH_* timers, the REASM_* bounds
+# and ROUTE_GUARD from its env; the chart never rewrites this text.
 #
 # Both VIPs go on lo before the proxy starts: the node owns them for good and
 # the routers reach them through the node's announcement (ADR-0056). Strict
@@ -25,6 +25,11 @@
 # fib_multipath_use_neigh makes multipath egress leave a next hop not resolved
 # (ADR-0056 §10). A host namespace's default entry reaches an interface created
 # later.
+#
+# Every datagram of the external face is reassembled here. A peer whose path
+# drops non-first fragments leaves first fragments queued until REASM_TIMEOUT_S,
+# and a pool over REASM_POOL_BYTES drops every peer's fragments (ADR-0027 X5):
+# IPv4 must take both, IPv6 and its conntrack defrag take them where present.
 #
 # Traffic from the external VIP is routed through the external interface
 # (ADR-0056 §11). A rule sends it to a table of its own, whose unreachable default
@@ -65,6 +70,16 @@ neigh_set ucast_solicit "$NEIGH_UCAST_SOLICIT"
 neigh_set mcast_solicit "$NEIGH_MCAST_SOLICIT"
 neigh_set retrans_time_ms "$NEIGH_RETRANS_TIME_MS"
 echo 1 > /proc/sys/net/ipv4/fib_multipath_use_neigh
+echo "$REASM_POOL_BYTES" > /proc/sys/net/ipv4/ipfrag_high_thresh
+echo "$REASM_TIMEOUT_S" > /proc/sys/net/ipv4/ipfrag_time
+if [ -e /proc/sys/net/ipv6/ip6frag_time ]; then
+  echo "$REASM_POOL_BYTES" > /proc/sys/net/ipv6/ip6frag_high_thresh
+  echo "$REASM_TIMEOUT_S" > /proc/sys/net/ipv6/ip6frag_time
+fi
+if [ -e /proc/sys/net/netfilter/nf_conntrack_frag6_timeout ]; then
+  echo "$REASM_POOL_BYTES" > /proc/sys/net/netfilter/nf_conntrack_frag6_high_thresh
+  echo "$REASM_TIMEOUT_S" > /proc/sys/net/netfilter/nf_conntrack_frag6_timeout
+fi
 ip route replace table 5060 unreachable default metric 4294967295
 ip rule show priority 5060 | grep -Fq "from $EXTERNAL_VIP lookup 5060" \
   || ip rule add priority 5060 from "$EXTERNAL_VIP" lookup 5060
@@ -88,4 +103,4 @@ else
   iptables -F SIP-EXT-EGRESS 2>/dev/null || true
   iptables -X SIP-EXT-EGRESS 2>/dev/null || true
 fi
-echo "vip-loopback: $PROXY_VIP $EXTERNAL_VIP on lo + strict ARP + no ICMP port unreachable from them + neigh unres_qlen_bytes=$UNRES_QLEN_BYTES base_reachable_time_ms=$NEIGH_BASE_REACHABLE_TIME_MS delay_first_probe_time=$NEIGH_DELAY_FIRST_PROBE_S ucast_solicit=$NEIGH_UCAST_SOLICIT mcast_solicit=$NEIGH_MCAST_SOLICIT retrans_time_ms=$NEIGH_RETRANS_TIME_MS + multipath off unresolved next hops + $EXTERNAL_VIP routed through $EXTERNAL_INTERFACE, its drop $EXTERNAL_EGRESS_DROP + route guard $ROUTE_GUARD ready"
+echo "vip-loopback: $PROXY_VIP $EXTERNAL_VIP on lo + strict ARP + no ICMP port unreachable from them + neigh unres_qlen_bytes=$UNRES_QLEN_BYTES base_reachable_time_ms=$NEIGH_BASE_REACHABLE_TIME_MS delay_first_probe_time=$NEIGH_DELAY_FIRST_PROBE_S ucast_solicit=$NEIGH_UCAST_SOLICIT mcast_solicit=$NEIGH_MCAST_SOLICIT retrans_time_ms=$NEIGH_RETRANS_TIME_MS + multipath off unresolved next hops + reassembly ${REASM_TIMEOUT_S} s within $REASM_POOL_BYTES B +$EXTERNAL_VIP routed through $EXTERNAL_INTERFACE, its drop $EXTERNAL_EGRESS_DROP + route guard $ROUTE_GUARD ready"

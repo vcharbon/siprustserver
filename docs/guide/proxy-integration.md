@@ -237,6 +237,7 @@ internal VIP and `B2BUA_CONTACT_ADDRESS` set to the external VIP.
 | `sip_proxy_self_external_invites_rejected_total` | New calls the proxy refused for its own load. |
 | `sip_proxy_lb_rate_cap_spilled_total` | New calls moved to the next worker in rank. |
 | `sip_proxy_external_untrusted_total{kind}` | Messages on the external face that claimed an internal role. |
+| `node_sockstat_FRAG_memory`, `node_sockstat6_FRAG6_memory` (node exporter, proxy nodes) | The memory of incomplete IP messages. A value that stays high: a peer path drops fragments. Near `proxy.reassembly.poolBytes`, the node drops the fragments of all peers. |
 
 The proxy serves `/metrics`, `/healthz`, `/readyz` and `/fitz` on port 9090.
 
@@ -252,7 +253,10 @@ The proxy serves `/metrics`, `/healthz`, `/readyz` and `/fitz` on port 9090.
 
 - **UDP only.** The proxy and the workers have no TCP and no TLS for SIP (ADR-0027). IP
   fragments a message that is larger than the path MTU. Each SIP peer must be on a path that
-  carries fragments, such as a carrier SBC on a controlled network.
+  carries fragments, such as a carrier SBC on a controlled network. A proxy node keeps the
+  fragments of an incomplete message for 2 s, in a pool of 64 MiB (`proxy.reassembly`). Thus a
+  peer whose path drops fragments loses its own large messages but does not stop the large
+  messages of the other peers.
 - **IPv4 on the proxy path.** The probe, the route guard and the node setup script use IPv4.
 - **No rotation of the cookie key.** A new key makes the requests of the calls in progress
   fail with 403. Change the key in a maintenance period.
