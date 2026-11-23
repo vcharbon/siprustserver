@@ -251,3 +251,53 @@ fn the_origin_of_a_relayed_fork_answer_is_the_winning_fork() {
     let copy = hits.iter().find(|h| h.emitter == P).expect("the platform's hit");
     assert_eq!(copy.relays.as_ref().map(|o| (o.emitter.as_str(), o.anchor_msg)), Some((B, 1)));
 }
+
+/// A call across the platform in which the caller asks OPTIONS in the
+/// dialog, the platform asks the callee onward, and the callee's 200
+/// states `callee_states` before the platform answers the caller bare.
+fn options_call(callee_states: &str) -> FlowsDoc {
+    doc_of(vec![
+        dg(1_000, A, P, request("INVITE", 1, "leg-a", "fa", None)),
+        dg(1_200, P, B, request_tok("INVITE", 1, "leg-b", "fp", None, "leg-a")),
+        dg(2_000, B, P, response(200, "OK", 1, "INVITE", "leg-b", "fp", Some("tb"))),
+        dg(2_100, P, A, response(200, "OK", 1, "INVITE", "leg-a", "fa", Some("tp"))),
+        dg(2_200, A, P, request("ACK", 1, "leg-a", "fa", Some("tp"))),
+        dg(2_300, P, B, request("ACK", 1, "leg-b", "fp", Some("tb"))),
+        dg(3_000, A, P, request("OPTIONS", 2, "leg-a", "fa", Some("tp"))),
+        dg(3_100, P, B, request("OPTIONS", 2, "leg-b", "fp", Some("tb"))),
+        dg(
+            3_200,
+            B,
+            P,
+            response_hdr(200, "OK", 2, "OPTIONS", "leg-b", "fp", Some("tb"), callee_states),
+        ),
+        dg(3_300, P, A, response(200, "OK", 2, "OPTIONS", "leg-a", "fa", Some("tp"))),
+        dg(4_000, A, P, request("BYE", 3, "leg-a", "fa", Some("tp"))),
+        dg(4_100, P, A, response(200, "OK", 3, "BYE", "leg-a", "fa", Some("tp"))),
+        dg(4_200, P, B, request("BYE", 3, "leg-b", "fp", Some("tb"))),
+        dg(4_300, B, P, response(200, "OK", 3, "BYE", "leg-b", "fp", Some("tb"))),
+    ])
+}
+
+/// The callee answers OPTIONS bare and the platform carries the bare 200
+/// back: the callee's hit is originated, the platform's relays it onward.
+#[test]
+fn a_bare_options_200_carried_back_is_relayed_onward() {
+    let hits = rule_hits(&options_call(""), RfcRule::OptionsResponseEchoes);
+    assert_eq!(hits.len(), 2, "{hits:?}");
+    let origin = hits.iter().find(|h| h.emitter == B).expect("the callee's hit");
+    let copy = hits.iter().find(|h| h.emitter == P).expect("the platform's hit");
+    assert!(!origin.relayed, "{origin:?}");
+    assert_eq!(copy.relays.as_ref().map(|o| o.emitter.as_str()), Some(B), "{copy:?}");
+}
+
+/// The callee described itself and the platform's 200 carries none of it:
+/// the platform's miss is its own.
+#[test]
+fn an_options_200_stripped_of_the_callee_description_is_originated() {
+    let hits =
+        rule_hits(&options_call("Allow: INVITE, ACK, BYE\r\n"), RfcRule::OptionsResponseEchoes);
+    assert_eq!(hits.len(), 1, "{hits:?}");
+    assert_eq!(hits[0].emitter, P);
+    assert!(!hits[0].relayed && hits[0].relays.is_none(), "{hits:?}");
+}

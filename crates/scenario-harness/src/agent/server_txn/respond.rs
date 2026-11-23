@@ -43,6 +43,9 @@ pub struct Respond<'a> {
     to_tag: Option<String>,
     /// The Contact URI this response states; `None` names the UA's socket.
     contact: Option<String>,
+    /// Whether a 2xx to INVITE or OPTIONS gains the UA's own `Allow` /
+    /// `Supported` / `Accept` where the fixture states none.
+    advertises: bool,
 }
 
 impl<'a> Respond<'a> {
@@ -60,7 +63,17 @@ impl<'a> Respond<'a> {
             extra_headers: vec![],
             to_tag: None,
             contact: None,
+            advertises: true,
         }
+    }
+
+    /// Answer as a UAS that skips the RFC 3261 §11.2 / §13.2.1 SHOULDs: the
+    /// response carries only the `Allow` / `Supported` / `Accept` the fixture
+    /// states, none of the UA's own. A test of such a peer waives
+    /// `options-response-echoes` (or `allow-supported-on-invite`) on it.
+    pub fn stating_no_capabilities(mut self) -> Self {
+        self.advertises = false;
+        self
     }
 
     pub fn with_sdp(mut self, sdp: &str) -> Self {
@@ -193,8 +206,9 @@ impl<'a> Respond<'a> {
         // (§7.3.3) — matching the live SIPp endpoints.
         let mut extra_headers = self.extra_headers.clone();
         let method = txn.request.cseq().method().as_str();
-        let advertises =
-            (200..300).contains(&self.status) && matches!(method, "INVITE" | "OPTIONS");
+        let advertises = self.advertises
+            && (200..300).contains(&self.status)
+            && matches!(method, "INVITE" | "OPTIONS");
         for (name, value, on) in [
             (HeaderName::Allow, B2BUA_ALLOW, advertises),
             (HeaderName::Supported, B2BUA_SUPPORTED, advertises),

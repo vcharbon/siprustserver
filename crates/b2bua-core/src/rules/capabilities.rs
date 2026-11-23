@@ -22,9 +22,11 @@
 //! narrowing it makes on its own behalf is the twin of that offer: a strategy
 //! that acknowledges none withholds `100rel` from every leg it originates
 //! ([`withheld_by_strategy_in`]). The node's own set
-//! (`B2buaConfig::node_capabilities`) is stated on every 200 to an OPTIONS,
-//! answered or relayed, since that 200 describes this UA (RFC 3261 §11.2),
-//! and on nothing else it relays. A
+//! (`B2buaConfig::node_capabilities`) is stated on every 200 it answers to an
+//! OPTIONS, since that 200 describes this UA (RFC 3261 §11.2); on a relayed
+//! one where `B2buaConfig::relayed_options_advertisement` names it, else that
+//! 200 carries the answerer's lines as they came; and on nothing else it
+//! relays. A
 //! relayed value is not an explicit update and never outranks a declaration:
 //! the messages that carry one, the relayed requests, drop it (see
 //! [`declared_advert_headers`]).

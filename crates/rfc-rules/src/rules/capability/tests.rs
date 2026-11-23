@@ -13,6 +13,8 @@ use super::{
     UnsupportedExtension420, UnsupportedExtension421, UnsupportedMethod405Allow,
 };
 
+mod relayed;
+
 const ALICE: &str = "127.0.0.1:5060";
 const BOB: &str = "127.0.0.1:5070";
 /// A second socket of bob's, the one it answers from.
@@ -584,6 +586,7 @@ fn an_options_2xx_describes_what_it_supports() {
     let f = violations(&OptionsResponseEchoes, &bare);
     assert_eq!(f.len(), 1, "{f:?}");
     assert_eq!(f[0].emitter, BOB);
+    assert!(!f[0].relayed, "bob sent no OPTIONS onward: the bare 2xx is his own");
     let Decision::Violated(Evidence::ResponseHeadersMissing { missing, .. }) = &f[0].decision
     else {
         panic!("{:?}", f[0].decision)

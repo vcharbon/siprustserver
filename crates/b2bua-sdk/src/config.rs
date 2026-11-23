@@ -12,6 +12,7 @@ mod cdr;
 mod defaults;
 mod event_queue_gate;
 mod front;
+mod relayed_options;
 mod retry_after;
 mod validate;
 pub use call_caps::{AgeCap, CallCaps, Cap, CapKind};
@@ -19,6 +20,7 @@ pub use capacity::{CapacityConfig, Ceilings};
 pub use cdr::CdrConfig;
 pub use event_queue_gate::{EventQueueGateConfig, GateBound, GateViolation, EVENT_QUEUE_CAPACITY};
 pub use front::Front;
+pub use relayed_options::RelayedOptionsAdvertisement;
 pub use retry_after::RetryAfterRange;
 
 /// Tunables for a B2BUA worker. Cheap to clone (a handful of scalars + two
@@ -331,13 +333,18 @@ pub struct B2buaConfig {
     /// leaves in ([`SdpFormPolicy`]); [`AsWritten`] by default.
     pub sdp_form: std::sync::Arc<dyn SdpFormPolicy>,
     /// **Node capability advertisement.** The `Allow`/`Supported`/`Accept`
-    /// set this worker states on every 200 it sends to an OPTIONS (RFC 3261
+    /// set this worker states on every 200 it answers to an OPTIONS (RFC 3261
     /// §11.2) — the out-of-dialog health reply, the one it answers in a
-    /// dialog, the one it relays — a node-scoped statement, not a call-scoped
-    /// one, so it is declared here rather than by a routing decision. The
-    /// default is the stack set; the health path borrows this value, so a
-    /// keepalive probe resolves its advertisement without allocating.
+    /// dialog — and on the one it relays under
+    /// [`RelayedOptionsAdvertisement::NodeSet`]: a node-scoped statement, not
+    /// a call-scoped one, so it is declared here rather than by a routing
+    /// decision. The default is the stack set; the health path borrows this
+    /// value, so a keepalive probe resolves its advertisement without
+    /// allocating.
     pub node_capabilities: sip_message::generators::CapabilitySet,
+    /// What a 200 this worker relays to an in-dialog OPTIONS advertises: the
+    /// node's set by default, or the answerer's lines as they came.
+    pub relayed_options_advertisement: RelayedOptionsAdvertisement,
     /// **Minted-final advertisement.** The `Allow`/`Supported`/`Accept` this
     /// worker states on a failure final to an INVITE it mints in its own name,
     /// restating no peer's final (a reject, a refusal, a timeout's final; not

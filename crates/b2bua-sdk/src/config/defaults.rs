@@ -66,6 +66,7 @@ impl Default for B2buaConfig {
             default_sdp: None,
             sdp_form: std::sync::Arc::new(AsWritten),
             node_capabilities: sip_message::generators::CapabilitySet::default(),
+            relayed_options_advertisement: super::RelayedOptionsAdvertisement::NodeSet,
             minted_final_advertisement: sip_message::generators::CapabilitySet::silent(),
             cdr: CdrConfig::default(),
             capacity: CapacityConfig::default(),

@@ -60,8 +60,8 @@ crate::registry::rules! {
     /// Charges the endpoint that sent it.
     UnsupportedExtension421 = "unsupported-extension-421";
     /// RFC 3261 §11.2: a 2xx to OPTIONS describes the sender's capabilities (`Allow` / `Supported`
-    /// / `Accept`). Charges the sender.
-    OptionsResponseEchoes = "options-response-echoes";
+    /// / `Accept`). Charges the sender; its bare relay of a far UAS's bare 2xx is marked relayed.
+    OptionsResponseEchoes = "options-response-echoes", relayable;
     /// RFC 3261 §8.2.2.3: a CANCEL, and the ACK of a non-2xx final, state no `Require` /
     /// `Proxy-Require` — a transaction-management request imposes no extension. Charges the sender.
     NoRequireOnCancelOrAck = "no-require-on-cancel-or-ack";
@@ -366,21 +366,35 @@ impl Obligation for UnsupportedExtension421 {
 /// carried — the request is required, so a 2xx whose OPTIONS this vantage never
 /// saw settles nothing and is not an occasion. Charges the sender. Any ONE of
 /// the three headers meets it.
+///
+/// **A bare 2xx the endpoint relays from a bare far 2xx is marked `relayed`**:
+/// it asked onward and carries back the far UAS's answer, whose miss the far
+/// UAS is charged with on its own occasion (`onward`). A relay that took a far
+/// 2xx carrying any of the three and answers bare dropped them, and is charged.
 pub struct OptionsResponseEchoes;
+
+/// The headers §11.2 asks of a 2xx to OPTIONS, any one of which meets it.
+const OPTIONS_OWED: &[&str] = &["Allow", "Supported", "Accept"];
+
+/// Whether the header block `head` carries any of [`OPTIONS_OWED`].
+fn carries_any(head: &[u8]) -> bool {
+    OPTIONS_OWED.iter().any(|name| sniff::has_header(head, name))
+}
 
 impl Obligation for OptionsResponseEchoes {
     fn eval(&self, wire: &WireView<'_>) -> Vec<Finding> {
         // The OPTIONS transactions each endpoint took — a 2xx is judged only on
         // one of them.
         let sides = Sides::of(wire.msgs);
-        let mut asked: BTreeMap<TxnKey<'_>, ()> = BTreeMap::new();
+        let mut onward = OnwardAnswers::of(wire.msgs, &sides);
+        let mut asked: BTreeMap<TxnKey<'_>, u64> = BTreeMap::new();
         let mut answered: BTreeMap<TxnKey<'_>, ()> = BTreeMap::new();
         let mut out = Vec::new();
         for (mi, msg) in wire.msgs.iter().enumerate() {
             match &msg.kind {
                 Kind::Request { method } if method.eq_ignore_ascii_case("OPTIONS") => {
                     if let Some(key) = uas_key(&sides, msg) {
-                        asked.insert(key, ());
+                        asked.entry(key).or_insert(msg.at_us);
                     }
                 }
                 Kind::Response { status } if (200..300).contains(status) => {
@@ -388,15 +402,15 @@ impl Obligation for OptionsResponseEchoes {
                         continue;
                     }
                     let Some(key) = uas_key(&sides, msg) else { continue };
-                    if !asked.contains_key(&key) || answered.insert(key, ()).is_some() {
-                        continue; // no OPTIONS at this vantage, or the same answer again
+                    let Some(&took_us) = asked.get(&key) else { continue };
+                    if answered.insert(key, ()).is_some() {
+                        continue;
                     }
-                    out.push(response_finding(
-                        RuleId::OptionsResponseEchoes,
-                        mi,
-                        msg,
-                        &["Allow", "Supported", "Accept"],
-                    ));
+                    let relays_bare = onward.relays_bare(mi, [msg.src.as_str(), key.0], took_us);
+                    let mut finding =
+                        response_finding(RuleId::OptionsResponseEchoes, mi, msg, OPTIONS_OWED);
+                    finding.relayed = relays_bare && finding.violated();
+                    out.push(finding);
                 }
                 _ => {}
             }
@@ -481,8 +495,10 @@ impl Obligation for NoRequireOnCancelOrAck {
     }
 }
 
+mod onward;
 mod walks;
 
+use onward::OnwardAnswers;
 use walks::{rejections, response_finding, sent_response_owes};
 
 #[cfg(test)]
