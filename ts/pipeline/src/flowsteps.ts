@@ -50,7 +50,7 @@ import { stampDrawnAckCounts } from "./drawn-ack.js"
 import { deriveFarSideReinvites } from "./far-side-reinvite.js"
 import { stampEarlyDialogs } from "./fork.js"
 import { mirrorRelayedProvisionals } from "./mirrored-provisional.js"
-import { relayImageOf } from "./relay-image.js"
+import { NO_RELAY_MARKS, relayImageOf, relayMarksOf, type RelayMarker } from "./relay-image.js"
 import { placeRelaysAfterSources } from "./relay-placement.js"
 import { stampTargetRefreshes } from "./target-refresh.js"
 import { stampSpareProvisionals } from "./spare-provisional.js"
@@ -151,7 +151,9 @@ export const synthesize = (
    * A platform that answers one itself derives nothing, and the run shows
    * what it did.
    */
-  relaysReinvite = false
+  relaysReinvite = false,
+  /** The headers whose values tie a relayed provisional to its source (`./relay-placement.ts`). */
+  relayMarker: RelayMarker = NO_RELAY_MARKS
 ): FlowOut => {
   const positions = layout.actorsObs.map((a) => CallFacts.atActor(flows, a).timeline)
   const order = CallFacts.merged(positions)
@@ -248,7 +250,8 @@ export const synthesize = (
       typeKey: typeKey(msg),
       cseq: msg.summary.cseq.seq,
       timerLinked: isSessionRefresh(msg),
-      image: relayImageOf(msg)
+      image: relayImageOf(msg),
+      marks: relayMarksOf(msg, relayMarker)
     })
     stepOfMsg.set(at, steps.length)
     rungAt.set(steps.length, o.at_us)
@@ -293,7 +296,7 @@ export const synthesize = (
   // First of the passes over positions: every later one reads "the emission
   // listed before" as the source of a relay (§6.9).
   // The records hold step OBJECTS: the flag is written once every id has settled.
-  const placed = placeRelaysAfterSources({ steps, timings, sources })
+  const placed = placeRelaysAfterSources({ steps, timings, sources, transparent18x })
 
   // Before the delays, so a derived step is classified like any other — the
   // relay it is, the answer it emits (§6.9). Every array below indexes the
@@ -328,8 +331,9 @@ export const synthesize = (
       kind: "relay-placed-after-source",
       detail:
         `${placed.length} relayed arrival(s) listed after the emission carrying their content ` +
-        `rather than at their capture instant: a relay stamped before its source, or relays out ` +
-        `of their sources' order, are expected as a relaying platform emits them (§6.9): ` +
+        `rather than at their capture instant: a relay stamped before its source (its session ` +
+        `description, or identifying values no earlier emission delivered), or relays out of ` +
+        `their sources' order, are expected as a relaying platform emits them (§6.9): ` +
         placed.map((p) => `${p.step.id} relays ${p.source.id} (${p.why})`).join("; ")
     })
   }

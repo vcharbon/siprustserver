@@ -133,7 +133,8 @@ export const assemble = (input: AssembleInput): Assembled => {
       input.parts ?? new Map(),
       background,
       policy.relay18x(flows, layout) === undefined,
-      policy.platform.relaysReinvite
+      policy.platform.relaysReinvite,
+      policy.relayMarker
     ),
     layout
   )

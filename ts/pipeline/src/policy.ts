@@ -31,6 +31,7 @@ import { NO_LEG_RULES, type LegRules } from "./header-pair-join.js"
 import { NO_JOIN_RULES, type JoinRule } from "./join-rules.js"
 import { NEUTRAL_PLATFORM, type PlatformProfile } from "./platform.js"
 import { checkRefusalRoster } from "./refusal-roster.js"
+import { NO_RELAY_MARKS, type RelayMarker } from "./relay-image.js"
 import type { RuleIdentity } from "./refusal-rule.js"
 import type { Layout, PartyIdentity } from "./topology.js"
 
@@ -247,6 +248,11 @@ export interface CasePolicy {
    * deployment owns its vocabulary (`origin-platform-header` families).
    */
   readonly headerClass: HeaderClassifier
+  /**
+   * The headers whose values tie a relayed provisional to its source where the
+   * capture stamped it first (`./relay-placement.ts`). Neutral: none.
+   */
+  readonly relayMarker: RelayMarker
   /** The informative family label. Never interpreted by anything downstream. */
   readonly familyOf: (view: CaseView) => string
   /**
@@ -305,6 +311,7 @@ export const neutralPolicy: CasePolicy = {
   joinRules: NO_JOIN_RULES,
   adaptFlow: (_flows, flow) => flow,
   headerClass: NO_HEADER_CLASS,
+  relayMarker: NO_RELAY_MARKS,
   familyOf: () => UNCLASSIFIED,
   detectors: () => [],
   lanes: () => ({}),

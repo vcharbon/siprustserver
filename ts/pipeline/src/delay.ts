@@ -66,6 +66,12 @@ export interface StepTiming {
    * legs are the same content. Absent where the step states none.
    */
   readonly image?: string
+  /**
+   * The identifying header values the message carries (`relayMarksOf`): a
+   * value on an arrival that no earlier emission delivered names the later
+   * emission that does as its source. Absent where the deployment names none.
+   */
+  readonly marks?: ReadonlyArray<string>
 }
 
 /**
@@ -114,7 +120,7 @@ export const relayedProvisional = (s: StepTiming): boolean => {
 }
 
 /** The transaction a step rides on its leg: the CSeq, method and number. */
-const transaction = (s: StepTiming): string =>
+export const transactionOf = (s: StepTiming): string =>
   `${s.cseq}:${/^(?:req|resp:\d+):(.+)$/.exec(s.typeKey)?.[1] ?? s.typeKey}`
 
 /**
@@ -123,10 +129,10 @@ const transaction = (s: StepTiming): string =>
  * its request where the transaction has one, the previous answer on a ladder.
  */
 const transactionPredecessorOf = (steps: ReadonlyArray<StepTiming>, i: number): number => {
-  const key = transaction(steps[i]!)
+  const key = transactionOf(steps[i]!)
   for (let p = i - 1; p >= 0; p--) {
     const c = steps[p]!
-    if (c.leg === steps[i]!.leg && transaction(c) === key) return p
+    if (c.leg === steps[i]!.leg && transactionOf(c) === key) return p
   }
   return -1
 }
