@@ -261,6 +261,9 @@ struct StepLadder {
     claimed_us: u64,
     /// When our side put the closer on the wire, where it did.
     closed_us: Option<u64>,
+    /// Whether the closer was the emitter's own BYE
+    /// ([`StepLadder::ended_by_emitters_bye`]) rather than our answer.
+    closed_by_emitters_bye: bool,
     /// The schedule the RFC puts on `claimed`'s emitter ([`pacing_of`]):
     /// its class's, or [`Schedule::once`] where the class rides no timer of its
     /// own and its repeats are drawn.
@@ -360,6 +363,33 @@ impl StepLadder {
         let Some(&last) = self.repeats_us.last() else { return false };
         last <= closed.saturating_add(TWO_HOPS.as_micros() as u64)
     }
+
+    /// Whether a 2xx ladder its emitter's own BYE closed ran on past that BYE
+    /// on the RFC's ladder: at least the `owed` rungs inside the dwell, at most
+    /// the rungs inside the run window (64·T1 at most), each repeat no earlier
+    /// than its §13.3.1.4 rung less [`TWO_HOPS`] of transit jitter. RFC 3261
+    /// §13.3.1.4 ends that ladder at the ACK or 64·T1, never at a BYE, so the
+    /// emitter may keep it running; a surplus or an early copy stays a mismatch.
+    fn ran_on_past_its_bye(&self, owed: u32, run_end_us: u64) -> bool {
+        if !self.closed_by_emitters_bye || self.observed <= owed {
+            return false;
+        }
+        let Some(ran) = run_end_us.checked_sub(self.claimed_us) else { return false };
+        if self.observed > rungs_within(&self.pacing, Duration::from_micros(ran)) {
+            return false;
+        }
+        let slack = TWO_HOPS.as_micros() as u64;
+        let mut rung = Duration::ZERO;
+        for (n, &at_us) in (1..).zip(&self.repeats_us) {
+            let Some(wait) = self.pacing.interval(n) else { return false };
+            rung += wait;
+            let offset_us = at_us.saturating_sub(self.claimed_us);
+            if offset_us.saturating_add(slack) < rung.as_micros() as u64 {
+                return false;
+            }
+        }
+        true
+    }
 }
 
 /// Every step's retransmission ladder, declared against observed (§6.9).
@@ -384,9 +414,10 @@ impl Repeats {
     ///
     /// A BYE an expect claims is the SUT ending a dialog (RFC 3261 §15): every
     /// ladder of a 2xx the SUT ran to a re-INVITE of ours on that dialog stops
-    /// there, so the claim closes them ([`StepLadder::ended_by_emitters_bye`]).
-    /// The 2xx that created the dialog keeps its ladder to the ACK or the
-    /// §13.3.1.4 give-up.
+    /// there, so the claim closes them ([`StepLadder::ended_by_emitters_bye`]),
+    /// and copies the SUT keeps sending on the §13.3.1.4 ladder after it are
+    /// not a mismatch ([`StepLadder::ran_on_past_its_bye`]). The 2xx that
+    /// created the dialog keeps its ladder to the ACK or the §13.3.1.4 give-up.
     pub fn claim(
         &mut self,
         step: &str,
@@ -416,6 +447,7 @@ impl Repeats {
                     && ladder.ended_by_emitters_bye(raw)
                 {
                     ladder.closed_us = Some(at_us);
+                    ladder.closed_by_emitters_bye = true;
                 }
             }
         }
@@ -435,6 +467,7 @@ impl Repeats {
             to_tag: Some(sip_message::sniff::to_tag(raw)).filter(|t| !t.is_empty()),
             claimed_us: at_us,
             closed_us: None,
+            closed_by_emitters_bye: false,
             pacing: pacing_of(raw),
             repeats_us: Vec::new(),
         });
@@ -599,9 +632,10 @@ impl Repeats {
     /// What each ladder owes is [`Repeats::owed`]'s call and never a margin:
     /// where the SUT paced it, the oracle is the RFC on every lane, because an
     /// interpreter that knew which stack was behind the socket could no longer
-    /// report that the stack differs. The one thing forgiven is the closer's own
-    /// boundary ([`StepLadder::raced_the_closer`]), and that is read off the
-    /// arrival the wire timestamped.
+    /// report that the stack differs. Two things are forgiven, both read off
+    /// the arrivals the wire timestamped: the closer's own boundary
+    /// ([`StepLadder::raced_the_closer`]), and a 2xx ladder run on past the
+    /// emitter's own BYE on the RFC's cadence ([`StepLadder::ran_on_past_its_bye`]).
     pub fn mismatches(&self, run_end_us: u64) -> Vec<Failure> {
         (0..self.ladders.len())
             .filter_map(|i| {
@@ -610,7 +644,10 @@ impl Repeats {
                     return None;
                 }
                 let expected = self.owed(i, run_end_us)?;
-                if ladder.observed == expected || ladder.raced_the_closer(expected) {
+                if ladder.observed == expected
+                    || ladder.raced_the_closer(expected)
+                    || ladder.ran_on_past_its_bye(expected, run_end_us)
+                {
                     return None;
                 }
                 Some(Failure::RetransmitCountMismatch {
