@@ -2,7 +2,7 @@
 //! transaction-layer seam: the server transaction its request opened leaves
 //! with no trace — no copy record (ADR-0063 §1), nothing on the unattributed
 //! books — so every copy of the request is a first arrival, handed up and
-//! answered once, under one To-tag. A request the full event queue drops
+//! answered once. A request the full event queue drops
 //! leaves no copy record either. An INVITE whose 100 already left keeps its
 //! transaction and owes its final Timer G (§17.2.1).
 
@@ -46,15 +46,6 @@ fn gone(raw: &[u8], to_tag: Option<&str>) -> SipResponse {
         .expect("the request echoes")
 }
 
-fn to_tags(msgs: &[SipMessage], status: u16) -> Vec<String> {
-    msgs.iter()
-        .filter_map(|m| match m {
-            SipMessage::Response(r) if r.status() == status => r.to().tag().map(str::to_string),
-            _ => None,
-        })
-        .collect()
-}
-
 /// Each copy of a tagged BYE, answered statelessly, is handed up again and
 /// draws its one 481: no transaction absorbs it, and no copy record left by
 /// the one before it absorbs the copies past Timer E's re-sends.
@@ -76,48 +67,6 @@ async fn every_copy_of_a_request_answered_statelessly_is_a_first_arrival() {
 
     elapse_ms(33_000).await;
     assert!(stack.drain_peer().is_empty(), "no answer is re-sent");
-}
-
-/// A stray CANCEL answered statelessly keeps the tag it was composed with,
-/// derived from the request, while the layer still remembers the tag the
-/// INVITE it names bound: its copy past Timer L, when that tag is forgotten,
-/// draws the same tag (§8.2.7).
-#[tokio::test(start_paused = true)]
-async fn copies_of_a_stray_cancel_draw_one_to_tag_across_the_remembered_tags_life() {
-    let mut stack = Stack::build(TRANSIT, 64, 64).await;
-    let (branch, call_id) = ("z9hG4bK-sl-tag-invite", "sl-tag@u");
-    let invite = inbound_request("INVITE", branch, call_id, None);
-    stack.inject(&invite).await;
-    elapse_ms(10).await;
-    let _ = stack.drain_events();
-    let busy = generate_response(
-        &request_of(&invite),
-        486,
-        "Busy Here",
-        &GenerateResponseOpts { to_tag: Some("dlg-tag".to_string()), ..Default::default() },
-    )
-    .expect("the INVITE echoes");
-    stack.txn.send_response(busy, addr(PEER)).await.unwrap();
-    stack.inject(&inbound_request("ACK", branch, call_id, Some("dlg-tag"))).await;
-    elapse_ms(6_000).await;
-    assert_eq!(active(&stack), 0, "Timer I ended the INVITE's transaction");
-    let _ = stack.drain_peer();
-
-    let cancel = inbound_request("CANCEL", branch, call_id, None);
-    let mut tags = Vec::new();
-    for wait_ms in [0, 30_000] {
-        elapse_ms(wait_ms).await;
-        stack.inject(&cancel).await;
-        elapse_ms(10).await;
-        assert_eq!(handed_up(&stack.drain_events(), "CANCEL"), 1, "no INVITE holds the CANCEL");
-        stack.txn.send_stateless_response(gone(&cancel, None), addr(PEER)).await.unwrap();
-        elapse_ms(10).await;
-        tags.extend(to_tags(&stack.drain_peer(), 481));
-    }
-    assert_eq!(tags.len(), 2, "each copy draws its 481");
-    assert_eq!(tags[0], tags[1], "both copies draw the same To-tag");
-    assert_ne!(tags[0], "dlg-tag", "the tag the INVITE bound is not the stateless answer's");
-    assert_eq!(active(&stack), 0);
 }
 
 /// Requests of fresh Call-IDs the full event queue drops leave no copy

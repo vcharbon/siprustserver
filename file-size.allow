@@ -26,7 +26,7 @@ crates/b2bua/src/repl/s12_tests.rs 888
 crates/b2bua/src/repl/tests.rs 823
 crates/call-limiter/tests/it/keyed_by_call.rs 877
 crates/callshapes/src/plan.rs 1074
-crates/failover-harness/src/harness.rs 1762
+crates/failover-harness/src/harness.rs 1741
 crates/failover-harness/tests/it/call_terminate_on_backup.rs 986
 crates/failover-harness/tests/it/failover.rs 1315
 crates/failover-harness/tests/it/fault_primitives.rs 887
