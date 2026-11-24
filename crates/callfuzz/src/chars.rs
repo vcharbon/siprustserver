@@ -1,47 +1,45 @@
 //! The "all chars" values: each one holds every character its RFC 3261 §25.1
 //! grammar slot allows, in a drawn order, plus drawn UTF-8 where the slot
-//! takes UTF-8.
+//! takes UTF-8. The classes are sip-message's ([`char_class`]).
+
+use sip_message::char_class;
 
 use crate::Rng;
-
-const ALPHANUM: &str = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
-/// `token`'s characters beyond `alphanum`.
-const TOKEN_MARKS: &str = "-.!%*_+`'~";
-/// `mark`: `unreserved`'s characters beyond `alphanum`.
-const MARK: &str = "-_.!~*'()";
-/// `user-unreserved`.
-const USER_UNRESERVED: &str = "&=+$,;?/";
-/// `param-unreserved`.
-const PARAM_UNRESERVED: &str = "[]/:&+$";
 
 /// Drawn non-ASCII characters a value carries where UTF-8 is legal, at most.
 const UTF8_MAX: u64 = 24;
 
+/// The ASCII bytes `class` admits, as characters.
+fn ascii_of(class: fn(u8) -> bool) -> Vec<char> {
+    (0u8..0x80).filter(|&b| class(b)).map(char::from).collect()
+}
+
 /// Every `token` character: a header name, a parameter name.
 pub fn token(rng: &mut Rng) -> String {
-    shuffled(rng, ALPHANUM.chars().chain(TOKEN_MARKS.chars()).collect())
+    shuffled(rng, ascii_of(char_class::is_token_char))
 }
 
 /// Every character a SIP URI `user` takes unescaped, and two drawn escapes.
 pub fn user(rng: &mut Rng) -> String {
-    let chars = ALPHANUM.chars().chain(MARK.chars()).chain(USER_UNRESERVED.chars()).collect();
-    format!("{}{}{}", shuffled(rng, chars), escape(rng), escape(rng))
+    let chars = shuffled(rng, ascii_of(char_class::is_user_char));
+    format!("{chars}{}{}", escape(rng), escape(rng))
 }
 
 /// Every `paramchar` character unescaped, and a drawn escape.
 pub fn param(rng: &mut Rng) -> String {
-    let chars = ALPHANUM.chars().chain(MARK.chars()).chain(PARAM_UNRESERVED.chars()).collect();
-    format!("{}{}", shuffled(rng, chars), escape(rng))
+    format!("{}{}", shuffled(rng, ascii_of(char_class::is_paramchar)), escape(rng))
 }
 
-/// Every `TEXT-UTF8char` of ASCII, spaces and tabs among them, then drawn
-/// UTF-8: an extension header's value.
+/// Every `TEXT-UTF8char` of ASCII with two spaces and a tab among them, never
+/// first, then drawn UTF-8: an extension header's value.
 pub fn text(rng: &mut Rng) -> String {
-    let mut chars: Vec<char> = (0x21u8..=0x7e).map(char::from).collect();
-    chars.extend([' ', ' ', '\t']);
-    let body = shuffled(rng, chars);
-    let first = body.trim_start();
-    format!("{first}{}", utf8(rng))
+    let mut chars: Vec<char> =
+        shuffled(rng, (0x21u8..=0x7e).map(char::from).collect()).chars().collect();
+    for ws in [' ', ' ', '\t'] {
+        let at = 1 + rng.below(chars.len() as u64) as usize;
+        chars.insert(at, ws);
+    }
+    format!("{}{}", chars.into_iter().collect::<String>(), utf8(rng))
 }
 
 /// Every ASCII character a quoted string carries, as `qdtext` or as the
@@ -82,25 +80,30 @@ fn shuffled(rng: &mut Rng, mut chars: Vec<char>) -> String {
 mod tests {
     use super::*;
 
-    fn holds_all(value: &str, set: &str) -> bool {
-        set.chars().all(|c| value.contains(c))
+    /// Every ASCII byte `class` admits occurs in `value`.
+    fn covers(value: &str, class: fn(u8) -> bool) -> bool {
+        (0u8..0x80).filter(|&b| class(b)).all(|b| value.contains(char::from(b)))
     }
 
     #[test]
-    fn each_value_holds_its_whole_class() {
+    fn each_value_is_a_run_of_its_class_and_holds_all_of_it() {
         let mut rng = Rng::new(3);
         for _ in 0..50 {
             let t = token(&mut rng);
-            assert!(holds_all(&t, ALPHANUM) && holds_all(&t, TOKEN_MARKS), "{t}");
+            assert!(char_class::is_run_of(&t, char_class::is_token_char, false), "{t}");
+            assert!(covers(&t, char_class::is_token_char), "{t}");
             let u = user(&mut rng);
-            assert!(holds_all(&u, MARK) && holds_all(&u, USER_UNRESERVED), "{u}");
+            assert!(char_class::is_run_of(&u, char_class::is_user_char, true), "{u}");
+            assert!(covers(&u, char_class::is_user_char), "{u}");
             let p = param(&mut rng);
-            assert!(holds_all(&p, PARAM_UNRESERVED), "{p}");
+            assert!(char_class::is_run_of(&p, char_class::is_paramchar, true), "{p}");
+            assert!(covers(&p, char_class::is_paramchar), "{p}");
             let x = text(&mut rng);
-            assert!((0x21u8..=0x7e).all(|b| x.contains(char::from(b))), "{x}");
-            assert!(x.chars().any(|c| !c.is_ascii()), "{x}");
+            assert!(covers(&x, |b| (0x21..=0x7e).contains(&b)), "{x}");
+            assert!(x.contains(' ') && x.contains('\t') && !x.starts_with([' ', '\t']), "{x:?}");
+            assert!(!x.is_ascii(), "{x}");
             let q = quoted(&mut rng);
-            assert!(q.contains('"') && q.contains('\\') && q.contains('\t'), "{q}");
+            assert!(covers(&q, |b| b != 0 && b != b'\r' && b != b'\n'), "{q:?}");
         }
     }
 

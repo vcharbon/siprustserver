@@ -80,10 +80,15 @@ impl Targets {
     pub const NONE: Targets = Targets { from: false, to: false, route: false, names: false };
 
     /// The targets a comma list names among `from`, `to`, `route` and
-    /// `names`; `none` alone names none. Any other word is refused.
+    /// `names`; `none` alone names none. Any other word, and `none` beside
+    /// another, is refused.
     pub fn parse(list: &str) -> Result<Self, String> {
+        let words: Vec<&str> = list.split(',').map(str::trim).filter(|w| !w.is_empty()).collect();
+        if words.contains(&"none") && words.len() > 1 {
+            return Err(format!("{list:?}: none stands alone"));
+        }
         let mut targets = Targets::NONE;
-        for word in list.split(',').map(str::trim).filter(|w| !w.is_empty()) {
+        for word in words {
             match word {
                 "from" => targets.from = true,
                 "to" => targets.to = true,

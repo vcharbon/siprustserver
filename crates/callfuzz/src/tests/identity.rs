@@ -2,6 +2,7 @@
 //! grammar, all chars or not; the targets and header lists bound what is
 //! drawn; a fuzzed call drawing them all runs to a legal ending.
 
+use sip_message::char_class;
 use sip_message::header::{
     AddrForm, HeaderName, HeaderValue, NameAddr, PAssertedIdentity, Uri, UriRole,
 };
@@ -45,11 +46,23 @@ async fn every_drawn_identity_value_reads_back() {
             for (name, value) in &plan.headers {
                 let raw = SipStr::owned(value);
                 if name == "P-Asserted-Identity" {
-                    let read = PAssertedIdentity::parse(&raw);
-                    assert!(read.is_ok_and(|a| a.display().is_some()), "seed {seed}: {value:?}");
+                    let read = PAssertedIdentity::parse(&raw).expect(value);
+                    assert!(read.display().is_some(), "seed {seed}: {value:?}");
+                    assert_eq!(read.uri().host(), "example.com", "seed {seed}: {value:?}");
+                    let user = read.uri().user().expect(value);
+                    assert!(drawn_user(user), "seed {seed}: user {user:?} of {value:?}");
                 } else if name == "Route" {
-                    let read = NameAddr::parse_as(&raw, AddrForm::NameAddrOnly, UriRole::Target);
-                    assert!(read.is_ok(), "seed {seed}: Route {value:?}");
+                    let read = NameAddr::parse_as(&raw, AddrForm::NameAddrOnly, UriRole::Target)
+                        .expect(value);
+                    let uri = read.uri();
+                    let (host, port) = (plan.via.ip().to_string(), plan.via.port());
+                    assert_eq!((uri.host(), uri.port()), (host.as_str(), Some(port)), "{value}");
+                    assert!(uri.param("lr").is_some(), "seed {seed}: {value:?}");
+                    let x_fz = value.split(";x-fz=").nth(1).expect(value).trim_end_matches('>');
+                    assert!(
+                        char_class::is_run_of(x_fz, char_class::is_paramchar, true),
+                        "seed {seed}: {value:?}"
+                    );
                 }
                 assert!(!value.contains(['\r', '\n', '\0']), "seed {seed}: {name}: {value:?}");
             }
@@ -67,14 +80,52 @@ async fn every_drawn_identity_value_reads_back() {
     h.finish().await;
 }
 
-#[tokio::test(start_paused = true)]
-async fn an_all_chars_user_is_read_as_written() {
+/// Whether `user`, as a URI reader read it, is one the fuzzer draws whole: a
+/// listed one, or a run of `user` characters and escapes holding all of them.
+fn drawn_user(user: &str) -> bool {
+    let all_chars =
+        (0u8..0x80).filter(|&b| char_class::is_user_char(b)).all(|b| user.contains(char::from(b)));
+    crate::identity::USERS.iter().any(|(u, _)| *u == user)
+        || all_chars && char_class::is_run_of(user, char_class::is_user_char, true)
+}
+
+/// The URI reader reads back `user` as the whole user part.
+fn read_as_written(user: &str) -> bool {
+    Uri::parse(&SipStr::owned(&format!("sip:{user}@example.com")))
+        .is_ok_and(|uri| uri.user() == Some(user))
+}
+
+#[test]
+fn every_listed_and_all_chars_user_is_read_as_written() {
+    for (user, _) in crate::identity::USERS {
+        assert!(read_as_written(user), "{user:?}");
+    }
     let mut rng = Rng::new(11);
     for _ in 0..200 {
         let user = crate::chars::user(&mut rng);
-        let uri = Uri::parse(&SipStr::owned(&format!("sip:{user}@example.com")));
-        assert!(uri.is_ok(), "{user:?}");
+        assert!(read_as_written(&user), "{user:?}");
     }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_configured_list_never_adds_a_header_the_stack_writes() {
+    let (h, alice, bob) = agents("callfuzz-identity-stack").await;
+    let env = env(&alice, &bob, "t");
+    let config = FuzzConfig {
+        addr_headers: &["From", "m"],
+        text_headers: &["Call-ID", "cseq", "Max-Forwards"],
+        ..every_target(true)
+    };
+    for seed in 0..100 {
+        let mut plan = invite_plan(&basic(&env));
+        let before = plan.headers.len();
+        let mut notes = Vec::new();
+        crate::identity::draw(&mut Rng::new(seed), &mut plan, &config, &mut notes);
+        let added: Vec<_> = plan.headers[before..].iter().map(|(n, _)| n.as_str()).collect();
+        assert!(added.iter().all(|n| *n == "Route"), "seed {seed}: {added:?}");
+        assert!(!notes.iter().any(|n| n.starts_with("addr:") || n.starts_with("text:")));
+    }
+    h.finish().await;
 }
 
 #[tokio::test(start_paused = true)]
@@ -118,6 +169,7 @@ fn targets_parse_from_a_comma_list() {
     assert_eq!(Targets::parse("none").unwrap(), Targets::NONE);
     assert_eq!(Targets::parse("from,to,route,names").unwrap(), Targets::ALL);
     assert!(Targets::parse("from,cseq").is_err());
+    assert!(Targets::parse("none,from").is_err());
 }
 
 /// Fuzzed basic calls drawing every target with all chars, alice to bob: each

