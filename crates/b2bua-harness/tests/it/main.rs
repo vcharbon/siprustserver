@@ -296,6 +296,7 @@ mod timed_out_invite_cancel;
 mod timer_scope;
 mod timestamp_echo;
 mod transaction_outcome_past_bounds;
+mod trying_after_the_start;
 mod two_xx_after_release;
 mod unacked_2xx_reap;
 mod unacked_2xx_retransmit_is_faithful;
