@@ -25,6 +25,9 @@ const BEFORE_ANY_TIMER: Duration = Duration::from_millis(1000);
 /// re-send of an INVITE's final (T1 = 500 ms, RFC 3261 §17.2.1).
 const BEFORE_TIMER_G: Duration = Duration::from_millis(300);
 
+/// The caller's offer in the late-PRACK call.
+const LATE_PRACK_OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 192.0.2.10\r\ns=-\r\nc=IN IP4 192.0.2.10\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
+
 /// A request written by hand: the ones a stack keeps for a dialog it holds
 /// would never be sent for one it does not.
 struct Stray {
@@ -360,4 +363,54 @@ async fn a_tagged_invite_naming_no_dialog_answered_before_its_100_leaves_no_tran
     settle_until(|| s.b2bua.is_reaped()).await;
     s.b2bua.assert_fully_reaped();
     let _ = s.finish().await;
+}
+
+/// A late PRACK naming a reliable provisional its released call showed
+/// (RFC 3262 §3) draws 200, and its first arrival takes the provisional off
+/// the book: no stateless answer could repeat it. It keeps its transaction,
+/// so its copy draws the same 200 from there and never reaches the router.
+#[tokio::test(start_paused = true)]
+async fn a_late_pracks_copy_draws_its_200_again_from_its_transaction() {
+    let h = Harness::with_transit_delay("b2bua-stateless-no-call-late-prack", 1);
+    let alice = h.agent_auto("alice").await;
+    let bob = h.agent_auto("bob").await;
+    let at = h.next_addr().to_string();
+    let b2bua =
+        B2buaSut::route_all_to("127.0.0.1", bob.addr().port()).start(&h, "b2bua", &at).await;
+
+    let mut call = alice
+        .invite(&bob)
+        .with_sdp(LATE_PRACK_OFFER)
+        .with_header("Supported", "100rel")
+        .through(b2bua.addr)
+        .send()
+        .await;
+    let mut uas = bob.receive("INVITE").await;
+    uas.respond(180, "Ringing").with_header("Require", "100rel").with_header("RSeq", "4711").await;
+    let ringing = call.expect(180).await;
+    uas.respond(486, "Busy Here").await;
+    bob.receive("ACK").await;
+    bob.receive("PRACK").await.respond(200, "OK").await;
+    call.expect(486).await;
+    h.advance(Duration::from_millis(70)).await;
+
+    let mark = h.wire_entries().len();
+    let (mut late, prack) =
+        call.try_prack_with_request(&ringing).await.expect("alice PRACKs the reliable 180");
+    late.expect(200).await;
+    alice.try_send_datagram(prack.image(), b2bua.addr).await.expect("the copy leaves");
+    h.advance(BEFORE_ANY_TIMER).await;
+    alice.drain().await;
+    let answers = answers_since(&h, &alice, b2bua.addr, mark, "PRACK");
+    assert_eq!(statuses(&answers), vec![200, 200], "the copy draws the same 200");
+    assert_eq!(
+        b2bua.metrics().late_prack_answered_total(),
+        1,
+        "the copy never reached the router: its transaction answered it"
+    );
+
+    h.advance(Duration::from_secs(1)).await;
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
+    let _ = h.finish().await;
 }
