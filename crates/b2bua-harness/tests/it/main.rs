@@ -280,6 +280,7 @@ mod stated_line_safety;
 mod stated_refusal;
 mod stated_single_valued_twice;
 mod stateful_proxy_fixture;
+mod stateless_no_call_answer;
 mod store_fault;
 mod stored_image_reads;
 mod stray_ack_during_cancel;
