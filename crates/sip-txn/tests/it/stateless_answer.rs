@@ -1,16 +1,17 @@
 //! A final sent as a stateless UAS sends it (RFC 3261 §8.2.7), at the
 //! transaction-layer seam: the server transaction its request opened leaves
-//! with no trace — no copy record (ADR-0063 §1), no remembered To-tag, nothing
-//! on the unattributed books — so every copy of the request is a first
-//! arrival, handed up and answered once. An INVITE whose 100 already left
-//! keeps its transaction and owes its final Timer G (§17.2.1).
+//! with no trace — no copy record (ADR-0063 §1), nothing on the unattributed
+//! books — so every copy of the request is a first arrival, handed up and
+//! answered once, under one To-tag. A request the full event queue drops
+//! leaves no copy record either. An INVITE whose 100 already left keeps its
+//! transaction and owes its final Timer G (§17.2.1).
 
 use std::sync::Arc;
 
 use sip_message::generators::{generate_response, GenerateResponseOpts};
 use sip_message::{SipMessage, SipResponse};
 use sip_txn::timers::TRYING_BOUND;
-use sip_txn::{IdGen, TransactionConfig, TransactionEvent};
+use sip_txn::{CallIdBudget, EventQueueClass, IdGen, TransactionConfig, TransactionEvent};
 
 use crate::common::*;
 
@@ -77,33 +78,82 @@ async fn every_copy_of_a_request_answered_statelessly_is_a_first_arrival() {
     assert!(stack.drain_peer().is_empty(), "no answer is re-sent");
 }
 
-/// A tagged request answered statelessly leaves no To-tag remembered for its
-/// dialog: a CANCEL of the same Call-ID and From-tag answered after it keeps
-/// the tag it was composed with.
+/// A stray CANCEL answered statelessly keeps the tag it was composed with,
+/// derived from the request, while the layer still remembers the tag the
+/// INVITE it names bound: its copy past Timer L, when that tag is forgotten,
+/// draws the same tag (§8.2.7).
 #[tokio::test(start_paused = true)]
-async fn a_request_answered_statelessly_leaves_no_remembered_to_tag() {
+async fn copies_of_a_stray_cancel_draw_one_to_tag_across_the_remembered_tags_life() {
     let mut stack = Stack::build(TRANSIT, 64, 64).await;
-    let bye = inbound_request("BYE", "z9hG4bK-sl-tag-bye", "sl-tag@u", Some("b-gone"));
-    stack.inject(&bye).await;
+    let (branch, call_id) = ("z9hG4bK-sl-tag-invite", "sl-tag@u");
+    let invite = inbound_request("INVITE", branch, call_id, None);
+    stack.inject(&invite).await;
     elapse_ms(10).await;
     let _ = stack.drain_events();
-    stack.txn.send_stateless_response(gone(&bye, None), addr(PEER)).await.unwrap();
-    elapse_ms(10).await;
-    assert_eq!(to_tags(&stack.drain_peer(), 481), vec!["b-gone".to_string()]);
+    let busy = generate_response(
+        &request_of(&invite),
+        486,
+        "Busy Here",
+        &GenerateResponseOpts { to_tag: Some("dlg-tag".to_string()), ..Default::default() },
+    )
+    .expect("the INVITE echoes");
+    stack.txn.send_response(busy, addr(PEER)).await.unwrap();
+    stack.inject(&inbound_request("ACK", branch, call_id, Some("dlg-tag"))).await;
+    elapse_ms(6_000).await;
+    assert_eq!(active(&stack), 0, "Timer I ended the INVITE's transaction");
+    let _ = stack.drain_peer();
 
-    let cancel = inbound_request("CANCEL", "z9hG4bK-sl-tag-cancel", "sl-tag@u", None);
-    stack.inject(&cancel).await;
-    elapse_ms(10).await;
-    assert_eq!(handed_up(&stack.drain_events(), "CANCEL"), 1, "no INVITE matches the CANCEL");
-    let answer = gone(&cancel, Some("own-tag"));
-    stack.txn.send_stateless_response(answer, addr(PEER)).await.unwrap();
-    elapse_ms(10).await;
-    assert_eq!(
-        to_tags(&stack.drain_peer(), 481),
-        vec!["own-tag".to_string()],
-        "no tag of the BYE's dialog was remembered to bind the CANCEL's answer to"
-    );
+    let cancel = inbound_request("CANCEL", branch, call_id, None);
+    let mut tags = Vec::new();
+    for wait_ms in [0, 30_000] {
+        elapse_ms(wait_ms).await;
+        stack.inject(&cancel).await;
+        elapse_ms(10).await;
+        assert_eq!(handed_up(&stack.drain_events(), "CANCEL"), 1, "no INVITE holds the CANCEL");
+        stack.txn.send_stateless_response(gone(&cancel, None), addr(PEER)).await.unwrap();
+        elapse_ms(10).await;
+        tags.extend(to_tags(&stack.drain_peer(), 481));
+    }
+    assert_eq!(tags.len(), 2, "each copy draws its 481");
+    assert_eq!(tags[0], tags[1], "both copies draw the same To-tag");
+    assert_ne!(tags[0], "dlg-tag", "the tag the INVITE bound is not the stateless answer's");
     assert_eq!(active(&stack), 0);
+}
+
+/// Requests of fresh Call-IDs the full event queue drops leave no copy
+/// record: each Call-ID's entry stays idle and gives its place to the next,
+/// so the Call-ID budget's bounded map counts every one of them.
+#[tokio::test(start_paused = true)]
+async fn requests_the_full_queue_drops_leave_no_copy_record() {
+    const ENTRIES: usize = 4;
+    let config = TransactionConfig {
+        udp_queue_max: 8,
+        call_id_budget: Some(CallIdBudget { messages: 1_000, entries: ENTRIES }),
+        ..TransactionConfig::new(Arc::new(IdGen::seeded(0xC0FFEE)))
+    };
+    let mut stack = Stack::build_with_config(TRANSIT, 1024, config).await;
+    let capacity = stack.txn.metrics().event_queue_capacity();
+    for i in 0..capacity {
+        let filler = format!("z9hG4bK-sl-fill-{i}");
+        stack.inject(&response_bytes(180, "Ringing", "INVITE", &filler, "sl-fill@u", true)).await;
+    }
+    let strays = 4 * ENTRIES;
+    for i in 0..strays {
+        let (branch, call_id) = (format!("z9hG4bK-sl-drop-{i}"), format!("sl-drop-{i}@u"));
+        let method = if i % 2 == 0 { "BYE" } else { "CANCEL" };
+        let tag = (method == "BYE").then_some("b-gone");
+        stack.inject(&inbound_request(method, &branch, &call_id, tag)).await;
+    }
+    elapse_ms(1_000).await;
+
+    let metrics = stack.txn.metrics();
+    assert_eq!(metrics.event_queue_drops(EventQueueClass::RequestOther), strays as u64);
+    assert_eq!(active(&stack), 0, "no dropped request keeps a transaction");
+    assert_eq!(
+        metrics.message_budget_uncounted(),
+        0,
+        "no entry of a dropped request's Call-ID holds a copy record against its eviction",
+    );
 }
 
 /// A tagged request whose Request-URI names no call is filed unattributed
