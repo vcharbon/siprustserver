@@ -17,7 +17,7 @@ use crate::config::B2buaConfig;
 use crate::decision::ScriptedDecisionEngine;
 use crate::initial_invite::build_initial_call;
 use crate::loops::{LoopOut, ENDED_POLL};
-use crate::router::test_support::{invite, node, node_probed, src, Node};
+use crate::router::test_support::{invite, node_probed, node_with, src, Node};
 use crate::router::ReplCommand;
 use crate::store::{CallStore, PartitionRole, PutOpts};
 use crate::turn_probe::{Hold, TurnMark, TurnProbe, TurnProbes};
@@ -115,10 +115,15 @@ async fn a_router_turn_held_past_the_threshold_reads_stalled() {
 
 /// A bulk reclaim waits on no call's lock: calls whose locks turns hold well
 /// past the threshold leave the router turning, and are reclaimed on turns of
-/// their own once their locks are free.
+/// their own once their locks are free. The start bound lies past the hold, so
+/// each undecided call reclaimed is asked again and stays live.
 #[tokio::test(start_paused = true)]
 async fn a_bulk_reclaim_meeting_held_call_locks_never_reads_stalled() {
-    let n = node("w0").await;
+    let n = node_with("w0", |config| {
+        config.call_control_timeout_ms = 60_000;
+        config.call_start_bound_ms = 30_000;
+    })
+    .await;
     let mut refs = Vec::new();
     for i in 0..3 {
         refs.push(seeded(&n, &format!("bulk-{i}")).await);

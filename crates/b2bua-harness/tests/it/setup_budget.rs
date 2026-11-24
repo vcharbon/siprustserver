@@ -263,7 +263,8 @@ async fn a_turn_waiting_for_a_permit_past_its_start_bound_is_refused_and_asks_no
     let text = s.b2bua.metrics().prometheus_text();
     assert!(text.contains("b2bua_new_call_turn_wait_seconds_count 2"), "both turns: {text}");
     assert!(text.contains("b2bua_new_call_turn_wait_seconds_bucket{le=\"1\"} 1"), "{text}");
-    assert!(text.contains("b2bua_new_call_turn_wait_seconds_bucket{le=\"3\"} 2"), "{text}");
+    assert!(text.contains("b2bua_new_call_turn_wait_seconds_bucket{le=\"3\"} 1"), "{text}");
+    assert!(text.contains("b2bua_new_call_turn_wait_seconds_bucket{le=\"5\"} 2"), "{text}");
     assert!(text.contains("b2bua_new_call_permit_hold_seconds_count 1"), "only the holder: {text}");
     let _ = s.finish().await;
 }
