@@ -27,10 +27,9 @@ that the hop's own timer (Timer B, or an SBC's reroute timer) sends the call els
    its opening. The B2BUA turns the switch on.
 2. **The anchor.** The initial INVITE's turn creates the call, offers its creation write to
    its backup when it has one, queues the 100 behind that write (the existing rider), and
-   arms the bound in the poll that sends the decision request. The anchor sits as close to the
-   HTTP request as the code allows: the arming is a queued command with no reply, which waits
-   only for room in the layer's command channel (1024 commands), never for the owner's turn.
-   The 100 then leaves at the earliest of
+   arms the bound in the poll that sends the decision request, as close to it as the code
+   allows: the arming is a queued command with no reply, waiting only for room in the layer's
+   command channel (1024), never for the owner's turn. The 100 then leaves at the earliest of
    the rider's release (the backup applied the write, the sync cap passed, or at once with no
    backup) and 200 ms after the arming. A backup that never answers, an outbox that does not
    drain and an unbacked call each still get their 100.
@@ -44,9 +43,9 @@ that the hop's own timer (Timer B, or an SBC's reroute timer) sends the call els
 4. **The re-ask.** A call taken over before its first decision (ADR-0047 D4) is held to the
    same start bound, counted from the INVITE's receipt its record states (`Call::received_at`),
    never from the takeover. The node asking again cannot tell whether the caller heard a 100.
-   Inside the bound, it sends her a 100 through the transaction the takeover seeded, so a
-   caller whose owner died before its 100 left stops retransmitting, asks the decision again
-   with a budget of its own and serves the call. Past it, it asks nothing, answers the bare
+   Inside the bound, it sends her a 100 through the transaction the takeover seeded (her
+   owner may have died before its 100 left), asks the decision again with a budget of its
+   own and serves the call. Past it, it asks nothing, answers the bare
    503 through that transaction, and dials no one: a caller that heard no 100 may have been
    failed over already, and a dial would ring the callee twice.
 5. **Bounds.** The start bound is positive and below the setup budget
@@ -74,20 +73,20 @@ that the hop's own timer (Timer B, or an SBC's reroute timer) sends the call els
   CANCEL before any 100 still draws 200 and 487.
 - §9.1 is the client's: a caller with no provisional does not CANCEL; its give-up is silent.
   The start bound keeps a late turn from ringing anyone.
-- The RFC audit's `proxy-100-within-grace` rule is advisory and charged to the front proxy;
-  no rule of the SUT's own output fires on the withheld 100.
-- §17.1.1.2: a caller whose owner's 100 did leave takes a second one from the node asking
-  again; her transaction is `Proceeding` either way. The failover audit reads one 100 more
-  per change of serving node as informative (ADR-0055 §11), never two from one node.
+- The audit's `proxy-100-within-grace` rule is advisory and charged to the front proxy; no
+  rule of the SUT's own output fires on the withheld 100.
+- §17.1.1.2: a caller whose owner's 100 left takes a second one from the node asking again,
+  which her `Proceeding` transaction absorbs; the failover audit reads it as informative
+  (ADR-0055 §11).
 
 ## Consequences
 
 - At nominal load the 100 leaves well under 200 ms (p99 1 to 3 ms on one worker at
   1000 calls/s), so nothing changes on the wire.
-- A stuck worker is silent; the previous hop retransmits and reroutes on its timer. A
-  retransmission follows the proxy's memo to the same worker while the proxy reads it alive or
-  slow (ADR-0069): the probe is answered on the router loop, so a wedged loop reads dead after
-  the probe's threshold.
+- A stuck worker is silent; the previous hop retransmits and reroutes on its timer. A copy
+  follows the proxy's memo to the same worker while the proxy reads it alive or slow
+  (ADR-0069): the probe is answered on the router loop, so a wedged loop reads dead past the
+  probe's threshold.
 - Retransmissions of a new INVITE become ordinary under load: a call slower than T1 to its
   creation write is retransmitted. A copy rewrites its own entry in the proxy's retransmission
   memo and adds none. A memo sized for the call rate (`calls_per_second` of its bounds) keeps
@@ -99,7 +98,7 @@ that the hop's own timer (Timer B, or an SBC's reroute timer) sends the call els
   holds no record and drops each one unanswered.
 - A caller who heard her 100 and whose worker dies during the consult gets the bare 503 when
   the re-ask starts past the start bound (item 4), where she was served before.
-- A CANCEL that meets a turn waiting for its permit comes from a caller that broke §9.1.
+- A CANCEL meeting a turn that waits for its permit comes from a caller breaking §9.1.
 - Residuals: a call ended with `Caller::Leave` (the stuck-poll discharge, an unrecoverable
   record, an ended body, a reclaim's ending); an unbacked call whose worker dies after its
   100; a consult that blocks its poll after the 100. An SBC retry on the same Call-ID meets the
@@ -107,8 +106,8 @@ that the hop's own timer (Timer B, or an SBC's reroute timer) sends the call els
 
 ## Rejected
 
-- **No fallback 100.** A call with no backup, or a backup that never answers, would draw no
-  100 at all from a worker that serves it.
+- **No fallback 100.** A call with no backup, or whose backup never answers, would draw no
+  100 from a worker serving it.
 - **The fallback at the call's creation.** It would arm before the creation write is offered
   and before the decision request, so a worker that never reaches the request would still say
   it works on the call.

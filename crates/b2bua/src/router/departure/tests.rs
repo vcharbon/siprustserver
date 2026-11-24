@@ -62,6 +62,12 @@ async fn element(store: &ReplicatingCallStore, call_ref: &str) -> Call {
     crate::store::envelope::decode(&MsgpackCodec::new(), &body).unwrap().call
 }
 
+/// Whether `lines` are `reasked` 100s, one per call whose decision was asked
+/// again (ADR-0070), and nothing else.
+fn tryings_alone(lines: &[String], reasked: usize) -> bool {
+    lines.len() == reasked && lines.iter().all(|l| l == "SIP/2.0 100 Trying")
+}
+
 /// The status lines `caller` receives within `within`.
 async fn heard(caller: &dyn UdpEndpoint, within: Duration) -> Vec<String> {
     let mut lines = Vec::new();
@@ -87,7 +93,7 @@ async fn a_departed_peers_in_flight_calls_are_taken_over_and_its_ended_calls_dis
     take_over_departed(ctx, "w0");
 
     let lines = heard(caller.as_ref(), Duration::from_millis(200)).await;
-    assert!(lines.is_empty(), "the undecided caller is refused nothing: {lines:?}");
+    assert!(tryings_alone(&lines, 1), "the undecided caller is refused nothing: {lines:?}");
     assert_eq!(n.metrics.repl_takeover_hydrated_total(), 1, "one call taken over");
     assert_eq!(n.metrics.repl_takeover_refused_terminated_total(), 0, "an ended call unread");
     assert!(ctx.state.peek(&quiet.call_ref).is_none(), "the quiet call stays reactive");
@@ -116,7 +122,7 @@ async fn a_dead_verdict_asks_an_undecided_calls_decision_again_and_leaves_an_end
     assert!(take_over_read_dead(ctx, "w0", None), "this node backs calls of w0");
 
     let lines = heard(caller.as_ref(), Duration::from_millis(200)).await;
-    assert!(lines.is_empty(), "nothing reaches the caller: {lines:?}");
+    assert!(tryings_alone(&lines, 1), "the caller is refused nothing: {lines:?}");
     assert_eq!(n.metrics.repl_takeover_hydrated_total(), 1, "the undecided call taken over");
     let copy = ctx.state.peek(&undecided.call_ref).expect("the undecided call's copy serves it");
     assert!(!copy.b_legs.is_empty(), "its decision was asked again and the callee dialled");
@@ -363,7 +369,7 @@ async fn a_takeover_that_panics_costs_its_call_only_and_is_counted() {
     });
 
     let lines = heard(caller.as_ref(), Duration::from_millis(200)).await;
-    assert!(lines.is_empty(), "no undecided caller is refused: {lines:?}");
+    assert!(tryings_alone(&lines, 2), "no undecided caller is refused: {lines:?}");
     assert_eq!(n.metrics.repl_takeover_hydrated_total(), 2, "the other two calls taken over");
     assert_eq!(n.metrics.departure_takeover_panics_total(), 1, "the panic is counted");
     assert!(task.await.is_ok(), "the sweep itself ran to its end");
