@@ -20,7 +20,8 @@
 //! placed on the survivor as a call of its own is not answered for the
 //! departed call; a removal with a replacement dials the callee once; a
 //! removed process whose backup never received the call refuses the caller
-//! 503 itself.
+//! 503 itself; a node that dies past the start bound leaves its backup to
+//! refuse the caller 503, asking nothing.
 //!
 //! Beyond the failover sweep: a decision in flight at the kill, asked again once, under removals
 //! and restarts.
@@ -404,12 +405,14 @@ async fn a_decision_returning_to_a_removed_process_is_not_applied() {
 }
 
 /// How long after the INVITE's receipt its node dies, in the cells of the
-/// re-ask's budget: most of the first budget is gone.
+/// re-ask's budget: most of the first budget is gone, inside the start bound.
 const KILLED_AFTER: Duration = Duration::from_secs(3);
+/// The start bound at its default, counted from the INVITE's receipt.
+const START_BOUND_MS: i64 = b2bua::config::B2buaConfig::DEFAULT_CALL_START_BOUND_MS;
 
 /// A re-ask after a takeover has a setup budget of its own (ADR-0022 X1): an
 /// answer that takes most of a budget, landing past the first one, still
-/// dials the callee.
+/// dials the callee. Its node died inside the start bound, so the re-ask runs.
 #[tokio::test(start_paused = true)]
 async fn a_reask_has_a_setup_budget_of_its_own() {
     let name = "undecided-call-reask-fresh-budget";
@@ -426,6 +429,7 @@ async fn a_reask_has_a_setup_budget_of_its_own() {
     call.expect(100).await;
     let (pri_ord, call_ref) = placed(&fh, &w_b1, &w_b2).await;
     fh.advance(KILLED_AFTER).await;
+    assert!(fh.now_ms() - received < START_BOUND_MS - 500, "the node dies inside the start bound");
     let (primary, survivor) = split_mut(&pri_ord, &mut w_b1, &mut w_b2);
     kill_announced(&mut fh, primary, survivor, &pri_ord, &proxy).await;
 
@@ -489,6 +493,54 @@ async fn an_unanswered_reask_refuses_the_caller_at_its_budget() {
     assert!(released, "nothing of the call is left live or stored");
     assert_eq!(total_cdrs_for(&[survivor], &call_ref), 1, "the backup writes the one CDR");
     fh.linger_peers(&[&alice, &bob], Duration::from_secs(3)).await;
+    fh.assert_sip_rfc_clean(name);
+    drop(proxy);
+}
+
+/// A re-ask held to the start bound, counted from the INVITE's receipt the
+/// record states, not from the takeover (ADR-0070): its node died past the
+/// bound, and the backup cannot tell whether the caller heard a 100. It asks
+/// nothing and refuses her the bare 503 through the transaction it seeded, at
+/// once, and dials no one.
+#[tokio::test(start_paused = true)]
+async fn a_reask_past_the_start_bound_refuses_the_caller_and_dials_no_one() {
+    let name = "undecided-call-reask-past-the-start-bound";
+    let mut fh = FailoverHarness::new(name, &["b1", "b2"]);
+    let alice = fh.agent("alice", ALICE).await;
+    let bob = fh.agent("bob", BOB).await;
+    let route = std::sync::Arc::new(ScriptedDecisionEngine::route_all_to("127.0.0.1", 5070));
+    let (decision, consults) = CountedDecision::counting(route, Duration::from_secs(60));
+    let (proxy, mut w_b1, mut w_b2) = bring_up_deciding(&mut fh, decision).await;
+
+    let received = fh.now_ms();
+    let mut call = alice.invite(&bob).with_sdp(OFFER).through(proxy.addr()).send().await;
+    call.expect(100).await;
+    let (pri_ord, call_ref) = placed(&fh, &w_b1, &w_b2).await;
+    let past_the_bound = received + START_BOUND_MS + 300 - fh.now_ms();
+    fh.advance(Duration::from_millis(past_the_bound.unsigned_abs())).await;
+    let killed_at = fh.now_ms();
+    let (primary, survivor) = split_mut(&pri_ord, &mut w_b1, &mut w_b2);
+    kill_announced(&mut fh, primary, survivor, &pri_ord, &proxy).await;
+
+    let refused = call.expect(503).await;
+    assert_eq!(refused.reason(), "Service Unavailable");
+    assert!(!refused.has(&HeaderName::Reason), "no Reason");
+    assert!(!refused.has(&HeaderName::RetryAfter), "no Retry-After");
+    let waited = fh.now_ms() - killed_at;
+    assert!(waited < ANSWER_BOUND.as_millis() as i64, "refused at the takeover: {waited} ms");
+    assert_eq!(consults.load(Ordering::SeqCst), 1, "the backup asks nothing");
+    assert_eq!(rejections_to(&fh, &alice), 1, "one final");
+
+    let survivor = survivor_of(&pri_ord, &w_b1, &w_b2);
+    let released = fh
+        .settle_terminal(async || {
+            survivor.memory_clean() && !survivor.holds_any_trace(&call_ref).await
+        })
+        .await;
+    assert!(released, "nothing of the call is left live or stored");
+    assert_eq!(total_cdrs_for(&[survivor], &call_ref), 1, "the backup writes the one CDR");
+    fh.linger_peers(&[&alice, &bob], Duration::from_secs(3)).await;
+    assert!(!reached(&fh, &bob), "the callee is never dialled");
     fh.assert_sip_rfc_clean(name);
     drop(proxy);
 }
