@@ -85,14 +85,16 @@ async fn every_drawn_identity_value_reads_back() {
 fn drawn_user(user: &str) -> bool {
     let all_chars =
         (0u8..0x80).filter(|&b| char_class::is_user_char(b)).all(|b| user.contains(char::from(b)));
-    crate::identity::USERS.iter().any(|(u, _)| *u == user)
-        || all_chars && char_class::is_run_of(user, char_class::is_user_char, true)
+    char_class::is_run_of(user, char_class::is_user_char, true)
+        && (all_chars || crate::identity::USERS.iter().any(|(u, _)| *u == user))
 }
 
-/// The URI reader reads back `user` as the whole user part.
+/// `user` is an RFC 3261 `user` (no `:` that would start a password) and the
+/// URI reader reads it back whole.
 fn read_as_written(user: &str) -> bool {
-    Uri::parse(&SipStr::owned(&format!("sip:{user}@example.com")))
-        .is_ok_and(|uri| uri.user() == Some(user))
+    char_class::is_run_of(user, char_class::is_user_char, true)
+        && Uri::parse(&SipStr::owned(&format!("sip:{user}@example.com")))
+            .is_ok_and(|uri| uri.user() == Some(user))
 }
 
 #[test]
