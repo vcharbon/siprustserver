@@ -1,9 +1,10 @@
-//! The predicate of `W-reask-trying` and `T-reask-trying` (ADR-0055 §11): the
-//! 100 Trying a node that takes an undecided call over, or back, sends the
-//! caller as it asks the routing decision again (ADR-0070), on an initial
-//! INVITE another node already sent its 100 for. The caller's client
-//! transaction is `Proceeding` either way and a 100 is hop by hop (RFC 3261
-//! §17.1.1.2, §16.7 step 5): the extra one changes nothing a party does.
+//! The extra 100 Trying a change of serving node explains (ADR-0070): a node
+//! that takes an undecided call over, or back, sends the caller a 100 as it
+//! asks the routing decision again, since it cannot tell whether the other
+//! node's left. Each node's server transaction sent one 100 (RFC 3261
+//! §17.2.1) and the front proxy is stateless (§16.11), which §16.7 step 5
+//! does not bind; the caller's `Proceeding` client transaction absorbs it
+//! (§17.1.1.2). The failover audit records it as informative, never gating.
 
 use std::net::SocketAddr;
 
@@ -11,14 +12,22 @@ use sip_message::Method;
 use sip_net_testkit::{CaptureIndex, Captured};
 
 /// The audit rule a caller taking more 100s than the INVITEs she sent meets.
-pub(super) const RULE_EXTRA_TRYING: &str = "proxy-100-trying-not-forwarded";
+const RULE_EXTRA_TRYING: &str = "proxy-100-trying-not-forwarded";
+
+/// Whether the finding of `rule` whose offending message is the 1-based
+/// `offending` index into `capture` is a caller's extra 100 a change of
+/// serving node explains ([`one_more_per_serving_node`]).
+pub(super) fn explained(rule: &str, offending: Option<usize>, capture: &CaptureIndex) -> bool {
+    let i = offending.and_then(|i| i.checked_sub(1));
+    rule == RULE_EXTRA_TRYING && i.is_some_and(|i| one_more_per_serving_node(i, capture))
+}
 
 /// Whether the 100 Trying at index `i` of `capture`, sent by a hop to the
 /// caller of an initial INVITE, is within the caller's budget once each change
 /// of the node sending that INVITE's 100s to the hop counts one more: she
 /// takes at most one 100 per INVITE she sent plus one per change of node,
 /// and at least one change happened.
-pub(super) fn one_more_per_serving_node(i: usize, capture: &CaptureIndex, _: u64) -> bool {
+fn one_more_per_serving_node(i: usize, capture: &CaptureIndex) -> bool {
     let (Some(entry), Some(trying)) = (capture.entry(i), capture.message(i)) else { return false };
     if trying.status() != Some(100) || trying.cseq_method != Method::Invite {
         return false;
@@ -108,7 +117,7 @@ mod tests {
 
     fn last_admitted(entries: Vec<RecordedSipEntry>) -> bool {
         let i = entries.len() - 1;
-        one_more_per_serving_node(i, &CaptureIndex::new(entries), 0)
+        one_more_per_serving_node(i, &CaptureIndex::new(entries))
     }
 
     #[test]

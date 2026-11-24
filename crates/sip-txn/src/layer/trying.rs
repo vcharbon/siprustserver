@@ -21,7 +21,7 @@ use call::TxnKind;
 
 use super::key::{ServerTxnId, ServerTxnKey};
 use super::owner::Owner;
-use super::txn::{Timer, TxnRef, TxnState};
+use super::txn::{Timer, TxnState};
 use crate::timers::ms;
 
 impl Owner {
@@ -30,12 +30,6 @@ impl Owner {
     /// unless its consumer arms it.
     pub(super) fn trying_bound_at_opening(&self, invite: &SipRequest) -> bool {
         !self.consumer_arms_initial_trying || invite.to().tag().is_some()
-    }
-
-    /// [`trying_bound_at_opening`](Self::trying_bound_at_opening) of the
-    /// INVITE a transaction holds; `true` when it holds none.
-    fn trying_bound_at_opening_of(&self, invite: Option<&SipRequest>) -> bool {
-        invite.is_none_or(|invite| self.trying_bound_at_opening(invite))
     }
 
     /// Arm the §17.2.1 bound of the server INVITE transaction `key` opened at
@@ -61,19 +55,16 @@ impl Owner {
 
     /// The bound of the transaction `key` opened at `opened` passed: its 100
     /// leaves unless a response already left. A transaction opened since on the
-    /// same key keeps its own bound. An initial INVITE's 100 its consumer held
-    /// for its release that leaves at the bound instead is reported as a held
-    /// message that passed its bound (`on_bound`).
+    /// same key keeps its own bound.
     pub(super) async fn fire_trying(
         &mut self,
         endpoint: &dyn UdpEndpoint,
         key: &ServerTxnKey,
         opened: Instant,
     ) {
-        let Some(txn) = self.server(key.id()).filter(|t| t.created_at == opened) else { return };
-        let held = !self.trying_bound_at_opening_of(txn.original_request.as_deref());
-        if self.send_first_trying(endpoint, key.id()).await && held {
-            self.told_bound(TxnRef::Server(key.id()));
+        let same = self.server(key.id()).is_some_and(|t| t.created_at == opened);
+        if same {
+            self.send_first_trying(endpoint, key.id()).await;
         }
     }
 

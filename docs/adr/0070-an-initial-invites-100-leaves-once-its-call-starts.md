@@ -77,8 +77,8 @@ that the hop's own timer (Timer B, or an SBC's reroute timer) sends the call els
 - The RFC audit's `proxy-100-within-grace` rule is advisory and charged to the front proxy;
   no rule of the SUT's own output fires on the withheld 100.
 - §17.1.1.2: a caller whose owner's 100 did leave takes a second one from the node asking
-  again; her transaction is `Proceeding` either way. The failover audit accepts one 100 more
-  per change of serving node (ADR-0055 §11, `W-reask-trying`), never two from one node.
+  again; her transaction is `Proceeding` either way. The failover audit reads one 100 more
+  per change of serving node as informative (ADR-0055 §11), never two from one node.
 
 ## Consequences
 

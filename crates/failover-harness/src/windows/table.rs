@@ -8,7 +8,6 @@ use super::copies::{
     provisional_after_a_final, second_bye_at_one_cseq, RULE_EARLY_BYE, RULE_NO_200_AFTER_CANCEL,
     RULE_TAG_CONSISTENCY, RULE_TAKEN_FINAL, RULE_UNACKED_NON_2XX,
 };
-use super::reask_trying::{one_more_per_serving_node, RULE_EXTRA_TRYING};
 use super::stall_cseq::reuses_a_stall_cseq;
 use super::stall_repeat::{reason_only_cancel_repeat, RULE_RUNG_BYTE_IDENTICAL};
 use super::unseen_rseq::{from_another_node, RULES as RSEQ_RULES};
@@ -22,7 +21,7 @@ use crate::{RULE_CSEQ_IN_DIALOG_ORDER, RULE_NO_CANCEL_AFTER_FINAL};
 use b2bua::repl::SyncLevel;
 
 mod sets;
-use sets::{NO_SPLIT, PRIMARY_KILLS, REASKS, SPLITS, STALE_COPY, STALE_OR_TWO_COPIES, TWO_COPIES};
+use sets::{NO_SPLIT, PRIMARY_KILLS, SPLITS, STALE_COPY, STALE_OR_TWO_COPIES, TWO_COPIES};
 /// The rows that accept only what follows a request a node sent again.
 pub(super) const RESEND_ROWS: &[&str] = &[
     "W-stale-resend",
@@ -32,7 +31,7 @@ pub(super) const RESEND_ROWS: &[&str] = &[
 ];
 /// The rows that accept only what follows a routing decision a node asked
 /// again.
-pub(super) const REASK_ROWS: &[&str] = &["W-off-stale-reask", "W-reask-trying", "T-reask-trying"];
+pub(super) const REASK_ROWS: &[&str] = &["W-off-stale-reask"];
 /// The rows that accept only a dialog two workers each ended with a BYE.
 pub(super) const TWO_SERVER_ROWS: &[&str] = &["W-off-reboot-two-servers"];
 /// The re-INVITE rule of RFC 3261 §14.1: no re-INVITE while one is in progress.
@@ -419,21 +418,6 @@ pub static TABLE: &[Row] = &[
         closes_when_over: false,
         witness: None,
     },
-    Row {
-        id: "W-reask-trying",
-        tier: Tier::Degraded,
-        opens: Opens::any(REASKS),
-        covers: "the 100 Trying a node taking an undecided call over, or back, sends the caller \
-                 as it asks the routing decision again, one per change of node, on an initial \
-                 INVITE another node sent its 100 for",
-        kind: Kind::Rfc {
-            rules: &[RULE_EXTRA_TRYING],
-            once_per_dialog: false,
-            admits: Some(one_more_per_serving_node),
-        },
-        closes_when_over: false,
-        witness: witness("basic", SyncLevel::Applied, StalledKilled, 1, TurnPoint::Logged),
-    },
     // Hand-written tests' faults no incident names.
     Row {
         id: "T-lag-copy-acts",
@@ -473,20 +457,6 @@ pub static TABLE: &[Row] = &[
             rules: &[RULE_UNACKED_NON_2XX, RULE_TAKEN_FINAL],
             once_per_dialog: false,
             admits: None,
-        },
-        closes_when_over: false,
-        witness: None,
-    },
-    Row {
-        id: "T-reask-trying",
-        tier: Tier::Degraded,
-        opens: Opens::Transitional(Transitional::UndecidedTakeover),
-        covers: "the 100 Trying a node taking an undecided call over, or back, sends the caller \
-                 as it asks the routing decision again, one per change of node",
-        kind: Kind::Rfc {
-            rules: &[RULE_EXTRA_TRYING],
-            once_per_dialog: false,
-            admits: Some(one_more_per_serving_node),
         },
         closes_when_over: false,
         witness: None,

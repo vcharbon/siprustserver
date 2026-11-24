@@ -30,7 +30,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use b2bua::decision::ScriptedDecisionEngine;
-use failover_harness::{FailoverHarness, ProxySut, Transitional, WorkerHealth};
+use failover_harness::{FailoverHarness, ProxySut, WorkerHealth};
 use sip_proxy::health::HealthProbeConfig;
 
 use crate::departure_support::{bring_up_deciding, placed, CountedDecision, B1, B2};
@@ -203,7 +203,6 @@ async fn an_undecided_call_is_asked_again_on_the_flip() {
 
     let (primary, _) = split_mut(&pri_ord, &mut w_b1, &mut w_b2);
     fh.mark(&pri_ord, None, "crash", "the process dies, its node lives");
-    fh.strike(Transitional::UndecidedTakeover);
     primary.crash();
     fh.advance(FLIP_AFTER_THE_CRASH).await;
     fh.flap_not_ready(&pri_ord);
@@ -419,7 +418,6 @@ async fn an_undecided_call_whose_worker_returns_inside_the_decision_is_dialled_o
 
     let (primary, _) = split_mut(&pri_ord, &mut w_b1, &mut w_b2);
     fh.mark(&pri_ord, None, "crash", "the process dies, its node lives");
-    fh.strike(Transitional::UndecidedTakeover);
     primary.crash();
     fh.advance(FLIP_AFTER_THE_CRASH).await;
     fh.flap_not_ready(&pri_ord);

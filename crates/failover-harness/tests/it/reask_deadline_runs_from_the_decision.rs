@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use b2bua::decision::ScriptedDecisionEngine;
 use b2bua::rules::ServiceDef;
-use failover_harness::{FailoverHarness, Transitional};
+use failover_harness::FailoverHarness;
 
 use crate::departure_support::{bring_up_deciding, kill_announced, placed, CountedDecision};
 use crate::inflight_resend::{reboot_and_reclaim, settle_to_one_cdr, split_mut};
@@ -121,7 +121,6 @@ async fn a_reasked_calls_attempt_deadline_runs_from_the_decision() {
     let (pri_ord, call_ref) = placed(&fh, &w_b1, &w_b2).await;
 
     let (primary, survivor) = split_mut(&pri_ord, &mut w_b1, &mut w_b2);
-    fh.strike(Transitional::UndecidedTakeover);
     kill_announced(&mut fh, primary, survivor, &pri_ord, &proxy).await;
     let mut uas = bob.receive("INVITE").await;
     let dialled_at = fh.now_ms();

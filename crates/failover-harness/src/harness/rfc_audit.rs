@@ -31,7 +31,11 @@ impl FailoverHarness {
     /// transactions (e.g. `response-echoes-request-via` §8.1.3/§17.1.3 response matching).
     pub fn assert_full_rfc_clean(&self, cell: &str) {
         let events = self.harness.recording().channel().snapshot();
-        let findings = self.rfc_acceptance.full_suite_gating(&events, self.is_sut());
+        let findings = self.rfc_acceptance.full_suite_gating(
+            &events,
+            self.is_sut(),
+            self.turn_points.reasked(),
+        );
         assert!(
             findings.is_empty(),
             "[{cell}] full-suite RFC audit violation(s) on the recorded trace:\n{}",
@@ -80,7 +84,12 @@ impl FailoverHarness {
     /// [`RfcAcceptance::partition`](crate::rfc_acceptance::RfcAcceptance::partition).
     pub(super) fn partition_rfc_findings(&self) -> Partitioned {
         let (events, scoped_out) = self.audited_events();
-        self.rfc_acceptance.partition(&events, &scoped_out, self.is_sut())
+        self.rfc_acceptance.partition(
+            &events,
+            &scoped_out,
+            self.is_sut(),
+            self.turn_points.reasked(),
+        )
     }
 
     /// Every address the run bound as a system under test: each lane bound as

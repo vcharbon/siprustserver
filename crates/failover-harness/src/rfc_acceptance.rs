@@ -25,6 +25,8 @@ use sip_net_testkit::{CaptureIndex, DialogKey, SignalingNetworkEvent};
 
 use crate::windows::{Kind, Row, TABLE};
 
+mod serving_node_trying;
+
 /// One RFC-audit rule accepted over a bounded slice of the run, in capture
 /// order, by one row of the window table.
 struct AcceptanceWindow {
@@ -185,20 +187,26 @@ impl RfcAcceptance {
     }
 
     /// The full-suite findings of `events` that gate: non-advisory, not
-    /// waived for the run, taken by no window, and not informative inside the
-    /// system under test (`is_sut` holding both ends of the hop) — the same
+    /// waived for the run, taken by no window, not informative inside the
+    /// system under test (`is_sut` holding both ends of the hop), and, in a
+    /// run where a node asked a routing decision again (`reasked`), no
+    /// caller's 100 a change of serving node explains — the same
     /// classification [`partition`](Self::partition) applies.
     pub fn full_suite_gating(
         &self,
         events: &[Stamped<SignalingNetworkEvent>],
         is_sut: impl Fn(&str) -> bool,
+        reasked: bool,
     ) -> Vec<sip_net_testkit::RfcFinding> {
         let capture = CaptureIndex::new(sip_net_testkit::audit_wire_entries(events));
+        let explained = |f: &sip_net_testkit::RfcFinding| {
+            reasked && serving_node_trying::explained(&f.rule, f.offending, &capture)
+        };
         sip_net_testkit::evaluate_rfc_findings(events)
             .into_iter()
             .filter(|f| !f.advisory && !self.waived(&f.rule))
             .filter(|f| self.accepts(&f.rule, f.offending, &capture).is_none())
-            .filter(|f| !f.inside_sut(&is_sut))
+            .filter(|f| !f.inside_sut(&is_sut) && !explained(f))
             .collect()
     }
 
@@ -208,14 +216,17 @@ impl RfcAcceptance {
     /// of the first window taking it, when its OFFENDING message was captured
     /// inside a window for its rule; else informative when its rule is
     /// informative inside the system under test and `is_sut` holds both ends
-    /// of its hop ([`sip_net_testkit::rfc_finding_inside_sut`]); else it gates.
-    /// A lifetime-waived rule is dropped outright; an unattributable finding
-    /// gates.
+    /// of its hop ([`sip_net_testkit::rfc_finding_inside_sut`]), or, in a run
+    /// where a node asked a routing decision again (`reasked`), when it is a
+    /// caller's 100 a change of serving node explains (ADR-0070); else it
+    /// gates. A lifetime-waived rule is dropped outright; an unattributable
+    /// finding gates.
     pub fn partition(
         &self,
         events: &[Stamped<SignalingNetworkEvent>],
         scoped_out: &HashSet<String>,
         is_sut: impl Fn(&str) -> bool,
+        reasked: bool,
     ) -> Partitioned {
         let capture = CaptureIndex::new(sip_net_testkit::audit_wire_entries(events));
         let mut out = Partitioned::default();
@@ -239,9 +250,11 @@ impl RfcAcceptance {
                     counterpart.as_deref(),
                     &is_sut,
                 );
+                let explained =
+                    reasked && serving_node_trying::explained(rule.name(), offending, &capture);
                 match self.taker(rule.name(), offending, &capture, &mut per_dialog) {
                     Some(row) => out.accepted.push((finding, row)),
-                    None if inside => out.informative.push(finding),
+                    None if inside || explained => out.informative.push(finding),
                     None => out.gating.push(finding),
                 }
             }
@@ -361,11 +374,11 @@ mod tests {
         let rules = |findings: &[Finding]| -> Vec<String> {
             findings.iter().map(|(rule, ..)| rule.clone()).collect()
         };
-        let inside = acceptance.partition(&events, &scoped_out, |_| true);
+        let inside = acceptance.partition(&events, &scoped_out, |_| true, false);
         assert_eq!(rules(&inside.gating), Vec::<String>::new());
         assert_eq!(rules(&inside.informative), [UNACKED_NON_2XX]);
 
-        let border = acceptance.partition(&events, &scoped_out, |bind| bind == PROXY);
+        let border = acceptance.partition(&events, &scoped_out, |bind| bind == PROXY, false);
         assert_eq!(rules(&border.gating), [UNACKED_NON_2XX]);
         assert!(border.informative.is_empty(), "a hop to a simulated party gates");
     }
@@ -377,9 +390,9 @@ mod tests {
         let rules = |findings: Vec<sip_net_testkit::RfcFinding>| -> Vec<String> {
             findings.into_iter().map(|f| f.rule).collect()
         };
-        let inside = acceptance.full_suite_gating(&events, |_| true);
+        let inside = acceptance.full_suite_gating(&events, |_| true, false);
         assert!(rules(inside).iter().all(|r| r != UNACKED_NON_2XX), "both ends under test");
-        let border = acceptance.full_suite_gating(&events, |bind| bind == PROXY);
+        let border = acceptance.full_suite_gating(&events, |bind| bind == PROXY, false);
         assert!(rules(border).iter().any(|r| r == UNACKED_NON_2XX), "a simulated worker gates");
     }
 

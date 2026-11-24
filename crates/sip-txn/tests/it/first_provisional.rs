@@ -5,8 +5,6 @@
 //! `consumer_arms_initial_trying` an initial INVITE's bound runs from its
 //! consumer's arming alone (ADR-0070); an in-dialog INVITE's from its opening.
 //! A seeded INVITE arms no bound and sends its 100 on its consumer's release.
-//! An initial INVITE's 100 that leaves at its armed bound, not on its release,
-//! is reported to `on_bound`.
 
 use std::sync::Arc;
 
@@ -164,35 +162,6 @@ async fn an_in_dialog_invite_keeps_its_bound_from_its_opening() {
     let _ = stack.drain_events();
     elapse_ms(20).await;
     assert_eq!(count_responses(&stack.drain_peer(), 100), 1, "the bound sends the 100");
-}
-
-/// An armed initial INVITE whose 100 leaves at its bound tells `on_bound`
-/// once; one released first, and an in-dialog INVITE's bound, tell nothing.
-#[tokio::test(start_paused = true)]
-async fn an_initial_100_that_leaves_at_its_bound_is_reported() {
-    let told: Told = Arc::default();
-    let config = TransactionConfig {
-        consumer_arms_initial_trying: true,
-        on_bound: Some(telling(&told)),
-        ..TransactionConfig::new(Arc::new(IdGen::seeded(0xC0FFEE)))
-    };
-    let mut stack = Stack::build_with_config(TRANSIT, 64, config).await;
-    let bound = inbound_request("INVITE", "z9hG4bK-told", "told-call", None);
-    let released = inbound_request("INVITE", "z9hG4bK-untold", "untold-call", None);
-    let in_dialog = inbound_request("INVITE", "z9hG4bK-in-dialog", "in-dialog-call", Some("uas"));
-    for raw in [&bound, &released, &in_dialog] {
-        stack.inject(raw).await;
-    }
-    elapse_ms(TRANSIT + 1).await;
-    let _ = stack.drain_events();
-    stack.txn.arm_trying(&request_of(&bound)).await.unwrap();
-    stack.txn.arm_trying(&request_of(&released)).await.unwrap();
-    assert!(stack.txn.release_trying(&request_of(&released)).await.unwrap());
-    elapse_ms(TRYING_BOUND * 2).await;
-    assert_eq!(count_responses(&stack.drain_peer(), 100), 3, "each INVITE's 100, once");
-    let told = told.lock().unwrap().clone();
-    let call_ids: Vec<_> = told.iter().map(|(_, call_id, _)| call_id.as_deref()).collect();
-    assert_eq!(call_ids, [Some("told-call")], "the bound's initial 100 alone is told");
 }
 
 /// A seeded INVITE that has sent nothing sends its 100 on its consumer's

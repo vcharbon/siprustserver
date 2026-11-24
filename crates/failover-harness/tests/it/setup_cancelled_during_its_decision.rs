@@ -24,7 +24,7 @@ use b2bua::repl::SyncLevel;
 use call::{CdrEventType, TerminationCause};
 use failover_harness::cluster::{limited_route_to, Cluster, ClusterRecipe};
 use failover_harness::sweep::{ALICE, BOB};
-use failover_harness::{Incident, Tier, Transitional, TurnAt, TurnPoint, WorkerHealth};
+use failover_harness::{Incident, Tier, TurnAt, TurnPoint, WorkerHealth};
 use sip_message::parser::custom::CustomParser;
 use sip_message::{Method, SipMessage, SipParser};
 
@@ -238,11 +238,6 @@ async fn cancelled_during_its_decision(kill: Kill, name: &str, turn: usize, poin
     match kill {
         Kill::Announced => {
             cluster.fh.strike(Incident::PrimaryKilled);
-            // The backup never learns a CANCEL the primary only logged: it
-            // takes the call over undecided and asks again, its 100 first.
-            if (turn, point) == (1, TurnPoint::Logged) {
-                cluster.fh.strike(Transitional::UndecidedTakeover);
-            }
             cluster.kill(&placement.primary, &placement.backup);
             held.release();
         }
@@ -279,17 +274,7 @@ async fn cancelled_during_its_decision(kill: Kill, name: &str, turn: usize, poin
     let drained = cluster.fh.settle_terminal(async || cluster.is_clear_of(&call_ref).await).await;
     assert!(drained, "[{name}] the cluster forgets the call, its limiter set released");
     cluster.fh.linger_peers(&[&alice, &bob], Duration::from_secs(3)).await;
-    if unmarked {
-        // The takeover's strike stands the run in the Degraded tier: the
-        // kill's own Guaranteed facts are read directly.
-        let points = cluster.fh.turn_points();
-        let capped = points.calls().iter().any(|(_, turns)| turns.iter().any(|t| t.cap_hit()));
-        let at_bound = !points.all_bound_passes().is_empty();
-        assert!(!capped && !at_bound, "[{name}] no answer left at its bound");
-    } else {
-        let tier = cluster.fh.tier();
-        assert_eq!(tier, Some(Tier::Guaranteed), "[{name}] no answer left at its bound");
-    }
+    assert_eq!(cluster.fh.tier(), Some(Tier::Guaranteed), "[{name}] no answer left at its bound");
 
     let cdrs: Vec<_> = cluster
         .nodes()

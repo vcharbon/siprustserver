@@ -35,7 +35,7 @@ use std::time::Duration;
 
 use b2bua::decision::test_adapter::{default_call_refer, route_to_processing_refer};
 use b2bua::decision::{CallDecisionEngine, NewCallResponse, ScriptedDecisionEngine};
-use failover_harness::{FailoverHarness, ProxySut, ReplicatedB2buaSut, Transitional, WorkerHealth};
+use failover_harness::{FailoverHarness, ProxySut, ReplicatedB2buaSut, WorkerHealth};
 use scenario_harness::agent::{Agent, Dialog};
 use scenario_harness::{ClientInvite, ServerTxn};
 use sip_message::generators::InDialogMethod;
@@ -147,7 +147,6 @@ async fn placed_call(name: &str, killed: bool) -> Ringing {
     let (pri_ord, call_ref) = placed(&fh, &w_b1, &w_b2).await;
     if killed {
         let (primary, survivor) = split_mut(&pri_ord, &mut w_b1, &mut w_b2);
-        fh.strike(Transitional::UndecidedTakeover);
         kill_announced(&mut fh, primary, survivor, &pri_ord, &proxy).await;
     }
     let mut at_bob = bob.receive("INVITE").await;
