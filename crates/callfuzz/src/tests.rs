@@ -40,11 +40,11 @@ fn invite_plan(call: &ActorCall) -> InvitePlan {
 }
 
 /// The bytes the display name `d` adds to a From as sip-message writes it.
-fn written(d: &String) -> usize {
+fn written(d: &str) -> usize {
     use sip_message::header::{From, NameAddr, Uri};
     let from = |addr: NameAddr| From::new(addr).to_string().len();
     let addr = NameAddr::new(Uri::sip("example.com"));
-    from(addr.clone().with_display(d.as_str())) - from(addr)
+    from(addr.clone().with_display(d)) - from(addr)
 }
 
 /// The headers of the call's INVITE.
@@ -115,7 +115,7 @@ async fn the_header_budget_bounds_every_invite() {
                     + [&p.from_display, &p.to_display]
                         .into_iter()
                         .flatten()
-                        .map(written)
+                        .map(|d| written(d))
                         .sum::<usize>()
             })
             .collect::<Vec<_>>()
