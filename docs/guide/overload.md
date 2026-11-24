@@ -89,13 +89,22 @@ A request can name a dialog or a call that this worker does not have: a BYE afte
 ended, a CANCEL after the final response, a forged request. The worker answers it 481, or 405
 for a method it does not support. It keeps no transaction for the answer (RFC 3261 §8.2.7).
 Each retransmission gets the same answer again, with the same To-tag. A flood of such requests
-thus uses CPU only. It keeps no memory and does not count against the transaction ceiling.
+thus uses CPU and does not count against the transaction ceiling. It keeps only small, bounded
+memory:
+
+- One entry per Call-ID in the per-Call-ID message budget. The table holds at most 262 144
+  entries. The worker removes the oldest idle entry to make room for a new Call-ID.
+- For a re-INVITE, its 100 Trying timer, until the timer expires 200 ms after the request
+  arrived.
+
+A request that the full event queue drops also keeps no transaction and no copy record.
 
 Two answers keep a transaction:
 
 - the 200 to a PRACK that a released call still answers;
-- the 481 to a re-INVITE while the worker serves calls of a failed peer, or when the 100 Trying
-  of the re-INVITE was already sent.
+- the 481 to a re-INVITE when the 100 Trying of the re-INVITE was already sent, or while a takeover
+  can be in progress: a peer worker left the cluster and did not come back, or the worker serves
+  calls of a failed peer.
 
 ## A worker with less CPU than its load needs
 
