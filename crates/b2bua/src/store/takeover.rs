@@ -66,6 +66,12 @@ impl CallState {
         self.locked().takeover.contains(call_ref)
     }
 
+    /// Whether this node serves any live takeover copy: a takeover of a peer's
+    /// calls is in progress here.
+    pub fn serves_takeover(&self) -> bool {
+        self.locked().takeover.len() > 0
+    }
+
     /// [`is_takeover`](Self::is_takeover) as the replication pullers read it on
     /// every write they apply: while no copy is live it answers without taking
     /// the call map's lock.

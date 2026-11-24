@@ -26,13 +26,13 @@ pub const OUTBOUND_UNSENT: Family = Family::counter(
 pub const UNROUTABLE_DROPPED: Family = Family::counter(
     "b2bua_unroutable_dropped_total",
     Labels::Product(&[UNROUTABLE_KIND]),
-    "wire messages that resolved to no call and drew no answer, by kind (ACK, or a response's status class); nothing a peer waits on",
+    "wire messages that resolved to no call and drew no answer, by kind (ACK, or a response's status class); nothing a peer waits on. The ACK of a non-2xx a tagged INVITE naming no call drew statelessly counts here: no transaction absorbs it",
 );
 
 pub const UNROUTABLE_REFUSED: Family = Family::counter(
     "b2bua_unroutable_refused_total",
     Labels::Product(&[ANSWERED_METHOD, Dim::new("code", &["481"])]),
-    "wire requests that resolved to no call, answered on no call's behalf (481 RFC 3261 §12.2.2/§15.1.2/§9.2, 405 §8.2.1) by method and code; a stray CANCEL's 481 is stateless, so each repeat of it counts again",
+    "wire requests that resolved to no call, answered on no call's behalf (481 RFC 3261 §12.2.2/§15.1.2/§9.2, 405 §8.2.1) by method and code; the answer is stateless (RFC 3261 §8.2.7), so each copy of a request counts again",
 ).capped(&UNROUTABLE_REFUSED_OVERFLOW, &["method"]);
 
 pub const UNROUTABLE_INTERNAL: Family = Family::counter(

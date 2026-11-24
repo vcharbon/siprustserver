@@ -83,6 +83,20 @@ When a request inside a dialog meets one of those two bounds, a re-INVITE gets 5
 `Retry-After` and the dialog stays. The worker drops any other request and serves its
 retransmission.
 
+## A request that names no call
+
+A request can name a dialog or a call that this worker does not have: a BYE after the call
+ended, a CANCEL after the final response, a forged request. The worker answers it 481, or 405
+for a method it does not support. It keeps no transaction for the answer (RFC 3261 §8.2.7).
+Each retransmission gets the same answer again, with the same To-tag. A flood of such requests
+thus uses CPU only. It keeps no memory and does not count against the transaction ceiling.
+
+Two answers keep a transaction:
+
+- the 200 to a PRACK that a released call still answers;
+- the 481 to a re-INVITE while the worker serves calls of a failed peer, or when the 100 Trying
+  of the re-INVITE was already sent.
+
 ## A worker with less CPU than its load needs
 
 A worker can have less CPU than its load needs: its CPU limit is too low, or its host is busy.

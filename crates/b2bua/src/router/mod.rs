@@ -197,9 +197,10 @@ pub struct RouterCtx {
     pub readiness: Readiness,
     /// Outbound messages left unsent, by next hop (`router::cannot_leave`).
     pub unsent_waves: Arc<observe::WaveSet<crate::lifecycle::Unsent>>,
-    /// The To-tag of the OPTIONS health answer, derived from the request: the
-    /// transaction layer holds no transaction for an out-of-dialog OPTIONS.
-    pub options_tagger: sip_txn::StatelessTagger,
+    /// The To-tag of an answer no transaction holds, derived from the request
+    /// (RFC 3261 §8.2.7): the OPTIONS health answer, and the answer to an
+    /// untagged request naming no call (`router::unroutable`).
+    pub stateless_tagger: sip_txn::StatelessTagger,
     /// Whether a call's primary has departed (ADR-0047). `None` on an unwired
     /// node: no call there has another primary.
     pub departed: Option<crate::repl::DepartedProbe>,

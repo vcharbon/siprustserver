@@ -23,7 +23,7 @@ use super::release::{release_call, ReleaseKind};
 use super::resolve::Resolution;
 use super::stray_cancel::reject_stray_cancel;
 use super::unrecoverable::discharge_after_turn;
-use super::unroutable::answer_vanished;
+use super::unroutable::{answer_no_call, answer_vanished};
 use super::RouterCtx;
 use crate::limiter::refresh_batch::RefreshAnswered;
 use crate::rule_chain::{enforced, fired, rule_chain_turn, TurnInput};
@@ -145,7 +145,7 @@ pub(super) async fn process(
             return false;
         }
         let Some(call) = resident_or_materialised(ctx, &call_ref, answered(event)).await else {
-            answer_vanished(ctx, event, &mut turn.ids).await;
+            answer_no_call(ctx, event, &mut turn.ids).await;
             // An admit report for a vanished call (a route fold, a service's
             // admit result): no call is left to own the set its admit may
             // have counted.

@@ -287,12 +287,12 @@ async fn answer_keepalive(ctx: &Arc<RouterCtx>, req: &SipRequest, src: SocketAdd
     let refused = sip_message::option_tags::not_understood(req);
     let resp = match &refused {
         Some(unsupported) => {
-            build_420(req, unsupported, Some(ctx.options_tagger.for_request(req).0))
+            build_420(req, unsupported, Some(ctx.stateless_tagger.for_request(req).0))
         }
         None => build_options_health_response(
             &ctx.readiness,
             &ctx.overload,
-            &ctx.options_tagger,
+            &ctx.stateless_tagger,
             req,
             &ctx.config.node_capabilities,
         ),

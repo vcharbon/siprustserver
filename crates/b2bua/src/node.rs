@@ -359,7 +359,7 @@ impl B2buaCore {
             decision,
             limiter,
             cdr: cdr.clone(),
-            options_tagger: sip_txn::StatelessTagger::from_id_gen(&id_gen),
+            stateless_tagger: sip_txn::StatelessTagger::from_id_gen(&id_gen),
             id_gen,
             clock,
             rules: Arc::new(rules),
