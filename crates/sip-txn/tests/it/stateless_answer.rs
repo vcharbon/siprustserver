@@ -131,7 +131,7 @@ async fn requests_the_full_queue_drops_leave_no_copy_record() {
         call_id_budget: Some(CallIdBudget { messages: 1_000, entries: ENTRIES }),
         ..TransactionConfig::new(Arc::new(IdGen::seeded(0xC0FFEE)))
     };
-    let mut stack = Stack::build_with_config(TRANSIT, 1024, config).await;
+    let stack = Stack::build_with_config(TRANSIT, 1024, config).await;
     let capacity = stack.txn.metrics().event_queue_capacity();
     for i in 0..capacity {
         let filler = format!("z9hG4bK-sl-fill-{i}");

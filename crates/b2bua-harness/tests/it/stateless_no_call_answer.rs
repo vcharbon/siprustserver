@@ -16,6 +16,7 @@ use std::time::Duration;
 use b2bua::config::Ceilings;
 use b2bua_harness::{settle_until, B2buaScene, B2buaSut};
 use scenario_harness::{Agent, Harness};
+use sip_message::generators::InDialogMethod;
 use sip_message::parser::custom::CustomParser;
 use sip_message::{SipMessage, SipParser, SipResponse};
 
@@ -413,4 +414,38 @@ async fn a_late_pracks_copy_draws_its_200_again_from_its_transaction() {
     settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
     let _ = h.finish().await;
+}
+
+/// A request that names a live call keeps its transaction: alice's INFO is
+/// relayed and answered, and her copy of it, sent before Timer J, draws the
+/// cached 200 from that transaction (§17.2.2) and never reaches the call:
+/// bob is sent the INFO once.
+#[tokio::test(start_paused = true)]
+async fn a_request_naming_a_live_call_keeps_its_transaction() {
+    let s = B2buaScene::new("b2bua-stateless-live-call-info").await;
+    let mut dialog = s.establish().await;
+
+    let mark = s.h.wire_entries().len();
+    let mut info = dialog.send_request(InDialogMethod::Info).send().await;
+    s.bob.receive("INFO").await.respond(200, "OK").await;
+    info.expect(200).await;
+    let sent =
+        s.h.wire_entries().into_iter().skip(mark).find(|e| {
+            e.from == s.alice.addr() && e.to == s.b2bua.addr && e.raw.starts_with(b"INFO ")
+        });
+    let sent = sent.expect("alice's INFO is on the wire");
+    s.alice.try_send_datagram(&sent.raw, s.b2bua.addr).await.expect("the copy leaves");
+    s.h.advance(BEFORE_ANY_TIMER).await;
+    s.alice.drain().await;
+    s.bob.drain().await;
+
+    let answers = answers_since(&s.h, &s.alice, s.b2bua.addr, mark, "INFO");
+    assert_eq!(statuses(&answers), vec![200, 200], "the copy draws the cached 200");
+    let relayed = s.h.wire_entries().into_iter().skip(mark);
+    let relayed = relayed.filter(|e| e.to == s.bob.addr() && e.raw.starts_with(b"INFO "));
+    assert_eq!(relayed.count(), 1, "the copy never reached the call: bob is sent one INFO");
+
+    s.hangup(&mut dialog).await;
+    settle_until(|| s.b2bua.is_reaped()).await;
+    let _ = s.finish().await;
 }
