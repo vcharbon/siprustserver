@@ -420,11 +420,13 @@ export const bodyProbes = (
     .flatMap((recording, leg) => recording.map((message, at) => ({ leg, at, message })))
     .sort((a, b) => a.message.at_us - b.message.at_us || a.leg - b.leg || a.at - b.at)
   const flowAt = new Map([...steps.keys()].map((id, at) => [id, at]))
+  const ended = dialogEnds(wire)
   const walk = (origins: Ledger | undefined): ReadonlyMap<Bundle.RecordedMessage, ReadonlyArray<ProbeAt>> => {
     const found = new Map<Bundle.RecordedMessage, ReadonlyArray<ProbeAt>>()
     wire.forEach(({ leg, message }, replayedAt) => {
       const capturedAt = message.step === undefined ? Number.MAX_SAFE_INTEGER : flowAt.get(message.step) ?? Number.MAX_SAFE_INTEGER
-      found.set(message, messageBodyProbes(input, steps, message, media, origins?.at({ capturedAt, replayedAt, leg })))
+      const place = { capturedAt, replayedAt, leg, opens: scopeOf(message)?.kind === "initial-invite", legEndedAt: ended.get(leg) }
+      found.set(message, messageBodyProbes(input, steps, message, media, origins?.at(place)))
     })
     return found
   }
@@ -437,6 +439,35 @@ export const bodyProbes = (
     found = walk(undefined)
   }
   return legs.flatMap((recording) => recording.flatMap((message) => found.get(message) ?? []))
+}
+
+/**
+ * By leg, the wire position at which its dialog ended: the ACK to a non-2xx
+ * final of its dialog-opening INVITE (RFC 3261 §17.1.1.3), or a final to a
+ * BYE (§15.1.1), whichever came first, in either direction. A leg whose
+ * dialog never ended on the wire has no entry.
+ */
+const dialogEnds = (
+  wire: ReadonlyArray<{ readonly leg: number; readonly message: Bundle.RecordedMessage }>
+): ReadonlyMap<number, number> => {
+  const out = new Map<number, number>()
+  const opening = new Map<number, string>()
+  const refused = new Map<number, string>()
+  wire.forEach(({ leg, message }, at) => {
+    if (out.has(leg)) return
+    const start = startLineOf(headText(message))
+    if (start === undefined) return
+    const cseq = cseqOf(message)
+    if (start.kind === "request") {
+      if (scopeOf(message)?.kind === "initial-invite" && !opening.has(leg)) opening.set(leg, cseq.number)
+      if (start.method === "ACK" && refused.get(leg) === cseq.number) out.set(leg, at)
+      return
+    }
+    if (start.status < 200) return
+    if (cseq.method === "BYE") out.set(leg, at)
+    else if (cseq.method === "INVITE" && start.status >= 300 && opening.get(leg) === cseq.number) refused.set(leg, cseq.number)
+  })
+  return out
 }
 
 /** One reception's body probes; none where it answers no `expect` stating a body. */

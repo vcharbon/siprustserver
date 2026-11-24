@@ -15,7 +15,9 @@
  * and admits a pair only when both origins are minted, differ in the two
  * numbers alone, keep a one-to-one pairing of origin identities across the
  * cell (a session the capture keeps, the replay keeps, on whichever leg; a
- * session the capture changes, the replay changes), and step sess-version by
+ * session the capture changes, the replay changes; one offer the replay sends
+ * unchanged to sequential targets, each after the previous dialog ended, pairs
+ * anew on each), and step sess-version by
  * the same amount since that session's previous description, each side in its
  * OWN order: the capture's by the flow, the replay's by its wire (RFC 3264
  * §8). A session's first description opens in the same form on both sides
@@ -90,6 +92,33 @@ export interface Sighting {
   readonly replayedAt: number
   /** The leg that received it. */
   readonly leg: number
+  /** Whether it rides a dialog-opening INVITE; absent reads as not. */
+  readonly opens?: boolean
+  /** The wire position at which its leg's dialog ended (`bodyProbes`); absent where it never did. */
+  readonly legEndedAt?: number | undefined
+}
+
+/**
+ * The run of sightings an identity's pairing holds: its first sighting, and
+ * the leg every sighting of it rode, `undefined` once they spread over two.
+ */
+interface Episode {
+  readonly opener: number
+  readonly leg: number | undefined
+}
+
+/**
+ * Whether `next` reopens, on a new leg, the identity `episode` held: a
+ * sequential search's next target sent the very offer the previous one got.
+ * Both open their dialog with an INVITE carrying the same replayed
+ * description, and the previous episode stayed on one leg whose dialog ended
+ * before `next` arrived, so the two sessions never coexist (RFC 4566 §5.2).
+ */
+const reopens = (sightings: ReadonlyArray<Sighting>, episode: Episode, next: number): boolean => {
+  const opener = sightings[episode.opener]!
+  const s = sightings[next]!
+  return s.opens === true && opener.opens === true && episode.leg !== undefined && episode.leg !== s.leg &&
+    opener.legEndedAt !== undefined && opener.legEndedAt < s.replayedAt && opener.replayed === s.replayed
 }
 
 /** Each sighting's predecessor on its own side: the index of the same identity's previous one in `order`. */
@@ -114,7 +143,9 @@ const orderBy = (sightings: ReadonlyArray<Sighting>, key: (s: Sighting) => numbe
 /**
  * Whether each sighting's origins are a minted origin and its counterpart.
  * Every pair whose origins parse takes part in the pairing and the steps,
- * admitted or not, so a pair is held to every session the cell shows.
+ * admitted or not, so a pair is held to every session the cell shows. A
+ * replayed identity that {@link reopens} on a new leg pairs anew there, with
+ * a captured identity no pair holds yet, as a session's first description.
  */
 export const readOrigins = (sightings: ReadonlyArray<Sighting>, driven: Driven): ReadonlyArray<boolean> => {
   const left = sightings.map((s) => originOf(s.captured))
@@ -125,25 +156,38 @@ export const readOrigins = (sightings: ReadonlyArray<Sighting>, driven: Driven):
   const byReplay = orderBy(sightings, (s) => s.replayedAt)
   const beforeLeft = predecessors(leftId, orderBy(sightings, (s) => s.capturedAt))
   const beforeRight = predecessors(rightId, byReplay)
-  // The pairing is one-to-one over the cell; the replay's order says which
-  // pair a broken pairing is charged to.
+  // The pairing is one-to-one over each episode of a replayed identity; the
+  // replay's order says which pair a broken pairing is charged to.
   const paired: Array<boolean> = sightings.map(() => false)
+  const reopened = new Set<number>()
   const toReplayed = new Map<string, string>()
   const toCaptured = new Map<string, string>()
+  const episodes = new Map<string, Episode>()
   for (const at of byReplay) {
     const l = leftId[at]
     const r = rightId[at]
     if (l === undefined || r === undefined) continue
+    const episode = episodes.get(r)
+    const held = toCaptured.get(r)
+    if (episode !== undefined && held !== undefined && held !== l && !toReplayed.has(l) && reopens(sightings, episode, at)) {
+      toCaptured.set(r, l)
+      episodes.delete(r)
+      reopened.add(at)
+    }
     paired[at] = (toReplayed.get(l) ?? r) === r && (toCaptured.get(r) ?? l) === l
     if (!toReplayed.has(l)) toReplayed.set(l, r)
     if (!toCaptured.has(r)) toCaptured.set(r, l)
+    const current = episodes.get(r)
+    episodes.set(r, current === undefined
+      ? { opener: at, leg: sightings[at]!.leg }
+      : { opener: current.opener, leg: current.leg === sightings[at]!.leg ? current.leg : undefined })
   }
   return sightings.map((_, at) => {
     const a = left[at]
     const b = right[at]
     if (a === undefined || b === undefined) return false
     const pa = beforeLeft[at]
-    const pb = beforeRight[at]
+    const pb = reopened.has(at) ? undefined : beforeRight[at]
     const stepped = pa === undefined || pb === undefined
       ? pa === pb && (a.sessVersion === a.sessId) === (b.sessVersion === b.sessId)
       : a.sessVersion - left[pa]!.sessVersion === b.sessVersion - right[pb]!.sessVersion
@@ -258,11 +302,13 @@ export interface Reception {
   readonly read: (captured: string, replayed: string) => OriginReading
 }
 
-/** Where a reception sits in each side's own order, and the leg that received it. */
+/** Where a reception sits in each side's own order, the leg that received it, and that leg's end. */
 export interface Place {
   readonly capturedAt: number
   readonly replayedAt: number
   readonly leg: number
+  readonly opens: boolean
+  readonly legEndedAt: number | undefined
 }
 
 /**

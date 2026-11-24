@@ -319,3 +319,58 @@ describe("a relayed session whose sess-version the capture skips and ours steps 
     ])
   })
 })
+
+describe("one offer the endpoint sends to sequential targets", () => {
+  const LEGS = ["B", "C", "D"] as const
+  /**
+   * A serial search: the endpoint offers `replayed[i]` to leg `LEGS[i]`, the
+   * leg refuses it 486 and the endpoint ACKs, in turn; the capture's offers
+   * are `captured[i]`. Under `overlapping` every INVITE leaves before any
+   * leg refuses.
+   */
+  const search = (
+    captured: ReadonlyArray<string>,
+    replayed: ReadonlyArray<string>,
+    overlapping = false
+  ): ReadonlyArray<BodyProbe> => {
+    const legs = replayed.map((_, i) => LEGS[i]!)
+    const flowSearch = legs.flatMap((leg, i) => [
+      step(`s${i}i`, leg, "expect", { method: "INVITE", body: sdpBody(`resources/${leg}.sdp`) }, false),
+      step(`s${i}r`, leg, "send", { status: 486 }, false),
+      step(`s${i}a`, leg, "expect", { method: "ACK" }, false)
+    ])
+    const at = (i: number, k: number): number => (overlapping && k > 0 ? 100 : 0) + i * 10 + k + 1
+    const invite = (leg: string) => `INVITE sip:${leg.toLowerCase()}@example.invalid SIP/2.0`
+    return confront({
+      pivot: { ...pivot, flow: [...flowSearch] },
+      verdict,
+      recordings: new Map(legs.map((leg, i) => [leg, [
+        message(at(i, 0), "in", `s${i}i`, invite(leg), `${i + 1} INVITE`, false, replayed[i]!),
+        message(at(i, 1), "out", `s${i}r`, "SIP/2.0 486 Busy Here", `${i + 1} INVITE`, true, ""),
+        message(at(i, 2), "in", `s${i}a`, `ACK sip:${leg.toLowerCase()}@example.invalid SIP/2.0`, `${i + 1} ACK`, true, "")
+      ]] as const)),
+      resources: new Map(legs.map((leg, i) => [`resources/${leg}.sdp`, utf8.encode(captured[i]!)] as const)),
+      media: "verbatim"
+    }).probes.flatMap((p) => (p.probe.kind === "body" ? [p.probe] : []))
+  }
+  const minted = (probes: ReadonlyArray<BodyProbe>) =>
+    probes.filter((p) => p.sdp?.line === "o=").map((p) => [p.step, p.sdp?.mintedOrigin === true])
+
+  it("marks each target's offer minted where every earlier target's dialog ended before it", () => {
+    const offer = sdp(o(7, 7))
+    expect(minted(search([sdp(o(1000, 1000)), sdp(o(2000, 2000)), sdp(o(3000, 3000))], [offer, offer, offer])))
+      .toEqual([["s0i", true], ["s1i", true], ["s2i", true]])
+  })
+
+  it("keeps the second offer unmarked where the first target's dialog was still up", () => {
+    const offer = sdp(o(7, 7))
+    expect(minted(search([sdp(o(1000, 1000)), sdp(o(2000, 2000))], [offer, offer], true)))
+      .toEqual([["s0i", true], ["s1i", false]])
+  })
+
+  it("keeps the second offer unmarked where it differs from the first in any other line", () => {
+    const moved = sdp(o(7, 7)).replace("m=audio 6000", "m=audio 6002")
+    expect(minted(search([sdp(o(1000, 1000)), sdp(o(2000, 2000))], [sdp(o(7, 7)), moved])))
+      .toEqual([["s0i", true], ["s1i", false]])
+  })
+})
