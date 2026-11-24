@@ -28,7 +28,7 @@ pub fn reanchor_offset(skew_offset_ms: i64) -> i64 {
 
 /// Move every absolute instant `call` holds by `offset_ms` (the reading
 /// clock minus the writing clock): the timer ledger's deadlines, the creation
-/// time, each dialled INVITE's send time, each NOTIFY in flight's send time, each
+/// time, the caller's INVITE's receipt, each dialled INVITE's send time, each NOTIFY in flight's send time, each
 /// request record's deadline, each re-ACKed 2xx copy's arrival, each answered
 /// request's Timer J, each awaited REFER authorization's send time, the CDR
 /// events, the message rings, the decision log, the termination record and the
@@ -43,6 +43,7 @@ pub fn shift_instants(call: &mut Call, offset_ms: i64) {
         shift(&mut timer.fire_at);
     }
     shift(&mut call.created_at);
+    shift(&mut call.received_at);
     for event in &mut call.cdr_events {
         shift(&mut event.timestamp);
     }

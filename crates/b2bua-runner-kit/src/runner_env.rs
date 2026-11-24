@@ -140,7 +140,7 @@ pub struct RunnerEnv {
     /// trip (default 5000; <= 0 is refused at startup — ADR-0022 X1).
     pub call_control_timeout_ms: i64,
     /// `B2BUA_CALL_START_BOUND_MS` — how long after its INVITE's receipt a
-    /// new call's turn may start (default 2000; not above zero or not below
+    /// new call's turn may start (default 4000; not above zero or not below
     /// the setup budget is refused at startup — ADR-0070).
     pub call_start_bound_ms: i64,
     /// `B2BUA_ACK_TIMEOUT_SEC` — un-ACKed 2xx give-up deadline (RFC 3261

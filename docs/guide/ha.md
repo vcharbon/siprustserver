@@ -165,7 +165,10 @@ that triggers it. The most visible ones are:
   owner held a teardown, or the effects of a response or of a timer, that the backup never
   received;
 - a second attempt to the callee, when the routing decision died with the primary at sync
-  level `off`.
+  level `off`;
+- a 503 to the caller, when the routing decision died with the primary after the start bound
+  (`B2BUA_CALL_START_BOUND_MS`, counted from the receipt of the INVITE). The backup does not
+  ask the decision backend again (ADR-0070).
 
 Three results are never permitted, and each is a defect:
 

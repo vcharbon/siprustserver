@@ -10,7 +10,8 @@
 //! hears a call past its lifetime cap or at its overflow ceiling, and a
 //! discarded request is paid what it is owed ([`super::owed`]). A new INVITE's
 //! turn, a copy's included, carries the setup budget and the start bound from
-//! its own receipt, a re-ask's a fresh budget ([`SetupBudget`]).
+//! its own receipt, a re-ask's a fresh budget and the start bound from the
+//! receipt its record states ([`SetupBudget`]).
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -225,8 +226,8 @@ pub(super) async fn on_event(
     let budget = if class.is_new_call() {
         SetupBudget::from_receipt(opened_at.unwrap_or_else(Instant::now), length)
             .with_start_bound(ctx.config.call_start_bound())
-    } else if super::undecided::notice_of(&event).is_some() {
-        SetupBudget::from_receipt(Instant::now(), length)
+    } else if let Some(budget) = super::undecided::reask_budget(ctx, &event) {
+        budget
     } else {
         SetupBudget::NONE
     };

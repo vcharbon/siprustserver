@@ -165,10 +165,18 @@ The worker sends 100 Trying for a new call only when it starts the call (ADR-007
 - Before this point, the worker sends nothing. The caller retransmits its INVITE. The
   previous hop, for example the SBC, can then send the call to a different worker on its own
   timer.
-- A call that starts 2 s or more after the worker received its INVITE
+- A call that starts 4 s or more after the worker received its INVITE
   (`B2BUA_CALL_START_BOUND_MS`) gets 503, and the worker calls no callee. This applies to
-  emergency calls too. Set the start bound below the timer at which the SBC sends the call to
-  a different worker.
+  emergency calls too.
+- The same start bound applies when a backup takes over a call that did not get its routing
+  decision. The backup counts the start bound from the time at which the first worker received
+  the INVITE. Before the start bound, the backup asks the decision backend again and serves the
+  call. After it, the backup sends 503 and calls no callee: the backup does not know if the
+  caller got 100 Trying.
+- Set the start bound plus the sync cap (`B2BUA_REPL_SYNC_CAP_MS`) below the time for which the
+  previous hop retransmits an INVITE with no 100 Trying before it sends the call to a different
+  site. For an SBC that retransmits for at least 5 s, the default of 4 s gives a margin of
+  900 ms.
 
 A re-INVITE gets its 100 Trying 200 ms after the worker received it, at the latest.
 

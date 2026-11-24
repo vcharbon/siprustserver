@@ -291,6 +291,7 @@ pub fn representative_call() -> Call {
         ],
         state: CallModelState::Active,
         created_at: 1_779_440_042_000,
+        received_at: 1_779_440_041_950,
         trace_id: Some("0123456789abcdef0123456789abcdef".into()),
         root_span_id: Some("fedcba9876543210".into()),
         sampled: Some(true),
@@ -637,6 +638,7 @@ pub fn arb_call() -> impl Strategy<Value = Call> {
             Just(CallModelState::Terminated),
         ],
         any::<i64>(),
+        any::<i64>(),
     );
     let trace = (
         proptest::option::of("[0-9a-f]{32}"),
@@ -692,7 +694,7 @@ pub fn arb_call() -> impl Strategy<Value = Call> {
         |(
             (call_ref, a_leg, b_legs, active_peer, callback_context, billing_context, a_leg_invite),
             (limiter, timers, cdr_events, attempts),
-            (state, created_at),
+            (state, created_at, received_at),
             (trace_id, root_span_id, sampled, worker_index),
             (
                 emergency,
@@ -722,6 +724,7 @@ pub fn arb_call() -> impl Strategy<Value = Call> {
             cdr_events,
             state,
             created_at,
+            received_at,
             trace_id,
             root_span_id,
             sampled,

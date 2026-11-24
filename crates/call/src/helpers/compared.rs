@@ -46,6 +46,7 @@ pub fn same_state(a: &Call, b: &Call) -> bool {
         cdr_events: _,
         state,
         created_at,
+        received_at,
         trace_id: _,
         root_span_id: _,
         sampled: _,
@@ -92,6 +93,7 @@ pub fn same_state(a: &Call, b: &Call) -> bool {
             .eq(b.timers.iter().filter(|t| !exempt_timer(t)))
         && *state == b.state
         && *created_at == b.created_at
+        && *received_at == b.received_at
         && *worker_index == b.worker_index
         && *emergency == b.emergency
         && *features == b.features

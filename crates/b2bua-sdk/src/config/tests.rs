@@ -246,7 +246,7 @@ fn nonpositive_call_control_timeout_is_rejected() {
 
 #[test]
 fn a_start_bound_not_inside_the_setup_budget_is_rejected() {
-    assert_eq!(B2buaConfig::default().call_start_bound_ms, 2_000);
+    assert_eq!(B2buaConfig::default().call_start_bound_ms, 4_000);
     for bad in [0, -1, 5_000, 6_000] {
         let c = B2buaConfig { call_start_bound_ms: bad, ..Default::default() };
         let e = c.validate().expect_err("a start bound outside the setup budget is rejected");

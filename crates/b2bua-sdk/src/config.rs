@@ -295,7 +295,7 @@ pub struct B2buaConfig {
     /// nothing and answers the bare 503 of a refused new call, emergency
     /// included (ADR-0070). Its caller has heard no 100, so the previous hop
     /// may have failed the call over already; it sits under that hop's
-    /// failover timer. Default **2000**; [`validate`](Self::validate) refuses a
+    /// failover timer. Default **4000**; [`validate`](Self::validate) refuses a
     /// value not above zero or not below the setup budget
     /// ([`call_control_timeout_ms`](Self::call_control_timeout_ms)).
     /// Overridable via `B2BUA_CALL_START_BOUND_MS`.

@@ -6,8 +6,9 @@
 //! (RFC 3261 §17.1.1.2), so when it runs out she gets the bare 503 of an
 //! unavailable decision. A new call's budget also holds its start bound
 //! (ADR-0070): the turn's wait for its permits ends there, and a turn that
-//! starts past it creates no call. A value is `Copy`: every await of one turn
-//! reads the same deadline.
+//! starts past it creates no call. A re-asked call's budget runs from the
+//! re-ask, its start bound from the receipt its record states. A value is
+//! `Copy`: every await of one turn reads the same deadline.
 
 use std::future::Future;
 use std::time::Duration;
@@ -41,6 +42,20 @@ impl SetupBudget {
     pub fn with_start_bound(self, bound: Duration) -> Self {
         let start_by = self.received.map(|received| sip_clock::deadline::after(received, bound));
         Self { start_by, ..self }
+    }
+
+    /// This budget, its turn held to start within `bound` of an INVITE
+    /// received `ago` before now: a receipt read from a record, not this
+    /// budget's own.
+    pub fn with_start_bound_since(self, ago: Duration, bound: Duration) -> Self {
+        let start_by = sip_clock::deadline::from_now(bound.saturating_sub(ago));
+        Self { start_by: Some(start_by), ..self }
+    }
+
+    /// Its receipt as epoch ms on `clock`; `None` for [`NONE`](Self::NONE).
+    pub fn received_ms(&self, clock: &sip_clock::Clock) -> Option<i64> {
+        let ago = self.elapsed()?;
+        Some(clock.now_ms().saturating_sub(sip_clock::wall::millis_i64(ago)))
     }
 
     /// The instant it runs out, when it does.
@@ -148,5 +163,26 @@ mod tests {
         assert!(bounded.started_late(), "late at the instant it is due");
         assert!(!budget.started_late(), "no start bound, never late");
         assert!(!bounded.spent());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_start_bound_since_an_earlier_receipt_keeps_its_own_budget() {
+        let now = Instant::now();
+        let budget = SetupBudget::from_receipt(now, 100 * MS);
+        let inside = budget.with_start_bound_since(30 * MS, 40 * MS);
+        assert_eq!(inside.wait_due(), Some(now + 10 * MS), "40 ms from a receipt 30 ms ago");
+        assert_eq!(inside.due(), Some(now + 100 * MS), "the budget runs from its own receipt");
+        assert!(!inside.started_late());
+        let past = budget.with_start_bound_since(50 * MS, 40 * MS);
+        assert!(past.started_late(), "a receipt older than the bound is late at once");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn its_receipt_reads_on_the_clock_it_elapsed_on() {
+        let clock = sip_clock::Clock::test_at(1_000_000);
+        let budget = SetupBudget::from_receipt(Instant::now(), 100 * MS);
+        tokio::time::advance(70 * MS).await;
+        assert_eq!(budget.received_ms(&clock), Some(1_000_000));
+        assert_eq!(SetupBudget::NONE.received_ms(&clock), None);
     }
 }

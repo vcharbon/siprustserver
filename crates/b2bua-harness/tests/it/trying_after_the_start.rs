@@ -39,13 +39,13 @@ const MARGIN: Duration = Duration::from_millis(20);
 const START_BOUND: Duration =
     Duration::from_millis(B2buaConfig::DEFAULT_CALL_START_BOUND_MS.unsigned_abs());
 /// How long the router stays wedged, from the INVITE's send, for a turn that
-/// starts well inside the start bound: past the layer's 200 ms and the first
-/// retransmission.
-const WEDGED_INSIDE: Duration = Duration::from_millis(1_200);
+/// starts inside the start bound: past the layer's 200 ms and two
+/// retransmissions.
+const WEDGED_INSIDE: Duration = Duration::from_millis(3_000);
 /// How long the router stays wedged, from the INVITE's send, for a turn that
-/// starts well past the start bound, and well inside the 5 s setup budget:
-/// past two retransmissions.
-const WEDGED_PAST: Duration = Duration::from_millis(2_500);
+/// starts past the start bound, and inside the 5 s setup budget: past three
+/// retransmissions.
+const WEDGED_PAST: Duration = Duration::from_millis(4_500);
 /// A wedge less the INVITE's transit to the node is how long its turn waits
 /// after the receipt: inside the start bound for one, past it for the other.
 const _: () = assert!(WEDGED_INSIDE.as_millis() < START_BOUND.as_millis() + TRANSIT.as_millis());

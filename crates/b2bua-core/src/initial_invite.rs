@@ -32,7 +32,9 @@ use crate::rules::relay;
 use b2bua_sdk::event::CallEvent;
 
 /// Build the initial [`Call`] (a-leg only) from an inbound INVITE, its
-/// incarnation mark and its caller-facing tag seed drawn from `ids`. Pure.
+/// incarnation mark and its caller-facing tag seed drawn from `ids`, created
+/// and received at `now_ms`; a turn that holds the INVITE's earlier receipt
+/// states it in [`Call::received_at`]. Pure.
 pub fn build_initial_call(
     invite: &SipRequest,
     src: SocketAddr,
@@ -115,6 +117,7 @@ pub fn build_initial_call(
         }],
         state: CallModelState::Active,
         created_at: now_ms,
+        received_at: now_ms,
         trace_id: None,
         root_span_id: None,
         sampled: None,

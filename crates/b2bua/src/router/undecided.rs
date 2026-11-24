@@ -5,7 +5,11 @@
 //! call asks the decision again (ADR-0047 D4) on a turn of the call's own, so
 //! the sweep does not wait on its round trip: the initial consult runs on the
 //! materialised call, its caller's INVITE rebuilt from the record, and answers
-//! her through the INVITE server transaction the materialisation seeded. The
+//! her through the INVITE server transaction the materialisation seeded. A
+//! re-ask that starts past the start bound, counted from the INVITE's receipt
+//! the record states, asks nothing and refuses her the bare 503 (ADR-0070):
+//! the node cannot tell whether her 100 left, and a caller that heard none
+//! may have been failed over already. The
 //! route's admit is numbered above every change the call reserved before, the
 //! counter having moved to its next epoch on the restore, so the limiter
 //! checks it net of what the key holds and counts the call once. A call whose
@@ -21,8 +25,10 @@
 //! per-call cap fails as the initial INVITE's turn does (ADR-0057 §4).
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use call::{Call, CallModelState};
+use tokio::time::Instant;
 
 use super::cancel_in_consult::consult_writing_its_cancel;
 use super::commit::commit_turn;
@@ -107,13 +113,13 @@ pub(super) async fn settle_undecided(
     off_wire::end(ctx, call_ref, ending, caller, now_ms, label).await;
 }
 
-/// The re-ask notice of `call`.
+/// The re-ask notice of `call`, carrying its INVITE's receipt.
 fn notice(call: &Call) -> CallEvent {
     CallEvent::InternalEvent {
         call_ref: call.call_ref.clone(),
         topic: TOPIC.to_string(),
         outcome: String::new(),
-        payload: serde_json::Value::Null,
+        payload: serde_json::Value::from(call.received_at),
         body: Vec::new(),
         incarnation: Some(call.incarnation().to_string()),
     }
@@ -127,10 +133,27 @@ pub(super) fn notice_of(event: &CallEvent) -> Option<&str> {
     }
 }
 
+/// The setup budget of the re-ask `event` names, `None` for any other event:
+/// a budget of its own from now (ADR-0047 D4), its start bound counted from
+/// the INVITE's receipt the call's record states (ADR-0070), so a re-ask
+/// whose caller may have heard no 100 for longer than the bound dials no one.
+pub(super) fn reask_budget(ctx: &RouterCtx, event: &CallEvent) -> Option<SetupBudget> {
+    let CallEvent::InternalEvent { topic, payload, .. } = event else { return None };
+    if topic != TOPIC {
+        return None;
+    }
+    let received_at = payload.as_i64().unwrap_or(i64::MIN);
+    let ago = ctx.clock.now_ms().saturating_sub(received_at).max(0);
+    let ago = Duration::from_millis(ago.unsigned_abs());
+    let budget = SetupBudget::from_receipt(Instant::now(), ctx.config.call_control_timeout());
+    Some(budget.with_start_bound_since(ago, ctx.config.call_start_bound()))
+}
+
 /// The re-ask turn of `call_ref`, under its per-call lock: the resident call,
 /// still undecided, is consulted as its initial INVITE's turn consults, under
 /// the fresh `budget` its notice started, and the turn lands as that one does;
-/// the budget spent before the turn ran, its caller is refused unasked, and an
+/// past its start bound or the budget spent before the turn ran, its caller is
+/// refused unasked with the bare 503 and no one is dialled, and an
 /// INVITE refused on sight ([`crate::initial_invite::refused_on_sight`]) is
 /// refused as its first owner refuses it, whose death between the call's
 /// creation write and that refusal's left it undecided. A call
@@ -157,7 +180,7 @@ pub(super) async fn reask_turn(ctx: &Arc<RouterCtx>, call_ref: &str, budget: Set
     let owners = crate::store::envelope::owners(&ctx.relay_owner, topology.as_ref());
     // The INVITE as it arrived is in no record: a trace backfills its image.
     let wire = caller.image().to_vec();
-    let refused = budget.spent();
+    let refused = budget.started_late() || budget.spent();
     let advertisement = &ctx.config.minted_final_advertisement;
     let on_sight = || {
         crate::initial_invite::refused_on_sight(&call, &caller, advertisement, now_ms).map(Box::new)

@@ -138,6 +138,7 @@ pub(super) async fn initial_invite_turn(
     }
 
     let mut call = build_initial_call(req, src, &ctx.config, &mut turn.ids, now_ms);
+    call.received_at = budget.received_ms(&ctx.clock).map_or(now_ms, |at| at.min(now_ms));
     // A call is born only with a record that rebuilds its caller's INVITE
     // (ADR-0052 §11): an INVITE whose record does not is refused from the
     // INVITE itself.

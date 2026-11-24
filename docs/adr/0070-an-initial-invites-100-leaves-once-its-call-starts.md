@@ -4,9 +4,9 @@
 
 **Owner:** the switch and the arming in `crates/sip-txn/src/layer/trying.rs`, the anchor and
 the start bound in `crates/b2bua/src/router/initial_turn.rs`, the bound's reading in
-`crates/b2bua/src/setup_budget.rs`.
+`crates/b2bua/src/setup_budget.rs`, the re-ask's in `crates/b2bua/src/router/undecided.rs`.
 
-Amends ADR-0022 (context, X1) and ADR-0047 (context, D3).
+Amends ADR-0022 (context, X1) and ADR-0047 (context, D3, D4).
 
 ## Context
 
@@ -33,20 +33,30 @@ that the hop's own timer (Timer B, or an SBC's reroute timer) sends the call els
    the rider's release (the backup applied the write, the sync cap passed, or at once with no
    backup) and 200 ms after the arming. A backup that never answers, an outbox that does not
    drain and an unbacked call each still get their 100.
-3. **The start bound.** A new call whose turn starts `B2BUA_CALL_START_BOUND_MS` (2000) or
+3. **The start bound.** A new call whose turn starts `B2BUA_CALL_START_BOUND_MS` (4000) or
    more after its INVITE's receipt creates no call, asks nothing and answers the bare 503 of an
    unavailable decision (ADR-0022 X3), with no 100 before it: its call is born only to write its
    record and CDR (ADR-0050 §9), counted `start_bound` on `b2bua_new_calls_total`. An
    emergency INVITE is held to it too: the hop has failed it over, or does on the 503, and
    proceeding would ring the PSAP twice. The order is: cancelled, cordoned, the start bound,
    the setup budget. A turn waiting for its permits stops waiting at its start bound.
-4. **Bounds.** The start bound is positive and below the setup budget
+4. **The re-ask.** A call taken over before its first decision (ADR-0047 D4) is held to the
+   same start bound, counted from the INVITE's receipt its record states (`Call::received_at`),
+   never from the takeover. The node asking again cannot tell whether the caller heard a 100.
+   Inside the bound, it asks the decision again with a budget of its own and serves the call.
+   Past it, it asks nothing, answers the bare 503 through the transaction the takeover seeded,
+   and dials no one: a caller that heard no 100 may have been failed over already, and a dial
+   would ring the callee twice.
+5. **Bounds.** The start bound is positive and below the setup budget
    (`B2BUA_CALL_CONTROL_TIMEOUT_MS`); with replication, start bound + sync cap is below the
-   setup budget. Both are refused at startup. The value must sit under the previous hop's
-   no-100 reroute timer: a 100 that reaches the hop after it gave up draws its CANCEL (§9.1).
-   The default is 2 s: under any plausible such timer, and four times the worst 100 delay
-   measured on a worker at three times its capacity (502 ms).
-5. **The sync cap** keeps its bounds, below T1 and below the §17.2.1 bound: a re-INVITE's 100
+   setup budget. Both are refused at startup. Start bound + sync cap must sit under the time
+   the previous hop retransmits an INVITE with no 100 before it fails the call over: a 100
+   that reaches the hop after it gave up draws its CANCEL (§9.1). The default is 4 s, for a
+   hop that retransmits for at least 5 s: 900 ms under it with the 100 ms sync cap, eight
+   times the worst 100 delay measured on a worker at three times its capacity (502 ms), and
+   above the proxy's dead verdict (2.6 to 3.6 s), so a call taken over can still be asked
+   again.
+6. **The sync cap** keeps its bounds, below T1 and below the §17.2.1 bound: a re-INVITE's 100
    is still released behind its write, and the ACK and CANCEL bounds stay on that bound.
 
 ## RFC 3261

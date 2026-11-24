@@ -11,6 +11,8 @@ Decision part: [ADR-0047](../0047-a-departed-peers-in-flight-invite-calls-are-ta
   stand-down read containment, the lifecycle order its gates read ranking only the base
   of a diverged call's end (ADR-0055 §7).
 - ADR-0022 X1 gives D4's re-ask a setup budget of its own.
+- ADR-0070 has the caller's 100 leave behind the creation write or after the decision is
+  asked (D3), and holds D4's re-ask to the start bound counted from the INVITE's receipt.
 - ADR-0050 §3 makes a proxy's dead verdict a second trigger (D1); the sweep's takeover
   half runs on either trigger, its discharge half and the refusal of an undecided call on
   a departure only (D2); it adds the residual of a death the peers are not told of.
@@ -204,7 +206,10 @@ unanswered, no decision applied, no attempt, no leg dialled — has that decisio
 again on a turn of the call's own (user ruling): the initial consult runs on the
 materialised call, its caller's INVITE rebuilt from the record, and the caller is
 answered through the INVITE server transaction the materialisation seeded. The
-re-ask has a setup budget of its own from its notice (ADR-0022 X1). The
+re-ask has a setup budget of its own from its notice (ADR-0022 X1), and a start bound
+counted from the INVITE's receipt the record states (`Call::received_at`, ADR-0070): a
+re-ask that starts past it asks nothing and refuses the caller the bare 503, as the node
+cannot tell whether her 100 left. The
 backend may be asked twice and the callee dialled twice; the backend is stateless
 (ADR-0055 §1). One owner acts on the answer (D7): a takeover copy whose primary wrote
 the call since the copy was made — a returning primary's reclaim, which asks the

@@ -1,7 +1,7 @@
 # A departed peer's in-flight INVITE calls are taken over
 
 **Status:** accepted. Amended by ADR-0022 X1 (D4), ADR-0039 decision 5 (D2), ADR-0050 §3
-(D1, D2) and ADR-0055 §3–§7 (D2, D5, D7); the [amendment record](appendix/0047-a-departed-peers-in-flight-invite-calls-are-taken-over.md#amendment-record)
+(D1, D2), ADR-0055 §3–§7 (D2, D5, D7) and ADR-0070 (D3, D4); the [amendment record](appendix/0047-a-departed-peers-in-flight-invite-calls-are-taken-over.md#amendment-record)
 lists each change.
 **Amends:** ADR-0014 D1 (takeover is reactive only), ADR-0022 X4 and X5, ADR-0031's case
 table and its D3 split rule (the lifecycle order the forward and reverse gates read),
@@ -62,8 +62,10 @@ decision is asked (ADR-0070).
 
 A call still waiting on its first routing decision, materialised by the sweep, a confirmed
 verdict or its own node's reclaim, has the decision asked again on its own turn, with a setup
-budget of its own (ADR-0022 X1). The caller is answered through the seeded INVITE server
-transaction. The backend may be asked twice and the callee dialled twice. A copy its primary
+budget of its own (ADR-0022 X1), held to the start bound counted from the INVITE's receipt:
+past it, the caller gets the bare 503 and nothing is asked (ADR-0070). The caller is answered
+through the seeded INVITE server transaction. The backend may be asked twice and the callee
+dialled twice. A copy its primary
 wrote since asks nothing and applies no later answer (D7). A call whose caller cancelled
 during the consult ends under her cancel.
 [Detail](appendix/0047-a-departed-peers-in-flight-invite-calls-are-taken-over.md#d4-an-undecided-call-materialised-with-no-message-has-its-decision-asked-again).

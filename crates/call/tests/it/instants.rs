@@ -126,6 +126,7 @@ fn every_instant_moves_by_the_offset_and_nothing_else_moves() {
     for kind in [
         "fire_at",
         "created_at",
+        "received_at",
         "timestamp",
         "decision_log",
         "termination",
