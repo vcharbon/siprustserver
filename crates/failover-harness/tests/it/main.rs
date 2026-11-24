@@ -86,6 +86,7 @@ mod one_backup_on_every_leg;
 mod outbound_invite_after_the_departure;
 mod prack_repeat_takeover;
 mod prack_takeover;
+mod primary_dies_before_the_calls_turn;
 mod probe_lost_with_the_primary;
 mod probe_wildcard_sent_by;
 mod promoted_answer_takeover;
