@@ -53,8 +53,8 @@ The rule covers:
 - the refusals replayed by the node's and the proxy's memos, the proxy's preflight rejects
   included.
 
-A request that names no call, a stray CANCEL included, is outside this rule: it is answered as a
-stateless UAS answers it (RFC 3261 §8.2.7). The rule needs state per trigger, and each copy draws
+A request naming no call, a stray CANCEL included, is outside this rule and answered as a
+stateless UAS answers it (RFC 3261 §8.2.7): the rule needs state per trigger, and each copy draws
 one answer, never re-sent. An Accepted INVITE
 absorbs copies (RFC 6026 §7.1), except on a seeded transaction whose 2xx has not yet left. A
 compliant client spaces its retransmissions at least T1 apart, so it is always served. The

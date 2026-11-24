@@ -78,8 +78,6 @@ pub(super) fn txn_config(
             NewCallGate::new(switch.clone(), crate::admission::class_of)
                 .refusing_at_age(config.event_queue_gate.refuse_at_age()),
         ),
-        // The OPTIONS health answer derives its To-tag from the request
-        // (`RouterCtx::stateless_tagger`).
         stateless_options: true,
         // The router takes a probe ahead of the queued events (ADR-0050 §2).
         keepalive_lane: Some(KEEPALIVE_LANE),
