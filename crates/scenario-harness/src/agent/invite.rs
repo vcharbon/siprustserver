@@ -52,6 +52,9 @@ pub struct Invite<'a> {
     from_uri: Option<String>,
     to_uri: Option<String>,
     request_uri: Option<String>,
+    /// The From and To display names, raw text the writer quotes.
+    from_display: Option<String>,
+    to_display: Option<String>,
     /// The hop count this INVITE states; `None` states the RFC 3261 §8.1.1.6
     /// default. A test drives it to reach a receiver's §16.6 hop gate.
     max_forwards: Option<u32>,
@@ -90,6 +93,8 @@ impl<'a> Invite<'a> {
             from_uri: None,
             to_uri: None,
             request_uri: None,
+            from_display: None,
+            to_display: None,
             max_forwards: None,
             delayed_automatic: None,
             wire_edit: None,
@@ -152,7 +157,7 @@ impl<'a> Invite<'a> {
         self.extra_headers.extend(frozen);
         self.template_body = Some(tmpl.body().to_vec());
         // Compact wire name-forms for the stack-regenerated headers (Via/From/…).
-        self.name_forms = tmpl.regenerated_name_forms();
+        self.name_forms.extend(tmpl.regenerated_name_forms());
         // Remote-target (Contact) captured user + params over the bound host:port.
         self.remote_emits = tmpl.remote_target_emits();
         self
@@ -184,6 +189,30 @@ impl<'a> Invite<'a> {
     /// INVITE is still *sent* to the peer/`through` wire destination.
     pub fn ruri(mut self, uri: impl Into<String>) -> Self {
         self.request_uri = Some(uri.into());
+        self
+    }
+
+    /// State `display` as the From display name, over any the From URI text
+    /// carries. Raw text: the writer quotes it and escapes `"`, `\` and
+    /// controls (RFC 3261 §25.1).
+    pub fn from_display(mut self, display: impl Into<String>) -> Self {
+        self.from_display = Some(display.into());
+        self
+    }
+
+    /// State `display` as the To display name, as
+    /// [`from_display`](Self::from_display) does for From.
+    pub fn to_display(mut self, display: impl Into<String>) -> Self {
+        self.to_display = Some(display.into());
+        self
+    }
+
+    /// Spell each header named `canonical` as `wire` on the datagram; of two
+    /// forms naming one header, the first added wins, a
+    /// [`template`](Self::template)'s included. The transaction keeps the
+    /// canonical spelling its ACK and CANCEL are built from.
+    pub fn with_name_forms(mut self, forms: &[(String, String)]) -> Self {
+        self.name_forms.extend_from_slice(forms);
         self
     }
 
@@ -271,8 +300,14 @@ impl<'a> Invite<'a> {
         let opts = GenerateOutOfDialogRequestOpts {
             request_uri: Some(uri_of(&request_uri)),
             call_id: call_id.clone(),
-            from: Some(from_of(&from_uri, &from_tag)),
-            to: Some(to_of(&to_uri)),
+            from: Some(match self.from_display.as_deref() {
+                Some(display) => from_of(&from_uri, &from_tag).with_display(display),
+                None => from_of(&from_uri, &from_tag),
+            }),
+            to: Some(match self.to_display.as_deref() {
+                Some(display) => to_of(&to_uri).with_display(display),
+                None => to_of(&to_uri),
+            }),
             cseq: self.cseq.unwrap_or(Party::Caller.first_cseq()),
             via: Some(caller.via()),
             contact: Some(match &self.contact {

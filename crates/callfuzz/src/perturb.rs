@@ -8,6 +8,7 @@ use callshapes::plan::TRANSIT;
 use scenario_harness::actor::{ActorCall, Barrier, Goal, GoalStep, LegPhase};
 use scenario_harness::realcall::InvitePlan;
 use sip_message::generators::InDialogMethod;
+use sip_message::header::HeaderName;
 
 use crate::{payload, FuzzConfig, Rng};
 
@@ -15,7 +16,7 @@ use crate::{payload, FuzzConfig, Rng};
 const MAX_INFOS: u64 = 2;
 
 /// The bytes one header takes on the wire: name, `": "` and CRLF.
-fn header_bytes(name: &str, value: &str) -> usize {
+pub(crate) fn header_bytes(name: &str, value: &str) -> usize {
     name.len() + value.len() + 4
 }
 
@@ -23,7 +24,8 @@ fn header_bytes(name: &str, value: &str) -> usize {
 /// `config.jitter_pct` percent, some goal delays grow by a drawn span; with
 /// `config.payload_pct` percent, every INVITE gains up to four hostile headers
 /// (one per name, compact forms counted as their long name, inside
-/// `config.header_budget`) and up to two parties
+/// `config.header_budget`), an initial INVITE the draws of its identity fields
+/// ([`crate::identity`]), and up to two parties
 /// send an INFO with an odd body once both they and the caller are confirmed,
 /// before their BYE; with `config.offer_pct` percent, the offer mode and the
 /// framings ([`crate::media`]); with `config.hold_pct` percent, a held ACK,
@@ -37,6 +39,7 @@ pub fn perturb(rng: &mut Rng, call: &mut ActorCall, config: &FuzzConfig, notes: 
         for g in call.actors.iter_mut().flat_map(|a| a.goals.iter_mut()) {
             if let GoalStep::Invite { plan: Some(plan), .. } = &mut g.step {
                 hostile_headers(rng, plan, config, notes);
+                crate::identity::draw(rng, plan, config, notes);
             }
         }
         for _ in 0..rng.below(MAX_INFOS + 1) {
@@ -61,12 +64,11 @@ fn jitter(rng: &mut Rng, call: &mut ActorCall, notes: &mut Vec<String>) {
     notes.push(format!("jitter<{span_ms}ms"));
 }
 
-/// The header name a compact form stands for (RFC 3261 §7.3.3), lowercased.
-fn canonical(name: &str) -> String {
-    match name.to_ascii_lowercase().as_str() {
-        "s" => "subject".to_string(),
-        other => other.to_string(),
-    }
+/// Whether `plan` holds a header `name` names, in any casing or compact form
+/// (RFC 3261 §7.3.3).
+pub(crate) fn holds(plan: &InvitePlan, name: &str) -> bool {
+    let name = HeaderName::from(name);
+    plan.headers.iter().any(|(h, _)| name.matches(h))
 }
 
 /// Up to four drawn headers on `plan`, none repeating a name it holds.
@@ -77,8 +79,8 @@ fn hostile_headers(
     notes: &mut Vec<String>,
 ) {
     for _ in 0..1 + rng.below(4) {
-        let (name, value, label) = payload::header(rng);
-        if plan.headers.iter().any(|(h, _)| canonical(h) == canonical(&name)) {
+        let (name, value, label) = payload::header(rng, config.all_chars);
+        if holds(plan, &name) {
             continue;
         }
         let used: usize = plan.headers.iter().map(|(h, v)| header_bytes(h, v)).sum();
@@ -109,7 +111,7 @@ fn odd_info(rng: &mut Rng, call: &mut ActorCall, config: &FuzzConfig, notes: &mu
     let (content_type, body, label) = payload::body(rng, config.illegal);
     let mut headers = Vec::new();
     if rng.chance(50) {
-        let (name, value, l) = payload::header(rng);
+        let (name, value, l) = payload::header(rng, config.all_chars);
         headers.push((name, value));
         notes.push(format!("info-hdr:{l}"));
     }

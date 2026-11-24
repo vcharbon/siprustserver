@@ -166,6 +166,7 @@ async fn request_template_early_update_rides_early_dialog() {
         call_id: None,
         headers: vec![("Supported".to_string(), "100rel".to_string())],
         rewrite: Default::default(),
+        presentation: Default::default(),
     };
     let update_tmpl = MessageTemplate::request(
         Method::Update,

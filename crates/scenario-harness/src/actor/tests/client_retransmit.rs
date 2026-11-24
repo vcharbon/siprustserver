@@ -52,6 +52,7 @@ async fn a_prack_left_unanswered_is_retransmitted_until_its_final() {
         call_id: None,
         headers: vec![("Supported".into(), "100rel".into())],
         rewrite: Default::default(),
+        presentation: Default::default(),
     };
     let call = CallPlan {
         actors: vec![ActorSpec {

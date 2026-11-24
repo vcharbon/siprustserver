@@ -20,6 +20,7 @@ fn caller(alice: &Agent, bob: &Agent, bye: bool) -> ActorSpec {
         call_id: None,
         headers: vec![("Supported".to_string(), "100rel".to_string())],
         rewrite: Default::default(),
+        presentation: Default::default(),
     };
     let mut goals =
         vec![Goal::new(Barrier::None, GoalStep::Invite { callee: "bob", plan: Some(plan) })];

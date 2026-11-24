@@ -14,12 +14,14 @@ pub mod auth;
 mod ctx;
 mod env;
 mod lost;
+mod presentation;
 mod scope;
 
 pub use auth::{Challenge, ChallengeResponder};
 pub use ctx::CallCtx;
 pub use env::{CallEnv, CoreIdentity, CorrelationStamp, InvitePlan};
 pub use lost::{LossNotes, LostMessage};
+pub use presentation::{quoted_len, Presentation};
 pub use scope::CallScope;
 
 /// Stable scenario name — the Prometheus `scenario` label and report dir name.

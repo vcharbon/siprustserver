@@ -191,6 +191,7 @@ async fn early_update_on_the_reliable_early_dialog() {
         call_id: None,
         headers: vec![("Supported".to_string(), "100rel".to_string())],
         rewrite: Default::default(),
+        presentation: Default::default(),
     };
     let alice_confirmed =
         Barrier::pred("confirmed", |s| s.leg_at_least("alice", LegPhase::Confirmed));

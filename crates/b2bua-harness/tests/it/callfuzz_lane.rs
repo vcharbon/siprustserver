@@ -10,7 +10,8 @@
 //! The fuzzer is random and runs only when asked: with `CALLFUZZ_CALLS`
 //! unset the test returns at once. `CALLFUZZ_SEED` is the run seed (default
 //! 1); `CALLFUZZ_FROM` the first call's index (default 0), so a campaign runs
-//! as batches under the test timeout; `CALLFUZZ_CALL_SEED` replays one call.
+//! as batches under the test timeout; `CALLFUZZ_CALL_SEED` replays one call;
+//! `CALLFUZZ_ALL_CHARS=1` draws the all-chars values (`FuzzConfig::all_chars`).
 //! A failure names each failing call's seed and draw.
 //!
 //! `CALLFUZZ_DROP` and `CALLFUZZ_LATE` (percent of datagrams, default 0) put
@@ -148,6 +149,7 @@ async fn fuzzed_calls_through_the_b2bua() {
         run_seed: knob("CALLFUZZ_SEED").unwrap_or(1),
         call_seed: knob("CALLFUZZ_CALL_SEED"),
         train: true,
+        all_chars: knob("CALLFUZZ_ALL_CHARS") == Some(1),
         ..FuzzConfig::default()
     };
     let calls = if config.call_seed.is_some() { 1 } else { calls };

@@ -104,7 +104,9 @@ a per-call SLA gate (population gating stays with result classes + metrics).
 **Fuzz wrapper** (`callfuzz::FuzzWrap`):
 Any load body run under a fuzz policy (`fz_<id>`): its call built as usual,
 then held callees, an injected CANCEL, provisional trains and the RFC-legal
-perturbation drawn from the call's seed (`callfuzz::call_seed`: the run seed
+perturbation (hostile headers, drawn identity fields and header name
+spellings, every character of a grammar slot when `all_chars` is on) drawn
+from the call's seed (`callfuzz::call_seed`: the run seed
 hashed with the call's token, or the one seed replayed, stamped into the
 Call-ID as `fz-<16 hex>-…` so a call-outcome record names its draw). A call
 that drew a CANCEL accepts the CANCEL races the policy states; any other

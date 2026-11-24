@@ -49,6 +49,7 @@ async fn a_lost_reliable_183_is_retransmitted_and_the_call_goes_on() {
         call_id: None,
         headers: vec![("Supported".to_string(), "100rel".to_string())],
         rewrite: Default::default(),
+        presentation: Default::default(),
     };
     let caller = caller_spec(
         "alice",

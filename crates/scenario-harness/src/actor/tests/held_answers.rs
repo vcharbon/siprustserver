@@ -153,6 +153,7 @@ async fn a_held_prack_is_sent_before_the_final_it_would_overtake() {
         call_id: None,
         headers: vec![("Supported".into(), "100rel".into())],
         rewrite: Default::default(),
+        presentation: Default::default(),
     };
     let goals = vec![
         Goal::new(Barrier::None, GoalStep::Invite { callee: "bob", plan: Some(plan) }),

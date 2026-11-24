@@ -436,15 +436,15 @@ pub(super) async fn react_until_done(st: &mut ActorState<'_>) -> Result<(), Step
             // inline-pull hazard). Every consumable appears via this actor's
             // own loop body, so the gate is re-evaluated on each iteration.
             ready = st.goals.next_ready(&obs, step_timeout, |s| s.caller_ended_cleanly() && s.leg_idle_or_ended(role)), if st.goals.has_pending() && goal_arm_enabled(st) => {
-                if let Some(step) = ready? {
-                    if matches!(step, GoalStep::Invite { .. } | GoalStep::InviteTemplate { .. }) {
+                if let Some(step) = ready?.map(Box::new) {
+                    if matches!(*step, GoalStep::Invite { .. } | GoalStep::InviteTemplate { .. }) {
                         st.invite_goal = st.goals.pending();
                     }
                     // A final already delivered is handled before the CANCEL (RFC 3261 §9.1).
-                    if matches!(step, GoalStep::Cancel { .. }) {
+                    if matches!(*step, GoalStep::Cancel { .. }) {
                         Box::pin(react_queued(st, &mut inbox, |st| st.dialogs.pending_invite.is_some())).await?;
                     }
-                    Box::pin(drive_goal(st, step)).await?;
+                    Box::pin(drive_goal(st, *step)).await?;
                 }
                 st.goals.advance();
                 // Requeue on advance: auto-react any parked request no

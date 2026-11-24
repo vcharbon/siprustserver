@@ -24,6 +24,7 @@ mod harness_log_capture;
 mod http_exchanges;
 mod load_dialog_judges;
 mod non_2xx_ack_hop;
+mod presentation;
 mod proxy_record_route;
 mod response_destination_gate;
 mod rport_echo_gate;

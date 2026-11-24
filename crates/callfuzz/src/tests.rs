@@ -9,7 +9,7 @@ use callshapes::shapes::{basic_call, default_binder};
 use scenario_harness::actor::{
     run_built_actor_call, ActorCall, ActorScenario, Disposition, GoalStep, ScenarioVerdict,
 };
-use scenario_harness::realcall::{CallCtx, CallEnv};
+use scenario_harness::realcall::{CallCtx, CallEnv, InvitePlan};
 use scenario_harness::{Agent, Harness};
 
 use crate::payload::ILLEGAL_BODY;
@@ -27,16 +27,21 @@ fn payloads_always() -> FuzzConfig {
     FuzzConfig { payload_pct: 100, jitter_pct: 100, ..FuzzConfig::default() }
 }
 
-/// The headers of the call's INVITE.
-fn invite_headers(call: &ActorCall) -> Vec<(String, String)> {
+/// The plan of the call's INVITE.
+fn invite_plan(call: &ActorCall) -> InvitePlan {
     call.actors
         .iter()
         .flat_map(|a| a.goals.iter())
         .find_map(|g| match &g.step {
-            GoalStep::Invite { plan: Some(plan), .. } => Some(plan.headers.clone()),
+            GoalStep::Invite { plan: Some(plan), .. } => Some(plan.clone()),
             _ => None,
         })
         .expect("the call has an INVITE")
+}
+
+/// The headers of the call's INVITE.
+fn invite_headers(call: &ActorCall) -> Vec<(String, String)> {
+    invite_plan(call).headers
 }
 
 /// Every goal of the call, its delay and step, in order.
@@ -96,7 +101,9 @@ async fn the_header_budget_bounds_every_invite() {
                 let mut call = basic(&env);
                 let config = FuzzConfig { header_budget, ..payloads_always() };
                 perturb(&mut Rng::new(seed), &mut call, &config, &mut Vec::new());
-                invite_headers(&call).iter().map(|(n, v)| n.len() + v.len() + 4).sum::<usize>()
+                let plan = invite_plan(&call);
+                plan.headers.iter().map(|(n, v)| n.len() + v.len() + 4).sum::<usize>()
+                    + plan.presentation.display_bytes()
             })
             .collect::<Vec<_>>()
     };
@@ -400,3 +407,5 @@ async fn proxy_require_is_drawn_only_on_a_proxied_path() {
     assert!(proxy_requires(true), "a proxied path draws it");
     h.finish().await;
 }
+
+mod identity;
