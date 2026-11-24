@@ -287,7 +287,8 @@ async fn a_callout_result_of_the_first_call_does_not_end_the_reoffer() {
 /// The caller's BYE of the first call's early dialog (RFC 3261 §15) reaches
 /// the node only while the second call rings: it names the first call's
 /// incarnation on the Request-URI the first call's Contact stated, draws the
-/// 481 a request of no dialog here is owed (§12.2.2), and the second call
+/// 481 a request of no dialog here is owed (§12.2.2) as a stateless UAS
+/// answers it (§8.2.7), with no transaction left behind, and the second call
 /// rings on.
 #[tokio::test(start_paused = true)]
 async fn a_late_bye_of_the_first_call_is_answered_481_and_does_not_end_the_reoffer() {
@@ -304,9 +305,15 @@ async fn a_late_bye_of_the_first_call_is_answered_481_and_does_not_end_the_reoff
     let mut first = first_call_cancelled(&s, start).await;
     let (reoffer, uas) = reoffer_rings(&s, start).await;
 
+    let live_before = s.b2bua.txn_metrics().active_transactions();
     let mut bye = first.invite.send_request(InDialogMethod::Bye).send().await;
     bye.expect(481).await;
     s.h.advance(Duration::from_secs(1)).await;
+    assert_eq!(
+        s.b2bua.txn_metrics().active_transactions(),
+        live_before,
+        "the 481 to a BYE of another incarnation leaves no transaction, inside Timer J",
+    );
     second_call_still_ringing(&s, "after the first call's late BYE").await;
     assert_eq!(s.b2bua.metrics().other_incarnation_dropped_total(), 1, "the BYE is dropped");
     answer_and_hang_up(&s, reoffer, uas).await;
