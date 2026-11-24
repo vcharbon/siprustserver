@@ -1,7 +1,7 @@
 //! The departed probe answers `true` only for a peer this node pulled and
 //! parked when it left the membership set: a peer never seen, pulled while
 //! ready, or kept on presence while not ready has not departed, and a peer
-//! that rejoins has not either.
+//! that rejoins has not either. The departed count follows the probe.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -36,14 +36,18 @@ async fn only_a_parked_peer_has_departed() {
     tick(500).await;
     assert_eq!(sup.peer_link("B"), PeerLink::Kept);
     assert!(!departed("B"), "a peer kept on presence has not departed");
+    let count = sup.departed_count();
+    assert!(!count.any(), "no peer has departed yet");
 
     membership.remove("B");
     tick(500).await;
     assert_eq!(sup.peer_link("B"), PeerLink::Parked);
     assert!(departed("B"), "a peer parked on leaving the set has departed");
+    assert!(count.any(), "the count names the parked peer");
 
     membership.add(Peer::new("B", "B"));
     tick(1_000).await;
     assert!(!departed("B"), "a peer that rejoined has not departed");
+    assert!(!count.any(), "the count drops the rejoined peer");
     sup.shutdown();
 }
