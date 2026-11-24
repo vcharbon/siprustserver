@@ -1,6 +1,7 @@
 //! A transaction's CANCEL and non-2xx ACK keep finding their hop while a
 //! flood of out-of-dialog requests holds the branch memo at its cap: the
-//! flood's entries are the ones the cap forgets.
+//! flood's entries are the ones the cap forgets. An INVITE's copies write no
+//! entry of their own; one whose memo the cap forgot is a new call.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -190,4 +191,45 @@ async fn a_flood_of_invite_entries_keeps_the_short_memos_of_a_new_transaction() 
     assert_eq!(ack.decision, RoutingDecisionKind::AckHop, "the relayed final's ACK hop is kept");
     assert_eq!(ack.target, Some(ProxyAddr::new(W2, 5060)));
     assert!(lru.lookup(&rtx).is_some(), "and the retransmission memo still");
+}
+
+/// An INVITE's retransmissions rewrite its own memo entry: a caller
+/// retransmitting to a node slow to send its 100 grows the memo by nothing,
+/// and each copy follows the first one's hop. A copy whose memo the cap
+/// forgot is a new call to the proxy: counted and admitted again, and placed
+/// by a fresh selection.
+#[tokio::test(start_paused = true)]
+async fn invite_copies_rewrite_their_memo_and_one_whose_memo_was_forgotten_is_a_new_call() {
+    let lru = Arc::new(CancelBranchLru::with_bounds(
+        Clock::test_at(0),
+        MemoBounds { max_entries: CAP, max_bytes: usize::MAX, stripes: 1, ..MemoBounds::default() },
+    ));
+    let metrics = Arc::new(ProxyMetrics::new());
+    let core = core(lru.clone(), metrics.clone()).await;
+    let uac: SocketAddr = format!("{UAC}:5060").parse().unwrap();
+    let invite = uac_request("INVITE", "INVITE", "");
+    core.route_request_from(&invite, uac).await;
+    let held = lru.size();
+
+    for _ in 0..3 {
+        tokio::time::advance(std::time::Duration::from_millis(500)).await;
+        let copy = core.route_request_from(&invite, uac).await;
+        assert_eq!(copy.target, Some(ProxyAddr::new(W1, 5060)), "the first copy's hop");
+    }
+    assert_eq!(lru.size(), held, "copies add no entry");
+    assert_eq!(metrics.calls_total(), 1, "copies are no new call");
+
+    flood(&core, 0, 3 * CAP).await;
+    let SipMessage::Request(req) = &invite else { unreachable!() };
+    let rtx = crate::cancel_lru::retransmit_key(
+        req.top_via(),
+        req.call_id().as_str(),
+        req.from().tag(),
+        "INVITE",
+        1,
+    );
+    assert!(lru.lookup(&rtx).is_none(), "the cap forgot the INVITE's retransmission memo");
+    let copy = core.route_request_from(&invite, uac).await;
+    assert_eq!(metrics.calls_total(), 2, "the copy is a new call to the proxy");
+    assert_eq!(copy.target, Some(ProxyAddr::new(W1, 5060)), "placed by a fresh selection");
 }

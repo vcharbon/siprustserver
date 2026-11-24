@@ -74,8 +74,14 @@ that the hop's own timer (Timer B, or an SBC's reroute timer) sends the call els
   slow (ADR-0069): the probe is answered on the router loop, so a wedged loop reads dead after
   the probe's threshold.
 - Retransmissions of a new INVITE become ordinary under load: a call slower than T1 to its
-  creation write is retransmitted, and a copy whose memo entry the proxy evicted is placed as a
-  new call.
+  creation write is retransmitted. A copy rewrites its own entry in the proxy's retransmission
+  memo and adds none. A memo sized for the call rate (`calls_per_second` of its bounds) keeps
+  the entry to Timer B. Past that rate the memo forgets its oldest writes first: the defaults,
+  sized for 109 calls/s, keep an entry about 4.4 s after its last write at 1000 calls/s. A copy
+  after a longer Timer A gap (the copies at 15.5 s and 31.5 s) is then placed as a new call,
+  which may ring a callee the previous hop already rerouted to.
+- The copies of a call whose primary died before its turn go to the cookie's backup, which
+  holds no record and drops each one unanswered.
 - A CANCEL that meets a turn waiting for its permit comes from a caller that broke §9.1.
 - Residuals: a call ended with `Caller::Leave` (the stuck-poll discharge, an unrecoverable
   record, an ended body, a reclaim's ending); an unbacked call whose worker dies after its
