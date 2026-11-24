@@ -35,12 +35,14 @@ use super::shrink::{shrink_idle, SHRINK_MIN_CAPACITY};
 use super::txn::{CancelWire, Timer, Transaction, TxnId, TxnRef, TxnRole};
 use super::unattributed::Unattributed;
 
-/// What a transaction leaving the map leaves behind it.
+/// What a transaction leaving the map leaves of its copy records (ADR-0063
+/// §1).
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Trace {
-    /// Its copy records and, for a server transaction, the To-tag it bound.
+    /// Its copy records, retired to its Call-ID's entry.
     Records,
-    /// Nothing: its request was answered as a stateless UAS answers it.
+    /// Nothing: nothing answered its request, or its answer left as a
+    /// stateless UAS sends it.
     Nothing,
 }
 
@@ -344,9 +346,10 @@ impl Owner {
     }
 
     /// Delete the server transaction `id` names, its timers with it, leaving
-    /// nothing behind: no copy record, no remembered To-tag, nothing on the
-    /// unattributed books. Its request was answered statelessly (RFC 3261
-    /// §8.2.7), so a copy of it is a first arrival. Whether it was there.
+    /// nothing behind: no copy record, nothing on the unattributed books, and
+    /// no remembered To-tag, as one that sent nothing bound none. Its request
+    /// went unanswered or was answered statelessly (RFC 3261 §8.2.7), so a
+    /// copy of it is a first arrival. Whether it was there.
     pub(super) fn forsake_server(&mut self, id: ServerTxnId<'_>) -> bool {
         self.remove_txn(TxnRef::Server(id), Trace::Nothing)
     }
@@ -362,7 +365,7 @@ impl Owner {
                     self.retire_copies(&mut t);
                 }
                 self.budgets.closed(&t.call_id);
-                if trace == Trace::Records && t.role() == TxnRole::Server {
+                if t.role() == TxnRole::Server {
                     if let Some(tag) = t.bound_to_tag() {
                         self.remember_uas_tag(&t.call_id, &t.from_tag, tag);
                     }

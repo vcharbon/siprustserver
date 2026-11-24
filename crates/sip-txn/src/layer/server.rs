@@ -269,6 +269,7 @@ impl Owner {
         // request's stamped response target (§18.2.2), fixed now.
         let Received { request: req, destination, .. } = self.stamp(req, src);
         let Some(id) = ServerTxnId::of_request(&req) else { return };
+        let continued = matches!(retired, Retired::Reopens(_));
         let copies = opening_copies(req.method(), retired);
         let held = if is_invite {
             match self.judge_new_invite(endpoint, &req, destination).await {
@@ -320,7 +321,7 @@ impl Owner {
         // full queue drops is not admitted: its transaction is forgotten, so the
         // UAC's Timer E copy (§17.1.2.2; UDP-only, ADR-0027) is admitted afresh
         // rather than absorbed unanswered by a Trying transaction.
-        let forgettable = (!is_invite).then(|| TxnRef::Server(id).to_id());
+        let forgettable = (!is_invite).then(|| id.to_key());
         let event = TransactionEvent::Message {
             message: Box::new(SipMessage::Request(req)),
             src,
@@ -332,7 +333,7 @@ impl Owner {
             self.emit_critical(event);
         } else if !self.emit(event) {
             if let Some(key) = forgettable {
-                self.delete_txn(key.as_ref());
+                self.forget_unqueued(key.id(), continued);
             }
         }
     }

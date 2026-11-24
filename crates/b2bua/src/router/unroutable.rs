@@ -224,8 +224,9 @@ fn wave_label(method: &Method) -> &str {
 ///
 /// - A To-tag names a dialog this node does not hold: 481 whatever the method
 ///   (§12.2.2), the answer that ends the peer's dialog (§12.2.1.2).
-/// - A CANCEL matching no INVITE: 481 (§9.2), under the tag the transaction
-///   layer binds from the INVITE's final, so none is chosen here.
+/// - A CANCEL matching no INVITE: 481 (§9.2), its tag chosen not here: through
+///   a transaction, the layer binds the one of the INVITE's final; sent
+///   statelessly, it keeps the one derived from its Call-ID.
 /// - Any other untagged request, under a To-tag minted here (§8.2.6.2): 481
 ///   for a method in the node's `Allow` (a BYE, §15.1.2), else 405 with
 ///   `Allow` (§8.2.1, extension methods included, as the stack's

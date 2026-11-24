@@ -23,7 +23,7 @@ use super::call_id_budget::Retired;
 use super::copy_gate::opening_copies;
 use super::key::{ServerTxnId, ServerTxnKey};
 use super::owner::Owner;
-use super::txn::{NewTransaction, Transaction, TxnId, TxnRef, TxnState, UnsentCancel};
+use super::txn::{NewTransaction, Transaction, TxnId, TxnState, UnsentCancel};
 
 impl Owner {
     /// RFC 3261 §9.2 at this layer: a CANCEL matching an active INVITE server
@@ -274,6 +274,7 @@ impl Owner {
             state: TxnState::Trying,
             destination: Some(stamped_destination(req.top_via(), src)),
         };
+        let continued = matches!(retired, Retired::Reopens(_));
         let copies = opening_copies(&Method::Cancel, retired);
         self.open_txn_with(head, |txn| txn.copies = Some(copies));
         let event = TransactionEvent::Message {
@@ -284,7 +285,7 @@ impl Owner {
             opened_at: None,
         };
         if !self.emit(event) {
-            self.delete_txn(TxnRef::Server(key.id()));
+            self.forget_unqueued(key.id(), continued);
         }
     }
 

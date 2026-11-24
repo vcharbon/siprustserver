@@ -6,7 +6,7 @@
 use std::net::SocketAddr;
 
 use bytes::Bytes;
-use sip_message::SipResponse;
+use sip_message::{Method, SipResponse};
 use sip_net::UdpEndpoint;
 
 use super::key::ServerTxnId;
@@ -19,8 +19,10 @@ impl Owner {
     /// forsaken ([`forsake_server`](Self::forsake_server)) and `msg`, held to
     /// the To-tag this layer binds ([`bind_to_tag`](Self::bind_to_tag)),
     /// leaves once, raw, to that transaction's destination (§18.2.2), else to
-    /// `dest`. A provisional, and a transaction that already sent a response
-    /// or holds a CANCEL's answers, go through
+    /// `dest`. A CANCEL's answer keeps the tag it carries: the tag remembered
+    /// past the INVITE it names expires, and every copy draws the same tag. A
+    /// provisional, and a transaction that already sent a response or holds
+    /// a CANCEL's answers, go through
     /// [`do_send_response`](Self::do_send_response).
     pub(super) async fn do_send_stateless_response(
         &mut self,
@@ -35,7 +37,7 @@ impl Owner {
             return self.do_send_response(endpoint, msg, dest).await;
         }
         let dest = holder.and_then(|txn| txn.destination).unwrap_or(dest);
-        let msg = self.bind_to_tag(msg);
+        let msg = if *msg.cseq().method() == Method::Cancel { msg } else { self.bind_to_tag(msg) };
         if let Some(key) = &key {
             self.forsake_server(key.id());
         }
