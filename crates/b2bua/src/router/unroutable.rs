@@ -138,8 +138,8 @@ pub(super) async fn answer_vanished(ctx: &RouterCtx, event: &CallEvent, ids: &mu
     }
 }
 
-/// A request whose `callRef` names no call here, every read having answered:
-/// the 200 of a PRACK its released call still answers, through its
+/// A request whose `callRef` names no call here, or an earlier incarnation of
+/// the one it names, every read having answered: the 200 of a PRACK its released call still answers, through its
 /// transaction ([`super::late_prack::answer`]), else the answer a request
 /// naming no call is owed ([`refusal`]), sent by [`send_no_call_answer`]; a
 /// final to an INVITE draws what an unknown dialog owes it

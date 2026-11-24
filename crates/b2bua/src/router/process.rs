@@ -23,7 +23,7 @@ use super::release::{release_call, ReleaseKind};
 use super::resolve::Resolution;
 use super::stray_cancel::reject_stray_cancel;
 use super::unrecoverable::discharge_after_turn;
-use super::unroutable::{answer_no_call, answer_vanished};
+use super::unroutable::answer_no_call;
 use super::RouterCtx;
 use crate::limiter::refresh_batch::RefreshAnswered;
 use crate::rule_chain::{enforced, fired, rule_chain_turn, TurnInput};
@@ -137,7 +137,7 @@ pub(super) async fn process(
         if of_another_incarnation(ctx, event, &res, |stamp| {
             ctx.state.is_incarnation(&call_ref, stamp) == Some(false)
         }) {
-            answer_vanished(ctx, event, &mut turn.ids).await;
+            answer_no_call(ctx, event, &mut turn.ids).await;
             return false;
         }
         if super::store_fault_gate::in_dialog_store_fault_gate(ctx, event, &call_ref, now_ms).await
@@ -167,7 +167,7 @@ pub(super) async fn process(
         res.bind_indexed_leg(&call, event);
         // A copy this event materialised is checked as a resident one was.
         if of_another_incarnation(ctx, event, &res, |stamp| call.incarnation() != stamp) {
-            answer_vanished(ctx, event, &mut turn.ids).await;
+            answer_no_call(ctx, event, &mut turn.ids).await;
             return false;
         }
         // A timer fire reaches the call only while its ledger holds the fired
