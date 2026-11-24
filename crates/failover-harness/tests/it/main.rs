@@ -98,6 +98,7 @@ mod record_size_cap_trip;
 mod reinvite_2xx_acked_through_the_primary;
 mod reinvite_2xx_acked_while_the_copy_stalls;
 mod reinvite_answer_failover;
+mod reinvite_naming_no_replica_during_a_departure;
 mod reinvite_refused_by_proxy;
 mod reinvite_round_gives_up_after_takeover;
 mod reinvite_round_not_yet_replicated;

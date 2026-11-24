@@ -66,6 +66,7 @@ mod release_all;
 mod repl_faults;
 mod repl_wiring;
 mod replacement;
+mod replica_surgery;
 mod rfc_audit;
 mod settle;
 mod signalling;
@@ -425,28 +426,6 @@ impl ReplicatedB2buaSut {
             .await
             .expect("replica store write");
         leg
-    }
-
-    /// HARNESS SURGERY: rewind the replica body this node holds for `call_ref`
-    /// in `(role, primary)` to `body` — an earlier body it genuinely held (read
-    /// back with [`get`](Self::get)) — as if every version after it died with
-    /// the crashed primary before the peer pulled it. The stored `(p,b)` is
-    /// kept, so bootstrap and reclaim replay the rewound body exactly as they
-    /// would the latest one.
-    pub async fn rewind_replica(
-        &self,
-        role: PartitionRole,
-        primary: &str,
-        call_ref: &str,
-        body: Vec<u8>,
-    ) {
-        self.harness.tampered.store(true, Ordering::Relaxed);
-        let (p, b) =
-            self.store.current_cv(role, primary, call_ref).expect("replica version vector present");
-        self.store
-            .put_call(role, primary, call_ref, body, &[], 600_000, p, b, &PutOpts::default())
-            .await
-            .expect("replica store write");
     }
 
     /// Is this node **synchronized** as the backup for `call_ref` — does it hold a
