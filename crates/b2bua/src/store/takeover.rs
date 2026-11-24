@@ -66,10 +66,10 @@ impl CallState {
         self.locked().takeover.contains(call_ref)
     }
 
-    /// Whether this node serves any live takeover copy: a takeover of a peer's
-    /// calls is in progress here.
-    pub fn serves_takeover(&self) -> bool {
-        self.locked().takeover.len() > 0
+    /// The count of live takeover copies this node serves, read without the
+    /// call map's lock.
+    pub fn takeover_copies(&self) -> Arc<AtomicUsize> {
+        self.locked().takeover.live.clone()
     }
 
     /// [`is_takeover`](Self::is_takeover) as the replication pullers read it on

@@ -20,6 +20,12 @@ pub enum PeerLink {
 }
 
 impl ReplicationSupervisor {
+    /// How many peers read [`PeerLink::Parked`], as of the last reconcile,
+    /// readable without the `peers` lock.
+    pub fn departed_count(&self) -> crate::repl::DepartedCount {
+        self.inner.departed.clone()
+    }
+
     /// This node's link state toward `peer` ([`PeerLink`]): `Active` while its
     /// Reclaim puller runs toward a ready member, `Kept` while it runs toward a
     /// member that is present but not ready, `Parked` once it left the

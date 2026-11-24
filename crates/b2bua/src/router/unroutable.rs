@@ -163,9 +163,10 @@ pub(super) async fn answer_no_call(ctx: &RouterCtx, event: &CallEvent, ids: &mut
 /// stateless UAS sends it (RFC 3261 §8.2.7): the request's transaction leaves
 /// with no trace, so neither it nor a copy of it holds state or counts
 /// against new-call admission, and each copy draws `answer` again. A tagged
-/// INVITE keeps its transaction while this node serves a takeover copy: a
-/// copy of it may yet resolve to a replica the takeover imports, and the
-/// caller would hold two finals.
+/// INVITE keeps its transaction while a takeover may be in progress here
+/// ([`TakeoverWindow`](super::takeover_window::TakeoverWindow)): a copy of
+/// it may yet resolve to a replica the takeover serves, and the caller would
+/// hold two finals.
 async fn send_no_call_answer(
     ctx: &RouterCtx,
     req: &SipRequest,
@@ -174,7 +175,7 @@ async fn send_no_call_answer(
 ) {
     let dest = reply_to(req, src);
     let reinvite = req.method() == Method::Invite && req.to().tag().is_some();
-    if reinvite && ctx.state.serves_takeover() {
+    if reinvite && ctx.takeover_window.open() {
         let _ = ctx.txn.send_response(answer, dest).await;
     } else {
         let _ = ctx.txn.send_stateless_response(answer, dest).await;

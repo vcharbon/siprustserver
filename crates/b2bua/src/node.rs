@@ -342,6 +342,10 @@ impl B2buaCore {
         );
         tasks.extend(limiter_tasks);
         let http_cap = config.service_http_timeout();
+        let takeover_window = crate::router::takeover_window::TakeoverWindow::new(
+            &state,
+            supervisor.as_ref().map(crate::repl::ReplicationSupervisor::departed_count),
+        );
         let ctx = Arc::new(RouterCtx {
             outbound_proxy: crate::router::outbound_proxy_target(&config),
             relay_owner: call::RelayOwner::new(config.self_ordinal.clone(), identity),
@@ -370,6 +374,7 @@ impl B2buaCore {
             readiness: readiness.clone(),
             unsent_waves: crate::lifecycle::unsent_waves(),
             departed: supervisor.as_ref().map(crate::repl::departed_probe),
+            takeover_window,
             peer_streams: supervisor.clone(),
             overload: overload.clone(),
             capacity: capacity.clone(),

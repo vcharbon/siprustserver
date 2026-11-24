@@ -24,8 +24,8 @@
 //! per-call teardown executor, `responses` the locally-authored response
 //! builders, `peer_metrics` per-peer failure attribution, `turn` the
 //! item offered to a call's queue, `owed` what a request whose body never
-//! ran is owed, and `unroutable` the answer and accounting of an event
-//! naming no call.
+//! ran is owed, `unroutable` the answer and accounting of an event naming no
+//! call, and `takeover_window` whether a takeover may be in progress here.
 
 mod admit;
 #[cfg(test)]
@@ -94,6 +94,7 @@ mod stand_down;
 mod store_fault_gate;
 mod stray_cancel;
 mod stuck;
+pub(crate) mod takeover_window;
 #[cfg(test)]
 pub(crate) mod test_support;
 pub(crate) mod topology_cookie;
@@ -204,6 +205,8 @@ pub struct RouterCtx {
     /// Whether a call's primary has departed (ADR-0047). `None` on an unwired
     /// node: no call there has another primary.
     pub departed: Option<crate::repl::DepartedProbe>,
+    /// Whether a takeover of a peer's calls may be in progress here.
+    pub takeover_window: takeover_window::TakeoverWindow,
     /// The replication streams from the peers, which confirm a proxy's dead
     /// verdict (ADR-0047 D1). `None` on an unwired node: a verdict there
     /// stands alone.
