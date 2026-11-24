@@ -368,6 +368,46 @@ describe("one offer the endpoint sends to sequential targets", () => {
       .toEqual([["s0i", true], ["s1i", false]])
   })
 
+  /** Leg B's offer, then `rest` on leg B, then leg C's same offer, each against its own captured origin. */
+  const thenC = (rest: ReadonlyArray<readonly [number, "in" | "out", string, string, boolean]>): ReadonlyArray<BodyProbe> => {
+    const offer = sdp(o(7, 7))
+    return confront({
+      pivot: {
+        ...pivot,
+        flow: [
+          step("s0i", "B", "expect", { method: "INVITE", body: sdpBody("resources/B.sdp") }, false),
+          step("s1i", "C", "expect", { method: "INVITE", body: sdpBody("resources/C.sdp") }, false)
+        ]
+      },
+      verdict,
+      recordings: new Map([
+        ["B", [
+          message(1, "in", "s0i", "INVITE sip:b@example.invalid SIP/2.0", "1 INVITE", false, offer),
+          ...rest.map(([at, dir, start, cseq, toTag], k) => message(at, dir, `b${k}`, start, cseq, toTag, ""))
+        ]],
+        ["C", [message(50, "in", "s1i", "INVITE sip:c@example.invalid SIP/2.0", "1 INVITE", false, offer)]]
+      ]),
+      resources: new Map([["resources/B.sdp", utf8.encode(sdp(o(1000, 1000)))], ["resources/C.sdp", utf8.encode(sdp(o(2000, 2000)))]]),
+      media: "verbatim"
+    }).probes.flatMap((p) => (p.probe.kind === "body" ? [p.probe] : []))
+  }
+  const answered = [[2, "out", "SIP/2.0 200 OK", "1 INVITE", true], [3, "in", "ACK sip:b@example.invalid SIP/2.0", "1 ACK", true]] as const
+
+  it("marks the second target's offer where the first target's dialog ended by a BYE answered before it", () => {
+    const released = [...answered, [4, "in", "BYE sip:b@example.invalid SIP/2.0", "2 BYE", true], [5, "out", "SIP/2.0 200 OK", "2 BYE", true]] as const
+    expect(minted(thenC(released))).toEqual([["s0i", true], ["s1i", true]])
+  })
+
+  it("keeps the second offer unmarked where the first target's dialog only refused a re-INVITE", () => {
+    const refused = [
+      ...answered,
+      [4, "in", "INVITE sip:b@example.invalid SIP/2.0", "2 INVITE", true],
+      [5, "out", "SIP/2.0 491 Request Pending", "2 INVITE", true],
+      [6, "in", "ACK sip:b@example.invalid SIP/2.0", "2 ACK", true]
+    ] as const
+    expect(minted(thenC(refused))).toEqual([["s0i", true], ["s1i", false]])
+  })
+
   it("keeps the second offer unmarked where it differs from the first in any other line", () => {
     const moved = sdp(o(7, 7)).replace("m=audio 6000", "m=audio 6002")
     expect(minted(search([sdp(o(1000, 1000)), sdp(o(2000, 2000))], [sdp(o(7, 7)), moved])))

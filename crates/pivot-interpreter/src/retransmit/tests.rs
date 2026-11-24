@@ -710,3 +710,31 @@ fn a_cancel_re_sent_after_its_200_stays_a_mismatch() {
     let charged = repeats.mismatches(5_000_000);
     assert_eq!(charged.len(), 1, "the CANCEL repeat after its 200: {charged:#?}");
 }
+
+/// Our ACK ends a 2xx ladder (RFC 3261 §13.3.1.4): copies after it stay a
+/// mismatch, on the RFC cadence or not; only the emitter's own BYE leaves
+/// the ladder running.
+#[test]
+fn copies_of_the_2xx_after_our_ack_stay_a_mismatch_on_the_rfc_cadence() {
+    let ok = b"SIP/2.0 200 OK\r\nContact: <sip:fixture@192.0.2.98>\r\nCall-ID: c1\r\nFrom: <sip:b@h>;tag=b1\r\n\
+            To: <sip:s@h>;tag=s1\r\nCSeq: 1 INVITE\r\n\r\n";
+    let ack =
+        b"ACK sip:s@h SIP/2.0\r\nMax-Forwards: 70\r\nCall-ID: c1\r\nFrom: <sip:b@h>;tag=b1\r\n\
+            To: <sip:s@h>;tag=s1\r\nCSeq: 1 ACK\r\n\r\n";
+    let reinvite = b"INVITE sip:s@h SIP/2.0\r\nMax-Forwards: 70\r\nContact: <sip:fixture@192.0.2.99>\r\nCall-ID: c1\r\nFrom: <sip:b@h>;tag=b1\r\n\
+            To: <sip:s@h>;tag=s1\r\nCSeq: 1 INVITE\r\n\r\n";
+    let mut repeats = Repeats::new();
+    repeats.claim("s9", "B", LadderSide::Send, None, &[], reinvite, 887_931);
+    repeats.note("B", ok, 929_829);
+    repeats.claim("s14", "B", LadderSide::Expect, None, &[], ok, 929_829);
+    repeats.answered("B", ack, 1_346_554);
+    for at in [1_411_171, 2_411_167, 4_411_151] {
+        repeats.note("B", ok, at);
+    }
+    let charged: Vec<Failure> = repeats
+        .mismatches(5_287_619)
+        .into_iter()
+        .filter(|f| matches!(f, Failure::RetransmitCountMismatch { step, .. } if step == "s14"))
+        .collect();
+    assert_eq!(charged.len(), 1, "three copies after our ACK: {charged:#?}");
+}
