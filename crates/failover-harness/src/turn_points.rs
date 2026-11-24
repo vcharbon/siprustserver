@@ -126,6 +126,9 @@ pub struct TurnPoints {
     /// How long each worker's takeover sweep spends on its next calls, in
     /// order; the last stands for every later one.
     sweep_pace: Mutex<Vec<std::time::Duration>>,
+    /// How long each worker holds a rider the outbox released before it sends
+    /// it, by ordinal.
+    rider_pace: Mutex<BTreeMap<String, std::time::Duration>>,
 }
 
 /// A source of places in the order of the run's recorded messages.
@@ -183,6 +186,13 @@ impl TurnPoints {
     /// duration of a sweep over a large partition.
     pub fn pace_sweep(&self, holds: &[std::time::Duration]) {
         *locked(&self.sweep_pace) = holds.to_vec();
+    }
+
+    /// From now on `node` holds each rider its outbox released `hold` before
+    /// it sends it, and the call's later entries wait behind it: the drainer
+    /// of a starved process. A zero `hold` lets riders go at once.
+    pub fn pace_riders(&self, node: &str, hold: std::time::Duration) {
+        locked(&self.rider_pace).insert(node.to_string(), hold);
     }
 
     /// Every bound pass of the run so far, the calls a backup deleted
@@ -390,6 +400,11 @@ impl TurnProbe for TurnPoints {
             1 => holds[0],
             _ => holds.remove(0),
         };
+        (!hold.is_zero()).then(|| Box::pin(tokio::time::sleep(hold)) as Hold)
+    }
+
+    fn rider_step(&self, node: &str, _call_ref: &str) -> Option<Hold> {
+        let hold = locked(&self.rider_pace).get(node).copied()?;
         (!hold.is_zero()).then(|| Box::pin(tokio::time::sleep(hold)) as Hold)
     }
 

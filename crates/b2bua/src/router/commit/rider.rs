@@ -24,26 +24,31 @@ pub enum Rider {
 }
 
 impl Rider {
-    /// What sending it does once the outbox releases it, sized to its kind.
-    fn into_effects(self, ctx: Arc<RouterCtx>) -> Effects {
+    /// What sending it for `call_ref` does once the outbox releases it: the
+    /// turn probe's rider step, then the send.
+    fn into_effects(self, ctx: Arc<RouterCtx>, call_ref: String) -> Effects {
+        Box::new(move |_| {
+            Box::pin(async move {
+                ctx.turn_probe.rider_step(&ctx.config.self_ordinal, &call_ref).await;
+                self.send(&ctx).await;
+            })
+        })
+    }
+
+    /// Send it through the transaction layer.
+    async fn send(self, ctx: &RouterCtx) {
         match self {
-            Rider::Trying(invite) => Box::new(move |_| {
-                Box::pin(async move {
-                    let _ = ctx.txn.release_trying(&invite).await;
-                })
-            }),
-            Rider::Answer(answer, dest) => Box::new(move |_| {
-                Box::pin(async move {
-                    let _ = ctx.txn.send_response(*answer, dest).await;
-                })
-            }),
-            Rider::Relinquish(keys) => Box::new(move |_| {
-                Box::pin(async move {
-                    for key in keys {
-                        let _ = ctx.txn.relinquish_server(key).await;
-                    }
-                })
-            }),
+            Rider::Trying(invite) => {
+                let _ = ctx.txn.release_trying(&invite).await;
+            }
+            Rider::Answer(answer, dest) => {
+                let _ = ctx.txn.send_response(*answer, dest).await;
+            }
+            Rider::Relinquish(keys) => {
+                for key in keys {
+                    let _ = ctx.txn.relinquish_server(key).await;
+                }
+            }
         }
     }
 }
@@ -56,5 +61,5 @@ pub fn behind_the_write<'a>(
     rider: Rider,
 ) -> impl Future<Output = ()> + 'a {
     let wait = ctx.state.hold_target(call_ref);
-    ctx.outboxes.push(call_ref, wait, rider.into_effects(ctx.clone()))
+    ctx.outboxes.push(call_ref, wait, rider.into_effects(ctx.clone(), call_ref.to_string()))
 }

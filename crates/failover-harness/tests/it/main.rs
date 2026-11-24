@@ -56,6 +56,7 @@ mod ending_crossing_a_round;
 mod failover;
 mod failover_matrix;
 mod failure_dump_names_the_node;
+mod fallback_100_behind_a_stalled_outbox;
 mod fault_primitives;
 mod forward_flush_never_regresses_backup_progress;
 mod ghost_of_a_departed_primary;
