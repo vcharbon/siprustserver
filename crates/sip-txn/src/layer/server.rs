@@ -284,6 +284,7 @@ impl Owner {
 
         let call_ref = extract_ruri_call_ref(&req);
         let unattributed = call_ref.is_none() && req.to().tag().is_some();
+        let bound_at_opening = is_invite && self.trying_bound_at_opening(&req);
 
         let head = NewTransaction {
             id: TxnId::Server(id.to_key()),
@@ -312,12 +313,12 @@ impl Owner {
         // An INVITE's first provisional is its consumer's to release, or this
         // layer's at the §17.2.1 bound (`layer::trying`).
         let opened_at = self.server(id).map(|t| t.created_at);
-        if let (true, Some(opened)) = (is_invite, opened_at) {
+        if let (true, Some(opened)) = (bound_at_opening, opened_at) {
             self.arm_trying_bound(id.to_key(), opened);
         }
 
-        // Critical for INVITE: the 100 the bound sends stops the UAC
-        // retransmitting, so this Message is the app's ONLY notice of the call. A non-INVITE the
+        // Critical for INVITE: no copy of it reaches the app while its
+        // transaction absorbs them, so this Message is the app's ONLY notice of the call. A non-INVITE the
         // full queue drops is not admitted: its transaction is forgotten, so the
         // UAC's Timer E copy (§17.1.2.2; UDP-only, ADR-0027) is admitted afresh
         // rather than absorbed unanswered by a Trying transaction.

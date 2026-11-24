@@ -148,9 +148,9 @@ branch. A call whose routing decision the record does not hold is no
 copy's: the decision may be in flight at a primary the proxy misread dead;
 a confirmed verdict, the departure or a reclaim asks it again (ADR-0047 D4). An initial INVITE whose cookie
 names another primary and that copies no such record gets no final
-(`b2bua_foreign_invite_copies_dropped_total`; its transaction is relinquished
-with nothing sent, ahead of the 100's 200 ms bound unless the router lags
-that long): the primary still owns that transaction, and a final from this
+(`b2bua_foreign_invite_copies_dropped_total`; its transaction, which arms no
+100 before a consult (ADR-0070), is relinquished with nothing sent, however
+long the router lags): the primary still owns that transaction, and a final from this
 worker would end the caller's.
 Accepted residuals:
 - a copy of an undecided call whose primary really died is dropped: the

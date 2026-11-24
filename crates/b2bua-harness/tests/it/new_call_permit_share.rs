@@ -6,10 +6,10 @@
 //! reaches the backend from the rest, and the established call's BYE is
 //! relayed and answered at once.
 //!
-//! Every burst INVITE is then CANCELed by its caller (RFC 3261 §9.1); the
-//! backend answers once released, each answer lands on a cancelled call and is
-//! dropped, a burst INVITE still waiting for a permit asks the backend nothing,
-//! and every call ends.
+//! A burst INVITE still waiting for a permit hears no 100 and is refused 503
+//! at its start bound (ADR-0070), asking the backend nothing; every other is
+//! CANCELed by its caller (RFC 3261 §9.1). The backend answers once released,
+//! each answer lands on a cancelled call and is dropped, and every call ends.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -28,8 +28,10 @@ use tokio::sync::watch;
 const EMERGENCY: (&str, &str) = ("Resource-Priority", "esnet.0");
 const CONCURRENCY: usize = 4;
 const SHARE_PERCENT: u8 = 50;
+/// The new-call share: half the pool.
+const SHARE: usize = 2;
 /// Normal new INVITEs in the burst: twice the new-call share.
-const BURST: usize = 4;
+const BURST: usize = 2 * SHARE;
 /// What a BYE of an established call takes on an idle node, with margin: a
 /// few transits and two turns.
 const NORMAL_TEARDOWN: Duration = Duration::from_secs(1);
@@ -147,6 +149,10 @@ async fn a_new_call_burst_on_a_stalled_backend_leaves_an_established_calls_bye_i
     );
     assert_eq!(engine.emergency.load(Ordering::SeqCst), 1, "the emergency INVITE's turn ran");
 
+    let mut waiting = burst.split_off(SHARE);
+    for invite in &mut waiting {
+        assert_eq!(invite.expect(503).await.reason(), "Service Unavailable");
+    }
     for invite in &mut burst {
         cancel(invite).await;
     }
@@ -156,12 +162,12 @@ async fn a_new_call_burst_on_a_stalled_backend_leaves_an_established_calls_bye_i
     assert_eq!(
         s.b2bua.cdr_records().len(),
         1 + BURST + 1,
-        "one CDR per call: the established one and each CANCELed new call"
+        "one CDR per call: the established one, each CANCELed or refused new call"
     );
     assert_eq!(
         engine.normal.load(Ordering::SeqCst),
-        1 + 2,
-        "a burst INVITE CANCELed while it waited for a permit asked no decision"
+        1 + SHARE,
+        "a burst INVITE refused at its start bound while it waited for a permit asked no decision"
     );
     assert!(
         s.bob.try_receive_tolerating("INVITE", &[]).await.is_none(),

@@ -77,6 +77,10 @@ pub enum Refusal {
     /// answered the bare 503 before any decision. Its call is born only to
     /// write its record.
     SetupBudget,
+    /// The INVITE's turn started past the start bound (ADR-0070): its
+    /// caller, who heard no 100, is answered the bare 503 before any
+    /// decision. Its call is born only to write its record.
+    StartBound,
     /// The INVITE is refused on sight, before any decision
     /// ([`b2bua_core::initial_invite::OnSight`]): 400 without a From tag, 420
     /// requiring an option tag the stack does not understand. Its call is born
@@ -86,7 +90,7 @@ pub enum Refusal {
 
 impl Refusal {
     /// Every reason, in exposition order.
-    pub const ALL: [Refusal; 16] = [
+    pub const ALL: [Refusal; 17] = [
         Refusal::BucketEmpty,
         Refusal::PanicElu,
         Refusal::CapacityCalls,
@@ -102,6 +106,7 @@ impl Refusal {
         Refusal::Unrecoverable,
         Refusal::EventQueue,
         Refusal::SetupBudget,
+        Refusal::StartBound,
         Refusal::OnSight,
     ];
 
@@ -123,6 +128,7 @@ impl Refusal {
             Refusal::Unrecoverable => "unrecoverable",
             Refusal::EventQueue => "event_queue",
             Refusal::SetupBudget => "setup_budget",
+            Refusal::StartBound => "start_bound",
             Refusal::OnSight => "on_sight",
         }
     }

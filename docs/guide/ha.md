@@ -78,7 +78,8 @@ Rule 3 is deliberate. A wait without a cap lets one lost peer stop all the calls
 Three messages have a bound of their own, 200 ms, because the transaction layer must send them
 before the peer retransmits: the first 100 Trying, the ACK of a failure response, and the
 answers to a CANCEL. If the turn did not release one of them at 200 ms, the transaction layer
-sends it.
+sends it. For a new call, the 200 ms of the 100 Trying start when the worker sends the request
+to the decision backend, and not before (ADR-0070).
 
 If each round trip completes before these bounds, the backup knows what the parties saw. That
 is the condition of the Guaranteed tier.

@@ -1,6 +1,7 @@
 # 0022. The initial-INVITE final-response guarantee (accept-and-forward, or 503 within the decision deadline)
 
-**Status:** accepted (2026-07-03). Amended with ADR-0047 (X4, X5) and ADR-0055 §3 (X1).
+**Status:** accepted (2026-07-03). Amended with ADR-0047 (X4, X5), ADR-0055 §3 (X1) and
+ADR-0070 (context, X1).
 
 The gaps the decision closes, the long form of each section, its coverage and the rejected
 alternatives: [appendix](appendix/0022-initial-invite-final-response-guarantee.md).
@@ -15,7 +16,7 @@ The operational contract:
 > decision-backend timeout, an HTTP call-control endpoint that hangs, an overload reject, or
 > an internal panic. The caller is never left on "100-then-silence".
 
-sip-txn sends the 100 before the router and the decision engine run. Behind it, a consult
+The 100 leaves once the call exists, as its decision is asked (ADR-0070). Behind it, a consult
 with no deadline or a silent backstop (reaper, panic, transaction sweep) breaks the contract.
 The transaction-less LB proxy cannot (X4). Detail: [appendix, context](appendix/0022-initial-invite-final-response-guarantee.md#context-the-three-gaps).
 
@@ -37,9 +38,9 @@ One setup budget runs from the INVITE's receipt (`TransactionEvent::Message::ope
 its final (`b2bua::setup_budget`). It covers the wait for the handler permits, the decision
 round trips with their retries, the limiter's admits and the failover chain they start.
 
-- **At the permit.** A turn stops waiting at the deadline and runs holding no permit. A turn
-  whose budget is spent as it starts asks nothing: its caller gets the X3 503, counted
-  `setup_budget` on `b2bua_new_calls_total`. A setup its caller CANCELed first ends as
+- **At the permit.** A turn stops waiting at its start bound (ADR-0070) and runs holding no
+  permit. A turn past it asks nothing: its caller gets the X3 503, counted `start_bound` on
+  `b2bua_new_calls_total` (`setup_budget` once spent). A setup its caller CANCELed first ends as
   cancelled. No ADR-0037 rung reads the budget, and an emergency INVITE is held to it too.
 - **On the turn.** A consult is bounded by what is left of the budget, and each route's admit
   is cut there as an unavailable limiter. A route the budget ran out on ends `Refused`, its
@@ -89,8 +90,8 @@ by the backup's takeover (ADR-0047). Detail: [appendix X4](appendix/0022-initial
 The per-call dispatcher refuses an event for a call with no queue once the live-queue map is
 at `per_call_queue_cap` (the SDK default 200 000; the runner's `B2BUA_CALL_CAP`, 1 000 000), a normal new INVITE at the cap less the new-call
 headroom (ADR-0037 item 10). No call exists there for X1 or X2 to reach. A refused new INVITE
-gets the X3 503 with a To-tag and a jittered `Retry-After`, through the server transaction
-that carried the 100, counted as a cap-shed new call. Detail: [appendix X6](appendix/0022-initial-invite-final-response-guarantee.md#decision-x6-the-per-call-cap-shed-a-new-invite-at-capacity-gets-a-503-not-a-silent-drop).
+gets the X3 503 with a To-tag and a jittered `Retry-After`, through its server transaction,
+counted as a cap-shed new call. Detail: [appendix X6](appendix/0022-initial-invite-final-response-guarantee.md#decision-x6-the-per-call-cap-shed-a-new-invite-at-capacity-gets-a-503-not-a-silent-drop).
 
 ## Decision X5: HA interaction: reclaim-discharge stays OFF the SIP wire
 

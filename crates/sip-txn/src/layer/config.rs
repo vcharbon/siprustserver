@@ -44,6 +44,15 @@ pub struct TransactionConfig {
     /// this long after its INVITE arrived sends the 100 itself. Default
     /// [`TRYING_BOUND`](crate::timers::TRYING_BOUND); the RFC allows no more.
     pub trying_bound_ms: u64,
+    /// Whether the bound of an initial INVITE (no To-tag) runs from its
+    /// consumer's arming ([`TransactionLayer::arm_trying`](crate::TransactionLayer::arm_trying))
+    /// rather than from its opening: until the consumer arms it or releases
+    /// the 100, the transaction sends nothing and absorbs the INVITE's copies,
+    /// so a previous hop told nothing fails the request over on its own
+    /// timers. An in-dialog INVITE's bound runs from its opening either way.
+    /// `false`, the default, runs every bound from the opening (RFC 3261
+    /// §17.2.1); `true` departs from it until the arming (ADR-0070).
+    pub consumer_arms_initial_trying: bool,
     /// The bound on the hop-by-hop ACK of a client INVITE's first non-2xx
     /// final, ms: the layer holds the ACK until its consumer releases it
     /// ([`TransactionLayer::release_ack`](crate::TransactionLayer::release_ack))
@@ -147,6 +156,7 @@ impl TransactionConfig {
             invite_initial_timeout_ms: crate::timers::INVITE_INITIAL_TIMEOUT,
             invite_first_response_timeout_ms: crate::timers::TIMER_B,
             trying_bound_ms: crate::timers::TRYING_BOUND,
+            consumer_arms_initial_trying: false,
             ack_bound_ms: 0,
             cancel_bound_ms: 0,
             consumer_ends_cancelled_reinvite: false,

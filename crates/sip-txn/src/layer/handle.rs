@@ -379,6 +379,22 @@ impl TransactionLayer {
         self.roundtrip(|reply| Command::ReleaseTrying { key, reply }).await
     }
 
+    /// Arm the §17.2.1 bound of the server INVITE transaction `invite`
+    /// opened, from the instant the layer takes the command: its 100 leaves
+    /// [`trying_bound_ms`](crate::TransactionConfig::trying_bound_ms) later
+    /// unless a release or a response left first. The bound of an initial
+    /// INVITE under
+    /// [`consumer_arms_initial_trying`](crate::TransactionConfig::consumer_arms_initial_trying)
+    /// runs from here alone. A transaction past `Trying`, or none, arms
+    /// nothing. Returns once the command is queued, never awaiting the
+    /// owner's turn.
+    pub async fn arm_trying(&self, invite: &SipRequest) -> Result<(), TransactionLayerClosed> {
+        let Some(key) = ServerTxnId::of_request(invite).map(ServerTxnId::to_key) else {
+            return Ok(());
+        };
+        self.cmd_tx.send(Command::ArmTrying { key }).await.map_err(|_| TransactionLayerClosed)
+    }
+
     /// Release the ACK of the non-2xx final the client INVITE transaction at
     /// `branch` took ([`TransactionConfig::ack_bound_ms`](crate::TransactionConfig)):
     /// it leaves now if it is still held. `true` when it left; `false` when

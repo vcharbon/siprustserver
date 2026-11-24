@@ -121,6 +121,8 @@ pub(super) struct Owner {
     pub(super) invite_first_response_timeout_ms: u64,
     /// [`TransactionConfig::trying_bound_ms`](crate::TransactionConfig).
     pub(super) trying_bound_ms: u64,
+    /// [`TransactionConfig::consumer_arms_initial_trying`](crate::TransactionConfig).
+    pub(super) consumer_arms_initial_trying: bool,
     /// [`TransactionConfig::ack_bound_ms`](crate::TransactionConfig).
     pub(super) ack_bound_ms: u64,
     /// [`TransactionConfig::cancel_bound_ms`](crate::TransactionConfig).
@@ -200,6 +202,7 @@ impl Owner {
             invite_initial_timeout_ms: config.invite_initial_timeout_ms,
             invite_first_response_timeout_ms: config.invite_first_response_timeout_ms,
             trying_bound_ms: config.trying_bound_ms,
+            consumer_arms_initial_trying: config.consumer_arms_initial_trying,
             ack_bound_ms: config.ack_bound_ms,
             cancel_bound_ms: config.cancel_bound_ms,
             consumer_ends_cancelled_reinvite: config.consumer_ends_cancelled_reinvite,

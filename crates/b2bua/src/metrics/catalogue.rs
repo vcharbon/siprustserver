@@ -65,6 +65,7 @@ assert_exposition_order!(
     Unrecoverable,
     EventQueue,
     SetupBudget,
+    StartBound,
     OnSight,
 );
 assert_exposition_order!(Class: Normal, Emergency, InDialog);

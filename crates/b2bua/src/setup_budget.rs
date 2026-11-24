@@ -4,8 +4,10 @@
 //! limiter's admits of the failover chain; one check as the turn starts and one
 //! deadline for every await after it. A caller past her 100 sends nothing more
 //! (RFC 3261 §17.1.1.2), so when it runs out she gets the bare 503 of an
-//! unavailable decision. A value is `Copy`: every await of one turn reads the
-//! same deadline.
+//! unavailable decision. A new call's budget also holds its start bound
+//! (ADR-0070): the turn's wait for its permits ends there, and a turn that
+//! starts past it creates no call. A value is `Copy`: every await of one turn
+//! reads the same deadline.
 
 use std::future::Future;
 use std::time::Duration;
@@ -19,17 +21,26 @@ pub struct SetupBudget {
     received: Option<Instant>,
     /// The instant it runs out; `None` for [`NONE`](Self::NONE).
     due: Option<Instant>,
+    /// The instant past which the turn starts no call; `None` when no start
+    /// bound holds it.
+    start_by: Option<Instant>,
 }
 
 impl SetupBudget {
     /// The budget of a turn that is no setup: nothing to bound, nothing to read.
     /// No consult runs under it: a copy of an INVITE is answered 482 unasked.
-    pub const NONE: Self = Self { received: None, due: None };
+    pub const NONE: Self = Self { received: None, due: None, start_by: None };
 
-    /// The budget running from `received`, `length` long.
+    /// The budget running from `received`, `length` long, with no start bound.
     pub fn from_receipt(received: Instant, length: Duration) -> Self {
         let due = sip_clock::deadline::after(received, length);
-        Self { received: Some(received), due: Some(due) }
+        Self { received: Some(received), due: Some(due), start_by: None }
+    }
+
+    /// This budget, its turn held to start within `bound` of the receipt.
+    pub fn with_start_bound(self, bound: Duration) -> Self {
+        let start_by = self.received.map(|received| sip_clock::deadline::after(received, bound));
+        Self { start_by, ..self }
     }
 
     /// The instant it runs out, when it does.
@@ -37,9 +48,20 @@ impl SetupBudget {
         self.due
     }
 
+    /// The instant the turn stops waiting for its permits: its start bound,
+    /// else the instant the budget runs out.
+    pub fn wait_due(&self) -> Option<Instant> {
+        self.start_by.or(self.due)
+    }
+
     /// Whether it ran out.
     pub fn spent(&self) -> bool {
         self.due.is_some_and(|due| Instant::now() >= due)
+    }
+
+    /// Whether the turn starts at or past its start bound.
+    pub fn started_late(&self) -> bool {
+        self.start_by.is_some_and(|start_by| Instant::now() >= start_by)
     }
 
     /// What is left of it, zero once spent; `None` for [`NONE`](Self::NONE).
@@ -106,7 +128,25 @@ mod tests {
     #[test]
     fn none_bounds_nothing_and_reads_nothing() {
         assert!(!SetupBudget::NONE.spent());
+        assert!(!SetupBudget::NONE.started_late());
         assert_eq!(SetupBudget::NONE.due(), None);
+        assert_eq!(SetupBudget::NONE.wait_due(), None);
         assert_eq!(SetupBudget::NONE.elapsed(), None);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_start_bound_runs_from_the_receipt_and_ends_the_wait() {
+        let received = Instant::now();
+        let budget = SetupBudget::from_receipt(received, 100 * MS);
+        assert_eq!(budget.wait_due(), Some(received + 100 * MS), "no start bound: the budget");
+        let bounded = budget.with_start_bound(40 * MS);
+        assert_eq!(bounded.wait_due(), Some(received + 40 * MS));
+        assert_eq!(bounded.due(), Some(received + 100 * MS), "the budget unchanged");
+        tokio::time::advance(39 * MS).await;
+        assert!(!bounded.started_late());
+        tokio::time::advance(MS).await;
+        assert!(bounded.started_late(), "late at the instant it is due");
+        assert!(!budget.started_late(), "no start bound, never late");
+        assert!(!bounded.spent());
     }
 }

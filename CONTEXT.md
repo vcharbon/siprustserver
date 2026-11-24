@@ -43,6 +43,7 @@ Full definitions: [docs/glossary/retransmission.md](docs/glossary/retransmission
 - **Snooze**: a timer fire a rule puts off by one short step (`RuleAction::SnoozeTimer`), counted per key. Avoid: defer, hold.
 - **Admission ladder**: the ordered rungs that may refuse a new INVITE, ending at the CPS bucket; a refusal draws one 503. ADR-0037.
 - **Copy** (of a new INVITE): an initial INVITE matching a live call's Call-ID, From-tag and CSeq on another branch; answered 482.
+- **Start bound**: how long after its INVITE's receipt a new call's turn may start; past it, a bare 503 and no 100. ADR-0070.
 - **Capacity gate**: the worker's normal and emergency ceilings on calls, transactions and RSS, and the backup ceilings. ADR-0037.
 - **CPS bucket**: the worker's token bucket on new-dialog INVITEs, the admission ladder's last rung. Avoid: overdraft, debt.
 - **Load-shedding primitives**: the token bucket, EWMA, `LoadSampler` seam and `Retry-After` policy every shedding process shares.

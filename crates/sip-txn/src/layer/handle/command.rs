@@ -158,6 +158,12 @@ pub(in crate::layer) enum Command {
         key: ServerTxnKey,
         reply: oneshot::Sender<bool>,
     },
+    /// Arm the §17.2.1 bound of the server INVITE transaction `key` names
+    /// from the instant the owner takes this. Nothing replies: the commands
+    /// sent after it are taken after it.
+    ArmTrying {
+        key: ServerTxnKey,
+    },
     /// Register `call_ref` for a one-shot
     /// [`TransactionEvent::CallQuiesced`](crate::TransactionEvent::CallQuiesced)
     /// when its last serving transaction clears (ADR-0014 self-release): one

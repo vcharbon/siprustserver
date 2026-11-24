@@ -290,6 +290,16 @@ pub struct B2buaConfig {
     /// ([`call_control_timeout`](Self::call_control_timeout), the one reader).
     /// Overridable via `B2BUA_CALL_CONTROL_TIMEOUT_MS`.
     pub call_control_timeout_ms: i64,
+    /// **The start bound** (ms): a new call whose initial INVITE's turn starts
+    /// this long or more after the INVITE's receipt creates no call, asks
+    /// nothing and answers the bare 503 of a refused new call, emergency
+    /// included (ADR-0070). Its caller has heard no 100, so the previous hop
+    /// may have failed the call over already; it sits under that hop's
+    /// failover timer. Default **2000**; [`validate`](Self::validate) refuses a
+    /// value not above zero or not below the setup budget
+    /// ([`call_control_timeout_ms`](Self::call_control_timeout_ms)).
+    /// Overridable via `B2BUA_CALL_START_BOUND_MS`.
+    pub call_start_bound_ms: i64,
     /// **Opt-in transparent header relay.** Header names whose *value* is copied
     /// verbatim from the a-leg INVITE onto every originated b-leg INVITE (the
     /// normal callee leg AND the REFER transfer-target leg — both funnel through
@@ -459,6 +469,17 @@ impl B2buaConfig {
     /// for a reader that runs before the configuration holds it.
     pub fn call_control_timeout_of(ms: i64) -> std::time::Duration {
         let ms = if ms > 0 { ms } else { Self::DEFAULT_CALL_CONTROL_TIMEOUT_MS };
+        std::time::Duration::from_millis(ms.unsigned_abs())
+    }
+
+    /// The start bound ([`call_start_bound_ms`](Self::call_start_bound_ms)),
+    /// never zero: a non-positive value reads the 2 s default.
+    pub fn call_start_bound(&self) -> std::time::Duration {
+        let ms = if self.call_start_bound_ms > 0 {
+            self.call_start_bound_ms
+        } else {
+            Self::DEFAULT_CALL_START_BOUND_MS
+        };
         std::time::Duration::from_millis(ms.unsigned_abs())
     }
 

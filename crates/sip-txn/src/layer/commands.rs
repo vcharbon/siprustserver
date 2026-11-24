@@ -79,6 +79,7 @@ impl Owner {
             Command::ReleaseTrying { key, reply } => {
                 let _ = reply.send(self.send_first_trying(endpoint, key.id()).await);
             }
+            Command::ArmTrying { key } => self.arm_trying_now(key),
             Command::WatchSelfRelease { call_ref, call_ids, reply } => {
                 self.watch_self_release(call_ref, call_ids);
                 let _ = reply.send(());

@@ -29,14 +29,15 @@ pub(crate) struct Turn {
     pub(super) class: DispatchClass,
     /// A new call admitted at ingress, counted until its turn creates it.
     pub(super) unborn: Option<UnbornCall>,
-    /// A setup turn's budget, which ends its wait for its permits; a turn that
-    /// is no setup carries [`SetupBudget::NONE`].
+    /// A setup turn's budget, whose start bound, or else whose end, ends its
+    /// wait for its permits; a turn that is no setup carries
+    /// [`SetupBudget::NONE`].
     pub(super) budget: SetupBudget,
 }
 
 impl Runnable for Turn {
     fn due_by(&self) -> Option<Instant> {
-        self.budget.due()
+        self.budget.wait_due()
     }
 
     fn into_body(self) -> DispatchBody {

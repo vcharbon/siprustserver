@@ -151,7 +151,26 @@ check. These refuse it:
 - a full call table;
 - a backlog at twice the normal limit;
 - a cordoned worker;
+- a call that starts after its start bound;
 - a spent setup budget, or a decision backend that is down.
+
+## When the worker sends 100 Trying
+
+The worker sends 100 Trying for a new call only when it starts the call (ADR-0070):
+
+- The worker creates the call and writes it to its backup. The 100 leaves when the backup
+  applied the write, at the sync cap, or at once for a call with no backup.
+- The worker then sends the request to the decision backend. If the 100 did not leave
+  200 ms after this request, the transaction layer sends it.
+- Before this point, the worker sends nothing. The caller retransmits its INVITE. The
+  previous hop, for example the SBC, can then send the call to a different worker on its own
+  timer.
+- A call that starts 2 s or more after the worker received its INVITE
+  (`B2BUA_CALL_START_BOUND_MS`) gets 503, and the worker calls no callee. This applies to
+  emergency calls too. Set the start bound below the timer at which the SBC sends the call to
+  a different worker.
+
+A re-INVITE gets its 100 Trying 200 ms after the worker received it, at the latest.
 
 ## The first INVITE always gets a final response
 
@@ -162,7 +181,7 @@ the worker dies, the backup of the call keeps the promise. A call with no backup
 
 - One setup budget of 5 s (`B2BUA_CALL_CONTROL_TIMEOUT_MS`) runs from the receipt of the INVITE.
   It covers the wait for a slot, each request to the decision backend, each limiter request and
-  the retries on other routes.
+  the retries on other routes. The wait for a slot stops at the start bound.
 - When the budget is spent, the caller gets 503. With replication on, the 503 can leave up to
   100 ms later, at the sync cap.
 - A call that ends unanswered for a different internal reason gets the same 503 from one last

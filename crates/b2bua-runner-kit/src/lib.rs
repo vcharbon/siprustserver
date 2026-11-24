@@ -319,6 +319,7 @@ impl RunnerEnv {
             invite_txn_timeout_sec: self.invite_txn_timeout_sec,
             invite_first_response_timeout_sec: self.invite_first_response_timeout_sec,
             call_control_timeout_ms: self.call_control_timeout_ms,
+            call_start_bound_ms: self.call_start_bound_ms,
             ack_timeout_sec: self.ack_timeout_sec,
             cps_bucket_size: self.cps_bucket_size,
             cps_bucket_rate: self.cps_bucket_rate,

@@ -197,12 +197,15 @@ async fn a_new_request_on_a_live_calls_identity_is_answered_retry_later() {
 }
 
 /// The caller CANCELs its retry while it waits for the challenged call's
-/// release (RFC 3261 §9.1): the challenged call's removal leaves the retry's
-/// cancellation standing, so the retry is born cancelled, asks no decision
-/// and never reaches the callee. Each attempt writes its CDR.
+/// release: the challenged call's removal leaves the retry's cancellation
+/// standing, so the retry is born cancelled, asks no decision and never
+/// reaches the callee. Each attempt writes its CDR.
 #[tokio::test(start_paused = true)]
 async fn a_retry_canceled_while_waiting_for_the_release_is_not_routed() {
     let (s, held, open) = challenged_scene("retry-canceled-behind-release").await;
+    let why = "the caller CANCELs its retry before any provisional (RFC 3261 §9.1): a retry \
+               waiting behind the release sends no 100 (ADR-0070), so only such a CANCEL meets it";
+    s.h.waive(WaiverScope::rule("cancel-after-1xx", why).on_party("alice"));
     challenge_the_first_invite(&s, &held).await;
     let mut retry = send_the_retry(&s).await;
     s.h.advance(TRANSIT).await;

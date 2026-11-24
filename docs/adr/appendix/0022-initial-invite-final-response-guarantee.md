@@ -44,10 +44,10 @@ decision deadline, so `call_refer` passes straight through the wrapper.
 
 The setup budget bounds the whole setup on an initial INVITE's turn, not each round trip: a
 caller behind the 100 waits for all of it together. The transaction absorbs a retransmission
-(RFC 3261 §17.2.3). A copy on a new branch (§8.2.2.2) opened a transaction of its own and
-heard its own 100. It is no new call, but its turn stops waiting at its own budget and
-answers its 482. A turn that stops waiting at the deadline (`Runnable::due_by`) and finds its
-budget spent has its call born only to write its record, and the INVITE is counted once. A
+(RFC 3261 §17.2.3). A copy on a new branch (§8.2.2.2) opened a transaction of its own. It is
+no new call, but its turn stops waiting at its own start bound and answers its 482. A turn
+that stops waiting at its start bound (`Runnable::due_by`, ADR-0070), its caller having heard
+no 100, has its call born only to write its record, and the INVITE is counted once. A
 setup its caller CANCELed first gets no second final. The budget is no admission rung, since
 a caller left waiting serves nobody. `DeadlineDecisionEngine` is the one bound on a round
 trip, failing `Unavailable` at the deadline and asking nothing once the budget is spent. A
@@ -132,7 +132,7 @@ A non-INVITE response answers a client transaction only its sender holds
 A caller that heard the worker's 100 sends no retransmission that could re-place
 its call: its client transaction is `Proceeding`, which runs no Timer B. The
 platform answers it without a message from it (ADR-0047): a new call is written
-to its backup at its birth, one replication stream hop after the 100
+to its backup at its birth, the 100 leaving behind that write (ADR-0070)
 (`failover-harness/tests/it/new_call_replication_window.rs`), and when its worker
 leaves the membership set the backup takes over every call with an INVITE in
 flight, answering one still waiting on its routing decision with a 503
@@ -156,11 +156,11 @@ synthesis to ride.
 The refusal of a **new INVITE** there is the at-cap cell of its row in the
 dispatch table (`dispatch/class.rs`): the offer hands the INVITE back owing the
 new-call 503 (X3) — a To-tag, a jittered `Retry-After`, no `Reason`, no per-call
-state born — which the router sends through the INVITE server txn that carried
-the 100, counted as a cap-shed new call. The rest of the table answers the
+state born — which the router sends through the INVITE server txn, counted as a
+cap-shed new call. The rest of the table answers the
 other events refused there: a non-INVITE request has its server transaction
 forgotten, so its retransmission is admitted again once the cap frees; an
-in-dialog INVITE — silenced by its 100 like the initial one — is answered 500
+in-dialog INVITE — silenced by its 100 at its §17.2.1 bound — is answered 500
 with a `Retry-After`. The threshold check and the creation of a queue happen in
 one offer under the dispatcher's map lock, so no other offer can take the last
 place between them. This path is unreachable under sane tuning (the

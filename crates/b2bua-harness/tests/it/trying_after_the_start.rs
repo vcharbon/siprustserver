@@ -5,7 +5,8 @@
 //! timers fail the call over. A turn that starts inside the start bound, counted
 //! from the INVITE's receipt, sends the 100 and the call goes on. A turn past it
 //! dials no one and answers the bare 503 of a refused new call. An emergency
-//! INVITE is held to the same bound.
+//! INVITE is held to the same bound. A re-INVITE keeps its §17.2.1 bound from
+//! its receipt (ADR-0070).
 //!
 //! Every call here ends fully: a refused call with its CDR, an answered one
 //! hung up by its caller.
@@ -13,6 +14,7 @@
 use std::time::Duration;
 
 use b2bua::admission::Class;
+use b2bua::config::B2buaConfig;
 use b2bua::decision::ScriptedDecisionEngine;
 use b2bua::new_calls::Refusal;
 use b2bua::TurnProbes;
@@ -29,8 +31,13 @@ const TRANSIT: Duration = Duration::from_millis(100);
 /// RFC 3261 T1: the caller's first INVITE retransmission is due this long
 /// after the INVITE, the second 2·T1 after the first (Timer A, §17.1.1.2).
 const T1: Duration = Duration::from_millis(500);
+/// RFC 3261 §17.2.1: the bound on an INVITE's first provisional.
+const TRYING_BOUND: Duration = Duration::from_millis(200);
+/// How far either side of its due instant a response is read.
+const MARGIN: Duration = Duration::from_millis(20);
 /// The start bound at its default.
-const START_BOUND: Duration = Duration::from_millis(2_000);
+const START_BOUND: Duration =
+    Duration::from_millis(B2buaConfig::DEFAULT_CALL_START_BOUND_MS.unsigned_abs());
 /// How long the router stays wedged, from the INVITE's send, for a turn that
 /// starts well inside the start bound: past the layer's 200 ms and the first
 /// retransmission.
@@ -164,8 +171,35 @@ async fn past_the_start_bound(name: &str, class: Class) {
     assert_eq!(cdr.termination.as_ref().map(|t| t.cause), Some(TerminationCause::Admission));
     let counts = s.b2bua.new_calls();
     assert_eq!(counts.accepted(class), 0, "not an accepted call");
+    assert_eq!(counts.rejected(Refusal::StartBound, class), 1, "refused at its start bound");
     assert_eq!(counts.rejected(Refusal::SetupBudget, class), 0, "inside its setup budget");
     assert_eq!(counts.rejected_sum(), 1, "a refused new call, counted once");
+    let _ = s.finish().await;
+}
+
+/// A re-INVITE keeps the §17.2.1 bound from its receipt: behind a wedged router
+/// its 100 leaves 200 ms after it arrived, and once the router runs the
+/// re-INVITE is relayed and answered as any other.
+#[tokio::test(start_paused = true)]
+async fn a_reinvite_behind_a_wedged_router_hears_its_100_at_the_bound() {
+    let pace = RouterPace::new();
+    let s = scene("trying-reinvite-at-the-bound", &pace).await;
+    let mut dialog = s.establish().await;
+    pace.set(NODE, Pace::Frozen);
+    let mut reinvite = dialog.reinvite(Some(OFFER_SDP)).await;
+    let cseq = dialog.local_cseq();
+    s.h.advance(TRANSIT + TRYING_BOUND - MARGIN).await;
+    assert!(s.alice.take_queued().await.is_none(), "no 100 before the bound");
+    s.h.advance(MARGIN * 2 + TRANSIT).await;
+    reinvite.expect(100).await;
+
+    pace.set(NODE, Pace::Free);
+    let mut uas = s.bob.receive("INVITE").await;
+    uas.respond(200, "OK").with_sdp(ANSWER_SDP).await;
+    reinvite.expect(200).await;
+    dialog.ack_for(cseq, None).await;
+    s.bob.receive("ACK").await;
+    hangup(&mut dialog, &s.bob).await;
     let _ = s.finish().await;
 }
 

@@ -46,4 +46,8 @@ impl B2buaConfig {
     /// Default [`call_control_timeout_ms`](Self::call_control_timeout_ms)
     /// (ms).
     pub const DEFAULT_CALL_CONTROL_TIMEOUT_MS: i64 = 5_000;
+    /// Default [`call_start_bound_ms`](Self::call_start_bound_ms) (ms): under
+    /// any plausible failover timer of the previous hop, and above the worst
+    /// 100 delay a worker at three times its capacity shows.
+    pub const DEFAULT_CALL_START_BOUND_MS: i64 = 2_000;
 }

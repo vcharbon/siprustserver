@@ -239,7 +239,21 @@ fn nonpositive_call_control_timeout_is_rejected() {
         let e = c.validate().expect_err("a non-positive setup budget must be rejected");
         assert!(e.contains("B2BUA_CALL_CONTROL_TIMEOUT_MS"), "msg was: {e}");
     }
-    assert!(B2buaConfig { call_control_timeout_ms: 1, ..Default::default() }.validate().is_ok());
+    let shortest =
+        B2buaConfig { call_control_timeout_ms: 2, call_start_bound_ms: 1, ..Default::default() };
+    assert!(shortest.validate().is_ok());
+}
+
+#[test]
+fn a_start_bound_not_inside_the_setup_budget_is_rejected() {
+    assert_eq!(B2buaConfig::default().call_start_bound_ms, 2_000);
+    for bad in [0, -1, 5_000, 6_000] {
+        let c = B2buaConfig { call_start_bound_ms: bad, ..Default::default() };
+        let e = c.validate().expect_err("a start bound outside the setup budget is rejected");
+        assert!(e.contains("B2BUA_CALL_START_BOUND_MS"), "msg was: {e}");
+    }
+    let c = B2buaConfig { call_start_bound_ms: 4_999, ..Default::default() };
+    assert!(c.validate().is_ok());
 }
 
 #[test]
