@@ -153,8 +153,6 @@ async fn initial_invite_at_the_per_call_cap_is_shed_503_not_dropped() {
     let mut d1 = establish(&alice, &bob, b2bua.addr).await;
     settle_until(|| b2bua.active_calls() == 1).await;
 
-    // Call 2 is a brand-new INVITE while the map is at cap → the shed rung's
-    // 503, never a silent drop.
     let mut call2 = carol.invite(&bob).with_sdp(OFFER_SDP).through(b2bua.addr).send().await;
     h.advance(Duration::from_millis(500)).await;
     call2.expect(503).await;

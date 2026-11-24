@@ -43,7 +43,9 @@ pub(super) enum Turn {
 
 /// The initial-INVITE turn: the admission ladder's router rungs admitted it
 /// at ingress (`super::admit`, ADR-0037); here the store-fault probe, the
-/// identity guard, then build + rule the new call. A setup its caller
+/// identity guard, then build + rule the new call. The probe runs before the
+/// guard's store read, which a faulted store cannot answer: it refuses the
+/// INVITE 500, its first response, and no call is born (ADR-0023). A setup its caller
 /// CANCELed before this turn ran is born and ruled by no one: no decision, no
 /// limiter admit. A setup whose turn starts past its start bound, or whose
 /// budget ran out before this turn ran, is refused as an unavailable decision,
@@ -72,13 +74,7 @@ pub(super) async fn initial_invite_turn(
     admitted: Option<(UnbornCall, SetupBudget)>,
     turn: &mut TurnScope,
 ) -> Turn {
-    // ── Live-path store-fault probe (ADR-0023): initial INVITE ──────────────
-    // The dialog-existence lookup (the `peek` identity guard below) is the
-    // store read this INVITE depends on; a faulted store cannot answer "does
-    // this dialog already exist", so the probe fires BEFORE the peek (its
-    // answer is untrustworthy under a fault). Fail CLOSED: a final **500
-    // Server Internal Error** through the INVITE server txn — the caller's
-    // first response, no 100 before it (ADR-0070) — and NO call state is born.
+    // ADR-0023
     let class = class_of(req);
     let cseq = req.cseq().seq();
     // A turn with no admission hold is a copy, offered unjudged: never a new

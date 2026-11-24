@@ -25,7 +25,7 @@ use sip_retransmit::{Class, Ladder, Schedule};
 use super::backlog::NewInvite;
 use super::call_id_budget::Retired;
 use super::copy_gate::opening_copies;
-use super::key::ServerTxnId;
+use super::key::{ServerTxnId, ServerTxnKey};
 use super::lifetime::Hold;
 use super::owner::Owner;
 use super::txn::{NewTransaction, Timer, TxnId, TxnRef, TxnState};
@@ -317,11 +317,6 @@ impl Owner {
             self.arm_trying_bound(id.to_key(), opened);
         }
 
-        // Critical for INVITE: once its 100 leaves, the UAC stops
-        // retransmitting, so this Message is the app's ONLY notice of the call. A non-INVITE the
-        // full queue drops is not admitted: its transaction is forgotten, so the
-        // UAC's Timer E copy (§17.1.2.2; UDP-only, ADR-0027) is admitted afresh
-        // rather than absorbed unanswered by a Trying transaction.
         let forgettable = (!is_invite).then(|| id.to_key());
         let event = TransactionEvent::Message {
             message: Box::new(SipMessage::Request(req)),
@@ -330,11 +325,28 @@ impl Owner {
             datagram,
             opened_at,
         };
-        if is_invite {
-            self.emit_critical(event);
-        } else if !self.emit(event) {
-            if let Some(key) = forgettable {
-                self.forget_unqueued(key.id(), continued);
+        self.hand_up_opened(event, forgettable, continued);
+    }
+
+    /// Hand the request a new server transaction opened on up as `event`.
+    /// `forgettable` names a non-INVITE's transaction: one a full queue drops
+    /// is not admitted but forgotten, so the UAC's Timer E copy (§17.1.2.2;
+    /// UDP-only, ADR-0027) is admitted afresh rather than absorbed unanswered
+    /// by a `Trying` transaction. An INVITE's (`None`) is never dropped: its
+    /// transaction absorbs its copies, so it is the consumer's only notice of
+    /// the call.
+    fn hand_up_opened(
+        &mut self,
+        event: TransactionEvent,
+        forgettable: Option<ServerTxnKey>,
+        continued: bool,
+    ) {
+        match forgettable {
+            None => self.emit_critical(event),
+            Some(key) => {
+                if !self.emit(event) {
+                    self.forget_unqueued(key.id(), continued);
+                }
             }
         }
     }

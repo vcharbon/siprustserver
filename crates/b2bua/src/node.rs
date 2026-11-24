@@ -324,11 +324,7 @@ impl B2buaCore {
         // `tune` seam ran in `spawn_b2bua_core` before this). Must happen before
         // `config` is moved into the ctx below.
         overload.configure_admission(&config);
-        // Decision-backend deadline (ADR-0022): bound EVERY engine round-trip so
-        // a hung adapter cannot wedge a per-call worker past
-        // `call_control_timeout_ms` — a consulted caller heard her 100 and must
-        // get her final. Wrapped HERE, after the `tune` seam finalized the config, so
-        // no injection path bypasses it.
+        // ADR-0022
         let decision =
             crate::decision::DeadlineDecisionEngine::wrap(decision, config.call_control_timeout());
         // The worker's handle on its call limiter: the lease, the release
