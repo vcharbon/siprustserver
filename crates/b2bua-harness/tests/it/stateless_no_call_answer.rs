@@ -5,8 +5,10 @@
 //! copy of the request finds no transaction, reaches the router again and
 //! draws the same answer under the same To-tag.
 //!
-//! Each shape is read 1 s after its request left, long before Timer J
-//! (64·T1 = 32 s) or Timer I (T4 = 5 s) would end a transaction.
+//! Each shape's state is read about 1 s after its request left, long before
+//! Timer J (64·T1 = 32 s) or Timer I (T4 = 5 s) would end a transaction. The
+//! answers are read on the recorded wire: a UA's stack absorbs a repeated
+//! final.
 
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -14,10 +16,14 @@ use std::time::Duration;
 use b2bua::config::Ceilings;
 use b2bua_harness::{settle_until, B2buaScene, B2buaSut};
 use scenario_harness::{Agent, Harness};
-use sip_message::{SipMessage, SipResponse};
+use sip_message::parser::custom::CustomParser;
+use sip_message::{SipMessage, SipParser, SipResponse};
 
 /// Long enough for the answer to come back, far short of Timer I and Timer J.
 const BEFORE_ANY_TIMER: Duration = Duration::from_millis(1000);
+/// The answer's round trip (two transits of 100 ms), short of Timer G's first
+/// re-send of an INVITE's final (T1 = 500 ms, RFC 3261 §17.2.1).
+const BEFORE_TIMER_G: Duration = Duration::from_millis(300);
 
 /// A request written by hand: the ones a stack keeps for a dialog it holds
 /// would never be sent for one it does not.
@@ -103,25 +109,35 @@ impl Stray {
 }
 
 /// `alice` sends `stray` to `b2bua` and reads, after [`BEFORE_ANY_TIMER`],
-/// every response whose CSeq names its method.
+/// every response `b2bua` sent her on the recorded wire since, whose CSeq
+/// names its method: the wire, not her queue, so a repeated final her stack
+/// absorbs is counted too.
 async fn send(h: &Harness, alice: &Agent, b2bua: SocketAddr, stray: &Stray) -> Vec<SipResponse> {
+    let mark = h.wire_entries().len();
     alice.try_send_datagram(&stray.wire(alice.addr()), b2bua).await.expect("the request leaves");
-    responses_to(h, alice, stray.method).await
+    h.advance(BEFORE_ANY_TIMER).await;
+    alice.drain().await;
+    answers_since(h, alice, b2bua, mark, stray.method)
 }
 
-/// Every response queued at `agent` whose CSeq names `method`, after the
-/// fabric has had [`BEFORE_ANY_TIMER`] to deliver.
-async fn responses_to(h: &Harness, agent: &Agent, method: &str) -> Vec<SipResponse> {
-    h.advance(BEFORE_ANY_TIMER).await;
-    let mut out = Vec::new();
-    while let Some(msg) = agent.take_queued().await {
-        if let SipMessage::Response(r) = msg {
-            if r.cseq().method().as_str() == method {
-                out.push(r);
-            }
-        }
-    }
-    out
+/// The responses `b2bua` sent `alice` on the recorded wire past entry `mark`
+/// whose CSeq names `method`.
+fn answers_since(
+    h: &Harness,
+    alice: &Agent,
+    b2bua: SocketAddr,
+    mark: usize,
+    method: &str,
+) -> Vec<SipResponse> {
+    h.wire_entries()
+        .into_iter()
+        .skip(mark)
+        .filter(|e| e.from == b2bua && e.to == alice.addr())
+        .filter_map(|e| match CustomParser::new().parse(&e.raw) {
+            Ok(SipMessage::Response(r)) if r.cseq().method().as_str() == method => Some(r),
+            _ => None,
+        })
+        .collect()
 }
 
 fn statuses(responses: &[SipResponse]) -> Vec<u16> {
@@ -184,6 +200,10 @@ async fn a_bye_naming_no_dialog_leaves_no_transaction_and_counts_against_no_new_
 async fn a_tagged_request_of_any_method_naming_no_dialog_leaves_no_transaction() {
     let s = B2buaScene::new("b2bua-stateless-no-call-tagged").await;
     s.h.allow_violation("mid-dialog-tags", "requests in a dialog no party holds are under test");
+    s.h.allow_violation(
+        "no-to-tag-on-initial-request",
+        "a tagged request in a dialog no party holds is under test",
+    );
     let shapes: [(&'static str, &'static [&'static str]); 6] = [
         ("INFO", &[]),
         ("UPDATE", &["Contact: <sip:alice@192.0.2.10>"]),
@@ -303,15 +323,29 @@ async fn a_bye_whose_call_ref_names_no_call_leaves_no_transaction() {
 async fn a_tagged_invite_naming_no_dialog_answered_before_its_100_leaves_no_transaction() {
     let s = B2buaScene::new("b2bua-stateless-no-call-invite").await;
     s.h.allow_violation("mid-dialog-tags", "a re-INVITE in a dialog no party holds is under test");
+    s.h.allow_violation(
+        "no-to-tag-on-initial-request",
+        "a tagged INVITE in a dialog no party holds is under test",
+    );
     let invite = Stray::new("INVITE", s.b2bua.addr, "no-dialog-invite")
         .tagged("b-gone")
         .with(&["Contact: <sip:alice@192.0.2.10>"]);
 
-    let answer = send(&s.h, &s.alice, s.b2bua.addr, &invite).await;
+    let mark = s.h.wire_entries().len();
+    let wire = invite.wire(s.alice.addr());
+    s.alice.try_send_datagram(&wire, s.b2bua.addr).await.expect("the INVITE leaves");
+    s.h.advance(BEFORE_TIMER_G).await;
+    let answer = answers_since(&s.h, &s.alice, s.b2bua.addr, mark, "INVITE");
     assert_eq!(statuses(&answer), vec![481], "no 100 before the 481 (§8.2.7), RFC 3261 §12.2.2");
     let ack = invite.ack_of(s.alice.addr(), &answer[0]);
     s.alice.try_send_datagram(&ack, s.b2bua.addr).await.expect("the ACK leaves");
     s.h.advance(BEFORE_ANY_TIMER).await;
+    s.alice.drain().await;
+    assert_eq!(
+        statuses(&answers_since(&s.h, &s.alice, s.b2bua.addr, mark, "INVITE")),
+        vec![481],
+        "the 481 leaves once (§8.2.7)"
+    );
     assert_eq!(
         live_transactions(&s.b2bua),
         0,
