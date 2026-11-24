@@ -49,8 +49,8 @@ async fn cps_bucket_empty_503s_a_new_invite_before_any_call_state() {
 
     let mut call = alice.invite(&_bob).with_sdp(OFFER).through(b2bua.addr).send().await;
 
-    // The bucket rung refuses: the caller's INVITE gets a 503 (after the txn
-    // layer's absorbed auto-100). It carries a Retry-After, no Reason, and a
+    // The bucket rung refuses: the caller's INVITE gets a 503, no 100 before
+    // it. It carries a Retry-After, no Reason, and a
     // To-tag (this codebase tags every non-100 final); the rejecting INVITE
     // server txn absorbs the ACK, and no call state exists.
     let resp = call.expect(503).await;

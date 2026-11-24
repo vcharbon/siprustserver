@@ -14,7 +14,7 @@ fn a_start_bound_and_sync_cap_past_the_setup_budget_are_refused() {
     let write_path = WritePath::default();
     let mut check = ConfigCheck::new();
     check.start_and_sync_fit_the_budget(&B2buaConfig::default(), &write_path);
-    assert!(check.into_result().is_ok(), "2000 + 100 ms fit the 5000 ms budget");
+    assert!(check.into_result().is_ok(), "4000 + 100 ms fit the 5000 ms budget");
 
     let config = B2buaConfig { call_start_bound_ms: 4_900, ..B2buaConfig::default() };
     let mut check = ConfigCheck::new();

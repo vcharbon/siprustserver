@@ -28,8 +28,9 @@ that the hop's own timer (Timer B, or an SBC's reroute timer) sends the call els
 2. **The anchor.** The initial INVITE's turn creates the call, offers its creation write to
    its backup when it has one, queues the 100 behind that write (the existing rider), and
    arms the bound in the poll that sends the decision request. The anchor sits as close to the
-   HTTP request as the code allows: the arming is a queued command with no reply, so no await
-   of the owner's turn sits between it and the request. The 100 then leaves at the earliest of
+   HTTP request as the code allows: the arming is a queued command with no reply, which waits
+   only for room in the layer's command channel (1024 commands), never for the owner's turn.
+   The 100 then leaves at the earliest of
    the rider's release (the backup applied the write, the sync cap passed, or at once with no
    backup) and 200 ms after the arming. A backup that never answers, an outbox that does not
    drain and an unbacked call each still get their 100.
@@ -92,6 +93,8 @@ that the hop's own timer (Timer B, or an SBC's reroute timer) sends the call els
   which may ring a callee the previous hop already rerouted to.
 - The copies of a call whose primary died before its turn go to the cookie's backup, which
   holds no record and drops each one unanswered.
+- A caller who heard her 100 and whose worker dies during the consult gets the bare 503 when
+  the re-ask starts past the start bound (item 4), where she was served before.
 - A CANCEL that meets a turn waiting for its permit comes from a caller that broke §9.1.
 - Residuals: a call ended with `Caller::Leave` (the stuck-poll discharge, an unrecoverable
   record, an ended body, a reclaim's ending); an unbacked call whose worker dies after its

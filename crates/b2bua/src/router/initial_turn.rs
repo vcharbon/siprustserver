@@ -47,10 +47,11 @@ pub(super) enum Turn {
 /// CANCELed before this turn ran is born and ruled by no one: no decision, no
 /// limiter admit. A setup whose turn starts past its start bound, or whose
 /// budget ran out before this turn ran, is refused as an unavailable decision,
-/// its call born only to write its record, the first with no 100 (ADR-0070);
-/// so is an INVITE refused on sight ([`crate::initial_invite::OnSight`]), which
-/// no decision is asked for and which is no admitted call. A consulted call
-/// arms its caller's fallback 100 as its decision request leaves. The probe's
+/// its call born only to write its record; so is an INVITE refused on sight
+/// ([`crate::initial_invite::OnSight`]), which no decision is asked for and
+/// which is no admitted call. Only a consulted call sends its caller a 100
+/// (ADR-0070): behind its creation write, or at the fallback bound armed as
+/// its decision request leaves. The probe's
 /// 500, the identity guard's 500, the cancelled setup, the cordon's, the start
 /// bound's or the budget's 503, the refusal on sight, or the accept counts the INVITE's outcome once
 /// ([`crate::new_calls`]); a copy is answered 482 and refused as a copy.
@@ -76,9 +77,8 @@ pub(super) async fn initial_invite_turn(
     // store read this INVITE depends on; a faulted store cannot answer "does
     // this dialog already exist", so the probe fires BEFORE the peek (its
     // answer is untrustworthy under a fault). Fail CLOSED: a final **500
-    // Server Internal Error** through the INVITE server txn — superseding the
-    // auto-100, composing with the ADR-0022 no-100-then-silence guarantee —
-    // and NO call state is born.
+    // Server Internal Error** through the INVITE server txn — the caller's
+    // first response, no 100 before it (ADR-0070) — and NO call state is born.
     let class = class_of(req);
     let cseq = req.cseq().seq();
     // A turn with no admission hold is a copy, offered unjudged: never a new
@@ -167,6 +167,7 @@ pub(super) async fn initial_invite_turn(
     } else {
         crate::initial_invite::OnSight::of(&call, &caller)
     };
+    let consults = !(cancelled || cordoned || late || spent) && on_sight.is_none();
     if cancelled {
         ctx.metrics.new_calls().cancel(class);
     } else if cordoned {
@@ -200,15 +201,11 @@ pub(super) async fn initial_invite_turn(
     }
     let backed = ctx.state.admit_backup(call_ref, topology.as_ref());
     ctx.state.create(call.clone(), topology);
-    // The caller's 100 follows the call's creation write through the call's
-    // outbox, so the backup holds the call from before the caller stops
-    // retransmitting, not from its decision (ADR-0047, ADR-0055 §3); the
-    // transaction layer sends it itself at the §17.2.1 bound.
     if backed {
         ctx.state.flush(&call);
     }
-    if !late {
-        behind_the_write(ctx, call_ref, Rider::Trying(Box::new(req.clone()))).await;
+    if consults {
+        trying_behind_the_creation_write(ctx, call_ref, req).await;
     }
     // Born: the call counts as live from here.
     drop(unborn);
@@ -299,6 +296,20 @@ pub(super) async fn initial_invite_turn(
         Ok(result) => Turn::Result(Box::new(result)),
         Err(tripped) => Turn::Tripped(tripped),
     }
+}
+
+/// Queue the caller's 100 for her INVITE `invite` behind the creation write of
+/// `call_ref`, through the call's outbox, so the backup holds the call from
+/// before the caller stops retransmitting, not from its decision (ADR-0047,
+/// ADR-0055 §3). Only a call that consults queues it: no 100 leaves before
+/// the consult (ADR-0070), where the fallback bound is armed too
+/// ([`arm_the_fallback_100`]).
+async fn trying_behind_the_creation_write(
+    ctx: &Arc<RouterCtx>,
+    call_ref: &str,
+    invite: &SipRequest,
+) {
+    behind_the_write(ctx, call_ref, Rider::Trying(Box::new(invite.clone()))).await;
 }
 
 /// Arm the fallback 100 of the caller's INVITE `invite` (ADR-0070 §2), in the

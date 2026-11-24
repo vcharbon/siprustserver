@@ -50,7 +50,7 @@ call is sampled nothing revokes it.
    malformed value falls back to the configured rate against
    `trace_header_malformed_total`.
 3. **Engine force-enable** — return `"trace": true` on the `RouteDecision`. This
-   backfills: the INVITE, the auto-100 and the decision round trip are recorded
+   backfills: the INVITE, the 100 Trying and the decision round trip are recorded
    with their ORIGINAL timestamps, so the span is complete despite activating
    late.
 

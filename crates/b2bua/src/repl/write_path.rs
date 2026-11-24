@@ -44,7 +44,8 @@ pub struct WritePath {
     /// The longest an outbox entry waits for its backup to apply the call's
     /// write, counted from its own enqueue. Under T1, so a held answer leaves
     /// before its peer's first retransmission, and under the §17.2.1 bound,
-    /// so a released 100 leaves before the transaction layer's own. Checked
+    /// so a re-INVITE's released 100 leaves before the transaction layer's
+    /// own (an initial INVITE's bound runs from its consult, ADR-0070). Checked
     /// at both levels, so a level change never makes a refused setting valid.
     pub sync_cap: Duration,
     /// The longest the transaction layer holds the hop-by-hop ACK of a

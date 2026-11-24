@@ -3,7 +3,7 @@
 //! A proxy that synthesized the RFC 3261 §17.1.1.3 hop-by-hop ACK the moment it
 //! relayed a non-2xx INVITE final upstream would quench the worker's §17.2.1
 //! Timer G — the ONLY retransmitter of the final in the whole system (the
-//! worker's auto-100 already silences the caller's INVITE Timer A) — while the
+//! worker's 100 already silences the caller's INVITE Timer A) — while the
 //! relay itself sends each copy once (the proxy is transaction-less, ADR-0022
 //! X4). Lose that single relayed copy and the caller never sees the reject at
 //! all: nothing retransmits, the caller wedges to Timer B / the 32 s safety

@@ -317,7 +317,7 @@ impl Owner {
             self.arm_trying_bound(id.to_key(), opened);
         }
 
-        // Critical for INVITE: the 100 the bound sends stops the UAC
+        // Critical for INVITE: once its 100 leaves, the UAC stops
         // retransmitting, so this Message is the app's ONLY notice of the call. A non-INVITE the
         // full queue drops is not admitted: its transaction is forgotten, so the
         // UAC's Timer E copy (§17.1.2.2; UDP-only, ADR-0027) is admitted afresh

@@ -40,7 +40,8 @@ round trips with their retries, the limiter's admits and the failover chain they
 
 - **At the permit.** A turn stops waiting at its start bound (ADR-0070) and runs holding no
   permit. A turn past it asks nothing: its caller gets the X3 503, counted `start_bound` on
-  `b2bua_new_calls_total` (`setup_budget` once spent). A setup its caller CANCELed first ends as
+  `b2bua_new_calls_total` (`setup_budget` once spent: a guard, since the start bound is
+  validated under the budget). A setup its caller CANCELed first ends as
   cancelled. No ADR-0037 rung reads the budget, and an emergency INVITE is held to it too.
 - **On the turn.** A consult is bounded by what is left of the budget, and each route's admit
   is cut there as an unavailable limiter. A route the budget ran out on ends `Refused`, its

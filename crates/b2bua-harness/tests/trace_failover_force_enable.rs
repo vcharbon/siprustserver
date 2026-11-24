@@ -11,7 +11,7 @@
 //!
 //! The configured rate is zero, so nothing here is drawn: every fact recorded
 //! below exists because the failover route asked for it. The backfill still owes
-//! the whole story — the INVITE the call arrived on, the auto-100 already sent,
+//! the whole story — the INVITE the call arrived on, the 100 Trying already sent,
 //! and the consult that turned tracing on.
 //!
 //! The trace registry is process-wide, so this file holds exactly ONE test and
@@ -100,7 +100,7 @@ async fn a_failover_route_turns_the_trace_on_and_backfills_the_call() {
     );
     assert!(
         log.matching("kind=sip.out").iter().any(|e| e.contains("100 Trying")),
-        "so is the auto-100 the transaction layer had already sent"
+        "so is the 100 Trying the caller had already heard"
     );
 
     // ── …including the consult that caused the activation ────────────────────

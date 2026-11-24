@@ -326,8 +326,8 @@ impl B2buaCore {
         overload.configure_admission(&config);
         // Decision-backend deadline (ADR-0022): bound EVERY engine round-trip so
         // a hung adapter cannot wedge a per-call worker past
-        // `call_control_timeout_ms` — the caller heard the auto-100 and must get
-        // its final. Wrapped HERE, after the `tune` seam finalized the config, so
+        // `call_control_timeout_ms` — a consulted caller heard her 100 and must
+        // get her final. Wrapped HERE, after the `tune` seam finalized the config, so
         // no injection path bypasses it.
         let decision =
             crate::decision::DeadlineDecisionEngine::wrap(decision, config.call_control_timeout());

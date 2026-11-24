@@ -473,7 +473,8 @@ impl B2buaConfig {
     }
 
     /// The start bound ([`call_start_bound_ms`](Self::call_start_bound_ms)),
-    /// never zero: a non-positive value reads the 2 s default.
+    /// never zero: a non-positive value reads
+    /// [`DEFAULT_CALL_START_BOUND_MS`](Self::DEFAULT_CALL_START_BOUND_MS).
     pub fn call_start_bound(&self) -> std::time::Duration {
         let ms = if self.call_start_bound_ms > 0 {
             self.call_start_bound_ms

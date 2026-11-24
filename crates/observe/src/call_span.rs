@@ -3,7 +3,7 @@
 //! ONE root span per call per node, opened only for an admitted call and
 //! closed at the call's terminal state or reap. Detail rides as span EVENTS
 //! carrying `at_ms` — when the fact HAPPENED — so a backfilled activation
-//! records the INVITE, the auto-100 and the decision round trip at their
+//! records the INVITE, the 100 Trying and the decision round trip at their
 //! original times rather than at activation time. Child spans exist only for
 //! outbound HTTP round trips.
 //!

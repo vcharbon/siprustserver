@@ -82,7 +82,7 @@ impl CallDecisionEngine for PanickingDecisionEngine {
     }
 }
 
-/// A hung decision backend must NOT strand the caller behind the auto-100:
+/// A hung decision backend must NOT strand the caller behind her 100:
 /// the default 5 s deadline converts it into the ordinary decision-error 503.
 /// The advance points bracket the deadline to pin the bound, not just the
 /// eventual delivery.
@@ -134,8 +134,8 @@ async fn hung_decision_is_rejected_503_at_the_default_deadline() {
 
 /// The per-call global cap is the one full-queue path that fires BEFORE a call
 /// exists: the dispatcher refuses a brand-new call's event when the live-queue
-/// map is full. A new INVITE refused there is answered 503 (ADR-0022 X6), so a
-/// caller who already heard the auto-100 still gets a final. cap = 1: one live
+/// map is full. A new INVITE refused there is answered 503 (ADR-0022 X6), so
+/// its caller gets a final, never silence. cap = 1: one live
 /// call fills the map, the next NEW INVITE is refused.
 #[tokio::test(start_paused = true)]
 async fn initial_invite_at_the_per_call_cap_is_shed_503_not_dropped() {
@@ -154,7 +154,7 @@ async fn initial_invite_at_the_per_call_cap_is_shed_503_not_dropped() {
     settle_until(|| b2bua.active_calls() == 1).await;
 
     // Call 2 is a brand-new INVITE while the map is at cap → the shed rung's
-    // 503, never a silent drop. The caller heard the auto-100, then gets its final.
+    // 503, never a silent drop.
     let mut call2 = carol.invite(&bob).with_sdp(OFFER_SDP).through(b2bua.addr).send().await;
     h.advance(Duration::from_millis(500)).await;
     call2.expect(503).await;

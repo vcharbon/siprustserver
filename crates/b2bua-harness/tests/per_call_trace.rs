@@ -49,7 +49,7 @@ async fn a_sampled_call_records_its_messages_decision_and_rules_on_one_span() {
     assert!(!log.matching("kind=sip.out").is_empty(), "the messages the b2bua put on the wire");
     assert!(
         log.matching("kind=sip.out").iter().any(|e| e.contains("100 Trying")),
-        "the transaction layer's auto-100 is part of the story"
+        "the caller's 100 Trying is part of the story"
     );
     assert!(
         log.matching("kind=http.request").iter().any(|e| e.contains("/call/new")),

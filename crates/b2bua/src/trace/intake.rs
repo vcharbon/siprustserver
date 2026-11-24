@@ -7,8 +7,9 @@
 //! from `/call/new` and from any later `/call/failure` route, which is why it
 //! lives here rather than inside the INVITE handler.
 //!
-//! Both doors end at the same backfill: the INVITE the call arrived on and the
-//! auto-100 sip-txn already sent are recorded at THEIR timestamps. Nothing is
+//! Both doors end at the same backfill: the INVITE the call arrived on, at its
+//! timestamp, and the caller's 100 Trying, noted at the call's creation, from
+//! which it leaves (ADR-0070). Nothing is
 //! buffered for an unsampled call — the backfill reads facts the call already
 //! carries.
 
@@ -133,15 +134,21 @@ fn header_rate(a_invite: &SipRequest) -> Option<f64> {
 }
 
 /// The two facts that precede any decision: the INVITE as it arrived, raw, and
-/// its 100 Trying, which the turn releases after the call's creation write
-/// and the transaction layer renders (ADR-0055 §3) — bytes this layer never
-/// holds, so it is recorded as a note rather than a wire body.
+/// its 100 Trying, which the transaction layer renders — bytes this layer
+/// never holds, so it is recorded as a note rather than a wire body, stamped
+/// at the call's creation. The 100 leaves behind the creation write, or at
+/// the fallback bound armed as the decision request leaves, whichever comes
+/// first (ADR-0070); the note names both.
 fn backfill(call: &Call, invite_wire: &[u8]) {
     let src = sip_net::ip_socket_addr(&call.a_leg.source.address, call.a_leg.source.port)
         .unwrap_or_else(|| SocketAddr::from(([0, 0, 0, 0], 0)));
     emit::sip_in(call, call.created_at, src, invite_wire);
-    emit::sip_out_note(call, call.created_at, "100 Trying (released after the creation write)");
+    emit::sip_out_note(call, call.created_at, TRYING_NOTE);
 }
+
+/// The note of the caller's 100 Trying ([`backfill`]).
+const TRYING_NOTE: &str =
+    "100 Trying (behind the creation write, or at the fallback bound from the consult)";
 
 /// One decision treatment's name, for the round-trip event's outcome.
 fn treatment_name(treatment: &NewCallResponse) -> &'static str {
