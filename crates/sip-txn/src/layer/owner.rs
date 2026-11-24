@@ -35,6 +35,15 @@ use super::shrink::{shrink_idle, SHRINK_MIN_CAPACITY};
 use super::txn::{CancelWire, Timer, Transaction, TxnId, TxnRef, TxnRole};
 use super::unattributed::Unattributed;
 
+/// What a transaction leaving the map leaves behind it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Trace {
+    /// Its copy records and, for a server transaction, the To-tag it bound.
+    Records,
+    /// Nothing: its request was answered as a stateless UAS answers it.
+    Nothing,
+}
+
 pub(super) struct Owner {
     /// The client transactions, by the branch of the request this node sent
     /// (RFC 3261 §17.1.3: only a response matches one). Boxed so a bucket is
@@ -327,16 +336,33 @@ impl Owner {
         }
     }
 
+    /// Delete the transaction `id` names, its timers with it, leaving its
+    /// copy records (ADR-0063 §1) and, for a server transaction, the To-tag
+    /// it bound (Timer L). Whether it was there.
     pub(super) fn delete_txn(&mut self, id: TxnRef<'_>) -> bool {
+        self.remove_txn(id, Trace::Records)
+    }
+
+    /// Delete the server transaction `id` names, its timers with it, leaving
+    /// nothing behind: no copy record, no remembered To-tag, nothing on the
+    /// unattributed books. Its request was answered statelessly (RFC 3261
+    /// §8.2.7), so a copy of it is a first arrival. Whether it was there.
+    pub(super) fn forsake_server(&mut self, id: ServerTxnId<'_>) -> bool {
+        self.remove_txn(TxnRef::Server(id), Trace::Nothing)
+    }
+
+    fn remove_txn(&mut self, id: TxnRef<'_>, trace: Trace) -> bool {
         let removed = match id {
             TxnRef::Client(branch) => self.clients.remove(branch),
             TxnRef::Server(id) => self.servers.remove(&id as &dyn ServerTxnIdentity),
         };
         match removed {
             Some(mut t) => {
-                self.retire_copies(&mut t);
+                if trace == Trace::Records {
+                    self.retire_copies(&mut t);
+                }
                 self.budgets.closed(&t.call_id);
-                if t.role() == TxnRole::Server {
+                if trace == Trace::Records && t.role() == TxnRole::Server {
                     if let Some(tag) = t.bound_to_tag() {
                         self.remember_uas_tag(&t.call_id, &t.from_tag, tag);
                     }

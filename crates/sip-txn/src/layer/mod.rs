@@ -32,6 +32,7 @@
 //! `accepted` (RFC 6026 §7.2: a client INVITE after its 2xx, and who ACKs it) ·
 //! `orphan` (a released call's client transactions, ADR-0034) ·
 //! `commands` (the command funnel's dispatch) · `server` (§17.2 UAS FSM) ·
+//! `stateless_answer` (§8.2.7: a final sent with no transaction kept) ·
 //! `attach` (a server transaction attributed to the call the consumer found) ·
 //! `trying` (§17.2.1: an INVITE's first provisional) · `timer_g` (§17.2.1: a
 //! non-2xx final re-sent until its ACK) · `server_cancel` (§9.2: a CANCEL of a server
@@ -88,6 +89,7 @@ mod self_release;
 mod server;
 mod server_cancel;
 mod shrink;
+mod stateless_answer;
 mod timer_g;
 mod trying;
 mod txn;

@@ -28,6 +28,13 @@ pub(in crate::layer) enum Command {
         dest: SocketAddr,
         reply: oneshot::Sender<Bytes>,
     },
+    /// Send a final as a stateless UAS, its request's server transaction
+    /// forsaken; replies with the datagram that left.
+    SendStatelessResponse {
+        msg: Box<SipResponse>,
+        dest: SocketAddr,
+        reply: oneshot::Sender<Bytes>,
+    },
     SendRaw {
         call_id: String,
         buf: Vec<u8>,

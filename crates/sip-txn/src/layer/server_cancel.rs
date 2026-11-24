@@ -242,7 +242,8 @@ impl Owner {
     /// 3261 §9.2, ADR-0063 §1): handed up once, for the TU's 481 or its
     /// re-offer, its copies answered from that transaction on the RFC
     /// schedule. A copy whose transaction left meets the record it left: past
-    /// the schedule it is absorbed. A CANCEL the event queue drops leaves no
+    /// the schedule it is absorbed. A CANCEL the event queue drops, or one the
+    /// TU answers statelessly (`layer::stateless_answer`), leaves no
     /// transaction behind.
     async fn take_stray_cancel(
         &mut self,

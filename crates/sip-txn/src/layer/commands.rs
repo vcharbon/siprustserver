@@ -18,6 +18,10 @@ impl Owner {
                 let sent = self.do_send_response(endpoint, *msg, dest).await;
                 let _ = reply.send(sent);
             }
+            Command::SendStatelessResponse { msg, dest, reply } => {
+                let sent = self.do_send_stateless_response(endpoint, *msg, dest).await;
+                let _ = reply.send(sent);
+            }
             Command::SendRaw { call_id, buf, dest, reply } => {
                 self.send_buffer(endpoint, &call_id, &buf, dest).await;
                 let _ = reply.send(());

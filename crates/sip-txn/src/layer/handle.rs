@@ -177,6 +177,26 @@ impl TransactionLayer {
         self.roundtrip(|reply| Command::SendResponse { msg: Box::new(msg), dest, reply }).await
     }
 
+    /// Send `msg`, the final to a request the consumer found no call for, as
+    /// a stateless UAS sends it (RFC 3261 §8.2.7), and return the datagram
+    /// that left. The server transaction its request opened leaves with no
+    /// trace: no copy record (ADR-0063 §1), no remembered To-tag, nothing on
+    /// the unattributed books, so a copy of the request is a first arrival
+    /// handed up again and the consumer, answering it the same, sends the same
+    /// final. The response leaves once, raw, to that transaction's destination
+    /// (§18.2.2), else to `dest`. A provisional, and a transaction that already
+    /// sent a response or holds a CANCEL's answers, go through the transaction
+    /// as [`send_response`](Self::send_response) sends them: an INVITE whose
+    /// 100 left owes its final Timer G (§17.2.1).
+    pub async fn send_stateless_response(
+        &self,
+        msg: SipResponse,
+        dest: SocketAddr,
+    ) -> Result<Bytes, TransactionLayerClosed> {
+        self.roundtrip(|reply| Command::SendStatelessResponse { msg: Box::new(msg), dest, reply })
+            .await
+    }
+
     /// Send a raw buffer directly, bypassing transaction management, counted
     /// under `call_id`, the message's Call-ID, against its budget
     /// ([`TransactionConfig::call_id_budget`]): nothing leaves under a muted
