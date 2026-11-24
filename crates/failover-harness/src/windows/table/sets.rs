@@ -31,3 +31,8 @@ pub(super) const NO_SPLIT: &[Incident] = &[
     StalledKilled,
     UnbackedKilled,
 ];
+/// The rows of a node taking an undecided call over, or back, and asking its
+/// routing decision again: a kill of the primary, announced or not, rebooted
+/// or not, and a stall past the cap then a kill.
+pub(super) const REASKS: &[Incident] =
+    &[PrimaryKilled, PrimaryKilledUnannounced, PrimaryRebooted, StalledKilled];

@@ -25,7 +25,7 @@ use b2bua::decision::{
     CallDecisionEngine, CallDecisionError, CallFailureRequest, CallFailureResponse,
     CallReferRequest, CallReferResponse, NewCallRequest, NewCallResponse,
 };
-use failover_harness::WorkerHealth;
+use failover_harness::{Transitional, WorkerHealth};
 
 use crate::departure_support::{bring_up_deciding, kill_announced, placed};
 use crate::inflight_resend::{settle_to_one_cdr, split_mut};
@@ -102,6 +102,7 @@ async fn ringing_while_the_primary_returns(name: &str, routable: bool) -> Ringin
     call.expect(100).await;
     let (pri_ord, call_ref) = placed(&fh, &w_b1, &w_b2).await;
     let (primary, survivor) = split_mut(&pri_ord, &mut w_b1, &mut w_b2);
+    fh.strike(Transitional::UndecidedTakeover);
     kill_announced(&mut fh, primary, survivor, &pri_ord, &proxy).await;
     let mut uas = bob.receive("INVITE").await;
     uas.respond(180, "Ringing").await;

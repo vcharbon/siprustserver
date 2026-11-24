@@ -102,8 +102,9 @@ impl Owner {
     /// A server INVITE holding `request`, keyed by its top Via, `Proceeding`.
     /// Its responses go to the top Via's response target (RFC 3261 §18.2.2).
     /// `provisional` is cached and sent there once now, so a retransmission
-    /// draws it again (§17.2.1); with none cached a retransmission draws a 100
-    /// Trying (`replay_cached`). `false` when the request names no branch or
+    /// draws it again (§17.2.1); with none cached a retransmission, or the
+    /// consumer's release (`release_trying`), draws a 100 Trying. `false` when
+    /// the request names no branch or
     /// its identity is occupied.
     async fn seed_server_invite(
         &mut self,

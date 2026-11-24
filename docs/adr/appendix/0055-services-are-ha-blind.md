@@ -720,8 +720,8 @@ the re-anchor deadband of each other.
     sub-point); no outbox entry hit the cap (a release because the backup
     left, or one the harness's own hold of an applied sub-point caused, is
     no cap hit); the transaction layer of the node the kill struck sent at
-    its bound, before the strike, no ACK or CANCEL's answers it held for a
-    turn of a call it still held (the probe reports it, by node and call; a
+    its bound, before the strike, no ACK, CANCEL's answers or initial
+    INVITE's 100 (ADR-0070) it held for a turn of a call it still held (the probe reports it, by node and call; a
     surviving node's loses nothing); the test
     tampered with no replication stream or replica; the incident is a kill. The cell is perfect: no row of any kind opens,
     every party goal is met, the evidence rule (§4) ends no call, and the CDR
@@ -889,7 +889,19 @@ the re-anchor deadband of each other.
     ruling, where no 2xx the copy could build would repeat the dead primary's
     byte for byte): a copy's non-2xx to a caller's INVITE the dead primary
     answered 2xx before the kill; she discards it (RFC 6026 §8.4) and owes it
-    no ACK.
+    no ACK;
+  - `W-reask-trying`, a kill of the primary, announced or not, rebooted or
+    not, and a stall past the cap then a kill, in a run where a node asked a
+    routing decision again (a turn mark says so; user ruling): the node that
+    takes an undecided call over, or back, sends the caller a 100 Trying as
+    it asks the routing decision again (ADR-0070), since it cannot tell
+    whether the other node's 100 left. On an initial INVITE that other node
+    already sent its 100 for, the caller takes one 100 more per change of
+    the node serving the INVITE, counted on the hop's worker side; a second
+    one from one node still gates. Her client transaction is `Proceeding`
+    either way (RFC 3261 §17.1.1.2) and a stateful hop absorbs a 100 (§16.7
+    step 5), so no party acts on it. Hand-written takeovers the sweep has no
+    incident for keep it as `T-reask-trying`.
 
   A split that never heals is not supposed to last: it cuts a representative
   few shapes (the re-INVITE, the REFER), whose cells check the worst case, no

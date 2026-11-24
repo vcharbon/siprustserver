@@ -366,9 +366,10 @@ impl TransactionLayer {
     }
 
     /// Release the 100 Trying of the server INVITE transaction `invite`
-    /// opened (RFC 3261 §17.2.1): it leaves now if the transaction is still
-    /// `Trying` with nothing sent, and never after another response. `true`
-    /// when the 100 left; `false` too when no transaction holds `invite`.
+    /// opened or a seed rebuilt (RFC 3261 §17.2.1): it leaves now if the
+    /// transaction has sent nothing, and never after another response.
+    /// `true` when the 100 left; `false` too when no transaction holds
+    /// `invite`.
     pub async fn release_trying(
         &self,
         invite: &SipRequest,

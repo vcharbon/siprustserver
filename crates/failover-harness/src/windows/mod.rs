@@ -13,6 +13,7 @@
 
 pub(crate) mod copies;
 pub mod outcome;
+pub(crate) mod reask_trying;
 pub(crate) mod stall_cseq;
 pub(crate) mod stall_repeat;
 mod table;
@@ -77,6 +78,9 @@ pub enum Transitional {
     /// A primary departs with its routing decision unreplicated, or after its
     /// caller's transaction completed, and the backup refuses the call.
     UndecidedDeparture,
+    /// A node takes an undecided call over, or back, from a node that sent
+    /// its caller's 100, and asks the routing decision again.
+    UndecidedTakeover,
 }
 
 /// What strikes a call.
@@ -205,8 +209,8 @@ impl Row {
     }
 
     /// Whether the row accepts only what follows a routing decision a node
-    /// asked again (`W-off-stale-reask`): it stays closed in a run where none
-    /// was.
+    /// asked again (`W-off-stale-reask`, `W-reask-trying`, `T-reask-trying`):
+    /// it stays closed in a run where none was.
     pub fn needs_reask(&self) -> bool {
         table::REASK_ROWS.contains(&self.id)
     }

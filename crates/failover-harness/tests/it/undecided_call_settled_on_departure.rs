@@ -107,6 +107,7 @@ async fn an_undecided_call_whose_node_departs_is_asked_again_by_its_backup() {
 
     let (primary, survivor) = split_mut(&pri_ord, &mut w_b1, &mut w_b2);
     let killed_at = fh.now_ms();
+    fh.strike(Transitional::UndecidedTakeover);
     let hydrated_before = kill_announced(&mut fh, primary, survivor, &pri_ord, &proxy).await;
     let mut uas = bob.receive("INVITE").await;
     assert!(
@@ -191,6 +192,7 @@ async fn an_undecided_call_reclaimed_by_its_restarted_node_is_asked_again() {
     // case 4), so no departure is announced; the restart reclaims the call.
     let (primary, survivor) = split_mut(&pri_ord, &mut w_b1, &mut w_b2);
     fh.mark(&pri_ord, None, "crash", "container restarts in place");
+    fh.strike(Transitional::UndecidedTakeover);
     primary.crash();
     proxy.set_health(&pri_ord, WorkerHealth::Dead);
     let hydrated_before = survivor.metrics().repl_takeover_hydrated_total();
@@ -302,6 +304,7 @@ async fn an_undecided_call_of_a_node_replaced_at_once_is_asked_again_once() {
     call.expect(100).await;
     let (pri_ord, call_ref) = placed(&fh, &w_b1, &w_b2).await;
 
+    fh.strike(Transitional::UndecidedTakeover);
     fh.withdraw(&pri_ord);
     fh.advance(Duration::from_millis(400)).await;
     let replacement = fh.spawn_replacement(&pri_ord).await;
@@ -361,6 +364,7 @@ async fn a_decision_returning_to_a_removed_process_is_not_applied() {
     call.expect(100).await;
     let (pri_ord, call_ref) = placed(&fh, &w_b1, &w_b2).await;
 
+    fh.strike(Transitional::UndecidedTakeover);
     fh.withdraw(&pri_ord);
     fh.advance(Duration::from_millis(400)).await;
     let replacement = fh.spawn_replacement(&pri_ord).await;
@@ -431,6 +435,7 @@ async fn a_reask_has_a_setup_budget_of_its_own() {
     fh.advance(KILLED_AFTER).await;
     assert!(fh.now_ms() - received < START_BOUND_MS - 500, "the node dies inside the start bound");
     let (primary, survivor) = split_mut(&pri_ord, &mut w_b1, &mut w_b2);
+    fh.strike(Transitional::UndecidedTakeover);
     kill_announced(&mut fh, primary, survivor, &pri_ord, &proxy).await;
 
     let mut uas = bob.receive("INVITE").await;
@@ -474,6 +479,7 @@ async fn an_unanswered_reask_refuses_the_caller_at_its_budget() {
     fh.advance(KILLED_AFTER).await;
     let killed_at = fh.now_ms();
     let (primary, survivor) = split_mut(&pri_ord, &mut w_b1, &mut w_b2);
+    fh.strike(Transitional::UndecidedTakeover);
     kill_announced(&mut fh, primary, survivor, &pri_ord, &proxy).await;
     assert_eq!(consults.load(Ordering::SeqCst), 2, "the backup asks the decision again");
 
@@ -571,6 +577,7 @@ async fn a_route_applied_before_it_replicated_is_dialled_again_by_the_backup() {
     // The callee's give-up reaches neither the dead node nor the backup.
     fh.strike(Transitional::UndecidedDeparture);
     let (primary, survivor) = split_mut(&pri_ord, &mut w_b1, &mut w_b2);
+    fh.strike(Transitional::UndecidedTakeover);
     kill_announced(&mut fh, primary, survivor, &pri_ord, &proxy).await;
     answer_and_hang_up(&mut call, &bob).await;
     assert_eq!(dialled(&fh, &bob), 2, "the dead node's INVITE and the backup's");
@@ -609,6 +616,7 @@ async fn an_undecided_call_of_a_node_that_never_returns_is_discharged_by_its_bac
     call.expect(100).await;
     let (pri_ord, call_ref) = placed(&fh, &w_b1, &w_b2).await;
     let (primary, survivor) = split_mut(&pri_ord, &mut w_b1, &mut w_b2);
+    fh.strike(Transitional::UndecidedTakeover);
     kill_announced(&mut fh, primary, survivor, &pri_ord, &proxy).await;
     answer_and_hang_up(&mut call, &bob).await;
 
@@ -649,6 +657,7 @@ async fn a_cancel_during_the_backups_asked_again_decision_dials_nobody() {
     call.expect(100).await;
     let (pri_ord, call_ref) = placed(&fh, &w_b1, &w_b2).await;
     let (primary, survivor) = split_mut(&pri_ord, &mut w_b1, &mut w_b2);
+    fh.strike(Transitional::UndecidedTakeover);
     kill_announced(&mut fh, primary, survivor, &pri_ord, &proxy).await;
     assert_eq!(consults.load(Ordering::SeqCst), 2, "the backup asks the decision again");
 

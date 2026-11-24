@@ -9,7 +9,8 @@
 //! re-ask that starts past the start bound, counted from the INVITE's receipt
 //! the record states, asks nothing and refuses her the bare 503 (ADR-0070):
 //! the node cannot tell whether her 100 left, and a caller that heard none
-//! may have been failed over already. The
+//! may have been failed over already; one inside it sends her a 100 before it
+//! asks. The
 //! route's admit is numbered above every change the call reserved before, the
 //! counter having moved to its next epoch on the restore, so the limiter
 //! checks it net of what the key holds and counts the call once. A call whose
@@ -28,6 +29,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use call::{Call, CallModelState};
+use sip_message::SipRequest;
 use tokio::time::Instant;
 
 use super::cancel_in_consult::consult_writing_its_cancel;
@@ -151,10 +153,10 @@ pub(super) fn reask_budget(ctx: &RouterCtx, event: &CallEvent) -> Option<SetupBu
 
 /// The re-ask turn of `call_ref`, under its per-call lock: the resident call,
 /// still undecided, is consulted as its initial INVITE's turn consults, under
-/// the fresh `budget` its notice started, and the turn lands as that one does;
-/// past its start bound or the budget spent before the turn ran, its caller is
-/// refused unasked with the bare 503 and no one is dialled, and an
-/// INVITE refused on sight ([`crate::initial_invite::refused_on_sight`]) is
+/// the fresh `budget` its notice started, its caller sent a 100 first, and
+/// the turn lands as that one does; past its start bound or the budget spent
+/// before the turn ran, its caller is refused unasked with the bare 503 and
+/// no one is dialled, and an INVITE refused on sight ([`crate::initial_invite::refused_on_sight`]) is
 /// refused as its first owner refuses it, whose death between the call's
 /// creation write and that refusal's left it undecided. A call
 /// gone, decided meanwhile or whose setup the caller CANCELed asks nothing; a
@@ -190,6 +192,7 @@ pub(super) async fn reask_turn(ctx: &Arc<RouterCtx>, call_ref: &str, budget: Set
     } else if let Some(refused) = on_sight() {
         (*refused, false)
     } else {
+        trying_before_the_reask(ctx, &caller).await;
         let consult = handle_initial_invite(
             call.clone(),
             &caller,
@@ -258,6 +261,15 @@ pub(super) async fn reask_turn(ctx: &Arc<RouterCtx>, call_ref: &str, budget: Set
     result.effects.reasked = !refused;
     let turn_label = &"the re-ask of an undecided call's decision";
     commit_turn(ctx, call_ref, result, now_ms, turn_label, None, Some(&mut turn)).await;
+}
+
+/// Send the caller `caller` her 100 through the INVITE transaction the
+/// materialisation seeded, as a re-ask inside its start bound asks
+/// (ADR-0070): the node cannot tell whether the first owner's 100 left, and a
+/// caller that heard none stops retransmitting before the callee rings. A
+/// seed that sent a provisional already sends nothing.
+async fn trying_before_the_reask(ctx: &RouterCtx, caller: &SipRequest) {
+    let _ = ctx.txn.release_trying(caller).await;
 }
 
 /// Whether `call_ref` is a takeover copy whose primary wrote the call since

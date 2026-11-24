@@ -44,10 +44,11 @@ that the hop's own timer (Timer B, or an SBC's reroute timer) sends the call els
 4. **The re-ask.** A call taken over before its first decision (ADR-0047 D4) is held to the
    same start bound, counted from the INVITE's receipt its record states (`Call::received_at`),
    never from the takeover. The node asking again cannot tell whether the caller heard a 100.
-   Inside the bound, it asks the decision again with a budget of its own and serves the call.
-   Past it, it asks nothing, answers the bare 503 through the transaction the takeover seeded,
-   and dials no one: a caller that heard no 100 may have been failed over already, and a dial
-   would ring the callee twice.
+   Inside the bound, it sends her a 100 through the transaction the takeover seeded, so a
+   caller whose owner died before its 100 left stops retransmitting, asks the decision again
+   with a budget of its own and serves the call. Past it, it asks nothing, answers the bare
+   503 through that transaction, and dials no one: a caller that heard no 100 may have been
+   failed over already, and a dial would ring the callee twice.
 5. **Bounds.** The start bound is positive and below the setup budget
    (`B2BUA_CALL_CONTROL_TIMEOUT_MS`); with replication, start bound + sync cap is below the
    setup budget. Both are refused at startup. Start bound + sync cap must sit under the time
@@ -75,6 +76,9 @@ that the hop's own timer (Timer B, or an SBC's reroute timer) sends the call els
   The start bound keeps a late turn from ringing anyone.
 - The RFC audit's `proxy-100-within-grace` rule is advisory and charged to the front proxy;
   no rule of the SUT's own output fires on the withheld 100.
+- §17.1.1.2: a caller whose owner's 100 did leave takes a second one from the node asking
+  again; her transaction is `Proceeding` either way. The failover audit accepts one 100 more
+  per change of serving node (ADR-0055 §11, `W-reask-trying`), never two from one node.
 
 ## Consequences
 

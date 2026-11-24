@@ -22,7 +22,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use b2bua::decision::ScriptedDecisionEngine;
-use failover_harness::{FailoverHarness, WorkerHealth};
+use failover_harness::{FailoverHarness, Transitional, WorkerHealth};
 
 use crate::departure_support::{bring_up_deciding, call_id_placed_on, CountedDecision};
 use crate::inflight_resend::settle_to_one_cdr;
@@ -191,6 +191,7 @@ async fn undecided_calls(name: &str, per_call: Duration) {
     fh.turn_points().pace_sweep(&[per_call]);
     fh.black_hole("b1");
     fh.mark("b1", None, "crash", "the process dies, its address answers no connect");
+    fh.strike(Transitional::UndecidedTakeover);
     w_b1.crash();
     fh.advance(FLIP_AFTER_THE_CRASH).await;
     fh.flap_not_ready("b1");
