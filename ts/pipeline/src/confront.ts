@@ -906,14 +906,14 @@ export const shapeProbes = (
   recordings: ReadonlyMap<string, ReadonlyArray<Bundle.RecordedMessage>>
 ): ReadonlyArray<ProbeAt> => {
   const answered = answeredTransactions(recordings)
-  const received = receivedRequests(recordings)
+  const repeatProbe = repeatReader(recordings)
   const out: Array<ProbeAt> = []
   for (const failure of verdict.failures ?? []) {
     switch (failure.failure) {
       case "unmatched-datagram": {
         const { arrived, gated_on } = failure
         const step = steps.get(failure.step)
-        const repeat = repeatProbe(failure.step, failure.leg, arrived, received)
+        const repeat = repeatProbe(failure.step, failure.leg, arrived)
         if (repeat !== undefined) {
           out.push(repeat)
           break
@@ -968,13 +968,13 @@ export const shapeProbes = (
       }
       case "unexpected-datagram":
         out.push(
-          repeatProbe("", failure.leg, failure.arrived, received) ??
+          repeatProbe("", failure.leg, failure.arrived) ??
             strayProbe("", failure.leg, failure.arrived, answered, failure.detail)
         )
         break
       case "datagram-after-flow":
         out.push(
-          repeatProbe("", failure.leg, failure.arrived, received) ??
+          repeatProbe("", failure.leg, failure.arrived) ??
             strayProbe("", failure.leg, failure.arrived, answered)
         )
         break
@@ -1031,46 +1031,67 @@ const answeredTransactions = (
   return out
 }
 
-/** Per leg, how many requests it received under each `"<CSeq number> <METHOD>"`. */
-const receivedRequests = (
+/** The CSeq number and upper-cased method a recorded message states. */
+const cseqOf = (message: Bundle.RecordedMessage): { readonly number: string; readonly method: string } => {
+  const [number = "", method = ""] = (headerValuesOf(headersInOrder(message), "CSeq")[0] ?? "").trim().split(/\s+/)
+  return { number, method: method.toUpperCase() }
+}
+
+/** One leg's ACKs to the 2xx it sent: by CSeq number, whether a step claimed each copy, in arrival order. */
+type AckCopies = ReadonlyMap<string, ReadonlyArray<boolean>>
+
+/**
+ * Per leg, the ACK copies it received for each INVITE it answered 2xx: every
+ * received ACK under that CSeq number, retransmissions left out, in arrival
+ * order, each marked with whether a step claimed it.
+ */
+const ackCopiesOf = (
   recordings: ReadonlyMap<string, ReadonlyArray<Bundle.RecordedMessage>>
-): ReadonlyMap<string, ReadonlyMap<string, number>> => {
-  const out = new Map<string, ReadonlyMap<string, number>>()
+): ReadonlyMap<string, AckCopies> => {
+  const out = new Map<string, AckCopies>()
   for (const [leg, recording] of recordings) {
-    const received = new Map<string, number>()
+    const answered = new Set<string>()
+    const copies = new Map<string, Array<boolean>>()
     for (const message of recording) {
-      if (message.dir !== "in") continue
       const start = startLineOf(headText(message))
-      if (start === undefined || start.kind !== "request") continue
-      const cseq = (headerValuesOf(headersInOrder(message), "CSeq")[0] ?? "").trim()
-      const [number = "", method = ""] = cseq.split(/\s+/)
-      const key = `${number} ${method.toUpperCase()}`
-      received.set(key, (received.get(key) ?? 0) + 1)
+      if (start === undefined) continue
+      const cseq = cseqOf(message)
+      if (message.dir === "out" && start.kind === "response" && start.status >= 200 && start.status < 300 && cseq.method === "INVITE") {
+        answered.add(cseq.number)
+      }
+      if (message.dir !== "in" || message.repeat_of !== undefined || start.kind !== "request" || cseq.method !== "ACK") continue
+      copies.set(cseq.number, [...(copies.get(cseq.number) ?? []), message.step !== undefined])
     }
-    out.set(leg, received)
+    out.set(leg, new Map([...copies].filter(([number]) => answered.has(number))))
   }
   return out
 }
 
 /**
- * A refused ACK the leg had already received under its CSeq, as the repeat it
- * is, or `undefined` for a first copy. Only an ACK: a 2xx ACK has no
- * transaction to absorb a copy (RFC 3261 §17.1.1.3), where any other repeated
- * request is a retransmission whose refusal the other shapes state.
+ * The repeat reader of one verdict: each refused ACK to a 2xx the leg sent, in
+ * the verdict's order, taken as the leg's next copy no step claimed, as the
+ * repeat it is (`copies`: the copies received up to and including it, the
+ * first left out), or `undefined` for a first copy or another request. Only
+ * the ACK of a 2xx: it has no transaction to absorb a copy (RFC 3261
+ * §17.1.1.3), where any other repeated request is a retransmission whose
+ * refusal the other shapes state.
  */
-const repeatProbe = (
-  step: string,
-  leg: string,
-  arrived: Bundle.Arrived,
-  received: ReadonlyMap<string, ReadonlyMap<string, number>>
-): ProbeAt | undefined => {
-  if (arrived.kind !== "request" || arrived.method.toUpperCase() !== "ACK") return undefined
-  const method = "ACK"
-  const copies = (received.get(leg)?.get(`${arrived.cseq} ${method}`) ?? 0) - 1
-  if (copies < 1) return undefined
-  return {
-    step,
-    probe: { kind: "shape", step, shapeKind: { shape: "repeated-request", method, copies }, scope: undefined }
+const repeatReader = (recordings: ReadonlyMap<string, ReadonlyArray<Bundle.RecordedMessage>>) => {
+  const acks = ackCopiesOf(recordings)
+  const refused = new Map<string, number>()
+  return (step: string, leg: string, arrived: Bundle.Arrived): ProbeAt | undefined => {
+    if (arrived.kind !== "request" || arrived.method.toUpperCase() !== "ACK") return undefined
+    const claimed = acks.get(leg)?.get(String(arrived.cseq))
+    if (claimed === undefined) return undefined
+    const key = `${leg}\u0000${arrived.cseq}`
+    const nth = refused.get(key) ?? 0
+    refused.set(key, nth + 1)
+    const copies = claimed.map((taken, at) => (taken ? -1 : at)).filter((at) => at >= 0)[nth]
+    if (copies === undefined || copies < 1) return undefined
+    return {
+      step,
+      probe: { kind: "shape", step, shapeKind: { shape: "repeated-request", method: "ACK", copies }, scope: undefined }
+    }
   }
 }
 

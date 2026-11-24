@@ -239,8 +239,8 @@ fn a_final_under_a_second_tag_is_a_second_observed_fork() {
 }
 
 /// A non-2xx final to the INVITE ends every early dialog of the leg, so it is
-/// taken under any learned fork's tag; an unknown tag, and a 2xx under another
-/// fork's tag, stay refused.
+/// taken under any learned fork's tag; an unknown tag, and a 2xx or a
+/// rejection of a PRACK or UPDATE under another fork's tag, stay refused.
 #[test]
 fn a_rejection_rides_any_learned_fork_of_the_leg() {
     let mut learned = LearnedForks::default();
@@ -257,12 +257,13 @@ fn a_rejection_rides_any_learned_fork_of_the_leg() {
     busy.to_tag = Some("sut-tag-9".into());
     assert!(!rides_observed_fork(&rejection, &busy, &learned).matches(), "no fork rides tag 9");
 
-    let mut answer = rejection.clone();
-    answer.discriminator =
-        Discriminator::Response { status: 200, cseq_method: Some("INVITE".into()) };
-    let mut ok = inbound_response(200, "INVITE");
-    ok.to_tag = Some("sut-tag-2".into());
-    assert!(!rides_observed_fork(&answer, &ok, &learned).matches(), "a 2xx makes its own dialog");
+    for (status, method) in [(200, "INVITE"), (481, "PRACK"), (481, "UPDATE")] {
+        let mut own = rejection.clone();
+        own.discriminator = Discriminator::Response { status, cseq_method: Some(method.into()) };
+        let mut other = inbound_response(status, method);
+        other.to_tag = Some("sut-tag-2".into());
+        assert!(!rides_observed_fork(&own, &other, &learned).matches(), "{status} to {method}");
+    }
 }
 
 /// A leg owns its own learned tag space: a binding on ANOTHER leg neither

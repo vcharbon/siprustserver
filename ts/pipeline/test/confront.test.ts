@@ -425,34 +425,53 @@ describe("shapeProbes", () => {
     expect(signature(refused()[0]!.probe)).toBe("shape:serviced-stray:BYE:auto-reacted")
   })
 
-  it("a refused request the leg already received under its method and CSeq is a repeat, counted per extra copy", () => {
+  describe("a refused ACK the leg already received under its CSeq", () => {
     const ack = (branch: string) =>
       crlf([`ACK sip:b@h.example SIP/2.0`, `Via: SIP/2.0/UDP h.example;branch=${branch}`, "Call-ID: cid-1", "CSeq: 1 ACK"])
-    const refusedAck = (copies: number) =>
+    const answer = (status: string): Bundle.RecordedMessage =>
+      ({ seq: 1, dir: "out", at_us: 5, step: "s5", raw: crlf([`SIP/2.0 ${status}`, "Call-ID: cid-1", "CSeq: 1 INVITE"]) }) as Bundle.RecordedMessage
+    const refused: Bundle.Failure = {
+      failure: "unmatched-datagram",
+      step: "s9",
+      leg: "B",
+      gated_on: { kind: "request", method: "UPDATE" },
+      reason: "gated on request UPDATE; ACK arrived",
+      arrived: { kind: "request", method: "ACK", cseq: 1 }
+    }
+    const unexpected: Bundle.Failure = { failure: "unexpected-datagram", leg: "B", arrived: { kind: "request", method: "ACK", cseq: 1 } }
+    /** The leg's recording: `final` sent, then `copies` ACKs, the first `taken` claimed by the step that expected it. */
+    const refusals = (failures: Bundle.RunVerdict["failures"], copies: number, taken: number, final = "200 OK") =>
       shapeProbes(
-        verdictWith([
-          {
-            failure: "unmatched-datagram",
-            step: "s9",
-            leg: "B",
-            gated_on: { kind: "request", method: "UPDATE" },
-            reason: "gated on request UPDATE; ACK arrived",
-            arrived: { kind: "request", method: "ACK", cseq: 1 }
-          }
-        ]),
+        verdictWith(failures),
         new Map(),
-        new Map([
+        new Map([[
+          "B",
           [
-            "B",
-            Array.from({ length: copies }, (_, i) => ({ seq: i + 1, dir: "in", at_us: 10 + i, raw: ack(`z9hG4bK-${i}`) })) as Array<
-              Bundle.RecordedMessage
-            >
-          ]
-        ])
-      )
-    expect(signature(refusedAck(2)[0]!.probe)).toBe("shape:repeated-request:ACK:1")
-    expect(signature(refusedAck(3)[0]!.probe)).toBe("shape:repeated-request:ACK:2")
-    expect(signature(refusedAck(1)[0]!.probe)).toBe("shape:method-substitution:UPDATE->ACK")
+            answer(final),
+            ...Array.from({ length: copies }, (_, i) => ({
+              seq: i + 2,
+              dir: "in",
+              at_us: 10 + i,
+              ...(i < taken ? { step: "s8" } : {}),
+              raw: ack(`z9hG4bK-${i}`)
+            }))
+          ] as Array<Bundle.RecordedMessage>
+        ]])
+      ).map((p) => signature(p.probe))
+
+    it("is a repeat counted by its arrival: the copies the leg received up to it, the first left out", () => {
+      expect(refusals([refused], 2, 1)).toEqual(["shape:repeated-request:ACK:1"])
+      expect(refusals([refused, unexpected], 3, 1)).toEqual(["shape:repeated-request:ACK:1", "shape:repeated-request:ACK:2"])
+      expect(refusals([refused], 1, 0)).toEqual(["shape:method-substitution:UPDATE->ACK"])
+    })
+
+    it("counts two refused copies the script never took as a first copy and one repeat", () => {
+      expect(refusals([refused, unexpected], 2, 0)).toEqual(["shape:method-substitution:UPDATE->ACK", "shape:repeated-request:ACK:1"])
+    })
+
+    it("is no repeat where the ACK answers no 2xx the leg sent", () => {
+      expect(refusals([refused], 2, 1, "486 Busy Here")).toEqual(["shape:method-substitution:UPDATE->ACK"])
+    })
   })
 
   it("a repeated request of another method keeps the shape its refusal states", () => {

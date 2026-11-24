@@ -8,7 +8,7 @@
 import { strays, substitution } from "@sip/delta-rules/families"
 import { statusOf } from "@sip/delta-rules/scope"
 import { autoAnswered, message, statusSubstitution, stray, substituted, TRYING_DEADLINE_MS } from "@sip/delta-rules/shapes"
-import type { RfcFacts } from "./facts.js"
+import { type RfcFacts, referTerminalNotifyAt } from "./facts.js"
 import type { RfcRow } from "./row.js"
 
 export const [prackAutomaticStray]: ReadonlyArray<RfcRow> = strays<RfcFacts>({
@@ -50,12 +50,12 @@ export const referProgressTerminalNotify: RfcRow = {
   rfc: "RFC 3515 §2.4.4, §2.4.5",
   why:
     "The terminal NOTIFY of a REFER whose scripted NOTIFY the stack answered with `100` first " +
-    "(RFC 3515 §2.4.5): the outcome rides a second NOTIFY the script never expected. Only on a " +
-    "document scripting a REFER outcome; a NOTIFY anywhere else stays visible.",
+    "(RFC 3515 §2.4.5): the outcome rides a second NOTIFY the script never expected. One, on " +
+    "that NOTIFY's leg after it; a NOTIFY anywhere else, or a second one, stays visible.",
   shape: (s, facts) => {
-    if (facts.referOutcomeAtStep.size === 0) return false
     const kind = s.shapeKind
-    return stray(s, "NOTIFY") || (kind.shape === "method-substitution" && kind.observed === "NOTIFY")
+    const notify = stray(s, "NOTIFY") || (kind.shape === "method-substitution" && kind.observed === "NOTIFY")
+    return notify && referTerminalNotifyAt(facts, s.step)
   }
 }
 

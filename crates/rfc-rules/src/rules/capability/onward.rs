@@ -5,11 +5,12 @@
 //! and answered with the 2xx it took back carries the far UAS's description of
 //! itself: a bare far 2xx relayed bare is the far UAS's miss, judged where the
 //! far UAS sent it. The two legs are tied by order alone, whatever Call-ID the
-//! far side wears: an answer pairs with the LAST far 2xx its endpoint took
-//! before the answer left, to an OPTIONS it sent no earlier than it took the
-//! one answered, and a far 2xx pairs with one answer at most. An OPTIONS the
-//! endpoint sends on its own account inside that window is not told apart from
-//! a forwarded one.
+//! far side wears, first in, first out, as a 2xx is forwarded when it arrives
+//! (§16.7): an answer pairs with the FIRST far 2xx not yet paired that its
+//! endpoint took before the answer left, to an OPTIONS it sent no earlier than
+//! it took the one answered, and a far 2xx pairs with one answer at most. An
+//! OPTIONS the endpoint sends on its own account inside that window is not
+//! told apart from a forwarded one.
 
 use std::collections::BTreeSet;
 
@@ -64,7 +65,8 @@ impl<'m> OnwardAnswers<'m> {
 
     /// Whether the 2xx at `answer_at`, sent by an endpoint whose sockets are
     /// `endpoint` to an OPTIONS it took at `took_us`, carries back a bare far
-    /// 2xx. The far 2xx it pairs with, bare or not, pairs with no later answer.
+    /// 2xx. It pairs with the first unpaired far 2xx it can carry back, bare
+    /// or not, which pairs with no later answer.
     pub(super) fn relays_bare(
         &mut self,
         answer_at: usize,
@@ -80,7 +82,7 @@ impl<'m> OnwardAnswers<'m> {
                     && endpoint.contains(&far.asked_by)
                     && !self.paired.contains(&far.at)
             })
-            .max_by_key(|far| far.at)
+            .min_by_key(|far| far.at)
             .map(|far| (far.at, far.bare));
         let Some((at, bare)) = far else { return false };
         self.paired.insert(at);

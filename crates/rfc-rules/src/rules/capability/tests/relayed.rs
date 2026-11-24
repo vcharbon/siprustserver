@@ -182,20 +182,43 @@ fn a_described_answer_to_a_bare_far_answer_is_compliant() {
     assert!(!bob.relayed, "{all:?}");
 }
 
-/// bob takes a bare far 2xx, then a described one: the last far answer is
-/// the one carried back, so bob's bare 2xx dropped its description.
+/// bob takes a described far 2xx, then a bare one: the first far answer is
+/// the one carried back (§16.7 forwards a 2xx as it arrives), so bob's bare
+/// 2xx dropped its description.
 #[test]
-fn the_last_far_answer_is_the_one_carried_back() {
+fn the_first_far_answer_is_the_one_carried_back() {
+    let [ask_f, described] = onward_on("z9hG4bK-f", 1_500, 1_800, "Allow: INVITE\r\n");
+    let [ask_g, bare] = onward_on("z9hG4bK-g", 1_600, 2_000, "");
+    let msgs = [
+        taken(1_000, "OPTIONS", "z9hG4bK-o", 1, ""),
+        ask_f,
+        ask_g,
+        described,
+        bare,
+        answered(2_500, 200, "OPTIONS", "z9hG4bK-o", 1, ""),
+    ];
+    let f = violations(&OptionsResponseEchoes, &msgs);
+    assert!(!charged(&f, BOB).relayed, "{f:?}");
+}
+
+/// Two OPTIONS asked onward in the order bob took them are answered in that
+/// order: each of bob's 2xx carries back the far answer to its own question,
+/// the bare one relayed, the one that dropped a description charged.
+#[test]
+fn interleaved_far_answers_pair_first_in_first_out() {
     let [ask_f, bare] = onward_on("z9hG4bK-f", 1_500, 1_800, "");
     let [ask_g, described] = onward_on("z9hG4bK-g", 1_600, 2_000, "Allow: INVITE\r\n");
     let msgs = [
         taken(1_000, "OPTIONS", "z9hG4bK-o", 1, ""),
+        taken(1_100, "OPTIONS", "z9hG4bK-p", 2, ""),
         ask_f,
         ask_g,
         bare,
         described,
         answered(2_500, 200, "OPTIONS", "z9hG4bK-o", 1, ""),
+        answered(2_600, 200, "OPTIONS", "z9hG4bK-p", 2, ""),
     ];
     let f = violations(&OptionsResponseEchoes, &msgs);
-    assert!(!charged(&f, BOB).relayed, "{f:?}");
+    let bob: Vec<bool> = f.iter().filter(|x| x.emitter == BOB).map(|x| x.relayed).collect();
+    assert_eq!(bob, [true, false], "{f:?}");
 }

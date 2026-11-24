@@ -24,11 +24,12 @@
  * - **A relay stamped before its source, by its identifying values** — on a
  *   platform that relays provisionals as they arrive, an arrival no listed
  *   emission explains, carrying identifying header values (`RelayMarker`) no
- *   earlier emission delivered, all of which an emission of the same message
- *   type on another leg, and only that one, delivers at most `RELAY_SKEW_US`
- *   later, before that leg's final to its INVITE — is moved to just after
- *   that emission. Such a value is the far side's, so the platform cannot
- *   have stated it first. These moves follow every move by description. One
+ *   earlier step carried, sent or received, all of which an emission of the
+ *   same message type on another leg, and only that one, delivers at most
+ *   `RELAY_SKEW_US` later, before that leg's final to its INVITE — is moved to
+ *   just after that emission. A value no step carried before is the far
+ *   side's: the platform did not state it first. These moves follow every
+ *   move by description. One
  *   passes at most one step of the arrival's leg, a relayed provisional of
  *   its transaction whose source is listed, and no step of a third leg or of
  *   another transaction on the source's leg; and it leaves every relay of the
@@ -93,13 +94,14 @@ const finalToInvite = (t: StepTiming): boolean => /^resp:[2-6]\d\d:INVITE$/.test
  * The emission the arrival at `i` relays by its identifying values, or -1: the
  * one emission of the arrival's type on another leg, stamped at most
  * `RELAY_SKEW_US` after it and before its leg's final to its INVITE, that
- * delivers every value of the arrival no emission listed before it delivered.
- * An arrival with no such value has none, and one whose values two emissions
+ * delivers every value of the arrival no step listed before it carried, an
+ * emission or an arrival: a value the platform stated first is its own. An
+ * arrival with no such value has none, and one whose values two emissions
  * deliver has none either: the values do not single its source out.
  */
 const valuesSourceOf = (timings: ReadonlyArray<StepTiming>, i: number): number => {
   const s = timings[i]!
-  const delivered = new Set(timings.slice(0, i).flatMap((t) => (t.emits ? (t.marks ?? []) : [])))
+  const delivered = new Set(timings.slice(0, i).flatMap((t) => t.marks ?? []))
   const unseen = (s.marks ?? []).filter((m) => !delivered.has(m))
   if (unseen.length === 0) return -1
   const ended = new Set<string>()

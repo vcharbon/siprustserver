@@ -99,6 +99,31 @@ const callerSent = (address: { readonly from: string; readonly to?: string }, ..
     }
   })
 
+/**
+ * Leg A's REFER outcome: the transferor's REFER answered 202, the progress
+ * NOTIFY its step s11 took (`active`, `100`), then `terminals` terminal NOTIFYs
+ * no step claimed reporting 403. The BYE the flow expects next rides
+ * `byeLeg` at s15, an earlier expect leg A at s9. `elsewhere` gives leg B a
+ * NOTIFY no step claimed too.
+ */
+const referredOn = (o: { readonly terminals?: number; readonly byeLeg?: string; readonly elsewhere?: boolean } = {}): RfcFacts => {
+  const terminal: Classifier.Reception = { method: "NOTIFY", cseqMethod: "NOTIFY", subscriptionState: "terminated", fragStatus: 403 }
+  return {
+    ...ranWith({ s9: "A", s11: "A", s15: o.byeLeg ?? "A" }, {
+      receptions: {
+        A: [
+          { step: "s11", method: "NOTIFY", cseqMethod: "NOTIFY", subscriptionState: "active", fragStatus: 100 },
+          ...Array.from({ length: o.terminals ?? 1 }, () => terminal)
+        ],
+        ...(o.elsewhere === true ? { B: [terminal] } : {})
+      }
+    }),
+    referOutcomeAtStep: new Map([["s11", 403]])
+  }
+}
+const strayNotify = shape({ shape: "serviced-stray", method: "NOTIFY", action: "auto-reacted" })
+const notifyForBye = (at: string) => shape({ shape: "method-substitution", expected: "BYE", observed: "NOTIFY" }, undefined, at)
+
 /** Leg A's session opened by the system's 200 at s8 under sess-id 111; the ACK at s34 comes later. */
 const sessionOpenedAt8 = ranWith(
   { s8: "A", s34: "A" },
@@ -909,14 +934,40 @@ const SHAPE: ReadonlyArray<RfcFixture> = [
   {
     id: "refer-progress-terminal-notify",
     named: [
-      { probe: shape({ shape: "serviced-stray", method: "NOTIFY", action: "auto-reacted" }), facts: factsWith({ referOutcomeAtStep: new Map([["s11", 403]]) }) },
-      { probe: shape({ shape: "method-substitution", expected: "BYE", observed: "NOTIFY" }, undefined, "s15"), facts: factsWith({ referOutcomeAtStep: new Map([["s11", 403]]) }) }
+      { probe: strayNotify, facts: referredOn() },
+      { probe: notifyForBye("s15"), facts: referredOn() }
     ],
-    visible: [{
-      defect: "a NOTIFY the flow never scripted on a document with no REFER outcome",
-      leftTo: undefined,
-      probe: shape({ shape: "serviced-stray", method: "NOTIFY", action: "auto-reacted" })
-    }]
+    visible: [
+      {
+        defect: "a NOTIFY the flow never scripted on a document with no REFER outcome",
+        leftTo: undefined,
+        probe: strayNotify
+      },
+      {
+        defect: "a second NOTIFY past the REFER's terminal one",
+        leftTo: undefined,
+        probe: strayNotify,
+        facts: referredOn({ terminals: 2 })
+      },
+      {
+        defect: "a NOTIFY where BYE was due on another leg than the REFER's",
+        leftTo: undefined,
+        probe: notifyForBye("s15"),
+        facts: referredOn({ byeLeg: "B" })
+      },
+      {
+        defect: "a NOTIFY where BYE was due before the REFER's progress NOTIFY",
+        leftTo: undefined,
+        probe: notifyForBye("s9"),
+        facts: referredOn()
+      },
+      {
+        defect: "a NOTIFY no step claimed on a leg beside the REFER's terminal one",
+        leftTo: undefined,
+        probe: strayNotify,
+        facts: referredOn({ elsewhere: true })
+      }
+    ]
   },
   {
     id: "trying-provisional-unscripted",

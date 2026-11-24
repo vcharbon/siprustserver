@@ -207,11 +207,18 @@ describe("a bare relay stamped before the callee message whose values it carries
   const callee = ["x-trace:callee-1", "x-route:r-7"]
   const CAPTURED = [1, 2, 3, 4, 5, 6, 7, 8]
   const shape = (
-    o: { early?: boolean; relayMarks?: Array<string>; sourceMarks?: Array<string>; sourceMs?: number; ringCseq?: number } = {}
+    o: {
+      early?: boolean
+      statedFirst?: boolean
+      relayMarks?: Array<string>
+      sourceMarks?: Array<string>
+      sourceMs?: number
+      ringCseq?: number
+    } = {}
   ) => [
     marked(timing("A", true, "req:INVITE", 0, 1, "bare"), "x-trace:caller-1"),
     timing("A", false, "resp:100:INVITE", 0.3, 1, "bare"),
-    marked(timing("B", false, "req:INVITE", 16, 7, "bare"), "x-trace:caller-1"),
+    marked(timing("B", false, "req:INVITE", 16, 7, "bare"), "x-trace:caller-1", ...(o.statedFirst === true ? callee : [])),
     marked(timing("B", true, "resp:100:INVITE", 17, 7, "bare"), ...(o.early === true ? callee : [])),
     marked(timing("A", false, "resp:183:INVITE", 73, 1, "bare"), ...(o.relayMarks ?? callee)),
     marked(timing("B", true, "resp:180:INVITE", 110, 7, "bare"), ...callee),
@@ -233,6 +240,10 @@ describe("a bare relay stamped before the callee message whose values it carries
 
   it("keeps it where an earlier callee message delivered those values", () => {
     expect(placed(shape({ early: true }))).toEqual(CAPTURED)
+  })
+
+  it("keeps it where the platform stated those values first, on the INVITE it sent the callee", () => {
+    expect(placed(shape({ statedFirst: true }))).toEqual(CAPTURED)
   })
 
   it("keeps it where the later message delivers only some of them", () => {

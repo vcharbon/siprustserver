@@ -282,6 +282,30 @@ export const referOutcomeAtStep = ({ facts }: DocumentReading, run: Classifier.R
   return out
 }
 
+/** Whether `r` is a NOTIFY no step of the flow claimed. */
+const unclaimedNotify = (r: Classifier.Reception): boolean => r.method === "NOTIFY" && r.step === undefined
+
+/**
+ * `refer-progress-terminal-notify`: whether a NOTIFY the flow never scripted,
+ * seen at `step`, is the one terminal NOTIFY of a {@link referOutcomeAtStep}
+ * outcome: the leg of the outcome's step received exactly one NOTIFY no step
+ * claimed after the progress NOTIFY that step took, and `step` rides that leg
+ * after it. A probe no step holds sits on no leg, so it is that NOTIFY only
+ * where no other leg received one no step claimed.
+ */
+export const referTerminalNotifyAt = ({ referOutcomeAtStep, facts }: RfcFacts, step: string): boolean => {
+  const order = [...facts.legOfStep.keys()]
+  const unclaimed = [...facts.run.receptions.values()].flat().filter(unclaimedNotify).length
+  return [...referOutcomeAtStep.keys()].some((outcome) => {
+    const leg = facts.legOfStep.get(outcome)
+    const received = (leg === undefined ? undefined : facts.run.receptions.get(leg)) ?? []
+    const progress = received.findIndex((r) => r.step === outcome && r.method === "NOTIFY")
+    if (progress < 0 || received.slice(progress + 1).filter(unclaimedNotify).length !== 1) return false
+    if (!facts.legOfStep.has(step)) return unclaimed === 1
+    return facts.legOfStep.get(step) === leg && order.indexOf(step) > order.indexOf(outcome)
+  })
+}
+
 /**
  * `trying-provisional-unscripted`: every system response but a `100` to an
  * INVITE the party sent, where the document scripts no `100` since that INVITE:
