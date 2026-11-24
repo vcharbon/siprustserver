@@ -546,6 +546,24 @@ describe("shapeProbes", () => {
     expect(signature(probes[0]!.probe)).toBe("shape:extra-message:OPTIONS")
   })
 
+  it("a datagram no step claimed states the leg and CSeq it arrived with, outside its signature", () => {
+    const ack = { kind: "request", method: "ACK", cseq: 1391552827 } as const
+    const probes = shapeProbes(
+      verdictWith([
+        { failure: "unexpected-datagram", leg: "A", arrived: ack },
+        { failure: "datagram-after-flow", leg: "B", arrived: { ...ack, cseq: 2 } },
+        { failure: "unmatched-datagram", step: "s9", leg: "A", gated_on: { kind: "request", method: "BYE" }, reason: "r", arrived: { kind: "request", method: "INFO", cseq: 3 } }
+      ]),
+      new Map(),
+      new Map()
+    )
+    expect(probes.map((p) => [signature(p.probe), p.probe.kind === "shape" ? p.probe.stray : "none"])).toEqual([
+      ["shape:extra-message:ACK", { leg: "A", cseq: 1391552827 }],
+      ["shape:extra-message:ACK", { leg: "B", cseq: 2 }],
+      ["shape:method-substitution:BYE->INFO", undefined]
+    ])
+  })
+
   it("an expectation nothing satisfied is a missing message", () => {
     const probes = shapeProbes(
       verdictWith([

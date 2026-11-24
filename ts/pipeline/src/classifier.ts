@@ -189,6 +189,8 @@ export interface Reception {
   readonly status?: number
   /** The CSeq method, uppercased; empty where the datagram states none. */
   readonly cseqMethod: string
+  /** The CSeq number as the run's wire carried it; absent where the datagram states none readable. */
+  readonly cseq?: number
   /** The Subscription-State's state token, lowercased (RFC 6665 §8.2.3), where it carries one. */
   readonly subscriptionState?: string
   /** The status line a `message/sipfrag` body states (RFC 3420), where it carries one. */

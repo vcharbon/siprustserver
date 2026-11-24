@@ -1,7 +1,7 @@
 /**
  * What each leg's scripted actor received, and what it sent, one summary per
  * datagram, read off the run's recording: which step claimed it, its start line
- * and CSeq method, its From and Record-Route, and the subscription state,
+ * and CSeq number and method, its From and Record-Route, and the subscription state,
  * sipfrag status and session origin it carries. The run-side facts a rule reads
  * beside a confrontation row, which states only the one message it compares.
  */
@@ -12,6 +12,8 @@ import { bodyBytesOf, headersInOrderRaw, headerValuesOf, headText, startLineOf }
 
 const ORIGIN_LINE = /^o=[^\r\n]*/m
 const FRAG_STATUS = /^SIP\/2\.0\s+(\d{3})/
+/** A CSeq number: 1*DIGIT (RFC 3261 §20.16), under 2**31 (§8.1.1.5), so ten digits at most. */
+const CSEQ_NUMBER = /^\d{1,10}$/
 
 /** The text of a recorded body, within its stated length; empty where it carries none. */
 const bodyText = (message: Bundle.RecordedMessage): string => {
@@ -25,7 +27,9 @@ export const receptionOf = (message: Bundle.RecordedMessage): Reception | undefi
   const start = startLineOf(head)
   if (start === undefined) return undefined
   const headers = headersInOrderRaw(head)
-  const cseqMethod = (headerValuesOf(headers, "CSeq")[0] ?? "").trim().split(/\s+/)[1]?.toUpperCase() ?? ""
+  const [cseqNumber = "", method = ""] = (headerValuesOf(headers, "CSeq")[0] ?? "").trim().split(/\s+/)
+  const cseqMethod = method.toUpperCase()
+  const cseq = CSEQ_NUMBER.test(cseqNumber) ? Number(cseqNumber) : undefined
   const state = headerValuesOf(headers, "Subscription-State")[0]?.split(";")[0]?.trim().toLowerCase()
   const from = headerValuesOf(headers, "From")[0]?.trim()
   const recordRoute = items("record-route", headerValuesOf(headers, "Record-Route"))
@@ -37,6 +41,7 @@ export const receptionOf = (message: Bundle.RecordedMessage): Reception | undefi
     ...(message.step === undefined ? {} : { step: message.step }),
     ...(start.kind === "request" ? { method: start.method } : { status: start.status }),
     cseqMethod,
+    ...(cseq === undefined ? {} : { cseq }),
     ...(state === undefined || state === "" ? {} : { subscriptionState: state }),
     ...(frag === null ? {} : { fragStatus: Number(frag[1]) }),
     ...(origin === undefined ? {} : { origin }),

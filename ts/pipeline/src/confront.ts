@@ -1135,7 +1135,8 @@ const repeatReader = (recordings: ReadonlyMap<string, ReadonlyArray<Bundle.Recor
  * Only a REQUEST can be serviced; a stray response answers nothing and stays an
  * extra message. A request the leg serviced although its CSeq skipped the
  * dialog's sequence (RFC 3261 §12.2.1.1) is the sender's numbering fault, not
- * a request the script did not expect: its action is `cseq-skip`.
+ * a request the script did not expect: its action is `cseq-skip`. A datagram
+ * no step claimed states the leg and CSeq it arrived with (`stray`).
  */
 const strayProbe = (
   step: string,
@@ -1148,6 +1149,7 @@ const strayProbe = (
     arrived.kind === "request" &&
     (answered.get(leg)?.has(`${arrived.cseq} ${arrived.method.toUpperCase()}`) ?? false)
   const action = detail !== undefined && CSEQ_SKIP.test(detail) ? "cseq-skip" : "auto-reacted"
+  const stray = step === "" && arrived.kind !== "unreadable" ? { stray: { leg, cseq: arrived.cseq } } : {}
   return {
     step,
     probe: {
@@ -1156,7 +1158,8 @@ const strayProbe = (
       shapeKind: serviced
         ? { shape: "serviced-stray", method: arrivedToken(arrived), action }
         : { shape: "extra-message", method: arrivedToken(arrived) },
-      scope: undefined
+      scope: undefined,
+      ...stray
     }
   }
 }

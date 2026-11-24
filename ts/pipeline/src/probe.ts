@@ -161,6 +161,13 @@ export interface ShapeProbe extends ProbeSite {
   readonly kind: "shape"
   readonly shapeKind: ShapeKind
   readonly scope: MsgScope | undefined
+  /**
+   * Where a datagram no step claimed arrived: the id of the leg whose
+   * recording holds it and the CSeq number it carried, as the failure states
+   * them; absent on a probe a step is attributed to, and on an unreadable
+   * datagram. Outside {@link signature}, like the step.
+   */
+  readonly stray?: { readonly leg: string; readonly cseq: number }
 }
 
 /**
