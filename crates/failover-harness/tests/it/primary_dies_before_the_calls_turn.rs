@@ -48,7 +48,6 @@ async fn the_copies_of_a_call_its_primary_never_started_reach_the_backup_and_dra
     let (proxy, mut w_b1, w_b2) = bring_up(&mut fh).await;
     let pace = fh.turn_points().router_pace().clone();
 
-    // ── both routers wedged: the primary never takes the INVITE's turn ──────
     fh.mark(PRIMARY, None, "stall", "both routers take no turn");
     pace.set(PRIMARY, Pace::Frozen);
     pace.set(BACKUP, Pace::Frozen);
@@ -66,7 +65,6 @@ async fn the_copies_of_a_call_its_primary_never_started_reach_the_backup_and_dra
     w_b1.crash();
     proxy.set_health(PRIMARY, WorkerHealth::Dead);
 
-    // ── the first copy reaches the backup, whose router lags ────────────────
     sip_clock::testkit::advance_settled(T1 - DIES_AT).await;
     call.retransmit().await;
     sip_clock::testkit::advance_settled(BACKUP_LAG).await;
@@ -74,15 +72,7 @@ async fn the_copies_of_a_call_its_primary_never_started_reach_the_backup_and_dra
     assert_eq!(heard_by(&fh, &alice), 0, "no 100 from a backup whose router lags");
     pace.set(BACKUP, Pace::Free);
 
-    // ── every later copy is dropped as foreign, up to Timer B ───────────────
-    let (mut now, mut last, mut gap, mut copies) = (T1 + BACKUP_LAG, T1, T1 * 2, 1);
-    while last + gap < TIMER_B {
-        last += gap;
-        sip_clock::testkit::advance_settled(last - now).await;
-        call.retransmit().await;
-        (now, gap, copies) = (last, gap * 2, copies + 1);
-    }
-    sip_clock::testkit::advance_settled(TIMER_B - now).await;
+    let copies = retransmit_up_to_timer_b(&call, T1 + BACKUP_LAG).await;
     assert_eq!(copies, 6, "Timer A: copies at 0.5, 1.5, 3.5, 7.5, 15.5 and 31.5 s");
     assert_eq!(copies_to(&fh, &w_b2), copies, "every copy goes to the backup");
     assert_eq!(
@@ -98,6 +88,21 @@ async fn the_copies_of_a_call_its_primary_never_started_reach_the_backup_and_dra
     assert!(w_b2.cdr_records().is_empty(), "no call, no CDR");
     fh.assert_sip_rfc_clean(name);
     drop((w_b1, w_b2, proxy));
+}
+
+/// The caller, `now` after its INVITE and having sent its first copy at T1,
+/// sends every later copy Timer A owes, until Timer B fires: the copies sent,
+/// the first included.
+async fn retransmit_up_to_timer_b(call: &scenario_harness::ClientInvite, now: Duration) -> usize {
+    let (mut now, mut last, mut gap, mut copies) = (now, T1, T1 * 2, 1);
+    while last + gap < TIMER_B {
+        last += gap;
+        sip_clock::testkit::advance_settled(last - now).await;
+        call.retransmit().await;
+        (now, gap, copies) = (last, gap * 2, copies + 1);
+    }
+    sip_clock::testkit::advance_settled(TIMER_B - now).await;
+    copies
 }
 
 /// The responses `agent` received, from the recording.
