@@ -190,7 +190,6 @@ async fn a_queued_new_call_counts_against_the_call_ceiling() {
     refused_at_once(&s, &erin).await;
     assert_eq!(s.b2bua.new_calls().rejected(Refusal::CapacityCalls, Class::Normal), 1);
 
-    // The waiting turn is refused at its start bound (ADR-0070).
     s.b2bua.capacity().configure(&CapacityConfig::default());
     waiting.expect(503).await;
     assert_eq!(s.b2bua.new_calls().rejected(Refusal::StartBound, Class::Normal), 1);

@@ -104,8 +104,6 @@ async fn an_invite_canceled_while_waiting_for_a_permit_skips_the_decision_and_th
     s.h.advance(Duration::from_millis(300)).await;
     assert_eq!(engine.count.load(Ordering::SeqCst), HOLDERS, "the share is held");
 
-    // A third INVITE's turn waits for a new-call permit, its caller hearing
-    // nothing.
     s.h.waive(WaiverScope::rule("cancel-after-1xx", CANCEL_UNPROVISIONED).on_party("erin"));
     let erin = s.h.agent("erin", "127.0.0.1:5069").await;
     let mut waiting = erin.invite(&s.bob).with_sdp(OFFER_SDP).through(s.b2bua.addr).send().await;

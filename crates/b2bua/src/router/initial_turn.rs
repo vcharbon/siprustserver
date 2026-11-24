@@ -156,8 +156,7 @@ pub(super) async fn initial_invite_turn(
     // `Cancelled` turn ends it with its Cancel CDR; it is neither accepted nor
     // treated (`adm`). A cordoned node refuses the call before its decision;
     // the call is born only to write its record (ADR-0050 §9). So does a turn
-    // that starts past its start bound (ADR-0070), and one whose setup budget
-    // ran out before it ran (ADR-0022 X1).
+    // whose setup budget ran out before it ran (ADR-0022 X1).
     let cancelled = ctx.state.is_setup_cancelled(call_ref, cseq);
     let cordoned = !cancelled && ctx.readiness.state() == ReadinessState::Cordoned;
     let late = !cancelled && !cordoned && budget.started_late();
@@ -203,8 +202,7 @@ pub(super) async fn initial_invite_turn(
     // The caller's 100 follows the call's creation write through the call's
     // outbox, so the backup holds the call from before the caller stops
     // retransmitting, not from its decision (ADR-0047, ADR-0055 §3); the
-    // transaction layer sends it itself at the §17.2.1 bound the consult
-    // arms. A caller refused past the start bound hears her 503 alone.
+    // transaction layer sends it itself at the §17.2.1 bound.
     if backed {
         ctx.state.flush(&call);
     }
@@ -243,9 +241,7 @@ pub(super) async fn initial_invite_turn(
             budget,
             &setup_cancelled,
         );
-        // ADR-0070: the fallback 100 runs from here, the poll that sends the
-        // decision request.
-        let _ = ctx.txn.arm_trying(req).await;
+        arm_the_fallback_100(ctx, req).await;
         let consult = consult_writing_its_cancel(ctx, call_ref, &call, &caller, consult).await;
         match consult {
             Consulted::Applied(result) => *result,
@@ -302,6 +298,14 @@ pub(super) async fn initial_invite_turn(
         Ok(result) => Turn::Result(Box::new(result)),
         Err(tripped) => Turn::Tripped(tripped),
     }
+}
+
+/// Arm the fallback 100 of the caller's INVITE `invite` (ADR-0070 §2), in the
+/// poll that sends the consult's decision request: the transaction layer sends
+/// it 200 ms from here unless the rider behind the creation write released it
+/// first. The command is queued, never awaiting the layer's turn.
+async fn arm_the_fallback_100(ctx: &RouterCtx, invite: &SipRequest) {
+    let _ = ctx.txn.arm_trying(invite).await;
 }
 
 /// [`refused_unavailable`] from the pre-handler call ([`discarded_turn`]), so

@@ -199,8 +199,6 @@ impl B2buaConfig {
                 Self::DEFAULT_CALL_CONTROL_TIMEOUT_MS
             ));
         }
-        // A turn that starts past the start bound is refused before its
-        // setup budget could cut it: the bound sits inside the budget.
         if self.call_start_bound_ms <= 0 || self.call_start_bound() >= self.call_control_timeout() {
             out.push(format!(
                 "B2BUA_CALL_START_BOUND_MS={} is not above zero and below \
