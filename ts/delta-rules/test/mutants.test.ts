@@ -57,6 +57,12 @@ describe("the fact mutants", () => {
     expect([...(leg?.facts.run.legOfStep ?? [])]).toEqual([["s1", "B"], ["s9", "B"]])
     expect(facts.every((m) => m.probe === bye && m.facts.count === 3)).toBe(true)
   })
+
+  it("toggle a stray's leg and CSeq where no step claimed it", () => {
+    const stray = { ...shape({ shape: "extra-message", method: "ACK" }), step: "", stray: { leg: "B", cseq: 7 } }
+    const steps = mutantsOf(stray, { steps: new Set(["B 7"]) }).find((m) => m.label === "gate:steps")
+    expect([...(steps?.facts.steps ?? [])]).toEqual([])
+  })
 })
 
 describe("the probe mutants", () => {

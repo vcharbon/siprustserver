@@ -368,8 +368,13 @@ describe("one offer the endpoint sends to sequential targets", () => {
       .toEqual([["s0i", true], ["s1i", false]])
   })
 
-  /** Leg B's offer, then `rest` on leg B, then leg C's same offer, each against its own captured origin. */
-  const thenC = (rest: ReadonlyArray<readonly [number, "in" | "out", string, string, boolean]>): ReadonlyArray<BodyProbe> => {
+  /** Where leg C's offer rides: a dialog-opening INVITE by default. */
+  const OPENING = { start: "INVITE sip:c@example.invalid SIP/2.0", cseq: "1 INVITE", toTag: false } as const
+  /** Leg B's offer, then `rest` on leg B, then leg C's same offer on `onC`, each against its own captured origin. */
+  const thenC = (
+    rest: ReadonlyArray<readonly [number, "in" | "out", string, string, boolean]>,
+    onC: { readonly start: string; readonly cseq: string; readonly toTag: boolean } = OPENING
+  ): ReadonlyArray<BodyProbe> => {
     const offer = sdp(o(7, 7))
     return confront({
       pivot: {
@@ -385,12 +390,13 @@ describe("one offer the endpoint sends to sequential targets", () => {
           message(1, "in", "s0i", "INVITE sip:b@example.invalid SIP/2.0", "1 INVITE", false, offer),
           ...rest.map(([at, dir, start, cseq, toTag], k) => message(at, dir, `b${k}`, start, cseq, toTag, ""))
         ]],
-        ["C", [message(50, "in", "s1i", "INVITE sip:c@example.invalid SIP/2.0", "1 INVITE", false, offer)]]
+        ["C", [message(50, "in", "s1i", onC.start, onC.cseq, onC.toTag, offer)]]
       ]),
       resources: new Map([["resources/B.sdp", utf8.encode(sdp(o(1000, 1000)))], ["resources/C.sdp", utf8.encode(sdp(o(2000, 2000)))]]),
       media: "verbatim"
     }).probes.flatMap((p) => (p.probe.kind === "body" ? [p.probe] : []))
   }
+  const refusedBusy = [[2, "out", "SIP/2.0 486 Busy Here", "1 INVITE", true], [3, "in", "ACK sip:b@example.invalid SIP/2.0", "1 ACK", true]] as const
   const answered = [[2, "out", "SIP/2.0 200 OK", "1 INVITE", true], [3, "in", "ACK sip:b@example.invalid SIP/2.0", "1 ACK", true]] as const
 
   it("marks the second target's offer where the first target's dialog ended by a BYE answered before it", () => {
@@ -406,6 +412,30 @@ describe("one offer the endpoint sends to sequential targets", () => {
       [6, "in", "ACK sip:b@example.invalid SIP/2.0", "2 ACK", true]
     ] as const
     expect(minted(thenC(refused))).toEqual([["s0i", true], ["s1i", false]])
+  })
+
+  it("keeps the second target's offer unmarked where the first target opened a later dialog still up", () => {
+    const reopened = [
+      ...refusedBusy,
+      [10, "in", "INVITE sip:b@example.invalid SIP/2.0", "2 INVITE", false],
+      [11, "out", "SIP/2.0 200 OK", "2 INVITE", true]
+    ] as const
+    expect(minted(thenC(reopened))).toEqual([["s0i", true], ["s1i", false]])
+  })
+
+  it("marks the second target's offer where both dialogs the first target opened ended before it", () => {
+    const both = [
+      ...refusedBusy,
+      [10, "in", "INVITE sip:b@example.invalid SIP/2.0", "2 INVITE", false],
+      [11, "out", "SIP/2.0 486 Busy Here", "2 INVITE", true],
+      [12, "in", "ACK sip:b@example.invalid SIP/2.0", "2 ACK", true]
+    ] as const
+    expect(minted(thenC(both))).toEqual([["s0i", true], ["s1i", true]])
+  })
+
+  it("keeps the offer unmarked where the second target receives it on a re-INVITE, not on a dialog-opening one", () => {
+    const reinvite = { start: "INVITE sip:c@example.invalid SIP/2.0", cseq: "2 INVITE", toTag: true } as const
+    expect(minted(thenC(refusedBusy, reinvite))).toEqual([["s0i", true], ["s1i", false]])
   })
 
   it("keeps the second offer unmarked where it differs from the first in any other line", () => {
