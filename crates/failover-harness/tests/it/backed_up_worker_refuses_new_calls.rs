@@ -18,7 +18,7 @@ use std::time::Duration;
 
 use b2bua::admission::Class;
 use b2bua::new_calls::Refusal;
-use b2bua_harness::{drop_backlog_answers, send_backlog, Pace, BACKLOG_METHOD};
+use b2bua_harness::{send_backlog, BurstAnswers, Pace};
 use failover_harness::{
     assert_call_fully_released, total_cdrs_for, Acceptance, FailoverHarness, WorkerHealth,
 };
@@ -57,7 +57,8 @@ async fn a_backed_up_worker_stays_alive_takes_no_new_call_and_keeps_its_dialogs(
     let mut fh = FailoverHarness::new(name, &["b1", "b2"]);
     let alice = fh.agent("alice", ALICE).await;
     let bob = fh.agent("bob", BOB).await;
-    let carol = fh.agent_with_pre_ingress("carol", CAROL, drop_backlog_answers()).await;
+    let answers = BurstAnswers::default();
+    let carol = fh.agent_with_pre_ingress("carol", CAROL, answers.hook()).await;
     let c = bring_up(&mut fh).await;
 
     // ── one call answered, then its primary's router starves ────────────────
@@ -68,7 +69,7 @@ async fn a_backed_up_worker_stays_alive_takes_no_new_call_and_keeps_its_dialogs(
     let pace = fh.turn_points().router_pace().clone();
     pace.set(&pri, Pace::PerTurn(PER_TURN));
     send_backlog(&carol, c.node(&pri).sip_addr(), BACKLOG, "backlog").await;
-    let refused = || c.node(&pri).metrics().unroutable_refused_of(BACKLOG_METHOD, 405);
+    let refused = || answers.of(405);
 
     // ── a new INVITE placed on it before the proxy reads the refusal ────────
     assert_eq!(c.proxy.acceptance(&pri), Some(Acceptance::Accept), "not read refusing yet");

@@ -12,7 +12,7 @@
 
 use std::time::Duration;
 
-use b2bua_harness::{drop_backlog_answers, send_backlog, Pace, BACKLOG_METHOD};
+use b2bua_harness::{send_backlog, BurstAnswers, Pace};
 use failover_harness::{assert_call_fully_over, WorkerHealth};
 use tokio::time::Instant;
 
@@ -46,11 +46,12 @@ async fn a_dead_verdict_behind_a_backlog_is_taken_once_in_the_order_told() {
         ..
     } = establish(name).await;
     let backup = if primary_ord == "b1" { &w_b2 } else { &w_b1 };
-    let carol = fh.agent_with_pre_ingress("carol", CAROL, drop_backlog_answers()).await;
+    let answers = BurstAnswers::default();
+    let carol = fh.agent_with_pre_ingress("carol", CAROL, answers.hook()).await;
     let pace = fh.turn_points().router_pace().clone();
     pace.set(backup.ordinal(), Pace::PerTurn(PER_TURN));
     send_backlog(&carol, backup.sip_addr(), BACKLOG, "backlog").await;
-    let refused = || backup.metrics().unroutable_refused_of(BACKLOG_METHOD, 405);
+    let refused = || answers.of(405);
     fh.advance(Duration::from_millis(500)).await;
 
     // ── the first verdict ───────────────────────────────────────────────────

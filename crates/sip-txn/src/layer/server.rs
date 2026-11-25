@@ -269,7 +269,7 @@ impl Owner {
         // INVITE the node already refused, an INVITE its deferred backlog has
         // no room for, and one its new-call gate refuses, on the consumer's
         // switch or the queue's age; it admits every other INVITE, and every
-        // other request its lane takes (below).
+        // other request its event queue takes (below).
         let kind =
             if req.method() == Method::Invite { TxnKind::Invite } else { TxnKind::NonInvite };
         let is_invite = matches!(kind, TxnKind::Invite);

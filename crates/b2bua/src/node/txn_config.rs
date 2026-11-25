@@ -29,7 +29,7 @@ const KEEPALIVE_LANE: usize = 64;
 /// the router takes after every other source. A request of a call whose
 /// Request-URI an element rewrote waits there a few tens of milliseconds of
 /// router turns at most; past the bound, a flood of them is shed by the
-/// transaction layer, before any transaction exists.
+/// transaction layer, before any transaction exists (ADR-0050 §13).
 const UNATTRIBUTED_LANE: usize = 1024;
 
 /// The transaction layer's tunables for this worker: its event queue, the
@@ -88,8 +88,6 @@ pub(super) fn txn_config(
         stateless_options: true,
         // The router takes a probe ahead of the queued events (ADR-0050 §2).
         keepalive_lane: Some(KEEPALIVE_LANE),
-        // Requests that name no call wait apart, so a flood of them never
-        // takes the event queue's room nor its age (ADR-0050 §13).
         unattributed_lane: Some(UNATTRIBUTED_LANE),
         // What the layer builds itself leaves for the front proxy, as every
         // other request of a worker behind one does. Its address is an IP

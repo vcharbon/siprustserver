@@ -179,6 +179,7 @@ b2bua-runner b2bua_txn_event_queue_depth gauge fixed {}
 b2bua-runner b2bua_txn_event_queue_capacity gauge fixed {}
 b2bua-runner b2bua_txn_event_queue_delay_ms gauge fixed {}
 b2bua-runner b2bua_txn_keepalive_lane_drops_total counter fixed {}
+b2bua-runner b2bua_txn_unattributed_lane_drops_total counter fixed {}
 b2bua-runner b2bua_txn_message_budget_trips_total counter fixed {}
 b2bua-runner b2bua_txn_message_budget_uncounted_total counter fixed {}
 b2bua-runner b2bua_txn_muted_messages_total counter fixed {direction}
