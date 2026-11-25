@@ -264,6 +264,9 @@ struct StepLadder {
     /// Whether the closer was the emitter's own BYE
     /// ([`StepLadder::ended_by_emitters_bye`]) rather than our answer.
     closed_by_emitters_bye: bool,
+    /// When our side sent the ACK to a 2xx the emitter's BYE had already
+    /// closed: the ACK still ends the ladder (RFC 3261 §13.3.1.4).
+    acked_us: Option<u64>,
     /// The schedule the RFC puts on `claimed`'s emitter ([`pacing_of`]):
     /// its class's, or [`Schedule::once`] where the class rides no timer of its
     /// own and its repeats are drawn.
@@ -365,28 +368,31 @@ impl StepLadder {
     }
 
     /// Whether a 2xx ladder its emitter's own BYE closed ran on past that BYE
-    /// on the RFC's ladder: at least the `owed` rungs inside the dwell, at most
-    /// the rungs inside the run window (64·T1 at most), each repeat no earlier
-    /// than its §13.3.1.4 rung less [`TWO_HOPS`] of transit jitter. RFC 3261
-    /// §13.3.1.4 ends that ladder at the ACK or 64·T1, never at a BYE, so the
-    /// emitter may keep it running; a surplus or an early copy stays a mismatch.
+    /// on the RFC's ladder. RFC 3261 §13.3.1.4 ends that ladder at the ACK or
+    /// 64·T1, never at a BYE, so the emitter may keep it running until our ACK
+    /// reaches it: at least the `owed` rungs inside the dwell, at most the
+    /// rungs up to our ACK plus [`TWO_HOPS`] (the run's end where none was
+    /// sent), each repeat one §13.3.1.4 interval after the one before it,
+    /// within [`TWO_HOPS`] either way. A surplus, a burst or a copy after the
+    /// ACK stays a mismatch.
     fn ran_on_past_its_bye(&self, owed: u32, run_end_us: u64) -> bool {
         if !self.closed_by_emitters_bye || self.observed <= owed {
             return false;
         }
-        let Some(ran) = run_end_us.checked_sub(self.claimed_us) else { return false };
+        let slack = TWO_HOPS.as_micros() as u64;
+        let end_us = self.acked_us.map_or(run_end_us, |acked| acked.saturating_add(slack));
+        let Some(ran) = end_us.checked_sub(self.claimed_us) else { return false };
         if self.observed > rungs_within(&self.pacing, Duration::from_micros(ran)) {
             return false;
         }
-        let slack = TWO_HOPS.as_micros() as u64;
-        let mut rung = Duration::ZERO;
+        let mut previous_us = self.claimed_us;
         for (n, &at_us) in (1..).zip(&self.repeats_us) {
             let Some(wait) = self.pacing.interval(n) else { return false };
-            rung += wait;
-            let offset_us = at_us.saturating_sub(self.claimed_us);
-            if offset_us.saturating_add(slack) < rung.as_micros() as u64 {
+            let gap_us = at_us.saturating_sub(previous_us);
+            if at_us > end_us || gap_us.abs_diff(wait.as_micros() as u64) > slack {
                 return false;
             }
+            previous_us = at_us;
         }
         true
     }
@@ -468,6 +474,7 @@ impl Repeats {
             claimed_us: at_us,
             closed_us: None,
             closed_by_emitters_bye: false,
+            acked_us: None,
             pacing: pacing_of(raw),
             repeats_us: Vec::new(),
         });
@@ -494,7 +501,9 @@ impl Repeats {
     /// class, inside the claimed datagram's own dialog, whichever comes first.
     ///
     /// Only an expect-side ladder needs it. A send-side ladder is ours to pace
-    /// and its count holds by construction, so nothing is closed there.
+    /// and its count holds by construction, so nothing is closed there. On a
+    /// 2xx ladder the emitter's BYE already closed, our ACK is held as where
+    /// the ladder's run-on ends ([`StepLadder::ran_on_past_its_bye`]).
     pub fn answered(&mut self, leg: &str, raw: &[u8], at_us: u64) {
         let cseq = sip_message::sniff::cseq_number(raw);
         let is_response = sip_message::sniff::is_response(raw);
@@ -502,7 +511,11 @@ impl Repeats {
         let method = sip_message::sniff::cseq_method_label(raw);
         let req_method = sip_message::sniff::req_method(raw);
         for ladder in self.ladders.iter_mut() {
-            if ladder.leg != leg || !ladder.counts() || ladder.closed_us.is_some() {
+            let bye_closed_unacked = ladder.closed_by_emitters_bye && ladder.acked_us.is_none();
+            if ladder.leg != leg
+                || !ladder.counts()
+                || (ladder.closed_us.is_some() && !bye_closed_unacked)
+            {
                 continue;
             }
             if !ladder.same_dialog(raw) {
@@ -534,7 +547,9 @@ impl Repeats {
                 }
                 Closer::Nothing => false,
             };
-            if closes {
+            if closes && bye_closed_unacked {
+                ladder.acked_us = Some(at_us);
+            } else if closes {
                 ladder.closed_us = Some(at_us);
             }
         }
