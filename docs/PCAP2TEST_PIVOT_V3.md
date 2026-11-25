@@ -388,6 +388,9 @@ A captured retransmission collapses onto the step it repeats as a count. Run-tim
   a platform that rings twice has sent twice.
 - On an `expect`, `retransmits` is recorded evidence of what the capture held; the ladder the run
   owes is the RFC's, settled by the interpreter.
+- The system's ACK to a 2xx the run sent owes one repeat per copy of that 2xx sent after its first
+  ACK arrived (RFC 3261 §13.2.2.4), none for a copy before it; a copy that crossed the ACK in
+  flight may draw one or none.
 - `retransmit_intervals_ms` states a captured ladder's own pacing; absent, the class's RFC pacing
   applies.
 - A peer that re-ACKs each repeated final on a fresh branch mints distinct datagrams: each ACK is

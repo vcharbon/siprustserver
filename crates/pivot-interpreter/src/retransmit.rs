@@ -346,6 +346,13 @@ impl StepLadder {
         sip_message::sniff::req_method(&self.claimed).as_deref() == Some("ACK")
     }
 
+    /// How many copies of this ladder's datagram, beyond the first, went out
+    /// after `at_us`: on our 2xx, the repeats the SUT's ACK sent at `at_us`
+    /// had not yet met, each owed an ACK of its own (RFC 3261 §13.2.2.4).
+    fn copies_past(&self, at_us: u64) -> u32 {
+        self.repeats_us.iter().filter(|&&at| at > at_us).count() as u32
+    }
+
     /// Whether the RFC paces the claimed datagram's class at all: a schedule
     /// with a first rung. [`Schedule::once`] has none.
     fn paced(&self) -> bool {
@@ -571,7 +578,8 @@ impl Repeats {
     /// |---|---|---|
     /// | a scripted send | the document | `declared` — it is an instruction |
     /// | an auto ACK send | the wire (§13.2.2.4) | one per repeat of its final |
-    /// | an expect of an ACK | the SUT | `declared`, or nothing where none is stated |
+    /// | an expect of an ACK to our 2xx | the wire (§13.2.2.4) | one per copy we sent after its first ACK |
+    /// | an expect of another ACK | the SUT | `declared`, or nothing where none is stated |
     /// | an expect of a paced class | the SUT, on the RFC's ladder | the rungs inside its window |
     /// | an expect of another drawn class | our own emissions, 1:1 | `declared` |
     fn owed(&self, i: usize, run_end_us: u64) -> Option<u32> {
@@ -587,8 +595,11 @@ impl Repeats {
                 LadderSide::Send => {
                     Some(self.paired_final(ladder).map_or(ladder.declared, |f| f.observed))
                 }
-                LadderSide::Expect if ladder.declared > 0 => Some(ladder.declared),
-                LadderSide::Expect => None,
+                LadderSide::Expect => match self.paired_sent_final(ladder) {
+                    Some(sent) => Some(sent.copies_past(ladder.claimed_us)),
+                    None if ladder.declared > 0 => Some(ladder.declared),
+                    None => None,
+                },
             },
             LadderSide::Send => Some(ladder.declared),
             LadderSide::Expect if !ladder.paced() => Some(ladder.declared),
@@ -596,6 +607,27 @@ impl Repeats {
                 ladder.window(run_end_us).map(|w| rungs_within(&ladder.pacing, w))
             }
         }
+    }
+
+    /// The 2xx OUR side sent that the SUT's ACK ladder `ack` acknowledges
+    /// ([`Self::paired_final`], a send-side one), whose copies say how many
+    /// ACKs the SUT owes.
+    fn paired_sent_final(&self, ack: &StepLadder) -> Option<&StepLadder> {
+        self.paired_final(ack).filter(|f| f.side == LadderSide::Send)
+    }
+
+    /// Whether the SUT's ACK ladder `ack` re-ACKed the copies of our 2xx that
+    /// crossed its first ACK: one more ACK than [`StepLadder::copies_past`]
+    /// owes per copy we sent inside [`TWO_HOPS`] before that ACK reached us,
+    /// which may have reached the SUT before or after its ACK left.
+    fn acked_crossing_copies(&self, ack: &StepLadder, owed: u32) -> bool {
+        if ack.side != LadderSide::Expect || !ack.draws_its_count() || ack.observed <= owed {
+            return false;
+        }
+        let Some(sent) = self.paired_sent_final(ack) else { return false };
+        let from_us = ack.claimed_us.saturating_sub(TWO_HOPS.as_micros() as u64);
+        let crossing = sent.repeats_us.iter().filter(|&&at| at > from_us && at <= ack.claimed_us);
+        ack.observed <= owed + crossing.count() as u32
     }
 
     /// The INVITE final an ACK ladder acknowledges — ours or the SUT's: same
@@ -647,10 +679,12 @@ impl Repeats {
     /// What each ladder owes is [`Repeats::owed`]'s call and never a margin:
     /// where the SUT paced it, the oracle is the RFC on every lane, because an
     /// interpreter that knew which stack was behind the socket could no longer
-    /// report that the stack differs. Two things are forgiven, both read off
+    /// report that the stack differs. Three things are forgiven, each read off
     /// the arrivals the wire timestamped: the closer's own boundary
-    /// ([`StepLadder::raced_the_closer`]), and a 2xx ladder run on past the
-    /// emitter's own BYE on the RFC's cadence ([`StepLadder::ran_on_past_its_bye`]).
+    /// ([`StepLadder::raced_the_closer`]), a 2xx ladder run on past the
+    /// emitter's own BYE on the RFC's cadence ([`StepLadder::ran_on_past_its_bye`]),
+    /// and the re-ACK of a 2xx copy that crossed the SUT's first ACK
+    /// ([`Repeats::acked_crossing_copies`]).
     pub fn mismatches(&self, run_end_us: u64) -> Vec<Failure> {
         (0..self.ladders.len())
             .filter_map(|i| {
@@ -662,6 +696,7 @@ impl Repeats {
                 if ladder.observed == expected
                     || ladder.raced_the_closer(expected)
                     || ladder.ran_on_past_its_bye(expected, run_end_us)
+                    || self.acked_crossing_copies(ladder, expected)
                 {
                     return None;
                 }
