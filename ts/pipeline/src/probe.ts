@@ -211,6 +211,13 @@ export interface BodyProbe extends ProbeSite {
 
 export type Probe = HeaderProbe | ShapeProbe | BodyProbe
 
+/** The key a case fact holds a stray under: the leg it arrived on and its CSeq number. */
+export const strayKey = (stray: { readonly leg: string; readonly cseq: number }): string => `${stray.leg} ${stray.cseq}`
+
+/** The key a case fact holds `probe` under: its step, or {@link strayKey} for a stray no step claimed. */
+export const factKeyOf = (probe: Probe): string =>
+  probe.step === "" && probe.kind === "shape" && probe.stray !== undefined ? strayKey(probe.stray) : probe.step
+
 /** The stable grouping key, e.g. `header:contact:response:200:INVITE`, `body:sdp:m0:a=rtpmap:response:200:INVITE`. */
 export const signature = (probe: Probe): string => {
   if (probe.kind === "header") return `header:${canonicalName(probe.name)}:${scopeText(probe.scope)}`
