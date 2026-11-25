@@ -44,7 +44,11 @@ impl Owner {
     /// answered through it: the 200 settles it, and once it holds a final
     /// (that 200 or the TU's 481) that final answers every copy on one count
     /// (§17.2.2), before any INVITE is looked up, so a copy never cancels an
-    /// INVITE rebuilt on its branch after the CANCEL was answered.
+    /// INVITE rebuilt on its branch after the CANCEL was answered. The
+    /// `Cancelled` of an INVITE filed attributed to no call rides the
+    /// unattributed lane behind that INVITE ([`cancelled_lane`](Self::cancelled_lane)):
+    /// a CANCEL that finds that lane full is dropped before it is answered,
+    /// `false`, and its copy judged afresh.
     pub(super) async fn handle_cancel(
         &mut self,
         endpoint: &dyn UdpEndpoint,
@@ -134,6 +138,10 @@ impl Owner {
         if self.server(id).is_some_and(|t| t.cancel_copies.is_some()) {
             return self.answer_cancel_copy(endpoint, &req, id, cancel_dest).await;
         }
+        let lane = self.cancelled_lane(id);
+        if !self.lane_has_room(lane) {
+            return false;
+        }
 
         // Resolve (and lazily pin) the UAS To-tag on the matched INVITE: the
         // tag both answers carry, reported upstream with the event.
@@ -192,14 +200,15 @@ impl Owner {
 
         // Critical: the 200 and the 487 are sent or held for this event's turn; a
         // dropped Cancelled would leave the b-leg ringing a cancelled call.
-        self.emit_critical(TransactionEvent::Cancelled {
+        let cancelled = TransactionEvent::Cancelled {
             call_id: call_id.as_str().to_string(),
             from_tag: from_tag.to_string(),
             invite_cseq,
             in_dialog,
             headers: req.headers().to_vec(),
             to_tag: uas_to_tag,
-        });
+        };
+        self.emit_critical_on(lane, cancelled);
         true
     }
 
@@ -242,8 +251,10 @@ impl Owner {
     /// 3261 §9.2, ADR-0063 §1): handed up once, for the TU's 481 or its
     /// re-offer, its copies answered from that transaction on the RFC
     /// schedule. A copy whose transaction left meets the record it left: past
-    /// the schedule it is absorbed. A CANCEL the event queue drops, or one the
-    /// TU answers statelessly (`layer::stateless_answer`), leaves no
+    /// the schedule it is absorbed. It rides its lane ([`lane_of`](Self::lane_of)):
+    /// one that finds the unattributed lane full is dropped before its
+    /// transaction opens. A CANCEL the event queue drops, or one the TU
+    /// answers statelessly (`layer::stateless_answer`), leaves no
     /// transaction behind.
     async fn take_stray_cancel(
         &mut self,
@@ -257,6 +268,10 @@ impl Owner {
         }
         let retired = self.retired_copy(&req);
         if matches!(retired, Retired::Absorbed) {
+            return;
+        }
+        let lane = self.lane_of(&req);
+        if !self.lane_has_room(lane) {
             return;
         }
         let Some(key) = ServerTxnKey::of(&req) else { return };
@@ -284,7 +299,7 @@ impl Owner {
             datagram,
             opened_at: None,
         };
-        if !self.emit(event) {
+        if !self.emit_on(lane, event) {
             self.forget_unqueued(key.id(), continued);
         }
     }

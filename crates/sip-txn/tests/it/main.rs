@@ -59,5 +59,6 @@ mod timer_burst;
 mod to_tag_binding;
 mod unanswered;
 mod unattributed;
+mod unattributed_lane;
 mod unowed_2xx;
 mod wheel_range;

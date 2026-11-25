@@ -389,6 +389,44 @@ lane is opt-in in the transaction layer (`keepalive_lane`), so its other
 users keep one queue. A slow but still turning worker stays `Alive`, and
 the delay of its in-dialog requests is not capped.
 
+### 13. The unattributed lane
+
+What rides it: every request that matches no transaction and whose
+Request-URI states no `callRef`, other than an initial INVITE (a new call,
+judged by admission) and an out-of-dialog OPTIONS (§12): a tagged request for
+a dialog the worker never had, an out-of-dialog non-INVITE, a CANCEL that
+matches no INVITE, an ACK passed up with no transaction. A request of a call
+always states its `callRef` while the Contact the worker gave is its remote
+target, so it rides the event queue. The `Cancelled` of an INVITE that rode
+the lane rides it too, behind that INVITE, so the router never takes it
+before the INVITE it cancels.
+
+The transaction owner is the lane's one sender. It reads the lane's room
+before it stamps, judges or opens anything for the request; a request that
+finds the lane full is dropped there and counted
+(`b2bua_txn_unattributed_lane_drops_total`), as if the network had lost it.
+No transaction, 100 Trying, copy record or answer is left, so the sender's
+retransmission is judged afresh. A CANCEL of an INVITE on the lane that finds
+it full is dropped before the layer answers it: no 200, no 487. The worker's
+bound is 1 024 requests, a few tens of milliseconds of router turns.
+
+The router takes the lane only when the keepalive lane, the event queue,
+the timers, re-entry, fail-back and readmission have nothing ready. Taking
+from it reads neither the event-queue gate nor the age the transaction layer
+refuses new calls on. Requests on the two queues can be taken out of their
+order of arrival, as the network can reorder two transactions. A takeover
+copy's self-release (ADR-0014) cannot overtake an unattributed request of its
+Call-ID: the release waits for that request's transaction to answer.
+
+Residuals: a request that states a forged `callRef` rides the event queue and
+is answered there as before. A request of a live call whose Request-URI an
+element rewrote rides the lane, so a flood can drop it; its retransmission
+recovers it (an ACK of a 2xx, the next 2xx retransmission). Responses that
+match no client transaction stay on the event queue. Past the transaction
+owner's own rate, the inbound UDP queue ahead of it fills and loses
+datagrams of every kind. The lane is opt-in in the transaction layer
+(`unattributed_lane`), so its other users keep one queue.
+
 ## Amended
 
 - ADR-0043 §11: the open breaker sets `new=refuse; cause=backend` on a `200`

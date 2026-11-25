@@ -51,6 +51,9 @@ pub(crate) struct MetricsInner {
     pub event_queue_deferred: AtomicUsize,
     /// Out-of-dialog OPTIONS the full keepalive lane dropped (counter).
     pub keepalive_lane_drops: AtomicU64,
+    /// Requests the full unattributed lane dropped, each before any
+    /// transaction or answer was made (counter).
+    pub unattributed_lane_drops: AtomicU64,
     /// Deferred requests removed because the server transaction that
     /// admitted them left the map unanswered — at its backstop, or reaped by
     /// the sweep (counter).
@@ -183,6 +186,7 @@ impl MetricsInner {
             event_queue_deferrals: ByClass::new(),
             event_queue_deferred: AtomicUsize::new(0),
             keepalive_lane_drops: AtomicU64::new(0),
+            unattributed_lane_drops: AtomicU64::new(0),
             deferred_swept: AtomicU64::new(0),
             sweep_reaped: AtomicU64::new(0),
             deferred_refused: ByClass::new(),
@@ -298,6 +302,13 @@ impl TransactionMetrics {
     /// Out-of-dialog OPTIONS the full keepalive lane dropped (counter).
     pub fn keepalive_lane_drops(&self) -> u64 {
         self.inner.keepalive_lane_drops.load(Ordering::Relaxed)
+    }
+
+    /// Requests the full unattributed lane dropped (counter). Counted per
+    /// wire copy: a dropped request's retransmission is judged afresh and
+    /// may be dropped again.
+    pub fn unattributed_lane_drops(&self) -> u64 {
+        self.inner.unattributed_lane_drops.load(Ordering::Relaxed)
     }
 
     /// Ordinary events the full output queue dropped, by class. Counted per

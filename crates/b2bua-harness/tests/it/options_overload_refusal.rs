@@ -11,9 +11,7 @@
 use std::time::Duration;
 
 use b2bua::TurnProbes;
-use b2bua_harness::{
-    drop_backlog_answers, send_backlog, B2buaScene, B2buaSut, Pace, RouterPace, BACKLOG_METHOD,
-};
+use b2bua_harness::{send_backlog, B2buaScene, B2buaSut, BurstAnswers, Pace, RouterPace};
 use scenario_harness::Agent;
 use sip_message::generators::OutOfDialogMethod;
 use sip_message::worker_report::{self, Readiness};
@@ -32,15 +30,16 @@ const ACCEPT_HOLD: Duration = Duration::from_millis(3000);
 
 /// A scene whose worker's router loop is paced by the returned handle, with
 /// carol, the backlog sender.
-async fn paced_scene(name: &str) -> (B2buaScene, std::sync::Arc<RouterPace>, Agent) {
+async fn paced_scene(name: &str) -> (B2buaScene, std::sync::Arc<RouterPace>, Agent, BurstAnswers) {
     let pace = RouterPace::new();
     let probe = TurnProbes::new(pace.clone());
     let s = B2buaScene::with_b2bua(name, move |bob_port| {
         B2buaSut::route_all_to("127.0.0.1", bob_port).turn_probe(probe)
     })
     .await;
-    let carol = s.h.agent_with_pre_ingress("carol", "127.0.0.1:5062", drop_backlog_answers()).await;
-    (s, pace, carol)
+    let answers = BurstAnswers::default();
+    let carol = s.h.agent_with_pre_ingress("carol", "127.0.0.1:5062", answers.hook()).await;
+    (s, pace, carol, answers)
 }
 
 /// The acceptance alice's out-of-dialog OPTIONS reads, answered `200`.
@@ -53,8 +52,8 @@ async fn readiness(s: &B2buaScene) -> Option<Readiness> {
 
 /// Pump until the worker has refused `n` backlog requests in all: the
 /// instant its router took the last of them.
-async fn drained(s: &B2buaScene, n: u64) -> Instant {
-    let refused = || s.b2bua.metrics().unroutable_refused_of(BACKLOG_METHOD, 405);
+async fn drained(s: &B2buaScene, answers: &BurstAnswers, n: u64) -> Instant {
+    let refused = || answers.of(405);
     let give_up = Instant::now() + Duration::from_secs(30);
     while refused() < n && Instant::now() < give_up {
         s.h.advance(Duration::from_millis(10)).await;
@@ -74,7 +73,7 @@ async fn advance_to(s: &B2buaScene, at: Instant) {
 /// events wait above the accept bound and below the refusal one, restarts it.
 #[tokio::test(start_paused = true)]
 async fn events_waiting_past_the_delay_threshold_refuse_new_calls_until_the_hold_passes() {
-    let (s, pace, carol) = paced_scene("options-overload-refusal-delay").await;
+    let (s, pace, carol, answers) = paced_scene("options-overload-refusal-delay").await;
     let mut dialog = s.establish().await;
     assert_eq!(readiness(&s).await, Some(Readiness::accept()), "an idle worker accepts");
 
@@ -88,7 +87,7 @@ async fn events_waiting_past_the_delay_threshold_refuse_new_calls_until_the_hold
         "events waiting past the delay threshold refuse new calls"
     );
 
-    let first_drain = drained(&s, 300).await;
+    let first_drain = drained(&s, &answers, 300).await;
     s.h.advance(Duration::from_secs(1)).await;
     assert_eq!(
         readiness(&s).await,
@@ -98,7 +97,7 @@ async fn events_waiting_past_the_delay_threshold_refuse_new_calls_until_the_hold
 
     // 20 events: the last waits about 200 ms, between the two delay bounds.
     send_backlog(&carol, s.b2bua.addr, 20, "bump").await;
-    let second_drain = drained(&s, 320).await;
+    let second_drain = drained(&s, &answers, 320).await;
     advance_to(&s, first_drain + ACCEPT_HOLD + Duration::from_millis(500)).await;
     assert_eq!(
         readiness(&s).await,
@@ -122,7 +121,7 @@ async fn events_waiting_past_the_delay_threshold_refuse_new_calls_until_the_hold
 /// once the queue has stayed drained for the hold.
 #[tokio::test(start_paused = true)]
 async fn a_queue_past_the_depth_threshold_refuses_new_calls_until_the_hold_passes() {
-    let (s, pace, carol) = paced_scene("options-overload-refusal-depth").await;
+    let (s, pace, carol, answers) = paced_scene("options-overload-refusal-depth").await;
     let mut dialog = s.establish().await;
 
     // Past the threshold by what the router takes while the OPTIONS travels.
@@ -149,7 +148,7 @@ async fn a_queue_past_the_depth_threshold_refuses_new_calls_until_the_hold_passe
         queued_at.elapsed()
     );
 
-    let drain = drained(&s, burst as u64).await;
+    let drain = drained(&s, &answers, burst as u64).await;
     s.h.advance(Duration::from_secs(1)).await;
     assert_eq!(
         readiness(&s).await,

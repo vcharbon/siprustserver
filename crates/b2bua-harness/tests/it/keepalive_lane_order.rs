@@ -12,8 +12,7 @@ use std::time::Duration;
 
 use b2bua::TurnProbes;
 use b2bua_harness::{
-    cluster_key, drop_backlog_answers, send_backlog, B2buaScene, B2buaSut, Pace, RouterPace,
-    BACKLOG_METHOD,
+    cluster_key, send_backlog, B2buaScene, B2buaSut, BurstAnswers, Pace, RouterPace,
 };
 use scenario_harness::Agent;
 use sip_message::dead_notice::{DeadNotice, X_WORKER_DEAD};
@@ -30,7 +29,7 @@ const TRANSIT: Duration = Duration::from_millis(150);
 /// A scene whose worker's router loop is paced by the returned handle and
 /// trusts the harness's cluster key, with carol, the sender of event-queue
 /// work.
-async fn paced_scene(name: &str) -> (B2buaScene, std::sync::Arc<RouterPace>, Agent) {
+async fn paced_scene(name: &str) -> (B2buaScene, std::sync::Arc<RouterPace>, Agent, BurstAnswers) {
     let pace = RouterPace::new();
     let probe = TurnProbes::new(pace.clone());
     let s = B2buaScene::with_b2bua(name, move |bob_port| {
@@ -39,8 +38,9 @@ async fn paced_scene(name: &str) -> (B2buaScene, std::sync::Arc<RouterPace>, Age
             .tune(|c| c.cluster_key = Some(cluster_key()))
     })
     .await;
-    let carol = s.h.agent_with_pre_ingress("carol", "127.0.0.1:5062", drop_backlog_answers()).await;
-    (s, pace, carol)
+    let answers = BurstAnswers::default();
+    let carol = s.h.agent_with_pre_ingress("carol", "127.0.0.1:5062", answers.hook()).await;
+    (s, pace, carol, answers)
 }
 
 /// The `X-Worker-Dead` value of a verdict on `ordinal` at `at_ms`, signed
@@ -57,7 +57,7 @@ fn notice(ordinal: &str, at_ms: i64) -> String {
 /// each answer, in the order they arrived. Both notices verify.
 #[tokio::test(start_paused = true)]
 async fn options_held_behind_a_turn_are_taken_in_arrival_order() {
-    let (s, pace, carol) = paced_scene("keepalive-lane-arrival-order").await;
+    let (s, pace, carol, _answers) = paced_scene("keepalive-lane-arrival-order").await;
     let mut dialog = s.establish().await;
 
     pace.set(NODE, Pace::Frozen);
@@ -110,9 +110,9 @@ async fn options_held_behind_a_turn_are_taken_in_arrival_order() {
 /// within a few turns, while the stream goes on.
 #[tokio::test(start_paused = true)]
 async fn a_stream_of_options_starves_no_queued_event() {
-    let (s, pace, carol) = paced_scene("keepalive-lane-fairness").await;
+    let (s, pace, carol, answers) = paced_scene("keepalive-lane-fairness").await;
     let mut dialog = s.establish().await;
-    let refused = || s.b2bua.metrics().unroutable_refused_of(BACKLOG_METHOD, 405);
+    let refused = || answers.of(405);
 
     pace.set(NODE, Pace::PerTurn(Duration::from_millis(10)));
     let mut probes = Vec::new();

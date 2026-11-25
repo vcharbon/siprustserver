@@ -69,6 +69,9 @@ pub(super) struct Owner {
     /// The keepalive lane ([`TransactionConfig::keepalive_lane`](crate::TransactionConfig)),
     /// when the layer runs one.
     pub(super) keepalive_tx: Option<mpsc::Sender<TransactionEvent>>,
+    /// The unattributed lane ([`TransactionConfig::unattributed_lane`](crate::TransactionConfig)),
+    /// when the layer runs one; the owner is its one sender.
+    pub(super) unattributed_tx: Option<mpsc::Sender<TransactionEvent>>,
     pub(super) metrics: Arc<MetricsInner>,
     pub(super) id_gen: Arc<IdGen>,
     /// The calls the consumer asked to be told about when their **last**
@@ -161,13 +164,17 @@ pub(super) struct Owner {
 }
 
 impl Owner {
-    /// The owner over the event queue `events_tx` with its entry stamps and
-    /// the keepalive lane `keepalive_tx`, holding the tunables of `config`
-    /// (which already sized both).
+    /// The owner over the event queue `events_tx` with its entry stamps, the
+    /// keepalive lane `keepalive_tx` and the unattributed lane
+    /// `unattributed_tx`, holding the tunables of `config` (which already
+    /// sized all three).
     pub(super) fn new(
         parser: Arc<dyn SipParser + Send + Sync>,
         (events_tx, event_ages): (mpsc::Sender<TransactionEvent>, Arc<EventAges>),
-        keepalive_tx: Option<mpsc::Sender<TransactionEvent>>,
+        (keepalive_tx, unattributed_tx): (
+            Option<mpsc::Sender<TransactionEvent>>,
+            Option<mpsc::Sender<TransactionEvent>>,
+        ),
         metrics: Arc<MetricsInner>,
         config: TransactionConfig,
     ) -> Self {
@@ -187,6 +194,7 @@ impl Owner {
             events_tx,
             event_ages,
             keepalive_tx,
+            unattributed_tx,
             metrics,
             parse_refusals: ParseRefusals::new(&config.id_gen, config.advertised),
             id_gen: config.id_gen,

@@ -150,6 +150,7 @@ pub fn txn_metrics_text(m: &sip_txn::TransactionMetrics) -> String {
     c::EVENT_QUEUE_CAPACITY.render_value(&mut s, m.event_queue_capacity());
     c::EVENT_QUEUE_DELAY.render_value(&mut s, m.event_queue_delay().as_millis());
     c::KEEPALIVE_LANE_DROPS.render_value(&mut s, m.keepalive_lane_drops());
+    c::UNATTRIBUTED_LANE_DROPS.render_value(&mut s, m.unattributed_lane_drops());
     c::MESSAGE_BUDGET_TRIPS.render_value(&mut s, m.message_budget_trips());
     c::MESSAGE_BUDGET_UNCOUNTED.render_value(&mut s, m.message_budget_uncounted());
     c::MUTED_MESSAGES.render(&mut s, |series| match series.index(&c::MUTED_DIRECTION) {

@@ -25,12 +25,20 @@ const UDP_QUEUE_MAX: usize = EVENT_QUEUE_CAPACITY / 4;
 /// queue.
 const KEEPALIVE_LANE: usize = 64;
 
+/// The bound of the unattributed lane: the requests that name no call, which
+/// the router takes after every other source. A request of a call whose
+/// Request-URI an element rewrote waits there a few tens of milliseconds of
+/// router turns at most; past the bound, a flood of them is shed by the
+/// transaction layer, before any transaction exists.
+const UNATTRIBUTED_LANE: usize = 1024;
+
 /// The transaction layer's tunables for this worker: its event queue, the
 /// deployment's INVITE bounds and CANCEL policy, the worker's shared
 /// `refusals`, the ceilings on the deferred backlog
 /// ([`crate::admission::deferred_bound`]) unless `ceilings` sets its own,
 /// no transaction for an out-of-dialog OPTIONS, which rides the keepalive
-/// lane, the worker's advertised SIP address, every Call-ID's message
+/// lane, the unattributed lane for the requests that name no call, the
+/// worker's advertised SIP address, every Call-ID's message
 /// budget (ADR-0063 §3, a trip ending the calls holding it), and the switch
 /// on new calls the
 /// event-queue gate sets (ADR-0037 item 11), which is `refusals`' own
@@ -80,6 +88,9 @@ pub(super) fn txn_config(
         stateless_options: true,
         // The router takes a probe ahead of the queued events (ADR-0050 §2).
         keepalive_lane: Some(KEEPALIVE_LANE),
+        // Requests that name no call wait apart, so a flood of them never
+        // takes the event queue's room nor its age (ADR-0050 §13).
+        unattributed_lane: Some(UNATTRIBUTED_LANE),
         // What the layer builds itself leaves for the front proxy, as every
         // other request of a worker behind one does. Its address is an IP
         // literal (the runner's `B2BUA_OUTBOUND_PROXY`).

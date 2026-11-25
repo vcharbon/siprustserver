@@ -29,6 +29,7 @@ use super::key::{ServerTxnId, ServerTxnKey};
 use super::lifetime::Hold;
 use super::owner::Owner;
 use super::txn::{NewTransaction, Timer, TxnId, TxnRef, TxnState};
+use super::unattributed_lane::Lane;
 
 impl Owner {
     /// Send a TU response through its server transaction and return the
@@ -179,7 +180,10 @@ impl Owner {
     /// carries the datagram as it arrived. A copy whose transaction left
     /// within 64·T1 of its last copy meets that transaction's record
     /// (ADR-0063 §1): past the schedule it is absorbed, else the transaction
-    /// it re-opens carries the count on.
+    /// it re-opens carries the count on. A request no transaction absorbed
+    /// that rides the unattributed lane ([`lane_of`](Self::lane_of)) and
+    /// finds it full is dropped before it is stamped or judged, and before
+    /// any transaction opens.
     pub(super) async fn handle_inbound_request(
         &mut self,
         endpoint: &dyn UdpEndpoint,
@@ -255,13 +259,17 @@ impl Owner {
         if matches!(retired, Retired::Absorbed) {
             return;
         }
+        let lane = self.lane_of(&req);
+        if !self.lane_has_room(lane) {
+            return;
+        }
 
         // New-call admission sits above this layer (ADR-0037). This layer
         // refuses, before any 100 Trying or transaction exists, a copy of an
         // INVITE the node already refused, an INVITE its deferred backlog has
         // no room for, and one its new-call gate refuses, on the consumer's
         // switch or the queue's age; it admits every other INVITE, and every
-        // other request its event queue takes (below).
+        // other request its lane takes (below).
         let kind =
             if req.method() == Method::Invite { TxnKind::Invite } else { TxnKind::NonInvite };
         let is_invite = matches!(kind, TxnKind::Invite);
@@ -317,7 +325,7 @@ impl Owner {
             self.arm_trying_bound(id.to_key(), opened);
         }
 
-        let forgettable = (!is_invite).then(|| id.to_key());
+        let forgettable = (!is_invite || lane == Lane::Unattributed).then(|| id.to_key());
         let event = TransactionEvent::Message {
             message: Box::new(SipMessage::Request(req)),
             src,
@@ -325,26 +333,29 @@ impl Owner {
             datagram,
             opened_at,
         };
-        self.hand_up_opened(event, forgettable, continued);
+        self.hand_up_opened(event, lane, forgettable, continued);
     }
 
-    /// Hand the request a new server transaction opened on up as `event`.
-    /// `forgettable` names a non-INVITE's transaction: one a full queue drops
-    /// is not admitted but forgotten, so the UAC's Timer E copy (§17.1.2.2;
-    /// UDP-only, ADR-0027) is admitted afresh rather than absorbed unanswered
-    /// by a `Trying` transaction. An INVITE's (`None`) is never dropped: its
-    /// transaction absorbs its copies, so it is the consumer's only notice of
-    /// the call.
+    /// Hand the request a new server transaction opened on up as `event`, on
+    /// `lane`. `forgettable` names a transaction whose event may be lost: one
+    /// the lane drops is not admitted but forgotten, so the UAC's copy (Timer
+    /// E, §17.1.2.2, or Timer A, §17.1.1.2; UDP-only, ADR-0027) is admitted
+    /// afresh rather than absorbed unanswered. That is a non-INVITE's, and an
+    /// INVITE's on the unattributed lane, which found room before its
+    /// transaction opened. An INVITE's on the event queue (`None`) is never
+    /// dropped: its transaction absorbs its copies, so it is the consumer's
+    /// only notice of the call.
     fn hand_up_opened(
         &mut self,
         event: TransactionEvent,
+        lane: Lane,
         forgettable: Option<ServerTxnKey>,
         continued: bool,
     ) {
         match forgettable {
             None => self.emit_critical(event),
             Some(key) => {
-                if !self.emit(event) {
+                if !self.emit_on(lane, event) {
                     self.forget_unqueued(key.id(), continued);
                 }
             }
@@ -362,11 +373,12 @@ impl Owner {
     }
 
     /// Hand `req`, received from `src` as `datagram`, to the TU with no
-    /// transaction, stamped on receipt. `false` when the event queue dropped
-    /// it.
+    /// transaction, stamped on receipt, on its lane
+    /// ([`lane_of`](Self::lane_of)). `false` when the lane dropped it.
     fn hand_up(&mut self, req: SipRequest, src: SocketAddr, datagram: Bytes) -> bool {
+        let lane = self.lane_of(&req);
         let event = self.upward(req, src, datagram);
-        self.emit(event)
+        self.emit_on(lane, event)
     }
 
     /// The event passing `req`, received from `src` as `datagram`, up to the

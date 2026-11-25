@@ -2,13 +2,15 @@
 //! apart, so no instant brings a bind more than its inbound queue holds:
 //!
 //! - a backlog: out-of-dialog requests of a method a worker does not serve,
-//!   each one event the worker's router takes and refuses `405` (RFC 3261
-//!   §8.2.1), opening no call;
+//!   each naming a call by the `callRef` of its Request-URI, so it waits in
+//!   the event queue among the work of calls: one event the worker's router
+//!   takes, finds no call for and refuses `405` (RFC 3261 §8.2.1);
 //! - strays: BYEs naming dialogs that do not exist, each on a Call-ID of its
 //!   own, that the worker answers `481` (§12.2.2).
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use scenario_harness::Agent;
@@ -21,13 +23,13 @@ pub const BACKLOG_METHOD: &str = "MESSAGE";
 const BATCH: usize = 128;
 
 /// Send `n` out-of-dialog [`BACKLOG_METHOD`] requests from `from` to `to`,
-/// each its own transaction, over `n / BATCH` milliseconds; `label` keeps one
-/// burst's Call-IDs apart from another's.
+/// each its own transaction naming a call `to` never had, over `n / BATCH`
+/// milliseconds; `label` keeps one burst's Call-IDs apart from another's.
 pub async fn send_backlog(from: &Agent, to: SocketAddr, n: usize, label: &str) {
     let via = from.addr();
     send_batched(from, to, n, |i| {
         format!(
-            "{BACKLOG_METHOD} sip:{to} SIP/2.0\r\n\
+            "{BACKLOG_METHOD} sip:{to};callRef=backlog-{label}-{i} SIP/2.0\r\n\
              Via: SIP/2.0/UDP {via};branch=z9hG4bK-{label}-{i}\r\n\
              Max-Forwards: 70\r\n\
              From: <sip:backlog@{via}>;tag={label}-{i}\r\n\
@@ -75,8 +77,39 @@ async fn send_batched(from: &Agent, to: SocketAddr, n: usize, wire: impl Fn(usiz
 
 /// The pre-ingress hook of a burst sender's bind: it drops every datagram
 /// the sender receives, the answers to its burst, before its inbox, so a
-/// burst of answers never overflows it. The worker's count of the requests it
-/// refused (`unroutable_refused_of`) tells what was answered.
+/// burst of answers never overflows it.
 pub fn drop_backlog_answers() -> PreIngressHook {
     Arc::new(|_, _, _| PreIngressAction::Drop)
+}
+
+/// The answers a burst sender received, by status: its bind's pre-ingress
+/// hook ([`hook`](Self::hook)) counts each response and drops every datagram
+/// before the inbox, as [`drop_backlog_answers`] does.
+#[derive(Clone, Default)]
+pub struct BurstAnswers(Arc<Mutex<HashMap<u16, u64>>>);
+
+impl BurstAnswers {
+    /// The pre-ingress hook that counts into these answers.
+    pub fn hook(&self) -> PreIngressHook {
+        let counts = self.0.clone();
+        Arc::new(move |arrival, _, _| {
+            if let Some(status) = status_of(arrival.raw()) {
+                let mut counts = counts.lock().unwrap_or_else(PoisonError::into_inner);
+                *counts.entry(status).or_default() += 1;
+            }
+            PreIngressAction::Drop
+        })
+    }
+
+    /// How many answers of `status` arrived.
+    pub fn of(&self, status: u16) -> u64 {
+        let counts = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        counts.get(&status).copied().unwrap_or(0)
+    }
+}
+
+/// The status code of the response `datagram` holds; `None` for a request.
+fn status_of(datagram: &[u8]) -> Option<u16> {
+    let code = datagram.strip_prefix(b"SIP/2.0 ")?.get(..3)?;
+    std::str::from_utf8(code).ok()?.parse().ok()
 }

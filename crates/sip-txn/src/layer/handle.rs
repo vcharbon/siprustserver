@@ -82,6 +82,11 @@ impl TransactionLayer {
             .keepalive_lane
             .map(|bound| mpsc::channel::<TransactionEvent>(bound.max(1)))
             .unzip();
+        #[expect(clippy::disallowed_methods, reason = "the lane's bound is at least 1")]
+        let (unattributed_tx, unattributed_rx) = config
+            .unattributed_lane
+            .map(|bound| mpsc::channel::<TransactionEvent>(bound.max(1)))
+            .unzip();
         #[expect(clippy::disallowed_methods, reason = "COMMAND_CAPACITY is not zero")]
         let (cmd_tx, cmd_rx) = mpsc::channel::<Command>(COMMAND_CAPACITY);
         let (forget_tx, forget_rx) = mpsc::unbounded_channel::<Forget>();
@@ -94,9 +99,11 @@ impl TransactionLayer {
             (ages.clone(), Arc::downgrade(&endpoint)),
             config.invite_refusals.clone(),
         );
-        let events = TransactionEvents::new(events_rx, keepalive_rx, ages.clone());
+        let events =
+            TransactionEvents::new(events_rx, (keepalive_rx, unattributed_rx), ages.clone());
 
-        let owner = Owner::new(parser, (events_tx, ages), keepalive_tx, metrics_inner, config);
+        let lanes = (keepalive_tx, unattributed_tx);
+        let owner = Owner::new(parser, (events_tx, ages), lanes, metrics_inner, config);
         let owner_pulse = Arc::new(LoopPulse::new());
         let owner_abort =
             tokio::spawn(run(owner, endpoint, cmd_rx, forget_rx, owner_pulse.clone()))

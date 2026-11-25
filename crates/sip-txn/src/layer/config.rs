@@ -117,6 +117,19 @@ pub struct TransactionConfig {
     /// newest and counts it; the prober repeats. `None` — the default — runs
     /// no lane: every OPTIONS rides the event queue.
     pub keepalive_lane: Option<usize>,
+    /// The bound of the unattributed lane, which carries, apart from the
+    /// event queue, every request that matches no transaction here and whose
+    /// Request-URI states no `callRef`, other than an initial INVITE (no
+    /// To-tag) and an OPTIONS on the keepalive lane: a request that can
+    /// belong to no call this element names, or to one whose Request-URI an
+    /// element on its path rewrote. A CANCEL of an INVITE such a request
+    /// opened rides it too, behind that INVITE. A request that finds the lane
+    /// full is dropped before any transaction, answer or record is made, and
+    /// counted: its sender's retransmission is judged afresh. A consumer that
+    /// takes the lane after the event queue keeps a flood of such requests
+    /// from taking the room, and the age, the requests of its calls need.
+    /// `None` — the default — runs no lane: they ride the event queue.
+    pub unattributed_lane: Option<usize>,
     /// The address every request the layer builds itself leaves for, whatever
     /// its Route or Request-URI says: the front proxy's, for an element behind
     /// one. `None`, the default: such a request goes to its own next hop.
@@ -148,7 +161,7 @@ impl TransactionConfig {
     /// The defaults, identifiers drawn from `id_gen`: a 256-datagram receive
     /// queue, the RFC 3261 INVITE bounds and first-provisional bound, strict To-tag binding, no deferred
     /// bound, no shared refusals, no new-call gate, a transaction per OPTIONS, no keepalive
-    /// lane, no first hop, no advertised address, no Call-ID budget.
+    /// lane, no unattributed lane, no first hop, no advertised address, no Call-ID budget.
     pub fn new(id_gen: Arc<IdGen>) -> Self {
         Self {
             udp_queue_max: 256,
@@ -167,6 +180,7 @@ impl TransactionConfig {
             new_call_gate: None,
             stateless_options: false,
             keepalive_lane: None,
+            unattributed_lane: None,
             first_hop: None,
             advertised: None,
             call_id_budget: None,

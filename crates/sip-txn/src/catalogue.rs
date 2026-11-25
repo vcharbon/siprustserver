@@ -132,6 +132,12 @@ pub const KEEPALIVE_LANE_DROPS: Family = Family::counter(
     "Out-of-dialog OPTIONS the full keepalive lane dropped; the prober repeats.",
 );
 
+pub const UNATTRIBUTED_LANE_DROPS: Family = Family::counter(
+    "b2bua_txn_unattributed_lane_drops_total",
+    Labels::None,
+    "Requests naming no call the full unattributed lane dropped before any transaction or answer; the sender retransmits.",
+);
+
 /// The way a datagram a mute dropped was going.
 pub const MUTED_DIRECTION: Dim = Dim::new("direction", &["in", "out"]);
 

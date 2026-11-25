@@ -44,7 +44,7 @@ pub mod terminated;
 mod wire_reads;
 pub mod witness;
 
-pub use backlog::{drop_backlog_answers, send_backlog, send_strays, BACKLOG_METHOD};
+pub use backlog::{drop_backlog_answers, send_backlog, send_strays, BurstAnswers, BACKLOG_METHOD};
 pub use inbound_pace::{InboundPace, PacedInbound};
 pub use limiter::{LimiterCount, LimiterLeak, LimiterProbe, DEFAULT_LIMITER_ID};
 pub use proxy_core::{spawn_proxy_core, spawn_proxy_reading, ExternalProxyFace, ProxyCoreParts};

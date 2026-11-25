@@ -63,6 +63,12 @@ impl Owner {
             .count()
     }
 
+    /// Whether the server transaction `id` of `call_id` is filed attributed
+    /// to no call.
+    pub(super) fn files_unattributed(&self, call_id: &str, id: ServerTxnId<'_>) -> bool {
+        self.unattributed.holds(call_id, id)
+    }
+
     /// The server transaction `id` sent its final: one unattributed no longer
     /// serves its call, and the watches naming its Call-ID are checked again.
     pub(super) fn unattributed_answered(&mut self, id: ServerTxnId<'_>) {

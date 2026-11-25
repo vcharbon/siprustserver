@@ -42,8 +42,9 @@
 //! `relinquish` (a call's transactions deleted for another node to serve) ·
 //! `new_call_gate` (a consumer's switch on new calls and its queue's age, read
 //! at receipt) ·
-//! `events` (output-queue discipline) · `event_receiver` (the consumer's end
-//! of the event queue and the keepalive lane) · `event_age` (the age of the
+//! `events` (output-queue discipline) · `unattributed_lane` (which output a
+//! request rides) · `event_receiver` (the consumer's end
+//! of the event queue and the lanes) · `event_age` (the age of the
 //! oldest event waiting in the queue) · `backlog` (new-call admission against
 //! the deferred backlog) · `refusals` (the node's shared refusals of new
 //! INVITEs) · `txn` (per-transaction state) · `unanswered` (server
@@ -95,6 +96,7 @@ mod trying;
 mod txn;
 mod unanswered;
 mod unattributed;
+mod unattributed_lane;
 mod via_marks;
 
 pub use backlog::DeferredBound;
