@@ -135,6 +135,12 @@ async fn an_ack_whose_final_never_arrived_stays_behind_the_expect_in_front() {
     scene.finish().await;
 }
 
+/// Leg B awaiting, before the BYE, an INFO the document draws from A's ACK
+/// (s8), the way a relayed request stands: the system never sends it.
+fn await_an_info_relayed_to_b(case: &mut Case) {
+    insert_before(case, "s11", never_arriving_on("B", "s9i", "s8", 0));
+}
+
 /// When leg `leg` sent the datagram of step `step`.
 fn sent_at(outcome: &Outcome, leg: &str, step: &str) -> Option<u64> {
     outcome.recording.legs()[leg]
@@ -151,11 +157,12 @@ async fn the_answer_to_a_taken_bye_goes_out_past_an_expect_that_never_matches() 
     let scene = api_scene("pivot-held-bye-answer").await;
     let mut case = fixture("linear-attempt.v3.json");
     case.document.case.id = "linear-attempt-held-bye-answer".to_string();
-    insert_before(&mut case, "s11", never_arriving_on("B", "s9i", "s9", 10));
+    await_an_info_relayed_to_b(&mut case);
     let (outcome, _dir) = replay_case(&scene, case, BTreeMap::new()).await;
 
     assert!(timed_out(&outcome, "s9i"), "the expect still fails: {:#?}", outcome.verdict.failures);
-    let answered = sent_at(&outcome, "B", "s12").expect("leg B answered the BYE");
+    let answered = sent_at(&outcome, "B", "s12")
+        .unwrap_or_else(|| panic!("leg B answered the BYE: {:#?}", outcome.recording.legs()["B"]));
     let offset_us = answered - taken_at(&outcome, "B", "s11");
     assert!(offset_us < 5_000, "at the 200's dwell from the BYE, got {offset_us} us");
     assert!(outcome.verdict.completed_steps.iter().any(|s| s == "s13"), "leg A took the 200");
@@ -172,7 +179,8 @@ async fn an_answer_to_a_request_never_taken_stays_behind_the_expect_in_front() {
     case.document.flow.retain(|node| {
         !matches!(node, pivot_schema::flow::FlowNode::Message(s) if s.id == "s10" || s.id == "s13")
     });
-    insert_before(&mut case, "s11", never_arriving_on("B", "s9i", "s9", 10));
+    step_of(&mut case, "s11").delay.from = pivot_schema::flow::Anchor::Step("s9".into());
+    await_an_info_relayed_to_b(&mut case);
     let (outcome, _dir) = replay_case(&scene, case, BTreeMap::new()).await;
 
     assert!(timed_out(&outcome, "s9i"), "{:#?}", outcome.verdict.failures);

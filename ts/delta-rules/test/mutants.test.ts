@@ -16,7 +16,8 @@ const RUN: Classifier.RunShape = {
   sentRSeqs: new Map(),
   openers: new Map(),
   receptions: new Map(),
-  sent: new Map()
+  sent: new Map(),
+  byeAheadOfInviteFinal: new Set()
 }
 
 interface Facts {

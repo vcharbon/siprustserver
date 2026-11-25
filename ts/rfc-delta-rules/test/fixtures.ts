@@ -41,7 +41,8 @@ const EMPTY_RUN: Classifier.RunShape = {
   sentRSeqs: new Map(),
   openers: new Map(),
   receptions: new Map(),
-  sent: new Map()
+  sent: new Map(),
+  byeAheadOfInviteFinal: new Set()
 }
 
 /** The facts a probe is read under where it needs none. */
