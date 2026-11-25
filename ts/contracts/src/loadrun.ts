@@ -77,7 +77,7 @@ export const SeriesPoint = Schema.Struct({
   rejected: Schema.Int,
   retransmissionsReceived: Schema.Int,
   retransmissionsResent: Schema.Int,
-  /** Retransmitted requests answered again after their call ended, in the window. */
+  /** Requests the mux answered after their call ended (a retransmission's held final, a CANCEL's 200 or 481), in the window. */
   lateAnswered: defaulted(Schema.Int, 0),
   p50Ms: Schema.Number,
   p99Ms: Schema.Number
@@ -243,7 +243,7 @@ export const Canaries = Schema.Struct({
   dropsOut: Schema.Int,
   /** Correlated datagrams discarded because their call's inbox was full. */
   inboxDrops: defaulted(Schema.Int, 0),
-  /** Retransmitted requests on an ended call's dialog, answered again with its final. */
+  /** Requests the mux answered for an ended call: a retransmission's held final, a CANCEL's 200 or 481. */
   lateAnswered: defaulted(Schema.Int, 0),
   /** Calls that reached the ring→answer step (the 18x-delivery denominator). */
   ringingExpected: Schema.Int,

@@ -206,9 +206,10 @@ pub struct Canaries {
     /// Correlated datagrams discarded because their call's inbox was full.
     #[serde(default)]
     pub inbox_drops: u64,
-    /// Retransmitted requests on a dialog whose call had ended, answered again
-    /// with the final the call sent (RFC 3261 §17.2.2): the repairs an orphan
-    /// count no longer includes.
+    /// Requests the mux answered for a call it no longer ran: a retransmission
+    /// on a dialog whose call had ended, answered again with the final the
+    /// call sent (RFC 3261 §17.2.2), and a CANCEL no live call took, answered
+    /// 200 or 481 (§9.2). None is an orphan.
     #[serde(default)]
     pub late_answered: u64,
     /// Calls that reached the ring→answer step (the 18x-delivery denominator).

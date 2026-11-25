@@ -75,8 +75,8 @@ pub struct SeriesPoint {
     pub retransmissions_received: u64,
     /// Re-sends by the calls ended in the window.
     pub retransmissions_resent: u64,
-    /// Retransmitted requests answered again after their call ended, in the
-    /// window.
+    /// Requests the mux answered after their call ended (a retransmission's
+    /// held final, a CANCEL's 200 or 481), in the window.
     #[serde(default)]
     pub late_answered: u64,
     /// End-to-end latency median of the calls ended in the window (`0` when

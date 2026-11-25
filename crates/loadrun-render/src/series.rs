@@ -43,7 +43,7 @@ pub(crate) fn series(out: &mut String, idx: &LoadRunIndex) {
         "<p class=\"muted\">{} window(s) over {}; the last {TABLE_WINDOWS}, newest first. \
          Error % is the failed share of the calls that ended in the window; retr/call the \
          retransmissions received and re-sent per call ended in it; after call the requests \
-         answered again after their call ended.</p>",
+         the loadgen answered after their call ended (retransmissions, CANCELs).</p>",
         points.len(),
         clock(span)
     );

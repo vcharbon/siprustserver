@@ -91,7 +91,7 @@ pub(crate) fn headline(out: &mut String, idx: &LoadRunIndex, live: Option<Live>)
         (
             "mux",
             format!(
-                "{} · late retransmissions answered {} · {}",
+                "{} · answered after the call {} · {}",
                 flagged("orphans", c.orphans),
                 c.late_answered,
                 flagged("inbox drops", c.inbox_drops)

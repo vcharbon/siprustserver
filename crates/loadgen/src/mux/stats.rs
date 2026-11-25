@@ -216,7 +216,8 @@ pub(crate) enum OrphanReason {
     /// A token matched a call, but its scenario-owned picker chose a label no
     /// registered receiver carries (a scenario routing bug).
     NoRoute,
-    /// An unknown Call-ID that is not an initial INVITE (a late straggler).
+    /// An unknown Call-ID that is not an initial INVITE (a late straggler),
+    /// nor a CANCEL (the mux answers that one).
     Stray,
     /// An INVITE on a Call-ID a finished call released (see `orphan_released`).
     Released,

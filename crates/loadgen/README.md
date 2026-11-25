@@ -162,7 +162,7 @@ and an extract half (how it is read off a received leg):
 | `loadgen_mux_orphan_total{reason="early"}` | a leg arriving before its caller sent the INVITE |
 | `loadgen_mux_orphan_total{reason="call_id_reuse"}` | a new INVITE reusing a caller's own Call-ID (RFC 3261 §8.1.1.4) |
 | `loadgen_mux_orphan_total{reason="stray"}` | a request other than a CANCEL with no call and no held answer |
-| `loadgen_mux_late_retransmission_answered_total` | a retransmission after the call ended, answered again with the held final (RFC 3261 §17.2.2, Timer J); a CANCEL no live call takes, answered 200 when its INVITE's final is held, else 481 (§9.2) |
+| `loadgen_mux_late_retransmission_answered_total` | a retransmission after the call ended, answered again with the held final (RFC 3261 §17.2.2, Timer J); a CANCEL no live call takes, answered 200 when its INVITE's non-2xx final is held or the INVITE reached the endpoint unanswered (no 487: the INVITE's Via rows are not held), else 481 (§9.2) |
 | `loadgen_mux_token_collision_total`, `loadgen_mux_key_cooling_total` | `from-user` draws refused (draws, not calls) |
 | `loadgen_mux_caller_key_mismatch_total` | a caller INVITE whose From user is not its key |
 

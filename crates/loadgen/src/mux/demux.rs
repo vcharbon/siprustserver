@@ -95,10 +95,10 @@ fn route(mux: &MuxSocket, pkt: &UdpPacket) -> Vec<(Arc<[u8]>, SocketAddr)> {
                     return vec![(refused.into(), src)];
                 }
             }
-            LateReply::Cancel(answers) => {
+            LateReply::Cancel(ok) => {
                 drop(g);
                 mux.stats.late_answered.fetch_add(1, Ordering::Relaxed);
-                return answers.into_iter().map(|answer| (answer, src)).collect();
+                return vec![(ok, src)];
             }
             LateReply::Absorbed => return Vec::new(),
             LateReply::NotHeld => {}

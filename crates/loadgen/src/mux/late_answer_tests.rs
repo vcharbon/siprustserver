@@ -231,28 +231,29 @@ fn a_request_in_unanswered_is_refused_unless_the_agent_answered_it() {
     assert!(matches!(on_request(&mut h, &req("ACK", 2, "z9hG4bKack")), LateReply::NotHeld));
 }
 
-/// A CANCEL of an INVITE whose non-2xx final is held draws a 200 bearing that
-/// final's To tag (RFC 3261 §9.2), its retransmission the same 200; a CANCEL
-/// of an INVITE answered 2xx, or of a transaction not held, draws nothing
-/// from the hold.
+/// The 200 a CANCEL draws from the hold, as `(status, CSeq, CSeq method, To
+/// tag)`; `None` when it draws none.
+fn cancel_ok(h: &mut HeldAnswers, raw: &[u8]) -> Option<(u16, u32, String, String)> {
+    let LateReply::Cancel(ok) = on_request(h, raw) else { return None };
+    let id = *Datagram::sniff(&ok).id();
+    let (status, cseq, method, tag) = (id.status?, id.cseq?, id.cseq_method?, id.to_tag?);
+    Some((status, cseq, method.into(), tag.into()))
+}
+
+/// A CANCEL of an initial INVITE whose non-2xx final is held draws a 200
+/// bearing that final's To tag (RFC 3261 §9.2: its own To names none), its
+/// retransmission the same 200; a CANCEL of another transaction draws
+/// nothing from the hold.
 #[test]
 #[ignore = "slow lane: loadgen"]
-fn a_cancel_of_an_answered_invite_draws_a_200_with_the_finals_tag() {
+fn a_cancel_of_a_rejected_invite_draws_a_200_with_the_finals_tag() {
     let branch = "z9hG4bKinv";
-    let busy = resp(486, "INVITE", 1, branch);
-    let mut h = held(&[busy, resp(200, "INVITE", 2, "z9hG4bKok")]);
-    for _ in 0..2 {
-        let LateReply::Cancel(answers) = on_request(&mut h, &req("CANCEL", 1, branch)) else {
-            panic!("the CANCEL is answered");
-        };
-        assert_eq!(answers.len(), 1, "a 200 alone: the INVITE has its final");
-        let ok = Datagram::sniff(&answers[0]);
-        let id = ok.id();
-        assert_eq!((id.status, id.cseq, id.cseq_method), (Some(200), Some(1), Some("CANCEL")));
-        assert_eq!((id.branch, id.to_tag), (Some(branch), Some("b1")));
-    }
+    let mut h = held(&[resp(486, "INVITE", 1, branch)]);
+    let cancel = String::from_utf8(req("CANCEL", 1, branch)).unwrap().replace(";tag=b1", "");
+    let want = Some((200, 1, "CANCEL".into(), "b1".into()));
+    assert_eq!(cancel_ok(&mut h, cancel.as_bytes()), want, "the final's tag");
+    assert_eq!(cancel_ok(&mut h, cancel.as_bytes()), want, "the retransmission");
     for (raw, why) in [
-        (req("CANCEL", 2, "z9hG4bKok"), "the 2xx ended the INVITE transaction"),
         (req("CANCEL", 1, "z9hG4bKother"), "another branch: another transaction"),
         (req("CANCEL", 3, branch), "another CSeq"),
     ] {
@@ -260,34 +261,33 @@ fn a_cancel_of_an_answered_invite_draws_a_200_with_the_finals_tag() {
     }
 }
 
-/// A re-INVITE that reached the endpoint and that the agent never answered
-/// is cancelled once the call released: the CANCEL draws a 200 and the
-/// re-INVITE a 487 (RFC 3261 §9.2), which the hold keeps as its final: a
-/// retransmitted re-INVITE draws it again and its ACK is absorbed.
+/// A re-INVITE that reached the endpoint and that the agent answered 2xx is
+/// no longer an unanswered request: the INVITE transaction ended at its 2xx
+/// (RFC 3261 §17.2.1), so a late CANCEL of it, and a retransmission of it,
+/// draw nothing from the hold.
 #[test]
 #[ignore = "slow lane: loadgen"]
-fn a_cancel_of_an_unanswered_reinvite_draws_a_200_and_a_487() {
-    let branch = "z9hG4bKreinv";
-    let answers = SentAnswers::default();
+fn a_reinvite_answered_2xx_draws_no_cancel_answer_and_no_refusal() {
+    let (branch, answers) = ("z9hG4bKreinv", SentAnswers::default());
+    answers.on_request_in(&Datagram::sniff(&req("INVITE", 2, branch)));
+    answers.on_outbound(&Datagram::sniff(&resp(200, "INVITE", 2, branch)), None);
+    let mut h = answers.take("c1").expect("the 2xx leaves its marker");
+    assert!(matches!(on_request(&mut h, &req("CANCEL", 2, branch)), LateReply::NotHeld));
+    assert!(matches!(on_request(&mut h, &req("INVITE", 2, branch)), LateReply::NotHeld));
+}
+
+/// A re-INVITE that reached the endpoint and that the agent never answered
+/// is cancelled once the call released: the CANCEL draws a 200 (RFC 3261
+/// §9.2) every time, and the re-INVITE's retransmissions keep drawing their
+/// 481, built from their own rows.
+#[test]
+#[ignore = "slow lane: loadgen"]
+fn a_cancel_of_an_unanswered_reinvite_draws_a_200() {
+    let (branch, answers) = ("z9hG4bKreinv", SentAnswers::default());
     answers.on_request_in(&Datagram::sniff(&req("INVITE", 2, branch)));
     let mut h = answers.take("c1").expect("the unanswered re-INVITE is held");
-    let LateReply::Cancel(sent) = on_request(&mut h, &req("CANCEL", 2, branch)) else {
-        panic!("the CANCEL is answered");
-    };
-    let ids: Vec<_> = sent
-        .iter()
-        .map(|a| {
-            let id = *Datagram::sniff(a).id();
-            (id.status, id.cseq, id.cseq_method.map(str::to_owned), id.to_tag.map(str::to_owned))
-        })
-        .collect();
-    let tagged =
-        |status, method: &str| (Some(status), Some(2), Some(method.into()), Some("b1".into()));
-    assert_eq!(ids, vec![tagged(200, "CANCEL"), tagged(487, "INVITE")]);
-    assert_eq!(reanswer(&mut h, &req("INVITE", 2, branch)), Some(sent[1].to_vec()), "the 487 held");
-    assert!(matches!(on_request(&mut h, &req("ACK", 2, branch)), LateReply::Absorbed), "its ACK");
-    assert!(
-        matches!(on_request(&mut h, &req("CANCEL", 2, branch)), LateReply::NotHeld),
-        "once ACKed, a retransmitted CANCEL finds no transaction"
-    );
+    let want = Some((200, 2, "CANCEL".into(), "b1".into()));
+    assert_eq!(cancel_ok(&mut h, &req("CANCEL", 2, branch)), want);
+    assert!(matches!(on_request(&mut h, &req("INVITE", 2, branch)), LateReply::Refuse));
+    assert_eq!(cancel_ok(&mut h, &req("CANCEL", 2, branch)), want, "the retransmission");
 }

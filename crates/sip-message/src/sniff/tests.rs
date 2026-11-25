@@ -556,14 +556,13 @@ From: <sip:b@h>;tag=fb\r\nTo: <sip:a@h>\r\nCall-ID: c1\r\nCSeq: 1 INVITE\r\n\r\n
 }
 
 /// A response to a CANCEL of an initial INVITE takes the tag it is given on
-/// its tagless To; the 487 to that INVITE, built from the CANCEL, names the
-/// INVITE in its CSeq; a To that names a tag keeps it.
+/// its tagless To; a To that names a tag keeps it.
 #[test]
-fn a_response_to_a_cancel_tags_its_to_and_may_name_the_invite() {
+fn a_response_to_a_cancel_tags_a_tagless_to() {
     let cancel = b"CANCEL sip:a@h SIP/2.0\r\nVia: SIP/2.0/UDP s;branch=z9hG4bK-i\r\n\
 From: <sip:b@h>;tag=fb\r\nTo: <sip:a@h>\r\nCall-ID: c1\r\nCSeq: 1 CANCEL\r\n\r\n";
-    assert!(response_to(cancel, 481, "x", "", None).is_none(), "a tagless To needs a tag");
-    let r = response_to(cancel, 481, "Call/Transaction Does Not Exist", "t9", None).unwrap();
+    assert!(response_to(cancel, 481, "x", "").is_none(), "a tagless To needs a tag");
+    let r = response_to(cancel, 481, "Call/Transaction Does Not Exist", "t9").unwrap();
     let (req, resp) = (identity(cancel), identity(&r));
     assert_eq!((resp.status, resp.to_tag), (Some(481), Some("t9")));
     assert_eq!(
@@ -571,12 +570,9 @@ From: <sip:b@h>;tag=fb\r\nTo: <sip:a@h>\r\nCall-ID: c1\r\nCSeq: 1 CANCEL\r\n\r\n
         (req.call_id, req.cseq, req.cseq_method, req.branch)
     );
     assert_eq!(header_value(&r, "To").as_deref(), Some("<sip:a@h>;tag=t9"));
-    let terminated = response_to(cancel, 487, "Request Terminated", "t9", Some("INVITE")).unwrap();
-    let id = identity(&terminated);
-    assert_eq!((id.status, id.cseq, id.cseq_method), (Some(487), Some(1), Some("INVITE")));
     let in_dialog = b"CANCEL sip:a@h SIP/2.0\r\nVia: SIP/2.0/UDP s;branch=z9hG4bK-r\r\n\
 From: <sip:b@h>;tag=fb\r\nTo: <sip:a@h>;tag=ta\r\nCall-ID: c1\r\nCSeq: 5 CANCEL\r\n\r\n";
-    let r = response_to(in_dialog, 200, "OK", "t9", None).unwrap();
+    let r = response_to(in_dialog, 200, "OK", "t9").unwrap();
     assert_eq!(identity(&r).to_tag, Some("ta"), "the dialog's tag stands");
-    assert!(response_to(&r, 200, "OK", "t9", None).is_none(), "a response draws none");
+    assert!(response_to(&r, 200, "OK", "t9").is_none(), "a response draws none");
 }
