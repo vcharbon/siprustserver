@@ -50,6 +50,7 @@ export const NO_FACTS: RfcFacts = {
   releasedLegSteps: new Set(),
   roundsPastReleaseSteps: new Set(),
   tryingOnNonInviteSteps: new Map(),
+  tryingOnEarlyByeSteps: new Set(),
   byeBesideCancelSteps: new Set(),
   cancelPastAnswerSteps: new Set(),
   cancelCrossingAnswerSteps: new Set(),
@@ -847,11 +848,15 @@ const SHAPE: ReadonlyArray<RfcFixture> = [
       {
         probe: shape({ shape: "status-substitution", captured: 100, observed: 200 }, answering(200, "CANCEL"), "s12"),
         facts: factsWith({ tryingOnNonInviteSteps: new Map([["s12", 200]]) })
+      },
+      {
+        probe: shape({ shape: "status-substitution", captured: 100, observed: 200 }, on200Bye, "s22"),
+        facts: factsWith({ tryingOnNonInviteSteps: new Map([["s22", 481]]), tryingOnEarlyByeSteps: new Set(["s22"]) })
       }
     ],
     visible: [
       {
-        defect: "a final to the BYE other than the one the document's dialog state owes after the 100",
+        defect: "a 200 to a BYE sent after the INVITE's final ended its early dialog",
         leftTo: undefined,
         probe: shape({ shape: "status-substitution", captured: 100, observed: 200 }, on200Bye, "s22"),
         facts: factsWith({ tryingOnNonInviteSteps: new Map([["s22", 481]]) })
