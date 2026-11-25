@@ -160,7 +160,7 @@ async fn metrics_shape_reports_brake_drops_and_queue_depth() {
 async fn metrics_shape_reports_live_tail_drop() {
     let (net, _b2bua, flooder, metrics) = setup().await;
 
-    // Fire QUEUE_MAX + 4 OPTIONS (the brake passes a call's). The queue caps
+    // Fire QUEUE_MAX + 4 OPTIONS (the brake passes non-INVITEs). The queue caps
     // at QUEUE_MAX (5); the 4 over capacity tail-drop.
     let n = (QUEUE_MAX + 4) as u32;
     for i in 0..n {
