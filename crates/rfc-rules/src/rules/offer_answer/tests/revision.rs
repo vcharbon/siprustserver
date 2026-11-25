@@ -471,3 +471,22 @@ fn a_gap_on_a_description_the_relay_rewrote_stays_the_relay_s() {
     let f = origin_finding(&msgs, onward);
     assert!(f.violated() && !f.relayed, "{f:?}");
 }
+
+/// The relay refused version 2 once, then ACCEPTED it re-offered on a new
+/// transaction: the version reached it and was never forwarded, so the gap
+/// toward BOB is its own (RFC 3264 §8).
+#[test]
+fn a_gap_left_by_an_offer_refused_once_then_accepted_stays_the_relay_s() {
+    let (mut msgs, _) = relayed_reoffers(491, AUDIO_OFFER_V3);
+    let resent = [
+        on_call(req(10, ALICE, RELAY, "INVITE", 3, Some("bt"), Some(T38_OFFER)), "a"),
+        on_call(resp(11, RELAY, ALICE, 200, 3, "INVITE", Some(AUDIO_ANSWER)), "a"),
+        on_call(req(12, ALICE, RELAY, "ACK", 3, Some("bt"), None), "a"),
+        on_call(req(13, ALICE, RELAY, "INVITE", 4, Some("bt"), Some(AUDIO_OFFER_V3)), "a"),
+        on_call(req(14, RELAY, BOB, "INVITE", 2, Some("bt"), Some(AUDIO_OFFER_V3)), "b"),
+    ];
+    msgs.truncate(9);
+    msgs.extend(resent);
+    let f = origin_finding(&msgs, 13);
+    assert!(f.violated() && !f.relayed, "{f:?}");
+}

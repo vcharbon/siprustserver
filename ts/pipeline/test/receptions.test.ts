@@ -1,6 +1,6 @@
 import { Bundle } from "@sip/contracts"
 import { describe, expect, it } from "vitest"
-import { receptionsOf, sentOf } from "../src/receptions.js"
+import { byeAheadOfInviteFinal, receptionsOf, sentOf } from "../src/receptions.js"
 
 const line = (raw: string, over: Record<string, unknown> = {}): Bundle.RecordedMessage =>
   Bundle.decodeRecordedMessageSync({ at_us: 0, dir: "in", seq: 1, raw, ...over })
@@ -66,6 +66,25 @@ describe("sentOf", () => {
     const got = sentOf(new Map([["A", [update, again, received]], ["B", [received]]]))
     expect(got.get("A")).toEqual([{ step: "s20", method: "UPDATE", cseqMethod: "UPDATE", cseq: 5, from: "<sip:+339@h.example>;tag=x" }])
     expect(got.has("B")).toBe(false)
+  })
+})
+
+describe("byeAheadOfInviteFinal", () => {
+  const out = (lines: ReadonlyArray<string>) => line(crlf([...lines, "Content-Length: 0", ""]), { dir: "out" })
+  const into = (lines: ReadonlyArray<string>) => line(crlf([...lines, "Content-Length: 0", ""]))
+  const invite = out(["INVITE sip:t@192.0.2.2 SIP/2.0", "CSeq: 1 INVITE"])
+  const bye = out(["BYE sip:t@192.0.2.2 SIP/2.0", "CSeq: 2 BYE"])
+  const ringing = into(["SIP/2.0 180 Ringing", "CSeq: 1 INVITE"])
+  const terminated = into(["SIP/2.0 487 Request Terminated", "CSeq: 1 INVITE"])
+
+  it("names the leg whose BYE left before any final to its INVITE arrived, a provisional being no final", () => {
+    const got = byeAheadOfInviteFinal(new Map([["A", [invite, ringing, bye, terminated]], ["C", [invite, bye]]]))
+    expect([...got].sort()).toEqual(["A", "C"])
+  })
+
+  it("leaves out the leg whose final came first, and a leg that sent no INVITE", () => {
+    const got = byeAheadOfInviteFinal(new Map([["B", [invite, terminated, bye]], ["D", [into(["INVITE sip:a@192.0.2.1 SIP/2.0", "CSeq: 1 INVITE"]), bye]]]))
+    expect(got.size).toBe(0)
   })
 })
 

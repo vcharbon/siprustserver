@@ -1,13 +1,19 @@
-//! The ACK a final the leg took is owed, sent past an earlier expect of the
-//! leg that never matches (§6.7h).
+//! The ACK a final the leg took is owed, and the answer to a non-INVITE
+//! request the leg took, sent past an earlier expect of the leg that never
+//! matches (§6.7h).
 
 use super::*;
 
-/// A required expect of a request the system never sends, anchored on `from`.
+/// A required expect on leg A of a request the system never sends, anchored on `from`.
 fn never_arriving(id: &str, from: &str, ms: u64) -> pivot_schema::flow::FlowNode {
+    never_arriving_on("A", id, from, ms)
+}
+
+/// A required expect on `leg` of a request the system never sends, anchored on `from`.
+fn never_arriving_on(leg: &str, id: &str, from: &str, ms: u64) -> pivot_schema::flow::FlowNode {
     let step: pivot_schema::flow::Step = serde_json::from_value(serde_json::json!({
         "delay": { "compressible": true, "from": format!("step:{from}"), "ms": ms, "timer_linked": false },
-        "check": "record", "id": id, "leg": "A", "msg": { "method": "INFO" }, "op": "expect"
+        "check": "record", "id": id, "leg": leg, "msg": { "method": "INFO" }, "op": "expect"
     }))
     .expect("an INFO expect");
     pivot_schema::flow::FlowNode::Message(Box::new(step))
@@ -125,6 +131,56 @@ async fn an_ack_whose_final_never_arrived_stays_behind_the_expect_in_front() {
         acks_out(&outcome, "A").iter().all(|m| m.step.as_deref() != Some("s8")),
         "no 2xx was taken, so the step never ran: {:#?}",
         outcome.recording.legs()["A"]
+    );
+    scene.finish().await;
+}
+
+/// When leg `leg` sent the datagram of step `step`.
+fn sent_at(outcome: &Outcome, leg: &str, step: &str) -> Option<u64> {
+    outcome.recording.legs()[leg]
+        .iter()
+        .find(|m| m.dir == Dir::Out && m.step.as_deref() == Some(step))
+        .map(|m| m.at_us)
+}
+
+/// RFC 3261 §17.2.2: the callee's 200 to the BYE it took goes out at its
+/// dwell from the BYE, not when the INFO expect standing in front of it times
+/// out. The expect still fails the run, and the caller takes the 200.
+#[tokio::test(start_paused = true)]
+async fn the_answer_to_a_taken_bye_goes_out_past_an_expect_that_never_matches() {
+    let scene = api_scene("pivot-held-bye-answer").await;
+    let mut case = fixture("linear-attempt.v3.json");
+    case.document.case.id = "linear-attempt-held-bye-answer".to_string();
+    insert_before(&mut case, "s11", never_arriving_on("B", "s9i", "s9", 10));
+    let (outcome, _dir) = replay_case(&scene, case, BTreeMap::new()).await;
+
+    assert!(timed_out(&outcome, "s9i"), "the expect still fails: {:#?}", outcome.verdict.failures);
+    let answered = sent_at(&outcome, "B", "s12").expect("leg B answered the BYE");
+    let offset_us = answered - taken_at(&outcome, "B", "s11");
+    assert!(offset_us < 5_000, "at the 200's dwell from the BYE, got {offset_us} us");
+    assert!(outcome.verdict.completed_steps.iter().any(|s| s == "s13"), "leg A took the 200");
+    scene.finish().await;
+}
+
+/// The answer waits for its request: where the BYE never arrives, nothing
+/// answers it before the expect in front times out.
+#[tokio::test(start_paused = true)]
+async fn an_answer_to_a_request_never_taken_stays_behind_the_expect_in_front() {
+    let scene = api_scene("pivot-held-bye-answer-no-bye").await;
+    let mut case = fixture("linear-attempt.v3.json");
+    case.document.case.id = "linear-attempt-held-bye-answer-no-bye".to_string();
+    case.document.flow.retain(|node| {
+        !matches!(node, pivot_schema::flow::FlowNode::Message(s) if s.id == "s10" || s.id == "s13")
+    });
+    insert_before(&mut case, "s11", never_arriving_on("B", "s9i", "s9", 10));
+    let (outcome, _dir) = replay_case(&scene, case, BTreeMap::new()).await;
+
+    assert!(timed_out(&outcome, "s9i"), "{:#?}", outcome.verdict.failures);
+    assert_eq!(
+        sent_at(&outcome, "B", "s12"),
+        None,
+        "no BYE was taken: {:#?}",
+        outcome.recording.legs()["B"]
     );
     scene.finish().await;
 }

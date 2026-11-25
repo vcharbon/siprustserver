@@ -64,3 +64,40 @@ fn a_copy_that_crossed_the_sut_s_ack_may_draw_one_more_ack_or_none() {
         "two re-ACKs for one crossing copy"
     );
 }
+
+/// Our 2xx sent once and ACKed, then `reacks` repeats of that ACK the SUT
+/// sent with no copy of our 2xx to draw them, the document declaring `declared`.
+fn reacks_with_no_copy(reacks: usize, declared: Option<u32>) -> Vec<Failure> {
+    let ok = b"SIP/2.0 200 OK\r\nContact: <sip:fixture@192.0.2.98>\r\nTo: <sip:b@h>;tag=b1\r\nCall-ID: c9\r\nCSeq: 4 INVITE\r\n\r\n";
+    let ack = b"ACK sip:b@h SIP/2.0\r\nMax-Forwards: 70\r\nTo: <sip:b@h>;tag=b1\r\nCall-ID: c9\r\nCSeq: 4 ACK\r\n\r\n";
+    let mut repeats = Repeats::new();
+    repeats.claim("s1", "B", LadderSide::Send, Some(0), &[], ok, 0);
+    repeats.claim("s2", "B", LadderSide::Expect, declared, &[], ack, 400_000);
+    for k in 0..reacks {
+        repeats.note("B", ack, 900_000 + 100_000 * k as u64);
+    }
+    repeats.mismatches(RUN_END)
+}
+
+/// A re-ACK the capture itself declares, which a relaying system repeats
+/// byte-identically from its other leg (RFC 3261 §13.2.2.4 there), is the
+/// capture's own reproduced, though no copy of our 2xx drew it.
+#[test]
+fn a_declared_re_ack_with_no_copy_of_our_2xx_is_the_capture_s_own() {
+    assert!(reacks_with_no_copy(1, Some(1)).is_empty(), "{:#?}", reacks_with_no_copy(1, Some(1)));
+}
+
+/// Past the capture's count, or with none declared, a re-ACK no copy of our
+/// 2xx drew stays a mismatch.
+#[test]
+fn a_re_ack_past_the_declared_count_with_no_copy_stays_a_mismatch() {
+    for (reacks, declared) in [(2, Some(1)), (1, None), (1, Some(0))] {
+        assert!(
+            matches!(
+                reacks_with_no_copy(reacks, declared).as_slice(),
+                [Failure::RetransmitCountMismatch { step, expected: 0, .. }] if step == "s2"
+            ),
+            "{reacks} re-ACKs, declared {declared:?}"
+        );
+    }
+}
