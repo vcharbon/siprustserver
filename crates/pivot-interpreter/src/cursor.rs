@@ -7,7 +7,8 @@
 //! establish it — a relay standing behind a send (§6.7b) and an answer to a
 //! transaction this leg has already opened (§6.7c) arm beside the step in
 //! front of them, and the answers a CANCEL this leg received draws (§6.7e) and
-//! the ACK a final this leg took is owed (§6.7h) go out past it. Everything
+//! the ACK a final this leg took is owed and the answer to a non-INVITE
+//! request it took (§6.7h) go out past it. Everything
 //! else here is what the three nondeterminism
 //! constructs mean at run time:
 //!
@@ -37,6 +38,8 @@ use crate::program::ItemKind;
 
 mod injects;
 mod transaction;
+
+pub use transaction::HeldTiming;
 
 /// Where one step stands; every status but `Pending` is settled.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -241,6 +244,9 @@ impl<'p> Cursor<'p> {
     /// made yet (`caused_elsewhere`). Only SENDS are walked past that way, and
     /// any number of them: once this leg is waiting on an arrival of its own,
     /// list order is what says which of the two comes first, and it binds.
+    /// What a transaction says comes now arms past a blocked item instead
+    /// (`transaction.rs`: §6.7c, §6.7e, §6.7h); for §6.7h, a send of the leg
+    /// still ahead of it keeps its place.
     pub fn frontier(&self) -> Vec<String> {
         let mut out: Vec<String> = Vec::new();
         for (leg, item_indices) in &self.plan.program().by_leg {
@@ -265,7 +271,8 @@ impl<'p> Cursor<'p> {
                 let is_message = self.plan.program().items[index].kind == ItemKind::Message;
                 let caused = !awaited && is_message && self.caused_elsewhere(&frontier, &armed);
                 if blocked && !caused && !self.races_with(&frontier, &armed) {
-                    let owes_ack = is_message && !send_ahead && self.acks_a_taken_final(&frontier);
+                    let owed_now =
+                        is_message && !send_ahead && self.owed_for_what_the_leg_took(&frontier);
                     send_ahead |= sends_here;
                     // The answers a CANCEL this leg received draws go out at
                     // their own dwell, whatever stands in front (§6.7e).
@@ -281,10 +288,7 @@ impl<'p> Cursor<'p> {
                         out.extend(frontier);
                         continue;
                     }
-                    // The ACK a final this leg took is owed whatever arrival
-                    // the leg still awaits; a send in front keeps its place
-                    // (§6.7h).
-                    if owes_ack {
+                    if owed_now {
                         armed.extend(frontier.iter().cloned());
                         out.extend(frontier);
                         continue;

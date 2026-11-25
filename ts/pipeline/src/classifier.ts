@@ -177,6 +177,12 @@ export interface RunShape {
    * leg that sent none has no entry.
    */
   readonly sent: ReadonlyMap<string, ReadonlyArray<Reception>>
+  /**
+   * The legs whose scripted actor sent a BYE before any final to the INVITE
+   * it sent there reached it, in the leg's wire order (`./receptions.ts`): the
+   * order {@link receptions} and {@link sent}, each one direction, cannot state.
+   */
+  readonly byeAheadOfInviteFinal: ReadonlySet<string>
 }
 
 /** One datagram a leg's scripted actor received or sent, as a rule reads it. */

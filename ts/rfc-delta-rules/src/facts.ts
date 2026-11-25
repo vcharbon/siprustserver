@@ -161,16 +161,23 @@ export const tryingOnNonInviteSteps = (document: DocumentReading): ReadonlyMap<s
 /**
  * `trying-on-non-invite-not-reproduced`: the {@link tryingOnNonInviteSteps}
  * steps answering a BYE the party sent after its own CANCEL and before any
- * final to its INVITE. The early dialog still stood when that BYE reached the
- * system (RFC 3261 §15), so 200 is owed as much as the 481 that the CANCEL's
- * 487 leaves (§12.2.2). A BYE sent after a final stays 481 alone.
+ * final to its INVITE, in the document and in the run's wire order alike
+ * (`RunShape.byeAheadOfInviteFinal`). The early dialog still stood when that
+ * BYE reached the system (RFC 3261 §15), so 200 is owed as much as the 481
+ * that the CANCEL's 487 leaves (§12.2.2). A BYE sent after a final stays 481
+ * alone.
  */
-export const tryingOnEarlyByeSteps = (document: DocumentReading): ReadonlySet<string> =>
-  new Set(tryingRows(document).filter((row) => row.early).map((row) => row.step))
+export const tryingOnEarlyByeSteps = (document: DocumentReading, run: Classifier.RunShape): ReadonlySet<string> =>
+  new Set(
+    tryingRows(document)
+      .filter((row) => row.early && run.byeAheadOfInviteFinal.has(row.leg))
+      .map((row) => row.step)
+  )
 
-/** One {@link tryingOnNonInviteSteps} member: its final, and whether its BYE crossed the INVITE's final. */
+/** One {@link tryingOnNonInviteSteps} member: its leg and final, and whether the document sends its BYE ahead of the INVITE's final. */
 interface TryingRow {
   readonly step: string
+  readonly leg: string
   readonly owed: number
   readonly early: boolean
 }
@@ -195,7 +202,7 @@ const tryingRows = ({ facts }: DocumentReading): ReadonlyArray<TryingRow> => {
       const next = later.findIndex((x) => !x.bySystem && isRequestOf(x, method))
       const scripted = (next === -1 ? later : later.slice(0, next)).find((x) => x.bySystem && isFinalTo(x, method))
       const early = method === "BYE" && finals.length === 0 && cancelled
-      if (scripted === undefined || scripted.status === owed) out.push({ step: e.step.id, owed, early })
+      if (scripted === undefined || scripted.status === owed) out.push({ step: e.step.id, leg: leg.leg, owed, early })
     }
   }
   return out
@@ -390,7 +397,7 @@ export const rfcFactsOf = (document: DocumentReading, run: Classifier.RunShape):
   releasedLegSteps: releasedLegSteps(document),
   roundsPastReleaseSteps: roundsPastReleaseSteps(document),
   tryingOnNonInviteSteps: tryingOnNonInviteSteps(document),
-  tryingOnEarlyByeSteps: tryingOnEarlyByeSteps(document),
+  tryingOnEarlyByeSteps: tryingOnEarlyByeSteps(document, run),
   byeBesideCancelSteps: byeBesideCancelSteps(document),
   cancelPastAnswerSteps: cancelPastAnswerSteps(document, run),
   cancelCrossingAnswerSteps: cancelCrossingAnswerSteps(document),

@@ -52,7 +52,7 @@ import {
 import { type CaseContext, type Classification, type DocumentStep, NO_PACK, type PackOf, type UnackedFinal } from "./classifier.js"
 import { items, valuesEqual } from "./fold.js"
 import { legPlaces } from "./leg-role.js"
-import { receptionsOf, sentOf } from "./receptions.js"
+import { byeAheadOfInviteFinal, receptionsOf, sentOf } from "./receptions.js"
 import type { BodyProbe, HeaderProbe, MsgScope, Probe } from "./probe.js"
 import { probeSetDelta, scopeText, shapeSides, signature } from "./probe.js"
 import type { WireHeader } from "./wire.js"
@@ -262,7 +262,8 @@ const runShape = (
       })
     ),
     receptions: receptionsOf(recordings),
-    sent: sentOf(recordings)
+    sent: sentOf(recordings),
+    byeAheadOfInviteFinal: byeAheadOfInviteFinal(recordings)
   }
 }
 

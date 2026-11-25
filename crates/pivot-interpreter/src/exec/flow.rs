@@ -11,7 +11,8 @@ use tokio::time::Instant;
 
 use super::stall::Stall;
 use super::Runner;
-use crate::plan::{CompiledStep, Discriminator};
+use crate::cursor::HeldTiming;
+use crate::plan::CompiledStep;
 
 impl<'a, 'p> Runner<'a, 'p> {
     /// The flow loop. `false` once a failure aborts it.
@@ -150,26 +151,21 @@ impl<'a, 'p> Runner<'a, 'p> {
     ///
     /// A compressible dwell on a virtual clock still rides — virtual time costs
     /// nothing and the dwell carries the causal order — while a `timer_linked`
-    /// one is what a system timer measures and is never shortened.
+    /// one is what a system timer measures and is never shortened. A send held
+    /// past what its leg awaits (§6.7h) goes out when its [`HeldTiming`] says.
     pub(super) fn dwell_deadline(&self, step: &CompiledStep) -> Option<Instant> {
-        if let Some(final_step) = self.instance.cursor().held_ack(&step.id) {
-            return self.held_ack_deadline(step, final_step);
+        match self.instance.cursor().held_send(&step.id) {
+            Some(HeldTiming::OnArrivalOf(taken)) => self.completed_at.get(&taken.id).copied(),
+            Some(HeldTiming::AtCapturedOffset) => self.offset_up_the_chain(step),
+            None => Some(self.anchor_at(&step.delay.from)? + Duration::from_millis(step.delay.ms)),
         }
-        Some(self.anchor_at(&step.delay.from)? + Duration::from_millis(step.delay.ms))
     }
 
-    /// When an ACK its leg sends past an arrival it still awaits goes out
-    /// (§6.7h). For a non-2xx final, when the final arrived: the ACK is its
-    /// client transaction's own (RFC 3261 §17.1.1.3). For a 2xx, at the
-    /// document's offset from it (§13.2.2.4): the ACK's anchor plus its dwell,
-    /// or, while that anchor has not happened, the nearest anchor up its chain
-    /// that has, plus every dwell between.
-    fn held_ack_deadline(&self, step: &CompiledStep, final_step: &CompiledStep) -> Option<Instant> {
-        let two_xx = matches!(final_step.discriminator, Discriminator::Response { status, .. }
-            if status < 300);
-        if !two_xx {
-            return self.completed_at.get(&final_step.id).copied();
-        }
+    /// When a send its leg makes past an arrival it still awaits goes out at
+    /// the document's offset (§6.7h): its anchor plus its dwell, or, while
+    /// that anchor has not happened, the nearest anchor up its chain that
+    /// has, plus every dwell between.
+    fn offset_up_the_chain(&self, step: &CompiledStep) -> Option<Instant> {
         let mut at = step;
         let mut ms = 0;
         loop {

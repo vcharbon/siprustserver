@@ -92,9 +92,10 @@ impl Obligation for SdpOriginContinuity {
 
 /// Whether the sender of `s` inherited the `sess-version` gap after `before`:
 /// `now` is a description it took verbatim on another call, and every version
-/// missing between the two rode an offer of that session it took there and
-/// refused with a non-2xx final. The originator's own sequence is continuous;
-/// the relay forwarded none of what it refused (RFC 3264 §8, RFC 3261 §14.1).
+/// missing between the two reached it there only on offers of that session it
+/// refused with a non-2xx final, each of them. The originator's own sequence
+/// is continuous; the relay forwarded none of what it refused (RFC 3264 §8,
+/// RFC 3261 §14.1).
 fn inherited_gap(
     wire: &WireView<'_>,
     seen: &Reading<'_>,
@@ -110,7 +111,7 @@ fn inherited_gap(
     let refused = |offer: usize| {
         let o = &wire.msgs[offer];
         matches!(o.kind, Kind::Request { .. })
-            && wire.msgs[offer + 1..].iter().any(|r| {
+            && wire.msgs.iter().any(|r| {
                 r.src == s.src
                     && r.call_id == o.call_id
                     && r.cseq == o.cseq
@@ -118,15 +119,16 @@ fn inherited_gap(
                     && r.status().is_some_and(|status| status >= 300)
             })
     };
+    let only_refused = |version: u64| {
+        let mut carriers = taken.iter().filter(|(_, origin)| {
+            origin.identifies_same_session(now) && origin.session_version == version
+        });
+        let first = carriers.next();
+        first.is_some_and(|&(i, _)| refused(i)) && carriers.all(|&(i, _)| refused(i))
+    };
     now.session_version > before.session_version.saturating_add(1)
         && taken.iter().any(|(_, origin)| *origin == now)
-        && (before.session_version + 1..now.session_version).all(|version| {
-            taken.iter().any(|&(i, origin)| {
-                origin.identifies_same_session(now)
-                    && origin.session_version == version
-                    && refused(i)
-            })
-        })
+        && (before.session_version + 1..now.session_version).all(only_refused)
 }
 
 /// **RFC 3264 §8 — an agent's later description carries at least as many `m=`

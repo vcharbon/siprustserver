@@ -1,7 +1,8 @@
 //! The answers list order does not hold back because their transaction says
 //! when they come: an answer to a transaction this leg opened (§6.7c), the
 //! answers a CANCEL this leg received draws (§6.7e), and the ACK a final this
-//! leg took is owed (§6.7h).
+//! leg took is owed and the answer a non-INVITE request it took is owed
+//! (§6.7h).
 
 use sip_message::Method;
 
@@ -139,15 +140,46 @@ impl<'p> Cursor<'p> {
             })
     }
 
-    /// Whether every step of an item is the ACK a final this leg TOOK is owed
-    /// (§6.7h, [`Self::acked_final`]). The final has arrived, so its ACK waits
-    /// on no arrival of another transaction the leg still awaits (RFC 3261
-    /// §13.2.2.4 for a 2xx, §17.1.1.3 for a non-2xx).
-    pub(super) fn acks_a_taken_final(&self, frontier: &[String]) -> bool {
+    /// Whether every step of an item is owed by what this leg TOOK (§6.7h):
+    /// the ACK to a final it took ([`Self::acked_final`]), or the answer to a
+    /// non-INVITE request it took ([`Self::answered_request`]). What it is
+    /// owed for has arrived, so it waits on no arrival of another transaction
+    /// the leg still awaits (RFC 3261 §13.2.2.4 for a 2xx, §17.1.1.3 for a
+    /// non-2xx, §17.2.2 for a non-INVITE request).
+    pub(super) fn owed_for_what_the_leg_took(&self, frontier: &[String]) -> bool {
         !frontier.is_empty()
-            && frontier
-                .iter()
-                .all(|id| self.plan.step(id).is_some_and(|s| self.acked_final(s).is_some()))
+            && frontier.iter().all(|id| {
+                self.plan.step(id).is_some_and(|s| {
+                    self.acked_final(s).is_some() || self.answered_request(s).is_some()
+                })
+            })
+    }
+
+    /// The non-INVITE request `step`, a `send` of a response to it, answers,
+    /// where an expect of the leg has taken it: the leg's last `expect` of a
+    /// request of that method before `step`, completed. `None` on any other
+    /// step, an INVITE's answer included: RFC 3262 §3 orders it behind the
+    /// PRACK it waits on, so it keeps list order.
+    pub fn answered_request(&self, step: &CompiledStep) -> Option<&'p CompiledStep> {
+        let Discriminator::Response { cseq_method: Some(method), .. } = &step.discriminator else {
+            return None;
+        };
+        let method = Method::from_wire(method);
+        if !step.is_send() || method == Method::Invite {
+            return None;
+        }
+        let key = self.leg_key(&step.id);
+        let request = self
+            .plan
+            .steps()
+            .into_iter()
+            .filter(|s| s.leg == step.leg && self.leg_key(&s.id) < key && s.is_expect())
+            .filter(|s| {
+                matches!(&s.discriminator, Discriminator::Request { method: m }
+                    if Method::from_wire(m) == method)
+            })
+            .max_by_key(|s| self.leg_key(&s.id))?;
+        (self.steps.get(&request.id).copied() == Some(StepStatus::Complete)).then_some(request)
     }
 
     /// The INVITE final `step`, a `send` of an ACK, acknowledges, where an
@@ -178,15 +210,20 @@ impl<'p> Cursor<'p> {
             .then_some(last)
     }
 
-    /// The final a pending ACK `step` is owed for while a required step before
-    /// it on its leg is still pending: the ACK the leg sends past what it
-    /// awaits (§6.7h), whose dwell the runner reads off that final.
-    pub fn held_ack(&self, step: &str) -> Option<&'p CompiledStep> {
+    /// When a pending `step` the leg sends past what it awaits (§6.7h) goes
+    /// out, where a required step before it on its leg is still pending:
+    /// the ACK to a non-2xx final on that final's arrival, the ACK to a 2xx
+    /// and the answer to a request at the document's offset.
+    pub fn held_send(&self, step: &str) -> Option<HeldTiming<'p>> {
         let step = self.plan.step(step)?;
         if self.steps.get(&step.id).copied() != Some(StepStatus::Pending) {
             return None;
         }
-        let final_step = self.acked_final(step)?;
+        let timing = match self.acked_final(step) {
+            Some(refusal) if is_refusal(refusal) => HeldTiming::OnArrivalOf(refusal),
+            Some(_) => HeldTiming::AtCapturedOffset,
+            None => self.answered_request(step).map(|_| HeldTiming::AtCapturedOffset)?,
+        };
         let key = self.leg_key(&step.id);
         self.plan
             .steps()
@@ -197,7 +234,7 @@ impl<'p> Cursor<'p> {
                     && !s.optional_expect()
                     && self.steps.get(&s.id).copied() == Some(StepStatus::Pending)
             })
-            .then_some(final_step)
+            .then_some(timing)
     }
 
     /// Whether the leg's last `expect` of a CANCEL standing before `step` has
@@ -215,6 +252,22 @@ impl<'p> Cursor<'p> {
             .max_by_key(|s| self.leg_key(&s.id))
             .is_some_and(|s| self.steps.get(&s.id).copied() == Some(StepStatus::Complete))
     }
+}
+
+/// When a send held past what its leg awaits goes out ([`Cursor::held_send`]).
+#[derive(Debug, Clone, Copy)]
+pub enum HeldTiming<'p> {
+    /// When that step's datagram arrived: the ACK to a non-2xx final is its
+    /// client transaction's own (RFC 3261 §17.1.1.3).
+    OnArrivalOf(&'p CompiledStep),
+    /// At the document's offset from what it answers, read up its anchor
+    /// chain to the nearest anchor that has happened.
+    AtCapturedOffset,
+}
+
+/// Whether `step` takes an INVITE final above 2xx.
+fn is_refusal(step: &CompiledStep) -> bool {
+    matches!(step.discriminator, Discriminator::Response { status, .. } if status >= 300)
 }
 
 /// The status an expect waits for on a response to `method`, where it does.
