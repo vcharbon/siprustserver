@@ -27,9 +27,9 @@ const KEEPALIVE_LANE: usize = 64;
 
 /// The bound of the unattributed lane: the requests that name no call, which
 /// the router takes after every other source. A request of a call whose
-/// Request-URI an element rewrote waits there a few tens of milliseconds of
-/// router turns at most; past the bound, a flood of them is shed by the
-/// transaction layer, before any transaction exists (ADR-0050 §13).
+/// Request-URI an element rewrote waits there until the router has no other
+/// work; past the bound, a flood of them is shed by the transaction layer,
+/// before any transaction exists (ADR-0050 §13).
 const UNATTRIBUTED_LANE: usize = 1024;
 
 /// The transaction layer's tunables for this worker: its event queue, the

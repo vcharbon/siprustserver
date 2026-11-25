@@ -24,6 +24,7 @@ use super::copy_gate::opening_copies;
 use super::key::{ServerTxnId, ServerTxnKey};
 use super::owner::Owner;
 use super::txn::{NewTransaction, Transaction, TxnId, TxnState, UnsentCancel};
+use super::unattributed_lane::Lane;
 
 impl Owner {
     /// RFC 3261 §9.2 at this layer: a CANCEL matching an active INVITE server
@@ -45,10 +46,12 @@ impl Owner {
     /// (that 200 or the TU's 481) that final answers every copy on one count
     /// (§17.2.2), before any INVITE is looked up, so a copy never cancels an
     /// INVITE rebuilt on its branch after the CANCEL was answered. The
-    /// `Cancelled` of an INVITE filed attributed to no call rides the
-    /// unattributed lane behind that INVITE ([`cancelled_lane`](Self::cancelled_lane)):
-    /// a CANCEL that finds that lane full is dropped before it is answered,
-    /// `false`, and its copy judged afresh.
+    /// `Cancelled` a CANCEL from the wire draws for an INVITE filed attributed
+    /// to no call rides the unattributed lane behind that INVITE
+    /// ([`cancelled_lane`](Self::cancelled_lane)): one that finds that lane
+    /// full is dropped before it is answered, `false`, and its copy judged
+    /// afresh. A re-offer's rides the event queue: its consumer took the
+    /// INVITE.
     pub(super) async fn handle_cancel(
         &mut self,
         endpoint: &dyn UdpEndpoint,
@@ -138,7 +141,7 @@ impl Owner {
         if self.server(id).is_some_and(|t| t.cancel_copies.is_some()) {
             return self.answer_cancel_copy(endpoint, &req, id, cancel_dest).await;
         }
-        let lane = self.cancelled_lane(id);
+        let lane = if datagram.is_some() { self.cancelled_lane(id) } else { Lane::Events };
         if !self.lane_has_room(lane) {
             return false;
         }
@@ -251,10 +254,8 @@ impl Owner {
     /// 3261 §9.2, ADR-0063 §1): handed up once, for the TU's 481 or its
     /// re-offer, its copies answered from that transaction on the RFC
     /// schedule. A copy whose transaction left meets the record it left: past
-    /// the schedule it is absorbed. It rides its lane ([`lane_of`](Self::lane_of)):
-    /// one that finds the unattributed lane full is dropped before its
-    /// transaction opens. A CANCEL the event queue drops, or one the TU
-    /// answers statelessly (`layer::stateless_answer`), leaves no
+    /// the schedule it is absorbed. A CANCEL the event queue drops, or one the
+    /// TU answers statelessly (`layer::stateless_answer`), leaves no
     /// transaction behind.
     async fn take_stray_cancel(
         &mut self,
@@ -268,10 +269,6 @@ impl Owner {
         }
         let retired = self.retired_copy(&req);
         if matches!(retired, Retired::Absorbed) {
-            return;
-        }
-        let lane = self.lane_of(&req);
-        if !self.lane_has_room(lane) {
             return;
         }
         let Some(key) = ServerTxnKey::of(&req) else { return };
@@ -299,7 +296,7 @@ impl Owner {
             datagram,
             opened_at: None,
         };
-        if !self.emit_on(lane, event) {
+        if !self.emit(event) {
             self.forget_unqueued(key.id(), continued);
         }
     }

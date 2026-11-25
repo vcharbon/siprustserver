@@ -393,33 +393,38 @@ the delay of its in-dialog requests is not capped.
 
 What rides it: every request that matches no transaction and whose
 Request-URI states no `callRef`, other than an initial INVITE (a new call,
-judged by admission) and an out-of-dialog OPTIONS (§12): a tagged request for
-a dialog the worker never had, an out-of-dialog non-INVITE, a CANCEL that
-matches no INVITE, an ACK passed up with no transaction. A request of a call
-always states its `callRef` while the Contact the worker gave is its remote
-target, so it rides the event queue. The `Cancelled` of an INVITE that rode
-the lane rides it too, behind that INVITE, so the router never takes it
-before the INVITE it cancels.
+judged by admission), a CANCEL and an out-of-dialog OPTIONS (§12): a tagged
+request for a dialog the worker never had, an out-of-dialog non-INVITE, an
+ACK passed up with no transaction. An in-dialog request of a call states its
+`callRef` while the Contact the worker gave is its remote target, so it rides
+the event queue. A CANCEL does too, whatever it matches: one that matches no
+INVITE here may cancel one a takeover rebuilds (§5). The `Cancelled` of an
+INVITE that rode the lane rides it, behind that INVITE, so the router never
+takes it before the INVITE it cancels; an ACK a transaction matches rides the
+event queue.
 
 The transaction owner is the lane's one sender. It reads the lane's room
 before it stamps, judges or opens anything for the request; a request that
 finds the lane full is dropped there and counted
 (`b2bua_txn_unattributed_lane_drops_total`), as if the network had lost it.
 No transaction, 100 Trying, copy record or answer is left, so the sender's
-retransmission is judged afresh. A CANCEL of an INVITE on the lane that finds
-it full is dropped before the layer answers it: no 200, no 487. The worker's
-bound is 1 024 requests, a few tens of milliseconds of router turns.
+retransmission is judged afresh, its copy record kept. A CANCEL of an INVITE
+on the lane that finds it full is dropped before the layer answers it: no
+200, no 487. The worker's bound is 1 024 requests.
 
 The router takes the lane only when the keepalive lane, the event queue,
 the timers, re-entry, fail-back and readmission have nothing ready. Taking
 from it reads neither the event-queue gate nor the age the transaction layer
-refuses new calls on. Requests on the two queues can be taken out of their
-order of arrival, as the network can reorder two transactions. A takeover
-copy's self-release (ADR-0014) cannot overtake an unattributed request of its
-Call-ID: the release waits for that request's transaction to answer.
+refuses new calls on. A request on the lane waits until the router has no
+other work: no bound caps its wait while the event queue stays busy. Requests
+on the two queues can be taken out of their order of arrival, as the network
+can reorder two transactions. A takeover copy's self-release (ADR-0014) waits
+for every unattributed server transaction of its Call-ID to answer, so it
+never overtakes the request that opened one; an ACK passed up with no
+transaction can be taken after it.
 
-Residuals: a request that states a forged `callRef` rides the event queue and
-is answered there as before. A request of a live call whose Request-URI an
+Residuals: a request that states a forged `callRef`, and a flood of stray
+CANCELs, ride the event queue and are answered there as before. A request of a live call whose Request-URI an
 element rewrote rides the lane, so a flood can drop it; its retransmission
 recovers it (an ACK of a 2xx, the next 2xx retransmission). Responses that
 match no client transaction stay on the event queue. Past the transaction

@@ -71,8 +71,9 @@ Detail: [appendix, context](appendix/0050-a-workers-two-readiness-axes.md#contex
     does not wait behind the queued events or datagrams while those lanes have room.
     [Detail](appendix/0050-a-workers-two-readiness-axes.md#12-the-keepalive-lane).
 13. **The unattributed lane.** The transaction layer passes each request that matches no
-    transaction and states no `callRef` in its Request-URI, other than an initial INVITE, up on
-    a bounded lane apart from the event queue, with the CANCEL of an INVITE that rode it. The
+    transaction and states no `callRef` in its Request-URI, other than an initial INVITE and a
+    CANCEL, up on a bounded lane apart from the event queue, with the `Cancelled` of an INVITE
+    that rode it. The
     router takes the lane after every other source; neither new-call gate reads it. A full lane
     drops the request before any state exists. A flood of requests that name no call thus takes
     no room or age from the requests of calls, and drops no BYE of one (ADR-0037 item 8).

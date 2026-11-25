@@ -120,10 +120,10 @@ pub struct TransactionConfig {
     /// The bound of the unattributed lane, which carries, apart from the
     /// event queue, every request that matches no transaction here and whose
     /// Request-URI states no `callRef`, other than an initial INVITE (no
-    /// To-tag) and an OPTIONS on the keepalive lane: a request that can
-    /// belong to no call this element names, or to one whose Request-URI an
-    /// element on its path rewrote. A CANCEL of an INVITE such a request
-    /// opened rides it too, behind that INVITE. A request that finds the lane
+    /// To-tag), a CANCEL and an OPTIONS on the keepalive lane: a request that
+    /// can belong to no call this element names, or to one whose Request-URI
+    /// an element on its path rewrote. The `Cancelled` of an INVITE such a
+    /// request opened rides it too, behind that INVITE. A request that finds the lane
     /// full is dropped before any transaction, answer or record is made, and
     /// counted: its sender's retransmission is judged afresh. A consumer that
     /// takes the lane after the event queue keeps a flood of such requests

@@ -356,3 +356,45 @@ async fn copies_of_a_cancel_answered_481_draw_its_481_once_a_seed_rebuilds_its_i
         .count();
     assert_eq!(cancelled, 0, "no copy reports a cancellation");
 }
+
+/// A copy that would re-open a forgotten transaction and finds the
+/// unattributed lane full is dropped as a lost datagram: its record stays, so
+/// the copy after it re-opens the transaction with the count carried on.
+#[tokio::test(start_paused = true)]
+async fn a_copy_the_full_lane_drops_keeps_the_forgotten_transactions_count() {
+    let config = sip_txn::TransactionConfig { unattributed_lane: Some(1), ..config() };
+    let mut stack = Stack::build_with_config(TRANSIT, 64, config).await;
+    let mut lane = stack.events.take_unattributed_lane().expect("a lane");
+    let (branch, call_id) = ("z9hG4bK-info-lane", "info-lane");
+    let info = inbound_request("INFO", branch, call_id, Some("b2bua-tag"));
+    stack.inject(&info).await;
+    elapse_ms(20).await;
+    assert!(lane.try_recv().is_ok(), "the INFO goes up on the lane");
+    stack.txn.forget_unanswered(&key_of(&info), call_id, "caller-tag");
+    elapse_ms(20).await;
+
+    stack.inject(&inbound_request("BYE", "z9hG4bK-fill", "fill", Some("t"))).await;
+    elapse_ms(20).await;
+    stack.inject(&info).await;
+    elapse_ms(20).await;
+    assert_eq!(stack.txn.metrics().unattributed_lane_drops(), 1, "the copy is dropped");
+    assert!(lane.try_recv().is_ok(), "the filler");
+    assert!(lane.try_recv().is_err(), "nothing else");
+
+    stack.inject(&info).await;
+    elapse_ms(20).await;
+    let TransactionEvent::Message { message, .. } = lane.try_recv().expect("re-opened") else {
+        panic!("a request")
+    };
+    let SipMessage::Request(request) = *message else { panic!("a request") };
+    let ok = generate_response(&request, 200, "OK", &GenerateResponseOpts::default()).unwrap();
+    stack.txn.send_response(ok, addr(PEER)).await.expect("the layer runs");
+    elapse_ms(20).await;
+    assert_eq!(answers(&stack.drain_peer(), 200, "INFO"), 1, "the TU's 200 leaves");
+
+    burst(&stack, &info, COPIES).await;
+    elapse_ms(20).await;
+    let replayed = answers(&stack.drain_peer(), 200, "INFO");
+    let resends = usize::try_from(Class::NonInviteClient.resends()).expect("fits");
+    assert!(replayed < resends, "the count goes on, not afresh: {replayed} of {resends}");
+}

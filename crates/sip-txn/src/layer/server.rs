@@ -182,8 +182,9 @@ impl Owner {
     /// (ADR-0063 §1): past the schedule it is absorbed, else the transaction
     /// it re-opens carries the count on. A request no transaction absorbed
     /// that rides the unattributed lane ([`lane_of`](Self::lane_of)) and
-    /// finds it full is dropped before it is stamped or judged, and before
-    /// any transaction opens.
+    /// finds it full is dropped before its copy record is read, before it is
+    /// stamped or judged, and before any transaction opens. An ACK a 2xx's
+    /// Accepted transaction matches rides the event queue.
     pub(super) async fn handle_inbound_request(
         &mut self,
         endpoint: &dyn UdpEndpoint,
@@ -213,7 +214,8 @@ impl Owner {
                         // copy; the transaction stays Accepted for Timer L.
                         (TxnState::Accepted, _) => {
                             self.detach_from_call(TxnRef::Server(id));
-                            self.hand_up(req, src, datagram);
+                            let event = self.upward(req, src, datagram);
+                            self.emit(event);
                             return;
                         }
                         _ => {}
@@ -255,12 +257,12 @@ impl Owner {
             return;
         }
 
-        let retired = self.retired_copy(&req);
-        if matches!(retired, Retired::Absorbed) {
-            return;
-        }
         let lane = self.lane_of(&req);
         if !self.lane_has_room(lane) {
+            return;
+        }
+        let retired = self.retired_copy(&req);
+        if matches!(retired, Retired::Absorbed) {
             return;
         }
 
@@ -519,6 +521,6 @@ fn state_after(kind: TxnKind, status: u16) -> TxnState {
 /// and until then the self-release count of a call naming its Call-ID counts
 /// it (`layer::unattributed`). The attribution is what the self-release count
 /// (ADR-0014) and a release's forget and answer read.
-fn extract_ruri_call_ref(req: &SipRequest) -> Option<String> {
+pub(super) fn extract_ruri_call_ref(req: &SipRequest) -> Option<String> {
     req.request_uri().param("callRef").and_then(ParamValue::as_str).map(decode_param)
 }

@@ -1,17 +1,19 @@
 //! `TransactionConfig::unattributed_lane`: a request that matches no
 //! transaction and whose Request-URI states no `callRef`, other than an
-//! initial INVITE, rides a bounded lane of its own, so a flood of such
+//! initial INVITE and a CANCEL, rides a bounded lane of its own, so a flood of such
 //! requests takes neither the event queue's room nor its age. A request that
 //! finds the lane full is dropped before any transaction or answer is made, so
-//! its retransmission is judged afresh; a CANCEL of an INVITE that rode the
-//! lane rides it behind that INVITE, or is dropped unanswered when the lane is
-//! full. With no lane, every request rides the event queue.
+//! its retransmission is judged afresh; the `Cancelled` of an INVITE that rode
+//! the lane rides it behind that INVITE, its CANCEL dropped unanswered when the
+//! lane is full. An ACK a transaction matches rides the event queue. With no
+//! lane, every request rides the event queue.
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use crate::common;
 use common::*;
+use sip_message::generators::{generate_response, GenerateResponseOpts};
 use sip_message::SipMessage;
 use sip_txn::{IdGen, TransactionConfig, TransactionEvent};
 use tokio::sync::mpsc;
@@ -86,9 +88,9 @@ async fn requests_that_name_no_call_ride_the_lane_and_the_rest_the_event_queue()
     }
     elapse_ms(TRANSIT + 1).await;
 
-    assert_eq!(drain(&mut lane), ["BYE", "MESSAGE", "CANCEL", "INVITE", "ACK"], "in order");
+    assert_eq!(drain(&mut lane), ["BYE", "MESSAGE", "INVITE", "ACK"], "in order");
     let queued: Vec<String> = stack.drain_events().iter().map(label).collect();
-    assert_eq!(queued, ["BYE", "INVITE"], "the keyed BYE and the new call");
+    assert_eq!(queued, ["CANCEL", "BYE", "INVITE"], "the CANCEL, the keyed BYE, the new call");
     assert_eq!(stack.txn.metrics().unattributed_lane_drops(), 0);
 }
 
@@ -213,4 +215,25 @@ async fn with_no_lane_a_request_naming_no_call_rides_the_event_queue() {
     elapse_ms(TRANSIT + 1).await;
     let queued: Vec<String> = stack.drain_events().iter().map(label).collect();
     assert_eq!(queued, ["BYE"]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_ack_its_accepted_invite_matches_rides_the_event_queue() {
+    let mut stack = stack(Some(4)).await;
+    let mut lane = stack.events.take_unattributed_lane().expect("the layer runs a lane");
+    stack.inject(&inbound_request("INVITE", "z9hG4bK-re", "re@u", Some("t"))).await;
+    elapse_ms(TRANSIT + 1).await;
+    let TransactionEvent::Message { message, .. } = lane.try_recv().expect("on the lane") else {
+        panic!("a request")
+    };
+    let SipMessage::Request(invite) = *message else { panic!("a request") };
+    let ok = generate_response(&invite, 200, "OK", &GenerateResponseOpts::default()).unwrap();
+    stack.txn.send_response(ok, addr(PEER)).await.expect("the layer runs");
+    elapse_ms(ROUND_TRIP).await;
+
+    stack.inject(&inbound_request("ACK", "z9hG4bK-re", "re@u", Some("t"))).await;
+    elapse_ms(TRANSIT + 1).await;
+    assert!(drain(&mut lane).is_empty(), "the matched ACK is not on the lane");
+    let queued: Vec<String> = stack.drain_events().iter().map(label).collect();
+    assert_eq!(queued, ["ACK"], "it rides the event queue");
 }
