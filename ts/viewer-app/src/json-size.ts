@@ -49,3 +49,11 @@ export const isOpen = (folded: boolean, shown: boolean | undefined): boolean => 
 
 /** Whether the bar offers show/hide: a folded document, or one the reader already toggled. */
 export const hasToggle = (folded: boolean, shown: boolean | undefined): boolean => folded || shown !== undefined
+
+/** Whether the bar offers the switch between a document with its packed strings opened and as they came: given both, and they differ. */
+export const isSwitchable = (opened: JsonSize, packed: JsonSize | undefined): packed is JsonSize =>
+  packed !== undefined && packed.text !== opened.text
+
+/** The form the reader sees: as it came when asked for and switchable, else opened. */
+export const shownForm = (opened: JsonSize, packed: JsonSize | undefined, asPacked: boolean): JsonSize =>
+  asPacked && isSwitchable(opened, packed) ? packed : opened
