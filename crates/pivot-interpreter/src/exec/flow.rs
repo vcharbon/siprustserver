@@ -11,7 +11,7 @@ use tokio::time::Instant;
 
 use super::stall::Stall;
 use super::Runner;
-use crate::plan::CompiledStep;
+use crate::plan::{CompiledStep, Discriminator};
 
 impl<'a, 'p> Runner<'a, 'p> {
     /// The flow loop. `false` once a failure aborts it.
@@ -152,7 +152,36 @@ impl<'a, 'p> Runner<'a, 'p> {
     /// nothing and the dwell carries the causal order — while a `timer_linked`
     /// one is what a system timer measures and is never shortened.
     pub(super) fn dwell_deadline(&self, step: &CompiledStep) -> Option<Instant> {
+        if let Some(final_step) = self.instance.cursor().held_ack(&step.id) {
+            return self.held_ack_deadline(step, final_step);
+        }
         Some(self.anchor_at(&step.delay.from)? + Duration::from_millis(step.delay.ms))
+    }
+
+    /// When an ACK its leg sends past an arrival it still awaits goes out
+    /// (§6.7h). For a non-2xx final, when the final arrived: the ACK is its
+    /// client transaction's own (RFC 3261 §17.1.1.3). For a 2xx, at the
+    /// document's offset from it (§13.2.2.4): the ACK's anchor plus its dwell,
+    /// or, while that anchor has not happened, the nearest anchor up its chain
+    /// that has, plus every dwell between.
+    fn held_ack_deadline(&self, step: &CompiledStep, final_step: &CompiledStep) -> Option<Instant> {
+        let two_xx = matches!(final_step.discriminator, Discriminator::Response { status, .. }
+            if status < 300);
+        if !two_xx {
+            return self.completed_at.get(&final_step.id).copied();
+        }
+        let mut at = step;
+        let mut ms = 0;
+        loop {
+            ms += at.delay.ms;
+            match &at.delay.from {
+                Anchor::Trigger => return Some(self.started + Duration::from_millis(ms)),
+                Anchor::Step(id) => match self.completed_at.get(id) {
+                    Some(happened) => return Some(*happened + Duration::from_millis(ms)),
+                    None => at = self.instance.plan().step(id)?,
+                },
+            }
+        }
     }
 
     /// Open the budget of every frontier expect whose dwell is known and whose

@@ -354,6 +354,14 @@ token this file names:
 |---|---|
 | `decision-request-in-flight` | the system under test sent a request to its decision backend and holds no response to it yet |
 
+### 6.7h The ACK a final the leg took is owed
+
+An ACK `send` whose INVITE final an `expect` of its leg has taken goes out past an arrival the leg
+still awaits; a send in front keeps its place. Held that way, the ACK to a non-2xx final goes out
+when the final arrived (RFC 3261 §17.1.1.3), and the ACK to a 2xx at the document's offset from
+the 2xx (§13.2.2.4). The expect it passed still fails on its own budget
+(`crates/pivot-interpreter/src/cursor/transaction.rs`, `exec/flow.rs`).
+
 ### 6.8 delay and dwell
 
 `crates/pivot-schema/src/flow.rs`, `Delay`. Every message step carries a `delay`, auto steps

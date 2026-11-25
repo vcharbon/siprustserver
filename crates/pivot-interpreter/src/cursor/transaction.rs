@@ -1,6 +1,7 @@
 //! The answers list order does not hold back because their transaction says
-//! when they come: an answer to a transaction this leg opened (§6.7c), and the
-//! answers a CANCEL this leg received draws (§6.7e).
+//! when they come: an answer to a transaction this leg opened (§6.7c), the
+//! answers a CANCEL this leg received draws (§6.7e), and the ACK a final this
+//! leg took is owed (§6.7h).
 
 use sip_message::Method;
 
@@ -136,6 +137,67 @@ impl<'p> Cursor<'p> {
                 };
                 step.is_send() && owed && self.cancel_received_before(step)
             })
+    }
+
+    /// Whether every step of an item is the ACK a final this leg TOOK is owed
+    /// (§6.7h, [`Self::acked_final`]). The final has arrived, so its ACK waits
+    /// on no arrival of another transaction the leg still awaits (RFC 3261
+    /// §13.2.2.4 for a 2xx, §17.1.1.3 for a non-2xx).
+    pub(super) fn acks_a_taken_final(&self, frontier: &[String]) -> bool {
+        !frontier.is_empty()
+            && frontier
+                .iter()
+                .all(|id| self.plan.step(id).is_some_and(|s| self.acked_final(s).is_some()))
+    }
+
+    /// The INVITE final `step`, a `send` of an ACK, acknowledges, where an
+    /// expect of the leg has taken it: the leg's last `expect` of an INVITE
+    /// final before `step`, completed, with no INVITE or ACK sent between the
+    /// two. `None` on any other step.
+    pub fn acked_final(&self, step: &CompiledStep) -> Option<&'p CompiledStep> {
+        let is_request = |s: &CompiledStep, wanted: Method| {
+            matches!(&s.discriminator, Discriminator::Request { method }
+                if Method::from_wire(method) == wanted)
+        };
+        if !step.is_send() || !is_request(step, Method::Ack) {
+            return None;
+        }
+        let key = self.leg_key(&step.id);
+        let mut along: Vec<&'p CompiledStep> = self
+            .plan
+            .steps()
+            .into_iter()
+            .filter(|s| s.leg == step.leg && self.leg_key(&s.id) < key)
+            .collect();
+        along.sort_by_key(|s| self.leg_key(&s.id));
+        let last = along.into_iter().rev().find(|s| {
+            (s.is_send() && (is_request(s, Method::Invite) || is_request(s, Method::Ack)))
+                || answers(s, &Method::Invite).is_some_and(|status| status >= 200)
+        })?;
+        (last.is_expect() && self.steps.get(&last.id).copied() == Some(StepStatus::Complete))
+            .then_some(last)
+    }
+
+    /// The final a pending ACK `step` is owed for while a required step before
+    /// it on its leg is still pending: the ACK the leg sends past what it
+    /// awaits (§6.7h), whose dwell the runner reads off that final.
+    pub fn held_ack(&self, step: &str) -> Option<&'p CompiledStep> {
+        let step = self.plan.step(step)?;
+        if self.steps.get(&step.id).copied() != Some(StepStatus::Pending) {
+            return None;
+        }
+        let final_step = self.acked_final(step)?;
+        let key = self.leg_key(&step.id);
+        self.plan
+            .steps()
+            .into_iter()
+            .any(|s| {
+                s.leg == step.leg
+                    && self.leg_key(&s.id) < key
+                    && !s.optional_expect()
+                    && self.steps.get(&s.id).copied() == Some(StepStatus::Pending)
+            })
+            .then_some(final_step)
     }
 
     /// Whether the leg's last `expect` of a CANCEL standing before `step` has

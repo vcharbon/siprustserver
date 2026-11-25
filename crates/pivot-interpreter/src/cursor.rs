@@ -6,8 +6,9 @@
 //! between a send and what it provokes; it never binds where nothing could
 //! establish it — a relay standing behind a send (§6.7b) and an answer to a
 //! transaction this leg has already opened (§6.7c) arm beside the step in
-//! front of them, and the answers a CANCEL this leg received draws (§6.7e) go
-//! out past it. Everything else here is what the three nondeterminism
+//! front of them, and the answers a CANCEL this leg received draws (§6.7e) and
+//! the ACK a final this leg took is owed (§6.7h) go out past it. Everything
+//! else here is what the three nondeterminism
 //! constructs mean at run time:
 //!
 //! - **`alt`** — every branch's first message is armed at once; the first one to
@@ -220,6 +221,14 @@ impl<'p> Cursor<'p> {
             && frontier.iter().all(|id| self.plan.step(id).is_some_and(|s| !s.is_expect()))
     }
 
+    /// Whether a step an item puts on this leg is a `send` not yet made.
+    fn has_pending_send(&self, frontier: &[String]) -> bool {
+        frontier.iter().any(|id| {
+            self.plan.step(id).is_some_and(|s| s.is_send())
+                && self.steps.get(id).copied() == Some(StepStatus::Pending)
+        })
+    }
+
     /// The steps the run is waiting on or about to emit, per leg, in leg order.
     ///
     /// A leg walks its items in order and stops at the first that can still
@@ -238,6 +247,7 @@ impl<'p> Cursor<'p> {
             let mut armed: Vec<String> = Vec::new();
             let mut blocked = false;
             let mut awaited = false;
+            let mut send_ahead = false;
             for &index in item_indices {
                 if self.items[index] == ItemStatus::Complete {
                     continue;
@@ -246,6 +256,7 @@ impl<'p> Cursor<'p> {
                     break;
                 }
                 let frontier = self.item_frontier(index, leg);
+                let sends_here = self.has_pending_send(&frontier);
                 // A message item only. An `alt` armed early could COMMIT before
                 // the send in front of it goes out, and an `unordered` group
                 // arms its whole membership: neither is a relay standing in a
@@ -254,6 +265,8 @@ impl<'p> Cursor<'p> {
                 let is_message = self.plan.program().items[index].kind == ItemKind::Message;
                 let caused = !awaited && is_message && self.caused_elsewhere(&frontier, &armed);
                 if blocked && !caused && !self.races_with(&frontier, &armed) {
+                    let owes_ack = is_message && !send_ahead && self.acks_a_taken_final(&frontier);
+                    send_ahead |= sends_here;
                     // The answers a CANCEL this leg received draws go out at
                     // their own dwell, whatever stands in front (§6.7e).
                     if is_message && self.answers_received_cancel(&frontier) {
@@ -264,6 +277,14 @@ impl<'p> Cursor<'p> {
                     // An answer to a transaction this leg already opened may be
                     // on the wire now, whatever stands in front of it (§6.7c).
                     if is_message && self.answers_open_transaction(&frontier, &armed) {
+                        armed.extend(frontier.iter().cloned());
+                        out.extend(frontier);
+                        continue;
+                    }
+                    // The ACK a final this leg took is owed whatever arrival
+                    // the leg still awaits; a send in front keeps its place
+                    // (§6.7h).
+                    if owes_ack {
                         armed.extend(frontier.iter().cloned());
                         out.extend(frontier);
                         continue;
@@ -297,6 +318,7 @@ impl<'p> Cursor<'p> {
                 {
                     awaited = true;
                 }
+                send_ahead |= sends_here;
                 armed.extend(frontier.iter().cloned());
                 out.extend(frontier);
                 if !all_optional {
