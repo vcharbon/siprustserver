@@ -38,7 +38,17 @@ import { carriesBody, mimeKey } from "./bodies.js"
 import { bodiesEqual } from "./bodyfold.js"
 import { layoutFault, locate, type LayoutFault } from "./parts.js"
 import { diffSdp, maskOf } from "./sdpfold.js"
-import { answering, collecting, type Driven, identitiesIn, type Ledger, readings, type Reception, type Sighting } from "./sdporigin.js"
+import {
+  answering,
+  collecting,
+  type Driven,
+  identitiesIn,
+  type LegDialog,
+  type Ledger,
+  readings,
+  type Reception,
+  type Sighting
+} from "./sdporigin.js"
 import { type CaseContext, type Classification, type DocumentStep, NO_PACK, type PackOf, type UnackedFinal } from "./classifier.js"
 import { items, valuesEqual } from "./fold.js"
 import { legPlaces } from "./leg-role.js"
@@ -420,12 +430,12 @@ export const bodyProbes = (
     .flatMap((recording, leg) => recording.map((message, at) => ({ leg, at, message })))
     .sort((a, b) => a.message.at_us - b.message.at_us || a.leg - b.leg || a.at - b.at)
   const flowAt = new Map([...steps.keys()].map((id, at) => [id, at]))
-  const ended = dialogEnds(wire)
+  const dialogs = legDialogs(wire)
   const walk = (origins: Ledger | undefined): ReadonlyMap<Bundle.RecordedMessage, ReadonlyArray<ProbeAt>> => {
     const found = new Map<Bundle.RecordedMessage, ReadonlyArray<ProbeAt>>()
     wire.forEach(({ leg, message }, replayedAt) => {
       const capturedAt = message.step === undefined ? Number.MAX_SAFE_INTEGER : flowAt.get(message.step) ?? Number.MAX_SAFE_INTEGER
-      const place = { capturedAt, replayedAt, leg, opens: scopeOf(message)?.kind === "initial-invite", legEndedAt: ended.get(leg) }
+      const place = { capturedAt, replayedAt, leg, opens: scopeOf(message)?.kind === "initial-invite", legDialogs: dialogs.get(leg) ?? [] }
       found.set(message, messageBodyProbes(input, steps, message, media, origins?.at(place)))
     })
     return found
@@ -442,33 +452,57 @@ export const bodyProbes = (
 }
 
 /**
- * By leg, the wire position at which its dialog ended: the ACK to a non-2xx
- * final of its dialog-opening INVITE (RFC 3261 §17.1.1.3), or a final to a
- * BYE (§15.1.1), whichever came first, in either direction. A leg whose
- * dialog never ended on the wire has no entry.
+ * By leg, every dialog it opened, in wire order: each dialog-opening INVITE
+ * transaction (Call-ID and CSeq number), ended by the ACK to its non-2xx final
+ * (RFC 3261 §17.1.1.3) or by a final to a BYE naming the tag its 2xx answered
+ * with (§15.1.1), in either direction. A dialog that never ended on the wire
+ * states no end.
  */
-const dialogEnds = (
+const legDialogs = (
   wire: ReadonlyArray<{ readonly leg: number; readonly message: Bundle.RecordedMessage }>
-): ReadonlyMap<number, number> => {
-  const out = new Map<number, number>()
-  const opening = new Map<number, string>()
-  const refused = new Map<number, string>()
+): ReadonlyMap<number, ReadonlyArray<LegDialog>> => {
+  interface Opened {
+    readonly callId: string
+    readonly cseq: string
+    readonly openedAt: number
+    endedAt?: number
+    refused: boolean
+    readonly tags: Set<string>
+  }
+  const byLeg = new Map<number, Array<Opened>>()
   wire.forEach(({ leg, message }, at) => {
-    if (out.has(leg)) return
     const start = startLineOf(headText(message))
     if (start === undefined) return
+    const headers = headersInOrder(message)
+    const callId = (headerValuesOf(headers, "Call-ID")[0] ?? "").trim()
     const cseq = cseqOf(message)
+    const opened = byLeg.get(leg) ?? []
+    byLeg.set(leg, opened)
+    const transaction = opened.find((d) => d.callId === callId && d.cseq === cseq.number)
     if (start.kind === "request") {
-      if (scopeOf(message)?.kind === "initial-invite" && !opening.has(leg)) opening.set(leg, cseq.number)
-      if (start.method === "ACK" && refused.get(leg) === cseq.number) out.set(leg, at)
+      if (scopeOf(message)?.kind === "initial-invite" && transaction === undefined) {
+        opened.push({ callId, cseq: cseq.number, openedAt: at, refused: false, tags: new Set() })
+      }
+      if (start.method === "ACK" && transaction?.refused === true && transaction.endedAt === undefined) transaction.endedAt = at
       return
     }
     if (start.status < 200) return
-    if (cseq.method === "BYE") out.set(leg, at)
-    else if (cseq.method === "INVITE" && start.status >= 300 && opening.get(leg) === cseq.number) refused.set(leg, cseq.number)
+    if (cseq.method === "INVITE" && transaction !== undefined) {
+      if (start.status >= 300) transaction.refused = true
+      else transaction.tags.add(tagOf(headerValuesOf(headers, "To")[0]))
+      return
+    }
+    if (cseq.method !== "BYE") return
+    const named = [tagOf(headerValuesOf(headers, "To")[0]), tagOf(headerValuesOf(headers, "From")[0])]
+    for (const d of opened) {
+      if (d.endedAt === undefined && d.callId === callId && named.some((t) => t !== "" && d.tags.has(t))) d.endedAt = at
+    }
   })
-  return out
+  return new Map([...byLeg].map(([leg, opened]) => [leg, opened.map(({ openedAt, endedAt }) => endedAt === undefined ? { openedAt } : { openedAt, endedAt })]))
 }
+
+/** The `tag` parameter of a To or From value, `""` where it states none. */
+const tagOf = (value: string | undefined): string => /;\s*tag\s*=\s*([^;>\s]+)/i.exec(value ?? "")?.[1] ?? ""
 
 /** One reception's body probes; none where it answers no `expect` stating a body. */
 const messageBodyProbes = (

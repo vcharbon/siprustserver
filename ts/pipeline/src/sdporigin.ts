@@ -94,8 +94,17 @@ export interface Sighting {
   readonly leg: number
   /** Whether it rides a dialog-opening INVITE; absent reads as not. */
   readonly opens?: boolean
-  /** The wire position at which its leg's dialog ended (`bodyProbes`); absent where it never did. */
-  readonly legEndedAt?: number | undefined
+  /** Every dialog its leg opened on the wire (`bodyProbes`); absent reads as none. */
+  readonly legDialogs?: ReadonlyArray<LegDialog>
+}
+
+/**
+ * One dialog a leg opened: the wire position of its dialog-opening INVITE,
+ * and of the message that ended it, absent while it never ended.
+ */
+export interface LegDialog {
+  readonly openedAt: number
+  readonly endedAt?: number
 }
 
 /**
@@ -111,14 +120,17 @@ interface Episode {
  * Whether `next` reopens, on a new leg, the identity `episode` held: a
  * sequential search's next target sent the very offer the previous one got.
  * Both open their dialog with an INVITE carrying the same replayed
- * description, and the previous episode stayed on one leg whose dialog ended
- * before `next` arrived, so the two sessions never coexist (RFC 4566 §5.2).
+ * description, and the previous episode stayed on one leg every dialog of
+ * which, opened before `next` arrived, also ended before it, so the two
+ * sessions never coexist (RFC 4566 §5.2).
  */
 const reopens = (sightings: ReadonlyArray<Sighting>, episode: Episode, next: number): boolean => {
   const opener = sightings[episode.opener]!
   const s = sightings[next]!
+  const earlier = (opener.legDialogs ?? []).filter((d) => d.openedAt < s.replayedAt)
   return s.opens === true && opener.opens === true && episode.leg !== undefined && episode.leg !== s.leg &&
-    opener.legEndedAt !== undefined && opener.legEndedAt < s.replayedAt && opener.replayed === s.replayed
+    earlier.length > 0 && earlier.every((d) => d.endedAt !== undefined && d.endedAt < s.replayedAt) &&
+    opener.replayed === s.replayed
 }
 
 /** Each sighting's predecessor on its own side: the index of the same identity's previous one in `order`. */
@@ -302,13 +314,13 @@ export interface Reception {
   readonly read: (captured: string, replayed: string) => OriginReading
 }
 
-/** Where a reception sits in each side's own order, the leg that received it, and that leg's end. */
+/** Where a reception sits in each side's own order, the leg that received it, and that leg's dialogs. */
 export interface Place {
   readonly capturedAt: number
   readonly replayedAt: number
   readonly leg: number
   readonly opens: boolean
-  readonly legEndedAt: number | undefined
+  readonly legDialogs: ReadonlyArray<LegDialog>
 }
 
 /**
