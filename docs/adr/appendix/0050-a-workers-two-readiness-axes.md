@@ -415,7 +415,9 @@ on the lane that finds it full is dropped before the layer answers it: no
 The inbound UDP queue ahead of the transaction owner applies the same rule
 (`sip_txn::names_no_call`): while the ingress brake is engaged (the queue at
 its threshold, 70 %, or the event-queue gate refusing), it drops a request
-that names no call before the queue, counted
+that names no call before the queue, other than an ACK (the ACK of a non-2xx
+final states its INVITE's Request-URI and ends that INVITE's transaction),
+counted
 (`b2bua_udp_ingress_brake_unattributed_dropped_total`). A flood faster than
 the owner takes the queue then holds it near the threshold, and the rest of
 it serves the datagrams of calls, which it no longer tail-drops.

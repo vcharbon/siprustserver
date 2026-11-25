@@ -40,11 +40,14 @@
 //!
 //!   - a datagram the parser refuses → accept (the transaction layer answers
 //!     or drops it);
-//!   - a request that names no call ([`sip_txn::names_no_call`]: no
-//!     `callRef`, neither an initial INVITE nor a CANCEL) → drop, counted
+//!   - a request other than an ACK that names no call
+//!     ([`sip_txn::names_no_call`]: no `callRef`, neither an initial INVITE
+//!     nor a CANCEL) → drop, counted
 //!     ([`IngressBrakeCounters::unattributed_dropped`]): it takes none of the
 //!     room the requests of calls need in the queue, and its sender
-//!     retransmits it (ADR-0050 §13);
+//!     retransmits it (ADR-0050 §13). An ACK passes: the ACK of a non-2xx
+//!     final states its INVITE's Request-URI and ends that INVITE's
+//!     transaction (RFC 3261 §17.2.1);
 //!   - a response, any other request but an INVITE → accept;
 //!   - a copy of an initial INVITE the worker refused, within 64·T1 of its
 //!     last copy — at this brake or at the transaction layer's deferred
@@ -245,7 +248,7 @@ pub fn build_ingress_brake_hook(
         if is_probe(req) {
             return PreIngressAction::AcceptAhead;
         }
-        if engaged && sip_txn::names_no_call(req) {
+        if engaged && *req.method() != Method::Ack && sip_txn::names_no_call(req) {
             counters.unattributed_dropped.fetch_add(1, Ordering::Relaxed);
             return PreIngressAction::Drop;
         }

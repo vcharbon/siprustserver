@@ -335,6 +335,7 @@ fn an_engaged_brake_drops_the_requests_that_name_no_call() {
         assert_eq!(hook(raw, src(), 2), PreIngressAction::Drop, "a request naming no call");
         assert_eq!(counters.unattributed_dropped(), i as u64 + 1, "counted");
     }
+    assert_eq!(hook(&in_dialog_buf("ACK", 7), src(), 2), PreIngressAction::Accept, "an ACK");
     let of_a_call = naming_a_call(&in_dialog_buf("BYE", 4), 4);
     assert_eq!(hook(&of_a_call, src(), 2), PreIngressAction::Accept, "a BYE naming its call");
     assert_eq!(hook(&cancel_buf(5), src(), 2), PreIngressAction::Accept, "a CANCEL");
