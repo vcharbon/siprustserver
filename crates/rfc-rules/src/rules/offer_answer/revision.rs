@@ -4,8 +4,10 @@
 
 use sip_message::sdp_doc;
 
+use sip_message::sdp_doc::SdpOrigin;
+
 use crate::verdict::{Decision, Evidence, Finding, RuleId};
-use crate::wire::WireView;
+use crate::wire::{Kind, WireView};
 
 use crate::rules::Obligation;
 
@@ -31,6 +33,10 @@ use super::records::OriginStep;
 /// a failure final's describe capabilities, no session (RFC 3261 §11.2,
 /// §21.4.26), and are no step at all. A description whose `o=` line no reader
 /// accepts settles nothing — the stream's predecessor is the last one that did.
+///
+/// A version gap the sender inherited is `relayed`: the description is one it
+/// took verbatim on another call, and the versions missing are offers of that
+/// session it took there and refused non-2xx ([`inherited_gap`]).
 pub struct SdpOriginContinuity;
 
 impl Obligation for SdpOriginContinuity {
@@ -60,6 +66,7 @@ impl Obligation for SdpOriginContinuity {
             let body_changed = before.body_excluding_origin != now.body_excluding_origin;
             let delta = i128::from(now.session_version) - i128::from(before.session_version);
             let ok = same_session && (delta == 1 || (delta == 0 && !body_changed));
+            let relayed = !ok && same_session && inherited_gap(wire, &seen, s, now, before);
             let decision = if ok {
                 Decision::Compliant
             } else {
@@ -76,11 +83,50 @@ impl Obligation for SdpOriginContinuity {
                     prior_session_version: before.session_version,
                 })
             };
-            out.push(head(s, decision));
+            out.push(Finding { relayed, ..head(s, decision) });
         }
         out.sort_by_key(|f| f.anchor);
         out
     }
+}
+
+/// Whether the sender of `s` inherited the `sess-version` gap after `before`:
+/// `now` is a description it took verbatim on another call, and every version
+/// missing between the two rode an offer of that session it took there and
+/// refused with a non-2xx final. The originator's own sequence is continuous;
+/// the relay forwarded none of what it refused (RFC 3264 §8, RFC 3261 §14.1).
+fn inherited_gap(
+    wire: &WireView<'_>,
+    seen: &Reading<'_>,
+    s: &OriginStep<'_>,
+    now: &SdpOrigin,
+    before: &SdpOrigin,
+) -> bool {
+    let call = &wire.msgs[s.msg].call_id;
+    let taken: Vec<(usize, &SdpOrigin)> = (0..s.msg)
+        .filter(|&i| wire.msgs[i].dst == s.src && wire.msgs[i].call_id != *call)
+        .filter_map(|i| Some((i, seen.docs[i].as_ref()?.origin.as_ref()?)))
+        .collect();
+    let refused = |offer: usize| {
+        let o = &wire.msgs[offer];
+        matches!(o.kind, Kind::Request { .. })
+            && wire.msgs[offer + 1..].iter().any(|r| {
+                r.src == s.src
+                    && r.call_id == o.call_id
+                    && r.cseq == o.cseq
+                    && r.cseq_method == o.cseq_method
+                    && r.status().is_some_and(|status| status >= 300)
+            })
+    };
+    now.session_version > before.session_version.saturating_add(1)
+        && taken.iter().any(|(_, origin)| *origin == now)
+        && (before.session_version + 1..now.session_version).all(|version| {
+            taken.iter().any(|&(i, origin)| {
+                origin.identifies_same_session(now)
+                    && origin.session_version == version
+                    && refused(i)
+            })
+        })
 }
 
 /// **RFC 3264 §8 — an agent's later description carries at least as many `m=`
