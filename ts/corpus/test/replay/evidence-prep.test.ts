@@ -8,7 +8,8 @@
  * The cut itself is a fake that opens a prep row and records who asked: the
  * claim is about WHEN the cut runs and which prep comes back, not about
  * cutting. The suite builds and drops its OWN database
- * (`@sip/store/test-server`).
+ * (`@sip/store/test-server`). A replay's first cut takes the named captures no
+ * cut has taken, and nothing else.
  */
 import { Client, Cuts, Model, Population, Runs, Sessions } from "@sip/store"
 import { drop, fresh, migrated, on, scratch, served, urlFor } from "@sip/store/test-server"
@@ -19,6 +20,7 @@ import * as os from "node:os"
 import * as path from "node:path"
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest"
 import { type Cutter, prepOf, workAsOf } from "../../src/replay/evidence-prep.js"
+import * as FirstCut from "../../src/replay/first-cut.js"
 import * as Fingerprint from "../../src/fingerprint.js"
 import type { Options } from "../../src/options.js"
 import { workList } from "../../src/universe.js"
@@ -344,5 +346,24 @@ describe.skipIf(!served)("the work list evidence replays, as of that prep", () =
     const plain = options(CURRENT, [])
     const before = await withStore(workList(plain.paths, LANE, plain.selection, undefined))
     expect(await withStore(workAsOf(before, plain, currentPrep + 1))).toBe(before)
+  })
+})
+
+describe.skipIf(!served)("a replay's first cut", () => {
+  it("cuts only the named captures no cut has taken, a stale or broken one left as it stands", async () => {
+    const uncut = await withStore(FirstCut.cutFirst([CURRENT, STALE, BROKEN, NEVER], options(NEVER, []), fakeCut))
+    expect(uncut).toEqual([NEVER])
+    expect(cutAsked).toEqual([[NEVER]])
+  })
+
+  it("cuts nothing where every named capture stands cut", async () => {
+    expect(await withStore(FirstCut.cutFirst([CURRENT, STALE], options(CURRENT, []), fakeCut))).toEqual([])
+    expect(cutAsked).toEqual([])
+  })
+
+  it("refuses a named --prep, which stands below the cut, naming the line that cuts", () => {
+    expect(FirstCut.refusal([NEVER], 3, "run replay")).toContain(`\`run replay ${NEVER}\` with no --prep cuts it first`)
+    expect(FirstCut.refusal([NEVER], undefined, "run replay")).toBeNull()
+    expect(FirstCut.refusal([], 3, "run replay")).toBeNull()
   })
 })

@@ -127,26 +127,28 @@ const work = Effect.fn("Cut.work")(function*(facts: CliFacts, input: Input, aske
     yield* Console.error(`[cut] refused: ${away}`)
     return 2
   }
-  const adopted = yield* Adopt.fromRoots(asked.paths, asked.selection, {
-    tag: "cut",
-    concurrency: asked.concurrency,
-    dryRun: asked.dryRun
-  })
-  if (adopted._tag === "refused") {
-    yield* Console.error(`[cut] refused: ${adopted.why}`)
+  const planned = yield* Adopt.plan(asked.paths, asked.selection, "cut")
+  if (planned._tag === "refused") {
+    yield* Console.error(`[cut] refused: ${planned.why}`)
     return 2
   }
-  const options = { ...asked, selection: { ...asked.selection, positional: adopted.positional } }
-  const refused = yield* Population.refusal(options.paths, options.selection, adopted.ingested)
+  const listed = { ...asked.selection, positional: planned.positional }
+  const refused = yield* Population.refusal(asked.paths, listed, Adopt.pendingOf(planned))
   if (refused !== null) {
     yield* Console.error(`[cut] refused: ${refused}`)
     return 2
   }
-  const census = yield* Refusals.census(facts, options.paths)
+  const census = yield* Refusals.census(facts, asked.paths)
   if (census !== null) {
     yield* Console.error(`[cut] refused: ${census}`)
     return 2
   }
+  const landed = yield* Adopt.land(asked.paths, planned, { tag: "cut", concurrency: asked.concurrency, dryRun: asked.dryRun })
+  if (landed._tag === "refused") {
+    yield* Console.error(`[cut] refused: ${landed.why}`)
+    return 2
+  }
+  const options = { ...asked, selection: { ...listed, positional: landed.positional } }
   const named = (yield* workList(options.paths, options.lane, options.selection, options.prep))
     .map((work) => work.capture)
   if (named.length === 0) {

@@ -2,9 +2,10 @@
  * Adoption of a named capture the artifact store lacks: a file directly under
  * a pcap root, named with its `.pcap` or without, resolves to its capture name
  * and is pending ingest; a held name stays; a name no root holds stays as
- * named for the store's refusal; two files for one name refuse; a dry run
- * ingests nothing. An ingest that stands failed refuses, naming the capture,
- * and a new generation's name replaces the one it renamed.
+ * named for the store's refusal, as does a file that is no capture; two
+ * files for one name refuse; a dry run ingests nothing. An ingest that stands
+ * failed refuses, naming the capture, and a new generation's name replaces
+ * the one it renamed.
  */
 import { NodeServices } from "@effect/platform-node"
 import * as Effect from "effect/Effect"
@@ -35,6 +36,7 @@ for (const dir of [paths.corpus, pcaps, other]) fs.mkdirSync(dir, { recursive: t
 fs.mkdirSync(path.join(paths.corpus, "held"))
 fs.writeFileSync(path.join(pcaps, "taken.anon.pcap"), "pcap")
 fs.writeFileSync(path.join(pcaps, "ring.pcap.gz"), "pcap")
+fs.writeFileSync(path.join(pcaps, "notes.md"), "not a capture")
 fs.writeFileSync(path.join(pcaps, "twice.pcap"), "pcap")
 fs.writeFileSync(path.join(other, "twice.pcap"), "another pcap")
 fs.mkdirSync(path.join(pcaps, "sub"))
@@ -51,7 +53,7 @@ const layer = Layer.merge(
   NodeServices.layer
 )
 
-const resolve = (names: ReadonlyArray<string>) => Effect.runPromise(Adopt.resolve(paths, names).pipe(Effect.provide(layer)))
+const resolve = (names: ReadonlyArray<string>) => Effect.runPromise(Adopt.resolve(paths, named(names)).pipe(Effect.provide(layer)))
 
 const named = (positional: ReadonlyArray<string>): Selection => ({
   universe: "named",
@@ -68,8 +70,8 @@ describe("Adopt.resolve", () => {
   it("takes a root's file by its capture name or its file name, pending ingest under the capture name", async () => {
     const read = await resolve(["taken.anon", "taken.anon.pcap", "ring.pcap.gz"])
     expect(read).toEqual({
-      _tag: "resolved",
-      positional: ["taken.anon", "taken.anon", "ring.pcap.gz"],
+      _tag: "plan",
+      positional: ["taken.anon", "ring.pcap.gz"],
       pending: [
         { capture: "taken.anon", pcaps: [path.join(pcaps, "taken.anon.pcap")] },
         { capture: "ring.pcap.gz", pcaps: [path.join(pcaps, "ring.pcap.gz")] }
@@ -78,10 +80,10 @@ describe("Adopt.resolve", () => {
     })
   })
 
-  it("keeps a held name and a name no root holds directly as named, pending nothing", async () => {
-    expect(await resolve(["held", "nowhere", "deep", "sub/deep.pcap", "../pcaps/taken.anon.pcap"])).toEqual({
-      _tag: "resolved",
-      positional: ["held", "nowhere", "deep", "sub/deep.pcap", "../pcaps/taken.anon.pcap"],
+  it("keeps a held name, a file that is no capture and a name no root holds directly as named, pending nothing", async () => {
+    expect(await resolve(["held", "nowhere", "notes.md", "deep", "sub/deep.pcap", "../pcaps/taken.anon.pcap"])).toEqual({
+      _tag: "plan",
+      positional: ["held", "nowhere", "notes.md", "deep", "sub/deep.pcap", "../pcaps/taken.anon.pcap"],
       pending: [],
       renamed: []
     })
@@ -99,7 +101,7 @@ describe("Adopt.resolve", () => {
     const linked = path.join(scratch, "linked")
     fs.symlinkSync(pcaps, linked)
     const read = await Effect.runPromise(
-      Adopt.resolve(paths, ["taken.anon"]).pipe(
+      Adopt.resolve(paths, named(["taken.anon"])).pipe(
         Effect.provide(Layer.merge(
           Roots.layerWith({
             paths: () => Effect.succeed(paths),
@@ -112,11 +114,11 @@ describe("Adopt.resolve", () => {
         ))
       )
     )
-    expect(read._tag === "resolved" && read.pending.map((one) => one.capture)).toEqual(["taken.anon"])
+    expect(read._tag === "plan" && read.pending.map((one) => one.capture)).toEqual(["taken.anon"])
   })
 })
 
-describe("Adopt.fromRootsBy", () => {
+describe("Adopt.plan then Adopt.landBy", () => {
   /** An ingest that lands every source it is handed, recording them. */
   const recording = () => {
     const handed: Array<ReadonlyArray<Found>> = []
@@ -132,7 +134,12 @@ describe("Adopt.fromRootsBy", () => {
     return { handed, ingest }
   }
   const adopt = (selection: Selection, dryRun: boolean, ingest: Adopt.Ingester<never, never>) =>
-    Effect.runPromise(Adopt.fromRootsBy(paths, selection, { tag: "t", concurrency: 1, dryRun }, ingest).pipe(Effect.provide(layer)))
+    Effect.runPromise(
+      Effect.gen(function*() {
+        const planned = yield* Adopt.plan(paths, selection, "t")
+        return planned._tag === "refused" ? planned : yield* Adopt.landBy(paths, planned, { tag: "t", concurrency: 1, dryRun }, ingest)
+      }).pipe(Effect.provide(layer))
+    )
 
   it("ingests the pending captures once each and answers the list under their capture names", async () => {
     const { handed, ingest } = recording()

@@ -38,6 +38,7 @@
  * taken, before the cut (`@sip/corpus` `pre-checks.ts`): a refusal of theirs
  * exits 2 with its message.
  */
+import { neverCut } from "@sip/corpus/cut/cut-staleness"
 import { afterSweep } from "@sip/corpus/housekeeping/cleanup"
 import * as Adopt from "@sip/corpus/ingest/adopt"
 import { errorsFail } from "@sip/corpus/options"
@@ -47,7 +48,7 @@ import { prepOf, workAsOf } from "@sip/corpus/replay/evidence-prep"
 import { planWork } from "@sip/corpus/replay/plan"
 import { phase as replay, report } from "@sip/corpus/replay/replay"
 import * as ReplaySummary from "@sip/corpus/report/replay-summary"
-import { label, workList } from "@sip/corpus/universe"
+import { label, type Selection, workList } from "@sip/corpus/universe"
 import * as Console from "effect/Console"
 import * as Effect from "effect/Effect"
 import { Command, Flag } from "effect/unstable/cli"
@@ -67,6 +68,17 @@ export const flags = (facts: CliFacts) => ({
 })
 
 type Input = TriageInput & { readonly summary: boolean }
+
+/**
+ * The selection the work list is read with before the cut: a named list
+ * holding a capture no cut has taken reads with no span bound, that capture
+ * having no span yet; `workAsOf` applies the bound once the cut stands.
+ */
+const unboundUntilCut = Effect.fn("Evidence.unboundUntilCut")(function*(selection: Selection) {
+  if (selection.universe !== "named" || selection.maxSpanSeconds === undefined) return selection
+  const uncut = yield* neverCut(selection.positional)
+  return uncut.length === 0 ? selection : { ...selection, maxSpanSeconds: undefined }
+})
 
 const main = Effect.fn("Evidence.main")(function*(facts: CliFacts, input: Input) {
   const asked = yield* cutAndReplayOptionsOf(input)
@@ -90,22 +102,28 @@ const main = Effect.fn("Evidence.main")(function*(facts: CliFacts, input: Input)
     yield* Console.error(`[evidence] refused: ${census}`)
     return 2
   }
-  const adopted = yield* Adopt.fromRoots(asked.paths, read.selection, {
-    tag: "evidence",
-    concurrency: asked.concurrency,
-    dryRun: asked.dryRun
-  })
-  if (adopted._tag === "refused") {
-    yield* Console.error(`[evidence] refused: ${adopted.why}`)
+  const planned = yield* Adopt.plan(asked.paths, read.selection, "evidence")
+  if (planned._tag === "refused") {
+    yield* Console.error(`[evidence] refused: ${planned.why}`)
     return 2
   }
-  const options = { ...asked, selection: { ...read.selection, positional: adopted.positional } }
-  const refused = yield* Population.refusal(options.paths, options.selection, adopted.ingested)
+  const named = { ...read.selection, positional: planned.positional }
+  const refused = yield* Population.refusal(asked.paths, named, Adopt.pendingOf(planned))
   if (refused !== null) {
     yield* Console.error(`[evidence] refused: ${refused}`)
     return 2
   }
-  const captures = yield* workList(options.paths, options.lane, options.selection, options.prep)
+  const landed = yield* Adopt.land(asked.paths, planned, {
+    tag: "evidence",
+    concurrency: asked.concurrency,
+    dryRun: asked.dryRun
+  })
+  if (landed._tag === "refused") {
+    yield* Console.error(`[evidence] refused: ${landed.why}`)
+    return 2
+  }
+  const options = { ...asked, selection: { ...named, positional: landed.positional } }
+  const captures = yield* workList(options.paths, options.lane, yield* unboundUntilCut(options.selection), options.prep)
   if (captures.length === 0) {
     yield* Console.error(
       options.selection.universe === "named"
