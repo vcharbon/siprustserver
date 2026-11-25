@@ -65,13 +65,16 @@ export const tryingOnNonInviteNotReproduced: RfcRow = {
   gate: "tryingOnNonInviteSteps",
   rfc: "RFC 3261 §9.2, §15.1.2, §17.2.2",
   why:
-    "A final in place of the capture's 100 to a BYE or CANCEL: RFC 3261 §17.2.2 leaves the 100 " +
-    "to the stack and owes only the final, which must be the one the document's dialog state " +
-    "owes (§9.2, §15.1.2, §12.2.2).",
+    "A final for the capture's 100 to a BYE or CANCEL: RFC 3261 §17.2.2 leaves the 100 to the " +
+    "stack and owes the final the document's dialog state owes (§9.2, §15.1.2, §12.2.2); 200 or " +
+    "481 to a BYE sent after the CANCEL and before any INVITE final (§15).",
   shape: (s, facts) => {
     const sub = statusSubstitution(s)
     const nonInvite = statusOf(s.scope, "BYE") !== undefined || statusOf(s.scope, "CANCEL") !== undefined
-    return sub?.captured === 100 && nonInvite && facts.tryingOnNonInviteSteps.get(s.step) === sub.observed
+    if (sub?.captured !== 100 || !nonInvite) return false
+    const owed = facts.tryingOnNonInviteSteps.get(s.step)
+    return owed === sub.observed ||
+      (owed !== undefined && sub.observed === 200 && facts.tryingOnEarlyByeSteps.has(s.step))
   }
 }
 

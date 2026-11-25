@@ -41,6 +41,12 @@ export interface RfcFacts {
    */
   readonly tryingOnNonInviteSteps: ReadonlyMap<string, number>
   /**
+   * The {@link tryingOnNonInviteSteps} steps answering a BYE the party sent
+   * after its CANCEL and before any final to its INVITE, which a 200 answers
+   * as well — see {@link tryingOnEarlyByeSteps}.
+   */
+  readonly tryingOnEarlyByeSteps: ReadonlySet<string>
+  /**
    * BYE expects on a callee's early dialog the caller both CANCELled and BYEd —
    * see {@link byeBesideCancelSteps}.
    */
@@ -149,8 +155,28 @@ export const roundsPastReleaseSteps = ({ facts }: DocumentReading): ReadonlySet<
  * CANCEL ended the early dialog (§12.2.2), else 200. A step whose scripted
  * final differs is no member.
  */
-export const tryingOnNonInviteSteps = ({ facts }: DocumentReading): ReadonlyMap<string, number> => {
-  const out = new Map<string, number>()
+export const tryingOnNonInviteSteps = (document: DocumentReading): ReadonlyMap<string, number> =>
+  new Map(tryingRows(document).map((row) => [row.step, row.owed]))
+
+/**
+ * `trying-on-non-invite-not-reproduced`: the {@link tryingOnNonInviteSteps}
+ * steps answering a BYE the party sent after its own CANCEL and before any
+ * final to its INVITE. The early dialog still stood when that BYE reached the
+ * system (RFC 3261 §15), so 200 is owed as much as the 481 that the CANCEL's
+ * 487 leaves (§12.2.2). A BYE sent after a final stays 481 alone.
+ */
+export const tryingOnEarlyByeSteps = (document: DocumentReading): ReadonlySet<string> =>
+  new Set(tryingRows(document).filter((row) => row.early).map((row) => row.step))
+
+/** One {@link tryingOnNonInviteSteps} member: its final, and whether its BYE crossed the INVITE's final. */
+interface TryingRow {
+  readonly step: string
+  readonly owed: number
+  readonly early: boolean
+}
+
+const tryingRows = ({ facts }: DocumentReading): ReadonlyArray<TryingRow> => {
+  const out: Array<TryingRow> = []
   for (const leg of facts.legs.values()) {
     for (const [i, e] of leg.entries.entries()) {
       const method = e.method
@@ -159,15 +185,17 @@ export const tryingOnNonInviteSteps = ({ facts }: DocumentReading): ReadonlyMap<
       if (sent === undefined) continue
       const before = leg.entries.filter((x) => x.index < sent.index)
       const finals = before.filter((x) => isFinalTo(x, "INVITE") && !x.inDialog)
+      const cancelled = before.some((x) => !x.bySystem && isRequestOf(x, "CANCEL"))
       const owed = method === "CANCEL" || finals.some((x) => x.status! < 300)
         ? 200
-        : finals.length > 0 || before.some((x) => !x.bySystem && isRequestOf(x, "CANCEL"))
+        : finals.length > 0 || cancelled
         ? 481
         : 200
       const later = leg.entries.slice(i + 1)
       const next = later.findIndex((x) => !x.bySystem && isRequestOf(x, method))
       const scripted = (next === -1 ? later : later.slice(0, next)).find((x) => x.bySystem && isFinalTo(x, method))
-      if (scripted === undefined || scripted.status === owed) out.set(e.step.id, owed)
+      const early = method === "BYE" && finals.length === 0 && cancelled
+      if (scripted === undefined || scripted.status === owed) out.push({ step: e.step.id, owed, early })
     }
   }
   return out
@@ -362,6 +390,7 @@ export const rfcFactsOf = (document: DocumentReading, run: Classifier.RunShape):
   releasedLegSteps: releasedLegSteps(document),
   roundsPastReleaseSteps: roundsPastReleaseSteps(document),
   tryingOnNonInviteSteps: tryingOnNonInviteSteps(document),
+  tryingOnEarlyByeSteps: tryingOnEarlyByeSteps(document),
   byeBesideCancelSteps: byeBesideCancelSteps(document),
   cancelPastAnswerSteps: cancelPastAnswerSteps(document, run),
   cancelCrossingAnswerSteps: cancelCrossingAnswerSteps(document),
