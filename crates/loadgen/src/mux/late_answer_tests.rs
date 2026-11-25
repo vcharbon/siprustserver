@@ -43,7 +43,7 @@ fn reanswer(h: &mut HeldAnswers, raw: &[u8]) -> Option<Vec<u8>> {
 }
 
 fn on_request(h: &mut HeldAnswers, raw: &[u8]) -> LateReply {
-    h.on_request(Datagram::sniff(raw).id())
+    h.on_request(&Datagram::sniff(raw))
 }
 
 #[test]
@@ -173,15 +173,14 @@ async fn a_held_answer_expires_with_the_hold() {
     reg.release_keys(keys, |_| (None, answers.take()), Instant::now() + RELEASE_HOLD, &stats);
     let bye = req("BYE", 3, "z9hG4bKbye");
     let bye = Datagram::sniff(&bye);
-    let drawn = |reg: &mut SocketRegistry| match reg.released_answer("c1", bye.id(), Instant::now())
-    {
+    let drawn = |reg: &mut SocketRegistry| match reg.released_answer("c1", &bye, Instant::now()) {
         LateReply::Reanswer(bytes, _) => Some(bytes.to_vec()),
         _ => None,
     };
 
     tokio::time::advance(RELEASE_HOLD - std::time::Duration::from_secs(1)).await;
     assert_eq!(drawn(&mut reg), Some(ok), "held for the hold");
-    assert!(matches!(reg.released_answer("c2", bye.id(), Instant::now()), LateReply::NotHeld));
+    assert!(matches!(reg.released_answer("c2", &bye, Instant::now()), LateReply::NotHeld));
     tokio::time::advance(std::time::Duration::from_secs(1)).await;
     assert_eq!(drawn(&mut reg), None, "gone at the deadline");
     reg.expire_released(Instant::now());
@@ -230,4 +229,65 @@ fn a_request_in_unanswered_is_refused_unless_the_agent_answered_it() {
     assert!(matches!(on_request(&mut h, &bye), LateReply::Refuse), "the unanswered BYE");
     assert_eq!(reanswer(&mut h, &info), Some(ok), "the agent's own answer stands");
     assert!(matches!(on_request(&mut h, &req("ACK", 2, "z9hG4bKack")), LateReply::NotHeld));
+}
+
+/// A CANCEL of an INVITE whose non-2xx final is held draws a 200 bearing that
+/// final's To tag (RFC 3261 §9.2), its retransmission the same 200; a CANCEL
+/// of an INVITE answered 2xx, or of a transaction not held, draws nothing
+/// from the hold.
+#[test]
+#[ignore = "slow lane: loadgen"]
+fn a_cancel_of_an_answered_invite_draws_a_200_with_the_finals_tag() {
+    let branch = "z9hG4bKinv";
+    let busy = resp(486, "INVITE", 1, branch);
+    let mut h = held(&[busy, resp(200, "INVITE", 2, "z9hG4bKok")]);
+    for _ in 0..2 {
+        let LateReply::Cancel(answers) = on_request(&mut h, &req("CANCEL", 1, branch)) else {
+            panic!("the CANCEL is answered");
+        };
+        assert_eq!(answers.len(), 1, "a 200 alone: the INVITE has its final");
+        let ok = Datagram::sniff(&answers[0]);
+        let id = ok.id();
+        assert_eq!((id.status, id.cseq, id.cseq_method), (Some(200), Some(1), Some("CANCEL")));
+        assert_eq!((id.branch, id.to_tag), (Some(branch), Some("b1")));
+    }
+    for (raw, why) in [
+        (req("CANCEL", 2, "z9hG4bKok"), "the 2xx ended the INVITE transaction"),
+        (req("CANCEL", 1, "z9hG4bKother"), "another branch: another transaction"),
+        (req("CANCEL", 3, branch), "another CSeq"),
+    ] {
+        assert!(matches!(on_request(&mut h, &raw), LateReply::NotHeld), "{why}");
+    }
+}
+
+/// A re-INVITE that reached the endpoint and that the agent never answered
+/// is cancelled once the call released: the CANCEL draws a 200 and the
+/// re-INVITE a 487 (RFC 3261 §9.2), which the hold keeps as its final: a
+/// retransmitted re-INVITE draws it again and its ACK is absorbed.
+#[test]
+#[ignore = "slow lane: loadgen"]
+fn a_cancel_of_an_unanswered_reinvite_draws_a_200_and_a_487() {
+    let branch = "z9hG4bKreinv";
+    let answers = SentAnswers::default();
+    answers.on_request_in(&Datagram::sniff(&req("INVITE", 2, branch)));
+    let mut h = answers.take("c1").expect("the unanswered re-INVITE is held");
+    let LateReply::Cancel(sent) = on_request(&mut h, &req("CANCEL", 2, branch)) else {
+        panic!("the CANCEL is answered");
+    };
+    let ids: Vec<_> = sent
+        .iter()
+        .map(|a| {
+            let id = *Datagram::sniff(a).id();
+            (id.status, id.cseq, id.cseq_method.map(str::to_owned), id.to_tag.map(str::to_owned))
+        })
+        .collect();
+    let tagged =
+        |status, method: &str| (Some(status), Some(2), Some(method.into()), Some("b1".into()));
+    assert_eq!(ids, vec![tagged(200, "CANCEL"), tagged(487, "INVITE")]);
+    assert_eq!(reanswer(&mut h, &req("INVITE", 2, branch)), Some(sent[1].to_vec()), "the 487 held");
+    assert!(matches!(on_request(&mut h, &req("ACK", 2, branch)), LateReply::Absorbed), "its ACK");
+    assert!(
+        matches!(on_request(&mut h, &req("CANCEL", 2, branch)), LateReply::NotHeld),
+        "once ACKed, a retransmitted CANCEL finds no transaction"
+    );
 }

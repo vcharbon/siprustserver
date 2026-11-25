@@ -18,7 +18,7 @@ mod via_stamp;
 pub use description::session_description;
 pub use except::{equal_except, header_row_spans, line_at, Except};
 pub use identity::{identity, Identity};
-pub use refusal::refusal;
+pub use refusal::{refusal, response_to};
 pub use reliability::{rack_cseq, rack_rseq, require_has_100rel, rseq_of};
 use std::borrow::Cow;
 use std::ops::ControlFlow;

@@ -40,9 +40,10 @@ pub struct MuxStats {
     /// each answered with its ACK, the first with the BYE ending the dialog
     /// (RFC 3261 §13.2.2.4, §15) — never an orphan.
     pub late_answer_ended: AtomicU64,
-    /// Requests (retransmissions) on a dialog its call already released,
-    /// answered again with the final its agent sent (RFC 3261 §17.2.2) —
-    /// never an orphan.
+    /// Requests the mux answers for a call it no longer runs: a
+    /// retransmission on a released dialog, answered again with the final its
+    /// agent sent (RFC 3261 §17.2.2), and a CANCEL no agent answers (§9.2).
+    /// Never an orphan.
     pub late_answered: AtomicU64,
     pub pending_expired: AtomicU64,
     pub inbox_drop: AtomicU64,

@@ -21,6 +21,15 @@
 //! (§17.2.1 Confirmed): its bytes go, and a retransmitted INVITE or ACK of
 //! that transaction is absorbed.
 //!
+//! A CANCEL a released dialog holds no answer to is answered as a UA answers
+//! it, from what the hold has (RFC 3261 §9.2): its INVITE transaction's
+//! non-2xx final still held, a 200 (the CANCEL has no effect, the To tag the
+//! final's); that INVITE reached the endpoint unanswered (an in-dialog
+//! re-INVITE), a 200 and the INVITE's 487, then held as its final. Any other
+//! CANCEL, on a released Call-ID or one never seen, draws a 481 built from
+//! itself alone ([`refuse_cancel`]): the mux holds nothing more for it, and
+//! an initial INVITE answered only with provisionals is not held.
+//!
 //! Bounds: per dialog the last [`ANSWERS_HELD`] answers and markers, each
 //! answer the response datagram as sent (the copy the endpoint's other stores
 //! share) with a hashed transaction key and its request's ladder arrow;
@@ -34,7 +43,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use sip_message::sniff::Identity;
+use sip_message::sniff::{response_to, to_tag, Identity};
 
 use super::datagram::{key_of, Datagram};
 use super::tally::LateRepair;
@@ -87,15 +96,20 @@ pub(in crate::mux) enum LateReply {
     /// a UA that no longer holds the dialog (RFC 3261 §12.2.2), built from
     /// the retransmission itself.
     Refuse,
+    /// A CANCEL of a held INVITE transaction: the responses it draws, its
+    /// 200 first.
+    Cancel(Vec<Arc<[u8]>>),
 }
 
 /// The answers one released dialog holds.
 pub(in crate::mux) struct HeldAnswers(Vec<Answer>);
 
 impl HeldAnswers {
-    /// What the request `id` draws from these answers; an ACK of a held
-    /// final marks it ACKed.
-    pub(in crate::mux) fn on_request(&mut self, id: &Identity<'_>) -> LateReply {
+    /// What the request `d` draws from these answers; an ACK of a held
+    /// final marks it ACKed, and a CANCEL of an unanswered INVITE holds the
+    /// 487 it draws.
+    pub(in crate::mux) fn on_request(&mut self, d: &Datagram<'_>) -> LateReply {
+        let id = d.id();
         let (Some(method), Some(cseq), Some(branch)) = (id.method, id.cseq, id.branch) else {
             return LateReply::NotHeld;
         };
@@ -105,6 +119,14 @@ impl HeldAnswers {
             return if held { LateReply::Absorbed } else { LateReply::NotHeld };
         }
         let txn = txn_key(cseq, method, branch);
+        if method == "CANCEL" {
+            return match self.0.iter().find(|a| a.txn == txn && a.bytes.is_some()) {
+                Some(Answer { bytes: Some(bytes), repair, .. }) => {
+                    LateReply::Reanswer(bytes.clone(), repair.clone())
+                }
+                _ => self.on_cancel(d, txn_key(cseq, "INVITE", branch)),
+            };
+        }
         match self.0.iter().find(|a| a.txn == txn) {
             Some(Answer { bytes: Some(bytes), repair, .. }) => {
                 LateReply::Reanswer(bytes.clone(), repair.clone())
@@ -114,6 +136,55 @@ impl HeldAnswers {
             None => LateReply::NotHeld,
         }
     }
+
+    /// What the CANCEL `d` draws from the INVITE transaction `invite` it
+    /// names (RFC 3261 §9.2): a 200 when its non-2xx final is held, a 200
+    /// and a 487 (held from now on as that INVITE's final) when it reached
+    /// the endpoint unanswered, nothing held otherwise.
+    fn on_cancel(&mut self, d: &Datagram<'_>, invite: u64) -> LateReply {
+        let Some(held) = self.0.iter_mut().find(|a| a.txn == invite) else {
+            return LateReply::NotHeld;
+        };
+        if held.unanswered {
+            let tag = stateless_tag(d);
+            let terminated = response_to(d.raw(), 487, "Request Terminated", &tag, Some("INVITE"));
+            let (Some(ok), Some(terminated)) =
+                (response_to(d.raw(), 200, "OK", &tag, None), terminated)
+            else {
+                return LateReply::NotHeld;
+            };
+            let terminated: Arc<[u8]> = terminated.into();
+            held.bytes = Some(terminated.clone());
+            held.unanswered = false;
+            return LateReply::Cancel(vec![ok.into(), terminated]);
+        }
+        let Some(tag) = held.bytes.as_deref().map(to_tag) else {
+            return LateReply::NotHeld;
+        };
+        match response_to(d.raw(), 200, "OK", &tag, None) {
+            Some(ok) => LateReply::Cancel(vec![ok.into()]),
+            None => LateReply::NotHeld,
+        }
+    }
+}
+
+/// The 481 a CANCEL no held INVITE transaction answers draws (RFC 3261
+/// §9.2), built from the CANCEL alone; `None` for a datagram that is no
+/// CANCEL or lacks a row a response copies.
+pub(in crate::mux) fn refuse_cancel(d: &Datagram<'_>) -> Option<Arc<[u8]>> {
+    if d.id().method != Some("CANCEL") {
+        return None;
+    }
+    let refused =
+        response_to(d.raw(), 481, "Call/Transaction Does Not Exist", &stateless_tag(d), None);
+    refused.map(Into::into)
+}
+
+/// The To tag a response built with no dialog state gives a request whose
+/// To names none (RFC 3261 §8.2.6.2): derived from the request's Call-ID and
+/// top Via branch, so every retransmission of it draws the same tag.
+fn stateless_tag(d: &Datagram<'_>) -> String {
+    format!("{:016x}", key_of((d.id().call_id, d.id().branch, "stateless")))
 }
 
 /// Mark ACKed the held INVITE final of transaction (`cseq`, `branch`) in

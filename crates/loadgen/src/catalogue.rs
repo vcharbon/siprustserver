@@ -200,7 +200,7 @@ pub const MUX_CLAIM_UNFIRED: Family = Family::counter(
 pub const MUX_LATE_ANSWERED: Family = Family::counter(
     "loadgen_mux_late_retransmission_answered_total",
     Labels::Product(&[STREAM]),
-    "Retransmitted requests on a released dialog answered again with the final its agent sent (RFC 3261 Timer J).",
+    "Requests the mux answers for a call it no longer runs: a retransmission drawing the final its agent sent (RFC 3261 Timer J), a CANCEL drawing a 200 or a 481 (RFC 3261 9.2).",
 )
 .semi_open();
 
