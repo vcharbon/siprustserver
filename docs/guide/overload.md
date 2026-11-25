@@ -103,8 +103,10 @@ Such a request waits on a queue of its own, apart from the requests of calls. Th
 that queue only when it has no other work. A flood of them thus delays no request of a call,
 never drops the BYE of one, and does not make the worker refuse new calls while it has CPU to
 spare. When 1 024 of them wait, the worker drops each new one on arrival, before it keeps
-anything for it, and counts it in `b2bua_txn_unattributed_lane_drops_total`. Its sender
-retransmits it. A request of a call carries the call's reference in its Request-URI when it
+anything for it, and counts it in `b2bua_txn_unattributed_lane_drops_total`. While check 1
+refuses new calls, the worker also drops each such request before its UDP input queue, and
+counts it in `b2bua_udp_ingress_brake_unattributed_dropped_total`, so the flood leaves room
+in that queue for the requests of calls. Its sender retransmits it. A request of a call carries the call's reference in its Request-URI when it
 reaches the worker at the Contact the worker gave. A request whose Request-URI an element on
 its path rewrote waits on that queue too, and its retransmission recovers it during a flood.
 

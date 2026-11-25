@@ -7,14 +7,14 @@
 
 use std::sync::atomic::Ordering::Relaxed;
 
-use sip_message::{Method, SipRequest};
+use sip_message::SipRequest;
 use tokio::sync::mpsc;
 
+use crate::attribution::names_no_call;
 use crate::event::TransactionEvent;
 
 use super::key::ServerTxnId;
 use super::owner::Owner;
-use super::server::extract_ruri_call_ref;
 
 /// The output an inbound request's event rides.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -27,19 +27,13 @@ pub(super) enum Lane {
 
 impl Owner {
     /// The output of `req`, a request no transaction here holds: the
-    /// unattributed lane when the layer runs one, `req`'s Request-URI states
-    /// no `callRef` (as [`extract_ruri_call_ref`] reads it) and `req` is
-    /// neither an initial INVITE (no To-tag, a new call, judged by admission)
-    /// nor a CANCEL (one this layer matches to no INVITE may cancel one its
-    /// consumer rebuilds, a call taken over); else the event queue.
+    /// unattributed lane when the layer runs one and `req` names no call
+    /// ([`names_no_call`]); else the event queue.
     pub(super) fn lane_of(&self, req: &SipRequest) -> Lane {
-        let initial_invite = req.method() == Method::Invite && req.to().tag().is_none();
-        let cancel = req.method() == Method::Cancel;
-        let names_a_call = extract_ruri_call_ref(req).is_some();
-        if self.unattributed_tx.is_none() || initial_invite || cancel || names_a_call {
-            Lane::Events
-        } else {
+        if self.unattributed_tx.is_some() && names_no_call(req) {
             Lane::Unattributed
+        } else {
+            Lane::Events
         }
     }
 

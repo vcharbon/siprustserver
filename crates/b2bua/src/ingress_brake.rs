@@ -2,7 +2,7 @@
 //! worker's UDP bind, the first rung of the admission ladder
 //! ([`crate::admission`]).
 //!
-//! Its one goal is to **refuse new normal calls when the ingress queue is
+//! Its first goal is to **refuse new normal calls when the ingress queue is
 //! backed up**, before the datagram is queued and before any transaction or
 //! call state exists. It engages on either of two readings, taken as the
 //! datagram arrives:
@@ -29,20 +29,30 @@
 //! 64 and shares its turns with the queue, so a stream of OPTIONS neither
 //! stops the calls in progress nor is stopped by them.
 //!
+//! Its third goal is to **keep the queue's room for the calls**: while it is
+//! engaged, a request that can belong to no call is dropped before it is
+//! queued, so a flood of them, faster than the transaction layer takes the
+//! queue, never fills it and drops a call's BYE at its tail.
+//!
 //! While it is engaged the datagram is
 //! parsed, and the parse is queued with it: the transaction layer takes it
 //! and does not parse the datagram again ([`sip_net::Arrival`]). Then:
 //!
 //!   - a datagram the parser refuses → accept (the transaction layer answers
 //!     or drops it);
-//!   - a response, any request but an INVITE → accept;
+//!   - a request that names no call ([`sip_txn::names_no_call`]: no
+//!     `callRef`, neither an initial INVITE nor a CANCEL) → drop, counted
+//!     ([`IngressBrakeCounters::unattributed_dropped`]): it takes none of the
+//!     room the requests of calls need in the queue, and its sender
+//!     retransmits it (ADR-0050 §13);
+//!   - a response, any other request but an INVITE → accept;
 //!   - a copy of an initial INVITE the worker refused, within 64·T1 of its
 //!     last copy — at this brake or at the transaction layer's deferred
 //!     backlog, whatever its class → that refusal again, counted as a copy,
 //!     on the RFC schedule (ADR-0063 §1); a copy past it → drop;
 //!   - otherwise the ladder's brake rung judges it in its class
 //!     ([`class_of`]): an INVITE carrying a `To`-tag is admitted (the brake
-//!     never touches an existing call), an emergency one too, counted on
+//!     never refuses an existing call), an emergency one too, counted on
 //!     [`IngressBrakeCounters::emergency_bypassed`]; a normal one is refused
 //!     with the worker's one refusal ([`Refusals`]) unless a live server
 //!     transaction holds a copy of it (that transaction answers it), its
@@ -128,6 +138,8 @@ pub struct IngressBrakeCounters {
     gate_refused: Arc<[AtomicU64; 3]>,
     /// Copies of a refused INVITE refused again here.
     copies: Arc<AtomicU64>,
+    /// Requests naming no call dropped here while engaged.
+    unattributed_dropped: Arc<AtomicU64>,
 }
 
 impl IngressBrakeCounters {
@@ -158,6 +170,12 @@ impl IngressBrakeCounters {
     /// brake answered with that refusal again.
     pub fn refused_copies(&self) -> u64 {
         self.copies.load(Ordering::Relaxed)
+    }
+
+    /// Requests naming no call ([`sip_txn::names_no_call`]) this brake
+    /// dropped while engaged, before the queue.
+    pub fn unattributed_dropped(&self) -> u64 {
+        self.unattributed_dropped.load(Ordering::Relaxed)
     }
 
     /// The brake's first refusals and copies, for the new-call count
@@ -226,6 +244,10 @@ pub fn build_ingress_brake_hook(
         };
         if is_probe(req) {
             return PreIngressAction::AcceptAhead;
+        }
+        if engaged && sip_txn::names_no_call(req) {
+            counters.unattributed_dropped.fetch_add(1, Ordering::Relaxed);
+            return PreIngressAction::Drop;
         }
         if *req.method() != Method::Invite {
             return PreIngressAction::Accept;

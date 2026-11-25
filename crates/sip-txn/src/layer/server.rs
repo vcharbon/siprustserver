@@ -521,6 +521,6 @@ fn state_after(kind: TxnKind, status: u16) -> TxnState {
 /// and until then the self-release count of a call naming its Call-ID counts
 /// it (`layer::unattributed`). The attribution is what the self-release count
 /// (ADR-0014) and a release's forget and answer read.
-pub(super) fn extract_ruri_call_ref(req: &SipRequest) -> Option<String> {
+fn extract_ruri_call_ref(req: &SipRequest) -> Option<String> {
     req.request_uri().param("callRef").and_then(ParamValue::as_str).map(decode_param)
 }

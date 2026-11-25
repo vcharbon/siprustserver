@@ -44,6 +44,7 @@
     )
 )]
 
+mod attribution;
 pub mod catalogue;
 pub mod event;
 pub mod invite_class;
@@ -67,6 +68,8 @@ pub use layer::{
 };
 // The class a new INVITE is judged in, read off the parsed request.
 pub use invite_class::{class_of, InviteClass};
+// Whether a request can belong to a call by what it states.
+pub use attribution::names_no_call;
 // The seeds a materialised call hands the layer, and a re-offer's disposition.
 pub use seed::{Reoffer, TxnSeed};
 // Upward events + the client-transaction handles `send_request` returns.

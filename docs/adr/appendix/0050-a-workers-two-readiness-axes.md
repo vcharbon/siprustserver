@@ -412,6 +412,14 @@ retransmission is judged afresh, its copy record kept. A CANCEL of an INVITE
 on the lane that finds it full is dropped before the layer answers it: no
 200, no 487. The worker's bound is 1 024 requests.
 
+The inbound UDP queue ahead of the transaction owner applies the same rule
+(`sip_txn::names_no_call`): while the ingress brake is engaged (the queue at
+its threshold, 70 %, or the event-queue gate refusing), it drops a request
+that names no call before the queue, counted
+(`b2bua_udp_ingress_brake_unattributed_dropped_total`). A flood faster than
+the owner takes the queue then holds it near the threshold, and the rest of
+it serves the datagrams of calls, which it no longer tail-drops.
+
 The router takes the lane only when the keepalive lane, the event queue,
 the timers, re-entry, fail-back and readmission have nothing ready. Taking
 from it reads neither the event-queue gate nor the age the transaction layer
@@ -427,9 +435,9 @@ Residuals: a request that states a forged `callRef`, and a flood of stray
 CANCELs, ride the event queue and are answered there as before. A request of a live call whose Request-URI an
 element rewrote rides the lane, so a flood can drop it; its retransmission
 recovers it (an ACK of a 2xx, the next 2xx retransmission). Responses that
-match no client transaction stay on the event queue. Past the transaction
-owner's own rate, the inbound UDP queue ahead of it fills and loses
-datagrams of every kind. The lane is opt-in in the transaction layer
+match no client transaction stay on the event queue. Past the receive
+pump's own rate, the kernel's receive buffer ahead of it loses datagrams of
+every kind. The lane is opt-in in the transaction layer
 (`unattributed_lane`), so its other users keep one queue.
 
 ## Amended

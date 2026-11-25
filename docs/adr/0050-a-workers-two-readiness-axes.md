@@ -75,8 +75,9 @@ Detail: [appendix, context](appendix/0050-a-workers-two-readiness-axes.md#contex
     CANCEL, up on a bounded lane apart from the event queue, with the `Cancelled` of an INVITE
     that rode it. The
     router takes the lane after every other source; neither new-call gate reads it. A full lane
-    drops the request before any state exists. A flood of requests that name no call thus takes
-    no room or age from the requests of calls, and drops no BYE of one (ADR-0037 item 8).
+    drops the request before any state exists, and the engaged ingress brake drops it before the
+    inbound UDP queue. A flood of requests that name no call thus takes no room or age from the
+    requests of calls, and drops no BYE of one (ADR-0037 item 8).
     [Detail](appendix/0050-a-workers-two-readiness-axes.md#13-the-unattributed-lane).
 
 ## Consequences

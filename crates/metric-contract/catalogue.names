@@ -196,6 +196,7 @@ b2bua-runner b2bua_txn_call_attach_refused_total counter fixed {}
 b2bua-runner b2bua_txn_retransmits_total counter capped:256 {ladder,method|ladder,method,code}
 b2bua-runner b2bua_txn_retransmits_overflow_total counter fixed {}
 b2bua-runner b2bua_udp_ingress_brake_emergency_bypassed_total counter fixed {}
+b2bua-runner b2bua_udp_ingress_brake_unattributed_dropped_total counter fixed {}
 b2bua-runner b2bua_udp_queue_depth gauge fixed {}
 b2bua-runner b2bua_udp_queue_wait_ms gauge fixed {}
 b2bua-runner b2bua_udp_queue_max gauge fixed {}

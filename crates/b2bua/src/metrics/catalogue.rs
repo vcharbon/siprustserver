@@ -112,6 +112,12 @@ pub const UDP_INGRESS_BRAKE_EMERGENCY_BYPASSED: Family = Family::counter(
     "New emergency INVITEs that crossed the ingress brake's threshold and passed it (the brake admits them). Emergency traffic skipping the gate under flood.",
 );
 
+pub const UDP_INGRESS_BRAKE_UNATTRIBUTED_DROPPED: Family = Family::counter(
+    "b2bua_udp_ingress_brake_unattributed_dropped_total",
+    Labels::None,
+    "Requests naming no call the engaged ingress brake dropped before the inbound queue, so they take none of its room; the sender retransmits.",
+);
+
 // ── Every new call's admission outcome ──
 
 /// Block 0: accepted, by class. Block 1: cancelled, by class. Block 2:
@@ -308,6 +314,7 @@ pub const TXN: &[Family] = &[
 /// The UDP transport and its ingress brake.
 pub const UDP: &[Family] = &[
     UDP_INGRESS_BRAKE_EMERGENCY_BYPASSED,
+    UDP_INGRESS_BRAKE_UNATTRIBUTED_DROPPED,
     udp::QUEUE_DEPTH,
     udp::QUEUE_WAIT,
     udp::QUEUE_MAX,

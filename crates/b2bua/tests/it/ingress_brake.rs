@@ -227,8 +227,9 @@ async fn emergency_invites_bypass_the_brake_even_above_the_threshold() {
     assert!(flooder.try_recv().is_none(), "emergency INVITE must not be rejected");
 }
 
-/// A re-INVITE names an existing dialog by its To-tag: the brake refuses NEW
-/// calls only, so an established call is never disturbed by ingress overload.
+/// A re-INVITE names an existing dialog by its To-tag, and its call by the
+/// `callRef` of the Contact the worker gave: the brake refuses NEW calls
+/// only, so an established call is never disturbed by ingress overload.
 #[tokio::test(start_paused = true)]
 async fn in_dialog_reinvites_are_never_braked() {
     let (net, b2bua, flooder, counters) = setup().await;
@@ -238,7 +239,9 @@ async fn in_dialog_reinvites_are_never_braked() {
     for i in 0..3u32 {
         flooder.send_to(&new_invite(i), b2bua_addr()).await.unwrap();
     }
-    flooder.send_to(&invite_buf(7, false, Some("bob-tag-7")), b2bua_addr()).await.unwrap();
+    let reinvite = String::from_utf8(invite_buf(7, false, Some("bob-tag-7"))).expect("utf-8");
+    let reinvite = reinvite.replacen(" SIP/2.0\r\n", ";callRef=c7 SIP/2.0\r\n", 1);
+    flooder.send_to(reinvite.as_bytes(), b2bua_addr()).await.unwrap();
     settle(&net).await;
 
     // Only the new INVITEs above the threshold were refused (indexes 2..).
