@@ -5,9 +5,10 @@
  *   cut --all --slice 200 [--resume <prep>]
  *   cut --job <id> …            (what a launched cut job runs)
  *
- * A `<capture>` is the pcap FILE NAME, extension and all — it names a
- * directory under the corpus and a key in the run store. A bare stem is a
- * DIFFERENT capture that owns no flows document.
+ * A `<capture>` is the capture name — a directory under the corpus and a key
+ * in the run store. A name the corpus lacks that a file directly under a pcap
+ * root answers to is ingested first, saying so, and cut under its capture
+ * name (`@sip/corpus` `ingest/adopt.ts`).
  *
  * It enriches, cuts and records, and takes nothing from anybody: a prep number
  * comes from a sequence and everything under it is content-named, so a cut runs
@@ -32,6 +33,7 @@
 import { phase } from "@sip/corpus/cut/cut"
 import { DEFAULT_SLICE, sliced } from "@sip/corpus/cut/cut-slices"
 import { cutStaleness } from "@sip/corpus/cut/cut-staleness"
+import * as Adopt from "@sip/corpus/ingest/adopt"
 import type { Options } from "@sip/corpus/options"
 import * as Population from "@sip/corpus/population"
 import { workList } from "@sip/corpus/universe"
@@ -119,13 +121,23 @@ const staleOf = Effect.fn("Cut.stale")(function*(captures: ReadonlyArray<string>
   return stale.map((one) => one.capture)
 })
 
-const work = Effect.fn("Cut.work")(function*(facts: CliFacts, input: Input, options: Options, job: number | undefined) {
-  const away = yield* Refusals.environment(facts, undefined, options.selection.universe, options.dryRun)
+const work = Effect.fn("Cut.work")(function*(facts: CliFacts, input: Input, asked: Options, job: number | undefined) {
+  const away = yield* Refusals.environment(facts, undefined, asked.selection.universe, asked.dryRun)
   if (away !== null) {
     yield* Console.error(`[cut] refused: ${away}`)
     return 2
   }
-  const refused = yield* Population.refusal(options.paths, options.selection)
+  const adopted = yield* Adopt.fromRoots(asked.paths, asked.selection, {
+    tag: "cut",
+    concurrency: asked.concurrency,
+    dryRun: asked.dryRun
+  })
+  if (adopted._tag === "refused") {
+    yield* Console.error(`[cut] refused: ${adopted.why}`)
+    return 2
+  }
+  const options = { ...asked, selection: { ...asked.selection, positional: adopted.positional } }
+  const refused = yield* Population.refusal(options.paths, options.selection, adopted.ingested)
   if (refused !== null) {
     yield* Console.error(`[cut] refused: ${refused}`)
     return 2

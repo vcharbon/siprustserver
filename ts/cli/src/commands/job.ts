@@ -50,6 +50,7 @@ import * as Job from "@sip/corpus/jobs/job"
 import { DEFAULT_GRACE } from "@sip/corpus/jobs/job"
 import { listLine, showLines } from "@sip/corpus/jobs/job-lines"
 import * as JobStart from "@sip/corpus/jobs/job-start"
+import * as JobWait from "@sip/corpus/jobs/job-wait"
 import { DEFAULT_CLEANUP, DEFAULT_CONCURRENCY, DEFAULT_MEMORY_MAX } from "@sip/corpus/knobs"
 import type { Paths } from "@sip/corpus/paths"
 import { Jobs, Requests } from "@sip/store"
@@ -71,8 +72,6 @@ const usage = (facts: CliFacts): string =>
   "start cut [--stale-only|--force] <capture>…|--standing|--all|--known [--slice N] | start retire <capture>… | " +
   "start delete <run>…|--request <id>|--sweep <id>|--of-job <id>|--lane L --older-than H | list [--limit N] | " +
   "show <id> | wait <id> [--timeout S] | stop <id> [--grace S] | restart <id> --resume|--again | reap [--dry-run]"
-
-const POLL_MS = 2_000
 
 const startFlags = {
   request: IdFlags.flag("request", "request").pipe(Flag.withDescription("The request to replay"), Flag.optional),
@@ -376,8 +375,6 @@ const startCommand = (facts: CliFacts, root: Root) =>
       })
   ).pipe(Command.withDescription("Create a job and launch it detached"))
 
-const ENDED: ReadonlySet<Jobs.Status> = new Set<Jobs.Status>(["done", "failed", "interrupted", "died"])
-
 /**
  * A stop asked of a running job: written on the row first — when,
  * and the grace its cells in flight get — then SIGTERM to its process group.
@@ -459,7 +456,7 @@ const restartCommand = (facts: CliFacts, root: Root) =>
           yield* Console.error(`[job] refused: job ${input.id} is a ${old.kind} job with no request to run again`)
           return yield* exit(2)
         }
-        if (!ENDED.has(old.status)) {
+        if (!JobWait.ENDED.has(old.status)) {
           yield* Console.error(`[job] refused: job ${input.id} is ${old.status} — stop it first (\`${facts.invocation("job")} stop ${input.id}\`)`)
           return yield* exit(2)
         }
@@ -509,31 +506,7 @@ const wait = Command.make(
     id: IdFlags.argument("id", "job").pipe(Argument.withDescription("The job")),
     timeout: Flag.float("timeout").pipe(Flag.withDescription("Seconds before giving up (0: never)"), Flag.withDefault(0))
   },
-  (input) =>
-    Effect.gen(function*() {
-      const jobs = yield* Jobs.Service
-      const deadline = input.timeout > 0 ? Date.now() + input.timeout * 1000 : undefined
-      for (;;) {
-        const detail = yield* jobs.show(input.id)
-        if (detail === null) {
-          yield* Console.error(`[job] refused: no job ${input.id}`)
-          return yield* exit(2)
-        }
-        if (ENDED.has(detail.job.status)) {
-          for (const line of showLines(detail)) yield* Console.log(line)
-          return yield* exit(detail.job.exit ?? (detail.job.status === "done" ? 0 : 1))
-        }
-        if (detail.job.status === "running" && (yield* Job.liveness(detail.job))._tag === "ended") {
-          for (const line of Reap.jobLines(yield* Reap.reapJobs(false), false)) yield* Console.log(line)
-          continue
-        }
-        if (deadline !== undefined && Date.now() >= deadline) {
-          yield* Console.error(`[job] job ${input.id} still ${detail.job.status} after ${input.timeout} s`)
-          return yield* exit(124)
-        }
-        yield* Effect.sleep(POLL_MS)
-      }
-    })
+  (input) => Effect.flatMap(JobWait.untilEnded(input.id, input.timeout), exit)
 ).pipe(Command.withDescription("Block until a job ends; the exit code is the job's"))
 
 const reap = Command.make(

@@ -28,11 +28,18 @@ import type { Selection, Work } from "./universe.js"
  * A name must also BE a basename. `path.join` would resolve `../` out of the
  * store and an absolute path into a second root, so a name carrying either is
  * refused on its shape rather than on whether that escape happens to exist.
+ * A `pending` capture counts as held: one a dry run would ingest first
+ * (`ingest/adopt.ts`).
  */
-const unknownCaptures = Effect.fn("Population.unknownCaptures")(function*(paths: Paths, selection: Selection) {
+const unknownCaptures = Effect.fn("Population.unknownCaptures")(function*(
+  paths: Paths,
+  selection: Selection,
+  pending: ReadonlyArray<string>
+) {
   if (selection.universe !== "named" || selection.positional.length === 0) return null
   const fs = yield* FileSystem.FileSystem
   const held = new Set(yield* fs.readDirectory(paths.corpus).pipe(Effect.orElseSucceed(() => [] as Array<string>)))
+  for (const capture of pending) held.add(capture)
   const unknown = selection.positional.filter((name) => !held.has(name))
   if (unknown.length === 0) return null
   // A miss is hand-entry damage — a pasted path, a dropped suffix, a single
@@ -80,11 +87,16 @@ const caseSet = (selection: Selection): string | null => {
  * excludes everything and a lane name nobody has run excludes everything — and
  * an empty work list reads as "the corpus has nothing to do" rather than as a
  * typo. So a stated predicate that names nothing refuses the invocation instead.
+ * A `pending` capture is a named one the store will hold before any row opens.
  */
-export const refusal = Effect.fn("Population.refusal")(function*(paths: Paths, selection: Selection) {
+export const refusal = Effect.fn("Population.refusal")(function*(
+  paths: Paths,
+  selection: Selection,
+  pending: ReadonlyArray<string> = []
+) {
   const set = caseSet(selection)
   if (set !== null) return set
-  const named = yield* unknownCaptures(paths, selection)
+  const named = yield* unknownCaptures(paths, selection, pending)
   if (named !== null) return named
   const stated = bound("max-span", selection.maxSpanSeconds) ??
     bound("sample", selection.sampleSize) ??

@@ -1,7 +1,7 @@
 /**
  * `source` — SOURCES from the command line:
  *
- *   source add <path>... [--paths-from FILE|-] [--set <file>]... [--cut] [--retry-failed] [--concurrency N] [--memory-max SIZE]
+ *   source add <path>... [--paths-from FILE|-] [--set <file>]... [--cut] [--retry-failed] [--concurrency N] [--memory-max SIZE] [--wait]
  *   source add --job <id> …          (what the launched ingest job runs)
  *   source list [--stale] [-q NAME] [--limit N] [--offset N]
  *
@@ -12,7 +12,9 @@
  * campaign's discover, extract and population phases, idempotent on the
  * pcap's fingerprint, then with `--cut` the cut over whatever those captures
  * left stale. "Add" and "add + cut" are the two shapes; a replay after them is
- * a request. A path outside the roots, or one naming nothing, is refused
+ * a request. The line returns once the job is launched; with `--wait` it
+ * blocks until the job ends (`jobs/job-wait.ts`), so a script's next line
+ * reads what the job landed. A path outside the roots, or one naming nothing, is refused
  * before any row exists. A selection of thousands of files is a list file
  * (`--paths-from`), never a shell glob: a package runner hands its script the
  * whole line as one argument, and past the kernel's 128 KiB per argument the
@@ -31,6 +33,7 @@ import * as Discover from "@sip/corpus/ingest/discover"
 import * as Source from "@sip/corpus/ingest/source"
 import * as Job from "@sip/corpus/jobs/job"
 import * as JobStart from "@sip/corpus/jobs/job-start"
+import * as JobWait from "@sip/corpus/jobs/job-wait"
 import { DEFAULT_BATCH, DEFAULT_CONCURRENCY, DEFAULT_MEMORY_MAX } from "@sip/corpus/knobs"
 import * as Locks from "@sip/corpus/locks"
 import type { Options } from "@sip/corpus/options"
@@ -51,7 +54,7 @@ import * as Refusals from "../refusals.js"
 import { exit, operatorCwd, stdinText } from "../runner.js"
 
 const usage = (facts: CliFacts): string =>
-  `usage: ${facts.invocation("source")} add <path>... [--set <file>]... [--cut] | ` +
+  `usage: ${facts.invocation("source")} add <path>... [--set <file>]... [--cut] [--wait] | ` +
   "list [--stale] [-q NAME] [--limit N] [--offset N]"
 
 export const addFlags = (facts: CliFacts) => ({
@@ -90,6 +93,10 @@ export const addFlags = (facts: CliFacts) => ({
     Flag.withDefault(DEFAULT_MEMORY_MAX)
   ),
   batch: Flag.integer("batch").pipe(Flag.withDescription("Captures per cut batch"), Flag.withDefault(DEFAULT_BATCH)),
+  wait: Flag.boolean("wait").pipe(
+    Flag.withDescription("Block until the launched job ends; the exit code is the job's"),
+    Flag.withDefault(false)
+  ),
   job: IdFlags.flag("job", "job").pipe(
     Flag.withDescription(`The job row this process was launched for (${facts.invocation("source")} add)`),
     Flag.optional
@@ -337,6 +344,7 @@ export const command = (facts: CliFacts) => {
       for (const line of JobStart.startedLines("ingest", what, started, facts.invocation("job"))) {
         yield* Console.log(line)
       }
+      if (input.wait) return yield* exit(yield* JobWait.untilEnded(started.id, 0))
     })).pipe(Command.withDescription("Add pcaps by path on the host: an ingest job, and with --cut the cut after it"))
 
   return root.pipe(Command.withSubcommands([add, list]))

@@ -63,8 +63,15 @@
  * including the ones that break: a capture the pinned prep never cut, or one
  * whose cut died, is an `error` the queue shows; a cut that refused every case
  * is `no-cases`. Silence is never an outcome.
+ *
+ * A named capture the artifact store does not hold yet, found under a pcap
+ * root, is ingested and cut first, in the foreground, saying so
+ * (`@sip/corpus` `ingest/adopt.ts`); the replay then pins the prep that cut
+ * opened.
  */
+import { phase as cutPhase } from "@sip/corpus/cut/cut"
 import { afterSweep } from "@sip/corpus/housekeeping/cleanup"
+import * as Adopt from "@sip/corpus/ingest/adopt"
 import * as Job from "@sip/corpus/jobs/job"
 import { DEFAULT_GRACE } from "@sip/corpus/jobs/job"
 import { errorsFail, type Options } from "@sip/corpus/options"
@@ -416,15 +423,44 @@ const workOf = Effect.fn("Replay.workOf")(function*(facts: CliFacts, input: Inpu
     if (prep === null) return noPrep(facts, options.prep)
     const work = yield* censusWork(input, prep)
     if (typeof work === "string") return `[replay] refused: ${work}`
-    return { options: { ...options, prep, selection: { ...options.selection, positional: work.map((one) => one.capture) } }, work }
+    const positional = work.map((one) => one.capture)
+    return { options: { ...options, prep, selection: { ...options.selection, positional } }, work, ingested: [] }
   }
   const read = yield* CaseSelection.resolve(options.selection, facts.refusalWhy)
   if (read._tag === "refused") return `[replay] refused: ${read.why}`
-  const selected = { ...options, selection: read.selection }
-  const refused = yield* Population.refusal(selected.paths, selected.selection)
+  const adopted = yield* Adopt.fromRoots(options.paths, read.selection, {
+    tag: "replay",
+    concurrency: options.concurrency,
+    dryRun: options.dryRun
+  })
+  if (adopted._tag === "refused") return `[replay] refused: ${adopted.why}`
+  const selected = { ...options, selection: { ...read.selection, positional: adopted.positional } }
+  const refused = yield* Population.refusal(selected.paths, selected.selection, adopted.ingested)
   if (refused !== null) return `[replay] refused: ${refused}`
   const work = yield* workList(selected.paths, selected.lane, selected.selection, selected.prep)
-  return { options: selected, work }
+  return { options: selected, work, ingested: adopted.ingested }
+})
+
+/**
+ * The captures this line just ingested, cut before the replay pins its prep,
+ * or why they could not be: the pin is the highest prep unless the line names
+ * one, so a named `--prep` stands below the cut and is refused.
+ */
+const cutIngested = Effect.fn("Replay.cutIngested")(function*(
+  facts: CliFacts,
+  captures: ReadonlyArray<string>,
+  options: Options
+) {
+  if (captures.length === 0) return null
+  const uncut = `${captures.join(", ")} stands ingested, not cut`
+  if (options.prep !== undefined) return `--prep ${options.prep} stands below the cut this line would open: ${uncut}`
+  const refused = yield* Refusals.cut(facts, options.paths)
+  if (refused !== null) return `${refused} — ${uncut}`
+  yield* Console.log(`[replay] cut: ${captures.join(", ")} — first cut, before the replay`)
+  return yield* cutPhase(captures, options).pipe(
+    Effect.as(null),
+    Effect.catchTag("Corpus.CensusRefused", (census) => Effect.succeed(`${census.reason} — ${uncut}`))
+  )
 })
 
 /** A work list replayed: planned off the cut store, then the phase under the lane's locks. */
@@ -453,6 +489,11 @@ const workMain = Effect.fn("Replay.work")(function*(facts: CliFacts, input: Inpu
   if (options.dryRun) {
     for (const work of captures) yield* Console.log(label(work))
     return 0
+  }
+  const uncut = yield* cutIngested(facts, asked.ingested, options)
+  if (uncut !== null) {
+    yield* Console.error(`[replay] refused: ${uncut}`)
+    return 2
   }
   // Pinned before the lane: which cut this invocation answers is settled once,
   // for every capture, and a store with no cut to read is a refusal not a sweep.
