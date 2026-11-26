@@ -72,18 +72,34 @@ sut_template() { # [helm args]
 }
 
 # Objects of the same names helm does not own, or another release owns, are
-# refused before helm refuses to adopt them.
+# refused before helm refuses to adopt them: the workers' StatefulSet, then
+# the objects the chart keeps past an uninstall (require_kept_object).
 require_own_release() {
   local owner release
-  kubectl -n "$NS" get statefulset b2bua-worker >/dev/null 2>&1 || return 0
-  owner="$(kubectl -n "$NS" get statefulset b2bua-worker \
-    -o jsonpath='{.metadata.labels.app\.kubernetes\.io/managed-by}')"
-  [ "$owner" = "Helm" ] \
-    || die "namespace $NS holds a b2bua-worker helm does not own; delete it first: kubectl --context kind-$CLUSTER delete namespace $NS"
-  release="$(kubectl -n "$NS" get statefulset b2bua-worker \
+  if kubectl -n "$NS" get statefulset b2bua-worker >/dev/null 2>&1; then
+    owner="$(kubectl -n "$NS" get statefulset b2bua-worker \
+      -o jsonpath='{.metadata.labels.app\.kubernetes\.io/managed-by}')"
+    [ "$owner" = "Helm" ] \
+      || die "namespace $NS holds a b2bua-worker helm does not own; delete it first: kubectl --context kind-$CLUSTER delete namespace $NS"
+    release="$(kubectl -n "$NS" get statefulset b2bua-worker \
+      -o jsonpath='{.metadata.annotations.meta\.helm\.sh/release-name}')"
+    [ "$release" = "$SUT_RELEASE" ] \
+      || die "namespace $NS holds release $release; uninstall it first: helm --kube-context kind-$CLUSTER -n $NS uninstall $release"
+  fi
+  require_kept_object service b2bua-worker
+  require_kept_object secret sip-front-proxy-hmac
+}
+
+# An object the chart keeps (`helm.sh/resource-policy: keep`) outlives its
+# release's uninstall; one SUT_RELEASE does not own is refused with the
+# command that deletes it.
+require_kept_object() { # <kind> <name>
+  local release
+  kubectl -n "$NS" get "$1" "$2" >/dev/null 2>&1 || return 0
+  release="$(kubectl -n "$NS" get "$1" "$2" \
     -o jsonpath='{.metadata.annotations.meta\.helm\.sh/release-name}')"
   [ "$release" = "$SUT_RELEASE" ] \
-    || die "namespace $NS holds release $release; uninstall it first: helm --kube-context kind-$CLUSTER -n $NS uninstall $release"
+    || die "namespace $NS keeps $1 $2 of release ${release:-none}; delete it first: kubectl --context kind-$CLUSTER -n $NS delete $1 $2"
 }
 
 sut_has_proxy() { kubectl -n "$NS" get deploy sip-front-proxy >/dev/null 2>&1; }

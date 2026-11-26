@@ -9,7 +9,8 @@ from charts import HELM_DIR
 
 # Stand-ins for lib/cluster.sh's log and die, lib/smokes.sh's smokes, and a
 # kubectl answering from FAKE_* variables: the worker StatefulSet's owner and
-# release, the proxy.
+# release, the release of the kept worker Service and cookie key Secret (empty:
+# absent), the proxy.
 HARNESS = """
 set -euo pipefail
 log() { echo "log: $*"; }
@@ -23,6 +24,10 @@ kubectl() {
     *"get statefulset b2bua-worker -o jsonpath="*managed-by*) printf '%s' "$FAKE_OWNER" ;;
     *"get statefulset b2bua-worker -o jsonpath="*release-name*) printf '%s' "$FAKE_RELEASE" ;;
     *"get statefulset b2bua-worker"*) [ -n "$FAKE_OWNER" ] ;;
+    *"get service b2bua-worker -o jsonpath="*release-name*) printf '%s' "$FAKE_SERVICE" ;;
+    *"get service b2bua-worker"*) [ -n "$FAKE_SERVICE" ] ;;
+    *"get secret sip-front-proxy-hmac -o jsonpath="*release-name*) printf '%s' "$FAKE_SECRET" ;;
+    *"get secret sip-front-proxy-hmac"*) [ -n "$FAKE_SECRET" ] ;;
     *"get deploy sip-front-proxy"*) [ "$FAKE_PROXY" = 1 ] ;;
     *) echo "unscripted kubectl $*" >&2; return 97 ;;
   esac
@@ -33,9 +38,10 @@ source "$HELM_DIR/lib/sut.sh"
 """
 
 
-def run(step: str, owner: str = "", release: str = "", proxy: str = "0", sut_release: str = "siprust") -> subprocess.CompletedProcess[str]:
+def run(step: str, owner: str = "", release: str = "", proxy: str = "0", sut_release: str = "siprust",
+        service: str = "", secret: str = "") -> subprocess.CompletedProcess[str]:
     env = {"PATH": "/usr/bin:/bin", "FAKE_OWNER": owner, "FAKE_RELEASE": release, "FAKE_PROXY": proxy,
-           "SUT_RELEASE": sut_release}
+           "FAKE_SERVICE": service, "FAKE_SECRET": secret, "SUT_RELEASE": sut_release}
     return subprocess.run(["bash", "-c", HARNESS, "harness", str(HELM_DIR), step],
                           capture_output=True, text=True, env=env)
 
@@ -54,6 +60,22 @@ class Ownership(unittest.TestCase):
         out = run("require_own_release", "Helm", "siprust", sut_release="product")
         self.assertNotEqual(out.returncode, 0)
         self.assertIn("holds release siprust; uninstall it first", out.stdout)
+
+    def test_the_release_s_own_kept_objects_pass(self) -> None:
+        out = run("require_own_release", service="siprust", secret="siprust")
+        self.assertEqual(out.returncode, 0, out.stdout)
+
+    def test_a_kept_service_of_an_uninstalled_release_is_refused_naming_its_delete(self) -> None:
+        out = run("require_own_release", service="siprust", sut_release="product")
+        self.assertNotEqual(out.returncode, 0)
+        self.assertIn("keeps service b2bua-worker of release siprust; delete it first: "
+                      "kubectl --context kind-lab -n ns delete service b2bua-worker", out.stdout)
+
+    def test_a_kept_secret_of_an_uninstalled_release_is_refused_naming_its_delete(self) -> None:
+        out = run("require_own_release", service="product", secret="siprust", sut_release="product")
+        self.assertNotEqual(out.returncode, 0)
+        self.assertIn("keeps secret sip-front-proxy-hmac of release siprust; delete it first: "
+                      "kubectl --context kind-lab -n ns delete secret sip-front-proxy-hmac", out.stdout)
 
 
 class Smokes(unittest.TestCase):

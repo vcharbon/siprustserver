@@ -208,14 +208,19 @@ drain then exit as on SIGTERM.
 upgrade, a selector edit) deletes its endpoint list: every member leaves at once, the
 worker itself included, and no member was singled out. A synced snapshot that lists no
 member, after one that listed the worker, is therefore no sighting: the worker latches
-nothing, parks no peer and runs no departure sweep, and every worker keeps serving its
-calls as primary and as backup. One membership reconcile is one stored snapshot, so no
+nothing, parks no peer and runs no departure sweep, and keeps its calls and the backup
+copies it holds. One membership reconcile is one stored snapshot, so no
 worker reads the shrinking set in between. The next snapshot that lists a member is read
 as usual: the worker absent beside a peer is a withdrawal, a peer absent beside the
-worker a departure. Residuals: the proxy's registry empties with the list, so no new
-call is routed until it returns; a pool spread over several slices loses them in separate
-watch events, whose partial sets read as departures; a lone worker whose endpoint alone
-leaves reads the same empty set: it is not withdrawn, and drains only on SIGTERM. The
+worker a departure. Residuals: the proxy's registry empties with the list, so it answers
+a new call 503 and drops an in-dialog request unanswered (no ordinal resolves) until the
+list returns; a retransmission after that reaches the worker, within the client's Timer F
+or B (32 s), and a selector that matches no pod keeps the gap open. A peer that dies in the
+gap is not taken over until the list returns: no snapshot shows its departure, and the
+proxy, with no worker listed, sends no dead notice. A pool spread over several slices
+loses them in separate watch events, whose partial sets read as departures; a lone worker
+whose endpoint alone leaves reads the same empty set: it is not withdrawn, and drains only
+on SIGTERM. The
 chart keeps the worker Service when a helm operation would delete it
 (`helm.sh/resource-policy: keep`).
 
