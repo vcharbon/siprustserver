@@ -31,8 +31,8 @@ as whatever final the engine chooses, and a cluster-wide outage leaves every wor
    is the name.
 2. **Name lookup through the target** (`ResolvedTarget`, plugged as the client's resolver).
    Lookups are single-flight and bounded, and none starts while a cap of them is stuck. The
-   addresses are forgotten when the breaker opens and when a probe fails, and refreshed at
-   each rotation, serving stale meanwhile. An attempt that ends with no address fails as `Dns`,
+   addresses are kept when a probe's fresh lookup finds nothing, and refreshed at each
+   rotation, serving stale meanwhile. An attempt that ends with no address fails as `Dns`,
    never as a timeout. A client whose name has no address at boot opens its breaker once that
    first lookup finds nothing. Detail: [appendix §2](appendix/0043-outbound-backend-client-policy.md#2-name-lookup-through-the-target).
 3. **Transport settings** (`ClientSettings`): connect timeout, an idle timeout below a typical

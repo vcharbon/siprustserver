@@ -23,9 +23,10 @@
 //! stale: the next request starts the lookup and is answered the addresses
 //! kept at once, never waiting for it; a lookup that finds something
 //! replaces them, one that finds nothing (no answer, past its bound, too many
-//! stuck) leaves them in use until the next refresh. A lookup only starts
-//! while no fresh address is kept, so the one in flight at a forget is
-//! already a fresh one: it lands and is kept.
+//! stuck) leaves them in use until the next refresh. A lookup in flight at a
+//! forget lands and is kept. [`ResolvedTarget::resolve_fresh_or_kept`]
+//! looks the name up whatever is kept and waits for that lookup: the caller
+//! gets what it finds, or, when it finds nothing, the addresses kept.
 
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -115,11 +116,28 @@ impl Named {
     /// the caller), or the lookup in flight, started when none is and fewer
     /// than [`LookupSettings::max_stuck`] are stuck.
     fn address_or_lookup(self: &Arc<Self>) -> Found {
-        let (found, started) = self.find_or_start();
-        if let Some(started) = started {
-            started.spawn();
+        spawn_started(self.find_or_start())
+    }
+
+    /// The lookup in flight, or one started now whatever is kept; the
+    /// addresses kept when [`LookupSettings::max_stuck`] lookups are stuck.
+    fn fresh_lookup(self: &Arc<Self>) -> Found {
+        spawn_started(self.join_or_start())
+    }
+
+    /// [`fresh_lookup`](Self::fresh_lookup) under the lock; the caller
+    /// spawns the lookup it starts once the lock is released.
+    fn join_or_start(self: &Arc<Self>) -> (Found, Option<PendingLookup>) {
+        let mut state = self.lock();
+        if let Some(waiting) = state.lookup.as_ref() {
+            return (Found::Wait(waiting.clone()), None);
         }
-        found
+        if state.stuck >= self.lookup.max_stuck {
+            let found = state.addrs.clone().map_or(Found::Refused, Found::Kept);
+            return (found, None);
+        }
+        let (waiting, started) = self.start(&mut state);
+        (Found::Wait(waiting), Some(started))
     }
 
     /// [`address_or_lookup`](Self::address_or_lookup) under the lock; a
@@ -155,6 +173,15 @@ impl Named {
         state.lookup = Some(rx.clone());
         (rx, PendingLookup { done: LookupDone(self.clone()), tx })
     }
+}
+
+/// What a request finds, its lookup, if it started one, spawned now that
+/// the lock is released.
+fn spawn_started((found, started): (Found, Option<PendingLookup>)) -> Found {
+    if let Some(started) = started {
+        started.spawn();
+    }
+    found
 }
 
 /// A lookup holding the slot, not spawned yet. Dropped unspawned, or its
@@ -279,6 +306,29 @@ impl ResolvedTarget {
             Found::Refused => return None,
         };
         let answer = lookup.wait_for(Option::is_some).await.ok()?.clone().flatten();
+        answer.or_else(|| named.lock().addrs.clone())
+    }
+
+    /// Every address to send to, from a fresh lookup: one starts now, kept
+    /// addresses or not, or the one in flight is joined, and it is waited
+    /// for within its bound. What it finds is kept and returned; when it
+    /// finds nothing (no answer, past its bound, refused by the stuck cap)
+    /// the addresses kept are returned, `None` only when none are. A name
+    /// target needs a tokio runtime context and panics without one.
+    pub async fn resolve_fresh_or_kept(&self) -> Option<Addresses> {
+        let named = match &self.kind {
+            Kind::Addr(addr) => return Some(Arc::from([*addr])),
+            Kind::Name(named) => named,
+        };
+        let mut lookup = match named.fresh_lookup() {
+            Found::Kept(addrs) => return Some(addrs),
+            Found::Wait(lookup) => lookup,
+            Found::Refused => return None,
+        };
+        let answer = match lookup.wait_for(Option::is_some).await {
+            Ok(answer) => answer.clone().flatten(),
+            Err(_) => None,
+        };
         answer.or_else(|| named.lock().addrs.clone())
     }
 

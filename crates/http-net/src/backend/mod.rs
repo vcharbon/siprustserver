@@ -13,7 +13,9 @@
 //!
 //! While the breaker is open, an attempt sends nothing and fails at once;
 //! what that means for the caller (fail the call, let it through) is the
-//! caller's policy. Opening the breaker forgets the target's addresses.
+//! caller's policy. Opening the breaker keeps the target's addresses: each
+//! probe looks the name up afresh and, when the lookup finds nothing, reaches
+//! the addresses kept.
 
 mod breaker;
 mod config;
@@ -298,10 +300,10 @@ impl Inner {
         }
     }
 
-    /// The breaker opened: forget the target's addresses, tell the
-    /// watchers, start the probe.
+    /// The breaker opened: tell the watchers, start the probe. The target's
+    /// addresses stay kept, for the probe to fall back on when its lookup
+    /// finds nothing.
     fn opened(self: &Arc<Self>) {
-        self.target.forget();
         self.open.send_replace(true);
         metrics::breaker_moved(&self.peer, true);
         tracing::warn!(

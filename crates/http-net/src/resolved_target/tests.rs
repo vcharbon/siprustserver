@@ -312,6 +312,95 @@ async fn a_refresh_whose_lookup_hangs_serves_stale_at_once() {
     assert_eq!(resolver.started.load(Ordering::SeqCst), 1);
 }
 
+fn moved() -> SocketAddr {
+    "10.0.0.2:8080".parse().unwrap()
+}
+
+/// A fresh lookup runs with an address kept, and what it finds replaces it
+/// at once, for the caller and for every request after.
+#[tokio::test(start_paused = true)]
+async fn a_fresh_lookup_returns_and_keeps_what_it_finds() {
+    let resolver = Arc::new(crate::MemoryResolver::new());
+    resolver.point("limiter:8080", [addr()]);
+    let target = ResolvedTarget::name_with("limiter:8080", resolver.clone());
+    assert_eq!(target.resolve().await, Some(addr()));
+    resolver.point("limiter:8080", [moved()]);
+    assert_eq!(target.resolve_fresh_or_kept().await.as_deref(), Some(&[moved()][..]));
+    assert_eq!(target.resolve().await, Some(moved()), "kept for the next request");
+    assert_eq!(resolver.lookups(), 2);
+}
+
+/// A fresh lookup that finds nothing answers the addresses kept, which stay.
+#[tokio::test(start_paused = true)]
+async fn a_fresh_lookup_that_finds_nothing_returns_the_kept_addresses() {
+    let resolver = Arc::new(crate::MemoryResolver::new());
+    resolver.point("limiter:8080", [addr()]);
+    let target = ResolvedTarget::name_with("limiter:8080", resolver.clone());
+    assert_eq!(target.resolve().await, Some(addr()));
+    resolver.unpoint("limiter:8080");
+    assert_eq!(target.resolve_fresh_or_kept().await.as_deref(), Some(&[addr()][..]));
+    assert_eq!(resolver.lookups(), 2, "the name was looked up");
+    assert_eq!(target.address(), Some(addr()));
+}
+
+/// A fresh lookup past its bound answers the addresses kept at the bound;
+/// its late find is dropped.
+#[tokio::test(start_paused = true)]
+async fn a_fresh_lookup_past_its_bound_returns_the_kept_addresses_at_the_bound() {
+    let resolver = Arc::new(ScriptedResolver::default());
+    *resolver.script.lock().unwrap() = [(0, Some(addr())), (10_000, Some(moved()))].into();
+    let target = ResolvedTarget::name_with("limiter:8080", resolver.clone());
+    assert_eq!(target.resolve().await, Some(addr()));
+    let start = tokio::time::Instant::now();
+    assert_eq!(target.resolve_fresh_or_kept().await.as_deref(), Some(&[addr()][..]));
+    assert_eq!(start.elapsed(), LOOKUP_BOUND);
+    tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+    assert_eq!(target.address(), Some(addr()), "the late find is dropped");
+}
+
+/// With the cap of stuck lookups reached, a fresh lookup starts none and
+/// answers the addresses kept at once.
+#[tokio::test(start_paused = true)]
+async fn a_fresh_lookup_at_the_stuck_cap_returns_the_kept_addresses_at_once() {
+    let resolver = Arc::new(ScriptedResolver::default());
+    *resolver.script.lock().unwrap() = [(0, Some(addr())), (10_000, None)].into();
+    let target = ResolvedTarget::name_with_lookup(
+        "limiter:8080",
+        resolver.clone(),
+        LookupSettings { bound: std::time::Duration::from_millis(300), max_stuck: 1 },
+    );
+    assert_eq!(target.resolve().await, Some(addr()));
+    assert_eq!(target.resolve_fresh_or_kept().await, Some(Arc::from([addr()])), "past its bound");
+    let start = tokio::time::Instant::now();
+    assert_eq!(target.resolve_fresh_or_kept().await, Some(Arc::from([addr()])), "one stuck");
+    assert_eq!(start.elapsed(), std::time::Duration::ZERO);
+    assert_eq!(resolver.started.load(Ordering::SeqCst), 2, "no third lookup started");
+}
+
+/// A fresh lookup joins the one in flight rather than start another.
+#[tokio::test(start_paused = true)]
+async fn a_fresh_lookup_joins_the_lookup_in_flight() {
+    let resolver = Arc::new(ScriptedResolver::default());
+    *resolver.script.lock().unwrap() = [(0, Some(addr())), (100, Some(moved()))].into();
+    let target = ResolvedTarget::name_with("limiter:8080", resolver.clone());
+    assert_eq!(target.resolve().await, Some(addr()));
+    target.refresh();
+    target.look_up();
+    let start = tokio::time::Instant::now();
+    assert_eq!(target.resolve_fresh_or_kept().await, Some(Arc::from([moved()])));
+    assert_eq!(start.elapsed(), std::time::Duration::from_millis(100), "the one in flight");
+    assert_eq!(resolver.started.load(Ordering::SeqCst), 2);
+}
+
+/// A name with nothing kept whose fresh lookup finds nothing has no address.
+#[tokio::test(start_paused = true)]
+async fn a_fresh_lookup_with_nothing_kept_and_nothing_found_is_none() {
+    let resolver = Arc::new(FakeResolver::default());
+    let target = ResolvedTarget::name_with("limiter:8080", resolver.clone());
+    assert_eq!(target.resolve_fresh_or_kept().await, None);
+    assert_eq!(resolver.lookups.load(Ordering::SeqCst), 1);
+}
+
 /// Polls one `resolve_all` of `target` once on a thread of its own, inside
 /// `runtime` when one is given: what the poll came back with, or `None` when
 /// the thread did not come back within the bound.

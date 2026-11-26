@@ -1,13 +1,18 @@
 //! The probe of an open breaker: every [`BreakerConfig::probe_period`] it
-//! forgets the target's addresses, looks the name up afresh (under the
-//! target's lookup bound), then asks `GET` [`BreakerConfig::health_path`]
-//! under [`BreakerConfig::probe_timeout`] on a client of its own that keeps
-//! no pool, so each probe opens a new connection. Any HTTP response, of any status,
+//! looks the name up afresh and waits for that lookup within the target's
+//! lookup bound ([`ResolvedTarget::resolve_fresh_or_kept`]): it probes what
+//! the lookup finds, so a backend that moved is reached at once, or, when
+//! the lookup finds nothing, the addresses kept, so a backend answering
+//! again where it was is reached while its name service fails. It then asks
+//! `GET` [`BreakerConfig::health_path`] under
+//! [`BreakerConfig::probe_timeout`] on a client of its own that keeps no
+//! pool, so each probe opens a new connection: one probe takes at most the
+//! lookup bound and the probe timeout. Any HTTP response, of any status,
 //! closes the breaker, one whose body the client refused past its cap
-//! included; a probe with none forgets the addresses again. A probe
-//! that panics runs again the next period. Closed, the probe waits for the
-//! next opening; it ends with the client.
+//! included. A probe that panics runs again the next period. Closed, the
+//! probe waits for the next opening; it ends with the client.
 //!
+//! [`ResolvedTarget::resolve_fresh_or_kept`]: crate::ResolvedTarget::resolve_fresh_or_kept
 //! [`BreakerConfig::probe_period`]: super::BreakerConfig::probe_period
 //! [`BreakerConfig::health_path`]: super::BreakerConfig::health_path
 //! [`BreakerConfig::probe_timeout`]: super::BreakerConfig::probe_timeout
@@ -55,8 +60,7 @@ async fn probe_until_closed(inner: Weak<Inner>) -> bool {
         if !*inner.open.borrow() {
             return true;
         }
-        inner.target.forget();
-        let answer = match inner.target.resolve_all().await {
+        let answer = match inner.target.resolve_fresh_or_kept().await {
             Some(_) => {
                 let client = inner.rotation.pool_less();
                 let health = HttpRequest::get(inner.config.health_path.clone());
@@ -82,6 +86,5 @@ async fn probe_until_closed(inner: Weak<Inner>) -> bool {
             inner.closed();
             return true;
         }
-        inner.target.forget();
     }
 }

@@ -252,10 +252,10 @@ is not known starts its breaker open: admits fail open at once, counted,
 no call pays a lookup or a timeout, and the probe looks the name up every
 period. From process start, calls can so stay uncounted for up to the
 boot wait plus one probe period after the name resolves. The address
-found is kept until the breaker opens or a probe fails; both forget it,
-so the probe reaches a limiter whose name now leads elsewhere. A forget
-leaves the lookup in flight to land and be kept, so a lookup slower than
-the probe's budget still closes the breaker at the next probe. No
+found is kept, an open breaker included: each probe looks the name up
+afresh, so it reaches a limiter whose name now leads elsewhere, and falls
+back on the address kept when that lookup finds nothing, so it reaches a
+limiter answering where it was while the name service fails. No
 `LIMITER_URL` runs without a limiter; a configured one is never replaced
 by none.
 

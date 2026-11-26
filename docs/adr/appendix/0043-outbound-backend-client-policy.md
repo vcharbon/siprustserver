@@ -11,7 +11,11 @@ the pooled client's resolver. Lookups are single-flight and bounded; a lookup pa
 its bound frees its slot and runs on until it ends by itself (a blocking
 resolver thread cannot be cancelled), and no new lookup starts while a cap
 of them is stuck. Every address found is returned. The addresses are
-**forgotten** when the breaker opens and when a probe fails; at each client
+**kept** through an open breaker: each probe starts a fresh lookup and
+waits for it within its bound, probing what it finds, or the addresses
+kept when it finds nothing, so a backend that moved is reached at once and
+one answering again where it was is reached while the name service fails
+(`ResolvedTarget::resolve_fresh_or_kept`). At each client
 **rotation** they are **refreshed**: the first request past the period
 starts a new lookup and is sent at once to the last good addresses, never
 waiting for it; what the lookup finds replaces them, and when it finds
@@ -77,8 +81,9 @@ answer whose body the client refused past its cap (14) is a response: a
 backend answering bodies past the cap is alive, and opening on it would
 fail every request at once and gate the node's OPTIONS (11). While
 open, a request fails at once, nothing sent, and a probe runs every period:
-it forgets the addresses, looks the name up afresh, and asks the backend's
-health path, under at most one period by default, on a client that keeps
+it looks the name up afresh (the addresses kept when that finds nothing),
+and asks the backend's health path, under at most one period by default,
+after its lookup, on a client that keeps
 no pool; any HTTP response closes the breaker, one refused past the cap
 included. A probe that panics runs again the next period.
 
@@ -233,7 +238,8 @@ refuses boot with one error naming every variable involved.
   final (ADR-0039's fold of an unanswered consult is this 503).
 - Pinned by: `http-net` `tests/it/backend.rs` (retry, cap, rotation, breaker,
   lookup bound), `tests/it/backend_breaker.rs` (a hung burst, slot waits, a
-  panicking probe, the boot lookup), `tests/it/classify.rs` (the loopback
+  panicking probe, the boot lookup, the probe's reach to a kept or moved
+  address), `tests/it/classify.rs` (the loopback
   classifier, a hanging lookup on the real client), `tests/it/real.rs` (a
   body cut before its end, the size cap), `tests/it/real_backend.rs`
   (the retry's room, a cut answer retried and a moved name, on the real clock),
@@ -244,7 +250,7 @@ refuses boot with one error naming every variable involved.
   `tests/body_cap_alloc.rs` (the body cap at the allocator), `ejection.rs`
   (the rules and the budget); `http-net-testkit` `tests/it/simulated_balanced.rs`
   (the same rules and body cap on the simulated fabric),
-  `resolved_target/tests.rs` (stuck lookups, serve stale); `b2bua-harness`
+  `resolved_target/tests.rs` (stuck lookups, serve stale, fresh or kept); `b2bua-harness`
   `unanswered_failure_consult`, `decision_deadline`, `refer_consult_error`,
   `service_http` (the adaptation port's retry),
   `options_backend_gate`, `limiter_breaker`; `sip-proxy` `load_balancer`

@@ -5,8 +5,9 @@
 //! ([`crate::limiter::LimiterHealth::breaker`], `http_net::backend`): it opens when the last
 //! 2 s saw at least 3 requests in flight to the limiter (admits, refreshes,
 //! releases) and not one HTTP response, and its probe asks the limiter's
-//! health every second until any response closes it. Opening forgets the
-//! limiter's address, so the probe reaches a limiter that moved.
+//! health every second until any response closes it. Each probe looks the
+//! limiter's name up afresh, so it reaches a limiter that moved, and falls
+//! back on the address kept when that lookup finds nothing.
 //!
 //! **Open**, an admit sends nothing and answers [`AdmitOutcome::NotSent`] at
 //! once: the call owes no release by that admit, and stays as it was (an

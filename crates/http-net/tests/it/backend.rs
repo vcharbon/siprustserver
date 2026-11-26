@@ -457,7 +457,7 @@ async fn a_rotation_while_dns_hangs_serves_the_kept_address_at_once() {
 
 // ── the breaker ─────────────────────────────────────────────────────────────
 
-/// A cut backend: three requests inside 2 s open the breaker, which forgets
+/// A cut backend: three requests inside 2 s open the breaker, which keeps
 /// the address; open, a request fails at once and sends nothing; a probe
 /// every second on a pool-less client, after a fresh lookup, until the
 /// backend answers anything (here a 404), which closes it.
@@ -471,7 +471,7 @@ async fn a_cut_backend_opens_the_breaker_and_a_404_probe_closes_it() {
     }
     assert!(rig.client.is_open());
     assert!(*state.borrow_and_update());
-    assert_eq!(rig.client.target().address(), None, "opening forgets the address");
+    assert_eq!(rig.client.target().address(), Some(rig.dst), "opening keeps the address");
     assert_eq!(metrics::breaker_transitions("breaker-cut:8080", true), 1);
 
     let sent = rig.transport.sent();
@@ -487,7 +487,11 @@ async fn a_cut_backend_opens_the_breaker_and_a_404_probe_closes_it() {
     advance_settled(Duration::from_millis(3_050)).await;
     assert!(rig.client.is_open(), "the probes fail while cut");
     assert_eq!(rig.transport.sent(), sent + 3, "one probe a second");
-    assert_eq!(rig.resolver.lookups(), lookups + 3, "each probe looks the name up afresh");
+    assert_eq!(
+        rig.resolver.lookups(),
+        lookups + 3,
+        "each probe looks the name up, kept address or not"
+    );
     assert_eq!(&rig.transport.built.lock().unwrap()[1..], &[0, 0, 0], "pool-less probes");
 
     *rig.backend.status.lock().unwrap() = 404;
