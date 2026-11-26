@@ -159,16 +159,21 @@ fn options(call_id: &str) -> String {
     )
 }
 
-fn new_invite(call_id: &str) -> String {
+/// The Via sent-by of a sender no configuration in these tests lists.
+const UNLISTED_SENT_BY: &str = "10.0.0.9:5060";
+
+/// A new INVITE whose top Via names `sent_by`.
+fn new_invite(call_id: &str, sent_by: &str) -> String {
+    let host = sent_by.split(':').next().expect("a host");
     format!(
         "INVITE sip:+15550100@198.51.100.7 SIP/2.0\r\n\
-         Via: SIP/2.0/UDP 10.0.0.9:5060;branch=z9hG4bK-{call_id}\r\n\
+         Via: SIP/2.0/UDP {sent_by};branch=z9hG4bK-{call_id}\r\n\
          Max-Forwards: 70\r\n\
-         From: <sip:caller@10.0.0.9>;tag=c1\r\n\
+         From: <sip:caller@{host}>;tag=c1\r\n\
          To: <sip:+15550100@198.51.100.7>\r\n\
-         Call-ID: {call_id}@10.0.0.9\r\n\
+         Call-ID: {call_id}@{host}\r\n\
          CSeq: 1 INVITE\r\n\
-         Contact: <sip:caller@10.0.0.9:5060>\r\n\
+         Contact: <sip:caller@{sent_by}>\r\n\
          Content-Length: 0\r\n\r\n"
     )
 }
@@ -197,9 +202,10 @@ async fn at_the_watermark_a_single_face_queues_a_listed_workers_new_invite() {
     let metrics = Arc::new(ProxyMetrics::new());
     let shard = at_the_watermark(&metrics, &workers, false).await;
     let face = shard.internal.as_ref();
-    let (waiting, leg, after) = (options("waiting"), new_invite("leg"), options("after"));
+    let leg = new_invite("leg", UNLISTED_SENT_BY);
+    let (waiting, after) = (options("waiting"), options("after"));
     send_in_order(&worker, face, &[&waiting, &leg]).await;
-    send_in_order(&outsider, face, &[&new_invite("outsider"), &after]).await;
+    send_in_order(&outsider, face, &[&new_invite("outsider", UNLISTED_SENT_BY), &after]).await;
     assert_eq!(next_queued(face).await, Some(waiting));
     assert_eq!(
         next_queued(face).await,
@@ -210,37 +216,43 @@ async fn at_the_watermark_a_single_face_queues_a_listed_workers_new_invite() {
     assert_eq!(metrics.intake_shed(), 1);
 }
 
-/// The internal face carries the workers' traffic: at the watermark a new
-/// INVITE from a worker on an address the configuration does not list is
-/// queued behind the datagram already waiting. A datagram no response can
-/// answer is still dropped there.
+/// The internal face of a dual-face proxy reads a worker as its core does: at
+/// the watermark a new INVITE whose top Via names a listed worker, sent from
+/// an address the configuration does not list, is queued behind the datagram
+/// already waiting; a new INVITE with no sign of a worker is shed, and so is a
+/// datagram no response can answer.
 #[tokio::test]
-async fn at_the_watermark_the_internal_face_queues_a_new_invite() {
+async fn at_the_watermark_the_internal_face_queues_a_workers_new_invite() {
     let metrics = Arc::new(ProxyMetrics::new());
     let shard = at_the_watermark(&metrics, "w0@10.0.0.1:5060", true).await;
-    let (waiting, invite) = (options("waiting"), new_invite("internal"));
-    let datagrams = [waiting.as_str(), "\x00 not SIP", &invite];
-    send_in_order(&peer("127.0.0.1").await, shard.internal.as_ref(), &datagrams).await;
-    assert_eq!(next_queued(shard.internal.as_ref()).await, Some(waiting));
+    let face = shard.internal.as_ref();
+    let worker_leg = new_invite("translated", "10.0.0.1:5060");
+    let signless = new_invite("signless", UNLISTED_SENT_BY);
+    let (waiting, after) = (options("waiting"), options("after"));
+    let datagrams = [waiting.as_str(), "\x00 not SIP", &worker_leg, &signless, &after];
+    send_in_order(&peer("127.0.0.1").await, face, &datagrams).await;
+    assert_eq!(next_queued(face).await, Some(waiting));
     assert_eq!(
-        next_queued(shard.internal.as_ref()).await,
-        Some(invite),
-        "the internal face queues the new INVITE at the watermark"
+        next_queued(face).await,
+        Some(worker_leg),
+        "the worker's new INVITE is queued at the watermark"
     );
-    assert_eq!((metrics.intake_shed(), metrics.intake_unanswerable()), (0, 1));
+    assert_eq!(next_queued(face).await, Some(after), "the signless new INVITE is shed");
+    assert_eq!((metrics.intake_shed(), metrics.intake_unanswerable()), (1, 1));
 }
 
 /// The external face sheds: at the watermark a new INVITE is dropped there,
-/// even one sent from the address of a listed worker, and the datagram sent
-/// after it is the next one queued.
+/// even one sent from the address of a listed worker and naming it in its
+/// top Via, and the datagram sent after it is the next one queued.
 #[tokio::test]
 async fn at_the_watermark_the_external_face_sheds_a_new_invite() {
     let metrics = Arc::new(ProxyMetrics::new());
     let sender = peer("127.0.0.1").await;
-    let workers = format!("w0@{}", sender.local_addr().expect("bound"));
-    let shard = at_the_watermark(&metrics, &workers, true).await;
+    let listed = sender.local_addr().expect("bound").to_string();
+    let shard = at_the_watermark(&metrics, &format!("w0@{listed}"), true).await;
     let external = shard.external.expect("a dual-face shard");
-    let (waiting, invite, after) = (options("waiting"), new_invite("external"), options("after"));
+    let invite = new_invite("external", &listed);
+    let (waiting, after) = (options("waiting"), options("after"));
     send_in_order(&sender, external.as_ref(), &[&waiting, &invite, &after]).await;
     assert_eq!(next_queued(external.as_ref()).await, Some(waiting));
     assert_eq!(next_queued(external.as_ref()).await, Some(after), "the new INVITE is shed");
