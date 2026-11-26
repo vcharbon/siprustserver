@@ -36,7 +36,7 @@ use super::records::OriginStep;
 ///
 /// A version gap the sender inherited is `relayed`: the description is one it
 /// took verbatim on another call, and the versions missing are offers of that
-/// session it took there and refused non-2xx ([`inherited_gap`]).
+/// session it took there and refused non-2xx.
 pub struct SdpOriginContinuity;
 
 impl Obligation for SdpOriginContinuity {
