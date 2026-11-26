@@ -126,3 +126,94 @@ async fn an_endpoint_set_emptied_at_once_withdraws_no_worker() {
 
     drop((w_b1, w_b2, proxy));
 }
+
+/// The slice empties while the callee rings: the call has its INVITE
+/// transaction to serve, the work a departure sweep takes over at once. No
+/// peer departed, so the backup takes nothing over and discharges nothing;
+/// the callee answers the primary once the slice is listed again, and the
+/// call ends there with one CDR.
+///
+/// ```text
+///   alice ─INVITE─▶ proxy ─▶ primary ─INVITE─▶ bob ─180─▶ … (replicated)
+///   t0          the slice empties; t0+6 s it fills again
+///   bob ─200─▶ primary ─200─▶ alice ─ACK─▶ … BYE
+/// ```
+#[tokio::test(start_paused = true)]
+async fn an_endpoint_set_emptied_while_the_callee_rings_takes_nothing_over() {
+    let name = "endpoint-set-emptied-while-ringing";
+    let mut fh = FailoverHarness::new(name, &["b1", "b2"]);
+
+    let alice = fh.agent("alice", ALICE).await;
+    let bob = fh.agent("bob", BOB).await;
+
+    let proxy =
+        fh.spawn_proxy(PROXY, &[("b1", B1.parse().unwrap()), ("b2", B2.parse().unwrap())]).await;
+    let w_b1 =
+        fh.spawn_worker("b1", "b1", B1, &["b2"], ("127.0.0.1", 5070), ("127.0.0.1", 5080)).await;
+    let w_b2 =
+        fh.spawn_worker("b2", "b2", B2, &["b1"], ("127.0.0.1", 5070), ("127.0.0.1", 5080)).await;
+    fh.advance(Duration::from_millis(500)).await;
+    assert!(w_b1.is_ready() && w_b2.is_ready(), "both workers ready at steady state");
+
+    // ── a ringing setup, replicated to its backup ─────────────────────────────
+    let mut call = alice.invite(&bob).with_sdp(OFFER).through(proxy.addr()).send().await;
+    let mut uas = bob.receive("INVITE").await;
+    let (pri_ord, _bak_ord) = worker_ordinals(uas.request());
+    uas.respond(180, "Ringing").await;
+    call.expect(180).await;
+    fh.advance(Duration::from_millis(500)).await;
+
+    let (primary, backup): (&ReplicatedB2buaSut, &ReplicatedB2buaSut) =
+        if pri_ord == "b1" { (&w_b1, &w_b2) } else { (&w_b2, &w_b1) };
+    let call_ref =
+        backup.scan_one_backed_up(&pri_ord).await.expect("the setup replicated to the backup");
+    assert!(primary.serves(&call_ref), "the primary serves the setup");
+    let hydrated_before = backup.metrics().repl_takeover_hydrated_total();
+
+    // ── the whole endpoint set leaves the slice while the callee rings ────────
+    fh.empty_the_slice();
+    fh.advance(EMPTY_FOR).await;
+    assert_eq!(
+        backup.metrics().repl_takeover_hydrated_total(),
+        hydrated_before,
+        "the backup hydrated nothing: no peer departed",
+    );
+    assert!(!backup.serves(&call_ref), "the backup took nothing over from a running primary");
+    assert!(primary.serves(&call_ref), "the primary keeps serving the setup");
+    for w in [&w_b1, &w_b2] {
+        let ord = w.ordinal();
+        assert!(!w.is_withdrawn() && !w.is_draining(), "{ord} never withdrew");
+    }
+
+    // ── the slice fills again, and the callee answers ─────────────────────────
+    fh.fill_the_slice();
+    for ord in ["b1", "b2"] {
+        proxy.set_health(ord, WorkerHealth::Alive);
+    }
+    fh.advance(Duration::from_secs(1)).await;
+    uas.respond(200, "OK").with_sdp(ANSWER).await;
+    call.expect(200).await;
+    let mut dialog = call.ack().await;
+    bob.receive("ACK").await;
+    fh.advance(Duration::from_millis(500)).await;
+    assert!(!backup.serves(&call_ref), "the answer reached the primary alone");
+
+    // ── the call ends on its primary, cleanly ─────────────────────────────────
+    scenario_harness::callflow::hangup(&mut dialog, &bob).await;
+    let nodes: [&ReplicatedB2buaSut; 2] = [&w_b1, &w_b2];
+    let drained = fh
+        .settle_terminal(async || {
+            nodes[0].memory_clean()
+                && nodes[1].memory_clean()
+                && !nodes[0].holds_any_trace(&call_ref).await
+                && !nodes[1].holds_any_trace(&call_ref).await
+        })
+        .await;
+    assert!(drained, "the cluster drains the call within the settle budget");
+    fh.linger_peers(&[&alice, &bob], Duration::from_secs(3)).await;
+    assert_eq!(total_cdrs_for(&nodes[..], &call_ref), 1, "exactly one CDR across the cluster");
+    assert_call_fully_released(&nodes[..], &call_ref).await;
+    fh.assert_sip_rfc_clean(name);
+
+    drop((w_b1, w_b2, proxy));
+}
