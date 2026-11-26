@@ -54,12 +54,13 @@ impl IntakeFace {
 ///   [`ProxyMetrics::intake_unanswerable`] and as the parse error or panic
 ///   the core would have counted, on every face.
 ///
-/// In-dialog traffic, responses, other methods, emergency INVITEs, a
-/// worker's new INVITE and answerable refusals (the core answers them with
-/// its capped 400) are always queued. A worker sign is what the core reads
-/// as worker-outbound; a worker's INVITE that re-enters on a verified cookie
-/// carries one too, is queued, and meets the core's self-gate. `parser` is
-/// the process's one parser, the core's too.
+/// In-dialog traffic, responses, other methods, emergency INVITEs and
+/// answerable refusals (the core answers them with its capped 400) are
+/// always queued. A worker's new INVITE is queued on a `Single` face (by its
+/// worker sign) and a `WorkersOnly` face; an `External` face sheds it. A
+/// worker sign is what the core reads as worker-outbound; a worker's INVITE
+/// that re-enters on a verified cookie carries one too, is queued, and meets
+/// the core's self-gate. `parser` is the process's one parser, the core's too.
 pub fn intake_shed_hook(
     watermark: usize,
     metrics: Arc<ProxyMetrics>,

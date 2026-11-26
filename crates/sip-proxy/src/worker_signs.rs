@@ -18,8 +18,10 @@ use crate::headers::cookie_params;
 use crate::registry::WorkerRegistry;
 
 /// This proxy's own addresses and the registry a worker sign is read
-/// against. Every read is lock-free: the registry's are (`WorkerRegistry`),
-/// and a worker the registry lists later is read as one from then on.
+/// against; the own addresses also answer whether a Route URI or a
+/// `host:port` names this proxy. Every read is lock-free: the registry's are
+/// (`WorkerRegistry`), and a worker the registry lists later is read as one
+/// from then on.
 #[derive(Clone)]
 pub struct WorkerSigns {
     registry: Arc<dyn WorkerRegistry>,

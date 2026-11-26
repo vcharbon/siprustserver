@@ -154,7 +154,7 @@ pub struct ProxyCore {
     strategy: Arc<dyn RoutingStrategy>,
     registry: Arc<dyn WorkerRegistry>,
     /// The worker signs and own addresses over `registry` and both
-    /// advertises, the intake shed's too.
+    /// advertises: the signs a single-face proxy's intake shed reads too.
     signs: WorkerSigns,
     cancel_lru: Arc<CancelBranchLru>,
     refusals: Arc<Refusals>,
