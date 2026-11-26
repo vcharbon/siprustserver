@@ -220,6 +220,32 @@ async fn reconcile_is_idempotent() {
 }
 
 #[test]
+fn a_concurrent_reader_sees_the_set_before_or_after_a_reconcile_never_between() {
+    let full = vec![Peer::new("w0", "h0"), Peer::new("w1", "h1"), Peer::new("w2", "h2")];
+    let state = MembershipState::new(full.clone());
+    let done = std::sync::atomic::AtomicBool::new(false);
+    let partial = std::thread::scope(|s| {
+        let reader = s.spawn(|| {
+            let mut partial = Vec::new();
+            while !done.load(std::sync::atomic::Ordering::SeqCst) {
+                let seen = state.snapshot();
+                if !seen.is_empty() && seen != full {
+                    partial.push(seen);
+                }
+            }
+            partial
+        });
+        for _ in 0..2_000 {
+            reconcile_to_desired(&state, Vec::new());
+            reconcile_to_desired(&state, full.clone());
+        }
+        done.store(true, std::sync::atomic::Ordering::SeqCst);
+        reader.join().unwrap()
+    });
+    assert!(partial.is_empty(), "a reader saw a partial set: {:?}", partial.first());
+}
+
+#[test]
 fn parse_peer_list_accepts_host_with_no_port() {
     // Port-agnostic: a bare host, an FQDN, even a host:port-looking string
     // is taken whole as the host (no port split).

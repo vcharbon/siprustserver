@@ -169,7 +169,9 @@ spec:
 {{- /*
 Headless Service: stable per-pod DNS, and the Service whose EndpointSlices the
 membership informer (replication and the proxy's worker discovery) watches. A
-NotReady or draining worker drops out of the slice.
+NotReady or draining worker drops out of the slice. `keep` leaves it in place
+when a helm operation would delete it: its deletion empties every slice at once,
+and the proxy routes to no worker until it is recreated (ADR-0031 D6).
 */}}
 apiVersion: v1
 kind: Service
@@ -178,6 +180,8 @@ metadata:
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "siprust.labels" (dict "root" $ "app" "b2bua-worker") | nindent 4 }}
+  annotations:
+    helm.sh/resource-policy: keep
 spec:
   clusterIP: None
   selector: { app: b2bua-worker }

@@ -180,6 +180,17 @@ impl MembershipState {
         let _ = self.tx.send(delta);
     }
 
+    /// Replace the whole set with `next` in one store (re-sorted by ordinal),
+    /// then emit `deltas` in order: a reader sees the set before or after,
+    /// never a set in between.
+    fn publish(&self, mut next: Vec<Peer>, deltas: Vec<MemberDelta>) {
+        sort_by_ordinal(&mut next);
+        self.peers.store(Arc::new(next));
+        for delta in deltas {
+            let _ = self.tx.send(delta);
+        }
+    }
+
     /// Add (or replace) a peer, emitting [`MemberDelta::Added`]. If a peer with
     /// the same ordinal already exists it is replaced (the join-after-restart
     /// path; consumers see a fresh `Added` for the re-joined ordinal).
@@ -275,29 +286,34 @@ fn sort_by_ordinal(peers: &mut [Peer]) {
 /// first occurrence wins, the rest are ignored — so a source that can list one
 /// member twice with different conditions must merge them before calling
 /// (`peers_from_slices` does).
+///
+/// One reconcile is one stored snapshot: its removals and additions land
+/// together, and the deltas follow (removals first). A reader woken by any of
+/// them reads the set before or after the reconcile, never a partial one, so
+/// a set that empties at once is never read as one member leaving
+/// (ADR-0031 D6). An unchanged set stores nothing.
 pub fn reconcile_to_desired(state: &MembershipState, desired: Vec<Peer>) {
-    // De-dup desired by ordinal (first wins), preserving a stable target set.
     let mut seen = std::collections::HashSet::new();
     let desired: Vec<Peer> =
         desired.into_iter().filter(|p| seen.insert(p.ordinal.clone())).collect();
-    let desired_ordinals: std::collections::HashSet<&str> =
-        desired.iter().map(|p| p.ordinal.as_str()).collect();
+    let current = state.snapshot();
 
-    // Removals: a current ordinal no longer desired.
-    for cur in state.snapshot() {
-        if !desired_ordinals.contains(cur.ordinal.as_str()) {
-            state.remove(&cur.ordinal);
-        }
-    }
-    // Adds, address changes, condition flips (each mutator is a no-op when
-    // nothing changed, so an unchanged peer emits no delta).
-    for d in desired {
-        match state.resolve(&d.ordinal) {
-            None => state.add(d),
-            Some(cur) if cur.binding_differs(&d) => state.set_address(d),
-            Some(cur) if cur.conditions_differ(&d) => state.set_conditions(d),
-            Some(_) => {}
-        }
+    let removals = current
+        .iter()
+        .filter(|cur| !desired.iter().any(|d| d.ordinal == cur.ordinal))
+        .map(|cur| MemberDelta::Removed(cur.ordinal.clone()));
+    let changes =
+        desired.iter().filter_map(|d| match current.iter().find(|cur| cur.ordinal == d.ordinal) {
+            None => Some(MemberDelta::Added(d.clone())),
+            Some(cur) if cur.binding_differs(d) => Some(MemberDelta::AddressChanged(d.clone())),
+            Some(cur) if cur.conditions_differ(d) => {
+                Some(MemberDelta::ConditionsChanged(d.clone()))
+            }
+            Some(_) => None,
+        });
+    let deltas: Vec<MemberDelta> = removals.chain(changes).collect();
+    if !deltas.is_empty() {
+        state.publish(desired, deltas);
     }
 }
 

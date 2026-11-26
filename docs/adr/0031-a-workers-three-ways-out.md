@@ -85,7 +85,9 @@ Detail: [appendix D5](appendix/0031-a-workers-three-ways-out.md#d5).
 **D6. A worker observes its own endpoint.** One predicate on its own `targetRef.name` reads it
 withdrawn: `terminating` and not `ready`, or absent, once it has seen itself `ready`. On that
 signal it latches `Draining` even if SIGTERM is late. A worker on a static membership never
-observes itself. Detail: [appendix D6](appendix/0031-a-workers-three-ways-out.md#d6).
+observes itself. A synced view that lists no member after one that listed the worker is no
+withdrawal and no departure; the proxy routes nowhere until the list returns.
+Detail: [appendix D6](appendix/0031-a-workers-three-ways-out.md#d6).
 
 Case 1 engages D1, D2, D3, D6; case 2 only the tombstone (the elder's own timers in its 2 s are
 lost); case 3 D3, and D1 in 3b; case 4 D1. Detail: [appendix, the cases](appendix/0031-a-workers-three-ways-out.md#the-cases-after-this-decision).

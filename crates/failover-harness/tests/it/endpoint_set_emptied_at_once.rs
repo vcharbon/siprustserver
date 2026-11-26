@@ -16,8 +16,9 @@
 //!   alice ──BYE──▶ proxy ──▶ primary ──▶ 200
 //! ```
 //!
-//! Each removal is applied in one poll of the paused current-thread runtime,
-//! so every worker reads the empty set and never a partial one.
+//! One reconcile is one stored snapshot (`topology::reconcile_to_desired`), so
+//! every worker reads the empty set and never a partial one, whatever the
+//! runtime.
 //!
 //! Beyond the failover sweep: a whole-set removal is a control-plane event, not
 //! a withdrawal.
@@ -113,14 +114,19 @@ async fn an_endpoint_set_emptied_at_once_withdraws_no_worker() {
     assert_eq!(total_cdrs_for(&nodes[..], &call_ref), 1, "exactly one CDR across the cluster");
     assert_call_fully_released(&nodes[..], &call_ref).await;
 
-    // ── what the ledger recorded: neither worker ever called itself draining ──
+    // ── what the ledger recorded: no worker drained, none parked its peer ────
     let ledger = fh.view_ledger();
-    for ord in ["b1", "b2"] {
+    for (ord, peer) in [("b1", "b2"), ("b2", "b1")] {
         let own_view = ledger.beliefs(&format!("{ord}#g1"), ord);
         assert_eq!(
             own_view,
             vec![Belief::Running { gen: 1 }],
             "{ord} ran throughout: {own_view:?}",
+        );
+        let peer_view = ledger.beliefs(&format!("{ord}#g1"), peer);
+        assert!(
+            !peer_view.contains(&Belief::PeerParked),
+            "{ord} never parked {peer}: {peer_view:?}",
         );
     }
 

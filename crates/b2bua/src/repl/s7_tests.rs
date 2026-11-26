@@ -376,8 +376,9 @@ async fn supervisor_readiness_flips_not_ready_to_ready_to_draining() {
     assert_eq!(readiness_of(&resp), refusing("draining"));
 }
 
-/// A worker whose own endpoint leaves the membership it pulls from observes its
-/// withdrawal from routing (ADR-0031 D6): the supervisor latches `is_withdrawn`,
+/// A worker whose own endpoint leaves the membership it pulls from, its peer
+/// still listed, observes its withdrawal from routing (ADR-0031 D6): the
+/// supervisor latches `is_withdrawn`,
 /// wakes its watch, raises the `withdrawn_running` gauge, and the readiness
 /// latch it feeds refuses new calls (`cause=draining`) without any SIGTERM. Boot-time
 /// absence is not a withdrawal: the latch waits for the first routable sighting.
@@ -398,7 +399,7 @@ async fn own_endpoint_withdrawn_latches_without_sigterm() {
     let mut own = a_sup.self_endpoint();
 
     // Not yet published: the informer shows the pool without this worker.
-    let membership = SimulatedMembership::with_clock(vec![], clock.clone());
+    let membership = SimulatedMembership::with_clock(vec![Peer::new("B", "B")], clock.clone());
     a_sup.start(Arc::new(membership.clone()));
     tick(100).await;
     assert!(!a_sup.is_withdrawn(), "absent before publication is not a withdrawal");
@@ -411,7 +412,7 @@ async fn own_endpoint_withdrawn_latches_without_sigterm() {
     assert_eq!(*own.borrow_and_update(), SelfEndpoint::Routable);
     assert!(!a_sup.metrics().withdrawn_running());
 
-    // Withdrawn from routing, no SIGTERM anywhere.
+    // Withdrawn from routing while its peer stays listed, no SIGTERM anywhere.
     membership.remove("A");
     tick(100).await;
     assert!(a_sup.is_withdrawn(), "the worker observed its own withdrawal");

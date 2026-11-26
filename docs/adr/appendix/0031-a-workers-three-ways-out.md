@@ -204,6 +204,21 @@ worker on a static membership never observes itself and keeps quiescence-or-grac
 does not make the worker stop serving (D5); it makes it know what the proxy knows, and
 drain then exit as on SIGTERM.
 
+**The whole set gone at once.** Deleting the pool's Service (a forced or replacing
+upgrade, a selector edit) deletes its endpoint list: every member leaves at once, the
+worker itself included, and no member was singled out. A synced snapshot that lists no
+member, after one that listed the worker, is therefore no sighting: the worker latches
+nothing, parks no peer and runs no departure sweep, and every worker keeps serving its
+calls as primary and as backup. One membership reconcile is one stored snapshot, so no
+worker reads the shrinking set in between. The next snapshot that lists a member is read
+as usual: the worker absent beside a peer is a withdrawal, a peer absent beside the
+worker a departure. Residuals: the proxy's registry empties with the list, so no new
+call is routed until it returns; a pool spread over several slices loses them in separate
+watch events, whose partial sets read as departures; a lone worker whose endpoint alone
+leaves reads the same empty set: it is not withdrawn, and drains only on SIGTERM. The
+chart keeps the worker Service when a helm operation would delete it
+(`helm.sh/resource-policy: keep`).
+
 ## The cases after this decision
 
 ### Case 1: graceful

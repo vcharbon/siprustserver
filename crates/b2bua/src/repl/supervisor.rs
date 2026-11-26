@@ -11,7 +11,9 @@
 //! subscribes to `changes()` and reconciles:
 //! - `Added` → spawn/Connecting (or un-Park: reconnect from the retained W).
 //! - `Removed` → `Parked`: interrupt both flows, **retain W forever** keyed by
-//!   `(ordinal, flow)`, and tell the router the peer departed (ADR-0047).
+//!   `(ordinal, flow)`, and tell the router the peer departed (ADR-0047). A
+//!   snapshot with no member left, this node included, parks nothing
+//!   (ADR-0031 D6).
 //! - `AddressChanged` → reconnect both flows to the new binding (host or worker
 //!   identity, ADR-0055 §6) from the retained W.
 //! - `ConditionsChanged` → nothing moves: a member is **pulled while it is in the
@@ -284,14 +286,21 @@ impl ReplicationSupervisor {
     /// puller whose ordinal is no longer desired is parked (both flows). An
     /// unchanged set produces no work. Every member of the snapshot is desired,
     /// whatever its `ready` / `terminating` conditions (ADR-0031 D1): a condition
-    /// flip is not drift, and only leaving the snapshot parks a peer.
+    /// flip is not drift, and only leaving the snapshot parks a peer. A
+    /// snapshot that reads the whole member set gone at once
+    /// ([`SelfObserver::whole_set_gone`]) parks nothing and tells no
+    /// departure: no peer left this node's view alone (ADR-0031 D6).
     ///
     /// The whole reconcile holds the `peers` lock — including the `tokio::spawn`
     /// of each puller (no await points) — so a concurrent caller (the periodic
     /// loop vs. the backup gate) cannot interleave check-then-spawn and
     /// double-spawn a flow.
     fn reconcile_from_snapshot(&self, snapshot: Vec<Peer>) {
+        let set_gone = self.inner.self_endpoint.whole_set_gone(&snapshot, self.membership_synced());
         self.observe_bindings(&snapshot);
+        if set_gone {
+            return;
+        }
         let desired: Vec<Peer> =
             snapshot.into_iter().filter(|p| p.ordinal != self.inner.self_ordinal).collect();
         let backup_enabled = self.inner.backup_enabled.load(Ordering::SeqCst);

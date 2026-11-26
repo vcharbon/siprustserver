@@ -163,6 +163,12 @@ class ShellScripts(unittest.TestCase):
         self.assertEqual(env(container(ds, "masq-exempt"))["EXTERNAL_SUBNET"], "192.168.60.0/25")
 
 
+class WorkerService(unittest.TestCase):
+    def test_the_worker_service_is_kept_when_a_helm_operation_would_delete_it(self) -> None:
+        service = find(render(SIPRUST, *KIND), "Service", "b2bua-worker")
+        self.assertEqual(service["metadata"]["annotations"]["helm.sh/resource-policy"], "keep")
+
+
 class Network(unittest.TestCase):
     def test_the_proxy_requires_its_network(self) -> None:
         self.assertIn("network.proxyVip is required", render_error(SIPRUST))

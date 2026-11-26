@@ -145,8 +145,8 @@ impl FailoverHarness {
     /// drops every ordinal, and every live worker's membership is reconciled
     /// to the empty set as its informer's is
     /// ([`SimulatedMembership::reconcile_to`](topology::SimulatedMembership::reconcile_to)).
-    /// Records the orchestrator's, the proxy's and every worker's belief at
-    /// this instant.
+    /// Records the orchestrator's and the proxy's belief at this instant; what
+    /// each worker makes of the empty view is its own, read by the sampler.
     pub fn empty_the_slice(&mut self) {
         let live = self.views.live_incarnations();
         for ordinal in distinct_ordinals(&live) {
@@ -157,11 +157,8 @@ impl FailoverHarness {
                 self.views.record("proxy", &ordinal, Belief::Absent, "empty_the_slice");
             }
         }
-        for (observer, ordinal, _, membership) in &live {
+        for (_, _, _, membership) in &live {
             membership.reconcile_to(Vec::new());
-            for peer in distinct_ordinals(&live).iter().filter(|p| *p != ordinal) {
-                self.views.record(observer, peer, Belief::PeerParked, "empty_the_slice");
-            }
         }
     }
 
@@ -170,7 +167,8 @@ impl FailoverHarness {
     /// every live ordinal again, bound to its newest incarnation at that
     /// incarnation's address. The proxy publishes each at `Unknown` health
     /// (nothing has probed it since), and every live worker's membership is
-    /// reconciled to the whole set.
+    /// reconciled to the whole set. Records the orchestrator's and the
+    /// proxy's belief; each worker's is read by the sampler.
     pub fn fill_the_slice(&mut self) {
         let live = self.views.live_incarnations();
         let ordinals = distinct_ordinals(&live);
@@ -191,11 +189,8 @@ impl FailoverHarness {
                 self.views.record("proxy", ordinal, belief, "fill_the_slice");
             }
         }
-        for (observer, ordinal, _, membership) in &live {
+        for (_, _, _, membership) in &live {
             membership.reconcile_to(members.clone());
-            for peer in ordinals.iter().filter(|p| *p != ordinal) {
-                self.views.record(observer, peer, Belief::PeerActive, "fill_the_slice");
-            }
         }
     }
 

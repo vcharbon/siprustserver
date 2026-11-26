@@ -1033,6 +1033,8 @@ type: Opaque
 apiVersion: v1
 kind: Service
 metadata:
+  annotations:
+    helm.sh/resource-policy: keep
   labels:
     app: b2bua-worker
     app.kubernetes.io/instance: rel

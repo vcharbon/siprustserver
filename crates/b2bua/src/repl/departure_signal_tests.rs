@@ -1,7 +1,8 @@
 //! The supervisor tells the router a peer departed once per real stop: the
 //! instant the peer leaves the membership set and its running flows are
 //! parked. A periodic reconcile of a peer already parked, a condition flip of
-//! a peer still in the set, and this node's own shutdown say nothing.
+//! a peer still in the set, the whole set gone at once, and this node's own
+//! shutdown say nothing.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -74,4 +75,42 @@ async fn a_peer_leaving_the_membership_set_is_announced_once_per_stop() {
     sup.shutdown();
     tick(500).await;
     assert!(departures(&mut rx).is_empty(), "this node's own shutdown announces no peer");
+}
+
+/// The whole set, this node's own endpoint included, leaves the view at once
+/// and returns: no peer left it alone, so none is parked or announced, and
+/// this node is not withdrawn. A peer that then leaves alone departs.
+#[tokio::test(start_paused = true)]
+async fn the_whole_set_gone_at_once_announces_no_departure() {
+    let clock = Clock::test_at(0);
+    let net = Arc::new(SimulatedReplicationNetwork::with_delay(1));
+    let (b, c) = (addr(1), addr(2));
+    let _b = Node::spawn("B", b, 5, &net, &clock).await;
+    let _c = Node::spawn("C", c, 5, &net, &clock).await;
+
+    let store = ReplicatingCallStore::new(6, clock.clone());
+    let peers = vec![("B".into(), b), ("C".into(), c)];
+    let sup = supervisor_for("A", &store, &net, &clock, peers, fast_config());
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    sup.set_repl_sink(tx);
+    let whole = vec![Peer::new("A", "A"), Peer::new("B", "B"), Peer::new("C", "C")];
+    let membership = Arc::new(SimulatedMembership::with_clock(whole.clone(), clock.clone()));
+    sup.start(membership.clone() as Arc<dyn Membership>);
+    tick(1_000).await;
+    assert!(sup.is_running("B") && sup.is_running("C"), "both peers pulled");
+
+    membership.reconcile_to(Vec::new());
+    tick(12_000).await;
+    assert!(departures(&mut rx).is_empty(), "nor on the periodic reconciles of the empty view");
+    assert!(sup.is_running("B") && sup.is_running("C"), "both peers still pulled");
+    assert!(!sup.is_withdrawn(), "this node was not singled out");
+
+    membership.reconcile_to(whole);
+    tick(1_000).await;
+    assert!(departures(&mut rx).is_empty(), "the set returning is no departure either");
+
+    membership.reconcile_to(vec![Peer::new("A", "A"), Peer::new("C", "C")]);
+    tick(500).await;
+    assert_eq!(departures(&mut rx), ["B"], "a peer leaving alone departs");
+    sup.shutdown();
 }

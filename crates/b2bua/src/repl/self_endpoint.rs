@@ -21,6 +21,12 @@
 //! identities are compared for equality only. Before the worker has seen its
 //! own identity, another one is its predecessor's, still listed: no
 //! supersession.
+//!
+//! A synced snapshot that lists no member at all, after one that listed this
+//! worker, is the whole set gone at once ([`SelfObserver::whole_set_gone`]):
+//! the orchestrator deleted the pool's endpoint list, it singled out no
+//! member, and it is no sighting. Nothing moves until a snapshot lists a
+//! member again.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -96,10 +102,16 @@ pub struct SelfObserver {
     self_identity: Option<String>,
     /// Set once a snapshot bound the ordinal to `self_identity`.
     own_identity_seen: AtomicBool,
+    /// Whether the last snapshot that listed any member listed this worker's
+    /// ordinal.
+    self_listed: AtomicBool,
+    /// Whether the latest synced snapshot read the whole set gone.
+    set_gone: AtomicBool,
     enabled: AtomicBool,
     state: watch::Sender<SelfEndpoint>,
-    /// Whether the latest synced snapshot shows the endpoint `ready` under
-    /// this worker's identity: the live sighting, not the latch.
+    /// Whether the latest synced snapshot that was a sighting shows the
+    /// endpoint `ready` under this worker's identity: the live sighting, not
+    /// the latch.
     ready_now: watch::Sender<bool>,
 }
 
@@ -109,6 +121,8 @@ impl SelfObserver {
             self_ordinal: self_ordinal.into(),
             self_identity,
             own_identity_seen: AtomicBool::new(false),
+            self_listed: AtomicBool::new(false),
+            set_gone: AtomicBool::new(false),
             enabled: AtomicBool::new(false),
             state: watch::channel(SelfEndpoint::Unobserved).0,
             ready_now: watch::channel(false).0,
@@ -126,14 +140,50 @@ impl SelfObserver {
         self.enabled.store(true, Ordering::SeqCst);
     }
 
+    /// Whether `snapshot` shows the whole member set gone at once: the
+    /// observer is enabled, the view `synced`, it lists no member, and the
+    /// last view that listed any listed this worker. Neither this worker nor
+    /// a peer left it alone, so the snapshot is no withdrawal and no
+    /// departure (ADR-0031 D6). Reads only; [`observe`](Self::observe)
+    /// records what each snapshot listed.
+    pub fn whole_set_gone(&self, snapshot: &[Peer], synced: bool) -> bool {
+        self.enabled.load(Ordering::SeqCst)
+            && synced
+            && snapshot.is_empty()
+            && self.self_listed.load(Ordering::SeqCst)
+    }
+
     /// Evaluate one membership `snapshot`. `synced` is the source's
     /// [`topology::Membership::synced`]: an informer's pre-LIST placeholder says
-    /// nothing about this worker. Returns the new state on a transition, `None`
-    /// when nothing moved. Logs each transition once, with the condition.
+    /// nothing about this worker. A snapshot that reads the
+    /// [whole set gone](Self::whole_set_gone) moves nothing, the live sighting
+    /// included. Returns the new state on a transition, `None` when nothing
+    /// moved. Logs each transition once, with the condition.
     pub fn observe(&self, snapshot: &[Peer], synced: bool) -> Option<SelfEndpoint> {
         if !self.enabled.load(Ordering::SeqCst) || !synced {
             return None;
         }
+        if self.whole_set_gone(snapshot, synced) {
+            if !self.set_gone.swap(true, Ordering::SeqCst) {
+                tracing::warn!(
+                    node = observe::node(),
+                    ordinal = %self.self_ordinal,
+                    "membership lists no member, this worker included; \
+                     no withdrawal, no departure, still serving"
+                );
+            }
+            return None;
+        }
+        if self.set_gone.swap(false, Ordering::SeqCst) {
+            tracing::info!(
+                node = observe::node(),
+                ordinal = %self.self_ordinal,
+                members = snapshot.len(),
+                "membership lists members again"
+            );
+        }
+        let listed = snapshot.iter().any(|p| p.ordinal == self.self_ordinal);
+        self.self_listed.store(listed, Ordering::SeqCst);
         let (observed, names_own) =
             classify(snapshot, &self.self_ordinal, self.self_identity.as_deref());
         if names_own {
@@ -203,7 +253,8 @@ impl SelfObserver {
 
     /// The live sighting, once [`enable`](Self::enable)d: whether the latest
     /// synced snapshot shows the endpoint `ready` under this worker's
-    /// identity. A readiness flap or a withdrawal reads `false` again. `None`
+    /// identity. A readiness flap or a withdrawal reads `false` again; the
+    /// [whole set gone](Self::whole_set_gone) is no sighting. `None`
     /// before `enable`: the source does not show the worker itself.
     pub fn ready_now(&self) -> Option<watch::Receiver<bool>> {
         self.enabled.load(Ordering::SeqCst).then(|| self.ready_now.subscribe())
@@ -402,19 +453,70 @@ mod tests {
         assert!(o.is_withdrawn(), "nothing new is routed to it");
         assert!(o.current().left_the_slice(), "its ordinal names a replacement");
         assert_eq!(o.observe(&[bound("w0", "uid-a")], true), None, "sticky");
-        assert_eq!(o.observe(&[], true), None, "terminal");
+        assert_eq!(o.observe(&[bound("w1", "uid-c")], true), None, "terminal");
     }
 
     #[test]
     fn a_withdrawn_worker_whose_ordinal_returns_under_another_identity_is_superseded() {
         let o = named("uid-a");
-        o.observe(&[bound("w0", "uid-a")], true);
+        let peer = bound("w1", "uid-c");
+        o.observe(&[bound("w0", "uid-a"), peer.clone()], true);
         assert_eq!(
-            o.observe(&[], true),
+            o.observe(std::slice::from_ref(&peer), true),
             Some(SelfEndpoint::Withdrawn(WithdrawalCondition::Absent))
         );
         let successor = bound("w0", "uid-b").not_ready();
-        assert_eq!(o.observe(&[successor], true), Some(SelfEndpoint::Superseded));
+        assert_eq!(o.observe(&[successor, peer], true), Some(SelfEndpoint::Superseded));
+    }
+
+    #[test]
+    fn the_whole_set_gone_at_once_is_no_sighting() {
+        let o = SelfObserver::new("w0", None);
+        o.enable();
+        let mut rx = o.subscribe();
+        let ready = o.ready_now().expect("enabled");
+        assert_eq!(o.observe(&peers(&["w0", "w1"]), true), Some(SelfEndpoint::Routable));
+        rx.borrow_and_update();
+
+        assert_eq!(o.observe(&[], true), None, "every member left together");
+        assert_eq!(o.observe(&[], true), None, "and a periodic re-read of it");
+        assert_eq!(o.current(), SelfEndpoint::Routable);
+        assert!(*ready.borrow(), "no sighting: the live one stands");
+        assert!(!rx.has_changed().unwrap());
+
+        assert_eq!(o.observe(&peers(&["w0", "w1"]), true), None, "the set returns");
+        assert_eq!(
+            o.observe(&peers(&["w1"]), true),
+            Some(SelfEndpoint::Withdrawn(WithdrawalCondition::Absent)),
+            "a later snapshot that singles this worker out still withdraws it"
+        );
+    }
+
+    #[test]
+    fn the_whole_set_is_gone_only_after_a_view_that_listed_this_worker() {
+        let o = SelfObserver::new("w0", None);
+        assert!(!o.whole_set_gone(&[], true), "not enabled: the source shows no self");
+        o.enable();
+        assert!(!o.whole_set_gone(&[], true), "nothing listed yet");
+        o.observe(&peers(&["w1"]), true);
+        assert!(!o.whole_set_gone(&[], true), "the peer alone left: a departure");
+        o.observe(&peers(&["w0", "w1"]), true);
+        assert!(o.whole_set_gone(&[], true));
+        assert!(!o.whole_set_gone(&[], false), "an unsynced placeholder says nothing");
+        assert!(!o.whole_set_gone(&peers(&["w1"]), true), "a member still listed");
+    }
+
+    #[test]
+    fn a_terminating_worker_whose_whole_set_goes_has_not_left_the_slice() {
+        let o = SelfObserver::new("w0", None);
+        o.enable();
+        o.observe(&peers(&["w0", "w1"]), true);
+        let terminating =
+            vec![Peer::with_conditions("w0", "w0", false, true), Peer::new("w1", "w1")];
+        o.observe(&terminating, true);
+        assert_eq!(o.observe(&[], true), None);
+        assert_eq!(o.current(), SelfEndpoint::Withdrawn(WithdrawalCondition::Terminating));
+        assert!(!o.current().left_the_slice(), "no backup took its calls over");
     }
 
     #[test]
