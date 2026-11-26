@@ -1,6 +1,7 @@
 //! The bind retry and the signalling sockets' intake hook, over real sockets
 //! and the real clock, with test-short intervals.
 use super::*;
+use crate::discovery::worker_pool;
 
 const TEST_INTERVAL: Duration = Duration::from_millis(10);
 const TEST_DEADLINE: Duration = Duration::from_millis(300);
@@ -100,7 +101,10 @@ async fn the_intake_hook_reads_under_the_limit_the_configuration_states() {
         cfg.parser_limits.max_header_lines = max_header_lines;
         async move {
             let metrics = Arc::new(ProxyMetrics::new());
-            let sockets = bind_sockets(&cfg, &Clock::system(), &metrics).await.expect("bound");
+            let pool = worker_pool(&cfg.workers, Clock::system()).expect("a pool");
+            let sockets = bind_sockets(&cfg, &Clock::system(), &metrics, &pool.registry)
+                .await
+                .expect("bound");
             let shard = sockets.shards.into_iter().next().expect("one shard");
             let to = shard.internal.local_addr();
             let peer = tokio::net::UdpSocket::bind("127.0.0.1:0").await.expect("the peer");
@@ -137,7 +141,9 @@ async fn at_the_watermark(metrics: &Arc<ProxyMetrics>, workers: &str, dual: bool
         _ => None,
     };
     let cfg = ProxyConfig::from_lookup(&lookup, &|| None).expect("a valid boot");
-    let sockets = bind_sockets(&cfg, &Clock::system(), metrics).await.expect("bound");
+    let pool = worker_pool(&cfg.workers, Clock::system()).expect("a pool");
+    let sockets =
+        bind_sockets(&cfg, &Clock::system(), metrics, &pool.registry).await.expect("bound");
     sockets.shards.into_iter().next().expect("one shard")
 }
 

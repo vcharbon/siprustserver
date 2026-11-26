@@ -12,7 +12,9 @@
 //!   source is a registry worker, or when its top Via sent-by is one, unless two
 //!   or more whole pairs lead its Route and the last one's cookie verifies for
 //!   the call: that request re-enters through a later pass. A loose Route past
-//!   the proxy's own is its next hop.
+//!   the proxy's own is its next hop. The three signs are read by
+//!   [`WorkerSigns`](crate::worker_signs::WorkerSigns), as the intake shed
+//!   reads them.
 //! - **External face**: none of these claims holds. Each one is ignored and
 //!   counted, every Route entry past the proxy's own is removed and counted,
 //!   and the request is routed as an inbound one, by its cookie or by a fresh
@@ -54,28 +56,10 @@ pub(super) struct Classified {
 }
 
 impl ProxyCore {
-    /// The top-Via sent-by when it is a registry worker. It identifies a
-    /// worker whose source address is translated on its way to the proxy.
-    fn worker_via_sent_by(&self, req: &SipRequest) -> Option<ProxyAddr> {
-        let (host, port) = req.top_via().sent_by().pair();
-        let addr = ProxyAddr::new(host, port);
-        self.registry.lookup_by_address(&addr).is_some().then_some(addr)
-    }
-
     /// Whether `req`, received from `src`, comes from a registry worker: by its
     /// source, or by its top Via where that source is translated.
     pub(super) fn sent_by_a_worker(&self, req: &SipRequest, src: SocketAddr) -> bool {
-        self.registry.lookup_by_address(&ProxyAddr::from(src)).is_some()
-            || self.worker_via_sent_by(req).is_some()
-    }
-
-    /// Whether a Route / Record-Route URI names this proxy, on either face, by
-    /// its authority or by its next hop: forwarding an entry whose `maddr`
-    /// names this proxy would loop on Max-Forwards.
-    fn is_self_route(&self, uri: &Uri) -> bool {
-        let (host, port) = uri.host_port();
-        let (target, target_port) = uri.next_hop();
-        self.is_self_addr(host, port) || self.is_self_addr(target, target_port)
+        self.signs.sent_by_a_worker(req, src)
     }
 
     /// `uri`, a Request-URI, without its `maddr` when that names this proxy at
@@ -102,18 +86,14 @@ impl ProxyCore {
         mut draft: RequestDraft,
     ) -> Option<(RequestDraft, Classified)> {
         let mut routes: Vec<RouteEntry> = req.list::<RouteEntry>().unwrap_or_default();
-        let self_routes = routes.iter().take_while(|r| self.is_self_route(r.uri())).count();
-        let direction_route = match self_routes {
-            0 => None,
-            n if n % 2 == 0 => routes.get(n - 2),
-            _ => routes.first(),
-        };
+        let own = self.signs.own_routes(&routes);
+        let self_routes = own.count;
         let external = face == Face::External;
         let mut cookie = None;
         let mut worker_outbound = false;
-        if let Some(direction_route) = direction_route {
+        if let Some(direction_route) = own.direction {
             let params = cookie_params(direction_route.uri());
-            if !params.contains_key("outbound") {
+            if !own.outbound_marker {
                 cookie = Some(params);
             } else if external {
                 self.metrics.record_external_untrusted(UntrustedClaim::OutboundMarker);
@@ -133,10 +113,10 @@ impl ProxyCore {
                 self.metrics.record_external_untrusted(UntrustedClaim::ForeignRoute);
                 draft = draft.remove(&HeaderName::Route);
             }
-            if self.registry.lookup_by_address(&ProxyAddr::from(src)).is_some() {
+            if self.signs.worker_source(src) {
                 self.metrics.record_external_untrusted(UntrustedClaim::WorkerSource);
             }
-            if self.worker_via_sent_by(req).is_some() {
+            if self.signs.worker_via(req).is_some() {
                 self.metrics.record_external_untrusted(UntrustedClaim::WorkerVia);
             }
             routes.truncate(self_routes);
@@ -153,7 +133,7 @@ impl ProxyCore {
         }
 
         let via_worker = if !worker_outbound || is_dialog_creating(req.method().as_str()) {
-            self.worker_via_sent_by(req)
+            self.signs.worker_via(req)
         } else {
             None
         };
@@ -163,8 +143,7 @@ impl ProxyCore {
             && cookie.as_ref().is_some_and(|c| self.strategy.verified_cookie(c, msg).is_some());
         if !worker_outbound
             && !spiral_reentry
-            && (self.registry.lookup_by_address(&ProxyAddr::from(src)).is_some()
-                || via_worker.is_some())
+            && (self.signs.worker_source(src) || via_worker.is_some())
         {
             worker_outbound = true;
             cookie = None;

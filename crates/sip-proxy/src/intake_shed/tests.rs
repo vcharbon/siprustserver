@@ -6,21 +6,69 @@ use sip_message::Bytes;
 use sip_net::{Arrival, QueueLoad};
 use std::net::SocketAddr;
 
+use crate::addr::ProxyAddr;
 use crate::observability::ProxyMetrics;
+use crate::registry::static_reg::StaticWorkerRegistry;
+use crate::registry::WorkerEntry;
 
 const WATERMARK: usize = 8;
+/// The proxy's internal (or only) face.
+const PROXY: (&str, u16) = ("192.0.2.1", 5060);
+/// The registry's one worker; no datagram below is sent by it unless a case
+/// says so.
+const WORKER: (&str, u16) = ("10.0.0.2", 5070);
 
 fn src() -> SocketAddr {
     "192.0.2.9:5060".parse().unwrap()
 }
 
-fn shed_hook() -> (PreIngressHook, Arc<ProxyMetrics>) {
+/// The internal face of a single-face proxy on `PROXY` whose registry lists
+/// `WORKER`.
+fn internal() -> IntakeFace {
+    let registry = StaticWorkerRegistry::from_entries(vec![WorkerEntry::alive(
+        "w1",
+        ProxyAddr::new(WORKER.0, WORKER.1),
+    )]);
+    IntakeFace::Internal(WorkerSigns::new(
+        Arc::new(registry),
+        ProxyAddr::new(PROXY.0, PROXY.1),
+        None,
+    ))
+}
+
+fn hook_on(face: IntakeFace) -> (PreIngressHook, Arc<ProxyMetrics>) {
     let metrics = Arc::new(ProxyMetrics::new());
-    (intake_shed_hook(WATERMARK, metrics.clone(), CustomParser::new()), metrics)
+    (intake_shed_hook(WATERMARK, metrics.clone(), CustomParser::new(), face), metrics)
+}
+
+fn shed_hook() -> (PreIngressHook, Arc<ProxyMetrics>) {
+    hook_on(internal())
 }
 
 fn judge(hook: &PreIngressHook, raw: &[u8], depth: usize) -> PreIngressAction {
-    hook(&mut Arrival::new(Bytes::copy_from_slice(raw)), src(), QueueLoad::at_depth(depth))
+    judge_from(hook, raw, src(), depth)
+}
+
+fn judge_from(
+    hook: &PreIngressHook,
+    raw: &[u8],
+    from: SocketAddr,
+    depth: usize,
+) -> PreIngressAction {
+    hook(&mut Arrival::new(Bytes::copy_from_slice(raw)), from, QueueLoad::at_depth(depth))
+}
+
+/// A new INVITE whose top Via names `sent_by`, with `extra` header lines.
+fn new_invite_via(sent_by: &str, extra: &str) -> Vec<u8> {
+    format!(
+        "INVITE sip:bob@198.51.100.7:5060 SIP/2.0\r\nContact: <sip:fixture@192.0.2.99>\r\n\
+Via: SIP/2.0/UDP {sent_by};branch=z9hG4bK-signs\r\n\
+{extra}Max-Forwards: 70\r\n\
+From: <sip:alice@example.com>;tag=a1\r\n\
+To: <sip:bob@example.com>\r\n\
+Call-ID: signs@192.0.2.10\r\nCSeq: 1 INVITE\r\nContent-Length: 0\r\n\r\n"
+    )
+    .into_bytes()
 }
 
 fn invite_with_to(to: &str) -> Vec<u8> {
@@ -159,6 +207,41 @@ fn the_shed_reads_the_to_tag_as_the_parser_does() {
         }
     }
     assert!(misread.is_empty(), "the shed misreads the To-tag of {misread:#?}");
+}
+
+/// At the watermark the internal face queues a new INVITE carrying any one
+/// worker sign, as the core reads it: a source that is a registry worker, a
+/// top Via sent-by that is one, or `;outbound` on the direction Route entry
+/// naming this proxy. A marker on a Route naming another host, or this
+/// proxy's Route without the marker, is no sign. The external face sheds
+/// every one of them.
+#[test]
+fn at_the_watermark_the_internal_face_queues_a_new_invite_with_a_worker_sign() {
+    let worker: SocketAddr = format!("{}:{}", WORKER.0, WORKER.1).parse().unwrap();
+    let (worker_via, other_via) = (format!("{}:{}", WORKER.0, WORKER.1), "192.0.2.10:5060");
+    let own_marker = format!("Route: <sip:{}:{};lr;outbound>\r\n", PROXY.0, PROXY.1);
+    let own_plain = format!("Route: <sip:{}:{};lr>\r\n", PROXY.0, PROXY.1);
+    let foreign_marker = "Route: <sip:198.51.100.9:5060;lr;outbound>\r\n";
+    let cases = [
+        ("worker source", worker, new_invite_via(other_via, ""), PreIngressAction::Accept),
+        ("worker Via", src(), new_invite_via(&worker_via, ""), PreIngressAction::Accept),
+        ("own marker", src(), new_invite_via(other_via, &own_marker), PreIngressAction::Accept),
+        ("own plain Route", src(), new_invite_via(other_via, &own_plain), PreIngressAction::Drop),
+        (
+            "foreign marker",
+            src(),
+            new_invite_via(other_via, foreign_marker),
+            PreIngressAction::Drop,
+        ),
+    ];
+    let (internal, internal_metrics) = hook_on(internal());
+    let (external, external_metrics) = hook_on(IntakeFace::External);
+    for (what, from, raw, verdict) in &cases {
+        assert_eq!(judge_from(&internal, raw, *from, WATERMARK), *verdict, "internal: {what}");
+        assert_eq!(judge_from(&external, raw, *from, WATERMARK), PreIngressAction::Drop, "{what}");
+    }
+    assert_eq!(internal_metrics.intake_shed(), 2);
+    assert_eq!(external_metrics.intake_shed(), 5);
 }
 
 #[test]

@@ -4,33 +4,51 @@
 
 use std::sync::Arc;
 
-use sip_message::{CustomParser, Method, SipMessage};
+use sip_message::{CustomParser, Method, SipMessage, SipRequest};
 use sip_net::types::{PreIngressAction, PreIngressHook};
-use sip_net::{ParseOutcome, ParserPanicked};
+use sip_net::ParserPanicked;
 use sip_txn::{class_of, InviteClass};
 
 use crate::observability::ProxyMetrics;
+use crate::worker_signs::WorkerSigns;
+
+/// The face a hook serves, as it reads who sent a new INVITE.
+#[derive(Clone)]
+pub enum IntakeFace {
+    /// The internal face, and the one face of a single-face proxy: a new
+    /// INVITE carrying a worker sign ([`WorkerSigns::reads_as_a_workers`])
+    /// belongs to a call a worker accepted and is never shed. A single-face
+    /// proxy that strangers reach trusts these signs as its core does.
+    Internal(WorkerSigns),
+    /// The external face of a dual-face proxy, where its deployment keeps
+    /// strangers: it trusts no worker sign.
+    External,
+}
 
 /// The hook every signaling socket runs on each datagram before it is queued.
 /// It parses the datagram, and the parse is queued with it, so the core does
 /// not parse it again. At or above `watermark` queued datagrams it drops:
 ///
-/// - a new non-emergency INVITE (`is_sheddable`), counted in
-///   [`ProxyMetrics::intake_shed`];
+/// - a new non-emergency INVITE (`is_sheddable`) that carries no worker sign
+///   on `face`, counted in [`ProxyMetrics::intake_shed`];
 /// - a datagram no response can answer — refused with nothing a 400 could
 ///   echo, or a parser panic — counted in
 ///   [`ProxyMetrics::intake_unanswerable`] and as the parse error or panic
 ///   the core would have counted.
 ///
-/// In-dialog traffic, responses, other methods, emergency INVITEs and
-/// answerable refusals (the core answers them with its capped 400) are
-/// always queued. `parser` is the process's one parser, the core's too.
+/// In-dialog traffic, responses, other methods, emergency INVITEs, a
+/// worker's new INVITE and answerable refusals (the core answers them with
+/// its capped 400) are always queued. A worker sign is what the core reads
+/// as worker-outbound; a worker's INVITE that re-enters on a verified cookie
+/// carries one too, is queued, and meets the core's self-gate. `parser` is
+/// the process's one parser, the core's too.
 pub fn intake_shed_hook(
     watermark: usize,
     metrics: Arc<ProxyMetrics>,
     parser: CustomParser,
+    face: IntakeFace,
 ) -> PreIngressHook {
-    Arc::new(move |arrival, _src, load| {
+    Arc::new(move |arrival, src, load| {
         let parsed = arrival.parse(&parser);
         if load.depth < watermark {
             return PreIngressAction::Accept;
@@ -46,24 +64,25 @@ pub fn intake_shed_hook(
                 metrics.record_intake_unanswerable();
                 PreIngressAction::Drop
             }
-            parsed if is_sheddable(parsed) => {
-                metrics.record_intake_shed();
-                PreIngressAction::Drop
-            }
+            Ok(Ok(SipMessage::Request(req))) if is_sheddable(req) => match &face {
+                IntakeFace::Internal(signs) if signs.reads_as_a_workers(req, src) => {
+                    PreIngressAction::Accept
+                }
+                _ => {
+                    metrics.record_intake_shed();
+                    PreIngressAction::Drop
+                }
+            },
             _ => PreIngressAction::Accept,
         }
     })
 }
 
-/// Whether `parsed` is the one class the shed drops: an INVITE of class
+/// Whether `req` is of the one class the shed drops: an INVITE of class
 /// [`InviteClass::Normal`] — no To-tag, no emergency priority — the class the
 /// B2BUA's ingress brake refuses.
-fn is_sheddable(parsed: &ParseOutcome) -> bool {
-    matches!(
-        parsed,
-        Ok(Ok(SipMessage::Request(req)))
-            if *req.method() == Method::Invite && class_of(req) == InviteClass::Normal
-    )
+fn is_sheddable(req: &SipRequest) -> bool {
+    *req.method() == Method::Invite && class_of(req) == InviteClass::Normal
 }
 
 /// The shed watermark in queued datagrams: `pct` percent of `queue_max`,

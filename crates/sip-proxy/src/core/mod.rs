@@ -40,7 +40,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use sip_clock::Clock;
-use sip_message::ip_literal::same_host;
 use sip_message::parser::custom::CustomParser;
 use sip_message::{SipMessage, SipParser};
 use sip_net::{parse_datagram, ParserPanicked, UdpEndpoint, UdpPacket};
@@ -59,6 +58,7 @@ use crate::resolver::{HostResolver, NamedForwarder, OnSent, ResolverConfig};
 use crate::self_gate::{IntakeAgeRecorder, ProxySelfGate};
 use crate::strategy::RoutingStrategy;
 use crate::trace::ProxyTraces;
+use crate::worker_signs::WorkerSigns;
 pub use builder::ProxyCoreBuilder;
 
 /// The per-peer bucket a failed send belongs in: an oversize datagram accuses
@@ -153,6 +153,9 @@ pub struct ProxyCore {
     egress: EgressPolicy,
     strategy: Arc<dyn RoutingStrategy>,
     registry: Arc<dyn WorkerRegistry>,
+    /// The worker signs and own addresses over `registry` and both
+    /// advertises, the intake shed's too.
+    signs: WorkerSigns,
     cancel_lru: Arc<CancelBranchLru>,
     refusals: Arc<Refusals>,
     parse_refusals: Arc<ParseRefusals>,
@@ -191,7 +194,13 @@ impl ProxyCore {
         });
         let egress =
             if external.is_some() { EgressPolicy::Crossing } else { EgressPolicy::SingleFace };
+        let signs = WorkerSigns::new(
+            parts.registry.clone(),
+            parts.advertised.clone(),
+            external.as_ref().map(|e| e.advertised.clone()),
+        );
         Self {
+            signs,
             endpoint,
             advertised: parts.advertised,
             external,
@@ -258,10 +267,10 @@ impl ProxyCore {
     /// ownership check (§16.7.3), and Record-Route cookie recovery: in
     /// dual-face mode the proxy's Via/Record-Route entries legitimately carry
     /// EITHER face's advertise. Hosts compare as what they name
-    /// ([`same_host`]): another spelling of this proxy's address is this proxy.
+    /// ([`same_host`](sip_message::ip_literal::same_host)): another spelling
+    /// of this proxy's address is this proxy.
     pub(super) fn is_self_addr(&self, host: &str, port: u16) -> bool {
-        let names = |at: &ProxyAddr| port == at.port && same_host(host, &at.host);
-        names(&self.advertised) || self.external.as_ref().is_some_and(|e| names(&e.advertised))
+        self.signs.is_self_addr(host, port)
     }
 
     /// Whether `src` is one of this proxy's own addresses: a face's bind or its

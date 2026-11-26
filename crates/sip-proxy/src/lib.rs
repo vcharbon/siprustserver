@@ -70,6 +70,7 @@ pub mod strategies;
 pub mod strategy;
 pub mod supervise;
 pub mod trace;
+pub mod worker_signs;
 
 pub use addr::ProxyAddr;
 pub use core::{ExternalFaceParts, ProxyCore, ProxyCoreBuilder};

@@ -14,9 +14,10 @@ use sip_message::{CustomParser, SipMessage, SipParser, SipParserLimits};
 use sip_net::UdpEndpoint;
 use sip_net::{BindUdpOpts, PreIngressHook, SignalingNetwork};
 use sip_net_testkit::SimulatedSignalingNetwork;
-use sip_proxy::intake_shed::intake_shed_hook;
+use sip_proxy::intake_shed::{intake_shed_hook, IntakeFace};
 use sip_proxy::registry::static_reg::StaticWorkerRegistry;
 use sip_proxy::registry::WorkerRegistry;
+use sip_proxy::worker_signs::WorkerSigns;
 use sip_proxy::{ForwardAllStrategy, ProxyAddr, ProxyCoreBuilder, ProxyMetrics, RoutingStrategy};
 use sip_txn::IdGen;
 use tokio::task::JoinHandle;
@@ -28,6 +29,13 @@ const QUEUE_MAX: usize = 1024;
 
 fn addr(s: &str) -> SocketAddr {
     s.parse().expect("an address")
+}
+
+/// The one face of the proxy on `PROXY`, read against a registry as empty
+/// as its core's.
+fn single_face() -> IntakeFace {
+    let registry: Arc<dyn WorkerRegistry> = Arc::new(StaticWorkerRegistry::from_entries(vec![]));
+    IntakeFace::Internal(WorkerSigns::new(registry, ProxyAddr::from(addr(PROXY)), None))
 }
 
 struct Rig {
@@ -122,7 +130,7 @@ Content-Length: 0\r\n\r\n";
 #[tokio::test(start_paused = true)]
 async fn the_core_routes_and_answers_the_parse_the_production_hook_queued() {
     let metrics = Arc::new(ProxyMetrics::new());
-    let hook = intake_shed_hook(QUEUE_MAX, metrics.clone(), CustomParser::new());
+    let hook = intake_shed_hook(QUEUE_MAX, metrics.clone(), CustomParser::new(), single_face());
     let rig = Rig::new(metrics, Some(hook), CustomParser::new()).await;
 
     rig.caller.send_to(&options("routed"), addr(PROXY)).await.expect("sent");
@@ -179,7 +187,7 @@ async fn the_limit_the_process_states_is_read_at_every_stage() {
     };
     let with_hook = {
         let metrics = Arc::new(ProxyMetrics::new());
-        let hook = intake_shed_hook(QUEUE_MAX, metrics.clone(), strict());
+        let hook = intake_shed_hook(QUEUE_MAX, metrics.clone(), strict(), single_face());
         Rig::new(metrics, Some(hook), strict()).await
     };
     let no_hook = Rig::new(Arc::new(ProxyMetrics::new()), None, strict()).await;

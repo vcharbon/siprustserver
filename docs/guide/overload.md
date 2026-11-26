@@ -51,6 +51,11 @@ The proxy has two gates of its own before these. It refuses new calls when its o
 above 0.8 or its rate bucket is empty. It also sends new calls away from a worker that reports a
 high load. See [proxy-integration.md](proxy-integration.md).
 
+Past a half-full input queue, the proxy drops a new call with no answer. Emergency calls pass,
+and so do the calls a worker places: the proxy knows them by the signs its routing trusts on the
+internal face (ADR-0048). A single-face proxy that strangers can reach trusts those signs from
+them too; the dual-face deployment keeps strangers on the external face, which trusts none.
+
 The capacity ceilings are off by default. A worker with no ceiling relies on checks 1, 2 and 4
 to 7 only. Set the ceilings for production. See [Sizing](#sizing).
 

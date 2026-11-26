@@ -10,7 +10,7 @@
 //! no verdict depends on how far the core drained the queue. The core runs its
 //! real recv loop on the simulated fabric.
 
-use crate::common::call_end::{ack_final, answered_at_callee, busy_at_callee, request_of};
+use crate::common::call_end::busy_at_callee;
 use crate::common::retransmits::{timer_a_copies, TIMER_B};
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -22,10 +22,11 @@ use sip_message::CustomParser;
 use sip_net::types::PreIngressHook;
 use sip_net::{BindUdpOpts, SignalingNetwork, UdpEndpoint};
 use sip_net_testkit::SimulatedSignalingNetwork;
-use sip_proxy::intake_shed::intake_shed_hook;
+use sip_proxy::intake_shed::{intake_shed_hook, IntakeFace};
 use sip_proxy::registry::composed::ComposedWorkerRegistry;
 use sip_proxy::registry::static_reg::StaticWorkerRegistry;
 use sip_proxy::registry::{WorkerEntry, WorkerRegistry};
+use sip_proxy::worker_signs::WorkerSigns;
 use sip_proxy::{
     ExternalFaceParts, ForwardAllStrategy, ProxyAddr, ProxyCoreBuilder, ProxyMetrics,
     RoutingStrategy,
@@ -68,11 +69,21 @@ fn listing_the_worker() -> Arc<dyn WorkerRegistry> {
 /// it has one.
 fn hook_at_watermark_0(
     metrics: &Arc<ProxyMetrics>,
-    _registry: &Arc<dyn WorkerRegistry>,
-    _external: Option<&str>,
-    _on: &str,
+    registry: &Arc<dyn WorkerRegistry>,
+    external: Option<&str>,
+    on: &str,
 ) -> PreIngressHook {
-    intake_shed_hook(0, metrics.clone(), CustomParser::new())
+    let face = if external == Some(on) {
+        IntakeFace::External
+    } else {
+        let external = external.map(|at| ProxyAddr::from(addr(at)));
+        IntakeFace::Internal(WorkerSigns::new(
+            registry.clone(),
+            ProxyAddr::from(addr(PROXY)),
+            external,
+        ))
+    };
+    intake_shed_hook(0, metrics.clone(), CustomParser::new(), face)
 }
 
 struct Rig {
@@ -228,8 +239,8 @@ async fn at_the_watermark_a_registered_workers_new_invite_is_relayed() {
 
 /// A worker whose datagrams reach the proxy from a node address, its top Via
 /// naming its registered sent-by: its new INVITE is relayed at the watermark.
-/// The far end's 486 reaches the worker at its sent-by, and the ACK it sends
-/// through the node address reaches the far end.
+/// The far end's 486 reaches the worker at the node address it was received
+/// from (RFC 3581 §4), and the worker's ACK of it reaches the far end.
 #[tokio::test(start_paused = true)]
 async fn at_the_watermark_a_translated_workers_new_invite_is_relayed() {
     let rig = Rig::single_face().await;
@@ -238,13 +249,8 @@ async fn at_the_watermark_a_translated_workers_new_invite_is_relayed() {
     rig.settle().await;
     let forwarded = rig.relayed_to_far("the translated worker's new INVITE");
     assert_eq!(rig.metrics.intake_shed(), 0, "the translated worker's new INVITE is not shed");
-    let busy =
-        answered_at_callee(rig.worker.as_ref(), rig.far.as_ref(), &forwarded, 486, "Busy Here")
-            .await;
-    ack_final(addr(PROXY), rig.translated.as_ref(), &invite, &busy).await;
-    rig.settle().await;
-    let [acked] = Rig::drained(rig.far.as_ref()).try_into().expect("one ACK at the far end");
-    assert_eq!(request_of(&acked).method(), "ACK", "the worker's ACK reaches the far end");
+    busy_at_callee(addr(PROXY), rig.translated.as_ref(), &invite, rig.far.as_ref(), &forwarded)
+        .await;
 }
 
 /// A worker on an address the registry does not hold, its new INVITE routed

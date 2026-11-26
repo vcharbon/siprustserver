@@ -115,7 +115,8 @@ ADR-0014 deliberately keep out of the LB (and duplicate a backstop the endpoints
 already own). All proxy-*internal* errors do answer immediately with a final
 (483/420/400/403, and a 503 with a Retry-After and no Reason for the self-gate shed); the
 silent paths are pre-parse recv-queue overflow, unparseable datagrams, the intake shed
-(a new non-emergency INVITE dropped at the receive-queue watermark, `intake_shed.rs`), and
+(a new non-emergency INVITE no worker sent, dropped at the receive-queue watermark,
+`intake_shed.rs`), and
 the downstream-blackhole case — all bounded by the caller's transaction timer.
 
 An INVITE response bound for a worker the proxy holds Dead fails over to the

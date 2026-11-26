@@ -177,8 +177,8 @@ use sip_proxy::self_gate::{AlwaysAdmitGate, EluCpsGate, IntakeAgeRecorder, Proxy
 use sip_proxy::strategies::LoadBalancerStrategy;
 use sip_proxy::{ExternalFaceParts, RoutingStrategy};
 use sip_proxy_runner::binds::{bind_sockets, ShardSockets, Sockets};
-use sip_proxy_runner::config::{refusal, ProxyConfig, WorkerSource};
-use sip_proxy_runner::discovery::{discovered_pool, static_pool};
+use sip_proxy_runner::config::{refusal, ProxyConfig};
+use sip_proxy_runner::discovery::worker_pool;
 use sip_proxy_runner::external_face::FaceMonitor;
 use sip_proxy_runner::health_sampler::HealthSampler;
 use sip_proxy_runner::listening::log_listening;
@@ -236,8 +236,10 @@ async fn run() -> Result<i32, String> {
 
     let clock = Clock::checked_system().map_err(|e| e.to_string())?;
     let metrics = Arc::new(ProxyMetrics::new());
+    let pool = worker_pool(&cfg.workers, clock.clone()).map_err(|e| refusal(&[e]))?;
+    let registry = pool.registry.clone();
     let Sockets { metrics: metrics_listener, shards, probe: probe_ep, notice: notice_ep } =
-        bind_sockets(&cfg, &clock, &metrics).await?;
+        bind_sockets(&cfg, &clock, &metrics, &registry).await?;
 
     let hmac = Arc::new(
         StaticHmacKeyProvider::new(
@@ -258,15 +260,6 @@ async fn run() -> Result<i32, String> {
         None => Arc::new(AlwaysAdmitGate),
     };
 
-    let pool = match &cfg.workers {
-        WorkerSource::Static(list) => {
-            static_pool(list, clock.clone()).map_err(|e| refusal(&[e]))?
-        }
-        WorkerSource::Discovered { service, namespace, port } => {
-            discovered_pool(namespace.clone(), service.clone(), *port, clock.clone())
-        }
-    };
-    let registry = pool.registry.clone();
     let health_control = pool.control.clone();
 
     let strategy: Arc<dyn RoutingStrategy> = Arc::new(LoadBalancerStrategy::new(

@@ -11,7 +11,9 @@ use sip_clock::Clock;
 use sip_net::socket_stats::was_clamped;
 use sip_net::types::BindUdpOpts;
 use sip_net::{BindError, RealSignalingNetwork, SignalingNetwork, UdpEndpoint};
-use sip_proxy::intake_shed::{intake_shed_hook, intake_shed_watermark};
+use sip_proxy::intake_shed::{intake_shed_hook, intake_shed_watermark, IntakeFace};
+use sip_proxy::registry::WorkerRegistry;
+use sip_proxy::worker_signs::WorkerSigns;
 use sip_proxy::ProxyMetrics;
 
 use crate::config::{ExternalFace, ProxyConfig};
@@ -41,10 +43,14 @@ pub struct ShardSockets {
 ///
 /// `Err` names the first socket that did not bind: the boot stops on it.
 /// `proxy_metrics` counts what the signalling sockets' intake hook drops.
+/// The internal face's hook reads a worker's signs over `registry`, the pool
+/// the cores route over, so a worker it lists later is read as one from then
+/// on; the external face's trusts none (`IntakeFace`).
 pub async fn bind_sockets(
     cfg: &ProxyConfig,
     clock: &Clock,
     proxy_metrics: &Arc<ProxyMetrics>,
+    registry: &Arc<dyn WorkerRegistry>,
 ) -> Result<Sockets, String> {
     let net = RealSignalingNetwork::new();
     let (listen_sa, metrics_sa, queue_max) = (cfg.listen, cfg.metrics, cfg.queue_max);
@@ -62,7 +68,11 @@ pub async fn bind_sockets(
     metrics.local_addr().map_err(|e| format!("metrics listener on {metrics_sa}: {e}"))?;
 
     let watermark = intake_shed_watermark(queue_max, cfg.intake_shed_pct);
-    let intake_shed = intake_shed_hook(watermark, proxy_metrics.clone(), cfg.parser());
+    let external_advertise = cfg.external.as_ref().map(|ext| ext.advertise.clone());
+    let signs = WorkerSigns::new(registry.clone(), cfg.advertise.clone(), external_advertise);
+    let shed_on = |face| intake_shed_hook(watermark, proxy_metrics.clone(), cfg.parser(), face);
+    let (internal_shed, external_shed) =
+        (shed_on(IntakeFace::Internal(signs)), shed_on(IntakeFace::External));
     let with_buffers = |mut opts: BindUdpOpts| {
         if let Some(bytes) = udp_sndbuf {
             opts = opts.with_send_buffer(bytes);
@@ -84,7 +94,7 @@ pub async fn bind_sockets(
                 let opts = with_buffers(
                     BindUdpOpts::new(listen_sa, queue_max)
                         .with_reuse_port(recv_shards > 1)
-                        .with_pre_ingress(intake_shed.clone())
+                        .with_pre_ingress(internal_shed.clone())
                         .with_clock(clock.clone()),
                 );
                 async move { net.bind_udp(opts).await }
@@ -107,7 +117,7 @@ pub async fn bind_sockets(
                     let opts = with_buffers(
                         BindUdpOpts::new(*ext_sa, queue_max)
                             .with_reuse_port(recv_shards > 1)
-                            .with_pre_ingress(intake_shed.clone())
+                            .with_pre_ingress(external_shed.clone())
                             .with_clock(clock.clone()),
                     );
                     async move { net.bind_udp(opts).await }

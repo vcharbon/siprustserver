@@ -12,11 +12,23 @@ use sip_proxy::registry::static_reg::{parse_worker_list, StaticWorkerRegistry};
 use sip_proxy::registry::{WorkerEntry, WorkerHealth, WorkerRegistry};
 use topology::{K8sMembership, Membership};
 
+use crate::config::WorkerSource;
+
 pub struct WorkerPool {
     pub registry: Arc<dyn WorkerRegistry>,
     pub control: Arc<dyn WorkerRegistryControl>,
     /// The EndpointSlice watch, `None` for a fixed list.
     pub discovery: Option<Arc<K8sMembership>>,
+}
+
+/// The pool `source` names: [`static_pool`] or [`discovered_pool`].
+pub fn worker_pool(source: &WorkerSource, clock: Clock) -> Result<WorkerPool, String> {
+    match source {
+        WorkerSource::Static(list) => static_pool(list, clock),
+        WorkerSource::Discovered { service, namespace, port } => {
+            Ok(discovered_pool(namespace.clone(), service.clone(), *port, clock))
+        }
+    }
 }
 
 /// The fixed pool `workers` lists (`id@host:port,..`), each worker `Unknown`
