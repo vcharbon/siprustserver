@@ -118,16 +118,20 @@ async fn the_intake_hook_reads_under_the_limit_the_configuration_states() {
     assert!(matches!(&*read, Ok(Ok(_))), "{read:?}");
 }
 
-/// A dual-face proxy's sockets, both faces on loopback, the intake-shed
-/// watermark at one queued datagram (`PROXY_INTAKE_SHED_PCT=0`). Nothing
-/// drains them here, so once one datagram is queued on a face, every later
-/// arrival there is at the watermark.
-async fn dual_face_at_the_watermark(metrics: &Arc<ProxyMetrics>) -> ShardSockets {
+/// The one shard's sockets of a proxy whose configuration lists `workers`
+/// (`PROXY_WORKERS`), with an external face on loopback when `dual`, and the
+/// intake-shed watermark at one queued datagram (`PROXY_INTAKE_SHED_PCT=0`).
+///
+/// A test sends every datagram before its first read. On the current-thread
+/// runtime the receive pump judges every datagram waiting in the socket, in
+/// arrival order, before the test reads one: once the first is queued, each
+/// later arrival on that face is at the watermark.
+async fn at_the_watermark(metrics: &Arc<ProxyMetrics>, workers: &str, dual: bool) -> ShardSockets {
     let lookup = |key: &str| match key {
         "PROXY_LISTEN" => Some("127.0.0.1:0".to_string()),
-        "PROXY_LISTEN_EXT" => Some("127.0.0.1:0".to_string()),
+        "PROXY_LISTEN_EXT" if dual => Some("127.0.0.1:0".to_string()),
         "PROXY_METRICS" => Some("127.0.0.1:0".to_string()),
-        "PROXY_WORKERS" => Some("w0@10.0.0.1:5060".to_string()),
+        "PROXY_WORKERS" => Some(workers.to_string()),
         "PROXY_HMAC_KEY" => Some("0123456789abcdef0123456789abcdef".to_string()),
         "PROXY_INTAKE_SHED_PCT" => Some("0".to_string()),
         _ => None,
@@ -135,6 +139,11 @@ async fn dual_face_at_the_watermark(metrics: &Arc<ProxyMetrics>) -> ShardSockets
     let cfg = ProxyConfig::from_lookup(&lookup, &|| None).expect("a valid boot");
     let sockets = bind_sockets(&cfg, &Clock::system(), metrics).await.expect("bound");
     sockets.shards.into_iter().next().expect("one shard")
+}
+
+/// A sender on the loopback address `ip`.
+async fn peer(ip: &str) -> tokio::net::UdpSocket {
+    tokio::net::UdpSocket::bind(format!("{ip}:0")).await.expect("the peer")
 }
 
 fn options(call_id: &str) -> String {
@@ -171,24 +180,47 @@ async fn next_queued(face: &dyn UdpEndpoint) -> Option<String> {
     Some(String::from_utf8_lossy(&packet.expect("the endpoint is open").raw).into_owned())
 }
 
-/// `datagrams` sent in order from one loopback peer to `face`.
-async fn send_in_order(face: &dyn UdpEndpoint, datagrams: &[&str]) {
-    let peer = tokio::net::UdpSocket::bind("127.0.0.1:0").await.expect("the peer");
+/// `datagrams` sent in order from `peer` to `face`.
+async fn send_in_order(peer: &tokio::net::UdpSocket, face: &dyn UdpEndpoint, datagrams: &[&str]) {
     for datagram in datagrams {
         peer.send_to(datagram.as_bytes(), face.local_addr()).await.expect("sent");
     }
 }
 
+/// A single-face proxy queues, at the watermark, a new INVITE sent from the
+/// address of a worker its configuration lists, and sheds a new INVITE from
+/// any other address: the datagram sent after it is the next one queued.
+#[tokio::test]
+async fn at_the_watermark_a_single_face_queues_a_listed_workers_new_invite() {
+    let (worker, outsider) = (peer("127.0.0.1").await, peer("127.0.0.2").await);
+    let workers = format!("w0@{}", worker.local_addr().expect("bound"));
+    let metrics = Arc::new(ProxyMetrics::new());
+    let shard = at_the_watermark(&metrics, &workers, false).await;
+    let face = shard.internal.as_ref();
+    let (waiting, leg, after) = (options("waiting"), new_invite("leg"), options("after"));
+    send_in_order(&worker, face, &[&waiting, &leg]).await;
+    send_in_order(&outsider, face, &[&new_invite("outsider"), &after]).await;
+    assert_eq!(next_queued(face).await, Some(waiting));
+    assert_eq!(
+        next_queued(face).await,
+        Some(leg),
+        "the listed worker's new INVITE is queued at the watermark"
+    );
+    assert_eq!(next_queued(face).await, Some(after), "the outsider's new INVITE is shed");
+    assert_eq!(metrics.intake_shed(), 1);
+}
+
 /// The internal face carries the workers' traffic: at the watermark a new
-/// INVITE from a worker on an address the registry does not list is queued
-/// behind the datagram already waiting. A datagram no response can answer is
-/// still dropped there.
+/// INVITE from a worker on an address the configuration does not list is
+/// queued behind the datagram already waiting. A datagram no response can
+/// answer is still dropped there.
 #[tokio::test]
 async fn at_the_watermark_the_internal_face_queues_a_new_invite() {
     let metrics = Arc::new(ProxyMetrics::new());
-    let shard = dual_face_at_the_watermark(&metrics).await;
+    let shard = at_the_watermark(&metrics, "w0@10.0.0.1:5060", true).await;
     let (waiting, invite) = (options("waiting"), new_invite("internal"));
-    send_in_order(shard.internal.as_ref(), &[&waiting, "\x00 not SIP", &invite]).await;
+    let datagrams = [waiting.as_str(), "\x00 not SIP", &invite];
+    send_in_order(&peer("127.0.0.1").await, shard.internal.as_ref(), &datagrams).await;
     assert_eq!(next_queued(shard.internal.as_ref()).await, Some(waiting));
     assert_eq!(
         next_queued(shard.internal.as_ref()).await,
@@ -198,15 +230,18 @@ async fn at_the_watermark_the_internal_face_queues_a_new_invite() {
     assert_eq!((metrics.intake_shed(), metrics.intake_unanswerable()), (0, 1));
 }
 
-/// The external face sheds: at the watermark an outsider's new INVITE is
-/// dropped, and the datagram sent after it is the next one queued.
+/// The external face sheds: at the watermark a new INVITE is dropped there,
+/// even one sent from the address of a listed worker, and the datagram sent
+/// after it is the next one queued.
 #[tokio::test]
 async fn at_the_watermark_the_external_face_sheds_a_new_invite() {
     let metrics = Arc::new(ProxyMetrics::new());
-    let shard = dual_face_at_the_watermark(&metrics).await;
+    let sender = peer("127.0.0.1").await;
+    let workers = format!("w0@{}", sender.local_addr().expect("bound"));
+    let shard = at_the_watermark(&metrics, &workers, true).await;
     let external = shard.external.expect("a dual-face shard");
     let (waiting, invite, after) = (options("waiting"), new_invite("external"), options("after"));
-    send_in_order(external.as_ref(), &[&waiting, &invite, &after]).await;
+    send_in_order(&sender, external.as_ref(), &[&waiting, &invite, &after]).await;
     assert_eq!(next_queued(external.as_ref()).await, Some(waiting));
     assert_eq!(next_queued(external.as_ref()).await, Some(after), "the new INVITE is shed");
     assert_eq!(metrics.intake_shed(), 1);

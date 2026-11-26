@@ -8,9 +8,11 @@
 //! real recv loop on the simulated fabric.
 
 use crate::common::call_end::busy_at_callee;
+use crate::common::retransmits::{timer_a_copies, TIMER_B};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::time::Instant;
 
 use sip_clock::Clock;
 use sip_message::CustomParser;
@@ -68,7 +70,7 @@ impl Rig {
             ProxyAddr::from(addr(PROXY)),
             strategy,
             registry,
-            Arc::new(IdGen::seeded(0x1194)),
+            Arc::new(IdGen::seeded(0x5ed)),
             CustomParser::new(),
         )
         .clock(Clock::test_at(0))
@@ -137,23 +139,32 @@ async fn at_the_watermark_a_registered_workers_new_invite_is_relayed() {
 
 /// The source address is the evidence: an outsider's new INVITE is shed, and
 /// so is one claiming the worker's Via sent-by or carrying an `;outbound`
-/// Route marker to the proxy.
+/// Route marker to the proxy. The first send and every Timer A copy (RFC 3261
+/// §17.1.1.2) are shed; the outsider's transaction ends at Timer B with
+/// nothing heard.
 #[tokio::test(start_paused = true)]
 async fn at_the_watermark_an_outsiders_new_invite_is_shed_whatever_it_claims() {
     let rig = Rig::at_the_watermark().await;
     let marker = format!("Route: <sip:{PROXY};lr;outbound>\r\n");
+    let mut shed = 0;
     for (call_id, sent_by, extra) in [
         ("plain", OUTSIDER, String::new()),
         ("worker-via", WORKER, String::new()),
         ("marker", OUTSIDER, marker),
     ] {
         let invite = new_invite(call_id, sent_by, &extra);
-        rig.outsider.send_to(&invite, addr(PROXY)).await.expect("sent");
-        rig.settle().await;
-        rig.nothing_relayed(call_id);
+        let sent_at = Instant::now();
+        for at in std::iter::once(Duration::ZERO).chain(timer_a_copies()) {
+            tokio::time::sleep_until(sent_at + at).await;
+            rig.outsider.send_to(&invite, addr(PROXY)).await.expect("sent");
+            rig.settle().await;
+            shed += 1;
+            rig.nothing_relayed(call_id);
+            assert_eq!(rig.metrics.intake_shed(), shed, "{call_id}: the send at {at:?} is shed");
+        }
+        tokio::time::sleep_until(sent_at + TIMER_B).await;
         assert!(Rig::drained(rig.outsider.as_ref()).is_empty(), "{call_id}: nothing answers it");
     }
-    assert_eq!(rig.metrics.intake_shed(), 3, "each is counted shed");
 }
 
 /// An outsider's emergency INVITE passes the shed and reaches the worker,
