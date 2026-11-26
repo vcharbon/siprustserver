@@ -121,7 +121,7 @@ impl Named {
 
     /// The lookup in flight, or one started now whatever is kept; the
     /// addresses kept when [`LookupSettings::max_stuck`] lookups are stuck,
-    /// refused when none are.
+    /// refused when none are kept.
     fn fresh_lookup(self: &Arc<Self>) -> Found {
         spawn_started(self.join_or_start())
     }

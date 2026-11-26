@@ -405,12 +405,10 @@ async fn a_fresh_lookup_with_nothing_kept_and_nothing_found_is_none() {
     assert_eq!(resolver.lookups.load(Ordering::SeqCst), 1);
 }
 
-/// A [`ResolvedTarget::resolve_all`] of the target.
 async fn resolve_all(target: Arc<ResolvedTarget>) -> Option<Addresses> {
     target.resolve_all().await
 }
 
-/// A [`ResolvedTarget::resolve_fresh_or_kept`] of the target.
 async fn resolve_fresh_or_kept(target: Arc<ResolvedTarget>) -> Option<Addresses> {
     target.resolve_fresh_or_kept().await
 }
