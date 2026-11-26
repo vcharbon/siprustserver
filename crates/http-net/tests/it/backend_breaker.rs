@@ -191,7 +191,7 @@ async fn a_hanging_name_service_keeps_the_probe_on_the_kept_address() {
 #[tokio::test(start_paused = true)]
 async fn a_moved_backend_is_reached_by_the_first_probe() {
     let rig = Rig::new("moved:8080", ClientSettings::default()).await;
-    let moved: SocketAddr = "10.0.0.2:8080".parse().unwrap();
+    let moved: SocketAddr = "192.0.2.2:8080".parse().unwrap();
     let mover = Backend::answering(200);
     let _moved = rig.net.serve(moved, mover.clone()).await.unwrap();
     keep_the_address(&rig).await;
@@ -201,6 +201,30 @@ async fn a_moved_backend_is_reached_by_the_first_probe() {
     advance_settled(Duration::from_millis(1_050)).await;
     assert!(!rig.client.is_open(), "the first probe reached the new address");
     assert_eq!(mover.served("/health"), 1);
+    assert_eq!(rig.send().await.map(|r| r.status), Ok(200));
+    assert_eq!(mover.served("/call"), 1, "served at the new address");
+}
+
+/// The backend moves while the breaker is open: the probe at 1 s fails on
+/// the old address, which refuses; at 1.5 s the name resolves to a new
+/// address that answers. The probe at 2 s reaches the new address and closes
+/// the breaker, and the next request is served there.
+#[tokio::test(start_paused = true)]
+async fn a_backend_that_moves_while_open_is_reached_by_the_next_probe() {
+    let rig = Rig::new("moved-open:8080", ClientSettings::default()).await;
+    let moved: SocketAddr = "192.0.2.3:8080".parse().unwrap();
+    let mover = Backend::answering(200);
+    let _moved = rig.net.serve(moved, mover.clone()).await.unwrap();
+    keep_the_address(&rig).await;
+    open_by_refusals(&rig).await;
+
+    advance_settled(Duration::from_millis(1_500)).await;
+    assert!(rig.client.is_open(), "the probe at 1 s found the old address refusing");
+    rig.resolver.point("moved-open:8080", [moved]);
+    advance_settled(Duration::from_millis(550)).await;
+    assert!(!rig.client.is_open(), "the probe at 2 s reached the new address");
+    assert_eq!(mover.served("/health"), 1);
+    assert_eq!(metrics::breaker_transitions("moved-open:8080", false), 1);
     assert_eq!(rig.send().await.map(|r| r.status), Ok(200));
     assert_eq!(mover.served("/call"), 1, "served at the new address");
 }

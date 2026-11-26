@@ -120,7 +120,8 @@ impl Named {
     }
 
     /// The lookup in flight, or one started now whatever is kept; the
-    /// addresses kept when [`LookupSettings::max_stuck`] lookups are stuck.
+    /// addresses kept when [`LookupSettings::max_stuck`] lookups are stuck,
+    /// refused when none are.
     fn fresh_lookup(self: &Arc<Self>) -> Found {
         spawn_started(self.join_or_start())
     }
@@ -185,7 +186,9 @@ fn spawn_started((found, started): (Found, Option<PendingLookup>)) -> Found {
 }
 
 /// A lookup holding the slot, not spawned yet. Dropped unspawned, or its
-/// task dropped unpolled, it frees the slot and its waiters get no address.
+/// task dropped unpolled, it frees the slot and its waiters get no address
+/// from it: a [`ResolvedTarget::resolve_fresh_or_kept`] waiter gets the
+/// addresses kept.
 struct PendingLookup {
     done: LookupDone,
     tx: watch::Sender<Answer>,
