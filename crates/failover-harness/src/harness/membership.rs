@@ -139,6 +139,66 @@ impl FailoverHarness {
         }
     }
 
+    /// **Empty the slice: every endpoint leaves it at once** — the orchestrator
+    /// deleted the Service, so its endpoint set is gone, every worker's own
+    /// included, while every process runs on untouched. The proxy's registry
+    /// drops every ordinal, and every live worker's membership is reconciled
+    /// to the empty set as its informer's is
+    /// ([`SimulatedMembership::reconcile_to`](topology::SimulatedMembership::reconcile_to)).
+    /// Records the orchestrator's, the proxy's and every worker's belief at
+    /// this instant.
+    pub fn empty_the_slice(&mut self) {
+        let live = self.views.live_incarnations();
+        for ordinal in distinct_ordinals(&live) {
+            self.mark(&ordinal, None, "empty_the_slice", "every endpoint left the slice at once");
+            self.views.record("orchestrator", &ordinal, Belief::Withdrawn, "empty_the_slice");
+            if let Some(registry) = self.views.proxy_registry() {
+                registry.remove(&ordinal);
+                self.views.record("proxy", &ordinal, Belief::Absent, "empty_the_slice");
+            }
+        }
+        for (observer, ordinal, _, membership) in &live {
+            membership.reconcile_to(Vec::new());
+            for peer in distinct_ordinals(&live).iter().filter(|p| *p != ordinal) {
+                self.views.record(observer, peer, Belief::PeerParked, "empty_the_slice");
+            }
+        }
+    }
+
+    /// **Fill the slice again** — the counterpart of
+    /// [`empty_the_slice`](Self::empty_the_slice): the recreated Service lists
+    /// every live ordinal again, bound to its newest incarnation at that
+    /// incarnation's address. The proxy publishes each at `Unknown` health
+    /// (nothing has probed it since), and every live worker's membership is
+    /// reconciled to the whole set.
+    pub fn fill_the_slice(&mut self) {
+        let live = self.views.live_incarnations();
+        let ordinals = distinct_ordinals(&live);
+        let members: Vec<Peer> = ordinals.iter().map(|o| self.bound_member(o)).collect();
+        for ordinal in &ordinals {
+            self.mark(ordinal, None, "fill_the_slice", "every endpoint listed again");
+            self.views.record("orchestrator", ordinal, Belief::Admitted, "fill_the_slice");
+            let newest = live.iter().rev().find(|(_, o, _, _)| o == ordinal);
+            if let (Some(registry), Some((_, _, addr, _))) = (self.views.proxy_registry(), newest) {
+                registry.add(sip_proxy::registry::WorkerEntry {
+                    health: WorkerHealth::Unknown,
+                    ..sip_proxy::registry::WorkerEntry::alive(
+                        ordinal,
+                        ProxyAddr::new(addr.ip().to_string(), addr.port()),
+                    )
+                });
+                let belief = Belief::Registered(WorkerHealth::Unknown);
+                self.views.record("proxy", ordinal, belief, "fill_the_slice");
+            }
+        }
+        for (observer, ordinal, _, membership) in &live {
+            membership.reconcile_to(members.clone());
+            for peer in ordinals.iter().filter(|p| *p != ordinal) {
+                self.views.record(observer, peer, Belief::PeerActive, "fill_the_slice");
+            }
+        }
+    }
+
     /// **Re-admit `ordinal` at `addr`** — the counterpart of
     /// [`withdraw`](Self::withdraw): the proxy publishes the endpoint again at
     /// `addr` with health `Unknown` (nothing has probed it yet) and every other
@@ -228,4 +288,15 @@ impl FailoverHarness {
             membership.add(member.clone());
         }
     }
+}
+
+/// The ordinals of `live` incarnations, each once, in first-seen order.
+fn distinct_ordinals<T, U, V>(live: &[(T, String, U, V)]) -> Vec<String> {
+    let mut ordinals: Vec<String> = Vec::new();
+    for (_, ordinal, _, _) in live {
+        if !ordinals.contains(ordinal) {
+            ordinals.push(ordinal.clone());
+        }
+    }
+    ordinals
 }

@@ -6,7 +6,7 @@ use std::sync::Arc;
 use sip_clock::Clock;
 use tokio::sync::broadcast;
 
-use crate::{MemberDelta, Membership, MembershipState, Peer};
+use crate::{reconcile_to_desired, MemberDelta, Membership, MembershipState, Peer};
 
 /// A membership whose peer set is driven imperatively by a test. Cheap to clone
 /// — clones share the same underlying state + delta channel. Clock-injected
@@ -56,6 +56,13 @@ impl SimulatedMembership {
     /// Add (or replace) a peer, emitting [`MemberDelta::Added`].
     pub fn add(&self, peer: Peer) {
         self.state.add(peer);
+    }
+
+    /// The source listed the whole set `desired`: the view is reconciled to it
+    /// as a watch event is ([`reconcile_to_desired`]), with the deltas that
+    /// close the gap.
+    pub fn reconcile_to(&self, desired: Vec<Peer>) {
+        reconcile_to_desired(&self.state, desired);
     }
 
     /// Remove the peer with `ordinal`, emitting [`MemberDelta::Removed`] (no-op

@@ -424,6 +424,18 @@ impl ViewLedger {
             .collect()
     }
 
+    /// Every live incarnation, as `(key, ordinal, SIP address, membership)`.
+    pub fn live_incarnations(&self) -> Vec<(String, String, SocketAddr, Arc<SimulatedMembership>)> {
+        self.inner
+            .lock()
+            .unwrap()
+            .incarnations
+            .iter()
+            .filter(|i| i.is_alive())
+            .map(|i| (i.key(), i.ordinal.clone(), i.sip_addr, i.membership.clone()))
+            .collect()
+    }
+
     /// The live incarnations that are NOT of `ordinal`, as `(key, membership)` —
     /// the peers a cluster membership primitive must drive.
     pub fn live_peers_of(&self, ordinal: &str) -> Vec<(String, Arc<SimulatedMembership>)> {

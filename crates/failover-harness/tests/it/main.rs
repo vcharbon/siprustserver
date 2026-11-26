@@ -53,6 +53,7 @@ mod drain_waits_for_a_backup_behind;
 mod drain_waits_for_an_unbacked_call;
 mod dual_face;
 mod ending_crossing_a_round;
+mod endpoint_set_emptied_at_once;
 mod failover;
 mod failover_matrix;
 mod failure_dump_names_the_node;
