@@ -644,10 +644,10 @@ spec:
             - /bin/sh
             - -c
             - ip -o route show table 5060 default | grep -q ' via '
-          failureThreshold: 1
+          failureThreshold: 2
           periodSeconds: 1
           successThreshold: 1
-          timeoutSeconds: 1
+          timeoutSeconds: 2
         resources:
           limits:
             memory: 32Mi

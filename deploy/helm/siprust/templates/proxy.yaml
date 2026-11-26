@@ -244,6 +244,10 @@ spec:
         # The external next hops in the table of the external VIP's traffic
         # (ADR-0056 §11). Ready while the table holds one: a pod whose table is
         # empty stays out of Ready, across a restart of this container too.
+        # The probe takes the pod's readiness period and threshold, so an empty
+        # table reads not Ready within periodSeconds × failureThreshold; the 2 s
+        # timeout holds an exec on a CPU-starved node, and a hung exec reads not
+        # Ready within failureThreshold × 2 s.
         - name: egress-routes
           {{- include "siprust.netToolsImage" . | nindent 10 }}
           command: ["/bin/sh", "-c"]
@@ -258,9 +262,9 @@ spec:
             exec:
               command: ["/bin/sh", "-c", "ip -o route show table 5060 default | grep -q ' via '"]
             periodSeconds: {{ int $p.readinessProbe.periodSeconds }}
-            failureThreshold: 1
+            failureThreshold: {{ int $p.readinessProbe.failureThreshold }}
             successThreshold: 1
-            timeoutSeconds: 1
+            timeoutSeconds: 2
           securityContext:
             runAsUser: 0
             runAsNonRoot: false

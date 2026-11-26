@@ -86,6 +86,13 @@ class Rendered(unittest.TestCase):
                 env={"PATH": os.environ["PATH"], "TABLE": table})
             self.assertEqual(read.returncode == 0, ready, table)
 
+    def test_the_probe_takes_the_pods_readiness_threshold_and_outlasts_a_slow_exec(self) -> None:
+        workload = proxy("--set", "proxy.readinessProbe.failureThreshold=3")
+        probe = container(workload, "egress-routes")["readinessProbe"]
+        pod = container(workload, "sip-front-proxy")["readinessProbe"]
+        self.assertEqual((probe["periodSeconds"], probe["failureThreshold"], probe["timeoutSeconds"]),
+                         (pod["periodSeconds"], 3, 2))
+
     def test_empty_next_hops_refuse_the_render(self) -> None:
         err = render_error(SIPRUST, *KIND, "--set", "network.externalNextHops=null",
                            "--set", "proxy.announce.metallb.enabled=false",
