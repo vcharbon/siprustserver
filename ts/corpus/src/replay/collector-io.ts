@@ -71,17 +71,49 @@ export const locker = (
     )
   })
 
-/** `event` as a line of the run's output. */
-export const lineOf = (event: CollectorRun.Event): string =>
-  `[collector] ${event.collector}: ${event.phase}${event.message === undefined ? "" : `: ${event.message}`}`
+/** `ms` in words: milliseconds under a second, else seconds to the tenth. */
+export const durationOf = (ms: number): string => (ms < 1_000 ? `${Math.round(ms)} ms` : `${(ms / 1_000).toFixed(1)} s`)
 
-/** Where a scope's collector events go: the output, and the job `job` names where it is one; a store refusing one is said, never the run's failure. */
+/** `event` as a line of the run's output, with the time its step took where `tookMs` states it. */
+export const lineOf = (event: CollectorRun.Event, tookMs?: number): string =>
+  `[collector] ${event.collector}: ${event.phase}${tookMs === undefined ? "" : ` (${durationOf(tookMs)})`}` +
+  (event.message === undefined ? "" : `: ${event.message}`)
+
+/** The phase that starts each step, and those that end it. */
+const STARTS: ReadonlySet<CollectorRun.Phase> = new Set(["open", "collect", "close"])
+const ENDS: ReadonlySet<CollectorRun.Phase> = new Set(["opened", "collected", "closed", "failed"])
+
+/**
+ * The time each collector's step took, on the events' clock: the start phase
+ * of a step remembered by collector, its end phase answered with the time
+ * since and forgotten; undefined for any other event.
+ */
+const stepTimer = () => {
+  const started = new Map<string, number>()
+  return (event: CollectorRun.Event): number | undefined => {
+    if (STARTS.has(event.phase)) {
+      started.set(event.collector, event.clock_ms)
+      return undefined
+    }
+    const at = started.get(event.collector)
+    if (!ENDS.has(event.phase) || at === undefined) return undefined
+    started.delete(event.collector)
+    return event.clock_ms - at
+  }
+}
+
+/**
+ * Where a scope's collector events go: the output, each step's end with the
+ * time the step took, and the job `job` names where it is one; a store
+ * refusing one is said, never the run's failure.
+ */
 export const sinkOf = (
   job: { readonly id: number; readonly events: JobEvents.Interface } | undefined
-): CollectorRun.Sink =>
-(event) =>
+): CollectorRun.Sink => {
+  const took = stepTimer()
+  return (event) =>
   Effect.andThen(
-    Console.log(lineOf(event)),
+    Console.log(lineOf(event, took(event))),
     job === undefined ? Effect.void : job.events.append(job.id, {
       subject: event.collector,
       phase: event.phase,
@@ -92,3 +124,4 @@ export const sinkOf = (
       Effect.catchCause(() => Console.error(`[collector] job ${job.id}: the store refused the event ${event.phase} of ${event.collector}`))
     )
   )
+}

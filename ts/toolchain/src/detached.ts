@@ -30,22 +30,49 @@ export class NotLaunched extends Schema.TaggedError<NotLaunched>()("Toolchain.No
   }
 }
 
+/** The stamp that starts every line of a detached command's log: `HH:MM:SS.mmmZ` and a space. */
+export const STAMP_PATTERN = /^\d{2}:\d{2}:\d{2}\.\d{3}Z /
+
+/** The log's text with the stamp of each line taken off. */
+export const unstamped = (log: string): string => log.split("\n").map((line) => line.replace(STAMP_PATTERN, "")).join("\n")
+
+/** How long the supervisor waits, once the command ended, for the stamper to write the last of its output. */
+const DRAIN_S = 2
+
 /**
- * The supervisor: runs the command into the log and records its exit. A TERM
- * or an INT never ends it: before the command starts a no-op handler takes
- * them (the command still starts with the default disposition), and once it
- * runs they are ignored — the command, in its group, takes them itself — so
- * its wait is never cut short and the code it records is the command's own.
- * It writes its pid record only once the command runs.
+ * The supervisor: runs the command into the log, each line stamped with its
+ * UTC time of day to the millisecond ({@link STAMP_PATTERN}), and records its
+ * exit. A TERM or an INT never ends it: they are ignored before the stamper
+ * starts, which inherits that and drains the command's output to its end; a
+ * no-op handler takes them while the command starts (so it starts with the
+ * default disposition), and they are ignored again once it runs — the
+ * command, in its group, takes them itself — so its wait is never cut short
+ * and the code it records is the command's own. It writes its pid record only
+ * once the command runs, and its exit once the stamper has written the
+ * command's last line, or {@link DRAIN_S} after the command ended where a
+ * process the command left still holds its output.
  */
 const SUPERVISOR = `
 d="$1"; shift
+stamp() {
+  export TZ=UTC0
+  local line t
+  while IFS= read -r line || [ -n "$line" ]; do
+    t="$EPOCHREALTIME"
+    printf '%(%H:%M:%S)T.%.3sZ %s\\n' "\${t%[.,]*}" "\${t#*[.,]}" "$line"
+  done
+}
+trap '' TERM INT
+exec 3> >(stamp >> "$d/log")
+stamper=$!
 trap ':' TERM INT
-"$@" >> "$d/log" 2>&1 &
+"$@" >&3 2>&1 3>&- &
 child=$!
+exec 3>&-
 trap '' TERM INT
 echo "$$ $(awk '{ print $22 }' "/proc/$$/stat")" > "$d/pid.tmp" && mv "$d/pid.tmp" "$d/pid"
 wait "$child"; code=$?
+for _ in $(seq ${DRAIN_S * 10}); do kill -0 "$stamper" 2> /dev/null || break; sleep 0.1; done
 echo "$code" > "$d/exit.tmp" && mv "$d/exit.tmp" "$d/exit"
 exit "$code"
 `

@@ -1,7 +1,8 @@
 /**
  * A detached command: its launch returns while it runs, its record names the
- * supervisor by pid and start ticks, its output lands in the log and its exit
- * code in `exit`; a TERM to the supervisor's group is forwarded to the
+ * supervisor by pid and start ticks, its output lands in the log, each line
+ * stamped, and its exit code in `exit`, a background child holding its
+ * output delaying it at most the drain bound; a TERM to the supervisor's group is forwarded to the
  * command and its exit still recorded; a record still running refuses a
  * second launch over it.
  */
@@ -73,7 +74,9 @@ describe("Detached.launch", () => {
     const dir = dirOf()
     const launched = await run(Detached.launch(dir, ["sh", "-c", "echo said; echo 'on err' >&2; exit 3"]))
     expect(await exited(dir)).toBe(3)
-    expect(fs.readFileSync(launched.log, "utf8")).toBe("said\non err\n")
+    const log = fs.readFileSync(launched.log, "utf8")
+    expect(Detached.unstamped(log)).toBe("said\non err\n")
+    expect(log.split("\n").filter((line) => line !== "").every((line) => Detached.STAMP_PATTERN.test(line))).toBe(true)
     expect(fs.readFileSync(path.join(dir, "cmd"), "utf8")).toBe("sh -c 'echo said; echo '\\''on err'\\'' >&2; exit 3'\n")
     const record = await run(Liveness.recorded(path.join(dir, "pid")))
     expect(record?.pid).toBe(launched.pid)
@@ -85,7 +88,33 @@ describe("Detached.launch", () => {
     const cwd = path.dirname(dir)
     await run(Detached.launch(dir, ["sh", "-c", "pwd; echo $DETACHED_FACT"], { cwd, env: { DETACHED_FACT: "stated" } }))
     expect(await exited(dir)).toBe(0)
-    expect(fs.readFileSync(path.join(dir, "log"), "utf8")).toBe(`${fs.realpathSync(cwd)}\nstated\n`)
+    expect(Detached.unstamped(fs.readFileSync(path.join(dir, "log"), "utf8"))).toBe(`${fs.realpathSync(cwd)}\nstated\n`)
+  })
+
+  it("stamps each line with the UTC time it was written, a last line without a newline included", async () => {
+    const dir = dirOf()
+    const before = new Date().toISOString().slice(11, 23)
+    await run(Detached.launch(dir, ["sh", "-c", "echo first; printf last"]))
+    expect(await exited(dir)).toBe(0)
+    const after = new Date().toISOString().slice(11, 23)
+    const lines = fs.readFileSync(path.join(dir, "log"), "utf8").split("\n").filter((line) => line !== "")
+    expect(lines.map((line) => line.replace(Detached.STAMP_PATTERN, ""))).toEqual(["first", "last"])
+    for (const line of lines) {
+      const stamp = line.slice(0, 12)
+      expect(stamp >= before || after < before).toBe(true)
+      expect(stamp <= after || after < before).toBe(true)
+    }
+  })
+
+  it("records the exit of a command whose background child still holds its output, the command's lines in the log", async () => {
+    const dir = dirOf()
+    await run(Detached.launch(dir, ["sh", "-c", "sleep 3600 & echo done; exit 4"]))
+    expect(await exited(dir)).toBe(4)
+    expect(Detached.unstamped(fs.readFileSync(path.join(dir, "log"), "utf8"))).toBe("done\n")
+    const record = await run(Liveness.recorded(path.join(dir, "pid")))
+    if (record === undefined) throw new Error(`${dir} holds no pid record`)
+    await stopped(dir)
+    await run(Detached.terminateGroup(record.pid))
   })
 
   it("takes a TERM to its group in the command and records the command's own exit; refuses a launch over a running record", async () => {

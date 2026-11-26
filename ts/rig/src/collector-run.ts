@@ -38,6 +38,7 @@ import type * as Judge from "./judge.js"
 import type * as Lanes from "./lanes.js"
 import type * as RigPath from "./rig-path.js"
 import * as ScopeJudging from "./scope-judging.js"
+import * as StepRelay from "./step-relay.js"
 
 /**
  * What an event says of a step; `refused` is a pre-check's `fail`, which
@@ -250,11 +251,15 @@ const lastLineOf = (file: string): string | undefined => {
   }
 }
 
-/** Runs `step`'s executable `file` of `instance` within `timeoutMs`; how it ended and what that says, its log's last line included. */
+/**
+ * Runs `step`'s executable `file` of `instance` within `timeoutMs`, its log
+ * relayed to the run's output as it grows (`step-relay.ts`); how it ended and
+ * what that says, its log's last line included.
+ */
 const runStep = (instance: Instance, file: string, step: "open" | "collect" | "close", timeoutMs: number, stdout?: string) => {
   const log = path.join(instance.dir, `${step}.log`)
   return Effect.map(
-    Executable.run({
+    StepRelay.relayed(instance.label, log, Executable.run({
       dir: instance.collector.dir,
       file,
       ...layoutOf(instance),
@@ -262,7 +267,7 @@ const runStep = (instance: Instance, file: string, step: "open" | "collect" | "c
       timeoutMs,
       log,
       ...(stdout === undefined ? {} : { stdout })
-    }),
+    })),
     (ended) => {
       const last = Executable.succeeded(ended) ? undefined : lastLineOf(log)
       return { ended, said: `${step} ${Executable.describe(ended)}${last === undefined ? "" : `: ${last}`}, its log ${log}` }
