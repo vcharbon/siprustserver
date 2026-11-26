@@ -10,4 +10,8 @@ ignore = [
     # which only the media crate's webrtc-rs framing witness links; media is test tooling,
     # in no runner binary.
     "RUSTSEC-2026-0441",
+    # chrono (unmaintained): a dependency of rvoip-sip-core alone, which only sip-message's
+    # `rvoip-oracle` feature links (the parity oracle, ADR-0001); no workspace build turns it
+    # on and production closures refuse it (`purity.toml`).
+    "RUSTSEC-2026-0543",
 ]
