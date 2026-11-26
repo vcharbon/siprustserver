@@ -111,6 +111,10 @@ pub struct Call {
     pub cdr_events: Vec<CdrEvent>,
     pub state: CallModelState,
     pub created_at: i64,
+    /// The epoch ms at which the caller's INVITE opened its server
+    /// transaction, at or before [`created_at`](Self::created_at): what a node
+    /// that asks the call's decision again counts the start bound from.
+    pub received_at: i64,
     pub trace_id: Option<String>,
     pub root_span_id: Option<String>,
     pub sampled: Option<bool>,

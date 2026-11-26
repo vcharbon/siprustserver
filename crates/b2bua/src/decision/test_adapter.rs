@@ -258,21 +258,10 @@ fn parse_service_ext(obj: &serde_json::Value) -> BTreeMap<String, serde_json::Va
         .unwrap_or_default()
 }
 
-/// `[{uri, q?}]` → ordered redirect Contact list.
+/// `[{uri, q?, params?}]` → ordered redirect Contact list.
 fn parse_contacts(v: Option<&serde_json::Value>) -> Vec<RedirectContact> {
     v.and_then(|x| x.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|c| {
-                    Some(RedirectContact {
-                        uri: c.get("uri")?.as_str()?.to_string(),
-                        q: c.get("q")
-                            .filter(|q| q.is_number())
-                            .and_then(|q| q.to_string().parse().ok()),
-                    })
-                })
-                .collect()
-        })
+        .map(|arr| arr.iter().filter_map(RedirectContact::from_json).collect())
         .unwrap_or_default()
 }
 

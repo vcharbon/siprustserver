@@ -29,12 +29,10 @@ fn check(next_hops: &[Ipv4Addr]) -> FaceCheck {
     FaceCheck { interface: "eth1".into(), next_hops: next_hops.to_vec() }
 }
 
-/// A solicit that sends.
 fn sent(_: Ipv4Addr) -> std::io::Result<()> {
     Ok(())
 }
 
-/// One reading with a fresh latch.
 fn read(
     check: &FaceCheck,
     root: &std::path::Path,
@@ -43,7 +41,6 @@ fn read(
     check.read_at(root, table, sent, &mut FaceLatch::default())
 }
 
-/// Rewrite `eth1`'s operstate under `root`.
 fn set_operstate(root: &std::path::Path, operstate: &str) {
     std::fs::write(root.join("eth1").join("operstate"), format!("{operstate}\n")).unwrap();
 }
@@ -364,7 +361,6 @@ async fn a_late_tick_reads_once_and_the_next_waits_a_period() {
     task.abort();
 }
 
-/// One live next hop of two carries the face.
 #[test]
 fn one_live_next_hop_of_two_keeps_the_face_usable() {
     let root = class_net("one-of-two", "up", None);
@@ -406,7 +402,6 @@ fn newneigh(ifindex: i32, addr: Ipv4Addr, state: u16) -> Vec<u8> {
     payload.extend_from_slice(&ifindex.to_ne_bytes());
     payload.extend_from_slice(&state.to_ne_bytes());
     payload.extend_from_slice(&[0, 1]);
-    // NDA_LLADDR: 6 bytes, padded to 8.
     payload.extend_from_slice(&10u16.to_ne_bytes());
     payload.extend_from_slice(&2u16.to_ne_bytes());
     payload.extend_from_slice(&[2, 0, 0, 0, 0, 1, 0, 0]);
@@ -477,7 +472,6 @@ fn the_request_asks_a_dump_of_the_ipv4_table() {
     assert_eq!(req[16], 2);
 }
 
-/// The running kernel answers the dump.
 #[test]
 fn the_running_kernel_answers_the_dump() {
     dump_ipv4().expect("the neighbour table is readable");

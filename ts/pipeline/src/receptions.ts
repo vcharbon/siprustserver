@@ -1,9 +1,11 @@
 /**
  * What each leg's scripted actor received, and what it sent, one summary per
  * datagram, read off the run's recording: which step claimed it, its start line
- * and CSeq method, its From and Record-Route, and the subscription state,
- * sipfrag status and session origin it carries. The run-side facts a rule reads
- * beside a confrontation row, which states only the one message it compares.
+ * and CSeq number and method, its From and Record-Route, and the subscription state,
+ * sipfrag status and session origin it carries; and the one order across both
+ * directions a rule reads, a BYE ahead of the INVITE's final. The run-side
+ * facts a rule reads beside a confrontation row, which states only the one
+ * message it compares.
  */
 import type { Bundle } from "@sip/contracts"
 import type { Reception } from "./classifier.js"
@@ -12,6 +14,8 @@ import { bodyBytesOf, headersInOrderRaw, headerValuesOf, headText, startLineOf }
 
 const ORIGIN_LINE = /^o=[^\r\n]*/m
 const FRAG_STATUS = /^SIP\/2\.0\s+(\d{3})/
+/** A CSeq number: 1*DIGIT (RFC 3261 §20.16), under 2**31 (§8.1.1.5), so ten digits at most. */
+const CSEQ_NUMBER = /^\d{1,10}$/
 
 /** The text of a recorded body, within its stated length; empty where it carries none. */
 const bodyText = (message: Bundle.RecordedMessage): string => {
@@ -25,7 +29,9 @@ export const receptionOf = (message: Bundle.RecordedMessage): Reception | undefi
   const start = startLineOf(head)
   if (start === undefined) return undefined
   const headers = headersInOrderRaw(head)
-  const cseqMethod = (headerValuesOf(headers, "CSeq")[0] ?? "").trim().split(/\s+/)[1]?.toUpperCase() ?? ""
+  const [cseqNumber = "", method = ""] = (headerValuesOf(headers, "CSeq")[0] ?? "").trim().split(/\s+/)
+  const cseqMethod = method.toUpperCase()
+  const cseq = CSEQ_NUMBER.test(cseqNumber) ? Number(cseqNumber) : undefined
   const state = headerValuesOf(headers, "Subscription-State")[0]?.split(";")[0]?.trim().toLowerCase()
   const from = headerValuesOf(headers, "From")[0]?.trim()
   const recordRoute = items("record-route", headerValuesOf(headers, "Record-Route"))
@@ -37,6 +43,7 @@ export const receptionOf = (message: Bundle.RecordedMessage): Reception | undefi
     ...(message.step === undefined ? {} : { step: message.step }),
     ...(start.kind === "request" ? { method: start.method } : { status: start.status }),
     cseqMethod,
+    ...(cseq === undefined ? {} : { cseq }),
     ...(state === undefined || state === "" ? {} : { subscriptionState: state }),
     ...(frag === null ? {} : { fragStatus: Number(frag[1]) }),
     ...(origin === undefined ? {} : { origin }),
@@ -54,6 +61,29 @@ export const receptionsOf = (
 export const sentOf = (
   recordings: ReadonlyMap<string, ReadonlyArray<Bundle.RecordedMessage>>
 ): ReadonlyMap<string, ReadonlyArray<Reception>> => summariesOf(recordings, "out")
+
+/**
+ * The legs whose actor sent a BYE before any final to the INVITE it sent
+ * there reached it, in the leg's wire order: a BYE that met the early dialog
+ * still standing (RFC 3261 §15). A provisional is no final.
+ */
+export const byeAheadOfInviteFinal = (
+  recordings: ReadonlyMap<string, ReadonlyArray<Bundle.RecordedMessage>>
+): ReadonlySet<string> =>
+  new Set(
+    [...recordings].flatMap(([leg, recording]) => {
+      const summaries = recording.flatMap((m) => {
+        const summary = m.repeat_of === undefined ? receptionOf(m) : undefined
+        return summary === undefined ? [] : [{ dir: m.dir, summary }]
+      })
+      const invited = summaries.some((s) => s.dir === "out" && s.summary.method === "INVITE")
+      const bye = summaries.findIndex((s) => s.dir === "out" && s.summary.method === "BYE")
+      const final = summaries.findIndex(
+        (s) => s.dir === "in" && s.summary.cseqMethod === "INVITE" && (s.summary.status ?? 0) >= 200
+      )
+      return invited && bye !== -1 && (final === -1 || bye < final) ? [leg] : []
+    })
+  )
 
 const summariesOf = (
   recordings: ReadonlyMap<string, ReadonlyArray<Bundle.RecordedMessage>>,

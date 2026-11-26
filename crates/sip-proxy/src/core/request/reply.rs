@@ -24,8 +24,7 @@ use super::{Arrival, RouteOutcome};
 /// absorbed past its sender's schedule (ADR-0063 §1).
 const COPY_PAST_SCHEDULE: &str = "copy_past_schedule";
 
-/// A typed value on the response generator's extra-header seam, which still
-/// takes wire lines.
+/// `value` as a wire header line for the response generator's extra headers.
 pub(super) fn extra_header(value: impl HeaderValue) -> SipHeader {
     let name = value.name();
     SipHeader { name: name.as_wire_str().into(), value: value.to_wire().into() }
@@ -35,9 +34,8 @@ impl ProxyCore {
     /// Reject `req` locally: answer it with `status`, counted under `metric`,
     /// remembered so its copies draw it on their sender's schedule and are
     /// absorbed past it (ADR-0063 §1), counted `copy_past_schedule`.
-    /// An ACK is never answered — nothing awaits a response to it — so a
-    /// rejected ACK is dropped, counted `ack_not_answered`; an ACK no worker
-    /// takes is a request dropped for want of a target (`no_target_dropped`).
+    /// An ACK is never answered (RFC 3261 §17), so a rejected ACK is dropped,
+    /// counted `ack_not_answered`.
     pub(super) async fn reply_reject(
         &self,
         req: &SipRequest,
@@ -106,6 +104,8 @@ impl ProxyCore {
     /// Refuse the new request `req` with a 503, `retry_after_sec` being the
     /// refusing stage's hint, counted once under `metric`: every later copy
     /// draws the same 503 from [`repeat_refusal`](Self::repeat_refusal).
+    /// A request whose lines no response can echo is counted and left
+    /// unanswered.
     pub(super) async fn refuse_new(
         &self,
         req: &SipRequest,
@@ -113,7 +113,6 @@ impl ProxyCore {
         retry_after_sec: u32,
         metric: &str,
     ) -> RouteOutcome {
-        // A request whose lines no response can echo is refused unanswered.
         if let Ok(resp) = self.refusals.refuse(req, arrival.src, retry_after_sec, self.now_ms()) {
             self.send_own_final(req, arrival, &resp).await;
         }
@@ -148,7 +147,6 @@ impl ProxyCore {
         Some(RouteOutcome { decision: RoutingDecisionKind::Cancel, target: None })
     }
 
-    /// Send what `repeat` owes `req`, or count it absorbed.
     async fn answer_copy(&self, req: &SipRequest, arrival: Arrival, repeat: Repeat) {
         match repeat {
             Repeat::Answer(resp) => self.send_own_final(req, arrival, &resp).await,
@@ -177,7 +175,6 @@ impl ProxyCore {
         }
     }
 
-    /// Send `resp`, the proxy's own final to `req`.
     async fn send_own_final(&self, req: &SipRequest, arrival: Arrival, resp: &SipResponse) {
         self.send_own_final_to(req.call_id().as_str(), arrival, resp).await;
     }
@@ -186,6 +183,8 @@ impl ProxyCore {
     /// the face that request arrived on (RFC 3581 §4) to the response target of
     /// its stamped top Via, the one address every response to that request
     /// goes to. The request's source where that target names no IP address.
+    /// Every final the proxy builds leaves through here, and only here does it
+    /// become a traced call's `sip.out`.
     pub(super) async fn send_own_final_to(
         &self,
         call_id: &str,
@@ -193,13 +192,8 @@ impl ProxyCore {
         resp: &SipResponse,
     ) {
         let dst = response_destination(resp.top_via()).unwrap_or(arrival.src);
-        // A recipe freezes into its own image, and that image IS the wire form.
         self.send_response(resp.image(), dst, arrival.face).await;
         self.metrics.record_message(Direction::Outbound, MessageResult::Responded);
-        // This is the proxy's ONLY self-generated-final seam, so it is the only
-        // place a traced call's own 503 / 483 / 420 / 400 becomes a `sip.out`.
-        // A shed call never reaches a downstream hop, so without this its span
-        // would show the INVITE arriving and nothing leaving.
         emit::responded(&self.traces, call_id, self.trace_ms(), dst, resp.image());
     }
 

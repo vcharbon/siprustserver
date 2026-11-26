@@ -199,6 +199,16 @@ impl B2buaConfig {
                 Self::DEFAULT_CALL_CONTROL_TIMEOUT_MS
             ));
         }
+        if self.call_start_bound_ms <= 0 || self.call_start_bound() >= self.call_control_timeout() {
+            out.push(format!(
+                "B2BUA_CALL_START_BOUND_MS={} is not above zero and below \
+                 B2BUA_CALL_CONTROL_TIMEOUT_MS={}: a new call starts inside its setup budget \
+                 (default {})",
+                self.call_start_bound_ms,
+                self.call_control_timeout_ms,
+                Self::DEFAULT_CALL_START_BOUND_MS
+            ));
+        }
         // An enabled bucket (size > 0) with no refill drains once and 503s
         // every new INVITE after the first burst.
         if self.cps_bucket_size > 0 && self.cps_bucket_rate == 0 {

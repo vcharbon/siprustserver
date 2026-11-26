@@ -396,3 +396,97 @@ a=rtpmap:96 {enc}\r\n"
     ];
     assert_eq!(violations(&PayloadTypeMappingStable, &msgs).len(), 1);
 }
+
+// ---- sdp-origin-continuity: a gap the relay inherited ---------------
+
+/// The B2BUA between ALICE (call `a`) and BOB (call `b`).
+const RELAY: &str = "10.0.0.9:5060";
+
+/// ALICE's third revision of her session: the description after the one the
+/// relay refused.
+const AUDIO_OFFER_V3: &str = "v=0\r\n\
+o=alice 424242 3 IN IP4 10.0.0.1\r\n\
+s=-\r\n\
+c=IN IP4 10.0.0.1\r\n\
+t=0 0\r\n\
+m=audio 27502 RTP/AVP 8\r\n";
+
+fn on_call(mut msg: Msg, call_id: &str) -> Msg {
+    msg.call_id = call_id.to_string();
+    msg
+}
+
+/// ALICE's session relayed to BOB: her offer, then a re-offer (version 2) the
+/// relay answers `refusal` on her call, then her next re-offer (version 3),
+/// and the description the relay sends BOB after version 1, `onward`.
+fn relayed_reoffers(refusal: u16, onward: &str) -> (Vec<Msg>, usize) {
+    let msgs = vec![
+        on_call(req(1, ALICE, RELAY, "INVITE", 1, None, Some(AUDIO_OFFER)), "a"),
+        on_call(req(2, RELAY, BOB, "INVITE", 1, None, Some(AUDIO_OFFER)), "b"),
+        on_call(resp(3, BOB, RELAY, 200, 1, "INVITE", Some(AUDIO_ANSWER)), "b"),
+        on_call(req(4, RELAY, BOB, "ACK", 1, Some("bt"), None), "b"),
+        on_call(resp(5, RELAY, ALICE, 200, 1, "INVITE", Some(AUDIO_ANSWER)), "a"),
+        on_call(req(6, ALICE, RELAY, "ACK", 1, Some("bt"), None), "a"),
+        on_call(req(7, ALICE, RELAY, "INVITE", 2, Some("bt"), Some(T38_OFFER)), "a"),
+        on_call(resp(8, RELAY, ALICE, refusal, 2, "INVITE", None), "a"),
+        on_call(req(9, ALICE, RELAY, "ACK", 2, Some("bt"), None), "a"),
+        on_call(req(10, ALICE, RELAY, "INVITE", 3, Some("bt"), Some(AUDIO_OFFER_V3)), "a"),
+        on_call(req(11, RELAY, BOB, "INVITE", 2, Some("bt"), Some(onward)), "b"),
+    ];
+    (msgs, 10)
+}
+
+fn origin_finding(msgs: &[Msg], anchor: usize) -> Finding {
+    run(&SdpOriginContinuity, msgs)
+        .into_iter()
+        .find(|f| f.anchor == anchor)
+        .unwrap_or_else(|| panic!("no finding on message {anchor}"))
+}
+
+/// RFC 3264 §8: the version gap on BOB's side is ALICE's own continuous
+/// sequence minus the re-offer the relay refused (491, RFC 3261 §14.1); a
+/// verbatim relay of her next description inherits it, and the finding is the
+/// relay's to forward, not to answer for.
+#[test]
+fn a_gap_left_by_a_refused_offer_on_the_other_call_is_relayed() {
+    let (msgs, onward) = relayed_reoffers(491, AUDIO_OFFER_V3);
+    let f = origin_finding(&msgs, onward);
+    assert!(f.violated(), "the gap is still on the wire: {f:?}");
+    assert!(f.relayed, "a verbatim relay of what the refused offer skipped: {f:?}");
+}
+
+/// The relay ANSWERED the middle offer: dropping it toward BOB is its own.
+#[test]
+fn a_gap_left_by_an_answered_offer_stays_the_relay_s() {
+    let (msgs, onward) = relayed_reoffers(200, AUDIO_OFFER_V3);
+    let f = origin_finding(&msgs, onward);
+    assert!(f.violated() && !f.relayed, "{f:?}");
+}
+
+/// A description the relay changed is no relay of ALICE's: its gap is its own.
+#[test]
+fn a_gap_on_a_description_the_relay_rewrote_stays_the_relay_s() {
+    let rewritten = AUDIO_OFFER_V3.replace("27502", "40000");
+    let (msgs, onward) = relayed_reoffers(491, &rewritten);
+    let f = origin_finding(&msgs, onward);
+    assert!(f.violated() && !f.relayed, "{f:?}");
+}
+
+/// The relay refused version 2 once, then ACCEPTED it re-offered on a new
+/// transaction: the version reached it and was never forwarded, so the gap
+/// toward BOB is its own (RFC 3264 §8).
+#[test]
+fn a_gap_left_by_an_offer_refused_once_then_accepted_stays_the_relay_s() {
+    let (mut msgs, _) = relayed_reoffers(491, AUDIO_OFFER_V3);
+    let resent = [
+        on_call(req(10, ALICE, RELAY, "INVITE", 3, Some("bt"), Some(T38_OFFER)), "a"),
+        on_call(resp(11, RELAY, ALICE, 200, 3, "INVITE", Some(AUDIO_ANSWER)), "a"),
+        on_call(req(12, ALICE, RELAY, "ACK", 3, Some("bt"), None), "a"),
+        on_call(req(13, ALICE, RELAY, "INVITE", 4, Some("bt"), Some(AUDIO_OFFER_V3)), "a"),
+        on_call(req(14, RELAY, BOB, "INVITE", 2, Some("bt"), Some(AUDIO_OFFER_V3)), "b"),
+    ];
+    msgs.truncate(9);
+    msgs.extend(resent);
+    let f = origin_finding(&msgs, 13);
+    assert!(f.violated() && !f.relayed, "{f:?}");
+}

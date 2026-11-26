@@ -1,8 +1,9 @@
 /**
  * The Pcaps page's read: every capture file of the workspace's `pcaps/`, with
  * its size and date, where the pipeline stands with it — `new` (never
- * ingested, or written since its last ingest), `ingested` (in the population, not cut), `cut` (with its case
- * count) — and its last full run per lane, whoever made it; the inbox beside it
+ * ingested, or written since its last ingest), `ingest-failed` (its standing
+ * ingest failed, whatever its cut holds), `ingested` (in the population, not
+ * cut), `cut` (with its case count) — and its last full run per lane, whoever made it; the inbox beside it
  * (`inbox.ts`); and how a capture replay fits each lane (`pcap-lanes.ts`),
  * with the pack's refusal of a lane it does not drive now (its lab guard).
  * A file is matched to its source row by the path its ingest recorded; the
@@ -25,7 +26,7 @@ import { PcapLanes } from "./pcap-lanes.ts"
 import { SitePack } from "./site-pack.ts"
 
 /** Where the pipeline stands with one file. */
-export type State = "new" | "ingested" | "cut"
+export type State = "new" | "ingest-failed" | "ingested" | "cut"
 
 export interface Pcap {
   readonly file: string
@@ -67,9 +68,19 @@ const ROW_CAP = 10_000
 /** A capture form as the ingest takes one file (`@sip/corpus` `PCAP_SUFFIXES`). */
 const isPcap = (name: string): boolean => !name.startsWith(".") && /\.pcap(ng)?(\.gz)?$/i.test(name)
 
-/** Where the pipeline stands with a file, off its source row. */
+/**
+ * Where the pipeline stands with a file, off its source row. A failed ingest
+ * is a state of its own: the cut of a capture whose extraction failed holds no
+ * case, and `cut` with no case is kept for a cut that found no call.
+ */
 export const stateOf = (row: Sources.Row | undefined): State =>
-  row === undefined ? "new" : row.prepId === null || row.cut === "broke" || row.cut === "never" ? "ingested" : "cut"
+  row === undefined
+    ? "new"
+    : row.ingest === "failed"
+    ? "ingest-failed"
+    : row.prepId === null || row.cut === "broke" || row.cut === "never"
+    ? "ingested"
+    : "cut"
 
 /**
  * Whether the file on disk was written after the row's last ingest (its

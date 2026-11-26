@@ -150,6 +150,14 @@ pub trait TurnProbe: Send + Sync {
     fn release_step(&self, _node: &str, _call_ref: &str) -> Option<Hold> {
         None
     }
+
+    /// Called on `node` once the outbox released a rider of `call_ref` (what
+    /// the router sends behind a call's write outside a handler turn), before
+    /// it is sent; `Some` holds it there, and the call's later entries wait
+    /// behind it, as a starved drainer stands.
+    fn rider_step(&self, _node: &str, _call_ref: &str) -> Option<Hold> {
+        None
+    }
 }
 
 /// The handle a worker carries: no probe by default.
@@ -204,6 +212,17 @@ impl TurnProbes {
             return;
         };
         if let Some(hold) = probe.release_step(node, call_ref) {
+            hold.await;
+        }
+    }
+
+    /// Report that the outbox of `node` released a rider of `call_ref` and
+    /// wait out the hold, if any.
+    pub(crate) async fn rider_step(&self, node: &str, call_ref: &str) {
+        let Some(probe) = &self.0 else {
+            return;
+        };
+        if let Some(hold) = probe.rider_step(node, call_ref) {
             hold.await;
         }
     }

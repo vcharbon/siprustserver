@@ -189,7 +189,7 @@ fn the_headline_states_rate_flight_and_every_rejection_source() {
         "shed at max-in-flight 4",
         "generator failures 0",
         "in 11 · out 13",
-        "orphans 2</span> · late retransmissions answered 5 · inbox drops 0",
+        "orphans 2</span> · answered after the call 5 · inbox drops 0",
         "0.9700",
     ] {
         assert!(page.contains(want), "headline lacks {want:?}: {page}");

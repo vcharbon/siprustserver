@@ -57,7 +57,6 @@ fn strategy(reg: SimulatedWorkerRegistry, clock: Clock) -> LoadBalancerStrategy 
     LoadBalancerStrategy::new(Arc::new(reg), hmac, observer, Arc::new(ProxyMetrics::new()), clock)
 }
 
-/// A pool of `workers`, every one read alive.
 fn pool(workers: &[(&str, (&str, u16))], clock: Clock) -> SimulatedWorkerRegistry {
     SimulatedWorkerRegistry::with_clock(
         workers.iter().map(|(id, a)| WorkerEntry::alive(*id, addr(*a))).collect(),
@@ -67,9 +66,9 @@ fn pool(workers: &[(&str, (&str, u16))], clock: Clock) -> SimulatedWorkerRegistr
 
 /// The `(w_pri, w_bak)` the cookie of a new call `call_id` names: the call
 /// placed by the strategy, then its stickiness encoded.
-async fn placed(s: &LoadBalancerStrategy, call_id: &str) -> (String, String) {
+fn placed(s: &LoadBalancerStrategy, call_id: &str) -> (String, String) {
     let msg = invite(call_id);
-    let target = s.select_for_new_dialog(&msg, SelectOpts::default()).await.expect("a target");
+    let target = s.select_for_new_dialog(&msg, SelectOpts::default()).expect("a target");
     let cookie = s.encode_stickiness(&target, &msg).expect("a cookie");
     let field = |name: &str| cookie.get(name).cloned().unwrap_or_default();
     (field("w_pri"), field("w_bak"))
@@ -83,7 +82,6 @@ impl RendezvousCandidate for Key {
     }
 }
 
-/// The rendezvous winner for `call_id` among `ids`.
 fn ranked_first(call_id: &str, ids: &[&'static str]) -> &'static str {
     let keys: Vec<Key> = ids.iter().map(|i| Key(i)).collect();
     rendezvous_select(call_id, &keys).expect("a candidate").0
@@ -93,7 +91,7 @@ fn ranked_first(call_id: &str, ids: &[&'static str]) -> &'static str {
 async fn the_other_alive_worker_is_the_backup() {
     let clock = Clock::test_at(0);
     let s = strategy(pool(&[(W1, A1), (W2, A2)], clock.clone()), clock);
-    let (pri, bak) = placed(&s, "alive-1@h").await;
+    let (pri, bak) = placed(&s, "alive-1@h");
     assert_ne!(pri, bak);
     assert!(!bak.is_empty(), "the other alive worker is named");
 }
@@ -104,7 +102,7 @@ async fn a_member_whose_endpoint_is_not_ready_is_named() {
     let reg = pool(&[(W1, A1), (W2, A2)], clock.clone());
     reg.set_ready(W2, false);
     let s = strategy(reg, clock);
-    assert_eq!(placed(&s, "not-ready-1@h").await, (W1.into(), W2.into()));
+    assert_eq!(placed(&s, "not-ready-1@h"), (W1.into(), W2.into()));
 }
 
 /// Past the tombstone of its address the not-ready member is still a member.
@@ -115,7 +113,7 @@ async fn a_member_not_ready_past_its_tombstone_is_still_named() {
     reg.set_ready(W2, false);
     tokio::time::advance(TOMBSTONE_WINDOW + Duration::from_secs(1)).await;
     let s = strategy(reg, clock);
-    assert_eq!(placed(&s, "not-ready-2@h").await, (W1.into(), W2.into()));
+    assert_eq!(placed(&s, "not-ready-2@h"), (W1.into(), W2.into()));
 }
 
 #[tokio::test(start_paused = true)]
@@ -125,7 +123,7 @@ async fn a_member_read_dead_or_unknown_is_named() {
         let reg = pool(&[(W1, A1), (W2, A2)], clock.clone());
         reg.set_health(W2, health);
         let s = strategy(reg, clock);
-        assert_eq!(placed(&s, "not-alive-1@h").await, (W1.into(), W2.into()), "{health:?}");
+        assert_eq!(placed(&s, "not-alive-1@h"), (W1.into(), W2.into()), "{health:?}");
     }
 }
 
@@ -135,7 +133,7 @@ async fn a_departed_worker_is_named_while_its_address_is_tombstoned() {
     let reg = pool(&[(W1, A1), (W2, A2)], clock.clone());
     reg.remove(W2);
     let s = strategy(reg, clock);
-    assert_eq!(placed(&s, "departed-1@h").await, (W1.into(), W2.into()));
+    assert_eq!(placed(&s, "departed-1@h"), (W1.into(), W2.into()));
 }
 
 #[tokio::test(start_paused = true)]
@@ -146,7 +144,7 @@ async fn a_departed_worker_whose_tombstone_closed_is_not_named() {
     tokio::time::advance(TOMBSTONE_WINDOW + Duration::from_secs(1)).await;
     let s = strategy(reg, clock);
     assert_eq!(
-        placed(&s, "departed-2@h").await,
+        placed(&s, "departed-2@h"),
         (W1.into(), String::new()),
         "the proxy knows no other ordinal: no backup"
     );
@@ -162,7 +160,7 @@ async fn the_primary_is_never_its_own_backup() {
     tokio::time::advance(TOMBSTONE_WINDOW + Duration::from_secs(1)).await;
     reg.set_address(W1, addr(("10.0.0.12", 5070)));
     let s = strategy(reg, clock);
-    assert_eq!(placed(&s, "own-1@h").await, (W1.into(), String::new()));
+    assert_eq!(placed(&s, "own-1@h"), (W1.into(), String::new()));
 }
 
 #[tokio::test(start_paused = true)]
@@ -172,7 +170,7 @@ async fn an_alive_worker_is_named_before_any_away_one() {
     reg.set_ready(W2, false);
     let s = strategy(reg, clock);
     for i in 0..20 {
-        let (pri, bak) = placed(&s, &format!("one-alive-{i}@h")).await;
+        let (pri, bak) = placed(&s, &format!("one-alive-{i}@h"));
         let alive_other = if pri == W1 { W3 } else { W1 };
         assert_eq!(bak, alive_other, "call {i}: the alive worker, never the away one");
     }
@@ -190,10 +188,10 @@ async fn with_every_other_worker_away_the_call_key_ranks_them() {
     let mut named = std::collections::BTreeSet::new();
     for i in 0..20 {
         let call_id = format!("none-alive-{i}@h");
-        let (pri, bak) = placed(&s, &call_id).await;
+        let (pri, bak) = placed(&s, &call_id);
         assert_eq!(pri, W2);
         assert_eq!(bak, ranked_first(&call_id, &[W1, W3]), "call {i}: the call key's pick");
-        assert_eq!(placed(&s, &call_id).await, (pri, bak.clone()), "the same pick again");
+        assert_eq!(placed(&s, &call_id), (pri, bak.clone()), "the same pick again");
         named.insert(bak);
     }
     assert_eq!(named.len(), 2, "the picks spread over both away ordinals: {named:?}");

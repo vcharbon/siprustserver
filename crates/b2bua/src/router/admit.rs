@@ -151,10 +151,9 @@ fn retransmits_answered(call: &Call, req: &SipRequest) -> bool {
 
 /// Whether the new INVITE `req` of `call_ref` retransmits the live call's
 /// answered INVITE after its transaction ended ([`retransmits_answered`]):
-/// then it is absorbed as it arrives, before any turn, so the 100 Trying
-/// bound of the transaction the layer opened for it never fires. That
-/// transaction is relinquished with nothing sent, and the copy is counted
-/// refused. A copy of a call answered after this read gets the turn's 482.
+/// then it is absorbed as it arrives, before any turn. The transaction the
+/// layer opened for it, which arms no 100 before a consult (ADR-0070), is
+/// relinquished with nothing sent, and the copy is counted refused. A copy of a call answered after this read gets the turn's 482.
 pub(super) async fn absorbs_retransmission(
     ctx: &RouterCtx,
     call_ref: &str,

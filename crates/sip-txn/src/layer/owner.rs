@@ -4,7 +4,7 @@
 //! `layer::client`, the UAS FSM is `layer::server`, output-queue discipline is
 //! `layer::events`.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -30,8 +30,21 @@ use super::key::{ServerTxnId, ServerTxnIdentity, ServerTxnKey};
 use super::new_call_gate::NewCallGate;
 use super::parse_refusal::ParseRefusals;
 use super::refusals::InviteRefusals;
+use super::self_release::SelfReleaseWatch;
 use super::shrink::{shrink_idle, SHRINK_MIN_CAPACITY};
 use super::txn::{CancelWire, Timer, Transaction, TxnId, TxnRef, TxnRole};
+use super::unattributed::Unattributed;
+
+/// What a transaction leaving the map leaves of its copy records (ADR-0063
+/// §1).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Trace {
+    /// Its copy records, retired to its Call-ID's entry.
+    Records,
+    /// Nothing: nothing answered its request, or its answer left as a
+    /// stateless UAS sends it.
+    Nothing,
+}
 
 pub(super) struct Owner {
     /// The client transactions, by the branch of the request this node sent
@@ -56,14 +69,17 @@ pub(super) struct Owner {
     /// The keepalive lane ([`TransactionConfig::keepalive_lane`](crate::TransactionConfig)),
     /// when the layer runs one.
     pub(super) keepalive_tx: Option<mpsc::Sender<TransactionEvent>>,
+    /// The unattributed lane ([`TransactionConfig::unattributed_lane`](crate::TransactionConfig)),
+    /// when the layer runs one; the owner is its one sender.
+    pub(super) unattributed_tx: Option<mpsc::Sender<TransactionEvent>>,
     pub(super) metrics: Arc<MetricsInner>,
     pub(super) id_gen: Arc<IdGen>,
-    /// call_refs the consumer asked to be told about when their **last**
-    /// transaction clears (ADR-0014 acting-backup self-release). On the
-    /// last-`delete_txn` for a watched call we capture
+    /// The calls the consumer asked to be told about when their **last**
+    /// serving transaction clears (ADR-0014 acting-backup self-release,
+    /// `layer::self_release`). On that clear we capture
     /// [`TransactionEvent::CallQuiesced`] onto the lossless critical path and drop
     /// the watch. Bounded — one entry per live takeover copy, removed when it fires.
-    pub(super) self_release_watch: HashSet<String>,
+    pub(super) self_release_watch: SelfReleaseWatch,
     /// `call_ref → its live transactions, by role`, kept in **lockstep** with
     /// `clients` and `servers` (every `set_txn`/`delete_txn` updates both; the
     /// entry is dropped when it empties). Makes the acting-backup self-release
@@ -72,6 +88,8 @@ pub(super) struct Owner {
     /// `do_cancel_txns_for_call` O(k) in the call's transactions instead of a
     /// scan of the maps. Never let this drift from the maps.
     pub(super) txn_index: HashMap<String, CallTxns>,
+    /// The in-dialog server transactions attributed to no call (`layer::unattributed`).
+    pub(super) unattributed: Unattributed,
     /// CRITICAL events a full events queue deferred, in FIFO order — re-offered on
     /// the [`Timer::EventRetry`] tick, never dropped while their transaction
     /// lives. These are one-shot signals whose protocol-level redelivery the
@@ -106,10 +124,14 @@ pub(super) struct Owner {
     pub(super) invite_first_response_timeout_ms: u64,
     /// [`TransactionConfig::trying_bound_ms`](crate::TransactionConfig).
     pub(super) trying_bound_ms: u64,
+    /// [`TransactionConfig::consumer_arms_initial_trying`](crate::TransactionConfig).
+    pub(super) consumer_arms_initial_trying: bool,
     /// [`TransactionConfig::ack_bound_ms`](crate::TransactionConfig).
     pub(super) ack_bound_ms: u64,
     /// [`TransactionConfig::cancel_bound_ms`](crate::TransactionConfig).
     pub(super) cancel_bound_ms: u64,
+    /// [`TransactionConfig::consumer_ends_cancelled_reinvite`](crate::TransactionConfig).
+    pub(super) consumer_ends_cancelled_reinvite: bool,
     /// [`TransactionConfig::on_bound`](crate::TransactionConfig).
     pub(super) on_bound: Option<super::config::OnBound>,
     /// [`TransactionConfig::first_hop`].
@@ -142,13 +164,17 @@ pub(super) struct Owner {
 }
 
 impl Owner {
-    /// The owner over the event queue `events_tx` with its entry stamps and
-    /// the keepalive lane `keepalive_tx`, holding the tunables of `config`
-    /// (which already sized both).
+    /// The owner over the event queue `events_tx` with its entry stamps, the
+    /// keepalive lane `keepalive_tx` and the unattributed lane
+    /// `unattributed_tx`, holding the tunables of `config` (which already
+    /// sized all three).
     pub(super) fn new(
         parser: Arc<dyn SipParser + Send + Sync>,
         (events_tx, event_ages): (mpsc::Sender<TransactionEvent>, Arc<EventAges>),
-        keepalive_tx: Option<mpsc::Sender<TransactionEvent>>,
+        (keepalive_tx, unattributed_tx): (
+            Option<mpsc::Sender<TransactionEvent>>,
+            Option<mpsc::Sender<TransactionEvent>>,
+        ),
         metrics: Arc<MetricsInner>,
         config: TransactionConfig,
     ) -> Self {
@@ -168,11 +194,13 @@ impl Owner {
             events_tx,
             event_ages,
             keepalive_tx,
+            unattributed_tx,
             metrics,
             parse_refusals: ParseRefusals::new(&config.id_gen, config.advertised),
             id_gen: config.id_gen,
-            self_release_watch: HashSet::new(),
+            self_release_watch: SelfReleaseWatch::default(),
             txn_index: HashMap::new(),
+            unattributed: Unattributed::default(),
             deferred_events: VecDeque::new(),
             deferred_bound: config.deferred_bound,
             refusals: config.invite_refusals,
@@ -182,8 +210,10 @@ impl Owner {
             invite_initial_timeout_ms: config.invite_initial_timeout_ms,
             invite_first_response_timeout_ms: config.invite_first_response_timeout_ms,
             trying_bound_ms: config.trying_bound_ms,
+            consumer_arms_initial_trying: config.consumer_arms_initial_trying,
             ack_bound_ms: config.ack_bound_ms,
             cancel_bound_ms: config.cancel_bound_ms,
+            consumer_ends_cancelled_reinvite: config.consumer_ends_cancelled_reinvite,
             on_bound: config.on_bound.clone(),
             first_hop: config.first_hop,
             held_cancels: HashMap::new(),
@@ -268,7 +298,7 @@ impl Owner {
     /// Add `id` to `call_ref`'s live transactions, in lockstep with a map
     /// insert. A txn with no `call_ref` (out-of-dialog initial INVITE /
     /// OPTIONS) is not indexed.
-    fn track_call_ref(&mut self, call_ref: &Option<String>, id: &TxnId) {
+    pub(super) fn track_call_ref(&mut self, call_ref: &Option<String>, id: &TxnId) {
         let Some(cr) = call_ref else { return };
         let txns = self.txn_index.entry(cr.clone()).or_default();
         match id {
@@ -319,22 +349,32 @@ impl Owner {
         }
     }
 
-    /// A watched call left with no transaction on its books hears
-    /// `CallQuiesced` at end of turn (ADR-0014).
-    fn quiesce_if_last(&mut self, cr: String) {
-        if self.self_release_watch.contains(&cr) && !self.has_txns_for(&cr) {
-            self.pending_quiesce.push(cr);
-        }
+    /// Delete the transaction `id` names, its timers with it, leaving its
+    /// copy records (ADR-0063 §1) and, for a server transaction, the To-tag
+    /// it bound (Timer L). Whether it was there.
+    pub(super) fn delete_txn(&mut self, id: TxnRef<'_>) -> bool {
+        self.remove_txn(id, Trace::Records)
     }
 
-    pub(super) fn delete_txn(&mut self, id: TxnRef<'_>) -> bool {
+    /// Delete the server transaction `id` names, its timers with it, leaving
+    /// nothing behind: no copy record, nothing on the unattributed books, and
+    /// no remembered To-tag, as one that sent nothing bound none. Its request
+    /// went unanswered or was answered statelessly (RFC 3261 §8.2.7), so a
+    /// copy of it is a first arrival. Whether it was there.
+    pub(super) fn forsake_server(&mut self, id: ServerTxnId<'_>) -> bool {
+        self.remove_txn(TxnRef::Server(id), Trace::Nothing)
+    }
+
+    fn remove_txn(&mut self, id: TxnRef<'_>, trace: Trace) -> bool {
         let removed = match id {
             TxnRef::Client(branch) => self.clients.remove(branch),
             TxnRef::Server(id) => self.servers.remove(&id as &dyn ServerTxnIdentity),
         };
         match removed {
             Some(mut t) => {
-                self.retire_copies(&mut t);
+                if trace == Trace::Records {
+                    self.retire_copies(&mut t);
+                }
                 self.budgets.closed(&t.call_id);
                 if t.role() == TxnRole::Server {
                     if let Some(tag) = t.bound_to_tag() {
@@ -349,6 +389,9 @@ impl Owner {
                 self.cancel_timer(t.cleanup_key);
                 self.cancel_timer(t.cancel_retransmit_key);
                 self.untrack_call_ref(&t.call_ref, id);
+                if self.unattributed.left(&t.call_id, id) {
+                    self.unattributed_settled(&t.call_id);
+                }
                 if t.held {
                     self.release_hold(t.branch(), &t.call_id, &t.from_tag);
                 }
@@ -471,6 +514,7 @@ impl Owner {
         self.clients.shrink_idle();
         shrink_idle(&mut self.servers);
         shrink_idle(&mut self.txn_index);
+        self.unattributed.shrink_idle();
         // `shrink_to_fit` only trims the slab's free tail and never moves an
         // entry, so every `Key` stored on a txn stays valid (`compact` would not).
         let cap = self.timers.capacity();

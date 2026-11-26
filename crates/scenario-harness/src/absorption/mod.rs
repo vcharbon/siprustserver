@@ -44,6 +44,7 @@ mod rejected_acks;
 mod two_xx_ack;
 mod unacked_finals;
 mod unanswered;
+mod unpracked;
 mod wire_log;
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -138,6 +139,8 @@ pub struct Absorption {
     unacked_finals: unacked_finals::UnackedFinals,
     /// The requests awaiting their answer (§17.1.1.2, §17.1.2.2).
     unanswered: unanswered::Unanswered,
+    /// The reliable provisionals awaiting their PRACK (RFC 3262 §3).
+    unpracked: unpracked::Unpracked,
     /// Whether the ladders above are driven: off for an endpoint that plays a
     /// peer which never retransmits.
     retransmits: AtomicBool,
@@ -186,6 +189,7 @@ impl Absorption {
             invited: invited::Invited::default(),
             unacked_finals: Default::default(),
             unanswered: Default::default(),
+            unpracked: Default::default(),
             retransmits: AtomicBool::new(true),
             repeats: Default::default(),
             abandoned: abandoned::AbandonedInvites::default(),
@@ -210,6 +214,7 @@ impl Absorption {
             invited: invited::Invited::default(),
             unacked_finals: Default::default(),
             unanswered: Default::default(),
+            unpracked: Default::default(),
             retransmits: AtomicBool::new(true),
             repeats: Default::default(),
             abandoned: abandoned::AbandonedInvites::default(),
@@ -238,6 +243,7 @@ impl Absorption {
         match msg {
             SipMessage::Request(r) => {
                 self.unacked_finals.sight(r);
+                self.unpracked.sight(r);
                 if dedup {
                     self.received_acks.sight(r);
                 }
@@ -298,6 +304,7 @@ impl Absorption {
                 self.answered.note_sent(r, wire, dst, after);
                 self.invited.note_sent(r, wire, dst, after);
                 self.unacked_finals.note_sent(r, wire, dst);
+                self.unpracked.note_sent(r, wire, dst);
             }
             SipMessage::Request(r) => {
                 self.unanswered.note_sent(r, wire, dst);
@@ -314,13 +321,17 @@ impl Absorption {
     }
 
     /// When a datagram this endpoint sent is due again: a final to an INVITE
-    /// awaiting its ACK (§13.3.1.4, §17.2.1), or a request awaiting its
-    /// answer (§17.1.1.2, §17.1.2.2).
+    /// awaiting its ACK (§13.3.1.4, §17.2.1), a request awaiting its answer
+    /// (§17.1.1.2, §17.1.2.2), or a reliable provisional awaiting its PRACK
+    /// (RFC 3262 §3).
     pub fn next_due(&self) -> Option<tokio::time::Instant> {
         if !self.retransmits.load(Ordering::Relaxed) {
             return None;
         }
-        self.unacked_finals.next_due().into_iter().chain(self.unanswered.next_due()).min()
+        [self.unacked_finals.next_due(), self.unanswered.next_due(), self.unpracked.next_due()]
+            .into_iter()
+            .flatten()
+            .min()
     }
 
     /// The datagrams due again at `now`, each with its destination.
@@ -330,6 +341,7 @@ impl Absorption {
         }
         let mut due = self.unacked_finals.take_due(now);
         due.extend(self.unanswered.take_due(now));
+        due.extend(self.unpracked.take_due(now));
         due
     }
 

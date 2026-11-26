@@ -25,4 +25,5 @@ mod outcome_records;
 mod pending_request;
 mod samples;
 mod smoke;
+mod stray_cancel_net;
 mod waiver_lane;

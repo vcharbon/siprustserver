@@ -118,7 +118,7 @@ fn a_new_dialog_answer_caches_its_description_alone() {
 fn the_stacks_in_dialog_invite_offer_flag_reads_its_description() {
     let key = SigningKey::new(&[3u8; 32]).expect("a key");
     let config = B2buaConfig { cluster_key: Some(key.clone()), ..B2buaConfig::default() };
-    let call = call_with_retained_answered_2xx();
+    let call = call_answered_and_acked();
     let event = CallEvent::sip(SipMessage::Request(invite()), "127.0.0.1:5060".parse().unwrap());
     let early = |disposition: &str| {
         let mut body = Body::own(SDP.as_bytes().to_vec(), Some("application/sdp".into()));

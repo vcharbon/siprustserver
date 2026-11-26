@@ -6,29 +6,28 @@
 //! downstream sent one, and a downstream that never answers leaves the
 //! caller's own Timer A/B armed (§17.1.1): *the caller*, not a proxy timer,
 //! gives up on it (local 408 at 64·T1). The proxy has no Timer C and no
-//! synthesized final. These tests pin both halves:
-//!
-//!  1. `proxy_emits_no_100_and_relays_the_downstream_100_18x_and_final` — the
-//!     caller hears nothing until the downstream's 100, then the 100, 180 and
-//!     200 relay in order.
-//!  2. `blackholed_worker_leaves_caller_silent_and_retransmits_reforward` —
-//!     a worker that never answers produces ZERO proxy-originated messages
-//!     toward the caller (no 100, no 408/5xx); the caller's Timer-A INVITE
-//!     retransmits are re-forwarded to the SAME target (the rtx memo), so the
-//!     caller's own transaction timers own the give-up.
+//! synthesized final.
 //!
 //! The b2bua-side counterpart (a caller that heard a 100 must get its final
 //! within the decision deadline) lives in
-//! `b2bua-harness/tests/decision_deadline.rs`.
+//! `b2bua-harness/tests/it/decision_deadline.rs`.
 
 use crate::common;
+use std::net::SocketAddr;
 use std::time::Duration;
 
-use common::{forward_all, spawn_proxy};
+use common::{forward_all, options_capabilities, spawn_proxy};
 use scenario_harness::Harness;
+use sip_message::generators::{
+    generate_ack_for_2xx_from_invite, generate_bye_for_2xx_from_invite, generate_response,
+    GenerateResponseOpts,
+};
+use sip_message::header::{Contact, HeaderValue};
 use sip_message::parser::custom::CustomParser;
-use sip_message::HeaderName;
-use sip_message::{SipMessage, SipParser, SipRequest};
+use sip_message::received::observed_source;
+use sip_message::{SipMessage, SipParser, SipRequest, SipResponse, SipStr};
+use sip_net::{UdpEndpoint, UdpPacket};
+use tokio::time::Instant;
 
 const ALICE_INVITE: &str = "INVITE sip:bob@127.0.0.1:5070 SIP/2.0\r\n\
 Via: SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK-alice-1\r\n\
@@ -40,150 +39,154 @@ Contact: <sip:alice@127.0.0.1:5060>\r\n\
 Max-Forwards: 70\r\n\
 Content-Length: 0\r\n\r\n";
 
-fn parse_request(raw: &[u8]) -> SipRequest {
-    match CustomParser::new().parse(raw).expect("forwarded message parses") {
+/// RFC 3261 §17.1.1.2: T1, the base of the INVITE client's timers.
+const T1: Duration = Duration::from_millis(500);
+
+fn parse(raw: &[u8]) -> SipMessage {
+    CustomParser::new().parse(raw).expect("the message parses")
+}
+
+fn request(packet: &UdpPacket) -> SipRequest {
+    match parse(&packet.raw) {
         SipMessage::Request(r) => r,
-        SipMessage::Response(_) => panic!("expected a request"),
+        SipMessage::Response(r) => panic!("expected a request, got {}", r.status()),
     }
 }
 
-/// Build bob's response to the *forwarded* INVITE: echo the full Via stack
-/// (proxy's Via on top, alice's below) so the proxy's §16.7 response path
-/// routes it back upstream.
-fn bob_response(fwd: &SipRequest, status: u16, reason: &str, to_tag: Option<&str>) -> String {
-    let vias: Vec<String> = fwd.raw(HeaderName::Via).map(|v| format!("Via: {v}\r\n")).collect();
-    let to = match to_tag {
-        Some(t) => format!("<sip:bob@127.0.0.1>;tag={t}"),
-        None => "<sip:bob@127.0.0.1>".to_string(),
-    };
-    format!(
-        "SIP/2.0 {status} {reason}\r\n\
-         {vias}\
-         From: <sip:alice@127.0.0.1>;tag=t1\r\n\
-         To: {to}\r\n\
-         Call-ID: stateless-contract@127.0.0.1\r\n\
-         CSeq: 1 INVITE\r\n\
-         Contact: <sip:bob@127.0.0.1:5070>\r\n\
-         Content-Length: 0\r\n\r\n",
-        vias = vias.concat(),
-    )
+fn response(packet: &UdpPacket) -> SipResponse {
+    match parse(&packet.raw) {
+        SipMessage::Response(r) => r,
+        SipMessage::Request(r) => panic!("expected a response, got {}", r.method()),
+    }
 }
 
-// ── 1. no proxy 100; the downstream's 100, 180 and 200 relay ─────────────
-#[tokio::test]
+/// The next datagram `ep` receives, failing as `what` past two seconds.
+async fn next(ep: &dyn UdpEndpoint, what: &str) -> UdpPacket {
+    tokio::time::timeout(Duration::from_secs(2), ep.recv())
+        .await
+        .unwrap_or_else(|_| panic!("{what}: nothing arrived"))
+        .expect("queue open")
+}
+
+/// Bob's response to the request `fwd` he received from `from` (RFC 3261
+/// §8.2.6): the Via stack echoed, the proxy's on top, so the proxy's §16.7
+/// response path routes it back, and the Record-Route echoed past a 100
+/// (§12.1.1); a 18x or 2xx to the INVITE states his Contact, and the 2xx his
+/// capabilities (§13.2.1).
+fn bob_response(fwd: &SipRequest, from: SocketAddr, status: u16, reason: &str) -> SipResponse {
+    let establishes = status > 100 && fwd.method() == "INVITE";
+    let contact = establishes.then(|| {
+        Contact::parse(&SipStr::from_static("<sip:bob@127.0.0.1:5070>")).expect("a Contact")
+    });
+    let extra_headers = match (200..300).contains(&status) && establishes {
+        true => options_capabilities(),
+        false => Vec::new(),
+    };
+    let opts = GenerateResponseOpts {
+        to_tag: Some("b1".into()),
+        contact,
+        extra_headers,
+        incoming_source: Some(observed_source(from)),
+        ..Default::default()
+    };
+    generate_response(fwd, status, reason, &opts).expect("bob's response")
+}
+
+/// The proxy sends no 100 of its own: the caller hears nothing until the
+/// downstream's 100, then the 100, 180 and 200 relay in order, the proxy's
+/// Via popped from each. The call then completes through the proxy: the ACK
+/// of the 200, and a BYE and its 200.
+#[tokio::test(start_paused = true)]
 async fn proxy_emits_no_100_and_relays_the_downstream_100_18x_and_final() {
-    let h = Harness::with_transit_delay("stateless-no-100", 0);
-    // Raw-injected responses: bob is a bare bind, not a real UA — the audit
-    // rules for a full UA dialog legitimately fire on the fixture (same spirit
-    // as the sibling §16.7 tests). The proxy is the SUT; waive the UA-side
-    // rules: locally-minted tag, the 200-terminus that is never ACKed/BYE'd,
-    // and Allow/Supported absence on the bare INVITE.
-    h.allow_violation("mid-dialog-tags", "raw-injected responses; proxy is the SUT, not a real UA");
-    h.allow_violation(
-        "unacked-2xx-not-cleared",
-        "bob's 200 is a fixture terminus; testing relay, not the dialog",
-    );
-    h.allow_violation(
-        "no-ack-to-dialog-creating-2xx",
-        "alice never ACKs the fixture terminus; testing relay, not the dialog",
-    );
-    h.allow_violation("allow-supported-on-invite", "bare INVITE fixture; proxy relay is the SUT");
-    let (bob_ep, bob_addr) = h.bind_peer("bob", "127.0.0.1:5070").await;
+    let h = Harness::with_transit_delay("stateless-no-100", 1);
+    let (bob, bob_addr) = h.bind_peer("bob", "127.0.0.1:5070").await;
     let (strategy, registry) = forward_all(bob_addr);
     let proxy = spawn_proxy(&h, "127.0.0.1:5080", strategy, registry).await;
     let (alice, _alice_addr) = h.bind_peer("alice", "127.0.0.1:5060").await;
+    let SipMessage::Request(invite) = parse(ALICE_INVITE.as_bytes()) else {
+        panic!("alice's INVITE is a request");
+    };
 
     alice.send_to(ALICE_INVITE.as_bytes(), proxy.addr()).await.unwrap();
-    let fwd = tokio::time::timeout(Duration::from_secs(2), bob_ep.recv())
-        .await
-        .expect("bob gets the forwarded INVITE")
-        .expect("queue open");
-    let fwd = parse_request(&fwd.raw);
+    let packet = next(&*bob, "bob gets the forwarded INVITE").await;
+    let fwd = request(&packet);
 
-    // The proxy forwarded WITHOUT answering: no proxy-originated 100 upstream.
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    h.advance(Duration::from_millis(100)).await;
     assert!(
         alice.try_recv().is_none(),
         "the stateless proxy must never generate a provisional of its own"
     );
 
-    // Bob's 100 is relayed by its Via (§16.11): the first thing alice hears.
-    bob_ep.send_to(bob_response(&fwd, 100, "Trying", None).as_bytes(), proxy.addr()).await.unwrap();
-    let relayed = tokio::time::timeout(Duration::from_secs(2), alice.recv())
-        .await
-        .expect("the downstream 100 relays upstream")
-        .expect("queue open");
-    let SipMessage::Response(resp) = CustomParser::new().parse(&relayed.raw).unwrap() else {
-        panic!("expected the relayed 100");
-    };
+    let trying = bob_response(&fwd, packet.src, 100, "Trying");
+    bob.send_to(trying.image(), proxy.addr()).await.unwrap();
+    let resp = response(&next(&*alice, "the downstream 100 relays upstream").await);
     assert_eq!(resp.status(), 100, "the downstream's 100 reaches the caller");
     assert_eq!(resp.via().iter().count(), 1, "the proxy's own Via is popped");
 
-    // The 180 relays next, then the 200.
-    bob_ep
-        .send_to(bob_response(&fwd, 180, "Ringing", Some("b1")).as_bytes(), proxy.addr())
-        .await
-        .unwrap();
-    let relayed = tokio::time::timeout(Duration::from_secs(2), alice.recv())
-        .await
-        .expect("the 180 relays upstream")
-        .expect("queue open");
-    let SipMessage::Response(resp) = CustomParser::new().parse(&relayed.raw).unwrap() else {
-        panic!("expected the relayed 180");
-    };
+    let ringing = bob_response(&fwd, packet.src, 180, "Ringing");
+    bob.send_to(ringing.image(), proxy.addr()).await.unwrap();
+    let resp = response(&next(&*alice, "the 180 relays upstream").await);
     assert_eq!(resp.status(), 180, "the second upstream message is the downstream's 180");
 
-    bob_ep
-        .send_to(bob_response(&fwd, 200, "OK", Some("b1")).as_bytes(), proxy.addr())
-        .await
-        .unwrap();
-    let relayed = tokio::time::timeout(Duration::from_secs(2), alice.recv())
-        .await
-        .expect("the 200 relays upstream")
-        .expect("queue open");
-    let SipMessage::Response(resp) = CustomParser::new().parse(&relayed.raw).unwrap() else {
-        panic!("expected the relayed 200");
-    };
-    assert_eq!(resp.status(), 200);
+    let ok = bob_response(&fwd, packet.src, 200, "OK");
+    bob.send_to(ok.image(), proxy.addr()).await.unwrap();
+    let ok = response(&next(&*alice, "the 200 relays upstream").await);
+    assert_eq!(ok.status(), 200);
+
+    let ack = generate_ack_for_2xx_from_invite(&invite, &ok, "z9hG4bK-alice-ack", None)
+        .expect("alice's ACK");
+    alice.send_to(ack.image(), proxy.addr()).await.unwrap();
+    let relayed = request(&next(&*bob, "the ACK relays downstream").await);
+    assert_eq!(relayed.method(), "ACK");
+
+    let bye =
+        generate_bye_for_2xx_from_invite(&invite, &ok, 2, "z9hG4bK-alice-bye").expect("a BYE");
+    alice.send_to(bye.image(), proxy.addr()).await.unwrap();
+    let packet = next(&*bob, "the BYE relays downstream").await;
+    let fwd_bye = request(&packet);
+    assert_eq!(fwd_bye.method(), "BYE");
+    let bye_ok = bob_response(&fwd_bye, packet.src, 200, "OK");
+    bob.send_to(bye_ok.image(), proxy.addr()).await.unwrap();
+    let resp = response(&next(&*alice, "the BYE's 200 relays upstream").await);
+    assert_eq!((resp.status(), resp.cseq().method().as_str()), (200, "BYE"));
 
     let _ = h.finish().await;
 }
 
-// ── 2. blackholed worker: proxy stays silent; caller's timers decide ────────
-#[tokio::test]
+/// A worker that never answers draws no proxy-originated message toward the
+/// caller, neither a 100 nor a final: each copy the caller's Timer A sends
+/// (RFC 3261 §17.1.1.2) is re-forwarded to the same target on the same
+/// branch, and the caller's transaction ends at Timer B (64·T1) with nothing
+/// heard.
+#[tokio::test(start_paused = true)]
 async fn blackholed_worker_leaves_caller_silent_and_retransmits_reforward() {
-    let h = Harness::with_transit_delay("stateless-blackhole", 0);
-    let (bob_ep, bob_addr) = h.bind_sut("bob", "127.0.0.1:5070").await;
+    let h = Harness::with_transit_delay("stateless-blackhole", 1);
+    let (bob, bob_addr) = h.bind_peer("bob", "127.0.0.1:5070").await;
     let (strategy, registry) = forward_all(bob_addr);
     let proxy = spawn_proxy(&h, "127.0.0.1:5080", strategy, registry).await;
-    let (alice, _alice_addr) = h.bind_sut("alice", "127.0.0.1:5060").await;
+    let (alice, _alice_addr) = h.bind_peer("alice", "127.0.0.1:5060").await;
 
+    let start = Instant::now();
     alice.send_to(ALICE_INVITE.as_bytes(), proxy.addr()).await.unwrap();
-    let _first = tokio::time::timeout(Duration::from_secs(2), bob_ep.recv())
-        .await
-        .expect("bob gets the forwarded INVITE")
-        .expect("queue open");
-    // Bob never responds — crashed / blackholed worker.
+    let first = request(&next(&*bob, "bob gets the forwarded INVITE").await);
 
-    // Alice's Timer-A retransmit (same branch) re-forwards to the SAME target
-    // via the rtx memo — the proxy keeps pumping, it does not answer.
-    alice.send_to(ALICE_INVITE.as_bytes(), proxy.addr()).await.unwrap();
-    let second = tokio::time::timeout(Duration::from_secs(2), bob_ep.recv())
-        .await
-        .expect("the retransmit is re-forwarded to the same (dead) worker")
-        .expect("queue open");
-    let second = parse_request(&second.raw);
-    assert_eq!(second.method(), "INVITE");
+    let mut interval = T1;
+    let mut copy_at = T1;
+    while copy_at < 64 * T1 {
+        h.advance((start + copy_at).saturating_duration_since(Instant::now())).await;
+        alice.send_to(ALICE_INVITE.as_bytes(), proxy.addr()).await.unwrap();
+        let copy = request(&next(&*bob, "the copy is re-forwarded to the dead worker").await);
+        assert_eq!(copy.method(), "INVITE");
+        assert_eq!(copy.top_via().branch(), first.top_via().branch(), "on the first's branch");
+        interval *= 2;
+        copy_at += interval;
+    }
 
-    // The contract under test: over the whole window the proxy sent alice
-    // NOTHING — no 100, no synthesized 408/5xx. With zero provisionals
-    // received, alice's own Timer B stays armed and the CALLER owns the
-    // give-up (local 408 at 64·T1). No proxy timer exists, by design.
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    h.advance((start + 64 * T1).saturating_duration_since(Instant::now())).await;
     assert!(
         alice.try_recv().is_none(),
         "a blackholed worker must produce ZERO proxy-originated messages upstream \
-         (no 100, no final) — the caller's transaction timers own the give-up"
+         (no 100, no final): the caller's Timer B ends its transaction"
     );
 
     let _ = h.finish().await;

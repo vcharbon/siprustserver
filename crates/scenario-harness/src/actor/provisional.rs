@@ -10,6 +10,7 @@ use std::time::Duration;
 use tokio::time::Instant;
 
 use super::endpoint::ForkWinner;
+use super::framing::CarriesBody;
 use super::held::{answer_held, early_tag, reject_held};
 use super::ledger::ObligationKey;
 use super::runner::ActorState;
@@ -25,7 +26,9 @@ use crate::{ServerTxn, StepError};
 /// the PRACK of its dialog's previous reliable provisional and carries the
 /// next `RSeq` of that dialog. The first reliable provisional of a dialog
 /// carries the session description whatever `sdp` says (RFC 3261 §13.2.1);
-/// any other carries it when `sdp`, always the same one. The PRACK that
+/// any other carries it when `sdp`, always the same one. To an INVITE with no
+/// offer only that first reliable one carries it, as the offer
+/// (the `offers` module). The PRACK that
 /// acknowledges it is answered `prack_answer_after` its arrival.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Provisional {
@@ -106,6 +109,13 @@ fn reliability(txn: &ServerTxn, p: &Provisional) -> bool {
     required || (p.reliable && req.offers_100rel().unwrap_or(false))
 }
 
+/// Whether `txn`'s INVITE lets a provisional go reliably: it offers or
+/// requires `100rel` (RFC 3262 §3).
+pub(super) fn reliable_allowed(txn: &ServerTxn) -> bool {
+    let req = txn.request();
+    req.requires_100rel().unwrap_or(false) || req.offers_100rel().unwrap_or(false)
+}
+
 /// Whether `GoalStep::Provisional` may fire: the INVITE is held, and a
 /// reliable provisional's dialog has no reliable one outstanding.
 pub(super) fn provisional_ready(st: &ActorState<'_>, p: &Provisional) -> bool {
@@ -128,6 +138,7 @@ pub(super) async fn send_provisional(
     p: Provisional,
 ) -> Result<(), StepError> {
     let sdp = st.answer_body();
+    let framing = st.media.framing();
     let first_on_txn = st.early_provisionals.is_empty();
     let known = st.held.as_deref().and_then(|txn| known_tag(st, txn, p.fork));
     let Some(txn) = st.held.as_deref_mut() else {
@@ -142,14 +153,17 @@ pub(super) async fn send_provisional(
         let call_id = txn.request().call_id().to_string();
         next.unwrap_or_else(|| first_rseq(&call_id, known.as_deref().unwrap_or_default()))
     });
-    let body = p.sdp || (reliable && next.is_none());
+    let offered = txn.request().sdp().is_some();
+    let key = p.fork.unwrap_or_default();
+    let wanted = p.sdp || (reliable && next.is_none());
+    let body = st.offers.provisional_carries(offered, key, reliable, wanted);
     let reason = if p.status == 180 { "Ringing" } else { "Session Progress" };
     let mut r = txn.respond(p.status, reason);
     if let Some(tag) = p.fork {
         r = r.with_to_tag(tag);
     }
     if body {
-        r = r.with_sdp(sdp);
+        r = r.framed(framing, sdp);
     }
     if let Some(rseq) = rseq {
         r = r.reliable(rseq);

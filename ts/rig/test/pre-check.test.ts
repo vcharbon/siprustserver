@@ -170,7 +170,7 @@ describe("a required pre-check", () => {
     const { refusal, answers } = await alone("required-hanging")
     expect(refusal).toMatch(/^the required pre-check required-hanging could not check required-hanging: collect /)
     expect(answers).toEqual([["required-hanging", "not-checkable"]])
-  }, 10_000)
+  })
 })
 
 describe("an on-demand pre-check", () => {

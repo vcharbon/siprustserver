@@ -22,9 +22,11 @@
 //! narrowing it makes on its own behalf is the twin of that offer: a strategy
 //! that acknowledges none withholds `100rel` from every leg it originates
 //! ([`withheld_by_strategy_in`]). The node's own set
-//! (`B2buaConfig::node_capabilities`) is stated on every 200 to an OPTIONS,
-//! answered or relayed, since that 200 describes this UA (RFC 3261 §11.2),
-//! and on nothing else it relays. A
+//! (`B2buaConfig::node_capabilities`) is stated on every 200 it answers to an
+//! OPTIONS, since that 200 describes this UA (RFC 3261 §11.2); on a relayed
+//! one where `B2buaConfig::relayed_options_advertisement` names it, else that
+//! 200 carries the answerer's lines as they came; and on nothing else it
+//! relays. A
 //! relayed value is not an explicit update and never outranks a declaration:
 //! the messages that carry one, the relayed requests, drop it (see
 //! [`declared_advert_headers`]).
@@ -225,8 +227,8 @@ pub fn offered_option_tags(call: &Call, kind: Option<LegKind>) -> Vec<String> {
 /// strategy withholds `timer` (RFC 4028 §7.1), and `100rel` where the INVITE
 /// carries no offer, so the destination's offer comes unreliably and again in
 /// its 2xx, whose ACK carries the originator's answer (RFC 3264 §4). An
-/// originator requiring `100rel` where it is withheld is answered 420 before
-/// any leg is dialled (RFC 3261 §8.2.2.3). The withhold outranks the
+/// originator requiring a tag the call withholds is answered 420 before any
+/// leg is dialled ([`unserved_for_originator_in`]). The withhold outranks the
 /// offer, and it applies on EVERY mint of the call — the initial route and each leg a
 /// rule creates — so the call solicits the same reliability from each callee.
 /// A media leg's provisionals belong to the service that dialled it: nothing
@@ -279,6 +281,43 @@ pub fn withheld_option_tags_in(
         }
     }
     withheld
+}
+
+/// The option tags an originator's INVITE may not require of a call armed
+/// with `features`, whatever INVITE it dials (RFC 3261 §8.2.2.3): every tag
+/// the call withholds from the destination ([`withheld_option_tags_in`]), and
+/// `100rel` under any 18x strategy, which shows the originator unreliable
+/// provisionals of its own whatever the destination sends (RFC 3262 §3). The
+/// offer moves only `100rel`, so the set is the same whether the INVITE offers
+/// or not. Whether the destination is put the session timer the originator
+/// requires is read off the INVITE built for it
+/// (`sip_message::option_tags::unserved_on_relay`).
+pub fn unserved_for_originator_in(features: Option<&FeatureActivations>) -> Vec<String> {
+    let mut tags = withheld_option_tags_in(features, None, true);
+    let armed = features.is_some_and(|f| f.relay_first_18x_to_180.is_some());
+    let reliable = sip_message::option_tags::RELIABLE;
+    if armed && !tags.iter().any(|t| t.eq_ignore_ascii_case(reliable)) {
+        tags.push(reliable.to_string());
+    }
+    tags
+}
+
+/// [`unserved_for_originator_in`] for a route whose dial a service defers,
+/// so no INVITE is built to read the session timer off: `timer` too where the
+/// destination's face declares a `Supported` without it, which keeps the
+/// timer off that leg (RFC 4028 §7.1).
+pub fn unserved_before_a_service_dials_in(features: Option<&FeatureActivations>) -> Vec<String> {
+    use crate::rules::relay::TIMER;
+    let face_lacks_timer = features
+        .and_then(|f| f.advertise_capabilities.as_ref())
+        .and_then(|a| a.toward_originated.as_ref())
+        .and_then(|declared| declared.supported.as_ref())
+        .is_some_and(|supported| !supported.iter().any(|t| t.eq_ignore_ascii_case(TIMER)));
+    let mut tags = unserved_for_originator_in(features);
+    if face_lacks_timer && !tags.iter().any(|t| t.eq_ignore_ascii_case(TIMER)) {
+        tags.push(TIMER.to_string());
+    }
+    tags
 }
 
 /// A final to the originator's INVITE refused in the element's own name:

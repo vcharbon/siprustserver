@@ -1,11 +1,12 @@
 # Outbound backend client policy
 
-**Status:** accepted (2026-10-11). Amended with ADR-0050 (§11, §12) and ADR-0022 X1 (§6, §10).
+**Status:** accepted (2026-10-11). Amended with ADR-0050 (§11, §12), ADR-0022 X1 (§6, §10),
+and the hyper-util client (§1, §2, §14).
 
 **Owner:** `crates/http-net/src/backend/` (the backend client, its breaker, probe, rotation,
 in-flight slots, retry rule and env grammar), `crates/http-net/src/resolved_target.rs` and
-`resolver.rs` (name lookup), `crates/http-net/src/settings.rs` and `transport/real_client.rs`
-(the `reqwest` client settings); `crates/b2bua-runner-kit/src/backend_url.rs` (a backend's
+`resolver.rs` (name lookup), `settings.rs`, `ejection.rs` and `transport/` (the pooled
+client, its ejection and body cap); `crates/b2bua-runner-kit/src/backend_url.rs` (a backend's
 URL in the env); the SIP side is `crates/b2bua-core/src/failure_unavailable.rs` and
 `rules/refer_transfer/machine/authorizing.rs`, `crates/b2bua/src/decision/limiter_failover.rs`,
 `repl/backend_gate.rs` and `limiter/breaker.rs`;
@@ -25,10 +26,10 @@ as whatever final the engine chooses, and a cluster-wide outage leaves every wor
 
 ## Decision
 
-1. **One client per backend** (`BackendClient`), over `HttpTransport::client`: stock
-   `reqwest`, no connection pool of our own. The URL carries the configured name, so `Host` is
-   the name.
-2. **Name lookup through the target** (`ResolvedTarget`, plugged as `reqwest`'s resolver).
+1. **One client per backend** (`BackendClient`), over `HttpTransport::client`: hyper-util's
+   pooled client, no connection pool of our own. The URL carries the configured name, so `Host`
+   is the name.
+2. **Name lookup through the target** (`ResolvedTarget`, plugged as the client's resolver).
    Lookups are single-flight and bounded, and none starts while a cap of them is stuck. The
    addresses are forgotten when the breaker opens and when a probe fails, and refreshed at
    each rotation, serving stale meanwhile. An attempt that ends with no address fails as `Dns`,
@@ -51,10 +52,11 @@ as whatever final the engine chooses, and a cluster-wide outage leaves every wor
 7. **Retry rule** (`BackendClient::send_with_retry`): one retry, on the same client, after a
    connection-level failure or a request timeout, when the total budget leaves room for a whole
    attempt. Never after an HTTP response of any status, never while the breaker is open, never
-   for a name that does not resolve or a request never sent. A response, here and in 8, is a
-   whole one: one cut or stalled before the end of its body is a connection-level failure or a
-   timeout, so the backend may serve a retried request twice. A caller that must not retry uses
-   `BackendClient::attempt`. The adaptation port (`AdaptationHttpPort`) follows the rule.
+   for a name that does not resolve or a request never sent. A response, here and in 8, is
+   whole, or past the body cap: one cut or stalled before the end of its body is a
+   connection-level failure or a timeout, so the backend may serve a retried request twice. A
+   caller that must not retry uses `BackendClient::attempt`. The adaptation port
+   (`AdaptationHttpPort`) follows the rule.
    Detail: [appendix §7](appendix/0043-outbound-backend-client-policy.md#7-retry-rule).
 8. **Breaker** (`WindowBreaker`, one per backend): it opens when at least the configured number
    of requests were in flight during the last window and not one HTTP response of any status
@@ -79,6 +81,10 @@ as whatever final the engine chooses, and a cluster-wide outage leaves every wor
 13. **No blocking lookup on the router task**: per-peer failure attribution reads the outbound
     proxy's kept addresses and starts its lookup off the task. A named hop other than the proxy
     is not attributed.
+14. **Per-connection ejection** (`http_net::ejection`): a connection is closed on the first
+    500, 502 or 504, after three 503, 429 or 408 in a row (20 a second at most), by a reset on
+    a timeout. A body past the cap is refused. Detail:
+    [appendix §14](appendix/0043-outbound-backend-client-policy.md#14-per-connection-ejection).
 
 ### Settings and their env keys
 

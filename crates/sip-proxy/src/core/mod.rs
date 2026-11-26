@@ -1,15 +1,15 @@
-//! [`ProxyCore`] — the stateless proxy data path (single-endpoint K8s-LB
-//! mode; a SIP registrar does NOT live here).
+//! [`ProxyCore`]: the stateless proxy data path (RFC 3261 §16). No registrar
+//! lives here.
 //!
-//! It binds one UDP endpoint, runs a recv loop, parses each datagram, and
-//! dispatches to [`request`](self) / [`response`](self) handling. It owns the
-//! routing-policy seam ([`RoutingStrategy`]), the worker registry, the
-//! `(Call-ID|CSeq#)` LRU, the [`Refusals`] that answer the requests it refuses
-//! itself, a [`Clock`], metrics, a logger, and the self-gate (intake-age/CPS
-//! admission). A hop thaws the received
-//! message into a draft, touches only the routing headers, and freezes it to
-//! the wire bytes it forwards — every untouched line is memcpy'd, never
-//! re-parsed (ADR-0025). Its defaults live in [`ProxyCoreBuilder`].
+//! A core serves the internal face's UDP socket, and the external face's on a
+//! dual-face proxy, parses each datagram once and dispatches it to request or
+//! response handling. It owns the routing-policy seam ([`RoutingStrategy`]), the
+//! worker registry, the INVITE-transaction memo ([`CancelBranchLru`]), the
+//! [`Refusals`] that answer the requests it refuses itself, a [`Clock`], metrics
+//! and the self-gate (intake-age and CPS admission). A hop thaws the received
+//! message into a draft, touches only the routing headers, and freezes it to the
+//! wire bytes it forwards: every untouched line is copied, never re-parsed
+//! (ADR-0025). Its defaults live in [`ProxyCoreBuilder`].
 
 mod builder;
 #[cfg(test)]
@@ -25,9 +25,13 @@ mod liveness_routing_tests;
 #[cfg(test)]
 mod maddr_tests;
 #[cfg(test)]
+mod named_worker_face_tests;
+#[cfg(test)]
 mod owner_rule_tests;
 mod request;
 mod response;
+#[cfg(test)]
+mod supervision_tests;
 #[cfg(test)]
 mod worker_ack_tests;
 
@@ -44,14 +48,14 @@ use sip_net::{parse_datagram, ParserPanicked, UdpEndpoint, UdpPacket};
 use crate::addr::ProxyAddr;
 use crate::cancel_lru::CancelBranchLru;
 use crate::face::EgressPolicy;
-use crate::health::FirstView;
+use crate::health::{FirstView, WorkerCapabilities};
 use crate::liveness::ShardPulse;
 use crate::observability::metrics::Face;
 use crate::observability::{ProxyMetrics, UdpShardStats};
 use crate::parse_refusals::ParseRefusals;
 use crate::refusals::Refusals;
 use crate::registry::WorkerRegistry;
-use crate::resolver::{HostResolver, NamedForwarder, ResolverConfig};
+use crate::resolver::{HostResolver, NamedForwarder, OnSent, ResolverConfig};
 use crate::self_gate::{IntakeAgeRecorder, ProxySelfGate};
 use crate::strategy::RoutingStrategy;
 use crate::trace::ProxyTraces;
@@ -75,10 +79,9 @@ fn is_dialog_creating(method: &str) -> bool {
     method == "INVITE" || method == "SUBSCRIBE"
 }
 
-/// The **external face** of a dual-face (multi-homed edge) proxy — the second
-/// UDP socket bound on the caller plane and its own advertise. Handed to
-/// [`ProxyCoreBuilder::external_face`]; when absent the core is the classic
-/// single-face proxy.
+/// The **external face** of a dual-face (multi-homed edge) proxy: the second
+/// UDP socket, bound on the caller plane, and its own advertise. Handed to
+/// [`ProxyCoreBuilder::external_face`]; without it the core is single-face.
 pub struct ExternalFaceParts {
     /// The external-plane socket (bound on the external VIP).
     pub endpoint: Box<dyn UdpEndpoint>,
@@ -86,7 +89,6 @@ pub struct ExternalFaceParts {
     pub advertised: ProxyAddr,
 }
 
-/// The live external face inside a running core.
 struct ExternalFace {
     endpoint: Arc<dyn UdpEndpoint>,
     advertised: ProxyAddr,
@@ -94,9 +96,8 @@ struct ExternalFace {
     named: NamedForwarder,
 }
 
-/// The dependency bundle for a [`ProxyCore`] (avoids a 10-argument
-/// constructor). Crate-private: external wiring goes through
-/// [`ProxyCoreBuilder`], which is the one place the defaults live.
+/// The dependencies of a [`ProxyCore`]. External wiring goes through
+/// [`ProxyCoreBuilder`], the one place the defaults live.
 pub(crate) struct ProxyCoreParts {
     pub endpoint: Box<dyn UdpEndpoint>,
     /// The address the proxy stamps on Via / Record-Route (its advertised
@@ -137,9 +138,11 @@ pub(crate) struct ProxyCoreParts {
     pub first_view: Arc<FirstView>,
     /// What reads a datagram no intake hook parsed: the process's one parser.
     pub parser: CustomParser,
+    /// The workers' last advertisement the proxy answers a supervision OPTIONS
+    /// with; `None` relays every OPTIONS.
+    pub supervision: Option<Arc<WorkerCapabilities>>,
 }
 
-/// The stateless proxy.
 pub struct ProxyCore {
     /// The internal-face socket (single-face mode: the ONLY socket).
     endpoint: Arc<dyn UdpEndpoint>,
@@ -147,7 +150,6 @@ pub struct ProxyCore {
     advertised: ProxyAddr,
     /// Dual-face mode: the external-plane socket/advertise.
     external: Option<ExternalFace>,
-    /// Which face a message leaves on.
     egress: EgressPolicy,
     strategy: Arc<dyn RoutingStrategy>,
     registry: Arc<dyn WorkerRegistry>,
@@ -166,6 +168,7 @@ pub struct ProxyCore {
     pub(super) traces: Arc<ProxyTraces>,
     pulse: Arc<ShardPulse>,
     first_view: Arc<FirstView>,
+    supervision: Option<Arc<WorkerCapabilities>>,
 }
 
 impl ProxyCore {
@@ -208,6 +211,7 @@ impl ProxyCore {
             pulse: parts.pulse,
             traces: parts.traces,
             first_view: parts.first_view,
+            supervision: parts.supervision,
         }
     }
 
@@ -217,7 +221,6 @@ impl ProxyCore {
         self.traces.clone()
     }
 
-    /// A handle to this proxy's metrics (for SUT assertions / a metrics server).
     pub fn metrics(&self) -> Arc<ProxyMetrics> {
         self.metrics.clone()
     }
@@ -226,11 +229,7 @@ impl ProxyCore {
         &self.advertised
     }
 
-    // ── Dual-face plumbing ──────────────────────────────────────────────────
-    // A single-face proxy has one socket and one advertise, the internal ones,
-    // and every message it handles is on that face.
-
-    /// The socket of `face`.
+    /// The socket of `face`; a single-face proxy has only the internal one.
     fn endpoint_of(&self, face: Face) -> &Arc<dyn UdpEndpoint> {
         match (&self.external, face) {
             (Some(ext), Face::External) => &ext.endpoint,
@@ -247,7 +246,6 @@ impl ProxyCore {
         }
     }
 
-    /// The named-target send path of `face`.
     fn named_of(&self, face: Face) -> &NamedForwarder {
         match (&self.external, face) {
             (Some(ext), Face::External) => &ext.named,
@@ -302,7 +300,8 @@ impl ProxyCore {
     /// literals) is sent inline; a DNS name — e.g. a `sipp-uas` pod FQDN in a
     /// worker-outbound b-leg R-URI — goes through the [`NamedForwarder`], which
     /// serves cache hits inline and resolves misses on a spawned task so the
-    /// recv loop NEVER waits on DNS (see [`crate::resolver`]). Every refusal is
+    /// recv loop NEVER waits on DNS (see [`crate::resolver`]); `on_sent` is
+    /// told the address a send to a name leaves for. Every refusal is
     /// counted; the kind of one the socket answered inline is returned, `None`
     /// when the datagram left or a resolve sends it later.
     async fn send_to(
@@ -310,17 +309,14 @@ impl ProxyCore {
         bytes: &[u8],
         target: &ProxyAddr,
         face: Face,
+        on_sent: Option<OnSent>,
     ) -> Option<sip_net::SendErrorKind> {
         self.metrics.record_face_egress(face);
         let Some(dst) = target.to_socket_addr() else {
-            return self.named_of(face).send(bytes, target).await;
+            return self.named_of(face).send(bytes, target, on_sent).await;
         };
         let e = self.endpoint_of(face).send_to(bytes, dst).await.err()?;
         self.metrics.record_send_failure();
-        // Per-peer attribution (sip_proxy_peer_failures_total{..., kind=…}):
-        // classify against the registry (a known worker is internal and always
-        // its own series, else external, under the cap), and name an oversize
-        // message as such rather than blaming the peer.
         self.metrics.record_peer_failure(&dst, self.classify_peer(target), peer_failure_kind(&e));
         Some(e.kind)
     }
@@ -342,9 +338,6 @@ impl ProxyCore {
         self.metrics.record_face_egress(face);
         if let Err(e) = self.endpoint_of(face).send_to(bytes, dst).await {
             self.metrics.record_send_failure();
-            // The destination is whoever the request's Via names (typically an
-            // upstream UAC/UAS — external); still classify via the registry in
-            // case it is a worker.
             let target = ProxyAddr::from(dst);
             self.metrics.record_peer_failure(
                 &dst,
@@ -354,26 +347,15 @@ impl ProxyCore {
         }
     }
 
-    /// The recv loop. Runs until the endpoint's queue is closed (the endpoint
-    /// is dropped). A datagram is parsed once: the loop takes the parse its
-    /// receive path made and parses only a datagram that came without one. A
-    /// refused one is answered or dropped (ADR-0054); one the parser panics
-    /// on is dropped and counted, and the loop goes on.
+    /// The recv loop over both faces' sockets: a datagram's face is its trust
+    /// (ADR-0048); it is parsed once, a refused one answered or dropped (ADR-0054),
+    /// one the parser panics on dropped and counted. The loop ends when either
+    /// face's socket closes, and the runner exits for a restart. Each read spends a
+    /// unit of the cooperative budget: a flood ends the poll every 128 datagrams.
+    /// ADR-0057 §6.
     pub async fn run(self) {
-        // The shared `(Call-ID|CSeq#)` LRU sweeper — spawned exactly once per
-        // LRU however many recv-shard cores share it (see
-        // [`CancelBranchLru::ensure_sweeper`]).
         self.cancel_lru.ensure_sweeper(self.metrics.clone());
 
-        // Per-shard endpoint-stats publisher: a tail-dropping queue otherwise
-        // shows 100% forwarded on dashboards. Each core owns its endpoint's
-        // slot, so N shards never stomp one gauge; the metrics render the
-        // cross-shard aggregate. The AbortOnDrop guard aborts it even when the
-        // whole recv-loop TASK is aborted (a supervisor/harness abort drops
-        // this future mid-`recv`): without it the stats task would keep a strong
-        // endpoint `Arc` alive forever, so the socket (and on the simulated
-        // fabric the bind address itself) would leak past the core's death and
-        // block rebinding the same VIP for a takeover proxy.
         let stats = {
             let metrics = self.metrics.clone();
             let endpoint = self.endpoint.clone();
@@ -401,11 +383,6 @@ impl ProxyCore {
         let _stats_guard = AbortOnDrop(stats);
 
         loop {
-            // Dual-face: serve BOTH sockets from the one core (one process,
-            // one state shared across faces). Either socket closing ends the
-            // core: the faces are one identity and live and die together (the
-            // runner supervises the core task and exits for restart). The face
-            // a datagram arrived on is its trust (ADR-0048).
             let (pkt, face) = match &self.external {
                 Some(ext) => tokio::select! {
                     p = self.endpoint.recv() => (p, Face::Internal),
@@ -416,16 +393,9 @@ impl ProxyCore {
             let Some(pkt) = pkt else { break };
             let now_ms = self.now_ms();
             self.pulse.took_packet(self.shard, now_ms);
-            // Intake-saturation signal: the packet's age at dequeue (arrival →
-            // now) feeds the self-gate's ELU arm through the shared recorder.
-            // Both readings sit on THIS core's `Clock` — the endpoint stamps
-            // arrivals on it (`BindUdpOpts::clock`) — so the age is a duration
-            // on one timeline and carries no wall-vs-monotonic drift.
             self.intake_age.record(now_ms.saturating_sub(pkt.arrival_ms));
             self.metrics.record_face_ingress(face);
             let UdpPacket { raw, src, parsed, .. } = pkt;
-            // The receive path's parse, else one made here; either way the
-            // message's `raw`/`body` share the receive buffer.
             let parsed = match parsed {
                 Some(parsed) => *parsed,
                 None => parse_datagram(raw.clone(), |b| self.parser.parse_shared(b)),

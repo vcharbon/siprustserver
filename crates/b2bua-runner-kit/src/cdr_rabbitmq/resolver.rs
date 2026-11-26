@@ -1,5 +1,5 @@
-//! The broker name resolution of the RabbitMQ CDR sink: single-flight and
-//! bounded by the connect deadline. A system lookup cannot be cancelled, so it
+//! The name resolution of one broker of the RabbitMQ CDR sink: single-flight
+//! and bounded by the caller's deadline. A system lookup cannot be cancelled, so it
 //! runs on a detached thread (never the runtime's blocking pool, whose drop
 //! waits on it) and at most one runs at a time: an attempt whose deadline
 //! passes leaves its lookup parked, and the next attempt awaits that lookup.
@@ -37,7 +37,9 @@ impl BrokerResolver {
         )
     }
 
-    fn with_lookup(lookup: Lookup, max_age: Duration) -> Self {
+    /// Resolves through `lookup`; a parked answer older than `max_age` is
+    /// not used.
+    pub(super) fn with_lookup(lookup: Lookup, max_age: Duration) -> Self {
         Self { lookup, max_age, in_flight: None }
     }
 
@@ -68,7 +70,7 @@ impl BrokerResolver {
         let answered = timeout_at(deadline, answer).await.map_err(|_| {
             io::Error::new(
                 io::ErrorKind::TimedOut,
-                format!("{host} still resolving at the connect deadline"),
+                format!("{host} still resolving at its share of the connect deadline"),
             )
         })?;
         self.in_flight = None;

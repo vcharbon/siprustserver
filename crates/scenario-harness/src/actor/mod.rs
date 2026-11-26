@@ -43,6 +43,7 @@
 
 mod accept_delta;
 mod answer;
+pub mod answers;
 mod barrier;
 mod clean_end;
 mod client_retransmit;
@@ -52,15 +53,19 @@ mod dialog_table;
 mod drive;
 mod ending;
 mod endpoint;
+mod extensions;
 mod facts;
+pub mod framing;
 mod give_up;
 mod goals;
 mod held;
 mod held_acks;
+mod held_pracks;
 mod ledger;
 mod lost_provisional;
 mod observation;
 mod observe;
+mod offers;
 mod originate;
 mod pacing;
 mod prack_hold;

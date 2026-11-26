@@ -13,6 +13,7 @@ pub mod route_fold;
 mod schemas;
 
 pub use b2bua_sdk::header_update::{header_lines, payload_lines, HeaderUpdate, SipHeaderUpdates};
+pub use b2bua_sdk::redirect_contact::{ContactParam, RedirectContact};
 pub use error::CallDecisionError;
 pub use no_answer::no_answer_deadline;
 pub use route_fold::MAX_LIMITER_FAILOVER;
@@ -20,6 +21,6 @@ pub use schemas::{
     default_platform_features, read_stated_port, BodyUpdate, CallFailureRequest,
     CallFailureResponse, CallReferRequest, CallReferResponse, CallReleaseRequest,
     CallReleaseResponse, CallSnapshot, CallTreatment, FailureInfo, FeatureActivations, LegSnapshot,
-    NewCallRequest, NewCallResponse, RedirectContact, RedirectDecision, RejectDecision,
-    RouteDecision, SipDestination,
+    NewCallRequest, NewCallResponse, RedirectDecision, RejectDecision, RouteDecision,
+    SipDestination,
 };

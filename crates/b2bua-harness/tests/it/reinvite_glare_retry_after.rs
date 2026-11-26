@@ -234,12 +234,14 @@ async fn a_newcomer_while_its_first_awaits_the_final_is_refused_500() {
     b2bua.assert_fully_reaped();
 }
 
-/// Bob CANCELs his relayed re-INVITE (487) and re-INVITEs again before alice
-/// answers the relayed copy: his own INVITE is over, only the stack's toward
-/// alice is open, so the 491 carries no Retry-After.
+/// Bob CANCELs his relayed re-INVITE and re-INVITEs again before alice's final
+/// reaches him: his CANCEL went on to alice, whose final answers his first
+/// re-INVITE (ADR-0065), so it still awaits that final and §14.2 owes the
+/// newcomer 500 with a `Retry-After` of 0 to 10 s.
 #[tokio::test]
-async fn a_newcomer_after_its_cancelled_reinvite_carries_no_retry_after() {
+async fn a_newcomer_after_its_relayed_cancel_is_refused_500() {
     let h = Harness::with_transit_delay("b2bua-glare-ra-cancelled", 0);
+    waive_overtaking(&h, "bob");
     let alice = h.agent("alice", "127.0.0.1:6318").await;
     let bob = h.agent("bob", "127.0.0.1:6319").await;
     let b2bua = sut(6319, Some(FIXED)).start(&h, "b2bua", "127.0.0.1:6320").await;
@@ -254,18 +256,22 @@ async fn a_newcomer_after_its_cancelled_reinvite_carries_no_retry_after() {
 
     let mut reinv1 = bob_dialog.reinvite(Some(BOB_V2)).await;
     let mut alice_uas = alice.receive("INVITE").await;
+    alice_uas.respond(100, "Trying").await;
     let mut cxl = reinv1.cancel().await;
     cxl.expect(200).await;
-    reinv1.expect(487).await;
+    alice.receive("CANCEL").await.respond(200, "OK").await;
 
     let mut reinv2 = bob_dialog.request(InDialogMethod::Invite, Some(BOB_V3)).await;
-    let refused = reinv2.expect(491).await;
-    assert_eq!(stated_by_response(&refused, "Retry-After"), None);
+    let refused = reinv2.expect(500).await;
+    let secs: u32 = stated_by_response(&refused, "Retry-After")
+        .expect("the 500 carries a Retry-After")
+        .parse()
+        .expect("delta-seconds");
+    assert!(secs <= 10, "{secs}");
 
-    alice_uas.respond(100, "Trying").await;
-    alice.receive("CANCEL").await.respond(200, "OK").await;
     alice_uas.respond(487, "Request Terminated").await;
     alice.receive("ACK").await;
+    reinv1.expect(487).await;
     let mut bye = alice_dialog.bye().await;
     bob.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;

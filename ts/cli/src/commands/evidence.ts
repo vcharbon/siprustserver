@@ -18,7 +18,10 @@
  * staleness rule (`@sip/corpus` `cut-staleness.ts`): a capture whose standing
  * cut came from this cut code and is no older than its artifacts is replayed
  * off that cut, and one that is stale or never cut is cut again, saying why;
- * `--force-recut` cuts a current one. A derived universe cuts.
+ * `--force-recut` cuts a current one. A derived universe cuts. A named
+ * capture the artifact store does not hold yet, found under a pcap root, is
+ * ingested first, saying so (`@sip/corpus` `ingest/adopt.ts`), and then cut
+ * as a never-cut one.
  *
  * The two phases are separate commands for a reason — one cut feeds as many
  * lanes at once as the host has. This composes them for the common case: one
@@ -35,7 +38,9 @@
  * taken, before the cut (`@sip/corpus` `pre-checks.ts`): a refusal of theirs
  * exits 2 with its message.
  */
+import { neverCut } from "@sip/corpus/cut/cut-staleness"
 import { afterSweep } from "@sip/corpus/housekeeping/cleanup"
+import * as Adopt from "@sip/corpus/ingest/adopt"
 import { errorsFail } from "@sip/corpus/options"
 import * as Population from "@sip/corpus/population"
 import * as ReplayBuild from "@sip/corpus/replay/build"
@@ -43,7 +48,7 @@ import { prepOf, workAsOf } from "@sip/corpus/replay/evidence-prep"
 import { planWork } from "@sip/corpus/replay/plan"
 import { phase as replay, report } from "@sip/corpus/replay/replay"
 import * as ReplaySummary from "@sip/corpus/report/replay-summary"
-import { label, workList } from "@sip/corpus/universe"
+import { label, type Selection, workList } from "@sip/corpus/universe"
 import * as Console from "effect/Console"
 import * as Effect from "effect/Effect"
 import { Command, Flag } from "effect/unstable/cli"
@@ -64,6 +69,17 @@ export const flags = (facts: CliFacts) => ({
 
 type Input = TriageInput & { readonly summary: boolean }
 
+/**
+ * The selection the work list is read with before the cut: a named list
+ * holding a capture no cut has taken reads with no span bound, that capture
+ * having no span yet; `workAsOf` applies the bound once the cut stands.
+ */
+const unboundUntilCut = Effect.fn("Evidence.unboundUntilCut")(function*(selection: Selection) {
+  if (selection.universe !== "named" || selection.maxSpanSeconds === undefined) return selection
+  const uncut = yield* neverCut(selection.positional)
+  return uncut.length === 0 ? selection : { ...selection, maxSpanSeconds: undefined }
+})
+
 const main = Effect.fn("Evidence.main")(function*(facts: CliFacts, input: Input) {
   const asked = yield* cutAndReplayOptionsOf(input)
   const away = yield* Refusals.environment(facts, asked.lane, asked.selection.universe, asked.dryRun)
@@ -76,23 +92,38 @@ const main = Effect.fn("Evidence.main")(function*(facts: CliFacts, input: Input)
     yield* Console.error(`[evidence] refused: ${read.why}`)
     return 2
   }
-  const options = { ...asked, selection: read.selection }
-  const refused = yield* Population.refusal(options.paths, options.selection)
-  if (refused !== null) {
-    yield* Console.error(`[evidence] refused: ${refused}`)
-    return 2
-  }
-  const unstated = yield* Refusals.lane(options.lane)
+  const unstated = yield* Refusals.lane(asked.lane)
   if (unstated !== null) {
     yield* Console.error(`[evidence] refused: ${unstated}`)
     return 2
   }
-  const census = yield* Refusals.census(facts, options.paths)
+  const census = yield* Refusals.census(facts, asked.paths)
   if (census !== null) {
     yield* Console.error(`[evidence] refused: ${census}`)
     return 2
   }
-  const captures = yield* workList(options.paths, options.lane, options.selection, options.prep)
+  const planned = yield* Adopt.plan(asked.paths, read.selection, "evidence")
+  if (planned._tag === "refused") {
+    yield* Console.error(`[evidence] refused: ${planned.why}`)
+    return 2
+  }
+  const named = { ...read.selection, positional: planned.positional }
+  const refused = yield* Population.refusal(asked.paths, named, Adopt.pendingOf(planned))
+  if (refused !== null) {
+    yield* Console.error(`[evidence] refused: ${refused}`)
+    return 2
+  }
+  const landed = yield* Adopt.land(asked.paths, planned, {
+    tag: "evidence",
+    concurrency: asked.concurrency,
+    dryRun: asked.dryRun
+  })
+  if (landed._tag === "refused") {
+    yield* Console.error(`[evidence] refused: ${landed.why}`)
+    return 2
+  }
+  const options = { ...asked, selection: { ...named, positional: landed.positional } }
+  const captures = yield* workList(options.paths, options.lane, yield* unboundUntilCut(options.selection), options.prep)
   if (captures.length === 0) {
     yield* Console.error(
       options.selection.universe === "named"

@@ -88,7 +88,8 @@ Every handler panic and every discharge is counted and alerted on: each one is a
 
 A long-lived task of the shell is supervised: one whose work survives in shared state restarts
 after a panic (`task-restart`), counted per task in `*_task_restarts_total{task}`; one the
-process cannot serve without ends the process, which exits non-zero.
+process cannot serve without ends the process, which exits non-zero. The CDR drainer restarts:
+its queue is shared state.
 Detail: [appendix §5](appendix/0051-production-crates-never-panic-on-input.md#5-panic-strategy-and-backstops).
 
 ### 6. Errors replacing panics

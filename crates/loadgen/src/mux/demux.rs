@@ -17,7 +17,7 @@ use sip_net::{UdpEndpoint, UdpPacket};
 use tokio::time::Instant;
 
 use super::datagram::Datagram;
-use super::late_answer::LateReply;
+use super::late_answer::{refuse_cancel, LateReply};
 use super::late_final::Reply;
 use super::stats::{MuxStats, OrphanReason};
 use super::taps::Dir;
@@ -45,7 +45,10 @@ pub(super) async fn dispatch_loop(mux: std::sync::Weak<MuxSocket>, endpoint: Arc
 /// by a finished call (`released`) or the call's caller has not sent its
 /// INVITE yet (`early`); (4) a final to the INVITE a released caller dialog
 /// last sent, answered with the datagrams this returns (its ACK, and for a 2xx
-/// the BYE ending the dialog); (5) orphan. The datagram is sniffed once,
+/// the BYE ending the dialog); (5) the answer to a copy the simulated network
+/// delivered after the call ended, or the ACK of an echoed final, counted
+/// and dropped; (6) a CANCEL nothing held answers, refused with a 481 built
+/// from itself; (7) orphan. The datagram is sniffed once,
 /// here, for every step and every watcher.
 fn route(mux: &MuxSocket, pkt: &UdpPacket) -> Vec<(Arc<[u8]>, SocketAddr)> {
     let (raw, src) = (&pkt.raw[..], pkt.src);
@@ -75,7 +78,7 @@ fn route(mux: &MuxSocket, pkt: &UdpPacket) -> Vec<(Arc<[u8]>, SocketAddr)> {
     //    loss model went with its endpoints: neither the request nor the
     //    re-answer is dropped.
     if let Some(cid) = cid.filter(|_| !dg.is_response()) {
-        match g.released_answer(cid, dg.id(), Instant::now()) {
+        match g.released_answer(cid, &dg, Instant::now()) {
             LateReply::Reanswer(answer, repair) => {
                 drop(g);
                 mux.stats.late_answered.fetch_add(1, Ordering::Relaxed);
@@ -91,6 +94,11 @@ fn route(mux: &MuxSocket, pkt: &UdpPacket) -> Vec<(Arc<[u8]>, SocketAddr)> {
                     mux.stats.late_answered.fetch_add(1, Ordering::Relaxed);
                     return vec![(refused.into(), src)];
                 }
+            }
+            LateReply::Cancel(ok) => {
+                drop(g);
+                mux.stats.late_answered.fetch_add(1, Ordering::Relaxed);
+                return vec![(ok, src)];
             }
             LateReply::Absorbed => return Vec::new(),
             LateReply::NotHeld => {}
@@ -221,7 +229,15 @@ fn route(mux: &MuxSocket, pkt: &UdpPacket) -> Vec<(Arc<[u8]>, SocketAddr)> {
         }
         Reply::NotHeld => {}
     }
-    // 5. Not a known dialog and not an initial INVITE → a late straggler.
+    if mux.stats.answers_a_copy(dg.id()) {
+        mux.stats.copy_answered.fetch_add(1, Ordering::Relaxed);
+        return Vec::new();
+    }
+    if let Some(refused) = refuse_cancel(&dg) {
+        drop(g);
+        mux.stats.late_answered.fetch_add(1, Ordering::Relaxed);
+        return vec![(refused, src)];
+    }
     mux.stats.orphan(OrphanReason::Stray, raw);
     Vec::new()
 }

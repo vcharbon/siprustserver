@@ -50,6 +50,21 @@ struct Bye {
     at_ms: i64,
 }
 
+/// A side's in-dialog request, by its dialog's To-tag, CSeq number and method:
+/// forked early dialogs number apart (RFC 3261 §12.2.1.1), so one number may
+/// name a request on each.
+pub(crate) type PendingKey = (String, u32, String);
+
+/// A side's in-dialog requests awaiting a final, by [`PendingKey`]: their
+/// method and when they were first sent.
+pub(crate) type Pending = HashMap<PendingKey, (String, i64)>;
+
+/// The [`PendingKey`] of the request or response of identity `id`.
+pub(crate) fn pending_key(id: &sip_message::sniff::Identity<'_>) -> Option<PendingKey> {
+    let tag = id.to_tag.unwrap_or_default().to_string();
+    Some((tag, id.cseq?, id.cseq_method?.to_string()))
+}
+
 /// One of a side's in-dialog requests, as its final judges it.
 pub(super) struct Request<'a> {
     pub(super) method: &'a str,
@@ -280,28 +295,23 @@ fn forget(failures: &mut Vec<WireFailure>, failure: &WireFailure) {
 /// request's failure only: the call's ending stays as the seal left it,
 /// never `cut`.
 pub(super) fn settle_pending(
-    (pending, failures, finals): (
-        &mut HashMap<u32, (String, i64)>,
-        &mut Vec<WireFailure>,
-        &mut Finals,
-    ),
-    method: &str,
-    cseq: u32,
+    (pending, failures, finals): (&mut Pending, &mut Vec<WireFailure>, &mut Finals),
+    key: PendingKey,
     (code, raw): (u16, &[u8]),
     now: i64,
 ) {
-    let held = pending.get(&cseq).is_some_and(|(m, _)| m == method && m != "BYE");
-    if code < 200 || !held {
+    let cseq = key.1;
+    if code < 200 || key.2 == "BYE" {
         return;
     }
-    if let Some((method, sent_at)) = pending.remove(&cseq) {
+    if let Some((method, sent_at)) = pending.remove(&key) {
         finals.judge(failures, &Request { method: &method, cseq, sent_at }, (code, raw), now);
     }
 }
 
 /// The requests of `pending` other than a BYE, as failures without a code,
 /// in the order they were sent.
-pub(super) fn unanswered(pending: &HashMap<u32, (String, i64)>) -> Vec<WireFailure> {
+pub(super) fn unanswered(pending: &Pending) -> Vec<WireFailure> {
     let mut left: Vec<WireFailure> = pending
         .values()
         .filter(|(method, _)| method != "BYE")

@@ -16,6 +16,7 @@
 //! | `B2BUA_QUEUE` ≥ [`MIN_INGRESS_QUEUE`]; `B2BUA_CONCURRENCY`, `B2BUA_CALL_CAP` ≥ 1 | here |
 //! | with replication: the replica TTL against the keepalive round and the INVITE bound, the backup ceilings against the emergency ceilings | `ReplicaConfig::validate` |
 //! | with replication: sync cap < ACK and CANCEL bounds < T1, the backlog marks | `WritePath::validate` |
+//! | with replication: `B2BUA_CALL_START_BOUND_MS` + `B2BUA_REPL_SYNC_CAP_MS` < `B2BUA_CALL_CONTROL_TIMEOUT_MS` | here: a call started at its bound releases its 100 inside its setup budget (ADR-0070) |
 //! | with replication: the verdict hold ≥ freshness window + Timer F | `VerdictBounds::validate` |
 //! | with replication: `B2BUA_DEAD_VERDICT_HOLD_MS` > 2 × `B2BUA_REPL_IDLE_TIMEOUT_MS` + `B2BUA_REPL_LOOKUP_TIMEOUT_MS` + `B2BUA_REPL_CONNECT_TIMEOUT_MS` | here: a verdict stays held while the backup confirms it (ADR-0047 D1) |
 //! | with replication: `B2BUA_REPL_BOOTSTRAP_HARD_TIMEOUT_MS` > 2 × `B2BUA_REPL_CONNECT_TIMEOUT_MS` + `B2BUA_REPL_BACKOFF_MAX_MS` | here: a cold flow refused or timed out once still makes a second connect before the timer reads its peer unreachable (ADR-0011 X5) |
@@ -115,6 +116,7 @@ impl ConfigCheck {
                      B2BUA_REPL_CANCEL_BOUND_MS / B2BUA_REPL_BACKLOG_*: {why}"
                 )
             }));
+            self.start_and_sync_fit_the_budget(config, &repl.write_path);
             self.take(repl.verdict.validate().map_err(|why| {
                 format!("B2BUA_DEAD_VERDICT_HOLD_MS / B2BUA_DEAD_NOTICE_FRESH_MS: {why}")
             }));
@@ -124,6 +126,28 @@ impl ConfigCheck {
             }
             self.bootstrap_outlasts_a_retry(&repl.puller);
         }
+    }
+
+    /// A new call that starts at its start bound still has its creation write
+    /// applied, or its sync cap passed, inside its setup budget: the latest a
+    /// 100 the creation write releases leaves (ADR-0070).
+    fn start_and_sync_fit_the_budget(
+        &mut self,
+        config: &b2bua::B2buaConfig,
+        write_path: &b2bua::repl::WritePath,
+    ) {
+        let (start, cap) = (config.call_start_bound(), write_path.sync_cap);
+        let budget = config.call_control_timeout();
+        self.require(start + cap < budget, || {
+            format!(
+                "B2BUA_CALL_START_BOUND_MS={} + B2BUA_REPL_SYNC_CAP_MS={} is not below \
+                 B2BUA_CALL_CONTROL_TIMEOUT_MS={}: a call started at its bound would release its \
+                 100 past its setup budget",
+                start.as_millis(),
+                cap.as_millis(),
+                budget.as_millis()
+            )
+        });
     }
 
     /// A cold flow's bootstrap hard timer outlasts one failed connect, the

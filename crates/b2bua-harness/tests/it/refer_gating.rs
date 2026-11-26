@@ -13,7 +13,7 @@
 //!
 //! Rows covered elsewhere and skipped here:
 //!   - A re-INVITE during a-realigning → 491   (refer_full_transfer.rs case 3)
-//!   - B non-BYE during c-realigning → 481     (refer_c_realign.rs case 5)
+//!   - B non-BYE, non-ACK during c-realigning → 481 (refer_c_realign.rs case 5)
 //!   - Second REFER during refer-authorizing → 491 (refer-reject family)
 
 use std::time::Duration;

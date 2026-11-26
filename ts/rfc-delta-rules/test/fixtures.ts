@@ -41,7 +41,8 @@ const EMPTY_RUN: Classifier.RunShape = {
   sentRSeqs: new Map(),
   openers: new Map(),
   receptions: new Map(),
-  sent: new Map()
+  sent: new Map(),
+  byeAheadOfInviteFinal: new Set()
 }
 
 /** The facts a probe is read under where it needs none. */
@@ -50,6 +51,7 @@ export const NO_FACTS: RfcFacts = {
   releasedLegSteps: new Set(),
   roundsPastReleaseSteps: new Set(),
   tryingOnNonInviteSteps: new Map(),
+  tryingOnEarlyByeSteps: new Set(),
   byeBesideCancelSteps: new Set(),
   cancelPastAnswerSteps: new Set(),
   cancelCrossingAnswerSteps: new Set(),
@@ -98,6 +100,31 @@ const callerSent = (address: { readonly from: string; readonly to?: string }, ..
       A: [{ name: "From", value: address.from }, ...(address.to === undefined ? [] : [{ name: "To", value: address.to }])]
     }
   })
+
+/**
+ * Leg A's REFER outcome: the transferor's REFER answered 202, the progress
+ * NOTIFY its step s11 took (`active`, `100`), then `terminals` terminal NOTIFYs
+ * no step claimed reporting 403. The BYE the flow expects next rides
+ * `byeLeg` at s15, an earlier expect leg A at s9. `elsewhere` gives leg B a
+ * NOTIFY no step claimed too.
+ */
+const referredOn = (o: { readonly terminals?: number; readonly byeLeg?: string; readonly elsewhere?: boolean } = {}): RfcFacts => {
+  const terminal: Classifier.Reception = { method: "NOTIFY", cseqMethod: "NOTIFY", subscriptionState: "terminated", fragStatus: 403 }
+  return {
+    ...ranWith({ s9: "A", s11: "A", s15: o.byeLeg ?? "A" }, {
+      receptions: {
+        A: [
+          { step: "s11", method: "NOTIFY", cseqMethod: "NOTIFY", subscriptionState: "active", fragStatus: 100 },
+          ...Array.from({ length: o.terminals ?? 1 }, () => terminal)
+        ],
+        ...(o.elsewhere === true ? { B: [terminal] } : {})
+      }
+    }),
+    referOutcomeAtStep: new Map([["s11", 403]])
+  }
+}
+const strayNotify = shape({ shape: "serviced-stray", method: "NOTIFY", action: "auto-reacted" })
+const notifyForBye = (at: string) => shape({ shape: "method-substitution", expected: "BYE", observed: "NOTIFY" }, undefined, at)
 
 /** Leg A's session opened by the system's 200 at s8 under sess-id 111; the ACK at s34 comes later. */
 const sessionOpenedAt8 = ranWith(
@@ -179,32 +206,6 @@ const steppedOrigin = (readings: { readonly versionStepOne?: true }): Probe.Prob
     replayed: ["o=- 222 106 IN IP4 192.0.2.10"],
     sdp: { section: "session", line: "o=", ...readings }
   })
-
-/**
- * An in-dialog ACK's `document:bytes` row: the captured description as its
- * author wrote it, the replay's re-serialized under `replayedOrigin`, its lines
- * ended by `eol`.
- */
-const reorderedBytes = (
-  capturedOrigin: string,
-  replayedOrigin: string,
-  eol: string,
-  readings: { readonly orderOnly?: true; readonly versionStepOne?: true }
-): Probe.Probe => {
-  const head = (origin: string) => ["v=0", origin, "s=-", "c=IN IP4 192.0.2.10", "t=0 0", "m=audio 4000 RTP/SAVP 8"]
-  const keys = ["a=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "a=crypto:2 AES_CM_128_HMAC_SHA1_32 inline:BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"]
-  const written = [...head(capturedOrigin), "a=sendrecv", ...keys, "a=rtpmap:8 PCMA/8000", ""].join("\r\n")
-  const inForm = [...head(replayedOrigin), "a=rtpmap:8 PCMA/8000", ...(readings.orderOnly ? keys : [keys[1]!, keys[0]!]), "a=sendrecv", ""]
-  return bodyProbe({
-    mediaType: "application/sdp",
-    scope: onAck,
-    compare: "sdp",
-    step: "s34",
-    captured: [written],
-    replayed: [inForm.join(eol)],
-    sdp: { section: "document", line: "bytes", ...readings }
-  })
-}
 
 /** An in-dialog INVITE's To or From toward the caller at s13, as the capture and the replay carried it. */
 const towardCaller = (name: "To" | "From", captured: string, replayed: string): Probe.Probe =>
@@ -503,19 +504,40 @@ const STACK_OWNED: ReadonlyArray<RfcFixture> = [
     ]
   },
   {
+    id: "response-identity-copied-from-request",
+    named: [{
+      probe: headerProbe({
+        name: "From",
+        step: "s2",
+        scope: answering(100, "INVITE"),
+        captured: ['"Alice A. Liddell" <sip:+15555550101@atlanta.example.com>;tag=c'],
+        replayed: ['"Alice" <sip:+15555550101@atlanta.example.com>;tag=d'],
+        leg: { role: "caller", direction: "to-caller" }
+      }),
+      facts: callerSent({ from: '"Alice" <sip:+15555550101@atlanta.example.com>;tag=d' }, "s2")
+    }],
+    visible: [{
+      defect: "a response From toward the caller that is not the From her INVITE carried",
+      leftTo: undefined,
+      probe: headerProbe({
+        name: "From",
+        step: "s2",
+        scope: answering(100, "INVITE"),
+        captured: ['"Alice A. Liddell" <sip:+15555550101@atlanta.example.com>;tag=c'],
+        replayed: ['"Al" <sip:+15555550101@atlanta.example.com>;tag=d'],
+        leg: { role: "caller", direction: "to-caller" }
+      }),
+      facts: callerSent({ from: '"Alice" <sip:+15555550101@atlanta.example.com>;tag=d' }, "s2")
+    }]
+  },
+  {
     id: "sdp-origin-stack-owned",
     named: [{ probe: mintedOrigin(true) }],
     visible: [{ defect: "the same numbers-only row the confrontation did not read as a minted origin", leftTo: undefined, probe: mintedOrigin(false) }]
   },
   {
     id: "sdp-session-id-restated",
-    named: [
-      { probe: restatedOrigin("o=- 111 105 IN IP4 192.0.2.10"), facts: sessionOpenedAt8 },
-      {
-        probe: reorderedBytes("o=- 222 105 IN IP4 192.0.2.10", "o=- 111 105 IN IP4 192.0.2.10", "\r\n", { orderOnly: true }),
-        facts: sessionOpenedAt8
-      }
-    ],
+    named: [{ probe: restatedOrigin("o=- 111 105 IN IP4 192.0.2.10"), facts: sessionOpenedAt8 }],
     visible: [
       {
         defect: "a sess-id that is not the one the leg's session opened with: the replay minted it",
@@ -524,43 +546,29 @@ const STACK_OWNED: ReadonlyArray<RfcFixture> = [
         facts: sessionOpenedAt8
       },
       {
-        defect: "a re-serialization out of RFC 4566 §5 line order (v= not first, a= ahead of c=)",
+        defect: "the restated description out of RFC 4566 §5 line order (a= ahead of c=): its `order` row",
         leftTo: undefined,
         probe: bodyProbe({
           mediaType: "application/sdp",
           scope: onAck,
           compare: "sdp",
           step: "s34",
-          captured: [["v=0", "o=- 222 105 IN IP4 192.0.2.10", "s=-", "c=IN IP4 192.0.2.10", "t=0 0", "m=audio 4000 RTP/AVP 8", "c=IN IP4 192.0.2.10", "a=sendrecv", ""].join("\r\n")],
-          replayed: [["o=- 111 105 IN IP4 192.0.2.10", "t=0 0", "v=0", "s=-", "c=IN IP4 192.0.2.10", "m=audio 4000 RTP/AVP 8", "a=sendrecv", "c=IN IP4 192.0.2.10", ""].join("\r\n")],
-          sdp: { section: "document", line: "bytes" }
+          captured: ["m=audio 4000 RTP/AVP 8", "c=IN IP4 192.0.2.10", "a=sendrecv"],
+          replayed: ["m=audio 4000 RTP/AVP 8", "a=sendrecv", "c=IN IP4 192.0.2.10"],
+          sdp: { section: "m0", line: "order" }
         }),
-        facts: sessionOpenedAt8
-      },
-      {
-        defect: "the restated session's bytes the confrontation did not read as order-only",
-        leftTo: undefined,
-        probe: reorderedBytes("o=- 222 105 IN IP4 192.0.2.10", "o=- 111 105 IN IP4 192.0.2.10", "\r\n", {}),
         facts: sessionOpenedAt8
       }
     ]
   },
   {
     id: "sdp-version-step-one",
-    named: [
-      { probe: steppedOrigin({ versionStepOne: true }) },
-      { probe: reorderedBytes("o=- 222 107 IN IP4 192.0.2.10", "o=- 222 106 IN IP4 192.0.2.10", "\r\n", { orderOnly: true, versionStepOne: true }) }
-    ],
+    named: [{ probe: steppedOrigin({ versionStepOne: true }) }],
     visible: [
       {
         defect: "the same gap the confrontation did not read as a step of one: the replay jumped too, or stands above the capture",
         leftTo: undefined,
         probe: steppedOrigin({})
-      },
-      {
-        defect: "a version-step bytes row the confrontation did not read as order-only (no orderOnly reading)",
-        leftTo: undefined,
-        probe: reorderedBytes("o=- 222 107 IN IP4 192.0.2.10", "o=- 222 106 IN IP4 192.0.2.10", "\n", { versionStepOne: true })
       }
     ]
   }
@@ -825,6 +833,13 @@ const SHAPE: ReadonlyArray<RfcFixture> = [
     visible: [{ defect: "a BYE the system sent that no endpoint answered on its own", leftTo: undefined, probe: shape({ shape: "extra-message", method: "BYE" }) }]
   },
   {
+    id: "ack-copy-relayed-once",
+    named: [{ probe: shape({ shape: "repeated-request", method: "ACK", copies: 1 }) }],
+    visible: [
+      { defect: "a second extra copy of the same ACK", leftTo: undefined, probe: shape({ shape: "repeated-request", method: "ACK", copies: 2 }) }
+    ]
+  },
+  {
     id: "trying-on-non-invite-not-reproduced",
     named: [
       {
@@ -834,11 +849,15 @@ const SHAPE: ReadonlyArray<RfcFixture> = [
       {
         probe: shape({ shape: "status-substitution", captured: 100, observed: 200 }, answering(200, "CANCEL"), "s12"),
         facts: factsWith({ tryingOnNonInviteSteps: new Map([["s12", 200]]) })
+      },
+      {
+        probe: shape({ shape: "status-substitution", captured: 100, observed: 200 }, on200Bye, "s22"),
+        facts: factsWith({ tryingOnNonInviteSteps: new Map([["s22", 481]]), tryingOnEarlyByeSteps: new Set(["s22"]) })
       }
     ],
     visible: [
       {
-        defect: "a final to the BYE other than the one the document's dialog state owes after the 100",
+        defect: "a 200 to a BYE sent after the INVITE's final ended its early dialog",
         leftTo: undefined,
         probe: shape({ shape: "status-substitution", captured: 100, observed: 200 }, on200Bye, "s22"),
         facts: factsWith({ tryingOnNonInviteSteps: new Map([["s22", 481]]) })
@@ -917,6 +936,44 @@ const SHAPE: ReadonlyArray<RfcFixture> = [
       probe: referReport,
       facts: factsWith({ referOutcomeAtStep: new Map([["s11", 486]]) })
     }]
+  },
+  {
+    id: "refer-progress-terminal-notify",
+    named: [
+      { probe: strayNotify, facts: referredOn() },
+      { probe: notifyForBye("s15"), facts: referredOn() }
+    ],
+    visible: [
+      {
+        defect: "a NOTIFY the flow never scripted on a document with no REFER outcome",
+        leftTo: undefined,
+        probe: strayNotify
+      },
+      {
+        defect: "a second NOTIFY past the REFER's terminal one",
+        leftTo: undefined,
+        probe: strayNotify,
+        facts: referredOn({ terminals: 2 })
+      },
+      {
+        defect: "a NOTIFY where BYE was due on another leg than the REFER's",
+        leftTo: undefined,
+        probe: notifyForBye("s15"),
+        facts: referredOn({ byeLeg: "B" })
+      },
+      {
+        defect: "a NOTIFY where BYE was due before the REFER's progress NOTIFY",
+        leftTo: undefined,
+        probe: notifyForBye("s9"),
+        facts: referredOn()
+      },
+      {
+        defect: "a NOTIFY no step claimed on a leg beside the REFER's terminal one",
+        leftTo: undefined,
+        probe: strayNotify,
+        facts: referredOn({ elsewhere: true })
+      }
+    ]
   },
   {
     id: "trying-provisional-unscripted",

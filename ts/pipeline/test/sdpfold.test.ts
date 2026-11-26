@@ -1,16 +1,18 @@
 /**
- * The `sdp` fold: sections by position, lines per section as a multiset, the
- * `o=` floor and the lane-owned fields masked only on a rebooked run, the
+ * The `sdp` fold: sections by position, each line under its key, the `o=`
+ * floor and the lane-owned fields masked only on a rebooked run, the
  * lane-owned ones under the tokens it applied — exactly the fields the render
- * writes. Every structural difference is one row per key, verbatim; on a
- * verbatim run two descriptions the structure cannot tell apart must still be
- * the same bytes, and an `o=` row is marked only where the caller read a
- * minted origin.
+ * writes. Two descriptions that differ in a serialization choice alone (a line
+ * ending, whitespace, a blank line, attribute order, a direction left
+ * implicit) state nothing on any run; every difference in meaning is one row
+ * per key, verbatim, and an `o=` row is marked only where the caller read its
+ * origins.
  */
 import { describe, expect, it } from "vitest"
 import { diffSdp, FLOOR, foldSdp, lineKey, maskLine, maskOf, type SdpMask, VERBATIM } from "../src/sdpfold.js"
 
-const REBOOKED: SdpMask = { origin: true, connectionAddress: true, mediaPort: true, verbatim: false }
+const REBOOKED: SdpMask = { origin: true, connectionAddress: true, mediaPort: true }
+const MASKS: ReadonlyArray<SdpMask> = [VERBATIM, FLOOR, REBOOKED]
 
 const OFFER = [
   "v=0",
@@ -29,11 +31,14 @@ const OFFER = [
 const crlf = (lines: ReadonlyArray<string>): string => lines.map((l) => `${l}\r\n`).join("")
 const swap = (lines: ReadonlyArray<string>, from: string, to: string): ReadonlyArray<string> =>
   lines.map((l) => (l === from ? to : l))
+const without = (lines: ReadonlyArray<string>, line: string): ReadonlyArray<string> => lines.filter((l) => l !== line)
+const keysOf = (rows: ReadonlyArray<{ readonly section: string; readonly line: string }>) =>
+  rows.map((d) => `${d.section}:${d.line}`)
 
 describe("maskOf", () => {
   it("reads the tokens only where the run rebooked media", () => {
     expect(maskOf(["c=addr", "m=port"], "rebooked")).toEqual(REBOOKED)
-    expect(maskOf(["c=addr"], "rebooked")).toEqual({ origin: true, connectionAddress: true, mediaPort: false, verbatim: false })
+    expect(maskOf(["c=addr"], "rebooked")).toEqual({ origin: true, connectionAddress: true, mediaPort: false })
     expect(maskOf(["c=addr", "m=port"], "verbatim")).toEqual(VERBATIM)
     expect(maskOf(undefined, "verbatim")).toEqual(VERBATIM)
     expect(maskOf(undefined, "rebooked")).toEqual(FLOOR)
@@ -48,7 +53,7 @@ describe("lineKey", () => {
     expect(lineKey("a=rtpmap:8 PCMA/8000")).toBe("a=rtpmap")
     expect(lineKey("a=ptime:20")).toBe("a=ptime")
     expect(lineKey("b=AS:64")).toBe("b=AS")
-    for (const d of ["sendrecv", "sendonly", "recvonly", "inactive"]) expect(lineKey(`a=${d}`)).toBe("a=direction")
+    for (const d of ["sendrecv", "sendonly", "recvonly", "inactive", "SENDONLY", "RecvOnly"]) expect(lineKey(`a=${d}`)).toBe("a=direction")
   })
 })
 
@@ -73,91 +78,201 @@ describe("maskLine", () => {
   })
 })
 
-describe("diffSdp", () => {
+describe("diffSdp: a serialization choice states nothing, on every run", () => {
+  // OFFER as a stack writes it: each format's rtpmap then fmtp, the others as written, the direction last.
+  const IN_FORM = [...OFFER.slice(0, 9), OFFER[9]!, OFFER[11]!, OFFER[10]!]
+  const SENDONLY_SESSION = [...OFFER.slice(0, 5), "a=sendonly", ...without(OFFER.slice(5), "a=sendrecv")]
+  const cases: ReadonlyArray<readonly [string, string, string]> = [
+    ["a bare-LF line ending", crlf(OFFER), OFFER.join("\n") + "\n"],
+    ["line endings mixed, the last one missing", crlf(OFFER), `${OFFER.slice(0, 6).join("\r\n")}\n${OFFER.slice(6).join("\r\n")}`],
+    ["whitespace trailing a line", crlf(OFFER), crlf(swap(OFFER, "a=ptime:20", "a=ptime:20 \t"))],
+    ["a blank line", crlf(OFFER), crlf([...OFFER.slice(0, 5), "", ...OFFER.slice(5), ""])],
+    ["attributes of different names in another order", crlf(OFFER), crlf([...OFFER.slice(0, 6), ...OFFER.slice(6).reverse()])],
+    ["the description in the stack's attribute order", crlf(OFFER), crlf(IN_FORM)],
+    ["the stack's attribute order against the author's", crlf(IN_FORM), crlf(OFFER)],
+    ["a format's fmtp ahead of its rtpmap", crlf(OFFER), crlf([...OFFER.slice(0, 7), OFFER[8]!, OFFER[7]!, ...OFFER.slice(9)])],
+    [
+      "rtpmap lines across formats out of the `m=` order",
+      crlf(OFFER),
+      crlf([...OFFER.slice(0, 6), OFFER[7]!, OFFER[6]!, ...OFFER.slice(8)])
+    ],
+    ["`a=sendrecv` left implicit", crlf(OFFER), crlf(without(OFFER, "a=sendrecv"))],
+    ["`a=sendrecv` written out where it was implicit", crlf(without(OFFER, "a=sendrecv")), crlf(OFFER)],
+    [
+      "a session-level direction written into the media section too",
+      crlf(SENDONLY_SESSION),
+      crlf([...SENDONLY_SESSION, "a=sendonly"])
+    ],
+    [
+      "a session-level direction moved into the media section",
+      crlf(SENDONLY_SESSION),
+      crlf([...without(SENDONLY_SESSION, "a=sendonly"), "a=sendonly"])
+    ],
+    [
+      "every choice at once",
+      crlf(without(OFFER, "a=sendrecv")),
+      [...IN_FORM.slice(0, 5), "", ...IN_FORM.slice(5).map((l) => `${l} `)].join("\n")
+    ]
+  ]
+  for (const [name, captured, replayed] of cases) {
+    it(name, () => {
+      for (const mask of MASKS) {
+        expect(diffSdp(mask, captured, replayed)).toEqual([])
+        expect(foldSdp(mask, captured)).toBe(foldSdp(mask, replayed))
+      }
+    })
+  }
+
+  it("a session-level direction with no media section compares against the default", () => {
+    const session = OFFER.slice(0, 5)
+    expect(diffSdp(VERBATIM, crlf(session), crlf([...session, "a=sendrecv"]))).toEqual([])
+    expect(diffSdp(VERBATIM, crlf(session), crlf([...session, "a=inactive"]))).toEqual([
+      { section: "session", line: "a=direction", captured: [], replayed: ["a=inactive"] }
+    ])
+  })
+})
+
+describe("diffSdp: a difference in meaning is one row per key, on every run", () => {
   it("states nothing for the same description", () => {
-    expect(diffSdp(FLOOR, crlf(OFFER), crlf(OFFER))).toEqual([])
+    for (const mask of MASKS) expect(diffSdp(mask, crlf(OFFER), crlf(OFFER))).toEqual([])
   })
 
-  it("on a rebooked run erases the `o=` floor, line endings, trailing whitespace and attribute order inside a section", () => {
-    const reordered = [
-      ...OFFER.slice(0, 6),
-      "a=sendrecv",
-      "a=rtcp:6001 IN IP4 192.0.2.10 ",
-      "a=fmtp:101 0-15",
-      "a=ptime:20",
-      "a=rtpmap:101 telephone-event/8000",
-      "a=rtpmap:8 PCMA/8000"
-    ]
-    const other = swap(reordered, "o=- 1234 5678 IN IP4 192.0.2.10", "o=- 99 100 IN IP4 192.0.2.10")
-    expect(diffSdp(FLOOR, crlf(OFFER), other.join("\n"))).toEqual([])
+  const strict: ReadonlyArray<readonly [string, ReadonlyArray<string>, ReadonlyArray<string>, ReadonlyArray<string>]> = [
+    ["a ptime", OFFER, swap(OFFER, "a=ptime:20", "a=ptime:30"), ["m0:a=ptime"]],
+    ["the format preference of the `m=` line", OFFER, swap(OFFER, "m=audio 6000 RTP/AVP 8 101", "m=audio 6000 RTP/AVP 101 8"), ["m0:m="]],
+    ["a codec", OFFER, swap(OFFER, "a=rtpmap:8 PCMA/8000", "a=rtpmap:8 PCMU/8000"), ["m0:a=rtpmap"]],
+    ["the media type", OFFER, swap(OFFER, "m=audio 6000 RTP/AVP 8 101", "m=video 6000 RTP/AVP 8 101"), ["m0:m="]],
+    ["a stream rejected", OFFER, swap(OFFER, "m=audio 6000 RTP/AVP 8 101", "m=audio 0 RTP/AVP 8 101"), ["m0:m="]],
+    ["an explicit direction", OFFER, swap(OFFER, "a=sendrecv", "a=sendonly"), ["m0:a=direction"]],
+    ["a direction against the implicit `sendrecv`", without(OFFER, "a=sendrecv"), swap(OFFER, "a=sendrecv", "a=inactive"), ["m0:a=direction"]],
+    ["the `a=rtcp` port, which no lane writes", OFFER, swap(OFFER, "a=rtcp:6001 IN IP4 192.0.2.10", "a=rtcp:6003 IN IP4 192.0.2.10"), ["m0:a=rtcp"]],
+    ["a session name", OFFER, swap(OFFER, "s=-", "s=call"), ["session:s="]],
+    ["a bandwidth added", OFFER, [...OFFER.slice(0, 6), "b=AS:64", ...OFFER.slice(6)], ["m0:b=AS"]],
+    [
+      "an upper-case direction beside an added `a=sendrecv`",
+      swap(OFFER, "a=sendrecv", "a=SENDONLY"),
+      [...swap(OFFER, "a=sendrecv", "a=SENDONLY"), "a=sendrecv"],
+      ["m0:a=direction"]
+    ],
+    ["an upper-case direction against the implicit `sendrecv`", without(OFFER, "a=sendrecv"), swap(OFFER, "a=sendrecv", "a=INACTIVE"), ["m0:a=direction"]],
+    ["whitespace trailing the session name, which is its text", OFFER, swap(OFFER, "s=-", "s=- "), ["session:s="]],
+    ["whitespace trailing the session information", [...OFFER.slice(0, 3), "i=call", ...OFFER.slice(3)], [...OFFER.slice(0, 3), "i=call ", ...OFFER.slice(3)], ["session:i="]]
+  ]
+  for (const [name, captured, replayed, keys] of strict) {
+    it(name, () => {
+      for (const mask of MASKS) {
+        expect(keysOf(diffSdp(mask, crlf(captured), crlf(replayed)))).toEqual(keys)
+        expect(foldSdp(mask, crlf(captured))).not.toBe(foldSdp(mask, crlf(replayed)))
+      }
+    })
+  }
+
+  it("a direction inherited from the session against another one written in the media section", () => {
+    const inherited = [...OFFER.slice(0, 5), "a=sendonly", ...without(OFFER.slice(5), "a=sendrecv")]
+    const written = [...without(OFFER, "a=sendrecv"), "a=sendrecv"]
+    expect(diffSdp(VERBATIM, crlf(inherited), crlf(written))).toEqual([
+      { section: "m0", line: "a=direction", captured: ["a=sendonly"], replayed: ["a=sendrecv"] }
+    ])
+    // The session-level line dropped changes the media section's direction, and only there.
+    expect(diffSdp(VERBATIM, crlf(inherited), crlf(without(inherited, "a=sendonly")))).toEqual([
+      { section: "m0", line: "a=direction", captured: ["a=sendonly"], replayed: [] }
+    ])
   })
 
-  describe("on a verbatim run the structure decides first, then the bytes", () => {
-    const bytesRow = (replayed: string) => [
-      { section: "document", line: "bytes", captured: [crlf(OFFER)], replayed: [replayed] }
+  it("same-name attributes swapped (a=crypto, a preference order) are their key's row", () => {
+    const keys = [
+      "a=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      "a=crypto:2 AES_CM_128_HMAC_SHA1_32 inline:BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"
     ]
-    const cases: ReadonlyArray<readonly [string, string]> = [
-      ["an attribute reorder the stack's form keeps (a=rtcp ahead of a=ptime)", crlf([...OFFER.slice(0, 9), OFFER[11]!, OFFER[9]!, OFFER[10]!])],
-      ["a bare-LF line ending", OFFER.join("\n") + "\n"],
-      ["trailing whitespace on a line", crlf(swap(OFFER, "a=ptime:20", "a=ptime:20 "))],
-      ["an inner blank line", crlf([...OFFER.slice(0, 5), "", ...OFFER.slice(5)])]
-    ]
-    for (const [name, replayed] of cases) {
-      it(`${name} is one document:bytes row, and nothing on a rebooked run`, () => {
-        expect(diffSdp(VERBATIM, crlf(OFFER), replayed)).toEqual(bytesRow(replayed))
-        expect(diffSdp(FLOOR, crlf(OFFER), replayed)).toEqual([])
-        expect(diffSdp(REBOOKED, crlf(OFFER), replayed)).toEqual([])
-      })
+    for (const mask of MASKS) {
+      expect(diffSdp(mask, crlf([...OFFER, ...keys]), crlf([...OFFER, keys[1]!, keys[0]!]))).toEqual([
+        { section: "m0", line: "a=crypto", captured: keys, replayed: [keys[1]!, keys[0]!] }
+      ])
     }
+  })
 
+  it("one format's two lines of one name swapped are their key's row", () => {
+    const fmtps = ["a=fmtp:101 0-15", "a=fmtp:101 16"]
+    const rows = diffSdp(VERBATIM, crlf([...OFFER, fmtps[1]!]), crlf([...without(OFFER, fmtps[0]!), fmtps[1]!, fmtps[0]!]))
+    expect(rows).toEqual([{ section: "m0", line: "a=fmtp", captured: fmtps, replayed: [fmtps[1]!, fmtps[0]!] }])
+  })
+
+  it("a line RFC 4566 §5 orders moved among the attributes is one `order` row, both sections whole", () => {
+    const withC = [...OFFER.slice(0, 6), "c=IN IP4 192.0.2.10", ...OFFER.slice(6)]
+    const cLast = [...OFFER, "c=IN IP4 192.0.2.10"]
+    for (const mask of MASKS) {
+      expect(diffSdp(mask, crlf(withC), crlf(cLast))).toEqual([
+        { section: "m0", line: "order", captured: withC.slice(5), replayed: cLast.slice(5) }
+      ])
+      expect(foldSdp(mask, crlf(withC))).not.toBe(foldSdp(mask, crlf(cLast)))
+    }
+    const twoTimes = [...OFFER.slice(0, 5), "r=7d 1h 0 25h", "t=1 2", ...OFFER.slice(5)]
+    const regrouped = [...OFFER.slice(0, 5), "t=1 2", "r=7d 1h 0 25h", ...OFFER.slice(5)]
+    expect(keysOf(diffSdp(VERBATIM, crlf(twoTimes), crlf(regrouped)))).toEqual(["session:order"])
+  })
+
+  it("a session section out of RFC 4566 §5 order beside a marked origin keeps its `order` row", () => {
+    const minted = "o=- 99 100 IN IP4 192.0.2.10"
+    const tFirst = ["v=0", minted, "s=-", "t=0 0", "c=IN IP4 192.0.2.10", ...OFFER.slice(5)]
+    const oLate = ["v=0", "s=-", minted, "c=IN IP4 192.0.2.10", "t=0 0", ...OFFER.slice(5)]
+    for (const replayed of [tFirst, oLate]) {
+      for (const reading of ["minted", "version-step-one", "not-continued"] as const) {
+        const rows = diffSdp(VERBATIM, crlf(OFFER), crlf(replayed), reading)
+        expect(keysOf(rows)).toEqual(["session:o=", "session:order"])
+        expect(rows[1]).toEqual({ section: "session", line: "order", captured: OFFER.slice(0, 5), replayed: replayed.slice(0, 5) })
+      }
+      expect(keysOf(diffSdp(FLOOR, crlf(OFFER), crlf(replayed)))).toEqual(["session:order"])
+    }
+  })
+
+  it("a line added or dropped is its key's row and no `order` row", () => {
+    const added = [...OFFER.slice(0, 6), "b=AS:64", ...OFFER.slice(6)]
+    expect(keysOf(diffSdp(VERBATIM, crlf(OFFER), crlf(added)))).toEqual(["m0:b=AS"])
+    expect(keysOf(diffSdp(VERBATIM, crlf(added), crlf(OFFER)))).toEqual(["m0:b=AS"])
+  })
+
+  describe("the origin", () => {
     const MINTED = "o=- 99 100 IN IP4 192.0.2.10"
     const originRow = { section: "session", line: "o=", captured: [OFFER[1]!], replayed: [MINTED] }
 
-    it("an `o=` that differs in its numbers is one `session:o=` row, marked only where the caller read a minted origin", () => {
-      const replayed = crlf(swap(OFFER, OFFER[1]!, MINTED))
-      expect(diffSdp(VERBATIM, crlf(OFFER), replayed)).toEqual([originRow])
-      expect(diffSdp(VERBATIM, crlf(OFFER), replayed, "minted")).toEqual([{ ...originRow, mintedOrigin: true }])
-      expect(diffSdp(FLOOR, crlf(OFFER), replayed, "minted")).toEqual([])
-    })
-
-    it("a minted origin never hides another byte: the bytes row follows the marked `o=` row", () => {
-      const reordered = [...OFFER.slice(0, 9), OFFER[11]!, OFFER[9]!, OFFER[10]!]
-      const replayed = crlf(swap(reordered, OFFER[1]!, MINTED))
-      expect(diffSdp(VERBATIM, crlf(OFFER), replayed, "minted")).toEqual([
-        { ...originRow, mintedOrigin: true },
-        { section: "document", line: "bytes", captured: [crlf(OFFER)], replayed: [replayed] }
+    it("a version move is a `session:o=` row on a verbatim run, masked on a rebooked one", () => {
+      const stepped = crlf(swap(OFFER, OFFER[1]!, "o=- 1234 5679 IN IP4 192.0.2.10"))
+      expect(keysOf(diffSdp(VERBATIM, crlf(OFFER), stepped))).toEqual(["session:o="])
+      expect(diffSdp(FLOOR, crlf(OFFER), stepped)).toEqual([])
+      expect(keysOf(diffSdp(FLOOR, crlf(OFFER), crlf(swap(OFFER, OFFER[1]!, "o=peer 1234 5678 IN IP4 192.0.2.10"))))).toEqual([
+        "session:o="
       ])
     })
 
-    it("a structural difference beside a minted origin is its own row, the `o=` row still marked", () => {
+    it("a `session:o=` row carries the caller's reading, and only where the origin is compared", () => {
+      const replayed = crlf(swap(OFFER, OFFER[1]!, MINTED))
+      expect(diffSdp(VERBATIM, crlf(OFFER), replayed)).toEqual([originRow])
+      expect(diffSdp(VERBATIM, crlf(OFFER), replayed, "minted")).toEqual([{ ...originRow, mintedOrigin: true }])
+      expect(diffSdp(VERBATIM, crlf(OFFER), replayed, "not-continued")).toEqual([{ ...originRow, originNotContinued: true }])
+      expect(diffSdp(VERBATIM, crlf(OFFER), replayed, "version-step-one")).toEqual([{ ...originRow, versionStepOne: true }])
+      expect(diffSdp(FLOOR, crlf(OFFER), replayed, "minted")).toEqual([])
+      const renamed = crlf(swap(OFFER, OFFER[1]!, "o=peer 99 100 IN IP4 192.0.2.10"))
+      expect(diffSdp(FLOOR, crlf(OFFER), renamed, "minted")).toEqual([
+        { section: "session", line: "o=", captured: [OFFER[1]!], replayed: ["o=peer 99 100 IN IP4 192.0.2.10"] }
+      ])
+    })
+
+    it("an origin row beside a serialization choice is the origin row alone", () => {
+      const replayed = [...swap(OFFER, OFFER[1]!, MINTED).slice(0, 6), ...OFFER.slice(6).reverse()].join("\n")
+      expect(diffSdp(VERBATIM, crlf(OFFER), replayed, "version-step-one")).toEqual([
+        { ...originRow, versionStepOne: true }
+      ])
+    })
+
+    it("a mark asked for a row that is no `o=` row marks nothing, and another row stands beside a marked one", () => {
+      expect(diffSdp(VERBATIM, crlf(OFFER), crlf(swap(OFFER, "s=-", "s=call")), "minted")).toEqual([
+        { section: "session", line: "s=", captured: ["s=-"], replayed: ["s=call"] }
+      ])
       const replayed = crlf(swap(swap(OFFER, OFFER[1]!, MINTED), "a=ptime:20", "a=ptime:30"))
       expect(diffSdp(VERBATIM, crlf(OFFER), replayed, "minted")).toEqual([
         { ...originRow, mintedOrigin: true },
         { section: "m0", line: "a=ptime", captured: ["a=ptime:20"], replayed: ["a=ptime:30"] }
       ])
-    })
-
-    it("an `o=` row the caller read as a session not continued is marked so, and never as minted", () => {
-      const replayed = crlf(swap(OFFER, OFFER[1]!, MINTED))
-      expect(diffSdp(VERBATIM, crlf(OFFER), replayed, "not-continued")).toEqual([
-        { ...originRow, originNotContinued: true }
-      ])
-      expect(diffSdp(FLOOR, crlf(OFFER), replayed, "not-continued")).toEqual([])
-    })
-
-    it("a mark asked for a row that is no `o=` row marks nothing", () => {
-      const changed = crlf(swap(OFFER, "s=-", "s=call"))
-      expect(diffSdp(VERBATIM, crlf(OFFER), changed, "minted")).toEqual([
-        { section: "session", line: "s=", captured: ["s=-"], replayed: ["s=call"] }
-      ])
-    })
-
-    it("a structural difference is its rows and never the bytes row", () => {
-      const changed = crlf(swap(OFFER, "a=ptime:20", "a=ptime:30"))
-      expect(diffSdp(VERBATIM, crlf(OFFER), changed)).toEqual([
-        { section: "m0", line: "a=ptime", captured: ["a=ptime:20"], replayed: ["a=ptime:30"] }
-      ])
-      expect(diffSdp(VERBATIM, crlf(OFFER), crlf(OFFER))).toEqual([])
     })
   })
 
@@ -168,25 +283,16 @@ describe("diffSdp", () => {
       "m=audio 40000 RTP/AVP 8 101"
     )
     expect(diffSdp(REBOOKED, crlf(OFFER), crlf(rebooked))).toEqual([])
-    expect(diffSdp(FLOOR, crlf(OFFER), crlf(rebooked)).map((d) => `${d.section}:${d.line}`)).toEqual([
-      "session:c=",
-      "m0:m="
-    ])
-    const keys = (mask: SdpMask, from: string, to: string) =>
-      diffSdp(mask, crlf(OFFER), crlf(swap(OFFER, from, to))).map((d) => `${d.section}:${d.line}`)
-    // A port-0 stream is never rebooked, so a port the system opened is its own.
-    expect(keys(REBOOKED, "m=audio 6000 RTP/AVP 8 101", "m=audio 0 RTP/AVP 8 101")).toEqual(["m0:m="])
+    expect(keysOf(diffSdp(FLOOR, crlf(OFFER), crlf(rebooked)))).toEqual(["session:c=", "m0:m="])
+    expect(keysOf(diffSdp(VERBATIM, crlf(OFFER), crlf(rebooked)))).toEqual(["session:c=", "m0:m="])
     // The pair count rides beside a rebooked port.
     const paired = swap(OFFER, "m=audio 6000 RTP/AVP 8 101", "m=audio 6000/2 RTP/AVP 8 101")
     expect(diffSdp(REBOOKED, crlf(paired), crlf(swap(paired, "m=audio 6000/2 RTP/AVP 8 101", "m=audio 40000/2 RTP/AVP 8 101")))).toEqual([])
     expect(diffSdp(REBOOKED, crlf(paired), crlf(swap(paired, "m=audio 6000/2 RTP/AVP 8 101", "m=audio 40000 RTP/AVP 8 101")))).toHaveLength(1)
-    // `a=rtcp` and an IP6 connection line are never written by the render.
-    for (const mask of [FLOOR, REBOOKED, VERBATIM]) {
-      expect(keys(mask, "a=rtcp:6001 IN IP4 192.0.2.10", "a=rtcp:6003 IN IP4 192.0.2.10")).toEqual(["m0:a=rtcp"])
-      const six = swap(OFFER, "c=IN IP4 192.0.2.10", "c=IN IP6 ::1")
-      expect(diffSdp(mask, crlf(six), crlf(swap(six, "c=IN IP6 ::1", "c=IN IP6 ::2"))).map((d) => `${d.section}:${d.line}`)).toEqual([
-        "session:c="
-      ])
+    // An IP6 connection line is never written by the render.
+    const six = swap(OFFER, "c=IN IP4 192.0.2.10", "c=IN IP6 ::1")
+    for (const mask of MASKS) {
+      expect(keysOf(diffSdp(mask, crlf(six), crlf(swap(six, "c=IN IP6 ::1", "c=IN IP6 ::2"))))).toEqual(["session:c="])
     }
   })
 
@@ -222,12 +328,17 @@ describe("diffSdp", () => {
     ])
     const swapped = [...OFFER.slice(0, 5), ...video, ...OFFER.slice(5)]
     const rows = diffSdp(REBOOKED, crlf([...OFFER, ...video]), crlf(swapped))
-    const audioKeys = ["m=", "a=rtpmap", "a=fmtp", "a=ptime", "a=direction", "a=rtcp"]
-    expect(rows.map((d) => `${d.section}:${d.line}`)).toEqual([
-      ...audioKeys.map((k) => `m0:${k}`),
+    expect(keysOf(rows)).toEqual([
+      "m0:m=",
+      "m0:a=rtpmap",
+      "m0:a=fmtp",
+      "m0:a=ptime",
+      "m0:a=rtcp",
       "m1:m=",
       "m1:a=rtpmap",
-      ...audioKeys.slice(2).map((k) => `m1:${k}`)
+      "m1:a=fmtp",
+      "m1:a=ptime",
+      "m1:a=rtcp"
     ])
   })
 
@@ -235,82 +346,10 @@ describe("diffSdp", () => {
     expect(diffSdp(REBOOKED, crlf(OFFER), "")).toEqual([
       { section: "document", line: "sdp", captured: [crlf(OFFER)], replayed: [""] }
     ])
-    expect(diffSdp(REBOOKED, crlf(OFFER), "<not/>")).toEqual([
+    expect(diffSdp(VERBATIM, crlf(OFFER), "<not/>")).toEqual([
       { section: "document", line: "sdp", captured: [crlf(OFFER)], replayed: ["<not/>"] }
     ])
     expect(diffSdp(REBOOKED, "", "")).toEqual([])
-  })
-
-  it("a session-level difference is its own row", () => {
-    const named = swap(OFFER, "s=-", "s=call")
-    expect(diffSdp(REBOOKED, crlf(OFFER), crlf(named))).toEqual([
-      { section: "session", line: "s=", captured: ["s=-"], replayed: ["s=call"] }
-    ])
-  })
-})
-
-describe("the bytes row of a verbatim run, read for attribute order and a version step", () => {
-  // OFFER in the stack's form: each format's rtpmap then fmtp, the others as written, the direction last.
-  const IN_FORM = [...OFFER.slice(0, 9), OFFER[9]!, OFFER[11]!, OFFER[10]!]
-  const bytes = (captured: string, replayed: string) => ({ section: "document", line: "bytes", captured: [captured], replayed: [replayed] })
-  const STEPPED = "o=- 1234 5677 IN IP4 192.0.2.10"
-  const originRow = { section: "session", line: "o=", captured: [OFFER[1]!], replayed: [STEPPED] }
-
-  it("two texts the stack's form puts in one order are an order-only bytes row", () => {
-    expect(diffSdp(VERBATIM, crlf(OFFER), crlf(IN_FORM))).toEqual([{ ...bytes(crlf(OFFER), crlf(IN_FORM)), orderOnly: true }])
-    // A format's fmtp ahead of its rtpmap, regrouped.
-    const fmtpFirst = [...OFFER.slice(0, 7), OFFER[8]!, OFFER[7]!, ...OFFER.slice(9)]
-    expect(diffSdp(VERBATIM, crlf(fmtpFirst), crlf(IN_FORM))).toEqual([{ ...bytes(crlf(fmtpFirst), crlf(IN_FORM)), orderOnly: true }])
-  })
-
-  it("ours out of the stack's form against an author's description in form stays a plain bytes row", () => {
-    expect(diffSdp(VERBATIM, crlf(IN_FORM), crlf(OFFER))).toEqual([bytes(crlf(IN_FORM), crlf(OFFER))])
-  })
-
-  it("two same-name attributes swapped (a=crypto, a preference order) stay a plain bytes row", () => {
-    const keys = ["a=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "a=crypto:2 AES_CM_128_HMAC_SHA1_32 inline:BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"]
-    const captured = crlf([...OFFER, ...keys])
-    const replayed = crlf([...IN_FORM.slice(0, -1), keys[1]!, keys[0]!, IN_FORM[IN_FORM.length - 1]!])
-    expect(diffSdp(VERBATIM, captured, replayed)).toEqual([bytes(captured, replayed)])
-  })
-
-  it("a line ending, a blank line or a non-attribute line among the attributes beside the reorder stays a plain bytes row", () => {
-    const lf = IN_FORM.join("\n") + "\n"
-    expect(diffSdp(VERBATIM, crlf(OFFER), lf)).toEqual([bytes(crlf(OFFER), lf)])
-    const blank = crlf([...IN_FORM.slice(0, 5), "", ...IN_FORM.slice(5)])
-    expect(diffSdp(VERBATIM, crlf(OFFER), blank)).toEqual([bytes(crlf(OFFER), blank)])
-    // RFC 4566 §5 fixes `c=` ahead of the attributes; only attributes may move.
-    const withC = [...OFFER.slice(0, 6), "c=IN IP4 192.0.2.10", ...OFFER.slice(6)]
-    const cLast = [...IN_FORM, "c=IN IP4 192.0.2.10"]
-    expect(diffSdp(VERBATIM, crlf(withC), crlf(cLast))).toEqual([bytes(crlf(withC), crlf(cLast))])
-  })
-
-  it("a direction stated on one side only is its own row, never an order-only one", () => {
-    const implicit = IN_FORM.filter((l) => l !== "a=sendrecv")
-    const rows = diffSdp(VERBATIM, crlf(implicit), crlf(IN_FORM))
-    expect(rows).toEqual([{ section: "m0", line: "a=direction", captured: [], replayed: ["a=sendrecv"] }])
-  })
-
-  it("an order-only bytes row beside an origin row is read once the origin is swapped, and carries a version step read on it", () => {
-    const replayed = crlf(swap(IN_FORM, OFFER[1]!, STEPPED))
-    expect(diffSdp(VERBATIM, crlf(OFFER), replayed)).toEqual([originRow, { ...bytes(crlf(OFFER), replayed), orderOnly: true }])
-    expect(diffSdp(VERBATIM, crlf(OFFER), replayed, "version-step-one")).toEqual([
-      { ...originRow, versionStepOne: true },
-      { ...bytes(crlf(OFFER), replayed), orderOnly: true, versionStepOne: true }
-    ])
-    // A minted origin marks its own row only.
-    expect(diffSdp(VERBATIM, crlf(OFFER), replayed, "minted")).toEqual([
-      { ...originRow, mintedOrigin: true },
-      { ...bytes(crlf(OFFER), replayed), orderOnly: true }
-    ])
-  })
-
-  it("a version step marks the `o=` row alone where the rest is the same bytes, and never a bytes row that is not order-only", () => {
-    const stepped = crlf(swap(OFFER, OFFER[1]!, STEPPED))
-    expect(diffSdp(VERBATIM, crlf(OFFER), stepped, "version-step-one")).toEqual([{ ...originRow, versionStepOne: true }])
-    const lf = swap(OFFER, OFFER[1]!, STEPPED).join("\n") + "\n"
-    expect(diffSdp(VERBATIM, crlf(OFFER), lf, "version-step-one")).toEqual([{ ...originRow, versionStepOne: true }, bytes(crlf(OFFER), lf)])
-    expect(diffSdp(FLOOR, crlf(OFFER), stepped, "version-step-one")).toEqual([])
   })
 })
 
@@ -319,23 +358,24 @@ describe("foldSdp", () => {
     const cases: ReadonlyArray<readonly [string, string]> = [
       [crlf(OFFER), crlf(OFFER)],
       [crlf(OFFER), OFFER.join("\n")],
+      [crlf(OFFER), crlf(without(OFFER, "a=sendrecv"))],
       [crlf(OFFER), crlf(swap(OFFER, "c=IN IP4 192.0.2.10", "c=IN IP4 127.0.0.2"))],
       [crlf(OFFER), crlf(swap(OFFER, "a=ptime:20", "a=ptime:30"))],
       [crlf(OFFER), crlf(swap(OFFER, "o=- 1234 5678 IN IP4 192.0.2.10", "o=- 9 9 IN IP4 192.0.2.10"))],
       [crlf(OFFER), ""],
       ["", ""],
-      ["<a/>", "<a/>"]
+      ["<a/>", "<a/>"],
+      ["<a/>", "<b/>"]
     ]
-    for (const mask of [FLOOR, REBOOKED, VERBATIM]) {
+    for (const mask of MASKS) {
       for (const [a, b] of cases) {
         expect(foldSdp(mask, a) === foldSdp(mask, b)).toBe(diffSdp(mask, a, b).length === 0)
       }
     }
   })
 
-  it("is the text itself on a verbatim run, and leaves a text that is no session description verbatim", () => {
-    expect(foldSdp(VERBATIM, crlf(OFFER))).toBe(crlf(OFFER))
-    expect(foldSdp(FLOOR, crlf(OFFER))).not.toBe(crlf(OFFER))
+  it("leaves a text that is no session description verbatim", () => {
+    expect(foldSdp(VERBATIM, crlf(OFFER))).not.toBe(crlf(OFFER))
     expect(foldSdp(FLOOR, "<a/>")).toBe("<a/>")
     expect(foldSdp(FLOOR, "")).toBe("")
   })

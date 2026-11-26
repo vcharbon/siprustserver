@@ -78,7 +78,9 @@ impl<'a, 'p> Runner<'a, 'p> {
         // policy nor the flow takes it. A CSeq skip is reported and taken.
         if let Some((leg, verdict)) = self.dialog_verdict(actor, &message) {
             if verdict.kind.refusal().is_some() {
-                return self.refuse_foreign_dialog(actor, &leg, &message, bytes, repeat).await;
+                return self
+                    .refuse_foreign_dialog(actor, &leg, &message, &verdict, bytes, repeat)
+                    .await;
             }
             self.report_dialog_verdict(&leg, &message, &verdict);
         }

@@ -20,6 +20,17 @@ use super::{Arrival, RouteOutcome};
 /// cookie's verdict for the traced routing fact.
 pub(super) type Chosen = (ProxyAddr, RoutingDecisionKind, Option<&'static str>);
 
+/// The hop of a request whose message or cookie names the next hop `hop`: for a
+/// retransmission (`rtx_hit`) toward a name, where its first copy went, which
+/// is the address that copy left for once its send settled the memo: one
+/// transaction, one destination (RFC 3261 §17.1.1.3). `hop` itself otherwise.
+pub(super) fn repeat_hop(hop: ProxyAddr, rtx_hit: Option<&CancelEntry>) -> ProxyAddr {
+    match rtx_hit {
+        Some(found) if hop.to_socket_addr().is_none() => found.target.clone(),
+        _ => hop,
+    }
+}
+
 impl ProxyCore {
     /// The Request-URI as the target, past §16.4 ([`Classified`]), its `maddr`
     /// where it has one (RFC 3261 §16.5). An out-of-range port is malformed
@@ -55,7 +66,7 @@ impl ProxyCore {
         if opts.admit_as_new {
             self.admit_new_call(req, arrival, is_emergency_request(req)).await?;
         }
-        match self.strategy.select_for_new_dialog(msg, opts).await {
+        match self.strategy.select_for_new_dialog(msg, opts) {
             Ok(target) => Ok(target),
             Err(e) => Err(self.reply_select_failure(req, arrival, e).await),
         }
@@ -65,40 +76,34 @@ impl ProxyCore {
     /// §16.11 on the INVITE's branch, which the survivor's rebuilt INVITE
     /// transaction is keyed by. The CANCEL's Via is its INVITE's top Via, so
     /// it finds the entry of its own INVITE transaction, never another pass of
-    /// a spiral sharing its Call-ID, From tag and CSeq. It goes where the
-    /// INVITE went while that node is not a worker the proxy reads not alive:
-    /// the INVITE's client transaction lives there and only there (§16.10).
-    /// Toward a worker no longer alive it follows the INVITE's stickiness
-    /// cookie, the workers being ONE logical UAS: the alive primary, else the
-    /// backup holding the call's replica (ADR-0014), else nowhere — dropped
-    /// and counted (ADR-0050 §5). With no entry (the INVITE crossed another
-    /// instance, or the entry was forgotten), the CANCEL of an INVITE this
-    /// hop refused is answered 200 here (`Err`, §9.2); any other repeats its
-    /// INVITE's Request-URI and Route, so it takes the route the INVITE took
-    /// without the memo: its loose Route, a worker's Request-URI, its cookie,
-    /// else the rendezvous winner among the alive workers (ADR-0009 X7). No
-    /// CANCEL meets an admission gate or draws a 503: with no worker to take
-    /// it, it is dropped and counted.
+    /// a spiral sharing its Call-ID, From tag and CSeq. The CANCEL of an INVITE
+    /// this hop answered itself, a 513 after its forward attempt included, is
+    /// answered 200 here (`Err`, §9.2), its hop remembered or not. Otherwise it
+    /// goes where the INVITE went while that node is not a worker the proxy reads
+    /// not alive: the INVITE's client transaction lives there and only there
+    /// (§16.10). Toward a worker no longer alive it follows the INVITE's
+    /// stickiness cookie, the workers being ONE logical UAS: the alive primary,
+    /// else the backup holding the call's replica (ADR-0014), else nowhere,
+    /// dropped and counted (ADR-0050 §5). With no entry (the INVITE crossed
+    /// another instance, or the entry was forgotten) it repeats its INVITE's
+    /// Request-URI and Route, so it takes the route the INVITE took without the
+    /// memo: its loose Route, a worker's Request-URI, its cookie, else the
+    /// rendezvous winner among the serving workers (ADR-0009 X7). No CANCEL meets
+    /// an admission gate or draws a 503: with no worker to take it, it is dropped
+    /// and counted. `invite` is the INVITE's entry in the memo.
     pub(super) async fn cancel_target(
         &self,
         msg: &SipMessage,
         req: &SipRequest,
         arrival: Arrival,
         c: &Classified,
+        invite: Option<&CancelEntry>,
     ) -> Result<ProxyAddr, RouteOutcome> {
-        let key = invite_txn_key(
-            req.top_via(),
-            req.call_id().as_str(),
-            req.from().tag(),
-            req.cseq().seq(),
-        );
-        // An INVITE this hop answered itself is cancelled here (§9.2), its
-        // hop remembered or not: a 513 follows the forward attempt.
         if let Some(answered) = self.cancel_refused(req, arrival).await {
             self.metrics.record_cancel_lookup(CancelLookup::Hit);
             return Err(answered);
         }
-        let Some(found) = self.cancel_lru.lookup(&key) else {
+        let Some(found) = invite.cloned() else {
             self.metrics.record_cancel_lookup(CancelLookup::Miss);
             if let Some(next) = &c.loose_route_next_hop {
                 return Ok(next.clone());
@@ -107,10 +112,10 @@ impl ProxyCore {
                 return self.request_uri_target(req, arrival, c).await;
             }
             let cookie = c.cookie.as_ref();
-            return self.admitted_target(msg, cookie, NoTargetDrop::Cancel).await;
+            return self.admitted_target(msg, cookie, NoTargetDrop::Cancel);
         };
         self.metrics.record_cancel_lookup(CancelLookup::Hit);
-        match self.follow_live_hop(found.target, found.stickiness.as_ref(), msg).await {
+        match self.follow_live_hop(found.target, found.stickiness.as_ref(), msg) {
             Some(target) => Ok(target),
             None => Err(self.drop_without_target(NoTargetDrop::Cancel)),
         }
@@ -120,13 +125,12 @@ impl ProxyCore {
     /// read off that INVITE's entry, which the ACK's top Via keys (§17.1.1.3:
     /// the ACK repeats the INVITE's, branch included). Toward a worker no
     /// longer alive, where the INVITE's cookie places the call. `None`: no
-    /// entry, or no branch to tell the ACK's transaction by.
-    pub(super) async fn invite_hop(
+    /// entry.
+    pub(super) fn invite_hop(
         &self,
         msg: &SipMessage,
         req: &SipRequest,
     ) -> Option<Result<ProxyAddr, RouteOutcome>> {
-        super::top_via_branch(req)?;
         let key = invite_txn_key(
             req.top_via(),
             req.call_id().as_str(),
@@ -134,7 +138,7 @@ impl ProxyCore {
             req.cseq().seq(),
         );
         let found = self.cancel_lru.lookup(&key)?;
-        Some(match self.follow_live_hop(found.target, found.stickiness.as_ref(), msg).await {
+        Some(match self.follow_live_hop(found.target, found.stickiness.as_ref(), msg) {
             Some(target) => Ok(target),
             None => Err(self.drop_without_target(NoTargetDrop::Initial)),
         })
@@ -144,13 +148,13 @@ impl ProxyCore {
     /// instance places it (ADR-0009 X7), [`admitted_hop`](Self::admitted_hop).
     /// It meets no admission gate and is never answered: with no worker to
     /// take it, it is dropped and counted under `drop`.
-    pub(super) async fn admitted_target(
+    pub(super) fn admitted_target(
         &self,
         msg: &SipMessage,
         cookie: Option<&RouteParams>,
         drop: NoTargetDrop,
     ) -> Result<ProxyAddr, RouteOutcome> {
-        match self.admitted_hop(msg, cookie).await {
+        match self.admitted_hop(msg, cookie) {
             Some(target) => Ok(target),
             None => Err(self.drop_without_target(drop)),
         }
@@ -158,15 +162,11 @@ impl ProxyCore {
 
     /// The memo-free hop of a request of an admitted call: where `cookie`
     /// places its dialog, else where the strategy places the call by rank
-    /// among the alive workers, with no filter, spill or token. A strategy
+    /// among the workers serving dialogs, with no filter, spill or token. A strategy
     /// that places by no rank selects afresh. `None`: no worker takes it.
-    async fn admitted_hop(
-        &self,
-        msg: &SipMessage,
-        cookie: Option<&RouteParams>,
-    ) -> Option<ProxyAddr> {
+    fn admitted_hop(&self, msg: &SipMessage, cookie: Option<&RouteParams>) -> Option<ProxyAddr> {
         if let Some(cookie) = cookie {
-            match self.strategy.decode_stickiness(cookie, msg).await {
+            match self.strategy.decode_stickiness(cookie, msg) {
                 DecodeResult::Forward { target, .. }
                 | DecodeResult::ForwardBackup { target, .. } => return Some(target),
                 DecodeResult::Unroutable => return None,
@@ -177,19 +177,22 @@ impl ProxyCore {
             RankPlacement::Node(target) => Some(target),
             RankPlacement::NoNode => None,
             RankPlacement::Unranked => {
-                self.strategy.select_for_new_dialog(msg, SelectOpts::default()).await.ok()
+                self.strategy.select_for_new_dialog(msg, SelectOpts::default()).ok()
             }
         }
     }
 
     /// The node a request goes to whose transaction already went to `went`:
     /// with no `cookie`, `went` itself; with one, `went` while it is the
-    /// address of an alive worker the cookie names, else where the cookie
+    /// address of a worker the cookie names that serves its dialogs (`Alive` or
+    /// `Slow`), else where the cookie
     /// places the call now — whatever the registry remembers of `went`, a
     /// departed address being forgotten after its window or bound by another
     /// worker since. `None`: the cookie verified and names no alive worker. A
-    /// cookie the strategy cannot place keeps `went`.
-    pub(super) async fn follow_live_hop(
+    /// cookie the strategy cannot place keeps `went`, and so does one placing
+    /// the call on a name: no worker is a name, and `went` is the address the
+    /// transaction's first send to that name left for (RFC 3261 §9.1).
+    pub(super) fn follow_live_hop(
         &self,
         went: ProxyAddr,
         cookie: Option<&RouteParams>,
@@ -202,16 +205,21 @@ impl ProxyCore {
             .into_iter()
             .flatten()
             .filter_map(|id| self.registry.resolve(id))
-            .any(|w| w.address == went && w.is_alive());
+            .any(|w| w.address == went && w.serves_dialogs());
         if live_there {
             return Some(went);
         }
-        match self.strategy.decode_stickiness(cookie, msg).await {
-            DecodeResult::Forward { target, .. } | DecodeResult::ForwardBackup { target, .. } => {
+        match self.strategy.decode_stickiness(cookie, msg) {
+            DecodeResult::Forward { target, .. } | DecodeResult::ForwardBackup { target, .. }
+                if target.to_socket_addr().is_some() =>
+            {
                 Some(target)
             }
             DecodeResult::Unroutable => None,
-            DecodeResult::Reject { .. } | DecodeResult::Unknown { .. } => Some(went),
+            DecodeResult::Forward { .. }
+            | DecodeResult::ForwardBackup { .. }
+            | DecodeResult::Reject { .. }
+            | DecodeResult::Unknown { .. } => Some(went),
         }
     }
 
@@ -223,11 +231,13 @@ impl ProxyCore {
         RouteOutcome { decision: RoutingDecisionKind::Reject, target: None }
     }
 
-    /// The target `cookie` places the request on. A cookie the strategy
-    /// cannot read falls to a fresh selection, which a retransmission
-    /// (`rtx_hit`) repeats from its memo instead of rolling the dice again; a
-    /// verified cookie naming no alive worker drops the request. The request's
-    /// ingress face decides the To-tag rule ([`ProxyCore::admits_as_new`]).
+    /// The target `cookie` places the request on; for a retransmission
+    /// (`rtx_hit`) the cookie places on a name, where its first copy went
+    /// ([`repeat_hop`]). A cookie the strategy cannot read falls to a fresh
+    /// selection, which a retransmission repeats from its memo instead of
+    /// rolling the dice again; a verified cookie naming no alive worker drops
+    /// the request. The request's ingress face decides the To-tag rule
+    /// ([`ProxyCore::admits_as_new`]).
     pub(super) async fn cookie_target(
         &self,
         msg: &SipMessage,
@@ -236,17 +246,17 @@ impl ProxyCore {
         cookie: &RouteParams,
         rtx_hit: Option<&CancelEntry>,
     ) -> Result<Chosen, RouteOutcome> {
-        let decoded = self.strategy.decode_stickiness(cookie, msg).await;
+        let decoded = self.strategy.decode_stickiness(cookie, msg);
         let miss = match decoded {
             DecodeResult::Forward { target, .. } => {
+                let target = repeat_hop(target, rtx_hit);
                 return Ok((target, RoutingDecisionKind::DecodeForward, Some("hit")));
             }
             DecodeResult::ForwardBackup { target, .. } => {
+                let target = repeat_hop(target, rtx_hit);
                 return Ok((target, RoutingDecisionKind::DecodeForwardBackup, Some("backup")));
             }
             DecodeResult::Reject { status, reason } => {
-                // The decode reasons are free-form diagnostics — one static
-                // label keeps the reason set bounded.
                 let metric = "stickiness_decode_rejected";
                 return Err(self.reply_reject(req, arrival, status, &reason, &[], metric).await);
             }

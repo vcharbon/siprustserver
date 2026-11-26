@@ -80,6 +80,8 @@ export interface IngestRequest {
   readonly captures: ReadonlyArray<string>
   /** Cut what is stale once the ingest has landed. */
   readonly cut: boolean
+  /** Extract again a capture whose last ingest failed (`source add --retry-failed`); absent is false. */
+  readonly retryFailed?: boolean
   readonly concurrency: number
   readonly memoryMax: string
 }
@@ -147,6 +149,7 @@ export const ingestArgs = (id: number, request: IngestRequest): ReadonlyArray<st
   "--job",
   String(id),
   ...(request.cut ? ["--cut"] : []),
+  ...(request.retryFailed === true ? ["--retry-failed"] : []),
   "--concurrency",
   String(request.concurrency),
   "--memory-max",

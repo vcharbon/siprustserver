@@ -46,6 +46,7 @@ pub fn same_state(a: &Call, b: &Call) -> bool {
         cdr_events: _,
         state,
         created_at,
+        received_at,
         trace_id: _,
         root_span_id: _,
         sampled: _,
@@ -92,6 +93,7 @@ pub fn same_state(a: &Call, b: &Call) -> bool {
             .eq(b.timers.iter().filter(|t| !exempt_timer(t)))
         && *state == b.state
         && *created_at == b.created_at
+        && *received_at == b.received_at
         && *worker_index == b.worker_index
         && *emergency == b.emergency
         && *features == b.features
@@ -233,6 +235,7 @@ fn same_record(a: &RequestRecord, b: &RequestRecord) -> bool {
         source_from,
         source_to,
         cancelled,
+        cancel_relayed,
         offered_100rel,
         offered,
         source_timestamp,
@@ -252,6 +255,7 @@ fn same_record(a: &RequestRecord, b: &RequestRecord) -> bool {
         && *source_from == b.source_from
         && *source_to == b.source_to
         && *cancelled == b.cancelled
+        && *cancel_relayed == b.cancel_relayed
         && *offered_100rel == b.offered_100rel
         && *offered == b.offered
         && *source_timestamp == b.source_timestamp
@@ -274,6 +278,7 @@ fn same_exchange(a: &InviteExchange, b: &InviteExchange) -> bool {
         rejection,
         provisional,
         answer_preempted,
+        ended_at_timer_b,
     } = a;
     let same_2xx = |x: &Unacked2xx, y: &Unacked2xx| {
         let Unacked2xx { dialog_tag, cseq, emission } = x;
@@ -291,6 +296,7 @@ fn same_exchange(a: &InviteExchange, b: &InviteExchange) -> bool {
         && *rejection == b.rejection
         && *provisional == b.provisional
         && *answer_preempted == b.answer_preempted
+        && *ended_at_timer_b == b.ended_at_timer_b
 }
 
 /// A reliable provisional, the rung of its shown ladder left out.
@@ -470,6 +476,7 @@ fn same_entry(a: &MessageEntry, b: &MessageEntry) -> bool {
         cseq,
         code,
         to_tag,
+        from_tag,
         decision_ordinal,
         headers,
         turn,
@@ -480,6 +487,7 @@ fn same_entry(a: &MessageEntry, b: &MessageEntry) -> bool {
         && *cseq == b.cseq
         && *code == b.code
         && *to_tag == b.to_tag
+        && *from_tag == b.from_tag
         && *decision_ordinal == b.decision_ordinal
         && *headers == b.headers
         && *turn == b.turn

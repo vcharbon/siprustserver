@@ -136,8 +136,8 @@ pub struct Dialog {
     /// and a non-2xx ending a re-INVITE closes it.
     pub sent_invite: Option<RequestRecord>,
     /// The CSeq of the latest INVITE this side sent on the dialog whose round
-    /// ended with no 2xx taken: a 2xx to it arriving later is its first, never
-    /// a copy (§13.3.1.4).
+    /// ended with no 2xx taken: a 2xx to it arriving later is owed nothing
+    /// and dropped unread (RFC 6026 §7.2).
     #[serde(default)]
     pub untaken_invite: Option<i64>,
     /// The INVITE this side received on the dialog and answered 2xx, while

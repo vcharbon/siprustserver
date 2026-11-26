@@ -111,6 +111,7 @@ async fn observe_final_records_divergence_and_acks_observed_2xx() {
 
                 cseq: None,
                 delayed: vec![],
+                answers: Default::default(),
                 claim: None,
             },
         ],
@@ -277,6 +278,7 @@ async fn reception_goal_suppresses_incidental_shed() {
 
                 cseq: None,
                 delayed: vec![],
+                answers: Default::default(),
                 claim: None,
             },
         ],
@@ -344,6 +346,7 @@ async fn observe_final_pinned_to_invite_skips_prack_200() {
                                 call_id: None,
                                 headers: vec![("Supported".into(), "100rel".into())],
                                 rewrite: Default::default(),
+                                presentation: Default::default(),
                             }),
                         },
                     ),
@@ -375,6 +378,7 @@ async fn observe_final_pinned_to_invite_skips_prack_200() {
                 feed: CtxFeed::default(),
                 cseq: None,
                 delayed: vec![],
+                answers: Default::default(),
                 claim: None,
             },
         ],

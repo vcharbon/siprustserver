@@ -52,6 +52,7 @@ async fn request_template_reinvite_completes_renegotiation() {
 
                 cseq: None,
                 delayed: vec![],
+                answers: Default::default(),
                 claim: None,
             },
             ActorSpec {
@@ -66,6 +67,7 @@ async fn request_template_reinvite_completes_renegotiation() {
 
                 cseq: None,
                 delayed: vec![],
+                answers: Default::default(),
                 claim: None,
             },
         ],
@@ -127,6 +129,7 @@ async fn request_template_bye_tears_down() {
 
                 cseq: None,
                 delayed: vec![],
+                answers: Default::default(),
                 claim: None,
             },
         ],
@@ -163,6 +166,7 @@ async fn request_template_early_update_rides_early_dialog() {
         call_id: None,
         headers: vec![("Supported".to_string(), "100rel".to_string())],
         rewrite: Default::default(),
+        presentation: Default::default(),
     };
     let update_tmpl = MessageTemplate::request(
         Method::Update,
@@ -199,6 +203,7 @@ async fn request_template_early_update_rides_early_dialog() {
 
                 cseq: None,
                 delayed: vec![],
+                answers: Default::default(),
                 claim: None,
             },
             ActorSpec {
@@ -213,6 +218,7 @@ async fn request_template_early_update_rides_early_dialog() {
 
                 cseq: None,
                 delayed: vec![],
+                answers: Default::default(),
                 claim: None,
             },
         ],
@@ -275,6 +281,7 @@ async fn request_template_reinvite_glare_491_hop_acks_and_retries() {
 
                 cseq: None,
                 delayed: vec![],
+                answers: Default::default(),
                 claim: None,
             },
             ActorSpec {
@@ -289,6 +296,7 @@ async fn request_template_reinvite_glare_491_hop_acks_and_retries() {
 
                 cseq: None,
                 delayed: vec![],
+                answers: Default::default(),
                 claim: None,
             },
         ],

@@ -299,7 +299,7 @@ impl<'a> Reading<'a> {
                                 .is_some_and(|h| lists_option(h, "Unsupported", "100rel")),
                             rseq: head.and_then(sniff::rseq_of),
                             to_tag: msg.to_tag.as_deref().unwrap_or_default(),
-                            has_body: head.is_some_and(sniff::has_body),
+                            description: msg.carries_description(),
                             readable: head.is_some(),
                         });
                 }

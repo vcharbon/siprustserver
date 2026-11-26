@@ -60,6 +60,12 @@ pub const SERVER_FINAL_UNSEEN_BRANCH: Family = Family::counter(
     "Non-2xx INVITE finals dropped because no server transaction held their branch (RFC 3261 section 17.2.1, one final per transaction); expected 0.",
 );
 
+pub const LATE_2XX_DROPPED: Family = Family::counter(
+    "b2bua_txn_late_2xx_dropped_total",
+    Labels::None,
+    "2xx responses a re-INVITE client transaction absorbed, neither ACKed nor handed up, because it owes them nothing (RFC 6026 sections 7.2, 8.4): it took a non-2xx final, or it gave up at Timer B with no response. Each is a peer answering a round that already ended; it repeats the 2xx to 64*T1 and then ends the dialog with a BYE.",
+);
+
 pub const VIA_STAMPS_UNWRITTEN: Family = Family::counter(
     "b2bua_txn_via_stamps_unwritten_total",
     Labels::None,
@@ -124,6 +130,12 @@ pub const KEEPALIVE_LANE_DROPS: Family = Family::counter(
     "b2bua_txn_keepalive_lane_drops_total",
     Labels::None,
     "Out-of-dialog OPTIONS the full keepalive lane dropped; the prober repeats.",
+);
+
+pub const UNATTRIBUTED_LANE_DROPS: Family = Family::counter(
+    "b2bua_txn_unattributed_lane_drops_total",
+    Labels::None,
+    "Requests naming no call the full unattributed lane dropped before any transaction or answer; the sender retransmits.",
 );
 
 /// The way a datagram a mute dropped was going.
@@ -203,6 +215,12 @@ pub const RELEASED_UNANSWERED_FORGOTTEN: Family = Family::counter(
     "b2bua_txn_released_unanswered_forgotten_total",
     Labels::None,
     "Non-INVITE server transactions with no final forgotten at their call's release (the handler died or its answer never came), so the retransmission reaches the orphan path.",
+);
+
+pub const CALL_ATTACH_REFUSED: Family = Family::counter(
+    "b2bua_txn_call_attach_refused_total",
+    Labels::None,
+    "Server transactions the router resolved by dialog identity to a call other than the one they are attributed to: each keeps its call. Zero unless resolution and attribution disagree.",
 );
 
 pub const RETRANSMITS: Family = Family::counter(

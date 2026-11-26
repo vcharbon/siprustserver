@@ -32,7 +32,13 @@ enum Work {
     Packet(UdpPacket),
 }
 
-/// Run the owner until every handle drops or the endpoint closes.
+/// Run the owner until every handle drops or the endpoint closes. Each turn
+/// polls in order (`biased`): a forget, so a retransmission read after it meets
+/// no transaction, then commands, due timers and the sweep, packets last. Every
+/// arm spends a unit of the cooperative budget per item, so a packet flood ends
+/// the poll every 128 items and never starves the arms above it.
+/// A backlog of N due timers, which only packets refill, delays a packet read by ⌈N/128⌉ polls.
+/// ADR-0057 §6.
 pub(super) async fn run(
     mut owner: Owner,
     endpoint: Arc<dyn UdpEndpoint>,
@@ -51,18 +57,6 @@ pub(super) async fn run(
     sweep.tick().await;
 
     loop {
-        // `biased` polls the arms top-to-bottom and the INBOUND PACKET arm is LAST
-        // on purpose: a sustained packet flood keeps `endpoint.recv()` ready every
-        // iteration, so if it were polled first it would starve the timer wheel and
-        // the safety-net sweep indefinitely — retransmits/timeouts/cleanups would
-        // stall and the transaction maps + DelayQueue would grow unbounded exactly under
-        // the overload the sweep exists to bound. Polling commands, due timers, and
-        // the sweep ahead of new packets guarantees the internal machinery always
-        // makes progress; the flood source (packets) can only be drained once
-        // nothing else is pending. (cmd/timer can't themselves flood without
-        // packets — the router only issues commands in response to events.)
-        // A forget goes first: a retransmission read after it was posted then
-        // meets no transaction and is admitted afresh.
         let work = tokio::select! {
             biased;
             Some(f) = forget_rx.recv() => Work::Forget(f),

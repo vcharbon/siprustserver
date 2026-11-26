@@ -1104,9 +1104,8 @@ async fn loadgen_packet_drop_without_retransmit_breaks_calls() {
 
     let mut c = cfg(b2bua.addr, 4.0, 1, 4, 0xD40F);
     c.default_tuning = CallTuning {
-        drop_rate: 0.0,
-        retransmit: false,
         drop_nth: Some(TargetedDrop::request("INVITE", 1, DropDir::Outbound).permanent()),
+        ..Default::default()
     };
     let driver = Driver::new(c, vec![mix("basic_call", 1.0)], reporter.clone(), transport);
     run_throttled(&driver).await;
@@ -1295,12 +1294,9 @@ async fn refer_drop_without_retransmit(base: u16) -> (Harness, B2buaSut, Arc<Mux
 ///   each answers independently, so the recoverable majority (dropped
 ///   NOTIFY/200/BYE the peer or SUT re-emits) SUCCEEDS.
 ///
-/// A drop of the SUT's OWN realign ACK stays unrecoverable — only the SUT can
-/// re-ACK its re-INVITE 2xx (§13.2.2.4), and this in-process `B2buaCore` does
-/// not (the same gap the endurance memory flags as failure 2's leading
-/// hypothesis, out of scope for a harness redesign). The actor form makes that
-/// residue a clean, bounded `timeout` instead of a cascade — which is exactly
-/// what this test pins.
+/// A drop of the SUT's own realign ACK stays unrecoverable: only the SUT re-ACKs its
+/// re-INVITE 2xx (§13.2.2.4), and this in-process `B2buaCore` does not. The test pins that
+/// residue as a bounded `timeout`, never a cascade.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "slow lane: loadgen"]
 async fn loadgen_actor_refer_recovers_loss_without_false_audit() {
@@ -1424,9 +1420,9 @@ async fn loadgen_settle_gate_recovers_dropped_bye() {
 
     let mut c = cfg(b2bua.addr, 2.0, 1, 4, 0x2D07);
     c.default_tuning = CallTuning {
-        drop_rate: 0.0,
         retransmit: true,
         drop_nth: Some(TargetedDrop::request("BYE", 1, DropDir::Outbound)),
+        ..Default::default()
     };
     let driver = Driver::new(c, vec![mix("refer", 1.0)], reporter.clone(), transport);
     run_throttled(&driver).await;
@@ -1473,9 +1469,9 @@ async fn loadgen_reack_recovers_dropped_initial_b_leg_ack() {
 
     let mut c = cfg(b2bua.addr, 1.0, 1, 4, 0x2AC0);
     c.default_tuning = CallTuning {
-        drop_rate: 0.0,
         retransmit: true,
         drop_nth: Some(TargetedDrop::request("ACK", 1, DropDir::Inbound)),
+        ..Default::default()
     };
     let driver = Driver::new(c, vec![mix("basic_call", 1.0)], reporter.clone(), transport);
     run_throttled(&driver).await;
@@ -1519,9 +1515,9 @@ async fn loadgen_callee_retransmits_non2xx_final_on_lost_hop_ack() {
 
     let mut c = cfg(b2bua.addr, 1.0, 1, 4, 0x2AC1);
     c.default_tuning = CallTuning {
-        drop_rate: 0.0,
         retransmit: true,
         drop_nth: Some(TargetedDrop::request("ACK", 1, DropDir::Inbound)),
+        ..Default::default()
     };
     let driver = Driver::new(c, vec![mix("invite_reject", 1.0)], reporter.clone(), transport);
     run_throttled(&driver).await;
@@ -1564,12 +1560,12 @@ async fn loadgen_abandoned_reject_leg_recovery_lands_on_recording() {
     let mut c = cfg(b2bua.addr, 1.0, 1, 4, 0x2AC2);
     c.call.egress = EgressPolicy::ApiCallPin; // the [bob, bob2] plan rides X-Api-Call
     c.default_tuning = CallTuning {
-        drop_rate: 0.0,
         retransmit: true,
         // Leg-scoped to bob: an unscoped `ACK`/`nth:1` would ALSO drop bob2's
         // answer ACK (per-endpoint counters), whose ~500 ms recovery delays the
         // whole call and masks the off-recording window under test.
         drop_nth: Some(TargetedDrop::request("ACK", 1, DropDir::Inbound).on_leg("bob")),
+        ..Default::default()
     };
     let driver = Driver::new(c, vec![mix("rerouting_prack", 1.0)], reporter.clone(), transport);
     run_throttled(&driver).await;
@@ -1629,9 +1625,9 @@ async fn loadgen_settle_gate_permanent_notify_loss_names_obligation() {
     // ONE call is enough — the outcome is deterministic.
     let mut c = cfg(b2bua.addr, 1.0, 1, 2, 0x2D08);
     c.default_tuning = CallTuning {
-        drop_rate: 0.0,
         retransmit: true,
         drop_nth: Some(TargetedDrop::request("NOTIFY", 2, DropDir::Inbound).permanent()),
+        ..Default::default()
     };
     let driver = Driver::new(c, vec![mix("refer", 1.0)], reporter.clone(), transport);
     run_throttled(&driver).await;
@@ -2126,6 +2122,7 @@ impl ActorScenario for ByeWithContact {
 
                 cseq: None,
                 delayed: vec![],
+                answers: Default::default(),
                 claim: None,
             },
             ActorSpec {
@@ -2143,6 +2140,7 @@ impl ActorScenario for ByeWithContact {
 
                 cseq: None,
                 delayed: vec![],
+                answers: Default::default(),
                 claim: None,
             },
         ];
@@ -2297,6 +2295,7 @@ impl ActorScenario for NumberPlanRefer {
 
                 cseq: None,
                 delayed: vec![],
+                answers: Default::default(),
                 claim: None,
             },
             // Bob rings then answers, then — established + a talk dwell — REFERs
@@ -2320,6 +2319,7 @@ impl ActorScenario for NumberPlanRefer {
 
                 cseq: None,
                 delayed: vec![],
+                answers: Default::default(),
                 claim: None,
             },
             // The number-addressed transfer target answers the transfer INVITE
@@ -2339,6 +2339,7 @@ impl ActorScenario for NumberPlanRefer {
 
                 cseq: None,
                 delayed: vec![],
+                answers: Default::default(),
                 claim: None,
             },
         ];
@@ -2452,9 +2453,8 @@ async fn settle_secs(secs: u64, cond: impl Fn() -> bool) {
 /// Asserts, per happy body:
 ///   - real OK calls happened (`ok > 100` — the body was actually driven);
 ///   - ZERO loss-induced NOK: no `timeout` (a drop retransmit failed to recover),
-///     no `rfc_audit_fail` (a recovered drop that looked like a false
-///     `cseq-in-dialog-order`/order charge — the exact anomaly the actor redesign
-///     eliminated), no `panic`.
+///     no `rfc_audit_fail` (a recovered drop read as a false
+///     `cseq-in-dialog-order` charge), no `panic`.
 /// Plus, once over the whole soak: the loss model actually bit (`drops > 0`, so
 /// the run is not vacuous) and there is NO mux/SUT leak.
 ///

@@ -1,8 +1,8 @@
 //! The proxy's live root spans and the gate that opens them (ADR-0026).
 //!
-//! One root span per call per process, keyed by `Call-ID` — the only
-//! correlation key, since the proxy puts no span context on the wire. The map
-//! is bounded by the admission chain's active-trace cap: every entry holds the
+//! One root span per call per process, keyed by `Call-ID`, the only correlation
+//! key: the proxy puts no span context on the wire (ADR-0026 §4). The map is
+//! bounded by the admission chain's active-trace cap: every entry holds the
 //! lease it was admitted with, so the cap counts open spans exactly.
 //!
 //! A span closes when the proxy observes the call's last fact on this hop — a
@@ -13,12 +13,9 @@
 //! carries ([`ProxyTraces::arm_close_on_ack`]): a rejected re-INVITE and an auth
 //! challenge are transactions that end while the call goes on.
 //!
-//! **One registry serves every SO_REUSEPORT shard**, so its lock is on the path
-//! of every shard's every datagram once anything is sampled. It is therefore an
-//! `RwLock`: recording — which is what a chatty traced call spends its time on —
-//! runs under the READ lock, and the per-shard map check of an untraced call
-//! runs in parallel with it. Only the three rare mutations (open, close, sweep)
-//! take the write lock.
+//! One registry serves every SO_REUSEPORT shard. Recording, the idle-deadline
+//! refresh and arming a close run under the read lock; only open, close and the
+//! stale-span sweep take the write lock.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, Ordering};
@@ -31,9 +28,8 @@ use crate::poison::{read, write, TRACE_REGISTRY};
 /// How long a root span survives with no datagram naming its call.
 pub const SPAN_IDLE_TTL_MS: i64 = 900_000;
 
-/// Sweeps per idle TTL. A stale span is therefore reclaimed within
-/// `idle_ttl / SWEEP_DIVISOR` of going stale, and the sweep's cost is amortised
-/// over that window instead of being paid per admitted INVITE.
+/// Sweeps per idle TTL: a stale span is reclaimed within
+/// `idle_ttl / SWEEP_DIVISOR` of going stale.
 const SWEEP_DIVISOR: i64 = 16;
 
 /// What an activation attempt did to a call's root span.
@@ -75,7 +71,6 @@ struct Entry {
     closes_on_ack: AtomicBool,
 }
 
-/// The proxy's trace gate + live root spans.
 pub struct ProxyTraces {
     admission: Arc<SampleAdmission>,
     honors_header: bool,
@@ -154,6 +149,10 @@ impl ProxyTraces {
     /// already recorded it for every other case). The span does FOLLOW that
     /// second INVITE: a credentialed retry continues the same setup, and it is
     /// the retry, not the challenged attempt, that the call now hangs on.
+    /// Stale spans are swept before the admission draw, so a span whose
+    /// teardown this hop never saw frees its slot for the call asking now.
+    /// A dialog-creating INVITE of another leg under this Call-ID is not the
+    /// call's setup: the span keeps the setup it follows.
     pub fn activate(
         &self,
         call_id: &str,
@@ -162,21 +161,13 @@ impl ProxyTraces {
         rate_override: Option<f64>,
         now_ms: i64,
     ) -> Activation {
-        // Inert without a collector: no draw, no lock, no span — the whole
-        // machinery costs one boolean read per new call.
         if !self.exporter_configured() {
             observe::counters::bump(&observe::counters::TRACE_DROPPED_NO_EXPORTER);
             return Activation::Refused;
         }
-        // Stale entries are reclaimed BEFORE the draw, so a span whose teardown
-        // this hop never saw frees its cap slot for the call now asking for one.
         self.sweep_if_due(now_ms);
         let mut spans = write(&self.spans, TRACE_REGISTRY);
         if let Some(open) = spans.get(call_id) {
-            // The same leg attempting the setup again: the span follows the new
-            // transaction. A different leg's dialog-creating INVITE under this
-            // Call-ID is not this call's setup, and leaves the span pointing at
-            // the one it opened for.
             if open.setup_from_tag == id.from_tag {
                 open.setup_cseq.store(setup_cseq, Ordering::Relaxed);
                 open.closes_on_ack.store(false, Ordering::Relaxed);
@@ -283,13 +274,9 @@ impl ProxyTraces {
         self.any.store(!spans.is_empty(), Ordering::Relaxed);
     }
 
-    /// Sweep stale spans, at most once per `idle_ttl / SWEEP_DIVISOR`.
-    ///
-    /// The sweep is a full scan under the write lock and its caller is every
-    /// admitted INVITE — call rate, not span rate — so running it unconditionally
-    /// would put a whole-map comparison per new call in front of every shard.
-    /// Off-schedule this is one relaxed load. The cost of the schedule is that a
-    /// stale span holds its cap slot for up to one sweep interval past its TTL.
+    /// Sweep stale spans, at most once per `idle_ttl / SWEEP_DIVISOR`;
+    /// off-schedule this is one relaxed load. A stale span holds its cap slot
+    /// for up to one sweep interval past its TTL.
     fn sweep_if_due(&self, now_ms: i64) {
         if !self.any_sampled() || now_ms < self.next_sweep_at_ms.load(Ordering::Relaxed) {
             return;
@@ -337,14 +324,14 @@ mod tests {
         );
     }
 
+    /// A second activation keeps the span even at a rate of 0 (sampling is
+    /// monotonic) and reports `AlreadyOpen`: the per-packet seam already
+    /// recorded its datagram.
     #[test]
     fn a_second_activation_reports_the_span_it_did_not_open() {
         let traces = gate(true, 100);
         assert_eq!(traces.activate("c@h", id(), 1, None, 0), Activation::Opened);
         assert!(traces.any_sampled());
-        // Sampling is monotonic: the call keeps its span even when the second
-        // attempt would draw at 0. But the caller must not treat this as an
-        // open — the datagram is already recorded by the per-packet seam.
         assert_eq!(
             traces.activate("c@h", id(), 1, Some(0.0), 0),
             Activation::AlreadyOpen,
@@ -353,11 +340,11 @@ mod tests {
         assert_eq!(traces.active(), 1);
     }
 
-    // A span closes on the ACK of the transaction that was attempting the call's
-    // SETUP, and on no other. The proxy relays a non-2xx INVITE final — and so
-    // reaches this seam — for a mid-dialog re-INVITE's rejection too, and the
-    // callee's leg numbers its CSeq in an independent space (§12.2.1.1) where it
-    // collides with the setup's, so both halves of the key are load-bearing.
+    /// A span closes on the ACK of the transaction that was attempting the call's
+    /// SETUP, and on no other. The proxy relays a non-2xx INVITE final — and so
+    /// reaches this seam — for a mid-dialog re-INVITE's rejection too, and the
+    /// callee's leg numbers its CSeq in an independent space (§12.2.1.1) where it
+    /// collides with the setup's, so both halves of the key are load-bearing.
     #[test]
     fn only_the_setup_transaction_arms_the_close() {
         let traces = gate(true, 100);
@@ -378,10 +365,9 @@ mod tests {
         assert!(!traces.close_on_ack("c@h"), "and says so once");
     }
 
-    // An auth challenge is a rejected transaction inside a call that goes on: the
-    // credentialed retry re-enters `activate`, and it is the retry the call now
-    // hangs on. (The challenge itself never arms — that is the response path's
-    // status test; here the span simply follows.)
+    /// An auth challenge is a rejected transaction inside a call that goes on:
+    /// the credentialed retry re-enters `activate`, and the call now hangs on
+    /// the retry.
     #[test]
     fn a_credentialed_retry_moves_the_span_onto_itself() {
         let traces = gate(true, 100);
@@ -421,8 +407,6 @@ mod tests {
     fn a_call_that_goes_quiet_expires_at_the_idle_ttl() {
         let traces = gate(true, 100);
         traces.activate("a@h", id(), 1, None, 0);
-        // Traffic at the deadline keeps the call alive; the sweep reclaims only
-        // what has actually gone quiet.
         traces.with_span("a@h", SPAN_IDLE_TTL_MS, |_| {});
         traces.activate("b@h", id(), 1, None, SPAN_IDLE_TTL_MS + 1);
         assert_eq!(traces.active(), 2, "a call still sending is not stale");
@@ -431,21 +415,14 @@ mod tests {
         assert!(traces.any_sampled(), "the freshly activated call keeps the flag up");
     }
 
-    // The sweep costs a full scan under the write lock and its caller is every
-    // admitted INVITE, so it is on a schedule: at most one per idle_ttl/16. A
-    // stale span therefore lingers until the next slot comes due.
     #[test]
     fn the_stale_span_sweep_runs_on_a_schedule_not_per_activation() {
         const TTL: i64 = 1600;
         let traces = gate(true, 100).with_idle_ttl(TTL);
-        // Nothing is sampled yet, so this one takes no sweep at all.
         traces.activate("a@h", id(), 1, None, 0);
-        // First sweep: `a` is not stale yet (it expires at TTL). The next slot
-        // is now TTL - 50 + 100.
         traces.activate("b@h", id(), 1, None, TTL - 50);
         assert_eq!(traces.active(), 2);
 
-        // `a` went stale at TTL, but the schedule's next slot is TTL + 50.
         traces.activate("c@h", id(), 1, None, TTL + 1);
         assert_eq!(traces.active(), 3, "a stale span lingers until the sweep is due");
 

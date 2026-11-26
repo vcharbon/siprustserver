@@ -44,7 +44,6 @@ Content-Length: 0\r\n\r\n"
     ))
 }
 
-/// An initial INVITE from the external caller to `uri`, its Route lines `route`.
 fn caller_invite_to(uri: &str, route: &str) -> SipMessage {
     parse_msg(&format!(
         "INVITE {uri} SIP/2.0\r\n\

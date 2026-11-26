@@ -22,6 +22,15 @@ impl HostPort {
         Self { host: host.into(), port, whole: false }
     }
 
+    /// Reads `text` whole as an RFC 3261 §25.1 `hostport`, its host a URI's
+    /// target host: an IPv6 literal only bracketed, held without its
+    /// brackets; a port from 1 to 65535 when written. `Err` names the
+    /// refusal: an empty or malformed host, an unbracketed IPv6 address, a
+    /// port out of range, a byte after the port.
+    pub fn parse(text: &str) -> Result<Self, String> {
+        super::read::read_whole_hostport(text)
+    }
+
     /// Text no host reader accepts, held whole as the host, with no port: it
     /// renders as written, never bracketed.
     pub fn whole(text: impl Into<SipStr>) -> Self {

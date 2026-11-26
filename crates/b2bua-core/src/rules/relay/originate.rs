@@ -9,7 +9,9 @@ use sip_ids::TurnIds;
 use sip_message::generators::{
     self, CapabilitySet, GenerateOutOfDialogRequestOpts, OutOfDialogMethod, RelayScope, SourceBody,
 };
-use sip_message::header::{self, ChargingVector, HeaderClass, HeaderName, HeaderValue, NameAddr};
+use sip_message::header::{
+    self, ChargingVector, HeaderClass, HeaderName, HeaderValue, Minted, NameAddr,
+};
 use sip_message::write_check::{self, WriteRefusal};
 use sip_message::{hops, SipHeader as MsgHeader, SipRequest, SipStr};
 
@@ -21,7 +23,7 @@ use super::body::{description_in, media_type, override_content_type};
 use super::egress::apply_b_leg_egress;
 use super::identity::{allocate_leg_contact, dialling_via, stated_contact, CallMarks};
 use super::option_tags::{apply_offered_option_tags, apply_withheld_option_tags};
-use super::stated_text::writable_on_new_request;
+use super::stated_text::{admitted, writable_on_new_request};
 use b2bua_sdk::model::Body;
 
 /// What an override's bytes are to the originator's body, the one place an
@@ -160,20 +162,17 @@ fn removed(header_updates: &[(String, Option<String>)], header: &HeaderName) -> 
     header_updates.iter().any(|(name, value)| value.is_none() && header.matches(name))
 }
 
-/// The lines `header_updates` set on the leg the stack dials: a structural
-/// name is the generator's, and every line of a single-valued header set on
-/// more than one line is left out, as though never stated, its refusal pushed
-/// onto `skipped` (ADR-0053 §7).
+/// The lines `header_updates` set on the leg the stack dials: a name the mint
+/// does not take from a decision ([`admitted`]) and every line of a
+/// single-valued header set on more than one line are left out, as though
+/// never stated, their refusals pushed onto `skipped` (ADR-0053 §7).
 pub(crate) fn decided_sets(
     header_updates: &[(String, Option<String>)],
     skipped: &mut Vec<WriteRefusal>,
 ) -> Vec<MsgHeader> {
-    let set: Vec<MsgHeader> = header_updates
-        .iter()
-        .filter(|(n, _)| HeaderName::class_of(n) != HeaderClass::Structural)
-        .filter_map(|(n, v)| {
-            v.as_ref().map(|val| MsgHeader { name: n.clone().into(), value: val.clone().into() })
-        })
+    let set: Vec<MsgHeader> = admitted(header_updates, Minted::Request, skipped)
+        .into_iter()
+        .filter_map(|(n, v)| v.map(|val| MsgHeader { name: n.into(), value: val.into() }))
         .collect();
     write_check::one_line_each(set, skipped)
 }
@@ -190,6 +189,12 @@ pub(crate) fn dialling_invite(leg: &Leg) -> Option<SipRequest> {
 /// Errs when a decision-supplied address (`new_ruri` / `new_from` / `new_to`)
 /// does not read: there is no b-leg to originate, and the caller answers the
 /// affected leg instead of dialing a fabricated target.
+///
+/// A `header_updates` statement, set or removal, of a header the mint does
+/// not take from a decision ([`HeaderName::stated_at_mint`]) is refused onto
+/// `skipped` and reaches no line: the INVITE carries the stack's own, the
+/// relayed one, or the line describing the minted body, as though nothing was
+/// stated. Every entity header is the minted body's, never a decision's.
 #[allow(clippy::too_many_arguments)]
 pub fn build_b_leg(
     // The call's marks, stamped on the originated b-leg INVITE's Via + Contact.
@@ -249,6 +254,7 @@ pub fn build_b_leg(
     // INVITE (ADR-0053): a header line, a part line, a charging host.
     skipped: &mut Vec<WriteRefusal>,
 ) -> Result<(Leg, OutboundSipEffect), UnreadableAddress> {
+    let header_updates = &admitted(header_updates, Minted::Request, skipped);
     let stamp = generators::timestamp_value(now_ms);
     // The INVITE is a new request: its next hop reads it at first ingress.
     let first_ingress = &config.parser_limits.first_ingress;
@@ -294,15 +300,9 @@ pub fn build_b_leg(
         .into_iter()
         .filter(|h| writable_on_new_request(h, first_ingress, skipped))
         .collect();
-    // The entity headers the minted body states for itself; a name the decision
-    // stated stands, and a structural name is the generator's.
-    let decided = extra_headers.clone();
     for (name, value) in entity_headers {
-        let header = HeaderName::from(name.as_str());
         let line = MsgHeader { name: SipStr::owned(&name), value: SipStr::owned(&value) };
         if HeaderName::class_of(&name) != HeaderClass::Structural
-            && !decided.iter().any(|h| header.matches(&h.name))
-            && !removed(header_updates, &header)
             && writable_on_new_request(&line, first_ingress, skipped)
         {
             extra_headers.push(line);

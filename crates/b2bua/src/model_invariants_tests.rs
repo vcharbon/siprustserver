@@ -429,6 +429,7 @@ fn an_in_dialog_request_neither_answered_nor_relayed_breaks_the_answer_invariant
             sent: None,
             deadline_ms: None,
             cancelled: false,
+            cancel_relayed: false,
             offered: false,
             offered_100rel: false,
             source_timestamp: None,

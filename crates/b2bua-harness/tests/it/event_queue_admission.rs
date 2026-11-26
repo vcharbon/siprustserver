@@ -21,8 +21,7 @@ use b2bua::admission::Class;
 use b2bua::new_calls::Refusal;
 use b2bua::TurnProbes;
 use b2bua_harness::{
-    drop_backlog_answers, send_backlog, settle_until, B2buaScene, B2buaSut, Pace, RouterPace,
-    BACKLOG_METHOD,
+    send_backlog, settle_until, B2buaScene, B2buaSut, BurstAnswers, Pace, RouterPace,
 };
 use scenario_harness::callflow::{ANSWER_SDP, OFFER_SDP};
 use scenario_harness::{Agent, Dialog};
@@ -81,14 +80,15 @@ async fn a_backed_up_queue_refuses_a_new_invite_on_arrival_until_the_gate_accept
         B2buaSut::route_all_to("127.0.0.1", bob_port).turn_probe(probe)
     })
     .await;
-    let carol = s.h.agent_with_pre_ingress("carol", "127.0.0.1:5062", drop_backlog_answers()).await;
+    let answers = BurstAnswers::default();
+    let carol = s.h.agent_with_pre_ingress("carol", "127.0.0.1:5062", answers.hook()).await;
     let mut held = s.establish().await;
 
     // ── the queue backs up; a new INVITE is refused on arrival ──────────────
     pace.set(NODE, Pace::PerTurn(PER_TURN));
     send_backlog(&carol, s.b2bua.addr, BACKLOG, "backlog").await;
     s.h.advance(Duration::from_secs(1)).await;
-    let refused_405 = || s.b2bua.metrics().unroutable_refused_of(BACKLOG_METHOD, 405);
+    let refused_405 = || answers.of(405);
     refused(&s).await;
     assert!(
         refused_405() < BACKLOG as u64 / 2,
@@ -152,7 +152,8 @@ async fn a_held_router_draws_the_refusal_past_the_queues_age_and_no_100() {
         B2buaSut::route_all_to("127.0.0.1", bob_port).turn_probe(probe)
     })
     .await;
-    let carol = s.h.agent_with_pre_ingress("carol", "127.0.0.1:5062", drop_backlog_answers()).await;
+    let answers = BurstAnswers::default();
+    let carol = s.h.agent_with_pre_ingress("carol", "127.0.0.1:5062", answers.hook()).await;
     let mut held = s.establish().await;
     let trying_before = trying_sent_to(&s, s.alice.addr());
 
@@ -200,7 +201,7 @@ async fn a_held_router_draws_the_refusal_past_the_queues_age_and_no_100() {
     let mut emergency = emergency.ack().await;
     s.bob.receive("ACK").await;
 
-    let refused_405 = || s.b2bua.metrics().unroutable_refused_of(BACKLOG_METHOD, 405);
+    let refused_405 = || answers.of(405);
     settle_until(|| refused_405() == 2).await;
     s.h.advance(ACCEPT_HOLD + Duration::from_secs(1)).await;
     s.hangup(&mut emergency).await;
@@ -219,7 +220,8 @@ async fn a_gap_under_the_queues_age_refuses_nothing() {
         B2buaSut::route_all_to("127.0.0.1", bob_port).turn_probe(probe)
     })
     .await;
-    let carol = s.h.agent_with_pre_ingress("carol", "127.0.0.1:5062", drop_backlog_answers()).await;
+    let answers = BurstAnswers::default();
+    let carol = s.h.agent_with_pre_ingress("carol", "127.0.0.1:5062", answers.hook()).await;
 
     pace.set(NODE, Pace::Frozen);
     send_backlog(&carol, s.b2bua.addr, 1, "held").await;
@@ -240,7 +242,7 @@ async fn a_gap_under_the_queues_age_refuses_nothing() {
     assert_eq!(on_arrival(), [0; 3], "nothing refused on arrival");
     assert_eq!(s.b2bua.new_calls().rejected_sum(), 0, "nor at its take");
 
-    let refused_405 = || s.b2bua.metrics().unroutable_refused_of(BACKLOG_METHOD, 405);
+    let refused_405 = || answers.of(405);
     settle_until(|| refused_405() == 2).await;
     s.hangup(&mut dialog).await;
     settle_until(|| s.b2bua.cdr_records().len() == 1).await;
@@ -259,7 +261,8 @@ async fn an_invite_admitted_behind_a_held_turn_is_refused_at_its_take() {
         B2buaSut::route_all_to("127.0.0.1", bob_port).turn_probe(probe)
     })
     .await;
-    let carol = s.h.agent_with_pre_ingress("carol", "127.0.0.1:5062", drop_backlog_answers()).await;
+    let answers = BurstAnswers::default();
+    let carol = s.h.agent_with_pre_ingress("carol", "127.0.0.1:5062", answers.hook()).await;
     let mut held = s.establish().await;
 
     pace.set(NODE, Pace::Frozen);
@@ -279,7 +282,7 @@ async fn an_invite_admitted_behind_a_held_turn_is_refused_at_its_take() {
     assert_eq!(s.b2bua.new_calls().rejected(Refusal::EventQueue, Class::Normal), 1);
     assert_eq!(on_arrival(), [0; 3], "refused at its take, not on arrival");
 
-    let refused_405 = || s.b2bua.metrics().unroutable_refused_of(BACKLOG_METHOD, 405);
+    let refused_405 = || answers.of(405);
     settle_until(|| refused_405() == 2).await;
     s.h.advance(ACCEPT_HOLD + Duration::from_secs(1)).await;
     s.hangup(&mut held).await;

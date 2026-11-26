@@ -22,7 +22,7 @@ pub use scenario_harness::actor::ForkWinner;
 use scenario_harness::actor::{
     phase, provisional_lost, ActorCall, ActorScenario, ActorSpec, Barrier, BarrierPhase, Branch,
     CtxFeed, Disposition, Ending, Expect, Feed, Goal, GoalStep, LegPhase, MediaState,
-    SettleBarrier, StateInner, SubflowState, SUBFLOW_EARLY, SUBFLOW_REFER,
+    SettleBarrier, StateInner, SUBFLOW_EARLY,
 };
 use scenario_harness::realcall::{CallEnv, ScenarioId};
 use scenario_harness::{StepError, ANSWER_SDP, OFFER_SDP};
@@ -31,9 +31,12 @@ use sip_message::generators::InDialogMethod;
 use crate::binder::{RouteBinder, RouteIntent};
 
 mod barriers;
+mod glare;
+mod transfer;
+pub use transfer::Hangup;
 
 pub(crate) use barriers::{answered, established_pred};
-use barriers::{declined, finalled, merged, renegs_reached};
+use barriers::{declined, finalled, renegs_reached};
 use barriers::{ringing, ringing_cancel};
 
 /// How the call is established — the first pipeline stage, which mints the
@@ -166,6 +169,14 @@ pub enum Stage {
         count: u32,
     },
     Transfer(Transfer),
+    /// Both parties renegotiate the current dialog at once, each with one
+    /// `Reinvite { n: 1 }` or `UpdatePostConnect` on the same gate, so the
+    /// offers cross (RFC 3261 §14.1). Replaces the gate with both completions
+    /// (the `glare` module).
+    Glare {
+        caller: Script,
+        callee: Script,
+    },
 }
 
 /// A deliberate in-dialog sequence a party drives on the CURRENT dialog (the
@@ -204,8 +215,9 @@ pub enum Script {
 pub enum Transfer {
     /// The target answers; the B2BUA's post-transfer media merge re-INVITEs
     /// the caller and the target as parallel sub-flows. Replaces the gate with
-    /// `merged` (the conjunction of both realigns).
-    Blind { refer_key: String },
+    /// `merged` (the conjunction of both realigns). With `hangup`, the
+    /// transferor BYEs its own leg at that phase (the `transfer` module).
+    Blind { refer_key: String, hangup: Option<Hangup> },
     /// The target DECLINES with `code` (603); the transfer fails, the original
     /// dialog stays up. Replaces the gate with `declined`; the call ends on its
     /// `transfer_declined` branch.
@@ -499,6 +511,11 @@ impl ShapePlan {
             if matches!(stage, Stage::Callee(Script::UpdateEarly)) {
                 return Err(err("UpdateEarly is the caller's; a callee's is Stage::Early"));
             }
+            if let Stage::Glare { caller, callee } = stage {
+                if !glare::crossable(*caller) || !glare::crossable(*callee) {
+                    return Err(err("a Glare stage crosses one re-INVITE or UPDATE per party"));
+                }
+            }
             if let Stage::Early { by, method, count } = stage {
                 validate_early(held_reliable, answered, *by, *method, *count).map_err(&err)?;
             } else {
@@ -547,6 +564,9 @@ impl ShapePlan {
                 Stage::Script(s) => self.compile_script(env, &mut b, s, Party::Caller),
                 Stage::Callee(s) => self.compile_script(env, &mut b, s, Party::Callee),
                 Stage::Transfer(t) => self.compile_transfer(env, &mut b, t)?,
+                Stage::Glare { caller, callee } => {
+                    self.compile_glare(env, &mut b, *caller, *callee)
+                }
                 Stage::Early { .. } => unreachable!("compiled above"),
             }
         }
@@ -605,6 +625,7 @@ impl ShapePlan {
 
             cseq: None,
             delayed: vec![],
+            answers: Default::default(),
             claim: None,
         }];
         actors.extend(b.callees);
@@ -660,6 +681,7 @@ impl ShapePlan {
 
                     cseq: None,
                     delayed: vec![],
+                    answers: Default::default(),
                     claim: None,
                 });
                 let est = established_pred("bob");
@@ -729,6 +751,7 @@ impl ShapePlan {
 
                     cseq: None,
                     delayed: vec![],
+                    answers: Default::default(),
                     claim: None,
                 });
                 b.callees.push(ActorSpec {
@@ -755,6 +778,7 @@ impl ShapePlan {
 
                     cseq: None,
                     delayed: vec![],
+                    answers: Default::default(),
                     claim: None,
                 });
                 b.winner = "bob2";
@@ -799,6 +823,7 @@ impl ShapePlan {
 
                     cseq: None,
                     delayed: vec![],
+                    answers: Default::default(),
                     claim: None,
                 });
                 let est = established_pred("bob");
@@ -854,6 +879,7 @@ impl ShapePlan {
 
                     cseq: None,
                     delayed: vec![],
+                    answers: Default::default(),
                     claim: None,
                 });
                 b.phases.push(phase("rejected", |s| s.leg_at_least("bob", LegPhase::Terminated)));
@@ -888,6 +914,7 @@ impl ShapePlan {
 
                     cseq: None,
                     delayed: vec![],
+                    answers: Default::default(),
                     claim: None,
                 });
                 b.phases.push(phase("ringing", ringing));
@@ -938,6 +965,7 @@ impl ShapePlan {
 
                     cseq: None,
                     delayed: vec![],
+                    answers: Default::default(),
                     claim: None,
                 });
                 b.phases.push(phase("ringing", ringing));
@@ -1029,83 +1057,6 @@ impl ShapePlan {
                 b.gate = finalled("pinged", role, "OPTIONS", b.add_ping(role));
             }
         }
-    }
-
-    fn compile_transfer(
-        &self,
-        env: &CallEnv<'_>,
-        b: &mut Build,
-        transfer: &Transfer,
-    ) -> Result<(), StepError> {
-        if env.charlie.is_none() {
-            return Err(StepError::UnexpectedKind {
-                who: self.id.to_string(),
-                detail: "bound without a charlie leg".to_string(),
-            });
-        }
-        let refer_to = env.refer_to().ok_or_else(|| StepError::UnexpectedKind {
-            who: self.id.to_string(),
-            detail: "no charlie for Refer-To".to_string(),
-        })?;
-        let (refer_key, happy, decline_code) = match transfer {
-            Transfer::Blind { refer_key } => (refer_key, true, 0),
-            Transfer::BlindDeclined { refer_key, code } => (refer_key, false, *code),
-        };
-        let authorization = self.binder.refer_authorization(env, refer_key);
-
-        // The current dialog's remote end (bob) drives the REFER once both
-        // ends are established, after a realistic talk dwell.
-        let bob = b.callee_mut("bob");
-        bob.goals.push(
-            Goal::new(
-                Barrier::AllConfirmed(&["alice", "bob"]),
-                GoalStep::Refer { refer_to, authorization },
-            )
-            .after(env.reinvite_gap),
-        );
-        if happy {
-            bob.feed.on_refer_accepted = Feed::new(Some("time_to_202"), Some("referred"));
-        }
-
-        b.callees.push(ActorSpec {
-            role: "charlie",
-            agent: env.callee_agent("charlie").clone().transfer_target(),
-            disposition: if happy {
-                Disposition::RingThenAnswer { ring: Duration::ZERO }
-            } else {
-                Disposition::Reject(decline_code)
-            },
-            media: MediaState::answer(ANSWER_SDP),
-            goals: vec![],
-            invite_targets: vec![],
-            via: None,
-            feed: if happy {
-                CtxFeed {
-                    on_answer_sent: Feed::new(Some("time_to_charlie_200"), Some("transferred")),
-                    ..CtxFeed::default()
-                }
-            } else {
-                CtxFeed::default()
-            },
-
-            cseq: None,
-            delayed: vec![],
-            claim: None,
-        });
-
-        if happy {
-            b.phases.push(phase("referred", |s| {
-                s.leg("bob").subflow(SUBFLOW_REFER).is_some_and(|f| f >= SubflowState::Answered)
-            }));
-            b.phases.push(phase("transferred", |s| s.leg_at_least("charlie", LegPhase::Confirmed)));
-            b.phases.push(phase("merged", merged));
-            b.gate = Barrier::pred("merged", merged);
-        } else {
-            b.phases.push(phase("declined", declined));
-            b.gate = Barrier::pred("declined", declined);
-            b.expect = Expect::one(TRANSFER_DECLINED);
-        }
-        Ok(())
     }
 }
 

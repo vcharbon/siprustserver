@@ -1,6 +1,7 @@
 /**
  * A relayed provisional is paired with the emission it relays by CONTENT —
- * status, body, To-tag — never by capture time alone, and its expectation is
+ * status, body, To-tag, the header values a deployment names as identifying —
+ * never by capture time alone, and its expectation is
  * placed after its source.
  *
  * A B2BUA may put two provisionals out in another order than it received them,
@@ -154,5 +155,51 @@ describe("a bare provisional and one with an answer, relayed in the other order"
 
   it("expects the relays in their sources' order", () => {
     expect(progress(flowOf(flows), "A", "expect").map(hasBody)).toEqual([false, true])
+  })
+})
+
+describe("a bare relay stamped before the callee message whose identifying value it carries", () => {
+  /**
+   * The caller-side 183 carries the callee side's `X-Trace` value 112 ms before
+   * the callee's 183 delivers it, with the callee's 180 and its relay stamped
+   * between. Placed behind it where the deployment names `X-Trace` as
+   * identifying; at its capture instant where it names neither header.
+   */
+  const traced = (o: { callId: string; status: number; reason: string; src: string; dst: string; ts_ms: number; toTag: string }) =>
+    response({ ...o, seq: 1, cseqMethod: "INVITE", headers: ["X-Trace: callee-7f3a", "X-Token: yes"] })
+  const ring = (callId: string, src: string, dst: string, ts_ms: number, toTag: string) =>
+    traced({ callId, status: 180, reason: "Ringing", src, dst, ts_ms, toTag })
+  const progressing = (callId: string, src: string, dst: string, ts_ms: number, toTag: string) =>
+    traced({ callId, status: 183, reason: "Session Progress", src, dst, ts_ms, toTag })
+  const flows = call(
+    [progressing(CALLER_CALL_ID, sut, caller, 73, "sut-tag"), ring(CALLER_CALL_ID, sut, caller, 111, "sut-tag")],
+    [ring(CALLEE_CALL_ID, callee, sut, 110, "callee-tag"), progressing(CALLEE_CALL_ID, callee, sut, 185, "callee-tag")]
+  )
+  const flowMarking = (named: string) =>
+    synthesize(
+      flows,
+      build(flows, BOTH_VANTAGES, sutSet(), plan(), derivesOnePrefix),
+      plan(),
+      undefined,
+      undefined,
+      undefined,
+      true,
+      false,
+      (name: string, value: string) => (name.toLowerCase() === named ? value : undefined)
+    )
+
+  it("lists the arrival after that message and anchors it there", () => {
+    const flow = flowMarking("x-trace")
+    const [send] = progress(flow, "B", "send")
+    const [arrival] = progress(flow, "A", "expect")
+    expect(flow.steps.indexOf(arrival!)).toBe(flow.steps.indexOf(send!) + 1)
+    expect(arrival!.delay.from).toBe(`step:${send!.id}`)
+  })
+
+  it("keeps the arrival at its capture instant where the deployment names none of its headers", () => {
+    const flow = flowMarking("x-correlation")
+    const [send] = progress(flow, "B", "send")
+    const [arrival] = progress(flow, "A", "expect")
+    expect(flow.steps.indexOf(arrival!)).toBeLessThan(flow.steps.indexOf(send!))
   })
 })

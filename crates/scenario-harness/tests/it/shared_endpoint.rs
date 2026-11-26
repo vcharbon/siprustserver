@@ -48,6 +48,7 @@ fn loopback_actors(peer: &Agent, as_ua: &Agent, teardown: impl Fn() -> Barrier) 
             feed: CtxFeed::default(),
             cseq: None,
             delayed: vec![],
+            answers: Default::default(),
             claim: None,
         },
         // The AS's receiving half: owns the leg addressed to the AS user-part.
@@ -62,6 +63,7 @@ fn loopback_actors(peer: &Agent, as_ua: &Agent, teardown: impl Fn() -> Barrier) 
             feed: CtxFeed::default(),
             cseq: None,
             delayed: vec![],
+            answers: Default::default(),
             claim: Some(ClaimRule::RuriUser("as".into())),
         },
         // The AS's re-originating half: once the inbound leg rings, it places
@@ -85,6 +87,7 @@ fn loopback_actors(peer: &Agent, as_ua: &Agent, teardown: impl Fn() -> Barrier) 
             feed: CtxFeed::default(),
             cseq: None,
             delayed: vec![],
+            answers: Default::default(),
             claim: None,
         },
         // The peer's receiving half: owns the loopback leg by its R-URI user.
@@ -99,6 +102,7 @@ fn loopback_actors(peer: &Agent, as_ua: &Agent, teardown: impl Fn() -> Barrier) 
             feed: CtxFeed::default(),
             cseq: None,
             delayed: vec![],
+            answers: Default::default(),
             claim: Some(ClaimRule::RuriUser("peer".into())),
         },
     ]

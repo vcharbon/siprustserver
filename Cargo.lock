@@ -136,7 +136,9 @@ dependencies = [
  "async-rs",
  "lapin",
  "rustls",
+ "socket2",
  "tokio",
+ "url",
 ]
 
 [[package]]
@@ -446,6 +448,7 @@ dependencies = [
  "call",
  "call-limiter",
  "call-limiter-wire",
+ "futures-util",
  "http-net",
  "http-net-testkit",
  "load-shed",
@@ -515,6 +518,7 @@ dependencies = [
  "b2bua-sdk",
  "call",
  "call-limiter",
+ "callfuzz",
  "callshapes",
  "futures",
  "http-net",
@@ -551,6 +555,7 @@ dependencies = [
  "call",
  "jemalloc-stats",
  "layer-harness",
+ "loopback-ports",
  "observe",
  "probe-http",
  "scenario-harness",
@@ -571,6 +576,7 @@ dependencies = [
  "b2bua",
  "call",
  "call-limiter",
+ "futures-util",
  "http-net",
  "http-net-testkit",
  "jemalloc-stats",
@@ -818,6 +824,7 @@ version = "0.1.0"
 dependencies = [
  "call-limiter",
  "http-net",
+ "loopback-ports",
  "observe",
  "serde_json",
  "sip-clock",
@@ -1656,9 +1663,9 @@ checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
 
 [[package]]
 name = "form_urlencoded"
-version = "1.2.2"
+version = "1.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cb4cb245038516f5f85277875cdaa4f7d2c9a0fa0468de06ed190163b1581fcf"
+checksum = "afa489199eaffb1211795df1c6236ce1ad0d41a6fa45250add73e3b02420f06e"
 dependencies = [
  "percent-encoding",
 ]
@@ -2040,6 +2047,7 @@ dependencies = [
 name = "http-net"
 version = "0.1.0"
 dependencies = [
+ "alloc-counter",
  "async-trait",
  "bytes",
  "http-body-util",
@@ -2050,11 +2058,11 @@ dependencies = [
  "lock-poison",
  "metric-catalogue",
  "metric-values",
- "reqwest",
  "sip-clock",
  "socket2",
  "thiserror 2.0.21",
  "tokio",
+ "tower-service",
  "tracing",
 ]
 
@@ -2749,6 +2757,10 @@ name = "lookup-map"
 version = "0.1.0"
 
 [[package]]
+name = "loopback-ports"
+version = "0.1.0"
+
+[[package]]
 name = "matchers"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3414,6 +3426,7 @@ dependencies = [
  "http-net",
  "http-net-testkit",
  "layer-harness",
+ "loopback-ports",
  "observe",
  "pivot-interpreter",
  "pivot-schema",
@@ -5407,9 +5420,9 @@ checksum = "8ecb6da28b8a351d773b68d5825ac39017e680750f980f3a1a85cd8dd28a47c1"
 
 [[package]]
 name = "url"
-version = "2.5.8"
+version = "2.5.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ff67a8a4397373c3ef660812acab3268222035010ab8680ec4215f38ba3d0eed"
+checksum = "f00cd2407bb42c0ef17be88d4cf020f5cceffd121665bac9b8b9493a369b3b1a"
 dependencies = [
  "form_urlencoded",
  "idna",

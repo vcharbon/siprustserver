@@ -23,6 +23,7 @@ async fn sim_rig() -> (Arc<CallTxns>, Box<dyn UdpEndpoint>, SocketAddr) {
         Arc::new(DropModel::new(0.0, 1, None)),
         Arc::new(MuxStats::new(4)),
         None,
+        None,
     ));
     (txns, peer, peer_addr)
 }

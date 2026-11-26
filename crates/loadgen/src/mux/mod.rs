@@ -86,14 +86,14 @@ pub use endpoint::MuxNetwork;
 pub use routing::CallRouting;
 // The data-driven claim rules live in their shared home, `scenario-harness`
 // (like the LegPicker below); the mux consumes them as its claim demux tier.
-pub use loss::{DropDir, TargetedDrop};
+pub use loss::{DropDir, NetFaults, TargetedDrop};
 pub use retransmit::RELEASE_HOLD;
 pub use rtt::{Exchange, RttSink};
 pub use scenario_harness::claim::ClaimRule;
 pub use stats::MuxStats;
 pub(crate) use stats::OrphanReason;
 pub use tally::{ArrowKey, ArrowStat, CallMessages, CallTally, LateSink, SUT_LANE};
-pub use taps::{notes_tap, Dir, LossTap, Side, WireTap};
+pub use taps::{notes_tap, DepartureTap, Dir, LossTap, Side, WireTap};
 
 use late_answer::SentAnswers;
 use late_final::SentInvites;

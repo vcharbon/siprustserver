@@ -9,6 +9,7 @@ use std::sync::Arc;
 
 use super::footprint::footprint;
 use super::CancelEntry;
+use crate::addr::ProxyAddr;
 
 struct Slot {
     entry: CancelEntry,
@@ -100,6 +101,35 @@ impl Pool {
         self.bytes = self.bytes.saturating_add(bytes);
         change.added = change.added.saturating_add(1);
         change.bytes_added = change.bytes_added.saturating_add(bytes);
+        self.evict_past_bounds(change);
+    }
+
+    /// The entry under `key`, while it targets `from`, targets `to`, marked
+    /// [`settled`](CancelEntry::settled), keeping its place in the write order
+    /// and its expiry. Past the byte bound the
+    /// oldest writes are forgotten.
+    pub(super) fn retarget(
+        &mut self,
+        key: &str,
+        from: &ProxyAddr,
+        to: &ProxyAddr,
+        change: &mut Change,
+    ) {
+        let Some(slot) = self.table.get_mut(key).filter(|slot| slot.entry.target == *from) else {
+            return;
+        };
+        slot.entry.target = to.clone();
+        slot.entry.settled = true;
+        let (old, new) = (slot.bytes, footprint(key, &slot.entry));
+        slot.bytes = new;
+        self.bytes = self.bytes.saturating_sub(old).saturating_add(new);
+        change.bytes_removed = change.bytes_removed.saturating_add(old);
+        change.bytes_added = change.bytes_added.saturating_add(new);
+        self.evict_past_bounds(change);
+    }
+
+    /// Forget the oldest writes while the pool is past a bound.
+    fn evict_past_bounds(&mut self, change: &mut Change) {
         while self.table.len() > self.max_entries || self.bytes > self.max_bytes {
             let Some((&front, _)) = self.by_write.first_key_value() else { break };
             self.remove_seq(front, change);
@@ -124,7 +154,6 @@ impl Pool {
         None
     }
 
-    /// Forget the entry under `key`, if held.
     pub(super) fn remove(&mut self, key: &str, change: &mut Change) {
         if let Some(seq) = self.table.get(key).map(|slot| slot.seq) {
             self.remove_seq(seq, change);

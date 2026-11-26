@@ -31,22 +31,25 @@ fn described() -> Body {
     Body::from_leg(SDP.as_bytes().to_vec(), "b-1").described_by(&source_lines())
 }
 
-/// Alice ↔ b-1, both dialogs confirmed.
+/// Alice ↔ b-1, both dialogs confirmed, each INVITE answered 2xx and ACKed.
 pub(super) fn bridged() -> call::Call {
     let mut call = test_call();
     call::testkit::stage_leg(&mut call.a_leg, LegState::Confirmed);
     call.a_leg.dialogs = vec![a_dialog(&call, "a-svc", DialogState::Confirmed)].into();
     call.a_leg.own_tag = Some("a-svc".into());
+    *call.a_leg.invite_final_sent_mut() = Some(200);
     let mut leg = b_leg_pending();
     call::testkit::stage_leg(&mut leg, LegState::Confirmed);
-    with_dialog(&mut leg, "b-tag").sent_invite = Some(call::testkit::own_invite(
+    let mut dialled = call::testkit::own_invite(
         1,
         Some(call::SentRequest {
             branch: "z9hG4bKb1".into(),
             image: invite().image().to_vec(),
             destination: HostPort { host: "10.0.0.2".into(), port: 5070 },
         }),
-    ));
+    );
+    dialled.invite.get_or_insert_with(Default::default).ack_branch = Some("z9hG4bKb1-ack".into());
+    with_dialog(&mut leg, "b-tag").sent_invite = Some(dialled);
     call.b_legs = vec![leg];
     call
 }

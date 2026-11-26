@@ -151,11 +151,13 @@ describe("a session that waits", () => {
   it("tells its watcher who holds the lane, then that it has it", async () => {
     const first = await taken(SINGLE, "replay A")
     const heard: Array<string | undefined> = []
-    setTimeout(() => void first.release(), 700)
+    const told = (holder: string | undefined) =>
+      Effect.suspend(() => {
+        heard.push(holder)
+        return heard.length === 1 ? Effect.promise(() => first.release()) : Effect.void
+      })
     await Effect.runPromise(
-      Effect.scoped(
-        Session.forReplay(options(SINGLE, 5_000), "replay B", (holder) => Effect.sync(() => void heard.push(holder)))
-      ).pipe(Effect.provide(services()))
+      Effect.scoped(Session.forReplay(options(SINGLE, 120_000), "replay B", told)).pipe(Effect.provide(services()))
     )
     expect(heard).toHaveLength(2)
     expect(heard[0]).toContain("replay A")

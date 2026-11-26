@@ -193,6 +193,7 @@ pub fn transfer_seed_rules() -> Vec<RuleDefinition> {
                     started_at_ms: ctx.now_ms,
                     last_c_leg_provisional_status: None,
                     c_initial_sdp: None,
+                    pending_a_realign: None,
                 };
 
                 // Build the /call/refer request JSON the router's callout fold reposts.

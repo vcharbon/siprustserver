@@ -1,15 +1,16 @@
-//! [`WorkerRegistryControl`] — the health-write seam. The HealthProbe writes worker health
-//! through this seam so it does not depend on a concrete registry's internals.
-//! The one impl is the adapter over the shared `WorkerSet` — every registry
-//! (static, composed, simulated) wraps a `WorkerSet`, so each hands out the
-//! same adapter from its `control()`.
+//! [`WorkerRegistryControl`]: the health-write seam. The health probe writes
+//! worker health through it, never through a concrete registry's internals.
+//! Its one impl adapts the shared `WorkerSet` that every registry (static,
+//! composed, simulated) wraps, so each hands out the same adapter from its
+//! `control()`.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use super::projection::WorkerSet;
 use super::{Acceptance, WorkerHealth};
 
-/// The write seam. Suspending allowed (the routing hot path never calls this).
+/// The write seam of worker health. The routing hot path never calls it.
 pub trait WorkerRegistryControl: Send + Sync {
     /// Annotate a worker's health. No-op if the worker is unknown or unchanged.
     fn set_health(&self, id: &str, health: WorkerHealth);
@@ -17,6 +18,10 @@ pub trait WorkerRegistryControl: Send + Sync {
     /// (`None` keeps that one), so no reader sees one without the other.
     /// No-op if the worker is unknown or unchanged.
     fn set_view(&self, id: &str, health: Option<WorkerHealth>, acceptance: Option<Acceptance>);
+    /// A probe answer of the worker arrived past its reply window: its late
+    /// stamp is fresh for `fresh_for` from now, and an endpoint flip inside it
+    /// reads the worker `Slow`, not `Dead` (ADR-0069). No-op if unknown.
+    fn note_late_answer(&self, id: &str, fresh_for: Duration);
 }
 
 /// Adapter exposing a shared `WorkerSet`'s health annotation as a control seam.
@@ -40,5 +45,8 @@ impl WorkerRegistryControl for WorkerSetControl {
     }
     fn set_view(&self, id: &str, health: Option<WorkerHealth>, acceptance: Option<Acceptance>) {
         self.set.set_view(id, health, acceptance);
+    }
+    fn note_late_answer(&self, id: &str, fresh_for: Duration) {
+        self.set.note_late_answer(id, fresh_for);
     }
 }

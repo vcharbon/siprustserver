@@ -15,8 +15,13 @@ const SETUP: Duration = Duration::from_millis(300);
 const GIVE_UP: Duration = Duration::from_secs(5);
 
 fn target(broker: &Broker, setup_timeout: Duration) -> Target {
+    target_at(&broker.url(), setup_timeout)
+}
+
+fn target_at(url: &str, setup_timeout: Duration) -> Target {
+    let uri = amqp_connect::checked_uri("CDR_AMQP_URL", url).unwrap();
     let tls = amqp_connect::BrokerTls::PLAIN;
-    Target { url: broker.url(), tls, queue: "cdr".into(), max_len: 100, setup_timeout }
+    Target { uri, tls, queue: "cdr".into(), max_len: 100, setup_timeout }
 }
 
 fn line(metrics: &LinkMetrics, name: &str) -> String {
@@ -79,4 +84,20 @@ async fn a_served_link_counts_as_consuming_until_it_drops_and_ends_its_connectio
     assert_eq!(line(&metrics, "cdr_amqp_consuming"), "cdr_amqp_consuming 0");
     assert_eq!(line(&metrics, "cdr_amqp_links_ended_total"), "cdr_amqp_links_ended_total 1");
     assert_eq!(ended_by_client(&broker, 1).await, 1, "a dropped link must end its socket");
+}
+
+/// The broker listens on 127.0.0.2 alone, which `localhost` never resolves
+/// to, and the URI names it as the IPv4-mapped IPv6 address
+/// `[::ffff:127.0.0.2]` (dual-stack sockets, Linux's default).
+#[tokio::test]
+async fn a_bracketed_ipv6_broker_is_the_one_the_link_reaches() {
+    let broker = Broker::start_on("127.0.0.2", Script::Serve).await;
+    let url = format!("amqp://guest:guest@[::ffff:127.0.0.2]:{}/%2f", broker.addr.port());
+    let metrics = Arc::new(LinkMetrics::default());
+    let link = tokio::time::timeout(GIVE_UP, target_at(&url, GIVE_UP).open(&metrics))
+        .await
+        .expect("bounded")
+        .expect("the broker the URI names links");
+    assert_eq!(broker.declares(), 1);
+    drop(link);
 }

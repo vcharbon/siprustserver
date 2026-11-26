@@ -31,9 +31,10 @@ impl Owner {
     /// outrank a rebuild. The one exception is an occupant with no final on
     /// an Accepted seed's identity: it takes the seed's 2xx, and that counts
     /// as seeded. Every seed is attributed to `call_ref` — a server seed
-    /// included, where the admit path attributes an initial INVITE to no call
-    /// — so the self-release count (ADR-0014) holds the copy until the seed
-    /// clears. Every seed's lifetime runs from the seed: an active seed's
+    /// included, where the admit path attributes an initial INVITE to no call,
+    /// and an occupant attributed to none that takes a seed's final — so the
+    /// self-release count (ADR-0014) holds the copy until the seed clears.
+    /// Every seed's lifetime runs from the seed: an active seed's
     /// backstop is an active INVITE's, measured from now, so a taken-over
     /// INVITE lives at most one bound longer than it would have on the node
     /// that sent or admitted it; an Accepted seed is held for Timer L from now.
@@ -101,8 +102,9 @@ impl Owner {
     /// A server INVITE holding `request`, keyed by its top Via, `Proceeding`.
     /// Its responses go to the top Via's response target (RFC 3261 §18.2.2).
     /// `provisional` is cached and sent there once now, so a retransmission
-    /// draws it again (§17.2.1); with none cached a retransmission draws a 100
-    /// Trying (`replay_cached`). `false` when the request names no branch or
+    /// draws it again (§17.2.1); with none cached a retransmission, or the
+    /// consumer's release (`release_trying`), draws a 100 Trying. `false` when
+    /// the request names no branch or
     /// its identity is occupied.
     async fn seed_server_invite(
         &mut self,
@@ -172,6 +174,7 @@ impl Owner {
                 return false;
             }
             let dest = occupant.destination.filter(|_| !occupant.seeded);
+            self.attribute_server(key.id(), call_ref);
             self.accept(key.id(), &response);
             match dest {
                 Some(dest) => {
@@ -229,7 +232,11 @@ impl Owner {
         };
         let occupant = match self.server(key.id()) {
             Some(occupant) if !occupant.state.is_active() => return false,
-            Some(occupant) => Some(occupant.destination.unwrap_or(dest)),
+            Some(occupant) => {
+                let source = occupant.destination.unwrap_or(dest);
+                self.attribute_server(key.id(), call_ref);
+                Some(source)
+            }
             None => {
                 let dest = response_destination(response.top_via()).unwrap_or(dest);
                 self.open_txn(NewTransaction {

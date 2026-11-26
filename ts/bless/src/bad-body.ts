@@ -2,8 +2,8 @@
  * THE BODY GATE: a body row no lane rule accepts fails its cell, whatever the
  * interpreter decided and whatever the confrontation mode.
  *
- * The replay reproduces every body byte for byte, the session description
- * included; the only values a rule may set aside are the ones the system under
+ * The replay reproduces every body byte for byte, and a session description
+ * in its meaning; the only values a rule may set aside are the ones the system under
  * test owns, each named by a deployment's delta rule (ADR-0062). Every
  * other `body:` row is a `bad-body` error. Where the gate is what refused the
  * cell (it passed, or the bless held on every other record), the cell counts

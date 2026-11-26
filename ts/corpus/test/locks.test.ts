@@ -47,6 +47,11 @@ const take = (
   Effect.runPromise(effect.pipe(Effect.provide(Layer.merge(rootsAt(locks), NodeServices.layer))))
 
 
+/** Resolves once a watcher heard something, `heard` being what it was told; the test's timeout bounds the wait. */
+const heardFirst = async (heard: ReadonlyArray<string | undefined>): Promise<void> => {
+  while (heard.length === 0) await new Promise((resolve) => setTimeout(resolve, 20))
+}
+
 /** The box's lock directory under the case's own lock root. */
 const box = (): string => path.join(root, "box.lock.d")
 
@@ -113,8 +118,11 @@ describe("the box", () => {
     const writer = await take(Locks.quiet("replay real", NO_WAIT))
     const heard: Array<string | undefined> = []
     const watch: Locks.Watch = (who) => Effect.sync(() => void heard.push(who))
-    const waiting = take(Locks.load("replay paused", { waitMs: 5_000 }, watch))
-    await new Promise((resolve) => setTimeout(resolve, 200))
+    const waiting = take(Locks.load("replay paused", { waitMs: 120_000 }, watch))
+    await Promise.race([
+      heardFirst(heard),
+      waiting.then(() => Promise.reject(new Error("the lock was taken without waiting for its holder")))
+    ])
     await release(writer)
     await release(await waiting)
     expect(heard[0]).toContain("replay real")

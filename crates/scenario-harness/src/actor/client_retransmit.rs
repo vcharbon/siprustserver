@@ -1,8 +1,13 @@
 //! The leg's transaction layer over the unreliable transport, driven by its
-//! own reactor arm: every request but ACK goes again until it is answered —
+//! own reactor arm during the call (past the scenario's last step, on a
+//! fabric that runs a loss model, by
+//! [`Harness::serve_parties_until`](crate::Harness::serve_parties_until)).
+//! Every request but ACK goes again until it is answered:
 //! an INVITE on Timer A until any response, any other request on Timer E
-//! until its final (RFC 3261 §17.1.1.2, §17.1.2.2) — and every final to an
-//! INVITE until its ACK (§13.3.1.4, §17.2.1), each given up at 64·T1. The
+//! until its final (RFC 3261 §17.1.1.2, §17.1.2.2). Every final to an INVITE
+//! goes again until its ACK (§13.3.1.4, §17.2.1), every reliable provisional
+//! until its PRACK or the INVITE's final (RFC 3262 §3). Each is given up at
+//! 64·T1. The
 //! ladders live with the endpoint ([`crate::absorption::Absorption`]); an
 //! endpoint playing a peer that never retransmits opts out
 //! ([`Agent::silence_retransmissions`](crate::Agent::silence_retransmissions)).

@@ -25,7 +25,7 @@ describe("a wheel over the undocked workbench", () => {
     expect(wheelTo(800, -120, -30, 41)).toBe(729)
   })
 
-  it("leaves a wheel moving away from the dock to the page", () => {
+  it("leaves a wheel moving away from the dock native", () => {
     expect(wheelTo(0, -120, 752, 41)).toBeUndefined()
     expect(wheelTo(1000, 120, -200, 41)).toBeUndefined()
   })

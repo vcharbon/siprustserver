@@ -11,9 +11,10 @@ use sip_message::generators::InDialogMethod;
 
 use super::answer::{answer_initial_invite, reject_initial, ForkAnswer};
 use super::endpoint::ForkWinner;
+use super::framing::CarriesBody;
 use super::goals::GoalStep;
 use super::ledger::{ObligationKey, ObligationKind};
-use super::provisional::{final_ready, provisional_ready};
+use super::provisional::{final_ready, provisional_ready, reliable_allowed};
 use super::runner::ActorState;
 use super::state::Observation;
 use crate::{ServerTxn, StepError};
@@ -28,6 +29,7 @@ pub(super) async fn hold_initial(
     st.obs.record(Observation::LegEarly { leg: st.role }, Instant::now());
     st.unpracked.clear();
     st.trains.reset();
+    st.offers.reset();
     st.early_dialogs.clear();
     st.held = Some(Box::new(uas));
     Ok(())
@@ -43,21 +45,27 @@ pub(super) fn early_tag(txn: &ServerTxn, fork: Option<&str>) -> String {
 }
 
 /// `GoalStep::Ring`: one provisional per fork tag, or one under the
-/// transaction's own tag; a reliable one awaits its PRACK.
+/// transaction's own tag; a reliable one, only where the INVITE allows it
+/// (RFC 3262 §3), awaits its PRACK.
 pub(super) async fn ring(
     st: &mut ActorState<'_>,
     forks: &'static [&'static str],
     reliable: bool,
 ) -> Result<(), StepError> {
     let sdp = st.answer_body();
+    let framing = st.media.framing();
     let Some(txn) = st.held.as_mut() else {
         return Err(no_held_invite(st.role, "Ring"));
     };
+    let offered = txn.request().sdp().is_some();
+    let reliable = reliable && reliable_allowed(txn);
     let tags: Vec<Option<&'static str>> =
         if forks.is_empty() { vec![None] } else { forks.iter().copied().map(Some).collect() };
     for fork in tags {
         let mut r = if reliable {
-            txn.respond(183, "Session Progress").reliable(1).with_sdp(sdp)
+            let key = fork.unwrap_or_default();
+            st.offers.provisional_carries(offered, key, true, true);
+            txn.respond(183, "Session Progress").reliable(1).framed(framing, sdp)
         } else {
             txn.respond(180, "Ringing")
         };
@@ -82,7 +90,9 @@ pub(super) async fn ring(
 }
 
 /// Whether a held-INVITE step may fire: each waits for what RFC 3262 §3 asks
-/// of it. Any other step is not gated here.
+/// of it, and a renegotiation of our own waits while the peer's is in
+/// progress ([`super::answers::may_renegotiate`]). Any other step is not gated
+/// here.
 pub(super) fn held_step_ready(st: &ActorState<'_>, step: &GoalStep) -> bool {
     match step {
         GoalStep::Ring { .. } => ring_ready(st),
@@ -90,6 +100,7 @@ pub(super) fn held_step_ready(st: &ActorState<'_>, step: &GoalStep) -> bool {
         GoalStep::Reject { .. } => reject_ready(st),
         GoalStep::Provisional(p) => provisional_ready(st, p),
         GoalStep::Final(f) => final_ready(st, f),
+        GoalStep::Reinvite | GoalStep::Update => super::answers::may_renegotiate(st),
         _ => true,
     }
 }
@@ -166,6 +177,7 @@ pub(super) async fn callee_early_request(
 ) -> Result<(), StepError> {
     let now = Instant::now();
     let offer = st.media.reoffer_sdp().unwrap_or(crate::ANSWER_SDP);
+    let framing = st.media.framing();
     let Some(txn) = st.held.as_mut() else {
         return Err(no_held_invite(st.role, "EarlyRequest"));
     };
@@ -178,7 +190,7 @@ pub(super) async fn callee_early_request(
     });
     let mut req = dialog.send_request(method);
     if method == InDialogMethod::Update {
-        req = req.with_sdp(offer);
+        req = req.framed(framing, offer);
     }
     let (_txn, request) = req.try_send_with_request().await?;
     let cseq = request.cseq().seq();

@@ -1,0 +1,11 @@
+# The modules the in-body comment ban holds (scripts/comments.py, `just comments`): a
+# comment is a doc comment stating its item's contract; every other comment is banned,
+# except a lone `// SAFETY: ...` over an `unsafe` block or `unsafe impl` and a bare ADR
+# pointer (`// ADR-0051 §3`, nothing after it). A module joins with one `scan` line once
+# the delete-comment skill has swept it clean; it never leaves, and a listed path that
+# holds no file (renamed, gone, misspelt) fails the check.
+limit 0
+test-limit 0
+ext .rs
+scan crates/sip-proxy
+scan crates/sip-proxy-runner

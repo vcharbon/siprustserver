@@ -1,9 +1,9 @@
-//! [`RoutingStrategy`] — the routing-policy seam.
+//! [`RoutingStrategy`], the routing-policy seam.
 //!
 //! The proxy *core* owns every SIP mechanic (classify, top-Route strip, Via
 //! push/pop, the CANCEL/ACK LRU, forwarding). The strategy never touches message
-//! bytes; the core never makes a routing-policy decision. A concrete strategy
-//! plugs in three hooks:
+//! bytes; the core never makes a routing-policy decision. The strategy's main
+//! hooks:
 //!
 //! - [`select_for_new_dialog`](RoutingStrategy::select_for_new_dialog) — pick the
 //!   downstream target for an out-of-dialog / non-sticky request. `Err` →
@@ -13,13 +13,13 @@
 //!   Record-Route URI it inserts for dialog-creating requests (§16.6.5);
 //!   [`encode_originated`](RoutingStrategy::encode_originated) the same for a
 //!   request a worker originates, naming the owners the worker states.
-//! - [`decode_stickiness`](RoutingStrategy::decode_stickiness) — given the parsed
-//!   params off the top-Route URI (which the core just stripped per §16.4),
-//!   recover the downstream target. Five outcomes, see [`DecodeResult`].
+//! - [`decode_stickiness`](RoutingStrategy::decode_stickiness) — given a cookie
+//!   of the proxy's own (a request's direction Route entry, popped per §16.4,
+//!   or the Via or Record-Route cookie of a response the core places), recover
+//!   the downstream target. Five outcomes, see [`DecodeResult`].
 
 use std::collections::BTreeMap;
 
-use async_trait::async_trait;
 use sip_message::SipMessage;
 
 use crate::addr::ProxyAddr;
@@ -40,20 +40,28 @@ pub struct StatedOwners {
     pub backup: String,
 }
 
-/// Outcome of [`RoutingStrategy::decode_stickiness`]. Tagged so the core can
-/// dispatch without casts.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DecodeResult {
-    /// Forward straight to that address.
-    Forward { target: ProxyAddr, is_emergency: bool },
+    Forward {
+        target: ProxyAddr,
+        is_emergency: bool,
+    },
     /// Routed to the cookie's backup: the primary is absent or not alive. The
     /// core forwards exactly like `Forward` but counts a distinct
     /// `decode_forward_backup` decision for HA observability.
-    ForwardBackup { target: ProxyAddr, is_emergency: bool },
+    ForwardBackup {
+        target: ProxyAddr,
+        is_emergency: bool,
+    },
     /// Synthesize a response (e.g. 403 on HMAC tamper).
-    Reject { status: u16, reason: String },
+    Reject {
+        status: u16,
+        reason: String,
+    },
     /// Stickiness couldn't be parsed; core falls back to `select_for_new_dialog`.
-    Unknown { is_emergency: bool },
+    Unknown {
+        is_emergency: bool,
+    },
     /// The cookie verified, and neither worker it names is alive: the request
     /// is dropped and counted, never answered and never placed afresh
     /// (ADR-0050 §5). The sender's retransmission meets the next view.
@@ -79,7 +87,6 @@ pub enum SelectError {
     RateCapExhausted { worker_id: String, retry_after_sec: u32 },
 }
 
-/// Options for [`RoutingStrategy::select_for_new_dialog`].
 #[derive(Debug, Clone, Default)]
 pub struct SelectOpts {
     /// Set by the core's cookie-decode fallback path: an in-dialog request
@@ -105,15 +112,13 @@ pub enum RankPlacement {
     Unranked,
 }
 
-/// The routing-policy seam. `async` for symmetry with the registry the LB
-/// calls; `ForwardAll` is effectively synchronous.
-#[async_trait]
+/// How the proxy places a request. The receive loop calls it inline and it never blocks: a
+/// network answer is resolved elsewhere and read from a cache (ADR-0033).
 pub trait RoutingStrategy: Send + Sync {
-    /// Human-readable name for logs/metrics (e.g. "ForwardAll", "LoadBalancer").
     fn name(&self) -> &str;
 
     /// Pick a downstream target for a request with no usable stickiness cookie.
-    async fn select_for_new_dialog(
+    fn select_for_new_dialog(
         &self,
         msg: &SipMessage,
         opts: SelectOpts,
@@ -126,9 +131,10 @@ pub trait RoutingStrategy: Send + Sync {
         RankPlacement::Unranked
     }
 
-    /// Recover the target previously encoded into the topmost Route URI's params
-    /// (the core already verified the URI points at us and stripped it).
-    async fn decode_stickiness(&self, route_param: &RouteParams, msg: &SipMessage) -> DecodeResult;
+    /// Recover the target a cookie of the proxy's own names: a request's
+    /// direction Route entry (the core already popped the proxy's entries), or
+    /// the Via or Record-Route cookie of a response the core places.
+    fn decode_stickiness(&self, route_param: &RouteParams, msg: &SipMessage) -> DecodeResult;
 
     /// Build the URI params to stamp into the Record-Route for dialog-creating
     /// requests the proxy places on `target`. `None` → this strategy has no

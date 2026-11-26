@@ -1,8 +1,8 @@
 //! [`HttpCallLimiter`] — the production limiter client.
 //!
 //! Speaks the call-keyed limiter API through a [`BackendClient`] (ADR-0043):
-//! the limiter's own client over an injected [`HttpTransport`] (real
-//! `reqwest` in the runner, the simulated fabric in tests), its name looked
+//! the limiter's own client over an injected [`HttpTransport`] (the real
+//! pooled client in the runner, the simulated fabric in tests), its name looked
 //! up through its [`ResolvedTarget`], at most [`MAX_IN_FLIGHT`] requests in
 //! flight, and its breaker probing `GET /v1/health`. The **timeout budgets
 //! live here**: every request is one attempt, never retried, under its

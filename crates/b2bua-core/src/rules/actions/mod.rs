@@ -43,6 +43,7 @@
 //! - `straggler` — the ACK and BYE a fork straggler's 2xx draws
 
 mod ack_leg;
+mod authored_final;
 mod bye;
 mod confirm;
 mod create_leg;
@@ -63,6 +64,7 @@ mod relay_request;
 mod relay_response;
 mod relayed_teardown;
 mod request_record;
+mod request_to_leg_method;
 mod respond;
 mod retire;
 mod select;
@@ -75,7 +77,7 @@ mod teardown;
 mod unrelayed;
 
 use call::helpers::{disarm_timer, keepalive_fire_at, retire_timers};
-use call::{Call, TimerEntry, TimerKey, TimerType};
+use call::{Call, DialogId, TimerEntry, TimerKey, TimerType};
 
 use crate::config::B2buaConfig;
 use crate::effects::{CriticalStateEffect, HandlerEffects, HandlerResult};
@@ -85,7 +87,7 @@ use b2bua_sdk::model::{RuleAction, RuleContext};
 
 pub use ladder::ladder_bound;
 pub use prack::{Owed, Settle};
-pub use provisional_arrival::invite_open;
+pub use provisional_arrival::{invite_open, Taken};
 pub(crate) use settle::{settle, Cause, Legs};
 pub(crate) use subscription::holds_requests;
 
@@ -166,6 +168,25 @@ impl ActionExecutor<'_> {
     fn leg_gone(&mut self, call: &Call, leg_id: &str, what: &str) {
         let detail = format!("{what} on leg {leg_id}: the leg left the record");
         self.turn.notes.defect(crate::turn_notes::REQUEST_KEEPS_ITS_LEG, detail, call);
+    }
+
+    /// Whether `what`, an INVITE toward `leg_id`'s dialog `id`, may leave
+    /// (RFC 3261 §14.1). With an INVITE transaction in progress on the dialog
+    /// it may not: the turn reports the defect
+    /// [`ONE_INVITE_PER_DIALOG`](crate::turn_notes::ONE_INVITE_PER_DIALOG),
+    /// naming the rule asking and what holds the dialog, and nothing waits to
+    /// send it later. ADR-0064.
+    fn invite_may_leave(&mut self, call: &Call, leg_id: &str, id: &DialogId, what: &str) -> bool {
+        let Some(open) = call::helpers::invite_in_progress(call, leg_id, id) else {
+            return true;
+        };
+        let rule = self.turn.rule.unwrap_or("(none)");
+        let (ours, peers) = (&id.our_tag, &id.peer_tag);
+        let detail = format!(
+            "rule '{rule}': {what} toward leg {leg_id}, dialog {ours}/{peers}, not sent: {open}"
+        );
+        self.turn.notes.defect(crate::turn_notes::ONE_INVITE_PER_DIALOG, detail, call);
+        false
     }
 
     /// Disarm `key`: off the replicated ledger and the live driver. A key the

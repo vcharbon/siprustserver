@@ -7,7 +7,12 @@
 //! fuzzer changes it in RFC-legal ways only, unless the caller opts in:
 //!
 //! - [`perturb`]: jittered goal dwells (new crossings), hostile but legal
-//!   INVITE headers under a size budget, INFOs with odd bodies;
+//!   INVITE headers under a size budget, drawn identity fields
+//!   ([`identity`]: display names, name-addr and free-text headers, a
+//!   preloaded `Route`, header name spellings), every character of a grammar
+//!   slot on request ([`chars`]), INFOs with odd bodies, the offer in
+//!   the INVITE or not and descriptions framed in multipart bodies
+//!   ([`media`]);
 //! - [`hold_callees`] / [`inject_cancel`]: a plain answering callee held, with
 //!   drawn forks, 100rel and a winner that may never have rung, and a caller
 //!   CANCEL at a drawn moment;
@@ -28,9 +33,13 @@
 
 use scenario_harness::actor::Branch;
 
+pub mod chars;
 mod config;
 pub mod held;
+pub mod holds;
+pub mod identity;
 pub mod join;
+pub mod media;
 pub mod payload;
 mod perturb;
 mod rng;
@@ -38,12 +47,12 @@ pub mod stamp;
 pub mod train;
 mod wrap;
 
-pub use config::FuzzConfig;
+pub use config::{FuzzConfig, Targets};
 pub use held::{hold_callees, inject_cancel, offer_100rel};
 pub use join::{join, Joined};
 pub use perturb::perturb;
 pub use rng::{call_seed, Rng};
-pub use stamp::{drawn, seal, seed_of_call_id, take_drawn, Drawn};
+pub use stamp::{drawn, seal, seed_of_call_id, take_drawn, Drawn, Requester};
 pub use train::draw_trains;
 pub use wrap::{wrapped_id, wrapped_shapes, FuzzWrap, Policy};
 

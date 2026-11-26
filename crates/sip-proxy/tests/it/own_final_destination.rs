@@ -36,8 +36,8 @@ async fn rig(name: &str) -> Rig {
         Arc::new(FailingSelect(|| SelectError::NoTarget { reason: "no worker alive".into() }));
     let registry: Arc<dyn WorkerRegistry> = Arc::new(StaticWorkerRegistry::from_entries(vec![]));
     let proxy = spawn_proxy(&h, PROXY, strategy, registry).await;
-    let (send, _) = h.bind_sut("peer", SEND).await;
-    let (listen, _) = h.bind_sut("peer-listen", LISTEN).await;
+    let (send, _) = h.bind_peer("peer", SEND).await;
+    let (listen, _) = h.bind_peer("peer-listen", LISTEN).await;
     Rig { h, proxy, send, listen }
 }
 
@@ -144,7 +144,7 @@ async fn with_rport_a_refusal_and_its_repeat_reach_the_source_port() {
 #[tokio::test(start_paused = true)]
 async fn a_sent_by_of_another_host_is_answered_at_received_and_its_port() {
     let r = rig("own-final-dest-received").await;
-    let (elsewhere, _) = r.h.bind_sut("elsewhere", "192.0.2.44:5070").await;
+    let (elsewhere, _) = r.h.bind_peer("elsewhere", "192.0.2.44:5070").await;
     let branch = "z9hG4bK-received";
     let invite = request("INVITE", branch, "", BOB, "")
         .replace(&format!("Via: SIP/2.0/UDP {LISTEN}"), "Via: SIP/2.0/UDP 192.0.2.44:5070");

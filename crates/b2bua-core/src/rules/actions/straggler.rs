@@ -38,7 +38,7 @@ impl ActionExecutor<'_> {
         leg_id: &str,
     ) {
         let Some(resp) = ctx.response() else { return };
-        let Some(tag) = resp.to().tag().filter(|t| !t.is_empty()).map(str::to_string) else {
+        let Some(tag) = resp.to().tag().map(str::to_string) else {
             return;
         };
         let marks = self.marks(call);

@@ -45,6 +45,8 @@ async-trait = { workspace = true }
 # its connection opened over a stream amqp-connect connects; serde_json encodes the CDR.
 lapin = { workspace = true }
 amqp-connect = { path = "../amqp-connect" }
+# Reads the client's connection events (cdr_rabbitmq/connection_watch.rs).
+futures-util = "0.3"
 serde_json = { workspace = true }
 # Replication from env (replication.rs): the real TCP transport and the
 # membership seam with the kube EndpointSlice informer for in-cluster discovery.

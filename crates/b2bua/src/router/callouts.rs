@@ -16,7 +16,7 @@ use super::RouterCtx;
 use crate::answer_deadline;
 use crate::decision::{
     CallDecisionEngine, CallDecisionError, CallFailureRequest, CallReleaseResponse, CallSnapshot,
-    CallTreatment, FailureInfo, SipHeaderUpdates,
+    CallTreatment, FailureInfo, RedirectContact, SipHeaderUpdates,
 };
 use crate::decision_log::STACK_AUTHORED;
 use crate::limiter::report::{admit_report_of, LimiterAdmitResult};
@@ -172,18 +172,13 @@ struct FailureRejectPayload {
 }
 
 #[derive(Serialize)]
-struct RedirectContactPayload {
-    uri: String,
-    // Emitted even when None (null): the advisory q is part of the pinned shape.
-    q: Option<f32>,
-}
-
-#[derive(Serialize)]
 struct FailureRedirectPayload {
     code: u16,
     #[serde(skip_serializing_if = "Option::is_none")]
     reason: Option<String>,
-    contacts: Vec<RedirectContactPayload>,
+    /// Each `{uri, q, params?}`, `q` emitted even when null: the pinned shape
+    /// [`RedirectContact::from_json`] reads back.
+    contacts: Vec<RedirectContact>,
     #[serde(skip_serializing_if = "Option::is_none")]
     update_headers: Option<SipHeaderUpdates>,
     failed_leg_id: String,
@@ -348,11 +343,7 @@ async fn failure_outcome(
                     to_payload(FailureRedirectPayload {
                         code: rd.code,
                         reason: rd.reason,
-                        contacts: rd
-                            .contacts
-                            .into_iter()
-                            .map(|c| RedirectContactPayload { uri: c.uri, q: c.q })
-                            .collect(),
+                        contacts: rd.contacts,
                         update_headers: rd.update_headers,
                         failed_leg_id,
                         origin: (depth > 0).then_some("call_limiter"),

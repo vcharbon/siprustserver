@@ -32,6 +32,8 @@
 //! `accepted` (RFC 6026 §7.2: a client INVITE after its 2xx, and who ACKs it) ·
 //! `orphan` (a released call's client transactions, ADR-0034) ·
 //! `commands` (the command funnel's dispatch) · `server` (§17.2 UAS FSM) ·
+//! `stateless_answer` (§8.2.7: a final sent with no transaction kept) ·
+//! `attach` (a server transaction attributed to the call the consumer found) ·
 //! `trying` (§17.2.1: an INVITE's first provisional) · `timer_g` (§17.2.1: a
 //! non-2xx final re-sent until its ACK) · `server_cancel` (§9.2: a CANCEL of a server
 //! INVITE) · `shrink` (a drained table's memory returned) · `lifetime` (when a transaction leaves the map:
@@ -40,15 +42,19 @@
 //! `relinquish` (a call's transactions deleted for another node to serve) ·
 //! `new_call_gate` (a consumer's switch on new calls and its queue's age, read
 //! at receipt) ·
-//! `events` (output-queue discipline) · `event_receiver` (the consumer's end
-//! of the event queue and the keepalive lane) · `event_age` (the age of the
+//! `events` (output-queue discipline) · `unattributed_lane` (which output a
+//! request rides) · `event_receiver` (the consumer's end
+//! of the event queue and the lanes) · `event_age` (the age of the
 //! oldest event waiting in the queue) · `backlog` (new-call admission against
 //! the deferred backlog) · `refusals` (the node's shared refusals of new
 //! INVITEs) · `txn` (per-transaction state) · `unanswered` (server
-//! transactions the consumer will not answer) · `key` (a server transaction's
-//! §17.2.3 identity).
+//! transactions the consumer will not answer) · `unattributed` (in-dialog
+//! server transactions attributed to no call) · `self_release` (the calls
+//! watched for their last serving transaction's clear, ADR-0014) · `key` (a
+//! server transaction's §17.2.3 identity).
 
 mod accepted;
+mod attach;
 mod backlog;
 mod bind;
 mod bound_report;
@@ -80,13 +86,17 @@ mod refusals;
 mod relinquish;
 mod run;
 mod seed;
+mod self_release;
 mod server;
 mod server_cancel;
 mod shrink;
+mod stateless_answer;
 mod timer_g;
 mod trying;
 mod txn;
 mod unanswered;
+mod unattributed;
+mod unattributed_lane;
 mod via_marks;
 
 pub use backlog::DeferredBound;
@@ -95,6 +105,8 @@ pub use call_id_budget::CallIdBudget;
 pub use config::OnBound;
 pub(crate) use event_age::EventAges;
 pub use handle::{TransactionConfig, TransactionEvents, TransactionLayer, TransactionLayerClosed};
+pub use held_cancel::CancelledInvite;
 pub use key::ServerTxnKey;
 pub use new_call_gate::NewCallGate;
+pub use orphan::OrphanOrigin;
 pub use refusals::{InviteRefusals, NewCallRefusal, RefusedCopy, Verdict, REFUSED_MEMO_MAX};

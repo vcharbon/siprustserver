@@ -16,7 +16,12 @@ use super::rig::{calls_won_by, winner_of, Pair, Party, Side};
 
 /// The caller's CANCEL of the ringing `call_id`, reaching `placed`, which
 /// ends the call: 200, 487, ACK.
-async fn cancel_reaches(pair: &Pair, call_id: &str, placed: Party, at_placed: &SipRequest) {
+pub(super) async fn cancel_reaches(
+    pair: &Pair,
+    call_id: &str,
+    placed: Party,
+    at_placed: &SipRequest,
+) {
     let invite = caller_invite(call_id);
     pair.send(Party::Caller, &SipMessage::Request(cancel_of(&invite))).await;
     let (cancel, from) = pair.request(placed, "CANCEL").await;

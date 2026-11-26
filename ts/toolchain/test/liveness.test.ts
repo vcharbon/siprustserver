@@ -1,10 +1,12 @@
 /**
  * Liveness off a pid record: this process runs, a record with other start
- * ticks is another process, an unreadable or malformed record is none.
+ * ticks is another process, an ended process not yet reaped runs no more, an
+ * unreadable or malformed record is none.
  */
 import { NodeServices } from "@effect/platform-node"
 import * as Effect from "effect/Effect"
 import type * as FileSystem from "effect/FileSystem"
+import * as child_process from "node:child_process"
 import * as fs from "node:fs"
 import * as os from "node:os"
 import * as path from "node:path"
@@ -14,6 +16,20 @@ import * as Liveness from "../src/liveness.js"
 const run = <A>(effect: Effect.Effect<A, never, FileSystem.FileSystem>) =>
   Effect.runPromise(effect.pipe(Effect.provide(NodeServices.layer)))
 
+/**
+ * Polls until `pid` is a zombie; its `/proc` stat fields from field 3 on.
+ * Fails as soon as `/proc` no longer holds `pid`. The test's timeout is its
+ * only bound.
+ */
+const zombie = async (pid: number): Promise<Array<string>> => {
+  for (;;) {
+    const stat = fs.readFileSync(`/proc/${pid}/stat`, "utf8")
+    const fields = stat.slice(stat.lastIndexOf(")") + 2).split(" ")
+    if (fields[0] === "Z") return fields
+    await new Promise((resolve) => setTimeout(resolve, 25))
+  }
+}
+
 describe("Liveness", () => {
   it("reads this process as running by pid and by its start ticks", async () => {
     const ticks = await run(Liveness.ticksOf(process.pid))
@@ -21,6 +37,21 @@ describe("Liveness", () => {
     expect(await run(Liveness.recordedAlive({ pid: process.pid, ticks }))).toBe(true)
     expect(await run(Liveness.recordedAlive({ pid: process.pid, ticks: "1" }))).toBe(false)
     expect(await run(Liveness.alive(process.pid))).toBe(true)
+  })
+
+  it("reads an ended process its parent has not reaped as gone", async () => {
+    // The inner shell ends at once; its parent, exec'd into sleep, never reaps it.
+    const parent = child_process.spawn("sh", ["-c", "sh -c 'exit 0' & echo $!; exec sleep 3600"], {
+      stdio: ["ignore", "pipe", "ignore"]
+    })
+    try {
+      const pid = Number(await new Promise<string>((resolve) => parent.stdout.once("data", (chunk) => resolve(String(chunk)))))
+      const fields = await zombie(pid)
+      expect(await run(Liveness.ticksOf(pid))).toBeUndefined()
+      expect(await run(Liveness.recordedAlive({ pid, ticks: fields[22 - 3] }))).toBe(false)
+    } finally {
+      parent.kill("SIGKILL")
+    }
   })
 
   it("reads a record's pid and ticks, and none off a missing or malformed file", async () => {

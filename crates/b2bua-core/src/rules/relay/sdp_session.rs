@@ -40,11 +40,14 @@
 //! §12.1.2): a leg the stack dialled tells them apart by the peer's tag, the
 //! caller's leg by this stack's.
 //!
-//! A description inside a dialog leaves in the form the service's
-//! [`SdpFormPolicy`] gives it from what the seam knows ([`SdpCrossing`]): as
-//! written, or re-serialized ([`sip_message::canonical_form`]). An opening
-//! description always leaves as written. Whether the stack has restated
-//! anything in the call is the call's fact: each leg records the
+//! A description that moves the version the peer holds leaves, inside a
+//! dialog, in the form the service's [`SdpFormPolicy`] gives it from what the
+//! seam knows ([`SdpCrossing`]): as written, or re-serialized
+//! ([`sip_message::canonical_form`]); in the initial INVITE's exchange, as
+//! written. One that keeps the version the peer holds leaves in the form that
+//! version first left in, so the peer receives the same bytes at that version
+//! (RFC 3264 §8); the policy is not asked about it. Whether the stack has
+//! restated anything in the call is the call's fact: each leg records the
 //! restatements it carried, and a confirming dialog takes over the facts of
 //! the forks it replaces.
 
@@ -149,7 +152,9 @@ impl Carried {
 /// A version at the top of its range has no next one: a description that would
 /// be restated above it leaves as written, and opens the session anew where the
 /// stack had stated no version of its own (RFC 3264 §8 — never a wrapped one).
-/// `policy` decides the form of an in-dialog description.
+/// `policy` decides the form of an in-dialog description that moves the
+/// version the peer holds; one that keeps it leaves in the form it first left
+/// in.
 #[allow(clippy::too_many_arguments)]
 pub fn continue_on_leg(
     call: &mut Call,
@@ -253,12 +258,7 @@ fn continue_session(
                 restate_session(sdp, &stated)
             }
         });
-    let reformed = carried.in_dialog()
-        && formed.policy.form(&SdpCrossing {
-            by_peer: matches!(author, Author::Leg(_)),
-            restated: restated.is_some(),
-            call_restated: formed.call_restated || restated.is_some(),
-        }) == SdpForm::Canonical;
+    let restating = restated.is_some();
     let state = &mut leg.sdp_session;
     let out = match restated {
         Some(r) => {
@@ -290,10 +290,16 @@ fn continue_session(
             Cow::Borrowed(sdp)
         }
     };
+    let reformed = if keeps_held_version(state, &out) {
+        state.sent_canonical
+    } else {
+        carried.in_dialog() && formed.canonical(author, restating)
+    };
     if let Some(now) = StatedSession::of(&out) {
         state.sent_origin = Some(now.origin);
         state.sent_media = now.media;
         state.sent_digest = parse_origin(&out).map(|o| digest(&o.body_excluding_origin));
+        state.sent_canonical = reformed;
     }
     let out = match reformed.then(|| canonical_form(&out)).flatten() {
         Some(canonical) => Cow::Owned(canonical),
@@ -404,6 +410,17 @@ fn skips_absorbed(state: &LegSdpSession, sdp: &[u8], absorbed: Option<&str>) -> 
         && absorbed.session_version < now.session_version
 }
 
+/// Whether `sdp` states the version of the session the peer last received
+/// under `state`: the same five identity fields, the same version.
+fn keeps_held_version(state: &LegSdpSession, sdp: &[u8]) -> bool {
+    match (parse_origin(sdp), state.sent_origin.as_deref().and_then(origin_of)) {
+        (Some(now), Some(held)) => {
+            now.identifies_same_session(&held) && now.session_version == held.session_version
+        }
+        _ => false,
+    }
+}
+
 /// Whether `sdp` describes, apart from its `o=` line, what the peer last
 /// received under `state`: a repeat, kept at the version the peer holds.
 fn repeats_what_was_held(state: &LegSdpSession, sdp: &[u8]) -> bool {
@@ -474,6 +491,18 @@ fn stated(leg: &Leg) -> Option<StatedSession> {
 struct Formed<'a> {
     policy: &'a dyn SdpFormPolicy,
     call_restated: bool,
+}
+
+impl Formed<'_> {
+    /// Whether the policy re-serializes an in-dialog description by `author`
+    /// that moves the version the peer holds, `restating` it or not.
+    fn canonical(&self, author: Author<'_>, restating: bool) -> bool {
+        self.policy.form(&SdpCrossing {
+            by_peer: matches!(author, Author::Leg(_)),
+            restated: restating,
+            call_restated: self.call_restated || restating,
+        }) == SdpForm::Canonical
+    }
 }
 
 /// Whether this stack has restated a description anywhere in `call`: on a leg,

@@ -161,8 +161,8 @@ and an extract half (how it is read off a received leg):
 | `loadgen_mux_orphan_total{reason="released"}` | an INVITE on a Call-ID a finished call released within 64·T1 |
 | `loadgen_mux_orphan_total{reason="early"}` | a leg arriving before its caller sent the INVITE |
 | `loadgen_mux_orphan_total{reason="call_id_reuse"}` | a new INVITE reusing a caller's own Call-ID (RFC 3261 §8.1.1.4) |
-| `loadgen_mux_orphan_total{reason="stray"}` | a request with no call and no held answer |
-| `loadgen_mux_late_retransmission_answered_total` | a retransmission after the call ended, answered again with the held final (RFC 3261 §17.2.2, Timer J) |
+| `loadgen_mux_orphan_total{reason="stray"}` | a request other than a CANCEL with no call and no held answer |
+| `loadgen_mux_late_retransmission_answered_total` | a retransmission after the call ended, answered again with the held final (RFC 3261 §17.2.2, Timer J); a CANCEL no live call takes, answered 200 when its INVITE's non-2xx final is held or the INVITE reached the endpoint unanswered (no 487: the INVITE's Via rows are not held), else 481 (§9.2) |
 | `loadgen_mux_token_collision_total`, `loadgen_mux_key_cooling_total` | `from-user` draws refused (draws, not calls) |
 | `loadgen_mux_caller_key_mismatch_total` | a caller INVITE whose From user is not its key |
 
@@ -307,7 +307,9 @@ incident window it fell in (ADR-0049 §3.5). With `--auto-retransmit`, a call
 whose in-dialog request (not a BYE) still awaits its final when the call ends
 is held until the final or Timer F (64·T1); the request then fails stamped at
 the call's end. A held call does not count against `--max-in-flight` and
-delays the drain by up to 32 s.
+delays the drain by up to 32 s. A held call that did not fail and records is
+audited when its client transactions end, so its RFC audit reads the final
+that a retransmission gets after the call ends.
 
 ### Call-outcome records
 

@@ -1,6 +1,7 @@
-//! A session over a caller-built simulated fabric, and a SUT endpoint on a
-//! lane of its own: the seams several SUT instances serving one shared
-//! address need.
+//! A session over a caller-built simulated fabric, one over a fabric that
+//! fails, holds or loses chosen datagrams, and a SUT endpoint on a lane of its
+//! own: the seams several SUT instances serving one shared address, a node
+//! cut off, or a path that reorders or loses, need.
 
 use std::collections::HashSet;
 use std::net::SocketAddr;
@@ -22,6 +23,61 @@ impl Harness {
     ) -> Self {
         let sim: Arc<dyn SignalingNetwork> = Arc::new(net);
         Self::build(scenario_name.into(), sim, Clock::test_at(0), TransportKind::Fake, RECV_TIMEOUT)
+    }
+
+    /// Like [`with_transit_delay`](Harness::with_transit_delay), plus an optional
+    /// per-pair send-fault injector on the simulated fabric: a `fault(src, dst)`
+    /// that answers `Some(reason)` fails that send, so the datagram never leaves
+    /// its endpoint. The seam a scenario uses to cut a node off the signalling
+    /// plane while its process keeps running and keeps firing its own timers.
+    pub fn with_transit_delay_and_send_fault(
+        scenario_name: impl Into<String>,
+        transit_delay_ms: u64,
+        fault: Option<sip_net_testkit::SendFault>,
+    ) -> Self {
+        let net = sip_net_testkit::SimulatedSignalingNetwork::new(transit_delay_ms.max(1));
+        let net = match fault {
+            Some(fault) => net.with_send_fault(fault),
+            None => net,
+        };
+        Self::with_simulated_network(scenario_name, net)
+    }
+
+    /// Like [`with_transit_delay`](Harness::with_transit_delay), plus a
+    /// per-datagram hold on the simulated fabric: a datagram `delay` holds
+    /// arrives that much later than the transit, so one its sender put on the
+    /// wire after it may arrive first. The seam a scenario reorders a path's
+    /// datagrams through while every party stays compliant at its send.
+    pub fn with_transit_delay_and_send_delay(
+        scenario_name: impl Into<String>,
+        transit_delay_ms: u64,
+        delay: sip_net_testkit::SendDelay,
+    ) -> Self {
+        let net = sip_net_testkit::SimulatedSignalingNetwork::new(transit_delay_ms.max(1));
+        Self::with_simulated_network(scenario_name, net.with_send_delay(delay))
+    }
+
+    /// Like [`with_transit_delay`](Harness::with_transit_delay), plus a
+    /// per-datagram fate on the simulated fabric ([`sip_net_testkit::Fate`]):
+    /// the losses and holds an unreliable transport makes, which every
+    /// party's transaction layer must ride out (RFC 3261 §17, §18). The run
+    /// declares a loss model: [`note_losses`](Self::note_losses) notes each
+    /// datagram lost to or from a call's party for its goals and endings;
+    /// [`serve_parties_until`](Self::serve_parties_until)
+    /// sends what the parties' timers owe and waits out the SUT's own 64·T1
+    /// give-up; a UA's CSeq out of sequence that a recorded loss explains is
+    /// no finding ([`LostOnTheWay`](crate::dialogs::LostOnTheWay)), nor is a
+    /// retransmission crossing the end of its dialog after the recorded loss
+    /// of its first copy ([`SentBeforeEnd`](crate::dialogs::SentBeforeEnd)).
+    pub fn with_transit_delay_and_send_fate(
+        scenario_name: impl Into<String>,
+        transit_delay_ms: u64,
+        fate: sip_net_testkit::SendFate,
+    ) -> Self {
+        let net = sip_net_testkit::SimulatedSignalingNetwork::new(transit_delay_ms.max(1));
+        let mut h = Self::with_simulated_network(scenario_name, net.with_send_fate(fate));
+        h.lossy = true;
+        h
     }
 
     /// [`bind_sut_with_roles`](Self::bind_sut_with_roles) on the lane

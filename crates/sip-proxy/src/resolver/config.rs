@@ -1,6 +1,5 @@
 //! The named-target resolver's cache and concurrency policy.
 
-/// Cache + concurrency policy for [`NamedForwarder`](super::NamedForwarder).
 #[derive(Debug, Clone, Copy)]
 pub struct ResolverConfig {
     /// How long a successful resolution is served from cache.
@@ -37,7 +36,7 @@ impl ResolverConfig {
     /// `positive_ttl − margin`, margin = min(ttl/4, 5 s). Both the margin and
     /// the delay are clamped ≥ 1 ms so degenerate tiny TTLs still schedule
     /// (a refresh landing at/after expiry idle-stops harmlessly).
-    pub(super) fn refresh_after_ms(&self) -> u64 {
+    pub(crate) fn refresh_after_ms(&self) -> u64 {
         let margin = (self.positive_ttl_ms / 4).clamp(1, 5_000);
         self.positive_ttl_ms.saturating_sub(margin).max(1)
     }

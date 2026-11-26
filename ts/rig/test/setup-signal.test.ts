@@ -12,6 +12,7 @@ import * as path from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
 import { SAMPLES, traceOf } from "./operations.js"
 import { tree } from "./tree.js"
+import { exitOf, phaseSeen } from "./waits.js"
 
 const RUNNER = path.join(import.meta.dirname, "fixtures", "setup-runner", "main.ts")
 const PACKAGE = path.join(import.meta.dirname, "..")
@@ -33,15 +34,6 @@ const phasesOf = (file: string): ReadonlyArray<string> =>
     })
     : []
 
-/** Resolves once `holds` does, checking every 20 ms for at most `withinMs`. */
-const until = async (holds: () => boolean, withinMs: number, what: string): Promise<void> => {
-  const deadline = Date.now() + withinMs
-  while (!holds()) {
-    if (Date.now() > deadline) throw new Error(`not within ${withinMs} ms: ${what}`)
-    await new Promise((resolve) => setTimeout(resolve, 20))
-  }
-}
-
 describe("a runner killed by a signal", () => {
   it.each(["SIGTERM", "SIGINT"] as const)("heals its setup on %s, a second signal during the heal ignored", async (signal) => {
     const root = tree(SAMPLES)
@@ -52,10 +44,10 @@ describe("a runner killed by a signal", () => {
       stdio: "ignore"
     })
     running.push(child)
-    const exited = new Promise<number | null>((resolve) => child.once("exit", (code) => resolve(code)))
-    await until(() => phasesOf(events).includes("injected slow-heal"), 60_000, "the setup injected")
+    const { ended, exited } = exitOf(child)
+    await phaseSeen(() => phasesOf(events), "injected slow-heal", ended)
     child.kill(signal)
-    await until(() => phasesOf(events).includes("heal slow-heal"), 10_000, "the heal began")
+    await phaseSeen(() => phasesOf(events), "heal slow-heal", ended)
     child.kill(signal)
     await exited
     expect(traceOf(root)).toEqual(["inject first", "inject slow-heal", "heal slow-heal", "healed slow-heal", "heal first"])
@@ -80,14 +72,12 @@ describe("a runner killed by a signal", () => {
     running.push(child)
     child.stdout.resume()
     child.stderr.resume()
-    const exited = new Promise<{ code: number | null; signal: string | null }>((resolve) =>
-      child.once("exit", (code, signal) => resolve({ code, signal }))
-    )
-    await until(() => phasesOf(events).includes("injected slow-heal"), 60_000, "the setup injected")
+    const { ended, exited } = exitOf(child)
+    await phaseSeen(() => phasesOf(events), "injected slow-heal", ended)
     child.stdout.destroy()
     child.stderr.destroy()
     child.kill("SIGHUP")
-    await until(() => phasesOf(events).includes("heal slow-heal"), 10_000, "the heal began")
+    await phaseSeen(() => phasesOf(events), "heal slow-heal", ended)
     child.kill("SIGHUP")
     expect(await exited).toEqual({ code: 130, signal: null })
     expect(traceOf(root)).toEqual(["inject first", "inject slow-heal", "heal slow-heal", "healed slow-heal", "heal first"])

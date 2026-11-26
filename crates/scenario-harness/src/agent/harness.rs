@@ -34,8 +34,12 @@ use super::waiver::{unused_waivers, WaiverScope, WaiverState};
 use super::weak_agent::WeakAgent;
 use super::{Agent, Proxy};
 use crate::absorption::Absorption;
-use crate::dialogs::{DialogJudge, DialogJudging, DialogOptIns};
+use crate::dialogs::{DialogJudging, DialogOptIns};
 use crate::run::RunReport;
+mod dialog_judges;
+mod loss_notes;
+mod peer_binds;
+mod serve;
 mod shared_lanes;
 
 /// Fake-fabric per-`recv` silent-wait bound (virtual time — a paused clock
@@ -109,6 +113,9 @@ pub struct Harness {
     dialog_opt_ins: DialogOptIns,
     /// The loopback addresses [`next_addr`](Self::next_addr) hands out.
     addrs: AddrAlloc,
+    /// Whether the fabric runs a loss model: its datagrams may be lost or
+    /// held ([`with_transit_delay_and_send_fate`](Self::with_transit_delay_and_send_fate)).
+    lossy: bool,
 }
 
 impl Harness {
@@ -129,24 +136,6 @@ impl Harness {
     /// deterministically. See [`sip_net_testkit::SimulatedSignalingNetwork::new`].
     pub fn with_transit_delay(scenario_name: impl Into<String>, transit_delay_ms: u64) -> Self {
         Self::with_transit_delay_and_send_fault(scenario_name, transit_delay_ms, None)
-    }
-
-    /// Like [`with_transit_delay`](Harness::with_transit_delay), plus an optional
-    /// per-pair send-fault injector on the simulated fabric: a `fault(src, dst)`
-    /// that answers `Some(reason)` fails that send, so the datagram never leaves
-    /// its endpoint. The seam a scenario uses to cut a node off the signalling
-    /// plane while its process keeps running and keeps firing its own timers.
-    pub fn with_transit_delay_and_send_fault(
-        scenario_name: impl Into<String>,
-        transit_delay_ms: u64,
-        fault: Option<sip_net_testkit::SendFault>,
-    ) -> Self {
-        let net = sip_net_testkit::SimulatedSignalingNetwork::new(transit_delay_ms.max(1));
-        let net = match fault {
-            Some(fault) => net.with_send_fault(fault),
-            None => net,
-        };
-        Self::with_simulated_network(scenario_name, net)
     }
 
     /// Start a session over a **caller-supplied** network + clock — the seam
@@ -239,16 +228,8 @@ impl Harness {
             steps: StepCounter::default(),
             dialog_opt_ins: DialogOptIns::default(),
             addrs: AddrAlloc::default(),
+            lossy: false,
         }
-    }
-
-    /// A harness-judged dialog table for the UA `party`, gated at
-    /// [`finish`](Self::finish).
-    pub(crate) fn dialog_judge(&self, party: &str) -> Arc<DialogJudge> {
-        let judge =
-            Arc::new(DialogJudge::new(party, self.dialog_opt_ins.clone(), DialogJudging::Harness));
-        self.judges.borrow_mut().push(judge.clone());
-        judge
     }
 
     /// Register what a SUT bound on this harness adds to the run's failure
@@ -496,19 +477,6 @@ impl Harness {
         agent
     }
 
-    /// Hold `agent` for the end-of-run sighting of what it left unread.
-    pub(crate) fn keep_bound(&self, agent: &Agent) {
-        self.bound.borrow_mut().push(agent.downgrade());
-    }
-
-    /// Let every UA's dialog table judge what it still has queued, left
-    /// unread, so a request no step pulled still meets its table.
-    fn judge_unread(&self) {
-        for agent in self.bound.borrow().iter().filter_map(WeakAgent::upgrade) {
-            agent.judge_unread();
-        }
-    }
-
     /// Begin a **multi-callee group** — several logical [`Agent`]s that share
     /// ONE bound socket at `addr`, demultiplexed by R-URI prefix (out-of-dialog)
     /// and Call-ID (in-dialog). This is how the transfer flows drive Bob /
@@ -604,26 +572,6 @@ impl Harness {
         if let Some(hook) = pre_ingress {
             opts = opts.with_pre_ingress(hook);
         }
-        let ep =
-            self.network.bind_udp(opts).await.unwrap_or_else(|e| panic!("bind {addr} failed: {e}"));
-        (ep, addr)
-    }
-
-    /// Bind a raw endpoint for a SIMULATED party (a byte-level fixture peer) on
-    /// the shared, recording-wrapped fabric: a UA-role (`{Uac, Uas}`) bind on
-    /// an `Ext` lane, so its findings are the party's own, never the SUT's
-    /// (a party-less waiver covers them). The SUT itself binds with
-    /// [`bind_sut`](Self::bind_sut).
-    pub async fn bind_peer(
-        &self,
-        name: impl Into<String>,
-        addr: &str,
-    ) -> (Box<dyn UdpEndpoint>, SocketAddr) {
-        let addr: SocketAddr = addr.parse().unwrap_or_else(|e| panic!("bad addr {addr:?}: {e}"));
-        self.addrs.note_bound(addr);
-        self.recorder.register_lane(addr, name.into(), NetworkTag::Ext);
-        let roles = HashSet::from([sip_net::UaRole::Uac, sip_net::UaRole::Uas]);
-        let opts = BindUdpOpts::new(addr, SUT_QUEUE_MAX).with_roles(roles);
         let ep =
             self.network.bind_udp(opts).await.unwrap_or_else(|e| panic!("bind {addr} failed: {e}"));
         (ep, addr)

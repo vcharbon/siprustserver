@@ -6,9 +6,9 @@
 //! and the router's live-path probe. These tests pin the three defined
 //! semantics against the three live probe points:
 //!
-//!  1. **Initial INVITE** (`LiveInitialInvite`): fail CLOSED — the caller who
-//!     heard the auto-100 gets a final **500** (ADR-0022 composition), no call
-//!     is created, nothing leaks.
+//!  1. **Initial INVITE** (`LiveInitialInvite`): fail CLOSED — the caller
+//!     gets a final **500** and no 100 before it (ADR-0070), no call is
+//!     created, nothing leaks.
 //!  2. **In-dialog request** (`LiveInDialog`): fail CLOSED — the BYE gets a
 //!     **500**, the call and its state stay untouched (distinct from the 481
 //!     lookup-MISS), and a retry after the store recovers proceeds normally.
@@ -36,9 +36,9 @@ async fn scene_with_faults(name: &str, faults: &StoreFaults) -> B2buaScene {
     .await
 }
 
-/// (1) Fault armed from the start: alice's initial INVITE draws the auto-100
-/// and then the fail-closed **500** final — never 100-then-silence (ADR-0022
-/// composition) — with NO call created and nothing leaked.
+/// (1) Fault armed from the start: alice's initial INVITE draws the
+/// fail-closed **500** final — never silence (ADR-0022 composition) — with NO
+/// call created and nothing leaked.
 #[tokio::test(start_paused = true)]
 async fn initial_invite_store_fault_fails_closed_500_no_call_created() {
     let faults = StoreFaults::default();

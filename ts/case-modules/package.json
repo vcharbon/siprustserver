@@ -21,6 +21,6 @@
     "@effect/platform-node": "4.0.0-rc.111",
     "@types/node": "24.10.1",
     "tsx": "4.20.6",
-    "vitest": "4.1.11"
+    "vitest": "4.1.12"
   }
 }

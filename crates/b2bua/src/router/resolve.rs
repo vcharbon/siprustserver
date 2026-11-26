@@ -137,12 +137,7 @@ fn resolve_call(ctx: &RouterCtx, event: &CallEvent) -> Resolution {
                     res.direction = leg_direction(&leg);
                     res.source_leg_id = leg;
                 }
-                let stated = req
-                    .request_uri()
-                    .param("callRef")
-                    .and_then(ParamValue::as_str)
-                    .map(crate::stack_identity::decode_param);
-                match stated {
+                match stated_call_ref(req) {
                     Some(call_ref) => res.call_ref = Some(call_ref),
                     None => {
                         if let Some(hit) = ctx.state.resolve_from_sip_key_sync(request_lookup(req))
@@ -347,6 +342,31 @@ async fn replicated_call_copied(
     let branch = req.top_via().branch().unwrap_or_default();
     let copied = call.a_leg_invite.cseq == req.cseq().seq() && names_server_branch(&call, branch);
     (copied && !is_undecided(&call)).then(|| (hit, names_unanswered_caller_invite(&call, branch)))
+}
+
+/// The `callRef` our Contact stamped on a request's Request-URI.
+fn stated_call_ref(req: &sip_message::SipRequest) -> Option<String> {
+    req.request_uri()
+        .param("callRef")
+        .and_then(ParamValue::as_str)
+        .map(crate::stack_identity::decode_param)
+}
+
+/// Whether the router attributes the server transaction of `req` to the call
+/// it resolves `req` to: `req` states no `callRef` (an element rewrote its
+/// Request-URI, so the call is found by dialog identity) and opens a
+/// transaction the transaction layer attributes by the Request-URI when it
+/// states one. An ACK opens none and a CANCEL's transaction is attributed to
+/// no call. An out-of-dialog INVITE's is not attributed here: one that opens
+/// a call is attributed to none, and one that copies a call's INVITE is
+/// relinquished or takes the attribution of the seed whose final it takes.
+pub(super) fn attributed_on_resolution(req: &sip_message::SipRequest) -> bool {
+    let method = req.method();
+    let opens_call = method == Method::Invite && req.to().tag().is_none();
+    !opens_call
+        && method != Method::Ack
+        && method != Method::Cancel
+        && stated_call_ref(req).is_none()
 }
 
 /// The index lookup for a request that carries no `callRef` of ours: a CANCEL

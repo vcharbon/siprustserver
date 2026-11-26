@@ -14,10 +14,15 @@ pub struct LegSdpSession {
     /// The `m=` values of that description, in order.
     pub sent_media: Vec<String>,
     /// A digest (64-bit FNV-1a) of that description apart from its `o=`
-    /// line: a later one with the same digest repeats it (RFC 3264 §8 keeps a
-    /// repeat at its version).
+    /// line, as composed before its form: a later one with the same digest
+    /// repeats it (RFC 3264 §8 keeps a repeat at its version).
     #[serde(default)]
     pub sent_digest: Option<u64>,
+    /// That description left re-serialized in canonical form rather than as
+    /// composed: a later one keeping its version leaves in the same form, so
+    /// the peer receives the same bytes at that version (RFC 3264 §8).
+    #[serde(default)]
+    pub sent_canonical: bool,
     /// The `o=` value of the last offer this leg's peer made that the stack
     /// answered itself — refused (a glare 491 or 500) or answered locally —
     /// so no other leg received it: a version the peer spent that the far

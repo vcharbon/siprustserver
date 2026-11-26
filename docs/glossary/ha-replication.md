@@ -387,4 +387,5 @@ worker flushes its queued limiter releases within `B2BUA_DRAIN_RELEASE_FLUSH_MS`
 re-checks a clean exit after the flush, and gives up, counted, what is left
 (ADR-0031 D2, ADR-0040 decision 9). Every exit then closes the CDR sink within
 `B2BUA_DRAIN_CDR_FLUSH_MS`: the queued records are written and the broker's
-outstanding confirms awaited; what the bound leaves counts in `cdr_dropped_total`.
+outstanding confirms awaited; what the bound leaves counts in
+`b2bua_cdr_dropped_total{reason="close_deadline"}`.

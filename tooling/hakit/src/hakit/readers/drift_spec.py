@@ -71,7 +71,8 @@ class DriftSpec:
     # lease after it was due.
     quiet_zero_increase: list[str] = field(default_factory=lambda: [])
     quiet_pad_s: float = 0
-    # One CDR outcome (written or dropped) per completed call, per worker.
+    # One CDR outcome (written, or dropped under any reason: the read sums
+    # the dropped counter's `reason` label) per completed call, per worker.
     cdr_written: str = "b2bua_cdr_written_total"
     cdr_dropped: str = "b2bua_cdr_dropped_total"
     warmup_s: int = 1800

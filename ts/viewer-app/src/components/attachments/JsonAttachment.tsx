@@ -1,4 +1,4 @@
-/** A `json` attachment: the document as a JSON view, its packed strings opened (`json-decoded.ts`). */
+/** A `json` attachment: the document as a JSON view, its packed strings opened (`json-decoded.ts`), switchable to the form it came in. */
 import type { JSX } from "react"
 import { useAsync } from "../../api.ts"
 import { jsonDecoded } from "../../json-decoded.ts"
@@ -11,5 +11,7 @@ export const JsonAttachment = ({ id, value, label }: {
 }): JSX.Element => {
   const opened = useAsync(() => jsonDecoded(value), `json#${id}`)
   if (opened.state === "loading") return <p className="muted">loading…</p>
-  return <JsonView value={opened.state === "ok" ? opened.value : value} label={label} />
+  return opened.state === "ok"
+    ? <JsonView value={opened.value} packed={value} label={label} />
+    : <JsonView value={value} label={label} />
 }

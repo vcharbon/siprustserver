@@ -132,6 +132,10 @@ pub fn rides_early_dialog(
 /// two steps naming two observed forks cannot both be satisfied by one tag, so
 /// a system that collapses two early dialogs into one is refused at the second
 /// step.
+///
+/// A non-2xx final to the INVITE ends every early dialog of the leg (RFC 3261
+/// §13.2.2.3), so the To-tag it rides is the sender's choice among them: it is
+/// taken under the tag of any fork the leg has learned.
 pub fn rides_observed_fork(
     step: &CompiledStep,
     inbound: &Inbound,
@@ -147,6 +151,9 @@ pub fn rides_observed_fork(
             None => format!("gated on early dialog {early:?}; the message carries no To-tag"),
         });
     };
+    if ends_every_early_dialog(step) && learned.holder(&step.leg, got).is_some() {
+        return GateVerdict::Matches;
+    }
     match bound {
         Some(tag) if got == tag => GateVerdict::Matches,
         Some(tag) => GateVerdict::Rejects(format!(
@@ -159,6 +166,16 @@ pub fn rides_observed_fork(
             )),
             None => GateVerdict::Matches,
         },
+    }
+}
+
+/// Whether `step` expects a non-2xx final to an INVITE.
+fn ends_every_early_dialog(step: &CompiledStep) -> bool {
+    match &step.discriminator {
+        Discriminator::Response { status, cseq_method: Some(method) } => {
+            *status >= 300 && Method::from_wire(method) == Method::Invite
+        }
+        _ => false,
     }
 }
 

@@ -8,7 +8,6 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use sip_message::SipMessage;
 
 use crate::core::dual_face_tests::{
@@ -38,19 +37,18 @@ const COPIES: usize = 15;
 /// refused 503.
 struct NoWorker;
 
-#[async_trait]
 impl RoutingStrategy for NoWorker {
     fn name(&self) -> &str {
         "NoWorker"
     }
-    async fn select_for_new_dialog(
+    fn select_for_new_dialog(
         &self,
         _msg: &SipMessage,
         _opts: SelectOpts,
     ) -> Result<ProxyAddr, SelectError> {
         Err(SelectError::NoTarget { reason: "no worker".into() })
     }
-    async fn decode_stickiness(&self, _params: &RouteParams, _msg: &SipMessage) -> DecodeResult {
+    fn decode_stickiness(&self, _params: &RouteParams, _msg: &SipMessage) -> DecodeResult {
         DecodeResult::Unknown { is_emergency: false }
     }
     fn encode_stickiness(&self, _target: &ProxyAddr, _msg: &SipMessage) -> Option<RouteParams> {
@@ -130,7 +128,6 @@ async fn rejected_on_the_ladder(
     assert_eq!(answered, 1 + resends, "{status}: the reject and the ladder's re-sends");
 }
 
-/// The caller's INVITE with Max-Forwards exhausted.
 fn exhausted() -> SipMessage {
     rewritten(&caller_invite("preflight-copies@test"), &[("Max-Forwards: 70", "Max-Forwards: 0")])
 }

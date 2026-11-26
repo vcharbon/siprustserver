@@ -59,6 +59,9 @@ impl WorkerRegistryControl for DeadAt {
         }
         self.inner.set_view(worker_id, health, acceptance);
     }
+    fn note_late_answer(&self, worker_id: &str, fresh_for: std::time::Duration) {
+        self.inner.note_late_answer(worker_id, fresh_for);
+    }
 }
 
 /// How the simulated worker answers: each OPTIONS `delay` after it arrives,
@@ -70,12 +73,10 @@ struct Answers {
     answered: usize,
 }
 
-/// What the worker saw and did.
 #[derive(Default)]
 struct Seen {
     /// When each OPTIONS (first copy) arrived, in order.
     arrivals: Vec<Instant>,
-    /// When the worker sent its last answer.
     last_answer: Option<Instant>,
 }
 
@@ -121,7 +122,6 @@ fn respond(
     (task, seen)
 }
 
-/// What one run of the probe left.
 struct Run {
     /// When each probe the worker saw was sent.
     sent: Vec<Instant>,
@@ -228,14 +228,14 @@ async fn a_late_answer_that_retires_the_next_probe_brings_the_verdict_to_its_bou
     );
 }
 
-/// An answer landing 10 ms after its window ended, before the next tick, is
-/// dropped: every probe is a miss, and the worker is read `Dead`.
+/// An answer landing 10 ms after its window ended is a miss: with no slow
+/// window past the reply window, every probe is one, and the worker is read
+/// `Dead` (a slow window reads it `Slow`, `probe_slow_verdict`).
 #[tokio::test(start_paused = true)]
-async fn an_answer_after_its_window_is_dropped_and_counts_as_a_miss() {
-    let config = HealthProbeConfig::default();
+async fn an_answer_after_its_window_counts_as_a_miss() {
+    let config = HealthProbeConfig { slow_window_ms: 1_600, ..HealthProbeConfig::default() };
     let window = Duration::from_millis(config.timeout_ms);
     let delay = window + Duration::from_millis(10) - TRANSIT * 2;
-    assert!(window + Duration::from_millis(10) < config.period() * 2, "before the next tick");
     let r = run(config, Answers { delay, answered: usize::MAX }, LONG).await;
     let dead = r.dead.expect("a worker answering past every window is read dead");
     assert!(dead >= r.sent[0] + config.verdict_after_first_miss());

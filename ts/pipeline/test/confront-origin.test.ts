@@ -259,6 +259,22 @@ describe("a session the endpoint does not continue where the capture did", () =>
     expect(notContinued(run(sdp(o(7, 7)), sdp(o(7, 7)))).some((r) => r.notContinued)).toBe(false)
   })
 
+  it("a description that keeps its version in other bytes than the endpoint's previous one is a break, its meaning the same", () => {
+    const written = (origin: string, attributes: ReadonlyArray<string>): string =>
+      ["v=0", origin, "s=-", "c=IN IP4 192.0.2.10", "t=0 0", "m=audio 6000 RTP/AVP 8", ...attributes, ""].join("\r\n")
+    const attributes = ["a=rtpmap:8 PCMA/8000", "a=ptime:20"]
+    const captured = { offer: written(o(1000, 1000), attributes), ack: written(o(1000, 1001), attributes) }
+    const offer = written(o(7, 7), attributes)
+    const kept = notContinued(run(offer, written(o(7, 7), attributes), captured))
+    expect(kept).toEqual([{ step: "s2", minted: true, notContinued: false }, { step: "s3", minted: false, notContinued: false }])
+    for (const reformed of [["a=ptime:20", "a=rtpmap:8 PCMA/8000"], [...attributes, "a=sendrecv"]]) {
+      expect(notContinued(run(offer, written(o(7, 7), reformed), captured))).toEqual([
+        { step: "s2", minted: true, notContinued: false },
+        { step: "s3", minted: false, notContinued: true }
+      ])
+    }
+  })
+
   it("a minted continuation is never marked not continued", () => {
     expect(notContinued(run(sdp(o(7, 7)), sdp(o(7, 8)))).some((r) => r.notContinued)).toBe(false)
   })
@@ -281,18 +297,17 @@ describe("a relayed session whose sess-version the capture skips and ours steps 
     ["v=0", o(555, version, "peer", "198.51.100.7"), "s=-", "c=IN IP4 198.51.100.7", "t=0 0", "m=audio 6000 RTP/AVP 8", ...attributes, ""]
       .join("\r\n")
   const readings = (probes: ReadonlyArray<BodyProbe>) =>
-    probes.map((p) => ({ step: p.step, line: p.sdp?.line, orderOnly: p.sdp?.orderOnly === true, versionStepOne: p.sdp?.versionStepOne === true }))
+    probes.map((p) => ({ step: p.step, line: p.sdp?.line, versionStepOne: p.sdp?.versionStepOne === true }))
 
-  it("marks the ACK's `session:o=` row, and its bytes row where the rest differs by attribute order alone", () => {
+  it("marks the ACK's `session:o=` row alone, the rest the same description in its bytes or in another attribute order", () => {
     const written = ["a=sendrecv", "a=rtpmap:8 PCMA/8000"]
     const inForm = ["a=rtpmap:8 PCMA/8000", "a=sendrecv"]
     const captured = { offer: relayed(555, written), ack: relayed(557, written) }
     expect(readings(run(relayed(555, written), relayed(556, written), captured))).toEqual([
-      { step: "s3", line: "o=", orderOnly: false, versionStepOne: true }
+      { step: "s3", line: "o=", versionStepOne: true }
     ])
     expect(readings(run(relayed(555, written), relayed(556, inForm), captured))).toEqual([
-      { step: "s3", line: "o=", orderOnly: false, versionStepOne: true },
-      { step: "s3", line: "bytes", orderOnly: true, versionStepOne: true }
+      { step: "s3", line: "o=", versionStepOne: true }
     ])
   })
 
@@ -300,7 +315,132 @@ describe("a relayed session whose sess-version the capture skips and ours steps 
     const written = ["a=sendrecv", "a=rtpmap:8 PCMA/8000"]
     const captured = { offer: relayed(555, written), ack: relayed(558, written) }
     expect(readings(run(relayed(555, written), relayed(557, written), captured))).toEqual([
-      { step: "s3", line: "o=", orderOnly: false, versionStepOne: false }
+      { step: "s3", line: "o=", versionStepOne: false }
     ])
+  })
+})
+
+describe("one offer the endpoint sends to sequential targets", () => {
+  const LEGS = ["B", "C", "D"] as const
+  /**
+   * A serial search: the endpoint offers `replayed[i]` to leg `LEGS[i]`, the
+   * leg refuses it 486 and the endpoint ACKs, in turn; the capture's offers
+   * are `captured[i]`. Under `overlapping` every INVITE leaves before any
+   * leg refuses.
+   */
+  const search = (
+    captured: ReadonlyArray<string>,
+    replayed: ReadonlyArray<string>,
+    overlapping = false
+  ): ReadonlyArray<BodyProbe> => {
+    const legs = replayed.map((_, i) => LEGS[i]!)
+    const flowSearch = legs.flatMap((leg, i) => [
+      step(`s${i}i`, leg, "expect", { method: "INVITE", body: sdpBody(`resources/${leg}.sdp`) }, false),
+      step(`s${i}r`, leg, "send", { status: 486 }, false),
+      step(`s${i}a`, leg, "expect", { method: "ACK" }, false)
+    ])
+    const at = (i: number, k: number): number => (overlapping && k > 0 ? 100 : 0) + i * 10 + k + 1
+    const invite = (leg: string) => `INVITE sip:${leg.toLowerCase()}@example.invalid SIP/2.0`
+    return confront({
+      pivot: { ...pivot, flow: [...flowSearch] },
+      verdict,
+      recordings: new Map(legs.map((leg, i) => [leg, [
+        message(at(i, 0), "in", `s${i}i`, invite(leg), `${i + 1} INVITE`, false, replayed[i]!),
+        message(at(i, 1), "out", `s${i}r`, "SIP/2.0 486 Busy Here", `${i + 1} INVITE`, true, ""),
+        message(at(i, 2), "in", `s${i}a`, `ACK sip:${leg.toLowerCase()}@example.invalid SIP/2.0`, `${i + 1} ACK`, true, "")
+      ]] as const)),
+      resources: new Map(legs.map((leg, i) => [`resources/${leg}.sdp`, utf8.encode(captured[i]!)] as const)),
+      media: "verbatim"
+    }).probes.flatMap((p) => (p.probe.kind === "body" ? [p.probe] : []))
+  }
+  const minted = (probes: ReadonlyArray<BodyProbe>) =>
+    probes.filter((p) => p.sdp?.line === "o=").map((p) => [p.step, p.sdp?.mintedOrigin === true])
+
+  it("marks each target's offer minted where every earlier target's dialog ended before it", () => {
+    const offer = sdp(o(7, 7))
+    expect(minted(search([sdp(o(1000, 1000)), sdp(o(2000, 2000)), sdp(o(3000, 3000))], [offer, offer, offer])))
+      .toEqual([["s0i", true], ["s1i", true], ["s2i", true]])
+  })
+
+  it("keeps the second offer unmarked where the first target's dialog was still up", () => {
+    const offer = sdp(o(7, 7))
+    expect(minted(search([sdp(o(1000, 1000)), sdp(o(2000, 2000))], [offer, offer], true)))
+      .toEqual([["s0i", true], ["s1i", false]])
+  })
+
+  /** Where leg C's offer rides: a dialog-opening INVITE by default. */
+  const OPENING = { start: "INVITE sip:c@example.invalid SIP/2.0", cseq: "1 INVITE", toTag: false } as const
+  /** Leg B's offer, then `rest` on leg B, then leg C's same offer on `onC`, each against its own captured origin. */
+  const thenC = (
+    rest: ReadonlyArray<readonly [number, "in" | "out", string, string, boolean]>,
+    onC: { readonly start: string; readonly cseq: string; readonly toTag: boolean } = OPENING
+  ): ReadonlyArray<BodyProbe> => {
+    const offer = sdp(o(7, 7))
+    return confront({
+      pivot: {
+        ...pivot,
+        flow: [
+          step("s0i", "B", "expect", { method: "INVITE", body: sdpBody("resources/B.sdp") }, false),
+          step("s1i", "C", "expect", { method: "INVITE", body: sdpBody("resources/C.sdp") }, false)
+        ]
+      },
+      verdict,
+      recordings: new Map([
+        ["B", [
+          message(1, "in", "s0i", "INVITE sip:b@example.invalid SIP/2.0", "1 INVITE", false, offer),
+          ...rest.map(([at, dir, start, cseq, toTag], k) => message(at, dir, `b${k}`, start, cseq, toTag, ""))
+        ]],
+        ["C", [message(50, "in", "s1i", onC.start, onC.cseq, onC.toTag, offer)]]
+      ]),
+      resources: new Map([["resources/B.sdp", utf8.encode(sdp(o(1000, 1000)))], ["resources/C.sdp", utf8.encode(sdp(o(2000, 2000)))]]),
+      media: "verbatim"
+    }).probes.flatMap((p) => (p.probe.kind === "body" ? [p.probe] : []))
+  }
+  const refusedBusy = [[2, "out", "SIP/2.0 486 Busy Here", "1 INVITE", true], [3, "in", "ACK sip:b@example.invalid SIP/2.0", "1 ACK", true]] as const
+  const answered = [[2, "out", "SIP/2.0 200 OK", "1 INVITE", true], [3, "in", "ACK sip:b@example.invalid SIP/2.0", "1 ACK", true]] as const
+
+  it("marks the second target's offer where the first target's dialog ended by a BYE answered before it", () => {
+    const released = [...answered, [4, "in", "BYE sip:b@example.invalid SIP/2.0", "2 BYE", true], [5, "out", "SIP/2.0 200 OK", "2 BYE", true]] as const
+    expect(minted(thenC(released))).toEqual([["s0i", true], ["s1i", true]])
+  })
+
+  it("keeps the second offer unmarked where the first target's dialog only refused a re-INVITE", () => {
+    const refused = [
+      ...answered,
+      [4, "in", "INVITE sip:b@example.invalid SIP/2.0", "2 INVITE", true],
+      [5, "out", "SIP/2.0 491 Request Pending", "2 INVITE", true],
+      [6, "in", "ACK sip:b@example.invalid SIP/2.0", "2 ACK", true]
+    ] as const
+    expect(minted(thenC(refused))).toEqual([["s0i", true], ["s1i", false]])
+  })
+
+  it("keeps the second target's offer unmarked where the first target opened a later dialog still up", () => {
+    const reopened = [
+      ...refusedBusy,
+      [10, "in", "INVITE sip:b@example.invalid SIP/2.0", "2 INVITE", false],
+      [11, "out", "SIP/2.0 200 OK", "2 INVITE", true]
+    ] as const
+    expect(minted(thenC(reopened))).toEqual([["s0i", true], ["s1i", false]])
+  })
+
+  it("marks the second target's offer where both dialogs the first target opened ended before it", () => {
+    const both = [
+      ...refusedBusy,
+      [10, "in", "INVITE sip:b@example.invalid SIP/2.0", "2 INVITE", false],
+      [11, "out", "SIP/2.0 486 Busy Here", "2 INVITE", true],
+      [12, "in", "ACK sip:b@example.invalid SIP/2.0", "2 ACK", true]
+    ] as const
+    expect(minted(thenC(both))).toEqual([["s0i", true], ["s1i", true]])
+  })
+
+  it("keeps the offer unmarked where the second target receives it on a re-INVITE, not on a dialog-opening one", () => {
+    const reinvite = { start: "INVITE sip:c@example.invalid SIP/2.0", cseq: "2 INVITE", toTag: true } as const
+    expect(minted(thenC(refusedBusy, reinvite))).toEqual([["s0i", true], ["s1i", false]])
+  })
+
+  it("keeps the second offer unmarked where it differs from the first in any other line", () => {
+    const moved = sdp(o(7, 7)).replace("m=audio 6000", "m=audio 6002")
+    expect(minted(search([sdp(o(1000, 1000)), sdp(o(2000, 2000))], [sdp(o(7, 7)), moved])))
+      .toEqual([["s0i", true], ["s1i", false]])
   })
 })

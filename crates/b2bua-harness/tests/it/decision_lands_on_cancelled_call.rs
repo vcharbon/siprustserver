@@ -187,7 +187,6 @@ async fn route_decision_landing_after_the_callers_cancel_is_recorded_not_applied
         .await;
 
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
-    // The INVITE is at the SUT (auto-100 sent), the route still in flight.
     h.advance(Duration::from_millis(200)).await;
 
     // ── the caller gives up while the route is undecided ─────────────────────

@@ -83,7 +83,8 @@ export const inUse = (error: SqlError): boolean => sqlState(error) === "55006"
 /**
  * `database` gone: this role's sessions on it ended, then a plain drop (never
  * `FORCE`, which a superuser-owned autovacuum worker refuses with 42501). A drop
- * still in use (55006) is retried every 250 ms, failing after at most 60 s.
+ * still in use (55006) is retried every 250 ms while at most 60 s have passed
+ * since its first refusal, so it fails at most one spacing and one attempt past that.
  */
 export const dropDatabase = (database: string): Effect.Effect<void, SqlError, SqlClient> =>
   Effect.flatMap(SqlClient, (sql) =>
@@ -92,5 +93,5 @@ export const dropDatabase = (database: string): Effect.Effect<void, SqlError, Sq
         WHERE datname = ${database} AND pid <> pg_backend_pid() AND usename = current_user`
       yield* sql.unsafe(`DROP DATABASE IF EXISTS ${database}`)
     })).pipe(
-      Effect.retry({ schedule: Schedule.spaced("250 millis"), times: 240, while: inUse })
+      Effect.retry({ schedule: Schedule.spaced("250 millis").pipe(Schedule.upTo({ duration: "60 seconds" })), while: inUse })
     )

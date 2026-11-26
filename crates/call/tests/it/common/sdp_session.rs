@@ -12,7 +12,11 @@ pub(super) fn arb_sdp_session() -> impl Strategy<Value = LegSdpSession> {
         proptest::option::of("(a|b-[0-9]{1,2})"),
         proptest::option::of("[0-9]{1,20}"),
         (any::<bool>(), any::<u32>(), any::<bool>()),
-        (proptest::option::of(any::<u64>()), proptest::option::of("[a-z0-9 .]{1,40}")),
+        (
+            proptest::option::of(any::<u64>()),
+            proptest::option::of("[a-z0-9 .]{1,40}"),
+            any::<bool>(),
+        ),
     )
         .prop_map(
             |(
@@ -23,11 +27,12 @@ pub(super) fn arb_sdp_session() -> impl Strategy<Value = LegSdpSession> {
                 session_author,
                 session_id,
                 (restated, exchanges_opened, has_restated),
-                (sent_digest, absorbed_origin),
+                (sent_digest, absorbed_origin, sent_canonical),
             )| {
                 LegSdpSession {
                     sent_origin,
                     sent_digest,
+                    sent_canonical,
                     absorbed_origin,
                     sent_media,
                     sent_slots,

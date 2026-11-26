@@ -10,7 +10,6 @@
 //! the seal is judged by its client transaction (RFC 3261 §17.1.2): a final
 //! that arrives after the seal still settles it.
 
-use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use sip_clock::Clock;
@@ -26,7 +25,8 @@ mod received;
 
 pub use excuse::Refusal;
 pub(crate) use finals::Finals;
-use finals::{settle_pending, unanswered, Request};
+pub(crate) use finals::Pending;
+use finals::{pending_key, settle_pending, unanswered, Request};
 use received::note_request;
 pub use received::{LegRequest, LEG_REQUESTS_MAX, LEG_REQUEST_BODY_MAX};
 
@@ -56,7 +56,7 @@ pub struct LegFacts {
     pub failures: Vec<WireFailure>,
     /// The leg's own in-dialog requests awaiting a final, by CSeq number:
     /// their method and when they were first sent.
-    pub(crate) pending: HashMap<u32, (String, i64)>,
+    pub(crate) pending: Pending,
     pub(crate) finals: Finals,
 }
 
@@ -103,7 +103,7 @@ pub struct WireFacts {
     pub legs: Vec<LegFacts>,
     /// The caller's in-dialog requests awaiting a final, by CSeq number: their
     /// method and when they were first sent.
-    pub(crate) pending: HashMap<u32, (String, i64)>,
+    pub(crate) pending: Pending,
     pub(crate) finals: Finals,
     /// The verdict resolved: the facts no longer change.
     pub(crate) sealed: bool,
@@ -124,9 +124,7 @@ impl WireFacts {
     /// Whether an in-dialog request other than a BYE, the caller's or a
     /// callee leg's, still awaits its final.
     pub fn awaits_finals(&self) -> bool {
-        let awaits = |pending: &HashMap<u32, (String, i64)>| {
-            pending.values().any(|(method, _)| method != "BYE")
-        };
+        let awaits = |pending: &Pending| pending.values().any(|(method, _)| method != "BYE");
         awaits(&self.pending) || self.legs.iter().any(|l| awaits(&l.pending))
     }
 }
@@ -259,7 +257,9 @@ impl WireFacts {
             self.teardown_released |= bye_ok;
             if let (Dir::In, Some(code)) = (dir, id.status) {
                 let side = (&mut self.pending, &mut self.failures, &mut self.finals);
-                settle_pending(side, method, cseq, (code, d.raw()), now);
+                if let Some(key) = pending_key(id) {
+                    settle_pending(side, key, (code, d.raw()), now);
+                }
             }
             return;
         }
@@ -272,7 +272,7 @@ impl WireFacts {
                 if setup {
                     self.setup_response(code, d.raw(), now);
                 } else if code >= 200 {
-                    self.in_dialog_final(cseq, (code, d.raw()), now);
+                    self.in_dialog_final(id, (code, d.raw()), now);
                 }
             }
             (Dir::In, None) => {
@@ -319,7 +319,9 @@ impl WireFacts {
                     }
                 }
                 self.finals.sent(&mut self.failures, method, cseq);
-                self.pending.entry(cseq).or_insert_with(|| (method.to_string(), now));
+                if let Some(key) = pending_key(id).filter(|_| !untagged(id)) {
+                    self.pending.entry(key).or_insert_with(|| (method.to_string(), now));
+                }
             }
         }
     }
@@ -365,8 +367,10 @@ impl WireFacts {
         }
     }
 
-    fn in_dialog_final(&mut self, cseq: u32, (code, raw): (u16, &[u8]), now: i64) {
-        let Some((method, sent_at)) = self.pending.remove(&cseq) else { return };
+    fn in_dialog_final(&mut self, id: &Identity<'_>, (code, raw): (u16, &[u8]), now: i64) {
+        let Some(key) = pending_key(id) else { return };
+        let cseq = key.1;
+        let Some((method, sent_at)) = self.pending.remove(&key) else { return };
         if method == "BYE" {
             self.bye = Some(Some(code));
         }
@@ -381,12 +385,12 @@ impl WireFacts {
         let opened = self.legs.iter().position(|l| l.role == role);
         if self.sealed {
             // Only the finals of the leg's requests the seal left pending.
-            if let (Dir::In, Some(code), Some(i), Some(method), Some(cseq)) =
-                (dir, id.status, opened, id.cseq_method, id.cseq)
+            if let (Dir::In, Some(code), Some(i), Some(key)) =
+                (dir, id.status, opened, pending_key(id))
             {
                 let leg = &mut self.legs[i];
                 let side = (&mut leg.pending, &mut leg.failures, &mut leg.finals);
-                settle_pending(side, method, cseq, (code, d.raw()), now);
+                settle_pending(side, key, (code, d.raw()), now);
             }
             return;
         }
@@ -467,17 +471,17 @@ impl LegFacts {
         }
         let new_bye = method == "BYE" && self.finals.bye(&mut self.failures, true, cseq, now);
         self.finals.sent(&mut self.failures, method, cseq);
-        self.pending.entry(cseq).or_insert_with(|| (method.to_string(), now));
+        if let Some(key) = pending_key(id) {
+            self.pending.entry(key).or_insert_with(|| (method.to_string(), now));
+        }
         new_bye
     }
 
     /// A final to one of the leg's own in-dialog requests.
     fn own_final(&mut self, id: &Identity<'_>, (code, raw): (u16, &[u8]), now: i64) {
-        let Some(cseq) = id.cseq else { return };
-        if code < 200 {
-            return;
-        }
-        let Some((method, sent_at)) = self.pending.remove(&cseq) else { return };
+        let Some(key) = pending_key(id).filter(|_| code >= 200) else { return };
+        let cseq = key.1;
+        let Some((method, sent_at)) = self.pending.remove(&key) else { return };
         let req = Request { method: &method, cseq, sent_at };
         self.finals.judge(&mut self.failures, &req, (code, raw), now);
     }

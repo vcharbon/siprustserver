@@ -1,7 +1,7 @@
 //! The allocator's footprint on this deployment, from the resolved jemalloc
 //! configuration: what a live byte costs beyond itself, and the settings that
 //! cannot hold here (a [`Hazard`]). Pure and target-independent: the mallctl
-//! readers live in `lib.rs`. ADR-0038 states why the report exists.
+//! readers live in `lib.rs` and `held.rs`. ADR-0038 states why the report exists.
 //!
 //! A heap-profile sample of a small object of `s` bytes occupies
 //! `ceil(s / page)` pages of its own outside `allocated`, plus one pad page on

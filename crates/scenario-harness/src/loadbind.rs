@@ -49,7 +49,7 @@ use sip_net::{BindUdpOpts, SignalingNetwork};
 use sip_net_testkit::{with_all_contracts, ScopedAuditOptions, SimulatedSignalingNetwork};
 
 use crate::agent::{decide_rr_fold, Agent, Ids};
-use crate::dialogs::{DialogJudge, DialogJudging, DialogOptIns};
+use crate::dialogs::{AheadOfFinal, Departures, DialogJudge, DialogJudging, DialogOptIns};
 
 /// The result of applying the structural waivers to a sampled call's audit
 /// (ADR-0024 §6): the surviving findings plus a per-waiver "did it filter
@@ -75,6 +75,9 @@ pub struct AgentBinder {
     recv_timeout: Duration,
     /// The dialog judge of every agent bound, for the call's verdicts.
     judges: std::sync::Mutex<Vec<Arc<DialogJudge>>>,
+    /// What the judges read of a request reaching the SUT ahead of its UA's
+    /// own final, once [`judge_departures`](Self::judge_departures) set it.
+    ahead_of_final: std::sync::Mutex<Option<AheadOfFinal>>,
 }
 
 impl AgentBinder {
@@ -157,6 +160,7 @@ impl AgentBinder {
                 ids,
                 recv_timeout,
                 judges: Default::default(),
+                ahead_of_final: Default::default(),
             };
         }
         // Recording path: wrap the raw network in the recorder + the default RFC
@@ -181,6 +185,7 @@ impl AgentBinder {
             ids,
             recv_timeout,
             judges: Default::default(),
+            ahead_of_final: Default::default(),
         }
     }
 
@@ -197,6 +202,18 @@ impl AgentBinder {
     /// every Call-ID this binder's agents mint, so two runs never share one.
     pub fn call_id_nonce(&self, nonce: &str) {
         self.ids.set_nonce(nonce);
+    }
+
+    /// Let the dialog judge of every agent bound, before and after, read from
+    /// the call's departure log `log` whether a request its UA sent reached
+    /// the SUT ahead of the UA's own final ([`Departures`]): the call's loss
+    /// model drops and holds copies the judge never sees.
+    pub fn judge_departures(&self, log: Departures) {
+        let ahead = AheadOfFinal::from_departures(log);
+        for judge in self.judges.lock().unwrap().iter() {
+            judge.set_ahead_of_final(ahead.clone());
+        }
+        *self.ahead_of_final.lock().unwrap() = Some(ahead);
     }
 
     /// Whether this binder records (the call was sampled).
@@ -254,6 +271,9 @@ impl AgentBinder {
             DialogOptIns::default(),
             DialogJudging::Harness,
         ));
+        if let Some(ahead) = self.ahead_of_final.lock().unwrap().clone() {
+            dialogs.set_ahead_of_final(ahead);
+        }
         self.judges.lock().unwrap().push(dialogs.clone());
         Ok(Agent {
             uri: format!("sip:{name}@{}", addr.ip()),
@@ -380,9 +400,11 @@ impl AgentBinder {
             let lost = notes.by_party(&caller);
             let gated = judges.iter().flat_map(|j| {
                 let party = j.party().to_string();
-                j.gated()
-                    .into_iter()
-                    .map(move |(verdict, _)| GatedVerdict { party: party.clone(), verdict })
+                j.gated().into_iter().map(move |r| GatedVerdict {
+                    party: party.clone(),
+                    verdict: r.verdict,
+                    sender: r.sender,
+                })
             });
             gated
                 .filter(|g| g.explained_by_loss(&lost))

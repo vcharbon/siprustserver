@@ -11,7 +11,7 @@ use sip_message::parser::custom::CustomParser;
 use sip_message::{SipMessage, SipParser};
 
 use super::materialise::{materialise, Materialised, Origin};
-use super::resolve::{replica_takeover, resolve};
+use super::resolve::{attributed_on_resolution, replica_takeover, resolve};
 use super::test_support::{invite, node, src};
 use crate::config::B2buaConfig;
 use crate::initial_invite::build_initial_call;
@@ -150,4 +150,41 @@ async fn a_stated_leg_wins_over_the_index() {
     res.bind_indexed_leg(&call, &event);
     assert_eq!(res.source_leg_id, "a");
     assert_eq!(res.direction, Direction::FromA);
+}
+
+/// `method` on `request_uri`, in a dialog when `to_tag` is given.
+fn request(method: &str, request_uri: &str, to_tag: Option<&str>) -> sip_message::SipRequest {
+    let to_tag = to_tag.map(|t| format!(";tag={t}")).unwrap_or_default();
+    let raw = format!(
+        "{method} {request_uri} SIP/2.0\r\n\
+         Via: SIP/2.0/UDP 10.0.0.9:5060;branch=z9hG4bK-attr\r\n\
+         Max-Forwards: 70\r\n\
+         From: <sip:peer@example.com>;tag=peer-tag\r\n\
+         To: <sip:b2bua@example.com>{to_tag}\r\n\
+         Call-ID: attr@10.0.0.9\r\n\
+         CSeq: 2 {method}\r\n\
+         Contact: <sip:peer@10.0.0.9:5060>\r\n\
+         Content-Length: 0\r\n\r\n"
+    );
+    match CustomParser::new().parse(raw.as_bytes()).unwrap() {
+        SipMessage::Request(req) => req,
+        SipMessage::Response(_) => panic!("a request"),
+    }
+}
+
+/// The router attributes the server transaction of a request it resolves
+/// only where the Request-URI states no `callRef` and the request opens a
+/// transaction of the call: never an ACK's (none opens), a CANCEL's, or an
+/// out-of-dialog INVITE's, which opens or copies a call.
+#[test]
+fn only_a_dialogs_request_stating_no_call_ref_is_attributed_on_resolution() {
+    let bare = "sip:127.0.0.2:5080";
+    let stamped = "sip:127.0.0.2:5080;callRef=w0%7Ccid%7Ctag;leg=a";
+    assert!(attributed_on_resolution(&request("BYE", bare, Some("t"))));
+    assert!(attributed_on_resolution(&request("INVITE", bare, Some("t"))));
+    assert!(attributed_on_resolution(&request("INFO", bare, Some("t"))));
+    assert!(!attributed_on_resolution(&request("BYE", stamped, Some("t"))), "the layer did");
+    assert!(!attributed_on_resolution(&request("ACK", bare, Some("t"))));
+    assert!(!attributed_on_resolution(&request("CANCEL", bare, None)));
+    assert!(!attributed_on_resolution(&request("INVITE", bare, None)));
 }

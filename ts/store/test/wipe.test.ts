@@ -168,12 +168,12 @@ beforeAll(async () => {
   )
   await on(SCRATCH, Server.migrated)
   store = await withStore(seed)
-}, 60_000)
+})
 
 afterAll(async () => {
   if (!served) return
   await on("postgres", Server.dropDatabase(SCRATCH))
-}, 60_000)
+})
 
 const citations = (): ReadonlyArray<Citations.Citation> => [
   { kind: "run", ref: String(store!.cited), citedBy: "proj/2", citedOn: null },

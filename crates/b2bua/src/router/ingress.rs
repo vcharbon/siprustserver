@@ -9,20 +9,24 @@
 //! admitted new INVITE spends its CPS token once its turn is queued, the reaper
 //! hears a call past its lifetime cap or at its overflow ceiling, and a
 //! discarded request is paid what it is owed ([`super::owed`]). A new INVITE's
-//! turn, a copy's included, carries the setup budget from its own receipt, a
-//! re-ask's a fresh one ([`SetupBudget`]).
+//! turn, a copy's included, carries the setup budget and the start bound from
+//! its own receipt, a re-ask's a fresh budget and the start bound from the
+//! receipt its record states ([`SetupBudget`]).
 
+use std::net::SocketAddr;
 use std::sync::Arc;
 
-use sip_message::SipMessage;
+use sip_message::{SipMessage, SipRequest};
 use tokio::time::Instant;
 
 use super::admit;
 use super::deferred_parks::DeferredParks;
 use super::owed::OwedAnswer;
 use super::peer_metrics::classify_b2bua_peer;
-use super::resolve::{initial_invite_copy, replica_takeover, resolve, InitialInvite};
-use super::responses::build_options_health_response;
+use super::resolve::{
+    attributed_on_resolution, initial_invite_copy, replica_takeover, resolve, InitialInvite,
+};
+use super::responses::{build_420, build_options_health_response};
 use super::turn::Turn;
 use super::txn_event::Arrival;
 use super::unroutable::Lookup;
@@ -48,7 +52,9 @@ pub(super) fn queue_notice(ctx: &Arc<RouterCtx>, event: CallEvent) -> bool {
 /// Take `event` in, with what the transaction layer states of it, amid the
 /// parks a bulk reclaim deferred, `parks`: a copy of one of those calls'
 /// INVITE is that call's ([`DeferredParks`]). An event the router raises
-/// itself names its call and passes none.
+/// itself names its call and passes none. A request found by dialog
+/// identity, through the acting-backup backstop included, has its server
+/// transaction attributed to its call by [`attach_arrival`].
 pub(super) async fn on_event(
     ctx: &Arc<RouterCtx>,
     event: CallEvent,
@@ -104,17 +110,7 @@ pub(super) async fn on_event(
     if let CallEvent::Sip { message, src, .. } = &event {
         if let SipMessage::Request(req) = message.as_ref() {
             if req.method() == "OPTIONS" && req.to().tag().is_none() {
-                let resp = build_options_health_response(
-                    &ctx.readiness,
-                    &ctx.overload,
-                    &ctx.options_tagger,
-                    req,
-                    &ctx.config.node_capabilities,
-                );
-                if let Ok(resp) = resp {
-                    let _ = ctx.txn.send_response(resp, super::reply_to::reply_to(req, *src)).await;
-                }
-                super::dead_verdict::on_options(ctx, req);
+                answer_keepalive(ctx, req, *src).await;
                 return;
             }
         }
@@ -171,6 +167,7 @@ pub(super) async fn on_event(
             return;
         }
     };
+    attach_arrival(ctx, &event, &call_ref).await;
 
     // ── Setup-CANCEL mark ──────────────────────────────────────────────
     // An out-of-dialog CANCEL means the txn layer just finalized the initial
@@ -228,8 +225,9 @@ pub(super) async fn on_event(
     let length = ctx.config.call_control_timeout();
     let budget = if class.is_new_call() {
         SetupBudget::from_receipt(opened_at.unwrap_or_else(Instant::now), length)
-    } else if super::undecided::notice_of(&event).is_some() {
-        SetupBudget::from_receipt(Instant::now(), length)
+            .with_start_bound(ctx.config.call_start_bound())
+    } else if let Some(budget) = super::undecided::reask_budget(ctx, &event) {
+        budget
     } else {
         SetupBudget::NONE
     };
@@ -258,6 +256,54 @@ pub(super) async fn on_event(
         }
         let admitted = item.unborn.is_some();
         OwedAnswer::of(ctx).render(&item.event, why, owed, admitted).await;
+    }
+}
+
+/// Attribute the server transaction of the request `event` carries to
+/// `call_ref`, the call it resolved to, when its Request-URI named none
+/// ([`attributed_on_resolution`]), as the transaction layer attributes one
+/// whose Request-URI names it: the self-release count (ADR-0014) and the
+/// call's release then reach it. Queued to the layer before the request's
+/// turn is offered, so the layer takes it ahead of every command that turn
+/// and every turn offered after it send for the call. A turn queued before
+/// it, a self-release notice's, may count the call's transactions first:
+/// that count names the call's Call-IDs, and the layer counts the
+/// transaction by its Call-ID until it is attributed; the watch the turn
+/// re-arms holds on it the same way.
+async fn attach_arrival(ctx: &RouterCtx, event: &CallEvent, call_ref: &str) {
+    let CallEvent::Sip { message, .. } = event else { return };
+    let SipMessage::Request(req) = message.as_ref() else { return };
+    if !attributed_on_resolution(req) {
+        return;
+    }
+    if let Some(key) = sip_txn::ServerTxnKey::of(req) {
+        let _ = ctx.txn.attach_server_to_call(key, call_ref).await;
+    }
+}
+
+/// Answer `req`, an out-of-dialog OPTIONS from `src`, with this node's health
+/// report, then take the proxy's dead verdicts it carries. One requiring an
+/// option tag this stack does not understand is answered 420 naming those
+/// tags (RFC 3261 §8.2.2.3), and its verdicts are not taken.
+async fn answer_keepalive(ctx: &Arc<RouterCtx>, req: &SipRequest, src: SocketAddr) {
+    let refused = sip_message::option_tags::not_understood(req);
+    let resp = match &refused {
+        Some(unsupported) => {
+            build_420(req, unsupported, Some(ctx.stateless_tagger.for_request(req).0))
+        }
+        None => build_options_health_response(
+            &ctx.readiness,
+            &ctx.overload,
+            &ctx.stateless_tagger,
+            req,
+            &ctx.config.node_capabilities,
+        ),
+    };
+    if let Ok(resp) = resp {
+        let _ = ctx.txn.send_response(resp, super::reply_to::reply_to(req, src)).await;
+    }
+    if refused.is_none() {
+        super::dead_verdict::on_options(ctx, req);
     }
 }
 

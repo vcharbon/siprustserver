@@ -44,11 +44,11 @@ describe("StoreBinding", () => {
 describe.skipIf(!Server.served)("StoreBinding's default schema on an empty database", () => {
   beforeAll(async () => {
     await Server.fresh(SCRATCH)
-  }, 60_000)
+  })
 
   afterAll(async () => {
     await Server.drop(SCRATCH)
-  }, 60_000)
+  })
 
   it("migrates to every key of its sets: each set's table records each of its keys, the migrate answering each", async () => {
     const { applied, recorded, expected } = await Server.on(
@@ -68,5 +68,5 @@ describe.skipIf(!Server.served)("StoreBinding's default schema on an empty datab
     expect(expected.flat().length).toBeGreaterThan(0)
     expect(recorded).toEqual(expected)
     expect(applied).toEqual(expected.flat())
-  }, 60_000)
+  })
 })

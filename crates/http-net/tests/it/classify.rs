@@ -1,5 +1,5 @@
 //! The real client's failures, classified on loopback (real clock, well
-//! under 1 s): each `reqwest` error reaches the caller as the
+//! under 1 s): each client error reaches the caller as the
 //! [`FailureCause`] the simulated fabric reports for the same fault. A
 //! backend client's URL names its target, so `Host` is the name, and its
 //! name lookups go through the target.

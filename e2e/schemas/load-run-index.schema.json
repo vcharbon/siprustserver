@@ -147,7 +147,7 @@
           "minimum": 0
         },
         "lateAnswered": {
-          "description": "Retransmitted requests on a dialog whose call had ended, answered again\nwith the final the call sent (RFC 3261 §17.2.2): the repairs an orphan\ncount no longer includes.",
+          "description": "Requests the mux answered for a call it no longer ran: a retransmission\non a dialog whose call had ended, answered again with the final the\ncall sent (RFC 3261 §17.2.2), and a CANCEL no live call took, answered\n200 or 481 (§9.2). None is an orphan.",
           "type": "integer",
           "format": "uint64",
           "default": 0,
@@ -951,7 +951,7 @@
           "minimum": 0
         },
         "lateAnswered": {
-          "description": "Retransmitted requests answered again after their call ended, in the\nwindow.",
+          "description": "Requests the mux answered after their call ended (a retransmission's\nheld final, a CANCEL's 200 or 481), in the window.",
           "type": "integer",
           "format": "uint64",
           "default": 0,

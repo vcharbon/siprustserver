@@ -157,6 +157,14 @@ pub struct InviteExchange {
     /// recorded that the transaction layer's autonomous 487 (its answer to the
     /// caller's CANCEL) pre-empted before it reached the wire (§9.2).
     pub answer_preempted: Option<u16>,
+    /// Sent, on an INVITE this stack originated on a dialog: its client
+    /// transaction ended at Timer B with no response (§17.1.1.2), or the
+    /// INVITE could not be sent and its transaction ended the same way. The
+    /// INVITE is no longer in progress (§14.1); the record keeps it, so a 2xx
+    /// to it arriving later is known owed nothing and dropped unread, no ACK
+    /// drawn (RFC 6026 §7.2).
+    #[serde(default)]
+    pub ended_at_timer_b: bool,
 }
 
 impl InviteExchange {

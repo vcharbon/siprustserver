@@ -114,13 +114,13 @@ beforeAll(async () => {
   if (!served) return
   await fresh(SCRATCH)
   await on(SCRATCH, migrated)
-}, 120_000)
+})
 
 afterAll(async () => {
   fs.rmSync(TREE, { recursive: true, force: true })
   if (!served) return
   await drop(SCRATCH)
-}, 120_000)
+})
 
 const jobOf = Effect.flatMap(Jobs.Service, (jobs) => jobs.create({ kind: "campaign", args: {}, createdBy: "test" }))
 
@@ -188,7 +188,7 @@ const labCollectors = async (
     target === "down" || leftChanged
       ? `echo '{"verification":"target-up","answer":"fail","message":"${TARGET_DOWN}"}'`
       : target === "slow"
-      ? "sleep 30"
+      ? "exec sleep 3600"
       : `echo '{"verification":"target-up","answer":"pass"}'`
   )
   fs.writeFileSync(
@@ -494,12 +494,10 @@ describe.skipIf(!served)("the rig's cell-scope collectors of a batch", () => {
 
   it("answer not checkable on a cell whose collectors had not answered when the stop's grace ran out, the batch ending then", async () => {
     endingAs({})
-    const collectors = await afterCallCollectors("real", { delay_s: 5 })
+    const collectors = await afterCallCollectors("real", { delay_s: 3600 })
     const drive = (stood: LaneBatch.Stood) =>
       Effect.flatMap(driveCells(STANDS, ["a"])(stood), (driven) => Effect.map(Clock.currentTimeMillis, (now) => ({ ...driven, graceEnd: now + 200 })))
-    const started = Date.now()
     const ended = await withStore(LaneBatch.run({ lane: STANDS, stand, collectors, drive }))
-    expect(Date.now() - started).toBeLessThan(3000)
     expect(ended.collected.map((one) => one.cells.get("a")?.verifications)).toEqual([
       [{ name: "after-call", source: "after-call", answer: "not-checkable", message: LaneBatch.GRACE_OVER }]
     ])
@@ -586,7 +584,7 @@ describe.skipIf(!served)("the pre-checks of a batch", () => {
     }))
     expect(events).toEqual(["collector collect"])
     expect([row.finishedAt !== null, row.detail]).toEqual([true, "interrupted"])
-  }, 10_000)
+  })
 })
 
 describe.skipIf(!served)("one batch on a lane", () => {

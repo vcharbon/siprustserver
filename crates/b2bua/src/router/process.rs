@@ -23,7 +23,7 @@ use super::release::{release_call, ReleaseKind};
 use super::resolve::Resolution;
 use super::stray_cancel::reject_stray_cancel;
 use super::unrecoverable::discharge_after_turn;
-use super::unroutable::answer_vanished;
+use super::unroutable::answer_no_call;
 use super::RouterCtx;
 use crate::limiter::refresh_batch::RefreshAnswered;
 use crate::rule_chain::{enforced, fired, rule_chain_turn, TurnInput};
@@ -36,7 +36,8 @@ use b2bua_sdk::event::CallEvent;
 /// transaction the transaction layer holds. `admitted` is a new call admitted
 /// at ingress: its hold, until its call is created (every other exit drops
 /// it), and its setup budget. `true` when a turn's outbox entry took the event,
-/// and with it what the transaction layer holds for that entry's release.
+/// and with it what the transaction layer holds for that entry's release; a
+/// turn discarded past a per-call cap took nothing.
 pub(super) async fn process(
     ctx: &Arc<RouterCtx>,
     event: &CallEvent,
@@ -136,7 +137,7 @@ pub(super) async fn process(
         if of_another_incarnation(ctx, event, &res, |stamp| {
             ctx.state.is_incarnation(&call_ref, stamp) == Some(false)
         }) {
-            answer_vanished(ctx, event, &mut turn.ids).await;
+            answer_no_call(ctx, event, &mut turn.ids).await;
             return false;
         }
         if super::store_fault_gate::in_dialog_store_fault_gate(ctx, event, &call_ref, now_ms).await
@@ -144,7 +145,7 @@ pub(super) async fn process(
             return false;
         }
         let Some(call) = resident_or_materialised(ctx, &call_ref, answered(event)).await else {
-            answer_vanished(ctx, event, &mut turn.ids).await;
+            answer_no_call(ctx, event, &mut turn.ids).await;
             // An admit report for a vanished call (a route fold, a service's
             // admit result): no call is left to own the set its admit may
             // have counted.
@@ -166,7 +167,7 @@ pub(super) async fn process(
         res.bind_indexed_leg(&call, event);
         // A copy this event materialised is checked as a resident one was.
         if of_another_incarnation(ctx, event, &res, |stamp| call.incarnation() != stamp) {
-            answer_vanished(ctx, event, &mut turn.ids).await;
+            answer_no_call(ctx, event, &mut turn.ids).await;
             return false;
         }
         // A timer fire reaches the call only while its ledger holds the fired
@@ -209,6 +210,7 @@ pub(super) async fn process(
                     .await;
                 return false;
             }
+            super::dialog_gate::Gate::Absorbed => return false,
         };
         super::dialog_gate::note_in_order(&mut call, &res.source_leg_id, &resolved, event);
         probe_failed = probe_timed_out(event, &call, &res.source_leg_id);
@@ -259,13 +261,12 @@ pub(super) async fn process(
     if super::commit::fenced(ctx, &call_ref) {
         return true;
     }
-    let unrecoverable = turn.notes.unrecoverable();
-    if result.is_ok() {
-        super::notes::drain(ctx, &call_ref, &mut turn);
-    } else {
-        super::notes::drain_discarded(ctx, &mut turn);
-    }
-    if unrecoverable {
+    if turn.notes.unrecoverable() {
+        if result.is_ok() {
+            super::notes::drain(ctx, &call_ref, &mut turn);
+        } else {
+            super::notes::drain_discarded(ctx, &mut turn);
+        }
         let ids = &mut turn.ids;
         if !discharge_after_turn(ctx, &call_ref, event, now_ms, ids).await {
             drop(_guard);
@@ -276,6 +277,7 @@ pub(super) async fn process(
     let result = match result {
         Ok(result) => result,
         Err(tripped) => {
+            super::notes::drain_discarded(ctx, &mut turn);
             let safepoint = ctx.state.peek(&call_ref);
             let in_hand = (!res.initial_invite).then_some(event);
             super::tripped::fail_turn(ctx, &call_ref, in_hand, tripped, safepoint, now_ms).await;
@@ -287,9 +289,8 @@ pub(super) async fn process(
         record_keepalive_failure_peer(ctx, &res.source_leg_id, &result.call);
     }
 
-    let turn = super::turn_label::EventSummary { call_ref: &call_ref, event };
-    commit_turn(ctx, &call_ref, result, now_ms, &turn, Some(event)).await;
-    true
+    let label = super::turn_label::EventSummary { call_ref: &call_ref, event };
+    commit_turn(ctx, &call_ref, result, now_ms, &label, Some(event), Some(&mut turn)).await
 }
 
 /// How a pre-handler gate resolved the event.

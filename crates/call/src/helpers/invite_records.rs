@@ -45,6 +45,35 @@ pub fn invite_untaken(d: &Dialog) -> bool {
     d.sent_invite.is_some() && !invite_taken(d)
 }
 
+/// Whether `d`'s last INVITE awaits its final: [`invite_untaken`], its client
+/// transaction not ended at Timer B ([`InviteExchange::ended_at_timer_b`]).
+pub fn invite_awaits_final(d: &Dialog) -> bool {
+    invite_untaken(d) && !sent_exchange(d).is_some_and(|x| x.ended_at_timer_b)
+}
+
+/// Whether the INVITE numbered `cseq` that `d` sent ended its round with no
+/// 2xx taken, so a 2xx to it is owed nothing (RFC 6026 §7.2): the latest one
+/// a non-2xx closed or a later INVITE replaced ([`Dialog::untaken_invite`]),
+/// or the last, ended at Timer B ([`InviteExchange::ended_at_timer_b`]).
+pub fn invite_round_ended(d: &Dialog, cseq: i64) -> bool {
+    let last = d.sent_invite.as_ref().is_some_and(|r| r.outbound_cseq == cseq);
+    d.untaken_invite == Some(cseq) || (last && invite_untaken(d) && !invite_awaits_final(d))
+}
+
+/// Mark the INVITE `leg_id`'s dialog `id` last sent, untaken, ended at its
+/// Timer B with no response (RFC 3261 §17.1.1.2,
+/// [`InviteExchange::ended_at_timer_b`]).
+pub fn end_invite_at_timer_b(call: &mut Call, leg_id: &str, id: &DialogId) {
+    update_dialog(call, leg_id, id, |d| {
+        if invite_taken(d) {
+            return;
+        }
+        if let Some(x) = sent_exchange_mut(d) {
+            x.ended_at_timer_b = true;
+        }
+    })
+}
+
 /// The relay `d` last sent an INVITE for, while no final settled it — a 2xx
 /// taken, or a non-2xx closing it — CANCELled toward its target or not.
 pub fn invite_relay(d: &Dialog) -> Option<&RequestRecord> {
@@ -134,6 +163,13 @@ pub fn set_awaited_ack_cseq(call: &mut Call, leg_id: &str, cseq: Option<i64>) {
     })
 }
 
+/// Whether `leg`'s established dialog owes the ACK numbered `cseq` that a
+/// peer's relayed ACK discharges: a 2xx in hand that nothing has ACKed yet,
+/// armed under that number ([`set_awaited_ack_cseq`], RFC 3261 §13.2.2.4).
+pub fn relayed_ack_owed(leg: &Leg, cseq: i64) -> bool {
+    leg.dialogs.established().and_then(sent_exchange).and_then(|x| x.awaited_ack_cseq) == Some(cseq)
+}
+
 /// Close the INVITE `leg_id`'s dialogs last sent on the client transaction
 /// `branch`, which a non-2xx final answered (RFC 3261 §17.1.1.3: the
 /// transaction ends with that final, hop-ACKed below the TU), so the record
@@ -172,6 +208,21 @@ pub fn close_rejected_invite_round(call: &mut Call, leg_id: &str, branch: &str) 
 /// when it carried none.
 pub fn close_untaken_invite(d: &mut Dialog) {
     note_untaken(d);
+    hold_invite_before(d);
+}
+
+/// Leave `d`'s last INVITE, a relay another worker made and still owns, to
+/// that worker: the dialog holds again the INVITE before it, as
+/// [`close_untaken_invite`] does, but its round is not noted untaken
+/// ([`Dialog::untaken_invite`]): it has not ended, and a 2xx to it is that
+/// worker's to take.
+pub fn leave_invite_relay(d: &mut Dialog) {
+    hold_invite_before(d);
+}
+
+/// `d` holds again the INVITE before its last, as the ACK the last carried
+/// ahead states it; nothing when it carried none.
+fn hold_invite_before(d: &mut Dialog) {
     let before = d.sent_invite.as_ref().and_then(|r| r.invite.as_ref()?.ack_ahead.as_ref());
     d.sent_invite = before.map(|ahead| ahead.restored());
 }

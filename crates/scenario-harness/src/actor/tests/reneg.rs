@@ -44,6 +44,7 @@ async fn reinvite_glare_491_both_ways_then_retry_resolves() {
 
                 cseq: None,
                 delayed: vec![],
+                answers: Default::default(),
                 claim: None,
             },
             ActorSpec {
@@ -59,6 +60,7 @@ async fn reinvite_glare_491_both_ways_then_retry_resolves() {
 
                 cseq: None,
                 delayed: vec![],
+                answers: Default::default(),
                 claim: None,
             },
         ],
@@ -123,6 +125,7 @@ async fn update_vs_reinvite_collision_491_then_retry_resolves() {
 
                 cseq: None,
                 delayed: vec![],
+                answers: Default::default(),
                 claim: None,
             },
             ActorSpec {
@@ -138,6 +141,7 @@ async fn update_vs_reinvite_collision_491_then_retry_resolves() {
 
                 cseq: None,
                 delayed: vec![],
+                answers: Default::default(),
                 claim: None,
             },
         ],
@@ -187,6 +191,7 @@ async fn early_update_on_the_reliable_early_dialog() {
         call_id: None,
         headers: vec![("Supported".to_string(), "100rel".to_string())],
         rewrite: Default::default(),
+        presentation: Default::default(),
     };
     let alice_confirmed =
         Barrier::pred("confirmed", |s| s.leg_at_least("alice", LegPhase::Confirmed));
@@ -215,6 +220,7 @@ async fn early_update_on_the_reliable_early_dialog() {
 
                 cseq: None,
                 delayed: vec![],
+                answers: Default::default(),
                 claim: None,
             },
             ActorSpec {
@@ -229,6 +235,7 @@ async fn early_update_on_the_reliable_early_dialog() {
 
                 cseq: None,
                 delayed: vec![],
+                answers: Default::default(),
                 claim: None,
             },
         ],
@@ -294,6 +301,7 @@ async fn actor_originates_in_dialog_info() {
 
                 cseq: None,
                 delayed: vec![],
+                answers: Default::default(),
                 claim: None,
             },
             ActorSpec {
@@ -308,6 +316,7 @@ async fn actor_originates_in_dialog_info() {
 
                 cseq: None,
                 delayed: vec![],
+                answers: Default::default(),
                 claim: None,
             },
         ],
@@ -368,6 +377,7 @@ async fn a_goal_whose_unless_branch_holds_is_not_owed() {
 
                 cseq: None,
                 delayed: vec![],
+                answers: Default::default(),
                 claim: None,
             },
             ActorSpec {
@@ -382,6 +392,7 @@ async fn a_goal_whose_unless_branch_holds_is_not_owed() {
 
                 cseq: None,
                 delayed: vec![],
+                answers: Default::default(),
                 claim: None,
             },
         ],
@@ -451,6 +462,7 @@ async fn a_barrier_reads_what_an_in_dialog_request_said() {
 
                 cseq: None,
                 delayed: vec![],
+                answers: Default::default(),
                 claim: None,
             },
             ActorSpec {
@@ -465,6 +477,7 @@ async fn a_barrier_reads_what_an_in_dialog_request_said() {
 
                 cseq: None,
                 delayed: vec![],
+                answers: Default::default(),
                 claim: None,
             },
         ],
@@ -512,6 +525,7 @@ async fn a_refused_reinvite_not_retried_finishes_its_renegotiation() {
         feed: CtxFeed::default(),
         cseq: None,
         delayed: vec![],
+        answers: Default::default(),
         claim: None,
     };
     let call = CallPlan {

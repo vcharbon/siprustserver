@@ -13,9 +13,10 @@ use sip_message::generators::InDialogMethod;
 use sip_message::SipResponse;
 
 use super::endpoint::{SUBFLOW_EARLY, SUBFLOW_REFER, SUBFLOW_RENEG};
+use super::held_acks::HeldAck;
 use super::ledger::{ObligationKey, ObligationKind};
 use super::reneg_done::{complete_originated_reinvite, refused_reneg};
-use super::runner::{ActorState, HeldAck};
+use super::runner::ActorState;
 use super::state::{Observation, SubflowState};
 use super::{Dwell, GoalStep};
 use crate::agent::InviteResponseFate;
@@ -51,7 +52,12 @@ async fn absorb_establishing_provisional(
     if let Some(rseq) = reliable_rseq(resp) {
         let fork = resp.to().tag().map(str::to_owned).unwrap_or_default();
         if st.pracked_rseqs.insert((fork.to_string(), rseq)) {
-            let (_txn, req) = inv.try_prack_with_request(resp).await?;
+            let answer = st.offers.prack_answers(resp).then(|| delayed_answer(st));
+            if !st.holds.answers.prack.is_zero() {
+                super::held_pracks::hold(st, resp.clone(), answer);
+                return Ok(());
+            }
+            let (_txn, req) = inv.try_prack_carrying(resp, answer).await?;
             st.obs.record(
                 Observation::RequestSent {
                     key: ObligationKey::new(st.role, ObligationKind::Prack, req.cseq().seq()),
@@ -172,6 +178,9 @@ pub(super) async fn react_response(
     // INVITE transaction (`absorb_response` would misread a PRACK 200 as the
     // INVITE being answered); it falls through to the obligation-closing path.
     if resp.cseq().method() == "INVITE" {
+        if resp.status() >= 200 {
+            super::held_pracks::before_final(st, &resp).await?;
+        }
         if let Some(mut inv) = st.dialogs.pending_invite.take() {
             match inv.absorb_response(&resp).await? {
                 InviteResponseFate::Provisional { status } => {
@@ -187,7 +196,11 @@ pub(super) async fn react_response(
                     st.feed.on_answer_rx.stamp(st.ctx);
                     // ACK the 2xx and register the confirmed dialog with NO await
                     // between (the drop-safety rule).
-                    let (mut dialog, ack_sent) = inv.ack_reporting(None, &[]).await;
+                    let answer = st.offers.ack_answers(&resp).then(|| delayed_answer(st));
+                    let (ct, body) = answer.unzip();
+                    let (mut dialog, ack_sent) = inv
+                        .ack_typed_reporting(ct.as_deref(), &body.unwrap_or_default(), &[])
+                        .await;
                     // Dialog-formation point: attach this leg's shared CSeq counter
                     // BEFORE the scope-refresh clone, so both share ONE step counter
                     // (ADR-0024 §6 — the teardown BYE never re-consumes an op).
@@ -262,9 +275,9 @@ pub(super) async fn react_response(
             if is_losing_fork {
                 if let Some(inv) = st.dialogs.won_invite.as_ref() {
                     let mut fork = inv.fork_dialog(&st.agent, &resp);
-                    // Our INVITE carried the offer, so the fork's 200 carried
-                    // its answer — the ACK is bodyless (§13.2.2.4).
-                    fork.try_ack_for(resp.cseq().seq(), None).await?;
+                    let answer = st.offers.ack_answers(&resp).then(|| delayed_answer(st));
+                    let body = answer.as_ref().map(|(ct, b)| (ct.as_str(), b.clone()));
+                    fork.try_ack_carrying(resp.cseq().seq(), body, &[]).await?;
                     let _bye = fork.send_request(InDialogMethod::Bye).try_send().await?;
                     st.obs.record(
                         Observation::RequestSent {
@@ -435,12 +448,11 @@ pub(super) async fn react_response(
 }
 
 /// The answer the ACK to an in-dialog INVITE 2xx owes (RFC 3261 §13.2.2.4):
-/// `Some` ONLY in the delayed-offer form — our re-INVITE was bodyless and the
-/// 2xx carries the offer, so the ACK closes the round with our answer (RFC 3264
-/// §4). When our own re-INVITE carried the offer the answer already rode the
-/// response and the round is complete: `None`, a bodyless ACK (§13.2.1). An
-/// INVITE whose transaction is no longer retained (a re-surfaced 2xx) reads as
-/// the offer-in-INVITE form; the per-CSeq cache re-emits the first ACK's body.
+/// `Some` only in the delayed-offer form, our re-INVITE bodyless and the 2xx
+/// carrying the offer (RFC 3264 §4); `None`, a bodyless ACK, when our re-INVITE
+/// offered (§13.2.1). An INVITE whose transaction is no longer retained (a
+/// re-surfaced 2xx) reads as the offer-in-INVITE form; the per-CSeq cache
+/// re-emits the first ACK's body.
 fn delayed_offer_answer(st: &ActorState<'_>, resp: &SipResponse) -> Option<&'static str> {
     let we_offered = st
         .sent_reinvite_txns
@@ -472,6 +484,13 @@ pub(super) fn resolve_ack_body(
     };
     cache.insert(cseq, resolved.clone());
     resolved
+}
+
+/// The answer this caller's PRACK or ACK carries to the offer a callee made
+/// on its INVITE with none (RFC 3262 §5, RFC 3261 §13.2.2.4): its own
+/// description, framed as it frames every one.
+fn delayed_answer(st: &ActorState<'_>) -> (String, Vec<u8>) {
+    st.media.framing().frame(st.answer_body()).into_body()
 }
 
 /// The `RSeq` of a reliable provisional (RFC 3262) — `Some(rseq)` iff `resp`

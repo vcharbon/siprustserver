@@ -34,9 +34,9 @@ Detail: [appendix §1](appendix/0057-a-call-is-bounded-a-turn-is-bounded-by-cons
 ### 2. The call record's collections are capped at the insert
 
 `b2bua-core` checks each collection's length when an action would grow it: `B2BUA_CAP_LEGS`,
-`_ATTEMPTS`, `_TIMERS`, `_REQUESTS`, `_CDR_EVENTS`, `_DIALOGS`, `_HEADER_UPDATES`, `_EXT_BYTES`.
-The caps are collection lengths, not new counters. A service's HTTP timeout is clamped to
-`B2BUA_CAP_SERVICE_HTTP_TIMEOUT_MS`.
+`_ATTEMPTS`, `_TIMERS`, `_REQUESTS`, `_CDR_EVENTS`, `_DIALOGS`, `_HEADER_UPDATES`, `_EXT_BYTES`;
+the commit checks a live write's body: `_RECORD_BYTES`. A service's HTTP timeout is
+clamped to `B2BUA_CAP_SERVICE_HTTP_TIMEOUT_MS`.
 Detail: [appendix §2](appendix/0057-a-call-is-bounded-a-turn-is-bounded-by-construction.md#2-the-call-records-collections-are-capped-at-the-insert).
 
 ### 3. A turn carries fuel
@@ -80,7 +80,8 @@ Detail: [appendix §7](appendix/0057-a-call-is-bounded-a-turn-is-bounded-by-cons
 ### 8. Configuration
 
 Each cap is a `B2BUA_CAP_*` variable, on by default. Startup refuses a zero cap and the
-relations the appendix lists between attempts, legs, the HTTP timeout and the fuel.
+relations the appendix lists between attempts, legs, the HTTP timeout and the fuel, and a
+record-size cap past half the replication frame.
 Detail: [appendix §8](appendix/0057-a-call-is-bounded-a-turn-is-bounded-by-construction.md#8-configuration).
 
 ### 9. Defaults are a measured maximum times a factor set by what the cap costs
@@ -123,7 +124,6 @@ Detail: [appendix §10](appendix/0057-a-call-is-bounded-a-turn-is-bounded-by-con
 - A cooperative cancel flag in the bounded helpers: it only shortens a finite computation.
 - A process or WebAssembly sandbox per turn: a copy of the record every turn.
 - A memo of the bytes of a request that stuck a poll: §5 and fuzzing prevent that request.
-- An encoded-size check of the record: it runs after the turn landed.
 - Replicated per-call counters: they need merge rules; lengths need none.
 - A Q.850 cause, or the cap's name, on the trip's final.
 - A count-only mode: it protects nothing.

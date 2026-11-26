@@ -1,16 +1,15 @@
-//! `ComposedWorkerRegistry` — the production [`WorkerRegistry`]: a `WorkerSet`
-//! (shared `topology::Membership` ⊕ health projection) driven by a live membership
-//! source via the shared `topology::follow_membership` self-heal loop, run as
-//! the proxy's supervised task `registry_membership`.
+//! `ComposedWorkerRegistry`, the production [`WorkerRegistry`]: a `WorkerSet`
+//! (the shared `topology::Membership` and a health projection) driven by a live
+//! membership source through the shared `topology::follow_membership` self-heal
+//! loop, run as the proxy's supervised task `registry_membership`.
 //!
-//! In production the source is the `topology::K8sMembership` EndpointSlice informer
-//! — the same watch the b2bua replication supervisor consumes (ADR-0011 X7 /
-//! ADR-0012 D4). A worker reboot/scale flows through the watch automatically, with
-//! no `PROXY_WORKERS` refresh / proxy redeploy. Every wakeup — a delta, a `Lagged`
-//! overflow, or the periodic tick — recomposes the projection from the
-//! authoritative snapshot, so a missed/lagged delta self-heals exactly as the repl
-//! supervisor does (D1/D2). Health stays the OPTIONS probe's concern, written via
-//! [`control`](ComposedWorkerRegistry::control) into the annotation overlay.
+//! In production the source is the `topology::K8sMembership` EndpointSlice
+//! informer (ADR-0011 X7, ADR-0012 D4): a worker reboot or scale reaches the
+//! registry through the watch. Every wakeup (a delta, a `Lagged` overflow or the
+//! periodic tick) recomposes the projection from the authoritative snapshot, so a
+//! missed delta self-heals (ADR-0012 D1/D2). Health is the OPTIONS probe's,
+//! written through [`control`](ComposedWorkerRegistry::control) into the
+//! annotation overlay.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -48,9 +47,6 @@ impl ComposedWorkerRegistry {
         let mut boot = Some(membership.changes());
         set.recompose();
         let s = set.clone();
-        // The shared self-heal loop (ADR-0012 D1/D2), identical to the one the
-        // b2bua repl supervisor consumes: every wakeup recomposes from the
-        // authoritative snapshot.
         let task = crate::supervise::spawn(crate::supervise::REGISTRY_MEMBERSHIP, move || {
             let (s, membership, boot) = (s.clone(), membership.clone(), boot.take());
             async move {
@@ -115,6 +111,9 @@ impl WorkerRegistry for ComposedWorkerRegistry {
     fn read_dead_now(&self) -> Vec<super::WorkerId> {
         self.set.read_dead_now()
     }
+    fn read_recovered(&self) -> tokio::sync::broadcast::Receiver<super::WorkerId> {
+        self.set.read_recovered()
+    }
 }
 
 #[cfg(test)]
@@ -123,6 +122,10 @@ mod tests {
     use crate::registry::WorkerHealth;
     use topology::{Peer, SimulatedMembership};
 
+    /// Membership and probe-written health compose: the boot reconcile runs
+    /// before `spawn` returns, a health write leaves membership alone, a
+    /// membership add flows through the follower, and the written health
+    /// survives it.
     #[tokio::test]
     async fn composes_membership_and_health_end_to_end() {
         let sim =
@@ -130,16 +133,13 @@ mod tests {
         let reg = ComposedWorkerRegistry::spawn(Arc::new(sim.clone()), 5060, Clock::test_at(0));
         let control = reg.control();
 
-        // Initial reconcile ran synchronously: w0 present, Unknown, cluster port.
         let w0 = reg.resolve("w0").expect("w0 present after sync initial reconcile");
         assert_eq!(w0.health, WorkerHealth::Unknown);
         assert_eq!(w0.address, ProxyAddr::new("10.0.0.1", 5060));
 
-        // Health write composes in without touching membership.
         control.set_health("w0", WorkerHealth::Alive);
         assert_eq!(reg.resolve("w0").unwrap().health, WorkerHealth::Alive);
 
-        // A membership add flows through the shared loop; poll for the rebuild.
         sim.add(Peer::new("w1", "10.0.0.2"));
         let mut w1 = None;
         for _ in 0..100 {
@@ -150,7 +150,6 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(2)).await;
         }
         assert!(w1.is_some(), "w1 picked up from membership delta");
-        // w0's probe-written health survived the membership change (separation holds).
         assert_eq!(reg.resolve("w0").unwrap().health, WorkerHealth::Alive);
         assert_eq!(reg.lookup_by_address(&ProxyAddr::new("10.0.0.2", 5060)).unwrap().id, "w1");
     }

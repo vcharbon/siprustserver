@@ -13,7 +13,6 @@ import { inStatuses } from "@sip/delta-rules/shapes"
 import {
   cseqMethodOf,
   mediaTypeApartFromBoundary,
-  originLine,
   rackParts,
   sessIdAlone,
   sessIdOf
@@ -211,6 +210,22 @@ export const callerDialogAddressKept: RfcRow = {
   }
 }
 
+export const responseIdentityCopiedFromRequest: RfcRow = {
+  id: "response-identity-copied-from-request",
+  on: { kind: "header", family: ["from", "to"] },
+  rfc: "RFC 3261 §8.2.6.2",
+  why:
+    "On a response to the caller's INVITE, a From/To the replay copied from her request, every " +
+    "part but the tag, where the capture's differs: RFC 3261 §8.2.6.2 makes the response's From " +
+    "and To the request's, which the captured side rewrote.",
+  header: (h, { facts }) => {
+    const replayed = single(h, "replayed")
+    const asked = openerValue(facts, h.step, canon(h.name))
+    return onLeg(h, ["caller"]) && statusOf(h.scope, "INVITE") !== undefined &&
+      replayed !== undefined && asked !== undefined && sameAddressButTag(asked, replayed)
+  }
+}
+
 export const sdpOriginStackOwned: RfcRow = {
   id: "sdp-origin-stack-owned",
   on: { kind: "body" },
@@ -232,15 +247,11 @@ export const sdpSessionIdRestated: RfcRow = {
     "forbids, the capture relayed it, and the replay restates the leg's session.",
   body: (b, { facts }) => {
     const first = openedBefore(facts, b.step)?.origin
-    if (b.sdp === undefined || !inDialogRequest(b.scope) || first === undefined) return false
+    if (b.sdp?.section !== "session" || b.sdp.line !== "o=" || !inDialogRequest(b.scope) || first === undefined) {
+      return false
+    }
     const [captured = "", replayed = ""] = [b.captured[0], b.replayed[0]]
-    const restated = (left: string, right: string): boolean =>
-      sessIdAlone(left, right) && sessIdOf(right) === sessIdOf(first) && sessIdOf(left) !== sessIdOf(first)
-    if (b.sdp.section === "session" && b.sdp.line === "o=") return restated(captured, replayed)
-    if (b.sdp.section !== "document" || b.sdp.line !== "bytes") return false
-    const left = originLine(captured)
-    const right = originLine(replayed)
-    return left !== undefined && right !== undefined && restated(left, right) && b.sdp.orderOnly === true
+    return sessIdAlone(captured, replayed) && sessIdOf(replayed) === sessIdOf(first) && sessIdOf(captured) !== sessIdOf(first)
   }
 }
 
@@ -252,6 +263,5 @@ export const sdpVersionStepOne: RfcRow = {
     "The capture's sess-version steps by more than one on this leg, which RFC 3264 §8 forbids, " +
     "where the replay's steps by one or repeats over an unchanged description, every later one " +
     "as far from the capture's. A replay that jumps, or exceeds the capture's, stays visible.",
-  body: (b) =>
-    b.sdp?.versionStepOne === true && (b.sdp.line === "o=" || (b.sdp.line === "bytes" && b.sdp.orderOnly === true))
+  body: (b) => b.sdp?.versionStepOne === true && b.sdp.line === "o="
 }

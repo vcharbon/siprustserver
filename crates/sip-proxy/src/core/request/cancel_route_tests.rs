@@ -216,10 +216,10 @@ async fn two_invites_on_one_identity_keep_their_cancels_apart_in_either_order() 
     each_cancel_follows_its_own_invite(Order::ThirdFirst).await;
 }
 
-// Both INVITEs end on a 487 relayed through this proxy, the spiralled one's
-// first. The third party's §17.1.1.3 ACK reaches the node its own final came
-// from, and the worker's goes where its own INVITE went: neither takes the
-// other's hop.
+/// Both INVITEs end on a 487 relayed through this proxy, the spiralled one's
+/// first. The third party's §17.1.1.3 ACK reaches the node its own final came
+/// from, and the worker's goes where its own INVITE went: neither takes the
+/// other's hop.
 #[tokio::test(start_paused = true)]
 async fn a_spirals_two_non_2xx_acks_keep_their_own_hops() {
     let core = core().await;

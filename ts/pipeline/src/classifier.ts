@@ -177,6 +177,12 @@ export interface RunShape {
    * leg that sent none has no entry.
    */
   readonly sent: ReadonlyMap<string, ReadonlyArray<Reception>>
+  /**
+   * The legs whose scripted actor sent a BYE before any final to the INVITE
+   * it sent there reached it, in the leg's wire order (`./receptions.ts`): the
+   * order {@link receptions} and {@link sent}, each one direction, cannot state.
+   */
+  readonly byeAheadOfInviteFinal: ReadonlySet<string>
 }
 
 /** One datagram a leg's scripted actor received or sent, as a rule reads it. */
@@ -189,6 +195,8 @@ export interface Reception {
   readonly status?: number
   /** The CSeq method, uppercased; empty where the datagram states none. */
   readonly cseqMethod: string
+  /** The CSeq number as the run's wire carried it; absent where the datagram states none readable. */
+  readonly cseq?: number
   /** The Subscription-State's state token, lowercased (RFC 6665 §8.2.3), where it carries one. */
   readonly subscriptionState?: string
   /** The status line a `message/sipfrag` body states (RFC 3420), where it carries one. */

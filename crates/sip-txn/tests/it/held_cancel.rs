@@ -6,7 +6,7 @@
 use std::sync::Arc;
 
 use crate::common::{self, *};
-use sip_txn::{TransactionConfig, TransactionEvent};
+use sip_txn::{CancelledInvite, TransactionConfig, TransactionEvent};
 
 const TRANSIT: u64 = 5;
 const BOUND: u64 = 200;
@@ -51,10 +51,17 @@ async fn the_answers_to_a_cancel_leave_on_release_and_copies_meanwhile_draw_none
     elapse_ms(20).await;
     assert_eq!(answers(&stack), (0, 0), "copies of the CANCEL and the INVITE draw nothing");
 
-    assert!(stack.txn.release_cancel(CALL_ID, &from_tag, cseq).await.unwrap(), "released");
+    assert!(
+        stack.txn.release_cancel(CALL_ID, &from_tag, cseq, CancelledInvite::End).await.unwrap(),
+        "released"
+    );
     elapse_ms(20).await;
     assert_eq!(answers(&stack), (1, 1), "the 200 and the 487 leave");
-    assert!(!stack.txn.release_cancel(CALL_ID, &from_tag, cseq).await.unwrap());
+    assert!(!stack
+        .txn
+        .release_cancel(CALL_ID, &from_tag, cseq, CancelledInvite::End)
+        .await
+        .unwrap());
     elapse_ms(600).await;
     assert_eq!(answers(&stack).1, 1, "the 487 repeats on Timer G until the ACK");
 }
@@ -99,7 +106,10 @@ async fn a_relinquished_transaction_sends_the_cancels_200_and_not_the_487() {
     assert!(stack.txn.relinquish_server(key).await.unwrap(), "it was there");
     elapse_ms(20).await;
     assert_eq!(answers(&stack), (1, 0), "the 200 leaves, the 487 does not");
-    assert!(!stack.txn.release_cancel(CALL_ID, &from_tag, cseq).await.unwrap(), "none held");
+    assert!(
+        !stack.txn.release_cancel(CALL_ID, &from_tag, cseq, CancelledInvite::End).await.unwrap(),
+        "none held"
+    );
     elapse_ms(BOUND).await;
     assert_eq!(answers(&stack), (0, 0), "nothing at the bound");
 }

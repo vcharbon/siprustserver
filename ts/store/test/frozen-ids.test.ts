@@ -47,12 +47,12 @@ beforeAll(async () => {
     })
   )
   await on(SCRATCH, Server.migrated)
-}, 60_000)
+})
 
 afterAll(async () => {
   if (!served) return
   await on("postgres", Server.dropDatabase(SCRATCH))
-}, 60_000)
+})
 
 const text = (value: string): Uint8Array => new TextEncoder().encode(value)
 

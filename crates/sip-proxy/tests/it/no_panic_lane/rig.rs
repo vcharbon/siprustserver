@@ -46,9 +46,7 @@ use tokio::time::Instant;
 pub const PROXY: (&str, u16) = ("192.0.2.1", 5060);
 /// The proxy's internal face, where it has two: the workers' plane.
 pub const PROXY_INTERNAL: (&str, u16) = ("10.0.0.1", 5060);
-/// Where the health probe listens.
 pub const PROBE: (&str, u16) = ("10.0.0.1", 5061);
-/// The peers, by role.
 pub const CALLER: (&str, u16) = ("192.0.2.20", 5060);
 pub const WORKER_A: (&str, u16) = ("10.0.0.2", 5070);
 pub const WORKER_B: (&str, u16) = ("10.0.0.3", 5070);
@@ -65,7 +63,6 @@ pub fn addr((host, port): (&str, u16)) -> SocketAddr {
     SocketAddr::new(host.parse().expect("a lane address"), port)
 }
 
-/// The peer a datagram of the lane leaves from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Peer {
     Caller,
@@ -74,7 +71,6 @@ pub enum Peer {
     Callee,
 }
 
-/// How a case failed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Failure {
     /// The recv loop ended: a panic on the loop every call shares.
@@ -151,7 +147,6 @@ impl HostResolver for CalleeResolver {
     }
 }
 
-/// A self-gate that refuses every external new-dialog INVITE.
 struct ClosedGate;
 
 impl ProxySelfGate for ClosedGate {
@@ -160,7 +155,6 @@ impl ProxySelfGate for ClosedGate {
     }
 }
 
-/// A running proxy and its peers.
 pub struct Rig {
     pub task: JoinHandle<()>,
     pub metrics: Arc<ProxyMetrics>,
@@ -333,7 +327,6 @@ impl Rig {
         })
     }
 
-    /// The failure the case ended in, if any.
     pub fn failure(&self) -> Option<Failure> {
         if self.task.is_finished() {
             Some(Failure::LoopEnded)
@@ -400,7 +393,6 @@ pub fn runtime() -> tokio::runtime::Runtime {
         .expect("the lane runtime")
 }
 
-/// [`case`] on the rig of `variant`.
 pub fn case_on(
     variant: Variant,
     before: &[(Peer, Vec<u8>)],

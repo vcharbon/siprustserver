@@ -1,9 +1,7 @@
-//! Asking the kernel to resolve a next hop, with no capability: one empty
-//! datagram toward it from a fresh unbound UDP socket. The kernel resolves the
-//! neighbour to send it, whatever the entry's state. The route guard's chain
-//! drops only BFD control (UDP 3784) and BGP (TCP 179) toward the routers, so
-//! this datagram reaches the neighbour layer while the node is withdrawn. A
-//! node firewall that drops it at output fails the send (`EPERM`).
+//! Asks the kernel to resolve a next hop: one empty datagram toward it from a
+//! fresh unbound UDP socket, which needs no capability. The kernel resolves the
+//! neighbour to send it, whatever the entry's state. A node firewall that drops
+//! it at output fails the send (`EPERM`). See ADR-0056 §3.
 
 use std::io;
 use std::net::{Ipv4Addr, SocketAddrV4, UdpSocket};
@@ -12,7 +10,6 @@ use std::net::{Ipv4Addr, SocketAddrV4, UdpSocket};
 /// nothing to do with it.
 pub(super) const DISCARD_PORT: u16 = 9;
 
-/// Send the datagram that makes the kernel resolve `hop`.
 pub(super) fn solicit(hop: Ipv4Addr, port: u16) -> io::Result<()> {
     let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))?;
     socket.send_to(&[], SocketAddrV4::new(hop, port)).map(|_| ())

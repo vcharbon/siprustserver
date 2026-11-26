@@ -439,7 +439,6 @@ const CellStudy = (
           className="study-workbench"
           data-detail={anyDetail}
           data-open={open.length}
-          data-docked={workbench.docked}
         >
           <div className="pane-toolbar">
             {PANES.map((pane) => (

@@ -111,6 +111,10 @@ impl UdpTransportMetrics {
     pub fn ingress_brake_emergency_bypassed(&self) -> u64 {
         self.brake.emergency_bypassed()
     }
+    /// Requests naming no call the engaged ingress brake dropped.
+    pub fn ingress_brake_unattributed_dropped(&self) -> u64 {
+        self.brake.unattributed_dropped()
+    }
     /// The brake's counters, for the new-call outcome count
     /// ([`crate::new_calls::NewCallCounts::read`]).
     pub fn brake(&self) -> &IngressBrakeCounters {
@@ -120,7 +124,8 @@ impl UdpTransportMetrics {
     /// Render the shape as Prometheus text exposition for the `/metrics` body.
     /// All series use the `b2bua_udp_*` namespace.
     ///
-    /// Counters (monotonic): `ingress_brake_emergency_bypassed`, `tail_dropped`,
+    /// Counters (monotonic): `ingress_brake_emergency_bypassed`,
+    /// `ingress_brake_unattributed_dropped`, `tail_dropped`,
     /// `send_would_block`, `kernel_rx_dropped`, `pre_ingress_panics`,
     /// `recv_errors`. Gauges
     /// (instantaneous): `queue_depth`, `queue_wait_ms`, `queue_max`. The brake's refusals are
@@ -132,6 +137,8 @@ impl UdpTransportMetrics {
         // ── Ingress brake: emergency INVITEs let through above the threshold ──
         catalogue::UDP_INGRESS_BRAKE_EMERGENCY_BYPASSED
             .render_value(&mut s, self.ingress_brake_emergency_bypassed());
+        catalogue::UDP_INGRESS_BRAKE_UNATTRIBUTED_DROPPED
+            .render_value(&mut s, self.ingress_brake_unattributed_dropped());
 
         // ── Inbound queue state (live getters over the endpoint). A
         //    tail-dropping queue otherwise shows 100% accepted, hiding a burst

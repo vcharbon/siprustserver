@@ -168,7 +168,7 @@ impl Owner {
             return;
         }
         for cr in std::mem::take(&mut self.pending_quiesce) {
-            if self.self_release_watch.contains(&cr) && !self.has_txns_for(&cr) {
+            if self.quiesced(&cr) {
                 self.notify_quiesced(cr);
             }
         }
@@ -182,7 +182,7 @@ impl Owner {
     /// the post-failover storm where takeover copies exist). The watch is cleared
     /// here because the event is now captured — the deque guarantees its delivery.
     pub(super) fn notify_quiesced(&mut self, call_ref: String) {
-        self.self_release_watch.remove(&call_ref);
+        self.self_release_watch.disarm(&call_ref);
         self.emit_critical(TransactionEvent::CallQuiesced { call_ref });
     }
 }

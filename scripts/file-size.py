@@ -18,15 +18,18 @@ by default) holds the settings and the entries:
   crates/a/src/big.rs 812        an entry: a file over the limit, its budget
 
 `#` starts a comment. The files scanned are those git sees under the scan
-directories: tracked, or untracked and not ignored.
+directories: tracked, or untracked and not ignored. A scan directory is a plain
+path (no pathspec magic).
 
 The allowlist itself only ever tightens: against its version at a base (REV,
 by default the merge-base of HEAD and `develop`, else HEAD; HEAD under
---staged), a new entry, a raised number or any changed setting line fails.
+--staged), a new entry, a raised number or a changed setting line other
+than `limit` and `test-limit` fails.
 The one new entry allowed is a file git sees renamed from a listed one in the
 same diff (`-M`), the old entry gone and the number no higher than its own;
-the one changed setting allowed is a `scan` or `exclude` path following a scan
-directory git sees renamed whole, none of its files left behind.
+the changed settings allowed are a `scan` or `exclude` path following a scan
+directory git sees renamed whole, none of its files left behind, and `scan`
+directories added to a base that already scans a list (scripts/ratchet.py).
 
   (no flag)  every scanned file against its budget, and the allowlist
              against the base; an entry above its file's size, or naming a
@@ -44,84 +47,18 @@ directory git sees renamed whole, none of its files left behind.
 Exit 1 on a violation, 2 on a usage or setup error.
 """
 import argparse
-import fnmatch
 import os
-import subprocess
 import sys
 
-SETTING_KEYS = ("limit", "test-limit", "test", "exclude", "scan", "ext")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import ratchet  # noqa: E402
+from ratchet import SetupError, git, rev_exists, default_base, loosened  # noqa: E402
+
 LIMIT_DEFAULT = 500
 TEST_LIMIT_DEFAULT = 800
-TEST_DEFAULT = ["tests/*", "*/tests/*", "*/tests.rs", "*_tests.rs"]
-EXT_DEFAULT = (".rs",)
-
-
-class Allow:
-    def __init__(self, text, path):
-        self.path = path
-        self.limit = LIMIT_DEFAULT
-        self.test_limit = TEST_LIMIT_DEFAULT
-        self.test = []
-        self.ext = EXT_DEFAULT
-        self.scan = []
-        self.exclude = []
-        self.entries = {}
-        self.settings = []
-        self.lines = text.splitlines()
-        for n, raw in enumerate(self.lines, 1):
-            words = raw.split("#", 1)[0].split()
-            if not words:
-                continue
-            key, rest = words[0], words[1:]
-            if key in SETTING_KEYS:
-                self.settings.append(" ".join(words))
-            if key == "limit" and len(rest) == 1 and rest[0].isdigit():
-                self.limit = int(rest[0])
-            elif key == "test-limit" and len(rest) == 1 and rest[0].isdigit():
-                self.test_limit = int(rest[0])
-            elif key == "test" and rest:
-                self.test.extend(rest)
-            elif key == "ext" and rest:
-                self.ext = tuple(rest)
-            elif key == "scan" and rest:
-                self.scan.extend(r.rstrip("/") for r in rest)
-            elif key == "exclude" and len(rest) == 1:
-                self.exclude.append(rest[0])
-            elif len(rest) == 1 and rest[0].isdigit():
-                if key in self.entries:
-                    fail_setup(f"{path}:{n}: {key} is listed twice")
-                self.entries[key] = int(rest[0])
-            else:
-                fail_setup(f"{path}:{n}: unreadable line: {raw.strip()}")
-        self.test = self.test or TEST_DEFAULT
-
-    def in_scope(self, rel):
-        if not rel.endswith(self.ext):
-            return False
-        if self.scan and not any(rel.startswith(d + "/") for d in self.scan):
-            return False
-        return not any(fnmatch.fnmatchcase(rel, g) for g in self.exclude)
-
-    def is_test(self, rel):
-        return any(fnmatch.fnmatchcase(rel, g) for g in self.test)
-
-    def limit_of(self, rel):
-        return self.test_limit if self.is_test(rel) else self.limit
-
-    def budget(self, rel):
-        return self.entries.get(rel, self.limit_of(rel))
-
-
-def fail_setup(msg):
-    print(f"file-size: {msg}", file=sys.stderr)
-    sys.exit(2)
-
-
-def git(root, *args, binary=False):
-    out = subprocess.run(["git", "-C", root, *args], capture_output=True)
-    if out.returncode != 0:
-        fail_setup(f"git {' '.join(args)}: {out.stderr.decode(errors='replace').strip()}")
-    return out.stdout if binary else out.stdout.decode()
+UNIT = "lines"
+# The settings that may change: a limit is raised or lowered deliberately, in review.
+LIMITS = ("limit", "test-limit")
 
 
 def count_lines(data):
@@ -129,14 +66,10 @@ def count_lines(data):
 
 
 def scanned(root, allow):
-    listed = git(root, "ls-files", "-z", "--cached", "--others", "--exclude-standard", "--",
-                 *(allow.scan or ["."]))
     sizes = {}
-    for rel in sorted(set(filter(None, listed.split("\0")))):
-        path = os.path.join(root, rel)
-        if allow.in_scope(rel) and os.path.isfile(path):
-            with open(path, "rb") as f:
-                sizes[rel] = count_lines(f.read())
+    for rel in ratchet.listed(root, allow):
+        with open(os.path.join(root, rel), "rb") as f:
+            sizes[rel] = count_lines(f.read())
     return sizes
 
 
@@ -151,134 +84,8 @@ def over_budget(sizes, allow):
     return bad
 
 
-def stale(sizes, allow):
-    bad = []
-    for rel, budget in sorted(allow.entries.items()):
-        n = sizes.get(rel)
-        if n is None:
-            bad.append(f"{allow.path} lists {rel}, which is gone or not scanned")
-        elif n <= allow.limit_of(rel):
-            bad.append(f"{allow.path} lists {rel} at {budget}, it is under the limit ({n} lines)")
-        elif n < budget:
-            bad.append(f"{allow.path} lists {rel} at {budget}, it has {n} lines")
-    return bad
-
-
-def rev_exists(root, rev):
-    out = subprocess.run(["git", "-C", root, "rev-parse", "--verify", "-q", f"{rev}^{{commit}}"],
-                         capture_output=True)
-    return out.returncode == 0
-
-
-def default_base(root):
-    if not rev_exists(root, "HEAD"):
-        return None
-    if rev_exists(root, "develop"):
-        return git(root, "merge-base", "HEAD", "develop").strip()
-    return "HEAD"
-
-
-def base_allow(root, base, allow_rel):
-    """The allowlist at `base`, or None when there is none to hold it to."""
-    if base is None or not rev_exists(root, base):
-        return None
-    out = subprocess.run(["git", "-C", root, "show", f"{base}:{allow_rel}"], capture_output=True)
-    return Allow(out.stdout.decode(), f"{base}:{allow_rel}") if out.returncode == 0 else None
-
-
-def renames(root, base, cached):
-    """`{new path: old path}` of the renames git sees between `base` and the
-    worktree (the index when `cached`)."""
-    if base is None:
-        return {}
-    args = ["diff", "-M", "--name-status", "-z"] + (["--cached"] if cached else []) + [base]
-    words = git(root, *args).split("\0")
-    found, i = {}, 0
-    while i < len(words) and words[i]:
-        status = words[i]
-        if status.startswith(("R", "C")):
-            if status.startswith("R"):
-                found[words[i + 2]] = words[i + 1]
-            i += 3
-        else:
-            i += 2
-    return found
-
-
-def moved_dirs(root, dirs, renamed, cached):
-    """`{old: new}` of the `dirs` git sees renamed whole: `new` is the one
-    directory below which renamed files keep their path under `old`, every file
-    renamed from under `old` lands under `new`, and no file is left under `old`
-    (in the index when `cached`, else tracked or untracked)."""
-    moved = {}
-    for d in dirs:
-        pre = d + "/"
-        moves = [(new, old[len(pre):]) for new, old in renamed.items() if old.startswith(pre)]
-        news = {new[:-len(rest) - 1] for new, rest in moves if new.endswith("/" + rest)}
-        if len(news) != 1:
-            continue
-        target = news.pop()
-        if any(not new.startswith(target + "/") for new, _ in moves):
-            continue
-        extra = [] if cached else ["--others", "--exclude-standard"]
-        if not git(root, "ls-files", "-z", "--cached", *extra, "--", d).strip("\0"):
-            moved[d] = target
-    return moved
-
-
-def follow_moves(setting, moved):
-    """`setting` with each `scan` or `exclude` path under a moved directory
-    named under its new one."""
-    key, *words = setting.split()
-    if key not in ("scan", "exclude"):
-        return setting
-
-    def follow(word):
-        for old, new in moved.items():
-            if word.rstrip("/") == old or word.startswith(old + "/"):
-                return new + word[len(old):]
-        return word
-
-    return " ".join([key] + [follow(w) for w in words])
-
-
-def against_base(allow, base, renamed, moved):
-    """What `allow` loosens against its `base` version, whose settings `allow`
-    keeps as they are or with their `scan` and `exclude` paths following the
-    directories git sees `moved`."""
-    if base is None:
-        return []
-    bad = []
-    base_settings = [follow_moves(x, moved) for x in base.settings]
-    if allow.settings != base.settings and allow.settings != base_settings:
-        gone = [x for x in base_settings if x not in allow.settings]
-        new = [x for x in allow.settings if x not in base_settings]
-        change = "; ".join([f"was `{x}`" for x in gone] + [f"now `{x}`" for x in new])
-        bad.append(f"{allow.path} changes its settings against {base.path} ({change or 'order'})")
-    for rel, n in sorted(allow.entries.items()):
-        old = base.entries.get(rel)
-        if old is not None:
-            if n > old:
-                bad.append(f"{allow.path} lists {rel} at {n}, above its {old} at {base.path}")
-            continue
-        src = renamed.get(rel)
-        if src in base.entries and src not in allow.entries and n <= base.entries[src]:
-            continue
-        bad.append(f"{allow.path} adds {rel} at {n}, which {base.path} does not list")
-    return bad
-
-
-def loosened(root, allow, base, since, cached):
-    """What `allow` loosens against its version at `base`, following the
-    renames git sees from `since` to the worktree (the index when `cached`)."""
-    held = base_allow(root, base, allow.path)
-    if held is None:
-        return []
-    renamed = renames(root, since, cached)
-    return against_base(allow, held, renamed, moved_dirs(root, held.scan, renamed, cached))
-
-
 BASE_HINT = "the allowlist only tightens: a file over its limit is split, never listed or raised"
+SPLIT_HINT = "a file over its budget is split into modules; its budget never goes up"
 
 
 def report(violations, hint=None):
@@ -289,60 +96,30 @@ def report(violations, hint=None):
     return 1 if violations else 0
 
 
-SPLIT_HINT = "a file over its budget is split into modules; its budget never goes up"
-
-
 def cmd_check(root, allow, base):
     sizes = scanned(root, allow)
     grown = over_budget(sizes, allow)
-    old = stale(sizes, allow)
-    loose = loosened(root, allow, base, base, False)
+    old = ratchet.stale(sizes, allow, UNIT)
+    loose = loosened(root, allow, base, base, False, LIMITS)
     rc = report(grown, SPLIT_HINT if grown else None)
     rc = report(loose, BASE_HINT if loose else None) or rc
     return report(old, "run `file-size.py --update` and commit the allowlist" if old else None) or rc
 
 
 def cmd_staged(root, allow_rel):
-    staged = git(root, "diff", "--cached", "--name-only", "-z", "--diff-filter=ACMR")
-    allow_blob = subprocess.run(["git", "-C", root, "show", f":{allow_rel}"], capture_output=True)
-    if allow_blob.returncode == 0:
-        allow = Allow(allow_blob.stdout.decode(), allow_rel)
-    else:
-        allow = load_allow(root, allow_rel)
-    sizes = {}
-    for rel in filter(None, staged.split("\0")):
-        if allow.in_scope(rel):
-            sizes[rel] = count_lines(git(root, "cat-file", "blob", f":{rel}", binary=True))
+    allow = ratchet.staged_allow(root, allow_rel, LIMIT_DEFAULT, TEST_LIMIT_DEFAULT)
+    sizes = {rel: count_lines(git(root, "cat-file", "blob", f":{rel}", binary=True))
+             for rel in ratchet.staged(root, allow)}
     grown = over_budget(sizes, allow)
     base = "HEAD" if rev_exists(root, "HEAD") else None
-    loose = loosened(root, allow, base, default_base(root), True)
+    loose = loosened(root, allow, base, default_base(root), True, LIMITS)
     rc = report(grown, SPLIT_HINT if grown else None)
     return report(loose, BASE_HINT if loose else None) or rc
 
 
 def cmd_update(root, allow, allow_file, base):
     sizes = scanned(root, allow)
-    moved_to = {old: new for new, old in renames(root, base, False).items()}
-    out, changed = [], []
-    for raw in allow.lines:
-        words = raw.split("#", 1)[0].split()
-        if len(words) == 2 and words[0] in allow.entries:
-            rel, budget = words[0], int(words[1])
-            n = sizes.get(rel)
-            new = moved_to.get(rel)
-            if n is None and new in sizes and new not in allow.entries:
-                rel, n = new, sizes[new]
-                changed.append(f"moved {words[0]} -> {rel}")
-                if n > allow.limit_of(rel):
-                    raw = f"{rel} {min(n, budget)}"
-            if n is None or n <= allow.limit_of(rel):
-                changed.append(f"removed {rel} ({'gone' if n is None else f'{n} lines'})")
-                continue
-            if n < budget:
-                changed.append(f"lowered {rel} {budget} -> {n}")
-                note = raw.split("#", 1)[1] if "#" in raw else None
-                raw = f"{rel} {n}" + (f"  #{note}" if note is not None else "")
-        out.append(raw)
+    out, changed = ratchet.updated(allow, sizes, ratchet.renames(root, base, False), UNIT)
     if changed:
         with open(allow_file, "w") as f:
             f.write("\n".join(out) + "\n")
@@ -350,7 +127,7 @@ def cmd_update(root, allow, allow_file, base):
         print(f"file-size: {c}")
     allow = load_allow(root, os.path.relpath(allow_file, root))
     grown = over_budget(sizes, allow)
-    loose = loosened(root, allow, base, base, False)
+    loose = loosened(root, allow, base, base, False, LIMITS)
     rc = report(grown, SPLIT_HINT if grown else None)
     return report(loose, BASE_HINT if loose else None) or rc
 
@@ -370,11 +147,24 @@ def cmd_report(root, allow):
 
 
 def load_allow(root, allow_rel):
-    path = os.path.join(root, allow_rel)
-    if not os.path.isfile(path):
-        fail_setup(f"no allowlist at {path}")
-    with open(path) as f:
-        return Allow(f.read(), allow_rel)
+    return ratchet.load_allow(root, allow_rel, LIMIT_DEFAULT, TEST_LIMIT_DEFAULT)
+
+
+def run(a):
+    root = git(a.root, "rev-parse", "--show-toplevel").strip()
+    if a.staged and a.base:
+        raise SetupError("--staged holds the allowlist to HEAD; --base does not apply")
+    if a.staged:
+        return cmd_staged(root, a.allow)
+    if a.base and not rev_exists(root, a.base):
+        raise SetupError(f"--base {a.base} is no commit")
+    base = a.base or default_base(root)
+    allow = load_allow(root, a.allow)
+    if a.update:
+        return cmd_update(root, allow, os.path.join(root, a.allow), base)
+    if a.report:
+        return cmd_report(root, allow)
+    return cmd_check(root, allow, base)
 
 
 def main():
@@ -386,21 +176,11 @@ def main():
     mode.add_argument("--staged", action="store_true")
     mode.add_argument("--update", action="store_true")
     mode.add_argument("--report", action="store_true")
-    a = p.parse_args()
-    root = git(a.root, "rev-parse", "--show-toplevel").strip()
-    if a.staged and a.base:
-        fail_setup("--staged holds the allowlist to HEAD; --base does not apply")
-    if a.staged:
-        return cmd_staged(root, a.allow)
-    if a.base and not rev_exists(root, a.base):
-        fail_setup(f"--base {a.base} is no commit")
-    base = a.base or default_base(root)
-    allow = load_allow(root, a.allow)
-    if a.update:
-        return cmd_update(root, allow, os.path.join(root, a.allow), base)
-    if a.report:
-        return cmd_report(root, allow)
-    return cmd_check(root, allow, base)
+    try:
+        return run(p.parse_args())
+    except SetupError as e:
+        print(f"file-size: {e}", file=sys.stderr)
+        return 2
 
 
 if __name__ == "__main__":

@@ -1,5 +1,5 @@
 //! [`BackendClient`] at the transport seam, on the simulated fabric under the
-//! paused clock: every fault is an outcome `reqwest` produces, scripted per
+//! paused clock: every fault is an outcome the real client produces, scripted per
 //! attempt. Each test names its own backend, so the process-wide counters it
 //! reads are its own.
 

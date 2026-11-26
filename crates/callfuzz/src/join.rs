@@ -6,7 +6,7 @@ use std::path::Path;
 
 use serde_json::{json, Value};
 
-use crate::stamp::Drawn;
+use crate::stamp::{Drawn, Requester};
 
 /// A run's records, each joined to its draw.
 #[derive(Debug, Default)]
@@ -25,9 +25,23 @@ pub struct Joined {
 }
 
 /// Whether `record` ran its call to an ending the call accepts
-/// (`producer_verdict` `ok:<branch>`) with no failure in it.
-pub fn record_passed(record: &Value) -> bool {
-    record["failures"].as_array().is_none_or(|f| f.is_empty())
+/// (`producer_verdict` `ok:<branch>`) with no failure in it but the refused
+/// in-dialog requests its draw asked for ([`Drawn::refusals`]).
+pub fn record_passed(record: &Value, draw: Option<&Drawn>) -> bool {
+    let side = |f: &Value, r: Requester| match r {
+        Requester::Caller => f["leg"].is_null(),
+        Requester::Callee => !f["leg"].is_null(),
+        Requester::Either => true,
+    };
+    let asked = |f: &Value| {
+        f["kind"] == "dialog_request"
+            && draw.is_some_and(|d| {
+                d.refusals
+                    .iter()
+                    .any(|(r, m, c)| side(f, *r) && f["method"] == *m && f["code"] == *c)
+            })
+    };
+    record["failures"].as_array().is_none_or(|f| f.iter().all(asked))
         && record["producer_verdict"].as_str().is_some_and(|v| v.starts_with("ok:"))
 }
 
@@ -54,7 +68,7 @@ pub fn join(records: &[Value], draws: &BTreeMap<String, Drawn>) -> Joined {
             }
             None => joined.unjoined.push(r.clone()),
         }
-        if !record_passed(r) {
+        if !record_passed(r, draw) {
             joined.failed.push(line.clone());
         }
         joined.lines.push(line);
@@ -83,7 +97,12 @@ mod tests {
     use super::*;
 
     fn draw(seed: u64, call_id: &str) -> Drawn {
-        Drawn { seed, call_id: call_id.into(), desc: format!("draw {seed:#x}") }
+        Drawn {
+            seed,
+            call_id: call_id.into(),
+            desc: format!("draw {seed:#x}"),
+            refusals: vec![(Requester::Caller, "INVITE", 488)],
+        }
     }
 
     fn record(call_id: &str, ending: &str, verdict: &str) -> Value {
@@ -142,5 +161,32 @@ mod tests {
         );
         let passing = record(ids[0], "abandoned", "ok:abandoned");
         assert!(join(&[passing], &draws).failed.is_empty());
+    }
+
+    /// A refused in-dialog request the draw asked for passes; another code,
+    /// or a refusal of another method, still fails the record.
+    #[test]
+    fn a_drawn_refusal_passes_and_no_other() {
+        let id = "fz-0000000000000003-0-1@x";
+        let d = draw(3, id);
+        let refused = |method: &str, code: u16| {
+            let mut r = record(id, "answered", "ok:answered");
+            r["failures"] =
+                json!([{ "at_ms": 9, "kind": "dialog_request", "method": method, "code": code }]);
+            r
+        };
+        assert!(record_passed(&refused("INVITE", 488), Some(&d)));
+        let mut on_a_leg = refused("INVITE", 488);
+        on_a_leg["failures"][0]["leg"] = json!("bob");
+        assert!(
+            !record_passed(&on_a_leg, Some(&d)),
+            "the drawn refusal meets the caller's request"
+        );
+        let leg_draw = Drawn { refusals: vec![(Requester::Callee, "INVITE", 488)], ..d.clone() };
+        assert!(record_passed(&on_a_leg, Some(&leg_draw)), "a callee leg's request meets it");
+        assert!(!record_passed(&refused("INVITE", 488), Some(&leg_draw)), "not the caller's");
+        assert!(!record_passed(&refused("INVITE", 500), Some(&d)));
+        assert!(!record_passed(&refused("UPDATE", 488), Some(&d)));
+        assert!(!record_passed(&refused("INVITE", 488), None));
     }
 }

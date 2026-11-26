@@ -12,7 +12,7 @@
 //! A non-zero delay makes every request park the runtime and auto-advance
 //! deterministically. Coerced in [`SimulatedHttpNetwork::with_transit_delay`].
 //!
-//! ## Behaviours: the outcomes `reqwest` produces
+//! ## Behaviours: the outcomes the real client produces
 //! Each failure is reported as the real client classifies it
 //! ([`FailureCause`](crate::failures::FailureCause)):
 //! - [`Behaviour::Refuse`] — refused at once (`Refused`); so is a request to
@@ -40,7 +40,7 @@
 //! A request rides a connection. [`request`](crate::HttpTransport::request)
 //! opens one per request; a backend client
 //! ([`client`](crate::HttpTransport::client)) keeps them in a pool, reused
-//! most recently returned first, as `reqwest` does (`pool` module). An
+//! most recently returned first, as the real client does (`pool` module). An
 //! address set with [`SimulatedHttpNetwork::balance`] stands in front of
 //! several backends: each new connection to it goes to one of them, chosen by
 //! its [`Pick`], and keeps that backend for its life. A backend closes every
@@ -58,6 +58,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
+use http_net::ejection::ConnectionRecord;
 use http_net::{HttpClient, ResolvedTarget};
 use tokio::sync::Notify;
 
@@ -117,13 +118,15 @@ impl Shared {
 
 /// One connection: the address dialled, the backend it reached (none when a
 /// balanced address had no member), the backend's closings when it opened,
-/// and the service once it answered on it.
+/// the service once it answered on it, and what its client's ejection rules
+/// keep about it.
 pub(super) struct Connection {
     shared: Arc<Shared>,
     front: SocketAddr,
     backend: Option<SocketAddr>,
     epoch: u64,
     service: Option<Arc<dyn HttpService>>,
+    pub(super) record: ConnectionRecord,
 }
 
 impl Connection {
@@ -321,6 +324,7 @@ impl SimulatedHttpNetwork {
             backend,
             epoch: backend.map_or(0, |b| self.shared.epoch(b)),
             service: None,
+            record: ConnectionRecord::default(),
         }
     }
 

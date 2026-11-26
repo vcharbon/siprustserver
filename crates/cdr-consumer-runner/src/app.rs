@@ -139,7 +139,7 @@ pub async fn run(view: Arc<dyn ObservationView>) -> Result<std::convert::Infalli
     let tls = amqp_connect::BrokerTls::for_uri(&uri)
         .map_err(|e| format!("CDR_AMQP_URL is amqps and the system's CA roots do not load: {e}"))?;
     let target = Target {
-        url,
+        uri,
         tls,
         queue: env_or("CDR_QUEUE", "cdr"),
         max_len: max_len(&env_or("CDR_QUEUE_MAX_LEN", "100000"))?,

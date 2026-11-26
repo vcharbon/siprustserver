@@ -1,16 +1,26 @@
-//! A 2xx to an earlier INVITE is a copy (RFC 3261 §13.3.1.4) only of a 2xx
-//! the record took. The callee, broken on purpose, rejects the caller's first
-//! re-INVITE 488, takes the second with a 200, then sends a 200 to the first
-//! as well: that 200 repeats no 2xx the dialog took, so it is counted on no
-//! copy budget. The callee, never ACKed, re-sends it at T1 and 3·T1: each of
-//! those repeats the 200 the dialog read, and is counted absorbed. The call
-//! then ends with the caller's BYE: one CDR, fully reaped.
+//! A 2xx to a re-INVITE whose client transaction took a non-2xx final is
+//! dropped (RFC 6026 §7.2, §8.4: the Completed state absorbs only 3xx-6xx
+//! retransmissions). The callee, broken on purpose, rejects the caller's
+//! first re-INVITE 488, takes the second with a 200, then sends a 200 to the
+//! first as well. The 488 drew its hop ACK; an ACK to that 200 would be a
+//! second, distinct ACK for one INVITE, so none leaves, nothing reaches the
+//! caller and neither leg reads it. The callee, never ACKed, re-sends it to
+//! 64·T1 and clears the dialog with a BYE (§13.3.1.4): one CDR, fully reaped.
+//!
+//! The 200 leaves once while the client transaction is still Completed
+//! (Timer D), which absorbs it and each copy, and once past Timer D, when the
+//! dialog gate drops them: the dialog notes the rejected re-INVITE untaken.
+//! Each counts what it drops.
 
 use std::net::SocketAddr;
 use std::time::Duration;
 
 use b2bua_harness::{settle_until, B2buaSut};
 use scenario_harness::{Harness, WaiverScope};
+
+use crate::common::late_2xx::{
+    assert_legs_unchanged, legs, reading_every_message, repeat_on_ladder, sent_to, LADDER_MS,
+};
 
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 192.0.2.10\r\ns=-\r\nc=IN IP4 192.0.2.10\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
 const ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 192.0.2.20\r\ns=-\r\nc=IN IP4 192.0.2.20\r\nt=0 0\r\nm=audio 20000 RTP/AVP 0\r\n";
@@ -51,25 +61,56 @@ fn late_200(
         .into_bytes()
 }
 
-/// The status lines the SUT at `b2bua` sent `to` in the wire entries past
-/// `from`, requests by their request line.
-fn sent_to(h: &Harness, b2bua: SocketAddr, to: SocketAddr, from: usize) -> Vec<String> {
-    h.wire_entries()
-        .into_iter()
-        .skip(from)
-        .filter(|e| e.from == b2bua && e.to == to)
-        .map(|e| String::from_utf8_lossy(&e.raw).lines().next().unwrap_or_default().to_string())
-        .collect()
+/// Which part of the stack drops the late 200 and its copies, each counting
+/// what it drops.
+#[derive(Clone, Copy)]
+enum DroppedBy {
+    /// The client transaction, still Completed (Timer D), absorbs them all.
+    Transaction,
+    /// With the transaction gone past Timer D, the dialog gate drops them
+    /// all: the dialog notes the rejected re-INVITE untaken.
+    DialogGate,
 }
 
+impl DroppedBy {
+    /// How many of the `sent` 2xx the transaction absorbs and the dialog
+    /// gate drops.
+    fn split(self, sent: u64) -> (u64, u64) {
+        match self {
+            DroppedBy::Transaction => (sent, 0),
+            DroppedBy::DialogGate => (0, sent),
+        }
+    }
+}
+
+/// Past Timer D (32 s) of the 488's client transaction.
+const PAST_TIMER_D: Duration = Duration::from_secs(33);
+
+/// The 200 to the rejected re-INVITE leaves at once: its transaction is
+/// still Completed.
 #[tokio::test(start_paused = true)]
-async fn a_2xx_to_an_earlier_reinvite_the_dialog_never_took_is_no_copy() {
-    let h = Harness::with_transit_delay("b2bua-late-first-reinvite-2xx", 1);
+async fn a_2xx_to_a_reinvite_that_took_a_non_2xx_final_is_dropped() {
+    let name = "b2bua-late-first-reinvite-2xx";
+    the_late_200_is_dropped(name, Duration::ZERO, DroppedBy::Transaction).await;
+}
+
+/// The 200 to the rejected re-INVITE leaves past its Timer D, the
+/// transaction gone.
+#[tokio::test(start_paused = true)]
+async fn a_2xx_to_a_rejected_reinvite_past_its_timer_d_is_dropped() {
+    let name = "b2bua-late-first-reinvite-2xx-past-timer-d";
+    the_late_200_is_dropped(name, PAST_TIMER_D, DroppedBy::DialogGate).await;
+}
+
+/// The callee answers the rejected re-INVITE 200 `late_by` after the second
+/// round, and `by` drops it.
+async fn the_late_200_is_dropped(name: &str, late_by: Duration, by: DroppedBy) {
+    let h = Harness::with_transit_delay(name, 1);
     h.waive(
         WaiverScope::rule(
             "single-final-per-server-txn",
             "the callee deliberately answers 200 to a re-INVITE it rejected 488 — the \
-             late first 2xx this test exists to read",
+             late 2xx this test exists to drop",
         )
         .on_party("bob"),
     );
@@ -77,7 +118,7 @@ async fn a_2xx_to_an_earlier_reinvite_the_dialog_never_took_is_no_copy() {
     let bob = h.agent_auto("bob").await;
     let at = h.next_addr().to_string();
     let b2bua = B2buaSut::route_all_to("127.0.0.1", bob.addr().port())
-        .tune(|c| c.keepalive_interval_sec = 3_600)
+        .tune(reading_every_message)
         .start(&h, "b2bua", &at)
         .await;
 
@@ -87,6 +128,7 @@ async fn a_2xx_to_an_earlier_reinvite_the_dialog_never_took_is_no_copy() {
     call.expect(200).await;
     let mut dialog = call.ack().await;
     bob.receive("ACK").await;
+    let call_ref = call::derive_call_ref("w0", &call.call_id(), dialog.local_tag());
 
     let mut rejected = dialog.reinvite(Some(ALICE_V2)).await;
     bob.receive("INVITE").await.respond(488, "Not Acceptable Here").await;
@@ -99,32 +141,34 @@ async fn a_2xx_to_an_earlier_reinvite_the_dialog_never_took_is_no_copy() {
     taken.expect(200).await;
     dialog.ack_for(taken_cseq, None).await;
     bob.receive("ACK").await;
+    h.advance(late_by).await;
+    bob.drain().await;
+    alice.drain().await;
 
     let before = h.wire_entries().len();
+    let held = legs(&b2bua.live_call(&call_ref).expect("the call is live"));
     let late = late_200(&h, b2bua.addr, bob.addr(), 1, 2);
     bob.try_send_datagram(&late, b2bua.addr).await.expect("the late 200 leaves");
-    h.advance(Duration::from_millis(5)).await;
-    bob.drain().await;
-    let to_bob = sent_to(&h, b2bua.addr, bob.addr(), before);
+    let to_give_up = repeat_on_ladder(&h, &bob, &late, b2bua.addr).await;
     assert_eq!(
-        b2bua.metrics().copies_past_schedule_total("2xx"),
-        0,
-        "the late 200 copies no 2xx the dialog took: {to_bob:?}"
+        sent_to(&h, b2bua.addr, bob.addr(), before),
+        Vec::<String>::new(),
+        "no ACK answers the late 200 or any of its {} copies",
+        LADDER_MS.len()
     );
-    for wait_ms in [500, 1_000] {
-        h.advance(Duration::from_millis(wait_ms)).await;
-        bob.try_send_datagram(&late, b2bua.addr).await.expect("its copy leaves");
-    }
-    h.advance(Duration::from_millis(5)).await;
-    bob.drain().await;
     assert_eq!(
-        b2bua.metrics().copies_past_schedule_total("2xx"),
-        2,
-        "each copy of the late 200 repeats the 200 the dialog read"
+        sent_to(&h, b2bua.addr, alice.addr(), before),
+        Vec::<String>::new(),
+        "the late 200 reaches no one"
     );
+    assert_legs_unchanged(&held, &b2bua.live_call(&call_ref).expect("the call is live"));
+    let (by_txn, by_gate) = by.split(1 + LADDER_MS.len() as u64);
+    assert_eq!(b2bua.txn_metrics().late_2xx_dropped(), by_txn, "absorbed by the transaction");
+    assert_eq!(b2bua.metrics().late_2xx_dropped_total(), by_gate, "dropped by the dialog gate");
 
-    let mut bye = dialog.bye().await;
-    bob.receive("BYE").await.respond(200, "OK").await;
+    h.advance(to_give_up).await;
+    let mut bye = uas.dialog().bye().await;
+    alice.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
     settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();

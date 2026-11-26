@@ -11,7 +11,9 @@ use sip_ids::SigningKey;
 use sip_message::CustomParser;
 use sip_net::UdpEndpoint;
 use sip_proxy::cancel_lru::CancelBranchLru;
-use sip_proxy::health::{DeadNotifier, FirstView, HealthProbe, HealthProbeConfig, WorkerReach};
+use sip_proxy::health::{
+    DeadNotifier, FirstView, HealthProbe, HealthProbeConfig, WorkerCapabilities, WorkerReach,
+};
 use sip_proxy::liveness::ShardPulse;
 use sip_proxy::load_observer::WorkerLoadObserver;
 use sip_proxy::parse_refusals::ParseRefusals;
@@ -48,14 +50,17 @@ pub struct SharedRouting {
     pub first_view: Arc<FirstView>,
     /// The last worker answer its health probe heard.
     pub reach: Arc<WorkerReach>,
+    /// What the workers last advertised on a probe answer.
+    pub capabilities: Arc<WorkerCapabilities>,
+    /// The shards answer a supervision OPTIONS themselves (ADR-0069).
+    pub local_options: bool,
     /// The process's one parser, its intake hook's too.
     pub parser: CustomParser,
 }
 
 impl SharedRouting {
-    /// The builder of recv shard `shard`'s core over the shared state.
     pub fn shard(&self, shard: usize) -> ProxyCoreBuilder {
-        ProxyCoreBuilder::new(
+        let builder = ProxyCoreBuilder::new(
             self.advertised.clone(),
             self.strategy.clone(),
             self.registry.clone(),
@@ -73,13 +78,19 @@ impl SharedRouting {
         .traces(self.traces.clone())
         .pulse(self.pulse.clone())
         .first_view(self.first_view.clone())
-        .shard(shard)
+        .shard(shard);
+        if self.local_options {
+            builder.supervision(self.capabilities.clone())
+        } else {
+            builder
+        }
     }
 
     /// The OPTIONS health probe over the worker pool on `endpoint`, writing
     /// health through `control` and load payloads into `observer`; it latches
-    /// the first view the shards and the probe routes read and stamps the
-    /// reach the fitness reads. Its misses are
+    /// the first view the shards and the probe routes read, stamps the reach
+    /// the fitness reads, and keeps the advertisement the shards' supervision
+    /// answer states. Its misses are
     /// counted per peer (`sip_proxy_peer_failures_total`).
     pub fn health_probe(
         &self,
@@ -101,6 +112,7 @@ impl SharedRouting {
         .with_metrics(self.metrics.clone())
         .with_first_view(self.first_view.clone())
         .with_reach(self.reach.clone())
+        .with_capabilities(self.capabilities.clone())
     }
 
     /// `probe` and the dead notifier on `notice` (ADR-0050 §3), signing with

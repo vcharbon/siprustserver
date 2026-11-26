@@ -4,12 +4,19 @@
 //!
 //! Contract: each record handed to `write` counts once, in `cdr_written_total`
 //! when the broker acked it on a confirm-mode channel, else in
-//! `cdr_dropped_total`. Dropped means unconfirmed, not lost: a record whose ack
-//! never arrived may still reach the queue. The writer's
+//! `cdr_dropped_total` under the [`CdrDrop`] reason of its drop site. Dropped
+//! means unconfirmed, not lost: a record whose ack never arrived may still
+//! reach the queue. The registry also counts the link: the live session
+//! (`b2bua_cdr_broker_connected`), each connect attempt's [`BrokerConnect`]
+//! outcome and each session's [`BrokerSessionEnd`] reason. The writer's
 //! [`CdrDeliveryObserver`] is told each of those ends, with the time since
 //! `write` was handed the record. `close` publishes nothing more and
 //! returns once every publish of every session is counted, by its deadline at
-//! the latest; a write still in flight then counts its own record.
+//! the latest; a write still in flight then counts its own record. A count is
+//! the last thing a write does, so a write that panics has counted nothing
+//! (its caller counts it, [`CdrWriter::dropped`]); a session the panic left
+//! half-used is retired, its earlier publishes still counted by their confirms
+//! ([`CdrWriter::after_panic`]).
 //!
 //! Bounds: the writer runs behind the kit's `BufferedCdrWriter` drainer (the
 //! grammar refuses `B2BUA_CDR_QUEUE=0` beside a URL); every broker wait is
@@ -17,8 +24,14 @@
 //! never a stalled call path or growing memory.
 
 mod backoff;
+mod broker_list;
+mod brokers;
 mod confirms;
+mod connection_watch;
 mod declaration;
+#[cfg(test)]
+mod fault;
+mod link;
 mod resolver;
 mod session;
 mod settings;
@@ -28,17 +41,21 @@ mod tally;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use b2bua::cdr::{CdrDeliveryObserver, CdrEncoder, CdrRecord, CdrWriter, JsonRecordEncoder};
+use b2bua::cdr::{
+    BrokerConnect, BrokerSessionEnd, CdrDeliveryObserver, CdrDrop, CdrEncoder, CdrRecord,
+    CdrWriter, JsonRecordEncoder,
+};
 use b2bua::metrics::B2buaMetrics;
 use call::Call;
 use sip_clock::wall::millis_u64;
 use tokio::sync::{watch, Mutex};
-use tokio::task::JoinHandle;
+use tokio::time::error::Elapsed;
 use tokio::time::{timeout_at, Instant};
 
 use backoff::Backoff;
-use resolver::BrokerResolver;
-use session::Session;
+use brokers::{drawn_start, Brokers, Unreached};
+use link::{Held, Link};
+use session::{PublishRefused, Session};
 pub use settings::{
     CdrDeliveryBounds, CdrQueueDeclare, RabbitMqCdrSettings, MAX_DRAINER_WAIT_MS, MAX_WAIT_MS,
     MAX_WINDOW,
@@ -98,17 +115,10 @@ pub struct RabbitMqCdrWriter {
     close_by: watch::Sender<Option<Instant>>,
 }
 
-struct Link {
-    /// `None` until the first connect, and after a session ended.
-    session: Option<Session>,
-    /// The confirm trackers of ended sessions still resolving their
-    /// publishes, joined by `close`.
-    retired: Vec<JoinHandle<()>>,
-    backoff: Backoff,
-    resolver: BrokerResolver,
-}
-
 impl RabbitMqCdrWriter {
+    /// The writer of `settings`, its first connect attempt starting at a
+    /// broker drawn at random, so the workers of a cluster spread over its
+    /// nodes ([`Self::starting_at`] fixes it).
     pub fn new(
         settings: RabbitMqCdrSettings,
         encoder: Arc<dyn CdrEncoder>,
@@ -118,14 +128,24 @@ impl RabbitMqCdrWriter {
         let backoff = Backoff::new(bounds.backoff_min, bounds.backoff_max);
         // A parked answer lives through the longest gap between two attempts
         // while records flow.
-        let resolver = BrokerResolver::new(bounds.connect_timeout + bounds.backoff_max);
+        let max_age = bounds.connect_timeout + bounds.backoff_max;
+        let brokers = Brokers::new(&settings.brokers, drawn_start(), max_age);
         Self {
             settings,
             encoder,
-            link: Mutex::new(Link { session: None, retired: Vec::new(), backoff, resolver }),
+            link: Mutex::new(Link::new(backoff, brokers)),
             tally: Tally::new(metrics),
             close_by: watch::Sender::new(None),
         }
+    }
+
+    /// This writer's first connect attempt starting at the broker of index
+    /// `first` in [`RabbitMqCdrSettings::brokers`] (modulo their count), in
+    /// place of the drawn one: a runner that numbers its workers may spread
+    /// them by that number.
+    pub fn starting_at(mut self, first: usize) -> Self {
+        self.link.get_mut().brokers.start_at(first);
+        self
     }
 
     /// This writer telling `observer` the end of each record it is handed:
@@ -156,33 +176,21 @@ impl RabbitMqCdrWriter {
 
     /// The live session, connecting one within the connect bound when there
     /// is none and the backoff allows; `None` when no session can publish now.
+    /// A session whose connection or channel is no longer open is ended and
+    /// replaced, so a connection that died between records costs no record.
     async fn session<'a>(&self, link: &'a mut Link) -> Option<&'a Session> {
-        if let Some(ended) = link.session.take_if(|s| s.ended_at().is_some()) {
-            if ended.delivered() {
-                link.backoff.recovered();
-            } else if let Some(ended_at) = ended.ended_at() {
-                // The backoff counts from the end, not from this record.
-                link.backoff.failed(ended_at);
-            }
-            link.retired.retain(|tracker| !tracker.is_finished());
-            link.retired.extend(ended.into_tracker());
+        if let Some(current) = &link.session {
+            current.end_if_disconnected();
         }
+        link.take_ended();
         if link.session.is_none() {
             if !link.backoff.ready(Instant::now()) {
                 return None;
             }
             let deadline = Instant::now() + self.settings.bounds.connect_timeout;
-            let opened = timeout_at(
-                deadline,
-                Session::open(
-                    &self.settings,
-                    &mut link.resolver,
-                    deadline,
-                    &self.tally,
-                    self.close_by.subscribe(),
-                ),
-            )
-            .await;
+            let attempt = link.brokers.open(&self.settings, deadline, &self.tally, &self.close_by);
+            let opened = timeout_at(deadline, attempt).await;
+            self.tally.metrics().bump_cdr_broker_connect(connect_outcome(&opened, deadline));
             match opened {
                 Ok(Ok(session)) => link.session = Some(session),
                 Ok(Err(e)) => {
@@ -205,6 +213,20 @@ impl RabbitMqCdrWriter {
     }
 }
 
+/// How the connect attempt bounded by `deadline` ended: timed out when the
+/// bound ran out before a session opened, even where each broker reported
+/// its own share running out, failed when every broker refused before it.
+fn connect_outcome(
+    opened: &Result<Result<Session, Unreached>, Elapsed>,
+    deadline: Instant,
+) -> BrokerConnect {
+    match opened {
+        Ok(Ok(_)) => BrokerConnect::Ok,
+        Ok(Err(_)) if Instant::now() < deadline => BrokerConnect::Failed,
+        Ok(Err(_)) | Err(_) => BrokerConnect::TimedOut,
+    }
+}
+
 #[async_trait]
 impl CdrWriter for RabbitMqCdrWriter {
     /// A record the encoder refuses is one dropped record, never a stopped
@@ -212,21 +234,50 @@ impl CdrWriter for RabbitMqCdrWriter {
     async fn write(&self, call: &Call, terminated_at: i64) {
         let handed_at = Instant::now();
         let Some(payload) = self.payload(call, terminated_at) else {
-            return self.tally.dropped(handed_at);
+            return self.tally.dropped(handed_at, CdrDrop::Encode);
         };
-        let mut link = self.link.lock().await;
+        let mut link = Held(self.link.lock().await);
         if self.close_by.borrow().is_some() {
-            return self.tally.dropped(handed_at);
+            return self.tally.dropped(handed_at, CdrDrop::Closed);
         }
         let Some(session) = self.session(&mut link).await else {
-            return self.tally.dropped(handed_at);
+            return self.tally.dropped(handed_at, CdrDrop::NoBroker);
         };
+        #[cfg(test)]
+        fault::panic_if(payload == fault::PANICS_HOLDING_THE_LINK, "holding the link");
         let deadline = Instant::now() + self.settings.bounds.publish_timeout;
         let published = session.publish(&self.settings.queue, &payload, handed_at, deadline);
         if let Err(refused) = published.await {
-            self.tally.dropped(handed_at);
             tracing::debug!(?refused, "CDR record dropped");
+            let why = match refused {
+                PublishRefused::WindowFull => CdrDrop::WindowFull,
+                PublishRefused::Ended => CdrDrop::PublishFailed,
+            };
+            self.tally.dropped(handed_at, why);
         }
+    }
+
+    /// Retires the live session when a panic unwound through a write holding
+    /// it, its end counted as [`BrokerSessionEnd::WriterPanic`]: it publishes
+    /// no more, its confirms still count its publishes, and neither the
+    /// backoff nor the broker cursor moves, so the next record opens a fresh
+    /// session on the same broker. A panic outside the link (the encoder, the
+    /// drainer between records) leaves the session serving.
+    async fn after_panic(&self) {
+        let mut link = self.link.lock().await;
+        if !std::mem::take(&mut link.panicked) {
+            return;
+        }
+        let Some(session) = link.session.take_if(|s| s.ended_at().is_none()) else {
+            return;
+        };
+        link.brokers.ended(true);
+        link.retire(Some(session.retire(BrokerSessionEnd::WriterPanic)));
+    }
+
+    /// Counts the record through the writer's own drops, its observer told.
+    fn dropped(&self, why: CdrDrop, handed_at: Instant, _metrics: &B2buaMetrics) {
+        self.tally.dropped(handed_at, why);
     }
 
     async fn read_all(&self) -> Vec<CdrRecord> {
@@ -257,231 +308,6 @@ impl CdrWriter for RabbitMqCdrWriter {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use b2bua::cdr::{build_record, CdrEncodeError};
-    use b2bua::config::B2buaConfig;
-    use b2bua::initial_invite::build_initial_call;
-    use call::Call;
-    use sip_message::parser::custom::CustomParser;
-    use sip_message::{SipMessage, SipParser};
-    use std::collections::HashMap;
-    use std::net::SocketAddr;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    fn lookup(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
-        let map: HashMap<String, String> =
-            pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
-        move |k| map.get(k).cloned()
-    }
-
-    fn a_call() -> Call {
-        let raw = "INVITE sip:bob@example.com SIP/2.0\r\n\
-            Via: SIP/2.0/UDP 10.0.0.9:5060;branch=z9hG4bK-sink\r\n\
-            Max-Forwards: 70\r\n\
-            From: <sip:alice@example.com>;tag=alicetag\r\n\
-            To: <sip:bob@example.com>\r\n\
-            Call-ID: sink-probe@10.0.0.9\r\n\
-            CSeq: 1 INVITE\r\n\
-            Contact: <sip:alice@10.0.0.9:5060>\r\n\
-            Content-Length: 0\r\n\r\n";
-        let req = match CustomParser::new().parse(raw.as_bytes()).expect("parse") {
-            SipMessage::Request(r) => r,
-            _ => panic!("expected a request"),
-        };
-        let cfg = B2buaConfig { self_ordinal: "w0".into(), ..Default::default() };
-        build_initial_call(
-            &req,
-            SocketAddr::from(([10, 0, 0, 9], 5060)),
-            &cfg,
-            &mut sip_ids::TurnIds::fixed(1),
-            1_000,
-        )
-    }
-
-    fn settings(declare: CdrQueueDeclare) -> RabbitMqCdrSettings {
-        RabbitMqCdrSettings {
-            url: "amqp://h/%2f".into(),
-            queue: "cdr".into(),
-            declare,
-            bounds: CdrDeliveryBounds::default(),
-            tls: amqp_connect::BrokerTls::PLAIN,
-        }
-    }
-
-    fn writer(declare: CdrQueueDeclare, encoder: Arc<dyn CdrEncoder>) -> RabbitMqCdrWriter {
-        RabbitMqCdrWriter::new(settings(declare), encoder, B2buaMetrics::new())
-    }
-
-    /// Refuses every call; counts its invocations.
-    #[derive(Default)]
-    struct RefusingEncoder {
-        calls: AtomicUsize,
-    }
-
-    impl CdrEncoder for RefusingEncoder {
-        fn encode(&self, _call: &Call, _terminated_at: i64) -> Result<Vec<u8>, CdrEncodeError> {
-            self.calls.fetch_add(1, Ordering::SeqCst);
-            Err("refused".into())
-        }
-    }
-
-    const OWN_DEFAULT: CdrQueueDeclare = CdrQueueDeclare::Own { max_len: 100_000 };
-
-    #[test]
-    fn an_unset_url_selects_no_writer() {
-        let metrics = B2buaMetrics::new();
-        assert!(rabbitmq_cdr_writer_from_lookup(lookup(&[]), &metrics).expect("ok").is_none());
-    }
-
-    /// The default writer publishes the bytes `serde_json::to_vec` gave over
-    /// `build_record` before the encoder seam, in order and skew-clamped alike.
-    #[test]
-    fn the_default_writer_publishes_the_json_record_byte_for_byte() {
-        let w = writer(OWN_DEFAULT, Arc::new(JsonRecordEncoder));
-        let call = a_call();
-        for terminated_at in [2_000, 500] {
-            let expected = serde_json::to_vec(&build_record(&call, terminated_at)).unwrap();
-            assert_eq!(w.payload(&call, terminated_at), Some(expected), "t={terminated_at}");
-        }
-    }
-
-    /// Remembers every end it is told.
-    #[derive(Default)]
-    struct Ends(std::sync::Mutex<Vec<b2bua::cdr::CdrDelivery>>);
-
-    impl CdrDeliveryObserver for Ends {
-        fn ended(&self, delivery: b2bua::cdr::CdrDelivery, _took: std::time::Duration) {
-            self.0.lock().unwrap().push(delivery);
-        }
-    }
-
-    #[tokio::test]
-    async fn an_encode_refusal_counts_one_dropped_record_and_tells_the_observer() {
-        let metrics = B2buaMetrics::new();
-        let enc = Arc::new(RefusingEncoder::default());
-        let ends = Arc::new(Ends::default());
-        let w = RabbitMqCdrWriter::new(settings(OWN_DEFAULT), enc.clone(), metrics.clone())
-            .observed_by(ends.clone());
-        w.write(&a_call(), 2_000).await;
-        assert_eq!(enc.calls.load(Ordering::SeqCst), 1);
-        assert_eq!((metrics.cdr_dropped_total(), metrics.cdr_written_total()), (1, 0));
-        assert_eq!(*ends.0.lock().unwrap(), vec![b2bua::cdr::CdrDelivery::Dropped]);
-    }
-
-    /// The native record of [`a_call`], created at 1000 and terminated at 2000,
-    /// as the RabbitMQ sink publishes it.
-    const GOLDEN: &str = concat!(
-        r#"{"call_ref":"w0|sink-probe@10.0.0.9|alicetag","#,
-        r#""incarnation":"w0|sink-probe@10.0.0.9|alicetag#94dmne6v","created_at":1000,"terminated_at":2000,"#,
-        r#""a_leg":{"call_id":"sink-probe@10.0.0.9","from_tag":"alicetag","state":"trying"},"#,
-        r#""b_legs":[],"events":[{"type":"invite_received","timestamp":1000,"leg_id":"a","#,
-        r#""status_code":null,"reason":null,"decision_ordinal":0}],"decision_log":[],"#,
-        r#""termination":null}"#
-    );
-
-    /// The same call discharged at 500, before its creation: clamped and flagged.
-    const GOLDEN_SKEWED: &str = concat!(
-        r#"{"call_ref":"w0|sink-probe@10.0.0.9|alicetag","#,
-        r#""incarnation":"w0|sink-probe@10.0.0.9|alicetag#94dmne6v","created_at":1000,"terminated_at":1000,"#,
-        r#""clock_skew_clamped":true,"#,
-        r#""a_leg":{"call_id":"sink-probe@10.0.0.9","from_tag":"alicetag","state":"trying"},"#,
-        r#""b_legs":[],"events":[{"type":"invite_received","timestamp":1000,"leg_id":"a","#,
-        r#""status_code":null,"reason":null,"decision_ordinal":0}],"decision_log":[],"#,
-        r#""termination":null}"#
-    );
-
-    fn assert_publishes_the_golden_record(w: &RabbitMqCdrWriter) {
-        let call = a_call();
-        for (t, golden) in [(2_000, GOLDEN), (500, GOLDEN_SKEWED)] {
-            let got = w.payload(&call, t).expect("the default record encodes");
-            assert_eq!(String::from_utf8(got).expect("utf-8"), golden, "terminated_at={t}");
-        }
-    }
-
-    /// The default settings entry point publishes the native record, byte for
-    /// byte.
-    #[test]
-    fn into_writer_publishes_the_golden_native_record() {
-        let w = settings(OWN_DEFAULT).into_writer(&B2buaMetrics::new());
-        assert_publishes_the_golden_record(&w);
-    }
-
-    /// The default lookup entry point, which `RunnerBase::rabbitmq_cdr_sink_from_env`
-    /// reads the process env through, publishes the native record, byte for byte.
-    #[test]
-    fn the_default_lookup_publishes_the_golden_native_record() {
-        let w = rabbitmq_cdr_writer_from_lookup(
-            lookup(&[("B2BUA_CDR_RABBITMQ_URL", "amqp://h/%2f")]),
-            &B2buaMetrics::new(),
-        )
-        .expect("ok")
-        .expect("some");
-        assert_publishes_the_golden_record(&w);
-    }
-
-    /// Records the `terminated_at` each call is encoded with.
-    #[derive(Default)]
-    struct RecordingEncoder {
-        seen: std::sync::Mutex<Vec<i64>>,
-    }
-
-    impl CdrEncoder for RecordingEncoder {
-        fn encode(&self, _call: &Call, terminated_at: i64) -> Result<Vec<u8>, CdrEncodeError> {
-            self.seen.lock().unwrap().push(terminated_at);
-            Ok(Vec::new())
-        }
-    }
-
-    /// The writer hands the encoder the raw discharge stamp, even one that
-    /// precedes the call's creation (cross-node skew); clamping is the
-    /// encoder's.
-    #[test]
-    fn the_writer_passes_a_skewed_terminated_at_through_unclamped() {
-        let enc = Arc::new(RecordingEncoder::default());
-        let w = writer(OWN_DEFAULT, enc.clone());
-        let call = a_call();
-        assert_eq!(call.created_at, 1_000);
-        assert_eq!(w.payload(&call, 500), Some(Vec::new()));
-        assert_eq!(*enc.seen.lock().unwrap(), vec![500]);
-    }
-
-    /// A broker address no one listens on: a connect is refused at once.
-    const REFUSING_BROKER: &str = "amqp://127.0.0.1:9/%2f";
-
-    /// The selected sink publishes: a write against a broker port that refuses
-    /// the connect counts one dropped record, which the discarding default
-    /// never does.
-    #[tokio::test]
-    async fn a_set_url_selects_the_broker_sink_not_the_discarding_default() {
-        let metrics = B2buaMetrics::new();
-        let sink = rabbitmq_cdr_writer_from_lookup(
-            lookup(&[("B2BUA_CDR_RABBITMQ_URL", REFUSING_BROKER)]),
-            &metrics,
-        )
-        .expect("ok")
-        .expect("a set URL must select the RabbitMQ sink");
-        sink.write(&a_call(), 2_000).await;
-        assert_eq!(metrics.cdr_dropped_total(), 1, "the publish attempt must be counted");
-        assert_eq!(metrics.cdr_written_total(), 0);
-    }
-
-    /// The sink selected with an encoder encodes through it: a refusing encoder
-    /// is called once per write and each refusal is one dropped record.
-    #[tokio::test]
-    async fn a_sink_selected_with_an_encoder_encodes_through_it() {
-        let metrics = B2buaMetrics::new();
-        let enc = Arc::new(RefusingEncoder::default());
-        let sink = rabbitmq_cdr_writer_from_lookup_with_encoder(
-            lookup(&[("B2BUA_CDR_RABBITMQ_URL", REFUSING_BROKER)]),
-            enc.clone(),
-            &metrics,
-        )
-        .expect("ok")
-        .expect("a set URL must select the RabbitMQ sink");
-        sink.write(&a_call(), 2_000).await;
-        sink.write(&a_call(), 3_000).await;
-        assert_eq!(enc.calls.load(Ordering::SeqCst), 2);
-        assert_eq!((metrics.cdr_dropped_total(), metrics.cdr_written_total()), (2, 0));
-    }
-}
+mod fault_tests;
+#[cfg(test)]
+mod tests;

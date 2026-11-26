@@ -35,7 +35,7 @@ pub fn sip_out(call: &Call, at_ms: i64, dest: SocketAddr, wire: &[u8]) {
 }
 
 /// A SIP message the stack sent on the call's behalf whose bytes this layer
-/// never held — the transaction layer's auto-100. Recorded so the backfilled
+/// never held — the caller's 100 Trying the transaction layer renders. Recorded so the backfilled
 /// story of a call is not missing its first response.
 pub fn sip_out_note(call: &Call, at_ms: i64, detail: &str) {
     if !sampled(call) {

@@ -69,6 +69,7 @@ impl ActorScenario for OptionsHold {
 
                 cseq: None,
                 delayed: vec![],
+                answers: Default::default(),
                 claim: None,
             },
             ActorSpec {
@@ -86,6 +87,7 @@ impl ActorScenario for OptionsHold {
 
                 cseq: None,
                 delayed: vec![],
+                answers: Default::default(),
                 claim: None,
             },
         ];
@@ -153,6 +155,7 @@ impl ActorScenario for LongCall {
 
                 cseq: None,
                 delayed: vec![],
+                answers: Default::default(),
                 claim: None,
             },
             ActorSpec {
@@ -170,6 +173,7 @@ impl ActorScenario for LongCall {
 
                 cseq: None,
                 delayed: vec![],
+                answers: Default::default(),
                 claim: None,
             },
         ];

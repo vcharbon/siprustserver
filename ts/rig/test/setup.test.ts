@@ -18,7 +18,8 @@ import type * as Lanes from "../src/lanes.js"
 import type * as OperationRun from "../src/operation-run.js"
 import * as RigPath from "../src/rig-path.js"
 import * as Setup from "../src/setup.js"
-import { laneOf, SAMPLES, traceOf } from "./operations.js"
+import { gone } from "./collectors.js"
+import { HANGING_INJECT_S, laneOf, SAMPLES, STALLING_PROBE_S, traceOf } from "./operations.js"
 import { run, tree } from "./tree.js"
 
 const made: Array<string> = []
@@ -126,10 +127,11 @@ describe("a job's setup", () => {
     const { events, sink } = collecting()
     const planned = plan(rig, root, ["hanging-inject"])
     const exit = await exitOf(Setup.around(planned, sink, Effect.void))
-    expect(Exit.isFailure(exit) && String(exit.cause)).toContain("timed out after 500 ms")
+    const timedOut = `inject timed out after ${HANGING_INJECT_S * 1000} ms`
+    expect(Exit.isFailure(exit) && String(exit.cause)).toContain(timedOut)
     const sleeper = Number(fs.readFileSync(path.join(planned[0]!.dir, "state", "sleeper"), "utf8"))
-    expect(() => process.kill(sleeper, 0)).toThrow()
-    expect(events.find((event) => event.phase === "failed")?.message).toMatch(/^inject timed out after 500 ms, its log .*inject\.log$/)
+    await gone(sleeper)
+    expect(events.find((event) => event.phase === "failed")?.message).toMatch(new RegExp(`^${timedOut}, its log .*inject\\.log$`))
     expect(traceOf(root)).toEqual(["inject hanging-inject", "heal hanging-inject"])
   })
 
@@ -275,15 +277,15 @@ describe("a job's setup", () => {
     expect(phases().slice(-1)).toEqual(["recovered late-recovery"])
   })
 
-  it("fails a heal attempt whose probe still answers 75 at its bound, and marks the lab after two", async () => {
+  it("fails a heal attempt whose probe answers 75 when its next call would come past its bound, and marks the lab after two", async () => {
     const { root, rig } = await samples()
     const { events, sink } = collecting()
     const exit = await exitOf(Setup.around(plan(rig, root, ["never-recovers"]), sink, Effect.void))
     expect(exit).toEqual(Exit.succeed({ value: undefined, labLeftChanged: true }))
     expect(traceOf(root).filter((line) => line === "heal never-recovers")).toHaveLength(2)
     expect(events.filter((event) => event.phase === "failed").map((event) => event.message?.split(",")[0])).toEqual([
-      "probe last answered not yet and its bound of 1 s ran out",
-      "probe last answered not yet and its bound of 1 s ran out"
+      "probe last answered not yet and its bound of 60 s ran out",
+      "probe last answered not yet and its bound of 60 s ran out"
     ])
   })
 
@@ -303,10 +305,8 @@ describe("a job's setup", () => {
     const { events, sink } = collecting()
     const exit = await exitOf(Setup.around(plan(rig, root, ["stalls-after-not-yet"]), sink, Effect.void))
     expect(exit).toEqual(Exit.succeed({ value: undefined, labLeftChanged: true }))
-    expect(events.filter((event) => event.phase === "failed").map((event) => event.message?.split(",")[0])).toEqual([
-      "probe last answered not yet and its bound of 1 s ran out",
-      "probe last answered not yet and its bound of 1 s ran out"
-    ])
+    const ranOut = `probe last answered not yet and its bound of ${STALLING_PROBE_S} s ran out`
+    expect(events.filter((event) => event.phase === "failed").map((event) => event.message?.split(",")[0])).toEqual([ranOut, ranOut])
   })
 })
 

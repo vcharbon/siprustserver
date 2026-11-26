@@ -42,7 +42,7 @@ afterEach(() => {
 afterAll(async () => {
   if (!served) return
   for (const database of [MISSING, EMPTY, CURRENT, BEHIND, SKIPPED]) await drop(database)
-}, 60_000)
+})
 
 /** `step` over the test binding and the node services. */
 const provided = <A, E>(step: Effect.Effect<A, E, StoreBinding.Service | NodeServices.NodeServices>) =>

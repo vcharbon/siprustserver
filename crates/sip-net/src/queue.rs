@@ -186,14 +186,22 @@ impl PacketQueue {
 
     /// Await the next packet. Returns `None` once the queue is closed and
     /// drained. Cancellation-safe.
+    ///
+    /// Each packet returned spends one unit of the task's cooperative budget,
+    /// as a tokio channel's `recv` does: a reader whose queue never empties
+    /// still ends its task poll once the budget is spent, its packet left
+    /// queued for the next poll, so the other tasks of its thread run and the
+    /// poll watchdog never reads an overload as a stuck poll.
     pub async fn take(&self) -> Option<UdpPacket> {
         loop {
             // Arm the notification BEFORE inspecting the buffer so a packet
             // offered between the check and the await is not lost.
             let notified = self.notify.notified();
             {
+                let budget = std::future::poll_fn(tokio::task::coop::poll_proceed).await;
                 let mut g = self.lock();
                 if let Some(pkt) = g.pop() {
+                    budget.made_progress();
                     return Some(pkt);
                 }
                 if g.closed {
@@ -263,7 +271,10 @@ impl Drop for CloseOnDrop {
 
 #[cfg(test)]
 mod tests {
+    use std::future::Future;
     use std::net::SocketAddr;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::task::Poll;
 
     use sip_message::Bytes;
 
@@ -336,6 +347,47 @@ mod tests {
             }
         }
         assert_eq!(from_the_queue, [1, 2, 3, 4], "every other take is the queue's");
+    }
+
+    /// Tokio's cooperative budget: the ready operations one task poll
+    /// completes before its next ready one returns pending.
+    const COOP_BUDGET: usize = 128;
+
+    #[tokio::test(start_paused = true)]
+    async fn a_reader_of_a_queue_that_never_empties_leaves_the_thread_every_budget() {
+        let queue = PacketQueue::new(4);
+        let taken = Arc::new(AtomicUsize::new(0));
+        let other_ran_at = Arc::new(OnceLock::new());
+        let (seen, at) = (taken.clone(), other_ran_at.clone());
+        tokio::spawn(async move { at.set(seen.load(Ordering::SeqCst)) });
+        while taken.load(Ordering::SeqCst) < 100 * COOP_BUDGET && other_ran_at.get().is_none() {
+            assert!(queue.offer(packet()));
+            assert!(queue.take().await.is_some());
+            taken.fetch_add(1, Ordering::SeqCst);
+        }
+        let ran_at = other_ran_at.get().copied();
+        assert!(
+            ran_at.is_some_and(|at| at <= COOP_BUDGET),
+            "the other task runs within a budget of takes (after {ran_at:?})"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_take_out_of_budget_leaves_its_packet_queued() {
+        let queue = PacketQueue::new(4);
+        while tokio::task::coop::has_budget_remaining() {
+            tokio::task::consume_budget().await;
+        }
+        let sent = Bytes::from_static(b"P");
+        assert!(queue.offer(UdpPacket { raw: sent.clone(), ..packet() }));
+        {
+            let mut take = std::pin::pin!(queue.take());
+            let first = std::future::poll_fn(|cx| Poll::Ready(take.as_mut().poll(cx))).await;
+            assert!(first.is_pending(), "a take out of budget is pending");
+        }
+        assert_eq!(queue.depth(), 1, "the dropped take left its packet queued");
+        let taken = queue.take().await.map(|p| p.raw);
+        assert_eq!(taken, Some(sent), "the next take returns it");
     }
 
     #[tokio::test(start_paused = true)]

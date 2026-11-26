@@ -17,10 +17,7 @@ use std::time::Duration;
 use b2bua::admission::Class;
 use b2bua::ingress_brake::IngressBrakeConfig;
 use b2bua::new_calls::Refusal;
-use b2bua_harness::{
-    drop_backlog_answers, send_backlog, settle_until, B2buaScene, B2buaSut, InboundPace,
-    BACKLOG_METHOD,
-};
+use b2bua_harness::{send_backlog, settle_until, B2buaScene, B2buaSut, BurstAnswers, InboundPace};
 use scenario_harness::callflow::{ANSWER_SDP, OFFER_SDP};
 use scenario_harness::{Agent, Dialog};
 use sip_message::generators::{InDialogMethod, OutOfDialogMethod};
@@ -46,7 +43,7 @@ const REOFFER: &str = "v=0\r\no=alice 1 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 12
 /// A scene whose worker takes its datagrams at the returned pace, with the
 /// ingress brake on the wait alone when `brake`, and carol, the backlog
 /// sender.
-async fn paced_scene(name: &str, brake: bool) -> (B2buaScene, InboundPace, Agent) {
+async fn paced_scene(name: &str, brake: bool) -> (B2buaScene, InboundPace, Agent, BurstAnswers) {
     let pace = InboundPace::new();
     let inbound = pace.clone();
     let s = B2buaScene::with_b2bua(name, move |bob_port| {
@@ -58,8 +55,9 @@ async fn paced_scene(name: &str, brake: bool) -> (B2buaScene, InboundPace, Agent
         }
     })
     .await;
-    let carol = s.h.agent_with_pre_ingress("carol", "127.0.0.1:5062", drop_backlog_answers()).await;
-    (s, pace, carol)
+    let answers = BurstAnswers::default();
+    let carol = s.h.agent_with_pre_ingress("carol", "127.0.0.1:5062", answers.hook()).await;
+    (s, pace, carol, answers)
 }
 
 /// Whether the gate refuses now, as the worker's metrics state it.
@@ -68,18 +66,18 @@ fn gate_refusing(s: &B2buaScene) -> bool {
 }
 
 /// The backlog requests the worker has refused `405`.
-fn taken(s: &B2buaScene) -> u64 {
-    s.b2bua.metrics().unroutable_refused_of(BACKLOG_METHOD, 405)
+fn taken(answers: &BurstAnswers) -> u64 {
+    answers.of(405)
 }
 
 /// Pump until the worker has refused the whole backlog: the instant its
 /// inbound queue drained.
-async fn drained(s: &B2buaScene) -> Instant {
+async fn drained(s: &B2buaScene, answers: &BurstAnswers) -> Instant {
     let give_up = Instant::now() + Duration::from_secs(30);
-    while taken(s) < BACKLOG as u64 && Instant::now() < give_up {
+    while taken(answers) < BACKLOG as u64 && Instant::now() < give_up {
         s.h.advance(PER_TAKE).await;
     }
-    assert_eq!(taken(s), BACKLOG as u64, "every backlog request is refused 405");
+    assert_eq!(taken(answers), BACKLOG as u64, "every backlog request is refused 405");
     Instant::now()
 }
 
@@ -146,7 +144,7 @@ async fn readiness(s: &B2buaScene) -> Option<Readiness> {
 /// is admitted.
 #[tokio::test(start_paused = true)]
 async fn a_backlog_in_the_inbound_queue_trips_the_gate_and_the_brake_refuses_on_arrival() {
-    let (s, pace, carol) = paced_scene("inbound-queue-admission-brake", true).await;
+    let (s, pace, carol, answers) = paced_scene("inbound-queue-admission-brake", true).await;
     let mut held = s.establish().await;
 
     pace.set(PER_TAKE);
@@ -157,29 +155,29 @@ async fn a_backlog_in_the_inbound_queue_trips_the_gate_and_the_brake_refuses_on_
         "the gate tripped with the oldest datagram waiting {tripped_at:?}"
     );
 
-    let before = taken(&s);
+    let before = taken(&answers);
     refused(&s).await;
     assert!(
-        taken(&s) - before <= FLIGHT_TAKES + 2,
+        taken(&answers) - before <= FLIGHT_TAKES + 2,
         "refused on arrival, not behind the queued backlog: {} taken meanwhile",
-        taken(&s) - before
+        taken(&answers) - before
     );
-    assert!(taken(&s) < BACKLOG as u64 / 2, "half the backlog still waits");
+    assert!(taken(&answers) < BACKLOG as u64 / 2, "half the backlog still waits");
 
-    let before = taken(&s);
+    let before = taken(&answers);
     assert_eq!(
         readiness(&s).await,
         Some(Readiness::refuse("overload")),
         "the probe's answer states the refusal"
     );
     assert!(
-        taken(&s) - before <= FLIGHT_TAKES + 2,
+        taken(&answers) - before <= FLIGHT_TAKES + 2,
         "the probe is answered ahead of the queued backlog: {} taken meanwhile",
-        taken(&s) - before
+        taken(&answers) - before
     );
 
     reinvited(&s, &mut held).await;
-    let drained = drained(&s).await;
+    let drained = drained(&s, &answers).await;
     pace.set(Duration::ZERO);
 
     assert_eq!(readiness(&s).await, Some(Readiness::refuse("overload")));
@@ -209,7 +207,7 @@ async fn a_backlog_in_the_inbound_queue_trips_the_gate_and_the_brake_refuses_on_
 /// event-queue reason: the gate tripped on the queue's wait and refuses.
 #[tokio::test(start_paused = true)]
 async fn with_no_brake_the_transaction_layer_refuses_while_the_gate_does() {
-    let (s, pace, carol) = paced_scene("inbound-queue-admission-no-brake", false).await;
+    let (s, pace, carol, answers) = paced_scene("inbound-queue-admission-no-brake", false).await;
     let mut held = s.establish().await;
 
     pace.set(PER_TAKE);
@@ -221,7 +219,7 @@ async fn with_no_brake_the_transaction_layer_refuses_while_the_gate_does() {
     assert_eq!(counts.rejected_sum(), 1, "under the event-queue reason alone");
     assert!(s.b2bua.cdr_records().is_empty(), "a ladder refusal writes no call record");
 
-    drained(&s).await;
+    drained(&s, &answers).await;
     pace.set(Duration::ZERO);
     s.h.advance(ACCEPT_HOLD).await;
     let mut fresh = admitted(&s, false).await;

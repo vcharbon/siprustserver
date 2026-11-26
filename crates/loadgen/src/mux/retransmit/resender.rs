@@ -37,6 +37,9 @@ impl Reports {
         if let Some(tap) = self.sendtap.get() {
             tap(bytes, dst, SendNote::ReEmit(kind));
         }
+        if let Some(taps) = &self.taps {
+            taps.on_departed(bytes);
+        }
     }
 }
 

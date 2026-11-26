@@ -191,6 +191,30 @@ class AgainstTheBase(Case):
         repo.write("src/big.rs", lines(700))
         self.refused(repo, "lists src/big.rs at 700, above its 600")
 
+    def test_an_added_scan_directory_passes(self):
+        repo = self.based()
+        repo.write("lib/x.rs", lines(10))
+        repo.write("file-size.allow", SETTINGS + "scan lib\nsrc/big.rs 600\n")
+        self.assertEqual(repo.run(), (0, ""))
+        repo.git("add", "-A")
+        self.assertEqual(repo.run("--staged"), (0, ""))
+
+    def test_a_first_scan_on_a_whole_root_base_fails(self):
+        whole = SETTINGS.replace("scan src\n", "")
+        repo = self.repo(whole)
+        repo.write("src/a.rs", lines(10))
+        repo.write("lib/b.rs", lines(10))
+        repo.commit()
+        repo.write("file-size.allow", whole + "scan src\n")
+        self.refused(repo, "changes its settings")
+
+    def test_a_scan_word_with_pathspec_magic_is_refused(self):
+        repo = self.based()
+        repo.write("file-size.allow", SETTINGS + "scan :(exclude)src/big.rs\nsrc/big.rs 600\n")
+        rc, out = repo.run()
+        self.assertEqual(rc, 2)
+        self.assertIn("no plain directory path", out)
+
     def test_a_new_entry_fails(self):
         repo = self.based()
         repo.write("file-size.allow", SETTINGS + "src/big.rs 600\nsrc/new.rs 700\n")
@@ -203,18 +227,14 @@ class AgainstTheBase(Case):
         repo.write("src/new.rs", lines(700))
         self.refused(repo, "changes its settings")
 
-    def test_a_raised_limit_fails(self):
+    def test_a_changed_limit_passes(self):
         repo = self.based()
         repo.write("file-size.allow", SETTINGS.replace("limit 500", "limit 800")
-                   + "src/big.rs 600\n")
+                   .replace("test-limit 800", "test-limit 900"))
         repo.write("src/new.rs", lines(700))
-        self.refused(repo, "now `limit 800`")
-
-    def test_a_raised_test_limit_fails(self):
-        repo = self.based()
-        repo.write("file-size.allow", SETTINGS.replace("test-limit 800", "test-limit 900")
-                   + "src/big.rs 600\n")
-        self.refused(repo, "now `test-limit 900`")
+        self.assertEqual(repo.run(), (0, ""))
+        repo.git("add", "-A")
+        self.assertEqual(repo.run("--staged"), (0, ""))
 
     def test_an_added_test_glob_fails_even_after_update(self):
         repo = self.based()

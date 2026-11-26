@@ -238,6 +238,34 @@ fn a_final_under_a_second_tag_is_a_second_observed_fork() {
     assert!(!rides_observed_fork(&answer, &ok, &learned).matches(), "r1's tag is not r2's");
 }
 
+/// A non-2xx final to the INVITE ends every early dialog of the leg, so it is
+/// taken under any learned fork's tag; an unknown tag, and a 2xx or a
+/// rejection of a PRACK or UPDATE under another fork's tag, stay refused.
+#[test]
+fn a_rejection_rides_any_learned_fork_of_the_leg() {
+    let mut learned = LearnedForks::default();
+    learned.bind("A", "f1", "sut-tag-1");
+    learned.bind("A", "f2", "sut-tag-2");
+    let mut rejection = step(
+        MsgSpec { status: Some(480), cseq_method: Some("INVITE".into()), ..MsgSpec::default() },
+        CheckMode::Record,
+    );
+    rejection.early = Some("f1".into());
+    let mut busy = inbound_response(480, "INVITE");
+    busy.to_tag = Some("sut-tag-2".into());
+    assert!(rides_observed_fork(&rejection, &busy, &learned).matches());
+    busy.to_tag = Some("sut-tag-9".into());
+    assert!(!rides_observed_fork(&rejection, &busy, &learned).matches(), "no fork rides tag 9");
+
+    for (status, method) in [(200, "INVITE"), (481, "PRACK"), (481, "UPDATE")] {
+        let mut own = rejection.clone();
+        own.discriminator = Discriminator::Response { status, cseq_method: Some(method.into()) };
+        let mut other = inbound_response(status, method);
+        other.to_tag = Some("sut-tag-2".into());
+        assert!(!rides_observed_fork(&own, &other, &learned).matches(), "{status} to {method}");
+    }
+}
+
 /// A leg owns its own learned tag space: a binding on ANOTHER leg neither
 /// satisfies this leg's id nor holds a tag against it.
 #[test]

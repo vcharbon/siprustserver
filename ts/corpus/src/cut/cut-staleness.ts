@@ -61,3 +61,13 @@ export const cutStaleness = Effect.fn("cutStaleness")(function*(
   }
   return stale as ReadonlyArray<Stale>
 })
+
+/**
+ * The captures of `captures` no cut has taken at all, a broken cut counting
+ * as taken: what a replay has no prep to read as of until a cut takes them.
+ * Answered in the order asked.
+ */
+export const neverCut = Effect.fn("neverCut")(function*(captures: ReadonlyArray<string>) {
+  const latest = yield* Effect.flatMap(Cuts.Service, (cuts) => cuts.latest)
+  return captures.filter((capture) => !latest.has(capture))
+})

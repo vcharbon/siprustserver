@@ -82,7 +82,7 @@ pub struct RunnerEnv {
     /// peers. Unset in a static pool: a per-boot token drawn from the OS RNG.
     pub identity: Option<String>,
     /// `B2BUA_CLUSTER_KEY` — the secret every worker of the cluster shares to
-    /// sign the via-extension on its own requests (ADR-0055 §12), 16 to 64
+    /// sign the via-extension on its own requests (ADR-0055 §12), 32 to 64
     /// bytes. Unset: the worker states none and trusts none.
     pub cluster_key: Option<sip_ids::SigningKey>,
     /// `B2BUA_CONCURRENCY` — handler concurrency ceiling (default 8192; a
@@ -139,6 +139,10 @@ pub struct RunnerEnv {
     /// INVITE's receipt to its final, an off-turn consult's deadline per round
     /// trip (default 5000; <= 0 is refused at startup — ADR-0022 X1).
     pub call_control_timeout_ms: i64,
+    /// `B2BUA_CALL_START_BOUND_MS` — how long after its INVITE's receipt a
+    /// new call's turn may start (default 4000; not above zero or not below
+    /// the setup budget is refused at startup — ADR-0070).
+    pub call_start_bound_ms: i64,
     /// `B2BUA_ACK_TIMEOUT_SEC` — un-ACKed 2xx give-up deadline (RFC 3261
     /// §13.3.1.4, 64·T1 = 32 s; <= 0 is refused at startup; the ladder
     /// always runs, ADR-0032 X5).
@@ -389,6 +393,10 @@ impl RunnerEnv {
                 "5",
             )?,
             call_control_timeout_ms,
+            call_start_bound_ms: knob(
+                "B2BUA_CALL_START_BOUND_MS",
+                &B2buaConfig::DEFAULT_CALL_START_BOUND_MS.to_string(),
+            )?,
             ack_timeout_sec: knob("B2BUA_ACK_TIMEOUT_SEC", "32")?,
             cps_bucket_size: knob("B2BUA_CPS_BUCKET_SIZE", "1000")?,
             cps_bucket_rate: knob("B2BUA_CPS_BUCKET_RATE", "500")?,

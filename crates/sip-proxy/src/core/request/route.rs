@@ -8,6 +8,7 @@
 //! [`reply`](super::reply).
 
 use std::net::SocketAddr;
+use std::sync::Arc;
 
 use sip_message::emergency::is_emergency_request;
 use sip_message::header::{ProxyRequire, Unsupported, Via};
@@ -20,26 +21,66 @@ use crate::headers::{via_marking_same_face, via_with_cookie};
 use crate::observability::metrics::{
     Direction, Face, MessageResult, NoTargetDrop, RoutingDecisionKind,
 };
+use crate::resolver::OnSent;
 use crate::self_gate::BypassKind;
 use crate::strategy::SelectOpts;
 use sip_message::received::observed_source;
 
 use super::super::ProxyCore;
 use super::reply::extra_header;
-use super::target::Chosen;
-use super::{top_via_branch, Arrival, RouteOutcome};
+use super::target::{repeat_hop, Chosen};
+use super::{received_branch, Arrival, RouteOutcome};
 
 impl ProxyCore {
-    /// Abandon a forward whose own edit the message will not allow. Unreachable
-    /// in practice — every value edited on the hop was read off these same
-    /// bytes moments earlier — and a drop is the only honest outcome: half an
-    /// edit on the wire is a request with no path back for its response.
+    /// What a send to `target` tells just before its packet is handed to the
+    /// socket, when `target` is a name: the memo entries under `keys`, written
+    /// for this forward, settle on the address the packet goes to
+    /// ([`CancelBranchLru::settle_name`]). `None` for an
+    /// IP literal, which no lookup can move.
+    ///
+    /// [`CancelBranchLru::settle_name`]: crate::cancel_lru::CancelBranchLru::settle_name
+    fn settle_on_send(&self, target: &ProxyAddr, keys: Vec<String>) -> Option<OnSent> {
+        if keys.is_empty() || target.to_socket_addr().is_some() {
+            return None;
+        }
+        let (memo, name) = (self.cancel_lru.clone(), target.clone());
+        Some(Arc::new(move |sent_to| {
+            for key in &keys {
+                memo.settle_name(key, &name, sent_to);
+            }
+        }))
+    }
+
+    /// Drops a request whose own edit the draft refuses, counted as a reject:
+    /// half an edit on the wire is a request with no path back for its
+    /// response.
     fn drop_unforwardable(&self) -> RouteOutcome {
         self.metrics.record_message(Direction::Outbound, MessageResult::Dropped);
         self.metrics.record_reject("drop_unforwardable");
         RouteOutcome { decision: RoutingDecisionKind::Reject, target: None }
     }
 
+    /// Routes one request down the RFC 3261 §16 ladder: forwards it, answers it
+    /// or drops it.
+    ///
+    /// - A supervision OPTIONS is the proxy's own to answer, ahead of the hop
+    ///   count: at `Max-Forwards: 0` the proxy is its final recipient (§16.3).
+    /// - An ACK is never answered (§17): an ACK past its hops, with an
+    ///   unsupported or unreadable Proxy-Require, or acknowledging a final this
+    ///   hop sent, ends here.
+    /// - A retransmission, matched on the whole received transaction so a
+    ///   request that only shares the branch is none, repeats its first copy's
+    ///   target (toward a name, the address that copy left for, on the name's
+    ///   face) and both
+    ///   cookies from the memo. It is not counted as a new call
+    ///   and meets no gate. A first target no longer `Alive` is replaced by
+    ///   where the first copy's cookie places the call. A CANCEL never takes
+    ///   this path; it follows its INVITE's entry.
+    /// - A copy of a refused request draws the refusal again and is not judged
+    ///   again (§8.2.7).
+    /// - An INVITE's entry keeps the cookie a CANCEL re-resolves a dead worker
+    ///   through: the verified one its Route carried, else the one its
+    ///   Record-Route was minted with. A worker-outbound INVITE keeps none.
     pub(in crate::core) async fn route_request(
         &self,
         msg: &SipMessage,
@@ -51,19 +92,20 @@ impl ProxyCore {
             self.metrics.record_reject("non_request");
             return RouteOutcome { decision: RoutingDecisionKind::Reject, target: None };
         };
+        let Some(received_branch) = received_branch(req) else {
+            tracing::error!("DEFECT: a request past ingress has no RFC 3261 branch");
+            return self.drop_unforwardable();
+        };
         let method = req.method().clone();
         let call_id = req.call_id();
         let from = req.from();
         let cseq = req.cseq();
         let select = RoutingDecisionKind::SelectNew;
 
-        // ── §16.3 + Max-Forwards ────────────────────────────────────────────
-        // The copy states the count less one, or 70 where the request states
-        // none (§16.6 step 3).
+        if let Some(answered) = self.answer_supervision(req, arrival).await {
+            return answered;
+        }
         if hops::hops_exhausted(req) {
-            // §16.3 check 2: an exhausted ACK is silently discarded, never
-            // answered — a response to an ACK is a stray message (the ACK
-            // terminates a transaction; nothing upstream awaits a reply to it).
             if method == Method::Ack {
                 self.metrics.record_reject("ack_max_forwards_exhausted");
                 return RouteOutcome { decision: RoutingDecisionKind::Reject, target: None };
@@ -74,24 +116,12 @@ impl ProxyCore {
         }
         let mf_next = hops::forwarded_max_forwards(req);
 
-        // ── §16.3 check 4: loop detection ───────────────────────────────────
-        // A request from one of this proxy's own addresses is one it forwarded
-        // that came back to it: a target naming the proxy itself.
         if self.is_own_source(src) {
             return self
                 .reply_reject(req, arrival, 482, "Loop Detected", &[], "loop_detected")
                 .await;
         }
 
-        // ── §16.3 check 5: Proxy-Require ────────────────────────────────────
-        // This proxy supports no proxy extensions, so any option-tag in
-        // Proxy-Require is unsupported: reject with 420 (Bad Extension) and an
-        // Unsupported header listing the offending tags — the request MUST NOT
-        // be forwarded. ACK is exempt: a proxy never answers an ACK (it
-        // terminates a transaction; nothing upstream awaits a reply), so an ACK
-        // with an unsupported Proxy-Require is silently dropped, never 420'd.
-        // Ingress refuses a Proxy-Require that is no option-tag list (§25.1),
-        // so one here is a defect, logged and answered 400.
         match req.token_set::<ProxyRequire>() {
             Some(Ok(required)) if !required.is_empty() => {
                 if method == Method::Ack {
@@ -126,44 +156,6 @@ impl ProxyCore {
             _ => {}
         }
 
-        // ── Non-2xx ACK hop decision (§17.1.1.3) ────────────────────────────
-        // An ACK for a NON-2xx INVITE final belongs to the INVITE transaction
-        // itself — it reuses the INVITE's top-Via branch — while an ACK for a
-        // 2xx is a NEW transaction (fresh branch) that takes the normal
-        // routing ladder. The `ackhop|` memo, written for every relayed
-        // non-2xx INVITE final, + branch match is the discriminator, NOT the
-        // presence of a Route header: a worker's b-leg INVITE carries a
-        // preloaded outbound-proxy Route, and §17.1.1.3 makes its non-2xx ACK
-        // copy that Route verbatim, so a route-presence heuristic misroutes
-        // exactly that ACK. With no ACK hop (the final crossed another
-        // instance), the ACK goes where its INVITE went: a caller's where the
-        // INVITE's entry names, else by the call's rank; a worker's by its
-        // Route and Request-URI (ADR-0009 X7). A takeover UA's 2xx ACK whose
-        // restarted `IdGen` aliases the dead incarnation's INVITE branch stays
-        // safe: no non-2xx final was relayed for a confirmed call, so no ACK
-        // hop exists, and as a worker's request it is routed by its Route and
-        // Request-URI, never by the INVITE's entry.
-        //
-        // A match is a relayed final (the memo names the node the final
-        // arrived from): a caller's ACK is RELAYED there, where §16.11 puts it
-        // on the INVITE's outbound branch so the downstream server transaction
-        // (§17.2.3) matches it and stops retransmitting the final (Timer G).
-        // A worker's ACK does not follow the final: §17.1.1.2 sends it where its
-        // INVITE went, whichever socket the far end answered from. That is the
-        // INVITE's entry where this instance holds one, else its Route and
-        // Request-URI.
-        // This transaction-less proxy never synthesizes the hop ACK itself
-        // (ADR-0022 X4; see `core/response`) — the upstream's ACK is the
-        // only quench, end-to-end, which is what keeps a lossy caller hop
-        // recoverable.
-        //
-        // The ACK to a final the proxy generated ITSELF carries the To-tag the
-        // proxy derived for that INVITE under the deployment's shared key
-        // (`crate::security::own_final_tag`): the ACK terminates HERE, at any
-        // proxy holding the key, and is never run through the strategy to hand
-        // a worker a stray ACK matching no transaction it ever created. A final
-        // to an in-dialog INVITE echoes the dialog's To-tag, so its ACK is
-        // recognised by the refusal memo holding that INVITE.
         let mut ack_hop: Option<CancelEntry> = None;
         if method == Method::Ack {
             if self.refusals.acknowledges_own_final(req)
@@ -178,77 +170,42 @@ impl ProxyCore {
                 from.tag(),
                 cseq.seq(),
             );
-            if let Some(found) = self.cancel_lru.lookup(&key) {
-                // The key carries the ACK's branch, so a hit with one is the
-                // INVITE's own transaction. Branchless legacy fallback
-                // (pre-RFC-3261 upstream): no branch to tell them apart, so
-                // the route-less heuristic decides — a 2xx ACK would carry
-                // the dialog's Route set.
-                let same_txn = top_via_branch(req).is_some();
-                let legacy_routeless = !same_txn && !req.has(&sip_message::HeaderName::Route);
-                if same_txn || legacy_routeless {
-                    ack_hop = Some(found);
-                }
-            }
+            ack_hop = self.cancel_lru.lookup(&key);
         }
 
-        // ── §16.6 / §17.2.3 retransmission memo (looked up FIRST) ───────────
-        // A retransmission repeats an already-forwarded request, so it must
-        // repeat the original forward exactly. The outbound branch it repeats
-        // is §16.11's function of the message; what this memo adds is the SAME
-        // downstream target (re-running the strategy under a changed candidate
-        // set would send the same branch to a DIFFERENT worker — one INVITE
-        // transaction split across two B2BUAs, a doubled call). It must also
-        // not be re-counted as a new call nor re-gated: a 503 to a retransmit
-        // of an admitted INVITE tears down a setup the first copy already
-        // started. Keyed on the whole received transaction
-        // (`cancel_lru::retransmit_key`) so a genuine retransmit matches but a
-        // different request that merely collides on the branch (a restarted
-        // UA's reset `IdGen`, another sender) does not.
-        // CANCEL is excluded — it resolves its target from the INVITE's own
-        // entry below.
-        let incoming_branch = top_via_branch(req);
-        let rtx_key = incoming_branch.as_ref().map(|_| {
-            retransmit_key(req.top_via(), call_id.as_str(), from.tag(), method.as_str(), cseq.seq())
-        });
-        let rtx_hit: Option<CancelEntry> = if method == Method::Cancel {
-            None
+        let rtx_key = retransmit_key(
+            req.top_via(),
+            call_id.as_str(),
+            from.tag(),
+            method.as_str(),
+            cseq.seq(),
+        );
+        let rtx_hit: Option<CancelEntry> =
+            if method == Method::Cancel { None } else { self.cancel_lru.lookup(&rtx_key) };
+        let cancelled_invite: Option<CancelEntry> = if method == Method::Cancel {
+            let key = invite_txn_key(req.top_via(), call_id.as_str(), from.tag(), cseq.seq());
+            self.cancel_lru.lookup(&key)
         } else {
-            rtx_key.as_ref().and_then(|k| self.cancel_lru.lookup(k))
+            None
         };
 
-        // ── §16.4 Route preprocessing + direction (`classify`) ──────────────
         let Some((mut draft, c)) = self.classify(msg, req, src, face, req.thaw()) else {
             return self.drop_unforwardable();
         };
 
-        // ── A copy of a refused request (§8.2.7) ────────────────────────────
-        // It draws the refusal's final and is neither counted as a new call
-        // nor judged again: a gate or a cap that cleared since must not admit
-        // a transaction this hop already refused, and a request too long to
-        // forward is not tried again. A copy of a 513 holds a retransmission
-        // memo too, and a worker's request may draw one, so both look.
         if method != Method::Ack && method != Method::Cancel {
             if let Some(repeated) = self.repeat_refusal(req, arrival).await {
                 return repeated;
             }
         }
 
-        // A new call = an initial dialog-creating INVITE (no To-tag yet), first
-        // transmission only.
-        let to = req.to();
-        let has_to_tag = to.tag().is_some_and(|t| !t.is_empty());
-        if method == Method::Invite && to.tag().is_none() && rtx_hit.is_none() {
+        let has_to_tag = req.to().tag().is_some();
+        if method == Method::Invite && !has_to_tag && rtx_hit.is_none() {
             self.metrics.record_call();
-            // The proxy's own sampling decision — independent of the worker's,
-            // taken once, on the call's first INVITE (ADR-0026).
+            // ADR-0026 §4
             self.activate_trace(req, src, self.trace_ms());
         }
 
-        // ── Proxy-self gate (`admission`) ───────────────────────────────────
-        // A retransmission bypasses the gate entirely: its first copy was
-        // already admitted and forwarded, so rejecting the re-sent copy would
-        // 503 a setup that is already ringing downstream.
         let is_emergency = is_emergency_request(req);
         if rtx_hit.is_none() && method == Method::Invite && !has_to_tag {
             if c.worker_outbound && !is_emergency {
@@ -258,63 +215,37 @@ impl ProxyCore {
             }
         }
 
-        // ── Pick the downstream target (`target`) ───────────────────────────
-        // A caller's §17.1.1.3 ACK with no ACK hop (its final crossed another
-        // instance): the INVITE's entry, which the ACK's branch keys, names
-        // where the INVITE went, whatever Route or cookie the ACK copied from
-        // it. A worker's ACK of a final relayed here: the same entry, where the
-        // ACK of an owner that holds no record of the INVITE may state less of
-        // its route. Any other worker's ACK repeats its INVITE's Route and
-        // Request-URI.
+        // ADR-0009 §X7
         let looks_at_invite = if c.worker_outbound {
             ack_hop.is_some()
         } else {
             ack_hop.is_none() && c.loose_route_next_hop.is_none()
         };
-        let placed_ack = if method == Method::Ack && looks_at_invite {
-            self.invite_hop(msg, req).await
-        } else {
-            None
-        };
+        let placed_ack =
+            if method == Method::Ack && looks_at_invite { self.invite_hop(msg, req) } else { None };
         let chosen: Result<Chosen, RouteOutcome> = if method == Method::Cancel {
-            let target = self.cancel_target(msg, req, arrival, &c).await;
+            let target = self.cancel_target(msg, req, arrival, &c, cancelled_invite.as_ref()).await;
             target.map(|t| (t, RoutingDecisionKind::Cancel, None))
         } else if let Some(found) = ack_hop.filter(|_| !c.worker_outbound) {
-            // A caller's §17.1.1.3 ACK for a relayed non-2xx final: to the node
-            // the final arrived from (see the hop-decision block above). It shares
-            // the INVITE's Call-ID, From tag, CSeq number and received branch,
-            // so §16.11 already puts it on the INVITE's outbound branch.
             Ok((found.target, RoutingDecisionKind::AckHop, None))
         } else if let Some(found) = placed_ack {
             found.map(|t| (t, RoutingDecisionKind::AckHop, None))
         } else if let Some(next) = c.loose_route_next_hop.clone() {
-            Ok((next, RoutingDecisionKind::LooseRoute, None))
+            Ok((repeat_hop(next, rtx_hit.as_ref()), RoutingDecisionKind::LooseRoute, None))
         } else if c.worker_outbound {
             let target = self.request_uri_target(req, arrival, &c).await;
+            let target = target.map(|t| repeat_hop(t, rtx_hit.as_ref()));
             target.map(|t| (t, RoutingDecisionKind::WorkerOutbound, None))
         } else if let Some(cookie) = &c.cookie {
             self.cookie_target(msg, req, arrival, cookie, rtx_hit.as_ref()).await
         } else if let Some(found) = &rtx_hit {
-            // Retransmitted out-of-dialog request: repeat the original
-            // selection. Re-running the strategy under a changed candidate set
-            // (an ELU band flip, a worker join/leave) would forward the SAME
-            // §16.11 branch to a DIFFERENT worker — one INVITE transaction
-            // split across two B2BUAs (double call), with the CANCEL entry
-            // then overwritten to point at the second one. A first copy's
-            // worker read not alive since is replaced by where the cookie it
-            // minted places the call: its backup holds the replicated call.
             let went = found.target.clone();
-            match self.follow_live_hop(went, found.minted.as_ref(), msg).await {
+            match self.follow_live_hop(went, found.minted.as_ref(), msg) {
                 Some(target) => Ok((target, RoutingDecisionKind::SelectNew, None)),
                 None => Err(self.drop_without_target(NoTargetDrop::Initial)),
             }
         } else if method == Method::Ack {
-            // A §17.1.1.3 ACK no memo, Route or cookie places (a flow moved
-            // after the INVITE crossed the other instance): where an unspilled
-            // placement put the call (ADR-0009 X7). A 2xx ACK opens its own
-            // transaction on a fresh branch and rides the dialog's cookie,
-            // which routed it above.
-            let target = self.admitted_target(msg, None, NoTargetDrop::Initial).await;
+            let target = self.admitted_target(msg, None, NoTargetDrop::Initial);
             target.map(|t| (t, RoutingDecisionKind::AckHop, None))
         } else {
             let admit_as_new = self.admits_as_new(msg, face, None);
@@ -327,13 +258,14 @@ impl ProxyCore {
             Err(refused) => return refused,
         };
 
-        // The face it leaves on, whatever its target's address (`crate::face`).
+        let memo = rtx_hit.as_ref().or(cancelled_invite.as_ref());
+        let settled_from_a_name = memo.is_some_and(|found| found.settled_on(&target));
         let egress =
             self.egress.request(face, c.worker_outbound, c.loose_route_next_hop.is_some(), || {
-                c.reentry || self.registry.lookup_by_address(&target).is_some()
+                c.reentry
+                    || (!settled_from_a_name && self.registry.lookup_by_address(&target).is_some())
             });
 
-        // ── §16.6 received/rport, Max-Forwards, Record-Route, Via ───────────
         let (src_host, src_port) = observed_source(src);
         draft = match draft.update_top::<Via>(|via| via.stamped_from(&src_host, src_port)) {
             Ok(d) => d,
@@ -341,12 +273,6 @@ impl ProxyCore {
         };
         draft = draft.set(mf_next);
 
-        // A retransmission repeats the cookies its first copy carried, on the
-        // Record-Route and on the Via, whatever moved in the worker set since:
-        // the downstream server transaction absorbs the copy, and the route
-        // set and responses it keeps are the first copy's (§12.1.1, §17.2.1),
-        // so the dialog keeps one cookie. The memo holds them for the
-        // retransmission window.
         let repeated = rtx_hit.as_ref().and_then(|found| found.minted.clone());
         let (routed, minted_cookie) = self.insert_double_record_route(
             draft,
@@ -366,16 +292,7 @@ impl ProxyCore {
             None => self.via_cookie(msg, req, &c, &originator, minted_cookie.as_ref()),
         };
 
-        // ── §16.11: the pushed branch is a function of the message ──────────
-        // A retransmission of this request, and its CANCEL and non-2xx ACK,
-        // compute the same value, so the downstream server transaction
-        // (§17.2.3) matches them to this forward at any proxy instance and
-        // whatever any memo above did or did not hold.
-        let our_branch = stateless_branch(req);
-        // Stamp the EGRESS face's advertise on the pushed Via (§18.1.1: the
-        // sent-by must be an address the next hop can return the response to —
-        // in dual-face mode that is the face the request leaves on, so the
-        // response arrives back on the same face).
+        let our_branch = stateless_branch(req, received_branch);
         let egress_adv = self.advertised_of(egress);
         let pushed = Via::udp(egress_adv.host.as_str(), egress_adv.port)
             .with_branch(our_branch.as_str())
@@ -387,39 +304,28 @@ impl ProxyCore {
         };
         draft = draft.push_front(via_with_cookie(pushed, via_cookie.as_ref()));
 
-        // Remember where the request's first copy went and both cookies, so a
-        // retransmit of THIS request repeats the forward. A retransmission
-        // forwarded elsewhere never rewrites that first target: every later
-        // copy, and the CANCEL, is judged from where the transaction lives
-        // (ADR-0050 §4). Short TTL: retransmits stop at Timer B/F.
+        // ADR-0050 §4
         let went = rtx_hit.as_ref().map_or_else(|| target.clone(), |found| found.target.clone());
+        let went_settled = rtx_hit.as_ref().is_some_and(|found| found.settled);
+        let mut memo_keys = Vec::with_capacity(2);
         if method != Method::Cancel {
-            if let Some(k) = &rtx_key {
-                self.cancel_lru.remember(
-                    k,
-                    CancelEntry {
-                        target: went.clone(),
-                        branch: our_branch.clone(),
-                        stickiness: None,
-                        minted: minted_cookie.clone(),
-                        via_cookie: via_cookie.clone(),
-                    },
-                    Lifetime::Retransmission,
-                );
-            }
+            self.cancel_lru.remember(
+                &rtx_key,
+                CancelEntry {
+                    target: went.clone(),
+                    branch: our_branch.clone(),
+                    stickiness: None,
+                    minted: minted_cookie.clone(),
+                    via_cookie: via_cookie.clone(),
+                    settled: went_settled,
+                },
+                Lifetime::Retransmission,
+            );
+            memo_keys.push(rtx_key);
         }
 
         if method == Method::Invite {
-            // Long TTL: a CANCEL or non-2xx final can legally arrive any time
-            // inside the downstream UA's INVITE window (B2BUA SetupTimeout /
-            // sip-txn INVITE_INITIAL_TIMEOUT) — see cancel_lru.rs. Keyed on
-            // the transaction as received, the Via the CANCEL will repeat.
             let key = invite_txn_key(req.top_via(), call_id.as_str(), from.tag(), cseq.seq());
-            // The cookie a CANCEL re-resolves a dead worker through: the verified
-            // one the re-INVITE carried in its Route, else the one this initial
-            // INVITE's Record-Route was minted with (a plain preloaded Route to
-            // the proxy carries none). A worker-outbound INVITE's cookie names
-            // the worker, not the downstream target, so it is not kept.
             let carried = c.cookie.as_ref().and_then(|p| self.strategy.verified_cookie(p, msg));
             let stickiness =
                 if c.worker_outbound { None } else { carried.or(minted_cookie.clone()) };
@@ -429,14 +335,16 @@ impl ProxyCore {
                 stickiness,
                 minted: None,
                 via_cookie: via_cookie.clone(),
+                settled: went_settled,
             };
             self.cancel_lru.remember(&key, entry, Lifetime::InviteTransaction);
             self.cancel_lru.publish(&self.metrics);
+            memo_keys.push(key);
         }
 
-        // ── Freeze + forward ────────────────────────────────────────────────
         let Ok(bytes) = draft.freeze_bytes() else { return self.drop_unforwardable() };
-        let refused = self.send_to(&bytes, &target, egress).await;
+        let on_sent = self.settle_on_send(&target, memo_keys);
+        let refused = self.send_to(&bytes, &target, egress, on_sent).await;
         if refused == Some(sip_net::SendErrorKind::MessageTooLong) {
             return self.reply_too_large(req, arrival).await;
         }

@@ -27,6 +27,7 @@ fn every_instant_present() -> Call {
         started_at_ms: 1_779_440_060_000,
         last_c_leg_provisional_status: None,
         c_initial_sdp: None,
+        pending_a_realign: None,
     });
     call.termination = Some(Termination {
         at_ms: 1_779_440_070_000,
@@ -62,6 +63,7 @@ fn every_instant_present() -> Call {
             cseq: 1,
             code: None,
             to_tag: None,
+            from_tag: None,
             decision_ordinal: 0,
             headers: Vec::new(),
             turn: 1,
@@ -124,6 +126,7 @@ fn every_instant_moves_by_the_offset_and_nothing_else_moves() {
     for kind in [
         "fire_at",
         "created_at",
+        "received_at",
         "timestamp",
         "decision_log",
         "termination",

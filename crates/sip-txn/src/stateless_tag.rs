@@ -31,7 +31,7 @@ impl StatelessTagger {
         Self { key }
     }
 
-    /// A tagger keyed by `secret` (16 to 64 bytes, [`SigningKey::new`]):
+    /// A tagger keyed by `secret` (32 to 64 bytes, [`SigningKey::new`]):
     /// every instance given the same secret derives the same tags, across
     /// restarts, hosts and builds. `None` for a secret of another length.
     pub fn keyed(secret: &[u8]) -> Option<Self> {

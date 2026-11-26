@@ -7,7 +7,8 @@
 //! lane first), `resolve` keys events to calls, `ingress` is
 //! the pre-dispatch pipeline, `admit` a new INVITE's router rungs of the
 //! admission ladder, `process` the per-call handler body,
-//! `commit` the tail of a turn, `turn_mark` a turn's marks at the turn-point
+//! `commit` the tail of a turn, `record_cap` the record-size cap its write is
+//! held to, `turn_mark` a turn's marks at the turn-point
 //! seam, `callouts` the fire-and-forget
 //! async-HTTP folds, `materialise` the one path a stored replica takes to
 //! become the live copy this node serves (takeover or reclaim), `departure`
@@ -23,8 +24,8 @@
 //! per-call teardown executor, `responses` the locally-authored response
 //! builders, `peer_metrics` per-peer failure attribution, `turn` the
 //! item offered to a call's queue, `owed` what a request whose body never
-//! ran is owed, and `unroutable` the answer and accounting of an event
-//! naming no call.
+//! ran is owed, `unroutable` the answer and accounting of an event naming no
+//! call, and `takeover_window` whether a takeover may be in progress here.
 
 mod admit;
 #[cfg(test)]
@@ -72,6 +73,9 @@ mod provisional_turn_tests;
 mod quiesced;
 mod readmission;
 mod reclaim;
+mod record_cap;
+#[cfg(test)]
+mod record_cap_tests;
 mod refer_result;
 mod release;
 mod reply_to;
@@ -90,6 +94,7 @@ mod stand_down;
 mod store_fault_gate;
 mod stray_cancel;
 mod stuck;
+pub(crate) mod takeover_window;
 #[cfg(test)]
 pub(crate) mod test_support;
 pub(crate) mod topology_cookie;
@@ -193,12 +198,15 @@ pub struct RouterCtx {
     pub readiness: Readiness,
     /// Outbound messages left unsent, by next hop (`router::cannot_leave`).
     pub unsent_waves: Arc<observe::WaveSet<crate::lifecycle::Unsent>>,
-    /// The To-tag of the OPTIONS health answer, derived from the request: the
-    /// transaction layer holds no transaction for an out-of-dialog OPTIONS.
-    pub options_tagger: sip_txn::StatelessTagger,
+    /// The To-tag of an answer no transaction holds, derived from the request
+    /// (RFC 3261 §8.2.7): the OPTIONS health answer, and the answer to an
+    /// untagged request naming no call (`router::unroutable`).
+    pub stateless_tagger: sip_txn::StatelessTagger,
     /// Whether a call's primary has departed (ADR-0047). `None` on an unwired
     /// node: no call there has another primary.
     pub departed: Option<crate::repl::DepartedProbe>,
+    /// Whether a takeover of a peer's calls may be in progress here.
+    pub takeover_window: takeover_window::TakeoverWindow,
     /// The replication streams from the peers, which confirm a proxy's dead
     /// verdict (ADR-0047 D1). `None` on an unwired node: a verdict there
     /// stands alone.

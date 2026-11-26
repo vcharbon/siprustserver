@@ -1,15 +1,10 @@
 //! Whether the external face can carry traffic, read from local kernel state:
 //! the external interface is present and up, and at least one of its
-//! configured next hops resolved in the neighbour table. The next hops are the
-//! external plane's BGP peers, whose BFD and keepalive traffic keeps their
-//! entries resolved while the node is let out; while the face is latched
-//! unusable the route guard drops that traffic, so each reading solicits the
-//! next hops itself. One reading of the interface down or of the next hops
-//! unresolved holds a usable face, so a carrier flap withdraws nothing when the
-//! first ARP retry after it is answered; a router answering later latches the
-//! face until the solicit is answered. `/readyz` requires the face usable, so a
-//! node whose caller-facing uplink is gone stops announcing both faces'
-//! addresses together (ADR-0056).
+//! configured next hops resolved in the neighbour table. While the face is
+//! latched unusable each reading solicits the next hops itself. One reading of
+//! the interface down or of the next hops unresolved, from a usable face, holds
+//! it usable, so a carrier flap whose first ARP retry is answered withdraws
+//! nothing. `/readyz` requires the face usable. See ADR-0056 §3.
 
 mod monitor;
 mod neighbours;
@@ -29,7 +24,6 @@ pub struct FaceCheck {
     pub next_hops: Vec<Ipv4Addr>,
 }
 
-/// One reading of the external face.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FaceState {
     Usable,
@@ -83,7 +77,6 @@ pub struct FaceLatch {
     solicit_failed: bool,
 }
 
-/// One next hop in the neighbour table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Hop {
     /// `REACHABLE`, `STALE`, `DELAY`, `PROBE` or `PERMANENT`.
@@ -94,7 +87,6 @@ enum Hop {
     Absent,
 }
 
-/// Where the kernel publishes its network interfaces.
 pub const SYS_CLASS_NET: &str = "/sys/class/net";
 
 impl FaceCheck {
@@ -196,7 +188,6 @@ impl FaceCheck {
     }
 }
 
-/// The state of `addr` on `ifindex` in `table`.
 fn hop(table: &[Neighbour], ifindex: i32, addr: Ipv4Addr) -> Hop {
     let Some(n) = table.iter().find(|n| n.ifindex == ifindex && n.addr == addr) else {
         return Hop::Absent;

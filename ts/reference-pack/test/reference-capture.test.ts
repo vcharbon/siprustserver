@@ -55,12 +55,12 @@ beforeAll(async () => {
   if (!served) return
   await fresh(SCRATCH)
   await on(SCRATCH, migrated)
-}, 120_000)
+})
 
 afterAll(async () => {
   fs.rmSync(work, { recursive: true, force: true })
   if (served) await drop(SCRATCH)
-}, 120_000)
+})
 
 /** The base campaign run of `sources` on `lane`: its exit code, the run the store holds of it and its job's events. */
 const recorded = (lane: string, workspace: string | undefined, sources: ReadonlyArray<string>) =>

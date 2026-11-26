@@ -1,7 +1,9 @@
 //! Stated text the wire cannot carry whole (ADR-0053) never costs the message
 //! it rides on: an authored final still reaches the caller, its reason phrase
 //! the status's default and the line left out; a BYE still leaves its leg
-//! without the line. Each skip is reported for the model-defect count.
+//! without the line; a response to the caller stating a To tag off `token`
+//! leaves under the stack's own. Each skip is reported for the model-defect
+//! count.
 
 use super::body_descriptors::{bridged, sent_request, values};
 use super::fixtures::*;
@@ -101,6 +103,59 @@ fn a_bye_with_a_line_break_in_a_stated_line_still_leaves() {
     assert_eq!(skips(&result), 1);
 }
 
+/// A structural name is the stack's own (RFC 3261 §16.6): a service stating
+/// one on a request it authors on a leg leaves the generator's line alone on
+/// the wire, the skip reported; a bound name stays the author's.
+#[test]
+fn a_bye_stating_a_cseq_leaves_with_the_dialogs_own() {
+    let call = bridged();
+    let next = call.b_legs[0].dialogs.confirmed().expect("b-1's dialog").our_cseq + 1;
+    let result = execute_on(
+        &call,
+        &[RuleAction::SendRequestToLeg {
+            leg_id: "b-1".into(),
+            method: "BYE".into(),
+            body: None,
+            headers: vec![
+                ("CSeq".into(), "9 BYE".into()),
+                ("Timestamp".into(), "54".into()),
+                ("X-Kept".into(), "fine".into()),
+            ],
+        }],
+    );
+    let bye = sent_request(&result, "b-1");
+    assert_eq!(bye.method(), "BYE");
+    assert_eq!(values(&bye, "CSeq"), [format!("{next} BYE")]);
+    assert_eq!(values(&bye, "Timestamp"), ["54"]);
+    assert_eq!(values(&bye, "X-Kept"), ["fine"]);
+    assert_eq!(skips(&result), 1);
+}
+
+/// The INVITE row of a service's in-dialog request is the re-INVITE, its
+/// stated lines judged alike.
+#[test]
+fn a_reinvite_stating_a_via_leaves_with_the_stacks_own() {
+    let result = execute_on(
+        &bridged(),
+        &[RuleAction::SendRequestToLeg {
+            leg_id: "b-1".into(),
+            method: "INVITE".into(),
+            body: None,
+            headers: vec![
+                ("v".into(), "SIP/2.0/UDP 192.0.2.66:5060;branch=z9hG4bKstated".into()),
+                ("X-Kept".into(), "fine".into()),
+            ],
+        }],
+    );
+    let reinvite = sent_request(&result, "b-1");
+    assert_eq!(reinvite.method(), "INVITE");
+    let via = values(&reinvite, "Via");
+    assert_eq!(via.len(), 1, "{via:?}");
+    assert!(!via[0].contains("192.0.2.66"), "{via:?}");
+    assert_eq!(values(&reinvite, "X-Kept"), ["fine"]);
+    assert_eq!(skips(&result), 1);
+}
+
 #[test]
 fn a_service_reported_skip_is_counted() {
     let result = execute_on(
@@ -108,6 +163,78 @@ fn a_service_reported_skip_is_counted() {
         &[RuleAction::ReportStatedTextSkipped { detail: "INFO part line".into() }],
     );
     assert_eq!(skips(&result), 1);
+}
+
+/// To tags no `token` spells (RFC 3261 §19.3, `tag-param = "tag" EQUAL token`).
+const OFF_TOKEN_TAGS: [&str; 3] = ["", "two words", "a;b"];
+
+/// The one response the caller was sent.
+fn response_to_a(result: &HandlerResult) -> sip_message::SipResponse {
+    let sent: Vec<_> = result
+        .effects
+        .outbound
+        .iter()
+        .filter(|e| e.leg_id.as_deref() == Some("a"))
+        .filter_map(|e| match &e.body {
+            OutboundBody::Response(r) => Some(r.clone()),
+            _ => None,
+        })
+        .collect();
+    let [resp] = sent.as_slice() else { panic!("one response to the caller: {sent:?}") };
+    resp.clone()
+}
+
+/// An early-media provisional stating a To tag off `token` still reaches the
+/// caller, under a tag the stack mints, which her early dialog holds; the skip
+/// is reported.
+#[test]
+fn a_provisional_stating_a_tag_off_token_leaves_under_a_minted_tag() {
+    for stated in OFF_TOKEN_TAGS {
+        let result = execute_on(
+            &test_call(),
+            &[RuleAction::SendProvisionalToLeg {
+                leg_id: "a".into(),
+                status: 183,
+                reason: "Session Progress".into(),
+                body: None,
+                to_tag: Some(stated.into()),
+                p_early_media: None,
+            }],
+        );
+        let resp = response_to_a(&result);
+        assert_eq!(resp.status(), 183, "{stated:?}");
+        let tag = resp.to().tag().expect("a To tag").to_string();
+        assert!(!tag.is_empty() && tag != stated, "{stated:?}: tag {tag:?}");
+        assert!(call::helpers::caller_dialog(&result.call, &tag).is_some(), "{stated:?}");
+        assert_eq!(skips(&result), 1, "{stated:?}");
+    }
+}
+
+/// A new-dialog answer stating a To tag off `token` still answers the caller,
+/// under a tag the stack mints, which the confirmed dialog holds; the skip is
+/// reported.
+#[test]
+fn a_new_dialog_answer_stating_a_tag_off_token_leaves_under_a_minted_tag() {
+    for stated in OFF_TOKEN_TAGS {
+        let result = execute_on(
+            &call_with_early_a_dialog("A1early"),
+            &[RuleAction::AnswerALegNewDialog {
+                status: 200,
+                reason: "OK".into(),
+                body: None,
+                to_tag: Some(stated.into()),
+                header_updates: vec![],
+                relayed: b2bua_core::rules::RelayedFinal::none(),
+            }],
+        );
+        let resp = response_to_a(&result);
+        assert_eq!(resp.status(), 200, "{stated:?}");
+        let tag = resp.to().tag().expect("a To tag").to_string();
+        assert!(!tag.is_empty() && tag != stated && tag != "A1early", "{stated:?}: tag {tag:?}");
+        let confirmed = result.call.a_leg.dialogs.confirmed().expect("a confirmed a-dialog");
+        assert_eq!(confirmed.our_tag, tag, "{stated:?}");
+        assert_eq!(skips(&result), 1, "{stated:?}");
+    }
 }
 
 /// A re-INVITE whose stamped lines state a single-valued header twice still
@@ -129,6 +256,27 @@ fn a_reinvite_stamping_a_single_valued_header_twice_leaves_without_it() {
     let reinvite = sent_request(&result, "b-1");
     assert_eq!(reinvite.method(), "INVITE");
     assert!(values(&reinvite, "Subject").is_empty());
+    assert_eq!(values(&reinvite, "X-Kept"), ["fine"]);
+    assert_eq!(skips(&result), 1);
+}
+
+/// A re-INVITE's stamped lines leave a structural name to the stack too.
+#[test]
+fn a_reinvite_stamping_a_max_forwards_leaves_with_the_stacks_own() {
+    let result = execute_on(
+        &bridged(),
+        &[RuleAction::SendReinvite {
+            leg_id: "b-1".into(),
+            body: None,
+            add_headers: vec![
+                sip_message::draft::Entry::raw(HeaderName::MaxForwards, SipStr::owned("5")),
+                sip_message::draft::Entry::raw(HeaderName::from("X-Kept"), SipStr::owned("fine")),
+            ],
+        }],
+    );
+    let reinvite = sent_request(&result, "b-1");
+    assert_eq!(reinvite.method(), "INVITE");
+    assert_eq!(values(&reinvite, "Max-Forwards"), ["70"]);
     assert_eq!(values(&reinvite, "X-Kept"), ["fine"]);
     assert_eq!(skips(&result), 1);
 }

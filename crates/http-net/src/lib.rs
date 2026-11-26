@@ -14,11 +14,13 @@
 //!   address and awaits the [`HttpResponse`].
 //!
 //! ## The production impl
-//! `RealHttpNetwork` — hyper server + a pooled `reqwest` client; **feature
-//! `real`**. Its tests run on a real (non-paused) runtime. The server listens
-//! with a 4096 backlog, sets `TCP_NODELAY` on every connection, and answers
-//! each request with its [`Receipt`] in scope (when its head arrived, before
-//! the body) and the connection's remote address in [`peer`] scope.
+//! `RealHttpNetwork` — hyper server + a pooled hyper-util client that keeps a
+//! record of each connection and closes the one that misbehaves
+//! ([`ejection`]); **feature `real`**. Its tests run on a real (non-paused)
+//! runtime. The server listens with a 4096 backlog, sets `TCP_NODELAY` on
+//! every connection, and answers each request with its [`Receipt`] in scope
+//! (when its head arrived, before the body) and the connection's remote
+//! address in [`peer`] scope.
 //!
 //! The simulated fabric (in-memory, per-destination faults, for the
 //! paused-clock tests), the recording decorator and the scripted test service
@@ -35,8 +37,10 @@
 //! [`BackendClient`] (ADR-0043): one per backend, its name looked up through a
 //! [`ResolvedTarget`] (bounded, single-flight), its connections held as
 //! [`ClientSettings`] state, a cap on requests in flight, a client rotated on a
-//! fixed period, a circuit breaker, the generic retry rule, and a connection
-//! closed after a 5xx answer ([`ErrorCloses`]). The transport
+//! fixed period, a circuit breaker, the generic retry rule, the connection
+//! that carried a broken or shedding backend's answer or a timed-out request
+//! closed ([`ejection`], within [`ErrorCloses`]), and a cap on an answer's
+//! body. The transport
 //! reports the honest outcome (`Ok(response)` or a classified [`HttpError`]);
 //! the budgets and what a failure means for the caller (fail the call, let
 //! it through) are the caller's policy.
@@ -60,6 +64,8 @@
 )]
 
 pub mod backend;
+pub mod ejection;
+mod env_reader;
 pub mod error_close;
 pub mod failures;
 pub mod poison;

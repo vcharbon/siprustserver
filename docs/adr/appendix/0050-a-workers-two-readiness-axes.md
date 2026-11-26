@@ -148,9 +148,9 @@ branch. A call whose routing decision the record does not hold is no
 copy's: the decision may be in flight at a primary the proxy misread dead;
 a confirmed verdict, the departure or a reclaim asks it again (ADR-0047 D4). An initial INVITE whose cookie
 names another primary and that copies no such record gets no final
-(`b2bua_foreign_invite_copies_dropped_total`; its transaction is relinquished
-with nothing sent, ahead of the 100's 200 ms bound unless the router lags
-that long): the primary still owns that transaction, and a final from this
+(`b2bua_foreign_invite_copies_dropped_total`; its transaction, which arms no
+100 before a consult (ADR-0070), is relinquished with nothing sent, however
+long the router lags): the primary still owns that transaction, and a final from this
 worker would end the caller's.
 Accepted residuals:
 - a copy of an undecided call whose primary really died is dropped: the
@@ -388,6 +388,59 @@ arrival: one more sweep of the same worker at worst. The
 lane is opt-in in the transaction layer (`keepalive_lane`), so its other
 users keep one queue. A slow but still turning worker stays `Alive`, and
 the delay of its in-dialog requests is not capped.
+
+### 13. The unattributed lane
+
+What rides it: every request that matches no transaction and whose
+Request-URI states no `callRef`, other than an initial INVITE (a new call,
+judged by admission), a CANCEL and an out-of-dialog OPTIONS (§12): a tagged
+request for a dialog the worker never had, an out-of-dialog non-INVITE, an
+ACK passed up with no transaction. An in-dialog request of a call states its
+`callRef` while the Contact the worker gave is its remote target, so it rides
+the event queue. A CANCEL does too, whatever it matches: one that matches no
+INVITE here may cancel one a takeover rebuilds (§5). The `Cancelled` of an
+INVITE that rode the lane rides it, behind that INVITE, so the router never
+takes it before the INVITE it cancels; an ACK a transaction matches rides the
+event queue.
+
+The transaction owner is the lane's one sender. It reads the lane's room
+before it stamps, judges or opens anything for the request; a request that
+finds the lane full is dropped there and counted
+(`b2bua_txn_unattributed_lane_drops_total`), as if the network had lost it.
+No transaction, 100 Trying, copy record or answer is left, so the sender's
+retransmission is judged afresh, its copy record kept. A CANCEL of an INVITE
+on the lane that finds it full is dropped before the layer answers it: no
+200, no 487. The worker's bound is 1 024 requests.
+
+The inbound UDP queue ahead of the transaction owner applies the same rule
+(`sip_txn::names_no_call`): while the ingress brake is engaged (the queue at
+its threshold, 70 %, or the event-queue gate refusing), it drops a request
+that names no call before the queue, other than an ACK (the ACK of a non-2xx
+final states its INVITE's Request-URI and ends that INVITE's transaction),
+counted
+(`b2bua_udp_ingress_brake_unattributed_dropped_total`). A flood faster than
+the owner takes the queue then holds it near the threshold, and the rest of
+it serves the datagrams of calls, which it no longer tail-drops.
+
+The router takes the lane only when the keepalive lane, the event queue,
+the timers, re-entry, fail-back and readmission have nothing ready. Taking
+from it reads neither the event-queue gate nor the age the transaction layer
+refuses new calls on. A request on the lane waits until the router has no
+other work: no bound caps its wait while the event queue stays busy. Requests
+on the two queues can be taken out of their order of arrival, as the network
+can reorder two transactions. A takeover copy's self-release (ADR-0014) waits
+for every unattributed server transaction of its Call-ID to answer, so it
+never overtakes the request that opened one; an ACK passed up with no
+transaction can be taken after it.
+
+Residuals: a request that states a forged `callRef`, and a flood of stray
+CANCELs, ride the event queue and are answered there as before. A request of a live call whose Request-URI an
+element rewrote rides the lane, so a flood can drop it; its retransmission
+recovers it (an ACK of a 2xx, the next 2xx retransmission). Responses that
+match no client transaction stay on the event queue. Past the receive
+pump's own rate, the kernel's receive buffer ahead of it loses datagrams of
+every kind. The lane is opt-in in the transaction layer
+(`unattributed_lane`), so its other users keep one queue.
 
 ## Amended
 

@@ -1462,7 +1462,7 @@ export const PcapView = Schema.Struct({
   modifiedAt: Schema.String,
   /** The capture the population holds it as, or the name its ingest will give it. */
   capture: Schema.String,
-  /** new | ingested | cut. */
+  /** new | ingest-failed | ingested | cut. */
   state: Schema.String,
   /** The standing cut's cases; null unless cut. */
   cases: Schema.NullOr(Schema.Number),

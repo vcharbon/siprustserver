@@ -6,7 +6,7 @@
 import { renderToStaticMarkup } from "react-dom/server"
 import { describe, expect, it } from "vitest"
 import { JsonView } from "../src/components/JsonView.tsx"
-import { choiceFor, describeJson, hasToggle, isOpen, JSON_FOLD_CHARS } from "../src/json-size.ts"
+import { choiceFor, describeJson, hasToggle, isOpen, isSwitchable, JSON_FOLD_CHARS, shownForm } from "../src/json-size.ts"
 
 const small = { a: 1 }
 /** A document well past the fold: a few hundred lines, several KB. */
@@ -76,5 +76,26 @@ describe("JsonView", () => {
     expect(markup).toContain(`${described.lines} lines`)
     expect(markup).toContain("KB")
     expect(markup).toContain("show")
+  })
+})
+
+describe("a document with packed strings, opened and as it came", () => {
+  const opened = describeJson({ context: { id: "r1" } })
+  const packed = describeJson({ context: "H4sIpacked" })
+
+  it("shows the opened form by default, the form it came in when asked, and offers the switch only where they differ", () => {
+    expect(shownForm(opened, packed, false)).toBe(opened)
+    expect(shownForm(opened, packed, true)).toBe(packed)
+    expect(isSwitchable(opened, packed)).toBe(true)
+    expect(isSwitchable(opened, describeJson({ context: { id: "r1" } }))).toBe(false)
+    expect(isSwitchable(opened, undefined)).toBe(false)
+    expect(shownForm(opened, undefined, true)).toBe(opened)
+  })
+
+  it("renders the opened text with a gzip switch in the bar; none for a document with nothing packed", () => {
+    const markup = renderToStaticMarkup(<JsonView value={{ context: { id: "r1" } }} packed={{ context: "H4sIpacked" }} />)
+    expect(markup).toContain("&quot;id&quot;: &quot;r1&quot;")
+    expect(markup).toContain(">gzip</button>")
+    expect(renderToStaticMarkup(<JsonView value={small} packed={small} />)).not.toContain("gzip")
   })
 })

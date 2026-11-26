@@ -1,37 +1,20 @@
-//! [`CancelBranchLru`] — proxy-local `INVITE transaction → {target, branches,
-//! cookie}` cache with per-entry TTL.
+//! [`CancelBranchLru`]: the proxy-local memo of `INVITE transaction →
+//! {target, branches, cookie}`, with a TTL per entry.
 //!
-//! RFC 3261 §16.10 / §17.2.3: a stateless proxy forwards a CANCEL to the same
-//! downstream the matching INVITE went to. The outbound branch the downstream
-//! transaction layer correlates them by is a function of the message (§16.11,
-//! `crate::branch`), so what this cache carries is the TARGET.
-//! An entry is keyed on the INVITE transaction as its upstream opened it
-//! ([`invite_txn_key`]): the received top-Via branch and sent-by, the pair a
-//! CANCEL repeats (§9.1) and §17.2.3 matches on. The dialog identity is no key
-//! on its own: a spiral (§16.3) crosses this proxy twice under one Call-ID,
-//! From tag and CSeq, once each way, and each pass's CANCEL belongs with its
-//! own INVITE. Keying on the RECEIVED transaction rather than on the proxy's
-//! outbound branch survives the LoadBalancer re-sharding a fallback selection
-//! to a different worker.
-//!
-//! The same cache also drives the non-2xx ACK hop decision (`ackhop|` keys —
-//! relay the upstream's §17.1.1.3 ACK for a relayed final to the node the
-//! final arrived from; see `core/request` and `core/response.rs`) and the
-//! retransmission target memo (`rtx|`-prefixed keys, see `core/request`).
-//! The ACK to a final the proxy generated itself is recognised by its To-tag
-//! and writes nothing here (`crate::refusals`).
-//!
-//! Each instance of an active pair holds only what crossed it, so every
-//! request these entries route also routes without them (ADR-0009 X7): an
-//! entry is a placement only this instance knows (a spill), a target the
-//! cookie would re-derive, or a hop the Request-URI names.
+//! It holds three kinds of entry: an INVITE transaction's CANCEL target (RFC
+//! 3261 §16.10), keyed on the transaction as received ([`invite_txn_key`]: the
+//! top-Via branch and sent-by, §9.1, §17.2.3); the hop of the ACK to a relayed
+//! non-2xx final (`ackhop|` keys, §17.1.1.3); and a request's retransmission
+//! target (`rtx|` keys). The ACK to a final the proxy generated itself writes
+//! nothing here (`crate::refusals`). Every request these entries route also
+//! routes without them. See ADR-0009 X1, X7.
 //!
 //! Keys are written by whoever sends the proxy a request, so the memo is
-//! bounded in entries and accounted bytes ([`MemoBounds`]). Each [`Lifetime`]
-//! has its own pool and share of the bounds; past a bound a pool forgets its
-//! oldest writes and counts them. Expiry and eviction walk a pool's write
-//! order from its front, so their work is what they remove, never the table.
-//! Reads and writes take one stripe's lock and never block on I/O.
+//! bounded in entries and accounted bytes ([`MemoBounds`]). Each
+//! [`Lifetime`] has its own pool and share of the bounds; past a bound a pool
+//! forgets its oldest writes and counts them. Expiry and eviction walk a pool's
+//! write order from its front, so their work is what they remove, never the
+//! table. Reads and writes take one stripe's lock and never block on I/O.
 
 mod bounds;
 mod footprint;
@@ -41,6 +24,7 @@ mod stripe;
 use std::collections::hash_map::RandomState;
 use std::fmt::Write as _;
 use std::hash::BuildHasher;
+use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
@@ -60,12 +44,9 @@ pub use bounds::{
 use pool::Change;
 use stripe::Stripe;
 
-/// TTL for retransmission target memos (`rtx|` keys): upstream retransmits
-/// stop at Timer B/F (64×T1 = 32 s), so these need live no longer. They are
-/// written for EVERY forwarded request — including each keepalive OPTIONS — so
-/// keeping them short keeps the map at ≈ one transaction window of traffic.
-/// It is also Timer H, the life of an ACK hop and of an INVITE entry whose
-/// final passed.
+/// TTL of a retransmission target memo (`rtx|` keys): Timer F (64×T1), past
+/// which no upstream retransmits. It is also Timer H, the life of an ACK hop
+/// and of an INVITE entry whose final passed.
 pub const RTX_ENTRY_TTL_MS: u64 = TIMER_F;
 
 /// How long a memo entry lives, and the pool of each stripe it is held in.
@@ -82,9 +63,8 @@ pub enum Lifetime {
     Retransmission,
 }
 
-/// Default sweep cadence — half the SHORT (rtx) TTL, so the dominant entry
-/// class is physically reclaimed near its expiry and the map stays at ~1×
-/// working set.
+/// Default sweep cadence: half [`RTX_ENTRY_TTL_MS`], so a retransmission
+/// entry, the most numerous, is reclaimed within half its TTL of expiring.
 pub const DEFAULT_SWEEP_INTERVAL_MS: u64 = 16_000;
 
 #[expect(clippy::disallowed_macros, reason = "checked at compile time")]
@@ -99,8 +79,8 @@ const _: () = assert!(RTX_ENTRY_TTL_MS == TIMER_H);
 /// Call-ID, From tag and CSeq number, which the INVITE, its CANCEL, its non-2xx
 /// ACK and every response to them repeat. The three dialog fields keep apart
 /// two transactions on one branch token (an upstream that spends a token twice
-/// across a restart, or a pre-RFC-3261 one that sends none). `|` is illegal in
-/// every component, so the join is unambiguous; a missing part keys as empty.
+/// across a restart). `|` is illegal in every component, so the join is
+/// unambiguous; a missing part keys as empty.
 pub fn invite_txn_key(via: &Via, call_id: &str, from_tag: Option<&str>, cseq_num: u32) -> String {
     txn_key(&["inv"], via, call_id, from_tag, cseq_num)
 }
@@ -119,6 +99,8 @@ pub fn retransmit_key(
     txn_key(&["rtx", method], via, call_id, from_tag, cseq_num)
 }
 
+/// The branch is folded to lower case in the key: a branch compares ignoring
+/// case (RFC 3261 §7.3.1).
 fn txn_key(
     namespace: &[&str],
     via: &Via,
@@ -137,7 +119,6 @@ fn txn_key(
         key.push_str(part);
         key.push('|');
     }
-    // A branch compares ignoring case (RFC 3261 §7.3.1): the key holds it folded.
     key.extend(branch.chars().map(|c| c.to_ascii_lowercase()));
     key.push('|');
     let _ = sent_by.write_canonical(&mut key);
@@ -160,7 +141,9 @@ pub fn ack_hop_key(via: &Via, call_id: &str, from_tag: Option<&str>, cseq_num: u
 /// What we cache per remembered INVITE: the downstream target and the branch
 /// we stamped on our outgoing Via (§16.11's function of the message — empty
 /// marks a final the proxy generated itself, whose ACK has no downstream to
-/// reach). The upstream's branch is part of the key.
+/// reach). The upstream's branch is part of the key. A named target becomes
+/// the address its send left for once that send settles it
+/// ([`CancelBranchLru::settle_name`]).
 ///
 /// `stickiness` is the cookie the INVITE's dialog rides on (the params of the
 /// Record-Route this proxy minted for it, or of the Route it carried), kept only
@@ -181,6 +164,18 @@ pub struct CancelEntry {
     pub stickiness: Option<RouteParams>,
     pub minted: Option<RouteParams>,
     pub via_cookie: Option<RouteParams>,
+    /// `target` is the address a send to a name left for, written by
+    /// [`CancelBranchLru::settle_name`] and kept by a copy's rewrite of the
+    /// entry. The face a request leaves on is the name's, so no registry match
+    /// of that address moves it.
+    pub settled: bool,
+}
+
+impl CancelEntry {
+    /// Whether `target` is this entry's address settled from a name.
+    pub fn settled_on(&self, target: &ProxyAddr) -> bool {
+        self.settled && self.target == *target
+    }
 }
 
 /// The CANCEL / ACK / retransmission memo: [`DEFAULT_STRIPES`] independently
@@ -217,13 +212,11 @@ impl CancelBranchLru {
         Self::with_clock(Clock::system())
     }
 
-    /// Explicit clock (tests use `Clock::test_at(..)` for deterministic
-    /// eviction under `tokio::time`), default bounds.
+    /// Default bounds, read on `clock`.
     pub fn with_clock(clock: Clock) -> Self {
         Self::with_bounds(clock, MemoBounds::default())
     }
 
-    /// Explicit clock and bounds.
     pub fn with_bounds(clock: Clock, bounds: MemoBounds) -> Self {
         let stripes = (0..bounds.stripe_count()).map(|_| Mutex::new(Stripe::new(&bounds)));
         Self {
@@ -237,15 +230,11 @@ impl CancelBranchLru {
         }
     }
 
-    /// Spawn the background sweeper for this LRU — once. Every `ProxyCore::run`
-    /// calls this; the first caller claims it and N recv-shard cores sharing one
-    /// LRU don't end up with N sweepers. A write expires its own stripe and a
-    /// lookup an expired entry it meets, so a stripe nobody writes to keeps its
-    /// expired entries until this sweep reclaims them; each sweep also
-    /// re-publishes the memo's series ([`publish`](Self::publish)). The task is
-    /// detached (process-lifetime, like the LRU itself) and restarted when a
-    /// sweep panics; supervision exits the process if a core dies, so an
-    /// orphaned sweeper cannot outlive the data path in production.
+    /// Spawn the memo's background sweeper, once whatever the number of
+    /// callers. A write expires only its own stripe and a lookup only the entry
+    /// it meets, so the sweep reclaims the stripes nobody writes to; each sweep
+    /// also republishes the memo's series ([`publish`](Self::publish)). The
+    /// task lives as long as the process and restarts when a sweep panics.
     pub fn ensure_sweeper(self: &Arc<Self>, metrics: Arc<ProxyMetrics>) {
         if self.sweeper_claimed.swap(true, Ordering::SeqCst) {
             return;
@@ -333,7 +322,17 @@ impl CancelBranchLru {
         found
     }
 
-    /// The entries held.
+    /// The entry under `key`, while it targets the name `name`, targets `to`,
+    /// the address a send to that name left for: the requests it routes
+    /// (a CANCEL, a non-2xx ACK, a retransmission) go there without a lookup
+    /// (RFC 3261 §9.1, §17.1.1.3). Its expiry stays.
+    pub fn settle_name(&self, key: &str, name: &ProxyAddr, to: SocketAddr) {
+        let mut change = Change::default();
+        let mut stripe = self.stripe(key);
+        stripe.retarget(key, name, &ProxyAddr::from(to), &mut change);
+        self.account(&change);
+    }
+
     pub fn size(&self) -> usize {
         self.len.load(Ordering::Relaxed)
     }
@@ -365,7 +364,6 @@ impl CancelBranchLru {
         swept
     }
 
-    /// Publish the memo's size to `metrics`.
     pub fn publish(&self, metrics: &ProxyMetrics) {
         metrics.set_pending_invite_lru_size(u64::try_from(self.size()).unwrap_or(u64::MAX));
     }

@@ -50,7 +50,7 @@ beforeAll(async () => {
     })
   )
   await on(SCRATCH, Server.migrated)
-}, 60_000)
+})
 
 afterAll(async () => {
   if (!served) return
@@ -60,7 +60,7 @@ afterAll(async () => {
       yield* Server.dropDatabase(SCRATCH)
     })
   )
-}, 60_000)
+})
 
 describe.skipIf(!served)("Population", () => {
   it("counts only the captures it had never held", () =>
@@ -105,6 +105,26 @@ describe.skipIf(!served)("Population", () => {
       // A restated record instant never moves an instant the row holds.
       yield* population.add([{ capture: one, sourcePath: "/p/one", ingestedAt: "2020-01-01T00:00:00.000Z", extractorHash: "e2" }])
       expect((yield* population.list)[0]).toMatchObject({ ingestedAt: first.ingestedAt })
+    })))
+
+  it("keeps whose a failure is while the failure stands restated, and drops it once the failure clears", () =>
+    withStore(Effect.gen(function*() {
+      yield* empty
+      const population = yield* Population.Service
+      const sql = yield* SqlClient
+      const one = "capture_kind.pcap.gz"
+      const kind = Effect.map(
+        sql<{ kind: string | null }>`SELECT ingest_failure_kind AS kind FROM population WHERE capture = ${one}`,
+        (rows) => rows[0]?.kind
+      )
+      yield* population.add([{ capture: one, sourcePath: "/p/k", ingested: true, extractorHash: "e1", ingestFailed: "killed", ingestFailureKind: "run" }])
+      expect(yield* kind).toBe("run")
+      yield* population.add([{ capture: one, sourcePath: "/p/k", extractorHash: "e1", ingestFailed: "killed" }])
+      expect(yield* kind).toBe("run")
+      yield* population.add([{ capture: one, sourcePath: "/p/k", ingested: true, extractorHash: "e1", ingestFailed: "exited 1", ingestFailureKind: "capture" }])
+      expect(yield* kind).toBe("capture")
+      yield* population.add([{ capture: one, sourcePath: "/p/k", ingested: true, extractorHash: "e1", ingestFailed: null, ingestFailureKind: null }])
+      expect(yield* kind).toBeNull()
     })))
 
   it("fills a row's missing ingest instant from the record a current capture keeps, once", () =>

@@ -23,6 +23,13 @@ class MetallbObjects(unittest.TestCase):
             self.assertEqual(adv, {"ipAddressPools": [name], "aggregationLength": 32,
                                    "peers": [f"sip-test-sip-front-proxy-{peer}"]})
 
+    def test_an_ipv6_vips_pool_holds_that_one_address(self) -> None:
+        docs = render(SIPRUST, *KIND, "--set", "network.proxyVip=fd00::250",
+                      "--set", "network.externalVip=2001:db8::250")
+        for face, vip in (("internal", "fd00::250"), ("external", "2001:db8::250")):
+            pool = find(docs, "IPAddressPool", f"sip-test-sip-front-proxy-{face}")
+            self.assertEqual(pool["spec"]["addresses"], [f"{vip}/128"])
+
     def test_peers_from_the_proxy_nodes_with_bfd_and_no_graceful_restart(self) -> None:
         docs = render(SIPRUST, *KIND)
         bfd = find(docs, "BFDProfile", "sip-test-sip-front-proxy")["spec"]

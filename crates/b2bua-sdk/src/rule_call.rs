@@ -3,11 +3,13 @@
 use std::collections::BTreeMap;
 
 use call::features::{FeatureActivations, RelayFirst18xStrategy};
-use call::helpers::{PrackDisposition, RAckTokens};
+use call::helpers::{InviteInProgress, PrackDisposition, RAckTokens};
 use call::{
     ALegInviteSnapshot, ActivePeer, Call, CallModelState, CdrEvent, Dialog, ExtMap, Leg, MachineId,
     Obligation, PromotePemState, StateLabel, TransferState,
 };
+
+use crate::lifecycle::RouteAnswer;
 
 /// The **refined view** of a [`Call`] a rule reads (ADR-0020 X8) — the entire
 /// read surface a rule handler, `Match::filter` guard, or service `init` hook
@@ -26,14 +28,29 @@ use call::{
 /// `emergency`. Add an accessor only when a real rule needs it — never
 /// speculatively.
 #[derive(Clone, Copy)]
-pub struct RuleCall<'a>(pub(crate) &'a Call);
+pub struct RuleCall<'a>(pub(crate) &'a Call, Option<&'a RouteAnswer>);
 
 impl<'a> RuleCall<'a> {
     /// Wrap a call for rule consumption. Built by the engine at the dispatch
     /// boundary (router / seed path); constructing one grants only the narrow
     /// read surface below.
     pub fn new(call: &'a Call) -> Self {
-        Self(call)
+        Self(call, None)
+    }
+
+    /// The view a service's `init` reads at call setup: `call` as the setup
+    /// routed it, and `route`, the routing answer the setup applied.
+    pub fn at_setup(call: &'a Call, route: &'a RouteAnswer) -> Self {
+        Self(call, Some(route))
+    }
+
+    /// The routing answer the call's setup applied, as a service's `init`
+    /// reads it (ADR-0016 X8): the route the setup applied, the first, or
+    /// the failover that stood in for a refused one. Its slices are the
+    /// ones the route states; [`ext`](Self::ext) also keeps those a refused
+    /// route left. `None` outside `init`, and at a setup that applied no route.
+    pub fn setup_route(&self) -> Option<&'a RouteAnswer> {
+        self.1
     }
 
     // ── identity / lifecycle ─────────────────────────────────────────────
@@ -136,6 +153,27 @@ impl<'a> RuleCall<'a> {
     /// Both peered leg ids (`active_peer`), or empty when split.
     pub fn all_peered_legs(&self) -> Vec<String> {
         call::helpers::all_peered_legs(self.0)
+    }
+    /// Whether `leg_id` carries the call ([`call::helpers::carries_call`]): an
+    /// in-dialog transaction timeout there ends the call, one on any other leg
+    /// that leg alone (ADR-0068). A dialling INVITE's timeout keeps the setup's
+    /// failure reading.
+    pub fn carries_call(&self, leg_id: &str) -> bool {
+        call::helpers::carries_call(self.0, leg_id)
+    }
+    /// The legs that carry the call ([`call::helpers::call_carrying_legs`]),
+    /// the originator's first.
+    pub fn call_carrying_legs(&self) -> Vec<&'a str> {
+        call::helpers::call_carrying_legs(self.0)
+    }
+    /// What holds an INVITE transaction in progress on the dialog a re-INVITE
+    /// of this stack toward `leg_id` rides ([`call::helpers::carrying_dialog`]),
+    /// as that re-INVITE's own guard reads it (RFC 3261 §14.1,
+    /// [`call::helpers::invite_in_progress`]). `None`: a re-INVITE may leave.
+    pub fn invite_in_progress(&self, leg_id: &str) -> Option<InviteInProgress> {
+        let leg = call::helpers::find_leg(self.0, leg_id)?;
+        let dialog = call::helpers::carrying_dialog(leg)?;
+        call::helpers::invite_in_progress(self.0, leg_id, &dialog.id())
     }
 
     // ── admission ──────────────────────────────────────────────────────────

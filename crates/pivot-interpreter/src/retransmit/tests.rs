@@ -633,3 +633,157 @@ fn the_emitters_bye_on_the_dialog_closes_its_2xx_ladder() {
         "the BYE at 415 ms ended the dialog before the 2xx's 500 ms rung: {charged:#?}"
     );
 }
+
+/// The system's 2xx to our re-INVITE on leg B, received at 929.829 ms and
+/// never ACKed, the system's BYE on that dialog at 1 346.554 ms, the 2xx's
+/// copies at `copies_us`; the mismatches the 2xx's step draws by `run_end_us`.
+fn reinvite_2xx_after_the_emitters_bye(copies_us: &[u64], run_end_us: u64) -> Vec<Failure> {
+    reinvite_2xx_after_the_emitters_bye_then_acked(copies_us, None, run_end_us)
+}
+
+/// The same ladder, our ACK to the 2xx sent at `ack_us` after the emitter's
+/// BYE where it is `Some`.
+fn reinvite_2xx_after_the_emitters_bye_then_acked(
+    copies_us: &[u64],
+    ack_us: Option<u64>,
+    run_end_us: u64,
+) -> Vec<Failure> {
+    let ok = b"SIP/2.0 200 OK\r\nContact: <sip:fixture@192.0.2.98>\r\nCall-ID: c1\r\nFrom: <sip:b@h>;tag=b1\r\n\
+            To: <sip:s@h>;tag=s1\r\nCSeq: 1 INVITE\r\n\r\n";
+    let ack =
+        b"ACK sip:s@h SIP/2.0\r\nMax-Forwards: 70\r\nCall-ID: c1\r\nFrom: <sip:b@h>;tag=b1\r\n\
+            To: <sip:s@h>;tag=s1\r\nCSeq: 1 ACK\r\n\r\n";
+    let bye =
+        b"BYE sip:b@h SIP/2.0\r\nMax-Forwards: 70\r\nCall-ID: c1\r\nFrom: <sip:s@h>;tag=s1\r\n\
+            To: <sip:b@h>;tag=b1\r\nCSeq: 2 BYE\r\n\r\n";
+    let reinvite = b"INVITE sip:s@h SIP/2.0\r\nMax-Forwards: 70\r\nContact: <sip:fixture@192.0.2.99>\r\nCall-ID: c1\r\nFrom: <sip:b@h>;tag=b1\r\n\
+            To: <sip:s@h>;tag=s1\r\nCSeq: 1 INVITE\r\n\r\n";
+    let mut repeats = Repeats::new();
+    repeats.claim("s9", "B", LadderSide::Send, None, &[], reinvite, 887_931);
+    repeats.note("B", ok, 929_829);
+    repeats.claim("s14", "B", LadderSide::Expect, None, &[], ok, 929_829);
+    repeats.note("B", bye, 1_346_554);
+    repeats.claim("s17", "B", LadderSide::Expect, None, &[], bye, 1_346_554);
+    if let Some(at) = ack_us {
+        repeats.answered("B", ack, at);
+    }
+    for &at in copies_us {
+        repeats.note("B", ok, at);
+    }
+    repeats
+        .mismatches(run_end_us)
+        .into_iter()
+        .filter(|f| matches!(f, Failure::RetransmitCountMismatch { step, .. } if step == "s14"))
+        .collect()
+}
+
+/// RFC 3261 §13.3.1.4 ends a 2xx ladder at the ACK or 64·T1, never at a
+/// BYE: a UAS that keeps retransmitting its 2xx after sending its own BYE,
+/// at 0.5/1/2 s from the first, owes no fewer copies and sent no extra one.
+/// Each copy arrives 18.7 ms ahead of its rung, inside one hop of jitter.
+#[test]
+fn a_2xx_ladder_run_on_past_the_emitters_bye_on_the_rfc_cadence_is_no_mismatch() {
+    let charged =
+        reinvite_2xx_after_the_emitters_bye(&[1_411_171, 2_411_167, 4_411_151], 5_287_619);
+    assert!(charged.is_empty(), "the copies ride the §13.3.1.4 ladder: {charged:#?}");
+}
+
+/// The same ladder, its copies sent in a burst right after the BYE: the
+/// second and third land a whole rung early, which no §13.3.1.4 ladder does.
+#[test]
+fn copies_of_the_2xx_off_the_rfc_cadence_after_the_emitters_bye_stay_a_mismatch() {
+    let charged =
+        reinvite_2xx_after_the_emitters_bye(&[1_411_171, 1_431_000, 1_451_000], 5_287_619);
+    assert_eq!(charged.len(), 1, "a burst is not the §13.3.1.4 ladder: {charged:#?}");
+}
+
+/// Three copies in 20 ms, 3.5 s after the 2xx: each is past its rung, and
+/// none is one §13.3.1.4 interval after the copy before it.
+#[test]
+fn a_late_burst_after_the_emitters_bye_stays_a_mismatch() {
+    let charged =
+        reinvite_2xx_after_the_emitters_bye(&[4_429_829, 4_439_829, 4_449_829], 5_287_619);
+    assert_eq!(charged.len(), 1, "a late burst is not the §13.3.1.4 ladder: {charged:#?}");
+}
+
+/// Our ACK ends the ladder even after the emitter's BYE (RFC 3261
+/// §13.3.1.4): copies after an ACK sent 3.4 ms behind the BYE stay a
+/// mismatch, on the RFC cadence or not.
+#[test]
+fn copies_after_our_ack_that_follows_the_emitters_bye_stay_a_mismatch() {
+    let charged = reinvite_2xx_after_the_emitters_bye_then_acked(
+        &[1_411_171, 2_411_167, 4_411_151],
+        Some(1_350_000),
+        5_287_619,
+    );
+    assert_eq!(charged.len(), 1, "three copies after our ACK: {charged:#?}");
+}
+
+/// A copy that crossed our ACK on the wire, inside one round trip of it,
+/// was on its rung before the ACK reached the emitter.
+#[test]
+fn a_copy_that_crossed_our_ack_after_the_emitters_bye_is_no_mismatch() {
+    let charged =
+        reinvite_2xx_after_the_emitters_bye_then_acked(&[1_411_171], Some(1_400_000), 5_287_619);
+    assert!(charged.is_empty(), "one copy inside the ACK's round trip: {charged:#?}");
+}
+
+/// A copy past the rungs the run window holds is one the RFC's ladder had
+/// not sent by the run's end: a fourth copy 7.48 s after the 2xx, inside
+/// the jitter of its 7.5 s rung, in a run that ended at 7.49 s.
+#[test]
+fn a_copy_past_the_rungs_of_the_run_window_stays_a_mismatch() {
+    let charged = reinvite_2xx_after_the_emitters_bye(
+        &[1_411_171, 2_411_167, 4_411_151, 8_409_829],
+        8_419_829,
+    );
+    assert_eq!(charged.len(), 1, "four copies where the window holds three rungs: {charged:#?}");
+}
+
+/// A CANCEL client transaction is Completed once its 200 arrives (RFC 3261
+/// §17.1.2.2): a copy the system sends after that 200 is owed by no timer,
+/// whatever provoked it.
+#[test]
+fn a_cancel_re_sent_after_its_200_stays_a_mismatch() {
+    let cancel =
+        b"CANCEL sip:b@h SIP/2.0\r\nMax-Forwards: 70\r\nCall-ID: c1\r\nFrom: <sip:a@h>;tag=a1\r\n\
+            To: <sip:b@h>\r\nCSeq: 1 CANCEL\r\n\r\n";
+    let answer = b"SIP/2.0 200 OK\r\nContact: <sip:fixture@192.0.2.98>\r\nCall-ID: c1\r\nFrom: <sip:a@h>;tag=a1\r\n\
+            To: <sip:b@h>;tag=b1\r\nCSeq: 1 CANCEL\r\n\r\n";
+    let mut repeats = Repeats::new();
+    repeats.claim("s10", "B", LadderSide::Expect, None, &[], cancel, 489_682);
+    repeats.answered("B", answer, 489_749);
+    repeats.note("B", cancel, 695_539);
+    let charged = repeats.mismatches(5_000_000);
+    assert_eq!(charged.len(), 1, "the CANCEL repeat after its 200: {charged:#?}");
+}
+
+/// Our ACK ends a 2xx ladder (RFC 3261 §13.3.1.4): copies after it stay a
+/// mismatch, on the RFC cadence or not; only the emitter's own BYE leaves
+/// the ladder running.
+#[test]
+fn copies_of_the_2xx_after_our_ack_stay_a_mismatch_on_the_rfc_cadence() {
+    let ok = b"SIP/2.0 200 OK\r\nContact: <sip:fixture@192.0.2.98>\r\nCall-ID: c1\r\nFrom: <sip:b@h>;tag=b1\r\n\
+            To: <sip:s@h>;tag=s1\r\nCSeq: 1 INVITE\r\n\r\n";
+    let ack =
+        b"ACK sip:s@h SIP/2.0\r\nMax-Forwards: 70\r\nCall-ID: c1\r\nFrom: <sip:b@h>;tag=b1\r\n\
+            To: <sip:s@h>;tag=s1\r\nCSeq: 1 ACK\r\n\r\n";
+    let reinvite = b"INVITE sip:s@h SIP/2.0\r\nMax-Forwards: 70\r\nContact: <sip:fixture@192.0.2.99>\r\nCall-ID: c1\r\nFrom: <sip:b@h>;tag=b1\r\n\
+            To: <sip:s@h>;tag=s1\r\nCSeq: 1 INVITE\r\n\r\n";
+    let mut repeats = Repeats::new();
+    repeats.claim("s9", "B", LadderSide::Send, None, &[], reinvite, 887_931);
+    repeats.note("B", ok, 929_829);
+    repeats.claim("s14", "B", LadderSide::Expect, None, &[], ok, 929_829);
+    repeats.answered("B", ack, 1_346_554);
+    for at in [1_411_171, 2_411_167, 4_411_151] {
+        repeats.note("B", ok, at);
+    }
+    let charged: Vec<Failure> = repeats
+        .mismatches(5_287_619)
+        .into_iter()
+        .filter(|f| matches!(f, Failure::RetransmitCountMismatch { step, .. } if step == "s14"))
+        .collect();
+    assert_eq!(charged.len(), 1, "three copies after our ACK: {charged:#?}");
+}
+
+mod sut_acks;

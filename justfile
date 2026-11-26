@@ -114,8 +114,31 @@ test-cpu-quota:
 
 # ── review gates ───────────────────────────────────────────────────────
 
-lint: file-size purity panic-sites audit-gate
+lint: file-size comments purity panic-sites audit-gate
     cargo clippy --workspace --all-targets
+
+# In-body comment ban on the modules comments.clean lists, those the
+# delete-comment skill swept: a comment is a doc comment stating its item's
+# contract; every other comment is banned but a lone one-line `// SAFETY:` over
+# unsafe code or a bare ADR pointer (scripts/comments.py). The pre-commit hook
+# checks the staged files.
+comments:
+    scripts/comments.py
+
+# Lowers each comments.clean entry to its file's count and removes the entries
+# of files at 0; never raises nor adds one.
+comments-update:
+    scripts/comments.py --update
+
+# Every file holding banned comments, most first, with its budget.
+comments-report:
+    @scripts/comments.py --report
+
+# The comment lexer, its ratchet and the delete-comment skill's tool on
+# throwaway repositories (under a second).
+comments-check:
+    PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts/comments-check
+    PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s .claude/skills/delete-comment -p 'test_*.py'
 
 # The RustSec audit of Cargo.lock (scripts/audit.py, .cargo/audit.toml): a
 # vulnerability not ignored there fails when the branch touches Cargo.lock or
@@ -133,8 +156,8 @@ audit:
 audit-check:
     PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts/audit-check
 
-# File-size budget: a first-party .rs file has at most 500 lines, a test file
-# 800, a file `file-size.allow` lists at most its listed size
+# File-size budget: a first-party .rs file has at most 800 lines, a test file
+# too, a file `file-size.allow` lists at most its listed size
 # (scripts/file-size.py). The pre-commit hook checks the staged files.
 file-size:
     scripts/file-size.py

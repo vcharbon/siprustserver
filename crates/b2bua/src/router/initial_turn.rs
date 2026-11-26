@@ -43,12 +43,19 @@ pub(super) enum Turn {
 
 /// The initial-INVITE turn: the admission ladder's router rungs admitted it
 /// at ingress (`super::admit`, ADR-0037); here the store-fault probe, the
-/// identity guard, then build + rule the new call. A setup its caller
+/// identity guard, then build + rule the new call. The probe runs before the
+/// guard's store read, which a faulted store cannot answer: it refuses the
+/// INVITE 500, its first response, and no call is born (ADR-0023). A setup its caller
 /// CANCELed before this turn ran is born and ruled by no one: no decision, no
-/// limiter admit. A setup whose budget ran out before this turn ran is refused
-/// as an unavailable decision, its call born only to write its record. The
-/// probe's 500, the identity guard's 500, the cancelled setup, the cordon's or
-/// the budget's 503, or the accept counts the INVITE's outcome once
+/// limiter admit. A setup whose turn starts past its start bound, or whose
+/// budget ran out before this turn ran, is refused as an unavailable decision,
+/// its call born only to write its record; so is an INVITE refused on sight
+/// ([`crate::initial_invite::OnSight`]), which no decision is asked for and
+/// which is no admitted call. Only a consulted call sends its caller a 100
+/// (ADR-0070): behind its creation write, or at the fallback bound armed as
+/// its decision request leaves. The probe's
+/// 500, the identity guard's 500, the cancelled setup, the cordon's, the start
+/// bound's or the budget's 503, the refusal on sight, or the accept counts the INVITE's outcome once
 /// ([`crate::new_calls`]); a copy is answered 482 and refused as a copy.
 /// `admitted` is the hold and the setup budget of a new call, `None` for a
 /// copy, whose budget only ends its wait for its permits: it asks nothing and
@@ -67,14 +74,7 @@ pub(super) async fn initial_invite_turn(
     admitted: Option<(UnbornCall, SetupBudget)>,
     turn: &mut TurnScope,
 ) -> Turn {
-    // ── Live-path store-fault probe (ADR-0023): initial INVITE ──────────────
-    // The dialog-existence lookup (the `peek` identity guard below) is the
-    // store read this INVITE depends on; a faulted store cannot answer "does
-    // this dialog already exist", so the probe fires BEFORE the peek (its
-    // answer is untrustworthy under a fault). Fail CLOSED: a final **500
-    // Server Internal Error** through the INVITE server txn — superseding the
-    // auto-100, composing with the ADR-0022 no-100-then-silence guarantee —
-    // and NO call state is born.
+    // ADR-0023
     let class = class_of(req);
     let cseq = req.cseq().seq();
     // A turn with no admission hold is a copy, offered unjudged: never a new
@@ -134,6 +134,7 @@ pub(super) async fn initial_invite_turn(
     }
 
     let mut call = build_initial_call(req, src, &ctx.config, &mut turn.ids, now_ms);
+    call.received_at = budget.received_ms(&ctx.clock).map_or(now_ms, |at| at.min(now_ms));
     // A call is born only with a record that rebuilds its caller's INVITE
     // (ADR-0052 §11): an INVITE whose record does not is refused from the
     // INVITE itself.
@@ -155,13 +156,24 @@ pub(super) async fn initial_invite_turn(
     // whose setup budget ran out before it ran (ADR-0022 X1).
     let cancelled = ctx.state.is_setup_cancelled(call_ref, cseq);
     let cordoned = !cancelled && ctx.readiness.state() == ReadinessState::Cordoned;
-    let spent = !cancelled && !cordoned && budget.spent();
+    let late = !cancelled && !cordoned && budget.started_late();
+    let spent = !cancelled && !cordoned && !late && budget.spent();
+    let on_sight = if cancelled || cordoned || late || spent {
+        None
+    } else {
+        crate::initial_invite::OnSight::of(&call, &caller)
+    };
+    let consults = !(cancelled || cordoned || late || spent) && on_sight.is_none();
     if cancelled {
         ctx.metrics.new_calls().cancel(class);
     } else if cordoned {
         ctx.metrics.new_calls().reject(Refusal::Cordoned, class);
+    } else if late {
+        ctx.metrics.new_calls().reject(Refusal::StartBound, class);
     } else if spent {
         ctx.metrics.new_calls().reject(Refusal::SetupBudget, class);
+    } else if on_sight.is_some() {
+        ctx.metrics.new_calls().reject(Refusal::OnSight, class);
     } else {
         ctx.metrics.new_calls().accept(class);
         // The `adm` published on X-Overload counts non-emergency calls only:
@@ -185,43 +197,24 @@ pub(super) async fn initial_invite_turn(
     }
     let backed = ctx.state.admit_backup(call_ref, topology.as_ref());
     ctx.state.create(call.clone(), topology);
-    // The caller's 100 follows the call's creation write through the call's
-    // outbox, so the backup holds the call from before the caller stops
-    // retransmitting, not from its decision (ADR-0047, ADR-0055 §3); the
-    // transaction layer sends it itself at the §17.2.1 bound.
     if backed {
         ctx.state.flush(&call);
     }
-    behind_the_write(ctx, call_ref, Rider::Trying(Box::new(req.clone()))).await;
+    if consults {
+        trying_behind_the_creation_write(ctx, call_ref, req).await;
+    }
     // Born: the call counts as live from here.
     drop(unborn);
-    // RFC 3261 §8.1.1.3: a dialog-forming INVITE MUST carry a From tag. The
-    // caller's From tag IS the a-leg dialog's remote tag, so admitting a
-    // tag-less INVITE would seed an un-probeable a-leg dialog (its in-dialog
-    // keepalive OPTIONS could never be built — see `send_request_to_leg`),
-    // producing the "OPTIONS to called, not calling" asymmetry that also
-    // round-trips through HA hydration. Reject malformed at ingest instead.
-    // Created-then-rejected mirrors the decision-reject path so the Terminated
-    // invariant reaps the call + propagates the delete.
     // The consult reads the setup-CANCEL mark itself, after its last await;
     // the other arms await nothing and leave it to the drop guard below.
     let (mut consulted, mut recorded) = (false, false);
+    let advertisement = &ctx.config.minted_final_advertisement;
     let mut handled = if cancelled {
         cancelled_setup(call.clone(), &caller, datagram, now_ms)
-    } else if cordoned || spent {
+    } else if cordoned || late || spent {
         refused_unavailable(ctx, call.clone(), &caller, now_ms)
-    } else if call.a_leg_invite.from_tag.is_empty() {
-        crate::initial_invite::reject_call(
-            call.clone(),
-            &caller,
-            400,
-            Some("Bad Request - missing From tag".into()),
-            None,
-            &[],
-            &ctx.config.minted_final_advertisement,
-            now_ms,
-            TerminationCause::Admission,
-        )
+    } else if let Some(why) = on_sight {
+        why.refuse(call.clone(), &caller, advertisement, now_ms)
     } else {
         consulted = true;
         // `datagram` is the only place the INVITE as it arrived exists (the
@@ -242,6 +235,7 @@ pub(super) async fn initial_invite_turn(
             budget,
             &setup_cancelled,
         );
+        arm_the_fallback_100(ctx, req).await;
         let consult = consult_writing_its_cancel(ctx, call_ref, &call, &caller, consult).await;
         match consult {
             Consulted::Applied(result) => *result,
@@ -298,6 +292,28 @@ pub(super) async fn initial_invite_turn(
         Ok(result) => Turn::Result(Box::new(result)),
         Err(tripped) => Turn::Tripped(tripped),
     }
+}
+
+/// Queue the caller's 100 for her INVITE `invite` behind the creation write of
+/// `call_ref`, through the call's outbox, so the backup holds the call from
+/// before the caller stops retransmitting, not from its decision (ADR-0047,
+/// ADR-0055 §3). Only a call that consults queues it: no 100 leaves before
+/// the consult (ADR-0070), where the fallback bound is armed too
+/// ([`arm_the_fallback_100`]).
+async fn trying_behind_the_creation_write(
+    ctx: &Arc<RouterCtx>,
+    call_ref: &str,
+    invite: &SipRequest,
+) {
+    behind_the_write(ctx, call_ref, Rider::Trying(Box::new(invite.clone()))).await;
+}
+
+/// Arm the fallback 100 of the caller's INVITE `invite` (ADR-0070 §2), in the
+/// poll that sends the consult's decision request: the transaction layer sends
+/// it 200 ms from here unless the rider behind the creation write released it
+/// first. The command is queued, never awaiting the layer's turn.
+async fn arm_the_fallback_100(ctx: &RouterCtx, invite: &SipRequest) {
+    let _ = ctx.txn.arm_trying(invite).await;
 }
 
 /// [`refused_unavailable`] from the pre-handler call ([`discarded_turn`]), so

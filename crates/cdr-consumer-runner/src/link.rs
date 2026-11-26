@@ -23,8 +23,8 @@ use tokio::time::{timeout_at, Instant};
 
 /// Where the consumer links to and how long a setup may take.
 pub struct Target {
-    /// The broker's AMQP URI.
-    pub url: String,
+    /// The broker's AMQP URI, as [`amqp_connect::checked_uri`] reads it.
+    pub uri: AMQPUri,
     /// The TLS the URI's scheme asks for, built once: every setup's
     /// handshake rides it.
     pub tls: BrokerTls,
@@ -91,14 +91,12 @@ impl Target {
     }
 
     async fn setup(&self, deadline: Instant) -> Result<Opened, lapin::Error> {
-        let url = self.url.as_str();
-        tracing::info!(node = observe::node(), state = "connecting", %url, "AMQP connection");
-        let uri: AMQPUri =
-            url.parse().map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
-        let connected = amqp_connect::connect_uri(&uri, &self.tls, deadline).await?;
+        let broker = amqp_connect::broker_name(&self.uri);
+        tracing::info!(node = observe::node(), state = "connecting", %broker, "AMQP connection");
+        let connected = amqp_connect::connect_uri(&self.uri, &self.tls, deadline).await?;
         let socket = ShutdownOnDrop(connected.socket);
-        let connection = amqp_connect::open_over(uri, connected.stream).await?;
-        tracing::info!(node = observe::node(), state = "connected", %url, "AMQP connection");
+        let connection = amqp_connect::open_over(self.uri.clone(), connected.stream).await?;
+        tracing::info!(node = observe::node(), state = "connected", %broker, "AMQP connection");
         let channel = connection.create_channel().await?;
 
         // Declare the SAME queue the producer declares (durable + bounded), so the
@@ -120,7 +118,7 @@ impl Target {
             )
             .await?;
         let queue = self.queue.as_str();
-        tracing::info!(node = observe::node(), state = "consuming", %queue, %url, "AMQP connection");
+        tracing::info!(node = observe::node(), state = "consuming", %queue, %broker, "AMQP connection");
         Ok(Opened { deliveries, channel, connection, socket })
     }
 }

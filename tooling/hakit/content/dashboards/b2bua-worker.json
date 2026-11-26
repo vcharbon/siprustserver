@@ -89,7 +89,7 @@
     },
     {
       "id": 4, "type": "stat", "title": "CDRs dropped / sec",
-      "description": "`b2bua_cdr_dropped_total` — CDRs lost to buffer overflow. Should be flat zero.",
+      "description": "`b2bua_cdr_dropped_total`, every reason summed: CDRs that ended undelivered. Should be flat zero; the CDR panel below splits it by reason.",
       "gridPos": { "h": 4, "w": 6, "x": 18, "y": 0 },
       "datasource": { "type": "prometheus", "uid": "vm" },
       "targets": [{ "expr": "sum(rate(b2bua_cdr_dropped_total{pod=~\"$pod\"}[1m]))", "refId": "A" }],
@@ -144,11 +144,14 @@
     },
     {
       "id": 9, "type": "timeseries", "title": "CDR written vs dropped / sec",
+      "description": "written · dropped by reason (`b2bua_cdr_dropped_total{reason}`: buffer_full, closed, close_deadline, encode, no_broker, window_full, publish_failed, nacked, returned, unconfirmed, file_write, panic) · a broker sink's connect attempts by outcome and session ends by reason; `b2bua_cdr_broker_connected` reads 1 while a session lives.",
       "gridPos": { "h": 8, "w": 12, "x": 0, "y": 20 },
       "datasource": { "type": "prometheus", "uid": "vm" },
       "targets": [
         { "expr": "sum(rate(b2bua_cdr_written_total{pod=~\"$pod\"}[1m]))", "refId": "A", "legendFormat": "written" },
-        { "expr": "sum(rate(b2bua_cdr_dropped_total{pod=~\"$pod\"}[1m]))", "refId": "B", "legendFormat": "dropped" }
+        { "expr": "sum by (reason) (rate(b2bua_cdr_dropped_total{pod=~\"$pod\"}[1m])) > 0", "refId": "B", "legendFormat": "dropped {{reason}}" },
+        { "expr": "sum by (outcome) (rate(b2bua_cdr_broker_connects_total{pod=~\"$pod\"}[1m])) > 0", "refId": "C", "legendFormat": "connects {{outcome}}" },
+        { "expr": "sum by (reason) (rate(b2bua_cdr_broker_session_ends_total{pod=~\"$pod\"}[1m])) > 0", "refId": "D", "legendFormat": "session ends {{reason}}" }
       ],
       "fieldConfig": { "defaults": { "unit": "cps" } }
     },

@@ -39,6 +39,7 @@ pub mod ack;
 pub mod bye;
 pub mod cancel;
 pub mod capabilities;
+pub mod carried_lines;
 pub mod contact_policy;
 pub mod in_dialog;
 pub mod invalid_request;
@@ -58,6 +59,7 @@ pub use ack::{
 pub use bye::generate_bye_for_2xx_from_invite;
 pub use cancel::generate_cancel;
 pub use capabilities::{admitted_on, CapabilitySet, B2BUA_ACCEPT, B2BUA_ALLOW, B2BUA_SUPPORTED};
+pub use carried_lines::body_and_advertisement_lines;
 pub use contact_policy::{
     request_states_contact, response_names_retry_targets, response_states_contact,
     response_states_own_contact, retain_retry_targets_for, retry_targets,

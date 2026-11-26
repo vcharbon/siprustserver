@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock, PoisonError};
 
-use scenario_harness::actor::{ActorCall, GoalStep};
+use scenario_harness::actor::{originating_role, ActorCall, GoalStep};
 
 /// What one call was drawn as.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -16,6 +16,60 @@ pub struct Drawn {
     pub call_id: String,
     /// The draw in one line: the shape's choices, then the perturbations.
     pub desc: String,
+    /// The non-2xx finals its in-dialog requests may meet, `(requester,
+    /// method, code)`: a refusal a party was drawn to give, met by its peer's
+    /// requests; `487` to a request a party holds when a BYE crosses it (RFC
+    /// 3261 §15.1.2); `491` to a renegotiation of either side still refused
+    /// once its retries ran out while a party held an ACK or an answer
+    /// (§14.1); and `420` to the sender of a request requiring an extension no
+    /// party implements, of its UAS (§8.2.2.3) or of a proxy (§16.3).
+    pub refusals: Vec<(Requester, &'static str, u16)>,
+}
+
+/// Whose in-dialog request a drawn final answers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Requester {
+    /// The originating party's: its record failures name no leg.
+    Caller,
+    /// A callee leg's: its record failures name the leg.
+    Callee,
+    Either,
+}
+
+/// The in-dialog finals `call`'s draw asks for ([`Drawn::refusals`]).
+pub(crate) fn refusals(call: &ActorCall) -> Vec<(Requester, &'static str, u16)> {
+    let caller = originating_role(&call.actors);
+    let mut out = Vec::new();
+    for a in &call.actors {
+        let (own, peer) = if a.role == caller {
+            (Requester::Caller, Requester::Callee)
+        } else {
+            (Requester::Callee, Requester::Caller)
+        };
+        let requires_unknown = a.goals.iter().any(|g| match &g.step {
+            GoalStep::InDialog { headers, .. } => {
+                headers.iter().any(|(_, v)| v == crate::payload::UNKNOWN_EXTENSION)
+            }
+            _ => false,
+        });
+        if requires_unknown {
+            out.push((own, "INFO", 420));
+        }
+        let mut holds = !a.delayed.is_empty();
+        for (method, answer) in [("INVITE", a.answers.reinvite), ("UPDATE", a.answers.update)] {
+            out.extend(answer.refuse.map(|code| (peer, method, code)));
+            if !answer.hold.is_zero() {
+                out.push((peer, method, 487));
+                holds = true;
+            }
+        }
+        if holds {
+            out.extend([(Requester::Either, "INVITE", 491), (Requester::Either, "UPDATE", 491)]);
+        }
+    }
+    out.sort_unstable();
+    out.dedup();
+    out
 }
 
 /// The prefix of a stamped Call-ID; the seed's 16 hex digits follow it.
@@ -78,7 +132,7 @@ pub fn seal(call: &mut ActorCall, seed: u64, token: &str, desc: String, log: boo
         let id = used.split('@').next().unwrap_or(&used);
         eprintln!("FUZZ-DRAW {id} seed={seed:#018x} {desc}");
     }
-    let draw = Drawn { seed, call_id: used, desc };
+    let draw = Drawn { seed, call_id: used, desc, refusals: refusals(call) };
     drawn().lock().unwrap_or_else(PoisonError::into_inner).insert(token.to_string(), draw);
 }
 

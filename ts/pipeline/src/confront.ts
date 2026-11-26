@@ -17,10 +17,11 @@
  *   held against that resource's text, both sides folded under the
  *   expectation's `compare` mode; the expected texts come from the caller,
  *   keyed by ref, and a ref the caller did not supply is the caller's error.
- *   Under `sdp` the fold masks the lane-owned fields the expect's `rewrite`
- *   names only where the run's media mode says the lane rebooked them, and
- *   on a verbatim run holds the two texts to the same bytes, an origin the
- *   replayed endpoint mints marked on its `o=` row (`./sdporigin.ts`).
+ *   Under `sdp` the two texts compare by meaning (`./sdpfold.ts`): the fold
+ *   masks the lane-owned fields the expect's `rewrite` names only where the
+ *   run's media mode says the lane rebooked them, and on a verbatim run an
+ *   origin the replayed endpoint mints is marked on its `o=` row
+ *   (`./sdporigin.ts`).
  * - **shape** — the verdict's structural failures, restated in the delta-record
  *   vocabulary (a final answered with another status, a datagram nothing
  *   expected — serviced by the leg or not — an expectation nothing satisfied,
@@ -37,11 +38,21 @@ import { carriesBody, mimeKey } from "./bodies.js"
 import { bodiesEqual } from "./bodyfold.js"
 import { layoutFault, locate, type LayoutFault } from "./parts.js"
 import { diffSdp, maskOf } from "./sdpfold.js"
-import { answering, collecting, type Driven, identitiesIn, type Ledger, readings, type Reception, type Sighting } from "./sdporigin.js"
+import {
+  answering,
+  collecting,
+  type Driven,
+  identitiesIn,
+  type LegDialog,
+  type Ledger,
+  readings,
+  type Reception,
+  type Sighting
+} from "./sdporigin.js"
 import { type CaseContext, type Classification, type DocumentStep, NO_PACK, type PackOf, type UnackedFinal } from "./classifier.js"
 import { items, valuesEqual } from "./fold.js"
 import { legPlaces } from "./leg-role.js"
-import { receptionsOf, sentOf } from "./receptions.js"
+import { byeAheadOfInviteFinal, receptionsOf, sentOf } from "./receptions.js"
 import type { BodyProbe, HeaderProbe, MsgScope, Probe } from "./probe.js"
 import { probeSetDelta, scopeText, shapeSides, signature } from "./probe.js"
 import type { WireHeader } from "./wire.js"
@@ -251,7 +262,8 @@ const runShape = (
       })
     ),
     receptions: receptionsOf(recordings),
-    sent: sentOf(recordings)
+    sent: sentOf(recordings),
+    byeAheadOfInviteFinal: byeAheadOfInviteFinal(recordings)
   }
 }
 
@@ -419,11 +431,13 @@ export const bodyProbes = (
     .flatMap((recording, leg) => recording.map((message, at) => ({ leg, at, message })))
     .sort((a, b) => a.message.at_us - b.message.at_us || a.leg - b.leg || a.at - b.at)
   const flowAt = new Map([...steps.keys()].map((id, at) => [id, at]))
+  const dialogs = legDialogs(wire)
   const walk = (origins: Ledger | undefined): ReadonlyMap<Bundle.RecordedMessage, ReadonlyArray<ProbeAt>> => {
     const found = new Map<Bundle.RecordedMessage, ReadonlyArray<ProbeAt>>()
     wire.forEach(({ leg, message }, replayedAt) => {
       const capturedAt = message.step === undefined ? Number.MAX_SAFE_INTEGER : flowAt.get(message.step) ?? Number.MAX_SAFE_INTEGER
-      found.set(message, messageBodyProbes(input, steps, message, media, origins?.at({ capturedAt, replayedAt, leg })))
+      const place = { capturedAt, replayedAt, leg, opens: scopeOf(message)?.kind === "initial-invite", legDialogs: dialogs.get(leg) ?? [] }
+      found.set(message, messageBodyProbes(input, steps, message, media, origins?.at(place)))
     })
     return found
   }
@@ -437,6 +451,59 @@ export const bodyProbes = (
   }
   return legs.flatMap((recording) => recording.flatMap((message) => found.get(message) ?? []))
 }
+
+/**
+ * By leg, every dialog it opened, in wire order: each dialog-opening INVITE
+ * transaction (Call-ID and CSeq number), ended by the ACK to its non-2xx final
+ * (RFC 3261 §17.1.1.3) or by a final to a BYE naming the tag its 2xx answered
+ * with (§15.1.1), in either direction. A dialog that never ended on the wire
+ * states no end.
+ */
+const legDialogs = (
+  wire: ReadonlyArray<{ readonly leg: number; readonly message: Bundle.RecordedMessage }>
+): ReadonlyMap<number, ReadonlyArray<LegDialog>> => {
+  interface Opened {
+    readonly callId: string
+    readonly cseq: string
+    readonly openedAt: number
+    endedAt?: number
+    refused: boolean
+    readonly tags: Set<string>
+  }
+  const byLeg = new Map<number, Array<Opened>>()
+  wire.forEach(({ leg, message }, at) => {
+    const start = startLineOf(headText(message))
+    if (start === undefined) return
+    const headers = headersInOrder(message)
+    const callId = (headerValuesOf(headers, "Call-ID")[0] ?? "").trim()
+    const cseq = cseqOf(message)
+    const opened = byLeg.get(leg) ?? []
+    byLeg.set(leg, opened)
+    const transaction = opened.find((d) => d.callId === callId && d.cseq === cseq.number)
+    if (start.kind === "request") {
+      if (scopeOf(message)?.kind === "initial-invite" && transaction === undefined) {
+        opened.push({ callId, cseq: cseq.number, openedAt: at, refused: false, tags: new Set() })
+      }
+      if (start.method === "ACK" && transaction?.refused === true && transaction.endedAt === undefined) transaction.endedAt = at
+      return
+    }
+    if (start.status < 200) return
+    if (cseq.method === "INVITE" && transaction !== undefined) {
+      if (start.status >= 300) transaction.refused = true
+      else transaction.tags.add(tagOf(headerValuesOf(headers, "To")[0]))
+      return
+    }
+    if (cseq.method !== "BYE") return
+    const named = [tagOf(headerValuesOf(headers, "To")[0]), tagOf(headerValuesOf(headers, "From")[0])]
+    for (const d of opened) {
+      if (d.endedAt === undefined && d.callId === callId && named.some((t) => t !== "" && d.tags.has(t))) d.endedAt = at
+    }
+  })
+  return new Map([...byLeg].map(([leg, opened]) => [leg, opened.map(({ openedAt, endedAt }) => endedAt === undefined ? { openedAt } : { openedAt, endedAt })]))
+}
+
+/** The `tag` parameter of a To or From value, `""` where it states none. */
+const tagOf = (value: string | undefined): string => /;\s*tag\s*=\s*([^;>\s]+)/i.exec(value ?? "")?.[1] ?? ""
 
 /** One reception's body probes; none where it answers no `expect` stating a body. */
 const messageBodyProbes = (
@@ -628,7 +695,6 @@ const bodyProbe = (
         line: d.line,
         ...(d.mintedOrigin === true ? { mintedOrigin: true as const } : {}),
         ...(d.originNotContinued === true ? { originNotContinued: true as const } : {}),
-        ...(d.orderOnly === true ? { orderOnly: true as const } : {}),
         ...(d.versionStepOne === true ? { versionStepOne: true as const } : {})
       }
     }))
@@ -906,12 +972,18 @@ export const shapeProbes = (
   recordings: ReadonlyMap<string, ReadonlyArray<Bundle.RecordedMessage>>
 ): ReadonlyArray<ProbeAt> => {
   const answered = answeredTransactions(recordings)
+  const repeatProbe = repeatReader(recordings)
   const out: Array<ProbeAt> = []
   for (const failure of verdict.failures ?? []) {
     switch (failure.failure) {
       case "unmatched-datagram": {
         const { arrived, gated_on } = failure
         const step = steps.get(failure.step)
+        const repeat = repeatProbe(failure.step, failure.leg, arrived)
+        if (repeat !== undefined) {
+          out.push(repeat)
+          break
+        }
         if (arrived.kind === "response" && gated_on.kind === "response") {
           out.push({
             step: failure.step,
@@ -961,8 +1033,16 @@ export const shapeProbes = (
         break
       }
       case "unexpected-datagram":
+        out.push(
+          repeatProbe("", failure.leg, failure.arrived) ??
+            strayProbe("", failure.leg, failure.arrived, answered, failure.detail)
+        )
+        break
       case "datagram-after-flow":
-        out.push(strayProbe("", failure.leg, failure.arrived, answered))
+        out.push(
+          repeatProbe("", failure.leg, failure.arrived) ??
+            strayProbe("", failure.leg, failure.arrived, answered)
+        )
         break
       case "expect-timed-out":
         out.push({
@@ -1017,6 +1097,70 @@ const answeredTransactions = (
   return out
 }
 
+/** The CSeq number and upper-cased method a recorded message states. */
+const cseqOf = (message: Bundle.RecordedMessage): { readonly number: string; readonly method: string } => {
+  const [number = "", method = ""] = (headerValuesOf(headersInOrder(message), "CSeq")[0] ?? "").trim().split(/\s+/)
+  return { number, method: method.toUpperCase() }
+}
+
+/** One leg's ACKs to the 2xx it sent: by CSeq number, whether a step claimed each copy, in arrival order. */
+type AckCopies = ReadonlyMap<string, ReadonlyArray<boolean>>
+
+/**
+ * Per leg, the ACK copies it received for each INVITE it answered 2xx: every
+ * received ACK under that CSeq number, retransmissions left out, in arrival
+ * order, each marked with whether a step claimed it.
+ */
+const ackCopiesOf = (
+  recordings: ReadonlyMap<string, ReadonlyArray<Bundle.RecordedMessage>>
+): ReadonlyMap<string, AckCopies> => {
+  const out = new Map<string, AckCopies>()
+  for (const [leg, recording] of recordings) {
+    const answered = new Set<string>()
+    const copies = new Map<string, Array<boolean>>()
+    for (const message of recording) {
+      const start = startLineOf(headText(message))
+      if (start === undefined) continue
+      const cseq = cseqOf(message)
+      if (message.dir === "out" && start.kind === "response" && start.status >= 200 && start.status < 300 && cseq.method === "INVITE") {
+        answered.add(cseq.number)
+      }
+      if (message.dir !== "in" || message.repeat_of !== undefined || start.kind !== "request" || cseq.method !== "ACK") continue
+      copies.set(cseq.number, [...(copies.get(cseq.number) ?? []), message.step !== undefined])
+    }
+    out.set(leg, new Map([...copies].filter(([number]) => answered.has(number))))
+  }
+  return out
+}
+
+/**
+ * The repeat reader of one verdict: each refused ACK to a 2xx the leg sent, in
+ * the verdict's order, taken as the leg's next copy no step claimed, as the
+ * repeat it is (`copies`: the copies received up to and including it, the
+ * first left out), or `undefined` for a first copy or another request. Only
+ * the ACK of a 2xx: it has no transaction to absorb a copy (RFC 3261
+ * §17.1.1.3), where any other repeated request is a retransmission whose
+ * refusal the other shapes state.
+ */
+const repeatReader = (recordings: ReadonlyMap<string, ReadonlyArray<Bundle.RecordedMessage>>) => {
+  const acks = ackCopiesOf(recordings)
+  const refused = new Map<string, number>()
+  return (step: string, leg: string, arrived: Bundle.Arrived): ProbeAt | undefined => {
+    if (arrived.kind !== "request" || arrived.method.toUpperCase() !== "ACK") return undefined
+    const claimed = acks.get(leg)?.get(String(arrived.cseq))
+    if (claimed === undefined) return undefined
+    const key = `${leg}\u0000${arrived.cseq}`
+    const nth = refused.get(key) ?? 0
+    refused.set(key, nth + 1)
+    const copies = claimed.map((taken, at) => (taken ? -1 : at)).filter((at) => at >= 0)[nth]
+    if (copies === undefined || copies < 1) return undefined
+    return {
+      step,
+      probe: { kind: "shape", step, shapeKind: { shape: "repeated-request", method: "ACK", copies }, scope: undefined }
+    }
+  }
+}
+
 /**
  * A datagram the script refused, as a shape: `serviced-stray` where the leg
  * answered it, `extra-message` where nothing did. The split is a real
@@ -1024,29 +1168,43 @@ const answeredTransactions = (
  * RFC 3261 §15.1.2 running, one nobody answered is a transaction left open —
  * so the two carry different signatures and a lane blesses them separately.
  * Only a REQUEST can be serviced; a stray response answers nothing and stays an
- * extra message.
+ * extra message. A request the leg serviced although its CSeq skipped the
+ * dialog's sequence (RFC 3261 §12.2.1.1) is the sender's numbering fault, not
+ * a request the script did not expect: its action is `cseq-skip`. A datagram
+ * no step claimed states the leg and CSeq it arrived with (`stray`).
  */
 const strayProbe = (
   step: string,
   leg: string,
   arrived: Bundle.Arrived,
-  answered: ReadonlyMap<string, ReadonlySet<string>>
+  answered: ReadonlyMap<string, ReadonlySet<string>>,
+  detail?: string
 ): ProbeAt => {
   const serviced =
     arrived.kind === "request" &&
     (answered.get(leg)?.has(`${arrived.cseq} ${arrived.method.toUpperCase()}`) ?? false)
+  const action = detail !== undefined && CSEQ_SKIP.test(detail) ? "cseq-skip" : "auto-reacted"
+  const stray = step === "" && arrived.kind !== "unreadable" ? { stray: { leg, cseq: arrived.cseq } } : {}
   return {
     step,
     probe: {
       kind: "shape",
       step,
       shapeKind: serviced
-        ? { shape: "serviced-stray", method: arrivedToken(arrived), action: "auto-reacted" }
+        ? { shape: "serviced-stray", method: arrivedToken(arrived), action }
         : { shape: "extra-message", method: arrivedToken(arrived) },
-      scope: undefined
+      scope: undefined,
+      ...stray
     }
   }
 }
+
+/**
+ * The dialog verdict of a CSeq skip as an `unexpected-datagram` failure's
+ * `detail` states it: the interpreter writes the scenario harness's
+ * `DialogVerdict` display there (`<method> CSeq <n> skips on From-tag ...`).
+ */
+const CSEQ_SKIP = /^\S+ CSeq \d+ skips on From-tag /
 
 /** The scope a substitution pins: the initial-INVITE final, or the answered transaction. */
 const substitutionScope = (step: Flow.Step | undefined, observed: number): MsgScope => {

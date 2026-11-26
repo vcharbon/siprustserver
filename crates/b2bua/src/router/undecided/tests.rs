@@ -98,6 +98,47 @@ async fn a_reask_past_its_budget_refuses_the_caller_unasked() {
     assert!(cdr.events.iter().any(|e| e.status_code == Some(503)), "its 503: {cdr:?}");
 }
 
+/// A re-ask of a call whose INVITE requires an option tag this stack does not
+/// understand refuses it on sight, as its first owner does: 420 (RFC 3261
+/// §8.2.2.3), nothing asked, nothing dialled, cause `Admission`. A primary
+/// that dies between the call's creation write and its refusal's leaves the
+/// call so; the failover harness marks no turn point between the two writes.
+#[tokio::test(start_paused = true)]
+async fn a_reask_of_an_invite_requiring_an_unknown_tag_refuses_it_420_unasked() {
+    use crate::router::test_support::node;
+    use crate::setup_budget::SetupBudget;
+    use sip_message::header::HeaderName;
+
+    let node = node("w0").await;
+    let ctx = node.core.router_ctx().clone();
+    let req = invite("w0", "w1", "undecided-420")
+        .thaw()
+        .push_raw(HeaderName::Require, "x-nonexistent")
+        .freeze()
+        .expect("a request with one more header is complete");
+    let config = B2buaConfig { self_ordinal: "w0".into(), ..Default::default() };
+    let call = build_initial_call(&req, src(), &config, &mut sip_ids::TurnIds::fixed(1), 0);
+    let call_ref = call.call_ref.clone();
+    ctx.state.create(call, None);
+
+    let length = std::time::Duration::from_millis(5_000);
+    super::reask_turn(
+        &ctx,
+        &call_ref,
+        SetupBudget::from_receipt(tokio::time::Instant::now(), length),
+    )
+    .await;
+
+    assert!(!ctx.state.contains(&call_ref), "the refused call ended");
+    let records = node.cdr.snapshot();
+    let cdr = records.iter().find(|r| r.call_ref == call_ref).expect("its CDR");
+    assert!(cdr.decision_log.is_empty(), "nothing asked: {cdr:?}");
+    assert!(cdr.b_legs.is_empty(), "nothing dialled: {cdr:?}");
+    assert!(cdr.events.iter().any(|e| e.status_code == Some(420)), "its 420: {cdr:?}");
+    let cause = cdr.termination.as_ref().map(|t| t.cause);
+    assert_eq!(cause, Some(call::TerminationCause::Admission));
+}
+
 /// A re-ask whose route would dial past the legs' cap trips as the initial
 /// INVITE's turn does (ADR-0057 §4): nothing is dialled, the record stays as
 /// the re-ask found it and owes its limiter release, and the trip is counted

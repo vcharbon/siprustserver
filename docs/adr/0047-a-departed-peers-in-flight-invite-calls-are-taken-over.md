@@ -1,7 +1,7 @@
 # A departed peer's in-flight INVITE calls are taken over
 
 **Status:** accepted. Amended by ADR-0022 X1 (D4), ADR-0039 decision 5 (D2), ADR-0050 §3
-(D1, D2) and ADR-0055 §3–§7 (D2, D5, D7); the [amendment record](appendix/0047-a-departed-peers-in-flight-invite-calls-are-taken-over.md#amendment-record)
+(D1, D2), ADR-0055 §3–§7 (D2, D5, D7) and ADR-0070 (D3, D4); the [amendment record](appendix/0047-a-departed-peers-in-flight-invite-calls-are-taken-over.md#amendment-record)
 lists each change.
 **Amends:** ADR-0014 D1 (takeover is reactive only), ADR-0022 X4 and X5, ADR-0031's case
 table and its D3 split rule (the lifecycle order the forward and reverse gates read),
@@ -12,7 +12,8 @@ Owner modules, test cells and the long form of each rule are in the
 
 ## Context
 
-The stateless front proxy relays a worker's 100 Trying (RFC 3261 §16.11, ADR-0022 X4). A
+The stateless front proxy relays a worker's 100 Trying (RFC 3261 §16.11, ADR-0022 X4), which
+leaves once the call is written to its backup or its decision is asked (ADR-0070). A
 caller that heard it runs no Timer B and sends nothing more until a final (§17.1.1.2).
 With reactive-only takeover (ADR-0014 D1), a call whose serving node dies while nothing
 arrives never gets a final. Four windows are open: a new call with its routing decision in
@@ -52,16 +53,19 @@ partition; its limiter release runs on the verdict too (D8).
 ### D3. A new call is written to its backup at its birth
 
 The INVITE's turn flushes the call it creates, when the call has a backup, before the
-decision is asked. The decision turn's write supersedes it, `(1,0)` then `(2,0)`. The replica
-lands one stream hop after the caller's 100.
+decision is asked. The decision turn's write supersedes it, `(1,0)` then `(2,0)`. The
+caller's 100 leaves behind that write, applied or at the sync cap, or 200 ms after the
+decision is asked (ADR-0070).
 [Detail](appendix/0047-a-departed-peers-in-flight-invite-calls-are-taken-over.md#d3-a-new-call-is-written-to-its-backup-at-its-birth).
 
 ### D4. An undecided call materialised with no message has its decision asked again
 
 A call still waiting on its first routing decision, materialised by the sweep, a confirmed
 verdict or its own node's reclaim, has the decision asked again on its own turn, with a setup
-budget of its own (ADR-0022 X1). The caller is answered through the seeded INVITE server
-transaction. The backend may be asked twice and the callee dialled twice. A copy its primary
+budget of its own (ADR-0022 X1), held to the start bound counted from the INVITE's receipt:
+past it, the caller gets the bare 503 and nothing is asked (ADR-0070). The caller is answered
+through the seeded INVITE server transaction. The backend may be asked twice and the callee
+dialled twice. A copy its primary
 wrote since asks nothing and applies no later answer (D7). A call whose caller cancelled
 during the consult ends under her cancel.
 [Detail](appendix/0047-a-departed-peers-in-flight-invite-calls-are-taken-over.md#d4-an-undecided-call-materialised-with-no-message-has-its-decision-asked-again).

@@ -198,14 +198,21 @@ impl ActionExecutor<'_> {
     /// ACK `leg_id`'s confirmed dialog with `answer`, another leg's answer
     /// ([`b2bua_sdk::model::RuleAction::AckLegAnswering`]): carried where the
     /// dialog's 2xx made an offer its ACK owes the answer to, awaited where it
-    /// did and none is given yet, left out where it made none.
+    /// did and none is given yet, left out where it made none. `ctx`'s event,
+    /// the first 2xx to an INVITE this stack sent on its own account there,
+    /// arms that wait itself ([`relay::owe_answer_in_own_ack`]); a rule that
+    /// ACKs its own event's leg selects a 2xx to that dialog's last INVITE.
     pub(super) fn ack_answering(
         &mut self,
         call: &mut Call,
         fx: &mut HandlerEffects,
+        ctx: &RuleContext,
         leg_id: &str,
         answer: &Option<Body>,
     ) {
+        if let Some(resp) = ctx.response().filter(|_| ctx.source_leg_id == leg_id) {
+            relay::owe_answer_in_own_ack(call, leg_id, resp);
+        }
         let owed = call::helpers::find_leg(call, leg_id).and_then(relay::offer_owed_in_ack);
         match (owed.is_some(), answer) {
             (true, None) => {}
@@ -234,12 +241,25 @@ impl ActionExecutor<'_> {
 
     /// ACK `leg_id`'s confirmed dialog on this stack's own account, answering
     /// the offer its 2xx made with every stream rejected (RFC 3264 §6), in the
-    /// session this stack stated on the dialog (§8): no ACK carrying a peer's
-    /// answer will come, and the dialog is BYEd next. Nothing when the ACK owes
-    /// no answer.
+    /// session this stack stated on the dialog (§8), whether or not a peer's
+    /// answer would have come. Nothing when the ACK owes no answer.
     pub(super) fn ack_rejecting(&mut self, call: &mut Call, fx: &mut HandlerEffects, leg_id: &str) {
         let Some(leg) = call::helpers::find_leg(call, leg_id) else { return };
-        let Some(offer) = relay::offer_owed_in_ack(leg) else { return };
+        let Some(offer) = relay::offer_owed_in_ack(leg).map(<[u8]>::to_vec) else { return };
+        self.ack_rejecting_offer(call, fx, leg_id, &offer);
+    }
+
+    /// ACK `leg_id`'s confirmed dialog on this stack's own account, answering
+    /// `offer`, the offer its 2xx made, with every stream rejected (RFC 3264
+    /// §6), in the session this stack stated on the dialog (§8).
+    pub(super) fn ack_rejecting_offer(
+        &mut self,
+        call: &mut Call,
+        fx: &mut HandlerEffects,
+        leg_id: &str,
+        offer: &[u8],
+    ) {
+        let Some(leg) = call::helpers::find_leg(call, leg_id) else { return };
         let origin = leg.dialogs.confirmed().and_then(|d| relay::next_origin_on(leg, d));
         let options = sip_message::BuildHeldSdpOptions {
             local_ip: self.config.sip_local_ip.clone(),

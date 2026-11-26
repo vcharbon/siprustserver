@@ -11,6 +11,7 @@ use tokio::time::Instant;
 
 use super::stall::Stall;
 use super::Runner;
+use crate::cursor::HeldTiming;
 use crate::plan::CompiledStep;
 
 impl<'a, 'p> Runner<'a, 'p> {
@@ -150,9 +151,33 @@ impl<'a, 'p> Runner<'a, 'p> {
     ///
     /// A compressible dwell on a virtual clock still rides — virtual time costs
     /// nothing and the dwell carries the causal order — while a `timer_linked`
-    /// one is what a system timer measures and is never shortened.
+    /// one is what a system timer measures and is never shortened. A send held
+    /// past what its leg awaits (§6.7h) goes out when its [`HeldTiming`] says.
     pub(super) fn dwell_deadline(&self, step: &CompiledStep) -> Option<Instant> {
-        Some(self.anchor_at(&step.delay.from)? + Duration::from_millis(step.delay.ms))
+        match self.instance.cursor().held_send(&step.id) {
+            Some(HeldTiming::OnArrivalOf(taken)) => self.completed_at.get(&taken.id).copied(),
+            Some(HeldTiming::AtCapturedOffset) => self.offset_up_the_chain(step),
+            None => Some(self.anchor_at(&step.delay.from)? + Duration::from_millis(step.delay.ms)),
+        }
+    }
+
+    /// When a send its leg makes past an arrival it still awaits goes out at
+    /// the document's offset (§6.7h): its anchor plus its dwell, or, while
+    /// that anchor has not happened, the nearest anchor up its chain that
+    /// has, plus every dwell between.
+    fn offset_up_the_chain(&self, step: &CompiledStep) -> Option<Instant> {
+        let mut at = step;
+        let mut ms = 0;
+        loop {
+            ms += at.delay.ms;
+            match &at.delay.from {
+                Anchor::Trigger => return Some(self.started + Duration::from_millis(ms)),
+                Anchor::Step(id) => match self.completed_at.get(id) {
+                    Some(happened) => return Some(*happened + Duration::from_millis(ms)),
+                    None => at = self.instance.plan().step(id)?,
+                },
+            }
+        }
     }
 
     /// Open the budget of every frontier expect whose dwell is known and whose

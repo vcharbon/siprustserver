@@ -12,7 +12,6 @@ use sip_proxy::registry::static_reg::{parse_worker_list, StaticWorkerRegistry};
 use sip_proxy::registry::{WorkerEntry, WorkerHealth, WorkerRegistry};
 use topology::{K8sMembership, Membership};
 
-/// A worker pool and its health-write seam.
 pub struct WorkerPool {
     pub registry: Arc<dyn WorkerRegistry>,
     pub control: Arc<dyn WorkerRegistryControl>,
@@ -61,7 +60,6 @@ where
     F: Fn() -> Fut + Send + Sync + 'static,
     Fut: Future<Output = Result<kube::Client, String>> + Send,
 {
-    // Installing the provider a second time returns Err; ignored.
     let _ = rustls::crypto::ring::default_provider().install_default();
     tracing::info!(source = "k8s-endpointslice", %service, %namespace, port, "worker pool");
     let (restarts, task) = (&sip_proxy::supervise::RESTARTS, sip_proxy::supervise::K8S_MEMBERSHIP);

@@ -15,7 +15,7 @@ use super::call_id_budget::Retired;
 use super::copies::{request_class, Copies};
 use super::key::ServerTxnId;
 use super::owner::Owner;
-use super::txn::Transaction;
+use super::txn::{Transaction, TxnRef};
 
 impl Owner {
     /// The copy of its request the server transaction `id` names meets now:
@@ -97,6 +97,20 @@ impl Owner {
             self.metrics.copies_past_schedule.add(copy_kind(req.method()).index());
         }
         retired
+    }
+
+    /// Remove the server transaction `id` names, opened for a request the
+    /// full event queue dropped before its consumer saw it. One its request
+    /// opened as a first arrival leaves no copy record: nothing answered the
+    /// request, and a record per dropped Call-ID would outlive the queue's
+    /// bound. One that `continued` a retired transaction's record
+    /// ([`Retired::Reopens`]) leaves that record again.
+    pub(super) fn forget_unqueued(&mut self, id: ServerTxnId<'_>, continued: bool) {
+        if continued {
+            self.delete_txn(TxnRef::Server(id));
+        } else {
+            self.forsake_server(id);
+        }
     }
 
     /// Retire the copy records of `txn`, a server transaction leaving the

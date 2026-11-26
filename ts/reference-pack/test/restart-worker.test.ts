@@ -55,6 +55,9 @@ const referenceLane = async (name: string) => {
   return { dir, catalog, lane: LaneCatalog.hosted(catalog, "reference")!, pid: written.pid }
 }
 
+/** The bound of a probe the test calls itself, which must answer: the package's test timeout. */
+const PROBE_WITHIN_MS = 300_000
+
 /** How `child` ended, once it has. */
 const endOf = (child: ChildProcess) =>
   new Promise<{ readonly code: number | null; readonly signal: NodeJS.Signals | null }>((resolve) =>
@@ -161,7 +164,7 @@ describe.skipIf(skipping)("restart-worker on the reference lane", () => {
           out: path.join(instance.dir, "out"),
           state: path.join(instance.dir, "state"),
           step: "probe",
-          timeoutMs: 5_000,
+          timeoutMs: PROBE_WITHIN_MS,
           log: path.join(instance.dir, "probe.log")
         }))
       expect(await probe(), "no runner stood again: not yet").toEqual({ _tag: "Exited", code: Operation.NOT_YET })
@@ -195,7 +198,7 @@ describe.skipIf(skipping)("restart-worker on the reference lane", () => {
 
   it("refuses to signal a process its pid file names where no runner answers at the lane's admin address", async () => {
     const found = await referenceLane("stranger")
-    const stranger = spawn("sleep", ["30"], { stdio: "ignore" })
+    const stranger = spawn("sleep", ["3600"], { stdio: "ignore" })
     fs.writeFileSync(found.pid, `${stranger.pid}\n`)
     try {
       const { ended, events } = await restarted(found, Effect.void)
@@ -212,8 +215,11 @@ describe.skipIf(skipping)("restart-worker on the reference lane", () => {
     const found = await referenceLane("stateless")
     const [host, port] = splitAddress(adminOf(found))
     const server = http.createServer((_request, response) => response.writeHead(200, { "content-type": "application/json" }).end("{}"))
-    await new Promise<void>((resolve) => server.listen(port, host, resolve))
-    const stranger = spawn("sleep", ["30"], { stdio: "ignore" })
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject)
+      server.listen(port, host, resolve)
+    })
+    const stranger = spawn("sleep", ["3600"], { stdio: "ignore" })
     fs.writeFileSync(found.pid, `${stranger.pid}\n`)
     try {
       const { ended } = await restarted(found, Effect.void)
@@ -230,7 +236,7 @@ describe.skipIf(skipping)("restart-worker on the reference lane", () => {
     const found = await referenceLane("reused")
     const part = Result.getOrThrow(runnerPartOf(found.lane))
     const runner = spawn(RUNNER, [], { env: { ...process.env, ...runnerEnvOf(found.lane, part) }, stdio: ["ignore", "pipe", "pipe"] })
-    const stranger = spawn("sleep", ["30"], { stdio: "ignore" })
+    const stranger = spawn("sleep", ["3600"], { stdio: "ignore" })
     try {
       await readyOf(runner, endOf(runner))
       fs.writeFileSync(found.pid, `${stranger.pid}\n`)

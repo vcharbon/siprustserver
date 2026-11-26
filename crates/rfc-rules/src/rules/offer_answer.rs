@@ -32,7 +32,9 @@
 //! message in hand: a transparent proxy carries both agents' descriptions on
 //! one Call-ID and has no offer/answer state of its own. These rules leave
 //! `relayed` false and the consumer skips the lanes it knows to be relays — the
-//! [`super::final_response`] precedent.
+//! [`super::final_response`] precedent. The one exception reads the message:
+//! a `sess-version` gap a B2BUA inherited from an offer it refused on its other
+//! call ([`SdpOriginContinuity`]).
 //!
 //! **A body-less vantage decides nothing.** [`Msg::body`](crate::wire::Msg::body)
 //! is `None` where the vantage did not carry the bytes; a rule that needs a body

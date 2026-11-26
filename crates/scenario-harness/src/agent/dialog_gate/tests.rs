@@ -1,6 +1,7 @@
 //! A clean-end waiver covers the `dialog-ended` verdicts on a BYE recorded
 //! from its start, one per dialog; every other verdict still gates.
 
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -11,6 +12,9 @@ use super::surviving_verdicts;
 use crate::agent::waiver::WaiverState;
 use crate::dialogs::{DialogJudge, DialogJudging, DIALOG_ENDED};
 use crate::WaiverScope;
+
+/// Where bob reads the caller's messages from.
+const PEER: SocketAddr = SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), 5060);
 
 fn message(text: String) -> SipMessage {
     CustomParser::new().parse(text.as_bytes()).expect("a well-formed test message")
@@ -38,20 +42,20 @@ fn response(status: u16, method: &str, cseq: u32) -> SipMessage {
 #[tokio::test(start_paused = true)]
 async fn a_clean_end_waiver_covers_one_bye_per_dialog_from_its_start() {
     let judge = Arc::new(DialogJudge::new("bob", Default::default(), DialogJudging::Harness));
-    judge.sight(&request("INVITE", 1));
+    judge.sight(&request("INVITE", 1), PEER);
     judge.note_sent(&response(200, "INVITE", 1));
-    judge.sight(&request("BYE", 2));
+    judge.sight(&request("BYE", 2), PEER);
     judge.note_sent(&response(200, "BYE", 2));
-    judge.sight(&request("BYE", 3));
+    judge.sight(&request("BYE", 3), PEER);
     tokio::time::sleep(Duration::from_millis(1)).await;
     let scope = WaiverScope::rule(DIALOG_ENDED, "the clean end's BYE")
         .on_party("bob")
         .on_method("BYE")
         .from_now_once_per_dialog();
     tokio::time::sleep(Duration::from_millis(1)).await;
-    judge.sight(&request("BYE", 4));
-    judge.sight(&request("BYE", 5));
-    judge.sight(&request("OPTIONS", 6));
+    judge.sight(&request("BYE", 4), PEER);
+    judge.sight(&request("BYE", 5), PEER);
+    judge.sight(&request("OPTIONS", 6), PEER);
 
     let (left, waived) = surviving_verdicts(&[judge], &[WaiverState::new(scope)]);
     let left: Vec<(String, u32)> =
@@ -74,9 +78,9 @@ fn notify(cseq: u32, state: &str) -> SipMessage {
 #[tokio::test(start_paused = true)]
 async fn a_terminating_waiver_covers_only_the_notify_ending_its_subscription() {
     let judge = Arc::new(DialogJudge::new("bob", Default::default(), DialogJudging::Harness));
-    judge.sight(&request("INVITE", 1));
+    judge.sight(&request("INVITE", 1), PEER);
     judge.note_sent(&response(200, "INVITE", 1));
-    judge.sight(&request("BYE", 2));
+    judge.sight(&request("BYE", 2), PEER);
     judge.note_sent(&response(200, "BYE", 2));
     let scope = WaiverScope::rule(DIALOG_ENDED, "the clean end's terminating NOTIFY")
         .on_party("bob")
@@ -84,8 +88,8 @@ async fn a_terminating_waiver_covers_only_the_notify_ending_its_subscription() {
         .terminating()
         .from_now_once_per_dialog();
     tokio::time::sleep(Duration::from_millis(1)).await;
-    judge.sight(&notify(3, "active;expires=60"));
-    judge.sight(&notify(4, "terminated;reason=noresource"));
+    judge.sight(&notify(3, "active;expires=60"), PEER);
+    judge.sight(&notify(4, "terminated;reason=noresource"), PEER);
 
     let (left, waived) = surviving_verdicts(&[judge], &[WaiverState::new(scope)]);
     let left: Vec<u32> = left.iter().map(|g| g.verdict.cseq).collect();

@@ -12,14 +12,15 @@ discovered from the EndpointSlices of the headless b2bua-worker Service
 (ADR-0012 D4).
 */}}
 {{- $p := .Values.proxy }}
-{{- $vip := include "siprust.net" (dict "root" $ "key" "proxyVip") }}
-{{- $extVip := include "siprust.net" (dict "root" $ "key" "externalVip") }}
-{{- $port := int .Values.network.sipPort }}
+{{- $vip := include "siprust.vip" (dict "root" $ "key" "proxyVip") }}
+{{- $extVip := include "siprust.vip" (dict "root" $ "key" "externalVip") }}
+{{- $sip := include "siprust.netHostPort" (dict "root" $ "key" "proxyVip") }}
+{{- $extSip := include "siprust.netHostPort" (dict "root" $ "key" "externalVip") }}
 {{- $env := dict
-  "PROXY_LISTEN" (printf "%s:%d" $vip $port)
-  "PROXY_ADVERTISE" (printf "%s:%d" $vip $port)
-  "PROXY_LISTEN_EXT" (printf "%s:%d" $extVip $port)
-  "PROXY_ADVERTISE_EXT" (printf "%s:%d" $extVip $port)
+  "PROXY_LISTEN" $sip
+  "PROXY_ADVERTISE" $sip
+  "PROXY_LISTEN_EXT" $extSip
+  "PROXY_ADVERTISE_EXT" $extSip
   "PROXY_EXT_INTERFACE" (include "siprust.net" (dict "root" $ "key" "externalInterface"))
   "PROXY_METRICS" (include "siprust.proxyMetricsBind" .)
   "PROXY_DEBUG" (include "siprust.proxyDebugBind" .)
@@ -135,6 +136,8 @@ spec:
             - { name: EXTERNAL_INTERFACE, value: {{ include "siprust.net" (dict "root" $ "key" "externalInterface") | quote }} }
             - { name: EXTERNAL_EGRESS_DROP, value: {{ ternary "on" "off" .Values.network.externalEgressDrop | quote }} }
             - { name: UNRES_QLEN_BYTES, value: {{ int $p.unresQlenBytes | toString | quote }} }
+            - { name: REASM_TIMEOUT_S, value: {{ int $p.reassembly.timeoutSeconds | toString | quote }} }
+            - { name: REASM_POOL_BYTES, value: {{ int64 $p.reassembly.poolBytes | toString | quote }} }
             - { name: NEIGH_BASE_REACHABLE_TIME_MS, value: {{ int $p.neighbour.baseReachableTimeMs | toString | quote }} }
             - { name: NEIGH_DELAY_FIRST_PROBE_S, value: {{ int $p.neighbour.delayFirstProbeSeconds | toString | quote }} }
             - { name: NEIGH_UCAST_SOLICIT, value: {{ int $p.neighbour.ucastSolicit | toString | quote }} }

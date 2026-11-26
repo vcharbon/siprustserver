@@ -141,6 +141,9 @@ struct SupervisorInner {
     membership: Mutex<Option<Arc<dyn Membership>>>,
     /// `ordinal → PeerEntry`.
     peers: Mutex<HashMap<String, PeerEntry>>,
+    /// How many of `peers` are parked, set wherever an entry parks or
+    /// resumes.
+    departed: super::DepartedCount,
     /// Set by [`shutdown`](ReplicationSupervisor::shutdown) before it parks the
     /// pullers: a reconcile already running when the loop is aborted reads it
     /// under the `peers` lock and spawns nothing.
@@ -234,6 +237,7 @@ impl ReplicationSupervisor {
                 backup_enabled: AtomicBool::new(false),
                 membership: Mutex::new(None),
                 peers: Mutex::new(HashMap::new()),
+                departed: super::DepartedCount::default(),
                 stopped: AtomicBool::new(false),
                 reconcile: Mutex::new(None),
                 gate: Mutex::new(None),
@@ -377,6 +381,7 @@ impl ReplicationSupervisor {
                 entry.park();
             }
         }
+        self.inner.departed.set(peers.values().filter(|e| e.parked()).count());
 
         let pulled_not_ready =
             desired.iter().filter(|p| !p.ready).count().try_into().unwrap_or(u64::MAX);

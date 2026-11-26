@@ -44,6 +44,7 @@
     )
 )]
 
+mod attribution;
 pub mod catalogue;
 pub mod event;
 pub mod invite_class;
@@ -61,12 +62,14 @@ pub mod timers;
 // the deferred-backlog ceiling on new calls and the node's shared refusals,
 // the per-Call-ID message budget.
 pub use layer::{
-    BoundPassed, CallIdBudget, DeferredBound, InviteRefusals, NewCallGate, NewCallRefusal, OnBound,
-    RefusedCopy, ServerTxnKey, TransactionConfig, TransactionEvents, TransactionLayer,
-    TransactionLayerClosed, Verdict, REFUSED_MEMO_MAX,
+    BoundPassed, CallIdBudget, CancelledInvite, DeferredBound, InviteRefusals, NewCallGate,
+    NewCallRefusal, OnBound, OrphanOrigin, RefusedCopy, ServerTxnKey, TransactionConfig,
+    TransactionEvents, TransactionLayer, TransactionLayerClosed, Verdict, REFUSED_MEMO_MAX,
 };
 // The class a new INVITE is judged in, read off the parsed request.
 pub use invite_class::{class_of, InviteClass};
+// Whether a request can belong to a call by what it states.
+pub use attribution::names_no_call;
 // The seeds a materialised call hands the layer, and a re-offer's disposition.
 pub use seed::{Reoffer, TxnSeed};
 // Upward events + the client-transaction handles `send_request` returns.

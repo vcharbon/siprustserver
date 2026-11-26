@@ -135,7 +135,7 @@ impl Owner {
                         self.note_tu_ack(&msg, &buf, dest);
                     }
                     if let Some(branch) = arm {
-                        self.arm_cancel_retransmit(&branch);
+                        self.arm_cancel_timers(&branch);
                         if first_on_given_up {
                             self.hold(TxnRef::Client(&branch), Hold::GaveUp);
                         }
@@ -312,6 +312,18 @@ impl Owner {
         self.hold(TxnRef::Client(branch), Hold::TimerD);
     }
 
+    /// Absorb a 2xx to `method` on the client txn at `branch` when that txn
+    /// owes it nothing ([`Transaction::owes_2xx_nothing`](super::txn::Transaction::owes_2xx_nothing)):
+    /// no ACK, no state change, nothing handed up, counted. Whether it did.
+    fn absorb_unowed_2xx(&mut self, branch: &str, method: &Method) -> bool {
+        let unowed =
+            self.clients.get(branch).is_some_and(|t| t.method == *method && t.owes_2xx_nothing());
+        if unowed {
+            self.metrics.late_2xx_dropped.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        unowed
+    }
+
     pub(super) async fn handle_inbound_response(
         &mut self,
         endpoint: &dyn UdpEndpoint,
@@ -401,6 +413,9 @@ impl Owner {
             // the source goes unchecked (ADR-0007). A 2xx on an Accepted txn its
             // call holds goes to the TU, which owns each ACK, matched to none.
             let is_2xx = (200..300).contains(&resp.status());
+            if is_2xx && self.absorb_unowed_2xx(branch, resp.cseq().method()) {
+                return true;
+            }
             let client_match = self
                 .clients
                 .get(branch)
@@ -411,13 +426,13 @@ impl Owner {
 
             if let Some((kind, state, original_request, destination, orphaned)) = client_match {
                 if state == TxnState::Accepted {
-                    // RFC 6026 §7.2 + RFC 3261 §13.2.2.4: the orphan's 2xx
-                    // draws its dialog's ACK from the layer; a 1xx or a non-2xx
-                    // is absorbed until Timer M (§8.4: only 2xx go up).
                     if is_2xx && self.final_copy_owed(branch, resp.to().tag(), resp.status()) {
                         self.release_2xx(endpoint, branch, &resp).await;
                     }
-                    return true;
+                    if orphaned || !super::accepted::is_reliable_provisional(&resp) {
+                        return true;
+                    }
+                    self.note_reliable_offer(branch, &resp);
                 }
                 if resp.status() < 200 {
                     // Provisional 1xx>100 — Proceeding. Ignore once Completed or

@@ -14,6 +14,7 @@ use sip_message::{SipResponse, SipStr};
 use sip_template::{EmitOpts, MessageTemplate};
 
 use super::answer::discharge_on_teardown;
+use super::framing::CarriesBody;
 use super::ledger::{ObligationKey, ObligationKind};
 use super::pacing::Dwell;
 use super::runner::ActorState;
@@ -84,7 +85,13 @@ pub(super) async fn originate_initial_invite(
         })?;
     let mut builder = st.agent.invite(&target);
     if let Some(offer) = st.media.offer_sdp() {
-        builder = builder.with_sdp(offer);
+        builder = builder.framed(st.media.framing(), offer);
+    } else if let Some(body) = st.media.no_offer() {
+        let (content_type, bytes, disposition) = body.body();
+        builder = builder.with_body(&content_type, bytes);
+        if let Some(d) = disposition {
+            builder = builder.with_header("Content-Disposition", d);
+        }
     }
     // The establishing INVITE consumes one ordinal in this actor's
     // originated-INVITE space; a declared delayed automatic covering it
@@ -125,6 +132,7 @@ pub(super) async fn originate_initial_invite(
         st.expected_provisional = 183;
     }
     let call = builder.try_send().await?;
+    st.offers.invite_offered = call.offered();
     // Bind the new dialog to this actor at its shared endpoint, in the same poll
     // as the send — before the actor yields, so no response can precede it.
     if let Some(ep) = &st.endpoint {
@@ -237,7 +245,7 @@ pub(super) async fn originate_early(
     let tag = inv.early_remote_tag().to_string();
     let mut req = inv.send_request(method);
     if method == InDialogMethod::Update {
-        req = req.with_sdp(offer);
+        req = req.framed(st.media.framing(), offer);
     }
     if !tag.is_empty() {
         req = req.with_to_tag(&tag);
@@ -310,7 +318,9 @@ pub(super) async fn originate_update(st: &mut ActorState<'_>) -> Result<(), Step
             who: st.role.to_string(),
             detail: "Update with no confirmed dialog".to_string(),
         })?;
-        let _upd = dialog.send_request(InDialogMethod::Update).with_sdp(offer).try_send().await?;
+        let framing = st.media.framing();
+        let _upd =
+            dialog.send_request(InDialogMethod::Update).framed(framing, offer).try_send().await?;
         let cseq = dialog.local_cseq();
         (ObligationKey::new(st.role, ObligationKind::Update, cseq), dialog.clone())
     };
@@ -350,16 +360,22 @@ pub(super) async fn ping_options_once(st: &mut ActorState<'_>) -> Result<(), Ste
     Ok(())
 }
 
+/// The retries one renegotiation gets before its refusal stands: a far end
+/// that refuses every attempt leaves the session as it was (RFC 3261 §14.1).
+const MAX_REINVITE_RETRIES: u32 = 3;
+
 /// Schedule the retry a non-2xx final to our re-INVITE asks for (RFC 3261
 /// §14.1): a 500 stating Retry-After after that delay (the peer's own INVITE
 /// had no final yet, §14.2); a 491 after the owner/non-owner dwell — the
 /// owner of the Call-ID (the originating actor) waits a random T in [2.1, 4]
 /// s, a non-owner one in [0, 2] s, fixed in range so the paused-clock test is
 /// deterministic. A replay plan suppresses the retry: the script carries the
-/// captured one ([`Automatics::suppress_491_retry`](super::Automatics)).
+/// captured one ([`Automatics::suppress_491_retry`](super::Automatics)), and
+/// a renegotiation refused past [`MAX_REINVITE_RETRIES`] is not retried.
 /// Returns whether a retry was scheduled.
 pub(super) fn schedule_reinvite_retry(st: &mut ActorState<'_>, resp: &SipResponse) -> bool {
-    if st.automatics.suppress_491_retry {
+    if st.automatics.suppress_491_retry || st.reinvite_retries >= MAX_REINVITE_RETRIES {
+        st.reinvite_retries = 0;
         return false;
     }
     let asked_later = (resp.status() == 500)
@@ -369,8 +385,12 @@ pub(super) fn schedule_reinvite_retry(st: &mut ActorState<'_>, resp: &SipRespons
         (Some(secs), _) => Duration::from_secs(secs.into()),
         (None, 491) if st.originates => Duration::from_millis(2500),
         (None, 491) => Duration::from_millis(1000),
-        _ => return false,
+        _ => {
+            st.reinvite_retries = 0;
+            return false;
+        }
     };
+    st.reinvite_retries += 1;
     st.reinvite_retry = Some(st.dwell(Dwell::Retry, delay));
     true
 }

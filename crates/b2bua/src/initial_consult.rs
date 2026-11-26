@@ -13,6 +13,7 @@ use sip_message::SipRequest;
 
 use crate::config::B2buaConfig;
 use crate::decision::apply_route::apply_route;
+use crate::decision::route_fold::Routed;
 use crate::decision::{DeadlineDecisionEngine, NewCallResponse};
 use crate::effects::{HandlerEffects, HandlerResult};
 use crate::initial_invite::{build_request, setup_event, treatment, Initial};
@@ -97,9 +98,9 @@ pub async fn handle_initial_invite(
     }
     trace::intake::record_new_call(&call, request_json, &response, sent_at_ms, received_at_ms);
 
-    let (result, routed) = match treatment(call, response, a_invite, config, now_ms) {
+    let (applied, routed) = match treatment(call, response, a_invite, config, now_ms) {
         Initial::Route { call, route } => {
-            let result = apply_route(
+            let applied = apply_route(
                 *call,
                 *route,
                 a_invite,
@@ -114,10 +115,11 @@ pub async fn handle_initial_invite(
                 budget,
             )
             .await;
-            (result, true)
+            (applied, true)
         }
-        Initial::Final(result) => (*result, false),
+        Initial::Final(result) => (Routed::final_only(*result), false),
     };
+    let Routed { result, route } = applied;
     if cancelled() {
         return Consulted::Cancelled(Box::new(result.call));
     }
@@ -130,6 +132,8 @@ pub async fn handle_initial_invite(
     // both leave the result untouched.
     let mut exec = ActionExecutor { config, owners, turn, now_ms: clock.now_ms() };
     let setup_event = setup_event(&result.call, a_invite);
-    let seeded = seed_services(result, services, &mut exec, &setup_event, "a", Direction::FromA);
+    let route = route.as_ref();
+    let seeded =
+        seed_services(result, route, services, &mut exec, &setup_event, "a", Direction::FromA);
     Consulted::Applied(Box::new(seeded))
 }

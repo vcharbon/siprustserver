@@ -5,8 +5,21 @@
 use tokio::time::Instant;
 
 use super::reneg_done::complete_originated_reinvite;
-use super::runner::{ActorState, HeldAck};
+use super::runner::ActorState;
 use crate::agent::StepError;
+
+/// One ACK-to-2xx a declared delayed automatic is holding: its own `select!`
+/// arm sends it (idempotent, re-derivable — RFC 3261 §13.2.2.4) when `at`
+/// elapses and completes the re-INVITE bookkeeping the hold deferred. A 2xx
+/// retransmitted while the entry is pending is absorbed, never ACKed early.
+pub(super) struct HeldAck {
+    pub(super) at: Instant,
+    /// The held transaction — the originated in-dialog INVITE's CSeq.
+    pub(super) cseq: u32,
+    /// The ACK body resolved when the 2xx first arrived (byte-identical on the
+    /// eventual send, §13.2.2.4).
+    pub(super) sdp: Option<String>,
+}
 
 /// Park until the earliest held ACK is due (or forever if none) — the delayed
 /// automatic's own reactor arm.

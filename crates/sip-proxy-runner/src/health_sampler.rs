@@ -1,5 +1,6 @@
 //! The health sampler: every 2 s it publishes the recv shards' stall gauge,
-//! the external face gauge, the worker-health and acceptance gauges and the
+//! the external face gauge, the worker-health, per-worker state and acceptance
+//! gauges and the
 //! discovery's own health, so an empty or unprobed pool, an unusable external
 //! face and the reason for each are observable in Prometheus, not only
 //! through readiness. A shard's stall and its recovery are logged once.
@@ -15,7 +16,6 @@ use topology::K8sMembership;
 
 use crate::external_face::FaceMonitor;
 
-/// What the sampler reads and where it publishes.
 pub struct HealthSampler {
     pub registry: Arc<dyn WorkerRegistry>,
     /// The EndpointSlice watch, `None` for a fixed pool.
@@ -28,7 +28,6 @@ pub struct HealthSampler {
     pub external_face: Option<Arc<FaceMonitor>>,
 }
 
-/// How often the sampler publishes.
 const PERIOD: Duration = Duration::from_secs(2);
 
 impl HealthSampler {
@@ -69,28 +68,30 @@ impl HealthSampler {
                 );
             }
         }
-        let (mut alive, mut unknown, mut dead, mut accepting) = (0, 0, 0, 0);
-        for w in self.registry.snapshot() {
+        let (mut alive, mut slow, mut unknown, mut dead, mut accepting) = (0, 0, 0, 0, 0);
+        let workers = self.registry.snapshot();
+        for w in &workers {
             match w.health {
                 WorkerHealth::Alive => alive += 1,
+                WorkerHealth::Slow => slow += 1,
                 WorkerHealth::Unknown => unknown += 1,
                 WorkerHealth::Dead => dead += 1,
             }
             accepting += u64::from(w.accepts_new_calls());
         }
-        m.set_worker_health_counts(alive, unknown, dead);
+        m.set_worker_health_counts(alive, slow, unknown, dead);
+        m.set_worker_states(workers.iter().map(|w| (w.id.as_str(), w.health)));
         m.set_worker_acceptance_counts(accepting, alive - accepting);
         m.set_routing_on_answers(self.registry.routes_on_answers());
         match self.discovery.as_ref().map(|watch| watch.watch_health()) {
-            // An informer whose task ended watches nothing, as one with no client.
             Some(h) => m.set_discovery(h.client_failing || h.ended, h.broken_since_unix_ms),
             None => m.set_discovery(false, None),
         }
         stalled
     }
 
-    /// Whether the external face is usable, published (the monitor logs
-    /// each change).
+    /// Publishes whether the external face is usable; with no face required
+    /// it is usable. The monitor logs each change.
     fn sample_face(&self) {
         let usable = self.external_face.as_ref().is_none_or(|monitor| monitor.usable());
         self.metrics.set_external_face_usable(usable);

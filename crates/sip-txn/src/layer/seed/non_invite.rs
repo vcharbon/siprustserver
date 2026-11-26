@@ -125,7 +125,11 @@ impl Owner {
         };
         let to = match self.server(key.id()) {
             Some(occupant) if !occupant.state.is_active() => return false,
-            Some(occupant) => occupant.destination.unwrap_or(dest),
+            Some(occupant) => {
+                let to = occupant.destination.unwrap_or(dest);
+                self.attribute_server(key.id(), call_ref);
+                to
+            }
             None => {
                 let destination = response_destination(response.top_via()).unwrap_or(dest);
                 self.open_txn(NewTransaction {

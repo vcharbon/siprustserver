@@ -4,7 +4,10 @@
 
 use std::time::Duration;
 
-use amqp_connect::BrokerTls;
+use amqp_connect::{broker_name, BrokerTls};
+use lapin::uri::AMQPUri;
+
+use super::broker_list::{broker_list, URL_VARIABLE};
 
 /// How the writer declares its destination queue, `B2BUA_CDR_RABBITMQ_DECLARE`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -129,10 +132,13 @@ fn bounded(
 /// The RabbitMQ CDR sink's env grammar, the one statement of it.
 #[derive(Debug, Clone)]
 pub struct RabbitMqCdrSettings {
-    /// AMQP URI (`amqp://user:pass@host:5672/vhost`), `B2BUA_CDR_RABBITMQ_URL`.
-    /// The URI's own `connection_timeout` is not read: `connect_timeout`
-    /// bounds the connect.
-    pub url: String,
+    /// The nodes the sink reaches its broker cluster through, in the order
+    /// `B2BUA_CDR_RABBITMQ_URL` lists them: one AMQP URI
+    /// (`amqp://user:pass@host:5672/vhost`) or several separated by commas,
+    /// each of one scheme and a node of its own. A connect attempt tries them
+    /// in turn (`RabbitMqCdrWriter`). A URI's own `connection_timeout` is not
+    /// read: `connect_timeout` bounds the connect.
+    pub brokers: Vec<AMQPUri>,
     /// Destination queue, `B2BUA_CDR_RABBITMQ_QUEUE` (default `cdr`).
     pub queue: String,
     /// How the queue is declared, `B2BUA_CDR_RABBITMQ_DECLARE` + `_MAX_LEN`.
@@ -140,30 +146,39 @@ pub struct RabbitMqCdrSettings {
     /// The bounds of every broker wait, `B2BUA_CDR_RABBITMQ_WINDOW` and the
     /// `_*_TIMEOUT_MS` / `_BACKOFF*_MS` variables.
     pub bounds: CdrDeliveryBounds,
-    /// The TLS the URL's scheme asks for, its CA roots read when the
+    /// The TLS the brokers' scheme asks for, its CA roots read when the
     /// settings are read: every reconnect's handshake rides it.
     pub tls: BrokerTls,
 }
 
 impl RabbitMqCdrSettings {
+    /// The brokers as logs name them, `host:port`, in list order.
+    pub fn broker_names(&self) -> Vec<String> {
+        self.brokers.iter().map(broker_name).collect()
+    }
+
     /// Reads the grammar through `get`; `Ok(None)` when the URL is unset or
     /// blank. `Err` names the variable when `B2BUA_CDR_QUEUE` is `0` (no
     /// buffer between the call path and the broker), when `QUEUE` is blank or
     /// padded, when `MAX_LEN`
     /// is not a non-negative integer, when `DECLARE` is neither `own` nor
-    /// `existing` (blank = `own`), when the URL does not parse or states
-    /// `heartbeat=0` ([`amqp_connect::checked_uri`]), when an `amqps` URL's
-    /// CA roots do not load ([`BrokerTls::for_uri`]), when `MAX_LEN` is set
-    /// beside `DECLARE=existing` (the broker owns the bound), or when a bound
-    /// of [`CdrDeliveryBounds`] is not a positive integer.
+    /// `existing` (blank = `own`), when an entry of the URL list is empty,
+    /// does not parse, states `heartbeat=0` ([`amqp_connect::checked_uri`]),
+    /// repeats a node or changes the scheme, when `amqps` brokers' CA roots
+    /// do not load ([`BrokerTls::for_uri`]), when `MAX_LEN` is set beside
+    /// `DECLARE=existing` (the broker owns the bound), or when a bound of
+    /// [`CdrDeliveryBounds`] is not a positive integer.
     pub fn from_lookup(get: impl Fn(&str) -> Option<String>) -> Result<Option<Self>, String> {
-        let Some(url) = get("B2BUA_CDR_RABBITMQ_URL").filter(|u| !u.trim().is_empty()) else {
+        let Some(url) = get(URL_VARIABLE).filter(|u| !u.trim().is_empty()) else {
             return Ok(None);
         };
-        let uri = amqp_connect::checked_uri("B2BUA_CDR_RABBITMQ_URL", &url)?;
-        let tls = BrokerTls::for_uri(&uri).map_err(|e| {
-            format!("B2BUA_CDR_RABBITMQ_URL is amqps and the system's CA roots do not load: {e}")
-        })?;
+        let brokers = broker_list(&url)?;
+        let tls = match brokers.first() {
+            Some(first) => BrokerTls::for_uri(first).map_err(|e| {
+                format!("{URL_VARIABLE} is amqps and the system's CA roots do not load: {e}")
+            })?,
+            None => BrokerTls::PLAIN,
+        };
         let queue = get("B2BUA_CDR_RABBITMQ_QUEUE").unwrap_or_else(|| "cdr".to_string());
         if queue.trim().is_empty() || queue.trim() != queue {
             return Err(format!(
@@ -207,7 +222,7 @@ impl RabbitMqCdrSettings {
             }
         };
         let bounds = CdrDeliveryBounds::from_lookup(&get)?;
-        Ok(Some(Self { url, queue, declare, bounds, tls }))
+        Ok(Some(Self { brokers, queue, declare, bounds, tls }))
     }
 }
 
@@ -246,15 +261,20 @@ mod tests {
         .expect("ok")
         .expect("some");
         assert_eq!(
-            (s.url.as_str(), s.queue.as_str(), s.declare, s.bounds),
-            (
-                "amqp://guest:guest@rabbitmq:5672/%2f",
-                "cdr",
-                OWN_DEFAULT,
-                CdrDeliveryBounds::default()
-            )
+            (s.broker_names(), s.queue.as_str(), s.declare, s.bounds),
+            (vec!["rabbitmq:5672".to_string()], "cdr", OWN_DEFAULT, CdrDeliveryBounds::default())
         );
+        assert_eq!(s.brokers[0].authority.userinfo.password, "guest");
         assert!(!s.tls.is_tls(), "an amqp URL runs no TLS");
+    }
+
+    /// The startup refusal of an unusable list entry
+    /// (`broker_list::tests` holds each kind).
+    #[test]
+    fn a_broker_list_with_an_unusable_entry_refuses_boot() {
+        let list = lookup(&[("B2BUA_CDR_RABBITMQ_URL", "amqp://a/%2f,,amqp://b/%2f")]);
+        let e = RabbitMqCdrSettings::from_lookup(list).expect_err("an empty entry");
+        assert!(e.contains("B2BUA_CDR_RABBITMQ_URL entry 2"), "{e}");
     }
 
     /// The CA roots are the fixture CA (trusted nowhere) alone while the

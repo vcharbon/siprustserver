@@ -7,27 +7,40 @@
  * these must lose the one, never the batch — and leaves no `target` behind a
  * failure, because the bytes land beside it (`<target>.<pid>.partial`, one
  * writer per process) and are renamed onto it. A signal is how a memory
- * scope's kill arrives, and it is named as one.
+ * scope's kill arrives, and it is named as one, with what the cgroup
+ * recorded of its OOM killer over the run (`oom.ts`).
  */
+import * as Cause from "effect/Cause"
 import * as Effect from "effect/Effect"
 import * as FileSystem from "effect/FileSystem"
 import * as Stream from "effect/Stream"
 import * as ChildProcess from "effect/unstable/process/ChildProcess"
 import * as ChildProcessSpawner from "effect/unstable/process/ChildProcessSpawner"
 import * as path from "node:path"
+import * as Oom from "./oom.js"
 import { messageOf, said, signalOf } from "./said.js"
+
+/**
+ * Where a run broke short of an ending of its own: `spawn` (it never ran),
+ * `await` (it ran, and its exit could not be read), `output` (its stdout
+ * could not be written or published).
+ */
+export type BrokeAt = "spawn" | "await" | "output"
 
 /** How one run ended. */
 export interface Ended {
-  /** Why it never ran or its answer was not written; `undefined` where it ran and `target` holds its stdout. */
+  /** Why it broke, in the platform's words; `undefined` where its ending is told by `exit` and `signal`. */
   readonly broke: string | undefined
+  /** Where it broke; `undefined` with `broke`. */
+  readonly brokeAt: BrokeAt | undefined
   /** The exit code; `null` where a signal ended it or it never ran. */
   readonly exit: number | null
   readonly signal: string | null
+  /** What the cgroup recorded of its OOM killer over the run; `null` unless a signal ended it. */
+  readonly oom: Oom.Evidence | null
   /** The head of what it wrote on stderr: its first chunks, up to the first past `stderrHead` characters. */
   readonly stderr: string
 }
-
 
 /** How much of stderr is kept when the caller names no head. */
 const HEAD = 300
@@ -47,6 +60,7 @@ export const exec = (
     const spawner = yield* ChildProcessSpawner.ChildProcessSpawner
     const head = options.stderrHead ?? HEAD
     const partial = `${target}.${process.pid}.partial`
+    const oomBefore = yield* Oom.count
     const ended = yield* Effect.gen(function*() {
       yield* fs.makeDirectory(path.dirname(target), { recursive: true })
       const handle = yield* spawner.spawn(
@@ -68,13 +82,14 @@ export const exec = (
         { concurrency: "unbounded" }
       )
       const signal = exit._tag === "Failure" ? signalOf(exit.failure) ?? null : null
-      const broke = written ?? (exit._tag === "Failure" && signal === null
-        ? `${binary} could not run: ${messageOf(exit.failure)}`
-        : undefined)
+      const unawaited = exit._tag === "Failure" && signal === null ? messageOf(exit.failure) : undefined
+      const broke = unawaited ?? written
       return {
         broke,
+        brokeAt: unawaited !== undefined ? "await" : written !== undefined ? "output" : undefined,
         exit: exit._tag === "Success" ? exit.success as number : null,
         signal,
+        oom: signal === null ? null : yield* Oom.since(oomBefore),
         stderr
       } satisfies Ended
     }).pipe(
@@ -82,9 +97,11 @@ export const exec = (
       Effect.catchCause((cause) =>
         Effect.succeed(
           {
-            broke: `${binary} could not be started: ${messageOf(cause)}`,
+            broke: messageOf(Cause.squash(cause)),
+            brokeAt: "spawn",
             exit: null,
             signal: null,
+            oom: null,
             stderr: ""
           } satisfies Ended
         )
@@ -99,11 +116,23 @@ export const exec = (
       Effect.catch((error) =>
         fs.remove(partial, { force: true }).pipe(
           Effect.ignore,
-          Effect.as({ ...ended, broke: `publishing ${target} failed: ${error.message}` })
+          Effect.as({ ...ended, broke: `publishing ${target} failed: ${error.message}`, brokeAt: "output" as const })
         )
       )
     )
   })
+
+/** How `binary` broke at `at`, in one line: what `run` answers and what an extraction's failure line says. */
+export const brokeLine = (binary: string, at: BrokeAt, broke: string): string => {
+  switch (at) {
+    case "spawn":
+      return `${binary} could not be started: ${broke}`
+    case "await":
+      return `${binary} ran, and its exit could not be read: ${broke}`
+    case "output":
+      return broke
+  }
+}
 
 /** `binary args` with stdout into `target`; `undefined` where it ran and exited 0, else why not, in one line. */
 export const run = (
@@ -112,9 +141,12 @@ export const run = (
   target: string
 ): Effect.Effect<string | undefined, never, FileSystem.FileSystem | ChildProcessSpawner.ChildProcessSpawner> =>
   Effect.map(exec(binary, args, target), (ended) => {
-    if (ended.broke !== undefined) return ended.broke
+    if (ended.broke !== undefined && ended.brokeAt !== undefined) return brokeLine(binary, ended.brokeAt, ended.broke)
     const words = said(ended.stderr).slice(-HEAD)
-    if (ended.signal !== null) return `${binary} was killed by ${ended.signal}: ${words}`
+    if (ended.signal !== null) {
+      const oom = ended.oom === null ? "" : ` (${Oom.words(ended.oom)})`
+      return `${binary} was killed by ${ended.signal}${oom}: ${words}`
+    }
     return ended.exit === 0 ? undefined : `${binary} exited ${ended.exit}: ${words}`
   })
 

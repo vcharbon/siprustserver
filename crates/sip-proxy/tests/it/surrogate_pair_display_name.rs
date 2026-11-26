@@ -76,7 +76,6 @@ fn holds_a_surrogate_half(bytes: &[u8]) -> bool {
     bytes.windows(2).any(|w| w[0] == 0xed && (0xa0..=0xbf).contains(&w[1]))
 }
 
-/// The From line of `raw`.
 fn from_line(raw: &[u8]) -> Vec<u8> {
     raw.split(|&b| b == b'\n')
         .find(|line| line.starts_with(b"From:"))
@@ -145,7 +144,6 @@ async fn a_surrogate_pair_in_the_callers_display_name_crosses_the_proxy_as_its_c
     settle().await;
     let answered = caller.try_recv().expect("the 200 reaches the caller").raw.to_vec();
     assert_relayed(&answered, "the 200");
-    // The caller's route set: the 200's Record-Route, reversed (§12.1.2).
     let route: Vec<String> = String::from_utf8_lossy(&answered)
         .lines()
         .filter_map(|line| line.strip_prefix("Record-Route: "))

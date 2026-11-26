@@ -35,13 +35,20 @@ const WORKER: &str = "127.0.0.1:5071";
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 49170 RTP/AVP 0\r\n";
 const ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 49180 RTP/AVP 0\r\n";
 
-/// The production cadence: a 1 s tick, a 1.5 s reply window.
-const PRODUCTION: HealthProbeConfig =
-    HealthProbeConfig { interval_ms: 1_000, timeout_ms: 1_500, threshold: 2 };
+const PRODUCTION: HealthProbeConfig = HealthProbeConfig {
+    interval_ms: 1_000,
+    timeout_ms: 1_500,
+    threshold: 2,
+    ..HealthProbeConfig::DEFAULT
+};
 
 /// A tick long enough that only the first round leaves within a test.
-const FIRST_ROUND_ONLY: HealthProbeConfig =
-    HealthProbeConfig { interval_ms: 10_000, timeout_ms: 1_500, threshold: 2 };
+const FIRST_ROUND_ONLY: HealthProbeConfig = HealthProbeConfig {
+    interval_ms: 10_000,
+    timeout_ms: 1_500,
+    threshold: 2,
+    ..HealthProbeConfig::DEFAULT
+};
 
 fn hmac() -> Arc<StaticHmacKeyProvider> {
     Arc::new(StaticHmacKeyProvider::new(HmacKey::new("k1", vec![7u8; 32]), None).unwrap())
@@ -89,7 +96,6 @@ async fn spawn_proxy(
     common::ProxySut::from_task(sock, metrics, tokio::spawn(core.run()))
 }
 
-/// The OPTIONS probe over `registry`, latching `view`.
 async fn spawn_probe(
     h: &Harness,
     registry: Arc<dyn WorkerRegistry>,
@@ -135,7 +141,6 @@ async fn a_restarted_proxy_answers_nothing_before_its_first_worker_view() {
     let alice = h.agent("alice", "127.0.0.1:5060").await;
     let worker = h.agent("b2b-1", WORKER).await;
 
-    // The established call, through the proxy before its restart.
     let before = spawn_proxy(&h, "proxy", pool(WorkerHealth::Alive), FirstView::given()).await;
     let mut call = alice.invite(&worker).with_sdp(OFFER).through(before.addr()).send().await;
     let mut uas = worker.receive("INVITE").await;
@@ -146,7 +151,6 @@ async fn a_restarted_proxy_answers_nothing_before_its_first_worker_view() {
     drop(before);
     tokio::time::sleep(Duration::from_millis(10)).await;
 
-    // The restart: the worker unread, the view pending.
     let registry = pool(WorkerHealth::Unknown);
     let view = FirstView::pending();
     let started = Instant::now();
@@ -154,11 +158,9 @@ async fn a_restarted_proxy_answers_nothing_before_its_first_worker_view() {
     let probe =
         spawn_probe(&h, registry.clone(), registry.control(), view.clone(), FIRST_ROUND_ONLY).await;
 
-    // The first OPTIONS leaves at bind; its answer is held.
     let mut options = worker.receive("OPTIONS").await;
     assert!(started.elapsed() < Duration::from_millis(10), "probed at {:?}", started.elapsed());
 
-    // Before the view: the BYE and a new INVITE are dropped, unanswered.
     let (mut bye, bye_sent) =
         dialog.send_request(InDialogMethod::Bye).try_send_with_request().await.unwrap();
     let mut second = alice.invite(&worker).through(proxy.addr()).send().await;
@@ -167,12 +169,10 @@ async fn a_restarted_proxy_answers_nothing_before_its_first_worker_view() {
     assert_eq!(proxy.metrics.no_target_dropped_count(NoTargetDrop::Initial), 1);
     assert!(!view.is_in());
 
-    // The worker answers: the view is in.
     answer_options(&mut options).await;
     tokio::time::sleep(Duration::from_millis(10)).await;
     assert!(view.is_in());
 
-    // Timer E and Timer A: the retransmissions are routed.
     tokio::time::sleep_until(started + Duration::from_millis(500)).await;
     alice
         .try_send_datagram(&serialize(&SipMessage::Request(bye_sent)), proxy.addr())
@@ -233,7 +233,7 @@ fn spawn_responder(ep: Box<dyn UdpEndpoint>, worker: Arc<Responder>) {
 #[tokio::test(start_paused = true)]
 async fn a_first_round_nobody_answers_completes_at_its_reply_window() {
     let h = Harness::with_transit_delay("first-view-silent", 0);
-    let (worker_ep, _) = h.bind_sut("b2b-1", WORKER).await;
+    let (worker_ep, _) = h.bind_peer("b2b-1", WORKER).await;
     let worker = Arc::new(Responder { answers: false, seen: Mutex::new(Vec::new()) });
     spawn_responder(worker_ep, worker.clone());
     let registry = pool(WorkerHealth::Unknown);
@@ -258,7 +258,7 @@ async fn a_first_round_nobody_answers_completes_at_its_reply_window() {
 #[tokio::test(start_paused = true)]
 async fn the_first_round_leaves_with_the_first_listing() {
     let h = Harness::with_transit_delay("first-view-listing", 0);
-    let (worker_ep, _) = h.bind_sut("b2b-1", WORKER).await;
+    let (worker_ep, _) = h.bind_peer("b2b-1", WORKER).await;
     let worker = Arc::new(Responder { answers: true, seen: Mutex::new(Vec::new()) });
     spawn_responder(worker_ep, worker.clone());
     let membership = SimulatedMembership::unsynced(Clock::test_at(0));

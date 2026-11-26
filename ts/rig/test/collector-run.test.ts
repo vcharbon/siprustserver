@@ -23,9 +23,10 @@ import * as CollectorOnDemand from "../src/collector-on-demand.js"
 import * as CollectorPlan from "../src/collector-plan.js"
 import * as CollectorRun from "../src/collector-run.js"
 import * as RigPath from "../src/rig-path.js"
-import { alive, cellOf, goneWithin, memoryLocker, SAMPLES, traceOf, tracedWithin } from "./collectors.js"
+import { alive, cellOf, gone, HANGING_COLLECT_S, memoryLocker, SAMPLES, traceHolds, traceOf } from "./collectors.js"
 import { laneOf } from "./operations.js"
 import { run, tree } from "./tree.js"
+import { endOf } from "./waits.js"
 
 const made: Array<string> = []
 
@@ -492,9 +493,8 @@ describe("a scope's collectors", () => {
     const cells = cellsUnder(root)
     const { collected } = await runScope([instanceOf(rig, root, "hanging-collect")], cells, { sink: () => Effect.void, locker: memoryLocker() })
     const [hung] = valueOf(collected)
-    expect(hung!.cells.get("c2")!.verifications[0]!.message).toMatch(/^collect timed out after 500 ms/)
-    const sleeper = Number(fs.readFileSync(path.join(root, "sleeper"), "utf8"))
-    expect(await goneWithin(sleeper)).toBe(true)
+    expect(hung!.cells.get("c2")!.verifications[0]!.message).toMatch(new RegExp(`^collect timed out after ${HANGING_COLLECT_S * 1000} ms`))
+    await gone(Number(fs.readFileSync(path.join(root, "sleeper"), "utf8")))
   })
 
   it("lets open leave a process running through the scope, which close ends", async () => {
@@ -505,8 +505,7 @@ describe("a scope's collectors", () => {
     })
     await runScope([instanceOf(rig, root, "leaves-process")], cellsUnder(root), { sink: () => Effect.void, locker: memoryLocker() }, body)
     expect(duringScope).toBe(true)
-    const sleeper = Number(fs.readFileSync(path.join(root, "sleeper"), "utf8"))
-    expect(await goneWithin(sleeper)).toBe(true)
+    await gone(Number(fs.readFileSync(path.join(root, "sleeper"), "utf8")))
   })
 
   it("closes, in reverse order, when the scope fails after open, and does not collect", async () => {
@@ -523,17 +522,19 @@ describe("a scope's collectors", () => {
 
   it("closes when the scope is interrupted after open, and when an open under way is interrupted", async () => {
     const { root, rig } = await samples()
+    const { events, sink } = collecting()
     const fiber = Effect.runFork(scope(
       ["tidy", "slow-open"].map((name) => instanceOf(rig, root, name)),
       cellsUnder(root),
-      { sink: () => Effect.void, locker: memoryLocker() },
+      { sink, locker: memoryLocker() },
       Effect.never
     ))
-    expect(await tracedWithin(root, "open slow-open")).toBe(true)
-    const interrupted = Date.now()
+    await traceHolds(root, "open slow-open", endOf(fiber))
     await Effect.runPromise(Fiber.interrupt(fiber))
-    expect(Date.now() - interrupted).toBeLessThan(4000)
     expect(traceOf(root)).toEqual(["open tidy open", "open slow-open", "close slow-open", "close tidy token close"])
+    expect(events.filter((event) => event.collector === "slow-open" && event.phase === "failed").map((event) => event.message)).toEqual([
+      "open interrupted, its process group killed"
+    ])
   })
 
   it("marks the lab left changed when close fails twice, and closes the others still", async () => {

@@ -1,12 +1,13 @@
-//! Response path, single-endpoint: validate ≥2 Via and that the top is us;
-//! route by the owner rule (`owner`, ADR-0055 §8): to the owner holding the
-//! response's transaction, along the next Via
-//! (received/rport precedence) or at the address it holds now, else to the
-//! call's other owner, else nowhere; pop the top Via entry (comma-aware);
-//! forward; on an INVITE final, shorten the INVITE's memo entry to Timer H
-//! and, for a non-2xx one, remember the ACK-relay hop — the node the final
-//! arrived from (`final_memo`; the ACK itself travels end-to-end — see
-//! `core/request`).
+//! The response path. A response is relayed when its top Via names either face
+//! of this proxy (the egress face's advertise stamps each outbound Via) and it
+//! carries at least two Vias (§16.7.3). It goes by the owner rule (ADR-0055 §8):
+//! to the owner holding its transaction, along the next Via (`received`/`rport`
+//! over sent-by, §18.2.2) or at the address that owner holds now, else to the
+//! call's other owner, else nowhere. The proxy pops its own Via entry
+//! (comma-aware, §7.3.1) and forwards. On an INVITE final it shortens the
+//! INVITE's memo entry to Timer H and, for a non-2xx one, remembers the ACK's
+//! hop: the node the final arrived from (`final_memo`; the ACK itself is routed
+//! by `core/request`).
 //!
 //! A 100 is relayed like any other response: §16.7's absorption of a 100 is a
 //! stateful proxy's, and this proxy is stateless (§16.11), so it neither
@@ -17,9 +18,9 @@
 //! call can take it, or when its top Via cannot be popped and the rest
 //! re-rendered.
 //!
-//! An address that LEFT the worker set counts as `Dead` here for Timer H past
-//! the last response for it (`registry::tombstone`, re-armed by every response
-//! whose next Via names it), so a response for it goes to the call's other
+//! An address that left the worker set counts as `Dead` for Timer H past the
+//! last response for it (`registry::tombstone`, re-armed by every response whose
+//! next Via sent-by names it), so a response for it goes to the call's other
 //! owner.
 
 use sip_message::header::Via;
@@ -55,8 +56,6 @@ impl ProxyCore {
         let cseq = resp.cseq().clone();
         self.metrics.record_message(Direction::Inbound, MessageResult::Forwarded);
         self.metrics.record_response(cseq.method().as_str(), resp.status());
-        // Per-call trace tier (ADR-0026): the parsed Call-ID, one predicted
-        // branch while nothing is sampled.
         let at_ms = self.trace_ms();
         let is_traced = emit::response_in(
             &self.traces,
@@ -66,34 +65,20 @@ impl ProxyCore {
             cseq.method().as_str(),
             resp.image(),
         );
-        // The relay below consumes the message, so a TRACED call's key is
-        // carried across it. An untraced call allocates nothing — the emission
-        // above already answered whether this call has a span, so the clone
-        // rides that answer and not the process-wide sampled flag.
         let traced: Option<String> = is_traced.then(|| resp.call_id().as_str().to_string());
         let ends_the_call = cseq.method() == Method::Bye && resp.status() >= 200;
 
-        // §16.7.3: need ≥2 Via (ours + the next hop's).
         let hops: Vec<Via> = resp.via().iter().cloned().collect();
         let [ours, next, ..] = hops.as_slice() else {
             self.metrics.record_message(Direction::Outbound, MessageResult::Dropped);
             return;
         };
         let (top_host, top_port) = ours.host_port();
-        // Dual-face: the proxy stamps its outbound Via with the EGRESS face's
-        // advertise, so a response legitimately names either face here.
         if !self.is_self_addr(top_host, top_port) {
-            // Top Via is not us — not our response to relay.
             self.metrics.record_message(Direction::Outbound, MessageResult::Dropped);
             return;
         }
 
-        // The worker a response is for is named by its Via sent-by — its
-        // advertised registry address, SNAT-immune, never the received/rport
-        // send target, which behind address translation is a node IP and an
-        // ephemeral port; a response for a departed address, whatever its
-        // method, re-arms that address's window. On a crossing proxy only a
-        // response that may be a worker's reads the registry (`crate::face`).
         let (sent_by_host, sent_by_port) = next.sent_by().pair();
         let sent_by = ProxyAddr::new(sent_by_host, sent_by_port);
         let marked = via_marks_same_face(ours);
@@ -102,9 +87,9 @@ impl ProxyCore {
             self.registry.rearm_departed(&sent_by);
         }
 
-        // ── The owner rule (ADR-0055 §8) ────────────────────────────────────
+        // ADR-0055 §8
         let msg = SipMessage::Response(resp);
-        let route = self.owner_route(&msg, ours, &sent_by, for_a_worker).await;
+        let route = self.owner_route(&msg, ours, &sent_by, for_a_worker);
         let SipMessage::Response(resp) = msg else { return };
         let (host, port, owner_named) = match (route, face) {
             (OwnerRoute::To(target), _) => (target.host, target.port, true),
@@ -112,7 +97,6 @@ impl ProxyCore {
                 self.metrics.record_message(Direction::Outbound, MessageResult::Dropped);
                 return;
             }
-            // received / rport take precedence over sent-by (§18.2.2 / §16.7.3).
             (OwnerRoute::Via { owner_named }, Face::Internal) => {
                 let (host, port) = next.response_target();
                 (host.to_string(), port, owner_named)
@@ -127,9 +111,6 @@ impl ProxyCore {
             },
         };
 
-        // Pop our own Via entry (§7.3.1 comma-aware) and forward. The thawed
-        // draft reads nothing below that top line, and freezing renders the
-        // relayed datagram once.
         let Ok(popped) = resp.thaw().pop_top::<Via>() else {
             self.metrics.record_message(Direction::Outbound, MessageResult::Dropped);
             return;
@@ -140,27 +121,18 @@ impl ProxyCore {
         };
         let next_hop = ProxyAddr::new(host, port);
         let egress = self.egress.response(face, owner_named, marked);
-        let _ = self.send_to(&bytes, &next_hop, egress).await;
+        let _ = self.send_to(&bytes, &next_hop, egress, None).await;
         self.metrics.record_message(Direction::Outbound, MessageResult::Forwarded);
         if let Some(call_id) = &traced {
             emit::relayed(&self.traces, call_id, at_ms, &next_hop, &bytes);
-            // The BYE's final is the last fact this hop will see about the
-            // call: close the span here rather than leaving it to the TTL.
             if ends_the_call {
                 self.traces.close(call_id);
             }
-            // A non-2xx INVITE final ends the CALL only when it rejects its
-            // setup for good. An auth challenge does not — the caller retries
-            // the same Call-ID with credentials — and neither does a
-            // mid-dialog re-INVITE's 488/491, which the registry tells apart
-            // by the transaction it is holding. One more fact follows a
-            // rejection on this hop, the ACK, so the span closes there.
             if rejects_the_setup(resp.status(), cseq.method()) {
                 self.traces.arm_close_on_ack(call_id, resp.from().tag(), cseq.seq());
             }
         }
 
-        // ── A relayed INVITE final: shorten its entry, keep its ACK hop ─────
         self.remember_final(&resp, next, ours, src);
     }
 

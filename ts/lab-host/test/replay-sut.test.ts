@@ -6,6 +6,8 @@
  */
 import { NodeServices } from "@effect/platform-node"
 import * as Effect from "effect/Effect"
+import * as Fiber from "effect/Fiber"
+import * as TestClock from "effect/testing/TestClock"
 import * as ChildProcess from "effect/unstable/process/ChildProcess"
 import * as fs from "node:fs"
 import * as os from "node:os"
@@ -32,8 +34,21 @@ const standIn = (script: string) =>
     forceKillAfter: "2 seconds"
   })
 
+/**
+ * `effect` run on a clock only the test moves, so no bound of the worker's
+ * (readiness, stop grace, log drain) runs out on a loaded box: each of its
+ * waits ends on its event, the package's test timeout the only bound.
+ */
 const run = <A, E>(effect: Effect.Effect<A, E, Sut.Requirements>) =>
-  Effect.runPromise(effect.pipe(Effect.provide(NodeServices.layer)))
+  Effect.runPromise(effect.pipe(Effect.provide(NodeServices.layer), Effect.provide(TestClock.layer())))
+
+/** Resolves once `holds` does, checking every 20 ms; the package's test timeout bounds the wait. */
+const until = async (holds: () => boolean): Promise<void> => {
+  while (!holds()) await new Promise((resolve) => setTimeout(resolve, 20))
+}
+
+/** Whether `log` holds `text`. */
+const logHolds = (log: string, text: string): boolean => fs.existsSync(log) && fs.readFileSync(log, "utf8").includes(text)
 
 /** Whether the stand-in's process is still there. */
 const alive = (): boolean => {
@@ -49,7 +64,12 @@ const alive = (): boolean => {
 describe("a managed worker", () => {
   it("is gone once its stand fails for a worker that never took its port", async () => {
     const log = path.join(dir, "sut.log")
-    const failed = await run(Effect.flip(Sut.worker(standIn("echo starting; exec sleep 30"), log, "lane-x", "300 millis")))
+    const failed = await run(Effect.gen(function*() {
+      const standing = yield* Effect.forkChild(Effect.flip(Sut.worker(standIn("echo starting; exec sleep 3600"), log, "lane-x", "300 millis")))
+      yield* Effect.promise(() => until(() => logHolds(log, "starting") || standing.pollUnsafe() !== undefined))
+      yield* TestClock.adjust("300 millis")
+      return yield* Fiber.join(standing)
+    }))
     expect(String(failed)).toContain("never took its port")
     expect(alive()).toBe(false)
     expect(fs.readFileSync(log, "utf8")).toContain("starting")
@@ -57,10 +77,10 @@ describe("a managed worker", () => {
 
   it("is handed over once it prints its readiness line, and is gone once stopped", async () => {
     const log = path.join(dir, "sut.log")
-    const held = await run(Sut.worker(standIn(`echo "${Sut.READY} 127.0.0.1:5060"; exec sleep 30`), log, "lane-x"))
+    const held = await run(Sut.worker(standIn(`echo "${Sut.READY} 127.0.0.1:5060"; exec sleep 3600`), log, "lane-x"))
     expect(held.died()).toBeUndefined()
     expect(alive()).toBe(true)
-    await Effect.runPromise(held.stop)
+    await run(held.stop)
     expect(alive()).toBe(false)
     expect(fs.readFileSync(log, "utf8")).toContain(Sut.READY)
   })
@@ -78,7 +98,7 @@ describe("a managed worker", () => {
         log,
         "lane-x"
       ))
-      await Effect.runPromise(held.stop)
+      await run(held.stop)
       expect(fs.readFileSync(log, "utf8"), `attempt ${attempt}`).toContain("LEAVING")
     }
   })
@@ -93,10 +113,12 @@ describe("a managed worker", () => {
   })
 
   it("says how it died once it dies after it was handed over", async () => {
-    const held = await run(Sut.worker(standIn(`echo "${Sut.READY}"; sleep 0.2; exit 7`), path.join(dir, "sut.log"), "lane-x"))
-    await new Promise((resolve) => setTimeout(resolve, 600))
+    const gate = path.join(dir, "gate")
+    const held = await run(Sut.worker(standIn(`echo "${Sut.READY}"; while [ ! -e ${gate} ]; do sleep 0.01; done; exit 7`), path.join(dir, "sut.log"), "lane-x"))
+    fs.writeFileSync(gate, "")
+    await until(() => held.died() !== undefined)
     expect(held.died()).toContain("the lane-x worker exited 7")
-    await Effect.runPromise(held.stop)
+    await run(held.stop)
   })
 })
 
@@ -106,21 +128,20 @@ describe("a managed lane's worker", () => {
     worker: "stand-in",
     metricsOf: () => undefined,
     ...(logOf === undefined ? {} : { logOf }),
-    command: () => Effect.succeed(standIn(`echo "${Sut.READY}"; echo "a call came"; exec sleep 30`))
+    command: () => Effect.succeed(standIn(`echo "warming up"; echo "${Sut.READY}"; exec sleep 3600`))
   })
 
   it("logs to the file its pack states for the lane, its directory made", async () => {
     const log = path.join(dir, "named", "sut.log")
     const held = await run(Sut.stand(packLogging(() => log), lane, path.join(dir, "batch")))
-    await new Promise((resolve) => setTimeout(resolve, 200))
-    await Effect.runPromise(held!.stop)
-    expect(fs.readFileSync(log, "utf8")).toContain("a call came")
+    await run(held!.stop)
+    expect(fs.readFileSync(log, "utf8")).toContain("warming up")
     expect(fs.existsSync(path.join(dir, "batch"))).toBe(false)
   })
 
   it("logs under the batch's directory where its pack states no file", async () => {
     const held = await run(Sut.stand(packLogging(undefined), lane, path.join(dir, "batch")))
-    await Effect.runPromise(held!.stop)
+    await run(held!.stop)
     expect(fs.readdirSync(path.join(dir, "batch")).filter((name) => name.startsWith("sut-"))).toHaveLength(1)
   })
 
@@ -128,7 +149,7 @@ describe("a managed lane's worker", () => {
     const pidFile = path.join(dir, "named", "sut.pid")
     const held = await run(Sut.stand({ ...packLogging(undefined), pidFileOf: () => pidFile }, lane, path.join(dir, "batch")))
     expect(fs.readFileSync(pidFile, "utf8").trim()).toBe(fs.readFileSync(path.join(dir, "pid"), "utf8").trim())
-    await Effect.runPromise(held!.stop)
+    await run(held!.stop)
     expect(alive()).toBe(false)
     expect(fs.existsSync(pidFile)).toBe(false)
   })
@@ -158,7 +179,7 @@ describe("a managed lane's worker", () => {
     expect(current()).not.toBe(first)
     expect(alive(), "the worker stood again runs").toBe(true)
     expect(held.died(), "a death the step claimed is no death of the lane's system").toBeUndefined()
-    await Effect.runPromise(held.stop)
+    await run(held.stop)
     expect(alive()).toBe(false)
     expect(fs.existsSync(pidFile)).toBe(false)
   })
@@ -174,7 +195,7 @@ describe("a managed lane's worker", () => {
     expect(await run(held.restand!())).toEqual({ exit: expect.stringContaining("exited SIGKILL"), claimed: false })
     expect(held.died()!.split("; "), "each death no step claimed").toHaveLength(2)
     expect(current()).not.toBe(second)
-    await Effect.runPromise(held.stop)
+    await run(held.stop)
     expect(held.died()!.split("; ")).toHaveLength(2)
   })
 
@@ -186,7 +207,7 @@ describe("a managed lane's worker", () => {
     const second = await killed()
     expect(await run(held.restand!(second))).toEqual({ exit: expect.stringContaining("exited SIGKILL"), claimed: true })
     expect(held.died(), "two deaths, each claimed by its step").toBeUndefined()
-    await Effect.runPromise(held.stop)
+    await run(held.stop)
   })
 
   it("keeps a claimed death claimed where standing its worker again failed, once a later stand succeeds", async () => {
@@ -197,7 +218,7 @@ describe("a managed lane's worker", () => {
       worker: "stand-in",
       metricsOf: () => undefined,
       pidFileOf: () => pidFile,
-      command: () => Effect.succeed(standIn(`if [ -e ${gate} ]; then echo "${Sut.READY}"; exec sleep 30; else exit 1; fi`))
+      command: () => Effect.succeed(standIn(`if [ -e ${gate} ]; then echo "${Sut.READY}"; exec sleep 3600; else exit 1; fi`))
     }
     const held = (await run(Sut.stand(pack, lane, path.join(dir, "batch"))))!
     const first = Number(fs.readFileSync(pidFile, "utf8").trim())
@@ -210,7 +231,7 @@ describe("a managed lane's worker", () => {
     const later = await run(held.restand!())
     expect(later).toEqual({ exit: expect.stringContaining("exited SIGKILL"), claimed: true })
     expect(alive(), "the worker stood again runs").toBe(true)
-    await Effect.runPromise(held.stop)
+    await run(held.stop)
     expect(held.died(), "the death the step claimed is no death of the lane's system").toBeUndefined()
   })
 })

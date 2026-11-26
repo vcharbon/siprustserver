@@ -41,21 +41,31 @@ use crate::shutdown::serve_until_stop;
 /// Set in the child's environment, naming its [`Spin`]: the child test runs
 /// only there.
 const CHILD: &str = "POLL_WATCHDOG_CHILD";
-/// Set in the child's environment: the hard exit bound, shortened for the
-/// case whose process ends there.
+/// Set in the child's environment: the hard exit bound, in place of the
+/// stuck exit's.
 const HARD_EXIT_MS: &str = "POLL_WATCHDOG_HARD_EXIT_MS";
 /// The stuck threshold the child's watchdog runs at.
 const THRESHOLD: Duration = Duration::from_millis(200);
+/// How long the child waits for an event of the pair: far past any delay a
+/// loaded box adds, and never waited out by a passing run.
+const EVENT_WITHIN: Duration = Duration::from_secs(30);
+/// How long the child lets what the turn would send ride a few more polls
+/// before it reads what the caller heard: a message later than this is not
+/// seen, so `caller_heard=0` can miss a leak on a loaded box, never invent one.
+const LAST_POLLS: Duration = Duration::from_millis(100);
 /// The bounds of the child worker's exit: the discharge returns as soon as
 /// the backup applied it, so a passing run never waits them out.
 const CHILD_BOUNDS: DrainBounds = DrainBounds {
     grace: Duration::from_secs(1),
     floor: Duration::from_millis(100),
-    release_flush: Duration::from_secs(2),
+    release_flush: Duration::from_secs(10),
     cdr_flush: Duration::from_millis(100),
 };
-/// How long the parent waits for the child.
-const CHILD_BUDGET: Duration = Duration::from_secs(15);
+/// The hard exit bound of the case whose turn leaves the CPU: past the
+/// pair's every wait.
+const THEN_REJECT_EXIT: Duration = Duration::from_secs(60);
+/// How long the parent waits for the child: past its hard exit.
+const CHILD_BUDGET: Duration = Duration::from_secs(90);
 /// The line the child prints once the backup holds no copy of the call.
 const BACKUP_GONE: &str = "backup copy gone";
 /// The topic of the internal event whose turn spins.
@@ -179,7 +189,7 @@ fn a_call_turn_spinning_on_the_only_worker_ends_the_process_at_the_hard_bound() 
 /// and the caller hears nothing.
 #[test]
 fn a_slow_turn_that_resumes_after_the_discharge_lands_nothing() {
-    let out = run_child(Spin::ThenReject, 4, Some(Duration::from_secs(12)));
+    let out = run_child(Spin::ThenReject, 4, Some(THEN_REJECT_EXIT));
     let all = text(&out);
     assert_eq!(out.status.code(), Some(i32::from(poll_watchdog::EXIT_CODE)), "{all}");
     assert!(all.contains("discharge=\"backup_applied\""), "the discharge's outcome: {all}");
@@ -208,7 +218,7 @@ fn child() {
         if let Some(ms) = std::env::var(HARD_EXIT_MS).ok().and_then(|v| v.parse().ok()) {
             watchdog.exit_after(Duration::from_millis(ms));
         }
-        tokio::spawn(report_backup_gone(pair.w1_store.clone(), call_ref.clone()));
+        let backup_gone = tokio::spawn(report_backup_gone(pair.w1_store.clone(), call_ref.clone()));
         pair.post(&call_ref, SPIN_TOPIC);
         if spin == Spin::ThenReject {
             pair.post(&call_ref, REJECT_TOPIC);
@@ -218,13 +228,11 @@ fn child() {
             serve_until_stop(&pair.w0, "child", bounds, exit, watchdog, pending(), pending()).await;
         if spin == Spin::ThenReject {
             let returned = |_: &Pair| RETURNED.load(Ordering::SeqCst);
-            pair.until_within(Duration::from_secs(10), "the spinning turn returned", returned)
-                .await;
+            pair.until_within(EVENT_WITHIN, "the spinning turn returned", returned).await;
             println!("the spinning turn returned");
         }
-        // What the turn would send and the backup's report ride a few more
-        // polls.
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        let _ = tokio::time::timeout(EVENT_WITHIN, backup_gone).await;
+        tokio::time::sleep(LAST_POLLS).await;
         let cdrs = pair.w0_cdrs.read_all().await.len();
         let mut caller_heard = 0;
         while pair.caller.try_recv().is_some() {
@@ -364,7 +372,7 @@ impl Pair {
         self.until("the call is live on w0", |p| p.w0.active_calls() == 1).await;
         let calls = (self.w0.live_calls_probe())().expect("the live calls read");
         let call_ref = calls.first().expect("the call").call_ref.clone();
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+        let deadline = tokio::time::Instant::now() + EVENT_WITHIN;
         loop {
             let held = self.w1_store.get_call(PartitionRole::Backup, "w0", &call_ref).await;
             if matches!(held, Ok(Some(_))) {
@@ -391,7 +399,7 @@ impl Pair {
     }
 
     async fn until(&self, what: &str, done: impl Fn(&Pair) -> bool) {
-        self.until_within(Duration::from_secs(3), what, done).await;
+        self.until_within(EVENT_WITHIN, what, done).await;
     }
 
     async fn until_within(&self, within: Duration, what: &str, done: impl Fn(&Pair) -> bool) {

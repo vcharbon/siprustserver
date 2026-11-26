@@ -174,7 +174,7 @@ impl B2buaCore {
         let mut tasks: Vec<tokio::task::JoinHandle<()>> = Vec::new();
         // The tasks the worker ends with (`WorkerLoops::with_vital`).
         let mut vital = vec![("timer_driver", timers.task())];
-        vital.extend(cdr.task().map(|task| ("cdr_drainer", task)));
+        vital.extend(cdr.task().map(|task| (crate::supervise::CDR_DRAINER, task)));
 
         // Replication wiring (opt-in). When present: write the store directly,
         // serve our changelog, start the puller supervisor, gate readiness on
@@ -324,11 +324,7 @@ impl B2buaCore {
         // `tune` seam ran in `spawn_b2bua_core` before this). Must happen before
         // `config` is moved into the ctx below.
         overload.configure_admission(&config);
-        // Decision-backend deadline (ADR-0022): bound EVERY engine round-trip so
-        // a hung adapter cannot wedge a per-call worker past
-        // `call_control_timeout_ms` — the caller heard the auto-100 and must get
-        // its final. Wrapped HERE, after the `tune` seam finalized the config, so
-        // no injection path bypasses it.
+        // ADR-0022
         let decision =
             crate::decision::DeadlineDecisionEngine::wrap(decision, config.call_control_timeout());
         // The worker's handle on its call limiter: the lease, the release
@@ -342,6 +338,10 @@ impl B2buaCore {
         );
         tasks.extend(limiter_tasks);
         let http_cap = config.service_http_timeout();
+        let takeover_window = crate::router::takeover_window::TakeoverWindow::new(
+            &state,
+            supervisor.as_ref().map(crate::repl::ReplicationSupervisor::departed_count),
+        );
         let ctx = Arc::new(RouterCtx {
             outbound_proxy: crate::router::outbound_proxy_target(&config),
             relay_owner: call::RelayOwner::new(config.self_ordinal.clone(), identity),
@@ -359,7 +359,7 @@ impl B2buaCore {
             decision,
             limiter,
             cdr: cdr.clone(),
-            options_tagger: sip_txn::StatelessTagger::from_id_gen(&id_gen),
+            stateless_tagger: sip_txn::StatelessTagger::from_id_gen(&id_gen),
             id_gen,
             clock,
             rules: Arc::new(rules),
@@ -370,6 +370,7 @@ impl B2buaCore {
             readiness: readiness.clone(),
             unsent_waves: crate::lifecycle::unsent_waves(),
             departed: supervisor.as_ref().map(crate::repl::departed_probe),
+            takeover_window,
             peer_streams: supervisor.clone(),
             overload: overload.clone(),
             capacity: capacity.clone(),

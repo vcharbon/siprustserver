@@ -1,4 +1,4 @@
-//! `sip-proxy` — the stateless SIP front proxy + its load balancer.
+//! `sip-proxy`, the stateless SIP front proxy and its load balancer.
 //!
 //! The proxy is a **stateless** RFC 3261 §16 proxy: it fans new dialogs across a
 //! pool of B2BUA workers, pins in-dialog traffic to the chosen worker via a
@@ -17,19 +17,19 @@
 //!   cookie + routing matrix, [`strategies`]), the worker registry (static,
 //!   simulated, and the composed registry a discovery source feeds), OPTIONS
 //!   health probing toward the B2BUA, the per-worker band classification and
-//!   AIMD rate-cap token bucket ([`load_observer`]), the metrics layer
-//!   (counters + a Prometheus HTTP endpoint), and [`self_gate`] — the ELU/CPS
+//!   AIMD rate-cap token bucket ([`load_observer`]), the metrics and their
+//!   Prometheus exposition ([`observability`]), and [`self_gate`], the ELU/CPS
 //!   admission gate ([`self_gate::EluCpsGate`]: EWMA-smoothed intake pressure
 //!   (packet age at dequeue) + per-class CPS token bucket) shedding external new-dialog
 //!   non-emergency INVITEs under self-overload, with the always-admit
 //!   [`self_gate::AlwaysAdmitGate`] as the no-protection default, and the
 //!   per-call trace tier ([`trace`], ADR-0026: independent sampling on the
 //!   initial INVITE, correlation by `Call-ID` only, nothing added to the wire).
-//! - Out of scope: the SIP registrar/REGISTER path, and the kubernetes
-//!   EndpointSlice source (`topology::K8sMembership`, wired by
-//!   `sip-proxy-runner`).
+//! - Out of scope: the SIP registrar/REGISTER path, the HTTP probe and
+//!   `/metrics` server (`probe-http`), and the kubernetes EndpointSlice source
+//!   (`topology::K8sMembership`); `sip-proxy-runner` wires both.
 
-// The panic set at deny outside test code (ADR-0051 §3).
+// ADR-0051 §3
 #![cfg_attr(
     not(test),
     deny(

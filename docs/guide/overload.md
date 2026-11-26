@@ -83,6 +83,40 @@ When a request inside a dialog meets one of those two bounds, a re-INVITE gets 5
 `Retry-After` and the dialog stays. The worker drops any other request and serves its
 retransmission.
 
+## A request that names no call
+
+A request can name a dialog or a call that this worker does not have: a BYE after the call
+ended, a CANCEL after the final response, a forged request. The worker answers it 481, or 405
+for a method it does not support. It keeps no transaction for the answer (RFC 3261 §8.2.7).
+Each retransmission gets the same answer again, with the same To-tag. A flood of such requests
+thus uses CPU and does not count against the transaction ceiling. It keeps only small, bounded
+memory:
+
+- One entry per Call-ID in the per-Call-ID message budget. The table holds at most 262 144
+  entries. The worker removes the oldest idle entry to make room for a new Call-ID.
+- For a re-INVITE, its 100 Trying timer, until the timer expires 200 ms after the request
+  arrived.
+
+A request that the full event queue drops also keeps no transaction and no copy record.
+
+Such a request waits on a queue of its own, apart from the requests of calls. The worker takes
+that queue only when it has no other work. A flood of them thus delays no request of a call,
+never drops the BYE of one, and does not make the worker refuse new calls while it has CPU to
+spare. When 1 024 of them wait, the worker drops each new one on arrival, before it keeps
+anything for it, and counts it in `b2bua_txn_unattributed_lane_drops_total`. While check 1
+refuses new calls, the worker also drops each such request before its UDP input queue, and
+counts it in `b2bua_udp_ingress_brake_unattributed_dropped_total`, so the flood leaves room
+in that queue for the requests of calls. Its sender retransmits it. A request of a call carries the call's reference in its Request-URI when it
+reaches the worker at the Contact the worker gave. A request whose Request-URI an element on
+its path rewrote waits on that queue too, and its retransmission recovers it during a flood.
+
+Two answers keep a transaction:
+
+- the 200 to a PRACK that a released call still answers;
+- the 481 to a re-INVITE when the 100 Trying of the re-INVITE was already sent, or while a takeover
+  can be in progress: a peer worker left the cluster and did not come back, or the worker serves
+  calls of a failed peer.
+
 ## A worker with less CPU than its load needs
 
 A worker can have less CPU than its load needs: its CPU limit is too low, or its host is busy.
@@ -128,7 +162,34 @@ check. These refuse it:
 - a full call table;
 - a backlog at twice the normal limit;
 - a cordoned worker;
+- a call that starts after its start bound;
 - a spent setup budget, or a decision backend that is down.
+
+## When the worker sends 100 Trying
+
+The worker sends 100 Trying for a new call only when it starts the call (ADR-0070):
+
+- The worker creates the call and writes it to its backup. The 100 leaves when the backup
+  applied the write, at the sync cap, or at once for a call with no backup.
+- The worker then sends the request to the decision backend. If the 100 did not leave
+  200 ms after this request, the transaction layer sends it.
+- Before this point, the worker sends nothing. The caller retransmits its INVITE. The
+  previous hop, for example the SBC, can then send the call to a different worker on its own
+  timer.
+- A call that starts 4 s or more after the worker received its INVITE
+  (`B2BUA_CALL_START_BOUND_MS`) gets 503, and the worker calls no callee. This applies to
+  emergency calls too.
+- The same start bound applies when a backup takes over a call that did not get its routing
+  decision. The backup counts the start bound from the time at which the first worker received
+  the INVITE. Before the start bound, the backup asks the decision backend again and serves the
+  call. After it, the backup sends 503 and calls no callee: the backup does not know if the
+  caller got 100 Trying.
+- Set the start bound plus the sync cap (`B2BUA_REPL_SYNC_CAP_MS`) below the time for which the
+  previous hop retransmits an INVITE with no 100 Trying before it sends the call to a different
+  site. For an SBC that retransmits for at least 5 s, the default of 4 s gives a margin of
+  900 ms.
+
+A re-INVITE gets its 100 Trying 200 ms after the worker received it, at the latest.
 
 ## The first INVITE always gets a final response
 
@@ -139,7 +200,7 @@ the worker dies, the backup of the call keeps the promise. A call with no backup
 
 - One setup budget of 5 s (`B2BUA_CALL_CONTROL_TIMEOUT_MS`) runs from the receipt of the INVITE.
   It covers the wait for a slot, each request to the decision backend, each limiter request and
-  the retries on other routes.
+  the retries on other routes. The wait for a slot stops at the start bound.
 - When the budget is spent, the caller gets 503. With replication on, the 503 can leave up to
   100 ms later, at the sync cap.
 - A call that ends unanswered for a different internal reason gets the same 503 from one last
@@ -175,9 +236,11 @@ These bounds stop a call that grows without end, by a fault of a peer or a defec
 | Timers of one call, open requests of one call | 400 each | The same. |
 | Dialogs of one leg | 100 | The same. |
 | Actions of one turn | 100 000 | The same. |
+| Size of the record of one call, encoded | 16 MiB | The same. The record is measured when the worker writes it, so the turn's record is not written and not sent to the backup. A BYE is never refused, so a BYE can leave a record above the bound. A worker with a lower bound can take over a record above its bound. In both cases the next write of the call ends it. |
 | Events queued for one call | 64 | See [What is never refused](#what-is-never-refused). |
 
-You can raise a bound. You cannot remove one. A worker refuses to start with a bound at zero.
+You can raise a bound. You cannot remove one. A worker refuses to start with a bound at zero, or
+with a record size above 32 MiB, half of the 64 MiB replication frame.
 
 A call that the worker ends for a bound gets a normal teardown. Each leg gets a BYE or a CANCEL,
 and a caller with no answer gets 503. The name of the bound does not go on the wire. It goes in
@@ -203,6 +266,11 @@ A call cannot stay in a worker with no owner.
 | One call spends 10 s of CPU in one step | A watchdog thread reads the CPU time of each runtime thread | The worker leaves that call to its parties and exits with code 70. |
 | A long-lived task panics | Immediate | The task starts again after 1 s. |
 | The logic of one call panics | Immediate | That call is torn down on the wire and released. The other calls continue. |
+
+An overload is none of these faults. A UDP input queue that never empties holds no event loop:
+the worker and the proxy read at most 128 datagrams of it in a row, then the other work of
+their thread runs, as the timers, the answers to the probes and the finals of the calls. The
+watchdog thus never reads an overload as a stuck step.
 
 The code of the worker and the proxy is written so that input cannot cause a panic. See
 [engineering-rules.md](engineering-rules.md). The rows above are the second line of defence.
@@ -252,8 +320,9 @@ its count falls. With a mean call duration `T`, `L` live calls and a ceiling `C`
 | `b2bua_event_queue_refusing` | 1 while check 7 refuses. |
 | `b2bua_udp_queue_wait_ms` | The wait of the oldest datagram in the UDP input queue. |
 | `b2bua_cap_trips_total{cap}` | Calls ended for a bound. |
+| `b2bua_cap_peak{cap}`, `b2bua_call_record_bytes` | How near calls come to each bound. The histogram gives the size of each call record that a worker writes. |
 | `b2bua_limiter_breaker_open`, `b2bua_limiter_uncounted_calls` | The limiter is unreachable, and how many calls run without a count. |
-| `b2bua_cdr_dropped_total` | CDRs lost at a full queue. |
+| `b2bua_cdr_dropped_total{reason}` | CDRs that a worker did not deliver. `buffer_full` counts the CDRs lost at a full queue. |
 | `b2bua_loop_stalled` | 1 while the event loop does not turn. |
 | `sip_proxy_self_external_invites_rejected_total` | New calls the proxy refused for its own load. |
 

@@ -9,7 +9,7 @@ use sip_txn::IdGen;
 
 use crate::addr::ProxyAddr;
 use crate::cancel_lru::CancelBranchLru;
-use crate::health::FirstView;
+use crate::health::{FirstView, WorkerCapabilities};
 use crate::liveness::ShardPulse;
 use crate::observability::ProxyMetrics;
 use crate::parse_refusals::ParseRefusals;
@@ -22,8 +22,11 @@ use crate::trace::ProxyTraces;
 
 use super::{ExternalFaceParts, ProxyCore, ProxyCoreParts};
 
-/// Convenience builder for the common all-defaults wiring (AlwaysAdmitGate +
-/// fresh metrics + system clock) around the caller's identifier generator.
+/// The builder of a [`ProxyCore`]. A part left unset takes its default: one
+/// face, shard 0, the system clock, an always-admit self-gate, fresh metrics,
+/// a private memo, refusals, intake-age recorder and pulse, the system
+/// resolver with [`ResolverConfig::default`], environment-read traces, and a
+/// first view already given.
 pub struct ProxyCoreBuilder {
     advertised: ProxyAddr,
     external: Option<ExternalFaceParts>,
@@ -44,6 +47,7 @@ pub struct ProxyCoreBuilder {
     pulse: Option<Arc<ShardPulse>>,
     first_view: Option<Arc<FirstView>>,
     parser: CustomParser,
+    supervision: Option<Arc<WorkerCapabilities>>,
 }
 
 impl ProxyCoreBuilder {
@@ -78,6 +82,7 @@ impl ProxyCoreBuilder {
             pulse: None,
             first_view: None,
             parser,
+            supervision: None,
         }
     }
 
@@ -98,6 +103,8 @@ impl ProxyCoreBuilder {
         )
     }
 
+    /// The clock a packet's intake age is read on: the one its endpoint stamps
+    /// arrivals on (`BindUdpOpts::clock`).
     pub fn clock(mut self, clock: Clock) -> Self {
         self.clock = Some(clock);
         self
@@ -147,10 +154,8 @@ impl ProxyCoreBuilder {
         self.resolver = Some(resolver);
         self
     }
-    /// Cache TTLs / caps for the named-target resolver (defaults:
-    /// [`ResolverConfig::default`] — positive 60 s, negative 5 s). The runner
-    /// env-exposes the TTLs as `PROXY_RESOLVER_POSITIVE_TTL_MS` /
-    /// `PROXY_RESOLVER_NEGATIVE_TTL_MS`.
+    /// The named-target resolver's cache TTLs and caps; the default is
+    /// [`ResolverConfig::default`].
     pub fn resolver_config(mut self, cfg: ResolverConfig) -> Self {
         self.resolver_cfg = Some(cfg);
         self
@@ -184,7 +189,13 @@ impl ProxyCoreBuilder {
         self.first_view = Some(view);
         self
     }
-    /// Finish into a [`ProxyCore`] bound on `endpoint`.
+    /// Answer a supervision OPTIONS here, stating `capabilities`, the
+    /// workers' last advertisement its [`HealthProbe`](crate::health::HealthProbe)
+    /// writes (ADR-0069). The default relays every OPTIONS.
+    pub fn supervision(mut self, capabilities: Arc<WorkerCapabilities>) -> Self {
+        self.supervision = Some(capabilities);
+        self
+    }
     pub fn build(self, endpoint: Box<dyn UdpEndpoint>) -> ProxyCore {
         let clock = self.clock.unwrap_or_else(Clock::system);
         let traces = self.traces.unwrap_or_else(|| Arc::new(ProxyTraces::from_env(clock.now_ms())));
@@ -213,6 +224,7 @@ impl ProxyCoreBuilder {
             pulse: self.pulse.unwrap_or_else(|| Arc::new(ShardPulse::new(self.shard + 1))),
             first_view: self.first_view.unwrap_or_else(FirstView::given),
             parser: self.parser,
+            supervision: self.supervision,
         })
     }
 }

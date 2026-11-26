@@ -15,6 +15,7 @@ import {
   releasedLegSteps,
   rfcFactsOf,
   roundsPastReleaseSteps,
+  tryingOnEarlyByeSteps,
   tryingOnNonInviteSteps,
   untriedInviteSteps
 } from "../src/facts.js"
@@ -39,6 +40,7 @@ const runOf = (over: Partial<Classifier.RunShape> = {}): Classifier.RunShape => 
   openers: new Map(),
   receptions: new Map(),
   sent: new Map(),
+  byeAheadOfInviteFinal: new Set(),
   ...over
 })
 
@@ -162,6 +164,27 @@ describe("a 100 to a BYE or CANCEL (RFC 3261 §9.2, §15.1.2, §12.2.2)", () => 
     expect([...tryingOnNonInviteSteps(read(byeOnPending))]).toEqual([["s22", 200]])
     const cancelAnswered = [...ringing, step("s11", "A", "send", { method: "CANCEL" }), step("s12", "A", "expect", { status: 100, cseqMethod: "CANCEL", auto: true })]
     expect([...tryingOnNonInviteSteps(read(cancelAnswered))]).toEqual([["s12", 200]])
+  })
+
+  /** The run where the caller's BYE left before the INVITE's final reached her. */
+  const byeFirst = runOf({ byeAheadOfInviteFinal: new Set(["A"]) })
+
+  it("names the BYE sent after the CANCEL and before any INVITE final as one a 200 answers too", () => {
+    expect([...tryingOnEarlyByeSteps(read(byeAfterCancel), byeFirst)]).toEqual(["s22"])
+    const byeAfterFinal = [
+      ...ringing,
+      step("s11", "A", "send", { method: "CANCEL" }),
+      step("s13", "A", "expect", { status: 200, cseqMethod: "CANCEL" }),
+      step("s14", "A", "expect", { status: 487, cseqMethod: "INVITE" }),
+      step("s15", "A", "send", { method: "BYE" }),
+      step("s22", "A", "expect", { status: 100, cseqMethod: "BYE", auto: true })
+    ]
+    expect([...tryingOnNonInviteSteps(read(byeAfterFinal))]).toEqual([["s22", 481]])
+    expect(tryingOnEarlyByeSteps(read(byeAfterFinal), byeFirst).size).toBe(0)
+  })
+
+  it("names no such BYE where the run's final reached the caller before her BYE left", () => {
+    expect(tryingOnEarlyByeSteps(read(byeAfterCancel), runOf()).size).toBe(0)
   })
 
   it("names no step whose scripted final differs from the owed one, nor a 100 to the INVITE", () => {

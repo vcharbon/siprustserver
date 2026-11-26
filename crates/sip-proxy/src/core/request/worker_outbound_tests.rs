@@ -21,8 +21,6 @@ use crate::strategies::forward_all::ForwardAllStrategy;
 use crate::strategies::LoadBalancerStrategy;
 use crate::{ProxyMetrics, RoutingStrategy};
 
-// Worker w1 lives at its POD ip:5060 (what the registry holds and the worker
-// stamps as its Via sent-by). The downstream UAC the keepalive targets.
 const W1_POD: &str = "10.244.5.8";
 const UAC: &str = "10.244.7.13";
 const PROXY_VIP: &str = "192.0.2.250";
@@ -50,9 +48,9 @@ async fn core_routing(
         .build(ep)
 }
 
-// A B2BUA A-leg keepalive OPTIONS toward the UAC: top Via = the originating
-// worker, our own cookie Route (`target=worker`, no `;outbound`), R-URI = the
-// UAC. This is exactly the on-wire shape captured in the endurance repro.
+/// A worker's in-dialog keepalive OPTIONS toward the UAC: the worker's top Via,
+/// the proxy's own cookie Route (`target=` the worker, no `;outbound`), the UAC
+/// as Request-URI.
 fn keepalive_options() -> SipMessage {
     let raw = format!(
         "OPTIONS sip:sipp@{UAC}:5060 SIP/2.0\r\n\
@@ -69,13 +67,9 @@ Content-Length: 0\r\n\r\n"
     CustomParser::new().parse(raw.as_bytes()).unwrap()
 }
 
-// The steady-state long-call-loss class: through a masquerading
-// node a worker→proxy packet is SNAT'd to the NODE ip:ephemeral-port, so the
-// proxy's UDP source is NOT a registered worker. The worker-outbound
-// classification must therefore key off the SNAT-immune top Via sent-by, not
-// the socket source — otherwise the cookie's `target=worker` decode bounces
-// the keepalive straight back to a worker and the UAC never sees it (350s
-// recv-timeout → BYE → 481).
+/// A worker's request translated by a masquerading node arrives from an address
+/// no registry holds: it is worker-outbound by its top Via sent-by, and reaches
+/// the Request-URI instead of following the cookie back to a worker.
 #[tokio::test]
 async fn snat_masqueraded_worker_keepalive_routes_to_downstream_not_back_to_worker() {
     let reg: Arc<dyn WorkerRegistry> =
@@ -85,7 +79,6 @@ async fn snat_masqueraded_worker_keepalive_routes_to_downstream_not_back_to_work
         )]));
     let core = core(reg).await;
 
-    // SNAT'd source: the kind NODE ip + an ephemeral port — NOT in the registry.
     let snat_src = "192.0.2.11:63522".parse().unwrap();
     let msg = keepalive_options();
     let outcome = core.route_request_from(&msg, snat_src).await;
@@ -102,13 +95,9 @@ async fn snat_masqueraded_worker_keepalive_routes_to_downstream_not_back_to_work
     );
 }
 
-// The recv-loop head-of-line block: a worker-outbound
-// request whose R-URI is a DNS name must NOT make routing wait on the
-// resolver — resolution happens on a spawned task (see crate::resolver).
-// Under an inline-await design a resolver that never answers would
-// park route_request (and with it the whole recv loop) forever;
-// here the only pending timer is the watchdog timeout, so a regression
-// fails fast instead of hanging.
+/// A worker-outbound request to a DNS name is routed without waiting on the
+/// resolver: with a resolver that never answers, routing returns before the
+/// 1 s watchdog.
 #[tokio::test(start_paused = true)]
 async fn named_target_resolution_never_blocks_routing() {
     struct PendingResolver;
@@ -164,8 +153,8 @@ Content-Length: 0\r\n\r\n"
     assert_eq!(outcome.target, Some(ProxyAddr::new("uas.example", 5060)));
 }
 
-// RFC 3261 §16.3: a Request-URI of a scheme that names no host is no target
-// this hop resolves; the request is answered 416, never forwarded.
+/// RFC 3261 §16.3: a Request-URI of a scheme that names no host is answered
+/// 416, never forwarded.
 #[tokio::test]
 async fn a_worker_outbound_request_uri_naming_no_host_is_refused() {
     let reg: Arc<dyn WorkerRegistry> =
@@ -204,7 +193,6 @@ Content-Length: 0\r\n\r\n"
     assert_eq!(metrics.reject_count("unsupported_uri_scheme"), 1);
 }
 
-// The un-NAT'd fast path still works: source IS the registered worker.
 #[tokio::test]
 async fn pod_direct_worker_source_is_still_worker_outbound() {
     let reg: Arc<dyn WorkerRegistry> =
@@ -222,9 +210,6 @@ async fn pod_direct_worker_source_is_still_worker_outbound() {
     assert_eq!(outcome.target, Some(ProxyAddr::new(UAC, 5060)));
 }
 
-// A genuine EXTERNAL in-dialog request (top Via = a non-worker UAC) must NOT
-// be misclassified as worker-outbound — it follows the cookie back to its
-// worker as before.
 #[tokio::test]
 async fn external_in_dialog_request_is_not_worker_outbound() {
     let reg: Arc<dyn WorkerRegistry> =
@@ -234,7 +219,6 @@ async fn external_in_dialog_request_is_not_worker_outbound() {
         )]));
     let core = core(reg).await;
 
-    // Same cookie Route, but the top Via sent-by is the UAC (not a worker).
     let raw = format!(
         "BYE sip:b2bua@{W1_POD}:5060 SIP/2.0\r\n\
 Via: SIP/2.0/UDP {UAC}:5060;branch=z9hG4bKext;rport\r\n\
@@ -276,10 +260,9 @@ async fn dual_face_core(reg: Arc<dyn WorkerRegistry>) -> crate::core::ProxyCore 
         .build(int_ep)
 }
 
-// An unsigned `;outbound` on the proxy's own Route entry, from a source and a
-// Via no registry holds (a worker on a new pod address, behind address
-// translation): the internal face trusts it, the external face ignores it,
-// counts it, and routes the request by the cookie the entry carries.
+/// An unsigned `;outbound` on the proxy's own Route entry, from a source and a
+/// Via no registry holds: the internal face trusts it, the external face
+/// ignores it, counts it, and routes the request by the entry's cookie.
 #[tokio::test]
 async fn an_unsigned_outbound_marker_is_trusted_only_on_the_internal_face() {
     let reg: Arc<dyn WorkerRegistry> =
@@ -289,7 +272,7 @@ async fn an_unsigned_outbound_marker_is_trusted_only_on_the_internal_face() {
         )]));
     let core = dual_face_core(reg).await;
 
-    let new_pod_ip = "10.244.9.99"; // a worker's address the registry does not hold
+    let new_pod_ip = "10.244.9.99";
     let raw = format!(
         "OPTIONS sip:sipp@{UAC}:5060 SIP/2.0\r\n\
 Via: SIP/2.0/UDP {new_pod_ip}:5060;branch=z9hG4bKreboot;lg=a;rport\r\n\
@@ -315,16 +298,11 @@ Content-Length: 0\r\n\r\n"
     assert_eq!(core.metrics().external_untrusted_total(UntrustedClaim::OutboundMarker), 1);
 }
 
-// ── Double-record-route: direction is intrinsic to the proxy's own RR ─────
-//
-// THE load-bearing case. A worker that has just rebooted onto a NEW pod IP
-// (absent from the registry) sends, behind the SNAT'd VIP, its keepalive on
-// the route set captured at dialog set-up: the proxy's OWN `;outbound`
-// Record-Route on top, the stickiness cookie below. The worker stamps NOTHING.
-// Neither the SNAT'd source nor the top Via (the new IP) is a registered
-// worker, so every registry-based discriminator MISSES — yet direction is
-// still correct because it is read from the proxy's own self-issued top RR.
-// The worker's own `;outbound` stamp is therefore not load-bearing.
+/// A worker on a pod address no registry holds, behind address translation,
+/// sends its keepalive on the route set of the dialog's set-up: the proxy's own
+/// `;outbound` Record-Route on top, the cookie below, nothing stamped by the
+/// worker. No registry match exists, and the direction is read from the
+/// proxy's own top entry: worker-outbound, to the Request-URI.
 #[tokio::test]
 async fn rebooted_worker_keepalive_direction_from_proxy_issued_outbound_rr() {
     let reg: Arc<dyn WorkerRegistry> =
@@ -334,7 +312,7 @@ async fn rebooted_worker_keepalive_direction_from_proxy_issued_outbound_rr() {
         )]));
     let core = core(reg).await;
 
-    let new_pod_ip = "10.244.9.99"; // rebooted worker's new IP — NOT in registry
+    let new_pod_ip = "10.244.9.99";
     let raw = format!(
         "OPTIONS sip:sipp@{UAC}:5060 SIP/2.0\r\n\
 Via: SIP/2.0/UDP {new_pod_ip}:5060;branch=z9hG4bKreboot;lg=a;rport\r\n\
@@ -349,7 +327,7 @@ Route: <sip:{PROXY_VIP}:5060;target={W1_POD}:5060;lr>\r\n\
 Content-Length: 0\r\n\r\n"
     );
     let msg = CustomParser::new().parse(raw.as_bytes()).unwrap();
-    let snat_src = "192.0.2.12:51000".parse().unwrap(); // node IP, not a worker
+    let snat_src = "192.0.2.12:51000".parse().unwrap();
     let outcome = core.route_request_from(&msg, snat_src).await;
 
     assert_eq!(
@@ -364,11 +342,9 @@ Content-Length: 0\r\n\r\n"
     );
 }
 
-// The mirror direction with the double-record-route present: an EXTERNAL
-// in-dialog request from the UAC carries the cookie on top (alice's route set
-// is the reverse of the 2xx: cookie, then outbound). The proxy pops BOTH self
-// RRs but reads direction from the top (cookie) → decode to the worker. The
-// trailing `;outbound` half must NOT flip it to worker-outbound.
+/// The caller's in-dialog request on a double Record-Route carries the cookie
+/// on top and `;outbound` below: the proxy pops both own entries, reads the
+/// direction from the top one, and forwards to the worker.
 #[tokio::test]
 async fn external_in_dialog_with_double_rr_decodes_to_worker() {
     let reg: Arc<dyn WorkerRegistry> =
@@ -400,8 +376,6 @@ Content-Length: 0\r\n\r\n"
     );
     assert_eq!(outcome.target, Some(ProxyAddr::new(W1_POD, 5060)));
 }
-
-// ── Spiral: several passes of this proxy in one route set ──────────────────
 
 const W2_POD: &str = "10.244.5.9";
 /// A third-party proxy the route set may cross between two passes.
@@ -442,10 +416,10 @@ fn two_workers() -> Arc<dyn WorkerRegistry> {
     ]))
 }
 
-// Two passes back to back: the request leaves w1 through the first pair and
-// enters call 2 through the second, whose cookie, signed for this call, decides.
-// Read from the first pair's `;outbound`, it would go to the Request-URI, a pod
-// no longer serving.
+/// Two own pairs back to back: the request leaves w1 through the first pair and
+/// enters call 2 through the second, whose cookie, signed for this call,
+/// decides; the first pair's `;outbound` would send it to a pod no longer
+/// serving.
 #[tokio::test]
 async fn a_route_set_with_two_own_pairs_back_to_back_follows_the_last_pair() {
     let registry = two_workers();
@@ -476,8 +450,8 @@ async fn a_route_set_with_two_own_pairs_back_to_back_follows_the_last_pair() {
     assert_eq!(outcome.target, Some(ProxyAddr::new(W2_POD, 5060)));
 }
 
-// A Record-Routing hop between the passes ends the run of own entries at the
-// first pair: worker-outbound, loose-routed to that hop, as before.
+/// A Record-Routing hop between two passes ends the run of own entries at the
+/// first pair: worker-outbound, loose-routed to that hop.
 #[tokio::test]
 async fn a_third_party_between_two_passes_keeps_the_first_pair_direction() {
     let core = core(two_workers()).await;
@@ -493,8 +467,8 @@ async fn a_third_party_between_two_passes_keeps_the_first_pair_direction() {
     assert_eq!(outcome.target, Some(ProxyAddr::new(THIRD_PARTY, 5060)));
 }
 
-// An odd run of own entries is no run of pairs this proxy recorded: the first
-// entry decides, and the worker Via still makes the request worker-outbound.
+/// An odd run of own entries is no run of recorded pairs: the first entry
+/// decides, and the worker Via makes the request worker-outbound.
 #[tokio::test]
 async fn an_odd_run_of_own_entries_from_a_worker_goes_to_the_request_uri() {
     let core = core(two_workers()).await;

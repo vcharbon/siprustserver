@@ -33,12 +33,13 @@ impl ProxyCore {
         let SipMessage::Request(req) = msg else { return false };
         face == Face::External
             && req.method() == Method::Invite
-            && req.to().tag().is_some_and(|t| !t.is_empty())
+            && req.to().tag().is_some()
             && cookie.is_none_or(|c| self.strategy.verified_cookie(c, msg).is_none())
     }
 
     /// Admit `req` as a new call. `Err` holds the outcome of the 503 a refused
     /// one was answered with.
+    /// A refusal emits its `shed` trace event before the 503 it sends.
     pub(super) async fn admit_new_call(
         &self,
         req: &SipRequest,
@@ -54,10 +55,7 @@ impl ProxyCore {
             return Ok(());
         };
         let reason = reason.label();
-        // The shed fact precedes the 503 it explains: the refusal is itself an
-        // emission site (the datagram it synthesizes).
         emit::shed(&self.traces, req.call_id().as_str(), self.trace_ms(), reason);
-        // A closed set: the gate's `ShedReason` labels.
         Err(self.refuse_new(req, arrival, retry_after_sec, reason).await)
     }
 }

@@ -13,7 +13,7 @@
 //! (`actions::subscription`): no NOTIFY leaves on it after.
 
 use b2bua_sdk::define_service;
-use call::{Call, StateLabel, TransferPhase, TransferState};
+use call::{Call, CallModelState, StateLabel, TransferPhase, TransferState};
 
 use b2bua_sdk::model::{RuleContext, RuleDefinition};
 
@@ -46,7 +46,9 @@ define_service! {
         realign::c_realign_200(),
         realign::c_realign_fail(),
         realign::c_realign_timeout(),
+        realign::c_realign_txn_timeout(),
         guards::c_glare_reinvite(),
+        realign::a_realign_on_ack(),
         realign::a_realign_200(),
         realign::a_realign_fail(),
         realign::a_realign_timeout(),
@@ -76,9 +78,12 @@ pub fn transfer_service_def() -> crate::rules::ServiceDef {
 /// read-only view the machine-gated rules select on, while `Call.transfer` stays
 /// the single source of truth. Called from `invariants::finalize`. Clearing the
 /// slice removes the cursor, deactivating the machine (so post-transfer relay is
-/// no longer intercepted by the glare/realign rules).
+/// no longer intercepted by the glare/realign rules). A terminating call
+/// projects none: it is the core teardown's alone, and no transfer rule acts
+/// on what its legs still answer.
 pub fn project_cursor(call: &mut Call) {
-    match call.transfer.as_ref().map(|t| t.phase) {
+    let live = !matches!(call.state, CallModelState::Terminating | CallModelState::Terminated);
+    match call.transfer.as_ref().map(|t| t.phase).filter(|_| live) {
         Some(p) => {
             call.sm_cursors.insert(TRANSFER_MACHINE, phase_label(p));
         }

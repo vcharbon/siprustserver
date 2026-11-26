@@ -7,8 +7,8 @@
  * holder's lock kept until its own close; two collectors of one scope share
  * it, taken once.
  *
- * Locks poll on the real clock (`Locks` POLL_MS): a waiter is seen waiting
- * after one poll.
+ * A waiter is seen waiting through the locker's watch, and a holder through
+ * its trace: no case waits a fixed time for either.
  */
 import { NodeServices } from "@effect/platform-node"
 import { CollectorPlan, CollectorRun, type Lanes, RigPath } from "@sip/rig"
@@ -21,6 +21,7 @@ import * as os from "node:os"
 import * as path from "node:path"
 import { afterAll, describe, expect, it } from "vitest"
 import { Roots } from "../../src/deployment/index.js"
+import type * as Locks from "../../src/locks.js"
 import * as CollectorIo from "../../src/replay/collector-io.js"
 
 const TREE = fs.mkdtempSync(path.join(os.tmpdir(), "collector-io-"))
@@ -35,8 +36,27 @@ const LANE: Lanes.Loaded = {
   capabilities: new Set()
 }
 
-/** More than one poll of a lock taken by another. */
-const ONE_POLL_MS = 800
+/** How long a collector waits for a lock where the case waits it out on another scope's steps: never reached. */
+const WAIT_MS = 120_000
+
+/** How long a collector waits for a lock its own scope took, which it never waits for. */
+const SHARED_WAIT_MS = 800
+
+/**
+ * Resolves once `holds` does, checking every 20 ms; fails as soon as `fiber`
+ * ended first, saying `what` never came. The test's timeout is its only bound.
+ */
+const until = <A, E>(holds: () => boolean, fiber: Fiber.Fiber<A, E>, what: string): Effect.Effect<void, Error> =>
+  Effect.gen(function*() {
+    while (!holds()) {
+      if (fiber.pollUnsafe() !== undefined) return yield* Effect.fail(new Error(`its scope ended before ${what}`))
+      yield* Effect.sleep(20)
+    }
+  })
+
+/** A watch that settles `waiting` once its locker is told whom it waits for. */
+const heardWaiting = (waiting: Deferred.Deferred<void>): Locks.Watch => (who) =>
+  who === undefined ? Effect.void : Effect.asVoid(Deferred.succeed(waiting, undefined))
 
 /**
  * A rig of the batch collectors `alpha` and `beta`, each naming the lock
@@ -81,12 +101,12 @@ const setup = async () => {
 
 /**
  * One scope of `instances` under the box-wide locker, each lock waited for up
- * to `waitMs`: opened, `held` run, collected over no cell, closed; what they
- * collected.
+ * to `waitMs`, whom it waits for told `watch`: opened, `held` run, collected
+ * over no cell, closed; what they collected.
  */
-const scopeOf = (instances: ReadonlyArray<CollectorRun.Instance>, held: Effect.Effect<void>, waitMs = 10_000) =>
+const scopeOf = (instances: ReadonlyArray<CollectorRun.Instance>, held: Effect.Effect<void>, watch?: Locks.Watch, waitMs = WAIT_MS) =>
   Effect.scoped(Effect.gen(function*() {
-    const locker = yield* CollectorIo.locker(waitMs)
+    const locker = yield* CollectorIo.locker(waitMs, watch)
     const opened = yield* CollectorRun.opened(instances, { sink: () => Effect.void, locker })
     yield* held
     return yield* opened.collect({ cells: [], unread: [], failed: [] })
@@ -95,12 +115,13 @@ const scopeOf = (instances: ReadonlyArray<CollectorRun.Instance>, held: Effect.E
 describe("collectors naming one box-wide lock", () => {
   it("run one after the other, open to close, across two scopes", async () => {
     const lab = await setup()
-    await Effect.runPromise(
-      Effect.all([
-        scopeOf([lab.alpha], Effect.sleep(ONE_POLL_MS)),
-        Effect.andThen(Effect.sleep(100), scopeOf([lab.beta], Effect.void))
-      ], { concurrency: 2 }).pipe(Effect.provide(Layer.merge(lab.roots, NodeServices.layer)))
-    )
+    await Effect.runPromise(Effect.gen(function*() {
+      const waiting = yield* Deferred.make<void>()
+      const holder = yield* Effect.forkChild(scopeOf([lab.alpha], Deferred.await(waiting)))
+      yield* until(() => lab.trace().includes("alpha open"), holder, "alpha opened")
+      yield* scopeOf([lab.beta], Effect.void, heardWaiting(waiting)).pipe(Effect.ensuring(Deferred.succeed(waiting, undefined)))
+      yield* Fiber.join(holder)
+    }).pipe(Effect.provide(Layer.merge(lab.roots, NodeServices.layer))))
     expect(lab.trace()).toEqual(["alpha open", "alpha collect", "alpha close", "beta open", "beta collect", "beta close"])
     expect(fs.existsSync(lab.lockFile)).toBe(false)
   })
@@ -110,9 +131,10 @@ describe("collectors naming one box-wide lock", () => {
     const seen = await Effect.runPromise(Effect.gen(function*() {
       const go = yield* Deferred.make<void>()
       const holder = yield* Effect.forkChild(scopeOf([lab.alpha], Deferred.await(go)))
-      yield* Effect.sleep(200)
-      const waiter = yield* Effect.forkChild(scopeOf([lab.beta], Effect.void))
-      yield* Effect.sleep(ONE_POLL_MS)
+      yield* until(() => lab.trace().includes("alpha open"), holder, "alpha opened")
+      const waiting = yield* Deferred.make<void>()
+      const waiter = yield* Effect.forkChild(scopeOf([lab.beta], Effect.void, heardWaiting(waiting)))
+      yield* Effect.raceFirst(Deferred.await(waiting), Effect.asVoid(Fiber.await(waiter)))
       yield* Fiber.interrupt(waiter)
       const afterInterrupt = { trace: lab.trace(), lock: fs.readFileSync(lab.lockFile, "utf8") }
       yield* Deferred.succeed(go, undefined)
@@ -128,7 +150,7 @@ describe("collectors naming one box-wide lock", () => {
   it("share it within one scope: both open, collect and close, the lock given back after the last close", async () => {
     const lab = await setup()
     const collected = await Effect.runPromise(
-      scopeOf([lab.alpha, lab.beta], Effect.void, ONE_POLL_MS).pipe(Effect.provide(Layer.merge(lab.roots, NodeServices.layer)))
+      scopeOf([lab.alpha, lab.beta], Effect.void, undefined, SHARED_WAIT_MS).pipe(Effect.provide(Layer.merge(lab.roots, NodeServices.layer)))
     )
     expect(collected.flatMap((one) => one.scope.verifications)).toEqual([])
     expect(lab.trace()).toEqual(["alpha open", "beta open", "alpha collect", "beta collect", "beta close", "alpha close"])

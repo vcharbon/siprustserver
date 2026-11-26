@@ -14,7 +14,6 @@ pub enum Face {
 }
 
 impl Face {
-    /// Every face, in declaration order.
     pub const ALL: [Face; 2] = [Face::Internal, Face::External];
 
     /// The face's metrics label, and the value a trace event names it by.
@@ -45,7 +44,6 @@ pub enum UntrustedClaim {
 }
 
 impl UntrustedClaim {
-    /// Every claim, in declaration order.
     pub const ALL: [UntrustedClaim; 5] = [
         UntrustedClaim::OutboundMarker,
         UntrustedClaim::WorkerVia,
@@ -54,7 +52,6 @@ impl UntrustedClaim {
         UntrustedClaim::ResponseNotToWorker,
     ];
 
-    /// The `kind` label.
     pub const fn as_str(self) -> &'static str {
         match self {
             UntrustedClaim::OutboundMarker => "outbound_marker",
@@ -67,12 +64,10 @@ impl UntrustedClaim {
 }
 
 impl ProxyMetrics {
-    /// Count one datagram RECEIVED on `face` (the recv loop's arrival socket).
     pub fn record_face_ingress(&self, face: Face) {
         self.count_face(face, Direction::Inbound);
     }
 
-    /// Count one datagram EGRESSED on `face` (the destination-picked socket).
     pub fn record_face_egress(&self, face: Face) {
         self.count_face(face, Direction::Outbound);
     }
@@ -83,17 +78,14 @@ impl ProxyMetrics {
         }
     }
 
-    /// Read one per-face counter (test/assertion surface).
     pub fn face_messages_total(&self, face: Face, direction: Direction) -> u64 {
         self.face_messages.get(face as usize).map_or(0, |row| super::read(row, direction as usize))
     }
 
-    /// Count one message on the external face carrying `claim`.
     pub fn record_external_untrusted(&self, claim: UntrustedClaim) {
         self.external_untrusted.add(&[claim.as_str()], 1);
     }
 
-    /// Read one `sip_proxy_external_untrusted_total` series.
     pub fn external_untrusted_total(&self, claim: UntrustedClaim) -> u64 {
         self.external_untrusted.get(&[claim.as_str()])
     }

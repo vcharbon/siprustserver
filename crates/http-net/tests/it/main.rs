@@ -10,4 +10,7 @@ mod backend_breaker;
 mod classify;
 mod real;
 mod real_backend;
+mod real_closes;
+mod real_peer_ends;
+mod real_timeout;
 mod receipt;

@@ -14,7 +14,8 @@ use call::{
 use sip_ids::TurnIds;
 use sip_message::emergency::is_emergency_request;
 use sip_message::generators::CapabilitySet;
-use sip_message::header::{HeaderClass, HeaderName};
+use sip_message::header::{HeaderName, HeaderValue, Minted, Unsupported};
+use sip_message::write_check::WriteRefusal;
 use sip_message::{SipHeader, SipMessage, SipRequest, SipStr};
 
 use crate::config::B2buaConfig;
@@ -23,15 +24,17 @@ use b2bua_sdk::reason_phrase::default_reason;
 
 use crate::decision::apply_reject::{apply_redirect, apply_reject};
 use crate::decision::{
-    CallDecisionError, NewCallRequest, NewCallResponse, RedirectContact, RouteDecision,
-    SipHeaderUpdates,
+    CallDecisionError, HeaderUpdate, NewCallRequest, NewCallResponse, RedirectContact,
+    RouteDecision, SipHeaderUpdates,
 };
 use crate::effects::{BufferedObservabilityEffect, HandlerEffects, HandlerResult};
 use crate::rules::relay;
 use b2bua_sdk::event::CallEvent;
 
 /// Build the initial [`Call`] (a-leg only) from an inbound INVITE, its
-/// incarnation mark and its caller-facing tag seed drawn from `ids`. Pure.
+/// incarnation mark and its caller-facing tag seed drawn from `ids`, created
+/// and received at `now_ms`; a turn that holds the INVITE's earlier receipt
+/// states it in [`Call::received_at`]. Pure.
 pub fn build_initial_call(
     invite: &SipRequest,
     src: SocketAddr,
@@ -114,6 +117,7 @@ pub fn build_initial_call(
         }],
         state: CallModelState::Active,
         created_at: now_ms,
+        received_at: now_ms,
         trace_id: None,
         root_span_id: None,
         sampled: None,
@@ -252,11 +256,13 @@ pub fn setup_event(call: &Call, a_invite: &SipRequest) -> CallEvent {
 /// Answer the a-leg with a final failure / redirect the decision layer authors,
 /// or one this stack authors on its own account (an unavailable backend, a
 /// refused target). `update_headers` adds non-structural headers (e.g.
-/// `Reason:`, RFC 3326); `contacts` renders one `Contact: <uri>;q=…` header
-/// per entry (used for a 3xx redirect — ADR-0017). Structural headers are
-/// skipped (the generator owns them, header-ownership matrix X2). Marks no
-/// decision: the caller marks the one it applies, and a final of the stack's
-/// own is none. `cause` is the termination record's: the decision layer's
+/// `Reason:`, RFC 3326); `contacts` renders one `Contact: <uri>;q=…;params…`
+/// header per entry (used for a 3xx redirect — ADR-0017). A statement, set,
+/// removal or add, of a header the final does not take from the decision, a
+/// structural one or one the stack binds, is left out and reported
+/// ([`HeaderName::stated_at_mint`]); an add yields to a line the final
+/// carries, the advertisement's included. Marks no decision: the caller marks
+/// the one it applies, and a final of the stack's own is none. `cause` is the termination record's: the decision layer's
 /// refusal, or the stack's own admission. A failure final carries the
 /// deployment's `advertisement` for a minted final under the decision's
 /// statements. Stated text the wire cannot carry is left out where every
@@ -274,7 +280,8 @@ pub fn reject_call(
     now_ms: i64,
     cause: TerminationCause,
 ) -> HandlerResult {
-    let mut extra_headers = end_to_end_headers(update_headers);
+    let mut skipped = Vec::new();
+    let mut extra_headers = end_to_end_headers(update_headers, status, &mut skipped);
     // A redirect whose target does not read cannot be authored: the caller dials
     // what a 3xx Contact names, so an invented one sends it at an address the
     // decision never stated. Answer the plain server error instead, with no
@@ -282,7 +289,7 @@ pub fn reject_call(
     match contact_headers(contacts) {
         Ok(headers) => {
             extra_headers.extend(headers);
-            let stated = Stated { update_headers, extra_headers, advertisement };
+            let stated = Stated { update_headers, extra_headers, advertisement, skipped };
             reject_with(call, a_invite, status, reason, stated, now_ms, cause)
         }
         Err(err) => {
@@ -291,19 +298,96 @@ pub fn reject_call(
                 detail = %err.detail(),
                 "redirect refused"
             );
-            let stated = Stated { update_headers, extra_headers, advertisement };
+            let stated = Stated { update_headers, extra_headers, advertisement, skipped };
             let reason = Some(err.to_string());
             reject_with(call, a_invite, 500, reason, stated, now_ms, TerminationCause::Admission)
         }
     }
 }
 
+/// Why the stack refuses a caller's INVITE on sight, before any decision is
+/// asked ([`OnSight::of`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OnSight {
+    /// It carries no From tag: 400 (RFC 3261 §8.1.1.3). That tag is the
+    /// caller dialog's remote tag, which every request of the stack's in her
+    /// dialog names.
+    NoFromTag,
+    /// It requires option tags this stack does not understand: 420 naming
+    /// them ([`refuse_extension`]).
+    BadExtension(Unsupported),
+}
+
+impl OnSight {
+    /// Why `a_invite`, the caller's INVITE of `call`, is refused on sight;
+    /// `None` when it is fit to route.
+    pub fn of(call: &Call, a_invite: &SipRequest) -> Option<Self> {
+        if call.a_leg_invite.from_tag.is_empty() {
+            return Some(Self::NoFromTag);
+        }
+        sip_message::option_tags::not_understood(a_invite).map(Self::BadExtension)
+    }
+
+    /// `call` refused for this reason. Nobody is dialled; the call is born and
+    /// ended, so the reaper takes it and its delete propagates, as for a
+    /// decision's reject. Its cause is `Admission`.
+    pub fn refuse(
+        self,
+        call: Call,
+        a_invite: &SipRequest,
+        advertisement: &CapabilitySet,
+        now_ms: i64,
+    ) -> HandlerResult {
+        match self {
+            Self::NoFromTag => {
+                let reason = Some("Bad Request - missing From tag".into());
+                let cause = TerminationCause::Admission;
+                reject_call(call, a_invite, 400, reason, None, &[], advertisement, now_ms, cause)
+            }
+            Self::BadExtension(unsupported) => {
+                refuse_extension(call, a_invite, &unsupported, advertisement, now_ms)
+            }
+        }
+    }
+}
+
+/// The caller's INVITE `a_invite` on `call` refused on sight
+/// ([`OnSight::of`], [`OnSight::refuse`]), or `None` when it is fit to route.
+pub fn refused_on_sight(
+    call: &Call,
+    a_invite: &SipRequest,
+    advertisement: &CapabilitySet,
+    now_ms: i64,
+) -> Option<HandlerResult> {
+    let why = OnSight::of(call, a_invite)?;
+    Some(why.refuse(call.clone(), a_invite, advertisement, now_ms))
+}
+
+/// `call` refused 420 Bad Extension, its `Unsupported` listing `unsupported`,
+/// the option tags the caller's INVITE `a_invite` requires and this call
+/// cannot serve (RFC 3261 §8.2.2.3); the call ends with cause `Admission`.
+pub fn refuse_extension(
+    call: Call,
+    a_invite: &SipRequest,
+    unsupported: &Unsupported,
+    advertisement: &CapabilitySet,
+    now_ms: i64,
+) -> HandlerResult {
+    let name = HeaderName::Unsupported.as_wire_str().to_string();
+    let stated: SipHeaderUpdates =
+        [(name, HeaderUpdate::line(unsupported.to_wire()))].into_iter().collect();
+    let cause = TerminationCause::Admission;
+    reject_call(call, a_invite, 420, None, Some(&stated), &[], advertisement, now_ms, cause)
+}
+
 /// The headers a rejecting final carries: what the decision stated, the
-/// headers built from it, and the deployment's advertisement.
+/// headers built from it, the deployment's advertisement, and the statements
+/// already left out.
 struct Stated<'a> {
     update_headers: Option<&'a SipHeaderUpdates>,
     extra_headers: Vec<SipHeader>,
     advertisement: &'a CapabilitySet,
+    skipped: Vec<WriteRefusal>,
 }
 
 /// The final `status` to the caller under `stated`, and the call ended
@@ -317,15 +401,14 @@ fn reject_with(
     now_ms: i64,
     cause: TerminationCause,
 ) -> HandlerResult {
-    let Stated { update_headers, mut extra_headers, advertisement } = stated;
-    let mut skipped = Vec::new();
+    let Stated { update_headers, mut extra_headers, advertisement, mut skipped } = stated;
     let reason = reason.unwrap_or_else(|| default_reason(status).to_string());
     // A failure final refused in this element's own name carries the
     // deployment's advertisement, each half under the decision's statements.
     if crate::rules::capabilities::is_minted_failure(status) {
         crate::rules::capabilities::stamp_own_advertisement(
             advertisement,
-            |name| update_headers.is_some_and(|u| u.keys().any(|n| name.matches(n))),
+            |name| update_headers.is_some_and(|u| restates(u, name)),
             &mut extra_headers,
         );
     }
@@ -393,39 +476,47 @@ pub fn build_request(invite: &SipRequest) -> NewCallRequest {
     }
 }
 
-/// The extra response headers a reject/redirect takes from `update_headers`:
-/// the non-structural *sets* (e.g. `Reason:`), one line per stated line — its
-/// adds yield to the final as built ([`reject_call`]). Removals and stack-owned
-/// keys are dropped — the response generator owns the structural set
-/// (ADR-0017 X2), including the Contact a redirect authors from its typed
-/// target list.
-fn end_to_end_headers(update_headers: Option<&SipHeaderUpdates>) -> Vec<SipHeader> {
+/// Whether `updates` set or remove the header `name` names: an add of it
+/// yields to the line the final carries, the advertisement's included.
+fn restates(updates: &SipHeaderUpdates, name: &HeaderName) -> bool {
+    updates.iter().any(|(n, update)| !update.adds() && name.matches(n))
+}
+
+/// The extra response headers a reject/redirect of `status` takes from
+/// `update_headers`: the *sets* (e.g. `Reason:`) of a header the final takes
+/// from the decision ([`HeaderName::stated_at_mint`]), one line per stated
+/// line — its adds yield to the final as built ([`reject_call`]), and a
+/// removal finds nothing to remove. A set or removal of the stack's own
+/// header, the Contact a redirect authors from its typed target list included
+/// (ADR-0017 X2), or of one the transaction, a negotiation or the body binds,
+/// is refused onto `skipped`.
+fn end_to_end_headers(
+    update_headers: Option<&SipHeaderUpdates>,
+    status: u16,
+    skipped: &mut Vec<WriteRefusal>,
+) -> Vec<SipHeader> {
     let mut out: Vec<SipHeader> = Vec::new();
-    if let Some(map) = update_headers {
-        for (name, val) in map {
-            let named = HeaderName::from(name.as_str());
-            if named.class() != HeaderClass::EndToEnd {
-                continue;
-            }
-            if val.adds() {
-                continue;
-            }
-            for v in val.lines() {
-                out.push(SipHeader { name: SipStr::owned(name), value: SipStr::owned(v) });
-            }
+    let sets = update_headers.into_iter().flatten().filter(|(_, val)| !val.adds());
+    for (name, val) in sets {
+        if let Err(refusal) = HeaderName::stated_at_mint(name, Minted::Final(status)) {
+            skipped.push(refusal);
+            continue;
+        }
+        for v in val.lines() {
+            out.push(SipHeader { name: SipStr::owned(name), value: SipStr::owned(v) });
         }
     }
     out
 }
 
-/// One `Contact: <uri>;q=…` per redirect target, or the error of the first
-/// that does not read: the whole redirect is refused, never partially
+/// One `Contact: <uri>;q=…;params…` per redirect target, or the error of the
+/// first that does not read: the whole redirect is refused, never partially
 /// authored (dropping the unreadable entry would send the caller at whichever
 /// targets happened to parse).
 fn contact_headers(
     contacts: &[RedirectContact],
 ) -> Result<Vec<SipHeader>, relay::UnreadableAddress> {
-    contacts.iter().map(|c| relay::redirect_contact(&c.uri, c.q)).collect()
+    contacts.iter().map(relay::redirect_contact).collect()
 }
 
 #[cfg(test)]

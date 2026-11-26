@@ -2,8 +2,10 @@
 //! its accounting in classes that never overlap.
 //!
 //! - A wire request other than ACK is one a peer waits on, and draws
-//!   [`refusal`] (`b2bua_unroutable_refused_total{method,code}`). A stray
-//!   CANCEL's 481 is stateless, so each repeat of it counts again.
+//!   [`refusal`] (`b2bua_unroutable_refused_total{method,code}`), sent as a
+//!   stateless UAS sends it (RFC 3261 §8.2.7, [`send_no_call_answer`]): no
+//!   transaction absorbs a copy, so each copy reaches the router, draws the
+//!   same answer and counts again.
 //! - A PRACK a released call still answers draws 200 instead
 //!   ([`super::late_prack`], `b2bua_late_prack_answered_total`).
 //! - An ACK or a response is owed nothing and is dropped
@@ -136,6 +138,56 @@ pub(super) async fn answer_vanished(ctx: &RouterCtx, event: &CallEvent, ids: &mu
     }
 }
 
+/// A request whose `callRef` names no call here, or an earlier incarnation of
+/// the one it names, every read having answered: the 200 of a PRACK its released call still answers, through its
+/// transaction ([`super::late_prack::answer`]), else the answer a request
+/// naming no call is owed ([`refusal`]), sent by [`send_no_call_answer`]; a
+/// final to an INVITE draws what an unknown dialog owes it
+/// ([`super::unheld::answer`]), its ACK drawn from the turn's `ids`; an ACK or
+/// any other response draws nothing.
+pub(super) async fn answer_no_call(ctx: &RouterCtx, event: &CallEvent, ids: &mut TurnIds) {
+    let CallEvent::Sip { message, src, .. } = event else { return };
+    match message.as_ref() {
+        SipMessage::Request(req) => {
+            if let Some(answer) = super::late_prack::answer(ctx, req) {
+                let _ = ctx.txn.send_response(answer, reply_to(req, *src)).await;
+            } else if let Some(answer) = refusal(ctx, req, || stateless_tag(ctx, req)) {
+                send_no_call_answer(ctx, req, answer, *src).await;
+            }
+        }
+        SipMessage::Response(resp) => super::unheld::answer(ctx, resp, *src, ids).await,
+    }
+}
+
+/// Send `answer` to `req`, from `src`, a request naming no call here, as a
+/// stateless UAS sends it (RFC 3261 §8.2.7): the request's transaction leaves
+/// with no trace, so neither it nor a copy of it holds state or counts
+/// against new-call admission, and each copy draws `answer` again. A tagged
+/// INVITE keeps its transaction while a takeover may be in progress here
+/// ([`TakeoverWindow`](super::takeover_window::TakeoverWindow)): a copy of
+/// it may yet resolve to a replica the takeover serves, and the caller would
+/// hold two finals.
+async fn send_no_call_answer(
+    ctx: &RouterCtx,
+    req: &SipRequest,
+    answer: SipResponse,
+    src: SocketAddr,
+) {
+    let dest = reply_to(req, src);
+    let reinvite = req.method() == Method::Invite && req.to().tag().is_some();
+    if reinvite && ctx.takeover_window.open() {
+        let _ = ctx.txn.send_response(answer, dest).await;
+    } else {
+        let _ = ctx.txn.send_stateless_response(answer, dest).await;
+    }
+}
+
+/// The To-tag a request with none draws when answered statelessly: derived
+/// from the request, so every copy draws the same one (RFC 3261 §8.2.7).
+fn stateless_tag(ctx: &RouterCtx, req: &SipRequest) -> String {
+    ctx.stateless_tagger.for_request(req).0
+}
+
 async fn on_request(ctx: &RouterCtx, req: &SipRequest, src: SocketAddr) {
     if let Some(answer) = super::late_prack::answer(ctx, req) {
         let _ = ctx.txn.send_response(answer, reply_to(req, src)).await;
@@ -144,10 +196,10 @@ async fn on_request(ctx: &RouterCtx, req: &SipRequest, src: SocketAddr) {
     let method = req.method().as_str();
     let class = wave_label(req.method());
     let sample = format!("method={method} call_id={} src={src}", req.call_id().as_str());
-    match refusal(ctx, req, || ctx.id_gen.new_tag()) {
+    match refusal(ctx, req, || stateless_tag(ctx, req)) {
         Some(answer) => {
             let code = answer.status();
-            let _ = ctx.txn.send_response(answer, reply_to(req, src)).await;
+            send_no_call_answer(ctx, req, answer, src).await;
             ctx.metrics.record_unroutable_refused(method, code);
             ctx.unroutable_waves.record(&format!("wire:{class}:{code}"), REQUEST_REASON, sample);
         }
@@ -182,8 +234,8 @@ fn wave_label(method: &Method) -> &str {
 ///   case-sensitively (§7.1).
 ///
 /// A request whose lines no response can echo draws none, as an ACK. `mint`
-/// draws the minted To-tag: the turn's own source inside a call's turn, the
-/// process's counter stream outside one.
+/// draws the minted To-tag: the turn's own source for an answer through a
+/// transaction, one derived from the request for an answer sent statelessly.
 pub(super) fn refusal(
     ctx: &RouterCtx,
     req: &SipRequest,

@@ -20,6 +20,7 @@ pub mod lifecycle_delivery;
 pub mod method_table;
 pub mod operator_release;
 mod pending_refusal;
+mod pending_reinvite;
 pub mod promote_pem;
 pub mod refer_transfer;
 pub mod relay;

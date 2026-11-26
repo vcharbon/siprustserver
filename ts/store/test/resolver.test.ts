@@ -146,7 +146,7 @@ beforeAll(async () => {
   )
   await on(SCRATCH, Server.migrated)
   store = await withStore(seed)
-}, 60_000)
+})
 
 afterAll(async () => {
   if (!served) return
@@ -156,7 +156,7 @@ afterAll(async () => {
       yield* Server.dropDatabase(SCRATCH)
     })
   )
-}, 60_000)
+})
 
 const resolve = (input: string, options?: Resolver.Options) =>
   withStore(Effect.flatMap(Resolver.Service, (resolver) => resolver.resolve(input, options)))

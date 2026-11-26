@@ -9,9 +9,9 @@ use sip_message::SipRequest;
 
 use crate::config::B2buaConfig;
 use crate::decision::failover_fold::Failover;
-use crate::decision::route_fold::{self, Admitting, AdmittingRoute};
+use crate::decision::route_fold::{self, Admitting, AdmittingRoute, Routed};
 use crate::decision::DeadlineDecisionEngine;
-use crate::effects::{HandlerEffects, HandlerResult};
+use crate::effects::HandlerEffects;
 use crate::limiter::{LimiterEntry, LimiterWorker};
 use crate::metrics::AdmitSite;
 use crate::owners::Owners;
@@ -34,7 +34,8 @@ pub use super::route_fold::MAX_LIMITER_FAILOVER;
 /// (`OutboundInvite::sent_at_ms`). The consult that answered `route` already
 /// honoured its trace force-enable. A route `budget` ran out on dials nothing:
 /// it ends as refused, the call answered as for an unavailable decision, its
-/// record owing the release of an admit that left.
+/// record owing the release of an admit that left. The route the call is
+/// dialled under, the first or a failover, is the one [`Routed`] names.
 #[allow(clippy::too_many_arguments)]
 pub async fn apply_route(
     call: Call,
@@ -49,9 +50,9 @@ pub async fn apply_route(
     clock: &Clock,
     now_ms: i64,
     budget: SetupBudget,
-) -> HandlerResult {
+) -> Routed {
     let admitting = match route_fold::up_to_admit(call, route, a_invite, config, now_ms, 0) {
-        Admitting::Final(result) => return *result,
+        Admitting::Final(result) => return Routed::final_only(*result),
         Admitting::Admit(admitting) => admitting,
     };
     let applied = admit(admitting, a_invite, config, limiter, owners, ids, clock, now_ms, budget);
@@ -88,7 +89,7 @@ async fn failovers(
     turn: Turn<'_>,
     ids: &mut TurnIds,
     budget: SetupBudget,
-) -> HandlerResult {
+) -> Routed {
     let Turn { a_invite, invite_wire, decision, limiter, config, owners, clock, now_ms } = turn;
     let (mut effects, mut refused) = (HandlerEffects::new(), first);
     loop {
@@ -108,30 +109,30 @@ async fn failovers(
         )
         .await;
         let (call, route) = match failover {
-            Failover::Final(result) => return after(effects, *result),
+            Failover::Final(result) => return after(effects, Routed::final_only(*result)),
             Failover::Route { call, route } => (call, route),
         };
         let next = depth + 1;
         let admitting = match route_fold::up_to_admit(*call, *route, a_invite, config, now_ms, next)
         {
-            Admitting::Final(result) => return after(effects, *result),
+            Admitting::Final(result) => return after(effects, Routed::final_only(*result)),
             Admitting::Admit(admitting) => admitting,
         };
         let applied =
             admit(admitting, a_invite, config, limiter, owners, ids, clock, now_ms, budget).await;
         refused = match applied {
-            Applied::Done(result) => return after(effects, result),
+            Applied::Done(routed) => return after(effects, routed),
             Applied::Refused(again) => again,
         };
     }
 }
 
-/// `result` with `refused`, the effects of the routes refused before it, in
+/// `routed` with `refused`, the effects of the routes refused before it, in
 /// front of its own.
-fn after(mut refused: HandlerEffects, mut result: HandlerResult) -> HandlerResult {
-    refused.extend(std::mem::take(&mut result.effects));
-    result.effects = refused;
-    result
+fn after(mut refused: HandlerEffects, mut routed: Routed) -> Routed {
+    refused.extend(std::mem::take(&mut routed.result.effects));
+    routed.result.effects = refused;
+    routed
 }
 
 /// What admitting one route came to.
@@ -141,7 +142,7 @@ fn after(mut refused: HandlerEffects, mut result: HandlerResult) -> HandlerResul
 )]
 enum Applied {
     /// The b-leg dialled, or the call's final.
-    Done(HandlerResult),
+    Done(Routed),
     /// The limiter refused the route.
     Refused(Box<Refused>),
 }
@@ -174,7 +175,7 @@ async fn admit(
     if budget.spent() {
         let (call, fx) = route_fold::refused(*admitting);
         let result = super::failover_fold::unavailable(call, a_invite, config, now_ms);
-        return Applied::Done(after(fx, result));
+        return Applied::Done(after(fx, Routed::final_only(result)));
     }
     if let Some(limiter_id) = refusal {
         let depth = admitting.depth;

@@ -10,11 +10,18 @@ use std::sync::{Arc, Mutex};
 use super::super::retransmit::CallTxns;
 use super::super::rtt::RttSink;
 use super::super::tally::CallTally;
-use super::super::taps::{LossTap, WireTap};
+use super::super::taps::{DepartureTap, LossTap, WireTap};
 use super::super::{routing, CallGate, CallRouting, MuxCore, TargetedDrop};
 use super::MuxNetwork;
 
 impl MuxNetwork {
+    /// Duplicate and hold back the datagrams this network's endpoints send
+    /// ([`NetFaults`](crate::mux::NetFaults)).
+    pub fn with_faults(mut self, faults: crate::mux::NetFaults) -> Self {
+        self.faults = faults;
+        self
+    }
+
     /// Measure the SIP round trips of every endpoint bound on this network
     /// into `sink`.
     pub fn with_rtt_sink(mut self, sink: RttSink) -> Self {
@@ -39,6 +46,13 @@ impl MuxNetwork {
     /// to `tap`.
     pub fn with_loss_tap(mut self, tap: LossTap) -> Self {
         self.loss_tap = Some(tap);
+        self
+    }
+
+    /// Hand every datagram this network's endpoints put on the wire to `tap`,
+    /// as it leaves.
+    pub fn with_departure_tap(mut self, tap: DepartureTap) -> Self {
+        self.departure_tap = Some(tap);
         self
     }
 
@@ -111,10 +125,12 @@ impl MuxCore {
             retransmit,
             drop_seed: AtomicU64::new(seed | 1),
             drop_nth,
+            faults: Default::default(),
             rtt_sink: None,
             tally: None,
             wire_tap: None,
             loss_tap: None,
+            departure_tap: None,
             engines: Mutex::new(Vec::new()),
         }
     }

@@ -311,3 +311,35 @@ fn past_its_own_maddr_a_uri_keeps_every_other_part() {
         assert_eq!(uri(text).without_own_maddr().to_string(), past, "{text}");
     }
 }
+
+/// A whole `hostport` (RFC 3261 §25.1): an IPv6 reference only bracketed,
+/// held bare; the port as written, from 1 to 65535.
+#[test]
+fn a_whole_hostport_reads_by_the_uri_host_grammar() {
+    for (text, host, port) in [
+        ("192.0.2.7:5060", "192.0.2.7", Some(5060)),
+        ("[2001:db8::7]:5070", "2001:db8::7", Some(5070)),
+        ("[2001:db8::7]", "2001:db8::7", None),
+        ("proxy.example.com:65535", "proxy.example.com", Some(65535)),
+        ("proxy.example.com", "proxy.example.com", None),
+    ] {
+        let read = HostPort::parse(text).unwrap_or_else(|e| panic!("{text}: {e}"));
+        assert_eq!((read.host(), read.port()), (host, port), "{text}");
+    }
+    for refused in [
+        "2001:db8::7:5060",
+        "[2001:db8::7",
+        "[]:5060",
+        ":5060",
+        "",
+        "host:0",
+        "host:65536",
+        "host:",
+        "host:50x",
+        "host:5060;transport=udp",
+        "host:5060 ",
+        "-host:5060",
+    ] {
+        assert!(HostPort::parse(refused).is_err(), "{refused:?} reads");
+    }
+}

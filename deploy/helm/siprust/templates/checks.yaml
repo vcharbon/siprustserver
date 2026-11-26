@@ -31,7 +31,7 @@ each runner's startup check.
 | worker B2BUA_CDR_RABBITMQ_MAX_LEN = consumer CDR_QUEUE_MAX_LEN | both declare the one queue; a different argument fails the second declare |
 | every RSS ceiling (B2BUA_MAX_RSS, _EMERGENCY, B2BUA_REPL_BACKUP_MAX_RSS) < worker `resources.limits.memory` | a ceiling at the limit is never reached before the OOM kill |
 | worker B2BUA_INVITE_TXN_TIMEOUT_SEC = proxy PROXY_INVITE_TXN_TIMEOUT_SEC (`inviteTxnTimeoutSec`) | the proxy keeps an INVITE's memo entry for the bound the workers ring under |
-| worker B2BUA_CALL_CONTROL_TIMEOUT_MS > proxy HEALTH_THRESHOLD × HEALTH_INTERVAL_MS + HEALTH_TIMEOUT_MS | a consult in flight outlasts the proxy's dead verdict on its worker, so a call whose worker dies unannounced is taken over before its consult gives up |
+| worker B2BUA_CALL_CONTROL_TIMEOUT_MS > proxy HEALTH_THRESHOLD × HEALTH_INTERVAL_MS + HEALTH_TIMEOUT_MS | a consult in flight outlasts the proxy's dead verdict on its worker, so a call whose worker dies unannounced is taken over before its consult gives up; the slow window lengthens no verdict on silence (the proxy's startup check, ADR-0069) |
 | proxy PROXY_BRANCH_MEMO_MAX_BYTES < proxy `resources.limits.memory` | the memo's accounted bytes fit the process |
 | `callLimiter.leaseSeconds` > 2 × worker LIMITER_REFRESH_SECONDS + LIMITER_REFRESH_BATCH_MS | a counted call's lease survives one missed refresh |
 | `proxy.hmac.existingSecret` set, or `proxy.hmac.drawInCluster` | a render without a cluster (helm template, GitOps) draws a new cookie key each time |

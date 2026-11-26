@@ -36,6 +36,10 @@ pub struct MessageEntry {
     /// The status of a response; `None` on a request.
     pub code: Option<u16>,
     pub to_tag: Option<String>,
+    /// The tag of the message's From. A response copies its request's From
+    /// (RFC 3261 §8.2.6.2), so the pair `from_tag`, `to_tag` names the
+    /// dialog of an in-dialog message whichever side sent it (§12).
+    pub from_tag: Option<String>,
     /// The count of decisions applied to the call when the message was
     /// handled (`Call::decision_ordinal` at the append); `0` before the
     /// first decision. The decision current at handling, not the leg's: a
@@ -182,6 +186,7 @@ mod tests {
             cseq,
             code,
             to_tag: to_tag.map(str::to_string),
+            from_tag: None,
             decision_ordinal: 0,
             headers: Vec::new(),
             turn: 1,

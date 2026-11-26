@@ -65,8 +65,9 @@ impl ActionExecutor<'_> {
     /// tag no provisional rang (§12.1.2), with the INVITE-seeded sequence —
     /// learning its target and route set (§12.1.2: the 2xx's Record-Route,
     /// reversed per recorded route). Its session becomes the leg's, and the
-    /// 2xx the final of the leg's INVITE. `peer_cseq` stays as the callee's early
-    /// requests left it: the 2xx echoes a number of our own sequence.
+    /// 2xx, at the turn's instant, the final of the leg's INVITE. `peer_cseq`
+    /// stays as the callee's early requests left it: the 2xx echoes a number
+    /// of our own sequence.
     fn promote_winner(&mut self, call: &mut Call, resp: &SipResponse, leg_id: &str) -> Promoted {
         let winner = resp.to().tag().unwrap_or_default().to_string();
         let crossed_cancel = call
@@ -93,7 +94,7 @@ impl ActionExecutor<'_> {
             losers =
                 leg.dialogs.iter().filter(|d| d.awaits_invite_final()).map(|d| d.id()).collect();
             if let Some(invite) = leg.outbound_invite_mut() {
-                invite.record_final(resp.status());
+                invite.record_final_at(resp.status(), self.now_ms);
             }
         }
         Promoted { leg_id: leg_id.to_string(), winner, losers, crossed_cancel }

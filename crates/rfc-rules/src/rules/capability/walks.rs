@@ -1,7 +1,7 @@
 //! The two walks the family shares: a request owed a specific rejection, and
 //! a response owed the headers its status names.
 
-use std::collections::{btree_map::Entry, BTreeMap};
+use std::collections::{btree_map::Entry, BTreeMap, BTreeSet};
 
 use sip_message::sniff;
 
@@ -22,6 +22,24 @@ pub(super) struct Rejectable<'a> {
     pub(super) emitter: &'a str,
     pub(super) taker: &'a str,
     pub(super) request: &'a Msg,
+    /// The request names a dialog a 2xx to a BYE had ended at its UAS
+    /// before it arrived there.
+    pub(super) on_ended_dialog: bool,
+}
+
+/// `(socket, dialog)`: each socket of both ends of a dialog a 2xx to a BYE
+/// ended, with that dialog ([`dialog_of`]), from that 2xx on.
+type EndedDialogs<'a> = BTreeSet<(&'a str, (&'a str, [&'a str; 2]))>;
+
+/// The dialog a message names, `(Call-ID, tags)` with its two tags in a fixed
+/// order, so both directions of the dialog name it alike; `None` without
+/// both tags.
+fn dialog_of(msg: &Msg) -> Option<(&str, [&str; 2])> {
+    let from = msg.from_tag.as_deref().filter(|t| !t.is_empty())?;
+    let to = msg.to_tag.as_deref().filter(|t| !t.is_empty())?;
+    let mut tags = [from, to];
+    tags.sort_unstable();
+    Some((msg.call_id.as_str(), tags))
 }
 
 /// The §8.2 walk: pair every request `owes` selects with the FIRST final its
@@ -33,6 +51,11 @@ pub(super) struct Rejectable<'a> {
 /// The first FINAL, not the first response: a 100 Trying answers nothing about
 /// the rejection, and reading it as the answer would charge a UAS that went on
 /// to reject correctly.
+///
+/// A UAS matches a To-tagged request to its dialogs before any §8.2 check, and
+/// applies those checks only to a request that matched one (§12.2.2); one
+/// naming a dialog a 2xx to a BYE had ended there is refused 481 instead, and
+/// that 481 discharges the obligation.
 pub(super) fn rejections<'a>(
     wire: &WireView<'a>,
     rule: RuleId,
@@ -44,7 +67,15 @@ pub(super) fn rejections<'a>(
     let mut occasions: Vec<Rejectable<'a>> = Vec::new();
     let mut opened: BTreeMap<TxnKey<'a>, usize> = BTreeMap::new();
     let mut answers: BTreeMap<TxnKey<'a>, Answer> = BTreeMap::new();
+    let mut ended: EndedDialogs<'a> = BTreeSet::new();
     for (mi, msg) in wire.msgs.iter().enumerate() {
+        let ends_dialog = msg.cseq_method.eq_ignore_ascii_case("BYE")
+            && msg.status().is_some_and(|s| (200..300).contains(&s));
+        if let Some(dialog) = dialog_of(msg).filter(|_| ends_dialog) {
+            for socket in [msg.src.as_str(), msg.dst.as_str(), sides.uas(msg), sides.uac(msg)] {
+                ended.insert((socket, dialog));
+            }
+        }
         match &msg.kind {
             Kind::Request { method } => {
                 // A request the strict reading refuses owes its 400, not the
@@ -55,6 +86,8 @@ pub(super) fn rejections<'a>(
                 let Some(key) = uas_key(&sides, msg) else { continue };
                 if let Entry::Vacant(e) = opened.entry(key) {
                     e.insert(occasions.len());
+                    let on_ended_dialog =
+                        dialog_of(msg).is_some_and(|d| ended.contains(&(key.0, d)));
                     occasions.push(Rejectable {
                         msg: mi,
                         hop: msg.hop,
@@ -65,6 +98,7 @@ pub(super) fn rejections<'a>(
                         emitter: msg.dst.as_str(),
                         taker: msg.src.as_str(),
                         request: msg,
+                        on_ended_dialog,
                     });
                 }
             }
@@ -99,6 +133,9 @@ pub(super) fn rejections<'a>(
                 decision,
             };
             match answer {
+                Some(Answer { status: 481, .. }) if occasion.on_ended_dialog => {
+                    finding(Decision::Compliant)
+                }
                 Some(Answer { listed_rows: None, .. }) => {
                     finding(Decision::Undecidable("no header block at this vantage"))
                 }

@@ -8,9 +8,9 @@ use sha2::Sha256;
 /// The bytes a signature keeps of the HMAC-SHA256 digest: 128 bits.
 pub const SIGNATURE_BYTES: usize = 16;
 
-/// The fewest bytes a key may hold: no shorter than the signature it makes
-/// (RFC 2104 §3).
-pub const MIN_KEY_BYTES: usize = 16;
+/// The fewest bytes a key may hold: the hash output length L, 32 bytes for
+/// SHA-256. A key under L bytes lowers the MAC's strength (RFC 2104 §3).
+pub const MIN_KEY_BYTES: usize = 32;
 
 /// The most bytes a key may hold: HMAC-SHA256's block, which HMAC zero-pads
 /// to (a longer key would be hashed first).
@@ -77,12 +77,14 @@ mod tests {
         SigningKey::new(&[byte; 32]).expect("a 32-byte key")
     }
 
+    /// A key holds SHA-256's 32-byte output at least and its 64-byte block at
+    /// most: 31 and 65 bytes are refused, 32 and 64 accepted.
     #[test]
     fn a_key_out_of_its_bounds_is_refused() {
-        assert!(SigningKey::new(&[1; MIN_KEY_BYTES - 1]).is_none());
-        assert!(SigningKey::new(&[1; MAX_KEY_BYTES + 1]).is_none());
-        assert!(SigningKey::new(&[1; MIN_KEY_BYTES]).is_some());
-        assert!(SigningKey::new(&[1; MAX_KEY_BYTES]).is_some());
+        assert!(SigningKey::new(&[1; 31]).is_none());
+        assert!(SigningKey::new(&[1; 65]).is_none());
+        assert!(SigningKey::new(&[1; 32]).is_some());
+        assert!(SigningKey::new(&[1; 64]).is_some());
     }
 
     #[test]

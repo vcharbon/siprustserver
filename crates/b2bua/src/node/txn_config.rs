@@ -25,12 +25,20 @@ const UDP_QUEUE_MAX: usize = EVENT_QUEUE_CAPACITY / 4;
 /// queue.
 const KEEPALIVE_LANE: usize = 64;
 
+/// The bound of the unattributed lane: the requests that name no call, which
+/// the router takes after every other source. A request of a call whose
+/// Request-URI an element rewrote waits there until the router has no other
+/// work; past the bound, a flood of them is shed by the transaction layer,
+/// before any transaction exists (ADR-0050 §13).
+const UNATTRIBUTED_LANE: usize = 1024;
+
 /// The transaction layer's tunables for this worker: its event queue, the
 /// deployment's INVITE bounds and CANCEL policy, the worker's shared
 /// `refusals`, the ceilings on the deferred backlog
 /// ([`crate::admission::deferred_bound`]) unless `ceilings` sets its own,
 /// no transaction for an out-of-dialog OPTIONS, which rides the keepalive
-/// lane, the worker's advertised SIP address, every Call-ID's message
+/// lane, the unattributed lane for the requests that name no call, the
+/// worker's advertised SIP address, every Call-ID's message
 /// budget (ADR-0063 §3, a trip ending the calls holding it), and the switch
 /// on new calls the
 /// event-queue gate sets (ADR-0037 item 11), which is `refusals`' own
@@ -54,16 +62,16 @@ pub(super) fn txn_config(
         // The TU's first-response deadline on an initial INVITE
         // (ADR-0044; default Timer B, which arms nothing).
         invite_first_response_timeout_ms: config.invite_first_response_timeout_ms(),
-        // An INVITE's 100 is the router's to release once the call's write is
-        // applied at its backup (ADR-0055 §3); the layer sends it at the
-        // §17.2.1 bound otherwise.
+        // ADR-0070
         trying_bound_ms: sip_txn::timers::TRYING_BOUND,
+        consumer_arms_initial_trying: true,
         // The ACK of a callee's non-2xx final is the router's to release with
         // the turn that took the final (ADR-0055 §3); the layer sends it at
         // the write path's ACK bound otherwise.
         ack_bound_ms: u64::try_from(write_path.ack_bound.as_millis()).unwrap_or(u64::MAX),
         // The answers to a CANCEL likewise, with the turn that took it.
         cancel_bound_ms: u64::try_from(write_path.cancel_bound.as_millis()).unwrap_or(u64::MAX),
+        consumer_ends_cancelled_reinvite: true,
         // A probe hears of what left at its bound, before its turn's write.
         on_bound: probe.installed().then(|| bound_report(probe, &config.self_ordinal)),
         strict_to_tag: true,
@@ -77,11 +85,10 @@ pub(super) fn txn_config(
             NewCallGate::new(switch.clone(), crate::admission::class_of)
                 .refusing_at_age(config.event_queue_gate.refuse_at_age()),
         ),
-        // The OPTIONS health answer derives its To-tag from the request
-        // (`RouterCtx::options_tagger`).
         stateless_options: true,
         // The router takes a probe ahead of the queued events (ADR-0050 §2).
         keepalive_lane: Some(KEEPALIVE_LANE),
+        unattributed_lane: Some(UNATTRIBUTED_LANE),
         // What the layer builds itself leaves for the front proxy, as every
         // other request of a worker behind one does. Its address is an IP
         // literal (the runner's `B2BUA_OUTBOUND_PROXY`).

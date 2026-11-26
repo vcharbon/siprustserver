@@ -28,7 +28,7 @@ pub(super) fn straggler_release(resolved: &call::helpers::Resolved) -> bool {
 /// want (§13.2.2.4): the call keeps the winner.
 pub(super) fn fork_straggler(ctx: &RuleContext) -> bool {
     let Some(resp) = ctx.response() else { return false };
-    if resp.to().tag().is_none_or(str::is_empty) {
+    if resp.to().tag().is_none() {
         return false;
     }
     let Some(leg) = ctx.call.b_legs().iter().find(|l| l.leg_id == ctx.source_leg_id) else {

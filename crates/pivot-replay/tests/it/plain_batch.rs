@@ -15,6 +15,7 @@ use std::time::Duration;
 
 use b2bua_harness::B2buaSut;
 use layer_harness::TransportKind;
+use loopback_ports::Kind;
 use scenario_harness::Harness;
 use sip_clock::Clock;
 use sip_net::{RealSignalingNetwork, SignalingNetwork};
@@ -29,12 +30,6 @@ pub(crate) fn scratch(run: &str) -> PathBuf {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("the scratch directory");
     dir
-}
-
-/// A loopback UDP address no socket held a moment ago.
-fn free_udp_port() -> SocketAddr {
-    let socket = std::net::UdpSocket::bind("127.0.0.1:0").expect("a probe socket");
-    socket.local_addr().expect("its address")
 }
 
 /// The Prometheus text a system's `/metrics` answers.
@@ -189,7 +184,7 @@ pub(crate) fn stand_b2bua(rt: &tokio::runtime::Runtime) -> (Harness, B2buaSut) {
         TransportKind::Live,
         Duration::from_secs(5),
     );
-    let ingress = free_udp_port();
+    let ingress = loopback_ports::free_addresses(&[Kind::Udp]).expect("a free loopback address")[0];
     let b2bua = rt.block_on(B2buaSut::route_api_call("127.0.0.1", 9).start(
         &h,
         "b2bua",

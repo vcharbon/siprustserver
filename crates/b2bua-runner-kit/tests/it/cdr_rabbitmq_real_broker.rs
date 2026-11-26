@@ -69,7 +69,7 @@ fn writer(url: String, queue: &str, declare: CdrQueueDeclare) -> (RabbitMqCdrWri
     let uri = url.parse().expect("an AMQP URI");
     let tls = amqp_connect::BrokerTls::for_uri(&uri).expect("the TLS its scheme asks for");
     let settings = RabbitMqCdrSettings {
-        url,
+        brokers: vec![uri],
         queue: queue.into(),
         declare,
         bounds: CdrDeliveryBounds::default(),

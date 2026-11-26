@@ -20,6 +20,7 @@ use tokio::time::Instant;
 use sip_message::{CseqDeviation, DelayedAutomatic};
 
 use super::answer::{fire_timed_answer, ForkAnswer, TimedAnswer};
+use super::answers::may_renegotiate;
 use super::delta::AcceptedDeltaPolicy;
 use super::dialog_table::DialogTable;
 use super::drive::drive_goal;
@@ -27,6 +28,7 @@ use super::ending::Expect;
 use super::endpoint::{ActorSpec, Automatics, CtxFeed, Disposition, MediaState};
 use super::give_up;
 use super::goals::{GoalCursor, GoalStep, RequestKind};
+use super::held_acks::HeldAck;
 use super::ledger::ObligationKey;
 use super::observe::ReceptionObserver;
 use super::originate::{
@@ -47,26 +49,9 @@ pub(super) struct ParkedRequest {
     pub(super) initial: bool,
 }
 
-/// One ACK-to-2xx a declared delayed automatic is holding: its own `select!`
-/// arm sends it (idempotent, re-derivable — RFC 3261 §13.2.2.4) when `at`
-/// elapses and completes the re-INVITE bookkeeping the hold deferred. A 2xx
-/// retransmitted while the entry is pending is absorbed, never ACKed early.
-pub(super) struct HeldAck {
-    pub(super) at: Instant,
-    /// The held transaction — the originated in-dialog INVITE's CSeq.
-    pub(super) cseq: u32,
-    /// The ACK body resolved when the 2xx first arrived (byte-identical on the
-    /// eventual send, §13.2.2.4).
-    pub(super) sdp: Option<String>,
-}
-
-/// A non-2xx final we sent to an initial INVITE, awaiting its §17.1.1.3 hop-ACK. The receive core
-/// claims that ACK below `recv_any` (it never surfaces to the reactor), so the actor watches the
-/// transaction layer's fulfilment as its own `select!` arm and closes the `reject-final` ledger
-/// obligation there. This is what makes the UA outlive the call: a REJECTED leg abandoned by a
-/// reroute keeps its actor reactive (and the settle barrier holds the verdict + recording window,
-/// Timer-H-bounded) until a lost hop-ACK is recovered by the Timer-G final retransmit + the SUT's
-/// §17.1.1.2 re-ACK.
+/// A non-2xx final we sent to an initial INVITE, awaiting its hop-ACK (RFC 3261 §17.1.1.3), which
+/// the receive core claims below `recv_any`: a `select!` arm closes the `reject-final` obligation,
+/// and the rejected leg stays reactive until a lost hop-ACK is recovered, Timer-H-bounded.
 pub(super) struct PendingRejectAck {
     pub(super) key: ObligationKey,
     pub(super) call_id: String,
@@ -130,6 +115,13 @@ pub struct ActorState<'c> {
     pub(super) pracked_rseqs: HashSet<(String, u32)>,
     /// A held callee's `RSeq` per early dialog and its held PRACK answers.
     pub(super) trains: super::provisional::Trains,
+    /// Where the offer of the INVITE transaction rides.
+    pub(super) offers: super::offers::Offers,
+    /// What this endpoint holds back or refuses, boxed: most calls hold
+    /// nothing.
+    pub(super) holds: Box<super::answers::Holds>,
+    /// Retries the pending renegotiation already took.
+    pub(super) reinvite_retries: u32,
     /// A held forking-UAS answer plan (C1/E3): set alongside
     /// `pending_prack_answer` by a RELIABLE [`Disposition::ForkingRing`], so the
     /// PRACK arm answers the INVITE only on the WINNER fork's PRACK (a losing
@@ -176,13 +168,10 @@ pub struct ActorState<'c> {
     /// At most one per leg (a leg rejects its initial INVITE once, or 487s its
     /// one CANCELled ring).
     pub(super) pending_reject_ack: Option<PendingRejectAck>,
-    /// The **deferred-auth adapter** (RFC 3261 §22.2) wired onto this caller's
-    /// establishing INVITE. `Some` → a `401`/`407` to that INVITE is ACKed, the
-    /// responder is asked for a credential, and the INVITE is resent ONCE
-    /// (bumped CSeq, fresh branch — see [`crate::ClientInvite::ack_and_resend_with_auth`]);
-    /// `None` (the default) → a challenge classifies as `status_401/407`
-    /// unchanged. Reaches the caller from [`CallEnv::challenge_responder`]
-    /// (`crates/loadgen/src/driver.rs` `run_one`).
+    /// The deferred-auth adapter (RFC 3261 §22.2) on this caller's establishing INVITE
+    /// ([`CallEnv::challenge_responder`]): a `401`/`407` to it is ACKed, the responder asked for a
+    /// credential and the INVITE resent once ([`crate::ClientInvite::ack_and_resend_with_auth`]).
+    /// `None`: a challenge classifies as `status_401/407`.
     pub(super) challenge_responder: Option<Arc<dyn ChallengeResponder>>,
     /// Authenticated INVITE resends still permitted (RFC 3261 §22.2) — `1` when a
     /// [`challenge_responder`](Self::challenge_responder) is wired, else `0`.
@@ -207,11 +196,8 @@ pub struct ActorState<'c> {
     /// anchor a parked request's CSeq rank is counted from
     /// ([`super::select::select_parked`]).
     pub(super) consumed_requests: HashMap<RequestKind, usize>,
-    /// The ACK body resolved for each in-dialog INVITE 2xx we ACKed, keyed by
-    /// CSeq (`None` = the bodyless ACK a complete offer/answer round takes) —
-    /// the ACK to a RETRANSMITTED 2xx must be byte-identical (RFC 3261
-    /// §13.2.2.4), so the decision is resolved once and re-emitted verbatim,
-    /// never re-derived from the (advanced) goal cursor or a dropped transaction.
+    /// The ACK body of each in-dialog INVITE 2xx we ACKed, by CSeq (`None`: bodyless), resolved
+    /// once: the ACK to a retransmitted 2xx is byte-identical (RFC 3261 §13.2.2.4).
     pub(super) reinvite_ack_bodies: HashMap<u32, Option<String>>,
     /// The plan's lane-chosen stack automatics.
     pub(super) automatics: Automatics,
@@ -320,6 +306,9 @@ impl<'c> ActorState<'c> {
             early_dialogs: HashMap::new(),
             pracked_rseqs: HashSet::new(),
             trains: Default::default(),
+            offers: Default::default(),
+            holds: Box::new(super::answers::Holds::new(spec.answers)),
+            reinvite_retries: 0,
             fork_answer: None,
             sent_reinvites: HashSet::new(),
             sent_reinvite_txns: HashMap::new(),
@@ -388,22 +377,17 @@ impl<'c> ActorState<'c> {
             .map(|d| Duration::from_millis(d.delay_ms))
     }
 
-    /// The SDP body to answer an INVITE/UPDATE with — this endpoint's answer (or
-    /// offer) media, falling back to the crate default so an answer-to-INVITE is
-    /// NEVER bodyless (RFC 3264 §5), even for a signalling-only endpoint
-    /// ([`MediaState::none`]). A delayed-offer bodyless re-INVITE thus still gets
-    /// 200 + our SDP.
+    /// The SDP an INVITE/UPDATE is answered with: this endpoint's media, else the crate default,
+    /// so an answer to an INVITE is never bodyless (RFC 3264 §5), [`MediaState::none`] included.
     pub(super) fn answer_body(&self) -> &'static str {
         self.media.answer_sdp().unwrap_or(crate::ANSWER_SDP)
     }
 }
 
-/// Drive ONE endpoint: interleave reacting with goal progress via `select!`, so
-/// a goal parked on a barrier NEVER blocks the reactor (the structural fix for
-/// the cascade). Resolves `Ok(())` when the call is fully torn down and this
-/// endpoint's goals are exhausted, or `Err` on a fatal step, naming the goal
-/// pending when it failed. The state rides boxed: the future lives as long as
-/// the call, so it holds a pointer, never the state itself.
+/// Drive one endpoint, reacting and progressing its goals in one `select!`, so a goal parked on
+/// a barrier never blocks the reactor. `Ok(())` once the call is torn down and the goals are
+/// exhausted, `Err` on a fatal step naming the pending goal. The state rides boxed: the call-long
+/// future holds a pointer.
 pub async fn run_actor(mut st: Box<ActorState<'_>>) -> Result<(), ActorFailure> {
     match react_until_done(&mut st).await {
         Ok(()) => Ok(()),
@@ -431,6 +415,8 @@ pub(super) async fn react_until_done(st: &mut ActorState<'_>) -> Result<(), Step
         let give_up_at = give_up::due(st);
         let retransmit_at = st.retransmit_due(); // a request awaiting its answer, or a final its ACK
         let prack_200_at = super::prack_hold::due(st);
+        let deferred_at =
+            [super::answers::due(st), super::held_pracks::due(st)].into_iter().flatten().min();
         tokio::select! {
             inbound = inbox.recv_boxed() => {
                 match inbound {
@@ -450,15 +436,15 @@ pub(super) async fn react_until_done(st: &mut ActorState<'_>) -> Result<(), Step
             // inline-pull hazard). Every consumable appears via this actor's
             // own loop body, so the gate is re-evaluated on each iteration.
             ready = st.goals.next_ready(&obs, step_timeout, |s| s.caller_ended_cleanly() && s.leg_idle_or_ended(role)), if st.goals.has_pending() && goal_arm_enabled(st) => {
-                if let Some(step) = ready? {
-                    if matches!(step, GoalStep::Invite { .. } | GoalStep::InviteTemplate { .. }) {
+                if let Some(step) = ready?.map(Box::new) {
+                    if matches!(*step, GoalStep::Invite { .. } | GoalStep::InviteTemplate { .. }) {
                         st.invite_goal = st.goals.pending();
                     }
                     // A final already delivered is handled before the CANCEL (RFC 3261 §9.1).
-                    if matches!(step, GoalStep::Cancel { .. }) {
+                    if matches!(*step, GoalStep::Cancel { .. }) {
                         Box::pin(react_queued(st, &mut inbox, |st| st.dialogs.pending_invite.is_some())).await?;
                     }
-                    Box::pin(drive_goal(st, step)).await?;
+                    Box::pin(drive_goal(st, *step)).await?;
                 }
                 st.goals.advance();
                 // Requeue on advance: auto-react any parked request no
@@ -490,13 +476,13 @@ pub(super) async fn react_until_done(st: &mut ActorState<'_>) -> Result<(), Step
             // re-INVITE now the owner/non-owner back-off has elapsed — the peer's
             // own re-INVITE was 491'd and is no longer pending, so this retry is
             // 200'd and the round completes.
-            _ = wait_reinvite_retry(&st.reinvite_retry), if st.reinvite_retry.is_some() => {
+            _ = wait_reinvite_retry(&st.reinvite_retry), if st.reinvite_retry.is_some() && may_renegotiate(st) => {
                 st.reinvite_retry = None;
                 Box::pin(originate_reinvite(st)).await?;
             }
             // The S6 UPDATE-collision retry deadline (C4/S6): re-originate the
             // UPDATE now the peer's colliding offer has cleared.
-            _ = wait_update_retry(&st.update_retry), if st.update_retry.is_some() => {
+            _ = wait_update_retry(&st.update_retry), if st.update_retry.is_some() && may_renegotiate(st) => {
                 st.update_retry = None;
                 Box::pin(originate_update(st)).await?;
             }
@@ -512,6 +498,10 @@ pub(super) async fn react_until_done(st: &mut ActorState<'_>) -> Result<(), Step
             _ = give_up::sleep(prack_200_at), if prack_200_at.is_some() => {
                 Box::pin(super::prack_hold::fire(st)).await?;
             }
+            _ = give_up::sleep(deferred_at), if deferred_at.is_some() => {
+                Box::pin(super::answers::fire(st, deferred_at)).await?;
+                Box::pin(super::held_pracks::fire(st, deferred_at)).await?;
+            }
             _ = super::re_ring::wait(&obs, role, st.rerung), if super::re_ring::armed(st) => {
                 Box::pin(super::re_ring::fire(st)).await?;
             }
@@ -522,7 +512,12 @@ pub(super) async fn react_until_done(st: &mut ActorState<'_>) -> Result<(), Step
         // §15, §17.1.1.3). Bounded: the controller's settle ceiling (64·T1)
         // wins the outer `select!` and drops still-parked actors either way.
         let settled = obs.all_terminated() && st.goals.is_exhausted() && obs.ledger_closed();
-        if settled && st.sent_reinvites.is_empty() && st.trains.held_200s.is_empty() {
+        if settled
+            && st.sent_reinvites.is_empty()
+            && st.trains.held_200s.is_empty()
+            && st.holds.answered.is_empty()
+            && st.holds.pracks.is_empty()
+        {
             return Ok(());
         }
     }

@@ -75,14 +75,15 @@ pub use compared::{merge_exempt, same_state, with_own_running};
 pub use decision_log::mark_decision;
 pub use dialog::{
     advance_peer_cseq, bump_our_cseq, cache_sdp_on_leg_dialog, cached_sdp_for_leg_dialog,
-    invite_glare, invite_transaction_open, peer_update_pending, sender_invite_unacknowledged,
-    sender_invite_unanswered,
+    invite_glare, invite_in_progress, invite_transaction_open, peer_update_pending,
+    sender_invite_unacknowledged, sender_invite_unanswered, InviteInProgress,
 };
 pub use instants::shift_instants;
 pub use invite_records::{
     answered_2xx, answered_2xx_mut, close_rejected_invite_round, close_untaken_invite,
-    hold_answered_2xx, invite_image, invite_relay, invite_taken, invite_untaken, open_sent_invite,
-    relayed_invite_pending, retain_ack_branch, retain_emitted_ack, sent_exchange,
+    end_invite_at_timer_b, hold_answered_2xx, invite_awaits_final, invite_image, invite_relay,
+    invite_round_ended, invite_taken, invite_untaken, leave_invite_relay, open_sent_invite,
+    relayed_ack_owed, relayed_invite_pending, retain_ack_branch, retain_emitted_ack, sent_exchange,
     sent_exchange_mut, sent_invite_image, set_awaited_ack_cseq,
 };
 pub use leg::{
@@ -104,8 +105,9 @@ pub use obligation::{
     restate_leg_invite, restate_retained, retained_for, Scope,
 };
 pub use peering::{
-    a_tag_shown, all_peered_legs, fronting_dialog, get_peer, merge_leg, note_shown,
-    relay_peer_dialog, relay_peer_dialog_ready, resolve_relay_peer, split_leg, RelayPeer,
+    a_tag_shown, all_peered_legs, call_carrying_legs, carries_call, fronting_dialog, get_peer,
+    merge_leg, note_shown, relay_peer_dialog, relay_peer_dialog_ready, resolve_relay_peer,
+    split_leg, RelayPeer,
 };
 pub use prack_disposition::{
     answerable_shown, named_by, prack_disposition, responder_dialog_carries_prack, AnswerableShown,
@@ -120,8 +122,8 @@ pub use reliable::{
 };
 pub use request_records::{
     add_record, answered_record, cancel_relay, close_held, close_record, drop_keepalive_records,
-    every_record, find_relay, held_record, next_held_deadline, record_with_branch, remove_relay,
-    take_overdue_held, Answers, RecordHolder,
+    every_record, find_relay, held_record, holds_relayed_cancel, next_held_deadline,
+    record_with_branch, relay_cancel, remove_relay, take_overdue_held, Answers, RecordHolder,
 };
 pub use resolved::{response_origin, Resolved, ResponseFacts, ResponseOrigin, UNRESOLVED};
 pub use sequence::{holds_records_of, keep_dialogs, raise_sequences};

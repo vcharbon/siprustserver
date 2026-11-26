@@ -62,12 +62,12 @@ beforeAll(async () => {
   )
   await on(SCRATCH, Server.migrated)
   await on(SCRATCH, seed)
-}, 60_000)
+})
 
 afterAll(async () => {
   if (!Server.served) return
   await on("postgres", Server.dropDatabase(SCRATCH))
-}, 60_000)
+})
 
 describe.skipIf(!Server.served)("RunSummaries.of", () => {
   it("reads a summarised run: its line, its cells in case order, and who cites it", async () => {

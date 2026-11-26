@@ -45,17 +45,12 @@ fn guard(who: &'static str, detail: &'static str) -> StepError {
     StepError::UnexpectedKind { who: who.to_string(), detail: detail.to_string() }
 }
 
-/// REFER blind transfer, actor-declared — the port of
-/// `Refer` and the redesign's exemplar: the
-/// B2BUA's post-transfer media merge re-INVITEs charlie (the c-realign) and
-/// alice (the a-realign) as logically parallel sub-flows, which the linear
-/// body serialized (one stall froze the other two legs — endurance failure
-/// `timeout/charlie@transferred`). Here each leg answers whatever arrives
-/// whenever it arrives; the `merged` barrier is the CONJUNCTION of the two
-/// realign sub-flows; and the settle barrier holds the verdict until every
-/// in-dialog request (each REFER-progress NOTIFY, each realign ACK) is
-/// actually acknowledged — a dropped datagram must be RECOVERED by
-/// re-emission, never excused (endurance failure `cseq-in-dialog-order`).
+/// REFER blind transfer, actor-declared. The B2BUA's post-transfer media merge re-INVITEs
+/// charlie (the c-realign) and alice (the a-realign) as parallel sub-flows: each leg answers
+/// whatever arrives whenever it arrives, the `merged` barrier is the conjunction of both
+/// realigns, and the settle barrier holds the verdict until every in-dialog request (each
+/// REFER-progress NOTIFY, each realign ACK) is acknowledged, a dropped datagram recovered by
+/// re-emission, never excused.
 ///
 /// Downstream contract: phases `referred` → `transferred` ONLY; checkpoints
 /// `time_to_200` / `time_to_202` / `time_to_charlie_200`; NO `mark_ringing`;
@@ -128,6 +123,7 @@ impl ActorScenario for Refer {
 
                 cseq: None,
                 delayed: vec![],
+                answers: Default::default(),
                 claim: None,
             },
             // Bob rings then answers, then — established + a realistic talk
@@ -152,6 +148,7 @@ impl ActorScenario for Refer {
 
                 cseq: None,
                 delayed: vec![],
+                answers: Default::default(),
                 claim: None,
             },
             // Charlie answers the transfer INVITE (180 then an immediate 200,
@@ -171,6 +168,7 @@ impl ActorScenario for Refer {
 
                 cseq: None,
                 delayed: vec![],
+                answers: Default::default(),
                 claim: None,
             },
         ];
@@ -202,12 +200,10 @@ impl ActorScenario for Refer {
     }
 }
 
-/// A blind transfer whose target DECLINES (`603`), actor-declared. A↔B
-/// establish, bob REFERs to charlie, charlie 603-declines the transfer INVITE;
-/// the transfer fails and A↔B stays up. The actor runner OWNS teardown (its own
-/// per-actor scopes), so **alice BYEs A↔B herself** once the decline is
-/// observed — the call tears down, settles, and succeeds under its
-/// `transfer_declined` branch.
+/// A blind transfer whose target declines (`603`), actor-declared. Alice and bob establish,
+/// bob REFERs to charlie, charlie declines the transfer INVITE and the call stays up; the actor
+/// runner owns teardown, so alice BYEs once the decline is observed, and the call succeeds
+/// under its `transfer_declined` branch.
 ///
 /// Downstream contract: NO phases, NO anchors, checkpoint `time_to_200` only,
 /// NO `mark_ringing`; guard errors under `who: "refer_charlie_reject"`, a fixed
@@ -272,6 +268,7 @@ impl ActorScenario for ReferCharlieReject {
 
                 cseq: None,
                 delayed: vec![],
+                answers: Default::default(),
                 claim: None,
             },
             // Bob rings then answers, then REFERs the call to charlie; his
@@ -293,6 +290,7 @@ impl ActorScenario for ReferCharlieReject {
 
                 cseq: None,
                 delayed: vec![],
+                answers: Default::default(),
                 claim: None,
             },
             // Charlie DECLINES the transfer INVITE with 603 (the contract's
@@ -309,6 +307,7 @@ impl ActorScenario for ReferCharlieReject {
 
                 cseq: None,
                 delayed: vec![],
+                answers: Default::default(),
                 claim: None,
             },
         ];
@@ -339,14 +338,11 @@ impl ActorScenario for ReferCharlieReject {
     }
 }
 
-/// Rerouting + a RELIABLE provisional on the winning leg, actor-declared — the
-/// port of `ReroutingPrack` (the LOAD body of the
-/// anchored `rerouting_prack` shape). Alice INVITEs with a `[bob, bob2]`
-/// candidate list; bob `486`s, the SUT fails over to bob2, which answers
-/// RELIABLY (RFC 3262: `183`/PRACK/`200`/ACK) on the winning leg. Each endpoint
-/// reacts independently: bob rejects, bob2 runs the reliable-answer state
-/// machine ([`Disposition::ReliableAnswer`]), alice PRACKs the reliable 183 in
-/// her reactor and BYEs once established.
+/// Rerouting and a reliable provisional on the winning leg, actor-declared (the load body of
+/// the anchored `rerouting_prack` shape). Alice INVITEs with a `[bob, bob2]` candidate list;
+/// bob answers `486`, the SUT fails over to bob2, which answers reliably (RFC 3262: 183, PRACK,
+/// 200, ACK; [`Disposition::ReliableAnswer`]). Alice PRACKs the 183 in her reactor and BYEs once
+/// established.
 ///
 /// Downstream contract: phases `rerouted` → `pracked` → `connected` → `bye_200`; checkpoints
 /// `time_to_prack_200` / `time_to_200` / `time_to_bye_200`; `mark_ringing(true)`
@@ -399,6 +395,7 @@ impl ActorScenario for ReroutingPrack {
 
                 cseq: None,
                 delayed: vec![],
+                answers: Default::default(),
                 claim: None,
             },
             // The primary callee REJECTS its b-leg (486), triggering the SUT's
@@ -415,6 +412,7 @@ impl ActorScenario for ReroutingPrack {
 
                 cseq: None,
                 delayed: vec![],
+                answers: Default::default(),
                 claim: None,
             },
             // The rerouted winning leg answers RELIABLY (183/PRACK/200/ACK).
@@ -436,6 +434,7 @@ impl ActorScenario for ReroutingPrack {
 
                 cseq: None,
                 delayed: vec![],
+                answers: Default::default(),
                 claim: None,
             },
         ];
@@ -462,13 +461,10 @@ impl ActorScenario for ReroutingPrack {
     }
 }
 
-/// RFC 3262 reliable-provisional establishment followed by an RFC 3311 in-dialog
-/// UPDATE renegotiation, actor-declared — the port of
-/// `PrackUpdate`. Bob answers RELIABLY
-/// ([`Disposition::ReliableAnswer`]: `183`/PRACK/`200`/ACK), alice PRACKs the
-/// reliable 183 in her reactor, and — once established — sends an in-dialog
-/// UPDATE (offer) whose 200 completes the exchange (no ACK), then BYEs. The
-/// reactor reuses the 100rel machinery the rerouting-prack port built.
+/// RFC 3262 reliable-provisional establishment, then an RFC 3311 in-dialog UPDATE,
+/// actor-declared. Bob answers reliably ([`Disposition::ReliableAnswer`]: 183, PRACK, 200,
+/// ACK), alice PRACKs the 183 in her reactor and, once established, sends an UPDATE whose 200
+/// completes the exchange, then BYEs.
 ///
 /// Downstream contract: phases `pracked` → `connected` → `updated` → `bye_200`; checkpoints
 /// `time_to_prack_200` / `time_to_200` / `time_to_update_200` / `time_to_bye_200`;
@@ -516,6 +512,7 @@ impl ActorScenario for PrackUpdate {
 
                 cseq: None,
                 delayed: vec![],
+                answers: Default::default(),
                 claim: None,
             },
             // Bob answers RELIABLY (183/PRACK/200/ACK) and reacts to the UPDATE
@@ -535,6 +532,7 @@ impl ActorScenario for PrackUpdate {
 
                 cseq: None,
                 delayed: vec![],
+                answers: Default::default(),
                 claim: None,
             },
         ];
@@ -558,12 +556,10 @@ impl ActorScenario for PrackUpdate {
     }
 }
 
-/// Establish then a delayed-offer in-dialog re-INVITE renegotiation then BYE,
-/// actor-declared — the port of `Reinvite`. Bob
-/// rings-then-answers; once established alice sends a bodyless (delayed-offer)
-/// re-INVITE, whose 2xx she ACKs WITH the answer SDP (RFC 3264 §4) in her
-/// reactor, then BYEs. Emergency variant `reinvite_em` reuses this body (the
-/// marker rides the INVITE plan).
+/// Establish, a delayed-offer in-dialog re-INVITE, then BYE, actor-declared. Bob rings then
+/// answers; alice sends a bodyless re-INVITE and ACKs its 2xx with the answer SDP (RFC 3264
+/// §4), then BYEs. The emergency variant `reinvite_em` reuses this body (the marker rides the
+/// INVITE plan).
 ///
 /// Downstream contract: phases `connected` → `reinvited` → `bye_200`; checkpoints `time_to_200` /
 /// `time_to_reinvite_200` / `time_to_bye_200`; `mark_ringing` on the 180;
@@ -606,6 +602,7 @@ impl ActorScenario for Reinvite {
 
                 cseq: None,
                 delayed: vec![],
+                answers: Default::default(),
                 claim: None,
             },
             // Bob rings then answers, then answers alice's re-INVITE (200 + SDP)
@@ -626,6 +623,7 @@ impl ActorScenario for Reinvite {
 
                 cseq: None,
                 delayed: vec![],
+                answers: Default::default(),
                 claim: None,
             },
         ];
@@ -647,11 +645,9 @@ impl ActorScenario for Reinvite {
     }
 }
 
-/// The callee REJECTS the INVITE with `486 Busy Here`, actor-declared. Alice
-/// INVITEs, bob 486s (the final auto-ACKed on both legs), and the transaction
-/// completes with nothing to CANCEL/BYE; the SUT must still reap the rejected
-/// call. Alice has ONLY the INVITE goal (her INVITE is rejected — no dialog, no
-/// BYE); the torn-down, settled call succeeds under its `rejected` branch.
+/// The callee rejects the INVITE with `486 Busy Here`, actor-declared. Alice INVITEs, bob 486s
+/// (the final ACKed on both legs), and nothing is left to CANCEL or BYE; the SUT still reaps
+/// the call. Alice has only the INVITE goal; the settled call succeeds under `rejected`.
 ///
 /// Downstream contract: NO phases, NO anchors, NO checkpoints, NO `mark_ringing`.
 pub struct InviteReject;
@@ -680,6 +676,7 @@ impl ActorScenario for InviteReject {
 
                 cseq: None,
                 delayed: vec![],
+                answers: Default::default(),
                 claim: None,
             },
             // Bob rejects the initial INVITE with 486; its reject-ACK is absorbed
@@ -696,6 +693,7 @@ impl ActorScenario for InviteReject {
 
                 cseq: None,
                 delayed: vec![],
+                answers: Default::default(),
                 claim: None,
             },
         ];
@@ -718,13 +716,11 @@ impl ActorScenario for InviteReject {
     }
 }
 
-/// The caller ABANDONS after ringing (CANCEL), actor-declared. Alice INVITEs,
-/// sees the 180, then CANCELs the still-pending INVITE (RFC 3261 §9.1); the SUT
-/// relays the CANCEL to bob, who 200s it and 487s his held INVITE, and both legs
-/// reap. The torn-down, settled call succeeds under [`Branch::ABANDONED`]. When
-/// bob's 200 crosses the CANCEL, alice ACKs it and BYEs, and the call succeeds
-/// under [`Branch::ANSWERED_DESPITE_CANCEL`]; when it reaches her before her
-/// CANCEL leaves, under [`Branch::ANSWERED_BEFORE_CANCEL`].
+/// The caller abandons after ringing, actor-declared. Alice INVITEs, sees the 180 and CANCELs
+/// (RFC 3261 §9.1); bob 200s the relayed CANCEL and 487s his INVITE, and the call succeeds
+/// under [`Branch::ABANDONED`]. A 200 crossing the CANCEL is ACKed and BYEd
+/// ([`Branch::ANSWERED_DESPITE_CANCEL`]); one reaching alice before her CANCEL leaves succeeds
+/// under [`Branch::ANSWERED_BEFORE_CANCEL`].
 ///
 /// Downstream contract: NO phases, NO anchors, checkpoint `time_to_180` (on the
 /// first provisional) only, NO `mark_ringing`.
@@ -776,6 +772,7 @@ impl ActorScenario for AbandonRinging {
 
                 cseq: None,
                 delayed: vec![],
+                answers: Default::default(),
                 claim: None,
             },
             // Bob rings (180) then would answer — but the CANCEL arrives first, so
@@ -792,6 +789,7 @@ impl ActorScenario for AbandonRinging {
 
                 cseq: None,
                 delayed: vec![],
+                answers: Default::default(),
                 claim: None,
             },
         ];
@@ -814,11 +812,9 @@ impl ActorScenario for AbandonRinging {
     }
 }
 
-/// The bread-and-butter happy call (INVITE/180/200/ACK, short talk, BYE),
-/// actor-declared — the port of `BasicCall` and
-/// the standard-path confirmation. Bob rings-then-answers; alice holds for
-/// `talk_time` then BYEs. Emergency variant `basic_call_em` reuses this body
-/// (the marker rides the INVITE plan).
+/// The happy call (INVITE, 180, 200, ACK, a short talk, BYE), actor-declared. Bob rings then
+/// answers; alice talks for `talk_time`, then BYEs. The emergency variant `basic_call_em`
+/// reuses this body (the marker rides the INVITE plan).
 ///
 /// Downstream contract: phases `connected` → `bye_200`; checkpoints `time_to_200` /
 /// `time_to_bye_200`; `mark_ringing` on the 180; anchors `LOAD_CALL_ANCHORS`.
@@ -856,6 +852,7 @@ impl ActorScenario for BasicCall {
 
                 cseq: None,
                 delayed: vec![],
+                answers: Default::default(),
                 claim: None,
             },
             ActorSpec {
@@ -873,6 +870,7 @@ impl ActorScenario for BasicCall {
 
                 cseq: None,
                 delayed: vec![],
+                answers: Default::default(),
                 claim: None,
             },
         ];

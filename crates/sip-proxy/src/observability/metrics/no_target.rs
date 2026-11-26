@@ -22,23 +22,19 @@ pub enum NoTargetDrop {
 }
 
 impl NoTargetDrop {
-    /// Every kind, in declaration order.
     pub const ALL: [NoTargetDrop; 3] =
         [NoTargetDrop::InDialog, NoTargetDrop::Cancel, NoTargetDrop::Initial];
 
-    /// The kind of `req`: a CANCEL, a request whose To names a tag (inside
-    /// a dialog), or another (out of dialog).
     pub fn of(req: &SipRequest) -> Self {
         if req.method() == Method::Cancel {
             NoTargetDrop::Cancel
-        } else if req.to().tag().is_some_and(|t| !t.is_empty()) {
+        } else if req.to().tag().is_some() {
             NoTargetDrop::InDialog
         } else {
             NoTargetDrop::Initial
         }
     }
 
-    /// The `kind` label.
     pub const fn as_str(self) -> &'static str {
         match self {
             NoTargetDrop::InDialog => "in_dialog",
@@ -49,14 +45,12 @@ impl NoTargetDrop {
 }
 
 impl ProxyMetrics {
-    /// Count one request dropped because neither worker its cookie names is
-    /// alive, for `sip_proxy_no_target_dropped_total{kind}`; each
-    /// retransmission counts.
+    /// Count one request dropped for want of an alive target, under its
+    /// `kind`; each retransmission counts.
     pub fn record_no_target_dropped(&self, kind: NoTargetDrop) {
         self.no_target_dropped.add(&[kind.as_str()], 1);
     }
 
-    /// Requests of `kind` dropped for want of an alive target so far.
     pub fn no_target_dropped_count(&self, kind: NoTargetDrop) -> u64 {
         self.no_target_dropped.get(&[kind.as_str()])
     }

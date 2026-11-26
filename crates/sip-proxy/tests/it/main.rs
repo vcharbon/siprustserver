@@ -5,13 +5,13 @@
 //! Select one (the workspace build `just test` made, no rebuild):
 //! `cargo nextest run --workspace -E 'package(=sip-proxy) & binary(it)' <module>::`.
 
-// Shared fixtures, reached from a test module as `crate::common::…`.
 mod common;
 
 mod active_active;
 mod backup_named_while_away;
 mod first_ingress_bound;
 mod first_view;
+mod flooded_shard;
 mod health_probe_late_reply;
 mod ingress_trust;
 mod load_balancer;
@@ -24,9 +24,11 @@ mod parse_refusal;
 mod per_call_trace;
 mod probe_dead_verdict;
 mod probe_isolation;
+mod probe_late_answer_reading;
 mod probe_not_ready_member;
 mod probe_period;
 mod probe_sent_by;
+mod probe_slow_verdict;
 mod rate_cap_spill;
 mod receive_path_parse;
 mod refused_invite_copies;
@@ -35,6 +37,8 @@ mod select_failure_503;
 mod self_gate_admission;
 mod shard_e2e;
 mod single_face_wire;
+mod slow_worker_back_as_another_process;
+mod slow_worker_routing;
 mod stateless_final_response_contract;
 mod surrogate_pair_display_name;
 mod transit_only;

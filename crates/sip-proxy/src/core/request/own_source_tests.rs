@@ -11,8 +11,8 @@ use crate::core::dual_face_tests::{
 };
 use crate::observability::metrics::{Face, RoutingDecisionKind};
 
-/// A worker's INVITE as this proxy forwarded it from the face at `from`
-/// toward a target naming its other face.
+/// A worker's `method` request as this proxy forwarded it from the face at
+/// `from`, toward a target naming its other face.
 fn looped(method: &str, from: SocketAddr, to_tag: &str) -> SipMessage {
     let (host, port) = (from.ip(), from.port());
     parse_msg(&format!(
@@ -57,7 +57,6 @@ async fn a_request_from_the_proxys_own_address_is_answered_482() {
     }
 }
 
-/// An ACK from the proxy's own address is dropped, answered by nothing.
 #[tokio::test]
 async fn an_ack_from_the_proxys_own_address_draws_nothing() {
     let fx = dual_face_core();

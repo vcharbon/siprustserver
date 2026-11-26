@@ -93,7 +93,11 @@ pub enum RuleAction {
     /// ACK a leg's confirmed dialog with the answer another leg gave (RFC
     /// 3264 §4), read off that dialog's own offer/answer state: where its 2xx
     /// made an offer the ACK answers, `answer` rides the ACK, and with no
-    /// answer yet the ACK waits for the relayed one that brings it; where the
+    /// answer yet the ACK waits for the relayed ACK, or the later
+    /// `AckLegAnswering` on that leg, that brings it (the first 2xx to an
+    /// INVITE this stack sent on its own account arms that wait, so a rule
+    /// emitting it on its 2xx's own leg selects a 2xx to that dialog's last
+    /// INVITE, on that dialog); where the
     /// 2xx made none (its INVITE carried the offer, or a reliable provisional
     /// did and its PRACK answers it, RFC 3262 §5) the ACK is bare.
     AckLegAnswering {
@@ -177,18 +181,19 @@ pub enum RuleAction {
         leg_id: String,
         headers: Vec<(String, String)>,
     },
+    /// CANCEL b-leg `leg_id`'s ringing INVITE (RFC 3261 §9.1); the leg reads
+    /// `Cancelling` until that INVITE's final. Each request relayed toward the
+    /// leg draws this stack's final at a leg's end (§15.1.2), and the leg's
+    /// later final to it is not relayed.
     CancelLeg {
         leg_id: String,
     },
-    /// CANCEL a relayed, still-unanswered **re-INVITE** client transaction on
-    /// `leg_id`'s dialog (RFC 3261 §9.1) — transaction-scoped: no leg state or
-    /// disposition change, the established dialog and the call stay up. Builds
-    /// the CANCEL from the INVITE the dialog's record holds (same
-    /// branch / Route set / wire destination as the re-INVITE) and marks the
-    /// matching pending-relay snapshot (`outbound_cseq`) cancelled so the
-    /// peer's eventual final is resolved locally instead of relayed: the
-    /// originator already holds its final — the txn layer's 487 to its own
-    /// CANCEL here, this stack's reject under [`Self::RejectPendingReinvite`].
+    /// Relay the originator's CANCEL onto the relayed, still-unanswered
+    /// **re-INVITE** on `leg_id`'s dialog (RFC 3261 §9.1): no leg state or
+    /// disposition change, the dialogs and the call stay up. The CANCEL reuses
+    /// the re-INVITE's branch, Route set and wire destination; the snapshot
+    /// (`outbound_cseq`) is marked `cancel_relayed`, and the peer's final is
+    /// relayed to the originator, whose re-INVITE stays open for it.
     CancelPendingReinvite {
         leg_id: String,
         outbound_cseq: i64,
@@ -212,10 +217,10 @@ pub enum RuleAction {
         status: u16,
         reason: String,
     },
-    /// Resolve a CANCELled relayed re-INVITE's final response locally: drop the
-    /// cancelled pending-relay snapshot (`outbound_cseq`) from `leg_id`'s
-    /// dialog. Never relayed — the txn layer answered the originator when the
-    /// CANCEL matched.
+    /// Resolve locally, never relayed, the target's final to a relayed re-INVITE
+    /// whose originator already holds this stack's final: a 2xx is ACKed on
+    /// `leg_id`'s dialog (RFC 3261 §13.2.2.4), an offer it made answered with
+    /// every stream rejected (RFC 3264 §6); the snapshot `outbound_cseq` drops.
     ResolveCancelledReinvite {
         leg_id: String,
         outbound_cseq: i64,
@@ -304,21 +309,23 @@ pub enum RuleAction {
     ClearState {
         machine: MachineId,
     },
-    /// Originate an in-dialog request toward a leg's confirmed dialog. Method is
-    /// restricted to the body-bearing/keepalive subset (OPTIONS / INFO / UPDATE /
-    /// MESSAGE — plus BYE/INVITE/PRACK/NOTIFY for internal callers). `body` is an
-    /// **opaque** payload (MSCML rides here as `application/mediaservercontrol+xml`);
+    /// Originate an in-dialog request toward a leg's confirmed dialog: OPTIONS, INFO, UPDATE,
+    /// MESSAGE, BYE, or INVITE (as [`RuleAction::SendReinvite`]). Another method is a turn
+    /// defect, not sent: NOTIFY is [`RuleAction::SendNotify`]'s, PRACK the stack's own.
+    /// `body` is **opaque** (MSCML rides as `application/mediaservercontrol+xml`);
     /// its `content_type` defaults to `application/sdp` when none is given.
     ///
-    /// `headers` forwards arbitrary application headers verbatim onto the
-    /// re-originated request (mirrors [`RuleAction::ServiceHttpRequest`]'s header
-    /// list). This is the seam a service uses to **reconstruct a deferred relay**:
-    /// e.g. a deferred User-to-User relay stashes the inbound INFO's
-    /// `User-To-User` header across an async decision, then re-emits it toward the peer here with
-    /// `headers: [("User-To-User", value)]`. The B2BUA rebuilds
-    /// every dialog/transport header itself (Via/CSeq/From/To/Call-ID/Contact), so
-    /// only application headers belong here. `Content-Type`/`Content-Length` are
-    /// owned by `body` and are ignored if listed (never duplicated).
+    /// `headers` forwards application headers verbatim onto the re-originated
+    /// request (mirrors [`RuleAction::ServiceHttpRequest`]'s header list). This is
+    /// the seam a service uses to **reconstruct a deferred relay**: e.g. a deferred
+    /// User-to-User relay stashes the inbound INFO's `User-To-User` header across
+    /// an async decision, then re-emits it toward the peer here with
+    /// `headers: [("User-To-User", value)]`. The B2BUA writes every structural
+    /// header itself (Via, From, To, Call-ID, CSeq, Contact, Route, Record-Route,
+    /// Max-Forwards; RFC 3261 §16.6): a line naming one, or a line the wire cannot
+    /// carry whole, is left out and reported as a skipped line, and the request
+    /// still leaves. `Content-Type`/`Content-Length` are owned by `body` and are
+    /// ignored if listed (never duplicated).
     SendRequestToLeg {
         leg_id: String,
         method: String,
@@ -550,15 +557,15 @@ pub enum RuleAction {
     },
     /// Author a decision-layer **Reject** or **Redirect** treatment on the a-leg
     /// INVITE server txn (ADR-0017 failover path). `header_updates` add
-    /// non-structural headers (e.g. `Reason:`, RFC 3326); `contacts` (`uri`, `q`)
-    /// render `Contact:` headers for a 3xx redirect. Distinct from
+    /// non-structural headers (e.g. `Reason:`, RFC 3326); `contacts` render one
+    /// `Contact:` header each for a 3xx redirect. Distinct from
     /// [`RelayFailureToALeg`](Self::RelayFailureToALeg), which relays the b-leg's
     /// own failure with the B2BUA Contact.
     RespondToALeg {
         status: u16,
         reason: String,
         header_updates: Vec<(String, Option<String>)>,
-        contacts: Vec<(String, Option<f32>)>,
+        contacts: Vec<crate::redirect_contact::RedirectContact>,
     },
     /// **A-side fork-confirm** (RFC 3261 §12.1 forked-request dialog
     /// establishment + RFC 3264 §5.1 one-answer-per-dialog): answer the a-leg

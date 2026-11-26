@@ -1,4 +1,5 @@
-//! The health probe's cadence and when it reads a silent worker `Dead`.
+//! The health probe's cadence and when it reads a silent worker `Dead` and a
+//! late one `Slow`.
 
 use std::time::Duration;
 
@@ -8,7 +9,6 @@ use tokio::time::Instant;
 /// millisecond past it, so an answer due at that last instant is read first.
 const REAP_PAST_WINDOW: Duration = Duration::from_millis(1);
 
-/// When a reply window whose last instant is `window_ends` is reaped.
 pub(super) fn past_the_window(window_ends: Instant) -> Instant {
     sip_clock::deadline::after(window_ends, REAP_PAST_WINDOW)
 }
@@ -18,23 +18,43 @@ pub(super) fn past_the_window(window_ends: Instant) -> Instant {
 /// reply window (windows may overlap ticks — probes are branch-correlated).
 /// The default window holds the three copies Timer E sends (at 0, T1 and 3·T1,
 /// 1.5 s) and the answer to the last one.
+///
+/// The slow axis (ADR-0069): a probe's answer is awaited `slow_window_ms`
+/// from its send, a late one stamping the worker; `threshold` misses read it
+/// `Slow` while a late answer is that recent, `Dead` otherwise. `Slow` turns
+/// `Alive` after `recover_probes` answers in time in a row.
 #[derive(Debug, Clone, Copy)]
 pub struct HealthProbeConfig {
     pub interval_ms: u64,
     pub timeout_ms: u64,
     pub threshold: u32,
+    pub slow_window_ms: u64,
+    pub recover_probes: u32,
 }
 
 impl Default for HealthProbeConfig {
     fn default() -> Self {
-        Self { interval_ms: 1_000, timeout_ms: 1_600, threshold: 2 }
+        Self::DEFAULT
     }
 }
 
 impl HealthProbeConfig {
-    /// The tick period the probe runs at: `interval_ms`, at least 1 ms.
+    pub const DEFAULT: Self = Self {
+        interval_ms: 1_000,
+        timeout_ms: 1_600,
+        threshold: 2,
+        slow_window_ms: 2_000,
+        recover_probes: 3,
+    };
+
     pub fn period(&self) -> Duration {
         Duration::from_millis(self.interval_ms.max(1))
+    }
+
+    /// How long a probe's late answer is awaited from its send, its reply
+    /// window at least.
+    pub fn slow_window(&self) -> Duration {
+        Duration::from_millis(self.slow_window_ms.max(self.timeout_ms))
     }
 
     /// From the send of the first probe a worker leaves unanswered to its
@@ -50,12 +70,24 @@ impl HealthProbeConfig {
             .saturating_add(REAP_PAST_WINDOW)
     }
 
-    /// The latest `Dead` verdict after a worker falls silent:
-    /// `threshold × interval + timeout`. The first probe it leaves unanswered
-    /// leaves within one interval of its silence (at once when the silence
-    /// swallows a probe already sent, one interval later when the worker
-    /// answered the probe of the tick just before).
+    /// The latest `Dead` verdict after the last answer the proxy received from
+    /// a worker, in time or late: `threshold × interval + timeout`. After an
+    /// answer in time, the first probe it leaves unanswered leaves within one
+    /// interval (at once when the silence swallows a probe already sent, one
+    /// interval later when the worker answered the probe of the tick just
+    /// before). After a late answer the worker is read `Dead` at the first reap
+    /// past the slow window, within `slow_window + interval`, which this bound
+    /// holds while [`slow_window_fits`](Self::slow_window_fits).
     pub fn verdict_within(&self) -> Duration {
         self.period().saturating_add(self.verdict_after_first_miss())
+    }
+
+    /// Whether the slow window lengthens no verdict on silence: a reap comes
+    /// every interval, so the first past the slow window lands within
+    /// `slow_window + interval` of the late answer, which `verdict_within`
+    /// bounds while `slow_window ≤ (threshold − 1) × interval + timeout`.
+    pub fn slow_window_fits(&self) -> bool {
+        self.slow_window().saturating_add(self.period()).saturating_add(REAP_PAST_WINDOW)
+            <= self.verdict_within()
     }
 }

@@ -6,6 +6,7 @@
 
 use super::pool::{Change, Pool};
 use super::{CancelEntry, Lifetime, MemoBounds};
+use crate::addr::ProxyAddr;
 
 pub(super) struct Stripe {
     invite: Pool,
@@ -33,7 +34,6 @@ impl Stripe {
         }
     }
 
-    /// Forget the expired entries of both pools.
     pub(super) fn expire(&mut self, now_ms: u64, change: &mut Change) {
         self.invite.expire(now_ms, change);
         self.retransmission.expire(now_ms, change);
@@ -76,7 +76,19 @@ impl Stripe {
         Some(entry)
     }
 
-    /// The live entry under `key`, from whichever pool holds it.
+    /// The entry under `key`, in whichever pool holds it, while it targets
+    /// `from`, targets `to` ([`Pool::retarget`]).
+    pub(super) fn retarget(
+        &mut self,
+        key: &str,
+        from: &ProxyAddr,
+        to: &ProxyAddr,
+        change: &mut Change,
+    ) {
+        self.invite.retarget(key, from, to, change);
+        self.retransmission.retarget(key, from, to, change);
+    }
+
     pub(super) fn get(
         &mut self,
         key: &str,

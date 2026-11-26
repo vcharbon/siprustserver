@@ -31,7 +31,9 @@ pub(super) enum TxnRole {
 pub(super) enum TxnState {
     Trying,
     Proceeding,
-    /// A final sent or received; held for Timer D/H/J.
+    /// A final sent or received; held for Timer D/H/J. An INVITE client txn
+    /// here took a non-2xx; a re-INVITE's absorbs a later 2xx (RFC 6026
+    /// §8.4), a dialling INVITE's hands it up.
     Completed,
     /// INVITE server txn whose non-2xx final is ACKed (RFC 3261 §17.2.1):
     /// held for Timer I, absorbing ACK retransmissions and any further final
@@ -164,6 +166,10 @@ pub(super) struct UnsentCancel {
     pub(super) terminated: Option<(Bytes, SocketAddr)>,
     /// The key the transaction is held under in `Owner::held_cancels`.
     pub(super) held_as: (String, String, u32),
+    /// The INVITE is still active, its 487 not yet its final: the release
+    /// says whether it ends with it
+    /// ([`TransactionConfig::consumer_ends_cancelled_reinvite`](crate::TransactionConfig)).
+    pub(super) invite_open: bool,
 }
 
 /// A CANCEL datagram parked on its INVITE client txn (see
@@ -174,7 +180,7 @@ pub(super) struct HeldCancel {
     pub(super) wire: CancelWire,
     /// Timer-E pacing for the on-wire datagram (§17.1.2.2). `None` while the
     /// datagram is still [`CancelWire::Held`]; armed, and re-armed from rung
-    /// one, by [`super::owner::Owner`]'s `arm_cancel_retransmit`.
+    /// one, by [`super::owner::Owner`]'s `arm_cancel_timers`.
     pub(super) ladder: Option<Ladder>,
 }
 
@@ -261,6 +267,7 @@ impl Transaction {
             past_trying: false,
             dialogs: Vec::new(),
             reliable_offers: Vec::new(),
+            answer_origin: None,
             lifetime,
             orphaned: false,
             held: false,
@@ -282,6 +289,20 @@ impl Transaction {
 
     pub(super) fn role(&self) -> TxnRole {
         self.id.as_ref().role()
+    }
+
+    /// Whether this client re-INVITE transaction owes a 2xx nothing, neither
+    /// its ACK nor its delivery (RFC 6026 §7.2): in Completed it takes only
+    /// repeats of its non-2xx final (§8.4), and one that gave up at Timer B
+    /// with no response is over (RFC 3261 §17.1.1.2). A dialling INVITE's
+    /// transaction still hands a 2xx up, in Completed or held after it gave
+    /// up: the dialog it confirms is ACKed and ended (§13.2.2.4, §15).
+    pub(super) fn owes_2xx_nothing(&self) -> bool {
+        let reinvite = self.kind == TxnKind::Invite
+            && self.original_request.as_deref().is_some_and(|r| r.to().tag().is_some());
+        let over_at_timer_b =
+            self.lifetime.gave_up() && self.timeout_kind == TxnTimeoutKind::Response;
+        reinvite && (self.state == TxnState::Completed || over_at_timer_b)
     }
 
     /// The From-tag of the caller whose tagless INVITE opened this server
@@ -430,12 +451,19 @@ pub(super) struct Transaction {
     /// reliable provisionals that carried one, at most [`MAX_DIALOGS`]. Their
     /// PRACK answered it (RFC 3262 §5), so their 2xx's ACK owes no answer.
     pub(super) reliable_offers: Vec<String>,
+    /// On an orphaned INVITE client txn: the `o=` value the answer its ACK
+    /// owes states, as the released call handed it over ([`OrphanOrigin`]);
+    /// `None`, a fresh origin.
+    ///
+    /// [`OrphanOrigin`]: super::OrphanOrigin
+    pub(super) answer_origin: Option<String>,
     /// When this transaction leaves the map, written only by
     /// `layer::lifetime`. An INVITE client txn that gave up is held
     /// [`Hold::GaveUp`](super::lifetime::Hold::GaveUp) in Trying/Proceeding:
     /// its `Timeout` is delivered, a late final is ACKed and handed up
-    /// (§17.1.1.3), it never times out again, and a CANCEL on it before any
-    /// provisional stays held.
+    /// (§17.1.1.3) but a 2xx it owes nothing ([`Self::owes_2xx_nothing`]),
+    /// it never times out again, and a CANCEL on it before any provisional
+    /// stays held.
     pub(super) lifetime: Lifetime,
     /// The call this transaction served has been released while it was still
     /// open or Accepted (`cancel_txns_for_call`). The layer then closes the

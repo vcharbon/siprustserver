@@ -1,40 +1,19 @@
-//! Transparency: HealthProbe late-reply recovery + uncorrelated-reply rejection,
-//! on the transaction-branch correlation model.
+//! The health probe's reply correlation: a late reply counts, and a reply that
+//! is uncorrelated or from a moved worker's old address never moves health.
 //!
-//! Under sustained UDP traffic a probe whose only re-marking path matches a
-//! per-cycle entry its reap has *already cleared* by the time the (valid)
-//! 200 OK arrives discards every late reply; once a worker crosses `threshold`
-//! it stays `dead`. These tests lock the two guarantees that keep a late reply
-//! counting:
+//! 1. A probe stays pending, keyed by its transaction Via branch, until its own
+//!    reply window (`timeout_ms`) ends, however many ticks the window spans. A
+//!    reply that lands ticks after the tick that sent it, inside its window,
+//!    correlates and resets the miss count; it also retires the worker's other
+//!    in-flight probes, so their reaps count no spurious miss.
+//! 2. Only a reply that correlates to a pending probe, while the worker is still
+//!    at the probed address, moves health: a reply on a forged branch is
+//!    dropped, and so is a correlated reply once the worker's address moved.
 //!
-//!   1. **Branch correlation, not an ephemeral Call-ID map.** A probe stays in
-//!      `pending` keyed by its transaction Via branch until its own reply window
-//!      (`timeout_ms`) ends, however many ticks the window spans. A reply that
-//!      lands several ticks after the tick that sent it, inside its window,
-//!      still correlates by branch and resets the miss counter
-//!      (`handle_reply`). A reply proving liveness also retires every other
-//!      in-flight probe to the same worker, so their later reaps cannot count a
-//!      spurious miss against a worker that just answered. There is no per-cycle
-//!      map entry to race a reap.
-//!
-//!   2. **Only a reply correlated to a real probe AND from the worker's current
-//!      address moves health.** Three cases map onto the two defensive gates in
-//!      `handle_reply`:
-//!        - (a) a response whose Via branch matches no `pending` probe (a
-//!          forged/replayed branch) is dropped at the FIRST gate, and
-//!        - (c) a branch-correlated reply from the worker's current registry
-//!          address re-marks it `Alive`; both are locked by test 3.
-//!        - (b) a reply that DOES correlate by branch but whose worker no longer
-//!          resolves to the probed origin (the "dead-pod resurrection race") is
-//!          dropped at the SECOND gate — the stale-origin check — locked by
-//!          test 4.
-//!
-//! These run on the paused clock (like the sibling `options_e2e.rs` probe tests):
-//! the probe, the worker and the fabric are tasks of the test's runtime, so tokio
-//! advances time only when all of them are idle. Determinism comes from sizing
-//! `timeout_ms` strictly larger than the injected reply delay (every reply lands
-//! inside its window → never a false miss) plus a `RecordingControl` that
-//! asserts `Dead` was never written, even transiently.
+//! The probe, the worker and the fabric are tasks of the test's runtime on the
+//! paused clock. Each `timeout_ms` exceeds the injected reply delay, so every
+//! reply lands inside its window, and a `RecordingControl` asserts `Dead` was
+//! never written, even transiently.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -86,6 +65,9 @@ impl sip_proxy::registry::control::WorkerRegistryControl for RecordingControl {
         }
         self.inner.set_view(worker_id, health, acceptance);
     }
+    fn note_late_answer(&self, worker_id: &str, fresh_for: std::time::Duration) {
+        self.inner.note_late_answer(worker_id, fresh_for);
+    }
 }
 
 /// Spawn a responder that answers every OPTIONS with 200 OK, but only AFTER
@@ -99,11 +81,11 @@ impl sip_proxy::registry::control::WorkerRegistryControl for RecordingControl {
 /// worker's drain rate below the probe rate — which would manufacture genuine
 /// reaps (a load artifact, not the late-reply guarantee under test).
 fn spawn_late_responder(
-    ep: Box<dyn UdpEndpoint>,
+    ep: impl Into<Arc<dyn UdpEndpoint>>,
     reply_delay: Duration,
     gate: Arc<AtomicBool>,
 ) -> tokio::task::JoinHandle<()> {
-    let ep: Arc<dyn UdpEndpoint> = Arc::from(ep);
+    let ep: Arc<dyn UdpEndpoint> = ep.into();
     tokio::spawn(async move {
         let parser = CustomParser::new();
         while let Some(pkt) = ep.recv().await {
@@ -112,11 +94,8 @@ fn spawn_late_responder(
                 continue;
             }
             if !gate.load(Ordering::SeqCst) {
-                continue; // worker is "down" — swallow the probe.
+                continue;
             }
-            // `generate_response` echoes the request's Via verbatim, so the 200
-            // carries the same branch the probe is waiting on: it correlates
-            // even though it is deliberately late.
             let opts = GenerateResponseOpts {
                 incoming_source: Some(observed_source(pkt.src)),
                 to_tag: Some("probe-uas".into()),
@@ -207,7 +186,6 @@ fn spawn_capture_responder(ep: Box<dyn UdpEndpoint>) -> (tokio::task::JoinHandle
     (task, ctl)
 }
 
-/// Build the probe under test over a freshly-bound UAC endpoint.
 async fn spawn_probe(
     h: &Harness,
     probe_addr: &str,
@@ -258,21 +236,15 @@ fn unknown_registry(worker_sock: std::net::SocketAddr) -> Arc<SimulatedWorkerReg
     ))
 }
 
-// ───────────────────────────────────────────────────────────────────────────
-// 1. Late replies past the reap window keep the worker alive.
-// ───────────────────────────────────────────────────────────────────────────
-/// The worker answers every OPTIONS, each reply a handful of ticks after its
-/// tick. A per-cycle pending entry would already be reaped, the reply
-/// discarded and the miss counter walked to threshold; the branch still
-/// correlates, so the worker reaches, and stays, Alive.
+/// The worker answers every OPTIONS three ticks after its tick, inside the
+/// reply window: each reply correlates by branch and its `X-Overload` payload
+/// applies, so the worker reaches `Alive`, stays there, and is never written
+/// `Dead`.
 #[tokio::test(start_paused = true)]
 async fn late_replies_past_the_reap_window_keep_the_worker_alive() {
     let h = Harness::with_transit_delay("probe-late-reply", 5);
-    let (worker_ep, worker_sock) = h.bind_sut(WORKER_ID, "127.0.0.1:5071").await;
+    let (worker_ep, worker_sock) = h.bind_peer(WORKER_ID, "127.0.0.1:5071").await;
 
-    // Reply delay (150 ms) is THREE tick intervals (50 ms) past the tick that
-    // issues each probe — the reply is unambiguously "late" — yet well inside
-    // the 600 ms reply window, so its branch still correlates.
     let responder = spawn_late_responder(
         worker_ep,
         Duration::from_millis(150),
@@ -291,7 +263,12 @@ async fn late_replies_past_the_reap_window_keep_the_worker_alive() {
         control,
         observer.clone(),
         1,
-        HealthProbeConfig { interval_ms: 50, timeout_ms: 600, threshold: 3 },
+        HealthProbeConfig {
+            interval_ms: 50,
+            timeout_ms: 600,
+            threshold: 3,
+            ..HealthProbeConfig::default()
+        },
     )
     .await;
 
@@ -301,8 +278,6 @@ async fn late_replies_past_the_reap_window_keep_the_worker_alive() {
         "the late reply's X-Overload payload must still be applied"
     );
 
-    // Hold the steady state well past `threshold × interval` so a missed
-    // correlation would have flipped the worker Dead.
     tokio::time::sleep(Duration::from_millis(400)).await;
     assert_eq!(registry.resolve(WORKER_ID).map(|w| w.health), Some(WorkerHealth::Alive));
     assert!(
@@ -315,13 +290,10 @@ async fn late_replies_past_the_reap_window_keep_the_worker_alive() {
     let _ = h.finish().await;
 }
 
-// ───────────────────────────────────────────────────────────────────────────
-// 2. Stable alive across sustained late replies.
-// ───────────────────────────────────────────────────────────────────────────
 #[tokio::test(start_paused = true)]
 async fn stable_alive_across_sustained_late_replies() {
     let h = Harness::with_transit_delay("probe-late-reply-sustained", 5);
-    let (worker_ep, worker_sock) = h.bind_sut(WORKER_ID, "127.0.0.1:5073").await;
+    let (worker_ep, worker_sock) = h.bind_peer(WORKER_ID, "127.0.0.1:5073").await;
     let responder = spawn_late_responder(
         worker_ep,
         Duration::from_millis(150),
@@ -340,15 +312,17 @@ async fn stable_alive_across_sustained_late_replies() {
         control,
         observer,
         2,
-        HealthProbeConfig { interval_ms: 50, timeout_ms: 600, threshold: 3 },
+        HealthProbeConfig {
+            interval_ms: 50,
+            timeout_ms: 600,
+            threshold: 3,
+            ..HealthProbeConfig::default()
+        },
     )
     .await;
 
     wait_for_health(&registry, WorkerHealth::Alive).await;
 
-    // Sample health across 10 reply cycles (≈ one reply round-trip each). The
-    // worker must read Alive at every sample, and Dead must never have been
-    // written.
     for cycle in 0..10 {
         tokio::time::sleep(Duration::from_millis(150)).await;
         assert_eq!(
@@ -367,33 +341,20 @@ async fn stable_alive_across_sustained_late_replies() {
     let _ = h.finish().await;
 }
 
-// ───────────────────────────────────────────────────────────────────────────
-// 3. An uncorrelated reply cannot revive a dead worker; a correlated one does.
-//    Correlation is the transaction Via branch (not a Call-ID prefix), so the
-//    spoof is a forged branch.
-// ───────────────────────────────────────────────────────────────────────────
+/// The worker is a simulated peer whose forged 200 is the test's subject: it
+/// reaches the probe while the worker is `Dead` and revives nothing; the
+/// worker's first correlated reply then does.
 #[tokio::test(start_paused = true)]
 async fn uncorrelated_reply_cannot_revive_dead_worker_correlated_one_does() {
     let h = Harness::with_transit_delay("probe-spoof-reject", 5);
-    // Step 1 injects a synthetic 200 from the worker bind that never matched an
-    // inbound request on that lane → the locally-minted-tag audit fires on the
-    // fixture. The probe (not a real UA) is the SUT; waive that UA-side rule.
-    h.allow_violation(
-        "mid-dialog-tags",
-        "raw-injected spoof response; probe is the SUT, not a real UA",
-    );
 
-    let (worker_ep, worker_sock) = h.bind_sut(WORKER_ID, "127.0.0.1:5075").await;
+    let (worker_ep, worker_sock) = h.bind_peer(WORKER_ID, "127.0.0.1:5075").await;
+    let worker_ep: Arc<dyn UdpEndpoint> = Arc::from(worker_ep);
     let probe_sock: std::net::SocketAddr = "127.0.0.1:5097".parse().unwrap();
 
-    // The responder is GATED off at first so the worker stays Dead while we
-    // probe the spoof path; we flip it on for the recovery half.
     let gate = Arc::new(AtomicBool::new(false));
-    // Use a separate raw handle for the synthetic spoof injection BEFORE handing
-    // the endpoint to the responder task.
-    let spoof_pkt = synthetic_200("z9hG4bK-totally-forged-branch", &worker_sock, &probe_sock);
-    worker_ep.send_to(&spoof_pkt, probe_sock).await.unwrap();
-    let responder = spawn_late_responder(worker_ep, Duration::from_millis(40), gate.clone());
+    let responder =
+        spawn_late_responder(worker_ep.clone(), Duration::from_millis(40), gate.clone());
 
     let registry = unknown_registry(worker_sock);
     let writes = Arc::new(Mutex::new(Vec::new()));
@@ -407,22 +368,28 @@ async fn uncorrelated_reply_cannot_revive_dead_worker_correlated_one_does() {
         control,
         observer,
         3,
-        HealthProbeConfig { interval_ms: 20, timeout_ms: 200, threshold: 2 },
+        HealthProbeConfig {
+            interval_ms: 20,
+            timeout_ms: 200,
+            threshold: 2,
+            ..HealthProbeConfig::default()
+        },
     )
     .await;
 
-    // Force the worker Dead directly: this exercises ONLY the reply-correlation
-    // path (no real OPTIONS answered while the gate is off). The probe keeps
-    // fanning OPTIONS at it (it never drops a worker from the sweep), and the
-    // gated-off responder swallows them, so the worker walks to Dead and the
-    // forged 200 above is the only thing that could (wrongly) revive it.
     registry.set_health(WORKER_ID, WorkerHealth::Dead);
     wait_for_health(&registry, WorkerHealth::Dead).await;
 
-    // The forged 200 correlates to no pending probe (its branch was never
-    // issued), so `handle_reply` drops it: the worker stays Dead. Give the
-    // packet ample time to have transited + been processed.
+    const FORGED: &str = "z9hG4bK-totally-forged-branch";
+    worker_ep.send_to(&synthetic_200(FORGED, &worker_sock, &probe_sock), probe_sock).await.unwrap();
     tokio::time::sleep(Duration::from_millis(150)).await;
+    let spoof = h
+        .snapshot_report()
+        .entries()
+        .into_iter()
+        .find(|e| e.to == probe_sock && String::from_utf8_lossy(&e.raw).contains(FORGED))
+        .expect("the forged 200 is on the wire");
+    assert!(spoof.delivered && spoof.recv_note.is_none(), "the probe read the forged 200");
     assert_eq!(
         registry.resolve(WORKER_ID).map(|w| w.health),
         Some(WorkerHealth::Dead),
@@ -433,8 +400,6 @@ async fn uncorrelated_reply_cannot_revive_dead_worker_correlated_one_does() {
         "no Alive write may result from a forged-branch reply"
     );
 
-    // Now let the worker answer the probe's REAL OPTIONS (its branch is in
-    // `pending`): a correctly-correlated 200 revives it to Alive.
     gate.store(true, Ordering::SeqCst);
     wait_for_health(&registry, WorkerHealth::Alive).await;
 
@@ -443,22 +408,11 @@ async fn uncorrelated_reply_cannot_revive_dead_worker_correlated_one_does() {
     let _ = h.finish().await;
 }
 
-// ───────────────────────────────────────────────────────────────────────────
-// 4. A branch-correlated reply from a worker whose address moved cannot revive
-//    it — the stale-origin guard (probe.rs `handle_reply`, the "dead-pod
-//    resurrection race"), case (b): a packet that DOES correlate (by Via
-//    branch) but whose worker no longer resolves to the probed origin must NOT
-//    move health. Case (a) [uncorrelated → drop] and
-//    case (c) [correlated + current → revive] are test 3 above; this closes (b).
-// ───────────────────────────────────────────────────────────────────────────
 #[tokio::test(start_paused = true)]
 async fn branch_correlated_reply_from_moved_worker_cannot_revive() {
     let h = Harness::with_transit_delay("probe-stale-origin", 5);
-    let (worker_ep, worker_sock) = h.bind_sut(WORKER_ID, "127.0.0.1:5077").await;
+    let (worker_ep, worker_sock) = h.bind_peer(WORKER_ID, "127.0.0.1:5077").await;
 
-    // Phase 1: immediate replies → establish a real Alive at the ORIGINAL
-    // address. Phase 2: capture a branch-correct 200 in flight, which we release
-    // only after moving the worker's registry address out from under it.
     let (responder, ctl) = spawn_capture_responder(worker_ep);
 
     let registry = unknown_registry(worker_sock);
@@ -466,8 +420,6 @@ async fn branch_correlated_reply_from_moved_worker_cannot_revive() {
     let control = Arc::new(RecordingControl { inner: registry.control(), writes: writes.clone() });
     let observer = Arc::new(WorkerLoadObserver::new(LoadObserverConfig::default()));
 
-    // Long reply window (600 ms) so the captured probe stays in `pending` well
-    // past the address move; short interval so it correlates quickly first.
     let probe_task = spawn_probe(
         &h,
         "127.0.0.1:5096",
@@ -475,35 +427,27 @@ async fn branch_correlated_reply_from_moved_worker_cannot_revive() {
         control,
         observer,
         4,
-        HealthProbeConfig { interval_ms: 30, timeout_ms: 600, threshold: 2 },
+        HealthProbeConfig {
+            interval_ms: 30,
+            timeout_ms: 600,
+            threshold: 2,
+            ..HealthProbeConfig::default()
+        },
     )
     .await;
 
-    // The worker answers at its original address → Alive (case (c), the
-    // baseline this test then subverts).
     wait_for_health(&registry, WorkerHealth::Alive).await;
 
-    // Capture the NEXT probe's branch-correct 200 (still addressed to the
-    // original 127.0.0.1 origin) instead of answering it.
     ctl.hold.store(true, Ordering::SeqCst);
     ctl.captured.notified().await;
 
-    // The pod is recreated at a new host: the worker's registry address moves.
-    // The captured probe is still in `pending` with the OLD address recorded.
     registry.set_address(WORKER_ID, ProxyAddr::new("127.0.0.2", worker_sock.port()));
 
-    // Drive the worker off Alive so "must not re-mark Alive" is observable. This
-    // write goes straight through the registry (not the recorded probe control),
-    // so `writes` stays probe-only.
     registry.set_health(WORKER_ID, WorkerHealth::Dead);
     let mark = writes.lock().unwrap().len();
 
-    // Release the captured 200: it still correlates by transaction Via branch,
-    // but its origin (127.0.0.1) no longer matches the worker's current address
-    // (127.0.0.2), so the stale-origin guard drops it before any health write.
     ctl.release.notify_one();
 
-    // Give the released reply ample time to transit + be processed.
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert_eq!(
         registry.resolve(WORKER_ID).map(|w| w.health),

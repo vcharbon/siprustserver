@@ -40,6 +40,18 @@ pub(crate) fn offered_reliably(call: &Call, leg_id: &str, tag: &str, invite_cseq
     with_sdp && !invite_carried_offer(call, leg_id, invite_cseq)
 }
 
+/// The offer `resp`, a 2xx to an INVITE this stack sent on `leg_id`, made
+/// (RFC 3264 §4): its description, where that INVITE carried none and no
+/// reliable provisional of the 2xx's dialog carried one first (RFC 3262 §5).
+pub(crate) fn offer_of_2xx(call: &Call, leg_id: &str, resp: &SipResponse) -> Option<Vec<u8>> {
+    let description = resp.sdp()?;
+    let tag = resp.to().tag().unwrap_or_default();
+    let invite_cseq = i64::from(resp.cseq().seq());
+    let made = !invite_carried_offer(call, leg_id, invite_cseq)
+        && !offered_reliably(call, leg_id, tag, invite_cseq);
+    made.then(|| description.to_vec())
+}
+
 /// Whether `leg_id`'s confirmed dialog left a provisional's offer to the ACK
 /// its 2xx awaits ([`OwedAnswer::DeferredToAck`]).
 pub(crate) fn offer_deferred_to_ack(call: &Call, leg_id: &str) -> bool {
@@ -80,13 +92,15 @@ pub(crate) fn ack_answer_on_leg(
 
 /// Whether `leg`'s confirmed dialog holds a 2xx whose ACK this stack composes
 /// alone: the §13.2.2.4 obligation is armed and undischarged, and the ACK
-/// owes no answer body (RFC 3264 §4) — the INVITE this stack sent carried the
-/// offer, or a reliable provisional carried it and the PRACK this stack owes
-/// carries the answer (RFC 3262 §5).
+/// owes no answer body (RFC 3264 §4): the dialog holds no offer of its 2xx
+/// awaiting the answer in that ACK ([`OwedAnswer::InAck`]). That covers an
+/// INVITE that carried the offer, a reliable provisional that carried it with
+/// a PRACK answering it, sent or still owed (RFC 3262 §5), and a 2xx to an
+/// offerless INVITE carrying no description at all.
 pub(crate) fn bare_ack_owed(leg: &Leg) -> bool {
     leg.dialogs.confirmed().is_some_and(|d| {
         call::helpers::sent_exchange(d).is_some_and(|x| x.awaited_ack_cseq.is_some())
-            && (offer_waits_for_ack(leg) || acked_invite_carries_offer(leg, d))
+            && !matches!(d.owed_answer, Some(OwedAnswer::InAck { .. }))
     })
 }
 
@@ -111,6 +125,32 @@ pub(crate) fn owe_answer_in_ack(call: &mut Call, leg_id: &str, resp: &SipRespons
     });
 }
 
+/// Note on `leg_id`'s confirmed dialog that the ACK of `resp`, the first 2xx
+/// to the INVITE this stack last sent there on its own account, owes the
+/// answer to the offer `resp` made ([`offer_of_2xx`]): the obligation is armed
+/// under that INVITE's CSeq, the number the ACK this stack composes carries
+/// (RFC 3261 §13.2.2.4), until that ACK leaves with the answer another leg's
+/// response brings (`RuleAction::AckLegAnswering`), or answering the offer on
+/// this stack's own account with every stream rejected (RFC 3264 §6).
+/// Requires `resp` to be a 2xx to that dialog's last sent INVITE, on that
+/// dialog: every rule emitting `AckLegAnswering` on the 2xx's own leg selects
+/// on both. Nothing where `resp` made no offer, or the dialog's obligation is
+/// already armed or discharged.
+pub(crate) fn owe_answer_in_own_ack(call: &mut Call, leg_id: &str, resp: &SipResponse) {
+    let Some(d) = call::helpers::find_leg(call, leg_id).and_then(|l| l.dialogs.confirmed()) else {
+        return;
+    };
+    if call::helpers::invite_taken(d) {
+        return;
+    }
+    let cseq = i64::from(resp.cseq().seq());
+    if offer_of_2xx(call, leg_id, resp).is_none() {
+        return;
+    }
+    call::helpers::set_awaited_ack_cseq(call, leg_id, Some(cseq));
+    owe_answer_in_ack(call, leg_id, resp, cseq);
+}
+
 /// The offer `leg`'s confirmed dialog left to the ACK its 2xx still awaits
 /// ([`OwedAnswer::InAck`]): the ACK owes its answer (RFC 3264 §4).
 pub(crate) fn offer_owed_in_ack(leg: &Leg) -> Option<&[u8]> {
@@ -125,28 +165,4 @@ pub(crate) fn offer_owed_in_ack(leg: &Leg) -> Option<&[u8]> {
 /// [`bare_ack_owed`] for `leg_id` of `call`.
 pub(crate) fn owes_bare_ack(call: &Call, leg_id: &str) -> bool {
     call::helpers::find_leg(call, leg_id).is_some_and(bare_ack_owed)
-}
-
-/// Whether the answer `leg_id`'s ACK owes ([`OwedAnswer::InAck`], RFC 3264
-/// §4) can no longer come: the ACK that would carry it acknowledges a 2xx
-/// another leg was given, and no leg awaits that ACK any more (RFC 3261
-/// §13.3.1.4) — it was given nowhere, its ACK went elsewhere, or its record
-/// ended with its leg.
-pub(crate) fn answer_never_comes(call: &Call, leg_id: &str) -> bool {
-    let Some(leg) = call::helpers::find_leg(call, leg_id) else { return false };
-    let Some(cseq) = leg
-        .dialogs
-        .confirmed()
-        .and_then(call::helpers::sent_exchange)
-        .and_then(|x| x.awaited_ack_cseq)
-    else {
-        return false;
-    };
-    let awaited = std::iter::once(&call.a_leg)
-        .chain(call.b_legs.iter())
-        .filter(|l| l.leg_id != leg_id)
-        .flat_map(|l| l.dialogs.iter())
-        .filter_map(call::helpers::answered_2xx)
-        .any(|u| u.cseq == cseq);
-    offer_owed_in_ack(leg).is_some() && !awaited
 }

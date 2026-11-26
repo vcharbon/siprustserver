@@ -13,6 +13,8 @@ use call::helpers::TERMINATING_TIMEOUT_MS;
 use scenario_harness::callflow::{ANSWER_SDP, OFFER_SDP};
 use scenario_harness::dialogs::DIALOG_ENDED;
 use scenario_harness::WaiverScope;
+use sip_message::generators::InDialogMethod;
+use sip_message::header::HeaderName;
 use sip_message::SipMessage;
 
 use crate::common::unrun::{DialogIds, RouteFirstThenHang};
@@ -232,6 +234,84 @@ async fn a_bye_to_a_capped_call_is_answered_where_it_is_refused() {
         1,
         "the capped call writes one CDR naming the cap: {cdrs:?}"
     );
+    s.b2bua.assert_fully_reaped();
+    let _ = s.finish().await;
+}
+
+/// The same capped call; bob's BYE requires an option tag this stack does not
+/// understand. A 420 is no overload refusal: the BYE draws it (RFC 3261
+/// §8.2.2.3), the dialog stays up (§15.1.1), and bob's plain BYE after it is
+/// answered 200 where it is refused. The cap's teardown then ends the call.
+#[tokio::test(start_paused = true)]
+async fn a_bye_to_a_capped_call_requiring_an_unknown_tag_is_refused_420() {
+    let s = B2buaScene::with_b2bua("b2bua-lifetime-cap-bye-420", |bob_port| {
+        B2buaSut::builder(Arc::new(RouteFirstThenHang::to("127.0.0.1", bob_port))).tune(|c| {
+            c.event_dispatch_concurrency = 1;
+            c.per_call_queue_depth = 1;
+            c.max_messages_per_call_lifetime = 20;
+            c.reaper_sweep_interval_sec = 3600;
+        })
+    })
+    .await;
+    s.h.waive(
+        WaiverScope::rule(
+            DIALOG_ENDED,
+            "a capped call answers the BYE where it is refused, so the call never learns it; the \
+             queued INFO and the cap's teardown reach bob's ended dialog, and his 481 ends them \
+             (an overload extreme case, accepted)",
+        )
+        .on_party("bob"),
+    );
+    let carol = s.h.agent("carol", "127.0.0.1:5062").await;
+    let mut call = s.alice.invite(&s.bob).with_sdp(OFFER_SDP).through(s.b2bua.addr).send().await;
+    let mut uas = s.bob.receive("INVITE").await;
+    uas.respond(200, "OK").with_sdp(ANSWER_SDP).await;
+    let answer = call.expect(200).await;
+    let dialog = call.ack().await;
+    s.bob.receive("ACK").await;
+    let ids = DialogIds::of(&answer);
+    let mut b_dialog = uas.dialog();
+
+    let mut parked = carol.invite(&s.bob).with_sdp(OFFER_SDP).through(s.b2bua.addr).send().await;
+    s.h.advance(Duration::from_millis(300)).await;
+    let base = dialog.local_cseq();
+    for cseq in base + 1..=base + 30 {
+        let info = ids.info(&s.alice, cseq, &format!("flood-{cseq}"));
+        s.alice.try_send_datagram(&info, s.b2bua.addr).await.expect("the INFO leaves");
+    }
+    s.h.advance(Duration::from_millis(300)).await;
+    assert_eq!(s.b2bua.metrics().message_cap_lifetime_crossed_total(), 1, "the cap is crossed");
+
+    let mut bye = b_dialog
+        .send_request(InDialogMethod::Bye)
+        .with_header("Require", "x-nonexistent")
+        .send()
+        .await;
+    let refusal = bye.try_expect(420).await.expect("the BYE requiring the tag is refused 420");
+    let unsupported: Vec<&str> = refusal.raw(HeaderName::Unsupported).collect();
+    assert_eq!(unsupported, ["x-nonexistent"], "the 420 names the tag not understood");
+    let mut bye = b_dialog.bye().await;
+    bye.try_expect(200).await.expect("bob's plain BYE is answered at once");
+    s.h.advance(Duration::from_millis(300)).await;
+    while s.alice.take_queued().await.is_some() {}
+    let metrics = s.b2bua.metrics();
+    assert_eq!(
+        metrics.capped_request_answered_total(),
+        metrics.capped_refusals_total(),
+        "every request refused past the cap is answered"
+    );
+
+    parked.expect(503).await;
+    s.bob.receive("INFO").await.respond(481, "Call/Transaction Does Not Exist").await;
+    s.bob.receive("BYE").await.respond(481, "Call/Transaction Does Not Exist").await;
+    s.alice.receive("BYE").await.respond(200, "OK").await;
+    settle_until(|| s.b2bua.is_reaped()).await;
+    let cdrs = s.b2bua.cdr_records();
+    let capped = cdrs
+        .iter()
+        .filter(|c| c.events.iter().any(|e| e.reason.as_deref() == Some("message-cap-lifetime")))
+        .count();
+    assert_eq!(capped, 1, "the capped call writes one CDR naming the cap: {cdrs:?}");
     s.b2bua.assert_fully_reaped();
     let _ = s.finish().await;
 }

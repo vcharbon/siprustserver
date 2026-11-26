@@ -52,7 +52,8 @@ pub fn stamp_advertisement(
 }
 
 /// Make a relayed 2xx to OPTIONS state `capabilities`, this UA's own set
-/// (RFC 3261 §11.2): the responder's `Allow` / `Supported` / `Accept` are
+/// (RFC 3261 §11.2), under `RelayedOptionsAdvertisement::NodeSet`: the
+/// responder's `Allow` / `Supported` / `Accept` are
 /// replaced as [`stamp_advertisement`] does, and its `Accept-Encoding` /
 /// `Accept-Language`, which the set does not state, dropped — a line the
 /// firing rule stamped stays.

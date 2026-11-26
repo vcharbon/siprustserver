@@ -20,144 +20,19 @@ use call::TxnKind;
 pub use super::config::TransactionConfig;
 use super::event_age::EventAges;
 pub use super::event_receiver::TransactionEvents;
+use super::held_cancel::CancelledInvite;
 use super::key::{ServerTxnId, ServerTxnKey};
+use super::orphan::OrphanOrigin;
 use super::owner::Owner;
 use super::run::run;
 
+mod command;
 mod relinquish;
+
+pub(super) use command::Command;
 
 /// The command funnel's bound.
 const COMMAND_CAPACITY: usize = 1024;
-
-pub(super) enum Command {
-    SendRequest {
-        msg: Box<SipRequest>,
-        dest: SocketAddr,
-        txn_type: TxnKind,
-        reply: oneshot::Sender<ClientTransactionHandle>,
-    },
-    SendResponse {
-        msg: Box<SipResponse>,
-        dest: SocketAddr,
-        reply: oneshot::Sender<Bytes>,
-    },
-    SendRaw {
-        call_id: String,
-        buf: Vec<u8>,
-        dest: SocketAddr,
-        reply: oneshot::Sender<()>,
-    },
-    /// Rebuild the in-flight INVITE transactions a materialised call names
-    /// (ADR-0014); replies with how many went in.
-    Seed {
-        call_ref: String,
-        seeds: Vec<TxnSeed>,
-        reply: oneshot::Sender<usize>,
-    },
-    /// Process a datagram the consumer already holds against the map as it now
-    /// stands, after seeding.
-    Reoffer {
-        message: Box<SipMessage>,
-        src: SocketAddr,
-        reply: oneshot::Sender<Reoffer>,
-    },
-    CancelTxnsForCall {
-        call_ref: String,
-        reply: oneshot::Sender<()>,
-    },
-    /// Delete every transaction of `call_ref` with nothing sent; replies with
-    /// how many.
-    RelinquishCall {
-        call_ref: String,
-        reply: oneshot::Sender<usize>,
-    },
-    /// Delete the Accepted client transactions of `call_ref`; replies how many.
-    RelinquishAccepted {
-        call_ref: String,
-        reply: oneshot::Sender<usize>,
-    },
-    /// Delete the server transaction `key` with nothing sent; replies whether
-    /// it was there.
-    RelinquishServer {
-        key: ServerTxnKey,
-        reply: oneshot::Sender<bool>,
-    },
-    /// Delete the server transaction `key` with nothing sent while it has
-    /// sent no final and holds no CANCEL's answers; replies whether it went.
-    RelinquishUnansweredServer {
-        key: ServerTxnKey,
-        reply: oneshot::Sender<bool>,
-    },
-    /// Count the transactions (any role/state) still attributed to `call_ref`.
-    /// The B2BUA's acting-backup **self-release** (ADR-0014) polls this after
-    /// serving a takeover event: when it reaches **0** the backup's served
-    /// transaction(s) have met their obligation to the call (final response +
-    /// ACK for an INVITE, Timer J/H for a non-INVITE, or on failure Timer F,
-    /// or an INVITE's give-up plus its 64·T1 hold),
-    /// so the acting-backup may shed its live takeover copy. Attribution — not
-    /// `is_active()` — is deliberate: an INVITE server txn lingers in
-    /// `Completed` or `Accepted` until its ACK, and shedding before the ACK
-    /// would strand the ACK relay. A txn that lives on past its obligation (an
-    /// INVITE server txn whose ACK it saw, in Confirmed for Timer I or
-    /// Accepted for Timer L; an INVITE client txn Accepted for Timer M once
-    /// its 2xx is handed up) is no longer counted.
-    ActiveTxnCount {
-        call_ref: String,
-        reply: oneshot::Sender<usize>,
-    },
-    /// Delete the client transaction on `branch` with nothing sent; replies
-    /// whether it was there.
-    RelinquishClient {
-        branch: String,
-        reply: oneshot::Sender<bool>,
-    },
-    /// Whether a client transaction on `branch` is resident.
-    HoldsClient {
-        branch: String,
-        reply: oneshot::Sender<bool>,
-    },
-    /// Forget every non-INVITE server transaction of `call_ref` that has sent
-    /// no final; replies with how many.
-    ForgetUnansweredOfCall {
-        call_ref: String,
-        reply: oneshot::Sender<usize>,
-    },
-    /// Answer every in-dialog INVITE server transaction of `call_ref` that
-    /// has sent no final with `status` `reason`; replies with how many.
-    AnswerUnansweredInvitesOfCall {
-        call_ref: String,
-        status: u16,
-        reason: String,
-        reply: oneshot::Sender<usize>,
-    },
-    /// Send the held answers to a CANCEL of the INVITE named by its Call-ID,
-    /// From-tag and CSeq number; replies whether they left.
-    ReleaseCancel {
-        call_id: String,
-        from_tag: String,
-        cseq: u32,
-        reply: oneshot::Sender<bool>,
-    },
-    /// Send the held ACK of the client INVITE transaction at `branch`;
-    /// replies whether it left.
-    ReleaseAck {
-        branch: String,
-        reply: oneshot::Sender<bool>,
-    },
-    /// Send the 100 Trying of the server INVITE transaction `key` names if it
-    /// has sent nothing yet; replies whether the 100 left.
-    ReleaseTrying {
-        key: ServerTxnKey,
-        reply: oneshot::Sender<bool>,
-    },
-    /// Register `call_ref` for a one-shot [`TransactionEvent::CallQuiesced`] when
-    /// its last transaction clears (ADR-0014 self-release). If it already has no
-    /// transactions, `CallQuiesced` is emitted at once.
-    WatchSelfRelease {
-        call_ref: String,
-        reply: oneshot::Sender<()>,
-    },
-}
 
 /// Forget the non-INVITE server transaction `key` names if it has sent nothing
 /// yet (`Trying`) and holds the request's dialog identity; no reply. It rides
@@ -207,6 +82,11 @@ impl TransactionLayer {
             .keepalive_lane
             .map(|bound| mpsc::channel::<TransactionEvent>(bound.max(1)))
             .unzip();
+        #[expect(clippy::disallowed_methods, reason = "the lane's bound is at least 1")]
+        let (unattributed_tx, unattributed_rx) = config
+            .unattributed_lane
+            .map(|bound| mpsc::channel::<TransactionEvent>(bound.max(1)))
+            .unzip();
         #[expect(clippy::disallowed_methods, reason = "COMMAND_CAPACITY is not zero")]
         let (cmd_tx, cmd_rx) = mpsc::channel::<Command>(COMMAND_CAPACITY);
         let (forget_tx, forget_rx) = mpsc::unbounded_channel::<Forget>();
@@ -219,9 +99,11 @@ impl TransactionLayer {
             (ages.clone(), Arc::downgrade(&endpoint)),
             config.invite_refusals.clone(),
         );
-        let events = TransactionEvents::new(events_rx, keepalive_rx, ages.clone());
+        let events =
+            TransactionEvents::new(events_rx, (keepalive_rx, unattributed_rx), ages.clone());
 
-        let owner = Owner::new(parser, (events_tx, ages), keepalive_tx, metrics_inner, config);
+        let lanes = (keepalive_tx, unattributed_tx);
+        let owner = Owner::new(parser, (events_tx, ages), lanes, metrics_inner, config);
         let owner_pulse = Arc::new(LoopPulse::new());
         let owner_abort =
             tokio::spawn(run(owner, endpoint, cmd_rx, forget_rx, owner_pulse.clone()))
@@ -302,6 +184,26 @@ impl TransactionLayer {
         self.roundtrip(|reply| Command::SendResponse { msg: Box::new(msg), dest, reply }).await
     }
 
+    /// Send `msg`, the final to a request the consumer found no call for, as
+    /// a stateless UAS sends it (RFC 3261 §8.2.7), and return the datagram
+    /// that left. The server transaction its request opened leaves with no
+    /// trace: no copy record (ADR-0063 §1), no remembered To-tag, nothing on
+    /// the unattributed books, so a copy of the request is a first arrival
+    /// handed up again and the consumer, answering it the same, sends the same
+    /// final. The response leaves once, raw, to that transaction's destination
+    /// (§18.2.2), else to `dest`. A provisional, and a transaction that already
+    /// sent a response or holds a CANCEL's answers, go through the transaction
+    /// as [`send_response`](Self::send_response) sends them: an INVITE whose
+    /// 100 left owes its final Timer G (§17.2.1).
+    pub async fn send_stateless_response(
+        &self,
+        msg: SipResponse,
+        dest: SocketAddr,
+    ) -> Result<Bytes, TransactionLayerClosed> {
+        self.roundtrip(|reply| Command::SendStatelessResponse { msg: Box::new(msg), dest, reply })
+            .await
+    }
+
     /// Send a raw buffer directly, bypassing transaction management, counted
     /// under `call_id`, the message's Call-ID, against its budget
     /// ([`TransactionConfig::call_id_budget`]): nothing leaves under a muted
@@ -352,19 +254,35 @@ impl TransactionLayer {
     /// each is orphaned and closes its own obligations, the ACK of each later
     /// 2xx among them, surfacing nothing (ADR-0034). Idempotent.
     pub async fn cancel_txns_for_call(&self, call_ref: &str) -> Result<(), TransactionLayerClosed> {
-        self.roundtrip(|reply| Command::CancelTxnsForCall { call_ref: call_ref.to_string(), reply })
-            .await
+        self.cancel_txns_for_call_with_origins(call_ref, Vec::new()).await
     }
 
-    /// How many transactions for `call_ref` are still resident in the map (any
-    /// role/state). The acting-backup self-release (ADR-0014) reads it as a
-    /// defensive re-check — see `Command::ActiveTxnCount`.
+    /// [`Self::cancel_txns_for_call`], each INVITE client transaction
+    /// `origins` names answering an offer its 2xx makes under the origin given
+    /// there ([`OrphanOrigin`]).
+    pub async fn cancel_txns_for_call_with_origins(
+        &self,
+        call_ref: &str,
+        origins: Vec<OrphanOrigin>,
+    ) -> Result<(), TransactionLayerClosed> {
+        let call_ref = call_ref.to_string();
+        self.roundtrip(|reply| Command::CancelTxnsForCall { call_ref, origins, reply }).await
+    }
+
+    /// How many transactions still serve `call_ref`: those on its books (any
+    /// role/state), plus the in-dialog server transactions of a Call-ID in
+    /// `call_ids` that opened attributed to no call and have sent no final,
+    /// until [`attach_server_to_call`](Self::attach_server_to_call) takes
+    /// them onto the books. Only the Call-IDs named are read: the
+    /// acting-backup self-release (ADR-0014) names those of the copy's legs
+    /// and reads it as a defensive re-check — see `Command::ActiveTxnCount`.
     pub async fn active_txn_count_for_call(
         &self,
         call_ref: &str,
+        call_ids: &[String],
     ) -> Result<usize, TransactionLayerClosed> {
-        self.roundtrip(|reply| Command::ActiveTxnCount { call_ref: call_ref.to_string(), reply })
-            .await
+        let (call_ref, call_ids) = (call_ref.to_string(), call_ids.to_vec());
+        self.roundtrip(|reply| Command::ActiveTxnCount { call_ref, call_ids, reply }).await
     }
 
     /// Whether this layer holds a client transaction on `branch`: the final to
@@ -390,6 +308,26 @@ impl TransactionLayer {
         };
         // Closed only once the owner is gone, which forgets nothing anyway.
         let _ = self.forget_tx.send(forget);
+    }
+
+    /// The consumer resolved the request whose server transaction is `key`
+    /// ([`ServerTxnKey::of`] the request) to `call_ref`, its Request-URI naming
+    /// no call: the transaction is attributed to `call_ref` while it has sent
+    /// no final and is attributed to no call, and from then on it is on the
+    /// call's books as one the Request-URI attributed (the self-release count,
+    /// the release's forget and answer). One attributed to another call keeps
+    /// it and the refusal is counted (`call_attach_refused`); a key naming no
+    /// transaction changes nothing. Returns once the command is queued, never
+    /// awaiting the owner's turn: every command sent after it is taken after
+    /// it.
+    pub async fn attach_server_to_call(
+        &self,
+        key: ServerTxnKey,
+        call_ref: &str,
+    ) -> Result<(), TransactionLayerClosed> {
+        let call_ref = call_ref.to_string();
+        let attach = Command::AttachServerToCall { key, call_ref };
+        self.cmd_tx.send(attach).await.map_err(|_| TransactionLayerClosed)
     }
 
     /// The consumer released `call_ref` for good: nothing will answer a request
@@ -435,9 +373,10 @@ impl TransactionLayer {
     }
 
     /// Release the 100 Trying of the server INVITE transaction `invite`
-    /// opened (RFC 3261 §17.2.1): it leaves now if the transaction is still
-    /// `Trying` with nothing sent, and never after another response. `true`
-    /// when the 100 left; `false` too when no transaction holds `invite`.
+    /// opened or a seed rebuilt (RFC 3261 §17.2.1): it leaves now if the
+    /// transaction has sent nothing, and never after another response.
+    /// `true` when the 100 left; `false` too when no transaction holds
+    /// `invite`.
     pub async fn release_trying(
         &self,
         invite: &SipRequest,
@@ -446,6 +385,22 @@ impl TransactionLayer {
             return Ok(false);
         };
         self.roundtrip(|reply| Command::ReleaseTrying { key, reply }).await
+    }
+
+    /// Arm the §17.2.1 bound of the server INVITE transaction `invite`
+    /// opened, from the instant the layer takes the command: its 100 leaves
+    /// [`trying_bound_ms`](crate::TransactionConfig::trying_bound_ms) later
+    /// unless a release or a response left first. The bound of an initial
+    /// INVITE under
+    /// [`consumer_arms_initial_trying`](crate::TransactionConfig::consumer_arms_initial_trying)
+    /// runs from here alone. A transaction past `Trying`, or none, arms
+    /// nothing. Returns once the command is queued, never awaiting the
+    /// owner's turn.
+    pub async fn arm_trying(&self, invite: &SipRequest) -> Result<(), TransactionLayerClosed> {
+        let Some(key) = ServerTxnId::of_request(invite).map(ServerTxnId::to_key) else {
+            return Ok(());
+        };
+        self.cmd_tx.send(Command::ArmTrying { key }).await.map_err(|_| TransactionLayerClosed)
     }
 
     /// Release the ACK of the non-2xx final the client INVITE transaction at
@@ -461,24 +416,37 @@ impl TransactionLayer {
     /// INVITE named by its Call-ID, From-tag and CSeq number as the
     /// `Cancelled` event states them
     /// ([`TransactionConfig::cancel_bound_ms`](crate::TransactionConfig)):
-    /// they leave now if still held. `true` when they left; `false` when none
-    /// are held for that INVITE.
+    /// they leave now if still held, an INVITE left open for this consumer
+    /// ending as `invite` says
+    /// ([`TransactionConfig::consumer_ends_cancelled_reinvite`](crate::TransactionConfig)).
+    /// `true` when they left; `false` when none are held for that INVITE.
     pub async fn release_cancel(
         &self,
         call_id: &str,
         from_tag: &str,
         cseq: u32,
+        invite: CancelledInvite,
     ) -> Result<bool, TransactionLayerClosed> {
         let (call_id, from_tag) = (call_id.to_string(), from_tag.to_string());
-        self.roundtrip(|reply| Command::ReleaseCancel { call_id, from_tag, cseq, reply }).await
+        self.roundtrip(|reply| Command::ReleaseCancel { call_id, from_tag, cseq, invite, reply })
+            .await
     }
 
     /// Ask to be notified (via [`TransactionEvent::CallQuiesced`]) when the last
-    /// transaction for `call_ref` clears — the push signal the B2BUA acting-backup
-    /// self-release (ADR-0014) arms when it takes a dialog over. Idempotent.
-    pub async fn watch_self_release(&self, call_ref: &str) -> Result<(), TransactionLayerClosed> {
-        self.roundtrip(|reply| Command::WatchSelfRelease { call_ref: call_ref.to_string(), reply })
-            .await
+    /// transaction serving `call_ref` clears — the push signal the B2BUA
+    /// acting-backup self-release (ADR-0014) arms when it takes a dialog over.
+    /// What serves it is what
+    /// [`active_txn_count_for_call`](Self::active_txn_count_for_call) counts
+    /// with the same `call_ids`: the watch holds while either kind is left,
+    /// and an unattributed transaction's final or leaving re-checks it.
+    /// Idempotent; a second watch replaces the first's `call_ids`.
+    pub async fn watch_self_release(
+        &self,
+        call_ref: &str,
+        call_ids: &[String],
+    ) -> Result<(), TransactionLayerClosed> {
+        let (call_ref, call_ids) = (call_ref.to_string(), call_ids.to_vec());
+        self.roundtrip(|reply| Command::WatchSelfRelease { call_ref, call_ids, reply }).await
     }
 }
 

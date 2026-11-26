@@ -48,6 +48,7 @@ async fn a_reinvite_pending_at_the_bye_still_acks_its_final() {
             feed: CtxFeed::default(),
             cseq: None,
             delayed: vec![],
+            answers: Default::default(),
             claim: None,
         }],
         plan: vec![phase("established", |s| s.leg_at_least("alice", LegPhase::Confirmed))],

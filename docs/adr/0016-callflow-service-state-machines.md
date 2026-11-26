@@ -80,7 +80,9 @@ pre-call announcement via MSCML) lives in its own crate against the public Rule 
 ## Decision X8: Services seed their own machine via an `init` hook
 
 Each service declares `init(descriptor, &Call) -> Option<ServiceSeed>`, run once at call setup,
-after routing has built the `Call`. `None` keeps the service dormant at no cost. A seed sets,
+after routing has built the `Call`. `init` engages on the slices of the route the setup applied
+(`RuleCall::setup_route`), as the core's deferred-routing gate does: never on a slice a route
+the limiter refused left on `ext`. `None` keeps the service dormant at no cost. A seed sets,
 in one atomic batch through the executor and effects pipeline, the initial cursor, the data
 backing and an initial action set. `define_service!` carries the `init` clause. No back-door
 writes call state outside the executor. Detail:

@@ -21,6 +21,7 @@ fn held_bob(bob: &crate::Agent, goals: Vec<Goal>) -> ActorSpec {
 
         cseq: None,
         delayed: vec![],
+        answers: Default::default(),
         claim: None,
     }
 }

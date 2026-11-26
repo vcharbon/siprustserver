@@ -23,6 +23,8 @@ use crate::types::SipHeader;
 pub enum Position {
     /// A header field name: a `token`.
     HeaderName,
+    /// A From or To `tag` parameter's value: a `token`.
+    Tag,
     /// A header field value: no NUL, and no other control byte but HTAB
     /// outside a quoted-pair.
     HeaderValue,
@@ -42,6 +44,7 @@ impl fmt::Display for Position {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
             Position::HeaderName => "header name",
+            Position::Tag => "tag",
             Position::HeaderValue => "header value",
             Position::ReasonPhrase => "reason phrase",
             Position::QuotedText => "quoted text",
@@ -70,11 +73,21 @@ impl std::error::Error for WriteRefusal {}
 /// A header name: `token = 1*(alphanum / "-" / "." / "!" / "%" / "*" / "_" /
 /// "+" / "`" / "'" / "~")`.
 pub fn header_name(name: &str) -> Result<(), WriteRefusal> {
-    if name.is_empty() {
-        return Err(refusal(Position::HeaderName, "empty".to_string()));
+    token(Position::HeaderName, name)
+}
+
+/// A From or To `tag` parameter's value (RFC 3261 §19.3): `tag-param = "tag"
+/// EQUAL token`, so neither empty nor holding a byte outside the token class.
+pub fn tag(value: &str) -> Result<(), WriteRefusal> {
+    token(Position::Tag, value)
+}
+
+fn token(position: Position, text: &str) -> Result<(), WriteRefusal> {
+    if text.is_empty() {
+        return Err(refusal(position, "empty".to_string()));
     }
-    match name.bytes().position(|b| !is_token_char(b)) {
-        Some(at) => Err(refusal(Position::HeaderName, byte_reason(name, at))),
+    match text.bytes().position(|b| !is_token_char(b)) {
+        Some(at) => Err(refusal(position, byte_reason(text, at))),
         None => Ok(()),
     }
 }
@@ -230,6 +243,15 @@ mod tests {
         assert!(header_name("X-Custom_1.a!%*+`'~").is_ok());
         for bad in ["", "X/Bad", "X A", "X:A", "X-A\r\nVia", "Ü"] {
             assert!(header_name(bad).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn a_tag_is_a_token() {
+        assert!(tag("a1-B.2!%*_+`'~").is_ok());
+        for bad in ["", "two words", "a;b", "a=b", "\"q\"", "a\r\nVia"] {
+            let refused = tag(bad).expect_err(bad);
+            assert_eq!(refused.position, Position::Tag, "{bad:?}");
         }
     }
 

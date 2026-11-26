@@ -5,19 +5,33 @@
 
 use b2bua_sdk::sm_rule;
 use call::{CdrEventType, Direction, LegState, TerminationCause, TimeoutKind, TransferPhase};
-use sip_message::Method;
+use sip_message::{Method, SipResponse};
 
 use super::{state, Phase, TRANSFER_MACHINE};
 use crate::rules::refer_transfer::ok;
-use crate::rules::Terminal;
-use b2bua_sdk::model::{Body, Effect, Match, RuleAction, RuleDefinition, TimerDelay};
+use crate::rules::{pending_reinvite, relay, Terminal};
+use b2bua_sdk::model::{
+    Body, Effect, Match, MessageTransform, RuleAction, RuleContext, RuleDefinition, TimerDelay,
+};
 use call::TimerKey;
+
+/// The longest the ACK of C's offering c-realign 2xx waits for A's answer:
+/// four T1 inside C's 64·T1 give-up on that 2xx (RFC 3261 §13.3.1.4), so the
+/// rollback's ACK reaches C before C gives the 2xx up.
+const HELD_ACK_BOUND_MS: u64 = (64 - 4) * sip_retransmit::timers::T1;
 
 /// transfer-c-realign-200 — C answers the c-realign re-INVITE (200).
 /// Distinguished from `transfer-c-200-initial` by `legState: confirmed`
 /// (the initial INVITE answered trying/early). A copy of the 2xx to C's
 /// first INVITE (RFC 3261 §13.3.1.4) answers nothing pending
 /// ([`RuleContext::answers_last_sent_invite`]); it is `re-ack-2xx-ahead`'s.
+/// Where the re-INVITE carried no offer and C offers in its 2xx, C's ACK
+/// waits for A's answer to the a-realign re-INVITE, which carries C's offer
+/// (RFC 3725 §4.1, flow I), and A's watchdog runs at most
+/// [`HELD_ACK_BOUND_MS`]; otherwise C is ACKed bare now. While A's dialog
+/// awaits an ACK, hers or B's of her 2xx, the a-realign re-INVITE waits in
+/// the transfer state and leaves on that ACK ([`a_realign_on_ack`]), under
+/// A's watchdog.
 ///
 /// [`RuleContext::answers_last_sent_invite`]: b2bua_sdk::model::RuleContext::answers_last_sent_invite
 pub(super) fn c_realign_200() -> RuleDefinition {
@@ -27,8 +41,8 @@ pub(super) fn c_realign_200() -> RuleDefinition {
         active: [ Phase::CRealigning ],
         transitions: [ Phase::CRealigning => Phase::ARealigning ],
         effects: [
-            Effect::Originate { method: Method::Ack, label: "ACK → C (c-realign answered)" },
-            Effect::Originate { method: Method::Invite, label: "re-INVITE → A (a-realign, C's active SDP)" },
+            Effect::Originate { method: Method::Ack, label: "ACK → C (c-realign answered; held for A's answer when C offers)" },
+            Effect::Originate { method: Method::Invite, label: "re-INVITE → A (a-realign, C's active SDP; parked while A's dialog awaits an ACK)" },
             Effect::GuardTimer { timer: call::TimerType::ReferReinviteAnswer, scope: call::TimerScopeKind::Leg, label: "cancel C / arm A re-INVITE watchdog" },
         ],
         matcher: Match::response()
@@ -50,29 +64,107 @@ pub(super) fn c_realign_200() -> RuleDefinition {
             // send path. C's *initial* held answer would leave A inactive →
             // one-way audio.
             let c_realign_sdp = resp.body().clone();
+            let watchdog = TimerDelay::secs(ctx.config.refer_reinvite_answer_sec);
+            let watchdog = if offers_to_its_ack(ctx, &c_leg_id) {
+                let bound = i64::try_from(HELD_ACK_BOUND_MS).unwrap_or(i64::MAX);
+                TimerDelay::millis(watchdog.as_millis().min(bound))
+            } else {
+                watchdog
+            };
 
             let mut new_state = st.clone();
             new_state.phase = TransferPhase::ARealigning;
 
-            ok(vec![
-                RuleAction::AckLeg { leg_id: c_leg_id.clone(), body: None },
+            let mut actions = vec![
+                RuleAction::AckLegAnswering { leg_id: c_leg_id.clone(), answer: None },
                 RuleAction::cancel(TimerKey::leg(call::TimerType::ReferReinviteAnswer, &c_leg_id)),
-                RuleAction::arm(
-                    TimerKey::leg(call::TimerType::ReferReinviteAnswer, "a"),
-                    TimerDelay::secs(ctx.config.refer_reinvite_answer_sec),
-                ),
-                RuleAction::SendReinvite {
-                    leg_id: "a".to_string(),
-                    body: Some(
-                        Body::from_leg(c_realign_sdp.to_vec(), c_leg_id.clone())
-                            .described_by(resp.headers()),
-                    ),
-                    add_headers: vec![],
-                },
-                RuleAction::SetTransfer { state: Some(new_state) },
+                RuleAction::arm(TimerKey::leg(call::TimerType::ReferReinviteAnswer, "a"), watchdog),
+            ];
+            if pending_reinvite::ack_awaited_on_her_dialog(ctx) {
+                let parked = pending_reinvite::park(&c_leg_id, &c_realign_sdp, resp.headers());
+                new_state.pending_a_realign = Some(Box::new(parked));
+            } else {
+                let body = Body::from_leg(c_realign_sdp.to_vec(), c_leg_id.clone())
+                    .described_by(resp.headers());
+                actions.push(a_realign(body));
+            }
+            actions.push(RuleAction::SetTransfer { state: Some(new_state) });
+            ok(actions)
+        },
+    }
+}
+
+/// The a-realign re-INVITE toward A, offering `body`.
+fn a_realign(body: Body) -> RuleAction {
+    RuleAction::SendReinvite { leg_id: "a".to_string(), body: Some(body), add_headers: vec![] }
+}
+
+/// transfer-a-realign-on-ack — the ACK the a-realign re-INVITE waits for
+/// ([`c_realign_200`]): A's, or B's ACK of her 2xx. The ACK is relayed to
+/// its peer, as `relay-ack` relays it, then the parked re-INVITE leaves,
+/// carrying C's description (ADR-0064 §3). It matches only an ACK that frees
+/// her dialog ([`pending_reinvite::ack_frees_her_dialog`]); any other ACK is
+/// `relay-ack`'s, and A's watchdog bounds the wait.
+pub(super) fn a_realign_on_ack() -> RuleDefinition {
+    sm_rule! {
+        id: "transfer-a-realign-on-ack",
+        machine: TRANSFER_MACHINE,
+        active: [ Phase::ARealigning ],
+        transitions: [],
+        effects: [
+            Effect::Relay { label: "ACK → its peer (A's to B, or B's to A)" },
+            Effect::Originate { method: Method::Invite, label: "re-INVITE → A (the parked a-realign, C's active SDP)" },
+        ],
+        matcher: Match::request()
+            .method("ACK")
+            .filter(|ctx| {
+                state(ctx).is_some_and(|s| s.pending_a_realign.is_some())
+                    && pending_reinvite::ack_frees_her_dialog(ctx)
+            }),
+        handle: |ctx| {
+            let mut st = state(ctx)?.clone();
+            let parked = st.pending_a_realign.take()?;
+            let lines = pending_reinvite::lines(&parked);
+            let body = Body::from_leg(parked.body, parked.leg_id).described_by(&lines);
+            ok(vec![
+                RuleAction::RelayToPeer { transform: MessageTransform::default() },
+                a_realign(body),
+                RuleAction::SetTransfer { state: Some(st) },
             ])
         },
     }
+}
+
+/// The a-realign re-INVITE has left toward A: none waits in the transfer
+/// state for her ACK. Only then can a response of hers in `ARealigning`
+/// answer it.
+fn a_realign_sent(ctx: &RuleContext) -> bool {
+    state(ctx).is_some_and(|s| s.pending_a_realign.is_none())
+}
+
+/// Whether `ctx`'s 2xx, C's to the c-realign re-INVITE on `c_leg_id`, makes
+/// an offer its ACK owes the answer to: it carries a session description and
+/// the re-INVITE carried none (RFC 3264 §4). It reads the rule's view of the
+/// call, so it also answers `true` where a reliable provisional carried C's
+/// offer first, which the hold's arming (`relay::offer_of_2xx`) excludes:
+/// the watchdog is then bounded with no hold, never longer.
+fn offers_to_its_ack(ctx: &RuleContext, c_leg_id: &str) -> bool {
+    let described = ctx.response().is_some_and(|r| r.sdp().is_some());
+    let offerless = ctx.call.b_legs().iter().find(|l| l.leg_id == c_leg_id).is_some_and(|l| {
+        l.dialogs.confirmed().is_some_and(|d| !relay::acked_invite_carries_offer(l, d))
+    });
+    described && offerless
+}
+
+/// The ACK of C's c-realign 2xx, held for A's answer
+/// ([`transfer-c-realign-200`](c_realign_200)), carrying `answer`, A's 2xx
+/// to the a-realign re-INVITE: nothing where C's ACK holds for no answer (it
+/// left bare).
+fn ack_c_with(ctx: &RuleContext, c_leg_id: &str, answer: &SipResponse) -> Option<RuleAction> {
+    let c_leg = ctx.call.b_legs().iter().find(|l| l.leg_id == c_leg_id)?;
+    relay::offer_owed_in_ack(c_leg)?;
+    let answer = Body::from_leg(answer.body().to_vec(), "a").described_by(answer.headers());
+    Some(RuleAction::AckLegAnswering { leg_id: c_leg_id.to_string(), answer: Some(answer) })
 }
 
 /// transfer-c-realign-fail — C rejects the c-realign re-INVITE → rollback.
@@ -144,27 +236,61 @@ pub(super) fn c_realign_timeout() -> RuleDefinition {
         ],
         matcher: Match::timer()
             .timer_type(call::TimerType::ReferReinviteAnswer),
+        handle: |ctx| ok(c_realign_rollback(ctx, None)?),
+    }
+}
+
+/// transfer-c-realign-txn-timeout — the c-realign re-INVITE's client
+/// transaction gave up (Timer B, or the INVITE bound after a provisional)
+/// → the same rollback as its watchdog. C does not carry the call before the
+/// merge, so the default would end C's dialog alone; the transfer machine
+/// owns that failure.
+pub(super) fn c_realign_txn_timeout() -> RuleDefinition {
+    sm_rule! {
+        id: "transfer-c-realign-txn-timeout",
+        machine: TRANSFER_MACHINE,
+        active: [ Phase::CRealigning ],
+        transitions: [],
+        effects: [
+            Effect::GuardTimer { timer: call::TimerType::ReferReinviteAnswer, scope: call::TimerScopeKind::Leg, label: "cancel the re-INVITE watchdog" },
+            Effect::GuardTimer { timer: call::TimerType::ReferOverallSafety, scope: call::TimerScopeKind::Call, label: "cancel overall-safety" },
+            Effect::LifecycleCommand { label: "terminate (c-realign timeout rollback)" },
+        ],
+        matcher: Match::timeout().filter(|ctx| {
+            ctx.timeout_method() == Some("INVITE")
+                && state(ctx).and_then(|s| s.c_leg_id.as_deref()) == Some(ctx.source_leg_id)
+        }),
         handle: |ctx| {
-            let st = state(ctx)?.clone();
-            let mut actions = vec![RuleAction::cancel(TimerKey::call(
-                call::TimerType::ReferOverallSafety,
-            ))];
-            if let Some(c_leg_id) = st.c_leg_id.clone() {
-                actions.push(RuleAction::AddCdrEvent {
-                    event_type: CdrEventType::Timeout,
-                    leg_id: c_leg_id,
-                    status_code: None,
-                    reason: Some("transfer-rollback-c-realign".to_string()),
-                });
-            }
-            actions.push(RuleAction::BeginTermination {
-                reason: None,
-                cause: TerminationCause::Timeout(TimeoutKind::NoAnswer),
-                by_leg: st.c_leg_id.clone(),
-            });
-            ok(actions)
+            let watchdog = TimerKey::leg(call::TimerType::ReferReinviteAnswer, ctx.source_leg_id);
+            ok(c_realign_rollback(ctx, Some(watchdog))?)
         },
     }
+}
+
+/// The c-realign rollback: cancel `watchdog` when it still runs and the
+/// overall-safety timer, record C's timeout and end the call (A, B and C are
+/// BYE'd).
+fn c_realign_rollback(
+    ctx: &b2bua_sdk::model::RuleContext,
+    watchdog: Option<TimerKey>,
+) -> Option<Vec<RuleAction>> {
+    let st = state(ctx)?.clone();
+    let mut actions: Vec<RuleAction> = watchdog.into_iter().map(RuleAction::cancel).collect();
+    actions.push(RuleAction::cancel(TimerKey::call(call::TimerType::ReferOverallSafety)));
+    if let Some(c_leg_id) = st.c_leg_id.clone() {
+        actions.push(RuleAction::AddCdrEvent {
+            event_type: CdrEventType::Timeout,
+            leg_id: c_leg_id,
+            status_code: None,
+            reason: Some("transfer-rollback-c-realign".to_string()),
+        });
+    }
+    actions.push(RuleAction::BeginTermination {
+        reason: None,
+        cause: TerminationCause::Timeout(TimeoutKind::NoAnswer),
+        by_leg: st.c_leg_id.clone(),
+    });
+    Some(actions)
 }
 
 /// transfer-a-realign-200 — A answers the a-realign re-INVITE (200) →
@@ -172,8 +298,12 @@ pub(super) fn c_realign_timeout() -> RuleDefinition {
 /// `refer_reinvite_answer` + the overall-safety timer, `merge(a, cLegId)`
 /// (A↔C now bridged), release the referrer B when it has not hung up (BYE;
 /// a BYE of B's crossing it is `resolve-cross-bye`'s), CDR answer
-/// "transfer-completed", and clear the slice. A copy of the 2xx to an earlier
-/// INVITE on A's dialog answers nothing pending; it is `re-ack-2xx-ahead`'s.
+/// "transfer-completed", and clear the slice. A copy of an earlier 2xx of A's
+/// answers nothing pending: once the a-realign re-INVITE has left it is
+/// `re-ack-2xx-ahead`'s; while that re-INVITE still waits for an ACK
+/// ([`a_realign_sent`]), the copy is of the 2xx to her dialog's last INVITE,
+/// `re-ack-retransmitted-2xx`'s once its ACK left.
+/// C's ACK held for A's answer leaves after A's, carrying it (RFC 3725 §4.1).
 pub(super) fn a_realign_200() -> RuleDefinition {
     sm_rule! {
         id: "transfer-a-realign-200",
@@ -182,6 +312,7 @@ pub(super) fn a_realign_200() -> RuleDefinition {
         transitions: [ Phase::ARealigning => Terminal ],
         effects: [
             Effect::Originate { method: Method::Ack, label: "ACK → A (a-realign answered)" },
+            Effect::Originate { method: Method::Ack, label: "ACK → C carrying A's answer (when held)" },
             Effect::GuardTimer { timer: call::TimerType::ReferReinviteAnswer, scope: call::TimerScopeKind::Leg, label: "cancel A re-INVITE watchdog" },
             Effect::GuardTimer { timer: call::TimerType::ReferOverallSafety, scope: call::TimerScopeKind::Call, label: "cancel overall" },
             Effect::LifecycleCommand { label: "merge A↔C (transfer complete)" },
@@ -191,12 +322,16 @@ pub(super) fn a_realign_200() -> RuleDefinition {
             .method("INVITE")
             .status_class(2)
             .direction(Direction::FromA)
-            .filter(|ctx| ctx.source_leg_id == "a" && ctx.answers_last_sent_invite()),
+            .filter(|ctx| {
+                ctx.source_leg_id == "a" && a_realign_sent(ctx) && ctx.answers_last_sent_invite()
+            }),
         handle: |ctx| {
             let st = state(ctx)?.clone();
             let c_leg_id = st.c_leg_id.clone()?;
-            ok(vec![
-                RuleAction::AckLeg { leg_id: "a".to_string(), body: None },
+            let resp = ctx.response()?;
+            let acks = std::iter::once(RuleAction::AckLeg { leg_id: "a".to_string(), body: None })
+                .chain(ack_c_with(ctx, &c_leg_id, resp));
+            ok(acks.chain([
                 RuleAction::cancel(TimerKey::leg(call::TimerType::ReferReinviteAnswer, "a")),
                 RuleAction::cancel(TimerKey::call(call::TimerType::ReferOverallSafety)),
                 RuleAction::Merge {
@@ -212,11 +347,13 @@ pub(super) fn a_realign_200() -> RuleDefinition {
                 },
                 RuleAction::SetTransfer { state: None },
             ])
+            .collect())
         },
     }
 }
 
-/// transfer-a-realign-fail — A rejects the a-realign re-INVITE → rollback.
+/// transfer-a-realign-fail — A rejects the a-realign re-INVITE → rollback,
+/// once that re-INVITE has left ([`a_realign_sent`]).
 /// begin-termination BYEs all three confirmed legs (A, B, C); the slice is
 /// dropped as the call terminates.
 pub(super) fn a_realign_fail() -> RuleDefinition {
@@ -235,7 +372,7 @@ pub(super) fn a_realign_fail() -> RuleDefinition {
             .direction(Direction::FromA)
             .filter(|ctx| {
                 let is_fail = ctx.response().map(|r| r.status() >= 300).unwrap_or(false);
-                is_fail && ctx.source_leg_id == "a"
+                is_fail && ctx.source_leg_id == "a" && a_realign_sent(ctx)
             }),
         handle: |ctx| {
             let resp = ctx.response()?;

@@ -297,12 +297,12 @@ beforeAll(async () => {
   if (!served) return
   await Server.fresh(SCRATCH)
   await Server.on(SCRATCH, Server.migrated)
-}, 60_000)
+})
 
 afterAll(async () => {
   if (!served) return
   await Server.drop(SCRATCH)
-}, 60_000)
+})
 
 describe.skipIf(!served)("Forget", () => {
   it("names every capture a table keys a row by, history tables included", async () => {
@@ -513,5 +513,5 @@ describe.skipIf(!served)("Forget", () => {
     expect(Exit.isFailure(exit)).toBe(true)
     expect(String(Exit.isFailure(exit) ? exit.cause : "")).toContain("lock timeout")
     expect(await withStore(counts)).toEqual(before)
-  }, 30_000)
+  })
 })

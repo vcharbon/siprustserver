@@ -234,7 +234,9 @@ pub enum Owed {
     DialogGone,
     /// The refusal of a capped call, through the request's transaction: a BYE
     /// 200 (the dialog still exists while the cap's teardown ends it,
-    /// RFC 3261 §15.1.2), a CANCEL 481 statelessly (§9.2), any other 481.
+    /// RFC 3261 §15.1.2) or 420 where it requires an option tag the stack does
+    /// not understand (§8.2.2.3), a CANCEL 481 statelessly (§9.2), any other
+    /// 481.
     CappedRefusal,
 }
 

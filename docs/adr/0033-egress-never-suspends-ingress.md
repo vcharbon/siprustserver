@@ -42,9 +42,9 @@ Detail: [appendix, context](appendix/0033-egress-never-suspends-ingress.md#conte
    waits on a call's lock.
    Detail: [appendix §4](appendix/0033-egress-never-suspends-ingress.md#4-a-recv-shard-states-its-liveness).
 5. **The invariant, stated:** an ingress loop awaits nothing whose completion a third party
-   controls. A `RoutingStrategy` that consults a network service resolves off-loop. A
-   replicated flush that needs a call's lock is queued as a turn of that call
-   (`router/flush_turn.rs`).
+   controls. `RoutingStrategy` is synchronous: a strategy that needs a network answer resolves
+   it off-loop and reads a cache. A replicated flush that needs a call's lock is queued as a
+   turn of that call (`router/flush_turn.rs`).
    Detail: [appendix §5](appendix/0033-egress-never-suspends-ingress.md#5-the-invariant-stated).
 
 ## Considered and rejected

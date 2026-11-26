@@ -5,7 +5,7 @@
 //! The configured rate here is zero, so the intake draw never activates a call:
 //! the only way this call is traced is the engine answering `trace: true`. What
 //! the test pins is that activating late loses nothing — the INVITE the call
-//! arrived on, the auto-100 the transaction layer already sent, and the decision
+//! arrived on, the 100 Trying the caller already heard, and the decision
 //! round trip that caused the activation are all recorded, at THEIR timestamps.
 //! Nothing was buffered for the calls that were not force-enabled; the backfill
 //! reads facts the call already carries.
@@ -64,7 +64,7 @@ async fn an_engine_force_enable_activates_and_backfills_the_call() {
     );
     assert!(
         log.matching("kind=sip.out").iter().any(|e| e.contains("100 Trying")),
-        "so is the auto-100 the transaction layer had already sent"
+        "so is the 100 Trying the caller had already heard"
     );
     let round_trip = log.matching("kind=http.request");
     assert!(

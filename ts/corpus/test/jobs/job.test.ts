@@ -58,12 +58,9 @@ const row = (id: number, launched: Partial<Jobs.Row>): Jobs.Row => ({
   ...launched
 })
 
-const until = async (ready: () => Promise<boolean>, ms = 5_000): Promise<void> => {
-  const deadline = Date.now() + ms
-  while (!(await ready())) {
-    if (Date.now() > deadline) throw new Error("timed out")
-    await new Promise((resolve) => setTimeout(resolve, 50))
-  }
+/** Resolves once `ready` does, checking every 50 ms; the package's test timeout bounds the wait. */
+const until = async (ready: () => Promise<boolean>): Promise<void> => {
+  while (!(await ready())) await new Promise((resolve) => setTimeout(resolve, 50))
 }
 
 const launch = (id: number, argv: ReadonlyArray<string>) =>
@@ -109,7 +106,7 @@ const groupLeads = (pid: number): boolean => {
 
 describe("a job's process", () => {
   it("is alive by its record while it runs, and died once its group is killed with no exit written", async () => {
-    const launched = await launch(1, ["sleep", "30"])
+    const launched = await launch(1, ["sleep", "3600"])
     const running = row(1, launched)
     expect(fs.existsSync(launched.logPath)).toBe(true)
     expect(await live(Job.liveness(running))).toEqual({ _tag: "running" })
@@ -126,7 +123,7 @@ describe("a job's process", () => {
     const launched = await launchSlowed(
       { setsid: (real) => `sleep 0.3\nexec ${real} /bin/sh -c 'sleep 0.3; exec "$@"' sh "$@"` },
       7,
-      ["sleep", "30"]
+      ["sleep", "3600"]
     )
     try {
       expect(fs.existsSync(launched.logPath)).toBe(true)
@@ -159,7 +156,7 @@ describe("a job's process", () => {
   })
 
   it("answers for a foreground job by its pid alone", async () => {
-    const child = spawn("sleep", ["30"], { stdio: "ignore" })
+    const child = spawn("sleep", ["3600"], { stdio: "ignore" })
     const foreground = row(3, { pid: child.pid! })
     expect(await live(Job.liveness(foreground))).toEqual({ _tag: "running" })
     child.kill("SIGKILL")
@@ -229,9 +226,9 @@ describe("an inbox job", () => {
 
 describe("reaping jobs", () => {
   it("closes a died job and the runs it left open, and leaves a running one alone", async () => {
-    const dead = await launch(4, ["sleep", "30"])
+    const dead = await launch(4, ["sleep", "3600"])
     process.kill(-dead.pid, "SIGKILL")
-    const alive = await launch(5, ["sleep", "30"])
+    const alive = await launch(5, ["sleep", "3600"])
     const died = row(4, dead)
     const running = row(5, alive)
     await until(async () => !(await live(Job.processAlive(died))))

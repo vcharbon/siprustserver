@@ -1,6 +1,7 @@
 # A worker's two readiness axes: serving dialogs, accepting new calls
 
-**Status:** accepted.
+**Status:** accepted. Amended by ADR-0069 (§3 to §6 and §11: a worker answering late reads
+`Slow`, serves its dialogs and keeps the proxy ready).
 
 **Owner:** the worker's state in `crates/b2bua/src/repl/readiness.rs`, the proxy's view in
 `crates/sip-proxy/src/registry/` and `health/probe.rs`; the full list is in the
@@ -69,6 +70,15 @@ Detail: [appendix, context](appendix/0050-a-workers-two-readiness-axes.md#contex
     brake queues it on a lane of the inbound UDP queue taken ahead of what waits, so a probe
     does not wait behind the queued events or datagrams while those lanes have room.
     [Detail](appendix/0050-a-workers-two-readiness-axes.md#12-the-keepalive-lane).
+13. **The unattributed lane.** The transaction layer passes each request that matches no
+    transaction and states no `callRef` in its Request-URI, other than an initial INVITE and a
+    CANCEL, up on a bounded lane apart from the event queue, with the `Cancelled` of an INVITE
+    that rode it. The
+    router takes the lane after every other source; neither new-call gate reads it. A full lane
+    drops the request before any state exists, and the engaged ingress brake drops it before the
+    inbound UDP queue. A flood of requests that name no call thus takes no room or age from the
+    requests of calls, and drops no BYE of one (ADR-0037 item 8).
+    [Detail](appendix/0050-a-workers-two-readiness-axes.md#13-the-unattributed-lane).
 
 ## Consequences
 

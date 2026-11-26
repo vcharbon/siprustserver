@@ -5,14 +5,14 @@ use std::net::Ipv4Addr;
 
 use super::*;
 
-/// A lookup over `pairs`.
 fn lookup(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
     let map: std::collections::HashMap<String, String> =
         pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
     move |key| map.get(key).cloned()
 }
 
-/// A complete, valid single-face boot with a fixed pool, plus `extra`.
+/// A complete, valid single-face boot with a fixed pool; each `extra` pair
+/// replaces the base pair of its key or adds one.
 fn boot(extra: &[(&str, &str)]) -> Result<ProxyConfig, Vec<String>> {
     let mut pairs = vec![
         ("PROXY_LISTEN", "127.0.0.1:5060"),
@@ -39,6 +39,34 @@ fn the_retry_after_jitter_is_bounded() {
     assert_eq!(cfg.retry_after_jitter_sec, 0);
     let errors = boot(&[("PROXY_RETRY_AFTER_JITTER_SEC", "3601")]).expect_err("out of range");
     assert!(errors.iter().any(|e| e.contains("PROXY_RETRY_AFTER_JITTER_SEC")), "{errors:?}");
+}
+
+/// The slow axis and the supervision answer read their defaults; a slow
+/// window shorter than the reply window, or one that would lengthen a verdict
+/// on silence, is refused naming every variable it involves, and so is a
+/// recovery of no probe and a supervision answer neither auto nor off.
+#[test]
+fn the_slow_axis_is_read_and_its_incoherent_sets_refused() {
+    let cfg = boot(&[]).expect("valid");
+    assert_eq!((cfg.probe.slow_window_ms, cfg.probe.recover_probes), (2_000, 3));
+    assert!(cfg.local_options, "auto by default");
+    let cfg = boot(&[("PROXY_LOCAL_OPTIONS", "off")]).expect("valid");
+    assert!(!cfg.local_options);
+    let cfg = boot(&[("HEALTH_SLOW_WINDOW_MS", "2600")]).expect("the bound itself fits");
+    assert_eq!(cfg.probe.slow_window_ms, 2_600);
+    let named = |errors: &[String], keys: &[&str]| {
+        errors.iter().any(|e| keys.iter().all(|k| e.contains(k)))
+    };
+    let errors = boot(&[("HEALTH_SLOW_WINDOW_MS", "1599")]).expect_err("inside the reply window");
+    assert!(named(&errors, &["HEALTH_SLOW_WINDOW_MS", "HEALTH_TIMEOUT_MS"]), "{errors:?}");
+    let errors = boot(&[("HEALTH_SLOW_WINDOW_MS", "2601")]).expect_err("lengthens a verdict");
+    let all =
+        ["HEALTH_SLOW_WINDOW_MS", "HEALTH_THRESHOLD", "HEALTH_INTERVAL_MS", "HEALTH_TIMEOUT_MS"];
+    assert!(named(&errors, &all), "{errors:?}");
+    for (key, bad) in [("HEALTH_RECOVER_PROBES", "0"), ("PROXY_LOCAL_OPTIONS", "on")] {
+        let errors = boot(&[(key, bad)]).expect_err(key);
+        assert!(named(&errors, &[key]), "{key}={bad}: {errors:?}");
+    }
 }
 
 /// The stuck-poll threshold takes 100..=600000 ms, 10 s by default.
@@ -77,8 +105,6 @@ fn the_branch_memo_bounds_are_read() {
     assert!(errors.iter().any(|e| e.contains("PROXY_BRANCH_MEMO_INVITES_PER_CALL")), "{errors:?}");
 }
 
-// ── LB_* operator overrides ─────────────────────────────────────────────
-
 /// Each `LB_*` value replaces exactly its field; a coherent set boots.
 #[test]
 fn lb_overrides_replace_their_fields() {
@@ -107,7 +133,6 @@ fn lb_overrides_replace_their_fields() {
     assert_eq!(cfg.observer.cap_floor_cps, 2.0);
 }
 
-/// An initial cap above the ceiling refuses the boot.
 #[test]
 fn an_initial_cap_above_the_ceiling_refuses_the_boot() {
     refused(&[("LB_CAP_INITIAL_CPS", "300")], "cap_initial_cps");
@@ -119,7 +144,6 @@ fn a_cooldown_shorter_than_a_probe_cycle_refuses_the_boot() {
     refused(&[("LB_AIMD_COOLDOWN_TICKS", "2")], "aimd cooldown");
 }
 
-/// An incoherent set (reversed bands) refuses the boot.
 #[test]
 fn lb_overrides_that_reverse_the_bands_refuse_the_boot() {
     let e = boot(&[("LB_ELU_SOFT", "0.8"), ("LB_ELU_HARD", "0.5"), ("LB_ELU_CRITICAL", "0.3")])
@@ -127,9 +151,6 @@ fn lb_overrides_that_reverse_the_bands_refuse_the_boot() {
     assert!(e.join("\n").contains("elu_soft < elu_hard < elu_critical"), "{e:?}");
 }
 
-// ── refusals: one per class ──────────────────────────────────────────────
-
-/// `Err` from `boot(extra)`, naming `key`.
 fn refused(extra: &[(&str, &str)], key: &str) -> Vec<String> {
     let errors = boot(extra).expect_err("the boot must be refused");
     assert!(errors.iter().any(|e| e.contains(key)), "no problem names {key}: {errors:?}");
@@ -185,6 +206,19 @@ fn a_missing_cookie_signing_key_refuses_the_boot() {
     assert!(errors.iter().any(|e| e.contains("PROXY_HMAC_KEY")), "{errors:?}");
 }
 
+/// The cookie key holds at least SHA-256's 32-byte output: 31 bytes refuse the
+/// boot, 32 boot.
+#[test]
+fn a_cookie_signing_key_shorter_than_the_hash_output_refuses_the_boot() {
+    let errors = boot(&[("PROXY_HMAC_KEY", &"k".repeat(31))]).expect_err("31 bytes");
+    assert!(
+        errors.iter().any(|e| e == "PROXY_HMAC_KEY must be at least 32 bytes (got 31)"),
+        "{errors:?}"
+    );
+    let cfg = boot(&[("PROXY_HMAC_KEY", &"k".repeat(32))]).expect("32 bytes");
+    assert_eq!(cfg.hmac_key, "k".repeat(32));
+}
+
 /// A dual-face proxy binds each face to its own address: a wildcard bind
 /// would deliver external-plane datagrams to the trusted internal socket.
 #[test]
@@ -199,8 +233,6 @@ fn a_dual_face_wildcard_bind_refuses_the_boot() {
     refused(&external, "PROXY_LISTEN_EXT 0.0.0.0:5060");
 }
 
-/// The debug routes listen on loopback: by default, and refused on any other
-/// address, naming the variable.
 #[test]
 fn the_debug_address_defaults_to_loopback_and_refuses_any_other() {
     assert_eq!(boot(&[]).expect("valid").debug, "127.0.0.1:9097".parse().unwrap());
@@ -222,9 +254,17 @@ fn the_metrics_address_reads_an_ipv6_address_without_brackets() {
     assert_eq!(cfg.metrics, "[2001:db8::9]:9090".parse().unwrap());
 }
 
+/// The cluster key holds at least SHA-256's 32-byte output: 31 bytes refuse
+/// the boot, 32 boot.
 #[test]
 fn a_cluster_key_out_of_its_bounds_refuses_the_boot() {
-    refused(&[("PROXY_CLUSTER_KEY", "short")], "PROXY_CLUSTER_KEY");
+    let errors = boot(&[("PROXY_CLUSTER_KEY", &"k".repeat(31))]).expect_err("31 bytes");
+    assert!(
+        errors.iter().any(|e| e == "PROXY_CLUSTER_KEY must hold 32 to 64 bytes, got 31"),
+        "{errors:?}"
+    );
+    let cfg = boot(&[("PROXY_CLUSTER_KEY", &"k".repeat(32))]).expect("32 bytes");
+    assert!(cfg.cluster_key.is_some());
 }
 
 #[test]
@@ -289,4 +329,19 @@ fn an_exemption_no_name_matches_refuses_the_boot() {
         let refused = boot(&[("SIP_EXEMPTIONS", blank)]).expect_err("refused");
         assert!(refused.iter().any(|e| e.contains("SIP_EXEMPTIONS")), "{blank:?}: {refused:?}");
     }
+}
+
+/// A configured address is an RFC 3261 `hostport`: an IPv6 host written
+/// bracketed is held bare, the form a Via or Record-Route brackets once; the
+/// unbracketed form, whose port no reader can tell, refuses the boot.
+#[test]
+fn a_configured_ipv6_address_is_read_bracketed_only() {
+    let advertise = ("PROXY_ADVERTISE", "[2001:db8::1]:5060");
+    let prewarm = ("PROXY_RESOLVER_PREWARM", "[2001:db8::9]:5070, peer.example.net:5060");
+    let cfg = boot(&[advertise, prewarm]).expect("valid");
+    assert_eq!(cfg.advertise, ProxyAddr::new("2001:db8::1", 5060));
+    let peer = ProxyAddr::new("peer.example.net", 5060);
+    assert_eq!(cfg.prewarm, vec![ProxyAddr::new("2001:db8::9", 5070), peer]);
+    refused(&[("PROXY_ADVERTISE", "2001:db8::1:5060")], "PROXY_ADVERTISE");
+    refused(&[("PROXY_RESOLVER_PREWARM", "2001:db8::9:5070")], "PROXY_RESOLVER_PREWARM");
 }

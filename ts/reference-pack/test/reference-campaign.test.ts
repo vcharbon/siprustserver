@@ -70,12 +70,12 @@ beforeAll(async () => {
   if (!served) return
   await fresh(SCRATCH)
   await on(SCRATCH, migrated)
-}, 120_000)
+})
 
 afterAll(async () => {
   fs.rmSync(work, { recursive: true, force: true })
   if (served) await drop(SCRATCH)
-}, 120_000)
+})
 
 /**
  * The reference campaign run once on `lane` as the job it creates, its lanes

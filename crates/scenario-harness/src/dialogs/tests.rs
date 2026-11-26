@@ -5,6 +5,9 @@ use sip_message::{SipMessage, SipParser, SipRequest, SipResponse};
 
 use super::*;
 
+mod crossing;
+mod lossy;
+
 const CALL: &str = "c1@host";
 
 fn parse(text: String) -> SipMessage {
@@ -20,10 +23,37 @@ fn tagged(name: &str, tag: Option<&str>) -> String {
 
 /// A request from `from_tag` to `to_tag`, numbered `cseq`.
 fn request(method: &str, cseq: u32, from_tag: &str, to_tag: Option<&str>) -> SipRequest {
-    let cseq_method = if method == "ACK" { "ACK" } else { method };
+    request_through(method, cseq, from_tag, to_tag, 0)
+}
+
+/// The loss of a copy of the [`request`] numbered `cseq` of `method`, its
+/// top-Via branch included.
+fn lost(cseq: u32, method: &str) -> LostRequest {
+    LostRequest {
+        cseq,
+        method: method.to_string(),
+        branch: Some(format!("z9hG4bK-{cseq}{method}")),
+    }
+}
+
+/// [`request`] as it arrives through `proxies` hops, each stacking its Via on
+/// the sender's.
+fn request_through(
+    method: &str,
+    cseq: u32,
+    from_tag: &str,
+    to_tag: Option<&str>,
+    proxies: usize,
+) -> SipRequest {
+    let hops: String = (1..=proxies)
+        .rev()
+        .map(|n| {
+            format!("Via: SIP/2.0/UDP 192.0.2.{n}:5060;branch=z9hG4bK-p{n}-{cseq}{method}\r\n")
+        })
+        .collect();
     let text = format!(
-        "{method} sip:x@host SIP/2.0\r\nContact: <sip:fixture@192.0.2.99>\r\nVia: SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK-{cseq}{method}\r\n\
-         From: {}\r\nTo: {}\r\nCall-ID: {CALL}\r\nCSeq: {cseq} {cseq_method}\r\n\
+        "{method} sip:x@host SIP/2.0\r\nContact: <sip:fixture@192.0.2.99>\r\n{hops}Via: SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK-{cseq}{method}\r\n\
+         From: {}\r\nTo: {}\r\nCall-ID: {CALL}\r\nCSeq: {cseq} {method}\r\n\
          Max-Forwards: 70\r\nContent-Length: 0\r\n\r\n",
         tagged("a", Some(from_tag)),
         tagged("b", to_tag),
@@ -140,30 +170,111 @@ fn a_bye_ends_the_dialog_after_its_final() {
 fn a_sent_bye_ends_the_dialog_at_its_final() {
     let mut t = ringing_uas(BackwardsCseq::Verdict);
     t.note_sent_response(&response(200, "INVITE", 1, "A1", "B1"), 0);
-    t.note_sent_request(&{
-        // The UAS's own BYE: From its tag B1, To the caller's A1.
-        let text = format!(
-            "BYE sip:a@host SIP/2.0\r\nVia: SIP/2.0/UDP 127.0.0.1:5070;branch=z9hG4bK-b1\r\n\
-             From: <sip:b@host>;tag=B1\r\nTo: <sip:a@host>;tag=A1\r\nCall-ID: {CALL}\r\n\
-             CSeq: 1 BYE\r\nMax-Forwards: 70\r\nContent-Length: 0\r\n\r\n"
-        );
-        match parse(text) {
-            SipMessage::Request(r) => r,
-            SipMessage::Response(_) => unreachable!(),
-        }
-    });
+    t.note_sent_request(&uas_bye());
     assert_eq!(t.judge_received(&request("BYE", 2, "A1", Some("B1")), 0), None, "crossing");
-    let ok = parse(format!(
-        "SIP/2.0 200 OK\r\nVia: SIP/2.0/UDP 127.0.0.1:5070;branch=z9hG4bK-b1\r\n\
-         From: <sip:b@host>;tag=B1\r\nTo: <sip:a@host>;tag=A1\r\nCall-ID: {CALL}\r\n\
-         CSeq: 1 BYE\r\nContent-Length: 0\r\n\r\n"
-    ));
-    let SipMessage::Response(ok) = ok else { unreachable!() };
-    t.note_received_response(&ok, 0);
+    t.note_received_response(&uas_bye_ok(), 0);
     assert_eq!(
         kind(t.judge_received(&request("INFO", 3, "A1", Some("B1")), 0)),
         Some(VerdictKind::Ended { by: None })
     );
+}
+
+/// The UAS's own BYE (CSeq 1): From its tag B1, To the caller's A1.
+fn uas_bye() -> SipRequest {
+    let text = format!(
+        "BYE sip:a@host SIP/2.0\r\nVia: SIP/2.0/UDP 127.0.0.1:5070;branch=z9hG4bK-b1\r\n\
+         From: <sip:b@host>;tag=B1\r\nTo: <sip:a@host>;tag=A1\r\nCall-ID: {CALL}\r\n\
+         CSeq: 1 BYE\r\nMax-Forwards: 70\r\nContent-Length: 0\r\n\r\n"
+    );
+    match parse(text) {
+        SipMessage::Request(r) => r,
+        SipMessage::Response(_) => unreachable!(),
+    }
+}
+
+/// The caller's 200 to [`uas_bye`].
+fn uas_bye_ok() -> SipResponse {
+    let text = format!(
+        "SIP/2.0 200 OK\r\nVia: SIP/2.0/UDP 127.0.0.1:5070;branch=z9hG4bK-b1\r\n\
+         From: <sip:b@host>;tag=B1\r\nTo: <sip:a@host>;tag=A1\r\nCall-ID: {CALL}\r\n\
+         CSeq: 1 BYE\r\nContent-Length: 0\r\n\r\n"
+    );
+    match parse(text) {
+        SipMessage::Response(r) => r,
+        SipMessage::Request(_) => unreachable!(),
+    }
+}
+
+/// The end [`uas_bye`] puts to the dialog, its final taken.
+const UAS_BYE_END: DialogEnd = DialogEnd { ending: Ending::Bye { cseq: 1 }, by_peer: false };
+
+/// A UAS whose wire record shows every request crossing its BYE numbered 1
+/// when `crossed`, and none else.
+fn uas_reading_the_wire(crossed: bool) -> DialogTable {
+    let mut t = ringing_uas(BackwardsCseq::Verdict);
+    t.set_sent_before_end(SentBeforeEnd::new(move |_, end| crossed && end == UAS_BYE_END));
+    t.note_sent_response(&response(200, "INVITE", 1, "A1", "B1"), 0);
+    t
+}
+
+/// [`uas_reading_the_wire`], its dialog ended by the final to its own BYE.
+fn ended_by_its_own_bye(crossed: bool) -> DialogTable {
+    let mut t = uas_reading_the_wire(crossed);
+    t.note_sent_request(&uas_bye());
+    t.note_received_response(&uas_bye_ok(), 0);
+    t
+}
+
+/// RFC 3261 §15.1.2, §17.1.2.2: the caller's BYE whose lost first copy left
+/// no later than she received the UAS's BYE goes again past that BYE's final. The
+/// UAS refuses it 481 and it is no finding; a repeat is not judged again.
+#[test]
+fn a_request_crossing_the_uas_own_bye_is_refused_and_no_finding() {
+    let mut t = ended_by_its_own_bye(true);
+    let v = t.judge_received(&request("BYE", 2, "A1", Some("B1")), 0).expect("refused");
+    assert_eq!(v.kind, VerdictKind::Crossed { by: None, broke: None });
+    assert_eq!(v.rule(), DIALOG_ENDED);
+    assert_eq!(v.kind.refusal(), REFUSED_481);
+    assert!(!v.kind.is_finding());
+    assert_eq!(
+        v.to_string(),
+        "BYE From-tag A1 To-tag B1 names a dialog a BYE ended, crossing that BYE"
+    );
+    assert_eq!(t.judge_received(&request("BYE", 2, "A1", Some("B1")), 0), None, "a repeat");
+}
+
+/// A request on a dialog the UAS's own BYE ended that the wire record does
+/// not show crossing it is a finding.
+#[test]
+fn a_request_after_the_uas_own_bye_that_crossed_nothing_is_a_finding() {
+    let mut t = ended_by_its_own_bye(false);
+    let v = t.judge_received(&request("BYE", 2, "A1", Some("B1")), 0).expect("a verdict");
+    assert_eq!(v.kind, VerdictKind::Ended { by: None });
+    assert!(v.kind.is_finding());
+}
+
+/// A dialog the caller's BYE ended, before the final to the UAS's own BYE
+/// arrived, is not ended by the UAS's BYE: a later request is judged against
+/// the caller's BYE, which the wire record shows it did not cross.
+#[test]
+fn a_dialog_the_peers_bye_ended_first_is_crossed_by_nothing() {
+    let mut t = uas_reading_the_wire(true);
+    t.note_sent_request(&uas_bye());
+    assert_eq!(t.judge_received(&request("BYE", 2, "A1", Some("B1")), 0), None, "crossing");
+    t.note_sent_response(&response(200, "BYE", 2, "A1", "B1"), 0);
+    t.note_received_response(&uas_bye_ok(), 0);
+    assert_eq!(
+        kind(t.judge_received(&request("INFO", 3, "A1", Some("B1")), 0)),
+        Some(VerdictKind::Ended { by: None })
+    );
+}
+
+/// A request crossing the UAS's own BYE is judged as on the confirmed
+/// dialog: one that skips a CSeq is a finding of the skip, still refused.
+#[test]
+fn a_cseq_skip_crossing_the_uas_own_bye_is_a_finding() {
+    let mut t = ended_by_its_own_bye(true);
+    assert_crossing_breaks(&mut t, &request("INFO", 5, "A1", Some("B1")), DIALOG_CSEQ_SKIP);
 }
 
 /// A UAC whose callee rang fork `F1` and answered on `F3`, which never rang,
@@ -279,14 +390,26 @@ fn uac_request(method: &str, cseq: u32) -> SipRequest {
     request(method, cseq, "A1", Some("B1"))
 }
 
-/// RFC 3261 §12.1.2: a non-2xx final ended the early dialog, so a 2xx to a
-/// request the UA sent on it answers a dialog that is gone. The message names
-/// the status, the method, the final and the dialog.
+/// RFC 3261 §12.3, §9.2: the UAC's BYE left before the peer's 487 reached
+/// it, so it may have reached the peer on the live early dialog, and the
+/// peer's 200 to it after that 487 is no verdict.
 #[test]
-fn a_2xx_on_a_dialog_a_final_ended_is_a_verdict() {
+fn a_2xx_to_a_request_sent_before_the_peers_final_arrived_is_no_verdict() {
     let mut t = ringing_uac();
     t.note_sent_request(&uac_request("BYE", 2));
     assert_eq!(t.note_received_response(&response(487, "INVITE", 1, "A1", "B1"), 0), None);
+    assert_eq!(t.note_received_response(&response(200, "BYE", 2, "A1", "B1"), 0), None);
+}
+
+/// RFC 3261 §12.1.2: a request the UAC sends after the peer's 487 reached it
+/// reaches the peer after the peer ended the dialog, so a 2xx to it answers a
+/// dialog that is gone. The message names the status, the method, the final
+/// and the dialog.
+#[test]
+fn a_2xx_to_a_request_sent_after_the_peers_final_arrived_is_a_verdict() {
+    let mut t = ringing_uac();
+    assert_eq!(t.note_received_response(&response(487, "INVITE", 1, "A1", "B1"), 0), None);
+    t.note_sent_request(&uac_request("BYE", 2));
     let v = t.note_received_response(&response(200, "BYE", 2, "A1", "B1"), 0).expect("a verdict");
     assert_eq!(v.rule(), DIALOG_ENDED_ANSWERED);
     assert_eq!(
@@ -294,6 +417,138 @@ fn a_2xx_on_a_dialog_a_final_ended_is_a_verdict() {
         format!("200 to BYE on a dialog a 487 ended (Call-ID {CALL}, tags A1/B1)")
     );
     assert_eq!(v.kind.refusal(), None, "a response is taken");
+}
+
+/// A UAS (local tag `B1`) that sent a 183 to the caller `A1`'s INVITE (CSeq
+/// 1), an INFO (CSeq 1) on that early dialog, then a 487 to the INVITE.
+fn refused_after_its_own_info() -> DialogTable {
+    refused_through(0)
+}
+
+/// [`refused_after_its_own_info`], the INVITE arriving through `proxies` hops.
+fn refused_through(proxies: usize) -> DialogTable {
+    let mut t = DialogTable::new(BackwardsCseq::Verdict);
+    assert_eq!(t.judge_received(&request_through("INVITE", 1, "A1", None, proxies), 0), None);
+    t.note_sent_response(&response(183, "INVITE", 1, "A1", "B1"), 0);
+    t.note_sent_request(&request("INFO", 1, "B1", Some("A1")));
+    t.note_sent_response(&response(487, "INVITE", 1, "A1", "B1"), 0);
+    t
+}
+
+/// The caller's 200 to the UAS's INFO, From the UAS's tag `B1`.
+fn info_ok() -> SipResponse {
+    response(200, "INFO", 1, "B1", "A1")
+}
+
+/// RFC 3261 §12.3, §9.2: the UAS's INFO left before its 487, so it reached
+/// the caller on the live early dialog, and the caller's 200 to it is no
+/// verdict whenever it arrives: before anything shows the caller saw the
+/// final, or after the caller's own ACK of it, a hop's own ACK, the caller's
+/// own ACK through a proxy, or the caller's new INVITE (§8.1.3.5).
+#[test]
+fn a_2xx_to_a_request_sent_before_the_uas_own_final_is_no_verdict() {
+    let shown: [(&str, usize, Option<SipRequest>); 5] = [
+        ("nothing", 0, None),
+        ("the caller's ACK", 0, Some(request("ACK", 1, "A1", Some("B1")))),
+        ("a hop's own ACK", 1, Some(request("ACK", 1, "A1", Some("B1")))),
+        (
+            "the caller's ACK through a proxy",
+            1,
+            Some(request_through("ACK", 1, "A1", Some("B1"), 1)),
+        ),
+        ("the caller's new INVITE", 0, Some(request("INVITE", 2, "A1", None))),
+    ];
+    for (what, proxies, seen) in shown {
+        let mut t = refused_through(proxies);
+        if let Some(seen) = seen {
+            assert_eq!(t.judge_received(&seen, 0), None, "{what}");
+        }
+        assert_eq!(t.note_received_response(&info_ok(), 0), None, "after {what}");
+        assert_eq!(t.state(CALL, "B1", "A1"), Some(DialogState::EndedByFinal(487)));
+    }
+}
+
+/// RFC 3261 §12.1.2: an INFO the UAS sends after its own 487 reaches the
+/// caller after that final, on a dialog gone: a 200 to it is a verdict,
+/// whether or not the caller's ACK of the final arrived first.
+#[test]
+fn a_2xx_to_a_request_sent_after_the_uas_own_final_is_a_verdict() {
+    for acked in [false, true] {
+        let mut t = DialogTable::new(BackwardsCseq::Verdict);
+        assert_eq!(t.judge_received(&request("INVITE", 1, "A1", None), 0), None);
+        t.note_sent_response(&response(183, "INVITE", 1, "A1", "B1"), 0);
+        t.note_sent_response(&response(487, "INVITE", 1, "A1", "B1"), 0);
+        t.note_sent_request(&request("INFO", 1, "B1", Some("A1")));
+        if acked {
+            assert_eq!(t.judge_received(&request("ACK", 1, "A1", Some("B1")), 0), None);
+        }
+        assert_eq!(
+            kind(t.note_received_response(&info_ok(), 0)),
+            Some(VerdictKind::EndedAnswered { status: 200, by: 487 }),
+            "acked: {acked}"
+        );
+    }
+}
+
+/// The caller's INFO (CSeq 2) on the early dialog the UAS's 487 ended.
+fn callers_info() -> SipRequest {
+    request("INFO", 2, "A1", Some("B1"))
+}
+
+/// RFC 3261 §12.3, §17.2.1: the caller may send a request on the early
+/// dialog before the UAS's final reaches it. The UAS refuses it 481 and it is
+/// no finding; its retransmission after the ACK is not judged again.
+#[test]
+fn a_request_crossing_the_uas_own_final_is_refused_and_no_finding() {
+    let mut t = refused_after_its_own_info();
+    let v = t.judge_received(&callers_info(), 0).expect("refused");
+    assert_eq!(v.kind, VerdictKind::Crossed { by: Some(487), broke: None });
+    assert_eq!(v.rule(), DIALOG_ENDED);
+    assert_eq!(v.kind.refusal(), Some((481, "Call/Transaction Does Not Exist")));
+    assert!(!v.kind.is_finding());
+    assert_eq!(t.judge_received(&request("ACK", 1, "A1", Some("B1")), 0), None);
+    assert_eq!(t.judge_received(&callers_info(), 0), None, "a retransmission");
+}
+
+/// Once the caller's ACK of the UAS's final arrived, a request it sends on
+/// the dialog is one it knew ended; a hop's own ACK shows nothing of that.
+#[test]
+fn a_request_after_the_ack_of_the_uas_own_final_is_a_finding() {
+    let mut t = refused_after_its_own_info();
+    assert_eq!(t.judge_received(&request("ACK", 1, "A1", Some("B1")), 0), None);
+    let v = t.judge_received(&callers_info(), 0).expect("a verdict");
+    assert_eq!(v.kind, VerdictKind::Ended { by: Some(487) });
+    assert!(v.kind.is_finding());
+
+    let mut through = refused_through(1);
+    assert_eq!(through.judge_received(&request("ACK", 1, "A1", Some("B1")), 0), None);
+    let v = through.judge_received(&callers_info(), 0).expect("refused");
+    assert_eq!(v.kind, VerdictKind::Crossed { by: Some(487), broke: None });
+}
+
+/// A non-2xx final with no provisional before it is the first message to
+/// carry its To-tag: a request naming that tag follows the final, so it is a
+/// finding.
+#[test]
+fn a_request_on_the_tag_of_a_final_with_no_provisional_is_a_finding() {
+    let mut t = DialogTable::new(BackwardsCseq::Verdict);
+    assert_eq!(t.judge_received(&request("INVITE", 1, "A1", None), 0), None);
+    t.note_sent_response(&response(487, "INVITE", 1, "A1", "B1"), 0);
+    assert_eq!(
+        kind(t.judge_received(&callers_info(), 0)),
+        Some(VerdictKind::Ended { by: Some(487) })
+    );
+}
+
+/// RFC 3261 §17.2.2: the peer's server transaction replays its 2xx for each
+/// retransmission of the request it answers. A 2xx the UA took on a dialog
+/// is judged once: its replay after the ACK of the UA's final is no verdict.
+#[test]
+fn a_replayed_crossing_2xx_after_the_ack_is_no_verdict() {
+    let mut t = refused_after_its_own_info();
+    assert_eq!(t.note_received_response(&info_ok(), 0), None);
+    assert_eq!(t.judge_received(&request("ACK", 1, "A1", Some("B1")), 0), None);
+    assert_eq!(t.note_received_response(&info_ok(), 0), None);
 }
 
 /// The 481 such a request deserves, a PRACK's 2xx (RFC 3262 §3) and a 2xx
@@ -446,4 +701,80 @@ fn a_verdict_is_explained_only_by_a_drop_of_its_own_request() {
     assert!(backwards.explained_by(&[&lost_request("OPTIONS", "a", 4)]));
     let by_final = verdict_of("PRACK", 3, VerdictKind::Ended { by: Some(487) });
     assert!(!by_final.explained_by(&[&prack3]), "a final's end is not the loss's");
+}
+
+/// A request crossing the UA's final is explained as the rule it broke on
+/// the early dialog is.
+#[test]
+fn a_crossing_verdict_is_explained_as_the_rule_it_broke() {
+    let broke = Some(Box::new(VerdictKind::CseqSkip { cseq: 4, last: 2 }));
+    let skip = verdict_of("INFO", 4, VerdictKind::Crossed { by: Some(487), broke });
+    assert!(skip.explained_by(&[&lost_request("INFO", "a", 3)]));
+    assert!(!skip.explained_by(&[&lost_request("INFO", "a", 4)]), "not in the gap");
+}
+
+const REFUSED_481: Option<(u16, &str)> = Some((481, "Call/Transaction Does Not Exist"));
+
+/// The verdict on `request`, received by `t`, as a crossing request that
+/// breaks `rule`: a finding of that rule, still refused 481 on the ended
+/// dialog.
+fn assert_crossing_breaks(t: &mut DialogTable, request: &SipRequest, rule: &str) {
+    let v = t.judge_received(request, 0).expect("a verdict");
+    assert_eq!((v.rule(), v.kind.is_finding()), (rule, true), "got {:?}", v.kind);
+    assert_eq!(v.kind.refusal(), REFUSED_481, "got {:?}", v.kind);
+}
+
+/// RFC 3261 §14.1: a UAC does not start a re-INVITE while its INVITE is in
+/// progress, so one on the early dialog, crossing the UAS's final, is still a
+/// finding.
+#[test]
+fn a_reinvite_crossing_the_uas_own_final_is_a_finding() {
+    let mut t = refused_after_its_own_info();
+    assert_crossing_breaks(&mut t, &request("INVITE", 2, "A1", Some("B1")), DIALOG_EARLY_REQUEST);
+}
+
+/// RFC 3261 §12.2.1.1: the caller numbers its requests on the early dialog
+/// one up from its INVITE's; a crossing request that skips is a finding.
+#[test]
+fn a_cseq_skip_crossing_the_uas_own_final_is_a_finding() {
+    let mut t = refused_after_its_own_info();
+    assert_crossing_breaks(&mut t, &request("INFO", 5, "A1", Some("B1")), DIALOG_CSEQ_SKIP);
+}
+
+/// RFC 3261 §12.2.2: a crossing request numbered below the INVITE's is a
+/// finding.
+#[test]
+fn a_cseq_backwards_crossing_the_uas_own_final_is_a_finding() {
+    let mut t = DialogTable::new(BackwardsCseq::Verdict);
+    assert_eq!(t.judge_received(&request("INVITE", 3, "A1", None), 0), None);
+    t.note_sent_response(&response(183, "INVITE", 3, "A1", "B1"), 0);
+    t.note_sent_response(&response(487, "INVITE", 3, "A1", "B1"), 0);
+    assert_crossing_breaks(&mut t, &request("INFO", 2, "A1", Some("B1")), DIALOG_CSEQ_BACKWARDS);
+}
+
+/// A crossing request advances the remote sequence: the next one in order
+/// is no finding, one past it skips.
+#[test]
+fn a_crossing_request_advances_the_remote_cseq() {
+    let mut t = refused_after_its_own_info();
+    for cseq in [2, 3] {
+        let v = t.judge_received(&request("INFO", cseq, "A1", Some("B1")), 0).expect("refused");
+        assert!(!v.kind.is_finding(), "CSeq {cseq}: got {:?}", v.kind);
+        assert_eq!(v.kind.refusal(), REFUSED_481);
+    }
+    assert_crossing_breaks(&mut t, &request("INFO", 5, "A1", Some("B1")), DIALOG_CSEQ_SKIP);
+}
+
+/// A crossing request whose CSeq goes backwards, under
+/// [`BackwardsCseq::Accept`], is no finding and still refused: the dialog
+/// ended, so nothing on it is taken.
+#[test]
+fn a_backwards_crossing_request_accepted_is_still_refused() {
+    let mut t = DialogTable::new(BackwardsCseq::Accept);
+    assert_eq!(t.judge_received(&request("INVITE", 3, "A1", None), 0), None);
+    t.note_sent_response(&response(183, "INVITE", 3, "A1", "B1"), 0);
+    t.note_sent_response(&response(487, "INVITE", 3, "A1", "B1"), 0);
+    let v = t.judge_received(&request("INFO", 2, "A1", Some("B1")), 0).expect("refused");
+    assert!(!v.kind.is_finding(), "got {:?}", v.kind);
+    assert_eq!(v.kind.refusal(), REFUSED_481);
 }

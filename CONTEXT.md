@@ -42,8 +42,7 @@ Full definitions: [docs/glossary/retransmission.md](docs/glossary/retransmission
 - **Message budget**: a Call-ID's datagram cap, then a mute. ADR-0063.
 - **Snooze**: a timer fire a rule puts off by one short step (`RuleAction::SnoozeTimer`), counted per key. Avoid: defer, hold.
 - **Admission ladder**: the ordered rungs that may refuse a new INVITE, ending at the CPS bucket; a refusal draws one 503. ADR-0037.
-- **Copy** (of a new INVITE): an initial INVITE matching a live call's Call-ID, From-tag and CSeq on another branch; answered 482.
-- **Capacity gate**: the worker's normal and emergency ceilings on calls, transactions and RSS, and the backup ceilings. ADR-0037.
+- **Copy** (of a new INVITE): an initial INVITE matching a live call's Call-ID, From-tag and CSeq on another branch; answered 482.- **Capacity gate**: the worker's normal and emergency ceilings on calls, transactions and RSS, and the backup ceilings. ADR-0037.
 - **CPS bucket**: the worker's token bucket on new-dialog INVITEs, the admission ladder's last rung. Avoid: overdraft, debt.
 - **Load-shedding primitives**: the token bucket, EWMA, `LoadSampler` seam and `Retry-After` policy every shedding process shares.
 - **Proxy refusal**: the front proxy's own 503 at its self-gate or for a failed worker selection, remembered for 64·T1.
@@ -119,7 +118,7 @@ Full definitions: [docs/glossary/http-call-decision.md](docs/glossary/http-call-
 
 Full definitions: [docs/glossary/outbound-backend.md](docs/glossary/outbound-backend.md).
 
-- **Backend client**: one backend's rotated `reqwest` client, resolved target, in-flight cap, breaker and retry rule (`http_net`).
+- **Backend client**: one backend's rotated pooled client, resolved target, in-flight cap, breaker, retry, ejection (`http_net`).
 - **Resolved target**: a backend's address, or its name looked up on the request path; forget, refresh, serve stale.
 - **Backend breaker**: opens when its window saw requests sent and no HTTP response at all; any answer to a health probe closes it.
 - **Decision backend failure**: no usable answer from the decision backend; the stack answers a bare 503. A reject is not one.

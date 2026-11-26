@@ -20,6 +20,7 @@ mod gauges_tests;
 mod index;
 mod local_release;
 mod materialise;
+mod measured;
 mod memory;
 mod parked;
 mod poison;
@@ -49,6 +50,7 @@ pub use call_store::{
 pub use envelope::{CallTopology, Enveloped};
 pub use faults::{FaultInjectingCallStore, StoreFaultPoint, StoreFaults};
 pub(crate) use index::resolve_in;
+pub use measured::Measured;
 pub use memory::InMemoryCallStore;
 pub(crate) use poison::*;
 pub use poison::{LOCKS, LOCK_RECOVERIES};
@@ -663,6 +665,12 @@ impl CallState {
     /// replicas keep the long backstop (refreshed every keepalive), so a held call's
     /// replica never expires mid-call.
     pub fn flush_with_ttl(&self, call: &Call, ttl_ms: i64) {
+        self.flush_carrying(call, ttl_ms, None);
+    }
+
+    /// Like [`flush_with_ttl`](Self::flush_with_ttl), the body written around
+    /// `inner` when the caller holds the codec's body of `call`.
+    fn flush_carrying(&self, call: &Call, ttl_ms: i64, inner: Option<Vec<u8>>) {
         let Some(repl) = self.repl.as_ref() else {
             return;
         };
@@ -671,7 +679,8 @@ impl CallState {
         let stored = self.topology(&call.call_ref);
         let (call_gen, call_bgen) = stored.as_ref().map(|t| (t.gen, t.bak_gen)).unwrap_or((0, 0));
         let (role, primary, mut opts) = self.store_target(&call.call_ref);
-        let Some(body) = flush_body::encode(&self.codec, &self.metrics, call, &stored) else {
+        let Some(body) = flush_body::encode(&self.codec, &self.metrics, call, &stored, inner)
+        else {
             return self.abandon_backup(&opts, &call.call_ref);
         };
         opts.incarnation = Some(call.incarnation().to_string());

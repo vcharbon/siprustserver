@@ -113,7 +113,7 @@ fn dropping_keepalive_records_keeps_every_other_request() {
 
 /// The next INVITE the dialog sends notes the one before it untaken when no
 /// 2xx to it was taken, its round never closed (no final, Timer B): a 2xx to
-/// it arriving later is its first (RFC 3261 §13.3.1.4). One that took its 2xx
+/// it arriving later is owed nothing (RFC 6026 §7.2). One that took its 2xx
 /// leaves the mark as it stood.
 #[test]
 fn the_next_invite_notes_an_unclosed_invite_untaken() {
@@ -130,4 +130,33 @@ fn the_next_invite_notes_an_unclosed_invite_untaken() {
         Some(RequestRecord { invite: Some(taken), ..RequestRecord::relayed("INVITE", 6, 4) });
     open_sent_invite(&mut call, "b-1", &id, RequestRecord::relayed("INVITE", 7, 5));
     assert_eq!(dialog(&call).untaken_invite, Some(5), "a taken INVITE is not noted");
+}
+
+/// A round ends with no 2xx taken when a non-2xx closes it, a later INVITE
+/// replaces it untaken, or its own INVITE reaches Timer B with no response:
+/// a 2xx to it is owed nothing (RFC 6026 §7.2). The last INVITE awaiting its
+/// final, or one that took its 2xx, is no ended round.
+#[test]
+fn a_round_ends_rejected_replaced_or_at_timer_b_never_awaiting_or_taken() {
+    let mut call = settled_call();
+    let id = DialogId { our_tag: B_LOCAL_TAG.into(), peer_tag: B_TAG.into() };
+    let dialog = |call: &Call| call.b_legs[0].dialogs.confirmed().expect("confirmed").clone();
+    let own = |cseq| RequestRecord {
+        origin: RequestOrigin::Own,
+        ..RequestRecord::relayed("INVITE", cseq, 0)
+    };
+    open_sent_invite(&mut call, "b-1", &id, own(5));
+    assert!(!invite_round_ended(&dialog(&call), 5), "awaiting its final");
+
+    end_invite_at_timer_b(&mut call, "b-1", &id);
+    assert!(invite_round_ended(&dialog(&call), 5), "ended at Timer B");
+
+    open_sent_invite(&mut call, "b-1", &id, own(6));
+    assert!(invite_round_ended(&dialog(&call), 5), "replaced untaken");
+    assert!(!invite_round_ended(&dialog(&call), 6), "the next one awaits its final");
+
+    let taken = InviteExchange { ack_branch: Some("z9hG4bK-ack".into()), ..Default::default() };
+    call.b_legs[0].dialogs.confirmed_mut().expect("confirmed").sent_invite =
+        Some(RequestRecord { invite: Some(taken), ..own(6) });
+    assert!(!invite_round_ended(&dialog(&call), 6), "a taken INVITE");
 }

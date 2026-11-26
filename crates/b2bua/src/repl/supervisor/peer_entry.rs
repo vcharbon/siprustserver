@@ -139,6 +139,12 @@ impl PeerEntry {
         }
     }
 
+    /// Whether the peer is parked: no Reclaim puller runs toward it
+    /// ([`PeerLink::Parked`](super::PeerLink::Parked)).
+    pub(super) fn parked(&self) -> bool {
+        self.reclaim.status_rx.is_none()
+    }
+
     /// Park BOTH flows: fold progress, interrupt, drop the status receivers. The
     /// retained watermarks/current flags survive.
     pub(super) fn park(&mut self) {

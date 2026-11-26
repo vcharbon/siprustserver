@@ -88,8 +88,9 @@ impl Owner {
     /// CANCEL, which still matches it (and restarts the hold), and the final
     /// that CANCEL provokes is ACKed (§17.1.1.3) and handed up, Timer D
     /// replacing the hold. In Calling it is a robustness hold:
-    /// its CANCEL stays held unless a late provisional arrives, and a late
-    /// final is ACKed.
+    /// its CANCEL stays held unless a late provisional arrives, a late
+    /// non-2xx final is ACKed, and a late 2xx to a re-INVITE is absorbed
+    /// (RFC 6026 §7.2, `Transaction::owes_2xx_nothing`).
     fn give_up(&mut self, branch: &str) {
         let retransmit = match self.clients.get_mut(branch) {
             Some(t) if t.kind == TxnKind::Invite => {
@@ -159,6 +160,36 @@ impl Owner {
         if let Some(txn) = self.clients.get_mut(branch) {
             txn.timeout_key = Some(key);
             txn.timeout_kind = TxnTimeoutKind::Transaction;
+        }
+    }
+
+    /// Bring the give-up of the INVITE client txn at `branch`, live and in
+    /// Proceeding, forward to 64·T1 past the CANCEL that just left on it (RFC
+    /// 3261 §9.1: with no final by then the client considers the original
+    /// transaction cancelled), where its own bound falls later. No-op for a txn
+    /// that gave up or whose hop was reported dead, and where its bound falls
+    /// sooner.
+    pub(super) fn bound_after_cancel(&mut self, branch: &str) {
+        let at = tokio::time::Instant::now() + ms(TIMER_B);
+        let later = match self.clients.get(branch) {
+            Some(t)
+                if t.kind == TxnKind::Invite
+                    && t.timeout_kind == TxnTimeoutKind::Transaction
+                    && !t.lifetime.gave_up()
+                    && !t.dead_hop_reported =>
+            {
+                t.timeout_key.as_ref().is_some_and(|k| self.timers.deadline(k) > at)
+            }
+            _ => false,
+        };
+        if !later {
+            return;
+        }
+        let old = self.clients.get_mut(branch).and_then(|t| t.timeout_key.take());
+        self.cancel_timer(old);
+        let key = self.arm(Timer::ClientTimeout(branch.to_string()), ms(TIMER_B));
+        if let Some(txn) = self.clients.get_mut(branch) {
+            txn.timeout_key = Some(key);
         }
     }
 }

@@ -22,8 +22,7 @@
  * mutant carries the facts it differs by, so a digest of the probe and that
  * delta names it without hashing a run's facts.
  */
-import type { Probe } from "@sip/pipeline"
-import { LegRole } from "@sip/pipeline"
+import { LegRole, Probe } from "@sip/pipeline"
 import { canonicalText, digestOf } from "./canonical.js"
 import type { RunFacts } from "./run-facts.js"
 
@@ -142,19 +141,24 @@ const probeMutants = (probe: Probe.Probe): ReadonlyArray<readonly [string, Probe
 const mapValueFor = (probe: Probe.Probe): number =>
   probe.scope?.kind === "response" ? probe.scope.status : 1
 
-/** One fact's value with the probe's step toggled, or flipped; `undefined` for a value of no known shape. */
+/**
+ * One fact's value with the probe's key ({@link Probe.factKeyOf}: its step, or
+ * a stray's leg and CSeq) toggled, or flipped; `undefined` for a value of no
+ * known shape.
+ */
 const toggled = (value: unknown, probe: Probe.Probe): unknown => {
   if (typeof value === "boolean") return !value
+  const key = Probe.factKeyOf(probe)
   if (value instanceof Set) {
     const next = new Set(value)
-    if (next.has(probe.step)) next.delete(probe.step)
-    else next.add(probe.step)
+    if (next.has(key)) next.delete(key)
+    else next.add(key)
     return next
   }
   if (value instanceof Map) {
     const next = new Map(value)
-    if (next.has(probe.step)) next.delete(probe.step)
-    else next.set(probe.step, mapValueFor(probe))
+    if (next.has(key)) next.delete(key)
+    else next.set(key, mapValueFor(probe))
     return next
   }
   return undefined

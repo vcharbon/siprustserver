@@ -25,10 +25,11 @@ use sip_retransmit::{Class, Ladder, Schedule};
 use super::backlog::NewInvite;
 use super::call_id_budget::Retired;
 use super::copy_gate::opening_copies;
-use super::key::ServerTxnId;
+use super::key::{ServerTxnId, ServerTxnKey};
 use super::lifetime::Hold;
 use super::owner::Owner;
 use super::txn::{NewTransaction, Timer, TxnId, TxnRef, TxnState};
+use super::unattributed_lane::Lane;
 
 impl Owner {
     /// Send a TU response through its server transaction and return the
@@ -92,6 +93,7 @@ impl Owner {
                     // for retransmit absorption.
                     if is_final {
                         txn.original_request = None;
+                        drop_parked_487(txn);
                         let kind = txn.kind;
                         self.arm_final_hold(id, kind, status);
                     }
@@ -144,8 +146,10 @@ impl Owner {
     /// passive replay-on-request-retransmit path never fires and a single
     /// dropped reject would otherwise wedge the caller for the full 32 s. 2xx
     /// is exempt (the TU owns §13.3.1.4 2xx retransmission); non-INVITE
-    /// (Timer J) only absorbs, never retransmits.
+    /// (Timer J) only absorbs, never retransmits. An unattributed transaction
+    /// stops serving its call here (`layer::unattributed`).
     pub(super) fn arm_final_hold(&mut self, id: ServerTxnId<'_>, kind: TxnKind, status: u16) {
+        self.unattributed_answered(id);
         self.hold(
             TxnRef::Server(id),
             match (kind, status) {
@@ -176,7 +180,11 @@ impl Owner {
     /// carries the datagram as it arrived. A copy whose transaction left
     /// within 64·T1 of its last copy meets that transaction's record
     /// (ADR-0063 §1): past the schedule it is absorbed, else the transaction
-    /// it re-opens carries the count on.
+    /// it re-opens carries the count on. A request no transaction absorbed
+    /// that rides the unattributed lane ([`lane_of`](Self::lane_of)) and
+    /// finds it full is dropped before its copy record is read, before it is
+    /// stamped or judged, and before any transaction opens. An ACK a 2xx's
+    /// Accepted transaction matches rides the event queue.
     pub(super) async fn handle_inbound_request(
         &mut self,
         endpoint: &dyn UdpEndpoint,
@@ -206,7 +214,8 @@ impl Owner {
                         // copy; the transaction stays Accepted for Timer L.
                         (TxnState::Accepted, _) => {
                             self.detach_from_call(TxnRef::Server(id));
-                            self.hand_up(req, src, datagram);
+                            let event = self.upward(req, src, datagram);
+                            self.emit(event);
                             return;
                         }
                         _ => {}
@@ -248,6 +257,10 @@ impl Owner {
             return;
         }
 
+        let lane = self.lane_of(&req);
+        if !self.lane_has_room(lane) {
+            return;
+        }
         let retired = self.retired_copy(&req);
         if matches!(retired, Retired::Absorbed) {
             return;
@@ -266,6 +279,7 @@ impl Owner {
         // request's stamped response target (§18.2.2), fixed now.
         let Received { request: req, destination, .. } = self.stamp(req, src);
         let Some(id) = ServerTxnId::of_request(&req) else { return };
+        let continued = matches!(retired, Retired::Reopens(_));
         let copies = opening_copies(req.method(), retired);
         let held = if is_invite {
             match self.judge_new_invite(endpoint, &req, destination).await {
@@ -278,14 +292,9 @@ impl Owner {
 
         // ── New server transaction ─────────────────────────────────────────────
 
-        // Attribute the server txn to its call so the B2BUA's acting-backup
-        // self-release (ADR-0014) can count "transactions still serving this
-        // call". An in-dialog request the proxy routes to the B2BUA carries the
-        // `callRef` in its Request-URI (the dialog remote target = the B2BUA
-        // Contact, which stamps it) — the same key the router resolves on. An
-        // out-of-dialog request (initial INVITE / OPTIONS keepalive) has no
-        // `callRef` param yet → `None`.
         let call_ref = extract_ruri_call_ref(&req);
+        let unattributed = call_ref.is_none() && req.to().tag().is_some();
+        let bound_at_opening = is_invite && self.trying_bound_at_opening(&req);
 
         let head = NewTransaction {
             id: TxnId::Server(id.to_key()),
@@ -307,20 +316,18 @@ impl Owner {
             txn.held = held;
             txn.copies = Some(copies);
         });
+        if unattributed {
+            self.unattributed.opened(req.call_id().as_str(), id.to_key());
+        }
 
         // An INVITE's first provisional is its consumer's to release, or this
         // layer's at the §17.2.1 bound (`layer::trying`).
         let opened_at = self.server(id).map(|t| t.created_at);
-        if let (true, Some(opened)) = (is_invite, opened_at) {
+        if let (true, Some(opened)) = (bound_at_opening, opened_at) {
             self.arm_trying_bound(id.to_key(), opened);
         }
 
-        // Critical for INVITE: the 100 the bound sends stops the UAC
-        // retransmitting, so this Message is the app's ONLY notice of the call. A non-INVITE the
-        // full queue drops is not admitted: its transaction is forgotten, so the
-        // UAC's Timer E copy (§17.1.2.2; UDP-only, ADR-0027) is admitted afresh
-        // rather than absorbed unanswered by a Trying transaction.
-        let forgettable = (!is_invite).then(|| TxnRef::Server(id).to_id());
+        let forgettable = (!is_invite || lane == Lane::Unattributed).then(|| id.to_key());
         let event = TransactionEvent::Message {
             message: Box::new(SipMessage::Request(req)),
             src,
@@ -328,11 +335,31 @@ impl Owner {
             datagram,
             opened_at,
         };
-        if is_invite {
-            self.emit_critical(event);
-        } else if !self.emit(event) {
-            if let Some(key) = forgettable {
-                self.delete_txn(key.as_ref());
+        self.hand_up_opened(event, lane, forgettable, continued);
+    }
+
+    /// Hand the request a new server transaction opened on up as `event`, on
+    /// `lane`. `forgettable` names a transaction whose event may be lost: one
+    /// the lane drops is not admitted but forgotten, so the UAC's copy (Timer
+    /// E, §17.1.2.2, or Timer A, §17.1.1.2; UDP-only, ADR-0027) is admitted
+    /// afresh rather than absorbed unanswered. That is a non-INVITE's, and an
+    /// INVITE's on the unattributed lane, which found room before its
+    /// transaction opened. An INVITE's on the event queue (`None`) is never
+    /// dropped: its transaction absorbs its copies, so it is the consumer's
+    /// only notice of the call.
+    fn hand_up_opened(
+        &mut self,
+        event: TransactionEvent,
+        lane: Lane,
+        forgettable: Option<ServerTxnKey>,
+        continued: bool,
+    ) {
+        match forgettable {
+            None => self.emit_critical(event),
+            Some(key) => {
+                if !self.emit_on(lane, event) {
+                    self.forget_unqueued(key.id(), continued);
+                }
             }
         }
     }
@@ -348,11 +375,12 @@ impl Owner {
     }
 
     /// Hand `req`, received from `src` as `datagram`, to the TU with no
-    /// transaction, stamped on receipt. `false` when the event queue dropped
-    /// it.
+    /// transaction, stamped on receipt, on its lane
+    /// ([`lane_of`](Self::lane_of)). `false` when the lane dropped it.
     fn hand_up(&mut self, req: SipRequest, src: SocketAddr, datagram: Bytes) -> bool {
+        let lane = self.lane_of(&req);
         let event = self.upward(req, src, datagram);
-        self.emit(event)
+        self.emit_on(lane, event)
     }
 
     /// The event passing `req`, received from `src` as `datagram`, up to the
@@ -461,6 +489,16 @@ impl Owner {
     }
 }
 
+/// The 487 `txn`, an INVITE left open by its CANCEL, keeps for its consumer's
+/// release is no longer owed once the INVITE takes a final of its own: dropped,
+/// so no release and no leaving sends a second final (RFC 3261 §17.2.1). The
+/// CANCEL's 200 still held stays owed.
+fn drop_parked_487(txn: &mut super::txn::Transaction) {
+    if let Some(held) = txn.unsent_cancel.as_mut().filter(|u| u.invite_open) {
+        held.terminated = None;
+    }
+}
+
 /// The state a server transaction of `kind` enters on sending a response of
 /// `status`: Proceeding on a provisional, Accepted on an INVITE's 2xx
 /// (RFC 6026 §7.1), Completed on any other final (RFC 3261 §17.2).
@@ -472,11 +510,17 @@ fn state_after(kind: TxnKind, status: u16) -> TxnState {
     }
 }
 
-/// The Request-URI `callRef` param, URL-decoded (the B2BUA's
-/// `build_call_contact` percent-encodes it). URI parameter names match
-/// case-insensitively per RFC 3261 §19.1.1. `None` for an out-of-dialog request,
-/// which carries no such param. Attributes a server transaction to its call
-/// (ADR-0014 self-release counting).
+/// The call a new server transaction is attributed to as it opens: the
+/// Request-URI `callRef` param, URL-decoded (the B2BUA's `build_call_contact`
+/// percent-encodes it), matched case-insensitively (RFC 3261 §19.1.1); the
+/// key the router resolves on when it is there. An in-dialog request whose
+/// remote target is the B2BUA's Contact carries it. `None` for an
+/// out-of-dialog request and for one an element rewrote the Request-URI of:
+/// the router attributes the latter once it finds the call by dialog identity
+/// ([`TransactionLayer::attach_server_to_call`](crate::TransactionLayer::attach_server_to_call)),
+/// and until then the self-release count of a call naming its Call-ID counts
+/// it (`layer::unattributed`). The attribution is what the self-release count
+/// (ADR-0014) and a release's forget and answer read.
 fn extract_ruri_call_ref(req: &SipRequest) -> Option<String> {
     req.request_uri().param("callRef").and_then(ParamValue::as_str).map(decode_param)
 }

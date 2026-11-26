@@ -11,14 +11,16 @@
 //!
 //!   in flight:  alice ─INVITE─▶ primary ─INVITE─▶ bob ─100─▶ primary
 //!               ✗ primary killed ✗   alice CANCELs (§9.1)
-//!               alice ─CANCEL─▶ SURVIVOR ─200, 487─▶ alice, ─CANCEL─▶ bob
+//!               alice ─CANCEL─▶ SURVIVOR ─200─▶ alice, ─CANCEL─▶ bob ─487─▶
+//!               SURVIVOR ─487─▶ alice
 //! ```
 //!
 //! An answered round's transaction is in RFC 6026 Accepted: a copy of the
 //! INVITE draws the 2xx the record retains, never a 491 beside it. An
 //! unanswered round's transaction holds its INVITE, rebuilt from the record:
-//! the caller's CANCEL draws 200 and 487 and the survivor CANCELs the callee's
-//! side of the round (RFC 3261 §9.2). Each comes two ways: the caller's own
+//! the caller's CANCEL draws 200, the survivor CANCELs the callee's side of
+//! the round, and the callee's 487 answers the caller (RFC 3261 §9.2,
+//! ADR-0065). Each comes two ways: the caller's own
 //! message takes the call over, or another request took it over first and the
 //! caller's message meets the rebuilt transaction already in place.
 //!
@@ -281,9 +283,10 @@ enum FirstAtTheSurvivor {
 
 /// A re-INVITE relayed and replicated, the callee's 100 its only answer, the
 /// caller's 100 heard: after the kill the caller CANCELs it. The survivor
-/// answers 200 and 487 from the transaction it rebuilt, CANCELs the callee's
-/// side once the callee's transaction repeats its 100, ACKs the callee's 487,
-/// and the call continues to its BYE.
+/// answers the CANCEL 200 from the transaction it rebuilt, CANCELs the
+/// callee's side once the callee's transaction repeats its 100, ACKs the
+/// callee's 487 and relays it to the caller, and the call continues to its
+/// BYE.
 async fn reinvite_cancelled_at_the_takeover(name: &str, first: FirstAtTheSurvivor) {
     let mut fh = FailoverHarness::new(name, &["b1", "b2"]);
     let alice = fh.agent("alice", ALICE).await;
@@ -315,7 +318,6 @@ async fn reinvite_cancelled_at_the_takeover(name: &str, first: FirstAtTheSurvivo
     // ── The caller gives the round up ───────────────────────────────────────
     let mut cancel = reinvite.cancel().await;
     cancel.expect(200).await;
-    reinvite.expect(487).await;
     fh.advance(Duration::from_millis(200)).await;
     assert_taken_over_once(survivor_of(&pri_ord, &w_b1, &w_b2), hydrated_before);
 
@@ -325,6 +327,7 @@ async fn reinvite_cancelled_at_the_takeover(name: &str, first: FirstAtTheSurvivo
     assert_resent_once_and_absorbed(&bob);
     at_bob.respond(487, "Request Terminated").await;
     bob.receive_absorbing("ACK", &["INVITE"]).await;
+    reinvite.expect(487).await;
     assert_eq!(round_invites_sent_to(&fh, bob.addr(), REOFFER), 1, "one b-leg INVITE");
 
     // ── The call lives on and is hung up normally ───────────────────────────

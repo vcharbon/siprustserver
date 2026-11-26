@@ -94,8 +94,9 @@ fn forwarder(
     (fwd, ep, metrics)
 }
 
+/// Lets the spawned resolve tasks run, the paused clock auto-advancing past
+/// any delay.
 async fn settle() {
-    // Let the spawned resolve task run (and auto-advance past any delay).
     for _ in 0..4 {
         tokio::task::yield_now().await;
     }
@@ -107,9 +108,9 @@ async fn resolves_once_then_serves_from_cache() {
     let (fwd, ep, metrics) = forwarder(resolver.clone(), ResolverConfig::default());
     let target = ProxyAddr::new("uas.example", 5060);
 
-    fwd.send(b"pkt1", &target).await;
+    fwd.send(b"pkt1", &target, None).await;
     settle().await;
-    fwd.send(b"pkt2", &target).await;
+    fwd.send(b"pkt2", &target, None).await;
 
     assert_eq!(resolver.calls.load(Ordering::SeqCst), 1, "second send must be a cache hit");
     let sent = ep.sent.lock().unwrap();
@@ -125,16 +126,14 @@ async fn failed_lookup_is_negatively_cached_then_retried_after_ttl() {
     let (fwd, ep, metrics) = forwarder(resolver.clone(), ResolverConfig::default());
     let target = ProxyAddr::new("gone.example", 5060);
 
-    fwd.send(b"pkt1", &target).await;
+    fwd.send(b"pkt1", &target, None).await;
     settle().await;
-    // Within the negative TTL: short-circuited, no second lookup.
-    fwd.send(b"pkt2", &target).await;
+    fwd.send(b"pkt2", &target, None).await;
     assert_eq!(resolver.calls.load(Ordering::SeqCst), 1);
     assert_eq!(metrics.named_send_count("dropped_negative"), 1);
 
-    // Past the negative TTL: a fresh lookup is allowed.
     tokio::time::advance(Duration::from_millis(5_001)).await;
-    fwd.send(b"pkt3", &target).await;
+    fwd.send(b"pkt3", &target, None).await;
     settle().await;
     assert_eq!(resolver.calls.load(Ordering::SeqCst), 2);
     assert!(ep.sent.lock().unwrap().is_empty(), "nothing resolvable, nothing sent");
@@ -146,10 +145,10 @@ async fn positive_entry_expires_and_picks_up_new_address() {
     let (fwd, _ep, _metrics) = forwarder(resolver.clone(), ResolverConfig::default());
     let target = ProxyAddr::new("uas.example", 5060);
 
-    fwd.send(b"pkt1", &target).await;
+    fwd.send(b"pkt1", &target, None).await;
     settle().await;
     tokio::time::advance(Duration::from_millis(60_001)).await;
-    fwd.send(b"pkt2", &target).await;
+    fwd.send(b"pkt2", &target, None).await;
     settle().await;
     assert_eq!(resolver.calls.load(Ordering::SeqCst), 2, "expired positive entry must re-resolve");
 }
@@ -161,11 +160,11 @@ async fn concurrent_sends_to_same_name_are_single_flight_and_bounded() {
     let (fwd, ep, metrics) = forwarder(resolver.clone(), cfg);
     let target = ProxyAddr::new("uas.example", 5060);
 
-    fwd.send(b"pkt1", &target).await;
-    fwd.send(b"pkt2", &target).await; // waits on the in-flight resolve
-    fwd.send(b"pkt3", &target).await; // past the per-name bound → dropped
+    fwd.send(b"pkt1", &target, None).await;
+    fwd.send(b"pkt2", &target, None).await;
+    fwd.send(b"pkt3", &target, None).await;
     assert_eq!(metrics.named_send_count("dropped_in_flight"), 1);
-    tokio::task::yield_now().await; // let the resolve task start (it parks at its delay)
+    tokio::task::yield_now().await;
     assert_eq!(resolver.calls.load(Ordering::SeqCst), 1, "single-flight: one lookup per name");
 
     tokio::time::advance(Duration::from_millis(1_000)).await;
@@ -182,9 +181,9 @@ async fn a_packet_racing_a_resolve_waits_for_it_and_follows_in_order() {
     let (fwd, ep, metrics) = forwarder(resolver.clone(), ResolverConfig::default());
     let target = ProxyAddr::new("uas.example", 5060);
 
-    fwd.send(b"pkt1", &target).await;
-    fwd.send(b"pkt2", &target).await;
-    tokio::task::yield_now().await; // the lookup starts, parked at its delay
+    fwd.send(b"pkt1", &target, None).await;
+    fwd.send(b"pkt2", &target, None).await;
+    tokio::task::yield_now().await;
     tokio::time::advance(Duration::from_millis(1_000)).await;
     settle().await;
 
@@ -206,9 +205,9 @@ async fn packets_waiting_on_a_failed_resolve_are_each_counted_failed() {
     let (fwd, ep, metrics) = forwarder(resolver.clone(), ResolverConfig::default());
     let target = ProxyAddr::new("gone.example", 5060);
 
-    fwd.send(b"pkt1", &target).await;
-    fwd.send(b"pkt2", &target).await;
-    tokio::task::yield_now().await; // the lookup starts, parked at its delay
+    fwd.send(b"pkt1", &target, None).await;
+    fwd.send(b"pkt2", &target, None).await;
+    tokio::task::yield_now().await;
     tokio::time::advance(Duration::from_millis(1_000)).await;
     settle().await;
 
@@ -241,12 +240,12 @@ async fn a_packet_arriving_while_the_held_ones_leave_goes_after_them() {
     let (fwd, ep, _metrics) = yielding_forwarder(resolver.clone());
     let target = ProxyAddr::new("uas.example", 5060);
 
-    fwd.send(b"pkt1", &target).await;
-    fwd.send(b"pkt2", &target).await;
-    tokio::task::yield_now().await; // the lookup starts, parked at its delay
+    fwd.send(b"pkt1", &target, None).await;
+    fwd.send(b"pkt2", &target, None).await;
+    tokio::task::yield_now().await;
     tokio::time::advance(Duration::from_millis(1_000)).await;
-    tokio::task::yield_now().await; // the lookup returns; pkt1 is on its way out
-    fwd.send(b"pkt3", &target).await;
+    tokio::task::yield_now().await;
+    fwd.send(b"pkt3", &target, None).await;
     settle().await;
 
     let order: Vec<Vec<u8>> = ep.sent.lock().unwrap().iter().map(|(b, _)| b.clone()).collect();
@@ -263,11 +262,11 @@ async fn a_packet_arriving_while_a_prewarm_releases_starts_no_second_lookup() {
     let target = ProxyAddr::new("uas.example", 5060);
 
     fwd.prewarm(vec![target.clone()]);
-    tokio::task::yield_now().await; // the prewarm lookup starts, parked at its delay
-    fwd.send(b"pkt1", &target).await; // waits on it
+    tokio::task::yield_now().await;
+    fwd.send(b"pkt1", &target, None).await;
     tokio::time::advance(Duration::from_millis(1_000)).await;
-    tokio::task::yield_now().await; // the lookup returns; pkt1 is on its way out
-    fwd.send(b"pkt2", &target).await;
+    tokio::task::yield_now().await;
+    fwd.send(b"pkt2", &target, None).await;
     settle().await;
 
     assert_eq!(resolver.calls.load(Ordering::SeqCst), 1, "one lookup of the name");
@@ -282,14 +281,12 @@ async fn in_flight_cap_bounds_spawned_resolves() {
     let (fwd, _ep, metrics) = forwarder(resolver.clone(), cfg);
 
     for i in 0..5 {
-        fwd.send(b"pkt", &ProxyAddr::new(format!("n{i}.example"), 5060)).await;
+        fwd.send(b"pkt", &ProxyAddr::new(format!("n{i}.example"), 5060), None).await;
     }
     assert_eq!(metrics.named_send_count("dropped_in_flight"), 3);
-    tokio::task::yield_now().await; // let the claimed tasks start (they park at their delay)
+    tokio::task::yield_now().await;
     assert_eq!(resolver.calls.load(Ordering::SeqCst), 2, "cap must bound concurrent resolves");
 }
-
-// ── bounded lookup and address family ───────────────────────────────────
 
 /// A lookup still running at its 2 s bound: the packet is dropped and a
 /// negative entry written; the slot stays taken until the lookup returns, and
@@ -300,32 +297,31 @@ async fn a_lookup_past_its_bound_drops_the_packet_and_never_sends_it_late() {
     let (fwd, ep, metrics) = forwarder(resolver.clone(), ResolverConfig::default());
     let target = ProxyAddr::new("stuck.example", 5060);
 
-    fwd.send(b"pkt1", &target).await;
-    tokio::task::yield_now().await; // the lookup starts, its bound armed at 0
-    fwd.send(b"pkt1-copy", &target).await; // waits on that lookup
+    fwd.send(b"pkt1", &target, None).await;
+    tokio::task::yield_now().await;
+    fwd.send(b"pkt1-copy", &target, None).await;
     tokio::time::advance(Duration::from_millis(2_000)).await;
     settle().await;
     assert_eq!(metrics.named_send_count("lookup_timed_out"), 2, "both dropped at the bound");
-    fwd.send(b"pkt2", &target).await;
+    fwd.send(b"pkt2", &target, None).await;
     assert_eq!(metrics.named_send_count("dropped_negative"), 1, "the negative entry holds");
 
-    // Negative entry expired, lookup still running: its slot is still taken.
     tokio::time::advance(Duration::from_millis(5_000)).await;
-    fwd.send(b"pkt3", &target).await;
+    fwd.send(b"pkt3", &target, None).await;
     assert_eq!(metrics.named_send_count("dropped_in_flight"), 1);
     assert_eq!(resolver.calls.load(Ordering::SeqCst), 1);
 
-    // The lookup returns: nothing goes out late, and the slot is free again.
     tokio::time::advance(Duration::from_millis(23_000)).await;
     settle().await;
     assert!(ep.sent.lock().unwrap().is_empty(), "nothing is sent after the bound");
-    fwd.send(b"pkt4", &target).await;
+    fwd.send(b"pkt4", &target, None).await;
     tokio::task::yield_now().await;
     assert_eq!(resolver.calls.load(Ordering::SeqCst), 2, "a fresh lookup claims the slot");
 }
 
 /// A name whose first address is IPv6, sent from an IPv4 socket, goes to its
 /// IPv4 address, and stays there for the cache lifetime.
+/// An IPv6 `[::]` socket takes the IPv6 address, wherever it stands.
 #[tokio::test(start_paused = true)]
 async fn a_name_is_sent_to_its_first_address_in_the_socket_family() {
     let v6: SocketAddr = "[2001:db8::7]:5060".parse().unwrap();
@@ -333,13 +329,12 @@ async fn a_name_is_sent_to_its_first_address_in_the_socket_family() {
     let (fwd, ep, _metrics) = forwarder(resolver, ResolverConfig::default());
     let target = ProxyAddr::new("dual.example", 5060);
 
-    fwd.send(b"pkt1", &target).await;
+    fwd.send(b"pkt1", &target, None).await;
     settle().await;
-    fwd.send(b"pkt2", &target).await;
+    fwd.send(b"pkt2", &target, None).await;
     let sent: Vec<SocketAddr> = ep.sent.lock().unwrap().iter().map(|(_, d)| *d).collect();
     assert_eq!(sent, [dst(), dst()]);
 
-    // An IPv6-only `[::]` socket takes the IPv6 address, wherever it stands.
     let resolver = Arc::new(FakeResolver::answering_all(vec![dst(), v6]));
     let ep = Arc::new(CapturingEndpoint {
         local: Some("[::]:5060".parse().unwrap()),
@@ -353,12 +348,10 @@ async fn a_name_is_sent_to_its_first_address_in_the_socket_family() {
         Clock::test_at(0),
         metrics,
     );
-    fwd.send(b"pkt3", &target).await;
+    fwd.send(b"pkt3", &target, None).await;
     settle().await;
     assert_eq!(ep.sent.lock().unwrap()[0].1, v6);
 }
-
-// ── absolute-first resolution ───────────────────────────────────────────
 
 /// A deadline no test reaches.
 fn far() -> Instant {
@@ -419,10 +412,10 @@ async fn resolve_first_tries_the_absolute_form_first() {
     );
 }
 
+/// An absolute form that answers nothing (a name that needs search-domain
+/// expansion) falls back to the raw name, tried second.
 #[tokio::test]
 async fn resolve_first_falls_back_to_the_raw_name_when_absolute_fails() {
-    // The absolute form yields nothing (a short name that NEEDS kube
-    // search-domain expansion) — the raw name is attempted second and wins.
     let (attempts, lookup) = scripted_lookup(&["uas.example"]);
     assert_eq!(resolve_first("uas.example", 5060, far(), lookup).await, vec![dst()]);
     assert_eq!(
@@ -448,35 +441,28 @@ async fn resolve_first_single_label_goes_straight_to_raw() {
     assert_eq!(*attempts.lock().unwrap(), vec!["mrf".to_string()]);
 }
 
-// ── proactive refresh + prewarm ─────────────────────────────────────────
-//
-// Default config: positive TTL 60 s, margin = min(60 s/4, 5 s) = 5 s, so
-// the refresh one-shot fires at exactly 55 s after a positive store. Each
-// `advance` below moves to exactly ONE pending deadline (test-clock rule 2).
-
+/// With the default config (positive TTL 60 s, refresh margin
+/// min(TTL/4, 5 s)) a used entry re-resolves off the send path 55 s after its
+/// store and sends nothing itself; a send past the original TTL is a cache hit.
 #[tokio::test(start_paused = true)]
 async fn used_entry_is_refreshed_before_ttl_and_stays_warm() {
     let resolver = Arc::new(FakeResolver::answering(dst()));
     let (fwd, ep, metrics) = forwarder(resolver.clone(), ResolverConfig::default());
     let target = ProxyAddr::new("uas.example", 5060);
 
-    fwd.send(b"pkt1", &target).await; // miss → resolve, positive store at t=0
+    fwd.send(b"pkt1", &target, None).await;
     settle().await;
-    fwd.send(b"pkt2", &target).await; // cache hit — marks the entry USED
+    fwd.send(b"pkt2", &target, None).await;
     assert_eq!(resolver.calls.load(Ordering::SeqCst), 1);
 
-    // Exactly the refresh deadline (55 s): the used entry re-resolves
-    // off-path and re-arms; nothing is sent by the refresh itself.
     tokio::time::advance(Duration::from_millis(55_000)).await;
     settle().await;
     assert_eq!(resolver.calls.load(Ordering::SeqCst), 2, "used entry must refresh before its TTL");
     assert_eq!(metrics.resolver_refresh_count("refreshed"), 1);
     assert_eq!(ep.sent.lock().unwrap().len(), 2, "refresh must not send anything");
 
-    // Past the ORIGINAL 60 s TTL: still a warm hit — no cold miss, no
-    // dropped or delayed datagram.
     tokio::time::advance(Duration::from_millis(6_000)).await;
-    fwd.send(b"pkt3", &target).await;
+    fwd.send(b"pkt3", &target, None).await;
     assert_eq!(
         resolver.calls.load(Ordering::SeqCst),
         2,
@@ -494,21 +480,18 @@ async fn unused_entry_refresh_idle_stops_and_expires_normally() {
     let (fwd, _ep, metrics) = forwarder(resolver.clone(), ResolverConfig::default());
     let target = ProxyAddr::new("oneshot.example", 5060);
 
-    fwd.send(b"pkt1", &target).await; // stored at t=0, never hit again
+    fwd.send(b"pkt1", &target, None).await;
     settle().await;
     assert_eq!(resolver.calls.load(Ordering::SeqCst), 1);
 
-    // Refresh deadline: the entry was never USED → idle stop, no resolve.
     tokio::time::advance(Duration::from_millis(55_000)).await;
     settle().await;
     assert_eq!(resolver.calls.load(Ordering::SeqCst), 1, "an unused entry must not be refreshed");
     assert_eq!(metrics.resolver_refresh_count("idle_stopped"), 1);
     assert_eq!(metrics.resolver_refresh_count("refreshed"), 0);
 
-    // The entry expires at its natural TTL; the next send is an ordinary
-    // cold miss (bounded churn: exactly one refresh decision per store).
     tokio::time::advance(Duration::from_millis(5_001)).await;
-    fwd.send(b"pkt2", &target).await;
+    fwd.send(b"pkt2", &target, None).await;
     settle().await;
     assert_eq!(
         resolver.calls.load(Ordering::SeqCst),
@@ -533,9 +516,7 @@ async fn prewarmed_name_first_send_is_a_cache_hit() {
     assert_eq!(resolver.calls.load(Ordering::SeqCst), 1, "prewarm resolves off the serving path");
     assert_eq!(metrics.resolver_refresh_count("prewarmed"), 1);
 
-    // The FIRST send is warm: outcome=cached, datagram out inline, zero
-    // resolves on the send path.
-    fwd.send(b"pkt1", &target).await;
+    fwd.send(b"pkt1", &target, None).await;
     assert_eq!(
         metrics.named_send_count("cached"),
         1,
@@ -560,8 +541,6 @@ async fn pinned_name_keeps_refreshing_across_ttl_windows_without_sends() {
     settle().await;
     assert_eq!(resolver.calls.load(Ordering::SeqCst), 1);
 
-    // Three full refresh cycles with ZERO sends: a pinned name refreshes
-    // every cycle regardless of use (never idle-stops).
     for round in 1..=3u64 {
         tokio::time::advance(Duration::from_millis(55_000)).await;
         settle().await;
@@ -578,12 +557,14 @@ async fn pinned_name_keeps_refreshing_across_ttl_windows_without_sends() {
         "a pinned name must never idle-stop"
     );
 
-    // ~2.75 original TTLs later, still warm on the first send.
-    fwd.send(b"pkt", &target).await;
+    fwd.send(b"pkt", &target, None).await;
     assert_eq!(metrics.named_send_count("cached"), 1);
     assert_eq!(resolver.calls.load(Ordering::SeqCst), 4);
 }
 
+/// A failed prewarm of a pinned name retries at the refresh cadence, so a slow
+/// DNS at boot leaves no name cold for good, and it writes no negative entry:
+/// the send path resolves as it does without a prewarm.
 #[tokio::test(start_paused = true)]
 async fn failed_prewarm_retries_at_the_refresh_cadence_and_stores_nothing() {
     let resolver = Arc::new(FakeResolver::failing());
@@ -595,16 +576,12 @@ async fn failed_prewarm_retries_at_the_refresh_cadence_and_stores_nothing() {
     assert_eq!(resolver.calls.load(Ordering::SeqCst), 1);
     assert_eq!(metrics.resolver_refresh_count("prewarm_failed"), 1);
 
-    // Pinned → retried at the refresh cadence (boot must not stay cold
-    // forever because CoreDNS was slow at prewarm time).
     tokio::time::advance(Duration::from_millis(55_000)).await;
     settle().await;
     assert_eq!(resolver.calls.load(Ordering::SeqCst), 2, "pinned prewarm failure must retry");
     assert_eq!(metrics.resolver_refresh_count("failed"), 1);
 
-    // A failed prewarm stores NO negative entry: the send path behaves
-    // exactly as without prewarm (miss → its own single-flight resolve).
-    fwd.send(b"pkt", &target).await;
+    fwd.send(b"pkt", &target, None).await;
     assert_eq!(
         metrics.named_send_count("dropped_negative"),
         0,
@@ -619,7 +596,7 @@ async fn cache_is_capped() {
     let (fwd, _ep, metrics) = forwarder(resolver.clone(), cfg);
 
     for i in 0..10 {
-        fwd.send(b"pkt", &ProxyAddr::new(format!("n{i}.example"), 5060)).await;
+        fwd.send(b"pkt", &ProxyAddr::new(format!("n{i}.example"), 5060), None).await;
         settle().await;
     }
     assert!(

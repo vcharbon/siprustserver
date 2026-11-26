@@ -6,8 +6,10 @@
 //! between a send and what it provokes; it never binds where nothing could
 //! establish it — a relay standing behind a send (§6.7b) and an answer to a
 //! transaction this leg has already opened (§6.7c) arm beside the step in
-//! front of them, and the answers a CANCEL this leg received draws (§6.7e) go
-//! out past it. Everything else here is what the three nondeterminism
+//! front of them, and the answers a CANCEL this leg received draws (§6.7e) and
+//! the ACK a final this leg took is owed and the answer to a non-INVITE
+//! request it took (§6.7h) go out past it. Everything
+//! else here is what the three nondeterminism
 //! constructs mean at run time:
 //!
 //! - **`alt`** — every branch's first message is armed at once; the first one to
@@ -36,6 +38,8 @@ use crate::program::ItemKind;
 
 mod injects;
 mod transaction;
+
+pub use transaction::HeldTiming;
 
 /// Where one step stands; every status but `Pending` is settled.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -220,6 +224,14 @@ impl<'p> Cursor<'p> {
             && frontier.iter().all(|id| self.plan.step(id).is_some_and(|s| !s.is_expect()))
     }
 
+    /// Whether a step an item puts on this leg is a `send` not yet made.
+    fn has_pending_send(&self, frontier: &[String]) -> bool {
+        frontier.iter().any(|id| {
+            self.plan.step(id).is_some_and(|s| s.is_send())
+                && self.steps.get(id).copied() == Some(StepStatus::Pending)
+        })
+    }
+
     /// The steps the run is waiting on or about to emit, per leg, in leg order.
     ///
     /// A leg walks its items in order and stops at the first that can still
@@ -232,12 +244,16 @@ impl<'p> Cursor<'p> {
     /// made yet (`caused_elsewhere`). Only SENDS are walked past that way, and
     /// any number of them: once this leg is waiting on an arrival of its own,
     /// list order is what says which of the two comes first, and it binds.
+    /// What a transaction says comes now arms past a blocked item instead
+    /// (`transaction.rs`: §6.7c, §6.7e, §6.7h); for §6.7h, a send of the leg
+    /// still ahead of it keeps its place.
     pub fn frontier(&self) -> Vec<String> {
         let mut out: Vec<String> = Vec::new();
         for (leg, item_indices) in &self.plan.program().by_leg {
             let mut armed: Vec<String> = Vec::new();
             let mut blocked = false;
             let mut awaited = false;
+            let mut send_ahead = false;
             for &index in item_indices {
                 if self.items[index] == ItemStatus::Complete {
                     continue;
@@ -246,6 +262,7 @@ impl<'p> Cursor<'p> {
                     break;
                 }
                 let frontier = self.item_frontier(index, leg);
+                let sends_here = self.has_pending_send(&frontier);
                 // A message item only. An `alt` armed early could COMMIT before
                 // the send in front of it goes out, and an `unordered` group
                 // arms its whole membership: neither is a relay standing in a
@@ -254,6 +271,9 @@ impl<'p> Cursor<'p> {
                 let is_message = self.plan.program().items[index].kind == ItemKind::Message;
                 let caused = !awaited && is_message && self.caused_elsewhere(&frontier, &armed);
                 if blocked && !caused && !self.races_with(&frontier, &armed) {
+                    let owed_now =
+                        is_message && !send_ahead && self.owed_for_what_the_leg_took(&frontier);
+                    send_ahead |= sends_here;
                     // The answers a CANCEL this leg received draws go out at
                     // their own dwell, whatever stands in front (§6.7e).
                     if is_message && self.answers_received_cancel(&frontier) {
@@ -264,6 +284,11 @@ impl<'p> Cursor<'p> {
                     // An answer to a transaction this leg already opened may be
                     // on the wire now, whatever stands in front of it (§6.7c).
                     if is_message && self.answers_open_transaction(&frontier, &armed) {
+                        armed.extend(frontier.iter().cloned());
+                        out.extend(frontier);
+                        continue;
+                    }
+                    if owed_now {
                         armed.extend(frontier.iter().cloned());
                         out.extend(frontier);
                         continue;
@@ -297,6 +322,7 @@ impl<'p> Cursor<'p> {
                 {
                     awaited = true;
                 }
+                send_ahead |= sends_here;
                 armed.extend(frontier.iter().cloned());
                 out.extend(frontier);
                 if !all_optional {

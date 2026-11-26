@@ -14,8 +14,9 @@
 //! The book is node-local: a takeover node answers from its own.
 //!
 //! A turn's admission is taken back unless its answers reach the call's
-//! outbox ([`Admission`]): a turn dropped or fenced off before, its BYE
-//! never left, leaves the book as it found it.
+//! outbox ([`TurnAdmission`]): a turn dropped, fenced off or discarded
+//! before, its BYE never left, leaves the book and its count as it found
+//! them.
 //!
 //! The book holds at most [`CAPACITY`] finals; past it, the half idle longest
 //! is forgotten, and a later copy of one of those draws its whole answer again
@@ -223,20 +224,44 @@ pub(super) fn admitted(
     sent.into_iter().flat_map(|s| counted(ctx, s)).collect()
 }
 
+/// A turn's [`Admission`], with the copies its answers absorbed: they are
+/// counted only once the book keeps the turn's answers.
+#[must_use = "an admission dropped unsent takes its answers back"]
+pub(super) struct TurnAdmission<'a> {
+    admission: Admission<'a>,
+    absorbed: usize,
+}
+
+impl TurnAdmission<'_> {
+    /// The turn's answers reached the call's outbox: the book keeps them, and
+    /// the copies they absorbed are counted.
+    pub(super) fn sent(self, ctx: &RouterCtx) {
+        self.admission.sent();
+        for _ in 0..self.absorbed {
+            ctx.metrics.record_copy_past_schedule(KIND);
+        }
+    }
+}
+
 /// `result` with what its unheld answers, drawn at `now_ms`, send moved onto
 /// its outbound effects behind the turn's own, and the admission the commit
-/// marks [`Admission::sent`] once the turn's entry is on the call's outbox.
+/// marks [`TurnAdmission::sent`] once the turn's entry is on the call's
+/// outbox.
 pub(super) fn admit_turn(
     ctx: &RouterCtx,
     mut result: HandlerResult,
     now_ms: i64,
-) -> (HandlerResult, Admission<'_>) {
+) -> (HandlerResult, TurnAdmission<'_>) {
     let answers = std::mem::take(&mut result.effects.unheld);
     let (sent, admission) = ctx.unheld_answers.admit_all(answers, now_ms);
+    let mut absorbed = 0;
     for s in sent {
-        result.effects.outbound.extend(counted(ctx, s));
+        match s {
+            Some(out) => result.effects.outbound.extend(out),
+            None => absorbed += 1,
+        }
     }
-    (result, admission)
+    (result, TurnAdmission { admission, absorbed })
 }
 
 #[cfg(test)]

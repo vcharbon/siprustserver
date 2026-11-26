@@ -2,6 +2,7 @@
 //! datagram the UA sends and every one it sights, and the failing verdicts it
 //! recorded. Shared across clones of the UA, like its transaction layer.
 
+use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 
 use sip_message::{SipMessage, SipRequest, SipResponse};
@@ -10,6 +11,9 @@ use tokio::time::Instant;
 use super::reliable::ReliableSent;
 use super::table::{BackwardsCseq, DialogTable};
 use super::verdict::DialogVerdict;
+use super::wire_ahead::AheadOfFinal;
+use super::wire_crossing::SentBeforeEnd;
+use super::wire_loss::LostOnTheWay;
 use crate::WaiverScope;
 
 /// The opt-ins a run declared for dialog verdicts: the `dialog-…` waivers,
@@ -30,12 +34,22 @@ pub enum DialogJudging {
     Off,
 }
 
+/// A verdict as the judge recorded it.
+#[derive(Debug, Clone)]
+pub struct RecordedVerdict {
+    pub verdict: DialogVerdict,
+    /// When it was first recorded.
+    pub at: Instant,
+    /// The address the UA read the judged message from: the party the
+    /// verdict charges.
+    pub sender: SocketAddr,
+}
+
 struct Inner {
     judging: DialogJudging,
     table: DialogTable,
     reliable: ReliableSent,
-    /// Each verdict with when it was first recorded.
-    recorded: Vec<(DialogVerdict, Instant)>,
+    recorded: Vec<RecordedVerdict>,
 }
 
 /// The dialog table of one UA and the verdicts it recorded.
@@ -65,6 +79,36 @@ impl DialogJudge {
                 recorded: Vec::new(),
             }),
         }
+    }
+
+    /// A judge for the UA `party`, gated by the harness under `opt_ins`.
+    pub fn harnessed(party: impl Into<String>, opt_ins: DialogOptIns) -> Self {
+        DialogJudge::new(party, opt_ins, DialogJudging::Harness)
+    }
+
+    /// This judge, its table reading from the wire record which requests the
+    /// network lost on their way to the UA (`lost`), whether a request
+    /// reaching a dialog a final or a BYE ended crossed that end (`crossed`),
+    /// and whether a request the UA sent reached the peer before the final
+    /// that ended its dialog took effect there (`ahead`): the judge of a run
+    /// that declares a loss model.
+    pub fn explaining_losses(
+        mut self,
+        lost: LostOnTheWay,
+        crossed: SentBeforeEnd,
+        ahead: AheadOfFinal,
+    ) -> Self {
+        let table = &mut self.inner.get_mut().unwrap().table;
+        table.set_lost_on_the_way(lost);
+        table.set_sent_before_end(crossed);
+        table.set_ahead_of_final(ahead);
+        self
+    }
+
+    /// Read from `ahead` whether a request the UA sent reached the peer before
+    /// the final that ended its dialog took effect there, from now on.
+    pub fn set_ahead_of_final(&self, ahead: AheadOfFinal) {
+        self.inner.lock().unwrap().table.set_ahead_of_final(ahead);
     }
 
     /// The UA this judge belongs to.
@@ -112,9 +156,10 @@ impl DialogJudge {
         self.inner.lock().unwrap().judging != DialogJudging::Off
     }
 
-    /// Feed a message the UA received (sighted once, not a §17.2 duplicate)
-    /// and record the verdict on a request, if any.
-    pub fn sight(&self, msg: &SipMessage) {
+    /// Feed a message the UA received from `sender` (sighted once, not a
+    /// §17.2 duplicate) and record the verdict on it, if any, charged to
+    /// `sender`.
+    pub fn sight(&self, msg: &SipMessage, sender: SocketAddr) {
         let now_us = self.now_us();
         let mut inner = self.inner.lock().unwrap();
         if inner.judging == DialogJudging::Off {
@@ -124,9 +169,9 @@ impl DialogJudge {
             SipMessage::Response(r) => inner.table.note_received_response(r, now_us),
             SipMessage::Request(r) => inner.table.judge_received(r, now_us),
         };
-        if let Some(v) = verdict {
-            if !inner.recorded.iter().any(|(r, _)| *r == v) {
-                inner.recorded.push((v, Instant::now()));
+        if let Some(verdict) = verdict {
+            if !inner.recorded.iter().any(|r| r.verdict == verdict) {
+                inner.recorded.push(RecordedVerdict { verdict, at: Instant::now(), sender });
             }
         }
     }
@@ -138,7 +183,7 @@ impl DialogJudge {
         inner
             .recorded
             .iter()
-            .map(|(v, _)| v)
+            .map(|r| &r.verdict)
             .rev()
             .find(|v| {
                 !v.kind.on_response()
@@ -151,13 +196,13 @@ impl DialogJudge {
             .cloned()
     }
 
-    /// The verdict on `request` that fails a scripted receive: one recorded
-    /// under harness judging and not opted in.
+    /// The verdict on `request` that fails a scripted receive: a finding
+    /// recorded under harness judging and not opted in.
     pub fn failure_for(&self, request: &SipRequest) -> Option<DialogVerdict> {
         if self.inner.lock().unwrap().judging != DialogJudging::Harness {
             return None;
         }
-        self.verdict_for(request).filter(|v| !self.opted_in(v))
+        self.verdict_for(request).filter(|v| v.kind.is_finding() && !self.opted_in(v))
     }
 
     /// The verdict on `response` that fails a scripted expect: one recorded
@@ -168,7 +213,7 @@ impl DialogJudge {
             return None;
         }
         let tag = |t: Option<&str>| t.unwrap_or_default().to_string();
-        let found = inner.recorded.iter().map(|(v, _)| v).rev().find(|v| {
+        let found = inner.recorded.iter().map(|r| &r.verdict).rev().find(|v| {
             v.kind.on_response()
                 && v.call_id == response.call_id().as_str()
                 && v.method == response.cseq().method().as_str()
@@ -207,18 +252,25 @@ impl DialogJudge {
             DialogJudging::Harness => "",
             DialogJudging::Driver(_) | DialogJudging::Off => " (its driver answers for it)",
         };
-        for (v, _) in &inner.recorded {
-            lines.push(format!("verdict [{}]{judged_by}: {v}", v.rule()));
+        for RecordedVerdict { verdict: v, .. } in &inner.recorded {
+            let finding = match (v.kind.is_finding(), v.kind.refusal()) {
+                (true, _) => "",
+                (false, Some(_)) => " (refused, no finding)",
+                (false, None) => " (taken, no finding)",
+            };
+            lines.push(format!("verdict [{}]{judged_by}{finding}: {v}", v.rule()));
         }
         lines
     }
 
-    /// Every verdict the harness gates — those recorded under harness
-    /// judging — with when it was first recorded.
-    pub fn gated(&self) -> Vec<(DialogVerdict, Instant)> {
+    /// Every verdict the harness gates: the findings recorded under harness
+    /// judging.
+    pub fn gated(&self) -> Vec<RecordedVerdict> {
         let inner = self.inner.lock().unwrap();
         match inner.judging {
-            DialogJudging::Harness => inner.recorded.clone(),
+            DialogJudging::Harness => {
+                inner.recorded.iter().filter(|r| r.verdict.kind.is_finding()).cloned().collect()
+            }
             DialogJudging::Driver(_) | DialogJudging::Off => Vec::new(),
         }
     }

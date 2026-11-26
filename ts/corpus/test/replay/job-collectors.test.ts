@@ -41,14 +41,14 @@ beforeAll(async () => {
   if (!served) return
   await fresh(SCRATCH)
   await on(SCRATCH, migrated)
-}, 120_000)
+})
 
 afterAll(async () => {
   fs.rmSync(TREE, { recursive: true, force: true })
   fs.rmSync(ELSEWHERE, { recursive: true, force: true })
   if (!served) return
   await drop(SCRATCH)
-}, 120_000)
+})
 
 /**
  * The deployment's collectors: the job collector `lab` on {@link LANE}, its
@@ -402,15 +402,13 @@ describe.skipIf(!served)("a job's collectors", () => {
         JobCollectors.around({ job, dir: path.join(TREE, `job${job}`), lanes: [LANE], cells: () => [], restore, watch }, Effect.void)
       ))
       const who = yield* Deferred.await(waitingOn)
-      const interrupted = Date.now()
       yield* Fiber.interrupt(fiber)
-      return { who, tookMs: Date.now() - interrupted }
+      return { who }
     }).pipe(Effect.provide(roots)))
     expect(seen.who).toContain("another job's collector")
-    expect(seen.tookMs).toBeLessThan(5000)
     expect(lab.trace()).toEqual([])
     expect(fs.readFileSync(holder, "utf8")).toContain("another job's collector")
-  }, 20_000)
+  })
 
   it("hand the caller what they answered of each cell where it lands its cells itself, and tell it who left the lab changed", async () => {
     const lab = await labOf({

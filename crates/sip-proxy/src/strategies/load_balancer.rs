@@ -5,16 +5,18 @@
 //! - `select_for_new_dialog`: Call-ID → snapshot the registry → the `Alive`
 //!   workers that accept new calls, or every `Alive` one when none accepts (a
 //!   refusing worker answers the call itself and writes its record, §6) → for
-//!   non-emergency new dialogs, drop `above_critical`-band workers → rank them
+//!   non-emergency new dialogs, drop `above_critical`-band workers; an
+//!   emergency or in-dialog one, with no worker `Alive`, takes the `Slow` ones
+//!   (ADR-0069) → rank them
 //!   by rendezvous → spend one token from the per-worker AIMD bucket of the
 //!   first in rank that has one (ADR-0009 X6) → address. `NoTarget` when the
 //!   candidate set is empty; `RateCapExhausted` when no candidate's bucket has
 //!   a token (→ 503 + Retry-After). Emergency / in-dialog requests take the
 //!   rendezvous winner and bypass the bucket (they still record the admit for
 //!   the `share` signal); an unobserved worker is admitted (bootstrap-friendly).
-//! - `placement_by_rank`: the rendezvous winner among the `Alive` workers,
-//!   unfiltered and spending no token, where a request of an admitted call no
-//!   memo places goes (ADR-0009 X7).
+//! - `placement_by_rank`: the rendezvous winner among the `Alive` and `Slow`
+//!   workers, unfiltered and spending no token, where a request of an admitted
+//!   call no memo places goes (ADR-0009 X7, ADR-0069).
 //! - `encode_stickiness`: a call the proxy places. Recover the target's
 //!   `WorkerId` (= `w_pri`) by address, pick the HRW winner among the other
 //!   `Alive` workers that accept new calls, else among the other `Alive` ones,
@@ -39,16 +41,15 @@
 //!   signature under its key, which the response path reads as that INVITE's
 //!   (ADR-0055 §8): the far end echoes the worker's Via, so its unsigned `pri`
 //!   decides nothing there.
-//! - `decode_stickiness`: verify the MAC, then `w_pri` while it is `Alive`,
-//!   else `w_bak` while it is `Alive`, else `Unroutable` (§4, §5); acceptance
-//!   is never read. It resolves the primary by ORDINAL, so a departed-address
+//! - `decode_stickiness`: verify the MAC, then `w_pri` while it is `Alive` or
+//!   `Slow`, else `w_bak` while it is `Alive` or `Slow`, else `Unroutable` (§4,
+//!   §5, ADR-0069); acceptance is never read. It resolves the primary by ORDINAL, so a departed-address
 //!   tombstone (address-keyed, always `Dead` — see `registry::tombstone`)
 //!   never reaches it: an ordinal that left membership resolves to nothing and
 //!   takes the backup.
 
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use sip_clock::Clock;
@@ -57,7 +58,7 @@ use sip_message::SipMessage;
 use crate::addr::ProxyAddr;
 use crate::load_observer::{EluBand, WorkerLoadObserver};
 use crate::observability::metrics::ProxyMetrics;
-use crate::registry::{WorkerEntry, WorkerRegistry};
+use crate::registry::{WorkerEntry, WorkerHealth, WorkerRegistry};
 use crate::security::hmac::{HmacKeyProvider, TRUNCATED_MAC_BYTES};
 use crate::strategy::{
     DecodeResult, RankPlacement, RouteParams, RoutingStrategy, SelectError, SelectOpts,
@@ -79,11 +80,11 @@ fn is_emergency_invite(msg: &SipMessage) -> bool {
     }
 }
 
-/// An in-dialog request carries a non-empty To-tag (AIMD/admission is a
-/// new-call knob — never applied to in-dialog traffic).
+/// An in-dialog request carries a To-tag (AIMD/admission is a new-call knob —
+/// never applied to in-dialog traffic).
 fn is_in_dialog(msg: &SipMessage) -> bool {
     match msg {
-        SipMessage::Request(r) => r.to().tag().is_some_and(|t| !t.is_empty()),
+        SipMessage::Request(r) => r.to().tag().is_some(),
         SipMessage::Response(_) => false,
     }
 }
@@ -96,7 +97,6 @@ fn call_id_of(msg: &SipMessage) -> Option<&str> {
     (!id.is_empty()).then_some(id)
 }
 
-/// Adapter so a `WorkerEntry` (by id) can feed `rendezvous_select`.
 struct WorkerKey(String);
 impl RendezvousCandidate for WorkerKey {
     fn id(&self) -> &str {
@@ -125,7 +125,6 @@ fn placeable<'w>(workers: impl Iterator<Item = &'w WorkerEntry> + Clone) -> Vec<
     }
 }
 
-/// The production routing strategy.
 pub struct LoadBalancerStrategy {
     registry: Arc<dyn WorkerRegistry>,
     hmac: Arc<dyn HmacKeyProvider>,
@@ -145,7 +144,6 @@ impl LoadBalancerStrategy {
         Self { registry, hmac, observer, metrics, clock }
     }
 
-    /// The cookie naming `primary` and `backup` for `msg`'s call (`call_id`).
     fn sign(&self, primary: &str, backup: &str, msg: &SipMessage, call_id: &str) -> RouteParams {
         let emergency_flag = if is_emergency_invite(msg) { "1" } else { "0" };
         let input = build_stickiness_input(primary, backup, emergency_flag, call_id);
@@ -207,22 +205,20 @@ impl LoadBalancerStrategy {
         rendezvous_select(call_id, &away).map(|k| k.0.clone()).unwrap_or_default()
     }
 
-    /// The address of worker `id` while it is `Alive`.
-    fn alive_address(&self, id: &str) -> Option<ProxyAddr> {
+    fn serving_address(&self, id: &str) -> Option<ProxyAddr> {
         if id.is_empty() {
             return None;
         }
-        self.registry.resolve(id).filter(WorkerEntry::is_alive).map(|w| w.address)
+        self.registry.resolve(id).filter(WorkerEntry::serves_dialogs).map(|w| w.address)
     }
 }
 
-#[async_trait]
 impl RoutingStrategy for LoadBalancerStrategy {
     fn name(&self) -> &str {
         "LoadBalancer"
     }
 
-    async fn select_for_new_dialog(
+    fn select_for_new_dialog(
         &self,
         msg: &SipMessage,
         opts: SelectOpts,
@@ -232,11 +228,13 @@ impl RoutingStrategy for LoadBalancerStrategy {
         let in_dialog = is_in_dialog(msg) && !opts.admit_as_new;
         let snapshot = self.registry.snapshot();
 
-        // The accepting workers, or every alive one when none accepts: a
-        // refusing worker answers the call itself (ADR-0050 §6).
         let alive = placeable(snapshot.iter());
         let candidates: Vec<_> = if is_emergency || in_dialog {
-            alive.clone()
+            if alive.is_empty() {
+                snapshot.iter().filter(|w| w.health == WorkerHealth::Slow).collect()
+            } else {
+                alive.clone()
+            }
         } else {
             alive
                 .iter()
@@ -268,15 +266,7 @@ impl RoutingStrategy for LoadBalancerStrategy {
             return Err(SelectError::NoTarget { reason });
         };
 
-        // Emergency and in-dialog requests bypass the per-worker AIMD bucket
-        // and stay on the rendezvous winner — in-dialog: the call is already
-        // admitted, AIMD is a new-call knob; the bypass still records the admit
-        // so `own_admitted_rate`/`share` stays truthful. A new call takes the
-        // first candidate in rank whose bucket has a token (ADR-0009 X6).
         if is_emergency || in_dialog {
-            // Emergency bypasses BOTH the above_critical critical-filter (above)
-            // and this AIMD bucket — count emergency new-dialog bypasses so the
-            // skip is observable under flood (in-dialog is not a new-call admit).
             if is_emergency && !in_dialog {
                 self.metrics.record_lb_emergency_bypass();
             }
@@ -286,20 +276,25 @@ impl RoutingStrategy for LoadBalancerStrategy {
         self.take_token(&ranked).map(|placed| placed.address.clone())
     }
 
-    /// The rendezvous winner for the call among the `Alive` workers: where a
-    /// call placed with neither filter nor spill lives, and, its primary gone,
-    /// the next in rank.
+    /// The rendezvous winner for the call among the workers serving their
+    /// dialogs (`Alive` or `Slow`): where a call placed with neither filter
+    /// nor spill lives, one placed before its worker turned `Slow` and an
+    /// emergency one placed on a `Slow` worker included, and, its primary
+    /// gone, the next in rank.
     fn placement_by_rank(&self, msg: &SipMessage) -> RankPlacement {
         let call_id = call_id_of(msg).unwrap_or("");
         let snapshot = self.registry.snapshot();
-        let alive: Vec<WorkerKey> =
-            snapshot.iter().filter(|w| w.is_alive()).map(|w| WorkerKey(w.id.clone())).collect();
-        rendezvous_select(call_id, &alive)
+        let serving: Vec<WorkerKey> = snapshot
+            .iter()
+            .filter(|w| w.serves_dialogs())
+            .map(|w| WorkerKey(w.id.clone()))
+            .collect();
+        rendezvous_select(call_id, &serving)
             .and_then(|key| snapshot.iter().find(|w| w.id == key.0))
             .map_or(RankPlacement::NoNode, |w| RankPlacement::Node(w.address.clone()))
     }
 
-    async fn decode_stickiness(&self, route_param: &RouteParams, msg: &SipMessage) -> DecodeResult {
+    fn decode_stickiness(&self, route_param: &RouteParams, msg: &SipMessage) -> DecodeResult {
         let (w_pri, w_bak, is_emergency) = match self.check(route_param, msg) {
             Ok(cookie) => (cookie.w_pri, cookie.w_bak, cookie.is_emergency),
             Err(fault) => {
@@ -308,11 +303,10 @@ impl RoutingStrategy for LoadBalancerStrategy {
             }
         };
 
-        // MAC verified: liveness alone places it, never a fresh selection.
-        if let Some(target) = self.alive_address(w_pri) {
+        if let Some(target) = self.serving_address(w_pri) {
             return DecodeResult::Forward { target, is_emergency };
         }
-        match self.alive_address(w_bak) {
+        match self.serving_address(w_bak) {
             Some(target) => DecodeResult::ForwardBackup { target, is_emergency },
             None => DecodeResult::Unroutable,
         }
@@ -332,7 +326,6 @@ impl RoutingStrategy for LoadBalancerStrategy {
         stated: &StatedOwners,
     ) -> Option<RouteParams> {
         let call_id = call_id_of(msg)?;
-        // A departed-address tombstone answers as the ordinal last bound there.
         let sender = self.registry.lookup_by_address(origin)?;
         let primary = if stated.primary.is_empty() { &sender.id } else { &stated.primary };
         let backup = if stated.backup == *primary { "" } else { stated.backup.as_str() };

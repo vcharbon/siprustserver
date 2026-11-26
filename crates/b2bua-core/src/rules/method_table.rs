@@ -15,11 +15,12 @@
 //! | INFO, MESSAGE, OPTIONS | the session | 200 | 487 |
 //! | UPDATE, SUBSCRIBE, any other | the session | 487 (§21.4.25) | 487 |
 //!
-//! A relay toward a leg that ended is terminated with it while its
-//! originator's dialog lives on or is being ended by this stack: 487 (RFC 3261
-//! §15.1.2) ends that transaction alone (RFC 5057 §5.1), where 481 would end
-//! the originator's dialog (§12.2.1.2). A NOTIFY's 481 ends only its
-//! subscription, whose subscriber is gone.
+//! A relay toward a leg that ended is terminated with it: 487 (RFC 3261
+//! §15.1.2). While its originator's dialog lives on or this stack is ending
+//! it, that ends the transaction alone (RFC 5057 §5.1), where 481 would end
+//! the originator's dialog (§12.2.1.2); where the originator's own BYE ends
+//! that dialog, §15.1.2 owes the 487 to each request it left pending. A
+//! NOTIFY's 481 ends only its subscription, whose subscriber is gone.
 //!
 //! What the timeout of this stack's own request ends is the rules' to decide
 //! (`defaults::request_timeouts`). Glare and offer/answer are facts of the

@@ -1,8 +1,11 @@
 //! A CANCEL received for an INVITE server transaction (RFC 3261 §9.2): the
 //! INVITE it names answered 487 and the CANCEL 200 while that INVITE is
-//! active, the CANCEL alone answered 200 once the INVITE took its final, and
-//! handed up through a non-INVITE transaction of its own when no INVITE here
-//! matches it. The rest of the server transaction lives in `layer::server`.
+//! active, the 487 of a re-INVITE left to the consumer
+//! (`consumer_ends_cancelled_reinvite`, `layer::held_cancel`); the CANCEL
+//! alone answered 200 once the INVITE took its final or the CANCEL was taken
+//! already, and handed up through a non-INVITE transaction of its own when no
+//! INVITE here matches it. The rest of the server transaction lives in
+//! `layer::server`.
 
 use std::net::SocketAddr;
 
@@ -20,14 +23,17 @@ use super::call_id_budget::Retired;
 use super::copy_gate::opening_copies;
 use super::key::{ServerTxnId, ServerTxnKey};
 use super::owner::Owner;
-use super::txn::{NewTransaction, Transaction, TxnId, TxnRef, TxnState};
+use super::txn::{NewTransaction, Transaction, TxnId, TxnState, UnsentCancel};
+use super::unattributed_lane::Lane;
 
 impl Owner {
     /// RFC 3261 §9.2 at this layer: a CANCEL matching an active INVITE server
-    /// transaction is answered 200 and its INVITE 487, and `Cancelled` is
-    /// emitted; `true`. Its copies, once the INVITE took its final, draw the
-    /// 200 again on the RFC schedule
-    /// ([`cancel_copy_owed`](Self::cancel_copy_owed)). One matching nothing
+    /// transaction is answered 200 and its INVITE 487, the 487 of a re-INVITE
+    /// left to the consumer instead (`consumer_ends_cancelled_reinvite`), and
+    /// `Cancelled` is emitted; `true`. Its copies, once the INVITE took its
+    /// final or while a re-INVITE left open awaits it, draw the 200 again on
+    /// the RFC schedule ([`cancel_copy_owed`](Self::cancel_copy_owed)), never
+    /// handed up. One matching nothing
     /// here is the TU's to answer — a call it holds for a peer may hold the
     /// INVITE the CANCEL names, and only the TU can rebuild that transaction
     /// and re-offer the CANCEL — so it is handed up unanswered as a `Message`
@@ -39,7 +45,13 @@ impl Owner {
     /// answered through it: the 200 settles it, and once it holds a final
     /// (that 200 or the TU's 481) that final answers every copy on one count
     /// (§17.2.2), before any INVITE is looked up, so a copy never cancels an
-    /// INVITE rebuilt on its branch after the CANCEL was answered.
+    /// INVITE rebuilt on its branch after the CANCEL was answered. The
+    /// `Cancelled` a CANCEL from the wire draws for an INVITE filed attributed
+    /// to no call rides the unattributed lane behind that INVITE
+    /// ([`cancelled_lane`](Self::cancelled_lane)): one that finds that lane
+    /// full is dropped before it is answered, `false`, and its copy judged
+    /// afresh. A re-offer's rides the event queue: its consumer took the
+    /// INVITE.
     pub(super) async fn handle_cancel(
         &mut self,
         endpoint: &dyn UdpEndpoint,
@@ -126,18 +138,26 @@ impl Owner {
             .and_then(|t| t.original_request.as_ref())
             .map(|r| (Some(r.cseq().seq()), r.to().tag().is_some()))
             .unwrap_or((None, false));
+        if self.server(id).is_some_and(|t| t.cancel_copies.is_some()) {
+            return self.answer_cancel_copy(endpoint, &req, id, cancel_dest).await;
+        }
+        let lane = if datagram.is_some() { self.cancelled_lane(id) } else { Lane::Events };
+        if !self.lane_has_room(lane) {
+            return false;
+        }
 
         // Resolve (and lazily pin) the UAS To-tag on the matched INVITE: the
         // tag both answers carry, reported upstream with the event.
         let uas_to_tag = self.uas_to_tag_of(id);
         self.note_first_cancel(id);
+        let invite_open = in_dialog && self.consumer_ends_cancelled_reinvite;
 
         // 200 OK to the CANCEL itself. This 200 and the 487 below are the
         // layer's own answers: they carry no header the TU states on its
         // messages.
         // A request whose lines no response can echo draws none.
         let opts = GenerateResponseOpts { to_tag: uas_to_tag.clone(), ..Default::default() };
-        let hold = self.holds_cancel_answers();
+        let hold = self.holds_cancel_answers() || invite_open;
         let cancel_ok = generate_response(&req, 200, "OK", &opts).ok();
         let cancel_ok = cancel_ok.map(|ok| (ok.image().clone(), cancel_dest));
         if let Some((buf, _)) = cancel_ok.as_ref() {
@@ -161,11 +181,8 @@ impl Owner {
                 self.send_buffer(endpoint, call_id.as_str(), &terminated_buf, invite_dest).await;
             }
             self.record_uas_tag(id, &terminated);
-            if let Some(txn) = self.server_mut(id) {
-                txn.state = TxnState::Completed;
-                txn.last_response = Some(terminated_buf);
-                txn.last_response_status = Some(487);
-                txn.original_request = None;
+            if !invite_open {
+                self.complete_with_487(id, terminated_buf);
             }
             // The layer's own final holds the transaction like a TU's: Timer G
             // repeats the 487 until the ACK, Timer H bounds it (§17.2.1);
@@ -180,20 +197,56 @@ impl Owner {
                 from_tag.to_string(),
                 invite_cseq.unwrap_or_default(),
             );
-            self.hold_cancel_answers(&key, held_as, cancel_ok, held_487);
+            let answers = UnsentCancel { cancel_ok, terminated: held_487, held_as, invite_open };
+            self.hold_cancel_answers(&key, answers);
         }
 
         // Critical: the 200 and the 487 are sent or held for this event's turn; a
         // dropped Cancelled would leave the b-leg ringing a cancelled call.
-        self.emit_critical(TransactionEvent::Cancelled {
+        let cancelled = TransactionEvent::Cancelled {
             call_id: call_id.as_str().to_string(),
             from_tag: from_tag.to_string(),
             invite_cseq,
             in_dialog,
             headers: req.headers().to_vec(),
             to_tag: uas_to_tag,
-        });
+        };
+        self.emit_critical_on(lane, cancelled);
         true
+    }
+
+    /// A copy of the CANCEL `req` the still active INVITE server transaction
+    /// `id` already took, its INVITE left open for the consumer's final
+    /// ([`TransactionConfig::consumer_ends_cancelled_reinvite`](crate::TransactionConfig)):
+    /// answered 200 again on the RFC schedule (§17.2.2), handed up never;
+    /// `true`.
+    async fn answer_cancel_copy(
+        &mut self,
+        endpoint: &dyn UdpEndpoint,
+        req: &SipRequest,
+        id: ServerTxnId<'_>,
+        dest: SocketAddr,
+    ) -> bool {
+        if !self.cancel_copy_owed(id) {
+            return true;
+        }
+        let to_tag = self.uas_to_tag_of(id);
+        let opts = GenerateResponseOpts { to_tag, ..Default::default() };
+        if let Ok(ok) = generate_response(req, 200, "OK", &opts) {
+            self.send_buffer(endpoint, req.call_id().as_str(), ok.image(), dest).await;
+        }
+        true
+    }
+
+    /// The INVITE server transaction `id` takes `terminated`, the layer's 487,
+    /// as its final: Completed, its request gone (§17.2.1).
+    pub(super) fn complete_with_487(&mut self, id: ServerTxnId<'_>, terminated: Bytes) {
+        if let Some(txn) = self.server_mut(id) {
+            txn.state = TxnState::Completed;
+            txn.last_response = Some(terminated);
+            txn.last_response_status = Some(487);
+            txn.original_request = None;
+        }
     }
 
     /// A CANCEL received from `src` as `datagram` that names no INVITE here
@@ -201,7 +254,8 @@ impl Owner {
     /// 3261 §9.2, ADR-0063 §1): handed up once, for the TU's 481 or its
     /// re-offer, its copies answered from that transaction on the RFC
     /// schedule. A copy whose transaction left meets the record it left: past
-    /// the schedule it is absorbed. A CANCEL the event queue drops leaves no
+    /// the schedule it is absorbed. A CANCEL the event queue drops, or one the
+    /// TU answers statelessly (`layer::stateless_answer`), leaves no
     /// transaction behind.
     async fn take_stray_cancel(
         &mut self,
@@ -232,6 +286,7 @@ impl Owner {
             state: TxnState::Trying,
             destination: Some(stamped_destination(req.top_via(), src)),
         };
+        let continued = matches!(retired, Retired::Reopens(_));
         let copies = opening_copies(&Method::Cancel, retired);
         self.open_txn_with(head, |txn| txn.copies = Some(copies));
         let event = TransactionEvent::Message {
@@ -242,14 +297,18 @@ impl Owner {
             opened_at: None,
         };
         if !self.emit(event) {
-            self.delete_txn(TxnRef::Server(key.id()));
+            self.forget_unqueued(key.id(), continued);
         }
     }
 
-    /// Whether the answers to a CANCEL with top Via `via` (its 200 and its
-    /// INVITE's 487) are still held: they answer its copies when released.
+    /// Whether the 200 to a CANCEL with top Via `via` is still held: it
+    /// answers the CANCEL's copies when released. Once it left with the 487 of
+    /// an INVITE left open still held, a copy is answered again
+    /// ([`Self::answer_cancel_copy`]).
     fn cancel_answers_held(&self, via: &Via) -> bool {
-        self.cancelled_invite(via, |t| t.unsent_cancel.is_some()).is_some()
+        let held =
+            |t: &Transaction| t.unsent_cancel.as_ref().is_some_and(|u| u.cancel_ok.is_some());
+        self.cancelled_invite(via, held).is_some()
     }
 
     /// Whether the CANCEL `req`'s own server transaction (a stray CANCEL's,

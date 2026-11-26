@@ -7,16 +7,23 @@
 //! nothing on the wire names the cap.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use b2bua::config::{AgeCap, CallCaps, Cap};
 use b2bua::decision::test_adapter::route_to;
 use b2bua::decision::{CallDecisionEngine, CallTreatment, NewCallResponse, ScriptedDecisionEngine};
 use b2bua::limiter::LimiterEntry;
 use b2bua_harness::{settle_until, B2buaScene, B2buaSut};
+use call::MsgpackCodec;
 use scenario_harness::callflow::{ANSWER_SDP, OFFER_SDP};
+use scenario_harness::{ClientReinvite, Dialog, InDialogTxn, ServerTxn};
 use sip_message::generators::InDialogMethod;
 use sip_message::header::HeaderName;
 use sip_message::SipResponse;
+use tokio::time::Instant;
+
+/// alice's re-offer on her answered call (RFC 3264 §8: the version moves on).
+const REOFFER_SDP: &str = "v=0\r\no=alice 1 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 30000 RTP/AVP 0\r\n";
 
 /// Routes to `bob_port` holding `trunk-a`, with a callback context; a
 /// failure fails over to carol (5071), holding `trunk-b`.
@@ -171,7 +178,7 @@ async fn the_default_caps_trip_no_valid_call() {
     assert!(Cap::ALL.iter().all(|c| m.cap_trips_of(*c) == 0));
     assert_eq!(m.cap_peak_of(Cap::Legs), 1);
     assert!(m.cap_peak_of(Cap::Requests) >= 1, "the INFO relay");
-    for cap in [Cap::Timers, Cap::CdrEvents, Cap::ActionsPerTurn] {
+    for cap in [Cap::Timers, Cap::CdrEvents, Cap::ActionsPerTurn, Cap::RecordBytes] {
         assert!(m.cap_peak_of(cap) > 0, "{cap:?} read");
     }
     let _ = s.finish().await;
@@ -282,6 +289,293 @@ const FROM_TAG: &str = "cap-terminating-tag";
 /// The CDR events an answered call of this scene holds: the cap that holds it
 /// exactly there.
 const CDR_EVENTS_ANSWERED: u64 = 3;
+
+/// The record-size cap of the scenes below: well above an answered call's
+/// record, and below the record a relayed INFO leaves when its body alone
+/// is larger, since the record holds the relayed request byte for byte.
+const RECORD_CAP: u64 = 32 << 10;
+
+/// The media type of the INFO bodies that grow a record.
+const INFO_BODY_TYPE: &str = "application/example-binary";
+
+/// alice's INFO on her answered call, carrying a body of `bytes`.
+async fn info_carrying(dialog: &mut Dialog, bytes: u64) -> InDialogTxn {
+    let body = vec![b'x'; usize::try_from(bytes).expect("a body length")];
+    dialog.send_request(InDialogMethod::Info).with_body(INFO_BODY_TYPE, body).send().await
+}
+
+/// A route that would leave the initial turn's record past the record-size
+/// cap trips that turn: bob is never dialled and alice is answered the bare
+/// 503, not the 500 an in-dialog request in hand draws.
+#[tokio::test(start_paused = true)]
+async fn an_initial_record_past_its_size_cap_answers_the_caller_a_bare_503() {
+    let s = scene("cap-record-setup", |c| c.record_bytes = 1).await;
+    let mut call = s.alice.invite(&s.bob).with_sdp(OFFER_SDP).through(s.b2bua.addr).send().await;
+    let (resp, _) = call.try_expect_final(503).await.expect("alice is answered 503");
+    assert_bare_503(&resp);
+    assert!(s.bob.try_receive_tolerating("INVITE", &[]).await.is_none(), "bob is never dialled");
+    assert_ended_by(&s, Cap::RecordBytes, 1).await;
+    let _ = s.finish().await;
+}
+
+/// alice's INFO carries a body larger than the record-size cap: the turn
+/// that would relay it is discarded before its write, so bob never sees the
+/// INFO, alice's is answered 500 and both legs are BYEd. The discarded turn
+/// reads nothing against the other caps: the requests' peak stays the
+/// answered call's, without the relay in flight.
+#[tokio::test(start_paused = true)]
+async fn an_info_growing_the_record_past_its_size_cap_byes_both_legs() {
+    let s = scene("cap-record-answered", |c| c.record_bytes = RECORD_CAP).await;
+    let mut dialog = s.establish().await;
+    let m = s.b2bua.metrics();
+    let answered = m.cap_peak_of(Cap::RecordBytes);
+    assert!(answered > 0 && answered < RECORD_CAP / 2, "the answered call's {answered} B landed");
+    let requests = m.cap_peak_of(Cap::Requests);
+    let mut info = info_carrying(&mut dialog, RECORD_CAP + 1).await;
+    info.expect(500).await;
+    s.alice.receive("BYE").await.respond(200, "OK").await;
+    s.bob.receive("BYE").await.respond(200, "OK").await;
+    assert_ended_by(&s, Cap::RecordBytes, 1).await;
+    assert_eq!(m.cap_peak_of(Cap::Requests), requests, "the discarded relay reads nothing");
+    let _ = s.finish().await;
+}
+
+/// alice's INFO carries the record past half the record-size cap and stays
+/// under it: it is relayed and answered, the write is counted near, and the
+/// call ends with its hangup, no cap tripped.
+#[tokio::test(start_paused = true)]
+async fn a_record_past_half_its_size_cap_lands_and_is_counted_near() {
+    let s = scene("cap-record-near", |c| c.record_bytes = RECORD_CAP).await;
+    let mut dialog = s.establish().await;
+    let m = s.b2bua.metrics();
+    assert_eq!(m.cap_near_of(Cap::RecordBytes), 0, "the answered call is under half the cap");
+    let mut info = info_carrying(&mut dialog, RECORD_CAP * 5 / 8).await;
+    let mut at_bob = s.bob.receive("INFO").await;
+    let relayed = m.cap_peak_of(Cap::RecordBytes);
+    assert!(relayed > RECORD_CAP / 2 && relayed <= RECORD_CAP, "the relay's {relayed} B landed");
+    assert!(m.cap_near_of(Cap::RecordBytes) >= 1, "the relay's write is counted near");
+    at_bob.respond(200, "OK").await;
+    info.expect(200).await;
+    s.hangup(&mut dialog).await;
+    settle_until(|| s.b2bua.is_reaped()).await;
+    assert!(Cap::ALL.iter().all(|c| m.cap_trips_of(*c) == 0));
+    let _ = s.finish().await;
+}
+
+/// A record-size cap no record of these scenes reaches.
+const UNBOUNDED: u64 = 1 << 30;
+
+/// The length of the header texts a ring entry keeps byte for byte.
+const LONG_TEXT: usize = 2048;
+
+/// The scene under the record-size cap of `record_bytes`.
+async fn record_capped(name: &str, record_bytes: u64) -> B2buaScene {
+    B2buaScene::with_b2bua(name, move |bob_port| {
+        B2buaSut::builder(holding_routes(bob_port))
+            .tune(move |c| c.caps.record_bytes = record_bytes)
+    })
+    .await
+}
+
+/// [`record_capped`], its calls keeping their messages in the record, each
+/// entry with its `Reason` and `Warning` values.
+async fn record_capped_ringed(name: &str, record_bytes: u64) -> B2buaScene {
+    B2buaScene::with_b2bua(name, move |bob_port| {
+        B2buaSut::builder(holding_routes(bob_port)).tune(move |c| {
+            c.cdr.message_ring = 32;
+            c.cdr.captured_headers = vec!["Reason".to_string(), "Warning".to_string()];
+            c.caps.record_bytes = record_bytes;
+        })
+    })
+    .await
+}
+
+/// A `Reason` (RFC 3326) carrying a text of [`LONG_TEXT`] bytes.
+fn long_reason() -> String {
+    format!("SIP;cause=487;text=\"{}\"", "x".repeat(LONG_TEXT))
+}
+
+/// A `Warning` (RFC 3261 §20.43) carrying a text of [`LONG_TEXT`] bytes.
+fn long_warning() -> String {
+    format!("399 bob.example \"{}\"", "x".repeat(LONG_TEXT))
+}
+
+/// The largest record the scene's writes held to the record-size cap read.
+fn record_peak(s: &B2buaScene) -> u64 {
+    s.b2bua.metrics().cap_peak_of(Cap::RecordBytes)
+}
+
+/// The encoded size of `call_ref`'s live record.
+fn live_record_bytes(s: &B2buaScene, call_ref: &str) -> u64 {
+    let call = s.b2bua.live_call(call_ref).expect("the call is live");
+    MsgpackCodec::new().encoded_len(&call).expect("the call encodes")
+}
+
+/// A record-size cap one turn alone crosses: `before`, the largest record
+/// written ahead of the turn, stays under it, and `after`, the record the
+/// turn lands, is past it.
+fn cap_between(before: u64, after: u64) -> u64 {
+    assert!(after > before + 1, "the turn grows the record: {before} B, then {after} B");
+    before + (after - before) / 2
+}
+
+/// bob refuses the re-INVITE he holds with a 488 and is ACKed: the time from
+/// his 488 to his ACK.
+async fn refused_and_acked(s: &B2buaScene, uas: &mut ServerTxn) -> Duration {
+    let refused = Instant::now();
+    uas.respond(488, "Not Acceptable Here").with_header("Warning", &long_warning()).await;
+    s.bob.receive("ACK").await;
+    refused.elapsed()
+}
+
+/// bob refuses alice's relayed re-INVITE with a 488, and the record its
+/// turn lands, its ring entry keeping the 488's long `Warning`, crosses the
+/// record-size cap: the turn is discarded, and the ACK the layer holds for
+/// the 488 leaves as soon as on a call under its cap. The verdict's teardown
+/// ends alice's re-INVITE with a 487 and BYEs both legs.
+#[tokio::test(start_paused = true)]
+async fn a_record_trip_on_a_re_invite_s_refusal_acks_it_at_once() {
+    const NAME: &str = "cap-record-reinvite-refusal";
+    let (before, under_cap) = {
+        let s = record_capped_ringed(NAME, UNBOUNDED).await;
+        let mut dialog = s.establish().await;
+        let mut reinvite = dialog.reinvite(Some(REOFFER_SDP)).await;
+        let mut at_bob = s.bob.receive("INVITE").await;
+        let before = record_peak(&s);
+        let under_cap = refused_and_acked(&s, &mut at_bob).await;
+        reinvite.expect(488).await;
+        s.hangup(&mut dialog).await;
+        let _ = s.finish().await;
+        (before, under_cap)
+    };
+
+    let cap = before + u64::try_from(LONG_TEXT / 2).expect("a length");
+    let s = record_capped_ringed(NAME, cap).await;
+    let mut dialog = s.establish().await;
+    let mut reinvite = dialog.reinvite(Some(REOFFER_SDP)).await;
+    let mut at_bob = s.bob.receive("INVITE").await;
+    let waited = refused_and_acked(&s, &mut at_bob).await;
+    assert!(waited <= under_cap, "bob's 488 is ACKed after {waited:?}, not {under_cap:?}");
+    reinvite.expect(487).await;
+    s.alice.receive("BYE").await.respond(200, "OK").await;
+    s.bob.receive("BYE").await.respond(200, "OK").await;
+    assert_ended_by(&s, Cap::RecordBytes, 1).await;
+    let _ = s.finish().await;
+}
+
+/// alice CANCELs her re-INVITE and is answered 200: the time from her CANCEL
+/// to its 200.
+async fn cancelled(reinvite: &mut ClientReinvite) -> Duration {
+    let cancelled = Instant::now();
+    reinvite.cancel().await.expect(200).await;
+    cancelled.elapsed()
+}
+
+/// alice CANCELs her re-INVITE, relayed to bob and answered 100 there, and
+/// the record the CANCEL's turn lands crosses the record-size cap: the turn
+/// is discarded, and the layer's 200 to the CANCEL leaves as soon as on a
+/// call under its cap, its 487 to the re-INVITE behind it. The verdict's
+/// teardown CANCELs the re-INVITE bob holds and BYEs both legs.
+#[tokio::test(start_paused = true)]
+async fn a_record_trip_on_a_re_invite_s_cancel_answers_it_at_once() {
+    const NAME: &str = "cap-record-reinvite-cancel";
+    let (before, after, under_cap) = {
+        let s = record_capped(NAME, UNBOUNDED).await;
+        let mut dialog = s.establish().await;
+        let mut reinvite = dialog.reinvite(Some(REOFFER_SDP)).await;
+        let mut at_bob = s.bob.receive("INVITE").await;
+        at_bob.respond(100, "Trying").await;
+        let before = record_peak(&s);
+        let under_cap = cancelled(&mut reinvite).await;
+        let after = record_peak(&s);
+        s.bob.receive("CANCEL").await.respond(200, "OK").await;
+        at_bob.respond(487, "Request Terminated").await;
+        s.bob.receive("ACK").await;
+        reinvite.expect(487).await;
+        s.hangup(&mut dialog).await;
+        let _ = s.finish().await;
+        (before, after, under_cap)
+    };
+
+    let s = record_capped(NAME, cap_between(before, after)).await;
+    let mut dialog = s.establish().await;
+    let mut reinvite = dialog.reinvite(Some(REOFFER_SDP)).await;
+    let mut at_bob = s.bob.receive("INVITE").await;
+    at_bob.respond(100, "Trying").await;
+    let waited = cancelled(&mut reinvite).await;
+    assert!(waited <= under_cap, "alice's CANCEL is answered after {waited:?}, not {under_cap:?}");
+    reinvite.expect(487).await;
+
+    s.alice.receive("BYE").await.respond(200, "OK").await;
+    let mut bob_cancel = s.bob.receive("CANCEL").await;
+    let mut bob_bye = s.bob.receive("BYE").await;
+    bob_cancel.respond(200, "OK").await;
+    at_bob.respond(487, "Request Terminated").await;
+    s.bob.receive("ACK").await;
+    bob_bye.respond(200, "OK").await;
+    assert_ended_by(&s, Cap::RecordBytes, 1).await;
+    let _ = s.finish().await;
+}
+
+/// alice CANCELs her call while bob rings, and the record her CANCEL's turn
+/// lands crosses the record-size cap: that turn ends the call, which the cap
+/// never holds, so bob is CANCELled, alice is answered 487 and the call ends
+/// with one CDR, no cap tripped.
+#[tokio::test(start_paused = true)]
+async fn a_cancel_ending_a_call_past_its_record_size_cap_lands() {
+    const NAME: &str = "cap-record-cancel";
+    const CALL_ID: &str = "cap-record-cancel@127.0.0.1";
+    const FROM_TAG: &str = "cap-record-cancel-tag";
+    let call_ref = call::derive_call_ref("w0", CALL_ID, FROM_TAG);
+    let reason = long_reason();
+    let (before, after) = {
+        let s = record_capped_ringed(NAME, UNBOUNDED).await;
+        let mut call = s
+            .alice
+            .invite(&s.bob)
+            .identity(CALL_ID, FROM_TAG)
+            .with_sdp(OFFER_SDP)
+            .through(s.b2bua.addr)
+            .send()
+            .await;
+        let mut uas = s.bob.receive("INVITE").await;
+        uas.respond(180, "Ringing").await;
+        call.expect(180).await;
+        let before = record_peak(&s);
+        call.cancel_stating(&[("Reason", &reason)]).await.expect(200).await;
+        call.expect(487).await;
+        let mut at_bob = s.bob.receive("CANCEL").await;
+        let after = live_record_bytes(&s, &call_ref);
+        at_bob.respond(200, "OK").await;
+        uas.respond(487, "Request Terminated").await;
+        s.bob.receive("ACK").await;
+        let _ = s.finish().await;
+        (before, after)
+    };
+
+    let s = record_capped_ringed(NAME, cap_between(before, after)).await;
+    let mut call = s
+        .alice
+        .invite(&s.bob)
+        .identity(CALL_ID, FROM_TAG)
+        .with_sdp(OFFER_SDP)
+        .through(s.b2bua.addr)
+        .send()
+        .await;
+    let mut uas = s.bob.receive("INVITE").await;
+    uas.respond(180, "Ringing").await;
+    call.expect(180).await;
+    call.cancel_stating(&[("Reason", &reason)]).await.expect(200).await;
+    call.expect(487).await;
+    s.bob.receive("CANCEL").await.respond(200, "OK").await;
+    uas.respond(487, "Request Terminated").await;
+    s.bob.receive("ACK").await;
+    settle_until(|| s.b2bua.is_reaped()).await;
+    assert_eq!(s.b2bua.cdr_records().len(), 1, "one CDR");
+    let m = s.b2bua.metrics();
+    assert!(Cap::ALL.iter().all(|c| m.cap_trips_of(*c) == 0), "no cap trips");
+    let _ = s.finish().await;
+}
 
 /// A turn that grows a collection across half its cap is counted, and lands.
 #[tokio::test(start_paused = true)]

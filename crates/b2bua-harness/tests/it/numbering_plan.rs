@@ -200,6 +200,9 @@ async fn direct_reject_carries_reason_header() {
 
 // ── 4. Direct 302 redirect carrying an ordered Contact list ──────────────────
 
+/// The caller reads each Contact as RFC 3261 §20.10 states it: a URI parameter
+/// inside the brackets, `q` and `expires` the Contact's own parameters, in the
+/// order the decision listed them.
 #[tokio::test]
 async fn direct_302_redirect_carries_contact_list() {
     let h = Harness::with_transit_delay("plan-redirect", 1);
@@ -212,7 +215,8 @@ async fn direct_302_redirect_carries_contact_list() {
         "code": 302,
         "reason": "Moved Temporarily",
         "contacts": [
-            {"uri": "sip:primary@alt1.example", "q": 1.0},
+            {"uri": "sip:primary@alt1.example;transport=tcp", "q": 1.0,
+                "params": [{"name": "expires", "value": "60"}]},
             {"uri": "sip:backup@alt2.example", "q": 0.5}
         ]
     })
@@ -230,10 +234,13 @@ async fn direct_302_redirect_carries_contact_list() {
     assert_eq!(resp.status(), 302);
     let contacts = resp.list::<Contact>().expect("readable Contact list");
     assert_eq!(contacts.len(), 2, "two Contact headers: {contacts:?}");
-    assert_eq!(contacts[0].uri().text(), "sip:primary@alt1.example");
+    assert_eq!(contacts[0].uri().text(), "sip:primary@alt1.example;transport=tcp");
     assert_eq!(contacts[0].param("q").and_then(ParamValue::as_str), Some("1"));
+    assert_eq!(contacts[0].param("expires").and_then(ParamValue::as_str), Some("60"));
+    assert_eq!(contacts[0].param("transport"), None);
     assert_eq!(contacts[1].uri().text(), "sip:backup@alt2.example");
     assert_eq!(contacts[1].param("q").and_then(ParamValue::as_str), Some("0.5"));
+    assert_eq!(contacts[1].param("expires"), None);
     settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
     finish_with_report(h).await;
@@ -241,6 +248,7 @@ async fn direct_302_redirect_carries_contact_list() {
 
 // ── 5. Reroute exhaustion → adapter-chosen 302 redirect ──────────────────────
 
+/// The failure consult's redirect reaches the caller with its contact-params.
 #[tokio::test]
 async fn reroute_exhaustion_redirects_caller() {
     let h = Harness::with_transit_delay("plan-exhaust-redirect", 1);
@@ -255,7 +263,8 @@ async fn reroute_exhaustion_redirects_caller() {
         "on_exhausted": {
             "action": "redirect",
             "code": 302,
-            "contacts": [{"uri": "sip:overflow@alt.example", "q": 1.0}]
+            "contacts": [{"uri": "sip:overflow@alt.example", "q": 1.0,
+                "params": [{"name": "expires", "value": "120"}]}]
         }
     })
     .to_string();
@@ -275,10 +284,11 @@ async fn reroute_exhaustion_redirects_caller() {
     let resp = call.expect(302).await;
     assert_eq!(resp.status(), 302);
     let contacts = resp.list::<Contact>().expect("readable Contact list");
-    assert!(
-        contacts.iter().any(|c| c.uri().text() == "sip:overflow@alt.example"),
-        "exhaustion redirect Contact present: {contacts:?}"
-    );
+    let overflow = contacts
+        .iter()
+        .find(|c| c.uri().text() == "sip:overflow@alt.example")
+        .unwrap_or_else(|| panic!("exhaustion redirect Contact present: {contacts:?}"));
+    assert_eq!(overflow.param("expires").and_then(ParamValue::as_str), Some("120"));
     settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
     finish_with_report(h).await;

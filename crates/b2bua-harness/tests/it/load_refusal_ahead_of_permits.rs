@@ -150,7 +150,8 @@ async fn a_load_refusal_does_not_wait_behind_a_held_new_call_share() {
 /// A new INVITE admitted at ingress counts against the live-call ceiling from
 /// its admission, before its turn — waiting behind the held new-call share —
 /// creates its call. With the ceiling one above the stalled calls, the next
-/// INVITE is admitted and waits; the one after it is refused 503 at once.
+/// INVITE is admitted and waits; the one after it is refused 503 at once. The
+/// one waiting is refused at its start bound.
 #[tokio::test(start_paused = true)]
 async fn a_queued_new_call_counts_against_the_call_ceiling() {
     let (release, released) = watch::channel(false);
@@ -180,7 +181,7 @@ async fn a_queued_new_call_counts_against_the_call_ceiling() {
 
     // Admitted: its turn waits for a new-call permit, no call yet.
     let dave = s.h.agent("dave", "127.0.0.1:5066").await;
-    pending.push(dave.invite(&s.bob).with_sdp(OFFER_SDP).through(s.b2bua.addr).send().await);
+    let mut waiting = dave.invite(&s.bob).with_sdp(OFFER_SDP).through(s.b2bua.addr).send().await;
     s.h.advance(Duration::from_millis(100)).await;
     assert_eq!(s.b2bua.active_calls(), STALLED, "the admitted INVITE's turn has not run");
 
@@ -190,6 +191,8 @@ async fn a_queued_new_call_counts_against_the_call_ceiling() {
     assert_eq!(s.b2bua.new_calls().rejected(Refusal::CapacityCalls, Class::Normal), 1);
 
     s.b2bua.capacity().configure(&CapacityConfig::default());
+    waiting.expect(503).await;
+    assert_eq!(s.b2bua.new_calls().rejected(Refusal::StartBound, Class::Normal), 1);
     for invite in &mut pending {
         cancel(invite).await;
     }

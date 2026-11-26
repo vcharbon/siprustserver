@@ -14,7 +14,7 @@ use super::peer_dialogs::RELAYED;
 /// How long after an endpoint takes the first 2xx to its INVITE an early
 /// dialog of another branch still stands: §13.2.2.4 has the UAC terminate the
 /// early dialogs no 2xx confirmed 64·T1 (32 s) after that first 2xx.
-pub const EARLY_DIALOG_WINDOW_US: u64 = 32_000_000;
+pub const EARLY_DIALOG_WINDOW_US: u64 = super::super::T1_64_US;
 
 /// **§12.2.1.1 / §12.1.2 — a request taken inside a confirmed dialog carries
 /// that dialog's remote tag in From.** The 2xx that confirms a dialog fixes

@@ -122,8 +122,6 @@ impl Memo {
 }
 
 impl Refused {
-    /// The first arrival at `now_ms` of a `method` request, answered `answer` under
-    /// `to_tag`.
     pub(super) fn first(
         method: &Method,
         now_ms: u64,

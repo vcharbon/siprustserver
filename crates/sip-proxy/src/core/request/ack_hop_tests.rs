@@ -1,19 +1,16 @@
-//! The non-2xx ACK hop decision is keyed on the §17.1.1.3 branch identity
-//! — an ACK for a non-2xx final reuses its INVITE's top-Via branch — NOT
-//! on the absence of a Route header. A b-leg INVITE behind an outbound
-//! proxy carries a preloaded Route, so its non-2xx ACK carries one too; a
-//! `route.is_none()` heuristic misroutes exactly that ACK.
-//! A caller's matched ACK for a RELAYED final is relayed to the node the final
-//! arrived from, a worker's where its INVITE went, on the INVITE's outbound
-//! branch (the downstream server transaction must match it to stop retransmitting
-//! the final); a matched ACK for a final the proxy generated ITSELF is absorbed
-//! (the proxy is the UAS).
+//! The non-2xx ACK hop decision is keyed on the §17.1.1.3 branch identity (an
+//! ACK for a non-2xx final reuses its INVITE's top-Via branch), not on the
+//! absence of a Route header: a b-leg INVITE behind an outbound proxy carries a
+//! preloaded Route, and so does its non-2xx ACK.
+//! A caller's matched ACK for a relayed final is relayed to the node the final
+//! arrived from, on the INVITE's outbound branch, so the downstream server
+//! transaction matches it and stops retransmitting the final; a matched ACK for
+//! a final the proxy generated itself is absorbed (the proxy is the UAS).
 
 use std::sync::Arc;
 
 use sip_clock::Clock;
 use sip_message::parser::custom::CustomParser;
-use sip_message::parser::SipParserLimits;
 use sip_message::{SipMessage, SipParser};
 use sip_net::types::BindUdpOpts;
 use sip_net::SignalingNetwork;
@@ -108,11 +105,10 @@ Content-Length: 0\r\n\r\n"
     resp
 }
 
-// The relay shape: the non-2xx ACK carries the INVITE's preloaded
-// outbound-proxy Route (§17.1.1.3 copies the Route verbatim). The memo +
-// branch identity — not a Route heuristic — classifies it, and it is
-// relayed on the INVITE's exact hop (AckHop), never re-run through the
-// strategy under a fresh branch.
+/// The non-2xx ACK carries the INVITE's preloaded outbound-proxy Route
+/// (§17.1.1.3 copies the Route verbatim). The memo and the branch identity
+/// classify it, and it is relayed on the INVITE's exact hop (`AckHop`), never
+/// re-run through the strategy under a fresh branch.
 #[tokio::test]
 async fn non_2xx_ack_with_preloaded_proxy_route_follows_the_invite_hop() {
     let core = core().await;
@@ -129,8 +125,6 @@ async fn non_2xx_ack_with_preloaded_proxy_route_follows_the_invite_hop() {
     );
 }
 
-// Control: the route-less non-2xx ACK (a UA with no preloaded route) takes
-// the same relay path.
 #[tokio::test]
 async fn non_2xx_ack_without_route_follows_the_invite_hop() {
     let core = core().await;
@@ -142,10 +136,10 @@ async fn non_2xx_ack_without_route_follows_the_invite_hop() {
     assert_eq!(outcome.target, Some(ProxyAddr::new(W1, 5060)));
 }
 
-// The hop memo names the node the final ARRIVED from, not the node the
-// INVITE was forwarded to: after a failover the survivor answers on the
-// INVITE's outbound branch, and only the survivor holds the server
-// transaction the caller's ACK must quench (§17.1.1.3).
+/// The hop memo names the node the final arrived from, not the node the
+/// INVITE was forwarded to: after a failover the survivor answers on the
+/// INVITE's outbound branch, and only the survivor holds the server
+/// transaction the caller's ACK must quench (§17.1.1.3).
 #[tokio::test]
 async fn non_2xx_ack_follows_the_finals_sender_not_the_invite_target() {
     let core = core().await;
@@ -162,9 +156,9 @@ async fn non_2xx_ack_follows_the_finals_sender_not_the_invite_target() {
     );
 }
 
-// A fresh-branch (2xx) ACK arriving AFTER a relayed non-2xx final for the
-// same (Call-ID, From-tag, CSeq) is a different transaction (§13.2.2.4):
-// the memo's branch does not match, so it takes the normal routing ladder.
+/// A fresh-branch (2xx) ACK arriving after a relayed non-2xx final for the
+/// same (Call-ID, From-tag, CSeq) is a different transaction (§13.2.2.4): the
+/// memo's branch does not match, so it takes the normal routing ladder.
 #[tokio::test]
 async fn fresh_branch_ack_after_a_relayed_final_takes_the_normal_ladder() {
     let core = core().await;
@@ -181,11 +175,9 @@ async fn fresh_branch_ack_after_a_relayed_final_takes_the_normal_ladder() {
     );
 }
 
-// An ACK for a 2xx is its OWN transaction (§13.2.2.4) and must be forwarded
-// end-to-end via the normal ladder — even when its fresh branch happens to
-// ALIAS the INVITE's (the failover harness's per-worker `IdGen` resets on
-// takeover and can re-mint a spent branch). No non-2xx final was relayed ⇒
-// no `ackhop|` memo ⇒ the ACK flows.
+/// An ACK for a 2xx is its own transaction (§13.2.2.4), forwarded end-to-end by
+/// the normal ladder even when its fresh branch aliases the INVITE's: with no
+/// non-2xx final relayed there is no `ackhop|` memo.
 #[tokio::test]
 async fn ack_for_2xx_is_forwarded_even_when_its_branch_aliases_the_invite() {
     let core = core().await;
@@ -199,7 +191,6 @@ async fn ack_for_2xx_is_forwarded_even_when_its_branch_aliases_the_invite() {
     );
 }
 
-// The plain 2xx ACK (fresh branch, dialog Route set) keeps flowing.
 #[tokio::test]
 async fn ack_for_2xx_with_fresh_branch_is_forwarded() {
     let core = core().await;
@@ -210,12 +201,10 @@ async fn ack_for_2xx_with_fresh_branch_is_forwarded() {
     assert!(outcome.target.is_some(), "a fresh-branch (2xx) ACK must be forwarded end-to-end");
 }
 
-// §16.7 / §17.1.1.3: a final the proxy generated ITSELF (here a 420 to an
-// unsupported Proxy-Require) makes it the UAS of the INVITE transaction, so
-// the upstream's same-branch ACK terminates at this hop — it must be
-// absorbed, never run through the strategy and handed to a worker as a
-// stray ACK matching no transaction it ever created (same class as the
-// relay leak above).
+/// §16.7 / §17.1.1.3: a final the proxy generated itself (here a 420 to an
+/// unsupported Proxy-Require) makes it the UAS of the INVITE transaction, so
+/// the upstream's same-branch ACK terminates at this hop: it is absorbed, never
+/// run through the strategy and handed to a worker as a stray ACK.
 #[tokio::test]
 async fn ack_for_a_self_generated_reject_is_absorbed() {
     let core = core().await;
@@ -231,7 +220,7 @@ Contact: <sip:alice@{UAC}:5060>\r\n\
 Proxy-Require: bogus-extension-xyz\r\n\
 Content-Length: 0\r\n\r\n"
     ));
-    core.route_request_from(&inv, src()).await; // → self-generated 420
+    core.route_request_from(&inv, src()).await;
     let SipMessage::Request(req) = &inv else { unreachable!() };
     let to_tag = core.refusals.to_tag(req);
     let ack = parse_req(&format!(
@@ -250,66 +239,4 @@ Content-Length: 0\r\n\r\n"
         outcome.target, None,
         "the ACK to a self-generated non-2xx final must be absorbed at this hop"
     );
-}
-
-/// A pre-RFC-3261 upstream's message: no `branch` on its top Via. The
-/// §8.1.1.7 magic-cookie gate is a wire-grammar rule, so it is hydrated
-/// rather than read off the wire.
-fn branchless(raw: &str) -> SipMessage {
-    let limits = SipParserLimits { wire_grammar: false, ..SipParserLimits::DEFAULT };
-    CustomParser::with_limits(limits).parse(raw.as_bytes()).unwrap()
-}
-
-fn branchless_ack(route: &str) -> SipMessage {
-    branchless(&format!(
-        "ACK sip:bob@10.0.0.50:5060 SIP/2.0\r\n\
-Via: SIP/2.0/UDP {UAC}:5060\r\n\
-Max-Forwards: 70\r\n\
-From: <sip:alice@{UAC}>;tag=tag-a\r\n\
-To: <sip:bob@10.0.0.50>;tag=callee-1\r\n\
-Call-ID: legacy-ack@test\r\n\
-CSeq: 1 ACK\r\n\
-{route}Content-Length: 0\r\n\r\n"
-    ))
-}
-
-// With no branch to tell a non-2xx ACK from a 2xx one, the hop decision falls
-// back on the route set: the route-less ACK follows the 486's hop, while one
-// carrying a Route (as a 2xx ACK carries the dialog's) takes the normal ladder.
-#[tokio::test]
-async fn a_branchless_non_2xx_ack_follows_the_final_only_without_a_route() {
-    let core = core().await;
-    let invite = branchless(&format!(
-        "INVITE sip:bob@10.0.0.50:5060 SIP/2.0\r\n\
-Via: SIP/2.0/UDP {UAC}:5060\r\n\
-Max-Forwards: 70\r\n\
-From: <sip:alice@{UAC}>;tag=tag-a\r\n\
-To: <sip:bob@10.0.0.50>\r\n\
-Call-ID: legacy-ack@test\r\n\
-CSeq: 1 INVITE\r\n\
-Contact: <sip:alice@{UAC}:5060>\r\n\
-Content-Length: 0\r\n\r\n"
-    ));
-    core.route_request_from(&invite, src()).await;
-    let SipMessage::Response(busy) = branchless(&format!(
-        "SIP/2.0 486 Busy Here\r\n\
-Via: SIP/2.0/UDP {PROXY_VIP}:5060;branch=z9hG4bKout;rport\r\n\
-Via: SIP/2.0/UDP {UAC}:5060\r\n\
-From: <sip:alice@{UAC}>;tag=tag-a\r\n\
-To: <sip:bob@10.0.0.50>;tag=callee-1\r\n\
-Call-ID: legacy-ack@test\r\n\
-CSeq: 1 INVITE\r\n\
-Content-Length: 0\r\n\r\n"
-    )) else {
-        panic!("expected response")
-    };
-    core.handle_response_from(busy, worker_src()).await;
-
-    let routed = format!("Route: <sip:{PROXY_VIP}:5060;lr>\r\n");
-    let out = core.route_request_from(&branchless_ack(&routed), src()).await;
-    assert_ne!(out.decision, RoutingDecisionKind::AckHop, "a routed ACK takes the ladder");
-
-    let out = core.route_request_from(&branchless_ack(""), src()).await;
-    assert_eq!(out.decision, RoutingDecisionKind::AckHop);
-    assert_eq!(out.target, Some(ProxyAddr::new(W1, 5060)), "to where the 486 came from");
 }

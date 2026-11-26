@@ -1,7 +1,8 @@
 // Own binary (ADR-0030 X2): installs jemalloc as the global allocator and re-runs itself per configuration.
 //! The allocator's footprint under a transaction-table allocation pattern on a
-//! multi-thread runtime, per resolved jemalloc configuration, and the defaults
-//! a binary linking this crate resolves with no operator setting.
+//! multi-thread runtime, per resolved jemalloc configuration, the defaults
+//! a binary linking this crate resolves with no operator setting, and what one
+//! thread's held-bytes reading counts.
 //!
 //! jemalloc reads `_RJEM_MALLOC_CONF` once, before `main`, so each case
 //! re-executes this test binary with the configuration under test and reads
@@ -252,4 +253,40 @@ fn a_binary_linking_the_crate_resolves_its_defaults_without_any_setting() {
     let out = child(TEST, Some("narenas:2"));
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("opt.narenas=2 thp=never dirty=1000 muzzy=1000"), "{stdout}");
+}
+
+/// A thread's held bytes count its own allocations alone: while it keeps a
+/// buffer, another thread frees a larger heap, which lowers the process-wide
+/// `stats.allocated` below its first reading, and the thread's reading still
+/// rises by the buffer alone: a larger buffer it allocates and frees in the
+/// same window leaves no trace.
+#[test]
+fn a_thread_reads_the_buffer_it_keeps_whatever_another_thread_frees() {
+    const KEPT: usize = 1 << 20;
+    const SLACK: u64 = 64 << 10;
+    let (heap_tx, heap_rx) = std::sync::mpsc::channel::<Vec<Vec<u8>>>();
+    let (freed_tx, freed_rx) = std::sync::mpsc::channel::<()>();
+    let other = std::thread::spawn(move || {
+        let heap = heap_rx.recv().expect("the heap");
+        drop(heap);
+        freed_tx.send(()).expect("the freed signal");
+    });
+    let heap: Vec<Vec<u8>> = (0..16).map(|_| vec![1u8; 4 * KEPT]).collect();
+
+    let process_before = jemalloc_stats::footprint_bytes().expect("jemalloc answers").0;
+    let held_before = jemalloc_stats::thread_held_bytes().expect("jemalloc answers");
+    let kept = vec![1u8; KEPT];
+    drop(std::hint::black_box(vec![1u8; 8 * KEPT]));
+    heap_tx.send(heap).expect("the heap sent");
+    freed_rx.recv().expect("the other thread freed its heap");
+    let held = jemalloc_stats::thread_held_bytes().expect("jemalloc answers") - held_before;
+    let process_after = jemalloc_stats::footprint_bytes().expect("jemalloc answers").0;
+    other.join().expect("the other thread ends");
+
+    assert!(process_after < process_before, "the other thread's free lowers stats.allocated");
+    assert!(
+        u64::try_from(held).is_ok_and(|h| h.abs_diff(KEPT as u64) <= SLACK),
+        "the thread holds {held} B for a {KEPT} B buffer"
+    );
+    drop(kept);
 }

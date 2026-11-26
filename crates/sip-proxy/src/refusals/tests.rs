@@ -38,7 +38,6 @@ fn answered(repeat: Option<Repeat>) -> Option<SipResponse> {
     }
 }
 
-/// The wire form of a refusal that must be built.
 fn refusal_wire(resp: Result<SipResponse, GenerateError>) -> String {
     wire(resp.expect("a refusal"))
 }
@@ -94,8 +93,6 @@ fn a_refusal_is_forgotten_after_64_t1_or_past_capacity() {
     r.refuse(&invite("z9hG4bK-a"), SRC, 1, 0).expect("a refusal");
     assert!(r.repeat(&invite("z9hG4bK-a"), SRC, TIMER_B).is_none());
 
-    // One refusal per stripe: of 100 refused, at most one per stripe stays,
-    // and the latest is always among them.
     let small = Refusals::with_capacity(&IdGen::seeded(1), 0, 1);
     for i in 0..100 {
         small.refuse(&invite(&format!("z9hG4bK-{i}")), SRC, 1, 0).expect("a refusal");

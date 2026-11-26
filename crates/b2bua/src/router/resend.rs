@@ -75,7 +75,7 @@ pub(super) async fn resend_turn(
     );
     let now_ms = ctx.clock.now_ms();
     let turn = &"the re-send of the requests the call awaits";
-    commit_turn(ctx, call_ref, result, now_ms, turn, None).await;
+    commit_turn(ctx, call_ref, result, now_ms, turn, None, None).await;
 }
 
 #[cfg(test)]

@@ -41,6 +41,12 @@ export interface RfcFacts {
    */
   readonly tryingOnNonInviteSteps: ReadonlyMap<string, number>
   /**
+   * The {@link tryingOnNonInviteSteps} steps answering a BYE the party sent
+   * after its CANCEL and before any final to its INVITE, which a 200 answers
+   * as well — see {@link tryingOnEarlyByeSteps}.
+   */
+  readonly tryingOnEarlyByeSteps: ReadonlySet<string>
+  /**
    * BYE expects on a callee's early dialog the caller both CANCELled and BYEd —
    * see {@link byeBesideCancelSteps}.
    */
@@ -149,8 +155,35 @@ export const roundsPastReleaseSteps = ({ facts }: DocumentReading): ReadonlySet<
  * CANCEL ended the early dialog (§12.2.2), else 200. A step whose scripted
  * final differs is no member.
  */
-export const tryingOnNonInviteSteps = ({ facts }: DocumentReading): ReadonlyMap<string, number> => {
-  const out = new Map<string, number>()
+export const tryingOnNonInviteSteps = (document: DocumentReading): ReadonlyMap<string, number> =>
+  new Map(tryingRows(document).map((row) => [row.step, row.owed]))
+
+/**
+ * `trying-on-non-invite-not-reproduced`: the {@link tryingOnNonInviteSteps}
+ * steps answering a BYE the party sent after its own CANCEL and before any
+ * final to its INVITE, in the document and in the run's wire order alike
+ * (`RunShape.byeAheadOfInviteFinal`). The early dialog still stood when that
+ * BYE reached the system (RFC 3261 §15), so 200 is owed as much as the 481
+ * that the CANCEL's 487 leaves (§12.2.2). A BYE sent after a final stays 481
+ * alone.
+ */
+export const tryingOnEarlyByeSteps = (document: DocumentReading, run: Classifier.RunShape): ReadonlySet<string> =>
+  new Set(
+    tryingRows(document)
+      .filter((row) => row.early && run.byeAheadOfInviteFinal.has(row.leg))
+      .map((row) => row.step)
+  )
+
+/** One {@link tryingOnNonInviteSteps} member: its leg and final, and whether the document sends its BYE ahead of the INVITE's final. */
+interface TryingRow {
+  readonly step: string
+  readonly leg: string
+  readonly owed: number
+  readonly early: boolean
+}
+
+const tryingRows = ({ facts }: DocumentReading): ReadonlyArray<TryingRow> => {
+  const out: Array<TryingRow> = []
   for (const leg of facts.legs.values()) {
     for (const [i, e] of leg.entries.entries()) {
       const method = e.method
@@ -159,15 +192,17 @@ export const tryingOnNonInviteSteps = ({ facts }: DocumentReading): ReadonlyMap<
       if (sent === undefined) continue
       const before = leg.entries.filter((x) => x.index < sent.index)
       const finals = before.filter((x) => isFinalTo(x, "INVITE") && !x.inDialog)
+      const cancelled = before.some((x) => !x.bySystem && isRequestOf(x, "CANCEL"))
       const owed = method === "CANCEL" || finals.some((x) => x.status! < 300)
         ? 200
-        : finals.length > 0 || before.some((x) => !x.bySystem && isRequestOf(x, "CANCEL"))
+        : finals.length > 0 || cancelled
         ? 481
         : 200
       const later = leg.entries.slice(i + 1)
       const next = later.findIndex((x) => !x.bySystem && isRequestOf(x, method))
       const scripted = (next === -1 ? later : later.slice(0, next)).find((x) => x.bySystem && isFinalTo(x, method))
-      if (scripted === undefined || scripted.status === owed) out.set(e.step.id, owed)
+      const early = method === "BYE" && finals.length === 0 && cancelled
+      if (scripted === undefined || scripted.status === owed) out.push({ step: e.step.id, leg: leg.leg, owed, early })
     }
   }
   return out
@@ -282,6 +317,30 @@ export const referOutcomeAtStep = ({ facts }: DocumentReading, run: Classifier.R
   return out
 }
 
+/** Whether `r` is a NOTIFY no step of the flow claimed. */
+const unclaimedNotify = (r: Classifier.Reception): boolean => r.method === "NOTIFY" && r.step === undefined
+
+/**
+ * `refer-progress-terminal-notify`: whether a NOTIFY the flow never scripted,
+ * seen at `step`, is the one terminal NOTIFY of a {@link referOutcomeAtStep}
+ * outcome: the leg of the outcome's step received exactly one NOTIFY no step
+ * claimed after the progress NOTIFY that step took, and `step` rides that leg
+ * after it. A probe no step holds sits on no leg, so it is that NOTIFY only
+ * where no other leg received one no step claimed.
+ */
+export const referTerminalNotifyAt = ({ referOutcomeAtStep, facts }: RfcFacts, step: string): boolean => {
+  const order = [...facts.legOfStep.keys()]
+  const unclaimed = [...facts.run.receptions.values()].flat().filter(unclaimedNotify).length
+  return [...referOutcomeAtStep.keys()].some((outcome) => {
+    const leg = facts.legOfStep.get(outcome)
+    const received = (leg === undefined ? undefined : facts.run.receptions.get(leg)) ?? []
+    const progress = received.findIndex((r) => r.step === outcome && r.method === "NOTIFY")
+    if (progress < 0 || received.slice(progress + 1).filter(unclaimedNotify).length !== 1) return false
+    if (!facts.legOfStep.has(step)) return unclaimed === 1
+    return facts.legOfStep.get(step) === leg && order.indexOf(step) > order.indexOf(outcome)
+  })
+}
+
 /**
  * `trying-provisional-unscripted`: every system response but a `100` to an
  * INVITE the party sent, where the document scripts no `100` since that INVITE:
@@ -338,6 +397,7 @@ export const rfcFactsOf = (document: DocumentReading, run: Classifier.RunShape):
   releasedLegSteps: releasedLegSteps(document),
   roundsPastReleaseSteps: roundsPastReleaseSteps(document),
   tryingOnNonInviteSteps: tryingOnNonInviteSteps(document),
+  tryingOnEarlyByeSteps: tryingOnEarlyByeSteps(document, run),
   byeBesideCancelSteps: byeBesideCancelSteps(document),
   cancelPastAnswerSteps: cancelPastAnswerSteps(document, run),
   cancelCrossingAnswerSteps: cancelCrossingAnswerSteps(document),

@@ -10,7 +10,6 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use async_trait::async_trait;
 use common::ProxySut;
 use load_shed::simulated;
 use scenario_harness::{Harness, WaiverScope};
@@ -105,7 +104,7 @@ async fn lossy_caller(h: &Harness, lose: u32) -> (Box<dyn UdpEndpoint>, Arc<Mute
             PreIngressAction::Accept
         }
     });
-    let (ep, _) = h.bind_sut_with_opts("alice", ALICE, sip_net::all_ua_roles(), Some(hook)).await;
+    let (ep, _) = h.bind_peer_with_pre_ingress("alice", ALICE, hook).await;
     (ep, lost)
 }
 
@@ -148,7 +147,7 @@ fn assert_one_refusal(lost: &[Vec<u8>], last: &[u8]) -> SipResponse {
 #[tokio::test(start_paused = true)]
 async fn a_copy_of_a_self_gate_refusal_draws_the_same_503_after_the_bucket_refills() {
     let h = Harness::with_transit_delay("refused-invite-copies-self-gate", 1);
-    let (bob, _) = h.bind_sut("bob", BOB).await;
+    let (bob, _) = h.bind_peer("bob", BOB).await;
     let gate = Arc::new(EluCpsGate::new(
         Arc::new(simulated().0),
         ProxySelfGateConfig { cps_bucket_size: 1, cps_bucket_rate: 1, ..Default::default() },
@@ -203,12 +202,11 @@ impl RefuseThenForward {
     }
 }
 
-#[async_trait]
 impl RoutingStrategy for RefuseThenForward {
     fn name(&self) -> &str {
         "RefuseThenForward"
     }
-    async fn select_for_new_dialog(
+    fn select_for_new_dialog(
         &self,
         _msg: &SipMessage,
         _opts: SelectOpts,
@@ -218,7 +216,7 @@ impl RoutingStrategy for RefuseThenForward {
         }
         Ok(ProxyAddr::from(BOB.parse::<SocketAddr>().unwrap()))
     }
-    async fn decode_stickiness(&self, _params: &RouteParams, _msg: &SipMessage) -> DecodeResult {
+    fn decode_stickiness(&self, _params: &RouteParams, _msg: &SipMessage) -> DecodeResult {
         DecodeResult::Unknown { is_emergency: false }
     }
     fn encode_stickiness(&self, _target: &ProxyAddr, _msg: &SipMessage) -> Option<RouteParams> {
@@ -234,7 +232,7 @@ impl RoutingStrategy for RefuseThenForward {
 #[tokio::test(start_paused = true)]
 async fn a_copy_of_a_rate_cap_refusal_draws_the_same_503_without_a_new_selection() {
     let h = Harness::with_transit_delay("refused-invite-copies-rate-cap", 1);
-    let (bob, _) = h.bind_sut("bob", BOB).await;
+    let (bob, _) = h.bind_peer("bob", BOB).await;
     let strategy = RefuseThenForward::rate_capped();
     let proxy = spawn_proxy(&h, strategy.clone(), None).await;
     let (alice, lost) = lossy_caller(&h, 1).await;
@@ -261,7 +259,7 @@ async fn a_copy_of_a_rate_cap_refusal_draws_the_same_503_without_a_new_selection
 #[tokio::test(start_paused = true)]
 async fn a_copy_of_a_no_target_refusal_draws_the_same_503() {
     let h = Harness::with_transit_delay("refused-invite-copies-no-target", 1);
-    let (bob, _) = h.bind_sut("bob", BOB).await;
+    let (bob, _) = h.bind_peer("bob", BOB).await;
     let strategy = RefuseThenForward::no_target();
     let proxy = spawn_proxy(&h, strategy.clone(), None).await;
     let (alice, lost) = lossy_caller(&h, 1).await;
@@ -299,8 +297,10 @@ Content-Length: 0\r\n\r\n"
     .into_bytes()
 }
 
-/// The INVITE is refused and its 503 lost; the caller gives up and CANCELs.
-/// This hop answered the INVITE itself, so it is the UAS the CANCEL reaches
+/// The INVITE is refused and its 503 lost; the caller gives up and CANCELs
+/// before any provisional, the §9.1 breach of a simulated caller this test is
+/// for: a stateless hop sends no provisional, so no compliant caller CANCELs
+/// through it. This hop answered the INVITE itself, so it is the UAS the CANCEL reaches
 /// (§9.2): a 200 carrying the INVITE final's To-tag, nothing forwarded. The
 /// INVITE's retransmission then draws its 503, which the caller ACKs.
 #[tokio::test(start_paused = true)]
@@ -309,12 +309,13 @@ async fn a_cancel_of_a_refused_invite_draws_200_and_is_never_forwarded() {
     h.waive(
         WaiverScope::rule(
             "cancel-after-1xx",
-            "alice CANCELs before any provisional (RFC 3261 §9.1): a stateless hop sends \
-             none, so only such a caller ever CANCELs an INVITE it refused, the case under test",
+            "the simulated caller CANCELs before any provisional (RFC 3261 §9.1): a stateless \
+             hop sends none, so only such a caller ever CANCELs an INVITE it refused, the case \
+             under test",
         )
         .on_party("alice"),
     );
-    let (bob, _) = h.bind_sut("bob", BOB).await;
+    let (bob, _) = h.bind_peer("bob", BOB).await;
     let strategy = RefuseThenForward::rate_capped();
     let proxy = spawn_proxy(&h, strategy.clone(), None).await;
     let (alice, lost) = lossy_caller(&h, 1).await;

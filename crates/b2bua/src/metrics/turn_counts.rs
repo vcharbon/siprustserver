@@ -108,5 +108,6 @@ impl B2buaMetrics {
         rows.cap_near.render(s);
         rows.cap_peak.render(s);
         rows.cap_peak_per_hour.render(s);
+        self.inner.record_sizes.render(s);
     }
 }

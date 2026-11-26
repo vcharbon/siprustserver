@@ -3,7 +3,9 @@
 **Status:** accepted
 
 The [appendix](appendix/0009-front-proxy-rust-shape.md) holds the full routing rules of X1 and
-the memo, the paths without it and the accepted residuals of X7.
+the memo, the paths without it and the accepted residuals of X7, and the reasons behind the
+branch function (X1), rendezvous placement (X3), the self-gate's shape (X4), the overload
+observer (X6) and the non-2xx ACK gate (X7).
 
 ## Context
 
@@ -13,16 +15,17 @@ Record-Route cookie, and tracks worker liveness with OPTIONS health probes. It c
 path, the load balancer, the worker registry (static and simulated), the health probing and the
 metrics. It has no registrar or REGISTER path.
 
-## Decision X1. Stateless proxy: reuse `IdGen`, not the transaction FSMs
+## Decision X1. Stateless proxy: a branch computed from the message, no transaction FSMs
 
 `ProxyCore` manipulates Via, Record-Route and Route directly and forwards, never instantiating a
-transaction state machine. It reuses only `sip-txn::IdGen` for Via branches and
-`sip-clock::Clock` for timestamps. CANCEL and ACK correlation is a proxy-local LRU
+transaction state machine. The Via branch it pushes is a function of the received request (RFC
+3261 §16.11, `branch`), so every copy of one transaction computes the same branch at any
+instance. `sip-clock::Clock` gives its timestamps. CANCEL and ACK correlation is a proxy-local LRU
 (`cancel_lru`) keyed on the INVITE transaction as received (top-Via branch and sent-by). A CANCEL
 matching no remembered INVITE is forwarded statelessly (§16.10) as X7 places it. Reverse-path
 failover reads the backup from this proxy's own Record-Route cookie, or from the cookie on the
 Via it pushed. These direction rules hold on the internal face only (ADR-0048).
-Detail: [appendix X1](appendix/0009-front-proxy-rust-shape.md#decision-x1-stateless-proxy-reuse-idgen-not-the-transaction-fsms).
+Detail: [appendix X1](appendix/0009-front-proxy-rust-shape.md#decision-x1-stateless-proxy-a-branch-computed-from-the-message-no-transaction-fsms).
 
 ## Decision X2. The scenario harness gains a System-Under-Test seam
 
@@ -40,9 +43,8 @@ The stickiness cookie (`v=3|w_pri|w_bak|e|c`), on a Record-Route entry or on the
 (X1), is signed with HMAC-SHA256 (`hmac` + `sha2`), truncated to 128 bits (RFC 4868 §2.6), and
 base64url-no-pad encoded (`base64`). Verify compares the prefix in constant time (`subtle`),
 trying the current then the previous key. Rendezvous (HRW) worker selection uses SHA-1 (`sha1`)
-as a fast, well-distributed hash only: the top 8 bytes as a `u64`, multiplied by weight in
-`u128`. The root manifest justifies the six deps (`hmac`/`sha2`/`sha1`/`base64`/`subtle`/
-`arc-swap`).
+as a fast, well-distributed hash only: the top 8 bytes as a `u64` are the score. The root
+manifest justifies the six deps (`hmac`/`sha2`/`sha1`/`base64`/`subtle`/`arc-swap`).
 
 ## Decision X4. Proxy self-gate; overload = self-gate + OPTIONS health + tail-drop
 
@@ -52,12 +54,11 @@ Overload protection rests on OPTIONS-driven worker health and band classificatio
 `above_critical` workers from new-dialog selection) and on `sip-net`'s receive-buffer tail-drop
 (`PacketQueue`).
 
-## Decision X5. Lock-free registry snapshot; `broadcast` change stream
+## Decision X5. Lock-free registry snapshot
 
 The routing hot path reads `snapshot`, `resolve` and `lookup_by_address` synchronously and
 lock-free: the worker set lives behind an `arc_swap::ArcSwap<Vec<WorkerEntry>>`. Only background
 mutators (the health probe through the `WorkerRegistryControl` seam, the k8s membership watcher, ADR-0012 D4) write.
-`changes()` is a `tokio::sync::broadcast` of deltas, with no backfill.
 
 ## Decision X6. Worker overload: band classification and the per-worker AIMD bucket
 
@@ -86,9 +87,10 @@ Detail: [appendix X7](appendix/0009-front-proxy-rust-shape.md#decision-x7-two-ac
 ## Consequences
 
 - `sip-proxy` is a near-leaf production crate (deps: `sip-message`, `sip-net`, `sip-clock`,
-  `sip-txn`-for-`IdGen`, tokio, the six hashing and concurrency crates).
-- The metrics layer is atomics-backed (`ProxyMetrics`) with a hand-rolled tokio Prometheus
-  `/metrics` HTTP server (no HTTP framework dep).
+  `sip-txn` for the To-tag of its own finals and the health probe's client transactions, tokio,
+  the six hashing and concurrency crates).
+- The metrics layer is atomics-backed (`ProxyMetrics`); `sip-proxy-runner` serves it on
+  `probe-http`'s `/metrics`.
 - The harness can drive any in-process SUT.
 - Out of scope: the registrar/REGISTER path.
 - HA is ADR-0056. Two anti-affined replicas run active-active, each node announcing the VIPs over

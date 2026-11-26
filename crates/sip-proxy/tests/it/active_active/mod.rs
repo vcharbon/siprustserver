@@ -12,4 +12,5 @@ mod off_rank;
 mod parties;
 mod residual;
 mod rig;
+mod slow_owner;
 mod worker_side;

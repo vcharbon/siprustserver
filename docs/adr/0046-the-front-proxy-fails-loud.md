@@ -92,7 +92,8 @@ bound starts no further attempt (no second name form). Its in-flight slot stays 
 running attempt returns, so stuck lookup threads stay at most `max_in_flight` (64) per recv
 shard, and a name is looked up again within about one resolver timeout after DNS recovers. Of a
 name's addresses the first the egress socket of the packet's face can reach is used and kept for
-the cache lifetime. An unspecified IPv6 bind is dual-stack and reaches both families.
+the cache lifetime. An IPv6 socket is `IPV6_V6ONLY` (`sip-net`): a face reaches only its own
+address family.
 
 ### 9. NAPTR/SRV is a deliberate gap
 

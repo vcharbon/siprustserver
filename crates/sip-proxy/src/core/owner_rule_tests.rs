@@ -189,7 +189,6 @@ fn dialog_route(cookie: &RouteParams) -> String {
     format!("Route: <sip:{PROXY_VIP}:5060;outbound;lr>, <sip:{PROXY_VIP}:5060{text};lr>\r\n")
 }
 
-/// The single datagram the last step put on the wire.
 fn one_sent(f: &Fixture) -> (SocketAddr, Vec<u8>) {
     let mut sent = std::mem::take(&mut *f.wire.sent.lock().unwrap());
     assert_eq!(sent.len(), 1, "one datagram");
@@ -246,9 +245,9 @@ fn uas() -> SocketAddr {
     at(UAS)
 }
 
-// A worker's dialog names the backup the worker states on its Via, never the
-// proxy's own pick over that dialog's Call-ID: every leg of one call names
-// the same backup, the one holding the call's replica.
+/// A worker's dialog names the backup the worker states on its Via, never the
+/// proxy's own pick over that dialog's Call-ID: every leg of one call names
+/// the same backup, the one holding the call's replica.
 #[tokio::test]
 async fn a_workers_dialog_names_the_backup_it_states() {
     let f = fixture();
@@ -261,7 +260,6 @@ async fn a_workers_dialog_names_the_backup_it_states() {
     assert!(via.contains("w_pri=w1") && via.contains("w_bak=w3"), "{via}");
 }
 
-// A worker the proxy has departed still names the backup it states.
 #[tokio::test]
 async fn a_departed_workers_dialog_names_the_backup_it_states() {
     let f = fixture();
@@ -273,8 +271,6 @@ async fn a_departed_workers_dialog_names_the_backup_it_states() {
     assert!(rr.contains("w_pri=w1") && rr.contains("w_bak=w3"), "{rr}");
 }
 
-// A call with one owner: the worker states no backup, and the cookie names
-// none.
 #[tokio::test]
 async fn a_workers_dialog_with_one_owner_names_no_backup() {
     let f = fixture();
@@ -283,8 +279,6 @@ async fn a_workers_dialog_with_one_owner_names_no_backup() {
     assert_eq!(cookie["w_bak"], "", "{cookie:?}");
 }
 
-// A worker's in-dialog request of any method carries the dialog's cookie on
-// the Via the proxy pushes.
 #[tokio::test]
 async fn a_workers_request_of_any_method_carries_the_cookie_on_the_pushed_via() {
     let f = fixture();
@@ -330,8 +324,6 @@ async fn sent_in_dialog(
     one_sent(f).1
 }
 
-// A response goes to the owner that holds its transaction while it is
-// alive, whatever its method.
 #[tokio::test]
 async fn a_response_goes_to_the_owner_holding_its_transaction() {
     let f = fixture();
@@ -343,8 +335,8 @@ async fn a_response_goes_to_the_owner_holding_its_transaction() {
     }
 }
 
-// A response whose holder is dead goes to the call's other owner, whatever its
-// method: the backup the dialog names, which holds the call's replica.
+/// A response whose holder is dead goes to the call's other owner, whatever its
+/// method: the backup the dialog names, which holds the call's replica.
 #[tokio::test]
 async fn a_response_for_a_dead_holder_goes_to_the_other_owner_whatever_its_method() {
     let f = fixture();
@@ -358,8 +350,8 @@ async fn a_response_for_a_dead_holder_goes_to_the_other_owner_whatever_its_metho
     }
 }
 
-// A copy on the backup sends a request in the primary's dialog; the copy dies
-// before its answer: the answer goes to the call's other owner, the primary.
+/// A copy on the backup sends a request in the primary's dialog; the copy dies
+/// before its answer: the answer goes to the call's other owner, the primary.
 #[tokio::test]
 async fn a_response_for_a_dead_copy_goes_to_the_primary() {
     let f = fixture();
@@ -373,8 +365,6 @@ async fn a_response_for_a_dead_copy_goes_to_the_primary() {
     }
 }
 
-// A call with one owner: its response goes to it while it is alive, and
-// nowhere once it is dead.
 #[tokio::test]
 async fn a_response_for_a_dead_sole_owner_goes_nowhere() {
     let f = fixture();
@@ -403,9 +393,9 @@ async fn dialled_stating(f: &Fixture, pod: &str, pri: &str, bak: &str) -> (Vec<u
     (fwd, cookie)
 }
 
-// A takeover copy dials a leg of its primary's call, stating both owners:
-// the leg's cookie names the call's primary and backup as stated, whichever
-// of the two sent it, on the Record-Route and on the pushed Via alike.
+/// A takeover copy dials a leg of its primary's call, stating both owners:
+/// the leg's cookie names the call's primary and backup as stated, whichever
+/// of the two sent it, on the Record-Route and on the pushed Via alike.
 #[tokio::test]
 async fn a_copys_dialled_leg_names_the_primary_and_backup_it_states() {
     let f = fixture();
@@ -416,8 +406,8 @@ async fn a_copys_dialled_leg_names_the_primary_and_backup_it_states() {
     assert!(via.contains("w_pri=w1") && via.contains("w_bak=w3"), "{via}");
 }
 
-// The copy dials while the proxy reads the call's primary dead: the cookie
-// still names the stated primary, and the backup as the stated backup.
+/// The copy dials while the proxy reads the call's primary dead: the cookie
+/// still names the stated primary, and the backup as the stated backup.
 #[tokio::test]
 async fn a_copys_dialled_leg_names_its_dead_primary() {
     let f = fixture();
@@ -429,8 +419,8 @@ async fn a_copys_dialled_leg_names_its_dead_primary() {
     assert!(via.contains("w_pri=w1") && via.contains("w_bak=w3"), "{via}");
 }
 
-// A worker that states no primary is the cookie's primary, the backup it
-// states the cookie's backup.
+/// A worker that states no primary is the cookie's primary, the backup it
+/// states the cookie's backup.
 #[tokio::test]
 async fn a_worker_stating_no_primary_is_named_the_primary() {
     let f = fixture();
@@ -441,9 +431,9 @@ async fn a_worker_stating_no_primary_is_named_the_primary() {
     assert!(via.contains("w_pri=w3") && via.contains("w_bak=w1"), "{via}");
 }
 
-// The INVITE a copy dialled is answered: while the call's primary is dead
-// its responses go to the copy, the call's other owner; once the primary is
-// alive again they go to the primary, which holds the call.
+/// The INVITE a copy dialled is answered: while the call's primary is dead
+/// its responses go to the copy, the call's other owner; once the primary is
+/// alive again they go to the primary, which holds the call.
 #[tokio::test]
 async fn an_invite_response_to_a_copys_dialled_leg_goes_to_its_live_primary() {
     let f = fixture();
@@ -456,9 +446,9 @@ async fn an_invite_response_to_a_copys_dialled_leg_goes_to_its_live_primary() {
     assert_eq!(one_sent(&f).0, at(W1_POD), "the 200 once the primary is alive");
 }
 
-// A non-INVITE response answers a client transaction only its sender holds
-// (RFC 3261 §17.1.2): a copy's request in the call's dialog has its final
-// follow the Via to the copy while the primary lives.
+/// A non-INVITE response answers a client transaction only its sender holds
+/// (RFC 3261 §17.1.2): a copy's request in the call's dialog has its final
+/// follow the Via to the copy while the primary lives.
 #[tokio::test]
 async fn a_non_invite_response_to_a_copys_request_follows_its_via() {
     let f = fixture();
@@ -482,10 +472,10 @@ async fn a_non_invite_response_to_a_copys_request_follows_its_via() {
     }
 }
 
-// A copy's re-INVITE on a leg the primary dialled: its 200 follows the Via
-// to the copy, even when the far end echoes the copy's Via with a `pri` it
-// added: only the proxy's signed dialling mark sends an INVITE response to
-// the primary.
+/// A copy's re-INVITE on a leg the primary dialled: its 200 follows the Via
+/// to the copy, even when the far end echoes the copy's Via with a `pri` it
+/// added: only the proxy's signed dialling mark sends an INVITE response to
+/// the primary.
 #[tokio::test]
 async fn a_reinvite_response_with_an_echoed_pri_follows_its_via() {
     let f = fixture();
@@ -509,9 +499,9 @@ async fn a_reinvite_response_with_an_echoed_pri_follows_its_via() {
     assert_eq!(one_sent(&f).0, at(W3_POD), "the 200 follows the Via to the copy");
 }
 
-// The INVITE a copy dialled is answered while the proxy has not read the
-// call's primary alive yet (`Unknown`): the response goes to the call's
-// backup, as a request on the leg's cookie would.
+/// The INVITE a copy dialled is answered while the proxy has not read the
+/// call's primary alive yet (`Unknown`): the response goes to the call's
+/// backup, as a request on the leg's cookie would.
 #[tokio::test]
 async fn an_invite_response_to_a_copys_dialled_leg_waits_for_an_alive_primary() {
     let f = fixture();

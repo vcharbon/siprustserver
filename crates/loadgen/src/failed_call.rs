@@ -1,14 +1,16 @@
-//! What a failed call owes the SUT before its endpoints drop: its teardown
-//! transactions run to their end, and its callee legs answer what the SUT
-//! still sends them; then what the call leaves once its traffic is over. A
-//! call with a client transaction still open at its end is held the same
-//! way, with no quiesce.
+//! What a call owes the SUT before its endpoints drop. A failed call: its
+//! teardown transactions run to their end, and its callee legs answer what
+//! the SUT still sends them; then what the call leaves once its traffic is
+//! over. A call that did not fail, with a client transaction still open at
+//! its end, is held the same way with no quiesce; a recorded one settles in
+//! place instead: that transaction runs to its end before the call is
+//! audited and recorded.
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use scenario_harness::Agent;
-use tokio::sync::{oneshot, RwLock};
+use tokio::sync::{oneshot, OwnedRwLockReadGuard, OwnedSemaphorePermit, RwLock};
 
 use crate::mux::MuxNetwork;
 
@@ -40,23 +42,52 @@ impl Tail {
     }
 }
 
-/// Hold the call when it `failed` or a client transaction of it is still
-/// `open` (RFC 3261 §17.1.2), releasing it in the background ([`release`]);
-/// any other call ends at once.
+/// What keeps the driver's drain waiting on a call until the call's task
+/// ends: its in-flight permit, or, for a call settled in place, `tails`
+/// read-locked, its permit freed while it settles.
+pub(crate) enum Held {
+    Permit { _permit: OwnedSemaphorePermit },
+    Tails { _tails: OwnedRwLockReadGuard<()> },
+}
+
+/// How a call stands at its verdict.
+pub(crate) struct CallEnd {
+    /// The call's scenario failed.
+    pub(crate) failed: bool,
+    /// A client transaction of its endpoints is still open (RFC 3261 §17.1.2).
+    pub(crate) open: bool,
+    /// The call records, so its RFC audit reads the recording.
+    pub(crate) recorded: bool,
+}
+
+/// Hold the call when it failed, or did not fail with a client transaction
+/// still open, releasing it in the background ([`release`]); a recorded call
+/// of the latter settles in place instead: every client transaction of its
+/// endpoints runs to its end, retransmitted until its final, so the audit
+/// that follows reads the final a retransmission draws after the verdict.
+/// Any other call ends at once.
 pub(crate) async fn hold(
-    failed: bool,
-    open: bool,
+    end: CallEnd,
+    permit: OwnedSemaphorePermit,
     tails: Arc<RwLock<()>>,
     net: Arc<MuxNetwork>,
-    caller: &Agent,
-    callees: &[(&str, Agent)],
+    (caller, callees): (&Agent, &[(&str, Agent)]),
     quiesce: Duration,
-) -> Tail {
-    match (failed, open) {
-        (false, false) => Tail(None),
-        (true, _) => release(tails, net, caller, callees, quiesce).await,
-        (false, true) => release(tails, net, caller, callees, Duration::ZERO).await,
-    }
+) -> (Tail, Held) {
+    let CallEnd { failed, open, recorded } = end;
+    let quiesce = match (failed, open, recorded) {
+        (false, false, _) => return (Tail(None), Held::Permit { _permit: permit }),
+        (false, true, true) => {
+            let held = tails.read_owned().await;
+            drop(permit);
+            net.client_txns_ended().await;
+            return (Tail(None), Held::Tails { _tails: held });
+        }
+        (true, ..) => quiesce,
+        (false, true, false) => Duration::ZERO,
+    };
+    let tail = release(tails, net, caller, callees, quiesce).await;
+    (tail, Held::Permit { _permit: permit })
 }
 
 /// Release a held call in the background, holding its endpoints until done

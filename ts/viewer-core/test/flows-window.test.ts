@@ -8,7 +8,7 @@
 import { describe, expect, it } from "vitest"
 import { callIdFamilies } from "../src/flows/families.ts"
 import { buildFlowsLayout } from "../src/flows/layout.ts"
-import { parseFlowsDocument } from "../src/flows/parse.ts"
+import { type FlowsDocument, parseFlowsDocument } from "../src/flows/parse.ts"
 import { EMPTY_SELECTION, messageCoordinate, type CaptureSelection } from "../src/flows/selection.ts"
 import {
   chunkedFlows,
@@ -148,6 +148,34 @@ describe("shiftWindow", () => {
   })
 })
 
+/**
+ * Leg-slot reads past which `drawnReading` stops at once: one per slot of the
+ * widest document here, which a walk over its span crosses within its first
+ * row and a cost per leg read never nears.
+ */
+const SLOT_READS_CAP = 30_100
+
+/**
+ * `document`'s Call-ID families and ladder, and how many of its leg slots they
+ * read by index. What costs per leg costs per leg READ: a window of 2 legs
+ * inside a span of thousands reads as many slots as a document of those 2.
+ */
+const drawnReading = (document: FlowsDocument) => {
+  let reads = 0
+  const legs = new Proxy(document.legs, {
+    get: (target, key, receiver) => {
+      if (typeof key === "string" && /^\d+$/.test(key) && ++reads > SLOT_READS_CAP) {
+        throw new Error(`${reads} leg slots read of a document ${target.length} legs wide`)
+      }
+      return Reflect.get(target, key, receiver)
+    }
+  })
+  const counted = { ...document, legs }
+  const families = callIdFamilies(counted)
+  const layout = buildFlowsLayout(counted, { title: "big" })
+  return { families, layout, reads }
+}
+
 describe("windowedFlows", () => {
   it("puts the window's legs at the indices the document gives them", () => {
     const value = windowedFlows(envelope, 30_100, 20_000, [legOf(20_000), legOf(20_001)])
@@ -244,15 +272,13 @@ describe("windowedFlows", () => {
   })
 
   it("is read and drawn over the legs it holds, never the whole span", () => {
-    // A window inside a capture of thousands: what costs per leg must cost per
-    // leg READ, so a document 30,000 legs wide draws its 2 as fast as a
-    // document of 2.
-    const read = parseFlowsDocument(windowedFlows(envelope, 30_100, 20_000, [legOf(20_000), legOf(20_001)]))
-    if (!read.ok) throw new Error(read.reason)
-    const started = performance.now()
-    const families = callIdFamilies(read.document)
-    const layout = buildFlowsLayout(read.document, { title: "big" })
-    expect(performance.now() - started).toBeLessThan(500)
+    const wide = parseFlowsDocument(windowedFlows(envelope, 30_100, 20_000, [legOf(20_000), legOf(20_001)]))
+    const narrow = parseFlowsDocument(windowedFlows(envelope, 2, 0, [legOf(0), legOf(1)]))
+    if (!wide.ok) throw new Error(wide.reason)
+    if (!narrow.ok) throw new Error(narrow.reason)
+    const { families, layout, reads } = drawnReading(wide.document)
+    expect(reads).toBeGreaterThan(0)
+    expect(reads).toBe(drawnReading(narrow.document).reads)
     expect(families.families).toHaveLength(2)
     expect(layout.rows.map((row) => row.legIndex)).toEqual([20_000, 20_001])
     expect(layout.legs.map((leg) => leg.legIndex)).toEqual([20_000, 20_001])

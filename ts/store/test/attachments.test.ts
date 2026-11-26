@@ -84,13 +84,13 @@ beforeAll(async () => {
     })
   )
   await on(SCRATCH, Server.migrated)
-}, 60_000)
+})
 
 afterAll(async () => {
   fs.rmSync(TREE, { recursive: true, force: true })
   if (!Server.served) return
   await on("postgres", Server.dropDatabase(SCRATCH))
-}, 60_000)
+})
 
 describe.skipIf(!Server.served)("attachments", () => {
   it("land with a cell read off its bundle, as it listed them, each a path under the cell's directory", () =>

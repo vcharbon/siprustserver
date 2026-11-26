@@ -56,6 +56,7 @@ async fn scripted_reinvite_answer_holds_settle_until_ack() {
 
                 cseq: None,
                 delayed: vec![],
+                answers: Default::default(),
                 claim: None,
             },
             scripted_spec(
@@ -343,6 +344,7 @@ async fn per_goal_deadline_bounds_the_guard_wait() {
 
             cseq: None,
             delayed: vec![],
+            answers: Default::default(),
             claim: None,
         }],
         plan: vec![],

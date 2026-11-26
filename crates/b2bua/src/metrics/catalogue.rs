@@ -8,6 +8,7 @@
 
 pub mod capacity;
 pub mod caps;
+pub mod cdr;
 pub mod limiter;
 pub mod plain;
 pub mod readiness;
@@ -64,6 +65,8 @@ assert_exposition_order!(
     Unrecoverable,
     EventQueue,
     SetupBudget,
+    StartBound,
+    OnSight,
 );
 assert_exposition_order!(Class: Normal, Emergency, InDialog);
 
@@ -109,6 +112,12 @@ pub const UDP_INGRESS_BRAKE_EMERGENCY_BYPASSED: Family = Family::counter(
     "New emergency INVITEs that crossed the ingress brake's threshold and passed it (the brake admits them). Emergency traffic skipping the gate under flood.",
 );
 
+pub const UDP_INGRESS_BRAKE_UNATTRIBUTED_DROPPED: Family = Family::counter(
+    "b2bua_udp_ingress_brake_unattributed_dropped_total",
+    Labels::None,
+    "Requests naming no call the engaged ingress brake dropped before the inbound queue, so they take none of its room; the sender retransmits.",
+);
+
 // ── Every new call's admission outcome ──
 
 /// Block 0: accepted, by class. Block 1: cancelled, by class. Block 2:
@@ -122,7 +131,7 @@ pub const NEW_CALLS: Family = Family::counter(
         &[Dim::new("outcome", &["rejected"]), REFUSAL, CLASS],
         &[Dim::new("outcome", &["rejected"]), BACKLOG_REASON, IN_DIALOG],
     ]),
-    "New initial INVITEs by admission outcome, once per INVITE (a copy is not counted): accepted (the call is born), cancelled (its caller CANCELed it before its turn ran: the call is born and ends with no decision and no limiter admit) or rejected (reason: a rung of the admission ladder, the store-fault 500, or a dispatch discard of the INVITE's turn); class emergency carries an RFC 4412 Resource-Priority, class in_dialog is an INVITE carrying a To-tag the deferred backlog refused.",
+    "New initial INVITEs by admission outcome, once per INVITE (a copy is not counted): accepted (the call is born), cancelled (its caller CANCELed it before its turn ran: the call is born and ends with no decision and no limiter admit) or rejected (reason: a rung of the admission ladder, the store-fault 500, a dispatch discard of the INVITE's turn, or the INVITE refused on sight: no From tag, or an option tag required that the stack does not understand); class emergency carries an RFC 4412 Resource-Priority, class in_dialog is an INVITE carrying a To-tag the deferred backlog refused.",
 );
 
 pub const NEW_CALL_REFUSED_COPIES: Family = Family::counter(
@@ -139,6 +148,11 @@ const WORKER_FAMILIES: [Family; plain::FAMILIES.len() + WORKER_REST.len()] =
     concat(plain::FAMILIES, WORKER_REST);
 
 const WORKER_REST: &[Family] = &[
+    cdr::WRITTEN,
+    cdr::DROPPED,
+    cdr::BROKER_CONNECTED,
+    cdr::BROKER_CONNECTS,
+    cdr::BROKER_SESSION_ENDS,
     worker::CALL_CREATIONS,
     worker::CALL_REMOVALS,
     shell::STORE_POISONED_LOCK_RECOVERIES,
@@ -164,6 +178,7 @@ const WORKER_REST: &[Family] = &[
     caps::CAP_NEAR,
     caps::CAP_PEAK,
     caps::CAP_PEAK_PER_HOUR,
+    caps::CALL_RECORD_BYTES,
     worker::REPL_QUIET_TURNS,
     worker::REPL_APPLIED,
     worker::REPL_NOOPS_SENT,
@@ -266,6 +281,7 @@ pub const TXN: &[Family] = &[
     txn::TIMER_QUEUE_LEN,
     txn::RETRANSMIT_BUF_BYTES,
     txn::SERVER_FINAL_UNSEEN_BRANCH,
+    txn::LATE_2XX_DROPPED,
     txn::VIA_STAMPS_UNWRITTEN,
     txn::PARSE_ERRORS,
     txn::PARSE_REFUSALS_ANSWERED,
@@ -277,6 +293,7 @@ pub const TXN: &[Family] = &[
     txn::EVENT_QUEUE_CAPACITY,
     txn::EVENT_QUEUE_DELAY,
     txn::KEEPALIVE_LANE_DROPS,
+    txn::UNATTRIBUTED_LANE_DROPS,
     txn::MESSAGE_BUDGET_TRIPS,
     txn::MESSAGE_BUDGET_UNCOUNTED,
     txn::MUTED_MESSAGES,
@@ -289,6 +306,7 @@ pub const TXN: &[Family] = &[
     txn::UNANSWERED_FORGOTTEN,
     txn::RELEASED_UNANSWERED_INVITES_ANSWERED,
     txn::RELEASED_UNANSWERED_FORGOTTEN,
+    txn::CALL_ATTACH_REFUSED,
     txn::RETRANSMITS,
     txn::RETRANSMITS_OVERFLOW,
 ];
@@ -296,6 +314,7 @@ pub const TXN: &[Family] = &[
 /// The UDP transport and its ingress brake.
 pub const UDP: &[Family] = &[
     UDP_INGRESS_BRAKE_EMERGENCY_BYPASSED,
+    UDP_INGRESS_BRAKE_UNATTRIBUTED_DROPPED,
     udp::QUEUE_DEPTH,
     udp::QUEUE_WAIT,
     udp::QUEUE_MAX,

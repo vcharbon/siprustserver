@@ -1,10 +1,12 @@
 //! Which leg talks to which: the caller-facing dialog that fronts a callee
-//! dialog, the active peer pair (INAP-style split/merge), and
-//! transparent-relay peer resolution.
+//! dialog, the active peer pair (INAP-style split/merge), the legs the call
+//! is carried on, and transparent-relay peer resolution.
 
 use crate::model::{ActivePeer, Call, Dialog, DialogId, Leg, LegState};
 
-use super::leg::{callee_dialog, caller_dialog, find_b_leg, is_adopted};
+use super::leg::{
+    callee_dialog, caller_dialog, every_leg, find_b_leg, find_leg, is_adopted, leg_is_going_away,
+};
 
 // ── Caller-facing fronts ────────────────────────────────────────────────────
 
@@ -46,6 +48,41 @@ pub fn split_leg(call: &mut Call, leg_id: &str) {
             call.active_peer = None;
         }
     }
+}
+
+// ── The legs the call is carried on ─────────────────────────────────────────
+
+/// Whether `leg_id` carries the call: a leg not going away that is the
+/// originator's, or the one the originator's leg is bridged to now (its live
+/// [`get_peer`]). While the originator's leg is bridged to no live leg (the
+/// setup, a peer gone away), the adopted b-legs dialled for it carry it.
+/// The bridged peer carries the call whatever its kind; a media leg beside
+/// the bridge, a leg dialled beside it before it is merged, and a leg the
+/// call has left carry nothing: a transaction timeout on one of those ends
+/// that leg alone.
+pub fn carries_call(call: &Call, leg_id: &str) -> bool {
+    let Some(leg) = find_leg(call, leg_id) else { return false };
+    if leg_is_going_away(call.state, leg) {
+        return false;
+    }
+    if leg_id == call.a_leg.leg_id {
+        return true;
+    }
+    match bridged_peer(call) {
+        Some(peer) => peer == leg_id,
+        None => is_adopted(leg),
+    }
+}
+
+/// Every leg [`carries_call`] holds, the originator's first.
+pub fn call_carrying_legs(call: &Call) -> Vec<&str> {
+    every_leg(call).map(|l| l.leg_id.as_str()).filter(|id| carries_call(call, id)).collect()
+}
+
+/// The leg the originator's leg is bridged to, while it is not going away.
+fn bridged_peer(call: &Call) -> Option<&str> {
+    get_peer(call, &call.a_leg.leg_id)
+        .filter(|id| find_leg(call, id).is_some_and(|l| !leg_is_going_away(call.state, l)))
 }
 
 /// All leg IDs that currently have a peer.

@@ -216,6 +216,9 @@ fn take_invite(st: &mut ActorState<'_>, uas: &ServerTxn) -> bool {
 /// The reactive in-dialog answer table — shared by the live dispatch and the
 /// requeue-on-advance auto-react (a re-recorded `InDialogRequest` observation
 /// is idempotent, so re-entry for a previously parked request is harmless).
+/// A request requiring an extension this UA does not implement is refused 420
+/// (RFC 3261 §8.2.2.3), an ACK or CANCEL aside. A BYE ending the dialog sends the
+/// held PRACKs of sibling forks' reliable provisionals (RFC 3262 §4).
 pub(super) async fn react_in_dialog_request(
     st: &mut ActorState<'_>,
     mut uas: ServerTxn,
@@ -223,6 +226,20 @@ pub(super) async fn react_in_dialog_request(
     let method = uas.request().method().as_str().to_string();
     let cseq = uas.request().cseq().seq();
     let now = Instant::now();
+
+    if !matches!(method.as_str(), "ACK" | "CANCEL") {
+        if let Some(unknown) = super::extensions::unsupported_required(uas.request()) {
+            uas.respond(420, "Bad Extension")
+                .with_header("Unsupported", &unknown)
+                .try_send()
+                .await?;
+            if method == "INVITE" {
+                arm_reject_final(st, &uas, 420);
+            }
+            st.obs.record(in_dialog_arrival(st.role, uas.request()), now);
+            return Ok(());
+        }
+    }
 
     match method.as_str() {
         // An ACK completes a transaction — absorbed, never answered. It confirms
@@ -301,6 +318,8 @@ pub(super) async fn react_in_dialog_request(
             // An in-dialog ack this leg still awaits (a re-INVITE it answered, a
             // PRACK/UPDATE, …) is moot now the dialog ends (§15) — discharge it so
             // settle does not wait 32 s for an ack the torn-down peer can never send.
+            super::answers::terminate(st).await?;
+            super::held_pracks::fire(st, None).await?;
             discharge_on_teardown(st, now);
             st.obs.record(Observation::LegTerminated { leg: st.role }, now);
             st.scope.mark_terminated();
@@ -349,24 +368,9 @@ pub(super) async fn react_in_dialog_request(
                 st.obs.record(in_dialog_arrival(st.role, uas.request()), now);
                 return Ok(());
             }
-            respond_200_sdp(&mut uas, st.answer_body()).await?;
-            st.answered_reinvites.insert(cseq);
-            st.obs.record(in_dialog_arrival(st.role, uas.request()), now);
-            st.obs.record(
-                Observation::RequestSent {
-                    key: ObligationKey::new(st.role, ObligationKind::ReInvite, cseq),
-                    detail: "realign 200 awaiting ACK".to_string(),
-                },
-                now,
-            );
-            st.obs.record(
-                Observation::Subflow {
-                    leg: st.role,
-                    name: SUBFLOW_REALIGN,
-                    to: SubflowState::Answered,
-                },
-                now,
-            );
+            if held_or_refused(st, uas).await? {
+                return Ok(());
+            }
         }
         // An UPDATE realign (RFC 3311) — answered 200 + SDP; its own 200
         // completes it (no ACK), so no obligation opens. COLLISION (C4/S6, RFC
@@ -381,15 +385,17 @@ pub(super) async fn react_in_dialog_request(
                 st.obs.record(in_dialog_arrival(st.role, uas.request()), now);
                 return Ok(());
             }
-            respond_200_sdp(&mut uas, st.answer_body()).await?;
-            st.obs.record(in_dialog_arrival(st.role, uas.request()), now);
             // C5 (RFC 3311 §5.1): the EARLY UPDATE's offer/answer completed —
             // release the held INVITE 200, but only once the reliable 183 was
             // also PRACKed (MUST-014); if the UPDATE raced ahead of the PRACK
             // the PRACK arm releases it instead.
             if st.hold_for_early_update {
+                respond_200_sdp(&mut uas, st.media.framing(), st.answer_body()).await?;
+                st.obs.record(in_dialog_arrival(st.role, uas.request()), now);
                 st.early_updated = true;
                 maybe_answer_held_invite(st).await?;
+            } else {
+                held_or_refused(st, uas).await?;
             }
         }
         // Boxed: its state stays off the reactor future's own.
@@ -426,5 +432,65 @@ pub(super) async fn react_queued(
         let Some(m) = inbox.try_take().await else { break };
         default_react(st, m).await?;
     }
+    Ok(())
+}
+
+/// A renegotiation under this endpoint's [`Answers`](super::answers::Answers):
+/// held, refused, or answered at once; one on an early dialog is answered at
+/// once, and one arriving while another is held is refused 500 with
+/// Retry-After (RFC 3261 §14.2, RFC 3311 §5.2). Returns whether it was held or
+/// refused rather than answered.
+async fn held_or_refused(st: &mut ActorState<'_>, uas: ServerTxn) -> Result<bool, StepError> {
+    let confirmed = st.dialogs.confirmed.as_ref().is_some_and(|d| {
+        uas.request().to().tag() == Some(d.local_tag())
+            && uas.request().from().tag() == Some(d.remote_tag())
+    });
+    let answer = if confirmed {
+        super::answers::answer_for(st, uas.request().method().as_str())
+    } else {
+        super::answers::Answer::default()
+    };
+    st.obs.record(in_dialog_arrival(st.role, uas.request()), Instant::now());
+    if !st.holds.answered.is_empty() {
+        super::answers::refuse(st, uas, 500).await?;
+        return Ok(true);
+    }
+    if !answer.hold.is_zero() {
+        super::answers::hold(st, uas, answer).await?;
+        return Ok(true);
+    }
+    if let Some(status) = answer.refuse {
+        super::answers::refuse(st, uas, status).await?;
+        return Ok(true);
+    }
+    answer_reoffer(st, uas).await?;
+    Ok(false)
+}
+
+/// Answer the peer's re-INVITE or UPDATE `uas` with this endpoint's
+/// description; a re-INVITE's 2xx then awaits its ACK and advances the leg's
+/// realign sub-flow.
+pub(super) async fn answer_reoffer(
+    st: &mut ActorState<'_>,
+    mut uas: ServerTxn,
+) -> Result<(), StepError> {
+    let now = Instant::now();
+    respond_200_sdp(&mut uas, st.media.framing(), st.answer_body()).await?;
+    if uas.request().method().as_str() != "INVITE" {
+        return Ok(());
+    }
+    let cseq = uas.request().cseq().seq();
+    st.answered_reinvites.insert(cseq);
+    st.obs.record(
+        Observation::RequestSent {
+            key: ObligationKey::new(st.role, ObligationKind::ReInvite, cseq),
+            detail: "realign 200 awaiting ACK".to_string(),
+        },
+        now,
+    );
+    st.obs.record(
+        Observation::Subflow { leg: st.role, name: SUBFLOW_REALIGN, to: SubflowState::Answered },
+        now,
+    );
     Ok(())
 }

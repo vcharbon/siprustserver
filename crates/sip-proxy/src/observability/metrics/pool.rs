@@ -9,10 +9,10 @@ use crate::observability::catalogue as c;
 
 impl ProxyMetrics {
     /// Set the worker-health gauges from a fleet count. Also derives
-    /// `worker_pool_empty` = `1` iff no worker is `Alive` (routable) — the
-    /// routing-fatal condition the `/readyz` gate also keys on.
-    pub fn set_worker_health_counts(&self, alive: u64, unknown: u64, dead: u64) {
-        self.pool.set_health_counts([alive, unknown, dead]);
+    /// `worker_pool_empty` = `1` iff no worker is `Alive`: no new normal dialog
+    /// is placed (`/readyz` keys on `Alive` or `Slow`).
+    pub fn set_worker_health_counts(&self, alive: u64, slow: u64, unknown: u64, dead: u64) {
+        self.pool.set_health_counts([alive, slow, unknown, dead]);
     }
 
     /// Set the worker-acceptance gauges: alive workers accepting and refusing
@@ -31,12 +31,11 @@ impl ProxyMetrics {
 /// The worker pool gauges, set by the runner's sampler.
 #[derive(Debug, Default)]
 pub(super) struct PoolGauges {
-    /// Workers per health state: alive, unknown, dead.
+    /// Workers per health state: alive, slow, unknown, dead.
     health: [AtomicU64; c::HEALTH_STATES.len()],
     /// Alive workers per acceptance of new calls: accept, refuse.
     acceptance: [AtomicU64; c::ACCEPTANCE_STATES.len()],
-    /// `1` iff no worker is `Alive` (routable): the proxy can serve no new
-    /// dialog. Pairs with the `/readyz` gate.
+    /// `1` iff no worker is `Alive`: the proxy places no new normal dialog.
     empty: AtomicU64,
     /// `1` while worker discovery's kube client fails to build.
     no_client: AtomicU64,
@@ -64,7 +63,6 @@ impl PoolGauges {
             .store(watch_broken_since_unix_ms.unwrap_or(0), Ordering::Relaxed);
     }
 
-    /// The pool-empty and discovery families.
     pub(super) fn render_pool(&self, out: &mut String) {
         let load = |a: &AtomicU64| a.load(Ordering::Relaxed);
         c::WORKER_POOL_EMPTY.render_value(out, load(&self.empty));
@@ -72,7 +70,6 @@ impl PoolGauges {
         c::DISCOVERY_WATCH_BROKEN_SINCE.render_value(out, load(&self.watch_broken_since_ms) / 1000);
     }
 
-    /// The worker-health and worker-acceptance families.
     pub(super) fn render_health(&self, out: &mut String) {
         c::WORKER_HEALTH.render(out, |series| super::read(&self.health, series.at(0)));
         c::WORKER_ACCEPTANCE.render(out, |series| super::read(&self.acceptance, series.at(0)));

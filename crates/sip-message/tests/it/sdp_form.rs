@@ -219,8 +219,8 @@ fn order_cases() -> Vec<OrderCase> {
     cases
 }
 
-/// The shared fixture's order rules hold here as in the TypeScript twin: each
-/// description's form is the fixture's, and a form is its own form.
+/// The shared fixture's order rules: each description's form is the
+/// fixture's, and a form is its own form.
 #[test]
 fn the_shared_order_fixture_is_the_form() {
     let cases = order_cases();

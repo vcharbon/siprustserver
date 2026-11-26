@@ -43,8 +43,8 @@ fn parse_req(raw: &str) -> SipMessage {
     CustomParser::new().parse(raw.as_bytes()).unwrap()
 }
 
-// §16.3 check 2: an ACK with Max-Forwards: 0 is silently discarded — a 483
-// (or any response) to an ACK is a protocol violation.
+/// §16.3 check 2: an ACK at Max-Forwards 0 is discarded silently, its reject
+/// counted: no response to an ACK is ever sent.
 #[tokio::test]
 async fn ack_at_max_forwards_zero_is_dropped_silently() {
     let (core, metrics) = core_with_metrics().await;
@@ -73,9 +73,8 @@ Content-Length: 0\r\n\r\n"
     );
 }
 
-// §7.3.1: a UA may fold its route set into ONE comma-combined Route header.
-// Stripping our own entry must pop only that entry — deleting the whole
-// line drops the downstream proxy's Route and bypasses its route set.
+/// §7.3.1: a route set folded into one comma-combined Route header loses only
+/// the proxy's own entry; the downstream proxy's entry drives loose routing.
 #[tokio::test]
 async fn folded_route_strip_preserves_the_downstream_route() {
     let (core, _metrics) = core_with_metrics().await;
@@ -99,10 +98,10 @@ Content-Length: 0\r\n\r\n"
     assert_eq!(outcome.target, Some(ProxyAddr::new("10.9.9.9", 5062)));
 }
 
-// An out-of-range URI port (70596 & 0xFFFF == 5060) must read as malformed,
-// never silently truncate into an alias of the proxy's own address: the wire
-// parse refuses the request, and a read without the wire grammar keeps the
-// route foreign.
+/// An out-of-range Route port (70596, which wraps to 5060 in 16 bits) is
+/// malformed, never an alias of the advertised address: the wire parse refuses
+/// the request, and a read without the wire grammar keeps the route foreign,
+/// so the request takes a fresh selection.
 #[tokio::test]
 async fn oversized_route_port_does_not_alias_the_advertised_address() {
     let (core, _metrics) = core_with_metrics().await;
@@ -121,8 +120,5 @@ Content-Length: 0\r\n\r\n"
     let lenient = SipParserLimits { wire_grammar: false, ..SipParserLimits::DEFAULT };
     let req = CustomParser::with_limits(lenient).parse(raw.as_bytes()).unwrap();
     let outcome = core.route_request_from(&req, format!("{UAC}:5060").parse().unwrap()).await;
-    // A 70596→5060 wrap would match the advertised VIP and strip the entry
-    // as a self-route. It must stay foreign (and being malformed, it can't
-    // drive loose routing either) → plain selection.
     assert_eq!(outcome.decision, RoutingDecisionKind::SelectNew);
 }

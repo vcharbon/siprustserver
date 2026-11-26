@@ -34,12 +34,12 @@ beforeAll(async () => {
   if (!served) return
   await fresh(SCRATCH)
   await on(SCRATCH, migrated)
-}, 120_000)
+})
 
 afterAll(async () => {
   if (!served) return
   await drop(SCRATCH)
-}, 120_000)
+})
 
 let root: string
 let paths: Paths

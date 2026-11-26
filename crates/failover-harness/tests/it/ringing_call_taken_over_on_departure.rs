@@ -242,7 +242,7 @@ pub(crate) async fn final_at(p: &mut Placed, deadline: i64) {
 
 /// The established call ends with the caller's BYE, which takes it over
 /// reactively; the dead node returns and every call settles to one CDR.
-async fn finish(mut p: Placed) {
+pub(crate) async fn finish(mut p: Placed) {
     let mut bye = p.quiet.bye().await;
     p.bob.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;

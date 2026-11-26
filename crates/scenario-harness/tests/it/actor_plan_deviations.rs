@@ -76,6 +76,7 @@ fn caller(
         feed: CtxFeed::default(),
         cseq: None,
         delayed: vec![],
+        answers: Default::default(),
         claim: None,
     }
 }
@@ -97,6 +98,7 @@ fn answering(
         feed: CtxFeed::default(),
         cseq: None,
         delayed: vec![],
+        answers: Default::default(),
         claim: None,
     }
 }

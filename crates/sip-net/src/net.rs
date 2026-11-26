@@ -93,8 +93,8 @@ pub trait UdpEndpoint: Send + Sync {
     /// datagrams and for sends a loss model drops — the outbound twin of
     /// [`install_recv_tap`](Self::install_recv_tap). Returns `false` when the
     /// impl neither re-emits nor drops below the recording layer (the recording
-    /// decorator then simply records nothing extra). Only the loadgen mux
-    /// overrides this.
+    /// decorator then simply records nothing extra). The loadgen mux and the
+    /// simulated fabric override this.
     fn install_send_tap(&self, tap: crate::types::SendTap) -> bool {
         let _ = tap;
         false

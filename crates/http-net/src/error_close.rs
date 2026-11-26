@@ -1,28 +1,14 @@
-//! [`ErrorCloses`] — a backend client closes the connection a 5xx answer
-//! came on instead of pooling it (ADR-0043).
-//!
-//! A pooled connection keeps the backend a layer-4 balancer chose for it, and
-//! the pool hands out the most recently returned connection first: a backend
-//! answering errors behind one address would keep every connection it holds,
-//! and every request on them, until the client rotates. Closing the
-//! connection after a 5xx makes the next request take another pooled
-//! connection or a new one, which the balancer spreads again. The request is
-//! never sent again (the retry rule stays: never after an HTTP answer).
-//!
-//! The closes are capped at `per_s` a second per client, a token bucket of
-//! `per_s` tokens: at a total 5xx outage every answer would close its
-//! connection, and each close leaves a socket in `TIME_WAIT` for the
-//! kernel's 60 s; past the cap the connection is pooled as any other. A 200
-//! whose body does not parse is the caller's to judge and pools as usual.
+//! [`ErrorCloses`] — the budget of connections a backend client closes on
+//! its answers ([`crate::ejection`]): `per_s` a second per client, a token
+//! bucket of `per_s` tokens.
 
 use std::sync::Mutex;
 
 use tokio::time::Instant;
 
-use crate::backend::metrics;
 use crate::poison::{locked, ERROR_CLOSES};
 
-/// One client's budget of connection closes after a 5xx answer.
+/// One client's budget of connection closes on its answers.
 pub struct ErrorCloses {
     per_s: u32,
     bucket: Mutex<Bucket>,
@@ -39,19 +25,8 @@ impl ErrorCloses {
         Self { per_s, bucket: Mutex::new(Bucket { tokens: f64::from(per_s), at: Instant::now() }) }
     }
 
-    /// Whether the connection a `status` answer of `peer` came on is closed:
-    /// a 5xx within the budget. Every 5xx is counted by what became of its
-    /// connection.
-    pub fn close_after(&self, peer: &str, status: u16) -> bool {
-        if !(500..=599).contains(&status) {
-            return false;
-        }
-        let closed = self.take();
-        metrics::error_answered(peer, closed);
-        closed
-    }
-
-    fn take(&self) -> bool {
+    /// Whether one more close fits the budget now; one that fits is taken.
+    pub fn take(&self) -> bool {
         if self.per_s == 0 {
             return false;
         }
@@ -80,22 +55,17 @@ mod tests {
     use super::*;
 
     #[tokio::test(start_paused = true)]
-    async fn only_a_5xx_closes_within_the_budget_refilled_each_second() {
+    async fn the_budget_is_full_at_first_and_refills_at_its_rate() {
         let c = ErrorCloses::new(2);
-        assert!(!c.close_after("p", 200));
-        assert!(!c.close_after("p", 404));
-        assert!(c.close_after("p", 500));
-        assert!(c.close_after("p", 503));
-        assert!(!c.close_after("p", 502), "past the budget the connection pools");
+        assert_eq!([c.take(), c.take(), c.take()], [true, true, false]);
         tokio::time::advance(Duration::from_millis(500)).await;
-        assert!(c.close_after("p", 500), "half a second refills one");
-        assert!(!c.close_after("p", 500));
-        assert_eq!(metrics::error_answers("p", true), 3);
-        assert_eq!(metrics::error_answers("p", false), 2);
+        assert_eq!([c.take(), c.take()], [true, false], "half a second refills one");
+        tokio::time::advance(Duration::from_secs(10)).await;
+        assert_eq!([c.take(), c.take(), c.take()], [true, true, false], "never past full");
     }
 
     #[tokio::test(start_paused = true)]
     async fn zero_never_closes() {
-        assert!(!ErrorCloses::new(0).close_after("q", 500));
+        assert!(!ErrorCloses::new(0).take());
     }
 }

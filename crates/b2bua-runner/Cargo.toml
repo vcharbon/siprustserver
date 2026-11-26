@@ -49,6 +49,8 @@ scenario-harness = { path = "../scenario-harness" }
 layer-harness = { path = "../layer-harness" }
 sip-clock = { path = "../sip-clock" }
 sip-net = { path = "../sip-net" }
+# The ports it hands the binary, no other process's socket taking one first.
+loopback-ports = { path = "../loopback-ports" }
 
 # jemalloc global allocator (see the #[global_allocator] note in src/main.rs):
 # glibc malloc ratchets RSS under sustained SIP churn (arena retention) and never

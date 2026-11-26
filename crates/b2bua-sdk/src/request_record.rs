@@ -33,18 +33,27 @@ impl<'a> RuleContext<'a> {
     }
 
     /// Whether the current response answers the INVITE this stack last sent on
-    /// the dialog it names ([`Self::dialog`]): it echoes that INVITE's CSeq
-    /// (RFC 3261 §12.2.1.2). A copy of the 2xx to an earlier INVITE on that
-    /// dialog (§13.3.1.4) answers nothing pending. `false` for any other event
-    /// and on a dialog holding no INVITE this stack sent.
+    /// the dialog it names ([`Self::dialog`]): it echoes that INVITE's CSeq,
+    /// number and method (RFC 3261 §12.2.1.2, §17.1.3), so the response to a
+    /// CANCEL of that INVITE, which shares its number, answers it not. A copy
+    /// of the 2xx to an earlier INVITE on that dialog (§13.3.1.4) answers
+    /// nothing pending. `false` for any other event and on a dialog holding no
+    /// INVITE this stack sent.
     pub fn answers_last_sent_invite(&self) -> bool {
         let (Some(resp), Some(dialog)) = (self.response(), self.dialog()) else { return false };
-        dialog.sent_invite.as_ref().is_some_and(|r| r.outbound_cseq == i64::from(resp.cseq().seq()))
+        let cseq = resp.cseq();
+        cseq.method() == sip_message::Method::Invite
+            && dialog.sent_invite.as_ref().is_some_and(|r| r.outbound_cseq == i64::from(cseq.seq()))
     }
 
     /// For a `Timeout` event: the request record the timeout settled, as it
     /// stood when its transaction gave up (ADR-0055 §2). `None` for every
-    /// other event kind, and for a transaction no record names (an INVITE).
+    /// other event kind, and for a transaction no record names (a relayed
+    /// INVITE, a leg's dialling INVITE). A service rule matching it outranks
+    /// the core default for a request the service sent (ADR-0068 §2); keeping
+    /// the call after the timeout of a re-INVITE on a leg that carries the
+    /// call departs from RFC 3261 §14.1, and the service states why (ADR-0068
+    /// §4).
     pub fn timed_out_record(&self) -> Option<&'a call::RequestRecord> {
         matches!(self.event, CallEvent::Timeout { .. })
             .then(|| self.resolved.record.as_deref().map(|(_, r)| r))

@@ -84,12 +84,12 @@ beforeAll(async () => {
     })
   )
   await on(SCRATCH, Server.migrated)
-}, 60_000)
+})
 
 afterAll(async () => {
   if (!Server.served) return
   await on("postgres", Server.dropDatabase(SCRATCH))
-}, 60_000)
+})
 
 describe.skipIf(!Server.served)("a landed cell answered later", () => {
   it("holds a collector's not-checkable line after its own, its attachment after the cell's, and reads unverified", () =>

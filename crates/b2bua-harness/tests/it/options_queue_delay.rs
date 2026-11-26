@@ -13,9 +13,7 @@
 use std::time::Duration;
 
 use b2bua::TurnProbes;
-use b2bua_harness::{
-    drop_backlog_answers, send_backlog, B2buaScene, B2buaSut, Pace, RouterPace, BACKLOG_METHOD,
-};
+use b2bua_harness::{send_backlog, B2buaScene, B2buaSut, BurstAnswers, Pace, RouterPace};
 use scenario_harness::Agent;
 use sip_message::generators::OutOfDialogMethod;
 use sip_message::worker_report::{self, Readiness};
@@ -32,15 +30,16 @@ const TRANSIT: Duration = Duration::from_millis(150);
 
 /// A scene whose worker's router loop is paced by the returned handle, with
 /// carol, the sender of the waiting events.
-async fn paced_scene(name: &str) -> (B2buaScene, std::sync::Arc<RouterPace>, Agent) {
+async fn paced_scene(name: &str) -> (B2buaScene, std::sync::Arc<RouterPace>, Agent, BurstAnswers) {
     let pace = RouterPace::new();
     let probe = TurnProbes::new(pace.clone());
     let s = B2buaScene::with_b2bua(name, move |bob_port| {
         B2buaSut::route_all_to("127.0.0.1", bob_port).turn_probe(probe)
     })
     .await;
-    let carol = s.h.agent_with_pre_ingress("carol", "127.0.0.1:5062", drop_backlog_answers()).await;
-    (s, pace, carol)
+    let answers = BurstAnswers::default();
+    let carol = s.h.agent_with_pre_ingress("carol", "127.0.0.1:5062", answers.hook()).await;
+    (s, pace, carol, answers)
 }
 
 /// The acceptance alice's out-of-dialog OPTIONS reads, answered `200`.
@@ -52,8 +51,8 @@ async fn readiness(s: &B2buaScene) -> Option<Readiness> {
 }
 
 /// Pump until the worker has refused `n` waiting requests in all.
-async fn drained(s: &B2buaScene, n: u64) {
-    let refused = || s.b2bua.metrics().unroutable_refused_of(BACKLOG_METHOD, 405);
+async fn drained(s: &B2buaScene, answers: &BurstAnswers, n: u64) {
+    let refused = || answers.of(405);
     let give_up = Instant::now() + Duration::from_secs(10);
     while refused() < n && Instant::now() < give_up {
         s.h.advance(Duration::from_millis(10)).await;
@@ -67,7 +66,7 @@ async fn drained(s: &B2buaScene, n: u64) {
 /// nothing.
 #[tokio::test(start_paused = true)]
 async fn a_stalled_router_reads_the_age_of_the_event_waiting_behind_it() {
-    let (s, pace, carol) = paced_scene("options-queue-delay-stalled").await;
+    let (s, pace, carol, answers) = paced_scene("options-queue-delay-stalled").await;
     let mut dialog = s.establish().await;
 
     pace.set(NODE, Pace::Frozen);
@@ -88,7 +87,7 @@ async fn a_stalled_router_reads_the_age_of_the_event_waiting_behind_it() {
         "the event waiting a second behind a stalled router refuses new calls"
     );
 
-    drained(&s, 2).await;
+    drained(&s, &answers, 2).await;
     s.hangup(&mut dialog).await;
     let _report = s.finish().await;
 }
@@ -99,7 +98,7 @@ async fn a_stalled_router_reads_the_age_of_the_event_waiting_behind_it() {
 /// accept.
 #[tokio::test(start_paused = true)]
 async fn a_wait_shorter_than_the_persistence_interval_refuses_nothing() {
-    let (s, pace, carol) = paced_scene("options-queue-delay-spike").await;
+    let (s, pace, carol, answers) = paced_scene("options-queue-delay-spike").await;
     let mut dialog = s.establish().await;
     let slow = REFUSE_DELAY + REFUSE_INTERVAL / 2;
 
@@ -116,7 +115,7 @@ async fn a_wait_shorter_than_the_persistence_interval_refuses_nothing() {
     let during = worker_report::readiness(&options.expect(200).await);
     assert_eq!(during, Some(Readiness::accept()), "read past the bound, inside the interval");
 
-    drained(&s, 2).await;
+    drained(&s, &answers, 2).await;
     assert_eq!(readiness(&s).await, Some(Readiness::accept()), "nothing latched a refusal");
     s.hangup(&mut dialog).await;
     let _report = s.finish().await;
@@ -126,7 +125,7 @@ async fn a_wait_shorter_than_the_persistence_interval_refuses_nothing() {
 /// bound for longer than the interval refuse new calls.
 #[tokio::test(start_paused = true)]
 async fn a_delay_sustained_past_the_persistence_interval_refuses() {
-    let (s, pace, carol) = paced_scene("options-queue-delay-sustained").await;
+    let (s, pace, carol, answers) = paced_scene("options-queue-delay-sustained").await;
     let mut dialog = s.establish().await;
 
     pace.set(NODE, Pace::PerTurn(Duration::from_millis(100)));
@@ -138,7 +137,7 @@ async fn a_delay_sustained_past_the_persistence_interval_refuses() {
         "a delay held past the bound for the interval refuses new calls"
     );
 
-    drained(&s, 20).await;
+    drained(&s, &answers, 20).await;
     pace.set(NODE, Pace::Free);
     s.hangup(&mut dialog).await;
     let _report = s.finish().await;

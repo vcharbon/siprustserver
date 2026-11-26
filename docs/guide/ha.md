@@ -78,7 +78,8 @@ Rule 3 is deliberate. A wait without a cap lets one lost peer stop all the calls
 Three messages have a bound of their own, 200 ms, because the transaction layer must send them
 before the peer retransmits: the first 100 Trying, the ACK of a failure response, and the
 answers to a CANCEL. If the turn did not release one of them at 200 ms, the transaction layer
-sends it.
+sends it. For a new call, the 200 ms of the 100 Trying start when the worker sends the request
+to the decision backend, and not before (ADR-0070).
 
 If each round trip completes before these bounds, the backup knows what the parties saw. That
 is the condition of the Guaranteed tier.
@@ -164,7 +165,10 @@ that triggers it. The most visible ones are:
   owner held a teardown, or the effects of a response or of a timer, that the backup never
   received;
 - a second attempt to the callee, when the routing decision died with the primary at sync
-  level `off`.
+  level `off`;
+- a 503 to the caller, when the routing decision died with the primary after the start bound
+  (`B2BUA_CALL_START_BOUND_MS`, counted from the receipt of the INVITE). The backup does not
+  ask the decision backend again (ADR-0070).
 
 Three results are never permitted, and each is a defect:
 
@@ -209,10 +213,18 @@ All values are the defaults.
 |---|---|---|---|
 | Planned exit: rolling update, drain, scale-down | The worker gets SIGTERM, or sees its own endpoint withdrawn. | It serves its calls until its backups hold them or the calls end, for 5 s at most. Then it sends its last limiter releases and CDRs, and exits (ADR-0031). A worker with no call exits immediately. | Nothing, for a call that a backup holds. |
 | Worker killed or node lost | The probe of the proxy reads it dead in 2.6 to 3.6 s. Each backup confirms on its own replication stream. | The backup takes over the calls with work in flight, 6 to 8 s at most after the verdict. A quiet call moves on its next request (ADR-0047). | Retransmissions, then the call continues. |
+| Worker slow: its probe answers arrive between 1.6 s and 2 s after the probe | The proxy reads it slow in 2.6 to 3.6 s, and alive after three answers in time. | Nothing is taken over. The worker keeps its calls and gets no new call (ADR-0069). | Slower answers from that worker. |
+| Worker slow, then killed | The proxy reads it dead at most 3.6 s after the last answer it received from it, 3 s after a late one (the slow window and one probe interval). | As for a kill. | As for a kill. |
+| Worker slow, then restarted | Its first answer in time names a new identity: the proxy reads it dead. | As for a kill. | As for a kill. |
+| A CANCEL crosses to the other proxy while a worker is slow | That proxy holds no memo of the INVITE. It sends the CANCEL to the first worker in rank that serves dialogs, which can be the slow worker the INVITE went past. | The worker holding the INVITE does not get the CANCEL. | The call rings until its own timers end it. |
+| One proxy reads every worker slow, the other reads them alive | The proxy stays announced. | It answers the normal new calls of its flows 503. | The SBC retries those calls elsewhere. |
+| Worker alive, its answers later than 2 s | The proxy reads it dead, as a killed worker. Its backup still hears its stream. | Its requests inside a dialog go to the backup while it runs, until it exits or answers in time again. | Requests of its calls answered by the backup. |
+| Every worker turns slow in the same probe round | From the last answer in time to the first late one, more than 2 s can pass: each proxy reads isolated meanwhile. | The route guards withdraw the POP. It returns after the first late answer and the guard's hold. | The SBC sends the POP's traffic to the other POPs for about 10 s. |
 | Worker restarted | It returns empty, with a new identity. | It takes its calls back from the backups. It reads ready when it holds them, or after 10 s if it cannot reach a peer (ADR-0014). | Nothing more than for the kill. |
 | Backup lost | The stream of the primary to it ends. | The primary continues. Its calls have no backup until the backup returns and completes its bootstrap. | Nothing. |
 | Replication link cut, then restored | A stream with no data for 2 s reads down. | The puller connects again and continues from its position (ADR-0045). | Nothing, if the cut is short. |
 | One proxy lost | The routers remove its routes. | The other proxy routes with the cookie. | Retransmissions. |
+| The POP returns after a total outage | Its proxies read fit again. | It takes its full share at once. The workers' admission refuses the excess with fast 503s. | The SBC retries the refused calls elsewhere. |
 | A backend answers slowly, inside its budget | The request has a deadline (ADR-0039). | The call waits for the answer. | A longer setup. |
 
 At the end of the grace of a planned exit, the worker ends each call that no backup holds. A
@@ -229,7 +241,7 @@ when its next request arrives. This prevents a burst of traffic on each failover
 2. **A fast link between all the workers.** The round trip must complete well below the sync
    cap. Put the pool in one site.
 3. **One shared key, on the workers and on the proxies.** Each worker gets the same
-   `B2BUA_CLUSTER_KEY`. A worker with replication on refuses to start without it. Give the same
+   `B2BUA_CLUSTER_KEY`, 32 to 64 bytes of text. A worker with replication on refuses to start without it. Give the same
    key to each proxy as `PROXY_CLUSTER_KEY`. A proxy with no key cannot tell the backups that a
    worker is dead. The calls with work in flight then wait until Kubernetes removes the pod,
    which takes minutes.
@@ -270,7 +282,7 @@ relation and the effect of a higher or lower value.
 | `b2bua_repl_takeover_hydrated_total` | Copies turned live by a takeover. |
 | `b2bua_drain_exits_total{reason}` | How each planned exit ended. `caught_up` and `quiescent` are the transparent ones. |
 | `b2bua_clock_wall_divergence_ms` | The drift of the wall clock of the host against its monotonic clock. A step of the host clock shows here. The worker warns above 500 ms. |
-| `b2bua_cdr_dropped_total` | CDRs that a worker dropped at a full queue. |
+| `b2bua_cdr_dropped_total{reason}` | CDRs that a worker did not deliver, by reason. `close_deadline` counts the CDRs that the exit bound cut. |
 
 ## How the guarantee is proven
 

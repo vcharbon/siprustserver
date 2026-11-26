@@ -27,12 +27,9 @@ const dirOf = (name: string): string => {
 const written = (dir: string): string =>
   fs.readdirSync(dir).map((entry) => fs.readFileSync(path.join(dir, entry), "utf8")).join("")
 
-const until = async (holds: () => boolean, ms: number): Promise<boolean> => {
-  for (let waited = 0; waited < ms; waited += 10) {
-    if (holds()) return true
-    await new Promise((resume) => setTimeout(resume, 10))
-  }
-  return holds()
+/** Resolves once `holds` does, checking every 10 ms; the package's test timeout bounds the wait. */
+const until = async (holds: () => boolean): Promise<void> => {
+  while (!holds()) await new Promise((resume) => setTimeout(resume, 10))
 }
 
 const into = (binary: string, args: ReadonlyArray<string>, target: string) =>
@@ -42,9 +39,15 @@ describe("IntoFile.run", () => {
   it("writes the command's output as it arrives, holding none of it", async () => {
     const dir = dirOf("streaming")
     const target = path.join(dir, "out")
-    const done = into("sh", ["-c", "printf hello; sleep 2"], target)
+    const release = path.join(scratch, "streaming-release")
+    let ran = true
+    const done = into("sh", ["-c", `printf hello; until [ -e '${release}' ]; do sleep 0.05; done`], target).finally(() => {
+      ran = false
+    })
     // The bytes are on disk while the command still runs, so nothing collected them.
-    expect(await until(() => written(dir) === "hello", 1500)).toBe(true)
+    await until(() => written(dir) === "hello" || !ran)
+    expect(ran).toBe(true)
+    fs.writeFileSync(release, "")
     expect(await done).toBeUndefined()
     expect(fs.readFileSync(target, "utf8")).toBe("hello")
   })
@@ -61,7 +64,7 @@ describe("IntoFile.run", () => {
   it("names the signal a command was killed by", async () => {
     const dir = dirOf("killed")
     const why = await into("sh", ["-c", "echo dying >&2; kill -KILL $$"], path.join(dir, "out"))
-    expect(why).toContain("killed by SIGKILL")
+    expect(why).toMatch(/killed by SIGKILL \((cgroup \S+ recorded|OOM kills not readable)/)
     expect(fs.readdirSync(dir)).toEqual([])
   })
 
@@ -94,6 +97,19 @@ describe("IntoFile.exec", () => {
         Effect.provide(NodeServices.layer)
       )
     )
-    expect(ended).toEqual({ broke: undefined, exit: 2, signal: null, stderr: "a\"b\nc" })
+    expect(ended).toEqual({ broke: undefined, brokeAt: undefined, exit: 2, signal: null, oom: null, stderr: "a\"b\nc" })
+  })
+
+  it("asks the cgroup about its OOM killer once a signal ended the run, and says it never ran where it did not", async () => {
+    const dir = dirOf("exec-killed")
+    const run = (binary: string, args: ReadonlyArray<string>) =>
+      Effect.runPromise(IntoFile.exec(binary, args, path.join(dir, "out")).pipe(Effect.provide(NodeServices.layer)))
+    const killed = await run("sh", ["-c", "kill -KILL $$"])
+    expect(killed).toMatchObject({ brokeAt: undefined, exit: null, signal: "SIGKILL", stderr: "" })
+    expect(["Recorded", "None", "Unknown"]).toContain(killed.oom?._tag)
+    const missing = await run(path.join(scratch, "no-such-binary"), [])
+    expect(missing).toMatchObject({ brokeAt: "spawn", signal: null, oom: null })
+    expect(missing.broke).toMatch(/^NotFound: ChildProcess\.spawn \(/)
+    expect(missing.broke).not.toContain("Cause(")
   })
 })

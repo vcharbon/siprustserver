@@ -18,26 +18,16 @@ use crate::trace::{emit, Activation, ProxyTraces};
 use super::super::ProxyCore;
 
 impl ProxyCore {
-    /// Run the admission chain for an initial INVITE and, on success, open the
-    /// proxy's root span for the call and record the INVITE that opened it.
-    /// A refusal is counted inside the chain and never logged.
-    ///
-    /// Only an [`Activation::Opened`] records here. A call that reaches this
-    /// seam a second time — a digest-auth retry, an INVITE retransmit whose
-    /// memo has been evicted — is `AlreadyOpen`, and its datagram was already
-    /// recorded by the per-packet seam at the top of `handle_request`, which
-    /// hits the map for every call that has a span. The CSeq goes in either
-    /// way: the span follows whichever dialog-creating INVITE the call's setup
-    /// currently hangs on.
+    /// Run the sampling admission for an initial INVITE and, on success, open
+    /// the proxy's root span for the call and record the INVITE that opened it.
+    /// A refusal is counted inside the admission and never logged. A call whose
+    /// span is already open (an authentication retry, a retransmission whose
+    /// memo was evicted) records nothing here, since the per-packet seam of
+    /// `handle_request` already recorded its datagram; its CSeq still moves the
+    /// span.
     pub(super) fn activate_trace(&self, req: &SipRequest, src: SocketAddr, at_ms: i64) {
         let call_id = req.call_id().as_str();
-        let id = CallIdentity {
-            call_id,
-            from_tag: req.from().tag().unwrap_or(""),
-            // The proxy is transaction-less: no To tag exists on the INVITE it
-            // routes, and it never mints one.
-            to_tag: "",
-        };
+        let id = CallIdentity { call_id, from_tag: req.from().tag().unwrap_or(""), to_tag: "" };
         let rate = intake_rate(&self.traces, req);
         if self.traces.activate(call_id, id, req.cseq().seq(), rate, at_ms) != Activation::Opened {
             return;
@@ -67,11 +57,10 @@ impl ProxyCore {
 }
 
 /// The rate this INVITE's draw runs at: the `X-Trace-Sample` override when the
-/// process both honors the header and exports at all, else `None` (the
-/// configured rate). With the deployment gate shut the header is not looked up
-/// at all — a serving edge cannot be steered into tracing by a caller, and a
-/// process with no collector does not look up a header no rate can change the
-/// fate of.
+/// process both honors the header and exports, else `None` (the configured
+/// rate). A malformed header is counted and reads as `None`. With either gate
+/// shut the header is never read, so a caller cannot steer the proxy into
+/// tracing.
 fn intake_rate(traces: &ProxyTraces, req: &SipRequest) -> Option<f64> {
     if !traces.honors_header() || !traces.exporter_configured() {
         return None;

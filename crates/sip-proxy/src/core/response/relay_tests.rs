@@ -15,10 +15,10 @@ const UAC: &str = "10.244.7.13";
 const W1: &str = "10.0.0.1";
 const PROXY_VIP: &str = "192.0.2.250";
 
-// RFC 3261 §16.11: a stateless proxy forwards every response by its Via, a
-// 100 included — the §16.7 rule that absorbs a 100 binds a stateful proxy
-// only. The relayed 100 loses the proxy's Via and reaches the next Via's
-// address, counted as a forwarded message.
+/// RFC 3261 §16.11: a stateless proxy forwards every response by its Via, a
+/// 100 included (the §16.7 rule that absorbs a 100 binds a stateful proxy
+/// only). The relayed 100 loses the proxy's Via, reaches the next Via's
+/// address and counts as a forwarded message.
 #[tokio::test]
 async fn trying_100_is_relayed_upstream_by_its_via() {
     let ep = Arc::new(ByteCapturingEndpoint::default());
@@ -65,7 +65,6 @@ Content-Length: 0\r\n\r\n"
     assert!(!txt.contains("sip_messages_total{label=\"outbound:dropped\"} 1"), "{txt}");
 }
 
-/// Endpoint double capturing every sent datagram's destination + bytes.
 #[derive(Default)]
 struct ByteCapturingEndpoint {
     sent: std::sync::Mutex<Vec<(std::net::SocketAddr, Vec<u8>)>>,
@@ -101,16 +100,11 @@ impl sip_net::UdpEndpoint for ByteCapturingEndpoint {
     }
 }
 
-// RFC 3261 §16.11 / ADR-0022 X4 — loss-recovery of a rejected call. The
-// proxy must NOT synthesize the §17.1.1.3 hop ACK when relaying a non-2xx
-// INVITE final: that would quench the downstream UAS's Timer G (the only
-// retransmitter in the system) while the upstream relay stays
-// exactly-once, so one lost relayed copy would wedge the caller until Timer B
-// / the 32 s safety timer. Reliability is end-to-end instead — the
-// upstream's own ACK is relayed downstream to the node the final arrived
-// from, on the INVITE's outbound Via branch (so the UAS's server
-// transaction matches it, §17.2.3), the caller's message otherwise
-// verbatim (R-URI included — the downstream demux keys on it).
+/// RFC 3261 §16.11: relaying a non-2xx INVITE final, the proxy sends no
+/// §17.1.1.3 hop ACK, which would quench the downstream UAS's Timer G while the
+/// relay upstream is sent once. The upstream's own ACK is relayed to the node
+/// the final came from, on the INVITE's outbound Via branch (§17.2.3), its
+/// Request-URI verbatim.
 #[tokio::test]
 async fn relayed_non_2xx_final_is_never_hop_acked_and_the_upstream_ack_relays() {
     let ep = Arc::new(ByteCapturingEndpoint::default());
@@ -123,8 +117,6 @@ async fn relayed_non_2xx_final_is_never_hop_acked_and_the_upstream_ack_relays() 
         .metrics(metrics.clone())
         .build(Box::new(EpHandle(ep.clone())));
 
-    // A full callee-shaped R-URI: user-part + `;user=phone`, as a worker's
-    // b-leg INVITE carries it through the LB.
     let invite_ruri = "sip:+155501113301000@uas.example:6001;user=phone";
     let raw_invite = format!(
         "INVITE {invite_ruri} SIP/2.0\r\nContact: <sip:fixture@192.0.2.99>\r\n\
@@ -139,8 +131,6 @@ Content-Length: 0\r\n\r\n"
     let msg = CustomParser::new().parse(raw_invite.as_bytes()).unwrap();
     core.handle_request_from(msg, format!("{UAC}:5060").parse().unwrap()).await;
 
-    // The branch the proxy stamped on its forwarded INVITE — the relayed
-    // ACK must repeat it exactly.
     let forwarded_invite = {
         let sent = ep.sent.lock().unwrap();
         String::from_utf8_lossy(&sent[0].1).to_string()
@@ -179,8 +169,6 @@ Content-Length: 0\r\n\r\n"
     }
     ep.sent.lock().unwrap().clear();
 
-    // The upstream's own §17.1.1.3 ACK (same branch as its INVITE) is
-    // relayed downstream on the INVITE's hop.
     let raw_ack = format!(
         "ACK {invite_ruri} SIP/2.0\r\n\
 Via: SIP/2.0/UDP {UAC}:5060;branch=z9hG4bKackuri;rport\r\n\
@@ -215,8 +203,6 @@ Content-Length: 0\r\n\r\n"
     );
 }
 
-/// Thin `UdpEndpoint` wrapper so the shared `Arc<ByteCapturingEndpoint>` can
-/// be both handed to the builder (boxed) and inspected by the test.
 struct EpHandle(Arc<ByteCapturingEndpoint>);
 
 #[async_trait::async_trait]

@@ -1,19 +1,28 @@
 //! CDR (call detail record) writing. One record is
 //! written per call at termination, carrying the accumulated `Call.cdr_events`.
 //! The in-memory writer ([`InMemoryCdrWriter`]) lets tests assert exactly one
-//! CDR per call; [`BufferedCdrWriter`] is the production drop-on-overload buffer.
+//! CDR per call; [`BufferedCdrWriter`] is the production drop-on-overload buffer,
+//! whose drainer survives a panic of the sink it drives.
 //! A transport sink publishes the bytes of a [`CdrEncoder`], by default
 //! [`JsonRecordEncoder`] (the [`CdrRecord`] as JSON), and tells a
-//! [`CdrDeliveryObserver`] how and when each record ended.
+//! [`CdrDeliveryObserver`] how and when each record ended. A dropped record
+//! counts its [`CdrDrop`] reason; a broker sink counts its link's
+//! [`BrokerConnect`] and [`BrokerSessionEnd`] events.
 
+mod broker_link;
 mod buffered;
 mod delivery;
+mod drop_reason;
 mod encoder;
+mod line_rate;
 mod memory;
 
+pub use broker_link::{BrokerConnect, BrokerSessionEnd};
 pub use buffered::BufferedCdrWriter;
 pub use delivery::{CdrDelivery, CdrDeliveryObserver};
+pub use drop_reason::CdrDrop;
 pub use encoder::{CdrEncodeError, CdrEncoder, JsonRecordEncoder};
+pub use line_rate::{LineRate, LINE_INTERVAL};
 pub use memory::InMemoryCdrWriter;
 
 use async_trait::async_trait;
@@ -21,6 +30,8 @@ use serde::Serialize;
 use tokio::time::Instant;
 
 use call::{Call, CdrEvent, DecisionMark, LegDisposition, LegState, Termination};
+
+use crate::metrics::B2buaMetrics;
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct CdrLeg {
@@ -115,11 +126,14 @@ pub fn build_record(call: &Call, terminated_at: i64) -> CdrRecord {
 /// The CDR sink. `write` is non-blocking-fast; `read_all` is the test accessor.
 #[async_trait]
 pub trait CdrWriter: Send + Sync {
+    /// Takes the record of `call`. A write that panics has counted nothing:
+    /// a sink's count of a record is the last thing its write does, so its
+    /// caller counts that record dropped once, through [`Self::dropped`].
     async fn write(&self, call: &Call, terminated_at: i64);
     async fn read_all(&self) -> Vec<CdrRecord>;
     /// The exit barrier: deliver the records this sink holds and take no more.
     /// When it returns, every record whose `write` returned before the close
-    /// began is delivered or counted in `cdr_dropped_total`, and every later
+    /// began is delivered or counted in `b2bua_cdr_dropped_total`, and every later
     /// one is counted there too; it never waits past `deadline`, and a later
     /// close's deadline does not move the first one's. A sink that writes
     /// inline holds nothing to close.
@@ -132,8 +146,25 @@ pub trait CdrWriter: Send + Sync {
         false
     }
 
+    /// Drops what a panic of a `write` may have left half-done (a connection
+    /// in an unknown state), so the next record starts from a clean sink. A
+    /// sink holding no such state does nothing.
+    async fn after_panic(&self) {}
+
+    /// Counts dropped, for `why`, the record handed to a `write` at
+    /// `handed_at` that did not count it: the write panicked, or its caller
+    /// cut it. The caller calls this once for such a record, and nothing else
+    /// counts it. The default counts it into `metrics`; a sink that tells an
+    /// observer each end counts it as its own drops, the observer told. When
+    /// this panics, the caller counts the record into `metrics` instead.
+    fn dropped(&self, why: CdrDrop, handed_at: Instant, metrics: &B2buaMetrics) {
+        let _ = handed_at;
+        metrics.bump_cdr_dropped(why);
+    }
+
     /// The task this sink delivers through, when it has one: the worker ends
-    /// when that task ends.
+    /// when that task ends. A task that survives its own panics hands the
+    /// handle of its supervisor, which ends only when its work does.
     fn task(&self) -> Option<tokio::task::AbortHandle> {
         None
     }

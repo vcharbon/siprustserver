@@ -1,7 +1,8 @@
 //! Cross-phase guards + the overall-safety watchdog: a second REFER (491),
 //! glare re-INVITEs from C or A during realign (491), the referrer B's
-//! in-dialog requests during realign (its BYE ends its leg alone, anything
-//! else 481), and the whole-transfer safety timeout (rollback).
+//! in-dialog requests during realign (its BYE ends its leg alone, its ACK is
+//! `relay-ack`'s, anything else 481), and the whole-transfer safety timeout
+//! (rollback).
 
 use b2bua_sdk::sm_rule;
 use call::{CdrEventType, Direction, TerminationCause, TimeoutKind};
@@ -175,9 +176,10 @@ pub(super) fn referrer_bye_in_realign() -> RuleDefinition {
     }
 }
 
-/// transfer-b-in-cre-are-reject — referrer B's non-BYE in-dialog request
-/// during realigning → 481 (B's signalling is "dead" until merge; its BYE
-/// is `transfer-referrer-bye`'s).
+/// transfer-b-in-cre-are-reject — referrer B's in-dialog request during
+/// realigning → 481 (B's signalling is "dead" until merge). Its BYE is
+/// `transfer-referrer-bye`'s; its ACK draws no response (RFC 3261
+/// §17.1.1.3) and is `relay-ack`'s, relayed to A while her dialog awaits it.
 pub(super) fn b_in_realign_reject() -> RuleDefinition {
     sm_rule! {
         id: "transfer-b-in-cre-are-reject",
@@ -192,7 +194,7 @@ pub(super) fn b_in_realign_reject() -> RuleDefinition {
             .filter(|ctx| {
                 let method_ok = ctx
                     .request()
-                    .map(|r| r.method() != "BYE")
+                    .map(|r| r.method() != "BYE" && r.method() != "ACK")
                     .unwrap_or(false);
                 method_ok
                     && state(ctx).map(|s| s.referrer_leg_id.as_str()) == Some(ctx.source_leg_id)

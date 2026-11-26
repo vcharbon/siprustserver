@@ -6,7 +6,6 @@ use std::env;
 
 use super::{refusal, ProxyConfig};
 
-/// Where a pod's service account states its namespace.
 const NAMESPACE_FILE: &str = "/var/run/secrets/kubernetes.io/serviceaccount/namespace";
 
 impl ProxyConfig {
@@ -38,7 +37,8 @@ impl ProxyConfig {
     }
 }
 
-/// The namespace of the pod this proxy runs in, from its service account.
+/// The pod's namespace from its service account; `None` outside a pod or when
+/// the file is unreadable.
 fn pod_namespace() -> Option<String> {
     std::fs::read_to_string(NAMESPACE_FILE).ok().map(|ns| ns.trim().to_string())
 }

@@ -261,6 +261,12 @@ struct StepLadder {
     claimed_us: u64,
     /// When our side put the closer on the wire, where it did.
     closed_us: Option<u64>,
+    /// Whether the closer was the emitter's own BYE
+    /// ([`StepLadder::ended_by_emitters_bye`]) rather than our answer.
+    closed_by_emitters_bye: bool,
+    /// When our side sent the ACK to a 2xx the emitter's BYE had already
+    /// closed: the ACK still ends the ladder (RFC 3261 §13.3.1.4).
+    acked_us: Option<u64>,
     /// The schedule the RFC puts on `claimed`'s emitter ([`pacing_of`]):
     /// its class's, or [`Schedule::once`] where the class rides no timer of its
     /// own and its repeats are drawn.
@@ -326,7 +332,8 @@ impl StepLadder {
     /// unexpected datagram, which is a harsher verdict than the count it is.
     ///
     /// And so does every EXPECT of an ACK, which no timer paces and the WIRE
-    /// draws: RFC 3261 §13.2.2.4 owes one ACK per 2xx received, so the count is
+    /// draws: RFC 3261 owes one ACK per final received, a 2xx (§13.2.2.4) or
+    /// not (§17.1.1.2), so the count is
     /// whatever the final's own ladder turned out to be — a number the document
     /// cannot state, because it is our side's emission and not the capture's.
     fn counts(&self) -> bool {
@@ -338,6 +345,13 @@ impl StepLadder {
     /// ACK, whose repeats are one per repeat of the final it acknowledges.
     fn draws_its_count(&self) -> bool {
         sip_message::sniff::req_method(&self.claimed).as_deref() == Some("ACK")
+    }
+
+    /// How many copies of this ladder's datagram, beyond the first, went out
+    /// after `at_us`: on our 2xx, the repeats the SUT's ACK sent at `at_us`
+    /// had not yet met, each owed an ACK of its own (RFC 3261 §13.2.2.4).
+    fn copies_past(&self, at_us: u64) -> u32 {
+        self.repeats_us.iter().filter(|&&at| at > at_us).count() as u32
     }
 
     /// Whether the RFC paces the claimed datagram's class at all: a schedule
@@ -359,6 +373,36 @@ impl StepLadder {
         let Some(closed) = self.closed_us else { return false };
         let Some(&last) = self.repeats_us.last() else { return false };
         last <= closed.saturating_add(TWO_HOPS.as_micros() as u64)
+    }
+
+    /// Whether a 2xx ladder its emitter's own BYE closed ran on past that BYE
+    /// on the RFC's ladder. RFC 3261 §13.3.1.4 ends that ladder at the ACK or
+    /// 64·T1, never at a BYE, so the emitter may keep it running until our ACK
+    /// reaches it: at least the `owed` rungs inside the dwell, at most the
+    /// rungs up to our ACK plus [`TWO_HOPS`] (the run's end where none was
+    /// sent), each repeat one §13.3.1.4 interval after the one before it,
+    /// within [`TWO_HOPS`] either way. A surplus, a burst or a copy after the
+    /// ACK stays a mismatch.
+    fn ran_on_past_its_bye(&self, owed: u32, run_end_us: u64) -> bool {
+        if !self.closed_by_emitters_bye || self.observed <= owed {
+            return false;
+        }
+        let slack = TWO_HOPS.as_micros() as u64;
+        let end_us = self.acked_us.map_or(run_end_us, |acked| acked.saturating_add(slack));
+        let Some(ran) = end_us.checked_sub(self.claimed_us) else { return false };
+        if self.observed > rungs_within(&self.pacing, Duration::from_micros(ran)) {
+            return false;
+        }
+        let mut previous_us = self.claimed_us;
+        for (n, &at_us) in (1..).zip(&self.repeats_us) {
+            let Some(wait) = self.pacing.interval(n) else { return false };
+            let gap_us = at_us.saturating_sub(previous_us);
+            if at_us > end_us || gap_us.abs_diff(wait.as_micros() as u64) > slack {
+                return false;
+            }
+            previous_us = at_us;
+        }
+        true
     }
 }
 
@@ -384,9 +428,10 @@ impl Repeats {
     ///
     /// A BYE an expect claims is the SUT ending a dialog (RFC 3261 §15): every
     /// ladder of a 2xx the SUT ran to a re-INVITE of ours on that dialog stops
-    /// there, so the claim closes them ([`StepLadder::ended_by_emitters_bye`]).
-    /// The 2xx that created the dialog keeps its ladder to the ACK or the
-    /// §13.3.1.4 give-up.
+    /// there, so the claim closes them ([`StepLadder::ended_by_emitters_bye`]),
+    /// and copies the SUT keeps sending on the §13.3.1.4 ladder after it are
+    /// not a mismatch ([`StepLadder::ran_on_past_its_bye`]). The 2xx that
+    /// created the dialog keeps its ladder to the ACK or the §13.3.1.4 give-up.
     pub fn claim(
         &mut self,
         step: &str,
@@ -416,6 +461,7 @@ impl Repeats {
                     && ladder.ended_by_emitters_bye(raw)
                 {
                     ladder.closed_us = Some(at_us);
+                    ladder.closed_by_emitters_bye = true;
                 }
             }
         }
@@ -435,6 +481,8 @@ impl Repeats {
             to_tag: Some(sip_message::sniff::to_tag(raw)).filter(|t| !t.is_empty()),
             claimed_us: at_us,
             closed_us: None,
+            closed_by_emitters_bye: false,
+            acked_us: None,
             pacing: pacing_of(raw),
             repeats_us: Vec::new(),
         });
@@ -461,7 +509,9 @@ impl Repeats {
     /// class, inside the claimed datagram's own dialog, whichever comes first.
     ///
     /// Only an expect-side ladder needs it. A send-side ladder is ours to pace
-    /// and its count holds by construction, so nothing is closed there.
+    /// and its count holds by construction, so nothing is closed there. On a
+    /// 2xx ladder the emitter's BYE already closed, our ACK is held as where
+    /// the ladder's run-on ends ([`StepLadder::ran_on_past_its_bye`]).
     pub fn answered(&mut self, leg: &str, raw: &[u8], at_us: u64) {
         let cseq = sip_message::sniff::cseq_number(raw);
         let is_response = sip_message::sniff::is_response(raw);
@@ -469,7 +519,11 @@ impl Repeats {
         let method = sip_message::sniff::cseq_method_label(raw);
         let req_method = sip_message::sniff::req_method(raw);
         for ladder in self.ladders.iter_mut() {
-            if ladder.leg != leg || !ladder.counts() || ladder.closed_us.is_some() {
+            let bye_closed_unacked = ladder.closed_by_emitters_bye && ladder.acked_us.is_none();
+            if ladder.leg != leg
+                || !ladder.counts()
+                || (ladder.closed_us.is_some() && !bye_closed_unacked)
+            {
                 continue;
             }
             if !ladder.same_dialog(raw) {
@@ -501,7 +555,9 @@ impl Repeats {
                 }
                 Closer::Nothing => false,
             };
-            if closes {
+            if closes && bye_closed_unacked {
+                ladder.acked_us = Some(at_us);
+            } else if closes {
                 ladder.closed_us = Some(at_us);
             }
         }
@@ -522,25 +578,30 @@ impl Repeats {
     /// | ladder | paced by | owes |
     /// |---|---|---|
     /// | a scripted send | the document | `declared` — it is an instruction |
-    /// | an auto ACK send | the wire (§13.2.2.4) | one per repeat of its final |
-    /// | an expect of an ACK | the SUT | `declared`, or nothing where none is stated |
+    /// | an auto ACK send | the wire (§13.2.2.4, §17.1.1.2) | one per repeat of its final |
+    /// | an expect of an ACK to our 2xx | the wire (§13.2.2.4) | one per copy we sent after its first ACK |
+    /// | an expect of another ACK | the SUT | `declared`, or nothing where none is stated |
     /// | an expect of a paced class | the SUT, on the RFC's ladder | the rungs inside its window |
     /// | an expect of another drawn class | our own emissions, 1:1 | `declared` |
+    ///
+    /// An ACK rides no timer on either side, so its count is the WIRE's and
+    /// never a pacing: one ACK per final received, a 2xx (RFC 3261 §13.2.2.4)
+    /// or not (§17.1.1.2). Ours we produce, so the paired final's own repeats
+    /// say how many; a count read off the capture would assert the captured
+    /// platform's ladder instead. The ladder still COUNTS either way, so a
+    /// re-ACK lands in it instead of reaching the gate as a stray.
     fn owed(&self, i: usize, run_end_us: u64) -> Option<u32> {
         let ladder = &self.ladders[i];
         match ladder.side {
-            // An ACK rides no timer on either side, so its count is the WIRE's
-            // and never a pacing. Ours we produce, so the paired final's own
-            // repeats say how many (RFC 3261 §13.2.2.4). A count read off the
-            // capture would assert the captured platform's ladder instead. The
-            // ladder still COUNTS either way, so a re-ACK lands in it instead of
-            // reaching the gate as a stray.
             _ if ladder.draws_its_count() => match ladder.side {
                 LadderSide::Send => {
                     Some(self.paired_final(ladder).map_or(ladder.declared, |f| f.observed))
                 }
-                LadderSide::Expect if ladder.declared > 0 => Some(ladder.declared),
-                LadderSide::Expect => None,
+                LadderSide::Expect => match self.paired_sent_final(ladder) {
+                    Some(sent) => Some(sent.copies_past(ladder.claimed_us)),
+                    None if ladder.declared > 0 => Some(ladder.declared),
+                    None => None,
+                },
             },
             LadderSide::Send => Some(ladder.declared),
             LadderSide::Expect if !ladder.paced() => Some(ladder.declared),
@@ -548,6 +609,40 @@ impl Repeats {
                 ladder.window(run_end_us).map(|w| rungs_within(&ladder.pacing, w))
             }
         }
+    }
+
+    /// The 2xx OUR side sent that the SUT's ACK ladder `ack` acknowledges
+    /// ([`Self::paired_final`], a send-side one), whose copies say how many
+    /// ACKs the SUT owes.
+    fn paired_sent_final(&self, ack: &StepLadder) -> Option<&StepLadder> {
+        self.paired_final(ack).filter(|f| f.side == LadderSide::Send)
+    }
+
+    /// Whether the SUT's ACK ladder `ack` re-ACKed the copies of our 2xx that
+    /// crossed its first ACK: one more ACK than [`StepLadder::copies_past`]
+    /// owes per copy we sent inside [`TWO_HOPS`] before that ACK reached us,
+    /// which may have reached the SUT before or after its ACK left.
+    fn acked_crossing_copies(&self, ack: &StepLadder, owed: u32) -> bool {
+        if ack.side != LadderSide::Expect || !ack.draws_its_count() || ack.observed <= owed {
+            return false;
+        }
+        let Some(sent) = self.paired_sent_final(ack) else { return false };
+        let from_us = ack.claimed_us.saturating_sub(TWO_HOPS.as_micros() as u64);
+        let crossing = sent.repeats_us.iter().filter(|&&at| at > from_us && at <= ack.claimed_us);
+        ack.observed <= owed + crossing.count() as u32
+    }
+
+    /// Whether the SUT's ACK ladder `ack` to our 2xx re-ACKed past what our
+    /// copies owe only as often as the capture declares: a relaying system
+    /// repeats byte-identically the re-ACK its other leg took (RFC 3261
+    /// §13.2.2.4 there), the capture's own repeat reproduced. A shortfall
+    /// against what our copies owe is never forgiven this way.
+    fn reproduced_captured_reacks(&self, ack: &StepLadder, owed: u32) -> bool {
+        ack.side == LadderSide::Expect
+            && ack.draws_its_count()
+            && self.paired_sent_final(ack).is_some()
+            && ack.observed > owed
+            && ack.observed <= ack.declared
     }
 
     /// The INVITE final an ACK ladder acknowledges — ours or the SUT's: same
@@ -599,9 +694,14 @@ impl Repeats {
     /// What each ladder owes is [`Repeats::owed`]'s call and never a margin:
     /// where the SUT paced it, the oracle is the RFC on every lane, because an
     /// interpreter that knew which stack was behind the socket could no longer
-    /// report that the stack differs. The one thing forgiven is the closer's own
-    /// boundary ([`StepLadder::raced_the_closer`]), and that is read off the
-    /// arrival the wire timestamped.
+    /// report that the stack differs. Three things are forgiven, each read off
+    /// the arrivals the wire timestamped: the closer's own boundary
+    /// ([`StepLadder::raced_the_closer`]), a 2xx ladder run on past the
+    /// emitter's own BYE on the RFC's cadence ([`StepLadder::ran_on_past_its_bye`]),
+    /// and the re-ACK of a 2xx copy that crossed the SUT's first ACK
+    /// ([`Repeats::acked_crossing_copies`]). A fourth is the capture's own: a
+    /// re-ACK beyond our copies up to the count the document declares
+    /// ([`Repeats::reproduced_captured_reacks`]).
     pub fn mismatches(&self, run_end_us: u64) -> Vec<Failure> {
         (0..self.ladders.len())
             .filter_map(|i| {
@@ -610,7 +710,12 @@ impl Repeats {
                     return None;
                 }
                 let expected = self.owed(i, run_end_us)?;
-                if ladder.observed == expected || ladder.raced_the_closer(expected) {
+                if ladder.observed == expected
+                    || ladder.raced_the_closer(expected)
+                    || ladder.ran_on_past_its_bye(expected, run_end_us)
+                    || self.acked_crossing_copies(ladder, expected)
+                    || self.reproduced_captured_reacks(ladder, expected)
+                {
                     return None;
                 }
                 Some(Failure::RetransmitCountMismatch {
@@ -626,8 +731,9 @@ impl Repeats {
 }
 
 /// One auto ACK step's emission, held so a later repeat of the final can be
-/// answered with the SAME datagram (RFC 3261 §13.2.2.4: one client transaction,
-/// one ACK, re-sent).
+/// answered with the SAME datagram: one ACK, re-sent, by the UAC core for a
+/// 2xx (RFC 3261 §13.2.2.4) and by the client transaction for a non-2xx
+/// (§17.1.1.2).
 #[derive(Debug, Clone)]
 pub struct DrawnAck {
     pub step: String,

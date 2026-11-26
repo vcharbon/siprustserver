@@ -1,4 +1,5 @@
 b2bua-runner b2bua_unexplained_acks_total counter fixed {}
+b2bua-runner b2bua_late_2xx_dropped_total counter fixed {}
 b2bua-runner b2bua_message_cap_lifetime_crossed_total counter fixed {}
 b2bua-runner b2bua_dispatch_capped_refusals_total counter fixed {}
 b2bua-runner b2bua_dispatch_capped_request_answered_total counter fixed {}
@@ -11,8 +12,6 @@ b2bua-runner b2bua_dispatch_new_call_share_waits_total counter fixed {}
 b2bua-runner b2bua_handler_timeouts_total counter fixed {}
 b2bua-runner b2bua_force_purge_total counter fixed {}
 b2bua-runner b2bua_fast_reject_terminating_total counter fixed {}
-b2bua-runner b2bua_cdr_written_total counter fixed {}
-b2bua-runner b2bua_cdr_dropped_total counter fixed {}
 b2bua-runner b2bua_decision_dropped_cancelled_total counter fixed {}
 b2bua-runner b2bua_termination_unrecorded_total counter fixed {}
 b2bua-runner b2bua_second_final_refused_total counter fixed {}
@@ -58,6 +57,11 @@ b2bua-runner b2bua_repl_stand_down_total counter fixed {}
 b2bua-runner b2bua_repl_terminal_lost_total counter fixed {}
 b2bua-runner b2bua_repl_bootstrap_seeded_total counter fixed {}
 b2bua-runner b2bua_repl_bootstrap_stalled_total counter fixed {}
+b2bua-runner b2bua_cdr_written_total counter fixed {}
+b2bua-runner b2bua_cdr_dropped_total counter fixed {reason}
+b2bua-runner b2bua_cdr_broker_connected gauge fixed {}
+b2bua-runner b2bua_cdr_broker_connects_total counter fixed {outcome}
+b2bua-runner b2bua_cdr_broker_session_ends_total counter fixed {reason}
 b2bua-runner b2bua_call_creations_total counter fixed {}
 b2bua-runner b2bua_call_removals_total counter fixed {}
 b2bua-runner b2bua_store_poisoned_lock_recoveries_total counter fixed {lock}
@@ -83,6 +87,7 @@ b2bua-runner b2bua_cap_trips_total counter fixed {cap,kind|cap,kind|cap,kind}
 b2bua-runner b2bua_cap_near_total counter fixed {cap}
 b2bua-runner b2bua_cap_peak gauge fixed {cap}
 b2bua-runner b2bua_cap_peak_per_hour gauge fixed {cap}
+b2bua-runner b2bua_call_record_bytes histogram fixed {}
 b2bua-runner b2bua_repl_quiet_turns_total counter fixed {kind}
 b2bua-runner b2bua_repl_applied_total counter semi_open {flow,peer,op}
 b2bua-runner b2bua_repl_noops_sent_total counter semi_open {flow,peer}
@@ -162,6 +167,7 @@ b2bua-runner b2bua_txn_active_transactions gauge fixed {}
 b2bua-runner b2bua_txn_timer_queue_len gauge fixed {}
 b2bua-runner b2bua_txn_retransmit_buf_bytes gauge fixed {}
 b2bua-runner b2bua_txn_server_final_unseen_branch_total counter fixed {}
+b2bua-runner b2bua_txn_late_2xx_dropped_total counter fixed {}
 b2bua-runner b2bua_txn_via_stamps_unwritten_total counter fixed {}
 b2bua-runner b2bua_txn_parse_errors_total counter fixed {}
 b2bua-runner b2bua_txn_parse_refusals_answered_total counter fixed {}
@@ -173,6 +179,7 @@ b2bua-runner b2bua_txn_event_queue_depth gauge fixed {}
 b2bua-runner b2bua_txn_event_queue_capacity gauge fixed {}
 b2bua-runner b2bua_txn_event_queue_delay_ms gauge fixed {}
 b2bua-runner b2bua_txn_keepalive_lane_drops_total counter fixed {}
+b2bua-runner b2bua_txn_unattributed_lane_drops_total counter fixed {}
 b2bua-runner b2bua_txn_message_budget_trips_total counter fixed {}
 b2bua-runner b2bua_txn_message_budget_uncounted_total counter fixed {}
 b2bua-runner b2bua_txn_muted_messages_total counter fixed {direction}
@@ -185,9 +192,11 @@ b2bua-runner b2bua_txn_sweep_reaped_total counter fixed {}
 b2bua-runner b2bua_txn_unanswered_forgotten_total counter fixed {}
 b2bua-runner b2bua_txn_released_unanswered_invites_answered_total counter fixed {}
 b2bua-runner b2bua_txn_released_unanswered_forgotten_total counter fixed {}
+b2bua-runner b2bua_txn_call_attach_refused_total counter fixed {}
 b2bua-runner b2bua_txn_retransmits_total counter capped:256 {ladder,method|ladder,method,code}
 b2bua-runner b2bua_txn_retransmits_overflow_total counter fixed {}
 b2bua-runner b2bua_udp_ingress_brake_emergency_bypassed_total counter fixed {}
+b2bua-runner b2bua_udp_ingress_brake_unattributed_dropped_total counter fixed {}
 b2bua-runner b2bua_udp_queue_depth gauge fixed {}
 b2bua-runner b2bua_udp_queue_wait_ms gauge fixed {}
 b2bua-runner b2bua_udp_queue_max gauge fixed {}
@@ -233,6 +242,12 @@ b2bua-runner http_request_breaker_transitions_total counter capped:256 {peer,to}
 b2bua-runner http_request_breaker_transitions_overflow_total counter fixed {}
 b2bua-runner http_request_error_answers_total counter capped:256 {peer,connection}
 b2bua-runner http_request_error_answers_overflow_total counter fixed {}
+b2bua-runner http_request_connection_closes_total counter capped:256 {peer,cause}
+b2bua-runner http_request_connection_closes_overflow_total counter fixed {}
+b2bua-runner http_request_connection_closes_budget_exhausted_total counter capped:256 {peer}
+b2bua-runner http_request_connection_closes_budget_exhausted_overflow_total counter fixed {}
+b2bua-runner http_request_body_refused_total counter capped:256 {peer,cause}
+b2bua-runner http_request_body_refused_overflow_total counter fixed {}
 b2bua-runner http_request_poisoned_lock_recoveries_total counter fixed {lock}
 b2bua-runner metric_values_poisoned_lock_recoveries_total counter fixed {lock}
 b2bua-runner sip_net_poisoned_lock_recoveries_total counter fixed {lock}
@@ -290,6 +305,7 @@ sip-proxy-runner sip_proxy_rejects_total counter fixed {reason}
 sip-proxy-runner sip_proxy_hmac_failures_total counter fixed {reason}
 sip-proxy-runner sip_proxy_cancel_lookups_total counter fixed {outcome}
 sip-proxy-runner sip_proxy_no_target_dropped_total counter fixed {kind}
+sip-proxy-runner sip_proxy_local_options_total counter fixed {answer}
 sip-proxy-runner sip_routing_duration_seconds histogram fixed {}
 sip-proxy-runner sip_proxy_record_route_inserted_total counter fixed {}
 sip-proxy-runner sip_proxy_pending_invite_lru_size gauge fixed {}
@@ -324,6 +340,9 @@ sip-proxy-runner sip_proxy_lb_emergency_bypassed_total counter fixed {}
 sip-proxy-runner sip_proxy_lb_rate_cap_spilled_total counter fixed {}
 sip-proxy-runner sip_worker_health gauge fixed {health}
 sip-proxy-runner sip_worker_acceptance gauge fixed {acceptance}
+sip-proxy-runner sip_proxy_worker_health gauge semi_open {worker,state}
+sip-proxy-runner sip_proxy_worker_slow_total counter semi_open {worker}
+sip-proxy-runner sip_proxy_probe_late_answers_total counter semi_open {worker}
 sip-proxy-runner sip_proxy_peer_failures_total counter capped:256 {peer,scope,kind}
 sip-proxy-runner sip_proxy_peer_failures_overflow_total counter fixed {}
 sip-proxy-runner sip_proxy_self_elu_ewma gauge fixed {}

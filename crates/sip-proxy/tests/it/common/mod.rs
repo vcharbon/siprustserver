@@ -5,10 +5,12 @@
 
 #![allow(dead_code)]
 
+pub mod call_end;
+pub mod retransmits;
+
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use scenario_harness::Harness;
 use sip_clock::Clock;
 use sip_message::SipMessage;
@@ -123,19 +125,18 @@ pub fn options_capabilities() -> Vec<sip_message::types::SipHeader> {
 /// was built with.
 pub struct FailingSelect(pub fn() -> SelectError);
 
-#[async_trait]
 impl RoutingStrategy for FailingSelect {
     fn name(&self) -> &str {
         "FailingSelect"
     }
-    async fn select_for_new_dialog(
+    fn select_for_new_dialog(
         &self,
         _msg: &SipMessage,
         _opts: SelectOpts,
     ) -> Result<ProxyAddr, SelectError> {
         Err((self.0)())
     }
-    async fn decode_stickiness(&self, _params: &RouteParams, _msg: &SipMessage) -> DecodeResult {
+    fn decode_stickiness(&self, _params: &RouteParams, _msg: &SipMessage) -> DecodeResult {
         DecodeResult::Unknown { is_emergency: false }
     }
     fn encode_stickiness(&self, _target: &ProxyAddr, _msg: &SipMessage) -> Option<RouteParams> {

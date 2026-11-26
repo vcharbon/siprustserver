@@ -106,12 +106,12 @@ beforeAll(async () => {
     })
   )
   await on(SCRATCH, Server.migrated)
-}, 60_000)
+})
 
 afterAll(async () => {
   if (!Server.served) return
   await on("postgres", Server.dropDatabase(SCRATCH))
-}, 60_000)
+})
 
 describe.skipIf(!Server.served)("verification lines", () => {
   it("land with a cell's case result, read back in order with their marks, and fail the cell", () =>

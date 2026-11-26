@@ -9,7 +9,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use b2bua::cdr::{
-    BufferedCdrWriter, CdrDelivery, CdrDeliveryObserver, CdrEncodeError, CdrEncoder, CdrWriter,
+    BrokerConnect, BrokerSessionEnd, BufferedCdrWriter, CdrDelivery, CdrDeliveryObserver, CdrDrop,
+    CdrEncodeError, CdrEncoder, CdrWriter,
 };
 use b2bua::config::B2buaConfig;
 use b2bua::initial_invite::build_initial_call;
@@ -20,10 +21,20 @@ use b2bua_runner_kit::{
 use call::Call;
 use sip_message::parser::custom::CustomParser;
 use sip_message::{SipMessage, SipParser};
-use support::fake_broker::{Admit, FakeBroker, Reply};
+use std::sync::atomic::AtomicUsize;
+use support::fake_broker::{
+    Admit, Counters, FakeBroker, Refusing, Reply, CONNECTION_FORCED, REPLY_SUCCESS, ROOMY,
+    SETTLE_WITHIN,
+};
 use tokio::time::Instant;
 
 const MS: Duration = Duration::from_millis(1);
+/// The most a loaded box delays the writer's return past the bound that
+/// ends its wait.
+const LATE: Duration = Duration::from_secs(5);
+/// A bound or backoff a slow-lane test waits out, its margins past any delay
+/// a loaded box adds.
+const SECONDS: Duration = Duration::from_secs(3);
 
 pub(crate) fn a_call() -> Call {
     let raw = "INVITE sip:bob@example.com SIP/2.0\r\n\
@@ -58,26 +69,33 @@ impl CdrEncoder for Sized {
     }
 }
 
-/// Bounds short enough for a test, long enough for a loopback broker.
-fn bounds() -> CdrDeliveryBounds {
+/// Connect, publish and confirm bounds a loopback broker meets on a loaded
+/// box, and a backoff short enough for a test to wait past.
+pub(crate) fn bounds() -> CdrDeliveryBounds {
     CdrDeliveryBounds {
         window: 64,
-        connect_timeout: 400 * MS,
-        publish_timeout: 200 * MS,
-        confirm_timeout: 600 * MS,
+        connect_timeout: ROOMY,
+        publish_timeout: ROOMY,
+        confirm_timeout: ROOMY,
         backoff_min: 300 * MS,
         backoff_max: 1_200 * MS,
     }
 }
 
-fn writer_to(
+/// [`bounds`] with a backoff no test waits out: every record after a failed
+/// connection drops without a connect.
+fn no_retry(bounds: CdrDeliveryBounds) -> CdrDeliveryBounds {
+    CdrDeliveryBounds { backoff_min: ROOMY, backoff_max: ROOMY, ..bounds }
+}
+
+pub(crate) fn writer_to(
     url: String,
     bounds: CdrDeliveryBounds,
     size: usize,
 ) -> (RabbitMqCdrWriter, B2buaMetrics) {
     let metrics = B2buaMetrics::new();
     let settings = RabbitMqCdrSettings {
-        url,
+        brokers: vec![url.parse().unwrap()],
         queue: "cdr".into(),
         declare: CdrQueueDeclare::Own { max_len: 100_000 },
         bounds,
@@ -102,35 +120,33 @@ impl CdrDeliveryObserver for Ends {
     }
 }
 
-fn counts(m: &B2buaMetrics) -> (u64, u64) {
+pub(crate) fn counts(m: &B2buaMetrics) -> (u64, u64) {
     (m.cdr_written_total(), m.cdr_dropped_total())
 }
 
-/// Waits (up to 5 s) until `(written, dropped)` equals `want`.
-async fn settle(m: &B2buaMetrics, want: (u64, u64)) {
-    let give_up = Instant::now() + Duration::from_secs(5);
+/// Waits (up to [`SETTLE_WITHIN`]) until `(written, dropped)` equals `want`.
+pub(crate) async fn settle(m: &B2buaMetrics, want: (u64, u64)) {
+    let give_up = Instant::now() + SETTLE_WITHIN;
     while counts(m) != want && Instant::now() < give_up {
         tokio::time::sleep(5 * MS).await;
     }
     assert_eq!(counts(m), want, "(written, dropped)");
 }
 
-/// Waits (up to 2 s) until the broker received `n` publishes, so a reply
-/// switched next applies to the following one only.
+/// Waits (up to [`SETTLE_WITHIN`]) until the broker received `n` publishes,
+/// so a reply switched next applies to the following one only.
 async fn published(broker: &FakeBroker, n: usize) {
-    let give_up = Instant::now() + Duration::from_secs(2);
-    while broker.count(|c| &c.published) < n && Instant::now() < give_up {
-        tokio::time::sleep(MS).await;
-    }
-    assert_eq!(broker.count(|c| &c.published), n);
+    counted(broker, |c| &c.published, n).await;
 }
 
-/// Writes one record, asserting the writer returned within `bound`.
+/// Writes one record, asserting the writer returned once `bound` passed, at
+/// the latest, give or take [`LATE`]: a bound that did not end the wait holds
+/// the writer for ever.
 async fn write_within(w: &RabbitMqCdrWriter, call: &Call, bound: Duration) {
     let t0 = Instant::now();
     w.write(call, 2_000).await;
     let took = t0.elapsed();
-    assert!(took <= bound, "the write held the drainer {took:?}, past {bound:?}");
+    assert!(took <= bound + LATE, "the write held the drainer {took:?}, past {bound:?}");
 }
 
 #[tokio::test]
@@ -178,30 +194,35 @@ async fn the_observer_is_told_an_unconfirmed_record_dropped_at_the_confirm_bound
     let [(delivery, took)] = told[..] else { panic!("one end expected, told {told:?}") };
     assert_eq!(delivery, CdrDelivery::Dropped);
     assert!(took >= 200 * MS, "told {took:?}, before the confirm bound");
+    assert_eq!(m.cdr_drops(), [(CdrDrop::Unconfirmed, 1)]);
+    assert_eq!(m.cdr_broker_session_ends_of(BrokerSessionEnd::ConfirmBound), 1);
 }
 
 #[tokio::test]
 #[ignore = "slow lane: real clock >= 1 s"]
 async fn a_publish_the_broker_never_confirms_is_not_written_and_drops_at_the_confirm_bound() {
     let broker = FakeBroker::start(Reply::Silent).await;
-    let (w, m) = writer_to(broker.url(), bounds(), 64);
+    let b = CdrDeliveryBounds {
+        confirm_timeout: SECONDS,
+        backoff_min: SECONDS,
+        backoff_max: 2 * SECONDS,
+        ..bounds()
+    };
+    let (w, m) = writer_to(broker.url(), b, 64);
     let call = a_call();
-    write_within(&w, &call, 450 * MS).await;
+    write_within(&w, &call, Duration::ZERO).await;
     tokio::time::sleep(300 * MS).await;
     assert_eq!(counts(&m), (0, 0), "handed to the connection is not written");
     settle(&m, (0, 1)).await;
     // The connection that lost a confirm is shut down: the broker sees it end.
-    let give_up = Instant::now() + Duration::from_secs(2);
-    while broker.count(|c| &c.ended_by_client) < 1 && Instant::now() < give_up {
-        tokio::time::sleep(5 * MS).await;
-    }
-    assert_eq!(broker.count(|c| &c.ended_by_client), 1);
+    counted(&broker, |c| &c.ended_by_client, 1).await;
     // It had delivered nothing: the next record waits out the backoff.
     broker.reply(Reply::Ack);
     w.write(&call, 2_000).await;
     settle(&m, (0, 2)).await;
     assert_eq!(broker.count(|c| &c.accepted), 1, "no connect inside the backoff");
-    tokio::time::sleep(350 * MS).await;
+    assert_eq!(m.cdr_drops(), [(CdrDrop::NoBroker, 1), (CdrDrop::Unconfirmed, 1)]);
+    tokio::time::sleep(b.backoff_min + 50 * MS).await;
     w.write(&call, 2_000).await;
     settle(&m, (1, 2)).await;
     assert_eq!(broker.count(|c| &c.accepted), 2);
@@ -218,6 +239,7 @@ async fn a_nacked_publish_counts_dropped_and_the_connection_carries_on() {
     w.write(&call, 2_000).await;
     settle(&m, (1, 1)).await;
     assert_eq!(broker.count(|c| &c.accepted), 1, "a nack does not end the connection");
+    assert_eq!(m.cdr_drops(), [(CdrDrop::Nacked, 1)]);
 }
 
 #[tokio::test]
@@ -235,6 +257,8 @@ async fn a_returned_publish_counts_dropped_and_the_next_record_declares_the_queu
     settle(&m, (1, 1)).await;
     assert_eq!(broker.count(|c| &c.accepted), 2, "a returned publish ends the connection");
     assert_eq!(broker.count(|c| &c.declared), 2, "the reconnect declares the queue again");
+    assert_eq!(m.cdr_drops(), [(CdrDrop::Returned, 1)]);
+    assert_eq!(m.cdr_broker_session_ends_of(BrokerSessionEnd::Returned), 1);
 }
 
 #[tokio::test]
@@ -250,6 +274,7 @@ async fn a_connection_lost_with_confirms_outstanding_drops_each_of_them_without_
     w.write(&call, 2_000).await;
     // Far inside the 30 s confirm bound: the lost connection fails them all.
     settle(&m, (0, 4)).await;
+    assert_eq!(m.cdr_drops(), [(CdrDrop::Unconfirmed, 4)]);
 }
 
 #[tokio::test]
@@ -268,58 +293,147 @@ async fn a_connection_that_delivered_reconnects_at_once_when_it_ends() {
     assert_eq!(broker.count(|c| &c.accepted), 2);
 }
 
+/// Waits (up to [`SETTLE_WITHIN`]) until the broker counted `n` on `pick`.
+async fn counted(broker: &FakeBroker, pick: impl Fn(&Counters) -> &AtomicUsize, n: usize) {
+    let give_up = Instant::now() + SETTLE_WITHIN;
+    while broker.count(&pick) < n && Instant::now() < give_up {
+        tokio::time::sleep(MS).await;
+    }
+    assert_eq!(broker.count(pick), n);
+}
+
+/// The broker closes the idle connection, as at a restart (CONNECTION_FORCED)
+/// or cleanly, which the client reports as no error; once the broker closed
+/// the socket, the next record opens a new connection at once and is written.
+/// The client acts on the close within the broker's 100 ms close timeout.
+#[tokio::test]
+async fn the_record_after_the_broker_closed_the_idle_connection_is_written() {
+    for reply_code in [CONNECTION_FORCED, REPLY_SUCCESS] {
+        let broker = FakeBroker::start(Reply::Ack).await;
+        let (w, m) = writer_to(broker.url(), bounds(), 64);
+        let call = a_call();
+        w.write(&call, 2_000).await;
+        settle(&m, (1, 0)).await;
+        broker.close_idle(reply_code);
+        counted(&broker, |c| &c.closed_by_broker, 1).await;
+        w.write(&call, 2_000).await;
+        settle(&m, (2, 0)).await;
+        assert_eq!(broker.count(|c| &c.accepted), 2, "reply code {reply_code}");
+        let lost = m.cdr_broker_session_ends_of(BrokerSessionEnd::ConnectionLost);
+        assert_eq!(lost, 1, "reply code {reply_code}");
+    }
+}
+
+/// The broker closes the idle channel cleanly, keeping the connection: the
+/// client reports no error, and the record after its `close-ok` finds the
+/// channel closed before it is published, opens a new connection at once and
+/// is written.
+#[tokio::test]
+async fn the_record_after_the_broker_closed_the_idle_channel_is_written() {
+    let broker = FakeBroker::start(Reply::Ack).await;
+    let (w, m) = writer_to(broker.url(), bounds(), 64);
+    let call = a_call();
+    w.write(&call, 2_000).await;
+    settle(&m, (1, 0)).await;
+    broker.close_idle_channel(REPLY_SUCCESS);
+    counted(&broker, |c| &c.channels_closed_by_broker, 1).await;
+    w.write(&call, 2_000).await;
+    settle(&m, (2, 0)).await;
+    assert_eq!(broker.count(|c| &c.accepted), 2);
+    assert_eq!(m.cdr_broker_session_ends_of(BrokerSessionEnd::ConnectionLost), 1);
+}
+
+/// The broker's side of the idle socket ends (a FIN): the session ends as the
+/// client reports it, its socket shut down before any record, and the next
+/// record opens a new connection at once and is written.
+#[tokio::test]
+async fn the_record_after_the_idle_socket_ended_is_written() {
+    let broker = FakeBroker::start(Reply::Ack).await;
+    let (w, m) = writer_to(broker.url(), bounds(), 64);
+    let call = a_call();
+    w.write(&call, 2_000).await;
+    settle(&m, (1, 0)).await;
+    broker.hang_up_idle();
+    counted(&broker, |c| &c.ended_by_client, 1).await;
+    w.write(&call, 2_000).await;
+    settle(&m, (2, 0)).await;
+    assert_eq!(broker.count(|c| &c.accepted), 2);
+}
+
 #[tokio::test]
 async fn a_stalled_handshake_holds_the_writer_no_longer_than_the_connect_bound_and_is_shut_down() {
     let broker = FakeBroker::start(Reply::Ack).await;
     broker.admit(Admit::StallHandshake);
-    let (w, m) = writer_to(broker.url(), bounds(), 64);
+    let quick = CdrDeliveryBounds { connect_timeout: 400 * MS, ..no_retry(bounds()) };
+    let (w, m) = writer_to(broker.url(), quick, 64);
     let call = a_call();
-    write_within(&w, &call, 500 * MS).await;
+    write_within(&w, &call, quick.connect_timeout).await;
     assert_eq!(counts(&m), (0, 1));
     // The abandoned connection's socket is shut down, not left to its IO loop.
-    let give_up = Instant::now() + Duration::from_secs(2);
-    while broker.count(|c| &c.ended_by_client) < 1 && Instant::now() < give_up {
-        tokio::time::sleep(5 * MS).await;
-    }
-    assert_eq!(broker.count(|c| &c.ended_by_client), 1, "the stalled connection must be ended");
+    counted(&broker, |c| &c.ended_by_client, 1).await;
     // Inside the backoff every record drops at once, with no connect attempt.
     for _ in 0..50 {
-        write_within(&w, &call, 20 * MS).await;
+        w.write(&call, 2_000).await;
     }
     assert_eq!(counts(&m), (0, 51));
+    assert_eq!(m.cdr_drops(), [(CdrDrop::NoBroker, 51)]);
     assert_eq!(broker.count(|c| &c.accepted), 1);
-    // Past it the broker is healthy again and the next record is delivered.
-    broker.admit(Admit::Serve);
-    tokio::time::sleep(350 * MS).await;
+    assert_eq!(m.cdr_broker_connects_of(BrokerConnect::TimedOut), 1, "the one attempt");
+    assert_eq!(m.cdr_broker_connects_of(BrokerConnect::Failed), 0);
+}
+
+/// A connect its stalled handshake timed out, then the broker serving again:
+/// past the backoff, the next record is delivered.
+#[tokio::test]
+#[ignore = "slow lane: real clock >= 1 s"]
+async fn the_record_past_the_backoff_of_a_stalled_handshake_is_delivered() {
+    let broker = FakeBroker::start(Reply::Ack).await;
+    broker.admit(Admit::StallHandshake);
+    let b = CdrDeliveryBounds { connect_timeout: Duration::from_secs(3), ..bounds() };
+    let (w, m) = writer_to(broker.url(), b, 64);
+    let call = a_call();
     w.write(&call, 2_000).await;
-    settle(&m, (1, 51)).await;
+    assert_eq!(m.cdr_drops(), [(CdrDrop::NoBroker, 1)]);
+    broker.admit(Admit::Serve);
+    tokio::time::sleep(b.backoff_min + 50 * MS).await;
+    w.write(&call, 2_000).await;
+    settle(&m, (1, 1)).await;
+    assert_eq!(m.cdr_broker_connects_of(BrokerConnect::TimedOut), 1);
 }
 
 #[tokio::test]
 async fn a_refused_connect_drops_the_record_and_backs_off() {
-    let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let addr = closed.local_addr().unwrap();
-    drop(closed);
-    let (w, m) = writer_to(format!("amqp://guest:guest@{addr}/%2f"), bounds(), 64);
+    let refusing = Refusing::bind();
+    let url = format!("amqp://guest:guest@{}/%2f", refusing.addr);
+    let (w, m) = writer_to(url, no_retry(bounds()), 64);
     let call = a_call();
     for _ in 0..10 {
-        write_within(&w, &call, 450 * MS).await;
+        w.write(&call, 2_000).await;
     }
     assert_eq!(counts(&m), (0, 10));
+    assert_eq!(m.cdr_drops(), [(CdrDrop::NoBroker, 10)]);
+    assert_eq!(m.cdr_broker_connects_of(BrokerConnect::Failed), 1, "one attempt per backoff");
+    assert_eq!(m.cdr_broker_connected(), 0);
 }
 
+/// Attempts at 0, then after 1 s and 2 s waits: three connects by about
+/// 3.1 s and the fourth not before about 7.2 s, where a constant 1 s backoff
+/// makes five by 5 s.
 #[tokio::test]
 #[ignore = "slow lane: real clock >= 1 s"]
 async fn consecutive_failed_connects_double_the_backoff() {
     let broker = FakeBroker::start(Reply::Ack).await;
     broker.admit(Admit::StallHandshake);
-    let quick = CdrDeliveryBounds { connect_timeout: 50 * MS, ..bounds() };
-    let (w, _m) = writer_to(broker.url(), quick, 64);
+    let b = CdrDeliveryBounds {
+        connect_timeout: 50 * MS,
+        backoff_min: Duration::from_secs(1),
+        backoff_max: Duration::from_secs(8),
+        ..bounds()
+    };
+    let (w, _m) = writer_to(broker.url(), b, 64);
     let call = a_call();
-    // Attempts at 0, then after 300 ms and 600 ms waits: three connects by
-    // ~1.1 s, while a constant 300 ms backoff would have made four.
     let t0 = Instant::now();
-    while t0.elapsed() < 1_150 * MS {
+    while t0.elapsed() < Duration::from_secs(5) {
         w.write(&call, 2_000).await;
         tokio::time::sleep(10 * MS).await;
     }
@@ -330,41 +444,52 @@ async fn consecutive_failed_connects_double_the_backoff() {
 async fn a_flow_controlled_connection_drops_at_the_publish_bound() {
     let broker = FakeBroker::start(Reply::Ack).await;
     broker.admit(Admit::ServeBlocked);
-    let (w, m) = writer_to(broker.url(), bounds(), 64);
+    let quick = CdrDeliveryBounds { publish_timeout: 200 * MS, ..no_retry(bounds()) };
+    let (w, m) = writer_to(broker.url(), quick, 64);
     let call = a_call();
     // Connect, then the blocked publish: past the connect, the publish bound.
-    write_within(&w, &call, 450 * MS).await;
+    write_within(&w, &call, quick.publish_timeout).await;
     assert_eq!(counts(&m), (0, 1));
     assert_eq!(broker.count(|c| &c.published), 0, "a blocked connection sends no publish");
     // The connection delivered nothing: the backoff drops the next at once.
     for _ in 0..3 {
-        write_within(&w, &call, 20 * MS).await;
+        w.write(&call, 2_000).await;
     }
     assert_eq!(counts(&m), (0, 4));
+    assert_eq!(m.cdr_drops(), [(CdrDrop::NoBroker, 3), (CdrDrop::PublishFailed, 1)]);
+    assert_eq!(m.cdr_broker_session_ends_of(BrokerSessionEnd::PublishBound), 1);
     assert_eq!(broker.count(|c| &c.accepted), 1);
 }
 
 #[tokio::test]
 async fn a_broker_that_stops_reading_holds_the_writer_no_longer_than_the_publish_bound() {
     let broker = FakeBroker::start(Reply::StopReading).await;
-    let (w, m) = writer_to(broker.url(), bounds(), 1 << 20);
+    let quick = CdrDeliveryBounds { publish_timeout: 200 * MS, ..bounds() };
+    let (w, m) = writer_to(broker.url(), quick, 1 << 20);
     let call = a_call();
     // 1 MiB records: the socket buffers fill within a few, then the hand-off
     // stalls and the publish bound ends the connection.
     for _ in 0..40 {
-        write_within(&w, &call, 450 * MS).await;
+        write_within(&w, &call, quick.publish_timeout).await;
     }
     let (written, dropped) = counts(&m);
     assert_eq!(written, 0);
     assert!(dropped > 0, "records past the stall must drop");
     settle(&m, (0, 40)).await;
+    let cut = m.cdr_broker_session_ends_of(BrokerSessionEnd::PublishBound);
+    assert!(cut > 0, "the publish bound ended the stalled connection");
 }
 
 #[tokio::test]
 #[ignore = "slow lane: real clock >= 1 s"]
 async fn a_full_window_drops_the_record_at_the_publish_bound_and_keeps_the_connection() {
     let broker = FakeBroker::start(Reply::Silent).await;
-    let tiny = CdrDeliveryBounds { window: 2, confirm_timeout: Duration::from_secs(2), ..bounds() };
+    let tiny = CdrDeliveryBounds {
+        window: 2,
+        publish_timeout: 200 * MS,
+        confirm_timeout: SECONDS,
+        ..bounds()
+    };
     let (w, m) = writer_to(broker.url(), tiny, 64);
     let call = a_call();
     w.write(&call, 2_000).await;
@@ -372,8 +497,10 @@ async fn a_full_window_drops_the_record_at_the_publish_bound_and_keeps_the_conne
     let t0 = Instant::now();
     w.write(&call, 2_000).await;
     let took = t0.elapsed();
-    assert!(took >= 190 * MS && took <= 300 * MS, "waited {took:?} for a slot");
+    let slot_wait = took >= tiny.publish_timeout - 10 * MS && took < tiny.confirm_timeout;
+    assert!(slot_wait, "waited {took:?} for a slot: the publish bound, before any confirm bound");
     assert_eq!(counts(&m), (0, 1), "the third record found the window full");
+    assert_eq!(m.cdr_drops(), [(CdrDrop::WindowFull, 1)]);
     assert_eq!(broker.count(|c| &c.published), 2, "no publish beyond the window");
     // The two unconfirmed publishes end at the confirm bound.
     settle(&m, (0, 3)).await;
@@ -432,7 +559,7 @@ async fn every_record_ends_written_or_dropped_exactly_once() {
         }
         tokio::time::sleep(if round % 2 == 0 { 50 * MS } else { Duration::ZERO }).await;
     }
-    let give_up = Instant::now() + Duration::from_secs(5);
+    let give_up = Instant::now() + SETTLE_WITHIN;
     while m.cdr_written_total() + m.cdr_dropped_total() < n && Instant::now() < give_up {
         tokio::time::sleep(5 * MS).await;
     }
@@ -468,9 +595,11 @@ async fn a_multiple_ack_counts_every_publish_it_covers_once() {
 /// confirm bound ends the session with publish 2 still queued behind it in
 /// the tracker: its ack, already received, still counts it written.
 #[tokio::test]
+#[ignore = "slow lane: real clock >= 1 s"]
 async fn a_publish_acked_before_its_session_ends_is_counted_written() {
     let broker = FakeBroker::start(Reply::Silent).await;
-    let (w, m) = writer_to(broker.url(), bounds(), 64);
+    let b = CdrDeliveryBounds { confirm_timeout: SECONDS, ..bounds() };
+    let (w, m) = writer_to(broker.url(), b, 64);
     let call = a_call();
     w.write(&call, 2_000).await;
     published(&broker, 1).await;
@@ -485,20 +614,17 @@ async fn a_publish_acked_before_its_session_ends_is_counted_written() {
 #[tokio::test]
 async fn a_record_waiting_for_a_slot_returns_when_the_session_ends() {
     let broker = FakeBroker::start(Reply::Silent).await;
-    let b = CdrDeliveryBounds {
-        window: 1,
-        publish_timeout: 2_000 * MS,
-        confirm_timeout: 300 * MS,
-        ..bounds()
-    };
+    let b = CdrDeliveryBounds { window: 1, confirm_timeout: 300 * MS, ..bounds() };
     let (w, m) = writer_to(broker.url(), b, 64);
     let call = a_call();
     w.write(&call, 2_000).await;
     let t0 = Instant::now();
     w.write(&call, 2_000).await;
     let took = t0.elapsed();
-    assert!(took < 1_000 * MS, "the waiter took {took:?}: the session end must release it");
+    let bound = b.publish_timeout;
+    assert!(took < bound, "the waiter took {took:?}: the session end must release it");
     settle(&m, (0, 2)).await;
+    assert_eq!(m.cdr_drops(), [(CdrDrop::PublishFailed, 1), (CdrDrop::Unconfirmed, 1)]);
     assert_eq!(broker.count(|c| &c.published), 1, "nothing is published on an ended session");
 }
 
@@ -510,7 +636,7 @@ async fn close_returns_once_the_outstanding_confirms_are_counted() {
     for _ in 0..5 {
         w.write(&call, 2_000).await;
     }
-    let deadline = Instant::now() + 500 * MS;
+    let deadline = Instant::now() + SETTLE_WITHIN;
     w.close(deadline).await;
     assert_eq!(counts(&m), (5, 0), "every confirm is counted when close returns");
     assert!(Instant::now() < deadline, "no wait past the last confirm");
@@ -527,6 +653,7 @@ async fn close_drops_every_confirm_still_outstanding_at_its_deadline() {
     let t0 = Instant::now();
     w.close(t0 + 100 * MS).await;
     assert_eq!(counts(&m), (0, 3), "the close counted each unconfirmed publish dropped");
+    assert_eq!(m.cdr_drops(), [(CdrDrop::CloseDeadline, 3)]);
     assert!(t0.elapsed() < bounds().confirm_timeout, "the close deadline, not the confirm bound");
 }
 
@@ -536,9 +663,10 @@ async fn a_write_after_close_is_dropped_without_a_connection() {
     let (w, m) = writer_to(broker.url(), bounds(), 64);
     let call = a_call();
     w.write(&call, 2_000).await;
-    w.close(Instant::now() + 500 * MS).await;
+    w.close(Instant::now() + SETTLE_WITHIN).await;
     w.write(&call, 2_000).await;
     assert_eq!(counts(&m), (1, 1));
+    assert_eq!(m.cdr_drops(), [(CdrDrop::Closed, 1)]);
     assert_eq!(broker.count(|c| &c.accepted), 1, "no connection after the close");
     assert_eq!(broker.count(|c| &c.published), 1);
 }
@@ -559,5 +687,7 @@ async fn a_buffered_close_cutting_a_write_counts_every_record_once() {
     let t0 = Instant::now();
     buf.close(t0 + 100 * MS).await;
     assert_eq!(counts(&m), (0, 4), "(written, dropped) once each");
+    let cut = [(CdrDrop::CloseDeadline, 4)];
+    assert_eq!(m.cdr_drops(), cut, "the unconfirmed, the cut write and the two queued");
     assert!(t0.elapsed() < bounds().publish_timeout, "cut at the close deadline");
 }

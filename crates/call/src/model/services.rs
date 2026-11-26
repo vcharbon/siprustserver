@@ -58,6 +58,12 @@ pub struct TransferState {
     /// a-realign re-INVITE can offer it back to A.
     #[serde(with = "serde_bytes")]
     pub c_initial_sdp: Option<Vec<u8>>,
+    /// The a-realign re-INVITE C's c-realign 2xx called for while A's dialog
+    /// awaited an ACK, hers of a 2xx this stack sent her or B's of hers: it
+    /// leaves on that ACK (RFC 3261 §14.1). Boxed: every turn future holding
+    /// a call carries its size.
+    #[serde(default)]
+    pub pending_a_realign: Option<Box<PendingResync>>,
 }
 
 /// An internal release event the decision backend can subscribe to on a
@@ -82,7 +88,9 @@ pub enum ReleaseEventKind {
 pub enum ReroutePhase {
     /// Replacement b-leg INVITE sent, awaiting its final response.
     BLegDialing,
-    /// Re-INVITE toward A with the replacement leg's answer SDP in flight.
+    /// Re-INVITE toward A with the replacement leg's answer SDP in flight, or
+    /// parked until the ACK A's dialog awaits
+    /// ([`RerouteState::pending_a_realign`]).
     ARealigning,
 }
 
@@ -101,6 +109,12 @@ pub struct RerouteState {
     pub old_leg_id: Option<String>,
     /// Wall-clock ms when the reroute was applied.
     pub started_at_ms: i64,
+    /// The a-realign re-INVITE the replacement leg's 2xx called for while A's
+    /// dialog awaited an ACK, hers of a 2xx this stack sent her or the old
+    /// b-leg's of hers: it leaves on that ACK (RFC 3261 §14.1). Boxed: every
+    /// turn future holding a call carries its size.
+    #[serde(default)]
+    pub pending_a_realign: Option<Box<PendingResync>>,
 }
 
 /// Runtime state for the `relayFirst18xTo180` service. Strategy itself lives on
@@ -140,4 +154,24 @@ pub struct PromotePemState {
     /// ACK of B's 200 carries it.
     #[serde(default, with = "serde_bytes")]
     pub caller_answer: Option<Vec<u8>>,
+    /// The resync re-INVITE B's 200 called for while Alice's ACK of the
+    /// synthetic 200 was awaited: it leaves on that ACK (RFC 3261 §14.1).
+    /// Boxed: every turn future holding a call carries its size.
+    #[serde(default)]
+    pub pending_resync: Option<Box<PendingResync>>,
+}
+
+/// A re-INVITE toward Alice waiting for her ACK of a 2xx this stack sent her
+/// (RFC 3261 §14.1): the description it offers and the lines of the message
+/// that carried it that describe it or state its sender's advertisement. The
+/// promotion's resync offers B's final description, the transfer's a-realign
+/// the description of C's c-realign 2xx, the release reroute's a-realign the
+/// description of the replacement leg's 2xx.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingResync {
+    /// The leg whose peer wrote the description.
+    pub leg_id: String,
+    #[serde(with = "serde_bytes")]
+    pub body: Vec<u8>,
+    pub lines: Vec<super::SipHeader>,
 }

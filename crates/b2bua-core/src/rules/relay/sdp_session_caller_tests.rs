@@ -5,7 +5,7 @@ use super::*;
 
 /// A caller leg `a` still in setup, holding the caller-facing early dialogs
 /// `x` and `y`, and legs `b-1`, `b-2`, `b-3` of its own.
-fn early_caller() -> Call {
+pub(super) fn early_caller() -> Call {
     let config = B2buaConfig { self_ordinal: "w0".into(), ..Default::default() };
     let mut call =
         build_initial_call(&invite("sdp"), src(), &config, &mut sip_ids::TurnIds::fixed(1), 0);
@@ -22,7 +22,7 @@ fn early_caller() -> Call {
 }
 
 /// The caller-facing dialog this stack shows under `tag`.
-fn face(c: &Call, tag: &str) -> call::DialogId {
+pub(super) fn face(c: &Call, tag: &str) -> call::DialogId {
     call::DialogId { our_tag: tag.to_string(), peer_tag: c.a_leg_invite.from_tag.clone() }
 }
 

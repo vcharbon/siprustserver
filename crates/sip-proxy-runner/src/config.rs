@@ -16,6 +16,7 @@ use sip_proxy::cancel_lru::{calls_per_second, MemoBounds};
 use sip_proxy::health::HealthProbeConfig;
 use sip_proxy::load_observer::LoadObserverConfig;
 use sip_proxy::resolver::ResolverConfig;
+use sip_proxy::security::hmac;
 use sip_proxy::self_gate::ProxySelfGateConfig;
 use sip_proxy::ProxyAddr;
 
@@ -26,7 +27,6 @@ use crate::external_face::FaceCheck;
 use branch_memo::branch_memo;
 use external_face::external_face_check;
 
-/// Where the worker pool comes from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WorkerSource {
     /// `PROXY_WORKERS`: a fixed `id@host:port,..` list.
@@ -43,7 +43,6 @@ pub struct ExternalFace {
     pub advertise: ProxyAddr,
 }
 
-/// The proxy's boot configuration.
 #[derive(Debug, Clone)]
 pub struct ProxyConfig {
     pub listen: SocketAddr,
@@ -80,9 +79,11 @@ pub struct ProxyConfig {
     pub intake_shed_pct: u64,
     /// `None`: the always-admit gate.
     pub self_gate: Option<ProxySelfGateConfig>,
+    /// The proxy answers a supervision OPTIONS itself (`PROXY_LOCAL_OPTIONS`
+    /// `auto`), or relays every OPTIONS (`off`).
+    pub local_options: bool,
     /// The spread, seconds, added to a refusal's `Retry-After` base.
     pub retry_after_jitter_sec: u32,
-    /// The entry cap and byte budget of the CANCEL/ACK branch memo.
     pub branch_memo: MemoBounds,
     pub resolver: ResolverConfig,
     pub prewarm: Vec<ProxyAddr>,
@@ -117,6 +118,8 @@ impl ProxyConfig {
     /// Reads every boot variable through `get` (`None` = unset).
     /// `pod_namespace` reads the namespace of the pod the proxy runs in.
     /// `Err` holds every problem, one line each.
+    /// `observe::TRACE_HEADER_ENV` is read by the trace registry and refused
+    /// here unless on or off.
     pub fn from_lookup(
         get: &dyn Fn(&str) -> Option<String>,
         pod_namespace: &dyn Fn() -> Option<String>,
@@ -150,12 +153,25 @@ impl ProxyConfig {
             interval_ms: env.int("HEALTH_INTERVAL_MS", probe_default.interval_ms, 1, MAX_MS),
             timeout_ms: env.int("HEALTH_TIMEOUT_MS", probe_default.timeout_ms, 1, MAX_MS),
             threshold: env.int_u32("HEALTH_THRESHOLD", probe_default.threshold, 1, u32::MAX),
+            slow_window_ms: env.int(
+                "HEALTH_SLOW_WINDOW_MS",
+                probe_default.slow_window_ms,
+                1,
+                MAX_MS,
+            ),
+            recover_probes: env.int_u32(
+                "HEALTH_RECOVER_PROBES",
+                probe_default.recover_probes,
+                1,
+                u32::MAX,
+            ),
         };
         let isolation_ms = env.int("HEALTH_ISOLATION_MS", DEFAULT_ISOLATION_MS, 1, MAX_MS);
         let isolation_window = Duration::from_millis(isolation_ms);
         let observer = observer_overrides(&mut env, LoadObserverConfig::default());
         let intake_shed_pct = env.int("PROXY_INTAKE_SHED_PCT", 50, 0, 100);
         let self_gate = self_gate(&mut env);
+        let local_options = local_options(&mut env);
         let retry_after_jitter_sec = env.int_u32("PROXY_RETRY_AFTER_JITTER_SEC", 5, 0, 3600);
         let branch_memo = branch_memo(&mut env);
         let resolver = resolver(&mut env);
@@ -166,7 +182,6 @@ impl ProxyConfig {
         let external_face_check = external_face_check(&mut env);
         let external_face_period =
             Duration::from_millis(env.int("PROXY_EXT_FACE_CHECK_MS", 500, 10, 60_000));
-        // Read by the trace registry; refused here unless on or off.
         env.flag(observe::TRACE_HEADER_ENV, false);
 
         let mut errors = env.into_errors();
@@ -175,10 +190,6 @@ impl ProxyConfig {
         if let Err(violations) = validate_config(timings, &observer) {
             errors.extend(violations);
         }
-        // The memo holds the entries of every call the self-gate admits. The
-        // gate counts the external INVITEs; the B-legs the workers send
-        // bypass it, so the check holds while the system's whole rate stays
-        // within one proxy's gate, each B-leg pairing an admitted call.
         if let Some(gate) = &self_gate {
             let held = calls_per_second(&branch_memo);
             if held < usize::try_from(gate.cps_bucket_rate).unwrap_or(usize::MAX) {
@@ -187,8 +198,9 @@ impl ProxyConfig {
                      memo of {held} calls/s at PROXY_BRANCH_MEMO_MEAN_RING_MS={}, \
                      PROXY_BRANCH_MEMO_INVITES_PER_CALL={} and an INVITE entry cap of {} ms \
                      (PROXY_INVITE_TXN_TIMEOUT_SEC + Timer H), below \
-                     PROXY_SELF_GATE_CPS_RATE={}: admitted calls would push out the entries \
-                     their CANCEL and ACK are routed by",
+                     PROXY_SELF_GATE_CPS_RATE={} (which must exceed the deployment's whole \
+                     new-call rate): admitted calls would push out the entries their CANCEL and \
+                     ACK are routed by",
                     branch_memo.max_entries,
                     branch_memo.max_bytes,
                     branch_memo.mean_ring_ms,
@@ -198,8 +210,7 @@ impl ProxyConfig {
                 ));
             }
         }
-        // A healthy proxy whose probes to every worker lose their first copy
-        // still hears the answer to a Timer E copy inside the window.
+        errors.extend(slow_window_refusals(&probe));
         let isolation_floor = probe.interval_ms.saturating_add(T1_MS);
         if isolation_ms < isolation_floor {
             errors.push(format!(
@@ -209,8 +220,6 @@ impl ProxyConfig {
                 probe.interval_ms
             ));
         }
-        // A recreated pod on the same host binds the faces its predecessor
-        // holds until that one's drain ends.
         if bind_retry_deadline <= drain_grace {
             errors.push(format!(
                 "PROXY_BIND_RETRY_DEADLINE_MS={} must exceed PROXY_DRAIN_GRACE_MS={}: a \
@@ -245,6 +254,7 @@ impl ProxyConfig {
             observer,
             intake_shed_pct,
             self_gate,
+            local_options,
             retry_after_jitter_sec,
             branch_memo,
             resolver,
@@ -255,6 +265,29 @@ impl ProxyConfig {
             external_face_period,
         })
     }
+}
+
+/// The slow window is awaited past the reply window, and lengthens no dead
+/// verdict on silence: `HEALTH_TIMEOUT_MS ≤ HEALTH_SLOW_WINDOW_MS ≤
+/// (HEALTH_THRESHOLD − 1) × HEALTH_INTERVAL_MS + HEALTH_TIMEOUT_MS` (ADR-0069).
+fn slow_window_refusals(probe: &HealthProbeConfig) -> Vec<String> {
+    let mut refusals = Vec::new();
+    if probe.slow_window_ms < probe.timeout_ms {
+        refusals.push(format!(
+            "HEALTH_SLOW_WINDOW_MS={} must be at least HEALTH_TIMEOUT_MS={}: a late answer \
+             is one past the reply window",
+            probe.slow_window_ms, probe.timeout_ms
+        ));
+    } else if !probe.slow_window_fits() {
+        refusals.push(format!(
+            "HEALTH_SLOW_WINDOW_MS={} must be at most (HEALTH_THRESHOLD={} - 1) x \
+             HEALTH_INTERVAL_MS={} + HEALTH_TIMEOUT_MS={}: a longer one lengthens the dead \
+             verdict of a worker silent after a late answer past threshold x interval + \
+             timeout",
+            probe.slow_window_ms, probe.threshold, probe.interval_ms, probe.timeout_ms
+        ));
+    }
+    refusals
 }
 
 /// The default limits with the exemptions `SIP_EXEMPTIONS` states.
@@ -278,7 +311,7 @@ fn advertise(env: &mut EnvReader, key: &str, listen: Option<SocketAddr>) -> Prox
     let fallback = ProxyAddr::new(listen.ip().to_string(), listen.port());
     match env.present(key) {
         Some(s) => ProxyAddr::parse(&s).unwrap_or_else(|| {
-            env.refuse(format!("{key} must be host:port, got {s:?}"));
+            env.refuse(format!("{key} must be host:port, an IPv6 host bracketed, got {s:?}"));
             fallback
         }),
         None if listen.ip().is_unspecified() => {
@@ -366,13 +399,17 @@ fn worker_source(env: &mut EnvReader, pod_namespace: &dyn Fn() -> Option<String>
 }
 
 /// `PROXY_HMAC_KEY`, the secret that signs the stickiness cookies: required,
-/// trimmed like every value, at least 16 bytes.
+/// trimmed like every value, at least [`hmac::MIN_KEY_BYTES`] long.
 fn hmac_key(env: &mut EnvReader) -> String {
     let unset = env.raw("PROXY_HMAC_KEY").is_none();
     match env.present("PROXY_HMAC_KEY") {
-        Some(key) if key.len() >= 16 => key,
-        Some(_) => {
-            env.refuse("PROXY_HMAC_KEY must be at least 16 bytes".to_string());
+        Some(key) if key.len() >= hmac::MIN_KEY_BYTES => key,
+        Some(key) => {
+            env.refuse(format!(
+                "PROXY_HMAC_KEY must be at least {} bytes (got {})",
+                hmac::MIN_KEY_BYTES,
+                key.len()
+            ));
             String::new()
         }
         None => {
@@ -412,7 +449,6 @@ fn socket_buffer(env: &mut EnvReader, key: &str) -> Option<usize> {
     }
 }
 
-/// The `LB_*` band, AIMD and cap overrides onto `cfg`.
 fn observer_overrides(env: &mut EnvReader, mut cfg: LoadObserverConfig) -> LoadObserverConfig {
     let mut set = |key: &str, field: &mut f64, span: Span| *field = env.real(key, *field, span);
     set("LB_ELU_SOFT", &mut cfg.elu_soft, Span::Fraction);
@@ -441,7 +477,19 @@ fn self_gate(env: &mut EnvReader) -> Option<ProxySelfGateConfig> {
     on.then_some(cfg)
 }
 
-/// The named-target resolver's cache and lookup bounds.
+/// `PROXY_LOCAL_OPTIONS`: `auto` (the default) answers a supervision OPTIONS
+/// here, `off` relays every OPTIONS.
+fn local_options(env: &mut EnvReader) -> bool {
+    match env.text("PROXY_LOCAL_OPTIONS", "auto").as_str() {
+        "auto" => true,
+        "off" => false,
+        other => {
+            env.refuse(format!("PROXY_LOCAL_OPTIONS={other} must be auto or off"));
+            true
+        }
+    }
+}
+
 fn resolver(env: &mut EnvReader) -> ResolverConfig {
     let d = ResolverConfig::default();
     ResolverConfig {
@@ -464,7 +512,9 @@ fn prewarm(env: &mut EnvReader) -> Vec<ProxyAddr> {
     for entry in raw.split(',').map(str::trim).filter(|s| !s.is_empty()) {
         match ProxyAddr::parse(entry) {
             Some(t) => targets.push(t),
-            None => env.refuse(format!("PROXY_RESOLVER_PREWARM entry {entry:?} is not host:port")),
+            None => env.refuse(format!(
+                "PROXY_RESOLVER_PREWARM entry {entry:?} is not host:port (an IPv6 host bracketed)"
+            )),
         }
     }
     targets

@@ -10,10 +10,13 @@ use crate::drain::DrainExit;
 use catalogue::worker::{DRAIN_BUCKETS, PAST_BOUND, REMOVAL_CLASS};
 
 pub mod catalogue;
+mod cdr;
 mod cells;
+mod dispatch_labels;
 mod durations;
 mod limiter;
 mod operator;
+mod record_sizes;
 mod removal_class;
 mod repl_gauges;
 mod repl_hold;
@@ -25,6 +28,7 @@ mod turn_counts;
 mod udp_transport;
 mod wire_drops;
 
+pub(crate) use dispatch_labels::{discard_label, past_bound_label, DISCARD_SITES, PAST_BOUNDS};
 pub use limiter::{
     AdmitSite, LimiterCounters, LimiterFailure, LimiterOp, LimiterTask, RefreshDiscard,
     RefreshGiveUp, ReleaseGiveUp,
@@ -38,6 +42,8 @@ pub use udp_transport::{LiveCounters, LiveGauge, UdpTransportMetrics};
 #[derive(Debug, Default)]
 struct Inner {
     plain: catalogue::plain::PlainCounters,
+    /// Each CDR's end, a dropped one by reason, and a broker sink's link.
+    cdr: cdr::CdrCounts,
     // The semi-open families (per-method traffic, repeats and give-ups,
     // unroutable messages, replication per stream, the cursor census), one
     // row per observed label set.
@@ -51,6 +57,8 @@ struct Inner {
     drain_seconds: durations::Durations<{ DRAIN_BUCKETS.len() }>,
     // A new call's turn wait and permit hold (ADR-0022 X1).
     setup_times: setup_times::SetupTimes,
+    /// The size of each record the record-size cap held (ADR-0057).
+    record_sizes: record_sizes::RecordSizes,
     // What every operator release-all reached, by kind (ADR-0050 §10).
     operator_releases: operator::OperatorReleases,
     // The worker's view of its call limiter (ADR-0040).
@@ -184,34 +192,6 @@ impl Default for B2buaMetrics {
             per_peer: Arc::default(),
             new_calls: Default::default(),
         }
-    }
-}
-
-/// One discard of each site, in label order: a release of any class counts
-/// under `released`.
-pub(crate) const DISCARD_SITES: [Discard; 4] = [
-    Discard::QueueFull,
-    Discard::AtCap,
-    Discard::Released(RemovalClass::Terminated),
-    Discard::Capped,
-];
-
-pub(crate) const fn discard_label(why: Discard) -> &'static str {
-    match why {
-        Discard::QueueFull => "queue_full",
-        Discard::AtCap => "at_cap",
-        Discard::Released(_) => "released",
-        Discard::Capped => "capped",
-    }
-}
-
-/// Every dispatcher bound, in label order.
-pub(crate) const PAST_BOUNDS: [PastBound; 2] = [PastBound::Depth, PastBound::Cap];
-
-pub(crate) const fn past_bound_label(bound: PastBound) -> &'static str {
-    match bound {
-        PastBound::Depth => "depth",
-        PastBound::Cap => "cap",
     }
 }
 
@@ -576,6 +556,7 @@ impl B2buaMetrics {
         let active = creations.saturating_sub(removals);
         let mut s = String::with_capacity(2048);
         catalogue::plain::render(self, &mut s);
+        self.inner.cdr.render(&mut s);
         catalogue::worker::CALL_CREATIONS.render_value(&mut s, creations);
         catalogue::worker::CALL_REMOVALS.render_value(&mut s, removals);
         shell::render(&mut s);

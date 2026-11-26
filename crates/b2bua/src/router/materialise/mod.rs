@@ -239,7 +239,7 @@ pub(super) async fn materialise_after(
     match origin {
         Origin::Takeover => {
             ctx.state.mark_takeover(call_ref);
-            let _ = ctx.txn.watch_self_release(call_ref).await;
+            super::quiesced::watch(ctx, call_ref).await;
             ctx.metrics.bump_repl_takeover_hydrated();
             ctx.state.note_takeover(call_ref, "hydrated");
             ctx.state.note_takeover_count(call_ref, "seeded", seeded.unwrap_or(0) as u64);

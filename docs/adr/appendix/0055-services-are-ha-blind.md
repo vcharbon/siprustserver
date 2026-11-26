@@ -734,6 +734,14 @@ the re-anchor deadband of each other.
 
   **What the guarantee promises, and what it does not** (user ruling). In
   every tier:
+  - a caller whose undecided call another node took over, or back, may take
+    one 100 Trying more per change of the node serving her INVITE: that node
+    sends one as it asks the routing decision again (ADR-0070), unable to
+    tell whether the other's left. Each node's server transaction sent one,
+    the front proxy is stateless, and her `Proceeding` transaction absorbs
+    it (RFC 3261 §17.1.1.2), so in a run where a node asked again the audit
+    records it as informative, in every tier; a second 100 from one node
+    still gates;
   - an unreliable provisional (an 18x without RFC 3262) is not guaranteed
     across a crash: one a dead node took, or was to relay, is lost, and
     nothing can do better, so a caller may go from silence straight to her

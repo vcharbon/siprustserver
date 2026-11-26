@@ -30,7 +30,6 @@ impl ProxyMetrics {
         self.parse.panics.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// Inbound datagrams the parser panicked on (counter).
     pub fn parse_panics(&self) -> u64 {
         self.parse.panics.load(Ordering::Relaxed)
     }
@@ -40,7 +39,6 @@ impl ProxyMetrics {
         self.parse.errors.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// Inbound datagrams the parser refused, dropped unanswered (counter).
     pub fn parse_errors(&self) -> u64 {
         self.parse.errors.load(Ordering::Relaxed)
     }
@@ -50,7 +48,6 @@ impl ProxyMetrics {
         self.parse.answered.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// Refused requests answered with a stateless 400 (counter).
     pub fn parse_refusals_answered(&self) -> u64 {
         self.parse.answered.load(Ordering::Relaxed)
     }
@@ -60,7 +57,6 @@ impl ProxyMetrics {
         self.parse.capped.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// Answerable refused requests dropped by the cap on 400s (counter).
     pub fn parse_refusals_capped(&self) -> u64 {
         self.parse.capped.load(Ordering::Relaxed)
     }

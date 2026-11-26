@@ -348,3 +348,109 @@ fn retiring_a_100_arms_its_transaction_only_where_an_answer_of_it_stands_next() 
     assert!(cursor.retiring_arms_its_transaction("s2"));
     assert_eq!(cursor.frontier(), ["s2"], "the probe left the cursor as it was");
 }
+
+/// RFC 3261 §13.2.2.4: the 2xx the leg took owes its ACK whatever arrival the
+/// leg still awaits on another transaction (§6.7h). The send behind the ACK
+/// keeps its place.
+#[test]
+fn the_ack_a_taken_2xx_owes_arms_past_an_unmatched_expect_in_front() {
+    let p = plan(&format!(
+        "[{},{},{},{},{},{}]",
+        send("s1", "A", "INVITE"),
+        answer("s2", "A", 200, "INVITE"),
+        send("s3", "A", "CANCEL"),
+        answer("s4", "A", 200, "CANCEL"),
+        send("s5", "A", "ACK"),
+        send("s6", "A", "BYE")
+    ));
+    let mut cursor = Cursor::new(&p);
+    cursor.complete("s1");
+    cursor.complete("s2");
+    cursor.complete("s3");
+    assert_eq!(cursor.frontier(), ["s4", "s5"], "the ACK arms beside the CANCEL's answer");
+    cursor.complete("s5");
+    assert_eq!(cursor.frontier(), ["s4"], "the BYE stays behind the CANCEL's answer");
+}
+
+/// The ACK waits for its final: before the 2xx is taken nothing owes it, and
+/// it arms only once it is.
+#[test]
+fn an_ack_arms_past_an_unmatched_expect_only_once_its_final_is_taken() {
+    let p = plan(&format!(
+        "[{},{},{},{}]",
+        send("s1", "A", "INVITE"),
+        request_expect("s2", "A", "INFO"),
+        answer("s3", "A", 200, "INVITE"),
+        send("s4", "A", "ACK")
+    ));
+    let mut cursor = Cursor::new(&p);
+    cursor.complete("s1");
+    assert_eq!(cursor.frontier(), ["s2", "s3"], "no final taken: the ACK waits");
+    cursor.complete("s3");
+    assert_eq!(cursor.frontier(), ["s2", "s4"], "the 2xx is taken: its ACK is owed");
+}
+
+/// The callee's leg once its call is up: the INVITE it took and answered, the
+/// ACK, an INFO it awaits, the BYE, and its 200 to that BYE.
+fn answered_callee_awaiting_info() -> String {
+    format!(
+        "[{},{},{},{},{},{}]",
+        request_expect("s1", "B", "INVITE"),
+        answer_send("s2", "B", 200, "INVITE"),
+        request_expect("s3", "B", "ACK"),
+        request_expect("s4", "B", "INFO"),
+        request_expect("s5", "B", "BYE"),
+        answer_send("s6", "B", 200, "BYE")
+    )
+}
+
+/// RFC 3261 §17.2.2: a request the leg took is answered by its server
+/// transaction whatever arrival the leg still awaits on another (§6.7h): the
+/// 200 to the BYE arms past the INFO that never came.
+#[test]
+fn the_answer_to_a_request_the_leg_took_arms_past_an_unmatched_expect_in_front() {
+    let p = plan(&answered_callee_awaiting_info());
+    let mut cursor = Cursor::new(&p);
+    for taken in ["s1", "s2", "s3"] {
+        cursor.complete(taken);
+    }
+    assert_eq!(cursor.frontier(), ["s4"], "the BYE has not arrived: its 200 waits");
+    cursor.complete("s5");
+    assert_eq!(cursor.frontier(), ["s4", "s6"], "the BYE is taken: its 200 is owed");
+}
+
+/// An INVITE's answer keeps its place behind what the leg awaits: RFC 3262
+/// §3 orders a final behind the PRACK it waits on, so the walk-past is the
+/// non-INVITE server transaction's alone.
+#[test]
+fn an_answer_to_a_taken_invite_stays_behind_an_unmatched_expect_in_front() {
+    let p = plan(&format!(
+        "[{},{},{}]",
+        request_expect("s1", "B", "INVITE"),
+        request_expect("s2", "B", "PRACK"),
+        answer_send("s3", "B", 200, "INVITE")
+    ));
+    let mut cursor = Cursor::new(&p);
+    cursor.complete("s1");
+    assert_eq!(cursor.frontier(), ["s2"], "the 200 waits for the PRACK");
+}
+
+/// A send of the leg's own in front of the ACK keeps list order: the runner
+/// never reorders its own emissions.
+#[test]
+fn a_send_in_front_keeps_the_ack_behind_it() {
+    let p = plan(&format!(
+        "[{},{},{},{},{}]",
+        send("s1", "A", "INVITE"),
+        answer("s2", "A", 200, "INVITE"),
+        send("s3", "A", "INFO"),
+        answer("s4", "A", 200, "INFO"),
+        send("s5", "A", "ACK")
+    ));
+    let mut cursor = Cursor::new(&p);
+    cursor.complete("s1");
+    cursor.complete("s2");
+    assert_eq!(cursor.frontier(), ["s3"], "the INFO goes first");
+    cursor.complete("s3");
+    assert_eq!(cursor.frontier(), ["s4", "s5"], "past the INFO's answer, the ACK arms");
+}

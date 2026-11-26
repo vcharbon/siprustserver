@@ -27,5 +27,6 @@ impl ReplicationSupervisor {
         for entry in peers.values_mut() {
             entry.park();
         }
+        self.inner.departed.set(peers.len());
     }
 }

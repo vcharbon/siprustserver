@@ -8,16 +8,22 @@ use call::{Call, MsgpackCodec};
 use super::envelope::{self, CallTopology};
 use crate::metrics::B2buaMetrics;
 
-/// `call` encoded in the envelope `stored`; `None`, counted and logged, when
-/// the body does not encode or nests past the bound every peer decodes
+/// `call` encoded in the envelope `stored`, around `inner` when the caller
+/// already holds the codec's body of `call`; `None`, counted and logged,
+/// when the body does not encode or nests past the bound every peer decodes
 /// under, and the flush is skipped.
 pub(super) fn encode(
     codec: &MsgpackCodec,
     metrics: &B2buaMetrics,
     call: &Call,
     stored: &Option<CallTopology>,
+    inner: Option<Vec<u8>>,
 ) -> Option<Vec<u8>> {
-    match envelope::encode(codec, stored.as_ref(), call) {
+    let encoded = match inner {
+        Some(inner) => envelope::wrap(stored.as_ref(), &inner),
+        None => envelope::encode(codec, stored.as_ref(), call),
+    };
+    match encoded {
         Ok(body) => Some(body),
         Err(e) => {
             metrics.bump_repl_flush_unencodable();
@@ -45,11 +51,11 @@ mod tests {
         let deep = (0..200).fold(serde_json::Value::Null, |v, _| serde_json::json!([v]));
         let mut call = base.clone();
         call::helpers::set_call_ext(&mut call, "svc", Some(deep));
-        assert_eq!(encode(&codec, &metrics, &call, &None), None);
+        assert_eq!(encode(&codec, &metrics, &call, &None, None), None);
         assert_eq!(metrics.repl_flush_unencodable_total(), 1);
         let mut shallow = base;
         call::helpers::set_call_ext(&mut shallow, "svc", Some(1.into()));
-        assert!(encode(&codec, &metrics, &shallow, &None).is_some());
+        assert!(encode(&codec, &metrics, &shallow, &None, None).is_some());
         assert_eq!(metrics.repl_flush_unencodable_total(), 1);
     }
 }

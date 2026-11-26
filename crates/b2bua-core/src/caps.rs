@@ -9,7 +9,9 @@
 //! its cap whatever it was before. The collection caps are off on a reaper
 //! verdict's turn and on a call already going away, whose teardown would
 //! otherwise trip on its own BYE record, CANCEL record, timer or CDR event,
-//! and whose wait `TerminatingTimeout` bounds; the fuel is never off.
+//! and whose wait `TerminatingTimeout` bounds; the fuel is never off. The
+//! record's size, [`Cap::RecordBytes`], is held by the shell's commit, which
+//! measures the record it writes.
 
 use std::io;
 use std::ops::ControlFlow;
@@ -100,7 +102,7 @@ impl Gauge {
     }
 
     /// The length the gauge reads for the collection `cap` bounds; `0` for
-    /// the ext value and the fuel, which it does not count.
+    /// the ext value, the fuel and the record's size, which it does not count.
     pub fn get(&self, cap: Cap) -> u64 {
         match cap {
             Cap::Legs => self.legs,
@@ -110,7 +112,7 @@ impl Gauge {
             Cap::CdrEvents => self.cdr_events,
             Cap::Dialogs => self.dialogs,
             Cap::HeaderUpdates => self.header_updates,
-            Cap::ExtBytes | Cap::ActionsPerTurn => 0,
+            Cap::ExtBytes | Cap::ActionsPerTurn | Cap::RecordBytes => 0,
         }
     }
 }

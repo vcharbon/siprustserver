@@ -347,6 +347,40 @@ fn a_re_invite_over_an_unanswered_one_is_violated() {
     assert!(!prior_accepted, "no final arrived — in progress, not Accepted");
 }
 
+/// The first drew no response through its Timer B (64·T1, RFC 3261
+/// §17.1.1.2): its transaction is terminated, and the second overtakes
+/// nothing. One instant earlier it is still in progress.
+#[test]
+fn a_re_invite_past_the_timer_b_of_an_unanswered_one_is_compliant() {
+    let after = |at_us| {
+        hits(
+            &NoReInviteWhileInviteInProgress,
+            &[
+                req(1_000, ALICE, BOB, "INVITE", "z9hG4bK-1", 2, "at", "bt"),
+                req(500_000, ALICE, BOB, "INVITE", "z9hG4bK-1", 2, "at", "bt"),
+                req(at_us, ALICE, BOB, "INVITE", "z9hG4bK-2", 3, "at", "bt"),
+            ],
+        )
+    };
+    assert!(after(32_001_000).is_empty(), "{:?}", after(32_001_000));
+    assert_eq!(after(32_000_999).len(), 1, "Timer B counts from the first copy");
+}
+
+/// A 100 Trying moves the first out of Calling (§17.1.1.2): Timer B no
+/// longer ends it, and a second INVITE overtakes it however late.
+#[test]
+fn a_re_invite_over_one_that_drew_a_100_stays_violated_past_timer_b() {
+    let f = hits(
+        &NoReInviteWhileInviteInProgress,
+        &[
+            req(1_000, ALICE, BOB, "INVITE", "z9hG4bK-1", 2, "at", "bt"),
+            rsp(2_000, BOB, ALICE, 100, "z9hG4bK-1", 2, "at", "bt", ""),
+            req(40_000_000, ALICE, BOB, "INVITE", "z9hG4bK-2", 3, "at", "bt"),
+        ],
+    );
+    assert_eq!(f.len(), 1, "{f:?}");
+}
+
 /// Crossing re-INVITEs relayed by ONE forwarding face are two requesters
 /// with one INVITE each — legal glare, not one UAC overlapping. The
 /// ORDERED key is what keeps them apart.

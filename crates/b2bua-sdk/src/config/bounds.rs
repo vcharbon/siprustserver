@@ -46,4 +46,10 @@ impl B2buaConfig {
     /// Default [`call_control_timeout_ms`](Self::call_control_timeout_ms)
     /// (ms).
     pub const DEFAULT_CALL_CONTROL_TIMEOUT_MS: i64 = 5_000;
+    /// Default [`call_start_bound_ms`](Self::call_start_bound_ms) (ms): with
+    /// the default sync cap, under a previous hop that retransmits an INVITE
+    /// with no 100 for 5 s before it fails the call over; above the worst 100
+    /// delay a worker at three times its capacity shows, and above a peer's
+    /// dead verdict, so a call taken over is asked again.
+    pub const DEFAULT_CALL_START_BOUND_MS: i64 = 4_000;
 }

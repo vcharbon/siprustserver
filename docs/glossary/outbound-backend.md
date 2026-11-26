@@ -7,11 +7,20 @@ limiter) and the client policy they share. See
 [ADR-0043](../../docs/adr/0043-outbound-backend-client-policy.md).
 
 **Backend client** (`http_net::BackendClient`):
-One backend's client: its own `reqwest` client (rotated on a fixed period),
-its name looked up through a **resolved target**, a cap on requests in
-flight, a **backend breaker**, and the generic retry rule. Every value is an
-env key under the backend's prefix (`<P>_…`).
-_Avoid_: "connection pool" for it (the pool is `reqwest`'s own).
+One backend's client: its own pooled hyper-util client (rotated on a fixed
+period), its name looked up through a **resolved target**, a cap on requests
+in flight, a **backend breaker**, the generic retry rule, and **connection
+ejection**. Every value is an env key under the backend's prefix (`<P>_…`).
+_Avoid_: "connection pool" for it (the pool is hyper-util's own).
+
+**Connection ejection** (`http_net::ejection`):
+A client closing the one pooled connection that misbehaves, so the next
+connection a balancer spreads reaches another backend: on the first answer of
+a **close status** (a broken backend), after a run of **shed statuses** on
+one connection (a backend shedding load), within a budget of closes a
+second; always, by a reset, on a timeout.
+_Avoid_: "eject the backend" (the client never sees the backends behind an
+address, only its connections).
 
 **Resolved target** (`http_net::ResolvedTarget`):
 A backend's socket address, or its `host:port` name looked up on the request

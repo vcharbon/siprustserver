@@ -151,7 +151,7 @@ beforeAll(async () => {
     })
   )
   await on(SCRATCH, Server.migrated)
-}, 60_000)
+})
 
 afterAll(async () => {
   if (!served) return
@@ -161,7 +161,7 @@ afterAll(async () => {
       yield* Server.dropDatabase(SCRATCH)
     })
   )
-}, 60_000)
+})
 
 describe.skipIf(!served)("Calls", () => {
   it("serves the source fault a writer stored: beside a failing call's main error, and on a passing call alone", () =>
@@ -575,7 +575,7 @@ const sortedGroups = (groups: ReadonlyArray<Facets.Group>): ReadonlyArray<Facets
   [...groups].sort((a, b) => (JSON.stringify(a) < JSON.stringify(b) ? -1 : 1))
 
 describe.skipIf(!served)("Calls.queue", () => {
-  beforeAll(() => withStore(seedFilters), 60_000)
+  beforeAll(() => withStore(seedFilters))
 
   /** The family's queue under a query, `filt` narrowing to it unless the query names its own capture. */
   const queue = (query: Facets.Query, limit = 0) =>
@@ -836,5 +836,5 @@ describe.skipIf(!served)("Calls.queue", () => {
       }
       expect(under.filter((line) => line.includes("Rows Removed by Filter"))).toEqual([])
       expect(plan.join("\n")).not.toContain("Seq Scan on cut_cases")
-    })), 120_000)
+    })))
 })

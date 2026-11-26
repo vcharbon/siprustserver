@@ -18,6 +18,42 @@ def script_of(c: Doc) -> str:
     return str(c["args"][0])
 
 
+# Each pool vip-loopback names in $reasm_pools: its cap and its timeout sysctl.
+REASSEMBLY_POOLS = {
+    "ipv4": ("ipv4/ipfrag_high_thresh", "ipv4/ipfrag_time"),
+    "ipv6": ("ipv6/ip6frag_high_thresh", "ipv6/ip6frag_time"),
+    "conntrack6": ("netfilter/nf_conntrack_frag6_high_thresh",
+                   "netfilter/nf_conntrack_frag6_timeout"),
+}
+READ_BACK = "".join(
+    f'[ -e /proc/sys/net/{s} ] && echo "{s}=$(cat /proc/sys/net/{s})"\n'
+    for pair in REASSEMBLY_POOLS.values() for s in pair
+) + 'echo "pools=$(echo $reasm_pools | tr " " ",")"\n'
+
+
+def reassembly_block(script: str) -> str:
+    """vip-loopback's reassembly lines: from reasm_set's definition to its last pool."""
+    start = script.index("reasm_set() {")
+    end = script.index('reasm_pools="$reasm_pools conntrack6"\nfi\n') + len(
+        'reasm_pools="$reasm_pools conntrack6"\nfi\n')
+    return script[start:end]
+
+
+def can_unshare_net() -> bool:
+    probe = ["unshare", "--user", "--map-root-user", "--net", "true"]
+    try:
+        return subprocess.run(probe, capture_output=True).returncode == 0
+    except FileNotFoundError:
+        return False
+
+
+def run_in_netns(script: str, timeout_s: str, pool_bytes: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["unshare", "--user", "--map-root-user", "--net", "sh", "-ec", script],
+        capture_output=True, text=True,
+        env={"PATH": "/usr/bin:/bin", "REASM_TIMEOUT_S": timeout_s, "REASM_POOL_BYTES": pool_bytes})
+
+
 class ShellScripts(unittest.TestCase):
     """The pod scripts reach the node verbatim: every variable they read is set."""
 
@@ -82,6 +118,45 @@ class ShellScripts(unittest.TestCase):
              "NEIGH_UCAST_SOLICIT": "12", "NEIGH_MCAST_SOLICIT": "12",
              "NEIGH_RETRANS_TIME_MS": "250"})
 
+    def test_vip_loopback_bounds_ip_reassembly(self) -> None:
+        # ADR-0027 X5
+        proxy = find(render(SIPRUST, *KIND), "Deployment", "sip-front-proxy")
+        c = container(proxy, "vip-loopback")
+        self.assertEqual((env(c)["REASM_TIMEOUT_S"], env(c)["REASM_POOL_BYTES"]), ("2", "67108864"))
+        block = reassembly_block(script_of(c))
+        self.assertIn("reasm_set /proc/sys/net/ipv4/ipfrag_high_thresh", block)
+        if not can_unshare_net():
+            self.skipTest("no unprivileged network namespace on this host")
+        done = run_in_netns(block + READ_BACK, "2", "67108864")
+        self.assertEqual(done.returncode, 0, done.stderr)
+        read = dict(line.split("=", 1) for line in done.stdout.split())
+        self.assertIn("ipv4", read["pools"].split(","))
+        for pool in read["pools"].split(","):
+            pool_sysctl, timeout_sysctl = REASSEMBLY_POOLS[pool]
+            self.assertEqual((read[pool_sysctl], read[timeout_sysctl]), ("67108864", "2"), pool)
+
+    def test_a_pool_under_the_nodes_low_thresh_fails_the_init_container_by_name(self) -> None:
+        if not can_unshare_net():
+            self.skipTest("no unprivileged network namespace on this host")
+        proxy = find(render(SIPRUST, *KIND), "Deployment", "sip-front-proxy")
+        block = reassembly_block(script_of(container(proxy, "vip-loopback")))
+        tuned = ("echo 33554432 > /proc/sys/net/ipv4/ipfrag_high_thresh\n"
+                 "echo 16777216 > /proc/sys/net/ipv4/ipfrag_low_thresh\n")
+        done = run_in_netns(tuned + block, "2", "8388608")
+        self.assertEqual(done.returncode, 1)
+        self.assertIn("/proc/sys/net/ipv4/ipfrag_high_thresh refused 8388608", done.stderr)
+
+    def test_reassembly_follows_its_values_and_never_shrinks_the_pool(self) -> None:
+        proxy = find(render(SIPRUST, *KIND, "--set", "proxy.reassembly.timeoutSeconds=5",
+                            "--set", "proxy.reassembly.poolBytes=4194304"),
+                     "Deployment", "sip-front-proxy")
+        e = env(container(proxy, "vip-loopback"))
+        self.assertEqual((e["REASM_TIMEOUT_S"], e["REASM_POOL_BYTES"]), ("5", "4194304"))
+        self.assertIn("poolBytes", render_error(SIPRUST, *KIND, "--set",
+                                                "proxy.reassembly.poolBytes=4194303"))
+        self.assertIn("timeoutSeconds", render_error(SIPRUST, *KIND, "--set",
+                                                     "proxy.reassembly.timeoutSeconds=0"))
+
     def test_masq_exempt_reads_only_what_it_is_given(self) -> None:
         ds = find(render(SIPRUST, *KIND), "DaemonSet", "masq-exempt")
         self.check_script(ds, "masq-exempt", "masq-exempt.sh")
@@ -120,6 +195,24 @@ class Network(unittest.TestCase):
         self.assertEqual(e["PROXY_ADVERTISE_EXT"], "192.168.60.250:5070")
         self.assertEqual((e["PROXY_EXT_INTERFACE"], e["PROXY_EXT_NEXT_HOPS"]),
                          ("eth1", "192.168.60.1"))
+
+    def test_an_ipv6_vip_is_a_bracketed_hostport_wherever_an_address_names_it(self) -> None:
+        docs = render(SIPRUST, *KIND, "--set", "network.proxyVip=fd00::250",
+                      "--set", "network.externalVip=2001:db8::250")
+        proxy = env(container(find(docs, "Deployment", "sip-front-proxy"), "sip-front-proxy"))
+        self.assertEqual((proxy["PROXY_LISTEN"], proxy["PROXY_ADVERTISE"]),
+                         ("[fd00::250]:5060", "[fd00::250]:5060"))
+        self.assertEqual((proxy["PROXY_LISTEN_EXT"], proxy["PROXY_ADVERTISE_EXT"]),
+                         ("[2001:db8::250]:5060", "[2001:db8::250]:5060"))
+        worker = env(container(find(docs, "StatefulSet", "b2bua-worker"), "b2bua-worker"))
+        self.assertEqual((worker["B2BUA_OUTBOUND_PROXY"], worker["B2BUA_CONTACT_ADDRESS"]),
+                         ("[fd00::250]:5060", "[2001:db8::250]:5060"))
+
+    def test_a_bracketed_vip_fails_the_render_naming_the_bare_address(self) -> None:
+        for key in ("proxyVip", "externalVip"):
+            err = render_error(SIPRUST, *KIND, "--set-string", f"network.{key}=[2001:db8::250]")
+            self.assertIn(f"network.{key}=[2001:db8::250] is bracketed: state the bare address, "
+                          "2001:db8::250", err)
 
     def test_the_announcement_follows_readyz_and_the_liveness_probe_healthz(self) -> None:
         # ADR-0056: each VIP is announced from the nodes whose proxy is Ready,

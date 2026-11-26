@@ -16,17 +16,10 @@ pub trait HostResolver: Send + Sync {
     async fn resolve(&self, host: &str, port: u16, deadline: Instant) -> Vec<SocketAddr>;
 }
 
-/// Candidate query strings for `host`, in attempt order.
-///
-/// Kubernetes resolv.conf ships `ndots:5`, so a Service FQDN like
-/// `svc.ns.svc.cluster.local` (4 dots < 5) is first expanded through every
-/// search domain — several serial lookups before the name is tried as-is.
-/// Appending the root dot makes the name absolute, which getaddrinfo resolves
-/// in one lookup:
-/// - dotted and not already absolute → `["{host}.", host]` (the raw fallback
-///   keeps short names that need search expansion working);
-/// - single-label (only search expansion can resolve it) or already absolute
-///   → `[host]`.
+/// Candidate query strings for `host`, in attempt order: a dotted name not
+/// already absolute is tried with the root dot first, so the resolver's
+/// search list is not walked before the name itself, then as given; a
+/// single-label or absolute name is tried once, as given.
 pub(crate) fn resolution_candidates(host: &str) -> Vec<String> {
     if host.contains('.') && !host.ends_with('.') {
         vec![format!("{host}."), host.to_string()]

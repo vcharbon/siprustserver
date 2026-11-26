@@ -1,20 +1,16 @@
-//! Proxy-self-gate admission suite — the gate's on-wire half.
-//!
-//! The 13 `self_gate::tests` unit tests prove [`EluCpsGate`] returns the right
-//! [`AdmitDecision`]; this suite pins the **glue** in `core/request` that turns
-//! a gate decision into the user-visible contract: a rejected NEW external
-//! new-dialog INVITE gets a `503 Service Unavailable` with `Retry-After: <n>` and
-//! no `Reason` (the gate's reason stays in its counters), while emergency / worker-outbound
-//! new-dialog INVITEs BYPASS the gate (no 503) and increment the right bypass
-//! counter. The reply is observed exactly the way `transit_only.rs`'s
-//! `max_forwards_zero_returns_483` does — a bound client endpoint `recv()`ing the
-//! proxy's response off the harness fabric.
+//! The self-gate's on-wire half: the glue in `core/request` that turns a gate
+//! decision into the user-visible contract. A rejected new external
+//! new-dialog INVITE gets a `503 Service Unavailable` with `Retry-After: <n>`
+//! and no `Reason` (the gate's reason stays in its counters), while emergency
+//! and worker-outbound new-dialog INVITEs bypass the gate (no 503) and
+//! increment the right bypass counter.
 
 use crate::common;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
+use common::call_end::busy_at_callee;
 use common::ProxySut;
 use load_shed::simulated;
 use scenario_harness::Harness;
@@ -34,8 +30,8 @@ use sip_txn::IdGen;
 const PROXY: &str = "127.0.0.1:5080";
 const ALICE: &str = "127.0.0.1:5060";
 const BOB: &str = "127.0.0.1:5070";
-// A registered worker — its identity is what makes a new-dialog INVITE whose top
-// Via sent-by matches it classify as worker-outbound (the internal-bypass arm).
+/// A registered worker: a new-dialog INVITE whose top Via sent-by is this
+/// address is worker-outbound, the gate's internal bypass.
 const WORKER: &str = "127.0.0.1:5090";
 
 /// Bind + spawn a real `ProxyCore` on the harness fabric with a caller-supplied
@@ -100,8 +96,6 @@ Content-Length: 0\r\n\r\n"
     .into_bytes()
 }
 
-/// `recv()` the proxy's reply off a bound client endpoint and parse it (the
-/// `max_forwards_zero_returns_483` shape).
 async fn recv_response(client: &dyn sip_net::UdpEndpoint) -> sip_message::SipResponse {
     let reply = tokio::time::timeout(std::time::Duration::from_secs(2), client.recv())
         .await
@@ -113,13 +107,6 @@ async fn recv_response(client: &dyn sip_net::UdpEndpoint) -> sip_message::SipRes
     }
 }
 
-// ── The 503 wire contract — the self-gate's user-visible output ─────────────
-//
-// A force-reject gate makes EVERY external new-dialog INVITE shed. This pins the
-// self-gate reject branch of `core/request/route.rs`: RouteOutcome.decision==Reject,
-// the source gets a 503 with Retry-After=<gate value> and no Reason header.
-
-/// Gate that always rejects, with a configurable reason and Retry-After.
 struct ForceRejectGate {
     reason: ShedReason,
     retry_after_sec: u32,
@@ -143,11 +130,11 @@ impl ProxySelfGate for ForceRejectGate {
 /// given (reason, retry) and assert the on-wire 503 the source receives.
 async fn assert_wire_503(name: &str, gate_reason: ShedReason, retry: u32, expect_retry_after: u32) {
     let h = Harness::with_transit_delay(name, 0);
-    let (bob_ep, _bob_addr) = h.bind_sut("bob", BOB).await;
+    let (bob_ep, _bob_addr) = h.bind_peer("bob", BOB).await;
     let (strategy, registry) = forward_all_with_worker();
     let gate = ForceRejectGate::new(gate_reason, retry);
     let proxy = spawn_proxy_with_gate(&h, strategy, registry, gate.clone()).await;
-    let (client, _client_addr) = h.bind_sut("alice", ALICE).await;
+    let (client, _client_addr) = h.bind_peer("alice", ALICE).await;
 
     client.send_to(&new_invite(ALICE, "z9hG4bK-rej", None), proxy.addr()).await.unwrap();
     let resp = recv_response(&*client).await;
@@ -163,12 +150,8 @@ async fn assert_wire_503(name: &str, gate_reason: ShedReason, retry: u32, expect
     assert!(resp.raw(HeaderName::Reason).next().is_none(), "503 carries no Reason");
     assert_eq!(gate.tries.load(Ordering::SeqCst), 1, "the gate is consulted exactly once");
 
-    // §17.1.1.3: ACK the shed 503 (same branch/CSeq as the INVITE, To echoed
-    // from the response). The proxy generated that final itself, so it absorbs
-    // the ACK at this hop — bob still sees nothing (asserted below).
     client.send_to(&ack_for_reject(ALICE, "z9hG4bK-rej", &resp), proxy.addr()).await.unwrap();
 
-    // The over-the-cap INVITE was NEVER forwarded (and neither was its ACK).
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     assert!(bob_ep.try_recv().is_none(), "a shed INVITE must not reach the backend");
     let _ = h.finish().await;
@@ -209,19 +192,12 @@ async fn a_gate_hint_of_zero_goes_on_the_wire_as_one_second() {
     assert_wire_503("self-gate-503-zero", ShedReason::Cps, 0, 1).await;
 }
 
-// ── End-to-end through the REAL EluCpsGate (not a double) ────────────────────
-//
-// Pins that the real gate, wired into the proxy, produces the documented wire
-// 503 for BOTH rejection reasons — the CPS bucket draining and the intake-age
-// EWMA crossing critical — so a Retry-After drift in either the gate or the
-// glue is caught together.
-
 /// Bucket size 1, rate 0: the second external INVITE sheds with the 60 s
 /// Retry-After fallback (rate 0 + empty bucket).
 #[tokio::test(start_paused = true)]
 async fn real_gate_cps_drain_yields_a_wire_503_cps() {
     let h = Harness::with_transit_delay("self-gate-real-cps", 1);
-    let (_bob_ep, _bob_addr) = h.bind_sut("bob", BOB).await;
+    let (bob_uas, _bob_addr) = h.bind_peer("bob", BOB).await;
     let (strategy, registry) = forward_all_with_worker();
     let gate = Arc::new(EluCpsGate::new(
         Arc::new(simulated().0),
@@ -233,25 +209,20 @@ async fn real_gate_cps_drain_yields_a_wire_503_cps() {
         },
     ));
     let proxy = spawn_proxy_with_gate(&h, strategy, registry, gate.clone()).await;
-    let (client, _client_addr) = h.bind_sut("alice", ALICE).await;
+    let (client, _client_addr) = h.bind_peer("alice", ALICE).await;
 
-    // First INVITE drains the lone token (admitted → forwarded to bob).
-    client.send_to(&new_invite(ALICE, "z9hG4bK-ok", None), proxy.addr()).await.unwrap();
-    let bob_uas = _bob_ep;
-    // Advance until the admitted INVITE lands at bob, draining it so it can't
-    // be confused with the shed second one. Bounded so a routing regression
-    // fails fast.
-    let mut delivered = false;
+    let admitted = new_invite(ALICE, "z9hG4bK-ok", None);
+    client.send_to(&admitted, proxy.addr()).await.unwrap();
+    let mut delivered = None;
     for _ in 0..20 {
-        if bob_uas.try_recv().is_some() {
-            delivered = true;
+        delivered = bob_uas.try_recv();
+        if delivered.is_some() {
             break;
         }
         h.advance(std::time::Duration::from_millis(5)).await;
     }
-    assert!(delivered, "the first (admitted) INVITE reaches bob");
+    let forward = delivered.expect("the first (admitted) INVITE reaches bob");
 
-    // Second INVITE: bucket empty → 503, Retry-After 60, counted as CPS.
     client.send_to(&new_invite(ALICE, "z9hG4bK-shed", None), proxy.addr()).await.unwrap();
     let resp = recv_response(&*client).await;
     assert_eq!(resp.status(), 503);
@@ -259,18 +230,18 @@ async fn real_gate_cps_drain_yields_a_wire_503_cps() {
     assert_eq!(resp.raw(HeaderName::RetryAfter).next(), Some("60"));
     assert_eq!(gate.metrics().rejected_cps_total, 1);
 
-    // §17.1.1.3: ACK the shed 503 — absorbed at the proxy (self-generated).
     client.send_to(&ack_for_reject(ALICE, "z9hG4bK-shed", &resp), proxy.addr()).await.unwrap();
 
     h.advance(std::time::Duration::from_millis(50)).await;
     assert!(bob_uas.try_recv().is_none(), "the shed INVITE must not reach bob");
+    busy_at_callee(proxy.addr(), &*client, &admitted, &*bob_uas, &forward.raw).await;
     let _ = h.finish().await;
 }
 
 #[tokio::test(start_paused = true)]
 async fn real_gate_elu_over_critical_yields_a_wire_503_elu() {
     let h = Harness::with_transit_delay("self-gate-real-elu", 1);
-    let (bob_ep, _bob_addr) = h.bind_sut("bob", BOB).await;
+    let (bob_ep, _bob_addr) = h.bind_peer("bob", BOB).await;
     let (strategy, registry) = forward_all_with_worker();
     let (sampler, ctl) = simulated();
     let gate = Arc::new(EluCpsGate::new(
@@ -282,38 +253,27 @@ async fn real_gate_elu_over_critical_yields_a_wire_503_elu() {
             ..Default::default()
         },
     ));
-    // Peg the ELU above critical and seat the EWMA there (two samples from 0:
-    // 0.2*0.9 path needs a few; set 1.0 then sample twice to clear 0.8).
     ctl.set_elu(1.0);
     gate.sample();
     gate.sample();
     assert!(gate.elu_ewma() > 0.8, "EWMA must be seated above critical, got {}", gate.elu_ewma());
 
     let proxy = spawn_proxy_with_gate(&h, strategy, registry, gate.clone()).await;
-    let (client, _client_addr) = h.bind_sut("alice", ALICE).await;
+    let (client, _client_addr) = h.bind_peer("alice", ALICE).await;
 
     client.send_to(&new_invite(ALICE, "z9hG4bK-elu", None), proxy.addr()).await.unwrap();
     let resp = recv_response(&*client).await;
     assert_eq!(resp.status(), 503);
     assert_eq!(resp.raw(HeaderName::Reason).next(), None);
-    // An intake-age rejection carries Retry-After: 1.
     assert_eq!(resp.raw(HeaderName::RetryAfter).next(), Some("1"));
     assert_eq!(gate.metrics().rejected_intake_age_total, 1);
 
-    // §17.1.1.3: ACK the shed 503 — absorbed at the proxy (self-generated).
     client.send_to(&ack_for_reject(ALICE, "z9hG4bK-elu", &resp), proxy.addr()).await.unwrap();
 
     h.advance(std::time::Duration::from_millis(50)).await;
     assert!(bob_ep.try_recv().is_none(), "an ELU-shed INVITE must not reach bob");
     let _ = h.finish().await;
 }
-
-// ── Bypass arms: the three-way classification end-to-end
-//
-// A force-reject gate would 503 anything the request path lets through. So if an
-// emergency / worker-outbound new-dialog INVITE reaches bob (no 503) AND the
-// gate's bypass counter ticks, the bypass branch was taken — pinning that
-// neither path even calls `try_admit_external`.
 
 /// Gate that rejects every admission attempt but tallies bypasses — so a 503
 /// proves the gate was consulted, and a forward proves it was bypassed.
@@ -349,43 +309,41 @@ impl ProxySelfGate for BypassProbeGate {
 #[tokio::test]
 async fn emergency_new_dialog_invite_bypasses_the_gate() {
     let h = Harness::with_transit_delay("self-gate-bypass-emergency", 0);
-    let (bob_ep, _bob_addr) = h.bind_sut("bob", BOB).await;
+    let (bob_ep, _bob_addr) = h.bind_peer("bob", BOB).await;
     let (strategy, registry) = forward_all_with_worker();
     let gate = BypassProbeGate::new();
     let proxy = spawn_proxy_with_gate(&h, strategy, registry, gate.clone()).await;
-    let (client, _client_addr) = h.bind_sut("alice", ALICE).await;
+    let (client, _client_addr) = h.bind_peer("alice", ALICE).await;
 
-    // Emergency INVITE (Resource-Priority: esnet.0) — must bypass, never 503.
-    client.send_to(&new_invite(ALICE, "z9hG4bK-emg", Some("esnet.0")), proxy.addr()).await.unwrap();
+    let invite = new_invite(ALICE, "z9hG4bK-emg", Some("esnet.0"));
+    client.send_to(&invite, proxy.addr()).await.unwrap();
 
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    assert!(bob_ep.try_recv().is_some(), "an emergency INVITE must bypass the gate and reach bob");
+    let forward =
+        bob_ep.try_recv().expect("an emergency INVITE must bypass the gate and reach bob");
     assert!(client.try_recv().is_none(), "an emergency INVITE must NOT be 503'd");
     assert_eq!(gate.admit_tries.load(Ordering::SeqCst), 0, "the gate must not even be consulted");
     assert_eq!(gate.emergency.load(Ordering::SeqCst), 1, "the emergency bypass must be counted");
     assert_eq!(gate.internal.load(Ordering::SeqCst), 0);
+    busy_at_callee(proxy.addr(), &*client, &invite, &*bob_ep, &forward.raw).await;
     let _ = h.finish().await;
 }
 
 #[tokio::test]
 async fn worker_outbound_new_dialog_invite_bypasses_the_gate() {
     let h = Harness::with_transit_delay("self-gate-bypass-internal", 0);
-    let (bob_ep, _bob_addr) = h.bind_sut("bob", BOB).await;
+    let (bob_ep, _bob_addr) = h.bind_peer("bob", BOB).await;
     let (strategy, registry) = forward_all_with_worker();
     let gate = BypassProbeGate::new();
     let proxy = spawn_proxy_with_gate(&h, strategy, registry, gate.clone()).await;
-    // The "alice" endpoint here stands in for the worker: its top Via sent-by is
-    // the registered worker address, which is the SNAT-immune worker-outbound
-    // discriminator (a worker b-leg INVITE).
-    let (worker_client, _wc_addr) = h.bind_sut("worker", WORKER).await;
+    let (worker_client, _wc_addr) = h.bind_peer("worker", WORKER).await;
 
-    worker_client.send_to(&new_invite(WORKER, "z9hG4bK-int", None), proxy.addr()).await.unwrap();
+    let invite = new_invite(WORKER, "z9hG4bK-int", None);
+    worker_client.send_to(&invite, proxy.addr()).await.unwrap();
 
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    assert!(
-        bob_ep.try_recv().is_some(),
-        "a worker-outbound INVITE must bypass the gate and reach bob"
-    );
+    let forward =
+        bob_ep.try_recv().expect("a worker-outbound INVITE must bypass the gate and reach bob");
     assert!(worker_client.try_recv().is_none(), "a worker-outbound INVITE must NOT be 503'd");
     assert_eq!(gate.admit_tries.load(Ordering::SeqCst), 0, "the gate must not even be consulted");
     assert_eq!(
@@ -394,5 +352,6 @@ async fn worker_outbound_new_dialog_invite_bypasses_the_gate() {
         "the internal (worker) bypass must be counted"
     );
     assert_eq!(gate.emergency.load(Ordering::SeqCst), 0);
+    busy_at_callee(proxy.addr(), &*worker_client, &invite, &*bob_ep, &forward.raw).await;
     let _ = h.finish().await;
 }

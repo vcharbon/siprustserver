@@ -8,7 +8,6 @@ import {
   cseqMethodOf,
   descriptorForm,
   mediaTypeApartFromBoundary,
-  originLine,
   rackParts,
   reasonForm,
   reasonKey,
@@ -77,13 +76,6 @@ describe("descriptor, Timestamp, CSeq and RAck values", () => {
 })
 
 describe("a session description's origin (RFC 4566 §5.2)", () => {
-  const SDP = "v=0\r\no=jdoe 2890844526 2890842807 IN IP4 192.0.2.10\r\ns=-\r\no=other 1 1 IN IP4 192.0.2.11\r\n"
-
-  it("reads the first `o=` line as written, none where the description states none", () => {
-    expect(originLine(SDP)).toBe("o=jdoe 2890844526 2890842807 IN IP4 192.0.2.10")
-    expect(originLine("v=0\r\ns=-\r\n")).toBeUndefined()
-  })
-
   it("reads the sess-id of an origin line", () => {
     expect(sessIdOf("o=jdoe 2890844526 2890842807 IN IP4 192.0.2.10")).toBe("2890844526")
   })

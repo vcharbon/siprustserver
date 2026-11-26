@@ -20,6 +20,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures::FutureExt;
+use scenario_harness::dialogs::Departures;
 use scenario_harness::{AgentBinder, WaiverScope};
 use sip_clock::Clock;
 use tokio::sync::{OwnedSemaphorePermit, RwLock, Semaphore};
@@ -241,7 +242,7 @@ pub(crate) async fn run_one(
     tuning: CallTuning,
     overload_reject: Option<u16>,
     outcomes: Option<Arc<OutcomeSink>>,
-    _permit: OwnedSemaphorePermit,
+    permit: OwnedSemaphorePermit,
     tails: Arc<RwLock<()>>,
 ) {
     let wire = outcomes.as_ref().map(|_| CallWire::new(transport.clock.clone()));
@@ -277,11 +278,7 @@ pub(crate) async fn run_one(
                 return record_unrun(&reporter, &outcomes, id, CallOutcome::Rejected(reason))
             }
         };
-        // Simulated packet loss + auto-retransmit both ride the mux transport
-        // (the mux dispatcher is the background pump that reacts to inbound
-        // datagrams). The loss RNG is seeded off the call seed so a run is
-        // reproducible; 0 rate is a no-op, and retransmit off leaves the
-        // transport untouched.
+        let departures = Departures::default();
         let mux_net = transport
             .core
             .network_tuned(
@@ -291,15 +288,18 @@ pub(crate) async fn run_one(
                 next_seed(seed_base),
                 tuning.drop_nth,
             )
+            .with_faults(tuning.faults)
             .with_rtt_sink(rtts.sink())
             .with_tally(tally.clone())
-            .with_loss_tap(loss::loss_tap(&ctx, wire.as_ref()));
+            .with_loss_tap(loss::loss_tap(&ctx, wire.as_ref()))
+            .with_departure_tap(loss::departure_tap(&departures));
         let net = Arc::new(match &wire {
             Some(w) => mux_net.with_wire_tap(w.tap()),
             None => mux_net,
         });
         let binder =
             AgentBinder::mux(net.clone(), transport.clock.clone(), transport.recv_timeout, record);
+        binder.judge_departures(departures);
         binder.seed_ids(next_seed(seed_base));
         if let Some(sink) = &outcomes {
             // The run (and its call-id tag) is the Call-ID nonce: no two share one.
@@ -391,11 +391,13 @@ pub(crate) async fn run_one(
 
     tally.mark_outcome(); // a call whose runner never resolved (its build failed)
     let ended_at_ms = transport.clock.now_ms();
+    let e2e = ctx.elapsed();
     let failed = !matches!(result, Ok(ScenarioVerdict::Success { .. }));
     // A request awaiting its final is judged by its transaction (RFC 3261 §17.1.2).
     let (open, awaits) = (net.client_txn_open(), wire.as_ref().is_some_and(CallWire::awaits));
-    let (agents, quiesce) = (&callee_agents, call.teardown_quiesce);
-    let tail = failed_call::hold(failed, open, tails, net, &alice, agents, quiesce).await;
+    let end = failed_call::CallEnd { failed, open, recorded: binder.is_recording() };
+    let (agents, quiesce) = ((&alice, &callee_agents[..]), call.teardown_quiesce);
+    let (tail, _held) = failed_call::hold(end, permit, tails, net, agents, quiesce).await;
 
     // The per-call audit policy (ADR-0024 §6): the merged structural waivers —
     // the attached case's lowered `allowViolations` PLUS the plan's declared
@@ -459,7 +461,6 @@ pub(crate) async fn run_one(
     if transport.correlation.is_from_user() {
         transport.core.release_key(&key, class.is_ok());
     }
-    let e2e = ctx.elapsed();
     let checkpoints = ctx.take_checkpoints();
     // Fold this call's 18x outcome into the cross-call ringing-delivery gate (a
     // dropped non-PRACK 18x is expected, so it is a rate, not a per-call failure).

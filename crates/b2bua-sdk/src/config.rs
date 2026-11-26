@@ -12,6 +12,7 @@ mod cdr;
 mod defaults;
 mod event_queue_gate;
 mod front;
+mod relayed_options;
 mod retry_after;
 mod validate;
 pub use call_caps::{AgeCap, CallCaps, Cap, CapKind};
@@ -19,6 +20,7 @@ pub use capacity::{CapacityConfig, Ceilings};
 pub use cdr::CdrConfig;
 pub use event_queue_gate::{EventQueueGateConfig, GateBound, GateViolation, EVENT_QUEUE_CAPACITY};
 pub use front::Front;
+pub use relayed_options::RelayedOptionsAdvertisement;
 pub use retry_after::RetryAfterRange;
 
 /// Tunables for a B2BUA worker. Cheap to clone (a handful of scalars + two
@@ -89,6 +91,9 @@ pub struct B2buaConfig {
     /// intercept; fires while still `refer-authorizing` (HTTP hung). Default 60.
     pub refer_subscription_expiry_sec: i64,
     /// Per re-INVITE answer watchdog during REFER realignment, seconds. Default 32.
+    /// While the ACK of the target's offering 2xx waits for the transferee's
+    /// answer, her watchdog runs at most 60·T1 (30 s), so the rollback's ACK
+    /// reaches the target inside its 64·T1 give-up (RFC 3261 §13.3.1.4).
     pub refer_reinvite_answer_sec: i64,
     /// Overall REFER safety timer covering the whole transfer FSM, seconds. Default 120.
     pub refer_overall_safety_sec: i64,
@@ -285,6 +290,16 @@ pub struct B2buaConfig {
     /// ([`call_control_timeout`](Self::call_control_timeout), the one reader).
     /// Overridable via `B2BUA_CALL_CONTROL_TIMEOUT_MS`.
     pub call_control_timeout_ms: i64,
+    /// **The start bound** (ms): a new call whose initial INVITE's turn starts
+    /// this long or more after the INVITE's receipt creates no call, asks
+    /// nothing and answers the bare 503 of a refused new call, emergency
+    /// included (ADR-0070). Its caller has heard no 100, so the previous hop
+    /// may have failed the call over already; it sits under that hop's
+    /// failover timer. Default **4000**; [`validate`](Self::validate) refuses a
+    /// value not above zero or not below the setup budget
+    /// ([`call_control_timeout_ms`](Self::call_control_timeout_ms)).
+    /// Overridable via `B2BUA_CALL_START_BOUND_MS`.
+    pub call_start_bound_ms: i64,
     /// **Opt-in transparent header relay.** Header names whose *value* is copied
     /// verbatim from the a-leg INVITE onto every originated b-leg INVITE (the
     /// normal callee leg AND the REFER transfer-target leg — both funnel through
@@ -328,13 +343,18 @@ pub struct B2buaConfig {
     /// leaves in ([`SdpFormPolicy`]); [`AsWritten`] by default.
     pub sdp_form: std::sync::Arc<dyn SdpFormPolicy>,
     /// **Node capability advertisement.** The `Allow`/`Supported`/`Accept`
-    /// set this worker states on every 200 it sends to an OPTIONS (RFC 3261
+    /// set this worker states on every 200 it answers to an OPTIONS (RFC 3261
     /// §11.2) — the out-of-dialog health reply, the one it answers in a
-    /// dialog, the one it relays — a node-scoped statement, not a call-scoped
-    /// one, so it is declared here rather than by a routing decision. The
-    /// default is the stack set; the health path borrows this value, so a
-    /// keepalive probe resolves its advertisement without allocating.
+    /// dialog — and on the one it relays under
+    /// [`RelayedOptionsAdvertisement::NodeSet`]: a node-scoped statement, not
+    /// a call-scoped one, so it is declared here rather than by a routing
+    /// decision. The default is the stack set; the health path borrows this
+    /// value, so a keepalive probe resolves its advertisement without
+    /// allocating.
     pub node_capabilities: sip_message::generators::CapabilitySet,
+    /// What a 200 this worker relays to an in-dialog OPTIONS advertises: the
+    /// node's set by default, or the answerer's lines as they came.
+    pub relayed_options_advertisement: RelayedOptionsAdvertisement,
     /// **Minted-final advertisement.** The `Allow`/`Supported`/`Accept` this
     /// worker states on a failure final to an INVITE it mints in its own name,
     /// restating no peer's final (a reject, a refusal, a timeout's final; not
@@ -449,6 +469,18 @@ impl B2buaConfig {
     /// for a reader that runs before the configuration holds it.
     pub fn call_control_timeout_of(ms: i64) -> std::time::Duration {
         let ms = if ms > 0 { ms } else { Self::DEFAULT_CALL_CONTROL_TIMEOUT_MS };
+        std::time::Duration::from_millis(ms.unsigned_abs())
+    }
+
+    /// The start bound ([`call_start_bound_ms`](Self::call_start_bound_ms)),
+    /// never zero: a non-positive value reads
+    /// [`DEFAULT_CALL_START_BOUND_MS`](Self::DEFAULT_CALL_START_BOUND_MS).
+    pub fn call_start_bound(&self) -> std::time::Duration {
+        let ms = if self.call_start_bound_ms > 0 {
+            self.call_start_bound_ms
+        } else {
+            Self::DEFAULT_CALL_START_BOUND_MS
+        };
         std::time::Duration::from_millis(ms.unsigned_abs())
     }
 

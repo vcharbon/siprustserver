@@ -25,8 +25,10 @@
 //!
 //! Beyond the failover sweep: a worker stalled past its exit threshold.
 
+use std::sync::Arc;
 use std::time::Duration;
 
+use b2bua::decision::CallDecisionEngine;
 use b2bua_harness::Pace;
 use failover_harness::{FailoverHarness, WorkerHealth};
 use sip_proxy::health::HealthProbeConfig;
@@ -46,7 +48,7 @@ const BOB: &str = "127.0.0.1:5070";
 const PROBE: &str = "127.0.0.1:5099";
 
 /// A ring deadline that outlasts the stall, the exit and the slowest restart.
-const LONG_RING: Duration = Duration::from_secs(40);
+pub(crate) const LONG_RING: Duration = Duration::from_secs(40);
 /// `B2BUA_LOOP_STALL_MS`, as it defaults.
 const LOOP_STALL: Duration = Duration::from_secs(10);
 /// `B2BUA_LOOP_EXIT_MS`, as it defaults.
@@ -68,14 +70,23 @@ const REFUTED_WITHIN: Duration = Duration::from_secs(1);
 
 /// The cluster on the production probe, read alive, one call established and
 /// one ringing on `b1`, both backed up on `b2`.
-async fn place_probed(name: &str) -> Placed {
+pub(crate) async fn place_probed(name: &str) -> Placed {
+    place_probed_deciding(name, ring_deadline_decision(LONG_RING)).await
+}
+
+/// [`place_probed`] with the workers on `decision`; its route's ring
+/// deadline is the cell's, past the cell.
+pub(crate) async fn place_probed_deciding(
+    name: &str,
+    decision: Arc<dyn CallDecisionEngine>,
+) -> Placed {
     let mut fh = FailoverHarness::new(name, &["b1", "b2"]);
     let alice = fh.agent("alice", ALICE).await;
     let bob = fh.agent("bob", BOB).await;
     let workers = [("b1", B1.parse().unwrap()), ("b2", B2.parse().unwrap())];
     let cadence = HealthProbeConfig::default();
     let proxy = fh.spawn_proxy_with_probe_cadence(PROXY, PROBE, &workers, cadence).await;
-    let (w_b1, w_b2) = spawn_workers_deciding(&mut fh, ring_deadline_decision(LONG_RING)).await;
+    let (w_b1, w_b2) = spawn_workers_deciding(&mut fh, decision).await;
     let read = Duration::from_millis(cadence.interval_ms + cadence.timeout_ms);
     fh.advance(read).await;
     assert_eq!(proxy.health("b1"), Some(WorkerHealth::Alive));

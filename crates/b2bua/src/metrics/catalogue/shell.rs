@@ -18,5 +18,5 @@ pub const POISONED_LOCK_RECOVERIES: Family = Family::counter(
 pub const TASK_RESTARTS: Family = Family::counter(
     "b2bua_task_restarts_total",
     Labels::Product(&[Dim::new("task", &crate::supervise::TASKS)]),
-    "runs of a long-lived worker task that panicked and were made again (process-wide), by task — expected 0",
+    "panics a long-lived worker task survived (process-wide), by task: a run made again, or a CDR sink panic the drainer caught — expected 0",
 );

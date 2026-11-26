@@ -18,6 +18,10 @@ impl Owner {
                 let sent = self.do_send_response(endpoint, *msg, dest).await;
                 let _ = reply.send(sent);
             }
+            Command::SendStatelessResponse { msg, dest, reply } => {
+                let sent = self.do_send_stateless_response(endpoint, *msg, dest).await;
+                let _ = reply.send(sent);
+            }
             Command::SendRaw { call_id, buf, dest, reply } => {
                 self.send_buffer(endpoint, &call_id, &buf, dest).await;
                 let _ = reply.send(());
@@ -29,8 +33,8 @@ impl Owner {
                 let disposition = self.do_reoffer(endpoint, *message, src).await;
                 let _ = reply.send(disposition);
             }
-            Command::CancelTxnsForCall { call_ref, reply } => {
-                self.do_cancel_txns_for_call(&call_ref);
+            Command::CancelTxnsForCall { call_ref, origins, reply } => {
+                self.do_cancel_txns_for_call(&call_ref, origins);
                 let _ = reply.send(());
             }
             Command::RelinquishCall { call_ref, reply } => {
@@ -39,6 +43,9 @@ impl Owner {
             Command::RelinquishServer { key, reply } => self.relinquish_server(&key, reply),
             Command::RelinquishUnansweredServer { key, reply } => {
                 self.relinquish_unanswered_server(&key, reply)
+            }
+            Command::AttachServerToCall { key, call_ref } => {
+                self.attach_server_to_call(&key, &call_ref)
             }
             Command::RelinquishClient { branch, reply } => {
                 self.relinquish_client(endpoint, &branch, reply).await
@@ -55,16 +62,16 @@ impl Owner {
                     .await;
                 let _ = reply.send(answered);
             }
-            Command::ActiveTxnCount { call_ref, reply } => {
+            Command::ActiveTxnCount { call_ref, call_ids, reply } => {
                 let on_books = self.txn_index.get(call_ref.as_str()).map_or(0, CallTxns::on_books);
-                let _ = reply.send(on_books);
+                let _ = reply.send(on_books + self.unattributed_serving(&call_ids));
             }
             Command::HoldsClient { branch, reply } => {
                 let _ = reply.send(self.clients.contains_key(&branch));
             }
-            Command::ReleaseCancel { call_id, from_tag, cseq, reply } => {
+            Command::ReleaseCancel { call_id, from_tag, cseq, invite, reply } => {
                 let key = (call_id, from_tag, cseq);
-                let _ = reply.send(self.release_held_cancel(endpoint, &key).await);
+                let _ = reply.send(self.release_held_cancel(endpoint, &key, invite).await);
             }
             Command::ReleaseAck { branch, reply } => {
                 let _ = reply.send(self.send_held_ack(endpoint, &branch).await);
@@ -72,15 +79,9 @@ impl Owner {
             Command::ReleaseTrying { key, reply } => {
                 let _ = reply.send(self.send_first_trying(endpoint, key.id()).await);
             }
-            Command::WatchSelfRelease { call_ref, reply } => {
-                if self.has_txns_for(&call_ref) {
-                    // Live txns — arm the watch; the last `delete_txn` fires the
-                    // (lossless) CallQuiesced at end-of-turn.
-                    self.self_release_watch.insert(call_ref);
-                } else {
-                    // Already quiesced — capture CallQuiesced now (lossless path).
-                    self.notify_quiesced(call_ref);
-                }
+            Command::ArmTrying { key } => self.arm_trying_now(key),
+            Command::WatchSelfRelease { call_ref, call_ids, reply } => {
+                self.watch_self_release(call_ref, call_ids);
                 let _ = reply.send(());
             }
         }

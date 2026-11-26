@@ -20,7 +20,8 @@ use super::ActionExecutor;
 
 impl ActionExecutor<'_> {
     /// Apply one action; `Break` ends the rule's list (a `CreateLeg` whose
-    /// leg is refused).
+    /// leg is refused, a `Respond` whose 2xx is refused 420,
+    /// [`Self::refuses_own_success`]).
     pub(super) fn step(
         &mut self,
         action: &RuleAction,
@@ -30,6 +31,11 @@ impl ActionExecutor<'_> {
     ) -> ControlFlow<()> {
         if matches!(action, RuleAction::CreateLeg { .. }) {
             return self.create_leg_of(action, ctx, call, fx);
+        }
+        if let RuleAction::Respond { status, .. } = action {
+            if self.refuses_own_success(call, fx, ctx, *status) {
+                return ControlFlow::Break(());
+            }
         }
         self.apply(action, ctx, call, fx);
         ControlFlow::Continue(())
@@ -116,7 +122,7 @@ impl ActionExecutor<'_> {
             }
             RuleAction::AckLeg { leg_id, body } => self.ack_authored(call, fx, leg_id, body),
             RuleAction::AckLegAnswering { leg_id, answer } => {
-                self.ack_answering(call, fx, leg_id, answer)
+                self.ack_answering(call, fx, ctx, leg_id, answer)
             }
             RuleAction::EndOnEvidence { leg_id } => self.end_on_evidence(call, fx, ctx, leg_id),
             RuleAction::ReleaseStraggler2xx { leg_id } => {
@@ -143,6 +149,9 @@ impl ActionExecutor<'_> {
             RuleAction::RejectPendingReinvite { leg_id, outbound_cseq, status, reason } => {
                 self.reject_pending_reinvite(call, fx, leg_id, *outbound_cseq, *status, reason);
             }
+            RuleAction::ResolveCancelledReinvite { leg_id, outbound_cseq } => {
+                self.resolve_cancelled_reinvite(call, fx, ctx, leg_id, *outbound_cseq);
+            }
             RuleAction::AnswerRelayOriginator { status, reason } => {
                 self.answer_relay_originator(call, fx, ctx, *status, reason);
             }
@@ -163,7 +172,6 @@ impl ActionExecutor<'_> {
             }
             RuleAction::Merge { .. }
             | RuleAction::Split { .. }
-            | RuleAction::ResolveCancelledReinvite { .. }
             | RuleAction::ScheduleTimer { .. }
             | RuleAction::SnoozeTimer { .. }
             | RuleAction::CancelTimer { .. }
@@ -209,6 +217,8 @@ impl ActionExecutor<'_> {
                 p_early_media,
             } => {
                 let (bytes, content_type, author, descriptors) = parts(body);
+                let to_tag =
+                    relay::writable_tag("provisional to the caller", to_tag.as_deref(), fx);
                 self.send_provisional_to_leg(
                     call,
                     fx,
@@ -218,7 +228,7 @@ impl ActionExecutor<'_> {
                     bytes,
                     content_type,
                     descriptors,
-                    to_tag.as_deref(),
+                    to_tag,
                     p_early_media.as_deref(),
                     author,
                 );
@@ -264,7 +274,7 @@ impl ActionExecutor<'_> {
                 self.relay_failure_to_a_leg(call, fx, ctx, *status, reason);
             }
             RuleAction::RespondToALeg { status, reason, header_updates, contacts } => {
-                let authored = super::respond::AuthoredFinal {
+                let authored = super::authored_final::AuthoredFinal {
                     status: *status,
                     reason,
                     header_updates,
@@ -281,6 +291,7 @@ impl ActionExecutor<'_> {
                 relayed,
             } => {
                 let (bytes, content_type, author, descriptors) = parts(body);
+                let to_tag = relay::writable_tag("final to the caller", to_tag.as_deref(), fx);
                 self.answer_a_leg_new_dialog(
                     call,
                     fx,
@@ -289,7 +300,7 @@ impl ActionExecutor<'_> {
                     bytes,
                     content_type,
                     descriptors,
-                    to_tag.as_deref(),
+                    to_tag,
                     header_updates,
                     relayed,
                     author,

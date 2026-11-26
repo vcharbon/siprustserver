@@ -10,13 +10,34 @@
 
 use std::panic::AssertUnwindSafe;
 
-use b2bua_harness::{model_gate, B2buaScene};
+use b2bua_harness::{model_gate, B2buaScene, B2buaSut};
 use callshapes::generator::{self, Cell, Ending, Winner};
 use callshapes::shapes::default_binder;
 use callshapes::CancelAt;
 use futures::FutureExt;
 use scenario_harness::actor::ScenarioVerdict;
 use scenario_harness::realcall::{run_actor_collecting, CallEnv};
+
+/// The port the transfer target, charlie, answers on.
+const CHARLIE_PORT: u16 = 5090;
+
+/// A scene whose B2BUA routes every call to bob and authorizes a transfer
+/// (`generator::REFER_KEY`), with charlie bound as the transfer target.
+pub(crate) async fn refer_scene(name: &str) -> (B2buaScene, scenario_harness::Agent) {
+    refer_scene_on(scenario_harness::Harness::new(name)).await
+}
+
+/// [`refer_scene`] on a harness the caller built, over the fabric it chose.
+pub(crate) async fn refer_scene_on(
+    h: scenario_harness::Harness,
+) -> (B2buaScene, scenario_harness::Agent) {
+    let scene =
+        B2buaScene::on_harness(h, |bob_port| B2buaSut::route_all_with_refer("127.0.0.1", bob_port))
+            .await;
+    let charlie =
+        scene.h.agent("charlie", &format!("127.0.0.1:{CHARLIE_PORT}")).await.transfer_target();
+    (scene, charlie)
+}
 
 /// Which cells a pending SUT defect fails.
 type CellsOf = fn(&Cell) -> bool;
@@ -30,11 +51,11 @@ const PENDING_SUT_DEFECTS: &[(CellsOf, &str)] = &[];
 /// model invariant a SUT turn broke, when one did, before what the call met.
 async fn run_cell(cell: Cell) {
     let since = model_gate::Mark::now();
-    let scene = B2buaScene::new(&format!("cell {cell}")).await;
+    let (scene, charlie) = refer_scene(&format!("cell {cell}")).await;
     let env = CallEnv::for_functional(
         &scene.alice,
         &scene.bob,
-        None,
+        Some(&charlie),
         scene.b2bua.addr,
         "X-Loadgen-Id",
         "cell-tok",
@@ -90,35 +111,54 @@ fn cells_of(ending: Ending, winner: Option<Winner>) -> Vec<Cell> {
         .collect()
 }
 
-/// The quarter `part` (0..4) of the generator's fixed sample.
-fn sample_part(part: usize) -> Vec<Cell> {
+/// Part `part` (0..`of`) of the generator's fixed sample: the cells from
+/// `len * part / of` up to `len * (part + 1) / of`, so the `of` parts hold
+/// every cell of the sample exactly once and differ in size by one cell at
+/// most.
+fn sample_part(part: usize, of: usize) -> Vec<Cell> {
     let sample = generator::sample();
-    let quarter = sample.len().div_ceil(4);
-    sample.into_iter().skip(part * quarter).take(quarter).collect()
+    let len = sample.len();
+    sample[len * part / of..len * (part + 1) / of].to_vec()
 }
 
-/// The fixed sample, every triple of dimension values, in four parts that
-/// run in parallel; the first holds the callee's early UPDATEs then its
-/// re-INVITE.
-#[tokio::test(start_paused = true)]
-async fn the_sample_of_call_shapes_part_1() {
-    run_cells(sample_part(0)).await;
+/// One default-lane test per name, each running its part of the fixed sample
+/// (every triple of dimension values), so the parts run in parallel and each
+/// stays well inside the lane's per-test timeout on a loaded box. The part
+/// count, `SAMPLE_PARTS`, is the number of names. The first part opens with
+/// the callee's early UPDATEs then its re-INVITE, the sample's first cell.
+macro_rules! sample_parts {
+    ($($name:ident),+ $(,)?) => {
+        const SAMPLE_PARTS: usize = [$(stringify!($name)),+].len();
+        sample_parts!(@part 0; $($name),+);
+    };
+    (@part $part:expr; $name:ident $(, $rest:ident)*) => {
+        #[tokio::test(start_paused = true)]
+        async fn $name() {
+            run_cells(sample_part($part, SAMPLE_PARTS)).await;
+        }
+        sample_parts!(@part $part + 1; $($rest),*);
+    };
+    (@part $part:expr;) => {};
 }
 
-#[tokio::test(start_paused = true)]
-async fn the_sample_of_call_shapes_part_2() {
-    run_cells(sample_part(1)).await;
-}
-
-#[tokio::test(start_paused = true)]
-async fn the_sample_of_call_shapes_part_3() {
-    run_cells(sample_part(2)).await;
-}
-
-#[tokio::test(start_paused = true)]
-async fn the_sample_of_call_shapes_part_4() {
-    run_cells(sample_part(3)).await;
-}
+sample_parts!(
+    the_sample_of_call_shapes_part_01,
+    the_sample_of_call_shapes_part_02,
+    the_sample_of_call_shapes_part_03,
+    the_sample_of_call_shapes_part_04,
+    the_sample_of_call_shapes_part_05,
+    the_sample_of_call_shapes_part_06,
+    the_sample_of_call_shapes_part_07,
+    the_sample_of_call_shapes_part_08,
+    the_sample_of_call_shapes_part_09,
+    the_sample_of_call_shapes_part_10,
+    the_sample_of_call_shapes_part_11,
+    the_sample_of_call_shapes_part_12,
+    the_sample_of_call_shapes_part_13,
+    the_sample_of_call_shapes_part_14,
+    the_sample_of_call_shapes_part_15,
+    the_sample_of_call_shapes_part_16,
+);
 
 /// One slow-lane test per slice of the compatible cells, so the slices run
 /// in parallel.
@@ -146,3 +186,15 @@ slow_slice!(cancel_after_1xx, Ending::Cancel(CancelAt::AfterProvisional), None);
 slow_slice!(cancel_then_early_bye, Ending::Cancel(CancelAt::AfterProvisionalThenEarlyBye), None);
 slow_slice!(cancel_crossing_final, Ending::Cancel(CancelAt::CrossingFinal), None);
 slow_slice!(cancel_after_final, Ending::Cancel(CancelAt::AfterFinal), None);
+
+/// The one cell `SHAPE_CELL` names by its label (`by=… … xfer=…`), when set:
+/// a failing cell of the lanes above, run alone.
+#[tokio::test(start_paused = true)]
+async fn the_cell_named_by_shape_cell() {
+    let Ok(label) = std::env::var("SHAPE_CELL") else { return };
+    let cell = generator::cells()
+        .into_iter()
+        .find(|c| c.to_string() == label)
+        .unwrap_or_else(|| panic!("no cell is labelled {label:?}"));
+    run_cell(cell).await;
+}

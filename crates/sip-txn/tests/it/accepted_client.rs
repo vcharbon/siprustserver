@@ -134,7 +134,7 @@ async fn a_2xx_holds_the_transaction_accepted_until_timer_m_and_the_tu_owns_the_
     assert_eq!(responses(&stack.drain_events()), vec![(200, true)], "the 2xx is the final");
     assert_eq!(stack.txn.metrics().active_transactions(), 1, "Accepted holds the transaction");
     assert_eq!(
-        stack.txn.active_txn_count_for_call(call_ref).await.unwrap(),
+        stack.txn.active_txn_count_for_call(call_ref, &[]).await.unwrap(),
         0,
         "the 2xx met the transaction's obligation to its call"
     );
@@ -388,11 +388,11 @@ async fn relinquishing_a_calls_accepted_transactions_leaves_the_others() {
     assert!(stack.drain_peer().is_empty(), "no ACK, no BYE from the layer");
 }
 
-/// RFC 6026 §8.4: an Accepted transaction passes only 2xx up. A provisional
-/// or a non-2xx on its branch is absorbed: nothing reaches the TU and nothing
-/// is sent.
+/// RFC 6026 §8.4: an Accepted transaction passes 2xx up. An unreliable
+/// provisional or a non-2xx on its branch is absorbed: nothing reaches the TU
+/// and nothing is sent.
 #[tokio::test(start_paused = true)]
-async fn an_accepted_transaction_hands_only_2xx_up() {
+async fn an_accepted_transaction_absorbs_an_unreliable_1xx_and_a_non_2xx() {
     let mut stack = Stack::build(5, 64, 64).await;
     let (call_ref, call_id, branch) = ("self|call-A11", "callid-A11", "z9hG4bK-A11");
     let invite = offerless_invite(call_ref, call_id, branch);
@@ -410,6 +410,94 @@ async fn an_accepted_transaction_hands_only_2xx_up() {
     stack.inject(&ok(1, branch, call_id, "t11", &[], "")).await;
     elapse_ms(20).await;
     assert_eq!(responses(&stack.drain_events()), vec![(200, false)], "a 2xx still goes up");
+}
+
+/// RFC 3262 §4: a sibling fork's reliable provisional reaching an Accepted
+/// transaction its call holds goes up to the TU, matched to it, which owes
+/// that fork its PRACK; the layer sends nothing for it.
+#[tokio::test(start_paused = true)]
+async fn an_accepted_transaction_hands_a_sibling_forks_reliable_1xx_up() {
+    let mut stack = Stack::build(5, 64, 64).await;
+    let (call_ref, call_id, branch) = ("self|call-A14", "callid-A14", "z9hG4bK-A14");
+    let invite = offerless_invite(call_ref, call_id, branch);
+    stack.txn.send_request(invite, addr(CALLEE), TxnKind::Invite).await.unwrap();
+    stack.inject(&ok(1, branch, call_id, "t14", &[], "")).await;
+    elapse_ms(20).await;
+    stack.drain_peer();
+    let _ = stack.drain_events();
+
+    let reliable = ["Require: 100rel", "RSeq: 7"];
+    let late =
+        provisional_or_final("183 Session Progress", 1, branch, call_id, "t15", &reliable, "");
+    stack.inject(&late).await;
+    elapse_ms(20).await;
+    assert_eq!(responses(&stack.drain_events()), vec![(183, true)], "it reaches the TU");
+    assert!(stack.drain_peer().is_empty(), "and draws nothing from the layer");
+}
+
+/// An offerless INVITE answered by one fork: a sibling fork's reliable
+/// provisional carrying an offer goes up from the Accepted transaction and
+/// its PRACK answers that offer (RFC 3262 §5). After release, the ACK the
+/// layer builds for that fork's 2xx carries no second answer.
+#[tokio::test(start_paused = true)]
+async fn after_release_a_sibling_forks_2xx_after_its_reliable_offer_is_acked_bare() {
+    let mut stack = Stack::build(5, 64, 64).await;
+    let (call_ref, call_id, branch) = ("self|call-A16", "callid-A16", "z9hG4bK-A16");
+    let invite = offerless_invite(call_ref, call_id, branch);
+    stack.txn.send_request(invite, addr(CALLEE), TxnKind::Invite).await.unwrap();
+    let sdp = ["Content-Type: application/sdp"];
+    stack.inject(&ok(1, branch, call_id, "t16", &sdp, OFFER)).await;
+    elapse_ms(20).await;
+    stack.drain_peer();
+    let _ = stack.drain_events();
+
+    let reliable = ["Require: 100rel", "RSeq: 7", "Content-Type: application/sdp"];
+    let late =
+        provisional_or_final("183 Session Progress", 1, branch, call_id, "t17", &reliable, OFFER);
+    stack.inject(&late).await;
+    elapse_ms(20).await;
+    assert_eq!(responses(&stack.drain_events()), vec![(183, true)], "it reaches the TU");
+
+    stack.txn.cancel_txns_for_call(call_ref).await.unwrap();
+    stack.inject(&ok(1, branch, call_id, "t17", &sdp, OFFER)).await;
+    elapse_ms(20).await;
+    let ack = reqs(&stack.drain_peer(), "ACK").pop().expect("the fork's 2xx is ACKed");
+    assert_eq!(ack.to().tag(), Some("t17"));
+    assert!(ack.body().is_empty(), "its PRACK answered the offer: {:?}", ack.body());
+}
+
+/// Once its call released it, an Accepted transaction absorbs a sibling
+/// fork's reliable provisional too: no TU is left to PRACK it, so nothing
+/// goes up and the layer sends nothing for it. Its offer stays unanswered,
+/// so that fork's 2xx is ACKed answering it, every stream rejected (RFC 3264
+/// §6).
+#[tokio::test(start_paused = true)]
+async fn after_release_a_sibling_forks_reliable_1xx_is_absorbed() {
+    let mut stack = Stack::build(5, 64, 64).await;
+    let (call_ref, call_id, branch) = ("self|call-A18", "callid-A18", "z9hG4bK-A18");
+    let invite = offerless_invite(call_ref, call_id, branch);
+    stack.txn.send_request(invite, addr(CALLEE), TxnKind::Invite).await.unwrap();
+    let sdp = ["Content-Type: application/sdp"];
+    stack.inject(&ok(1, branch, call_id, "t18", &sdp, OFFER)).await;
+    elapse_ms(20).await;
+    stack.drain_peer();
+    let _ = stack.drain_events();
+
+    stack.txn.cancel_txns_for_call(call_ref).await.unwrap();
+    let reliable = ["Require: 100rel", "RSeq: 7", "Content-Type: application/sdp"];
+    let late =
+        provisional_or_final("183 Session Progress", 1, branch, call_id, "t19", &reliable, OFFER);
+    stack.inject(&late).await;
+    elapse_ms(20).await;
+    assert!(responses(&stack.drain_events()).is_empty(), "nothing goes up");
+    assert!(stack.drain_peer().is_empty(), "and nothing is sent");
+
+    stack.inject(&ok(1, branch, call_id, "t19", &sdp, OFFER)).await;
+    elapse_ms(20).await;
+    let ack = reqs(&stack.drain_peer(), "ACK").pop().expect("the fork's 2xx is ACKed");
+    assert_eq!(ack.to().tag(), Some("t19"));
+    let answer = String::from_utf8_lossy(ack.sdp().expect("the ACK answers the offer")).to_string();
+    assert!(answer.contains("m=audio 0 RTP/AVP 0"), "the stream is rejected: {answer}");
 }
 
 /// After its call is released, a repeat of a 2xx whose ACK the TU sent draws

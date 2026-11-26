@@ -6,6 +6,7 @@
 //! `cargo nextest run --workspace -E 'package(=scenario-harness) & binary(it)' <module>::`.
 
 mod ack_obligation;
+mod ack_typed_body;
 mod actor_plan_deviations;
 mod advance_settles;
 mod alice_calls_bob;
@@ -21,7 +22,9 @@ mod fluent_dialog;
 mod fork_route_set;
 mod harness_log_capture;
 mod http_exchanges;
+mod load_dialog_judges;
 mod non_2xx_ack_hop;
+mod presentation;
 mod proxy_record_route;
 mod response_destination_gate;
 mod rport_echo_gate;

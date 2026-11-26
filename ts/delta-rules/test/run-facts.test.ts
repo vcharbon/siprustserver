@@ -35,7 +35,8 @@ const RUN: Classifier.RunShape = {
       { step: "s4", status: 200, cseqMethod: "INVITE" },
       { step: "s9", status: 200, cseqMethod: "BYE" }
     ]]
-  ])
+  ]),
+  byeAheadOfInviteFinal: new Set()
 }
 
 const FACTS = runFactsOf(RUN, DOCUMENT)

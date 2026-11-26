@@ -3,24 +3,29 @@
 //! the a-side fork-confirm (`AnswerALegNewDialog`), brokered early-media
 //! provisionals. Relaying a *peer's* response does NOT live here — see
 //! [`super::relay_response`]; the ladder an a-facing 2xx arms lives in
-//! [`super::ladder`].
+//! [`super::ladder`]. The lines an a-leg final takes beside its own live in
+//! [`super::authored_final`].
 
 use call::helpers::Scope;
 use call::{Call, TimerKey, TimerType};
 use sip_message::draft::Entry;
-use sip_message::generators::{self, GenerateResponseOpts, RelayDirection, RelaySituation};
-use sip_message::header::HeaderName;
+use sip_message::generators::{self, GenerateResponseOpts};
+use sip_message::header::{HeaderName, Minted};
 use sip_message::{Method, SipHeader, SipStr};
 
-use crate::config::{B2buaConfig, RetryAfterRange};
+use crate::config::RetryAfterRange;
 use crate::effects::{
-    HandlerEffects, OutboundBody, OutboundSipEffect, OutboundTxnMode, Provenance,
+    BufferedObservabilityEffect, HandlerEffects, OutboundBody, OutboundSipEffect, OutboundTxnMode,
+    Provenance,
 };
 use crate::rules::capabilities::{self, Face};
 use crate::rules::relay;
 use crate::rules::RelayedFinal;
 use b2bua_sdk::model::{GlareRefusal, RuleContext};
 
+use super::authored_final::{
+    build_a_leg_response_headers, failure_headers_answering, AuthoredFinal,
+};
 use super::ActionExecutor;
 
 /// The `Retry-After` range RFC 3261 §14.2 and RFC 3311 §5.2 set on the 500
@@ -116,6 +121,30 @@ impl ActionExecutor<'_> {
                 provenance: Provenance::Authored,
             });
         }
+    }
+
+    /// Refuse the turn's request `420 Bad Extension` in place of the 2xx
+    /// (`status`) a rule's `Respond` writes, where the request requires a tag
+    /// only its peer serves
+    /// ([`sip_message::option_tags::required_end_to_end`]): the stack runs no
+    /// session timer of its own, so its own 2xx cannot accept the requirement
+    /// (RFC 3261 §8.2.2.3, RFC 4028 §7.1). True when refused: the rule's later
+    /// actions, which the 2xx would have settled (an answer cached), are not
+    /// applied.
+    pub(super) fn refuses_own_success(
+        &mut self,
+        call: &mut Call,
+        fx: &mut HandlerEffects,
+        ctx: &RuleContext,
+        status: u16,
+    ) -> bool {
+        if !(200..300).contains(&status) {
+            return false;
+        }
+        let required = ctx.request().and_then(sip_message::option_tags::required_end_to_end);
+        let Some(unsupported) = required else { return false };
+        self.refuse_unserved(call, fx, ctx, &unsupported);
+        true
     }
 
     /// Refuse the current INVITE that meets glare, or UPDATE over an open
@@ -215,7 +244,9 @@ impl ActionExecutor<'_> {
     /// and a refused redirect are new instructions, not relayed refusals, so
     /// they carry none of the peer's headers. A failure final that restates
     /// no peer's carries the deployment's advertisement for a minted final,
-    /// under the decision's statements.
+    /// under the decision's statements. A statement of a header the final
+    /// does not take from the decision is left out and reported
+    /// ([`relay::admitted`]), so the peer's line of it rides as relayed.
     pub(super) fn respond_to_a_leg(
         &mut self,
         call: &mut Call,
@@ -224,6 +255,9 @@ impl ActionExecutor<'_> {
         authored: AuthoredFinal<'_>,
     ) {
         let AuthoredFinal { status, reason, header_updates, contacts } = authored;
+        let mut skipped = Vec::new();
+        let header_updates = &relay::admitted(header_updates, Minted::Final(status), &mut skipped);
+        fx.buffered.extend(BufferedObservabilityEffect::skipped("final to the caller", skipped));
         // A decision-authored final ends the setup: every §3 ladder stops with
         // it (RFC 3261 §17.2.1 — no 1xx after the transaction's final).
         self.retire(call, fx, Scope::Provisionals);
@@ -311,7 +345,7 @@ impl ActionExecutor<'_> {
         // The 2xx confirms the caller-facing dialog its To-tag names (RFC 3261
         // §12.1.1) and retires her other early dialogs.
         if let OutboundBody::Response(resp) = &effect.body {
-            if let Some(tag) = resp.to().tag().filter(|t| !t.is_empty()) {
+            if let Some(tag) = resp.to().tag() {
                 super::dialog_track::adopt_a_tag(call, tag);
             }
         }
@@ -452,7 +486,7 @@ impl ActionExecutor<'_> {
         // §16.6: the delivered final's lines ride as received, except the names
         // the service's `header_updates` state — those are the service's, set
         // or removed, and a relayed line of the same name never competes.
-        let stated = relay::Statements::of("final to the caller", header_updates, fx);
+        let stated = relay::Statements::of("final to the caller", header_updates, status, fx);
         let mut extra_headers: Vec<SipHeader> =
             relayed.headers().iter().filter(|h| !stated.states(&h.name)).cloned().collect();
         // The advert (RFC 3261 §13.2.1): a DECLARED half stands, an undeclared
@@ -524,56 +558,4 @@ impl ActionExecutor<'_> {
             }
         }
     }
-}
-
-/// What the decision authored for the caller's final, as
-/// [`b2bua_sdk::model::RuleAction::RespondToALeg`] states it: the status line
-/// plus the two lists that own their own names.
-pub(super) struct AuthoredFinal<'a> {
-    pub status: u16,
-    pub reason: &'a str,
-    pub header_updates: &'a [(String, Option<String>)],
-    pub contacts: &'a [(String, Option<f32>)],
-}
-
-/// The failing peer's relayable headers, but ONLY on a final that answers the
-/// `/call/failure` consult the image belongs to — the `call-failure-result`
-/// event — and only when that failure had a peer final: `None` when the final
-/// restates no peer's. A setup deadline, a capacity refusal or a media-service failure mints
-/// its own diagnosis about a peer that is not the one being answered, so it
-/// carries none of them, nor does a fold that answers no peer's final
-/// ([`crate::failure_unavailable::answers_the_peer`]). The deployment's relay policy is read for the
-/// final being minted: a `status` to the INVITE, toward the caller.
-fn failure_headers_answering(
-    ctx: &RuleContext,
-    call: &Call,
-    config: &B2buaConfig,
-    status: u16,
-) -> Option<Vec<SipHeader>> {
-    match ctx.event {
-        b2bua_sdk::event::CallEvent::InternalEvent { topic, payload, .. }
-            if topic == "call-failure-result"
-                && crate::failure_unavailable::answers_the_peer(payload) =>
-        {
-            let minted =
-                RelaySituation::response(status, &Method::Invite, RelayDirection::TowardCaller);
-            let mut image = relay::relayed_failure_headers(call.ext.as_ref())?;
-            image.retain(|h| !config.relay_policy.drops(&h.name, minted));
-            Some(image)
-        }
-        _ => None,
-    }
-}
-
-/// Errs when a redirect target does not read — the whole redirect is refused,
-/// never partially authored.
-fn build_a_leg_response_headers(
-    header_updates: &[(String, Option<String>)],
-    contacts: &[(String, Option<f32>)],
-) -> Result<Vec<SipHeader>, relay::UnreadableAddress> {
-    let mut out = relay::set_lines(header_updates);
-    for (uri, q) in contacts {
-        out.push(relay::redirect_contact(uri, *q)?);
-    }
-    Ok(out)
 }

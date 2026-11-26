@@ -3,10 +3,10 @@
 //! incomplete, and what each dropped datagram was.
 
 use layer_harness::{LaneKey, Stamped};
-use sip_message::{SipMessage, SipParser};
+use sip_message::{sniff, SipMessage, SipParser};
 
 use crate::contracts::SignalingNetworkEvent;
-use crate::rfc_audit::msg_reads::{call_id, cseq_seq, request_method, status, to_tag};
+use crate::rfc_audit::msg_reads::{call_id, cseq_method, cseq_seq, request_method, status, to_tag};
 use crate::types::RecvDisposition;
 
 /// One datagram the loss model dropped between `lane` and the party address
@@ -23,7 +23,10 @@ struct Lost {
     /// The response status; `None` for a request.
     status: Option<u16>,
     cseq: u32,
+    cseq_method: String,
     to_tag: Option<String>,
+    /// The datagram as it was put on the wire.
+    raw: Vec<u8>,
 }
 
 /// Every datagram the loss model dropped on a lane: one a party sent the
@@ -42,13 +45,14 @@ impl Dropped {
                     disposition: RecvDisposition::LossModel,
                 } => {
                     let Some(parsed) = wire.parsed.as_deref() else { continue };
-                    dropped.push(Lost::of(bind_key, packet.src.to_string(), true, parsed));
+                    let party = packet.src.to_string();
+                    dropped.push(Lost::of(bind_key, party, true, parsed, &packet.raw));
                 }
                 SignalingNetworkEvent::SendLost { bind_key, to, msg } => {
                     let Ok(parsed) = crate::rfc_audit::lenient_parser().parse(msg) else {
                         continue;
                     };
-                    dropped.push(Lost::of(bind_key, to.to_string(), false, &parsed));
+                    dropped.push(Lost::of(bind_key, to.to_string(), false, &parsed, msg));
                 }
                 _ => {}
             }
@@ -94,6 +98,26 @@ impl Dropped {
     }
 
     /// Whether the loss model dropped, on its way from `party` to `lane` on
+    /// the call `call_id`, a `status` final to the request `method` `cseq`
+    /// carrying at least one `owed_header` row: the party issued it, and the
+    /// lane took a later copy, if any.
+    pub(crate) fn final_to(
+        &self,
+        (lane, party, call_id): (&str, &str, &str),
+        (method, cseq): (&str, u32),
+        (status, owed_header): (u16, &str),
+    ) -> bool {
+        self.0.iter().any(|l| {
+            l.toward_lane
+                && l.between(lane, party, call_id)
+                && l.status == Some(status)
+                && l.cseq == cseq
+                && l.cseq_method.eq_ignore_ascii_case(method)
+                && !sniff::header_values(&l.raw, owed_header).is_empty()
+        })
+    }
+
+    /// Whether the loss model dropped, on its way from `party` to `lane` on
     /// the call `call_id`, a provisional above 100 carrying the To tag
     /// `to_tag`.
     pub(crate) fn provisional_to(
@@ -111,7 +135,7 @@ impl Dropped {
 }
 
 impl Lost {
-    fn of(lane: &LaneKey, party: String, toward_lane: bool, m: &SipMessage) -> Lost {
+    fn of(lane: &LaneKey, party: String, toward_lane: bool, m: &SipMessage, raw: &[u8]) -> Lost {
         Lost {
             lane: lane.clone(),
             party,
@@ -120,7 +144,9 @@ impl Lost {
             method: request_method(m).map(|method| method.as_str().to_string()),
             status: Some(status(m)).filter(|s| *s != 0),
             cseq: cseq_seq(m),
+            cseq_method: cseq_method(m).to_string(),
             to_tag: to_tag(m).map(str::to_string),
+            raw: raw.to_vec(),
         }
     }
 

@@ -1,6 +1,9 @@
 //! The dead notice (ADR-0050 §3): each dead verdict of the proxy's health
-//! view is told to every other `Alive` worker, on an out-of-dialog OPTIONS
-//! carrying `X-Worker-Dead` signed with the cluster key. A worker that backs
+//! view is told to every other `Alive` or `Slow` worker, on an out-of-dialog
+//! OPTIONS carrying `X-Worker-Dead` signed with the cluster key. A worker that
+//! turns `Alive` from `Slow` is told every verdict standing then
+//! ([`WorkerRegistry::read_dead_now`]), so a survivor slow at a death never
+//! stays unaware of it (ADR-0069). A worker that backs
 //! the dead one's calls takes over those with work in flight at once, as the
 //! proxy now routes the dead worker's traffic to it (ADR-0047 D1).
 //!
@@ -42,6 +45,7 @@ pub struct DeadNotifier {
     port: u16,
     registry: Arc<dyn WorkerRegistry>,
     verdicts: broadcast::Receiver<WorkerId>,
+    recoveries: broadcast::Receiver<WorkerId>,
     key: SigningKey,
     clock: Clock,
     id_gen: Arc<IdGen>,
@@ -66,6 +70,7 @@ impl DeadNotifier {
             TransactionConfig::new(id_gen.clone()),
         );
         let verdicts = registry.read_dead();
+        let recoveries = registry.read_recovered();
         Self {
             txn,
             events,
@@ -73,6 +78,7 @@ impl DeadNotifier {
             port: local.port(),
             registry,
             verdicts,
+            recoveries,
             key,
             clock,
             id_gen,
@@ -80,14 +86,26 @@ impl DeadNotifier {
     }
 
     /// Tell every verdict until the transaction layer or the registry closes
-    /// (spawn it; abort to stop). A reader that lags tells every ordinal a
-    /// verdict may stand on now ([`WorkerRegistry::read_dead_now`]).
+    /// (spawn it; abort to stop), and tell a worker turning `Alive` from `Slow`
+    /// every verdict standing then. A reader that lags tells every ordinal a
+    /// verdict may stand on now ([`WorkerRegistry::read_dead_now`]) to every
+    /// worker serving its dialogs.
     pub async fn run(mut self) {
         loop {
             tokio::select! {
                 verdict = self.verdicts.recv() => {
                     let told = match verdict {
                         Ok(dead) => self.tell(&dead).await,
+                        Err(RecvError::Lagged(_)) => self.tell_every_dead().await,
+                        Err(RecvError::Closed) => return,
+                    };
+                    if told.is_err() {
+                        return;
+                    }
+                }
+                recovered = self.recoveries.recv() => {
+                    let told = match recovered {
+                        Ok(worker) => self.retell(&worker).await,
                         Err(RecvError::Lagged(_)) => self.tell_every_dead().await,
                         Err(RecvError::Closed) => return,
                     };
@@ -109,25 +127,59 @@ impl DeadNotifier {
         Ok(())
     }
 
-    /// Tell every other `Alive` worker, routed or not, that `dead` is read dead
-    /// now.
+    /// Tell every other `Alive` or `Slow` worker, routed or not, that `dead`
+    /// is read dead now.
     async fn tell(&self, dead: &str) -> Result<(), TransactionLayerClosed> {
+        let Some(value) = self.notice_value(dead) else { return Ok(()) };
+        tracing::info!(node = observe::node(), worker = dead, "dead verdict told to the workers");
+        for w in self.registry.probed() {
+            if w.id == dead || !w.serves_dialogs() {
+                continue;
+            }
+            self.send(&w, &value).await?;
+        }
+        Ok(())
+    }
+
+    /// Tell `worker`, just turned `Alive` from `Slow`, every verdict standing
+    /// now but its own.
+    async fn retell(&self, worker: &str) -> Result<(), TransactionLayerClosed> {
+        let Some(w) = self.registry.probed().into_iter().find(|w| w.id == worker) else {
+            return Ok(());
+        };
+        for dead in self.registry.read_dead_now() {
+            if dead == worker {
+                continue;
+            }
+            let Some(value) = self.notice_value(&dead) else { continue };
+            tracing::info!(
+                node = observe::node(),
+                worker = %dead,
+                to = worker,
+                "dead verdict told again to a worker read alive again"
+            );
+            self.send(&w, &value).await?;
+        }
+        Ok(())
+    }
+
+    /// The signed `X-Worker-Dead` value telling `dead` is read dead now;
+    /// `None` where the ordinal makes no header.
+    fn notice_value(&self, dead: &str) -> Option<String> {
         let notice = DeadNotice { ordinal: dead.to_string(), at_ms: self.clock.now_ms() };
         let fields = notice.signed_fields();
         let signature = self.key.sign(&fields.each_ref().map(Vec::as_slice));
-        let Some(value) = notice.header_value(&signature) else {
+        let value = notice.header_value(&signature);
+        if value.is_none() {
             tracing::warn!(worker = dead, "dead notice not sent: the ordinal makes no header");
-            return Ok(());
-        };
-        tracing::info!(node = observe::node(), worker = dead, "dead verdict told to the workers");
-        for w in self.registry.probed() {
-            if w.id == dead || !w.is_alive() {
-                continue;
-            }
-            let Some(dst) = w.address.to_socket_addr() else { continue };
-            let Some(req) = self.build_options(&w, &value) else { continue };
-            self.txn.send_request(req, dst, TxnKind::NonInvite).await?;
         }
+        value
+    }
+
+    async fn send(&self, w: &WorkerEntry, value: &str) -> Result<(), TransactionLayerClosed> {
+        let Some(dst) = w.address.to_socket_addr() else { return Ok(()) };
+        let Some(req) = self.build_options(w, value) else { return Ok(()) };
+        self.txn.send_request(req, dst, TxnKind::NonInvite).await?;
         Ok(())
     }
 

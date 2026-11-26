@@ -1,6 +1,6 @@
-//! The discovered pool over a kube client that fails to build first, on the
-//! paused clock. The client that finally builds talks to a stand-in API
-//! server: it lists one ready worker and holds the watch open.
+//! The worker pool's two sources: a fixed pool, and a discovered pool over a
+//! stand-in API server on the paused clock that lists one ready worker and
+//! holds the watch open.
 
 use std::convert::Infallible;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -17,8 +17,6 @@ use crate::readiness::probe_state;
 type Frame = Result<http_body::Frame<Bytes>, Infallible>;
 type Body = Either<Full<Bytes>, StreamBody<futures::stream::Pending<Frame>>>;
 
-/// The EndpointSlice list the stand-in API server answers: one ready
-/// endpoint, pod `worker-0` at 10.0.0.7.
 fn slice_list() -> Bytes {
     let list = serde_json::json!({
         "apiVersion": "discovery.k8s.io/v1",
@@ -44,7 +42,6 @@ fn slice_list() -> Bytes {
     Bytes::from(list.to_string())
 }
 
-/// A kube client whose API server lists [`slice_list`] and never ends a watch.
 fn stand_in_client() -> kube::Client {
     let api = tower::service_fn(|req: http::Request<kube::client::Body>| async move {
         let watching = req.uri().query().is_some_and(|q| q.contains("watch=true"));
@@ -58,8 +55,6 @@ fn stand_in_client() -> kube::Client {
     kube::Client::new(api, "lab")
 }
 
-/// A fixed pool is listed at once and reads every worker `Unknown` until it
-/// answers a probe.
 #[test]
 fn a_fixed_pool_is_listed_with_every_worker_unknown() {
     let pool = static_pool("w0@10.0.0.1:5070,w1@10.0.0.2:5070", Clock::test_at(0)).unwrap();

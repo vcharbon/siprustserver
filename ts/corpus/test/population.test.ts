@@ -295,6 +295,18 @@ describe("Population.refusal", () => {
       expect(await run({ positional: [held], universe: "named" }, undefined, corpus())).toBeNull()
     })
 
+    it("passes a name pending ingest, and still refuses one beside it that is neither held nor pending", async () => {
+      const paths = corpus()
+      const refusal = (positional: ReadonlyArray<string>) =>
+        Effect.runPromise(
+          Population.refusal(paths, selection({ positional, universe: "named" }), ["taken.anon"]).pipe(
+            Effect.provide(Layer.merge(runsOf([]), NodeServices.layer))
+          )
+        )
+      expect(await refusal(["taken.anon", held])).toBeNull()
+      expect(await refusal(["taken.anon", "other.anon"])).toContain(`"other.anon" names no capture in`)
+    })
+
     it("refuses a name it does not, and names the near miss", async () => {
       // One character gone from the middle of a long name.
       const typo = "trace-1f2e3d4c-5b6a-4789-8abc-def01235678.pcap.gz"

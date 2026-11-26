@@ -2,7 +2,6 @@
 //! defaults, and the band-config validator the runner's boot preflight calls.
 //! The classifier these knobs feed lives in [`super::band`].
 
-/// Band thresholds + hysteresis + AIMD ladder tunables.
 #[derive(Debug, Clone, Copy)]
 pub struct LoadObserverConfig {
     /// AIMD increase enabled while `elu <= elu_soft`.
@@ -26,7 +25,10 @@ pub struct LoadObserverConfig {
     pub cap_floor_cps: f64,
     /// Cap never increases above this.
     pub cap_ceiling_cps: f64,
-    /// Payload older than this (ms) is stale; sweep conservatively decreases.
+    /// Payload older than this (ms) is stale, and the sweep decreases the cap.
+    /// It is at least twice the health probe cycle (the runner preflight refuses
+    /// otherwise), or the sweep halves the cap of a worker that answers every
+    /// cycle down to the floor.
     pub payload_stale_ms: i64,
     /// Nominal OPTIONS interval (ms) — used for the cooldown clock.
     pub options_interval_ms: i64,
@@ -51,8 +53,6 @@ impl LoadObserverConfig {
     pub fn validate_bands(&self, violations: &mut Vec<String>) -> bool {
         let start = violations.len();
 
-        // ELU band ordering. A reversed band threshold turns the controller
-        // inside-out (low ELU triggers above_critical).
         if !(self.elu_soft < self.elu_hard && self.elu_hard < self.elu_critical) {
             violations.push(format!(
                 "ELU band thresholds must satisfy elu_soft < elu_hard < elu_critical \
@@ -61,8 +61,6 @@ impl LoadObserverConfig {
             ));
         }
 
-        // Hysteresis wider than a band gap means `compute_band` cannot exit the
-        // higher band even at zero ELU.
         let min_band_gap = (self.elu_hard - self.elu_soft).min(self.elu_critical - self.elu_hard);
         if self.band_hysteresis < 0.0 || self.band_hysteresis >= min_band_gap {
             violations.push(format!(
@@ -78,25 +76,11 @@ impl LoadObserverConfig {
 }
 
 impl Default for LoadObserverConfig {
-    /// Deliberately aggressive bands: a loaded worker stops taking new
-    /// non-emergency traffic early so it reserves CPU for emergency +
-    /// already-established (in-dialog) calls, and each decrease tick halves the
-    /// cap (`aimd_decrease_factor` 0.5).
-    ///
-    /// **These are CALIBRATION STARTING POINTS, not final values.** They are to
-    /// be tuned empirically against the cluster overload sweep (the all-worker
-    /// 0.30-core `overloadall` case); the runner exposes every band/AIMD field as
-    /// an env var (`LB_ELU_*`, `LB_AIMD_*`, `LB_CAP_*`) so the sweep can retune
-    /// without a rebuild. Any change must keep `elu_soft < elu_hard < elu_critical`
-    /// and `band_hysteresis < min band gap` (here min gap = 0.5−0.4 = 0.1 >
-    /// 0.05) so `validate_bands` / the runner preflight accept the config.
-    ///
-    /// At 2 workers × ~50 CAPS sustained, `cap_initial_cps = 30` admits 30 cps per
-    /// worker initially and AIMDs up while ELU stays low; a burst drains the
-    /// bucket and the per-tick decreases collapse it further. `payload_stale_ms`
-    /// (8000) MUST exceed one full HealthProbe cycle (`interval_ms + timeout_ms`)
-    /// or `sweep_stale` halves the cap every cycle down to the floor, silently —
-    /// the runner preflight enforces a 2× margin.
+    /// Aggressive bands: a loaded worker stops taking new non-emergency calls
+    /// early, keeping CPU for emergency and in-dialog traffic, and each decrease
+    /// tick halves its cap. The band, hysteresis, AIMD and cap fields are set at
+    /// boot (`LB_ELU_*`, `LB_BAND_HYSTERESIS`, `LB_AIMD_*`, `LB_CAP_*`) and pass
+    /// `validate_bands`. See ADR-0009.
     fn default() -> Self {
         Self {
             elu_soft: 0.4,
@@ -126,12 +110,6 @@ mod tests {
         assert!(v.is_empty());
     }
 
-    /// Pin the aggressive shipped band thresholds (a loaded worker sheds
-    /// non-emergency sooner). These are calibration starting points; the runner
-    /// exposes them as env vars (`LB_ELU_*`) so the cluster sweep can retune
-    /// without a rebuild. The test guards an accidental revert and a retuning
-    /// that would break `validate_bands` (it asserts the ordering +
-    /// hysteresis-bound invariants hold for the shipped values).
     #[test]
     fn default_bands_are_the_aggressive_calibration_starting_points() {
         let c = LoadObserverConfig::default();
@@ -139,7 +117,6 @@ mod tests {
         assert_eq!(c.elu_hard, 0.5, "multiplicative-decrease band opens early");
         assert_eq!(c.elu_critical, 0.65, "worker leaves new-dialog candidacy early");
         assert_eq!(c.aimd_decrease_factor, 0.5, "decrease stays aggressive (×0.5)");
-        // Invariants that keep validate_bands / the runner preflight happy.
         assert!(c.elu_soft < c.elu_hard && c.elu_hard < c.elu_critical);
         let min_gap = (c.elu_hard - c.elu_soft).min(c.elu_critical - c.elu_hard);
         assert!(
@@ -169,8 +146,6 @@ mod tests {
         assert!(!cfg.validate_bands(&mut v));
     }
 
-    /// Default gaps are hard−soft = 0.1 and critical−hard = 0.15 → min gap 0.1;
-    /// hysteresis 0.25 traps the controller in the higher band.
     #[test]
     fn validate_bands_rejects_hysteresis_wider_than_a_band_gap() {
         let mut cfg = LoadObserverConfig::default();
@@ -190,8 +165,8 @@ mod tests {
     fn validate_bands_rejects_hysteresis_equal_to_min_gap() {
         let mut cfg = LoadObserverConfig::default();
         cfg.elu_soft = 0.1;
-        cfg.elu_hard = 0.3; // hard−soft = 0.2
-        cfg.elu_critical = 0.5; // critical−hard = 0.2 → min gap = 0.2
+        cfg.elu_hard = 0.3;
+        cfg.elu_critical = 0.5;
         cfg.band_hysteresis = 0.2;
         let mut v = Vec::new();
         assert!(!cfg.validate_bands(&mut v));
@@ -205,8 +180,6 @@ mod tests {
         assert!(!cfg.validate_bands(&mut v));
     }
 
-    /// A fully reversed ordering trips the ordering rule (it does not silently
-    /// pass). Both elu ordering and hysteresis errors can surface together.
     #[test]
     fn validate_bands_rejects_fully_reversed_ordering() {
         let mut cfg = LoadObserverConfig::default();

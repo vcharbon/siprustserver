@@ -23,6 +23,7 @@ fn forking_bob_plan(bob: &crate::Agent, disposition: Disposition) -> CallPlan {
 
             cseq: None,
             delayed: vec![],
+            answers: Default::default(),
             claim: None,
         }],
         plan: vec![phase("established", |s| s.leg_at_least("bob", LegPhase::Confirmed))],
@@ -244,6 +245,7 @@ fn forked_pair_plan(
 
                 cseq: None,
                 delayed: vec![],
+                answers: Default::default(),
                 claim: None,
             },
             ActorSpec {
@@ -258,6 +260,7 @@ fn forked_pair_plan(
 
                 cseq: None,
                 delayed: vec![],
+                answers: Default::default(),
                 claim: None,
             },
         ],
@@ -379,6 +382,7 @@ async fn actor_caller_byes_reliable_losing_fork_past_its_prack() {
         call_id: None,
         headers: vec![("Supported".to_string(), "100rel".to_string())],
         rewrite: Default::default(),
+        presentation: Default::default(),
     };
 
     let call = forked_pair_plan(
@@ -429,6 +433,7 @@ async fn actor_caller_pracks_each_reliable_fork() {
         call_id: None,
         headers: vec![("Supported".to_string(), "100rel".to_string())],
         rewrite: Default::default(),
+        presentation: Default::default(),
     };
 
     let call = forked_pair_plan(
@@ -495,6 +500,7 @@ async fn actor_caller_confirms_reliable_unrung_winner() {
         call_id: None,
         headers: vec![("Supported".to_string(), "100rel".to_string())],
         rewrite: Default::default(),
+        presentation: Default::default(),
     };
     let call = forked_pair_plan(
         &alice,

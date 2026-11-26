@@ -14,7 +14,7 @@ before ADR-0063. "Bound by" names the ADR-0063 section that bounds it.
 | 2xx replayed for an INVITE copy, Accepted (RFC 6026) | `layer/server.rs` | re-sends the INVITE on every 2xx | Timer L 32 s | §1 (absorbed but on a seeded transaction) |
 | Non-INVITE response replayed for a request copy | `layer/server.rs` | re-sends the request on every response | Timer J 32 s | §1 |
 | 200 to a CANCEL copy on an answered INVITE | `layer/server_cancel.rs` | re-sends the CANCEL on every 200 | the INVITE's hold, up to 32 s | §1 |
-| 481 to a CANCEL matching no INVITE, stateless | `layer/server_cancel.rs` → router | re-sends the CANCEL on every 481 | none | §1 (its own transaction), §3 |
+| 481 to a CANCEL matching no INVITE, stateless | `layer/server_cancel.rs` → router | re-sends the CANCEL on every 481 | none | §3; outside §1, one 481 per copy (§8.2.7) |
 | Hop ACK to a non-2xx final copy | `layer/held_ack.rs` | re-sends the final on every ACK | Timer D 32 s, after the call's removal included | §1 |
 | Orphan's re-ACK of a 2xx copy, up to 16 dialogs | `layer/orphan.rs` | re-sends the 2xx on every ACK | Timer M 32 s; outside ADR-0057 §10 | §1, counted per dialog |
 | Refusal replayed for a copy of a refused INVITE (backlog, ingress brake) | `layer/backlog.rs`, `b2bua/src/ingress_brake.rs` | re-sends the INVITE on every refusal | 64·T1 memo from the first refusal | §1 (the brake answers on the receive thread, from its memo) |

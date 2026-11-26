@@ -48,6 +48,7 @@ pub(super) fn caller_spec(
 
         cseq: None,
         delayed: vec![],
+        answers: Default::default(),
         claim: None,
     }
 }
@@ -70,6 +71,7 @@ pub(super) fn scripted_spec(
 
         cseq: None,
         delayed: vec![],
+        answers: Default::default(),
         claim: None,
     }
 }

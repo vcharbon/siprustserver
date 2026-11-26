@@ -17,6 +17,27 @@ fn wire_order_and_spelling_survive() {
     assert!(p.get("lr").unwrap().is_flag());
 }
 
+/// A value read back as written keeps its form: a token bare, a quoted string
+/// with its quotes and escapes, so it reads again as the same value.
+#[test]
+fn a_value_as_written_reads_back_as_itself() {
+    let p = header_params(";expires=60;lr;+sip.text=\"a \\\"b\\\"\";+sip.tok=\"ab\"");
+    let written: Vec<Option<String>> = p.iter().map(|(_, v)| v.as_written()).collect();
+    assert_eq!(
+        written,
+        [Some("60".into()), None, Some("\"a \\\"b\\\"\"".into()), Some("\"ab\"".into())]
+    );
+}
+
+/// Only a token value reads as a token: a quoted string of the same text and a
+/// flag do not.
+#[test]
+fn only_a_token_value_reads_as_a_token() {
+    let p = header_params(";expires=60;lr;tok=\"60\"");
+    let tokens: Vec<Option<&str>> = p.iter().map(|(_, v)| v.as_token()).collect();
+    assert_eq!(tokens, [Some("60"), None, None]);
+}
+
 /// The lenient reading keeps an empty value apart from a flag; the strict
 /// one refuses it, `gen-value` being no empty run.
 #[test]

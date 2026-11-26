@@ -48,6 +48,11 @@ export type ShapeKind =
    * first (RFC 3261 §17.2.1); `afterMs` is the final's arrival from the INVITE.
    */
   | { readonly shape: "trying-omitted"; readonly final: number; readonly afterMs: number }
+  /**
+   * An ACK the leg received again under the CSeq of one it already received,
+   * past the script; `copies` counts the leg's extra copies.
+   */
+  | { readonly shape: "repeated-request"; readonly method: string; readonly copies: number }
   | {
       readonly shape: "retransmission"
       readonly cseqMethod: string
@@ -71,6 +76,8 @@ const shapeText = (kind: ShapeKind): string => {
       return `alignment-lost:${kind.method}`
     case "trying-omitted":
       return "trying-omitted"
+    case "repeated-request":
+      return `repeated-request:${kind.method}:${kind.copies}`
     case "retransmission":
       return `retransmission:${kind.cseqMethod}:2xx`
   }
@@ -154,6 +161,13 @@ export interface ShapeProbe extends ProbeSite {
   readonly kind: "shape"
   readonly shapeKind: ShapeKind
   readonly scope: MsgScope | undefined
+  /**
+   * Where a datagram no step claimed arrived: the id of the leg whose
+   * recording holds it and the CSeq number it carried, as the failure states
+   * them; absent on a probe a step is attributed to, and on an unreadable
+   * datagram. Outside {@link signature}, like the step.
+   */
+  readonly stray?: { readonly leg: string; readonly cseq: number }
 }
 
 /**
@@ -183,22 +197,26 @@ export interface BodyProbe extends ProbeSite {
    * `originNotContinued` one where the replay breaks RFC 3264 §8 against its
    * previous description on the leg while the capture keeps its session, and
    * `versionStepOne` one whose sess-version the capture skips where the
-   * replay steps by one (`./sdporigin.ts`); `orderOnly` marks a
-   * `document:bytes` row whose texts differ in attribute order alone
-   * (`./sdpfold.ts`), and carries `versionStepOne` beside it where its origin
-   * row does. The signature carries none of them.
+   * replay steps by one (`./sdporigin.ts`). The signature carries none of
+   * them.
    */
   readonly sdp?: {
     readonly section: string
     readonly line: string
     readonly mintedOrigin?: true
     readonly originNotContinued?: true
-    readonly orderOnly?: true
     readonly versionStepOne?: true
   }
 }
 
 export type Probe = HeaderProbe | ShapeProbe | BodyProbe
+
+/** The key a case fact holds a stray under: the leg it arrived on and its CSeq number. */
+export const strayKey = (stray: { readonly leg: string; readonly cseq: number }): string => `${stray.leg} ${stray.cseq}`
+
+/** The key a case fact holds `probe` under: its step, or {@link strayKey} for a stray no step claimed. */
+export const factKeyOf = (probe: Probe): string =>
+  probe.step === "" && probe.kind === "shape" && probe.stray !== undefined ? strayKey(probe.stray) : probe.step
 
 /** The stable grouping key, e.g. `header:contact:response:200:INVITE`, `body:sdp:m0:a=rtpmap:response:200:INVITE`. */
 export const signature = (probe: Probe): string => {

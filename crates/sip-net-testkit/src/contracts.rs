@@ -43,8 +43,8 @@ use layer_harness::{
 
 use crate::net::{SignalingNetwork, UdpEndpoint};
 use crate::types::{
-    all_ua_roles, BindError, BindUdpOpts, RecvDisposition, SendError, UaRole, UdpEndpointCounters,
-    UdpPacket, UndeliveredPacket,
+    all_ua_roles, BindError, BindUdpOpts, RecvDisposition, SendError, SendNote, SendTap, UaRole,
+    UdpEndpointCounters, UdpPacket, UndeliveredPacket,
 };
 
 /// The `layer-harness` channel key for this layer. The `RunContext` uses the
@@ -114,7 +114,12 @@ struct RecordingInner {
     should_audit: ShouldAuditBind,
     bind_roles: Mutex<HashMap<LaneKey, HashSet<UaRole>>>,
     closed: AtomicBool,
+    /// Handed each `SendLost` once recorded ([`RecordingSignalingNetwork::watch_losses`]).
+    loss_watch: Arc<Mutex<Option<LossWatch>>>,
 }
+
+/// What a recording hands each `SendLost` it records.
+type LossWatch = Arc<dyn Fn(&SignalingNetworkEvent) + Send + Sync>;
 
 /// Records every call onto the typed channel and runs the audit rules. Clone
 /// shares the same recorder + channel, so a clone kept for `close()` sees the
@@ -141,7 +146,36 @@ impl RecordingSignalingNetwork {
             should_audit,
             bind_roles: Mutex::new(HashMap::new()),
             closed: AtomicBool::new(false),
+            loss_watch: Arc::default(),
         }))
+    }
+
+    /// Hand `watch` each `SendLost` recorded from now on, right after it is
+    /// recorded, inside the send its endpoint's loss model dropped; replaces
+    /// an earlier watch. `watch` must not send.
+    pub fn watch_losses(&self, watch: impl Fn(&SignalingNetworkEvent) + Send + Sync + 'static) {
+        *self.0.loss_watch.lock().unwrap() = Some(Arc::new(watch));
+    }
+
+    /// The send-side twin of the bind `bind_key`'s delivery tap: what its
+    /// endpoint does below this decorator goes on the channel, a re-emitted
+    /// recovery frame as `ReEmit` (on the ladder, invisible to the audit), a
+    /// datagram its loss model dropped as `SendLost`, then handed to the loss
+    /// watch.
+    fn send_tap(&self, bind_key: LaneKey) -> SendTap {
+        let channel = self.0.channel.clone();
+        let loss_watch = self.0.loss_watch.clone();
+        Arc::new(move |raw: &[u8], to, note| {
+            let event = SignalingNetworkEvent::sent_below(bind_key.clone(), to, raw.to_vec(), note);
+            let watch = loss_watch.lock().unwrap().clone();
+            match watch.filter(|_| note == SendNote::LossModel) {
+                Some(watch) => {
+                    channel.record(event.clone());
+                    watch(&event);
+                }
+                None => channel.record(event),
+            }
+        })
     }
 
     /// The recorder this decorator writes to — for snapshot/anomaly assertions.
@@ -325,19 +359,7 @@ impl SignalingNetwork for RecordingSignalingNetwork {
                 wire: WireStamp::classify(&tap_tables, &pkt.raw, seq),
             });
         }));
-        // Send-side twin (loadgen mux only): re-emitted recovery frames go on the
-        // wire below this decorator, so tap them into the channel as `ReEmit`
-        // events — visible on the ladder, invisible to the audit.
-        let sendtap_channel = self.0.channel.clone();
-        let sendtap_key = bind_key.clone();
-        endpoint.install_send_tap(Arc::new(move |raw: &[u8], to, note| {
-            sendtap_channel.record(SignalingNetworkEvent::sent_below(
-                sendtap_key.clone(),
-                to,
-                raw.to_vec(),
-                note,
-            ));
-        }));
+        endpoint.install_send_tap(self.send_tap(bind_key.clone()));
         Ok(Box::new(RecordedEndpoint {
             inner: endpoint,
             channel: self.0.channel.clone(),

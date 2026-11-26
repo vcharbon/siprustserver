@@ -1,13 +1,16 @@
 //! The turn commit (ADR-0055 §3): the one tail of a call's turn. It sends
 //! the turn's unheld answers through the node's book (ADR-0063 §2), which
-//! keeps them once the turn's entry is on the call's outbox, persists
-//! the landed record, reports the turn `Logged`, takes in the turn what never
-//! leaves the node (timers, the CDR, metrics, re-entries), queues everything
-//! the turn sends on the call's outbox behind the write that records it, and
-//! ends the call once that outbox drained, as its [`CommitKind`] states. Only
-//! the commit pushes on a call's outbox and reports a turn's marks. A turn on
-//! the body a poll watchdog read stuck, fenced off before its call's
-//! discharge, stops at the next of the commit's fence checks (ADR-0057 §6).
+//! keeps them once the turn's entry is on the call's outbox, holds the
+//! landed record to the record-size cap, persists it, reports the turn
+//! `Logged`, takes in the turn what never leaves the node (timers, the CDR,
+//! metrics, re-entries), queues everything the turn sends on the call's
+//! outbox behind the write that records it, and ends the call once that
+//! outbox drained, as its [`CommitKind`] states. Only the commit pushes on a
+//! call's outbox and reports a turn's marks. A turn on the body a poll
+//! watchdog read stuck, fenced off before its call's discharge, stops at the
+//! next of the commit's fence checks (ADR-0057 §6). The model invariants and
+//! the stated text a turn's messages left out are reported only for a turn
+//! whose record the commit keeps: a turn a cap discards reads nothing.
 
 mod held;
 mod rider;
@@ -24,10 +27,12 @@ use super::release::{release_call, ReleaseKind};
 use super::turn_mark::{reach, TurnKind};
 use super::RouterCtx;
 use crate::effects::{
-    BufferedObservabilityEffect, CriticalStateEffect, FireAndForgetEffect, HandlerResult,
-    QuietTurn, SoftBoundedEffect,
+    BufferedObservabilityEffect, CriticalStateEffect, FireAndForgetEffect, HandlerEffects,
+    HandlerResult, QuietTurn, SoftBoundedEffect,
 };
+use crate::store::Measured;
 use crate::turn_probe::TurnPoint;
+use crate::turn_scope::TurnScope;
 pub(super) use held::release_untaken;
 use held::HeldCancel;
 pub(super) use rider::{behind_the_write, Rider};
@@ -134,9 +139,41 @@ fn classify(landed: Landed, residency: impl FnOnce() -> Residency) -> CommitKind
     }
 }
 
+/// A turn's result landed on its call and classified, before its write.
+struct Prepared<'a> {
+    /// The landed record, shared with the store from its write on: what
+    /// follows only reads it.
+    call: Arc<Call>,
+    effects: HandlerEffects,
+    /// The turn's unheld answers, taken back unless its entry reaches the
+    /// call's outbox.
+    admission: super::unheld_book::TurnAdmission<'a>,
+    commit: CommitKind,
+    kind: TurnKind,
+    cdr: bool,
+    awaited_before: bool,
+    /// The request the turn handled, when it handled one.
+    received: Option<&'a SipRequest>,
+    ack: Option<String>,
+    cancel: Option<HeldCancel>,
+}
+
+impl Prepared<'_> {
+    /// The turn writes the record of a live call: the one write the
+    /// record-size cap holds.
+    fn writes_live(&self) -> bool {
+        self.commit == CommitKind::Write && self.call.state == CallModelState::Active
+    }
+}
+
 /// Commit the handler `result` of `call_ref`'s turn. `turn` names what the
 /// turn handled, for a model-invariant violation, and `trigger` is the event
-/// it handled, when it handled one.
+/// it handled, when it handled one. `notes` is the turn's scope when its
+/// notes are still undrained: they are drained once the record-size cap held
+/// the landed record, and drained as a discarded turn's when it tripped
+/// ([`super::record_cap`]): the turn then fails before its write. `false`
+/// when it tripped, so no outbox entry took what the layer holds for
+/// `trigger` ([`release_untaken`]).
 pub(super) async fn commit_turn(
     ctx: &Arc<RouterCtx>,
     call_ref: &str,
@@ -144,9 +181,76 @@ pub(super) async fn commit_turn(
     now_ms: i64,
     turn: &(dyn std::fmt::Display + Sync),
     trigger: Option<&CallEvent>,
+    notes: Option<&mut TurnScope>,
+) -> bool {
+    let Some(prepared) = prepare(ctx, call_ref, result, now_ms, trigger) else {
+        drain_notes(ctx, call_ref, notes);
+        return true;
+    };
+    match super::record_cap::hold(ctx, &prepared.call, prepared.writes_live(), trigger) {
+        Ok(measured) => {
+            report_model(ctx, call_ref, &prepared, turn);
+            drain_notes(ctx, call_ref, notes);
+            write_and_send(ctx, call_ref, prepared, measured, now_ms).await;
+            true
+        }
+        Err(tripped) => {
+            drop(prepared);
+            if let Some(scope) = notes {
+                super::notes::drain_discarded(ctx, scope);
+            }
+            let safepoint = ctx.state.peek(call_ref);
+            let in_hand = trigger.filter(|event| !opens_the_call(event));
+            let fail =
+                super::tripped::fail_turn(ctx, call_ref, in_hand, tripped, safepoint, now_ms);
+            Box::pin(fail).await;
+            false
+        }
+    }
+}
+
+/// Drain the notes of the turn whose scope is `notes`, when undrained.
+fn drain_notes(ctx: &RouterCtx, call_ref: &str, notes: Option<&mut TurnScope>) {
+    if let Some(scope) = notes {
+        super::notes::drain(ctx, call_ref, scope);
+    }
+}
+
+/// Commit `result`, the safepoint of `call_ref`'s turn past a per-call cap,
+/// as [`commit_turn`] does with the record-size cap off: the record is the
+/// call before that turn.
+pub(super) async fn commit_safepoint(
+    ctx: &Arc<RouterCtx>,
+    call_ref: &str,
+    result: HandlerResult,
+    now_ms: i64,
+    turn: &(dyn std::fmt::Display + Sync),
 ) {
+    if let Some(prepared) = prepare(ctx, call_ref, result, now_ms, None) {
+        report_model(ctx, call_ref, &prepared, turn);
+        write_and_send(ctx, call_ref, prepared, None, now_ms).await;
+    }
+}
+
+/// Whether `event` is the caller's initial INVITE, the request outside any
+/// dialog that opens the call (RFC 3261 §12.1): its final is the teardown's.
+fn opens_the_call(event: &CallEvent) -> bool {
+    let CallEvent::Sip { message, .. } = event else { return false };
+    let SipMessage::Request(r) = message.as_ref() else { return false };
+    *r.method() == Method::Invite && r.to().tag().is_none()
+}
+
+/// Land `result` on `call_ref` and classify its commit; `None` when the turn
+/// runs on a body fenced off.
+fn prepare<'a>(
+    ctx: &'a Arc<RouterCtx>,
+    call_ref: &str,
+    result: HandlerResult,
+    now_ms: i64,
+    trigger: Option<&'a CallEvent>,
+) -> Option<Prepared<'a>> {
     if fenced(ctx, call_ref) {
-        return;
+        return None;
     }
     let message = trigger.and_then(|e| match e {
         CallEvent::Sip { message, .. } => Some(message.as_ref()),
@@ -161,36 +265,78 @@ pub(super) async fn commit_turn(
     let result = crate::landing::land(result, &ctx.landing(), now_ms);
     let kind = TurnKind::of(&result, received);
     let awaited_before = ctx.state.resident(call_ref).is_some_and(|c| !c.awaited.is_empty());
-    // Stated text the turn's messages left out is a defect of the model that
-    // stated it, reported whichever node sends them.
-    for eff in &result.effects.buffered {
+    let commit = classify(Landed::of(&result), || Residency::of(ctx, call_ref));
+    let cdr =
+        result.effects.buffered.iter().any(|e| matches!(e, BufferedObservabilityEffect::WriteCdr));
+    let HandlerResult { call, effects } = result;
+    let call = Arc::new(call);
+    Some(Prepared {
+        call,
+        effects,
+        admission,
+        commit,
+        kind,
+        cdr,
+        awaited_before,
+        received,
+        ack,
+        cancel,
+    })
+}
+
+/// Report what the `prepared` turn of `call_ref` states against the model,
+/// before its write: the stated text its messages left out, a defect of the
+/// model that stated it whichever node sends them, and the model invariants
+/// of its record against the one the previous turn landed. `turn` names what
+/// the turn handled.
+fn report_model(
+    ctx: &RouterCtx,
+    call_ref: &str,
+    prepared: &Prepared<'_>,
+    turn: &(dyn std::fmt::Display + Sync),
+) {
+    for eff in &prepared.effects.buffered {
         if let BufferedObservabilityEffect::StatedTextSkipped { detail } = eff {
-            crate::model_invariants::stated_text_skipped(&ctx.metrics, &result.call, detail);
+            crate::model_invariants::stated_text_skipped(&ctx.metrics, &prepared.call, detail);
         }
     }
-    // The record this turn lands states the model invariants, against the
-    // one the previous turn landed.
     if ctx.config.model_invariants {
         let before = ctx.state.resident(call_ref);
         let turn_record = crate::model_invariants::Turn {
             before: before.as_deref(),
-            after: &result.call,
-            received,
-            sent: &result.effects.outbound,
+            after: &prepared.call,
+            received: prepared.received,
+            sent: &prepared.effects.outbound,
         };
         crate::model_invariants::check(&turn_record, turn, &ctx.metrics);
     }
-    let commit = classify(Landed::of(&result), || Residency::of(ctx, call_ref));
-    let cdr =
-        result.effects.buffered.iter().any(|e| matches!(e, BufferedObservabilityEffect::WriteCdr));
-    // The landed record is shared with the store from here on: what follows
-    // only reads it.
-    let HandlerResult { call, effects } = result;
-    let call = Arc::new(call);
+}
+
+/// Write the `prepared` turn's record, `measured` when the record-size cap
+/// held it, and queue what it sends behind the write.
+async fn write_and_send(
+    ctx: &Arc<RouterCtx>,
+    call_ref: &str,
+    prepared: Prepared<'_>,
+    measured: Option<Measured>,
+    now_ms: i64,
+) {
+    let Prepared {
+        call,
+        effects,
+        admission,
+        commit,
+        kind,
+        cdr,
+        awaited_before,
+        received,
+        ack,
+        cancel,
+    } = prepared;
     if fenced(ctx, call_ref) {
         return;
     }
-    let wrote = persist(ctx, call_ref, &call, commit, cdr, now_ms).await;
+    let wrote = persist(ctx, call_ref, &call, commit, cdr, measured, now_ms).await;
     let version = ctx.state.topology(call_ref).map_or((0, 0), |t| (t.gen, t.bak_gen));
     reach(ctx, call_ref, TurnPoint::Logged, version, wrote, kind, None).await;
     super::quiesced::rearm_after_answer(ctx, call_ref, awaited_before, &call).await;
@@ -218,7 +364,7 @@ pub(super) async fn commit_turn(
             return;
         }
         push(ctx, call_ref, entry).await;
-        admission.sent();
+        admission.sent(ctx);
         ctx.outboxes.drained(call_ref).await;
         release_call(ctx, call_ref, ReleaseKind::SelfRelease { ended: true }).await;
         return;
@@ -277,7 +423,7 @@ pub(super) async fn commit_turn(
         return;
     }
     push(ctx, call_ref, entry).await;
-    admission.sent();
+    admission.sent(ctx);
     if fenced(ctx, call_ref) {
         return;
     }
@@ -302,14 +448,15 @@ pub(super) async fn commit_turn(
 }
 
 /// Persist `call` as `commit` states, its CDR enqueued (`cdr`) where the
-/// commit ends the call. `true` when the record was logged for the call's
-/// backup.
+/// commit ends the call, a write carrying the body `measured` built. `true`
+/// when the record was logged for the call's backup.
 async fn persist(
     ctx: &RouterCtx,
     call_ref: &str,
     call: &Arc<Call>,
     commit: CommitKind,
     cdr: bool,
+    measured: Option<Measured>,
     now_ms: i64,
 ) -> bool {
     match commit {
@@ -322,7 +469,10 @@ async fn persist(
             ctx.state.update(Arc::clone(call));
             false
         }
-        CommitKind::Write | CommitKind::DeferToPrimary => ctx.state.write(Arc::clone(call)),
+        CommitKind::Write | CommitKind::DeferToPrimary => match measured {
+            Some(measured) => ctx.state.write_measured(Arc::clone(call), measured),
+            None => ctx.state.write(Arc::clone(call)),
+        },
         CommitKind::DeleteAfterDrain => {
             if cdr {
                 ctx.cdr.write(call, now_ms).await;

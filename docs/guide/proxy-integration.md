@@ -30,8 +30,20 @@ the same dialog to the same worker with no shared state. A request with a bad si
 403.
 
 **The probe.** Each proxy sends an OPTIONS to each worker once a second. A worker that misses
-two probes reads dead after 2.6 to 3.6 s. The answer of a live worker tells the proxy if the
-worker accepts new calls, and how loaded it is.
+two probes reads dead after 2.6 to 3.6 s. A worker that misses them but answers between 1.6 s
+and 2 s after the probe reads slow: it keeps its calls and gets no new one. It reads alive again
+after three answers in time. A worker that answers later than 2 s reads dead (ADR-0069). The
+dead verdict lands at most 3.6 s after the last answer the proxy received from the worker. The
+answer of a live worker tells the proxy if the worker accepts new calls, and how loaded it is.
+
+**The supervision OPTIONS.** An OPTIONS to the proxy's advertised address, or to an address the
+proxy binds by name (not `0.0.0.0`), with no user part and no To-tag, is answered by the proxy:
+200 while a worker is alive or slow, with the `Allow`, `Supported` and `Accept` of the last 200
+of a worker. With no such worker it gets no answer, and the supervisor's timeout takes the POP
+out. It uses none of the new-call budget.
+
+**The return after an outage.** A POP back in rotation takes its full share of new calls at
+once. The workers' admission refuses any excess with fast 503s, which the SBC retries elsewhere.
 
 ## The recommended mode
 
@@ -190,7 +202,7 @@ it names each problem in one message (ADR-0046).
 
 | Setting | Default | Role |
 |---|---|---|
-| `PROXY_HMAC_KEY` | none, required | The secret that signs the cookie. 16 bytes or more. The same on the two proxies. |
+| `PROXY_HMAC_KEY` | none, required | The secret that signs the cookie. 32 bytes or more. The same on the two proxies. |
 | `PROXY_LISTEN`, `PROXY_ADVERTISE` | `0.0.0.0:5060` | The internal face: the internal VIP and port. With two faces, the proxy refuses the default: set the VIP. |
 | `PROXY_LISTEN_EXT`, `PROXY_ADVERTISE_EXT` | not set | The external face: the external VIP and port. |
 | `PROXY_WORKER_SERVICE`, `PROXY_WORKER_PORT` | `b2bua-worker`, 5060 | The Service whose EndpointSlices list the workers. |
@@ -198,7 +210,9 @@ it names each problem in one message (ADR-0046).
 | `PROXY_CLUSTER_KEY` | not set | The key of the workers. With it, the proxy tells the workers when it reads one of them dead. Required for HA, see [ha.md](ha.md#what-you-must-provide). |
 | `PROXY_INVITE_TXN_TIMEOUT_SEC` | 158 | The longest INVITE transaction. It must equal the value of the workers. |
 | `HEALTH_INTERVAL_MS`, `HEALTH_TIMEOUT_MS`, `HEALTH_THRESHOLD` | 1000, 1600, 2 | The probe of the workers. |
-| `PROXY_SELF_GATE_CPS_RATE`, `PROXY_SELF_GATE_CPS_SIZE` | 100, 50 | The new calls a second that one proxy accepts from the outside, and the burst. Above the rate, the proxy answers 503. |
+| `HEALTH_SLOW_WINDOW_MS`, `HEALTH_RECOVER_PROBES` | 2000, 3 | A late answer inside the window makes a worker slow, not dead. The answers in time that make a slow worker alive. |
+| `PROXY_LOCAL_OPTIONS` | `auto` | `auto`: the proxy answers the supervision OPTIONS. `off`: it sends every OPTIONS to a worker. |
+| `PROXY_SELF_GATE_CPS_RATE`, `PROXY_SELF_GATE_CPS_SIZE` | 100, 50 | The new calls a second that one proxy accepts from the outside, and the burst. Above the rate, the proxy answers 503. Set the rate above the new calls a second of the full deployment: when one proxy is lost, the other proxy accepts all of them. |
 | `LB_CAP_INITIAL_CPS`, `LB_CAP_CEILING_CPS` | 30, 200 | The new calls a second that the proxy sends to one worker: the first value, and the highest. The proxy moves the value with the load that the worker reports. |
 | `PROXY_BRANCH_MEMO_MAX_BYTES` | 192 MiB | The size of the memory of INVITEs. The proxy refuses to start if it cannot hold the calls of the rate above. |
 | `ROUTE_GUARD_PEERS` | none, required | The routers whose BFD and BGP the route guard controls. |
@@ -216,9 +230,14 @@ internal VIP and `B2BUA_CONTACT_ADDRESS` set to the external VIP.
 | `route_guard_withdrawals_total{cause}` | Each withdrawal and its cause. |
 | `sip_proxy_no_target_dropped_total` | Requests inside a dialog with no live owner. |
 | `sip_proxy_worker_pool_empty` | The proxy knows no worker. |
+| `sip_proxy_worker_health{worker,state}` | The state the proxy reads for each worker: `alive`, `slow`, `unknown` or `dead`. |
+| `sip_proxy_worker_slow_total{worker}` | Each turn of a worker to slow. |
+| `sip_proxy_probe_late_answers_total{worker}` | Probe answers that came after the reply window and inside the slow window. |
+| `sip_proxy_local_options_total{answer}` | Supervision OPTIONS answered by the proxy (`ok`) or dropped with no worker (`dropped`). |
 | `sip_proxy_self_external_invites_rejected_total` | New calls the proxy refused for its own load. |
 | `sip_proxy_lb_rate_cap_spilled_total` | New calls moved to the next worker in rank. |
 | `sip_proxy_external_untrusted_total{kind}` | Messages on the external face that claimed an internal role. |
+| `node_sockstat_FRAG_memory`, `node_sockstat_FRAG6_memory` (node exporter, proxy nodes) | The memory of incomplete IP messages. A value that stays high: a peer path drops fragments. Near `proxy.reassembly.poolBytes`, the node drops the fragments of all peers. The IPv6 conntrack pool is not in these metrics. |
 
 The proxy serves `/metrics`, `/healthz`, `/readyz` and `/fitz` on port 9090.
 
@@ -234,7 +253,11 @@ The proxy serves `/metrics`, `/healthz`, `/readyz` and `/fitz` on port 9090.
 
 - **UDP only.** The proxy and the workers have no TCP and no TLS for SIP (ADR-0027). IP
   fragments a message that is larger than the path MTU. Each SIP peer must be on a path that
-  carries fragments, such as a carrier SBC on a controlled network.
+  carries fragments, such as a carrier SBC on a controlled network. A proxy node keeps the
+  fragments of an incomplete message for 2 s, in a pool of 64 MiB (`proxy.reassembly`). This
+  applies to IPv4, and to IPv6 if the node has IPv6 when the proxy pod starts. Thus a
+  peer whose path drops fragments loses its own large messages but does not stop the large
+  messages of the other peers.
 - **IPv4 on the proxy path.** The probe, the route guard and the node setup script use IPv4.
 - **No rotation of the cookie key.** A new key makes the requests of the calls in progress
   fail with 403. Change the key in a maintenance period.

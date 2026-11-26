@@ -188,7 +188,16 @@ registered thread's CPU time
 on the same sequence number while its thread spent more than
 `B2BUA_STUCK_POLL_CPU_MS` (default 10 000) of CPU. A thread that is throttled,
 starved, stopped or blocked spends no CPU and never reads stuck; driver work
-between polls is never charged; wall time is never read. A thread blocked behind
+between polls is never charged; wall time is never read. An overload is never a
+stuck poll: `PacketQueue::take` spends one unit of the task's cooperative budget
+per datagram it returns, as tokio's own channels, timers and sockets do, and the
+proxy's resolver one per packet it releases, so a loop whose input queue never
+empties still ends its poll every budget of 128 items. Two residuals remain. A
+task that yields on its budget on a multi-thread runtime is woken again on its
+own worker and is not stolen, so a stuck poll on that worker delays it until the
+watchdog's exit. A backlog of N timers due at once delays the next packet read,
+the probe's among them, by ⌈N/128⌉ polls; the backlog is bounded, and without
+packets nothing refills it. A thread blocked behind
 a stuck one is not stuck, and needs not be: the stuck one is. A node whose
 `schedstat` cannot be read refuses to boot.
 
@@ -255,7 +264,10 @@ settings' documentation, on by default. Startup refuses:
 - `B2BUA_CAP_ACTIONS_PER_TURN` at or below `B2BUA_CAP_LEGS` (its base) plus the
   teardown's two further actions: a call at its leg cap before any grant could
   not be torn down. A teardown takes one action per unresolved leg, far fewer
-  than the legs a granted call may have dialled.
+  than the legs a granted call may have dialled;
+- `B2BUA_CAP_RECORD_BYTES` above half the replication frame's cap: the frame
+  that carries a record at the cap also carries its envelope and its index
+  keys, which repeat the identifiers of the dialogs the record holds.
 
 The upstream defaults are constants stated with their derivation from the
 scenario catalogue's heaviest shapes; a deployment sets its own from measurement
@@ -344,9 +356,6 @@ ladder covering the ACK in flight. A leg its BYE terminated still owes it
 - **A memo of the bytes of a request that stuck a poll**: §5 and the fuzz
   campaign keep such a request from existing; the exit's discharge keeps the
   record from carrying it.
-- **An encoded-size check of the record**: it exists only where a replicating
-  store is wired, and runs after the turn has landed, where the turn can no
-  longer be discarded. The per-collection caps bound the record on every node.
 - **Replicated per-call counters**: they need merge rules and diverge on quiet
   turns; collection lengths need neither.
 - **A Q.850 cause, or the cap's name, on the trip's final**: the wire learns

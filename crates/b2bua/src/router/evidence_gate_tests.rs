@@ -73,6 +73,7 @@ fn kind(gate: &Gate) -> &'static str {
         Gate::Pass(_) => "passed",
         Gate::Answered { .. } => "answered here",
         Gate::Dropped => "dropped",
+        Gate::Absorbed => "absorbed",
     }
 }
 

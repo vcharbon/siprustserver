@@ -19,13 +19,17 @@ afterEach(() => {
   for (const d of dirs.splice(0)) fs.rmSync(d, { recursive: true, force: true })
 })
 
-/** Polls until `ready` holds, or fails after five seconds. */
-const until = async (ready: () => boolean): Promise<void> => {
-  const deadline = Date.now() + 5_000
-  while (!ready()) {
-    if (Date.now() > deadline) throw new Error("the stub never reported")
-    await new Promise((resolve) => setTimeout(resolve, 20))
-  }
+/**
+ * Resolves once `ready` holds, checking every 20 ms; rejects as soon as
+ * `fiber` ended without it. The package's test timeout bounds the wait.
+ */
+const until = async <A, E>(ready: () => boolean, fiber: Fiber.Fiber<A, E>): Promise<void> => {
+  let ended = false
+  void Effect.runPromise(Fiber.await(fiber)).then(() => {
+    ended = true
+  })
+  while (!ready() && !ended) await new Promise((resolve) => setTimeout(resolve, 20))
+  if (!ready()) throw new Error("the cell ended before the stub reported")
 }
 
 describe("an interrupted cell", () => {
@@ -40,7 +44,7 @@ describe("an interrupted cell", () => {
         Effect.provide(rig({ replay: fixture("stub-replay-slow.sh") }))
       )
     )
-    await until(() => fs.existsSync(path.join(marks, "started")))
+    await until(() => fs.existsSync(path.join(marks, "started")), fiber)
     const exit = await Effect.runPromise(Effect.andThen(Fiber.interrupt(fiber), Fiber.await(fiber)))
     expect(Exit.isFailure(exit)).toBe(true)
     expect(fs.readFileSync(path.join(marks, "signal"), "utf8").trim()).toBe("TERM")

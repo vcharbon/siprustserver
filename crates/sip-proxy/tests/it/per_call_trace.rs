@@ -1,15 +1,9 @@
-//! End-to-end: a SAMPLED call records its datagrams and routing facts on ONE
-//! proxy-side root span, and that span closes with the call (ADR-0026).
-//!
-//! The scenario is the canonical complete callflow — alice → ProxyCore → bob,
-//! INVITE/180/200/ACK/BYE — so the wire stays RFC-compliant and the call reaches
-//! a terminal state; the trace assertions ride on top. This is a dedicated test
-//! OF the trace machinery, so it may assert on the captured subscriber buffer;
-//! ordinary scenario tests never do (the `Recorder` is their oracle).
-//!
-//! The proxy adds NOTHING to the wire for tracing: sampling is independent per
-//! process and correlation is by `sip.call_id` alone, which the RFC audit at
-//! `finish()` and the header assertions below both hold it to.
+//! End to end: a sampled call records its datagrams and routing facts on one
+//! proxy-side root span, which closes with the call (ADR-0026). The call is a
+//! complete INVITE/180/200/ACK/BYE through the proxy. The proxy adds nothing
+//! to the wire for tracing: correlation is by `sip.call_id` alone. As a test of
+//! the trace machinery it asserts on the captured subscriber buffer, which
+//! ordinary scenario tests never do.
 
 use crate::common;
 use std::sync::Arc;
@@ -65,7 +59,6 @@ async fn a_sampled_call_records_its_datagrams_and_routing_on_one_span() {
 
     assert_eq!(traces.active(), 1, "the call holds exactly one root span at the proxy");
 
-    // ── The call's story, as this hop saw it ────────────────────────────────
     let span = log.spans_matching("sip.call");
     assert_eq!(span.len(), 1, "one root span per call per process");
     assert!(span[0].contains("sip.call_id="), "every span carries the correlation key");
@@ -85,7 +78,6 @@ async fn a_sampled_call_records_its_datagrams_and_routing_on_one_span() {
         decision.iter().map(|e| e.line()).collect::<Vec<_>>(),
     );
 
-    // ── Teardown: the BYE final closes the span ─────────────────────────────
     let mut bye = dialog.bye().await;
     let mut bob_bye = bob.receive("BYE").await;
     bob_bye.respond(200, "OK").await;

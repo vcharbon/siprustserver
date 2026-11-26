@@ -6,8 +6,11 @@
 //! when that turn was itself an OPTIONS and other work is ready, one more
 //! turn. Among themselves the other sources keep `select!`'s fairness: the
 //! transaction event queue, the timer fires, the re-entry channel, the
-//! fail-back commands and what readmission releases. A source whose senders
-//! are all gone retires. While the event-queue gate refuses, an idle loop
+//! fail-back commands and what readmission releases. The unattributed lane,
+//! when the layer runs one, comes last: a request that names no call is taken
+//! only while every other source has nothing ready, so a flood of them delays
+//! no work of a call (ADR-0050 §13). A source whose senders are all gone
+//! retires. While the event-queue gate refuses, an idle loop
 //! reads it again every [`GATE_REREAD`], so the state the transaction layer
 //! reads on each new INVITE's arrival follows the queue with no traffic
 //! taken; the router task stays the gate's one writer.
@@ -39,6 +42,7 @@ pub(super) enum Taken {
 /// One poll's outcome, a source retiring included.
 enum Next {
     Keepalive(Option<TransactionEvent>),
+    Unattributed(Option<TransactionEvent>),
     Work(Work),
     TxnClosed,
     TimersClosed,
@@ -52,6 +56,7 @@ enum Next {
 pub(super) struct Inbox {
     txn_rx: TransactionEvents,
     keepalive: Option<mpsc::Receiver<TransactionEvent>>,
+    unattributed: Option<mpsc::Receiver<TransactionEvent>>,
     timer_rx: mpsc::UnboundedReceiver<CallEvent>,
     timers_open: bool,
     reentry_rx: mpsc::UnboundedReceiver<CallEvent>,
@@ -71,9 +76,11 @@ impl Inbox {
         repl_rx: Option<mpsc::UnboundedReceiver<ReplCommand>>,
     ) -> Self {
         let keepalive = txn_rx.take_keepalive_lane();
+        let unattributed = txn_rx.take_unattributed_lane();
         Self {
             txn_rx,
             keepalive,
+            unattributed,
             timer_rx,
             timers_open: true,
             reentry_rx,
@@ -94,6 +101,7 @@ impl Inbox {
             let Self {
                 txn_rx,
                 keepalive,
+                unattributed,
                 timer_rx,
                 timers_open,
                 reentry_rx,
@@ -117,13 +125,15 @@ impl Inbox {
                 tokio::select! {
                     biased;
                     next = others => next,
-                    ev = next_keepalive(keepalive) => Next::Keepalive(ev),
+                    ev = next_on_lane(keepalive) => Next::Keepalive(ev),
+                    ev = next_on_lane(unattributed) => Next::Unattributed(ev),
                 }
             } else {
                 tokio::select! {
                     biased;
-                    ev = next_keepalive(keepalive) => Next::Keepalive(ev),
+                    ev = next_on_lane(keepalive) => Next::Keepalive(ev),
                     next = others => next,
+                    ev = next_on_lane(unattributed) => Next::Unattributed(ev),
                 }
             };
             match next {
@@ -132,6 +142,11 @@ impl Inbox {
                     return Taken::Keepalive(ev);
                 }
                 Next::Keepalive(None) => self.keepalive = None,
+                Next::Unattributed(Some(ev)) => {
+                    self.after_keepalive = false;
+                    return Taken::Work(txn_event::work(ev, ctx.clock.now_ms()));
+                }
+                Next::Unattributed(None) => self.unattributed = None,
                 Next::Work(work) => {
                     self.after_keepalive = false;
                     return Taken::Work(work);
@@ -193,9 +208,9 @@ async fn next_other(
     }
 }
 
-/// The next OPTIONS of the keepalive lane; pending forever when there is no
-/// lane, `None` once it closed.
-async fn next_keepalive(
+/// The next event of a lane; pending forever when there is no lane, `None`
+/// once it closed.
+async fn next_on_lane(
     lane: &mut Option<mpsc::Receiver<TransactionEvent>>,
 ) -> Option<TransactionEvent> {
     match lane {

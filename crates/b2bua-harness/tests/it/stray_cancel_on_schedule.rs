@@ -1,10 +1,10 @@
-//! ADR-0063 §1 for the 481 a CANCEL matching no INVITE draws (RFC 3261
-//! §9.2): the caller's call was answered and ended, its INVITE's Accepted
-//! transaction gone at Timer L, and the caller, broken on purpose, then
-//! CANCELs that INVITE and re-sends the CANCEL on every 481. The CANCEL is
-//! answered through its own non-INVITE transaction: the 481 leaves for it and
-//! the copies Timer E re-sends, at any pace, and the rest are absorbed. The
-//! call itself ended with one CDR, fully reaped.
+//! The 481 a CANCEL matching no INVITE draws (RFC 3261 §9.2), outside
+//! ADR-0063 §1's bound: the caller's call was answered and ended, its INVITE's
+//! Accepted transaction gone at Timer L, and the caller, broken on purpose,
+//! then CANCELs that INVITE and re-sends the CANCEL on every 481. The CANCEL
+//! names no call, so it is answered as a stateless UAS answers it (§8.2.7):
+//! each copy draws one 481, never re-sent, and leaves nothing behind. The call
+//! itself ended with one CDR, fully reaped.
 //!
 //! Each step reads after a settled advance of a few transits: the verdict
 //! depends on no in-order draining of the paused runtime.
@@ -20,11 +20,8 @@ const ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 192.0.2.20\r\ns=-\r\nc=IN IP4 192.
 
 /// 64·T1 (RFC 3261 §17.1.1.1): Timer L.
 const WINDOW_MS: u64 = 64 * 500;
-/// The copies of a CANCEL a compliant client re-sends on Timer E (§17.1.2.2,
-/// T1 = 500 ms, T2 = 4 s) before Timer F = 64·T1: at 0.5, 1.5, 3.5, 7.5, 11.5,
-/// 15.5, 19.5, 23.5, 27.5 and 31.5 s.
-const CANCEL_RESENDS: usize = 10;
-/// The copies of the burst, past Timer E's re-sends.
+/// The copies of the burst after the first CANCEL, more than the 10 a
+/// compliant client re-sends on Timer E (§17.1.2.2) before Timer F.
 const COPIES: usize = 15;
 
 /// The CANCEL of `invite`, the caller's INVITE as it left (§9.1): its
@@ -65,7 +62,7 @@ fn gone_to(h: &Harness, b2bua: SocketAddr, to: SocketAddr, from: usize) -> usize
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_stray_cancel_re_sent_on_every_481_draws_it_on_timer_es_schedule() {
+async fn a_stray_cancel_re_sent_on_every_481_draws_one_481_per_copy() {
     let h = Harness::with_transit_delay("b2bua-stray-cancel-481", 1);
     h.waive(
         WaiverScope::rule(
@@ -108,6 +105,8 @@ async fn a_stray_cancel_re_sent_on_every_481_draws_it_on_timer_es_schedule() {
     h.advance(Duration::from_millis(20)).await;
     alice.drain().await;
     let answered = gone_to(&h, b2bua.addr, alice.addr(), before);
+    let live = b2bua.txn_metrics().active_transactions();
     h.finish().await;
-    assert_eq!(answered, 1 + CANCEL_RESENDS, "the 481 and Timer E's re-sends, the rest absorbed");
+    assert_eq!(answered, 1 + COPIES, "one 481 per copy, none absorbed, none re-sent");
+    assert_eq!(live, 0, "no CANCEL transaction outlives its 481");
 }

@@ -69,7 +69,6 @@ enum Answer {
 }
 
 impl Answer {
-    /// The final `req`, received from `src`, draws, with `to_tag`.
     fn to(
         self,
         req: &SipRequest,
@@ -288,8 +287,6 @@ impl Refusals {
         self.key_of(req.top_via(), req.call_id().as_str(), from.tag(), method, req.cseq().seq())
     }
 
-    /// The key of the transaction a `method` request with top Via `via`,
-    /// `call_id`, `from_tag` and CSeq number `cseq` opens ([`key`](Self::key)).
     fn key_of(
         &self,
         via: &Via,

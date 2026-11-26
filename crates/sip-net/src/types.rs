@@ -122,7 +122,8 @@ pub enum SendNote {
     /// Put on the wire again by the endpoint's retransmit engine.
     ReEmit(ReEmitKind),
     /// Handed to `send_to` and discarded by the simulated packet-loss model
-    /// (loadgen `--drop-rate`): never on the wire.
+    /// (loadgen `--drop-rate`, a simulated fabric's lost fate): never on the
+    /// wire.
     LossModel,
 }
 

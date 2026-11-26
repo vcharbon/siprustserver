@@ -554,3 +554,25 @@ Content-Length: 0\r\n\r\n";
 From: <sip:b@h>;tag=fb\r\nTo: <sip:a@h>\r\nCall-ID: c1\r\nCSeq: 1 INVITE\r\n\r\n";
     assert!(refusal(initial, 481, "x").is_none());
 }
+
+/// A response to a CANCEL of an initial INVITE takes the tag it is given on
+/// its tagless To; a To that names a tag keeps it.
+#[test]
+fn a_response_to_a_cancel_tags_a_tagless_to() {
+    let cancel = b"CANCEL sip:a@h SIP/2.0\r\nVia: SIP/2.0/UDP s;branch=z9hG4bK-i\r\n\
+From: <sip:b@h>;tag=fb\r\nTo: <sip:a@h>\r\nCall-ID: c1\r\nCSeq: 1 CANCEL\r\n\r\n";
+    assert!(response_to(cancel, 481, "x", "").is_none(), "a tagless To needs a tag");
+    let r = response_to(cancel, 481, "Call/Transaction Does Not Exist", "t9").unwrap();
+    let (req, resp) = (identity(cancel), identity(&r));
+    assert_eq!((resp.status, resp.to_tag), (Some(481), Some("t9")));
+    assert_eq!(
+        (resp.call_id, resp.cseq, resp.cseq_method, resp.branch),
+        (req.call_id, req.cseq, req.cseq_method, req.branch)
+    );
+    assert_eq!(header_value(&r, "To").as_deref(), Some("<sip:a@h>;tag=t9"));
+    let in_dialog = b"CANCEL sip:a@h SIP/2.0\r\nVia: SIP/2.0/UDP s;branch=z9hG4bK-r\r\n\
+From: <sip:b@h>;tag=fb\r\nTo: <sip:a@h>;tag=ta\r\nCall-ID: c1\r\nCSeq: 5 CANCEL\r\n\r\n";
+    let r = response_to(in_dialog, 200, "OK", "t9").unwrap();
+    assert_eq!(identity(&r).to_tag, Some("ta"), "the dialog's tag stands");
+    assert!(response_to(&r, 200, "OK", "t9").is_none(), "a response draws none");
+}

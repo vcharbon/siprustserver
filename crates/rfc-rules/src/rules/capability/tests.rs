@@ -13,6 +13,8 @@ use super::{
     UnsupportedExtension420, UnsupportedExtension421, UnsupportedMethod405Allow,
 };
 
+mod relayed;
+
 const ALICE: &str = "127.0.0.1:5060";
 const BOB: &str = "127.0.0.1:5070";
 /// A second socket of bob's, the one it answers from.
@@ -433,6 +435,69 @@ fn a_request_with_no_head_opens_no_require_occasion() {
     assert!(run(&UnsupportedExtension420, &msgs).is_empty());
 }
 
+/// [`taken`] on the dialog `at`/`bt`.
+fn taken_in_dialog(at_us: u64, method: &str, branch: &str, cseq: u32, extra: &str) -> Msg {
+    Msg { to_tag: Some("bt".to_string()), ..taken(at_us, method, branch, cseq, extra) }
+}
+
+/// Alice's BYE of the dialog `at`/`bt`, answered 200 at `at_us`.
+fn bye_ended(at_us: u64) -> [Msg; 2] {
+    [
+        taken_in_dialog(at_us - 500, "BYE", "z9hG4bK-b", 2, ""),
+        answered(at_us, 200, "BYE", "z9hG4bK-b", 2, ""),
+    ]
+}
+
+/// RFC 3261 §12.2.2: a UAS matches a To-tagged request to its dialogs before
+/// it applies the §8.2 checks; one naming a dialog a BYE ended is refused
+/// 481, which discharges the `Require` occasion.
+#[test]
+fn a_481_to_a_request_on_a_dialog_a_bye_ended_discharges_the_require() {
+    let [bye, ok] = bye_ended(2_000);
+    let msgs = [
+        bye,
+        ok,
+        taken_in_dialog(3_000, "INFO", "z9hG4bK-i", 3, "Require: frobnicate\r\n"),
+        answered(4_000, 481, "INFO", "z9hG4bK-i", 3, ""),
+    ];
+    let all = run(&UnsupportedExtension420, &msgs);
+    assert_eq!(all.len(), 1, "{all:?}");
+    assert!(matches!(all[0].decision, Decision::Compliant), "{:?}", all[0].decision);
+}
+
+/// So for an unrecognised method: the 481 is the answer its ended dialog
+/// owes, before §8.2.1 is reached.
+#[test]
+fn a_481_to_an_unknown_method_on_a_dialog_a_bye_ended_discharges_the_405() {
+    let [bye, ok] = bye_ended(2_000);
+    let msgs = [
+        bye,
+        ok,
+        taken_in_dialog(3_000, "FROBNICATE", "z9hG4bK-x", 3, ""),
+        answered(4_000, 481, "FROBNICATE", "z9hG4bK-x", 3, ""),
+    ];
+    assert!(violations(&UnsupportedMethod405Allow, &msgs).is_empty());
+}
+
+/// A 481 on a dialog no BYE ended, to a request on no dialog (no To-tag),
+/// or to one that arrived before the BYE's 2xx, still owes the 420.
+#[test]
+fn a_481_anywhere_else_is_violated() {
+    let info = |at_us, to_tag: Option<&str>| Msg {
+        to_tag: to_tag.map(str::to_string),
+        ..taken(at_us, "INFO", "z9hG4bK-i", 3, "Require: frobnicate\r\n")
+    };
+    let refused = answered(4_000, 481, "INFO", "z9hG4bK-i", 3, "");
+    let live = [info(3_000, Some("bt")), refused.clone()];
+    assert_eq!(violations(&UnsupportedExtension420, &live).len(), 1, "a live dialog");
+    let [bye, ok] = bye_ended(2_000);
+    let out_of_dialog = [bye.clone(), ok.clone(), info(3_000, None), refused.clone()];
+    assert_eq!(violations(&UnsupportedExtension420, &out_of_dialog).len(), 1, "no To-tag");
+    let [_, late_ok] = bye_ended(3_500);
+    let before_the_end = [bye, info(3_000, Some("bt")), late_ok, refused];
+    assert_eq!(violations(&UnsupportedExtension420, &before_the_end).len(), 1, "before the 2xx");
+}
+
 /// A request the strict reading refuses owes its 400, whatever method it
 /// names: an unknown one opens no §8.2.1 occasion.
 #[test]
@@ -521,6 +586,7 @@ fn an_options_2xx_describes_what_it_supports() {
     let f = violations(&OptionsResponseEchoes, &bare);
     assert_eq!(f.len(), 1, "{f:?}");
     assert_eq!(f[0].emitter, BOB);
+    assert!(!f[0].relayed, "bob sent no OPTIONS onward: the bare 2xx is his own");
     let Decision::Violated(Evidence::ResponseHeadersMissing { missing, .. }) = &f[0].decision
     else {
         panic!("{:?}", f[0].decision)

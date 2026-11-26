@@ -2,7 +2,7 @@
 
 use scenario_harness::{callflow, Agent, Dialog, Harness, RunReport};
 
-use crate::{settle_until, B2buaSut, B2buaSutBuilder, LimiterLeak};
+use crate::{B2buaSut, B2buaSutBuilder, LimiterLeak};
 
 /// The port of `alice` in a [`B2buaScene`]: the first address a fresh
 /// harness allocates ([`Harness::next_addr`]).
@@ -72,10 +72,14 @@ impl B2buaScene {
     /// (`outbound_proxy`, `limiter`, `services`, `tune`), so a test needing a
     /// non-default decision still gets the canonical alice/bob/ports wiring for
     /// free. Default decision = `route_all_to(bob)` (see [`new`](Self::new)).
+    /// The fabric is the harness's default, `SIMULATED_TRANSIT_DELAY_MS` a hop.
     pub async fn with_b2bua(name: &str, build: impl FnOnce(u16) -> B2buaSutBuilder) -> Self {
-        // Match the common b2bua-test convention: the harness's default
-        // SIMULATED_TRANSIT_DELAY_MS (1 ms floor enforced by the fabric).
-        let h = Harness::new(name);
+        Self::on_harness(Harness::new(name), build).await
+    }
+
+    /// Like [`with_b2bua`](Self::with_b2bua) on a harness the caller built,
+    /// over a fabric of its choosing (a lossy one, say).
+    pub async fn on_harness(h: Harness, build: impl FnOnce(u16) -> B2buaSutBuilder) -> Self {
         let alice = h.agent_auto("alice").await;
         let bob = h.agent_auto("bob").await;
         let at = h.next_addr().to_string();
@@ -96,9 +100,10 @@ impl B2buaScene {
         callflow::hangup(dialog, &self.bob).await
     }
 
-    /// Settle until every call is reaped, run [`B2buaSut::assert_fully_reaped`],
-    /// then gate the RFC audit and render the report. Consumes the scene
-    /// (`Harness::finish` consumes `self`).
+    /// Settle until every call is reaped, the parties still serving their
+    /// transactions ([`Harness::serve_parties_until`]), run
+    /// [`B2buaSut::assert_fully_reaped`], then gate the RFC audit and render
+    /// the report. Consumes the scene (`Harness::finish` consumes `self`).
     pub async fn finish(self) -> RunReport {
         self.finish_leaving(LimiterLeak::NONE).await
     }
@@ -106,7 +111,7 @@ impl B2buaScene {
     /// [`finish`](Self::finish) for a scenario that leaves limiter holds
     /// behind on purpose: the reaped check requires exactly `leak`.
     pub async fn finish_leaving(self, leak: LimiterLeak) -> RunReport {
-        settle_until(|| self.b2bua.is_reaped_leaving(&leak)).await;
+        self.h.serve_parties_until(|| self.b2bua.is_reaped_leaving(&leak)).await;
         self.b2bua.assert_fully_reaped_leaving(leak);
         self.h.finish().await
     }

@@ -58,6 +58,7 @@ impl Default for B2buaConfig {
             worker_allowed_target_suffixes: vec![".svc.cluster.local".to_string()],
             // Decision-backend deadline: one knob for all three methods (ADR-0022).
             call_control_timeout_ms: Self::DEFAULT_CALL_CONTROL_TIMEOUT_MS,
+            call_start_bound_ms: Self::DEFAULT_CALL_START_BOUND_MS,
             relay_headers: Vec::new(),
             privacy_service: true,
             relay_policy: sip_message::generators::RelayPolicy::transparent(),
@@ -66,6 +67,7 @@ impl Default for B2buaConfig {
             default_sdp: None,
             sdp_form: std::sync::Arc::new(AsWritten),
             node_capabilities: sip_message::generators::CapabilitySet::default(),
+            relayed_options_advertisement: super::RelayedOptionsAdvertisement::NodeSet,
             minted_final_advertisement: sip_message::generators::CapabilitySet::silent(),
             cdr: CdrConfig::default(),
             capacity: CapacityConfig::default(),

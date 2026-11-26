@@ -1,6 +1,6 @@
 //! An initial INVITE whose turn waits for a new-call permit, CANCELed by its
-//! caller meanwhile, once the transaction layer's 100 reached it (RFC 3261
-//! §9.1, §17.2.1): the transaction layer answers 200 to the
+//! caller meanwhile: a waiting turn sends no 100 (ADR-0070), so the CANCEL is a
+//! caller's that breaks RFC 3261 §9.1. The transaction layer answers 200 to the
 //! CANCEL and 487 to the INVITE at once, and the call's turn, once it gets its
 //! permit, ends the setup as cancelled. It asks the decision backend nothing,
 //! admits no limiter hold, and is counted as cancelled, not accepted nor on
@@ -20,8 +20,12 @@ use b2bua::decision::{
 use b2bua_harness::{settle_until, B2buaScene, B2buaSut};
 use call::{CdrEventType, TerminationCause};
 use scenario_harness::callflow::OFFER_SDP;
-use scenario_harness::ClientInvite;
+use scenario_harness::{ClientInvite, WaiverScope};
 use tokio::sync::watch;
+
+/// The waiver of the caller under test.
+const CANCEL_UNPROVISIONED: &str = "erin CANCELs before any provisional (RFC 3261 §9.1): a \
+     turn waiting for its permit sends no 100 (ADR-0070), so only such a caller's CANCEL meets it";
 
 const CONCURRENCY: usize = 4;
 /// Half the pool: two new-call permits.
@@ -100,12 +104,11 @@ async fn an_invite_canceled_while_waiting_for_a_permit_skips_the_decision_and_th
     s.h.advance(Duration::from_millis(300)).await;
     assert_eq!(engine.count.load(Ordering::SeqCst), HOLDERS, "the share is held");
 
-    // A third INVITE's turn waits for a new-call permit; no turn releases its
-    // 100, the transaction layer sends it at the RFC 3261 §17.2.1 bound, and
-    // its caller may CANCEL from then on (§9.1).
+    s.h.waive(WaiverScope::rule("cancel-after-1xx", CANCEL_UNPROVISIONED).on_party("erin"));
     let erin = s.h.agent("erin", "127.0.0.1:5069").await;
     let mut waiting = erin.invite(&s.bob).with_sdp(OFFER_SDP).through(s.b2bua.addr).send().await;
-    waiting.expect(100).await;
+    s.h.advance(Duration::from_millis(300)).await;
+    assert!(erin.take_queued().await.is_none(), "no 100 while its turn waits");
     assert_eq!(
         s.b2bua.metrics().new_call_share_waits_total(),
         1,

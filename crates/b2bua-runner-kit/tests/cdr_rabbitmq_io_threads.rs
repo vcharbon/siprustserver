@@ -101,7 +101,7 @@ fn writer_to(addr: SocketAddr, metrics: &B2buaMetrics) -> RabbitMqCdrWriter {
         backoff_max: 20 * MS,
     };
     let settings = RabbitMqCdrSettings {
-        url: format!("amqp://guest:guest@{addr}/%2f"),
+        brokers: vec![format!("amqp://guest:guest@{addr}/%2f").parse().unwrap()],
         queue: "cdr".into(),
         declare: CdrQueueDeclare::Own { max_len: 0 },
         bounds,

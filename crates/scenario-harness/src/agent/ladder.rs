@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use std::net::SocketAddr;
 
 use layer_harness::{Channel, Recorder};
-use sip_net_testkit::{to_sip_entries, SignalingNetworkEvent};
+use sip_net_testkit::{to_sip_entries, RecordedSipEntry, SignalingNetworkEvent};
 
 use crate::report::wire::{facets, format_relative};
 
@@ -40,7 +40,7 @@ pub(super) fn render_ladder(
                 }
                 _ => sent,
             };
-            let undelivered = if e.delivered { "" } else { "  [UNDELIVERED]" };
+            let undelivered = undelivered_tag(e);
             format!(
                 "[{ts}] {} → {}  {}{}",
                 label_for(&e.from),
@@ -50,4 +50,14 @@ pub(super) fn render_ladder(
             )
         })
         .collect()
+}
+
+/// The tag of an entry that never reached its taker, naming why when the
+/// recording knows (a datagram the network lost); empty for a delivered one.
+fn undelivered_tag(e: &RecordedSipEntry) -> String {
+    match (e.delivered, e.recv_note) {
+        (true, _) => String::new(),
+        (false, Some(note)) => format!("  [UNDELIVERED: {}]", note.tag()),
+        (false, None) => "  [UNDELIVERED]".to_string(),
+    }
 }

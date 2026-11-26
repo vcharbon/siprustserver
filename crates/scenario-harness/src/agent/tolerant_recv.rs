@@ -75,7 +75,7 @@ impl Agent {
             let Ok(msg) = self.txn.read(&pkt.raw) else {
                 continue; // unparseable noise: nothing to answer
             };
-            self.dialogs.sight(&msg);
+            self.dialogs.sight(&msg, pkt.src);
             let SipMessage::Request(r) = msg else {
                 continue; // responses: nothing to answer
             };
@@ -121,7 +121,7 @@ impl Agent {
                 .txn
                 .read(&pkt.raw)
                 .unwrap_or_else(|e| panic!("{} drained an unparseable datagram: {e}", self.name));
-            self.dialogs.sight(&msg);
+            self.dialogs.sight(&msg, pkt.src);
             let r = match msg {
                 SipMessage::Request(r) => r,
                 SipMessage::Response(resp) => panic!(

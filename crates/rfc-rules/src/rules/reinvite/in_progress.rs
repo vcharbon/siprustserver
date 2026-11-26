@@ -4,7 +4,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::verdict::{Decision, Evidence, Finding, RuleId};
-use crate::wire::{Kind, WireView};
+use crate::wire::{Kind, Msg, WireView};
 
 use super::super::branch::BranchName;
 use super::super::correlation::Parties;
@@ -24,7 +24,8 @@ use super::{branch_msg, OrderedKey, Origins, TxnKey};
 /// 6026's *Accepted* state, where it stays until the UAC's own ACK goes out —
 /// §14.1 rule 2 requires Confirmed, not merely a final. A non-2xx final ends it
 /// at the final itself, because its ACK is the transaction layer's and may
-/// never surface as a TU send at all.
+/// never surface as a TU send at all. One that drew no response at all ends
+/// at its Timer B, 64·T1 after it first left (§17.1.1.2).
 ///
 /// **The key is the ORDERED tag pair — same-direction overlap only.** The
 /// reversed orientation is the OTHER party's request: crossing re-INVITEs, one
@@ -44,6 +45,34 @@ use super::{branch_msg, OrderedKey, Origins, TxnKey};
 /// INVITE left from (`Sides`).
 pub struct NoReInviteWhileInviteInProgress;
 
+/// Timer B over UDP at the default T1 (RFC 3261 §17.1.1.2, 64·T1): an INVITE
+/// client transaction that drew no response by then is terminated.
+const TIMER_B_US: u64 = super::super::T1_64_US;
+
+/// The INVITE transactions a UAC sent, by when each first left, and those
+/// that drew a response: what tells one Timer B ended from one in progress.
+#[derive(Default)]
+struct Silence<'a> {
+    first_sent: BTreeMap<TxnKey<'a>, u64>,
+    answered: BTreeSet<TxnKey<'a>>,
+}
+
+impl<'a> Silence<'a> {
+    fn sent(&mut self, txn: TxnKey<'a>, at_us: u64) {
+        self.first_sent.entry(txn).or_insert(at_us);
+    }
+
+    fn answered(&mut self, txn: TxnKey<'a>) {
+        self.answered.insert(txn);
+    }
+
+    /// Whether `txn` drew no response and its Timer B fired by `at_us`.
+    fn timed_out(&self, txn: &TxnKey<'a>, at_us: u64) -> bool {
+        !self.answered.contains(txn)
+            && self.first_sent.get(txn).is_some_and(|sent| at_us >= sent + TIMER_B_US)
+    }
+}
+
 impl Obligation for NoReInviteWhileInviteInProgress {
     fn eval(&self, wire: &WireView<'_>) -> Vec<Finding> {
         // Per requester (endpoint + dialog + DIRECTION): the branches of its own
@@ -62,9 +91,13 @@ impl Obligation for NoReInviteWhileInviteInProgress {
         // Transactions whose 2xx has landed and whose ACK has not gone out.
         let mut accepted: BTreeSet<TxnKey<'_>> = BTreeSet::new();
         let mut origins = Origins::default();
+        let mut silence = Silence::default();
         let mut out = Vec::new();
 
         for (mi, msg) in wire.msgs.iter().enumerate() {
+            if let Some(txn) = answered_invite(msg, &sides, &parties) {
+                silence.answered(txn);
+            }
             match &msg.kind {
                 Kind::Request { method } if method.eq_ignore_ascii_case("ACK") => {
                     let sender = parties.sent_by(msg);
@@ -124,6 +157,11 @@ impl Obligation for NoReInviteWhileInviteInProgress {
                         to_tag: if in_dialog { to_tag } else { "" },
                     };
                     let in_flight = in_progress.entry(dialog).or_default();
+                    in_flight.retain(|b| {
+                        let held = TxnKey { branch: BranchName(b), ..txn };
+                        !silence.timed_out(&held, msg.at_us)
+                    });
+                    silence.sent(txn, msg.at_us);
                     let spiral = origins.copies_one_of(msg, sender, in_flight);
                     origins.record(msg, txn);
                     if in_dialog {
@@ -273,4 +311,23 @@ impl Obligation for NoReInviteWhileInviteInProgress {
         out.sort_by_key(|f| f.anchor);
         out
     }
+}
+
+/// The INVITE transaction `msg` answers, a response of any status to it, as
+/// its UAC drove it.
+fn answered_invite<'a>(
+    msg: &'a Msg,
+    sides: &Sides<'a>,
+    parties: &Parties<'a>,
+) -> Option<TxnKey<'a>> {
+    let Kind::Response { .. } = msg.kind else { return None };
+    if !msg.cseq_method.eq_ignore_ascii_case("INVITE") {
+        return None;
+    }
+    let branch = msg.via_branch.as_deref().filter(|b| !b.is_empty())?;
+    Some(TxnKey {
+        endpoint: parties.agent(&msg.call_id, sides.uac(msg)),
+        call_id: msg.call_id.as_str(),
+        branch: BranchName(branch),
+    })
 }

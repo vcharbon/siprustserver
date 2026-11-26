@@ -32,6 +32,8 @@ pub fn record_route_flagged<'a>(
     entry(advertised, params, Some(flag))
 }
 
+/// An empty param value rides as a flag (`pvalue = 1*paramchar`, RFC 3261
+/// §25.1), which [`cookie_params`] reads back empty.
 fn entry<'a>(
     advertised: &ProxyAddr,
     params: impl IntoIterator<Item = (&'a String, &'a String)>,
@@ -39,8 +41,6 @@ fn entry<'a>(
 ) -> RecordRouteEntry {
     let mut uri = Uri::sip(advertised.host.clone()).with_port(advertised.port);
     for (name, value) in params {
-        // `pvalue = 1*paramchar` (RFC 3261 §25.1): an empty value rides as a
-        // flag, which [`cookie_params`] reads back empty.
         let value =
             if value.is_empty() { ParamValue::Flag } else { ParamValue::text(value.as_str()) };
         uri = uri.with_param(name.as_str(), value);
@@ -101,7 +101,6 @@ fn stated(worker_via: &Via, name: &str) -> String {
 /// internal: the response comes back on it (`crate::face`).
 const SAME_FACE: &str = "same-face";
 
-/// `via` with the marker of a hop that stayed on one face.
 pub fn via_marking_same_face(via: Via) -> Via {
     via.with_param(SAME_FACE, ParamValue::Flag)
 }
@@ -122,8 +121,6 @@ pub fn via_with_cookie(via: Via, cookie: Option<&RouteParams>) -> Via {
     })
 }
 
-/// A cookie field's value as a Via `gen-value`: the token as written, any
-/// other text quoted.
 fn via_value(value: &str) -> ParamValue {
     if is_run_of(value, is_token_char, false) {
         ParamValue::Token(SipStr::owned(value))
@@ -174,6 +171,9 @@ mod tests {
         );
     }
 
+    /// The cookie reads back off this proxy's own Record-Route entry with every
+    /// param of its URI, the `lr` flag included: the strategy names the fields
+    /// it decodes.
     #[test]
     fn the_cookie_reads_back_off_our_own_entry() {
         let adv = ProxyAddr::new("10.0.0.1", 5060);
@@ -181,8 +181,6 @@ mod tests {
         let read_back = cookie_params(written.uri());
         assert_eq!(read_back.get("v").map(String::as_str), Some("3"));
         assert_eq!(read_back.get("w_pri").map(String::as_str), Some("b2b-1"));
-        // The routing flag rides the same URI, so the cookie carries it too —
-        // the strategy names the fields it decodes.
         assert!(read_back.contains_key("lr"));
         assert_eq!(route_target(written.uri()), adv);
     }

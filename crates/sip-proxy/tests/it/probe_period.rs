@@ -63,7 +63,12 @@ async fn a_zero_probe_interval_rounds_every_millisecond() {
         Arc::new(WorkerLoadObserver::new(LoadObserverConfig::default())),
         Clock::test_at(0),
         Arc::new(IdGen::seeded(9)),
-        HealthProbeConfig { interval_ms: 0, timeout_ms: 500, threshold: 3 },
+        HealthProbeConfig {
+            interval_ms: 0,
+            timeout_ms: 500,
+            threshold: 3,
+            ..HealthProbeConfig::default()
+        },
     );
     let task = tokio::spawn(probe.run());
 

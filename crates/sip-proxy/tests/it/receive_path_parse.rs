@@ -3,6 +3,7 @@
 //! and the core routes the queued message, or answers the queued refusal with
 //! its stateless 400 (RFC 3261 §16.3), without parsing the datagram again.
 
+use crate::common::call_end::{ack_final, answered_at_callee};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -116,7 +117,8 @@ Content-Length: 0\r\n\r\n";
 
 /// Under the production intake hook, below its watermark: a well-formed
 /// OPTIONS is routed to the worker and its 200 relayed back, and a malformed
-/// INVITE is answered 400 from the refusal queued with it, nothing forwarded.
+/// INVITE is answered 400 from the refusal queued with it, nothing forwarded,
+/// and the caller's ACK of that 400 ends at the proxy.
 #[tokio::test(start_paused = true)]
 async fn the_core_routes_and_answers_the_parse_the_production_hook_queued() {
     let metrics = Arc::new(ProxyMetrics::new());
@@ -148,19 +150,25 @@ async fn the_core_routes_and_answers_the_parse_the_production_hook_queued() {
     rig.caller.send_to(MALFORMED_INVITE, addr(PROXY)).await.expect("sent");
     rig.settle().await;
     let answered = Rig::received(rig.caller.as_ref());
-    assert!(
-        matches!(answered.as_slice(), [SipMessage::Response(r)] if r.status() == 400),
-        "the queued refusal is answered 400: {answered:?}"
-    );
+    let [SipMessage::Response(refusal)] = answered.as_slice() else {
+        panic!("the queued refusal is answered: {answered:?}");
+    };
+    assert_eq!(refusal.status(), 400, "the queued refusal is answered 400");
     assert!(Rig::received(rig.worker.as_ref()).is_empty(), "nothing forwarded");
     assert_eq!(rig.metrics.parse_refusals_answered(), 1);
+
+    let readable =
+        String::from_utf8_lossy(MALFORMED_INVITE).replace("Max-Forwards: abc", "Max-Forwards: 70");
+    ack_final(addr(PROXY), rig.caller.as_ref(), readable.as_bytes(), refusal).await;
+    rig.settle().await;
+    assert!(Rig::received(rig.worker.as_ref()).is_empty(), "the ACK to the own 400 ends here");
 }
 
 /// The limit a process states is the one its datagrams read under, whichever
 /// stage parses them: the production hook below its watermark and the core with
 /// no hook refuse the same well-formed OPTIONS past three header lines with no
 /// partial, drop it unanswered, and count one parse error. The default limits
-/// route the same datagram.
+/// route the same datagram, and the worker's 200 reaches the caller.
 #[tokio::test(start_paused = true)]
 async fn the_limit_the_process_states_is_read_at_every_stage() {
     let strict = || {
@@ -187,5 +195,8 @@ async fn the_limit_the_process_states_is_read_at_every_stage() {
     let default = Rig::new(Arc::new(ProxyMetrics::new()), None, CustomParser::new()).await;
     default.caller.send_to(&options("default"), addr(PROXY)).await.expect("sent");
     default.settle().await;
-    assert_eq!(Rig::received(default.worker.as_ref()).len(), 1, "the default limits route it");
+    let forwarded = default.worker.try_recv().expect("the default limits route it");
+    assert!(default.worker.try_recv().is_none(), "routed once");
+    answered_at_callee(default.caller.as_ref(), default.worker.as_ref(), &forwarded.raw, 200, "OK")
+        .await;
 }

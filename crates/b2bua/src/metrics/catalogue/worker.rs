@@ -104,7 +104,7 @@ pub const CALL_REMOVALS: Family = Family::counter(
 pub const REQUESTS: Family = Family::counter(
     "b2bua_requests_total",
     Labels::Product(&[METHOD]),
-    "inbound SIP requests by method",
+    "inbound SIP requests by method, each copy no transaction absorbs counted again: every copy of a request naming no call, answered statelessly (RFC 3261 §8.2.7)",
 )
 .capped(&REQUESTS_OVERFLOW, &["method"]);
 

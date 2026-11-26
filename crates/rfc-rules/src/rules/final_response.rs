@@ -61,11 +61,8 @@ use crate::verdict::{Decision, Evidence, Finding, RuleId};
 use crate::wire::{Msg, WireView};
 
 use super::sides::Sides;
-use super::Obligation;
+use super::{Obligation, T1_64_US};
 
-/// 64·T1 over UDP (RFC 3261 §17): Timer J, Timer H, and the 2xx's
-/// retransmission envelope (§13.3.1.4).
-const T1_64_US: u64 = 32_000_000;
 /// T4 over UDP (RFC 3261 §17.2.1): Timer I.
 const T4_US: u64 = 5_000_000;
 

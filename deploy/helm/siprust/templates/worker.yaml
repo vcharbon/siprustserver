@@ -38,8 +38,8 @@ NetworkPolicy holds its port. The operator and debug routes listen on loopback
 Contact names its external VIP; without it the worker is standalone. */ -}}
 {{- if .Values.proxy.enabled }}
 {{- $_ := set $env "B2BUA_MODE" "proxied" }}
-{{- $_ := set $env "B2BUA_OUTBOUND_PROXY" (printf "%s:%d" (include "siprust.net" (dict "root" $ "key" "proxyVip")) (int .Values.network.sipPort)) }}
-{{- $_ := set $env "B2BUA_CONTACT_ADDRESS" (printf "%s:%d" (include "siprust.net" (dict "root" $ "key" "externalVip")) (int .Values.network.sipPort)) }}
+{{- $_ := set $env "B2BUA_OUTBOUND_PROXY" (include "siprust.netHostPort" (dict "root" $ "key" "proxyVip")) }}
+{{- $_ := set $env "B2BUA_CONTACT_ADDRESS" (include "siprust.netHostPort" (dict "root" $ "key" "externalVip")) }}
 {{- else }}
 {{- $_ := set $env "B2BUA_MODE" "standalone" }}
 {{- end }}

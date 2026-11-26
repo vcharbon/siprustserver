@@ -142,9 +142,13 @@ pub fn encode(
     topology: Option<&CallTopology>,
     call: &Call,
 ) -> Result<Vec<u8>, CallEncodeError> {
-    let inner = codec.encode(call)?;
-    rmp_serde::to_vec(&BodyOut(topology, &inner))
-        .map_err(|e| CallEncodeError::Encode(e.to_string()))
+    wrap(topology, &codec.encode(call)?)
+}
+
+/// The call body `inner`, as the codec wrote it, under `topology`, encoded
+/// as a replicated body.
+pub fn wrap(topology: Option<&CallTopology>, inner: &[u8]) -> Result<Vec<u8>, CallEncodeError> {
+    rmp_serde::to_vec(&BodyOut(topology, inner)).map_err(|e| CallEncodeError::Encode(e.to_string()))
 }
 
 /// A replicated body read as the call it carries in its envelope.

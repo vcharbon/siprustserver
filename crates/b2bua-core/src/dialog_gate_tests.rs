@@ -1,8 +1,10 @@
 //! The dialog gate's table (ADR-0041): which dialog state takes which request,
-//! and what a caller-facing dialog the caller was never shown names.
+//! what a caller-facing dialog the caller was never shown names, and the 420
+//! to a request requiring an option tag this stack does not understand.
 
 use b2bua_sdk::event::CallEvent;
 use call::{Call, CallModelState, Dialog, DialogEnd, DialogState, EndingBy};
+use sip_message::header::{HeaderName, HeaderValue};
 use sip_message::{Method, SipMessage, SipRequest};
 
 use super::{admission, note_in_order, request_verdict, Admission, Verdict};
@@ -202,6 +204,26 @@ fn a_request_the_gate_passes_sets_its_dialogs_last_cseq_and_an_ack_does_not() {
     assert_eq!(last_cseq_after(call, caller_request(Method::Ack, 9)), Some(1));
 }
 
+/// The methods this stack carries in no dialog, which it only ever refuses.
+fn carried_in_no_dialog() -> [Method; 3] {
+    [Method::Subscribe, Method::Publish, Method::Other("FOO".into())]
+}
+
+/// A request of a method this stack carries in no dialog reaches its rules'
+/// refusal whatever its CSeq (RFC 3261 §8.2.1 before §12.2.2), and leaves its
+/// dialog's last CSeq as it was.
+#[test]
+fn a_method_carried_in_no_dialog_is_held_to_no_order_and_numbers_nothing() {
+    let mut call = call_with_caller_dialog(true);
+    call.a_leg.dialogs.by_tags_mut("ours", CALLER_TAG).expect("the dialog").peer_cseq = Some(5);
+    for method in carried_in_no_dialog() {
+        let below = request_verdict(&call, "a", &caller_request(method.clone(), 4));
+        assert!(matches!(below, Verdict::Pass(_)), "{method} below: {below:?}");
+        let above = caller_request(method.clone(), 9);
+        assert_eq!(last_cseq_after(call.clone(), above), Some(5), "{method} numbers nothing");
+    }
+}
+
 #[test]
 fn a_rejected_caller_dialog_refuses_her_bye_and_takes_her_prack() {
     let mut call = call_with_caller_dialog(true);
@@ -233,6 +255,8 @@ fn an_ending_dialog_answers_in_its_own_dialog_and_judges_the_order_first() {
     assert!(matches!(update, Verdict::Terminated(_)), "{update:?}");
     assert_eq!(named(update), Some("ours".to_string()));
     assert_eq!(request_verdict(&call, "a", &caller_request(Method::Info, 4)), Verdict::OutOfOrder);
+    let subscribe = request_verdict(&call, "a", &caller_request(Method::Subscribe, 4));
+    assert!(matches!(subscribe, Verdict::Terminated(_)), "held to no order: {subscribe:?}");
 }
 
 /// A PRACK on a retired dialog reaches its rule on the caller face, where a
@@ -336,4 +360,93 @@ fn a_request_on_a_leg_the_record_lacks_names_no_dialog() {
     let call = call_with_caller_dialog(true);
     assert_eq!(request_verdict(&call, "b-9", &caller_request(Method::Bye, 2)), Verdict::NoDialog);
     assert_eq!(request_verdict(&call, "b-9", &caller_request(Method::Ack, 1)), Verdict::Drop);
+}
+
+/// `req` requiring `require` of its UAS.
+fn requiring(req: SipRequest, require: &str) -> SipRequest {
+    req.thaw()
+        .push_raw(HeaderName::Require, require)
+        .freeze()
+        .expect("a request with one more header is complete")
+}
+
+/// The `Unsupported` the gate's 420 states; `None` for any other verdict.
+fn refusal(verdict: &Verdict) -> Option<String> {
+    let Verdict::BadExtension(unsupported) = verdict else { return None };
+    Some(unsupported.to_wire())
+}
+
+/// Every method this stack carries in a dialog, on either face, requiring a
+/// tag it does not understand draws 420 naming only that tag (RFC 3261
+/// §8.2.2.3). A SUBSCRIBE or a PUBLISH, which it does not carry, reaches its
+/// rules' refusal first (§8.2.1); an ACK imposes nothing.
+#[test]
+fn a_request_requiring_a_tag_not_understood_draws_420_naming_only_that_tag() {
+    let call = call_with_ringing_callee();
+    let carried = [
+        Method::Invite,
+        Method::Bye,
+        Method::Options,
+        Method::Prack,
+        Method::Info,
+        Method::Message,
+        Method::Notify,
+        Method::Update,
+        Method::Refer,
+    ];
+    for leg in ["a", "b-1"] {
+        for method in carried.clone() {
+            let req = requiring(caller_request(method.clone(), 2), "replaces, x-nonexistent");
+            let verdict = request_verdict(&call, leg, &req);
+            assert_eq!(verdict.status(), Some(420), "{leg}: {method}");
+            assert_eq!(refusal(&verdict).as_deref(), Some("x-nonexistent"), "{leg}: {method}");
+        }
+        for method in [Method::Subscribe, Method::Publish, Method::Ack] {
+            let req = requiring(caller_request(method.clone(), 2), "x-nonexistent");
+            let verdict = request_verdict(&call, leg, &req);
+            assert!(matches!(verdict, Verdict::Pass(_)), "{leg}: {method} {verdict:?}");
+        }
+    }
+}
+
+/// `timer` is understood on a request that negotiates the session alone (RFC
+/// 4028 §7.1): an UPDATE or a re-INVITE requiring it passes, an INFO draws
+/// 420 naming it.
+#[test]
+fn timer_is_understood_on_a_session_request_only() {
+    let call = call_with_caller_dialog(true);
+    for method in [Method::Update, Method::Invite] {
+        let req = requiring(caller_request(method.clone(), 2), "timer");
+        assert!(matches!(request_verdict(&call, "a", &req), Verdict::Pass(_)), "{method}");
+    }
+    let info = requiring(caller_request(Method::Info, 2), "timer");
+    assert_eq!(refusal(&request_verdict(&call, "a", &info)).as_deref(), Some("timer"));
+}
+
+/// A re-INVITE requiring `100rel` draws 420 naming it (RFC 3262 §3): the stack
+/// relays the peer's provisionals to it as they come.
+#[test]
+fn a_reinvite_requiring_100rel_draws_420_naming_it() {
+    let call = call_with_caller_dialog(true);
+    let reinvite = requiring(caller_request(Method::Invite, 2), "100rel");
+    assert_eq!(refusal(&request_verdict(&call, "a", &reinvite)).as_deref(), Some("100rel"));
+}
+
+/// On a dialog this side is ending, the extension is refused before the
+/// dialog's own answer (200, 487 or the crossing BYE's pass) and before the
+/// order check (RFC 3261 §12.2.2 applies §8.2 first): a request below the
+/// dialog's last CSeq draws 420 too, and a plain one 500.
+#[test]
+fn an_ending_dialog_refuses_the_extension_before_its_answer_and_the_order_check() {
+    let mut call = call_with_caller_dialog(true);
+    let d = call.a_leg.dialogs.by_tags_mut("ours", CALLER_TAG).expect("the dialog");
+    d.state = DialogState::Ending(EndingBy::Bye);
+    d.peer_cseq = Some(5);
+    for method in [Method::Info, Method::Update, Method::Bye] {
+        let req = requiring(caller_request(method.clone(), 6), "x-nonexistent");
+        assert_eq!(request_verdict(&call, "a", &req).status(), Some(420), "{method}");
+    }
+    let late = requiring(caller_request(Method::Info, 4), "x-nonexistent");
+    assert_eq!(request_verdict(&call, "a", &late).status(), Some(420));
+    assert_eq!(request_verdict(&call, "a", &caller_request(Method::Info, 4)), Verdict::OutOfOrder);
 }

@@ -8,10 +8,8 @@
 use sip_message::worker_report::Readiness;
 use sip_proxy::load_observer::{parse_x_overload_header, LoadObserverConfig, WorkerLoadObserver};
 
-/// The interval between two answers of the worker.
 const INTERVAL_MS: i64 = 1_000;
 
-/// One case: the report's lines, in order.
 pub fn case(report: &[u8]) {
     let observer = WorkerLoadObserver::new(LoadObserverConfig::default());
     let mut now = 0;

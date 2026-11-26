@@ -1367,10 +1367,11 @@ async fn a_leg_with_its_own_set_takes_it_instead_of_the_calls() {
     assert_every_message_carries("the caller's leg", &to_alice, "X-Leg", &[]);
 }
 
-/// The caller cancels her pending re-INVITE: the `487` the transaction layer
-/// answers it with is its own and carries no set.
+/// The caller cancels her pending re-INVITE: the `487` that answers it is the
+/// callee's, relayed (ADR-0065), so it carries the leg's every-message set and
+/// none of the originator finals' set, which is the initial INVITE's.
 #[tokio::test(start_paused = true)]
-async fn the_layers_487_to_a_cancelled_reinvite_carries_no_set() {
+async fn the_relayed_487_to_a_cancelled_reinvite_carries_the_every_message_set() {
     let s = scene("stated-headers-reinvite-cancel", every_scope()).await;
     let mut call = s.alice.invite(&s.bob).with_sdp(OFFER).through(s.b2bua.addr).send().await;
     let mut uas = s.bob.receive("INVITE").await;
@@ -1383,17 +1384,16 @@ async fn the_layers_487_to_a_cancelled_reinvite_carries_no_set() {
     let mut bob_reinv = s.bob.receive("INVITE").await;
     let mut cxl = reinv.cancel().await;
     cxl.expect(200).await;
-    let terminated = reinv.expect(487).await;
     bob_reinv.respond(100, "Trying").await;
     s.bob.receive("CANCEL").await.respond(200, "OK").await;
     bob_reinv.respond(487, "Request Terminated").await;
     s.bob.receive("ACK").await;
-    for name in ["X-Every", "X-Final"] {
-        assert!(
-            terminated.raw(HeaderName::from(name)).next().is_none(),
-            "the layer's 487 to the re-INVITE carries no `{name}`"
-        );
-    }
+    let terminated = reinv.expect(487).await;
+    let lines = |name: &str| -> Vec<String> {
+        terminated.raw(HeaderName::from(name)).map(str::to_string).collect()
+    };
+    assert_eq!(lines("X-Every"), ["every"], "the relayed 487 carries the leg's set");
+    assert!(lines("X-Final").is_empty(), "a re-INVITE's final takes no originator-final set");
     let mut bye = dialog.bye().await;
     s.bob.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;

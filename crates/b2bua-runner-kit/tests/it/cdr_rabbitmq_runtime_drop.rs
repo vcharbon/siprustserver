@@ -53,7 +53,7 @@ fn black_holed() -> (socket2::Socket, std::net::TcpStream, SocketAddr) {
 
 fn writer_to(addr: SocketAddr) -> RabbitMqCdrWriter {
     let settings = RabbitMqCdrSettings {
-        url: format!("amqp://guest:guest@{addr}/%2f"),
+        brokers: vec![format!("amqp://guest:guest@{addr}/%2f").parse().unwrap()],
         queue: "cdr".into(),
         declare: CdrQueueDeclare::Own { max_len: 0 },
         bounds: CdrDeliveryBounds { connect_timeout: Duration::from_secs(5), ..Default::default() },

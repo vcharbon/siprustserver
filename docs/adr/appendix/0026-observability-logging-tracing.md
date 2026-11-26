@@ -113,8 +113,26 @@ covers the case where a specific call must be seen end to end.
 
 Proxy internals: a `Call-ID -> span context` TTL map bounded by the same active
 cap, with the per-packet check gated behind an atomic "anything sampled?" flag,
-so an unsampled proxy pays one predicted branch. The span closes on an observed
-BYE-final or on TTL.
+so an unsampled proxy pays one predicted branch.
+
+- **Where a span closes.** On the last fact the proxy's hop sees about the call: an
+  observed BYE final, an initial INVITE the routing ladder refused (nothing names that
+  Call-ID again), the forwarded ACK of a setup rejected for good (486, 603, the CANCEL
+  flow's 487), else its idle TTL. The response path, which knows the final's status,
+  arms the close on ACK; any other ACK (a re-INVITE's 488, an auth challenge's, a 2xx's)
+  leaves the span open. Holding every span to its TTL was rejected: it keeps the span,
+  its active-cap slot and the process-wide sampled flag for the full idle TTL.
+- **One map behind an `RwLock`.** The map is shared by every receive shard, so once any
+  call is sampled its lock sits on every shard's every datagram. Every per-datagram write
+  (the idle-deadline refresh, arming the close on ACK) is an atomic inside the entry, so
+  recording runs under the read lock in parallel with the other shards' lookups; only
+  open, close and the stale sweep take the write lock. A `Mutex` was rejected: one
+  traced call would queue every shard behind it. An entry field written on the datagram
+  path stays atomic.
+- **The stale sweep is rate-limited.** It is a full scan under the write lock and its
+  caller is every admitted INVITE, so it runs at most once per `idle_ttl / 16`; off
+  schedule it costs one relaxed load. A stale span keeps its active-cap slot for up to
+  one sweep interval past its idle TTL.
 
 ### 5. HA
 

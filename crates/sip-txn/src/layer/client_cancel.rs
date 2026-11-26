@@ -18,8 +18,9 @@ impl Owner {
     /// Put a held CANCEL on the wire — called when its INVITE client txn takes
     /// its first provisional (RFC 3261 §9.1 "wait for the arrival of a
     /// provisional response before sending") — and arm its Timer-E ladder. A
-    /// send on an INVITE that gave up restarts its hold: §9.1's 64·T1 runs
-    /// from the CANCEL.
+    /// send on an INVITE that gave up restarts its hold, and one on a live
+    /// INVITE brings its give-up within 64·T1 ([`Owner::bound_after_cancel`]):
+    /// §9.1's 64·T1 runs from the CANCEL.
     pub(super) async fn flush_cancel_on_provisional(
         &mut self,
         endpoint: &dyn UdpEndpoint,
@@ -41,17 +42,19 @@ impl Owner {
             }
             self.send_buffer(endpoint, &call_id, &buf, dest).await;
             self.metrics.held_cancels_flushed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            self.arm_cancel_retransmit(branch);
+            self.arm_cancel_timers(branch);
         }
     }
 
-    /// Arms the Timer-E ladder for the on-wire CANCEL parked on `branch`,
-    /// resetting the pacing to T1. No-op while a ladder is already running —
-    /// a re-send never resets the pacing. Callers: the first-send sites
-    /// (direct pass-through, first-provisional flush) plus the pass-through of
-    /// a superseding CANCEL (a fresh TU datagram earns a fresh ladder even
-    /// after a ceiling).
-    pub(super) fn arm_cancel_retransmit(&mut self, branch: &str) {
+    /// Arms the timers of the on-wire CANCEL parked on `branch`: its INVITE's
+    /// give-up brought within 64·T1 ([`Owner::bound_after_cancel`]), and its
+    /// Timer-E ladder, the pacing reset to T1. No ladder is armed while one
+    /// already runs — a re-send never resets the pacing. Callers: the
+    /// first-send sites (direct pass-through, first-provisional flush) plus
+    /// the pass-through of a superseding CANCEL (a fresh TU datagram earns a
+    /// fresh ladder even after a ceiling).
+    pub(super) fn arm_cancel_timers(&mut self, branch: &str) {
+        self.bound_after_cancel(branch);
         let Some(txn) = self.clients.get_mut(branch) else { return };
         if txn.cancel_retransmit_key.is_some() {
             return;

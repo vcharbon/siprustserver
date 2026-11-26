@@ -137,6 +137,7 @@ pub fn txn_metrics_text(m: &sip_txn::TransactionMetrics) -> String {
     c::TIMER_QUEUE_LEN.render_value(&mut s, m.timer_queue_len());
     c::RETRANSMIT_BUF_BYTES.render_value(&mut s, m.retransmit_buf_bytes());
     c::SERVER_FINAL_UNSEEN_BRANCH.render_value(&mut s, m.server_final_unseen_branch());
+    c::LATE_2XX_DROPPED.render_value(&mut s, m.late_2xx_dropped());
     c::VIA_STAMPS_UNWRITTEN.render_value(&mut s, m.via_stamps_unwritten());
     c::PARSE_ERRORS.render_value(&mut s, m.parse_errors());
     c::PARSE_REFUSALS_ANSWERED.render_value(&mut s, m.parse_refusals_answered());
@@ -149,6 +150,7 @@ pub fn txn_metrics_text(m: &sip_txn::TransactionMetrics) -> String {
     c::EVENT_QUEUE_CAPACITY.render_value(&mut s, m.event_queue_capacity());
     c::EVENT_QUEUE_DELAY.render_value(&mut s, m.event_queue_delay().as_millis());
     c::KEEPALIVE_LANE_DROPS.render_value(&mut s, m.keepalive_lane_drops());
+    c::UNATTRIBUTED_LANE_DROPS.render_value(&mut s, m.unattributed_lane_drops());
     c::MESSAGE_BUDGET_TRIPS.render_value(&mut s, m.message_budget_trips());
     c::MESSAGE_BUDGET_UNCOUNTED.render_value(&mut s, m.message_budget_uncounted());
     c::MUTED_MESSAGES.render(&mut s, |series| match series.index(&c::MUTED_DIRECTION) {
@@ -174,6 +176,7 @@ pub fn txn_metrics_text(m: &sip_txn::TransactionMetrics) -> String {
     c::RELEASED_UNANSWERED_INVITES_ANSWERED
         .render_value(&mut s, m.released_unanswered_invites_answered());
     c::RELEASED_UNANSWERED_FORGOTTEN.render_value(&mut s, m.released_unanswered_forgotten());
+    c::CALL_ATTACH_REFUSED.render_value(&mut s, m.call_attach_refused());
     let rows = m.retransmit_rows().into_iter().map(|row| {
         let mut labels = vec![row.ladder.to_owned(), row.method];
         labels.extend(row.code.map(|code| code.to_string()));

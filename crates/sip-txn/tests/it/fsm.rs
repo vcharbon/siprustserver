@@ -1303,29 +1303,29 @@ async fn self_release_fires_only_after_the_last_call_txn_clears() {
     stack.inject(&inbound_with_callref("OPTIONS", "z9hG4bK-r2", "cid-sr", cr)).await;
     elapse_ms(60).await;
     let _ = stack.drain_events();
-    assert_eq!(stack.txn.active_txn_count_for_call(cr).await.unwrap(), 2, "both txns counted");
+    assert_eq!(stack.txn.active_txn_count_for_call(cr, &[]).await.unwrap(), 2, "both txns counted");
     assert_eq!(
-        stack.txn.active_txn_count_for_call("w0z-other|t").await.unwrap(),
+        stack.txn.active_txn_count_for_call("w0z-other|t", &[]).await.unwrap(),
         0,
         "a different call_ref is isolated in the index"
     );
 
     // Arm the watch while txns are live → NO immediate CallQuiesced.
-    stack.txn.watch_self_release(cr).await.unwrap();
+    stack.txn.watch_self_release(cr, &[]).await.unwrap();
     assert!(!drained_quiesced(&mut stack, cr), "must not fire while txns are in flight");
 
     // Clear the FIRST txn (200 → non-INVITE server Timer J eviction). Count → 1.
     let r1 = parse_response(&response_bytes(200, "OK", "OPTIONS", "z9hG4bK-r1", "cid-sr", true));
     stack.txn.send_response(r1, addr(PEER)).await.unwrap();
     elapse_ms(33_000).await; // past TIMER_J (64*T1 = 32 s)
-    assert_eq!(stack.txn.active_txn_count_for_call(cr).await.unwrap(), 1, "one txn cleared");
+    assert_eq!(stack.txn.active_txn_count_for_call(cr, &[]).await.unwrap(), 1, "one txn cleared");
     assert!(!drained_quiesced(&mut stack, cr), "one txn still live → no self-release");
 
     // Clear the SECOND: the last `delete_txn` for the call fires CallQuiesced.
     let r2 = parse_response(&response_bytes(200, "OK", "OPTIONS", "z9hG4bK-r2", "cid-sr", true));
     stack.txn.send_response(r2, addr(PEER)).await.unwrap();
     elapse_ms(33_000).await;
-    assert_eq!(stack.txn.active_txn_count_for_call(cr).await.unwrap(), 0, "index drained to 0");
+    assert_eq!(stack.txn.active_txn_count_for_call(cr, &[]).await.unwrap(), 0, "the index drained");
     assert!(drained_quiesced(&mut stack, cr), "last txn cleared → CallQuiesced");
 }
 
@@ -1357,7 +1357,7 @@ async fn call_quiesced_survives_a_full_event_queue() {
     elapse_ms(60).await;
 
     // The watch's immediate-fire path (no txns for `cr`) hits the full queue.
-    stack.txn.watch_self_release(cr).await.unwrap();
+    stack.txn.watch_self_release(cr, &[]).await.unwrap();
 
     // The backlog the consumer now drains does NOT contain the notice…
     assert!(

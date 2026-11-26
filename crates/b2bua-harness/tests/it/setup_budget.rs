@@ -4,7 +4,8 @@
 //! the limiter's admits. When it runs out the caller gets the bare 503 of an
 //! unavailable decision (RFC 3261 §17.1.1.2: past the 100 it sends nothing more
 //! and only a final moves it on), no callee is dialled, and what an admit may
-//! have counted is released.
+//! have counted is released. A turn waits for its permit up to its start bound
+//! (ADR-0070), its caller hearing no 100 meanwhile, and is refused there.
 //!
 //! Every call here ends fully: a refused call with its CDR, an answered one
 //! hung up by its caller.
@@ -15,6 +16,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use b2bua::admission::Class;
+use b2bua::config::B2buaConfig;
 use b2bua::decision::test_adapter::route_to;
 use b2bua::decision::{
     CallDecisionEngine, CallDecisionError, CallFailureRequest, CallFailureResponse,
@@ -31,7 +33,7 @@ use b2bua_harness::limiter::doubles::{
 use b2bua_harness::{settle_until, B2buaScene, B2buaSut, Pace, RouterPace};
 use call::{CdrEventType, TerminationCause};
 use scenario_harness::callflow::{hangup, ANSWER_SDP, OFFER_SDP};
-use scenario_harness::{Agent, ClientInvite};
+use scenario_harness::{Agent, ClientInvite, WaiverScope};
 use sip_message::header::HeaderName;
 use tokio::sync::watch;
 
@@ -44,6 +46,20 @@ const MARGIN: Duration = Duration::from_millis(50);
 /// When a final the turn sends at the budget reaches a caller who sent her
 /// INVITE at 0: one transit to the receipt, the budget, one transit back.
 const FINAL_AT: Duration = Duration::from_millis(100 + 5_000 + 100);
+/// `call_start_bound_ms` at its default.
+const START_BOUND: Duration =
+    Duration::from_millis(B2buaConfig::DEFAULT_CALL_START_BOUND_MS.unsigned_abs());
+/// When the final of a turn refused at its start bound reaches a caller who
+/// sent her INVITE at 0.
+const REFUSED_AT: Duration = Duration::from_millis(100 + START_BOUND.as_millis() as u64 + 100);
+/// How long after an INVITE its copy on a new branch is sent: the two turns'
+/// start bounds stay well apart.
+const COPY_AFTER: Duration = Duration::from_millis(500);
+/// The waiver of a caller who CANCELs her INVITE before any provisional: the
+/// only CANCEL a turn waiting for its permit can meet, its 100 waiting for the
+/// consult.
+const CANCEL_UNPROVISIONED: &str = "the caller CANCELs before any provisional (RFC 3261 §9.1): \
+     a waiting turn sends no 100 (ADR-0070), so only such a caller's CANCEL meets it";
 
 /// Holds every turn of the first call it sees at the turn's `Logged` point
 /// while the gate is shut: a body keeping its permits past any budget, as a
@@ -177,16 +193,17 @@ fn assert_bare_503(resp: &sip_message::SipResponse) {
     assert!(!resp.has(&HeaderName::RetryAfter), "no Retry-After");
 }
 
-/// Nothing of the INVITE's final has reached `caller` by just before
-/// [`FINAL_AT`], counted from `sent`; the 503 arrives just after it.
-async fn final_503_at_the_budget(
+/// Nothing has reached `caller` by just before `at`, counted from `sent`; the
+/// 503 arrives just after it.
+async fn final_503_at(
     s: &B2buaScene,
     caller: &Agent,
     call: &mut ClientInvite,
     sent: tokio::time::Instant,
+    at: Duration,
 ) {
-    tokio::time::sleep_until(sent + FINAL_AT - MARGIN).await;
-    assert!(caller.take_queued().await.is_none(), "no final before the budget");
+    tokio::time::sleep_until(sent + at - MARGIN).await;
+    assert!(caller.take_queued().await.is_none(), "nothing before the final is due");
     s.h.advance(MARGIN * 2).await;
     assert_bare_503(&call.expect(503).await);
 }
@@ -201,10 +218,11 @@ fn assert_refused_cdr(s: &B2buaScene, call: &ClientInvite) {
     assert!(cdr.events.iter().any(|e| e.status_code == Some(503)), "its 503: {cdr:?}");
 }
 
-/// A turn that waited for its permit up to the budget runs without it: a 503,
-/// no decision asked, no call dialled, and one CDR of a refused call.
+/// A turn that waited for its permit up to its start bound runs without it: its
+/// caller, who heard no 100, gets a 503, no decision is asked, no call dialled,
+/// and one CDR of a refused call.
 #[tokio::test(start_paused = true)]
-async fn a_turn_waiting_for_a_permit_past_the_budget_is_refused_and_asks_nothing() {
+async fn a_turn_waiting_for_a_permit_past_its_start_bound_is_refused_and_asks_nothing() {
     let (open, gate) = watch::channel(false);
     let mut engine = None;
     let s = B2buaScene::with_b2bua("setup-budget-permit-wait", |bob_port| {
@@ -222,9 +240,9 @@ async fn a_turn_waiting_for_a_permit_past_the_budget_is_refused_and_asks_nothing
 
     let sent = tokio::time::Instant::now();
     let mut waiting = invite(&s, &s.alice).await;
-    waiting.expect(100).await;
+    s.h.advance(TRANSIT * 2).await;
     assert_eq!(s.b2bua.metrics().new_call_share_waits_total(), 1, "its turn waits for a permit");
-    final_503_at_the_budget(&s, &s.alice, &mut waiting, sent).await;
+    final_503_at(&s, &s.alice, &mut waiting, sent, REFUSED_AT).await;
 
     assert!(!engine.asked_of("alice"), "no decision asked");
     assert!(s.bob.take_queued().await.is_none(), "no call dialled");
@@ -237,23 +255,25 @@ async fn a_turn_waiting_for_a_permit_past_the_budget_is_refused_and_asks_nothing
 
     let counts = s.b2bua.new_calls();
     assert_eq!(counts.accepted(Class::Normal), 1, "the holder");
-    assert_eq!(counts.rejected(Refusal::SetupBudget, Class::Normal), 1, "the refused turn");
+    assert_eq!(counts.rejected(Refusal::StartBound, Class::Normal), 1, "the refused turn");
     assert_eq!(counts.total(), 2, "one count per INVITE");
     let header = s.b2bua.overload().x_overload_header_value();
     assert!(header.ends_with("adm=1"), "the refused call is not counted as treated: {header}");
 
     let text = s.b2bua.metrics().prometheus_text();
     assert!(text.contains("b2bua_new_call_turn_wait_seconds_count 2"), "both turns: {text}");
+    assert!(text.contains("b2bua_new_call_turn_wait_seconds_bucket{le=\"1\"} 1"), "{text}");
     assert!(text.contains("b2bua_new_call_turn_wait_seconds_bucket{le=\"3\"} 1"), "{text}");
     assert!(text.contains("b2bua_new_call_turn_wait_seconds_bucket{le=\"5\"} 2"), "{text}");
     assert!(text.contains("b2bua_new_call_permit_hold_seconds_count 1"), "only the holder: {text}");
     let _ = s.finish().await;
 }
 
-/// The budget runs from the transaction layer's receipt, not from the router's:
-/// an INVITE whose event waited behind a wedged router past the budget heard
-/// its 100 from the layer, and is refused as soon as its turn runs, the
-/// decision never asked.
+/// The budget and the start bound run from the transaction layer's receipt,
+/// not from the router's: an INVITE whose event waited behind a wedged router
+/// past the budget heard nothing, its 100 included, and is refused as soon as
+/// its turn runs, under the start bound it passed first, the decision never
+/// asked.
 #[tokio::test(start_paused = true)]
 async fn a_turn_past_its_budget_behind_a_wedged_router_is_refused_unasked() {
     const NODE: &str = "w0";
@@ -271,9 +291,8 @@ async fn a_turn_past_its_budget_behind_a_wedged_router_is_refused_unasked() {
 
     pace.set(NODE, Pace::Frozen);
     let mut call = invite(&s, &s.alice).await;
-    call.expect(100).await;
     s.h.advance(BUDGET).await;
-    assert!(s.alice.take_queued().await.is_none(), "no final while the router is wedged");
+    assert!(s.alice.take_queued().await.is_none(), "nothing while the router is wedged");
 
     pace.set(NODE, Pace::Free);
     s.h.advance(TRANSIT * 2).await;
@@ -283,16 +302,16 @@ async fn a_turn_past_its_budget_behind_a_wedged_router_is_refused_unasked() {
     settle_until(|| s.b2bua.cdr_records().len() == 1).await;
     assert_refused_cdr(&s, &call);
     let counts = s.b2bua.new_calls();
-    assert_eq!(counts.rejected(Refusal::SetupBudget, Class::Normal), 1);
+    assert_eq!(counts.rejected(Refusal::StartBound, Class::Normal), 1, "the start bound first");
     assert_eq!(counts.total(), 1, "counted once");
     let _ = s.finish().await;
 }
 
 /// A copy of an INVITE waiting for its permit, on a new branch (RFC 3261
-/// §8.2.2.2): its caller heard a 100 too, so its turn is due at its own budget and
+/// §8.2.2.2), sent a while after it: its turn is due at its own start bound and
 /// answers its 482 then, whatever still holds the permits. It is no new call.
 #[tokio::test(start_paused = true)]
-async fn a_copy_waiting_for_a_permit_is_answered_at_its_own_budget() {
+async fn a_copy_waiting_for_a_permit_is_answered_at_its_own_start_bound() {
     let (open, gate) = watch::channel(false);
     let s = B2buaScene::with_b2bua("setup-budget-copy", |bob_port| {
         let inner = ScriptedDecisionEngine::route_all_to("127.0.0.1", bob_port);
@@ -316,7 +335,7 @@ async fn a_copy_waiting_for_a_permit_is_answered_at_its_own_budget() {
         .through(s.b2bua.addr)
         .send()
         .await;
-    first.expect(100).await;
+    s.h.advance(COPY_AFTER).await;
     let sent = tokio::time::Instant::now();
     let mut copy = s
         .alice
@@ -327,18 +346,17 @@ async fn a_copy_waiting_for_a_permit_is_answered_at_its_own_budget() {
         .through(s.b2bua.addr)
         .send()
         .await;
-    copy.expect(100).await;
     assert_bare_503(&first.expect(503).await);
 
-    tokio::time::sleep_until(sent + FINAL_AT - MARGIN).await;
-    assert!(s.alice.take_queued().await.is_none(), "no final before its own budget");
+    tokio::time::sleep_until(sent + REFUSED_AT - MARGIN).await;
+    assert!(s.alice.take_queued().await.is_none(), "no final before its own start bound");
     s.h.advance(MARGIN * 2).await;
     copy.expect(482).await;
 
     settle_until(|| s.b2bua.cdr_records().len() == 1).await;
     assert_refused_cdr(&s, &first);
     let counts = s.b2bua.new_calls();
-    assert_eq!(counts.rejected(Refusal::SetupBudget, Class::Normal), 1, "the first alone");
+    assert_eq!(counts.rejected(Refusal::StartBound, Class::Normal), 1, "the first alone");
     assert_eq!(counts.refused_copies(), 1, "a copy is no new call");
 
     open.send_replace(true);
@@ -347,25 +365,26 @@ async fn a_copy_waiting_for_a_permit_is_answered_at_its_own_budget() {
     let _ = s.finish().await;
 }
 
-/// A CANCEL that crosses the 503 of a spent turn: it reaches the node just after
-/// the final left, and the caller's INVITE keeps that one final (RFC 3261 §9.2).
+/// A CANCEL that crosses the 503 of a turn refused at its start bound: it
+/// reaches the node just after the final left, and the caller's INVITE keeps
+/// that one final (RFC 3261 §9.2).
 #[tokio::test(start_paused = true)]
-async fn a_cancel_crossing_the_budgets_503_draws_no_second_final() {
+async fn a_cancel_crossing_the_start_bounds_503_draws_no_second_final() {
     let (open, gate) = watch::channel(false);
     let s = B2buaScene::with_b2bua("setup-budget-cancel-crossing", |bob_port| {
         let inner = ScriptedDecisionEngine::route_all_to("127.0.0.1", bob_port);
         permits_held(gate, Slow::new(inner, Duration::ZERO, Duration::ZERO), 2, BUDGET_MS)
     })
     .await;
+    s.h.waive(WaiverScope::rule("cancel-after-1xx", CANCEL_UNPROVISIONED).on_party("alice"));
     let carol = s.h.agent("carol", "127.0.0.1:5062").await;
     let mut holder = invite(&s, &carol).await;
     s.h.advance(TRANSIT * 2).await;
 
     let sent = tokio::time::Instant::now();
     let mut waiting = invite(&s, &s.alice).await;
-    waiting.expect(100).await;
     // Sent while the 503 is on its way: each reaches the far end after the other left.
-    tokio::time::sleep_until(sent + FINAL_AT - MARGIN).await;
+    tokio::time::sleep_until(sent + REFUSED_AT - MARGIN).await;
     let mut cancel = waiting.cancel().await;
     assert_bare_503(&waiting.expect(503).await);
     cancel.expect(200).await;
@@ -373,7 +392,7 @@ async fn a_cancel_crossing_the_budgets_503_draws_no_second_final() {
     settle_until(|| s.b2bua.cdr_records().len() == 1).await;
     assert_refused_cdr(&s, &waiting);
     let counts = s.b2bua.new_calls();
-    assert_eq!(counts.rejected(Refusal::SetupBudget, Class::Normal), 1, "refused, not cancelled");
+    assert_eq!(counts.rejected(Refusal::StartBound, Class::Normal), 1, "refused, not cancelled");
     assert_eq!(counts.cancelled(Class::Normal), 0);
     assert!(s.alice.take_queued().await.is_none(), "the 503 was its one final");
 
@@ -429,7 +448,7 @@ async fn a_chain_of_slow_answers_and_refusals_is_cut_at_the_budget() {
     let sent = tokio::time::Instant::now();
     let mut call = invite(&s, &s.alice).await;
     call.expect(100).await;
-    final_503_at_the_budget(&s, &s.alice, &mut call, sent).await;
+    final_503_at(&s, &s.alice, &mut call, sent, FINAL_AT).await;
 
     assert_eq!(engine.failures.load(Ordering::SeqCst), 3, "the third consult is cut");
     assert!(s.bob.take_queued().await.is_none(), "no call dialled");
@@ -462,7 +481,7 @@ async fn an_admit_unanswered_at_the_budget_is_cut_and_its_key_released() {
     let sent = tokio::time::Instant::now();
     let mut call = invite(&s, &s.alice).await;
     call.expect(100).await;
-    final_503_at_the_budget(&s, &s.alice, &mut call, sent).await;
+    final_503_at(&s, &s.alice, &mut call, sent, FINAL_AT).await;
 
     // Past the admit's own bound, which ended it open on an unbudgeted turn.
     s.h.advance(Duration::from_secs(4)).await;
@@ -494,7 +513,7 @@ async fn a_hold_granted_at_the_budget_dials_nothing_and_is_released() {
     let sent = tokio::time::Instant::now();
     let mut call = invite(&s, &s.alice).await;
     call.expect(100).await;
-    final_503_at_the_budget(&s, &s.alice, &mut call, sent).await;
+    final_503_at(&s, &s.alice, &mut call, sent, FINAL_AT).await;
 
     s.h.advance(Duration::from_secs(1)).await;
     assert!(s.bob.take_queued().await.is_none(), "no call dialled");
@@ -572,9 +591,9 @@ async fn a_chain_past_its_depth_answers_the_bare_503() {
 }
 
 /// An emergency INVITE draws the shared pool alone and holds no privilege over
-/// the budget: a caller left waiting serves nobody.
+/// the start bound: a caller left waiting serves nobody.
 #[tokio::test(start_paused = true)]
-async fn an_emergency_invite_is_held_to_the_same_budget() {
+async fn an_emergency_invite_is_held_to_the_same_start_bound() {
     let (open, gate) = watch::channel(false);
     let mut engine = None;
     let s = B2buaScene::with_b2bua("setup-budget-emergency", |bob_port| {
@@ -599,11 +618,10 @@ async fn an_emergency_invite_is_held_to_the_same_budget() {
         .through(s.b2bua.addr)
         .send()
         .await;
-    waiting.expect(100).await;
-    final_503_at_the_budget(&s, &s.alice, &mut waiting, sent).await;
+    final_503_at(&s, &s.alice, &mut waiting, sent, REFUSED_AT).await;
     assert!(!engine.asked_of("alice"), "no decision asked");
     let counts = s.b2bua.new_calls();
-    assert_eq!(counts.rejected(Refusal::SetupBudget, Class::Emergency), 1, "in its own class");
+    assert_eq!(counts.rejected(Refusal::StartBound, Class::Emergency), 1, "in its own class");
 
     open.send_replace(true);
     answer_and_hang_up(&mut holder, &s.bob).await;
@@ -612,10 +630,10 @@ async fn an_emergency_invite_is_held_to_the_same_budget() {
 }
 
 /// A setup its caller CANCELed while its turn waited has its 487 already: at
-/// the budget its turn runs and ends the setup as cancelled, not refused, with
-/// the permit still held elsewhere and no second final.
+/// its start bound its turn runs and ends the setup as cancelled, not refused,
+/// with the permit still held elsewhere and no second final.
 #[tokio::test(start_paused = true)]
-async fn a_setup_canceled_while_waiting_ends_at_the_budget_as_cancelled() {
+async fn a_setup_canceled_while_waiting_ends_at_its_start_bound_as_cancelled() {
     let (open, gate) = watch::channel(false);
     let mut engine = None;
     let s = B2buaScene::with_b2bua("setup-budget-canceled", |bob_port| {
@@ -626,18 +644,19 @@ async fn a_setup_canceled_while_waiting_ends_at_the_budget_as_cancelled() {
     })
     .await;
     let engine = engine.expect("the engine was built");
+    s.h.waive(WaiverScope::rule("cancel-after-1xx", CANCEL_UNPROVISIONED).on_party("alice"));
 
     let carol = s.h.agent("carol", "127.0.0.1:5062").await;
     let mut holder = invite(&s, &carol).await;
     s.h.advance(TRANSIT * 2).await;
 
     let mut waiting = invite(&s, &s.alice).await;
-    waiting.expect(100).await;
+    s.h.advance(TRANSIT * 2).await;
     let mut cancel = waiting.cancel().await;
     cancel.expect(200).await;
     waiting.expect(487).await;
 
-    s.h.advance(BUDGET).await;
+    s.h.advance(START_BOUND).await;
     settle_until(|| s.b2bua.cdr_records().len() == 1).await;
     let cdrs = s.b2bua.cdr_records();
     let cdr = &cdrs[0];

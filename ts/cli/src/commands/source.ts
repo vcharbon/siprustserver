@@ -1,7 +1,7 @@
 /**
  * `source` — SOURCES from the command line:
  *
- *   source add <path>... [--paths-from FILE|-] [--set <file>]... [--cut] [--concurrency N] [--memory-max SIZE]
+ *   source add <path>... [--paths-from FILE|-] [--set <file>]... [--cut] [--retry-failed] [--concurrency N] [--memory-max SIZE] [--wait]
  *   source add --job <id> …          (what the launched ingest job runs)
  *   source list [--stale] [-q NAME] [--limit N] [--offset N]
  *
@@ -12,7 +12,9 @@
  * campaign's discover, extract and population phases, idempotent on the
  * pcap's fingerprint, then with `--cut` the cut over whatever those captures
  * left stale. "Add" and "add + cut" are the two shapes; a replay after them is
- * a request. A path outside the roots, or one naming nothing, is refused
+ * a request. The line returns once the job is launched; with `--wait` it
+ * blocks until the job ends (`jobs/job-wait.ts`), so a script's next line
+ * reads what the job landed. A path outside the roots, or one naming nothing, is refused
  * before any row exists. A selection of thousands of files is a list file
  * (`--paths-from`), never a shell glob: a package runner hands its script the
  * whole line as one argument, and past the kernel's 128 KiB per argument the
@@ -31,6 +33,7 @@ import * as Discover from "@sip/corpus/ingest/discover"
 import * as Source from "@sip/corpus/ingest/source"
 import * as Job from "@sip/corpus/jobs/job"
 import * as JobStart from "@sip/corpus/jobs/job-start"
+import * as JobWait from "@sip/corpus/jobs/job-wait"
 import { DEFAULT_BATCH, DEFAULT_CONCURRENCY, DEFAULT_MEMORY_MAX } from "@sip/corpus/knobs"
 import * as Locks from "@sip/corpus/locks"
 import type { Options } from "@sip/corpus/options"
@@ -51,7 +54,7 @@ import * as Refusals from "../refusals.js"
 import { exit, operatorCwd, stdinText } from "../runner.js"
 
 const usage = (facts: CliFacts): string =>
-  `usage: ${facts.invocation("source")} add <path>... [--set <file>]... [--cut] | ` +
+  `usage: ${facts.invocation("source")} add <path>... [--set <file>]... [--cut] [--wait] | ` +
   "list [--stale] [-q NAME] [--limit N] [--offset N]"
 
 export const addFlags = (facts: CliFacts) => ({
@@ -74,6 +77,13 @@ export const addFlags = (facts: CliFacts) => ({
     Flag.withDescription("Cut what the ingest left stale once it has landed"),
     Flag.withDefault(false)
   ),
+  retryFailed: Flag.boolean("retry-failed").pipe(
+    Flag.withDescription(
+      "Extract again a capture whose last ingest failed, though neither its pcap nor the extractor changed " +
+        "(the cause was outside both: memory, a missing binary)"
+    ),
+    Flag.withDefault(false)
+  ),
   concurrency: Flag.integer("concurrency").pipe(
     Flag.withDescription("Extractions at once, and captures enriched at once by the cut"),
     Flag.withDefault(DEFAULT_CONCURRENCY)
@@ -83,6 +93,10 @@ export const addFlags = (facts: CliFacts) => ({
     Flag.withDefault(DEFAULT_MEMORY_MAX)
   ),
   batch: Flag.integer("batch").pipe(Flag.withDescription("Captures per cut batch"), Flag.withDefault(DEFAULT_BATCH)),
+  wait: Flag.boolean("wait").pipe(
+    Flag.withDescription("Block until the launched job ends; the exit code is the job's"),
+    Flag.withDefault(false)
+  ),
   job: IdFlags.flag("job", "job").pipe(
     Flag.withDescription(`The job row this process was launched for (${facts.invocation("source")} add)`),
     Flag.optional
@@ -137,7 +151,8 @@ const cutOptions = (facts: CliFacts, paths: Paths, input: AddInput, captures: Re
  * recorded, one line each; then, with `--cut`, the captures the cut rule
  * finds stale — the ones just extracted first among them — cut under a prep
  * of this job's own. The row closes with the exit code: 1 where a capture's
- * ingest or cut broke, 0 otherwise.
+ * ingest stands failed (now, or before and left as it stood) or its cut
+ * broke, 0 otherwise.
  */
 const runAsJob = Effect.fn("Source.runAsJob")(function*(
   facts: CliFacts,
@@ -150,16 +165,21 @@ const runAsJob = Effect.fn("Source.runAsJob")(function*(
   for (const said of found.collisions) yield* Console.error(`   ! ${said}`)
   yield* jobs.planned(job, found.sources.length)
   yield* standing
-  const ingested = yield* Source.ingest(found.sources, paths.corpus, Math.max(1, input.concurrency))
-  let broke = 0
+  const ingested = yield* Source.ingest(found.sources, paths.corpus, Math.max(1, input.concurrency), input.retryFailed)
+  let refused = 0
+  let leftFailed = 0
   for (const source of ingested.sources) {
     const outcome = ingested.outcomes.get(source.capture) ?? { _tag: "current" as const }
-    if (outcome._tag === "failed") broke += 1
+    if (outcome._tag === "failed") refused += 1
+    else if (Source.standsFailed(outcome)) leftFailed += 1
     yield* Console.log(Source.line(source.capture, outcome))
   }
+  const broke = refused + leftFailed
   yield* Console.log(
-    `[source] ingest: ${ingested.extracted.size - broke} extracted, ${broke} refused, ` +
-      `${found.sources.length - ingested.extracted.size} already current; +${ingested.added} new in the population`
+    `[source] ingest: ${ingested.extracted.size - refused} extracted, ${refused} refused, ` +
+      `${found.sources.length - ingested.extracted.size} already current` +
+      (leftFailed === 0 ? "" : ` (${leftFailed} of them a failed ingest left as it stood)`) +
+      `; +${ingested.added} new in the population`
   )
   if (!input.cut) return broke > 0 ? 1 : 0
   const captures = ingested.sources.map((source) => source.capture)
@@ -312,6 +332,7 @@ export const command = (facts: CliFacts) => {
         set: absolute(input.set, cwd),
         captures: found.sources.map((source) => source.capture),
         cut: input.cut,
+        retryFailed: input.retryFailed,
         concurrency: Math.max(1, input.concurrency),
         memoryMax: input.memoryMax
       }).pipe(Effect.catchIf(JobStart.isNotStarted, (refused) => Effect.succeed(refused)))
@@ -323,6 +344,7 @@ export const command = (facts: CliFacts) => {
       for (const line of JobStart.startedLines("ingest", what, started, facts.invocation("job"))) {
         yield* Console.log(line)
       }
+      if (input.wait) return yield* exit(yield* JobWait.untilEnded(started.id, 0))
     })).pipe(Command.withDescription("Add pcaps by path on the host: an ingest job, and with --cut the cut after it"))
 
   return root.pipe(Command.withSubcommands([add, list]))

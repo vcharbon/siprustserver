@@ -95,7 +95,8 @@ fn w2() -> Option<ProxyAddr> {
     Some(ProxyAddr::new(W2_POD, 5060))
 }
 
-/// The caller's initial INVITE, `route` its Route header lines.
+/// The caller's initial `method` request (an INVITE, or its CANCEL), `route`
+/// its Route header lines.
 fn initial(method: &str, route: &str) -> SipMessage {
     parse(&format!(
         "{method} sip:bob@{UAC}:5060 SIP/2.0\r\n\

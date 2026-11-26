@@ -6,9 +6,9 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
-use sip_message::sniff::Identity;
 use tokio::time::Instant;
 
+use super::datagram::Datagram;
 use super::late_answer::{HeldAnswers, LateReply};
 use super::late_final::Held;
 use super::stats::MuxStats;
@@ -97,17 +97,17 @@ impl SocketRegistry {
         self.released_invites.get_mut(call_id)
     }
 
-    /// What the request `id` on the released dialog `call_id` draws from its
+    /// What the request `d` on the released dialog `call_id` draws from its
     /// held answers, while its hold lasts at `now`.
     pub(in crate::mux) fn released_answer(
         &mut self,
         call_id: &str,
-        id: &Identity<'_>,
+        d: &Datagram<'_>,
         now: Instant,
     ) -> LateReply {
         let live = self.is_released(call_id, now);
         match self.released_answers.get_mut(call_id) {
-            Some(answers) if live => answers.on_request(id),
+            Some(answers) if live => answers.on_request(d),
             _ => LateReply::NotHeld,
         }
     }

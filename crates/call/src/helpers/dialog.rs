@@ -2,9 +2,11 @@
 //! SDP cache. The request records a dialog holds are
 //! [`super::request_records`]' and [`super::invite_records`]'.
 
+use std::fmt;
+
 use crate::model::{Call, Dialog, DialogId, Leg};
 
-use super::invite_records::{invite_untaken, relayed_invite_pending, sent_exchange};
+use super::invite_records::{invite_awaits_final, relayed_invite_pending, sent_exchange};
 use super::leg::find_leg;
 use super::lens::{update_dialog, update_leg};
 use super::peering::relay_peer_dialog;
@@ -31,8 +33,9 @@ pub fn advance_peer_cseq(call: &mut Call, leg_id: &str, id: &DialogId, cseq: i64
 // ── INVITE glare ────────────────────────────────────────────────────────────
 
 /// Whether an INVITE transaction is still open on this dialog (RFC 3261
-/// §14.1): an INVITE this side sent on the dialog, relayed or its own, with
-/// no 2xx taken (rule 1), or a 2xx un-ACKed on either face — one this side
+/// §14.1): an INVITE this side sent on the dialog, relayed or its own,
+/// awaiting its final (rule 1; [`invite_awaits_final`]: one ended at Timer B
+/// does not), or a 2xx un-ACKed on either face — one this side
 /// sent (a re-INVITE's or the call's own answer) or one taken here whose ACK
 /// has not left yet (rule 2; RFC 6026 names the interval *Accepted*). While
 /// any holds, a new INVITE on the dialog is glare and is refused, 491 or 500
@@ -40,9 +43,73 @@ pub fn advance_peer_cseq(call: &mut Call, leg_id: &str, id: &DialogId, cseq: i64
 /// re-INVITE ([`super::close_rejected_invite_round`]); on a leg holding no
 /// confirmed dialog the dialling INVITE stays, and its early dialogs end.
 pub fn invite_transaction_open(dialog: &Dialog) -> bool {
-    invite_untaken(dialog)
+    invite_awaits_final(dialog)
         || dialog.answered_invite.is_some()
         || sent_exchange(dialog).is_some_and(|x| x.awaited_ack_cseq.is_some())
+}
+
+/// What holds an INVITE transaction in progress on a dialog (RFC 3261 §14.1),
+/// as [`invite_in_progress`] reads it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InviteInProgress {
+    /// An INVITE this side sent on the dialog, relayed or its own, numbered
+    /// `cseq`, with no 2xx taken and not ended at Timer B: it awaits its
+    /// final, or the ACK of its 2xx is not composed yet. `author` names the
+    /// rule that sent an own one.
+    Sent { cseq: i64, author: Option<String> },
+    /// A 2xx this side took to its INVITE numbered `cseq`, whose ACK has not
+    /// left.
+    TakenUnacknowledged { cseq: i64 },
+    /// A 2xx this side sent to the peer's INVITE numbered `cseq`, awaiting its
+    /// ACK.
+    AnsweredUnacknowledged { cseq: i64 },
+    /// An INVITE the peer sent on the dialog that this side has sent no final
+    /// to.
+    PeerUnanswered,
+}
+
+impl fmt::Display for InviteInProgress {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            InviteInProgress::Sent { cseq, author: Some(rule) } => {
+                write!(f, "INVITE CSeq {cseq} sent by rule '{rule}' awaits its final or its ACK")
+            }
+            InviteInProgress::Sent { cseq, author: None } => {
+                write!(f, "INVITE CSeq {cseq} sent awaits its final or its ACK")
+            }
+            InviteInProgress::TakenUnacknowledged { cseq } => {
+                write!(f, "2xx to INVITE CSeq {cseq} taken, its ACK not sent")
+            }
+            InviteInProgress::AnsweredUnacknowledged { cseq } => {
+                write!(f, "2xx to the peer's INVITE CSeq {cseq} sent, its ACK not received")
+            }
+            InviteInProgress::PeerUnanswered => write!(f, "the peer's INVITE has no final"),
+        }
+    }
+}
+
+/// What holds an INVITE transaction in progress on `leg_id`'s dialog `id`,
+/// in either direction (RFC 3261 §14.1): one open on the dialog
+/// ([`invite_transaction_open`]), else the peer's INVITE this side has sent
+/// no final to ([`sender_invite_unanswered`]). `None`: this side may
+/// initiate an INVITE on the dialog.
+pub fn invite_in_progress(call: &Call, leg_id: &str, id: &DialogId) -> Option<InviteInProgress> {
+    let d = named_dialog(call, leg_id, Some(id))?;
+    if let Some(sent) = d.sent_invite.as_ref() {
+        if invite_awaits_final(d) {
+            return Some(InviteInProgress::Sent {
+                cseq: sent.outbound_cseq,
+                author: sent.author.clone(),
+            });
+        }
+        if sent_exchange(d).is_some_and(|x| x.awaited_ack_cseq.is_some()) {
+            return Some(InviteInProgress::TakenUnacknowledged { cseq: sent.outbound_cseq });
+        }
+    }
+    if let Some(answered) = d.answered_invite.as_ref() {
+        return Some(InviteInProgress::AnsweredUnacknowledged { cseq: answered.inbound_cseq });
+    }
+    sender_invite_unanswered(call, leg_id, Some(id)).then_some(InviteInProgress::PeerUnanswered)
 }
 
 /// Whether an INVITE from `source_leg_id`'s peer, on its dialog `source`,

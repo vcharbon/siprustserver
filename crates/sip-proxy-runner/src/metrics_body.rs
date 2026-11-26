@@ -25,11 +25,9 @@ pub const CATALOGUE: Catalogue = Catalogue {
     ],
 };
 
-/// The `/metrics` body: the data path, the self gate (`None` for the
-/// always-admit gate), the branch memo `memo` read at this scrape, the
-/// restarted tasks, the metric rows', the UDP endpoint's and the poll
-/// watchdog's lock recoveries, the dropped log lines and
-/// trace-admission denials (ADR-0026), then `allocator`.
+/// The `/metrics` body, in [`CATALOGUE`] order. `gate` is `None` for the
+/// always-admit gate, `memo` is read at this scrape, and `allocator` renders
+/// the allocator's exposition, which comes last.
 pub fn body(
     metrics: &ProxyMetrics,
     gate: Option<&ProxySelfGateMetrics>,
@@ -53,8 +51,6 @@ mod tests {
     use super::*;
     use sip_proxy::observability::metrics::{CancelLookup, NoTargetDrop};
 
-    /// The body holds its catalogue exactly, with and without a gate, with
-    /// recorded counts.
     #[test]
     fn the_body_holds_its_catalogue_exactly() {
         let metrics = ProxyMetrics::new();

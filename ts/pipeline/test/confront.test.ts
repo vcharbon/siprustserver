@@ -398,6 +398,104 @@ describe("shapeProbes", () => {
     expect(signature(probes[0]!.probe)).toBe("shape:serviced-stray:BYE:auto-reacted")
   })
 
+  it("a serviced request whose CSeq skipped the dialog's sequence is a cseq-skip, not a stray the script missed", () => {
+    const answer = crlf(["SIP/2.0 200 OK", "To: <sip:+15551@h.example>;tag=b", "Call-ID: cid-1", "CSeq: 4 BYE"])
+    const recordings = new Map([
+      ["B", [{ seq: 1, dir: "out", at_us: 10, raw: answer }] as Array<Bundle.RecordedMessage>]
+    ])
+    const refused = (detail?: string) =>
+      shapeProbes(
+        verdictWith([
+          {
+            failure: "unexpected-datagram",
+            leg: "B",
+            arrived: { kind: "request", method: "BYE", cseq: 4 },
+            ...(detail === undefined ? {} : { detail })
+          }
+        ]),
+        new Map(),
+        recordings
+      )
+    expect(signature(refused("BYE CSeq 4 skips on From-tag b (last remote CSeq 2)")[0]!.probe)).toBe(
+      "shape:serviced-stray:BYE:cseq-skip"
+    )
+    expect(signature(refused("BYE CSeq 4 goes backwards on From-tag b (last remote CSeq 7)")[0]!.probe)).toBe(
+      "shape:serviced-stray:BYE:auto-reacted"
+    )
+    expect(signature(refused()[0]!.probe)).toBe("shape:serviced-stray:BYE:auto-reacted")
+  })
+
+  describe("a refused ACK the leg already received under its CSeq", () => {
+    const ack = (branch: string) =>
+      crlf([`ACK sip:b@h.example SIP/2.0`, `Via: SIP/2.0/UDP h.example;branch=${branch}`, "Call-ID: cid-1", "CSeq: 1 ACK"])
+    const answer = (status: string): Bundle.RecordedMessage =>
+      ({ seq: 1, dir: "out", at_us: 5, step: "s5", raw: crlf([`SIP/2.0 ${status}`, "Call-ID: cid-1", "CSeq: 1 INVITE"]) }) as Bundle.RecordedMessage
+    const refused: Bundle.Failure = {
+      failure: "unmatched-datagram",
+      step: "s9",
+      leg: "B",
+      gated_on: { kind: "request", method: "UPDATE" },
+      reason: "gated on request UPDATE; ACK arrived",
+      arrived: { kind: "request", method: "ACK", cseq: 1 }
+    }
+    const unexpected: Bundle.Failure = { failure: "unexpected-datagram", leg: "B", arrived: { kind: "request", method: "ACK", cseq: 1 } }
+    /** The leg's recording: `final` sent, then `copies` ACKs, the first `taken` claimed by the step that expected it. */
+    const refusals = (failures: Bundle.RunVerdict["failures"], copies: number, taken: number, final = "200 OK") =>
+      shapeProbes(
+        verdictWith(failures),
+        new Map(),
+        new Map([[
+          "B",
+          [
+            answer(final),
+            ...Array.from({ length: copies }, (_, i) => ({
+              seq: i + 2,
+              dir: "in",
+              at_us: 10 + i,
+              ...(i < taken ? { step: "s8" } : {}),
+              raw: ack(`z9hG4bK-${i}`)
+            }))
+          ] as Array<Bundle.RecordedMessage>
+        ]])
+      ).map((p) => signature(p.probe))
+
+    it("is a repeat counted by its arrival: the copies the leg received up to it, the first left out", () => {
+      expect(refusals([refused], 2, 1)).toEqual(["shape:repeated-request:ACK:1"])
+      expect(refusals([refused, unexpected], 3, 1)).toEqual(["shape:repeated-request:ACK:1", "shape:repeated-request:ACK:2"])
+      expect(refusals([refused], 1, 0)).toEqual(["shape:method-substitution:UPDATE->ACK"])
+    })
+
+    it("counts two refused copies the script never took as a first copy and one repeat", () => {
+      expect(refusals([refused, unexpected], 2, 0)).toEqual(["shape:method-substitution:UPDATE->ACK", "shape:repeated-request:ACK:1"])
+    })
+
+    it("is no repeat where the ACK answers no 2xx the leg sent", () => {
+      expect(refusals([refused], 2, 1, "486 Busy Here")).toEqual(["shape:method-substitution:UPDATE->ACK"])
+    })
+  })
+
+  it("a repeated request of another method keeps the shape its refusal states", () => {
+    const invite = (branch: string) =>
+      crlf([`INVITE sip:b@h.example SIP/2.0`, `Via: SIP/2.0/UDP h.example;branch=${branch}`, "Call-ID: cid-1", "CSeq: 2 INVITE"])
+    const probes = shapeProbes(
+      verdictWith([
+        {
+          failure: "unmatched-datagram",
+          step: "s9",
+          leg: "B",
+          gated_on: { kind: "request", method: "ACK" },
+          reason: "gated on request ACK; INVITE arrived",
+          arrived: { kind: "request", method: "INVITE", cseq: 2 }
+        }
+      ]),
+      new Map(),
+      new Map([
+        ["B", [0, 1].map((i) => ({ seq: i + 1, dir: "in", at_us: 10 + i, raw: invite(`z9hG4bK-${i}`) })) as Array<Bundle.RecordedMessage>]
+      ])
+    )
+    expect(signature(probes[0]!.probe)).toBe("shape:method-substitution:ACK->INVITE")
+  })
+
   it("an answer on another leg does not service the stray", () => {
     const answer = crlf(["SIP/2.0 200 OK", "To: <sip:+15551@h.example>;tag=b", "Call-ID: cid-1", "CSeq: 2 BYE"])
     const probes = shapeProbes(
@@ -446,6 +544,24 @@ describe("shapeProbes", () => {
       new Map()
     )
     expect(signature(probes[0]!.probe)).toBe("shape:extra-message:OPTIONS")
+  })
+
+  it("a datagram no step claimed states the leg and CSeq it arrived with, outside its signature", () => {
+    const ack = { kind: "request", method: "ACK", cseq: 1391552827 } as const
+    const probes = shapeProbes(
+      verdictWith([
+        { failure: "unexpected-datagram", leg: "A", arrived: ack },
+        { failure: "datagram-after-flow", leg: "B", arrived: { ...ack, cseq: 2 } },
+        { failure: "unmatched-datagram", step: "s9", leg: "A", gated_on: { kind: "request", method: "BYE" }, reason: "r", arrived: { kind: "request", method: "INFO", cseq: 3 } }
+      ]),
+      new Map(),
+      new Map()
+    )
+    expect(probes.map((p) => [signature(p.probe), p.probe.kind === "shape" ? p.probe.stray : "none"])).toEqual([
+      ["shape:extra-message:ACK", { leg: "A", cseq: 1391552827 }],
+      ["shape:extra-message:ACK", { leg: "B", cseq: 2 }],
+      ["shape:method-substitution:BYE->INFO", undefined]
+    ])
   })
 
   it("an expectation nothing satisfied is a missing message", () => {
@@ -717,12 +833,13 @@ describe("an expected body held against the one received", () => {
       ])
     })
 
-    it("on a verbatim run the same structure in other bytes is one `document:bytes` row", () => {
+    it("on every run a description in other bytes of the same meaning states nothing", () => {
       const bareLf = OFFER.replace(/\r\n/g, "\n")
       expect(runSdp(bareLf, "rebooked")).toEqual([])
-      const probes = runSdp(bareLf, "verbatim")
-      expect(probes.map((p) => signature(p.probe))).toEqual(["body:sdp:document:bytes:request:INFO:in-dialog"])
-      expect(probes[0]!.probe.kind === "body" && probes[0]!.probe).toMatchObject({ captured: [OFFER], replayed: [bareLf] })
+      expect(runSdp(bareLf, "verbatim")).toEqual([])
+      const directionDropped = OFFER.replace("a=sendrecv\r\n", "")
+      expect(OFFER).not.toBe(directionDropped)
+      expect(runSdp(directionDropped, "verbatim")).toEqual([])
     })
 
     it("a body the system dropped whole is one `document` row, the captured text against the empty one", () => {

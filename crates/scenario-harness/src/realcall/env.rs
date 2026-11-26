@@ -332,6 +332,7 @@ impl<'a> CallEnv<'a> {
             call_id,
             headers,
             rewrite: self.egress.rewrite_with_no_answer(&targets, no_answer_ms),
+            presentation: Default::default(),
         }
     }
 
@@ -402,6 +403,8 @@ pub struct InvitePlan {
     pub headers: Vec<(String, String)>,
     /// The layout's egress rewrite — applied LAST (final say on R-URI/headers).
     pub rewrite: crate::egress::EgressRewrite,
+    /// The display names and the wire header names the INVITE states.
+    pub presentation: super::Presentation,
 }
 
 impl InvitePlan {
@@ -420,10 +423,11 @@ impl InvitePlan {
     }
 
     /// Replay the plan onto an INVITE builder (what
-    /// [`CallEnv::outgoing_invite`] applies), in op order: `through(via)` → core
-    /// From/To/R-URI → identity headers → the egress rewrite last.
+    /// [`CallEnv::outgoing_invite`] applies), in op order: `through(via)` →
+    /// presentation → core From/To/R-URI → identity headers → the egress rewrite
+    /// last.
     pub fn apply<'b>(&self, inv: Invite<'b>) -> Invite<'b> {
-        let mut inv = inv.through(self.via);
+        let mut inv = self.presentation.apply(inv.through(self.via));
         if let Some(from) = &self.from {
             inv = inv.from(from);
         }

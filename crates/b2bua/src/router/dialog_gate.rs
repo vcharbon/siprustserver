@@ -1,9 +1,11 @@
 //! The dialog gate's shell (ADR-0041): the verdict is the core's
 //! ([`b2bua_core::dialog_gate`]); here a refused request is answered — 481,
-//! 500, 200 (an OPTIONS stating what this stack supports, §11.2) or 487,
+//! 500, 200 (an OPTIONS stating what this stack supports, §11.2), 487 or 420
+//! (an option tag required that this stack does not understand, §8.2.2.3),
 //! each under the call's stated headers — and whether another owner served
 //! the call is read off this node's topology for the ACK the verdict asks it
-//! of. An ACK that proves nothing on a call no other owner served is counted.
+//! of. An ACK that proves nothing on a call no other owner served is counted,
+//! and so is a 2xx to an INVITE whose round ended.
 
 use call::helpers::Resolved;
 use call::Call;
@@ -11,7 +13,9 @@ use sip_ids::TurnIds;
 use sip_message::{Method, SipMessage, SipResponse};
 
 use super::resolve::Resolution;
-use super::responses::{build_200, build_200_advertising, build_481, build_487, build_bare_500};
+use super::responses::{
+    build_200, build_200_advertising, build_420, build_481, build_487, build_bare_500,
+};
 use super::RouterCtx;
 use b2bua_core::dialog_gate::{verdict, Verdict};
 use b2bua_sdk::event::CallEvent;
@@ -28,6 +32,9 @@ pub(super) enum Gate {
     Answered { answer: Option<Box<SipResponse>>, in_order: Option<Resolved> },
     /// A response that answers nothing of this stack's, dropped unread.
     Dropped,
+    /// A response owed nothing, dropped unread and unanswered: a 2xx to an
+    /// INVITE whose round ended (RFC 6026 §7.2).
+    Absorbed,
 }
 
 /// Resolve `event` on `call` (its source leg `res.source_leg_id`), answering a
@@ -45,6 +52,10 @@ pub(super) fn admit(
     let refused = match verdict(call, leg_id, event, &ctx.config, served) {
         Verdict::Pass(resolved) => return Gate::Pass(resolved),
         Verdict::Stray => return Gate::Dropped,
+        Verdict::RoundEnded => {
+            ctx.metrics.bump_late_2xx_dropped();
+            return Gate::Absorbed;
+        }
         Verdict::Drop => return Gate::Answered { answer: None, in_order: None },
         Verdict::UnexplainedAck => {
             ctx.metrics.bump_unexplained_ack();
@@ -62,12 +73,14 @@ pub(super) fn admit(
         }
         Verdict::Absorbed(_) => build_200(req),
         Verdict::Terminated(_) => build_487(req),
+        Verdict::BadExtension(unsupported) => build_420(req, &unsupported, None),
         Verdict::OutOfOrder => build_bare_500(req),
         Verdict::NoDialog
         | Verdict::Pass(_)
         | Verdict::Drop
         | Verdict::UnexplainedAck
-        | Verdict::Stray => {
+        | Verdict::Stray
+        | Verdict::RoundEnded => {
             let minted = req.to().tag().is_none().then(|| ids.new_tag());
             build_481(req, minted.as_deref())
         }

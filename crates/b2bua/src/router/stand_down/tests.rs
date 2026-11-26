@@ -139,6 +139,7 @@ fn relaying(mut copy: Enveloped, by: RelayOwner) -> Enveloped {
         sent: None,
         deadline_ms: None,
         cancelled: false,
+        cancel_relayed: false,
         offered_100rel: false,
         offered: false,
         source_timestamp: None,

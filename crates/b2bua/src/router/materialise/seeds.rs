@@ -232,9 +232,12 @@ fn rejected_seed_reading(leg: &Leg, reads: &ImageReads) -> Option<TxnSeed> {
 }
 
 /// The client seed of the INVITE `leg`'s `dialog` last sent, `record`: while
-/// the leg's dialling INVITE has no final, or no 2xx was taken for it and,
-/// for a relay, it was not CANCELled toward its target. A re-INVITE records
-/// no provisional, and carries the ACK of the 2xx before it.
+/// the leg's dialling INVITE has no final, or it awaits its final (no 2xx
+/// taken, not ended at Timer B) and, for a relay, its originator holds no
+/// final yet. A re-INVITE records no provisional, and carries the ACK of the
+/// 2xx before it, and the CANCEL its originator's CANCEL relayed
+/// (`cancel_relayed`, ADR-0065), held until a provisional as the dialling
+/// INVITE's is (RFC 3261 §9.1).
 fn sent_invite_seed(
     leg: &Leg,
     dialog: &Dialog,
@@ -243,12 +246,13 @@ fn sent_invite_seed(
 ) -> Option<TxnSeed> {
     let sent = call::helpers::invite_image(leg, record)?;
     let initial_in_flight = leg.outbound_invite().is_some_and(|i| i.final_received.is_none());
-    let round_open = !call::helpers::invite_taken(dialog) && !record.cancelled;
+    let round_open = call::helpers::invite_awaits_final(dialog) && !record.cancelled;
     if !(initial_in_flight || round_open) {
         return None;
     }
-    let provisional = initial_in_flight && !leg.dialogs.is_empty();
-    let mut seed = client_seed(sent, provisional, None, reads)?;
+    let cancel = (round_open && record.cancel_relayed).then_some(&[][..]);
+    let provisional = initial_in_flight && !leg.dialogs.is_empty() && cancel.is_none();
+    let mut seed = client_seed(sent, provisional, cancel, reads)?;
     if let TxnSeed::ClientInvite { ack_ahead, .. } = &mut seed {
         *ack_ahead = call::helpers::sent_exchange(dialog)
             .and_then(|x| x.ack_ahead.as_ref())

@@ -52,9 +52,49 @@ Max-Forwards: 70\r\n"
     s.into_bytes()
 }
 
-/// A new, non-emergency INVITE — the only class the brake sheds.
+/// A new, non-emergency INVITE — the only class the brake refuses.
 fn new_invite(i: u32) -> Vec<u8> {
     invite_buf(i, false, None)
+}
+
+/// `raw`, a request fixture, its Request-URI naming the call `c{i}`, as a
+/// request of a call reaching the Contact the worker gave does.
+fn naming_a_call(raw: &[u8], i: u32) -> Vec<u8> {
+    let raw = std::str::from_utf8(raw).expect("utf-8");
+    let ruri = format!("sip:bob@{B2BUA_IP}:{B2BUA_PORT}");
+    raw.replacen(&format!("{ruri} SIP/2.0"), &format!("{ruri};callRef=c{i} SIP/2.0"), 1)
+        .into_bytes()
+}
+
+/// A request of `method` inside a dialog the worker may never have had:
+/// To-tagged, its Request-URI naming no call.
+fn in_dialog_buf(method: &str, i: u32) -> Vec<u8> {
+    format!(
+        "{method} sip:bob@{B2BUA_IP}:{B2BUA_PORT} SIP/2.0\r\n\
+Via: SIP/2.0/UDP {FLOODER_IP}:{FLOODER_PORT};branch=z9hG4bK-dlg-{i}\r\n\
+From: <sip:alice@flooder.test>;tag=alice-tag-{i}\r\n\
+To: <sip:bob@b2bua.test>;tag=bob-tag-{i}\r\n\
+Call-ID: dlg-{i}@{FLOODER_IP}\r\n\
+CSeq: 2 {method}\r\n\
+Max-Forwards: 70\r\n\
+Content-Length: 0\r\n\r\n"
+    )
+    .into_bytes()
+}
+
+/// A CANCEL of [`new_invite`]`(i)`.
+fn cancel_buf(i: u32) -> Vec<u8> {
+    format!(
+        "CANCEL sip:bob@{B2BUA_IP}:{B2BUA_PORT} SIP/2.0\r\n\
+Via: SIP/2.0/UDP {FLOODER_IP}:{FLOODER_PORT};branch=z9hG4bK-brake-{i}\r\n\
+From: <sip:alice@flooder.test>;tag=alice-tag-{i}\r\n\
+To: <sip:bob@b2bua.test>\r\n\
+Call-ID: brake-test-{i}@{FLOODER_IP}\r\n\
+CSeq: 1 CANCEL\r\n\
+Max-Forwards: 70\r\n\
+Content-Length: 0\r\n\r\n"
+    )
+    .into_bytes()
 }
 
 fn options_buf(i: u32) -> Vec<u8> {
@@ -278,12 +318,37 @@ fn emergency_invites_bypass_the_brake_even_above_the_threshold() {
 fn in_dialog_reinvites_are_never_braked() {
     let (hook, counters) = brake();
     assert_eq!(
-        hook(&invite_buf(7, false, Some("bob-tag-7")), src(), 99),
+        hook(&naming_a_call(&invite_buf(7, false, Some("bob-tag-7")), 7), src(), 99),
         PreIngressAction::Accept,
-        "a To-tagged INVITE is in-dialog and must not be braked"
+        "a To-tagged INVITE of a call is in-dialog and must not be braked"
     );
     assert_eq!(answered(&counters), 0);
     assert_eq!(counters.emergency_bypassed(), 0);
+}
+
+#[test]
+fn an_engaged_brake_drops_the_requests_that_name_no_call() {
+    let (hook, counters) = brake();
+    let reinvite = invite_buf(3, false, Some("bob-tag-3"));
+    for (i, raw) in [in_dialog_buf("BYE", 1), in_dialog_buf("INFO", 2), reinvite].iter().enumerate()
+    {
+        assert_eq!(hook(raw, src(), 2), PreIngressAction::Drop, "a request naming no call");
+        assert_eq!(counters.unattributed_dropped(), i as u64 + 1, "counted");
+    }
+    assert_eq!(hook(&in_dialog_buf("ACK", 7), src(), 2), PreIngressAction::Accept, "an ACK");
+    let of_a_call = naming_a_call(&in_dialog_buf("BYE", 4), 4);
+    assert_eq!(hook(&of_a_call, src(), 2), PreIngressAction::Accept, "a BYE naming its call");
+    assert_eq!(hook(&cancel_buf(5), src(), 2), PreIngressAction::Accept, "a CANCEL");
+    assert_eq!(hook(&options_buf(6), src(), 2), PreIngressAction::AcceptAhead, "a probe");
+    assert_eq!(counters.unattributed_dropped(), 3);
+    assert_eq!(answered(&counters), 0, "nothing answered");
+}
+
+#[test]
+fn below_the_threshold_a_request_naming_no_call_is_accepted() {
+    let (hook, counters) = brake();
+    assert_eq!(hook(&in_dialog_buf("BYE", 1), src(), 1), PreIngressAction::Accept);
+    assert_eq!(counters.unattributed_dropped(), 0);
 }
 
 #[test]
@@ -448,7 +513,7 @@ fn in_dialog_options(i: u32) -> Vec<u8> {
     let probe = String::from_utf8(options_buf(i)).expect("utf-8 fixture");
     let (head, rest) = probe.split_once("\r\nTo: ").expect("a To line");
     let (to, tail) = rest.split_once("\r\n").expect("the To line's end");
-    format!("{head}\r\nTo: {to};tag=bob-tag-{i}\r\n{tail}").into_bytes()
+    naming_a_call(format!("{head}\r\nTo: {to};tag=bob-tag-{i}\r\n{tail}").as_bytes(), i)
 }
 
 /// A liveness probe (an OPTIONS outside any dialog) is queued ahead of what
@@ -483,7 +548,7 @@ fn the_gate_refusing_refuses_a_new_invite_at_an_empty_queue() {
     assert!(matches!(hook(&new_invite(1), src(), idle), PreIngressAction::Reply { .. }));
     assert_eq!(hook(&invite_buf(2, true, None), src(), idle), PreIngressAction::Accept);
     assert_eq!(
-        hook(&invite_buf(3, false, Some("bob-tag-3")), src(), idle),
+        hook(&naming_a_call(&invite_buf(3, false, Some("bob-tag-3")), 3), src(), idle),
         PreIngressAction::Accept
     );
     assert_eq!(counters.gate_refused(Class::Normal), 1, "the gate's refusal, counted as its own");

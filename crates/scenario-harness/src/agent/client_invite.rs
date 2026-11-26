@@ -10,7 +10,7 @@ use std::net::SocketAddr;
 use sip_message::generators::{InDialogMethod, StackDialog};
 use sip_message::header::{self, CSeq, HeaderName, HeaderValue};
 use sip_message::sip_str::SipStr;
-use sip_message::{Automatic, DelayedAutomatic, SipRequest, SipResponse};
+use sip_message::{DelayedAutomatic, SipRequest, SipResponse};
 
 use super::client_txn::{awaited_response, try_expect_response, try_send_cancel, AckCtx, Awaited};
 use super::dialog::{Dialog, InDialogRequest, InDialogTxn};
@@ -18,6 +18,7 @@ use super::step::{unwrap_step, unwrap_step_at, StepError};
 use super::Agent;
 use crate::realcall::auth::{parse_challenge, ChallengeResponder};
 
+mod ack;
 mod fallible;
 mod final_wait;
 mod won;
@@ -42,7 +43,7 @@ fn uac_route_set(resp: &SipResponse) -> Vec<String> {
 /// The `RAck` acknowledging a reliable provisional (RFC 3262 §7.2):
 /// `<RSeq> <CSeq-num> <CSeq-method>`, all read off the 1xx itself. `None` when
 /// the response carries no parseable `RSeq` (it is not a reliable provisional).
-fn rack_for(reliable_1xx: &SipResponse) -> Option<String> {
+pub(crate) fn rack_for(reliable_1xx: &SipResponse) -> Option<String> {
     let rseq = reliable_1xx.header::<header::RSeq>()?.ok()?;
     let cseq = reliable_1xx.cseq();
     Some(header::RAck::new(rseq.value(), cseq.seq(), cseq.method().clone()).to_wire())
@@ -94,6 +95,12 @@ pub struct ClientInvite {
 }
 
 impl ClientInvite {
+    /// Whether the INVITE carried a session description: an offer (RFC 3261
+    /// §13.2.1).
+    pub fn offered(&self) -> bool {
+        self.original_invite.sdp().is_some()
+    }
+
     /// The Call-ID of the dialog this INVITE creates — the identity a
     /// per-endpoint demux binds the originating actor to.
     pub fn call_id(&self) -> String {
@@ -430,6 +437,17 @@ impl ClientInvite {
         &mut self,
         reliable_1xx: &SipResponse,
     ) -> Result<(InDialogTxn, SipRequest), StepError> {
+        self.try_prack_carrying(reliable_1xx, None).await
+    }
+
+    /// [`try_prack_with_request`](Self::try_prack_with_request) carrying
+    /// `body`, `(Content-Type, bytes)`: the answer to an offer the reliable
+    /// provisional made (RFC 3262 §5).
+    pub async fn try_prack_carrying(
+        &mut self,
+        reliable_1xx: &SipResponse,
+        body: Option<(String, Vec<u8>)>,
+    ) -> Result<(InDialogTxn, SipRequest), StepError> {
         let rack = rack_for(reliable_1xx).ok_or_else(|| StepError::UnexpectedKind {
             who: self.agent.name.clone(),
             detail: format!(
@@ -443,63 +461,10 @@ impl ClientInvite {
         if let Some(tag) = &fork_tag {
             req = req.with_to_tag(tag);
         }
-        req.try_send_with_request().await
-    }
-
-    /// Generate and send the ACK for the 2xx (CSeq reused from the INVITE per
-    /// RFC 3261 §13.2.2.4), then return the confirmed [`Dialog`]. With a route
-    /// set the ACK carries Route headers and goes to the first hop (the proxy).
-    /// The ACK-to-2xx is a dedicated primitive: it takes no template in v1 — a
-    /// captured ACK's frozen-header quirks are not replayable yet.
-    pub async fn ack(&mut self) -> Dialog {
-        self.ack_with(None).await
-    }
-
-    /// The EXPLICIT delayed-ACK form: asserts a `delayed-automatic` declaration
-    /// exists (declare it via [`Invite::delayed_ack`](super::Invite::delayed_ack))
-    /// and then ACKs — identical to [`ack`](Self::ack), which also honours the
-    /// declaration. Reach for it when a test states its intent to hold the ACK.
-    pub async fn ack_delayed(&mut self) -> Dialog {
-        assert!(
-            self.delayed_automatic.is_some(),
-            "ack_delayed requires a declared delayed-automatic (Invite::delayed_ack) — use ack()",
-        );
-        self.ack_with(None).await
-    }
-
-    /// Hold the ACK-to-2xx for the declared duration (a `delayed-automatic`), if
-    /// any: sleep on the (paused) clock so the peer retransmits the 2xx
-    /// meanwhile (RFC 3261 §13.3.1.4). A no-op with no declaration — the ACK
-    /// fires immediately, so an undeclared call is unchanged.
-    async fn honour_delayed_automatic(&self) {
-        if let Some(dev) = self.delayed_automatic {
-            match dev.which {
-                Automatic::AckTo2xx => {
-                    tokio::time::sleep(std::time::Duration::from_millis(dev.delay_ms)).await;
-                }
-            }
+        if let Some((content_type, bytes)) = body {
+            req = req.with_body(&content_type, bytes);
         }
-    }
-
-    /// ACK the 2xx carrying an optional SDP body — the delayed-offer answer
-    /// rides the ACK when the 200 OK carried the offer (RFC 3264 §4). Honours a
-    /// declared `delayed-automatic` (holds the ACK first), so a plain `ack()`
-    /// after a declaration still delays.
-    pub async fn ack_with(&mut self, sdp: Option<&str>) -> Dialog {
-        self.ack_with_stating(sdp, &[]).await
-    }
-
-    /// [`ack`](Self::ack) with the acknowledging party's own header lines on
-    /// the ACK (RFC 3261 §13.2.2.4 makes it a request of its own, so it may
-    /// state end-to-end headers like any other).
-    pub async fn ack_stating(&mut self, stated: &[(&str, &str)]) -> Dialog {
-        self.ack_with_stating(None, stated).await
-    }
-
-    /// [`ack_with`](Self::ack_with) and [`ack_stating`](Self::ack_stating) at
-    /// once: the delayed-offer answer and the party's own lines on one ACK.
-    pub async fn ack_with_stating(&mut self, sdp: Option<&str>, stated: &[(&str, &str)]) -> Dialog {
-        unwrap_step(self.try_ack_with_stating(sdp, stated).await)
+        req.try_send_with_request().await
     }
 }
 

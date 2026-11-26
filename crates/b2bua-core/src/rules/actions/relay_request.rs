@@ -27,7 +27,9 @@ use super::ActionExecutor;
 impl ActionExecutor<'_> {
     /// Relay an inbound SIP request to `target_leg`, in its dialog
     /// `target_dialog`; with no live dialog there to carry it, the sender is
-    /// told to retry ([`Unrelayed::NotNow`]). The relayed copy carries the
+    /// told to retry ([`Unrelayed::NotNow`]), and one whose copy would lose a
+    /// requirement only the peer serves is refused 420
+    /// ([`Self::refuse_unserved`]). The relayed copy carries the
     /// target dialog's next number (RFC 3261 §12.2.1.1: each dialog numbers
     /// its own requests; a gap in the sender's sequence is not reproduced),
     /// the PRACK `RAck` CSeq rewrite (RFC 3262 §7.2), and the pending-request
@@ -57,12 +59,9 @@ impl ActionExecutor<'_> {
         // 2xx. A repeated 2xx re-ACKs via `re-ack-retransmitted-2xx`, which never
         // consults this obligation.
         if req.method() == Method::Ack {
-            let owed = leg_at(call, target_leg)
-                .and_then(|leg| leg.dialogs.established())
-                .is_some_and(|d| {
-                    call::helpers::sent_exchange(d).and_then(|x| x.awaited_ack_cseq)
-                        == Some(req.cseq().seq() as i64)
-                });
+            let owed = leg_at(call, target_leg).is_some_and(|leg| {
+                call::helpers::relayed_ack_owed(leg, i64::from(req.cseq().seq()))
+            });
             if !owed {
                 return;
             }
@@ -140,6 +139,20 @@ impl ActionExecutor<'_> {
             self.refuse_unrelayed(call, fx, ctx, Unrelayed::NotNow);
             return;
         };
+        if *req.method() == Method::Invite
+            && !self.invite_may_leave(call, target_leg, &target_dialog.id(), "relayed INVITE")
+        {
+            self.refuse_glare(call, fx, ctx, ctx.glare_refusal());
+            return;
+        }
+
+        let target_face = capabilities::Face::of_leg(target_leg);
+        let (extra_headers, advertised) =
+            relayed_request_headers(call, req, target_leg, target_face, self.config, self.now_ms);
+        if let Some(unsupported) = sip_message::option_tags::dropped_on_relay(req, &extra_headers) {
+            self.refuse_unserved(call, fx, ctx, &unsupported);
+            return;
+        }
 
         // The target dialog's next number (§12.2.1.1).
         let inbound_cseq = req.cseq().seq() as i64;
@@ -188,9 +201,6 @@ impl ActionExecutor<'_> {
             None
         };
         let content_type = req.raw(HeaderName::ContentType).next().and_then(relay::media_type);
-        let target_face = capabilities::Face::of_leg(target_leg);
-        let (extra_headers, advertised) =
-            relayed_request_headers(call, req, target_leg, target_face, self.config, self.now_ms);
         let body = relay::continue_on_leg(
             call,
             target_leg,

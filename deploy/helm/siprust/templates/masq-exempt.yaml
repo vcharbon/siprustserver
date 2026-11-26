@@ -29,8 +29,8 @@ spec:
             - |
               {{- .Files.Get "files/masq-exempt.sh" | nindent 14 }}
           env:
-            - { name: PROXY_VIP, value: {{ include "siprust.net" (dict "root" $ "key" "proxyVip") | quote }} }
-            - { name: EXTERNAL_VIP, value: {{ include "siprust.net" (dict "root" $ "key" "externalVip") | quote }} }
+            - { name: PROXY_VIP, value: {{ include "siprust.vip" (dict "root" $ "key" "proxyVip") | quote }} }
+            - { name: EXTERNAL_VIP, value: {{ include "siprust.vip" (dict "root" $ "key" "externalVip") | quote }} }
             - { name: EXTERNAL_SUBNET, value: {{ include "siprust.net" (dict "root" $ "key" "externalSubnet") | quote }} }
             - { name: EXTERNAL_INTERFACE, value: {{ include "siprust.net" (dict "root" $ "key" "externalInterface") | quote }} }
             - { name: PERIOD, value: {{ int .Values.masqExempt.periodSeconds | toString | quote }} }

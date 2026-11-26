@@ -4,25 +4,22 @@ use sip_proxy::registry::WorkerRegistry;
 
 use crate::config::ProxyConfig;
 
-/// The lifecycle line of a proxy about to serve: its faces, its workers and
-/// its socket settings.
 pub fn log_listening(cfg: &ProxyConfig, registry: &dyn WorkerRegistry) {
     let face_note = match &cfg.external {
-        Some(ext) => format!(
-            " DUAL-FACE ext_listen={} ext_advertise={}:{}",
-            ext.listen, ext.advertise.host, ext.advertise.port,
-        ),
+        Some(ext) => {
+            format!(" DUAL-FACE ext_listen={} ext_advertise={}", ext.listen, ext.advertise)
+        }
         None => String::new(),
     };
     tracing::info!(
         pid = std::process::id(),
         listen = %cfg.listen,
-        advertise = %format_args!("{}:{}", cfg.advertise.host, cfg.advertise.port),
+        advertise = %cfg.advertise,
         faces = %face_note,
         workers = %registry
             .snapshot()
             .iter()
-            .map(|w| format!("{}@{}:{}", w.id, w.address.host, w.address.port))
+            .map(|w| format!("{}@{}", w.id, w.address))
             .collect::<Vec<_>>()
             .join(","),
         queue = cfg.queue_max,

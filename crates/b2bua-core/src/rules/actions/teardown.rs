@@ -80,10 +80,6 @@ impl ActionExecutor<'_> {
             relayed_teardown(ctx, RelaySituation::request(method, relay::toward_leg(leg_id)))
         };
         let hops = relayed_teardown_hops(ctx);
-        // A teardown a peer's BYE asked for, or the give-up of a 2xx awaiting
-        // its ACK: the ACK an owed answer would ride will not come.
-        let answer_lost = ctx.request().is_some_and(|r| r.method() == Method::Bye)
-            || matches!(ended.0, TerminationCause::Timeout(call::TimeoutKind::Ack));
         // RFC 3326: the firing rule's teardown cause rides each BYE only when
         // it is a structured `SIP;cause=…` value (the `promote18xPemTo200`
         // diagnostic teardown). The CORE rules pass opaque labels
@@ -104,7 +100,7 @@ impl ActionExecutor<'_> {
                 LegState::Confirmed => {
                     let relayed = relayed(&Method::Bye, &id);
                     let reason = reason_header.or_else(|| own_release_reason(ctx));
-                    self.send_bye(call, fx, &id, reason, relayed, hops, answer_lost);
+                    self.send_bye(call, fx, &id, reason, relayed, hops);
                     super::dialog_end::end_dialogs(call, ctx, &id, LegEnd::OurByeSent);
                 }
                 // The caller's INVITE is answered by the firing rule, or by
@@ -188,7 +184,7 @@ impl ActionExecutor<'_> {
                 // where the rule states none (RFC 3326 §2).
                 let stated_reason = stated.iter().any(|h| HeaderName::Reason.matches(&h.name));
                 let own = own_release_reason(ctx).filter(|_| !stated_reason);
-                self.send_bye(call, fx, leg_id, own, Relayed::headers(stated), None, false);
+                self.send_bye(call, fx, leg_id, own, Relayed::headers(stated), None);
                 super::dialog_end::end_dialogs(call, ctx, leg_id, LegEnd::OurByeSent);
             }
             // The CANCEL leaves the leg `Cancelling`: a 200 OK crossing it
@@ -207,7 +203,9 @@ impl ActionExecutor<'_> {
     }
 
     /// CANCEL a ringing b-leg, which then reads `Cancelling`
-    /// ([`b2bua_sdk::model::RuleAction::CancelLeg`]).
+    /// ([`b2bua_sdk::model::RuleAction::CancelLeg`]). The leg ends with its
+    /// CANCEL: the requests relayed toward it are settled (§15.1.2), so its
+    /// later finals to them are never relayed.
     pub(super) fn cancel_leg(
         &mut self,
         call: &mut Call,
@@ -220,6 +218,7 @@ impl ActionExecutor<'_> {
         self.retire(call, fx, Scope::Leg(leg_id));
         let situation = RelaySituation::request(&Method::Cancel, relay::toward_leg(leg_id));
         self.send_cancel(call, fx, leg_id, &relayed_teardown(ctx, situation).headers);
+        settle(call, fx, Legs::One(leg_id), Cause::LegEnd, self.now_ms);
     }
 
     /// End `leg_id` as `end` records
@@ -336,8 +335,8 @@ pub(super) fn without_reason(headers: &[SipHeader]) -> Vec<SipHeader> {
 /// Remove every service machine's cursor: a terminating call is the core
 /// teardown's alone, so no machine-bound rule is a candidate on it. The
 /// `global-call` projection stays — it is the lifecycle itself, re-projected
-/// by `invariants::finalize`, which also restores the engine's own
-/// projections (`transfer`, `relayFirst18x`) from their authoritative slices.
+/// by `invariants::finalize`, which also restores the engine's `relayFirst18x`
+/// projection from its authoritative slice; the `transfer` one stays off.
 fn deactivate_service_machines(call: &mut Call) {
     call.sm_cursors.retain(|machine, _| *machine == GLOBAL_CALL_MACHINE);
 }

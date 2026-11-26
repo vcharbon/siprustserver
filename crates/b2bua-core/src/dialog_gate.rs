@@ -22,9 +22,19 @@
 //! ([`crate::rules::method_table`]) — a BYE crossing ours and a PRACK pass to
 //! their rules; an INFO, MESSAGE, NOTIFY or OPTIONS is answered 200 and goes
 //! no further; any other request, an INVITE, UPDATE, REFER or SUBSCRIBE among
-//! them, is answered 487 (§21.4.25). A request below its dialog's last CSeq
-//! draws 500 (§12.2.2); one the gate passes or answers sets that last CSeq
-//! ([`note_in_order`]). An ACK passes on a dialog a 2xx established, ended by
+//! them, is answered 487 (§21.4.25). Past the 481s, the §8.2 checks come
+//! before the dialog's CSeq order (§12.2.2): a request of a method this stack
+//! carries in a dialog that requires an option tag this stack does not
+//! understand draws 420, naming those tags in `Unsupported` (§8.2.2.3,
+//! [`Verdict::BadExtension`]), whatever its CSeq. Then a request of such a
+//! method below its dialog's last CSeq draws 500 (§12.2.2). A refusal changes
+//! no state (§8.2): nothing reaches the rules or the peer, and the dialog, its
+//! last CSeq and its session stay as they were. A request of such a method
+//! the gate passes, or answers 200 or 487, sets that last CSeq
+//! ([`note_in_order`]). A request of a method this stack carries in no
+//! dialog, which it only ever refuses (405 or 489, §8.2.1; 487 on an ending
+//! dialog), is held to no order and sets nothing.
+//! An ACK passes on a dialog a 2xx established, ended by
 //! a BYE since or not (RFC 5407 §2); it is never answered (§17.1.1.3), so one
 //! the gate refuses is dropped. An ACK naming an INVITE on its leg for which
 //! the record holds no final sent reaches the rules only on a call another
@@ -37,12 +47,16 @@
 //! transaction (§9.1) and passes unread, tagged or not. A response whose From-tag is no tag
 //! this stack put on the leg answers nothing of this stack's and is dropped,
 //! save a 2xx to an INVITE whose verified via-extension names a leg the record
-//! lacks (ADR-0055 §4, §12).
+//! lacks (ADR-0055 §4, §12). A 2xx to an INVITE whose round on its dialog
+//! ended with no 2xx taken, rejected or past its Timer B, is owed nothing
+//! (RFC 6026 §7.2): dropped unread and unanswered, and counted
+//! ([`Verdict::RoundEnded`]).
 
 use b2bua_sdk::event::CallEvent;
 use call::helpers::{response_origin, Resolved, ResponseFacts, ResponseOrigin};
 use call::{Call, Dialog, DialogEnd, DialogState};
 use sip_message::generators::InDialogMethod;
+use sip_message::header::Unsupported;
 use sip_message::{Method, SipMessage, SipRequest, SipResponse};
 
 use crate::config::B2buaConfig;
@@ -63,6 +77,10 @@ pub enum Verdict {
     Absorbed(Resolved),
     /// A request its ending dialog will not act on: 487 (§21.4.25).
     Terminated(Resolved),
+    /// A request requiring option tags this stack does not understand: 420,
+    /// its `Unsupported` listing exactly those (§8.2.2.3). It changes no state
+    /// of its dialog (§8.2).
+    BadExtension(Unsupported),
     /// An ACK naming no dialog that takes it: dropped unanswered (§17.1.1.3).
     Drop,
     /// An ACK of an INVITE the record holds no final sent for, on a call no
@@ -71,6 +89,10 @@ pub enum Verdict {
     UnexplainedAck,
     /// A response that answers nothing of this stack's, dropped unread.
     Stray,
+    /// A 2xx to an INVITE whose round on its dialog ended with no 2xx taken
+    /// ([`call::helpers::invite_round_ended`]): owed nothing (RFC 6026 §7.2),
+    /// dropped unread and unanswered, the dialog untouched, and counted.
+    RoundEnded,
 }
 
 impl Verdict {
@@ -82,15 +104,28 @@ impl Verdict {
             Verdict::OutOfOrder => Some(500),
             Verdict::Absorbed(_) => Some(200),
             Verdict::Terminated(_) => Some(487),
-            Verdict::Pass(_) | Verdict::Drop | Verdict::UnexplainedAck | Verdict::Stray => None,
+            Verdict::BadExtension(_) => Some(420),
+            Verdict::Pass(_)
+            | Verdict::Drop
+            | Verdict::UnexplainedAck
+            | Verdict::Stray
+            | Verdict::RoundEnded => None,
         }
     }
 
-    /// The dialog a request the gate answers was taken in order on, if any.
+    /// The dialog a request the gate answers was taken in order on, if any:
+    /// a 200 or a 487 of its ending dialog's. A refusal is taken on none.
     pub fn in_order(&self) -> Option<&Resolved> {
         match self {
             Verdict::Absorbed(resolved) | Verdict::Terminated(resolved) => Some(resolved),
-            _ => None,
+            Verdict::Pass(_)
+            | Verdict::NoDialog
+            | Verdict::OutOfOrder
+            | Verdict::BadExtension(_)
+            | Verdict::Drop
+            | Verdict::UnexplainedAck
+            | Verdict::Stray
+            | Verdict::RoundEnded => None,
         }
     }
 }
@@ -150,11 +185,32 @@ pub fn request_verdict(call: &Call, leg_id: &str, req: &SipRequest) -> Verdict {
         Admission::Refuse => return Verdict::NoDialog,
     };
     let Some(dialog) = dialog else { return Verdict::NoDialog };
+    if let Some(unsupported) = bad_extension(req) {
+        return Verdict::BadExtension(unsupported);
+    }
     let cseq = i64::from(req.cseq().seq());
-    if *method != Method::Ack && dialog.peer_cseq.is_some_and(|last| cseq < last) {
+    if carried_in_dialog(method) && dialog.peer_cseq.is_some_and(|last| cseq < last) {
         return Verdict::OutOfOrder;
     }
     taken(Resolved { dialog: Some(dialog.id()), record: None })
+}
+
+/// Whether this stack carries a request of `method` in a dialog. A request of
+/// any other method is held to no CSeq order and numbers nothing: an ACK
+/// (RFC 3261 §13.2.2.4), or a method this stack only ever refuses (§8.2.1).
+fn carried_in_dialog(method: &Method) -> bool {
+    InDialogMethod::try_from(method).is_ok()
+}
+
+/// The option tags `req` requires that this stack does not understand (RFC
+/// 3261 §8.2.2.3, [`sip_message::option_tags::not_understood`]), on a method
+/// this stack carries in a dialog: any other method draws its rules' 405 or
+/// 489 first (§8.2.1).
+fn bad_extension(req: &SipRequest) -> Option<Unsupported> {
+    if !carried_in_dialog(req.method()) {
+        return None;
+    }
+    sip_message::option_tags::not_understood(req)
 }
 
 /// What the gate makes of a request with no To-tag, which names no dialog
@@ -181,13 +237,14 @@ fn names_losing_fork(dialog: Option<&Dialog>, method: &Method) -> bool {
 
 /// Note the request the gate passed or answered in order on the dialog it
 /// names: its CSeq becomes that dialog's remote sequence number (RFC 3261
-/// §12.2.2). An ACK numbers nothing (§13.2.2.4).
+/// §12.2.2). An ACK numbers nothing (§13.2.2.4), nor does a method this stack
+/// carries in no dialog, which it only ever refuses (§8.2.1).
 pub fn note_in_order(call: &mut Call, leg_id: &str, resolved: &Resolved, event: &CallEvent) {
     let CallEvent::Sip { message, .. } = event else { return };
     let (SipMessage::Request(req), Some(dialog)) = (message.as_ref(), &resolved.dialog) else {
         return;
     };
-    if *req.method() == Method::Ack {
+    if !carried_in_dialog(req.method()) {
         return;
     }
     call::helpers::advance_peer_cseq(call, leg_id, dialog, i64::from(req.cseq().seq()));
@@ -285,10 +342,24 @@ fn response_verdict(
         branch: resp.top_via().branch(),
     };
     match response_origin(call, leg_id, facts) {
+        ResponseOrigin::Dialog(resolved) if answers_ended_round(call, leg_id, &resolved, resp) => {
+            Verdict::RoundEnded
+        }
         ResponseOrigin::Dialog(resolved) => Verdict::Pass(resolved),
         ResponseOrigin::Creates | ResponseOrigin::Request => Verdict::Pass(Resolved::default()),
         ResponseOrigin::Stray => Verdict::Stray,
     }
+}
+
+/// Whether `resp`, resolved to a dialog of `leg_id`, is a 2xx to an INVITE
+/// whose round there ended with no 2xx taken.
+fn answers_ended_round(call: &Call, leg_id: &str, resolved: &Resolved, resp: &SipResponse) -> bool {
+    let is_invite_2xx =
+        (200..300).contains(&resp.status()) && resp.cseq().method() == Method::Invite;
+    let Some(id) = resolved.dialog.as_ref().filter(|_| is_invite_2xx) else { return false };
+    let dialog = call::helpers::find_leg(call, leg_id)
+        .and_then(|leg| leg.dialogs.by_tags(&id.our_tag, &id.peer_tag));
+    dialog.is_some_and(|d| call::helpers::invite_round_ended(d, i64::from(resp.cseq().seq())))
 }
 
 /// Whether `resp` is a 2xx to an INVITE whose verified via-extension names

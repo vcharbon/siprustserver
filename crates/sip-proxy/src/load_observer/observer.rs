@@ -107,7 +107,6 @@ impl WorkerState {
         }
     }
 
-    /// The AIMD cap (cps).
     fn cap(&self) -> f64 {
         self.bucket.capacity()
     }
@@ -132,8 +131,9 @@ pub struct WorkerLoadObserver {
 }
 
 impl WorkerLoadObserver {
+    /// An observer over `config`. A cooldown no duration holds (negative, NaN)
+    /// blocks nothing.
     pub fn new(config: LoadObserverConfig) -> Self {
-        // A cooldown no duration holds (negative, NaN) blocks nothing.
         let ticks_ms = config.aimd_cooldown_ticks * config.options_interval_ms as f64;
         let cooldown = Duration::try_from_secs_f64(ticks_ms / 1000.0).unwrap_or(Duration::ZERO);
         let cooldown_ms = i64::try_from(cooldown.as_millis()).unwrap_or(i64::MAX);
@@ -156,6 +156,8 @@ impl WorkerLoadObserver {
     /// floor + arm cooldown; `hard_to_critical` → multiplicative decrease + arm
     /// cooldown; `soft_to_hard` → hold; `below_soft` → additive increase iff
     /// the cooldown has elapsed (else suppress).
+    ///
+    /// A band change is logged once, with the cap the step set.
     fn apply_aimd_step(&self, worker_id: &str, state: &mut WorkerState, elu: f64, now_ms: i64) {
         let c = &self.config;
         let previous = state.band;
@@ -177,7 +179,6 @@ impl WorkerLoadObserver {
                 state.last_action = AimdAction::Hold;
             }
             EluBand::BelowSoft => {
-                // Increase only if the cooldown has elapsed.
                 if now_ms < state.cooldown_until_ms {
                     state.last_action = AimdAction::Cooldown;
                 } else {
@@ -188,11 +189,6 @@ impl WorkerLoadObserver {
             }
         }
 
-        // A band change is a rare state transition (hysteresis keeps it from
-        // flapping), so it gets its own line with the load that caused it —
-        // emitted AFTER the AIMD step, because `cap_cps` is the number the line
-        // exists to explain and the step above is what sets it. Read before the
-        // step, an `AboveCritical` entry would report the cap the slam replaced.
         if new_band != previous {
             tracing::info!(
                 node = observe::node(),
@@ -280,19 +276,12 @@ impl WorkerLoadObserver {
         locked(&self.workers, LOAD_OBSERVER).get(worker_id).map(|s| s.band)
     }
 
-    /// Periodic sweep — call every ~`options_interval_ms`. Each worker `alive`
+    /// Periodic sweep, run every ~`options_interval_ms`. Each worker `alive`
     /// names whose last payload is older than `payload_stale_ms` gets one
     /// conservative multiplicative decrease (floored), a re-armed cooldown, and
     /// `payload_missing_count++`. A worker not alive is left as it is: no new
     /// call reaches it, and every `200` it answers once back carries a payload
-    /// (ADR-0050 §6).
-    ///
-    /// Returns the number of workers floored this sweep, so the caller can feed a
-    /// coarse `stale_decrease` aggregate counter — the observer itself stays pure
-    /// (no `ProxyMetrics` dependency, no clock), mirroring how the per-worker
-    /// `bucket_empty` rejection is counted at the strategy boundary, not here.
-    /// The per-worker smoking gun is the snapshot's
-    /// `last_action = StaleDecrease` + `payload_missing_count`.
+    /// (ADR-0050 §6). Returns the number of workers decreased.
     pub fn sweep_stale(&self, now_ms: i64, alive: impl Fn(&str) -> bool) -> u64 {
         let c = &self.config;
         let mut workers = locked(&self.workers, LOAD_OBSERVER);
@@ -347,10 +336,9 @@ impl WorkerLoadObserver {
         locked(&self.workers, LOAD_OBSERVER).retain(|id, _| keep(id));
     }
 
-    /// Forget a worker's state entirely. A recreated pod (same ordinal, new host)
-    /// must be judged from scratch — inheriting the dead pod's band (e.g.
-    /// `AboveCritical` at the moment it crashed) excluded the idle fresh pod from
-    /// new-dialog selection until its first `X-Overload` reply.
+    /// Forget a worker's state: a recreated worker (same ordinal, new host)
+    /// starts with no band and no bucket, never with the band its predecessor
+    /// held.
     pub fn reset(&self, worker_id: &str) {
         locked(&self.workers, LOAD_OBSERVER).remove(worker_id);
     }

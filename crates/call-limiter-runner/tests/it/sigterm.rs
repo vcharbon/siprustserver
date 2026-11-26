@@ -3,18 +3,15 @@
 //! process that only dies of the default action would serve on until SIGKILL,
 //! beside its replacement (two authoritative stores, ADR-0040).
 
-use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::net::TcpStream;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-/// A loopback port nothing listens on at the time of the call.
-fn free_port() -> SocketAddr {
-    TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap()
-}
+use loopback_ports::Kind;
 
 #[test]
 fn sigterm_closes_the_port_and_exits_cleanly() {
-    let addr = free_port();
+    let addr = loopback_ports::free_addresses(&[Kind::Tcp]).expect("a free loopback port")[0];
     let mut child = Command::new(env!("CARGO_BIN_EXE_call-limiter-runner"))
         .env("LIMITER_LISTEN", addr.to_string())
         .stdout(Stdio::null())

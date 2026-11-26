@@ -29,10 +29,11 @@ fn ack_of_the_first_2xx() -> AckAhead {
 /// **A dropped INVITE relay gives back the INVITE before it.** The caller's
 /// dialog holds a re-INVITE (CSeq 2) another worker relays, awaiting its
 /// final, which carries ahead the ACK of the caller's 2xx to CSeq 1. The
-/// union this worker keeps leaves that relay to its worker and holds CSeq 1
-/// again, with its ACK, its client transaction and its copies' count, so a
-/// copy of that 2xx still draws its ACK here (RFC 3261 §13.2.2.4) under the
-/// same bound (ADR-0057 §10).
+/// union this worker keeps leaves that relay to its worker, its round not
+/// noted ended (a 2xx to it is no late 2xx to drop), and holds CSeq 1 again,
+/// with its ACK, its client transaction and its copies' count, so a copy of
+/// that 2xx still draws its ACK here (RFC 3261 §13.2.2.4) under the same
+/// bound (ADR-0057 §10).
 #[test]
 fn a_dropped_invite_relay_gives_back_the_invite_before_it() {
     let mut copy = answered(6, 1, CallModelState::Active).call;
@@ -49,6 +50,8 @@ fn a_dropped_invite_relay_gives_back_the_invite_before_it() {
     let kept = own_records(copy, &live, &RelayOwner::new("w0", "this worker"));
 
     let d = kept.a_leg.dialogs.confirmed().expect("the caller's dialog");
+    assert_eq!(d.untaken_invite, None, "the relay's round is its worker's, not ended");
+    assert!(!call::helpers::invite_round_ended(d, 2), "a 2xx to the relay is no late 2xx");
     let held = d.sent_invite.as_ref().expect("the INVITE before the dropped relay");
     assert_eq!(held.outbound_cseq, 1, "the INVITE the ACK acknowledges");
     let x = held.invite.as_ref().expect("its exchange");

@@ -1,0 +1,82 @@
+# No INVITE leaves a dialog with one in progress; a rule asking for one is a defect
+
+**Status:** accepted
+
+**Owner:** `crates/b2bua-core/src/rules/actions/mod.rs` (`invite_may_leave`), its callers in
+`originate.rs` (`send_reinvite`, `send_request_to_leg`) and `relay_request.rs`;
+`crates/call/src/helpers/dialog.rs` (`invite_in_progress`).
+
+## Context
+
+RFC 3261 §14.1: *"A UAC MUST NOT initiate a new INVITE transaction within a dialog while
+another INVITE transaction is in progress in either direction."* Inbound, the core rule
+`reinvite-glare` refuses a peer's INVITE that would be relayed onto such a dialog (§14.2). The
+executor itself sent whatever INVITE an action asked for. Two state machines that each ask
+for a re-INVITE on one leg in the same turn put both on the wire at once; a peer processing
+one of them strands the other's offer and its 2xx un-ACKed.
+
+Two answers were weighed: queue the second INVITE until the first transaction ends, or
+refuse it.
+
+## Decision
+
+### §1 What is in progress
+
+An INVITE transaction is in progress on a dialog while any of these holds
+(`call::helpers::invite_in_progress`):
+
+- an INVITE this side sent on it, own or relayed, has no 2xx taken: it awaits its final, or
+  the ACK of its 2xx is not composed;
+- a 2xx this side took has its ACK owed and not sent (RFC 6026 *Accepted*);
+- a 2xx this side sent awaits the peer's ACK;
+- the peer's INVITE on it has no final from this side: relayed and unanswered, or the
+  originator's dialog-creating INVITE.
+
+A non-2xx final closes this side's INVITE (`close_rejected_invite_round`). The Timer B of
+an INVITE this side originated, with no response (RFC 3261 §17.1.1.2), ends it in progress:
+the record keeps it marked (`ended_at_timer_b`). A late 2xx to a re-INVITE whose round
+ended with no 2xx taken, rejected or past Timer B, is owed nothing (RFC 6026 §7.2): the
+client transaction absorbs it while it lives, the dialog gate drops it after, no ACK leaves,
+and the peer, never ACKed, ends the dialog with a BYE at 64·T1 (§13.3.1.4). A dialling
+INVITE's late 2xx confirms a dialog no call holds: it is ACKed and that dialog BYEd
+(§13.2.2.4, §15).
+
+### §2 The INVITE is refused, never queued
+
+A re-INVITE action, an in-dialog INVITE request, or the relay of a peer's INVITE onto such a
+dialog is not sent. The turn reports the defect `one-invite-in-progress-per-dialog`
+(ADR-0052 §8): its detail names the rule refused, the leg, the dialog, and what holds it,
+with the CSeq and the rule that sent this side's INVITE. Production logs it with the call's
+dump and counts it in `b2bua_model_defects_total{invariant}`; a harness run fails on it unless
+the scenario takes it. A refused relay answers its sender as glare: 491, or 500 where the
+sender's own INVITE is unanswered (§14.2).
+
+Queuing lost: an offer built for the dialog as it stood may be stale once the first
+transaction ends, the queue would reorder offer/answer behind the rule's back, and it would
+hide the rule's error. A rule that needs a second renegotiation waits for the first's
+final and ACK, and asks then.
+
+### §3 Every producer waits on its own
+
+The transfer realign and the release reroute ACK the answer that calls for their re-INVITE
+earlier in the same action list. The early-media promotion's resync is called for by the
+callee's 200, which may overtake the caller's ACK of the promoted 200: the resync then waits
+in the promotion's state (`PendingResync`) and leaves on that ACK (`promote-resync-on-a-ack`).
+The transfer's a-realign, due while the originator's dialog awaits an ACK, waits the same way
+in the transfer state and leaves on that ACK (`transfer-a-realign-on-ack`), bounded by its
+re-INVITE watchdog. The ACK is hers, of a 2xx this side sent her, or her peer's, of her 2xx to
+his re-INVITE, which this side relays to her. The release reroute's a-realign waits the same
+way in the reroute state (`reroute-a-realign-on-ack`), bounded by the reroute guard. Until the
+a-realign leaves, no response of hers answers it. A refusal met later is a rule defect,
+ticketed on its own.
+
+Neither the transfer's nor the reroute's a-realign waits for a re-INVITE of the originator's
+own that is still relayed and unanswered when it is due: that realign is refused, the transfer
+rolls back when its re-INVITE watchdog fires, and the reroute ends the call when its guard
+fires.
+
+## Consequences
+
+- No call is left with two INVITEs crossing on one dialog. A refused re-INVITE leaves its
+  treatment where it stood: the transfer and the release reroute end by their watchdogs.
+- `send_request_to_leg` with `INVITE` takes the same refusal.

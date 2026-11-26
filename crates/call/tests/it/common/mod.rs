@@ -155,6 +155,7 @@ pub fn representative_call() -> Call {
             sent_origin: Some("bob 202 3 IN IP4 203.0.113.42".into()),
             sent_media: vec!["audio 20000 RTP/AVP 8".into(), "video 0 RTP/AVP 96".into()],
             sent_digest: Some(0x5eed_d16e_5700_0001),
+            sent_canonical: true,
             absorbed_origin: Some("bob 202 2 IN IP4 203.0.113.42".into()),
             sent_slots: vec![Some(0), None],
             sent_slots_author: Some("b-3".into()),
@@ -290,6 +291,7 @@ pub fn representative_call() -> Call {
         ],
         state: CallModelState::Active,
         created_at: 1_779_440_042_000,
+        received_at: 1_779_440_041_950,
         trace_id: Some("0123456789abcdef0123456789abcdef".into()),
         root_span_id: Some("fedcba9876543210".into()),
         sampled: Some(true),
@@ -332,6 +334,7 @@ pub fn representative_call() -> Call {
             new_leg_id: "b-2".into(),
             old_leg_id: Some("b-1".into()),
             started_at_ms: 1_779_440_050_000,
+            pending_a_realign: None,
         }),
         provisionals: Vec::new(),
         message_seq: 0,
@@ -373,6 +376,16 @@ fn arb_uri() -> impl Strategy<Value = String> {
 }
 fn arb_bytes(max: usize) -> impl Strategy<Value = Vec<u8>> {
     proptest::collection::vec(any::<u8>(), 0..max)
+}
+/// A re-INVITE parked in a service's state: its describing leg, body and
+/// lines.
+fn arb_pending_resync() -> impl Strategy<Value = Box<PendingResync>> {
+    (arb_tag(), arb_bytes(64), proptest::collection::vec((arb_tag(), arb_tag()), 0..3)).prop_map(
+        |(leg_id, body, lines)| {
+            let lines = lines.iter().map(|(n, v)| header(n, v)).collect();
+            Box::new(PendingResync { leg_id, body, lines })
+        },
+    )
 }
 
 fn arb_json() -> impl Strategy<Value = serde_json::Value> {
@@ -625,6 +638,7 @@ pub fn arb_call() -> impl Strategy<Value = Call> {
             Just(CallModelState::Terminated),
         ],
         any::<i64>(),
+        any::<i64>(),
     );
     let trace = (
         proptest::option::of("[0-9a-f]{32}"),
@@ -652,18 +666,26 @@ pub fn arb_call() -> impl Strategy<Value = Call> {
         arb_termination(),
         proptest::collection::vec(Just(ReleaseEventKind::MaxCallDuration), 0..2),
         proptest::option::of(
-            (arb_tag(), proptest::option::of(arb_tag()), any::<i64>(), any::<bool>()).prop_map(
-                |(new_leg_id, old_leg_id, started_at_ms, realigning)| RerouteState {
-                    phase: if realigning {
-                        ReroutePhase::ARealigning
-                    } else {
-                        ReroutePhase::BLegDialing
+            (
+                arb_tag(),
+                proptest::option::of(arb_tag()),
+                any::<i64>(),
+                any::<bool>(),
+                proptest::option::of(arb_pending_resync()),
+            )
+                .prop_map(
+                    |(new_leg_id, old_leg_id, started_at_ms, realigning, parked)| RerouteState {
+                        phase: if realigning {
+                            ReroutePhase::ARealigning
+                        } else {
+                            ReroutePhase::BLegDialing
+                        },
+                        new_leg_id,
+                        old_leg_id,
+                        started_at_ms,
+                        pending_a_realign: parked,
                     },
-                    new_leg_id,
-                    old_leg_id,
-                    started_at_ms,
-                },
-            ),
+                ),
         ),
         any::<u32>(),
     );
@@ -672,7 +694,7 @@ pub fn arb_call() -> impl Strategy<Value = Call> {
         |(
             (call_ref, a_leg, b_legs, active_peer, callback_context, billing_context, a_leg_invite),
             (limiter, timers, cdr_events, attempts),
-            (state, created_at),
+            (state, created_at, received_at),
             (trace_id, root_span_id, sampled, worker_index),
             (
                 emergency,
@@ -702,6 +724,7 @@ pub fn arb_call() -> impl Strategy<Value = Call> {
             cdr_events,
             state,
             created_at,
+            received_at,
             trace_id,
             root_span_id,
             sampled,

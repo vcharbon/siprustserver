@@ -11,7 +11,7 @@
 use std::sync::Arc;
 
 use e2e_model::{ShapeDescriptor, ShapeRegistry};
-use scenario_harness::actor::{ActorCall, ActorScenario, Branch, Expect};
+use scenario_harness::actor::{ActorCall, ActorScenario, Branch, Expect, GoalStep};
 use scenario_harness::realcall::{CallEnv, ScenarioId};
 use scenario_harness::StepError;
 
@@ -66,7 +66,9 @@ impl ActorScenario for FuzzWrap {
     }
 
     /// The inner call, mutated and perturbed from the call's seed, sealed with
-    /// a `Wrap | <inner id> <notes>` draw.
+    /// a `Wrap | <inner id> <notes>` draw. Jitter and trains move a caller's
+    /// own CANCEL against the final, so a call that CANCELs accepts every
+    /// CANCEL race (RFC 3261 §9).
     fn build(&self, env: &CallEnv<'_>) -> Result<ActorCall, StepError> {
         let seed = self.config.seed_of(&env.token);
         let mut rng = Rng::new(seed);
@@ -80,10 +82,25 @@ impl ActorScenario for FuzzWrap {
             let max = self.config.train_max;
             draw_trains(seed, &mut call, max, self.policy.callee_reliable, &mut notes);
         }
+        if let Some(endings) = self.policy.cancel_endings {
+            if caller_cancels(&call) {
+                call.expect = Expect::of(endings);
+            }
+        }
         let desc = format!("Wrap | {}", notes.join(" "));
         seal(&mut call, seed, &env.token, desc, self.config.log_draws);
         Ok(call)
     }
+}
+
+/// Whether the caller of `call` has a CANCEL among its goals.
+fn caller_cancels(call: &ActorCall) -> bool {
+    let caller = scenario_harness::actor::originating_role(&call.actors);
+    call.actors
+        .iter()
+        .filter(|a| a.role == caller)
+        .flat_map(|a| a.goals.iter())
+        .any(|g| matches!(g.step, GoalStep::Cancel { .. }))
 }
 
 /// The id of `inner`'s fuzz wrapper.

@@ -5,11 +5,12 @@
  * `blessing`: a run the interpreter failed ONLY on datagrams the flow did not
  * claim (`unmatched-datagram`, `unexpected-datagram`, `datagram-after-flow` —
  * one shape under three failure kinds), on a 100 an INVITE final stood in for
- * (`trying-omitted`), on expects that timed out, or on a
+ * (`trying-omitted`), on expects that timed out, on a header check, or on a
  * `must_fail` declaration the run never reached ({@link neverReached}), every
  * refusal answered by a shape record at its own step, every absence by the
- * confrontation's own `missing-message` shape at that step and every omission
- * by its own `trying-omitted` shape there, all of them
+ * confrontation's own `missing-message` shape at that step, every omission
+ * by its own `trying-omitted` shape there and every failed header check by
+ * that header's own record at its step, all of them
  * `accepted` or `known-bug` under a named rule, is within what the lane's lists
  * accept. Coverage is a mapping, never a count, and every other record
  * must be `accepted` or `known-bug`.
@@ -73,11 +74,18 @@ export const blessing = (
   )
   const absences = failures.filter((f) => f.failure === "expect-timed-out")
   const omissions = failures.filter((f) => f.failure === "trying-omitted")
+  const checks = failures.flatMap((f) => (f.failure === "check-failed" ? [checkedHeaderOf(f)] : []))
   const untestable = failures.filter((f) => neverReached(f, abandoned))
   if (untestable.length === failures.length) return undefined
-  if (refusals.length + absences.length + omissions.length + untestable.length !== failures.length) {
+  if (refusals.length + absences.length + omissions.length + checks.length + untestable.length !== failures.length) {
     return undefined
   }
+  const checkRecords = checks.map((check) =>
+    check === undefined
+      ? undefined
+      : records.find((r) => r.kind === "header" && r.step === check.step && r.name.toLowerCase() === check.name)
+  )
+  if (!checkRecords.every((r) => r !== undefined && r.rule !== "")) return undefined
   const shapes = records.filter((r) => r.kind === "shape")
   const stepOf = (f: (typeof refusals)[number]): string =>
     f.failure === "unmatched-datagram" ? f.step : ""
@@ -87,7 +95,19 @@ export const blessing = (
   const omitted = shapes.filter((r) => BlessAudit.shapeKindOf(r.signature) === OMITTED_SHAPE)
   if (!omissions.every((f) => omitted.some((r) => r.step === f.step))) return undefined
   if (!ConfrontationRecords.recordsPass(records)) return undefined
-  return [...new Set(shapes.map((r) => r.rule))].filter((r) => r !== "").sort()
+  return [...new Set([...shapes, ...checkRecords].map((r) => r?.rule ?? ""))].filter((r) => r !== "").sort()
+}
+
+/**
+ * The header and step a failed check reads, as the interpreter names them
+ * (`header(<Name>)` at `step "<id>"`), or `undefined` for any other check.
+ */
+const checkedHeaderOf = (
+  failure: Extract<Bundle.Failure, { readonly failure: "check-failed" }>
+): { readonly name: string; readonly step: string } | undefined => {
+  const name = /^header\((.+)\)$/.exec(failure.field)?.[1]
+  const step = /^step "(.+)"$/.exec(failure.site)?.[1]
+  return name === undefined || step === undefined ? undefined : { name: name.toLowerCase(), step }
 }
 
 /**

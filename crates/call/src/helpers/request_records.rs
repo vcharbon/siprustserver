@@ -74,7 +74,9 @@ pub fn answered_record(
 }
 
 /// The sent record whose transaction left on `branch` from `leg_id`, and
-/// where it is kept: what a transaction timeout names (RFC 3261 §17.1.2.2).
+/// where it is kept: what a transaction timeout names (RFC 3261 §17.1.1.2,
+/// §17.1.2.2). A non-INVITE record, or the INVITE this stack originated on
+/// the dialog; a relayed INVITE is no record a timeout names.
 pub fn record_with_branch(
     call: &Call,
     leg_id: &str,
@@ -87,7 +89,8 @@ pub fn record_with_branch(
     leg.dialogs.iter().find_map(|d| {
         // A branch compares ignoring case (RFC 3261 §7.3.1).
         let named = |r: &&RequestRecord| r.branch().is_some_and(|b| b.eq_ignore_ascii_case(branch));
-        d.requests.iter().find(named).map(|r| (holder_of(d), r.clone()))
+        let own_invite = d.sent_invite.iter().filter(|r| r.is_own());
+        d.requests.iter().chain(own_invite).find(named).map(|r| (holder_of(d), r.clone()))
     })
 }
 
@@ -144,6 +147,37 @@ pub fn cancel_relay(call: &mut Call, leg_id: &str, id: &DialogId, outbound_cseq:
             p.cancelled = true;
         }
     })
+}
+
+/// Mark the relayed re-INVITE `leg_id`'s dialog `id` holds under
+/// `outbound_cseq` as CANCELled by its originator, the CANCEL relayed toward
+/// its target ([`RequestRecord::cancel_relayed`]): the target's final is
+/// relayed back.
+pub fn relay_cancel(call: &mut Call, leg_id: &str, id: &DialogId, outbound_cseq: i64) {
+    update_dialog(call, leg_id, id, |d| {
+        let relay = d.sent_invite.as_mut().filter(|p| p.is_relay());
+        if let Some(p) = relay.filter(|p| p.outbound_cseq == outbound_cseq) {
+            p.cancel_relayed = true;
+        }
+    })
+}
+
+/// Whether `call` holds the relay of the INVITE its originator sent under
+/// Call-ID `call_id` and CSeq number `cseq` with the originator's CANCEL
+/// relayed toward the target and no final held by the originator
+/// ([`RequestRecord::cancel_relayed`]): the originator's INVITE stays open
+/// for the target's final.
+pub fn holds_relayed_cancel(call: &Call, call_id: &str, cseq: i64) -> bool {
+    std::iter::once(&call.a_leg)
+        .chain(call.b_legs.iter())
+        .flat_map(|leg| leg.dialogs.iter())
+        .filter_map(super::invite_records::invite_relay)
+        .any(|p| {
+            p.cancel_relayed
+                && !p.cancelled
+                && p.inbound_cseq == cseq
+                && p.source_call_id == call_id
+        })
 }
 
 /// Close the relay `leg_id`'s dialog `id` holds with outbound CSeq
