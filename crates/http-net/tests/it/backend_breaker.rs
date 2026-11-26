@@ -1,17 +1,21 @@
 //! The backend breaker under traffic shapes the window rule must survive: a
-//! hung backend under a burst, a cap whose waiters never send, and a probe
-//! that panics.
+//! hung backend under a burst, a cap whose waiters never send, a probe that
+//! panics; and the probe's reach while the name service fails or the backend
+//! moves.
 
+use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 use http_net::backend::metrics;
-use http_net::{AttemptError, BreakerConfig, ClientSettings, HttpRequest};
-use http_net_testkit::{Behaviour, SimulatedHttpNetwork};
+use http_net::{
+    AttemptError, BreakerConfig, ClientSettings, HttpRequest, HttpTransport, LOOKUP_BOUND,
+};
+use http_net_testkit::{Behaviour, Fault, SimulatedHttpNetwork};
 use sip_clock::testkit::{advance_settled, settle};
 
-use crate::backend::{Rig, ATTEMPT};
+use crate::backend::{Backend, Rig, ATTEMPT};
 
 /// Three requests sent at once to a hung backend, nothing else: each attempt
 /// times out at 2.5 s, past the 2 s window, and the breaker opens all the
@@ -116,4 +120,87 @@ async fn a_name_unresolved_at_boot_opens_the_breaker_until_a_probe_answers() {
     resolved.client.trip_unless_resolved();
     settle().await;
     assert!(!resolved.client.is_open());
+}
+
+// ── the probe's reach ───────────────────────────────────────────────────────
+
+/// A request answered at the rig's address, so the name's addresses are
+/// kept; then the breaker's window passes, so the answer no longer counts.
+async fn keep_the_address(rig: &Rig) {
+    assert_eq!(rig.send().await.map(|r| r.status), Ok(200));
+    assert_eq!(rig.client.target().address(), Some(rig.dst));
+    let window = BreakerConfig::probing("/health").window;
+    advance_settled(window + Duration::from_millis(100)).await;
+}
+
+/// The backend at the rig's address refuses three requests, which open the
+/// breaker.
+async fn open_by_refusals(rig: &Rig) {
+    rig.behave(Behaviour::Refuse);
+    for _ in 0..3 {
+        let _ = rig.client.attempt(HttpRequest::get("/call"), ATTEMPT).await;
+    }
+    assert!(rig.client.is_open());
+}
+
+/// The name stops resolving once its addresses are kept (an empty answer, at
+/// once); the backend refuses until 1.5 s after the opening, then answers at
+/// the same address. The probe at 1 s fails, the one at 2 s reaches the
+/// backend at the kept address and closes the breaker, and requests are
+/// served there while the name still resolves to nothing.
+#[tokio::test(start_paused = true)]
+async fn a_name_that_stops_resolving_keeps_the_probe_on_the_kept_address() {
+    let rig = Rig::new("dns-gone:8080", ClientSettings::default()).await;
+    keep_the_address(&rig).await;
+    rig.resolver.unpoint("dns-gone:8080");
+    open_by_refusals(&rig).await;
+
+    advance_settled(Duration::from_millis(1_500)).await;
+    assert!(rig.client.is_open(), "the probe at 1 s found the backend refusing");
+    rig.net.apply_fault(Fault::Resume { dst: rig.dst });
+    advance_settled(Duration::from_millis(550)).await;
+    assert!(!rig.client.is_open(), "the probe at 2 s reached the kept address");
+    assert_eq!(rig.backend.served("/health"), 1);
+    assert_eq!(metrics::breaker_transitions("dns-gone:8080", false), 1);
+    assert_eq!(rig.send().await.map(|r| r.status), Ok(200));
+    assert_eq!(rig.backend.served("/call"), 2, "the answer before the opening, and this one");
+}
+
+/// The name service hangs once the name's addresses are kept, and the
+/// backend answers again at the same address right after the opening: a
+/// probe reaches it within one probe period and one lookup bound, and closes
+/// the breaker.
+#[tokio::test(start_paused = true)]
+async fn a_hanging_name_service_keeps_the_probe_on_the_kept_address() {
+    let rig = Rig::new("dns-hung:8080", ClientSettings::default()).await;
+    keep_the_address(&rig).await;
+    rig.resolver.slow(Duration::from_secs(30));
+    open_by_refusals(&rig).await;
+    rig.net.apply_fault(Fault::Resume { dst: rig.dst });
+
+    let probe_period = BreakerConfig::probing("/health").probe_period;
+    advance_settled(probe_period + LOOKUP_BOUND + Duration::from_millis(50)).await;
+    assert!(!rig.client.is_open(), "a probe reached the kept address");
+    assert_eq!(rig.backend.served("/health"), 1);
+    assert_eq!(rig.send().await.map(|r| r.status), Ok(200));
+}
+
+/// The backend moves: its name resolves to a new address, served there,
+/// while the old one refuses. The first probe after the opening reaches the
+/// new address and closes the breaker, and the next request is served there.
+#[tokio::test(start_paused = true)]
+async fn a_moved_backend_is_reached_by_the_first_probe() {
+    let rig = Rig::new("moved:8080", ClientSettings::default()).await;
+    let moved: SocketAddr = "10.0.0.2:8080".parse().unwrap();
+    let mover = Backend::answering(200);
+    let _moved = rig.net.serve(moved, mover.clone()).await.unwrap();
+    keep_the_address(&rig).await;
+    rig.resolver.point("moved:8080", [moved]);
+    open_by_refusals(&rig).await;
+
+    advance_settled(Duration::from_millis(1_050)).await;
+    assert!(!rig.client.is_open(), "the first probe reached the new address");
+    assert_eq!(mover.served("/health"), 1);
+    assert_eq!(rig.send().await.map(|r| r.status), Ok(200));
+    assert_eq!(mover.served("/call"), 1, "served at the new address");
 }
