@@ -222,29 +222,24 @@ async fn at_the_watermark_a_single_face_queues_a_listed_workers_new_invite() {
     assert_eq!(metrics.intake_shed(), 1);
 }
 
-/// The internal face of a dual-face proxy reads a worker as its core does: at
-/// the watermark a new INVITE whose top Via names a listed worker, sent from
-/// an address the configuration does not list, is queued behind the datagram
-/// already waiting; a new INVITE with no sign of a worker is shed, and so is a
-/// datagram no response can answer.
+/// The internal face of a dual-face proxy carries the workers' traffic alone:
+/// at the watermark a new INVITE with no sign of a worker, from an address the
+/// configuration does not list, is queued behind the datagram already waiting.
+/// A datagram no response can answer is still dropped there.
 #[tokio::test]
-async fn at_the_watermark_the_internal_face_queues_a_workers_new_invite() {
+async fn at_the_watermark_the_internal_face_queues_a_new_invite() {
     let metrics = Arc::new(ProxyMetrics::new());
     let shard = at_the_watermark(&metrics, "w0@10.0.0.1:5060", true).await;
     let face = shard.internal.as_ref();
-    let worker_leg = new_invite("translated", "10.0.0.1:5060");
-    let signless = new_invite("signless", UNLISTED_SENT_BY);
-    let (waiting, after) = (options("waiting"), options("after"));
-    let datagrams = [waiting.as_str(), "\x00 not SIP", &worker_leg, &signless, &after];
-    send_in_order(&peer("127.0.0.1").await, face, &datagrams).await;
+    let (waiting, signless) = (options("waiting"), new_invite("signless", UNLISTED_SENT_BY));
+    send_in_order(&peer("127.0.0.1").await, face, &[&waiting, "\x00 not SIP", &signless]).await;
     assert_eq!(next_queued(face).await, Some(waiting));
     assert_eq!(
         next_queued(face).await,
-        Some(worker_leg),
-        "the worker's new INVITE is queued at the watermark"
+        Some(signless),
+        "the internal face queues the new INVITE at the watermark"
     );
-    assert_eq!(next_queued(face).await, Some(after), "the signless new INVITE is shed");
-    assert_eq!((metrics.intake_shed(), metrics.intake_unanswerable()), (1, 1));
+    assert_eq!((metrics.intake_shed(), metrics.intake_unanswerable()), (0, 1));
 }
 
 /// The external face sheds: at the watermark a new INVITE is dropped there,
