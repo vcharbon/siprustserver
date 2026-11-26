@@ -3,6 +3,7 @@
 **Status:** accepted
 
 **Owner:** `crates/sip-proxy/src/core/request/classify.rs` (a request's direction),
+`crates/sip-proxy/src/worker_signs.rs` (the worker signs, the intake shed's too),
 `core/request/admission.rs` (the To-tag rule and the gate), `core/response.rs` (the response
 rule), `crates/sip-proxy/src/face.rs` (the egress face), `crates/sip-message/src/header/via.rs`
 (`received`), `crates/sip-proxy-runner/src/config.rs` (the single-face warning, the wildcard
@@ -33,7 +34,8 @@ Detail: [appendix §1](appendix/0048-the-front-proxy-trusts-by-ingress-face.md#1
 
 On the internal face a request is worker-outbound when its direction entry carries `;outbound`,
 when its source is a registry worker, or when its top Via sent-by is one. A loose Route past the
-proxy's own is followed.
+proxy's own is followed. The intake shed reads the same signs (`worker_signs.rs`) and never
+drops a new INVITE that carries one.
 Detail: [appendix §2](appendix/0048-the-front-proxy-trusts-by-ingress-face.md#2-on-the-internal-face-a-request-is-worker-outbound).
 
 ### 3. On the external face no claim of the internal plane holds
