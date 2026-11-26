@@ -83,6 +83,7 @@ async fn an_endpoint_set_emptied_at_once_withdraws_no_worker() {
         assert!(!w.metrics().withdrawn_running(), "{ord} is not withdrawn-but-running");
     }
     assert!(primary.serves(&call_ref), "the primary keeps serving the call");
+    assert!(!backup.serves(&call_ref), "the backup took nothing over from a running primary");
 
     // ── the recreated Service lists the same endpoints again ──────────────────
     fh.fill_the_slice();
