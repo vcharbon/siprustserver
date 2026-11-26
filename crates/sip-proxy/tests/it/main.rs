@@ -14,6 +14,7 @@ mod first_view;
 mod flooded_shard;
 mod health_probe_late_reply;
 mod ingress_trust;
+mod intake_shed_sender;
 mod load_balancer;
 mod load_balancer_routing;
 mod no_panic_lane;
