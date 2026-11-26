@@ -101,6 +101,12 @@ and the teardown's retirement of the call's timers clears it. The shell then:
 - writes the safepoint owing the release of the call's limiter key (ADR-0040), so
   the termination releases every hold the call took, an initial turn's admission
   or an off-turn fold's alike;
+- writes on the safepoint the final the event in hand brings when it is a non-2xx
+  response to the INVITE that dialled a leg: the client transaction completed and
+  ACKed it (RFC 3261 §17.1.1.3) whatever became of the turn, so that leg awaits no
+  final and is owed no CANCEL (§9.1). A callee's refusal on a route that fails
+  over leaves no leg alive, and the teardown answers the caller at once. A 2xx is
+  not written: its ACK is the call's to send;
 - answers an in-dialog request in hand, when it holds a server transaction the
   turn would have answered, with the stack's bare `500` built from the event. The
   caller's initial INVITE is not answered here: the verdict's teardown answers it
@@ -111,7 +117,7 @@ and the teardown's retirement of the call's timers clears it. The shell then:
 
 The `fatal-error` verdict then ends the call from its safepoint through the
 normal rules, as it ends a panicked call: `teardown_on_the_wire` sends a BYE to
-each confirmed leg, a CANCEL to each early leg and the bare `503` an unanswered
+each confirmed leg, a CANCEL to each leg whose INVITE still rings and the bare `503` an unanswered
 caller is owed, with `TerminatingTimeout` bounding the wait. The CDR, the limiter
 release and the delete, the backup's copy included, run through the one
 enforcement path. The reaper's verdict turns run with the collection caps off

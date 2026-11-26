@@ -218,7 +218,7 @@ fn drain_notes(ctx: &RouterCtx, call_ref: &str, notes: Option<&mut TurnScope>) {
 
 /// Commit `result`, the safepoint of `call_ref`'s turn past a per-call cap,
 /// as [`commit_turn`] does with the record-size cap off: the record is the
-/// call before that turn.
+/// call before that turn, as [`super::tripped::fail_turn`] states it.
 pub(super) async fn commit_safepoint(
     ctx: &Arc<RouterCtx>,
     call_ref: &str,
