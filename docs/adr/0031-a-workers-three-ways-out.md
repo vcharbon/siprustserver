@@ -111,13 +111,7 @@ ADR-0055 §7 replaces this fold with containment.
 
 Detail: [appendix, amendment](appendix/0031-a-workers-three-ways-out.md#amendment).
 
-## Considered and rejected
-
-- Stop authoring on SIGTERM: a direct-bound worker must finish its calls (D5).
-- A fixed tombstone TTL from departure: it expires under a live elder whose grace was raised.
-- A compaction that keeps a `Put` ahead of a `Delete`: every call end ships a body plus a
-  `Delete`, and a re-bootstrap still sees the `Delete` alone.
-- A push-based flush: replication stays pull-only (ADR-0011).
+Considered and rejected: [appendix](appendix/0031-a-workers-three-ways-out.md#considered-and-rejected).
 
 ## Consequences
 

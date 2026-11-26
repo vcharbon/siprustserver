@@ -536,6 +536,14 @@ end it, so a `Terminating` or `Terminated` body folds no further than its counte
 no limiter release, no reverse delete. A `Terminating` body ends no call in either
 direction; its counter is adopted and the terminal flush is awaited.
 
+## Considered and rejected
+
+- Stop authoring on SIGTERM: a direct-bound worker must finish its calls (D5).
+- A fixed tombstone TTL from departure: it expires under a live elder whose grace was raised.
+- A compaction that keeps a `Put` ahead of a `Delete`: every call end ships a body plus a
+  `Delete`, and a re-bootstrap still sees the `Delete` alone.
+- A push-based flush: replication stays pull-only (ADR-0011).
+
 ## Residuals
 
 The dual-owner window while a partition lasts is ADR-0014's accepted trade-off.

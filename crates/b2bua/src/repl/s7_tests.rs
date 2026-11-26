@@ -412,7 +412,7 @@ async fn own_endpoint_withdrawn_latches_without_sigterm() {
     assert_eq!(*own.borrow_and_update(), SelfEndpoint::Routable);
     assert!(!a_sup.metrics().withdrawn_running());
 
-    // Withdrawn from routing while its peer stays listed, no SIGTERM anywhere.
+    // Withdrawn from routing, no SIGTERM anywhere.
     membership.remove("A");
     tick(100).await;
     assert!(a_sup.is_withdrawn(), "the worker observed its own withdrawal");
