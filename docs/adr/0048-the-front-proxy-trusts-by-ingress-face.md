@@ -34,8 +34,9 @@ Detail: [appendix §1](appendix/0048-the-front-proxy-trusts-by-ingress-face.md#1
 
 On the internal face a request is worker-outbound when its direction entry carries `;outbound`,
 when its source is a registry worker, or when its top Via sent-by is one. A loose Route past the
-proxy's own is followed. The intake shed reads the same signs (`worker_signs.rs`) and never
-drops a new INVITE that carries one.
+proxy's own is followed. A single-face proxy's intake shed reads the same signs
+(`worker_signs.rs`) and never drops a new INVITE that carries one; a dual-face proxy's internal
+face sheds no new INVITE.
 Detail: [appendix §2](appendix/0048-the-front-proxy-trusts-by-ingress-face.md#2-on-the-internal-face-a-request-is-worker-outbound).
 
 ### 3. On the external face no claim of the internal plane holds

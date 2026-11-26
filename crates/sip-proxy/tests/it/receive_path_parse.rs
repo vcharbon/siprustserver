@@ -35,7 +35,7 @@ fn addr(s: &str) -> SocketAddr {
 /// as its core's.
 fn single_face() -> IntakeFace {
     let registry: Arc<dyn WorkerRegistry> = Arc::new(StaticWorkerRegistry::from_entries(vec![]));
-    IntakeFace::Internal(WorkerSigns::new(registry, ProxyAddr::from(addr(PROXY)), None))
+    IntakeFace::Single(WorkerSigns::new(registry, ProxyAddr::from(addr(PROXY)), None))
 }
 
 struct Rig {

@@ -161,7 +161,7 @@ overload gates of the proxy. The proxy does not authenticate that header.
 | A worker drains or is cordoned | A route to a different worker | A route to that worker while it runs. A draining worker exits after its grace, and the backup then serves its calls. |
 | A worker is overloaded | A route to the next worker in rank | A route to that worker |
 | All workers refuse new calls | The 503 of a worker, with Retry-After | A route to the owner |
-| The proxy is overloaded | 503 with Retry-After. If its input queue is half full, no answer. Emergency calls and the calls a worker places pass. | A route to the owner |
+| The proxy is overloaded | 503 with Retry-After. If its input queue is half full, no answer. Emergency calls and the calls a worker places pass, and so does every call on a dual-face proxy's internal face. | A route to the owner |
 | No worker is alive | 503 with Retry-After, then the VIPs are withdrawn | Nothing: the proxy drops it |
 | The two owners of the call are dead | Not applicable | Nothing: the proxy drops it, and the sender times out |
 | The cookie has a bad signature | Not applicable | 403 |

@@ -66,22 +66,21 @@ fn listing_the_worker() -> Arc<dyn WorkerRegistry> {
 
 /// The production intake hook at watermark 0 for the face at `on` of a proxy
 /// on `PROXY` routing over `registry`, its external face at `external` when
-/// it has one.
+/// it has one: the faces the proxy's sockets install.
 fn hook_at_watermark_0(
     metrics: &Arc<ProxyMetrics>,
     registry: &Arc<dyn WorkerRegistry>,
     external: Option<&str>,
     on: &str,
 ) -> PreIngressHook {
-    let face = if external == Some(on) {
-        IntakeFace::External
-    } else {
-        let external = external.map(|at| ProxyAddr::from(addr(at)));
-        IntakeFace::Internal(WorkerSigns::new(
+    let face = match external {
+        Some(ext) if ext == on => IntakeFace::External,
+        Some(_) => IntakeFace::WorkersOnly,
+        None => IntakeFace::Single(WorkerSigns::new(
             registry.clone(),
             ProxyAddr::from(addr(PROXY)),
-            external,
-        ))
+            None,
+        )),
     };
     intake_shed_hook(0, metrics.clone(), CustomParser::new(), face)
 }

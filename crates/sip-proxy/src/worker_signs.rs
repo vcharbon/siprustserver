@@ -1,10 +1,10 @@
 //! The signs that a request was sent by a worker, read the same by the core's
-//! Route preprocessing (`core::request::classify`) and by the intake shed
-//! ([`crate::intake_shed`]): its direction Route entry to this proxy carries
-//! `;outbound`, its source is a registry worker, or its top Via sent-by is one
-//! (a worker whose source is translated on its way here). The internal face,
-//! and the one face of a single-face proxy, trusts them; the external face
-//! trusts none (ADR-0048).
+//! Route preprocessing (`core::request::classify`) and by a single-face
+//! proxy's intake shed ([`crate::intake_shed`]): its direction Route entry to
+//! this proxy carries `;outbound`, its source is a registry worker, or its top
+//! Via sent-by is one (a worker whose source is translated on its way here).
+//! The internal face, and the one face of a single-face proxy, trusts them;
+//! the external face trusts none (ADR-0048).
 
 use std::net::SocketAddr;
 use std::sync::Arc;

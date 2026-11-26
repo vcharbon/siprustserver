@@ -12,7 +12,7 @@ use crate::registry::static_reg::StaticWorkerRegistry;
 use crate::registry::WorkerEntry;
 
 const WATERMARK: usize = 8;
-/// The proxy's internal (or only) face.
+/// The proxy's one face.
 const PROXY: (&str, u16) = ("192.0.2.1", 5060);
 /// The registry's one worker; no datagram below is sent by it unless a case
 /// says so.
@@ -22,18 +22,14 @@ fn src() -> SocketAddr {
     "192.0.2.9:5060".parse().unwrap()
 }
 
-/// The internal face of a single-face proxy on `PROXY` whose registry lists
+/// The one face of a single-face proxy on `PROXY` whose registry lists
 /// `WORKER`.
-fn internal() -> IntakeFace {
+fn single() -> IntakeFace {
     let registry = StaticWorkerRegistry::from_entries(vec![WorkerEntry::alive(
         "w1",
         ProxyAddr::new(WORKER.0, WORKER.1),
     )]);
-    IntakeFace::Internal(WorkerSigns::new(
-        Arc::new(registry),
-        ProxyAddr::new(PROXY.0, PROXY.1),
-        None,
-    ))
+    IntakeFace::Single(WorkerSigns::new(Arc::new(registry), ProxyAddr::new(PROXY.0, PROXY.1), None))
 }
 
 fn hook_on(face: IntakeFace) -> (PreIngressHook, Arc<ProxyMetrics>) {
@@ -42,7 +38,7 @@ fn hook_on(face: IntakeFace) -> (PreIngressHook, Arc<ProxyMetrics>) {
 }
 
 fn shed_hook() -> (PreIngressHook, Arc<ProxyMetrics>) {
-    hook_on(internal())
+    hook_on(single())
 }
 
 fn judge(hook: &PreIngressHook, raw: &[u8], depth: usize) -> PreIngressAction {
@@ -209,14 +205,14 @@ fn the_shed_reads_the_to_tag_as_the_parser_does() {
     assert!(misread.is_empty(), "the shed misreads the To-tag of {misread:#?}");
 }
 
-/// At the watermark the internal face queues a new INVITE carrying any one
+/// At the watermark a single-face proxy queues a new INVITE carrying any one
 /// worker sign, as the core reads it: a source that is a registry worker, a
 /// top Via sent-by that is one, or `;outbound` on the direction Route entry
 /// naming this proxy. A marker on a Route naming another host, or this
 /// proxy's Route without the marker, is no sign. The external face sheds
 /// every one of them.
 #[test]
-fn at_the_watermark_the_internal_face_queues_a_new_invite_with_a_worker_sign() {
+fn at_the_watermark_a_single_face_queues_a_new_invite_with_a_worker_sign() {
     let worker: SocketAddr = format!("{}:{}", WORKER.0, WORKER.1).parse().unwrap();
     let (worker_via, other_via) = (format!("{}:{}", WORKER.0, WORKER.1), "192.0.2.10:5060");
     let own_marker = format!("Route: <sip:{}:{};lr;outbound>\r\n", PROXY.0, PROXY.1);
@@ -234,14 +230,28 @@ fn at_the_watermark_the_internal_face_queues_a_new_invite_with_a_worker_sign() {
             PreIngressAction::Drop,
         ),
     ];
-    let (internal, internal_metrics) = hook_on(internal());
+    let (single, single_metrics) = hook_on(single());
     let (external, external_metrics) = hook_on(IntakeFace::External);
     for (what, from, raw, verdict) in &cases {
-        assert_eq!(judge_from(&internal, raw, *from, WATERMARK), *verdict, "internal: {what}");
+        assert_eq!(judge_from(&single, raw, *from, WATERMARK), *verdict, "single: {what}");
         assert_eq!(judge_from(&external, raw, *from, WATERMARK), PreIngressAction::Drop, "{what}");
     }
-    assert_eq!(internal_metrics.intake_shed(), 2);
+    assert_eq!(single_metrics.intake_shed(), 2);
     assert_eq!(external_metrics.intake_shed(), 5);
+}
+
+/// At the watermark the internal face of a dual-face proxy queues a new
+/// INVITE that carries no worker sign, and still drops a datagram no response
+/// can answer.
+#[test]
+fn at_the_watermark_a_workers_only_face_sheds_no_new_invite() {
+    let (hook, metrics) = hook_on(IntakeFace::WorkersOnly);
+    let plain_route = format!("Route: <sip:{}:{};lr>\r\n", PROXY.0, PROXY.1);
+    for raw in [NEW_INVITE.to_vec(), new_invite_via("192.0.2.10:5060", &plain_route)] {
+        assert_eq!(judge(&hook, &raw, WATERMARK), PreIngressAction::Accept);
+    }
+    assert_eq!(judge(&hook, GARBAGE, WATERMARK), PreIngressAction::Drop);
+    assert_eq!((metrics.intake_shed(), metrics.intake_unanswerable()), (0, 1));
 }
 
 #[test]

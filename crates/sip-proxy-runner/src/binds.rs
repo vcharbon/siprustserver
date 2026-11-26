@@ -43,9 +43,10 @@ pub struct ShardSockets {
 ///
 /// `Err` names the first socket that did not bind: the boot stops on it.
 /// `proxy_metrics` counts what the signalling sockets' intake hook drops.
-/// The internal face's hook reads a worker's signs over `registry`, the pool
-/// the cores route over, so a worker it lists later is read as one from then
-/// on; the external face's trusts none (`IntakeFace`).
+/// A single-face proxy's hook reads a worker's signs over `registry`, the
+/// pool the cores route over, so a worker it lists later is read as one from
+/// then on. A dual-face proxy's internal face sheds no new INVITE and its
+/// external face sheds every one (`IntakeFace`).
 pub async fn bind_sockets(
     cfg: &ProxyConfig,
     clock: &Clock,
@@ -68,11 +69,12 @@ pub async fn bind_sockets(
     metrics.local_addr().map_err(|e| format!("metrics listener on {metrics_sa}: {e}"))?;
 
     let watermark = intake_shed_watermark(queue_max, cfg.intake_shed_pct);
-    let external_advertise = cfg.external.as_ref().map(|ext| ext.advertise.clone());
-    let signs = WorkerSigns::new(registry.clone(), cfg.advertise.clone(), external_advertise);
+    let internal_face = match cfg.external {
+        Some(_) => IntakeFace::WorkersOnly,
+        None => IntakeFace::Single(WorkerSigns::new(registry.clone(), cfg.advertise.clone(), None)),
+    };
     let shed_on = |face| intake_shed_hook(watermark, proxy_metrics.clone(), cfg.parser(), face);
-    let (internal_shed, external_shed) =
-        (shed_on(IntakeFace::Internal(signs)), shed_on(IntakeFace::External));
+    let (internal_shed, external_shed) = (shed_on(internal_face), shed_on(IntakeFace::External));
     let with_buffers = |mut opts: BindUdpOpts| {
         if let Some(bytes) = udp_sndbuf {
             opts = opts.with_send_buffer(bytes);

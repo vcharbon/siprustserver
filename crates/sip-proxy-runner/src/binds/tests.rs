@@ -122,9 +122,14 @@ async fn the_intake_hook_reads_under_the_limit_the_configuration_states() {
     assert!(matches!(&*read, Ok(Ok(_))), "{read:?}");
 }
 
+/// The address the proxy of these tests advertises on its internal (or only)
+/// face, apart from the loopback address it listens on.
+const ADVERTISED: &str = "192.0.2.1:5060";
+
 /// The one shard's sockets of a proxy whose configuration lists `workers`
-/// (`PROXY_WORKERS`), with an external face on loopback when `dual`, and the
-/// intake-shed watermark at one queued datagram (`PROXY_INTAKE_SHED_PCT=0`).
+/// (`PROXY_WORKERS`) and advertises `ADVERTISED`, with an external face on
+/// loopback when `dual`, and the intake-shed watermark at one queued datagram
+/// (`PROXY_INTAKE_SHED_PCT=0`).
 ///
 /// A test sends every datagram before its first read. On the current-thread
 /// runtime the receive pump judges every datagram waiting in the socket, in
@@ -133,6 +138,7 @@ async fn the_intake_hook_reads_under_the_limit_the_configuration_states() {
 async fn at_the_watermark(metrics: &Arc<ProxyMetrics>, workers: &str, dual: bool) -> ShardSockets {
     let lookup = |key: &str| match key {
         "PROXY_LISTEN" => Some("127.0.0.1:0".to_string()),
+        "PROXY_ADVERTISE" => Some(ADVERTISED.to_string()),
         "PROXY_LISTEN_EXT" if dual => Some("127.0.0.1:0".to_string()),
         "PROXY_METRICS" => Some("127.0.0.1:0".to_string()),
         "PROXY_WORKERS" => Some(workers.to_string()),
@@ -184,6 +190,11 @@ fn new_invite(call_id: &str, sent_by: &str) -> String {
     )
 }
 
+/// `invite` with a first Route entry to `at` carrying the `;outbound` marker.
+fn routed_outbound(invite: &str, at: &str) -> String {
+    invite.replacen("\r\n", &format!("\r\nRoute: <sip:{at};lr;outbound>\r\n"), 1)
+}
+
 /// The next datagram `face` queued, read as text, if one is queued within
 /// 500 ms.
 async fn next_queued(face: &dyn UdpEndpoint) -> Option<String> {
@@ -199,26 +210,54 @@ async fn send_in_order(peer: &tokio::net::UdpSocket, face: &dyn UdpEndpoint, dat
 }
 
 /// A single-face proxy queues, at the watermark, a new INVITE sent from the
-/// address of a worker its configuration lists, and sheds a new INVITE from
-/// any other address: the datagram sent after it is the next one queued.
+/// address of a worker its configuration lists, and one whose top Via names
+/// that worker from another address; it sheds a new INVITE with neither: the
+/// datagram sent after it is the next one queued.
 #[tokio::test]
 async fn at_the_watermark_a_single_face_queues_a_listed_workers_new_invite() {
     let (worker, outsider) = (peer("127.0.0.1").await, peer("127.0.0.2").await);
-    let workers = format!("w0@{}", worker.local_addr().expect("bound"));
+    let listed = worker.local_addr().expect("bound").to_string();
     let metrics = Arc::new(ProxyMetrics::new());
-    let shard = at_the_watermark(&metrics, &workers, false).await;
+    let shard = at_the_watermark(&metrics, &format!("w0@{listed}"), false).await;
     let face = shard.internal.as_ref();
-    let leg = new_invite("leg", UNLISTED_SENT_BY);
+    let (leg, translated) =
+        (new_invite("leg", UNLISTED_SENT_BY), new_invite("translated", &listed));
     let (waiting, after) = (options("waiting"), options("after"));
     send_in_order(&worker, face, &[&waiting, &leg]).await;
-    send_in_order(&outsider, face, &[&new_invite("outsider", UNLISTED_SENT_BY), &after]).await;
+    let outsider_sent = [translated.as_str(), &new_invite("outsider", UNLISTED_SENT_BY), &after];
+    send_in_order(&outsider, face, &outsider_sent).await;
     assert_eq!(next_queued(face).await, Some(waiting));
     assert_eq!(
         next_queued(face).await,
         Some(leg),
         "the listed worker's new INVITE is queued at the watermark"
     );
+    assert_eq!(
+        next_queued(face).await,
+        Some(translated),
+        "the new INVITE whose Via names the listed worker is queued at the watermark"
+    );
     assert_eq!(next_queued(face).await, Some(after), "the outsider's new INVITE is shed");
+    assert_eq!(metrics.intake_shed(), 1);
+}
+
+/// A single-face proxy reads the `;outbound` marker on a Route naming the
+/// address it advertises, not the one it listens on, as a worker's sign: at
+/// the watermark a new INVITE carrying it is queued from an address and a Via
+/// no configuration lists, and the same INVITE marked on a Route naming
+/// another host is shed.
+#[tokio::test]
+async fn at_the_watermark_a_single_face_reads_the_outbound_marker_to_its_advertise() {
+    let metrics = Arc::new(ProxyMetrics::new());
+    let shard = at_the_watermark(&metrics, "w0@10.0.0.1:5060", false).await;
+    let face = shard.internal.as_ref();
+    let marked = routed_outbound(&new_invite("marked", UNLISTED_SENT_BY), ADVERTISED);
+    let foreign = routed_outbound(&new_invite("foreign", UNLISTED_SENT_BY), "198.51.100.9:5060");
+    let (waiting, after) = (options("waiting"), options("after"));
+    send_in_order(&peer("127.0.0.1").await, face, &[&waiting, &marked, &foreign, &after]).await;
+    assert_eq!(next_queued(face).await, Some(waiting));
+    assert_eq!(next_queued(face).await, Some(marked), "the marked new INVITE is queued");
+    assert_eq!(next_queued(face).await, Some(after), "the foreign-marked new INVITE is shed");
     assert_eq!(metrics.intake_shed(), 1);
 }
 

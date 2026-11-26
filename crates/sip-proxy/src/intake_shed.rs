@@ -2,6 +2,7 @@
 //! last-line guard below the admission layer (the self-gate is the first-line
 //! brake).
 
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use sip_message::{CustomParser, Method, SipMessage, SipRequest};
@@ -12,29 +13,46 @@ use sip_txn::{class_of, InviteClass};
 use crate::observability::ProxyMetrics;
 use crate::worker_signs::WorkerSigns;
 
-/// The face a hook serves, as it reads who sent a new INVITE.
+/// The face a hook serves, which decides whose new INVITE it sheds.
 #[derive(Clone)]
 pub enum IntakeFace {
-    /// The internal face, and the one face of a single-face proxy: a new
-    /// INVITE carrying a worker sign ([`WorkerSigns::reads_as_a_workers`])
-    /// belongs to a call a worker accepted and is never shed. A single-face
-    /// proxy that strangers reach trusts these signs as its core does.
-    Internal(WorkerSigns),
+    /// The one face of a single-face proxy, which carries the workers' and
+    /// the callers' traffic alike: a new INVITE carrying a worker sign
+    /// ([`WorkerSigns::reads_as_a_workers`]) belongs to a call a worker
+    /// accepted and is never shed. A single-face proxy that strangers reach
+    /// trusts these signs as its core does.
+    Single(WorkerSigns),
+    /// The internal face of a dual-face proxy, which carries the workers'
+    /// traffic alone: no new INVITE is shed, since a shed there could only
+    /// drop a worker's leg silently, where the self-gate behind it answers
+    /// one it refuses with a 503.
+    WorkersOnly,
     /// The external face of a dual-face proxy, where its deployment keeps
-    /// strangers: it trusts no worker sign.
+    /// strangers: it trusts no worker sign and sheds every new INVITE.
     External,
+}
+
+impl IntakeFace {
+    /// Whether this face sheds `req`, a new non-emergency INVITE from `src`.
+    fn sheds(&self, req: &SipRequest, src: SocketAddr) -> bool {
+        match self {
+            IntakeFace::Single(signs) => !signs.reads_as_a_workers(req, src),
+            IntakeFace::WorkersOnly => false,
+            IntakeFace::External => true,
+        }
+    }
 }
 
 /// The hook every signaling socket runs on each datagram before it is queued.
 /// It parses the datagram, and the parse is queued with it, so the core does
 /// not parse it again. At or above `watermark` queued datagrams it drops:
 ///
-/// - a new non-emergency INVITE (`is_sheddable`) that carries no worker sign
-///   on `face`, counted in [`ProxyMetrics::intake_shed`];
+/// - a new non-emergency INVITE (`is_sheddable`) that `face` sheds, counted
+///   in [`ProxyMetrics::intake_shed`];
 /// - a datagram no response can answer — refused with nothing a 400 could
 ///   echo, or a parser panic — counted in
 ///   [`ProxyMetrics::intake_unanswerable`] and as the parse error or panic
-///   the core would have counted.
+///   the core would have counted, on every face.
 ///
 /// In-dialog traffic, responses, other methods, emergency INVITEs, a
 /// worker's new INVITE and answerable refusals (the core answers them with
@@ -64,15 +82,10 @@ pub fn intake_shed_hook(
                 metrics.record_intake_unanswerable();
                 PreIngressAction::Drop
             }
-            Ok(Ok(SipMessage::Request(req))) if is_sheddable(req) => match &face {
-                IntakeFace::Internal(signs) if signs.reads_as_a_workers(req, src) => {
-                    PreIngressAction::Accept
-                }
-                _ => {
-                    metrics.record_intake_shed();
-                    PreIngressAction::Drop
-                }
-            },
+            Ok(Ok(SipMessage::Request(req))) if is_sheddable(req) && face.sheds(req, src) => {
+                metrics.record_intake_shed();
+                PreIngressAction::Drop
+            }
             _ => PreIngressAction::Accept,
         }
     })
