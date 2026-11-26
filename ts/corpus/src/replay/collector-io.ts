@@ -72,7 +72,7 @@ export const locker = (
   })
 
 /** `ms` in words: milliseconds under a second, else seconds to the tenth. */
-export const durationOf = (ms: number): string => (ms < 1_000 ? `${Math.round(ms)} ms` : `${(ms / 1_000).toFixed(1)} s`)
+export const durationOf = (ms: number): string => (Math.round(ms) < 1_000 ? `${Math.round(ms)} ms` : `${(ms / 1_000).toFixed(1)} s`)
 
 /** `event` as a line of the run's output, with the time its step took where `tookMs` states it. */
 export const lineOf = (event: CollectorRun.Event, tookMs?: number): string =>

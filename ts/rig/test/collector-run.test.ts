@@ -6,10 +6,12 @@
  * directory; a failed, timed-out or unreadable `open` or `collect` answering
  * `not checkable` on every cell, as on a cell the base could not describe; a
  * `close` failing twice marking the lab left changed; locks held from `open`
- * to `close`; an `on-failure` collector collecting the failed cells alone;
+ * to `close`; a step's log relayed to the run's output; an `on-failure`
+ * collector collecting the failed cells alone;
  * an on-demand run over the cells named.
  */
 import { Attachment, Verification } from "@sip/contracts"
+import * as Console from "effect/Console"
 import * as Effect from "effect/Effect"
 import * as Exit from "effect/Exit"
 import * as Fiber from "effect/Fiber"
@@ -462,6 +464,18 @@ describe("a scope's collectors", () => {
     expect(failed!.scope.verifications).toEqual(lines)
     expect(events.find((event) => event.phase === "failed")?.message).toBe(message)
     expect(traceOf(root)).toEqual(["collect failing-collect", "close failing-collect"])
+  })
+
+  it("relays what a step says on its log to the run's output, its label and step named", async () => {
+    const { root, rig } = await samples()
+    const printed: Array<string> = []
+    const heard: Console.Console = { ...globalThis.console, log: (...args: ReadonlyArray<unknown>) => void printed.push(args.map(String).join(" ")) }
+    await Effect.runPromise(
+      scope([instanceOf(rig, root, "failing-collect")], cellsUnder(root), { sink: () => Effect.void, locker: memoryLocker() }).pipe(
+        Effect.provideService(Console.Console, heard)
+      )
+    )
+    expect(printed).toContain("[collector] failing-collect (collect) the records store is down")
   })
 
   it("does not collect a collector whose open failed, answers not checkable with the open's message, and still closes it", async () => {

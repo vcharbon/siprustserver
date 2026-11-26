@@ -2,7 +2,7 @@
  * A step's log relayed to the run's output (`step-relay.ts`): what the step
  * appends, while it runs and once it ended, its last line without a newline
  * included, never what the log held before; a step that fails still relayed
- * to its end; past the cap, one line naming the log. The relay's polls run on
+ * to its end; past its head, its tail at its end after one line naming the log. The relay's polls run on
  * a test clock the step itself moves.
  */
 import * as Console from "effect/Console"
@@ -41,7 +41,7 @@ describe("a step's log relayed to the run's output", () => {
     const log = logWith("an earlier attempt's line\n")
     let seenWhileRunning: ReadonlyArray<string> = []
     const { exit, lines } = await relaying((heard) =>
-      StepRelay.relayed("records", log, Effect.gen(function*() {
+      StepRelay.relayed("records", "collect", log, Effect.gen(function*() {
         fs.appendFileSync(log, "the store as found\nhalf ")
         yield* TestClock.adjust(StepRelay.POLL_MS)
         seenWhileRunning = [...heard]
@@ -50,30 +50,32 @@ describe("a step's log relayed to the run's output", () => {
       }))
     )
     expect(exit._tag).toBe("Success")
-    expect(seenWhileRunning).toEqual(["[collector] records | the store as found"])
+    expect(seenWhileRunning).toEqual(["[collector] records (collect) the store as found"])
     expect(lines).toEqual([
-      "[collector] records | the store as found",
-      "[collector] records | half a line",
-      "[collector] records | no newline"
+      "[collector] records (collect) the store as found",
+      "[collector] records (collect) half a line",
+      "[collector] records (collect) no newline"
     ])
   })
 
   it("relays a failing step to its last line", async () => {
     const log = logWith("")
     const { exit, lines } = await relaying(() =>
-      StepRelay.relayed("db", log, Effect.andThen(Effect.sync(() => fs.appendFileSync(log, "dump refused: disk full\n")), Effect.fail("exited 1")))
+      StepRelay.relayed("db", "open", log, Effect.andThen(Effect.sync(() => fs.appendFileSync(log, "dump refused: disk full\n")), Effect.fail("exited 1")))
     )
     expect(exit._tag).toBe("Failure")
-    expect(lines).toEqual(["[collector] db | dump refused: disk full"])
+    expect(lines).toEqual(["[collector] db (open) dump refused: disk full"])
   })
 
-  it(`prints ${StepRelay.MAX_LINES} lines of a step at most, then one naming the log`, async () => {
+  it(`prints the first ${StepRelay.HEAD_LINES} lines of a step as they come and its last ${StepRelay.TAIL_LINES} at its end, after one counting those left out`, async () => {
     const log = logWith("")
+    const total = StepRelay.HEAD_LINES + 80 + StepRelay.TAIL_LINES
     const { lines } = await relaying(() =>
-      StepRelay.relayed("chatty", log, Effect.sync(() => fs.appendFileSync(log, Array.from({ length: StepRelay.MAX_LINES + 50 }, (_, i) => `line ${i}\n`).join(""))))
+      StepRelay.relayed("chatty", "collect", log, Effect.sync(() => fs.appendFileSync(log, Array.from({ length: total }, (_, i) => `line ${i}\n`).join(""))))
     )
-    expect(lines).toHaveLength(StepRelay.MAX_LINES + 1)
-    expect(lines.at(-2)).toBe(`[collector] chatty | line ${StepRelay.MAX_LINES - 1}`)
-    expect(lines.at(-1)).toBe(`[collector] chatty | … further lines in ${log}`)
+    expect(lines).toHaveLength(StepRelay.HEAD_LINES + 1 + StepRelay.TAIL_LINES)
+    expect(lines[StepRelay.HEAD_LINES - 1]).toBe(`[collector] chatty (collect) line ${StepRelay.HEAD_LINES - 1}`)
+    expect(lines[StepRelay.HEAD_LINES]).toBe(`[collector] chatty (collect) … 80 line(s) left out, every line in ${log}`)
+    expect(lines.at(-1)).toBe(`[collector] chatty (collect) line ${total - 1}`)
   })
 })

@@ -259,7 +259,7 @@ const lastLineOf = (file: string): string | undefined => {
 const runStep = (instance: Instance, file: string, step: "open" | "collect" | "close", timeoutMs: number, stdout?: string) => {
   const log = path.join(instance.dir, `${step}.log`)
   return Effect.map(
-    StepRelay.relayed(instance.label, log, Executable.run({
+    StepRelay.relayed(instance.label, step, log, Executable.run({
       dir: instance.collector.dir,
       file,
       ...layoutOf(instance),

@@ -106,6 +106,16 @@ describe("Detached.launch", () => {
     }
   })
 
+  it("records the exit only once the command's last line is in the log, its output past the pipe's buffer included", async () => {
+    const dir = dirOf()
+    await run(Detached.launch(dir, ["seq", "1", "40000"]))
+    expect(await exited(dir)).toBe(0)
+    const lines = Detached.unstamped(fs.readFileSync(path.join(dir, "log"), "utf8")).split("\n").filter((line) => line !== "")
+    expect(lines).toHaveLength(40000)
+    expect(lines.at(-1)).toBe("40000")
+    await stopped(dir)
+  })
+
   it("records the exit of a command whose background child still holds its output, the command's lines in the log", async () => {
     const dir = dirOf()
     await run(Detached.launch(dir, ["sh", "-c", "sleep 3600 & echo done; exit 4"]))
