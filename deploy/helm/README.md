@@ -64,6 +64,14 @@ A component on the external plane, such as a media relay, is a sidecar of the
 proxy pod: it shares the edge node's network (hostNetwork) and the proxy's
 fate.
 
+## The worker Service
+
+The chart keeps the worker Service `b2bua-worker` (`helm.sh/resource-policy: keep`):
+`helm uninstall`, or an upgrade or rollback that would delete it, leaves it in place.
+Its endpoint list is the workers' membership, and its deletion empties every slice at
+once (ADR-0031 D6). A reinstall under the same release name adopts it; another release
+in the namespace needs it deleted first (`kubectl delete service b2bua-worker`).
+
 ## Removing the chart from a proxy node
 
 A pod stop removes nothing from its node, so the routes hold through a restart (ADR-0056 §7, §11).

@@ -22,8 +22,9 @@
 //!   and counted on the `b2bua_repl_peers_pulled_not_ready` gauge.
 //!
 //! Every snapshot is also read for this node's **own** endpoint before self is
-//! filtered out of the desired set: once seen routable, its disappearance is the
-//! node's withdrawal from routing (ADR-0031 D6), and its ordinal bound to
+//! filtered out of the desired set: once seen routable, its disappearance while
+//! a member stays listed is the node's withdrawal from routing (ADR-0031 D6),
+//! and its ordinal bound to
 //! another worker identity is its supersession (ADR-0055 §6) — the
 //! [`SelfEndpoint`](super::SelfEndpoint) state, exposed as
 //! [`is_withdrawn`](ReplicationSupervisor::is_withdrawn) and on a watch the core

@@ -376,7 +376,8 @@ the caller, CANCEL to the callee). Counted on `b2bua_operator_released_total{kin
 **Ready** = every stream to a *reachable ready* peer, **Reclaim** first then
 **Backup**, has hit its first `Noop` (ADR-0014 §11; best-effort, hard-timer bounded so a
 dead/slow peer cannot hang readiness). **Draining** = latched on SIGTERM, or on the worker's own observation that its
-endpoint is withdrawn; terminal. The drain exits on the first of: live calls
+endpoint is withdrawn; terminal. A synced view that lists no member, after one that listed
+the worker, is no withdrawal: the whole set is gone at once (ADR-0031 D6). The drain exits on the first of: live calls
 cleared (`quiescent`), every live call's backup holding its changelog head once
 the floor `B2BUA_DRAIN_MIN_MS` has passed, for a worker that has observed its own
 withdrawal (`caught_up`), or the grace `B2BUA_DRAIN_GRACE_MS`, as `grace` for a
