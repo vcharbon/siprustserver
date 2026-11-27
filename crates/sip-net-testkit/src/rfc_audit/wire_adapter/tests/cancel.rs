@@ -114,6 +114,28 @@ fn a_200_crossing_the_cancel_is_judged_only_at_the_uas_lane() {
     assert_eq!((out[0].0.as_str(), out[0].3.as_deref()), (BOB, Some(BOB)));
 }
 
+/// The recording stamps at millisecond resolution: a 200 the UAS sent in the
+/// millisecond it took the CANCEL shows no order between the two, so §9.2's
+/// 200 after the CANCEL is not read there. A 200 one millisecond later is.
+#[test]
+fn a_200_in_the_cancel_s_millisecond_is_not_charged() {
+    let at_callee = |ok_ms| {
+        vec![
+            recv(BOB, req("INVITE", "z9hG4bK-x", 1, None), ALICE, 0),
+            sent(BOB, resp(180, 1, "INVITE", "bt", "z9hG4bK-x"), ALICE, 1),
+            recv(BOB, req("CANCEL", "z9hG4bK-x", 1, None), ALICE, 2),
+            Stamped {
+                at_ms: ok_ms,
+                ..sent(BOB, resp(200, 1, "INVITE", "bt", "z9hG4bK-x"), ALICE, 3)
+            },
+        ]
+    };
+    let tie = live(RuleId::No200AfterCancel).check_positioned(&at_callee(2));
+    assert!(tie.is_empty(), "one millisecond holds both: {tie:?}");
+    let after = live(RuleId::No200AfterCancel).check_positioned(&at_callee(3));
+    assert_eq!(after.len(), 1, "the next millisecond orders them: {after:?}");
+}
+
 #[test]
 fn divergent_cancel_route_is_flagged_at_its_wire_position() {
     let evs = vec![
