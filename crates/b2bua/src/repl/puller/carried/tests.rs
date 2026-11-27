@@ -9,6 +9,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
+use call::{CallModelState, LegState};
 use repl_net::frame::{Frame, Op, Partition, Watermark};
 use repl_net::transport::{
     ConnectError, ListenError, ReplicationConnection, ReplicationListener, ReplicationNetwork,
@@ -19,6 +20,7 @@ use tokio::sync::{mpsc, watch};
 
 use super::{CarriedCopies, StoredCopy};
 use crate::metrics::B2buaMetrics;
+use crate::repl::call_bodies_tests::{body_at, call_in};
 use crate::repl::{Puller, PullerConfig, ReplicatingCallStore, RouterSink};
 use crate::router::{PrimaryWrite, ReplCommand};
 use crate::store::{CallStore, PartitionRole, PutOpts, TakeoverProbe};
@@ -210,9 +212,13 @@ impl Node {
 
     /// Write call `id` at version `(p, b)` here, as the router or a takeover
     /// copy writes it.
-    async fn write(&self, id: &str, (p, b): (i64, i64)) {
+    async fn write(&self, id: &str, version: (i64, i64)) {
+        self.write_body(id, b"written here".to_vec(), version).await;
+    }
+
+    /// [`write`](Self::write) of `body`.
+    async fn write_body(&self, id: &str, body: Vec<u8>, (p, b): (i64, i64)) {
         let (role, primary) = self.keyspace();
-        let body = b"written here".to_vec();
         let opts = PutOpts::default();
         self.store
             .put_call(role, primary, &key(self.flow, id), body, &[], 0, p, b, &opts)
@@ -426,6 +432,35 @@ async fn on_the_backup_flow_the_sweep_drops_as_a_tail_delete_does() {
     assert!(node.holds("y").await);
     assert_eq!(node.swept(), 3);
     assert_eq!(node.reclaim_commands(), [format!("delete heard by {}", key(flow, "t"))]);
+}
+
+/// The sweep keeps an Element the `Delete` guard keeps (ADR-0031 D3): pass 1
+/// carries X and Z, ringing, and is cut; a takeover copy here answers both
+/// callers and writes their Elements, which the holder never reads, Z's then
+/// ending; the holder ends both behind the cut. Pass 2 carries Y alone and
+/// catches up: X's Element, `Active` with its caller answered here, stays;
+/// Z's, ending, goes; no takeover copy is live to hear of either.
+#[tokio::test(start_paused = true)]
+async fn on_the_backup_flow_the_sweep_keeps_an_element_answered_here() {
+    let flow = Partition::Bak;
+    let mut node = Node::new(flow);
+    let _cancel = node.pull_plain(vec![
+        cut(vec![put(flow, (1, 5), "x", 1), put(flow, (1, 5), "z", 1)]),
+        quiet(vec![put(flow, (1, 9), "y", 1), noop((1, 9))]),
+    ]);
+    pump(40).await;
+    assert!(node.holds("z").await, "pass 1 landed before its cut");
+    let answered = call_in("w0", "w1", "x", LegState::Confirmed, CallModelState::Active);
+    node.write_body("x", body_at(&answered, 1, 1), (1, 1)).await;
+    let ending = call_in("w0", "w1", "z", LegState::Confirmed, CallModelState::Terminating);
+    node.write_body("z", body_at(&ending, 1, 1), (1, 1)).await;
+    pump(1_000).await;
+
+    assert!(node.holds("x").await, "X's Element, answered here, stays");
+    assert!(!node.holds("z").await, "Z's Element, ending, goes");
+    assert!(node.holds("y").await);
+    assert_eq!(node.swept(), 1);
+    assert!(node.reclaim_commands().is_empty());
 }
 
 /// On the Reclaim flow a hard timer running out on an open pass reclaims a

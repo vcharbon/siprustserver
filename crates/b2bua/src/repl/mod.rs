@@ -108,6 +108,9 @@ mod s10_tests;
 mod s11_tests;
 
 #[cfg(test)]
+mod call_bodies_tests;
+
+#[cfg(test)]
 mod s12_tests;
 
 #[cfg(test)]
