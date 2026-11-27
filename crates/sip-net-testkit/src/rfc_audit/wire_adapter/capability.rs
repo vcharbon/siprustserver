@@ -53,9 +53,9 @@ fn rejection_405_lost(
     lane: &LaneKey,
     f: &rfc_rules::Finding,
     cid: &str,
-    msgs: &[Msg],
+    _msgs: &[Msg],
 ) -> bool {
-    rejection_explained(dropped, (lane, f, cid), msgs, (405, "Allow"))
+    rejection_explained(dropped, (lane, f, cid), (405, "Allow"))
 }
 
 /// A 420 with `Unsupported` the loss model explains ([`rejection_explained`]).
@@ -64,72 +64,30 @@ fn rejection_420_lost(
     lane: &LaneKey,
     f: &rfc_rules::Finding,
     cid: &str,
-    msgs: &[Msg],
+    _msgs: &[Msg],
 ) -> bool {
-    rejection_explained(dropped, (lane, f, cid), msgs, (420, "Unsupported"))
+    rejection_explained(dropped, (lane, f, cid), (420, "Unsupported"))
 }
 
-/// Whether the loss model explains the rejection the taker `lane` misses,
-/// over its view `msgs`. With no final in view: the emitter's `status` final
-/// carrying an `owed_header` row was dropped on its way to the lane, and its
-/// §17.2.2 re-sent copy fell outside the view. With a 481 in view: the
-/// request's copy was dropped on its way to the emitter, and the dialog had
-/// ended in the lane's view before the 481 arrived, so the emitter took a
-/// later copy on an ended dialog and owed it the 481 (§12.2.2). A wrong
-/// final in view, a lost final of another status or without the owed
-/// header, and a 481 with no lost request copy, are never excused.
+/// Whether the loss model explains the rejection the taker `lane` misses:
+/// with no final in view, the emitter's `status` final carrying an
+/// `owed_header` row was dropped on its way to the lane, and its §17.2.2
+/// re-sent copy fell outside the view. A final in view, and a lost final of
+/// another status or without the owed header, are never excused.
 fn rejection_explained(
     dropped: &Dropped,
     (lane, f, cid): (&LaneKey, &rfc_rules::Finding, &str),
-    msgs: &[Msg],
     owed: (u16, &str),
 ) -> bool {
     let Decision::Violated(rfc_rules::Evidence::RejectionNotIssued {
-        rejection_msg,
         method,
-        answered_status,
+        answered_status: 0,
         ..
     }) = &f.decision
     else {
         return false;
     };
-    let ends = (lane.as_str(), f.emitter.as_str(), cid);
-    match answered_status {
-        0 => dropped.final_to(ends, (method, f.cseq), owed),
-        481 => {
-            dropped.request_from(ends, method, f.cseq)
-                && answered_on_ended_dialog(msgs, &msgs[*rejection_msg])
-        }
-        _ => false,
-    }
-}
-
-/// Whether, in the view `msgs`, a 2xx to a BYE on `request`'s dialog came
-/// before the 481 its taker answered it with.
-fn answered_on_ended_dialog(msgs: &[Msg], request: &Msg) -> bool {
-    let answered_at = msgs.iter().find_map(|m| {
-        let answers = m.status() == Some(481)
-            && m.call_id == request.call_id
-            && m.cseq == request.cseq
-            && m.cseq_method == request.cseq_method
-            && m.via_branch == request.via_branch;
-        answers.then_some(m.at_us)
-    });
-    let Some(answered_at) = answered_at else { return false };
-    msgs.iter().any(|m| {
-        m.at_us < answered_at
-            && m.cseq_method.eq_ignore_ascii_case("BYE")
-            && m.status().is_some_and(|s| (200..300).contains(&s))
-            && dialog(m) == dialog(request)
-    })
-}
-
-/// The dialog `m` names: its Call-ID and its two tags in a fixed order, so
-/// both directions of the dialog name it alike.
-fn dialog(m: &Msg) -> (&str, [Option<&str>; 2]) {
-    let mut tags = [m.from_tag.as_deref(), m.to_tag.as_deref()];
-    tags.sort_unstable();
-    (m.call_id.as_str(), tags)
+    dropped.final_to((lane.as_str(), f.emitter.as_str(), cid), (method, f.cseq), owed)
 }
 
 fn unsupported_method_405_allow(f: &rfc_rules::Finding, cid: &str) -> String {

@@ -200,25 +200,34 @@ fn lost_on_send(request: Vec<u8>, seq: u64) -> Stamped<SignalingNetworkEvent> {
     }
 }
 
-/// §12.2.2 on a lossy wire, at the requester's lane: an in-dialog `method`
-/// stating `extra`, owed a rejection, answered 481. The 481 is excused when
-/// the request's copy was lost on send and the dialog's BYE 2xx came before
-/// the 481: the UAS took a later copy on an ended dialog. With no lost copy,
-/// or no BYE 2xx ahead of the 481, the 481 stays the miss.
-fn a_481_after_the_bye_is_excused_only_behind_a_lost_copy(rule: RuleId, method: &str, extra: &str) {
+/// §12.2.2 at the requester's lane: an in-dialog `method` stating `extra`,
+/// owed a rejection, answered 481. A 481 the UAS sent after its own BYE on
+/// the dialog is the answer of a dialog it ended: the request crossed that
+/// BYE, or a later copy of it, lost on send, reached the UAS after it. With
+/// no BYE, or the BYE after the 481, the 481 stays the miss, lost copy or
+/// not.
+fn a_481_after_the_uas_s_bye_is_its_answer(rule: RuleId, method: &str, extra: &str) {
     let request = || in_dialog(method, B, "z9hG4bK-n", 2, A, B, extra);
     let bye = || recv(ALICE, in_dialog("BYE", A, "z9hG4bK-b", 1, B, A, ""), SUT, 100);
     let bye_ok = || sent(ALICE, resp_with(200, 1, "BYE", "z9hG4bK-b", ""), SUT, 101);
     let refused = |seq| recv(ALICE, resp_with(481, 2, method, "z9hG4bK-n", ""), SUT, seq);
 
-    let behind_a_lost_copy = vec![lost_on_send(request(), 1), bye(), bye_ok(), refused(600)];
-    let excused = owed_rejection(rule, request(), behind_a_lost_copy);
-    assert!(excused.is_empty(), "the 481 answered a later copy: {excused:?}");
+    let answered = [
+        ("a crossing", vec![bye(), bye_ok(), refused(600)]),
+        ("behind a lost copy", vec![lost_on_send(request(), 1), bye(), bye_ok(), refused(600)]),
+    ];
+    for (case, then) in answered {
+        let found = owed_rejection(rule, request(), then);
+        assert!(found.is_empty(), "{case}: the 481 answered an ended dialog: {found:?}");
+    }
 
     let unexplained = [
-        ("no lost copy", vec![bye(), bye_ok(), refused(600)]),
-        ("no BYE", vec![lost_on_send(request(), 1), refused(600)]),
-        ("the BYE after the 481", vec![lost_on_send(request(), 1), refused(50), bye(), bye_ok()]),
+        ("no BYE", vec![refused(600)]),
+        ("no BYE behind a lost copy", vec![lost_on_send(request(), 1), refused(600)]),
+        ("the BYE after the 481", vec![refused(50), bye(), bye_ok()]),
+        ("the BYE after the 481 behind a lost copy", {
+            vec![lost_on_send(request(), 1), refused(50), bye(), bye_ok()]
+        }),
     ];
     for (case, then) in unexplained {
         let found = owed_rejection(rule, request(), then);
@@ -229,8 +238,8 @@ fn a_481_after_the_bye_is_excused_only_behind_a_lost_copy(rule: RuleId, method: 
 }
 
 #[test]
-fn a_481_to_an_unsupported_require_after_the_bye_is_excused_only_behind_a_lost_copy() {
-    a_481_after_the_bye_is_excused_only_behind_a_lost_copy(
+fn a_481_to_an_unsupported_require_after_the_uas_s_bye_is_its_answer() {
+    a_481_after_the_uas_s_bye_is_its_answer(
         RuleId::UnsupportedExtension420,
         "INFO",
         "Require: frobnicate\r\n",
@@ -238,12 +247,8 @@ fn a_481_to_an_unsupported_require_after_the_bye_is_excused_only_behind_a_lost_c
 }
 
 #[test]
-fn a_481_to_an_unrecognised_method_after_the_bye_is_excused_only_behind_a_lost_copy() {
-    a_481_after_the_bye_is_excused_only_behind_a_lost_copy(
-        RuleId::UnsupportedMethod405Allow,
-        "FROBNICATE",
-        "",
-    );
+fn a_481_to_an_unrecognised_method_after_the_uas_s_bye_is_its_answer() {
+    a_481_after_the_uas_s_bye_is_its_answer(RuleId::UnsupportedMethod405Allow, "FROBNICATE", "");
 }
 
 /// A request whose copy is lost on send still owes its rejection: the

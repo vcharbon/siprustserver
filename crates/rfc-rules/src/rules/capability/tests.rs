@@ -479,8 +479,61 @@ fn a_481_to_an_unknown_method_on_a_dialog_a_bye_ended_discharges_the_405() {
     assert!(violations(&UnsupportedMethod405Allow, &msgs).is_empty());
 }
 
+/// Bob's BYE of the dialog `at`/`bt` at `at_us`, and alice's 200 to it at
+/// `ok_us`.
+fn bye_from_bob(at_us: u64, ok_us: u64) -> [Msg; 2] {
+    let bye = Msg {
+        src: BOB.to_string(),
+        dst: ALICE.to_string(),
+        from_tag: Some("bt".to_string()),
+        to_tag: Some("at".to_string()),
+        ..taken(at_us, "BYE", "z9hG4bK-bb", 7, "")
+    };
+    let ok = Msg {
+        src: ALICE.to_string(),
+        dst: BOB.to_string(),
+        from_tag: Some("bt".to_string()),
+        to_tag: Some("at".to_string()),
+        ..answered(ok_us, 200, "BYE", "z9hG4bK-bb", 7, "")
+    };
+    [bye, ok]
+}
+
+/// RFC 3261 §15.1.1 and RFC 5407 §3.3: a UA's dialog ends for new requests
+/// once it sends or takes a BYE, so a request crossing bob's BYE draws the
+/// 481 of a dialog bob no longer holds, at whichever vantage the crossing is
+/// read: alice's shows her request before bob's BYE, bob's shows his 481
+/// before alice's 200.
+#[test]
+fn a_481_to_a_request_crossing_the_taker_s_bye_discharges_the_require() {
+    let info = || taken_in_dialog(1_000, "INFO", "z9hG4bK-i", 3, "Require: frobnicate\r\n");
+    let refused = |at_us| answered(at_us, 481, "INFO", "z9hG4bK-i", 3, "");
+    let [bye, ok] = bye_from_bob(1_200, 1_600);
+    let at_alice = [info(), bye.clone(), ok.clone(), refused(2_000)];
+    let at_bob = [bye, Msg { at_us: 1_300, ..info() }, refused(1_400), ok];
+    for (vantage, msgs) in [("alice's", at_alice), ("bob's", at_bob)] {
+        let all = run(&UnsupportedExtension420, &msgs);
+        assert_eq!(all.len(), 1, "{vantage}: {all:?}");
+        assert!(matches!(all[0].decision, Decision::Compliant), "{vantage}: {:?}", all[0].decision);
+    }
+}
+
+/// So does a request bob takes after alice's BYE reached him, before he
+/// answered that BYE.
+#[test]
+fn a_481_to_a_request_after_the_bye_reached_its_taker_discharges_the_require() {
+    let [bye, _] = bye_ended(2_000);
+    let msgs = [
+        bye,
+        taken_in_dialog(3_000, "INFO", "z9hG4bK-i", 3, "Require: frobnicate\r\n"),
+        answered(3_500, 200, "BYE", "z9hG4bK-b", 2, ""),
+        answered(4_000, 481, "INFO", "z9hG4bK-i", 3, ""),
+    ];
+    assert!(violations(&UnsupportedExtension420, &msgs).is_empty());
+}
+
 /// A 481 on a dialog no BYE ended, to a request on no dialog (no To-tag),
-/// or to one that arrived before the BYE's 2xx, still owes the 420.
+/// or sent before any BYE of the dialog, still owes the 420.
 #[test]
 fn a_481_anywhere_else_is_violated() {
     let info = |at_us, to_tag: Option<&str>| Msg {
@@ -491,11 +544,11 @@ fn a_481_anywhere_else_is_violated() {
     let live = [info(3_000, Some("bt")), refused.clone()];
     assert_eq!(violations(&UnsupportedExtension420, &live).len(), 1, "a live dialog");
     let [bye, ok] = bye_ended(2_000);
-    let out_of_dialog = [bye.clone(), ok.clone(), info(3_000, None), refused.clone()];
+    let out_of_dialog = [bye, ok, info(3_000, None), refused.clone()];
     assert_eq!(violations(&UnsupportedExtension420, &out_of_dialog).len(), 1, "no To-tag");
-    let [_, late_ok] = bye_ended(3_500);
-    let before_the_end = [bye, info(3_000, Some("bt")), late_ok, refused];
-    assert_eq!(violations(&UnsupportedExtension420, &before_the_end).len(), 1, "before the 2xx");
+    let [late_bye, late_ok] = bye_from_bob(4_500, 5_000);
+    let before_the_bye = [info(3_000, Some("bt")), refused, late_bye, late_ok];
+    assert_eq!(violations(&UnsupportedExtension420, &before_the_bye).len(), 1, "before the BYE");
 }
 
 /// A request the strict reading refuses owes its 400, whatever method it

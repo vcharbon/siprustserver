@@ -115,6 +115,8 @@ fn uas_key<'a>(sides: &Sides<'a>, msg: &'a Msg) -> Option<TxnKey<'a>> {
 /// how many rows of the header the correct rejection owes it carried.
 #[derive(Clone, Copy)]
 struct Answer {
+    /// Index into the view's `msgs`.
+    msg: usize,
     status: u16,
     /// `None` where the vantage carried no header block for the answer.
     listed_rows: Option<u32>,
@@ -219,11 +221,11 @@ impl Obligation for AllowSupportedOnInvite {
 ///
 /// The occasion is ONE unrecognised request the endpoint TOOK, keyed by its
 /// transaction. Charges that endpoint. The answer that discharges it is a 405
-/// carrying at least one `Allow` row, or a 481 to a request naming a dialog a
-/// BYE had ended at its taker (§12.2.2: the dialog is matched first) — any
-/// other final, or none at all, is the miss. A request the vantage carried no branch for names no transaction and
-/// is no occasion; an answer whose header block the vantage lost is
-/// `Undecidable`.
+/// carrying at least one `Allow` row, or a 481 its taker sent after a BYE on the
+/// request's dialog left or reached it (§12.2.2: the dialog is matched first) —
+/// any other final, or none at all, is the miss. A request the vantage carried
+/// no branch for names no transaction and is no occasion; an answer whose
+/// header block the vantage lost is `Undecidable`.
 pub struct UnsupportedMethod405Allow;
 
 impl Obligation for UnsupportedMethod405Allow {
@@ -262,8 +264,8 @@ impl Obligation for UnsupportedMethod405Allow {
 /// The occasion is ONE request the endpoint TOOK whose `Require` names a tag
 /// outside the recognised set, keyed by its transaction. Charges that endpoint.
 /// A 420 carrying at least one `Unsupported` row discharges it, and so does a
-/// 481 to a request naming a dialog a BYE had ended at its taker: the taker
-/// matches the dialog before it reads `Require` (§12.2.2). A request whose
+/// 481 its taker sent after a BYE on the request's dialog left or reached it:
+/// the taker matches the dialog before it reads `Require` (§12.2.2). A request whose
 /// header block the vantage lost is NOT an occasion — the `Require` tags are
 /// what would make it one.
 pub struct UnsupportedExtension420;
