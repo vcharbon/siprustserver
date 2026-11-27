@@ -42,6 +42,7 @@ mod dead_notice_behind_a_backlog;
 mod deferred_end_of_a_departed_primary;
 mod departure_support;
 mod discharged_call_dropped_by_its_primary;
+mod discharged_identity_refused;
 mod diverged_end;
 mod drain_exits_caught_up_inside_grace;
 mod drain_flushes_releases_before_a_verified_exit;

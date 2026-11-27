@@ -32,7 +32,7 @@ use std::time::Duration;
 
 use b2bua::cdr::{CdrRecord, InMemoryCdrWriter};
 use b2bua::decision::{CallDecisionEngine, ScriptedDecisionEngine};
-use b2bua::drain::{DrainBounds, DrainExit, DrainOutcome};
+use b2bua::drain::{DrainBounds, DrainOutcome};
 use b2bua::limiter::{CallLimiter, NoopLimiter};
 use b2bua::metrics::B2buaMetrics;
 use b2bua::repl::ReplicatingCallStore;
@@ -54,6 +54,7 @@ use crate::turn_points::TurnPoints;
 use crate::views::{Belief, Incarnation, ViewLedger};
 
 mod acceptance;
+mod exits;
 mod flows;
 mod live;
 mod membership;
@@ -71,6 +72,7 @@ mod rfc_audit;
 mod settle;
 mod signalling;
 mod strike;
+pub use exits::PendingDrain;
 pub use proxy_sut::ProxySut;
 pub(crate) use repl_wiring::sync_level_from_env;
 use repl_wiring::ReplWiring;
@@ -528,77 +530,6 @@ impl ReplicatedB2buaSut {
         });
     }
 
-    /// Begin a graceful drain of this incarnation ([`B2buaCore::drain`]): latch
-    /// `Draining` — the proxy's OPTIONS probe then steers new calls away — and
-    /// wait for the first of the live calls clearing, a withdrawn worker's
-    /// backups holding them past the floor, or the grace. Returns the named
-    /// exit + residual. The process keeps serving throughout: draining is not
-    /// death.
-    pub async fn begin_drain(&self, bounds: DrainBounds) -> DrainOutcome {
-        self.views.record(
-            &self.incarnation_key(),
-            &self.ordinal,
-            Belief::Draining { gen: self.gen },
-            "drain",
-        );
-        match self.core.as_ref() {
-            Some(core) => core.drain(bounds).await,
-            None => DrainOutcome {
-                exit: DrainExit::Quiescent,
-                residual: 0,
-                elapsed: Duration::ZERO,
-                release_flush: Default::default(),
-            },
-        }
-    }
-
-    /// [`begin_drain`](Self::begin_drain) without the wait: latch `Draining`
-    /// now and hand the wait back as a [`PendingDrain`] the test polls while it
-    /// drives the timeline. The wait holds only the core's owned probes, its
-    /// release flush included, so the process can still be killed mid-drain;
-    /// a killed incarnation's flush returns at once.
-    pub fn begin_drain_detached(&self, bounds: DrainBounds) -> PendingDrain {
-        self.views.record(
-            &self.incarnation_key(),
-            &self.ordinal,
-            Belief::Draining { gen: self.gen },
-            "drain",
-        );
-        let probe = self.core.as_ref().map(|core| {
-            core.begin_draining();
-            core.drain_probe()
-        });
-        let metrics = self.core.as_ref().map(|core| core.metrics().clone());
-        let limiter = self.core.as_ref().map(|core| core.limiter().clone());
-        let mut pending = PendingDrain {
-            fut: Box::pin(async move {
-                match probe {
-                    Some(p) => {
-                        // The core's own drain, flush included, without the
-                        // borrow of the core; it records the same exit, unless
-                        // the incarnation was killed mid-drain.
-                        let out = b2bua::drain::drain_until_quiescent(p, bounds).await;
-                        let killed = limiter.is_some_and(|l| l.is_stopped());
-                        if let (Some(m), false) = (metrics, killed) {
-                            m.record_drain_exit(&out);
-                        }
-                        out
-                    }
-                    None => DrainOutcome {
-                        exit: DrainExit::Quiescent,
-                        residual: 0,
-                        elapsed: Duration::ZERO,
-                        release_flush: Default::default(),
-                    },
-                }
-            }),
-            outcome: None,
-        };
-        // One poll arms the first poll-interval sleep on the paused clock.
-        pending.poll();
-        pending
-    }
-
     /// The SIP address a reboot at the current `gen` binds on. Models a new pod
     /// IP: same port, a gen-stamped HOST (`127.0.<gen>.1`) so the reborn worker
     /// shares NO network endpoint with the dead incarnation — in-flight SIP toward
@@ -885,32 +816,6 @@ pub(crate) fn incarnation_key(ordinal: &str, gen: u64) -> String {
 /// `127.0.0.1:9400+n` — a stable per-ordinal repl listen address.
 fn repl_addr_for(index: usize) -> SocketAddr {
     SocketAddr::from(([127, 0, 0, 1], 9400 + index as u16))
-}
-
-/// A drain the test started and has not waited out: the node is latched
-/// `Draining` and keeps serving its live calls while the timeline runs. Owns
-/// its wait (an active-call probe, not the node), so the caller stays free to
-/// kill the process mid-drain. Created by
-/// [`FailoverHarness::begin_drain_pending`].
-pub struct PendingDrain {
-    fut: std::pin::Pin<Box<dyn std::future::Future<Output = DrainOutcome> + Send>>,
-    outcome: Option<DrainOutcome>,
-}
-
-impl PendingDrain {
-    /// The drain's outcome once it has returned — why it exited, the residual
-    /// live-call count and how long it waited — `None` while it still waits.
-    /// Re-polls the drain, so call it after every advance: nothing else drives
-    /// this future.
-    pub fn poll(&mut self) -> Option<DrainOutcome> {
-        if self.outcome.is_none() {
-            let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
-            if let std::task::Poll::Ready(out) = self.fut.as_mut().poll(&mut cx) {
-                self.outcome = Some(out);
-            }
-        }
-        self.outcome
-    }
 }
 
 impl FailoverHarness {
