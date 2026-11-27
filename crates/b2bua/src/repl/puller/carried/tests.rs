@@ -360,35 +360,6 @@ fn only_the_stream_opened_last_records_and_sweeps() {
     assert_eq!(swept, ["x"], "the current pass sweeps what the earlier one left");
 }
 
-/// A bulk reclaim counted while the record holds a copy leaves the sweep
-/// out, a later copy notwithstanding; one counted while the record held
-/// nothing, before its first copy or once its copies went, does not.
-#[test]
-fn a_bulk_reclaim_while_the_record_holds_a_copy_leaves_the_sweep_out() {
-    let held = || Some(StoredCopy { version: (1, 0), incarnation: None });
-    let swept = |record: &CarriedCopies, reclaims: u64| -> Vec<String> {
-        let last = record.open_pass();
-        record.caught_up(last, 1, reclaims).into_iter().map(|(k, _)| k).collect()
-    };
-
-    let record = CarriedCopies::default();
-    record.carried(record.open_pass(), 1, "x", held(), 3);
-    assert_eq!(swept(&record, 3), ["x"], "no bulk reclaim since X was left");
-
-    let record = CarriedCopies::default();
-    let cut = record.open_pass();
-    record.carried(cut, 1, "x", held(), 3);
-    record.carried(cut, 1, "z", held(), 4);
-    assert!(swept(&record, 4).is_empty(), "a bulk reclaim while X was held");
-
-    let record = CarriedCopies::default();
-    let cut = record.open_pass();
-    record.carried(cut, 1, "x", held(), 3);
-    record.carried(cut, 1, "x", None, 4);
-    record.carried(cut, 1, "z", held(), 4);
-    assert_eq!(swept(&record, 4), ["z"], "the bulk reclaim came while nothing was held");
-}
-
 /// The last pass carries a key in any frame: X at a version the stored copy
 /// dominates, in the scan; Z only on the tail, past the scan's position,
 /// before the catch-up `Noop`. Both stay.
@@ -523,46 +494,37 @@ async fn a_reclaim_whose_hard_timer_reclaimed_a_partial_seed_sweeps_nothing() {
     assert_eq!(node.reclaim_commands(), ["reclaim all", "reclaim all"]);
 }
 
-/// A bulk reclaim materialises the copies of every Reclaim flow: one another
-/// flow fires while this flow's record holds a copy may serve it, so this
-/// bootstrap sweeps nothing (the residual of ADR-0014 §8), and one fired
-/// while the record held nothing leaves the sweep whole. The flow from `w2`
-/// catches up 10 ms after its spawn, 50 ms before or after the flow from
-/// `w0` opens; that one lands X at 10 ms, is cut at 20 ms and catches up
-/// without X past the 100 ms backoff, so X is held from 10 ms to then.
+/// A bulk reclaim another Reclaim flow hands the router between two passes
+/// serves this flow's copies too: one it left unwritten is still the copy
+/// the earlier pass left, and is swept ahead of this flow's bulk reclaim;
+/// one written since, as a bulk reclaim may write it, is spared (the
+/// residual of ADR-0014 §8). The flow from `w0` lands X at 10 ms and R at
+/// 20 ms and is cut at 30 ms; the flow from `w2`, spawned at 50 ms, catches
+/// up at 60 ms; R is written here at 70 ms; the flow from `w0` catches up
+/// without X or R past the 100 ms backoff.
 #[tokio::test(start_paused = true)]
-async fn a_bulk_reclaim_of_another_flow_while_a_pass_holds_a_copy_leaves_its_sweep_out() {
+async fn a_copy_another_flows_bulk_reclaim_left_unwritten_is_swept() {
     let flow = Partition::Pri;
-    for other_before in [false, true] {
-        let mut node = Node::new(flow);
-        let other = || {
-            let catches_up = vec![quiet(vec![noop((1, 1))])];
-            node.pull_from("w2", CarriedCopies::default(), catches_up, PullerConfig::fast_test())
-        };
-        let mut started = Vec::new();
-        if other_before {
-            started.push(other());
-            pump(50).await;
-        }
-        started.push(node.pull_plain(vec![
-            cut(vec![put(flow, (1, 5), "x", 1)]),
-            quiet(vec![put(flow, (1, 9), "y", 1), noop((1, 9))]),
-        ]));
-        if !other_before {
-            pump(50).await;
-            started.push(other());
-        }
-        pump(1_000).await;
+    let mut node = Node::new(flow);
+    let _cancel = node.pull_plain(vec![
+        cut(vec![put(flow, (1, 5), "x", 1), put(flow, (1, 5), "r", 1)]),
+        quiet(vec![put(flow, (1, 9), "y", 1), noop((1, 9))]),
+    ]);
+    pump(50).await;
+    let catches_up = vec![quiet(vec![noop((1, 1))])];
+    let _other =
+        node.pull_from("w2", CarriedCopies::default(), catches_up, PullerConfig::fast_test());
+    pump(20).await;
+    assert_eq!(node.reclaim_commands(), ["reclaim all"], "the flow from w2 caught up");
+    node.write("r", (1, 1)).await;
+    pump(1_000).await;
 
-        assert_eq!(node.holds("x").await, !other_before, "other before: {other_before}");
-        assert!(node.holds("y").await);
-        assert_eq!(node.swept(), u64::from(other_before));
-        let x_dropped = other_before.then(|| format!("dropped {}", key(flow, "x")));
-        let mut want = vec!["reclaim all".to_string()];
-        want.extend(x_dropped);
-        want.push("reclaim all".to_string());
-        assert_eq!(node.reclaim_commands(), want, "other before: {other_before}");
-    }
+    assert!(!node.holds("x").await, "X, left unwritten by the bulk reclaim, goes");
+    assert!(node.holds("r").await, "R was written since pass 1 carried it");
+    assert!(node.holds("y").await);
+    assert_eq!(node.swept(), 1);
+    let x = key(flow, "x");
+    assert_eq!(node.reclaim_commands(), [format!("dropped {x}"), "reclaim all".into()]);
 }
 
 /// A puller spawned between two passes reads what the earlier ones carried
