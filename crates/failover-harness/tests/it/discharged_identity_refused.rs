@@ -5,9 +5,12 @@
 //! gives up on the INVITE and retries it on the same Call-ID and From tag,
 //! the next CSeq (RFC 3261 §8.1.3.5). With the primary gone the proxy places
 //! the retry on the survivor, where the call is unknown: a consult there meets
-//! the same answer and sticks the survivor too. For 64·T1 after it applied the
-//! discharge's delete, the survivor answers an initial INVITE on that
-//! identity the bare 503 before any consult, and serves every other call.
+//! the same answer and sticks the survivor too. A hop that heard the 100
+//! retries on its Timer C (more than 3 min, RFC 3261 §16.6 item 11), its
+//! copies on Timer B (64·T1): for Timer C's 3 min plus 64·T1 (212 s) after it
+//! applied the discharge's delete, the survivor answers an initial INVITE on
+//! that identity the bare 503 before any consult, emergency included, and
+//! serves every other call.
 //!
 //! ```text
 //!   0 s      alice ──INVITE──▶ proxy ──▶ b1: created, copy on b2, 100 (ADR-0070),
@@ -16,15 +19,17 @@
 //!            b1 exits and departs
 //!   2 s      alice CANCELs the INVITE (RFC 3261 §9.1): 481 from b2, no final
 //!   2.5 s    alice ──INVITE (next CSeq)──▶ proxy ──▶ b2: 503, no consult
-//!   2.6 s    another identity: consulted, answered, hung up
-//!   31 s     alice ──INVITE (next CSeq)──▶ b2: 503, no consult
-//!   35 s     past 64·T1 from the delete: the identity is consulted and served
+//!   2.6 s    another identity: consulted, answered, hung up; then
+//!            alice ──emergency INVITE (next CSeq)──▶ b2: 503, no consult
+//!   35 s     2 s past 64·T1 from the delete: 503, no consult
+//!   211 s    2 s before 212 s from the delete: 503, no consult
+//!   215 s    2 s past 212 s from the delete: the identity is consulted and served
 //! ```
 //!
 //! The timing axes: the consult sticks at the INVITE's turn; the stuck read
 //! falls inside the setup budget (5 s), which would end the consult with a
-//! 503; the retries fall 1.5 s after the delete and 2 s before 64·T1 from
-//! it; the last INVITE 2 s past 64·T1.
+//! 503; the retries fall 1.5 s after the delete, 2 s past 64·T1 from it and
+//! 2 s before 212 s from it; the last INVITE 2 s past 212 s.
 //!
 //! When b1's 100 is lost on its way to alice, her Timer A copies go on: the
 //! one at 0.5 s reaches b1, the one at 1.5 s reaches b2 under the cookie
@@ -69,6 +74,11 @@ const OTHER_FROM_TAG: &str = "another-identity-from-tag";
 
 /// RFC 3261 T1.
 const T1: Duration = Duration::from_millis(500);
+/// How long the survivor refuses the identity after the delete: a previous
+/// hop's Timer C (3 min at least, RFC 3261 §16.6 item 11) plus 64·T1.
+const WINDOW: Duration = Duration::from_secs(212);
+/// The `Resource-Priority` value marking an INVITE emergency (RFC 4412).
+const EMERGENCY_PRIORITY: &str = "esnet.0";
 /// How long after the INVITE the host reads the poll stuck and discharges its
 /// call: under the setup budget (5 s), which would end the consult.
 const READ_STUCK: Duration = Duration::from_secs(1);
@@ -80,9 +90,12 @@ const GIVE_UP: Duration = Duration::from_secs(2);
 const RETRY: Duration = Duration::from_millis(2_500);
 /// Past the simulated transit of a request and its answer.
 const TRANSIT: Duration = Duration::from_millis(100);
-/// How long before 64·T1 from the delete the last refused retry is sent.
+/// How far past 64·T1 from the delete a retry on the previous hop's Timer C
+/// is sent.
+const PAST_TIMER_B: Duration = Duration::from_secs(2);
+/// How long before the window ends the last refused retry is sent.
 const BEFORE_THE_WINDOW_ENDS: Duration = Duration::from_secs(2);
-/// How far past 64·T1 from the delete the last INVITE is sent.
+/// How far past the window the last INVITE is sent.
 const PAST_WINDOW: Duration = Duration::from_secs(2);
 /// When alice's Timer A copies of an INVITE that drew no response are sent
 /// (RFC 3261 §17.1.1.2): T1, then 3·T1 after it.
@@ -247,15 +260,19 @@ impl Scene {
     /// alice's INVITE under `identity` (Call-ID, From tag) with CSeq `cseq`,
     /// through the proxy.
     async fn invite(&self, identity: (&str, &str), cseq: u32) -> ClientInvite {
+        self.invite_as(identity, cseq, Class::Normal).await
+    }
+
+    /// alice's INVITE under `identity` with CSeq `cseq` in `class`: an
+    /// emergency one carries an emergency `Resource-Priority`.
+    async fn invite_as(&self, identity: (&str, &str), cseq: u32, class: Class) -> ClientInvite {
         let proxy: SocketAddr = self.proxy.addr();
-        self.alice
-            .invite(&self.bob)
-            .identity(identity.0, identity.1)
-            .cseq(cseq)
-            .with_sdp(OFFER_SDP)
-            .through(proxy)
-            .send()
-            .await
+        let invite = self.alice.invite(&self.bob).identity(identity.0, identity.1).cseq(cseq);
+        let invite = match class {
+            Class::Emergency => invite.with_header("Resource-Priority", EMERGENCY_PRIORITY),
+            _ => invite,
+        };
+        invite.with_sdp(OFFER_SDP).through(proxy).send().await
     }
 
     /// bob answers `call`, bob hangs up: the call is served.
@@ -298,25 +315,25 @@ impl Scene {
         delete_applied
     }
 
-    /// Step 2: alice's INVITE on the stuck identity with CSeq `cseq`, inside
-    /// the window: b2 answers it the bare 503 at once, never asks its
-    /// routing, and dials no callee.
-    async fn refused_inside_the_window(&self, cseq: u32) {
+    /// Step 2: alice's INVITE in `class` on the stuck identity with CSeq
+    /// `cseq`, inside the window: b2 answers it the bare 503 at once, never
+    /// asks its routing, and dials no callee.
+    async fn refused_inside_the_window(&self, cseq: u32, class: Class) {
         let dialled = self.invites_to_bob();
-        let refused = self.refused_on_b2();
-        let mut retry = self.invite(self.stuck(), cseq).await;
+        let refused = self.refused_on_b2(class);
+        let mut retry = self.invite_as(self.stuck(), cseq, class).await;
         self.fh.advance(TRANSIT).await;
         let consults = self.b2.seen.consults_of(self.stuck().0);
         assert_eq!(consults, 0, "b2 never asks the identity's routing");
         assert!(self.b2.seen.stuck_task().is_none(), "b2 does not stick");
         assert_bare(&retry.expect(503).await);
         assert_eq!(self.invites_to_bob(), dialled, "no callee dialled");
-        assert_eq!(self.refused_on_b2(), refused + 1, "counted as a discharged identity");
+        assert_eq!(self.refused_on_b2(class), refused + 1, "counted as a discharged identity");
     }
 
-    /// The new calls b2 refused on a discharged identity.
-    fn refused_on_b2(&self) -> u64 {
-        self.b2.sut.metrics().new_calls().rejected(Refusal::Discharged, Class::Normal)
+    /// The new calls in `class` b2 refused on a discharged identity.
+    fn refused_on_b2(&self, class: Class) -> u64 {
+        self.b2.sut.metrics().new_calls().rejected(Refusal::Discharged, class)
     }
 
     /// The INVITEs bob received so far.
@@ -338,11 +355,11 @@ impl Scene {
         assert_eq!(self.b2.seen.consults_of(self.other().0), 1, "the other identity is consulted");
     }
 
-    /// Step 4: past 64·T1 from `delete_applied`, with the routing answer no
-    /// longer sticking, an INVITE on the stuck identity is consulted and
+    /// Step 4: past the window from `delete_applied`, with the routing answer
+    /// no longer sticking, an INVITE on the stuck identity is consulted and
     /// served.
     async fn serve_the_identity_past_the_window(&self, delete_applied: Instant, cseq: u32) {
-        let past = delete_applied + T1 * 64 + PAST_WINDOW;
+        let past = delete_applied + WINDOW + PAST_WINDOW;
         self.fh.advance(past - Instant::now()).await;
         self.armed.store(false, Ordering::SeqCst);
         let consulted = self.b2.seen.consults_of(self.stuck().0);
@@ -396,26 +413,31 @@ fn call_ref(primary: &str, identity: (&str, &str)) -> String {
     call::derive_call_ref(primary, identity.0, identity.1)
 }
 
-/// The retries on the stuck identity reach b2 inside 64·T1 of the delete,
-/// 1.5 s after it and 2 s before the window ends: b2 answers each the bare
-/// 503 at once and never asks its routing, so b2 does not stick; another
-/// identity is served meanwhile, and 2 s past the window the identity is
-/// served again, the window not stretched by the refusals.
+/// The retries on the stuck identity reach b2 inside the window, 1.5 s after
+/// the delete, an emergency one next, then 2 s past 64·T1 from the delete (a
+/// retry on the previous hop's Timer C) and 2 s before the window ends: b2
+/// answers each the bare 503 at once and never asks its routing, so b2 does
+/// not stick; another identity is served meanwhile, and 2 s past the window
+/// the identity is served again, the window not stretched by the refusals.
 #[tokio::test(start_paused = true)]
-async fn the_survivor_refuses_the_identity_of_a_call_a_stuck_poll_held_for_64_t1() {
+async fn the_survivor_refuses_the_identity_of_a_call_a_stuck_poll_held_through_timer_c() {
     let name = "discharged-identity-refused";
     let mut s = Scene::start(name, AliceHears::Everything).await;
     let first_cseq = Party::Caller.first_cseq();
     let delete_applied = s.stick_and_discharge().await;
 
     s.fh.advance(RETRY - GIVE_UP).await;
-    s.refused_inside_the_window(first_cseq + 1).await;
+    s.refused_inside_the_window(first_cseq + 1, Class::Normal).await;
     s.serve_the_other_identity().await;
-    let late = delete_applied + T1 * 64 - BEFORE_THE_WINDOW_ENDS;
+    s.refused_inside_the_window(first_cseq + 2, Class::Emergency).await;
+    let past_timer_b = delete_applied + T1 * 64 + PAST_TIMER_B;
+    s.fh.advance(past_timer_b - Instant::now()).await;
+    s.refused_inside_the_window(first_cseq + 3, Class::Normal).await;
+    let late = delete_applied + WINDOW - BEFORE_THE_WINDOW_ENDS;
     s.fh.advance(late - Instant::now()).await;
-    s.refused_inside_the_window(first_cseq + 2).await;
+    s.refused_inside_the_window(first_cseq + 4, Class::Normal).await;
 
-    s.serve_the_identity_past_the_window(delete_applied, first_cseq + 3).await;
+    s.serve_the_identity_past_the_window(delete_applied, first_cseq + 5).await;
     let (stuck, other) = (s.stuck.clone(), s.other.clone());
     s.finish(name, &[(&stuck.0, stuck.1), (&other.0, other.1)]).await;
 }
@@ -444,7 +466,7 @@ async fn a_copy_of_the_discharged_invite_reaching_the_survivor_draws_the_bare_50
     assert!(s.b2.seen.stuck_task().is_none(), "b2 does not stick");
     assert_bare(&first.expect(503).await);
     assert_eq!(s.invites_to_bob(), 0, "no callee dialled");
-    assert_eq!(s.refused_on_b2(), 1, "counted as a discharged identity");
+    assert_eq!(s.refused_on_b2(Class::Normal), 1, "counted as a discharged identity");
     let dropped = s.b2.sut.metrics().foreign_invite_copies_dropped_total();
     assert_eq!(dropped, 0, "answered, not dropped as another primary's copy");
     s.finish(name, &[]).await;
