@@ -47,6 +47,10 @@ The first two run before the worker creates a transaction, so a refusal there is
 | 6 | Rate | A token bucket of new calls | 500 a second, burst 1 000 | Refused | Passes |
 | 7 | Event queue | Depth and age of the event queue, and the wait of the oldest datagram in the UDP input queue | 512 events, or 300 ms for 150 ms | Refused | Passes |
 
+Before check 3, the worker refuses a new INVITE with the Call-ID and From tag of a call that a
+peer ended after a stuck poll, for 32 s, normal or emergency. This is not a load check. See
+[ha.md](ha.md#incidents-and-timings).
+
 The proxy has two gates of its own before these. It refuses new calls when its own CPU use is
 above 0.8 or its rate bucket is empty. It also sends new calls away from a worker that reports a
 high load. See [proxy-integration.md](proxy-integration.md).
@@ -169,7 +173,8 @@ check. These refuse it:
 - a backlog at twice the normal limit;
 - a cordoned worker;
 - a call that starts after its start bound;
-- a spent setup budget, or a decision backend that is down.
+- a spent setup budget, or a decision backend that is down;
+- the Call-ID and From tag of a call that a peer ended after a stuck poll, for 32 s.
 
 ## When the worker sends 100 Trying
 

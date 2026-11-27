@@ -227,6 +227,7 @@ All values are the defaults.
 | One proxy lost | The routers remove its routes. | The other proxy routes with the cookie. | Retransmissions. |
 | The POP returns after a total outage | Its proxies read fit again. | It takes its full share at once. The workers' admission refuses the excess with fast 503s. | The SBC retries the refused calls elsewhere. |
 | A backend answers slowly, inside its budget | The request has a deadline (ADR-0039). | The call waits for the answer. | A longer setup. |
+| A turn of a call never returns: a poll stays on the CPU (a query of death) | The watchdog of the worker reads the poll stuck after 10 s of CPU (ADR-0057). | The worker ends that call with its CDR, deletes the copy on the backup, and exits. The backup takes over the other calls. For 64·T1 (32 s) after it deletes the copy, the backup answers 503 to each new INVITE with the Call-ID and From tag of that call, before it asks the decision backend. It serves all other calls. | Nothing more for the parties of that call. A retry of that call gets 503 for 32 s. The incident costs one worker, not two. |
 
 At the end of the grace of a planned exit, the worker ends each call that no backup holds. A
 caller in setup gets 503. An established call gets its CDR and nothing on the wire, so the
@@ -286,6 +287,7 @@ relation and the effect of a higher or lower value.
 | `b2bua_drain_exits_total{reason}` | How each planned exit ended. `caught_up` and `quiescent` are the transparent ones. |
 | `b2bua_clock_wall_divergence_ms` | The drift of the wall clock of the host against its monotonic clock. A step of the host clock shows here. The worker warns above 500 ms. |
 | `b2bua_cdr_dropped_total{reason}` | CDRs that a worker did not deliver, by reason. `close_deadline` counts the CDRs that the exit bound cut. |
+| `b2bua_new_calls_total{reason="discharged"}` | New INVITEs refused because a peer ended a call with the same Call-ID and From tag after a stuck poll. A rise follows a query of death on a peer. |
 
 ## How the guarantee is proven
 

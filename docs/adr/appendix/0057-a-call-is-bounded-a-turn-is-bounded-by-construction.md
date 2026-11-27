@@ -249,9 +249,20 @@ other calls over (ADR-0047). The front proxy's runner carries the same watchdog
 and hard exit (`PROXY_STUCK_POLL_CPU_MS`); it holds no call, and its traffic
 moves off it as its route is withdrawn (ADR-0056).
 
+The discharge's delete states the discharge (the mark on the replication
+`Delete`), and the peer that applies it refuses the call's identity, its Call-ID
+and From-tag, until 64·T1 after the apply: an initial INVITE on it, the previous
+hop's retry placed on that peer or a copy of the stuck INVITE placed there under
+the dead primary's cookie, gets the bare 503 at router ingress, ahead of the
+admission ladder and of any routing consult, and no call is born
+(`b2bua_new_calls_total{reason="discharged"}`). The caller's own retry thus never
+carries the input to the surviving node. The peer holds at most 1 024 identities,
+the oldest forgotten first; an ordinary delete refuses nothing, and a lookup
+never extends the window.
+
 A spin that escapes §5 thus costs one node per delivery of the input that causes
-it, and the discharge keeps the record from delivering it again; §5 and fuzzing
-are what keep that input from existing.
+it, and the discharge keeps the record, and the call's retries for 64·T1, from
+delivering it again; §5 and fuzzing are what keep that input from existing.
 
 ### 7. Detection
 
