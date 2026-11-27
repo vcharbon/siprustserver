@@ -424,6 +424,22 @@ fn a_recognised_require_is_not_an_occasion() {
     assert!(run(&UnsupportedExtension420, &msgs).is_empty());
 }
 
+/// RFC 3261 §8.2.2.3: a UAS ignores `Require` in a CANCEL and in the ACK of a
+/// non-2xx, and no ACK draws a response, so neither opens a 420 occasion; the
+/// sender's own miss is `no-require-on-cancel-or-ack`'s.
+#[test]
+fn a_cancel_or_an_ack_demanding_an_extension_opens_no_require_occasion() {
+    let cancelled = [
+        taken(1_000, "INVITE", "z9hG4bK-i", 1, ""),
+        taken(2_000, "CANCEL", "z9hG4bK-i", 1, "Require: frobnicate\r\n"),
+        answered(3_000, 200, "CANCEL", "z9hG4bK-i", 1, ""),
+        answered(4_000, 487, "INVITE", "z9hG4bK-i", 1, ""),
+        taken(5_000, "ACK", "z9hG4bK-i", 1, "Require: frobnicate\r\n"),
+    ];
+    let f = run(&UnsupportedExtension420, &cancelled);
+    assert!(f.is_empty(), "{f:?}");
+}
+
 /// The `Require` tags are what make the occasion exist, so a request the
 /// vantage carried no header block for is no occasion.
 #[test]
