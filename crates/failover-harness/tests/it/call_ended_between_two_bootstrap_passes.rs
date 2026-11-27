@@ -62,14 +62,14 @@ use crate::away_backup_support::{
     BOB,
 };
 
-/// How late each frame from b1 reaches the rebooted b2: one bootstrap body per
-/// delay, under the puller's 2 s idle bound.
-const FRAME_DELAY_MS: u64 = 500;
+/// How late each frame from b1 reaches b2 during its first pass: one
+/// bootstrap body per delay, under the puller's 2 s idle bound.
+pub(crate) const FRAME_DELAY_MS: u64 = 500;
 
 /// Past the replica's TTL (`reboot_budget`, 600 s), the reap that follows it
 /// (every 30 s) and one keepalive interval (300 s): whatever a copy left
 /// behind would have probed, ended or been reaped by then.
-const PAST_THE_REPLICA_TTL: Duration = Duration::from_secs(720);
+pub(crate) const PAST_THE_REPLICA_TTL: Duration = Duration::from_secs(720);
 
 /// Two workers behind the proxy and the parties: `holder` is the node the
 /// `restarted` one bootstraps its flow from.
@@ -113,7 +113,7 @@ enum InTheCut {
 
 /// Every cold `PullRequest` `caller` sent on `flow`, as the local end of its
 /// stream.
-fn cold_pulls(fh: &FailoverHarness, caller: &str, flow: Partition) -> Vec<SocketAddr> {
+pub(crate) fn cold_pulls(fh: &FailoverHarness, caller: &str, flow: Partition) -> Vec<SocketAddr> {
     fh.repl_report()
         .frames
         .iter()
@@ -130,7 +130,7 @@ fn cold_pulls(fh: &FailoverHarness, caller: &str, flow: Partition) -> Vec<Socket
 }
 
 /// How many `Noop`s the stream whose local end is `local` received.
-fn noops_on(fh: &FailoverHarness, local: SocketAddr) -> usize {
+pub(crate) fn noops_on(fh: &FailoverHarness, local: SocketAddr) -> usize {
     fh.repl_report()
         .frames
         .iter()
