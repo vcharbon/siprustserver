@@ -22,7 +22,7 @@ crates/b2bua-harness/tests/it/stated_headers.rs 1453
 crates/b2bua-harness/tests/it/suppress_18x.rs 814
 crates/b2bua/src/decision/test_adapter.rs 807
 crates/b2bua/src/repl/real_transport_tests.rs 1185
-crates/b2bua/src/repl/s12_tests.rs 888
+crates/b2bua/src/repl/s12_tests.rs 822
 crates/b2bua/src/repl/tests.rs 823
 crates/call-limiter/tests/it/keyed_by_call.rs 877
 crates/callshapes/src/plan.rs 1074
