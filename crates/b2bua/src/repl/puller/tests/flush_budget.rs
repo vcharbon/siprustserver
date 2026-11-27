@@ -1,16 +1,20 @@
-//! Forward writes of a live takeover copy's call, applied faster than the
-//! router handles them, ride up within the flush budget: the puller stops
-//! applying once the bodies it handed up fill the budget, goes on as the
-//! router handles them, and every write rides up, in order (ADR-0047 D7).
+//! Bodies a puller hands the router faster than the router handles them ride
+//! up within the flush budget: the puller stops once the bodies it handed up
+//! fill the budget, goes on as the router handles them, and every command
+//! rides up, in order. A wait on the budget is not a silent stream: the
+//! puller stays on it past its idle bound (ADR-0047 D7, ADR-0045).
 //!
 //! ```text
-//!   stream    a warm Backup flow: 8 forward Puts of one call, gens 1..8,
-//!             1 MiB bodies, one frame every 10 ms
-//!   budget    3 MiB: three bodies
-//!   router    reads nothing for 3 s, then one command, then the rest
-//!   puller    answers each applied frame with its Position, after the body
-//!             rode up; idle bound 2 s, so the 3 s wait on the budget must not
-//!             read as a silent stream
+//!   link      one frame every 10 ms
+//!   budget    3 MiB: three 1 MiB bodies
+//!   router    reads nothing for 3 s, then the commands as they come
+//!   puller    idle bound 2 s; a Position after each applied frame, once its
+//!             command rode up, and after each Noop, once the batch's held
+//!             copies rode up
+//!   forward   a warm Backup flow: 8 applied Puts of a live takeover copy's
+//!             call, gens 1..8
+//!   reverse   a warm Reclaim flow: 6 Puts of 6 calls the store dominates,
+//!             held to the batch's Noop, then a Put of a new call
 //! ```
 
 use std::collections::VecDeque;
@@ -26,27 +30,61 @@ use super::{at, position, RecordingNet};
 use crate::metrics::B2buaMetrics;
 use crate::repl::{FlushBudget, Puller, PullerConfig, ReplicatingCallStore, RouterSink};
 use crate::router::{PrimaryWrite, ReplCommand};
+use crate::store::{CallStore, PartitionRole, PutOpts};
 
 const MIB: usize = 1024 * 1024;
 const COPY: &str = "w0|copy|t";
 const WRITES: u64 = 8;
+const DOMINATED: u64 = 6;
+const AFTER: &str = "w1|after|t";
 
-/// The primary's write `gen` of the copy's call: a 1 MiB body of `gen` bytes.
-fn write(gen: u64) -> Frame {
+/// A `Put` of `call_ref` at `gen`, the change-log entry `counter`, with a
+/// body of `len` bytes of `tag`.
+fn put(partition: Partition, call_ref: &str, gen: u64, counter: u64, tag: u8, len: usize) -> Frame {
     Frame::Data {
-        at: at(gen),
+        at: at(counter),
         op: Op::Put,
-        partition: Partition::Bak,
-        call_ref: COPY.to_string(),
+        partition,
+        call_ref: call_ref.to_string(),
         call_gen: gen as i64,
         call_bgen: 0,
         body_ttl_ms: 0,
         origin_now_ms: 0,
         indexes: Vec::new(),
-        body: Some(Arc::from(vec![gen as u8; MIB])),
+        body: Some(Arc::from(vec![tag; len])),
         answered: false,
         incarnation: None,
     }
+}
+
+/// A warm puller of `partition` on `w1`, pulling `w0` over `script` into
+/// `store` and handing `sink` its commands; the frames it sends back.
+fn spawn_puller(
+    partition: Partition,
+    script: VecDeque<Frame>,
+    store: ReplicatingCallStore,
+    sink: RouterSink,
+) -> (Arc<Mutex<Vec<Frame>>>, watch::Sender<bool>, tokio::task::JoinHandle<()>) {
+    let sent = Arc::new(Mutex::new(Vec::new()));
+    let net: Arc<dyn ReplicationNetwork> =
+        Arc::new(RecordingNet { script: Mutex::new(Some(script)), sent: sent.clone() });
+    let (puller, _status) = Puller::new_at(
+        "w0",
+        "w1",
+        partition,
+        "127.0.0.1:9".parse().unwrap(),
+        net,
+        store,
+        PullerConfig::fast_test(),
+        Watermark::new(1, 0),
+        B2buaMetrics::new(),
+    );
+    let puller = puller.with_repl_sink(sink);
+    let (cancel_tx, cancel_rx) = watch::channel(false);
+    let task = tokio::spawn(async move {
+        puller.run(cancel_rx).await;
+    });
+    (sent, cancel_tx, task)
 }
 
 /// The positions the puller sent back, in order.
@@ -66,6 +104,19 @@ fn gen_of(cmd: &ReplCommand) -> u8 {
     }
 }
 
+/// What a reverse-flow command names: the refused copy's call and its body's
+/// tag, or the reclaimed call.
+fn reverse_of(cmd: &ReplCommand) -> String {
+    match cmd {
+        ReplCommand::ReverseFlushRefused { call_ref, body, .. } => {
+            assert_eq!(body.len(), MIB, "the whole body rides up");
+            format!("refused {call_ref} {}", body[0])
+        }
+        ReplCommand::ReclaimCall(call_ref) => format!("reclaim {call_ref}"),
+        other => panic!("expected a reverse-flow command: {other:?}"),
+    }
+}
+
 async fn advance(ms: u64) {
     for _ in 0..ms / 10 {
         tokio::time::advance(Duration::from_millis(10)).await;
@@ -73,30 +124,32 @@ async fn advance(ms: u64) {
     }
 }
 
+/// What `read` reads of every command `rx` gets while the clock runs `ms`
+/// more, each command handled and dropped as it comes.
+async fn drain<T>(
+    rx: &mut mpsc::UnboundedReceiver<ReplCommand>,
+    ms: u64,
+    read: impl Fn(&ReplCommand) -> T,
+) -> Vec<T> {
+    let mut got = Vec::new();
+    for _ in 0..ms / 10 {
+        while let Ok(cmd) = rx.try_recv() {
+            got.push(read(&cmd));
+        }
+        advance(10).await;
+    }
+    got
+}
+
 #[tokio::test(start_paused = true)]
 async fn forward_writes_ride_up_within_the_budget_and_none_is_lost() {
-    let sent = Arc::new(Mutex::new(Vec::new()));
-    let script: VecDeque<Frame> = (1..=WRITES).map(write).collect();
-    let net: Arc<dyn ReplicationNetwork> =
-        Arc::new(RecordingNet { script: Mutex::new(Some(script)), sent: sent.clone() });
+    let script = (1..=WRITES).map(|n| put(Partition::Bak, COPY, n, n, n as u8, MIB)).collect();
     let store = ReplicatingCallStore::new(1, Clock::test_at(0));
-    let (puller, _status) = Puller::new_at(
-        "w0",
-        "w1",
-        Partition::Bak,
-        "127.0.0.1:9".parse().unwrap(),
-        net,
-        store,
-        PullerConfig::fast_test(),
-        Watermark::new(1, 0),
-        B2buaMetrics::new(),
-    );
     let (tx, mut rx) = mpsc::unbounded_channel();
     let probe: crate::store::TakeoverProbe = Arc::new(|r: &str| r == COPY);
     let budget = FlushBudget::new(3 * MIB);
-    let puller = puller.with_repl_sink(RouterSink::new(tx, probe).with_budget(budget.clone()));
-    let (cancel_tx, cancel_rx) = watch::channel(false);
-    let task = tokio::spawn(async move { puller.run(cancel_rx).await });
+    let sink = RouterSink::new(tx, probe).with_budget(budget.clone());
+    let (sent, cancel, task) = spawn_puller(Partition::Bak, script, store, sink);
 
     advance(3_000).await;
     assert_eq!(
@@ -114,17 +167,52 @@ async fn forward_writes_ride_up_within_the_budget_and_none_is_lost() {
     assert_eq!(positions(&sent).len(), 4, "and only the next");
 
     let mut gens = vec![1];
-    for _ in 0..WRITES * 2 {
-        while let Ok(cmd) = rx.try_recv() {
-            gens.push(gen_of(&cmd));
-        }
-        advance(10).await;
-    }
+    gens.extend(drain(&mut rx, WRITES * 20, gen_of).await);
     assert_eq!(gens, (1..=WRITES as u8).collect::<Vec<_>>(), "every write rides up, in order");
     let want: Vec<Frame> = (1..=WRITES).map(position).collect();
     assert_eq!(positions(&sent), want);
     assert_eq!(budget.in_use(), 0, "every handled body gave its bytes back");
 
-    let _ = cancel_tx.send(true);
+    let _ = cancel.send(true);
+    task.abort();
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_copies_a_batch_held_ride_up_within_the_budget_and_the_stream_goes_on() {
+    let store = ReplicatingCallStore::new(1, Clock::test_at(0));
+    let call = |n: u64| format!("w1|c{n}|t");
+    for n in 1..=DOMINATED {
+        let opts = PutOpts::default();
+        store
+            .put_call(PartitionRole::Primary, "w1", &call(n), vec![0], &[], 0, 5, 0, &opts)
+            .await
+            .unwrap();
+    }
+    let mut script: VecDeque<Frame> =
+        (1..=DOMINATED).map(|n| put(Partition::Pri, &call(n), 1, n, n as u8, MIB)).collect();
+    script.push_back(Frame::Noop { at: at(DOMINATED) });
+    script.push_back(put(Partition::Pri, AFTER, 1, DOMINATED + 1, 0, 16));
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let budget = FlushBudget::new(3 * MIB);
+    let sink = RouterSink::from(tx).with_budget(budget.clone());
+    let (sent, cancel, task) = spawn_puller(Partition::Pri, script, store.clone(), sink);
+
+    advance(3_000).await;
+    let tail: Vec<Frame> = (1..=DOMINATED).map(position).collect();
+    assert_eq!(positions(&sent), tail, "the Noop waits for the held copies to ride up");
+    assert_eq!(budget.in_use(), 3 * MIB);
+
+    let got = drain(&mut rx, 400, reverse_of).await;
+    let mut want: Vec<String> =
+        (1..=DOMINATED).map(|n| format!("refused {} {n}", call(n))).collect();
+    want.push(format!("reclaim {AFTER}"));
+    assert_eq!(got, want, "every held copy rides up in order, then the stream goes on");
+    let mut tail = tail;
+    tail.extend([position(DOMINATED), position(DOMINATED + 1)]);
+    assert_eq!(positions(&sent), tail);
+    assert!(store.get_call(PartitionRole::Primary, "w1", AFTER).await.unwrap().is_some());
+    assert_eq!(budget.in_use(), 0);
+
+    let _ = cancel.send(true);
     task.abort();
 }

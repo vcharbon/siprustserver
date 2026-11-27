@@ -564,6 +564,7 @@ impl Puller {
                         }
                     }
                     self.release_meetings().await;
+                    quiet_until = sip_clock::deadline::from_now(idle);
                     // Every `Noop` is answered with the position it announced:
                     // the first one is the bootstrap's own claim (every scan body
                     // is applied by now), the idle ones keep the claim fresh
