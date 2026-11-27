@@ -77,6 +77,12 @@ reconnect and recovery path on a cut.
    call's changelog entry compacts away, so only the scan is a complete snapshot),
    capturing `W = head at scan-start`, then the partition-filtered tail.
 
+   The scan sends its bodies in batches of at most 128 bodies and 4 MiB, a larger
+   body alone, each batch one send under the server's 15 s send stall (ADR-0045).
+   The link between two workers must carry one record at the record cap within the
+   puller's 2 s idle bound: 8 MiB/s at the 16 MiB default. A slower link drops the
+   stream on its largest records, whatever the batching.
+
 ### 9. Inbound apply is changelog-silent
 
 9. **Inbound apply is changelog-silent (loopback prevention).** Applying a received

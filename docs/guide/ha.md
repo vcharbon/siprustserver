@@ -240,7 +240,9 @@ when its next request arrives. This prevents a burst of traffic on each failover
 
 1. **Two workers or more.** Each call has one backup. A pool of one worker runs with no HA.
 2. **A fast link between all the workers.** The round trip must complete well below the sync
-   cap. Put the pool in one site.
+   cap. Put the pool in one site. The link must also carry one record at the record cap in
+   2 s: 8 MiB/s at the default cap of 16 MiB. On a slower link, a stream that carries a
+   record at the cap reads down and starts again.
 3. **One shared key, on the workers and on the proxies.** Each worker gets the same
    `B2BUA_CLUSTER_KEY`, 32 to 64 bytes of text. A worker with replication on refuses to start without it. Give the same
    key to each proxy as `PROXY_CLUSTER_KEY`. A proxy with no key cannot tell the backups that a
