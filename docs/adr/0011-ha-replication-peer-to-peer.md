@@ -5,7 +5,9 @@
 ADR-0014 owns takeover (reactive-only), acting-backup self-release (terminal discharge
 deferred to the primary), `(p,b)` reconciliation and the wire (five frames over two
 single-flow sockets). The sections below hold what ADR-0014 did not replace. X5 amended by
-ADR-0055 §6 (fencing by worker identity compared for equality).
+ADR-0055 §6 (fencing by worker identity compared for equality). X6's OPTIONS answers amended by
+ADR-0050 §2 (`200` while the node serves dialogs, Draining with `new=refuse; cause=draining`;
+`503` only while NotReady).
 
 The rationale of each choice and the rejected alternatives are in the
 [appendix](appendix/0011-ha-replication-peer-to-peer.md).

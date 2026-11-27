@@ -34,8 +34,9 @@ impl B2buaCore {
     }
 
     /// Latch this worker into the `Draining` readiness state (SIGTERM → drain).
-    /// OPTIONS then self-reports `503 draining` so the front proxy steers new
-    /// calls away while in-flight calls finish. Terminal — never un-drains.
+    /// OPTIONS then self-reports `200` with `X-Readiness: new=refuse;
+    /// cause=draining` so the front proxy steers new calls away while in-flight
+    /// calls finish. Terminal — never un-drains.
     ///
     /// SIGTERM wiring: the **runner** installs the `tokio::signal` SIGTERM hook
     /// that calls this; the library exposes the method rather than installing

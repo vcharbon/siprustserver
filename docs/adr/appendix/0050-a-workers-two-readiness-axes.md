@@ -444,6 +444,8 @@ every kind. The lane is opt-in in the transaction layer
 
 ## Amended
 
+- ADR-0011 X6: a Draining node answers OPTIONS `200` with `new=refuse;
+  cause=draining` instead of a `503`; only NotReady answers `503`.
 - ADR-0043 §11: the open breaker sets `new=refuse; cause=backend` on a `200`
   instead of a `503`. §12: the fallback stands, and "a node not-ready on a
   backend still serves calls" now holds for in-dialog requests (4).

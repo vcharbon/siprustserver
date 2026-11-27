@@ -7,7 +7,7 @@
 `crates/sip-proxy/src/registry/` and `health/probe.rs`; the full list is in the
 [appendix](appendix/0050-a-workers-two-readiness-axes.md), with each section in full.
 
-Amends ADR-0043 §11–12, ADR-0031 D1 and D4, ADR-0046 §2 and D4, ADR-0012 D4, ADR-0014 §5 and
+Amends ADR-0011 X6, ADR-0043 §11–12, ADR-0031 D1 and D4, ADR-0046 §2 and D4, ADR-0012 D4, ADR-0014 §5 and
 ADR-0009 (the fresh-pod guard and the drain grace).
 Detail: [appendix, amended](appendix/0050-a-workers-two-readiness-axes.md#amended).
 

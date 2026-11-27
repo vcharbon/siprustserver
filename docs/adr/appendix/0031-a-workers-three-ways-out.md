@@ -42,9 +42,10 @@ ledger and the kind cluster's logs:
   peer, lose the TCP stream, back off (100 ms → 30 s) and retry.
 - **The leaving worker itself** learns nothing from membership: a node filters its own
   ordinal out of its desired peer set and never observes its own withdrawal. SIGTERM is the
-  only signal it has. On SIGTERM it latches `Draining` (OPTIONS 503, `/ready` 503), keeps
-  serving, and waits for its live calls to clear or the grace to elapse. It keeps pulling
-  its peers throughout, so it still folds their progress on its own calls.
+  only signal it has. On SIGTERM it latches `Draining` (OPTIONS `200` with `new=refuse;
+  cause=draining`, `/ready` 503), keeps serving, and waits for its live calls to clear or the
+  grace to elapse. It keeps pulling its peers throughout, so it still folds their progress on
+  its own calls.
 
 The drain's purpose is to keep serving in-flight transactions and to have the time to flush
 the call context to the backup. Without D1 the second half never happens: the peers park the

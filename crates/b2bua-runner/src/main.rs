@@ -125,8 +125,9 @@
 //!                                freshness window + Timer F           (42000)
 //!
 //! SIGTERM, or the worker's own endpoint withdrawn with no SIGTERM, latches
-//! the worker into `Draining` (OPTIONS 503 + readiness probe fails) so k8s
-//! steers new calls away while in-flight calls finish, then exits 0. A
+//! the worker into `Draining` (OPTIONS `200` with `X-Readiness: new=refuse;
+//! cause=draining`, `/ready` `503`) so the proxy and k8s steer new calls away
+//! while in-flight calls finish, then exits 0. A
 //! transaction owner or router loop stalled past `B2BUA_LOOP_STALL_MS` fails
 //! `/ready` and `/healthz`; one stalled past `B2BUA_LOOP_EXIT_MS`, or whose
 //! task ended, exits the process non-zero.

@@ -89,8 +89,8 @@ pub use debug::HeapDumpFn;
 
 /// The readiness a runner reports for `GET /readyz` (and the `/ready` alias).
 /// Three-valued so the HTTP probe can distinguish a node still coming up from
-/// one shutting down — matching the OPTIONS self-report, which carries the same
-/// distinction (`text="not-ready"` vs `text="draining"`).
+/// one shutting down. The OPTIONS self-report draws the same line: NotReady
+/// answers `503`, Draining `200` with `X-Readiness: new=refuse; cause=draining`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProbeState {
     /// Fit to take traffic. `200 ready`.
