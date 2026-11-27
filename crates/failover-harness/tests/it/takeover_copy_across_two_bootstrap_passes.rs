@@ -27,10 +27,10 @@
 //! Timing axes: the cut of pass 1 lands within 100 ms of X, at least 400 ms
 //! before its next frame. The re-INVITE reaches b2 200 ms after the proxy
 //! reads b1 dead, the callee's BYE b1 200 ms after it reads b1 alive, and the
-//! callee's 487 follows the BYE at once. The heal comes 500 ms later, well
-//! inside the puller's 10 s hard timer, with the copy not yet shed and its
-//! round answered; pass 2 catches up on its own `Noop`. Every step is 100 ms
-//! or more apart, so no verdict depends on in-order draining.
+//! callee's 487 follows the BYE 500 ms later. The heal comes 500 ms after
+//! the 487, well inside the puller's 10 s hard timer, with the copy not yet
+//! shed and its round answered; pass 2 catches up on its own `Noop`. Every
+//! step is 100 ms or more apart, so no verdict depends on in-order draining.
 //!
 //! Beyond the failover sweep: a takeover copy across two cold bootstrap passes.
 
