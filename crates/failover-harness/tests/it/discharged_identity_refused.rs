@@ -17,13 +17,14 @@
 //!   2 s      alice CANCELs the INVITE (RFC 3261 §9.1): 481 from b2, no final
 //!   2.5 s    alice ──INVITE (next CSeq)──▶ proxy ──▶ b2: 503, no consult
 //!   2.6 s    another identity: consulted, answered, hung up
+//!   31 s     alice ──INVITE (next CSeq)──▶ b2: 503, no consult
 //!   35 s     past 64·T1 from the delete: the identity is consulted and served
 //! ```
 //!
 //! The timing axes: the consult sticks at the INVITE's turn; the stuck read
 //! falls inside the setup budget (5 s), which would end the consult with a
-//! 503; the retry falls 1.5 s after the delete, inside 64·T1; the last INVITE
-//! 2 s past 64·T1.
+//! 503; the retries fall 1.5 s after the delete and 2 s before 64·T1 from
+//! it; the last INVITE 2 s past 64·T1.
 //!
 //! Beyond the failover sweep: a query of death costs one worker, not both.
 
@@ -40,7 +41,8 @@ use b2bua::decision::{
 use b2bua::limiter::NoopLimiter;
 use b2bua::StuckDischarge;
 use failover_harness::{
-    assert_call_fully_released, total_cdrs_for, FailoverHarness, ProxySut, ReplicatedB2buaSut,
+    assert_call_fully_released, total_cdrs_for, FailoverHarness, PartitionRole, ProxySut,
+    ReplicatedB2buaSut,
 };
 use scenario_harness::callflow::{hangup, ANSWER_SDP, OFFER_SDP};
 use scenario_harness::{Agent, ClientInvite, Party};
@@ -68,6 +70,8 @@ const GIVE_UP: Duration = Duration::from_secs(2);
 const RETRY: Duration = Duration::from_millis(2_500);
 /// Past the simulated transit of a request and its answer.
 const TRANSIT: Duration = Duration::from_millis(100);
+/// How long before 64·T1 from the delete the last refused retry is sent.
+const BEFORE_THE_WINDOW_ENDS: Duration = Duration::from_secs(2);
 /// How far past 64·T1 from the delete the last INVITE is sent.
 const PAST_WINDOW: Duration = Duration::from_secs(2);
 
@@ -229,12 +233,11 @@ impl Scene {
         self.fh.advance(READ_STUCK).await;
         let task = self.b1.seen.stuck_task().expect("b1's consult of the call sticks");
         let discharged = call_ref("b1", self.stuck());
+        let copy = self.b2.sut.get(PartitionRole::Backup, "b1", &discharged).await;
+        assert!(copy.is_some(), "b2 holds the copy of the call b1's consult sticks");
         let discharge = self.b1.sut.discharge_stuck(&discharged, task, DISCHARGE_WITHIN).await;
-        assert_eq!(
-            discharge,
-            Some(StuckDischarge::BackupApplied),
-            "the discharge's delete reached b2"
-        );
+        assert_eq!(discharge, Some(StuckDischarge::BackupApplied), "the discharge ended");
+        assert!(!self.b2.sut.holds_any_trace(&discharged).await, "b2 applied the delete");
         let delete_applied = Instant::now();
         self.fh.mark("b1", None, "crash", "the stuck exit");
         self.b1.sut.crash();
@@ -242,6 +245,31 @@ impl Scene {
         self.fh.advance(GIVE_UP - READ_STUCK).await;
         first.cancel().await.expect(481).await;
         delete_applied
+    }
+
+    /// Step 2: alice's INVITE on the stuck identity with CSeq `cseq`, inside
+    /// the window: b2 answers it the bare 503 at once, never asks its
+    /// routing, and dials no callee.
+    async fn refused_inside_the_window(&self, cseq: u32) {
+        let dialled = self.invites_to_bob();
+        let mut retry = self.invite(self.stuck(), cseq).await;
+        self.fh.advance(TRANSIT).await;
+        let consults = self.b2.seen.consults_of(self.stuck().0);
+        assert_eq!(consults, 0, "b2 never asks the identity's routing");
+        assert!(self.b2.seen.stuck_task().is_none(), "b2 does not stick");
+        retry.expect(503).await;
+        assert_eq!(self.invites_to_bob(), dialled, "no callee dialled");
+    }
+
+    /// The INVITEs bob received so far.
+    fn invites_to_bob(&self) -> usize {
+        let to_bob = |e: &&sip_net_testkit::RecordedSipEntry| e.to == self.bob.addr();
+        self.fh
+            .sip_entries()
+            .iter()
+            .filter(to_bob)
+            .filter(|e| e.raw.starts_with(b"INVITE "))
+            .count()
     }
 
     /// Step 3: a call on the other identity, inside the window, is consulted
@@ -301,25 +329,25 @@ fn call_ref(primary: &str, identity: (&str, &str)) -> String {
     call::derive_call_ref(primary, identity.0, identity.1)
 }
 
-/// The retry on the stuck identity reaches b2 inside 64·T1 of the delete: b2
-/// answers it the bare 503 at once and never asks its routing, so b2 does not
-/// stick; another identity is served meanwhile, and past the window the
-/// identity is served again.
+/// The retries on the stuck identity reach b2 inside 64·T1 of the delete,
+/// 1.5 s after it and 2 s before the window ends: b2 answers each the bare
+/// 503 at once and never asks its routing, so b2 does not stick; another
+/// identity is served meanwhile, and 2 s past the window the identity is
+/// served again, the window not stretched by the refusals.
 #[tokio::test(start_paused = true)]
 async fn the_survivor_refuses_the_identity_of_a_call_a_stuck_poll_held_for_64_t1() {
     let name = "discharged-identity-refused";
     let mut s = Scene::start(name).await;
+    let first_cseq = Party::Caller.first_cseq();
     let delete_applied = s.stick_and_discharge().await;
 
     s.fh.advance(RETRY - GIVE_UP).await;
-    let mut retry = s.invite(s.stuck(), Party::Caller.first_cseq() + 1).await;
-    s.fh.advance(TRANSIT).await;
-    assert_eq!(s.b2.seen.consults_of(s.stuck().0), 0, "b2 never asks the identity's routing");
-    assert!(s.b2.seen.stuck_task().is_none(), "b2 does not stick");
-    retry.expect(503).await;
-    assert!(!s.fh.sip_entries().iter().any(|e| e.to == s.bob.addr()), "no callee dialled");
-
+    s.refused_inside_the_window(first_cseq + 1).await;
     s.serve_the_other_identity().await;
-    s.serve_the_identity_past_the_window(delete_applied, Party::Caller.first_cseq() + 2).await;
+    let late = delete_applied + T1 * 64 - BEFORE_THE_WINDOW_ENDS;
+    s.fh.advance(late - Instant::now()).await;
+    s.refused_inside_the_window(first_cseq + 2).await;
+
+    s.serve_the_identity_past_the_window(delete_applied, first_cseq + 3).await;
     s.finish(name).await;
 }
