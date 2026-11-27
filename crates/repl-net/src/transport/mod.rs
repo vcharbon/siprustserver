@@ -136,6 +136,28 @@ pub fn append_wire_bytes(frame: &Frame, out: &mut Vec<u8>) -> Result<(), SendErr
     Ok(())
 }
 
+/// The fixed part of a `Data` frame's [`wire_bytes`], above its 83 bytes at
+/// msgpack's widest headers: the length prefix, the integers and the headers
+/// of its four variable-length fields.
+const DATA_FIXED_WIRE_BYTES: usize = 128;
+
+/// The bytes a buffer reserves for [`wire_bytes`] of `frame`: at least them
+/// for a `Data` frame, whose indexes each add a header of at most 5 bytes;
+/// [`DATA_FIXED_WIRE_BYTES`] for the other frames, which carry no body.
+pub fn wire_len_bound(frame: &Frame) -> usize {
+    match frame {
+        Frame::Data { call_ref, indexes, body, incarnation, .. } => {
+            let indexes: usize = indexes.iter().map(|idx| idx.len().saturating_add(5)).sum();
+            DATA_FIXED_WIRE_BYTES
+                .saturating_add(call_ref.len())
+                .saturating_add(indexes)
+                .saturating_add(body.as_ref().map_or(0, |body| body.len()))
+                .saturating_add(incarnation.as_ref().map_or(0, String::len))
+        }
+        _ => DATA_FIXED_WIRE_BYTES,
+    }
+}
+
 /// A connection-oriented, reliable, ordered, framed replication network.
 ///
 /// Parallel to `sip-net::SignalingNetwork` but for a reliable stream. A node

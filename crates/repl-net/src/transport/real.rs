@@ -19,7 +19,7 @@ use tokio::sync::Mutex;
 
 use crate::{decode_frame, try_read_framed, Frame};
 
-use super::{append_wire_bytes, wire_bytes};
+use super::{append_wire_bytes, wire_bytes, wire_len_bound};
 use super::{
     AcceptError, ConnectError, ListenError, ReplicationConnection, ReplicationListener,
     ReplicationNetwork, SendError, SocketSettings,
@@ -166,7 +166,8 @@ impl ReplicationConnection for RealConnection {
     }
 
     /// Every frame encoded, each behind its own length prefix, into ONE
-    /// buffer, then a SINGLE write + flush: a bootstrap batch costs one
+    /// buffer reserved up front ([`wire_len_bound`]), then a SINGLE write +
+    /// flush: a bootstrap batch costs one
     /// syscall, one flush and one write-lock acquisition. The bytes on the
     /// wire are byte-for-byte those of the frames sent one by one, so the
     /// receiver's framed `recv` is unchanged.
@@ -174,7 +175,7 @@ impl ReplicationConnection for RealConnection {
         if frames.is_empty() {
             return Ok(());
         }
-        let mut buf = Vec::new();
+        let mut buf = Vec::with_capacity(frames.iter().map(wire_len_bound).sum());
         for frame in frames {
             append_wire_bytes(&frame, &mut buf)?;
         }
