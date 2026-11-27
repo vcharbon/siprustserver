@@ -178,6 +178,7 @@ impl ActionExecutor<'_> {
                 // The call-lifetime latch: the standing withheld option tags
                 // union into the incoming declaration (`apply_route` parity).
                 let mut features = features.clone();
+                b2bua_sdk::timer_delay::hold_max_duration(&mut features.platform);
                 features.latch_call_lifetime(call.features.as_ref());
                 call.features = Some(features);
             }

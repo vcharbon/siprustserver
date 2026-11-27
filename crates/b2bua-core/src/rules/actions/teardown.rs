@@ -148,7 +148,8 @@ impl ActionExecutor<'_> {
         call.state = call::CallModelState::Terminating;
         // A caller dialog held possibly confirmed is BYEd when its hold ends,
         // the backstop running again from that BYE.
-        let held = super::possibly_confirmed::held_for(call, self.now_ms).map_or(0, |h| h + 1);
+        let held = super::possibly_confirmed::held_for(call, self.now_ms)
+            .map_or(0, |h| h.saturating_add(1));
         self.schedule(
             call,
             fx,

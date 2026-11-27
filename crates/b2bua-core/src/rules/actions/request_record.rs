@@ -84,7 +84,7 @@ impl ActionExecutor<'_> {
                 req.method().as_str(),
                 i64::from(req.cseq().seq()),
                 sent_request(req, dest),
-                self.now_ms + RequestRecord::TIMER_F_MS,
+                self.now_ms.saturating_add(RequestRecord::TIMER_F_MS),
                 usage_of(req),
             )
         };
@@ -115,7 +115,7 @@ impl ActionExecutor<'_> {
     ) -> RequestRecord {
         RequestRecord {
             sent: Some(sent_request(out, dest)),
-            deadline_ms: Some(self.now_ms + RequestRecord::TIMER_F_MS),
+            deadline_ms: Some(self.now_ms.saturating_add(RequestRecord::TIMER_F_MS)),
             usage: usage_of(out),
             ..record
         }
@@ -193,7 +193,7 @@ impl ActionExecutor<'_> {
         let record = RequestRecord {
             origin: RequestOrigin::Held,
             usage: usage_of(req),
-            deadline_ms: Some(self.now_ms + RequestRecord::HELD_ANSWER_MS),
+            deadline_ms: Some(self.now_ms.saturating_add(RequestRecord::HELD_ANSWER_MS)),
             source_vias: req.raw(HeaderName::Via).map(str::to_string).collect(),
             source_call_id: req.call_id().as_str().to_string(),
             source_from: req.raw(HeaderName::From).next().unwrap_or_default().to_string(),

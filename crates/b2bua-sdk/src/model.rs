@@ -231,7 +231,9 @@ pub enum RuleAction {
     /// A [`TimerType::Keepalive`](call::TimerType::Keepalive) is armed exactly one `keepalive_interval_sec`
     /// out (`call::helpers::keepalive_fire_at`), a larger `delay` noted as a
     /// defect; an arm of the framework's `Rung`, `NotifyAnswerCap` or
-    /// `HeldAnswer` is dropped as one. Every other type keeps its `delay`.
+    /// `HeldAnswer` is dropped as one. Every other type keeps its `delay`,
+    /// held to [`MAX_DELAY_MS`](crate::timer_delay::MAX_DELAY_MS), a longer one
+    /// noted as a defect.
     ScheduleTimer {
         key: TimerKey,
         delay: TimerDelay,
@@ -508,7 +510,8 @@ pub enum RuleAction {
     /// Overwrite the call's feature activations from a (re)route decision. The
     /// initial route applies features inside `apply_route`; the async failover
     /// route folds back through the rule layer, so this is how the reroute's
-    /// features reach the call (failover/initial-route parity).
+    /// features reach the call (failover/initial-route parity). The maximum
+    /// call duration is held to [`MAX_DELAY_MS`](crate::timer_delay::MAX_DELAY_MS).
     SetFeatures {
         features: FeatureActivations,
     },

@@ -46,7 +46,7 @@ pub fn arm_at_first_18x(
             call_ref = %call.call_ref,
             leg_id,
             requested_ms = ms,
-            held_ms = held - now_ms,
+            held_ms = held.saturating_sub(now_ms),
             invite_txn_timeout_sec = config.invite_txn_timeout_sec,
             "ring deadline held under the INVITE transaction bound"
         );

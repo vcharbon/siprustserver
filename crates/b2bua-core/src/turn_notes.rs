@@ -40,6 +40,10 @@ pub const CALLER_INVITE_REBUILDS: &str = "caller-invite-rebuilds";
 pub const TERMINATION_RECORDED: &str = "terminal-call-records-its-termination";
 /// A `Keepalive` was armed beyond one keepalive interval; it is held to one.
 pub const KEEPALIVE_WITHIN_CADENCE: &str = "keepalive-armed-within-one-cadence";
+/// A timer was armed or snoozed past
+/// [`MAX_DELAY_MS`](b2bua_sdk::timer_delay::MAX_DELAY_MS); it is armed at the
+/// maximum.
+pub const DELAY_WITHIN_MAXIMUM: &str = "timer-armed-within-the-maximum-delay";
 /// The leg an in-dialog request was being built for left the record while
 /// it was built; the request is not sent.
 pub const REQUEST_KEEPS_ITS_LEG: &str = "request-keeps-its-leg";
@@ -68,7 +72,7 @@ pub const ONE_INVITE_PER_DIALOG: &str = "one-invite-in-progress-per-dialog";
 pub const REQUEST_TO_LEG_METHOD: &str = "request-to-leg-names-a-method-it-sends";
 
 /// Every defect a turn reports, by name.
-pub const DEFECTS: [&str; 14] = [
+pub const DEFECTS: [&str; 15] = [
     PRACK_HAS_A_LEG,
     PRACK_HAS_A_DIALOG,
     UNDECLARED_TRANSITION,
@@ -77,6 +81,7 @@ pub const DEFECTS: [&str; 14] = [
     CALLER_INVITE_REBUILDS,
     TERMINATION_RECORDED,
     KEEPALIVE_WITHIN_CADENCE,
+    DELAY_WITHIN_MAXIMUM,
     REQUEST_KEEPS_ITS_LEG,
     STATED_TEXT_FITS,
     STORED_IMAGE_READS,

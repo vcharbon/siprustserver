@@ -255,7 +255,7 @@ impl ActionExecutor<'_> {
     fn arm_answer_cap(&mut self, call: &mut Call, fx: &mut HandlerEffects) {
         let ends = waits(call).into_iter().map(|(_, _, end)| end.unwrap_or(self.now_ms));
         match ends.min() {
-            Some(end) => self.schedule(call, fx, cap_key(), (end - self.now_ms).max(0)),
+            Some(end) => self.schedule(call, fx, cap_key(), end.saturating_sub(self.now_ms).max(0)),
             None => self.disarm(call, fx, &cap_key()),
         }
     }

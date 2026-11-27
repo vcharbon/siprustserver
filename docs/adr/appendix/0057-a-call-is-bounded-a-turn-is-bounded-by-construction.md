@@ -60,6 +60,11 @@ rules close the window's escapes:
   framework-only types: a rule's arm of one is dropped as a defect, as an
   undeclared lifecycle action is.
 
+Any other delay is held to `MAX_DELAY_MS` (`i32::MAX` ms, about 24.8 days), a
+longer one armed at it and noted as a defect; a route's maximum call duration is
+held to it too, so the caps that grow with the grant read the held value. Every
+deadline sum on the clock saturates.
+
 ### 2. The call record's collections are capped at the insert
 
 `b2bua-core` checks each collection's length when an action would grow it:

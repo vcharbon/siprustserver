@@ -6,6 +6,7 @@
 //! refused and [`admitted`] dials the b-leg it routes to.
 
 use b2bua_sdk::lifecycle::{AttemptOpening, RouteAnswer};
+use b2bua_sdk::timer_delay::hold_max_duration;
 use call::helpers::{add_originated_b_leg, mark_decision};
 use call::{
     AdmitOutcome, AdmitReport, AttemptCause, Call, Deadline, DecisionKind, TerminationCause,
@@ -59,7 +60,10 @@ pub struct AdmittingRoute {
 }
 
 /// Apply `route` to `call` (which already carries the a-leg) up to its admit.
-/// `depth` counts the chained limiter-reject failovers behind it.
+/// `depth` counts the chained limiter-reject failovers behind it. The
+/// maximum call duration the route states is held to
+/// [`MAX_DELAY_MS`](b2bua_sdk::timer_delay::MAX_DELAY_MS) before the call and
+/// its deadlines read it.
 ///
 /// A destination host that is neither an IP literal nor allow-listed (a bogus
 /// host from call-control, a cluster name with no live pod) is refused with a
@@ -109,6 +113,7 @@ pub fn up_to_admit(
         )));
     }
 
+    hold_max_duration(&mut route.features.platform);
     // The call-lifetime latch: a failover route that does not restate the
     // withheld option tags cannot restore one — merged before its features
     // replace the standing ones (SetFeatures parity).
@@ -398,14 +403,15 @@ pub fn admitted(
 }
 
 /// Arm the GlobalDuration absolute-cap backstop on the call, replacing the
-/// instance it held. Factored out so the deferred-routing path arms it too.
+/// instance it held, its deadline saturating at the bounds of `i64`.
+/// Factored out so the deferred-routing path arms it too.
 fn arm_global_duration(
     call: &mut Call,
     fx: &mut HandlerEffects,
     max_duration_ms: i64,
     now_ms: i64,
 ) {
-    let fire_at = now_ms + max_duration_ms;
+    let fire_at = now_ms.saturating_add(max_duration_ms);
     arm(call, fx, TimerKey::call(TimerType::GlobalDuration), fire_at);
 }
 
@@ -416,10 +422,11 @@ fn arm_global_duration(
 /// promote/18x confirm paths); fired by the CORE `setup-timeout` rule (408 to
 /// A, CANCEL pending b-legs). It lives in
 /// the call record's ledger, where the transaction layer's initial-INVITE
-/// bound does not. A non-positive `setup_timeout_ms` is off.
+/// bound does not. A non-positive `setup_timeout_ms` is off; the deadline
+/// saturates at the bounds of `i64`.
 fn arm_setup_timeout(call: &mut Call, fx: &mut HandlerEffects, setup_timeout_ms: i64, now_ms: i64) {
     if let Some(ms) = Deadline::of_millis(Some(setup_timeout_ms)).millis() {
-        arm(call, fx, TimerKey::setup(TimerType::SetupTimeout), now_ms + ms);
+        arm(call, fx, TimerKey::setup(TimerType::SetupTimeout), now_ms.saturating_add(ms));
     }
 }
 

@@ -122,6 +122,6 @@ pub fn held_for(call: &Call, now_ms: i64) -> Option<i64> {
     call.timers
         .iter()
         .filter(|t| matches!(t.timer_type(), TimerType::PossiblyConfirmed { .. }))
-        .map(|t| t.fire_at - now_ms)
+        .map(|t| t.fire_at.saturating_sub(now_ms))
         .max()
 }

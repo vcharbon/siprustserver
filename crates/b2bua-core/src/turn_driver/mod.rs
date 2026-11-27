@@ -336,7 +336,7 @@ impl<'d> Session<'d> {
         let seq = self.steps;
         self.steps += 1;
         if let Step::Advance(ms) = step {
-            self.now += ms;
+            self.now = self.now.saturating_add(*ms);
             return Outcome::Advanced;
         }
         if self.call.state == CallModelState::Terminated {

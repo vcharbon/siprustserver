@@ -84,6 +84,7 @@ use crate::effects::{CriticalStateEffect, HandlerEffects, HandlerResult};
 use crate::turn_scope::TurnScope;
 
 use b2bua_sdk::model::{RuleAction, RuleContext};
+use b2bua_sdk::timer_delay::MAX_DELAY_MS;
 
 pub use ladder::ladder_bound;
 pub use prack::{Owed, Settle};
@@ -142,18 +143,18 @@ impl ActionExecutor<'_> {
         HandlerResult { call, effects: fx }
     }
 
-    /// Arm (or re-arm) the persisted per-call timer `key`, replacing the
-    /// instance it held under the call's next generation. A `Keepalive` is
-    /// armed exactly one interval out ([`keepalive_fire_at`]).
+    /// Arm (or re-arm) the persisted per-call timer `key` `delay_ms` out,
+    /// replacing the instance it held under the call's next generation, at
+    /// the deadline [`Self::fire_at`] gives it.
     fn schedule(&mut self, call: &mut Call, fx: &mut HandlerEffects, key: TimerKey, delay_ms: i64) {
-        let fire_at = self.capped_fire_at(call, &key.timer_type, self.now_ms + delay_ms);
+        let fire_at = self.fire_at(call, &key.timer_type, delay_ms);
         crate::timer_arm::arm(call, fx, key, fire_at);
     }
 
     /// Snooze the per-call timer `key`: re-arm it `delay_ms` out as
     /// [`Self::schedule`] does, one more snooze counted on the ledger.
     fn snooze(&mut self, call: &mut Call, fx: &mut HandlerEffects, key: TimerKey, delay_ms: i64) {
-        let fire_at = self.capped_fire_at(call, &key.timer_type, self.now_ms + delay_ms);
+        let fire_at = self.fire_at(call, &key.timer_type, delay_ms);
         crate::timer_arm::snooze(call, fx, key, fire_at);
     }
 
@@ -211,22 +212,33 @@ impl ActionExecutor<'_> {
         }
     }
 
-    /// `fire_at` for a minted timer, with a `Keepalive` armed exactly one
-    /// keepalive interval out whatever it asks for, so its window resets at
-    /// most once per interval (ADR-0057 §1); a farther deadline is a defect
-    /// at the caller, noted on the turn. Non-keepalive deadlines pass
-    /// through: a policy timer legitimately outlives a probe cadence.
-    fn capped_fire_at(&mut self, call: &Call, timer_type: &TimerType, fire_at: i64) -> i64 {
-        if !matches!(timer_type, TimerType::Keepalive) {
-            return fire_at;
+    /// The deadline of a timer of `timer_type` armed `delay_ms` out. A
+    /// `Keepalive` is armed exactly one keepalive interval out whatever it
+    /// asks for, so its window resets at most once per interval (ADR-0057
+    /// §1); a farther one is a defect at the caller, noted on the turn. Any
+    /// other delay, and a `Keepalive`'s with probing off, is held to
+    /// [`MAX_DELAY_MS`], a longer one noted on the turn: a policy timer
+    /// legitimately outlives a probe cadence, never the maximum. The deadline
+    /// saturates at the bounds of `i64`.
+    fn fire_at(&mut self, call: &Call, timer_type: &TimerType, delay_ms: i64) -> i64 {
+        let interval_ms = self.config.keepalive_interval_sec.saturating_mul(1000);
+        if matches!(timer_type, TimerType::Keepalive) && interval_ms > 0 {
+            if delay_ms > interval_ms {
+                let detail =
+                    format!("Keepalive armed {delay_ms} ms out of a {interval_ms} ms cadence");
+                self.turn.notes.defect(crate::turn_notes::KEEPALIVE_WITHIN_CADENCE, detail, call);
+            }
+            let asked = self.now_ms.saturating_add(delay_ms);
+            return keepalive_fire_at(asked, self.now_ms, interval_ms);
         }
-        let interval_ms = self.config.keepalive_interval_sec * 1000;
-        let armed = keepalive_fire_at(fire_at, self.now_ms, interval_ms);
-        if fire_at > armed && interval_ms > 0 {
-            let out = fire_at - self.now_ms;
-            let detail = format!("Keepalive armed {out} ms out of a {interval_ms} ms cadence");
-            self.turn.notes.defect(crate::turn_notes::KEEPALIVE_WITHIN_CADENCE, detail, call);
+        if delay_ms > MAX_DELAY_MS {
+            let rule = self.turn.rule.unwrap_or("(none)");
+            let detail = format!(
+                "rule '{rule}': {timer_type:?} armed {delay_ms} ms out, \
+                 past the {MAX_DELAY_MS} ms maximum; armed at the maximum"
+            );
+            self.turn.notes.defect(crate::turn_notes::DELAY_WITHIN_MAXIMUM, detail, call);
         }
-        armed
+        self.now_ms.saturating_add(delay_ms.min(MAX_DELAY_MS))
     }
 }

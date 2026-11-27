@@ -132,7 +132,9 @@ A service arms a timer for a delay. When the delay ends, the call gets a timer e
   names the service and the timer. The scope is what the timer guards: the call, one attempt,
   or one leg. Two more scopes exist, and only the engine uses them.
 - **Arm.** `RuleAction::arm(key, TimerDelay::secs(10))`. A call holds one timer for each key.
-  If you arm a key again, the new timer replaces the old one.
+  If you arm a key again, the new timer replaces the old one. A delay is at most
+  `MAX_DELAY_MS`, about 24.8 days: the engine arms a longer one at that maximum and records a
+  defect.
 - **Cancel.** `RuleAction::cancel(key)`.
 - **Fire.** A rule takes the event with `Match::timer().service_timers(MACHINE)`. The handler
   reads the full key with `ctx.timer_key()`. `ctx.service_timer_key()` gives the service and

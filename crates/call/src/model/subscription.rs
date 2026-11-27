@@ -81,6 +81,6 @@ impl NotifyInFlight {
 
     /// When the requests behind the NOTIFY leave though it is unanswered.
     pub fn cap_at_ms(&self) -> i64 {
-        self.sent_at_ms + Self::ANSWER_CAP_MS
+        self.sent_at_ms.saturating_add(Self::ANSWER_CAP_MS)
     }
 }

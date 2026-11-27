@@ -260,7 +260,7 @@ A call cannot stay in a worker with no owner.
 |---|---|---|
 | Keepalive | An OPTIONS in each dialog each 300 s | No answer in 32 s, or an answer that shows the dialog is gone, ends the call. |
 | Teardown timer | 32 s | A teardown that gets no answer ends at this time. |
-| Maximum duration | Set by the decision for each call. 1 h when the decision gives no value. | The call is ended at this time. |
+| Maximum duration | Set by the decision for each call, at most 2 147 483 647 ms (about 24.8 days). 1 h when the decision gives no value. | The call is ended at this time. |
 | Reaper | A sweep each 30 s | A call with no activity for 900 s is released, with its CDR. |
 
 ## The process

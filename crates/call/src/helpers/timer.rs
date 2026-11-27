@@ -13,12 +13,13 @@ pub const TERMINATING_TIMEOUT_MS: i64 = 32_000;
 /// out, whatever `fire_at` it asked for, so its message window resets at most
 /// once per interval (ADR-0057 §1). `keepalive_interval_ms <= 0` (probing
 /// disabled) keeps `fire_at`. Restored deadlines take
-/// [`cap_keepalive_fire_at`] instead, which never raises one.
+/// [`cap_keepalive_fire_at`] instead, which never raises one. The deadline
+/// saturates at `i64::MAX`.
 pub fn keepalive_fire_at(fire_at: i64, now_ms: i64, keepalive_interval_ms: i64) -> i64 {
     if keepalive_interval_ms <= 0 {
         return fire_at;
     }
-    now_ms + keepalive_interval_ms
+    now_ms.saturating_add(keepalive_interval_ms)
 }
 
 /// The ledger's one-interval ceiling on a `Keepalive` deadline: `fire_at`
@@ -30,12 +31,13 @@ pub fn keepalive_fire_at(fire_at: i64, now_ms: i64, keepalive_interval_ms: i64) 
 /// than a peer's keepalive tolerance. Clamping moves a probe only earlier, which
 /// costs nothing. `keepalive_interval_ms <= 0` (probing disabled) imposes no
 /// ceiling. The driver-only store-fault re-arm and restore hygiene clamp
-/// through it; the rule-arming seam arms at [`keepalive_fire_at`].
+/// through it; the rule-arming seam arms at [`keepalive_fire_at`]. The
+/// ceiling saturates at `i64::MAX`.
 pub fn cap_keepalive_fire_at(fire_at: i64, now_ms: i64, keepalive_interval_ms: i64) -> i64 {
     if keepalive_interval_ms <= 0 {
         return fire_at;
     }
-    fire_at.min(now_ms + keepalive_interval_ms)
+    fire_at.min(now_ms.saturating_add(keepalive_interval_ms))
 }
 
 /// Arm `key` to fire at `fire_at` under the call's next generation,
@@ -111,5 +113,13 @@ mod tests {
             now + 10 * interval,
             "probing disabled (non-positive interval) imposes no ceiling",
         );
+    }
+
+    #[test]
+    fn a_keepalive_deadline_past_i64_saturates() {
+        let now = 1_700_000_000_000;
+        assert_eq!(keepalive_fire_at(0, now, i64::MAX), i64::MAX);
+        assert_eq!(cap_keepalive_fire_at(i64::MAX, now, i64::MAX), i64::MAX);
+        assert_eq!(cap_keepalive_fire_at(now, now, i64::MAX), now);
     }
 }
