@@ -74,9 +74,22 @@ impl From<UnknownDiscriminant> for ReplCodecError {
 /// Deterministic: same frame → identical bytes. A string, a body or an index
 /// list longer than msgpack's 32-bit length is [`ReplCodecError::TooLong`].
 pub fn encode_frame(frame: &Frame) -> Result<Vec<u8>, ReplCodecError> {
-    let mut enc = Encoder(ByteBuf::new());
-    enc.frame(frame)?;
-    Ok(enc.0.into_vec())
+    let mut out = Vec::new();
+    encode_frame_onto(frame, &mut out)?;
+    Ok(out)
+}
+
+/// Append the bytes [`encode_frame`] makes of `frame` to `out`, with no
+/// buffer of their own. On an error `out` is left as it was.
+pub fn encode_frame_onto(frame: &Frame, out: &mut Vec<u8>) -> Result<(), ReplCodecError> {
+    let start = out.len();
+    let mut enc = Encoder(ByteBuf::from_vec(std::mem::take(out)));
+    let encoded = enc.frame(frame);
+    *out = enc.0.into_vec();
+    if encoded.is_err() {
+        out.truncate(start);
+    }
+    encoded
 }
 
 /// The msgpack writes of one frame, over a buffer whose writes cannot fail;

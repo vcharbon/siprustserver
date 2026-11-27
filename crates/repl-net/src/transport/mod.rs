@@ -29,7 +29,7 @@ use std::net::SocketAddr;
 
 use async_trait::async_trait;
 
-use crate::framing::{frame_with_len_prefix, MAX_FRAME_LEN};
+use crate::framing::MAX_FRAME_LEN;
 use crate::Frame;
 
 pub use real::RealReplicationNetwork;
@@ -110,7 +110,30 @@ pub fn payload(frame: &Frame) -> Result<Vec<u8>, SendError> {
 /// `frame` encoded and length-prefixed, as a connection writes it; one that
 /// does not encode or frame is [`SendError::Unencodable`].
 pub fn wire_bytes(frame: &Frame) -> Result<Vec<u8>, SendError> {
-    frame_with_len_prefix(&payload(frame)?).map_err(|e| SendError::Unencodable(e.to_string()))
+    let mut wire = Vec::new();
+    append_wire_bytes(frame, &mut wire)?;
+    Ok(wire)
+}
+
+/// Append [`wire_bytes`] of `frame` to `out`, encoded in place behind its
+/// length prefix: a batch of frames is one buffer, never a buffer per frame
+/// beside it. On an error `out` is left as it was.
+pub fn append_wire_bytes(frame: &Frame, out: &mut Vec<u8>) -> Result<(), SendError> {
+    let start = out.len();
+    out.extend_from_slice(&[0; 4]);
+    if let Err(e) = crate::codec::encode_frame_onto(frame, out) {
+        out.truncate(start);
+        return Err(SendError::Unencodable(e.to_string()));
+    }
+    let len = out.len().saturating_sub(start).saturating_sub(4);
+    let Some(prefix) = u32::try_from(len).ok().filter(|len| *len <= MAX_FRAME_LEN) else {
+        out.truncate(start);
+        return Err(SendError::Unencodable(format!("{len} bytes past the {MAX_FRAME_LEN} cap")));
+    };
+    if let Some(slot) = out.get_mut(start..).and_then(<[u8]>::first_chunk_mut::<4>) {
+        *slot = prefix.to_be_bytes();
+    }
+    Ok(())
 }
 
 /// A connection-oriented, reliable, ordered, framed replication network.
@@ -169,10 +192,11 @@ pub trait ReplicationConnection: Send + Sync {
     /// hundreds–thousands of small bodies stream back-to-back and a per-frame
     /// flush collapses throughput on any non-loopback link. A batch holding a
     /// frame that does not encode is [`SendError::Unencodable`] and nothing of
-    /// it is sent: the default checks every frame before the first send.
+    /// it is sent: the default checks every frame before the first send. The
+    /// batch's encoded bytes are held once, in the one buffer the write takes.
     async fn send_batch(&self, frames: Vec<Frame>) -> Result<(), SendError> {
         for frame in &frames {
-            wire_bytes(frame)?;
+            payload(frame)?;
         }
         for frame in frames {
             self.send(frame).await?;

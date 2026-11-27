@@ -8,3 +8,4 @@
 mod no_panic_lane;
 mod property;
 mod roundtrip;
+mod wire_batch;

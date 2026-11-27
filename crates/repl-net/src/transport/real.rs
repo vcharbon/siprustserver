@@ -19,7 +19,7 @@ use tokio::sync::Mutex;
 
 use crate::{decode_frame, try_read_framed, Frame};
 
-use super::wire_bytes;
+use super::{append_wire_bytes, wire_bytes};
 use super::{
     AcceptError, ConnectError, ListenError, ReplicationConnection, ReplicationListener,
     ReplicationNetwork, SendError, SocketSettings,
@@ -170,13 +170,13 @@ impl ReplicationConnection for RealConnection {
             return Ok(());
         }
         // Encode every frame (each with its own length prefix) into ONE buffer,
-        // then a SINGLE write + flush — so a 128-body bootstrap chunk costs one
-        // syscall / one flush / one write-lock acquisition instead of 128. The
+        // then a SINGLE write + flush — so a bootstrap batch costs one
+        // syscall / one flush / one write-lock acquisition. The
         // bytes on the wire are byte-for-byte identical to sending them
         // individually, so the receiver's framed `recv` is unchanged.
         let mut buf = Vec::new();
-        for frame in &frames {
-            buf.extend_from_slice(&wire_bytes(frame)?);
+        for frame in frames {
+            append_wire_bytes(&frame, &mut buf)?;
         }
         let mut w = self.write.lock().await;
         w.write_all(&buf).await.map_err(|e| classify_write(&e))?;

@@ -8,14 +8,54 @@ use repl_net::transport::ReplicationConnection;
 use super::{ReplServer, Unsent};
 use crate::store::PartitionRole;
 
-/// Bootstrap store-scan batch size (bodies per `send_batch`).
+/// The most bodies one bootstrap `send_batch` carries.
 const BOOTSTRAP_CHUNK: usize = 128;
+
+/// The most body bytes one bootstrap `send_batch` carries; a body past it is
+/// a batch of its own. Each batch is one send under the server's send stall,
+/// so a batch leaves within it on any link that carries this much, or one
+/// record, per stall (ADR-0014 §8).
+const BOOTSTRAP_BATCH_BYTES: usize = 4 * 1024 * 1024;
+
+/// The scan's next batch: its keys in scan order, their frames, and the
+/// bytes of their bodies.
+#[derive(Default)]
+struct Batch<'k> {
+    keys: Vec<&'k str>,
+    frames: Vec<Frame>,
+    bytes: usize,
+}
+
+impl<'k> Batch<'k> {
+    /// Whether a body of `len` bytes joins this batch: an empty batch takes
+    /// any body, a batch below both bounds one that keeps it within them.
+    fn admits(&self, len: usize) -> bool {
+        self.frames.is_empty()
+            || (self.frames.len() < BOOTSTRAP_CHUNK
+                && self.bytes.saturating_add(len) <= BOOTSTRAP_BATCH_BYTES)
+    }
+
+    fn push(&mut self, key: &'k str, frame: Frame) {
+        self.bytes = self.bytes.saturating_add(body_len(&frame));
+        self.keys.push(key);
+        self.frames.push(frame);
+    }
+}
+
+/// The bytes of the body `frame` carries.
+fn body_len(frame: &Frame) -> usize {
+    match frame {
+        Frame::Data { body: Some(body), .. } => body.len(),
+        _ => 0,
+    }
+}
 
 impl ReplServer {
     /// Bulk store-scan bootstrap for one flow. Snapshots the flow's keyset under
     /// brief locks, captures `W = head` at scan start, streams each live body as
-    /// `Data{ op: Put, partition, at: W }` in [`BOOTSTRAP_CHUNK`] batches (one
-    /// `send_batch` per chunk — never holding a lock across the socket), and
+    /// `Data{ op: Put, partition, at: W }` in scan order, batched by
+    /// [`BOOTSTRAP_CHUNK`] bodies and [`BOOTSTRAP_BATCH_BYTES`] (one
+    /// `send_batch` per batch — never holding a lock across the socket), and
     /// returns `W` so the tail resumes warm. A key whose body vanished between
     /// the snapshot and the read is skipped (the call ended), and so is a body
     /// the transport refuses ([`Self::send_or_skip`]). `Err` if the socket
@@ -46,54 +86,73 @@ impl ReplServer {
             Partition::Bak => self.source.scan_refs_backed_by(&self.self_ordinal, caller),
         };
 
-        for group in keys.chunks(BOOTSTRAP_CHUNK) {
-            let frames = self.bootstrap_frames(group, w, partition, role, primary).await;
-            match self.bounded(conn.send_batch(frames), caller, flow).await {
-                // A refused frame refuses its whole batch unsent: the chunk is
-                // read again and sent frame by frame, the refused one skipped.
-                Err(Unsent::Refused(_)) => {
-                    for frame in self.bootstrap_frames(group, w, partition, role, primary).await {
-                        self.send_or_skip(conn, frame, caller, flow).await?;
-                    }
-                }
-                sent => sent?,
+        let scan = Scan { conn, caller, partition, role, primary, flow, w };
+        let mut batch = Batch::default();
+        for key in &keys {
+            let Some(frame) = self.bootstrap_frame(key, &scan).await else { continue };
+            if !batch.admits(body_len(&frame)) {
+                self.send_bootstrap_batch(std::mem::take(&mut batch), &scan).await?;
             }
+            batch.push(key, frame);
         }
+        self.send_bootstrap_batch(batch, &scan).await?;
         Ok(w)
     }
 
-    /// The bootstrap frames of the keys `group`, each a `Put` at `w`; a key
-    /// whose body vanished is left out.
-    async fn bootstrap_frames(
-        &self,
-        group: &[String],
-        w: Watermark,
-        partition: Partition,
-        role: PartitionRole,
-        primary: &str,
-    ) -> Vec<Frame> {
-        let mut frames = Vec::with_capacity(group.len());
-        for key in group {
-            match self.source.read_entry(role, primary, key).await {
-                Some((body, meta)) => frames.push(Frame::Data {
-                    at: w,
-                    op: repl_net::frame::Op::Put,
-                    partition,
-                    call_ref: key.clone(),
-                    call_gen: meta.call_gen,
-                    call_bgen: meta.call_bgen,
-                    body_ttl_ms: meta.body_ttl_ms,
-                    // Send-time stamp in the frame of the body's instants, as
-                    // `drain_since` stamps it.
-                    origin_now_ms: meta.origin_now_ms(self.changelog.now_ms()),
-                    indexes: meta.indexes,
-                    body: Some(body),
-                    answered: false,
-                    incarnation: meta.incarnation,
-                }),
-                _ => continue,
-            }
+    /// Send `batch` in one `send_batch`. A refused frame refuses its whole
+    /// batch unsent: the batch's keys are read again and sent frame by frame,
+    /// the refused one skipped.
+    async fn send_bootstrap_batch(&self, batch: Batch<'_>, scan: &Scan<'_>) -> Result<(), Unsent> {
+        if batch.frames.is_empty() {
+            return Ok(());
         }
-        frames
+        match self.bounded(scan.conn.send_batch(batch.frames), scan.caller, scan.flow).await {
+            Err(Unsent::Refused(_)) => {
+                for key in batch.keys {
+                    if let Some(frame) = self.bootstrap_frame(key, scan).await {
+                        self.send_or_skip(scan.conn, frame, scan.caller, scan.flow).await?;
+                    }
+                }
+                Ok(())
+            }
+            sent => sent,
+        }
+    }
+
+    /// The bootstrap frame of `key`, a `Put` at the scan's `W`; `None` when
+    /// its body vanished.
+    async fn bootstrap_frame(&self, key: &str, scan: &Scan<'_>) -> Option<Frame> {
+        let (body, meta) = self.source.read_entry(scan.role, scan.primary, key).await?;
+        Some(Frame::Data {
+            at: scan.w,
+            op: repl_net::frame::Op::Put,
+            partition: scan.partition,
+            call_ref: key.to_string(),
+            call_gen: meta.call_gen,
+            call_bgen: meta.call_bgen,
+            body_ttl_ms: meta.body_ttl_ms,
+            // Send-time stamp in the frame of the body's instants, as
+            // `drain_since` stamps it.
+            origin_now_ms: meta.origin_now_ms(self.changelog.now_ms()),
+            indexes: meta.indexes,
+            body: Some(body),
+            answered: false,
+            incarnation: meta.incarnation,
+        })
     }
 }
+
+/// One bootstrap pass: the stream it is sent on, the flow it serves and the
+/// `W` its frames carry.
+struct Scan<'a> {
+    conn: &'a dyn ReplicationConnection,
+    caller: &'a str,
+    partition: Partition,
+    role: PartitionRole,
+    primary: &'a str,
+    flow: &'static str,
+    w: Watermark,
+}
+
+#[cfg(test)]
+mod tests;
