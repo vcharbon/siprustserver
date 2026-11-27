@@ -1,13 +1,14 @@
 //! A route stating its ring deadline and its call's maximum duration at
-//! `i64::MAX` ms: the call sets up, stays up past an hour, and ends by the
-//! caller's BYE, every call deadline armed in the future and none wrapped
-//! behind the clock.
+//! `i64::MAX` ms, on the first attempt or on the failover after a busy
+//! callee: the call sets up, stays up past an hour, and ends by the caller's
+//! BYE, every call deadline armed in the future and none wrapped behind the
+//! clock, with no defect counted on any turn.
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use b2bua::decision::test_adapter::route_to;
-use b2bua::decision::{NewCallResponse, ScriptedDecisionEngine};
+use b2bua::decision::{CallTreatment, NewCallResponse, ScriptedDecisionEngine};
 use b2bua_harness::{settle_until, B2buaSut};
 use scenario_harness::Harness;
 
@@ -54,6 +55,55 @@ async fn a_route_stating_the_largest_timers_sets_up_and_ends_by_bye() {
 
     let mut bye = dialog.bye().await;
     bob.receive("BYE").await.respond(200, "OK").await;
+    bye.expect(200).await;
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
+    let _report = h.finish().await;
+}
+
+/// Bob is busy; the failover route to carol states the call's maximum
+/// duration at `i64::MAX` ms. The call is granted the supported maximum on
+/// the failover as on the first route, so no turn counts a defect.
+#[tokio::test(start_paused = true)]
+async fn a_failover_route_stating_the_largest_duration_sets_up_and_ends_by_bye() {
+    let h = Harness::new("b2bua-extreme-failover-duration");
+    let alice = h.agent("alice", "127.0.0.1:5069").await;
+    let bob = h.agent("bob", "127.0.0.1:5079").await;
+    let carol = h.agent("carol", "127.0.0.1:5078").await;
+    let decision = Arc::new(
+        ScriptedDecisionEngine::builder()
+            .fallback(move |_req| {
+                let mut route = route_to("127.0.0.1", 5079);
+                route.callback_context = Some("failover".into());
+                NewCallResponse::Route(route)
+            })
+            .on_failure(move |_req| {
+                let mut route = route_to("127.0.0.1", 5078);
+                route.features.platform.max_duration_ms = i64::MAX;
+                CallTreatment::Route(route)
+            })
+            .build(),
+    );
+    let b2bua = B2buaSut::builder(decision)
+        .tune(|c| c.keepalive_interval_sec = KEEPALIVE_SEC)
+        .start(&h, "b2bua", "127.0.0.1:5089")
+        .await;
+
+    let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
+    bob.receive("INVITE").await.respond(486, "Busy Here").await;
+    bob.receive("ACK").await;
+    let mut uas = carol.receive("INVITE").await;
+    uas.respond(200, "OK").with_sdp(ANSWER).await;
+    call.expect(200).await;
+    let mut dialog = call.ack().await;
+    carol.receive("ACK").await;
+
+    h.advance(HELD).await;
+    assert_eq!(alice.drain().await, 0, "the call is up an hour after the answer");
+    assert_eq!(carol.drain().await, 0, "the call is up an hour after the answer");
+
+    let mut bye = dialog.bye().await;
+    carol.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
     settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
