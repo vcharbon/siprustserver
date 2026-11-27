@@ -12,7 +12,8 @@
 //!            meets blocks its send ~1.75 s > 1 s, so every scan of the
 //!            Backup flow is dropped there and the second never leaves,
 //!            whatever order the scan takes; the puller reads the first
-//!            drop ~2 s after the Backup flow opens
+//!            drop ~2 s in, the server's (it lands there with the
+//!            puller's 2 s idle bound raised to 6 s)
 //!   puller   fast_test, hard timer 3 s: past the first drop; backoff
 //!            100 ms to 1 s
 //!   Reclaim  B's own calls at A: none, so that scan reaches its Noop

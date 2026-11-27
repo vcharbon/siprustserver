@@ -46,8 +46,9 @@ impl Puller {
     /// The bootstrap hard timer ran out before the first catch-up `Noop`, on
     /// either flow: counted on `b2bua_repl_bootstrap_stalled_total`, then the
     /// bootstrap completes best-effort. On a flow that reached its peer the
-    /// scan stopped short, so a warning names the bodies applied: `applied`
-    /// when a stream is open, else those of the last cold stream.
+    /// scan had not reached its catch-up `Noop`, so a warning names the bodies
+    /// applied: `applied` when a stream is open, else those of the last cold
+    /// stream.
     pub(super) fn bootstrap_timer_fired(&self, applied: Option<u64>, reason: &'static str) {
         self.metrics.bump_repl_bootstrap_stalled();
         let applied = applied.unwrap_or_else(|| self.scan_applied.load(Ordering::Relaxed));
@@ -85,10 +86,10 @@ impl Puller {
     /// Signal the router to **bulk-reclaim** every `pri:{self}` body — materialise
     /// each into the live serving map, parked, then re-arm its timers with the
     /// keepalive backlog smoothed (ADR-0014 §4). Fired by the **Reclaim** flow on
-    /// bootstrap completion (first `Noop` or best-effort hard-timer); the router
-    /// parks at once and arms while the node's own endpoint reads ready
-    /// (ADR-0055 §8). Idempotent
-    /// (`materialize_if_absent`), so a partial pass plus a later one self-heal.
+    /// its first `Noop` and on the hard timer running out while a stream is
+    /// open; the router parks at once and arms while the node's own endpoint
+    /// reads ready (ADR-0055 §8). Idempotent (`materialize_if_absent`), so a
+    /// partial pass plus a later one self-heal.
     pub(super) fn signal_reclaim_all(&self) {
         if let Some(sink) = &self.repl_tx {
             sink.send(ReplCommand::ReclaimAll);
