@@ -101,6 +101,7 @@ pub(crate) mod topology_cookie;
 #[cfg(test)]
 mod topology_cookie_tests;
 mod tripped;
+mod tripped_event;
 mod turn;
 mod turn_label;
 mod turn_mark;

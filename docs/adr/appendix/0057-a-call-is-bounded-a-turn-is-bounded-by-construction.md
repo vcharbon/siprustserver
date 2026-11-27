@@ -101,12 +101,18 @@ and the teardown's retirement of the call's timers clears it. The shell then:
 - writes the safepoint owing the release of the call's limiter key (ADR-0040), so
   the termination releases every hold the call took, an initial turn's admission
   or an off-turn fold's alike;
-- writes on the safepoint the final the event in hand brings when it is a non-2xx
-  response to the INVITE that dialled a leg: the client transaction completed and
-  ACKed it (RFC 3261 §17.1.1.3) whatever became of the turn, so that leg awaits no
-  final and is owed no CANCEL (§9.1). A callee's refusal on a route that fails
-  over leaves no leg alive, and the teardown answers the caller at once. A 2xx is
-  not written: its ACK is the call's to send;
+- writes on the safepoint what the transaction layer made true of the event in
+  hand whatever became of the turn, so the teardown starts from the wire as it
+  stands. A non-2xx final to the INVITE that dialled a leg: the client
+  transaction completed and ACKed it (RFC 3261 §17.1.1.3), so that leg awaits no
+  final and is owed no CANCEL (§9.1). A dead hop's first-response timeout: the
+  leg's CANCEL then waits unsent in the transaction and the leg awaits nothing.
+  The caller's CANCEL: the layer answered it 200 and her INVITE 487 (§9.2), so
+  she is owed no 503 and the CDR states none. A callee's refusal or dead hop on a
+  route that fails over leaves no leg alive, and the teardown answers the caller
+  at once. A 2xx is not written (its ACK is the call's to send), nor is a
+  provisional, nor the timeout of an INVITE that rang: that INVITE still rings,
+  and its CANCEL's 487 is still coming;
 - answers an in-dialog request in hand, when it holds a server transaction the
   turn would have answered, with the stack's bare `500` built from the event. The
   caller's initial INVITE is not answered here: the verdict's teardown answers it
