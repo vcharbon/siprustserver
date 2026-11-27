@@ -5,7 +5,7 @@ use super::*;
 pub(super) const LIVE: &[Live] = &[
     // Live stamps are strictly monotonic, so a 2xx sent before the CANCEL arrived is a race the
     // rule clears.
-    Live::emitter_only(RuleId::No200AfterCancel, no_200_after_cancel).admits(ordered_after_cancel),
+    Live::emitter_only(RuleId::No200AfterCancel, no_200_after_cancel),
     Live::emitter(RuleId::CancelRouteEchoesInvite, cancel_route_echoes_invite)
         .skip(Skip::RelayLanes),
     // A `{Proxy}`-only lane forwards its upstream's CANCEL at the upstream's timing; a B2BUA
@@ -14,19 +14,6 @@ pub(super) const LIVE: &[Live] = &[
     // No relay skip: a lane forwarding an upstream CANCEL never ACKed the final itself.
     Live::emitter(RuleId::NoCancelAfterFinal, no_cancel_after_final),
 ];
-
-/// Whether the recording orders the 2xx after the CANCEL: it stamps at
-/// millisecond resolution, the microseconds of a view's stamp only keeping its
-/// event order, so a 2xx in the millisecond the UAS took the CANCEL in may
-/// have left before the UAS read it (RFC 3261 §9.2), and is not charged.
-fn ordered_after_cancel(f: &rfc_rules::Finding) -> bool {
-    match &f.decision {
-        Decision::Violated(rfc_rules::Evidence::Cancelled {
-            cancel_ts_us, response_ts_us, ..
-        }) => response_ts_us / 1_000 > cancel_ts_us / 1_000,
-        _ => true,
-    }
-}
 
 fn no_200_after_cancel(f: &rfc_rules::Finding, cid: &str) -> String {
     let (status, gap_us) = match &f.decision {
