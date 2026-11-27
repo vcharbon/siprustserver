@@ -1,7 +1,9 @@
 //! The router's rungs of the admission ladder (ADR-0037): a new INVITE is
 //! judged at ingress — capacity, shed, panic-ELU, bucket, event queue, in
 //! [`LADDER`](crate::admission::LADDER) order — before the dispatch offer, so
-//! a refusal opens no per-call queue and waits for no handler permit. A
+//! a refusal opens no per-call queue and waits for no handler permit. An
+//! INVITE on the identity of a call a peer discharged is refused ahead of
+//! the rungs ([`super::discharged`]). A
 //! refused INVITE is answered through its server transaction, which absorbs
 //! its retransmissions and the ACK, and is counted once. An admitted one
 //! spends its CPS token when the offer queues its turn, and counts against
@@ -170,9 +172,10 @@ pub(super) async fn absorbs_retransmission(
     true
 }
 
-/// Judge the new INVITE `req` of `call_ref` offered as `dispatch` on the
-/// router rungs: refused, it is answered and counted here and `None` is
-/// returned; admitted, the returned hold counts it until its call is born.
+/// Judge the new INVITE `req` of `call_ref` offered as `dispatch`: refused
+/// on the identity of a call a peer discharged ([`super::discharged`]), then
+/// on the router rungs. Refused, it is answered and counted here and `None`
+/// is returned; admitted, the returned hold counts it until its call is born.
 pub(super) async fn admit(
     ctx: &RouterCtx,
     call_ref: &str,
@@ -180,7 +183,9 @@ pub(super) async fn admit(
     src: SocketAddr,
     dispatch: DispatchClass,
 ) -> Option<UnbornCall> {
-    match judge(ctx, call_ref, req, dispatch) {
+    let refused =
+        super::discharged::refusal(ctx, req).or_else(|| judge(ctx, call_ref, req, dispatch));
+    match refused {
         Some(refused) => {
             answer(&ctx.txn, &ctx.refusals, req, src, refused).await;
             ctx.metrics.new_calls().reject(refused.reason, class_of(req));

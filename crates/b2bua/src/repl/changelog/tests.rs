@@ -216,7 +216,7 @@ async fn drained(cl: &Changelog, since: Watermark) -> Vec<(Op, bool)> {
 async fn a_put_compacted_into_a_delete_drains_as_one_delete_stating_the_answer() {
     let cl = changelog();
     cl.bump_put("A", "call-1", Partition::Bak);
-    cl.bump_delete("A", "call-1", Partition::Bak, true, None);
+    cl.bump_delete("A", "call-1", Partition::Bak, DeleteStated::answering(true), None);
     assert_eq!(drained(&cl, Watermark::new(7, 0)).await, vec![(Op::Delete, true)]);
     // A cold drain reads the same tombstone.
     assert_eq!(drained(&cl, Watermark::new(0, 0)).await, vec![(Op::Delete, true)]);
@@ -225,11 +225,11 @@ async fn a_put_compacted_into_a_delete_drains_as_one_delete_stating_the_answer()
 #[tokio::test]
 async fn a_later_delete_stating_no_answer_keeps_the_stated_one() {
     let cl = changelog();
-    cl.bump_delete("A", "call-1", Partition::Bak, true, None);
-    cl.bump_delete("A", "call-1", Partition::Bak, false, None);
+    cl.bump_delete("A", "call-1", Partition::Bak, DeleteStated::answering(true), None);
+    cl.bump_delete("A", "call-1", Partition::Bak, DeleteStated::answering(false), None);
     assert_eq!(drained(&cl, Watermark::new(7, 0)).await, vec![(Op::Delete, true)]);
     // A delete that never stated one states none.
-    cl.bump_delete("A", "call-2", Partition::Bak, false, None);
+    cl.bump_delete("A", "call-2", Partition::Bak, DeleteStated::answering(false), None);
     assert_eq!(
         drained(&cl, Watermark::new(7, 2)).await,
         vec![(Op::Delete, false)],
@@ -240,14 +240,47 @@ async fn a_later_delete_stating_no_answer_keeps_the_stated_one() {
 #[tokio::test]
 async fn a_put_after_a_delete_starts_a_new_call_with_no_answer_stated() {
     let cl = changelog();
-    cl.bump_delete("A", "call-1", Partition::Bak, true, None);
+    cl.bump_delete("A", "call-1", Partition::Bak, DeleteStated::answering(true), None);
     // The same ref is reused by a new call inside the tombstone window.
     cl.bump_put("A", "call-1", Partition::Bak);
-    cl.bump_delete("A", "call-1", Partition::Bak, false, None);
+    cl.bump_delete("A", "call-1", Partition::Bak, DeleteStated::answering(false), None);
     assert_eq!(
         drained(&cl, Watermark::new(7, 0)).await,
         vec![(Op::Delete, false)],
         "the earlier call's answer is not the new call's",
+    );
+}
+
+/// Whether each frame `cl` drains for `A`'s Backup flow from `since` states
+/// a discharge.
+async fn discharges(cl: &Changelog, since: Watermark) -> Vec<bool> {
+    cl.drain_since("A", Partition::Bak, since, 100, &NoBodies, PartitionRole::Primary, "self")
+        .await
+        .into_iter()
+        .map(|f| match f {
+            Frame::Data { discharged, .. } => discharged,
+            other => panic!("expected Data, got {other:?}"),
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn a_discharge_a_delete_states_is_kept_by_a_later_delete_and_cleared_by_a_put() {
+    let cl = changelog();
+    let discharge = DeleteStated { answered: false, discharged: true };
+    cl.bump_put("A", "call-1", Partition::Bak);
+    cl.bump_delete("A", "call-1", Partition::Bak, discharge, None);
+    assert_eq!(discharges(&cl, Watermark::new(7, 0)).await, vec![true], "the Put compacted");
+    cl.bump_delete("A", "call-1", Partition::Bak, DeleteStated::default(), None);
+    assert_eq!(discharges(&cl, Watermark::new(0, 0)).await, vec![true], "kept, read cold");
+    cl.bump_delete("A", "call-2", Partition::Bak, DeleteStated::answering(true), None);
+    assert_eq!(discharges(&cl, Watermark::new(7, 3)).await, vec![false], "an ordinary delete");
+    cl.bump_put("A", "call-1", Partition::Bak);
+    cl.bump_delete("A", "call-1", Partition::Bak, DeleteStated::default(), None);
+    assert_eq!(
+        discharges(&cl, Watermark::new(7, 4)).await,
+        vec![false],
+        "a new call on the ref inherits no discharge",
     );
 }
 
@@ -261,7 +294,13 @@ struct DeletedMidDrain {
 #[async_trait::async_trait]
 impl BodySource for DeletedMidDrain {
     async fn read_body(&self, _: PartitionRole, _: &str, call_ref: &str) -> Option<Arc<[u8]>> {
-        self.cl.bump_delete("A", call_ref, Partition::Bak, self.answered, None);
+        self.cl.bump_delete(
+            "A",
+            call_ref,
+            Partition::Bak,
+            DeleteStated::answering(self.answered),
+            None,
+        );
         None
     }
     fn read_meta(&self, _: &str) -> Option<RefMeta> {
@@ -350,7 +389,7 @@ async fn a_peer_holds_a_call_it_applied_a_write_of_under_its_identity() {
     cl.note_scanned("A", Partition::Bak, cl.head());
     cl.note_applied("A", Some("a#g2"), Partition::Bak, cl.head());
     assert!(cl.applied_any("A", Partition::Bak, "call-2"), "its bootstrap carried the call");
-    cl.bump_delete("A", "call-2", Partition::Bak, false, None);
+    cl.bump_delete("A", "call-2", Partition::Bak, DeleteStated::answering(false), None);
     cl.bump_put("A", "call-2", Partition::Bak);
     assert!(!cl.applied_any("A", Partition::Bak, "call-2"), "a new call on the ref is not held");
 }

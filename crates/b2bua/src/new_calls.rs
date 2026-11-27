@@ -6,7 +6,9 @@
 //! cordoned worker's refusal, the refusal of a turn past its setup budget and
 //! an INVITE refused on sight (no From tag, an option tag required that the
 //! stack does not understand) are refusals too, though their call is born to
-//! write the record of a call no decision reached.
+//! write the record of a call no decision reached. So is an INVITE on the
+//! identity of a call a peer discharged, refused ahead of the router's rungs
+//! with no call born ([`crate::repl::DischargedIdentities`]).
 //!
 //! A new call is a new initial INVITE (no To-tag). Its first refusal is
 //! counted once, on `b2bua_new_calls_total`, in the class it was judged in;
@@ -86,11 +88,15 @@ pub enum Refusal {
     /// requiring an option tag the stack does not understand. Its call is born
     /// only to write its record.
     OnSight,
+    /// A peer discharged a call on the INVITE's Call-ID and From-tag in the
+    /// last 64·T1, its turn's poll never having returned (ADR-0057 §6):
+    /// answered the bare 503 before any decision, and no call is born.
+    Discharged,
 }
 
 impl Refusal {
     /// Every reason, in exposition order.
-    pub const ALL: [Refusal; 17] = [
+    pub const ALL: [Refusal; 18] = [
         Refusal::BucketEmpty,
         Refusal::PanicElu,
         Refusal::CapacityCalls,
@@ -108,6 +114,7 @@ impl Refusal {
         Refusal::SetupBudget,
         Refusal::StartBound,
         Refusal::OnSight,
+        Refusal::Discharged,
     ];
 
     /// Stable `reason` label.
@@ -130,6 +137,7 @@ impl Refusal {
             Refusal::SetupBudget => "setup_budget",
             Refusal::StartBound => "start_bound",
             Refusal::OnSight => "on_sight",
+            Refusal::Discharged => "discharged",
         }
     }
 

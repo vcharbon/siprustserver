@@ -186,6 +186,7 @@ impl Stream {
             body: None,
             answered: false,
             incarnation: None,
+            discharged: false,
         }
     }
 }

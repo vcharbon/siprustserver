@@ -37,6 +37,7 @@ fn mib_frame(counter: u64) -> Frame {
         body: Some(Arc::from(vec![7u8; MIB as usize])),
         answered: false,
         incarnation: None,
+        discharged: false,
     }
 }
 

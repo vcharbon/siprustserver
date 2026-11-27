@@ -6,6 +6,7 @@ use std::sync::Arc;
 use call::CallModelState;
 use repl_net::frame::{Op, Partition};
 
+use super::super::changelog::DeleteStated;
 use super::super::incarnation::is_another_call;
 use super::Puller;
 use crate::router::{PrimaryWrite, ReplCommand};
@@ -80,7 +81,9 @@ impl Puller {
     ///
     /// A `Delete` applies, except on the Forward flow over an Element the
     /// authority never saw answered (ADR-0031, "the `Delete` guard keys on the
-    /// answer").
+    /// answer"). A `Delete` that applies stating a discharge refuses the
+    /// call's identity to new INVITEs for 64·T1 (ADR-0057 §6); no other write
+    /// does.
     ///
     /// With no local copy every mode applies; the store's own resurrection
     /// tombstone, not this gate, is what stops a re-create of a just-deleted call.
@@ -108,7 +111,7 @@ impl Puller {
         origin_now_ms: i64,
         indexes: &[String],
         body: Option<Arc<[u8]>>,
-        answered: bool,
+        stated: DeleteStated,
         incarnation: Option<String>,
         mode: ApplyMode,
     ) -> ApplyOutcome {
@@ -248,6 +251,7 @@ impl Puller {
                     self.store.incarnation(call_ref).as_deref(),
                     incarnation.as_deref(),
                 );
+                let answered = stated.answered;
                 if mode == ApplyMode::Forward
                     && of_the_element
                     && self.element_outlives_the_delete(role, &primary, call_ref, answered).await
@@ -258,6 +262,9 @@ impl Puller {
                 let opts = PutOpts { incarnation, ..PutOpts::default() };
                 let _ =
                     self.store.delete_call(role, &primary, call_ref, indexes, false, &opts).await;
+                if stated.discharged {
+                    self.store.discharged().refuse(call_ref);
+                }
                 self.metrics.record_repl_applied(self.flow_label(), self.peer_ordinal(), "delete");
                 ApplyOutcome::Applied
             }

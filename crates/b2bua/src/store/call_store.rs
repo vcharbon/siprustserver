@@ -59,6 +59,11 @@ pub struct PutOpts {
     /// `None` names no incarnation: the write is taken as one of the call the
     /// store already holds for the ref.
     pub incarnation: Option<String>,
+    /// On a `Delete`: this node discharges the call because a poll of its
+    /// turn never returned (ADR-0057 §6). A replicating store states it on
+    /// the propagated delete, whose receiver refuses the call's identity for
+    /// 64·T1; every other store ignores it.
+    pub discharged: bool,
 }
 
 #[derive(Debug, thiserror::Error)]

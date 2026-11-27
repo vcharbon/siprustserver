@@ -36,6 +36,7 @@ fn data(op: Op, body: Option<&[u8]>, incarnation: Option<&str>) -> Frame {
         body: body.map(Arc::from),
         answered: true,
         incarnation: incarnation.map(String::from),
+        discharged: op == Op::Delete,
     }
 }
 

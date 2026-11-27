@@ -259,6 +259,7 @@ mod tests {
             body: Some(StdArc::from(&b"body"[..])),
             answered: false,
             incarnation: None,
+            discharged: false,
         };
 
         client.send(req.clone()).await.unwrap();

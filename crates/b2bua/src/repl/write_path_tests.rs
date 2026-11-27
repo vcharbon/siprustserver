@@ -18,7 +18,7 @@ use repl_net_testkit::SimulatedReplicationNetwork;
 use sip_clock::Clock;
 
 use super::test_support::{cref, fast_config, fwd, one_peer, supervisor_for, tick, Node};
-use super::{BacklogMarks, BodySource, Changelog, ReplicatingCallStore};
+use super::{BacklogMarks, BodySource, Changelog, DeleteStated, ReplicatingCallStore};
 use crate::metrics::B2buaMetrics;
 use crate::store::{CallState, CallStore, InMemoryCallStore, PartitionRole};
 
@@ -121,7 +121,7 @@ async fn a_tombstone_stays_until_the_peer_reports_applying_it() {
     let log = Changelog::new(1, clock.clone());
     let _serving = log.serving("B", Partition::Bak);
     log.bump_put("B", "c", Partition::Bak);
-    log.bump_delete("B", "c", Partition::Bak, false, None);
+    log.bump_delete("B", "c", Partition::Bak, DeleteStated::answering(false), None);
     let deleted_at = log.head();
 
     tokio::time::advance(Duration::from_secs(3_600)).await;

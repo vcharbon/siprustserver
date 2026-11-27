@@ -69,12 +69,13 @@ fn roundtrip_data_body_some_multi_index() {
         body: Some(Arc::from(&b"\x00\x01\x02encoded-call\xff"[..])),
         answered: false,
         incarnation: Some("pri1|callid|fromtag#n1".into()),
+        discharged: false,
     });
 }
 
 #[test]
 fn roundtrip_data_body_none_delete_negatives() {
-    // delete → body None, its answered statement set; negative call_gen / call_bgen / body_ttl_ms (i64 wire).
+    // delete → body None, its answered and discharged statements set; negative call_gen / call_bgen / body_ttl_ms (i64 wire).
     assert_roundtrip(&Frame::Data {
         at: Watermark::new(0, 0),
         op: Op::Delete,
@@ -88,6 +89,7 @@ fn roundtrip_data_body_none_delete_negatives() {
         body: None,
         answered: true,
         incarnation: None,
+        discharged: true,
     });
 }
 
@@ -107,6 +109,7 @@ fn roundtrip_data_empty_body_is_some_not_none() {
         body: Some(Arc::from(&[][..])),
         answered: false,
         incarnation: Some(String::new()),
+        discharged: false,
     };
     assert_roundtrip(&f);
     if let Frame::Data { body, .. } = decode_frame(&enc(&f)).unwrap() {
@@ -132,6 +135,7 @@ fn roundtrip_data_large_body() {
         body: Some(Arc::from(big.as_slice())),
         answered: false,
         incarnation: None,
+        discharged: false,
     });
 }
 
@@ -226,7 +230,7 @@ fn a_v4_pull_request_decodes_for_its_refusal() {
 fn err_unknown_enum_discriminant_op() {
     // Data with op = 5.
     let mut bytes = Vec::new();
-    rmp::encode::write_array_len(&mut bytes, 14).unwrap();
+    rmp::encode::write_array_len(&mut bytes, 15).unwrap();
     rmp::encode::write_uint(&mut bytes, 1).unwrap(); // tag Data
     rmp::encode::write_uint(&mut bytes, 0).unwrap(); // gen
     rmp::encode::write_uint(&mut bytes, 0).unwrap(); // counter
@@ -241,6 +245,7 @@ fn err_unknown_enum_discriminant_op() {
     rmp::encode::write_nil(&mut bytes).unwrap(); // body
     rmp::encode::write_bool(&mut bytes, false).unwrap(); // answered
     rmp::encode::write_nil(&mut bytes).unwrap(); // incarnation
+    rmp::encode::write_bool(&mut bytes, false).unwrap(); // discharged
     match decode_frame(&bytes) {
         Err(ReplCodecError::UnknownDiscriminant { field: "Op", value: 5 }) => {}
         other => panic!("expected UnknownDiscriminant Op 5, got {other:?}"),
@@ -276,6 +281,7 @@ fn err_truncated_payload() {
         body: Some(Arc::from(&b"abc"[..])),
         answered: false,
         incarnation: None,
+        discharged: false,
     });
     let truncated = &full[..full.len() - 1];
     match decode_frame(truncated) {
@@ -416,7 +422,7 @@ fn watermark_gen_is_high_word() {
 #[test]
 fn err_data_inflated_indexes_count_is_typed_error_not_oom() {
     let mut b = Vec::new();
-    rmp::encode::write_array_len(&mut b, 14).unwrap(); // DATA arity
+    rmp::encode::write_array_len(&mut b, 15).unwrap(); // DATA arity
     rmp::encode::write_uint(&mut b, 1).unwrap(); // tag Data
     rmp::encode::write_uint(&mut b, 0).unwrap(); // gen
     rmp::encode::write_uint(&mut b, 0).unwrap(); // counter

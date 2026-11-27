@@ -136,7 +136,7 @@ pub fn append_wire_bytes(frame: &Frame, out: &mut Vec<u8>) -> Result<(), SendErr
     Ok(())
 }
 
-/// The fixed part of a `Data` frame's [`wire_bytes`], above its 83 bytes at
+/// The fixed part of a `Data` frame's [`wire_bytes`], above its 84 bytes at
 /// msgpack's widest headers: the length prefix, the integers and the headers
 /// of its four variable-length fields.
 const DATA_FIXED_WIRE_BYTES: usize = 128;

@@ -30,6 +30,7 @@ use repl_net::frame::Partition;
 use sip_clock::Clock;
 
 use super::changelog::{BodySource, Changelog, RefMeta};
+use super::discharged::DischargedIdentities;
 use super::resurrection::ResurrectionTombstones;
 use crate::store::{
     locked, CallStore, InMemoryCallStore, PartitionRole, PropagateDirection, PutOpts, StoreError,
@@ -103,6 +104,9 @@ pub struct ReplicatingCallStore {
     /// the latest write of each by incarnation: nobody settled them, so
     /// [`take_displaced`](Self::take_displaced) hands them to the replica reap.
     displaced: Arc<Mutex<HashMap<String, Arc<[u8]>>>>,
+    /// The identities of the calls a peer discharged, refused to new INVITEs
+    /// for 64·T1 (ADR-0057 §6).
+    discharged: DischargedIdentities,
     /// Backstop TTL applied when a call is stored with `ttl_ms <= 0`
     /// ([`DEFAULT_REPLICATED_TTL_MS`] by default; tests inject a short value).
     default_ttl_ms: i64,
@@ -125,8 +129,16 @@ impl ReplicatingCallStore {
             refusals: Arc::default(),
             tombstones: Arc::new(Mutex::new(ResurrectionTombstones::default())),
             displaced: Arc::new(Mutex::new(HashMap::new())),
+            discharged: DischargedIdentities::default(),
             default_ttl_ms: DEFAULT_REPLICATED_TTL_MS,
         }
+    }
+
+    /// The identities of the calls a peer discharged, which this node
+    /// refuses to new INVITEs (ADR-0057 §6): recorded as the discharge's
+    /// delete applies, read at router ingress.
+    pub fn discharged(&self) -> &DischargedIdentities {
+        &self.discharged
     }
 
     /// `(bodies, indexes, meta, tombstones)` map lengths — leak-localisation

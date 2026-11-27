@@ -6,7 +6,8 @@
 //! One concern per submodule: `inbox` what the loop takes next (the keepalive
 //! lane first), `resolve` keys events to calls, `ingress` is
 //! the pre-dispatch pipeline, `admit` a new INVITE's router rungs of the
-//! admission ladder, `process` the per-call handler body,
+//! admission ladder, `discharged` the refusal of the identity of a call a
+//! peer discharged, `process` the per-call handler body,
 //! `commit` the tail of a turn, `record_cap` the record-size cap its write is
 //! held to, `turn_mark` a turn's marks at the turn-point
 //! seam, `callouts` the fire-and-forget
@@ -42,6 +43,7 @@ mod deferred_copy;
 mod deferred_parks;
 mod departure;
 mod dialog_gate;
+mod discharged;
 mod dropped_on_delete;
 mod ended_body;
 #[cfg(test)]

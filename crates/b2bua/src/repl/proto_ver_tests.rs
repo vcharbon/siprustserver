@@ -93,10 +93,9 @@ async fn a_refused_puller_counts_it_and_pulls_again_after_its_backoff() {
     assert!(!status.borrow().current, "a refused stream never reads as current");
 }
 
-/// v7: a dialog holds one queue of the requests this stack has not sent
-/// yet, each with what it waits behind (ADR-0055 §2), so a v6 peer's records
-/// do not decode here.
+/// v8: a `Data` frame states whether its `Delete` discharges a call a stuck
+/// poll held (ADR-0057 §6), so a v7 peer's frames do not decode here.
 #[test]
-fn the_version_names_the_one_queue_dialog_shape() {
-    assert_eq!(PROTO_VER, 7);
+fn the_version_names_the_delete_stating_a_discharge() {
+    assert_eq!(PROTO_VER, 8);
 }

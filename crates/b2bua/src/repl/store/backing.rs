@@ -107,6 +107,7 @@ impl ReplicatingCallStore {
             }
         };
         let bak = repl_net::frame::Partition::Bak;
-        self.changelog.bump_delete(backup, call_ref, bak, false, incarnation);
+        let stated = crate::repl::changelog::DeleteStated::default();
+        self.changelog.bump_delete(backup, call_ref, bak, stated, incarnation);
     }
 }

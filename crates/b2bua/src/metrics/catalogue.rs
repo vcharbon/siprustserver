@@ -67,6 +67,7 @@ assert_exposition_order!(
     SetupBudget,
     StartBound,
     OnSight,
+    Discharged,
 );
 assert_exposition_order!(Class: Normal, Emergency, InDialog);
 

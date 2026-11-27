@@ -9,7 +9,7 @@ use repl_net::frame::{Op, Partition};
 
 use super::{backup_puller, body_at};
 use super::{ApplyMode, ApplyOutcome, Puller};
-use crate::repl::ReplicatingCallStore;
+use crate::repl::{DeleteStated, ReplicatingCallStore};
 use crate::store::envelope::{self, Enveloped};
 use crate::store::PartitionRole;
 
@@ -46,7 +46,7 @@ async fn put_from(
         origin_now_ms,
         &indexes,
         Some(body),
-        false,
+        DeleteStated::default(),
         None,
         mode,
     )

@@ -23,6 +23,7 @@ fn data_frame(counter: u64, body: &[u8]) -> Frame {
         body: Some(StdArc::from(body)),
         answered: false,
         incarnation: None,
+        discharged: false,
     }
 }
 

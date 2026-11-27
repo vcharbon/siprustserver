@@ -11,14 +11,14 @@
 
 use std::sync::Arc;
 
-/// The protocol version a [`Frame::PullRequest`] announces: **v7**, the seven
+/// The protocol version a [`Frame::PullRequest`] announces: **v8**, the seven
 /// frames `{PullRequest, Data, Noop, ResetToBootstrap, Position,
 /// ReplicaRefused, StreamRefused}`, one socket = one flow, scan-then-tail,
-/// `Op` = `{Put, Delete}`. Bumped on every change to a frame's shape, to the
-/// frame set or to the shape of the call record the frames carry; a server
-/// refuses a stream announcing another version ([`Frame::StreamRefused`]), and
-/// no upgrade compatibility is kept.
-pub const PROTO_VER: u16 = 7;
+/// `Op` = `{Put, Delete}`, a `Delete` stating a discharge. Bumped on every
+/// change to a frame's shape, to the frame set or to the shape of the call
+/// record the frames carry; a server refuses a stream announcing another
+/// version ([`Frame::StreamRefused`]), and no upgrade compatibility is kept.
+pub const PROTO_VER: u16 = 8;
 
 /// Discriminant outside the accepted range for an enum-coded byte field.
 ///
@@ -162,7 +162,7 @@ pub enum Frame {
         /// Watermark to resume from; `(0,0)` ⇒ bootstrap-then-tail.
         since: Watermark,
     },
-    /// `[1, gen, counter, op, partition, call_ref, call_gen, call_bgen, body_ttl_ms, origin_now_ms, indexes, body, answered, incarnation]`
+    /// `[1, gen, counter, op, partition, call_ref, call_gen, call_bgen, body_ttl_ms, origin_now_ms, indexes, body, answered, incarnation, discharged]`
     ///
     /// Server → client: one changelog entry. `body` is opaque msgpack `bin`
     /// (the `Arc<[u8]>` read straight from the store) or `nil` for
@@ -213,6 +213,11 @@ pub enum Frame {
         /// call_bgen)` vector orders versions of one incarnation only. Not the
         /// node incarnation `at.gen`. `None` when the sender named none.
         incarnation: Option<String>,
+        /// On a `Delete`: the deleting node discharged the call because a
+        /// poll of its turn never returned (ADR-0057 §6), so the receiver
+        /// refuses a new INVITE on the call's identity for 64·T1. `false` on
+        /// a `Put` and on every other `Delete`.
+        discharged: bool,
     },
     /// `[2, gen, counter]`
     ///

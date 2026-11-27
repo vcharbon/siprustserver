@@ -23,6 +23,7 @@ fn put(call_ref: &str, body: Vec<u8>) -> Frame {
         body: Some(Arc::from(body)),
         answered: false,
         incarnation: Some("inc".into()),
+        discharged: false,
     }
 }
 
@@ -73,6 +74,7 @@ fn the_wire_bound_of_a_data_frame_covers_its_widest_encoding() {
         body: Some(Arc::from(vec![0; 70_000])),
         answered: true,
         incarnation: Some(long(70_000)),
+        discharged: true,
     };
     for (name, frame) in [
         ("widest", widest),

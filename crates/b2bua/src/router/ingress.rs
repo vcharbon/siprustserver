@@ -2,7 +2,9 @@
 //! per-peer timeout attribution, the out-of-dialog OPTIONS health responder,
 //! resolution (a copy of the INVITE of a call whose park a bulk reclaim
 //! deferred included, [`DeferredParks`]; an event resolving to no call goes
-//! to [`super::unroutable`]), a
+//! to [`super::unroutable`]; another primary's copy of an initial INVITE is
+//! dropped, or answered the bare 503 on the identity of a call a peer
+//! discharged, [`super::discharged`]), a
 //! new INVITE's router rungs of the admission ladder ([`super::admit`]), then
 //! the offer of the event's [`Turn`] to its call's queue under its dispatch
 //! class ([`crate::dispatch::class`]). The router acts on the offer: an
@@ -124,7 +126,8 @@ pub(super) async fn on_event(
     // unanswered INVITE replaces the one the layer opened for the copy. One
     // placed here as another primary's backup and copying none belongs to
     // that primary and gets no final, its transaction relinquished with
-    // nothing sent — never a second call.
+    // nothing sent — never a second call; one on the identity of a call a
+    // peer discharged gets the bare 503 (`discharged`).
     // A copy of the INVITE of a call whose park a bulk reclaim deferred is
     // that call's: it queues on the call's queue, unjudged, keeping its
     // transaction, and is judged at its turn (`deferred_copy`).
@@ -138,8 +141,10 @@ pub(super) async fn on_event(
         }
         InitialInvite::Deferred => res.deferred_copy = true,
         InitialInvite::Foreign => {
-            ctx.metrics.bump_foreign_invite_copy_dropped();
-            relinquish_arrival(ctx, &event).await;
+            if !super::discharged::answers_copy(ctx, &event).await {
+                ctx.metrics.bump_foreign_invite_copy_dropped();
+                relinquish_arrival(ctx, &event).await;
+            }
             return;
         }
     }

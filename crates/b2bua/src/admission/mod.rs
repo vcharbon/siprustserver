@@ -25,6 +25,9 @@
 //! order). At router ingress the rungs run before the dispatch offer, so a
 //! refusal opens no per-call queue and waits for no handler permit; the CPS token is spent
 //! only when the offer queues the INVITE's turn, and a refusal spends none.
+//! Ahead of the router's rungs, an initial INVITE on the identity of a call a
+//! peer discharged in the last 64·T1 is refused, whatever its class
+//! ([`crate::repl::DischargedIdentities`]).
 //! An admitted INVITE counts as a live call until its turn creates the call
 //! or ends without one; an INVITE on the identity of a call already here
 //! (live, or admitted and not born yet) is that call's copy: not judged, and

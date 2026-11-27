@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use super::admission::Write;
 use super::{CallMeta, ReplicatingCallStore};
-use crate::repl::changelog::RefMeta;
+use crate::repl::changelog::{DeleteStated, RefMeta};
 use crate::repl::incarnation::is_another_call;
 use crate::repl::resurrection::Burial;
 use crate::store::{
@@ -175,7 +175,8 @@ impl ReplicatingCallStore {
 
         if let Some(peer) = &opts.peer {
             let partition = Self::partition_for(opts.direction);
-            self.changelog.bump_delete(peer, call_ref, partition, answered, incarnation);
+            let stated = DeleteStated { answered, discharged: opts.discharged };
+            self.changelog.bump_delete(peer, call_ref, partition, stated, incarnation);
         }
         Ok(())
     }

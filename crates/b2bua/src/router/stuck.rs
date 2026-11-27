@@ -18,13 +18,16 @@ use super::{off_wire, RouterCtx};
 /// the delete, the backup's copy included. A record the stuck turn already
 /// landed terminated wrote its CDR then: its key is released and the call
 /// deleted as it stands, a takeover copy whose primary lives released here
-/// only. `true` when the call was resident and no longer is. The per-call
-/// lock stays with the stuck turn, whose body the caller fenced off first.
+/// only. Every delete written states the discharge, so the peer applying it
+/// refuses the call's identity for 64·T1. `true` when the call was resident
+/// and no longer is. The per-call lock stays with the stuck turn, whose body
+/// the caller fenced off first.
 pub(crate) async fn discharge_stuck(ctx: &Arc<RouterCtx>, call_ref: &str, now_ms: i64) -> bool {
     let Some(mut call) = ctx.state.peek(call_ref) else {
         return false;
     };
     tracing::error!(%call_ref, "the call a stuck poll holds: discharged");
+    ctx.state.mark_discharging(call_ref);
     if call.state == CallModelState::Terminated {
         if ctx.state.is_takeover(call_ref) && !primary_departed(ctx, call_ref) {
             release_call(ctx, call_ref, ReleaseKind::SelfRelease { ended: true }).await;

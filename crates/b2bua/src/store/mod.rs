@@ -12,6 +12,7 @@ mod call_lock_tests;
 mod call_store;
 mod census;
 pub mod containment;
+mod discharging;
 pub mod envelope;
 mod faults;
 mod flush_body;
@@ -123,6 +124,9 @@ struct Inner {
     /// Reclaimed calls resident here and not yet armed (`parked`): cleared on
     /// arming and on drop_local.
     parked: std::collections::HashSet<String>,
+    /// Resident calls a stuck poll holds, being discharged (ADR-0057 §6):
+    /// the delete of each states the discharge. Cleared on drop_local.
+    discharging: std::collections::HashSet<String>,
     /// **Last-touched stamps** (ADR-0020 X4) — the call reaper's only liveness
     /// input: epoch-ms of the last dispatched event that reached the handler
     /// (`router::process` touches), stamped at every entry
@@ -551,8 +555,10 @@ impl CallState {
     /// replication store is wired, leaving the call resident: a terminal turn
     /// logs its delete before its effects leave (ADR-0055 §3) and evicts the
     /// call after them. The delete states whether the copy had answered the
-    /// caller (ADR-0031 D3) and names the call it removes, so its tombstone
-    /// buries that call, not a later one born on the same ref.
+    /// caller (ADR-0031 D3) and whether the call is being discharged
+    /// ([`mark_discharging`](Self::mark_discharging)), and names the call it
+    /// removes, so its tombstone buries that call, not a later one born on
+    /// the same ref.
     pub fn log_delete(&self, call_ref: &str) {
         let Some(repl) = self.repl.as_ref() else {
             return;
@@ -563,6 +569,7 @@ impl CallState {
             let Some(call) = inner.calls.get(call_ref) else {
                 return;
             };
+            opts.discharged = inner.discharging.contains(call_ref);
             let keys = inner.indexed.get(call_ref).cloned().unwrap_or_default();
             (keys, call::helpers::caller_answered(call), call.incarnation().to_string())
         };

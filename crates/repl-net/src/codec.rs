@@ -172,8 +172,9 @@ impl Encoder {
                 body,
                 answered,
                 incarnation,
+                discharged,
             } => {
-                self.array(14, "Data")?;
+                self.array(15, "Data")?;
                 self.uint(tag::DATA);
                 self.uint(at.gen);
                 self.uint(at.counter);
@@ -194,6 +195,7 @@ impl Encoder {
                 }
                 self.bool(*answered);
                 self.opt_str(incarnation.as_deref(), "incarnation")?;
+                self.bool(*discharged);
             }
             Frame::Noop { at } => {
                 self.array(3, "Noop")?;
@@ -289,7 +291,7 @@ fn decode_pull_request(rd: &mut &[u8], len: u32) -> Result<Frame, ReplCodecError
 }
 
 fn decode_data(rd: &mut &[u8], len: u32) -> Result<Frame, ReplCodecError> {
-    expect_len(len, 14, "Data")?;
+    expect_len(len, 15, "Data")?;
     let gen = read_u64(rd, "gen")?;
     let counter = read_u64(rd, "counter")?;
     let op = Op::from_u8(read_u8(rd, "op")?)?;
@@ -311,6 +313,7 @@ fn decode_data(rd: &mut &[u8], len: u32) -> Result<Frame, ReplCodecError> {
     let body = read_opt_bin(rd, "body")?;
     let answered = read_bool(rd, "answered")?;
     let incarnation = read_opt_str(rd, "incarnation")?;
+    let discharged = read_bool(rd, "discharged")?;
     Ok(Frame::Data {
         at: Watermark::new(gen, counter),
         op,
@@ -324,6 +327,7 @@ fn decode_data(rd: &mut &[u8], len: u32) -> Result<Frame, ReplCodecError> {
         body,
         answered,
         incarnation,
+        discharged,
     })
 }
 

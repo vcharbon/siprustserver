@@ -137,6 +137,7 @@ impl ReplServer {
             body: Some(body),
             answered: false,
             incarnation: meta.incarnation,
+            discharged: false,
         })
     }
 }

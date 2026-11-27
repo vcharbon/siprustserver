@@ -772,10 +772,10 @@ async fn a_bulk_re_seed_after_a_reset_still_refuses_a_regressing_put() {
                                 body: Some(regressing.into()),
                                 answered: false,
                                 incarnation: None,
+                                discharged: false,
                             })
                             .await;
                         let _ = conn.send(Frame::Noop { at: Watermark::new(2, 1) }).await;
-                        // Hold the stream open: the re-seed is the last word.
                         tokio::time::sleep(Duration::from_secs(3_600)).await;
                         return;
                     }

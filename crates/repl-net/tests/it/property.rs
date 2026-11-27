@@ -41,7 +41,7 @@ fn frame_strat() -> impl Strategy<Value = Frame> {
         any::<i64>(),
         proptest::collection::vec(".*", 0..5),
         proptest::option::of(proptest::collection::vec(any::<u8>(), 0..256)),
-        any::<bool>(),
+        (any::<bool>(), any::<bool>()),
         proptest::option::of(".*"),
     )
         .prop_map(
@@ -56,7 +56,7 @@ fn frame_strat() -> impl Strategy<Value = Frame> {
                 origin_now_ms,
                 indexes,
                 body,
-                answered,
+                (answered, discharged),
                 incarnation,
             )| {
                 Frame::Data {
@@ -72,6 +72,7 @@ fn frame_strat() -> impl Strategy<Value = Frame> {
                     body: body.map(|b| Arc::from(b.as_slice())),
                     answered,
                     incarnation,
+                    discharged,
                 }
             },
         );

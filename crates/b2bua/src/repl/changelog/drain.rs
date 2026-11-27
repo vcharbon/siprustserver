@@ -3,7 +3,7 @@
 
 use repl_net::frame::{Frame, Op, Partition, Watermark};
 
-use super::{BodySource, Changelog, Due};
+use super::{BodySource, Changelog, DeleteStated, Due};
 use crate::store::{locked, PartitionRole, REPLICA_CHANGELOG};
 
 impl Changelog {
@@ -39,10 +39,10 @@ impl Changelog {
         };
 
         let mut frames = Vec::with_capacity(due.len());
-        for Due { counter, call_ref, op, answered, incarnation } in due {
+        for Due { counter, call_ref, op, stated, incarnation } in due {
             let at = Watermark::new(self.gen, counter);
             if op == Op::Delete {
-                frames.push(delete_frame(at, partition, call_ref, answered, incarnation));
+                frames.push(delete_frame(at, partition, call_ref, stated, incarnation));
                 continue;
             }
             // Body read at send time — lock already dropped. The frame is
@@ -62,16 +62,17 @@ impl Changelog {
                     body: Some(body),
                     answered: false,
                     incarnation: meta.incarnation,
+                    discharged: false,
                 }),
                 // Gone between snapshot and read: a delete recorded since then
-                // has an entry of its own and drains with its own answer; any
-                // other loss (an expired body) goes out as a delete stating
-                // what the entry states now.
+                // has an entry of its own and drains with its own statement;
+                // any other loss (an expired body) goes out as a delete
+                // stating what the entry states now.
                 None => match self.current(peer, partition, &call_ref) {
                     Some((Op::Delete, _)) => {}
                     current => {
-                        let answered = current.is_some_and(|(_, answered)| answered);
-                        frames.push(delete_frame(at, partition, call_ref, answered, None));
+                        let stated = current.map(|(_, stated)| stated).unwrap_or_default();
+                        frames.push(delete_frame(at, partition, call_ref, stated, None));
                     }
                 },
             }
@@ -79,16 +80,23 @@ impl Changelog {
         frames
     }
 
-    /// The `(op, answered)` `call_ref`'s entry holds now, `None` when it has none.
-    fn current(&self, peer: &str, partition: Partition, call_ref: &str) -> Option<(Op, bool)> {
+    /// The op and statement `call_ref`'s entry holds now, `None` when it has
+    /// none.
+    fn current(
+        &self,
+        peer: &str,
+        partition: Partition,
+        call_ref: &str,
+    ) -> Option<(Op, DeleteStated)> {
         let inner = locked(&self.inner, REPLICA_CHANGELOG);
         let st = inner.peers.get(peer)?.sub(partition).by_ref.get(call_ref)?;
-        Some((st.op, st.answered))
+        Some((st.op, st.stated))
     }
 }
 
 /// Build a `Delete` `Data` frame (nil body, zero meta) at `at`/`partition`,
-/// stating `answered` (ADR-0031 D3) and naming the incarnation it removed.
+/// stating `stated` (ADR-0031 D3, ADR-0057 §6) and naming the incarnation it
+/// removed.
 ///
 /// `origin_now_ms` is `0`: a delete carries no re-anchorable timers, so the
 /// receiver-side skew offset is never read for it.
@@ -96,7 +104,7 @@ fn delete_frame(
     at: Watermark,
     partition: Partition,
     call_ref: String,
-    answered: bool,
+    stated: DeleteStated,
     incarnation: Option<String>,
 ) -> Frame {
     Frame::Data {
@@ -110,7 +118,8 @@ fn delete_frame(
         origin_now_ms: 0,
         indexes: Vec::new(),
         body: None,
-        answered,
+        answered: stated.answered,
         incarnation,
+        discharged: stated.discharged,
     }
 }

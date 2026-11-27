@@ -92,7 +92,7 @@ use repl_net::transport::{ReplicationConnection, ReplicationNetwork};
 use tokio::sync::watch;
 use topology::Peer;
 
-use super::{AddrResolver, ReplicatingCallStore, RouterSink};
+use super::{AddrResolver, DeleteStated, ReplicatingCallStore, RouterSink};
 
 mod apply;
 mod bootstrap_complete;
@@ -483,6 +483,7 @@ impl Puller {
                     body,
                     answered,
                     incarnation,
+                    discharged,
                 }) => {
                     // Apply under the `(p,b)` rule for this flow + phase. No
                     // watermark gate — `(p,b)` dominance is the only idempotency.
@@ -504,7 +505,7 @@ impl Puller {
                             origin_now_ms,
                             &indexes,
                             body,
-                            answered,
+                            DeleteStated { answered, discharged },
                             incarnation,
                             mode,
                         )

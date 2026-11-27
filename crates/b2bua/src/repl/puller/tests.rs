@@ -1,6 +1,6 @@
 use super::*;
 use crate::metrics::B2buaMetrics;
-use crate::repl::ReplicatingCallStore;
+use crate::repl::{DeleteStated, ReplicatingCallStore};
 use crate::router::ReplCommand;
 use crate::store::{CallStore, PartitionRole};
 use async_trait::async_trait;
@@ -76,6 +76,7 @@ impl ReplicationNetwork for PacedNet {
                 body: Some(Arc::from(format!("body{i}").into_bytes().into_boxed_slice())),
                 answered: false,
                 incarnation: None,
+                discharged: false,
             });
         }
         q.push_back(Frame::Noop { at: self.w_scan });
@@ -185,7 +186,7 @@ async fn put(p: &Puller, partition: Partition, call_ref: &str, gen: i64) -> Appl
         0,
         &[],
         Some(body),
-        false,
+        DeleteStated::default(),
         None,
         ApplyMode::Forward,
     )
@@ -228,7 +229,7 @@ async fn the_backup_count_ceiling_sheds_new_replicas_only() {
             0,
             &[],
             None,
-            false,
+            DeleteStated::default(),
             None,
             ApplyMode::Forward,
         )
@@ -416,6 +417,7 @@ fn data(op: Op, call_ref: &str, gen: i64, counter: u64) -> Frame {
         body: (op == Op::Put).then(|| Arc::from(b"body".to_vec().into_boxed_slice())),
         answered: false,
         incarnation: None,
+        discharged: false,
     }
 }
 
@@ -553,7 +555,7 @@ async fn a_tombstoned_put_is_not_shed() {
             0,
             &[],
             None,
-            false,
+            DeleteStated::default(),
             None,
             ApplyMode::Forward,
         )
@@ -586,7 +588,7 @@ async fn put_of(
         0,
         &[],
         Some(body),
-        false,
+        DeleteStated::default(),
         Some(incarnation.to_string()),
         mode,
     )
@@ -662,7 +664,20 @@ async fn a_deleted_call_is_not_resurrected_and_a_new_one_on_its_ref_is_stored() 
     let forward = ApplyMode::Forward;
     put_of(&p, Partition::Bak, r, (3, 0), "w0|a|t#1", forward).await;
     let delete = p
-        .apply_to_store(Op::Delete, Partition::Bak, r, 0, 0, 0, 0, &[], None, false, None, forward)
+        .apply_to_store(
+            Op::Delete,
+            Partition::Bak,
+            r,
+            0,
+            0,
+            0,
+            0,
+            &[],
+            None,
+            DeleteStated::default(),
+            None,
+            forward,
+        )
         .await;
     assert_eq!(delete, ApplyOutcome::Applied);
 
@@ -670,6 +685,37 @@ async fn a_deleted_call_is_not_resurrected_and_a_new_one_on_its_ref_is_stored() 
     assert!(store.get_call(PartitionRole::Backup, "w0", r).await.unwrap().is_none());
     put_of(&p, Partition::Bak, r, (1, 0), "w0|a|t#2", forward).await;
     assert_eq!(body_of(&store, PartitionRole::Backup, r).await, b"w0|a|t#2");
+}
+
+/// A delete stating a discharge refuses its call's identity once it
+/// applies; an ordinary delete refuses none (ADR-0057 §6).
+#[tokio::test]
+async fn only_a_delete_stating_a_discharge_refuses_its_calls_identity() {
+    let (p, store, _, _) = backup_puller(crate::capacity::BackupCeilings::default());
+    let forward = ApplyMode::Forward;
+    let discharge = DeleteStated { answered: false, discharged: true };
+    for (r, stated) in [("w0|a|t", DeleteStated::default()), ("w0|b|t", discharge)] {
+        put_of(&p, Partition::Bak, r, (3, 0), r, forward).await;
+        let delete = p
+            .apply_to_store(
+                Op::Delete,
+                Partition::Bak,
+                r,
+                0,
+                0,
+                0,
+                0,
+                &[],
+                None,
+                stated,
+                None,
+                forward,
+            )
+            .await;
+        assert_eq!(delete, ApplyOutcome::Applied, "{r}");
+    }
+    assert!(!store.discharged().refuses("a", "t"), "an ordinary delete");
+    assert!(store.discharged().refuses("b", "t"), "the discharge's delete");
 }
 
 // ---- two copies meeting in the store (ADR-0055 §7) ----
@@ -707,7 +753,7 @@ async fn forward_at(p: &Puller, (gen, bgen): (i64, i64), body: Arc<[u8]>) -> App
         0,
         &[],
         Some(body),
-        false,
+        DeleteStated::default(),
         None,
         ApplyMode::Forward,
     )

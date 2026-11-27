@@ -282,6 +282,7 @@ mod tests {
             body: Some(StdArc::from(&b"the-encoded-call-body-bytes"[..])),
             answered: false,
             incarnation: None,
+            discharged: false,
         };
 
         client.send(noop.clone()).await.unwrap();

@@ -21,6 +21,7 @@
 //! the caller, and every `Delete` frame drained from it — tail or cold — carries
 //! that statement. A later `Delete` stating no answer never clears one an
 //! earlier `Delete` stated; a `Put` of the ref (a new call reusing it) does.
+//! The tombstone keeps a discharge the same way ([`DeleteStated`]).
 //!
 //! ## Send model (ADR-0055 §3)
 //! Every write moves its sub-log's head, which wakes the serve task streaming
@@ -76,9 +77,9 @@ struct RefState {
     op: Op,
     /// `now_ms` of the write the entry holds: the age of a pending write.
     written_ms: i64,
-    /// A `Delete` of this ref stated that the deleting node had answered the
-    /// call. Kept across later `Delete`s of the ref; a `Put` clears it.
-    answered: bool,
+    /// What the `Delete`s of this ref stated. Kept across later `Delete`s of
+    /// the ref; a `Put` clears it.
+    stated: DeleteStated,
     /// The call incarnation a `Delete` removed; `None` on a `Put` (its body's
     /// metadata names it at drain time).
     incarnation: Option<String>,
@@ -89,8 +90,34 @@ struct Due {
     counter: u64,
     call_ref: String,
     op: Op,
-    answered: bool,
+    stated: DeleteStated,
     incarnation: Option<String>,
+}
+
+/// What a `Delete` states of the call it removes, beside its op.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DeleteStated {
+    /// The deleting node's own copy had answered the caller (ADR-0031 D3).
+    pub answered: bool,
+    /// The deleting node discharged the call because a poll of its turn
+    /// never returned (ADR-0057 §6).
+    pub discharged: bool,
+}
+
+impl DeleteStated {
+    /// A delete stating `answered`, of a call not discharged.
+    pub const fn answering(answered: bool) -> Self {
+        Self { answered, discharged: false }
+    }
+
+    /// What two `Delete`s of one ref state together: each statement either
+    /// made.
+    fn and(self, earlier: Self) -> Self {
+        Self {
+            answered: self.answered || earlier.answered,
+            discharged: self.discharged || earlier.discharged,
+        }
+    }
 }
 
 /// One compacted ref-log for a single `(peer, partition)`.
@@ -149,15 +176,17 @@ impl SubLog {
     }
 
     /// Move `call_ref` to `counter` with `op`, written at `now_ms`, dropping any
-    /// prior slot, and wake the serve task. A `Delete` over a `Delete` keeps the
-    /// answer the first one stated; a `Put` starts the ref afresh, so a reused
+    /// prior slot, and wake the serve task. A `Delete` over a `Delete` keeps
+    /// what the first one stated; a `Put` starts the ref afresh, so a reused
     /// ref never inherits a former call's.
-    fn put(&mut self, counter: u64, call_ref: &str, op: Op, now_ms: i64, stated: Stated) {
-        let Stated { mut answered, incarnation } = stated;
+    fn put(&mut self, counter: u64, call_ref: &str, op: Op, now_ms: i64, entry: Stated) {
+        let Stated { mut stated, incarnation } = entry;
         let mut first_sent = None;
         if let Some(prev) = self.by_ref.get(call_ref) {
             self.entries.remove(&prev.counter);
-            answered |= op == Op::Delete && prev.op == Op::Delete && prev.answered;
+            if op == Op::Delete && prev.op == Op::Delete {
+                stated = stated.and(prev.stated);
+            }
             // A send lost with its flow is no send: kept only once applied.
             let acked = self.acked.borrow().counter;
             if op == Op::Delete || prev.op == Op::Put {
@@ -165,7 +194,7 @@ impl SubLog {
             }
         }
         self.entries.insert(counter, call_ref.to_string());
-        let state = RefState { counter, first_sent, op, written_ms: now_ms, answered, incarnation };
+        let state = RefState { counter, first_sent, op, written_ms: now_ms, stated, incarnation };
         self.by_ref.insert(call_ref.to_string(), state);
         self.head = self.head.max(counter);
         self.written.send_replace(self.head);
@@ -193,7 +222,7 @@ impl SubLog {
                     counter: *c,
                     call_ref: call_ref.clone(),
                     op: st.op,
-                    answered: st.answered,
+                    stated: st.stated,
                     incarnation: st.incarnation.clone(),
                 })
             })
@@ -201,10 +230,11 @@ impl SubLog {
     }
 }
 
-/// What a `Delete` entry states beside its op ([`Changelog::bump_delete`]).
+/// What an entry states beside its op ([`Changelog::bump_delete`]): nothing
+/// on a `Put`.
 #[derive(Default)]
 struct Stated {
-    answered: bool,
+    stated: DeleteStated,
     incarnation: Option<String>,
 }
 
@@ -369,20 +399,21 @@ impl Changelog {
         self.bump(peer, call_ref, Op::Put, partition, Stated::default())
     }
 
-    /// Record a `Delete` of `call_ref` for `(peer, partition)`, with the deleting
-    /// node's statement that its copy had answered the call. The tombstone keeps
-    /// the statement; a `Delete` following a `Delete` keeps an answer the first
-    /// one stated (ADR-0031 D3). The `Delete` names the call incarnation it
-    /// removed, so its receiver buries that call and no other.
+    /// Record a `Delete` of `call_ref` for `(peer, partition)`, with what the
+    /// deleting node states of it: whether its copy had answered the call and
+    /// whether it discharged the call. The tombstone keeps the statement; a
+    /// `Delete` following a `Delete` keeps what the first one stated (ADR-0031
+    /// D3). The `Delete` names the call incarnation it removed, so its
+    /// receiver buries that call and no other.
     pub fn bump_delete(
         &self,
         peer: &str,
         call_ref: &str,
         partition: Partition,
-        answered: bool,
+        stated: DeleteStated,
         incarnation: Option<String>,
     ) -> Watermark {
-        self.bump(peer, call_ref, Op::Delete, partition, Stated { answered, incarnation })
+        self.bump(peer, call_ref, Op::Delete, partition, Stated { stated, incarnation })
     }
 
     /// Record a mutation for `(peer, partition)`: assign the next counter,

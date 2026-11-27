@@ -16,9 +16,10 @@ pub(crate) const REPLICA_CHANGELOG: &str = "replica_changelog";
 pub(crate) const RESURRECTION_TOMBSTONES: &str = "resurrection_tombstones";
 pub(crate) const DISPLACED_BODIES: &str = "displaced_bodies";
 pub(crate) const REPLICA_REFUSALS: &str = "replica_refusals";
+pub(crate) const DISCHARGED_IDENTITIES: &str = "discharged_identities";
 
 /// Every lock name, in counter order: the `lock` label's values.
-pub const LOCKS: [&str; 7] = [
+pub const LOCKS: [&str; 8] = [
     CALL_STORE,
     REPLICA_BODIES,
     REPLICA_METADATA,
@@ -26,6 +27,7 @@ pub const LOCKS: [&str; 7] = [
     RESURRECTION_TOMBSTONES,
     DISPLACED_BODIES,
     REPLICA_REFUSALS,
+    DISCHARGED_IDENTITIES,
 ];
 
 /// The recoveries of the store's locks in this process.

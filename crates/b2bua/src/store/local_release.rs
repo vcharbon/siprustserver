@@ -29,6 +29,7 @@ impl CallState {
         inner.retire_lock(call_ref);
         inner.takeover.remove(call_ref);
         inner.parked.remove(call_ref);
+        inner.discharging.remove(call_ref);
         inner.touched.remove(call_ref);
         inner.shrink_idle();
         drop(inner);
