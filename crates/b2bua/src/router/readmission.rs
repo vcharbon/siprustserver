@@ -68,12 +68,17 @@ impl ReadmissionGate {
     }
 
     /// `cmd` when it runs now: it reclaims nothing, or the gate is open and
-    /// holds nothing older. Otherwise `cmd` is held.
-    pub(super) fn admit(&mut self, cmd: ReplCommand) -> Option<ReplCommand> {
+    /// holds nothing older. Otherwise `cmd` is held, and the body it carries
+    /// gives its bytes of the pullers' flush budget back: the endpoint's
+    /// readiness waits on the pullers, so a held body never keeps one waiting.
+    pub(super) fn admit(&mut self, mut cmd: ReplCommand) -> Option<ReplCommand> {
         let reclaims =
             matches!(cmd, ReplCommand::ReclaimCall(_) | ReplCommand::ReverseFlushRefused { .. });
         if !reclaims || (self.holds_nothing() && self.is_open()) {
             return Some(cmd);
+        }
+        if let Some(body) = cmd.body_mut() {
+            body.release();
         }
         self.held.push(cmd);
         None

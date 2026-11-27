@@ -338,7 +338,12 @@ impl Puller {
     /// incarnation it names, rides up for every call: the backup discharged the
     /// call, and a live copy of it here is dropped (ADR-0047 D8). No other
     /// `Delete` rides up.
-    pub(super) fn signal(
+    ///
+    /// A body rides up once it holds its bytes of the sink's budget, so the
+    /// apply waits while the router has not handled the bodies before it
+    /// ([`RouterSink::hand_up`](crate::repl::RouterSink)); a held copy holds
+    /// none until it rides up.
+    pub(super) async fn signal(
         &self,
         mode: ApplyMode,
         outcome: ApplyOutcome,
@@ -356,22 +361,22 @@ impl Puller {
             ) => self.held_meetings.hold(call_ref, cmd),
             other => {
                 if let Some(held) = self.held_meetings.take(call_ref) {
-                    sink.send(held);
+                    sink.hand_up(held).await;
                 }
                 if let Some(cmd) = other {
-                    sink.send(cmd);
+                    sink.hand_up(cmd).await;
                 }
             }
         }
     }
 
-    /// Hand the router every refused copy the batch held, the batch read
-    /// whole ([`held_meetings`](super::held_meetings)).
-    pub(super) fn release_meetings(&self) {
+    /// Hand the router every refused copy the batch held, in order, the batch
+    /// read whole ([`held_meetings`](super::held_meetings)).
+    pub(super) async fn release_meetings(&self) {
         let held = self.held_meetings.take_all();
         if let Some(sink) = &self.repl_tx {
             for cmd in held {
-                sink.send(cmd);
+                sink.hand_up(cmd).await;
             }
         }
     }
@@ -433,7 +438,7 @@ pub(super) fn written(
     incarnation: &Option<String>,
 ) -> PrimaryWrite {
     match op {
-        Op::Put => PrimaryWrite::Put(body.clone().unwrap_or_else(|| Arc::from(Vec::new()))),
+        Op::Put => PrimaryWrite::Put(body.clone().unwrap_or_else(|| Arc::from(Vec::new())).into()),
         Op::Delete => PrimaryWrite::Delete(incarnation.clone()),
     }
 }

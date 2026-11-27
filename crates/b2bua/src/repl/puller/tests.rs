@@ -270,14 +270,14 @@ async fn a_shed_replica_signals_nothing() {
     let (p, _, _, _) = backup_puller(crate::capacity::BackupCeilings::default());
     let (tx, mut rx) = mpsc::unbounded_channel();
     let p = p.with_repl_sink(tx);
-    p.signal(ApplyMode::Forward, ApplyOutcome::Shed, true, "w0|a|t", bodyless(), 0);
-    p.signal(ApplyMode::Reverse, ApplyOutcome::Shed, true, "w0|a|t", bodyless(), 0);
+    p.signal(ApplyMode::Forward, ApplyOutcome::Shed, true, "w0|a|t", bodyless(), 0).await;
+    p.signal(ApplyMode::Reverse, ApplyOutcome::Shed, true, "w0|a|t", bodyless(), 0).await;
     assert!(rx.try_recv().is_err());
 }
 
 /// A `Put` with no body, as a refused flush's signal carries it.
 fn bodyless() -> crate::router::PrimaryWrite {
-    crate::router::PrimaryWrite::Put(Arc::from(Vec::new()))
+    crate::router::PrimaryWrite::Put(Vec::new().into())
 }
 
 /// An applied forward write rides up for a call the router serves as a live
@@ -296,7 +296,7 @@ async fn an_applied_forward_write_rides_up_for_a_live_takeover_copy_alone() {
     let p = p.with_repl_sink(RouterSink::new(tx, probe));
     let (forward, applied) = (ApplyMode::Forward, ApplyOutcome::Applied);
     for bootstrapped in [false, true] {
-        p.signal(forward, applied, bootstrapped, copy, Put(body.clone()), 0);
+        p.signal(forward, applied, bootstrapped, copy, Put(body.clone().into()), 0).await;
         match rx.try_recv() {
             Ok(ReplCommand::ForwardFlushApplied { call_ref, write: Put(sent) }) => {
                 assert_eq!(call_ref, copy);
@@ -305,23 +305,23 @@ async fn an_applied_forward_write_rides_up_for_a_live_takeover_copy_alone() {
             other => panic!("expected the applied write (bootstrapped: {bootstrapped}): {other:?}"),
         }
     }
-    p.signal(forward, applied, true, copy, Delete(Some("w0|copy|t#1".into())), 0);
+    p.signal(forward, applied, true, copy, Delete(Some("w0|copy|t#1".into())), 0).await;
     match rx.try_recv() {
         Ok(ReplCommand::ForwardFlushApplied { call_ref, write: Delete(Some(deleted)) }) => {
             assert_eq!((call_ref.as_str(), deleted.as_str()), (copy, "w0|copy|t#1"));
         }
         other => panic!("expected the applied delete: {other:?}"),
     }
-    p.signal(forward, applied, true, other, Put(body.clone()), 0);
-    p.signal(forward, applied, true, other, Delete(None), 0);
-    p.signal(forward, ApplyOutcome::Dominated, true, copy, Put(body.clone()), 0);
-    p.signal(forward, ApplyOutcome::Refused, true, copy, Delete(None), 0);
+    p.signal(forward, applied, true, other, Put(body.clone().into()), 0).await;
+    p.signal(forward, applied, true, other, Delete(None), 0).await;
+    p.signal(forward, ApplyOutcome::Dominated, true, copy, Put(body.clone().into()), 0).await;
+    p.signal(forward, ApplyOutcome::Refused, true, copy, Delete(None), 0).await;
     assert!(rx.try_recv().is_err(), "nothing else rides up");
 
     let (unprobed, _, _, _) = backup_puller(crate::capacity::BackupCeilings::default());
     let (tx, mut rx) = mpsc::unbounded_channel();
     let unprobed = unprobed.with_repl_sink(tx);
-    unprobed.signal(forward, applied, true, copy, Put(body), 0);
+    unprobed.signal(forward, applied, true, copy, Put(body.into()), 0).await;
     assert!(rx.try_recv().is_err(), "no probe, no signal");
 }
 
@@ -337,7 +337,8 @@ async fn an_applied_reverse_delete_rides_up_for_any_call() {
     let (tx, mut rx) = mpsc::unbounded_channel();
     let p = p.with_repl_sink(tx);
     for mode in [ApplyMode::Reverse, ApplyMode::Bootstrap] {
-        p.signal(mode, ApplyOutcome::Applied, true, call, Delete(Some("w0|ended|t#1".into())), 0);
+        p.signal(mode, ApplyOutcome::Applied, true, call, Delete(Some("w0|ended|t#1".into())), 0)
+            .await;
         match rx.try_recv() {
             Ok(ReplCommand::ReverseDeleteApplied { call_ref, incarnation }) => {
                 assert_eq!(call_ref, call);
@@ -346,8 +347,8 @@ async fn an_applied_reverse_delete_rides_up_for_any_call() {
             other => panic!("expected the applied reverse delete ({mode:?}): {other:?}"),
         }
     }
-    p.signal(ApplyMode::Forward, ApplyOutcome::Applied, true, call, Delete(None), 0);
-    p.signal(ApplyMode::Reverse, ApplyOutcome::Refused, true, call, Delete(None), 0);
+    p.signal(ApplyMode::Forward, ApplyOutcome::Applied, true, call, Delete(None), 0).await;
+    p.signal(ApplyMode::Reverse, ApplyOutcome::Refused, true, call, Delete(None), 0).await;
     assert!(rx.try_recv().is_err(), "nothing else rides up");
 }
 
@@ -645,7 +646,7 @@ async fn a_reverse_flush_of_a_replaced_call_meets_nothing() {
     );
     let outcome = put_of(&p, Partition::Pri, r, (1, 7), "w0|a|t#1", reverse).await;
     assert_eq!(outcome, ApplyOutcome::Superseded);
-    p.signal(reverse, outcome, true, r, bodyless(), 0);
+    p.signal(reverse, outcome, true, r, bodyless(), 0).await;
     assert!(rx.try_recv().is_err(), "nothing rides up to the router");
     assert_eq!(body_of(&store, PartitionRole::Primary, r).await, b"w0|a|t#2");
 
@@ -715,4 +716,5 @@ async fn forward_at(p: &Puller, (gen, bgen): (i64, i64), body: Arc<[u8]>) -> App
 }
 
 mod containment;
+mod flush_budget;
 mod undecodable;

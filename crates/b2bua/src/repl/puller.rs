@@ -332,20 +332,21 @@ impl Puller {
 
     /// Leave a stream that delivered nothing for `idle_timeout_ms`: the peer
     /// went silent without a reset (ADR-0045).
-    fn left_idle(&self, connected_at: tokio::time::Instant) -> RunOutcome {
+    async fn left_idle(&self, connected_at: tokio::time::Instant) -> RunOutcome {
         self.note_state(
             "idle",
             &format!("nothing received for {}ms, pulling again", self.config.idle_timeout_ms),
         );
-        self.ended(connected_at)
+        self.ended(connected_at).await
     }
 
     /// A stream connected at `connected_at` ended: the copies its last batch
     /// refused meet the live copy now.
-    fn ended(&self, connected_at: tokio::time::Instant) -> RunOutcome {
-        self.release_meetings();
+    async fn ended(&self, connected_at: tokio::time::Instant) -> RunOutcome {
         let idle = Duration::from_millis(self.config.idle_timeout_ms);
-        RunOutcome::Disconnected { lasted: connected_at.elapsed() >= idle }
+        let lasted = connected_at.elapsed() >= idle;
+        self.release_meetings().await;
+        RunOutcome::Disconnected { lasted }
     }
 
     /// Send `frame` within `send_stall_ms`; `false` when the stream failed or
@@ -367,6 +368,8 @@ impl Puller {
     /// hard timer (X5); while bootstrap is outstanding the connect wait and the
     /// first-`Noop` wait race it, marking complete best-effort if it fires (the
     /// connection keeps streaming regardless — `*deadline` is set `None`).
+    /// The idle bound runs while the stream is read: a wait on the flush
+    /// budget ([`RouterSink::hand_up`]) starts it again.
     async fn run_once(
         &self,
         cancel: &mut watch::Receiver<bool>,
@@ -394,7 +397,7 @@ impl Puller {
             since,
         };
         if !self.send(conn.as_ref(), req).await {
-            return self.ended(connected_at);
+            return self.ended(connected_at).await;
         }
 
         // A warm resume (W > (0,0)) tails directly — already past bootstrap, so
@@ -427,10 +430,11 @@ impl Puller {
                 Some(at) => tokio::select! {
                     f = conn.recv() => f,
                     _ = tokio::time::sleep_until(quiet_until) => {
-                        return self.left_idle(connected_at);
+                        return self.left_idle(connected_at).await;
                     }
                     () = tokio::time::sleep(held_meetings::BATCH_QUIET), if held => {
-                        self.release_meetings();
+                        self.release_meetings().await;
+                        quiet_until = sip_clock::deadline::from_now(idle);
                         continue;
                     }
                     _ = tokio::time::sleep_until(at) => {
@@ -456,10 +460,11 @@ impl Puller {
                 None => tokio::select! {
                     f = conn.recv() => f,
                     _ = tokio::time::sleep_until(quiet_until) => {
-                        return self.left_idle(connected_at);
+                        return self.left_idle(connected_at).await;
                     }
                     () = tokio::time::sleep(held_meetings::BATCH_QUIET), if held => {
-                        self.release_meetings();
+                        self.release_meetings().await;
+                        quiet_until = sip_clock::deadline::from_now(idle);
                         continue;
                     }
                     () = cancelled(cancel) => return RunOutcome::Cancelled,
@@ -514,13 +519,14 @@ impl Puller {
                     if outcome == ApplyOutcome::Shed
                         && !self.refuse(conn.as_ref(), at, &call_ref, refused.as_deref()).await
                     {
-                        return self.ended(connected_at);
+                        return self.ended(connected_at).await;
                     }
                     if !bootstrapped {
                         applied_in_bootstrap += 1;
                     }
                     self.report_applied(mode, outcome, op, &call_ref, (call_gen, call_bgen)).await;
-                    self.signal(mode, outcome, bootstrapped, &call_ref, write, origin_now_ms);
+                    self.signal(mode, outcome, bootstrapped, &call_ref, write, origin_now_ms).await;
+                    quiet_until = sip_clock::deadline::from_now(idle);
                     // Pre-bootstrap frames share `at = W`; only the post-bootstrap
                     // tail advances W.
                     if bootstrapped {
@@ -531,7 +537,7 @@ impl Puller {
                         // scan is applied would be false, so the bootstrap claim
                         // is made once, on the first catch-up `Noop`.
                         if !self.send(conn.as_ref(), Frame::Position { at }).await {
-                            return self.ended(connected_at);
+                            return self.ended(connected_at).await;
                         }
                     }
                 }
@@ -557,13 +563,13 @@ impl Puller {
                             self.signal_reclaim_all();
                         }
                     }
-                    self.release_meetings();
+                    self.release_meetings().await;
                     // Every `Noop` is answered with the position it announced:
                     // the first one is the bootstrap's own claim (every scan body
                     // is applied by now), the idle ones keep the claim fresh
                     // (ADR-0031 D2).
                     if !self.send(conn.as_ref(), Frame::Position { at }).await {
-                        return self.ended(connected_at);
+                        return self.ended(connected_at).await;
                     }
                 }
                 Some(Frame::ResetToBootstrap { .. }) => {
@@ -590,7 +596,7 @@ impl Puller {
                         crate::poison::PULLER_BOOTSTRAP,
                     ) = Some(tokio::time::Instant::now());
                     self.note_state("reset_to_bootstrap", "server dropped our watermark");
-                    return self.ended(connected_at);
+                    return self.ended(connected_at).await;
                 }
                 // The peer speaks another protocol: nothing it would send can be
                 // read, so the stream is left and pulled again after the
@@ -606,11 +612,11 @@ impl Puller {
                         reason,
                         "replication stream refused: the peer speaks another protocol"
                     );
-                    return self.ended(connected_at);
+                    return self.ended(connected_at).await;
                 }
                 // Client→server frames; never expected here. Ignore.
                 Some(_) => {}
-                None => return self.ended(connected_at),
+                None => return self.ended(connected_at).await,
             }
         }
     }
