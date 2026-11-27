@@ -22,7 +22,7 @@ pub(super) struct Cancels<'a> {
 
 impl<'a> Cancels<'a> {
     /// File `msg`, the view's message `mi` on top-Via `branch`, where it is a
-    /// CANCEL or a 2xx to one.
+    /// CANCEL the strict reading admits or a 2xx to one.
     pub(super) fn absorb(
         &mut self,
         sides: &Sides<'a>,
@@ -33,7 +33,7 @@ impl<'a> Cancels<'a> {
     ) {
         let call_id = msg.call_id.as_str();
         let branch = BranchName(branch);
-        if msg.is_request("CANCEL") {
+        if msg.is_request("CANCEL") && !msg.refused {
             let txn = TxnKey { endpoint: parties.took(msg), call_id, branch };
             self.taken.entry(txn).or_insert(mi);
         } else if msg.cseq_method.eq_ignore_ascii_case("CANCEL")
