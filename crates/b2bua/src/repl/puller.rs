@@ -49,9 +49,10 @@
 //! - connect ok → send one `PullRequest{ partition, since = retained W }`.
 //! - `Data{at}` → apply under `(p,b)`; if `bootstrapped`, `W = at` (+ Reclaim
 //!   straggler [`ReclaimCall`](crate::router::ReplCommand::ReclaimCall)).
-//! - `Noop{at}` → `current = true` (sticky); first one marks bootstrap-complete,
-//!   flips `bootstrapped`, drops the copies an earlier cold pass carried and
-//!   this one did not ([`carried`]), and (Reclaim flow) then fires the bulk
+//! - `Noop{at}` → the first one first drops the copies an earlier cold pass
+//!   carried and this one did not ([`carried`]); then `current = true` (sticky),
+//!   and the first one marks bootstrap-complete, flips `bootstrapped` and
+//!   (Reclaim flow) fires the bulk
 //!   [`ReclaimAll`](crate::router::ReplCommand::ReclaimAll); advance `W` if greater.
 //! - `ResetToBootstrap` → discard `W`, clear bootstrap-complete, bump
 //!   `reset_gen`, disconnect (reconnect re-bootstraps from `(0,0)`).
@@ -556,6 +557,9 @@ impl Puller {
                 }
                 Some(Frame::Noop { at }) => {
                     let first = !bootstrapped;
+                    if first {
+                        self.sweep_uncarried(pass, at).await;
+                    }
                     self.status_tx.send_modify(|s| {
                         s.current = true;
                         if at > s.watermark {
@@ -569,7 +573,6 @@ impl Puller {
                         self.scan_applied.store(0, std::sync::atomic::Ordering::Relaxed);
                         self.mark_bootstrap_complete(applied_in_bootstrap, "first catch-up Noop");
                         *deadline = None;
-                        self.sweep_uncarried(pass, at).await;
                         // Reclaim flow: bulk-materialise everything the bootstrap
                         // scan imported into the live serving map (smoothed).
                         if self.is_reclaim() {

@@ -149,7 +149,8 @@ impl Puller {
         self.carried.carried(pass, at.gen, call_ref, self.held_copy(call_ref));
     }
 
-    /// The cold `pass` caught up at `at`: each copy an earlier pass of the
+    /// The cold `pass` caught up at `at`, before the flow reads current or its
+    /// bootstrap complete: each copy an earlier pass of the
     /// bootstrap left that this pass did not carry is dropped, local-only,
     /// unless it was written since, is a live takeover copy, or is an Element
     /// the `Delete` guard keeps. On the Reclaim flow the router is told of

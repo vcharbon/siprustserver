@@ -87,8 +87,8 @@ reconnect and recovery path on a cut.
    pass scans again, and its tail starts past every delete of the outage, so a call
    the holder ended between the two passes is in neither. The puller records, per
    `(peer, flow)` and holder incarnation, the copies each cold pass of a bootstrap
-   left, kept by the supervisor across a respawn. On the first catch-up `Noop` it
-   drops, local-only, each copy an earlier pass left and the last pass did not
+   left, kept by the supervisor across a respawn. On the first catch-up `Noop`,
+   before the flow reads current or its bootstrap complete, it drops, local-only, each copy an earlier pass left and the last pass did not
    carry in any frame: no BYE and no CDR, the call ended on its holder
    (`b2bua_repl_bootstrap_swept_total{flow}`). A copy written since, a live takeover
    copy and an Element the `Delete` guard keeps (ADR-0031 D3) are spared. On the
