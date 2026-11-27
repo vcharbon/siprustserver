@@ -29,7 +29,12 @@ impl FlushBudget {
     /// A budget of `bound` bytes, at least one and at most `u32::MAX`.
     pub fn new(bound: usize) -> Self {
         let bound = u32::try_from(bound).unwrap_or(u32::MAX).max(1);
-        Self { free: Arc::new(Semaphore::new(bound as usize)), bound }
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "at most u32::MAX permits, below Semaphore::MAX_PERMITS"
+        )]
+        let free = Semaphore::new(bound as usize);
+        Self { free: Arc::new(free), bound }
     }
 
     /// The budget's bound, in bytes.
@@ -91,7 +96,7 @@ impl From<Arc<[u8]>> for FlushBody {
 
 impl From<Vec<u8>> for FlushBody {
     fn from(bytes: Vec<u8>) -> Self {
-        Self::from(Arc::<[u8]>::from(bytes))
+        Self { bytes: Arc::from(bytes), held: None }
     }
 }
 

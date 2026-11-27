@@ -165,15 +165,15 @@ impl ReplicationConnection for RealConnection {
         Ok(())
     }
 
+    /// Every frame encoded, each behind its own length prefix, into ONE
+    /// buffer, then a SINGLE write + flush: a bootstrap batch costs one
+    /// syscall, one flush and one write-lock acquisition. The bytes on the
+    /// wire are byte-for-byte those of the frames sent one by one, so the
+    /// receiver's framed `recv` is unchanged.
     async fn send_batch(&self, frames: Vec<Frame>) -> Result<(), SendError> {
         if frames.is_empty() {
             return Ok(());
         }
-        // Encode every frame (each with its own length prefix) into ONE buffer,
-        // then a SINGLE write + flush — so a bootstrap batch costs one
-        // syscall / one flush / one write-lock acquisition. The
-        // bytes on the wire are byte-for-byte identical to sending them
-        // individually, so the receiver's framed `recv` is unchanged.
         let mut buf = Vec::new();
         for frame in frames {
             append_wire_bytes(&frame, &mut buf)?;

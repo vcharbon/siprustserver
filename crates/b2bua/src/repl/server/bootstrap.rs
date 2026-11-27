@@ -119,8 +119,9 @@ impl ReplServer {
         }
     }
 
-    /// The bootstrap frame of `key`, a `Put` at the scan's `W`; `None` when
-    /// its body vanished.
+    /// The bootstrap frame of `key`, a `Put` at the scan's `W`, stamped at
+    /// send time in the frame of the body's instants as `drain_since` stamps
+    /// it; `None` when its body vanished.
     async fn bootstrap_frame(&self, key: &str, scan: &Scan<'_>) -> Option<Frame> {
         let (body, meta) = self.source.read_entry(scan.role, scan.primary, key).await?;
         Some(Frame::Data {
@@ -131,8 +132,6 @@ impl ReplServer {
             call_gen: meta.call_gen,
             call_bgen: meta.call_bgen,
             body_ttl_ms: meta.body_ttl_ms,
-            // Send-time stamp in the frame of the body's instants, as
-            // `drain_since` stamps it.
             origin_now_ms: meta.origin_now_ms(self.changelog.now_ms()),
             indexes: meta.indexes,
             body: Some(body),

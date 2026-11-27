@@ -31,15 +31,14 @@ pub(super) struct SimConnection {
     pub(super) in_view: Arc<WireView>,
 }
 
-#[async_trait]
-impl ReplicationConnection for SimConnection {
-    async fn send(&self, frame: Frame) -> Result<(), SendError> {
-        // A puller names itself on its opening `PullRequest`: that is what ties
-        // this stream's ephemeral local to the node that owns it — on the
-        // fabric's map and on both of the stream's wires, before either actor
-        // judges a frame on it. Only a client end is attributed: a listener's
-        // address is its own owner.
-        if let Frame::PullRequest { caller, .. } = &frame {
+impl SimConnection {
+    /// A puller names itself on its opening `PullRequest`: that is what ties
+    /// this stream's ephemeral local to the node that owns it — on the
+    /// fabric's map and on both of the stream's wires, before either actor
+    /// judges a frame on it. Only a client end is attributed: a listener's
+    /// address is its own owner.
+    fn attribute_owner(&self, frame: &Frame) {
+        if let Frame::PullRequest { caller, .. } = frame {
             if !self.shared.is_listener(self.local) {
                 if let Some(owner) = self.shared.attribute(self.local, caller) {
                     self.out_view.learn(self.local, owner);
@@ -47,21 +46,29 @@ impl ReplicationConnection for SimConnection {
                 }
             }
         }
-        // A simulated network error wins over a clean cut; a cut on the wire
-        // and a cut on the owner pair fail the send alike.
+    }
+
+    /// Why a send fails now, if it does: a simulated network error wins over
+    /// a clean cut, and a cut on the wire and a cut on the owner pair fail the
+    /// send alike.
+    fn refusal(&self) -> Option<SendError> {
         if self.out_dir.errored.load(Ordering::SeqCst) {
-            return Err(SendError::Io("simulated network error".into()));
+            return Some(SendError::Io("simulated network error".into()));
         }
         if self.out_dir.cut.load(Ordering::SeqCst) || self.out_view.node_fault().cut {
-            return Err(SendError::Closed);
+            return Some(SendError::Closed);
         }
+        None
+    }
 
-        // Flow-control black-hole ([`Fault::Block`]): when the peer is not pulling
-        // and the in-flight window is full, the write BLOCKS on buffer space —
-        // modelling a TCP sender stuck on a full socket buffer with a dead reader.
-        // It unblocks when the peer drains (recv releases a slot), the block is
-        // cleared (Resume), or the direction is cut/errored. Arming the `Notified`
-        // future before the window check avoids a lost wakeup vs `recv`'s notify.
+    /// The flow-control black-hole ([`Fault::Block`](super::Fault::Block)):
+    /// when the peer is not pulling and the in-flight window is full, the
+    /// write BLOCKS on buffer space — modelling a TCP sender stuck on a full
+    /// socket buffer with a dead reader. It unblocks when the peer drains
+    /// (`recv` releases a slot), the block is cleared (Resume), or the
+    /// direction is cut or errored. The `Notified` future is armed before the
+    /// window check, so a `recv`'s notify is never lost.
+    async fn window(&self) -> Result<(), SendError> {
         while self.out_dir.block.load(Ordering::SeqCst) {
             if self.out_dir.errored.load(Ordering::SeqCst) {
                 return Err(SendError::Io("simulated network error".into()));
@@ -77,28 +84,45 @@ impl ReplicationConnection for SimConnection {
             }
             notified.await;
         }
+        Ok(())
+    }
 
-        // The codec plays through every path: encode to bytes, move bytes.
+    /// Release one flow-control window slot of the sender and wake a blocked
+    /// writer (`in_dir` is the sender's `out_dir` for this direction).
+    fn release_window(&self) {
+        if self.in_dir.inflight.load(Ordering::SeqCst) > 0 {
+            self.in_dir.inflight.fetch_sub(1, Ordering::SeqCst);
+        }
+        self.in_dir.wake.notify_waiters();
+    }
+}
+
+#[async_trait]
+impl ReplicationConnection for SimConnection {
+    /// The codec plays through every path: the frame is encoded and its bytes
+    /// moved, behind the link's rate when it has one, and counted against the
+    /// flow-control window until the peer's `recv` releases it, so `block`
+    /// can be armed mid-stream.
+    async fn send(&self, frame: Frame) -> Result<(), SendError> {
+        self.attribute_owner(&frame);
+        if let Some(refused) = self.refusal() {
+            return Err(refused);
+        }
+        self.window().await?;
         let bytes = repl_net::transport::payload(&frame)?;
         let left_at = match &self.out_dir.link {
             Some(link) => link.queue(bytes.len()).await,
             None => tokio::time::Instant::now(),
         };
-        // Account the frame against the flow-control window (released by the
-        // peer's `recv`). Always tracked so `block` can be armed mid-stream.
         self.out_dir.inflight.fetch_add(1, Ordering::SeqCst);
         self.out.send((left_at, bytes)).map_err(|_| SendError::Closed)
     }
 
+    /// The next frame, decoded back from the bytes the sender moved: the sim
+    /// moves encoded `Vec<u8>`, never a `Frame`.
     async fn recv(&self) -> Option<Frame> {
         let bytes = self.inbound.lock().await.recv().await?;
-        // Release one flow-control window slot for the sender + wake a blocked
-        // writer (`in_dir` == the sender's `out_dir` for this direction).
-        if self.in_dir.inflight.load(Ordering::SeqCst) > 0 {
-            self.in_dir.inflight.fetch_sub(1, Ordering::SeqCst);
-        }
-        self.in_dir.wake.notify_waiters();
-        // Decode back from bytes — sim moves encoded `Vec<u8>`, never `Frame`.
+        self.release_window();
         decode_frame(&bytes).ok()
     }
 

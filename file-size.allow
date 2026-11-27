@@ -38,7 +38,7 @@ crates/loadgen/tests/it/smoke.rs 2656
 crates/pivot-interpreter/src/plan.rs 1493
 crates/pivot-interpreter/src/render/tests.rs 856
 crates/pivot-schema/tests/it/lint.rs 2890
-crates/repl-net-testkit/src/simulated.rs 955
+crates/repl-net-testkit/src/simulated.rs 886
 crates/rfc-rules/src/rules/cseq/tests.rs 815
 crates/rfc-rules/src/verdict/evidence.rs 1659
 crates/scenario-harness/src/actor/scenarios.rs 893
