@@ -15,7 +15,9 @@ pub struct PullerStatus {
     /// Sticky **bootstrap-complete** flag (ADR-0011 X5). Set when the first
     /// catch-up `Noop` arrives OR the bootstrap hard timer fires (best-effort) OR
     /// the puller resumes warm (`W > (0,0)` — no bootstrap needed). Cleared only
-    /// by a `ResetToBootstrap`. Readiness consumes this.
+    /// by a `ResetToBootstrap`. A timer's completion holds no promise that the
+    /// scan's bodies arrived; it releases the readiness of a flow that never
+    /// connected, never a caught-up read.
     pub bootstrap_complete: bool,
     /// Monotonic reset generation: bumped each time the server pushes
     /// `ResetToBootstrap` (watermark forced back to `(0,0)`). Lets the supervisor

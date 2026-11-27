@@ -191,6 +191,12 @@ pub const REPL_INBOUND_DROPPED: Family = Family::counter(
     "inbound replication connections the serve loop closed before they opened a flow (ADR-0045): reason=cap, accepted while B2BUA_REPL_MAX_CONNECTIONS were served; reason=open_timeout, no opening PullRequest within B2BUA_REPL_OPEN_TIMEOUT_MS. A healthy cluster reads 0 for both; a rising count names a client that is not a peer worker, or a cap below the flows the peers open",
 );
 
+pub const REPL_BOOTSTRAP_DROPPED: Family = Family::counter(
+    "b2bua_repl_bootstrap_dropped_total",
+    Labels::Product(&[Dim::new("flow", &["recovery", "backup"])]),
+    "cold replication streams that ended before their first catch-up Noop, by flow (flow=recovery|backup, ADR-0011 X5): a bootstrap scan cut short, after which the next pull scans again from the first key. A healthy cluster climbs by one per link cut or peer restart that falls mid-scan; a count that keeps climbing on one flow names a scan that cannot finish, and the bodies past the point it drops at are not held there",
+);
+
 pub const DRAIN_EXITS: Family = Family::counter(
     "b2bua_drain_exits_total",
     Labels::Product(&[DRAIN_REASON]),

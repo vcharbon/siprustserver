@@ -368,6 +368,19 @@ impl B2buaMetrics {
         self.inner.rows.repl_inbound_dropped.get(&[reason])
     }
 
+    /// `b2bua_repl_bootstrap_dropped_total{flow}`: one cold replication stream
+    /// ended before its first catch-up `Noop` (ADR-0011 X5). `flow` is
+    /// `recovery` (the Reclaim flow) or `backup` (the Backup flow).
+    pub fn record_repl_bootstrap_dropped(&self, flow: &str) {
+        self.inner.rows.repl_bootstrap_dropped.add(&[flow], 1);
+    }
+
+    /// Cold streams of `flow` that ended before their first catch-up `Noop`
+    /// (test/observability).
+    pub fn repl_bootstrap_dropped(&self, flow: &str) -> u64 {
+        self.inner.rows.repl_bootstrap_dropped.get(&[flow])
+    }
+
     /// Count one inbound request by SIP method, as written (a method is
     /// case-sensitive, RFC 3261 §7.1), for `b2bua_requests_total{method}`.
     pub fn record_request(&self, method: &str) {
@@ -579,6 +592,7 @@ impl B2buaMetrics {
         rows.repl_noops_sent.render(&mut s);
         rows.repl_forward_flush_refused.render(&mut s);
         rows.repl_inbound_dropped.render(&mut s);
+        rows.repl_bootstrap_dropped.render(&mut s);
         catalogue::worker::DRAIN_EXITS.render(&mut s, |series| {
             cells::get_at(&i.drain_exits, series.index(&catalogue::worker::DRAIN_REASON))
         });

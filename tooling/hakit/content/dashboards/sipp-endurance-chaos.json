@@ -1390,7 +1390,7 @@
       "id": 36,
       "type": "timeseries",
       "title": "Re-hydration: bootstrap outcome (passes/min)",
-      "description": "A rebooting primary pulls its partition back from the backup. SEEDED = a pass reached the terminal Noop (full keyset streamed). STALLED = a pass tripped the (now 2-min) idle window — the stream went silent mid-rehydration. Persistent STALLED = a peer-side stall truncating the stream, not the materialisation.",
+      "description": "A rebooting primary pulls its partition back from the backup. SEEDED = a recovery pass reached its first catch-up Noop (full keyset streamed). STALLED = a cold flow, recovery or backup, whose bootstrap hard timer ran out before its first Noop: completed best-effort. DROPPED = a cold stream that ended before its first Noop, by flow; the next pull scans again from the first key. A DROPPED rate that stays up on one flow = a scan that cannot finish, and the bodies past its drop point are not held.",
       "gridPos": {
         "h": 8,
         "w": 12,
@@ -1411,6 +1411,11 @@
           "expr": "sum by (pod)(rate(b2bua_repl_bootstrap_stalled_total[5m]))*60",
           "refId": "B",
           "legendFormat": "STALLED/min {{pod}}"
+        },
+        {
+          "expr": "sum by (pod, flow)(rate(b2bua_repl_bootstrap_dropped_total[5m]))*60",
+          "refId": "C",
+          "legendFormat": "DROPPED/min {{pod}} {{flow}}"
         }
       ],
       "fieldConfig": {

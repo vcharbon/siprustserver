@@ -64,6 +64,7 @@ impl Puller {
                 bootstrap_started_at: std::sync::Mutex::new(
                     (!warm).then(tokio::time::Instant::now),
                 ),
+                scan_applied: Default::default(),
                 held_meetings: Default::default(),
                 asks: None,
             },

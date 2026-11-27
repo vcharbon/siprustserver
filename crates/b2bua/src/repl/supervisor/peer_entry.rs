@@ -24,7 +24,12 @@ pub(super) struct FlowState {
     pub(super) current: bool,
     /// Sticky bootstrap-complete flag (X5) — retained across Park. Set when the
     /// puller hit the first catch-up `Noop`, the hard timer fired, or it resumed
-    /// warm.
+    /// warm. Set by the timer, bodies of the scan may be missing: it gates
+    /// [`all_bootstrapped`](super::ReplicationSupervisor::all_bootstrapped) and
+    /// the readiness of a flow never connected ([`ready`](Self::ready),
+    /// [`PeerEntry::ready`]), never a reached flow's readiness, which reads
+    /// `current`, nor a drain's caught-up read, which reads the flow's
+    /// `Position` claim.
     pub(super) bootstrap_complete: bool,
     /// Highest reset generation absorbed from any puller for this flow. A puller
     /// bumps its `reset_gen` when the server pushes `ResetToBootstrap` (watermark

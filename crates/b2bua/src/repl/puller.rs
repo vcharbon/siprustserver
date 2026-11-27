@@ -82,6 +82,13 @@
 //! slow. It does **not** abandon the connection: it keeps streaming on the same
 //! socket and the real first `Noop` (when it arrives) completes the bootstrap for
 //! real.
+//!
+//! A cold stream that ends before its first `Noop` leaves W at `(0,0)`, so the
+//! next pull scans again from the first key (`b2bua_repl_bootstrap_dropped_total`).
+//! A scan cut at the same point on every pass never delivers the bodies past
+//! it: the timer then completes the bootstrap with them missing, and warns on
+//! a flow that reached its peer. What a completion gates, and what it never
+//! stands for, is stated in `bootstrap_complete`.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -193,6 +200,10 @@ pub struct Puller {
     /// bootstrap to time). Written from the single task that runs the FSM; the
     /// mutex is what keeps `&Puller` `Sync` across its awaits.
     bootstrap_started_at: std::sync::Mutex<Option<tokio::time::Instant>>,
+    /// The bodies the last cold stream applied before it ended short of its
+    /// first catch-up `Noop`: what a hard timer running out between two
+    /// streams reports.
+    scan_applied: std::sync::atomic::AtomicU64,
     /// The copies a batch refused, until it is read whole (ADR-0055 §7).
     held_meetings: held_meetings::HeldMeetings,
     /// Where requests for a connect at once arrive
@@ -293,7 +304,7 @@ impl Puller {
                     match fire_hard.await {
                         SelectOutcome::Cancelled => return,
                         SelectOutcome::Deadline => {
-                            self.mark_bootstrap_complete(0, "hard timeout while backing off");
+                            self.bootstrap_timer_fired(None, "hard timeout while backing off");
                             deadline = None;
                         }
                         SelectOutcome::Completed => {}
@@ -393,31 +404,32 @@ impl Puller {
             partition: self.partition,
             since,
         };
-        if !self.send(conn.as_ref(), req).await {
-            return self.ended(connected_at);
-        }
-
         // A warm resume (W > (0,0)) tails directly — already past bootstrap, so
         // advance W and apply the Reverse rule from the first frame. A cold pull
         // starts pre-bootstrap: apply ungated, hold W until the first Noop.
         let mut bootstrapped = since != Watermark::new(0, 0);
+        if !self.send(conn.as_ref(), req).await {
+            if !bootstrapped {
+                self.bootstrap_dropped(0);
+            }
+            return self.ended(connected_at);
+        }
         // A Backup scan re-sends every live body the primary still offers
         // this node, so the refusals of an earlier stream say nothing about
         // it: they go (ADR-0037 item 4).
         if !bootstrapped && !self.is_reclaim() {
             self.store.clear_refusals_of(self.peer_ordinal());
         }
-        // Bodies imported during the pre-`Noop` bootstrap phase — the
-        // re-hydration diagnostic (Reclaim flow only): a pass that re-stalls at
-        // the same value across reconnects would signal truncation
-        // (structurally impossible, but the gauge keeps proving it).
+        // Bodies imported during the pre-`Noop` bootstrap phase, which the
+        // completion, the hard timer and a dropped scan report: a scan cut at
+        // the same point on every pass re-stalls at the same value.
         let mut applied_in_bootstrap = 0u64;
         // The idle bound (ADR-0045): a stream that delivers nothing for this long
         // is left, whatever the phase.
         let idle = Duration::from_millis(self.config.idle_timeout_ms);
         let mut quiet_until = sip_clock::deadline::from_now(idle);
 
-        loop {
+        let outcome = loop {
             // While bootstrap is outstanding, race the first frame against the
             // hard deadline; once complete (or warm), race cancel only. Both
             // race the idle bound.
@@ -427,7 +439,7 @@ impl Puller {
                 Some(at) => tokio::select! {
                     f = conn.recv() => f,
                     _ = tokio::time::sleep_until(quiet_until) => {
-                        return self.left_idle(connected_at);
+                        break self.left_idle(connected_at);
                     }
                     () = tokio::time::sleep(held_meetings::BATCH_QUIET), if held => {
                         self.release_meetings();
@@ -439,13 +451,12 @@ impl Puller {
                         // arrived (Reclaim flow), then KEEP streaming on the same
                         // socket — the real Noop will complete it for real. No
                         // apply-gate collision exists to force a disconnect.
-                        self.mark_bootstrap_complete(
-                            applied_in_bootstrap,
+                        self.bootstrap_timer_fired(
+                            Some(applied_in_bootstrap),
                             "hard timeout awaiting the first catch-up Noop",
                         );
                         *deadline = None;
                         if self.is_reclaim() {
-                            self.metrics.bump_repl_bootstrap_stalled();
                             self.metrics.set_repl_bootstrap_last_applied(applied_in_bootstrap);
                             self.signal_reclaim_all();
                         }
@@ -456,7 +467,7 @@ impl Puller {
                 None => tokio::select! {
                     f = conn.recv() => f,
                     _ = tokio::time::sleep_until(quiet_until) => {
-                        return self.left_idle(connected_at);
+                        break self.left_idle(connected_at);
                     }
                     () = tokio::time::sleep(held_meetings::BATCH_QUIET), if held => {
                         self.release_meetings();
@@ -515,7 +526,7 @@ impl Puller {
                     if outcome == ApplyOutcome::Shed
                         && !self.refuse(conn.as_ref(), at, &call_ref, refused.as_deref()).await
                     {
-                        return self.ended(connected_at);
+                        break self.ended(connected_at);
                     }
                     if !bootstrapped {
                         applied_in_bootstrap += 1;
@@ -532,7 +543,7 @@ impl Puller {
                         // scan is applied would be false, so the bootstrap claim
                         // is made once, on the first catch-up `Noop`.
                         if !self.send(conn.as_ref(), Frame::Position { at }).await {
-                            return self.ended(connected_at);
+                            break self.ended(connected_at);
                         }
                     }
                 }
@@ -564,7 +575,7 @@ impl Puller {
                     // is applied by now), the idle ones keep the claim fresh
                     // (ADR-0031 D2).
                     if !self.send(conn.as_ref(), Frame::Position { at }).await {
-                        return self.ended(connected_at);
+                        break self.ended(connected_at);
                     }
                 }
                 Some(Frame::ResetToBootstrap { .. }) => {
@@ -591,7 +602,7 @@ impl Puller {
                         crate::poison::PULLER_BOOTSTRAP,
                     ) = Some(tokio::time::Instant::now());
                     self.note_state("reset_to_bootstrap", "server dropped our watermark");
-                    return self.ended(connected_at);
+                    break self.ended(connected_at);
                 }
                 // The peer speaks another protocol: nothing it would send can be
                 // read, so the stream is left and pulled again after the
@@ -607,13 +618,17 @@ impl Puller {
                         reason,
                         "replication stream refused: the peer speaks another protocol"
                     );
-                    return self.ended(connected_at);
+                    break self.ended(connected_at);
                 }
                 // Client→server frames; never expected here. Ignore.
                 Some(_) => {}
-                None => return self.ended(connected_at),
+                None => break self.ended(connected_at),
             }
+        };
+        if !bootstrapped {
+            self.bootstrap_dropped(applied_in_bootstrap);
         }
+        outcome
     }
 }
 

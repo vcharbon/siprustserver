@@ -120,6 +120,9 @@ mod frame_cap_tests;
 mod bootstrap_link_rate_tests;
 
 #[cfg(test)]
+mod bootstrap_drop_tests;
+
+#[cfg(test)]
 mod puller_restart_tests;
 
 #[cfg(test)]

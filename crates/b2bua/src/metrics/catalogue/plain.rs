@@ -345,6 +345,6 @@ plain_counters! {
     ) => repl_bootstrap_seeded, bump_repl_bootstrap_seeded, repl_bootstrap_seeded_total;
     REPL_BOOTSTRAP_STALLED = (
         "b2bua_repl_bootstrap_stalled_total",
-        "rebooted-primary bootstrap passes that hit the bootstrap hard deadline before the first Noop (best-effort completion; keeps streaming on the same socket)",
+        "cold flows, either flow, whose bootstrap hard deadline ran out before their first catch-up Noop, while connecting, backing off or streaming (ADR-0011 X5): the bootstrap completes best-effort, a stream open then keeps streaming, and a peer never reached stops holding readiness. On a flow that reached its peer a warning line names the bodies applied; the bodies past them are not held until a scan reaches its Noop (b2bua_repl_bootstrap_dropped_total)",
     ) => repl_bootstrap_stalled, bump_repl_bootstrap_stalled, repl_bootstrap_stalled_total;
 }

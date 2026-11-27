@@ -49,7 +49,7 @@ impl Puller {
                         // Hard timer tripped mid-connect: best-effort complete for
                         // readiness, then back off + retry (now warm → no hard
                         // timer). A connect asked for keeps waiting on the next.
-                        self.mark_bootstrap_complete(0, "hard timeout while connecting");
+                        self.bootstrap_timer_fired(None, "hard timeout while connecting");
                         *deadline = None;
                         return Err(RunOutcome::ConnectFailed);
                     }

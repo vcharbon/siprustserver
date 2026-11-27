@@ -237,6 +237,9 @@ async fn hard_timer_unreachable_peer_boots_anyway() {
     tick(2_500).await;
     assert!(a_sup.bootstrap_complete("B"), "hard timer marks B bootstrap-complete best-effort");
     assert!(a_sup.all_bootstrapped(), "A boots and serves despite unreachable B");
+    let metrics = a_sup.metrics();
+    assert_eq!(metrics.repl_bootstrap_stalled_total(), 1, "the Reclaim flow's timer ran out");
+    assert_eq!(metrics.repl_bootstrap_dropped("recovery"), 0, "no stream ever opened");
 }
 
 // ---------------------------------------------------------------------------
@@ -283,6 +286,13 @@ async fn hard_timer_stalled_bootstrap_completes_best_effort() {
         "stalled bootstrap completes best-effort on the hard timer"
     );
     assert!(a_sup.all_bootstrapped());
+    let metrics = a_sup.metrics();
+    assert_eq!(metrics.repl_bootstrap_stalled_total(), 1, "the timer ran out once");
+    assert_eq!(
+        metrics.repl_bootstrap_dropped("recovery"),
+        1,
+        "the silent stream was left at its 2 s idle bound, before any Noop"
+    );
 }
 
 // ---------------------------------------------------------------------------
