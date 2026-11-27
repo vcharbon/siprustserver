@@ -97,7 +97,9 @@ reconnect and recovery path on a cut.
    and the router reads each drop as a backup's delete (ADR-0047 D8), ahead of the
    bulk reclaim, so nothing dropped is re-served. Residuals, each held to its
    body TTL: a bootstrap whose hard timer reclaimed a partial seed sweeps nothing
-   (`b2bua_repl_bootstrap_stalled_total`); a pass of another holder incarnation drops
+   (`b2bua_repl_bootstrap_stalled_total`), and so does a Reclaim flow's bootstrap
+   whose record held a copy while any flow of the node handed the router a bulk
+   reclaim, which materialises every flow's `pri:{self}` copies; a pass of another holder incarnation drops
    nothing an earlier one left, since that incarnation may not hold its calls yet;
    a copy the warm tail left before a `ResetToBootstrap` is not recorded.
 

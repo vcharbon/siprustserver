@@ -17,7 +17,6 @@
 use std::sync::atomic::Ordering;
 
 use super::Puller;
-use crate::router::ReplCommand;
 
 impl Puller {
     /// Mark this puller **bootstrap-complete** (sticky). Called on the first
@@ -89,10 +88,11 @@ impl Puller {
     /// its first `Noop` and on the hard timer running out while a stream is
     /// open; the router parks at once and arms while the node's own endpoint
     /// reads ready (ADR-0055 §8). Idempotent (`materialize_if_absent`), so a
-    /// partial pass plus a later one self-heal.
+    /// partial pass plus a later one self-heal. Counted on the node's sink, so
+    /// no Reclaim flow then holding a copy sweeps it ([`carried`](super::carried)).
     pub(super) fn signal_reclaim_all(&self) {
         if let Some(sink) = &self.repl_tx {
-            sink.send(ReplCommand::ReclaimAll);
+            sink.reclaim_all();
         }
     }
 }

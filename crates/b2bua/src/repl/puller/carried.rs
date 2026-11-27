@@ -41,6 +41,10 @@ struct Passes {
     /// A hard timer's bulk reclaim served a partial seed: nothing is recorded
     /// or swept until a pass catches up.
     reclaimed_early: bool,
+    /// The node's bulk reclaims so far when `left` took its first copy: one
+    /// handed to the router since, by any flow, may serve any copy left, and
+    /// none is swept.
+    reclaims_at_first_copy: u64,
 }
 
 impl Passes {
@@ -77,9 +81,10 @@ impl CarriedCopies {
     }
 
     /// A frame of `pass`, read from peer incarnation `gen`, carried `key`, of
-    /// which the store holds `left` now. A frame of another incarnation than
-    /// the recorded passes' forgets them first.
-    fn carried(&self, pass: PassId, gen: u64, key: &str, left: Option<StoredCopy>) {
+    /// which the store holds `left` now, the node having handed the router
+    /// `reclaims` bulk reclaims. A frame of another incarnation than the
+    /// recorded passes' forgets them first.
+    fn carried(&self, pass: PassId, gen: u64, key: &str, left: Option<StoredCopy>, reclaims: u64) {
         let mut passes = self.passes();
         if passes.reclaimed_early || !passes.current(pass) {
             return;
@@ -89,23 +94,32 @@ impl CarriedCopies {
         }
         passes.this_pass.insert(key.to_string());
         match left {
-            Some(copy) => passes.left.insert(key.to_string(), copy),
+            Some(copy) => {
+                if passes.left.is_empty() {
+                    passes.reclaims_at_first_copy = reclaims;
+                }
+                passes.left.insert(key.to_string(), copy)
+            }
             None => passes.left.remove(key),
         };
     }
 
-    /// `pass` caught up at a position of peer incarnation `gen`: the copies
-    /// earlier passes of that incarnation left and this one did not carry,
-    /// each as it was held then, and the record empties. Nothing for a pass
-    /// that is no longer the current one.
-    fn caught_up(&self, pass: PassId, gen: u64) -> Vec<(String, StoredCopy)> {
+    /// `pass` caught up at a position of peer incarnation `gen`, the node
+    /// having handed the router `reclaims` bulk reclaims: the copies earlier
+    /// passes of that incarnation left and this one did not carry, each as it
+    /// was held then, and the record empties. Nothing for a pass that is no
+    /// longer the current one, nor once a bulk reclaim was handed up while
+    /// the record held a copy.
+    fn caught_up(&self, pass: PassId, gen: u64, reclaims: u64) -> Vec<(String, StoredCopy)> {
         let mut passes = self.passes();
         if !passes.current(pass) {
             return Vec::new();
         }
         let left = std::mem::take(&mut passes.left);
         let this_pass = std::mem::take(&mut passes.this_pass);
-        let sweeps = !passes.reclaimed_early && passes.gen == Some(gen);
+        let sweeps = !passes.reclaimed_early
+            && passes.gen == Some(gen)
+            && passes.reclaims_at_first_copy == reclaims;
         passes.restart(None, false);
         if !sweeps {
             return Vec::new();
@@ -146,7 +160,17 @@ impl Puller {
     /// A `Data` frame of the cold `pass`, before its first catch-up `Noop`,
     /// carried `call_ref` at `at`, whatever the store made of it.
     pub(super) fn note_carried(&self, pass: PassId, at: Watermark, call_ref: &str) {
-        self.carried.carried(pass, at.gen, call_ref, self.held_copy(call_ref));
+        let held = self.held_copy(call_ref);
+        self.carried.carried(pass, at.gen, call_ref, held, self.bulk_reclaims());
+    }
+
+    /// The bulk reclaims the node handed the router so far, which serve the
+    /// copies of every Reclaim flow; none on the Backup flow.
+    fn bulk_reclaims(&self) -> u64 {
+        match &self.repl_tx {
+            Some(sink) if self.is_reclaim() => sink.bulk_reclaims(),
+            _ => 0,
+        }
     }
 
     /// The cold `pass` caught up at `at`, before the flow reads current or its
@@ -160,7 +184,7 @@ impl Puller {
     /// copy went.
     pub(super) async fn sweep_uncarried(&self, pass: PassId, at: Watermark) {
         let mut swept = 0u64;
-        for (call_ref, copy) in self.carried.caught_up(pass, at.gen) {
+        for (call_ref, copy) in self.carried.caught_up(pass, at.gen, self.bulk_reclaims()) {
             if self.drop_uncarried(&call_ref, copy).await {
                 swept += 1;
             }

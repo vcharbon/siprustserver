@@ -345,19 +345,48 @@ fn only_the_stream_opened_last_records_and_sweeps() {
 
     let record = CarriedCopies::default();
     let first = record.open_pass();
-    record.carried(first, 1, "x", held());
+    record.carried(first, 1, "x", held(), 0);
     let successor = record.open_pass();
-    record.carried(successor, 1, "x", held());
+    record.carried(successor, 1, "x", held(), 0);
     let _late = record.open_pass();
-    assert!(record.caught_up(successor, 1).is_empty(), "X, carried by the successor, stays");
+    assert!(record.caught_up(successor, 1, 0).is_empty(), "X, carried by the successor, stays");
 
     let record = CarriedCopies::default();
     let stale = record.open_pass();
-    record.carried(stale, 1, "x", held());
+    record.carried(stale, 1, "x", held(), 0);
     let current = record.open_pass();
-    assert!(record.caught_up(stale, 1).is_empty(), "a stale catch-up sweeps nothing");
-    let swept: Vec<String> = record.caught_up(current, 1).into_iter().map(|(k, _)| k).collect();
+    assert!(record.caught_up(stale, 1, 0).is_empty(), "a stale catch-up sweeps nothing");
+    let swept: Vec<String> = record.caught_up(current, 1, 0).into_iter().map(|(k, _)| k).collect();
     assert_eq!(swept, ["x"], "the current pass sweeps what the earlier one left");
+}
+
+/// A bulk reclaim counted while the record holds a copy leaves the sweep
+/// out, a later copy notwithstanding; one counted while the record held
+/// nothing, before its first copy or once its copies went, does not.
+#[test]
+fn a_bulk_reclaim_while_the_record_holds_a_copy_leaves_the_sweep_out() {
+    let held = || Some(StoredCopy { version: (1, 0), incarnation: None });
+    let swept = |record: &CarriedCopies, reclaims: u64| -> Vec<String> {
+        let last = record.open_pass();
+        record.caught_up(last, 1, reclaims).into_iter().map(|(k, _)| k).collect()
+    };
+
+    let record = CarriedCopies::default();
+    record.carried(record.open_pass(), 1, "x", held(), 3);
+    assert_eq!(swept(&record, 3), ["x"], "no bulk reclaim since X was left");
+
+    let record = CarriedCopies::default();
+    let cut = record.open_pass();
+    record.carried(cut, 1, "x", held(), 3);
+    record.carried(cut, 1, "z", held(), 4);
+    assert!(swept(&record, 4).is_empty(), "a bulk reclaim while X was held");
+
+    let record = CarriedCopies::default();
+    let cut = record.open_pass();
+    record.carried(cut, 1, "x", held(), 3);
+    record.carried(cut, 1, "x", None, 4);
+    record.carried(cut, 1, "z", held(), 4);
+    assert_eq!(swept(&record, 4), ["z"], "the bulk reclaim came while nothing was held");
 }
 
 /// The last pass carries a key in any frame: X at a version the stored copy
