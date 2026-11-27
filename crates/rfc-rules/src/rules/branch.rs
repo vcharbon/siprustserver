@@ -129,6 +129,10 @@ pub(super) struct Sent<'a> {
 
 /// What one endpoint did on one branch: the requests it sent, in view order,
 /// and where its first provisional and first final answer landed.
+///
+/// The answers are those of the transaction the branch names. A CANCEL reuses
+/// its INVITE's branch but is a transaction of its own (RFC 3261 §9.1), so a
+/// response whose CSeq method is CANCEL answers neither field.
 #[derive(Debug, Default)]
 pub(super) struct Branch<'a> {
     sent: Vec<Sent<'a>>,
@@ -183,6 +187,9 @@ impl<'a> BranchReading<'a> {
         }
         let Some(branch) = msg.via_branch.as_deref().filter(|b| !b.is_empty()) else { return };
         if let Some(status) = msg.status() {
+            if msg.cseq_method.eq_ignore_ascii_case("CANCEL") {
+                return;
+            }
             // A response belongs to the endpoint that TOOK it — the UAC side of
             // the branch. Its own arrival order in the view is what a "before"
             // test reads.

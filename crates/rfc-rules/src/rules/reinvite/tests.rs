@@ -554,6 +554,28 @@ fn a_provisional_then_silence_is_violated() {
     assert_eq!((branch.as_str(), *provisional_status), ("z9hG4bK-re", 183));
 }
 
+/// The 200 to a CANCEL answers the CANCEL's own transaction (RFC 3261 §9.2):
+/// a cancelled re-INVITE that drew a provisional and then no final of its
+/// own was still abandoned.
+#[test]
+fn a_cancel_s_200_is_not_the_re_invite_s_final() {
+    let cancel_ok = Msg {
+        cseq_method: "CANCEL".to_string(),
+        ..rsp(4_000, BOB, ALICE, 200, "z9hG4bK-re", 2, "at", "bt", "")
+    };
+    let f = hits(
+        &FailedReinviteTearsDownDialog,
+        &[
+            req(1_000, ALICE, BOB, "INVITE", "z9hG4bK-re", 2, "at", "bt"),
+            rsp(2_000, BOB, ALICE, 183, "z9hG4bK-re", 2, "at", "bt", ""),
+            req(3_000, ALICE, BOB, "CANCEL", "z9hG4bK-re", 2, "at", "bt"),
+            cancel_ok,
+        ],
+    );
+    assert_eq!(f.len(), 1, "{f:?}");
+    assert_eq!(f[0].anchor, 0, "the abandoned re-INVITE is charged");
+}
+
 /// "Absent another cause": a BYE on the dialog is an independent teardown
 /// that legitimately abandons the in-flight re-INVITE.
 #[test]

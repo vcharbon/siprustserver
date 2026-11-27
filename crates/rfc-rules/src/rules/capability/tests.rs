@@ -651,6 +651,23 @@ fn the_ack_of_a_non_2xx_demanding_an_extension_is_violated() {
     assert_eq!((on.as_str(), header.as_str()), ("ACK", "Proxy-Require"));
 }
 
+/// The 200 to a CANCEL answers the CANCEL's own transaction (RFC 3261 §9.2),
+/// never the INVITE's: the cancelled INVITE's branch ends in its 487, so the
+/// ACK riding it acknowledges a non-2xx and owes §8.2.2.3.
+#[test]
+fn the_ack_of_a_cancelled_invite_s_487_demanding_an_extension_is_violated() {
+    let msgs = [
+        taken(1_000, "INVITE", "z9hG4bK-i", 1, ""),
+        taken(2_000, "CANCEL", "z9hG4bK-i", 1, ""),
+        answered(3_000, 200, "CANCEL", "z9hG4bK-i", 1, ""),
+        answered(4_000, 487, "INVITE", "z9hG4bK-i", 1, ""),
+        taken(5_000, "ACK", "z9hG4bK-i", 1, "Require: 100rel\r\n"),
+    ];
+    let f = violations(&NoRequireOnCancelOrAck, &msgs);
+    assert_eq!(f.len(), 1, "{f:?}");
+    assert_eq!(f[0].anchor, 4, "the ACK is charged, not the CANCEL");
+}
+
 /// The §13.2.2.4 2xx ACK is a fresh transaction on its own branch: §8.2.2.3
 /// does not reach it, so it opens no occasion at all.
 #[test]
