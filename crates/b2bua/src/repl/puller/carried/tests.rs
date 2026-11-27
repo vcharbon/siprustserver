@@ -20,7 +20,7 @@ use tokio::sync::{mpsc, watch};
 use super::{CarriedCopies, StoredCopy};
 use crate::metrics::B2buaMetrics;
 use crate::repl::{Puller, PullerConfig, ReplicatingCallStore, RouterSink};
-use crate::router::ReplCommand;
+use crate::router::{PrimaryWrite, ReplCommand};
 use crate::store::{CallStore, PartitionRole, PutOpts, TakeoverProbe};
 
 /// What a scripted stream does once its frames are read.
@@ -228,13 +228,17 @@ impl Node {
         self.metrics.repl_bootstrap_swept(flow)
     }
 
-    /// The drop notices and bulk reclaims the router was sent, in order.
+    /// The drop notices, delete notices of a takeover copy and bulk reclaims
+    /// the router was sent, in order.
     fn reclaim_commands(&mut self) -> Vec<String> {
         let mut seen = Vec::new();
         while let Ok(cmd) = self.rx.try_recv() {
             match cmd {
                 ReplCommand::ReverseDeleteApplied { call_ref, .. } => {
                     seen.push(format!("dropped {call_ref}"));
+                }
+                ReplCommand::ForwardFlushApplied { call_ref, write: PrimaryWrite::Delete(_) } => {
+                    seen.push(format!("delete heard by {call_ref}"));
                 }
                 ReplCommand::ReclaimAll => seen.push("reclaim all".to_string()),
                 _ => {}
@@ -360,54 +364,68 @@ async fn a_key_the_last_pass_carried_in_any_frame_stays() {
     }
 }
 
-/// Pass 1 carries X, R and T; R is written here between the passes, and on
-/// the Backup flow the router serves T as a live takeover copy. Pass 2
-/// carries Y alone: X goes; R, no longer the copy pass 1 left, stays, and so
-/// does T on the Backup flow. On the Reclaim flow, a call this node recovered
-/// from another peer (W) was never carried by this flow and stays.
+/// Pass 1 carries X and R and is cut; R is written here between the passes;
+/// W, a call this node recovered from another peer, is written here too.
+/// Pass 2 carries Y alone and catches up: X goes; R, no longer the copy
+/// pass 1 left, stays, as does W, which this flow never carried.
 #[tokio::test(start_paused = true)]
-async fn a_copy_written_since_its_pass_or_served_as_a_takeover_copy_stays() {
-    for flow in FLOWS {
-        let mut node = Node::new(flow);
-        let t = key(flow, "t");
-        let probe: TakeoverProbe = Arc::new(move |r: &str| r == t);
-        let _cancel = node.pull(
-            vec![
-                cut(vec![
-                    put(flow, (1, 5), "x", 1),
-                    put(flow, (1, 5), "r", 1),
-                    put(flow, (1, 5), "t", 1),
-                ]),
-                quiet(vec![put(flow, (1, 9), "y", 1), noop((1, 9))]),
-            ],
-            PullerConfig::fast_test(),
-            probe,
-        );
-        pump(60).await;
-        assert!(node.holds("t").await, "pass 1 landed before its cut");
-        node.write("r", (1, 1)).await;
-        node.write("w", (1, 0)).await;
-        pump(1_000).await;
+async fn on_the_reclaim_flow_a_copy_written_since_its_pass_stays() {
+    let flow = Partition::Pri;
+    let mut node = Node::new(flow);
+    let _cancel = node.pull_plain(vec![
+        cut(vec![put(flow, (1, 5), "x", 1), put(flow, (1, 5), "r", 1)]),
+        quiet(vec![put(flow, (1, 9), "y", 1), noop((1, 9))]),
+    ]);
+    pump(40).await;
+    assert!(node.holds("r").await, "pass 1 landed before its cut");
+    node.write("r", (1, 1)).await;
+    node.write("w", (1, 0)).await;
+    pump(1_000).await;
 
-        assert!(!node.holds("x").await, "{flow:?}: X goes");
-        assert!(node.holds("r").await, "{flow:?}: R was written since pass 1 carried it");
-        assert!(node.holds("w").await, "{flow:?}: W was never carried by this flow");
-        let takeover_spared = flow == Partition::Bak;
-        assert_eq!(node.holds("t").await, takeover_spared, "{flow:?}: T as a takeover copy");
-        assert_eq!(node.swept(), 2 - u64::from(takeover_spared), "{flow:?}");
-        if flow == Partition::Pri {
-            let dropped: Vec<String> = ["t", "x"].iter().map(|id| key(flow, id)).collect();
-            let mut commands = node.reclaim_commands();
-            assert_eq!(
-                commands.pop().as_deref(),
-                Some("reclaim all"),
-                "the bulk reclaim comes last"
-            );
-            commands.sort();
-            let want: Vec<String> = dropped.iter().map(|k| format!("dropped {k}")).collect();
-            assert_eq!(commands, want);
-        }
+    assert!(!node.holds("x").await, "X goes");
+    assert!(node.holds("r").await, "R was written since pass 1 carried it");
+    assert!(node.holds("w").await, "W was never carried by this flow");
+    assert_eq!(node.swept(), 1);
+    let x = key(flow, "x");
+    assert_eq!(node.reclaim_commands(), [format!("dropped {x}"), "reclaim all".into()]);
+}
+
+/// On the Backup flow the sweep drops a copy as the holder's tail `Delete`
+/// would have: whatever this node wrote on it since, and with the router told
+/// of the delete for a call it serves as a live takeover copy (ADR-0047 D7).
+/// Pass 1 carries X, R and T and is cut; R is written here between the
+/// passes, and the router serves T as a live takeover copy. Pass 2 carries Y
+/// alone and catches up: X, R and T go; T's copy alone is told of the delete.
+#[tokio::test(start_paused = true)]
+async fn on_the_backup_flow_the_sweep_drops_as_a_tail_delete_does() {
+    let flow = Partition::Bak;
+    let mut node = Node::new(flow);
+    let t = key(flow, "t");
+    let probe: TakeoverProbe = Arc::new(move |r: &str| r == t);
+    let _cancel = node.pull(
+        vec![
+            cut(vec![
+                put(flow, (1, 5), "x", 1),
+                put(flow, (1, 5), "r", 1),
+                put(flow, (1, 5), "t", 1),
+            ]),
+            quiet(vec![put(flow, (1, 9), "y", 1), noop((1, 9))]),
+        ],
+        PullerConfig::fast_test(),
+        probe,
+    );
+    pump(60).await;
+    assert!(node.holds("t").await, "pass 1 landed before its cut");
+    node.write("r", (1, 1)).await;
+    node.write("t", (1, 1)).await;
+    pump(1_000).await;
+
+    for id in ["x", "r", "t"] {
+        assert!(!node.holds(id).await, "{id} goes");
     }
+    assert!(node.holds("y").await);
+    assert_eq!(node.swept(), 3);
+    assert_eq!(node.reclaim_commands(), [format!("delete heard by {}", key(flow, "t"))]);
 }
 
 /// On the Reclaim flow a hard timer running out on an open pass reclaims a
