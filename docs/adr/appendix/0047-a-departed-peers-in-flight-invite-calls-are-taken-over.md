@@ -267,11 +267,7 @@ write-free for it. On the backup that write is a forward flush. Applied to the E
 backup serves as a takeover copy, on the stream's tail or inside a bootstrap scan of
 the returned node, it is handed to the router with its body; so is an applied forward
 delete of the call, with the incarnation it names. The puller reads the router's live
-takeover marks first, so no other call's write reaches the router. The bodies every
-puller hands the router, these writes and the refused flushes alike, share one byte
-budget (`repl::FlushBudget`, 64 MiB): a puller waits for a body's bytes before it hands
-it up and the router gives them back once it has handled the command, so the stream
-slows and no write is dropped. The router queues
+takeover marks first, so no other call's write reaches the router. The router queues
 the copy's **stand-down** as a turn of the call's own queue, so a message already
 queued for the copy is served first (ADR-0010 X2). Under the per-call lock the copy
 stands down when:
@@ -537,15 +533,12 @@ the call has one CDR.
   cannot tell the two apart; reading the peer's last applied position instead trades
   the duplicate for a lost CDR
   (`deferred_end_of_a_departed_primary.rs`, the reconciled-then-departed cell).
-- **Bodies the flush budget does not count.** A refused copy a puller holds until its
-  batch is read whole holds no bytes of the budget, one per call the store holds. A
-  refused reverse flush the readmission gate holds gives its bytes back, because the
-  endpoint's readiness waits on the pullers; the gate holds every one that arrives
-  while the endpoint does not read ready. A notice the router queued on a call's turn
-  queue carries a copy of its body, and a call's queue always takes an internal event:
-  a call whose turns run slower than its primary writes holds one body per write
-  queued. A puller that waits on the budget reports no position: past the 1 s claim
-  TTL the primary reads the flow stale and holds no new effect for it (ADR-0055 §3)
-  until the router catches up. A router slower than
-  the server's 15 s send stall drops the stream, and the puller pulls it again from
-  its position.
+- **Flush bodies are not bounded by bytes.** A forward write applied to a live takeover
+  copy and a refused forward or reverse flush ride up with their record body: through
+  the router's command channel, then into the call's turn queue as a notice carrying a
+  copy of the body. Neither bounds bytes, and a call's queue always takes an internal
+  event. Each body is at most one record (`B2BUA_CAP_RECORD_BYTES`), one per forward
+  write on a takeover copy, so a router or a call whose turns run slower than the
+  primary writes holds one record per write queued. A refused copy a puller holds until
+  its batch is read whole is one per call the store holds; the readmission gate holds
+  every refused reverse flush that arrives while the endpoint does not read ready.
