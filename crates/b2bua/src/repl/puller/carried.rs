@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use repl_net::frame::Watermark;
 
 use super::Puller;
-use crate::router::ReplCommand;
+use crate::router::{PrimaryWrite, ReplCommand};
 use crate::store::{partition_of, PartitionRole, PutOpts};
 
 /// What the cold passes of one bootstrap of a `(peer, flow)` carried. The
@@ -150,13 +150,14 @@ impl Puller {
     }
 
     /// The cold `pass` caught up at `at`, before the flow reads current or its
-    /// bootstrap complete: each copy an earlier pass of the
-    /// bootstrap left that this pass did not carry is dropped, local-only,
-    /// unless it was written since, is a live takeover copy, or is an Element
-    /// the `Delete` guard keeps. On the Reclaim flow the router is told of
-    /// each drop as of a backup's applied delete (ADR-0047 D8), ahead of the
-    /// bulk reclaim. Counted on `b2bua_repl_bootstrap_swept_total` and lined
-    /// once when any copy went.
+    /// bootstrap complete: each copy an earlier pass of the bootstrap left
+    /// that this pass did not carry is dropped, local-only
+    /// ([`drop_uncarried`](Self::drop_uncarried)). On the Backup flow a live
+    /// takeover copy hears each drop as its primary's applied `Delete`
+    /// (ADR-0047 D7); on the Reclaim flow the router is told of each drop as
+    /// of a backup's applied delete (ADR-0047 D8), ahead of the bulk reclaim.
+    /// Counted on `b2bua_repl_bootstrap_swept_total` and lined once when any
+    /// copy went.
     pub(super) async fn sweep_uncarried(&self, pass: PassId, at: Watermark) {
         let mut swept = 0u64;
         for (call_ref, copy) in self.carried.caught_up(pass, at.gen) {
@@ -175,27 +176,35 @@ impl Puller {
     }
 
     /// Drop `call_ref`, held as `copy` when a pass carried it; `false` when it
-    /// is spared or already gone.
+    /// is spared or already gone. Another call under the key is spared on
+    /// either flow. On the Backup flow the drop is the holder's `Delete` the
+    /// tail never sent: it spares only the Element the `Delete` guard keeps,
+    /// and a live takeover copy is handed the delete to stand down on
+    /// (ADR-0047 D7). On the Reclaim flow a copy written since is this node's
+    /// own write and is spared.
     async fn drop_uncarried(&self, call_ref: &str, copy: StoredCopy) -> bool {
         let (role, primary) = self.keyspace(call_ref);
-        if !self.is_reclaim() {
-            let takeover = self.repl_tx.as_ref().is_some_and(|sink| sink.serves_takeover(call_ref));
-            if takeover || self.element_outlives_the_delete(role, &primary, call_ref, false).await {
-                return false;
-            }
+        if !self.is_reclaim()
+            && self.element_outlives_the_delete(role, &primary, call_ref, false).await
+        {
+            return false;
         }
-        if self.held_copy(call_ref).as_ref() != Some(&copy) {
+        let Some(held) = self.held_copy(call_ref) else { return false };
+        if held.incarnation != copy.incarnation
+            || (self.is_reclaim() && held.version != copy.version)
+        {
             return false;
         }
         let indexes = self.store.held_indexes(call_ref);
         let opts = PutOpts { incarnation: copy.incarnation.clone(), ..PutOpts::default() };
         let _ = self.store.write_delete(role, &primary, call_ref, &indexes, false, &opts);
-        if let Some(sink) = self.repl_tx.as_ref().filter(|_| self.is_reclaim()) {
-            let call_ref = call_ref.to_string();
-            sink.send(ReplCommand::ReverseDeleteApplied {
-                call_ref,
-                incarnation: copy.incarnation,
-            });
+        let Some(sink) = self.repl_tx.as_ref() else { return true };
+        let (call_ref, incarnation) = (call_ref.to_string(), copy.incarnation);
+        if self.is_reclaim() {
+            sink.send(ReplCommand::ReverseDeleteApplied { call_ref, incarnation });
+        } else if sink.serves_takeover(&call_ref) {
+            let write = PrimaryWrite::Delete(incarnation);
+            sink.send(ReplCommand::ForwardFlushApplied { call_ref, write });
         }
         true
     }

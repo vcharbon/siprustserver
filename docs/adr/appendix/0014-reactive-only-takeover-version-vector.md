@@ -90,10 +90,12 @@ reconnect and recovery path on a cut.
    left, kept by the supervisor across a respawn. On the first catch-up `Noop`,
    before the flow reads current or its bootstrap complete, it drops, local-only, each copy an earlier pass left and the last pass did not
    carry in any frame: no BYE and no CDR, the call ended on its holder
-   (`b2bua_repl_bootstrap_swept_total{flow}`). A copy written since, a live takeover
-   copy and an Element the `Delete` guard keeps (ADR-0031 D3) are spared. On the
-   Reclaim flow the router reads each drop as a backup's delete (ADR-0047 D8), ahead
-   of the bulk reclaim, so nothing dropped is re-served. Residuals, each held to its
+   (`b2bua_repl_bootstrap_swept_total{flow}`). On the Backup flow the drop is the
+   holder's `Delete` the tail never sent: only an Element the `Delete` guard keeps
+   (ADR-0031 D3) is spared, and a live takeover copy hears the delete and stands down
+   on it (ADR-0047 D7). On the Reclaim flow a copy this node wrote since is spared,
+   and the router reads each drop as a backup's delete (ADR-0047 D8), ahead of the
+   bulk reclaim, so nothing dropped is re-served. Residuals, each held to its
    body TTL: a bootstrap whose hard timer reclaimed a partial seed sweeps nothing
    (`b2bua_repl_bootstrap_stalled_total`); a pass of another holder incarnation drops
    nothing an earlier one left, since that incarnation may not hold its calls yet;
