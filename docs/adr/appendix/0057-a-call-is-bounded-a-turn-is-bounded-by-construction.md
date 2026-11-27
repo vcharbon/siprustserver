@@ -105,8 +105,9 @@ and the teardown's retirement of the call's timers clears it. The shell then:
   hand whatever became of the turn, so the teardown starts from the wire as it
   stands. A non-2xx final to the INVITE that dialled a leg: the client
   transaction completed and ACKed it (RFC 3261 §17.1.1.3), so that leg awaits no
-  final and is owed no CANCEL (§9.1). A dead hop's first-response timeout: the
-  leg's CANCEL then waits unsent in the transaction and the leg awaits nothing.
+  final and is owed no CANCEL (§9.1). An INVITE's `Response` timeout (nothing
+  answered it): the leg's CANCEL then waits unsent in the transaction and the
+  leg awaits nothing.
   The caller's CANCEL: the layer answered it 200 and her INVITE 487 (§9.2), so
   she is owed no 503 and the CDR states none. A callee's refusal or dead hop on a
   route that fails over leaves no leg alive, and the teardown answers the caller

@@ -2,9 +2,10 @@
 //! cap held, whatever became of the turn (ADR-0057 §4), written on the
 //! call's safepoint so the verdict's teardown starts from the wire as it
 //! stands: a non-2xx final to the INVITE that dialled a leg, which its
-//! client transaction completed and ACKed (RFC 3261 §17.1.1.3); a dead hop,
-//! whose INVITE's CANCEL the transaction holds unsent (§9.1); the caller's
-//! CANCEL, answered 200 with her INVITE's 487 (§9.2).
+//! client transaction completed and ACKed (RFC 3261 §17.1.1.3); an INVITE's
+//! `Response` timeout (nothing answered it), whose CANCEL the transaction
+//! holds unsent (§9.1); the caller's CANCEL, answered 200 with her INVITE's
+//! 487 (§9.2).
 
 use b2bua_core::rules::relay::cancelled_final;
 use b2bua_core::turn_notes::TurnNotes;
