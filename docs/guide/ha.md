@@ -205,6 +205,17 @@ stops immediately (ADR-0055 §6).
 The backup of a call is any peer. The selection does not know zones or racks. Do not put the
 workers of one pool on links that cannot complete the round trip in the sync cap.
 
+**The two owners of a call do not change.** The proxy selects them when the call starts, and
+they stay the owners until the call ends. This is a design restriction:
+
+- When one owner is lost, the call does not get a new backup on a third worker. The other
+  owner serves the call alone. The call has a backup again only when the lost worker returns
+  and completes its bootstrap.
+- Thus the pool tolerates one lost worker at a time. If a second worker is lost while the
+  first is away, the calls whose two owners are those two workers are lost.
+- Put each worker of a pool on its own node: use a required pod anti-affinity on the node.
+  If two workers share a node, one node fault loses each call that they own together.
+
 ## Incidents and timings
 
 All values are the defaults.
