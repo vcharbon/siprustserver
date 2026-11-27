@@ -35,11 +35,12 @@ fn run(actions: &[RuleAction]) -> (HandlerResult, Vec<&'static str>) {
     run_under(&B2buaConfig::default(), actions)
 }
 
-/// The deadline `result` holds for `key`, on the ledger and in its
-/// replicated write, which carry the same instant.
+/// The deadline `result` holds for `key`, on the ledger and in the
+/// `ScheduleTimer` effect that hands it to the driver, which carry the same
+/// instant.
 fn armed_deadline(result: &HandlerResult, key: &TimerKey) -> i64 {
     let armed = result.call.timers.iter().find(|t| &t.key == key).expect("the timer is armed");
-    let replicated = result
+    let scheduled = result
         .effects
         .critical
         .iter()
@@ -47,8 +48,8 @@ fn armed_deadline(result: &HandlerResult, key: &TimerKey) -> i64 {
             CriticalStateEffect::ScheduleTimer(t) if &t.key == key => Some(t),
             _ => None,
         })
-        .expect("the ledger write is replicated");
-    assert_eq!(replicated.fire_at, armed.fire_at, "the replica hydrates the ledger's deadline");
+        .expect("the arm is scheduled");
+    assert_eq!(scheduled.fire_at, armed.fire_at, "the driver fires at the ledger's deadline");
     armed.fire_at
 }
 
