@@ -1,15 +1,16 @@
-//! **A takeover copy live across two cold bootstrap passes hears the end of
-//! the call its primary ended between them** (ADR-0014 §8, ADR-0047 D7). b2
-//! backs b1's calls X and Y up and stays routable throughout. Its Backup flow
-//! falls off b1's compacted change log, so its next stream is a cold pass,
-//! which carries X and is cut. While the cut holds, the proxy reads b1 dead
-//! and routes the caller's re-INVITE of X to b2, whose takeover copy relays
-//! it; the proxy reads b1 alive again, and the callee's BYE ends X on b1. The
-//! second cold pass carries Y alone and catches up while the copy still holds
-//! the open re-INVITE: b2 drops X's Element as b1's delete would have, and the
-//! copy hears that delete. The callee's 487 clears the copy. b1 dies, b2
-//! serves Y; past the replica's TTL, b2 holds nothing of X, has sent no BYE
-//! in its dialogs, and X has its one CDR, b1's.
+//! **A takeover copy live across two cold bootstrap passes stands down on the
+//! end of the call its primary ended between them** (ADR-0014 §8, ADR-0047
+//! D7). b2 backs b1's calls X and Y up and stays routable throughout. Its
+//! Backup flow falls off b1's compacted change log, so its next stream is a
+//! cold pass, which carries X and is cut. While the cut holds, the proxy reads
+//! b1 dead and routes the caller's re-INVITE of X to b2, whose takeover copy
+//! relays it; the proxy reads b1 alive again, and the callee's BYE ends X on
+//! b1. The callee refuses the re-INVITE through the copy, which stays live.
+//! The second cold pass carries Y alone and catches up: b2 drops X's Element
+//! as b1's delete would have, and the copy, holding no request of its own,
+//! stands down on that delete. b1 dies, b2 serves Y; past the replica's TTL,
+//! b2 holds nothing of X, has sent no BYE in its dialogs, and X has its one
+//! CDR, b1's.
 //!
 //! ```text
 //!   b1 answers X and Y, each w_bak=b2
@@ -17,22 +18,19 @@
 //!   heal, b1 → b2 500 ms  pass 1 (cold) lands X; b1 ✂ b2
 //!   proxy: b1 dead        alice ─re-INVITE(X)─▶ b2 ─▶ bob, unanswered
 //!   proxy: b1 alive       bob ─BYE(X)─▶ b1 ─▶ alice: X ends on b1, one CDR
+//!   bob ─487─▶ b2 ─▶ alice  the round ends; the copy stays live
 //!   heal                  pass 2 carries Y, catches up: X's Element dropped,
-//!                         the live copy told of the delete
-//!   bob ─487─▶ b2 ─▶ alice  the copy clears
+//!                         the copy stands down on the delete
 //!   b1 dies               alice ─BYE(Y)─▶ b2; past the replica TTL
 //! ```
 //!
 //! Timing axes: the cut of pass 1 lands within 100 ms of X, at least 400 ms
 //! before its next frame. The re-INVITE reaches b2 200 ms after the proxy
-//! reads b1 dead, the BYE b1 200 ms after it reads b1 alive, and the heal
-//! follows the BYE by 500 ms, well inside the puller's 10 s hard timer. The
-//! callee, not the caller, hangs up X: the BYE b1 sends then rides the
-//! caller's leg, whose CSeq the copy's re-INVITE on the callee's leg never
-//! moved. Pass 2
-//! catches up on its own `Noop` with the copy not yet shed (its re-INVITE
-//! open); the 487 comes after the catch-up. Every step is 100 ms or more
-//! apart, so no verdict depends on in-order draining.
+//! reads b1 dead, the callee's BYE b1 200 ms after it reads b1 alive, and the
+//! callee's 487 follows the BYE at once. The heal comes 500 ms later, well
+//! inside the puller's 10 s hard timer, with the copy not yet shed and its
+//! round answered; pass 2 catches up on its own `Noop`. Every step is 100 ms
+//! or more apart, so no verdict depends on in-order draining.
 //!
 //! Beyond the failover sweep: a takeover copy across two cold bootstrap passes.
 
@@ -100,7 +98,7 @@ async fn on_b1(
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_takeover_copy_live_across_two_bootstrap_passes_hears_the_end_of_its_call() {
+async fn a_takeover_copy_live_across_two_bootstrap_passes_stands_down_on_the_end_of_its_call() {
     let name = "takeover-copy-across-two-passes";
     let mut fh = FailoverHarness::new(name, &["b1", "b2"]);
     let alice = fh.agent("alice", ALICE).await;
@@ -151,6 +149,11 @@ async fn a_takeover_copy_live_across_two_bootstrap_passes_hears_the_end_of_its_c
     callee_hangs_up(&mut calls[x].bob_dialog, &alice).await;
     fh.advance(Duration::from_millis(500)).await;
     assert_eq!(total_cdrs_for(&[&b1], &x_ref), 1, "X ended on b1, its CDR there");
+    at_bob.respond(487, "Request Terminated").await;
+    bob.receive_absorbing("ACK", &["INVITE"]).await;
+    reinvite.expect(487).await;
+    fh.advance(Duration::from_millis(500)).await;
+    assert!(b2.serves(&x_ref), "the copy is live at the heal, its round answered");
 
     fh.heal("b1", "b2");
     let caught_up = fh
@@ -160,16 +163,10 @@ async fn a_takeover_copy_live_across_two_bootstrap_passes_hears_the_end_of_its_c
         })
         .await;
     assert!(caught_up, "pass 2 caught up on its own Noop");
-    assert!(b2.serves(&x_ref), "the copy is live at the catch-up, its re-INVITE open");
     assert_eq!(b2.scan_backed_up("b1"), vec![y_ref.clone()], "b2 holds b1's live set: Y");
-
-    at_bob.respond(487, "Request Terminated").await;
-    bob.receive_absorbing("ACK", &["INVITE"]).await;
-    reinvite.expect(487).await;
-    let cleared = fh
-        .pump_until(Duration::from_secs(1), Duration::from_secs(40), async || !b2.serves(&x_ref))
-        .await;
-    assert!(cleared, "the copy clears once its re-INVITE's transactions end");
+    fh.advance(Duration::from_millis(200)).await;
+    assert!(!b2.serves(&x_ref), "the copy stands down on the delete");
+    assert_eq!(b2.metrics().repl_stand_down_total(), 1);
 
     pod_deleted(&mut fh, &mut b1);
     proxy.set_health("b1", WorkerHealth::Dead);
