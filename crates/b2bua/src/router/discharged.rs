@@ -33,12 +33,15 @@ pub(super) fn refuses(ctx: &RouterCtx, req: &SipRequest) -> bool {
 
 /// Answer `req`, a new INVITE from `src` that [`refuses`] refuses, the bare
 /// 503 through its server transaction, and count it as a refused new call.
-/// Its To-tag is derived from `req`, so every copy draws the same one.
+/// Its To-tag is derived from `req`, so every copy draws the same one; a
+/// request whose lines no response can echo is left to its transaction's
+/// lifetime.
 pub(super) async fn refuse(ctx: &RouterCtx, req: &SipRequest, src: SocketAddr) {
-    let minted = ctx.stateless_tagger.for_request(req).0;
-    let response = build_unborn_503(req, minted, &ctx.config.minted_final_advertisement);
-    admit::send(&ctx.txn, response, req, src).await;
     ctx.metrics.new_calls().reject(Refusal::Discharged, class_of(req));
+    let minted = ctx.stateless_tagger.for_request(req).0;
+    let advertised = &ctx.config.minted_final_advertisement;
+    let Ok(resp) = build_unborn_503(req, minted, advertised) else { return };
+    admit::send(&ctx.txn, resp, req, src).await;
 }
 
 /// Answer the initial INVITE `event` carries, another primary's copy, the

@@ -19,7 +19,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use call::Call;
-use sip_message::generators::GenerateError;
 use sip_message::{SipRequest, SipResponse};
 use sip_txn::TransactionLayer;
 
@@ -263,22 +262,19 @@ pub(super) async fn answer(
     src: SocketAddr,
     refused: Refused,
 ) {
-    send(txn, refusals.answer(req, refused), req, src).await;
+    let Ok(resp) = refusals.answer(req, refused) else { return };
+    send(txn, resp, req, src).await;
 }
 
-/// Send `response`, the final refusing the new INVITE `req` from `src`,
-/// through its server transaction ([`reply_to`](super::reply_to::reply_to)).
-/// A request whose lines no response can echo, `response` an error, is left
-/// to its transaction's lifetime.
+/// Send `resp`, the final refusing the new INVITE `req` from `src`, through
+/// its server transaction ([`reply_to`](super::reply_to::reply_to)).
 pub(super) async fn send(
     txn: &TransactionLayer,
-    response: Result<SipResponse, GenerateError>,
+    resp: SipResponse,
     req: &SipRequest,
     src: SocketAddr,
 ) {
-    if let Ok(resp) = response {
-        let _ = txn.send_response(resp, super::reply_to::reply_to(req, src)).await;
-    }
+    let _ = txn.send_response(resp, super::reply_to::reply_to(req, src)).await;
 }
 
 #[cfg(test)]
