@@ -1,8 +1,8 @@
 //! The identities of the calls a peer discharged because a poll of their turn
 //! never returned (ADR-0057 §6). The router refuses a new INVITE on one of
-//! them (Call-ID and From-tag) for 64·T1 after the discharge's delete applied
-//! here: a retry or a copy of the INVITE that stuck the peer never reaches
-//! this node's routing consult.
+//! them (Call-ID and From-tag) for [`DISCHARGED_WINDOW`] after the
+//! discharge's delete applied here: a retry or a copy of the INVITE that
+//! stuck the peer never reaches this node's routing consult.
 
 use std::collections::hash_map::RandomState;
 use std::collections::{HashMap, VecDeque};
@@ -16,9 +16,15 @@ use tokio::time::Instant;
 use crate::store::{locked, DISCHARGED_IDENTITIES};
 
 /// How long an identity stays refused after its discharge applied here:
-/// 64·T1 (Timer B), the longest the previous hop keeps the INVITE's
-/// transaction and its copies going.
-pub const DISCHARGED_WINDOW: Duration = Duration::from_millis(sip_retransmit::timers::TIMER_B);
+/// Timer C's 3 min plus 64·T1, 212 s. A previous hop still in Calling sends
+/// copies of the INVITE through its Timer B (64·T1); one that heard the 100
+/// retries the INVITE when its Timer C fires (more than 3 min, RFC 3261 §16.6
+/// item 11), and the retry's own copies follow it through Timer B.
+pub const DISCHARGED_WINDOW: Duration =
+    Duration::from_millis(TIMER_C_LEAST + sip_retransmit::timers::TIMER_B);
+
+/// The least Timer C a proxy runs, in ms (RFC 3261 §16.6 item 11).
+const TIMER_C_LEAST: u64 = 180_000;
 
 /// The most identities held. A worker discharges one call per stuck poll and
 /// exits, so a node meets a handful; past the bound the oldest is forgotten
@@ -143,17 +149,18 @@ mod tests {
         call::derive_call_ref("w1", call_id, "tag-a")
     }
 
-    /// Refused from the discharge until 64·T1 has passed, on its Call-ID and
-    /// From-tag whatever primary placed the retry; never another identity.
+    /// Refused from the discharge until Timer C's 3 min plus 64·T1 has
+    /// passed, on its Call-ID and From-tag whatever primary placed the retry;
+    /// never another identity.
     #[tokio::test(start_paused = true)]
-    async fn an_identity_is_refused_for_64_t1_from_its_discharge() {
+    async fn an_identity_is_refused_through_timer_c_and_64_t1_from_its_discharge() {
         let set = DischargedIdentities::default();
         assert!(!set.refuses("a@host", "tag-a"));
         set.refuse(&call_ref("a@host"));
         assert!(set.refuses("a@host", "tag-a"));
         assert!(!set.refuses("a@host", "tag-b"), "another From-tag");
         assert!(!set.refuses("b@host", "tag-a"), "another Call-ID");
-        tokio::time::advance(DISCHARGED_WINDOW - Duration::from_millis(1)).await;
+        tokio::time::advance(Duration::from_millis(212_000 - 1)).await;
         assert!(set.refuses("a@host", "tag-a"), "1 ms before the window ends");
         tokio::time::advance(Duration::from_millis(1)).await;
         assert!(!set.refuses("a@host", "tag-a"), "the window ended");
