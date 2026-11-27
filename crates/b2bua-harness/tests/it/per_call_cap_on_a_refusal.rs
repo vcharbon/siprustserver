@@ -30,6 +30,12 @@ use tokio::time::Instant;
 /// The port carol, the failover target, listens on.
 const CAROL_PORT: u16 = 5071;
 
+/// The Call-ID of alice's INVITE, which names her call on the B2BUA.
+const CALL_ID: &str = "per-call-cap-on-a-refusal@127.0.0.1";
+
+/// The From tag of alice's INVITE.
+const FROM_TAG: &str = "alice-tag";
+
 /// The CDR events a call holds while its first route is dialled and has
 /// answered nothing: the cap that holds it there, so the event recording
 /// bob's refusal, his ringing or his INVITE's timeout crosses it.
@@ -126,11 +132,19 @@ impl FailoverScene {
         Cap::ALL.iter().map(|c| (*c, m.cap_trips_of(*c))).filter(|(_, n)| *n > 0).collect()
     }
 
-    /// alice's INVITE, relayed to bob: her call, and bob's transaction.
+    /// alice's INVITE, under [`CALL_ID`] and [`FROM_TAG`], relayed to bob:
+    /// her call, and bob's transaction.
     async fn dial(&self) -> (ClientInvite, ServerTxn) {
         let s = &self.s;
-        let call = s.alice.invite(&s.bob).with_sdp(OFFER_SDP).through(s.b2bua.addr).send().await;
+        let invite = s.alice.invite(&s.bob).identity(CALL_ID, FROM_TAG).with_sdp(OFFER_SDP);
+        let call = invite.through(s.b2bua.addr).send().await;
         (call, s.bob.receive("INVITE").await)
+    }
+
+    /// The B2BUA's live copy of alice's call, the image its next turn
+    /// starts from, if it serves the call.
+    fn live_call(&self) -> Option<call::Call> {
+        self.s.b2bua.live_call(&call::derive_call_ref("w0", CALL_ID, FROM_TAG))
     }
 
     /// What reached bob since he was last read: a request's method or a
@@ -140,6 +154,19 @@ impl FailoverScene {
             Inbound::Request(txn) => txn.request().method().to_string(),
             Inbound::Response(resp) => resp.status().to_string(),
         })
+    }
+
+    /// The status of each final response queued to alice, her queue drained.
+    async fn finals_queued_to_alice(&self) -> Vec<u16> {
+        let mut finals = Vec::new();
+        while let Some(inbound) = self.s.alice.take_queued_inbound().await {
+            if let Inbound::Response(resp) = inbound {
+                if resp.status() >= 200 {
+                    finals.push(resp.status());
+                }
+            }
+        }
+        finals
     }
 }
 
@@ -174,6 +201,14 @@ fn assert_bare_503(resp: &SipResponse) {
     assert_eq!(resp.status(), 503);
     assert!(!resp.has(&HeaderName::Reason), "no Reason: {resp:?}");
     assert!(!resp.has(&HeaderName::Warning), "no Warning: {resp:?}");
+}
+
+/// The status of the non-2xx final `leg` retains for the INVITE it received,
+/// `None` when it retains none.
+fn retained_rejection_status(leg: &call::Leg) -> Option<u16> {
+    let (datagram, _) = leg.invite_rejection()?.wire();
+    let status_line = std::str::from_utf8(datagram).ok()?.lines().next()?;
+    status_line.split(' ').nth(1)?.parse().ok()
 }
 
 /// The turn that ended bob's INVITE tripped `cap`, and nothing else did:
@@ -355,8 +390,9 @@ async fn a_cancel_after_a_refusal_s_trip_is_answered_200() {
 /// CANCEL reaches the B2BUA first and its turn crosses the CDR events' cap.
 /// The transaction layer answered her CANCEL 200 and her INVITE 487 (RFC
 /// 3261 §9.2) whatever became of that turn: that 487 is her INVITE's one
-/// final (§17.2.1, held by the RFC audit), and the CDR states no 503 to her.
-/// The teardown's CANCEL waits for bob's provisional, which his 486
+/// final (§17.2.1, held by the RFC audit), the call retains it as her
+/// INVITE's rejection, the one a takeover re-arms, and the CDR states no 503
+/// to her. The teardown's CANCEL waits for bob's provisional, which his 486
 /// overtakes, so bob draws nothing past the ACK of his 486; carol is never
 /// dialled; the call ends with one CDR naming the cap.
 #[tokio::test(start_paused = true)]
@@ -371,6 +407,7 @@ async fn a_cancel_before_a_refusal_past_a_cap_draws_one_final() {
     uas.respond(486, "Busy Here").await;
     f.s.h.advance(HOP / 2 + HOP / 10).await;
     let trips_on_the_cancel = f.trips();
+    let retained = f.live_call().map(|c| retained_rejection_status(&c.a_leg));
     f.s.bob.receive("ACK").await;
 
     let cancel_answered = cancel.try_expect(200).await;
@@ -387,15 +424,16 @@ async fn a_cancel_before_a_refusal_past_a_cap_draws_one_final() {
         .filter_map(|e| e.status_code)
         .collect();
     let facts = format!(
-        "trips on the CANCEL {trips_on_the_cancel:?}; consults {}; alice's final {:?}; her \
-         CANCEL's {:?}; carol dialled: {carol_dialled}; bob drew {bob_drew:?}; the CDR's \
-         statuses to alice {to_alice:?}",
+        "trips on the CANCEL {trips_on_the_cancel:?}; consults {}; the rejection the call \
+         retains for alice {retained:?}; alice's final {:?}; her CANCEL's {:?}; carol dialled: \
+         {carol_dialled}; bob drew {bob_drew:?}; the CDR's statuses to alice {to_alice:?}",
         f.consults(),
         answered.as_ref().map(|(r, _)| r.status()),
         cancel_answered.as_ref().map(SipResponse::status),
     );
     let cancel_trip = vec![(Cap::CdrEvents, 1)];
     assert_eq!(trips_on_the_cancel, cancel_trip, "the CANCEL's turn tripped: {facts}");
+    assert_eq!(retained, Some(Some(487)), "the call retains alice's 487: {facts}");
     cancel_answered.unwrap_or_else(|e| panic!("alice's CANCEL is answered 200 ({e}): {facts}"));
     answered.unwrap_or_else(|e| panic!("alice's INVITE is answered 487 ({e}): {facts}"));
     assert!(!to_alice.contains(&503), "the CDR states no 503 to alice: {facts}");
@@ -433,8 +471,10 @@ async fn a_trip_on_the_callee_s_ringing_cancels_him() {
     uas.respond(487, "Request Terminated").await;
     f.s.bob.receive("ACK").await;
 
-    let (resp, _) = call.try_expect_final(503).await.expect("alice is answered 503");
+    let (resp, ringing) = call.try_expect_final(503).await.expect("alice is answered 503");
     assert_bare_503(&resp);
+    let ringing: Vec<_> = ringing.iter().map(SipResponse::status).collect();
+    assert_eq!(ringing, Vec::<u16>::new(), "alice hears no ringing");
     f.s.h.advance(PAST_THE_TEARDOWN).await;
     let carol_dialled = f.carol.try_receive_tolerating("INVITE", &[]).await.is_some();
     assert!(!carol_dialled, "carol is never dialled");
@@ -500,10 +540,10 @@ async fn a_dead_hop_past_the_actions_cap_answers_the_caller_a_bare_503() {
 /// bob rings, then goes silent past the INVITE bound, and the turn of his
 /// transaction's timeout crosses the CDR events' cap. His INVITE still
 /// rings: the teardown abandons it with a CANCEL (RFC 3261 §9.1), whose 487
-/// is still coming, as a trip on any turn of a ringing call does. bob
-/// answers the CANCEL 200 and his INVITE 487, which the B2BUA ACKs
-/// (§17.1.1.3), and alice is answered the bare 503 then; carol is never
-/// dialled; one CDR names the cap.
+/// is still coming, as a trip on any turn of a ringing call does, so alice
+/// holds no final when bob's CANCEL arrives. bob answers the CANCEL 200 and
+/// his INVITE 487, which the B2BUA ACKs (§17.1.1.3), and alice is answered
+/// the bare 503 then; carol is never dialled; one CDR names the cap.
 #[tokio::test(start_paused = true)]
 async fn a_ringing_timeout_past_the_cdr_events_cap_cancels_the_callee() {
     let f = FailoverScene::start("cap-ringing-timeout", |c| {
@@ -528,6 +568,8 @@ async fn a_ringing_timeout_past_the_cdr_events_cap_cancels_the_callee() {
     assert_eq!(f.consults(), 0, "the trip came before any failure consult: {facts}");
     let mut cancel =
         cancel.unwrap_or_else(|e| panic!("bob is CANCELled, his INVITE ringing ({e}): {facts}"));
+    let early = f.finals_queued_to_alice().await;
+    assert_eq!(early, Vec::<u16>::new(), "alice holds no final before bob's 487: {facts}");
     cancel.respond(200, "OK").await;
     uas.respond(487, "Request Terminated").await;
     f.s.bob.try_receive("ACK").await.expect("the 487 the CANCEL provoked is ACKed");
