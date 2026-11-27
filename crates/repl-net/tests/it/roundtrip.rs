@@ -75,7 +75,7 @@ fn roundtrip_data_body_some_multi_index() {
 
 #[test]
 fn roundtrip_data_body_none_delete_negatives() {
-    // delete → body None, its answered and discharged statements set; negative call_gen / call_bgen / body_ttl_ms (i64 wire).
+    // delete → body None, its answered statement set; negative call_gen / call_bgen / body_ttl_ms (i64 wire).
     assert_roundtrip(&Frame::Data {
         at: Watermark::new(0, 0),
         op: Op::Delete,

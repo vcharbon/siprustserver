@@ -40,7 +40,10 @@ impl ReplicatedB2buaSut {
     /// now and hand the wait back as a [`PendingDrain`] the test polls while it
     /// drives the timeline. The wait holds only the core's owned probes, its
     /// release flush included, so the process can still be killed mid-drain;
-    /// a killed incarnation's flush returns at once.
+    /// a killed incarnation's flush returns at once. The wait is the core's
+    /// own drain, and records the same exit unless the incarnation was killed
+    /// mid-drain. It is polled once before it is handed back, which arms the
+    /// first poll-interval sleep on the paused clock.
     pub fn begin_drain_detached(&self, bounds: DrainBounds) -> PendingDrain {
         self.views.record(
             &self.incarnation_key(),
@@ -58,9 +61,6 @@ impl ReplicatedB2buaSut {
             fut: Box::pin(async move {
                 match probe {
                     Some(p) => {
-                        // The core's own drain, flush included, without the
-                        // borrow of the core; it records the same exit, unless
-                        // the incarnation was killed mid-drain.
                         let out = b2bua::drain::drain_until_quiescent(p, bounds).await;
                         let killed = limiter.is_some_and(|l| l.is_stopped());
                         if let (Some(m), false) = (metrics, killed) {
@@ -78,7 +78,6 @@ impl ReplicatedB2buaSut {
             }),
             outcome: None,
         };
-        // One poll arms the first poll-interval sleep on the paused clock.
         pending.poll();
         pending
     }

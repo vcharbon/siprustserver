@@ -269,11 +269,14 @@ pub(super) enum InitialInvite {
     CopyOf { hit: IndexHit, unanswered: bool },
     /// Another primary's INVITE that copies no transaction of a record this
     /// node holds: the primary owns its transaction, and placing it would
-    /// dial a second call.
+    /// dial a second call. It gets no final, its transaction relinquished
+    /// with nothing sent, unless a peer discharged a call on its identity:
+    /// then it gets the bare 503 ([`super::discharged`]).
     Foreign,
     /// A copy of the initial INVITE of this node's own call whose park a bulk
     /// reclaim deferred, until its deferred arming ran
-    /// ([`DeferredParks::copies`]).
+    /// ([`DeferredParks::copies`]): it queues on that call's queue, unjudged,
+    /// keeping its transaction, and is judged at its turn.
     Deferred,
 }
 

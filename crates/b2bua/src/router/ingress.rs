@@ -120,17 +120,6 @@ pub(super) async fn on_event(
 
     let mut res = resolve(ctx, &event);
     let mut lookup = Lookup::Answered;
-    // An initial INVITE copying a transaction of a decided call this node
-    // holds the record of is that call's: the call is taken over and the copy
-    // absorbed by the transaction the record rebuilds, which for the caller's
-    // unanswered INVITE replaces the one the layer opened for the copy. One
-    // placed here as another primary's backup and copying none belongs to
-    // that primary and gets no final, its transaction relinquished with
-    // nothing sent — never a second call; one on the identity of a call a
-    // peer discharged gets the bare 503 (`discharged`).
-    // A copy of the INVITE of a call whose park a bulk reclaim deferred is
-    // that call's: it queues on the call's queue, unjudged, keeping its
-    // transaction, and is judged at its turn (`deferred_copy`).
     match initial_invite_copy(ctx, &event, &res, parks).await {
         InitialInvite::Own => {}
         InitialInvite::CopyOf { hit, unanswered } => {

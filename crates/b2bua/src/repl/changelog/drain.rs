@@ -65,9 +65,9 @@ impl Changelog {
                     discharged: false,
                 }),
                 // Gone between snapshot and read: a delete recorded since then
-                // has an entry of its own and drains with its own statement;
-                // any other loss (an expired body) goes out as a delete
-                // stating what the entry states now.
+                // has an entry of its own and drains with its own answer; any
+                // other loss (an expired body) goes out as a delete stating
+                // what the entry states now.
                 None => match self.current(peer, partition, &call_ref) {
                     Some((Op::Delete, _)) => {}
                     current => {
