@@ -1,0 +1,30 @@
+schema: incident.v1
+name: worker_rollout
+description: >-
+  A rolling restart of every worker: `kubectl rollout restart` of their
+  StatefulSet, which replaces one pod at a time and waits for each
+  replacement to be Ready before it deletes the next. Each replaced worker
+  drains as kill_worker_graceful's does. Inject watches the rollout to its
+  end; the probe wants every old pod replaced and as many pods live as
+  before.
+kind: fault
+target:
+  selector: app=b2bua-worker
+  pick: all
+params:
+  statefulset:
+    type: string
+    default: b2bua-worker
+    description: The StatefulSet of the targets.
+  rollout_timeout_s:
+    type: integer
+    default: 300
+    description: How long inject watches the rollout.
+duration_s: 0
+expected_s: 120
+timeouts:
+  inject_s: 330
+  heal_s: 10
+  probe_s: 180
+  probe_interval_s: 2
+requires: [kind]

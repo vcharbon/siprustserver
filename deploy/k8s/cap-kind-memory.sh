@@ -29,7 +29,7 @@
 set -euo pipefail
 
 CLUSTER="${CLUSTER:-sip-e2e}"
-TOTAL_CAP_MB="${TOTAL_CAP_MB:-11264}"  # 11 GiB whole-cluster hard ceiling. On a ~16 GiB host,
+TOTAL_CAP_MB="${TOTAL_CAP_MB:-13824}"  # 13.5 GiB whole-cluster hard ceiling. On a ~16 GiB host,
                                        # leave room for rust-analyzer (~2.5 GiB), the
                                        # observability stack (~1.9 GiB) and the page cache.
 CP_CAP_MB="${CP_CAP_MB:-3072}"         # control plane: etcd, the apiserver, and etcd's data on the

@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# Restart the targets' StatefulSet and watch the rollout to its end, once a
+# second. Facts: the pods before, the restart instant and the instant the
+# rollout read complete.
+# shellcheck source=incident.sh
+source "$HAKIT_LIB/incident.sh"
+hk_pick_targets
+kubectl -n "$NS" rollout restart "statefulset/$HAKIT_PARAM_STATEFULSET" >&2
+start="$(hk_now_ms)"
+echo "$start" > "$HAKIT_EVENT_DIR/killed_at_ms"
+deadline=$(( start + HAKIT_PARAM_ROLLOUT_TIMEOUT_S * 1000 ))
+until kubectl -n "$NS" rollout status "statefulset/$HAKIT_PARAM_STATEFULSET" --timeout=1s >/dev/null 2>&1; do
+  [ "$(hk_now_ms)" -lt "$deadline" ] || hk_die "the rollout of $HAKIT_PARAM_STATEFULSET did not end within ${HAKIT_PARAM_ROLLOUT_TIMEOUT_S}s"
+  sleep 1
+done
+jq -cn --argjson pods "$(hk_target_pods_json)" --argjson before "$(cat "$HAKIT_EVENT_DIR/live_before")" \
+  --argjson at "$start" --argjson rolled "$(hk_now_ms)" \
+  '{pods: $pods, live_before: $before, restarted_at_ms: $at, rolled_at_ms: $rolled}'

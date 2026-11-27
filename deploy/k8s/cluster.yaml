@@ -4,9 +4,11 @@
 # time, and
 # `deploy/helm/kind-lab.sh up` refuses to replace an existing one.
 #
-# Tiers: edge = front proxy, app = b2bua workers (two app nodes so a primary and
-# its backup land on different nodes for real failover), infra = the call
-# limiter and the CDR broker + consumer (tainted, see below).
+# Tiers: edge = front proxy, app = b2bua workers (three app nodes, one worker
+# each: a primary and its backup land on different nodes for real failover, and
+# a pool of three runs with every worker on its own node), infra = the call
+# limiter and the CDR broker + consumer (tainted, see below). The third app node
+# comes after the infra node, so the node names of the first five hold.
 #
 # `kernel.core_pattern` is not namespaced: the Debian node image ships
 # `10-coredump-debian.conf` (`kernel.core_pattern=core`) and the privileged
@@ -83,6 +85,13 @@ nodes:
         nodeRegistration:
           taints:
             - { key: tier, value: infra, effect: NoSchedule }
+    extraMounts:
+      - hostPath: /dev/null
+        containerPath: /usr/lib/sysctl.d/10-coredump-debian.conf
+        readOnly: true
+  - role: worker
+    labels:
+      tier: app
     extraMounts:
       - hostPath: /dev/null
         containerPath: /usr/lib/sysctl.d/10-coredump-debian.conf

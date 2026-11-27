@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# Recovered when the StatefulSet's rollout is complete, every old pod is
+# replaced (by uid) and as many pods are live as before. Exit 75 while not
+# yet. Facts: each replacement's start and Ready (hk_probe_replaced).
+# shellcheck source=incident.sh
+source "$HAKIT_LIB/incident.sh"
+kubectl -n "$NS" rollout status "statefulset/$HAKIT_PARAM_STATEFULSET" --timeout=1s >/dev/null 2>&1 || exit "$HK_NOT_YET"
+hk_probe_replaced
