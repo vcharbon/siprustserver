@@ -1,14 +1,16 @@
-//! A per-call cap (ADR-0057) crossed by the turn that handles the end of a
-//! callee's INVITE, on a route with a failover: his failure final, or his
-//! INVITE transaction's timeout. The turn is discarded with what it held:
-//! the failure's record, its consult of the decision service, the failed
-//! leg's end. The callee's INVITE transaction ended all the same, its final
-//! ACKed by the transaction layer (RFC 3261 §17.1.1.3), so nothing more is
-//! coming on that leg: the verdict's teardown answers the caller, who holds
-//! a 100 Trying, the bare 503 at once (§16.7, ADR-0022), dials no further
-//! leg and draws from the callee only the CANCEL an INVITE still ringing is
-//! owed (§9.1). The call writes one CDR naming the cap and releases every
-//! limiter hold.
+//! A per-call cap (ADR-0057) crossed by a turn of a call that dials a route
+//! with a failover: the turn of the callee's failure final, of his dead
+//! hop's timeout, of his ringing or its timeout, or of the caller's CANCEL.
+//! The turn is discarded with what it held: the failure's record, its
+//! consult of the decision service, the failed leg's end. What the
+//! transaction layer did of the event stands all the same: a final it
+//! ACKed (RFC 3261 §17.1.1.3), a CANCEL it holds unsent for a dead hop
+//! (§9.1), the 487 it answered a CANCELled INVITE with (§9.2). Where nothing
+//! more is coming from the callee, the verdict's teardown answers the
+//! caller, who holds a 100 Trying, the bare 503 at once (§16.7, ADR-0022);
+//! where his INVITE still rings, it CANCELs him and answers her on his 487.
+//! It dials no further leg. The call writes one CDR naming the cap and
+//! releases every limiter hold.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
