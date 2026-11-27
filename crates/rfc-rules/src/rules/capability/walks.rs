@@ -47,6 +47,15 @@ fn ends_dialog(msg: &Msg) -> bool {
     }
 }
 
+/// A transaction of the §8.2 walk: its [`uas_key`], and whether it is a
+/// CANCEL's, which rides its INVITE's branch as a transaction of its own
+/// (RFC 3261 §9.2), so a CANCEL's response never answers the INVITE.
+type WalkKey<'a> = (TxnKey<'a>, bool);
+
+fn walk_key<'a>(sides: &Sides<'a>, msg: &'a Msg) -> Option<WalkKey<'a>> {
+    Some((uas_key(sides, msg)?, msg.cseq_method.eq_ignore_ascii_case("CANCEL")))
+}
+
 /// The dialog a message names, `(Call-ID, tags)` with its two tags in a fixed
 /// order, so both directions of the dialog name it alike; `None` without
 /// both tags.
@@ -84,8 +93,8 @@ pub(super) fn rejections<'a>(
 ) -> Vec<Finding> {
     let sides = Sides::of(wire.msgs);
     let mut occasions: Vec<Rejectable<'a>> = Vec::new();
-    let mut opened: BTreeMap<TxnKey<'a>, usize> = BTreeMap::new();
-    let mut answers: BTreeMap<TxnKey<'a>, Answer> = BTreeMap::new();
+    let mut opened: BTreeMap<WalkKey<'a>, usize> = BTreeMap::new();
+    let mut answers: BTreeMap<WalkKey<'a>, Answer> = BTreeMap::new();
     let mut ended: EndedDialogs<'a> = BTreeMap::new();
     for (mi, msg) in wire.msgs.iter().enumerate() {
         if let Some(dialog) = dialog_of(msg).filter(|_| ends_dialog(msg)) {
@@ -101,7 +110,7 @@ pub(super) fn rejections<'a>(
                 if msg.refused || !owes(msg) {
                     continue;
                 }
-                let Some(key) = uas_key(&sides, msg) else { continue };
+                let Some(key) = walk_key(&sides, msg) else { continue };
                 if let Entry::Vacant(e) = opened.entry(key) {
                     e.insert(occasions.len());
                     occasions.push(Rejectable {
@@ -110,7 +119,7 @@ pub(super) fn rejections<'a>(
                         ts_us: msg.at_us,
                         cseq: msg.cseq,
                         method: method.as_str(),
-                        branch: key.2,
+                        branch: key.0 .2,
                         emitter: msg.dst.as_str(),
                         taker: msg.src.as_str(),
                         request: msg,
@@ -118,7 +127,7 @@ pub(super) fn rejections<'a>(
                 }
             }
             Kind::Response { status } if *status >= 200 => {
-                let Some(key) = uas_key(&sides, msg) else { continue };
+                let Some(key) = walk_key(&sides, msg) else { continue };
                 if !opened.contains_key(&key) {
                     continue;
                 }
@@ -137,8 +146,8 @@ pub(super) fn rejections<'a>(
     occasions
         .iter()
         .map(|occasion| {
-            let key = (occasion.emitter, occasion.request.call_id.as_str(), occasion.branch);
-            let answer = answers.get(&key).copied();
+            let answer =
+                walk_key(&sides, occasion.request).and_then(|key| answers.get(&key)).copied();
             let end_before_481 = dialog_of(occasion.request)
                 .and_then(|d| ended.get(&(occasion.emitter, d)))
                 .filter(|end| answer.is_some_and(|a| a.status == 481 && end.msg < a.msg));
