@@ -501,21 +501,56 @@ fn bye_from_bob(at_us: u64, ok_us: u64) -> [Msg; 2] {
 
 /// RFC 3261 §15.1.1 and RFC 5407 §3.3: a UA's dialog ends for new requests
 /// once it sends or takes a BYE, so a request crossing bob's BYE draws the
-/// 481 of a dialog bob no longer holds, at whichever vantage the crossing is
-/// read: alice's shows her request before bob's BYE, bob's shows his 481
-/// before alice's 200.
+/// 481 of a dialog bob no longer holds. Bob's vantage shows the crossing: his
+/// BYE before the request. Alice's shows her request before bob's BYE, which
+/// bob may have taken on the live dialog as well: that settles nothing.
 #[test]
 fn a_481_to_a_request_crossing_the_taker_s_bye_discharges_the_require() {
     let info = || taken_in_dialog(1_000, "INFO", "z9hG4bK-i", 3, "Require: frobnicate\r\n");
     let refused = |at_us| answered(at_us, 481, "INFO", "z9hG4bK-i", 3, "");
     let [bye, ok] = bye_from_bob(1_200, 1_600);
-    let at_alice = [info(), bye.clone(), ok.clone(), refused(2_000)];
-    let at_bob = [bye, Msg { at_us: 1_300, ..info() }, refused(1_400), ok];
-    for (vantage, msgs) in [("alice's", at_alice), ("bob's", at_bob)] {
-        let all = run(&UnsupportedExtension420, &msgs);
-        assert_eq!(all.len(), 1, "{vantage}: {all:?}");
-        assert!(matches!(all[0].decision, Decision::Compliant), "{vantage}: {:?}", all[0].decision);
-    }
+    let at_bob = [bye.clone(), Msg { at_us: 1_300, ..info() }, refused(1_400), ok.clone()];
+    let all = run(&UnsupportedExtension420, &at_bob);
+    assert_eq!(all.len(), 1, "bob's: {all:?}");
+    assert!(matches!(all[0].decision, Decision::Compliant), "bob's: {:?}", all[0].decision);
+
+    let at_alice = [info(), bye, ok, refused(2_000)];
+    let all = run(&UnsupportedExtension420, &at_alice);
+    assert_eq!(all.len(), 1, "alice's: {all:?}");
+    assert!(matches!(all[0].decision, Decision::Undecidable(_)), "alice's: {:?}", all[0].decision);
+}
+
+/// §8.2.2.3 and §15.1.2: a request its UAS took on a live dialog owes its
+/// 420 whatever BYE follows it. Alice's own BYE behind her request reaches bob
+/// after it, so his 481 is the miss; bob's BYE behind the request, alice's 200
+/// to it, and then his 481, reads as the crossing it may be: undecided.
+#[test]
+fn a_481_to_a_request_taken_before_a_later_bye_still_owes_the_420() {
+    let info = taken_in_dialog(1_000, "INFO", "z9hG4bK-i", 3, "Require: frobnicate\r\n");
+    let refused = |at_us| answered(at_us, 481, "INFO", "z9hG4bK-i", 3, "");
+    let alice_s_bye = [
+        info.clone(),
+        taken_in_dialog(1_100, "BYE", "z9hG4bK-b", 4, ""),
+        refused(1_300),
+        answered(1_400, 200, "BYE", "z9hG4bK-b", 4, ""),
+    ];
+    let f = violations(&UnsupportedExtension420, &alice_s_bye);
+    assert_eq!(f.len(), 1, "alice's BYE: {f:?}");
+    let Decision::Violated(Evidence::RejectionNotIssued { answered_status, .. }) = &f[0].decision
+    else {
+        panic!("{:?}", f[0].decision)
+    };
+    assert_eq!(*answered_status, 481);
+
+    let [bye, ok] = bye_from_bob(3_000, 3_500);
+    let bob_s_bye = [info, bye, ok, refused(4_000)];
+    let all = run(&UnsupportedExtension420, &bob_s_bye);
+    assert_eq!(all.len(), 1, "bob's BYE: {all:?}");
+    assert!(
+        matches!(all[0].decision, Decision::Undecidable(_)),
+        "bob's BYE: {:?}",
+        all[0].decision
+    );
 }
 
 /// So does a request bob takes after alice's BYE reached him, before he
