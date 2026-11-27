@@ -114,6 +114,9 @@ mod s13_tests;
 mod frame_cap_tests;
 
 #[cfg(test)]
+mod bootstrap_link_rate_tests;
+
+#[cfg(test)]
 mod puller_restart_tests;
 
 #[cfg(test)]
