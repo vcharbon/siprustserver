@@ -53,6 +53,30 @@ fn a_cancel_on_a_foreign_branch_is_the_branch_rules_finding() {
     assert_eq!(invite_branches.as_slice(), ["z9hG4bK-i"]);
 }
 
+/// RFC 3261 §9.1 on the UAC side: a CANCEL sent while its INVITE rings must
+/// carry that INVITE's top Via branch. One sent on another branch matches no
+/// server transaction, and its sender is charged, whatever the UAS answers
+/// next; the same CANCEL on the INVITE's branch is compliant.
+#[test]
+fn a_cancel_off_its_ringing_invite_s_branch_is_charged_to_its_sender() {
+    let ringing = |cancel_branch| {
+        vec![
+            req(1_000, A, B, "INVITE", "sip:bob@h", 1, "z9hG4bK-b1", "sip:alice@h", "at", None, 1),
+            resp(2_000, B, A, 180, 1, "INVITE", "z9hG4bK-b1", "at", Some("bt"), 1),
+            req(3_000, A, B, "CANCEL", "sip:bob@h", 1, cancel_branch, "sip:alice@h", "at", None, 1),
+            resp(4_000, B, A, 200, 1, "INVITE", "z9hG4bK-b1", "at", Some("bt"), 1),
+        ]
+    };
+    let f = run(&CancelViaBranch, &ringing("z9hG4bK-b2"));
+    assert_eq!(f.len(), 1, "{f:?}");
+    assert_eq!((f[0].emitter.as_str(), f[0].anchor), (A, 2), "the CANCEL's sender is charged");
+    assert!(f[0].violated(), "{:?}", f[0].decision);
+
+    let on_its_branch = run(&CancelViaBranch, &ringing("z9hG4bK-b1"));
+    assert_eq!(on_its_branch.len(), 1, "{on_its_branch:?}");
+    assert!(matches!(on_its_branch[0].decision, Decision::Compliant), "{on_its_branch:?}");
+}
+
 /// A re-INVITE opens a second transaction, and a CANCEL matching EITHER
 /// branch is fine.
 #[test]

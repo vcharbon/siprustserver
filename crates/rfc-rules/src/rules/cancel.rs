@@ -9,7 +9,9 @@
 //! the number it repeats. The §9.2
 //! rule reads the transaction as its UAS took it and [`NoCancelAfterFinal`] as
 //! its UAC drove it, both here; the two other §9.1 rules read the walk every
-//! branch-pairing family shares, in `super::branch`.
+//! branch-pairing family shares, in `super::branch`. A CANCEL whose branch
+//! pairs with no INVITE is none of theirs: §9.1's own branch match is
+//! `cancel-via-branch`'s, in `super::correlation`.
 //!
 //! **Repeats are not fresh events** in any of them: a message the adapter
 //! marked [`Msg::repeat`] opens no occasion, since retransmitting until
