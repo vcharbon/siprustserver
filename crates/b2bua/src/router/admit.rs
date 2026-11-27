@@ -27,7 +27,6 @@ use super::RouterCtx;
 use crate::admission::{class_of, first_refusal, Refusals, Refused, RouterReadings};
 use crate::capacity::{CapacityReading, Occupancy};
 use crate::dispatch::DispatchClass;
-use crate::new_calls::Refusal;
 
 /// New calls admitted at ingress whose turn has not created their call yet,
 /// by `callRef` and INVITE CSeq number. Clone shares them.
@@ -185,15 +184,14 @@ pub(super) async fn admit(
     src: SocketAddr,
     dispatch: DispatchClass,
 ) -> Option<UnbornCall> {
-    let refused = match super::discharged::refusal(ctx, req) {
-        Some(bare) => Some((Refusal::Discharged, bare)),
-        None => judge(ctx, call_ref, req, dispatch)
-            .map(|refused| (refused.reason, ctx.refusals.answer(req, refused))),
-    };
-    match refused {
-        Some((reason, response)) => {
-            send(&ctx.txn, response, req, src).await;
-            ctx.metrics.new_calls().reject(reason, class_of(req));
+    if super::discharged::refuses(ctx, req) {
+        super::discharged::refuse(ctx, req, src).await;
+        return None;
+    }
+    match judge(ctx, call_ref, req, dispatch) {
+        Some(refused) => {
+            answer(&ctx.txn, &ctx.refusals, req, src, refused).await;
+            ctx.metrics.new_calls().reject(refused.reason, class_of(req));
             None
         }
         None => Some(ctx.unborn.admit(call_ref, req.cseq().seq())),
