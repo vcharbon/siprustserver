@@ -58,8 +58,8 @@ pub(super) struct Rows {
     // Inbound replication connections closed before they opened a flow, by
     // reason (ADR-0045).
     pub(super) repl_inbound_dropped: FixedCounts,
-    // Cold replication streams that ended before their first catch-up
-    // `Noop`, by flow (ADR-0011 X5).
+    /// Cold replication streams that ended before their first catch-up
+    /// `Noop`, by flow (ADR-0011 X5).
     pub(super) repl_bootstrap_dropped: FixedCounts,
     // Live calls resting at each state-machine cursor (ADR-0016),
     // a census replaced whole on the gauge cadence.

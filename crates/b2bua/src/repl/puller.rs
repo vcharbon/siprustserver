@@ -420,9 +420,6 @@ impl Puller {
         if !bootstrapped && !self.is_reclaim() {
             self.store.clear_refusals_of(self.peer_ordinal());
         }
-        // Bodies imported during the pre-`Noop` bootstrap phase, which the
-        // completion, the hard timer and a dropped scan report: a scan cut at
-        // the same point on every pass re-stalls at the same value.
         let mut applied_in_bootstrap = 0u64;
         // The idle bound (ADR-0045): a stream that delivers nothing for this long
         // is left, whatever the phase.
