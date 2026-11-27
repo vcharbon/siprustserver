@@ -532,6 +532,20 @@ fn a_481_to_a_request_after_the_bye_reached_its_taker_discharges_the_require() {
     assert!(violations(&UnsupportedExtension420, &msgs).is_empty());
 }
 
+/// A vantage that carried the BYE's 2xx and not the BYE still shows the
+/// dialog ended there; a BYE the strict reading refuses ends nothing.
+#[test]
+fn a_bye_s_2xx_ends_the_dialog_and_a_refused_bye_does_not() {
+    let info = taken_in_dialog(3_000, "INFO", "z9hG4bK-i", 3, "Require: frobnicate\r\n");
+    let refused = answered(4_000, 481, "INFO", "z9hG4bK-i", 3, "");
+    let [bye, ok] = bye_ended(2_000);
+    let only_the_2xx = [ok, info.clone(), refused.clone()];
+    assert!(violations(&UnsupportedExtension420, &only_the_2xx).is_empty(), "the 2xx alone");
+    let strictly_refused = Msg { refused: true, ..bye };
+    let refused_bye = [strictly_refused, info, refused];
+    assert_eq!(violations(&UnsupportedExtension420, &refused_bye).len(), 1, "a refused BYE");
+}
+
 /// A 481 on a dialog no BYE ended, to a request on no dialog (no To-tag),
 /// or sent before any BYE of the dialog, still owes the 420.
 #[test]
