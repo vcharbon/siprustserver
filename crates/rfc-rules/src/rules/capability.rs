@@ -269,13 +269,19 @@ impl Obligation for UnsupportedMethod405Allow {
 /// taker matches the dialog before it reads `Require` (§12.2.2). A 481 to a
 /// request that may have crossed its taker's own BYE is `Undecidable`. A
 /// request whose header block the vantage lost is NOT an occasion — the
-/// `Require` tags are what would make it one.
+/// `Require` tags are what would make it one. Nor is a CANCEL or an ACK: the
+/// UAS ignores their `Require` (§8.2.2.3), and no ACK draws a response.
 pub struct UnsupportedExtension420;
 
 impl Obligation for UnsupportedExtension420 {
     fn eval(&self, wire: &WireView<'_>) -> Vec<Finding> {
-        let taken = |msg: &Msg| {
-            matches!(msg.kind, Kind::Request { .. }) && !unsupported_require(msg).is_empty()
+        let taken = |msg: &Msg| match &msg.kind {
+            Kind::Request { method } => {
+                !method.eq_ignore_ascii_case("CANCEL")
+                    && !method.eq_ignore_ascii_case("ACK")
+                    && !unsupported_require(msg).is_empty()
+            }
+            Kind::Response { .. } => false,
         };
         rejections(
             wire,
