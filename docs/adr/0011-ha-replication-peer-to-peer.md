@@ -60,7 +60,9 @@ again, idempotent under `(p,b)`, so snapshot consistency does not matter.
 A rebooting primary reclaims its calls by re-materialising its `pri:{self}` partition.
 Recovery is purely causal (ADR-0014), with no time-based ownership flip. The hard timer only
 bounds readiness: a node boots and serves even when peers are unreachable (liveness over
-completeness). ADR-0014 owns the backup half.
+completeness). A timer's completion never reads as a backup caught up: that read takes the
+`Position` claim a catch-up `Noop` answers. A scan that cannot finish is counted on
+`b2bua_repl_bootstrap_dropped_total`. ADR-0014 owns the backup half.
 [Detail](appendix/0011-ha-replication-peer-to-peer.md#decision-x5-fail-back-readiness-gated-reclaim-hard-timer-is-a-readiness-bound-only).
 
 ## Decision X6. Readiness/OPTIONS gate: re-hydrated and backup-current

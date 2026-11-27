@@ -200,9 +200,10 @@ pub struct Puller {
     /// bootstrap to time). Written from the single task that runs the FSM; the
     /// mutex is what keeps `&Puller` `Sync` across its awaits.
     bootstrap_started_at: std::sync::Mutex<Option<tokio::time::Instant>>,
-    /// The bodies the last cold stream applied before it ended short of its
-    /// first catch-up `Noop`: what a hard timer running out between two
-    /// streams reports.
+    /// The bodies the last cold stream of this bootstrap applied before it
+    /// ended short of its first catch-up `Noop`: what a hard timer running out
+    /// between two streams reports. Zero from a first `Noop` or a
+    /// `ResetToBootstrap` until a cold stream ends.
     scan_applied: std::sync::atomic::AtomicU64,
     /// The copies a batch refused, until it is read whole (ADR-0055 §7).
     held_meetings: held_meetings::HeldMeetings,
@@ -556,6 +557,7 @@ impl Puller {
                         // First catch-up Noop ends the bootstrap: from here the
                         // tail advances W and (Reclaim) applies the Reverse rule.
                         bootstrapped = true;
+                        self.scan_applied.store(0, std::sync::atomic::Ordering::Relaxed);
                         self.mark_bootstrap_complete(applied_in_bootstrap, "first catch-up Noop");
                         *deadline = None;
                         // Reclaim flow: bulk-materialise everything the bootstrap
@@ -598,6 +600,7 @@ impl Puller {
                         &self.bootstrap_started_at,
                         crate::poison::PULLER_BOOTSTRAP,
                     ) = Some(tokio::time::Instant::now());
+                    self.scan_applied.store(0, std::sync::atomic::Ordering::Relaxed);
                     self.note_state("reset_to_bootstrap", "server dropped our watermark");
                     break self.ended(connected_at);
                 }

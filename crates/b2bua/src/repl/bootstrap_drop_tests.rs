@@ -7,8 +7,10 @@
 //! ```text
 //!   link     4 MiB/s each way, a 1 MiB sender's buffer, 1 ms transit
 //!   server   send_stall 1 s
-//!   calls    11 of 1 KiB and one of 8 MiB: its batch blocks ~1.75 s > 1 s,
-//!            so every scan of the Backup flow is dropped there
+//!   calls    10 of 1 KiB and two of 8 MiB: the first large one the scan
+//!            meets blocks its send ~1.75 s > 1 s, so every scan of the
+//!            Backup flow is dropped there and the second never leaves,
+//!            whatever order the scan takes
 //!   puller   fast_test: hard timer 2 s, backoff 100 ms to 1 s
 //!   Reclaim  B's own calls at A: none, so that scan reaches its Noop
 //! ```
@@ -32,15 +34,15 @@ const MIB: usize = 1024 * 1024;
 
 /// The calls A holds when B bootstraps.
 const CALLS: usize = 12;
-/// The call whose body no batch can send within the send stall.
-const LARGE: usize = 5;
+/// The calls whose bodies no batch can send within the send stall.
+const LARGE: [usize; 2] = [3, 8];
 
 fn addr(n: u16) -> SocketAddr {
     SocketAddr::from(([127, 0, 0, 1], 9980 + n))
 }
 
 fn body(n: usize) -> Vec<u8> {
-    let len = if n == LARGE { 8 * MIB } else { 1024 };
+    let len = if LARGE.contains(&n) { 8 * MIB } else { 1024 };
     vec![n as u8; len]
 }
 
