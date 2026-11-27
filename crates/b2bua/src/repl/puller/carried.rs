@@ -203,7 +203,7 @@ impl Puller {
     /// is spared or already gone. Another call under the key is spared on
     /// either flow. On the Backup flow the drop is the holder's `Delete` the
     /// tail never sent: it spares only the Element the `Delete` guard keeps,
-    /// and a live takeover copy is handed the delete to stand down on
+    /// and a live takeover copy is handed the delete as its primary's
     /// (ADR-0047 D7). On the Reclaim flow a copy written since is this node's
     /// own write and is spared.
     async fn drop_uncarried(&self, call_ref: &str, copy: StoredCopy) -> bool {
