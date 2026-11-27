@@ -1,0 +1,349 @@
+//! **A call that ends between two cold bootstrap passes leaves no copy on the
+//! node that bootstraps** (ADR-0014 §8). A returning node's first pass of a
+//! flow carries call X, then the stream drops before the pass's catch-up
+//! `Noop`, so the node's watermark stays cold. X ends on the node that holds it
+//! while the stream is down. The second pass is cold again: its scan no longer
+//! lists X when X's record is gone, and its tail starts past X's delete, so
+//! neither carries the end. Once that pass catches up, the bootstrapping node
+//! holds exactly the live set of the flow and X stays over: no node ends it a
+//! second time, no request of X leaves a node, X has its one CDR.
+//!
+//! ```text
+//!   Backup flow (b2 backs b1's calls up)
+//!   b2 restarts in place     b1 answers X and Y, each w_bak=b2
+//!   b2 reboots               b1 → b2 delayed 500 ms a frame: pass 1 lands X
+//!   b2 holds X, no Noop      b1 ✂ b2: pass 1 dropped, b2's watermark cold
+//!   alice ─BYE(X)─▶ b1       X ends on b1, its CDR there, its record deleted
+//!   heal                     pass 2: the scan carries Y, the tail starts past
+//!                            X's delete; its first Noop: b2 caught up, ready
+//!   b2 holds Y alone
+//!   b1 dies and leaves       alice ─BYE(Y)─▶ b2: served, one CDR
+//!   past the replica TTL     X: no request from b2, still one CDR
+//!
+//!   Reclaim flow (b2 recovers its own calls from b1's copies)
+//!   b2 answers X and Y, each w_bak=b1
+//!   b2 restarts in place     │ b2 departs, b1 not told it is back
+//!   b2 reboots               b1 → b2 delayed 500 ms a frame: pass 1 lands X
+//!   b2 holds X, no Noop      b1 ✂ b2
+//!   alice ─BYE(X)─▶ b1       b1's copy takes X over and ends it, its CDR there
+//!                            │ b2 departed: the copy discharges X, its record
+//!                            │ deleted
+//!   heal                     pass 2 carries Y (and X's ended record while b1
+//!                            keeps it); its first Noop reclaims
+//!   b2 serves Y alone, holds no trace of X
+//! ```
+//!
+//! Timing axes: each bootstrap frame lands one 500 ms delay after the one
+//! before it, so pass 1 is cut within 100 ms of X landing, at least 400 ms
+//! before its next frame. X ends while the cut holds, 500 ms before the heal
+//! and well inside the puller's 10 s hard timer; pass 2 starts at the heal and
+//! catches up within a few hundred ms. Every step is 100 ms or more apart, so
+//! no verdict depends on in-order draining.
+//!
+//! Beyond the failover sweep: a call ended between two cold bootstrap passes stays over.
+
+use std::net::SocketAddr;
+use std::time::Duration;
+
+use failover_harness::{
+    total_cdrs_for, FailoverHarness, Partition, ProxySut, ReplicatedB2buaSut, WorkerHealth,
+};
+use repl_net::frame::{Frame, Watermark};
+use repl_net_testkit::Direction;
+use scenario_harness::Agent;
+
+use crate::away_backup_support::{
+    answered_on, bring_up, caller_hangs_up, pod_deleted, restart_in_place, settle, Answered, ALICE,
+    BOB,
+};
+
+/// How late each frame from b1 reaches the rebooted b2: one bootstrap body per
+/// delay, under the puller's 2 s idle bound.
+const FRAME_DELAY_MS: u64 = 500;
+
+/// Two workers behind the proxy and two answered calls: `holder` is the node
+/// the `restarted` one bootstraps them from.
+struct Cluster {
+    fh: FailoverHarness,
+    alice: Agent,
+    bob: Agent,
+    proxy: ProxySut,
+    holder: ReplicatedB2buaSut,
+    restarted: ReplicatedB2buaSut,
+}
+
+/// The cluster once the second pass has caught up: X ended between the
+/// passes, Y lives on.
+struct Passed {
+    cluster: Cluster,
+    x: Answered,
+    y: Answered,
+}
+
+/// How `restarted` comes back for its two passes.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Return {
+    /// Restarted in place: its peers keep it in their set.
+    InPlace,
+    /// Departed and back at its ordinal, seen by its own informer only: its
+    /// peers still read it departed.
+    UnseenByPeers,
+}
+
+/// Every cold `PullRequest` `caller` sent on `flow`, as the local end of its
+/// stream.
+fn cold_pulls(fh: &FailoverHarness, caller: &str, flow: Partition) -> Vec<SocketAddr> {
+    fh.repl_report()
+        .frames
+        .iter()
+        .filter(|f| f.dir == Direction::Sent)
+        .filter_map(|f| match &f.frame {
+            Frame::PullRequest { caller: c, partition, since, .. }
+                if c == caller && *partition == flow && *since == Watermark::new(0, 0) =>
+            {
+                Some(f.from)
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// How many `Noop`s the stream whose local end is `local` received.
+fn noops_on(fh: &FailoverHarness, local: SocketAddr) -> usize {
+    fh.repl_report()
+        .frames
+        .iter()
+        .filter(|f| f.dir == Direction::Received && f.from == local)
+        .filter(|f| matches!(f.frame, Frame::Noop { .. }))
+        .count()
+}
+
+/// The requests `node` sent inside a dialog of `call`, toward either party.
+fn requests_of(fh: &FailoverHarness, node: SocketAddr, call: &Answered) -> usize {
+    let tags = [call.dialog.local_tag(), call.bob_dialog.local_tag()];
+    fh.sip_entries()
+        .iter()
+        .filter(|e| e.from == node && !e.opens_with("SIP/2.0"))
+        .filter(|e| {
+            let raw = String::from_utf8_lossy(&e.raw);
+            tags.iter().any(|t| raw.contains(t))
+        })
+        .count()
+}
+
+/// The proxy and both workers ready, the parties bound.
+async fn cluster(name: &str) -> Cluster {
+    let mut fh = FailoverHarness::new(name, &["b1", "b2"]);
+    let alice = fh.agent("alice", ALICE).await;
+    let bob = fh.agent("bob", BOB).await;
+    let (proxy, holder, restarted) = bring_up(&mut fh).await;
+    Cluster { fh, alice, bob, proxy, holder, restarted }
+}
+
+/// Two calls answered on `on`, each signed by the proxy with `ordinals`
+/// (primary, backup).
+async fn two_calls(c: &Cluster, on: &ReplicatedB2buaSut, ordinals: (&str, &str)) -> [Answered; 2] {
+    let calls = [
+        answered_on(&c.fh, &c.alice, &c.bob, &c.proxy, on).await,
+        answered_on(&c.fh, &c.alice, &c.bob, &c.proxy, on).await,
+    ];
+    let want = (ordinals.0.to_string(), ordinals.1.to_string());
+    for call in &calls {
+        assert_eq!(call.cookie, want, "{} serves, {} backs up", ordinals.0, ordinals.1);
+    }
+    calls
+}
+
+/// `restarted` reboots under the delay, its first cold pass of `flow` is cut
+/// once it holds one of `calls`, that call (X) ends through the proxy while
+/// the cut holds, and the second pass makes `restarted` ready.
+async fn two_passes(
+    mut c: Cluster,
+    flow: Partition,
+    mut calls: [Answered; 2],
+    back: Return,
+) -> (Passed, SocketAddr) {
+    let (h, r) = (c.holder.ordinal().to_string(), c.restarted.ordinal().to_string());
+    let earlier = cold_pulls(&c.fh, &r, flow).len();
+    c.fh.delay(&h, &r, FRAME_DELAY_MS);
+    c.fh.mark(&r, None, "reboot", "a fresh incarnation at a new address");
+    let addr = c.restarted.reboot().await;
+    c.fh.note_worker_rebound(&r, addr);
+    if back == Return::UnseenByPeers {
+        c.fh.publish_to_itself(&r);
+    }
+
+    let held = |n: &ReplicatedB2buaSut| match flow {
+        Partition::Bak => n.scan_backed_up(&h),
+        Partition::Pri => n.scan_primary(&r),
+    };
+    let landed =
+        c.fh.pump_until(Duration::from_millis(100), Duration::from_secs(5), async || {
+            !held(&c.restarted).is_empty()
+        })
+        .await;
+    assert!(landed, "pass 1 carried a call");
+    let pass1 = cold_pulls(&c.fh, &r, flow).split_off(earlier);
+    assert_eq!(pass1.len(), 1, "one cold pass since the reboot");
+    assert_eq!(noops_on(&c.fh, pass1[0]), 0, "pass 1 has not caught up when it is cut");
+    let first = held(&c.restarted);
+    assert_eq!(first.len(), 1, "pass 1 landed one call before the cut: {first:?}");
+    let x = calls.iter().position(|call| call.call_ref == first[0]).expect("pass 1 landed X or Y");
+    c.fh.cut_streams(&h, &r);
+
+    caller_hangs_up(&mut calls[x].dialog, &c.bob).await;
+    c.fh.advance(Duration::from_millis(500)).await;
+    c.fh.heal(&h, &r);
+
+    let ready =
+        c.fh.pump_until(Duration::from_millis(100), Duration::from_secs(10), async || {
+            c.restarted.is_ready()
+        })
+        .await;
+    assert!(ready, "pass 2 caught up: {r} is ready");
+    let pulls = cold_pulls(&c.fh, &r, flow).split_off(earlier);
+    assert!(pulls.len() >= 2, "pass 2 pulled cold again: {pulls:?}");
+
+    let [c0, c1] = calls;
+    let (x, y) = if x == 0 { (c0, c1) } else { (c1, c0) };
+    (Passed { cluster: c, x, y }, addr)
+}
+
+/// `restarted` is published at `addr` to the proxy and its peers and read
+/// alive, and `holder` reads its `flow` caught up.
+async fn published(c: &mut Cluster, flow: Partition, addr: SocketAddr) {
+    let r = c.restarted.ordinal().to_string();
+    c.fh.readmit(&r, addr);
+    c.proxy.set_health(&r, WorkerHealth::Alive);
+    let caught_up =
+        c.fh.pump_until(Duration::from_millis(100), Duration::from_secs(2), async || {
+            c.holder.flow_caught_up(&r, flow)
+        })
+        .await;
+    assert!(caught_up, "{} reads {r}'s flow caught up once {r} is published", c.holder.ordinal());
+}
+
+/// Backup flow: b1 answers X and Y while b2 is away; b2 bootstraps them twice,
+/// X ending on b1 in between.
+async fn backup_passes(name: &str) -> Passed {
+    let mut c = cluster(name).await;
+    restart_in_place(&mut c.fh, &mut c.restarted);
+    c.fh.advance(Duration::from_millis(500)).await;
+    let calls = two_calls(&c, &c.holder, ("b1", "b2")).await;
+    let (mut passed, addr) = two_passes(c, Partition::Bak, calls, Return::InPlace).await;
+    published(&mut passed.cluster, Partition::Bak, addr).await;
+    passed
+}
+
+/// Reclaim flow: b2 answers X and Y, b1 backing them up, and b2 dies the way
+/// `back` returns; b2 recovers them twice, X ending on b1's copy in between.
+async fn reclaim_passes(name: &str, back: Return) -> Passed {
+    let mut c = cluster(name).await;
+    c.fh.flap_not_ready("b1");
+    c.fh.advance(Duration::from_millis(500)).await;
+    let calls = two_calls(&c, &c.restarted, ("b2", "b1")).await;
+    c.fh.flap_ready("b1");
+    c.proxy.set_health("b1", WorkerHealth::Alive);
+    let backed =
+        c.fh.pump_until(Duration::from_millis(100), Duration::from_secs(5), async || {
+            let held = c.holder.scan_backed_up("b2");
+            calls.iter().all(|call| held.contains(&call.call_ref))
+        })
+        .await;
+    assert!(backed, "b1 holds both calls: {:?}", c.holder.scan_backed_up("b2"));
+
+    match back {
+        Return::InPlace => restart_in_place(&mut c.fh, &mut c.restarted),
+        Return::UnseenByPeers => pod_deleted(&mut c.fh, &mut c.restarted),
+    }
+    c.fh.advance(Duration::from_millis(500)).await;
+    let (mut passed, addr) = two_passes(c, Partition::Pri, calls, back).await;
+    published(&mut passed.cluster, Partition::Pri, addr).await;
+    passed
+}
+
+/// After the second pass, the backup holds the primary's live set: Y, not X.
+#[tokio::test(start_paused = true)]
+async fn a_backup_holds_no_copy_of_a_call_ended_between_its_two_bootstrap_passes() {
+    let name = "backup-copy-ended-between-two-passes";
+    let Passed { cluster: c, x, mut y } = backup_passes(name).await;
+
+    assert_eq!(
+        c.restarted.scan_backed_up("b1"),
+        vec![y.call_ref.clone()],
+        "b2 holds b1's live set once caught up: Y, live through both passes, and no copy of X"
+    );
+
+    caller_hangs_up(&mut y.dialog, &c.bob).await;
+    let refs = [x.call_ref.as_str(), y.call_ref.as_str()];
+    settle(&c.fh, &[&c.holder, &c.restarted], &refs, &[&c.alice, &c.bob]).await;
+    for r in refs {
+        assert_eq!(total_cdrs_for(&[&c.holder, &c.restarted], r), 1, "one CDR for {r}");
+    }
+    c.fh.assert_sip_rfc_clean(name);
+}
+
+/// The primary dies after the second pass: the backup serves Y with its one
+/// CDR, and X stays over, past the replica's TTL.
+#[tokio::test(start_paused = true)]
+async fn a_takeover_after_two_bootstrap_passes_never_ends_the_call_ended_between_them() {
+    let name = "takeover-after-two-passes";
+    let Passed { cluster: mut c, x, mut y } = backup_passes(name).await;
+    assert_eq!(total_cdrs_for(&[&c.holder], &x.call_ref), 1, "X ended on b1 with its CDR");
+
+    pod_deleted(&mut c.fh, &mut c.holder);
+    c.proxy.set_health("b1", WorkerHealth::Dead);
+    c.fh.advance(Duration::from_secs(1)).await;
+    caller_hangs_up(&mut y.dialog, &c.bob).await;
+
+    let drained =
+        c.fh.settle_lossy_cleanup(async || {
+            c.restarted.memory_clean()
+                && !c.restarted.holds_any_trace(&x.call_ref).await
+                && !c.restarted.holds_any_trace(&y.call_ref).await
+        })
+        .await;
+    assert!(drained, "b2 releases both calls, past the replica's TTL");
+    c.fh.linger_peers(&[&c.alice, &c.bob], Duration::from_secs(3)).await;
+    let nodes = [&c.holder, &c.restarted];
+    assert_eq!(total_cdrs_for(&nodes, &y.call_ref), 1, "Y served by b2 with one CDR");
+    assert_eq!(
+        requests_of(&c.fh, c.restarted.sip_addr(), &x),
+        0,
+        "b2 sends no request inside X's dialogs"
+    );
+    assert_eq!(total_cdrs_for(&nodes, &x.call_ref), 1, "X keeps its one CDR, b1's");
+    c.fh.assert_sip_rfc_clean(name);
+}
+
+/// The reclaiming node serves Y alone and holds no trace of X; both calls end
+/// with one CDR each.
+async fn reclaims_y_alone(name: &str, back: Return) {
+    let Passed { cluster: c, x, mut y } = reclaim_passes(name, back).await;
+
+    assert!(c.restarted.serves(&y.call_ref), "b2 reclaimed Y, live through both passes");
+    assert!(!c.restarted.serves(&x.call_ref), "b2 does not serve X");
+    assert!(!c.restarted.holds_any_trace(&x.call_ref).await, "b2 holds no trace of X");
+
+    caller_hangs_up(&mut y.dialog, &c.bob).await;
+    let refs = [x.call_ref.as_str(), y.call_ref.as_str()];
+    settle(&c.fh, &[&c.holder, &c.restarted], &refs, &[&c.alice, &c.bob]).await;
+    for r in refs {
+        assert_eq!(total_cdrs_for(&[&c.holder, &c.restarted], r), 1, "one CDR for {r}");
+    }
+    c.fh.assert_sip_rfc_clean(name);
+}
+
+/// Restarted in place: the backup's copy that ended X keeps X's record, so
+/// the second pass carries X's end.
+#[tokio::test(start_paused = true)]
+async fn a_reclaim_learns_the_end_of_a_call_taken_over_between_its_two_bootstrap_passes() {
+    reclaims_y_alone("reclaim-in-place-across-two-passes", Return::InPlace).await;
+}
+
+/// Departed and back unseen: the backup's copy that ended X discharges it,
+/// deleting X's record, so no pass carries X's end.
+#[tokio::test(start_paused = true)]
+async fn a_reclaim_holds_no_trace_of_a_call_discharged_between_its_two_bootstrap_passes() {
+    reclaims_y_alone("reclaim-unseen-across-two-passes", Return::UnseenByPeers).await;
+}

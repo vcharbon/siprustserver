@@ -25,6 +25,7 @@ mod backup_spread_during_a_rollout;
 mod call_admitted_during_a_long_backup_absence;
 mod call_admitted_during_the_backups_bootstrap;
 mod call_admitted_while_its_backup_restarts;
+mod call_ended_between_two_bootstrap_passes;
 mod call_terminate_on_backup;
 mod caller_copy_takes_over;
 mod cancel_and_retransmission_follow_a_live_hop;
