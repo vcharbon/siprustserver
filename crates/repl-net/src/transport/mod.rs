@@ -143,7 +143,8 @@ const DATA_FIXED_WIRE_BYTES: usize = 128;
 
 /// The bytes a buffer reserves for [`wire_bytes`] of `frame`: at least them
 /// for a `Data` frame, whose indexes each add a header of at most 5 bytes;
-/// [`DATA_FIXED_WIRE_BYTES`] for the other frames, which carry no body.
+/// the 128 bytes of a `Data` frame's fixed part for the other frames, which
+/// carry no body.
 pub fn wire_len_bound(frame: &Frame) -> usize {
     match frame {
         Frame::Data { call_ref, indexes, body, incarnation, .. } => {
