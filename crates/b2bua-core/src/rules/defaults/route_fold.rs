@@ -167,10 +167,13 @@ pub fn parse_service_ext(payload: &serde_json::Value) -> call::ExtMap {
 /// features (incl. the GlobalDuration re-arm), service_ext merge and the
 /// release-subscription registry. The limiter state is the router's, applied
 /// from the fold's admit before the rules read it; the refresh cadence of a
-/// counted call follows from it (`limiter::call::arm_refresh`).
+/// counted call follows from it (`limiter::call::arm_refresh`). The
+/// maximum duration is held as the initial route holds it
+/// (`decision::route_fold::hold_max_duration`).
 pub fn route_fold_parity_actions(fold: &RouteFold, ctx: &RuleContext) -> Vec<RuleAction> {
     let mut actions = Vec::new();
-    if let Some(f) = &fold.features {
+    if let Some(mut f) = fold.features.clone() {
+        crate::decision::route_fold::hold_max_duration(&mut f.platform);
         // Re-arm the duration cap from the reroute's features, as the initial
         // path does at route time (ScheduleTimer id-dedups) — under the same
         // anchor: with the cap anchored at the answer, the answer this fold leads
@@ -181,7 +184,7 @@ pub fn route_fold_parity_actions(fold: &RouteFold, ctx: &RuleContext) -> Vec<Rul
                 TimerDelay::millis(f.platform.max_duration_ms),
             ));
         }
-        actions.push(RuleAction::SetFeatures { features: f.clone() });
+        actions.push(RuleAction::SetFeatures { features: f });
     }
     if !fold.service_ext.is_empty() {
         actions.push(RuleAction::MergeCallExt { ext: fold.service_ext.clone() });

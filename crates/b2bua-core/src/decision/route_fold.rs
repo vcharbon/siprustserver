@@ -6,7 +6,8 @@
 //! refused and [`admitted`] dials the b-leg it routes to.
 
 use b2bua_sdk::lifecycle::{AttemptOpening, RouteAnswer};
-use b2bua_sdk::timer_delay::hold_max_duration;
+use b2bua_sdk::timer_delay::MAX_DELAY_MS;
+use call::features::PlatformActivations;
 use call::helpers::{add_originated_b_leg, mark_decision};
 use call::{
     AdmitOutcome, AdmitReport, AttemptCause, Call, Deadline, DecisionKind, TerminationCause,
@@ -400,6 +401,14 @@ pub fn admitted(
     arm_setup_timeout(&mut call, &mut fx, config.setup_timeout_ms, now_ms);
 
     Routed { result: HandlerResult { call, effects: fx }, route: Some(answer) }
+}
+
+/// Hold the call's maximum duration in `platform` to [`MAX_DELAY_MS`], on
+/// every path that sets a call's features (the initial route, a failover or
+/// reroute fold, `SetFeatures`): the `GlobalDuration` deadline it arms and
+/// the per-call caps that grow with it read the held value.
+pub(crate) fn hold_max_duration(platform: &mut PlatformActivations) {
+    platform.max_duration_ms = platform.max_duration_ms.min(MAX_DELAY_MS);
 }
 
 /// Arm the GlobalDuration absolute-cap backstop on the call, replacing the
