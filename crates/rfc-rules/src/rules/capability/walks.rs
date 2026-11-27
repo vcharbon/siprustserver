@@ -24,10 +24,18 @@ pub(super) struct Rejectable<'a> {
     pub(super) request: &'a Msg,
 }
 
-/// `(socket, dialog)` → the view index of the first BYE, or 2xx to one, on
-/// that dialog ([`dialog_of`]) between that socket and its peer: from there
-/// on, both ends hold the dialog ended for new requests.
-type EndedDialogs<'a> = BTreeMap<(&'a str, (&'a str, [&'a str; 2])), usize>;
+/// `(socket, dialog)` → the first BYE, or 2xx to one, on that dialog
+/// ([`dialog_of`]) between that socket and its peer: from there on, both ends
+/// hold the dialog ended for new requests.
+type EndedDialogs<'a> = BTreeMap<(&'a str, (&'a str, [&'a str; 2])), DialogEnd<'a>>;
+
+/// Where a dialog ended in the view, and the sockets of the BYE's UAC and UAS.
+#[derive(Clone, Copy)]
+struct DialogEnd<'a> {
+    msg: usize,
+    uac: &'a str,
+    uas: &'a str,
+}
 
 /// Whether `msg` ends its dialog at both its ends: a BYE the strict reading
 /// admits, whose sender and taker hold the dialog ended for new requests once
@@ -61,11 +69,12 @@ fn dialog_of(msg: &Msg) -> Option<(&str, [&str; 2])> {
 /// to reject correctly.
 ///
 /// A UAS matches a To-tagged request to its dialogs before any §8.2 check, and
-/// applies those checks only to a request that matched one (§12.2.2). A UAS
-/// that sent or took a BYE on the dialog before it answered refuses the
-/// request 481 instead, and that 481 discharges the obligation. The 481 is
-/// what is weighed against the BYE: a request crossing the UAS's own BYE shows
-/// at its sender's vantage before that BYE does.
+/// applies those checks only to a request that matched one (§12.2.2). A
+/// request that follows a BYE on its dialog in the view reached a UAS that
+/// held the dialog ended, and its 481 discharges the obligation. One that
+/// precedes the BYE was taken on the live dialog and still owes the
+/// rejection (§15.1.2), unless the BYE is its UAS's own: the request may have
+/// crossed it, as its sender's vantage shows, and that 481 is `Undecidable`.
 pub(super) fn rejections<'a>(
     wire: &WireView<'a>,
     rule: RuleId,
@@ -80,8 +89,9 @@ pub(super) fn rejections<'a>(
     let mut ended: EndedDialogs<'a> = BTreeMap::new();
     for (mi, msg) in wire.msgs.iter().enumerate() {
         if let Some(dialog) = dialog_of(msg).filter(|_| ends_dialog(msg)) {
-            for socket in [msg.src.as_str(), msg.dst.as_str(), sides.uas(msg), sides.uac(msg)] {
-                ended.entry((socket, dialog)).or_insert(mi);
+            let end = DialogEnd { msg: mi, uac: sides.uac(msg), uas: sides.uas(msg) };
+            for socket in [msg.src.as_str(), msg.dst.as_str(), end.uas, end.uac] {
+                ended.entry((socket, dialog)).or_insert(end);
             }
         }
         match &msg.kind {
@@ -129,11 +139,11 @@ pub(super) fn rejections<'a>(
         .map(|occasion| {
             let key = (occasion.emitter, occasion.request.call_id.as_str(), occasion.branch);
             let answer = answers.get(&key).copied();
-            let ended_before = |answer: &Answer| {
-                dialog_of(occasion.request)
-                    .and_then(|d| ended.get(&(occasion.emitter, d)))
-                    .is_some_and(|&at| at < answer.msg)
-            };
+            let end_before_481 = dialog_of(occasion.request)
+                .and_then(|d| ended.get(&(occasion.emitter, d)))
+                .filter(|end| answer.is_some_and(|a| a.status == 481 && end.msg < a.msg));
+            let from_its_sender =
+                |end: &DialogEnd| end.uac == occasion.taker || end.uas == occasion.emitter;
             let finding = |decision| Finding {
                 rule,
                 emitter: occasion.emitter.to_string(),
@@ -144,7 +154,15 @@ pub(super) fn rejections<'a>(
                 decision,
             };
             match answer {
-                Some(a) if a.status == 481 && ended_before(&a) => finding(Decision::Compliant),
+                _ if end_before_481.is_some_and(|end| end.msg < occasion.msg) => {
+                    finding(Decision::Compliant)
+                }
+                _ if end_before_481.is_some_and(|end| !from_its_sender(end)) => {
+                    finding(Decision::Undecidable(
+                        "the request precedes its UAS's own BYE at this vantage: \
+                         it may have crossed it",
+                    ))
+                }
                 Some(Answer { listed_rows: None, .. }) => {
                     finding(Decision::Undecidable("no header block at this vantage"))
                 }

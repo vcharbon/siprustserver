@@ -202,7 +202,7 @@ fn lost_on_send(request: Vec<u8>, seq: u64) -> Stamped<SignalingNetworkEvent> {
 
 /// §12.2.2 at the requester's lane: an in-dialog `method` stating `extra`,
 /// owed a rejection, answered 481. A 481 the UAS sent after its own BYE on
-/// the dialog is the answer of a dialog it ended: the request crossed that
+/// the dialog is no finding at this lane: the request may have crossed that
 /// BYE, or a later copy of it, lost on send, reached the UAS after it. With
 /// no BYE, or the BYE after the 481, the 481 stays the miss, lost copy or
 /// not.

@@ -221,11 +221,12 @@ impl Obligation for AllowSupportedOnInvite {
 ///
 /// The occasion is ONE unrecognised request the endpoint TOOK, keyed by its
 /// transaction. Charges that endpoint. The answer that discharges it is a 405
-/// carrying at least one `Allow` row, or a 481 its taker sent after a BYE on the
-/// request's dialog left or reached it (§12.2.2: the dialog is matched first) —
-/// any other final, or none at all, is the miss. A request the vantage carried
-/// no branch for names no transaction and is no occasion; an answer whose
-/// header block the vantage lost is `Undecidable`.
+/// carrying at least one `Allow` row, or a 481 to a request that reached its
+/// taker after a BYE on its dialog (§12.2.2: the dialog is matched first) —
+/// any other final, or none at all, is the miss. A 481 to a request that may
+/// have crossed its taker's own BYE is `Undecidable`. A request the vantage
+/// carried no branch for names no transaction and is no occasion; an answer
+/// whose header block the vantage lost is `Undecidable`.
 pub struct UnsupportedMethod405Allow;
 
 impl Obligation for UnsupportedMethod405Allow {
@@ -264,10 +265,11 @@ impl Obligation for UnsupportedMethod405Allow {
 /// The occasion is ONE request the endpoint TOOK whose `Require` names a tag
 /// outside the recognised set, keyed by its transaction. Charges that endpoint.
 /// A 420 carrying at least one `Unsupported` row discharges it, and so does a
-/// 481 its taker sent after a BYE on the request's dialog left or reached it:
-/// the taker matches the dialog before it reads `Require` (§12.2.2). A request whose
-/// header block the vantage lost is NOT an occasion — the `Require` tags are
-/// what would make it one.
+/// 481 to a request that reached its taker after a BYE on its dialog: the
+/// taker matches the dialog before it reads `Require` (§12.2.2). A 481 to a
+/// request that may have crossed its taker's own BYE is `Undecidable`. A
+/// request whose header block the vantage lost is NOT an occasion — the
+/// `Require` tags are what would make it one.
 pub struct UnsupportedExtension420;
 
 impl Obligation for UnsupportedExtension420 {
