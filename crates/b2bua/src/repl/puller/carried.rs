@@ -179,11 +179,10 @@ impl Puller {
     /// is spared or already gone. Another call under the key is spared on
     /// either flow. On the Backup flow the drop is the holder's `Delete` the
     /// tail never sent: it spares only the Element the `Delete` guard keeps,
-    /// and a live takeover copy is handed the delete to stand down on
-    /// (ADR-0047 D7). On the Reclaim flow a copy written since is this node's
-    /// own write, or a bulk reclaim's, and is spared. It keeps more than a tail
-    /// `Delete`: any change of call incarnation spares the copy, one already
-    /// gone is left, and a spare counts no refused forward flush.
+    /// and a live takeover copy is handed the delete as its primary's
+    /// (ADR-0047 D7). On the Reclaim flow a copy written since, by this node
+    /// or a bulk reclaim, is spared. Beyond a tail `Delete`, any change of call
+    /// incarnation spares, and a spare counts no refused forward flush.
     async fn drop_uncarried(&self, call_ref: &str, copy: StoredCopy) -> bool {
         let (role, primary) = self.keyspace(call_ref);
         if !self.is_reclaim()
