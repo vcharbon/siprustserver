@@ -251,6 +251,49 @@ fn a_481_to_an_unrecognised_method_after_the_uas_s_bye_is_its_answer() {
     a_481_after_the_uas_s_bye_is_its_answer(RuleId::UnsupportedMethod405Allow, "FROBNICATE", "");
 }
 
+/// §12.2.2 at the requester's lane, the requester's own BYE behind its
+/// in-dialog `method` stating `extra`, answered 481 after the BYE's 2xx. The
+/// UAS took the request before the BYE and owed the rejection, unless the
+/// request's copy was lost on send: a later copy then reached a UAS that held
+/// the dialog ended.
+fn a_481_after_the_requester_s_bye_is_excused_only_behind_a_lost_copy(
+    rule: RuleId,
+    method: &str,
+    extra: &str,
+) {
+    let request = || in_dialog(method, B, "z9hG4bK-n", 2, A, B, extra);
+    let bye = || sent(ALICE, in_dialog("BYE", B, "z9hG4bK-b", 3, A, B, ""), SUT, 100);
+    let bye_ok = || recv(ALICE, resp_with(200, 3, "BYE", "z9hG4bK-b", ""), SUT, 101);
+    let refused = || recv(ALICE, resp_with(481, 2, method, "z9hG4bK-n", ""), SUT, 600);
+
+    let behind_a_lost_copy = vec![lost_on_send(request(), 1), bye(), bye_ok(), refused()];
+    let excused = owed_rejection(rule, request(), behind_a_lost_copy);
+    assert!(excused.is_empty(), "a later copy met the ended dialog: {excused:?}");
+
+    let found = owed_rejection(rule, request(), vec![bye(), bye_ok(), refused()]);
+    assert_eq!(found.len(), 1, "no lost copy: {found:?}");
+    assert_eq!((found[0].lane.as_str(), found[0].charged.as_deref()), (ALICE, Some(SUT)));
+    assert!(found[0].detail.contains("got 481"), "{}", found[0].detail);
+}
+
+#[test]
+fn a_481_to_an_unsupported_require_after_the_requester_s_bye_is_excused_only_behind_a_lost_copy() {
+    a_481_after_the_requester_s_bye_is_excused_only_behind_a_lost_copy(
+        RuleId::UnsupportedExtension420,
+        "INFO",
+        "Require: frobnicate\r\n",
+    );
+}
+
+#[test]
+fn a_481_to_an_unrecognised_method_after_the_requester_s_bye_is_excused_only_behind_a_lost_copy() {
+    a_481_after_the_requester_s_bye_is_excused_only_behind_a_lost_copy(
+        RuleId::UnsupportedMethod405Allow,
+        "FROBNICATE",
+        "",
+    );
+}
+
 /// A request whose copy is lost on send still owes its rejection: the
 /// requester retransmits it (RFC 3261 §17.1.2) and the UAS answers the copy
 /// it takes. The lane's view holds no retransmitted copy, but a view kept
