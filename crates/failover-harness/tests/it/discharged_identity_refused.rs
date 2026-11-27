@@ -26,6 +26,12 @@
 //! 503; the retries fall 1.5 s after the delete and 2 s before 64·T1 from
 //! it; the last INVITE 2 s past 64·T1.
 //!
+//! When b1's 100 is lost on its way to alice, her Timer A copies go on: the
+//! one at 0.5 s reaches b1, the one at 1.5 s reaches b2 under the cookie
+//! naming b1, another primary's INVITE. b2 answers that copy the bare 503
+//! too: the caller ends her transaction on a final (ADR-0022), and nothing is
+//! consulted.
+//!
 //! Beyond the failover sweep: a query of death costs one worker, not both.
 
 use std::net::SocketAddr;
@@ -46,6 +52,7 @@ use failover_harness::{
 };
 use scenario_harness::callflow::{hangup, ANSWER_SDP, OFFER_SDP};
 use scenario_harness::{Agent, ClientInvite, Party};
+use sip_net::{Arrival, PreIngressAction, PreIngressHook};
 use tokio::time::Instant;
 
 use crate::departure_support::{call_id_placed_on, spawn_front_proxy, B1, B2};
@@ -74,6 +81,35 @@ const TRANSIT: Duration = Duration::from_millis(100);
 const BEFORE_THE_WINDOW_ENDS: Duration = Duration::from_secs(2);
 /// How far past 64·T1 from the delete the last INVITE is sent.
 const PAST_WINDOW: Duration = Duration::from_secs(2);
+/// When alice's Timer A copies of an INVITE that drew no response are sent
+/// (RFC 3261 §17.1.1.2): T1, then 3·T1 after it.
+const FIRST_COPY: Duration = T1;
+const SECOND_COPY: Duration = Duration::from_millis(1_500);
+
+/// What alice's bind lets through.
+#[derive(Clone, Copy)]
+enum AliceHears {
+    /// Every datagram.
+    Everything,
+    /// Every datagram but a 100 Trying: lost on the way.
+    NoTrying,
+}
+
+impl AliceHears {
+    /// The bind hook dropping what alice does not hear.
+    fn hook(self) -> Option<PreIngressHook> {
+        match self {
+            AliceHears::Everything => None,
+            AliceHears::NoTrying => Some(Arc::new(|arrival: &mut Arrival, _src, _depth| {
+                if arrival.raw().starts_with(b"SIP/2.0 100 ") {
+                    PreIngressAction::Drop
+                } else {
+                    PreIngressAction::Accept
+                }
+            })),
+        }
+    }
+}
 
 /// A routing backend whose answer for one Call-ID sticks the turn that asked
 /// it, while armed: the consult never returns. Every other call is routed to
@@ -168,10 +204,14 @@ struct Scene {
 
 impl Scene {
     /// Both workers behind the proxy, each on its own routing backend
-    /// sticking the stuck identity's Call-ID, ready at steady state.
-    async fn start(name: &str) -> Scene {
+    /// sticking the stuck identity's Call-ID, ready at steady state; alice
+    /// hears what `hears` lets through.
+    async fn start(name: &str, hears: AliceHears) -> Scene {
         let mut fh = FailoverHarness::new(name, &["b1", "b2"]);
-        let alice = fh.agent("alice", ALICE).await;
+        let alice = match hears.hook() {
+            None => fh.agent("alice", ALICE).await,
+            Some(hook) => fh.agent_with_pre_ingress("alice", ALICE, hook).await,
+        };
         let bob = fh.agent("bob", BOB).await;
         let proxy = spawn_front_proxy(&fh).await;
         let stuck = (call_id_placed_on("b1", "stuck-identity"), STUCK_FROM_TAG);
@@ -231,6 +271,16 @@ impl Scene {
     async fn stick_and_discharge(&mut self) -> Instant {
         let first = self.invite(self.stuck(), Party::Caller.first_cseq()).await;
         self.fh.advance(READ_STUCK).await;
+        let delete_applied = self.discharge().await;
+        self.fh.advance(GIVE_UP - READ_STUCK).await;
+        first.cancel().await.expect(481).await;
+        delete_applied
+    }
+
+    /// The host reads b1's consult of the stuck identity stuck and
+    /// discharges its call; b2 applies the delete; b1 exits and departs. The
+    /// instant b2 applied the delete.
+    async fn discharge(&mut self) -> Instant {
         let task = self.b1.seen.stuck_task().expect("b1's consult of the call sticks");
         let discharged = call_ref("b1", self.stuck());
         let copy = self.b2.sut.get(PartitionRole::Backup, "b1", &discharged).await;
@@ -242,8 +292,6 @@ impl Scene {
         self.fh.mark("b1", None, "crash", "the stuck exit");
         self.b1.sut.crash();
         self.fh.depart("b1");
-        self.fh.advance(GIVE_UP - READ_STUCK).await;
-        first.cancel().await.expect(481).await;
         delete_applied
     }
 
@@ -297,17 +345,17 @@ impl Scene {
         );
     }
 
-    /// Every call over on b2, each with its one CDR: the refused retry wrote
-    /// none. The RFC audit clean.
-    async fn finish(self, name: &str) {
+    /// Every call over on b2: the discharged one and those of `served`,
+    /// served on b2, each with its one CDR, the latter fully released; a
+    /// refused INVITE wrote none. The RFC audit clean.
+    async fn finish(self, name: &str, served: &[(&str, &str)]) {
         let discharged = call_ref("b1", self.stuck());
-        let served = call_ref("b2", self.stuck());
-        let other = call_ref("b2", self.other());
+        let served: Vec<String> = served.iter().map(|id| call_ref("b2", *id)).collect();
         let drained = self
             .fh
             .settle_terminal(async || {
                 let mut clean = self.b2.sut.memory_clean();
-                for call_ref in [&discharged, &served, &other] {
+                for call_ref in std::iter::once(&discharged).chain(&served) {
                     clean &= !self.b2.sut.holds_any_trace(call_ref).await;
                 }
                 clean
@@ -317,9 +365,10 @@ impl Scene {
         assert!(drained, "b2 holds nothing of any call");
         let nodes = [&self.b1.sut, &self.b2.sut];
         assert_eq!(total_cdrs_for(&nodes, &discharged), 1, "the discharge's CDR");
-        assert_eq!(total_cdrs_for(&nodes, &served), 1, "the identity's call past the window");
-        assert_eq!(total_cdrs_for(&nodes, &other), 1, "the other identity's CDR");
-        assert_call_fully_released(&[&self.b2.sut], &served).await;
+        for call_ref in &served {
+            assert_eq!(total_cdrs_for(&nodes, call_ref), 1, "{call_ref}: its one CDR");
+            assert_call_fully_released(&[&self.b2.sut], call_ref).await;
+        }
         self.fh.assert_sip_rfc_clean(name);
     }
 }
@@ -337,7 +386,7 @@ fn call_ref(primary: &str, identity: (&str, &str)) -> String {
 #[tokio::test(start_paused = true)]
 async fn the_survivor_refuses_the_identity_of_a_call_a_stuck_poll_held_for_64_t1() {
     let name = "discharged-identity-refused";
-    let mut s = Scene::start(name).await;
+    let mut s = Scene::start(name, AliceHears::Everything).await;
     let first_cseq = Party::Caller.first_cseq();
     let delete_applied = s.stick_and_discharge().await;
 
@@ -349,5 +398,33 @@ async fn the_survivor_refuses_the_identity_of_a_call_a_stuck_poll_held_for_64_t1
     s.refused_inside_the_window(first_cseq + 2).await;
 
     s.serve_the_identity_past_the_window(delete_applied, first_cseq + 3).await;
-    s.finish(name).await;
+    let (stuck, other) = (s.stuck.clone(), s.other.clone());
+    s.finish(name, &[(&stuck.0, stuck.1), (&other.0, other.1)]).await;
+}
+
+/// b1's 100 is lost on its way to alice, so her Timer A copies of the
+/// INVITE go on: the one at 0.5 s reaches b1, the one at 1.5 s, 0.5 s after
+/// the delete, reaches b2 under the cookie naming b1. b2 answers that copy
+/// the bare 503 at once, never asks its routing and dials no callee: the
+/// caller's transaction ends on a final, and the discharge's CDR is the
+/// call's only one.
+#[tokio::test(start_paused = true)]
+async fn a_copy_of_the_discharged_invite_reaching_the_survivor_draws_the_bare_503() {
+    let name = "discharged-identity-copy-refused";
+    let mut s = Scene::start(name, AliceHears::NoTrying).await;
+    let sent = Instant::now();
+    let mut first = s.invite(s.stuck(), Party::Caller.first_cseq()).await;
+    s.fh.advance(sent + FIRST_COPY - Instant::now()).await;
+    first.retransmit().await;
+    s.fh.advance(sent + READ_STUCK - Instant::now()).await;
+    s.discharge().await;
+
+    s.fh.advance(sent + SECOND_COPY - Instant::now()).await;
+    first.retransmit().await;
+    s.fh.advance(TRANSIT).await;
+    assert_eq!(s.b2.seen.consults_of(s.stuck().0), 0, "b2 never asks the identity's routing");
+    assert!(s.b2.seen.stuck_task().is_none(), "b2 does not stick");
+    first.expect(503).await;
+    assert_eq!(s.invites_to_bob(), 0, "no callee dialled");
+    s.finish(name, &[]).await;
 }
