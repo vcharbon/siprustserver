@@ -3,7 +3,7 @@
 //! every 10 ms, then cut or fall quiet. Every pass is cold; the second one
 //! opens after the backoff (100 ms or more) that follows the first's cut.
 
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -143,40 +143,52 @@ async fn pump(ms: u64) {
 }
 
 /// `w1` bootstrapping `flow` from `w0`: its store, metrics, the record of
-/// its passes and the router commands its pullers send.
+/// its passes, the calls its router serves as live takeover copies and the
+/// router commands its pullers send through the node's one sink.
 struct Node {
     flow: Partition,
     store: ReplicatingCallStore,
     metrics: B2buaMetrics,
     carried: CarriedCopies,
-    tx: mpsc::UnboundedSender<ReplCommand>,
+    takeovers: Arc<Mutex<HashSet<String>>>,
+    sink: RouterSink,
     rx: mpsc::UnboundedReceiver<ReplCommand>,
 }
 
 impl Node {
     fn new(flow: Partition) -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
+        let takeovers: Arc<Mutex<HashSet<String>>> = Arc::default();
+        let served = takeovers.clone();
+        let probe: TakeoverProbe = Arc::new(move |r: &str| served.lock().unwrap().contains(r));
         Self {
             flow,
             store: ReplicatingCallStore::new(1, Clock::test_at(0)),
             metrics: B2buaMetrics::new(),
             carried: CarriedCopies::default(),
-            tx,
+            takeovers,
+            sink: RouterSink::new(tx, probe),
             rx,
         }
     }
 
-    /// Start a puller of the flow over `passes`, the router serving the
-    /// calls `probe` names as takeover copies; its cancel handle.
-    fn pull(
+    /// Start a puller of the flow from `w0` over `passes`; its cancel handle.
+    fn pull(&self, passes: Vec<Pass>, config: PullerConfig) -> watch::Sender<bool> {
+        self.pull_from("w0", self.carried.clone(), passes, config)
+    }
+
+    /// Start a puller of the flow from `peer` over `passes`, its record of
+    /// the passes `carried`; its cancel handle.
+    fn pull_from(
         &self,
+        peer: &str,
+        carried: CarriedCopies,
         passes: Vec<Pass>,
         config: PullerConfig,
-        probe: TakeoverProbe,
     ) -> watch::Sender<bool> {
         let holder = Holder { passes: Mutex::new(passes.into()) };
         let (puller, _status) = Puller::new_at(
-            "w0",
+            peer,
             "w1",
             self.flow,
             "127.0.0.1:9".parse().unwrap(),
@@ -186,16 +198,19 @@ impl Node {
             Watermark::new(0, 0),
             self.metrics.clone(),
         );
-        let puller = puller
-            .with_repl_sink(RouterSink::new(self.tx.clone(), probe))
-            .with_carried(self.carried.clone());
+        let puller = puller.with_repl_sink(self.sink.clone()).with_carried(carried);
         let (cancel_tx, cancel_rx) = watch::channel(false);
         tokio::spawn(puller.run(cancel_rx));
         cancel_tx
     }
 
     fn pull_plain(&self, passes: Vec<Pass>) -> watch::Sender<bool> {
-        self.pull(passes, PullerConfig::fast_test(), Arc::new(|_: &str| false))
+        self.pull(passes, PullerConfig::fast_test())
+    }
+
+    /// The router serves call `id` as a live takeover copy.
+    fn serve_as_takeover(&self, id: &str) {
+        self.takeovers.lock().unwrap().insert(key(self.flow, id));
     }
 
     fn keyspace(&self) -> (PartitionRole, &'static str) {
@@ -406,20 +421,11 @@ async fn on_the_reclaim_flow_a_copy_written_since_its_pass_stays() {
 async fn on_the_backup_flow_the_sweep_drops_as_a_tail_delete_does() {
     let flow = Partition::Bak;
     let mut node = Node::new(flow);
-    let t = key(flow, "t");
-    let probe: TakeoverProbe = Arc::new(move |r: &str| r == t);
-    let _cancel = node.pull(
-        vec![
-            cut(vec![
-                put(flow, (1, 5), "x", 1),
-                put(flow, (1, 5), "r", 1),
-                put(flow, (1, 5), "t", 1),
-            ]),
-            quiet(vec![put(flow, (1, 9), "y", 1), noop((1, 9))]),
-        ],
-        PullerConfig::fast_test(),
-        probe,
-    );
+    node.serve_as_takeover("t");
+    let _cancel = node.pull_plain(vec![
+        cut(vec![put(flow, (1, 5), "x", 1), put(flow, (1, 5), "r", 1), put(flow, (1, 5), "t", 1)]),
+        quiet(vec![put(flow, (1, 9), "y", 1), noop((1, 9))]),
+    ]);
     pump(60).await;
     assert!(node.holds("t").await, "pass 1 landed before its cut");
     node.write("r", (1, 1)).await;
@@ -479,7 +485,6 @@ async fn a_reclaim_whose_hard_timer_reclaimed_a_partial_seed_sweeps_nothing() {
             quiet(vec![put(flow, (1, 9), "y", 1), noop((1, 9))]),
         ],
         config,
-        Arc::new(|_: &str| false),
     );
     pump(3_000).await;
 
@@ -487,6 +492,48 @@ async fn a_reclaim_whose_hard_timer_reclaimed_a_partial_seed_sweeps_nothing() {
     assert!(node.holds("y").await, "pass 2 caught up");
     assert_eq!(node.swept(), 0);
     assert_eq!(node.reclaim_commands(), ["reclaim all", "reclaim all"]);
+}
+
+/// A bulk reclaim materialises the copies of every Reclaim flow: one another
+/// flow fires while this flow's record holds a copy may serve it, so this
+/// bootstrap sweeps nothing (the residual of ADR-0014 §8), and one fired
+/// while the record held nothing leaves the sweep whole. The flow from `w2`
+/// catches up 10 ms after its spawn, 50 ms before or after the flow from
+/// `w0` opens; that one lands X at 10 ms, is cut at 20 ms and catches up
+/// without X past the 100 ms backoff, so X is held from 10 ms to then.
+#[tokio::test(start_paused = true)]
+async fn a_bulk_reclaim_of_another_flow_while_a_pass_holds_a_copy_leaves_its_sweep_out() {
+    let flow = Partition::Pri;
+    for other_before in [false, true] {
+        let mut node = Node::new(flow);
+        let other = || {
+            let catches_up = vec![quiet(vec![noop((1, 1))])];
+            node.pull_from("w2", CarriedCopies::default(), catches_up, PullerConfig::fast_test())
+        };
+        let mut started = Vec::new();
+        if other_before {
+            started.push(other());
+            pump(50).await;
+        }
+        started.push(node.pull_plain(vec![
+            cut(vec![put(flow, (1, 5), "x", 1)]),
+            quiet(vec![put(flow, (1, 9), "y", 1), noop((1, 9))]),
+        ]));
+        if !other_before {
+            pump(50).await;
+            started.push(other());
+        }
+        pump(1_000).await;
+
+        assert_eq!(node.holds("x").await, !other_before, "other before: {other_before}");
+        assert!(node.holds("y").await);
+        assert_eq!(node.swept(), u64::from(other_before));
+        let x_dropped = other_before.then(|| format!("dropped {}", key(flow, "x")));
+        let mut want = vec!["reclaim all".to_string()];
+        want.extend(x_dropped);
+        want.push("reclaim all".to_string());
+        assert_eq!(node.reclaim_commands(), want, "other before: {other_before}");
+    }
 }
 
 /// A puller spawned between two passes reads what the earlier ones carried
