@@ -20,8 +20,16 @@ use crate::store::{partition_of, PartitionRole, PutOpts};
 #[derive(Clone, Default)]
 pub(crate) struct CarriedCopies(Arc<Mutex<Passes>>);
 
+/// One stream of the flow, as the record counts its frames: only the stream
+/// opened last does, so a puller cancelled for a respawn and still finishing
+/// a step neither records nor sweeps for its successor.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct PassId(u64);
+
 #[derive(Default)]
 struct Passes {
+    /// The streams opened on the flow so far; the last one is the current pass.
+    opened: u64,
     /// The peer incarnation the recorded passes were read from: what a pass
     /// of another incarnation lacks says nothing of what this one ended.
     gen: Option<u64>,
@@ -33,6 +41,17 @@ struct Passes {
     /// A hard timer's bulk reclaim served a partial seed: nothing is recorded
     /// or swept until a pass catches up.
     reclaimed_early: bool,
+}
+
+impl Passes {
+    fn current(&self, pass: PassId) -> bool {
+        pass == PassId(self.opened)
+    }
+
+    /// Forget every pass recorded, keeping the count of streams opened.
+    fn restart(&mut self, gen: Option<u64>, reclaimed_early: bool) {
+        *self = Passes { opened: self.opened, gen, reclaimed_early, ..Passes::default() };
+    }
 }
 
 /// A stored copy as the sweep tells it from a later write: its version and
@@ -48,21 +67,25 @@ impl CarriedCopies {
         crate::poison::locked(&self.0, crate::poison::PULLER_CARRIED_COPIES)
     }
 
-    /// A cold pass opens: none of its keys is carried yet.
-    pub(super) fn open_pass(&self) {
-        self.passes().this_pass.clear();
+    /// A stream of the flow opens and becomes the current pass: none of its
+    /// keys is carried yet, and no earlier stream's frame counts any more.
+    pub(super) fn open_pass(&self) -> PassId {
+        let mut passes = self.passes();
+        passes.opened += 1;
+        passes.this_pass.clear();
+        PassId(passes.opened)
     }
 
-    /// A frame of the current pass, read from peer incarnation `gen`, carried
-    /// `key`, of which the store holds `left` now. A frame of another
-    /// incarnation than the recorded passes' forgets them first.
-    fn carried(&self, gen: u64, key: &str, left: Option<StoredCopy>) {
+    /// A frame of `pass`, read from peer incarnation `gen`, carried `key`, of
+    /// which the store holds `left` now. A frame of another incarnation than
+    /// the recorded passes' forgets them first.
+    fn carried(&self, pass: PassId, gen: u64, key: &str, left: Option<StoredCopy>) {
         let mut passes = self.passes();
-        if passes.reclaimed_early {
+        if passes.reclaimed_early || !passes.current(pass) {
             return;
         }
         if passes.gen != Some(gen) {
-            *passes = Passes { gen: Some(gen), ..Passes::default() };
+            passes.restart(Some(gen), false);
         }
         passes.this_pass.insert(key.to_string());
         match left {
@@ -71,23 +94,29 @@ impl CarriedCopies {
         };
     }
 
-    /// The current pass caught up at a position of peer incarnation `gen`:
-    /// the copies earlier passes of that incarnation left and this one did not
-    /// carry, each as it was held then. The record empties.
-    fn caught_up(&self, gen: u64) -> Vec<(String, StoredCopy)> {
+    /// `pass` caught up at a position of peer incarnation `gen`: the copies
+    /// earlier passes of that incarnation left and this one did not carry,
+    /// each as it was held then, and the record empties. Nothing for a pass
+    /// that is no longer the current one.
+    fn caught_up(&self, pass: PassId, gen: u64) -> Vec<(String, StoredCopy)> {
         let mut passes = self.passes();
-        let ended = std::mem::take(&mut *passes);
-        if ended.reclaimed_early || ended.gen != Some(gen) {
+        if !passes.current(pass) {
             return Vec::new();
         }
-        let Passes { left, this_pass, .. } = ended;
+        let left = std::mem::take(&mut passes.left);
+        let this_pass = std::mem::take(&mut passes.this_pass);
+        let sweeps = !passes.reclaimed_early && passes.gen == Some(gen);
+        passes.restart(None, false);
+        if !sweeps {
+            return Vec::new();
+        }
         left.into_iter().filter(|(key, _)| !this_pass.contains(key)).collect()
     }
 
     /// A hard timer's bulk reclaim served a partial seed: this bootstrap
     /// sweeps nothing (the residual of ADR-0014 §8).
     pub(super) fn reclaimed_early(&self) {
-        *self.passes() = Passes { reclaimed_early: true, ..Passes::default() };
+        self.passes().restart(None, true);
     }
 }
 
@@ -114,22 +143,22 @@ impl Puller {
         Some(StoredCopy { version, incarnation: self.store.incarnation(call_ref) })
     }
 
-    /// A `Data` frame of a cold pass, before its first catch-up `Noop`,
+    /// A `Data` frame of the cold `pass`, before its first catch-up `Noop`,
     /// carried `call_ref` at `at`, whatever the store made of it.
-    pub(super) fn note_carried(&self, at: Watermark, call_ref: &str) {
-        self.carried.carried(at.gen, call_ref, self.held_copy(call_ref));
+    pub(super) fn note_carried(&self, pass: PassId, at: Watermark, call_ref: &str) {
+        self.carried.carried(pass, at.gen, call_ref, self.held_copy(call_ref));
     }
 
-    /// The cold pass caught up at `at`: each copy an earlier pass of the
+    /// The cold `pass` caught up at `at`: each copy an earlier pass of the
     /// bootstrap left that this pass did not carry is dropped, local-only,
     /// unless it was written since, is a live takeover copy, or is an Element
     /// the `Delete` guard keeps. On the Reclaim flow the router is told of
     /// each drop as of a backup's applied delete (ADR-0047 D8), ahead of the
     /// bulk reclaim. Counted on `b2bua_repl_bootstrap_swept_total` and lined
     /// once when any copy went.
-    pub(super) async fn sweep_uncarried(&self, at: Watermark) {
+    pub(super) async fn sweep_uncarried(&self, pass: PassId, at: Watermark) {
         let mut swept = 0u64;
-        for (call_ref, copy) in self.carried.caught_up(at.gen) {
+        for (call_ref, copy) in self.carried.caught_up(pass, at.gen) {
             if self.drop_uncarried(&call_ref, copy).await {
                 swept += 1;
             }

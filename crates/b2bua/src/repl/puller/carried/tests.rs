@@ -17,7 +17,7 @@ use repl_net::transport::{
 use sip_clock::Clock;
 use tokio::sync::{mpsc, watch};
 
-use super::CarriedCopies;
+use super::{CarriedCopies, StoredCopy};
 use crate::metrics::B2buaMetrics;
 use crate::repl::{Puller, PullerConfig, ReplicatingCallStore, RouterSink};
 use crate::router::ReplCommand;
@@ -269,21 +269,70 @@ async fn a_copy_an_earlier_pass_carried_and_the_last_did_not_is_dropped() {
 
 /// The holder restarted between the passes: pass 2 is of another
 /// incarnation, whose scan may lack a call the earlier one still holds (not
-/// yet recovered), so nothing pass 1 carried is dropped.
+/// yet recovered), so nothing pass 1 carried is dropped, whether pass 2
+/// carries another call or, freshly restarted, nothing at all.
 #[tokio::test(start_paused = true)]
 async fn a_pass_of_another_holder_incarnation_drops_nothing() {
+    for flow in FLOWS {
+        for second in [vec![put(flow, (2, 3), "y", 1), noop((2, 3))], vec![noop((2, 1))]] {
+            let node = Node::new(flow);
+            let _cancel =
+                node.pull_plain(vec![cut(vec![put(flow, (1, 5), "x", 1)]), quiet(second)]);
+            pump(1_000).await;
+
+            assert!(
+                node.holds("x").await,
+                "{flow:?}: X, carried by the earlier incarnation, stays"
+            );
+            assert_eq!(node.swept(), 0, "{flow:?}");
+        }
+    }
+}
+
+/// Pass 1 of incarnation 1 carries X; the holder restarts; pass 2, of
+/// incarnation 2, carries Y and is cut; pass 3 catches up carrying nothing.
+/// Only Y, which an earlier pass of the catching-up incarnation carried,
+/// goes.
+#[tokio::test(start_paused = true)]
+async fn only_the_passes_of_the_incarnation_that_catches_up_are_swept() {
     for flow in FLOWS {
         let node = Node::new(flow);
         let _cancel = node.pull_plain(vec![
             cut(vec![put(flow, (1, 5), "x", 1)]),
-            quiet(vec![put(flow, (2, 3), "y", 1), noop((2, 3))]),
+            cut(vec![put(flow, (2, 3), "y", 1)]),
+            quiet(vec![noop((2, 4))]),
         ]);
-        pump(1_000).await;
+        pump(1_500).await;
 
-        assert!(node.holds("x").await, "{flow:?}: X, carried by the earlier incarnation, stays");
-        assert!(node.holds("y").await);
-        assert_eq!(node.swept(), 0, "{flow:?}");
+        assert!(node.holds("x").await, "{flow:?}: X, of the earlier incarnation, stays");
+        assert!(!node.holds("y").await, "{flow:?}: Y ended between passes 2 and 3");
+        assert_eq!(node.swept(), 1, "{flow:?}");
     }
+}
+
+/// A stream opened after the current pass fences it out: a cancelled
+/// puller that opens its stream late leaves its successor's pass recording
+/// nothing and sweeping nothing, and a catch-up of a pass that is no longer
+/// the current one sweeps nothing and leaves the record to the current one.
+#[test]
+fn only_the_stream_opened_last_records_and_sweeps() {
+    let held = || Some(StoredCopy { version: (1, 0), incarnation: None });
+
+    let record = CarriedCopies::default();
+    let first = record.open_pass();
+    record.carried(first, 1, "x", held());
+    let successor = record.open_pass();
+    record.carried(successor, 1, "x", held());
+    let _late = record.open_pass();
+    assert!(record.caught_up(successor, 1).is_empty(), "X, carried by the successor, stays");
+
+    let record = CarriedCopies::default();
+    let stale = record.open_pass();
+    record.carried(stale, 1, "x", held());
+    let current = record.open_pass();
+    assert!(record.caught_up(stale, 1).is_empty(), "a stale catch-up sweeps nothing");
+    let swept: Vec<String> = record.caught_up(current, 1).into_iter().map(|(k, _)| k).collect();
+    assert_eq!(swept, ["x"], "the current pass sweeps what the earlier one left");
 }
 
 /// The last pass carries a key in any frame: X at a version the stored copy

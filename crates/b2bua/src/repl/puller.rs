@@ -427,9 +427,7 @@ impl Puller {
         if !bootstrapped && !self.is_reclaim() {
             self.store.clear_refusals_of(self.peer_ordinal());
         }
-        if !bootstrapped {
-            self.carried.open_pass();
-        }
+        let pass = self.carried.open_pass();
         let mut applied_in_bootstrap = 0u64;
         // The idle bound (ADR-0045): a stream that delivers nothing for this long
         // is left, whatever the phase.
@@ -538,7 +536,7 @@ impl Puller {
                     }
                     if !bootstrapped {
                         applied_in_bootstrap += 1;
-                        self.note_carried(at, &call_ref);
+                        self.note_carried(pass, at, &call_ref);
                     }
                     self.report_applied(mode, outcome, op, &call_ref, (call_gen, call_bgen)).await;
                     self.signal(mode, outcome, bootstrapped, &call_ref, write, origin_now_ms);
@@ -571,7 +569,7 @@ impl Puller {
                         self.scan_applied.store(0, std::sync::atomic::Ordering::Relaxed);
                         self.mark_bootstrap_complete(applied_in_bootstrap, "first catch-up Noop");
                         *deadline = None;
-                        self.sweep_uncarried(at).await;
+                        self.sweep_uncarried(pass, at).await;
                         // Reclaim flow: bulk-materialise everything the bootstrap
                         // scan imported into the live serving map (smoothed).
                         if self.is_reclaim() {
