@@ -318,13 +318,29 @@ fn a_racing_re_invite_cancelled_before_its_final_is_answered_487() {
 
 /// The 487 answers §14.2 only behind a CANCEL bob matched before it: with no
 /// CANCEL, with the CANCEL refused 481, with the CANCEL arriving after the
-/// 487, or with a 2xx after the CANCEL, the race is still charged.
+/// 487, with a 2xx after the CANCEL, or with a CANCEL the strict reading
+/// refuses before the 487 and an admitted one after it, the race is still
+/// charged.
 #[test]
 fn a_racing_re_invite_s_487_without_a_matched_cancel_before_it_is_violated() {
     let racing = |status| rsp(4_000, BOB, ALICE, status, "z9hG4bK-2", 3, "at", "bt", "");
     let [first, second, cancel] = a_cancelled_race(3_000);
     let [.., late_cancel] = a_cancelled_race(5_000);
+    let malformed_cancel = Msg { refused: true, ..cancel.clone() };
     let cases = [
+        (
+            "a refused CANCEL before the 487, an admitted one after it",
+            vec![
+                first.clone(),
+                second.clone(),
+                malformed_cancel,
+                cancel_answered(3_500, 400),
+                racing(487),
+                late_cancel.clone(),
+                cancel_answered(5_500, 200),
+            ],
+            487,
+        ),
         ("no CANCEL", vec![first.clone(), second.clone(), racing(487)], 487),
         (
             "the CANCEL refused 481",
