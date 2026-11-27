@@ -544,6 +544,8 @@ the call has one CDR.
   while the endpoint does not read ready. A notice the router queued on a call's turn
   queue carries a copy of its body, and a call's queue always takes an internal event:
   a call whose turns run slower than its primary writes holds one body per write
-  queued. A router slower than
+  queued. A puller that waits on the budget reports no position: past the 1 s claim
+  TTL the primary reads the flow stale and holds no new effect for it (ADR-0055 §3)
+  until the router catches up. A router slower than
   the server's 15 s send stall drops the stream, and the puller pulls it again from
   its position.
