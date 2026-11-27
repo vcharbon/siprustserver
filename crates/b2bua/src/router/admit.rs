@@ -19,13 +19,15 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use call::Call;
-use sip_message::SipRequest;
+use sip_message::generators::GenerateError;
+use sip_message::{SipRequest, SipResponse};
 use sip_txn::TransactionLayer;
 
 use super::RouterCtx;
 use crate::admission::{class_of, first_refusal, Refusals, Refused, RouterReadings};
 use crate::capacity::{CapacityReading, Occupancy};
 use crate::dispatch::DispatchClass;
+use crate::new_calls::Refusal;
 
 /// New calls admitted at ingress whose turn has not created their call yet,
 /// by `callRef` and INVITE CSeq number. Clone shares them.
@@ -183,12 +185,15 @@ pub(super) async fn admit(
     src: SocketAddr,
     dispatch: DispatchClass,
 ) -> Option<UnbornCall> {
-    let refused =
-        super::discharged::refusal(ctx, req).or_else(|| judge(ctx, call_ref, req, dispatch));
+    let refused = match super::discharged::refusal(ctx, req) {
+        Some(bare) => Some((Refusal::Discharged, bare)),
+        None => judge(ctx, call_ref, req, dispatch)
+            .map(|refused| (refused.reason, ctx.refusals.answer(req, refused))),
+    };
     match refused {
-        Some(refused) => {
-            answer(&ctx.txn, &ctx.refusals, req, src, refused).await;
-            ctx.metrics.new_calls().reject(refused.reason, class_of(req));
+        Some((reason, response)) => {
+            send(&ctx.txn, response, req, src).await;
+            ctx.metrics.new_calls().reject(reason, class_of(req));
             None
         }
         None => Some(ctx.unborn.admit(call_ref, req.cseq().seq())),
@@ -260,7 +265,20 @@ pub(super) async fn answer(
     src: SocketAddr,
     refused: Refused,
 ) {
-    if let Ok(resp) = refusals.answer(req, refused) {
+    send(txn, refusals.answer(req, refused), req, src).await;
+}
+
+/// Send `response`, the final refusing the new INVITE `req` from `src`,
+/// through its server transaction ([`reply_to`](super::reply_to::reply_to)).
+/// A request whose lines no response can echo, `response` an error, is left
+/// to its transaction's lifetime.
+pub(super) async fn send(
+    txn: &TransactionLayer,
+    response: Result<SipResponse, GenerateError>,
+    req: &SipRequest,
+    src: SocketAddr,
+) {
+    if let Ok(resp) = response {
         let _ = txn.send_response(resp, super::reply_to::reply_to(req, src)).await;
     }
 }

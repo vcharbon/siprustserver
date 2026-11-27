@@ -80,6 +80,10 @@ Three refusals have no `Retry-After`, because an early retry does not help:
 - the decision backend is down;
 - an operator cordoned the worker.
 
+The refusal of the Call-ID and From tag of a call that a peer ended after a stuck poll has no
+`Retry-After` either: the worker is not loaded, and a `Retry-After` stops the previous hop from
+sending it any request for that time (RFC 3261 §21.5.4).
+
 ## What is never refused
 
 | Item | Guarantee |

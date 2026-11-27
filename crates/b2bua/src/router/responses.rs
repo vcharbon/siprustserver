@@ -234,7 +234,8 @@ pub(super) fn build_unborn_500(
 }
 
 /// The bare **503 Service Unavailable** for an initial INVITE whose call is
-/// gone before the final it was owed (ADR-0022 X2/X3): the failure an
+/// gone before the final it was owed (ADR-0022 X2/X3), or refused on the
+/// identity of a call a peer discharged (ADR-0057 §6): the failure an
 /// upstream element reroutes on. Sent through the INVITE server transaction,
 /// the To-tag `minted` (RFC 3261 §8.2.6.2), no Retry-After, no Reason; the
 /// deployment's `advertisement` for a minted final rides.

@@ -40,11 +40,13 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
+use b2bua::admission::Class;
 use b2bua::decision::{
     CallDecisionEngine, CallDecisionError, CallFailureRequest, CallFailureResponse,
     CallReferRequest, CallReferResponse, NewCallRequest, NewCallResponse, ScriptedDecisionEngine,
 };
 use b2bua::limiter::NoopLimiter;
+use b2bua::new_calls::Refusal;
 use b2bua::StuckDischarge;
 use failover_harness::{
     assert_call_fully_released, total_cdrs_for, FailoverHarness, PartitionRole, ProxySut,
@@ -52,6 +54,7 @@ use failover_harness::{
 };
 use scenario_harness::callflow::{hangup, ANSWER_SDP, OFFER_SDP};
 use scenario_harness::{Agent, ClientInvite, Party};
+use sip_message::header::HeaderName;
 use sip_net::{Arrival, PreIngressAction, PreIngressHook};
 use tokio::time::Instant;
 
@@ -300,13 +303,20 @@ impl Scene {
     /// routing, and dials no callee.
     async fn refused_inside_the_window(&self, cseq: u32) {
         let dialled = self.invites_to_bob();
+        let refused = self.refused_on_b2();
         let mut retry = self.invite(self.stuck(), cseq).await;
         self.fh.advance(TRANSIT).await;
         let consults = self.b2.seen.consults_of(self.stuck().0);
         assert_eq!(consults, 0, "b2 never asks the identity's routing");
         assert!(self.b2.seen.stuck_task().is_none(), "b2 does not stick");
-        retry.expect(503).await;
+        assert_bare(&retry.expect(503).await);
         assert_eq!(self.invites_to_bob(), dialled, "no callee dialled");
+        assert_eq!(self.refused_on_b2(), refused + 1, "counted as a discharged identity");
+    }
+
+    /// The new calls b2 refused on a discharged identity.
+    fn refused_on_b2(&self) -> u64 {
+        self.b2.sut.metrics().new_calls().rejected(Refusal::Discharged, Class::Normal)
     }
 
     /// The INVITEs bob received so far.
@@ -373,6 +383,14 @@ impl Scene {
     }
 }
 
+/// `resp` is the bare 503: no `Retry-After`, which would keep the previous
+/// hop off the healthy survivor (RFC 3261 §21.5.4), and no `Reason`.
+fn assert_bare(resp: &sip_message::SipResponse) {
+    assert_eq!(resp.reason(), "Service Unavailable");
+    assert!(!resp.has(&HeaderName::RetryAfter), "no Retry-After");
+    assert!(!resp.has(&HeaderName::Reason), "no Reason");
+}
+
 /// The `callRef` of the call `identity` (Call-ID, From tag) opens on `primary`.
 fn call_ref(primary: &str, identity: (&str, &str)) -> String {
     call::derive_call_ref(primary, identity.0, identity.1)
@@ -424,7 +442,10 @@ async fn a_copy_of_the_discharged_invite_reaching_the_survivor_draws_the_bare_50
     s.fh.advance(TRANSIT).await;
     assert_eq!(s.b2.seen.consults_of(s.stuck().0), 0, "b2 never asks the identity's routing");
     assert!(s.b2.seen.stuck_task().is_none(), "b2 does not stick");
-    first.expect(503).await;
+    assert_bare(&first.expect(503).await);
     assert_eq!(s.invites_to_bob(), 0, "no callee dialled");
+    assert_eq!(s.refused_on_b2(), 1, "counted as a discharged identity");
+    let dropped = s.b2.sut.metrics().foreign_invite_copies_dropped_total();
+    assert_eq!(dropped, 0, "answered, not dropped as another primary's copy");
     s.finish(name, &[]).await;
 }

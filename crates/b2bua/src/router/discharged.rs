@@ -5,24 +5,36 @@
 //! the identity's retries and the copies of its INVITE placed here as another
 //! primary's, for 64·T1 after the discharge's delete applied
 //! ([`DischargedIdentities`](crate::repl::DischargedIdentities)).
+//!
+//! The 503 carries no `Retry-After`: the previous hop sends this healthy node
+//! no request for the duration one states (RFC 3261 §21.5.4), and only the
+//! one identity is refused.
 
-use sip_message::{SipMessage, SipRequest};
+use sip_message::generators::GenerateError;
+use sip_message::{SipMessage, SipRequest, SipResponse};
 
-use super::admit;
-use super::RouterCtx;
-use crate::admission::{class_of, Refused};
+use super::responses::build_unborn_503;
+use super::{admit, RouterCtx};
+use crate::admission::class_of;
 use crate::new_calls::Refusal;
 use b2bua_sdk::event::CallEvent;
 
-/// The refusal of `req`, a new INVITE, when it is initial (no To-tag) and a
-/// peer discharged a call on its Call-ID and From-tag in the last 64·T1.
-pub(super) fn refusal(ctx: &RouterCtx, req: &SipRequest) -> Option<Refused> {
+/// The bare 503 refusing `req`, a new INVITE, when it is initial (no To-tag)
+/// and a peer discharged a call on its Call-ID and From-tag in the last
+/// 64·T1: its To-tag derived from `req`, so every copy draws the same one.
+pub(super) fn refusal(
+    ctx: &RouterCtx,
+    req: &SipRequest,
+) -> Option<Result<SipResponse, GenerateError>> {
     let refused = req.to().tag().is_none()
         && ctx.state.repl_store().is_some_and(|repl| {
             let from_tag = req.from().tag().unwrap_or_default();
             repl.discharged().refuses(req.call_id().as_str(), from_tag)
         });
-    refused.then_some(Refused { reason: Refusal::Discharged, not_before_sec: 0 })
+    refused.then(|| {
+        let minted = ctx.stateless_tagger.for_request(req).0;
+        build_unborn_503(req, minted, &ctx.config.minted_final_advertisement)
+    })
 }
 
 /// Answer the initial INVITE `event` carries, another primary's copy, the
@@ -33,8 +45,8 @@ pub(super) fn refusal(ctx: &RouterCtx, req: &SipRequest) -> Option<Refused> {
 pub(super) async fn answers_copy(ctx: &RouterCtx, event: &CallEvent) -> bool {
     let CallEvent::Sip { message, src, .. } = event else { return false };
     let SipMessage::Request(req) = message.as_ref() else { return false };
-    let Some(refused) = refusal(ctx, req) else { return false };
-    admit::answer(&ctx.txn, &ctx.refusals, req, *src, refused).await;
-    ctx.metrics.new_calls().reject(refused.reason, class_of(req));
+    let Some(response) = refusal(ctx, req) else { return false };
+    admit::send(&ctx.txn, response, req, *src).await;
+    ctx.metrics.new_calls().reject(Refusal::Discharged, class_of(req));
     true
 }
