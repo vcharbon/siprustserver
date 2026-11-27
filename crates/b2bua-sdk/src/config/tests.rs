@@ -109,6 +109,25 @@ fn rejects_setup_deadline_at_or_above_the_txn_bound() {
 }
 
 #[test]
+fn a_keepalive_past_the_longest_delay_is_refused() {
+    for (keepalive, reaper) in [(B2buaConfig::MAX_KEEPALIVE_SEC + 1, 0), (i64::MAX, 1_000)] {
+        let c = B2buaConfig {
+            keepalive_interval_sec: keepalive,
+            reaper_idle_max_sec: reaper,
+            ..Default::default()
+        };
+        let e = c.validate().expect_err("a cadence past the longest delay must be rejected");
+        assert!(e.contains(&format!("B2BUA_KEEPALIVE_SEC={keepalive} > max 2147483 s")), "{e}");
+    }
+}
+
+#[test]
+fn a_keepalive_at_the_longest_delay_validates() {
+    let c = B2buaConfig { keepalive_interval_sec: 2_147_483, ..Default::default() };
+    assert_eq!(c.validate(), Ok(()));
+}
+
+#[test]
 fn rejects_txn_bound_outside_the_supported_range() {
     for bad in [700, 20] {
         let c =

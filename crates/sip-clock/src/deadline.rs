@@ -8,7 +8,10 @@ use tokio::time::Instant;
 
 /// The furthest a deadline lies: past it, a configured duration of a year or
 /// more, or a deadline read off a skewed clock, is held here. It is below the
-/// range of the timer wheel (2^36 ms, about 2.2 years).
+/// range of the timer wheel (2^36 ms, about 2.2 years). It is the driver's
+/// ceiling on an `Instant`; the engine's rule-facing bound on a per-call
+/// timer's delay, `b2bua_sdk::timer_delay::MAX_DELAY_MS` (about 24.8 days),
+/// lies below it.
 pub const MAX_DELAY: Duration = Duration::from_secs(365 * 24 * 3600);
 
 /// The instant `delay` after `from`, at most [`MAX_DELAY`] after it, and at

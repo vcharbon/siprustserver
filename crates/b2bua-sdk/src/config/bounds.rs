@@ -10,6 +10,12 @@ impl B2buaConfig {
     /// **production** floor only — the paused-clock test harness builds configs
     /// directly and skips [`validate`](Self::validate) to use a faster cadence.
     pub const MIN_KEEPALIVE_SEC: i64 = 120;
+    /// Ceiling for [`keepalive_interval_sec`](Self::keepalive_interval_sec)
+    /// (s): the longest whole-second cadence within
+    /// [`MAX_DELAY_MS`](crate::timer_delay::MAX_DELAY_MS), so the keepalive
+    /// deadline and the windows derived from the cadence stay within the
+    /// engine's longest delay.
+    pub const MAX_KEEPALIVE_SEC: i64 = crate::timer_delay::MAX_DELAY_MS / 1000;
     /// Floor for [`invite_txn_timeout_sec`](Self::invite_txn_timeout_sec) (s):
     /// the out-of-dialog bound must stay above the 32 s in-dialog Timer B.
     pub const MIN_INVITE_TXN_TIMEOUT_SEC: i64 = 33;

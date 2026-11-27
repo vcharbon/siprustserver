@@ -113,7 +113,8 @@ pub struct B2buaConfig {
     /// UAC is not expecting it. Overridable per worker via `B2BUA_KEEPALIVE_SEC`.
     /// The test harness lowers this to 30 s so paused-clock tests stay fast.
     /// A probe's only deadline is its own transaction's Timer F (32 s, RFC 3261
-    /// §17.1.2.2): unanswered by then, it ends the call.
+    /// §17.1.2.2): unanswered by then, it ends the call. At most
+    /// [`MAX_KEEPALIVE_SEC`](Self::MAX_KEEPALIVE_SEC).
     pub keepalive_interval_sec: i64,
     /// Limiter-refresh cadence, seconds — how often a counted call extends its
     /// lease on the limiter. The lease is the limiter's own, stated in its

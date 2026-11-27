@@ -104,11 +104,19 @@ impl B2buaConfig {
                 Self::MIN_KEEPALIVE_SEC
             ));
         }
+        if self.keepalive_interval_sec > Self::MAX_KEEPALIVE_SEC {
+            out.push(format!(
+                "B2BUA_KEEPALIVE_SEC={} > max {} s (about 24.8 days): the cadence is a timer \
+                 delay, at most the engine's longest delay",
+                self.keepalive_interval_sec,
+                Self::MAX_KEEPALIVE_SEC
+            ));
+        }
         // The reaper's staleness verdict is only provable when a healthy call is
         // guaranteed at least one liveness-bearing event (its keepalive OPTIONS
         // `200`) inside the idle window (ADR-0020 X4).
         if self.reaper_idle_max_sec != 0
-            && self.reaper_idle_max_sec < 2 * self.keepalive_interval_sec
+            && self.reaper_idle_max_sec < self.keepalive_interval_sec.saturating_mul(2)
         {
             out.push(format!(
                 "reaper_idle_max_sec={} < 2 × B2BUA_KEEPALIVE_SEC={}: a healthy call is only \
