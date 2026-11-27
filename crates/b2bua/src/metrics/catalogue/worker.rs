@@ -194,7 +194,7 @@ pub const REPL_INBOUND_DROPPED: Family = Family::counter(
 pub const REPL_BOOTSTRAP_DROPPED: Family = Family::counter(
     "b2bua_repl_bootstrap_dropped_total",
     Labels::Product(&[Dim::new("flow", &["recovery", "backup"])]),
-    "cold replication streams that ended before their first catch-up Noop, by flow (flow=recovery|backup, ADR-0011 X5): a bootstrap scan cut short, after which the next pull scans again from the first key. A healthy cluster climbs by one per link cut or peer restart that falls mid-scan; a count that keeps climbing on one flow names a scan that cannot finish, and the bodies past the point it drops at are not held there",
+    "cold replication streams that ended before their first catch-up Noop, by flow (flow=recovery|backup, ADR-0011 X5): a bootstrap scan cut short, after which the next pull scans again from the first key. A healthy cluster climbs by one per link cut or peer restart that falls mid-scan; a count that keeps climbing on one flow names a scan that cannot finish, and the bodies past the point it drops at are not held there. It also climbs with no scan: a PullRequest that cannot be sent, a peer on another protocol refusing each pull (b2bua_repl_stream_refused_total), and a peer silent past the idle bound (the puller state line state=idle)",
 );
 
 pub const DRAIN_EXITS: Family = Family::counter(

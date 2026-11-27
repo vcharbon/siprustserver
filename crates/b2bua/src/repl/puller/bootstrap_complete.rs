@@ -6,11 +6,13 @@
 //! applied) or, best-effort, from the bootstrap hard timer (bodies may be
 //! missing). It releases what must not wait on a peer that cannot be reached:
 //! the readiness of a flow that never connected (the supervisor's
-//! `FlowState::ready` and `PeerEntry::ready`), `all_bootstrapped`, and the
-//! Reclaim flow's bulk reclaim of what the scan imported. It never reads as the calls being held: a drain's
-//! caught-up read and the hold read the `Position` claim, which only a
-//! catch-up `Noop` or a post-bootstrap `Data` answers, and a reached flow's
-//! readiness reads `current`.
+//! `FlowState::ready` and `PeerEntry::ready`) and `all_bootstrapped`. The
+//! Reclaim flow's bulk reclaim of what the scan imported fires on the first
+//! `Noop` and on the timer running out while a stream is open, not on the
+//! timer running out while connecting or backing off. Completion never reads
+//! as the calls being held: a drain's caught-up read and the hold read the
+//! `Position` claim, which only a catch-up `Noop` or a post-bootstrap `Data`
+//! answers, and a reached flow's readiness reads `current`.
 
 use std::sync::atomic::Ordering;
 
@@ -56,8 +58,9 @@ impl Puller {
                 flow = self.flow_label(),
                 applied,
                 reason,
-                "bootstrap hard timer ran out on a reached peer: complete best-effort, the bodies \
-                 past those applied are not held until a scan reaches its catch-up Noop"
+                "bootstrap hard timer ran out on a reached peer: complete best-effort, bodies \
+                 past those applied may be missing; no caught-up read is made until a catch-up \
+                 Noop"
             );
         }
         self.mark_bootstrap_complete(applied, reason);
