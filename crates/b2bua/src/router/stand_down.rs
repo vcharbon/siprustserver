@@ -51,7 +51,7 @@ pub(super) async fn offer(ctx: &Arc<RouterCtx>, call_ref: String, write: Primary
 /// nothing. An Element gone is the primary's delete.
 pub(super) async fn offer_the_element(ctx: &RouterCtx, call_ref: &str) {
     let write = match ctx.state.replica_body(call_ref).await {
-        Some(body) => PrimaryWrite::Put(body.into()),
+        Some(body) => PrimaryWrite::Put(body),
         None => PrimaryWrite::Delete(None),
     };
     let _ = ctx.reentry_tx.send(notice(call_ref.to_string(), write));

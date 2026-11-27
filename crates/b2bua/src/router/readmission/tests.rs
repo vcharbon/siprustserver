@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use std::time::Duration;
 
 use super::*;
@@ -16,7 +17,7 @@ fn names(cmds: &[ReplCommand]) -> Vec<String> {
 fn refused(call_ref: &str) -> ReplCommand {
     ReplCommand::ReverseFlushRefused {
         call_ref: call_ref.into(),
-        body: Vec::new().into(),
+        body: Arc::from(&b""[..]),
         origin_now_ms: 0,
     }
 }
@@ -102,34 +103,4 @@ async fn the_deferred_parks_of_every_pass_are_armed_with_the_arming() {
     gate.defer(["d".to_string()]);
     assert_eq!(gate.arm_now(), Some(vec!["d".to_string()]), "an open gate arms them at once");
     assert_eq!(gate.arm_now(), Some(Vec::new()), "and hands each once");
-}
-
-/// A refused flush the gate holds gives its bytes of the flush budget back,
-/// its body kept whole; one that passes keeps them until it is handled.
-#[tokio::test(start_paused = true)]
-async fn a_held_refused_flush_gives_its_bytes_of_the_budget_back() {
-    let budget = crate::repl::FlushBudget::new(100);
-    let refused_holding = |call_ref: &str| {
-        let budget = budget.clone();
-        let call_ref = call_ref.to_string();
-        async move {
-            let mut body = crate::repl::FlushBody::from(vec![7; 40]);
-            budget.hold(&mut body).await;
-            ReplCommand::ReverseFlushRefused { call_ref, body, origin_now_ms: 0 }
-        }
-    };
-    let (tx, rx) = watch::channel(true);
-    let mut gate = ReadmissionGate::new(Some(rx));
-    let passed = gate.admit(refused_holding("open").await).expect("an open gate passes it");
-    assert_eq!(budget.in_use(), 40, "a command that passes holds its bytes");
-    drop(passed);
-    tx.send(false).unwrap();
-    assert!(gate.admit(refused_holding("closed").await).is_none());
-    assert_eq!(budget.in_use(), 0, "a held command holds none");
-    tx.send(true).unwrap();
-    let released = tokio::time::timeout(Duration::from_secs(1), gate.released()).await.unwrap();
-    match released.cmds.as_slice() {
-        [ReplCommand::ReverseFlushRefused { body, .. }] => assert_eq!(&body[..], &[7; 40][..]),
-        other => panic!("expected the held refused flush: {other:?}"),
-    }
 }

@@ -19,7 +19,6 @@
 mod backend_gate;
 mod changelog;
 mod departed;
-mod flush_budget;
 mod incarnation;
 mod peer_body;
 mod peer_resolver;
@@ -39,7 +38,6 @@ pub use changelog::{
     BacklogMarks, BodySource, Changelog, FlowLiveness, Reach, RefMeta, DEFAULT_DEAD_PEER_TTL_MS,
 };
 pub use departed::{departed_probe, DepartedCount, DepartedProbe};
-pub use flush_budget::{FlushBody, FlushBudget, FLUSH_BUDGET_BYTES};
 pub(crate) use peer_body::decode_peer_body;
 pub use peer_resolver::{AddrResolver, FnPeerResolver, PeerResolver};
 pub use puller::{Attempt, ConnectNow, Puller, PullerConfig, PullerStatus};

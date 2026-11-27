@@ -18,9 +18,7 @@ pub(super) const BATCH_QUIET: Duration = Duration::from_millis(20);
 use crate::router::ReplCommand;
 
 /// The latest refused copy of each call the current batch carried, in the
-/// order of each call's latest refusal. A copy is refused only against a
-/// stored one, so it holds at most one body per call the store holds, and
-/// none of the flush budget until it rides up.
+/// order of each call's latest refusal.
 #[derive(Default)]
 pub(super) struct HeldMeetings(Mutex<Vec<(String, ReplCommand)>>);
 
@@ -70,11 +68,7 @@ mod tests {
 
     fn refused(call_ref: &str, tag: u8) -> ReplCommand {
         let body: Arc<[u8]> = Arc::from(vec![tag]);
-        ReplCommand::ReverseFlushRefused {
-            call_ref: call_ref.into(),
-            body: body.into(),
-            origin_now_ms: 0,
-        }
+        ReplCommand::ReverseFlushRefused { call_ref: call_ref.into(), body, origin_now_ms: 0 }
     }
 
     fn tag(cmd: &ReplCommand) -> u8 {

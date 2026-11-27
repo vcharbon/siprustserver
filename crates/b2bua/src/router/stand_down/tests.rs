@@ -4,6 +4,8 @@
 //! request record the copy keeps open, and on its primary's delete of the
 //! call when it holds none; every other copy plays on.
 
+use std::sync::Arc;
+
 use call::testkit::{stage_leg, stage_reinvite_round, RoundStage};
 use call::{LegState, MsgpackCodec, RelayOwner, RequestRecord};
 
@@ -286,7 +288,7 @@ async fn primary_wrote(n: &Node, call_ref: &str, write: PrimaryWrite) {
 }
 
 fn put(copy: &Enveloped) -> PrimaryWrite {
-    PrimaryWrite::Put(body(copy).into())
+    PrimaryWrite::Put(Arc::from(body(copy)))
 }
 
 #[tokio::test(start_paused = true)]

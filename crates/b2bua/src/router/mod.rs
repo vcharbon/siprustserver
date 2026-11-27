@@ -138,7 +138,7 @@ use crate::limiter::LimiterWorker;
 use crate::metrics::B2buaMetrics;
 use crate::obligations::ObligationSet;
 use crate::overload::OverloadSignal;
-use crate::repl::{FlushBody, Readiness};
+use crate::repl::Readiness;
 use crate::rules::{RuleDefinition, ServiceDef};
 use crate::store::{CallState, StoreFaults};
 use crate::timers::TimerService;
@@ -311,9 +311,7 @@ impl RouterCtx {
 
 /// Replication-driven commands the puller/supervisor inject into the router loop
 /// (ADR-0011 X11 / ADR-0014 fail-back). Routed through the same single-threaded
-/// `run` loop as SIP events so reclaim never races the per-call handlers. A
-/// record body a command carries holds its bytes of the pullers'
-/// [`FlushBudget`](crate::repl::FlushBudget) until the loop has handled it.
+/// `run` loop as SIP events so reclaim never races the per-call handlers.
 #[derive(Debug, Clone)]
 pub enum ReplCommand {
     /// **Bulk reclaim** — materialise every `pri:{self}` call into the
@@ -335,13 +333,13 @@ pub enum ReplCommand {
     /// ADR-0055 §7), on a turn of the call. `origin_now_ms` is the flushing
     /// node's wall clock, for timer re-anchoring. Held with the reclaim, so it
     /// meets the copy the reclaim makes live.
-    ReverseFlushRefused { call_ref: String, body: FlushBody, origin_now_ms: i64 },
+    ReverseFlushRefused { call_ref: String, body: Arc<[u8]>, origin_now_ms: i64 },
     /// A primary's forward flush this backup did not take: the body is handed
     /// up on the same terms as the reverse case, and meets only a live
     /// takeover copy of the call — an Element alone is kept as it is. Only the
     /// steady tail sends it: a bulk re-seed's refusals are the state of the two
     /// views, not events, and are counted alone.
-    ForwardFlushRefused { call_ref: String, body: FlushBody, origin_now_ms: i64 },
+    ForwardFlushRefused { call_ref: String, body: Arc<[u8]>, origin_now_ms: i64 },
     /// A primary's forward write this backup applied to the Element of a call
     /// it serves as a live takeover copy, in a scan or on the tail: handed up so
     /// the copy can stand down on it (`stand_down`, ADR-0047 D7).
@@ -357,23 +355,11 @@ pub enum ReplCommand {
     PeerDeparted(String),
 }
 
-impl ReplCommand {
-    /// The record body the command carries, if any.
-    pub(crate) fn body_mut(&mut self) -> Option<&mut FlushBody> {
-        match self {
-            ReplCommand::ReverseFlushRefused { body, .. }
-            | ReplCommand::ForwardFlushRefused { body, .. }
-            | ReplCommand::ForwardFlushApplied { write: PrimaryWrite::Put(body), .. } => Some(body),
-            _ => None,
-        }
-    }
-}
-
 /// A write of a call's primary, as a backup applied it to its Element.
 #[derive(Debug, Clone)]
 pub enum PrimaryWrite {
     /// The primary's body of the call.
-    Put(FlushBody),
+    Put(Arc<[u8]>),
     /// The primary ended the call and deleted it; the incarnation the delete
     /// names, when it names one.
     Delete(Option<String>),
