@@ -107,7 +107,7 @@ impl B2buaConfig {
         if self.keepalive_interval_sec > Self::MAX_KEEPALIVE_SEC {
             out.push(format!(
                 "B2BUA_KEEPALIVE_SEC={} > max {} s (about 24.8 days): the cadence is a timer \
-                 delay, at most the engine's longest delay",
+                 delay, at most MAX_DELAY_MS",
                 self.keepalive_interval_sec,
                 Self::MAX_KEEPALIVE_SEC
             ));

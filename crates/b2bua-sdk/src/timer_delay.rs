@@ -1,5 +1,6 @@
 //! A per-call timer's delay, carrying its unit ([`TimerDelay`]), and the
-//! longest delay the engine arms ([`MAX_DELAY_MS`]).
+//! longest delay the engine honours for a rule's timer or a route's duration
+//! ([`MAX_DELAY_MS`]).
 
 /// The longest delay a rule arms a per-call timer for, and the longest
 /// maximum duration a route grants a call, in milliseconds: `i32::MAX`, about

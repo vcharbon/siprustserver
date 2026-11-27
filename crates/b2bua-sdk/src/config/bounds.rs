@@ -13,8 +13,8 @@ impl B2buaConfig {
     /// Ceiling for [`keepalive_interval_sec`](Self::keepalive_interval_sec)
     /// (s): the longest whole-second cadence within
     /// [`MAX_DELAY_MS`](crate::timer_delay::MAX_DELAY_MS), so the keepalive
-    /// deadline and the windows derived from the cadence stay within the
-    /// engine's longest delay.
+    /// is armed one cadence out as stated, and the windows derived from the
+    /// cadence stay far from `i64::MAX`.
     pub const MAX_KEEPALIVE_SEC: i64 = crate::timer_delay::MAX_DELAY_MS / 1000;
     /// Floor for [`invite_txn_timeout_sec`](Self::invite_txn_timeout_sec) (s):
     /// the out-of-dialog bound must stay above the 32 s in-dialog Timer B.

@@ -66,8 +66,8 @@ on the first route, a failover or a reroute, is held to it too, so the caps that
 grow with the grant read the held value. The startup check refuses a
 `B2BUA_KEEPALIVE_SEC` past it. Every deadline sum on the clock in the pure crates
 saturates; the shell's restore and reclaim passes
-(`router/restore_hygiene.rs`, `router/reclaim/bulk.rs`) move ledger deadlines
-by plain sums, outside this claim.
+(`router/restore_hygiene.rs`, `router/reclaim/bulk.rs`) move and measure
+ledger deadlines by plain arithmetic, outside this claim.
 
 ### 2. The call record's collections are capped at the insert
 
