@@ -62,7 +62,8 @@ pub struct PutOpts {
     /// On a `Delete`: this node discharges the call because a poll of its
     /// turn never returned (ADR-0057 §6). A replicating store states it on
     /// the propagated delete, whose receiver refuses the call's identity for
-    /// 64·T1; every other store ignores it.
+    /// [`DISCHARGED_WINDOW`](crate::repl::DISCHARGED_WINDOW); every other
+    /// store ignores it.
     pub discharged: bool,
 }
 

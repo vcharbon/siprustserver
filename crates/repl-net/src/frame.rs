@@ -215,8 +215,9 @@ pub enum Frame {
         incarnation: Option<String>,
         /// On a `Delete`: the deleting node discharged the call because a
         /// poll of its turn never returned (ADR-0057 §6), so the receiver
-        /// refuses a new INVITE on the call's identity for 64·T1. `false` on
-        /// a `Put` and on every other `Delete`.
+        /// refuses a new INVITE on the call's identity (Call-ID and From-tag)
+        /// for a previous hop's Timer C plus 64·T1. `false` on a `Put` and on
+        /// every other `Delete`.
         discharged: bool,
     },
     /// `[2, gen, counter]`

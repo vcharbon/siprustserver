@@ -88,8 +88,9 @@ pub enum Refusal {
     /// requiring an option tag the stack does not understand. Its call is born
     /// only to write its record.
     OnSight,
-    /// A peer discharged a call on the INVITE's Call-ID and From-tag in the
-    /// last 64·T1, its turn's poll never having returned (ADR-0057 §6):
+    /// A peer discharged a call on the INVITE's Call-ID and From-tag inside
+    /// [`DISCHARGED_WINDOW`](crate::repl::DISCHARGED_WINDOW), its turn's poll
+    /// never having returned (ADR-0057 §6):
     /// answered the bare 503 before any decision, and no call is born.
     Discharged,
 }

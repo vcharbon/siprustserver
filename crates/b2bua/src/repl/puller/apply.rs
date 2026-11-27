@@ -82,8 +82,9 @@ impl Puller {
     /// A `Delete` applies, except on the Forward flow over an Element the
     /// authority never saw answered (ADR-0031, "the `Delete` guard keys on the
     /// answer"). A `Delete` that applies stating a discharge refuses the
-    /// call's identity to new INVITEs for 64·T1 (ADR-0057 §6); no other write
-    /// does.
+    /// call's identity to new INVITEs for
+    /// [`DISCHARGED_WINDOW`](crate::repl::DISCHARGED_WINDOW) (ADR-0057 §6); no
+    /// other write does.
     ///
     /// With no local copy every mode applies; the store's own resurrection
     /// tombstone, not this gate, is what stops a re-create of a just-deleted call.

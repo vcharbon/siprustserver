@@ -251,18 +251,22 @@ moves off it as its route is withdrawn (ADR-0056).
 
 The discharge's delete states the discharge (the mark on the replication
 `Delete`), and the peer that applies it refuses the call's identity, its Call-ID
-and From-tag, until 64·T1 after the apply: an initial INVITE on it, the previous
+and From-tag, until 212 s after the apply: an initial INVITE on it, the previous
 hop's retry placed on that peer or a copy of the stuck INVITE placed there under
 the dead primary's cookie, gets the bare 503 at router ingress, ahead of the
 admission ladder and of any routing consult, and no call is born
-(`b2bua_new_calls_total{reason="discharged"}`). The 503 states no `Retry-After`,
-which would keep the previous hop off a healthy node (RFC 3261 §21.5.4). Once the
-peer applied the delete, the caller's own retry placed on it does not carry the
-input there. The peer holds at most 1 024 identities, the oldest forgotten first;
+(`b2bua_new_calls_total{reason="discharged"}`). The window is a previous hop's
+Timer C (more than 3 min, RFC 3261 §16.6 item 11), on which a hop that heard the
+100 retries, plus 64·T1 for the copies of the retry, which also covers the copies
+a hop still in Calling sends. The 503 states no `Retry-After`, which would keep
+the previous hop off a healthy node (RFC 3261 §21.5.4). Once the peer applied the
+delete, the caller's own retry placed on it within 212 s does not carry the input
+there; a retry later than that, from a hop whose Timer C or timeout is longer, is
+consulted. The peer holds at most 1 024 identities, the oldest forgotten first;
 an ordinary delete refuses nothing, and a lookup never extends the window.
 
 A spin that escapes §5 thus costs one node per delivery of the input that causes
-it, and the discharge keeps the record, and the call's retries for 64·T1, from
+it, and the discharge keeps the record, and the call's retries within 212 s, from
 delivering it again; §5 and fuzzing are what keep that input from existing.
 
 ### 7. Detection

@@ -1,6 +1,7 @@
 //! The resident calls a stuck poll holds, being discharged before the process
 //! exits (ADR-0057 §6): every delete written for one states the discharge, so
-//! the peer holding its copy refuses the call's identity for 64·T1.
+//! the peer holding its copy refuses the call's identity for
+//! [`DISCHARGED_WINDOW`](crate::repl::DISCHARGED_WINDOW).
 
 use super::CallState;
 

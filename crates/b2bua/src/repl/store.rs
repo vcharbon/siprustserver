@@ -105,7 +105,7 @@ pub struct ReplicatingCallStore {
     /// [`take_displaced`](Self::take_displaced) hands them to the replica reap.
     displaced: Arc<Mutex<HashMap<String, Arc<[u8]>>>>,
     /// The identities of the calls a peer discharged, refused to new INVITEs
-    /// for 64·T1 (ADR-0057 §6).
+    /// for [`DISCHARGED_WINDOW`](crate::repl::DISCHARGED_WINDOW) (ADR-0057 §6).
     discharged: DischargedIdentities,
     /// Backstop TTL applied when a call is stored with `ttl_ms <= 0`
     /// ([`DEFAULT_REPLICATED_TTL_MS`] by default; tests inject a short value).
