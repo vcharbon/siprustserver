@@ -640,3 +640,17 @@ def test_cut_proxy_workers_drops_the_workers_on_one_proxy_node_and_times_its_wit
     assert len(sb.lines("iptables -I INPUT")) == 2
     assert (f["node"], f["workers"]) == ("e2", ["10.244.1.5", "10.244.2.7"])
     assert withdrawn(f) == {f"{IVIP} 172.20.0.4", f"{EVIP} 192.168.60.12"}
+
+
+def test_cut_proxy_workers_from_one_worker_leaves_the_routes_unwatched(tmp_path: Path) -> None:
+    sb = Sandbox(tmp_path, "cut_proxy_workers",
+                 worker_selector="statefulset.kubernetes.io/pod-name=w-1", withdraw="false")
+    dropped = "-A INPUT -s 10.244.2.7/32 -m comment --comment hakit-reject -j DROP\n"
+    sb.rules(ONE_PROXY, *PLANES,
+             Rule(r"get pods -l statefulset\.kubernetes\.io/pod-name=w-1 -o jsonpath=\{range \.items\[\*\]\}\{\.status\.podIP\}", "10.244.2.7\n"),
+             Rule(r"nsenter -t 111 -n -- iptables -I INPUT -s 10\.244\.2\.7/32 -m comment --comment hakit-reject -j DROP$"),
+             *pod_rules("p-1", "e2", "u1", iptables=dropped, host_network="true"))
+    f = facts(sb.run("inject"))
+    assert len(sb.lines("iptables -I INPUT")) == 1
+    assert (f["node"], f["workers"], f["withdrawn_ms"]) == ("e2", ["10.244.2.7"], None)
+    assert sb.index("route show") == -1

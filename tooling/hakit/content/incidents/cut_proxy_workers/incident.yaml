@@ -18,6 +18,12 @@ params:
     type: string
     default: app=b2bua-worker
     description: The workers the proxy is cut off.
+  withdraw:
+    type: boolean
+    default: true
+    description: >-
+      Wait for the node to leave both VIPs' next hops. A cut from some workers
+      only leaves the proxy fit and its routes in place: false skips the wait.
   internal_vip:
     type: string
     default: 172.20.255.250
