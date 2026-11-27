@@ -158,12 +158,13 @@ tolerated (§3).
     |---|---|---|
     | `kill_worker` | fault | crash one worker: SIGKILL its processes from the node, proven dead; the kubelet restarts it |
     | `kill_worker_graceful` | fault | delete one worker pod with its grace period |
+    | `worker_rollout` | fault | a rollout restart of the workers' StatefulSet, one pod at a time, watched to its end |
     | `kill_worker_held` | fault | crash one worker and keep it absent for `duration_s` (the nodes it may run on tainted NoSchedule), then let it start once |
     | `kill_worker_loop` | fault | crash one worker and each restart of it, `kill_after_s` after it runs, until the kubelet's backoff kept it away `away_s` |
     | `kill_proxy` | fault | crash one front proxy; time its node's withdrawal from the VIPs' routes |
     | `proxy_rollout` | fault | a rollout restart of the proxies, each drained past its node's withdrawal; time the drain-to-withdrawal |
     | `speaker_restart` | fault | restart the BGP speakers of one proxy's node |
-    | `cut_proxy_workers` | fault | cut one proxy off every worker for `duration_s`; time its node's withdrawal |
+    | `cut_proxy_workers` | fault | cut one proxy off every worker, or the ones `worker_selector` names, for `duration_s`; with `withdraw`, time its node's withdrawal |
     | `freeze_proxy` | fault | freeze one proxy's container for `duration_s` (a hung process, the pod's other containers running); time its node's withdrawal |
     | `backend_outage` | fault | freeze every worker for `duration_s`; time every proxy node's withdrawal |
     | `pod_kill` | fault | crash one pod of any selector |

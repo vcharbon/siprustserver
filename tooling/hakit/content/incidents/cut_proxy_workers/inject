@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Drop every packet from the workers' pod addresses on the node of one front
-# proxy, then wait until the node left both VIPs' next hops. Facts as
+# proxy, then, with withdraw, wait until the node left both VIPs' next hops. Facts as
 # pod_freeze's, plus the node, the workers' addresses and, per "vip addr",
 # the withdrawal in ms after the cut (null when withdraw is false).
 # shellcheck source=incident.sh

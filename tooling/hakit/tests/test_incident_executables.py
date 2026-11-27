@@ -493,8 +493,6 @@ def test_worker_rollout_probe_waits_for_the_rollout_and_every_replacement(tmp_pa
     sb = Sandbox(tmp_path, "worker_rollout")
     sb.state("targets", "w-0 u0 n1\nw-1 u1 n2\n")
     sb.state("live_before", "2\n")
-    sb.rules(Rule(r"rollout status statefulset/b2bua-worker --timeout=1s$", rc=1))
-    assert sb.run("probe").returncode == 75
     t = iso(T_RELEASE)
 
     def pod(name: str, puid: str) -> dict[str, object]:
@@ -502,10 +500,13 @@ def test_worker_rollout_probe_waits_for_the_rollout_and_every_replacement(tmp_pa
             "conditions": [{"type": "Ready", "status": "True", "lastTransitionTime": t}],
             "containerStatuses": [{"state": {"running": {"startedAt": t}}}]}}
 
+    replaced = Rule(r"get pods -l app=b2bua-worker -o json$", json.dumps({"items": [pod("w-0", "u8"), pod("w-1", "u9")]}))
+    sb.rules(Rule(r"rollout status statefulset/b2bua-worker --timeout=1s$", rc=1), replaced)
+    assert sb.run("probe").returncode == 75
     rollout_done = Rule(r"rollout status statefulset/b2bua-worker --timeout=1s$")
     sb.rules(rollout_done, Rule(r"get pods -l app=b2bua-worker -o json$", json.dumps({"items": [pod("w-0", "u8"), pod("w-1", "u1")]})))
     assert sb.run("probe").returncode == 75
-    sb.rules(rollout_done, Rule(r"get pods -l app=b2bua-worker -o json$", json.dumps({"items": [pod("w-0", "u8"), pod("w-1", "u9")]})))
+    sb.rules(rollout_done, replaced)
     f = facts(sb.run("probe"))
     assert [(r["pod"], r["uid"]) for r in objs(f, "replacements")] == [("w-0", "u8"), ("w-1", "u9")]
 

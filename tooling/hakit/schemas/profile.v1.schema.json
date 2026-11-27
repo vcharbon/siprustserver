@@ -38,7 +38,7 @@
       "exclusiveMinimum": 0
     },
     "placement": {
-      "description": "Where the run needs its pods, read before the load: at least one pod of `selector`, and each on a node of `node_selector`, or the run is refused.",
+      "description": "Where the run needs its pods, read before the load: at least `min_pods` pods of `selector` (default 1), and each on a node of `node_selector`, or the run is refused.",
       "type": "array",
       "items": {
         "type": "object",
@@ -46,7 +46,12 @@
         "required": ["selector", "node_selector"],
         "properties": {
           "selector": { "type": "string", "minLength": 1 },
-          "node_selector": { "type": "string", "minLength": 1 }
+          "node_selector": { "type": "string", "minLength": 1 },
+          "min_pods": {
+            "description": "The fewest pods of `selector` the run needs: a profile written for a pool of that size refuses a smaller one.",
+            "type": "integer",
+            "minimum": 1
+          }
         }
       }
     },

@@ -7,7 +7,6 @@ source "$HAKIT_LIB/incident.sh"
 hk_pick_targets
 kubectl -n "$NS" rollout restart "statefulset/$HAKIT_PARAM_STATEFULSET" >&2
 start="$(hk_now_ms)"
-echo "$start" > "$HAKIT_EVENT_DIR/killed_at_ms"
 deadline=$(( start + HAKIT_PARAM_ROLLOUT_TIMEOUT_S * 1000 ))
 until kubectl -n "$NS" rollout status "statefulset/$HAKIT_PARAM_STATEFULSET" --timeout=1s >/dev/null 2>&1; do
   [ "$(hk_now_ms)" -lt "$deadline" ] || hk_die "the rollout of $HAKIT_PARAM_STATEFULSET did not end within ${HAKIT_PARAM_ROLLOUT_TIMEOUT_S}s"

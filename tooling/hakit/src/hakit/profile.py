@@ -156,6 +156,7 @@ class Placement:
 
     selector: str
     node_selector: str
+    min_pods: int = 1
 
 
 @dataclass(frozen=True)
@@ -300,5 +301,8 @@ def parse_profile(d: Json) -> Profile:
         defaults={k: jv.as_obj(v, k) for k, v in jv.obj(d, "defaults").items()},
         raw=d,
         report_metrics=[_report_metric(m) for m in jv.objs(d, "report_metrics")],
-        placement=[Placement(jv.string(p, "selector"), jv.string(p, "node_selector")) for p in jv.objs(d, "placement")],
+        placement=[
+            Placement(jv.string(p, "selector"), jv.string(p, "node_selector"), jv.opt_int(p, "min_pods") or 1)
+            for p in jv.objs(d, "placement")
+        ],
     )

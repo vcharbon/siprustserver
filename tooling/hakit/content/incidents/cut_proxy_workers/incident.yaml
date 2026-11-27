@@ -1,14 +1,16 @@
 schema: incident.v1
 name: cut_proxy_workers
 description: >-
-  Cut one front proxy off every worker for duration_s: its node drops every
-  packet from the workers' pod addresses (the proxy's health probes go
-  unanswered, the workers' requests through that node are lost), while the
-  peer proxy keeps them all. The cut proxy reads every worker dead, turns not
-  ready, and its node withdraws both VIPs; the peer carries every flow.
-  Inject measures, from the cut, when the node left each VIP's next hops in
-  the host's table; heal deletes the rules; the probe wants both VIPs routed
-  over every live proxy's node again.
+  Cut one front proxy off the workers of worker_selector (every worker by
+  default) for duration_s: its node drops every packet from their pod
+  addresses (the proxy's health probes go unanswered, their requests through
+  that node are lost), while the peer proxy keeps them all. Cut off every
+  worker, the proxy reads them all dead, turns not ready, and its node
+  withdraws both VIPs; the peer carries every flow. Cut off some, it stays fit
+  and announced, reading those dead while the peer reads them alive. With
+  withdraw, inject measures, from the cut, when the node left each VIP's next
+  hops in the host's table; heal deletes the rules; the probe wants both VIPs
+  routed over every live proxy's node again.
 kind: fault
 target:
   selector: app=sip-front-proxy

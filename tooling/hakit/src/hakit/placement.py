@@ -1,7 +1,8 @@
 """Where a profile needs its pods (`placement`), read from the API server before
 the load: a run whose fault takes a node means to take what runs on it and no
 more, so a pod elsewhere refuses the run. Each entry's selector must name at
-least one pod, and every one of them must run on a node of its node selector.
+least `min_pods` pods (one by default), and every one of them must run on a
+node of its node selector.
 """
 
 from __future__ import annotations
@@ -37,7 +38,8 @@ def _errors(spec: Placement, lab: Lab, executor: Executor) -> list[str]:
         return [f"{where}: the API server's answer is no list: {e}"]
     if not on_node:
         return [f"{where}: no pod matches"]
-    return [
+    few = [f"{where}: {len(on_node)} pods match, the run needs {spec.min_pods}"] if len(on_node) < spec.min_pods else []
+    return few + [
         f"{where}: {pod} runs on {node}, outside node selector {spec.node_selector!r}"
         for pod, node in sorted(on_node.items())
         if node not in admitted

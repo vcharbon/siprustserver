@@ -10,23 +10,18 @@ from hakit.placement import placement_errors
 from hakit.profile import parse_profile
 
 
-def profile() -> object:
-    return parse_profile(
-        {
-            "name": "p",
-            "duration_s": 1,
-            "setup_slow_ms": 1,
-            "streams": [],
-            "placement": [{"selector": "app=mock", "node_selector": "tier=infra"}],
-        }
-    )
+def profile(min_pods: int | None = None) -> object:
+    entry: dict[str, object] = {"selector": "app=mock", "node_selector": "tier=infra"}
+    if min_pods is not None:
+        entry["min_pods"] = min_pods
+    return parse_profile({"name": "p", "duration_s": 1, "setup_slow_ms": 1, "streams": [], "placement": [entry]})
 
 
 def pods(*on: tuple[str, str]) -> str:
     return json.dumps({"items": [{"metadata": {"name": n}, "spec": {"nodeName": node}} for n, node in on]})
 
 
-def errors(pod_list: str, node_list: list[str], rc: int = 0) -> list[str]:
+def errors(pod_list: str, node_list: list[str], rc: int = 0, min_pods: int | None = None) -> list[str]:
     nodes = json.dumps({"items": [{"metadata": {"name": n}} for n in node_list]})
 
     def rule(call: object) -> ProcResult | None:
@@ -37,7 +32,7 @@ def errors(pod_list: str, node_list: list[str], rc: int = 0) -> list[str]:
             return ProcResult(0, nodes, "")
         return None
 
-    p = profile()
+    p = profile(min_pods)
     return placement_errors(p, lab_from_env({}), FakeExecutor([rule]))  # type: ignore[arg-type]
 
 
@@ -58,3 +53,12 @@ def test_no_pod_refuses_the_run() -> None:
 def test_an_unread_api_refuses_the_run() -> None:
     (err,) = errors("", ["infra1"], rc=1)
     assert "cannot be read" in err
+
+
+def test_fewer_pods_than_the_run_needs_refuse_it() -> None:
+    (err,) = errors(pods(("m-0", "infra1"), ("m-1", "infra1")), ["infra1"], min_pods=3)
+    assert "2 pods match, the run needs 3" in err
+
+
+def test_as_many_pods_as_the_run_needs_pass() -> None:
+    assert errors(pods(("m-0", "infra1"), ("m-1", "infra1"), ("m-2", "infra1")), ["infra1"], min_pods=3) == []

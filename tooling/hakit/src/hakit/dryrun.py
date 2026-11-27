@@ -26,12 +26,13 @@ from .loadgen import FINAL_METRICS
 STAT_HEADER = "StartTime;LastResetTime;CurrentTime;CurrentCall;TotalCallCreated\n"
 STAT_ROW = "0;0;0;0;0\n"
 HELD_STAT = "StartTime;LastResetTime;CurrentTime;CurrentCall;TotalCallCreated;TargetRate\n0;0;0;0;0;0\n"
-# Every label selector names two ready pods.
+# Every label selector names three ready pods: a pool of three, the largest a
+# profile's placement asks for.
 READY_PODS = json.dumps(
     {
         "items": [
             {"metadata": {"name": f"p{i}"}, "spec": {"nodeName": "n0"}, "status": {"conditions": [{"type": "Ready", "status": "True"}]}}
-            for i in (0, 1)
+            for i in (0, 1, 2)
         ]
     }
 )
