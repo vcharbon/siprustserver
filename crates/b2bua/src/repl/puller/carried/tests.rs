@@ -345,18 +345,18 @@ fn only_the_stream_opened_last_records_and_sweeps() {
 
     let record = CarriedCopies::default();
     let first = record.open_pass();
-    record.carried(first, 1, "x", held(), 0);
+    record.carried(first, 1, "x", held());
     let successor = record.open_pass();
-    record.carried(successor, 1, "x", held(), 0);
+    record.carried(successor, 1, "x", held());
     let _late = record.open_pass();
-    assert!(record.caught_up(successor, 1, 0).is_empty(), "X, carried by the successor, stays");
+    assert!(record.caught_up(successor, 1).is_empty(), "X, carried by the successor, stays");
 
     let record = CarriedCopies::default();
     let stale = record.open_pass();
-    record.carried(stale, 1, "x", held(), 0);
+    record.carried(stale, 1, "x", held());
     let current = record.open_pass();
-    assert!(record.caught_up(stale, 1, 0).is_empty(), "a stale catch-up sweeps nothing");
-    let swept: Vec<String> = record.caught_up(current, 1, 0).into_iter().map(|(k, _)| k).collect();
+    assert!(record.caught_up(stale, 1).is_empty(), "a stale catch-up sweeps nothing");
+    let swept: Vec<String> = record.caught_up(current, 1).into_iter().map(|(k, _)| k).collect();
     assert_eq!(swept, ["x"], "the current pass sweeps what the earlier one left");
 }
 
@@ -441,7 +441,7 @@ async fn on_the_backup_flow_the_sweep_drops_as_a_tail_delete_does() {
 }
 
 /// The sweep keeps an Element the `Delete` guard keeps (ADR-0031 D3): pass 1
-/// carries X and Z, ringing, and is cut; a takeover copy here answers both
+/// carries X and Z, each an undecodable body, and is cut; a takeover copy here answers both
 /// callers and writes their Elements, which the holder never reads, Z's then
 /// ending; the holder ends both behind the cut. Pass 2 carries Y alone and
 /// catches up: X's Element, `Active` with its caller answered here, stays;

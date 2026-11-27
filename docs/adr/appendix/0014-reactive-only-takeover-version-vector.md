@@ -88,21 +88,24 @@ reconnect and recovery path on a cut.
    the holder ended between the two passes is in neither. The puller records, per
    `(peer, flow)` and holder incarnation, the copies each cold pass of a bootstrap
    left, kept by the supervisor across a respawn. On the first catch-up `Noop`,
-   before the flow reads current or its bootstrap complete, it drops, local-only, each copy an earlier pass left and the last pass did not
-   carry in any frame: no BYE and no CDR, the call ended on its holder
+   before the flow reads current or its bootstrap complete, it drops, local-only,
+   each copy an earlier pass left and the last pass did not carry in any frame: no
+   BYE and no CDR, the call ended on its holder
    (`b2bua_repl_bootstrap_swept_total{flow}`). On the Backup flow the drop is the
    holder's `Delete` the tail never sent: only an Element the `Delete` guard keeps
    (ADR-0031 D3) is spared, and a live takeover copy hears the delete as its
    primary's: it stands down unless it holds a request only it can finish, and then
-   plays on until it sheds (ADR-0047 D7). On the Reclaim flow a copy this node wrote since is spared,
-   and the router reads each drop as a backup's delete (ADR-0047 D8), ahead of the
-   bulk reclaim, so nothing dropped is re-served. Residuals, each held to its
-   body TTL: a bootstrap whose hard timer reclaimed a partial seed sweeps nothing
-   (`b2bua_repl_bootstrap_stalled_total`), and so does a Reclaim flow's bootstrap
-   whose record held a copy while any flow of the node handed the router a bulk
-   reclaim, which materialises every flow's `pri:{self}` copies; a pass of another holder incarnation drops
-   nothing an earlier one left, since that incarnation may not hold its calls yet;
-   a copy the warm tail left before a `ResetToBootstrap` is not recorded.
+   plays on until it sheds (ADR-0047 D7). On the Reclaim flow a copy written here
+   since its pass is spared, and the router reads each drop as a backup's delete
+   (ADR-0047 D8), ahead of the bulk reclaim, so nothing dropped is re-served.
+   Residuals, each held to its body TTL: a bootstrap whose hard timer reclaimed a
+   partial seed sweeps nothing (`b2bua_repl_bootstrap_stalled_total`); a copy a bulk
+   reclaim of another Reclaim flow wrote since its pass is spared; the sweep states
+   no answer to the `Delete` guard, so an Element answered here whose holder
+   answered too, unpublished behind the cut, is kept; a pass of another holder
+   incarnation drops nothing an earlier one left, since that incarnation may not
+   hold its calls yet; a copy the warm tail left before a `ResetToBootstrap` is not
+   recorded.
 
 ### 9. Inbound apply is changelog-silent
 
