@@ -62,9 +62,8 @@ pub struct AdmittingRoute {
 
 /// Apply `route` to `call` (which already carries the a-leg) up to its admit.
 /// `depth` counts the chained limiter-reject failovers behind it. The
-/// maximum call duration the route states is held to
-/// [`MAX_DELAY_MS`](b2bua_sdk::timer_delay::MAX_DELAY_MS) before the call and
-/// its deadlines read it.
+/// maximum call duration the route states is held to [`MAX_DELAY_MS`]
+/// (`hold_max_duration`) before the call and its deadlines read it.
 ///
 /// A destination host that is neither an IP literal nor allow-listed (a bogus
 /// host from call-control, a cluster name with no live pod) is refused with a
