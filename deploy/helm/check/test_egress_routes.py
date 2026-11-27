@@ -87,11 +87,15 @@ class Rendered(unittest.TestCase):
             self.assertEqual(read.returncode == 0, ready, table)
 
     def test_the_probe_takes_the_pods_readiness_threshold_and_outlasts_a_slow_exec(self) -> None:
-        workload = proxy("--set", "proxy.readinessProbe.failureThreshold=3")
+        workload = proxy("--set", "proxy.readinessProbe.periodSeconds=3",
+                         "--set", "proxy.readinessProbe.failureThreshold=3",
+                         "--set-string", "proxy.env.PROXY_DRAIN_GRACE_MS=15000")
         probe = container(workload, "egress-routes")["readinessProbe"]
         pod = container(workload, "sip-front-proxy")["readinessProbe"]
         self.assertEqual((probe["periodSeconds"], probe["failureThreshold"], probe["timeoutSeconds"]),
-                         (pod["periodSeconds"], 3, 2))
+                         (3, 3, 2))
+        self.assertEqual((probe["periodSeconds"], probe["failureThreshold"]),
+                         (pod["periodSeconds"], pod["failureThreshold"]))
 
     def test_empty_next_hops_refuse_the_render(self) -> None:
         err = render_error(SIPRUST, *KIND, "--set", "network.externalNextHops=null",

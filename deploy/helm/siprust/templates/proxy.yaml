@@ -247,7 +247,8 @@ spec:
         # The probe takes the pod's readiness period and threshold, so an empty
         # table reads not Ready within periodSeconds × failureThreshold; the 2 s
         # timeout holds an exec on a CPU-starved node, and a hung exec reads not
-        # Ready within failureThreshold × 2 s.
+        # Ready within periodSeconds + failureThreshold × 2 s (the kubelet runs one
+        # probe of a container at a time).
         - name: egress-routes
           {{- include "siprust.netToolsImage" . | nindent 10 }}
           command: ["/bin/sh", "-c"]

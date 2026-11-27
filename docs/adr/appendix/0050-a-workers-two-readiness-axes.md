@@ -444,6 +444,9 @@ every kind. The lane is opt-in in the transaction layer
 
 ## Amended
 
+- ADR-0010 X8: the OPTIONS answer is `200` while the node serves dialogs, a
+  Draining node's with `new=refuse; cause=draining`; only NotReady answers
+  `503`.
 - ADR-0011 X6: a Draining node answers OPTIONS `200` with `new=refuse;
   cause=draining` instead of a `503`; only NotReady answers `503`.
 - ADR-0043 §11: the open breaker sets `new=refuse; cause=backend` on a `200`

@@ -250,11 +250,12 @@ with it, with no pod restart. Each turn (`proxy.egressRoutes.periodSeconds`, 1 s
 table and writes only on a difference, so no route or cached entry churns. A write failing three
 turns in a row with the interface up and addressed exits it. Its readiness probe reads the table
 and passes while it holds a next hop, on the pod's readiness period and threshold with a 2 s
-timeout, so one slow exec on a busy node does not withdraw it. A pod whose table is empty stays
-out of Ready across the container's restarts: the node withdraws by the slow path (§3) and stays
-out until the routes are in. It is not the route guard: the guard is optional, its image has no
-`ip`, and a stuck route call there would delay its refresh and falsely withdraw the node. The render requires next hops and a period below `routeGuard.holdMs`, so the table is
-filled before the guard lets the node out. A pod stop removes nothing, as for the VIPs on `lo`
+timeout; at a threshold of 2 or more (the default), one slow exec on a busy node does not
+withdraw it. A pod whose table is empty stays out of Ready across the container's restarts: the
+node withdraws by the slow path (§3) and stays out until the routes are in. It is not the route
+guard: the guard is optional, its image has no `ip`, and a stuck route call there would delay
+its refresh and falsely withdraw the node. The render requires next hops and a period below
+`routeGuard.holdMs`, so the table is filled before the guard lets the node out. A pod stop removes nothing, as for the VIPs on `lo`
 (§7); `deploy/helm/README.md` states the uninstall commands.
 
 ## Rejected

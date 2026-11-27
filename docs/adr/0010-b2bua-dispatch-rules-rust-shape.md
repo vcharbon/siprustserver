@@ -1,6 +1,7 @@
 # 0010: B2BUA Rust shape. One crate, per-call FIFO, rule engine, replication-aware store
 
-**Status:** accepted.
+**Status:** accepted. X8's OPTIONS answer amended by ADR-0050 §2 (`200` while the node serves
+dialogs, Draining with `new=refuse; cause=draining`; `503` only while NotReady).
 
 ## Context
 
