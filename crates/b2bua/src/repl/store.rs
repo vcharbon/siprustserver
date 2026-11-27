@@ -302,6 +302,15 @@ impl ReplicatingCallStore {
         locked(&self.meta, REPLICA_METADATA).get(call_ref).and_then(|m| m.meta.incarnation.clone())
     }
 
+    /// The index keys stored with the body held for a callRef; empty when
+    /// absent.
+    pub fn held_indexes(&self, call_ref: &str) -> Vec<String> {
+        locked(&self.meta, REPLICA_METADATA)
+            .get(call_ref)
+            .map(|m| m.meta.indexes.clone())
+            .unwrap_or_default()
+    }
+
     /// Account one `meta` entry leaving role `old` for role `new` (`None` =
     /// absent). Called under the `meta` lock.
     fn account_role(&self, old: Option<PartitionRole>, new: Option<PartitionRole>) {

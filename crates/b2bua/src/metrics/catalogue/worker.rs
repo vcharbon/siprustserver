@@ -185,6 +185,12 @@ pub const REPL_FORWARD_FLUSH_REFUSED: Family = Family::counter(
     "forward flushes (primary→backup) a backup refused (ADR-0031 D3): op=put, a body behind the Element on a lifecycle axis or behind its b; op=delete, a teardown of an answered Active Element by an authority that never published the answer. A rising count means a primary is flushing a branch of a call one of its backups took over — expected across a partition heal or a drain, sustained means the two views never converge",
 );
 
+pub const REPL_BOOTSTRAP_SWEPT: Family = Family::counter(
+    "b2bua_repl_bootstrap_swept_total",
+    Labels::Product(&[Dim::new("flow", &["recovery", "backup"])]),
+    "copies a bootstrap dropped as it caught up, by flow (flow=recovery|backup, ADR-0014 §8): calls an earlier cold pass of the bootstrap carried and its last pass did not, ended on their holder while the stream was down. No BYE and no CDR leave for them. A healthy cluster climbs only on a stream cut mid-scan while calls end; a puller state line names each bootstrap that swept",
+);
+
 pub const REPL_INBOUND_DROPPED: Family = Family::counter(
     "b2bua_repl_inbound_dropped_total",
     Labels::Product(&[Dim::new("reason", &["cap", "open_timeout"])]),

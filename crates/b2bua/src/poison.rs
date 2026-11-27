@@ -26,6 +26,7 @@ pub(crate) const OUTBOX: &str = "outbox";
 pub(crate) const OVERLOAD_SAMPLER: &str = "overload_sampler";
 pub(crate) const OVERLOAD_SIGNAL: &str = "overload_signal";
 pub(crate) const PULLER_BOOTSTRAP: &str = "puller_bootstrap";
+pub(crate) const PULLER_CARRIED_COPIES: &str = "puller_carried_copies";
 pub(crate) const PULLER_HELD_MEETINGS: &str = "puller_held_meetings";
 pub(crate) const READINESS_TRANSITIONS: &str = "readiness_transitions";
 pub(crate) const REAPER_LEDGERS: &str = "reaper_ledgers";
@@ -36,7 +37,7 @@ pub(crate) const TRACE_SPANS: &str = "trace_spans";
 pub(crate) const UNHELD_ANSWERS: &str = "unheld_answers";
 
 /// Every lock name, in counter order: the `lock` label's values.
-pub const LOCKS: [&str; 26] = [
+pub const LOCKS: [&str; 27] = [
     ADMIT_BY_CALL,
     BACKEND_GATE,
     CAPACITY_LIMITS,
@@ -55,6 +56,7 @@ pub const LOCKS: [&str; 26] = [
     OVERLOAD_SAMPLER,
     OVERLOAD_SIGNAL,
     PULLER_BOOTSTRAP,
+    PULLER_CARRIED_COPIES,
     PULLER_HELD_MEETINGS,
     READINESS_TRANSITIONS,
     REAPER_LEDGERS,

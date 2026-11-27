@@ -355,6 +355,19 @@ impl B2buaMetrics {
         self.inner.rows.repl_forward_flush_refused.get(&[op])
     }
 
+    /// `b2bua_repl_bootstrap_swept_total{flow}`: `n` copies one bootstrap
+    /// dropped as it caught up (ADR-0014 §8). `flow` is `recovery` (the
+    /// Reclaim flow) or `backup` (the Backup flow).
+    pub fn record_repl_bootstrap_swept(&self, flow: &str, n: u64) {
+        self.inner.rows.repl_bootstrap_swept.add(&[flow], n);
+    }
+
+    /// Copies the bootstraps of `flow` dropped as they caught up
+    /// (test/observability).
+    pub fn repl_bootstrap_swept(&self, flow: &str) -> u64 {
+        self.inner.rows.repl_bootstrap_swept.get(&[flow])
+    }
+
     /// `b2bua_repl_inbound_dropped_total{reason}`: one inbound replication
     /// connection closed before it opened a flow (ADR-0045). `reason` is `cap`
     /// (accepted at the cap on concurrent connections) or `open_timeout` (no
@@ -591,6 +604,7 @@ impl B2buaMetrics {
         rows.repl_applied.render(&mut s);
         rows.repl_noops_sent.render(&mut s);
         rows.repl_forward_flush_refused.render(&mut s);
+        rows.repl_bootstrap_swept.render(&mut s);
         rows.repl_inbound_dropped.render(&mut s);
         rows.repl_bootstrap_dropped.render(&mut s);
         catalogue::worker::DRAIN_EXITS.render(&mut s, |series| {

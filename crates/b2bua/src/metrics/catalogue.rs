@@ -184,6 +184,7 @@ const WORKER_REST: &[Family] = &[
     worker::REPL_APPLIED,
     worker::REPL_NOOPS_SENT,
     worker::REPL_FORWARD_FLUSH_REFUSED,
+    worker::REPL_BOOTSTRAP_SWEPT,
     worker::REPL_INBOUND_DROPPED,
     worker::REPL_BOOTSTRAP_DROPPED,
     worker::DRAIN_EXITS,

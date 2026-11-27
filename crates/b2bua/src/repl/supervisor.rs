@@ -423,7 +423,7 @@ impl ReplicationSupervisor {
             start_w,
             self.inner.metrics.clone(),
         );
-        let mut puller = self.wire(puller);
+        let mut puller = self.wire(puller).with_carried(flow.carried.clone());
         let (cancel_tx, cancel_rx) = watch::channel(false);
         flow.status_rx = Some(status_rx);
         flow.cancel_tx = Some(cancel_tx);

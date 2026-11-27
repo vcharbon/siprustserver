@@ -83,6 +83,22 @@ reconnect and recovery path on a cut.
    puller's 2 s idle bound: 8 MiB/s at the 16 MiB default. A slower link drops the
    stream on its largest records, whatever the batching.
 
+   A cold stream cut before its catch-up `Noop` leaves the watermark cold: the next
+   pass scans again, and its tail starts past every delete of the outage, so a call
+   the holder ended between the two passes is in neither. The puller records, per
+   `(peer, flow)` and holder incarnation, the copies each cold pass of a bootstrap
+   left, kept by the supervisor across a respawn. On the first catch-up `Noop` it
+   drops, local-only, each copy an earlier pass left and the last pass did not
+   carry in any frame: no BYE and no CDR, the call ended on its holder
+   (`b2bua_repl_bootstrap_swept_total{flow}`). A copy written since, a live takeover
+   copy and an Element the `Delete` guard keeps (ADR-0031 D3) are spared. On the
+   Reclaim flow the router reads each drop as a backup's delete (ADR-0047 D8), ahead
+   of the bulk reclaim, so nothing dropped is re-served. Residuals, each held to its
+   body TTL: a bootstrap whose hard timer reclaimed a partial seed sweeps nothing
+   (`b2bua_repl_bootstrap_stalled_total`); a pass of another holder incarnation drops
+   nothing an earlier one left, since that incarnation may not hold its calls yet;
+   a copy the warm tail left before a `ResetToBootstrap` is not recorded.
+
 ### 9. Inbound apply is changelog-silent
 
 9. **Inbound apply is changelog-silent (loopback prevention).** Applying a received

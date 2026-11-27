@@ -55,6 +55,8 @@ pub(super) struct Rows {
     // Forward flushes a backup refused as a regression of its own progress
     // (ADR-0031 D3), by the operation refused.
     pub(super) repl_forward_flush_refused: FixedCounts,
+    /// Copies a bootstrap dropped as it caught up, by flow (ADR-0014 §8).
+    pub(super) repl_bootstrap_swept: FixedCounts,
     // Inbound replication connections closed before they opened a flow, by
     // reason (ADR-0045).
     pub(super) repl_inbound_dropped: FixedCounts,
@@ -90,6 +92,7 @@ impl Default for Rows {
             repl_applied: OpenRows::new(&w::REPL_APPLIED),
             repl_noops_sent: OpenRows::new(&w::REPL_NOOPS_SENT),
             repl_forward_flush_refused: FixedCounts::new(&w::REPL_FORWARD_FLUSH_REFUSED),
+            repl_bootstrap_swept: FixedCounts::new(&w::REPL_BOOTSTRAP_SWEPT),
             repl_inbound_dropped: FixedCounts::new(&w::REPL_INBOUND_DROPPED),
             repl_bootstrap_dropped: FixedCounts::new(&w::REPL_BOOTSTRAP_DROPPED),
             sm_cursors: OpenRows::new(&w::SM_CURSORS),

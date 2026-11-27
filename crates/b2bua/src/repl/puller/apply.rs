@@ -303,7 +303,7 @@ impl Puller {
     /// [`peek_body_raw`](ReplicatingCallStore::peek_body_raw) — the guard must not
     /// destroy the Element it protects — and happens only when the authority is
     /// unanswered, so an ordinary teardown decodes nothing.
-    async fn element_outlives_the_delete(
+    pub(super) async fn element_outlives_the_delete(
         &self,
         role: PartitionRole,
         primary: &str,

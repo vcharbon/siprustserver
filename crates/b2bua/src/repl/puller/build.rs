@@ -66,6 +66,7 @@ impl Puller {
                 ),
                 scan_applied: Default::default(),
                 held_meetings: Default::default(),
+                carried: Default::default(),
                 asks: None,
             },
             status_rx,

@@ -50,7 +50,8 @@
 //! - `Data{at}` → apply under `(p,b)`; if `bootstrapped`, `W = at` (+ Reclaim
 //!   straggler [`ReclaimCall`](crate::router::ReplCommand::ReclaimCall)).
 //! - `Noop{at}` → `current = true` (sticky); first one marks bootstrap-complete,
-//!   flips `bootstrapped`, and (Reclaim flow) fires the bulk
+//!   flips `bootstrapped`, drops the copies an earlier cold pass carried and
+//!   this one did not ([`carried`]), and (Reclaim flow) then fires the bulk
 //!   [`ReclaimAll`](crate::router::ReplCommand::ReclaimAll); advance `W` if greater.
 //! - `ResetToBootstrap` → discard `W`, clear bootstrap-complete, bump
 //!   `reset_gen`, disconnect (reconnect re-bootstraps from `(0,0)`).
@@ -104,6 +105,7 @@ use super::{AddrResolver, DeleteStated, ReplicatingCallStore, RouterSink};
 mod apply;
 mod bootstrap_complete;
 mod build;
+mod carried;
 mod config;
 mod connect_now;
 mod connecting;
@@ -111,6 +113,7 @@ mod held_meetings;
 mod status;
 mod wiring;
 use apply::{ApplyMode, ApplyOutcome};
+pub(crate) use carried::CarriedCopies;
 pub use config::{PullerConfig, DEFAULT_BOOTSTRAP_HARD_TIMEOUT_MS};
 use connect_now::Asks;
 pub use connect_now::{Attempt, ConnectNow};
@@ -207,6 +210,9 @@ pub struct Puller {
     scan_applied: std::sync::atomic::AtomicU64,
     /// The copies a batch refused, until it is read whole (ADR-0055 §7).
     held_meetings: held_meetings::HeldMeetings,
+    /// What the cold passes of this bootstrap carried, swept once one
+    /// catches up (ADR-0014 §8).
+    carried: CarriedCopies,
     /// Where requests for a connect at once arrive
     /// ([`connect_now`](Self::connect_now)); `None` when no handle was made.
     /// Taken by [`run`](Self::run).
@@ -421,6 +427,9 @@ impl Puller {
         if !bootstrapped && !self.is_reclaim() {
             self.store.clear_refusals_of(self.peer_ordinal());
         }
+        if !bootstrapped {
+            self.carried.open_pass();
+        }
         let mut applied_in_bootstrap = 0u64;
         // The idle bound (ADR-0045): a stream that delivers nothing for this long
         // is left, whatever the phase.
@@ -456,6 +465,7 @@ impl Puller {
                         *deadline = None;
                         if self.is_reclaim() {
                             self.metrics.set_repl_bootstrap_last_applied(applied_in_bootstrap);
+                            self.carried.reclaimed_early();
                             self.signal_reclaim_all();
                         }
                         continue;
@@ -528,6 +538,7 @@ impl Puller {
                     }
                     if !bootstrapped {
                         applied_in_bootstrap += 1;
+                        self.note_carried(at, &call_ref);
                     }
                     self.report_applied(mode, outcome, op, &call_ref, (call_gen, call_bgen)).await;
                     self.signal(mode, outcome, bootstrapped, &call_ref, write, origin_now_ms);
@@ -560,6 +571,7 @@ impl Puller {
                         self.scan_applied.store(0, std::sync::atomic::Ordering::Relaxed);
                         self.mark_bootstrap_complete(applied_in_bootstrap, "first catch-up Noop");
                         *deadline = None;
+                        self.sweep_uncarried(at).await;
                         // Reclaim flow: bulk-materialise everything the bootstrap
                         // scan imported into the live serving map (smoothed).
                         if self.is_reclaim() {

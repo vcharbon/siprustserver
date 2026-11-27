@@ -5,7 +5,7 @@
 use repl_net::frame::{Partition, Watermark};
 use tokio::sync::watch;
 
-use crate::repl::puller::{ConnectNow, PullerStatus};
+use crate::repl::puller::{CarriedCopies, ConnectNow, PullerStatus};
 
 /// Per-`(ordinal, flow)` retained replication state — survives Park/disconnect/
 /// re-add. One of these per flow lives inside a [`PeerEntry`].
@@ -43,6 +43,10 @@ pub(super) struct FlowState {
     pub(super) ever_connected: bool,
     /// Sticky: a connect of this flow to its peer failed at least once.
     pub(super) connect_failed: bool,
+    /// What the cold passes of the flow's bootstrap carried, handed to each
+    /// puller spawned, so a respawn between two passes still sweeps what the
+    /// earlier ones left (ADR-0014 §8).
+    pub(super) carried: CarriedCopies,
 }
 
 impl FlowState {
@@ -64,6 +68,7 @@ impl FlowState {
             reset_gen: 0,
             ever_connected: false,
             connect_failed: false,
+            carried: CarriedCopies::default(),
         }
     }
 
