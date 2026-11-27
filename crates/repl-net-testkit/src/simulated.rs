@@ -35,6 +35,14 @@
 //! `try_send`s and, on `Full`, **cuts the connection** (drops the subscriber):
 //! `recv` then yields `None` and further `send` returns `Closed`.
 //!
+//! ## Link rate
+//! A fabric built [`with_link_rate`](SimulatedReplicationNetwork::with_link_rate)
+//! carries each wire direction at a byte rate ([`LinkRate`]): a frame's bytes
+//! leave behind every byte queued before them, a `send` blocks while more
+//! than the sender's buffer is queued ahead of its frame, and the frame is
+//! delivered its transit delay after its last byte left. A fabric without one
+//! moves any number of bytes at once.
+//!
 //! ## Fault switchboard
 //! Keyed by directed pair `(src, dst)`. `delay/stall/resume` mutate the live
 //! per-direction state the actor consults each loop; `cut/partition` flip a
@@ -88,17 +96,21 @@ use async_trait::async_trait;
 use tokio::sync::mpsc;
 use tokio::sync::Notify;
 
-use crate::{decode_frame, Frame};
-
+#[cfg(doc)]
+use super::SendError;
 use super::{
     ConnectError, ListenError, ReplicationConnection, ReplicationListener, ReplicationNetwork,
-    SendError,
 };
 
+mod connection;
 mod fault;
+mod link_rate;
 mod listener;
 mod node_handle;
+use connection::SimConnection;
 pub use fault::Fault;
+use link_rate::Link;
+pub use link_rate::LinkRate;
 use listener::SimListener;
 pub use node_handle::NodeReplicationNetwork;
 
@@ -134,11 +146,14 @@ struct DirState {
     /// Woken when any of the above flip (or a window slot frees), so a
     /// stalled/parked actor — or a `block`ed writer — re-checks.
     wake: Notify,
+    /// The direction's byte rate, on a fabric that has one.
+    link: Option<Link>,
 }
 
 impl DirState {
-    fn new(delay_ms: u64, drop_on_overflow: bool, cap: usize) -> Self {
+    fn new(delay_ms: u64, drop_on_overflow: bool, cap: usize, rate: Option<LinkRate>) -> Self {
         Self {
+            link: rate.map(Link::new),
             delay_ms: AtomicU64::new(delay_ms.max(1)),
             stalled: AtomicBool::new(false),
             cut: AtomicBool::new(false),
@@ -181,6 +196,8 @@ struct SimShared {
     default_delay_ms: u64,
     /// Default inbound-buffer capacity.
     buffer_cap: usize,
+    /// The byte rate of every direction, when the fabric has one.
+    link_rate: Option<LinkRate>,
     /// Per-direction live state, created lazily per `connect`-direction and
     /// kept so later `delay/stall/cut` faults reach the live actors.
     dir_state: Mutex<BTreeMap<Pair, Arc<DirState>>>,
@@ -221,7 +238,8 @@ impl SimShared {
         g.entry((src, dst))
             .or_insert_with(|| {
                 let drop_on = self.drop_on_overflow_pairs.lock().unwrap().contains(&(src, dst));
-                Arc::new(DirState::new(self.default_delay_ms, drop_on, self.buffer_cap))
+                let (delay, cap) = (self.default_delay_ms, self.buffer_cap);
+                Arc::new(DirState::new(delay, drop_on, cap, self.link_rate))
             })
             .clone()
     }
@@ -321,11 +339,27 @@ impl SimulatedReplicationNetwork {
     /// is a determinism trap (see the module docs / CLAUDE.md). `buffer_cap` is
     /// coerced to `>= 1` (a zero-capacity bounded channel can never deliver).
     pub fn new(transit_delay_ms: u64, buffer_cap: usize) -> Self {
+        Self::build(transit_delay_ms, buffer_cap, None)
+    }
+
+    /// Convenience: a fabric with the default 8-frame buffer.
+    pub fn with_delay(transit_delay_ms: u64) -> Self {
+        Self::new(transit_delay_ms, 8)
+    }
+
+    /// A fabric with the default 8-frame buffer whose every wire direction
+    /// carries `rate` (see the module docs' Link rate).
+    pub fn with_link_rate(transit_delay_ms: u64, rate: LinkRate) -> Self {
+        Self::build(transit_delay_ms, 8, Some(rate))
+    }
+
+    fn build(transit_delay_ms: u64, buffer_cap: usize, link_rate: Option<LinkRate>) -> Self {
         Self {
             shared: Arc::new(SimShared {
                 routing: Mutex::new(BTreeMap::new()),
                 default_delay_ms: transit_delay_ms.max(1),
                 buffer_cap: buffer_cap.max(1),
+                link_rate,
                 dir_state: Mutex::new(BTreeMap::new()),
                 drop_on_overflow_pairs: Mutex::new(BTreeSet::new()),
                 partitions: Mutex::new(BTreeSet::new()),
@@ -339,11 +373,6 @@ impl SimulatedReplicationNetwork {
                 next_local: std::sync::atomic::AtomicU32::new(1),
             }),
         }
-    }
-
-    /// Convenience: a fabric with the default 8-frame buffer.
-    pub fn with_delay(transit_delay_ms: u64) -> Self {
-        Self::new(transit_delay_ms, 8)
     }
 
     /// Install one fault. A directed fault between two declared endpoints
@@ -664,10 +693,14 @@ impl WireView {
     }
 }
 
+/// A frame `send` staged: the instant its last byte left the sender (the
+/// instant of the `send` on a fabric with no link rate), and its bytes.
+type Staged = (tokio::time::Instant, Vec<u8>);
+
 /// The two ends of one directional wire, returned from [`spawn_wire`].
 struct Wire {
     /// Sender side: `send` pushes encoded bytes here (ordered, never blocks).
-    staging_tx: mpsc::UnboundedSender<Vec<u8>>,
+    staging_tx: mpsc::UnboundedSender<Staged>,
     /// Receiver side: the peer's `recv` drains decoded frames from here.
     inbound_rx: mpsc::Receiver<Vec<u8>>,
     /// Live fault state for this direction.
@@ -681,7 +714,7 @@ struct Wire {
 fn spawn_wire(shared: Arc<SimShared>, src: SocketAddr, dst: SocketAddr) -> Wire {
     let dir = shared.dir(src, dst);
     let view = Arc::new(WireView::new(shared.clone(), src, dst));
-    let (staging_tx, mut staging_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+    let (staging_tx, mut staging_rx) = mpsc::unbounded_channel::<Staged>();
     let (inbound_tx, inbound_rx) = mpsc::channel::<Vec<u8>>(shared.buffer_cap);
 
     let dir_actor = dir.clone();
@@ -731,9 +764,9 @@ fn spawn_wire(shared: Arc<SimShared>, src: SocketAddr, dst: SocketAddr) -> Wire 
             // a burst of sends becomes a run of ordered timers.
             loop {
                 match staging_rx.try_recv() {
-                    Ok(bytes) => {
+                    Ok((left_at, bytes)) => {
                         let now = tokio::time::Instant::now();
-                        let base = last_deadline.max(now);
+                        let base = last_deadline.max(now).max(left_at);
                         let deadline = base + delay_now();
                         last_deadline = deadline;
                         pending.push_back((deadline, bytes));
@@ -756,9 +789,9 @@ fn spawn_wire(shared: Arc<SimShared>, src: SocketAddr, dst: SocketAddr) -> Wire 
                     biased;
                     _ = dir_actor.wake.notified() => continue,
                     next = staging_rx.recv() => match next {
-                        Some(bytes) => {
+                        Some((left_at, bytes)) => {
                             let now = tokio::time::Instant::now();
-                            let deadline = last_deadline.max(now) + delay_now();
+                            let deadline = last_deadline.max(now).max(left_at) + delay_now();
                             last_deadline = deadline;
                             pending.push_back((deadline, bytes));
                             shared_actor.in_flight.fetch_add(1, Ordering::Relaxed);
@@ -847,108 +880,6 @@ fn spawn_wire(shared: Arc<SimShared>, src: SocketAddr, dst: SocketAddr) -> Wire 
     });
 
     Wire { staging_tx, inbound_rx, dir, view }
-}
-
-struct SimConnection {
-    local: SocketAddr,
-    peer: SocketAddr,
-    /// The fabric, for the owner attribution a `PullRequest` carries.
-    shared: Arc<SimShared>,
-    /// Outbound staging: `send` pushes encoded bytes (ordered).
-    out: mpsc::UnboundedSender<Vec<u8>>,
-    /// Outbound direction state — `send` fails fast once it is cut.
-    out_dir: Arc<DirState>,
-    /// The outbound wire's owner pair — `send` fails fast once it is cut.
-    out_view: Arc<WireView>,
-    /// Inbound decoded-frame source.
-    inbound: tokio::sync::Mutex<mpsc::Receiver<Vec<u8>>>,
-    /// Inbound direction state — `recv` releases its flow-control window slot
-    /// (waking a `block`ed writer) on this direction.
-    in_dir: Arc<DirState>,
-    /// The inbound wire's owner pair, taught this end's owner with `out_view`.
-    in_view: Arc<WireView>,
-}
-
-#[async_trait]
-impl ReplicationConnection for SimConnection {
-    async fn send(&self, frame: Frame) -> Result<(), SendError> {
-        // A puller names itself on its opening `PullRequest`: that is what ties
-        // this stream's ephemeral local to the node that owns it — on the
-        // fabric's map and on both of the stream's wires, before either actor
-        // judges a frame on it. Only a client end is attributed: a listener's
-        // address is its own owner.
-        if let Frame::PullRequest { caller, .. } = &frame {
-            if !self.shared.is_listener(self.local) {
-                if let Some(owner) = self.shared.attribute(self.local, caller) {
-                    self.out_view.learn(self.local, owner);
-                    self.in_view.learn(self.local, owner);
-                }
-            }
-        }
-        // A simulated network error wins over a clean cut; a cut on the wire
-        // and a cut on the owner pair fail the send alike.
-        if self.out_dir.errored.load(Ordering::SeqCst) {
-            return Err(SendError::Io("simulated network error".into()));
-        }
-        if self.out_dir.cut.load(Ordering::SeqCst) || self.out_view.node_fault().cut {
-            return Err(SendError::Closed);
-        }
-
-        // Flow-control black-hole ([`Fault::Block`]): when the peer is not pulling
-        // and the in-flight window is full, the write BLOCKS on buffer space —
-        // modelling a TCP sender stuck on a full socket buffer with a dead reader.
-        // It unblocks when the peer drains (recv releases a slot), the block is
-        // cleared (Resume), or the direction is cut/errored. Arming the `Notified`
-        // future before the window check avoids a lost wakeup vs `recv`'s notify.
-        while self.out_dir.block.load(Ordering::SeqCst) {
-            if self.out_dir.errored.load(Ordering::SeqCst) {
-                return Err(SendError::Io("simulated network error".into()));
-            }
-            if self.out_dir.cut.load(Ordering::SeqCst) {
-                return Err(SendError::Closed);
-            }
-            let notified = self.out_dir.wake.notified();
-            tokio::pin!(notified);
-            notified.as_mut().enable();
-            if self.out_dir.inflight.load(Ordering::SeqCst) < self.out_dir.cap {
-                break;
-            }
-            notified.await;
-        }
-
-        // The codec plays through every path: encode to bytes, move bytes.
-        let bytes = repl_net::transport::payload(&frame)?;
-        // Account the frame against the flow-control window (released by the
-        // peer's `recv`). Always tracked so `block` can be armed mid-stream.
-        self.out_dir.inflight.fetch_add(1, Ordering::SeqCst);
-        self.out.send(bytes).map_err(|_| SendError::Closed)
-    }
-
-    async fn recv(&self) -> Option<Frame> {
-        let bytes = self.inbound.lock().await.recv().await?;
-        // Release one flow-control window slot for the sender + wake a blocked
-        // writer (`in_dir` == the sender's `out_dir` for this direction).
-        if self.in_dir.inflight.load(Ordering::SeqCst) > 0 {
-            self.in_dir.inflight.fetch_sub(1, Ordering::SeqCst);
-        }
-        self.in_dir.wake.notify_waiters();
-        // Decode back from bytes — sim moves encoded `Vec<u8>`, never `Frame`.
-        decode_frame(&bytes).ok()
-    }
-
-    fn peer_addr(&self) -> SocketAddr {
-        self.peer
-    }
-
-    fn local_addr(&self) -> SocketAddr {
-        self.local
-    }
-}
-
-impl Drop for SimConnection {
-    fn drop(&mut self) {
-        self.shared.forget_stream(self.local);
-    }
 }
 
 #[cfg(test)]

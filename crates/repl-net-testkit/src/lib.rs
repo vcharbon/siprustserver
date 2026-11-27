@@ -25,4 +25,4 @@ use repl_net::{decode_frame, transport, Frame};
 use repl_net::{Op, Partition, Watermark};
 
 pub use recording::{CaptureSeq, CapturedFrame, Direction, RecordingReplicationNetwork};
-pub use simulated::{Fault, NodeReplicationNetwork, SimulatedReplicationNetwork};
+pub use simulated::{Fault, LinkRate, NodeReplicationNetwork, SimulatedReplicationNetwork};
