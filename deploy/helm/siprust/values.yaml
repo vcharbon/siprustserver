@@ -327,7 +327,7 @@ proxy:
     mcastSolicit: 12
     retransTimeMs: 250
   # The readiness probe the node's announcement follows (ADR-0056), taken by
-  # every container of the proxy pod that has one: periodSeconds ×
+  # the proxy, route-guard and egress-routes containers: periodSeconds ×
   # failureThreshold bounds how long a failing proxy stays announced before the
   # withdrawal starts.
   readinessProbe:
