@@ -107,6 +107,11 @@ pub const REINVITE_FINAL_WINDOW_US: u64 = 180_000_000;
 /// must not stand in for it, so the verdict reads the transaction's first final
 /// and nothing earlier.
 ///
+/// **A racing re-INVITE its UAC cancelled first is answered 487.** Once the UAS
+/// has taken a CANCEL on the re-INVITE's branch and answered it 2xx, the
+/// matched CANCEL leaves the re-INVITE one final, 487 (§9.2), whichever of the
+/// two responses leaves first (`cancelled`).
+///
 /// **A re-INVITE the strict reading refuses ([`Msg::refused`]) is neither an
 /// occasion nor in progress**: the UAS answers it 400 or drops it, and no
 /// session change rides it.
@@ -133,6 +138,7 @@ impl Obligation for ConcurrentReInvite500Or491 {
         // The racing re-INVITEs, and the first final each was answered with.
         let mut raced: Vec<Race<'_>> = Vec::new();
         let mut answered: BTreeMap<TxnKey<'_>, Answer> = BTreeMap::new();
+        let mut cancels = Cancels::default();
 
         for (mi, msg) in wire.msgs.iter().enumerate() {
             let Some(branch) = msg.via_branch.as_deref().filter(|b| !b.is_empty()) else {
@@ -199,6 +205,7 @@ impl Obligation for ConcurrentReInvite500Or491 {
                         continue;
                     }
                     answered.entry(txn).or_insert(Answer {
+                        msg: mi,
                         status: *status,
                         // §14.2 makes `Retry-After` part of the 500 answer; a
                         // vantage carrying no header block cannot read it.
@@ -214,7 +221,7 @@ impl Obligation for ConcurrentReInvite500Or491 {
                     }
                     completed.insert(txn);
                 }
-                _ => {}
+                _ => cancels.absorb(&sides, &parties, mi, msg, branch),
             }
         }
 
@@ -252,7 +259,8 @@ impl Obligation for ConcurrentReInvite500Or491 {
                 })));
                 continue;
             };
-            if answer.status == 491 && !race.same_sender {
+            if (answer.status == 491 && !race.same_sender) || cancels.terminated(&race.txn, answer)
+            {
                 out.push(finding(Decision::Compliant));
                 continue;
             }
@@ -286,8 +294,10 @@ impl Obligation for ConcurrentReInvite500Or491 {
     }
 }
 
+mod cancelled;
 mod in_progress;
 mod origins;
+use cancelled::Cancels;
 pub use in_progress::NoReInviteWhileInviteInProgress;
 use origins::Origins;
 
@@ -443,6 +453,8 @@ struct Race<'a> {
 /// The first final one transaction was answered with.
 #[derive(Debug)]
 struct Answer {
+    /// Index into the view's `msgs`.
+    msg: usize,
     status: u16,
     /// Whether it carried `Retry-After`, or `None` where the vantage carried no
     /// header block to read.

@@ -280,3 +280,88 @@ fn an_unanswered_race_inside_the_window_is_undecidable() {
     assert!(!open[0].decided(), "{:?}", open[0].decision);
     assert_eq!(hits(&ConcurrentReInvite500Or491, &msgs).len(), 1);
 }
+
+/// alice's second re-INVITE, racing her first, and her CANCEL of it on its
+/// branch (RFC 3261 §9.1).
+fn a_cancelled_race(cancel_at_us: u64) -> [Msg; 3] {
+    [
+        req(1_000, ALICE, BOB, "INVITE", "z9hG4bK-1", 2, "at", "bt"),
+        req(2_000, ALICE, BOB, "INVITE", "z9hG4bK-2", 3, "at", "bt"),
+        req(cancel_at_us, ALICE, BOB, "CANCEL", "z9hG4bK-2", 3, "at", "bt"),
+    ]
+}
+
+/// bob's answer to the CANCEL on the racing re-INVITE's branch.
+fn cancel_answered(at_us: u64, status: u16) -> Msg {
+    Msg {
+        cseq_method: "CANCEL".to_string(),
+        ..rsp(at_us, BOB, ALICE, status, "z9hG4bK-2", 3, "at", "bt", "")
+    }
+}
+
+/// A CANCEL bob matched before he answered the racing re-INVITE leaves it one
+/// final, 487 (RFC 3261 §9.2), whichever of the 487 and the CANCEL's 200
+/// leaves first: §14.2 is not reached.
+#[test]
+fn a_racing_re_invite_cancelled_before_its_final_is_answered_487() {
+    let racing_487 = rsp(4_000, BOB, ALICE, 487, "z9hG4bK-2", 3, "at", "bt", "");
+    for (case, answers) in [
+        ("the CANCEL's 200 first", [cancel_answered(3_500, 200), racing_487.clone()]),
+        ("the 487 first", [racing_487.clone(), cancel_answered(4_500, 200)]),
+    ] {
+        let msgs: Vec<Msg> = a_cancelled_race(3_000).into_iter().chain(answers).collect();
+        let f = eval(&ConcurrentReInvite500Or491, &msgs);
+        assert_eq!(f.len(), 1, "{case}: {f:?}");
+        assert!(matches!(f[0].decision, Decision::Compliant), "{case}: {:?}", f[0].decision);
+    }
+}
+
+/// The 487 answers §14.2 only behind a CANCEL bob matched before it: with no
+/// CANCEL, with the CANCEL refused 481, with the CANCEL arriving after the
+/// 487, or with a 2xx after the CANCEL, the race is still charged.
+#[test]
+fn a_racing_re_invite_s_487_without_a_matched_cancel_before_it_is_violated() {
+    let racing = |status| rsp(4_000, BOB, ALICE, status, "z9hG4bK-2", 3, "at", "bt", "");
+    let [first, second, cancel] = a_cancelled_race(3_000);
+    let [.., late_cancel] = a_cancelled_race(5_000);
+    let cases = [
+        ("no CANCEL", vec![first.clone(), second.clone(), racing(487)], 487),
+        (
+            "the CANCEL refused 481",
+            vec![
+                first.clone(),
+                second.clone(),
+                cancel.clone(),
+                cancel_answered(3_500, 481),
+                racing(487),
+            ],
+            487,
+        ),
+        (
+            "the CANCEL after the 487",
+            vec![
+                first.clone(),
+                second.clone(),
+                racing(487),
+                late_cancel,
+                cancel_answered(5_500, 200),
+            ],
+            487,
+        ),
+        (
+            "a 2xx after the CANCEL",
+            vec![first, second, cancel, cancel_answered(3_500, 200), racing(200)],
+            200,
+        ),
+    ];
+    for (case, msgs, status) in cases {
+        let f = hits(&ConcurrentReInvite500Or491, &msgs);
+        assert_eq!(f.len(), 1, "{case}: {f:?}");
+        let Decision::Violated(Evidence::ConcurrentReInvite { answered_status, .. }) =
+            &f[0].decision
+        else {
+            panic!("{case}: {:?}", f[0].decision)
+        };
+        assert_eq!(*answered_status, status, "{case}");
+    }
+}
