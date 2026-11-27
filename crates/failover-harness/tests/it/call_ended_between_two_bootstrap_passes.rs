@@ -38,8 +38,11 @@
 //! before it, so pass 1 is cut within 100 ms of X landing, at least 400 ms
 //! before its next frame. X ends while the cut holds, 500 ms before the heal
 //! and well inside the puller's 10 s hard timer; pass 2 starts at the heal and
-//! catches up within a few hundred ms. Every step is 100 ms or more apart, so
-//! no verdict depends on in-order draining.
+//! catches up on its own `Noop` within a few hundred ms. In the cell whose
+//! backup's view loses the primary, the primary leaves that view right after
+//! the cut and returns once both flows read parked (within 100 ms), before X
+//! ends. Every step is 100 ms or more apart, so no verdict depends on in-order
+//! draining.
 //!
 //! Beyond the failover sweep: a call ended between two cold bootstrap passes stays over.
 
@@ -47,7 +50,8 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use failover_harness::{
-    total_cdrs_for, FailoverHarness, Partition, ProxySut, ReplicatedB2buaSut, WorkerHealth,
+    total_cdrs_for, FailoverHarness, Partition, PeerLink, ProxySut, ReplicatedB2buaSut,
+    WorkerHealth,
 };
 use repl_net::frame::{Frame, Watermark};
 use repl_net_testkit::Direction;
@@ -94,6 +98,17 @@ enum Return {
     /// Departed and back at its ordinal, seen by its own informer only: its
     /// peers still read it departed.
     UnseenByPeers,
+}
+
+/// What the bootstrapping node's view of its holder does while pass 1's cut
+/// holds.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum InTheCut {
+    /// The view keeps the holder: pass 2 runs on the puller pass 1 ran on.
+    Kept,
+    /// The holder leaves the view and returns at the same incarnation and
+    /// address: the flow is parked, and pass 2 runs on a puller spawned anew.
+    LeftAndReturned,
 }
 
 /// Every cold `PullRequest` `caller` sent on `flow`, as the local end of its
@@ -160,14 +175,37 @@ async fn two_calls(c: &Cluster, on: &ReplicatedB2buaSut, ordinals: (&str, &str))
     calls
 }
 
+/// `holder` leaves `node`'s view, which parks both flows toward it, and
+/// returns once they read parked, which spawns their pullers anew.
+async fn leaves_and_returns(fh: &mut FailoverHarness, node: &ReplicatedB2buaSut, holder: &str) {
+    fh.mark(node.ordinal(), Some(holder), "peer_removed", "the holder leaves this node's view");
+    node.simulate_peer_removed(holder);
+    let parked = fh
+        .pump_until(Duration::from_millis(100), Duration::from_secs(1), async || {
+            node.peer_link(holder) == PeerLink::Parked
+        })
+        .await;
+    assert!(parked, "{} parks its flows toward {holder}", node.ordinal());
+    fh.mark(node.ordinal(), Some(holder), "peer_returned", "the same incarnation and address");
+    node.simulate_peer_returned(holder);
+    let back = fh
+        .pump_until(Duration::from_millis(100), Duration::from_secs(1), async || {
+            node.peer_link(holder) != PeerLink::Parked
+        })
+        .await;
+    assert!(back, "{} pulls {holder} again", node.ordinal());
+}
+
 /// `restarted` reboots under the delay, its first cold pass of `flow` is cut
-/// once it holds one of `calls`, that call (X) ends through the proxy while
-/// the cut holds, and the second pass makes `restarted` ready.
+/// once it holds one of `calls`, its view of the holder does `in_the_cut`,
+/// that call (X) ends through the proxy while the cut holds, and the second
+/// pass catches up.
 async fn two_passes(
     mut c: Cluster,
     flow: Partition,
     mut calls: [Answered; 2],
     back: Return,
+    in_the_cut: InTheCut,
 ) -> (Passed, SocketAddr) {
     let (h, r) = (c.holder.ordinal().to_string(), c.restarted.ordinal().to_string());
     let earlier = cold_pulls(&c.fh, &r, flow).len();
@@ -196,6 +234,9 @@ async fn two_passes(
     assert_eq!(first.len(), 1, "pass 1 landed one call before the cut: {first:?}");
     let x = calls.iter().position(|call| call.call_ref == first[0]).expect("pass 1 landed X or Y");
     c.fh.cut_streams(&h, &r);
+    if in_the_cut == InTheCut::LeftAndReturned {
+        leaves_and_returns(&mut c.fh, &c.restarted, &h).await;
+    }
 
     caller_hangs_up(&mut calls[x].dialog, &c.bob).await;
     c.fh.advance(Duration::from_millis(500)).await;
@@ -225,6 +266,12 @@ async fn two_passes(
     assert!(ready, "pass 2 caught up: {r} is ready");
     let pulls = cold_pulls(&c.fh, &r, flow).split_off(earlier);
     assert!(pulls.len() >= 2, "pass 2 pulled cold again: {pulls:?}");
+    let caught_up =
+        c.fh.pump_until(Duration::from_millis(100), Duration::from_secs(2), async || {
+            pulls.last().is_some_and(|last| noops_on(&c.fh, *last) > 0)
+        })
+        .await;
+    assert!(caught_up, "pass 2 caught up on its own Noop, not on the hard timer");
 
     let [c0, c1] = calls;
     let (x, y) = if x == 0 { (c0, c1) } else { (c1, c0) };
@@ -246,13 +293,14 @@ async fn published(c: &mut Cluster, flow: Partition, addr: SocketAddr) {
 }
 
 /// Backup flow: b1 answers X and Y while b2 is away; b2 bootstraps them twice,
-/// X ending on b1 in between.
-async fn backup_passes(name: &str) -> Passed {
+/// X ending on b1 in between, b2's view of b1 doing `in_the_cut`.
+async fn backup_passes(name: &str, in_the_cut: InTheCut) -> Passed {
     let mut c = cluster(name).await;
     restart_in_place(&mut c.fh, &mut c.restarted);
     c.fh.advance(Duration::from_millis(500)).await;
     let calls = two_calls(&c, &c.holder, ("b1", "b2")).await;
-    let (mut passed, addr) = two_passes(c, Partition::Bak, calls, Return::InPlace).await;
+    let (mut passed, addr) =
+        two_passes(c, Partition::Bak, calls, Return::InPlace, in_the_cut).await;
     published(&mut passed.cluster, Partition::Bak, addr).await;
     passed
 }
@@ -279,16 +327,16 @@ async fn reclaim_passes(name: &str, back: Return) -> Passed {
         Return::UnseenByPeers => pod_deleted(&mut c.fh, &mut c.restarted),
     }
     c.fh.advance(Duration::from_millis(500)).await;
-    let (mut passed, addr) = two_passes(c, Partition::Pri, calls, back).await;
+    let (mut passed, addr) = two_passes(c, Partition::Pri, calls, back, InTheCut::Kept).await;
     published(&mut passed.cluster, Partition::Pri, addr).await;
     passed
 }
 
-/// After the second pass, the backup holds the primary's live set: Y, not X.
-#[tokio::test(start_paused = true)]
-async fn a_backup_holds_no_copy_of_a_call_ended_between_its_two_bootstrap_passes() {
-    let name = "backup-copy-ended-between-two-passes";
-    let Passed { cluster: c, x, mut y } = backup_passes(name).await;
+/// After the second pass, the backup holds the primary's live set, Y and not
+/// X, whatever puller the second pass runs on; both calls end with one CDR
+/// each.
+async fn holds_the_live_set(name: &str, in_the_cut: InTheCut) {
+    let Passed { cluster: c, x, mut y } = backup_passes(name, in_the_cut).await;
 
     assert_eq!(
         c.restarted.scan_backed_up("b1"),
@@ -305,12 +353,26 @@ async fn a_backup_holds_no_copy_of_a_call_ended_between_its_two_bootstrap_passes
     c.fh.assert_sip_rfc_clean(name);
 }
 
+/// The second pass runs on the puller the first one ran on.
+#[tokio::test(start_paused = true)]
+async fn a_backup_holds_no_copy_of_a_call_ended_between_its_two_bootstrap_passes() {
+    holds_the_live_set("backup-copy-ended-between-two-passes", InTheCut::Kept).await;
+}
+
+/// The primary leaves the backup's view during the cut and returns: the
+/// second pass runs on a puller spawned anew, which reads what the first
+/// pass carried from the flow's record.
+#[tokio::test(start_paused = true)]
+async fn a_backup_whose_primary_left_its_view_between_two_passes_holds_no_copy_of_the_ended_call() {
+    holds_the_live_set("backup-view-left-between-two-passes", InTheCut::LeftAndReturned).await;
+}
+
 /// The primary dies after the second pass: the backup serves Y with its one
 /// CDR, and X stays over, past the replica's TTL.
 #[tokio::test(start_paused = true)]
 async fn a_takeover_after_two_bootstrap_passes_never_ends_the_call_ended_between_them() {
     let name = "takeover-after-two-passes";
-    let Passed { cluster: mut c, x, mut y } = backup_passes(name).await;
+    let Passed { cluster: mut c, x, mut y } = backup_passes(name, InTheCut::Kept).await;
     pod_deleted(&mut c.fh, &mut c.holder);
     c.proxy.set_health("b1", WorkerHealth::Dead);
     c.fh.advance(Duration::from_secs(1)).await;

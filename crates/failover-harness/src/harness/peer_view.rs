@@ -28,6 +28,16 @@ impl ReplicatedB2buaSut {
         self.membership.add(Peer::new(ordinal, ordinal));
     }
 
+    /// Drive a `MemberDelta::Added` for `ordinal` bound to its newest
+    /// incarnation into THIS node's membership: after a
+    /// [`simulate_peer_removed`](Self::simulate_peer_removed), the peer returns
+    /// to this node's view at the address and worker identity it left with.
+    pub fn simulate_peer_returned(&self, ordinal: &str) {
+        let gen = self.views.max_gen(ordinal).max(1);
+        self.membership
+            .add(Peer::new(ordinal, ordinal).with_identity(super::incarnation_key(ordinal, gen)));
+    }
+
     /// List this incarnation's own endpoint under its identity, as the
     /// informer lists a restarted pod once ready, unless the orchestrator
     /// departed or withdrew the ordinal: [`readmit`](crate::FailoverHarness::readmit)
