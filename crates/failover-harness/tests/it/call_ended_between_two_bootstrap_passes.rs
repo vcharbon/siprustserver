@@ -25,9 +25,10 @@
 //!   b2 restarts in place     │ b2 departs, b1 not told it is back
 //!   b2 reboots               b1 → b2 delayed 500 ms a frame: pass 1 lands X
 //!   b2 holds X, no Noop      b1 ✂ b2
-//!   alice ─BYE(X)─▶ b1       b1's copy takes X over and ends it, its CDR there
-//!                            │ b2 departed: the copy discharges X, its record
-//!                            │ deleted
+//!   alice ─BYE(X)─▶ b1       b1's copy takes X over and ends it, keeping X's
+//!                            ended record for b2's reclaim
+//!                            │ b2 departed: the copy discharges X, its CDR
+//!                            │ there, its record deleted
 //!   heal                     pass 2 carries Y (and X's ended record while b1
 //!                            keeps it); its first Noop reclaims
 //!   b2 serves Y alone, holds no trace of X
@@ -61,8 +62,13 @@ use crate::away_backup_support::{
 /// delay, under the puller's 2 s idle bound.
 const FRAME_DELAY_MS: u64 = 500;
 
-/// Two workers behind the proxy and two answered calls: `holder` is the node
-/// the `restarted` one bootstraps them from.
+/// Past the replica's TTL (`reboot_budget`, 600 s), the reap that follows it
+/// (every 30 s) and one keepalive interval (300 s): whatever a copy left
+/// behind would have probed, ended or been reaped by then.
+const PAST_THE_REPLICA_TTL: Duration = Duration::from_secs(720);
+
+/// Two workers behind the proxy and the parties: `holder` is the node the
+/// `restarted` one bootstraps its flow from.
 struct Cluster {
     fh: FailoverHarness,
     alice: Agent,
@@ -193,6 +199,22 @@ async fn two_passes(
 
     caller_hangs_up(&mut calls[x].dialog, &c.bob).await;
     c.fh.advance(Duration::from_millis(500)).await;
+    let x_ref = &calls[x].call_ref;
+    let left_to_the_reclaim = flow == Partition::Pri && back == Return::InPlace;
+    assert_eq!(
+        total_cdrs_for(&[&c.holder], x_ref),
+        usize::from(!left_to_the_reclaim),
+        "X ended on {h}: its CDR there, unless its copy leaves the end to the primary's reclaim"
+    );
+    let record_kept = match flow {
+        Partition::Bak => c.holder.scan_primary(&h),
+        Partition::Pri => c.holder.scan_backed_up(&r),
+    }
+    .contains(x_ref);
+    assert_eq!(
+        record_kept, left_to_the_reclaim,
+        "{h} keeps X's ended record only as the copy of a primary it reads alive"
+    );
     c.fh.heal(&h, &r);
 
     let ready =
@@ -289,21 +311,18 @@ async fn a_backup_holds_no_copy_of_a_call_ended_between_its_two_bootstrap_passes
 async fn a_takeover_after_two_bootstrap_passes_never_ends_the_call_ended_between_them() {
     let name = "takeover-after-two-passes";
     let Passed { cluster: mut c, x, mut y } = backup_passes(name).await;
-    assert_eq!(total_cdrs_for(&[&c.holder], &x.call_ref), 1, "X ended on b1 with its CDR");
-
     pod_deleted(&mut c.fh, &mut c.holder);
     c.proxy.set_health("b1", WorkerHealth::Dead);
     c.fh.advance(Duration::from_secs(1)).await;
     caller_hangs_up(&mut y.dialog, &c.bob).await;
 
-    let drained =
-        c.fh.settle_lossy_cleanup(async || {
-            c.restarted.memory_clean()
-                && !c.restarted.holds_any_trace(&x.call_ref).await
-                && !c.restarted.holds_any_trace(&y.call_ref).await
-        })
-        .await;
-    assert!(drained, "b2 releases both calls, past the replica's TTL");
+    c.fh.pump_until(Duration::from_secs(30), PAST_THE_REPLICA_TTL, async || false).await;
+    assert!(
+        c.restarted.memory_clean()
+            && !c.restarted.holds_any_trace(&x.call_ref).await
+            && !c.restarted.holds_any_trace(&y.call_ref).await,
+        "b2 releases both calls, past the replica's TTL"
+    );
     c.fh.linger_peers(&[&c.alice, &c.bob], Duration::from_secs(3)).await;
     let nodes = [&c.holder, &c.restarted];
     assert_eq!(total_cdrs_for(&nodes, &y.call_ref), 1, "Y served by b2 with one CDR");
