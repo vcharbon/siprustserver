@@ -2,6 +2,7 @@
 //! future, never wrapped behind the clock, and the delay past the supported
 //! maximum is a defect noted on the turn.
 
+use b2bua_core::turn_driver::Driver;
 use b2bua_core::turn_notes::{DELAY_WITHIN_MAXIMUM, KEEPALIVE_WITHIN_CADENCE};
 use b2bua_sdk::timer_delay::MAX_DELAY_MS;
 use call::features::FeatureActivations;
@@ -115,4 +116,18 @@ fn stated_features_hold_the_maximum_duration_to_the_maximum_delay() {
     let (result, _) = run(&[RuleAction::SetFeatures { features }]);
     let granted = result.call.features.expect("the features are set").platform.max_duration_ms;
     assert_eq!(granted, 2_147_483_647);
+}
+
+/// A route stating a maximum duration of `i64::MAX` ms grants the call the
+/// supported maximum, and the duration cap the route arms at the call's
+/// creation (instant 0) lies that far out.
+#[test]
+fn a_route_stating_the_largest_duration_grants_the_maximum_delay() {
+    let driver = Driver::new().with_route(|r| r.features.platform.max_duration_ms = i64::MAX);
+    let session = driver.dial();
+    let call = session.call();
+    let granted = call.features.as_ref().expect("the route's features").platform.max_duration_ms;
+    assert_eq!(granted, 2_147_483_647);
+    let cap = call.timers.iter().find(|t| t.key == global_duration()).expect("the cap is armed");
+    assert_eq!(cap.fire_at, 2_147_483_647);
 }
