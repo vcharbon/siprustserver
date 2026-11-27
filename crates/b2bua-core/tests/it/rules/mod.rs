@@ -44,6 +44,7 @@ mod declared_capabilities;
 mod default_sdp_create_leg;
 mod ended_dialog_481;
 mod enforce_equivalence;
+mod extreme_delays;
 mod final_guard;
 mod fixtures;
 mod going_away_gate;

@@ -79,6 +79,7 @@ mod ended_leg_481;
 mod ended_leg_txn_timeout;
 mod ending_dialog;
 mod event_queue_admission;
+mod extreme_route_timers;
 mod failover_reject_guard;
 mod failure;
 mod failure_consult_bounds;
