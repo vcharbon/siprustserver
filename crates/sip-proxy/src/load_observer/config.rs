@@ -129,9 +129,7 @@ mod tests {
 
     #[test]
     fn validate_bands_rejects_elu_soft_ge_elu_hard() {
-        let mut cfg = LoadObserverConfig::default();
-        cfg.elu_soft = 0.6;
-        cfg.elu_hard = 0.6;
+        let cfg = LoadObserverConfig { elu_soft: 0.6, elu_hard: 0.6, ..Default::default() };
         let mut v = Vec::new();
         assert!(!cfg.validate_bands(&mut v));
         assert!(v.iter().any(|m| m.contains("elu_soft < elu_hard")));
@@ -139,17 +137,14 @@ mod tests {
 
     #[test]
     fn validate_bands_rejects_elu_hard_ge_elu_critical() {
-        let mut cfg = LoadObserverConfig::default();
-        cfg.elu_hard = 0.75;
-        cfg.elu_critical = 0.75;
+        let cfg = LoadObserverConfig { elu_hard: 0.75, elu_critical: 0.75, ..Default::default() };
         let mut v = Vec::new();
         assert!(!cfg.validate_bands(&mut v));
     }
 
     #[test]
     fn validate_bands_rejects_hysteresis_wider_than_a_band_gap() {
-        let mut cfg = LoadObserverConfig::default();
-        cfg.band_hysteresis = 0.25;
+        let cfg = LoadObserverConfig { band_hysteresis: 0.25, ..Default::default() };
         let mut v = Vec::new();
         assert!(!cfg.validate_bands(&mut v));
         assert!(v.iter().any(|m| m.contains("band_hysteresis")));
@@ -163,29 +158,32 @@ mod tests {
     /// make `band_hysteresis = 0.15` strictly *less* than the min gap and admit).
     #[test]
     fn validate_bands_rejects_hysteresis_equal_to_min_gap() {
-        let mut cfg = LoadObserverConfig::default();
-        cfg.elu_soft = 0.1;
-        cfg.elu_hard = 0.3;
-        cfg.elu_critical = 0.5;
-        cfg.band_hysteresis = 0.2;
+        let cfg = LoadObserverConfig {
+            elu_soft: 0.1,
+            elu_hard: 0.3,
+            elu_critical: 0.5,
+            band_hysteresis: 0.2,
+            ..Default::default()
+        };
         let mut v = Vec::new();
         assert!(!cfg.validate_bands(&mut v));
     }
 
     #[test]
     fn validate_bands_rejects_negative_hysteresis() {
-        let mut cfg = LoadObserverConfig::default();
-        cfg.band_hysteresis = -0.01;
+        let cfg = LoadObserverConfig { band_hysteresis: -0.01, ..Default::default() };
         let mut v = Vec::new();
         assert!(!cfg.validate_bands(&mut v));
     }
 
     #[test]
     fn validate_bands_rejects_fully_reversed_ordering() {
-        let mut cfg = LoadObserverConfig::default();
-        cfg.elu_soft = 0.9;
-        cfg.elu_hard = 0.6;
-        cfg.elu_critical = 0.3;
+        let cfg = LoadObserverConfig {
+            elu_soft: 0.9,
+            elu_hard: 0.6,
+            elu_critical: 0.3,
+            ..Default::default()
+        };
         let mut v = Vec::new();
         assert!(!cfg.validate_bands(&mut v));
         assert!(v.iter().any(|m| m.contains("elu_soft < elu_hard < elu_critical")));

@@ -23,12 +23,15 @@ pub struct RepeatTables {
     /// Call-ID is in the key because a deterministic harness can mint one
     /// branch across two calls, and those are not one transaction; a CANCEL or
     /// ACK sharing its INVITE's branch is its own key (§17.2.3 keys on method).
-    requests: Mutex<HashMap<(String, String, String), (u64, Vec<u8>)>>,
+    requests: Table<(String, String, String)>,
     /// Final-response key: Call-ID, branch, CSeq number, CSeq method, status.
     /// Byte-different under one key is a forked 2xx carrying its own To-tag —
     /// a real signal, never a repeat.
-    finals: Mutex<HashMap<(String, String, u32, String, u16), (u64, Vec<u8>)>>,
+    finals: Table<(String, String, u32, String, u16)>,
 }
+
+/// Per transaction key, the token of its first sighting and that sighting's bytes.
+type Table<K> = Mutex<HashMap<K, (u64, Vec<u8>)>>;
 
 impl RepeatTables {
     /// Whether `raw` repeats what its key already holds: `Some(first)` names
@@ -95,12 +98,7 @@ fn keyable(branch: Option<String>) -> Option<String> {
     branch.filter(|b| sip_message::header::has_magic_cookie(b)).map(|b| b.to_ascii_lowercase())
 }
 
-fn note<K: std::hash::Hash + Eq>(
-    table: &Mutex<HashMap<K, (u64, Vec<u8>)>>,
-    key: K,
-    raw: &[u8],
-    token: u64,
-) -> Option<u64> {
+fn note<K: std::hash::Hash + Eq>(table: &Table<K>, key: K, raw: &[u8], token: u64) -> Option<u64> {
     let mut seen = table.lock().unwrap();
     match seen.get(&key) {
         Some((first, bytes)) if bytes.as_slice() == raw => Some(*first),

@@ -372,7 +372,12 @@ Content-Length: 0\r\n\r\n",
         // (1) Loose route on top → wire dest is the top route's host:port.
         let route = "<sip:10.0.0.9:5060;outbound;lr>".to_string();
         assert_eq!(
-            leg_egress_dest(&B2buaConfig::default(), "b-1", &[route.clone()], base.clone()),
+            leg_egress_dest(
+                &B2buaConfig::default(),
+                "b-1",
+                std::slice::from_ref(&route),
+                base.clone()
+            ),
             ("10.0.0.9".to_string(), 5060),
             "loose route → top route host:port",
         );

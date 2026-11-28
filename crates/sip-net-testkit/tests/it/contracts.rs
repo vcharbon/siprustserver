@@ -319,8 +319,7 @@ async fn overflow_arrival_is_recorded_with_its_disposition() {
     assert!(sip_net_testkit::audit_visible_event(
         &snapshot
             .iter()
-            .filter(|s| matches!(&s.event, SignalingNetworkEvent::RecvItem { .. }))
-            .next_back()
+            .rfind(|s| matches!(&s.event, SignalingNetworkEvent::RecvItem { .. }))
             .unwrap()
             .event
     ));

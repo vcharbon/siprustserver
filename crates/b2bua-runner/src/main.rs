@@ -18,9 +18,9 @@
 //!     `NullCdrWriter` — any of them behind the bounded `BufferedCdrWriter`
 //!     (drop-on-overload).
 //!   - HA   : opt-in peer-to-peer replication with static or kube
-//!            EndpointSlice membership.
+//!     EndpointSlice membership.
 //!   - alloc: jemalloc (+ heap-profiling `/debug/heap` route, jemalloc stats
-//!            appended to `/metrics`).
+//!     appended to `/metrics`).
 //!
 //! Config via env (optional unless marked; the generic `B2BUA_*`/`LIMITER_*`/`WORKER_*`
 //! knobs are parsed by `b2bua_runner_kit::RunnerEnv` — see its field docs):

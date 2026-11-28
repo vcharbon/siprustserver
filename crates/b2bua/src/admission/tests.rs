@@ -95,7 +95,6 @@ fn reading(calls: u64, transactions: u64, rss: Option<u64>) -> CapacityReading {
             calls: pair(10, 12),
             transactions: pair(100, 150),
             rss_bytes: pair(1_000, 2_000),
-            ..Default::default()
         },
         occupancy: Occupancy { calls, transactions },
         rss,

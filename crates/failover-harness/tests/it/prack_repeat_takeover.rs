@@ -200,7 +200,7 @@ async fn a_repeat_after_takeover_draws_no_second_prack_from_the_survivor() {
     );
     assert_eq!(entries[0].id.rseq.0, BOB_RSEQ, "the replicated entry carries bob's number");
     assert!(
-        matches!(entries[0].responder, ResponderAck::OwnPrack { .. }),
+        matches!(entries[0].responder, ResponderAck::OwnPrack),
         "the replicated entry records this stack's own PRACK: {:?}",
         entries[0].responder,
     );

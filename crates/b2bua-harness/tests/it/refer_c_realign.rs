@@ -505,7 +505,11 @@ async fn refer_allow_c_realign_carries_the_answer_whole() {
     let lines = |name: &str| -> Vec<String> {
         req.raw(sip_message::header::HeaderName::from(name)).map(str::to_string).collect()
     };
-    assert_eq!(lines("Content-Type"), [framed.content_type.clone()], "C's own media type");
+    assert_eq!(
+        lines("Content-Type"),
+        std::slice::from_ref(&framed.content_type),
+        "C's own media type"
+    );
     assert_eq!(lines("MIME-Version"), ["1.0"]);
     assert_eq!(lines("Content-Disposition"), ["session;handling=required"]);
     let body = String::from_utf8_lossy(req.body()).into_owned();

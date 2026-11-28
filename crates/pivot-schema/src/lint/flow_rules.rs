@@ -318,7 +318,7 @@ fn automatic_body_placement(index: &Index<'_>, report: &mut Report) {
             report.error(
                 "auto/body-not-composable",
                 at("flow", &step.id),
-                &format!("a transaction-derived step stores a body the stack cannot place: {why}"),
+                format!("a transaction-derived step stores a body the stack cannot place: {why}"),
                 "drop the body: the class carries none, so nothing would emit it",
             );
         }
@@ -362,13 +362,12 @@ fn automatic_ack_has_a_final(index: &Index<'_>, report: &mut Report) {
 /// outstanding per dialog, so the latest is the only one.
 fn outstanding_invite(all: &[(Place, &Step)], step: &Step, place: Place) -> Option<Place> {
     all.iter()
-        .filter(|(other_place, other)| {
+        .rfind(|(other_place, other)| {
             other.leg == step.leg
                 && other.msg.status.is_none()
                 && other.msg.method.as_deref().is_some_and(|m| m.eq_ignore_ascii_case("INVITE"))
                 && reach(*other_place, place) == Reach::Ok
         })
-        .next_back()
         .map(|(other_place, _)| *other_place)
 }
 

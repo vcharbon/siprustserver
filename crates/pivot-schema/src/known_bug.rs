@@ -60,11 +60,10 @@ mod tests {
 
     #[test]
     fn every_bug_round_trips_through_its_token() {
-        for token in ["provisional-rewrite-not-applied"] {
-            let bug: KnownBug = token.parse().unwrap();
-            assert_eq!(bug.to_string(), token);
-            assert_eq!(serde_json::to_string(&bug).unwrap(), format!("\"{token}\""));
-        }
+        let token = "provisional-rewrite-not-applied";
+        let bug: KnownBug = token.parse().unwrap();
+        assert_eq!(bug.to_string(), token);
+        assert_eq!(serde_json::to_string(&bug).unwrap(), format!("\"{token}\""));
     }
 
     #[test]

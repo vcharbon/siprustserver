@@ -61,9 +61,7 @@ pub fn row(method: &Method) -> MethodRow {
     let ordinary = MethodRow { on_ending: OnEnding::Terminate, owed_at_leg_end: TERMINATED };
     match method {
         Method::Bye => MethodRow { on_ending: OnEnding::Pass, ..ordinary },
-        Method::Prack => {
-            MethodRow { on_ending: OnEnding::Pass, owed_at_leg_end: (200, "OK"), ..ordinary }
-        }
+        Method::Prack => MethodRow { on_ending: OnEnding::Pass, owed_at_leg_end: (200, "OK") },
         Method::Notify => {
             MethodRow { on_ending: OnEnding::Absorb, owed_at_leg_end: DOES_NOT_EXIST }
         }

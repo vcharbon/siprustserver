@@ -145,7 +145,7 @@ pub const NEW_CALL_REFUSED_COPIES: Family = Family::counter(
 /// plain counters first, in row order, then the rest.
 pub const WORKER: &[Family] = &WORKER_FAMILIES;
 
-const WORKER_FAMILIES: [Family; plain::FAMILIES.len() + WORKER_REST.len()] =
+static WORKER_FAMILIES: [Family; plain::FAMILIES.len() + WORKER_REST.len()] =
     concat(plain::FAMILIES, WORKER_REST);
 
 const WORKER_REST: &[Family] = &[

@@ -100,7 +100,7 @@ async fn a_departed_peers_in_flight_calls_are_taken_over_and_its_ended_calls_dis
     let copy = ctx.state.peek(&undecided.call_ref).expect("the undecided call's copy serves it");
     assert!(!copy.b_legs.is_empty(), "its decision was asked again and the callee dialled");
     let cdrs: Vec<String> = n.cdr.snapshot().into_iter().map(|r| r.call_ref).collect();
-    assert_eq!(cdrs, [ended.call_ref.clone()], "the ended call is discharged");
+    assert_eq!(cdrs, std::slice::from_ref(&ended.call_ref), "the ended call is discharged");
     let held = n.store.get_call(BAK, "w0", &ended.call_ref).await.unwrap();
     assert!(held.is_none(), "the discharged call is deleted");
 }

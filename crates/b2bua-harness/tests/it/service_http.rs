@@ -60,8 +60,11 @@ fn laddr() -> SocketAddr {
 /// bytes), and records every received request body so the test can assert the
 /// REQUEST payload arrived binary-intact too.
 struct EchoServer {
-    received: Arc<Mutex<Vec<(String, Vec<u8>)>>>,
+    received: Received,
 }
+
+/// Each request body the echo server received, with its `X-Corr` value.
+type Received = Arc<Mutex<Vec<(String, Vec<u8>)>>>;
 
 #[async_trait]
 impl HttpService for EchoServer {

@@ -103,7 +103,7 @@ async fn a_queued_release_declared_under_another_key_fails_the_reaped_check() {
 #[tokio::test(start_paused = true)]
 async fn a_declared_queued_release_passes_the_reaped_check() {
     let (s, key) = call_through_a_backend("reaped-limiter-declared-queued", false).await;
-    assert_eq!(s.b2bua.limiter_waiting_keys(), [key.clone()]);
+    assert_eq!(s.b2bua.limiter_waiting_keys(), std::slice::from_ref(&key));
     let _ = s.finish_leaving(LimiterLeak { unreleased: 0, stored: 2, queued: vec![key] }).await;
 }
 

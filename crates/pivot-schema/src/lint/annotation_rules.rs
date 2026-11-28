@@ -45,7 +45,7 @@ pub(super) fn check(index: &Index<'_>, report: &mut Report) {
             report.error(
                 "annotations/detector-outcome-unrostered",
                 "case.annotations.flags",
-                &format!("detector {detector:?} states an outcome and the roster does not name it"),
+                format!("detector {detector:?} states an outcome and the roster does not name it"),
                 "add the detector to the `detector-roster` flag, or drop its outcome flag",
             );
         }
@@ -57,13 +57,13 @@ pub(super) fn check(index: &Index<'_>, report: &mut Report) {
             0 => report.error(
                 "annotations/detector-roster-incomplete",
                 "case.annotations.flags",
-                &format!("the roster names detector {detector:?} and no flag states its outcome"),
+                format!("the roster names detector {detector:?} and no flag states its outcome"),
                 "emit exactly one of detected:/detected-none:/detection-unavailable: for it",
             ),
             n => report.error(
                 "annotations/detector-roster-incomplete",
                 "case.annotations.flags",
-                &format!("detector {detector:?} states {n} outcomes; a detector concludes once"),
+                format!("detector {detector:?} states {n} outcomes; a detector concludes once"),
                 "emit exactly one of detected:/detected-none:/detection-unavailable: for it",
             ),
         }

@@ -227,7 +227,7 @@ impl ReplicationSupervisor {
         Self {
             inner: Arc::new(SupervisorInner {
                 self_endpoint: SelfObserver::new(self_ordinal.clone(), self_identity),
-                self_ordinal: self_ordinal.into(),
+                self_ordinal,
                 network,
                 store,
                 resolve,

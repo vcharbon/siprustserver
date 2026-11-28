@@ -66,13 +66,12 @@ impl ReadinessSource for FlagSource {
     }
 }
 
-/// A bare out-of-dialog OPTIONS keepalive (tagless To), like a proxy probe.
-
 /// The URI a fixture names as text.
 fn uri_of(text: &str) -> Uri {
     Uri::parse(&SipStr::owned(text)).expect("readable URI")
 }
 
+/// A bare out-of-dialog OPTIONS keepalive (tagless To), like a proxy probe.
 fn options_probe() -> SipRequest {
     options_probe_on("z9hG4bKprobe")
 }

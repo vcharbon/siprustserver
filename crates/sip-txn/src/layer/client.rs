@@ -108,7 +108,7 @@ impl Owner {
                     let park = if msg.method() == Method::Cancel {
                         msg.top_via().branch().filter(|b| {
                             self.clients
-                                .get(*b)
+                                .get(b)
                                 .is_some_and(|t| t.kind == TxnKind::Invite && t.state.is_active())
                         })
                     } else {

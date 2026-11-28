@@ -96,7 +96,7 @@ mod tests {
 
     #[test]
     fn the_draw_tracks_the_configured_rate() {
-        let d = RateDraw::seeded(0xC0FF_EE);
+        let d = RateDraw::seeded(0x00C0_FFEE);
         const N: usize = 200_000;
         let hits = (0..N).filter(|_| d.draw(0.05)).count();
         let observed = hits as f64 / N as f64;

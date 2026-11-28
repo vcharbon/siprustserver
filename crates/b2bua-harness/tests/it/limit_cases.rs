@@ -18,6 +18,7 @@
 //!   - call never hangs up → max-duration BYE: `max_duration_byes_both_legs_*`.
 //!   - too many 18x before connect → message cap: `provisional_storm_*`.
 //!   - too many in-dialog messages on an up call → message cap: `in_dialog_*`.
+//!
 //! The 200/CANCEL crossing limit case lives in its sibling `cancel_200_crossing.rs`.
 
 use call::LimiterEntry;

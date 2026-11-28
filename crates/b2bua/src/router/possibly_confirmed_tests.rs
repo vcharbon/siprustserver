@@ -237,7 +237,7 @@ async fn a_held_caller_of_a_departed_primary_is_byed_by_the_backup() {
     tokio::time::sleep(Duration::from_secs(40)).await;
 
     let cdrs: Vec<String> = backup.cdr.snapshot().into_iter().map(|r| r.call_ref).collect();
-    assert_eq!(cdrs, [call_ref.clone()], "the call's one CDR");
+    assert_eq!(cdrs, std::slice::from_ref(&call_ref), "the call's one CDR");
     assert!(backup.core.router_ctx().state.peek(&call_ref).is_none(), "no copy is left");
     let kept = store.get_call(bak, "w0", &call_ref).await.unwrap();
     assert!(kept.is_none(), "the ended call is deleted");
