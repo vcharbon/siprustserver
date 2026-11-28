@@ -16,11 +16,16 @@ bound, and covering it proves nothing. The export therefore also waits for the
 broker's queue to read empty in a scrape taken after the observations stopped
 growing: the consumer acknowledges a CDR once its observation landed, so an
 empty queue holds none still owed. Without that reading (the lab names no queue
-series, or the broker was not scraped since) only an exact written count
-completes the export. A CDR the broker lost (a broker replaced with its queue)
-is owed no more: cdr_check charges it missing.
-`cdrs-collect.json` records whether that happened (`complete`), the counts, and
-the payloads the consumer could not read; the verdict judges them.
+series, or the broker was not scraped since) only a written count no series
+ended or reset in completes the export. That fallback keeps one limit: a live
+worker's series trails its counter by up to a scrape interval, longer than
+`QUIET_S`, so a CDR acknowledged in the last interval before the observations
+went quiet can be left out unseen. A CDR the broker lost (a broker replaced
+with its queue) is owed no more: cdr_check charges it missing.
+`cdrs-collect.json` records whether that happened (`complete`), the counts
+(`written_lossy` when a written series ended or reset, `queued` the last queue
+reading), and the payloads the consumer could not read; the verdict judges
+them.
 """
 
 from __future__ import annotations
@@ -73,10 +78,10 @@ def _queued(vm: VictoriaMetrics, selector: str, since_ms: int, now_ms: int) -> f
     return sum(newest) if newest else None
 
 
-def _none_owed(queued: float | None, exact: bool) -> bool:
+def _none_owed(queued: float | None, written_lossy: bool) -> bool:
     """Whether observations that cover the written count hold every CDR: the
-    queue reads empty or, with no reading, the written count is exact."""
-    return queued == 0 if queued is not None else exact
+    queue reads empty or, with no reading, no written series ended or reset."""
+    return queued == 0 if queued is not None else not written_lossy
 
 
 def collect_cdrs(
@@ -87,20 +92,20 @@ def collect_cdrs(
     last: int | None = None
     quiet_since = clock.now_ms()
     written: float | None = None
-    exact = False
+    written_lossy = True
     queued: float | None = None
     complete = False
     while True:
         series = _since_start(vm, lab.cdr_written_series, started_ms, clock.now_ms())
         written = increase(series, started_ms) if series is not None else None
-        exact = series is not None and not lossy(series, started_ms)
+        written_lossy = series is None or lossy(series, started_ms)
         n = vlogs.cdr_count(run, started_ms - MARGIN_MS, clock.now_ms() + MARGIN_MS)
         if n != last:
             last, quiet_since = n, clock.now_ms()
         caught_up = written is not None and last is not None and last >= written
         if caught_up and clock.now_ms() - quiet_since >= QUIET_S * 1000:
             queued = _queued(vm, lab.cdr_queued_series, quiet_since, clock.now_ms())
-            if _none_owed(queued, exact):
+            if _none_owed(queued, written_lossy):
                 complete = True
                 break
         if clock.now_ms() >= deadline:
@@ -119,7 +124,7 @@ def collect_cdrs(
     doc: Json = {
         "complete": complete,
         "written": written,
-        "written_exact": exact,
+        "written_lossy": written_lossy,
         "observed": last,
         "queued": queued,
         "consumed": consumed,

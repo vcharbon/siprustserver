@@ -34,13 +34,13 @@ def _owed(collect: Json) -> str:
     a lower bound reads "at least", and the broker's queue is named when it held
     CDRs or, behind a lower bound, could not be read."""
     written, observed, queued = (jv.opt_number(collect, k) for k in ("written", "observed", "queued"))
-    exact = jv.boolean(collect, "written_exact", default=True)
-    w = "unread" if written is None else f"{'' if exact else 'at least '}{written:g}"
+    lower_bound = jv.boolean(collect, "written_lossy")
+    w = "unread" if written is None else f"{'at least ' if lower_bound else ''}{written:g}"
     o = "unread" if observed is None else f"{observed:g}"
     counts = f"{w} written, {o} distinct observed"
     if queued:
         return f"{counts}, {queued:g} queued at the broker"
-    if queued is None and not exact:
+    if queued is None and lower_bound:
         return f"{counts}, the broker's queue unread"
     return counts
 

@@ -364,7 +364,7 @@ def test_cdrs_still_owed_at_the_cut_are_an_incomplete_export_not_impacts(tmp_pat
 def cut_behind_a_lower_bound(tmp_path: Path, queued: float | None) -> list[str]:
     """The integrity details of a run whose export was cut with its one written
     CDR observed, the written count a lower bound and the broker's queue `queued`."""
-    doc = {**collected(False, 1, 1), "written_exact": False, "queued": queued}
+    doc = {**collected(False, 1, 1), "written_lossy": True, "queued": queued}
     d = run_dir(tmp_path, [ANSWERED], calls=1, events=[], profile=ON, cdrs=[cdr("a", T0, 100, 30_000)], cdr_collect=doc)
     return [jv.string(i, "detail") for i in jv.objs(compute(d, SCHEMAS), "integrity")]
 

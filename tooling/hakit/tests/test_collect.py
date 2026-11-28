@@ -1,7 +1,7 @@
 """The CDR export after the drain (ADR-0049 §3.8): complete once the run's
 distinct shipped observations cover every CDR the workers wrote, have stopped
-growing and, when a written series may have lost its last counts, the broker's
-queue reads empty."""
+growing, and the broker's queue reads empty after that; with no queue reading,
+only when no written series ended or reset."""
 
 from __future__ import annotations
 
@@ -38,6 +38,16 @@ ROLLED_OUT: Samples = [(STARTED - 30_000, 100), (STARTED + 15_000, 104), (STARTE
 RESTARTED: Samples = [(STARTED - 30_000, 50), (STARTED + 15_000, 57), (STARTED + 30_000, 1), (STARTED + 45_000, 3)]
 # An earlier run's last CDRs land in the minute before the start.
 EARLIER_RUN_TAIL: Samples = [(STARTED - 50_000, 0), (STARTED - 35_000, 300), (STARTED - 20_000, 500), (STARTED + 15_000, 510)]
+# The broker's queue holding 3 CDRs past the cap, scraped every 15 s.
+QUEUE_HELD: Samples = [(t, 3.0) for t in range(T0, T0 + 2 * MAX_WAIT_S * 1000, SCRAPE_MS)]
+# A queue read empty once, a minute before the export began, and never since.
+QUEUE_EMPTY_BEFORE_THE_EXPORT: Samples = [(T0 - 60_000, 0.0)]
+# A broker instance replaced while it held 41 CDRs (its series ends with a
+# staleness marker at +60 s), and its successor reading an empty queue.
+BROKER_REPLACED: list[Samples] = [
+    [(T0 + 30_000, 41.0), (T0 + 45_000, 41.0), (T0 + 60_000, None)],
+    [(t, 0.0) for t in range(T0 + 30_000, T0 + 2 * MAX_WAIT_S * 1000, SCRAPE_MS)],
+]
 
 
 def counter(name: str, pod: str, samples: Samples) -> tuple[dict[str, str], Samples]:
@@ -48,11 +58,11 @@ class Chain:
     """Workers wrote 10 CDRs, their counter series `written`. The run's
     distinct observations reach 10 at `observed_after_s` (8 before, 8 forever
     when None) and keep growing until `shipping_until_s`; the broker's queue
-    holds the CDRs not observed yet, scraped every 15 s unless
-    `broker_unscraped`; the consumer's counter follows the observations unless
-    `counter_lost` (a consumer killed between two scrapes loses what it counted
-    since the last one); another run's observations are never in the run's
-    count."""
+    holds the CDRs not observed yet, scraped every 15 s, unless `queues` gives
+    the gauge's series or `broker_unscraped`; the consumer's counter follows
+    the observations unless `counter_lost` (a consumer killed between two
+    scrapes loses what it counted since the last one); another run's
+    observations are never in the run's count."""
 
     def __init__(
         self,
@@ -63,6 +73,7 @@ class Chain:
         counter_lost: bool = False,
         written: list[Samples] = ONE_WORKER,
         broker_unscraped: bool = False,
+        queues: list[Samples] | None = None,
     ) -> None:
         self.clock = clock
         self.observed_after_s = observed_after_s
@@ -71,17 +82,19 @@ class Chain:
         self.counter_lost = counter_lost
         self.written = written
         self.broker_unscraped = broker_unscraped
+        self.queues = queues
 
     def observed(self, at_ms: int) -> int:
         elapsed = (at_ms - T0) / 1000
         done = self.observed_after_s is not None and elapsed >= self.observed_after_s
         return (WRITTEN if done else 8) + int(min(elapsed, self.shipping_until_s))
 
-    def queue(self, now_ms: int) -> Samples:
+    def queue_series(self, now_ms: int) -> list[Samples]:
         if self.broker_unscraped:
             return []
-        scrapes = range(T0, now_ms + 1, SCRAPE_MS)
-        return [(t, float(max(0, WRITTEN - self.observed(t)))) for t in scrapes]
+        if self.queues is not None:
+            return self.queues
+        return [[(t, float(max(0, WRITTEN - self.observed(t)))) for t in range(T0, now_ms + 1, SCRAPE_MS)]]
 
     def rule(self, c: Call) -> HttpResult | None:
         now = self.clock.now_ms()
@@ -91,7 +104,7 @@ class Chain:
                 *(counter("b2bua_cdr_written_total", f"w-{i}", s) for i, s in enumerate(self.written)),
                 counter("cdr_consumed_total", "c-0", [(STARTED - 30_000, 40), (now, 40 + consumed)]),
                 counter("cdr_observations_unread_total", "c-0", [(STARTED - 30_000, 3), (now, 3 + self.unread)]),
-                counter("rabbitmq_queue_messages", "b-0", self.queue(now)),
+                *(counter("rabbitmq_queue_messages", f"b-{i}", s) for i, s in enumerate(self.queue_series(now))),
             ]))
         q = urllib.parse.parse_qs(urllib.parse.urlsplit(c.url).query).get("query", [""])[0]
         if "stats count_uniq_hash(_msg) cdrs" in q:
@@ -117,7 +130,7 @@ def collect(tmp_path: Path, chain: Chain) -> dict[str, Any]:
 def test_the_export_waits_through_a_late_broker_thaw_until_every_written_cdr_was_observed(tmp_path: Path) -> None:
     doc = collect(tmp_path, Chain(FakeClock(T0), 120))
     assert (doc["complete"], doc["written"], doc["observed"], doc["consumed"], doc["unread"]) == (True, 10, 10, 10, 0)
-    assert (doc["written_exact"], doc["queued"]) == (True, 0)
+    assert (doc["written_lossy"], doc["queued"]) == (False, 0)
     assert 120 <= doc["waited_s"] < 140
 
 
@@ -140,7 +153,7 @@ def test_a_consumer_counter_reset_by_a_kill_does_not_hold_the_export(tmp_path: P
 
 def test_cdrs_a_killed_worker_wrote_after_its_last_scrape_still_queued_leave_the_export_incomplete(tmp_path: Path) -> None:
     doc = collect(tmp_path, Chain(FakeClock(T0), None, written=[KILLED, REPLACEMENT]))
-    assert (doc["complete"], doc["written"], doc["written_exact"], doc["observed"], doc["queued"]) == (False, 8, False, 8, 2)
+    assert (doc["complete"], doc["written"], doc["written_lossy"], doc["observed"], doc["queued"]) == (False, 8, True, 8, 2)
     assert doc["waited_s"] >= MAX_WAIT_S
 
 
@@ -152,26 +165,43 @@ def test_a_killed_workers_unscraped_cdrs_hold_the_export_until_the_queue_reads_e
 
 def test_a_killed_worker_with_no_queue_reading_leaves_the_export_incomplete(tmp_path: Path) -> None:
     doc = collect(tmp_path, Chain(FakeClock(T0), 0, written=[KILLED, REPLACEMENT], broker_unscraped=True))
-    assert (doc["complete"], doc["written_exact"], doc["observed"], doc["queued"]) == (False, False, 10, None)
+    assert (doc["complete"], doc["written_lossy"], doc["observed"], doc["queued"]) == (False, True, 10, None)
 
 
-def test_with_every_written_series_whole_the_counts_alone_complete_the_export(tmp_path: Path) -> None:
+def test_a_queue_read_empty_only_before_the_observations_went_quiet_is_no_reading(tmp_path: Path) -> None:
+    chain = Chain(FakeClock(T0), 30, written=[KILLED, REPLACEMENT], queues=[QUEUE_EMPTY_BEFORE_THE_EXPORT])
+    doc = collect(tmp_path, chain)
+    assert (doc["complete"], doc["written_lossy"], doc["observed"], doc["queued"]) == (False, True, 10, None)
+
+
+def test_a_replaced_broker_instance_left_holding_cdrs_does_not_hold_the_export(tmp_path: Path) -> None:
+    doc = collect(tmp_path, Chain(FakeClock(T0), 30, written=[KILLED, REPLACEMENT], queues=BROKER_REPLACED))
+    assert (doc["complete"], doc["observed"], doc["queued"]) == (True, 10, 0)
+    assert 60 <= doc["waited_s"] < 80
+
+
+def test_a_queue_still_holding_cdrs_holds_the_export_though_no_written_series_ended(tmp_path: Path) -> None:
+    doc = collect(tmp_path, Chain(FakeClock(T0), 30, queues=[QUEUE_HELD]))
+    assert (doc["complete"], doc["written_lossy"], doc["observed"], doc["queued"]) == (False, False, 10, 3)
+
+
+def test_with_no_written_series_ended_or_reset_the_counts_alone_complete_the_export(tmp_path: Path) -> None:
     doc = collect(tmp_path, Chain(FakeClock(T0), 30, broker_unscraped=True))
-    assert (doc["complete"], doc["written_exact"], doc["queued"]) == (True, True, None)
+    assert (doc["complete"], doc["written_lossy"], doc["queued"]) == (True, False, None)
     assert 30 <= doc["waited_s"] < 50
 
 
 def test_a_rollout_that_replaces_a_workers_series_counts_the_old_series_and_the_new(tmp_path: Path) -> None:
     doc = collect(tmp_path, Chain(FakeClock(T0), 30, written=[ROLLED_OUT, REPLACEMENT]))
-    assert (doc["complete"], doc["written"], doc["written_exact"], doc["observed"]) == (True, 10, False, 10)
+    assert (doc["complete"], doc["written"], doc["written_lossy"], doc["observed"]) == (True, 10, True, 10)
     assert 30 <= doc["waited_s"] < 60
 
 
 def test_a_worker_restarted_in_place_counts_after_its_reset(tmp_path: Path) -> None:
     doc = collect(tmp_path, Chain(FakeClock(T0), 30, written=[RESTARTED]))
-    assert (doc["complete"], doc["written"], doc["written_exact"]) == (True, 10, False)
+    assert (doc["complete"], doc["written"], doc["written_lossy"]) == (True, 10, True)
 
 
 def test_cdrs_written_before_the_run_started_are_not_owed_to_it(tmp_path: Path) -> None:
     doc = collect(tmp_path, Chain(FakeClock(T0), 30, written=[EARLIER_RUN_TAIL]))
-    assert (doc["complete"], doc["written"], doc["written_exact"]) == (True, 10, True)
+    assert (doc["complete"], doc["written"], doc["written_lossy"]) == (True, 10, False)
