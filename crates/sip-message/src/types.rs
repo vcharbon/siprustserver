@@ -300,6 +300,7 @@ impl SipResponse {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[expect(clippy::large_enum_variant, reason = "both hold one MessageCore; the start lines differ")]
 pub enum SipMessage {
     Request(SipRequest),
     Response(SipResponse),

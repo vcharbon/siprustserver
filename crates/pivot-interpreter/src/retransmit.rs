@@ -432,6 +432,7 @@ impl Repeats {
     /// and copies the SUT keeps sending on the §13.3.1.4 ladder after it are
     /// not a mismatch ([`StepLadder::ran_on_past_its_bye`]). The 2xx that
     /// created the dialog keeps its ladder to the ACK or the §13.3.1.4 give-up.
+    #[expect(clippy::too_many_arguments, reason = "the step's datagram with its ladder and time")]
     pub fn claim(
         &mut self,
         step: &str,

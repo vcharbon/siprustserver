@@ -150,6 +150,7 @@ impl From<std::io::Error> for PcapError {
 pub struct Probes(u32);
 
 impl Probes {
+    #[expect(clippy::should_implement_trait, reason = "a counter that never ends, not an Iterator")]
     pub fn next(&mut self) -> u32 {
         let id = self.0;
         self.0 += 1;

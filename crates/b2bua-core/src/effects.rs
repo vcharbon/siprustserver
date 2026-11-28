@@ -28,6 +28,7 @@ pub enum OutboundTxnMode {
 
 /// The outbound payload — a request, a response, or a retained datagram.
 #[derive(Debug, Clone)]
+#[expect(clippy::large_enum_variant, reason = "Request and Response differ only by start line")]
 pub enum OutboundBody {
     Request(SipRequest),
     Response(SipResponse),

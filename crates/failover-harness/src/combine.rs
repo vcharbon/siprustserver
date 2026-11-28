@@ -65,6 +65,7 @@ pub struct WorkerAxis {
 /// are the SIP recording (lanes + anomalies + wire trace). `repl` is the
 /// replication recording (frames + lifecycle markers). `workers` ties the two
 /// address spaces to the shared `b1`/`b2` columns.
+#[expect(clippy::too_many_arguments, reason = "the two recordings and the axes that join them")]
 pub fn combine_doc(
     title: &str,
     description: Option<&str>,

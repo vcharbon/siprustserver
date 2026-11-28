@@ -49,6 +49,7 @@ pub enum ReferOutcome {
 }
 
 /// What the scripted adapter decides for a `call_release` consult.
+#[expect(clippy::large_enum_variant, reason = "test support: one value per scripted consult")]
 pub enum ReleaseOutcome {
     /// A decided response (`Release` or a reroute `Route`).
     Respond(CallReleaseResponse),
@@ -716,8 +717,7 @@ impl ScriptedBuilder {
     }
 
     /// Script the `call_release` consult (subscribed release events).
-    /// Unset = the trait's back-compat default (`Release` —
-    /// local teardown).
+    /// Unset = the trait's back-compat default (`Release` — local teardown).
     pub fn on_release(
         mut self,
         f: impl Fn(&CallReleaseRequest) -> ReleaseOutcome + Send + Sync + 'static,

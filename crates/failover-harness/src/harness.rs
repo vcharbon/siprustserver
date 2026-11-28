@@ -179,10 +179,6 @@ impl HarnessHandle {
         name: &str,
         addr: &str,
     ) -> (Box<dyn sip_net::UdpEndpoint>, SocketAddr) {
-        // `bind_udp` is async; the harness is `!Sync`, so we cannot hold the
-        // std Mutex guard across the await. `Harness::bind_sut` only registers a
-        // lane (sync) + binds — but to keep the guard off the await boundary we
-        // take the harness out, bind, then put it back.
         let h = self.inner.lock().unwrap().take().expect("harness taken (already finished?)");
         let res = h.bind_sut(name, addr).await;
         *self.inner.lock().unwrap() = Some(h);
@@ -882,6 +878,10 @@ impl FailoverHarness {
             sip_net,
             markers: Vec::new(),
             event_seq,
+            #[expect(
+                clippy::arc_with_non_send_sync,
+                reason = "the harness runs on one current-thread task"
+            )]
             harness: Arc::new(HarnessHandle::new(harness)),
             worker_clock_offsets: HashMap::new(),
             rfc_acceptance: RfcAcceptance::default(),
