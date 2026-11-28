@@ -8,12 +8,14 @@ description: >-
   elsewhere by itself. A caller who heard a provisional and no final takes no
   allowance here or in any budget (`silent_after_provisional`). Every other
   failed setup is a finding. A BYE or a callee's 2xx sent to the worker before
-  the proxy reads it dead, 3.6 s after the death at the latest (a held worker
-  is read by the probe alone), reaches the backup on its first retransmission
-  past the verdict, the one at 7.5 s at the latest (RFC 3261, T1 500 ms, T2
-  4 s), while the CDR holds the first send's instant: a CDR's end or answer may
-  lead the caller's by that much past the join's own 1 s tolerance. Any other
-  CDR mismatch is a finding.
+  the proxy moves its traffic reaches the backup on its first retransmission
+  past that instant, while the CDR holds the first send's instant. The probe's
+  dead verdict comes 3.6 s after the death at the latest, the endpoint's flip
+  to not ready or its departure from the slice sooner; the retransmission
+  past 3.6 s is the one at 7.5 s (RFC 3261, T1 500 ms, T2 4 s). So a CDR's end
+  or answer may lead the caller's by 7.5 s past the join's own 1 s tolerance.
+  A force-deleted pod leaves the slice at once: the same bound covers it,
+  loosely. Any other CDR mismatch is a finding.
 setup_failed:
   - { stream: "*", code: 0, reason: timeout, max_seconds: 2 }
 setup_slow:

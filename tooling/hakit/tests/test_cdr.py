@@ -4,8 +4,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 from kit import T0, paced, record, rejected
-from rundir import SCHEMAS, kill, run_dir
+from rundir import CONTENT, SCHEMAS, kill, run_dir
 
 from hakit import jsonval as jv
 from hakit.cdrjoin import join
@@ -421,3 +422,52 @@ def test_a_duration_that_differs_at_the_answer_is_charged_at_the_answer(tmp_path
     assert details([late], [cdr("late", at + 1_000, 1_100, 180_000)]) == [
         ("late", at + 1_000 + 4_600, "CDR duration 178900 ms, the caller's 175400 ms (allowed 1001 ms apart)")
     ]
+
+
+CRASH = T0 + 100_000  # the worker's death; the window is [+100 s, +145 s]
+UP = CRASH - 20_000  # a call answered 20 s before it
+CRASH_BUDGETS = ["worker-kill", "worker-crash-loop"]
+
+
+def crash_differs(tmp_path: Path, budget: Json, records: list[Json], cdrs: list[Json]) -> list[tuple[object, object]]:
+    """The `differs` rows of a crash window judged by `budget`: (count, finding)."""
+    d = run_dir(
+        tmp_path,
+        records,
+        calls=len(records),
+        events=kill(1, CRASH, budget=str(budget["name"])),
+        budgets=[budget],
+        profile={"cdr_join": True, "generator_stall_ms": 3_600_000},
+        cdrs=cdrs,
+    )
+    (w,) = jv.objs(compute(d, SCHEMAS), "windows")
+    return [(r["count"], r["finding"]) for r in jv.objs(w, "impacts") if r["class"] == "cdr_mismatch" and r["reason"] == "differs"]
+
+
+def shipped(name: str) -> Json:
+    return CONTENT.budgets[name].raw
+
+
+@pytest.mark.parametrize("budget", CRASH_BUDGETS)
+def test_a_bye_sent_to_a_crashed_worker_ends_the_cdr_before_the_caller_within_its_budget(tmp_path: Path, budget: str) -> None:
+    """The BYE goes out 72 ms after the death; the backup answers its retransmission
+    1.242 s after, the CDR holds the first send: 1.17 s ahead of the caller."""
+    bye = [record("bye", UP, ended=21_242)]
+    cdrs = [cdr("bye", UP, 100, 20_072)]
+    assert crash_differs(tmp_path, shipped(budget), bye, cdrs) == [(1, False)]
+    stripped = {k: v for k, v in shipped(budget).items() if k != "cdr_mismatch"} | {"name": "no-cdr-clause"}
+    assert crash_differs(tmp_path / "stripped", stripped, bye, cdrs) == [(1, True)]
+
+
+@pytest.mark.parametrize("budget", CRASH_BUDGETS)
+def test_a_2xx_repaired_on_the_retransmission_at_7_5_s_is_within_the_crash_budgets(tmp_path: Path, budget: str) -> None:
+    """INVITE at the death; the CDR answers at +0.5 s, the caller at +8 s, on the
+    2xx retransmission past a 3.6 s probe verdict; both ends agree."""
+    late = [record("late", CRASH, answered=8_000, setup=8_000, ended=60_000)]
+    assert crash_differs(tmp_path, shipped(budget), late, [cdr("late", CRASH, 500, 60_000)]) == [(1, False)]
+
+
+@pytest.mark.parametrize("budget", CRASH_BUDGETS)
+def test_a_cdr_end_9_s_ahead_of_the_caller_is_a_finding_of_the_crash_budgets(tmp_path: Path, budget: str) -> None:
+    far = [record("far", UP, ended=29_500)]
+    assert crash_differs(tmp_path, shipped(budget), far, [cdr("far", UP, 100, 20_500)]) == [(1, True)]
