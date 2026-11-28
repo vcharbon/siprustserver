@@ -122,8 +122,9 @@ Content-Length: 0\r\n\r\n";
 pub const EMITTED_ACK: &[u8] = b"ACK sip:bob@192.0.2.20:5060 SIP/2.0\r\nMax-Forwards: 70\r\nVia: SIP/2.0/UDP 192.0.2.1:5060;branch=z9hG4bK-ack-1f45\r\n\
 CSeq: 8005 ACK\r\nContent-Length: 0\r\n\r\n";
 
-/// A realistic confirmed 2-leg call.
-pub fn representative_call() -> Call {
+/// The representative call's caller leg `a`: its dialog confirmed toward
+/// `b-1`, the 2xx it answered her with held for her ACK.
+fn representative_a_leg() -> Leg {
     let mut a_leg = Leg {
         leg_id: "a".into(),
         call_id: "call-id-deadbeef@example.com".into(),
@@ -179,6 +180,12 @@ pub fn representative_call() -> Call {
             emission: paced_emission(ANSWERED_2XX, ("192.0.2.10", 5060), Class::Final2xx, 3),
         },
     );
+    a_leg
+}
+
+/// The representative call's callee leg `b-1`: its dialog confirmed, the
+/// ACK it sent the callee retained.
+fn representative_b_leg() -> Leg {
     let mut b_leg = Leg {
         leg_id: "b-1".into(),
         call_id: "b-leg-call-id-fedcba@b2bua".into(),
@@ -224,7 +231,11 @@ pub fn representative_call() -> Call {
         ));
     }
     b_dialog.sent_invite = Some(b_invite);
+    b_leg
+}
 
+/// A realistic confirmed 2-leg call.
+pub fn representative_call() -> Call {
     let mut ext: ExtMap = BTreeMap::new();
     ext.insert(
         "promote-pem".into(),
@@ -233,8 +244,8 @@ pub fn representative_call() -> Call {
 
     Call {
         call_ref: "worker-0|call-id-deadbeef@example.com|alice-from-tag-001".into(),
-        a_leg,
-        b_legs: vec![b_leg],
+        a_leg: representative_a_leg(),
+        b_legs: vec![representative_b_leg()],
         attempts: Vec::new(),
         active_peer: Some(ActivePeer { leg_a: "a".into(), leg_b: "b-1".into() }),
         callback_context: Some("ctx-abc-123".into()),
