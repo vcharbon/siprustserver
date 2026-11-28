@@ -24,7 +24,7 @@ k8s/sipp/: trace_*
 # row keys, SIPp options), read as a reader for its own queries.
 ../tooling/hakit/src/: cdr_all
 ../tooling/hakit/src/: cdr_check
-../tooling/hakit/src/: cdr_consumed_query
+../tooling/hakit/src/: cdr_consumed_series
 ../tooling/hakit/src/: cdr_count
 ../tooling/hakit/src/: cdr_dropped
 ../tooling/hakit/src/: cdr_firings
@@ -38,9 +38,9 @@ k8s/sipp/: trace_*
 ../tooling/hakit/src/: cdr_mismatch
 ../tooling/hakit/src/: cdr_ms
 ../tooling/hakit/src/: cdr_unaccounted
-../tooling/hakit/src/: cdr_unread_query
+../tooling/hakit/src/: cdr_unread_series
 ../tooling/hakit/src/: cdr_written
-../tooling/hakit/src/: cdr_written_query
+../tooling/hakit/src/: cdr_written_series
 ../tooling/hakit/src/: limiter_errors
 ../tooling/hakit/src/: limiter_overshoot
 ../tooling/hakit/src/: limiter_undershoot

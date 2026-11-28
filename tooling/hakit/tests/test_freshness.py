@@ -14,9 +14,14 @@ from hakit.vlogs import VictoriaLogs
 from hakit.vm import VictoriaMetrics
 
 
+LATENCY_OFFSET_MS = 30_000
+
+
 class Lab:
     """Records that stop arriving at `records_stop_ms`, a series whose newest sample
-    stops at `series_stop_ms` and, when `series_back_ms` is set, comes back then."""
+    stops at `series_stop_ms` and, when `series_back_ms` is set, comes back then.
+    As VictoriaMetrics does, an instant query sees no sample newer than its
+    latency offset, 30 s unless the query sets it."""
 
     def __init__(self, clock: FakeClock, records_stop_ms: int, series_stop_ms: int, series_back_ms: int | None = None) -> None:
         self.clock = clock
@@ -25,13 +30,15 @@ class Lab:
         self.series_back_ms = series_back_ms
 
     def rule(self, c: Call) -> HttpResult | None:
-        q = urllib.parse.parse_qs(urllib.parse.urlsplit(c.url).query).get("query", [""])[0]
+        params = urllib.parse.parse_qs(urllib.parse.urlsplit(c.url).query)
+        q = params.get("query", [""])[0]
         now = self.clock.now_ms()
         if "count() live" in q:
             return HttpResult(200, f'{{"live":"{(min(now, self.records_stop_ms) - T0) // 1000}"}}\n')
         if "timestamp(" in q:
-            back = self.series_back_ms is not None and now >= self.series_back_ms
-            newest = (now if back else min(now, self.series_stop_ms)) / 1000
+            visible = now - (1 if params.get("latency_offset") == ["1ms"] else LATENCY_OFFSET_MS)
+            back = self.series_back_ms is not None and visible >= self.series_back_ms
+            newest = (visible if back else min(visible, self.series_stop_ms)) / 1000
             return HttpResult(200, f'{{"status":"success","data":{{"result":[{{"value":[0,"{newest}"]}}]}}}}')
         return None
 
@@ -74,6 +81,12 @@ def test_records_that_stop_growing_are_stale_once_from_the_last_growth_seen() ->
 def test_a_series_whose_newest_sample_ages_three_intervals_is_stale() -> None:
     found = watch(T0 + 10_000_000, T0 + 200_000, T0 + 600_000)
     assert found == [{"kind": "series_stale", "at_ms": T0 + 200_000, "detail": "the series sut_calls stopped updating"}]
+
+
+def test_a_rollout_whose_new_pods_sample_29_s_after_the_old_ones_is_not_stale() -> None:
+    # The old pods' last sample at +199 s, the new pods' first at +228 s, outside
+    # any window: at most 41 s old at a check, under three intervals.
+    assert watch(T0 + 10_000_000, T0 + 199_000, T0 + 600_000, series_back_ms=T0 + 228_000) == []
 
 
 def test_no_record_before_the_first_calls_can_end_is_no_staleness() -> None:

@@ -121,5 +121,23 @@ def logsql_holds(url: str, at_ms: float) -> bool:
     return int(q["start"][0]) <= at_ms * 1_000_000 < int(q["end"][0])
 
 
+type Samples = list[tuple[int, float | None]]
+
+
+def vm_export(url: str, series: Sequence[tuple[Mapping[str, str], Samples]]) -> str:
+    """VictoriaMetrics' answer to an `/api/v1/export`: one line per series whose
+    `__name__` starts the `match[]` selector, with its samples in the range;
+    `None` is a staleness marker."""
+    q = urllib.parse.parse_qs(urllib.parse.urlsplit(url).query)
+    selector, lo, hi = q["match[]"][0], float(q["start"][0]) * 1000, float(q["end"][0]) * 1000
+    lines: list[str] = []
+    for labels, samples in series:
+        held = [(t, v) for t, v in samples if lo <= t <= hi]
+        if selector.startswith(labels["__name__"]) and held:
+            row = {"metric": dict(labels), "values": [v for _, v in held], "timestamps": [t for t, _ in held]}
+            lines.append(json.dumps(row) + "\n")
+    return "".join(lines)
+
+
 def write_jsonl(p: Path, rows: list[Json]) -> None:
     p.write_text("".join(json.dumps(r) + "\n" for r in rows))

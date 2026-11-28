@@ -358,9 +358,12 @@ made. A run profile joins the two.
    (`cdr_observations_unread_total`). After the drain the runner exports
    the observations whose `call_id` carries the run id (the Call-ID nonce of
    §6.4) into `cdrs.jsonl`, once the run's distinct shipped observations
-   cover every CDR the system under test wrote (the lab's written counter over
-   the run; the consumer's own counter loses what it counted after its last
-   scrape when it is killed, its shipped observations stay) and have stopped
+   cover every CDR the system under test wrote (what each series of the lab's
+   written counter counted after the run started, read from its raw samples:
+   no CDR of an earlier run, and a worker replaced or restarted counts on its
+   new series; a target killed between two scrapes loses what it counted since
+   the last, so the count never exceeds the CDRs written, and the consumer's
+   own counter is no measure, its shipped observations stay) and have stopped
    growing for 10 s, at most
    300 s, long enough for a broker thawing late. The consumer acknowledges a
    CDR only once its observation has landed, so a consumer killed in between
@@ -826,7 +829,8 @@ made. A run profile joins the two.
    VictoriaLogs, whose count must grow once the stream's first calls could
    have ended, and each VictoriaMetrics selector of the lab's `live_series`
    (`HAKIT_LIVE_SERIES`, `;`-separated; the system under test's call gauge
-   by default), whose newest sample must be recent. One that stops updating
+   by default), whose newest sample over all its series must be recent, read
+   past VictoriaMetrics' latency offset. One that stops updating
    for three scrape intervals (for records, at least five calls of the
    stream's rate) is a `series_stale` integrity finding with the instant it
    was last fresh. An open incident window holds that count and a silence

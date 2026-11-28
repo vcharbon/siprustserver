@@ -1,4 +1,5 @@
-"""VictoriaMetrics: the incident series the runner pushes, and instant queries.
+"""VictoriaMetrics: the incident series the runner pushes, instant queries, and
+raw sample exports.
 
 `sip_chaos_event{incident,phase,source,run} 1` at each phase instant, and
 `sip_chaos_window{incident,run}` at 1 while a window is open, 0 when it closes
@@ -8,7 +9,9 @@
 from __future__ import annotations
 
 import json
+import math
 import urllib.parse
+from dataclasses import dataclass
 
 from .executor import Executor
 from .jsonval import as_list, as_obj
@@ -35,6 +38,17 @@ class QueryFailed(Exception):
     pass
 
 
+@dataclass(frozen=True)
+class RawSeries:
+    """One series' raw samples, `(epoch ms, value)` ascending, staleness markers left out."""
+
+    labels: dict[str, str]
+    points: list[tuple[int, float]]
+
+    def label(self, name: str) -> str:
+        return self.labels.get(name, "")
+
+
 class VictoriaMetrics:
     def __init__(self, executor: Executor, base_url: str) -> None:
         self.executor = executor
@@ -51,10 +65,13 @@ class VictoriaMetrics:
             self.failures += 1
         return ok
 
-    def scalar(self, query: str) -> float:
+    def scalar(self, query: str, latency_offset: str | None = None) -> float:
         """The summed value of an instant query; `QueryFailed` when VictoriaMetrics
-        does not answer or the query selects no series."""
-        url = f"{self.base_url}/api/v1/query?{urllib.parse.urlencode({'query': query})}"
+        does not answer or the query selects no series. An instant query at now
+        sees no sample newer than VictoriaMetrics' latency offset (30 s by
+        default); `latency_offset` sets it for this query."""
+        params = {"query": query} | ({"latency_offset": latency_offset} if latency_offset else {})
+        url = f"{self.base_url}/api/v1/query?{urllib.parse.urlencode(params)}"
         res = self.executor.http("GET", url)
         if res.status != 200:
             raise QueryFailed(f"VictoriaMetrics did not answer {query!r}: HTTP {res.status} {res.body[:120]}")
@@ -87,3 +104,27 @@ class VictoriaMetrics:
             return out
         except (ValueError, TypeError) as e:
             raise QueryFailed(f"VictoriaMetrics answered {query!r} with no vector: {e}") from e
+
+    def export(self, selector: str, start_ms: int, end_ms: int) -> list[RawSeries]:
+        """The raw samples of every series `selector` matches in `[start_ms, end_ms]`,
+        each series once however many lines it comes in; `QueryFailed` when
+        VictoriaMetrics does not answer or answers lines that do not parse."""
+        params = {"match[]": selector, "start": f"{start_ms / 1000:.3f}", "end": f"{end_ms / 1000:.3f}"}
+        res = self.executor.http("GET", f"{self.base_url}/api/v1/export?{urllib.parse.urlencode(params)}", timeout_s=60)
+        if res.status != 200:
+            raise QueryFailed(f"VictoriaMetrics did not export {selector!r}: HTTP {res.status} {res.body[:120]}")
+        merged: dict[str, RawSeries] = {}
+        try:
+            for line in res.body.splitlines():
+                if not line.strip():
+                    continue
+                row = as_obj(json.loads(line))
+                labels = {k: str(v) for k, v in as_obj(row.get("metric")).items()}
+                pairs = zip(as_list(row.get("timestamps")), as_list(row.get("values")), strict=True)
+                points = [(int(str(t)), float(str(v))) for t, v in pairs if v is not None]
+                key = json.dumps(labels, sort_keys=True)
+                prior = merged[key].points if key in merged else []
+                merged[key] = RawSeries(labels, prior + [p for p in points if math.isfinite(p[1])])
+        except (ValueError, TypeError) as e:
+            raise QueryFailed(f"VictoriaMetrics exported {selector!r} in lines that do not parse: {e}") from e
+        return [RawSeries(s.labels, sorted(s.points)) for s in merged.values()]

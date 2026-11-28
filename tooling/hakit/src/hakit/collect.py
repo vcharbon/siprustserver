@@ -5,7 +5,12 @@ consumer ships in batches), so the export waits until the run's distinct
 shipped observations cover every CDR the workers wrote and have stopped growing
 for `QUIET_S`, at most `MAX_WAIT_S`. The observations, not the consumer's
 counter, are the measure: a consumer killed between two scrapes takes what it
-counted since the last one with it, while what it shipped stays.
+counted since the last one with it, while what it shipped stays. The written
+count is what the workers' counter series counted after the run started
+(`counters.increase`): it holds no CDR of an earlier run, and a worker
+replaced or restarted during the run counts from its new series. A worker
+killed between two scrapes takes what it counted since the last one with it,
+so the count never exceeds the CDRs written.
 `cdrs-collect.json` records whether that happened (`complete`), the counts, and
 the payloads the consumer could not read; the verdict judges them.
 """
@@ -16,6 +21,7 @@ import json
 from pathlib import Path
 
 from .clock import Clock
+from .counters import BASELINE_LOOKBACK_MS, increase
 from .jsonval import Json
 from .lab import Lab
 from .vlogs import VictoriaLogs
@@ -27,11 +33,14 @@ POLL_S = 2
 MARGIN_MS = 3_600_000
 
 
-def _read(vm: VictoriaMetrics, template: str, span_s: int) -> float | None:
+def _counted(vm: VictoriaMetrics, selector: str, started_ms: int, now_ms: int) -> float | None:
+    """What the counter `selector` counted since the run started; `None` when
+    VictoriaMetrics does not answer or holds no series of it."""
     try:
-        return vm.scalar(template.replace("{span}", str(span_s)))
+        series = vm.export(selector, started_ms - BASELINE_LOOKBACK_MS, now_ms)
     except QueryFailed:
         return None
+    return increase(series, started_ms) if series else None
 
 
 def collect_cdrs(
@@ -44,8 +53,7 @@ def collect_cdrs(
     written: float | None = None
     complete = False
     while True:
-        span = int((clock.now_ms() - started_ms) / 1000) + 60
-        written = _read(vm, lab.cdr_written_query, span)
+        written = _counted(vm, lab.cdr_written_series, started_ms, clock.now_ms())
         n = vlogs.cdr_count(run, started_ms - MARGIN_MS, clock.now_ms() + MARGIN_MS)
         if n != last:
             last, quiet_since = n, clock.now_ms()
@@ -56,9 +64,8 @@ def collect_cdrs(
         if clock.now_ms() >= deadline:
             break
         clock.sleep(POLL_S)
-    span = int((clock.now_ms() - started_ms) / 1000) + 60
-    unread = _read(vm, lab.cdr_unread_query, span)
-    consumed = _read(vm, lab.cdr_consumed_query, span)
+    unread = _counted(vm, lab.cdr_unread_series, started_ms, clock.now_ms())
+    consumed = _counted(vm, lab.cdr_consumed_series, started_ms, clock.now_ms())
     bad: list[str] = []
     observations = 0
     with (run_dir / "cdrs.jsonl").open("w") as fh:

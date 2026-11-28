@@ -25,6 +25,8 @@ PROXY_LOG = (
     'node="e1" worker=w-0 host=10.0.0.1\n'
     "2026-10-15T22:29:14.250000Z  INFO sip_proxy::registry::projection: worker joined the registry "
     'node="e1" worker=w-0 host=10.0.0.9\n'
+    "2026-10-15T22:29:14.900000Z  INFO sip_proxy::registry::projection::annotations: worker health flip "
+    'node="e1" worker="w-0" from=Unknown to=Alive\n'
 )
 T_RELEASE = 1_792_000_000_000
 
@@ -149,8 +151,9 @@ def held_probe(tmp_path: Path, uid: str, scheduled_ms: int, old_present: bool = 
 def test_the_held_probe_proves_one_incarnation_after_the_release(tmp_path: Path) -> None:
     f = facts(held_probe(tmp_path, "u9", T_RELEASE + 2000).run("probe"))
     assert f["incarnations"] == 1 and f["released_at_ms"] == T_RELEASE
-    assert f["survivors"] == [{"pod": "w-1", "parked_at_ms": 1792103350500}]
-    assert f["proxies"] == [{"pod": "p-0", "left_at_ms": 1792103350100, "joined_at_ms": 1792103354250}]
+    assert f["survivors"] == [{"pod": "w-1", "not_ready_at_ms": None, "parked_at_ms": 1792103350500}]
+    # A pod that joins the registry is routed once the proxy's probe reads it alive.
+    assert f["proxies"] == [{"pod": "p-0", "left_at_ms": 1792103350100, "joined_at_ms": 1792103354900}]
 
 
 def test_the_held_probe_fails_on_a_replacement_other_than_the_one_that_waited(tmp_path: Path) -> None:

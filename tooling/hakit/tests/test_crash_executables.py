@@ -104,6 +104,53 @@ def test_two_incarnations_running_together_fail_the_crash_probe(tmp_path: Path) 
     failed(crashed_probe(tmp_path, 1, T0 + 1500, T0 + 900).run("probe"), "logged 600 ms after its successor started")
 
 
+SURVIVOR_LOG = (
+    "2026-10-15T22:29:10.935000Z  INFO b2bua::repl::supervisor: replication peer kept on presence alone (not ready) "
+    'node="w-1" peer=w-0 host=10.0.0.1 terminating=false\n'
+    "2026-10-15T22:29:11.935000Z  INFO b2bua::repl::supervisor: replication peer ready again "
+    'node="w-1" peer=w-0 host=10.0.0.1\n'
+)
+PROXY_LOG = (
+    "2026-10-15T22:29:10.930000Z  INFO sip_proxy::registry::projection::annotations: worker reads not ready, "
+    'another reads ready: out of the routing node="e1" worker=w-0 host=10.0.0.1\n'
+    "2026-10-15T22:29:11.556000Z  INFO sip_proxy::health::probe: worker incarnation changed "
+    'node="e1" worker=w-0 from=1 to=2\n'
+    "2026-10-15T22:29:11.557000Z  INFO sip_proxy::registry::projection::annotations: worker health flip "
+    'node="e1" worker="w-0" from=Unknown to=Alive\n'
+)
+
+
+def test_a_worker_restarted_in_place_is_timed_not_ready_on_the_survivors_and_back_alive_on_the_proxies(
+    tmp_path: Path,
+) -> None:
+    sb = Sandbox(tmp_path, "kill_worker")
+    sb.state("targets", "w-0 u0 n1\n")
+    sb.state("live_before", "2\n")
+    sb.state("crashed", "w-0 u0 n1 worker c1 0\n")
+    sb.state("killed_at_ms", f"{T0 + 500}\n")
+    pod = {
+        "metadata": {"uid": "u0"},
+        "status": {
+            "conditions": [{"type": "Ready", "status": "True", "lastTransitionTime": "2026-10-15T22:29:12Z"}],
+            "containerStatuses": [
+                {"name": "worker", "restartCount": 1, "state": {"running": {"startedAt": "2026-10-15T22:29:11Z"}}}
+            ],
+        },
+    }
+    sb.rules(
+        Rule(r"get pod w-0 --ignore-not-found -o json$", json.dumps(pod)),
+        Rule(r"logs w-0 -c worker --previous --timestamps --tail=1$", f"{iso_ms(T0)} last words\n"),
+        Rule(r"logs w-0 -c worker --timestamps --limit-bytes=8192$", f"{iso_ms(T0 + 1_100)} first words\n"),
+        live("app=b2bua-worker", "w-0 u0 n1 True\nw-1 u1 n2 True\n"),
+        live("app=sip-front-proxy", "p-0 pu e1 True\n"),
+        Rule(r"logs w-1 --since-time=2026-10-15T22:29:10Z$", SURVIVOR_LOG),
+        Rule(r"logs p-0 -c sip-front-proxy --since-time=2026-10-15T22:29:10Z$", PROXY_LOG),
+    )
+    f = facts(sb.run("probe"))
+    assert f["survivors"] == [{"pod": "w-1", "not_ready_at_ms": T0 + 935, "parked_at_ms": None}]
+    assert f["proxies"] == [{"pod": "p-0", "left_at_ms": T0 + 930, "joined_at_ms": T0 + 1_557}]
+
+
 def test_the_crash_probe_waits_while_the_pod_cannot_be_read(tmp_path: Path) -> None:
     sb = crashed_probe(tmp_path, 1, T0, T0 + 900)
     sb.rules(Rule(r"get pod l-0 --ignore-not-found -o json$", rc=1))

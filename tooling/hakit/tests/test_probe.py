@@ -8,7 +8,7 @@ import os
 import urllib.parse
 from pathlib import Path
 
-from kit import T0, logsql_holds, record, timed_out
+from kit import T0, Samples, logsql_holds, record, timed_out, vm_export
 from rundir import kill, run_dir
 
 from hakit import jsonval as jv
@@ -25,10 +25,15 @@ def shipped(records: list[Json]) -> str:
     return "".join(json.dumps({"_msg": json.dumps(r)}) + "\n" for r in records)
 
 
-def lab(records: list[Json], vm: dict[str, float] | None = None, pods: str = '{"items": []}') -> FakeExecutor:
+type Exported = list[tuple[dict[str, str], Samples]]
+
+
+def lab(records: list[Json], vm: dict[str, float] | None = None, pods: str = '{"items": []}', exported: Exported | None = None) -> FakeExecutor:
     def rule(c: Call) -> HttpResult | ProcResult | None:
         if c.kind == "http" and "/select/logsql/query" in c.url:
             return HttpResult(200, shipped([r for r in records if logsql_holds(c.url, jv.number(r, "ended_at_ms"))]))
+        if c.kind == "http" and "/api/v1/export" in c.url:
+            return HttpResult(200, vm_export(c.url, exported or []))
         if c.kind == "http" and "/api/v1/query" in c.url:
             q = urllib.parse.parse_qs(urllib.parse.urlsplit(c.url).query)["query"][0]
             hits = [v for k, v in (vm or {}).items() if k in q]
@@ -102,6 +107,39 @@ def test_a_running_run_checks_liveness_bounds_and_pods(tmp_path: Path) -> None:
     assert "stream basic wrote no record in the last 900 s" in an
     assert "bound limiter admission: 5 > 4" in an
     assert "pod not ready outside every window: w-0 Pending" in an
+
+
+def restarts(pod: str, container: str, uid: str, exporter: str, samples: Samples) -> tuple[dict[str, str], Samples]:
+    labels = {"__name__": "kube_pod_container_status_restarts_total", "instance": exporter,
+              "exported_pod": pod, "exported_container": container, "uid": uid}
+    return labels, samples
+
+
+def test_each_container_restart_since_the_load_counts_once_across_exporter_and_pod_replacements(tmp_path: Path) -> None:
+    load = NOW - 120_000
+    d = run_dir(tmp_path, [], calls=0, events=[])
+    meta = json.loads((d / "run-meta.json").read_text())
+    (d / "run-meta.json").write_text(json.dumps({**meta, "load_started_at_ms": load}))
+    # The proxy's three containers restart once each at +50 s; the exporter is
+    # replaced at +80 s and its new instance exports the counts it finds.
+    proxy = [
+        series
+        for c in ("proxy", "guard", "routes")
+        for series in (
+            restarts("p-0", c, "u0", "ksm-a", [(load - 30_000, 0), (load + 30_000, 0), (load + 60_000, 1), (load + 75_000, None)]),
+            restarts("p-0", c, "u0", "ksm-b", [(load + 90_000, 1), (load + 105_000, 1)]),
+        )
+    ]
+    # The worker restarted before the load, then was replaced by a pod whose
+    # container restarted once.
+    worker = [
+        restarts("w-0", "worker", "u1", "ksm-a", [(load - 30_000, 2), (load + 30_000, 2), (load + 45_000, None)]),
+        restarts("w-0", "worker", "u2", "ksm-a", [(load + 60_000, 0), (load + 75_000, 1)]),
+    ]
+    s = snap(d, [], exported=proxy + worker)
+    assert jv.obj(s, "series")["container_restarts_since_load"] == {
+        "p-0/proxy": 1, "p-0/guard": 1, "p-0/routes": 1, "w-0/worker": 1,
+    }
 
 
 def test_integrity_findings_appended_while_the_run_runs_are_anomalies(tmp_path: Path) -> None:

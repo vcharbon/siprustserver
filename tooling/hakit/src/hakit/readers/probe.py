@@ -6,7 +6,8 @@ live status, the integrity findings the runner appended so far), the records
 that ended in the recent span from VictoriaLogs, classified and judged
 provisionally against the windows (`probe_live`), and a few generic series
 from VictoriaMetrics: the system under test's live calls, the generators'
-offered rate by stream, the container restarts, and the product's bounds
+offered rate by stream, the restarts of each container since the load
+started, and the product's bounds
 (`--spec`). `anomalies` lists what deserves a look; `healthy` is true when it
 is empty. While the run is not loading, the liveness checks are skipped: a
 finished run's empty rates say nothing.
@@ -18,10 +19,12 @@ import json
 from pathlib import Path
 
 from .. import jsonval as jv
+from ..counters import BASELINE_LOOKBACK_MS, grown
 from ..executor import Executor
 from ..jsonval import Json, as_list, as_obj
 from ..offschedule import ACTIVE, pid_alive
 from ..vlogs import VictoriaLogs
+from ..vm import QueryFailed, RawSeries, VictoriaMetrics
 from .probe_live import RunFiles, event_rows, judge_recent, planned_events, read_files, window_status
 from .probe_spec import ProbeSpec
 from .vmrange import Vm
@@ -72,11 +75,30 @@ def _not_ready(executor: Executor, context: str, namespace: str) -> list[str]:
     return out
 
 
-def _series(vm: Vm, spec: ProbeSpec, files: RunFiles, now_s: float) -> Json:
+def _container(s: RawSeries) -> str:
+    return f"{s.label('exported_pod')}/{s.label('exported_container')}"
+
+
+def _container_restarts(raw: VictoriaMetrics, spec: ProbeSpec, start_ms: int, now_ms: int) -> dict[str, int]:
+    """By `pod/container`, its restarts since `start_ms`, containers that did not
+    restart left out. A pod (its uid) counts once however many exporter
+    instances export it; a pod replaced under the same name sums the restarts
+    of each pod."""
+    sel = f'exported_namespace="{spec.namespace}"' + (f',exported_pod=~"{spec.restart_pods}"' if spec.restart_pods else "")
+    try:
+        series = raw.export(f"kube_pod_container_status_restarts_total{{{sel}}}", start_ms - BASELINE_LOOKBACK_MS, now_ms)
+    except QueryFailed:
+        return {}
+    out: dict[str, int] = {}
+    for (container, _), n in grown(series, start_ms, lambda s: (_container(s), s.label("uid"))).items():
+        out[container] = out.get(container, 0) + round(n)
+    return out
+
+
+def _series(vm: Vm, raw: VictoriaMetrics, spec: ProbeSpec, files: RunFiles, now_s: float) -> Json:
     ns = spec.namespace
     start = jv.opt_number(files.meta, "load_started_at_ms")
-    since = max(60, int(now_s - start / 1000)) if start is not None else 3600
-    restart_sel = f'exported_namespace="{ns}"' + (f',exported_pod=~"{spec.restart_pods}"' if spec.restart_pods else "")
+    start_ms = int(start) if start is not None else int(now_s * 1000) - 3_600_000
     offered = (
         "sum by (stream)(rate(sipp_calls_created_total[1m])) "
         "or sum by (stream)(rate(loadgen_calls_offered_total[1m]))"
@@ -85,14 +107,7 @@ def _series(vm: Vm, spec: ProbeSpec, files: RunFiles, now_s: float) -> Json:
         "active_calls": sum(v for _, v in vm.at(f'sum({spec.active_calls}{{namespace="{ns}"}})', now_s)),
         "active_calls_by_pod": vm.by(f'sum by (pod)({spec.active_calls}{{namespace="{ns}"}})', now_s, "pod"),
         "offered_cps_by_stream": {k: round(v, 2) for k, v in vm.by(offered, now_s, "stream").items()},
-        "restarts_since_load": {
-            k: round(v)
-            for k, v in vm.by(
-                f"sum by (exported_pod)(increase(kube_pod_container_status_restarts_total{{{restart_sel}}}[{since}s])) > 0.5",
-                now_s,
-                "exported_pod",
-            ).items()
-        },
+        "container_restarts_since_load": _container_restarts(raw, spec, start_ms, int(now_s * 1000)),
         "bounds": [
             {"name": b.name, "max": b.max, "value": max((v for _, v in vm.at(b.expr, now_s)), default=None)}
             for b in spec.bounds
@@ -161,7 +176,7 @@ def probe(run_dir: Path, spec: ProbeSpec, executor: Executor, vm_url: str, vlogs
         "open_windows": [w.event for w in files.windows if window_status(w, now_ms) in ("open", "settling")],
         "integrity": files.integrity,
         "recent": {"since_ms": since_ms, "unreadable_lines": len(bad), **judge_recent(files, records)},
-        "series": _series(Vm(executor, vm_url), spec, files, now_ms / 1000),
+        "series": _series(Vm(executor, vm_url), VictoriaMetrics(executor, vm_url), spec, files, now_ms / 1000),
     }
     not_ready = _not_ready(executor, context, spec.namespace) if loading else []
     snap["pods_not_ready"] = not_ready

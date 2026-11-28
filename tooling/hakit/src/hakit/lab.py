@@ -39,12 +39,12 @@ class Lab:
     leftover_calls_query: str
     # VictoriaMetrics selectors the run reads live, checked for freshness.
     live_series: list[str]
-    # The CDR chain's counters over the run, `{span}` its length in seconds: the
-    # CDRs the system under test wrote, those the consumer consumed, and the
-    # payloads it could not read.
-    cdr_written_query: str
-    cdr_consumed_query: str
-    cdr_unread_query: str
+    # The CDR chain's counter series, each read over the run: the CDRs the
+    # system under test wrote, those the consumer consumed, and the payloads it
+    # could not read.
+    cdr_written_series: str
+    cdr_consumed_series: str
+    cdr_unread_series: str
     # A tmpfs directory a docker generator works in, copied into the run
     # directory at its end (workdir.py); empty: the run directory itself.
     generator_scratch: str
@@ -133,9 +133,9 @@ def lab_from_env(env: Mapping[str, str]) -> Lab:
         callees=parse_callees(g("HAKIT_CALLEES", "192.168.60.21:5060,192.168.60.22:5060")),
         leftover_calls_query=g("HAKIT_LEFTOVER_CALLS_QUERY", "sum(last_over_time(b2bua_active_calls[30s]))"),
         live_series=[s.strip() for s in g("HAKIT_LIVE_SERIES", "b2bua_active_calls").split(";") if s.strip()],
-        cdr_written_query=g("HAKIT_CDR_WRITTEN_QUERY", "sum(increase(b2bua_cdr_written_total[{span}s]))"),
-        cdr_consumed_query=g("HAKIT_CDR_CONSUMED_QUERY", "sum(increase(cdr_consumed_total[{span}s]))"),
-        cdr_unread_query=g("HAKIT_CDR_UNREAD_QUERY", "sum(increase(cdr_observations_unread_total[{span}s]))"),
+        cdr_written_series=g("HAKIT_CDR_WRITTEN_SERIES", "b2bua_cdr_written_total"),
+        cdr_consumed_series=g("HAKIT_CDR_CONSUMED_SERIES", "cdr_consumed_total"),
+        cdr_unread_series=g("HAKIT_CDR_UNREAD_SERIES", "cdr_observations_unread_total"),
         generator_scratch=g("HAKIT_GENERATOR_SCRATCH", "/dev/shm/hakit"),
         generator_user=g("HAKIT_GENERATOR_USER", f"{os.getuid()}:{os.getgid()}"),
     )

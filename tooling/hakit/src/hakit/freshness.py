@@ -2,7 +2,8 @@
 
 Every scrape interval during the load: each stream's record count in
 VictoriaLogs must grow once its first calls could have ended, and the newest
-sample of each `live_series` selector in VictoriaMetrics must be recent. A
+sample of each `live_series` selector in VictoriaMetrics, over all its series,
+must be recent: a rollout's new pods take over from the old ones. A
 series that stops for three scrape intervals (for records, at least five calls
 of the stream's rate) is one `series_stale` finding, with the instant it was
 last fresh. An incident window holds that count: a fault may silence every
@@ -22,6 +23,10 @@ from .vm import QueryFailed, VictoriaMetrics
 SCRAPE_MS = 15_000
 STALE_INTERVALS = 3
 RECORD_CALLS = 5
+# The newest sample is read with VictoriaMetrics' smallest latency offset: its
+# default hides the last 30 s, which alone ages a series to two of its three
+# intervals.
+NEWEST_LATENCY_OFFSET = "1ms"
 
 
 @dataclass
@@ -87,7 +92,7 @@ class Freshness:
                 found.append({**stale, "stream": w.name})
         for w in self.series:
             try:
-                newest_s = self.vm.scalar(f"max(timestamp({w.name}))")
+                newest_s = self.vm.scalar(f"max(timestamp({w.name}))", latency_offset=NEWEST_LATENCY_OFFSET)
                 w.fresh_at_ms = max(w.fresh_at_ms, int(newest_s * 1000))
             except QueryFailed:
                 pass
