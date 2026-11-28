@@ -115,14 +115,10 @@ def restarts(pod: str, container: str, uid: str, exporter: str, samples: Samples
     return labels, samples
 
 
-def test_each_container_restart_since_the_load_counts_once_across_exporter_and_pod_replacements(tmp_path: Path) -> None:
-    load = NOW - 120_000
-    d = run_dir(tmp_path, [], calls=0, events=[])
-    meta = json.loads((d / "run-meta.json").read_text())
-    (d / "run-meta.json").write_text(json.dumps({**meta, "load_started_at_ms": load}))
-    # The proxy's three containers restart once each at +50 s; the exporter is
-    # replaced at +80 s and its new instance exports the counts it finds.
-    proxy = [
+def proxy_restarts_across_an_exporter_replacement(load: int) -> Exported:
+    """The proxy's three containers restart once each at +50 s; the exporter is
+    replaced at +80 s and its new instance exports the counts it finds."""
+    return [
         series
         for c in ("proxy", "guard", "routes")
         for series in (
@@ -130,13 +126,24 @@ def test_each_container_restart_since_the_load_counts_once_across_exporter_and_p
             restarts("p-0", c, "u0", "ksm-b", [(load + 90_000, 1), (load + 105_000, 1)]),
         )
     ]
-    # The worker restarted before the load, then was replaced by a pod whose
-    # container restarted once.
-    worker = [
+
+
+def worker_replaced_after_a_restart_before_the_load(load: int) -> Exported:
+    """The worker restarted before the load, then was replaced by a pod whose
+    container restarted once."""
+    return [
         restarts("w-0", "worker", "u1", "ksm-a", [(load - 30_000, 2), (load + 30_000, 2), (load + 45_000, None)]),
         restarts("w-0", "worker", "u2", "ksm-a", [(load + 60_000, 0), (load + 75_000, 1)]),
     ]
-    s = snap(d, [], exported=proxy + worker)
+
+
+def test_each_container_restart_since_the_load_counts_once_across_exporter_and_pod_replacements(tmp_path: Path) -> None:
+    load = NOW - 120_000
+    d = run_dir(tmp_path, [], calls=0, events=[])
+    meta = json.loads((d / "run-meta.json").read_text())
+    (d / "run-meta.json").write_text(json.dumps({**meta, "load_started_at_ms": load}))
+    exported = proxy_restarts_across_an_exporter_replacement(load) + worker_replaced_after_a_restart_before_the_load(load)
+    s = snap(d, [], exported=exported)
     assert jv.obj(s, "series")["container_restarts_since_load"] == {
         "p-0/proxy": 1, "p-0/guard": 1, "p-0/routes": 1, "w-0/worker": 1,
     }

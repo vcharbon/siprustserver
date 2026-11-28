@@ -16,11 +16,11 @@ params:
   proxy_selector:
     type: string
     default: app=sip-front-proxy
-    description: The front proxies whose registry join of the replacement is timed; empty skips them.
+    description: The front proxies whose drop of the worker and take-back of its replacement are timed; empty skips them.
   proxy_container:
     type: string
     default: sip-front-proxy
-    description: The proxy container whose log holds the registry lines.
+    description: The proxy container whose log holds the registry, health and acceptance lines.
 duration_s: 0
 expected_s: 90
 timeouts:

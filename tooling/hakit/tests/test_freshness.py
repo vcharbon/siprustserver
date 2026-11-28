@@ -84,8 +84,8 @@ def test_a_series_whose_newest_sample_ages_three_intervals_is_stale() -> None:
 
 
 def test_a_rollout_whose_new_pods_sample_29_s_after_the_old_ones_is_not_stale() -> None:
-    # The old pods' last sample at +199 s, the new pods' first at +228 s, outside
-    # any window: at most 41 s old at a check, under three intervals.
+    """The old pods' last sample at +199 s, the new pods' first at +228 s,
+    outside any window: at most 41 s old at a check, under three intervals."""
     assert watch(T0 + 10_000_000, T0 + 199_000, T0 + 600_000, series_back_ms=T0 + 228_000) == []
 
 

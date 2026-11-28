@@ -367,7 +367,11 @@ made. A run profile joins the two.
    growing for 10 s, at most
    300 s, long enough for a broker thawing late. The consumer acknowledges a
    CDR only once its observation has landed, so a consumer killed in between
-   leaves the CDR to the broker's redelivery. `cdrs-collect.json` keeps
+   leaves the CDR to the broker's redelivery, and the broker's queue read empty
+   after the observations stopped growing holds no CDR still owed. The export
+   waits for that reading too; without one (the lab names no queue gauge, or
+   the broker was not scraped since) it completes only on a written count no
+   ended or reset series made a lower bound. `cdrs-collect.json` keeps
    whether that happened and the counts. Byte-identical observations (a
    redelivery, a re-post) count once. Joined on `call_id`, each mismatch of a
    kind:

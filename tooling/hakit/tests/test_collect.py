@@ -1,6 +1,7 @@
 """The CDR export after the drain (ADR-0049 §3.8): complete once the run's
-distinct shipped observations cover every CDR the workers wrote and have
-stopped growing."""
+distinct shipped observations cover every CDR the workers wrote, have stopped
+growing and, when a written series may have lost its last counts, the broker's
+queue reads empty."""
 
 from __future__ import annotations
 
@@ -20,9 +21,23 @@ from hakit.vm import VictoriaMetrics
 
 LAB = lab_from_env({})
 STARTED = T0 - 600_000
+WRITTEN = 10
+SCRAPE_MS = 15_000
 # A worker's counter through the run: 5 CDRs of an earlier run before the
 # start, 10 of this run after it.
 ONE_WORKER: list[Samples] = [[(STARTED - 30_000, 5), (STARTED + 15_000, 9), (STARTED + 30_000, 15)]]
+# A worker killed between two scrapes: its last scrape saw 4 of the 6 CDRs it
+# wrote; its replacement wrote the other 4.
+KILLED: Samples = [(STARTED - 30_000, 100), (STARTED + 15_000, 104), (STARTED + 30_000, None)]
+REPLACEMENT: Samples = [(STARTED + 60_000, 4), (STARTED + 75_000, 4)]
+# A worker rolled out after its last scrape counted its 6: its series ends
+# with a staleness marker, its replacement's starts at 0 and counts 4.
+ROLLED_OUT: Samples = [(STARTED - 30_000, 100), (STARTED + 15_000, 104), (STARTED + 30_000, 106), (STARTED + 45_000, None)]
+# A worker restarted in place: its series drops to the counts of the new
+# process, 7 before the restart and 3 after.
+RESTARTED: Samples = [(STARTED - 30_000, 50), (STARTED + 15_000, 57), (STARTED + 30_000, 1), (STARTED + 45_000, 3)]
+# An earlier run's last CDRs land in the minute before the start.
+EARLIER_RUN_TAIL: Samples = [(STARTED - 50_000, 0), (STARTED - 35_000, 300), (STARTED - 20_000, 500), (STARTED + 15_000, 510)]
 
 
 def counter(name: str, pod: str, samples: Samples) -> tuple[dict[str, str], Samples]:
@@ -32,10 +47,12 @@ def counter(name: str, pod: str, samples: Samples) -> tuple[dict[str, str], Samp
 class Chain:
     """Workers wrote 10 CDRs, their counter series `written`. The run's
     distinct observations reach 10 at `observed_after_s` (8 before, 8 forever
-    when None) and keep growing until `shipping_until_s`; the consumer's
-    counter follows them unless `counter_lost` (a consumer killed between two
-    scrapes loses what it counted since the last one); another run's
-    observations are never in the run's count."""
+    when None) and keep growing until `shipping_until_s`; the broker's queue
+    holds the CDRs not observed yet, scraped every 15 s unless
+    `broker_unscraped`; the consumer's counter follows the observations unless
+    `counter_lost` (a consumer killed between two scrapes loses what it counted
+    since the last one); another run's observations are never in the run's
+    count."""
 
     def __init__(
         self,
@@ -45,6 +62,7 @@ class Chain:
         shipping_until_s: float = 0,
         counter_lost: bool = False,
         written: list[Samples] = ONE_WORKER,
+        broker_unscraped: bool = False,
     ) -> None:
         self.clock = clock
         self.observed_after_s = observed_after_s
@@ -52,24 +70,32 @@ class Chain:
         self.shipping_until_s = shipping_until_s
         self.counter_lost = counter_lost
         self.written = written
+        self.broker_unscraped = broker_unscraped
 
-    def observed(self) -> int:
-        elapsed = (self.clock.now_ms() - T0) / 1000
+    def observed(self, at_ms: int) -> int:
+        elapsed = (at_ms - T0) / 1000
         done = self.observed_after_s is not None and elapsed >= self.observed_after_s
-        return (10 if done else 8) + int(min(elapsed, self.shipping_until_s))
+        return (WRITTEN if done else 8) + int(min(elapsed, self.shipping_until_s))
+
+    def queue(self, now_ms: int) -> Samples:
+        if self.broker_unscraped:
+            return []
+        scrapes = range(T0, now_ms + 1, SCRAPE_MS)
+        return [(t, float(max(0, WRITTEN - self.observed(t)))) for t in scrapes]
 
     def rule(self, c: Call) -> HttpResult | None:
+        now = self.clock.now_ms()
         if "/api/v1/export" in c.url:
-            now = self.clock.now_ms()
-            consumed = 8 if self.counter_lost else min(self.observed(), 10)
+            consumed = 8 if self.counter_lost else min(self.observed(now), WRITTEN)
             return HttpResult(200, vm_export(c.url, [
                 *(counter("b2bua_cdr_written_total", f"w-{i}", s) for i, s in enumerate(self.written)),
                 counter("cdr_consumed_total", "c-0", [(STARTED - 30_000, 40), (now, 40 + consumed)]),
                 counter("cdr_observations_unread_total", "c-0", [(STARTED - 30_000, 3), (now, 3 + self.unread)]),
+                counter("rabbitmq_queue_messages", "b-0", self.queue(now)),
             ]))
         q = urllib.parse.parse_qs(urllib.parse.urlsplit(c.url).query).get("query", [""])[0]
         if "stats count_uniq_hash(_msg) cdrs" in q:
-            return HttpResult(200, f'{{"cdrs":"{self.observed() if "run-x" in q else 1000}"}}\n')
+            return HttpResult(200, f'{{"cdrs":"{self.observed(now) if "run-x" in q else 1000}"}}\n')
         if "/select/logsql/query" in c.url:
             if not logsql_holds(c.url, T0):
                 return HttpResult(200, "")
@@ -88,15 +114,16 @@ def collect(tmp_path: Path, chain: Chain) -> dict[str, Any]:
     return doc
 
 
-def test_the_export_waits_until_every_written_cdr_was_observed(tmp_path: Path) -> None:
+def test_the_export_waits_through_a_late_broker_thaw_until_every_written_cdr_was_observed(tmp_path: Path) -> None:
     doc = collect(tmp_path, Chain(FakeClock(T0), 120))
     assert (doc["complete"], doc["written"], doc["observed"], doc["consumed"], doc["unread"]) == (True, 10, 10, 10, 0)
-    assert 120 <= doc["waited_s"] < 140  # long enough for a broker thaw
+    assert (doc["written_exact"], doc["queued"]) == (True, 0)
+    assert 120 <= doc["waited_s"] < 140
 
 
 def test_cdrs_still_owed_at_the_cap_leave_the_export_incomplete(tmp_path: Path) -> None:
     doc = collect(tmp_path, Chain(FakeClock(T0), None, unread=2))
-    assert (doc["complete"], doc["written"], doc["observed"], doc["unread"]) == (False, 10, 8, 2)
+    assert (doc["complete"], doc["written"], doc["observed"], doc["unread"], doc["queued"]) == (False, 10, 8, 2, 2)
     assert doc["waited_s"] >= MAX_WAIT_S >= 300
 
 
@@ -111,24 +138,40 @@ def test_a_consumer_counter_reset_by_a_kill_does_not_hold_the_export(tmp_path: P
     assert 30 <= doc["waited_s"] < 50
 
 
-def test_a_rollout_that_replaces_a_workers_series_counts_the_old_series_and_the_new(tmp_path: Path) -> None:
-    # The old pod counted 6 of the run's CDRs before its series ended (its
-    # staleness marker last); its replacement's series starts at 0 and counts 4.
-    old: Samples = [(STARTED - 30_000, 100), (STARTED + 15_000, 104), (STARTED + 30_000, 106), (STARTED + 45_000, None)]
-    new: Samples = [(STARTED + 60_000, 4), (STARTED + 75_000, 4)]
-    doc = collect(tmp_path, Chain(FakeClock(T0), 30, written=[old, new]))
-    assert (doc["complete"], doc["written"], doc["observed"]) == (True, 10, 10)
+def test_cdrs_a_killed_worker_wrote_after_its_last_scrape_still_queued_leave_the_export_incomplete(tmp_path: Path) -> None:
+    doc = collect(tmp_path, Chain(FakeClock(T0), None, written=[KILLED, REPLACEMENT]))
+    assert (doc["complete"], doc["written"], doc["written_exact"], doc["observed"], doc["queued"]) == (False, 8, False, 8, 2)
+    assert doc["waited_s"] >= MAX_WAIT_S
+
+
+def test_a_killed_workers_unscraped_cdrs_hold_the_export_until_the_queue_reads_empty(tmp_path: Path) -> None:
+    doc = collect(tmp_path, Chain(FakeClock(T0), 30, written=[KILLED, REPLACEMENT]))
+    assert (doc["complete"], doc["written"], doc["observed"], doc["queued"]) == (True, 8, 10, 0)
+    assert 40 <= doc["waited_s"] < 60
+
+
+def test_a_killed_worker_with_no_queue_reading_leaves_the_export_incomplete(tmp_path: Path) -> None:
+    doc = collect(tmp_path, Chain(FakeClock(T0), 0, written=[KILLED, REPLACEMENT], broker_unscraped=True))
+    assert (doc["complete"], doc["written_exact"], doc["observed"], doc["queued"]) == (False, False, 10, None)
+
+
+def test_with_every_written_series_whole_the_counts_alone_complete_the_export(tmp_path: Path) -> None:
+    doc = collect(tmp_path, Chain(FakeClock(T0), 30, broker_unscraped=True))
+    assert (doc["complete"], doc["written_exact"], doc["queued"]) == (True, True, None)
     assert 30 <= doc["waited_s"] < 50
 
 
+def test_a_rollout_that_replaces_a_workers_series_counts_the_old_series_and_the_new(tmp_path: Path) -> None:
+    doc = collect(tmp_path, Chain(FakeClock(T0), 30, written=[ROLLED_OUT, REPLACEMENT]))
+    assert (doc["complete"], doc["written"], doc["written_exact"], doc["observed"]) == (True, 10, False, 10)
+    assert 30 <= doc["waited_s"] < 60
+
+
 def test_a_worker_restarted_in_place_counts_after_its_reset(tmp_path: Path) -> None:
-    restarted: Samples = [(STARTED - 30_000, 50), (STARTED + 15_000, 57), (STARTED + 30_000, 1), (STARTED + 45_000, 3)]
-    doc = collect(tmp_path, Chain(FakeClock(T0), 30, written=[restarted]))
-    assert (doc["complete"], doc["written"]) == (True, 10)
+    doc = collect(tmp_path, Chain(FakeClock(T0), 30, written=[RESTARTED]))
+    assert (doc["complete"], doc["written"], doc["written_exact"]) == (True, 10, False)
 
 
 def test_cdrs_written_before_the_run_started_are_not_owed_to_it(tmp_path: Path) -> None:
-    # An earlier run's last CDRs land in the minute before the start.
-    tail: Samples = [(STARTED - 50_000, 0), (STARTED - 35_000, 300), (STARTED - 20_000, 500), (STARTED + 15_000, 510)]
-    doc = collect(tmp_path, Chain(FakeClock(T0), 30, written=[tail]))
-    assert (doc["complete"], doc["written"]) == (True, 10)
+    doc = collect(tmp_path, Chain(FakeClock(T0), 30, written=[EARLIER_RUN_TAIL]))
+    assert (doc["complete"], doc["written"], doc["written_exact"]) == (True, 10, True)

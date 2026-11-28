@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Recovered when the deleted pod is replaced and as many pods of the selector
-# are live as before. Exit 75 while not yet. Facts: the replacement's start and
-# Ready, each survivor's peer park and each proxy's registry leave and join
-# (lib/worker.sh).
+# are live as before. Exit 75 while not yet, and while a proxy that dropped the
+# worker has not taken it back. Facts: the replacement's start and Ready, each
+# survivor's not-ready and park instants of the peer, each proxy's drop and
+# take-back of the worker (lib/worker.sh).
 # shellcheck source=incident.sh
 source "$HAKIT_LIB/incident.sh"
 # shellcheck source=worker.sh

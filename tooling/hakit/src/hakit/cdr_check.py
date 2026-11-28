@@ -29,6 +29,22 @@ def _failed(detail: str) -> Json:
     return integrity("class_failed", f"cdr_mismatch: {detail}")
 
 
+def _owed(collect: Json) -> str:
+    """The counts of an export cut with CDRs still owed: a written count that is
+    a lower bound reads "at least", and the broker's queue is named when it held
+    CDRs or, behind a lower bound, could not be read."""
+    written, observed, queued = (jv.opt_number(collect, k) for k in ("written", "observed", "queued"))
+    exact = jv.boolean(collect, "written_exact", default=True)
+    w = "unread" if written is None else f"{'' if exact else 'at least '}{written:g}"
+    o = "unread" if observed is None else f"{observed:g}"
+    counts = f"{w} written, {o} distinct observed"
+    if queued:
+        return f"{counts}, {queued:g} queued at the broker"
+    if queued is None and not exact:
+        return f"{counts}, the broker's queue unread"
+    return counts
+
+
 def cdr_impacts_of(run_dir: Path, profile: Profile, records: list[Json], schemas: SchemaSet) -> tuple[list[Impact], list[Json]]:
     if not profile.cdr_join:
         return [], []
@@ -39,9 +55,7 @@ def cdr_impacts_of(run_dir: Path, profile: Profile, records: list[Json], schemas
     found: list[Json] = []
     complete = jv.boolean(collect, "complete")
     if not complete:
-        counts = [jv.opt_number(collect, k) for k in ("written", "observed")]
-        written, observed = ("unread" if v is None else f"{v:g}" for v in counts)
-        found.append(_failed(f"the export was cut with CDRs still owed: {written} written, {observed} distinct observed"))
+        found.append(_failed(f"the export was cut with CDRs still owed: {_owed(collect)}"))
     unread = jv.opt_number(collect, "unread") or 0
     if unread:
         found.append(_failed(f"the consumer could not read {unread:g} CDR payloads"))

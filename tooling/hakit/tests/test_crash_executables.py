@@ -104,25 +104,36 @@ def test_two_incarnations_running_together_fail_the_crash_probe(tmp_path: Path) 
     failed(crashed_probe(tmp_path, 1, T0 + 1500, T0 + 900).run("probe"), "logged 600 ms after its successor started")
 
 
-SURVIVOR_LOG = (
+SURVIVOR_NOT_READY = (
     "2026-10-15T22:29:10.935000Z  INFO b2bua::repl::supervisor: replication peer kept on presence alone (not ready) "
     'node="w-1" peer=w-0 host=10.0.0.1 terminating=false\n'
-    "2026-10-15T22:29:11.935000Z  INFO b2bua::repl::supervisor: replication peer ready again "
+)
+SURVIVOR_LOG = (
+    SURVIVOR_NOT_READY + "2026-10-15T22:29:11.935000Z  INFO b2bua::repl::supervisor: replication peer ready again "
     'node="w-1" peer=w-0 host=10.0.0.1\n'
 )
-PROXY_LOG = (
+# A not-ready reading of the kill second's first half: an earlier flap of the
+# peer, before the kill at +500 ms that `--since-time` floors to the second.
+SURVIVOR_FLAP_BEFORE_KILL = (
+    "2026-10-15T22:29:10.300000Z  INFO b2bua::repl::supervisor: replication peer kept on presence alone (not ready) "
+    'node="w-1" peer=w-0 host=10.0.0.1 terminating=false\n'
+)
+PROXY_LEFT = (
     "2026-10-15T22:29:10.930000Z  INFO sip_proxy::registry::projection::annotations: worker reads not ready, "
     'another reads ready: out of the routing node="e1" worker=w-0 host=10.0.0.1\n'
     "2026-10-15T22:29:11.556000Z  INFO sip_proxy::health::probe: worker incarnation changed "
     'node="e1" worker=w-0 from=1 to=2\n'
-    "2026-10-15T22:29:11.557000Z  INFO sip_proxy::registry::projection::annotations: worker health flip "
+)
+PROXY_LOG = (
+    PROXY_LEFT + "2026-10-15T22:29:11.557000Z  INFO sip_proxy::registry::projection::annotations: worker health flip "
     'node="e1" worker="w-0" from=Unknown to=Alive\n'
 )
 
 
-def test_a_worker_restarted_in_place_is_timed_not_ready_on_the_survivors_and_back_alive_on_the_proxies(
-    tmp_path: Path,
-) -> None:
+def restarted_in_place(tmp_path: Path, survivor_log: str, proxy_log: str) -> Sandbox:
+    """kill_worker's probe of w-0, killed at +500 ms and restarted in place,
+    Ready again at +2 s, with w-1 and p-0 logging `survivor_log` and
+    `proxy_log` from the kill's second."""
     sb = Sandbox(tmp_path, "kill_worker")
     sb.state("targets", "w-0 u0 n1\n")
     sb.state("live_before", "2\n")
@@ -143,12 +154,33 @@ def test_a_worker_restarted_in_place_is_timed_not_ready_on_the_survivors_and_bac
         Rule(r"logs w-0 -c worker --timestamps --limit-bytes=8192$", f"{iso_ms(T0 + 1_100)} first words\n"),
         live("app=b2bua-worker", "w-0 u0 n1 True\nw-1 u1 n2 True\n"),
         live("app=sip-front-proxy", "p-0 pu e1 True\n"),
-        Rule(r"logs w-1 --since-time=2026-10-15T22:29:10Z$", SURVIVOR_LOG),
-        Rule(r"logs p-0 -c sip-front-proxy --since-time=2026-10-15T22:29:10Z$", PROXY_LOG),
+        Rule(r"logs w-1 --since-time=2026-10-15T22:29:10Z$", survivor_log),
+        Rule(r"logs p-0 -c sip-front-proxy --since-time=2026-10-15T22:29:10Z$", proxy_log),
     )
-    f = facts(sb.run("probe"))
+    return sb
+
+
+def test_a_worker_restarted_in_place_is_timed_not_ready_on_the_survivors_and_back_alive_on_the_proxies(
+    tmp_path: Path,
+) -> None:
+    f = facts(restarted_in_place(tmp_path, SURVIVOR_LOG, PROXY_LOG).run("probe"))
     assert f["survivors"] == [{"pod": "w-1", "not_ready_at_ms": T0 + 935, "parked_at_ms": None}]
     assert f["proxies"] == [{"pod": "p-0", "left_at_ms": T0 + 930, "joined_at_ms": T0 + 1_557}]
+
+
+def test_a_line_of_the_kill_second_logged_before_the_kill_is_no_timing_of_it(tmp_path: Path) -> None:
+    f = facts(restarted_in_place(tmp_path, SURVIVOR_FLAP_BEFORE_KILL + SURVIVOR_LOG, PROXY_LOG).run("probe"))
+    assert f["survivors"] == [{"pod": "w-1", "not_ready_at_ms": T0 + 935, "parked_at_ms": None}]
+
+
+def test_the_probe_waits_while_a_proxy_that_dropped_the_worker_has_not_taken_it_back(tmp_path: Path) -> None:
+    res = restarted_in_place(tmp_path, SURVIVOR_LOG, PROXY_LEFT).run("probe")
+    assert res.returncode == 75 and "unscripted call" not in res.stderr, res.stderr
+
+
+def test_a_proxy_that_never_dropped_the_worker_leaves_both_its_instants_null(tmp_path: Path) -> None:
+    f = facts(restarted_in_place(tmp_path, SURVIVOR_LOG, "").run("probe"))
+    assert f["proxies"] == [{"pod": "p-0", "left_at_ms": None, "joined_at_ms": None}]
 
 
 def test_the_crash_probe_waits_while_the_pod_cannot_be_read(tmp_path: Path) -> None:

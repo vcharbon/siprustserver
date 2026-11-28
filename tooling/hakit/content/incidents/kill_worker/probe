@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # Recovered when the crashed worker's containers restarted and it is Ready
 # again, with no overlap between the crashed incarnation and its successor.
-# Exit 75 while not yet. Facts: per container its restart, Ready and overlap;
-# each survivor's peer park and each proxy's registry leave and join
-# (lib/worker.sh).
+# Exit 75 while not yet, and while a proxy that dropped the worker has not
+# taken it back. Facts: per container its restart, Ready and overlap; each
+# survivor's not-ready and park instants of the peer, each proxy's drop and
+# take-back of the worker (lib/worker.sh).
 # shellcheck source=incident.sh
 source "$HAKIT_LIB/incident.sh"
 # shellcheck source=crash.sh

@@ -5,8 +5,9 @@ description: >-
   SIGKILL from its node and proven dead before injected; the kubelet restarts
   it in place. The probe waits until it is Ready again, proves no overlap
   between the crashed incarnation and its successor, and reads the restart
-  timings: each survivor's replication peer park, the restart and Ready
-  instants, each proxy's registry leave and join.
+  timings: each survivor's not-ready and park instants of the replication
+  peer, the restart and Ready instants, each proxy's drop and take-back of the
+  worker.
 kind: fault
 target:
   selector: app=b2bua-worker
@@ -15,11 +16,11 @@ params:
   proxy_selector:
     type: string
     default: app=sip-front-proxy
-    description: The front proxies whose registry join of the restarted worker is timed; empty skips them.
+    description: The front proxies whose drop and take-back of the restarted worker are timed; empty skips them.
   proxy_container:
     type: string
     default: sip-front-proxy
-    description: The proxy container whose log holds the registry lines.
+    description: The proxy container whose log holds the registry, health and acceptance lines.
 duration_s: 0
 expected_s: 60
 timeouts:

@@ -45,6 +45,11 @@ class Lab:
     cdr_written_series: str
     cdr_consumed_series: str
     cdr_unread_series: str
+    # The broker's gauge of the CDRs its queue holds, ready or delivered and not
+    # yet acknowledged (the consumer acknowledges once the observation landed);
+    # empty: the lab has none, and a written count that may have lost its last
+    # counts never completes the export (collect.py).
+    cdr_queued_series: str
     # A tmpfs directory a docker generator works in, copied into the run
     # directory at its end (workdir.py); empty: the run directory itself.
     generator_scratch: str
@@ -136,6 +141,7 @@ def lab_from_env(env: Mapping[str, str]) -> Lab:
         cdr_written_series=g("HAKIT_CDR_WRITTEN_SERIES", "b2bua_cdr_written_total"),
         cdr_consumed_series=g("HAKIT_CDR_CONSUMED_SERIES", "cdr_consumed_total"),
         cdr_unread_series=g("HAKIT_CDR_UNREAD_SERIES", "cdr_observations_unread_total"),
+        cdr_queued_series=g("HAKIT_CDR_QUEUED_SERIES", "rabbitmq_queue_messages"),
         generator_scratch=g("HAKIT_GENERATOR_SCRATCH", "/dev/shm/hakit"),
         generator_user=g("HAKIT_GENERATOR_USER", f"{os.getuid()}:{os.getgid()}"),
     )

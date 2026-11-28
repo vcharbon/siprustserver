@@ -149,10 +149,11 @@ def held_probe(tmp_path: Path, uid: str, scheduled_ms: int, old_present: bool = 
 
 
 def test_the_held_probe_proves_one_incarnation_after_the_release(tmp_path: Path) -> None:
+    """The replacement joins the registry, then is routed once the proxy's
+    probe reads it alive: its joined instant is the health flip's."""
     f = facts(held_probe(tmp_path, "u9", T_RELEASE + 2000).run("probe"))
     assert f["incarnations"] == 1 and f["released_at_ms"] == T_RELEASE
     assert f["survivors"] == [{"pod": "w-1", "not_ready_at_ms": None, "parked_at_ms": 1792103350500}]
-    # A pod that joins the registry is routed once the proxy's probe reads it alive.
     assert f["proxies"] == [{"pod": "p-0", "left_at_ms": 1792103350100, "joined_at_ms": 1792103354900}]
 
 

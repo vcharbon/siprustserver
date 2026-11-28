@@ -361,6 +361,26 @@ def test_cdrs_still_owed_at_the_cut_are_an_incomplete_export_not_impacts(tmp_pat
     assert v["unattributed"] == []
 
 
+def cut_behind_a_lower_bound(tmp_path: Path, queued: float | None) -> list[str]:
+    """The integrity details of a run whose export was cut with its one written
+    CDR observed, the written count a lower bound and the broker's queue `queued`."""
+    doc = {**collected(False, 1, 1), "written_exact": False, "queued": queued}
+    d = run_dir(tmp_path, [ANSWERED], calls=1, events=[], profile=ON, cdrs=[cdr("a", T0, 100, 30_000)], cdr_collect=doc)
+    return [jv.string(i, "detail") for i in jv.objs(compute(d, SCHEMAS), "integrity")]
+
+
+def test_an_export_cut_with_cdrs_queued_behind_a_lower_bound_names_them(tmp_path: Path) -> None:
+    assert cut_behind_a_lower_bound(tmp_path, 1) == [
+        "cdr_mismatch: the export was cut with CDRs still owed: at least 1 written, 1 distinct observed, 1 queued at the broker"
+    ]
+
+
+def test_an_export_cut_behind_a_lower_bound_with_no_queue_reading_says_so(tmp_path: Path) -> None:
+    assert cut_behind_a_lower_bound(tmp_path, None) == [
+        "cdr_mismatch: the export was cut with CDRs still owed: at least 1 written, 1 distinct observed, the broker's queue unread"
+    ]
+
+
 def test_payloads_the_consumer_could_not_read_make_the_run_invalid(tmp_path: Path) -> None:
     d = run_dir(tmp_path, [ANSWERED], calls=1, events=[], profile=ON, cdrs=[cdr("a", T0, 100, 30_000)], cdr_collect=collected(True, 1, 1, unread=3))
     v = compute(d, SCHEMAS)

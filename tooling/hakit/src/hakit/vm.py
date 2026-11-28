@@ -40,13 +40,24 @@ class QueryFailed(Exception):
 
 @dataclass(frozen=True)
 class RawSeries:
-    """One series' raw samples, `(epoch ms, value)` ascending, staleness markers left out."""
+    """One series' raw samples, `(epoch ms, value)` ascending, staleness markers
+    left out; `ended_ms` is the instant of the staleness marker that ends it (its
+    target went away), `None` while a sample follows every marker."""
 
     labels: dict[str, str]
     points: list[tuple[int, float]]
+    ended_ms: int | None = None
 
     def label(self, name: str) -> str:
         return self.labels.get(name, "")
+
+
+def _raw_series(labels: dict[str, str], samples: list[tuple[int, float | None]]) -> RawSeries:
+    ordered = sorted(samples, key=lambda p: p[0])
+    points = [(t, v) for t, v in ordered if v is not None and math.isfinite(v)]
+    last = ordered[-1] if ordered else None
+    ended = last[0] if last is not None and (last[1] is None or not math.isfinite(last[1])) else None
+    return RawSeries(labels, points, ended)
 
 
 class VictoriaMetrics:
@@ -113,7 +124,7 @@ class VictoriaMetrics:
         res = self.executor.http("GET", f"{self.base_url}/api/v1/export?{urllib.parse.urlencode(params)}", timeout_s=60)
         if res.status != 200:
             raise QueryFailed(f"VictoriaMetrics did not export {selector!r}: HTTP {res.status} {res.body[:120]}")
-        merged: dict[str, RawSeries] = {}
+        merged: dict[str, tuple[dict[str, str], list[tuple[int, float | None]]]] = {}
         try:
             for line in res.body.splitlines():
                 if not line.strip():
@@ -121,10 +132,8 @@ class VictoriaMetrics:
                 row = as_obj(json.loads(line))
                 labels = {k: str(v) for k, v in as_obj(row.get("metric")).items()}
                 pairs = zip(as_list(row.get("timestamps")), as_list(row.get("values")), strict=True)
-                points = [(int(str(t)), float(str(v))) for t, v in pairs if v is not None]
-                key = json.dumps(labels, sort_keys=True)
-                prior = merged[key].points if key in merged else []
-                merged[key] = RawSeries(labels, prior + [p for p in points if math.isfinite(p[1])])
+                samples = [(int(str(t)), None if v is None else float(str(v))) for t, v in pairs]
+                merged.setdefault(json.dumps(labels, sort_keys=True), (labels, []))[1].extend(samples)
         except (ValueError, TypeError) as e:
             raise QueryFailed(f"VictoriaMetrics exported {selector!r} in lines that do not parse: {e}") from e
-        return [RawSeries(s.labels, sorted(s.points)) for s in merged.values()]
+        return [_raw_series(labels, samples) for labels, samples in merged.values()]
