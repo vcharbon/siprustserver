@@ -4,8 +4,9 @@ The simulated lab answers what a healthy one would: every executable exits 0
 with no facts, a generator runs until it is drained, places no call, shows a
 hold at rate 0 in its next statistics row, the system under test holds no call, a SIPp twin's record copy is complete, a loadgen image registers every shape of the
 search path, the API server serves every resource definition asked for (Chaos
-Mesh's included), every Service a stream targets has a cluster IP, and every
-label selector names two ready pods. Each effect is recorded, and the timeline
+Mesh's included), every Service a stream targets has a cluster IP, every
+label selector names two ready pods, and every exported series is live and
+reads 0. Each effect is recorded, and the timeline
 printed from the run's own `events.jsonl`.
 """
 
@@ -141,7 +142,19 @@ class SimulatedLab:
             value = self.clock.now_ms() / 1000 if "timestamp(" in query else 0
             body = f'{{"status":"success","data":{{"resultType":"vector","result":[{{"metric":{{}},"value":[0,"{value}"]}}]}}}}'
             return HttpResult(200, body)
+        if call.kind == "http" and "/api/v1/export" in call.url:
+            return HttpResult(200, self._export(call.url))
         return None
+
+    def _export(self, url: str) -> str:
+        """One live series of the selector's metric, reading 0 at both ends of
+        the range (its end held to the clock): a counter that counted nothing, a
+        gauge that holds nothing."""
+        q = urllib.parse.parse_qs(urllib.parse.urlsplit(url).query)
+        name = q["match[]"][0].split("{")[0]
+        lo, hi = round(float(q["start"][0]) * 1000), min(round(float(q["end"][0]) * 1000), self.clock.now_ms())
+        stamps = sorted({lo, hi})
+        return json.dumps({"metric": {"__name__": name}, "values": [0] * len(stamps), "timestamps": stamps}) + "\n"
 
 
 def simulated(extra: list[Rule] | None = None, shapes: Sequence[str] = ()) -> tuple[FakeClock, FakeExecutor]:

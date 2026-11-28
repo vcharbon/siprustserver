@@ -9,6 +9,7 @@ import pytest
 from kit import budget, executable, fault_incident, write_yaml
 
 from hakit import jsonval as jv
+from hakit.collect import collect_cdrs
 from hakit.content import Content, discover
 from hakit.dryrun import simulated
 from hakit.executor import Call, FakeExecutor, HttpResult, ProcResult, Rule
@@ -18,6 +19,8 @@ from hakit.paths import BASE_CONTENT
 from hakit.runner import Runner, RunRefused
 from hakit.schemas import SchemaSet
 from hakit.jsonl import read_jsonl
+from hakit.vlogs import VictoriaLogs
+from hakit.vm import VictoriaMetrics
 
 SCHEMAS = SchemaSet.load()
 LAB = lab_from_env({})
@@ -187,3 +190,12 @@ def test_a_system_under_test_holding_calls_refuses_the_run(tmp_path: Path) -> No
     with pytest.raises(RunRefused, match="leftover_calls: the system under test holds 7 calls"):
         r.run(SMOKE)
     assert not (tmp_path / "results").exists()
+
+
+def test_the_simulated_lab_completes_a_cdr_export_that_owes_nothing(tmp_path: Path) -> None:
+    clock, fake = simulated()
+    started = clock.now_ms()
+    clock.sleep(600)
+    collect_cdrs(VictoriaLogs(fake, "vl"), VictoriaMetrics(fake, "vm"), LAB, clock, "run-x", tmp_path, started)
+    doc = as_obj(json.loads((tmp_path / "cdrs-collect.json").read_text()))
+    assert (doc["complete"], doc["written"], doc["written_lossy"], doc["queued"]) == (True, 0.0, False, 0.0)
