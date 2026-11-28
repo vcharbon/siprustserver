@@ -154,11 +154,11 @@ pub struct ReplicatedB2buaSut {
 }
 
 /// A shared handle to the `scenario_harness::Harness` so a worker can re-bind its
-/// SIP endpoint on reboot (`Harness::bind_sut` takes `&self`). The `Harness` is
-/// not `Sync` (its panic-dump guard holds a `Cell`), so we keep it behind a
-/// `Mutex` and bind under a brief lock — making `Arc<HarnessHandle>` `Send + Sync`
-/// for sharing across the SUTs. The whole harness runs on one (current-thread)
-/// test task, so the lock is never contended.
+/// SIP endpoint on reboot (`Harness::bind_sut` takes `&self`). The `Harness` holds
+/// `Rc`s, so the handle is neither `Send` nor `Sync`: one current-thread test task
+/// runs the whole harness and shares the handle among its SUTs by `Arc`. The
+/// `Mutex` lets `bind_sut` take the harness out and put it back through `&self`;
+/// it is never contended.
 pub struct HarnessHandle {
     inner: std::sync::Mutex<Option<Harness>>,
     /// The test rewrote what replication carries, through the harness or a
