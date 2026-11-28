@@ -7,8 +7,18 @@ description: >-
   holds no record of them and drops them; a caller who hears nothing goes
   elsewhere by itself. A caller who heard a provisional and no final takes no
   allowance here or in any budget (`silent_after_provisional`). Every other
-  failed setup is a finding.
+  failed setup is a finding. A BYE or a callee's 2xx sent to the worker before
+  the proxy reads it dead, 3.6 s after the death at the latest (a held worker
+  is read by the probe alone), reaches the backup on its first retransmission
+  past the verdict, the one at 7.5 s at the latest (RFC 3261, T1 500 ms, T2
+  4 s), while the CDR holds the first send's instant: a CDR's end or answer may
+  lead the caller's by that much past the join's own 1 s tolerance. Any other
+  CDR mismatch is a finding.
 setup_failed:
   - { stream: "*", code: 0, reason: timeout, max_seconds: 2 }
 setup_slow:
   max_seconds: 2
+cdr_mismatch:
+  differs:
+    max_calls: 0
+    excess_ms: 7500
