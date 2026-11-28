@@ -139,7 +139,7 @@ impl ProxyCore {
         };
         // ADR-0048 §10
         let spiral_reentry = self_routes > 2
-            && self_routes % 2 == 0
+            && self_routes.is_multiple_of(2)
             && cookie.as_ref().is_some_and(|c| self.strategy.verified_cookie(c, msg).is_some());
         if !worker_outbound
             && !spiral_reentry
