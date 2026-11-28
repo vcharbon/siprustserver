@@ -37,6 +37,7 @@ k8s/sipp/: trace_*
 ../tooling/hakit/src/: cdr_required
 ../tooling/hakit/src/: cdr_mismatch
 ../tooling/hakit/src/: cdr_ms
+../tooling/hakit/src/: cdr_queued_series
 ../tooling/hakit/src/: cdr_unaccounted
 ../tooling/hakit/src/: cdr_unread_series
 ../tooling/hakit/src/: cdr_written
